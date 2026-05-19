@@ -20,13 +20,13 @@
 ## ⚡ Быстрый старт
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate/master/bootstrap.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh)
 ```
 
 Или с `wget`:
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate/master/bootstrap.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh)
 ```
 
 ## 🎯 Возможности
