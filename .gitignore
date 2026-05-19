@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.env
+
+# Logs
+*.log
+/var/log/
+
+# Runtime state
+*.tmp
+*.temp
+state.json
+health.status
+checkpoint.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Keys / secrets — НИКОГДА не коммитить!
+*.pem
+*.key
+*.crt
+private_key*
+public_key*
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
