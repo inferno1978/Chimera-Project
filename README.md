@@ -114,17 +114,17 @@ Smart Balancer выбирает лучшую Exit-ноду по latency/дост
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        VLESS Ultimate                        │
+│                        VLESS Ultimate                       │
 │                                                             │
-│  bootstrap.sh ──► main.py ──exec──► _core.py               │
+│  bootstrap.sh ──► main.py ──exec──► _core.py                │
 │                                         │                   │
 │              ┌──────────────────────────┤                   │
 │              │                          │                   │
-│         Xray-core                  Nginx (TLS)             │
-│         /etc/xray/                 /etc/nginx/             │
-│         config.json                sites-enabled/          │
+│         Xray-core                  Nginx (TLS)              │
+│         /etc/xray/                 /etc/nginx/              │
+│         config.json                sites-enabled/           │
 │              │                          │                   │
-│         iptables/ipset            Certbot (ACME)           │
+│         iptables/ipset            Certbot (ACME)            │
 │         (ingress block)                                     │
 │              │                                              │
 │         AmneziaWG (AWG)                                     │
