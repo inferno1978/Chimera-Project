@@ -26,7 +26,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-I
 Или с `wget`:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh | bash
+wget -O bootstrap.sh https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh
+chmod +x bootstrap.sh
+bash bootstrap.sh
 ```
 
 ## 🎯 Возможности
