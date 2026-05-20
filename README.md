@@ -1,6 +1,6 @@
 # VLESS Ultimate Installer v4.11
 
-[![Version](https://img.shields.io/badge/version-4.10-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate)
+[![Version](https://img.shields.io/badge/version-4.11-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
