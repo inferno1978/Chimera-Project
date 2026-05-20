@@ -306,9 +306,7 @@ def do_cluster_menu() -> None:
         os.system('clear')
         nodes = load_exit_nodes()
 
-        print()
         _box_top("🌐  КЛАСТЕР — управление Exit Nodes")
-        _box_row()
         if nodes:
             _box_row(f"  Exit Nodes ({len(nodes)}):")
             for i, nd in enumerate(nodes, 1):
@@ -316,7 +314,6 @@ def do_cluster_menu() -> None:
         else:
             _box_row(f"  {YELLOW}Нет Exit Nodes в state.json.{NC}")
             _box_row(f"  {DIM}Добавьте каскадный Режим B для появления нод.{NC}")
-        _box_row()
         _box_sep()
         _box_item("1", "Диагностика всех нод")
         _box_item("2", "Перезапуск Xray на всех нодах")
@@ -324,10 +321,8 @@ def do_cluster_menu() -> None:
         _box_item("4", "Ротация UUID на всех нодах")
         _box_item("5", "Произвольная команда")
         _box_item("6", "Проверить SSH-доступ")
-        _box_row()
         _box_back()
         _box_bottom()
-        print()
 
         try:
             ch = input(f'{CYAN}Выбор:{NC} ').strip().lower()
