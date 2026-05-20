@@ -116,7 +116,7 @@ VLESS-Ultimate-Installer/
 
 ```
                               ┌──► Exit VPS 1 (EU) ──►┐
-Клиент ──► Entry VPS (RU) ───┼──► Exit VPS 2 (US) ──►├──► Интернет
+Клиент ──► Entry VPS (RU) ───-┼──► Exit VPS 2 (US) ──►├──► Интернет
                               └──► Exit VPS 3 (AS) ──►┘
 ```
 
