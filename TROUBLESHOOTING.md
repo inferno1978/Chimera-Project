@@ -357,3 +357,88 @@ systemctl restart xray nginx
 | Сертификаты | `/etc/letsencrypt/live/DOMAIN/` |
 | Лог изменений конфига | `/var/log/xray-changes.log` |
 | Лог scheduled backup | `/var/log/xray-scheduled-backup.log` |
+
+---
+
+## Кластерное управление `[CL]` — Permission denied (publickey,password)
+
+**Симптом:** все операции в меню `[CL]` завершаются ошибкой:
+```
+root@your-node.com: Permission denied (publickey,password).
+```
+
+**Причина:** SSH-ключ не установлен на Exit Nodes, а скрипт пробовал
+только ключевую аутентификацию.
+
+**Решение с v4.11.1:** скрипт автоматически запрашивает пароль root
+при недоступности ключа. Пароль сохраняется на сессию.
+
+**Требования для парольного режима:**
+```bash
+# sshpass устанавливается автоматически, но можно вручную:
+apt install sshpass
+```
+
+**Ручная проверка SSH-доступа:**
+```bash
+# Ключевой режим
+ssh -o BatchMode=yes root@your-node.com echo ok
+
+# Парольный режим
+sshpass -p 'ваш_пароль' ssh \
+  -o StrictHostKeyChecking=no \
+  -o PreferredAuthentications=password \
+  root@your-node.com echo ok
+```
+
+**Настройка ключевой аутентификации (рекомендуется):**
+```bash
+# На Entry Node — сгенерировать ключ (если нет)
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
+
+# Скопировать публичный ключ на каждую Exit Node
+ssh-copy-id -i ~/.ssh/id_ed25519.pub root@your-exit-node.com
+
+# Проверить
+ssh root@your-exit-node.com echo ok
+```
+
+После настройки ключей пароль в `[CL]` запрашиваться не будет.
+
+---
+
+## nginx Watchdog `[NW]` — таймер не активируется
+
+```bash
+# Проверить статус
+systemctl status nginx-watchdog.timer
+systemctl status nginx-watchdog.service
+
+# Посмотреть лог
+tail -50 /var/log/nginx-watchdog.log
+
+# Перезапустить таймер вручную
+systemctl restart nginx-watchdog.timer
+```
+
+---
+
+## ipset Persistent `[IP]` — ipset не восстанавливается после reboot
+
+```bash
+# Проверить юнит
+systemctl status xray-ipset-restore.service
+
+# Проверить наличие дампа
+ls -lh /etc/ipset.conf
+wc -l /etc/ipset.conf
+
+# Восстановить вручную
+ipset restore -! -f /etc/ipset.conf
+
+# Проверить что правила загружены
+ipset list | grep -E "^Name:|elements:"
+```
+
+Если `/etc/ipset.conf` отсутствует — сначала сохраните текущий ipset
+через меню `[IP]` → пункт `2`.
