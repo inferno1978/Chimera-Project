@@ -195,24 +195,18 @@ def do_manage_nginx_watchdog() -> None:
         os.system('clear')
         active  = _is_active('nginx-watchdog.timer')
         enabled = _is_enabled('nginx-watchdog.timer')
-
         status_str = f'{GREEN}активен{NC}' if active else f'{YELLOW}не активен{NC}'
-        print()
+
         _box_top('🔁  NGINX WATCHDOG')
-        _box_row()
         _box_row(f'  Статус:  {status_str}')
         _box_row(f'  Таймер:  {"enabled" if enabled else "disabled"}')
         _box_row(f'  Режим:   {_protocol_mode()}')
-        _box_row()
-
         if _LOG.exists():
-            lines = _LOG.read_text(errors='replace').splitlines()[-6:]
+            lines = _LOG.read_text(errors='replace').splitlines()[-4:]
             if lines:
-                _box_row(f'  {DIM}Последние события:{NC}')
+                _box_sep()
                 for line in lines:
-                    _box_row(f'    {DIM}{line[:68]}{NC}')
-                _box_row()
-
+                    _box_row(f'  {DIM}{line[:68]}{NC}')
         _box_sep()
         if active:
             _box_item('1', 'Отключить watchdog')
@@ -220,10 +214,8 @@ def do_manage_nginx_watchdog() -> None:
             _box_item('1', 'Включить watchdog (timer каждые 2 минуты)')
         _box_item('2', 'Запустить проверку вручную прямо сейчас')
         _box_item('3', 'Показать полный лог')
-        _box_row()
         _box_back()
         _box_bottom()
-        print()
 
         try:
             ch = input(f'{CYAN}Выбор:{NC} ').strip().lower()

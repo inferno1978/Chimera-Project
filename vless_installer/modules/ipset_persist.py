@@ -185,10 +185,8 @@ def do_manage_ipset_persist() -> None:
 
         print()
         _box_top('📦  IPSET PERSISTENT')
-        _box_row()
         _box_row(f'  Юнит xray-ipset-restore:  {status_str}')
         _box_row(f'  Файл /etc/ipset.conf:      {conf_str}')
-        _box_row()
         _box_sep()
         if enabled:
             _box_item('1', 'Удалить юнит')
@@ -196,10 +194,8 @@ def do_manage_ipset_persist() -> None:
             _box_item('1', 'Установить юнит (восстановление при boot)')
         _box_item('2', 'Сохранить текущий ipset → /etc/ipset.conf')
         _box_item('3', 'Показать содержимое /etc/ipset.conf (первые 30 строк)')
-        _box_row()
         _box_back()
         _box_bottom()
-        print()
 
         try:
             ch = input(f'{CYAN}Выбор:{NC} ').strip().lower()
