@@ -2,7 +2,7 @@
 vless_installer/modules/mtproto.py
 ───────────────────────────────────────────────────────────────────────────────
 Модуль Telemt MTProxy — Telegram MTProto-прокси на Rust/Tokio.
-Интегрируется в VLESS Ultimate Installer v4.10.
+Интегрируется в VLESS Ultimate Installer v4.11.
 
 Точка входа из _core.py:
     from vless_installer.modules.mtproto import mtproto_menu

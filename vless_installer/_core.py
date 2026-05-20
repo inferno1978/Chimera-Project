@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# === v4.10 ===
+# === v4.11 ===
 """
-VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.10
+VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.11
 Python 3.12+ port
 
 Поддержка: Ubuntu 20.04/22.04/24.04, Debian 11/12/13
@@ -194,7 +194,7 @@ def _make_banner() -> str:
         "  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝",
     ]
     _info_lines = [
-        "VLESS REALITY + xHTTP TLS INSTALLER v4.10",
+        "VLESS REALITY + xHTTP TLS INSTALLER v4.11",
         "IPv6 DualStack | 6 Templates | SHA256 Verify",
         "Balancer: RoundRobin | LeastPing | LeastLoad",
         "Dashboard | FP Rotate | GeoCheck | Multi-User",
@@ -25294,7 +25294,7 @@ def _fetch_prefixes_for_asn(asn: str) -> list:
         for attempt in range(1, 4):   # до 3 попыток на каждый URL
             try:
                 req = urllib.request.Request(url, headers={
-                    "User-Agent": "xray-installer/4.10",
+                    "User-Agent": "xray-installer/4.11",
                     "Accept":     "application/json",
                 })
                 with urllib.request.urlopen(req, timeout=30) as resp:
@@ -30829,10 +30829,10 @@ def _menu_security() -> None:
         _box_item("7", f"🔀 Авто-фолбэк в Режим A{_awg_na7}")
         _box_item("8",  "🐕 Watchdog авторестарт Xray")
         _box_item("NW", f"🔁 nginx Watchdog  {DIM}(перезапуск nginx при падении){NC}")
-        _box_item("W",  f"🔌 AWG Tunnel Watchdog  {DIM}(ip rule fallback при падении awg0){NC}")
+        _box_item("W",  f"🔌 AWG Tunnel Watchdog  {DIM}(fallback при падении awg0){NC}")
         _box_item("N",  f"🌐 AWG Multi-Node  {DIM}(ноды, failover, SSH-защита){NC}")
         _box_item("IP", f"📦 ipset Persist  {DIM}(восстановление ipset при reboot){NC}")
-        _box_item("CL", f"🖧  Кластер Exit Nodes  {DIM}(управление всеми Exit Nodes по SSH){NC}")
+        _box_item("CL", f"🖧  Кластер Exit Nodes  {DIM}(все Exit Nodes по SSH){NC}")
         _box_item("9", f"🔒 Мониторинг certbot renew  {DIM}(алерт при истечении){NC}")
         _box_item("H", f"🔒 SSH Hardening  {DIM}(порт / ключи / AllowUsers){NC}")
         _box_sep()
@@ -35830,7 +35830,7 @@ def do_manage_dns_rules() -> None:
 
 
 # =============================================================================
-#  МОДУЛЬ: HONEYPOT-ПОРТ  (v4.10)
+#  МОДУЛЬ: HONEYPOT-ПОРТ  (v4.11)
 #  Слушает TCP-порт через socat/netcat, каждого подключившегося сразу банит
 #  через UFW. Эффективная ловушка для сканеров портов и DPI-зондов.
 # =============================================================================
@@ -35870,7 +35870,7 @@ def _honeypot_write_script(port: int, whitelist: list) -> None:
     script = (
         "#!/usr/bin/env python3\n"
         f"# xray-honeypot.py — автономный honeypot, порт {port}\n"
-        "# Генерируется установщиком VLESS v4.10. Не редактируйте вручную.\n"
+        "# Генерируется установщиком VLESS v4.11. Не редактируйте вручную.\n"
         "import socket, subprocess, json, time, os\n"
         "from pathlib import Path\n"
         "from datetime import datetime\n"
