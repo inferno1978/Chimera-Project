@@ -165,6 +165,9 @@ def ipset_restore_unit_remove() -> None:
 def do_manage_ipset_persist() -> None:
     """Интерактивное меню управления персистентностью ipset."""
     import os
+    from vless_installer._core import (
+        _box_top, _box_row, _box_sep, _box_bottom, _box_item, _box_back,
+    )
     while True:
         os.system('clear')
         enabled     = _is_enabled('xray-ipset-restore.service')
@@ -181,25 +184,25 @@ def do_manage_ipset_persist() -> None:
                       if conf_exists else f'{YELLOW}отсутствует{NC}')
 
         print()
-        print(f'  {CYAN}{"═"*56}{NC}')
-        print(f'  {CYAN}  📦 IPSET PERSISTENT (восстановление при reboot){NC}')
-        print(f'  {CYAN}{"─"*56}{NC}')
-        print(f'  Юнит xray-ipset-restore:  {status_str}')
-        print(f'  Файл /etc/ipset.conf:      {conf_str}')
-        print()
-        print(f'  {CYAN}{"─"*56}{NC}')
+        _box_top('📦  IPSET PERSISTENT')
+        _box_row()
+        _box_row(f'  Юнит xray-ipset-restore:  {status_str}')
+        _box_row(f'  Файл /etc/ipset.conf:      {conf_str}')
+        _box_row()
+        _box_sep()
         if enabled:
-            print(f'  1. Удалить юнит')
+            _box_item('1', 'Удалить юнит')
         else:
-            print(f'  1. Установить юнит (восстановление при boot)')
-        print(f'  2. Сохранить текущий ipset → /etc/ipset.conf')
-        print(f'  3. Показать содержимое /etc/ipset.conf (первые 30 строк)')
-        print(f'  Q. Назад')
-        print(f'  {CYAN}{"═"*56}{NC}')
+            _box_item('1', 'Установить юнит (восстановление при boot)')
+        _box_item('2', 'Сохранить текущий ipset → /etc/ipset.conf')
+        _box_item('3', 'Показать содержимое /etc/ipset.conf (первые 30 строк)')
+        _box_row()
+        _box_back()
+        _box_bottom()
         print()
 
         try:
-            ch = input(f'  {CYAN}Выбор:{NC} ').strip().lower()
+            ch = input(f'{CYAN}Выбор:{NC} ').strip().lower()
         except (EOFError, KeyboardInterrupt):
             break
 

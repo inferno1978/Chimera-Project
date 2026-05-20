@@ -299,35 +299,38 @@ def _check_ssh(host: str, ssh_key: Optional[str] = None) -> tuple[bool, str]:
 def do_cluster_menu() -> None:
     """Интерактивное меню мультисерверного управления Exit Nodes."""
     import os
+    from vless_installer._core import (
+        _box_top, _box_row, _box_sep, _box_bottom, _box_item, _box_back,
+    )
     while True:
         os.system('clear')
         nodes = load_exit_nodes()
 
         print()
-        print(f'  {CYAN}{"═"*60}{NC}')
-        print(f'  {CYAN}  🌐 КЛАСТЕР — управление Exit Nodes{NC}')
-        print(f'  {CYAN}{"─"*60}{NC}')
+        _box_top("🌐  КЛАСТЕР — управление Exit Nodes")
+        _box_row()
         if nodes:
-            print(f'  Exit Nodes ({len(nodes)}):')
+            _box_row(f"  Exit Nodes ({len(nodes)}):")
             for i, nd in enumerate(nodes, 1):
-                print(f'    {i}. {nd.get("host","?")}:{nd.get("port",443)}')
+                _box_row(f"    {i}. {nd.get('host','?')}:{nd.get('port',443)}")
         else:
-            print(f'  {YELLOW}  Нет Exit Nodes в state.json.{NC}')
-            print(f'  {DIM}  Добавьте каскадный Режим B для появления нод.{NC}')
-        print()
-        print(f'  {CYAN}{"─"*60}{NC}')
-        print(f'  1. Диагностика всех нод')
-        print(f'  2. Перезапуск Xray на всех нодах')
-        print(f'  3. Обновление Xray-core на всех нодах')
-        print(f'  4. Ротация UUID на всех нодах')
-        print(f'  5. Произвольная команда')
-        print(f'  6. Проверить SSH-доступ')
-        print(f'  Q. Назад')
-        print(f'  {CYAN}{"═"*60}{NC}')
+            _box_row(f"  {YELLOW}Нет Exit Nodes в state.json.{NC}")
+            _box_row(f"  {DIM}Добавьте каскадный Режим B для появления нод.{NC}")
+        _box_row()
+        _box_sep()
+        _box_item("1", "Диагностика всех нод")
+        _box_item("2", "Перезапуск Xray на всех нодах")
+        _box_item("3", "Обновление Xray-core на всех нодах")
+        _box_item("4", "Ротация UUID на всех нодах")
+        _box_item("5", "Произвольная команда")
+        _box_item("6", "Проверить SSH-доступ")
+        _box_row()
+        _box_back()
+        _box_bottom()
         print()
 
         try:
-            ch = input(f'  {CYAN}Выбор:{NC} ').strip().lower()
+            ch = input(f'{CYAN}Выбор:{NC} ').strip().lower()
         except (EOFError, KeyboardInterrupt):
             break
 

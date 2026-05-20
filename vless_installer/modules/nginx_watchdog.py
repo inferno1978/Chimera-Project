@@ -188,6 +188,9 @@ def nginx_watchdog_remove() -> None:
 def do_manage_nginx_watchdog() -> None:
     """Интерактивное меню управления nginx watchdog."""
     import os
+    from vless_installer._core import (
+        _box_top, _box_row, _box_sep, _box_bottom, _box_item, _box_back,
+    )
     while True:
         os.system('clear')
         active  = _is_active('nginx-watchdog.timer')
@@ -195,35 +198,35 @@ def do_manage_nginx_watchdog() -> None:
 
         status_str = f'{GREEN}активен{NC}' if active else f'{YELLOW}не активен{NC}'
         print()
-        print(f'  {CYAN}{"═"*54}{NC}')
-        print(f'  {CYAN}  🔁 NGINX WATCHDOG{NC}')
-        print(f'  {CYAN}{"─"*54}{NC}')
-        print(f'  Статус:  {status_str}')
-        print(f'  Таймер:  {"enabled" if enabled else "disabled"}')
-        print(f'  Режим:   {_protocol_mode()}')
-        print()
+        _box_top('🔁  NGINX WATCHDOG')
+        _box_row()
+        _box_row(f'  Статус:  {status_str}')
+        _box_row(f'  Таймер:  {"enabled" if enabled else "disabled"}')
+        _box_row(f'  Режим:   {_protocol_mode()}')
+        _box_row()
 
         if _LOG.exists():
             lines = _LOG.read_text(errors='replace').splitlines()[-6:]
             if lines:
-                print(f'  {DIM}Последние события:{NC}')
+                _box_row(f'  {DIM}Последние события:{NC}')
                 for line in lines:
-                    print(f'    {DIM}{line[:72]}{NC}')
-                print()
+                    _box_row(f'    {DIM}{line[:68]}{NC}')
+                _box_row()
 
-        print(f'  {CYAN}{"─"*54}{NC}')
+        _box_sep()
         if active:
-            print(f'  1. Отключить watchdog')
+            _box_item('1', 'Отключить watchdog')
         else:
-            print(f'  1. Включить watchdog (timer каждые 2 минуты)')
-        print(f'  2. Запустить проверку вручную прямо сейчас')
-        print(f'  3. Показать полный лог')
-        print(f'  Q. Назад')
-        print(f'  {CYAN}{"═"*54}{NC}')
+            _box_item('1', 'Включить watchdog (timer каждые 2 минуты)')
+        _box_item('2', 'Запустить проверку вручную прямо сейчас')
+        _box_item('3', 'Показать полный лог')
+        _box_row()
+        _box_back()
+        _box_bottom()
         print()
 
         try:
-            ch = input(f'  {CYAN}Выбор:{NC} ').strip().lower()
+            ch = input(f'{CYAN}Выбор:{NC} ').strip().lower()
         except (EOFError, KeyboardInterrupt):
             break
 
