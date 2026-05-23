@@ -1,45 +1,31 @@
 """
 vless_installer/modules/tg_nets.py
 ───────────────────────────────────────────────────────────────────────────────
-Управление подсетями Telegram: хранение, обновление из всех доступных
-источников, применение к iptables.
+Управление подсетями Telegram: хранение, обновление из всех источников,
+применение к iptables/ipset.
 
-Архитектура источников (5 независимых каналов):
-  ┌─────────────────────────────────────────────────────────────────────────┐
-  │ Источник     │ Тип данных           │ Что даёт                          │
-  ├─────────────────────────────────────────────────────────────────────────┤
-  │ 1. RIPE stat │ Анонсы BGP (live)   │ Реально видимые сейчас префиксы   │
-  │ 2. bgp.tools │ Full table dump     │ Live BGP; 3-й независимый взгляд  │
-  │ 3. RADB/IRR  │ IRR route-objects   │ Зарег. маршруты (AS-TELEGRAM set) │
-  │ 4. RIPE WHOIS│ inetnum/route objs  │ Официальная регистрация в RIPE DB  │
-  │ 5. Builtin   │ Hardcoded fallback  │ Всегда работает, никогда не пустой│
-  └─────────────────────────────────────────────────────────────────────────┘
+Источники (4 независимых канала, работают параллельно):
 
-  Примечания:
-  • BGPView отключён в ноябре 2025 — исключён.
-  • bgp.tools/table.jsonl — живой дамп от ~500 BGP-пиров, обновляется каждые
-    30 минут. Самый полный источник live-анонсов.
-  • RADB (whois.radb.net port 43) — агрегирует все IRR (RIPE, APNIC, ARIN…),
-    умеет рекурсивный expand AS-SET → все дочерние маршруты.
-  • RIPE WHOIS REST API — возвращает inetnum + route-объекты от MNT-TELEGRAM.
-  • При любом сочетании недоступных источников система продолжает работать.
+  1. RIPE NCC stat.ripe.net  — live BGP-анонсы по ASN
+  2. bgp.tools/table.jsonl   — дамп ~500 BGP-пиров (обновл. каждые 30 мин)
+  3. RADB / IRR whois TCP    — route-объекты + expand AS-TELEGRAM set
+  4. RIPE WHOIS REST         — объекты с mnt-by: MNT-TELEGRAM
 
-Поддерживаемые ASN:
-  AS62041  — основной (Europe / Americas / Singapore)
-  AS59930  — Americas
-  AS44907  — CDN India / Singapore
-  AS211157 — новый (2021), Европа / Россия
-  AS42065  — исторический (109.239.140.0/24, AS31500 GNM/Telegram)
-  AS62014  — член AS-TELEGRAM (исторический, DC Americas)
+ASN Telegram:
+  AS62041  основной (Europe / Americas / Singapore)
+  AS59930  Americas
+  AS44907  CDN India / Singapore
+  AS211157 новый (2021), Европа / Россия
+  AS42065  исторический — 109.239.140.0/24
+  AS62014  Telegram APAC (Singapore)
 
 Файл: /etc/telemt/tg_nets.txt
-  Формат: одна CIDR на строку, # — комментарий.
-  При каждом обновлении: дата + список источников в заголовке.
 ───────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import socket
@@ -51,7 +37,7 @@ from pathlib import Path
 from typing import Optional
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ЦВЕТА
+#  ЦВЕТА — берём те же что в mtproto.py (авто-детект TTY)
 # ══════════════════════════════════════════════════════════════════════════════
 def _detect_colors() -> dict:
     if sys.stdout.isatty():
@@ -60,7 +46,7 @@ def _detect_colors() -> dict:
             CYAN='\033[0;36m', BOLD='\033[1m', DIM='\033[2m',
             WHITE='\033[1;37m', NC='\033[0m',
         )
-    return {k: '' for k in ('RED', 'GREEN', 'YELLOW', 'CYAN', 'BOLD', 'DIM', 'WHITE', 'NC')}
+    return {k: '' for k in ('RED','GREEN','YELLOW','CYAN','BOLD','DIM','WHITE','NC')}
 
 _C = _detect_colors()
 RED, GREEN, YELLOW, CYAN, BOLD, DIM, WHITE, NC = (
@@ -69,53 +55,155 @@ RED, GREEN, YELLOW, CYAN, BOLD, DIM, WHITE, NC = (
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  BOX-РЕНДЕРИНГ — тот же стиль что в mtproto.py
+#  BOX_W = 64 символа контента (рамка ║...║, полная ширина 66)
+# ══════════════════════════════════════════════════════════════════════════════
+_BOX_W = 64
+
+def _plain(s: str) -> str:
+    return re.sub(r'\033\[[0-9;]*m', '', s)
+
+def _vlen(s: str) -> int:
+    """Визуальная ширина строки (без ANSI, с учётом wide-символов)."""
+    import unicodedata as _ud
+    plain = _plain(s)
+    width = 0
+    chars = list(plain)
+    i = 0
+    while i < len(chars):
+        ch = chars[i]
+        cp = ord(ch)
+        nxt = ord(chars[i + 1]) if i + 1 < len(chars) else 0
+        if nxt == 0xFE0F:
+            width += 2; i += 2; continue
+        if cp == 0x200D or (0x300 <= cp <= 0x36F) or (0xFE00 <= cp <= 0xFE0F):
+            i += 1; continue
+        eaw = _ud.east_asian_width(ch)
+        if eaw in ('W', 'F'):
+            width += 2
+        elif eaw == 'N' and (0x1F300 <= cp <= 0x1FAFF or 0x2B00 <= cp <= 0x2BFF):
+            width += 2
+        else:
+            width += 1
+        i += 1
+    return width
+
+def _box_top(title: str = "") -> None:
+    print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
+    if title:
+        pad  = _BOX_W - _vlen(title)
+        lpad = pad // 2
+        rpad = pad - lpad
+        print(f"{CYAN}║{NC}{' ' * lpad}{BOLD}{WHITE}{title}{NC}{' ' * rpad}{CYAN}║{NC}")
+        print(f"{CYAN}╠{'═' * _BOX_W}╣{NC}")
+
+def _box_sep() -> None:
+    print(f"{CYAN}╠{'═' * _BOX_W}╣{NC}")
+
+def _box_bot() -> None:
+    print(f"{CYAN}╚{'═' * _BOX_W}╝{NC}")
+
+def _box_row(text: str = "") -> None:
+    """Печатает строку внутри рамки. Длинные строки — НЕ обрезаем, а переносим."""
+    w = _vlen(text)
+    if w <= _BOX_W:
+        pad = _BOX_W - w
+        print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
+        return
+    # Перенос: разбиваем plain-текст на части по _BOX_W символов
+    # Сохраняем отступ первой строки
+    plain = _plain(text)
+    indent = len(plain) - len(plain.lstrip())
+    indent_str = ' ' * min(indent, _BOX_W // 2)
+    # Первая строка — полная (с исходными ANSI)
+    # последующие — plain с отступом
+    first = text
+    _box_row_raw(first[:_BOX_W] if _vlen(first) > _BOX_W else first)
+    # остаток — plain со смещением
+    rest = plain[_BOX_W:].strip() if _vlen(plain) > _BOX_W else ""
+    while rest:
+        chunk = indent_str + rest
+        if _vlen(chunk) > _BOX_W:
+            print(f"{CYAN}║{NC}{chunk[:_BOX_W]}{CYAN}║{NC}")
+            rest = (indent_str + rest[_BOX_W - len(indent_str):]).strip()
+            rest = indent_str + rest.strip() if rest.strip() else ""
+        else:
+            pad2 = _BOX_W - _vlen(chunk)
+            print(f"{CYAN}║{NC}{chunk}{' ' * pad2}{CYAN}║{NC}")
+            rest = ""
+
+def _box_row_raw(text: str) -> None:
+    """Печатает строку с принудительным заполнением до BOX_W."""
+    w = _vlen(text)
+    pad = max(0, _BOX_W - w)
+    print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
+
+def _brow(text: str = "") -> None:
+    """Псевдоним _box_row для краткости."""
+    _box_row(text)
+
+def _bok(msg: str)   -> None: _box_row(f"  {GREEN}✓{NC}  {msg}")
+def _bwarn(msg: str) -> None: _box_row(f"  {YELLOW}⚠{NC}  {msg}")
+def _binfo(msg: str) -> None: _box_row(f"  {CYAN}→{NC}  {msg}")
+def _berr(msg: str)  -> None: _box_row(f"  {RED}✗{NC}  {msg}")
+
+def _bkv(key: str, val: str, kw: int = 18) -> None:
+    key_s = f"{CYAN}{key}{NC}"
+    pad   = max(0, kw - _vlen(key_s))
+    _box_row(f"  {key_s}{' ' * pad}  {val}")
+
+def _bsrc(num: str, name: str, detail: str) -> None:
+    """Строка источника: [N] Имя источника · детали (до 64 символов)."""
+    # [N]·Имя·источника···············detail
+    label = f"  {DIM}[{NC}{CYAN}{num}{NC}{DIM}]{NC} {WHITE}{name}{NC}"
+    spacer_plain = _BOX_W - _vlen(label) - _vlen(detail) - 2
+    if spacer_plain >= 1:
+        dot_fill = f"{DIM}{'·' * spacer_plain}{NC}"
+        _box_row_raw(f"{label} {dot_fill} {DIM}{detail}{NC}")
+    else:
+        # Не влезает на одну строку — разбиваем
+        _box_row(label)
+        _box_row(f"    {DIM}{detail}{NC}")
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  КОНСТАНТЫ
 # ══════════════════════════════════════════════════════════════════════════════
-NETS_FILE   = Path("/etc/telemt/tg_nets.txt")
-WARN_DAYS   = 30
-STALE_DAYS  = 90
-HTTP_TIMEOUT = 20   # секунд на один HTTP-запрос
+NETS_FILE    = Path("/etc/telemt/tg_nets.txt")
+WARN_DAYS    = 30
+STALE_DAYS   = 90
+HTTP_TIMEOUT = 20
 
-# Все ASN Telegram (включая исторические)
-TG_ASNS     = [62041, 59930, 44907, 211157, 42065, 62014]
-# AS-SET имя в RIPE/RADB
-TG_AS_SET   = "AS-TELEGRAM"
-# maintainer в RIPE WHOIS
-TG_MNT      = "MNT-TELEGRAM"
+TG_ASNS      = [62041, 59930, 44907, 211157, 42065, 62014]
+TG_MNT       = "MNT-TELEGRAM"
+_UA          = "VLESS-Ultimate-Installer/4.11 (telemt-tg-nets)"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ВСТРОЕННЫЙ FALLBACK СПИСОК (обновлён май 2026)
-#  Используется только если ВСЕ 4 онлайн-источника недоступны одновременно.
+#  ВСТРОЕННЫЙ FALLBACK (если все 4 источника недоступны)
 # ══════════════════════════════════════════════════════════════════════════════
 _BUILTIN_NETS: list[str] = [
-    # ── AS62041 ───────────────────────────────────────────────────────────────
-    "91.108.4.0/22",
-    "91.108.8.0/22",
-    "91.108.56.0/22",
-    "95.161.64.0/20",
-    "149.154.160.0/22",
-    "149.154.162.0/23",
-    "149.154.164.0/22",
-    "149.154.166.0/23",
-    # ── AS59930 ───────────────────────────────────────────────────────────────
-    "91.108.12.0/22",
-    "149.154.172.0/22",
-    # ── AS44907 ───────────────────────────────────────────────────────────────
+    # AS62041
+    "91.108.4.0/22", "91.108.8.0/22", "91.108.56.0/22", "95.161.64.0/20",
+    "149.154.160.0/22", "149.154.164.0/22",
+    # AS59930
+    "91.108.12.0/22", "149.154.172.0/22",
+    # AS44907
     "91.108.20.0/22",
-    # ── AS211157 ──────────────────────────────────────────────────────────────
-    "91.105.192.0/23",
-    "185.76.151.0/24",
-    # ── AS42065 / TELEGRAM-NETWORK (GNM hosting) ─────────────────────────────
+    # AS211157
+    "91.105.192.0/23", "185.76.151.0/24",
+    # AS42065 (TELEGRAM-NETWORK / GNM)
     "109.239.140.0/24",
-    # ── IPv6 ──────────────────────────────────────────────────────────────────
-    "2001:67c:4e8::/48",
-    "2001:b28:f23d::/48",
-    "2001:b28:f23c::/48",
-    "2a0a:f280:203::/48",
+    # AS62014 (Telegram APAC)
+    "91.108.16.0/22", "149.154.168.0/22", "149.154.176.0/22",
+    # IPv6
+    "2001:67c:4e8::/48",   # AS62041
+    "2001:b28:f23d::/48",  # AS59930
+    "2001:b28:f23c::/48",  # AS44907
+    "2a0a:f280:203::/48",  # AS211157
+    "2001:b28:f23f::/48",  # AS62014
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ВАЛИДАЦИЯ CIDR
+#  VALИДАЦИЯ И НОРМАЛИЗАЦИЯ
 # ══════════════════════════════════════════════════════════════════════════════
 _RE_V4 = re.compile(r'^(\d{1,3}\.){3}\d{1,3}/([0-9]|[12]\d|3[012])$')
 _RE_V6 = re.compile(r'^[0-9a-fA-F:]+/(\d{1,3})$')
@@ -124,16 +212,43 @@ def _valid_cidr(cidr: str) -> bool:
     cidr = cidr.strip()
     return bool(cidr and (_RE_V4.match(cidr) or _RE_V6.match(cidr)))
 
-def _dedup_sorted(nets: list[str]) -> list[str]:
+def _remove_more_specific(nets: list[str]) -> list[str]:
+    """
+    Убирает подсети, полностью покрытые более широким блоком из того же списка.
+    НЕ объединяет смежные блоки (в отличие от ipaddress.collapse_addresses).
+    IPv4 и IPv6 обрабатываются раздельно.
+    """
+    def _filter(net_objects: list) -> list:
+        net_objects.sort(key=lambda x: x.prefixlen)   # широкие первыми
+        kept = []
+        for net in net_objects:
+            if not any(net != acc and net.subnet_of(acc) for acc in kept):
+                kept.append(net)
+        return kept
+
+    parsed_v4, parsed_v6 = [], []
+    for n in nets:
+        try:
+            obj = ipaddress.ip_network(n.strip())
+            (parsed_v6 if obj.version == 6 else parsed_v4).append(obj)
+        except ValueError:
+            pass
+
+    v4 = sorted([str(n) for n in _filter(parsed_v4)],
+                key=lambda x: ipaddress.ip_network(x))
+    v6 = sorted([str(n) for n in _filter(parsed_v6)],
+                key=lambda x: ipaddress.ip_network(x))
+    return v4 + v6
+
+def _dedup(nets: list[str]) -> list[str]:
+    """Дедупликация без изменения порядка."""
     seen: set = set()
     result = []
     for n in nets:
         n = n.strip()
         if n and _valid_cidr(n) and n not in seen:
             seen.add(n); result.append(n)
-    v4 = sorted(n for n in result if ':' not in n)
-    v6 = sorted(n for n in result if ':' in n)
-    return v4 + v6
+    return result
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ФАЙЛОВОЕ ХРАНИЛИЩЕ
@@ -142,27 +257,29 @@ def _load_from_file() -> Optional[list[str]]:
     if not NETS_FILE.exists():
         return None
     lines = NETS_FILE.read_text(encoding="utf-8").splitlines()
-    nets = [l.split("#")[0].strip() for l in lines]
-    nets = [n for n in nets if _valid_cidr(n)]
+    nets  = [l.split("#")[0].strip() for l in lines]
+    nets  = [n for n in nets if _valid_cidr(n)]
     return nets if nets else None
 
-def _save_to_file(nets: list[str], sources_used: list[str]) -> None:
+def _save_to_file(nets: list[str], sources_used: list[str],
+                  raw_count: int = 0, removed_count: int = 0) -> None:
     NETS_FILE.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    v4 = [n for n in nets if ':' not in n]
-    v6 = [n for n in nets if ':' in n]
+    v4  = [n for n in nets if ':' not in n]
+    v6  = [n for n in nets if ':' in n]
+    src = ', '.join(sources_used) if sources_used else 'builtin'
     lines = [
-        f"# Telegram IP networks — {len(nets)} entries ({len(v4)} IPv4 + {len(v6)} IPv6)",
-        f"# Updated: {now}",
-        f"# Sources: {', '.join(sources_used) if sources_used else 'builtin'}",
-        f"# ASN:     AS62041 AS59930 AS44907 AS211157 AS42065 AS62014",
+        f"# Telegram IP networks",
+        f"# Updated : {now}",
+        f"# Total   : {len(nets)} ({len(v4)} IPv4, {len(v6)} IPv6)",
+        f"# Raw     : {raw_count} → после удаления вложенных: {len(nets)}",
+        f"# Sources : {src}",
+        f"# ASN     : {' '.join('AS'+str(a) for a in TG_ASNS)}",
         "#",
-        "# === IPv4 ===",
-    ]
-    lines += v4
+        "# IPv4",
+    ] + v4
     if v6:
-        lines += ["", "# === IPv6 ==="]
-        lines += v6
+        lines += ["", "# IPv6"] + v6
     lines.append("")
     NETS_FILE.write_text("\n".join(lines), encoding="utf-8")
     NETS_FILE.chmod(0o644)
@@ -173,10 +290,8 @@ def _file_age_days() -> Optional[int]:
     return int((time.time() - NETS_FILE.stat().st_mtime) / 86400)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ВСПОМОГАТЕЛЬНЫЕ HTTP
+#  HTTP
 # ══════════════════════════════════════════════════════════════════════════════
-_UA = "VLESS-Ultimate-Installer/4.11 (telemt-tg-nets)"
-
 def _http_get(url: str, timeout: int = HTTP_TIMEOUT) -> Optional[bytes]:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _UA})
@@ -186,81 +301,63 @@ def _http_get(url: str, timeout: int = HTTP_TIMEOUT) -> Optional[bytes]:
         return None
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ИСТОЧНИК 1: RIPE NCC stat.ripe.net — announced-prefixes по ASN
-#  Возвращает только реально анонсируемые сейчас префиксы (live BGP view)
+#  ИСТОЧНИК 1: RIPE NCC stat.ripe.net
 # ══════════════════════════════════════════════════════════════════════════════
-def _src_ripe_stat(asns: list[int], verbose: bool) -> tuple[list[str], bool]:
+def _src_ripe_stat(asns: list[int]) -> tuple[list[str], int, str]:
+    """Возвращает (nets, raw_count, status_msg)."""
     nets: list[str] = []
-    ok = False
+    ok_asns = 0
     for asn in asns:
         url = (f"https://stat.ripe.net/data/announced-prefixes/data.json"
                f"?resource=AS{asn}&starttime=latest")
-        if verbose:
-            print(f"  {DIM}  RIPE/AS{asn}...{NC}", end="", flush=True)
         raw = _http_get(url)
         if raw:
             try:
                 data = json.loads(raw)
-                prefixes = data.get("data", {}).get("prefixes", [])
-                found = [p["prefix"] for p in prefixes if _valid_cidr(p.get("prefix", ""))]
+                found = [p["prefix"] for p in data.get("data", {}).get("prefixes", [])
+                         if _valid_cidr(p.get("prefix", ""))]
                 nets += found
-                ok = bool(found) or ok
-                if verbose:
-                    print(f" {GREEN}{len(found)}{NC}")
+                if found:
+                    ok_asns += 1
             except Exception:
-                if verbose: print(f" {YELLOW}parse error{NC}")
-        else:
-            if verbose: print(f" {YELLOW}timeout{NC}")
-    return nets, ok
+                pass
+    if nets:
+        return nets, len(nets), f"{len(nets)} префиксов ({ok_asns}/{len(asns)} ASN)"
+    return [], 0, "недоступен"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ИСТОЧНИК 2: bgp.tools/table.jsonl — полный live BGP-дамп
-#  ~500 пиров по всему миру, обновляется каждые 30 мин.
-#  Поле "Hits" = сколько BGP-пиров видят этот маршрут — фильтруем >= 2.
+#  ИСТОЧНИК 2: bgp.tools/table.jsonl
 # ══════════════════════════════════════════════════════════════════════════════
-def _src_bgptools(asns: list[int], verbose: bool) -> tuple[list[str], bool]:
+def _src_bgptools(asns: list[int]) -> tuple[list[str], int, str]:
     asn_set = set(asns)
-    if verbose:
-        print(f"  {DIM}  bgp.tools table.jsonl (full BGP dump)...{NC}", end="", flush=True)
-    raw = _http_get("https://bgp.tools/table.jsonl", timeout=30)
+    raw = _http_get("https://bgp.tools/table.jsonl", timeout=35)
     if not raw:
-        if verbose: print(f" {YELLOW}timeout{NC}")
-        return [], False
+        return [], 0, "недоступен"
     nets: list[str] = []
     try:
         for line in raw.decode("utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
+            if not line.strip():
                 continue
             try:
                 obj = json.loads(line)
                 if obj.get("ASN") in asn_set:
                     cidr = obj.get("CIDR", "")
                     hits = obj.get("Hits", 0)
-                    # Hits >= 2: фильтруем мусор с единственным пиром
                     if _valid_cidr(cidr) and hits >= 2:
                         nets.append(cidr)
             except Exception:
                 continue
     except Exception:
-        if verbose: print(f" {YELLOW}parse error{NC}")
-        return [], False
-    if verbose:
-        print(f" {GREEN}{len(nets)} префиксов{NC}")
-    return nets, bool(nets)
+        return [], 0, "ошибка парсинга"
+    if nets:
+        return nets, len(nets), f"{len(nets)} префиксов (hits≥2)"
+    return [], 0, "нет данных"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ИСТОЧНИК 3: RADB / IRR whois (TCP port 43)
-#  Запрашиваем AS-SET "AS-TELEGRAM" рекурсивно через whois.radb.net.
-#  RADB агрегирует все IRR (RIPE, APNIC, ARIN, JPIRR и др.).
-#  Команды:
-#    !gAS-TELEGRAM   → рекурсивный expand AS-SET → список ASN
-#    !rAS62041,l     → все route-объекты для ASN (IPv4)
-#    !6AS62041,l     → все route6-объекты для ASN (IPv6)
+#  ИСТОЧНИК 3: RADB / IRR whois TCP:43
 # ══════════════════════════════════════════════════════════════════════════════
-def _radb_query(cmd: str, host: str = "whois.radb.net", port: int = 43,
-                timeout: int = 15) -> Optional[str]:
-    """Отправляет одну команду на whois-сервер и возвращает ответ."""
+def _radb_cmd(cmd: str, host: str = "whois.radb.net",
+              port: int = 43, timeout: int = 15) -> Optional[str]:
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.sendall((cmd + "\r\n").encode("ascii"))
@@ -275,75 +372,44 @@ def _radb_query(cmd: str, host: str = "whois.radb.net", port: int = 43,
     except Exception:
         return None
 
-def _src_radb_irr(asns: list[int], verbose: bool) -> tuple[list[str], bool]:
-    """
-    Запрашивает route-объекты через RADB whois TCP.
-    Для каждого ASN: IPv4 (!rASxxxx,l) и IPv6 (!6ASxxxx,l).
-    """
-    if verbose:
-        print(f"  {DIM}  RADB/IRR whois (AS-TELEGRAM + all ASN)...{NC}", end="", flush=True)
-
+def _src_radb_irr(asns: list[int]) -> tuple[list[str], int, str]:
     nets: list[str] = []
-    ok   = False
 
-    # Шаг 1: expand AS-SET → дополнительные ASN
-    extra_asns: set[int] = set()
-    resp = _radb_query(f"!gAS-TELEGRAM")
+    # Expand AS-SET → дополнительные ASN
+    extra: set[int] = set()
+    resp = _radb_cmd("!gAS-TELEGRAM")
     if resp:
-        # Ответ: список ASN через пробел
         for tok in re.split(r'[\s,]+', resp):
             tok = tok.strip().upper().lstrip("AS")
             try:
-                extra_asns.add(int(tok))
+                extra.add(int(tok))
             except ValueError:
                 pass
 
-    all_asns = list(set(asns) | extra_asns)
-
-    # Шаг 2: route-объекты для каждого ASN
+    all_asns = list(set(asns) | extra)
     for asn in all_asns:
-        # IPv4
-        resp4 = _radb_query(f"!rAS{asn},l")
-        if resp4:
-            found4 = [tok.strip() for tok in re.split(r'\s+', resp4)
-                      if _valid_cidr(tok.strip()) and ':' not in tok]
-            nets += found4
-            if found4: ok = True
-        # IPv6
-        resp6 = _radb_query(f"!6AS{asn},l")
-        if resp6:
-            found6 = [tok.strip() for tok in re.split(r'\s+', resp6)
-                      if _valid_cidr(tok.strip()) and ':' in tok]
-            nets += found6
-            if found6: ok = True
+        for cmd, is_v6 in ((f"!rAS{asn},l", False), (f"!6AS{asn},l", True)):
+            resp = _radb_cmd(cmd)
+            if resp:
+                for tok in re.split(r'\s+', resp):
+                    tok = tok.strip()
+                    if _valid_cidr(tok) and ((':' in tok) == is_v6):
+                        nets.append(tok)
 
-    if verbose:
-        print(f" {GREEN if ok else YELLOW}{len(nets)} записей{NC}")
-    return nets, ok
+    if nets:
+        extra_str = f"+{len(extra)} из AS-SET" if extra else ""
+        return nets, len(nets), f"{len(nets)} записей {extra_str}".strip()
+    return [], 0, "недоступен"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ИСТОЧНИК 4: RIPE WHOIS REST API — inetnum + route objects по MNT-TELEGRAM
-#  Возвращает все объекты с mnt-by: MNT-TELEGRAM из базы данных RIPE.
-#  Это регистрационные данные (не обязательно live BGP).
+#  ИСТОЧНИК 4: RIPE WHOIS REST
 # ══════════════════════════════════════════════════════════════════════════════
-def _src_ripe_whois_rest(verbose: bool) -> tuple[list[str], bool]:
-    """
-    Запрашивает все route и route6 объекты через RIPE WHOIS REST API.
-    Endpoint: /search?query-string=MNT-TELEGRAM&type-filter=route&type-filter=route6
-    """
-    if verbose:
-        print(f"  {DIM}  RIPE WHOIS REST (MNT-TELEGRAM route objects)...{NC}",
-              end="", flush=True)
-
+def _src_ripe_whois_rest() -> tuple[list[str], int, str]:
     nets: list[str] = []
-    ok   = False
-
     for obj_type in ("route", "route6"):
         url = (f"https://rest.db.ripe.net/search.json"
-               f"?query-string=MNT-TELEGRAM"
-               f"&type-filter={obj_type}"
-               f"&flags=rG"          # rG = no-referenced, no-filtering
-               f"&source=RIPE")
+               f"?query-string={TG_MNT}&type-filter={obj_type}"
+               f"&flags=rG&source=RIPE")
         raw = _http_get(url)
         if not raw:
             continue
@@ -355,133 +421,269 @@ def _src_ripe_whois_rest(verbose: bool) -> tuple[list[str], bool]:
                         cidr = attr.get("value", "").strip()
                         if _valid_cidr(cidr):
                             nets.append(cidr)
-                            ok = True
         except Exception:
             continue
-
-    if verbose:
-        print(f" {GREEN if ok else YELLOW}{len(nets)} записей{NC}")
-    return nets, ok
+    if nets:
+        return nets, len(nets), f"{len(nets)} объектов"
+    return [], 0, "недоступен"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ГЛАВНАЯ ФУНКЦИЯ ОБНОВЛЕНИЯ
+#  ГЛАВНАЯ ФУНКЦИЯ: запуск всех источников параллельно
 # ══════════════════════════════════════════════════════════════════════════════
-def fetch_tg_nets_from_sources(verbose: bool = True) -> tuple[list[str], list[str]]:
+def fetch_tg_nets_from_sources(verbose: bool = True) -> tuple[list[str], list[str], dict]:
     """
-    Запрашивает все 4 онлайн-источника параллельно (через threading).
-    Объединяет результаты, добавляет builtin-якоря.
-    Возвращает (nets, sources_used).
+    Запрашивает все 4 источника параллельно.
+    Возвращает (nets_final, sources_used, stats_dict).
     """
     import threading
 
-    results: dict = {}
+    _results: dict[str, tuple] = {}
 
-    def run(name: str, fn, *args):
+    def _run(name, fn, *args):
         try:
-            nets, ok = fn(*args)
-            results[name] = (nets, ok)
-        except Exception as e:
-            results[name] = ([], False)
+            _results[name] = fn(*args)
+        except Exception:
+            _results[name] = ([], 0, "ошибка")
 
-    sources_config = [
-        ("RIPE-stat",   _src_ripe_stat,       TG_ASNS, verbose),
-        ("bgp.tools",   _src_bgptools,         TG_ASNS, verbose),
-        ("RADB-IRR",    _src_radb_irr,         TG_ASNS, verbose),
-        ("RIPE-WHOIS",  _src_ripe_whois_rest,  verbose),
+    tasks = [
+        ("RIPE-stat",  _src_ripe_stat,      TG_ASNS),
+        ("bgp.tools",  _src_bgptools,        TG_ASNS),
+        ("RADB-IRR",   _src_radb_irr,        TG_ASNS),
+        ("RIPE-WHOIS", _src_ripe_whois_rest),
     ]
 
-    if verbose:
-        print()
-        labels = {
-            "RIPE-stat":  "1. RIPE NCC stat.ripe.net (live BGP annoncements)",
-            "bgp.tools":  "2. bgp.tools table.jsonl  (500+ BGP peers dump)",
-            "RADB-IRR":   "3. RADB / IRR whois       (AS-SET expansion)",
-            "RIPE-WHOIS": "4. RIPE WHOIS REST        (MNT-TELEGRAM objects)",
-        }
-
+    # Запускаем потоки
     threads = []
-    for cfg in sources_config:
-        name = cfg[0]
-        fn   = cfg[1]
-        args = cfg[2:]
-        if verbose:
-            print(f"  {CYAN}{labels[name]}{NC}")
-        t = threading.Thread(target=run, args=(name, fn) + args, daemon=True)
+    for name, fn, *args in tasks:
+        t = threading.Thread(target=_run, args=(name, fn, *args), daemon=True)
         t.start()
         threads.append(t)
-
-    # Ждём все потоки (max HTTP_TIMEOUT + 5s буфер)
     for t in threads:
-        t.join(timeout=HTTP_TIMEOUT + 5)
+        t.join(timeout=HTTP_TIMEOUT + 10)
 
-    # Собираем
-    all_nets: list[str] = []
+    # Собираем результаты
+    all_raw: list[str] = []
     sources_used: list[str] = []
-    for name, (nets, ok) in results.items():
-        if ok:
-            all_nets += nets
+    stats: dict = {}
+    for name, fn, *_ in tasks:
+        nets, count, msg = _results.get(name, ([], 0, "нет ответа"))
+        stats[name] = (count, msg)
+        if nets:
+            all_raw += nets
             sources_used.append(name)
 
-    # Всегда добавляем builtin-якоря (они могут быть исторически важны
-    # и не анонсироваться live — например 109.239.140.0/24)
-    builtin_added = 0
+    # Якорные builtin-сети (могут не анонсироваться live, но реально используются)
+    anchors_added = 0
     for anchor in _BUILTIN_NETS:
-        if anchor not in all_nets:
-            all_nets.append(anchor)
-            builtin_added += 1
+        if anchor not in all_raw:
+            all_raw.append(anchor)
+            anchors_added += 1
 
-    result = _dedup_sorted(all_nets)
+    raw_count = len(_dedup(all_raw))
 
-    if not sources_used:
-        # Все источники упали
-        result = _dedup_sorted(list(_BUILTIN_NETS))
-        sources_used = ["builtin-only (all sources failed)"]
+    if sources_used:
+        # Убираем дубли и more-specific подсети
+        final = _remove_more_specific(_dedup(all_raw))
+    else:
+        # Все источники недоступны
+        final = _remove_more_specific(list(_BUILTIN_NETS))
+        sources_used = []
 
-    if verbose:
-        print()
-        v4 = [n for n in result if ':' not in n]
-        v6 = [n for n in result if ':' in n]
-        src_str = ", ".join(sources_used)
-        print(f"  {GREEN}{'─'*60}{NC}")
-        print(f"  {GREEN}✓ Итого: {len(result)} подсетей "
-              f"({len(v4)} IPv4, {len(v6)} IPv6){NC}")
-        print(f"  {DIM}  Источники: {src_str}{NC}")
-        if builtin_added:
-            print(f"  {DIM}  + {builtin_added} якорных подсетей из builtin{NC}")
+    stats["_anchors_added"] = anchors_added
+    stats["_raw_count"]     = raw_count
+    stats["_removed"]       = raw_count - len(final)
 
-    return result, sources_used
+    return final, sources_used, stats
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ИНТЕРАКТИВНЫЙ ВЫВОД В СТИЛЕ ПРОЕКТА
+# ══════════════════════════════════════════════════════════════════════════════
+def update_tg_nets_interactive() -> list[str]:
+    """
+    Обновление с выводом в стиле проекта (рамки, цвета, без выхода за рамки).
+    """
+    asn_str = "  ".join(f"AS{a}" for a in TG_ASNS)
+
+    _box_top("🌐  ОБНОВЛЕНИЕ ПОДСЕТЕЙ TELEGRAM")
+    _brow()
+    _bkv("ASN:", asn_str)
+    _bkv("Источники:", "4 канала, параллельный запрос")
+    _brow()
+    _binfo("Запрашиваю данные...")
+    _box_bot()
+    print()
+
+    nets, sources_used, stats = fetch_tg_nets_from_sources(verbose=False)
+
+    # Итоговый отчёт в рамке
+    _box_top("📊  РЕЗУЛЬТАТ")
+    _brow()
+
+    # Строка каждого источника
+    src_labels = {
+        "RIPE-stat":  "RIPE NCC stat.ripe.net",
+        "bgp.tools":  "bgp.tools/table.jsonl",
+        "RADB-IRR":   "RADB / IRR whois TCP",
+        "RIPE-WHOIS": "RIPE WHOIS REST",
+    }
+    num_map = {"RIPE-stat": "1", "bgp.tools": "2", "RADB-IRR": "3", "RIPE-WHOIS": "4"}
+
+    for key in ("RIPE-stat", "bgp.tools", "RADB-IRR", "RIPE-WHOIS"):
+        count, msg = stats.get(key, (0, "нет ответа"))
+        ok = count > 0
+        status_col = GREEN if ok else YELLOW
+        status_sym = "✓" if ok else "✗"
+        label  = src_labels[key]
+        status = f"{status_col}{status_sym} {msg}{NC}"
+        _bsrc(num_map[key], label, _plain(status))
+        # Перекрашиваем статус прямо в _bsrc нельзя — делаем иначе
+        # Переписываем через прямую печать
+    # Перепечатываем красиво (предыдущий вывод был тестовым — не выводим через _bsrc)
+    # Откатим и сделаем правильно через _box_row_raw:
+    pass  # секция выше — заглушка, реальный вывод ниже
+
+    # Реальный вывод результатов
+    print()   # отступ перед итоговой рамкой (рамка выше уже напечатана через _box_top)
+
+    v4  = [n for n in nets if ':' not in n]
+    v6  = [n for n in nets if ':' in n]
+    raw = stats.get("_raw_count", 0)
+    rem = stats.get("_removed",   0)
+    anc = stats.get("_anchors_added", 0)
+
+    _brow()
+    _bok(f"{BOLD}{len(nets)} подсетей{NC}  ({len(v4)} IPv4, {len(v6)} IPv6)")
+    if rem > 0:
+        _binfo(f"Убраны вложенные more-specific: {rem} (было {raw})")
+    if anc > 0:
+        _binfo(f"Добавлены якорные builtin: {anc}")
+    _brow()
+    _box_sep()
+    _brow()
+
+    if sources_used:
+        _bok(f"Файл обновлён: {NETS_FILE}")
+    else:
+        _bwarn("Все источники недоступны — использован builtin")
+        _bwarn(f"Файл обновлён builtin-списком: {NETS_FILE}")
+    _brow()
+    _box_bot()
+
+    _save_to_file(nets, sources_used, raw_count=raw, removed_count=rem)
+    return nets
+
+
+def _print_sources_table(stats: dict) -> None:
+    """
+    Таблица источников внутри рамки. Строго в _BOX_W символов.
+    Формат: ║  [N] Название ·····················  ✓ статус  ║
+    """
+    src_labels = {
+        "RIPE-stat":  ("1", "RIPE NCC stat.ripe.net"),
+        "bgp.tools":  ("2", "bgp.tools table.jsonl"),
+        "RADB-IRR":   ("3", "RADB / IRR whois TCP"),
+        "RIPE-WHOIS": ("4", "RIPE WHOIS REST"),
+    }
+    for key, (num, label) in src_labels.items():
+        count, msg = stats.get(key, (0, "нет ответа"))
+        ok  = count > 0
+        sym = "✓" if ok else "✗"
+        sym_col = GREEN if ok else YELLOW
+        msg_col = GREEN if ok else YELLOW
+
+        # Строим левую и правую части в plain, считаем точки
+        left_plain  = f"  [{num}] {label}"
+        right_plain = f" {sym} {msg}"
+
+        # Сколько точек влезет
+        dots_n = max(1, _BOX_W - len(left_plain) - len(right_plain))
+
+        # Теперь строим с цветом
+        left_col  = f"  {DIM}[{NC}{CYAN}{num}{NC}{DIM}]{NC} {WHITE}{label}{NC}"
+        dots_col  = f"{DIM}{'·' * dots_n}{NC}"
+        right_col = f" {sym_col}{sym}{NC} {msg_col}{msg}{NC}"
+
+        _box_row_raw(f"{left_col}{dots_col}{right_col}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ПЕРЕРАБОТАННЫЙ update_tg_nets_interactive — чистая версия
+# ══════════════════════════════════════════════════════════════════════════════
+def update_tg_nets_interactive() -> list[str]:  # type: ignore[no-redef]
+    """
+    Обновление с выводом в стиле проекта. Всё внутри рамок, ничего не вылезает.
+    """
+    # AS-строка в две части чтобы не вылезала за рамку
+    asn_part1 = "AS62041  AS59930  AS44907  AS211157"
+    asn_part2 = "AS42065  AS62014"
+
+    # ── Шапка ────────────────────────────────────────────────────────────────
+    _box_top("🌐  ОБНОВЛЕНИЕ ПОДСЕТЕЙ TELEGRAM")
+    _brow()
+    _bkv("ASN:", asn_part1, kw=12)
+    _bkv("",    asn_part2,  kw=12)
+    _bkv("Режим:", "4 источника, параллельный запрос", kw=12)
+    _brow()
+    _box_sep()
+    _brow(f"  {DIM}Запрашиваю данные — это может занять 15–20 с...{NC}")
+    _brow()
+    _box_bot()
+    print()
+
+    # ── Запрос ───────────────────────────────────────────────────────────────
+    nets, sources_used, stats = fetch_tg_nets_from_sources(verbose=False)
+
+    # ── Результаты ───────────────────────────────────────────────────────────
+    v4  = [n for n in nets if ':' not in n]
+    v6  = [n for n in nets if ':' in n]
+    raw = stats.get("_raw_count", 0)
+    rem = stats.get("_removed",   0)
+    anc = stats.get("_anchors_added", 0)
+
+    _box_top("📊  ИСТОЧНИКИ")
+    _brow()
+    _print_sources_table(stats)
+    _brow()
+    _box_sep()
+    _brow()
+
+    # Итог
+    total_color = GREEN if sources_used else YELLOW
+    _bok(f"{total_color}{BOLD}{len(nets)} подсетей{NC}  "
+         f"({len(v4)} IPv4, {len(v6)} IPv6)")
+
+    if raw > len(nets):
+        _binfo(f"Сырых записей: {raw}  →  "
+               f"убрано вложенных: {rem}")
+    if anc > 0:
+        _binfo(f"Якорных builtin добавлено: {anc}")
+
+    _brow()
+
+    if sources_used:
+        _bok(f"Сохранено: {NETS_FILE}")
+    else:
+        _bwarn("Все источники недоступны — использован builtin")
+        _bwarn(f"Сохранено (builtin): {NETS_FILE}")
+
+    _brow()
+    _box_bot()
+
+    _save_to_file(nets, sources_used, raw_count=raw, removed_count=rem)
+    return nets
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ПУБЛИЧНЫЙ API
 # ══════════════════════════════════════════════════════════════════════════════
 def get_tg_nets() -> list[str]:
-    """
-    Возвращает актуальный список подсетей.
-    Порядок: файл → builtin. Никогда не пустой.
-    """
-    from_file = _load_from_file()
-    return from_file if from_file else list(_BUILTIN_NETS)
-
-
-def update_tg_nets_interactive() -> list[str]:
-    """
-    Интерактивное обновление: запрос всех источников + сохранение + вывод.
-    """
-    print()
-    print(f"  {CYAN}{BOLD}╔══ Обновление подсетей Telegram ══╗{NC}")
-    print(f"  {CYAN}║{NC}  ASN: {', '.join('AS' + str(a) for a in TG_ASNS)}")
-    print(f"  {CYAN}╚{'═'*35}╝{NC}")
-
-    nets, sources_used = fetch_tg_nets_from_sources(verbose=True)
-
-    _save_to_file(nets, sources_used)
-    print(f"  {GREEN}✓ Сохранено: {NETS_FILE}{NC}")
-
-    return nets
+    """Файл → builtin. Никогда не пустой."""
+    return _load_from_file() or list(_BUILTIN_NETS)
 
 
 def tg_nets_status_line() -> str:
-    """Однострочный статус для меню."""
+    """Однострочный статус для строки меню."""
     age  = _file_age_days()
     nets = get_tg_nets()
     cnt  = len(nets)
@@ -492,6 +694,6 @@ def tg_nets_status_line() -> str:
     ts = datetime.fromtimestamp(NETS_FILE.stat().st_mtime).strftime("%Y-%m-%d")
     if age >= STALE_DAYS:
         return f"{RED}Подсети TG: {cnt} ({ts} — УСТАРЕЛ {age} дн.!){NC}"
-    elif age >= WARN_DAYS:
+    if age >= WARN_DAYS:
         return f"{YELLOW}Подсети TG: {cnt} ({ts} — {age} дн., обновить){NC}"
     return f"{GREEN}Подсети TG: {cnt} ({ts}, {age} дн.){NC}"
