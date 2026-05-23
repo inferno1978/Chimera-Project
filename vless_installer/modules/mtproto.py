@@ -2,7 +2,7 @@
 vless_installer/modules/mtproto.py
 ───────────────────────────────────────────────────────────────────────────────
 Модуль Telemt MTProxy — Telegram MTProto-прокси на Rust/Tokio.
-Интегрируется в VLESS Ultimate Installer v4.11.
+Интегрируется в VLESS Ultimate Installer v4.11.2
 
 Точка входа из _core.py:
     from vless_installer.modules.mtproto import mtproto_menu
@@ -69,6 +69,38 @@ GITHUB_API      = "https://api.github.com/repos/telemt/telemt/releases/latest"
 
 CHAIN_IN        = "TELEMT_STATS_IN"
 CHAIN_OUT       = "TELEMT_STATS_OUT"
+
+# ── Xray tproxy-интеграция ────────────────────────────────────────────────────
+# Telemt (Rust, без поддержки SOCKS5-upstream) работает в режиме direct.
+# Трафик к Telegram-подсетям перехватывается iptables REDIRECT и отправляется
+# в dokodemo-door inbound xray, который уже настроен на cascade (VLESS или AWG).
+# Схема:  Telemt → iptables REDIRECT → dokodemo :10811 → xray → exit VPS → TG
+#
+# Это работает одинаково для обоих транспортов:
+#   VLESS: xray направляет по chain-exit outbound / balancer
+#   AWG:   xray направляет через freedom+fwmark → awg0 → exit VPS
+#          (dokodemo обрабатывается uid xray → fwmark проставляется корректно)
+XRAY_TPROXY_TAG    = "tproxy-telemt"
+XRAY_TPROXY_PORT   = 10811          # порт dokodemo-door; не конфликтует с 10808
+XRAY_CONFIG_PATHS  = [
+    Path("/etc/xray/config.json"),
+    Path("/usr/local/etc/xray/config.json"),
+]
+XRAY_SERVICE_NAME  = "xray"
+
+# Подсети Telegram (актуальные AS блоки)
+_TG_NETS = [
+    "91.108.4.0/22",
+    "91.108.8.0/22",
+    "91.108.56.0/22",
+    "91.108.16.0/22",
+    "91.108.12.0/22",
+    "149.154.160.0/20",
+    "149.154.164.0/22",
+    "2001:b28:f23d::/48",
+    "2001:b28:f23f::/48",
+    "2001:67c:4e8::/48",
+]
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  BOX-РЕНДЕРИНГ
@@ -333,7 +365,11 @@ def _save_users(users: dict) -> None:
                      CONFIG_FILE.read_text(), flags=re.MULTILINE)
     CONFIG_FILE.write_text(content)
 
-def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy) -> None:
+def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
+                  socks5_port: int = 0) -> None:
+    """
+    socks5_port > 0  →  upstream через локальный SOCKS5 (xray), иначе direct.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     arr = ", ".join(f'"{u}"' for u in users)
@@ -356,11 +392,419 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy) -> None
         "", "[access.users]",
     ]
     for n, s in users.items(): lines.append(f'{n} = "{s}"')
-    lines += ["", "[[upstreams]]", 'type = "direct"', "enabled = true", "weight = 10"]
+    if socks5_port > 0:
+        lines += [
+            "", "[[upstreams]]",
+            'type = "socks5"',
+            f'addr = "127.0.0.1:{socks5_port}"',
+            "enabled = true", "weight = 10",
+        ]
+    else:
+        lines += ["", "[[upstreams]]", 'type = "direct"', "enabled = true", "weight = 10"]
     if not use_middle_proxy:
         lines += ["", "[dc_overrides]", '"203" = "91.105.192.100:443"']
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
     CONFIG_FILE.chmod(0o640)
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  XRAY TPROXY-ИНТЕГРАЦИЯ  (dokodemo-door + iptables REDIRECT)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  Почему не SOCKS5:
+#    Текущая версия telemt (Rust/Tokio) не поддерживает SOCKS5-upstream.
+#    Используем обходной путь на уровне ядра:
+#      1. Xray слушает dokodemo-door на 127.0.0.1:XRAY_TPROXY_PORT
+#      2. iptables REDIRECT перехватывает TCP telemt → Telegram IP → :XRAY_TPROXY_PORT
+#      3. Xray обрабатывает пакет под uid xray:
+#           VLESS: → chain-exit outbound / balancer → exit VPS → Telegram
+#           AWG:   → freedom+fwmark → awg0 → exit VPS → Telegram
+#             (uid xray получает fwmark от policy routing → пакет идёт через awg0 ✓)
+#
+#  Схема одинакова для обоих транспортов — VLESS-цепочки и AWG 2.0.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _xray_config_path() -> Optional[Path]:
+    """Возвращает первый найденный config.json xray, иначе None."""
+    for p in XRAY_CONFIG_PATHS:
+        if p.exists():
+            return p
+    return None
+
+
+def _xray_cascade_mode() -> str:
+    """
+    Определяет режим каскада по state.json.
+    Возвращает: "awg" | "vless" | "none"
+    """
+    state_file = Path("/var/lib/xray-installer/state.json")
+    if not state_file.exists():
+        return "none"
+    try:
+        state = json.loads(state_file.read_text())
+        if state.get("awg_exit_enabled"):
+            return "awg"
+        mode = state.get("install_mode", state.get("mode", ""))
+        if str(mode).upper() == "B":
+            return "vless"
+    except Exception:
+        pass
+    return "none"
+
+
+def _find_xray_bin() -> Optional[str]:
+    """Возвращает путь к бинарнику xray или None."""
+    for candidate in ("/usr/local/bin/xray", "/usr/bin/xray"):
+        if Path(candidate).exists():
+            return candidate
+    import shutil as _sh
+    return _sh.which("xray")
+
+
+def _xray_has_inbound(cfg: dict, tag: str) -> bool:
+    """Проверяет наличие inbound с данным тегом."""
+    return any(ib.get("tag") == tag for ib in cfg.get("inbounds", []))
+
+
+def _xray_get_proxy_tag(cfg: dict) -> tuple:
+    """
+    Находит тег главного outbound/balancer каскада.
+    Возвращает (tag: str, is_balancer: bool).
+
+    Balancer (2+ нод) требует balancerTag в routing rule — это другое поле,
+    не outboundTag; путать нельзя, xray не найдёт outboundTag среди outbounds.
+    """
+    for b in cfg.get("routing", {}).get("balancers", []):
+        if "chain" in b.get("tag", ""):
+            return b["tag"], True
+    outbounds = cfg.get("outbounds", [])
+    for prefer in ("chain-exit-1", "chain-exit"):
+        if any(ob.get("tag") == prefer for ob in outbounds):
+            return prefer, False
+    # AWG-режим: freedom outbound с fwmark
+    for ob in outbounds:
+        tag = ob.get("tag", "")
+        if tag in ("BLOCK", "xray-stats-api", "direct"):
+            continue
+        sm = ob.get("streamSettings", {}).get("sockopt", {}).get("mark", 0)
+        if ob.get("protocol") == "freedom" and sm:
+            return tag, False
+        if ob.get("protocol") == "vless":
+            return tag, False
+    return "chain-exit", False
+
+
+# ── Xray config: dokodemo-door inbound ───────────────────────────────────────
+
+def _xray_inject_dokodemo(cfg: dict, port: int) -> bool:
+    """
+    Добавляет dokodemo-door inbound + routing rule в конфиг xray.
+    followRedirect=True: принимает TCP переброшенные iptables REDIRECT.
+    Возвращает True если конфиг изменён.
+    """
+    if _xray_has_inbound(cfg, XRAY_TPROXY_TAG):
+        return False
+
+    cfg.setdefault("inbounds", []).append({
+        "tag":      XRAY_TPROXY_TAG,
+        "port":     port,
+        "listen":   "127.0.0.1",
+        "protocol": "dokodemo-door",
+        "settings": {"network": "tcp", "followRedirect": True},
+        "sniffing": {"enabled": False},
+    })
+
+    proxy_tag, is_balancer = _xray_get_proxy_tag(cfg)
+    rule: dict = {"type": "field", "inboundTag": [XRAY_TPROXY_TAG]}
+    if is_balancer:
+        rule["balancerTag"] = proxy_tag
+    else:
+        rule["outboundTag"] = proxy_tag
+
+    rules: list = cfg.setdefault("routing", {}).setdefault("rules", [])
+    rules.insert(0, rule)
+    return True
+
+
+def _xray_remove_dokodemo(cfg: dict) -> bool:
+    """Удаляет dokodemo inbound и routing rule из конфига xray."""
+    changed = False
+    inbounds = cfg.get("inbounds", [])
+    new_ib = [ib for ib in inbounds if ib.get("tag") != XRAY_TPROXY_TAG]
+    if len(new_ib) != len(inbounds):
+        cfg["inbounds"] = new_ib
+        changed = True
+    rules = cfg.get("routing", {}).get("rules", [])
+    new_r = [r for r in rules if XRAY_TPROXY_TAG not in r.get("inboundTag", [])]
+    if len(new_r) != len(rules):
+        cfg["routing"]["rules"] = new_r
+        changed = True
+    return changed
+
+
+def _xray_dokodemo_port(cfg: dict) -> int:
+    """Возвращает порт dokodemo inbound если настроен, иначе 0."""
+    for ib in cfg.get("inbounds", []):
+        if ib.get("tag") == XRAY_TPROXY_TAG:
+            return int(ib.get("port", 0))
+    return 0
+
+
+def _xray_write_and_test(cfg_path: Path, cfg: dict) -> Optional[str]:
+    """
+    Записывает конфиг и проверяет синтаксис через xray -test.
+    Возвращает None при успехе, строку с ошибкой при неудаче.
+    """
+    try:
+        cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+        cfg_path.chmod(0o640)
+    except Exception as e:
+        return f"Не удалось записать {cfg_path}: {e}"
+    xray_bin = _find_xray_bin()
+    if xray_bin:
+        r = _run([xray_bin, "run", "-test", "-config", str(cfg_path)], capture=True)
+        if r.returncode != 0:
+            return f"xray -test провалился: {(r.stderr or r.stdout)[:300]}"
+    return None
+
+
+# ── iptables REDIRECT для Telegram-подсетей ───────────────────────────────────
+
+def _ipt_rule_exists(net: str, port: int) -> bool:
+    """Проверяет наличие REDIRECT-правила через iptables -C (не дублирует)."""
+    v6  = ":" in net
+    ipt = "ip6tables" if v6 else "iptables"
+    r   = _run([ipt, "-t", "nat", "-C", "OUTPUT",
+                "-d", net, "-p", "tcp",
+                "-j", "REDIRECT", "--to-port", str(port)],
+               capture=True)
+    return r.returncode == 0
+
+
+def _ipt_add_redirect(net: str, port: int) -> bool:
+    """Добавляет REDIRECT-правило если ещё нет. Возвращает True при успехе."""
+    if _ipt_rule_exists(net, port):
+        return True
+    v6  = ":" in net
+    ipt = "ip6tables" if v6 else "iptables"
+    r   = _run([ipt, "-t", "nat", "-A", "OUTPUT",
+                "-d", net, "-p", "tcp",
+                "-j", "REDIRECT", "--to-port", str(port)],
+               capture=True)
+    return r.returncode == 0
+
+
+def _ipt_del_redirect(net: str, port: int) -> None:
+    """Удаляет REDIRECT-правило (все копии, идемпотентно)."""
+    for _ in range(5):
+        if not _ipt_rule_exists(net, port):
+            break
+        v6  = ":" in net
+        ipt = "ip6tables" if v6 else "iptables"
+        _run([ipt, "-t", "nat", "-D", "OUTPUT",
+              "-d", net, "-p", "tcp",
+              "-j", "REDIRECT", "--to-port", str(port)],
+             capture=True)
+
+
+def _iptables_persist() -> None:
+    """
+    Сохраняет iptables-правила для выживания после ребута.
+    Порядок попыток:
+      1. netfilter-persistent save  (Debian/Ubuntu с iptables-persistent)
+      2. iptables-save → /etc/iptables/rules.v4 + rules.v6
+      3. systemd-сервис telemt-iptables (fallback)
+    """
+    if shutil.which("netfilter-persistent"):
+        _run(["netfilter-persistent", "save"], capture=True)
+        return
+    rules_dir = Path("/etc/iptables")
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    r4 = _run(["iptables-save"],  capture=True)
+    if r4.returncode == 0 and r4.stdout:
+        (rules_dir / "rules.v4").write_text(r4.stdout)
+    r6 = _run(["ip6tables-save"], capture=True)
+    if r6.returncode == 0 and r6.stdout:
+        (rules_dir / "rules.v6").write_text(r6.stdout)
+    _ensure_ipt_restore_service()
+
+
+def _ensure_ipt_restore_service() -> None:
+    """
+    Создаёт systemd-сервис восстановления iptables при загрузке,
+    если нет netfilter-persistent.
+    """
+    svc_path = Path("/etc/systemd/system/telemt-iptables.service")
+    if svc_path.exists():
+        # Пересоздаём чтобы обновить пути если изменились
+        pass
+    rules_v4 = Path("/etc/iptables/rules.v4")
+    rules_v6 = Path("/etc/iptables/rules.v6")
+    exec_lines = ""
+    if rules_v4.exists():
+        exec_lines += f"ExecStart=/bin/sh -c 'iptables-restore < {rules_v4}'\n"
+    if rules_v6.exists():
+        exec_lines += f"ExecStart=/bin/sh -c 'ip6tables-restore < {rules_v6}'\n"
+    if not exec_lines:
+        return
+    svc_path.write_text(
+        "[Unit]\n"
+        "Description=Restore iptables REDIRECT rules for telemt tproxy\n"
+        "Before=network-pre.target\n"
+        "Wants=network-pre.target\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        + exec_lines +
+        "\n[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+    _run(["systemctl", "daemon-reload"], capture=True)
+    _run(["systemctl", "enable", "telemt-iptables.service"], capture=True)
+
+
+# ── Публичный API ─────────────────────────────────────────────────────────────
+
+def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
+    """
+    Полная активация tproxy-интеграции (VLESS-цепочки и AWG 2.0).
+
+    Шаги:
+      1. dokodemo-door inbound → xray config.json
+      2. routing rule: tproxy-telemt → balancer/chain-exit
+      3. iptables REDIRECT всех Telegram-подсетей → port
+      4. Persist iptables (netfilter-persistent / iptables-save / systemd)
+      5. Перезапуск xray
+
+    Идемпотентна: повторный вызов не дублирует правила.
+    Возвращает (ok: bool, message: str).
+    """
+    cfg_path = _xray_config_path()
+    if not cfg_path:
+        return False, "xray config.json не найден — xray не установлен"
+
+    cascade = _xray_cascade_mode()
+    if cascade == "none":
+        return False, (
+            "xray не настроен в режиме каскада (Режим B). "
+            "Сначала установите xray с Режимом B, затем повторите."
+        )
+
+    try:
+        cfg = json.loads(cfg_path.read_text())
+    except Exception as e:
+        return False, f"Не удалось прочитать {cfg_path}: {e}"
+
+    # Если порт поменялся — пересоздаём inbound
+    existing_port = _xray_dokodemo_port(cfg)
+    if existing_port and existing_port != port:
+        _xray_remove_dokodemo(cfg)
+        existing_port = 0
+
+    xray_changed = False
+    if not existing_port:
+        xray_changed = _xray_inject_dokodemo(cfg, port)
+
+    if xray_changed:
+        err = _xray_write_and_test(cfg_path, cfg)
+        if err:
+            # Откат
+            _xray_remove_dokodemo(cfg)
+            cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+            return False, err
+        _run(["systemctl", "restart", XRAY_SERVICE_NAME])
+
+    # ── iptables REDIRECT ─────────────────────────────────────────────────────
+    failed = [net for net in _TG_NETS if not _ipt_add_redirect(net, port)]
+    _iptables_persist()
+
+    if failed:
+        return False, f"iptables REDIRECT не удалось для: {', '.join(failed)}"
+
+    mode_label = "AWG 2.0" if cascade == "awg" else "VLESS"
+    status = "уже был настроен" if (existing_port and not xray_changed) else "добавлен"
+    return True, (
+        f"dokodemo-door {status} (:{port}), "
+        f"iptables REDIRECT активен [{len(_TG_NETS)} подсетей], "
+        f"транспорт: {mode_label}"
+    )
+
+
+def xray_disable_tproxy_for_telemt() -> tuple:
+    """
+    Полное отключение tproxy-интеграции:
+      1. Удаляет dokodemo-door из xray config, перезапускает xray
+      2. Удаляет iptables REDIRECT для всех Telegram-подсетей
+      3. Сохраняет состояние iptables
+    Возвращает (ok: bool, message: str).
+    """
+    cfg_path = _xray_config_path()
+    if cfg_path:
+        try:
+            cfg = json.loads(cfg_path.read_text())
+            port = _xray_dokodemo_port(cfg)
+            if _xray_remove_dokodemo(cfg):
+                cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+                cfg_path.chmod(0o640)
+                _run(["systemctl", "restart", XRAY_SERVICE_NAME])
+        except Exception as e:
+            return False, f"Не удалось обновить xray config: {e}"
+    else:
+        port = XRAY_TPROXY_PORT
+
+    for net in _TG_NETS:
+        _ipt_del_redirect(net, port or XRAY_TPROXY_PORT)
+
+    _iptables_persist()
+
+    svc = Path("/etc/systemd/system/telemt-iptables.service")
+    if svc.exists():
+        _run(["systemctl", "disable", "--now", "telemt-iptables.service"], capture=True)
+        svc.unlink(missing_ok=True)
+        _run(["systemctl", "daemon-reload"], capture=True)
+
+    return True, "tproxy-интеграция отключена: dokodemo удалён, iptables очищен"
+
+
+def _xray_tproxy_status() -> dict:
+    """
+    Возвращает dict со статусом tproxy-интеграции:
+      enabled   – bool  (dokodemo inbound настроен)
+      port      – int   (0 если нет)
+      cascade   – str   ("awg" | "vless" | "none")
+      proxy_tag – str
+      ipt_ok    – bool  (все iptables-правила на месте)
+      ipt_count – int   (сколько из len(_TG_NETS) правил активно)
+    """
+    cfg_path = _xray_config_path()
+    cascade  = _xray_cascade_mode()
+    base     = {"enabled": False, "port": 0, "cascade": cascade,
+                "proxy_tag": "—", "ipt_ok": False, "ipt_count": 0}
+    if not cfg_path:
+        return base
+    try:
+        cfg = json.loads(cfg_path.read_text())
+    except Exception:
+        return base
+
+    port = _xray_dokodemo_port(cfg)
+    if not port:
+        return base
+
+    pt, is_bal   = _xray_get_proxy_tag(cfg)
+    proxy_tag    = pt + (" [balancer]" if is_bal else "")
+    ipt_active   = sum(1 for n in _TG_NETS if _ipt_rule_exists(n, port))
+
+    return {
+        "enabled":   True,
+        "port":      port,
+        "cascade":   cascade,
+        "proxy_tag": proxy_tag,
+        "ipt_ok":    ipt_active == len(_TG_NETS),
+        "ipt_count": ipt_active,
+    }
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  УСТАНОВКА БИНАРНИКА
@@ -826,6 +1270,40 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     tls_domain = _select_domain()
     use_mp     = _is_direct_ip(server_ip)
 
+    # ── Xray tproxy-интеграция (dokodemo + iptables REDIRECT) ────────────────
+    # Работает для VLESS-цепочек и AWG 2.0 — транспорт прозрачен для схемы.
+    _xs       = _xray_tproxy_status()
+    _cascade  = _xs["cascade"]
+    _tproxy_already = _xs["enabled"]
+
+    _banner()
+    _box_top("ИНТЕГРАЦИЯ С XRAY (ОБХОД БЛОКИРОВКИ)")
+    _box_row()
+    if _cascade == "none":
+        _box_warn("xray не обнаружен в режиме каскада (Режим B).")
+        _box_info("Telemt будет работать в режиме direct — Telegram недоступен из РФ.")
+        _box_info("Сначала установите xray в Режиме B, затем переустановите Telemt.")
+    else:
+        _cascade_label = "AWG 2.0" if _cascade == "awg" else "VLESS"
+        _box_ok(f"Обнаружен xray-каскад: {_cascade_label}")
+        _box_info(f"Схема: Telemt → iptables REDIRECT → dokodemo :{XRAY_TPROXY_PORT} → xray → exit VPS → Telegram")
+        if _tproxy_already:
+            ipt_str = f"{_xs['ipt_count']}/{len(_TG_NETS)} подсетей"
+            _box_ok(f"tproxy уже настроен (порт {_xs['port']}, iptables: {ipt_str})")
+        _box_row()
+        _box_item("Y", f"Направить трафик Telemt через xray ({_cascade_label})  ✓ рекомендуется")
+        _box_item("N", "Прямое подключение (direct) — Telegram будет заблокирован в РФ")
+    _box_bot()
+    print()
+
+    _use_tproxy = False
+    if _cascade != "none":
+        _use_xray = _ask(
+            f"{CYAN}Использовать xray для проксирования? [Y/n]: {NC}",
+            default="y", c=True,
+        ).strip().lower()
+        _use_tproxy = _use_xray in ("y", "")
+
     # ── Пользователи ─────────────────────────────────────────────────────────
     _banner(); _box_top("ПОЛЬЗОВАТЕЛИ"); _box_row()
     _box_info("Введите имя первого пользователя (Enter = user1).")
@@ -861,7 +1339,8 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     time.sleep(1)
 
     _info("Генерирую конфиг...")
-    _write_config(port, ipv4, ipv6, tls_domain, users, use_mp)
+    # telemt всегда в режиме direct — xray перехватывается на уровне iptables
+    _write_config(port, ipv4, ipv6, tls_domain, users, use_mp, socks5_port=0)
     _ok(f"Конфиг: {CONFIG_FILE}")
 
     _info("Устанавливаю зависимости...")
@@ -882,6 +1361,18 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     _info("Установка systemd-сервиса...")
     _install_service()
     _setup_ufw(port)
+
+    # ── Xray: dokodemo-door + iptables REDIRECT ───────────────────────────────
+    tproxy_ok_msg = ""
+    if _use_tproxy:
+        _info("Настраиваю tproxy-интеграцию (dokodemo + iptables REDIRECT)...")
+        _ok_tp, _msg_tp = xray_enable_tproxy_for_telemt(XRAY_TPROXY_PORT)
+        if _ok_tp:
+            _ok(_msg_tp)
+            tproxy_ok_msg = _msg_tp
+        else:
+            _warn(f"Не удалось настроить tproxy: {_msg_tp}")
+            _warn("Telemt будет работать в режиме direct (Telegram может быть заблокирован).")
 
     _info("Настройка учёта трафика (iptables)...")
     ipt_ok = _setup_accounting(port)
@@ -907,6 +1398,11 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     if server_ipv6: _box_ok(f"IPv6:    {server_ipv6}")
     _box_ok(f"Middle:  {'да' if use_mp else 'нет (NAT)'}")
     _box_ok(f"Учёт:    {'активен (iptables)' if ipt_ok else 'journalctl'}")
+    if _use_tproxy and tproxy_ok_msg:
+        _cascade_label = "AWG 2.0" if _cascade == "awg" else "VLESS"
+        _box_ok(f"Xray:    dokodemo :{XRAY_TPROXY_PORT} + iptables REDIRECT → {_cascade_label} ✓")
+    else:
+        _box_warn("Xray:    не используется (direct — Telegram может быть заблокирован)")
     _box_row(); _box_sep()
     _box_row(f"  {DIM}journalctl -u telemt -f   # логи{NC}")
     _box_bot()
@@ -920,6 +1416,132 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
         print(f"  {YELLOW}{link}{NC}")
         print()
     _pause()
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ПОДМЕНЮ: XRAY SOCKS5-ИНТЕГРАЦИЯ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _menu_xray_integration() -> None:
+    """
+    Управление tproxy-интеграцией: dokodemo-door + iptables REDIRECT.
+    Поддерживает VLESS+REALITY и AWG 2.0 без изменений логики.
+    """
+    while True:
+        _banner()
+        xs      = _xray_tproxy_status()
+        cascade = xs["cascade"]
+        enabled = xs["enabled"]
+
+        _box_top("XRAY ИНТЕГРАЦИЯ  •  TELEMT → XRAY → EXIT VPS")
+        _box_row()
+
+        if cascade == "none":
+            _box_err("xray-каскад (Режим B) не обнаружен на этом сервере.")
+            _box_row()
+            _box_info("Для работы интеграции необходимо:")
+            _box_info("1. Установить xray через VLESS Ultimate (пункт 1 → Режим B)")
+            _box_info("2. Вернуться в это меню и включить интеграцию.")
+            _box_row(); _box_sep()
+            _box_item("Q", "← Назад"); _box_bot(); print()
+            _ask(f"{CYAN}Выбор: {NC}", c=True)
+            break
+
+        cascade_label = "AWG 2.0" if cascade == "awg" else "VLESS+REALITY"
+        _box_kv("Каскад:", f"{GREEN}{cascade_label}{NC}")
+        _box_kv("Proxy tag:", xs["proxy_tag"])
+
+        if enabled:
+            ipt_str = f"{xs['ipt_count']}/{len(_TG_NETS)}"
+            ipt_col = GREEN if xs["ipt_ok"] else YELLOW
+            _box_kv("dokodemo:", f"{GREEN}✓ активен  →  :{xs['port']}{NC}")
+            _box_kv("iptables:", f"{ipt_col}REDIRECT {ipt_str} подсетей{NC}")
+            _box_row()
+            _box_info("Схема трафика:")
+            _box_info(f"  Telemt → iptables REDIRECT → dokodemo :{xs['port']} → xray → {cascade_label} → exit VPS → Telegram")
+            if not xs["ipt_ok"]:
+                _box_warn(f"Не все iptables-правила на месте ({ipt_str}). Используйте [2] для восстановления.")
+        else:
+            _box_kv("tproxy:", f"{RED}✗ не настроен (telemt работает через direct){NC}")
+            _box_row()
+            _box_warn("Telegram недоступен с российских IP без интеграции с xray!")
+
+        _box_row(); _box_sep()
+        if not enabled:
+            _box_item("1", f"✅  Включить интеграцию (dokodemo :{XRAY_TPROXY_PORT} + iptables)")
+        else:
+            _box_item("1", f"🔄  Переприменить / восстановить правила")
+            _box_item("2", f"❌  Отключить интеграцию (перейти на direct)")
+        _box_item("3", "🔍  Проверить статус xray inbound + iptables")
+        _box_sep()
+        _box_item("Q", "← Назад"); _box_bot(); print()
+
+        try:
+            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+        except _Cancelled:
+            break
+
+        if ch == "1":
+            _info(f"Применяю tproxy-интеграцию (dokodemo :{XRAY_TPROXY_PORT})...")
+            ok, msg = xray_enable_tproxy_for_telemt(XRAY_TPROXY_PORT)
+            if ok:
+                _ok(msg)
+            else:
+                _err(msg)
+            _pause()
+
+        elif ch == "2" and enabled:
+            ok, msg = xray_disable_tproxy_for_telemt()
+            if ok:
+                _ok(msg)
+            else:
+                _err(msg)
+            _pause()
+
+        elif ch == "3":
+            cfg_path = _xray_config_path()
+            print()
+            if not cfg_path:
+                _warn("xray config.json не найден.")
+            else:
+                try:
+                    cfg = json.loads(cfg_path.read_text())
+                    # dokodemo inbound
+                    inbounds = [ib for ib in cfg.get("inbounds", [])
+                                if ib.get("tag") == XRAY_TPROXY_TAG]
+                    rules    = [r for r in cfg.get("routing", {}).get("rules", [])
+                                if XRAY_TPROXY_TAG in r.get("inboundTag", [])]
+                    if inbounds:
+                        _ok(f"dokodemo inbound: порт {inbounds[0].get('port')}, "
+                            f"listen {inbounds[0].get('listen')}, "
+                            f"followRedirect {inbounds[0].get('settings', {}).get('followRedirect')}")
+                    else:
+                        _warn("dokodemo inbound не найден в xray config.")
+                    if rules:
+                        dest = rules[0].get("outboundTag") or rules[0].get("balancerTag") or "?"
+                        _ok(f"Routing rule: {XRAY_TPROXY_TAG} → {dest}")
+                    else:
+                        _warn("Routing rule не найден.")
+                    # xray service
+                    r = _run(["systemctl", "is-active", XRAY_SERVICE_NAME], capture=True)
+                    svc = r.stdout.strip()
+                    _ok(f"xray сервис: {svc}") if svc == "active" else _warn(f"xray сервис: {svc}")
+                    # iptables
+                    port = _xray_dokodemo_port(cfg) or XRAY_TPROXY_PORT
+                    active = sum(1 for n in _TG_NETS if _ipt_rule_exists(n, port))
+                    total  = len(_TG_NETS)
+                    col    = GREEN if active == total else YELLOW
+                    _ok(f"iptables REDIRECT: {col}{active}/{total} подсетей{NC}")
+                    if active < total:
+                        missing = [n for n in _TG_NETS if not _ipt_rule_exists(n, port)]
+                        for n in missing:
+                            _warn(f"  отсутствует: {n}")
+                except Exception as e:
+                    _err(f"Ошибка: {e}")
+            _pause()
+
+        elif ch in ("q", ""):
+            break
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ГЛАВНОЕ МЕНЮ MTProxy  ←  точка входа из _core.py
@@ -943,7 +1565,21 @@ def mtproto_menu() -> None:
                      f"{YELLOW}● не установлен{NC}")
 
         _box_top("TELEMT MTPROXY")
-        _box_row(); _box_kv("Статус:", svc_str); _box_row(); _box_sep()
+        _box_row(); _box_kv("Статус:", svc_str); _box_row()
+
+        # tproxy-интеграция — статус одной строкой
+        _xs  = _xray_tproxy_status()
+        if _xs["enabled"]:
+            _mode  = "AWG 2.0" if _xs["cascade"] == "awg" else "VLESS"
+            ipt_s  = f"{_xs['ipt_count']}/{len(_TG_NETS)}"
+            ipt_c  = GREEN if _xs["ipt_ok"] else YELLOW
+            _box_kv("Xray:", f"{GREEN}dokodemo :{_xs['port']} → {_mode}{NC}  iptables {ipt_c}{ipt_s}{NC}")
+        elif _xs["cascade"] != "none":
+            _box_kv("Xray:", f"{YELLOW}каскад есть, tproxy не настроен{NC}")
+        else:
+            _box_kv("Xray:", f"{RED}каскад не обнаружен (direct){NC}")
+
+        _box_row(); _box_sep()
         _box_item("1", "🚀  Установить / переустановить")
         _box_item("2", "👥  Управление пользователями")
         _box_item("3", "🔗  Показать ссылки")
@@ -951,6 +1587,7 @@ def mtproto_menu() -> None:
         _box_item("5", "⬆️   Проверить и обновить")
         _box_item("6", "📊  Статистика трафика")
         _box_item("7", "📋  Статус / логи")
+        _box_item("X", "🔗  Xray-интеграция (SOCKS5 ↔ каскад)")
         _box_item("8", f"{RED}🗑️   Полное удаление{NC}")
         _box_sep()
         _box_item("Q", "← Назад в главное меню VLESS")
@@ -1036,6 +1673,12 @@ def mtproto_menu() -> None:
                 _full_uninstall(silent=False)
             except _Cancelled:
                 _info("Удаление отменено."); _pause()
+
+        elif ch == "x":
+            try:
+                _menu_xray_integration()
+            except _Cancelled:
+                pass
 
         elif ch in ("q", ""):
             break

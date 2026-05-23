@@ -1,5 +1,42 @@
 # Changelog
 
+## [4.11.2] — 2026-05-23
+
+### Добавлено
+
+- **Telemt MTProto Proxy — интеграция с xray-каскадом для обхода блокировки Telegram в РФ**
+
+  Telemt, установленный на **entry-ноде в России**, теперь может направлять трафик
+  через xray-каскад (VLESS+REALITY или AWG 2.0) на зарубежную exit-ноду —
+  обеспечивая доступ к заблокированному Telegram без какой-либо настройки со стороны
+  пользователя.
+
+  **Как работает:**
+  - При установке Telemt установщик обнаруживает активный xray-каскад (Режим B)
+    и предлагает включить интеграцию
+  - В xray добавляется `dokodemo-door` inbound (transparent proxy, порт 10811)
+  - В systemd-юнит `telemt.service` через `ExecStartPre` / `ExecStopPost`
+    встраиваются правила `iptables REDIRECT`, перехватывающие исходящие TCP-соединения
+    Telemt к диапазонам IP серверов Telegram (5 CIDR-блоков)
+  - Перехваченный трафик уходит через xray → exit VPS → серверы Telegram
+  - При остановке/удалении Telemt правила iptables автоматически убираются
+
+  **Поддерживаемые транспорты каскада:**
+  - VLESS + REALITY (одна exit-нода: `outboundTag: chain-exit[-1]`)
+  - Мульти-каскад 2–10 нод с балансировщиком (`balancerTag: chain-balancer`)
+  - AmneziaWG 2.0 (трафик маркируется fwmark → AWG-интерфейс → exit VPS)
+
+  **Новый пункт меню `[X] Xray-интеграция`** в разделе Telemt MTProxy:
+  - Включить / отключить интеграцию
+  - Проверить статус dokodemo-door inbound и routing rule в xray
+  - Корректно определяет тип каскада (`outboundTag` vs `balancerTag`)
+
+  **Техническое решение:** Telemt v3.x не поддерживает `type = "socks5"` в
+  `[[upstreams]]`, поэтому интеграция реализована через прозрачный перехват
+  (iptables REDIRECT + dokodemo-door) без изменений конфига Telemt.
+
+---
+
 ## [4.11.1] — 2026-05-20
 
 ### Исправлено
