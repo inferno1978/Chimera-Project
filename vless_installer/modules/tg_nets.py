@@ -523,6 +523,35 @@ def fetch_tg_nets_from_sources(verbose: bool = True) -> tuple[list[str], list[st
             sources_used.append(name)
 
     # Якорные builtin-сети (могут не анонсироваться live, но реально используются)
+    # ── Whitelist-фильтр ──────────────────────────────────────────────────────
+    # Внешние источники возвращают транзитные и агрегированные маршруты
+    # соседних AS. Принимаем только префиксы внутри известного IP-пространства
+    # Telegram — это единственный надёжный способ исключить чужие подсети.
+    _TG_SUPERNETS = [ipaddress.ip_network(n) for n in [
+        "91.108.0.0/16",        # AS62041, AS44907, AS62014, AS59930
+        "149.154.160.0/20",     # AS62041, AS59930, AS62014
+        "95.161.64.0/20",       # AS62041
+        "91.105.192.0/23",      # AS211157
+        "185.76.151.0/24",      # AS211157
+        "109.239.140.0/24",     # AS42065
+        "2001:67c:4e8::/48",    # AS62041
+        "2001:b28:f23c::/46",   # AS44907, AS59930, AS62014 (покрывает /48 блоки)
+        "2a0a:f280:203::/48",   # AS211157
+    ]]
+
+    def _in_tg_space(cidr: str) -> bool:
+        try:
+            net = ipaddress.ip_network(cidr)
+            return any(
+                net.version == sup.version and (net == sup or net.subnet_of(sup))
+                for sup in _TG_SUPERNETS
+            )
+        except ValueError:
+            return False
+
+    all_raw = [n for n in all_raw if _in_tg_space(n)]
+    # ──────────────────────────────────────────────────────────────────────────
+
     anchors_added = 0
     for anchor in _BUILTIN_NETS:
         if anchor not in all_raw:
@@ -532,10 +561,8 @@ def fetch_tg_nets_from_sources(verbose: bool = True) -> tuple[list[str], list[st
     raw_count = len(_dedup(all_raw))
 
     if sources_used:
-        # Убираем дубли и more-specific подсети
         final = _remove_more_specific(_dedup(all_raw))
     else:
-        # Все источники недоступны
         final = _remove_more_specific(list(_BUILTIN_NETS))
         sources_used = []
 
