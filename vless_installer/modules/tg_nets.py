@@ -354,19 +354,18 @@ def _src_ripe_stat(asns: list[int]) -> tuple[list[str], int, str]:
 #  ИСТОЧНИК 2: bgp.tools — парсинг страниц /as/XXXX (только Originated)
 #
 #  Вырезаем строго блок между маркерами:
-#    "scraping this block" → конец таблицы перед "Upstreams"
-#  Это исключает секции Peers/Upstreams/Policy где тоже встречаются /prefix/ ссылки.
+#    "scraping this block" → ближайший из: Low Visibility / Peers / Upstreams
+#  Это исключает секции Low Visibility/Peers/Upstreams где тоже есть /prefix/ ссылки.
 # ══════════════════════════════════════════════════════════════════════════════
 def _src_bgptools(asns: list[int]) -> tuple[list[str], int, str]:
     _re_v4 = re.compile(r'/prefix/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2})')
     _re_v6 = re.compile(r'/prefix/([0-9a-fA-F]*:[0-9a-fA-F:]+/\d{1,3})')
-    # Маркеры: таблица префиксов находится строго между ними
+    # Маркеры: блок "Originated" — между MARK_START и ближайшим из разделителей.
+    # Исключаем Low Visibility / Peers / Upstreams где тоже есть /prefix/ ссылки.
     MARK_START = "scraping this block"
-    MARK_END   = "Upstreams"
+    MARK_ENDS  = ["Low Visibility", "Upstreams", "Peers", "upstreams", "peers"]
 
     nets: list[str] = []
-    headers = {"User-Agent": "VLESS-Ultimate bgp.tools - admin@example.com",
-                "Accept": "text/html,application/xhtml+xml"}
 
     for asn in asns:
         url = f"https://bgp.tools/as/{asn}"
@@ -375,12 +374,16 @@ def _src_bgptools(asns: list[int]) -> tuple[list[str], int, str]:
             continue
         try:
             html = raw.decode("utf-8", errors="replace")
-            # Вырезаем только блок таблицы префиксов
             s = html.find(MARK_START)
-            e = html.find(MARK_END, s) if s != -1 else -1
-            block = html[s:e] if s != -1 and e != -1 else ""
-            if not block:
+            if s == -1:
                 continue
+            # Ближайший маркер конца после начала блока
+            e = len(html)
+            for marker in MARK_ENDS:
+                pos = html.find(marker, s + len(MARK_START))
+                if pos != -1 and pos < e:
+                    e = pos
+            block = html[s:e]
             found = _re_v4.findall(block) + _re_v6.findall(block)
             nets += [n for n in found if _valid_cidr(n)]
         except Exception:
@@ -510,18 +513,20 @@ def fetch_tg_nets_from_sources(verbose: bool = True) -> tuple[list[str], list[st
             all_raw += nets
             sources_used.append(name)
 
-    # Якорные builtin-сети (могут не анонсироваться live, но реально используются)
+    # Якорные builtin-сети добавляем ДО дедупликации и remove_more_specific,
+    # чтобы более широкий /22 из builtin вытеснил /23-суб-блоки из live-источников.
     anchors_added = 0
     for anchor in _BUILTIN_NETS:
         if anchor not in all_raw:
             all_raw.append(anchor)
             anchors_added += 1
 
-    raw_count = len(_dedup(all_raw))
+    deduped = _dedup(all_raw)
+    raw_count = len(deduped)
 
     if sources_used:
         # Убираем дубли и more-specific подсети
-        final = _remove_more_specific(_dedup(all_raw))
+        final = _remove_more_specific(deduped)
     else:
         # Все источники недоступны
         final = _remove_more_specific(list(_BUILTIN_NETS))
