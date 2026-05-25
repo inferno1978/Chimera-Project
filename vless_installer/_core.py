@@ -72,18 +72,28 @@ from vless_installer.modules.ripe_file_age   import (
     check_ripe_file_age, ripe_file_age_banner,
 )
 from vless_installer.modules.cluster_ops import do_cluster_menu, load_exit_nodes
-from vless_installer.modules.dnscrypt import (
-    dnscrypt_menu,
-    install_dnscrypt,
-    apply_dnscrypt_tuning,
-    is_dnscrypt_running,
-    get_dnscrypt_port          as _get_dnscrypt_port,
-    DNSCRYPT_BIN,
-    DNSCRYPT_CONF,
-    DNSCRYPT_CONF_DIR,
-    DNSCRYPT_SERVICE,
-    DNSCRYPT_LISTEN_ADDR,
-    DNSCRYPT_LISTEN_PORT,
+from vless_installer.modules.box_renderer import (
+    _get_box_width, _plain, _wcslen,
+    _box_line_top, _box_line_sep, _box_line_bot,
+    _box_row, _box_row_auto, _box_link, _box_top, _box_sep, _box_bottom,
+    _box_item, _box_item_exit, _box_back, _box_desc,
+    _box_wrap_msg, _box_info, _box_warn, _box_ok, _box_dim, _box_input,
+    _submenu_header, _submenu_item, _submenu_back,
+)
+import vless_installer.modules.box_renderer as _br
+_BOX_W = _br._BOX_W  # алиас для совместимости с кодом в _core.py
+from vless_installer.modules.logrotate  import do_manage_logrotate
+from vless_installer.modules.dns_rules  import do_manage_dns_rules
+from vless_installer.modules.honeypot      import do_manage_honeypot
+from vless_installer.modules.scheduler     import render_scheduler_menu
+from vless_installer.modules.ingress_geoip import (
+    do_manage_ingress_geoip,
+    _ingress_state_load, _ingress_enable,
+    INGRESS_CRON_FILE, INGRESS_CRON_SCRIPT,
+    INGRESS_GEOIP_FILE, INGRESS_IPSET_NAME, INGRESS_IPSET6_NAME, INGRESS_LOG,
+)
+from vless_installer.modules.tui        import (
+    tui_input, tui_confirm, tui_select, tui_progress, tui_form,
 )
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -449,7 +459,13 @@ STAGE_UFW_DONE:     bool = False
 STAGE_XRAY_DONE:    bool = False
 STAGE_NGINX_DONE:   bool = False
 
-# DNSCrypt-proxy globals — управляются модулем vless_installer.modules.dnscrypt
+# DNSCrypt-proxy globals
+DNSCRYPT_BIN         = Path("/usr/local/bin/dnscrypt-proxy")
+DNSCRYPT_CONF_DIR    = Path("/etc/dnscrypt-proxy")
+DNSCRYPT_CONF        = DNSCRYPT_CONF_DIR / "dnscrypt-proxy.toml"
+DNSCRYPT_SERVICE     = Path("/etc/systemd/system/dnscrypt-proxy.service")
+DNSCRYPT_LISTEN_ADDR = "127.0.0.1"
+DNSCRYPT_LISTEN_PORT = 5300
 DNSCRYPT_INSTALLED:  bool = False
 PARAM_USE_DNSCRYPT:  bool = False
 
@@ -5836,11 +5852,335 @@ def install_dependencies() -> None:
     success("Зависимости готовы")
 
 # =============================================================================
-#  ШАГ 1.5: УСТАНОВКА DNSCRYPT-PROXY — перенесено в модуль
-#  vless_installer/modules/dnscrypt.py
-#  Функции install_dnscrypt(), apply_dnscrypt_tuning(), _get_dnscrypt_port()
-#  импортируются выше через: from vless_installer.modules.dnscrypt import ...
+#  ШАГ 1.5: УСТАНОВКА DNSCRYPT-PROXY
 # =============================================================================
+def _get_dnscrypt_port() -> int:
+    """Надёжное определение реального порта DNSCrypt-proxy"""
+    if not DNSCRYPT_CONF.exists():
+        return DNSCRYPT_LISTEN_PORT
+    try:
+        content = DNSCRYPT_CONF.read_text()
+        m = re.search(r'listen_addresses\s*=\s*\[\s*[\'"][^:]+:(\d+)', content, re.IGNORECASE)
+        if m:
+            port = int(m.group(1))
+            if 1024 <= port <= 65535:
+                return port
+    except Exception:
+        pass
+    return DNSCRYPT_LISTEN_PORT
+
+def install_dnscrypt() -> None:
+    global DNSCRYPT_INSTALLED, DNSCRYPT_LISTEN_PORT
+
+    if not PARAM_USE_DNSCRYPT:
+        info("DNSCrypt-proxy: пропускаем по выбору пользователя")
+        DNSCRYPT_INSTALLED = False
+        return
+
+    info("Установка DNSCrypt-proxy...")
+    PROGRESS.update(2, "DNSCrypt")
+
+    arch = _run(["uname", "-m"], capture=True, check=False).stdout.strip()
+    arch_map = {
+        "x86_64": "linux_x86_64", "aarch64": "linux_arm64",
+        "armv7l": "linux_arm",    "i386": "linux_386", "i686": "linux_386",
+    }
+    dc_arch = arch_map.get(arch)
+    if not dc_arch:
+        warn(f"Неподдерживаемая архитектура для DNSCrypt: {arch} — пропускаем")
+        return
+
+    r_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
+                    capture=True, check=False)
+    if r_active.stdout.strip() == "active" and DNSCRYPT_BIN.exists():
+        info("DNSCrypt-proxy уже установлен и запущен — пропускаем")
+        DNSCRYPT_INSTALLED = True
+        PROGRESS.update(3, "DNSCrypt")
+        return
+
+    dc_tag = ""
+    for attempt in range(1, 4):
+        try:
+            r = _run(["curl", "-fsSL", "--connect-timeout", "10",
+                      "https://api.github.com/repos/DNSCrypt/dnscrypt-proxy/releases/latest"],
+                     capture=True, check=False)
+            data = json.loads(r.stdout)
+            dc_tag = data.get("tag_name", "")
+            if dc_tag:
+                break
+        except Exception:
+            pass
+        warn(f"Попытка {attempt}: не удалось получить тег DNSCrypt, повтор...")
+        time.sleep(3)
+
+    if not dc_tag:
+        warn("Не удалось получить версию DNSCrypt-proxy — пропускаем")
+        warn("Xray будет использовать публичные DNS (1.1.1.1 / 8.8.8.8)")
+        return
+
+    info(f"DNSCrypt-proxy: {dc_tag} ({dc_arch})")
+    dc_url = (f"https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/"
+              f"{dc_tag}/dnscrypt-proxy-{dc_arch}-{dc_tag}.tar.gz")
+
+    with tempfile.TemporaryDirectory(prefix="dnscrypt.") as dc_tmp:
+        dc_archive = Path(dc_tmp) / "dnscrypt.tar.gz"
+        r = _run(["curl", "-fsSL", "--connect-timeout", "30", "--retry", "3",
+                  dc_url, "-o", str(dc_archive)], check=False, quiet=True)
+        if r.returncode != 0:
+            warn("Не удалось скачать DNSCrypt-proxy — пропускаем")
+            return
+
+        _run(["tar", "-xzf", str(dc_archive), "-C", dc_tmp],
+             check=False, quiet=True)
+
+        bin_found: Path | None = None
+        for p in Path(dc_tmp).rglob("dnscrypt-proxy"):
+            if p.is_file():
+                bin_found = p
+                break
+
+        if not bin_found:
+            warn("Бинарник dnscrypt-proxy не найден в архиве — пропускаем")
+            return
+
+        shutil.copy2(bin_found, DNSCRYPT_BIN)
+        DNSCRYPT_BIN.chmod(0o755)
+
+    success(f"Бинарник DNSCrypt-proxy установлен: {DNSCRYPT_BIN}")
+    DNSCRYPT_CONF_DIR.mkdir(parents=True, exist_ok=True)
+
+    DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
+        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.11.3
+        ## Слушает на {DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}
+
+        listen_addresses = ['{DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}']
+
+        max_clients = 250
+
+        ipv4_servers = true
+        ipv6_servers = false
+        dnscrypt_servers = true
+        doh_servers = true
+        odoh_servers = false
+
+        require_dnssec = false
+        require_nolog = true
+        require_nofilter = false
+
+        force_tcp = false
+        timeout = 2500
+        keepalive = 30
+
+        log_level = 1
+        use_syslog = true
+
+        cert_refresh_delay = 240
+
+        bootstrap_resolvers = ['1.1.1.1:53', '8.8.8.8:53']
+        ignore_system_dns = true
+
+        fallback_resolvers = ['1.1.1.1:53', '8.8.8.8:53']
+
+        netprobe_timeout = 5
+        netprobe_address = '1.1.1.1:53'
+
+        offline_mode = false
+        reject_ttl = 10
+
+        cache = true
+        cache_size = 32768
+        cache_min_ttl = 60
+        cache_max_ttl = 86400
+        cache_neg_min_ttl = 60
+        cache_neg_max_ttl = 600
+
+        [blocked_names]
+          blocked_names_file = '/etc/dnscrypt-proxy/blocked-names.txt'
+          log_file = '/var/log/dnscrypt-proxy-blocked.log'
+          log_format = 'tsv'
+
+        [blocked_ips]
+          blocked_ips_file = '/etc/dnscrypt-proxy/blocked-ips.txt'
+
+        [sources]
+          [sources.public-resolvers]
+            urls = [
+              'https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md',
+              'https://download.dnscrypt.info/resolvers-list/v3/public-resolvers.md'
+            ]
+            cache_file = '/etc/dnscrypt-proxy/public-resolvers.md'
+            minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
+            refresh_delay = 72
+            prefix = ''
+
+          [sources.relays]
+            urls = [
+              'https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/relays.md',
+              'https://download.dnscrypt.info/resolvers-list/v3/relays.md'
+            ]
+            cache_file = '/etc/dnscrypt-proxy/relays.md'
+            minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
+            refresh_delay = 72
+            prefix = ''
+    """))
+
+    for f in ("blocked-names.txt", "blocked-ips.txt"):
+        fp = DNSCRYPT_CONF_DIR / f
+        fp.touch()
+        fp.chmod(0o644)
+    DNSCRYPT_CONF.chmod(0o644)
+
+    # ИСПРАВЛЕНИЕ: создаём отдельного пользователя dnscrypt.
+    # При AWG iptables mangle маркирует трафик по --uid-owner.
+    # Если dnscrypt-proxy работает от root (uid=0), его исходящие соединения
+    # к DNS upstream-серверам (203.0.113.105:443 и т.п.) НЕ получают AWG fwmark
+    # и уходят через дефолтный маршрут провайдера, где DoT/DNSCrypt блокируется.
+    # Запуск от отдельного uid позволяет добавить его в AWG mark-правила.
+    _run(["useradd", "-r", "-s", "/usr/sbin/nologin", "-d", "/var/lib/dnscrypt-proxy",
+          "-m", "dnscrypt"], check=False, quiet=True)
+    _run(["chown", "-R", "dnscrypt:dnscrypt", str(DNSCRYPT_CONF_DIR)],
+         check=False, quiet=True)
+
+    DNSCRYPT_SERVICE.write_text(textwrap.dedent("""\
+        [Unit]
+        Description=DNSCrypt-proxy — зашифрованный DNS-резолвер
+        Documentation=https://github.com/DNSCrypt/dnscrypt-proxy
+        After=network.target network-online.target
+        Wants=network-online.target
+        Before=xray.service nginx.service
+
+        [Service]
+        Type=simple
+        NonBlocking=true
+        ExecStart=/usr/local/bin/dnscrypt-proxy -config /etc/dnscrypt-proxy/dnscrypt-proxy.toml
+        Restart=on-failure
+        RestartSec=5s
+        TimeoutStartSec=60s
+        TimeoutStopSec=10s
+        User=dnscrypt
+        Group=dnscrypt
+        AmbientCapabilities=CAP_NET_BIND_SERVICE
+        CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+        NoNewPrivileges=yes
+
+        [Install]
+        WantedBy=multi-user.target
+    """))
+
+    _run(["systemctl", "daemon-reload"], check=False, quiet=True)
+    _run(["systemctl", "enable", "dnscrypt-proxy"], check=False, quiet=True)
+    _run(["systemctl", "start",  "dnscrypt-proxy"], check=False, quiet=True)
+
+    dc_ok = False
+    for _ in range(30):
+        time.sleep(1)
+        r = _run(["systemctl", "is-active", "dnscrypt-proxy"],
+                 capture=True, check=False)
+        if r.stdout.strip() == "active":
+            dc_ok = True
+            break
+        r2 = _run(["systemctl", "is-failed", "dnscrypt-proxy"],
+                  capture=True, check=False)
+        if r2.stdout.strip() == "failed":
+            warn("DNSCrypt-proxy перешёл в состояние failed")
+            break
+
+    if dc_ok:
+        port_ok = False
+        for _ in range(3):
+            r = _run(["ss", "-ulnp"], capture=True, check=False)
+            if f":{DNSCRYPT_LISTEN_PORT} " in r.stdout:
+                port_ok = True
+                break
+            time.sleep(1)
+        if port_ok:
+            DNSCRYPT_INSTALLED = True
+            success(f"DNSCrypt-proxy {dc_tag} запущен на "
+                    f"{DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}")
+        else:
+            warn(f"DNSCrypt-proxy активен, но порт {DNSCRYPT_LISTEN_PORT} не слушает")
+    else:
+        warn("DNSCrypt-proxy не запустился — Xray будет использовать публичные DNS")
+        warn("Проверьте вручную: journalctl -u dnscrypt-proxy -n 30")
+
+    PROGRESS.update(3, "DNSCrypt")
+
+# =============================================================================
+#  ШАГ 1.6: ОПТИМИЗАЦИЯ КОНФИГА DNSCRYPT
+# =============================================================================
+def apply_dnscrypt_tuning() -> None:
+    if not DNSCRYPT_BIN.exists():
+        warn("DNSCrypt-proxy не установлен")
+        return
+    info("Применение оптимизированного конфига DNSCrypt-proxy...")
+
+    if not DNSCRYPT_CONF.exists():
+        warn(f"Конфиг не найден: {DNSCRYPT_CONF}")
+        return
+
+    bak = DNSCRYPT_CONF.parent / (
+        DNSCRYPT_CONF.name + "." +
+        datetime.now().strftime("%Y%m%d%H%M%S") + ".bak"
+    )
+    shutil.copy2(DNSCRYPT_CONF, bak)
+
+    TOP_PARAMS: dict[str, str] = {
+        "doh_servers":        "true",
+        "force_tcp":          "false",
+        "odoh_servers":       "false",
+        "timeout":            "2500",
+        "netprobe_timeout":   "5",
+        "reject_ttl":         "10",
+        "fallback_resolvers": "['1.1.1.1:53', '8.8.8.8:53']",
+        "cache":              "true",
+        "cache_size":         "32768",
+        "cache_min_ttl":      "60",
+        "use_syslog":         "true",
+    }
+
+    lines = DNSCRYPT_CONF.read_text().splitlines(keepends=True)
+    result: list[str] = []
+    in_section = False
+    applied_top: set[str] = set()
+
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r'^\[', stripped):
+            in_section = True
+        if not in_section:
+            if re.match(r'^log_file\s*=', stripped):
+                result.append("## log_file удалён apply_dnscrypt_tuning — используем journald\n")
+                continue
+            m = re.match(r'^(\w+)\s*=\s*.*$', stripped)
+            if m and m.group(1) in TOP_PARAMS:
+                key = m.group(1)
+                indent = line[: len(line) - len(line.lstrip())]
+                line = f"{indent}{key} = {TOP_PARAMS[key]}\n"
+                applied_top.add(key)
+        result.append(line)
+
+    missing_top = [k for k in TOP_PARAMS if k not in applied_top]
+    if missing_top:
+        result.append("\n## Добавлено apply_dnscrypt_tuning\n")
+        for k in missing_top:
+            result.append(f"{k} = {TOP_PARAMS[k]}\n")
+
+    DNSCRYPT_CONF.write_text("".join(result))
+    success(f"Конфиг обновлён: {DNSCRYPT_CONF}")
+
+    _run(["systemctl", "restart", "dnscrypt-proxy"], check=False, quiet=True)
+    time.sleep(2)
+    r = _run(["systemctl", "is-active", "dnscrypt-proxy"], capture=True, check=False)
+    if r.stdout.strip() == "active":
+        success("DNSCrypt-proxy перезапущен с оптимизированным конфигом")
+        info("Активные параметры:")
+        content = DNSCRYPT_CONF.read_text()
+        for key in ("doh_servers", "timeout", "cache_size", "cache_min_ttl", "server_names"):
+            m = re.search(rf'^{key}\s*=\s*(.+)$', content, re.MULTILINE)
+            val = m.group(1).strip() if m else "?"
+            dim(f"  {key} = {val}")
+    else:
+        warn("DNSCrypt-proxy не запустился: journalctl -u dnscrypt-proxy -n 20")
 
 # =============================================================================
 #  ШАГ 2: ФАЙРВОЛЛ
@@ -27764,433 +28104,7 @@ def do_patch_stats_api() -> None:
 
 # =============================================================================
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ: ОТРИСОВКА МЕНЮ В СТИЛЕ БАННЕРА VLESS
-# =============================================================================
-import re as _re
-import unicodedata as _unicodedata
-
-def _get_box_width() -> int:
-    """
-    Определяет внутреннюю ширину рамки динамически:
-    - Берёт ширину терминала минус 2 (под символы ║ с обеих сторон)
-    - Минимум 64 (ширина баннера), максимум 78 (безопасный лимит для SSH)
-    """
-    cols = 80  # безопасный дефолт
-    # 1. Переменная окружения (более надёжна в браузерных SSH-клиентах)
-    env_cols = os.environ.get("COLUMNS", "").strip()
-    if env_cols.isdigit():
-        cols = int(env_cols)
-    # 2. PTY (может быть некорректна, берём только если меньше env)
-    try:
-        pty_cols = os.get_terminal_size().columns
-        cols = min(cols, pty_cols)
-    except Exception:
-        pass
-    return max(64, min(cols - 2, 100))
-
-_BOX_W = _get_box_width()  # внутренняя ширина рамки (динамическая)
-
-
-def _plain(s: str) -> str:
-    """Возвращает строку без ANSI-кодов."""
-    return _re.sub(r'\033\[[0-9;]*m', '', s)
-
-
-def _wcslen(s: str) -> int:
-    """
-    Подсчёт видимой ширины строки в терминале с учётом:
-      - ANSI escape-кодов (не видны)
-      - Emoji и CJK символов (занимают 2 колонки каждый)
-      - Emoji с вариационным селектором VS16 (U+FE0F) — тоже 2 колонки
-      - Zero-width joiners и вариационные селекторы — ширина 0
-      - Block elements (█░▓▒, U+2580-U+259F) и Box drawings (─│┌, U+2500-U+257F)
-        считаются как 1 колонка (eaw='A'/'N', но в Latin терминалах = 1)
-    """
-    # Диапазоны символов, которые в стандартных (Latin) терминалах = 1 колонка,
-    # даже если eaw='A' (Ambiguous):
-    _FORCE_WIDTH1 = (
-        (0x2500, 0x257F),  # Box Drawing
-        (0x2580, 0x259F),  # Block Elements (█ ░ ▓ ▒ и др.)
-        (0x25A0, 0x25FF),  # Geometric Shapes
-        # Note: 0x2600-0x26FF (Misc Symbols) and 0x2700-0x27BF (Dingbats) removed
-        # because some chars like ⚡ U+26A1 have eaw='W' and must be 2-wide
-    )
-    # BMP-символы, которые терминалы (особенно с emoji-шрифтом) рендерят как 2 колонки,
-    # несмотря на eaw='N'/'A'. Перечисляем точечно, чтобы не сломать рамочную графику.
-    _FORCE_WIDTH2_CODEPOINTS = frozenset({
-        0x23F8,  # ⏸ PAUSE BUTTON
-        0x23F9,  # ⏹ STOP BUTTON
-        0x23FA,  # ⏺ RECORD BUTTON
-        0x23CF,  # ⏏ EJECT SYMBOL
-        0x23ED,  # ⏭ NEXT TRACK
-        0x23EE,  # ⏮ LAST TRACK
-        0x23EF,  # ⏯ PLAY OR PAUSE
-        0x270F,  # ✏ PENCIL (без VS16 в некоторых терминалах = 2)
-        0x2714,  # ✔ HEAVY CHECK MARK
-        0x2716,  # ✖ HEAVY MULTIPLICATION X
-        0x274C,  # ❌ CROSS MARK
-        0x2764,  # ❤ HEAVY BLACK HEART
-        0x2B50,  # ⭐ WHITE MEDIUM STAR
-        0x2B55,  # ⭕ HEAVY LARGE CIRCLE
-    })
-
-    plain = _plain(s)
-    width = 0
-    i = 0
-    while i < len(plain):
-        ch = plain[i]
-        cp = ord(ch)
-        # Вариационный селектор (VS1-VS16, VS17-VS256) — нулевая ширина
-        if 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF:
-            i += 1
-            continue
-        # Zero-Width Joiner и прочие невидимые объединители
-        if cp in (0x200D, 0x200B, 0x200C):
-            i += 1
-            continue
-        # Combining marks — нулевая ширина
-        if _unicodedata.category(ch) in ('Mn', 'Me', 'Cf'):
-            i += 1
-            continue
-        # Box-drawing и block-element — явно 1 колонка в Latin терминалах
-        if any(lo <= cp <= hi for lo, hi in _FORCE_WIDTH1):
-            # Если следует VS16, символ становится 2-wide emoji-стилем
-            if i + 1 < len(plain) and ord(plain[i + 1]) == 0xFE0F:
-                width += 2
-                i += 2
-            else:
-                width += 1
-                i += 1
-            continue
-        # BMP-emoji, которые терминалы рендерят как 2 колонки (eaw='N', но визуально wide)
-        if cp in _FORCE_WIDTH2_CODEPOINTS:
-            # Если за символом идёт VS16 — пропускаем его
-            if i + 1 < len(plain) and ord(plain[i + 1]) == 0xFE0F:
-                i += 2
-            else:
-                i += 1
-            width += 2
-            continue
-        # Regional Indicator пара (флаги: 🇷🇺 = U+1F1F7 + U+1F1FA) — 2 колонки суммарно
-        if 0x1F1E6 <= cp <= 0x1F1FF:
-            if i + 1 < len(plain) and 0x1F1E6 <= ord(plain[i + 1]) <= 0x1F1FF:
-                width += 2
-                i += 2
-            else:
-                width += 2
-                i += 1
-            continue
-        eaw = _unicodedata.east_asian_width(ch)
-        if eaw in ('W', 'F'):
-            width += 2
-        elif cp >= 0x1F000:
-            # Emoji вне BMP — всегда 2 колонки в современных терминалах
-            width += 2
-        else:
-            # Базовые emoji в BMP + VS16 = 2 колонки
-            if i + 1 < len(plain) and ord(plain[i + 1]) == 0xFE0F:
-                width += 2
-            else:
-                width += 1
-        i += 1
-    return width
-
-
-def _box_line_top() -> None:
-    """Верхняя граница: ╔════╗"""
-    print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
-
-
-def _box_line_sep() -> None:
-    """Разделитель: ╠════║"""
-    print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
-
-
-def _box_line_bot() -> None:
-    """Нижняя граница: ╚════╝"""
-    print(f"{CYAN}╚{'═' * _BOX_W}╝{NC}")
-
-
-def _box_row(text: str = "") -> None:
-    """Одна строка внутри рамки: ║ text ... ║"""
-    pad = _BOX_W - _wcslen(text)
-    if pad < 0:
-        pad = 0
-    print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
-
-
-def _box_row_auto(text: str = "", cont_indent: str = "  ") -> None:
-    """Одна строка внутри рамки с автопереносом длинных строк.
-    Если текст не влезает в _BOX_W — разбивает по словам на несколько строк.
-    cont_indent — отступ продолжения (по умолчанию 2 пробела).
-    Правая граница ║ всегда на месте."""
-    if not text:
-        _box_row()
-        return
-    # Если влезает — выводим как есть
-    if _wcslen(text) <= _BOX_W:
-        _box_row(text)
-        return
-    # Нужен перенос: определяем отступ первой строки (ведущие пробелы)
-    plain_text = _plain(text)
-    first_indent_len = len(plain_text) - len(plain_text.lstrip(' '))
-    cont_plain_len = len(cont_indent)
-    # Используем _box_wrap_msg: prefix = ведущий отступ + ANSI,
-    # msg = остаток без ведущих пробелов (plain, т.к. wrap работает с plain)
-    # Но нам нужно сохранить ANSI — используем собственный wrap
-    max_w = _BOX_W  # полная внутренняя ширина (pad считается в _box_row)
-    words = text.split(' ')
-    lines_out = []
-    current = ''
-    current_w = 0
-    for word in words:
-        word_w = _wcslen(word)
-        sep = ' ' if current else ''
-        sep_w = len(sep)
-        if current_w + sep_w + word_w <= max_w:
-            current += sep + word
-            current_w += sep_w + word_w
-        else:
-            if current:
-                lines_out.append(current)
-            # Слово длиннее строки — жёсткая резка
-            avail = max_w - cont_plain_len
-            if avail < 4:
-                avail = 4
-            while _wcslen(word) > avail:
-                piece = ''
-                pw = 0
-                for ch in word:
-                    cw = _wcslen(ch)
-                    if pw + cw > avail:
-                        break
-                    piece += ch
-                    pw += cw
-                lines_out.append(cont_indent + piece)
-                word = word[len(piece):]
-            current = cont_indent + word
-            current_w = cont_plain_len + _wcslen(word)
-    if current:
-        lines_out.append(current)
-    for line in lines_out:
-        _box_row(line)
-
-
-def _box_link(link: str, colour: str = "") -> None:
-    """Выводит ссылку внутри бокса БЕЗ боковых границ ║.
-    Строки ссылки печатаются простым print без левого и правого ║,
-    чтобы длинный URL никогда не сдвигал правую границу рамки.
-    Никогда не разрывает метку (#флаг домен) посередине."""
-    if not colour:
-        colour = '\033[0;33m'  # non-bold жёлтый
-    max_w = _BOX_W - 2  # 1 пробел слева, без правой границы
-
-    # Разбиваем ссылку на часть до # и метку после #
-    if "#" in link:
-        url_part, label_part = link.rsplit("#", 1)
-        label_part = "#" + label_part
-    else:
-        url_part, label_part = link, ""
-
-    # Собираем токены из url_part, разбивая по & (безопасные точки разрыва)
-    tokens = []
-    buf = ""
-    for ch in url_part:
-        buf += ch
-        if ch == "&":
-            tokens.append(buf)
-            buf = ""
-    if buf:
-        if label_part:
-            tokens.append(buf + label_part)
-            label_part = ""
-        else:
-            tokens.append(buf)
-    if label_part:
-        tokens.append(label_part)
-
-    chunk = ""
-    chunk_w = 0
-    for token in tokens:
-        tok_w = _wcslen(token)
-        if chunk_w + tok_w > max_w and chunk:
-            print(f" {colour}{chunk}{NC}")
-            chunk = token
-            chunk_w = tok_w
-        else:
-            chunk += token
-            chunk_w += tok_w
-        # Жёсткий разрыв по видимой ширине (не по индексу Python-символов)
-        while chunk_w > max_w:
-            cut = 0
-            cut_w = 0
-            for _ch in chunk:
-                _cw = _wcslen(_ch)
-                if cut_w + _cw > max_w:
-                    break
-                cut_w += _cw
-                cut += 1
-            print(f" {colour}{chunk[:cut]}{NC}")
-            chunk = chunk[cut:]
-            chunk_w = _wcslen(chunk)
-    if chunk:
-        print(f" {colour}{chunk}{NC}")
-def _box_top(title: str = "") -> None:
-    """Верхняя граница + опциональный заголовок по центру."""
-    _box_line_top()
-    if title:
-        plain_len = _wcslen(title)
-        total_pad = _BOX_W - plain_len
-        lpad = total_pad // 2
-        rpad = total_pad - lpad
-        print(f"{CYAN}║{NC}{' ' * lpad}{BOLD}{WHITE}{title}{NC}{' ' * rpad}{CYAN}║{NC}")
-        _box_line_sep()
-
-
-def _box_sep() -> None:
-    """Горизонтальный разделитель внутри рамки."""
-    _box_line_sep()
-
-
-def _box_bottom() -> None:
-    """Нижняя граница рамки."""
-    _box_line_bot()
-
-
-def _box_item(key: str, label: str) -> None:
-    """Пункт меню: ║  [KEY]  label  ║"""
-    if key in ("Q", "q"):
-        text = f"  {DIM}[{NC}{RED}{BOLD}{key}{NC}{DIM}]{NC}  {label}"
-    else:
-        text = f"  {DIM}[{NC}{WHITE}{BOLD}{key}{NC}{DIM}]{NC}  {label}"
-    _box_row(text)
-
-
-def _box_item_exit(key: str, label: str) -> None:
-    """Пункт выхода/назад/отмены с красным жирным ключом: ║  [KEY]  label  ║"""
-    text = f"  {DIM}[{NC}{RED}{BOLD}{key}{NC}{DIM}]{NC}  {label}"
-    _box_row(text)
-
-
-def _box_back() -> None:
-    """Строка возврата в нижней части рамки."""
-    text = f"  {DIM}[{NC}{RED}{BOLD}Q{NC}{DIM}]{NC}  {DIM}← Назад в главное меню{NC}"
-    _box_row(text)
-
-
-def _box_desc(text: str) -> None:
-    """Строка описания под пунктом меню (с отступом, приглушённый стиль)."""
-    wrapped = f"     {DIM}{text}{NC}"
-    # Если строка слишком длинная — перенос с отступом
-    inner = _BOX_W - 5  # 5 = len("     ")
-    plain_text = _plain(text)
-    if _wcslen(plain_text) <= inner:
-        _box_row(wrapped)
-        return
-    # Перенос по словам
-    words = plain_text.split(' ')
-    lines = []
-    current = ''
-    for word in words:
-        candidate = (current + ' ' + word).lstrip() if current else word
-        if _wcslen(candidate) <= inner:
-            current = candidate
-        else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    for i, line in enumerate(lines):
-        prefix = "     " if i == 0 else "       "
-        _box_row(f"{prefix}{DIM}{line}{NC}")
-
-
-def _box_wrap_msg(prefix_colored: str, prefix_plain_len: int, msg: str) -> None:
-    """Выводит строку внутри рамки с автопереносом длинных сообщений.
-    Все строки выводятся через _box_row — единственный источник правого ║."""
-    max_msg = _BOX_W - prefix_plain_len
-    if max_msg < 10:
-        max_msg = 10
-    # Разбиваем по словам, используя _wcslen для точного подсчёта
-    words = msg.split(' ')
-    chunks = []
-    current = ''
-    for word in words:
-        candidate = (current + ' ' + word).lstrip() if current else word
-        if _wcslen(candidate) <= max_msg:
-            current = candidate
-        else:
-            if current:
-                chunks.append(current)
-            # Слово длиннее строки — режем жёстко по _wcslen
-            while _wcslen(word) > max_msg:
-                piece = ''
-                pw = 0
-                for ch in word:
-                    import unicodedata as _ud2
-                    cw = 2 if _ud2.east_asian_width(ch) in ('W', 'F') else 1
-                    if pw + cw > max_msg:
-                        break
-                    piece += ch
-                    pw += cw
-                chunks.append(piece)
-                word = word[len(piece):]
-            current = word
-    if current:
-        chunks.append(current)
-    if not chunks:
-        _box_row(prefix_colored)
-        return
-    # Все строки идут через _box_row — он добавляет одинаковый правый ║
-    _box_row(f"{prefix_colored}{chunks[0]}")
-    indent = ' ' * prefix_plain_len
-    for chunk in chunks[1:]:
-        _box_row(f"{indent}{chunk}")
-
-
-def _box_info(msg: str) -> None:
-    """Аналог info() внутри рамки: ║ [INFO]  msg ║"""
-    _box_wrap_msg(f"{CYAN}[INFO]{NC}  ", 9, msg)
-
-
-def _box_warn(msg: str) -> None:
-    """Аналог warn() внутри рамки: ║ [WARN]  msg ║"""
-    _box_wrap_msg(f"{YELLOW}[WARN]{NC}  ", 9, msg)
-
-
-def _box_ok(msg: str) -> None:
-    """Аналог success() внутри рамки: ║ [OK]    msg ║"""
-    _box_wrap_msg(f"{GREEN}[OK]{NC}    ", 11, msg)
-
-
-def _box_dim(msg: str) -> None:
-    """Аналог dim() внутри рамки: ║ msg (dim) ║"""
-    _box_row(f"{DIM}{msg}{NC}")
-
-
-def _box_input(prompt: str, default: str = "", reopen: bool = True) -> str:
-    """Ввод внутри бокса: закрывает рамку, берёт ввод, опционально рисует ╠══╣."""
-    _box_bottom()
-    val = input(f"  {CYAN}{prompt}: {NC}").strip()
-    if reopen:
-        _box_line_top()
-    return val if val else default
-
-
-def _submenu_header(title: str) -> None:
-    """Очищает экран — рамка рисуется в самом подменю."""
-    os.system("clear")
-
-
-def _submenu_item(key: str, label: str) -> None:
-    _box_item(key, label)
-def _submenu_back() -> None:
-    _box_back()
-
-
-# =============================================================================
-#  АВАРИЙНОЕ ВОССТАНОВЛЕНИЕ (пункт 6 подменю "Установка и система")
-# =============================================================================
+# box_renderer — перенесено в vless_installer/modules/box_renderer.py
 def do_emergency_repair() -> None:
     """
     Аварийное восстановление после сбоя хостера / краша системы.
@@ -29430,7 +29344,9 @@ def _menu_network() -> None:
             _box_bottom()
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "3":
-            dnscrypt_menu()
+            info("Применение оптимизированного конфига DNSCrypt-proxy...")
+            apply_dnscrypt_tuning()
+            input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "4":
             do_manage_warp()
         elif ch == "5":
@@ -30013,185 +29929,7 @@ def _menu_diagnostics() -> None:
 
 # =============================================================================
 #  ПОДМЕНЮ: 5 — БЕЗОПАСНОСТЬ И АВТОМАТИЗАЦИЯ
-# =============================================================================
-def do_manage_logrotate() -> None:
-    """
-    Управление ротацией логов Xray из интерактивного меню.
-
-    Позволяет:
-      - Просмотреть текущие конфиги /etc/logrotate.d/xray*
-      - Изменить частоту (daily / weekly) и глубину хранения (rotate N)
-      - Принудительно запустить ротацию прямо сейчас (logrotate -f)
-      - Показать размер лог-файлов
-    """
-    _LOGROTATE_XRAY     = Path("/etc/logrotate.d/xray")
-    _LOGROTATE_XRAY_AUX = Path("/etc/logrotate.d/xray-aux")
-    _LOG_DIR            = Path("/var/log/xray")
-    _AUX_LOGS           = [
-        Path("/var/log/xray-autoupdate.log"),
-        Path("/var/log/xray-geo-update.log"),
-        Path("/var/log/xray-autoban.log"),
-        Path("/var/log/xray-watchdog.log"),
-        Path("/var/log/vless-install.log"),
-    ]
-
-    def _log_size(p: Path) -> str:
-        try:
-            sz = p.stat().st_size
-            if sz >= 1024 * 1024:
-                return f"{sz / 1024 / 1024:.1f} МБ"
-            if sz >= 1024:
-                return f"{sz // 1024} КБ"
-            return f"{sz} Б"
-        except Exception:
-            return "—"
-
-    def _config_exists(p: Path) -> str:
-        return f"{GREEN}есть{NC}" if p.exists() else f"{RED}нет{NC}"
-
-    def _parse_rotate_param(path: Path, param: str) -> str:
-        """Читает значение параметра (daily/weekly/rotate N) из конфига logrotate."""
-        if not path.exists():
-            return "?"
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if line.startswith(param):
-                parts = line.split()
-                return parts[1] if len(parts) > 1 else parts[0]
-        return "?"
-
-    while True:
-        os.system("clear")
-        print()
-        _box_top("📋  УПРАВЛЕНИЕ РОТАЦИЕЙ ЛОГОВ XRAY")
-        _box_row()
-
-        # Размеры основных логов
-        _box_row(f"  {CYAN}Размер лог-файлов:{NC}")
-        for fname in ("access.log", "error.log"):
-            lp = _LOG_DIR / fname
-            sz = _log_size(lp) if lp.exists() else f"{DIM}нет файла{NC}"
-            _box_row(f"    /var/log/xray/{fname:<16}  {sz}")
-        for lp in _AUX_LOGS:
-            if lp.exists():
-                _box_row(f"    {lp}  {_log_size(lp)}")
-
-        _box_sep()
-        # Текущие параметры logrotate
-        freq_main = _parse_rotate_param(_LOGROTATE_XRAY,     "daily") or \
-                    _parse_rotate_param(_LOGROTATE_XRAY,     "weekly")
-        rot_main  = _parse_rotate_param(_LOGROTATE_XRAY,     "rotate")
-        freq_aux  = _parse_rotate_param(_LOGROTATE_XRAY_AUX, "daily") or \
-                    _parse_rotate_param(_LOGROTATE_XRAY_AUX, "weekly")
-        rot_aux   = _parse_rotate_param(_LOGROTATE_XRAY_AUX, "rotate")
-        _box_row(f"  Конфиг xray:      {_config_exists(_LOGROTATE_XRAY)}"
-                 f"  {DIM}(частота: {freq_main or '?'}, хранить: {rot_main or '?'} архивов){NC}")
-        _box_row(f"  Конфиг xray-aux:  {_config_exists(_LOGROTATE_XRAY_AUX)}"
-                 f"  {DIM}(частота: {freq_aux or '?'}, хранить: {rot_aux or '?'} архивов){NC}")
-        _box_sep()
-
-        _box_item("1", "Применить/обновить конфиг logrotate (настройки по умолчанию)")
-        _box_item("2", "Изменить частоту и глубину хранения")
-        _box_item("3", f"Запустить ротацию прямо сейчас  {DIM}(logrotate -f){NC}")
-        _box_item("4", f"Показать содержимое конфигов logrotate")
-        _box_item("Q", "Назад")
-        _box_bottom()
-
-        try:
-            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
-        except KeyboardInterrupt:
-            break
-
-        # ── [1] Применить дефолтный конфиг ──────────────────────────────────
-        if ch == "1":
-            setup_logrotate()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        # ── [2] Изменить параметры ────────────────────────────────────────────
-        elif ch == "2":
-            print()
-            _box_row("  Параметры для access.log / error.log:")
-            _box_item("1", "daily   — ежедневно (рекомендуется при высоком трафике)")
-            _box_item("2", "weekly  — еженедельно (стандарт)")
-            _box_bottom()
-            try:
-                freq_ch = input("  Частота [1=daily / 2=weekly]: ").strip()
-                freq = "daily" if freq_ch == "1" else "weekly"
-                rot_raw = input("  Количество архивов [14]: ").strip()
-                rotate = int(rot_raw) if rot_raw.isdigit() else 14
-            except (KeyboardInterrupt, EOFError, ValueError):
-                warn("Отмена")
-                input(f"{BLUE}Нажмите Enter...{NC}")
-                continue
-
-            _LOGROTATE_XRAY.parent.mkdir(parents=True, exist_ok=True)
-            _LOGROTATE_XRAY.write_text(textwrap.dedent(f"""\
-                # Ротация логов Xray-core
-                # Создано VLESS Ultimate Installer v4.11.3
-                /var/log/xray/access.log
-                /var/log/xray/error.log {{
-                    {freq}
-                    rotate {rotate}
-                    compress
-                    delaycompress
-                    missingok
-                    notifempty
-                    create 0640 xray xray
-                    sharedscripts
-                    postrotate
-                        systemctl kill -s USR1 xray 2>/dev/null || true
-                    endscript
-                }}
-            """))
-            _LOGROTATE_XRAY.chmod(0o644)
-            r = _run(["logrotate", "--debug", str(_LOGROTATE_XRAY)],
-                     check=False, quiet=True, capture=True)
-            if r.returncode == 0:
-                success(f"logrotate обновлён: {freq}, {rotate} архивов")
-            else:
-                warn("logrotate --debug вернул ошибку — проверьте конфиг вручную")
-            log_to_file("INFO", f"logrotate reconfig: freq={freq}, rotate={rotate}")
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        # ── [3] Принудительная ротация ────────────────────────────────────────
-        elif ch == "3":
-            if not _LOGROTATE_XRAY.exists():
-                warn(f"Конфиг не найден: {_LOGROTATE_XRAY} — сначала выполните пункт [1]")
-                input(f"{BLUE}Нажмите Enter...{NC}")
-                continue
-            info("Запускаю logrotate -f ...")
-            r = _run(["logrotate", "-f", str(_LOGROTATE_XRAY)], check=False, capture=True)
-            if r.returncode == 0:
-                success("Ротация выполнена")
-            else:
-                warn(f"Ротация завершилась с кодом {r.returncode}")
-                if r.stderr:
-                    dim(r.stderr.strip())
-            # Aux тоже ротируем если конфиг есть
-            if _LOGROTATE_XRAY_AUX.exists():
-                _run(["logrotate", "-f", str(_LOGROTATE_XRAY_AUX)], check=False, quiet=True)
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        # ── [4] Показать конфиги ──────────────────────────────────────────────
-        elif ch == "4":
-            for cfg in (_LOGROTATE_XRAY, _LOGROTATE_XRAY_AUX):
-                print()
-                if cfg.exists():
-                    print(f"  {CYAN}=== {cfg} ==={NC}")
-                    for line in cfg.read_text().splitlines():
-                        print(f"  {line}")
-                else:
-                    print(f"  {YELLOW}{cfg} — не найден{NC}")
-            print()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch in ("q", ""):
-            break
-        else:
-            warn("Неверный выбор")
-            time.sleep(1)
-
-
+# logrotate — перенесено в vless_installer/modules/logrotate.py
 def do_scheduler_menu() -> None:
     """
     Единый планировщик задач — все cron/systemd задачи в одном месте.
@@ -30428,66 +30166,7 @@ def do_scheduler_menu() -> None:
         },
     ]
 
-    while True:
-        os.system("clear")
-        print()
-        _box_top("🗓️  ПЛАНИРОВЩИК ЗАДАЧ")
-        _box_row(f"  {DIM}Все автоматические задачи cron и systemd в одном месте{NC}")
-        _box_sep()
-        _COL_ID    = 3
-        _COL_LBL   = 34
-        _COL_SCHED = 20
-
-        def _pad(s: str, width: int) -> str:
-            """Дополняет строку пробелами до нужной видимой ширины (учитывает эмодзи)."""
-            diff = width - _wcslen(s)
-            return s + " " * max(diff, 0)
-
-        _box_row(f"  {'№':<{_COL_ID}}  {'Задача':<{_COL_LBL}}  {'Расписание':<{_COL_SCHED}}  Статус")
-        _box_row(f"  {'─'*_COL_ID}  {'─'*_COL_LBL}  {'─'*_COL_SCHED}  {'─'*10}")
-
-        for i, t in enumerate(TASKS, 1):
-            active = _task_status(t.get("cron"), t.get("unit"))
-            status_str = f"{GREEN}вкл{NC}" if active else f"{DIM}выкл{NC}"
-            # Флаг 🇷🇺 состоит из двух Regional Indicator (U+1F1F7 + U+1F1FA).
-            # В терминалах без поддержки эмодзи-флагов они рендерятся как "RU" (2 символа,
-            # 2 колонки), а _wcslen считает их как одну пару = 2 колонки — результат совпадает,
-            # паддинг корректен. Если терминал показывает их раздельно ("R U" с пробелом),
-            # заменяем флаг на текстовую метку для единообразия.
-            emoji = t['emoji']
-            label = f"{emoji} {t['label']}"
-            sched_plain = t['schedule']
-            sched_ansi  = f"{DIM}{sched_plain}{NC}"
-            # Паддинг для колонки расписания: выравниваем по видимой ширине
-            sched_pad   = sched_ansi + " " * max(_COL_SCHED - len(sched_plain), 0)
-            _box_row(f"  {_pad(str(i), _COL_ID)}  {_pad(label, _COL_LBL)}  {sched_pad}  {status_str}")
-
-        _box_sep()
-        _box_row(f"  {CYAN}Введите номер задачи{NC} — открыть настройки")
-        _box_row(f"  {RED}{BOLD}Q{NC} — назад")
-        _box_bottom()
-
-        try:
-            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
-        except KeyboardInterrupt:
-            break
-
-        if ch in ("q", ""):
-            break
-
-        if not ch.isdigit() or not (1 <= int(ch) <= len(TASKS)):
-            warn("Неверный выбор")
-            time.sleep(1)
-            continue
-
-        task = TASKS[int(ch) - 1]
-        if task.get("configure"):
-            task["configure"]()
-        else:
-            active = _task_status(task.get("cron"), task.get("unit"))
-            warn(f"Задача '{task['label']}' управляется из меню установки (пункт 1)")
-            time.sleep(2)
-
+    render_scheduler_menu(TASKS)
 
 def _menu_security() -> None:
     while True:
@@ -33991,506 +33670,8 @@ def do_manage_auto_fallback() -> None:
 #
 #  Все функции graceful-деградируют на обычный input() если терминал не TTY
 #  (например, при запуске из cron/pipe).
-# =============================================================================
-
-import unicodedata as _unicodedata
-
-
-def _is_tty() -> bool:
-    """Проверяет что stdin и stdout — реальный терминал."""
-    return sys.stdin.isatty() and sys.stdout.isatty()
-
-
-def _ansi_strip(s: str) -> str:
-    return re.sub(r'\033\[[0-9;]*m', '', s)
-
-
-def _vis_len(s: str) -> int:
-    """Видимая ширина строки (без ANSI, с учётом emoji/CJK двойной ширины).
-    Block elements (█░) и Box drawings (─│) считаются как 1 колонка."""
-    _FORCE1 = (
-        (0x2500, 0x259F),  # Box Drawing + Block Elements
-        (0x25A0, 0x27BF),  # Geometric Shapes, Dingbats
-    )
-    w = 0
-    for ch in _ansi_strip(s):
-        cp = ord(ch)
-        if any(lo <= cp <= hi for lo, hi in _FORCE1):
-            w += 1
-        else:
-            eaw = _unicodedata.east_asian_width(ch)
-            w += 2 if eaw in ('W', 'F') else 1
-    return w
-
-
-# ── базовый однострочный getch ────────────────────────────────────────────────
-
-def _getch_raw() -> str:
-    """
-    Читает один (возможно многобайтный) кейстрок без echo.
-    Возвращает строку: обычный символ, или ESC-последовательность,
-    или спецкод: 'KEY_UP', 'KEY_DOWN', 'KEY_LEFT', 'KEY_RIGHT',
-    'KEY_BACKSPACE', 'KEY_DELETE', 'KEY_HOME', 'KEY_END',
-    'KEY_PGUP', 'KEY_PGDN', 'KEY_TAB', 'KEY_BTAB', '\r', '\n', '\x03'.
-    """
-    import termios, tty
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == '\x1b':
-            # ESC-последовательность — читаем до конца
-            rest = ''
-            import select
-            while True:
-                r, _, _ = select.select([sys.stdin], [], [], 0.05)
-                if not r:
-                    break
-                c = sys.stdin.read(1)
-                rest += c
-                if c.isalpha() or c == '~':
-                    break
-            seq = ch + rest
-            _map = {
-                '\x1b[A': 'KEY_UP',   '\x1bOA': 'KEY_UP',
-                '\x1b[B': 'KEY_DOWN', '\x1bOB': 'KEY_DOWN',
-                '\x1b[C': 'KEY_RIGHT','\x1bOC': 'KEY_RIGHT',
-                '\x1b[D': 'KEY_LEFT', '\x1bOD': 'KEY_LEFT',
-                '\x1b[H': 'KEY_HOME', '\x1b[F': 'KEY_END',
-                '\x1b[1~': 'KEY_HOME','\x1b[4~': 'KEY_END',
-                '\x1b[5~': 'KEY_PGUP','\x1b[6~': 'KEY_PGDN',
-                '\x1b[3~': 'KEY_DELETE',
-                '\x1b[Z': 'KEY_BTAB',
-            }
-            return _map.get(seq, seq)
-        if ch in ('\x7f', '\x08'):
-            return 'KEY_BACKSPACE'
-        if ch == '\t':
-            return 'KEY_TAB'
-        return ch
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-
-
-# ── tui_input ─────────────────────────────────────────────────────────────────
-
-def tui_input(
-    prompt:    str,
-    default:   str = "",
-    validator: "callable | None" = None,
-    secret:    bool = False,
-    max_len:   int  = 200,
-    hint:      str  = "",
-) -> str:
-    """
-    Строка ввода с валидацией на лету.
-
-    validator(text) -> str | None
-      None  — значение корректно
-      str   — сообщение об ошибке (отображается красным под полем)
-
-    Возвращает введённую строку (или default при пустом вводе).
-    Graceful fallback на input() если не TTY.
-    """
-    if not _is_tty():
-        raw = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip()
-        return raw or default
-
-    buf   = list(default)
-    cur   = len(buf)
-    err   = ""
-
-    def _render():
-        nonlocal err
-        sys.stdout.write("\r\033[2K")          # очистить строку
-        # подсказка
-        text = ''.join(buf)
-        display = ('*' * len(buf)) if secret else text
-        err_txt = ""
-        if validator:
-            result = validator(text)
-            err    = result or ""
-        # строка ввода
-        line = f"  {CYAN}{prompt}{NC}  {display}"
-        if default and not buf:
-            line += f"  {DIM}[{default}]{NC}"
-        sys.stdout.write(line)
-        sys.stdout.flush()
-        # ошибка — на следующей строке
-        if err:
-            sys.stdout.write(f"\n  {RED}✗ {err}{NC}\033[A")  # вернуться на строку ввода
-        elif hint:
-            sys.stdout.write(f"\n  {DIM}{hint}{NC}\033[A")
-        sys.stdout.flush()
-
-    print()
-    _render()
-
-    while True:
-        k = _getch_raw()
-
-        if k in ('\r', '\n'):
-            # очистить строку с ошибкой/hint
-            sys.stdout.write("\n")
-            if err:
-                sys.stdout.write("\033[2K\033[A")
-            print()
-            result = ''.join(buf) or default
-            return result
-
-        elif k == '\x03':   # Ctrl+C
-            sys.stdout.write("\n")
-            raise KeyboardInterrupt
-
-        elif k == 'KEY_BACKSPACE':
-            if cur > 0:
-                buf.pop(cur - 1)
-                cur -= 1
-
-        elif k == 'KEY_DELETE':
-            if cur < len(buf):
-                buf.pop(cur)
-
-        elif k == 'KEY_LEFT':
-            if cur > 0:
-                cur -= 1
-
-        elif k == 'KEY_RIGHT':
-            if cur < len(buf):
-                cur += 1
-
-        elif k == 'KEY_HOME':
-            cur = 0
-
-        elif k == 'KEY_END':
-            cur = len(buf)
-
-        elif len(k) == 1 and k.isprintable():
-            if len(buf) < max_len:
-                buf.insert(cur, k)
-                cur += 1
-
-        _render()
-
-
-# ── tui_confirm ───────────────────────────────────────────────────────────────
-
-def tui_confirm(question: str, default: bool = False) -> bool:
-    """
-    [y/N] или [Y/n] диалог. Нажатие Enter = default.
-    Graceful fallback.
-    """
-    if not _is_tty():
-        hint = "Y/n" if default else "y/N"
-        raw  = input(f"  {question} [{hint}]: ").strip().lower()
-        if not raw:
-            return default
-        return raw.startswith('y')
-
-    hint  = f"{GREEN}Y{NC}/{DIM}n{NC}" if default else f"{DIM}y{NC}/{RED}N{NC}"
-    prompt = f"  {BOLD}{question}{NC}  [{hint}]  "
-    sys.stdout.write(f"\n{prompt}")
-    sys.stdout.flush()
-
-    while True:
-        k = _getch_raw().lower()
-        if k in ('\r', '\n'):
-            sys.stdout.write("\n\n")
-            return default
-        if k == 'y':
-            sys.stdout.write(f"{GREEN}Да{NC}\n\n")
-            return True
-        if k in ('n', '\x1b'):
-            sys.stdout.write(f"{RED}Нет{NC}\n\n")
-            return False
-        if k == '\x03':
-            sys.stdout.write("\n")
-            raise KeyboardInterrupt
-
-
-# ── tui_select ────────────────────────────────────────────────────────────────
-
-def tui_select(
-    title:   str,
-    options: "list[str]",
-    default: int = 0,
-) -> "int | None":
-    """
-    Выбор из списка стрелками ↑↓ + Enter. Esc/q = None (отмена).
-    Возвращает индекс выбранного элемента или None.
-    Graceful fallback: нумерованный список + input().
-    """
-    if not options:
-        return None
-
-    if not _is_tty():
-        _box_top(title)
-        for i, o in enumerate(options, 1):
-            _box_item(str(i), o)
-        _box_bottom()
-        raw = input(f"  {CYAN}Выбор (1–{len(options)}):{NC} ").strip()
-        if raw.isdigit() and 1 <= int(raw) <= len(options):
-            return int(raw) - 1
-        return None
-
-    cur = max(0, min(default, len(options) - 1))
-    BOX = _BOX_W  # используем ту же ширину что у остального UI
-
-    def _render():
-        os.system("clear")
-        print()
-        _box_top(title)
-        _box_row()
-        for i, opt in enumerate(options):
-            if i == cur:
-                marker = f"{GREEN}▶{NC}"
-                line   = f"  {marker} {BOLD}{opt}{NC}"
-            else:
-                marker = f"{DIM} {NC}"
-                line   = f"  {marker} {DIM}{opt}{NC}"
-            _box_row(line)
-        _box_row()
-        _box_row(f"  {DIM}↑↓ выбор  Enter подтвердить  Esc отмена{NC}")
-        _box_bottom()
-
-    _render()
-
-    while True:
-        k = _getch_raw()
-        if k == 'KEY_UP':
-            cur = (cur - 1) % len(options)
-            _render()
-        elif k == 'KEY_DOWN':
-            cur = (cur + 1) % len(options)
-            _render()
-        elif k in ('\r', '\n'):
-            return cur
-        elif k in ('\x1b', 'q', '\x03'):
-            if k == '\x03':
-                raise KeyboardInterrupt
-            return None
-
-
-# ── tui_progress ──────────────────────────────────────────────────────────────
-
-def tui_progress(
-    label:   str,
-    current: int,
-    total:   int,
-    width:   int = 40,
-) -> None:
-    """
-    Рисует прогресс-бар в текущей строке терминала внутри стиля рамки.
-    Вызывается повторно — перезаписывает строку через \\r.
-
-      tui_progress("Загрузка", 45, 100)
-      →  ║  Загрузка  [██████████████████░░░░░░░░░░░░░░░░░░░░]  45%  ║
-    """
-    pct    = min(100, int(current * 100 / total)) if total else 0
-    filled = int(width * pct / 100)
-    empty  = width - filled
-    bar    = f"{GREEN}{'#' * filled}{NC}{DIM}{'-' * empty}{NC}"
-    line   = f"  {label:<18}  [{bar}]  {BOLD}{pct:3d}%{NC}"
-    # Печатаем внутри рамки
-    pad = _BOX_W - _vis_len(line)
-    sys.stdout.write(f"\r{CYAN}║{NC}{line}{' ' * max(0, pad)}{CYAN}║{NC}")
-    sys.stdout.flush()
-    if pct >= 100:
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-
-
-# ── tui_form ──────────────────────────────────────────────────────────────────
-
-class TuiField:
-    """Описание одного поля формы."""
-    def __init__(
-        self,
-        key:       str,
-        label:     str,
-        default:   str = "",
-        required:  bool = False,
-        secret:    bool = False,
-        validator: "callable | None" = None,
-        hint:      str = "",
-        max_len:   int = 200,
-    ):
-        self.key       = key
-        self.label     = label
-        self.default   = default
-        self.required  = required
-        self.secret    = secret
-        self.validator = validator
-        self.hint      = hint
-        self.max_len   = max_len
-
-
-def tui_form(
-    title:  str,
-    fields: "list[TuiField]",
-) -> "dict[str, str] | None":
-    """
-    Многополевая форма. Tab/↓ — следующее поле, ↑ — предыдущее.
-    Enter на последнем поле или пустой строке — подтвердить.
-    Esc — отмена (возвращает None).
-
-    Возвращает dict {field.key: value} или None при отмене.
-
-    Graceful fallback: последовательный tui_input() для каждого поля.
-    """
-    if not fields:
-        return {}
-
-    values = {f.key: f.default for f in fields}
-
-    if not _is_tty():
-        # Fallback: последовательный ввод
-        os.system("clear")
-        print()
-        _box_top(title)
-        _box_row()
-        try:
-            for f in fields:
-                def _v(text, _f=f):
-                    if _f.required and not text:
-                        return "Поле обязательно для заполнения"
-                    return _f.validator(text) if _f.validator else None
-                val = tui_input(
-                    f.label, default=f.default,
-                    validator=_v, secret=f.secret,
-                    max_len=f.max_len, hint=f.hint,
-                )
-                values[f.key] = val
-        except KeyboardInterrupt:
-            return None
-        _box_bottom()
-        return values
-
-    # ── TUI-режим ────────────────────────────────────────────────────────────
-    cur_idx = 0
-    bufs    = {f.key: list(f.default) for f in fields}
-    cursors = {f.key: len(f.default)  for f in fields}
-    errors  = {f.key: ""              for f in fields}
-
-    def _validate_field(f: TuiField) -> str:
-        text = ''.join(bufs[f.key])
-        if f.required and not text:
-            return "Поле обязательно для заполнения"
-        if f.validator:
-            return f.validator(text) or ""
-        return ""
-
-    def _render():
-        os.system("clear")
-        print()
-        _box_top(title)
-        _box_row()
-        for i, f in enumerate(fields):
-            active = (i == cur_idx)
-            text   = ''.join(bufs[f.key])
-            disp   = ('*' * len(bufs[f.key])) if f.secret else text
-            err    = errors[f.key]
-
-            if active:
-                label_col = f"{BOLD}{CYAN}{f.label}{NC}"
-                val_col   = f"{BOLD}{disp}{NC}{'_' if len(disp) < 40 else ''}"
-                prefix    = f"  {GREEN}▶{NC}"
-            else:
-                label_col = f"{DIM}{f.label}{NC}"
-                val_col   = f"{DIM}{disp if disp else f'[{f.default}]' if f.default else '—'}{NC}"
-                prefix    = f"   "
-
-            line = f"{prefix} {label_col:<28}  {val_col}"
-            _box_row(line)
-
-            if err:
-                _box_row(f"     {RED}✗ {err}{NC}")
-            elif active and f.hint:
-                _box_row(f"     {DIM}ℹ {f.hint}{NC}")
-
-        _box_sep()
-        _box_row(f"  {DIM}Tab/↓ следующее  ↑ предыдущее  Enter подтвердить  Esc отмена{NC}")
-        _box_bottom()
-
-    _render()
-
-    while True:
-        k = _getch_raw()
-        f = fields[cur_idx]
-
-        if k in ('KEY_TAB', 'KEY_DOWN', '\r', '\n'):
-            # валидируем текущее поле
-            errors[f.key] = _validate_field(f)
-            if errors[f.key]:
-                _render()
-                continue
-            if cur_idx < len(fields) - 1:
-                cur_idx += 1
-                _render()
-            else:
-                # Последнее поле — финальная валидация всех
-                all_ok = True
-                for fi in fields:
-                    errors[fi.key] = _validate_field(fi)
-                    if errors[fi.key]:
-                        all_ok = False
-                if all_ok:
-                    return {f.key: ''.join(bufs[f.key]) or f.default
-                            for f in fields}
-                # Перейти к первому полю с ошибкой
-                cur_idx = next(
-                    i for i, fi in enumerate(fields) if errors[fi.key]
-                )
-                _render()
-
-        elif k == 'KEY_BTAB' or k == 'KEY_UP':
-            errors[f.key] = _validate_field(f)
-            cur_idx = max(0, cur_idx - 1)
-            _render()
-
-        elif k == '\x1b':
-            return None
-
-        elif k == '\x03':
-            raise KeyboardInterrupt
-
-        elif k == 'KEY_BACKSPACE':
-            c = cursors[f.key]
-            if c > 0:
-                bufs[f.key].pop(c - 1)
-                cursors[f.key] -= 1
-                errors[f.key] = ""
-                _render()
-
-        elif k == 'KEY_DELETE':
-            c = cursors[f.key]
-            if c < len(bufs[f.key]):
-                bufs[f.key].pop(c)
-                errors[f.key] = ""
-                _render()
-
-        elif k == 'KEY_LEFT':
-            cursors[f.key] = max(0, cursors[f.key] - 1)
-
-        elif k == 'KEY_RIGHT':
-            cursors[f.key] = min(len(bufs[f.key]), cursors[f.key] + 1)
-
-        elif k == 'KEY_HOME':
-            cursors[f.key] = 0
-
-        elif k == 'KEY_END':
-            cursors[f.key] = len(bufs[f.key])
-
-        elif len(k) == 1 and k.isprintable():
-            if len(bufs[f.key]) < f.max_len:
-                c = cursors[f.key]
-                bufs[f.key].insert(c, k)
-                cursors[f.key] += 1
-                errors[f.key] = ""
-                _render()
-
-
+# tui_input/tui_confirm/tui_select/tui_progress/tui_form
+# — перенесено в vless_installer/modules/tui.py
 # =============================================================================
 #  МОДУЛЬ 10: GEOIP БЛОКИРОВКА ВХОДЯЩИХ ЧЕРЕЗ IPTABLES (РЕЖИМ B)
 #
@@ -34504,1345 +33685,8 @@ def tui_form(
 #    • Обновление через существующий systemd-таймер РФ подсетей
 #      или отдельный cron
 #    • Состояние хранится в /var/lib/xray-installer/ingress_geoip.json
-# =============================================================================
-
-INGRESS_GEOIP_FILE   = Path("/var/lib/xray-installer/ingress_geoip.json")
-INGRESS_IPSET_NAME   = "xray_ru_block"
-INGRESS_IPSET6_NAME  = "xray_ru_block6"
-INGRESS_CRON_SCRIPT  = Path("/usr/local/bin/xray-ingress-geoip-update.sh")
-INGRESS_CRON_FILE    = Path("/etc/cron.d/xray-ingress-geoip")
-INGRESS_LOG          = Path("/var/log/xray-ingress-geoip.log")
-
-
-def _ingress_state_load() -> dict:
-    try:
-        if INGRESS_GEOIP_FILE.exists():
-            return json.loads(INGRESS_GEOIP_FILE.read_text())
-    except Exception:
-        pass
-    return {"enabled": False, "port": 0, "cidrs_v4": 0, "cidrs_v6": 0,
-            "updated_at": "", "method": ""}
-
-
-def _ingress_state_save(data: dict) -> None:
-    INGRESS_GEOIP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    INGRESS_GEOIP_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    INGRESS_GEOIP_FILE.chmod(0o600)
-
-
-def _ingress_ipset_available() -> bool:
-    return bool(shutil.which("ipset"))
-
-
-def _ingress_iptables_available() -> bool:
-    return bool(shutil.which("iptables"))
-
-
-def _ingress_get_cidrs() -> "tuple[list[str], list[str]]":
-    """
-    Возвращает (v4_cidrs, v6_cidrs).
-    Источники приоритетов:
-      1. /etc/xray/ru_subnets_ripe.txt (уже скачан split-tunnel модулем)
-      2. Свежая загрузка через _fetch_ru_subnets_from_ripe()
-    """
-    ru_file = Path("/etc/xray/ru_subnets_ripe.txt")
-    if ru_file.exists() and ru_file.stat().st_size > 1000:
-        try:
-            lines = [l.strip() for l in ru_file.read_text().splitlines()
-                     if l.strip() and not l.startswith("#")]
-            v4 = [l for l in lines if ":" not in l]
-            v6 = [l for l in lines if ":" in l]
-            if v4:
-                info(f"Используем существующий файл РФ подсетей: {len(v4)} v4, {len(v6)} v6")
-                return v4, v6
-        except Exception:
-            pass
-    info("Загружаем РФ подсети с RIPE NCC...")
-    all_cidrs = _fetch_ru_subnets_from_ripe()
-    v4 = [c for c in all_cidrs if ":" not in c]
-    v6 = [c for c in all_cidrs if ":" in c]
-    return v4, v6
-
-
-def _ingress_apply_ipset(port: int, v4: list, v6: list) -> bool:
-    """
-    Применяет блокировку через ipset (эффективно для 5000+ CIDR).
-    Создаёт/обновляет set и добавляет одно правило iptables.
-    """
-    info(f"Применяю ipset блокировку ({len(v4)} IPv4 + {len(v6)} IPv6 CIDR)...")
-
-    # ── IPv4 ──
-    cmds_v4 = [
-        ["ipset", "create", INGRESS_IPSET_NAME, "hash:net",
-         "family", "inet", "maxelem", "500000", "-exist"],
-        ["ipset", "flush",  INGRESS_IPSET_NAME],
-    ]
-    for cmd in cmds_v4:
-        r = _run(cmd, check=False, quiet=True)
-        if r.returncode != 0:
-            warn(f"ipset error: {r.stderr.strip()}")
-            return False
-
-    # batch-добавление через временный файл restore
-    restore_v4 = "\n".join(
-        [f"add {INGRESS_IPSET_NAME} {cidr}" for cidr in v4]
-    )
-    tmp_v4 = Path("/tmp/xray_ingress_v4.ipset")
-    tmp_v4.write_text(restore_v4)
-    r = _run(["ipset", "restore", "-!", "-f", str(tmp_v4)], check=False, quiet=True)
-    tmp_v4.unlink(missing_ok=True)
-    if r.returncode != 0:
-        warn(f"ipset restore v4 failed: {r.stderr.strip()[:200]}")
-
-    # правило iptables: DROP входящих из ru_set на SERVER_PORT.
-    # ВАЖНО: вставляем через -A (в конец), а не -I 1 (в начало).
-    # Правила ESTABLISHED,RELATED и lo-ACCEPT должны стоять ВЫШЕ,
-    # иначе уже установленные соединения клиентов будут обрываться.
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-m", "set", "--match-set", INGRESS_IPSET_NAME, "src", "-j", "DROP"],
-         check=False, quiet=True)
-    r = _run(["iptables", "-A", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", INGRESS_IPSET_NAME, "src",
-              "-j", "DROP", "-m", "comment", "--comment", "xray-ru-ingress-block"],
-             check=False, quiet=True)
-    if r.returncode != 0:
-        warn(f"iptables v4 rule error: {r.stderr.strip()}")
-        return False
-    success(f"IPv4: {len(v4)} CIDR → ipset {INGRESS_IPSET_NAME} → DROP :{port}")
-
-    # ── IPv6 ──
-    if v6:
-        _run(["ipset", "create", INGRESS_IPSET6_NAME, "hash:net",
-              "family", "inet6", "maxelem", "100000", "-exist"],
-             check=False, quiet=True)
-        _run(["ipset", "flush", INGRESS_IPSET6_NAME], check=False, quiet=True)
-        restore_v6 = "\n".join(
-            [f"add {INGRESS_IPSET6_NAME} {cidr}" for cidr in v6]
-        )
-        tmp_v6 = Path("/tmp/xray_ingress_v6.ipset")
-        tmp_v6.write_text(restore_v6)
-        _run(["ipset", "restore", "-!", "-f", str(tmp_v6)], check=False, quiet=True)
-        tmp_v6.unlink(missing_ok=True)
-
-        _run(["ip6tables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", INGRESS_IPSET6_NAME, "src", "-j", "DROP"],
-             check=False, quiet=True)
-        # Аналогично IPv4 — через -A, а не -I 1
-        _run(["ip6tables", "-A", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", INGRESS_IPSET6_NAME, "src",
-              "-j", "DROP", "-m", "comment", "--comment", "xray-ru-ingress-block"],
-             check=False, quiet=True)
-        success(f"IPv6: {len(v6)} CIDR → ipset {INGRESS_IPSET6_NAME} → DROP :{port}")
-
-    return True
-
-
-def _ingress_apply_iptables_plain(port: int, v4: list) -> bool:
-    """
-    Fallback без ipset: добавляет отдельное правило на каждый CIDR.
-    Медленно, но работает везде. Рекомендуется только при < 500 CIDR.
-    """
-    if len(v4) > 500:
-        warn(f"Fallback-режим (без ipset): {len(v4)} правил — это медленно!")
-        warn("Установите ipset: apt install ipset")
-
-    info(f"Применяю iptables правила ({len(v4)} CIDR)...")
-    # Удаляем старые правила с комментарием
-    while True:
-        r = _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-                  "-m", "comment", "--comment", "xray-ru-ingress-block",
-                  "-j", "DROP"], check=False, quiet=True)
-        if r.returncode != 0:
-            break
-
-    # Создаём новую цепочку XRU для компактности
-    _run(["iptables", "-N", "XRU_BLOCK"], check=False, quiet=True)
-    _run(["iptables", "-F", "XRU_BLOCK"], check=False, quiet=True)
-    for cidr in v4:
-        _run(["iptables", "-A", "XRU_BLOCK", "-s", cidr, "-j", "DROP"],
-             check=False, quiet=True)
-    _run(["iptables", "-A", "XRU_BLOCK", "-j", "RETURN"], check=False, quiet=True)
-
-    # Привязываем цепочку к INPUT через -A (в конец, НЕ -I 1).
-    # Правила ESTABLISHED,RELATED и whitelist ACCEPT уже стоят выше —
-    # вставка через -I 1 перекрыла бы их и порвала активные сессии.
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-j", "XRU_BLOCK"], check=False, quiet=True)
-    r = _run(["iptables", "-A", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-j", "XRU_BLOCK", "-m", "comment", "--comment", "xray-ru-ingress-block"],
-             check=False, quiet=True)
-    if r.returncode != 0:
-        warn(f"Ошибка iptables: {r.stderr.strip()}")
-        return False
-
-    success(f"iptables plain: {len(v4)} правил → DROP :{port}")
-    return True
-
-
-def _ingress_remove() -> None:
-    """Удаляет все правила блокировки входящих РФ, включая whitelist ACCEPT."""
-    state = _ingress_state_load()
-    port  = state.get("port", 0)
-    meth  = state.get("method", "")
-
-    # Сначала убираем ACCEPT-правила whitelist
-    for _wip in state.get("whitelist", []):
-        _ingress_whitelist_remove(_wip, port)
-
-    if meth == "ipset":
-        if port:
-            _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-                  "-m", "set", "--match-set", INGRESS_IPSET_NAME, "src", "-j", "DROP"],
-                 check=False, quiet=True)
-            _run(["ip6tables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-                  "-m", "set", "--match-set", INGRESS_IPSET6_NAME, "src", "-j", "DROP"],
-                 check=False, quiet=True)
-        _run(["ipset", "destroy", INGRESS_IPSET_NAME],  check=False, quiet=True)
-        _run(["ipset", "destroy", INGRESS_IPSET6_NAME], check=False, quiet=True)
-    elif meth == "plain" and port:
-        _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-j", "XRU_BLOCK"], check=False, quiet=True)
-        _run(["iptables", "-F", "XRU_BLOCK"], check=False, quiet=True)
-        _run(["iptables", "-X", "XRU_BLOCK"], check=False, quiet=True)
-
-    # ── Очищаем UFW deny-правила накопленные autoban/honeypot/dpi-detector ───
-    # Пока geo-блокировка работала, эти модули могли добавлять ufw deny from <ip>
-    # для РФ-адресов. При полном удалении блокировки чистим их тоже.
-    _ingress_flush_autoban_ufw()
-
-    _ingress_state_save({"enabled": False, "port": 0, "cidrs_v4": 0,
-                          "cidrs_v6": 0, "updated_at": "", "method": "",
-                          "whitelist": state.get("whitelist", [])})
-    INGRESS_CRON_FILE.unlink(missing_ok=True)
-    INGRESS_CRON_SCRIPT.unlink(missing_ok=True)
-    success("Блокировка входящих РФ удалена")
-
-
-def _ingress_flush_autoban_ufw() -> None:
-    """
-    Удаляет из UFW все deny-правила добавленные autoban/honeypot/dpi-detector.
-    Вызывается при полном удалении geo-блокировки.
-    Не трогает allow-правила (SSH, порты сервисов).
-    """
-    if not shutil.which("ufw"):
-        return
-    try:
-        r = _run(["ufw", "status", "numbered"], capture=True, check=False)
-        lines = r.stdout.splitlines()
-        # Собираем номера правил DENY with autoban/honeypot/dpi comments
-        # ufw numbered output: "[ N] DENY IN   anywhere   COMMENT"
-        targets = []
-        for line in lines:
-            low = line.lower()
-            if ("deny" in low and
-                    any(tag in low for tag in (
-                        "xray-autoban", "xray-dpi-detector", "honeypot",
-                        "xray-ru-ingress"
-                    ))):
-                import re as _re2
-                m = _re2.match(r'\s*\[\s*(\d+)\]', line)
-                if m:
-                    targets.append(int(m.group(1)))
-        # Удаляем в обратном порядке (нумерация сдвигается после каждого удаления)
-        for num in sorted(targets, reverse=True):
-            _run(["ufw", "--force", "delete", str(num)], check=False, quiet=True)
-        if targets:
-            success(f"UFW: удалено {len(targets)} накопленных deny-правил (autoban/honeypot/dpi)")
-        else:
-            info("UFW: накопленных deny-правил не найдено")
-    except Exception as e:
-        warn(f"UFW очистка: {e}")
-
-
-def _ingress_whitelist_apply(ip: str, port: int) -> None:
-    """
-    Добавляет правило ACCEPT для конкретного IP/CIDR — вставляет его
-    перед DROP-правилом (позиция 1 в INPUT), чтобы whitelist работал
-    для всех портов: SSH (22), порт Xray и любых других сервисов.
-    Помечает правило комментарием xray-ru-wl для управления.
-    """
-    comment = f"xray-ru-wl-{ip.replace('/', '_')}"
-    # Удаляем старое правило если было (idempotent)
-    _run(["iptables", "-D", "INPUT", "-s", ip, "-j", "ACCEPT",
-          "-m", "comment", "--comment", comment],
-         check=False, quiet=True)
-    # Вставляем ACCEPT самым первым — до всех DROP
-    _run(["iptables", "-I", "INPUT", "1", "-s", ip, "-j", "ACCEPT",
-          "-m", "comment", "--comment", comment],
-         check=False, quiet=True)
-    # IPv6 если это CIDR с двоеточием
-    if ":" in ip:
-        _run(["ip6tables", "-D", "INPUT", "-s", ip, "-j", "ACCEPT",
-              "-m", "comment", "--comment", comment],
-             check=False, quiet=True)
-        _run(["ip6tables", "-I", "INPUT", "1", "-s", ip, "-j", "ACCEPT",
-              "-m", "comment", "--comment", comment],
-             check=False, quiet=True)
-
-
-def _ingress_whitelist_remove(ip: str, port: int) -> None:
-    """Удаляет ACCEPT-правило whitelist для IP/CIDR."""
-    comment = f"xray-ru-wl-{ip.replace('/', '_')}"
-    _run(["iptables", "-D", "INPUT", "-s", ip, "-j", "ACCEPT",
-          "-m", "comment", "--comment", comment],
-         check=False, quiet=True)
-    if ":" in ip:
-        _run(["ip6tables", "-D", "INPUT", "-s", ip, "-j", "ACCEPT",
-              "-m", "comment", "--comment", comment],
-             check=False, quiet=True)
-
-
-def _ingress_whitelist_apply_all(state: dict, port: int) -> None:
-    """Применяет ACCEPT-правила для всех IP из whitelist в state."""
-    for ip in state.get("whitelist", []):
-        _ingress_whitelist_apply(ip, port)
-
-
-def _ingress_enable(port: int) -> None:
-    """Основной вызов: скачать CIDR, применить, сохранить состояние, поставить cron."""
-    if not _ingress_iptables_available():
-        warn("iptables не найден — невозможно применить правила")
-        return
-
-    # Проверяем возраст RIPE-файла перед apply
-    if not check_ripe_file_age(interactive=True):
-        return
-    v4, v6 = _ingress_get_cidrs()
-    if not v4:
-        warn("Список РФ подсетей пуст — проверьте доступность RIPE NCC")
-        return
-
-    use_ipset = _ingress_ipset_available()
-    if use_ipset:
-        ok = _ingress_apply_ipset(port, v4, v6)
-        method = "ipset"
-        if ok:
-            ipset_save()  # persist ipset для boot-restore
-    else:
-        warn("ipset не установлен — используем plain iptables (медленнее)")
-        warn("Рекомендуется: apt install ipset")
-        ok = _ingress_apply_iptables_plain(port, v4)
-        method = "plain"
-
-    if not ok:
-        warn("Не удалось применить правила — проверьте лог")
-        return
-
-    # Применяем whitelist ACCEPT-правила (вставляются перед DROP)
-    _state_for_wl = _ingress_state_load()
-    _ingress_whitelist_apply_all(_state_for_wl, port)
-    wl_count = len(_state_for_wl.get("whitelist", []))
-    if wl_count:
-        success(f"Whitelist: {wl_count} IP защищены (ACCEPT до DROP)")
-
-    # Сохраняем состояние — whitelist ОБЯЗАТЕЛЬНО переносим из предыдущего state,
-    # иначе при каждом enable/restore он обнуляется и ACCEPT-правила теряются
-    _ingress_state_save({
-        "enabled":    True,
-        "port":       port,
-        "cidrs_v4":   len(v4),
-        "cidrs_v6":   len(v6),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "method":     method,
-        "whitelist":  _state_for_wl.get("whitelist", []),
-    })
-
-    # Устанавливаем cron для автообновления (еженедельно по воскресеньям в 03:00)
-    _ingress_install_cron(port)
-    # Устанавливаем systemd-юнит восстановления ipset при reboot
-    ipset_restore_unit_install()
-
-    log_to_file("INFO",
-        f"Ingress GeoIP block enabled: port={port}, "
-        f"v4={len(v4)}, v6={len(v6)}, method={method}"
-    )
-    _tg_notify_event(
-        "ingress_geoip",
-        f"🛡 Блокировка входящих РФ <b>включена</b>: "
-        f"порт {port}, {len(v4)} IPv4 CIDR, метод: {method}"
-    )
-
-
-def _ingress_install_cron(port: int) -> None:
-    """Cron: еженедельное обновление списка РФ-подсетей и переприменение правил."""
-    script = textwrap.dedent(f"""\
-        #!/bin/bash
-        # Xray Ingress GeoIP Block — weekly update (VLESS Installer)
-        LOG="{INGRESS_LOG}"
-        DATE=$(date '+%Y-%m-%d %H:%M:%S')
-        echo "[$DATE] Ingress GeoIP update start" >> "$LOG"
-        python3 {Path(__file__).resolve()} --ingress-geoip-update >> "$LOG" 2>&1
-        echo "[$DATE] Ingress GeoIP update done (exit $?)" >> "$LOG"
-    """)
-    INGRESS_CRON_SCRIPT.write_text(script)
-    INGRESS_CRON_SCRIPT.chmod(0o750)
-    INGRESS_CRON_FILE.write_text(
-        f"0 3 * * 0 root {INGRESS_CRON_SCRIPT} >> {INGRESS_LOG} 2>&1\n"
-    )
-    INGRESS_CRON_FILE.chmod(0o644)
-    success(f"Cron обновления установлен: еженедельно вс 03:00 → {INGRESS_CRON_SCRIPT}")
-
-
-def do_manage_ingress_geoip() -> None:
-    """
-    Меню: блокировка входящих подключений из РФ на уровне iptables.
-    Предназначено для Режима B — Entry Node в РФ, пользователи за рубежом.
-    """
-    while True:
-        os.system("clear")
-        print()
-        state = _ingress_state_load()
-        enabled  = state.get("enabled", False)
-        port     = state.get("port", 0)
-        cidrs_v4 = state.get("cidrs_v4", 0)
-        cidrs_v6 = state.get("cidrs_v6", 0)
-        updated  = state.get("updated_at", "")[:16].replace("T", " ")
-        method   = state.get("method", "—")
-        cron_ok  = INGRESS_CRON_FILE.exists()
-
-        # Читаем текущий порт из state.json если не задан
-        cur_port = port
-        if not cur_port and STATE_FILE.exists():
-            try:
-                cur_port = json.loads(STATE_FILE.read_text()).get("server_port", 443)
-            except Exception:
-                cur_port = 443
-
-        ipset_ok = _ingress_ipset_available()
-
-        _box_top("БЛОКИРОВКА ВХОДЯЩИХ ИЗ РФ (iptables)")
-        _box_row()
-
-        wl_ips = state.get("whitelist", [])
-
-        if enabled:
-            _box_row(f"  Статус:   {GREEN}ВКЛЮЧЕНО{NC}")
-            _box_row(f"  Порт:     {CYAN}{port}{NC}")
-            _box_row(f"  IPv4:     {CYAN}{cidrs_v4} CIDR{NC}")
-            _box_row(f"  IPv6:     {CYAN}{cidrs_v6} CIDR{NC}")
-            _box_row(f"  Метод:    {CYAN}{method}{NC}")
-            _box_row(f"  Обновлено:{CYAN} {updated or '—'}{NC}")
-            _box_row(f"  Cron:     "
-                     f"{''+GREEN+'вс 03:00'+NC if cron_ok else ''+YELLOW+'отключён'+NC}")
-            _box_row(f"  {ripe_file_age_banner()}")
-        else:
-            _box_row(f"  Статус:   {YELLOW}ОТКЛЮЧЕНО{NC}")
-            _box_row(f"  Порт Entry Node: {CYAN}{cur_port}{NC}")
-            _box_row()
-            _box_row(f"  {DIM}Блокирует входящие TCP на порт Xray с российских IP.{NC}")
-            _box_row(f"  {DIM}РФ-подсети RIPE NCC (тот же список что split-tunnel).{NC}")
-            _box_row(f"  {DIM}Режим B: Entry Node в РФ, пользователи за рубежом.{NC}")
-
-        _box_sep()
-        _box_row(f"  ipset: {''+GREEN+'доступен'+NC if ipset_ok else ''+YELLOW+'НЕТ (apt install ipset)'+NC}")
-        # Whitelist — показываем всегда
-        if wl_ips:
-            _box_row(f"  {BOLD}Whitelist (всегда разрешены — SSH/управление):{NC}")
-            for _wip in wl_ips:
-                _box_row(f"    {GREEN}✓{NC} {_wip}")
-        else:
-            _box_row(f"  {YELLOW}Whitelist пуст{NC} — добавьте ваш IP управления!")
-        _box_sep()
-
-        if enabled:
-            _box_item("1", "Обновить список РФ подсетей и переприменить")
-            _box_item("2", f"{RED}Отключить блокировку (удалить правила){NC}")
-        else:
-            _box_item("1", f"{GREEN}Включить блокировку входящих из РФ{NC}")
-
-        _box_item("3", "Проверить текущие правила iptables")
-        _box_item("4", f"Управление whitelist {DIM}(ваш IP, SSH-источники){NC}")
-        _box_item("5", f"🧹 Очистить накопленные UFW deny (autoban/honeypot/dpi)")
-        _box_row()
-        _box_row(f"  {YELLOW}⚠{NC} {DIM}Добавьте свой IP в whitelist перед включением!{NC}")
-        _box_row(f"  {DIM}  Иначе потеряете SSH если ваш провайдер — РФ.{NC}")
-        _box_row()
-        _box_back()
-        _box_bottom()
-
-        try:
-            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
-        except KeyboardInterrupt:
-            break
-
-        if ch == "1":
-            if enabled:
-                # Обновить
-                print()
-                info("Обновляю список РФ-подсетей и переприменяю правила...")
-                _ingress_remove()
-                _ingress_enable(cur_port if not port else port)
-                input(f"{BLUE}Нажмите Enter...{NC}")
-            else:
-                # Включить — сначала проверяем/предлагаем добавить whitelist
-                print()
-                _box_top("Включение блокировки входящих из РФ")
-                _box_row()
-                _box_row(
-                    f"  {YELLOW}ПРЕДУПРЕЖДЕНИЕ:{NC} После включения IP-адреса из РФ"
-                )
-                _box_row(f"  не смогут подключиться на порт {CYAN}{cur_port}{NC}.")
-                _box_row()
-                if wl_ips:
-                    _box_row(f"  {GREEN}Whitelist:{NC}")
-                    for _wip in wl_ips:
-                        _box_row(f"    {GREEN}✓{NC} {_wip}  {DIM}(будет разрешён){NC}")
-                else:
-                    _box_row(f"  {RED}Whitelist пуст!{NC}")
-                    _box_row(f"  {DIM}Если вы управляете сервером с РФ-IP —{NC}")
-                    _box_row(f"  {DIM}вы потеряете SSH доступ!{NC}")
-                    _box_row()
-                    _box_row(f"  {DIM}Рекомендуется сначала добавить ваш IP (пункт 4).{NC}")
-                _box_row()
-                _box_bottom()
-                print()
-                if tui_confirm("Применить блокировку?", default=False):
-                    _ingress_enable(cur_port)
-                input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch == "2" and enabled:
-            print()
-            if tui_confirm("Удалить все правила блокировки входящих из РФ?", default=False):
-                _ingress_remove()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch == "3":
-            print()
-            _box_top("Текущие правила iptables (INPUT)")
-            _box_row()
-            r = _run(["iptables", "-L", "INPUT", "-n", "--line-numbers"],
-                     check=False, capture=True)
-            for line in r.stdout.splitlines():
-                if "xray-ru-ingress" in line or "XRU_BLOCK" in line \
-                   or line.startswith("num") or line.startswith("Chain"):
-                    _box_row(f"  {line}")
-            if ipset_ok:
-                _box_row()
-                r2 = _run(["ipset", "list", INGRESS_IPSET_NAME,
-                            "-t"],  # только заголовок, без 5000 IP
-                           check=False, capture=True)
-                for line in r2.stdout.splitlines():
-                    _box_row(f"  {line}")
-            _box_row()
-            _box_bottom()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch == "4":
-            # Управление whitelist
-            print()
-            _box_top("Whitelist — разрешённые IP (SSH / управление)")
-            _box_row(f"  {DIM}IP из этого списка всегда пропускаются — до правил блокировки.{NC}")
-            _box_row(f"  {DIM}Добавьте сюда ваш IP провайдера чтобы не потерять SSH.{NC}")
-            _box_sep()
-            if wl_ips:
-                for i, _wip in enumerate(wl_ips, 1):
-                    _box_item(str(i), f"{GREEN}{_wip}{NC}")
-            else:
-                _box_row(f"  {DIM}Список пуст{NC}")
-            _box_sep()
-            _box_item("+", "Добавить IP")
-            _box_item("-", "Удалить IP")
-            _box_item("D", f"Определить мой текущий IP автоматически")
-            _box_bottom()
-            wl_act = input("  Действие [+/-/D/Enter]: ").strip().lower()
-
-            if wl_act == "d":
-                # Автоопределение внешнего IP
-                _my_ip = ""
-                for _url in ("https://api.ipify.org", "https://ifconfig.me/ip",
-                             "https://icanhazip.com"):
-                    try:
-                        import urllib.request as _ur2
-                        with _ur2.urlopen(_url, timeout=5) as _r2:
-                            _my_ip = _r2.read().decode().strip()
-                        if _my_ip:
-                            break
-                    except Exception:
-                        continue
-                if _my_ip:
-                    print()
-                    print(f"  {GREEN}Ваш внешний IP:{NC} {CYAN}{_my_ip}{NC}")
-                    if tui_confirm(f"Добавить {_my_ip} в whitelist?", default=True):
-                        wl_act = "+"
-                        _prefill_ip = _my_ip
-                    else:
-                        _prefill_ip = ""
-                else:
-                    warn("Не удалось определить внешний IP — введите вручную")
-                    wl_act = "+"
-                    _prefill_ip = ""
-            else:
-                _prefill_ip = ""
-
-            if wl_act == "+":
-                new_ip = _prefill_ip or input("  IP или CIDR для whitelist: ").strip()
-                if new_ip and new_ip not in wl_ips:
-                    wl_ips.append(new_ip)
-                    state["whitelist"] = wl_ips
-                    _ingress_state_save(state)
-                    success(f"Добавлен: {new_ip}")
-                    # Если блокировка уже включена — сразу применяем ACCEPT правило
-                    if enabled:
-                        _ingress_whitelist_apply(new_ip, port)
-                        success(f"ACCEPT правило для {new_ip} применено немедленно")
-                elif new_ip in wl_ips:
-                    warn(f"{new_ip} уже в whitelist")
-
-            elif wl_act == "-":
-                if not wl_ips:
-                    warn("Список пуст")
-                else:
-                    raw_n = input("  Номер для удаления: ").strip()
-                    if raw_n.isdigit() and 1 <= int(raw_n) <= len(wl_ips):
-                        removed_ip = wl_ips.pop(int(raw_n) - 1)
-                        state["whitelist"] = wl_ips
-                        _ingress_state_save(state)
-                        success(f"Удалён: {removed_ip}")
-                        # Если блокировка включена — убираем ACCEPT правило
-                        if enabled:
-                            _ingress_whitelist_remove(removed_ip, port)
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch == "5":
-            print()
-            info("Очищаю накопленные UFW deny-правила (autoban/honeypot/dpi-detector)...")
-            _ingress_flush_autoban_ufw()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch in ("q", ""):
-            break
-        else:
-            warn("Неверный выбор")
-            time.sleep(1)
-
-
-# =============================================================================
-#  МОДУЛЬ 11: КАСТОМНЫЕ DNS ПРАВИЛА (Xray hosts + DNSCrypt static)
-#
-#  Позволяет задать:
-#    • domain → IP(s)   через секцию hosts{} в Xray config
-#    • domain → outbound через dns-routing правила (domain → direct/proxy)
-#    • Просмотр текущих hosts и dns-правил
-#    • Совместимость с DNSCrypt-proxy (blocked-names.txt)
-# =============================================================================
-
-DNS_RULES_FILE  = Path("/var/lib/xray-installer/dns_rules.json")
-
-
-def _dns_rules_load() -> dict:
-    try:
-        if DNS_RULES_FILE.exists():
-            return json.loads(DNS_RULES_FILE.read_text())
-    except Exception:
-        pass
-    return {"hosts": {}, "routing": []}
-
-
-def _dns_rules_save(data: dict) -> None:
-    DNS_RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    DNS_RULES_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    DNS_RULES_FILE.chmod(0o600)
-
-
-def _dns_get_xray_config() -> "tuple[Path | None, dict]":
-    for p in (CONFIG_DIR / "config.json",
-              Path("/usr/local/etc/xray/config.json")):
-        if p.exists():
-            try:
-                return p, json.loads(p.read_text())
-            except Exception:
-                pass
-    return None, {}
-
-
-def _dns_apply_hosts(hosts: dict) -> bool:
-    """
-    Записывает dict {domain: [ip, ...]} в секцию dns.hosts Xray конфига.
-    Merges с уже существующими записями.
-    """
-    cfg_path, cfg = _dns_get_xray_config()
-    if not cfg_path:
-        warn("Xray конфиг не найден")
-        return False
-    try:
-        dns_sec  = cfg.setdefault("dns", {})
-        existing = dns_sec.get("hosts", {})
-        existing.update(hosts)
-        dns_sec["hosts"] = existing
-        cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-        _set_config_owner(cfg_path)
-        return True
-    except Exception as e:
-        warn(f"Ошибка записи hosts: {e}")
-        return False
-
-
-def _dns_remove_host(domain: str) -> bool:
-    cfg_path, cfg = _dns_get_xray_config()
-    if not cfg_path:
-        return False
-    try:
-        hosts = cfg.get("dns", {}).get("hosts", {})
-        if domain in hosts:
-            del hosts[domain]
-            cfg.setdefault("dns", {})["hosts"] = hosts
-            cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-            _set_config_owner(cfg_path)
-            return True
-    except Exception as e:
-        warn(f"Ошибка удаления hosts: {e}")
-    return False
-
-
-def _dns_apply_routing_rule(domain: str, outbound: str) -> bool:
-    """
-    Добавляет routing-правило: domain → outbound (direct/proxy/block).
-    Размещает перед остальными правилами.
-    """
-    cfg_path, cfg = _dns_get_xray_config()
-    if not cfg_path:
-        return False
-    try:
-        routing = cfg.setdefault("routing", {})
-        rules   = routing.setdefault("rules", [])
-        # Удаляем старое правило для этого домена если есть
-        rules = [r for r in rules
-                 if not (r.get("comment", "").startswith("dns_custom:")
-                         and domain in r.get("domain", []))]
-        new_rule = {
-            "type":       "field",
-            "domain":     [domain],
-            "outboundTag": outbound,
-            "comment":    f"dns_custom:{domain}",
-        }
-        routing["rules"] = [new_rule] + rules
-        cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-        _set_config_owner(cfg_path)
-        return True
-    except Exception as e:
-        warn(f"Ошибка добавления dns routing: {e}")
-        return False
-
-
-def _dns_remove_routing_rule(domain: str) -> bool:
-    cfg_path, cfg = _dns_get_xray_config()
-    if not cfg_path:
-        return False
-    try:
-        rules = cfg.get("routing", {}).get("rules", [])
-        new_rules = [r for r in rules
-                     if not (r.get("comment", "").startswith("dns_custom:")
-                             and domain in r.get("domain", []))]
-        cfg["routing"]["rules"] = new_rules
-        cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-        _set_config_owner(cfg_path)
-        return True
-    except Exception as e:
-        warn(f"Ошибка удаления dns routing: {e}")
-        return False
-
-
-def _dns_reload_xray() -> None:
-    # Xray 26.x не поддерживает SIGHUP reload — используем restart напрямую
-    r = _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    time.sleep(1)
-    ok = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-    if ok.stdout.strip() == "active":
-        success("Xray перезапущен с новыми DNS правилами")
-    else:
-        warn("Xray не запустился — проверьте конфиг!")
-
-
-def _dns_validate_ip(text: str) -> "str | None":
-    """Проверяет что текст — одиночный IP или список IP через запятую."""
-    if not text:
-        return "Введите IP-адрес"
-    for part in text.split(","):
-        p = part.strip()
-        # IPv4
-        parts4 = p.split(".")
-        if len(parts4) == 4:
-            if all(x.isdigit() and 0 <= int(x) <= 255 for x in parts4):
-                continue
-        # IPv6 — упрощённая проверка
-        if ":" in p and len(p) <= 39:
-            continue
-        return f"Неверный IP: '{p}'"
-    return None
-
-
-def _dns_validate_domain(text: str) -> "str | None":
-    if not text:
-        return "Введите домен"
-    # Базовая проверка — содержит точку, нет пробелов
-    if " " in text:
-        return "Домен не должен содержать пробелы"
-    if "." not in text and not text.startswith("domain:") \
-       and not text.startswith("geosite:"):
-        return "Введите домен (напр.: example.com) или geosite:ru"
-    return None
-
-
-def do_manage_dns_rules() -> None:
-    """
-    Меню управления кастомными DNS правилами.
-    """
-    while True:
-        os.system("clear")
-        data     = _dns_rules_load()
-        hosts    = data.get("hosts", {})
-        rt_rules = data.get("routing", [])
-
-        # Читаем актуальные hosts прямо из конфига
-        _, cfg = _dns_get_xray_config()
-        live_hosts    = cfg.get("dns", {}).get("hosts", {})
-        live_rt_rules = [r for r in cfg.get("routing", {}).get("rules", [])
-                         if r.get("comment", "").startswith("dns_custom:")]
-
-        _box_top("🌐  КАСТОМНЫЕ DNS ПРАВИЛА")
-        _box_row()
-
-        # ── Hosts (domain → IP) ──
-        _box_row(f"  {BOLD}Hosts (domain → IP):  {DIM}{len(live_hosts)} записей{NC}")
-        if live_hosts:
-            _box_sep()
-            for dom, ips in list(live_hosts.items())[:8]:
-                ip_str = ", ".join(ips) if isinstance(ips, list) else str(ips)
-                line   = f"  {CYAN}{dom:<30}{NC} → {GREEN}{ip_str}{NC}"
-                _box_row(line)
-            if len(live_hosts) > 8:
-                _box_row(f"  {DIM}... ещё {len(live_hosts)-8} записей{NC}")
-
-        _box_sep()
-
-        # ── Routing правила (domain → outbound) ──
-        _box_row(
-            f"  {BOLD}DNS routing (domain → outbound):  "
-            f"{DIM}{len(live_rt_rules)} правил{NC}"
-        )
-        if live_rt_rules:
-            _box_sep()
-            for r in live_rt_rules[:6]:
-                doms = ", ".join(r.get("domain", [])[:2])
-                out  = r.get("outboundTag", "?")
-                col  = GREEN if out == "direct" else CYAN if out == "proxy" else RED
-                _box_row(f"  {DIM}{doms:<30}{NC} → {col}{out}{NC}")
-            if len(live_rt_rules) > 6:
-                _box_row(f"  {DIM}... ещё {len(live_rt_rules)-6} правил{NC}")
-
-        _box_sep()
-        _box_row()
-        _box_item("1", f"Добавить host: domain → IP(s)")
-        _box_item("2", f"Удалить host")
-        _box_item("3", f"Добавить routing: domain → direct/proxy/block")
-        _box_item("4", f"Удалить routing-правило")
-        _box_item("5", f"Показать все DNS-правила из конфига")
-        _box_item("6", f"Перезапустить Xray (применить изменения)")
-        _box_row()
-        _box_back()
-        _box_bottom()
-
-        try:
-            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
-        except KeyboardInterrupt:
-            break
-
-        # ── 1: Добавить host ──────────────────────────────────────────────
-        if ch == "1":
-            print()
-            result = tui_form("Добавить DNS host", [
-                TuiField(
-                    key="domain", label="Домен",
-                    required=True, validator=_dns_validate_domain,
-                    hint="Напр.: example.com  или  domain:google.com",
-                ),
-                TuiField(
-                    key="ips", label="IP-адрес(а)",
-                    required=True, validator=_dns_validate_ip,
-                    hint="Один или несколько через запятую: 1.2.3.4, 5.6.7.8",
-                ),
-            ])
-            if result:
-                domain = result["domain"].strip().lower()
-                ips    = [ip.strip() for ip in result["ips"].split(",") if ip.strip()]
-                if _dns_apply_hosts({domain: ips}):
-                    # Сохраняем в наш файл для учёта
-                    data = _dns_rules_load()
-                    data.setdefault("hosts", {})[domain] = ips
-                    _dns_rules_save(data)
-                    success(f"Host добавлен: {domain} → {', '.join(ips)}")
-                    _dns_reload_xray()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        # ── 2: Удалить host ───────────────────────────────────────────────
-        elif ch == "2":
-            if not live_hosts:
-                warn("Нет hosts для удаления")
-                input(f"{BLUE}Нажмите Enter...{NC}")
-                continue
-            domains = list(live_hosts.keys())
-            idx = tui_select(
-                "Выберите домен для удаления",
-                [f"{d}  →  {', '.join(live_hosts[d]) if isinstance(live_hosts[d],list) else live_hosts[d]}"
-                 for d in domains],
-            )
-            if idx is not None:
-                domain = domains[idx]
-                if tui_confirm(f"Удалить host '{domain}'?", default=False):
-                    _dns_remove_host(domain)
-                    data = _dns_rules_load()
-                    data.get("hosts", {}).pop(domain, None)
-                    _dns_rules_save(data)
-                    success(f"Host '{domain}' удалён")
-                    _dns_reload_xray()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        # ── 3: Добавить routing ───────────────────────────────────────────
-        elif ch == "3":
-            print()
-            outbound_idx = tui_select(
-                "Куда направить трафик домена?",
-                [
-                    f"direct  — напрямую (обход прокси)",
-                    f"proxy   — через прокси/exit-ноду",
-                    f"block   — заблокировать (blackhole)",
-                ],
-                default=0,
-            )
-            if outbound_idx is None:
-                continue
-            outbound_map = {0: "direct", 1: "proxy", 2: "block"}
-            outbound = outbound_map[outbound_idx]
-
-            result = tui_form(f"Routing: домен → {outbound}", [
-                TuiField(
-                    key="domain", label="Домен / паттерн",
-                    required=True, validator=_dns_validate_domain,
-                    hint="Напр.: ads.example.com  или  geosite:category-ads-all",
-                ),
-            ])
-            if result:
-                domain = result["domain"].strip().lower()
-                if _dns_apply_routing_rule(domain, outbound):
-                    data = _dns_rules_load()
-                    data.setdefault("routing", []).append(
-                        {"domain": domain, "outbound": outbound}
-                    )
-                    _dns_rules_save(data)
-                    col = GREEN if outbound == "direct" else CYAN if outbound == "proxy" else RED
-                    success(f"Routing: {domain} → {col}{outbound}{NC}")
-                    _dns_reload_xray()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        # ── 4: Удалить routing ────────────────────────────────────────────
-        elif ch == "4":
-            if not live_rt_rules:
-                warn("Нет кастомных routing-правил")
-                input(f"{BLUE}Нажмите Enter...{NC}")
-                continue
-            options = [
-                f"{', '.join(r.get('domain',[])[:2])}  →  {r.get('outboundTag','?')}"
-                for r in live_rt_rules
-            ]
-            idx = tui_select("Выберите правило для удаления", options)
-            if idx is not None:
-                rule   = live_rt_rules[idx]
-                domain = rule.get("domain", ["?"])[0]
-                if tui_confirm(f"Удалить routing '{domain}'?", default=False):
-                    _dns_remove_routing_rule(domain)
-                    data = _dns_rules_load()
-                    data["routing"] = [
-                        r for r in data.get("routing", [])
-                        if r.get("domain") != domain
-                    ]
-                    _dns_rules_save(data)
-                    success(f"Routing правило '{domain}' удалено")
-                    _dns_reload_xray()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        # ── 5: Показать все DNS из конфига ────────────────────────────────
-        elif ch == "5":
-            os.system("clear")
-            print()
-            _box_top("DNS конфигурация Xray (dns секция)")
-            dns_section = cfg.get("dns", {})
-            if not dns_section:
-                _box_row(f"  {DIM}Секция dns не найдена в конфиге{NC}")
-            else:
-                servers = dns_section.get("servers", [])
-                _box_row(f"  {BOLD}DNS Servers:{NC}")
-                for s in servers:
-                    if isinstance(s, str):
-                        _box_row(f"    {CYAN}{s}{NC}")
-                    elif isinstance(s, dict):
-                        addr    = s.get("address", "")
-                        domains = s.get("domains", [])
-                        dom_str = ", ".join(domains[:3]) + ("..." if len(domains)>3 else "")
-                        _box_row(f"    {CYAN}{addr}{NC}  {DIM}→ {dom_str}{NC}")
-                _box_sep()
-                _box_row(f"  {BOLD}Hosts ({len(live_hosts)} записей):{NC}")
-                for dom, ips in live_hosts.items():
-                    ip_str = ", ".join(ips) if isinstance(ips, list) else str(ips)
-                    _box_row(f"    {dom:<35} → {ip_str}")
-                _box_sep()
-                _box_row(f"  {BOLD}Кастомные routing ({len(live_rt_rules)} правил):{NC}")
-                for r in live_rt_rules:
-                    doms = ", ".join(r.get("domain", []))
-                    out  = r.get("outboundTag", "?")
-                    _box_row(f"    {doms:<35} → {out}")
-            _box_bottom()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        # ── 6: Перезапустить Xray ─────────────────────────────────────────
-        elif ch == "6":
-            print()
-            _dns_reload_xray()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch in ("q", ""):
-            break
-        else:
-            warn("Неверный выбор")
-            time.sleep(1)
-
-
-
-# =============================================================================
-#  МОДУЛЬ: HONEYPOT-ПОРТ  (v4.11.3)
-#  Слушает TCP-порт через socat/netcat, каждого подключившегося сразу банит
-#  через UFW. Эффективная ловушка для сканеров портов и DPI-зондов.
-# =============================================================================
-
-_HONEYPOT_STATE_FILE = Path("/var/lib/xray-installer/honeypot.json")
-_HONEYPOT_LOG        = Path("/var/log/xray-honeypot.log")
-_HONEYPOT_SERVICE    = Path("/etc/systemd/system/xray-honeypot.service")
-_HONEYPOT_SCRIPT     = Path("/usr/local/bin/xray-honeypot.py")
-
-
-def _honeypot_state_load() -> dict:
-    try:
-        if _HONEYPOT_STATE_FILE.exists():
-            return json.loads(_HONEYPOT_STATE_FILE.read_text())
-    except Exception:
-        pass
-    return {"enabled": False, "port": 9999, "whitelist": ["127.0.0.1", "::1"], "banned": {}}
-
-
-def _honeypot_state_save(data: dict) -> None:
-    _HONEYPOT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _HONEYPOT_STATE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    _HONEYPOT_STATE_FILE.chmod(0o600)
-
-
-def _honeypot_write_script(port: int, whitelist: list) -> None:
-    """
-    Записывает автономный Python-скрипт honeypot, который:
-    - Слушает TCP-порт (socket, без внешних зависимостей)
-    - При каждом подключении логирует IP и банит через UFW
-    - Уважает whitelist
-    - Работает как systemd-сервис (бесконечный цикл)
-    """
-    wl_repr = repr(whitelist)
-    # Формируем скрипт конкатенацией — без f-string, чтобы не конфликтовать
-    # с фигурными скобками Python внутри тела скрипта (format-строки Xray-honeypot)
-    script = (
-        "#!/usr/bin/env python3\n"
-        f"# xray-honeypot.py — автономный honeypot, порт {port}\n"
-        "# Генерируется установщиком VLESS v4.11. Не редактируйте вручную.\n"
-        "import socket, subprocess, json, time, os\n"
-        "from pathlib import Path\n"
-        "from datetime import datetime\n"
-        "\n"
-        f"PORT      = {port}\n"
-        f"WHITELIST = set({wl_repr})\n"
-        'LOG       = Path("/var/log/xray-honeypot.log")\n'
-        'STATE     = Path("/var/lib/xray-installer/honeypot.json")\n'
-        "LOG.parent.mkdir(parents=True, exist_ok=True)\n"
-        "\n"
-        "def log(msg):\n"
-        '    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")\n'
-        "    try:\n"
-        '        with LOG.open("a") as f:\n'
-        '            f.write(f"[{ts}] {msg}\\n")\n'
-        "    except Exception:\n"
-        "        pass\n"
-        "\n"
-        "def ban(ip):\n"
-        "    try:\n"
-        "        r = subprocess.run(\n"
-        '            ["ufw", "deny", "from", ip, "to", "any", "comment", "honeypot"],\n'
-        "            capture_output=True, timeout=10\n"
-        "        )\n"
-        "        ok = r.returncode == 0\n"
-        "    except Exception:\n"
-        "        ok = False\n"
-        "    log(f\"BAN {ip} — ufw={'OK' if ok else 'FAIL'}\")\n"
-        "    try:\n"
-        "        if STATE.exists():\n"
-        "            data = json.loads(STATE.read_text())\n"
-        "        else:\n"
-        "            data = {}\n"
-        '        banned = data.setdefault("banned", {})\n'
-        "        if ip not in banned:\n"
-        '            banned[ip] = {"banned_at": datetime.now().isoformat(), "source": "honeypot"}\n'
-        "        STATE.write_text(json.dumps(data, indent=2, ensure_ascii=False))\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "    return ok\n"
-        "\n"
-        "srv = socket.socket(socket.AF_INET6 if socket.has_ipv6 else socket.AF_INET, socket.SOCK_STREAM)\n"
-        "srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
-        "try:\n"
-        "    srv.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)\n"
-        "except Exception:\n"
-        "    pass\n"
-        'srv.bind(("", PORT))\n'
-        "srv.listen(64)\n"
-        "srv.settimeout(5)\n"
-        'log(f"Honeypot слушает порт {PORT}")\n'
-        "\n"
-        "while True:\n"
-        "    try:\n"
-        "        conn, addr = srv.accept()\n"
-        '        ip = addr[0].replace("::ffff:", "")  # убираем IPv4-mapped prefix\n'
-        "        conn.close()\n"
-        "        if ip in WHITELIST:\n"
-        '            log(f"SKIP {ip} (whitelist)")\n'
-        "            continue\n"
-        '        log(f"CONNECT {ip}:{addr[1]}")\n'
-        "        ban(ip)\n"
-        "    except socket.timeout:\n"
-        "        continue\n"
-        "    except Exception as e:\n"
-        '        log(f"ERROR {e}")\n'
-        "        time.sleep(1)\n"
-    )
-    _HONEYPOT_SCRIPT.write_text(script)
-    _HONEYPOT_SCRIPT.chmod(0o755)
-
-
-def _honeypot_install_service(port: int, whitelist: list) -> bool:
-    """Устанавливает и запускает systemd-сервис honeypot."""
-    _honeypot_write_script(port, whitelist)
-
-    svc = textwrap.dedent(f"""\
-        [Unit]
-        Description=VLESS Honeypot Port {port}
-        After=network.target
-
-        [Service]
-        Type=simple
-        ExecStart=/usr/bin/python3 {_HONEYPOT_SCRIPT}
-        Restart=always
-        RestartSec=5
-        User=root
-        StandardOutput=journal
-        StandardError=journal
-
-        [Install]
-        WantedBy=multi-user.target
-    """)
-    _HONEYPOT_SERVICE.write_text(svc)
-
-    _run(["systemctl", "daemon-reload"], check=False, quiet=True)
-    _run(["systemctl", "enable", "--now", "xray-honeypot"], check=False, quiet=True)
-    time.sleep(1)
-    r = _run(["systemctl", "is-active", "xray-honeypot"], capture=True, check=False)
-    return r.stdout.strip() == "active"
-
-
-def _honeypot_remove_service() -> None:
-    _run(["systemctl", "disable", "--now", "xray-honeypot"], check=False, quiet=True)
-    _HONEYPOT_SERVICE.unlink(missing_ok=True)
-    _HONEYPOT_SCRIPT.unlink(missing_ok=True)
-    _run(["systemctl", "daemon-reload"], check=False, quiet=True)
-
-
-def do_manage_honeypot() -> None:
-    """Интерактивное управление Honeypot-портом."""
-    while True:
-        os.system("clear")
-        print()
-        cfg     = _honeypot_state_load()
-        port    = cfg.get("port", 9999)
-        wl      = cfg.get("whitelist", ["127.0.0.1", "::1"])
-        banned  = cfg.get("banned", {})
-
-        # Проверяем реальный статус сервиса
-        r = _run(["systemctl", "is-active", "xray-honeypot"], capture=True, check=False)
-        active = r.stdout.strip() == "active"
-
-        _box_top("🍯  HONEYPOT-ПОРТ")
-        _box_row(f"  {DIM}Слушает TCP-порт и мгновенно банит любого подключившегося через UFW.{NC}")
-        _box_row(f"  {DIM}Идеален для ловли сканеров портов и активных DPI-зондов.{NC}")
-        _box_sep()
-        _box_row(f"  Сервис:    {''+GREEN+'● активен'+NC if active else ''+DIM+'○ остановлен'+NC}")
-        _box_row(f"  Порт:      {CYAN}{port}{NC}")
-        _box_row(f"  Забанено:  {RED if banned else DIM}{len(banned)}{NC} IP")
-        _box_sep()
-        _box_item("1", f"{'Остановить' if active else 'Запустить'} Honeypot")
-        _box_item("2", f"Изменить порт {DIM}(текущий: {port}){NC}")
-        _box_item("3", f"Управление whitelist {DIM}({len(wl)} IP){NC}")
-        _box_item("4", f"Список пойманных IP {DIM}({len(banned)} шт.){NC}")
-        _box_item("5", f"Разбанить IP")
-        _box_item("6", f"📋 Последние 30 строк лога")
-        _box_row()
-        _box_back()
-        _box_bottom()
-
-        try:
-            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
-        except KeyboardInterrupt:
-            break
-
-        if ch == "1":
-            if active:
-                _honeypot_remove_service()
-                cfg["enabled"] = False
-                _honeypot_state_save(cfg)
-                success("Honeypot остановлен")
-            else:
-                ok = _honeypot_install_service(port, wl)
-                cfg["enabled"] = ok
-                _honeypot_state_save(cfg)
-                if ok:
-                    success(f"Honeypot запущен на порту {port}")
-                    _tg_notify_event("install_complete",
-                        f"🍯 Honeypot активирован на порту <b>{port}</b>")
-                else:
-                    warn("Не удалось запустить сервис — проверьте journalctl -u xray-honeypot")
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch == "2":
-            print()
-            raw = input(f"  Новый порт [{port}]: ").strip()
-            if raw.isdigit() and 1 <= int(raw) <= 65535:
-                new_port = int(raw)
-                # Предупреждение о конфликте с Xray
-                if STATE_FILE.exists():
-                    try:
-                        st = json.loads(STATE_FILE.read_text())
-                        xray_port = st.get("server_port", 443)
-                        if new_port == xray_port:
-                            warn(f"Порт {new_port} занят Xray! Выберите другой.")
-                            input(f"{BLUE}Нажмите Enter...{NC}")
-                            continue
-                    except Exception:
-                        pass
-                cfg["port"] = new_port
-                _honeypot_state_save(cfg)
-                if active:
-                    # Перезапускаем с новым портом
-                    _honeypot_remove_service()
-                    _honeypot_install_service(new_port, wl)
-                    cfg["enabled"] = True
-                    _honeypot_state_save(cfg)
-                success(f"Порт изменён → {new_port}")
-            else:
-                warn("Некорректный порт")
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch == "3":
-            print()
-            _box_top("Whitelist Honeypot")
-            for i, ip in enumerate(wl, 1):
-                _box_item(str(i), ip)
-            _box_sep()
-            _box_item("+", "Добавить")
-            _box_item("-", "Удалить")
-            _box_bottom()
-            act = input("  Действие [+/-/Enter]: ").strip()
-            if act == "+":
-                new_ip = input("  IP: ").strip()
-                if new_ip and new_ip not in wl:
-                    wl.append(new_ip)
-                    cfg["whitelist"] = wl
-                    _honeypot_state_save(cfg)
-                    if active:
-                        _honeypot_write_script(port, wl)
-                        _run(["systemctl", "restart", "xray-honeypot"], check=False, quiet=True)
-                    success(f"Добавлен: {new_ip}")
-            elif act == "-":
-                raw_n = input("  Номер для удаления: ").strip()
-                if raw_n.isdigit() and 1 <= int(raw_n) <= len(wl):
-                    removed = wl.pop(int(raw_n) - 1)
-                    cfg["whitelist"] = wl
-                    _honeypot_state_save(cfg)
-                    if active:
-                        _honeypot_write_script(port, wl)
-                        _run(["systemctl", "restart", "xray-honeypot"], check=False, quiet=True)
-                    success(f"Удалён: {removed}")
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch == "4":
-            print()
-            _box_top(f"Пойманные IP ({len(banned)})")
-            if not banned:
-                _box_row(f"  {DIM}Список пуст{NC}")
-            else:
-                _box_row(f"  {BOLD}{'IP':<22} {'Забанен':<20} Источник{NC}")
-                _box_sep()
-                for ip, meta in list(banned.items())[-30:]:
-                    ts  = meta.get("banned_at", "?")[:16].replace("T", " ")
-                    src = meta.get("source", "honeypot")
-                    _box_row(f"  {RED}{ip:<22}{NC} {DIM}{ts:<20}{NC} {src}")
-                if len(banned) > 30:
-                    _box_row(f"  {DIM}... и ещё {len(banned)-30}{NC}")
-            _box_bottom()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch == "5":
-            if not banned:
-                warn("Список пуст")
-                input(f"{BLUE}Нажмите Enter...{NC}")
-                continue
-            print()
-            ban_list = list(banned.keys())
-            _box_top("Выберите IP для разбана")
-            for i, ip in enumerate(ban_list[-20:], 1):
-                _box_item(str(i), ip)
-            _box_bottom()
-            raw = input("  Номер или IP: ").strip()
-            target = ""
-            if raw.isdigit() and 1 <= int(raw) <= min(len(ban_list), 20):
-                target = ban_list[-(20 - int(raw) + 1)] if len(ban_list) > 20 else ban_list[int(raw) - 1]
-            elif raw in banned:
-                target = raw
-            if target:
-                _run(["ufw", "delete", "deny", "from", target, "to", "any"],
-                     check=False, quiet=True)
-                del banned[target]
-                cfg["banned"] = banned
-                _honeypot_state_save(cfg)
-                success(f"Разбанен: {target}")
-            else:
-                warn("IP не найден")
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch == "6":
-            print()
-            if _HONEYPOT_LOG.exists():
-                lines = _HONEYPOT_LOG.read_text(errors="replace").splitlines()[-30:]
-                _box_top("📋 Лог Honeypot (последние 30 строк)")
-                for line in lines:
-                    col = RED if "BAN" in line else YELLOW if "CONNECT" in line else DIM
-                    _box_row(f"  {col}{line[:100]}{NC}")
-                _box_bottom()
-            else:
-                warn("Лог пуст или не создан")
-            input(f"{BLUE}Нажмите Enter...{NC}")
-
-        elif ch in ("q", ""):
-            break
-        else:
-            warn("Неверный выбор")
-            time.sleep(1)
-
-
-# =============================================================================
-#  МОДУЛЬ: MTU TRACEPATH-ДИАГНОСТИКА  (v3.99)
-#  Расширяет do_mtu_tuning() опцией детальной диагностики маршрута:
-#  tracepath по каждому хопу + ping с разными MTU, показ узкого места.
+# ingress_geoip — перенесено в vless_installer/modules/ingress_geoip.py
+# INGRESS_* константы импортируются из модуля
 # =============================================================================
 
 def do_mtu_tracepath_diag() -> None:
