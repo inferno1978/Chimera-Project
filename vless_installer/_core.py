@@ -5536,7 +5536,7 @@ UUID:       {PARAM_UUID}
 Протокол:   {entry_proto_str}
 PublicKey:  {PARAM_PUBLIC_KEY if proto == 'reality' else 'n/a (xHTTP TLS)'}
 ShortID:    {PARAM_SHORTID if proto == 'reality' else 'n/a (xHTTP TLS)'}
-SNI:        {PARAM_DOMAIN}
+SNI:        {PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) else PARAM_DOMAIN}
 {nodes_text}
 ## ─── Клиентская ссылка (подключаться к Entry Node) ─────
 {link}
@@ -5590,7 +5590,8 @@ SNI:        {PARAM_DOMAIN}
     _box_row(f"    UUID:    {CYAN}{PARAM_UUID}{NC}")
     _box_row(f"    PubKey:  {CYAN}{PARAM_PUBLIC_KEY[:30]}...{NC}")
     _box_row(f"    ShortID: {CYAN}{PARAM_SHORTID}{NC}")
-    _box_row(f"    SNI:     {CYAN}{PARAM_DOMAIN}{NC}")
+    _sni_display = PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) else PARAM_DOMAIN
+    _box_row(f"    SNI:     {CYAN}{_sni_display}{NC}")
     for i, nd in enumerate(nodes):
         _box_row()
         lbl = f"Exit Node #{i+1}" if len(nodes) > 1 else "Exit Node"
@@ -15242,12 +15243,20 @@ def do_manage_users() -> None:
                     spiderx   = st.get("spiderx", "/")
                     xhttp_path = st.get("xhttp_path", "/")
                     server_ip = get_server_ip("4")
+                    # SNI: при Mode B + AWG — домен маскировки, иначе собственный домен
+                    _ul_install_mode = st.get("install_mode", "A")
+                    _ul_awg = st.get("awg_exit_enabled", False) and _ul_install_mode == "B"
+                    _ul_reality_dest = st.get("reality_dest", "")
+                    if proto == "reality" and _ul_awg and _ul_reality_dest:
+                        _ul_sni = _ul_reality_dest
+                    else:
+                        _ul_sni = domain
 
                     if proto == "reality":
                         link = (
                             f"vless://{u['uuid']}@{server_ip}:{port}"
                             f"?encryption=none&flow=xtls-rprx-vision"
-                            f"&security=reality&sni={domain}"
+                            f"&security=reality&sni={_ul_sni}"
                             f"&fp=chrome&pbk={pub_key}&sid={short_id}"
                             f"&spx={spiderx}&type=tcp"
                             f"#{u.get('name','user')}"
@@ -15483,6 +15492,14 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
     xhttp_mode = st.get("xhttp_mode", "streamup")
     ipv6       = st.get("ipv6", "")          # сохранённый IPv6 из state.json
     install_mode = st.get("install_mode", "A")
+    # SNI: при Mode B + AWG используем reality_dest (домен маскировки),
+    # во всех остальных случаях — собственный домен.
+    _awg_exit    = st.get("awg_exit_enabled", False) and install_mode == "B"
+    _reality_dest = st.get("reality_dest", "")
+    if proto == "reality" and _awg_exit and _reality_dest:
+        _sni = _reality_dest
+    else:
+        _sni = domain
 
     uid   = u["uuid"]
     label = u.get("name") or u.get("email") or "user"
@@ -15501,7 +15518,7 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
         flagged_label = _flag_prefix + urllib.parse.quote(label)
         flagged_domain = _flag_prefix + urllib.parse.quote(domain)
         return _gen_vless_link(
-            host, uid, pub_key, short_id, domain, "chrome",
+            host, uid, pub_key, short_id, _sni, "chrome",
             proto=proto, xhttp_path=xhttp_path, xhttp_mode=xhttp_mode,
             port=port,
         ).replace(f"#{flagged_domain}", f"#{flagged_label}")
@@ -22123,9 +22140,17 @@ def do_share_config_server() -> None:
             pub_key  = state.get("public_key", "")
             short_id = state.get("short_id", "")
             fp       = state.get("fingerprint", "chrome")
-            sni      = state.get("sni", domain)
             port     = state.get("server_port", 443)
             proto    = state.get("protocol_mode", "reality")
+            # SNI: при Mode B + AWG — домен маскировки, иначе собственный домен.
+            # Ключ "sni" не сохраняется в state.json, поэтому читаем reality_dest.
+            _sc_install_mode = state.get("install_mode", "A")
+            _sc_awg = state.get("awg_exit_enabled", False) and _sc_install_mode == "B"
+            _sc_reality_dest = state.get("reality_dest", "")
+            if proto == "reality" and _sc_awg and _sc_reality_dest:
+                sni = _sc_reality_dest
+            else:
+                sni = domain
             if proto == "reality":
                 link = (f"vless://{vuuid}@{domain}:{port}"
                         f"?encryption=none&flow=xtls-rprx-vision"
