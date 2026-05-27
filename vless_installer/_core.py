@@ -3677,10 +3677,27 @@ def generate_xray_config_chain_entry() -> None:
                 },
             },
             {"protocol": "blackhole", "tag": "BLOCK"},
+            # ИСПРАВЛЕНИЕ: freedom/direct с AWG fwmark нужен при AWG_EXIT_ENABLED,
+            # чтобы DNS-запросы Xray (к 127.0.0.1/DNSCrypt, к 1.1.1.1 и т.д.)
+            # и loopback-трафик уходили через AWG-таблицу маршрутизации,
+            # а не через дефолтный маршрут.
+            # Без этого Xray пытается слать DNS через chain-exit (VLESS TCP),
+            # получает таймауты и всё тормозит.
+            *([{
+                "protocol": "freedom",
+                "tag":      "direct",
+                "settings": {"domainStrategy": "UseIPv6v4"},
+                "streamSettings": {"sockopt": {"mark": AWG_FWMARK}},
+            }] if AWG_EXIT_ENABLED else []),
         ],
         "routing": {
             "domainStrategy": "IPIfNonMatch",
             "rules": [
+                # ИСПРАВЛЕНИЕ: при AWG loopback → direct (с AWG fwmark),
+                # иначе DNS-запросы к 127.0.0.1 (DNSCrypt) попадают в chain-exit
+                # и теряются, вызывая задержки и таймауты у клиентов.
+                *([{"type": "field", "ip": ["127.0.0.1/32", "::1/128"], "outboundTag": "direct"}]
+                  if AWG_EXIT_ENABLED else []),
                 # Блокируем торренты
                 {"type": "field", "protocol": ["bittorrent"], "outboundTag": "BLOCK"},
                 # Всё остальное — через exit node
