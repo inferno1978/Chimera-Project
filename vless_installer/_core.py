@@ -11883,10 +11883,33 @@ def awg_setup_remote_server(
     # ── Копируем серверный конфиг (scp → base64 fallback) ────────────────────
     import base64 as _b64
     _srv_tmpl = _AWG_CONF_DIR / "awg0-server-template.conf"
+
+    # FIX: файл мог быть удалён awg_rollback() при предыдущей неудачной попытке.
+    # Если шаблона нет — пересоздаём его через генератор (те же ключи уже в globals).
+    if not _srv_tmpl.exists():
+        warn("AWG: awg0-server-template.conf не найден — пересоздаём из текущих параметров...")
+        try:
+            _AWG_CONF_DIR.mkdir(parents=True, exist_ok=True)
+            os.chmod(str(_AWG_CONF_DIR), 0o700)
+            _srv_tmpl.write_text(_awg_server_conf_text())
+            os.chmod(str(_srv_tmpl), 0o600)
+            success(f"AWG: серверный конфиг пересоздан → {_srv_tmpl}")
+        except Exception as _regen_err:
+            warn(f"AWG: не удалось пересоздать серверный конфиг: {_regen_err}")
+            _awg_print_manual_guide()
+            _passwd = ""
+            return False
+
     r_scp = _scp(str(_srv_tmpl), _AWG_REMOTE_CONF_PATH)
     if r_scp.returncode != 0:
         info("AWG: scp не удался — передаём через base64/stdin...")
-        _cfg_b64 = _b64.b64encode(_srv_tmpl.read_bytes()).decode()
+        try:
+            _cfg_b64 = _b64.b64encode(_srv_tmpl.read_bytes()).decode()
+        except FileNotFoundError:
+            warn("AWG: серверный конфиг недоступен для передачи через base64")
+            _awg_print_manual_guide()
+            _passwd = ""
+            return False
         r_hd = _ssh(
             f"printf '%s' '{_cfg_b64}' | base64 -d > {_AWG_REMOTE_CONF_PATH}"
             f" && chmod 600 {_AWG_REMOTE_CONF_PATH}"
