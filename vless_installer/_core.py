@@ -11353,10 +11353,17 @@ def awg_setup_local_client() -> bool:
     # -------------------------------------------------------------------------
 
     # Сохраняем серверный конфиг рядом (для scp на exit-VPS)
+    log_to_file("DEBUG", f"AWG template: generating server conf text "
+                         f"(server_pubkey={AWG_SERVER_PUBKEY[:16] if AWG_SERVER_PUBKEY else 'EMPTY'}, "
+                         f"client_pubkey={AWG_CLIENT_PUBKEY[:16] if AWG_CLIENT_PUBKEY else 'EMPTY'}, "
+                         f"psk={'SET' if AWG_PRESHARED_KEY else 'EMPTY'})")
     server_conf = _awg_server_conf_text()
     _server_conf_save = _AWG_CONF_DIR / "awg0-server-template.conf"
+    log_to_file("DEBUG", f"AWG template: writing to {_server_conf_save} ({len(server_conf)} bytes)")
     _server_conf_save.write_text(server_conf)
     os.chmod(str(_server_conf_save), 0o600)
+    log_to_file("DEBUG", f"AWG template: written OK, exists={_server_conf_save.exists()}, "
+                         f"size={_server_conf_save.stat().st_size}")
     success(f"AWG: серверный конфиг (шаблон для exit-VPS) → {_server_conf_save}")
 
     # 5. UID пользователя xray
@@ -11886,26 +11893,45 @@ def awg_setup_remote_server(
 
     # FIX: файл мог быть удалён awg_rollback() при предыдущей неудачной попытке.
     # Если шаблона нет — пересоздаём его через генератор (те же ключи уже в globals).
+    log_to_file("DEBUG", f"AWG remote: checking template {_srv_tmpl}: "
+                         f"exists={_srv_tmpl.exists()}, "
+                         f"server_pubkey={AWG_SERVER_PUBKEY[:16] + '...' if AWG_SERVER_PUBKEY else 'EMPTY'}, "
+                         f"client_pubkey={AWG_CLIENT_PUBKEY[:16] + '...' if AWG_CLIENT_PUBKEY else 'EMPTY'}, "
+                         f"psk={'SET' if AWG_PRESHARED_KEY else 'EMPTY'}")
     if not _srv_tmpl.exists():
         warn("AWG: awg0-server-template.conf не найден — пересоздаём из текущих параметров...")
+        log_to_file("WARN", f"AWG remote: template missing, regenerating "
+                            f"(pubkeys: server={AWG_SERVER_PUBKEY[:16] + '...' if AWG_SERVER_PUBKEY else 'EMPTY'}, "
+                            f"client={AWG_CLIENT_PUBKEY[:16] + '...' if AWG_CLIENT_PUBKEY else 'EMPTY'})")
         try:
             _AWG_CONF_DIR.mkdir(parents=True, exist_ok=True)
             os.chmod(str(_AWG_CONF_DIR), 0o700)
             _srv_tmpl.write_text(_awg_server_conf_text())
             os.chmod(str(_srv_tmpl), 0o600)
+            log_to_file("DEBUG", f"AWG remote: template regenerated OK, size={_srv_tmpl.stat().st_size}")
             success(f"AWG: серверный конфиг пересоздан → {_srv_tmpl}")
         except Exception as _regen_err:
+            log_to_file("ERROR", f"AWG remote: template regen failed: {_regen_err}")
             warn(f"AWG: не удалось пересоздать серверный конфиг: {_regen_err}")
             _awg_print_manual_guide()
             _passwd = ""
             return False
+    else:
+        log_to_file("DEBUG", f"AWG remote: template OK, size={_srv_tmpl.stat().st_size}")
 
+    log_to_file("DEBUG", f"AWG remote: starting scp {_srv_tmpl} → root@{AWG_EXIT_HOST}:{_AWG_REMOTE_CONF_PATH}")
     r_scp = _scp(str(_srv_tmpl), _AWG_REMOTE_CONF_PATH)
+    log_to_file("DEBUG", f"AWG remote: scp rc={r_scp.returncode}, "
+                         f"stderr={r_scp.stderr[:300] if r_scp.stderr else ''}")
     if r_scp.returncode != 0:
         info("AWG: scp не удался — передаём через base64/stdin...")
+        log_to_file("WARN", f"AWG remote: scp failed (rc={r_scp.returncode}), falling back to base64. "
+                            f"scp stderr: {r_scp.stderr[:500] if r_scp.stderr else '(empty)'}")
         try:
             _cfg_b64 = _b64.b64encode(_srv_tmpl.read_bytes()).decode()
+            log_to_file("DEBUG", f"AWG remote: base64 payload ready ({len(_cfg_b64)} chars)")
         except FileNotFoundError:
+            log_to_file("ERROR", f"AWG remote: template vanished between exists-check and read_bytes: {_srv_tmpl}")
             warn("AWG: серверный конфиг недоступен для передачи через base64")
             _awg_print_manual_guide()
             _passwd = ""
@@ -11914,7 +11940,10 @@ def awg_setup_remote_server(
             f"printf '%s' '{_cfg_b64}' | base64 -d > {_AWG_REMOTE_CONF_PATH}"
             f" && chmod 600 {_AWG_REMOTE_CONF_PATH}"
         )
+        log_to_file("DEBUG", f"AWG remote: base64 transfer rc={r_hd.returncode}, "
+                             f"stderr={r_hd.stderr[:300] if r_hd.stderr else ''}")
         if r_hd.returncode != 0:
+            log_to_file("ERROR", f"AWG remote: base64 transfer failed: {r_hd.stderr[:500]}")
             warn("AWG: не удалось передать конфиг ни через scp, ни через base64")
             _awg_print_manual_guide()
             _passwd = ""
@@ -11922,6 +11951,7 @@ def awg_setup_remote_server(
         success("AWG: конфиг передан через base64")
     else:
         _ssh(f"chmod 600 {_AWG_REMOTE_CONF_PATH}")
+        log_to_file("DEBUG", "AWG remote: scp succeeded")
         success(f"AWG: серверный конфиг скопирован → {_AWG_REMOTE_CONF_PATH}")
 
     # ── Systemd unit на exit-VPS (передаём через base64) ─────────────────────
