@@ -542,6 +542,7 @@ CHAIN_PINNED_NODE_INDEX: int = -1
 AWG_EXIT_ENABLED:    bool = False  # True если выбран AWG как транспорт exit
 AWG_EXIT_HOST:       str  = ""     # IP зарубежного VPS с AWG-сервером
 AWG_EXIT_PORT:       int  = 51820  # UDP-порт AWG-сервера
+AWG_CLIENT_LISTEN_PORT: int = 11100  # UDP-порт на котором слушает AWG-клиент (entry-нода)
 AWG_INTERFACE:       str  = "awg0" # имя WG-интерфейса на RU-сервере
 AWG_SUBNET:          str  = "10.66.66.0/24"
 AWG_CLIENT_IP:       str  = "10.66.66.2/32"
@@ -10889,6 +10890,7 @@ def _awg_client_conf_text() -> str:
         f"[Interface]\n"
         f"PrivateKey = {AWG_CLIENT_PRIVKEY}\n"
         f"Address = {AWG_CLIENT_IP}, {AWG_CLIENT_IPv6}\n"
+        f"ListenPort = {AWG_CLIENT_LISTEN_PORT}\n"
         f"MTU = {AWG_MTU}\n"
         f"Jc = {AWG_JC}\n"
         f"Jmin = {AWG_JMIN}\n"
@@ -11370,6 +11372,30 @@ def awg_setup_local_client() -> bool:
     _run(["systemctl", "daemon-reload"], check=False, quiet=True)
     _run(["systemctl", "enable", "amneziawg-awg0.service"], check=False, quiet=True)
     success("AWG: systemd unit amneziawg-awg0.service создан и включён")
+
+    # BUGFIX: открываем входящий UDP порт AWG на entry-ноде.
+    # Некоторые провайдеры (например AEZA) ставят INPUT policy DROP по умолчанию,
+    # и без этого правила ответные пакеты от exit-ноды не проходят —
+    # туннель односторонний (sent > 0, received = 0).
+    import subprocess as _sp2
+    _lport = str(AWG_CLIENT_LISTEN_PORT)
+    _chk2 = _sp2.run(
+        ["iptables", "-C", "INPUT", "-p", "udp", "--dport", _lport, "-j", "ACCEPT"],
+        capture_output=True
+    )
+    if _chk2.returncode != 0:
+        _sp2.run(
+            ["iptables", "-A", "INPUT", "-p", "udp", "--dport", _lport, "-j", "ACCEPT"],
+            capture_output=True
+        )
+        success(f"AWG: открыт входящий UDP/{_lport} на entry-ноде")
+    # Сохраняем правило если доступен iptables-persistent
+    _sp2.run(
+        ["bash", "-c",
+         "which netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save 2>/dev/null || "
+         "mkdir -p /etc/iptables && iptables-save > /etc/iptables/rules.v4 2>/dev/null || true"],
+        capture_output=True
+    )
 
     return True
 
@@ -12718,6 +12744,7 @@ def do_full_install() -> None:
             "awg_exit_enabled":  AWG_EXIT_ENABLED,
             "awg_exit_host":     AWG_EXIT_HOST,
             "awg_exit_port":     AWG_EXIT_PORT,
+            "awg_client_listen_port": AWG_CLIENT_LISTEN_PORT,
             "awg_interface":     AWG_INTERFACE,
             "awg_subnet":        AWG_SUBNET,
             "awg_subnet_v6":     AWG_SUBNET_V6,
@@ -29084,6 +29111,7 @@ def _load_state_into_globals() -> None:
         AWG_INSTALLED    = state.get("awg_installed",     AWG_EXIT_ENABLED)
         AWG_EXIT_HOST    = state.get("awg_exit_host",     AWG_EXIT_HOST)
         AWG_EXIT_PORT    = state.get("awg_exit_port",     AWG_EXIT_PORT)
+        AWG_CLIENT_LISTEN_PORT = state.get("awg_client_listen_port", AWG_CLIENT_LISTEN_PORT)
         PARAM_REALITY_DEST = state.get("reality_dest",   PARAM_REALITY_DEST)
         # === FIX 1: загрузка multi-node полей ===
         AWG_NODES             = state.get("awg_nodes",             [])
