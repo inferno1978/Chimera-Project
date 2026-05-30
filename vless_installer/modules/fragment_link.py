@@ -3,33 +3,30 @@ vless_installer/modules/fragment_link.py
 ───────────────────────────────────────────────────────────────────────────────
 Генерация клиентских ссылок, QR-кодов и конфигов с фрагментацией.
 
-Что делает этот модуль:
-  1. Берёт параметры из state.json (domain, uuid, public_key, …)
-  2. Предлагает выбрать пресет фрагментации (или ввести свои)
-  3. Генерирует ДВА варианта ссылки:
-       A) Nekoray/Nekobox — расширенный vless:// URI с параметрами fragment
-          в query string (&fragment=packets,length,interval).
-          Импортируется одним QR или копированием — фрагментация работает сразу.
-       B) Универсальная vless:// без fragment — для v2rayNG, Hiddify и прочих.
-          Фрагментацию придётся включить вручную в настройках клиента.
-  4. Генерирует полный клиентский Xray JSON-конфиг с fragment в sockopt
-  5. Генерирует Sing-box JSON с нативным fragment (sing-box поддерживает)
-  6. Выводит мини-гайд: кому что использовать
+Поддерживаемые клиенты и форматы fragment в URI (из официальной документации):
 
-ФОРМАТ fragment в Nekoray/Nekobox URI:
-  Nekobox (sing-box core) принимает дополнительные параметры в vless:// URI:
-    &fragment=<packets>,<length>,<interval>
-  Пример:
-    vless://uuid@host:443?type=tcp&security=reality&...&fragment=1-3,3-7,10-20#label
-  Это нестандартное расширение — работает только в Nekoray / Nekobox.
-  Другие клиенты игнорируют неизвестные параметры (не ломаются, просто
-  фрагментация не применяется).
+  Клиент          Формат параметра в vless://               «Просто QR»
+  ─────────────── ──────────────────────────────────────── ─────────────
+  Happ            &fragment=length,interval,packets          ✅ да
+  Incy            &fragmentLength=L&fragmentInterval=I       ✅ да
+  Nekoray/Nekobox &fragment=packets,length,interval          ✅ да
+  NyameBox (ПК)   не поддерживается в URI                   ❌ нет
+  v2rayNG         не поддерживается в URI                   ❌ нет
+  Hiddify         не поддерживается в URI                   ❌ нет
 
-ВАЖНО: функция _gen_vless_link из _core.py НЕ модифицируется.
-  Nekoray-ссылка генерируется отдельной функцией _gen_nekoray_link()
-  только внутри этого файла, не затрагивая никакой существующий код.
+  Для клиентов без поддержки URI:
+    → Xray JSON-конфиг (xray-client-*.json) через scp + импорт из файла
+    → Sing-box JSON  (singbox-client-*.json) через scp + импорт из файла
 
-ВАЖНО: серверный /etc/xray/config.json не затрагивается ни при каких условиях.
+ИСТОЧНИКИ:
+  Happ:    https://www.happ.su/main/dev-docs/examples-of-links-and-parameters
+  Incy:    https://incy.gitbook.io/docs/docs-en/developer-documentation/config-parameters
+  Nekobox: собственный расширенный формат URI (sing-box core)
+
+ВАЖНО: функция _gen_vless_link из _core.py НЕ изменяется.
+  Каждый клиент — отдельная функция генерации только внутри этого файла.
+
+ВАЖНО: серверный /etc/xray/config.json не затрагивается.
 
 Точка входа из _core.py:
     from vless_installer.modules.fragment_link import do_fragment_link_menu
@@ -103,7 +100,6 @@ from vless_installer.modules.fragment_config import (
 
 # ── Делегирование в _core.py (без circular import, без дублирования) ──────
 def _core_call(func_name: str, *args, **kwargs):
-    """Вызов функции из _core.py через importlib — не дублируем логику."""
     _core = importlib.import_module("vless_installer._core")
     return getattr(_core, func_name)(*args, **kwargs)
 
@@ -113,7 +109,7 @@ def _show_qr(link: str, label: str, png_path: str) -> None:
 def _gen_vless_link(host, uuid_str, pbk, sid, domain, fp="chrome",
                     proto="reality", xhttp_path="/", xhttp_mode="streamup",
                     port=443) -> str:
-    """Стандартная ссылка — делегируем в _core.py без изменений."""
+    """Стандартная ссылка без fragment — делегируем в _core.py без изменений."""
     return _core_call(
         "_gen_vless_link",
         host, uuid_str, pbk, sid, domain, fp, proto, xhttp_path, xhttp_mode, port,
@@ -129,27 +125,8 @@ def _get_server_country_cached():
 _STATE_FILE = Path("/var/lib/xray-installer/state.json")
 _OUT_DIR    = Path("/root/xray-client-configs")
 
-# ── Чтение state.json ─────────────────────────────────────────────────────
-def _load_state() -> Optional[dict]:
-    if not _STATE_FILE.exists():
-        _warn("state.json не найден — сначала установите VLESS-сервер")
-        return None
-    try:
-        state = json.loads(_STATE_FILE.read_text())
-    except Exception as e:
-        _warn(f"Не удалось прочитать state.json: {e}")
-        return None
-    if not state.get("domain") or not state.get("uuid"):
-        _warn("В state.json нет domain/uuid — завершите установку сервера")
-        return None
-    return state
-
-# ── Вычисление SNI из state ───────────────────────────────────────────────
+# ── Вычисление SNI ────────────────────────────────────────────────────────
 def _resolve_sni(state: dict) -> str:
-    """
-    Определяет правильный SNI по тем же правилам что и do_generate_client_config.
-    Mode B + AWG → reality_dest; иначе → domain.
-    """
     proto        = state.get("protocol_mode", "reality")
     domain       = state.get("domain", "")
     reality_dest = state.get("reality_dest", "")
@@ -159,131 +136,101 @@ def _resolve_sni(state: dict) -> str:
         return reality_dest.split(":")[0]
     return domain
 
-# ── Генерация Nekoray/Nekobox-ссылки с fragment ───────────────────────────
-def _gen_nekoray_link(
-    host: str,
-    uuid_str: str,
-    pbk: str,
-    sid: str,
-    domain: str,
-    packets: str,
-    length: str,
-    interval: str,
-    fp: str = "chrome",
-    proto: str = "reality",
-    xhttp_path: str = "/",
-    xhttp_mode: str = "streamup",
-    port: int = 443,
-) -> str:
-    """
-    Генерирует vless:// URI с параметром &fragment=<packets>,<length>,<interval>
-    в формате Nekoray / Nekobox (sing-box core).
-
-    Формат fragment-параметра: packets,length,interval
-    Пример: 1-3,3-7,10-20
-
-    Эта функция НЕ изменяет и НЕ вызывает _gen_vless_link из _core.py —
-    полностью независимая реализация только для Nekoray/Nekobox.
-    Существующая генерация ссылок в проекте не затрагивается.
-    """
-    import urllib.parse
-
+# ── Получение флага и префикса страны ────────────────────────────────────
+def _flag_prefix() -> str:
     try:
-        _, _, _flag = _get_server_country_cached()
-        _flag_prefix = f"{_flag} " if _flag and _flag != "🌐" else ""
+        _, _, flag = _get_server_country_cached()
+        return f"{flag} " if flag and flag != "🌐" else ""
     except Exception:
-        _flag_prefix = ""
+        return ""
 
-    label = _flag_prefix + urllib.parse.quote(domain) + "%20%F0%9F%94%80frag"
-
-    frag_param = f"{packets},{length},{interval}"
-
+# ── Базовые части URI (без параметров fragment) ───────────────────────────
+def _base_uri_params(
+    host: str, uuid_str: str, pbk: str, sid: str, sni: str,
+    fp: str, proto: str, xhttp_path: str, xhttp_mode: str, port: int,
+) -> str:
+    """Возвращает vless://uuid@host:port?<базовые параметры> без fragment и без #label."""
+    import urllib.parse
     if proto == "xhttp":
         path_enc = urllib.parse.quote(xhttp_path, safe="/")
         return (
             f"vless://{uuid_str}@{host}:{port}"
-            f"?type=xhttp&security=tls&sni={domain}"
-            f"&path={path_enc}&mode={xhttp_mode}"
-            f"&fp={fp}"
-            f"&fragment={urllib.parse.quote(frag_param)}"
-            f"#{label}"
+            f"?type=xhttp&security=tls&sni={sni}"
+            f"&path={path_enc}&mode={xhttp_mode}&fp={fp}"
         )
     else:
         return (
             f"vless://{uuid_str}@{host}:{port}"
             f"?type=tcp&security=reality&pbk={pbk}"
-            f"&fp={fp}&sni={domain}&sid={sid}"
-            f"&flow=xtls-rprx-vision"
-            f"&fragment={urllib.parse.quote(frag_param)}"
-            f"#{label}"
+            f"&fp={fp}&sni={sni}&sid={sid}&flow=xtls-rprx-vision"
         )
 
-# ── Выбор пресета ─────────────────────────────────────────────────────────
-def _pick_fragment_preset() -> Optional[tuple[str, str, str]]:
+# ══════════════════════════════════════════════════════════════════════════
+# ГЕНЕРАТОРЫ ССЫЛОК — по одной функции на каждый клиент
+# ══════════════════════════════════════════════════════════════════════════
+
+def _gen_happ_link(
+    host: str, uuid_str: str, pbk: str, sid: str, sni: str,
+    packets: str, length: str, interval: str,
+    fp: str = "chrome", proto: str = "reality",
+    xhttp_path: str = "/", xhttp_mode: str = "streamup", port: int = 443,
+) -> str:
     """
-    Возвращает (packets, length, interval) или None при отмене.
-    Пустые строки означают «без фрагментации».
+    Happ (iOS/Android/Desktop, Xray-core).
+    Документация: https://www.happ.su/main/dev-docs/examples-of-links-and-parameters
+    Формат: &fragment=length,interval,packets
+    Пример: &fragment=3-7,10-20,1-3
     """
-    print()
-    _box_top("🔀  Выберите пресет фрагментации")
-    _box_row()
-    _box_item("1", f"⚡ Агрессивная    {DIM}packets=1-3  length=1-3б   interval=5-10мс{NC}")
-    _box_item("2", f"✅ Сбалансированная  {DIM}packets=1-3  length=3-7б   interval=10-20мс{NC}")
-    _box_item("3", f"🔆 Лёгкая         {DIM}packets=1-2  length=5-15б  interval=20-50мс{NC}")
-    _box_item("4", f"⚙️  Своя           {DIM}ввести параметры вручную{NC}")
-    _box_sep()
-    _box_item("0", f"Без фрагментации  {DIM}стандартная ссылка{NC}")
-    _box_row()
-    _box_back()
-    _box_bottom()
+    import urllib.parse
+    base   = _base_uri_params(host, uuid_str, pbk, sid, sni, fp, proto, xhttp_path, xhttp_mode, port)
+    frag   = urllib.parse.quote(f"{length},{interval},{packets}")
+    label  = _flag_prefix() + urllib.parse.quote(sni) + "%20%F0%9F%94%B5Happ"
+    return f"{base}&fragment={frag}#{label}"
 
-    try:
-        ch = input(f"{CYAN}Выбор:{NC} ").strip()
-    except KeyboardInterrupt:
-        return None
 
-    preset_map = {
-        "1": ("1-3", "1-3",  "5-10"),
-        "2": ("1-3", "3-7",  "10-20"),
-        "3": ("1-2", "5-15", "20-50"),
-    }
+def _gen_incy_link(
+    host: str, uuid_str: str, pbk: str, sid: str, sni: str,
+    packets: str, length: str, interval: str,
+    fp: str = "chrome", proto: str = "reality",
+    xhttp_path: str = "/", xhttp_mode: str = "streamup", port: int = 443,
+) -> str:
+    """
+    Incy (iOS/Android/Desktop/TV, Xray-core).
+    Документация: https://incy.gitbook.io/docs/docs-en/developer-documentation/config-parameters
+    Формат: &fragmentLength=length&fragmentInterval=interval
+    Пример: &fragmentLength=3-7&fragmentInterval=10-20
+    Примечание: packets в URI Incy не передаётся — клиент использует
+    дефолтный пакет tlshello автоматически при tls/reality.
+    """
+    import urllib.parse
+    base  = _base_uri_params(host, uuid_str, pbk, sid, sni, fp, proto, xhttp_path, xhttp_mode, port)
+    label = _flag_prefix() + urllib.parse.quote(sni) + "%20%F0%9F%94%B5Incy"
+    return f"{base}&fragmentLength={length}&fragmentInterval={interval}#{label}"
 
-    if ch == "0":
-        return ("", "", "")
 
-    if ch in preset_map:
-        packets, length, interval = preset_map[ch]
-        name = {"1": "aggressive", "2": "balanced", "3": "light"}[ch]
-        _info(f"Пресет: {_FRAGMENT_PRESETS[name]['desc']}")
-        return (packets, length, interval)
+def _gen_nekoray_link(
+    host: str, uuid_str: str, pbk: str, sid: str, sni: str,
+    packets: str, length: str, interval: str,
+    fp: str = "chrome", proto: str = "reality",
+    xhttp_path: str = "/", xhttp_mode: str = "streamup", port: int = 443,
+) -> str:
+    """
+    Nekoray / Nekobox (Desktop, sing-box core).
+    Формат: &fragment=packets,length,interval
+    Пример: &fragment=1-3,3-7,10-20
+    Примечание: NyameBox (qr243vbi/nekobox) — тот же формат, но
+    поддержка fragment в URI нестабильна, рекомендуется JSON-файл.
+    """
+    import urllib.parse
+    base   = _base_uri_params(host, uuid_str, pbk, sid, sni, fp, proto, xhttp_path, xhttp_mode, port)
+    frag   = urllib.parse.quote(f"{packets},{length},{interval}")
+    label  = _flag_prefix() + urllib.parse.quote(sni) + "%20%F0%9F%94%B5Neko"
+    return f"{base}&fragment={frag}#{label}"
 
-    if ch == "4":
-        print()
-        _info("Введите параметры (диапазон: N или N-M, например 3-7):")
-        print()
-        try:
-            raw_packets  = input(f"  {CYAN}packets {DIM}(сегменты, напр. 1-3){NC}:  ").strip() or "1-3"
-            raw_length   = input(f"  {CYAN}length  {DIM}(байты,    напр. 3-7){NC}:  ").strip() or "3-7"
-            raw_interval = input(f"  {CYAN}interval{DIM}(мс,       напр. 10-20){NC}: ").strip() or "10-20"
-        except KeyboardInterrupt:
-            return None
-        ok = (
-            _validate_range_str(raw_packets,  "packets")
-            and _validate_range_str(raw_length,   "length")
-            and _validate_range_str(raw_interval, "interval")
-        )
-        if not ok:
-            time.sleep(2)
-            return None
-        return (raw_packets, raw_length, raw_interval)
+# ══════════════════════════════════════════════════════════════════════════
+# ГЕНЕРАЦИЯ JSON-КОНФИГОВ
+# ══════════════════════════════════════════════════════════════════════════
 
-    if ch.lower() in ("q", ""):
-        return None
-
-    _warn("Неверный выбор.")
-    return None
-
-# ── Генерация Xray JSON-конфига ───────────────────────────────────────────
 def _build_xray_client_json(state: dict, packets: str, length: str,
                              interval: str) -> dict:
     """Полный клиентский Xray config.json с fragment в sockopt."""
@@ -361,10 +308,10 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
         },
     }
 
-# ── Генерация Sing-box JSON ───────────────────────────────────────────────
+
 def _build_singbox_json(state: dict, packets: str, length: str,
                         interval: str) -> dict:
-    """Sing-box outbound с нативным fragment (sing-box >= 1.8)."""
+    """Sing-box outbound с нативным fragment."""
     proto      = state.get("protocol_mode", "reality")
     domain     = state.get("domain", "")
     port       = int(state.get("server_port", 443))
@@ -379,11 +326,7 @@ def _build_singbox_json(state: dict, packets: str, length: str,
     dial_fields: dict = {}
     if packets and length and interval:
         dial_fields["tcp_fast_open"] = True
-        dial_fields["fragment"] = {
-            "enabled": True,
-            "size":    length,
-            "sleep":   interval,
-        }
+        dial_fields["fragment"] = {"enabled": True, "size": length, "sleep": interval}
 
     if proto == "reality":
         outbound = {
@@ -393,8 +336,7 @@ def _build_singbox_json(state: dict, packets: str, length: str,
             "tls": {
                 "enabled": True, "server_name": sni,
                 "utls": {"enabled": True, "fingerprint": fp},
-                "reality": {"enabled": True, "public_key": pub_key,
-                            "short_id": short_id},
+                "reality": {"enabled": True, "public_key": pub_key, "short_id": short_id},
             },
             **dial_fields,
         }
@@ -427,85 +369,78 @@ def _build_singbox_json(state: dict, packets: str, length: str,
         },
     }
 
-# ── Мини-гайд для пользователя ────────────────────────────────────────────
-def _print_client_guide(has_fragment: bool, domain: str,
-                        xray_path: Path, singbox_path: Path,
-                        frag_label: str) -> None:
-    """
-    Выводит понятный мини-гайд: кому что делать в зависимости от клиента.
-    Вызывается после показа ссылок и QR-кодов.
-    """
-    w = _get_box_width()
-    line = "─" * (w - 2)
+# ══════════════════════════════════════════════════════════════════════════
+# ВЫБОР ПРЕСЕТА
+# ══════════════════════════════════════════════════════════════════════════
 
+def _pick_fragment_preset() -> Optional[tuple[str, str, str]]:
+    """Возвращает (packets, length, interval) или None при отмене."""
     print()
-    print(f"  {BOLD}{CYAN}{'─'*((w-28)//2)}  КАК ИСПОЛЬЗОВАТЬ ЭТОТ КОНФИГ  {'─'*((w-28)//2)}{NC}")
-    print()
+    _box_top("🔀  Выберите пресет фрагментации")
+    _box_row()
+    _box_item("1", f"⚡ Агрессивная    {DIM}packets=1-3  length=1-3б   interval=5-10мс{NC}")
+    _box_item("2", f"✅ Сбалансированная  {DIM}packets=1-3  length=3-7б   interval=10-20мс{NC}")
+    _box_item("3", f"🔆 Лёгкая         {DIM}packets=1-2  length=5-15б  interval=20-50мс{NC}")
+    _box_item("4", f"⚙️  Своя           {DIM}ввести параметры вручную{NC}")
+    _box_sep()
+    _box_item("0", f"Без фрагментации  {DIM}стандартная ссылка + QR{NC}")
+    _box_row()
+    _box_back()
+    _box_bottom()
 
-    if has_fragment:
-        # ── Блок 1: Nekoray / Nekobox ──────────────────────────────────────
-        print(f"  {GREEN}{BOLD}┌─ Nekoray / Nekobox{NC}  {GREEN}← фрагментация работает из коробки{NC}")
-        print(f"  {GREEN}│{NC}")
-        print(f"  {GREEN}│{NC}  Отсканируйте QR «Nekoray» выше ИЛИ скопируйте ссылку")
-        print(f"  {GREEN}│{NC}  с пометкой 🔀frag и добавьте в Nekoray/Nekobox.")
-        print(f"  {GREEN}│{NC}  Фрагментация включится автоматически — ничего больше")
-        print(f"  {GREEN}│{NC}  делать не нужно.")
-        print(f"  {GREEN}└──────────────────────────────────────────────────{NC}")
+    try:
+        ch = input(f"{CYAN}Выбор:{NC} ").strip()
+    except KeyboardInterrupt:
+        return None
+
+    preset_map = {
+        "1": ("1-3", "1-3",  "5-10"),
+        "2": ("1-3", "3-7",  "10-20"),
+        "3": ("1-2", "5-15", "20-50"),
+    }
+
+    if ch == "0":
+        return ("", "", "")
+
+    if ch in preset_map:
+        packets, length, interval = preset_map[ch]
+        name = {"1": "aggressive", "2": "balanced", "3": "light"}[ch]
+        _info(f"Пресет: {_FRAGMENT_PRESETS[name]['desc']}")
+        return (packets, length, interval)
+
+    if ch == "4":
         print()
-
-        # ── Блок 2: v2rayNG ────────────────────────────────────────────────
-        print(f"  {YELLOW}{BOLD}┌─ v2rayNG (Android){NC}  {YELLOW}← нужен JSON-файл{NC}")
-        print(f"  {YELLOW}│{NC}")
-        print(f"  {YELLOW}│{NC}  1. Скачайте файл с сервера на телефон:")
-        print(f"  {YELLOW}│{NC}       {DIM}scp root@{domain}:{xray_path} ./{xray_path.name}{NC}")
-        print(f"  {YELLOW}│{NC}  2. В v2rayNG: ⊕ → «Импорт конфигурации из файла»")
-        print(f"  {YELLOW}│{NC}  3. Выберите скачанный {xray_path.name}")
-        print(f"  {YELLOW}│{NC}")
-        print(f"  {YELLOW}│{NC}  {DIM}Либо: отсканируйте обычный QR (без fragment),{NC}")
-        print(f"  {YELLOW}│{NC}  {DIM}затем в настройках подключения включите Fragment вручную.{NC}")
-        print(f"  {YELLOW}└──────────────────────────────────────────────────{NC}")
+        _info("Введите параметры (диапазон: N или N-M, например 3-7):")
         print()
+        try:
+            raw_packets  = input(f"  {CYAN}packets {DIM}(сегменты, напр. 1-3){NC}:  ").strip() or "1-3"
+            raw_length   = input(f"  {CYAN}length  {DIM}(байты,    напр. 3-7){NC}:  ").strip() or "3-7"
+            raw_interval = input(f"  {CYAN}interval{DIM}(мс,       напр. 10-20){NC}: ").strip() or "10-20"
+        except KeyboardInterrupt:
+            return None
+        ok = (
+            _validate_range_str(raw_packets,  "packets")
+            and _validate_range_str(raw_length,   "length")
+            and _validate_range_str(raw_interval, "interval")
+        )
+        if not ok:
+            time.sleep(2)
+            return None
+        return (raw_packets, raw_length, raw_interval)
 
-        # ── Блок 3: Hiddify ────────────────────────────────────────────────
-        print(f"  {MAGENTA}{BOLD}┌─ Hiddify (Android/iOS/Desktop){NC}  {MAGENTA}← нужен JSON-файл{NC}")
-        print(f"  {MAGENTA}│{NC}")
-        print(f"  {MAGENTA}│{NC}  1. Скачайте Sing-box конфиг:")
-        print(f"  {MAGENTA}│{NC}       {DIM}scp root@{domain}:{singbox_path} ./{singbox_path.name}{NC}")
-        print(f"  {MAGENTA}│{NC}  2. В Hiddify: «Добавить» → «Из файла» → выберите файл")
-        print(f"  {MAGENTA}└──────────────────────────────────────────────────{NC}")
-        print()
+    if ch.lower() in ("q", ""):
+        return None
 
-        # ── Блок 4: Xray на десктопе ───────────────────────────────────────
-        print(f"  {CYAN}{BOLD}┌─ Xray / v2ray на Linux / macOS / Windows{NC}")
-        print(f"  {CYAN}│{NC}")
-        print(f"  {CYAN}│{NC}  scp root@{domain}:{xray_path} .")
-        print(f"  {CYAN}│{NC}  xray run -config {xray_path.name}")
-        print(f"  {CYAN}│{NC}  → socks5://127.0.0.1:10808  http://127.0.0.1:10809")
-        print(f"  {CYAN}└──────────────────────────────────────────────────{NC}")
+    _warn("Неверный выбор.")
+    return None
 
-    else:
-        # Без фрагментации — простой гайд
-        print(f"  {GREEN}{BOLD}┌─ Любой клиент (v2rayNG, Nekoray, Hiddify, Xray…){NC}")
-        print(f"  {GREEN}│{NC}")
-        print(f"  {GREEN}│{NC}  Отсканируйте QR-код выше или скопируйте ссылку.")
-        print(f"  {GREEN}│{NC}  Фрагментация не применяется.")
-        print(f"  {GREEN}└──────────────────────────────────────────────────{NC}")
+# ══════════════════════════════════════════════════════════════════════════
+# ПОКАЗ ССЫЛОК И QR
+# ══════════════════════════════════════════════════════════════════════════
 
-    print()
-    print(f"  {DIM}Файлы на сервере:{NC}")
-    print(f"    {DIM}{xray_path}{NC}   — Xray JSON")
-    print(f"    {DIM}{singbox_path}{NC}   — Sing-box JSON")
-    print(f"  {DIM}Скачать всё: scp root@{domain}:{_OUT_DIR}/*{frag_label}* ./{NC}")
-    print()
-
-# ── Показ ссылок и QR-кодов ───────────────────────────────────────────────
 def _show_links_and_qr(state: dict, packets: str, length: str,
                         interval: str) -> None:
-    """
-    Выводит все ссылки и QR. Вызывается из do_fragment_link_menu.
-    Стандартная ссылка → через _gen_vless_link (_core.py, без изменений).
-    Nekoray-ссылка    → через _gen_nekoray_link (только этот файл).
-    """
+    """Выводит ссылки всех форматов и QR-коды."""
     proto      = state.get("protocol_mode", "reality")
     domain     = state.get("domain", "")
     port       = int(state.get("server_port", 443))
@@ -516,120 +451,200 @@ def _show_links_and_qr(state: dict, packets: str, length: str,
     xhttp_path = state.get("xhttp_path", "/")
     xhttp_mode = state.get("xhttp_mode", "streamup")
     sni        = _resolve_sni(state)
+    ipv4       = _get_server_ip("4")
 
     has_fragment = bool(packets and length and interval)
-    ipv4 = _get_server_ip("4")
+
+    def _show_for_host(host: str, host_label: str) -> None:
+        if has_fragment:
+            # Happ
+            happ = _gen_happ_link(
+                host, uuid_val, pub_key, short_id, sni,
+                packets, length, interval, fp, proto, xhttp_path, xhttp_mode, port,
+            )
+            print()
+            print(f"  {GREEN}🔵 Happ {DIM}({host_label}){NC}  {DIM}← QR достаточно{NC}")
+            _box_link(happ)
+            print()
+            _show_qr(happ, f"Happ {host_label}", f"/root/vless_qr_happ_{host_label.lower()}.png")
+
+            # Incy
+            incy = _gen_incy_link(
+                host, uuid_val, pub_key, short_id, sni,
+                packets, length, interval, fp, proto, xhttp_path, xhttp_mode, port,
+            )
+            print()
+            print(f"  {CYAN}🔵 Incy {DIM}({host_label}){NC}  {DIM}← QR достаточно{NC}")
+            _box_link(incy)
+            print()
+            _show_qr(incy, f"Incy {host_label}", f"/root/vless_qr_incy_{host_label.lower()}.png")
+
+            # Nekoray / Nekobox
+            neko = _gen_nekoray_link(
+                host, uuid_val, pub_key, short_id, sni,
+                packets, length, interval, fp, proto, xhttp_path, xhttp_mode, port,
+            )
+            print()
+            print(f"  {MAGENTA}🔵 Nekoray/Nekobox {DIM}({host_label}){NC}  {DIM}← QR достаточно{NC}")
+            _box_link(neko)
+            print()
+            _show_qr(neko, f"Nekoray {host_label}", f"/root/vless_qr_neko_{host_label.lower()}.png")
+
+            # Универсальная (без fragment)
+            std = _gen_vless_link(
+                host, uuid_val, pub_key, short_id, sni, fp,
+                proto, xhttp_path, xhttp_mode, port,
+            )
+            print()
+            print(f"  {YELLOW}📱 Универсальная {DIM}({host_label}) — v2rayNG, NyameBox, Hiddify{NC}")
+            print(f"     {DIM}Фрагментацию нужно включить вручную в настройках клиента.{NC}")
+            _box_link(std)
+        else:
+            std = _gen_vless_link(
+                host, uuid_val, pub_key, short_id, sni, fp,
+                proto, xhttp_path, xhttp_mode, port,
+            )
+            print()
+            print(f"  {GREEN}📡 Стандартная ссылка {DIM}({host_label}){NC}")
+            _box_link(std)
+            print()
+            _show_qr(std, f"Стандартная {host_label}", f"/root/vless_qr_{host_label.lower()}.png")
+
+    frag_label = f"fragment {length}б/{interval}мс" if has_fragment else "без фрагментации"
+    print()
+    _box_top(f"🔗  ССЫЛКИ  ({frag_label})")
+
+    if ipv4:
+        _box_sep()
+        _box_row(f"  {BOLD}IPv4: {ipv4}{NC}")
+        _box_sep()
+        _show_for_host(ipv4, "IPv4")
+
+    _box_sep()
+    _box_row(f"  {BOLD}Domain: {domain}{NC}")
+    _box_sep()
+    _show_for_host(domain, "Domain")
+
+    _box_bottom()
+
+# ══════════════════════════════════════════════════════════════════════════
+# МИНИ-ГАЙД
+# ══════════════════════════════════════════════════════════════════════════
+
+def _print_client_guide(has_fragment: bool, domain: str,
+                        xray_path: Path, singbox_path: Path,
+                        frag_suffix: str) -> None:
+    """
+    Мини-гайд: кому что делать в зависимости от клиента.
+    Основан на официальной документации каждого клиента.
+    """
+    w = _get_box_width()
+    line = "─" * min(w - 4, 54)
+
+    print()
+    print(f"  {BOLD}{CYAN}══  КАК ПОДКЛЮЧИТЬСЯ  ══{NC}")
+    print()
 
     if has_fragment:
-        frag_label = f"fragment {length}б / {interval}мс"
-        print()
-        _box_top(f"🔗  ССЫЛКИ С ФРАГМЕНТАЦИЕЙ  ({frag_label})")
 
-        # ── Nekoray/Nekobox-ссылка ─────────────────────────────────────────
+        # ── Группа 1: клиенты с поддержкой fragment в URI (просто QR) ─────
+        print(f"  {GREEN}{BOLD}✅  QR/ссылка — фрагментация включается автоматически:{NC}")
+        print(f"  {line}")
         print()
-        print(f"{GREEN}🔀 Nekoray / Nekobox (с fragment){NC}  "
-              f"{DIM}← отсканируйте QR, фрагментация включена{NC}")
-        if ipv4:
-            neko_link4 = _gen_nekoray_link(
-                ipv4, uuid_val, pub_key, short_id, sni,
-                packets, length, interval,
-                fp, proto, xhttp_path, xhttp_mode, port,
-            )
-            print(f"  {DIM}IPv4:{NC}")
-            _box_link(neko_link4)
-            print()
-            _show_qr(neko_link4, f"Nekoray IPv4 ({frag_label})",
-                     "/root/vless_qr_neko_fragment_ipv4.png")
 
-        neko_link_ds = _gen_nekoray_link(
-            domain, uuid_val, pub_key, short_id, sni,
-            packets, length, interval,
-            fp, proto, xhttp_path, xhttp_mode, port,
-        )
+        print(f"  {GREEN}•{NC} {BOLD}Happ{NC}  {DIM}(iOS / Android / macOS / Windows / Linux / TV){NC}")
+        print(f"    Отсканируйте QR «Happ» или скопируйте ссылку с меткой 🔵Happ.")
+        print(f"    {DIM}Формат fragment: length,interval,packets — официальный стандарт Happ.{NC}")
         print()
-        print(f"  {DIM}Domain:{NC}")
-        _box_link(neko_link_ds)
-        print()
-        _show_qr(neko_link_ds, f"Nekoray Domain ({frag_label})",
-                 "/root/vless_qr_neko_fragment.png")
 
-        # ── Универсальная ссылка (без fragment — для прочих клиентов) ──────
+        print(f"  {GREEN}•{NC} {BOLD}Incy{NC}  {DIM}(iOS / Android / macOS / Windows / Linux / TV){NC}")
+        print(f"    Отсканируйте QR «Incy» или скопируйте ссылку с меткой 🔵Incy.")
+        print(f"    {DIM}Формат: fragmentLength + fragmentInterval — официальный стандарт Incy.{NC}")
         print()
-        _box_sep()
-        print(f"{YELLOW}📱 Универсальная ссылка (без fragment){NC}  "
-              f"{DIM}← v2rayNG, Hiddify, прочие{NC}")
-        print(f"  {DIM}Fragment потребуется включить вручную в настройках клиента.{NC}")
-        if ipv4:
-            std_link4 = _gen_vless_link(
-                ipv4, uuid_val, pub_key, short_id, sni, fp,
-                proto, xhttp_path, xhttp_mode, port,
-            )
-            print()
-            print(f"  {DIM}IPv4:{NC}")
-            _box_link(std_link4)
-            print()
-            _show_qr(std_link4, "Универсальная IPv4",
-                     "/root/vless_qr_universal_ipv4.png")
 
-        std_link_ds = _gen_vless_link(
-            domain, uuid_val, pub_key, short_id, sni, fp,
-            proto, xhttp_path, xhttp_mode, port,
-        )
+        print(f"  {GREEN}•{NC} {BOLD}Nekoray / Nekobox{NC}  {DIM}(Desktop: Windows / Linux / macOS){NC}")
+        print(f"    Отсканируйте QR «Nekoray» или скопируйте ссылку с меткой 🔵Neko.")
+        print(f"    {DIM}Формат: fragment=packets,length,interval (sing-box URI extension).{NC}")
         print()
-        print(f"  {DIM}Domain:{NC}")
-        _box_link(std_link_ds)
-        print()
-        _show_qr(std_link_ds, "Универсальная Domain",
-                 "/root/vless_qr_universal.png")
 
-        _box_bottom()
+        # ── Группа 2: клиенты без поддержки fragment в URI ────────────────
+        print(f"  {YELLOW}{BOLD}⚠️   Нужен JSON-файл — QR только для подключения, без фрагментации:{NC}")
+        print(f"  {line}")
+        print()
+
+        print(f"  {YELLOW}•{NC} {BOLD}NyameBox (ПК){NC}  {DIM}(qr243vbi/nekobox — Desktop){NC}")
+        print(f"    Fragment в URI нестабилен в этом форке.")
+        print(f"    {DIM}→ Импортируйте Sing-box JSON:{NC}")
+        print(f"    {DIM}  scp root@{domain}:{singbox_path} ./{NC}")
+        print(f"    {DIM}  «Добавить сервер» → «Импорт из файла» → {singbox_path.name}{NC}")
+        print()
+
+        print(f"  {YELLOW}•{NC} {BOLD}v2rayNG{NC}  {DIM}(Android){NC}")
+        print(f"    Импортируйте Xray JSON-конфиг:")
+        print(f"    {DIM}  scp root@{domain}:{xray_path} ./{NC}")
+        print(f"    {DIM}  ⊕ → «Импорт конфигурации из файла» → {xray_path.name}{NC}")
+        print(f"    {DIM}  Либо: отсканируйте «Универсальную» ссылку, затем включите{NC}")
+        print(f"    {DIM}  фрагментацию вручную в настройках подключения.{NC}")
+        print()
+
+        print(f"  {YELLOW}•{NC} {BOLD}Hiddify{NC}  {DIM}(Android / iOS / Desktop){NC}")
+        print(f"    Импортируйте Sing-box JSON:")
+        print(f"    {DIM}  scp root@{domain}:{singbox_path} ./{NC}")
+        print(f"    {DIM}  «Добавить» → «Из файла» → {singbox_path.name}{NC}")
+        print()
+
+        print(f"  {CYAN}•{NC} {BOLD}Xray на Linux / macOS / Windows{NC}")
+        print(f"    {DIM}  scp root@{domain}:{xray_path} ./{NC}")
+        print(f"    {DIM}  xray run -config {xray_path.name}{NC}")
+        print(f"    {DIM}  → socks5://127.0.0.1:10808   http://127.0.0.1:10809{NC}")
+        print()
 
     else:
-        # Без фрагментации — только стандартная ссылка
+        print(f"  {GREEN}{BOLD}Любой клиент:{NC}")
+        print(f"  {line}")
+        print(f"  Отсканируйте QR-код или скопируйте ссылку выше.")
+        print(f"  Фрагментация не применяется.")
         print()
-        _box_top("🔗  СТАНДАРТНАЯ ССЫЛКА (без фрагментации)")
-        if ipv4:
-            std_link4 = _gen_vless_link(
-                ipv4, uuid_val, pub_key, short_id, sni, fp,
-                proto, xhttp_path, xhttp_mode, port,
-            )
-            print()
-            print(f"{GREEN}📡 IPv4:{NC}")
-            _box_link(std_link4)
-            print()
-            _show_qr(std_link4, "IPv4", "/root/vless_qr_ipv4.png")
 
-        std_link_ds = _gen_vless_link(
-            domain, uuid_val, pub_key, short_id, sni, fp,
-            proto, xhttp_path, xhttp_mode, port,
-        )
-        print()
-        print(f"{MAGENTA}🔄 Domain:{NC}")
-        _box_link(std_link_ds)
-        print()
-        _show_qr(std_link_ds, "Domain", "/root/vless_qr.png")
-        _box_bottom()
+    print(f"  {DIM}Файлы JSON на сервере:{NC}")
+    print(f"    {DIM}{xray_path}   — Xray{NC}")
+    print(f"    {DIM}{singbox_path}   — Sing-box{NC}")
+    print(f"  {DIM}Скачать всё: scp root@{domain}:{_OUT_DIR}/*{frag_suffix}* ./{NC}")
+    print()
 
-# ── Главное меню ──────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+# ЗАГРУЗКА STATE
+# ══════════════════════════════════════════════════════════════════════════
+
+def _load_state() -> Optional[dict]:
+    if not _STATE_FILE.exists():
+        _warn("state.json не найден — сначала установите VLESS-сервер")
+        return None
+    try:
+        state = json.loads(_STATE_FILE.read_text())
+    except Exception as e:
+        _warn(f"Не удалось прочитать state.json: {e}")
+        return None
+    if not state.get("domain") or not state.get("uuid"):
+        _warn("В state.json нет domain/uuid — завершите установку сервера")
+        return None
+    return state
+
+# ══════════════════════════════════════════════════════════════════════════
+# ГЛАВНОЕ МЕНЮ
+# ══════════════════════════════════════════════════════════════════════════
+
 def do_fragment_link_menu() -> None:
     """
     Генерация ссылок и конфигов с фрагментацией.
     Вызывается из _menu_users() в _core.py (пункт F).
-
-    Что генерируется:
-      • Nekoray/Nekobox ссылка + QR  (с fragment в URI)
-      • Универсальная ссылка + QR    (без fragment, для v2rayNG и др.)
-      • Xray client JSON             (с fragment в sockopt)
-      • Sing-box JSON                (с нативным fragment)
-      • Мини-гайд: кому что делать
     """
     os.system("clear")
     print()
     _box_top("🔀  ССЫЛКИ И КОНФИГИ С ФРАГМЕНТАЦИЕЙ")
     _box_desc(
-        "Генерирует ссылки для всех популярных клиентов. "
-        "Nekoray/Nekobox — фрагментация из QR-кода. "
-        "Остальные — через JSON-файл."
+        "Генерирует ссылки для Happ, Incy, Nekoray (QR = готово) "
+        "и JSON-конфиги для v2rayNG, NyameBox, Hiddify, Xray."
     )
     _box_row()
     _box_info("Серверный конфиг /etc/xray/config.json не затрагивается.")
@@ -647,28 +662,27 @@ def do_fragment_link_menu() -> None:
     packets, length, interval = result
     has_fragment = bool(packets and length and interval)
 
-    if has_fragment:
-        safe = lambda s: s.replace("-", "_")
-        frag_suffix = f"fragment_{safe(length)}b_{safe(interval)}ms"
-    else:
-        frag_suffix = "no_fragment"
+    safe = lambda s: s.replace("-", "_")
+    frag_suffix = f"fragment_{safe(length)}b_{safe(interval)}ms" if has_fragment else "no_fragment"
 
-    # Генерируем и сохраняем JSON-конфиги
+    # Генерируем JSON-конфиги
     print()
-    _info("Генерирую конфиги...")
-
+    _info("Генерирую JSON-конфиги...")
     _OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     xray_path    = _OUT_DIR / f"xray-client-{frag_suffix}.json"
     singbox_path = _OUT_DIR / f"singbox-client-{frag_suffix}.json"
 
-    xray_cfg    = _build_xray_client_json(state, packets, length, interval)
-    singbox_cfg = _build_singbox_json(state, packets, length, interval)
-
     try:
-        xray_path.write_text(json.dumps(xray_cfg, ensure_ascii=False, indent=2))
+        xray_path.write_text(
+            json.dumps(_build_xray_client_json(state, packets, length, interval),
+                       ensure_ascii=False, indent=2)
+        )
         xray_path.chmod(0o600)
-        singbox_path.write_text(json.dumps(singbox_cfg, ensure_ascii=False, indent=2))
+        singbox_path.write_text(
+            json.dumps(_build_singbox_json(state, packets, length, interval),
+                       ensure_ascii=False, indent=2)
+        )
         singbox_path.chmod(0o600)
         _ok(f"Xray JSON:  {xray_path}")
         _ok(f"Sing-box:   {singbox_path}")
@@ -682,7 +696,7 @@ def do_fragment_link_menu() -> None:
         f"[packets={packets} length={length} interval={interval}]"
     ))
 
-    # Показываем ссылки и QR
+    # Ссылки и QR
     _show_links_and_qr(state, packets, length, interval)
 
     # Мини-гайд
