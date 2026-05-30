@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# === v4.11.4 ===
+# === v4.11.5 ===
 """
-VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.11.4
+VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.11.5
 Python 3.12+ port
 
 Поддержка: Ubuntu 20.04/22.04/24.04, Debian 11/12/13
@@ -58,7 +58,7 @@ from datetime import datetime, timezone
 from typing import Any
 import getpass
 
-# ── Модули v4.11.4 ──────────────────────────────────────────────────────────────
+# ── Модули v4.11.5 ──────────────────────────────────────────────────────────────
 from vless_installer.modules.smoke_test      import smoke_test_xray
 from vless_installer.modules.xray_safe_apply import xray_apply_with_smoke
 from vless_installer.modules.nginx_watchdog  import (
@@ -107,6 +107,13 @@ from vless_installer.modules.ingress_geoip import (
 from vless_installer.modules.tui        import (
     tui_input, tui_confirm, tui_select, tui_progress, tui_form,
 )
+# ── Модули фрагментации v4.12 ─────────────────────────────────────────────────
+from vless_installer.modules.fragment_config     import do_fragment_config_menu
+from vless_installer.modules.fragment_fuzzer     import do_fragment_fuzzer_menu
+from vless_installer.modules.fragment_log_viewer import do_fragment_log_viewer_menu
+from vless_installer.modules.fragment_link       import do_fragment_link_menu
+from vless_installer.modules.fragment_presets    import do_fragment_presets_menu
+from vless_installer.modules.fragment_guide      import do_fragment_guide_menu
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -202,7 +209,7 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.11.4 ===")
+log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.11.5 ===")
 log_to_file("INFO", f"Время начала: {datetime.now()}")
 
 # =============================================================================
@@ -229,7 +236,7 @@ def _make_banner() -> str:
         "  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝",
     ]
     _info_lines = [
-        "VLESS REALITY + xHTTP TLS INSTALLER v4.11.4",
+        "VLESS REALITY + xHTTP TLS INSTALLER v4.11.5",
         "IPv6 DualStack | 6 Templates | SHA256 Verify",
         "Balancer: RoundRobin | LeastPing | LeastLoad",
         "Dashboard | FP Rotate | GeoCheck | Multi-User",
@@ -5755,7 +5762,7 @@ def install_dnscrypt() -> None:
     DNSCRYPT_CONF_DIR.mkdir(parents=True, exist_ok=True)
 
     DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
-        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.11.4
+        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.11.5
         ## Слушает на {DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}
 
         listen_addresses = ['{DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}']
@@ -24372,7 +24379,7 @@ def _fetch_prefixes_for_asn(asn: str) -> list:
         for attempt in range(1, 4):   # до 3 попыток на каждый URL
             try:
                 req = urllib.request.Request(url, headers={
-                    "User-Agent": "xray-installer/4.11.4",
+                    "User-Agent": "xray-installer/4.11.5",
                     "Accept":     "application/json",
                 })
                 with urllib.request.urlopen(req, timeout=30) as resp:
@@ -28116,6 +28123,7 @@ def _menu_users() -> None:
             f"  {DIM}({len(_ttl_data)} записей){NC}{_ttl_badge}"
         )
         _box_item("E", f"📤 Экспорт конфига клиента  {DIM}(файл / SFTP / QR){NC}")
+        _box_item("F", f"🔀 Ссылка + конфиг с фрагментацией  {DIM}(обход DPI){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -28153,6 +28161,8 @@ def _menu_users() -> None:
         elif ch.lower() == "e":
             do_export_client_config()
             input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch.lower() == "f":
+            do_fragment_link_menu()
         elif ch.lower() == "q" or ch == "":
             break
         else:
@@ -28908,6 +28918,12 @@ def _menu_diagnostics() -> None:
         _box_item("P", f"🔧 Патч Stats API  {DIM}(починить статистику трафика){NC}")
         _box_item("N", f"🔍 DNS Leak Test  {DIM}(проверить утечку DNS-запросов){NC}")
         _box_item("T", f"🔒 Проверка TLS-сертификата  {DIM}(цепочка, срок, SAN){NC}")
+        _box_sep()
+        _box_item("F1", f"🔀 Генератор конфига с фрагментацией  {DIM}(один пресет){NC}")
+        _box_item("F2", f"🔬 Тест связности с VPS  {DIM}(Fuzzer — ориентировочно){NC}")
+        _box_item("F3", f"📊 Визуализация фрагментации в логах")
+        _box_item("F4", f"📦 Сгенерировать ВСЕ конфиги с фрагментацией  {DIM}(рекомендуется){NC}")
+        _box_item("F5", f"📖 Гайд: как тестировать фрагментацию на своём устройстве")
         _box_row()
         _box_back()
         _box_bottom()
@@ -28975,6 +28991,16 @@ def _menu_diagnostics() -> None:
             do_node_health_matrix()
         elif ch.lower() == "b":
             do_port_block_detect()
+        elif ch.lower() in ("f1",):
+            do_fragment_config_menu()
+        elif ch.lower() in ("f2",):
+            do_fragment_fuzzer_menu()
+        elif ch.lower() in ("f3",):
+            do_fragment_log_viewer_menu()
+        elif ch.lower() in ("f4",):
+            do_fragment_presets_menu()
+        elif ch.lower() in ("f5",):
+            do_fragment_guide_menu()
         elif ch.lower() == "q" or ch == "":
             break
         else:
@@ -29476,7 +29502,7 @@ def main_menu() -> None:
             _BOX_W_saved = _BOX_W
             _BOX_W = 64
             _box_top()
-            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.11.4{NC}  {DIM}│{NC}  {mode_str}")
+            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.11.5{NC}  {DIM}│{NC}  {mode_str}")
             _box_sep()
             _box_row()
             _box_row(f"  {CYAN}1{NC}  ⚙️  {TITLE}Установка и Система{NC}")
