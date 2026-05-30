@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  VLESS Ultimate Installer v4.11.4 — Bootstrap
+#  VLESS Ultimate Installer v4.11.5 — Bootstrap
 #  bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh)
 # ============================================================
 set -euo pipefail
@@ -21,7 +21,7 @@ cat << 'BANNER'
  ╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║
   ╚████╔╝ ███████╗███████╗███████║███████║
    ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝
-   Ultimate Installer v4.11.4
+   Ultimate Installer v4.11.5
 BANNER
 echo -e "${NC}"
 
