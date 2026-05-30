@@ -297,28 +297,59 @@ def _get_local_primary_ipv4() -> str:
     return ""
 
 def _get_public_ip() -> tuple:
-    ipv4, ipv6 = "", ""
-    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
-        try:
-            with urllib.request.urlopen(url, timeout=5) as r:
-                ipv4 = r.read().decode().strip()
-            break
-        except Exception:
-            pass
-    # If the detected external IP is not assigned to any local interface (e.g. the
-    # server is an entry node behind NAT and the external request exits via a
-    # different egress node), fall back to the actual local interface IP so that
-    # generated tg:// links point to *this* machine.
-    if ipv4 and not _is_direct_ip(ipv4):
-        local_ip = _get_local_primary_ipv4()
-        if local_ip:
-            ipv4 = local_ip
+    """
+    Возвращает (ipv4, ipv6) для использования в tg:// ссылках.
+
+    Логика выбора IPv4:
+      1. Читаем IP локального интерфейса (тот, на котором слушает telemt).
+         Это единственно правильный адрес для tg:// ссылки — пользователь
+         должен подключаться к ЭТОЙ машине, а не к exit-ноде.
+      2. Если локальный IP приватный (NAT) — запрашиваем внешний.
+         Но если внешний не совпадает с локальным (Режим B — трафик уходит
+         через exit-ноду), всё равно возвращаем локальный.
+      3. IPv6 всегда через api6.ipify.org.
+    """
+    local_ip = _get_local_primary_ipv4()
+    ipv4 = ""
+
+    if local_ip and _is_public_ip(local_ip):
+        # Локальный интерфейс уже имеет публичный IP — используем его
+        ipv4 = local_ip
+    else:
+        # Сервер за NAT — запрашиваем внешний IP
+        for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+            try:
+                with urllib.request.urlopen(url, timeout=5) as r:
+                    external_ip = r.read().decode().strip()
+                if external_ip:
+                    # Если внешний IP принадлежит этой машине — используем его.
+                    # Если нет (Режим B: трафик идёт через exit-ноду) —
+                    # используем локальный: ссылка должна вести на entry-ноду.
+                    ipv4 = external_ip if _is_direct_ip(external_ip) else (local_ip or external_ip)
+                    break
+            except Exception:
+                pass
+
+    if not ipv4:
+        ipv4 = local_ip
+
+    ipv6 = ""
     try:
         with urllib.request.urlopen("https://api6.ipify.org", timeout=5) as r:
             ipv6 = r.read().decode().strip()
     except Exception:
         pass
     return ipv4, ipv6
+
+
+def _is_public_ip(ip: str) -> bool:
+    """True если IP публичный (не RFC-1918, не loopback, не link-local)."""
+    import ipaddress
+    try:
+        a = ipaddress.ip_address(ip)
+        return not (a.is_private or a.is_loopback or a.is_link_local)
+    except ValueError:
+        return False
 
 def _is_direct_ip(ipv4: str) -> bool:
     if not ipv4: return False
