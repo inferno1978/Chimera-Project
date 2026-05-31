@@ -115,6 +115,11 @@ from vless_installer.modules.fragment_log_viewer import do_fragment_log_viewer_m
 from vless_installer.modules.fragment_link       import do_fragment_link_menu
 from vless_installer.modules.fragment_presets    import do_fragment_presets_menu
 from vless_installer.modules.fragment_guide      import do_fragment_guide_menu
+from vless_installer.modules.fragment_noise      import do_fragment_noise_menu
+from vless_installer.modules.fragment_mux        import do_fragment_mux_menu
+from vless_installer.modules.fragment_watchdog   import do_fragment_watchdog_menu
+from vless_installer.modules.fragment_stats      import do_fragment_stats_menu
+from vless_installer.modules.fragment_share      import do_fragment_share_menu
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -28131,6 +28136,7 @@ def _menu_users() -> None:
         )
         _box_item("E", f"📤 Экспорт конфига клиента  {DIM}(файл / SFTP / QR){NC}")
         _box_item("F", f"🔀 Ссылка + конфиг с фрагментацией  {DIM}(обход DPI){NC}")
+        _box_item("G", f"📲 Поделиться конфигом  {DIM}(QR → скачать без scp){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -28170,6 +28176,8 @@ def _menu_users() -> None:
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch.lower() == "f":
             do_fragment_link_menu()
+        elif ch.lower() == "g":
+            do_fragment_share_menu()
         elif ch.lower() == "q" or ch == "":
             break
         else:
@@ -28934,6 +28942,10 @@ def _menu_diagnostics() -> None:
         _box_item("F3", f"📊 Визуализация фрагментации в логах")
         _box_item("F4", f"📦 Сгенерировать ВСЕ конфиги с фрагментацией  {DIM}(рекомендуется){NC}")
         _box_item("F5", f"📖 Гайд: как тестировать фрагментацию на своём устройстве")
+        _box_item("F6", f"🔊 Фрагментация + Noise  {DIM}(шум перед ClientHello){NC}")
+        _box_item("F7", f"🔀 Фрагментация + Mux  {DIM}(мультиплексирование потоков){NC}")
+        _box_item("F8", f"🔄 Watchdog  {DIM}(автопереключение пресетов при RST){NC}")
+        _box_item("F9", f"📈 Статистика эффективности фрагментации")
         _box_row()
         _box_back()
         _box_bottom()
@@ -29011,6 +29023,14 @@ def _menu_diagnostics() -> None:
             do_fragment_presets_menu()
         elif ch.lower() in ("f5",):
             do_fragment_guide_menu()
+        elif ch.lower() in ("f6",):
+            do_fragment_noise_menu()
+        elif ch.lower() in ("f7",):
+            do_fragment_mux_menu()
+        elif ch.lower() in ("f8",):
+            do_fragment_watchdog_menu()
+        elif ch.lower() in ("f9",):
+            do_fragment_stats_menu()
         elif ch.lower() == "q" or ch == "":
             break
         else:
