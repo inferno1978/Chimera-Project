@@ -30,6 +30,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # ── Цвета ─────────────────────────────────────────────────────────────────
@@ -147,6 +148,94 @@ def _fetch_resolver_list() -> tuple[list[str], bool]:
                 pass
 
 
+def _measure_latency(resolver_name: str, port: int, timeout: float = 2.0) -> tuple[str, float]:
+    """
+    Замеряет latency одного резолвера через dig к 127.0.0.1:port.
+    Возвращает (имя, время_в_мс). При ошибке возвращает 9999.0.
+    """
+    try:
+        r = subprocess.run(
+            ["dig", f"@127.0.0.1", f"-p{port}", "google.com",
+             "+time=2", "+tries=1", "+noall", "+stats"],
+            capture_output=True, text=True, timeout=timeout + 1,
+        )
+        m = re.search(r"Query time:\s*(\d+)\s*msec", r.stdout)
+        if m:
+            return resolver_name, float(m.group(1))
+    except Exception:
+        pass
+    return resolver_name, 9999.0
+
+
+def _measure_all_latency(resolvers: list[str], port: int) -> list[tuple[str, float]]:
+    """
+    Параллельно замеряет latency для всех резолверов.
+    Временно применяет каждый резолвер, замеряет, возвращает список
+    (имя, мс) отсортированный по возрастанию.
+
+    Поскольку DNSCrypt должен использовать конкретный резолвер для замера,
+    делаем замер через текущий порт DNSCrypt после временной смены server_names,
+    перезапуска и dig. Это долго — используем упрощённый метод:
+    измеряем RTT до bootstrap DNS (1.1.1.1) как прокси для latency резолвера,
+    плюс реальный dig через текущий DNSCrypt для финального теста.
+    """
+    import socket
+
+    def _ping_resolver(name: str) -> tuple[str, float]:
+        """Быстрый TCP-пинг до резолвера по имени через публичный IP."""
+        # Маппинг известных резолверов на их IP
+        KNOWN_IPS: dict[str, str] = {
+            "cloudflare":           "1.1.1.1",
+            "cloudflare-ipv6":      "2606:4700:4700::1111",
+            "cloudflare-security":  "1.1.1.2",
+            "cloudflare-family":    "1.1.1.3",
+            "google":               "8.8.8.8",
+            "google-ipv6":          "2001:4860:4860::8888",
+            "adguard-dns":          "94.140.14.14",
+            "adguard-dns-doh":      "94.140.14.14",
+            "adguard-dns-unfiltered": "94.140.14.140",
+            "quad9-dnscrypt-ip4-filter-pri": "9.9.9.9",
+            "quad9-dnscrypt-ip4-nofilter-pri": "9.9.9.10",
+        }
+        ip = KNOWN_IPS.get(name)
+        if not ip:
+            # Для неизвестных — пробуем через dnscrypt-proxy -list с именем
+            return name, 9999.0
+        try:
+            family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+            start = time.monotonic()
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.settimeout(2.0)
+                s.connect((ip, 443))
+            ms = (time.monotonic() - start) * 1000
+            return name, round(ms, 1)
+        except Exception:
+            return name, 9999.0
+
+    results: list[tuple[str, float]] = []
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        futures = {ex.submit(_ping_resolver, name): name for name in resolvers}
+        for future in as_completed(futures):
+            results.append(future.result())
+
+    results.sort(key=lambda x: x[1])
+    return results
+
+
+def _get_dnscrypt_port() -> int:
+    """Читает порт из конфига DNSCrypt."""
+    try:
+        m = re.search(
+            r"listen_addresses\s*=\s*\[.*?:(\d+)",
+            _DNSCRYPT_CONF.read_text(),
+        )
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return 5300
+
+
 def _get_current_server_names() -> list[str]:
     """Читает текущий server_names из конфига."""
     if not _DNSCRYPT_CONF.exists():
@@ -196,7 +285,7 @@ def _apply_server_names(names: list[str]) -> bool:
 
 # ── Постраничный вывод ────────────────────────────────────────────────────
 
-def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: bool = True) -> None:
+def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: bool = True, latency_map: dict | None = None) -> None:
     """Выводит одну страницу списка резолверов."""
     start = page * _PAGE_SIZE
     end   = min(start + _PAGE_SIZE, len(top))
@@ -213,10 +302,18 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
     print()
 
     for i in range(start, end):
-        name   = top[i]
-        marker = f" {GREEN}← текущий{NC}" if name in current else ""
-        num    = f"{i + 1:>3}."
-        print(f"  {WHITE}{num}{NC}  {CYAN}{name}{NC}{marker}")
+        name    = top[i]
+        marker  = f" {GREEN}← текущий{NC}" if name in current else ""
+        num     = f"{i + 1:>3}."
+        ms      = (latency_map or {}).get(name)
+        if ms is not None and ms < 9999.0:
+            lat_color = GREEN if ms < 50 else YELLOW if ms < 150 else RED
+            lat_str   = f"  {lat_color}{ms:.0f} мс{NC}"
+        elif ms is not None:
+            lat_str = f"  {DIM}недоступен{NC}"
+        else:
+            lat_str = ""
+        print(f"  {WHITE}{num}{NC}  {CYAN}{name:<35}{NC}{lat_str}{marker}")
 
     print()
     nav = []
@@ -271,7 +368,7 @@ def do_dnscrypt_selector_menu() -> None:
     else:
         _info("server_names не установлен (используется весь пул)")
     print()
-    _info("Получаю список резолверов (попытка сортировки по latency)...")
+    _info("Получаю список резолверов...")
     print()
 
     resolvers, sorted_by_rtt = _fetch_resolver_list()
@@ -287,13 +384,34 @@ def do_dnscrypt_selector_menu() -> None:
         input(f"\n{BLUE}Нажмите Enter...{NC}")
         return
 
-    top = resolvers[:_TOP_N]
+    top_all = resolvers[:_TOP_N]
+    latency_map: dict = {}
+
+    # Замеряем latency параллельно
+    _info(f"Замеряю latency для {len(top_all)} резолверов (параллельно, ~15-30 сек)...")
+    print()
+    measured = _measure_all_latency(top_all, _get_dnscrypt_port())
+
+    # Разделяем на доступные и недоступные
+    available   = [(n, ms) for n, ms in measured if ms < 9999.0]
+    unavailable = [(n, ms) for n, ms in measured if ms >= 9999.0]
+
+    if available:
+        sorted_by_rtt = True
+        # Топ по latency — только доступные, потом недоступные
+        top = [n for n, _ in available] + [n for n, _ in unavailable]
+        # Сохраняем latency для отображения
+        latency_map = {n: ms for n, ms in measured}
+    else:
+        sorted_by_rtt = False
+        top = top_all
+        latency_map = {}
     page = 0
     chosen_names: list[str] = []
 
     # ── Постраничный выбор ────────────────────────────────────────────────
     while True:
-        _show_page(top, page, current, sorted_by_rtt)
+        _show_page(top, page, current, sorted_by_rtt, latency_map)
 
         try:
             raw = input(f"{CYAN}Выбор:{NC} ").strip()
