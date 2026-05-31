@@ -83,7 +83,8 @@ from vless_installer.modules.box_renderer import (
 import vless_installer.modules.box_renderer as _br
 _BOX_W = _br._BOX_W  # алиас для совместимости с кодом в _core.py
 from vless_installer.modules.logrotate  import do_manage_logrotate
-from vless_installer.modules.dns_rules  import do_manage_dns_rules
+from vless_installer.modules.dns_rules         import do_manage_dns_rules
+from vless_installer.modules.dnscrypt_selector import do_dnscrypt_selector_menu
 from vless_installer.modules.honeypot      import do_manage_honeypot
 from vless_installer.modules.scheduler     import render_scheduler_menu
 from vless_installer.modules.warp          import do_manage_warp
@@ -5770,7 +5771,7 @@ def install_dnscrypt() -> None:
         max_clients = 250
 
         ipv4_servers = true
-        ipv6_servers = false
+        ipv6_servers = {'true' if IS_IPV6_AVAILABLE else 'false'}
         dnscrypt_servers = true
         doh_servers = true
         odoh_servers = false
@@ -5780,7 +5781,11 @@ def install_dnscrypt() -> None:
         require_nofilter = false
 
         force_tcp = false
-        timeout = 2500
+        ## Фиксируем быстрые резолверы. Для смены: Сеть → DNSCrypt → Выбор резолверов.
+        {"server_names = ['cloudflare', 'cloudflare-ipv6', 'google', 'google-ipv6']" if IS_IPV6_AVAILABLE else "server_names = ['cloudflare', 'google']"}
+        lb_strategy = 'p2'
+        lb_estimator = true
+        timeout = 1500
         keepalive = 30
 
         log_level = 1
@@ -5801,7 +5806,7 @@ def install_dnscrypt() -> None:
 
         cache = true
         cache_size = 32768
-        cache_min_ttl = 60
+        cache_min_ttl = 300
         cache_max_ttl = 86400
         cache_neg_min_ttl = 60
         cache_neg_max_ttl = 600
@@ -5940,13 +5945,15 @@ def apply_dnscrypt_tuning() -> None:
         "doh_servers":        "true",
         "force_tcp":          "false",
         "odoh_servers":       "false",
-        "timeout":            "2500",
+        "timeout":            "1500",
         "netprobe_timeout":   "5",
         "reject_ttl":         "10",
         "fallback_resolvers": "['1.1.1.1:53', '8.8.8.8:53']",
         "cache":              "true",
         "cache_size":         "32768",
-        "cache_min_ttl":      "60",
+        "cache_min_ttl":      "300",
+        "lb_strategy":        "p2",
+        "lb_estimator":       "true",
         "use_syslog":         "true",
     }
 
@@ -28383,6 +28390,7 @@ def _menu_network() -> None:
         _box_item("1", f"🔀 Раздельное туннелирование  {DIM}(РФ подсети){NC}")
         _box_item("2", "🔍 Диагностика split tunneling")
         _box_item("3", f"🔒 DNSCrypt-proxy  {DIM}(управление и оптимизация){NC}")
+        _box_item("R", f"🔍 DNSCrypt: выбор резолверов  {DIM}(замер latency → server_names){NC}")
         _box_item("4", f"☁️  Cloudflare WARP  {DIM}(управление туннелем){NC}")
         _box_item("5", f"🔄 Сменить домен / порт  {DIM}(без переустановки){NC}")
         _box_item("6", f"🌍 Стратегия исходящих  {DIM}(domainStrategy){NC}")
@@ -28465,6 +28473,8 @@ def _menu_network() -> None:
         elif ch == "0":
             check_exit_geo(silent=False)
             input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch.lower() == "r":
+            do_dnscrypt_selector_menu()
         elif ch.lower() == "d":
             do_manage_dns_rules()
         elif ch.lower() == "m":
