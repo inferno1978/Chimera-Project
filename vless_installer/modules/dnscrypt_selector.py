@@ -146,8 +146,30 @@ def _fetch_resolver_list() -> tuple[list[str], bool]:
     tmp_conf = None
     try:
         content = _DNSCRYPT_CONF.read_text()
-        # Убираем server_names из временного конфига
-        tmp_content = re.sub(r"^server_names\s*=\s*\[.*?\]\n?", "", content, flags=re.MULTILINE)
+        # Убираем server_names — поддерживаем однострочный и многострочный форматы:
+        #   server_names = ["cloudflare", "google"]
+        #   server_names = [
+        #     'cloudflare',
+        #     'google'
+        #   ]
+        tmp_content = re.sub(
+            r"^server_names\s*=\s*\[.*?\]",
+            "",
+            content,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        # Меняем порт во временном конфиге чтобы не конфликтовать
+        # с рабочим dnscrypt-proxy который уже занял основной порт
+        tmp_content = re.sub(
+            r"(listen_addresses\s*=\s*\[')[^']+(')",
+            r"\g<1>127.0.0.1:15353\g<2>",
+            tmp_content,
+        )
+        tmp_content = re.sub(
+            r'(listen_addresses\s*=\s*\[")[^"]+(")',
+            r'\g<1>127.0.0.1:15353\g<2>',
+            tmp_content,
+        )
         fd, tmp_conf = tempfile.mkstemp(suffix=".toml")
         with os.fdopen(fd, "w") as f:
             f.write(tmp_content)
