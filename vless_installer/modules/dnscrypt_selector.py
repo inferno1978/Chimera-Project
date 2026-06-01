@@ -496,46 +496,118 @@ def _apply_server_names(names: list[str]) -> bool:
 # ── Постраничный вывод ────────────────────────────────────────────────────
 
 def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: bool = True, latency_map: dict | None = None) -> None:
-    """Выводит одну страницу списка резолверов."""
-    start = page * _PAGE_SIZE
-    end   = min(start + _PAGE_SIZE, len(top))
+    """Выводит одну страницу списка резолверов в стиле box-рендерера."""
+    from vless_installer.modules.box_renderer import (
+        _box_line_top, _box_line_sep, _box_line_bot,
+        _box_row, _box_top, _box_bottom, _BOX_W, _wcslen, _plain,
+    )
+
+    start       = page * _PAGE_SIZE
+    end         = min(start + _PAGE_SIZE, len(top))
     total_pages = (len(top) + _PAGE_SIZE - 1) // _PAGE_SIZE
 
     os.system("clear")
     print()
-    _box_top(f"🔍  ВЫБОР DNSCRYPT-РЕЗОЛВЕРОВ  —  стр. {page + 1}/{total_pages}")
-    if sorted_by_rtt:
-        _box_desc(f"Топ-{len(top)} резолверов по latency с этого сервера. Выберите 2–3. Номера через запятую.")
-    else:
-        _box_desc(f"{len(top)} резолверов (алфавитный порядок — latency будет после накопления статистики). Выберите 2–3.")
-    _box_bottom()
-    print()
 
+    # ── Шапка ─────────────────────────────────────────────────────────────
+    title = f"🔍  ВЫБОР DNSCRYPT-РЕЗОЛВЕРОВ  —  стр. {page + 1}/{total_pages}"
+    _box_top(title)
+    if sorted_by_rtt:
+        sub = f"Топ-{len(top)} резолверов по latency с этого сервера. Выберите 2–3. Номера через запятую."
+    else:
+        sub = f"{len(top)} резолверов (алфавитный порядок — latency накопится после первого запуска). Выберите 2–3."
+    # Описание — обёртка с отступом, как _box_desc
+    inner = _BOX_W - 5
+    words = sub.split()
+    lines_sub: list[str] = []
+    cur = ""
+    for w in words:
+        cand = (cur + " " + w).lstrip() if cur else w
+        if len(cand) <= inner:
+            cur = cand
+        else:
+            if cur:
+                lines_sub.append(cur)
+            cur = w
+    if cur:
+        lines_sub.append(cur)
+    for i, ln in enumerate(lines_sub):
+        prefix = "     " if i == 0 else "       "
+        _box_row(f"{prefix}{DIM}{ln}{NC}")
+    _box_line_sep()
+
+    # ── Заголовок колонок таблицы ──────────────────────────────────────────
+    # Колонки: №(5) | Резолвер(динамически) | Время отклика(фиксировано)
+    COL_NUM     = 5    # "  99."
+    COL_LAT     = 16   # " 999 мс ← текущий"  (с запасом на маркер)
+    COL_NAME    = _BOX_W - COL_NUM - COL_LAT - 4  # 4 = разделители " │ "×2
+    if COL_NAME < 20:
+        COL_NAME = 20
+
+    hdr_num  = f"{DIM}{'  №':<{COL_NUM}}{NC}"
+    hdr_name = f"{DIM}{'Резолвер':<{COL_NAME}}{NC}"
+    hdr_lat  = f"{DIM}{'Время отклика':>{COL_LAT}}{NC}"
+    sep_char = f"{DIM}│{NC}"
+    _box_row(f" {hdr_num} {sep_char} {hdr_name} {sep_char} {hdr_lat}")
+
+    # Линия-разделитель под шапкой колонок (─── внутри рамки)
+    inner_sep = (
+        f" {DIM}"
+        + "─" * (COL_NUM + 1)
+        + "┼"
+        + "─" * (COL_NAME + 2)
+        + "┼"
+        + "─" * (COL_LAT + 1)
+        + f"{NC}"
+    )
+    _box_row(inner_sep)
+
+    # ── Строки резолверов ──────────────────────────────────────────────────
     for i in range(start, end):
-        name    = top[i]
-        marker  = f" {GREEN}← текущий{NC}" if name in current else ""
-        num     = f"{i + 1:>3}."
-        ms      = (latency_map or {}).get(name)
+        name = top[i]
+        ms   = (latency_map or {}).get(name)
+
+        # Номер
+        num_str = f"{i + 1:>3}."
+
+        # Время отклика + маркер «текущий»
+        is_current = name in current
         if ms is not None and ms < 9999.0:
             lat_color = GREEN if ms < 50 else YELLOW if ms < 150 else RED
-            lat_str   = f"  {lat_color}{ms:.0f} мс{NC}"
-        elif ms is not None and ms >= 9999.0:
-            lat_str = f"  {DIM}недоступен{NC}"
+            ms_part   = f"{lat_color}{ms:.0f} мс{NC}"
+        elif ms is not None:
+            ms_part = f"{DIM}недоступен{NC}"
         else:
-            lat_str = ""
-        print(f"  {WHITE}{num}{NC}  {CYAN}{name:<35}{NC}{lat_str}{marker}")
+            ms_part = f"{DIM}—{NC}"
 
-    print()
+        marker = f" {GREEN}←{NC}" if is_current else ""
+
+        # Имя резолвера — обрезаем если не влезает
+        plain_name = name
+        if len(plain_name) > COL_NAME:
+            plain_name = plain_name[:COL_NAME - 1] + "…"
+        name_col = f"{CYAN}{plain_name:<{COL_NAME}}{NC}"
+
+        # Правая колонка: выравниваем время вправо внутри COL_LAT
+        # Считаем видимую ширину ms_part + marker
+        ms_visible = _wcslen(_plain(ms_part) + _plain(marker))
+        rpad = COL_LAT - ms_visible
+        if rpad < 0:
+            rpad = 0
+        lat_col = f"{' ' * rpad}{ms_part}{marker}"
+
+        _box_row(f" {WHITE}{num_str}{NC} {sep_char} {name_col} {sep_char} {lat_col}")
+
+    # ── Навигация ──────────────────────────────────────────────────────────
+    _box_line_sep()
     nav = []
     if page > 0:
         nav.append(f"{WHITE}P{NC} — предыдущая")
     if end < len(top):
         nav.append(f"{WHITE}N{NC} — следующая")
-    nav.append(f"{WHITE}Q{NC} — отмена")
-
-    _box_top("")
-    _box_row(f"  {DIM}Навигация: {('  |  '.join(nav))}{NC}")
-    _box_row(f"  {DIM}Или введите номера через запятую (например: 1,3,7):{NC}")
+    nav.append(f"{RED}Q{NC} — отмена")
+    _box_row(f"  {DIM}Навигация:{NC}  {'  │  '.join(nav)}")
+    _box_row(f"  {DIM}Введите номера через запятую (например: 1,3,7) или имя резолвера:{NC}")
     _box_bottom()
 
 
