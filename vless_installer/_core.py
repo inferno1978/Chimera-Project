@@ -120,6 +120,8 @@ from vless_installer.modules.fragment_mux        import do_fragment_mux_menu
 from vless_installer.modules.fragment_watchdog   import do_fragment_watchdog_menu
 from vless_installer.modules.fragment_stats      import do_fragment_stats_menu
 from vless_installer.modules.fragment_share      import do_fragment_share_menu
+# ── Hysteria2 transport (аддитивно, v4.11.5+) ────────────────────────────────
+from vless_installer.modules.hysteria2_menu      import do_hysteria2_menu
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -28487,6 +28489,8 @@ def _menu_network() -> None:
         _box_item("D", f"🌐 Кастомные DNS правила  {DIM}(hosts / routing override){NC}")
         _box_item("M", f"📏 MTU/MSS автотюнинг  {DIM}(оптимизация для exit-нод){NC}")
         _box_item("X", f"⚡ XTLS-flow режим  {DIM}(Vision / Splice / none — только REALITY){NC}")
+        _box_sep()
+        _box_item("H", f"🚀 Hysteria2 транспорт  {DIM}(Режим B, Exit-нода, Балансировщик, DPI){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -28571,6 +28575,8 @@ def _menu_network() -> None:
                 time.sleep(2)
             else:
                 do_manage_xtls_flow()
+        elif ch.lower() == "h":
+            do_hysteria2_menu()
         elif ch.lower() == "q" or ch == "":
             break
         else:
@@ -29634,13 +29640,17 @@ def main_menu() -> None:
             _box_row()
             _box_row(f"  {CYAN}6{NC}  📡 {TITLE}Telemt MTProxy{NC}")
             _box_row(f"     {DIM}Telegram MTProto-прокси (Rust/Tokio){NC}")
+            _box_sep()
+            _box_row()
+            _box_row(f"  {CYAN}7{NC}  🚀 {TITLE}Hysteria2 транспорт{NC}")
+            _box_row(f"     {DIM}Exit-нода, Балансировщик, Health, DPI, Cert{NC}")
             _box_row()
             _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–6 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–7 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -29674,6 +29684,9 @@ def main_menu() -> None:
             except ImportError as _e:
                 warn(f"Модуль MTProxy не найден: {_e}")
                 time.sleep(2)
+
+        elif choice == "7":
+            do_hysteria2_menu()
 
         elif choice == "0":
             print(f"{GREEN}До свидания! 👋{NC}")
