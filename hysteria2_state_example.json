@@ -1,0 +1,86 @@
+{
+  "_comment": "Пример state.json с секцией hysteria2. Реальный файл — /var/lib/xray-installer/state.json",
+  "install_mode": "B",
+  "protocol_mode": "reality",
+  "awg_exit_enabled": false,
+  "hysteria2": {
+    "enabled": true,
+    "transport_only": false,
+    "active_transport": "hysteria2",
+    "_active_node_ip": "203.0.113.10",
+    "_wd_fail_count": 0,
+    "exit_nodes": [
+      {
+        "ip": "203.0.113.10",
+        "ports": [443],
+        "auth": "your-strong-password-here",
+        "weight": 1.0,
+        "status": "active",
+        "ipstack": "dual",
+        "version": "2.6.0",
+        "ssh_port": 22,
+        "metrics": {
+          "rtt_ms": 42.5,
+          "rtt_min": 38.1,
+          "rtt_max": 51.2,
+          "loss_pct": 0.0,
+          "speed_mbps": 145.3,
+          "checked_at": "2025-09-01T12:00:00"
+        }
+      },
+      {
+        "ip": "2001:db8::1",
+        "ports": [443, 8443],
+        "auth": "your-strong-password-here",
+        "weight": 0.8,
+        "status": "active",
+        "ipstack": "ipv6",
+        "version": "2.6.0",
+        "ssh_port": 22,
+        "metrics": {
+          "rtt_ms": 35.0,
+          "rtt_min": 31.0,
+          "rtt_max": 44.0,
+          "loss_pct": 2.0,
+          "speed_mbps": 200.0,
+          "checked_at": "2025-09-01T12:00:00"
+        }
+      }
+    ],
+    "cert": {
+      "crt": "/etc/xray/hysteria.crt",
+      "key": "/etc/xray/hysteria.key",
+      "domain": "vpn.example.com",
+      "auto_renew": true,
+      "expire_date": "01.09.2026",
+      "ipv6_support": true
+    },
+    "health_check": {
+      "interval_sec": 60,
+      "timeout_sec": 5,
+      "method": "quic_ping",
+      "fail_threshold": 3
+    },
+    "firewall": {
+      "udp_ports": [443],
+      "ip6tables_rules": true,
+      "fallback_ports": [8443, 2083, 2087, 2096, 4433],
+      "auto_configure": true
+    },
+    "balancer": {
+      "strategy": "weightedRandom",
+      "switch_threshold": 0.5,
+      "current_weights": {
+        "203.0.113.10": 1.0,
+        "2001:db8::1": 0.8
+      },
+      "ipv4_weight": 1.0,
+      "ipv6_weight": 1.0,
+      "_rr_index": 0
+    },
+    "auto_update": {
+      "enabled": true,
+      "check_interval_hours": 24
+    }
+  }
+}
