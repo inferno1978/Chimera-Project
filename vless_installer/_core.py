@@ -23164,60 +23164,65 @@ def _traffic_snapshot_save() -> None:
 
 def _install_traffic_snapshot_cron() -> None:
     sh = Path("/usr/local/bin/xray-traffic-snapshot.sh")
-    sh.write_text(textwrap.dedent(f"""\
-        #!/bin/bash
-        python3 -c "
-import json, re, subprocess, sys, time
-from pathlib import Path
-from datetime import datetime
-XRAY_BIN = Path('/usr/local/bin/xray')
-XRAY_STATS_API_PORT = 10085
-USERS_FILE = Path('/etc/xray/users.json')
-TRAFFIC_HISTORY_FILE = Path('/var/lib/xray-installer/traffic_history.json')
-
-def _run(args):
-    return subprocess.run(args, capture_output=True, text=True)
-
-def _users_load():
-    try: return json.loads(USERS_FILE.read_text()) if USERS_FILE.exists() else []
-    except: return []
-
-def qbytes(email):
-    total = 0
-    for d in ('uplink','downlink'):
-        r = _run([str(XRAY_BIN),'api','statsquery',
-            f'--server=127.0.0.1:{{XRAY_STATS_API_PORT}}',
-            f'--pattern=user>>>{{email}}>>>{{d}}'])
-        for line in r.stdout.splitlines():
-            m = re.search(r'\"value\"\\s*:\\s*\"?(\\d+)\"?', line)
-            if m: total += int(m.group(1))
-    return total
-
-users = _users_load()
-if not users: sys.exit(0)
-now_date = datetime.now().strftime('%Y-%m-%d')
-try:
-    history = json.loads(TRAFFIC_HISTORY_FILE.read_text()) if TRAFFIC_HISTORY_FILE.exists() else {{}}
-except: history = {{}}
-day_data = history.setdefault(now_date, {{}})
-for u in users:
-    email = u.get('email','')
-    if not email: continue
-    used = qbytes(email)
-    key = f'{{email}}_max'
-    day_data[key] = max(day_data.get(key, 0), used)
-cutoff = time.time() - 90 * 86400
-history = {{d: v for d, v in history.items()
-    if datetime.strptime(d,'%Y-%m-%d').timestamp() >= cutoff}}
-TRAFFIC_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-TRAFFIC_HISTORY_FILE.write_text(json.dumps(history, indent=2))
-" 2>>/var/log/xray-traffic-snapshot.log
-    """))
+    # Используем heredoc вместо python3 -c "..." чтобы избежать проблем
+    # с экранированием кавычек и невалидным shebang на Debian 13 / dash.
+    script_lines = [
+        "#!/bin/bash",
+        "python3 - <<'PYEOF'",
+        "import json, re, subprocess, sys, time",
+        "from pathlib import Path",
+        "from datetime import datetime",
+        "XRAY_BIN = Path('/usr/local/bin/xray')",
+        "XRAY_STATS_API_PORT = 10085",
+        "USERS_FILE = Path('/etc/xray/users.json')",
+        "TRAFFIC_HISTORY_FILE = Path('/var/lib/xray-installer/traffic_history.json')",
+        "",
+        "def _run(args):",
+        "    return subprocess.run(args, capture_output=True, text=True)",
+        "",
+        "def _users_load():",
+        "    try: return json.loads(USERS_FILE.read_text()) if USERS_FILE.exists() else []",
+        "    except: return []",
+        "",
+        "def qbytes(email):",
+        "    total = 0",
+        "    for d in ('uplink', 'downlink'):",
+        "        r = _run([str(XRAY_BIN), 'api', 'statsquery',",
+        "            f'--server=127.0.0.1:{XRAY_STATS_API_PORT}',",
+        "            f'--pattern=user>>>{email}>>>{d}'])",
+        "        for line in r.stdout.splitlines():",
+        '            m = re.search(r\'"value"\\s*:\\s*"?(\\d+)"?\', line)',
+        "            if m: total += int(m.group(1))",
+        "    return total",
+        "",
+        "users = _users_load()",
+        "if not users: sys.exit(0)",
+        "now_date = datetime.now().strftime('%Y-%m-%d')",
+        "try:",
+        "    history = json.loads(TRAFFIC_HISTORY_FILE.read_text()) if TRAFFIC_HISTORY_FILE.exists() else {}",
+        "except: history = {}",
+        "day_data = history.setdefault(now_date, {})",
+        "for u in users:",
+        "    email = u.get('email', '')",
+        "    if not email: continue",
+        "    used = qbytes(email)",
+        "    key = f'{email}_max'",
+        "    day_data[key] = max(day_data.get(key, 0), used)",
+        "cutoff = time.time() - 90 * 86400",
+        "history = {d: v for d, v in history.items()",
+        "    if datetime.strptime(d, '%Y-%m-%d').timestamp() >= cutoff}",
+        "TRAFFIC_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)",
+        "TRAFFIC_HISTORY_FILE.write_text(json.dumps(history, indent=2))",
+        "PYEOF",
+    ]
+    sh.write_text("\n".join(script_lines) + "\n")
     sh.chmod(0o750)
     cron_p = Path("/etc/cron.d/xray-traffic-snapshot")
     cron_p.write_text(f"*/15 * * * * root {sh} >> /var/log/xray-traffic-snapshot.log 2>&1\n")
     cron_p.chmod(0o644)
     success("Cron снимков трафика установлен (каждые 15 мин)")
+
+
 
 
 def do_traffic_history() -> None:
@@ -25718,6 +25723,33 @@ def _autoban_get_chain_ips() -> list[str]:
     return ips
 
 
+def _fw_ban(ip: str) -> bool:
+    """Банит IP через ufw если доступен, иначе через iptables. Возвращает True при успехе."""
+    import shutil as _shutil
+    if _shutil.which("ufw"):
+        r = _run(["ufw", "deny", "from", ip, "to", "any", "comment", "xray-autoban"],
+                 check=False, quiet=True)
+        return r.returncode == 0
+    # Fallback: iptables (Debian 13 / nftables системы без ufw)
+    r = _run(["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP",
+              "-m", "comment", "--comment", "xray-autoban"],
+             check=False, quiet=True)
+    return r.returncode == 0
+
+
+def _fw_unban(ip: str) -> bool:
+    """Разбанивает IP через ufw или iptables."""
+    import shutil as _shutil
+    if _shutil.which("ufw"):
+        r = _run(["ufw", "delete", "deny", "from", ip, "to", "any"],
+                 check=False, quiet=True)
+        return r.returncode == 0
+    r = _run(["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP",
+              "-m", "comment", "--comment", "xray-autoban"],
+             check=False, quiet=True)
+    return r.returncode == 0
+
+
 def _autoban_run_once() -> int:
     """
     Сканирует error.log за последние N минут, считает TLS-ошибки по IP.
@@ -25781,10 +25813,7 @@ def _autoban_run_once() -> int:
     for ip, count in ip_errors.items():
         if count >= threshold and ip not in banned:
             # Баним через UFW
-            r = _run(["ufw", "deny", "from", ip, "to", "any",
-                      "comment", "xray-autoban"],
-                     check=False, quiet=True)
-            if r.returncode == 0:
+            if _fw_ban(ip):
                 _ban_ts = datetime.now().isoformat()
                 banned[ip] = {
                     "count":     count,
@@ -25825,12 +25854,10 @@ def _autoban_run_once() -> int:
 
 def _autoban_install_cron(threshold: int, window: int) -> None:
     """Устанавливает cron каждые 5 минут."""
-    installer = Path(sys.argv[0]).resolve()
     sh = _XRAY_BAN_SCRIPT
-    sh.write_text(textwrap.dedent(f"""\
-        #!/bin/bash
-        python3 -c "
-import json, re, subprocess, sys, time
+    # Используем heredoc + iptables-fallback для совместимости с Debian 13
+    # (нет ufw по умолчанию, textwrap.dedent ломает shebang)
+    py_body = f"""import json, re, subprocess, sys, time, shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -25848,6 +25875,14 @@ def tg(msg):
                 '-d',f'chat_id={{ch}}','-d',f'text={{msg}}'],capture_output=True)
     except: pass
 
+def fw_ban(ip):
+    if shutil.which('ufw'):
+        return subprocess.run(['ufw','deny','from',ip,'to','any','comment','xray-autoban'],
+            capture_output=True).returncode == 0
+    return subprocess.run(['iptables','-I','INPUT','-s',ip,'-j','DROP',
+        '-m','comment','--comment','xray-autoban'],
+        capture_output=True).returncode == 0
+
 cfg = {{}}
 try:
     if BAN_STATE.exists(): cfg = json.loads(BAN_STATE.read_text())
@@ -25855,7 +25890,6 @@ except: pass
 threshold = cfg.get('threshold', {threshold})
 window    = cfg.get('window_min', {window})
 whitelist = set(cfg.get('whitelist', ['127.0.0.1','::1']))
-# Автоматически добавляем IP нод каскада в whitelist — они не нарушители
 try:
     import socket as _sock
     _state_f = Path('/var/lib/xray-installer/state.json')
@@ -25872,14 +25906,13 @@ try:
                 except: pass
         _lh = _st.get('chain_exit_host','')
         if _lh:
-            import re as _re
             if _re.match(r'^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$', _lh):
                 whitelist.add(_lh)
             else:
                 try: whitelist.add(_sock.gethostbyname(_lh))
                 except: pass
 except: pass
-banned    = cfg.get('banned', {{}})
+banned = cfg.get('banned', {{}})
 
 error_log = Path('/var/log/xray/error.log')
 if not error_log.exists(): sys.exit(0)
@@ -25902,9 +25935,7 @@ for line in error_log.read_text(errors='replace').splitlines()[-5000:]:
 
 for ip, cnt in ip_errors.items():
     if cnt >= threshold and ip not in banned:
-        r = subprocess.run(['ufw','deny','from',ip,'to','any','comment','xray-autoban'],
-            capture_output=True)
-        if r.returncode == 0:
+        if fw_ban(ip):
             banned[ip] = {{'count':cnt,'banned_at':datetime.now().isoformat()}}
             BAN_LOG.parent.mkdir(parents=True,exist_ok=True)
             with open(BAN_LOG,'a') as f:
@@ -25914,14 +25945,17 @@ for ip, cnt in ip_errors.items():
 cfg['banned'] = banned
 BAN_STATE.parent.mkdir(parents=True,exist_ok=True)
 BAN_STATE.write_text(json.dumps(cfg,indent=2))
-" 2>>/var/log/xray-autoban.log
-    """))
+"""
+    lines = ["#!/bin/bash", "python3 - <<'PYEOF'"] + py_body.splitlines() + ["PYEOF"]
+    sh.write_text("\n".join(lines) + "\n")
     sh.chmod(0o750)
     _XRAY_BAN_CRON.write_text(
         f"*/5 * * * * root {sh} >> /var/log/xray-autoban.log 2>&1\n"
     )
     _XRAY_BAN_CRON.chmod(0o644)
     success(f"AutoBan cron установлен (каждые 5 мин, порог: {threshold} ошибок за {window} мин)")
+
+
 
 
 def do_manage_autoban() -> None:
@@ -26070,8 +26104,7 @@ def do_manage_autoban() -> None:
                 _unban_ts = datetime.now().isoformat()
                 ok_count  = 0
                 for target in targets:
-                    _run(["ufw", "delete", "deny", "from", target, "to", "any"],
-                         check=False, quiet=True)
+                    _fw_unban(target)
                     banned.pop(target, None)
                     for _hrec in reversed(cfg.get("ban_history", [])):
                         if _hrec.get("ip") == target and _hrec.get("unbanned_at") is None:
