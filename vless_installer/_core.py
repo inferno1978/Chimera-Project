@@ -27694,6 +27694,27 @@ def do_emergency_repair() -> None:
     except Exception as e:
         _box_warn(f"AS-direct: {e}")
 
+    # ── Восстановление Telemt tproxy-интеграции ───────────────────────────────
+    # После пересборки config.json dokodemo-door inbound теряется — нужно
+    # переинжектировать до запуска Xray. Детект — по факту (бинарник/сервис),
+    # без флагов в state.json (их для tproxy нет).
+    try:
+        from vless_installer.modules.mtproto import telemt_tproxy_emergency_restore
+        import io as _io_tp, contextlib as _cl_tp
+        _tp_sink = _io_tp.StringIO()
+        with _cl_tp.redirect_stdout(_tp_sink):
+            _tp_result, _tp_msg = telemt_tproxy_emergency_restore()
+        if _tp_result is None:
+            _box_row(f"  {DIM}Telemt tproxy: {_tp_msg} — пропуск{NC}")
+        elif _tp_result:
+            _box_ok(f"Telemt tproxy: {_tp_msg}")
+        else:
+            _box_warn(f"Telemt tproxy: {_tp_msg}")
+    except ImportError:
+        _box_row(f"  {DIM}Модуль mtproto не найден — Telemt tproxy пропуск{NC}")
+    except Exception as _tp_e:
+        _box_warn(f"Telemt tproxy: {_tp_e}")
+
     # DNSCrypt
     # ИСПРАВЛЕНИЕ: раньше проверялся только флаг PARAM_USE_DNSCRYPT из state.json.
     # Но DNSCrypt мог быть запущен (и использоваться Xray как DNS upstream) даже
