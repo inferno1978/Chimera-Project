@@ -26004,29 +26004,85 @@ def do_manage_autoban() -> None:
             ban_list = list(banned.keys())
             _box_top("Забаненные IP — выберите для разбана")
             for i, ip in enumerate(ban_list, 1):
-                _box_item(f"{i}", f"{ip}")
+                meta  = banned[ip]
+                ts    = meta.get("banned_at", "?")[:16].replace("T", " ")
+                cnt   = meta.get("count", "?")
+                _box_row(f"  {CYAN}{i:>3}{NC}  {ip:<18} {YELLOW}{cnt}{NC} ошибок  {DIM}{ts}{NC}")
+            _box_row()
+            _box_row(f"  {DIM}Примеры ввода:{NC}")
+            _box_row(f"  {DIM}  3        — разбанить один IP по номеру{NC}")
+            _box_row(f"  {DIM}  1,3,5    — разбанить несколько через запятую{NC}")
+            _box_row(f"  {DIM}  2-6      — разбанить диапазон номеров{NC}")
+            _box_row(f"  {DIM}  all      — разбанить всех{NC}")
+            _box_row(f"  {DIM}  1.2.3.4  — разбанить по IP напрямую{NC}")
             _box_bottom()
-            raw = input("  Номер или IP для разбана: ").strip()
-            target = ""
-            if raw.isdigit() and 1 <= int(raw) <= len(ban_list):
-                target = ban_list[int(raw)-1]
+            raw = input(f"  {CYAN}Ввод:{NC} ").strip().lower()
+
+            # ── Разбираем ввод → список целевых IP ────────────────────────────
+            targets: list[str] = []
+
+            if raw in ("all", "все", "*"):
+                targets = list(ban_list)
+
+            elif "-" in raw and not raw.startswith("-") and not raw.replace(".", "").replace("-", "").isdigit() is False:
+                # Диапазон номеров: "2-6"
+                parts = raw.split("-", 1)
+                if parts[0].isdigit() and parts[1].isdigit():
+                    lo, hi = int(parts[0]), int(parts[1])
+                    lo, hi = min(lo, hi), max(lo, hi)
+                    targets = [ban_list[i-1] for i in range(lo, hi+1)
+                               if 1 <= i <= len(ban_list)]
+                else:
+                    warn("Неверный диапазон. Формат: 2-6")
+
+            elif "," in raw:
+                # Перечисление: "1,3,5" или "1.2.3.4,5.6.7.8"
+                for token in raw.split(","):
+                    token = token.strip()
+                    if token.isdigit():
+                        idx = int(token)
+                        if 1 <= idx <= len(ban_list):
+                            targets.append(ban_list[idx-1])
+                        else:
+                            warn(f"Номер {idx} вне диапазона — пропущен")
+                    elif token in banned:
+                        targets.append(token)
+                    else:
+                        warn(f"'{token}' не найден — пропущен")
+
+            elif raw.isdigit():
+                idx = int(raw)
+                if 1 <= idx <= len(ban_list):
+                    targets = [ban_list[idx-1]]
+                else:
+                    warn(f"Номер {idx} вне диапазона")
+
             elif raw in banned:
-                target = raw
-            if target:
-                _run(["ufw", "delete", "deny", "from", target, "to", "any"],
-                     check=False, quiet=True)
-                del banned[target]
-                cfg["banned"] = banned
-                # Проставляем unbanned_at в истории для последней записи с этим IP
-                _unban_ts = datetime.now().isoformat()
-                for _hrec in reversed(cfg.get("ban_history", [])):
-                    if _hrec.get("ip") == target and _hrec.get("unbanned_at") is None:
-                        _hrec["unbanned_at"] = _unban_ts
-                        break
-                _autoban_save(cfg)
-                success(f"IP {target} разбанен")
+                targets = [raw]
+
             else:
-                warn("IP не найден")
+                warn("Не удалось распознать ввод")
+
+            # ── Выполняем разбан ──────────────────────────────────────────────
+            if targets:
+                _unban_ts = datetime.now().isoformat()
+                ok_count  = 0
+                for target in targets:
+                    _run(["ufw", "delete", "deny", "from", target, "to", "any"],
+                         check=False, quiet=True)
+                    banned.pop(target, None)
+                    for _hrec in reversed(cfg.get("ban_history", [])):
+                        if _hrec.get("ip") == target and _hrec.get("unbanned_at") is None:
+                            _hrec["unbanned_at"] = _unban_ts
+                            break
+                    ok_count += 1
+                cfg["banned"] = banned
+                _autoban_save(cfg)
+                if ok_count == 1:
+                    success(f"IP {targets[0]} разбанен")
+                else:
+                    success(f"Разбанено IP: {ok_count}")
+
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "4":
