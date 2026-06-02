@@ -831,6 +831,57 @@ def xray_disable_tproxy_for_telemt() -> tuple:
     return True, "tproxy-интеграция отключена: dokodemo удалён, iptables очищен"
 
 
+def telemt_tproxy_emergency_restore() -> tuple:
+    """
+    Восстанавливает tproxy-интеграцию Telemt→Xray после аварийного восстановления.
+
+    Вызывается из do_emergency_repair() в _core.py.
+    Детектирует факт установки Telemt по бинарнику / systemd-сервису — без опоры
+    на флаги в state.json (которых для tproxy нет).
+
+    Логика:
+      1. Если Telemt не установлен — возвращает (None, "не установлен"), вызывающий
+         код выводит "пропуск". None сигнализирует: не ошибка, просто не применимо.
+      2. Если Xray не в каскадном режиме (Режим B / AWG) — возвращает (None, причина).
+         xray_enable_tproxy_for_telemt сама это проверит, но ранняя проверка позволяет
+         вернуть корректный статус без лишних операций.
+      3. Если dokodemo уже есть в config.json и все iptables-правила на месте —
+         возвращает (True, "уже активна"). Функция идемпотентна.
+      4. Иначе — вызывает xray_enable_tproxy_for_telemt() и возвращает её результат.
+
+    Возвращает:
+      (True,  сообщение) — интеграция восстановлена или уже была активна
+      (False, сообщение) — ошибка при восстановлении
+      (None,  сообщение) — Telemt не установлен или неприменимо (не ошибка)
+    """
+    # ── Детект установки Telemt ───────────────────────────────────────────────
+    telemt_installed = BIN_PATH.exists() or SERVICE_FILE.exists()
+    if not telemt_installed:
+        # Дополнительная проверка через systemctl (на случай нестандартного пути)
+        r_svc = _run(["systemctl", "is-active", SERVICE_NAME], capture=True, check=False)
+        telemt_installed = r_svc.stdout.strip() in ("active", "inactive", "failed")
+
+    if not telemt_installed:
+        return None, "Telemt не установлен"
+
+    # ── Проверка каскадного режима ────────────────────────────────────────────
+    cascade = _xray_cascade_mode()
+    if cascade == "none":
+        return None, "xray-каскад (Режим B) не активен — tproxy неприменим"
+
+    # ── Статус текущей интеграции ─────────────────────────────────────────────
+    status = _xray_tproxy_status()
+    if status["enabled"] and status["ipt_ok"]:
+        return True, (
+            f"tproxy-интеграция уже активна "
+            f"(dokodemo :{status['port']}, "
+            f"iptables {status['ipt_count']}/{status['ipt_total']} подсетей)"
+        )
+
+    # ── Применяем / восстанавливаем ───────────────────────────────────────────
+    return xray_enable_tproxy_for_telemt(XRAY_TPROXY_PORT)
+
+
 def _xray_tproxy_status() -> dict:
     """
     Возвращает dict со статусом tproxy-интеграции:
