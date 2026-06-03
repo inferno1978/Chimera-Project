@@ -202,11 +202,77 @@ def _box_line_bot() -> None:
 
 
 def _box_row(text: str = "") -> None:
-    """Одна строка внутри рамки: ║ text ... ║"""
-    pad = _BOX_W - _wcslen(text)
-    if pad < 0:
-        pad = 0
-    print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
+    """Одна строка внутри рамки: ║ text ... ║
+
+    Если видимая ширина текста превышает _BOX_W — автоматически переносит
+    по словам с сохранением ведущего отступа. Правая граница ║ всегда ровная.
+    Это единственное место где надо что-то поменять — все существующие и
+    будущие вызовы _box_row() получают перенос бесплатно.
+    """
+    if not text:
+        print(f"{CYAN}║{NC}{' ' * _BOX_W}{CYAN}║{NC}")
+        return
+
+    vis_w = _wcslen(text)
+    if vis_w <= _BOX_W:
+        # Обычный случай — влезает, выводим как есть
+        pad = _BOX_W - vis_w
+        print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
+        return
+
+    # Текст длиннее рамки — переносим по словам
+    # Определяем ведущий отступ (пробелы в начале видимой части)
+    plain = _plain(text)
+    indent_len = len(plain) - len(plain.lstrip(' '))
+    indent = ' ' * indent_len
+    cont_w = _BOX_W - indent_len  # доступная ширина для продолжений
+
+    # Делим по пробелам.
+    # split(' ') на строке с ведущими пробелами даёт пустые элементы в начале,
+    # которые теряются при сборке. Сохраняем ведущий отступ явно.
+    plain_for_indent = _plain(text)
+    leading_spaces = len(plain_for_indent) - len(plain_for_indent.lstrip(' '))
+    prefix = ' ' * leading_spaces          # ведущий отступ первой строки
+    text_stripped = text[leading_spaces:]  # текст без ведущих пробелов (с ANSI)
+
+    words = text_stripped.split(' ')
+    lines_out: list[str] = []
+    current = prefix   # первая строка начинается с отступа
+    current_vis = leading_spaces
+
+    for word in words:
+        word_vis = _wcslen(word)
+        sep_vis  = 1 if current else 0
+        if current_vis + sep_vis + word_vis <= _BOX_W:
+            current     = current + (' ' if current else '') + word
+            current_vis = current_vis + sep_vis + word_vis
+        else:
+            if current:
+                lines_out.append(current)
+            # Слово само по себе длиннее строки — режем жёстко
+            avail = max(_BOX_W - indent_len, 8)
+            while _wcslen(word) > avail:
+                piece = ''
+                pw = 0
+                for ch in word:
+                    cw = _wcslen(ch)
+                    if pw + cw > avail:
+                        break
+                    piece += ch
+                    pw   += cw
+                lines_out.append(indent + piece)
+                word = word[len(piece):]
+            current     = indent + word
+            current_vis = indent_len + _wcslen(word)
+
+    if current:
+        lines_out.append(current)
+
+    for line in lines_out:
+        pad = _BOX_W - _wcslen(line)
+        if pad < 0:
+            pad = 0
+        print(f"{CYAN}║{NC}{line}{' ' * pad}{CYAN}║{NC}")
 
 
 def _box_row_auto(text: str = "", cont_indent: str = "  ") -> None:
