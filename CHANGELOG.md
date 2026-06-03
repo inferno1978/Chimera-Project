@@ -2,6 +2,156 @@
 
 ---
 
+## 🚀 v4.12.0-beta — 2 июня 2026 — Hysteria2 транспорт + фиксы Debian 13
+
+> ⚠️ **Beta.** Hysteria2-модули добавлены и интегрированы, но автором
+> ещё не тестировались на живом сервере. Используйте с осторожностью,
+> сообщайте о проблемах через Issues.
+
+---
+
+### Новое: Hysteria2 как альтернативный транспорт (Режим B)
+
+Добавлена поддержка **Hysteria2** как транспортного уровня между
+Entry и Exit нодами. Клиенты подключаются по обычным VLESS-ссылкам
+и не замечают смены транспорта — прозрачно.
+
+```
+Клиент ──VLESS──► Entry VPS ──Hysteria2/QUIC/UDP──► Exit VPS ──► Интернет
+       (ссылка не меняется)   (скрытый транспорт)
+```
+
+AWG и Hysteria2 работают параллельно. Переключение через меню в любой момент
+без переустановки.
+
+#### Меню
+
+- Главное меню: новый пункт **7 — 🚀 Hysteria2 транспорт**
+- Настройки сети: новый пункт **H — 🚀 Hysteria2 транспорт**
+
+#### Подменю Hysteria2
+
+| Пункт | Назначение |
+|-------|-----------|
+| **1 — Exit-нода** | Установка H2-сервера локально или на удалённую ноду по SSH |
+| **2 — Выбор транспорта** | Переключение AWG / Hysteria2 / оба |
+| **3 — Балансировщик** | Стратегии weightedRandom, leastRtt, roundRobin |
+| **4 — Health Check** | QUIC-пинг, RTT, потери (не TCP) |
+| **5 — Watchdog** | Авторестарт через cron каждые 2 мин |
+| **6 — Трафик** | RX/TX через iptables/ip6tables/ss, без новых демонов |
+| **7 — Сертификаты** | certbot (Let's Encrypt) или самоподписанный |
+| **8 — Обновление** | Автообновление бинарника с GitHub Releases |
+| **9 — Кластер SSH** | status / restart / logs / update на группе нод |
+| **B — Бэкап** | Резервное копирование конфигов + миграция из AWG |
+| **D — DPI детектор** | Тест блокировки QUIC/UDP, авто-фолбэк на другой порт |
+| **Q — Качество** | RTT/потери/скорость + Telegram-отчёт + авто-оптимизация |
+| **S — Smoke Test** | Полная проверка после установки |
+| **L — Логи** | Просмотр /var/log/hysteria*.log |
+
+#### CLI-флаги
+
+```bash
+sudo python3 main.py --h2-install-exit [--h2-port 443,8443]
+sudo python3 main.py --h2-transport h2|awg
+sudo python3 main.py --h2-status
+sudo python3 main.py --h2-health
+sudo python3 main.py --h2-traffic
+sudo python3 main.py --h2-quality-report [--tg]
+sudo python3 main.py --h2-logs
+sudo python3 main.py --h2-cluster status|restart|logs|update
+sudo python3 main.py --h2-smoke
+sudo python3 main.py --h2-weights 1.2.3.4:1.5,5.6.7.8:0.5
+sudo python3 main.py --h2-autoupdate        # из cron
+sudo python3 main.py --h2-watchdog-run      # из cron
+sudo python3 main.py --h2-cert-monitor      # из cron
+sudo python3 main.py --h2-dpi-check         # из cron
+```
+
+#### Особенности реализации
+
+- **Zero-breakage** — ни одна существующая функция не изменена.
+  VLESS/xHTTP TLS, AWG, генерация ссылок и конфигов работают штатно
+- **15 новых модулей** в `vless_installer/modules/hysteria2_*.py`
+- **Только +15 строк** в `_core.py` (импорт + 2 пункта меню)
+- **DualStack** — полная поддержка IPv4 и IPv6 на всех этапах
+- **Health Check через QUIC**, не TCP
+- **Статистика** через iptables/ip6tables/ss — без новых демонов
+- **Автофолбэк порта** при детекции блокировки DPI
+- **Миграция** из AWG: `python3 migrate_awg_to_h2.py`
+
+---
+
+### Фикс: Debian 13 / Python 3.13 — `SyntaxError: "(" unexpected` в cron
+
+**Затронуто:** `xray-traffic-snapshot.sh` и `xray-autoban.sh`
+
+**Проблема:** оба скрипта генерировались через `textwrap.dedent(f"""...""")`
+с Python-кодом внутри `python3 -c "..."`. Из-за смешанных отступов
+`dedent` не убирал пробелы перед `#!/bin/bash`, получался невалидный
+shebang. На Debian 13 (`/bin/sh` = dash вместо bash) скрипты
+запускались через dash и падали с `Syntax error: "(" unexpected`
+примерно на строке 25 — там, где в Python-коде встречается кортеж
+`('uplink', 'downlink')`.
+
+**Исправление:** оба скрипта переписаны на heredoc:
+```bash
+#!/bin/bash
+python3 - <<'PYEOF'
+... Python-код без проблем с кавычками и shebang ...
+PYEOF
+```
+
+На Ubuntu 24.04 поведение не меняется.
+
+---
+
+### Фикс: Debian 13 — `FileNotFoundError: 'ufw'` в AutoBan
+
+**Проблема:** `ufw` не установлен на Debian 13 по умолчанию
+(система использует чистый nftables/iptables). AutoBan вызывал `ufw`
+напрямую без проверки наличия — `subprocess` падал с `FileNotFoundError`.
+
+**Исправление:** добавлены хелперы `_fw_ban()` / `_fw_unban()`:
+```
+ufw доступен  → ufw deny from IP to any
+ufw отсутствует → iptables -I INPUT -s IP -j DROP
+```
+
+Работает на Ubuntu 24.04 (ufw) и Debian 13 (iptables) без изменения
+поведения на каждой системе.
+
+---
+
+### Фикс: Python 3.13 — `SyntaxWarning` → `SyntaxError` на escape-последовательностях
+
+**Проблема:** escape-последовательности `\d`, `\.`, `\s` внутри
+обычных (не raw) f-строк вызывали `SyntaxWarning` в Python 3.12
+и стали `SyntaxError` в Python 3.13.
+
+**Исправление:** все regex-паттерны внутри генерируемых скриптов
+приведены к корректному виду с двойным экранированием.
+
+---
+
+### Фикс: Python 3.13 — `NameError` в cron-обработчиках `main.py`
+
+Исправлено в предыдущем коммите, документируется здесь для полноты.
+
+**Затронуто:** `--dpi-check`, `--smart-balance`, `--pinned-fallback-check`,
+`--ingress-geoip-update`
+
+**Проблема:** `main.py` загружает `_core.py` через `exec(..., globals())`.
+Функции из модулей, которые не были явно импортированы в `_core.py`
+(например `_dpi_run_once` из `dpi_detector.py`), не попадали в
+`globals()` при cron-запуске. На Python 3.13 поведение `exec` в части
+изоляции пространств имён стало строже — `NameError` начал
+воспроизводиться стабильно.
+
+**Исправление:** в каждый cron-обработчик добавлен явный `import`
+нужной функции прямо перед вызовом.
+
+---
+
 ## 🔧 v4.11.5 — 2 июня 2026 (дополнение)
 
 ### Массовый разбан в AutoBan — больше не по одному
