@@ -213,7 +213,7 @@ def do_h2_balancer_menu() -> None:
         strategy = balancer.get("strategy", _DEFAULT_STRATEGY)
         active   = h2.get("_active_node_ip", "—")
 
-        _box_top("⚖️  HYSTERIA2 — БАЛАНСИРОВЩИК НОД")
+        _box_top("⚡  HYSTERIA2 — БАЛАНСИРОВЩИК НОД")
         _box_row(f"  Стратегия: {CYAN}{strategy}{NC}  │  Активная: {GREEN}{active}{NC}  │  Порог: {balancer.get('switch_threshold', _SWITCH_THRESHOLD)*100:.0f}% потерь")
         _box_sep()
         _box_row()
@@ -268,7 +268,7 @@ def do_h2_balancer_menu() -> None:
 def _change_strategy() -> None:
     strategies = ["weightedRandom", "leastRtt", "roundRobin"]
     print()
-    _box_top("⚖️  СТРАТЕГИЯ БАЛАНСИРОВКИ")
+    _box_top("⚡  СТРАТЕГИЯ БАЛАНСИРОВКИ")
     for i, s in enumerate(strategies, 1):
         _box_item(str(i), s)
     _box_row()
@@ -293,7 +293,7 @@ def _set_node_weight() -> None:
         warn("Нет нод")
         return
     print()
-    _box_top("⚖️  УСТАНОВИТЬ ВЕС НОДЫ")
+    _box_top("⚡  УСТАНОВИТЬ ВЕС НОДЫ")
     for i, n in enumerate(nodes):
         _box_item(str(i+1), f"{n['ip']}  {DIM}(текущий вес: {n.get('weight',1.0)}){NC}")
     _box_row()
