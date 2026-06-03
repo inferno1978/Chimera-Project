@@ -161,7 +161,7 @@ def do_h2_update_menu() -> None:
         h2 = _load_h2_state()
         upd = h2.get("autoupdate", {})
         cur_ver = _h2_binary_version() if _h2_binary_exists() else "—"
-        _box_top("⬆️  HYSTERIA2 — ОБНОВЛЕНИЕ БИНАРНИКА")
+        _box_top("🔺  HYSTERIA2 — ОБНОВЛЕНИЕ БИНАРНИКА")
         _box_row(f"  Версия: {CYAN}{cur_ver}{NC}  │  Автообновление: {'вкл' if upd.get('enabled') else 'выкл'}  │  Последнее: {DIM}{upd.get('last_check','—')}{NC}")
         _box_sep()
         _box_row()

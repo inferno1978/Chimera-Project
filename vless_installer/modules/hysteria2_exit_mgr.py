@@ -431,7 +431,7 @@ def do_h2_exit_menu() -> None:
         st = h2_exit_status()
         status_str = f"{GREEN}активен{NC}" if st["active"] else f"{RED}остановлен{NC}"
 
-        _box_top("🖥️  HYSTERIA2 — EXIT-НОДА")
+        _box_top("💻  HYSTERIA2 — EXIT-НОДА")
         _box_row(f"  Сервис: {status_str}  │  Версия: {DIM}{st['version'] or '—'}{NC}  │  Порты UDP: {CYAN}{st['ports']}{NC}")
         _box_sep()
         _box_row()

@@ -256,7 +256,7 @@ def do_h2_cluster_menu() -> None:
         cred_str = (f"ключ ({key})" if key else
                     ("пароль (задан)" if password else f"{YELLOW}не задан{NC}"))
 
-        _box_top("🖧  HYSTERIA2 — КЛАСТЕРНЫЕ ОПЕРАЦИИ")
+        _box_top("🔗  HYSTERIA2 — КЛАСТЕРНЫЕ ОПЕРАЦИИ")
         _box_row(f"  Нод в state: {CYAN}{len(nodes)}{NC}  │  SSH-доступ: {DIM}{cred_str}{NC}")
         if nodes:
             for n in nodes:
