@@ -1,6 +1,6 @@
-# VLESS Ultimate Installer v4.12.1
+# VLESS Ultimate Installer v4.12.3
 
-[![Version](https://img.shields.io/badge/version-4.12.1-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
+[![Version](https://img.shields.io/badge/version-4.12.3-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
@@ -14,7 +14,7 @@
 ╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║
  ╚████╔╝ ███████╗███████╗███████║███████║
   ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝
-  Ultimate Installer v4.12.1
+  Ultimate Installer v4.12.3
 ```
 
 ## ⚡ Быстрый старт
@@ -51,7 +51,7 @@ bash bootstrap.sh
 | **v4.11.1**        | Smoke-test, nginx Watchdog `[NW]`, ipset Persist `[IP]`, Кластер `[CL]` |
 | **v4.11.4**        | Telemt MTProto на entry-ноде → xray-каскад → Telegram (VLESS / AWG 2.0) |
 | **v4.11.5**        | TCP-фрагментация ClientHello: обход DPI, 6 модулей, поддержка Happ / Incy / Nekoray |
-| **v4.12.1 NEW** 🔥 | Hysteria2 транспорт: меню 7, выбор H2 при установке Режима B, балансировщик нод |
+| **v4.12.3 NEW** 🔥 | Hysteria2 транспорт: меню 7, выбор H2 при установке Режима B, балансировщик нод |
 
 ## 📋 Требования
 
@@ -137,7 +137,7 @@ VLESS-Ultimate-Installer/
 │                                                             │
 │  bootstrap.sh ──► main.py ──exec──► _core.py                │
 │                                         │                   │
-│                               modules/ (v4.12.1)            │
+│                               modules/ (v4.12.3)            │
 │                                         │                   │
 │         Xray-core              Nginx (TLS)                  │
 │         /etc/xray/             /etc/nginx/                  │
