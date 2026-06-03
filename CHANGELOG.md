@@ -2,6 +2,39 @@
 
 ---
 
+## 🐛 v4.12.3 — 3 июня 2026 — Фикс Mode B + xHTTP + AWG (Xray не стартовал)
+
+### Исправлено
+
+**Xray не запускался при установке в режиме B (каскад) с xHTTP + AmneziaWG** — с ошибкой:
+```
+failed to build inbound config with tag inbound-vless >
+infra/conf: Failed to build REALITY config. >
+infra/conf: invalid "privateKey": n/a
+```
+
+**Причина:** в `generate_xray_config_chain_entry_multi()` при `AWG_EXIT_ENABLED=True`
+безусловно вызывалась `generate_xray_config()`, которая всегда генерирует `inbound`
+с `realitySettings`. Но для xHTTP REALITY-ключи не создаются — в конфиг попадали
+заглушки `"privateKey": "n/a"`, и Xray падал при старте.
+
+В режиме A проблема не воспроизводилась, потому что там
+`generate_xray_config_xhttp()` вызывается напрямую.
+
+**Исправление в двух местах:**
+
+1. `generate_xray_config_chain_entry_multi()` — добавлена проверка `PROTOCOL_MODE`:
+   - `xhttp` → вызывается `generate_xray_config_xhttp()` (TLS Let's Encrypt, без `realitySettings`)
+   - остальные режимы → `generate_xray_config()` как прежде
+
+2. `generate_xray_config_xhttp()` — в outbound `direct` добавлен `sockopt.mark = AWG_FWMARK`
+   при `AWG_EXIT_ENABLED=True`, чтобы исходящий трафик Xray маршрутизировался
+   через AWG-туннель (policy routing по fwmark).
+
+**Не затронуто:** Mode A, Mode B + VLESS, Mode B + VLESS + AWG, Mode B + xHTTP без AWG.
+
+---
+
 ## 🆕 v4.12.1 — 3 июня 2026 — Hysteria2 транспорт
 
 ### Добавлено
