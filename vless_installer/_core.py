@@ -23083,17 +23083,23 @@ def do_full_migration_export() -> None:
 
 
 def do_full_migration_import() -> None:
-    """Импорт полного зашифрованного архива миграции."""
+    """Импорт полного архива миграции (зашифрованного .tar.gz.enc или обычного .tar.gz)."""
     import getpass, tarfile as _tarfile
 
     print()
-    archive_raw  = input(f"  Путь к архиву (.tar.gz.enc): ").strip()
+    archive_raw  = input(f"  Путь к архиву (.tar.gz или .tar.gz.enc): ").strip()
     archive_path = Path(archive_raw)
     if not archive_path.exists():
         warn(f"Файл не найден: {archive_path}")
         return
 
-    pw = getpass.getpass("  Пароль шифрования: ")
+    is_encrypted = archive_path.suffix == ".enc"
+
+    pw = ""
+    if is_encrypted:
+        pw = getpass.getpass("  Пароль шифрования: ")
+    else:
+        info("Архив без шифрования — пароль не требуется")
     print()
     warn("ВНИМАНИЕ: импорт перезапишет текущие конфиги, сертификаты и ключи!")
     ans = input(f"{YELLOW}Продолжить? [y/N]:{NC} ").strip().lower()
@@ -23102,18 +23108,21 @@ def do_full_migration_import() -> None:
         return
 
     with tempfile.TemporaryDirectory(prefix="xray_migimp_") as tmpdir:
-        tmp_tar = Path(tmpdir) / "migration.tar.gz"
-        r = _run([
-            "openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-iter", "100000",
-            "-in", str(archive_path), "-out", str(tmp_tar),
-            "-pass", f"pass:{pw}",
-        ], capture=True, check=False)
-        if r.returncode != 0:
-            warn("Ошибка дешифрования — неверный пароль или повреждённый файл")
-            return
+        if is_encrypted:
+            tmp_tar = Path(tmpdir) / "migration.tar.gz"
+            r = _run([
+                "openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-iter", "100000",
+                "-in", str(archive_path), "-out", str(tmp_tar),
+                "-pass", f"pass:{pw}",
+            ], capture=True, check=False)
+            if r.returncode != 0:
+                warn("Ошибка дешифрования — неверный пароль или повреждённый файл")
+                return
+        else:
+            tmp_tar = archive_path
 
         if not _tarfile.is_tarfile(tmp_tar):
-            warn("Файл не является tar-архивом после дешифрования")
+            warn("Файл не является tar-архивом" + (" после дешифрования" if is_encrypted else ""))
             return
 
         with _tarfile.open(tmp_tar, "r:gz") as tar:
@@ -28278,7 +28287,7 @@ def _menu_migration() -> None:
         _box_top("📦  МИГРАЦИЯ КОНФИГУРАЦИИ")
         _box_row()
         _box_item("1", f"📤 Экспорт  {DIM}(зашифрованный архив){NC}")
-        _box_item("2", f"📥 Импорт  {DIM}(восстановить из архива){NC}")
+        _box_item("2", f"📥 Импорт  {DIM}(восстановить из .tar.gz или .tar.gz.enc){NC}")
         _box_item("3", f"📄 Стандартный экспорт  {DIM}(без шифрования){NC}")
         _box_row()
         _box_back()
