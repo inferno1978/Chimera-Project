@@ -200,7 +200,7 @@ def do_h2_backup_menu() -> None:
     while True:
         os.system("clear")
         print()
-        backups = _list_backups()
+        backups = h2_backup_list()
         _box_top("💾  HYSTERIA2 — БЭКАП КОНФИГУРАЦИИ")
         if backups:
             _box_row(f"  Бэкапов: {CYAN}{len(backups)}{NC}  │  Последний: {DIM}{backups[0].name}{NC}  ({int(backups[0].stat().st_size/1024)} KB)")
