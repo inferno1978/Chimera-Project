@@ -272,7 +272,7 @@ def _change_strategy() -> None:
         print(f"  {CYAN}{i}{NC}  {s}")
     print()
     try:
-        ch = input("  Выбор: ").strip()
+        ch = input(f"  {CYAN}Выбор:{NC} ").strip()
     except KeyboardInterrupt:
         return
     if ch.isdigit() and 1 <= int(ch) <= len(strategies):
@@ -294,8 +294,8 @@ def _set_node_weight() -> None:
         print(f"  {CYAN}{i+1}{NC}  {n['ip']} (текущий вес: {n.get('weight',1.0)})")
     print()
     try:
-        idx  = int(input("  Номер ноды: ").strip()) - 1
-        wval = float(input("  Новый вес (0.1 – 10.0): ").strip())
+        idx  = int(input(f"  {CYAN}Номер ноды:{NC} ").strip()) - 1
+        wval = float(input(f"  {CYAN}Новый вес{NC} (0.1 – 10.0): ").strip())
     except (KeyboardInterrupt, ValueError):
         return
     if 0 <= idx < len(nodes):
@@ -312,7 +312,7 @@ def _set_threshold() -> None:
     print()
     try:
         v = float(input(
-            f"  Порог потерь для смены ноды (0–100%) "
+            f"  {CYAN}Порог потерь для смены ноды{NC} (0–100%) "
             f"[{h2.get('balancer',{}).get('switch_threshold',0.5)*100:.0f}]: "
         ).strip())
     except (KeyboardInterrupt, ValueError):

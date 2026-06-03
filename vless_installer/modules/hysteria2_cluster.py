@@ -289,7 +289,7 @@ def do_h2_cluster_menu() -> None:
             input(f"\n{BLUE}Нажмите Enter...{NC}")
         elif ch == "5":
             try:
-                cmd = input("  Команда (bash): ").strip()
+                cmd = input(f"  {CYAN}Команда (bash):{NC} ").strip()
             except KeyboardInterrupt:
                 continue
             if cmd:
@@ -317,7 +317,7 @@ def _set_ssh_creds_interactive(nodes: list[dict], cb) -> None:
     print(f"  {CYAN}1{NC}  Использовать SSH-ключ (~/.ssh/id_*)")
     print(f"  {CYAN}2{NC}  Ввести пароль")
     try:
-        c = input("  Выбор: ").strip()
+        c = input(f"  {CYAN}Выбор:{NC} ").strip()
     except KeyboardInterrupt:
         return
     # Реальное использование через _get_creds() при следующей операции
@@ -333,7 +333,7 @@ def _remove_node_interactive() -> None:
     for i, n in enumerate(nodes):
         print(f"  {CYAN}{i+1}{NC}  {n.get('ip','?')}")
     try:
-        idx = int(input("  Удалить ноду №: ").strip()) - 1
+        idx = int(input(f"  {CYAN}Удалить ноду №:{NC} ").strip()) - 1
     except (KeyboardInterrupt, ValueError):
         return
     if 0 <= idx < len(nodes):

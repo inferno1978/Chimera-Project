@@ -241,7 +241,7 @@ def do_h2_backup_menu() -> None:
             for i, b in enumerate(backups, 1):
                 print(f"  {CYAN}{i}{NC}  {b.name}")
             try:
-                idx = int(input("  Номер: ").strip()) - 1
+                idx = int(input(f"  {CYAN}Номер:{NC} ").strip()) - 1
             except (KeyboardInterrupt, ValueError):
                 continue
             if 0 <= idx < len(backups):
