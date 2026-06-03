@@ -84,10 +84,20 @@ def _install_h2_binary() -> bool:
     info("Скачиваю бинарник Hysteria2...")
     url, tag = _h2_latest_url()
     tmp = Path("/tmp/hysteria.bin")
-    r = _run(["curl", "-L", "--max-time", "60", "-o", str(tmp), url],
+    r = _run(["curl", "-fsSL", "--max-time", "60", "-o", str(tmp), url],
              capture=True)
-    if r.returncode != 0 or not tmp.exists():
-        error(f"Не удалось скачать: {url}")
+    if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 1024 * 1024:
+        error(f"Не удалось скачать: {url} (код {r.returncode})")
+        tmp.unlink(missing_ok=True)
+        return False
+    # Проверяем, что скачали настоящий ELF-бинарник, а не HTML/JSON с ошибкой
+    magic = tmp.read_bytes()[:4]
+    if magic != b"\x7fELF":
+        error(
+            f"Скачанный файл не является ELF-бинарником (магия: {magic!r}). "
+            "Возможно, GitHub недоступен или отдал страницу с ошибкой."
+        )
+        tmp.unlink(missing_ok=True)
         return False
     H2_BINARY.parent.mkdir(parents=True, exist_ok=True)
     import shutil
@@ -358,11 +368,45 @@ def h2_exit_remote_install(
     if not auth_password:
         auth_password = secrets.token_urlsafe(24)
 
-    arch = _detect_arch()
-    url, tag = _h2_latest_url()
+    # Определяем архитектуру удалённой машины, а не локальной
+    ssh_opts_pre = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15"]
+    if ssh_key:
+        ssh_opts_pre += ["-i", ssh_key]
+    _arch_cmd = ["ssh"] + ssh_opts_pre + [f"root@{host}", "uname -m"]
+    if ssh_pass:
+        _arch_cmd = ["sshpass", "-p", ssh_pass] + _arch_cmd
+    _arch_r = _run(_arch_cmd, capture=True, timeout=15, check=False)
+    _remote_arch_raw = _arch_r.stdout.strip() if _arch_r.returncode == 0 else ""
+    arch = _ARCH_MAP.get(_remote_arch_raw, None)
+    if not arch:
+        warn(f"Не удалось определить архитектуру удалённой машины "
+             f"(uname -m вернул: {_remote_arch_raw!r}), использую amd64")
+        arch = "amd64"
+    else:
+        info(f"Архитектура удалённой ноды: {_remote_arch_raw} -> {arch}")
+
+    # Строим URL под архитектуру удалённой машины
+    try:
+        _gr = _run(["curl", "-s", "--max-time", "15", _GH_API], capture=True)
+        _gdata = json.loads(_gr.stdout)
+        tag = _gdata.get("tag_name", "v2.6.0")
+        url = next(
+            (a["browser_download_url"] for a in _gdata.get("assets", [])
+             if f"linux-{arch}" in a.get("name", "") and a["name"].endswith(".bin")),
+            f"https://github.com/apernet/hysteria/releases/download/{tag}/hysteria-linux-{arch}.bin",
+        )
+    except Exception:
+        tag = "v2.6.0"
+        url = (f"https://github.com/apernet/hysteria/releases/download/{tag}/"
+               f"hysteria-linux-{arch}.bin")
 
     commands = [
-        f"curl -L --max-time 60 -o /usr/local/bin/hysteria '{url}' && chmod +x /usr/local/bin/hysteria",
+        # -f: curl вернёт ошибку при HTTP >= 400; xxd проверяет ELF magic
+        f"curl -fsSL --max-time 60 -o /tmp/hysteria.bin '{url}' && "
+        f"[ \"$(head -c4 /tmp/hysteria.bin | xxd -p)\" = '7f454c46' ] && "
+        f"mv /tmp/hysteria.bin /usr/local/bin/hysteria && chmod +x /usr/local/bin/hysteria || "
+        f"{{ echo 'ERROR: hysteria binary is not ELF (wrong arch or GitHub unreachable)'; "
+        f"rm -f /tmp/hysteria.bin; exit 1; }}",
         "mkdir -p /etc/hysteria",
         f"openssl req -x509 -newkey rsa:4096 -keyout /etc/xray/hysteria.key "
         f"-out /etc/xray/hysteria.crt -days 3650 -nodes -subj '/CN=hysteria2.local' 2>/dev/null",
