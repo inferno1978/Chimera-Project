@@ -276,7 +276,7 @@ def do_h2_dpi_menu() -> None:
         elif ch == "3":
             try:
                 raw = input(
-                    f"  Fallback-порты (через запятую) "
+                    f"  {CYAN}Fallback-порты{NC} (через запятую) "
                     f"[{','.join(map(str,fb))}]: "
                 ).strip()
             except KeyboardInterrupt:

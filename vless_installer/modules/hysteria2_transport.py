@@ -273,50 +273,68 @@ def h2_select_transport() -> None:
     Интерактивный выбор транспорта: AWG / Hysteria2 / Оба (с весами балансировщика).
     Вызывается из do_hysteria2_menu().
     """
-    os.system("clear")
-    print()
-    print(f"{CYAN}{'═'*62}{NC}")
-    print(f"  {BOLD}🔀 Выбор транспорта Entry → Exit{NC}")
-    print(f"{CYAN}{'═'*62}{NC}")
-    print()
+    while True:
+        os.system("clear")
+        print()
+        print(f"{CYAN}{'═'*62}{NC}")
+        print(f"  {BOLD}🔀 Hysteria2 — Выбор транспорта Entry → Exit{NC}")
+        print(f"{CYAN}{'═'*62}{NC}")
 
-    st = h2_transport_status()
-    print(f"  Текущий транспорт: {CYAN}{st['active_transport']}{NC}")
-    print()
-    print(f"  {CYAN}1{NC}  AWG (AmneziaWG) — текущий по умолчанию")
-    print(f"  {CYAN}2{NC}  Hysteria2 (QUIC/UDP)")
-    print(f"  {CYAN}3{NC}  Оба (балансировка по весам)")
-    print()
-    print(f"  {DIM}[Q]{NC}  Отмена")
-    print()
+        st = h2_transport_status()
+        active   = st["active_transport"]
+        exit_ip  = st.get("exit_ip", "")
+        exit_prt = st.get("exit_port", 0)
+        n_nodes  = st.get("h2_nodes", 0)
 
-    try:
-        ch = input(f"{CYAN}Выбор:{NC} ").strip()
-    except KeyboardInterrupt:
-        return
+        col = GREEN if active == "hysteria2" else (YELLOW if active == "awg" else CYAN)
+        print(f"  Текущий транспорт: {col}{active}{NC}", end="")
+        if active == "hysteria2" and exit_ip:
+            print(f"  │  {DIM}Exit: {exit_ip}:{exit_prt}{NC}", end="")
+        print()
+        print(f"  H2 exit-нод в state: {CYAN}{n_nodes}{NC}")
+        print()
 
-    if ch == "1":
-        h2_transport_remove()
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
-    elif ch == "2":
-        h2 = _load_h2_state()
-        nodes = [n for n in h2.get("exit_nodes", []) if n.get("status") == "active"]
-        if not nodes:
-            warn("Нет активных H2 exit-нод. Сначала выполните установку.")
+        print(f"  {CYAN}1{NC}  AWG (AmneziaWG)          {DIM}Вернуть на AWG/VLESS транспорт{NC}")
+        print(f"  {CYAN}2{NC}  Hysteria2 (QUIC/UDP)     {DIM}Переключить outbound на H2{NC}")
+        print(f"  {CYAN}3{NC}  Оба (AWG + H2)           {DIM}Балансировка по весам{NC}")
+        print()
+        print(f"  {DIM}[Q]{NC}  ← Назад")
+        print()
+
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()
+        except KeyboardInterrupt:
+            break
+
+        if ch == "Q" or ch == "":
+            break
+
+        elif ch == "1":
+            h2_transport_remove()
             input(f"\n{BLUE}Нажмите Enter...{NC}")
-            return
-        node = nodes[0]
-        h2_transport_apply(
-            exit_ip=node["ip"],
-            exit_port=node.get("ports", [443])[0],
-            auth_password=node.get("auth", ""),
-        )
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
-    elif ch == "3":
-        info("Режим балансировки AWG+H2 — настройте веса в меню Балансировщик")
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
-    elif ch.upper() == "Q":
-        return
+
+        elif ch == "2":
+            h2 = _load_h2_state()
+            nodes = [n for n in h2.get("exit_nodes", []) if n.get("status") == "active"]
+            if not nodes:
+                warn("Нет активных H2 exit-нод. Сначала выполните установку (меню 1 → Exit-нода).")
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+                continue
+            node = nodes[0]
+            h2_transport_apply(
+                exit_ip=node["ip"],
+                exit_port=node.get("ports", [443])[0],
+                auth_password=node.get("auth", ""),
+            )
+            input(f"\n{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "3":
+            info("Режим AWG+H2 — настройте веса в меню «Балансировщик» (пункт 3)")
+            input(f"\n{BLUE}Нажмите Enter...{NC}")
+
+        else:
+            warn("Неверный выбор")
+            time.sleep(0.8)
 
 
 """

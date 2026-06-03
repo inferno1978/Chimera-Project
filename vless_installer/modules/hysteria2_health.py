@@ -295,13 +295,13 @@ def _edit_health_params() -> None:
     hc = h2.setdefault("health_check", {})
     print()
     try:
-        v = input(f"  Интервал проверки сек [{hc.get('interval_sec',60)}]: ").strip()
+        v = input(f"  {CYAN}Интервал проверки сек{NC} [{hc.get('interval_sec',60)}]: ").strip()
         if v.isdigit():
             hc["interval_sec"] = int(v)
-        v = input(f"  Таймаут сек [{hc.get('timeout_sec',5)}]: ").strip()
+        v = input(f"  {CYAN}Таймаут сек{NC} [{hc.get('timeout_sec',5)}]: ").strip()
         if v.isdigit():
             hc["timeout_sec"] = int(v)
-        v = input(f"  Порог сбоев [{hc.get('fail_threshold',3)}]: ").strip()
+        v = input(f"  {CYAN}Порог сбоев{NC} [{hc.get('fail_threshold',3)}]: ").strip()
         if v.isdigit():
             hc["fail_threshold"] = int(v)
     except KeyboardInterrupt:

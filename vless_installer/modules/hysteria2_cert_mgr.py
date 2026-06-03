@@ -245,7 +245,7 @@ def do_h2_cert_menu() -> None:
 
         if ch == "1":
             try:
-                domain_input = input("  Домен (например: myvpn.example.com): ").strip()
+                domain_input = input(f"  {CYAN}Домен{NC} (например: myvpn.example.com): ").strip()
             except KeyboardInterrupt:
                 continue
             if domain_input:
@@ -254,7 +254,7 @@ def do_h2_cert_menu() -> None:
             input(f"\n{BLUE}Нажмите Enter...{NC}")
         elif ch == "2":
             try:
-                dom = input("  CN (домен/IP, пусто = hysteria2.local): ").strip()
+                dom = input(f"  {CYAN}CN{NC} (домен/IP, пусто = hysteria2.local): ").strip()
             except KeyboardInterrupt:
                 continue
             _gen_selfsigned(dom or "hysteria2.local")
@@ -274,7 +274,7 @@ def do_h2_cert_menu() -> None:
             input(f"\n{BLUE}Нажмите Enter...{NC}")
         elif ch == "6":
             try:
-                d = input("  Новый домен: ").strip()
+                d = input(f"  {CYAN}Новый домен:{NC} ").strip()
             except KeyboardInterrupt:
                 continue
             if d:

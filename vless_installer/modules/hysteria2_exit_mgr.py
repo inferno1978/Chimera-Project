@@ -496,8 +496,8 @@ def _interactive_local_install() -> None:
         ports = [int(p.strip()) for p in raw_ports.split(",") if p.strip().isdigit()] \
             if raw_ports else [443]
 
-        domain = input("  Домен для TLS-сертификата (пусто = самоподписанный): ").strip()
-        raw_pass = input("  Пароль аутентификации (пусто = авто): ").strip()
+        domain = input(f"  {CYAN}Домен для TLS-сертификата{NC} (пусто = самоподписанный): ").strip()
+        raw_pass = input(f"  {CYAN}Пароль аутентификации{NC} (пусто = авто): ").strip()
     except KeyboardInterrupt:
         return
 
@@ -509,15 +509,15 @@ def _interactive_local_install() -> None:
 def _interactive_remote_install() -> None:
     print()
     try:
-        host = input("  IP/домен удалённой Exit-ноды: ").strip()
+        host = input(f"  {CYAN}IP/домен удалённой Exit-ноды:{NC} ").strip()
         if not host:
             return
-        raw_ports = input(f"  UDP-порт(ы) [{CYAN}443{NC}]: ").strip()
+        raw_ports = input(f"  {CYAN}UDP-порт(ы){NC} [{CYAN}443{NC}]: ").strip()
         ports = [int(p.strip()) for p in raw_ports.split(",") if p.strip().isdigit()] \
             if raw_ports else [443]
-        ssh_key = input("  Путь к SSH-ключу (пусто = пароль): ").strip() or None
-        ssh_pass = getpass.getpass("  SSH-пароль (пусто = ключ): ") if not ssh_key else None
-        raw_pass = input("  Пароль H2 (пусто = авто): ").strip()
+        ssh_key = input(f"  {CYAN}Путь к SSH-ключу{NC} (пусто = пароль): ").strip() or None
+        ssh_pass = getpass.getpass(f"  {CYAN}SSH-пароль{NC} (пусто = ключ): ") if not ssh_key else None
+        raw_pass = input(f"  {CYAN}Пароль H2{NC} (пусто = авто): ").strip()
     except KeyboardInterrupt:
         return
 
