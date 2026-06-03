@@ -5067,6 +5067,23 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
     # Восстанавливаем AS-direct правила (if any)
     _as_direct_restore_if_needed(silent=False)
 
+    # Восстанавливаем Telemt tproxy-интеграцию (если установлен).
+    # generate_* перезаписывает config.json целиком — dokodemo inbound и
+    # iptables-правила теряются. Переинжектируем ДО рестарта xray, чтобы
+    # inbound уже был в конфиге к моменту запуска.
+    try:
+        from vless_installer.modules.mtproto import telemt_tproxy_emergency_restore
+        _tp_result, _tp_msg = telemt_tproxy_emergency_restore()
+        if _tp_result is True:
+            info(f"Telemt tproxy: {_tp_msg}")
+        elif _tp_result is False:
+            warn(f"Telemt tproxy: {_tp_msg}")
+        # None = не установлен / неприменимо — молчим
+    except ImportError:
+        pass
+    except Exception as _tp_e:
+        warn(f"Telemt tproxy восстановление: {_tp_e}")
+
     # Финальный рестарт
     _run(["systemctl", "restart", "xray"], check=False, quiet=True)
     time.sleep(3)
