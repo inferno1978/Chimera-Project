@@ -946,20 +946,23 @@ def do_manage_warp() -> None:
                 if v == "1":
                     if detected_ssh_ip:
                         _set_warp("WARP_SSH_CLIENT_IP", detected_ssh_ip)
-                        _box_ok(f"SSH IP: {_get_warp("WARP_SSH_CLIENT_IP", "")}")
+                        _ssh_ip_val = _get_warp("WARP_SSH_CLIENT_IP", "")
+                        _box_ok(f"SSH IP: {_ssh_ip_val}")
                         break
                     else:
                         # Нет автоопределения — запрашиваем вручную
                         ip_raw = input("  SSH client IP: ").strip()
                         if ip_raw:
                             _set_warp("WARP_SSH_CLIENT_IP", ip_raw)
-                            _box_ok(f"SSH IP: {_get_warp("WARP_SSH_CLIENT_IP", "")}")
+                            _ssh_ip_val = _get_warp("WARP_SSH_CLIENT_IP", "")
+                            _box_ok(f"SSH IP: {_ssh_ip_val}")
                         break
                 elif v == "2":
                     ip_raw = input("  SSH client IP: ").strip()
                     if ip_raw:
                         _set_warp("WARP_SSH_CLIENT_IP", ip_raw)
-                        _box_ok(f"SSH IP: {_get_warp("WARP_SSH_CLIENT_IP", "")}")
+                        _ssh_ip_val = _get_warp("WARP_SSH_CLIENT_IP", "")
+                        _box_ok(f"SSH IP: {_ssh_ip_val}")
                     break
                 elif v == "3":
                     _box_warn("SSH IP не задан — SSH может оборваться при полном туннеле!")
@@ -973,7 +976,8 @@ def do_manage_warp() -> None:
             _box_row(f"{BLUE}Режим маршрутизации WARP:{NC}")
             _box_row()
             _box_item("1", f"🌐 Весь трафик через WARP {GREEN}(full){NC}")
-            _box_desc(f"Максимальная защита. SSH-клиент ({_get_warp("WARP_SSH_CLIENT_IP", "")}) исключён автоматически.")
+            _ssh_ip_desc = _get_warp("WARP_SSH_CLIENT_IP", "")
+            _box_desc(f"Максимальная защита. SSH-клиент ({_ssh_ip_desc}) исключён автоматически.")
             _box_row()
             _box_item("2", f"🎯 Выборочные ресурсы {GREEN}(selective){NC}")
             _box_desc(f"Только указанные вами IP/домены идут через WARP.")
@@ -1065,7 +1069,8 @@ def do_manage_warp() -> None:
                 continue
             _box_top(f"Смена режима маршрутизации")
             _box_row()
-            _box_row(f"  Текущий: {CYAN}{_get_warp("WARP_MODE", "full")}{NC}")
+            _warp_mode_cur = _get_warp("WARP_MODE", "full")
+            _box_row(f"  Текущий: {CYAN}{_warp_mode_cur}{NC}")
             _box_row()
             _box_item("1", f"full      — весь трафик через WARP")
             _box_item("2", f"selective — выборочные ресурсы")
@@ -1097,7 +1102,8 @@ def do_manage_warp() -> None:
                 elif _get_warp("WARP_MODE", "") == runet:
                     _warp_configure_runet_mode(_get_warp("WARP_SSH_CLIENT_IP", ""))
                 _warp_save_state()
-                success(f"Режим изменён на: {_get_warp("WARP_MODE", "full")}")
+                _warp_mode_new = _get_warp("WARP_MODE", "full")
+                success(f"Режим изменён на: {_warp_mode_new}")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "4":
@@ -1187,8 +1193,10 @@ def do_manage_warp() -> None:
             _box_row(f"  Версия:   {r_ver.stdout.strip()}")
             _box_row(f"  Статус:   {_warp_status()}")
             _box_row(f"  Сервис:   {'активен' if _warp_service_active() else 'неактивен'}")
-            _box_row(f"  Режим:    {_get_warp("WARP_MODE", "full")}")
-            _box_row(f"  SSH IP:   {_get_warp("WARP_SSH_CLIENT_IP", "") or '(не задан)'}")
+            _warp_mode_st = _get_warp("WARP_MODE", "full")
+            _box_row(f"  Режим:    {_warp_mode_st}")
+            _ssh_ip_st = _get_warp("WARP_SSH_CLIENT_IP", "") or "(не задан)"
+            _box_row(f"  SSH IP:   {_ssh_ip_st}")
             _box_row()
             r_st = _warp_cli("settings")
             _box_row(f"{DIM}{r_st.stdout[:800]}{NC}")

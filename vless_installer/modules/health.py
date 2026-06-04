@@ -146,7 +146,8 @@ def health_check_ssl() -> bool:
     if not _get_state_value("domain", ""):
         warn("SSL проверка пропущена: домен не задан")
         return False
-    cert = Path(f"/etc/letsencrypt/live/{_get_state_value("domain", "")}/fullchain.pem")
+    _domain_val = _get_state_value("domain", "")
+    cert = Path(f"/etc/letsencrypt/live/{_domain_val}/fullchain.pem")
     if not cert.exists():
         warn("SSL сертификат не найден")
         return False
