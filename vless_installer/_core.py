@@ -5847,6 +5847,11 @@ def install_dnscrypt() -> None:
     success(f"Бинарник DNSCrypt-proxy установлен: {DNSCRYPT_BIN}")
     DNSCRYPT_CONF_DIR.mkdir(parents=True, exist_ok=True)
 
+    _dnscrypt_server_names = (
+        'server_names = ["cloudflare", "cloudflare-ipv6", "google", "google-ipv6"]'
+        if IS_IPV6_AVAILABLE else
+        'server_names = ["cloudflare", "google"]'
+    )
     DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
         ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.12.3
         ## Слушает на {DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}
@@ -5867,7 +5872,7 @@ def install_dnscrypt() -> None:
 
         force_tcp = false
         ## Фиксируем быстрые резолверы. Для смены: Сеть → DNSCrypt → Выбор резолверов.
-        {"server_names = [\"cloudflare\", \"cloudflare-ipv6\", \"google\", \"google-ipv6\"]" if IS_IPV6_AVAILABLE else "server_names = [\"cloudflare\", \"google\"]"}
+        {_dnscrypt_server_names}
         lb_strategy = 'p2'
         lb_estimator = true
         timeout = 5000
