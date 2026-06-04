@@ -3667,11 +3667,10 @@ def generate_xray_config_chain_entry() -> None:
             "sniffing": {
                 "enabled":      True,
                 "destOverride": ["http", "tls"],
-                # BUGFIX: metadataOnly=False required для корректной работы UseIPv6v4.
-                # При metadataOnly=True xray не читает SNI/Host из трафика → freedom получает
-                # IP вместо домена → UseIPv6v4 domainStrategy не применяется → IPv6 недоступен.
-                # AWG использует маршрутизацию ядра и не зависит от sniffing доменов.
-                "metadataOnly": False,
+                # AWG использует маршрутизацию ядра — sniffing доменов не нужен (metadataOnly=True).
+                # Базовый VLESS/REALITY: metadataOnly=False обязателен — xray должен читать SNI/Host
+                # чтобы freedom мог резолвить домены и применять UseIPv6v4 domainStrategy.
+                "metadataOnly": True if AWG_EXIT_ENABLED else False,
                 "routeOnly":    True,
             },
             "streamSettings": {
@@ -4771,11 +4770,10 @@ def generate_xray_config_chain_entry_multi() -> None:
             "sniffing": {
                 "enabled":      True,
                 "destOverride": ["http", "tls"],
-                # BUGFIX: metadataOnly=False required для корректной работы UseIPv6v4.
-                # При metadataOnly=True xray не читает SNI/Host из трафика → freedom получает
-                # IP вместо домена → UseIPv6v4 domainStrategy не применяется → IPv6 недоступен.
-                # AWG использует маршрутизацию ядра и не зависит от sniffing доменов.
-                "metadataOnly": False,
+                # AWG использует маршрутизацию ядра — sniffing доменов не нужен (metadataOnly=True).
+                # Базовый VLESS/REALITY: metadataOnly=False обязателен — xray должен читать SNI/Host
+                # чтобы freedom мог резолвить домены и применять UseIPv6v4 domainStrategy.
+                "metadataOnly": True if AWG_EXIT_ENABLED else False,
                 "routeOnly":    True,
             },
             "streamSettings": {
