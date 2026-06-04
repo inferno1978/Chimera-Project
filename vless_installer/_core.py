@@ -3633,7 +3633,7 @@ def generate_xray_config_chain_entry() -> None:
             },
             "sniffing": {
                 "enabled":      True,
-                "destOverride": ["http", "tls", "quic"],
+                "destOverride": ["http", "tls"],
                 "metadataOnly": False,
                 "routeOnly":    True,
             },
@@ -3662,7 +3662,7 @@ def generate_xray_config_chain_entry() -> None:
             },
             "sniffing": {
                 "enabled":      True,
-                "destOverride": ["http", "tls", "quic"],
+                "destOverride": ["http", "tls"],
                 # === MERGE FROM install_split.py: metadataOnly fix (generate_xray_config_chain_entry) ===
                 "metadataOnly": True if AWG_EXIT_ENABLED else (False if SPLIT_TUNNEL_ENABLED else True),
                 # === END MERGE ===
@@ -3896,7 +3896,7 @@ def _make_exit_node_config(nd: dict) -> dict:
             },
             "sniffing": {
                 "enabled":      True,
-                "destOverride": ["http", "tls", "quic"],
+                "destOverride": ["http", "tls"],
                 "metadataOnly": False,
                 "routeOnly":    False,
             },
@@ -3944,7 +3944,7 @@ def _make_exit_node_config(nd: dict) -> dict:
             },
             "sniffing": {
                 "enabled":      True,
-                "destOverride": ["http", "tls", "quic"],
+                "destOverride": ["http", "tls"],
                 "metadataOnly": False,
                 "routeOnly":    False,
             },
@@ -4734,7 +4734,7 @@ def generate_xray_config_chain_entry_multi() -> None:
             },
             "sniffing": {
                 "enabled":      True,
-                "destOverride": ["http", "tls", "quic"],
+                "destOverride": ["http", "tls"],
                 "metadataOnly": False,
                 "routeOnly":    True,
             },
@@ -4764,7 +4764,7 @@ def generate_xray_config_chain_entry_multi() -> None:
             },
             "sniffing": {
                 "enabled":      True,
-                "destOverride": ["http", "tls", "quic"],
+                "destOverride": ["http", "tls"],
                 # === MERGE FROM install_split.py: metadataOnly fix (Режим B, VLESS каскад) ===
                 # При AWG_EXIT_ENABLED — True (AWG использует маршрутизацию ядра, домены не нужны).
                 # При SPLIT_TUNNEL_ENABLED без AWG — False обязателен: Xray должен читать
@@ -5859,7 +5859,7 @@ def install_dnscrypt() -> None:
         {"server_names = [\"cloudflare\", \"cloudflare-ipv6\", \"google\", \"google-ipv6\"]" if IS_IPV6_AVAILABLE else "server_names = [\"cloudflare\", \"google\"]"}
         lb_strategy = 'p2'
         lb_estimator = true
-        timeout = 1500
+        timeout = 5000
         keepalive = 30
 
         log_level = 1
@@ -7081,7 +7081,7 @@ def generate_xray_config() -> None:
             },
             "sniffing": {
                 "enabled":      True,
-                "destOverride": ["http", "tls", "quic"],
+                "destOverride": ["http", "tls"],
                 "metadataOnly": True,
                 "routeOnly":    True,
             },
@@ -7252,7 +7252,7 @@ def generate_xray_config_xhttp() -> None:
             },
             "sniffing": {
                 "enabled":      True,
-                "destOverride": ["http", "tls", "quic"],
+                "destOverride": ["http", "tls"],
                 "metadataOnly": False,
                 "routeOnly":    True,
             },
