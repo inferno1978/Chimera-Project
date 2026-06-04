@@ -116,6 +116,8 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
             || warn "Не удалось обновить: ${rel_path}"
     }
     _update_module "vless_installer/modules/tg_nets.py"
+    _update_module "vless_installer/_core.py"
+    _update_module "main.py"
 else
     if [[ -d "$INSTALL_DIR" ]] && [[ -f "${INSTALL_DIR}/main.py" ]]; then
         # Установка без .git — принудительно обновляем все файлы с GitHub
