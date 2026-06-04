@@ -6488,7 +6488,8 @@ def _xray_print_manual_download_hint(zip_name: str, tag: str, xray_arch: str) ->
     print(f"    {BOLD}/tmp/xray.zip{NC}")
     print()
     print(f"{WHITE}💡  Команда для скачивания (выполните в другом окне/на другом ПК):{NC}")
-    print(f"    {DIM}curl -L \"{XRAY_MANUAL_MIRRORS[1]}\" -o /root/{zip_name}{NC}")
+    _mirror_url = XRAY_MANUAL_MIRRORS[1]
+    print(f"    {DIM}curl -L \"{_mirror_url}\" -o /root/{zip_name}{NC}")
     print(f"    {DIM}scp /path/to/{zip_name} root@<IP>:/root/{zip_name}{NC}")
     print()
     print(f"{WHITE}▶  После размещения файла нажмите Enter для продолжения...{NC}")
@@ -8328,8 +8329,10 @@ def _geo_print_manual_download_hint() -> None:
     print(f"    {BOLD}/usr/local/etc/xray/{NC}")
     print()
     print(f"{WHITE}💡  Команда для скачивания (выполните в другом окне/на другом ПК):{NC}")
-    print(f"    {DIM}curl -L \"{_GEO_MANUAL['geosite.dat'][3]}\" -o /root/geosite.dat{NC}")
-    print(f"    {DIM}curl -L \"{_GEO_MANUAL['geoip.dat'][3]}\" -o /root/geoip.dat{NC}")
+    _geo_site_url = _GEO_MANUAL['geosite.dat'][3]
+    _geo_ip_url = _GEO_MANUAL['geoip.dat'][3]
+    print(f"    {DIM}curl -L \"{_geo_site_url}\" -o /root/geosite.dat{NC}")
+    print(f"    {DIM}curl -L \"{_geo_ip_url}\" -o /root/geoip.dat{NC}")
     print(f"    {DIM}# Или SCP с вашего ПК:{NC}")
     print(f"    {DIM}scp geosite.dat geoip.dat root@<IP>:/root/{NC}")
     print()
