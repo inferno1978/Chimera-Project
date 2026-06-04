@@ -122,6 +122,10 @@ from vless_installer.modules.fragment_stats      import do_fragment_stats_menu
 from vless_installer.modules.fragment_share      import do_fragment_share_menu
 # ── Hysteria2 transport (аддитивно, v4.12.3+) ────────────────────────────────
 from vless_installer.modules.hysteria2_menu      import do_hysteria2_menu
+# ── Новые модули (бэкап, cold boot, health monitor) ──────────────────────────
+from vless_installer.modules.config_backup       import backup_xray_config, do_backup_menu
+from vless_installer.modules.cold_boot_restore   import do_cold_boot_menu
+from vless_installer.modules.node_health_monitor import do_health_monitor_menu
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -5044,6 +5048,13 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
     восстанавливает пользователей и RIPE-правила, затем перезапускает сервис.
     Единая точка пересборки — вызывается из всех мест меню нод и split tunnel.
     """
+    # Бэкап текущего конфига перед пересборкой
+    _bk_ok, _bk_path = backup_xray_config()
+    if _bk_ok:
+        info(f"Бэкап конфига: {_bk_path}")
+    else:
+        info(f"Бэкап конфига: {_bk_path}")
+
     if INSTALL_MODE == "B":
         generate_xray_config_chain_entry_multi()
     elif PROTOCOL_MODE == "xhttp":
@@ -29547,6 +29558,10 @@ def _menu_security() -> None:
             if _ing_on else f"{DIM}выкл{NC}"
         )
         _box_item("G", f"🛡️  Блокировка входящих из РФ  {_ing_str}")
+        _box_sep()
+        _box_item("BK", f"💾 Бэкапы конфига Xray  {DIM}(история конфигов, откат){NC}")
+        _box_item("CB", f"🔄 Cold Boot Restore  {DIM}(авто-восстановление после reboot){NC}")
+        _box_item("HM", f"📡 Health Monitor нод  {DIM}(проверка exit-нод по расписанию){NC}")
         _box_back()
         _box_bottom()
         try:
@@ -29595,6 +29610,12 @@ def _menu_security() -> None:
             do_scheduler_menu()
         elif ch.lower() == "g":
             do_manage_ingress_geoip()
+        elif ch.lower() == "bk":
+            do_backup_menu()
+        elif ch.lower() == "cb":
+            do_cold_boot_menu()
+        elif ch.lower() == "hm":
+            do_health_monitor_menu()
         elif ch.lower() == "q" or ch == "":
             break
         else:
