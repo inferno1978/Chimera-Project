@@ -22904,7 +22904,9 @@ ts = datetime.now().strftime('%d.%m.%Y %H:%M')
 lines = [f'Daily Health Report [{{hostname}}]  {{ts}}', '']
 for svc in ('xray','nginx'):
     ok = _run(['systemctl','is-active',svc]).stdout.strip() == 'active'
-    lines.append(f'{{chr(9989) if ok else chr(10060)}} {{svc}}: {{\"активен\" if ok else \"НЕ АКТИВЕН\"}}')
+    _icon = chr(9989) if ok else chr(10060)
+    _status = 'активен' if ok else 'НЕ АКТИВЕН'
+    lines.append(f'{_icon} {svc}: {_status}')
 domain = ''
 try:
     if STATE_FILE.exists():
