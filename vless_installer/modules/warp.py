@@ -908,7 +908,7 @@ def do_manage_warp() -> None:
             print()
             break
 
-        if ch == "0" or ch == "":
+        if ch in ("0", "Q", "q", ""):
             break
 
         elif ch == "1":

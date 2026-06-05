@@ -1347,7 +1347,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
         _box_item("0", "← Отмена  (Ctrl+C)")
         _box_bot(); print()
         ch = _ask(f"{CYAN}Выбор [1/2/0]: {NC}", c=True).strip()
-        if ch == "0" or ch == "": return
+        if ch in ("0", "Q", "q", ""): return
         if ch == "1":
             if not _full_uninstall(silent=True): return
             print()

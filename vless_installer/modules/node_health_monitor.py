@@ -355,7 +355,7 @@ def do_health_monitor_menu() -> None:
 
         ch = input(f"{CYAN}Выбор: {NC}").strip().upper()
 
-        if ch == "0":
+        if ch in ("0", "Q", ""):
             break
 
         elif ch == "C":
