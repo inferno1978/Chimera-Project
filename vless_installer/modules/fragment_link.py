@@ -399,7 +399,7 @@ def _pick_fragment_preset() -> Optional[tuple[str, str, str]]:
         "3": ("1-2", "5-15", "20-50"),
     }
 
-    if ch == "0":
+    if ch in ("0", "Q", "q", ""):
         return ("", "", "")
 
     if ch in preset_map:

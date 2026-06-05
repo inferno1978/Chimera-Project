@@ -190,7 +190,7 @@ def do_backup_menu() -> None:
 
         ch = input(f"{CYAN}Выбор: {NC}").strip().upper()
 
-        if ch == "0":
+        if ch in ("0", "Q", "q", ""):
             break
 
         elif ch == "B":
