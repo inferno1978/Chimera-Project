@@ -15326,7 +15326,7 @@ def do_manage_fingerprint() -> None:
             print()
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -15856,7 +15856,7 @@ def do_manage_users() -> None:
                 warn("Применение не удалось — см. лог")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -17040,7 +17040,7 @@ def do_manage_geo_update() -> None:
                 warn("Лог /var/log/xray-geo-update.log не найден (обновлений ещё не было)")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -17546,7 +17546,7 @@ def do_manage_backup() -> None:
                     dim(f"  Удалён: {f.name}")
                 success(f"Удалено {len(to_del)} старых архивов")
             input(f"{BLUE}Нажмите Enter...{NC}")
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -17690,7 +17690,7 @@ def do_manage_scheduled_backup() -> None:
                 warn(f"Ошибка бэкапа: {e}")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -19268,7 +19268,7 @@ def do_manage_uuid_rotation() -> None:
                 _uuid_install_cron(days_map.get(iv, 7))
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -19484,7 +19484,7 @@ def do_manage_reality_keys() -> None:
                 warn("vless_link.txt не найден")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -19633,7 +19633,7 @@ def do_manage_watchdog() -> None:
                 warn("Watchdog не установлен — сначала включите его")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -20139,7 +20139,7 @@ def do_failover_status() -> None:
                 warn("Лог пуст")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -21536,7 +21536,7 @@ def do_manage_telegram() -> None:
                 success("Telegram-конфиг удалён")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -21939,7 +21939,7 @@ if changed:
             success("Проверка завершена")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -22643,7 +22643,7 @@ def do_manage_ttl_users() -> None:
                 info("Отмена")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -23029,7 +23029,7 @@ def do_manage_health_report() -> None:
                 warn("Лог не найден")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -23478,7 +23478,7 @@ def do_traffic_history() -> None:
             success("Снимок сохранён")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -23668,7 +23668,7 @@ def do_manage_geoip_block() -> None:
         elif ch == "7":
             do_manage_as_direct()
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -24363,7 +24363,7 @@ def do_manage_ru_subnet_direct() -> None:
             _show_xray_routing_rules()
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -25376,7 +25376,7 @@ def do_manage_as_direct() -> None:
             _box_bottom()
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -25441,7 +25441,7 @@ def do_connection_audit() -> None:
         elif ch == "4":
             _audit_active_now()
             input(f"{BLUE}Нажмите Enter...{NC}")
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -26403,7 +26403,7 @@ def do_manage_autoban() -> None:
                     success(f"Удалён из whitelist: {removed}")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -26591,7 +26591,7 @@ def do_manage_certbot_monitor() -> None:
             else:
                 warn("Лог пуст")
             input(f"{BLUE}Нажмите Enter...{NC}")
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -27349,7 +27349,7 @@ def do_view_changes_log() -> None:
                 success("Лог очищен")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор")
@@ -30420,7 +30420,7 @@ def do_manage_awg_watchdog() -> None:
                 print("  Лог-файл не найден.")
             input(f"\n{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор.")
@@ -31991,7 +31991,7 @@ def do_manage_auto_fallback() -> None:
                 warn("Лог пуст.")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
-        elif ch in ("q", ""):
+        elif ch in ("q", "Q", ""):
             break
         else:
             warn("Неверный выбор.")
