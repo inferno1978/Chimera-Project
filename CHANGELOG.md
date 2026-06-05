@@ -2,6 +2,73 @@
 
 ---
 
+## 🐛 v4.12.5 — 5 июня 2026 — IPv6 не работал через прокси (metadataOnly: True)
+
+### Исправлено
+
+---
+
+#### IPv6 недоступен при подключении через VLESS REALITY (test-ipv6.com показывал 0/10)
+
+**Симптом:** При подключении через прокси сайты с IPv6 открывались по IPv4,
+test-ipv6.com показывал `0/10`, хотя на сервере IPv6-связность была (`curl -6` работал),
+и в конфиге была выбрана стратегия `UseIPv6v4`.
+
+**Причина:** В трёх функциях генерации конфига Xray параметр `metadataOnly` был
+выставлен в `True` для базового сценария (без AWG, без split tunnel):
+
+```python
+# Было (неправильно для базового случая):
+"metadataOnly": True if AWG_EXIT_ENABLED else (False if SPLIT_TUNNEL_ENABLED else True)
+#                                                                              ^^^^ баг
+```
+
+При `metadataOnly: True` Xray не читает SNI/Host из трафика клиента.
+В результате outbound `freedom` получает уже готовый IPv4-адрес вместо доменного имени,
+`domainStrategy: UseIPv6v4` не применяется, и соединение устанавливается по IPv4.
+
+**Затронутые функции:**
+- `generate_xray_config()` — Режим A (основная установка)
+- `generate_xray_config_chain_entry()` — Режим A/B, xHTTP транспорт
+- `generate_xray_config_chain_entry_multi()` — Режим B, VLESS каскад
+
+**Исправление:** Условие упрощено — `metadataOnly: True` только при AWG
+(AWG использует маршрутизацию ядра и не зависит от sniffing доменов),
+во всех остальных случаях — `False`:
+
+```python
+# Стало:
+"metadataOnly": True if AWG_EXIT_ENABLED else False
+```
+
+**Как исправить на существующей установке** (без переустановки):
+
+```bash
+cd /opt/vless-ultimate && git pull
+
+python3 - <<'EOF'
+import json
+path = "/etc/xray/config.json"
+with open(path) as f:
+    d = json.load(f)
+for ib in d.get("inbounds", []):
+    sn = ib.get("sniffing", {})
+    if sn.get("metadataOnly") == True:
+        sn["metadataOnly"] = False
+        print(f"inbound [{ib.get('tag')}] metadataOnly -> False")
+    if sn.get("routeOnly") == True:
+        sn["routeOnly"] = False
+        print(f"inbound [{ib.get('tag')}] routeOnly -> False")
+with open(path, "w") as f:
+    json.dump(d, f, indent=2, ensure_ascii=False)
+print("Готово.")
+EOF
+
+systemctl restart xray
+```
+
+---
+
 ## 🐛 v4.12.4 — 4 июня 2026 — Совместимость с Python 3.10 (Ubuntu 22.04)
 
 ### Исправлено
