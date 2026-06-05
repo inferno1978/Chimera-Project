@@ -291,7 +291,7 @@ def do_cold_boot_menu() -> None:
 
         ch = input(f"{CYAN}Выбор: {NC}").strip().upper()
 
-        if ch == "0":
+        if ch in ("0", "Q", "q", ""):
             break
 
         elif ch == "I" and not installed:
