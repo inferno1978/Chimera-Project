@@ -7714,6 +7714,33 @@ def _create_simple_site(
 # =============================================================================
 #  ШАГ 10: NGINX ВРЕМЕННЫЙ КОНФИГ
 # =============================================================================
+def _ensure_nginx_sites_enabled_include() -> None:
+    """
+    nginx из официального репо (nginx.org) использует conf.d/ и не включает
+    sites-enabled/ по умолчанию. Эта функция добавляет:
+        include /etc/nginx/sites-enabled/*;
+    в блок http {} файла /etc/nginx/nginx.conf если строка отсутствует.
+    """
+    nginx_conf = Path("/etc/nginx/nginx.conf")
+    if not nginx_conf.exists():
+        return
+    text = nginx_conf.read_text()
+    if "sites-enabled" in text:
+        return  # уже есть
+    # Ищем закрывающую скобку блока http {}
+    # Вставляем include перед последней } в файле
+    insert_line = "    include /etc/nginx/sites-enabled/*;"
+    # Находим позицию последней закрывающей скобки
+    idx = text.rfind("}")
+    if idx == -1:
+        warn("nginx.conf: не удалось найти блок http {} — include sites-enabled не добавлен")
+        return
+    new_text = text[:idx] + insert_line + "
+}" + text[idx+1:]
+    nginx_conf.write_text(new_text)
+    info("nginx.conf: добавлен include /etc/nginx/sites-enabled/* (nginx.org репо)")
+
+
 def setup_nginx_temp() -> None:
     global STAGE_NGINX_DONE
     info("Настройка Nginx для certbot (временный конфиг)...")
@@ -7740,6 +7767,10 @@ def setup_nginx_temp() -> None:
     web_root.mkdir(parents=True, exist_ok=True)
     NGINX_CONF_DIR.mkdir(parents=True, exist_ok=True)
     NGINX_ENABLED_DIR.mkdir(parents=True, exist_ok=True)
+
+    # nginx из официального репо (nginx.org) не включает sites-enabled по умолчанию.
+    # Проверяем nginx.conf и добавляем include если отсутствует.
+    _ensure_nginx_sites_enabled_include()
 
     cfg = NGINX_CONF_DIR / PARAM_DOMAIN
     cfg.write_text(textwrap.dedent(f"""\
@@ -8042,11 +8073,12 @@ def setup_nginx_final() -> None:
         }}
 
         # Default server: reject all other SNI
+        # ssl_reject_handshake поддерживается только начиная с nginx 1.19.4
+        {"" if (nginx_major > 1 or (nginx_major == 1 and nginx_minor >= 19)) else "# UNSUPPORTED on nginx " + nginx_ver}
         server {{
             {listen_default}
             server_name _;
-            ssl_reject_handshake on;
-            return 444;
+            {"ssl_reject_handshake on;" if (nginx_major > 1 or (nginx_major == 1 and nginx_minor >= 19)) else "return 444;  # ssl_reject_handshake недоступна в nginx " + nginx_ver}
         }}
     """))
 
