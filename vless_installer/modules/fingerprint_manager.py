@@ -42,7 +42,7 @@ XRAY_FP_LIST: list[str] = [
 
 DEFAULT_FP: str = "chrome"
 
-# Сопоставление отображаемых пунктов меню → имён FP (строится динамически)
+# Сопоставление номера → имени FP
 _FP_MENU: dict[str, str] = {str(i): fp for i, fp in enumerate(XRAY_FP_LIST, 1)}
 
 
@@ -69,39 +69,28 @@ def prompt_fingerprint(
     - При некорректном вводе предупреждает и повторяет запрос.
     - KeyboardInterrupt прокидывается наверх (для корректной отмены установки).
     """
-    # Импортируем здесь, чтобы не создавать циклический импорт.
-    # _core.py импортирует нас, а мы импортируем цветовые константы из _core.
     try:
         from vless_installer._core import (  # type: ignore[import]
-            _box_top, _box_item, _box_bottom, _box_sep,
+            _box_top, _box_item, _box_bottom, _box_row,
             success, warn,
-            CYAN, GREEN, NC, BLUE, DIM,
+            CYAN, NC, BLUE,
         )
     except ImportError:
         # Fallback для юнит-тестов вне основного проекта
-        def _box_top(s: str = "") -> None: print(f"┌─ {s}")         # noqa: E731
-        def _box_item(k: str, v: str) -> None: print(f"│  [{k}] {v}")  # noqa: E731
-        def _box_bottom() -> None: print("└" + "─" * 40)            # noqa: E731
-        def _box_sep() -> None: print("├" + "─" * 40)              # noqa: E731
-        def success(s: str) -> None: print(f"[OK] {s}")             # noqa: E731
-        def warn(s: str) -> None: print(f"[!] {s}")                 # noqa: E731
-        CYAN = GREEN = NC = BLUE = DIM = ""
+        def _box_top(s: str = "") -> None: print(f"┌─ {s}")
+        def _box_item(k: str, v: str) -> None: print(f"│  [{k}] {v}")
+        def _box_bottom() -> None: print("└" + "─" * 40)
+        def _box_row(s: str = "") -> None: print(f"│  {s}")
+        def success(s: str) -> None: print(f"[OK] {s}")
+        def warn(s: str) -> None: print(f"[!] {s}")
+        CYAN = NC = BLUE = ""
 
     title = f"Fingerprint браузера (TLS/uTLS){' — ' + label if label else ''}"
     _box_top(f"{BLUE}{title}{NC}")
-
-    # Формируем строки меню: по 3 пункта в ряд для компактности
-    items = list(_FP_MENU.items())
-    row_size = 3
-    for row_start in range(0, len(items), row_size):
-        row = items[row_start:row_start + row_size]
-        parts = []
-        for num, fp_name in row:
-            marker = f"{GREEN}✓{NC} " if fp_name == current else "  "
-            parts.append(f"{CYAN}[{num}]{NC} {marker}{fp_name}")
-        _box_sep()
-        print("  " + "   ".join(parts))
-
+    _box_row()
+    for num, fp_name in _FP_MENU.items():
+        _box_item(num, fp_name)
+    _box_row()
     _box_bottom()
 
     valid_names = set(XRAY_FP_LIST)
@@ -113,30 +102,24 @@ def prompt_fingerprint(
     while True:
         try:
             raw = input(
-                f"   Выбор [{default_num} = {current}] "
-                f"(номер или имя, Enter = {current}): "
+                f"  {CYAN}Выбор [{default_num} = {current}]"
+                f" (номер или имя, Enter = {current}): {NC}"
             ).strip()
         except KeyboardInterrupt:
             print()
             raise
 
-        # Пустой ввод → fallback
         if not raw:
-            success(f"   Fingerprint: {current}")
+            success(f"  Fingerprint: {current}")
             return current
 
-        # Ввод номера
         if raw in _FP_MENU:
             chosen = _FP_MENU[raw]
-            success(f"   Fingerprint: {chosen}")
+            success(f"  Fingerprint: {chosen}")
             return chosen
 
-        # Ввод имени напрямую
         if raw in valid_names:
-            success(f"   Fingerprint: {raw}")
+            success(f"  Fingerprint: {raw}")
             return raw
 
-        warn(
-            f"   Некорректный выбор. "
-            f"Введите номер 1–{len(XRAY_FP_LIST)} или имя из списка."
-        )
+        warn(f"  Некорректный выбор. Введите номер 1–{len(XRAY_FP_LIST)} или имя из списка.")
