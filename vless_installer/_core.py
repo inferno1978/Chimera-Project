@@ -2310,7 +2310,6 @@ def prompt_protocol_mode() -> None:
             SERVER_PORT = 8443
             break
         elif ch == "3":
-            _box_bottom()
             while True:
                 try:
                     raw = input("  Порт (1–65535): ").strip()
@@ -2325,8 +2324,7 @@ def prompt_protocol_mode() -> None:
         else:
             warn("Введите 1, 2 или 3")
     XHTTP_PORT = SERVER_PORT   # синхронизируем alias
-    _box_row(f"  {GREEN}✓ Порт: {SERVER_PORT}{NC}")
-    _box_bottom()
+    print(f"  {GREEN}✓ Порт: {SERVER_PORT}{NC}")
 
 
 def _build_sockopt(tcp_no_delay: bool | None = None) -> dict:
