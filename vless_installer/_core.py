@@ -3786,6 +3786,7 @@ def generate_xray_config_chain_entry() -> None:
     cfg_file = CONFIG_DIR / "config.json"
     _apply_stats_to_config(config)
     cfg_file.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+    _set_config_owner(cfg_file)
 
     # Симлинк
     alt_dir = Path("/usr/local/etc/xray")
@@ -4889,6 +4890,7 @@ def generate_xray_config_chain_entry_multi() -> None:
     cfg_file = CONFIG_DIR / "config.json"
     _apply_stats_to_config(config)
     cfg_file.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+    _set_config_owner(cfg_file)
 
     alt_dir = Path("/usr/local/etc/xray")
     if alt_dir.exists():
@@ -7158,11 +7160,7 @@ def generate_xray_config() -> None:
         except Exception:
             pass
 
-    try:
-        cfg_file.chmod(0o640)
-        _run(["chown", "root:xray", str(cfg_file)], check=False, quiet=True)
-    except Exception:
-        cfg_file.chmod(0o600)
+    _set_config_owner(cfg_file)
 
     r = _run([str(XRAY_BIN), "run", "-test", "-config", str(cfg_file)],
              capture=True, check=False)
@@ -7317,11 +7315,7 @@ def generate_xray_config_xhttp() -> None:
         except Exception:
             pass
 
-    try:
-        cfg_file.chmod(0o640)
-        _run(["chown", "root:xray", str(cfg_file)], check=False, quiet=True)
-    except Exception:
-        cfg_file.chmod(0o600)
+    _set_config_owner(cfg_file)
 
     # Валидация (может упасть если сертификат ещё не получен — нормально)
     r = _run([str(XRAY_BIN), "run", "-test", "-config", str(cfg_file)],
