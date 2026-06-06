@@ -2,6 +2,85 @@
 
 ---
 
+## ✨ v4.12.7 — 7 июня 2026 — Telemt: гибридный fallback Middle Proxy → Direct Mode
+
+### Новое
+
+#### Telemt: автоматический fallback из Middle Proxy в Direct Mode
+
+Новый модуль `telemt_fallback.py` реализует гибридный режим работы Telemt:
+при деградации ME-серверов Telegram сервис автоматически переключается в
+Direct Mode без перезапуска и разрыва активных соединений.
+
+**Новые параметры в секции `[middle_proxy]` в `telemt.toml`** (все опциональны,
+старые конфиги работают без изменений):
+
+```toml
+[middle_proxy]
+fallback_to_direct      = true   # разрешить автоматический fallback
+fallback_after_attempts = 3      # попыток инициализации ME-пула до признания недоступным
+fallback_after_seconds  = 45     # максимальное время warmup (секунд)
+auto_revert_to_middle   = false  # автовозврат в Middle после восстановления (каркас)
+```
+
+**Логика работы:**
+- После старта Telemt выполняется TCP-проверка ME-серверов (DC1–DC5, кворум ≥34%)
+- При неудаче после `fallback_after_attempts` попыток или по истечении `fallback_after_seconds` — runtime-переключение в Direct Mode
+- Переключение затрагивает только транспорт до Telegram DC; порты, iptables и xray-интеграция не изменяются
+- Защита от restart-loop: повторная попытка инициализации Middle Proxy только при `systemctl reload` или через `auto_revert_to_middle`
+
+**Новые пункты в меню Telemt:**
+- `[F]` Hybrid Fallback — просмотр состояния, изменение параметров, ручное переключение режима, ME-проба, hot-reload
+- Строка статуса `Fallback:` в шапке меню
+
+**Логирование:**
+```
+WARN  Middle Proxy warmup timeout exceeded (45s)
+WARN  ME pool initialization failed after 3 attempts
+WARN  ME pool initialization failed for too long → falling back to Direct DC mode for stability
+INFO  Runtime transport mode switched: Middle Proxy -> Direct
+INFO  Configuration reload requested Middle Proxy mode, starting ME pool initialization
+```
+
+**Встроенные тесты:** `python telemt_fallback.py --test` (24 теста)
+
+---
+
+### Исправлено
+
+#### Telemt: дублирование ключа `use_middle_proxy` в `telemt.toml`
+
+**Симптом:** После срабатывания fallback Telemt не запускался:
+```
+TOML parse error at line 7, column 1
+use_middle_proxy = false
+^^^^^^^^^^^^^^^^
+duplicate key
+```
+
+**Причина:** `_patch_config_middle_proxy()` определяла отсутствие ключа по сравнению
+строк `new_text == text`. При повторном вызове с тем же значением (`false → false`)
+regex заменял успешно, но строки оставались идентичными — функция уходила в ветку
+вставки и добавляла второй экземпляр ключа.
+
+**Исправление:** Наличие ключа теперь проверяется отдельным `re.search` до любых
+замен. Добавлен проход по строкам, удаляющий дубликаты даже из уже повреждённых
+конфигов. Функция идемпотентна: N последовательных вызовов гарантируют ровно одно
+вхождение ключа.
+
+---
+
+#### Telemt: неполный список `[dc_overrides]` в Direct Mode
+
+**Симптом:** При fallback в Direct Mode часть Telegram DC могла не резолвиться —
+в конфиг добавлялся только DC203, тогда как Telemt обслуживает группы
+`[-203, -3, -2, -1, 1, 2, 3, 203, -5, -4, 5]`.
+
+**Исправление:** `[dc_overrides]` теперь содержит все 12 записей:
+DC1–DC5, их зеркала (-1..-5), DC203 и -DC203.
+
+---
+
 ## 🛠 v4.12.7 — 6 июня 2026 — Хотфиксы Ubuntu 22.04
 
 ### Исправлено
