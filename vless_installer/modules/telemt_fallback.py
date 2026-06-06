@@ -417,19 +417,42 @@ def _patch_config_middle_proxy(
         return False
     try:
         text = config_file.read_text(encoding="utf-8", errors="replace")
-        # Заменяем use_middle_proxy
-        new_text = re.sub(
-            r'^(use_middle_proxy\s*=\s*)(true|false)',
-            f'\\g<1>{str(enable).lower()}',
+
+        # Проверяем наличие ключа (независимо от текущего значения и пробелов)
+        key_present = bool(re.search(
+            r'^use_middle_proxy\s*=\s*(true|false)',
             text,
             flags=re.MULTILINE | re.IGNORECASE,
-        )
-        if new_text == text:
-            # Ключ не найден — вставляем после [general]
+        ))
+
+        if key_present:
+            # Ключ есть — заменяем значение. count=1 защищает от двойной замены.
+            new_text = re.sub(
+                r'^(use_middle_proxy\s*=\s*)(true|false)',
+                f'use_middle_proxy = {str(enable).lower()}',
+                text,
+                count=1,
+                flags=re.MULTILINE | re.IGNORECASE,
+            )
+            # Удаляем возможные дублирующиеся строки (защита от старых конфигов)
+            lines = new_text.splitlines()
+            seen_key = False
+            out_lines = []
+            for line in lines:
+                if re.match(r'^use_middle_proxy\s*=', line, re.IGNORECASE):
+                    if seen_key:
+                        continue   # дубликат — пропускаем
+                    seen_key = True
+                out_lines.append(line)
+            new_text = "\n".join(out_lines)
+            if not new_text.endswith("\n"):
+                new_text += "\n"
+        else:
+            # Ключ отсутствует — вставляем сразу после заголовка [general]
             new_text = re.sub(
                 r'(\[general\])',
                 f'\\1\nuse_middle_proxy = {str(enable).lower()}',
-                new_text,
+                text,
                 count=1,
             )
 
