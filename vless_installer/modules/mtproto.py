@@ -97,6 +97,16 @@ from vless_installer.modules.tg_nets import (
     tg_nets_status_line  as _tg_nets_status_line,
 )
 
+# Гибридный fallback: Middle Proxy → Direct Mode (telemt_fallback.py)
+# Импортируем lazy чтобы не замедлять старт при первом импорте mtproto.
+def _get_fallback_module():
+    """Lazy-import telemt_fallback — изолирует ошибки импорта."""
+    try:
+        from vless_installer.modules import telemt_fallback as _fb_mod
+        return _fb_mod
+    except ImportError:
+        return None
+
 def _TG_NETS_current() -> list:
     """Возвращает актуальный список подсетей TG (файл → встроенный)."""
     return _get_tg_nets()
@@ -429,9 +439,10 @@ def _save_users(users: dict) -> None:
     CONFIG_FILE.write_text(content)
 
 def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
-                  socks5_port: int = 0) -> None:
+                  socks5_port: int = 0, fallback_cfg=None) -> None:
     """
     socks5_port > 0  →  upstream через локальный SOCKS5 (xray), иначе direct.
+    fallback_cfg     →  FallbackConfig (из telemt_fallback); None = не писать секцию.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -468,6 +479,15 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
         lines += ["", "[dc_overrides]", '"203" = "91.105.192.100:443"']
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
     CONFIG_FILE.chmod(0o640)
+
+    # Записываем секцию [middle_proxy] с параметрами fallback (если передана)
+    if fallback_cfg is not None:
+        _fb_mod = _get_fallback_module()
+        if _fb_mod is not None:
+            try:
+                _fb_mod.append_fallback_section(CONFIG_FILE, fallback_cfg)
+            except Exception as _e:
+                _warn(f"Не удалось записать [middle_proxy]: {_e}")
 
 
 
@@ -1388,6 +1408,39 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     tls_domain = _select_domain()
     use_mp     = _is_direct_ip(server_ip)
 
+    # ── Настройка гибридного fallback (Middle Proxy → Direct) ────────────────
+    # Шаг показывается только если use_mp=True (Middle Proxy актуален).
+    # При use_mp=False сервер за NAT — Middle Proxy уже отключён, fallback не нужен.
+    _fb_cfg = None
+    if use_mp:
+        _fb_mod = _get_fallback_module()
+        if _fb_mod is not None:
+            try:
+                _banner()
+                _box_top("HYBRID FALLBACK  •  MIDDLE PROXY → DIRECT")
+                _box_row()
+                _box_info("Telemt может автоматически переключаться в Direct Mode")
+                _box_info("при деградации ME-серверов Telegram.")
+                _box_row()
+                _box_info("Переключение затрагивает только транспорт до Telegram DC.")
+                _box_info("Порты, iptables и xray-интеграция не изменяются.")
+                _box_row()
+                _box_item("Y", f"Настроить fallback  {GREEN}(рекомендуется){NC}")
+                _box_item("N", f"Пропустить (всегда Middle Proxy)")
+                _box_bot(); print()
+                _fb_ans = _ask(
+                    f"{CYAN}Настроить hybrid fallback? [Y/n]: {NC}",
+                    default="y", c=True,
+                ).strip().lower()
+                if _fb_ans in ("y", ""):
+                    _fb_cfg = _fb_mod.me_probe_menu(CONFIG_FILE)
+                else:
+                    # Создаём конфиг с дефолтами (fallback разрешён, но без интерактива)
+                    _fb_cfg = _fb_mod.FallbackConfig.defaults()
+            except Exception as _fe:
+                _warn(f"Модуль fallback недоступен: {_fe}")
+                _fb_cfg = None
+
     # ── Xray tproxy-интеграция (dokodemo + iptables REDIRECT) ────────────────
     # Работает для VLESS-цепочек и AWG 2.0 — транспорт прозрачен для схемы.
     _xs       = _xray_tproxy_status()
@@ -1458,7 +1511,8 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
 
     _info("Генерирую конфиг...")
     # telemt всегда в режиме direct — xray перехватывается на уровне iptables
-    _write_config(port, ipv4, ipv6, tls_domain, users, use_mp, socks5_port=0)
+    _write_config(port, ipv4, ipv6, tls_domain, users, use_mp, socks5_port=0,
+                  fallback_cfg=_fb_cfg)
     _ok(f"Конфиг: {CONFIG_FILE}")
 
     _info("Устанавливаю зависимости...")
@@ -1507,14 +1561,50 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     else:
         _warn(f"Порт не открылся за 40с — journalctl -u telemt -n 30")
 
-    # ── Финальный отчёт ───────────────────────────────────────────────────────
+    # ── Post-install: проверка ME-серверов и автоматический fallback ──────────
+    # Выполняется только при use_mp=True и если fallback настроен.
+    # Не блокирует установку при ошибке — предупреждает и продолжает.
+    _fallback_triggered = False
+    _fallback_msg = ""
+    if use_mp and _fb_cfg is not None and getattr(_fb_cfg, "fallback_to_direct", False):
+        _fb_mod = _get_fallback_module()
+        if _fb_mod is not None:
+            _info("Проверяю доступность ME-серверов (Telegram Middle Proxy)...")
+            try:
+                _fb_result = _fb_mod.run_post_install_fallback_check(
+                    config_file=CONFIG_FILE,
+                    service=SERVICE_NAME,
+                    warmup_wait=8,
+                )
+                if _fb_result:
+                    # Fallback сработал
+                    _warn("Middle Proxy недоступен — активирован Direct Mode.")
+                    _warn("Конфиг обновлён автоматически (telemt.toml не перезаписан).")
+                    _fallback_triggered = True
+                    _fallback_msg = _fb_result
+                else:
+                    _ok("Middle Proxy доступен — работаем в режиме Middle Proxy.")
+            except Exception as _fe:
+                _warn(f"Проверка ME-серверов не удалась: {_fe}")
     _banner(); _box_top("✅ УСТАНОВКА ЗАВЕРШЕНА"); _box_row()
     _box_ok(f"Версия:  telemt {tag}")
     _box_ok(f"Порт:    {port}")
     _box_ok(f"Домен:   {tls_domain}")
     _box_ok(f"IPv4:    {server_ip or '—'}")
     if server_ipv6: _box_ok(f"IPv6:    {server_ipv6}")
-    _box_ok(f"Middle:  {'да' if use_mp else 'нет (NAT)'}")
+    if use_mp and not _fallback_triggered:
+        _box_ok(f"Middle:  да (активен)")
+    elif use_mp and _fallback_triggered:
+        _box_warn(f"Middle:  отказ → Direct Mode (ME-серверы недоступны)")
+    else:
+        _box_ok(f"Middle:  нет (NAT / Direct)")
+    # Статус fallback-настройки
+    if _fb_cfg is not None:
+        _fb_status = (
+            f"включён (попыток: {_fb_cfg.fallback_after_attempts}, "
+            f"timeout: {_fb_cfg.fallback_after_seconds}s)"
+        )
+        _box_ok(f"Fallback: {_fb_status}")
     _box_ok(f"Учёт:    {'активен (iptables)' if ipt_ok else 'journalctl'}")
     if _use_tproxy and tproxy_ok_msg:
         _cascade_label = "AWG 2.0" if _cascade == "awg" else "VLESS"
@@ -1719,6 +1809,11 @@ def mtproto_menu() -> None:
         # Статус подсетей Telegram
         _box_kv("Подсети:", _tg_nets_status_line())
 
+        # Статус hybrid fallback одной строкой
+        _fb_mod_for_status = _get_fallback_module()
+        if _fb_mod_for_status is not None and CONFIG_FILE.exists():
+            _box_kv("Fallback:", _fb_mod_for_status.fallback_status_line(CONFIG_FILE))
+
         _box_row(); _box_sep()
         _box_item("1", "🚀  Установить / переустановить")
         _box_item("2", "👥  Управление пользователями")
@@ -1728,6 +1823,7 @@ def mtproto_menu() -> None:
         _box_item("6", "📊  Статистика трафика")
         _box_item("7", "📋  Статус / логи")
         _box_item("X", "🔗  Xray-интеграция (SOCKS5 ↔ каскад)")
+        _box_item("F", "🔀  Hybrid Fallback (Middle Proxy → Direct)")
         _box_item("N", "🌐  Обновить подсети Telegram (RIPE NCC)")
         _box_item("8", f"{RED}🗑️   Полное удаление{NC}")
         _box_sep()
@@ -1820,6 +1916,96 @@ def mtproto_menu() -> None:
                 _menu_xray_integration()
             except _Cancelled:
                 pass
+
+        elif ch == "f":
+            # ── Hybrid Fallback управление ────────────────────────────────────
+            if not CONFIG_FILE.exists():
+                _warn("Telemt не установлен."); _pause(); continue
+            _fb_mod = _get_fallback_module()
+            if _fb_mod is None:
+                _warn("Модуль telemt_fallback недоступен."); _pause(); continue
+            try:
+                _banner()
+                _box_top("🔀  HYBRID FALLBACK  •  MIDDLE PROXY → DIRECT")
+                _box_row()
+                _fb_now = _fb_mod.read_fallback_config(CONFIG_FILE)
+                _mp_now = _fb_mod.read_runtime_middle_proxy(CONFIG_FILE)
+                _box_kv("Текущий режим:",    f"{'Middle Proxy' if _mp_now else 'Direct'}")
+                _box_kv("fallback_to_direct:",       f"{GREEN if _fb_now.fallback_to_direct else RED}{_fb_now.fallback_to_direct}{NC}")
+                _box_kv("fallback_after_attempts:",  str(_fb_now.fallback_after_attempts))
+                _box_kv("fallback_after_seconds:",   str(_fb_now.fallback_after_seconds))
+                _box_kv("auto_revert_to_middle:",    f"{GREEN if _fb_now.auto_revert_to_middle else DIM}{_fb_now.auto_revert_to_middle}{NC}")
+                _box_row(); _box_sep()
+                _box_item("1", "⚙️   Изменить параметры fallback")
+                _box_item("2", "🔍  Проверить ME-серверы сейчас")
+                _box_item("3", "🔄  Применить reload (hot-reload конфига)")
+                _box_item("4", f"→  Переключить в Direct Mode вручную")
+                _box_item("5", f"←  Переключить в Middle Proxy вручную")
+                _box_sep()
+                _box_item("Q", "← Назад")
+                _box_bot(); print()
+
+                try:
+                    fb_ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+                except _Cancelled:
+                    fb_ch = "q"
+
+                if fb_ch == "1":
+                    new_fb_cfg = _fb_mod.me_probe_menu(CONFIG_FILE)
+                    _fb_mod.append_fallback_section(CONFIG_FILE, new_fb_cfg)
+                    _ok("Параметры fallback обновлены в конфиге.")
+                    _pause()
+
+                elif fb_ch == "2":
+                    print()
+                    _info("Проверяю ME-серверы...")
+                    probe = _fb_mod.MiddleProxyProbe()
+                    ok_c, total_c = probe.probe_all()
+                    ratio = ok_c / total_c if total_c else 0
+                    if ratio >= _fb_mod._ME_QUORUM:
+                        _ok(f"ME-серверы доступны: {ok_c}/{total_c} ({ratio:.0%})")
+                    else:
+                        _warn(f"ME-серверы НЕДОСТУПНЫ: {ok_c}/{total_c} ({ratio:.0%} < кворум)")
+                    hits = _fb_mod.check_journal_for_me_failures()
+                    if hits:
+                        _warn(f"В журнале найдены сигналы отказа ME ({len(hits)} строк):")
+                        for h in hits[:3]:
+                            print(f"    {DIM}{h[:70]}{NC}")
+                    else:
+                        _ok("Журнал: сигналов отказа ME не найдено.")
+                    _pause()
+
+                elif fb_ch == "3":
+                    _info("Выполняю hot-reload конфига...")
+                    fb_orch = _fb_mod.FallbackOrchestrator(
+                        fb_config=_fb_now, config_file=CONFIG_FILE, service=SERVICE_NAME,
+                    )
+                    result = fb_orch.apply_reload_config()
+                    _ok(result)
+                    _pause()
+
+                elif fb_ch == "4":
+                    _info("Переключаю в Direct Mode (runtime)...")
+                    ok_p = _fb_mod._patch_config_middle_proxy(CONFIG_FILE, enable=False)
+                    if ok_p:
+                        _fb_mod._reload_telemt(SERVICE_NAME)
+                        _ok("Переключено в Direct Mode. use_middle_proxy=false в конфиге.")
+                    else:
+                        _err("Не удалось обновить конфиг.")
+                    _pause()
+
+                elif fb_ch == "5":
+                    _info("Переключаю в Middle Proxy (runtime)...")
+                    ok_p = _fb_mod._patch_config_middle_proxy(CONFIG_FILE, enable=True)
+                    if ok_p:
+                        _fb_mod._reload_telemt(SERVICE_NAME)
+                        _ok("Переключено в Middle Proxy. use_middle_proxy=true в конфиге.")
+                    else:
+                        _err("Не удалось обновить конфиг.")
+                    _pause()
+
+            except Exception as _fe:
+                _err(f"Ошибка fallback-меню: {_fe}"); _pause()
 
         elif ch == "n":
             # ── Обновление подсетей Telegram ──────────────────────────────
