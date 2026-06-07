@@ -26004,8 +26004,8 @@ def _autoban_run_once() -> int:
                     cfg["ban_history"] = cfg["ban_history"][-500:]
                 new_bans += 1
                 log_to_file("INFO", f"AutoBan: {ip} banned ({count} errors)")
-                _tg_notify_event("xray_down",
-                    f"🚫 IP <b>{ip}</b> забанен автоматически: {count} TLS-ошибок за {window} мин")
+                _tg_notify_event("autoban",
+                    f"IP <b>{ip}</b> забанен автоматически: {count} TLS-ошибок за {window} мин")
                 try:
                     _XRAY_BAN_LOG.parent.mkdir(parents=True, exist_ok=True)
                     with _XRAY_BAN_LOG.open("a") as f:

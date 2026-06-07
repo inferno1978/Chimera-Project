@@ -185,6 +185,7 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "health_report": "📋",
         "node_down":     "📡",
         "port_blocked":  "🚫",
+        "autoban":       "🛡️",
         "port_hopping":  "⚡",
     }
     icon = icons.get(event, "ℹ️")
@@ -755,6 +756,7 @@ def do_manage_telegram() -> None:
                 "health_report":"Ежедневный health-отчёт (08:00)",
                 "node_down":    "Exit-нода недоступна",
                 "port_blocked": "Порт заблокирован ТСПУ",
+                "autoban":      "AutoBan — IP забанен автоматически",
             }
             for ev, label in event_labels.items():
                 en = events.get(ev, True)
@@ -804,11 +806,11 @@ def do_manage_telegram() -> None:
 
         elif ch == "3":
             ev_keys = ["xray_down","xray_up","cert_expire","traffic_limit",
-                       "health_report","node_down","port_blocked"]
+                       "health_report","node_down","port_blocked","autoban"]
             ev_labels = [
                 "Xray упал","Xray восстановился","Сертификат истекает",
                 "Лимит трафика","Daily health-отчёт","Exit-нода недоступна",
-                "Порт заблокирован ТСПУ",
+                "Порт заблокирован ТСПУ","AutoBan — IP забанен",
             ]
             events = cfg.get("events", {k: True for k in ev_keys})
             print()
