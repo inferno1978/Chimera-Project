@@ -458,8 +458,7 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
     if ipv4: lines += ['[[server.listeners]]', 'ip = "0.0.0.0"', ""]
     if ipv6: lines += ['[[server.listeners]]', 'ip = "::"', ""]
     lines += [
-        "[timeouts]", "client_handshake = 60", "tg_connect = 10",
-        "client_keepalive = 60", "client_ack = 300",
+        "[timeouts]", "client_handshake = 300", "client_keepalive = 60", "client_ack = 300",
         "", "[censorship]", f'tls_domain = "{tls_domain}"',
         "mask = true", "mask_port = 443", "fake_cert_len = 2048",
         "", "[access]", "replay_check_len = 65536", "ignore_time_skew = false",
