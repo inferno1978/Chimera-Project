@@ -5547,18 +5547,20 @@ def generate_chain_summary() -> None:
     proto = PROTOCOL_MODE
     if proto == "xhttp":
         _path_enc = _uparse.quote(XHTTP_PATH, safe="/")
+        _cs_fp = PARAM_FINGERPRINT or _fp_from_state()
         link = (
             f"vless://{PARAM_UUID}@{entry_host}:{SERVER_PORT}"
             f"?type=xhttp&security=tls&sni={PARAM_DOMAIN}"
             f"&path={_path_enc}&mode={XHTTP_MODE}"
-            f"&fp={PARAM_FINGERPRINT or 'chrome'}#{_chain_label}"
+            f"&fp={_cs_fp}#{_chain_label}"
         )
     else:
         _reality_sni = PARAM_REALITY_DEST if AWG_EXIT_ENABLED else PARAM_DOMAIN
+        _cs_fp = PARAM_FINGERPRINT or _fp_from_state()
         link = (
             f"vless://{PARAM_UUID}@{entry_host}:{SERVER_PORT}"
             f"?type=tcp&security=reality&pbk={PARAM_PUBLIC_KEY}"
-            f"&fp={PARAM_FINGERPRINT or 'chrome'}&sni={_reality_sni}&sid={PARAM_SHORTID}"
+            f"&fp={_cs_fp}&sni={_reality_sni}&sid={PARAM_SHORTID}"
             f"&flow=xtls-rprx-vision#{_chain_label}"
         )
 
