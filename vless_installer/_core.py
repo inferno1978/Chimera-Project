@@ -29445,6 +29445,7 @@ def _load_state_into_globals() -> None:
     global AWG_EXIT_ENABLED, AWG_INSTALLED, AWG_EXIT_HOST, AWG_EXIT_PORT, PARAM_REALITY_DEST
     global H2_EXIT_ENABLED
     global XTLS_FLOW
+    global PARAM_FINGERPRINT
     # === FIX 1: объявление глобалей для multi-node полей ===
     global AWG_NODES, AWG_ACTIVE_NODE_INDEX, _AWG_SSH_CLIENT_IP
     # === END FIX 1 ===
@@ -29467,6 +29468,7 @@ def _load_state_into_globals() -> None:
         PARAM_UUID       = state.get("uuid",        PARAM_UUID)
         PARAM_PUBLIC_KEY = state.get("public_key",  PARAM_PUBLIC_KEY)
         PARAM_SHORTID    = state.get("short_id",    PARAM_SHORTID)
+        PARAM_FINGERPRINT = state.get("fingerprint", PARAM_FINGERPRINT) or "chrome"
         IPV6_PREFLIGHT   = state.get("ipv6",        IPV6_PREFLIGHT)
         INSTALL_MODE     = state.get("install_mode", "A")
         if IPV6_PREFLIGHT:
