@@ -16063,7 +16063,7 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
         flagged_label = _flag_prefix + urllib.parse.quote(label)
         flagged_domain = _flag_prefix + urllib.parse.quote(domain)
         return _gen_vless_link(
-            host, uid, pub_key, short_id, _sni, "chrome",
+            host, uid, pub_key, short_id, _sni, st.get("fingerprint", "chrome") or "chrome",
             proto=proto, xhttp_path=xhttp_path, xhttp_mode=xhttp_mode,
             port=port,
         ).replace(f"#{flagged_domain}", f"#{flagged_label}")
