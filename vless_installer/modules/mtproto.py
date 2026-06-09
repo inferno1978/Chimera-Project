@@ -474,7 +474,10 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
         "mask = true", "mask_port = 443", "fake_cert_len = 2048",
     ]
     if client_mss:
-        censorship_lines.append(f'client_mss = "{client_mss}"')
+        if client_mss.lstrip('-').isdigit():
+            censorship_lines.append(f'client_mss = {client_mss}')
+        else:
+            censorship_lines.append(f'client_mss = "{client_mss}"')
     lines += censorship_lines
     lines += [
         "", "[access]", "replay_check_len = 65536", "ignore_time_skew = false",
