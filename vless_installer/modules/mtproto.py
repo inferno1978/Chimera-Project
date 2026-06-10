@@ -1568,8 +1568,10 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     time.sleep(1)
 
     _info("Генерирую конфиг...")
-    # telemt всегда в режиме direct — xray перехватывается на уровне iptables
-    _write_config(port, ipv4, ipv6, tls_domain, users, use_mp, socks5_port=0,
+    # telemt всегда в режиме direct — xray перехватывается на уровне iptables REDIRECT.
+    # use_middle_proxy=True несовместим с каскадом: ME-серверы на :8888 попадают под REDIRECT.
+    # Всегда передаём False независимо от ответа пользователя.
+    _write_config(port, ipv4, ipv6, tls_domain, users, False, socks5_port=0,
                   fallback_cfg=_fb_cfg, client_mss=_client_mss)
     _ok(f"Конфиг: {CONFIG_FILE}")
 
