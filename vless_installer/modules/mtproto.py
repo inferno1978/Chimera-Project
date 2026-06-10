@@ -824,6 +824,17 @@ def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
         _run(["systemctl", "restart", XRAY_SERVICE_NAME])
 
     # ── iptables REDIRECT ─────────────────────────────────────────────────────
+    # Исключение 1: xray (UID 999) не должен попадать в REDIRECT-петлю
+    _run(["iptables", "-t", "nat", "-D", "OUTPUT",
+          "-m", "owner", "--uid-owner", "999", "-j", "RETURN"], capture=True)
+    _run(["iptables", "-t", "nat", "-I", "OUTPUT", "1",
+          "-m", "owner", "--uid-owner", "999", "-j", "RETURN"])
+    # Исключение 2: ME-серверы Telegram на порту 8888 не должны попадать под REDIRECT
+    # (нужно для работы use_middle_proxy=true в каскадной схеме)
+    _run(["iptables", "-t", "nat", "-D", "OUTPUT",
+          "-p", "tcp", "--dport", "8888", "-j", "RETURN"], capture=True)
+    _run(["iptables", "-t", "nat", "-I", "OUTPUT", "2",
+          "-p", "tcp", "--dport", "8888", "-j", "RETURN"])
     tg_nets = _TG_NETS_current()
     failed = [net for net in tg_nets if not _ipt_add_redirect(net, port)]
     _iptables_persist()
