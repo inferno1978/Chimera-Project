@@ -91,7 +91,7 @@ _TURNTUNNEL_FILE  = Path("/var/lib/xray-installer/turntunnel.json")
 
 # Паттерн валидной ссылки ВК-звонка
 _VK_LINK_RE = re.compile(
-    r'^https?://(vk\.com|m\.vk\.com)/call/join/[A-Za-z0-9_\-]+/?$'
+    r'^https?://(vk\.com|m\.vk\.com|vk\.ru|m\.vk\.ru)/call/join/[A-Za-z0-9_\-]+/?$'
 )
 
 _BOX_W = 66
