@@ -2,6 +2,92 @@
 
 ---
 
+## v4.12.8-patch4 — 11 июня 2026 — qWDTT: WireGuard через TURN ВКонтакте
+
+### Контекст
+
+Альтернатива vk-turn-proxy для пользователей которым нужна парольная модель
+доступа, временные пароли с TTL, лимиты устройств и управление через
+Telegram без SSH. Использует WireGuard как внутренний протокол вместо VLESS,
+ключи WRAP выводятся из пароля через HKDF — не хранятся в APK.
+
+### Схема трафика
+
+```
+Android (qWDTT APK)
+  │  WRAP RTP AEAD/ChaCha20-Poly1305 поверх DTLS 1.2
+  ▼
+TURN-серверы ВКонтакте  (трафик = медиа-поток звонка)
+  │  UDP → VPS :56000
+  ▼
+wdtt-server  (:56000/udp DTLS)
+  │  WireGuard  (:56001/udp внутренний)
+  ▼
+WireGuard tun: wdtt0  (10.66.66.0/16)
+  │  NAT MASQUERADE
+  ▼
+Интернет
+```
+
+### Новое
+
+#### Модуль `wdtt.py` — установка и управление qWDTT
+
+- Сборка `wdtt-server` из исходников Go (github.com/SpaceNeuroX/proxy-turn-vk-android)
+  с автоустановкой Go через apt если отсутствует
+- Systemd-сервис с `After=network-online.target`
+- iptables: UDP порт 56000, MASQUERADE для подсети `10.66.66.0/16`
+- IP forwarding (`net.ipv4.ip_forward=1`) через `/etc/sysctl.d/99-wdtt.conf`
+- **Парольная модель:**
+  - Главный пароль — бессрочный (для администратора)
+  - До 10 временных паролей с TTL (1–365 дней) и лимитом устройств
+  - Ключи WRAP выводятся через HKDF — не хранятся в клиентском APK
+- **Hot reload** через SIGHUP — смена паролей без перезапуска службы
+  и разрыва активных соединений
+- **Telegram-бот** (опционально): `/new`, `/list`, деактивация,
+  отвязка устройств, удаление паролей — всё без SSH
+- Генерация `qwdtt://` ссылок и `.conf` файлов для клиента
+- Состояние в `/var/lib/xray-installer/wdtt.json`,
+  пароли в `/etc/wdtt/passwords.json`
+- При удалении чисто убирает всё: сервис, бинарник, конфиги,
+  iptables-правила, sysctl
+
+#### Встроенный гайд (пункт [G])
+
+- Скачать qWDTT APK (github.com/SpaceNeuroX/proxy-turn-vk-android/releases)
+- Получить VK-хеш звонка (часть ссылки после /join/)
+- Подключение по `qwdtt://` ссылке — формат и импорт в приложение
+- Telegram-бот — создание бота, команды, возможности
+- Сравнение с vk-turn-proxy — когда что выбрать
+
+#### Интеграция в `_core.py`
+
+- Новый пункт **10** в главном меню: `🔒 qWDTT (WireGuard/TURN)`
+- Импорт `do_wdtt_menu` на уровне модуля
+- Промпт выбора обновлён до `1–10 / 0`
+
+### Отличия от vk-turn-proxy (turntunnel.py)
+
+| | vk-turn-proxy | qWDTT |
+|---|---|---|
+| Протокол | VLESS (Xray) | WireGuard |
+| Аутентификация | UUID | Пароль + HKDF |
+| Клиент | WireTurn | qWDTT APK |
+| Временные пароли | turntunnel_links.py | Встроено (TTL, лимит) |
+| Telegram-бот | — | ✓ |
+| Hot reload | — | ✓ SIGHUP |
+
+### Что не затрагивается
+
+- `config.json` Xray и VLESS-inbound
+- `state.json` инсталлера
+- iptables-правила других модулей (ipban, turntunnel, autoban)
+- Любые другие службы
+
+---
+
+---
+
 ## v4.12.8-patch3 — 11 июня 2026 — SlipGate/SlipNet: DNS-туннели для обхода полных блокировок
 
 ### Контекст
