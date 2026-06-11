@@ -25211,7 +25211,7 @@ def _parse_access_log() -> list:
         r'(?:from\s+(?P<from_ip>[^:]+):\d+\s+)?'
         r'(?P<action>\w+)\s+(?P<proto>\w+):(?P<dst_ip>[^:]+):(?P<src_port>\d+)'
         r'(?:\s+(?P<dst>\S+))?(?:\s+\[(?P<tag>[^\]]*)\])?'
-        r'(?:.*?email:(?P<email>\S+))?'
+        r'(?:.*?email:\s*(?P<email>\S+))?'
     )
     try:
         lines = log_path.read_text(errors="replace").splitlines()
