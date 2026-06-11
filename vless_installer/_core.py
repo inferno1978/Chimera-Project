@@ -69,6 +69,7 @@ from vless_installer.modules.ipset_persist   import (
     do_manage_ipset_persist,
 )
 from vless_installer.modules.ipban import do_manage_ipban
+from vless_installer.modules.turntunnel import do_turntunnel_menu
 from vless_installer.modules.ripe_file_age   import (
     check_ripe_file_age, ripe_file_age_banner,
 )
@@ -29621,13 +29622,17 @@ def main_menu() -> None:
             _box_row()
             _box_row(f"  {CYAN}7{NC}  🚀 {TITLE}Hysteria2 транспорт{NC}")
             _box_row(f"     {DIM}Exit-нода, Балансировщик, Health, DPI, Cert{NC}")
+            _box_sep()
+            _box_row()
+            _box_row(f"  {CYAN}8{NC}  📲 {TITLE}VK Turn Tunnel{NC}")
+            _box_row(f"     {DIM}Проброс VLESS через TURN ВКонтакте (WireTurn/Android){NC}")
             _box_row()
             _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–7 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–8 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -29664,6 +29669,13 @@ def main_menu() -> None:
 
         elif choice == "7":
             do_hysteria2_menu()
+
+        elif choice == "8":
+            try:
+                do_turntunnel_menu()
+            except ImportError as _e:
+                warn(f"Модуль VK Turn Tunnel не найден: {_e}")
+                time.sleep(2)
 
         elif choice == "0":
             print(f"{GREEN}До свидания! 👋{NC}")
