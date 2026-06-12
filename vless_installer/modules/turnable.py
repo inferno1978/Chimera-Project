@@ -211,6 +211,26 @@ def _box_link(link: str, color: str = "") -> None:
         print(f"{CYAN}║{NC}{indent}{color}{chunk}{NC}{' ' * pad}{CYAN}║{NC}")
         i += max_w
 
+
+def _print_link_full(link: str, color: str = "") -> None:
+    """
+    Выводит длинную ссылку полностью за пределами box-рамки.
+    Используется для turnable:// и vless:// ссылок которые не влезают в box.
+    """
+    color = color or YELLOW
+    plain_link = _plain(link)
+    # Получаем ширину терминала, fallback 120
+    try:
+        term_w = os.get_terminal_size().columns
+    except Exception:
+        term_w = 120
+    chunk_w = max(66, term_w - 2)
+    i = 0
+    while i < len(plain_link):
+        chunk = plain_link[i:i + chunk_w]
+        print(f"{color}{chunk}{NC}")
+        i += chunk_w
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
@@ -970,9 +990,7 @@ def _show_wireturn_config(
 
     if turnable_link:
         _box_info("3. Вставьте turnable:// ссылку в поле «Импорт»:")
-        _box_row()
-        _box_link(turnable_link)
-        _box_row()
+        _box_info("   (ссылка выведена ниже после закрытия рамки)")
         _box_info("   Или отсканируйте QR-код ниже:")
         _show_qr_in_box(turnable_link, "turnable:// ссылка для WireTurn")
     else:
@@ -983,9 +1001,7 @@ def _show_wireturn_config(
     _box_info("4. Выберите маршрут VLESS, нажмите «Далее».")
     _box_row()
     _box_info("5. Вкладка Xray — импортируйте VLESS-ссылку:")
-    _box_row()
-    _box_link(vless_link)
-    _box_row()
+    _box_info("   (ссылка выведена ниже после закрытия рамки)")
     _box_info("   Или отсканируйте QR-код ниже:")
     _show_qr_in_box(vless_link, "VLESS ссылка для Xray в WireTurn")
     _box_row()
@@ -995,6 +1011,21 @@ def _show_wireturn_config(
     _box_info("Логи Turnable: journalctl -u turnable -f")
     _box_info("Логи Xray:     journalctl -u xray -f")
     _box_bot()
+
+    if turnable_link:
+        print(f"
+{CYAN}{'─' * 66}{NC}")
+        print(f"{BOLD}{WHITE}turnable:// ссылка (скопируйте в WireTurn → Импорт):{NC}")
+        print(f"{CYAN}{'─' * 66}{NC}")
+        _print_link_full(turnable_link, YELLOW)
+
+    print(f"
+{CYAN}{'─' * 66}{NC}")
+    print(f"{BOLD}{WHITE}VLESS ссылка (скопируйте в WireTurn → Xray):{NC}")
+    print(f"{CYAN}{'─' * 66}{NC}")
+    _print_link_full(vless_link, YELLOW)
+    print()
+
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
