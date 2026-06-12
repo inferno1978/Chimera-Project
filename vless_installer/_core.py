@@ -69,7 +69,7 @@ from vless_installer.modules.ipset_persist   import (
     do_manage_ipset_persist,
 )
 from vless_installer.modules.ipban import do_manage_ipban
-from vless_installer.modules.turntunnel import do_turntunnel_menu
+from vless_installer.modules.vkturn_menu import do_vkturn_menu
 from vless_installer.modules.slipgate import do_slipgate_menu
 from vless_installer.modules.wdtt import do_wdtt_menu
 from vless_installer.modules.ripe_file_age   import (
@@ -29640,7 +29640,7 @@ def main_menu() -> None:
             _box_sep()
             _box_row()
             _box_row(f"  {CYAN}8{NC}  📲 {TITLE}VK Turn Tunnel{NC}")
-            _box_row(f"     {DIM}Проброс VLESS через TURN ВКонтакте (WireTurn/Android){NC}")
+            _box_row(f"     {DIM}FreeTurn (vk-turn-proxy) · WireTurn (Turnable){NC}")
             _box_row()
             _box_sep()
             _box_row(f"  {CYAN}9{NC}  🌐 {TITLE}SlipGate / SlipNet{NC}")
@@ -29695,7 +29695,7 @@ def main_menu() -> None:
 
         elif choice == "8":
             try:
-                do_turntunnel_menu()
+                do_vkturn_menu()
             except ImportError as _e:
                 warn(f"Модуль VK Turn Tunnel не найден: {_e}")
                 time.sleep(2)
