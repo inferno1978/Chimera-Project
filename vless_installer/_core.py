@@ -13946,12 +13946,18 @@ def _mtu_persist(iface: str, mtu: int) -> None:
         try:
             txt = interfaces_file.read_text()
             if f"iface {iface}" in txt and "mtu" not in txt:
-                new_txt = txt.replace(
-                    f"iface {iface}",
-                    f"iface {iface}\n    mtu {mtu}"
+                import re as _re3
+                # Заменяем строку "iface <iface> ..." целиком,
+                # добавляя mtu на следующей строке с отступом.
+                # Корректно для Debian 12/13: iface ens3 inet static → +mtu строка
+                new_txt = _re3.sub(
+                    r'(iface ' + re.escape(iface) + r'[^\n]*)',
+                    lambda m: m.group(0) + f"\n    mtu {mtu}",
+                    txt,
                 )
-                interfaces_file.write_text(new_txt)
-                return
+                if new_txt != txt:
+                    interfaces_file.write_text(new_txt)
+                    return
         except Exception:
             pass
 
