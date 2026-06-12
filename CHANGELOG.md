@@ -2,6 +2,100 @@
 
 ---
 
+## v4.12.8-patch5 — 12 июня 2026 — VK Turn Tunnel: два клиента, два модуля
+
+### Контекст
+
+Предыдущая реализация `turntunnel.py` запускала `vk-turn-proxy` с флагом
+`-vless`, который предназначен для работы в паре с CLI-клиентом (`client -vless`)
+а не с мобильным приложением WireTurn. Xray inbound добавлялся, но к нему
+никто не подключался. Одновременно WireTurn ожидает сервер Turnable, а не
+vk-turn-proxy. Патч разделяет схемы на два независимых модуля.
+
+### Новое
+
+#### Модуль `vkturn_menu.py` — диспетчер пункта 8
+
+- Новая точка входа `do_vkturn_menu()` вместо `do_turntunnel_menu()`
+- Показывает выбор между двумя подсистемами с текущим статусом каждой
+- Оба модуля могут быть установлены и работать одновременно (разные порты,
+  разные сервисы, не конфликтуют)
+
+#### Модуль `turntunnel.py` — рефакторинг под FreeTurn
+
+- Убран флаг `-vless` из systemd ExecStart
+- Удалён весь Xray-блок:
+  `_xray_inject_turn_inbound`, `_xray_remove_turn_inbound`,
+  `_xray_write_and_test`, `_xray_has_turn_inbound`, `_xray_get_turn_inbound`
+- Удалён перезапуск Xray после установки/удаления
+- Добавлен QR-код адреса сервера (`IP:порт`) для сканирования в FreeTurn
+- Обновлена инструкция: вкладка «Сервер» и вкладка «Клиент» в FreeTurn
+- Целевой сервис — WireGuard (UDP 51820) или Hysteria2, выбирается при установке
+- Клиент: **FreeTurn** (samosvalishe/turn-proxy-android)
+
+#### Модуль `turnable.py` — новый, под WireTurn
+
+- Скачивает бинарник **Turnable** (TheAirBlow/Turnable, v0.4.1, linux-amd64)
+- Генерирует пару ключей через `turnable keygen` (priv_key / pub_key)
+- Запрашивает Call ID ВК-звонка (принимает полную ссылку или только ID)
+- Создаёт `/opt/turnable/config.json` и `store.json` с маршрутом VLESS
+- Добавляет VLESS-inbound в `config.json` Xray:
+  `127.0.0.1:12767`, plain TCP, тег `vless-turnable-inbound`;
+  проверка через `xray -test` перед применением; откат при ошибке
+- Создаёт systemd-сервис `turnable` с `After=xray.service`
+- Открывает UDP 56001 в iptables (56000 зарезервирован для FreeTurn)
+- Генерирует `turnable://` ссылку через `turnable config generate`
+- Показывает два QR-кода: turnable:// ссылка + VLESS-ссылка для Xray
+- Хранит состояние в `/var/lib/xray-installer/turnable.json`
+- При удалении: сервис, бинарник, inbound из Xray, iptables, turnable.json
+- Клиент: **WireTurn** (spkprsnts/WireTurn)
+
+### Схемы трафика
+
+```
+FreeTurn (Android)
+  │  DTLS 1.2 / STUN ChannelData
+  ▼
+TURN-серверы ВКонтакте
+  │  UDP → VPS :56000
+  ▼
+vk-turn-proxy server (UDP relay)
+  │  UDP → WireGuard / Hysteria2
+  ▼
+Интернет
+```
+
+```
+WireTurn + встроенный Xray (Android)
+  │  WebRTC DTLS / TURN
+  ▼
+TURN-серверы ВКонтакте
+  │  UDP → VPS :56001
+  ▼
+Turnable server
+  │  TCP → Xray inbound :12767
+  ▼
+Xray (VLESS plain TCP, только localhost)
+  │
+  ▼
+Интернет
+```
+
+### Изменения в `_core.py`
+
+- Импорт заменён: `do_turntunnel_menu` → `do_vkturn_menu` из `vkturn_menu`
+- Вызов пункта 8 обновлён соответственно
+- Подпись пункта 8: `FreeTurn (vk-turn-proxy) · WireTurn (Turnable)`
+
+### Что не затрагивается
+
+- Основной VLESS/REALITY inbound и его пользователи
+- Hysteria2, MTProxy, SlipGate, qWDTT и все прочие модули
+- iptables-правила других модулей (ipban, autoban, geoip, telemt)
+- `state.json`
+
+---
+
 ## v4.12.8-patch4 — 11 июня 2026 — qWDTT: WireGuard через TURN ВКонтакте
 
 ### Контекст
@@ -178,96 +272,6 @@ SlipNet (клиент, APK) — закрытая лицензия, запрещ�
 через app stores. Модуль инсталлера не распространяет клиент —
 только скачивает серверный компонент (SlipGate, AGPL-3.0) и показывает
 ссылку на официальный GitHub для загрузки клиента.
-
----
-
----
-
-## v4.12.8-patch2 — 11 июня 2026 — VK Turn Tunnel: проброс VLESS через TURN ВКонтакте
-
-### Контекст
-
-Мобильные операторы РФ (МТС, Билайн, Мегафон, Теле2) применяют белые списки —
-по умолчанию блокируют зарубежные IP-адреса, разрешая только одобренные ресурсы.
-Прямое VLESS-подключение к VPS в этих условиях невозможно.
-TURN-серверы ВКонтакте (`198.51.100.5/20`) входят в белые списки операторов
-как инфраструктура легального российского сервиса видеозвонков.
-Данный патч добавляет поддержку проброса VLESS-трафика через эти серверы
-с помощью `vk-turn-proxy` (github.com/cacggghp/vk-turn-proxy).
-
-### Схема трафика
-
-```
-Android (WireTurn)
-  │  DTLS 1.2 поверх STUN ChannelData
-  ▼
-TURN-серверы ВКонтакте  (трафик выглядит как медиа-звонок)
-  │  UDP → VPS
-  ▼
-vk-turn-proxy server  (:56000 UDP)
-  │  TCP → Xray
-  ▼
-Xray inbound VLESS  (127.0.0.1:порт, plain TCP, без TLS)
-  │
-  ▼
-Интернет
-```
-
-### Новое
-
-#### Модуль `turntunnel.py` — установка и управление vk-turn-proxy
-
-- Скачивает бинарник `vk-turn-proxy` с GitHub (только amd64, проверка архитектуры)
-- Добавляет **второй VLESS-inbound** в `config.json` Xray:
-  `127.0.0.1:12766`, plain TCP, без TLS — через `xray -test` перед применением.
-  Основной VLESS/REALITY inbound не затрагивается
-- Создаёт `systemd`-сервис с `After=xray.service`
-- Открывает входящий UDP-порт в `iptables`, персистирует через
-  `netfilter-persistent` или `iptables-save`
-- Хранит состояние в `/var/lib/xray-installer/turntunnel.json` —
-  `state.json` не трогает
-- При удалении чисто убирает всё: сервис, бинарник, inbound, iptables-правило
-- Меню: установка, смена порта, перезапуск, обновление бинарника, статус/логи, удаление
-
-#### Модуль `turntunnel_links.py` — менеджер пула ссылок ВК-звонков
-
-Ссылка на ВК-звонок — единственный способ получить TURN-credentials.
-Одну ссылку можно использовать для всех клиентов, но при компрометации
-пострадают все. Модуль реализует пул ссылок с назначением по пользователям.
-
-- Добавление ссылок с валидацией формата `vk.com/call/join/...`
-  и проверкой на дубликаты
-- Список пула: ID, метка, кому назначена, дата создания, статус
-- Назначение свободной ссылки пользователю → автоматическая генерация
-  готовой инструкции для WireTurn (адрес сервера, ссылка звонка, VLESS-ссылка)
-- Повторный показ инструкции для любой записи из пула
-- Снятие назначения — ссылка возвращается в свободный пул
-- Отзыв / активация ссылки без удаления
-- Удаление записи из пула с подтверждением
-- Хранение в `/var/lib/xray-installer/turntunnel_links.json`
-
-#### Интеграция в `_core.py`
-
-- Новый пункт **8** в главном меню: `📲 VK Turn Tunnel`
-- Импорт `do_turntunnel_menu` на уровне модуля рядом с `ipban`
-- Менеджер ссылок доступен через пункт `[L]` внутри меню Turn Tunnel
-
-### Клиентская часть
-
-Пользователи Android устанавливают **WireTurn**
-(github.com/spkprsnts/WireTurn) и настраивают:
-- Адрес сервера: `IP:56000`
-- Ссылку на ВК-звонок (создаётся один раз, действует вечно
-  пока не завершить звонок принудительно)
-- VLESS-ссылку (генерируется инсталлером)
-
-### Что не затрагивается
-
-- Основной VLESS/REALITY inbound и конфиг Xray
-- Существующие пользователи и UUID
-- `state.json`
-- iptables-правила других модулей (ipban, autoban, geoip, telemt)
-- Любые другие службы
 
 ---
 

@@ -1,59 +1,46 @@
 """
 vless_installer/modules/turntunnel.py
 ───────────────────────────────────────────────────────────────────────────────
-VK Turn Tunnel — проброс VLESS через TURN-серверы ВКонтакте.
+VK Turn Tunnel — vk-turn-proxy (cacggghp/vk-turn-proxy).
 
 Назначение:
-  Позволяет Android-пользователям (WireTurn) подключаться к VPS через
+  Позволяет Android-пользователям (FreeTurn) подключаться к VPS через
   TURN-серверы ВКонтакте, обходя белые списки мобильных операторов РФ.
+  Трафик пробрасывается напрямую к WireGuard / Hysteria2 на VPS.
 
 Схема трафика:
-  Android (WireTurn)
+  Android (FreeTurn)
     │  DTLS 1.2 поверх STUN ChannelData
     ▼
   TURN-серверы ВКонтакте  (трафик выглядит как медиа-звонок)
     │  UDP → VPS
     ▼
   vk-turn-proxy server  (:56000 UDP)
-    │  TCP → Xray
-    ▼
-  Xray inbound VLESS  (127.0.0.1:порт, plain TCP, без TLS)
-    │
+    │  UDP → WireGuard / Hysteria2
     ▼
   Интернет
 
 Что модуль делает:
   • Скачивает бинарник vk-turn-proxy с GitHub (только amd64)
-  • Добавляет второй VLESS-inbound в config.json Xray (127.0.0.1, plain TCP)
   • Создаёт systemd-сервис vk-turn-proxy
   • Открывает входящий UDP-порт в iptables (56000 по умолчанию)
-  • Генерирует UUID для нового inbound и показывает инструкцию для WireTurn
+  • Генерирует инструкцию для FreeTurn
   • При удалении — чисто убирает всё перечисленное выше
 
 Что модуль НЕ трогает:
-  • Основной VLESS/REALITY inbound (config.json основной inbound)
+  • config.json Xray (в отличие от предыдущей реализации — Xray здесь не нужен)
+  • Основной VLESS/REALITY inbound
   • Существующих пользователей и ключи
-  • iptables-правила других модулей (ipban, telemt, autoban, geoip)
-  • state.json (только читает install_mode и uuid для справки)
-  • Любые другие службы
+  • iptables-правила других модулей
+  • state.json (только читает для определения IP/режима)
 
-Точка входа из _core.py:
+Клиентское приложение:
+  FreeTurn (samosvalishe/turn-proxy-android)
+  github.com/samosvalishe/turn-proxy-android
+
+Точка входа:
     from vless_installer.modules.turntunnel import do_turntunnel_menu
     do_turntunnel_menu()
-
-Интеграция в _core.py:
-  1. Добавить импорт рядом с mtproto:
-       from vless_installer.modules.turntunnel import do_turntunnel_menu
-  2. Добавить пункт меню в главное меню (choice == "8"):
-       elif choice == "8":
-           try:
-               do_turntunnel_menu()
-           except ImportError as _e:
-               warn(f"Модуль VK Turn Tunnel не найден: {_e}")
-               time.sleep(2)
-  3. Добавить строку в _box_row главного меню:
-       _box_row(f"  {CYAN}8{NC}  📲 {TITLE}VK Turn Tunnel{NC}")
-       _box_row(f"     {DIM}Проброс VLESS через TURN ВКонтакте (Android/WireTurn){NC}")
 ───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -106,21 +93,11 @@ _SERVICE_FILE    = Path("/etc/systemd/system/vk-turn-proxy.service")
 _SERVICE_NAME    = "vk-turn-proxy"
 _LOG_FILE        = Path("/var/log/vk-turn-proxy-install.log")
 _STATE_FILE      = Path("/var/lib/xray-installer/state.json")
+_MODULE_STATE    = Path("/var/lib/xray-installer/turntunnel.json")
 
-# Порт на котором vk-turn-proxy слушает входящий UDP от WireTurn
-_DEFAULT_LISTEN_PORT = 56000
+_DEFAULT_LISTEN_PORT = 56000   # UDP — порт на который подключается FreeTurn
+_DEFAULT_TARGET_PORT = 51820   # порт WireGuard / Hysteria2 на VPS (редактируется)
 
-# Тег и базовый порт для второго VLESS-inbound в Xray
-_XRAY_INBOUND_TAG    = "vless-turn-inbound"
-_DEFAULT_XRAY_PORT   = 12766
-
-# Пути к config.json xray (проверяем оба)
-_XRAY_CONFIG_PATHS = [
-    Path("/etc/xray/config.json"),
-    Path("/usr/local/etc/xray/config.json"),
-]
-
-# GitHub: бинарник только amd64 (arm64 не публикуется)
 _GITHUB_RELEASES_URL = (
     "https://github.com/cacggghp/vk-turn-proxy/releases/latest/download/"
     "server-linux-amd64"
@@ -130,7 +107,7 @@ _GITHUB_API_URL = "https://api.github.com/repos/cacggghp/vk-turn-proxy/releases/
 _BOX_W = 66
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  BOX-РЕНДЕРИНГ  (идентичен стилю остальных модулей проекта)
+#  BOX-РЕНДЕРИНГ
 # ══════════════════════════════════════════════════════════════════════════════
 def _plain(s: str) -> str:
     return re.sub(r'\033\[[0-9;]*m', '', s)
@@ -205,21 +182,16 @@ def _box_kv(key: str, val: str, kw: int = 22) -> None:
     _box_row(f"  {key_colored}{' ' * max(0, key_pad)}  {val}")
 
 def _box_link(link: str, color: str = "") -> None:
-    """Выводит длинную ссылку с переносом по строкам внутри box."""
     color = color or YELLOW
-    # Отступ 2 символа слева
     indent = "  "
-    indent_w = 2
-    max_w = _BOX_W - indent_w
+    max_w = _BOX_W - 2
     plain_link = _plain(link)
-    chunks = []
     i = 0
     while i < len(plain_link):
-        chunks.append(plain_link[i:i + max_w])
-        i += max_w
-    for j, chunk in enumerate(chunks):
-        pad = max(0, _BOX_W - indent_w - len(chunk))
+        chunk = plain_link[i:i + max_w]
+        pad = max(0, max_w - len(chunk))
         print(f"{CYAN}║{NC}{indent}{color}{chunk}{NC}{' ' * pad}{CYAN}║{NC}")
+        i += max_w
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
@@ -246,7 +218,7 @@ def _info(msg: str) -> None: print(f"  {CYAN}→{NC}  {msg}"); _log(f"[INFO] {ms
 def _err(msg: str)  -> None: print(f"  {RED}✗{NC}  {msg}"); _log(f"[ERR] {msg}")
 
 class _Cancelled(Exception):
-    """Пользователь нажал Ctrl+C — возврат в вызывающее меню."""
+    pass
 
 def _pause() -> None:
     try:
@@ -256,7 +228,6 @@ def _pause() -> None:
         print()
 
 def _ask(prompt: str, default: str = "", c: bool = False) -> str:
-    """c=True → при Ctrl+C бросает _Cancelled вместо возврата default."""
     try:
         print(prompt, end="", flush=True)
         val = input().strip()
@@ -268,148 +239,37 @@ def _ask(prompt: str, default: str = "", c: bool = False) -> str:
         if c: raise _Cancelled()
         return default
 
-def _gen_uuid() -> str:
-    return str(uuid.uuid4())
-
 def _is_amd64() -> bool:
     return platform.machine().lower() in ("x86_64", "amd64")
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  STATE.JSON — только чтение, не пишем
+#  STATE
 # ══════════════════════════════════════════════════════════════════════════════
-def _read_state() -> dict:
-    if not _STATE_FILE.exists():
+def _load_state() -> dict:
+    if not _MODULE_STATE.exists():
         return {}
     try:
-        return json.loads(_STATE_FILE.read_text())
+        return json.loads(_MODULE_STATE.read_text())
     except Exception:
         return {}
 
-def _xray_config_path() -> Optional[Path]:
-    """Возвращает первый найденный config.json xray, иначе None."""
-    for p in _XRAY_CONFIG_PATHS:
-        if p.exists():
-            return p
-    return None
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  КОНФИГ МОДУЛЯ — отдельный файл, не трогает state.json
-# ══════════════════════════════════════════════════════════════════════════════
-_MODULE_STATE_FILE = Path("/var/lib/xray-installer/turntunnel.json")
-
-def _load_module_state() -> dict:
-    """Загружает конфиг модуля. Возвращает {} если файл не существует."""
-    if not _MODULE_STATE_FILE.exists():
-        return {}
+def _save_state(data: dict) -> None:
     try:
-        return json.loads(_MODULE_STATE_FILE.read_text())
-    except Exception:
-        return {}
-
-def _save_module_state(data: dict) -> None:
-    """Сохраняет конфиг модуля. Не трогает state.json."""
-    try:
-        _MODULE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _MODULE_STATE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        _MODULE_STATE_FILE.chmod(0o600)
+        _MODULE_STATE.parent.mkdir(parents=True, exist_ok=True)
+        _MODULE_STATE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        _MODULE_STATE.chmod(0o600)
     except Exception as e:
         _warn(f"Не удалось сохранить turntunnel.json: {e}")
 
 def _is_installed() -> bool:
-    """Проверяет что всё установлено: бинарник + сервис + inbound в xray."""
-    if not _BIN_PATH.exists():
+    if not _BIN_PATH.exists() or not _SERVICE_FILE.exists():
         return False
-    if not _SERVICE_FILE.exists():
-        return False
-    state = _load_module_state()
-    return state.get("installed", False)
+    return _load_state().get("installed", False)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  XRAY CONFIG: добавление / удаление второго VLESS-inbound
+#  IPTABLES
 # ══════════════════════════════════════════════════════════════════════════════
-def _xray_has_turn_inbound(cfg: dict) -> bool:
-    return any(ib.get("tag") == _XRAY_INBOUND_TAG for ib in cfg.get("inbounds", []))
-
-def _xray_get_turn_inbound(cfg: dict) -> Optional[dict]:
-    for ib in cfg.get("inbounds", []):
-        if ib.get("tag") == _XRAY_INBOUND_TAG:
-            return ib
-    return None
-
-def _xray_inject_turn_inbound(cfg: dict, port: int, vless_uuid: str) -> bool:
-    """
-    Добавляет второй VLESS-inbound на 127.0.0.1:port (plain TCP, без TLS).
-    Это единственный inbound который принимает соединения от vk-turn-proxy.
-    Основной inbound (VLESS+REALITY) не затрагивается.
-    Возвращает True если конфиг изменён.
-    """
-    if _xray_has_turn_inbound(cfg):
-        return False
-
-    inbound = {
-        "tag":      _XRAY_INBOUND_TAG,
-        "port":     port,
-        "listen":   "127.0.0.1",       # только локально — vk-turn-proxy форвардит сюда
-        "protocol": "vless",
-        "settings": {
-            "clients": [
-                {
-                    "id":    vless_uuid,
-                    "email": "wireturn@localhost",
-                }
-            ],
-            "decryption": "none",
-        },
-        "sniffing": {
-            "enabled":      True,
-            "destOverride": ["http", "tls"],
-            "metadataOnly": False,
-            "routeOnly":    False,
-        },
-        "streamSettings": {
-            "network":   "tcp",
-            "security":  "none",        # plain TCP — TLS терминируется на стороне TURN
-        },
-    }
-
-    cfg.setdefault("inbounds", []).append(inbound)
-    return True
-
-def _xray_remove_turn_inbound(cfg: dict) -> bool:
-    """Удаляет turn-inbound из конфига. Возвращает True если что-то удалено."""
-    inbounds = cfg.get("inbounds", [])
-    new_ib = [ib for ib in inbounds if ib.get("tag") != _XRAY_INBOUND_TAG]
-    if len(new_ib) == len(inbounds):
-        return False
-    cfg["inbounds"] = new_ib
-    return True
-
-def _xray_write_and_test(cfg_path: Path, cfg: dict) -> Optional[str]:
-    """
-    Записывает конфиг и проверяет синтаксис через xray -test.
-    Возвращает None при успехе, строку с ошибкой при неудаче.
-    """
-    backup = cfg_path.read_text()
-    try:
-        cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-        cfg_path.chmod(0o640)
-    except Exception as e:
-        return f"Не удалось записать {cfg_path}: {e}"
-
-    xray_bin = shutil.which("xray") or "/usr/local/bin/xray"
-    if Path(xray_bin).exists():
-        r = _run([xray_bin, "run", "-test", "-config", str(cfg_path)], capture=True)
-        if r.returncode != 0:
-            # Откатываем
-            cfg_path.write_text(backup)
-            return f"xray -test провалился: {(r.stderr or r.stdout)[:300]}"
-    return None
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  IPTABLES: открытие / закрытие UDP-порта
-# ══════════════════════════════════════════════════════════════════════════════
-def _ipt_udp_rule_exists(port: int) -> bool:
-    """Проверяет наличие правила ACCEPT для входящего UDP на данный порт."""
+def _ipt_rule_exists(port: int) -> bool:
     r = _run(
         ["iptables", "-t", "filter", "-C", "INPUT",
          "-p", "udp", "--dport", str(port), "-j", "ACCEPT"],
@@ -418,8 +278,7 @@ def _ipt_udp_rule_exists(port: int) -> bool:
     return r.returncode == 0
 
 def _ipt_open_udp(port: int) -> bool:
-    """Открывает входящий UDP порт. Идемпотентно. Возвращает True при успехе."""
-    if _ipt_udp_rule_exists(port):
+    if _ipt_rule_exists(port):
         return True
     r = _run(
         ["iptables", "-t", "filter", "-I", "INPUT", "1",
@@ -429,9 +288,8 @@ def _ipt_open_udp(port: int) -> bool:
     return r.returncode == 0
 
 def _ipt_close_udp(port: int) -> None:
-    """Закрывает UDP порт. Идемпотентно — удаляет все копии правила."""
     for _ in range(5):
-        if not _ipt_udp_rule_exists(port):
+        if not _ipt_rule_exists(port):
             break
         _run(
             ["iptables", "-t", "filter", "-D", "INPUT",
@@ -440,7 +298,6 @@ def _ipt_close_udp(port: int) -> None:
         )
 
 def _ipt_persist() -> None:
-    """Сохраняет iptables-правила для выживания после ребута."""
     if shutil.which("netfilter-persistent"):
         _run(["netfilter-persistent", "save"], capture=True)
         return
@@ -451,10 +308,9 @@ def _ipt_persist() -> None:
         (rules_dir / "rules.v4").write_text(r4.stdout)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  БИНАРНИК vk-turn-proxy
+#  БИНАРНИК
 # ══════════════════════════════════════════════════════════════════════════════
 def _get_latest_version() -> str:
-    """Получает тег последнего релиза с GitHub."""
     try:
         req = urllib.request.Request(
             _GITHUB_API_URL,
@@ -467,13 +323,8 @@ def _get_latest_version() -> str:
         return "unknown"
 
 def _download_binary() -> bool:
-    """
-    Скачивает бинарник vk-turn-proxy.
-    Поддерживается только amd64 — проверяем архитектуру заранее.
-    """
     if not _is_amd64():
-        _err("vk-turn-proxy доступен только для amd64 (x86_64).")
-        _err(f"Текущая архитектура: {platform.machine()}")
+        _err(f"Архитектура {platform.machine()} не поддерживается (только amd64).")
         return False
 
     _BIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -481,23 +332,18 @@ def _download_binary() -> bool:
     tmp_bin = tmp / "server"
 
     try:
-        _info(f"Скачиваю vk-turn-proxy с GitHub...")
+        _info("Скачиваю vk-turn-proxy с GitHub...")
         urllib.request.urlretrieve(_GITHUB_RELEASES_URL, str(tmp_bin))
         tmp_bin.chmod(0o755)
-
-        # Проверяем что это ELF-бинарник а не страница ошибки
         with tmp_bin.open("rb") as f:
             magic = f.read(4)
         if magic != b'\x7fELF':
             _err("Скачанный файл не является ELF-бинарником.")
-            _err("Возможно GitHub недоступен или изменился URL релиза.")
             return False
-
         shutil.copy2(str(tmp_bin), str(_BIN_PATH))
         _BIN_PATH.chmod(0o755)
         _ok(f"Установлено: {_BIN_PATH}")
         return True
-
     except Exception as e:
         _err(f"Ошибка загрузки: {e}")
         return False
@@ -505,7 +351,6 @@ def _download_binary() -> bool:
         shutil.rmtree(tmp, ignore_errors=True)
 
 def _get_installed_version() -> Optional[str]:
-    """Возвращает версию установленного бинарника или None."""
     if not _BIN_PATH.exists():
         return None
     r = _run([str(_BIN_PATH), "-version"], capture=True)
@@ -516,16 +361,16 @@ def _get_installed_version() -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 #  SYSTEMD СЕРВИС
 # ══════════════════════════════════════════════════════════════════════════════
-def _install_service(listen_port: int, xray_port: int) -> None:
+def _install_service(listen_port: int, target_port: int, target_proto: str) -> None:
     """
     Создаёт systemd-сервис vk-turn-proxy.
-    After=xray.service — гарантирует что xray уже слушает на xray_port
-    при старте vk-turn-proxy.
+    target_proto: 'udp' для WireGuard, 'tcp' для Hysteria2 (если поддержит).
+    В обычном режиме vk-turn-proxy форвардит UDP → target_port без флага -vless.
     """
     _SERVICE_FILE.write_text(
         "[Unit]\n"
-        "Description=VK Turn Proxy — TURN tunnel to Xray VLESS\n"
-        "After=network-online.target xray.service\n"
+        "Description=VK Turn Proxy — TURN tunnel to WireGuard/Hysteria2\n"
+        "After=network-online.target\n"
         "Wants=network-online.target\n"
         "\n"
         "[Service]\n"
@@ -533,8 +378,7 @@ def _install_service(listen_port: int, xray_port: int) -> None:
         f"WorkingDirectory={_BIN_DIR}\n"
         f"ExecStart={_BIN_PATH} "
         f"-listen 0.0.0.0:{listen_port} "
-        f"-connect 127.0.0.1:{xray_port} "
-        f"-vless\n"
+        f"-connect 127.0.0.1:{target_port}\n"
         "Restart=always\n"
         "RestartSec=5\n"
         "NoNewPrivileges=true\n"
@@ -545,57 +389,69 @@ def _install_service(listen_port: int, xray_port: int) -> None:
     _run(["systemctl", "daemon-reload"])
     _run(["systemctl", "enable", _SERVICE_NAME])
 
-def _update_service_ports(listen_port: int, xray_port: int) -> None:
-    """Обновляет порты в существующем сервисе без переустановки."""
-    _install_service(listen_port, xray_port)
-
 # ══════════════════════════════════════════════════════════════════════════════
-#  СТАТУС
+#  QR-КОД
 # ══════════════════════════════════════════════════════════════════════════════
-def _get_status() -> dict:
-    """
-    Возвращает полный статус модуля:
-      installed     – bool
-      service_ok    – bool (сервис active)
-      xray_ok       – bool (inbound в config.json)
-      ipt_ok        – bool (UDP порт открыт)
-      listen_port   – int
-      xray_port     – int
-      vless_uuid    – str
-      bin_version   – str или None
-    """
-    state = _load_module_state()
-    listen_port = state.get("listen_port", _DEFAULT_LISTEN_PORT)
-    xray_port   = state.get("xray_port",   _DEFAULT_XRAY_PORT)
-    vless_uuid  = state.get("vless_uuid",  "")
+def _show_qr_in_box(data: str, label: str) -> None:
+    """Выводит QR-код внутри box-рамки. Использует qrencode или python3-qrcode."""
+    _box_sep()
+    _box_row(f"  {BOLD}{WHITE}QR-код для сканирования в FreeTurn:{NC}")
+    _box_row(f"  {DIM}{label}{NC}")
+    _box_sep()
 
-    r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
-    service_ok = r.stdout.strip() == "active"
+    qrencode = shutil.which("qrencode")
+    _QR_COLOR = "\033[96m"
+    _QR_RESET = "\033[0m"
 
-    cfg_path = _xray_config_path()
-    xray_ok = False
-    if cfg_path:
+    if qrencode:
         try:
-            cfg = json.loads(cfg_path.read_text())
-            xray_ok = _xray_has_turn_inbound(cfg)
+            proc = subprocess.run(
+                [qrencode, "-t", "ANSIUTF8", "-m", "1",
+                 "--foreground=00BFFF", "--background=000000",
+                 "--strict-version", data],
+                capture_output=True, text=True,
+            )
+            lines = proc.stdout.splitlines()
         except Exception:
-            pass
+            lines = []
+        if not lines:
+            try:
+                proc = subprocess.run(
+                    [qrencode, "-t", "ANSIUTF8", "-m", "1", data],
+                    capture_output=True, text=True,
+                )
+                lines = proc.stdout.splitlines()
+            except Exception:
+                lines = []
+        for line in lines:
+            if _QR_COLOR not in line and "\033[" not in line:
+                _box_row(f"  {_QR_COLOR}{line}{_QR_RESET}")
+            else:
+                _box_row(f"  {line}")
+    else:
+        # fallback: python3-qrcode
+        try:
+            import qrcode as _qrcode  # type: ignore
+            import io as _io
+            qr = _qrcode.QRCode(border=1)
+            qr.add_data(data)
+            qr.make(fit=True)
+            buf = _io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = buf
+            qr.print_ascii(invert=True)
+            sys.stdout = old_stdout
+            for line in buf.getvalue().splitlines():
+                _box_row(f"  {_QR_COLOR}{line}{_QR_RESET}")
+        except ImportError:
+            _box_warn("qrencode не найден: apt install qrencode")
+        except Exception as e:
+            _box_warn(f"Ошибка QR: {e}")
 
-    ipt_ok = _ipt_udp_rule_exists(listen_port)
-
-    return {
-        "installed":   state.get("installed", False),
-        "service_ok":  service_ok,
-        "xray_ok":     xray_ok,
-        "ipt_ok":      ipt_ok,
-        "listen_port": listen_port,
-        "xray_port":   xray_port,
-        "vless_uuid":  vless_uuid,
-        "bin_version": _get_installed_version(),
-    }
-
+# ══════════════════════════════════════════════════════════════════════════════
+#  IP СЕРВЕРА
+# ══════════════════════════════════════════════════════════════════════════════
 def _get_server_ip() -> str:
-    """Определяет публичный IPv4 сервера."""
     try:
         import socket
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -612,41 +468,52 @@ def _get_server_ip() -> str:
     return "ВАШ_IP"
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  СТАТУС
+# ══════════════════════════════════════════════════════════════════════════════
+def _get_status() -> dict:
+    state = _load_state()
+    listen_port = state.get("listen_port", _DEFAULT_LISTEN_PORT)
+    target_port = state.get("target_port", _DEFAULT_TARGET_PORT)
+
+    r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
+    service_ok = r.stdout.strip() == "active"
+    ipt_ok = _ipt_rule_exists(listen_port)
+
+    return {
+        "installed":   state.get("installed", False),
+        "service_ok":  service_ok,
+        "ipt_ok":      ipt_ok,
+        "listen_port": listen_port,
+        "target_port": target_port,
+        "target_type": state.get("target_type", "wireguard"),
+        "bin_version": _get_installed_version(),
+    }
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  УСТАНОВКА
 # ══════════════════════════════════════════════════════════════════════════════
 def _run_install() -> None:
-    """Полная установка vk-turn-proxy. Перехватывает _Cancelled."""
     try:
         _run_install_inner()
     except _Cancelled:
-        print(f"\n  {YELLOW}Установка прервана — возврат в меню.{NC}\n")
+        print(f"\n  {YELLOW}Установка прервана.{NC}\n")
         _pause()
 
 def _run_install_inner() -> None:
     os.system("clear")
-    _box_top("📲  УСТАНОВКА  •  VK TURN TUNNEL")
+    _box_top("📲  УСТАНОВКА  •  VK TURN PROXY  (FreeTurn)")
     _box_row()
 
-    # ── Проверка архитектуры ──────────────────────────────────────────────────
     if not _is_amd64():
         _box_err(f"Архитектура {platform.machine()} не поддерживается.")
-        _box_err("vk-turn-proxy распространяется только для amd64 (x86_64).")
         _box_bot(); _pause(); return
 
-    # ── Проверка что xray установлен ─────────────────────────────────────────
-    cfg_path = _xray_config_path()
-    if not cfg_path:
-        _box_err("Xray config.json не найден.")
-        _box_err("Сначала установите xray через VLESS Ultimate (пункт 1).")
-        _box_bot(); _pause(); return
-
-    # ── Уже установлено? ─────────────────────────────────────────────────────
     already = _is_installed()
     if already:
-        _box_warn("Обнаружена существующая установка VK Turn Tunnel.")
+        _box_warn("Обнаружена существующая установка.")
         _box_row()
-        _box_item("1", "Переустановить (сохранить UUID и порты)")
-        _box_item("2", f"Переустановить полностью  {YELLOW}(новый UUID){NC}")
+        _box_item("1", "Переустановить (сохранить порты)")
+        _box_item("2", f"Переустановить полностью")
         _box_item("0", "← Отмена")
         _box_bot(); print()
         ch = _ask(f"{CYAN}Выбор [1/2/0]: {NC}", default="0", c=True).strip()
@@ -654,105 +521,67 @@ def _run_install_inner() -> None:
             return
         if ch == "2":
             _full_uninstall(silent=True)
-        # ch == "1" → продолжаем с существующим UUID и портами
 
-    # ── Порты ─────────────────────────────────────────────────────────────────
-    old_state   = _load_module_state()
-    old_listen  = old_state.get("listen_port", _DEFAULT_LISTEN_PORT)
-    old_xport   = old_state.get("xray_port",   _DEFAULT_XRAY_PORT)
+    old = _load_state()
+    old_listen  = old.get("listen_port", _DEFAULT_LISTEN_PORT)
+    old_target  = old.get("target_port", _DEFAULT_TARGET_PORT)
+    old_ttype   = old.get("target_type", "wireguard")
 
     os.system("clear")
-    _box_top("📲  ПОРТЫ  •  VK TURN TUNNEL")
+    _box_top("📲  НАСТРОЙКА ПОРТОВ  •  VK TURN PROXY")
     _box_row()
-    _box_info("Порт vk-turn-proxy (UDP) — на него подключается WireTurn с телефона.")
+    _box_info("UDP-порт vk-turn-proxy — на него подключается FreeTurn с телефона.")
     _box_info(f"По умолчанию: {_DEFAULT_LISTEN_PORT}")
     _box_row()
-    _box_info("Порт Xray inbound (TCP, только локально) — plain VLESS без TLS.")
-    _box_info(f"По умолчанию: {_DEFAULT_XRAY_PORT}")
+    _box_info("Целевой порт — локальный WireGuard или Hysteria2 на этом VPS.")
+    _box_info(f"По умолчанию: {_DEFAULT_TARGET_PORT} (WireGuard)")
     _box_row()
-    _box_warn("Убедитесь что оба порта не заняты другими службами.")
+    _box_item("1", "WireGuard (UDP)")
+    _box_item("2", "Hysteria2  (UDP)")
     _box_bot(); print()
 
     try:
-        raw = _ask(
-            f"  {CYAN}UDP-порт vk-turn-proxy [{old_listen}]: {NC}",
-            default=str(old_listen), c=True,
-        )
+        raw = _ask(f"  {CYAN}UDP-порт vk-turn-proxy [{old_listen}]: {NC}",
+                   default=str(old_listen), c=True)
         listen_port = int(raw) if raw.isdigit() else old_listen
 
-        raw = _ask(
-            f"  {CYAN}TCP-порт Xray inbound  [{old_xport}]: {NC}",
-            default=str(old_xport), c=True,
+        ttype_ch = _ask(f"  {CYAN}Целевой сервис [1=WG/2=H2, Enter={old_ttype}]: {NC}",
+                        default="", c=True).strip()
+        target_type = "hysteria2" if ttype_ch == "2" else (
+            "wireguard" if ttype_ch == "1" else old_ttype
         )
-        xray_port = int(raw) if raw.isdigit() else old_xport
+
+        raw = _ask(f"  {CYAN}Целевой порт [{old_target}]: {NC}",
+                   default=str(old_target), c=True)
+        target_port = int(raw) if raw.isdigit() else old_target
     except _Cancelled:
         raise
-    except Exception:
-        listen_port = old_listen
-        xray_port   = old_xport
 
-    if not (1024 <= listen_port <= 65535) or not (1024 <= xray_port <= 65535):
+    if not (1024 <= listen_port <= 65535) or not (1024 <= target_port <= 65535):
         _err("Порты должны быть в диапазоне 1024–65535."); _pause(); return
-    if listen_port == xray_port:
-        _err("UDP и TCP порты не должны совпадать."); _pause(); return
+    if listen_port == target_port:
+        _err("UDP и целевой порты не должны совпадать."); _pause(); return
 
-    # ── UUID ──────────────────────────────────────────────────────────────────
-    vless_uuid = old_state.get("vless_uuid", "") or _gen_uuid()
-
-    # ── Установка ─────────────────────────────────────────────────────────────
     os.system("clear")
-    _box_top("📲  УСТАНОВКА  •  VK TURN TUNNEL")
+    _box_top("📲  УСТАНОВКА  •  VK TURN PROXY  (FreeTurn)")
     _box_row()
 
-    # 1. Бинарник
     _box_info("Загружаю vk-turn-proxy...")
     if not _download_binary():
         _box_bot(); _pause(); return
     _box_ok("Бинарник установлен.")
 
-    # 2. Xray inbound
-    _box_info("Добавляю VLESS-inbound в Xray config.json...")
-    try:
-        cfg = json.loads(cfg_path.read_text())
-    except Exception as e:
-        _box_err(f"Не удалось прочитать xray config: {e}")
-        _box_bot(); _pause(); return
-
-    # Если inbound уже есть — удалим перед добавлением чтобы обновить порт/UUID
-    _xray_remove_turn_inbound(cfg)
-    _xray_inject_turn_inbound(cfg, xray_port, vless_uuid)
-    err = _xray_write_and_test(cfg_path, cfg)
-    if err:
-        _box_err(f"Xray конфиг не прошёл проверку: {err}")
-        _box_err("Откат — xray config.json не изменён.")
-        _box_bot(); _pause(); return
-    _box_ok("VLESS-inbound добавлен в xray config.json.")
-
-    # 3. Перезапуск xray
-    _box_info("Перезапускаю xray...")
-    _run(["systemctl", "restart", "xray"])
-    time.sleep(2)
-    r = _run(["systemctl", "is-active", "xray"], capture=True)
-    if r.stdout.strip() == "active":
-        _box_ok("xray перезапущен успешно.")
-    else:
-        _box_warn("xray может не запуститься — проверьте: journalctl -u xray -n 30")
-
-    # 4. Systemd-сервис
-    _box_info("Устанавливаю systemd-сервис vk-turn-proxy...")
-    _install_service(listen_port, xray_port)
+    _box_info("Устанавливаю systemd-сервис...")
+    _install_service(listen_port, target_port, target_type)
     _box_ok("Сервис создан и включён.")
 
-    # 5. iptables UDP
     _box_info(f"Открываю UDP-порт {listen_port} в iptables...")
     if _ipt_open_udp(listen_port):
         _ipt_persist()
         _box_ok(f"UDP {listen_port} открыт.")
     else:
         _box_warn(f"Не удалось открыть UDP {listen_port} в iptables.")
-        _box_warn("Откройте порт вручную или через панель хостера.")
 
-    # 6. Запуск сервиса
     _box_info("Запускаю vk-turn-proxy...")
     _run(["systemctl", "start", _SERVICE_NAME])
     time.sleep(2)
@@ -762,69 +591,83 @@ def _run_install_inner() -> None:
     else:
         _box_warn("Сервис не запустился — проверьте: journalctl -u vk-turn-proxy -n 30")
 
-    # 7. Сохраняем состояние модуля
-    _save_module_state({
+    _save_state({
         "installed":   True,
         "listen_port": listen_port,
-        "xray_port":   xray_port,
-        "vless_uuid":  vless_uuid,
+        "target_port": target_port,
+        "target_type": target_type,
     })
 
-    # ── Итог ──────────────────────────────────────────────────────────────────
-    server_ip = _get_server_ip()
+    _show_freeturn_config(listen_port, target_port, target_type, after_install=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ИНСТРУКЦИЯ FreeTurn
+# ══════════════════════════════════════════════════════════════════════════════
+def _show_freeturn_config(
+    listen_port: int,
+    target_port: int,
+    target_type: str,
+    after_install: bool = False,
+) -> None:
+    server_ip  = _get_server_ip()
+    ttype_name = "WireGuard" if target_type == "wireguard" else "Hysteria2"
+
     os.system("clear")
-    _box_top("✅  УСТАНОВКА ЗАВЕРШЕНА  •  VK TURN TUNNEL")
+    title = "✅  УСТАНОВКА ЗАВЕРШЕНА" if after_install else "📱  НАСТРОЙКА FREETURN"
+    _box_top(f"{title}  •  VK TURN PROXY")
     _box_row()
-    _box_ok("vk-turn-proxy установлен и запущен.")
-    _box_row()
-    _box_kv("UDP порт (WireTurn):", f"{YELLOW}{listen_port}{NC}")
-    _box_kv("TCP порт (Xray):",    f"{DIM}{xray_port} (только localhost){NC}")
-    _box_kv("VLESS UUID:",          f"{YELLOW}{vless_uuid}{NC}")
-    _box_row()
-    _box_sep()
-    _box_row(f"  {BOLD}{WHITE}Настройка WireTurn на Android:{NC}")
-    _box_row()
-    _box_info("1. Скачайте WireTurn: github.com/spkprsnts/WireTurn")
-    _box_info("2. Создайте звонок ВКонтакте, скопируйте ссылку-приглашение")
-    _box_info("3. В WireTurn → вкладка Клиент:")
-    _box_kv("   Сервер:", f"{server_ip}:{listen_port}")
-    _box_info("   Ссылка на звонок: вставьте ссылку vk.com/call/join/...")
-    _box_info("4. Вкладка Xray → импортируйте VLESS-ссылку:")
-    _box_row()
-    _vless_link = (
-        f"vless://{vless_uuid}@127.0.0.1:9000"
-        f"?encryption=none&security=none&type=tcp"
-        f"#WireTurn"
-    )
-    _box_link(_vless_link)
-    _box_row()
-    _box_info("5. В WireTurn → Главная → запустите туннель")
+    _box_ok("vk-turn-proxy установлен и запущен." if after_install else "")
+    if after_install:
+        _box_row()
+    _box_kv("UDP порт (FreeTurn):", f"{YELLOW}{listen_port}{NC}")
+    _box_kv("Целевой сервис:",     f"{DIM}{ttype_name} → 127.0.0.1:{target_port}{NC}")
     _box_row()
     _box_sep()
-    _box_info("Ссылка на звонок действует вечно пока вы не завершите звонок.")
-    _box_info("Команда для просмотра логов:")
-    _box_row(f"  {DIM}journalctl -u vk-turn-proxy -f{NC}")
+    _box_row(f"  {BOLD}{WHITE}Настройка FreeTurn на Android:{NC}")
+    _box_row()
+    _box_info("1. Установите FreeTurn:")
+    _box_link("   github.com/samosvalishe/turn-proxy-android/releases")
+    _box_row()
+    _box_info("2. Вкладка «Сервер» в FreeTurn:")
+    _box_kv("   IP прослушивания:", "0.0.0.0")
+    _box_kv("   Порт прослушивания:", f"{YELLOW}{listen_port}{NC}")
+    _box_kv("   Адрес TURN-клиента:", f"{YELLOW}127.0.0.1:{target_port}{NC}")
+    _box_row()
+    _box_info("3. Вкладка «Клиент» в FreeTurn:")
+    _box_kv("   Адрес vk-turn-proxy:", f"{YELLOW}{server_ip}:{listen_port}{NC}")
+    _box_kv("   Ссылка на звонок:", f"{DIM}vk.com/call/join/... (создать в ВК){NC}")
+    _box_kv("   Локальный адрес:", f"{DIM}127.0.0.1:9000{NC}")
+    _box_row()
+    _box_info(f"4. В {ttype_name}-клиенте укажите Endpoint: 127.0.0.1:9000")
+    _box_row()
+    _box_sep()
+    _box_row(f"  {BOLD}{WHITE}QR-код адреса сервера:{NC}")
+
+    server_addr = f"{server_ip}:{listen_port}"
+    _show_qr_in_box(server_addr, f"Адрес vk-turn-proxy сервера: {server_addr}")
+
+    _box_row()
+    _box_info("Ссылка на звонок действует вечно — не нажимайте «Завершить для всех».")
+    _box_info("Логи: journalctl -u vk-turn-proxy -f")
     _box_bot()
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ПОЛНОЕ УДАЛЕНИЕ
+#  УДАЛЕНИЕ
 # ══════════════════════════════════════════════════════════════════════════════
 def _full_uninstall(silent: bool = False) -> bool:
     if not silent:
         os.system("clear")
-        _box_top("🗑️  УДАЛЕНИЕ  •  VK TURN TUNNEL")
+        _box_top("🗑️  УДАЛЕНИЕ  •  VK TURN PROXY")
         _box_row()
         _box_warn("Будет удалено:")
-        _box_row(f"  {DIM}  • Сервис systemd  (vk-turn-proxy){NC}")
-        _box_row(f"  {DIM}  • Бинарник        ({_BIN_PATH}){NC}")
-        _box_row(f"  {DIM}  • VLESS-inbound   (xray config.json){NC}")
+        _box_row(f"  {DIM}  • Сервис  vk-turn-proxy{NC}")
+        _box_row(f"  {DIM}  • Бинарник {_BIN_PATH}{NC}")
         _box_row(f"  {DIM}  • iptables UDP-правило{NC}")
         _box_row(f"  {DIM}  • turntunnel.json{NC}")
         _box_row()
-        _box_warn("Основной VLESS/REALITY inbound не затрагивается.")
+        _box_warn("Xray, WireGuard и Hysteria2 не затрагиваются.")
         _box_row()
-        _box_sep()
         _box_item("Y", f"{RED}Да, удалить{NC}")
         _box_item("N", "Нет, отмена")
         _box_bot(); print()
@@ -832,11 +675,10 @@ def _full_uninstall(silent: bool = False) -> bool:
         if ans != "y":
             _info("Удаление отменено."); _pause(); return False
 
-    state = _load_module_state()
+    state = _load_state()
     listen_port = state.get("listen_port", _DEFAULT_LISTEN_PORT)
 
-    # 1. Останавливаем сервис
-    _run(["systemctl", "stop", _SERVICE_NAME])
+    _run(["systemctl", "stop",    _SERVICE_NAME])
     _run(["systemctl", "disable", _SERVICE_NAME])
     if _SERVICE_FILE.exists():
         _SERVICE_FILE.unlink()
@@ -844,7 +686,6 @@ def _full_uninstall(silent: bool = False) -> bool:
     _run(["systemctl", "reset-failed"], capture=True)
     if not silent: _ok("Сервис остановлен и удалён.")
 
-    # 2. Бинарник
     try:
         if _BIN_DIR.exists():
             shutil.rmtree(_BIN_DIR)
@@ -852,40 +693,23 @@ def _full_uninstall(silent: bool = False) -> bool:
     except Exception as e:
         if not silent: _warn(f"Не удалось удалить {_BIN_DIR}: {e}")
 
-    # 3. Xray inbound
-    cfg_path = _xray_config_path()
-    if cfg_path:
-        try:
-            cfg = json.loads(cfg_path.read_text())
-            if _xray_remove_turn_inbound(cfg):
-                cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-                cfg_path.chmod(0o640)
-                _run(["systemctl", "restart", "xray"])
-                if not silent: _ok("VLESS-inbound удалён из xray config.json, xray перезапущен.")
-            else:
-                if not silent: _info("Turn-inbound в xray config не обнаружен — пропуск.")
-        except Exception as e:
-            if not silent: _warn(f"Не удалось обновить xray config: {e}")
-
-    # 4. iptables
     _ipt_close_udp(listen_port)
     _ipt_persist()
     if not silent: _ok(f"iptables UDP {listen_port} закрыт.")
 
-    # 5. Файл состояния модуля
     try:
-        if _MODULE_STATE_FILE.exists():
-            _MODULE_STATE_FILE.unlink()
+        if _MODULE_STATE.exists():
+            _MODULE_STATE.unlink()
     except Exception:
         pass
 
     if not silent:
-        _ok("VK Turn Tunnel полностью удалён.")
+        _ok("VK Turn Proxy полностью удалён.")
         _pause()
     return True
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ОБНОВЛЕНИЕ БИНАРНИКА
+#  ОБНОВЛЕНИЕ
 # ══════════════════════════════════════════════════════════════════════════════
 def _run_update() -> None:
     os.system("clear")
@@ -929,60 +753,12 @@ def _run_update() -> None:
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ПОКАЗ НАСТРОЕК ДЛЯ WIRETURN
-# ══════════════════════════════════════════════════════════════════════════════
-def _show_wireturn_config() -> None:
-    os.system("clear")
-    state = _load_module_state()
-    if not state.get("installed"):
-        _box_top("📱  НАСТРОЙКИ ДЛЯ WIRETURN")
-        _box_row()
-        _box_err("VK Turn Tunnel не установлен.")
-        _box_bot(); _pause(); return
-
-    listen_port = state.get("listen_port", _DEFAULT_LISTEN_PORT)
-    vless_uuid  = state.get("vless_uuid", "")
-    server_ip   = _get_server_ip()
-
-    _vless_link = (
-        f"vless://{vless_uuid}@127.0.0.1:9000"
-        f"?encryption=none&security=none&type=tcp"
-        f"#WireTurn"
-    )
-
-    _box_top("📱  НАСТРОЙКИ ДЛЯ WIRETURN")
-    _box_row()
-    _box_row(f"  {BOLD}{WHITE}Вкладка Клиент:{NC}")
-    _box_row()
-    _box_kv("  IP:порт сервера:", f"{YELLOW}{server_ip}:{listen_port}{NC}")
-    _box_kv("  Ссылка на звонок:", f"{DIM}vk.com/call/join/... (создайте в ВК){NC}")
-    _box_kv("  Локальный адрес:", f"{DIM}127.0.0.1:9000{NC}")
-    _box_row()
-    _box_sep()
-    _box_row(f"  {BOLD}{WHITE}Вкладка Xray — импортировать ссылку:{NC}")
-    _box_row()
-    _box_link(_vless_link)
-    _box_row()
-    _box_sep()
-    _box_row(f"  {BOLD}{WHITE}Порядок запуска в WireTurn:{NC}")
-    _box_row()
-    _box_info("1. Создайте звонок ВКонтакте, скопируйте ссылку")
-    _box_info("2. Вставьте ссылку в поле «Ссылка на звонок» в WireTurn")
-    _box_info("3. Нажмите кнопку запуска туннеля")
-    _box_info("4. Дождитесь «DTLS connection established» в логах")
-    _box_info("5. Включите Xray и VPN Mode")
-    _box_row()
-    _box_info("Ссылка на звонок действует вечно если не завершать звонок.")
-    _box_bot()
-    _pause()
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  СТАТУС И ЛОГИ
+#  СТАТУС / ЛОГИ
 # ══════════════════════════════════════════════════════════════════════════════
 def _show_status() -> None:
     os.system("clear")
     st = _get_status()
-    _box_top("📊  СТАТУС  •  VK TURN TUNNEL")
+    _box_top("📊  СТАТУС  •  VK TURN PROXY")
     _box_row()
 
     svc_str = (
@@ -990,13 +766,14 @@ def _show_status() -> None:
         f"{RED}● остановлен{NC}"
     )
     _box_kv("Сервис:",       svc_str)
-    _box_kv("Бинарник:",     f"{GREEN}✓ {st['bin_version']}{NC}" if st["bin_version"] else f"{RED}✗ не установлен{NC}")
-    _box_kv("Xray inbound:", f"{GREEN}✓ настроен{NC}" if st["xray_ok"] else f"{RED}✗ отсутствует{NC}")
-    _box_kv("iptables UDP:", f"{GREEN}✓ открыт{NC}"   if st["ipt_ok"] else f"{YELLOW}⚠ не найдено правило{NC}")
+    _box_kv("Бинарник:",     f"{GREEN}✓ {st['bin_version']}{NC}"
+                             if st["bin_version"] else f"{RED}✗ не установлен{NC}")
+    _box_kv("iptables UDP:", f"{GREEN}✓ открыт{NC}"
+                             if st["ipt_ok"] else f"{YELLOW}⚠ не найдено правило{NC}")
     _box_row()
-    _box_kv("UDP порт:",     str(st["listen_port"]))
-    _box_kv("TCP порт Xray:", str(st["xray_port"]))
-    _box_kv("VLESS UUID:",   st["vless_uuid"] or "—")
+    _box_kv("UDP порт:",        str(st["listen_port"]))
+    _box_kv("Целевой порт:",    str(st["target_port"]))
+    _box_kv("Целевой сервис:",  st["target_type"])
     _box_row()
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Последние 30 строк журнала:{NC}")
@@ -1018,79 +795,55 @@ def _show_status() -> None:
 #  СМЕНА ПОРТА
 # ══════════════════════════════════════════════════════════════════════════════
 def _change_port() -> None:
-    state = _load_module_state()
+    state = _load_state()
     if not state.get("installed"):
-        _warn("VK Turn Tunnel не установлен."); _pause(); return
+        _warn("VK Turn Proxy не установлен."); _pause(); return
 
     old_listen = state.get("listen_port", _DEFAULT_LISTEN_PORT)
-    old_xport  = state.get("xray_port",   _DEFAULT_XRAY_PORT)
+    old_target = state.get("target_port", _DEFAULT_TARGET_PORT)
+    old_ttype  = state.get("target_type", "wireguard")
 
     os.system("clear")
-    _box_top("🔌  СМЕНА ПОРТА  •  VK TURN TUNNEL")
+    _box_top("🔌  СМЕНА ПОРТА  •  VK TURN PROXY")
     _box_row()
-    _box_kv("Текущий UDP-порт:", str(old_listen))
-    _box_kv("Текущий TCP-порт:", str(old_xport))
-    _box_row()
-    _box_bot(); print()
+    _box_kv("Текущий UDP-порт:",    str(old_listen))
+    _box_kv("Текущий целевой порт:", str(old_target))
+    _box_row(); _box_bot(); print()
 
     try:
-        raw = _ask(
-            f"  {CYAN}Новый UDP-порт [{old_listen}]: {NC}",
-            default=str(old_listen), c=True,
-        )
+        raw = _ask(f"  {CYAN}Новый UDP-порт [{old_listen}]: {NC}",
+                   default=str(old_listen), c=True)
         new_listen = int(raw) if raw.isdigit() else old_listen
 
-        raw = _ask(
-            f"  {CYAN}Новый TCP-порт Xray [{old_xport}]: {NC}",
-            default=str(old_xport), c=True,
-        )
-        new_xport = int(raw) if raw.isdigit() else old_xport
+        raw = _ask(f"  {CYAN}Новый целевой порт [{old_target}]: {NC}",
+                   default=str(old_target), c=True)
+        new_target = int(raw) if raw.isdigit() else old_target
     except _Cancelled:
         return
 
-    if new_listen == old_listen and new_xport == old_xport:
+    if new_listen == old_listen and new_target == old_target:
         _info("Порты не изменились."); _pause(); return
 
-    if not (1024 <= new_listen <= 65535) or not (1024 <= new_xport <= 65535):
+    if not (1024 <= new_listen <= 65535) or not (1024 <= new_target <= 65535):
         _err("Порты должны быть в диапазоне 1024–65535."); _pause(); return
-    if new_listen == new_xport:
-        _err("UDP и TCP порты не должны совпадать."); _pause(); return
+    if new_listen == new_target:
+        _err("Порты не должны совпадать."); _pause(); return
 
-    # Обновляем xray inbound если изменился xray_port
-    if new_xport != old_xport:
-        cfg_path = _xray_config_path()
-        if cfg_path:
-            try:
-                cfg = json.loads(cfg_path.read_text())
-                ib = _xray_get_turn_inbound(cfg)
-                if ib:
-                    ib["port"] = new_xport
-                    err = _xray_write_and_test(cfg_path, cfg)
-                    if err:
-                        _err(f"Xray конфиг не прошёл проверку: {err}")
-                        _pause(); return
-                    _run(["systemctl", "restart", "xray"])
-                    _ok("Xray inbound обновлён.")
-            except Exception as e:
-                _err(f"Не удалось обновить xray config: {e}"); _pause(); return
-
-    # Обновляем iptables если изменился listen_port
     if new_listen != old_listen:
         _ipt_close_udp(old_listen)
         _ipt_open_udp(new_listen)
         _ipt_persist()
         _ok(f"iptables: UDP {old_listen} → {new_listen}.")
 
-    # Обновляем сервис
     _run(["systemctl", "stop", _SERVICE_NAME])
-    _update_service_ports(new_listen, new_xport)
+    _install_service(new_listen, new_target, old_ttype)
     _run(["systemctl", "start", _SERVICE_NAME])
 
     state["listen_port"] = new_listen
-    state["xray_port"]   = new_xport
-    _save_module_state(state)
+    state["target_port"] = new_target
+    _save_state(state)
 
-    _ok(f"Порты обновлены. UDP: {new_listen}, TCP: {new_xport}.")
+    _ok(f"Порты обновлены. UDP: {new_listen}, цель: {new_target}.")
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1098,9 +851,9 @@ def _change_port() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 def do_turntunnel_menu() -> None:
     """
-    Точка входа из _core.py.
+    Точка входа.
     Ctrl+C внутри подменю → возврат сюда.
-    Ctrl+C здесь → пробрасывается в _core.py (KeyboardInterrupt не ловим).
+    Ctrl+C здесь → пробрасывается в _core.py.
     """
     while True:
         os.system("clear")
@@ -1112,17 +865,15 @@ def do_turntunnel_menu() -> None:
             f"{YELLOW}● не установлен{NC}"
         )
 
-        _box_top("VK TURN TUNNEL")
+        _box_top("VK TURN PROXY  •  FreeTurn")
         _box_row()
         _box_kv("Статус:", svc_str)
 
         if st["installed"]:
             ipt_col = GREEN if st["ipt_ok"] else YELLOW
-            xray_col = GREEN if st["xray_ok"] else RED
-            _box_kv("UDP порт:", str(st["listen_port"]))
-            _box_kv("Xray inbound:",
-                    f"{xray_col}✓ настроен :{st['xray_port']}{NC}" if st["xray_ok"]
-                    else f"{RED}✗ отсутствует{NC}")
+            _box_kv("UDP порт:",        str(st["listen_port"]))
+            _box_kv("Целевой порт:",    str(st["target_port"]))
+            _box_kv("Целевой сервис:",  st["target_type"])
             _box_kv("iptables UDP:",
                     f"{ipt_col}✓ открыт{NC}" if st["ipt_ok"]
                     else f"{YELLOW}⚠ не найдено правило{NC}")
@@ -1133,7 +884,7 @@ def do_turntunnel_menu() -> None:
             _box_item("1", "🚀  Установить")
         else:
             _box_item("1", "🚀  Переустановить")
-            _box_item("2", "📱  Показать настройки для WireTurn")
+            _box_item("2", "📱  Показать настройки / QR для FreeTurn")
             _box_item("3", "🔌  Сменить порт")
             _box_item("4", "🔄  Перезапустить сервис")
             _box_item("5", "⬆️   Обновить бинарник")
@@ -1143,7 +894,7 @@ def do_turntunnel_menu() -> None:
             _box_item("8", f"{RED}🗑️   Удалить{NC}")
 
         _box_sep()
-        _box_item("Q", "← Назад в главное меню VLESS")
+        _box_item("Q", "← Назад")
         _box_bot(); print()
 
         try:
@@ -1155,7 +906,12 @@ def do_turntunnel_menu() -> None:
             _run_install()
 
         elif ch == "2" and st["installed"]:
-            _show_wireturn_config()
+            state = _load_state()
+            _show_freeturn_config(
+                state.get("listen_port", _DEFAULT_LISTEN_PORT),
+                state.get("target_port", _DEFAULT_TARGET_PORT),
+                state.get("target_type", "wireguard"),
+            )
 
         elif ch == "3" and st["installed"]:
             try:
@@ -1199,9 +955,7 @@ def do_turntunnel_menu() -> None:
         elif ch in ("q", ""):
             break
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  АВТОНОМНЫЙ ЗАПУСК (для отладки)
-# ══════════════════════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
     if os.geteuid() != 0:
         print(f"{RED}Запустите от root.{NC}"); sys.exit(1)
