@@ -171,6 +171,19 @@ def _box_kv(key: str, val: str, kw: int = 22) -> None:
     key_pad = kw - _wlen(key_colored)
     _box_row(f"  {key_colored}{' ' * max(0, key_pad)}  {val}")
 
+def _box_link(link: str, color: str = "") -> None:
+    """Выводит длинную ссылку с переносом по строкам внутри box."""
+    color = color or YELLOW
+    indent = "  "
+    max_w = _BOX_W - 2
+    plain_link = _plain(link)
+    i = 0
+    while i < len(plain_link):
+        chunk = plain_link[i:i + max_w]
+        pad = max(0, _BOX_W - 2 - len(chunk))
+        print(f"{CYAN}║{NC}{indent}{color}{chunk}{NC}{' ' * pad}{CYAN}║{NC}")
+        i += max_w
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
@@ -485,7 +498,7 @@ def _show_user_instruction(vk_link: str, username: str) -> None:
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Вкладка Xray — VLESS-ссылка:{NC}")
     _box_row()
-    _box_row(f"  {YELLOW}{vless_link}{NC}")
+    _box_link(vless_link)
     _box_row()
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Порядок запуска:{NC}")

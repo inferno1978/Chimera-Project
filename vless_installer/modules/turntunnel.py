@@ -204,6 +204,23 @@ def _box_kv(key: str, val: str, kw: int = 22) -> None:
     key_pad = kw - _wlen(key_colored)
     _box_row(f"  {key_colored}{' ' * max(0, key_pad)}  {val}")
 
+def _box_link(link: str, color: str = "") -> None:
+    """Выводит длинную ссылку с переносом по строкам внутри box."""
+    color = color or YELLOW
+    # Отступ 2 символа слева
+    indent = "  "
+    indent_w = 2
+    max_w = _BOX_W - indent_w
+    plain_link = _plain(link)
+    chunks = []
+    i = 0
+    while i < len(plain_link):
+        chunks.append(plain_link[i:i + max_w])
+        i += max_w
+    for j, chunk in enumerate(chunks):
+        pad = max(0, _BOX_W - indent_w - len(chunk))
+        print(f"{CYAN}║{NC}{indent}{color}{chunk}{NC}{' ' * pad}{CYAN}║{NC}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
@@ -779,7 +796,7 @@ def _run_install_inner() -> None:
         f"?encryption=none&security=none&type=tcp"
         f"#WireTurn"
     )
-    _box_row(f"  {YELLOW}{_vless_link}{NC}")
+    _box_link(_vless_link)
     _box_row()
     _box_info("5. В WireTurn → Главная → запустите туннель")
     _box_row()
@@ -944,7 +961,7 @@ def _show_wireturn_config() -> None:
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Вкладка Xray — импортировать ссылку:{NC}")
     _box_row()
-    _box_row(f"  {YELLOW}{_vless_link}{NC}")
+    _box_link(_vless_link)
     _box_row()
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Порядок запуска в WireTurn:{NC}")
