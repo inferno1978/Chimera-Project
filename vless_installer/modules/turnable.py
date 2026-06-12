@@ -1012,20 +1012,20 @@ def _show_wireturn_config(
     _box_info("Логи Xray:     journalctl -u xray -f")
     _box_bot()
 
+    sep = CYAN + "─" * 66 + NC
     if turnable_link:
-        print(f"
-{CYAN}{'─' * 66}{NC}")
-        print(f"{BOLD}{WHITE}turnable:// ссылка (скопируйте в WireTurn → Импорт):{NC}")
-        print(f"{CYAN}{'─' * 66}{NC}")
+        print("")
+        print(sep)
+        print(BOLD + WHITE + "turnable:// ссылка (скопируйте в WireTurn → Импорт):" + NC)
+        print(sep)
         _print_link_full(turnable_link, YELLOW)
 
-    print(f"
-{CYAN}{'─' * 66}{NC}")
-    print(f"{BOLD}{WHITE}VLESS ссылка (скопируйте в WireTurn → Xray):{NC}")
-    print(f"{CYAN}{'─' * 66}{NC}")
+    print("")
+    print(sep)
+    print(BOLD + WHITE + "VLESS ссылка (скопируйте в WireTurn → Xray):" + NC)
+    print(sep)
     _print_link_full(vless_link, YELLOW)
-    print()
-
+    print("")
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
