@@ -124,9 +124,9 @@ def wlog(msg: str) -> None:
 
 def load_state() -> dict:
     try:
-        return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {{}}
+        return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     except Exception:
-        return {{}}
+        return {}
 
 def save_state(s: dict) -> None:
     try:
@@ -378,4 +378,10 @@ def do_fragment_watchdog_menu() -> None:
                 print()
                 if _install_watchdog():
                     _ok("Watchdog активен — мониторинг запущен")
-                time.sleep(2)
+                    # Ждём пока systemd переведёт сервис в active
+                    for _ in range(10):
+                        time.sleep(1)
+                        if _watchdog_status() == "active":
+                            break
+                else:
+                    time.sleep(2)

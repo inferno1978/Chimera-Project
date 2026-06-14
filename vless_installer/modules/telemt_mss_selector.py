@@ -341,7 +341,7 @@ def get_current_mss(config_file: Optional[Path] = None) -> str:
         return MSS_PRESET_NONE
     try:
         m = re.search(
-            r'^client_mss\s*=\s*"([^"]*)"',
+            r'^client_mss\s*=\s*"?([^"\s]+)"?',
             path.read_text(),
             re.MULTILINE,
         )

@@ -474,7 +474,9 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
         "mask = true", "mask_port = 443", "fake_cert_len = 2048",
     ]
     if client_mss:
-        censorship_lines.append(f'client_mss = "{client_mss}"')
+        # client_mss принадлежит секции [server] (ServerConfig struct).
+        # Тип всегда String — числа тоже в кавычках ("256", "tspu", "2in8" и т.д.)
+        lines.insert(lines.index(f'port = {port}') + 1, f'client_mss = "{client_mss}"')
     lines += censorship_lines
     lines += [
         "", "[access]", "replay_check_len = 65536", "ignore_time_skew = false",
@@ -822,6 +824,17 @@ def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
         _run(["systemctl", "restart", XRAY_SERVICE_NAME])
 
     # ── iptables REDIRECT ─────────────────────────────────────────────────────
+    # Исключение 1: xray (UID 999) не должен попадать в REDIRECT-петлю
+    _run(["iptables", "-t", "nat", "-D", "OUTPUT",
+          "-m", "owner", "--uid-owner", "999", "-j", "RETURN"], capture=True)
+    _run(["iptables", "-t", "nat", "-I", "OUTPUT", "1",
+          "-m", "owner", "--uid-owner", "999", "-j", "RETURN"])
+    # Исключение 2: ME-серверы Telegram на порту 8888 не должны попадать под REDIRECT
+    # (нужно для работы use_middle_proxy=true в каскадной схеме)
+    _run(["iptables", "-t", "nat", "-D", "OUTPUT",
+          "-p", "tcp", "--dport", "8888", "-j", "RETURN"], capture=True)
+    _run(["iptables", "-t", "nat", "-I", "OUTPUT", "2",
+          "-p", "tcp", "--dport", "8888", "-j", "RETURN"])
     tg_nets = _TG_NETS_current()
     failed = [net for net in tg_nets if not _ipt_add_redirect(net, port)]
     _iptables_persist()
@@ -1565,8 +1578,10 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     time.sleep(1)
 
     _info("Генерирую конфиг...")
-    # telemt всегда в режиме direct — xray перехватывается на уровне iptables
-    _write_config(port, ipv4, ipv6, tls_domain, users, use_mp, socks5_port=0,
+    # telemt всегда в режиме direct — xray перехватывается на уровне iptables REDIRECT.
+    # use_middle_proxy=True несовместим с каскадом: ME-серверы на :8888 попадают под REDIRECT.
+    # Всегда передаём False независимо от ответа пользователя.
+    _write_config(port, ipv4, ipv6, tls_domain, users, False, socks5_port=0,
                   fallback_cfg=_fb_cfg, client_mss=_client_mss)
     _ok(f"Конфиг: {CONFIG_FILE}")
 
