@@ -125,8 +125,8 @@ _BIN_URL_AMD64   = (
 )
 # Caddy с forwardproxy плагином (альтернатива)
 _CADDY_NAIVE_URL = (
-    "https://github.com/lxzan/caddy-forwardproxy-naive/releases/latest/download/"
-    "caddy-forwardproxy-naive-linux-amd64"
+    "https://github.com/Michaol/caddy-naive/releases/latest/download/"
+    "caddy-linux-amd64"
 )
 
 _DEFAULT_PORT    = 443
