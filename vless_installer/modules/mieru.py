@@ -460,6 +460,7 @@ def _install_service() -> None:
         "[Service]\n"
         "Type=simple\n"
         f"ExecStart={_MITA_BIN} run\n"
+        "RuntimeDirectory=mita\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
         "NoNewPrivileges=true\n"
@@ -647,8 +648,9 @@ def _run_install_inner() -> None:
 
     # 7. Systemd — сначала установить и запустить сервис,
     #    т.к. mita apply config работает через Unix-сокет запущенного демона
-    #    /etc/mita должна существовать до старта — mita проверяет её при запуске
+    #    /etc/mita и /var/run/mita должны существовать до старта
     _CFG_DIR.mkdir(parents=True, exist_ok=True)
+    Path("/var/run/mita").mkdir(parents=True, exist_ok=True)
     _install_service()
     _run(["systemctl", "start", _SERVICE_NAME])
     time.sleep(2)
