@@ -625,7 +625,20 @@ def _run_install_inner() -> None:
         print(f"  {GREEN}✓{NC}  Создан первый пользователь: "
               f"{YELLOW}{first_user}{NC} / {YELLOW}{first_pass}{NC}")
 
-    # 5. Конфиг
+    # 5. Systemd — сначала установить и запустить сервис,
+    #    т.к. mita apply config работает через Unix-сокет запущенного демона
+    _install_service()
+    _run(["systemctl", "start", _SERVICE_NAME])
+    time.sleep(2)
+    r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
+    svc_ok = r.stdout.strip() == "active"
+    if svc_ok:
+        print(f"  {GREEN}✓{NC}  mita запущен.")
+    else:
+        print(f"  {YELLOW}⚠{NC}  Сервис не запустился — проверьте логи (пункт 4).")
+
+    # 6. Конфиг — только после запуска сервиса
+    #    (mita apply config требует работающий /var/run/mita/mita.sock)
     _CFG_DIR.mkdir(parents=True, exist_ok=True)
     cfg = _build_server_config(users, port_start, port_end, protocol)
     err = _apply_server_config(cfg)
@@ -634,23 +647,10 @@ def _run_install_inner() -> None:
         _pause(); return
     print(f"  {GREEN}✓{NC}  Конфиг применён.")
 
-    # 6. Systemd
-    _install_service()
-
     # 7. iptables
     _ipt_open_port(protocol, port_start, port_end)
     _ipt_persist()
     print(f"  {GREEN}✓{NC}  iptables: {protocol} {port_start}-{port_end} открыт.")
-
-    # 8. Запуск
-    _run(["systemctl", "start", _SERVICE_NAME])
-    time.sleep(2)
-    r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
-    svc_ok = r.stdout.strip() == "active"
-    if svc_ok:
-        print(f"  {GREEN}✓{NC}  mita запущен.")
-    else:
-        print(f"  {YELLOW}⚠{NC}  Сервис не запустился — проверьте логи (пункт 5).")
 
     # 9. Сохраняем состояние
     _save_state({
