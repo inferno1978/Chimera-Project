@@ -69,6 +69,11 @@ from vless_installer.modules.ipset_persist   import (
     do_manage_ipset_persist,
 )
 from vless_installer.modules.ipban import do_manage_ipban
+from vless_installer.modules.vkturn_menu import do_vkturn_menu
+from vless_installer.modules.slipgate import do_slipgate_menu
+from vless_installer.modules.wdtt import do_wdtt_menu
+from vless_installer.modules.naiveproxy import do_naiveproxy_menu
+from vless_installer.modules.mieru import do_mieru_menu
 from vless_installer.modules.ripe_file_age   import (
     check_ripe_file_age, ripe_file_age_banner,
 )
@@ -3981,7 +3986,7 @@ def _make_exit_node_config(nd: dict) -> dict:
     return {
         "_comment": comment,
         "log": {
-            "loglevel": "warning",
+            "loglevel": "info",
             "access": "/var/log/xray/access.log",
             "error": "/var/log/xray/error.log"
         },
@@ -13943,12 +13948,18 @@ def _mtu_persist(iface: str, mtu: int) -> None:
         try:
             txt = interfaces_file.read_text()
             if f"iface {iface}" in txt and "mtu" not in txt:
-                new_txt = txt.replace(
-                    f"iface {iface}",
-                    f"iface {iface}\n    mtu {mtu}"
+                import re as _re3
+                # Заменяем строку "iface <iface> ..." целиком,
+                # добавляя mtu на следующей строке с отступом.
+                # Корректно для Debian 12/13: iface ens3 inet static → +mtu строка
+                new_txt = _re3.sub(
+                    r'(iface ' + re.escape(iface) + r'[^\n]*)',
+                    lambda m: m.group(0) + f"\n    mtu {mtu}",
+                    txt,
                 )
-                interfaces_file.write_text(new_txt)
-                return
+                if new_txt != txt:
+                    interfaces_file.write_text(new_txt)
+                    return
         except Exception:
             pass
 
@@ -25205,10 +25216,11 @@ def _parse_access_log() -> list:
     entries = []
     # Формат Xray: 2024/01/15 12:34:56 accepted tcp:1.2.3.4:1234 ... email:user@domain
     pattern = re.compile(
-        r'(?P<date>\d{4}/\d{2}/\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2})\s+'
-        r'(?P<action>\w+)\s+(?P<proto>\w+):(?P<src_ip>[^:]+):(?P<src_port>\d+)'
+        r'(?P<date>\d{4}/\d{2}/\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2})(?:\.\d+)?\s+'
+        r'(?:from\s+(?P<from_ip>[^:]+):\d+\s+)?'
+        r'(?P<action>\w+)\s+(?P<proto>\w+):(?P<dst_ip>[^:]+):(?P<src_port>\d+)'
         r'(?:\s+(?P<dst>\S+))?(?:\s+\[(?P<tag>[^\]]*)\])?'
-        r'(?:.*?email:(?P<email>\S+))?'
+        r'(?:.*?email:\s*(?P<email>\S+))?'
     )
     try:
         lines = log_path.read_text(errors="replace").splitlines()
@@ -25229,7 +25241,7 @@ def _parse_access_log() -> list:
                 except Exception:
                     pass
                 action = m.group("action") or ""
-                src_ip = m.group("src_ip") or ""
+                src_ip = m.group("from_ip") or m.group("dst_ip") or ""
                 email  = m.group("email")  or ""
             else:
                 m2 = re.match(r'(\d{4}/\d{2}/\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\w+)', line)
@@ -25259,9 +25271,21 @@ def _parse_access_log() -> list:
 def _audit_user_summary() -> None:
     print()
     info("Анализ access.log...")
-    entries = _parse_access_log()
+    all_entries = _parse_access_log()
+    entries = [e for e in all_entries if e.get("action", "").lower() == "accepted"]
     if not entries:
-        warn("Нет данных для анализа")
+        log_path = Path("/var/log/xray/access.log")
+        if not log_path.exists():
+            warn("access.log не найден — xray не запущен или путь не задан в config.json")
+        elif log_path.stat().st_size == 0:
+            warn("access.log пустой — xray запущен с loglevel=warning")
+            info("Для аудита подключений нужен loglevel=info в config.json → перезапустите xray")
+        elif not all_entries:
+            warn("access.log есть, но записи не распознаны — нестандартный формат")
+        else:
+            warn("access.log есть, но записи 'accepted' не найдены")
+            info("Причина: loglevel=warning — xray не пишет подключения при таком уровне")
+            info("Для аудита: config.json → log.loglevel = 'info', затем перезапустите xray")
         return
 
     from collections import defaultdict
@@ -29621,13 +29645,33 @@ def main_menu() -> None:
             _box_row()
             _box_row(f"  {CYAN}7{NC}  🚀 {TITLE}Hysteria2 транспорт{NC}")
             _box_row(f"     {DIM}Exit-нода, Балансировщик, Health, DPI, Cert{NC}")
+            _box_sep()
+            _box_row()
+            _box_row(f"  {CYAN}8{NC}  📲 {TITLE}VK Turn Tunnel{NC}")
+            _box_row(f"     {DIM}FreeTurn (vk-turn-proxy) · WireTurn (Turnable){NC}")
+            _box_row()
+            _box_sep()
+            _box_row(f"  {CYAN}9{NC}  🌐 {TITLE}SlipGate / SlipNet{NC}")
+            _box_row(f"     {DIM}DNS-туннели (DNSTT, NoizDNS, Slipstream) — обход полных блокировок{NC}")
+            _box_row()
+            _box_sep()
+            _box_row(f"  {CYAN}10{NC} 🔒 {TITLE}qWDTT (WireGuard/TURN){NC}")
+            _box_row(f"     {DIM}WireGuard через TURN ВКонтакте — пароли, TTL, Telegram-бот{NC}")
+            _box_row()
+            _box_sep()
+            _box_row(f"  {CYAN}11{NC} 🔐 {TITLE}NaiveProxy{NC}")
+            _box_row(f"     {DIM}HTTPS/HTTP2 + Chromium fingerprint + probe resistance{NC}")
+            _box_row()
+            _box_sep()
+            _box_row(f"  {CYAN}12{NC} 🔒 {TITLE}Mieru{NC}")
+            _box_row(f"     {DIM}mTLS + random padding — маскировка без домена{NC}")
             _box_row()
             _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–7 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–12 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -29664,6 +29708,41 @@ def main_menu() -> None:
 
         elif choice == "7":
             do_hysteria2_menu()
+
+        elif choice == "8":
+            try:
+                do_vkturn_menu()
+            except ImportError as _e:
+                warn(f"Модуль VK Turn Tunnel не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "9":
+            try:
+                do_slipgate_menu()
+            except ImportError as _e:
+                warn(f"Модуль SlipGate не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "10":
+            try:
+                do_wdtt_menu()
+            except ImportError as _e:
+                warn(f"Модуль qWDTT не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "11":
+            try:
+                do_naiveproxy_menu()
+            except ImportError as _e:
+                warn(f"Модуль NaiveProxy не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "12":
+            try:
+                do_mieru_menu()
+            except ImportError as _e:
+                warn(f"Модуль Mieru не найден: {_e}")
+                time.sleep(2)
 
         elif choice == "0":
             print(f"{GREEN}До свидания! 👋{NC}")

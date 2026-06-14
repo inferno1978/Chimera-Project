@@ -2,6 +2,388 @@
 
 ---
 
+## v4.12.8-patch5 — 14 июня 2026 — NaiveProxy + Mieru: HTTPS/mTLS маскировка трафика
+
+### Контекст
+
+Два новых протокола для обхода DPI-фильтрации. Оба модуля написаны
+в едином стиле проекта — без сторонних зависимостей, чистое удаление,
+встроенный гайд, QR-коды для клиентов.
+
+### NaiveProxy (`naiveproxy.py`)
+
+**Принцип:** HTTPS/HTTP2 с Chromium fingerprint + probe resistance.
+DPI видит легитимный HTTPS трафик к домену. Зонды РКН видят фейковый сайт.
+
+**Схема:**
+```
+Клиент (Karing/NekoBox/ShadowRocket)
+  │  HTTPS/HTTP2 + Chromium fingerprint
+  ▼
+caddy-forwardproxy-naive :443
+  │  probe resistance → фейковый сайт для незнакомых клиентов
+  ▼
+Интернет
+```
+
+**Каскад Entry→Exit:**
+```
+Клиент → caddy-naive Entry (RU) → upstream → caddy-naive Exit (EU) → Интернет
+```
+
+**Что делает модуль:**
+- Скачивает caddy-forwardproxy-naive (prebuilt amd64)
+- Генерирует Caddyfile с probe resistance и basicauth
+- Создаёт фейковый HTML-сайт для незнакомых клиентов
+- Systemd-сервис с `CAP_NET_BIND_SERVICE` (без root)
+- Открывает TCP 443 в iptables
+- Управление пользователями с bcrypt хешированием паролей
+- Каскад Entry→Exit через upstream в Caddyfile
+- Генерация `naive+https://` ссылок и QR-кодов
+- Встроенный гайд: DNS, probe resistance, каскад, клиенты
+
+**Требования:** домен с A-записью на VPS, порт 443/tcp
+
+**Клиенты:** Karing, NekoBox (Android), ShadowRocket (iOS), naiveproxy CLI
+
+---
+
+### Mieru (`mieru.py`)
+
+**Принцип:** mTLS + рандомный padding — трафик без паттернов.
+Не требует домена. Временная метка защищает от replay-атак.
+
+**Схема:**
+```
+Клиент (Karing / Nekobox / sing-box)
+  │  mTLS + random padding + timestamp
+  ▼
+mita :2012-2022 (диапазон портов)
+  │  проверка ±30 сек, встроенный SOCKS5
+  ▼
+Интернет
+```
+
+**Что делает модуль:**
+- Скачивает mita (сервер) и mieru (CLI) с GitHub (amd64/arm64)
+- Устанавливает chrony если нет NTP-синхронизации
+- Применяет конфиг через `mita apply config`
+- Systemd-сервис `mita`
+- Открывает диапазон TCP/UDP портов в iptables
+- Управление пользователями с hot-reload конфига
+- Проверка NTP-синхронизации в статусе
+- Генерация `mieru://` ссылок, sing-box JSON outbound и QR-кодов
+- Встроенный гайд: как работает, синхронизация времени, TCP vs UDP
+
+**Требования:** только IP и порт, домен не нужен
+
+**Клиенты:** Karing, Nekobox (Android), sing-box CLI
+
+---
+
+### Интеграция в `_core.py`
+
+- Пункт **11** в главном меню: `🔐 NaiveProxy`
+- Пункт **12** в главном меню: `🔒 Mieru`
+- Промпт выбора обновлён до `1–12 / 0`
+- Импорты `do_naiveproxy_menu`, `do_mieru_menu`
+
+### Что не затрагивается
+
+- Xray `config.json` и VLESS-inbound
+- `state.json` инсталлера
+- iptables-правила других модулей
+- Любые другие службы
+
+### NaiveProxy vs Mieru — когда что выбрать
+
+| | NaiveProxy | Mieru |
+|---|---|---|
+| Маскировка | HTTPS/H2 Chromium | mTLS + random padding |
+| Домен | Обязателен | Не нужен |
+| Probe resistance | ✓ | — |
+| Синхронизация времени | — | ±30 сек обязательно |
+| Клиенты | Karing, NekoBox, ShadowRocket | Karing, NekoBox, sing-box |
+
+---
+
+---
+
+## v4.12.8-patch2 — 12 июня 2026 — VK Turn Tunnel: два клиента, два модуля
+
+### Контекст
+
+Предыдущая реализация `turntunnel.py` запускала `vk-turn-proxy` с флагом
+`-vless`, который предназначен для работы в паре с CLI-клиентом (`client -vless`)
+а не с мобильным приложением WireTurn. Xray inbound добавлялся, но к нему
+никто не подключался. Одновременно WireTurn ожидает сервер Turnable, а не
+vk-turn-proxy. Патч разделяет схемы на два независимых модуля.
+
+### Новое
+
+#### Модуль `vkturn_menu.py` — диспетчер пункта 8
+
+- Новая точка входа `do_vkturn_menu()` вместо `do_turntunnel_menu()`
+- Показывает выбор между двумя подсистемами с текущим статусом каждой
+- Оба модуля могут быть установлены и работать одновременно (разные порты,
+  разные сервисы, не конфликтуют)
+
+#### Модуль `turntunnel.py` — рефакторинг под FreeTurn
+
+- Убран флаг `-vless` из systemd ExecStart
+- Удалён весь Xray-блок:
+  `_xray_inject_turn_inbound`, `_xray_remove_turn_inbound`,
+  `_xray_write_and_test`, `_xray_has_turn_inbound`, `_xray_get_turn_inbound`
+- Удалён перезапуск Xray после установки/удаления
+- Добавлен QR-код адреса сервера (`IP:порт`) для сканирования в FreeTurn
+- Обновлена инструкция: вкладка «Сервер» и вкладка «Клиент» в FreeTurn
+- Целевой сервис — WireGuard (UDP 51820) или Hysteria2, выбирается при установке
+- Клиент: **FreeTurn** (samosvalishe/turn-proxy-android)
+
+#### Модуль `turnable.py` — новый, под WireTurn
+
+- Скачивает бинарник **Turnable** (TheAirBlow/Turnable, v0.4.1, linux-amd64)
+- Генерирует пару ключей через `turnable keygen` (priv_key / pub_key)
+- Запрашивает Call ID ВК-звонка (принимает полную ссылку или только ID)
+- Создаёт `/opt/turnable/config.json` и `store.json` с маршрутом VLESS
+- Добавляет VLESS-inbound в `config.json` Xray:
+  `127.0.0.1:12767`, plain TCP, тег `vless-turnable-inbound`;
+  проверка через `xray -test` перед применением; откат при ошибке
+- Создаёт systemd-сервис `turnable` с `After=xray.service`
+- Открывает UDP 56001 в iptables (56000 зарезервирован для FreeTurn)
+- Генерирует `turnable://` ссылку через `turnable config generate`
+- Показывает два QR-кода: turnable:// ссылка + VLESS-ссылка для Xray
+- Хранит состояние в `/var/lib/xray-installer/turnable.json`
+- При удалении: сервис, бинарник, inbound из Xray, iptables, turnable.json
+- Клиент: **WireTurn** (spkprsnts/WireTurn)
+
+### Схемы трафика
+
+```
+FreeTurn (Android)
+  │  DTLS 1.2 / STUN ChannelData
+  ▼
+TURN-серверы ВКонтакте
+  │  UDP → VPS :56000
+  ▼
+vk-turn-proxy server (UDP relay)
+  │  UDP → WireGuard / Hysteria2
+  ▼
+Интернет
+```
+
+```
+WireTurn + встроенный Xray (Android)
+  │  WebRTC DTLS / TURN
+  ▼
+TURN-серверы ВКонтакте
+  │  UDP → VPS :56001
+  ▼
+Turnable server
+  │  TCP → Xray inbound :12767
+  ▼
+Xray (VLESS plain TCP, только localhost)
+  │
+  ▼
+Интернет
+```
+
+### Изменения в `_core.py`
+
+- Импорт заменён: `do_turntunnel_menu` → `do_vkturn_menu` из `vkturn_menu`
+- Вызов пункта 8 обновлён соответственно
+- Подпись пункта 8: `FreeTurn (vk-turn-proxy) · WireTurn (Turnable)`
+
+### Что не затрагивается
+
+- Основной VLESS/REALITY inbound и его пользователи
+- Hysteria2, MTProxy, SlipGate, qWDTT и все прочие модули
+- iptables-правила других модулей (ipban, autoban, geoip, telemt)
+- `state.json`
+
+---
+
+## v4.12.8-patch4 — 11 июня 2026 — qWDTT: WireGuard через TURN ВКонтакте
+
+### Контекст
+
+Альтернатива vk-turn-proxy для пользователей которым нужна парольная модель
+доступа, временные пароли с TTL, лимиты устройств и управление через
+Telegram без SSH. Использует WireGuard как внутренний протокол вместо VLESS,
+ключи WRAP выводятся из пароля через HKDF — не хранятся в APK.
+
+### Схема трафика
+
+```
+Android (qWDTT APK)
+  │  WRAP RTP AEAD/ChaCha20-Poly1305 поверх DTLS 1.2
+  ▼
+TURN-серверы ВКонтакте  (трафик = медиа-поток звонка)
+  │  UDP → VPS :56000
+  ▼
+wdtt-server  (:56000/udp DTLS)
+  │  WireGuard  (:56001/udp внутренний)
+  ▼
+WireGuard tun: wdtt0  (10.66.66.0/16)
+  │  NAT MASQUERADE
+  ▼
+Интернет
+```
+
+### Новое
+
+#### Модуль `wdtt.py` — установка и управление qWDTT
+
+- Сборка `wdtt-server` из исходников Go (github.com/SpaceNeuroX/proxy-turn-vk-android)
+  с автоустановкой Go через apt если отсутствует
+- Systemd-сервис с `After=network-online.target`
+- iptables: UDP порт 56000, MASQUERADE для подсети `10.66.66.0/16`
+- IP forwarding (`net.ipv4.ip_forward=1`) через `/etc/sysctl.d/99-wdtt.conf`
+- **Парольная модель:**
+  - Главный пароль — бессрочный (для администратора)
+  - До 10 временных паролей с TTL (1–365 дней) и лимитом устройств
+  - Ключи WRAP выводятся через HKDF — не хранятся в клиентском APK
+- **Hot reload** через SIGHUP — смена паролей без перезапуска службы
+  и разрыва активных соединений
+- **Telegram-бот** (опционально): `/new`, `/list`, деактивация,
+  отвязка устройств, удаление паролей — всё без SSH
+- Генерация `qwdtt://` ссылок и `.conf` файлов для клиента
+- Состояние в `/var/lib/xray-installer/wdtt.json`,
+  пароли в `/etc/wdtt/passwords.json`
+- При удалении чисто убирает всё: сервис, бинарник, конфиги,
+  iptables-правила, sysctl
+
+#### Встроенный гайд (пункт [G])
+
+- Скачать qWDTT APK (github.com/SpaceNeuroX/proxy-turn-vk-android/releases)
+- Получить VK-хеш звонка (часть ссылки после /join/)
+- Подключение по `qwdtt://` ссылке — формат и импорт в приложение
+- Telegram-бот — создание бота, команды, возможности
+- Сравнение с vk-turn-proxy — когда что выбрать
+
+#### Интеграция в `_core.py`
+
+- Новый пункт **10** в главном меню: `🔒 qWDTT (WireGuard/TURN)`
+- Импорт `do_wdtt_menu` на уровне модуля
+- Промпт выбора обновлён до `1–10 / 0`
+
+### Отличия от vk-turn-proxy (turntunnel.py)
+
+| | vk-turn-proxy | qWDTT |
+|---|---|---|
+| Протокол | VLESS (Xray) | WireGuard |
+| Аутентификация | UUID | Пароль + HKDF |
+| Клиент | WireTurn | qWDTT APK |
+| Временные пароли | turntunnel_links.py | Встроено (TTL, лимит) |
+| Telegram-бот | — | ✓ |
+| Hot reload | — | ✓ SIGHUP |
+
+### Что не затрагивается
+
+- `config.json` Xray и VLESS-inbound
+- `state.json` инсталлера
+- iptables-правила других модулей (ipban, turntunnel, autoban)
+- Любые другие службы
+
+---
+
+---
+
+## v4.12.8-patch3 — 11 июня 2026 — SlipGate/SlipNet: DNS-туннели для обхода полных блокировок
+
+### Контекст
+
+Когда все прямые соединения заблокированы — VLESS, WireGuard, TURN —
+DNS-туннель работает потому что операторы не могут заблокировать DNS
+не нарушив работу всего интернета.
+Трафик прячется внутри DNS-запросов и выглядит как обычная DNS-активность.
+Данный патч интегрирует SlipGate (github.com/anonvector/slipgate) —
+серверный компонент для DNS-туннелей — в VLESS Ultimate Installer.
+
+### Схема трафика
+
+```
+Android / CLI (SlipNet)
+  │  DNS-запросы (UDP/53) с данными внутри
+  ▼
+DNS-сервер оператора / публичный резолвер
+  │  NS-делегирование на поддомен
+  ▼
+VPS :53/udp — SlipGate (DNSTT/NoizDNS/Slipstream/VayDNS)
+  │  расшифровка, Curve25519
+  ▼
+SOCKS5 :1080 / SSH :22 → Интернет
+```
+
+### Поддерживаемые протоколы
+
+| Протокол    | Транспорт         | Домен нужен | Порт    |
+|-------------|-------------------|-------------|---------|
+| DNSTT       | DNS (UDP)         | Да (NS)     | 53/udp  |
+| NoizDNS     | DNS + DPI-obfs    | Да (NS)     | 53/udp  |
+| Slipstream  | QUIC over DNS     | Да (NS)     | 53/udp  |
+| VayDNS      | KCP + Curve25519  | Да (NS)     | 53/udp  |
+| StunTLS     | SSH over TLS+WS   | Нет         | 443/tcp |
+| NaiveProxy  | HTTPS Chromium FP | Да (A)      | 443/tcp |
+
+### Новое
+
+#### Модуль `slipgate.py` — установка и управление SlipGate
+
+- Установка через официальный `install.sh` от авторов (AGPL-3.0)
+- Управление туннелями через SlipGate TUI (`slipgate` без аргументов)
+- Генерация `slipnet://` URI для импорта в клиент (пункт [3])
+- Статус всех туннелей и systemd-сервисов
+- Диагностика (`slipgate diag`)
+- Просмотр логов по туннелям и общих
+- Обновление (`slipgate update`)
+- Удаление (`slipgate uninstall`) — чисто убирает всё
+- Хранит флаг установки в `/var/lib/xray-installer/slipgate.json`
+
+#### Встроенный гайд (пункт [G])
+
+Полная документация прямо в TUI без выхода в браузер:
+
+- **DNS-настройка** — A-запись для NS-сервера, NS-записи для каждого
+  туннеля, A-запись для NaiveProxy; команда проверки (`dig NS`)
+- **Android-клиент** — где скачать SlipNet APK, как импортировать
+  `slipnet://` профиль, порядок подключения
+- **CLI-клиент** — скачивание `slipnet-linux-amd64`, использование
+  с SOCKS5 прокси, кастомный порт
+- **Добавить туннель** — пошагово через TUI и через CLI
+- **Типы туннелей** — что выбрать под конкретную ситуацию
+
+#### Интеграция в `_core.py`
+
+- Новый пункт **9** в главном меню: `🌐 SlipGate / SlipNet`
+- Импорт `do_slipgate_menu` на уровне модуля
+- Промпт выбора обновлён до `1–9 / 0`
+
+### Клиентская часть
+
+- **Android**: SlipNet APK — `github.com/anonvector/SlipNet/releases`
+- **Linux/macOS/Windows**: `slipnet-linux-amd64` из тех же релизов
+- Импорт через `slipnet://BASE64...` URI (генерируется пунктом [3])
+
+### Что не затрагивается
+
+- `config.json` Xray и основной VLESS/REALITY inbound
+- `state.json` инсталлера
+- iptables-правила других модулей
+- Пользователи и UUID VLESS
+- Любые другие службы
+
+### Примечание по лицензии
+
+SlipNet (клиент, APK) — закрытая лицензия, запрещающая распространение
+через app stores. Модуль инсталлера не распространяет клиент —
+только скачивает серверный компонент (SlipGate, AGPL-3.0) и показывает
+ссылку на официальный GitHub для загрузки клиента.
+
+---
+
+---
+
 ## v4.12.8-patch1 — 8 июня 2026 — Fragment Fuzzer: режим тестирования с клиента
 
 ### Контекст
