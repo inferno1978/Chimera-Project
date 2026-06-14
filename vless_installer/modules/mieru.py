@@ -440,7 +440,17 @@ def _ipt_persist() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  SYSTEMD
 # ══════════════════════════════════════════════════════════════════════════════
+def _ensure_mita_user() -> None:
+    """mita требует системного пользователя 'mita' для управления сокетом."""
+    r = _run(["id", "mita"], capture=True)
+    if r.returncode != 0:
+        _run(["useradd", "--system", "--no-create-home",
+              "--shell", "/usr/sbin/nologin", "mita"])
+
 def _install_service() -> None:
+    # mita run — запуск в foreground (для systemd Type=simple).
+    # mita start пытается подключиться к уже запущенному демону через сокет
+    # и немедленно падает с "daemon is not running".
     _SERVICE_FILE.write_text(
         "[Unit]\n"
         "Description=Mieru Proxy Server (mita)\n"
@@ -449,8 +459,7 @@ def _install_service() -> None:
         "\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={_MITA_BIN} start\n"
-        f"ExecStop={_MITA_BIN} stop\n"
+        f"ExecStart={_MITA_BIN} run\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
         "NoNewPrivileges=true\n"
@@ -625,7 +634,10 @@ def _run_install_inner() -> None:
         print(f"  {GREEN}✓{NC}  Создан первый пользователь: "
               f"{YELLOW}{first_user}{NC} / {YELLOW}{first_pass}{NC}")
 
-    # 5. Systemd — сначала установить и запустить сервис,
+    # 5. Системный пользователь mita (требуется для Unix-сокета)
+    _ensure_mita_user()
+
+    # 6. Systemd — сначала установить и запустить сервис,
     #    т.к. mita apply config работает через Unix-сокет запущенного демона
     _install_service()
     _run(["systemctl", "start", _SERVICE_NAME])
