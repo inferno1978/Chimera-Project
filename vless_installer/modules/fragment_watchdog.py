@@ -378,4 +378,10 @@ def do_fragment_watchdog_menu() -> None:
                 print()
                 if _install_watchdog():
                     _ok("Watchdog активен — мониторинг запущен")
-                time.sleep(2)
+                    # Ждём пока systemd переведёт сервис в active
+                    for _ in range(10):
+                        time.sleep(1)
+                        if _watchdog_status() == "active":
+                            break
+                else:
+                    time.sleep(2)
