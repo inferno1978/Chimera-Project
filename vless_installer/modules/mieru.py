@@ -437,6 +437,51 @@ def _ipt_persist() -> None:
     if r.returncode == 0 and r.stdout:
         (rules_dir / "rules.v4").write_text(r.stdout)
 
+def _ufw_is_active() -> bool:
+    """Проверяет активен ли UFW."""
+    if not shutil.which("ufw"):
+        return False
+    r = _run(["ufw", "status"], capture=True)
+    return "active" in r.stdout.lower()
+
+def _ufw_open_port(proto: str, port_start: int, port_end: int) -> None:
+    """Открывает порты через UFW если он активен."""
+    if not _ufw_is_active():
+        return
+    proto = proto.lower()
+    if port_start == port_end:
+        _run(["ufw", "allow", f"{port_start}/{proto}"], capture=True)
+    else:
+        _run(["ufw", "allow", f"{port_start}:{port_end}/{proto}"], capture=True)
+
+def _ufw_close_port(proto: str, port_start: int, port_end: int) -> None:
+    """Закрывает порты через UFW если он активен."""
+    if not _ufw_is_active():
+        return
+    proto = proto.lower()
+    if port_start == port_end:
+        _run(["ufw", "delete", "allow", f"{port_start}/{proto}"], capture=True)
+    else:
+        _run(["ufw", "delete", "allow", f"{port_start}:{port_end}/{proto}"], capture=True)
+
+def _open_ports(proto: str, port_start: int, port_end: int) -> str:
+    """Открывает порты через UFW (если активен) или iptables. Возвращает описание."""
+    if _ufw_is_active():
+        _ufw_open_port(proto, port_start, port_end)
+        return f"UFW: {proto} {port_start}-{port_end} открыт."
+    else:
+        _ipt_open_port(proto, port_start, port_end)
+        _ipt_persist()
+        return f"iptables: {proto} {port_start}-{port_end} открыт."
+
+def _close_ports(proto: str, port_start: int, port_end: int) -> None:
+    """Закрывает порты через UFW (если активен) или iptables."""
+    if _ufw_is_active():
+        _ufw_close_port(proto, port_start, port_end)
+    else:
+        _ipt_close_port(proto, port_start, port_end)
+        _ipt_persist()
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  SYSTEMD
 # ══════════════════════════════════════════════════════════════════════════════
@@ -508,6 +553,9 @@ def _gen_singbox_outbound(server_ip: str, port_start: int, port_end: int,
     """
     Генерирует sing-box outbound для mieru.
     Импортируется в Karing / Nekobox / sing-box CLI.
+    Spec: https://sing-box.sagernet.org/configuration/outbound/mieru/
+    Поля: server, server_port, transport, password — username НЕ является
+    отдельным полем outbound в sing-box, оно не передаётся.
     """
     port_entry = port_start if port_start == port_end else f"{port_start}-{port_end}"
     return {
@@ -516,21 +564,35 @@ def _gen_singbox_outbound(server_ip: str, port_start: int, port_end: int,
         "server": server_ip,
         "server_port": port_entry,
         "transport": protocol.upper(),
-        "username": username,
         "password": password,
     }
 
 def _gen_client_share_link(server_ip: str, port_start: int, port_end: int,
                             protocol: str, username: str, password: str) -> str:
     """
-    Генерирует mierus:// share link.
-    Официальный формат: mierus://user:pass@host?port=PORT&protocol=TCP&profile=default&mtu=1400
+    Генерирует mierus:// share link для Karing (sing-box).
+    Формат: mierus://user:pass@host?port=PORT&protocol=TCP&profile=default&mtu=1400
     Документация: https://github.com/enfein/mieru/blob/main/docs/client-install.md
     """
     port_str = str(port_start) if port_start == port_end else f"{port_start}-{port_end}"
     return (
         f"mierus://{username}:{password}@{server_ip}"
         f"?port={port_str}&protocol={protocol.upper()}&profile=default&mtu=1400"
+    )
+
+def _gen_client_share_link_nekobox(server_ip: str, port_start: int,
+                                    protocol: str, username: str, password: str) -> str:
+    """
+    Генерирует mierus:// share link для Nekobox / Nyamebox.
+    Формат: mierus://user:pass@host:PORT?transport=TCP&mtu=1400
+    Отличия от Karing:
+      - порт через двоеточие после IP (не query-параметр port=)
+      - параметр transport= вместо protocol=
+      - только один конкретный порт (не диапазон)
+    """
+    return (
+        f"mierus://{username}:{password}@{server_ip}:{port_start}"
+        f"?transport={protocol.upper()}&mtu=1400"
     )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -672,10 +734,20 @@ def _run_install_inner() -> None:
         _pause(); return
     print(f"  {GREEN}✓{NC}  Конфиг применён.")
 
-    # 7. iptables
-    _ipt_open_port(protocol, port_start, port_end)
-    _ipt_persist()
-    print(f"  {GREEN}✓{NC}  iptables: {protocol} {port_start}-{port_end} открыт.")
+    # КРИТИЧНО: перезапуск после apply config — без него mita слушает только
+    # UNIX-сокет и не открывает TCP порты
+    _run(["systemctl", "restart", _SERVICE_NAME])
+    time.sleep(3)
+    r2 = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
+    svc_ok = r2.stdout.strip() == "active"
+    if svc_ok:
+        print(f"  {GREEN}✓{NC}  mita перезапущен, TCP порты активированы.")
+    else:
+        print(f"  {YELLOW}⚠{NC}  Сервис не запустился после перезапуска — проверьте логи.")
+
+    # 7. Фаервол (UFW если активен, иначе iptables)
+    fw_msg = _open_ports(protocol, port_start, port_end)
+    print(f"  {GREEN}✓{NC}  {fw_msg}")
 
     # 9. Сохраняем состояние
     _save_state({
@@ -688,11 +760,11 @@ def _run_install_inner() -> None:
     })
 
     # ── Итог ──────────────────────────────────────────────────────────────────
-    server_ip  = _get_server_ip()
-    share_link = _gen_client_share_link(
-        server_ip, port_start, port_end, protocol,
-        users[0]["username"], users[0]["password"],
-    )
+    server_ip      = _get_server_ip()
+    uname          = users[0]["username"]
+    pwd            = users[0]["password"]
+    share_link     = _gen_client_share_link(server_ip, port_start, port_end, protocol, uname, pwd)
+    share_link_neko = _gen_client_share_link_nekobox(server_ip, port_start, protocol, uname, pwd)
 
     os.system("clear")
     _box_top("✅  УСТАНОВКА ЗАВЕРШЕНА  •  MIERU")
@@ -705,17 +777,22 @@ def _run_install_inner() -> None:
     _box_kv("Порт(ы):",    f"{YELLOW}{port_str}/{protocol}{NC}")
     _box_row()
     _box_sep()
-    _box_row(f"  {BOLD}{WHITE}Ссылка для клиента (первый пользователь):{NC}")
+    _box_row(f"  {BOLD}{WHITE}Ссылка для Karing (sing-box core):{NC}")
     _box_row()
     _box_link(share_link)
     _box_row()
     _box_sep()
-    _box_info("Клиенты: Karing, Nekobox (Android), sing-box CLI")
+    _box_row(f"  {BOLD}{WHITE}Ссылка для Nekobox / Nyamebox:{NC}")
+    _box_row()
+    _box_link(share_link_neko)
+    _box_row()
+    _box_sep()
+    _box_warn("Karing: убедитесь что выбрано ядро sing-box (не Xray-core!)")
     _box_info("Добавьте пользователей через пункт [2].")
     _box_warn("Убедитесь что время на клиенте синхронизировано!")
     _box_bot()
     print()
-    _print_qr(share_link, f"mierus:// для {users[0]['username']}")
+    _print_qr(share_link, f"Karing / mierus:// для {uname}")
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -816,9 +893,8 @@ def _add_user(state: dict) -> None:
     port_start = state.get("port_start", _DEFAULT_PORT_START)
     port_end   = state.get("port_end",   _DEFAULT_PORT_END)
     protocol   = state.get("protocol",   _DEFAULT_PROTOCOL)
-    share_link = _gen_client_share_link(
-        server_ip, port_start, port_end, protocol, username, password,
-    )
+    share_link      = _gen_client_share_link(server_ip, port_start, port_end, protocol, username, password)
+    share_link_neko = _gen_client_share_link_nekobox(server_ip, port_start, protocol, username, password)
 
     os.system("clear")
     _box_top("✅  ПОЛЬЗОВАТЕЛЬ ДОБАВЛЕН")
@@ -828,12 +904,16 @@ def _add_user(state: dict) -> None:
     if err: _box_warn(f"Ошибка конфига: {err}")
     else: _box_ok("Конфиг применён.")
     _box_row(); _box_sep()
-    _box_row(f"  {BOLD}{WHITE}mierus:// ссылка:{NC}")
+    _box_row(f"  {BOLD}{WHITE}Ссылка для Karing (sing-box core):{NC}")
     _box_row()
     _box_link(share_link)
+    _box_row(); _box_sep()
+    _box_row(f"  {BOLD}{WHITE}Ссылка для Nekobox / Nyamebox:{NC}")
+    _box_row()
+    _box_link(share_link_neko)
     _box_row(); _box_bot()
     print()
-    _print_qr(share_link, f"mierus:// для {username}")
+    _print_qr(share_link, f"Karing / mierus:// для {username}")
     _pause()
 
 def _show_user_link(users: list, server_ip: str,
@@ -857,22 +937,26 @@ def _show_user_link(users: list, server_ip: str,
     except (ValueError, IndexError):
         print(f"  {RED}✗{NC}  Неверный номер."); _pause(); return
 
-    share_link = _gen_client_share_link(
-        server_ip, port_start, port_end, protocol,
-        user["username"], user["password"],
-    )
+    share_link      = _gen_client_share_link(server_ip, port_start, port_end, protocol,
+                                               user["username"], user["password"])
+    share_link_neko = _gen_client_share_link_nekobox(server_ip, port_start, protocol,
+                                                      user["username"], user["password"])
     os.system("clear")
     _box_top(f"🔗  {user['username']}  •  MIERU")
     _box_row()
     _box_kv("Логин:", f"{YELLOW}{user['username']}{NC}")
     _box_kv("Пароль:", f"{YELLOW}{user['password']}{NC}")
     _box_row(); _box_sep()
-    _box_row(f"  {BOLD}{WHITE}mierus:// ссылка:{NC}")
+    _box_row(f"  {BOLD}{WHITE}Ссылка для Karing (sing-box core):{NC}")
     _box_row()
     _box_link(share_link)
+    _box_row(); _box_sep()
+    _box_row(f"  {BOLD}{WHITE}Ссылка для Nekobox / Nyamebox:{NC}")
+    _box_row()
+    _box_link(share_link_neko)
     _box_row(); _box_bot()
     print()
-    _print_qr(share_link, f"mierus:// для {user['username']}")
+    _print_qr(share_link, f"Karing / mierus:// для {user['username']}")
     _pause()
 
 def _show_singbox_json(users: list, server_ip: str,
@@ -1197,8 +1281,7 @@ def _full_uninstall(silent: bool = False) -> bool:
     if _CFG_DIR.exists():
         shutil.rmtree(_CFG_DIR, ignore_errors=True)
 
-    _ipt_close_port(protocol, port_start, port_end)
-    _ipt_persist()
+    _close_ports(protocol, port_start, port_end)
 
     try:
         if _MODULE_STATE.exists(): _MODULE_STATE.unlink()
