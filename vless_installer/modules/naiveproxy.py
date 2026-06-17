@@ -262,6 +262,26 @@ def _gen_password(length: int = 16) -> str:
 def _gen_probe_secret() -> str:
     return secrets.token_urlsafe(24)
 
+def _gen_singbox_outbound(domain: str, port: int, username: str, password: str) -> dict:
+    """
+    Генерирует sing-box outbound для NaiveProxy.
+    Импортируется в Karing (modified sing-box core) — Karing не понимает
+    схему naive+https://, только sing-box JSON формат.
+    """
+    return {
+        "type": "naive",
+        "tag": f"naive-{username}",
+        "server": domain,
+        "server_port": port,
+        "username": username,
+        "password": password,
+        "network": "tcp",
+        "tls": {
+            "enabled": True,
+            "server_name": domain,
+        },
+    }
+
 def _get_server_ip() -> str:
     try:
         import socket
@@ -704,11 +724,34 @@ def _run_install_inner() -> None:
     _box_link(naive_link)
     _box_row()
     _box_sep()
-    _box_info("Клиенты: Karing, NekoBox (Android), ShadowRocket (iOS)")
+    _box_info("Эта ссылка подходит для: NekoBox, husi, Exclave (Android),")
+    _box_info("v2rayN/v2rayNG, оригинальный naive CLI клиент.")
+    _box_warn("Karing ссылку naive+https:// НЕ понимает — для него нужен")
+    _box_warn("sing-box JSON, см. пункт [3] в меню NaiveProxy.")
     _box_info("Добавьте пользователей через пункт [2].")
     _box_bot()
     print()
     _print_qr(naive_link, "naive+https:// для клиента")
+    _pause()
+
+def _show_singbox_json(domain: str, port: int, username: str, password: str) -> None:
+    """Показывает sing-box outbound JSON для Karing."""
+    outbound = _gen_singbox_outbound(domain, port, username, password)
+    full_config = {
+        "outbounds": [outbound, {"type": "direct", "tag": "direct"}],
+    }
+    json_str = json.dumps(full_config, indent=2, ensure_ascii=False)
+
+    os.system("clear")
+    _box_top(f"📋  sing-box JSON  •  {username}  •  NAIVEPROXY")
+    _box_row()
+    _box_info("Для Karing: профили → Добавить → Sing-box JSON формат,")
+    _box_info("вставьте код ниже целиком.")
+    _box_row()
+    _box_bot()
+    print()
+    print(json_str)
+    print()
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1246,6 +1289,7 @@ def do_naiveproxy_menu() -> None:
             _box_item("3", "🔄  Перезапустить сервис")
             _box_item("4", "🔗  Каскад Entry→Exit")
             _box_item("5", "📊  Статус / логи")
+            _box_item("6", "📋  sing-box JSON для Karing")
             _box_sep()
             _box_item("9", f"{RED}🗑️   Удалить NaiveProxy{NC}")
 
@@ -1276,6 +1320,14 @@ def do_naiveproxy_menu() -> None:
             except _Cancelled: pass
         elif ch == "5" and installed:
             _show_status()
+        elif ch == "6" and installed:
+            state = _load_state()
+            users = state.get("users", [])
+            if users:
+                _show_singbox_json(state.get("domain", ""), state.get("port", _DEFAULT_PORT),
+                                    users[0]["username"], users[0]["password"])
+            else:
+                print(f"  {YELLOW}⚠{NC}  Нет пользователей."); _pause()
         elif ch == "9" and installed:
             try: _full_uninstall(silent=False)
             except _Cancelled:
