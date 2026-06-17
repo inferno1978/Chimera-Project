@@ -368,7 +368,7 @@ def _build_caddyfile(domain: str, port: int, users: list,
     }}
     route {{
         forward_proxy {{
-            basicauth {{}}\n{auth_lines}            hide_ip
+{auth_lines}            hide_ip
             hide_via
             probe_resistance {probe_secret}
 {upstream_line}        }}
