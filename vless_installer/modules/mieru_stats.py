@@ -236,21 +236,17 @@ def _get_mita_ports() -> tuple[int, int]:
 # ══════════════════════════════════════════════════════════════════════════════
 def _ensure_iptables_rule(port_start: int, port_end: int, proto: str) -> bool:
     """
-    Гарантирует ровно одно iptables-правило для диапазона портов mita.
-    Удаляет все дубли (если накопились от предыдущих запусков),
-    оставляет одно свежее правило с обнулёнными счётчиками.
-    Возвращает True если правило установлено успешно.
+    Гарантирует ровно одно iptables-правило-счётчик для mita.
+    Использует iptables -C (check) для проверки и -D в цикле для удаления дублей.
+    Правило с mita-stats уже существует и накопило трафик — НЕ пересоздаём.
     """
-    p = proto.lower()
-    if port_start == port_end:
-        dport_arg = str(port_start)
-        check_str = f"dpt:{port_start}"
-    else:
-        dport_arg = f"{port_start}:{port_end}"
-        check_str = f"dpt:{port_start}:{port_end}"
+    import subprocess as _sp
 
-    cmd_base = [
-        "iptables", "-D", "INPUT",
+    p = proto.lower()
+    dport_arg = str(port_start) if port_start == port_end else f"{port_start}:{port_end}"
+
+    # Базовые аргументы правила (без -I/-D/-C)
+    rule_args = [
         "-p", p,
         "--dport", dport_arg,
         "-j", "ACCEPT",
@@ -258,27 +254,41 @@ def _ensure_iptables_rule(port_start: int, port_end: int, proto: str) -> bool:
     ]
 
     try:
-        # Удаляем все дубли в цикле пока они есть
-        for _ in range(20):
-            r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x"], capture=True)
-            found = any(
-                p in line.lower() and check_str in line and "mita-stats" in line
-                for line in r.stdout.splitlines()
+        # iptables -C INPUT: returncode=0 если правило существует
+        chk = _sp.run(
+            ["iptables", "-C", "INPUT"] + rule_args,
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
+        )
+        if chk.returncode == 0:
+            # Правило есть. Проверяем нет ли дублей — считаем через -L
+            r_list = _sp.run(
+                ["iptables", "-L", "INPUT", "-n", "-v", "-x"],
+                capture_output=True, text=True
             )
-            if not found:
-                break
-            _run(cmd_base)  # -D удаляет первое совпадение
+            check_str = (f"dpts:{port_start}:{port_end}"
+                         if port_start != port_end else f"dpt:{port_start}")
+            count = sum(
+                1 for line in r_list.stdout.splitlines()
+                if p in line.lower() and check_str in line
+            )
+            if count <= 1:
+                return True  # ровно одно правило — всё хорошо, не трогаем счётчик
+            # Дубли: удаляем все, потом создадим одно
+        # Удаляем ВСЕ вхождения через -D в цикле (каждый -D удаляет одно)
+        for _ in range(30):
+            d = _sp.run(
+                ["iptables", "-D", "INPUT"] + rule_args,
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
+            )
+            if d.returncode != 0:
+                break  # больше нет
 
-        # Создаём одно чистое правило
-        cmd_add = [
-            "iptables", "-I", "INPUT", "1",
-            "-p", p,
-            "--dport", dport_arg,
-            "-j", "ACCEPT",
-            "-m", "comment", "--comment", "mita-stats"
-        ]
-        r2 = _run(cmd_add)
-        return r2.returncode == 0
+        # Добавляем одно чистое правило
+        add = _sp.run(
+            ["iptables", "-I", "INPUT", "1"] + rule_args,
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
+        )
+        return add.returncode == 0
     except Exception:
         return False
 
