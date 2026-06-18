@@ -311,9 +311,11 @@ def _iptables_stats(port_start: int, port_end: int, proto: str) -> dict:
             # Ищем строку с нашим протоколом и портом
             if proto.lower() not in lp:
                 continue
-            # Диапазон портов: --dport start:end
+            # Диапазон портов: iptables пишет dpts:start:end (с 's')
+            # Одиночный порт: dpt:XXXX (без 's')
             if port_start != port_end:
-                if f"dpt:{port_start}:{port_end}" not in line and \
+                if f"dpts:{port_start}:{port_end}" not in line and \
+                   f"dpt:{port_start}:{port_end}" not in line and \
                    f"dport {port_start}:{port_end}" not in line:
                     continue
             else:
