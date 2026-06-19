@@ -440,13 +440,17 @@ def _parse_journal(window_minutes: int = 60) -> dict:
         prev_passive = None   # для дельты PassiveOpens между снимками
 
         for line in lines:
-            # Временной слот для гистограммы
+            # Временной слот для гистограммы — храним полный sortable key
+            # (дата+час+10-мин интервал), а не голое HH:MM, чтобы сортировка
+            # не ломалась на переходе через полночь (23:50 после 00:30)
             slot = None
             m_ts = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})", line)
             if m_ts:
                 try:
                     dt = datetime.fromisoformat(m_ts.group(1))
-                    slot = dt.strftime("%H:%M")[:-1] + "0"
+                    rounded_min = (dt.minute // 10) * 10
+                    slot = dt.replace(minute=rounded_min, second=0,
+                                      microsecond=0).strftime("%Y-%m-%d %H:%M")
                 except ValueError:
                     pass
 
@@ -588,6 +592,7 @@ def _render_histogram(slots: dict) -> None:
         _box_row(f"  {DIM}Нет данных для гистограммы{NC}")
         return
 
+    # Ключи теперь "YYYY-MM-DD HH:MM" — сортировка строкой = сортировка по времени
     keys    = sorted(slots.keys())
     max_acc = max((slots[k]["accepted"] for k in keys), default=1) or 1
     bar_w   = 24
@@ -603,7 +608,9 @@ def _render_histogram(slots: dict) -> None:
         bar  = f"{GREEN}{'█' * ok_w}{NC}{RED}{'▓' * er_w}{NC}"
         err_s = f"{RED}{err:>6}{NC}" if err else f"{DIM}{err:>6}{NC}"
         wrn_s = f"{YELLOW}{wrn:>7}{NC}" if wrn else f"{DIM}{wrn:>7}{NC}"
-        _box_row(f"  {DIM}{slot:<7}{NC}  {GREEN}{acc:>7}{NC}  {err_s}  {wrn_s}  {bar}")
+        # Отображаем только время (HH:MM) — дата отбрасывается визуально
+        time_label = slot.split(" ")[-1] if " " in slot else slot
+        _box_row(f"  {DIM}{time_label:<7}{NC}  {GREEN}{acc:>7}{NC}  {err_s}  {wrn_s}  {bar}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ТРЕНД соединений
