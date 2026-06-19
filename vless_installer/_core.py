@@ -240,7 +240,7 @@ log_to_file("INFO", f"Время начала: {datetime.now()}")
 # =============================================================================
 #  БАННЕР
 # =============================================================================
-def _make_banner() -> str:
+def _make_banner(show_ram_warning: bool = True) -> str:
     _OW = 64   # внутренняя ширина внешней рамки
     _IW = _OW - 6  # внутренняя ширина вложенной рамки (58)
     _blank  = "║" + " " * _OW + "║"
@@ -283,21 +283,35 @@ def _make_banner() -> str:
         pad = _OW - 8 - len(visible)
         return "║  ║ " + raw + " " * max(pad, 0) + " ║  ║"
     _ram_sep = "║  ║" + "─" * _IW + "║  ║"
+    _ram_block = (
+        [_ram_sep] + [_irow_ansi(rl) for rl in _ram_lines]
+        if show_ram_warning else []
+    )
     _rows = (
         [_top, _blank]
         + [_art(a) for a in _art_lines]
         + [_blank, _itop]
         + [_irow(il) for il in _info_lines]
-        + [_ram_sep]
-        + [_irow_ansi(rl) for rl in _ram_lines]
+        + _ram_block
         + [_ibot, _blank, _bot]
     )
     return "\n" + "\n".join(_rows) + "\n"
 
-BANNER = _make_banner()
+# Сохраняем глобальную BANNER для обратной совместимости (verify.py и
+# любой другой код, ожидающий готовую строку с баннером). Это статичный
+# вариант "по умолчанию" — с RAM-предупреждением, как раньше.
+BANNER = _make_banner(show_ram_warning=True)
+
+# Порог ОЗУ (МБ), ниже которого показывается предупреждение в баннере.
+# 2048 МБ заявлено как рекомендуемый минимум в самом тексте плашки.
+_RAM_WARNING_THRESHOLD_MB = 2048
 
 def print_banner() -> None:
-    print(BANNER)
+    # К моменту вызова print_banner() (из main.py или из меню) модуль
+    # уже полностью импортирован, TOTAL_RAM определён ниже по файлу —
+    # переменная доступна в момент вызова функции.
+    _low_ram = TOTAL_RAM < _RAM_WARNING_THRESHOLD_MB
+    print(_make_banner(show_ram_warning=_low_ram))
 
 # =============================================================================
 #  ПРОГРЕСС-БАР
