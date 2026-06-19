@@ -116,6 +116,15 @@ def _get_mss_module():
     except ImportError:
         return None
 
+# Per-IP SYN rate limiter: telemt_syn_limiter.py
+def _get_syn_limiter_module():
+    """Lazy-import telemt_syn_limiter — изолирует ошибки импорта."""
+    try:
+        from vless_installer.modules import telemt_syn_limiter as _sl_mod
+        return _sl_mod
+    except ImportError:
+        return None
+
 def _TG_NETS_current() -> list:
     """Возвращает актуальный список подсетей TG (файл → встроенный)."""
     return _get_tg_nets()
@@ -1915,6 +1924,11 @@ def mtproto_menu() -> None:
         if _fb_mod_for_status is not None and CONFIG_FILE.exists():
             _box_kv("Fallback:", _fb_mod_for_status.fallback_status_line(CONFIG_FILE))
 
+        # Статус SYN-лимитера одной строкой
+        _sl_mod_for_status = _get_syn_limiter_module()
+        if _sl_mod_for_status is not None and CONFIG_FILE.exists():
+            _box_kv("SYN-limiter:", _sl_mod_for_status.syn_limiter_status_line())
+
         _box_row(); _box_sep()
         _box_item("1", "🚀  Установить / переустановить")
         _box_item("2", "👥  Управление пользователями")
@@ -1925,6 +1939,7 @@ def mtproto_menu() -> None:
         _box_item("7", "📋  Статус / логи")
         _box_item("X", "🔗  Xray-интеграция (SOCKS5 ↔ каскад)")
         _box_item("F", "🔀  Hybrid Fallback (Middle Proxy → Direct)")
+        _box_item("S", "🛡️   SYN-limiter (стабилизация подключения)")
         _box_item("N", "🌐  Обновить подсети Telegram (RIPE NCC)")
         _box_item("8", f"{RED}🗑️   Полное удаление{NC}")
         _box_sep()
@@ -2107,6 +2122,20 @@ def mtproto_menu() -> None:
 
             except Exception as _fe:
                 _err(f"Ошибка fallback-меню: {_fe}"); _pause()
+
+        elif ch == "s":
+            # ── SYN-limiter управление ────────────────────────────────────────
+            if not CONFIG_FILE.exists():
+                _warn("Telemt не установлен."); _pause(); continue
+            _sl_mod = _get_syn_limiter_module()
+            if _sl_mod is None:
+                _warn("Модуль telemt_syn_limiter недоступен."); _pause(); continue
+            try:
+                _sl_mod.syn_limiter_menu()
+            except _Cancelled:
+                pass
+            except Exception as _se:
+                _err(f"Ошибка меню SYN-limiter: {_se}"); _pause()
 
         elif ch == "n":
             # ── Обновление подсетей Telegram ──────────────────────────────
