@@ -125,6 +125,12 @@ _DEFAULT_PORT_START = 2012
 _DEFAULT_PORT_END   = 2022
 _DEFAULT_PROTOCOL   = "TCP"  # TCP или UDP
 
+# Валидация логина: только ASCII-латиница, цифры, _ и -.
+# Защищает от случайной кириллицы при не переключённой раскладке клавиатуры
+# (частая ошибка при вводе через мобильные SSH-клиенты типа Termius).
+_RE_USERNAME      = re.compile(r"^[A-Za-z0-9_-]+$")
+_RE_USERNAME_CHAR = re.compile(r"^[A-Za-z0-9_-]$")
+
 _BOX_W = 66
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -934,9 +940,20 @@ def _add_user(state: dict) -> None:
     _box_row(); _box_bot(); print()
 
     try:
-        username = _ask(f"  {CYAN}Логин: {NC}", c=True).strip()
-        if not username:
-            print(f"  {RED}✗{NC}  Логин не может быть пустым."); _pause(); return
+        while True:
+            username = _ask(f"  {CYAN}Логин: {NC}", c=True).strip()
+            if not username:
+                print(f"  {RED}✗{NC}  Логин не может быть пустым."); _pause(); return
+
+            if not _RE_USERNAME.match(username):
+                bad_chars = sorted(set(ch for ch in username if not _RE_USERNAME_CHAR.match(ch)))
+                print(f"  {RED}✗{NC}  Недопустимые символы: {YELLOW}{' '.join(bad_chars)}{NC}")
+                print(f"  {DIM}Разрешены только латиница (a-z, A-Z), цифры и _ -{NC}")
+                print(f"  {DIM}Похоже, при вводе была активна не та раскладка клавиатуры.{NC}")
+                print(f"  {DIM}Переключите раскладку на английскую и введите логин ещё раз.{NC}\n")
+                continue
+
+            break
 
         users = state.get("users", [])
         if any(u["username"] == username for u in users):
