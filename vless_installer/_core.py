@@ -96,6 +96,7 @@ from vless_installer.modules.fingerprint_manager import (
 )
 from vless_installer.modules.dnscrypt_selector import do_dnscrypt_selector_menu
 from vless_installer.modules.honeypot      import do_manage_honeypot
+from vless_installer.modules.fail2ban_manager import do_manage_fail2ban
 from vless_installer.modules.scheduler     import render_scheduler_menu
 from vless_installer.modules.warp          import do_manage_warp
 from vless_installer.modules.smart_balancer import (
@@ -29464,6 +29465,7 @@ def _menu_security() -> None:
         _box_item("N",  f"🌐 AWG Multi-Node  {DIM}(ноды, failover, SSH-защита){NC}")
         _box_item("IP", f"📦 ipset Persist  {DIM}(восстановление ipset при reboot){NC}")
         _box_item("IB", f"🚫 IP-Бан  {DIM}(iptables/ipset: IP / подсеть / диапазон / ASN){NC}")
+        _box_item("FB", f"🛡️  Fail2ban  {DIM}(банит за подбор пароля / лишние запросы){NC}")
         _box_item("CL", f"🔗 Кластер Exit Nodes  {DIM}(все Exit Nodes по SSH){NC}")
         _box_item("9", f"🔒 Мониторинг certbot renew  {DIM}(алерт при истечении){NC}")
         _box_item("H", f"🔒 SSH Hardening  {DIM}(порт / ключи / AllowUsers){NC}")
@@ -29519,6 +29521,8 @@ def _menu_security() -> None:
             do_manage_ipset_persist()
         elif ch.lower() == "ib":
             do_manage_ipban()
+        elif ch.lower() == "fb":
+            do_manage_fail2ban()
         elif ch.lower() == "cl":
             do_cluster_menu()
         elif ch.lower() == "n":
