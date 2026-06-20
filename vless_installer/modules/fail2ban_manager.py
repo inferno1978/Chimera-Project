@@ -11,8 +11,11 @@ nginx-limit-req: бан за подбор пароли / TLS-ошибки рук
 редактировать /etc/fail2ban/jail.d/*:
 
   • Статус службы + сводка по джейлам (сколько IP забанено сейчас)
-  • Список забаненных IP + разбан
-  • Бан IP вручную в выбранном джейле
+  • Список забаненных IP + разбан (несколько целей сразу, в т.ч. CIDR/ASN)
+  • Бан вручную в выбранном джейле: один IP, несколько IP, диапазон
+    (1.2.3.1-1.2.3.50), подсеть (CIDR) или целая ASN (AS12345 — префиксы
+    через RIPE Stat). Разбор входной строки делегируется модулю ipban —
+    там это уже реализовано и протестировано, логика не дублируется.
   • Тонкая настройка джейла (bantime / findtime / maxretry)
   • Включение/выключение отдельного джейла
   • Просмотр лога Fail2ban
@@ -184,10 +187,69 @@ def _f2b_ban(jail: str, ip: str) -> bool:
     return r.returncode == 0
 
 
+def _f2b_ban_many(jail: str, ips: list, chunk: int = 50) -> int:
+    """
+    Банит список IP/CIDR в джейле пачками — fail2ban-client принимает
+    несколько IP за один вызов banip, поэтому шлём их группами по `chunk`,
+    а не по одному (важно для ASN, где префиксов может быть сотни).
+    Возвращает точное число НОВЫХ записей (диф "Banned IP list" до/после),
+    а не просто факт успешного завершения команды.
+    """
+    if not ips:
+        return 0
+    before = set(_f2b_jail_info(jail)["banned_ips"])
+    for i in range(0, len(ips), chunk):
+        batch = [str(x) for x in ips[i:i + chunk]]
+        _f2b_client("set", jail, "banip", *batch, timeout=30)
+    after = set(_f2b_jail_info(jail)["banned_ips"])
+    return len(after - before)
+
+
 def _f2b_unban(ip: str) -> bool:
     """Разбан по всем джейлам сразу (глобальная команда fail2ban-client unban)."""
     r = _f2b_client("unban", ip, timeout=15)
     return r.returncode == 0
+
+
+def _f2b_unban_many(ips: list) -> tuple:
+    """
+    Разбанивает список IP/CIDR по всем джейлам сразу. Каждый элемент —
+    отдельным вызовом (а не одной пачкой), чтобы один "не найден" не отменял
+    разбан остальных. Возвращает (успешно, неудачно).
+    """
+    ok = fail = 0
+    for ip in ips:
+        if _f2b_unban(str(ip)):
+            ok += 1
+        else:
+            fail += 1
+    return ok, fail
+
+
+# ── Разбор ввода: одиночный IP / несколько IP / диапазон / CIDR / ASN ─────────
+def _resolve_ban_targets(raw: str) -> list:
+    """
+    Разбирает строку пользовательского ввода (несколько токенов через запятую
+    или пробел) на список (display, kind, [CIDR, ...]).
+
+    Сам парсинг (что является IP/CIDR/диапазоном/ASN, скачивание префиксов
+    ASN с RIPE Stat) делегируется модулю ipban — там это уже реализовано
+    и проверено в работе (см. vless_installer/modules/ipban.py), поэтому
+    логика не дублируется и не может разойтись между двумя модулями.
+    Импорт лениво через importlib — по той же причине, что и в
+    _f2b_install_or_repair() (единый источник правды без циклических импортов).
+    """
+    import importlib
+    ipban = importlib.import_module("vless_installer.modules.ipban")
+    tokens = [t.strip() for t in raw.replace(",", " ").split() if t.strip()]
+    results = []
+    for token in tokens:
+        try:
+            display, kind, cidrs = ipban._resolve_to_cidrs(token)
+            results.append((display, kind, cidrs))
+        except (ValueError, RuntimeError) as exc:
+            _warn(f"{token}: {exc}")
+    return results
 
 
 # ── Работа с jail.d/xray-reality.conf (bantime/findtime/maxretry/enabled) ─────
@@ -291,7 +353,7 @@ def do_manage_fail2ban() -> None:
             _box_item("1", f"{'Остановить' if active else 'Запустить'} Fail2ban")
             _box_item("2", "🔁 Перезапустить / применить конфигурацию")
             _box_item("3", f"🚫 Забаненные IP  {DIM}({total_banned} шт.){NC}")
-            _box_item("4", "➕ Забанить IP вручную")
+            _box_item("4", "➕ Забанить вручную (IP/диапазон/ASN)")
             _box_item("5", f"⚙️  Настройка джейла  {DIM}(bantime/findtime/maxretry){NC}")
             _box_item("6", "🔌 Включить/выключить джейл")
             _box_item("7", "📋 Лог Fail2ban (последние 30 строк)")
@@ -370,32 +432,41 @@ def do_manage_fail2ban() -> None:
                 for i, (ip, j) in enumerate(rows, 1):
                     _box_row(f"  {CYAN}{i:<4}{NC}{RED}{ip:<22}{NC}{DIM}{j}{NC}")
                 _box_sep()
-                _box_row(f"  {DIM}Введите номер или IP для разбана, Enter — назад{NC}")
+                _box_row(f"  {DIM}Номер(а)/IP/CIDR/диапазон/ASN через запятую{NC}")
+                _box_row(f"  {DIM}или пробел (можно несколько), Enter — назад{NC}")
             _box_bottom()
             if rows:
                 raw = input("  Разбанить: ").strip()
-                target = ""
-                if raw.isdigit() and 1 <= int(raw) <= len(rows):
-                    target = rows[int(raw) - 1][0]
-                elif raw:
-                    target = raw
-                if target:
-                    if _f2b_unban(target):
-                        _success(f"Разбанен: {target}")
+                if raw:
+                    tokens = [t.strip() for t in raw.replace(",", " ").split() if t.strip()]
+                    targets: list = []
+                    for t in tokens:
+                        if t.isdigit() and 1 <= int(t) <= len(rows):
+                            targets.append(rows[int(t) - 1][0])
+                        else:
+                            # IP / CIDR / диапазон / ASN — разворачиваем в CIDR
+                            for _disp, _kind, cidrs in _resolve_ban_targets(t):
+                                targets.extend(cidrs)
+                    if not targets:
+                        _warn("Не удалось разобрать ввод")
                     else:
-                        _warn(f"Не удалось разбанить {target} (возможно, не был забанен)")
+                        ok, fail = _f2b_unban_many(targets)
+                        if ok:
+                            _success(f"Разбанено: {ok}")
+                        if fail:
+                            _warn(f"Не найдено / не было забанено: {fail}")
                     input(f"{BLUE}Нажмите Enter...{NC}")
             else:
                 input(f"{BLUE}Нажмите Enter...{NC}")
 
-        # ── 4. Бан IP вручную ───────────────────────────────────────────────────
+        # ── 4. Бан вручную: IP / несколько IP / диапазон / CIDR / ASN ──────────
         elif ch == "4":
             print()
             if not jail_names:
                 _warn("Нет доступных джейлов")
                 input(f"{BLUE}Нажмите Enter...{NC}")
                 continue
-            _box_top("Забанить IP вручную")
+            _box_top("Забанить вручную")
             for i, j in enumerate(jail_names, 1):
                 _box_item(str(i), j)
             _box_bottom()
@@ -405,14 +476,42 @@ def do_manage_fail2ban() -> None:
                 input(f"{BLUE}Нажмите Enter...{NC}")
                 continue
             jail = jail_names[int(raw_j) - 1]
-            ip = input("  IP для бана: ").strip()
-            if not ip:
-                _warn("IP не указан")
-            elif _f2b_ban(jail, ip):
-                _success(f"{ip} забанен в джейле {jail}")
+
+            _box_top("Что банить")
+            _box_row(f"  {DIM}Можно несколько целей через запятую или пробел:{NC}")
+            _box_row()
+            _box_row(f"    {CYAN}1.2.3.4{NC}              — одиночный IP")
+            _box_row(f"    {CYAN}10.0.0.0/24{NC}          — подсеть (CIDR)")
+            _box_row(f"    {CYAN}10.0.0.1-10.0.0.255{NC}  — диапазон IPv4")
+            _box_row(f"    {CYAN}AS12345{NC}              — вся ASN (через RIPE Stat)")
+            _box_row()
+            _box_row(f"  {DIM}Пример: 1.2.3.4, 10.0.0.0/8, AS1234{NC}")
+            _box_bottom()
+            raw_inp = input("  Ввод: ").strip()
+            if not raw_inp:
+                _warn("Не указано, что банить")
+                input(f"{BLUE}Нажмите Enter...{NC}")
+                continue
+
+            targets = _resolve_ban_targets(raw_inp)
+            if not targets:
+                _warn("Не удалось разобрать ни одной цели")
+                input(f"{BLUE}Нажмите Enter...{NC}")
+                continue
+
+            all_cidrs: list = []
+            for display, kind, cidrs in targets:
+                all_cidrs.extend(cidrs)
+                _info(f"{display} ({kind}): {len(cidrs)} CIDR")
+
+            print()
+            _info(f"Применяю бан в джейле {jail} ({len(all_cidrs)} CIDR)...")
+            newly = _f2b_ban_many(jail, all_cidrs)
+            if newly:
+                _success(f"Забанено новых записей: {newly} (джейл {jail})")
             else:
-                _warn("Не удалось забанить — проверьте корректность IP "
-                      "и что джейл активен (служба запущена)")
+                _warn("Новых записей не добавлено — возможно, уже забанены "
+                      "или джейл неактивен (служба запущена?)")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         # ── 5. Настройка bantime/findtime/maxretry ─────────────────────────────

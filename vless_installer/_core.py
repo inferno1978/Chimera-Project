@@ -7561,7 +7561,15 @@ def setup_fail2ban() -> None:
 
     Path("/etc/fail2ban/filter.d/xray-reality.conf").write_text(textwrap.dedent("""\
         [Definition]
-        failregex = ^.*Failed authentication.*$|^.*Invalid user.*$|^.*TLS handshake failed.*$|^.*<HOST>.*blocked.*$
+        # FIX: в старой версии 3 из 4 альтернатив (Failed authentication /
+        # Invalid user / TLS handshake failed) не содержали <HOST> — строка
+        # матчилась, но группа для бана не извлекалась, из-за чего fail2ban
+        # валился в лог ошибкой "No group found in '...' using 're.compile(...)'"
+        # на каждое такое совпадение. Теперь <HOST> обязателен в каждой строке
+        # через lookahead: матчим только если в строке одновременно есть IP
+        # И один из признаков ошибки (порядок "IP / признак" в логе не важен) —
+        # группа для бана гарантированно присутствует при любом совпадении.
+        failregex = ^(?=.*<HOST>)(?=.*(?:Failed authentication|Invalid user|TLS handshake failed|blocked)).*$
         ignoreregex =
     """))
 
