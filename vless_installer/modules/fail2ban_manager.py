@@ -246,6 +246,38 @@ def _f2b_today_ban_history() -> list:
     return sorted(stats.values(), key=lambda e: e["last_seen"], reverse=True)
 
 
+def _f2b_clear_log() -> tuple:
+    """
+    Принудительно очищает лог Fail2ban (/var/log/fail2ban.log + .log.1,
+    если есть). На саму службу fail2ban, активные баны/разбаны и тем более
+    на остальные службы (xray, nginx и т.д.) это НЕ влияет — очищается
+    только файл лога.
+
+    truncate безопасен для уже открытого на запись файла: логирование
+    fail2ban-server использует обычный append-режим (O_APPEND), поэтому
+    после очистки новые записи продолжат дописываться с начала файла —
+    это тот же приём, что и в logrotate с опцией copytruncate, никакого
+    restart/reload службы не требуется.
+
+    Возвращает (успех, сообщение).
+    """
+    cleared = []
+    errors = []
+    for p in (_F2B_LOG, Path(str(_F2B_LOG) + ".1")):
+        if not p.exists():
+            continue
+        try:
+            p.write_text("", encoding="utf-8")
+            cleared.append(str(p))
+        except Exception as exc:
+            errors.append(f"{p}: {exc}")
+    if errors:
+        return False, "; ".join(errors)
+    if not cleared:
+        return True, "Лог уже пуст или файлы не найдены"
+    return True, f"Очищено: {', '.join(cleared)}"
+
+
 def _f2b_ban(jail: str, ip: str) -> bool:
     r = _f2b_client("set", jail, "banip", ip, timeout=15)
     return r.returncode == 0
@@ -423,6 +455,8 @@ def do_manage_fail2ban() -> None:
             _box_item("7", "📋 Лог Fail2ban (последние 30 строк)")
             _box_item("8", "🛠️  Восстановить базовую конфигурацию")
             _box_item("9", "📊 История банов за сутки  (накопительно)")
+            _box_sep()
+            _box_item("X", f"{RED}🧹 Очистить лог Fail2ban{NC}  {DIM}(принудительно){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -699,6 +733,31 @@ def do_manage_fail2ban() -> None:
                         f"{e['count']:<5}{DIM}{e['first_seen']:<10}{NC}{e['last_seen']}"
                     )
             _box_bottom()
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        # ── X. Очистить лог Fail2ban (принудительно, с подтверждением) ──────────
+        elif ch == "x":
+            print()
+            _box_top(f"{RED}🧹 ОЧИСТКА ЛОГА FAIL2BAN{NC}")
+            _box_row(f"  {YELLOW}Будет очищен {_F2B_LOG} (+ .log.1, если есть).{NC}")
+            _box_row(f"  {YELLOW}Текущие баны/разбаны НЕ затрагиваются — служба{NC}")
+            _box_row(f"  {YELLOW}fail2ban продолжит работать как обычно.{NC}")
+            _box_row(f"  {DIM}История за сутки (пункт 9) после очистки станет пустой.{NC}")
+            _box_bottom()
+            try:
+                confirm = input(
+                    f"{RED}Введите{NC} {BOLD}ДА{NC} для подтверждения: "
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                continue
+            if confirm in ("ДА", "да", "yes", "YES", "y", "Y"):
+                ok, msg = _f2b_clear_log()
+                if ok:
+                    _success(msg)
+                else:
+                    _warn(f"Не удалось очистить: {msg}")
+            else:
+                _info("Отменено")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         else:
