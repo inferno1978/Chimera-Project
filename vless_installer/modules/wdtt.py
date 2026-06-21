@@ -392,23 +392,33 @@ def _build_wdtt_server() -> bool:
         # Исходники qWDTT содержат go.mod, но НЕ содержат go.sum.
         # При -mod=readonly (по умолчанию с Go 1.16+) это даёт ошибку
         # "missing go.sum entry" — поэтому сначала достраиваем go.sum.
-        # go.mod исходников может требовать go-версию новее установленной
-        # (например "go 1.25.0", а из apt стоит 1.22) — по умолчанию Go
-        # тогда лезет в сеть за новым тулчейном, а это скачивание требует
-        # проверки через checksum database. GOSUMDB=off этому мешает, поэтому
-        # GOTOOLCHAIN=local запрещает автодокачку: собираем тем Go, что есть.
+        #
+        # go.mod может требовать go-версию новее установленной (например
+        # "go 1.25.0" при локальном 1.22-1.24). Штатное поведение Go
+        # (GOTOOLCHAIN=auto) — самому скачать и проверить нужный тулчейн
+        # через checksum database, это просто работает при наличии сети.
+        # Принудительный офлайн-режим (GOSUMDB=off + GOTOOLCHAIN=local)
+        # помогает только если локальный Go уже не старее требуемого —
+        # поэтому это запасной путь, а не основной.
         print(f"  {CYAN}→{NC}  Разрешаю зависимости Go-модуля...")
-        mod_env = {**os.environ, "GOSUMDB": "off", "GOTOOLCHAIN": "local"}
-        r = _run([go, "mod", "tidy"], capture=True, env=mod_env, cwd=str(src_dir))
+        default_env = dict(os.environ)
+        offline_env = {**os.environ, "GOSUMDB": "off", "GOTOOLCHAIN": "local"}
+
+        r = _run([go, "mod", "tidy"], capture=True, env=default_env, cwd=str(src_dir))
+        tidy_env = default_env
         if r.returncode != 0:
-            print(f"  {RED}✗{NC}  Не удалось разрешить зависимости Go (go mod tidy):")
-            print(f"  {DIM}{(r.stderr or r.stdout or '')[:500]}{NC}")
-            print(f"  {DIM}Проверьте доступ к proxy.golang.org с этого сервера.{NC}")
-            return False
+            r2 = _run([go, "mod", "tidy"], capture=True, env=offline_env, cwd=str(src_dir))
+            if r2.returncode == 0:
+                tidy_env = offline_env
+            else:
+                print(f"  {RED}✗{NC}  Не удалось разрешить зависимости Go (go mod tidy):")
+                print(f"  {DIM}{(r.stderr or r.stdout or '')[:500]}{NC}")
+                print(f"  {DIM}Нужен доступ к proxy.golang.org, либо локальный Go "
+                      f"не старее версии, указанной в go.mod исходников.{NC}")
+                return False
 
         print(f"  {CYAN}→{NC}  Компилирую wdtt-server (это займёт ~1-2 минуты)...")
-        env = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64",
-               "GOTOOLCHAIN": "local"}
+        env = {**tidy_env, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"}
         r = _run(
             [go, "build", "-o", str(tmp / "wdtt-server"),
              "-ldflags", "-s -w", "./server.go"],
