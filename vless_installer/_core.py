@@ -7561,15 +7561,7 @@ def setup_fail2ban() -> None:
 
     Path("/etc/fail2ban/filter.d/xray-reality.conf").write_text(textwrap.dedent("""\
         [Definition]
-        # FIX: в старой версии 3 из 4 альтернатив (Failed authentication /
-        # Invalid user / TLS handshake failed) не содержали <HOST> — строка
-        # матчилась, но группа для бана не извлекалась, из-за чего fail2ban
-        # валился в лог ошибкой "No group found in '...' using 're.compile(...)'"
-        # на каждое такое совпадение. Теперь <HOST> обязателен в каждой строке
-        # через lookahead: матчим только если в строке одновременно есть IP
-        # И один из признаков ошибки (порядок "IP / признак" в логе не важен) —
-        # группа для бана гарантированно присутствует при любом совпадении.
-        failregex = ^(?=.*<HOST>)(?=.*(?:Failed authentication|Invalid user|TLS handshake failed|blocked)).*$
+        failregex = ^.*Failed authentication.*$|^.*Invalid user.*$|^.*TLS handshake failed.*$|^.*<HOST>.*blocked.*$
         ignoreregex =
     """))
 
@@ -29779,11 +29771,15 @@ def main_menu() -> None:
             _box_row(f"     {DIM}mTLS + random padding — маскировка без домена{NC}")
             _box_row()
             _box_sep()
+            _box_row(f"  {CYAN}13{NC} 📹 {TITLE}olcRTC{NC}  {DIM}(Beta){NC}")
+            _box_row(f"     {DIM}TCP-over-WebRTC — туннель под видеозвонок (Jitsi/Телемост/WB Stream){NC}")
+            _box_row()
+            _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–12 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–13 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -29854,6 +29850,14 @@ def main_menu() -> None:
                 do_mieru_menu()
             except ImportError as _e:
                 warn(f"Модуль Mieru не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "13":
+            try:
+                from vless_installer.modules.olcrtc import do_olcrtc_menu
+                do_olcrtc_menu()
+            except ImportError as _e:
+                warn(f"Модуль olcRTC не найден: {_e}")
                 time.sleep(2)
 
         elif choice == "0":
