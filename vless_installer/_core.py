@@ -6224,6 +6224,16 @@ def configure_firewall() -> None:
 
         r = _run(["ufw", "status"], capture=True, check=False)
         if "Status: active" not in r.stdout:
+            # Гарантируем наличие /var/log/ufw.log до включения логирования ufw,
+            # иначе rsyslog (работает от syslog:adm) не может создать файл сам —
+            # каталог /var/log имеет права drwxr-xr-x root:syslog без w для группы,
+            # и rsyslog уходит в suspended/resumed ("Permission denied").
+            ufw_log = Path("/var/log/ufw.log")
+            if not ufw_log.exists():
+                ufw_log.touch(exist_ok=True)
+                _run(["chown", "syslog:adm", str(ufw_log)], check=False, quiet=True)
+                ufw_log.chmod(0o640)
+
             _run(["ufw", "default", "deny",  "incoming"], check=False, quiet=True)
             _run(["ufw", "default", "allow", "outgoing"], check=False, quiet=True)
             _run(["ufw", "--force", "enable"], check=False, quiet=True)
