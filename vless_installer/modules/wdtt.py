@@ -389,6 +389,18 @@ def _build_wdtt_server() -> bool:
             return False
         src_dir = src_dirs[0]
 
+        # Исходники qWDTT содержат go.mod, но НЕ содержат go.sum.
+        # При -mod=readonly (по умолчанию с Go 1.16+) это даёт ошибку
+        # "missing go.sum entry" — поэтому сначала достраиваем go.sum.
+        print(f"  {CYAN}→{NC}  Разрешаю зависимости Go-модуля...")
+        mod_env = {**os.environ, "GOSUMDB": "off"}
+        r = _run([go, "mod", "tidy"], capture=True, env=mod_env, cwd=str(src_dir))
+        if r.returncode != 0:
+            print(f"  {RED}✗{NC}  Не удалось разрешить зависимости Go (go mod tidy):")
+            print(f"  {DIM}{(r.stderr or r.stdout or '')[:500]}{NC}")
+            print(f"  {DIM}Проверьте доступ к proxy.golang.org с этого сервера.{NC}")
+            return False
+
         print(f"  {CYAN}→{NC}  Компилирую wdtt-server (это займёт ~1-2 минуты)...")
         env = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"}
         r = _run(
