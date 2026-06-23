@@ -252,10 +252,19 @@ def _pause() -> None:
         print()
 
 def _ask(prompt: str, default: str = "", c: bool = False) -> str:
+    """prompt уже содержит ведущие пробелы/цвет (как везде в этом файле).
+    Во время набора текста рамки нет — терминал должен свободно показывать
+    ввод/backspace. После Enter строка стирается и перерисовывается уже
+    как обычный _box_row (рамка с обоих боков), чтобы не "ломать" общий
+    стиль интерфейса посередине ввода."""
     try:
         print(prompt, end="", flush=True)
         val = input().strip()
-        return val if val else default
+        out = val if val else default
+        shown = val if val else (f"{DIM}{default}{NC}" if default else "")
+        print("\033[1A\033[2K\r", end="")  # курсор на строку выше, очистить, в начало
+        _box_row(f"{prompt}{shown}")
+        return out
     except (EOFError, UnicodeDecodeError):
         print(); return default
     except KeyboardInterrupt:
