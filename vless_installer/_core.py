@@ -8645,7 +8645,7 @@ def _xray_update_geo_runetfreedom() -> bool:
                 info(f"  Загрузка {fname}: {url.split('/')[2]} ...")
                 r = _run([
                     "curl", "-fL", "--connect-timeout", "15",
-                    "-m", "120", "--retry", "2",
+                    "-m", "180", "--retry", "0",
                     "-o", str(tmp_dl), url,
                 ], capture=True, check=False, quiet=True)
                 sz = tmp_dl.stat().st_size if tmp_dl.exists() else 0
@@ -10138,8 +10138,8 @@ def download_geo_files() -> bool:
                 for url in urls:
                     tmp_path.unlink(missing_ok=True)
                     r = _run([
-                        "curl", "-fL", "--connect-timeout", "10",
-                        "-m", "45", "--retry", "1", "--retry-delay", "0",
+                        "curl", "-fL", "--connect-timeout", "15",
+                        "-m", "180", "--retry", "0",
                         "-o", str(tmp_path), url,
                     ], capture=True, check=False, quiet=True)
                     if r.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > min_size:
