@@ -100,10 +100,26 @@ def _install_h2_binary() -> bool:
     info("Скачиваю бинарник Hysteria2...")
     url, tag = _h2_latest_url()
     tmp = Path("/tmp/hysteria.bin")
-    r = _run(["curl", "-fsSL", "--max-time", "60", "-o", str(tmp), url],
-             capture=True)
-    if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 1024 * 1024:
-        error(f"Не удалось скачать: {url} (код {r.returncode})")
+    # Зеркала на случай если github.com медленный или недоступен
+    mirrors = [
+        url,
+        url.replace("https://github.com/",
+                    "https://ghproxy.net/https://github.com/"),
+        url.replace("https://github.com/",
+                    "https://mirror.ghproxy.com/https://github.com/"),
+    ]
+    r = None
+    for _url in mirrors:
+        tmp.unlink(missing_ok=True)
+        r = _run(["curl", "-fsSL", "--connect-timeout", "15",
+                  "--max-time", "180", "-o", str(tmp), _url],
+                 capture=True, check=False)
+        if r.returncode == 0 and tmp.exists() and tmp.stat().st_size >= 1024 * 1024:
+            break
+        sz = tmp.stat().st_size if tmp.exists() else 0
+        warn(f"curl {_url.split('/')[2]}: код {r.returncode}, {sz} Б — пробую зеркало...")
+    if r is None or r.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 1024 * 1024:
+        error(f"Не удалось скачать hysteria2 ни с одного зеркала")
         tmp.unlink(missing_ok=True)
         return False
     # Проверяем, что скачали настоящий ELF-бинарник, а не HTML/JSON с ошибкой
@@ -528,9 +544,14 @@ def h2_exit_remote_install(
         url = (f"https://github.com/apernet/hysteria/releases/download/{tag}/"
                f"hysteria-linux-{arch}")
 
+    url_mirror1 = url.replace("https://github.com/", "https://ghproxy.net/https://github.com/")
+    url_mirror2 = url.replace("https://github.com/", "https://mirror.ghproxy.com/https://github.com/")
     commands = [
         # -f: curl вернёт ошибку при HTTP >= 400; xxd проверяет ELF magic
-        f"curl -fsSL --max-time 60 -o /tmp/hysteria.bin '{url}' && "
+        # Три зеркала с таймаутом 180s: основной github + два прокси
+        f"( curl -fsSL --connect-timeout 15 --max-time 180 -o /tmp/hysteria.bin '{url}' "
+        f"|| curl -fsSL --connect-timeout 15 --max-time 180 -o /tmp/hysteria.bin '{url_mirror1}' "
+        f"|| curl -fsSL --connect-timeout 15 --max-time 180 -o /tmp/hysteria.bin '{url_mirror2}' ) && "
         f"[ \"$(head -c4 /tmp/hysteria.bin | xxd -p)\" = '7f454c46' ] && "
         f"mv /tmp/hysteria.bin /usr/local/bin/hysteria && chmod +x /usr/local/bin/hysteria || "
         f"{{ echo 'ERROR: hysteria binary is not ELF (wrong arch or GitHub unreachable)'; "
