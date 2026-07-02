@@ -511,17 +511,18 @@ def h2_exit_remote_install(
     else:
         info(f"Архитектура удалённой ноды: {_remote_arch_raw} -> {arch}")
 
-    # Определяем, есть ли IPv6 на удалённой ноде — раньше ipv6=True было
-    # захардкожено, и на VPS без IPv6 (частый случай) Hysteria не мог
-    # забиндиться на [::]:port, сервис не стартовал.
-    _ipv6_cmd = ["ssh"] + ssh_opts_pre + [
-        f"root@{host}", "ip -6 addr show 2>/dev/null | grep -q inet6 && echo yes || echo no"
-    ]
-    if ssh_pass:
-        _ipv6_cmd = ["sshpass", "-p", ssh_pass] + _ipv6_cmd
-    _ipv6_r = _run(_ipv6_cmd, capture=True, timeout=15, check=False)
-    remote_ipv6 = _ipv6_r.returncode == 0 and "yes" in _ipv6_r.stdout
-    info(f"IPv6 на удалённой ноде: {'есть' if remote_ipv6 else 'нет'}")
+    # Определяем listen-адрес по семейству IP самой exit-ноды, а не по
+    # наличию IPv6 на интерфейсе. Предыдущий подход (ip -6 addr show |
+    # grep -q inet6) возвращал "yes" даже при наличии только link-local
+    # fe80:: адреса — который есть на каждом Linux по умолчанию и не
+    # означает реального IPv6-подключения. В результате hysteria-server
+    # слушал [::]:PORT на IPv4-only VPS, пакеты от entry-ноды не доходили
+    # до процесса и клиент получал EOF.
+    # Правило: entry подключается к exit по адресу `host`. Если host —
+    # IPv4-адрес → слушаем 0.0.0.0. Если IPv6-адрес → слушаем [::].
+    remote_ipv6 = _is_ipv6(host)
+    info(f"Адрес exit-ноды {'IPv6' if remote_ipv6 else 'IPv4'} → listen: "
+         f"{'[::]' if remote_ipv6 else '0.0.0.0'}")
 
     # Строим URL под архитектуру удалённой машины
     try:
