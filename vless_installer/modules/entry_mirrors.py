@@ -78,6 +78,7 @@ import secrets
 import socket
 import sys
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -257,6 +258,41 @@ def _list_mirrors() -> None:
         _box_row(f"  {DIM}[{i}]{NC}  {WHITE}{m['label']}{NC}  {_status_str(m)}")
         _box_row(f"        {DIM}{m['host']}:{m['port']}  sni={m['sni']}{NC}")
 
+# ══════════════════════════════════════════════════════════════════════════
+#  ПАРСИНГ vless:// ССЫЛКИ (чтобы не вбивать host/pbk/sid/sni/fp руками —
+#  всё это уже есть в ссылке, которую отдаёт mirror-сервер в своём меню)
+# ══════════════════════════════════════════════════════════════════════════
+def _parse_vless_link(link: str) -> Optional[dict]:
+    """Разбирает vless://uuid@host:port?...&security=reality&pbk=...&sid=...
+    &sni=...&fp=...#label на составные части. Возвращает None, если это не
+    похоже на REALITY-ссылку (нет security=reality, pbk или sni) — такую
+    ссылку как mirror-точку REALITY не добавить, нужны вручную введённые
+    поля."""
+    try:
+        parsed = urllib.parse.urlparse(link.strip())
+        if parsed.scheme != "vless" or not parsed.hostname:
+            return None
+        qs = urllib.parse.parse_qs(parsed.query)
+        def _q(key: str, default: str = "") -> str:
+            return (qs.get(key) or [default])[0]
+        if _q("security") != "reality":
+            return None
+        pbk = _q("pbk")
+        sni = _q("sni")
+        if not pbk or not sni:
+            return None
+        return {
+            "host":  parsed.hostname,
+            "port":  parsed.port or 443,
+            "pbk":   pbk,
+            "sid":   _q("sid"),
+            "sni":   sni,
+            "fp":    _q("fp", "chrome"),
+            "label": urllib.parse.unquote(parsed.fragment) if parsed.fragment else "",
+        }
+    except Exception:
+        return None
+
 def _add_mirror() -> None:
     print()
     print(f"  {BOLD}Добавление entry mirror{NC}")
@@ -264,18 +300,46 @@ def _add_mirror() -> None:
     print(f"   с ТЕМИ ЖЕ UUID в users.json, что и на основном сервере){NC}")
     print()
     try:
-        label = input(f"  {CYAN}Название (для себя, например 'EU-2 Hetzner'): {NC}").strip()
+        raw_link = input(
+            f"  {CYAN}Вставьте vless:// ссылку с mirror-сервера{NC}"
+            f"  {DIM}(или Enter, чтобы ввести поля вручную): {NC}"
+        ).strip()
+    except (KeyboardInterrupt, EOFError):
+        print(); return
+
+    parsed = _parse_vless_link(raw_link) if raw_link else None
+    if raw_link and not parsed:
+        _warn(
+            "Не похоже на REALITY-ссылку (нужны security=reality, pbk и sni "
+            "в query) — переключаюсь на ввод полями."
+        )
+
+    try:
+        label_hint = f" [{parsed['label']}]" if parsed and parsed.get("label") else ""
+        label = input(f"  {CYAN}Название (для себя, например 'EU-2 Hetzner'){label_hint}: {NC}").strip()
+        if not label and parsed:
+            label = parsed.get("label", "")
         if not label:
             print(f"  {RED}✗{NC}  Название обязательно."); return
-        host = input(f"  {CYAN}IP или домен: {NC}").strip()
-        if not host:
-            print(f"  {RED}✗{NC}  Host обязателен."); return
-        port_raw = input(f"  {CYAN}Порт [443]: {NC}").strip()
-        port = int(port_raw) if port_raw else 443
-        sni = input(f"  {CYAN}SNI (reality_dest / domain маскировки): {NC}").strip()
-        pbk = input(f"  {CYAN}Public Key (pbk): {NC}").strip()
-        sid = input(f"  {CYAN}Short ID (sid, можно пусто): {NC}").strip()
-        fp  = input(f"  {CYAN}Fingerprint [chrome]: {NC}").strip() or "chrome"
+
+        if parsed:
+            host = input(f"  {CYAN}IP или домен [{parsed['host']}]: {NC}").strip() or parsed["host"]
+            port_raw = input(f"  {CYAN}Порт [{parsed['port']}]: {NC}").strip()
+            port = int(port_raw) if port_raw else parsed["port"]
+            sni = input(f"  {CYAN}SNI [{parsed['sni']}]: {NC}").strip() or parsed["sni"]
+            pbk = input(f"  {CYAN}Public Key (pbk) [{parsed['pbk'][:12]}…]: {NC}").strip() or parsed["pbk"]
+            sid = input(f"  {CYAN}Short ID (sid) [{parsed['sid'] or 'пусто'}]: {NC}").strip() or parsed["sid"]
+            fp  = input(f"  {CYAN}Fingerprint [{parsed['fp']}]: {NC}").strip() or parsed["fp"]
+        else:
+            host = input(f"  {CYAN}IP или домен: {NC}").strip()
+            if not host:
+                print(f"  {RED}✗{NC}  Host обязателен."); return
+            port_raw = input(f"  {CYAN}Порт [443]: {NC}").strip()
+            port = int(port_raw) if port_raw else 443
+            sni = input(f"  {CYAN}SNI (reality_dest / domain маскировки): {NC}").strip()
+            pbk = input(f"  {CYAN}Public Key (pbk): {NC}").strip()
+            sid = input(f"  {CYAN}Short ID (sid, можно пусто): {NC}").strip()
+            fp  = input(f"  {CYAN}Fingerprint [chrome]: {NC}").strip() or "chrome"
     except (KeyboardInterrupt, EOFError):
         print(); return
 
