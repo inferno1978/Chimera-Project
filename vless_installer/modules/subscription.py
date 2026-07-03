@@ -433,6 +433,16 @@ def build_subscription_body(user: dict) -> bytes:
     if telemt:
         links.append(telemt)
 
+    # Резервные entry-ноды (см. entry_mirrors.py) — опционально, для
+    # клиент-сайд auto-failover если основной entry заблокируют/забанят.
+    uuid_str = user.get("uuid", "")
+    if uuid_str:
+        try:
+            from vless_installer.modules.entry_mirrors import get_mirror_uris
+            links += get_mirror_uris(uuid_str, only_healthy=True)
+        except Exception as e:
+            _log("WARN", f"entry_mirrors недоступен: {e}")
+
     payload = "\n".join(links)
     return base64.b64encode(payload.encode())
 
