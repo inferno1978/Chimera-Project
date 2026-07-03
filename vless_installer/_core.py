@@ -8668,9 +8668,13 @@ def _xray_update_geo_runetfreedom() -> bool:
     geosite_ok = False
     failed_files: list[str] = []
 
-    for urls, fname, min_size in (
-        (GEOSITE_URLS, "geosite.dat", 3_000_000),
-        (GEOIP_URLS,   "geoip.dat",   10_000),
+    # BUGFIX: geosite.dat у runetfreedom вырос до ~70 МБ — старых 180с не
+    # хватает на медленных/дросселируемых каналах до GitHub, а jsDelivr
+    # вообще отказывает (жёсткий лимит CDN — 20 МБ на файл, файл больше —
+    # 403). geoip.dat остаётся маленьким, ему хватает старого таймаута.
+    for urls, fname, min_size, timeout_s in (
+        (GEOSITE_URLS, "geosite.dat", 3_000_000, 600),
+        (GEOIP_URLS,   "geoip.dat",   10_000,    120),
     ):
         tmp = Path(f"/tmp/runet_{fname}")
         downloaded = False
@@ -8691,9 +8695,20 @@ def _xray_update_geo_runetfreedom() -> bool:
                 info(f"  Загрузка {fname}: {url.split('/')[2]} ...")
                 r = _run([
                     "curl", "-fL", "--connect-timeout", "15",
-                    "-m", "180", "--retry", "0",
+                    "-m", str(timeout_s), "--retry", "0",
                     "-o", str(tmp_dl), url,
                 ], capture=True, check=False, quiet=True)
+                # BUGFIX: при обрыве по таймауту (код 28) не выбрасываем уже
+                # скачанное — докачиваем (-C -) по тому же URL ещё раз, вместо
+                # того чтобы терять 20+ МБ и начинать с нуля на следующем
+                # зеркале (которое чаще всего вообще недоступно).
+                if r.returncode == 28 and tmp_dl.exists() and tmp_dl.stat().st_size > 0:
+                    warn(f"  {url.split('/')[2]}: таймаут, докачиваю ({tmp_dl.stat().st_size // 1024} КБ уже есть)...")
+                    r = _run([
+                        "curl", "-fL", "-C", "-", "--connect-timeout", "15",
+                        "-m", str(timeout_s), "--retry", "0",
+                        "-o", str(tmp_dl), url,
+                    ], capture=True, check=False, quiet=True)
                 sz = tmp_dl.stat().st_size if tmp_dl.exists() else 0
                 if r.returncode == 0 and sz >= min_size:
                     info(f"  Скачан {fname} ({sz // 1024} КБ)")
@@ -10170,9 +10185,13 @@ def download_geo_files() -> bool:
     success_count = 0
     failed_files: list[str] = []
 
-    for urls, fname, min_size in (
-        (GEOSITE_URLS, "geosite.dat", 3_000_000),
-        (GEOIP_URLS,   "geoip.dat",   10_000),
+    # BUGFIX: geosite.dat у runetfreedom вырос до ~70 МБ — старых 180с не
+    # хватает на медленных/дросселируемых каналах до GitHub, а jsDelivr
+    # вообще отказывает (жёсткий лимит CDN — 20 МБ на файл, файл больше —
+    # 403). geoip.dat остаётся маленьким, ему хватает старого таймаута.
+    for urls, fname, min_size, timeout_s in (
+        (GEOSITE_URLS, "geosite.dat", 3_000_000, 600),
+        (GEOIP_URLS,   "geoip.dat",   10_000,    120),
     ):
         info(f"  Загрузка {fname}...")
         tmp_path = Path(f"/tmp/{fname}")
@@ -10193,9 +10212,19 @@ def download_geo_files() -> bool:
                     tmp_path.unlink(missing_ok=True)
                     r = _run([
                         "curl", "-fL", "--connect-timeout", "15",
-                        "-m", "180", "--retry", "0",
+                        "-m", str(timeout_s), "--retry", "0",
                         "-o", str(tmp_path), url,
                     ], capture=True, check=False, quiet=True)
+                    # BUGFIX: при обрыве по таймауту (код 28) докачиваем
+                    # (-C -) по тому же URL вместо потери уже скачанных
+                    # десятков МБ и перехода на next-зеркало.
+                    if r.returncode == 28 and tmp_path.exists() and tmp_path.stat().st_size > 0:
+                        warn(f"  {url.split('/')[2]}: таймаут, докачиваю ({tmp_path.stat().st_size // 1024} КБ уже есть)...")
+                        r = _run([
+                            "curl", "-fL", "-C", "-", "--connect-timeout", "15",
+                            "-m", str(timeout_s), "--retry", "0",
+                            "-o", str(tmp_path), url,
+                        ], capture=True, check=False, quiet=True)
                     if r.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > min_size:
                         downloaded = True
                         info(f"  Загружено с: {url.split('/')[2]}")
