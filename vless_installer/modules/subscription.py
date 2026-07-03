@@ -52,6 +52,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import ssl
 import subprocess
 import sys
@@ -99,6 +100,19 @@ def _info(msg: str) -> None: print(f"{CYAN}[INFO]{NC}  {msg}"); _log("INFO", msg
 def _ok(msg: str)   -> None: print(f"{GREEN}[OK]{NC}    {msg}"); _log("SUCCESS", msg)
 def _warn(msg: str) -> None: print(f"{YELLOW}[WARN]{NC}  {msg}"); _log("WARN", msg)
 def _err(msg: str)  -> None: print(f"{RED}[ERR]{NC}   {msg}"); _log("ERROR", msg)
+
+def _print_qr(data: str, label: str = "") -> None:
+    if not shutil.which("qrencode"):
+        print(f"  {YELLOW}⚠{NC}  qrencode не установлен: apt install qrencode")
+        return
+    if label:
+        print(f"  {CYAN}→{NC}  QR: {YELLOW}{label}{NC}")
+    print()
+    try:
+        subprocess.run(["qrencode", "-t", "UTF8", "-m", "1", data], check=True)
+    except Exception as e:
+        print(f"  {RED}✗{NC}  QR ошибка: {e}")
+    print()
 
 # ── Делегирование в _core.py (без circular import, без дублирования) ──────
 def _core_call(func_name: str, *args, **kwargs):
@@ -632,6 +646,7 @@ def do_subscription_menu() -> None:
                 _box_row(f"  {WHITE}{label}{NC}")
                 _box_row(f"  {GREEN}{url}{NC}")
                 _box_row()
+                _print_qr(url, label)
             if not any_user:
                 _box_warn_line("Нет активных пользователей.")
             _box_back()
