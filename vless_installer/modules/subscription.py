@@ -531,6 +531,7 @@ def _unit_text(python_bin: str, module_path: str, port: int) -> str:
         "User=root\n"
         "NoNewPrivileges=true\n"
         "ProtectSystem=strict\n"
+        "PrivateTmp=true\n"
         "ReadWritePaths=/var/lib/xray-installer /var/log\n"
         "\n"
         "[Install]\n"
