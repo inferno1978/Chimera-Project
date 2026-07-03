@@ -28400,6 +28400,7 @@ def _menu_users() -> None:
         _box_item("E", f"📤 Экспорт конфига клиента  {DIM}(файл / SFTP / QR){NC}")
         _box_item("F", f"🔀 Ссылка + конфиг с фрагментацией  {DIM}(обход DPI){NC}")
         _box_item("G", f"📲 Поделиться конфигом  {DIM}(QR → скачать без scp){NC}")
+        _box_item("H", f"🔁 Единая подписка  {DIM}(все транспорты в одном URL){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -28441,6 +28442,13 @@ def _menu_users() -> None:
             do_fragment_link_menu()
         elif ch.lower() == "g":
             do_fragment_share_menu()
+        elif ch.lower() == "h":
+            try:
+                from vless_installer.modules.subscription import do_subscription_menu
+                do_subscription_menu()
+            except ImportError as _e:
+                warn(f"Модуль Единой подписки не найден: {_e}")
+                time.sleep(2)
         elif ch.lower() == "q" or ch == "":
             break
         else:

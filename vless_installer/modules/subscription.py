@@ -76,6 +76,12 @@ RED, GREEN, YELLOW, CYAN, BOLD, DIM, WHITE, NC = (
     _C['BOLD'], _C['DIM'], _C['WHITE'], _C['NC'],
 )
 
+# ── Единый box-рендерер проекта (та же система, что и во всех остальных меню) ──
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_bottom, _box_row, _box_item, _box_back,
+    _box_info, _box_warn as _box_warn_line, _box_ok as _box_ok_line,
+)
+
 # ── Логирование (единый формат с остальными модулями) ──────────────────────
 _LOG_FILE = Path("/var/log/vless-install.log")
 
@@ -561,110 +567,159 @@ def _install_service(port: int) -> bool:
 # ══════════════════════════════════════════════════════════════════════════
 
 def do_subscription_menu() -> None:
-    os.system("clear")
-    print(f"{BOLD}{CYAN}══  ЕДИНАЯ ПОДПИСКА (subscription)  ══{NC}\n")
+    while True:
+        os.system("clear")
+        state = _load_state()
+        cfg = _load_sub_conf()
+        enabled = cfg.get("enabled", False)
+        status = f"{GREEN}включена{NC}" if enabled else f"{DIM}выключена{NC}"
 
-    state = _load_state()
-    if not state or not state.get("domain"):
-        _err("state.json не найден или нет domain — сначала установите сервер.")
+        _box_top(f"🔁  ЕДИНАЯ ПОДПИСКА  {DIM}({NC}{status}{DIM}){NC}")
+        _box_row()
+        if not state or not state.get("domain"):
+            _box_warn_line("state.json не найден — сначала установите сервер (раздел 1).")
+            _box_row()
+            _box_back()
+            _box_bottom()
+            input(f"\n{CYAN}Enter…{NC}")
+            return
+
+        _box_item("1", "🚀 Включить / переустановить сервис")
+        _box_item("2", "🔗 Показать ссылки подписки для всех пользователей")
+        _box_item("3", f"🔄 Сгенерировать pepper заново  {DIM}(инвалидирует все ссылки){NC}")
+        _box_item("4", "🛑 Выключить сервис")
+        _box_item("5", f"🧩 Привязать Mieru/NaiveProxy/Telemt к UUID  {DIM}(вручную){NC}")
+        _box_row()
+        _box_back()
+        _box_bottom()
+
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip()
+        except KeyboardInterrupt:
+            return
+
+        if ch == "1":
+            port = cfg.get("listen_port", DEFAULT_PORT)
+            try:
+                port = int(input(f"Порт [{port}]: ").strip() or port)
+            except ValueError:
+                pass
+            cfg["enabled"] = True
+            cfg["listen_port"] = port
+            _ensure_pepper(cfg)
+            _save_sub_conf(cfg)
+            if _install_service(port):
+                _ok(f"Сервис {SERVICE_NAME} запущен на :{port}")
+                _info(f"nginx (опционально): подключите {_NGINX_SNIP}")
+            input(f"\n{BOLD}Enter…{NC}")
+
+        elif ch == "2":
+            pepper = _ensure_pepper(cfg)
+            domain = state.get("domain", "")
+            port = cfg.get("listen_port", DEFAULT_PORT)
+            os.system("clear")
+            _box_top("🔗  ССЫЛКИ ПОДПИСКИ")
+            _box_row()
+            any_user = False
+            for u in _load_all_users():
+                if u.get("disabled") or not u.get("uuid"):
+                    continue
+                any_user = True
+                token = _token_for(u["uuid"], pepper)
+                url = f"https://{domain}:{port}/sub/{token}"
+                label = u.get("email", u.get("name", "?"))
+                _box_row(f"  {WHITE}{label}{NC}")
+                _box_row(f"  {GREEN}{url}{NC}")
+                _box_row()
+            if not any_user:
+                _box_warn_line("Нет активных пользователей.")
+            _box_back()
+            _box_bottom()
+            input(f"\n{BOLD}Enter…{NC}")
+
+        elif ch == "3":
+            confirm = input(f"{YELLOW}Все выданные ссылки перестанут работать. Продолжить? (y/N):{NC} ")
+            if confirm.lower() == "y":
+                cfg["pepper"] = secrets.token_hex(32)
+                _save_sub_conf(cfg)
+                _ok("Pepper обновлён.")
+            input(f"\n{BOLD}Enter…{NC}")
+
+        elif ch == "4":
+            cfg["enabled"] = False
+            _save_sub_conf(cfg)
+            subprocess.run(["systemctl", "disable", "--now", SERVICE_NAME], check=False)
+            _ok("Сервис остановлен.")
+            input(f"\n{BOLD}Enter…{NC}")
+
+        elif ch == "5":
+            _do_identity_map_menu(cfg)
+
+        elif ch == "" or ch.lower() == "q" or ch == "0":
+            return
+        else:
+            _warn("Неверный выбор.")
+
+
+def _do_identity_map_menu(cfg: dict) -> None:
+    users = [u for u in _load_all_users() if u.get("uuid")]
+    os.system("clear")
+    _box_top("🧩  ПРИВЯЗКА САТЕЛЛИТНЫХ ЛОГИНОВ К UUID")
+    _box_row()
+    if not users:
+        _box_warn_line("Нет пользователей.")
+        _box_back()
+        _box_bottom()
+        input(f"\n{BOLD}Enter…{NC}")
         return
 
-    cfg = _load_sub_conf()
-    enabled = cfg.get("enabled", False)
-    print(f"  Статус: {(GREEN + 'включена' + NC) if enabled else (YELLOW + 'выключена' + NC)}")
-    print(f"  1) Включить / переустановить сервис")
-    print(f"  2) Показать ссылки подписки для всех пользователей")
-    print(f"  3) Сгенерировать заново pepper (инвалидирует все текущие ссылки)")
-    print(f"  4) Выключить сервис")
-    print(f"  5) Привязать Mieru/NaiveProxy/Telemt логин к UUID вручную")
-    print(f"  0) Назад")
-    ch = input(f"\n{CYAN}Выбор:{NC} ").strip()
+    for i, u in enumerate(users, 1):
+        _box_row(f"  {DIM}{i}.{NC} {WHITE}{u.get('email', u.get('name','?'))}{NC}  "
+                  f"{DIM}[{u['uuid'][:8]}…]{NC}")
+    _box_row()
+    _box_back()
+    _box_bottom()
 
-    if ch == "1":
-        port = cfg.get("listen_port", DEFAULT_PORT)
-        try:
-            port = int(input(f"Порт [{port}]: ").strip() or port)
-        except ValueError:
-            pass
-        cfg["enabled"] = True
-        cfg["listen_port"] = port
-        _ensure_pepper(cfg)
-        _save_sub_conf(cfg)
-        if _install_service(port):
-            _ok(f"Сервис {SERVICE_NAME} запущен на :{port}")
-            _info(f"nginx: подключите {_NGINX_SNIP}")
-        input("\nEnter…")
+    try:
+        idx = int(input("Номер пользователя: ").strip()) - 1
+        target = users[idx]
+    except (ValueError, IndexError):
+        _warn("Неверный номер.")
+        input(f"\n{BOLD}Enter…{NC}")
+        return
 
-    elif ch == "2":
-        pepper = _ensure_pepper(cfg)
-        domain = state.get("domain", "")
-        port = cfg.get("listen_port", DEFAULT_PORT)
-        for u in _load_all_users():
-            if u.get("disabled") or not u.get("uuid"):
-                continue
-            token = _token_for(u["uuid"], pepper)
-            url = f"https://{domain}:{port}/sub/{token}"
-            print(f"  {WHITE}{u.get('email', u.get('name','?'))}{NC}: {GREEN}{url}{NC}")
-        input("\nEnter…")
+    mieru_pool = set()
+    if _MIERU_STATE.exists():
+        mieru_pool |= {u["username"] for u in json.loads(_MIERU_STATE.read_text()).get("users", [])}
+    if _MITA_HYBRID_CFG.exists():
+        mieru_pool |= {u["name"] for u in json.loads(_MITA_HYBRID_CFG.read_text()).get("users", [])}
+    naive_pool = set()
+    if _NAIVE_STATE.exists():
+        naive_pool |= {u["username"] for u in json.loads(_NAIVE_STATE.read_text()).get("users", [])}
+    telemt_cfg = _parse_telemt_toml()
+    telemt_pool = set(telemt_cfg["users"].keys()) if telemt_cfg else set()
 
-    elif ch == "3":
-        confirm = input("Все выданные ссылки перестанут работать. Продолжить? (y/N): ")
-        if confirm.lower() == "y":
-            cfg["pepper"] = secrets.token_hex(32)
-            _save_sub_conf(cfg)
-            _ok("Pepper обновлён.")
-        input("\nEnter…")
+    os.system("clear")
+    _box_top(f"🧩  {target.get('email', target.get('name','?'))}")
+    _box_row()
+    _box_row(f"  Mieru доступные:      {', '.join(sorted(mieru_pool)) or '—'}")
+    _box_row(f"  NaiveProxy доступные: {', '.join(sorted(naive_pool)) or '—'}")
+    _box_row(f"  Telemt доступные:     {', '.join(sorted(telemt_pool)) or '—'}")
+    _box_row()
+    _box_bottom()
 
-    elif ch == "4":
-        cfg["enabled"] = False
-        _save_sub_conf(cfg)
-        subprocess.run(["systemctl", "disable", "--now", SERVICE_NAME], check=False)
-        _ok("Сервис остановлен.")
-        input("\nEnter…")
+    m = input("Mieru логин (Enter — пропустить): ").strip()
+    n = input("NaiveProxy логин (Enter — пропустить): ").strip()
+    t = input("Telemt логин (Enter — пропустить): ").strip()
 
-    elif ch == "5":
-        users = [u for u in _load_all_users() if u.get("uuid")]
-        if not users:
-            _warn("Нет пользователей.")
-            input("\nEnter…")
-            return
-        for i, u in enumerate(users, 1):
-            print(f"  {i}. {u.get('email', u.get('name','?'))}  [{u['uuid'][:8]}…]")
-        try:
-            idx = int(input("Номер пользователя: ").strip()) - 1
-            target = users[idx]
-        except (ValueError, IndexError):
-            _warn("Неверный номер.")
-            input("\nEnter…")
-            return
-
-        mieru_pool = set()
-        if _MIERU_STATE.exists():
-            mieru_pool |= {u["username"] for u in json.loads(_MIERU_STATE.read_text()).get("users", [])}
-        if _MITA_HYBRID_CFG.exists():
-            mieru_pool |= {u["name"] for u in json.loads(_MITA_HYBRID_CFG.read_text()).get("users", [])}
-        naive_pool = set()
-        if _NAIVE_STATE.exists():
-            naive_pool |= {u["username"] for u in json.loads(_NAIVE_STATE.read_text()).get("users", [])}
-        telemt_cfg = _parse_telemt_toml()
-        telemt_pool = set(telemt_cfg["users"].keys()) if telemt_cfg else set()
-
-        print(f"\n  Mieru доступные:   {', '.join(sorted(mieru_pool)) or '—'}")
-        print(f"  NaiveProxy доступные: {', '.join(sorted(naive_pool)) or '—'}")
-        print(f"  Telemt доступные:  {', '.join(sorted(telemt_pool)) or '—'}\n")
-
-        m = input("Mieru логин (Enter — пропустить): ").strip()
-        n = input("NaiveProxy логин (Enter — пропустить): ").strip()
-        t = input("Telemt логин (Enter — пропустить): ").strip()
-
-        idmap = cfg.setdefault("identity_map", {})
-        entry = idmap.setdefault(target["uuid"], {})
-        if m: entry["mieru"] = m
-        if n: entry["naive"] = n
-        if t: entry["telemt"] = t
-        _save_sub_conf(cfg)
-        _ok("Привязка сохранена.")
-        input("\nEnter…")
+    idmap = cfg.setdefault("identity_map", {})
+    entry = idmap.setdefault(target["uuid"], {})
+    if m: entry["mieru"] = m
+    if n: entry["naive"] = n
+    if t: entry["telemt"] = t
+    _save_sub_conf(cfg)
+    _ok("Привязка сохранена.")
+    input(f"\n{BOLD}Enter…{NC}")
 
 
 if __name__ == "__main__":
