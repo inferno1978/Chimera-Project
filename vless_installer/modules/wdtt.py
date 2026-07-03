@@ -185,17 +185,35 @@ def _box_sep() -> None:
 def _box_bot() -> None:
     print(f"{CYAN}╚{'═' * _BOX_W}╝{NC}")
 
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
 def _box_row(text: str = "") -> None:
     w = _wlen(text)
     if w > _BOX_W:
-        acc, plain = 0, _plain(text)
-        cut = 0
-        for i, ch in enumerate(plain):
-            import unicodedata as _ud
-            acc += 2 if _ud.east_asian_width(ch) in ('W', 'F') else 1
-            if acc > _BOX_W - 1:
-                cut = i; break
-        text = text[:cut] + "…"
+        # cut считался по plain-строке (без ANSI), а срез text[:cut]
+        # применялся к оригинальной строке с ANSI-кодами — при наличии
+        # цвета это рвало escape-последовательность посередине и портило
+        # вывод (сдвигало правую границу ║). Обрезаем посимвольно, пропуская
+        # ANSI-коды целиком и считая ширину только по видимым символам.
+        import unicodedata as _ud
+        acc = 0
+        out = []
+        i = 0
+        n = len(text)
+        while i < n:
+            m = _ANSI_RE.match(text, i)
+            if m:
+                out.append(m.group(0))
+                i = m.end()
+                continue
+            ch = text[i]
+            cw = 2 if _ud.east_asian_width(ch) in ('W', 'F') else 1
+            if acc + cw > _BOX_W - 1:
+                break
+            out.append(ch)
+            acc += cw
+            i += 1
+        text = ''.join(out) + "…"
         w = _wlen(text)
     pad = max(0, _BOX_W - w)
     print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
@@ -215,13 +233,15 @@ def _box_kv(key: str, val: str, kw: int = 22) -> None:
     _box_row(f"  {key_colored}{' ' * max(0, key_pad)}  {val}")
 
 def _box_link(link: str, color: str = "") -> None:
-    """Выводит длинную ссылку внутри рамки, разбивая её на несколько строк
-    по '&' (безопасные точки разрыва), без сокращения/обрезания текста.
-    В отличие от _box_row(), никогда не добавляет '…' — вся ссылка видна
-    полностью, просто на нескольких строках."""
+    """Выводит длинную ссылку БЕЗ боковых границ ║ рамки — печатается
+    обычным print() ниже/внутри блока, но не как строка рамки. Так длинный
+    URL никогда не сдвигает и не ломает правую границу ║ (см. аналогичный
+    _box_link в box_renderer.py). Разбивает по '&' (безопасные точки
+    разрыва), без сокращения/обрезания текста — вся ссылка видна полностью,
+    просто на нескольких строках."""
     if not color:
         color = YELLOW
-    max_w = _BOX_W - 4  # отступ "  " слева + запас на правую границу
+    max_w = _BOX_W - 2  # 1 пробел слева, без правой границы
 
     tokens, buf = [], ""
     for ch in link:
@@ -253,7 +273,7 @@ def _box_link(link: str, color: str = "") -> None:
         lines.append(cur)
 
     for line in lines:
-        _box_row(f"  {color}{line}{NC}")
+        print(f" {color}{line}{NC}")
 
 def _save_link_file(link: str, filename: str) -> Path:
     """Сохраняет полную ссылку в файл в _CFG_DIR, чтобы её можно было
@@ -600,12 +620,28 @@ def _ipt_rule_exists(table: str, chain: str, args: list) -> bool:
     r = _run(["iptables", "-t", table, "-C", chain] + args, capture=True)
     return r.returncode == 0
 
+def _fw_tool() -> str:
+    """ufw, если он есть и активен — иначе raw iptables (fallback)."""
+    if shutil.which("ufw"):
+        r = _run(["ufw", "status"], capture=True, check=False)
+        if "Status: active" in (r.stdout or ""):
+            return "ufw"
+    return "iptables"
+
 def _ipt_open_udp(port: int) -> None:
+    if _fw_tool() == "ufw":
+        r = _run(["ufw", "status"], capture=True, check=False)
+        if not re.search(rf'^{port}/udp\b.*ALLOW', r.stdout or "", re.MULTILINE):
+            _run(["ufw", "allow", f"{port}/udp", "comment", "qWDTT DTLS"],
+                 check=False)
+        return
     args = ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"]
     if not _ipt_rule_exists("filter", "INPUT", args):
         _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
 
 def _ipt_close_udp(port: int) -> None:
+    if shutil.which("ufw"):
+        _run(["ufw", "delete", "allow", f"{port}/udp"], check=False)
     args = ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"]
     for _ in range(5):
         if not _ipt_rule_exists("filter", "INPUT", args):
@@ -809,11 +845,12 @@ def _run_install_inner() -> None:
     _enable_ip_forward()
     print(f"  {GREEN}✓{NC}  IP forwarding включён.")
 
-    # 4. iptables
+    # 4. Firewall + NAT
+    fw_tool = _fw_tool()
     _ipt_open_udp(dtls_port)
     _ipt_add_masquerade()
     _ipt_persist()
-    print(f"  {GREEN}✓{NC}  iptables: UDP {dtls_port} открыт, NAT настроен.")
+    print(f"  {GREEN}✓{NC}  {fw_tool}: UDP {dtls_port} открыт, NAT настроен.")
 
     # 5. Systemd
     _install_service(dtls_port, wg_port, main_pass, admin_id, bot_token)
@@ -1161,7 +1198,7 @@ def _show_status() -> None:
     _box_kv("Устройств:", str(len(devices)))
     _box_row(); _box_sep()
     _box_row(f"  {BOLD}{WHITE}Последние 30 строк журнала:{NC}")
-    _box_row()
+    _box_bot()  # рамка закрыта — длинные строки лога печатаются уже вне неё
 
     r2 = subprocess.run(
         ["journalctl", "-u", _SERVICE_NAME, "-n", "30",
@@ -1169,10 +1206,21 @@ def _show_status() -> None:
         capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "LANG": "C.UTF-8"},
     )
+    max_w = _BOX_W + 12  # вне рамки можно чуть шире — просто по ширине терминала
     for line in (r2.stdout or r2.stderr or "Нет записей").splitlines():
-        _box_row(f"  {DIM}{line[:_BOX_W - 4]}{NC}")
+        line = line.replace("\t", "    ")
+        if _wlen(line) > max_w:
+            acc, cut = 0, 0
+            import unicodedata as _ud
+            for ch in line:
+                acc += 2 if _ud.east_asian_width(ch) in ('W', 'F') else 1
+                if acc > max_w:
+                    break
+                cut += 1
+            line = line[:cut] + "…"
+        print(f"  {DIM}{line}{NC}")
 
-    _box_row(); _box_bot()
+    print()
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1497,7 +1545,7 @@ def do_wdtt_menu() -> None:
                 f"&workers=16&port={_DEFAULT_TUN_PORT}"
                 f"&pass={main_pass}"
             )
-            _box_row(f"  {YELLOW}{link}{NC}")
+            _box_link(link)
             _box_row()
             _box_bot()
             _pause()
