@@ -4192,6 +4192,108 @@ def generate_xray_config_chain_exit() -> None:
 
 
 # =============================================================================
+#  ДОП. КЛИЕНТ ДЛЯ УЖЕ РАЗВЁРНУТОЙ EXIT-НОДЫ (для резервной Entry-ноды)
+# =============================================================================
+def do_generate_chain_exit_additional_client() -> None:
+    """
+    generate_xray_config_chain_exit() перезаписывает inbounds[0].settings.clients
+    ОДНИМ клиентом — это ломает доступ уже работающей entry-ноды, если
+    сгенерировать конфиг заново под вторую (резервную) entry. Эта функция
+    вместо полной перегенерации выдаёт JSON-сниппет с ОДНИМ новым клиентом
+    (новый UUID) — его нужно вручную добавить ЕЩЁ ОДНИМ элементом в уже
+    существующий массив clients на exit-VPS, не трогая остальные.
+
+    Если exit-нода — это обычная установка данного инсталлятора в Режиме A
+    (вариант "вставить VLESS-ссылку" при добавлении ноды, а не шаблон из
+    generate_xray_config_chain_exit()) — специальный сниппет не нужен:
+    проще добавить обычного пользователя через "Менеджер пользователей"
+    (меню 2 → 1) прямо на exit-VPS и взять его vless-ссылку.
+    """
+    global CHAIN_NODES
+    _load_chain_nodes_from_state()
+
+    print()
+    _box_top("Доп. клиент для существующей Exit-ноды (резервная Entry)")
+    _box_row(f"  {DIM}Для entry-ноды, форвардящей трафик в УЖЕ развёрнутый exit —")
+    _box_row(f"  {DIM}не переписывает существующего клиента, только добавляет нового.{NC}")
+    _box_row()
+
+    nd: dict | None = None
+    if CHAIN_NODES:
+        for i, cnd in enumerate(CHAIN_NODES):
+            _box_row(f"  [{i+1}] {cnd['host']}:{cnd['port']}  SNI={cnd['sni']}")
+        _box_row(f"  [0] Ввести параметры exit-ноды вручную")
+        _box_bottom()
+        try:
+            v = input("  Номер exit-ноды (0 = вручную): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print(); return
+        if v.isdigit() and 1 <= int(v) <= len(CHAIN_NODES):
+            nd = CHAIN_NODES[int(v) - 1]
+    else:
+        _box_row(f"  {DIM}Список нод этой entry пуст — введите параметры exit-ноды вручную.{NC}")
+        _box_bottom()
+
+    if nd is None:
+        try:
+            host = input("  Host exit-ноды: ").strip()
+            if not host:
+                warn("Host обязателен."); return
+            port_raw = input("  Порт [443]: ").strip()
+            port = int(port_raw) if port_raw else 443
+            proto = (input("  Протокол [reality/xhttp, по умолчанию reality]: ").strip().lower() or "reality")
+            sni = input("  SNI: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print(); return
+        nd = {"host": host, "port": port, "sni": sni, "proto": proto}
+
+    try:
+        label = input("  Метка нового клиента [entry-backup]: ").strip() or "entry-backup"
+    except (KeyboardInterrupt, EOFError):
+        print(); return
+
+    new_uuid = str(uuid.uuid4())
+    client_obj: dict = {"id": new_uuid, "email": f"{label}@chain"}
+    if nd.get("proto", "reality") != "xhttp" and XTLS_FLOW:
+        client_obj["flow"] = XTLS_FLOW
+
+    snippet_path = Path(f"/root/exit_add_client_{new_uuid[:8]}.json")
+    snippet_path.write_text(json.dumps(client_obj, indent=2, ensure_ascii=False))
+    snippet_path.chmod(0o600)
+
+    print()
+    success(f"Сниппет клиента сохранён: {snippet_path}")
+    _box_top("Что сделать дальше")
+    _box_row(f"  1. Скопируйте файл на exit-VPS ({nd['host']}):")
+    _box_row(f"     {CYAN}scp {snippet_path} root@{nd['host']}:/root/{NC}")
+    _box_row(f"  2. На exit-VPS откройте /etc/xray/config.json,")
+    _box_row(f"     найдите inbounds[0].settings.clients (это список) и")
+    _box_row(f"     добавьте туда содержимое {snippet_path.name}")
+    _box_row(f"     ЕЩЁ ОДНИМ элементом через запятую — существующего")
+    _box_row(f"     клиента (основную entry) НЕ трогайте и не удаляйте.")
+    _box_row(f"  3. Перезапустите Xray на exit-VPS:")
+    _box_row(f"     {CYAN}systemctl restart xray{NC}")
+    _box_row()
+    _box_row(f"  {BOLD}Параметры для резервной entry-ноды{NC} {DIM}(ввести при настройке")
+    _box_row(f"  {DIM}её cascade / добавлении этой exit-ноды в её CHAIN_NODES):{NC}")
+    _box_row(f"     Host:      {nd['host']}")
+    _box_row(f"     Port:      {nd['port']}")
+    _box_row(f"     UUID:      {new_uuid}")
+    if nd.get("pubkey"):
+        _box_row(f"     PublicKey: {nd['pubkey']}")
+    if nd.get("shortid"):
+        _box_row(f"     ShortID:   {nd['shortid']}")
+    _box_row(f"     SNI:       {nd.get('sni', '')}")
+    _box_row(f"     FP:        {nd.get('fp', 'chrome')}")
+    if not nd.get("pubkey") or not nd.get("shortid"):
+        _box_row()
+        _box_row(f"  {YELLOW}PublicKey/ShortID exit-ноды не были указаны — возьмите их{NC}")
+        _box_row(f"  {YELLOW}из исходной VLESS-ссылки этой exit-ноды.{NC}")
+    _box_bottom()
+    input(f"{BLUE}Нажмите Enter...{NC}")
+
+
+# =============================================================================
 #  МУЛЬТИ-КАСКАД: ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (до 10 exit-нод)
 # =============================================================================
 
@@ -5444,6 +5546,7 @@ def do_manage_nodes() -> None:
             if len(CHAIN_NODES) >= 2:
                 _box_item("B", f"Изменить стратегию балансировки  [{_bal_label}]")
         _box_item("O", f"Изменить стратегию исходящих соединений  [{_ds_label}]")
+        _box_item("N", f"Доп. клиент для резервной Entry-ноды  {DIM}(на уже развёрнутый exit){NC}")
         _box_item_exit("0", f"Назад в главное меню")
         _box_bottom()
 
@@ -5684,6 +5787,9 @@ def do_manage_nodes() -> None:
             else:
                 info("Изменение отменено.")
             input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "n":
+            do_generate_chain_exit_additional_client()
 
         else:
             warn("Неверный выбор.")
