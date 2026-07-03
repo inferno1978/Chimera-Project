@@ -4078,7 +4078,13 @@ def _make_exit_node_config(nd: dict) -> dict:
                 "clients": [{
                     "id":    nd["uuid"],
                     "email": "entry@chain",
-                    **( {"flow": XTLS_FLOW} if XTLS_FLOW else {} ),
+                    # BUGFIX: flow убран сознательно — см. комментарий в
+                    # generate_xray_config_chain_entry() / _multi(). Entry
+                    # теперь подключается к exit-ноде БЕЗ flow (двойной XTLS
+                    # Vision в одном процессе Xray ломает фрейминг), поэтому
+                    # inbound exit-ноды тоже не должен требовать flow от
+                    # этого клиента — иначе VLESS flow mismatch рвёт
+                    # соединение (entry→exit EOF).
                 }],
                 "decryption": "none",
             },
