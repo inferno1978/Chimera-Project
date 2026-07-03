@@ -3679,30 +3679,6 @@ def prompt_awg_exit_mode() -> None:
 # =============================================================================
 #  ГЕНЕРАЦИЯ КОНФИГА XRAY ДЛЯ РЕЖИМА B — российский (entry) VPS
 # =============================================================================
-def _assert_reality_dest_sane() -> None:
-    """
-    BUGFIX: защита от невалидного realitySettings.serverNames/dest.
-
-    Если AWG_EXIT_ENABLED=True, а PARAM_REALITY_DEST пуст (рассинхрон между
-    транспортным флагом и параметром camouflage-домена — например, после
-    ручного переключения режима без полного сброса состояния), генераторы
-    конфига ниже соберут:
-        "dest": ":443", "serverNames": [""]
-    Это не ловится `xray run -test` как синтаксическая ошибка, но ломает
-    REALITY-хендшейк для абсолютно любого клиента (домен/IPv4/IPv6 — не важно,
-    хост один и тот же битый inbound). Лучше упасть здесь с понятной ошибкой,
-    чем молча выкатить нерабочий config.json.
-    """
-    if AWG_EXIT_ENABLED and not PARAM_REALITY_DEST:
-        die(
-            "AWG_EXIT_ENABLED=True, но PARAM_REALITY_DEST пуст — "
-            "конфиг получился бы с serverNames=[\"\"] и dest=':443' "
-            "(REALITY не будет работать ни для одного клиента). "
-            "Запустите prompt_awg_exit_mode() заново или проверьте "
-            "reality_dest в state.json."
-        )
-
-
 def generate_xray_config_chain_entry() -> None:
     """
     Режим B, Entry node (российский VPS):
@@ -3710,7 +3686,6 @@ def generate_xray_config_chain_entry() -> None:
     • Исходящий — VLESS+REALITY → зарубежный VPS (exit node)
     """
     global DNSCRYPT_LISTEN_PORT
-    _assert_reality_dest_sane()
     info("Режим B: создание конфига Entry Node (российский VPS)...")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # ПАТЧ: гарантируем создание группы/пользователя xray ДО chown.
@@ -3849,15 +3824,7 @@ def generate_xray_config_chain_entry() -> None:
                         "users":   [{
                             "id":         CHAIN_EXIT_UUID,
                             "encryption": "none",
-                            # BUGFIX: flow убран сознательно. XTLS Vision уже
-                            # включён на клиентском inbound этой entry-ноды
-                            # (см. inbound_block выше). Включать Vision ЕЩЁ РАЗ
-                            # на исходящем в том же процессе xray (проксирование
-                            # inbound-vision → outbound-vision) — известное
-                            # ограничение Xray-core: padding/сигналинг Vision
-                            # ломается при двойном хопе, часть клиентов
-                            # (например Exclave) детектит битый TLS-фрейминг
-                            # и рвёт соединение по таймауту.
+                            **( {"flow": XTLS_FLOW} if XTLS_FLOW else {} ),
                         }],
                     }],
                 },
@@ -4078,13 +4045,7 @@ def _make_exit_node_config(nd: dict) -> dict:
                 "clients": [{
                     "id":    nd["uuid"],
                     "email": "entry@chain",
-                    # BUGFIX: flow убран сознательно — см. комментарий в
-                    # generate_xray_config_chain_entry() / _multi(). Entry
-                    # теперь подключается к exit-ноде БЕЗ flow (двойной XTLS
-                    # Vision в одном процессе Xray ломает фрейминг), поэтому
-                    # inbound exit-ноды тоже не должен требовать flow от
-                    # этого клиента — иначе VLESS flow mismatch рвёт
-                    # соединение (entry→exit EOF).
+                    **( {"flow": XTLS_FLOW} if XTLS_FLOW else {} ),
                 }],
                 "decryption": "none",
             },
@@ -4740,7 +4701,6 @@ def generate_xray_config_chain_entry_multi() -> None:
     Если нода одна — конфиг идентичен оригинальному (без balancer).
     """
     global DNSCRYPT_LISTEN_PORT
-    _assert_reality_dest_sane()
     nodes = CHAIN_NODES if CHAIN_NODES else []
     if not nodes:
         # Fallback на legacy-переменные
@@ -4875,12 +4835,7 @@ def generate_xray_config_chain_entry_multi() -> None:
                         "users":   [{
                             "id":         nd["uuid"],
                             "encryption": "none",
-                            # BUGFIX: flow убран сознательно — см. комментарий
-                            # в generate_xray_config_chain_entry() выше.
-                            # Vision уже включён на клиентском inbound
-                            # entry-ноды; повторное включение на исходящем
-                            # в том же процессе ломает Vision-фрейминг для
-                            # части клиентов (Exclave и др.) → таймаут.
+                            "flow":       nd.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision",
                         }],
                     }],
                 },
@@ -7197,7 +7152,6 @@ def _detect_xhttp_mode_support() -> None:
 
 def generate_xray_config() -> None:
     global DNSCRYPT_LISTEN_PORT
-    _assert_reality_dest_sane()
     info("Создание конфигурации Xray...")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # ПАТЧ: гарантируем создание группы/пользователя xray ДО chown.
@@ -8668,13 +8622,9 @@ def _xray_update_geo_runetfreedom() -> bool:
     geosite_ok = False
     failed_files: list[str] = []
 
-    # BUGFIX: geosite.dat у runetfreedom вырос до ~70 МБ — старых 180с не
-    # хватает на медленных/дросселируемых каналах до GitHub, а jsDelivr
-    # вообще отказывает (жёсткий лимит CDN — 20 МБ на файл, файл больше —
-    # 403). geoip.dat остаётся маленьким, ему хватает старого таймаута.
-    for urls, fname, min_size, timeout_s in (
-        (GEOSITE_URLS, "geosite.dat", 3_000_000, 600),
-        (GEOIP_URLS,   "geoip.dat",   10_000,    120),
+    for urls, fname, min_size in (
+        (GEOSITE_URLS, "geosite.dat", 3_000_000),
+        (GEOIP_URLS,   "geoip.dat",   10_000),
     ):
         tmp = Path(f"/tmp/runet_{fname}")
         downloaded = False
@@ -8695,20 +8645,9 @@ def _xray_update_geo_runetfreedom() -> bool:
                 info(f"  Загрузка {fname}: {url.split('/')[2]} ...")
                 r = _run([
                     "curl", "-fL", "--connect-timeout", "15",
-                    "-m", str(timeout_s), "--retry", "0",
+                    "-m", "180", "--retry", "0",
                     "-o", str(tmp_dl), url,
                 ], capture=True, check=False, quiet=True)
-                # BUGFIX: при обрыве по таймауту (код 28) не выбрасываем уже
-                # скачанное — докачиваем (-C -) по тому же URL ещё раз, вместо
-                # того чтобы терять 20+ МБ и начинать с нуля на следующем
-                # зеркале (которое чаще всего вообще недоступно).
-                if r.returncode == 28 and tmp_dl.exists() and tmp_dl.stat().st_size > 0:
-                    warn(f"  {url.split('/')[2]}: таймаут, докачиваю ({tmp_dl.stat().st_size // 1024} КБ уже есть)...")
-                    r = _run([
-                        "curl", "-fL", "-C", "-", "--connect-timeout", "15",
-                        "-m", str(timeout_s), "--retry", "0",
-                        "-o", str(tmp_dl), url,
-                    ], capture=True, check=False, quiet=True)
                 sz = tmp_dl.stat().st_size if tmp_dl.exists() else 0
                 if r.returncode == 0 and sz >= min_size:
                     info(f"  Скачан {fname} ({sz // 1024} КБ)")
@@ -9896,17 +9835,9 @@ def generate_client_links() -> None:
         print()
         _show_qr(link4, "IPv4", "/root/vless_qr_ipv4.png")
 
-    # BUGFIX: IPV6_PREFLIGHT — это первый global-scope адрес из `ip -6 addr
-    # show`, определённый один раз при установке, без подтверждения, что
-    # именно ОН виден снаружи (при нескольких global IPv6 — privacy-адреса
-    # RFC4941, доп. интерфейсы от WARP/AWG — порядок в выводе `ip addr` не
-    # гарантирован). IPv4-ссылка рядом уже строится через get_server_ip("4")
-    # с внешней проверкой (curl api4.ipify.org) — используем ту же логику
-    # для IPv6, вместо непроверенного локального адреса.
-    ipv6_ext = get_server_ip("6") if IS_IPV6_AVAILABLE else ""
-    if ipv6_ext:
+    if IS_IPV6_AVAILABLE and IPV6_PREFLIGHT:
         link6 = _gen_vless_link(
-            f"[{ipv6_ext}]", PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
+            f"[{IPV6_PREFLIGHT}]", PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
             proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
             port=SERVER_PORT,
         )
@@ -10185,13 +10116,9 @@ def download_geo_files() -> bool:
     success_count = 0
     failed_files: list[str] = []
 
-    # BUGFIX: geosite.dat у runetfreedom вырос до ~70 МБ — старых 180с не
-    # хватает на медленных/дросселируемых каналах до GitHub, а jsDelivr
-    # вообще отказывает (жёсткий лимит CDN — 20 МБ на файл, файл больше —
-    # 403). geoip.dat остаётся маленьким, ему хватает старого таймаута.
-    for urls, fname, min_size, timeout_s in (
-        (GEOSITE_URLS, "geosite.dat", 3_000_000, 600),
-        (GEOIP_URLS,   "geoip.dat",   10_000,    120),
+    for urls, fname, min_size in (
+        (GEOSITE_URLS, "geosite.dat", 3_000_000),
+        (GEOIP_URLS,   "geoip.dat",   10_000),
     ):
         info(f"  Загрузка {fname}...")
         tmp_path = Path(f"/tmp/{fname}")
@@ -10212,19 +10139,9 @@ def download_geo_files() -> bool:
                     tmp_path.unlink(missing_ok=True)
                     r = _run([
                         "curl", "-fL", "--connect-timeout", "15",
-                        "-m", str(timeout_s), "--retry", "0",
+                        "-m", "180", "--retry", "0",
                         "-o", str(tmp_path), url,
                     ], capture=True, check=False, quiet=True)
-                    # BUGFIX: при обрыве по таймауту (код 28) докачиваем
-                    # (-C -) по тому же URL вместо потери уже скачанных
-                    # десятков МБ и перехода на next-зеркало.
-                    if r.returncode == 28 and tmp_path.exists() and tmp_path.stat().st_size > 0:
-                        warn(f"  {url.split('/')[2]}: таймаут, докачиваю ({tmp_path.stat().st_size // 1024} КБ уже есть)...")
-                        r = _run([
-                            "curl", "-fL", "-C", "-", "--connect-timeout", "15",
-                            "-m", str(timeout_s), "--retry", "0",
-                            "-o", str(tmp_path), url,
-                        ], capture=True, check=False, quiet=True)
                     if r.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > min_size:
                         downloaded = True
                         info(f"  Загружено с: {url.split('/')[2]}")
@@ -30175,14 +30092,6 @@ def switch_mode_ab() -> None:
     global XHTTP_TCP_NO_DELAY, XHTTP_ENABLE_SESSION_RESUMPTION
     global CHAIN_EXIT_HOST, CHAIN_EXIT_PORT, CHAIN_EXIT_UUID
     global CHAIN_EXIT_PUBKEY, CHAIN_EXIT_SHORTID, CHAIN_EXIT_SNI, CHAIN_EXIT_FP
-    # BUGFIX: без этих трёх глобалов switch_mode_ab() не синхронизировал
-    # AWG/H2-транспорт и reality_dest с state.json — generate_xray_config*()
-    # ниже мог собрать конфиг по значениям, оставшимся в памяти процесса от
-    # предыдущей установки/переключения в этой же сессии (например,
-    # AWG_EXIT_ENABLED=True из старого теста Режима B, при пустом
-    # PARAM_REALITY_DEST → serverNames=[""] и dest=":443" в Режиме A —
-    # REALITY-хендшейк ломается для ЛЮБОГО хоста в клиентской ссылке).
-    global AWG_EXIT_ENABLED, H2_EXIT_ENABLED, PARAM_REALITY_DEST
 
     if not STATE_FILE.exists():
         warn("state.json не найден — сначала выполните установку.")
@@ -30278,12 +30187,6 @@ def switch_mode_ab() -> None:
     IPV6_PREFLIGHT  = state.get("ipv6",          False)
     CHAIN_NODES     = _nodes_from_state(state)
     CHAIN_BALANCER_STRATEGY = state.get("chain_balancer_strategy", "roundRobin")
-    # BUGFIX: раньше эти три поля не читались из state.json в этой функции —
-    # generate_xray_config()/generate_xray_config_chain_entry_multi() ниже
-    # использовали протухшие значения из памяти процесса.
-    AWG_EXIT_ENABLED   = state.get("awg_exit_enabled", False)
-    H2_EXIT_ENABLED    = state.get("h2_exit_enabled", False)
-    PARAM_REALITY_DEST = state.get("reality_dest", "")
     if CHAIN_NODES:
         n = CHAIN_NODES[0]
         CHAIN_EXIT_HOST    = n.get("host",    "")
