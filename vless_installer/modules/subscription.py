@@ -563,6 +563,53 @@ _NGINX_SNIPPET_TEXT = (
     "}\n"
 )
 
+def _fw_open_tcp(port: int) -> str:
+    """Открывает TCP-порт подписки в файрволе. ufw, если активен (как
+    делает основной инсталлятор в _core.py) — иначе raw iptables fallback.
+    Возвращает использованный инструмент ('ufw' / 'iptables' / '' при неудаче)."""
+    if shutil.which("ufw"):
+        r = subprocess.run(["ufw", "status"], capture_output=True, text=True, check=False)
+        if "Status: active" in (r.stdout or ""):
+            already = re.search(rf'^{port}/tcp\b.*ALLOW', r.stdout or "", re.MULTILINE)
+            if not already:
+                subprocess.run(
+                    ["ufw", "allow", f"{port}/tcp", "comment", "vless-subscription"],
+                    check=False,
+                )
+            return "ufw"
+    if shutil.which("iptables"):
+        chk = subprocess.run(
+            ["iptables", "-C", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
+            capture_output=True, check=False,
+        )
+        if chk.returncode != 0:
+            subprocess.run(
+                ["iptables", "-I", "INPUT", "1", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
+                check=False,
+            )
+        return "iptables"
+    return ""
+
+
+def _fw_close_tcp(port: int) -> None:
+    """Закрывает TCP-порт, ранее открытый _fw_open_tcp (при смене порта
+    подписки старое правило иначе остаётся висеть в файрволе)."""
+    if shutil.which("ufw"):
+        subprocess.run(["ufw", "delete", "allow", f"{port}/tcp"], check=False)
+    if shutil.which("iptables"):
+        for _ in range(5):
+            chk = subprocess.run(
+                ["iptables", "-C", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
+                capture_output=True, check=False,
+            )
+            if chk.returncode != 0:
+                break
+            subprocess.run(
+                ["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
+                check=False,
+            )
+
+
 def _install_service(port: int) -> bool:
     try:
         python_bin = sys.executable
@@ -614,7 +661,8 @@ def do_subscription_menu() -> None:
             return
 
         if ch == "1":
-            port = cfg.get("listen_port", DEFAULT_PORT)
+            old_port = cfg.get("listen_port", DEFAULT_PORT)
+            port = old_port
             try:
                 port = int(input(f"Порт [{port}]: ").strip() or port)
             except ValueError:
@@ -623,8 +671,15 @@ def do_subscription_menu() -> None:
             cfg["listen_port"] = port
             _ensure_pepper(cfg)
             _save_sub_conf(cfg)
+            if old_port != port:
+                _fw_close_tcp(old_port)
+            fw_tool = _fw_open_tcp(port)
             if _install_service(port):
                 _ok(f"Сервис {SERVICE_NAME} запущен на :{port}")
+                if fw_tool:
+                    _ok(f"{fw_tool}: TCP {port} открыт")
+                else:
+                    _warn(f"Не найден ufw/iptables — откройте {port}/tcp вручную.")
                 _info(f"nginx (опционально): подключите {_NGINX_SNIP}")
             input(f"\n{BOLD}Enter…{NC}")
 
@@ -674,7 +729,8 @@ def do_subscription_menu() -> None:
             cfg["enabled"] = False
             _save_sub_conf(cfg)
             subprocess.run(["systemctl", "disable", "--now", SERVICE_NAME], check=False)
-            _ok("Сервис остановлен.")
+            _fw_close_tcp(cfg.get("listen_port", DEFAULT_PORT))
+            _ok("Сервис остановлен, порт закрыт.")
             input(f"\n{BOLD}Enter…{NC}")
 
         elif ch == "5":
