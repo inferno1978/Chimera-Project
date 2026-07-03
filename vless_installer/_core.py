@@ -3679,6 +3679,30 @@ def prompt_awg_exit_mode() -> None:
 # =============================================================================
 #  ГЕНЕРАЦИЯ КОНФИГА XRAY ДЛЯ РЕЖИМА B — российский (entry) VPS
 # =============================================================================
+def _assert_reality_dest_sane() -> None:
+    """
+    BUGFIX: защита от невалидного realitySettings.serverNames/dest.
+
+    Если AWG_EXIT_ENABLED=True, а PARAM_REALITY_DEST пуст (рассинхрон между
+    транспортным флагом и параметром camouflage-домена — например, после
+    ручного переключения режима без полного сброса состояния), генераторы
+    конфига ниже соберут:
+        "dest": ":443", "serverNames": [""]
+    Это не ловится `xray run -test` как синтаксическая ошибка, но ломает
+    REALITY-хендшейк для абсолютно любого клиента (домен/IPv4/IPv6 — не важно,
+    хост один и тот же битый inbound). Лучше упасть здесь с понятной ошибкой,
+    чем молча выкатить нерабочий config.json.
+    """
+    if AWG_EXIT_ENABLED and not PARAM_REALITY_DEST:
+        die(
+            "AWG_EXIT_ENABLED=True, но PARAM_REALITY_DEST пуст — "
+            "конфиг получился бы с serverNames=[\"\"] и dest=':443' "
+            "(REALITY не будет работать ни для одного клиента). "
+            "Запустите prompt_awg_exit_mode() заново или проверьте "
+            "reality_dest в state.json."
+        )
+
+
 def generate_xray_config_chain_entry() -> None:
     """
     Режим B, Entry node (российский VPS):
@@ -3686,6 +3710,7 @@ def generate_xray_config_chain_entry() -> None:
     • Исходящий — VLESS+REALITY → зарубежный VPS (exit node)
     """
     global DNSCRYPT_LISTEN_PORT
+    _assert_reality_dest_sane()
     info("Режим B: создание конфига Entry Node (российский VPS)...")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # ПАТЧ: гарантируем создание группы/пользователя xray ДО chown.
@@ -4701,6 +4726,7 @@ def generate_xray_config_chain_entry_multi() -> None:
     Если нода одна — конфиг идентичен оригинальному (без balancer).
     """
     global DNSCRYPT_LISTEN_PORT
+    _assert_reality_dest_sane()
     nodes = CHAIN_NODES if CHAIN_NODES else []
     if not nodes:
         # Fallback на legacy-переменные
@@ -7152,6 +7178,7 @@ def _detect_xhttp_mode_support() -> None:
 
 def generate_xray_config() -> None:
     global DNSCRYPT_LISTEN_PORT
+    _assert_reality_dest_sane()
     info("Создание конфигурации Xray...")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # ПАТЧ: гарантируем создание группы/пользователя xray ДО chown.
@@ -9835,9 +9862,17 @@ def generate_client_links() -> None:
         print()
         _show_qr(link4, "IPv4", "/root/vless_qr_ipv4.png")
 
-    if IS_IPV6_AVAILABLE and IPV6_PREFLIGHT:
+    # BUGFIX: IPV6_PREFLIGHT — это первый global-scope адрес из `ip -6 addr
+    # show`, определённый один раз при установке, без подтверждения, что
+    # именно ОН виден снаружи (при нескольких global IPv6 — privacy-адреса
+    # RFC4941, доп. интерфейсы от WARP/AWG — порядок в выводе `ip addr` не
+    # гарантирован). IPv4-ссылка рядом уже строится через get_server_ip("4")
+    # с внешней проверкой (curl api4.ipify.org) — используем ту же логику
+    # для IPv6, вместо непроверенного локального адреса.
+    ipv6_ext = get_server_ip("6") if IS_IPV6_AVAILABLE else ""
+    if ipv6_ext:
         link6 = _gen_vless_link(
-            f"[{IPV6_PREFLIGHT}]", PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
+            f"[{ipv6_ext}]", PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
             proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
             port=SERVER_PORT,
         )
@@ -30092,6 +30127,14 @@ def switch_mode_ab() -> None:
     global XHTTP_TCP_NO_DELAY, XHTTP_ENABLE_SESSION_RESUMPTION
     global CHAIN_EXIT_HOST, CHAIN_EXIT_PORT, CHAIN_EXIT_UUID
     global CHAIN_EXIT_PUBKEY, CHAIN_EXIT_SHORTID, CHAIN_EXIT_SNI, CHAIN_EXIT_FP
+    # BUGFIX: без этих трёх глобалов switch_mode_ab() не синхронизировал
+    # AWG/H2-транспорт и reality_dest с state.json — generate_xray_config*()
+    # ниже мог собрать конфиг по значениям, оставшимся в памяти процесса от
+    # предыдущей установки/переключения в этой же сессии (например,
+    # AWG_EXIT_ENABLED=True из старого теста Режима B, при пустом
+    # PARAM_REALITY_DEST → serverNames=[""] и dest=":443" в Режиме A —
+    # REALITY-хендшейк ломается для ЛЮБОГО хоста в клиентской ссылке).
+    global AWG_EXIT_ENABLED, H2_EXIT_ENABLED, PARAM_REALITY_DEST
 
     if not STATE_FILE.exists():
         warn("state.json не найден — сначала выполните установку.")
@@ -30187,6 +30230,12 @@ def switch_mode_ab() -> None:
     IPV6_PREFLIGHT  = state.get("ipv6",          False)
     CHAIN_NODES     = _nodes_from_state(state)
     CHAIN_BALANCER_STRATEGY = state.get("chain_balancer_strategy", "roundRobin")
+    # BUGFIX: раньше эти три поля не читались из state.json в этой функции —
+    # generate_xray_config()/generate_xray_config_chain_entry_multi() ниже
+    # использовали протухшие значения из памяти процесса.
+    AWG_EXIT_ENABLED   = state.get("awg_exit_enabled", False)
+    H2_EXIT_ENABLED    = state.get("h2_exit_enabled", False)
+    PARAM_REALITY_DEST = state.get("reality_dest", "")
     if CHAIN_NODES:
         n = CHAIN_NODES[0]
         CHAIN_EXIT_HOST    = n.get("host",    "")
