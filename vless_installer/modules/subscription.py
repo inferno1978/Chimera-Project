@@ -633,24 +633,33 @@ def do_subscription_menu() -> None:
             domain = state.get("domain", "")
             port = cfg.get("listen_port", DEFAULT_PORT)
             os.system("clear")
-            _box_top("🔗  ССЫЛКИ ПОДПИСКИ")
-            _box_row()
-            any_user = False
+
+            rows = []
             for u in _load_all_users():
                 if u.get("disabled") or not u.get("uuid"):
                     continue
-                any_user = True
                 token = _token_for(u["uuid"], pepper)
                 url = f"https://{domain}:{port}/sub/{token}"
                 label = u.get("email", u.get("name", "?"))
+                rows.append((label, url))
+
+            _box_top("🔗  ССЫЛКИ ПОДПИСКИ")
+            _box_row()
+            if not rows:
+                _box_warn_line("Нет активных пользователей.")
+            for label, url in rows:
                 _box_row(f"  {WHITE}{label}{NC}")
                 _box_row(f"  {GREEN}{url}{NC}")
                 _box_row()
-                _print_qr(url, label)
-            if not any_user:
-                _box_warn_line("Нет активных пользователей.")
             _box_back()
             _box_bottom()
+
+            # QR — вне рамки, qrencode рисует свою фиксированную ASCII-сетку,
+            # внутри box она ломает выравнивание.
+            for label, url in rows:
+                print()
+                _print_qr(url, label)
+
             input(f"\n{BOLD}Enter…{NC}")
 
         elif ch == "3":
