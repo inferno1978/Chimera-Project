@@ -1067,7 +1067,9 @@ def _create_password() -> None:
     _box_row()
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Ссылка qwdtt:// для клиента:{NC}")
-    _box_row()
+    if not vk_hash:
+        _box_warn("Замените ВК_ХЕШ на хеш из ссылки vk.com/call/join/ХЕШ")
+    _box_bot()
     vk_part = vk_hash if vk_hash else "ВК_ХЕШ"
     link = (
         f"qwdtt://config?name=qWDTT-{server_ip}"
@@ -1076,11 +1078,9 @@ def _create_password() -> None:
         f"&workers=16&port={_DEFAULT_TUN_PORT}"
         f"&pass={new_pass}"
     )
+    print()
     _box_link(link)
-    _box_row()
-    if not vk_hash:
-        _box_warn("Замените ВК_ХЕШ на хеш из ссылки vk.com/call/join/ХЕШ")
-    _box_bot()
+    print()
     link_path = _save_link_file(link, f"link_{new_pass[:8]}.txt")
     _print_link_file_path(link_path)
     _pause()
@@ -1122,11 +1122,12 @@ def _show_password_link(passwords: dict, server_ip: str, dtls_port: int) -> None
     print()
     _box_top("🔗  ССЫЛКА ДЛЯ КЛИЕНТА")
     _box_row()
-    _box_link(link)
-    _box_row()
     if vk_hash == "ВК_ХЕШ":
         _box_warn("Хеш звонка не задан — замените ВК_ХЕШ вручную.")
     _box_bot()
+    print()
+    _box_link(link)
+    print()
     link_path = _save_link_file(link, f"link_{pw[:8]}.txt")
     _print_link_file_path(link_path)
     _pause()
@@ -1537,7 +1538,7 @@ def do_wdtt_menu() -> None:
             _box_top("🔗  ССЫЛКА  •  ГЛАВНЫЙ ПАРОЛЬ")
             _box_row()
             _box_warn("Замените ВК_ХЕШ на хеш из vk.com/call/join/ХЕШ")
-            _box_row()
+            _box_bot()
             link = (
                 f"qwdtt://config?name=qWDTT-{server_ip}"
                 f"&peer={server_ip}:{dtls_port}"
@@ -1545,9 +1546,9 @@ def do_wdtt_menu() -> None:
                 f"&workers=16&port={_DEFAULT_TUN_PORT}"
                 f"&pass={main_pass}"
             )
+            print()
             _box_link(link)
-            _box_row()
-            _box_bot()
+            print()
             _pause()
 
         elif ch == "4" and installed:
