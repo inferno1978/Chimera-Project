@@ -149,6 +149,7 @@ _NAIVE_STATE  = Path("/var/lib/xray-installer/naiveproxy.json")
 _HYBRID_STATE = Path("/var/lib/xray-installer/hybrid_mieru_state.json")
 _MITA_HYBRID_CFG = Path("/etc/mita/hybrid_server_config.json")
 _SUB_CONF    = Path("/var/lib/xray-installer/subscription.json")
+_TRAFFIC_LIMITS_FILE = Path("/var/lib/xray-installer/traffic_limits.json")
 _UNIT_PATH   = Path("/etc/systemd/system/vless-subscription.service")
 _NGINX_SNIP  = Path("/etc/nginx/snippets/vless-subscription.conf")
 
@@ -412,6 +413,48 @@ def _find_user_by_token(token: str, pepper: str) -> Optional[dict]:
             return u
     return None
 
+# ══════════════════════════════════════════════════════════════════════════
+# Subscription-Userinfo — остаток трафика в клиенте (v2rayNG/Clash/Happ/
+# NekoBox читают этот заголовок и показывают юзеру расход/лимит прямо в
+# приложении, без захода в свою учётку).
+# ══════════════════════════════════════════════════════════════════════════
+
+def _load_traffic_limits() -> dict:
+    if not _TRAFFIC_LIMITS_FILE.exists():
+        return {}
+    try:
+        return json.loads(_TRAFFIC_LIMITS_FILE.read_text())
+    except Exception:
+        return {}
+
+def _build_userinfo_header(user: dict) -> Optional[str]:
+    """Источник данных — traffic_limits.json, который уже ведёт _core.py
+    (do_manage_traffic_limits / _check_traffic_limits_once, cron раз в 15
+    мин). Здесь НИЧЕГО заново не запрашивается у Xray Stats API — только
+    читается уже посчитанное значение, чтобы не гонять `xray api
+    statsquery` на каждый HTTP-запрос подписки (клиенты дёргают её сами
+    каждые Profile-Update-Interval часов, но открытых клиентов может быть
+    много одновременно).
+
+    traffic_limits.json хранит только суммарный used_bytes (up+down вместе,
+    см. _query_user_traffic_bytes в _core.py) — раздельного up/down там нет,
+    поэтому весь объём указывается как download, upload=0. Для того, как
+    v2rayNG/Clash считают процент использования (upload+download к total),
+    этого достаточно.
+
+    Если лимит для пользователя не задан — возвращает None, а не
+    total=0: часть клиентов трактует total=0 как "лимит исчерпан", это был
+    бы неверный сигнал для пользователя без лимита вообще."""
+    email = user.get("email", "")
+    if not email:
+        return None
+    lim = _load_traffic_limits().get(email)
+    if not lim or not lim.get("limit_gb"):
+        return None
+    used_bytes  = int(lim.get("used_bytes", 0))
+    total_bytes = int(lim.get("limit_gb", 0)) * 1024 ** 3
+    return f"upload=0; download={used_bytes}; total={total_bytes}"
+
 def build_subscription_body(user: dict) -> bytes:
     state = _load_state() or {}
     ipv4  = _get_server_ip("4")
@@ -487,6 +530,11 @@ class _SubHandler(BaseHTTPRequestHandler):
         # т.к. тело и так генерируется на лету без кеша.
         self.send_header("Profile-Update-Interval", "6")
         self.send_header("Profile-Title", "Chimera")
+        userinfo = _build_userinfo_header(user)
+        if userinfo:
+            # v2rayNG/Clash/Happ/NekoBox читают это и показывают остаток
+            # трафика прямо в приложении — см. _build_userinfo_header().
+            self.send_header("Subscription-Userinfo", userinfo)
         self.end_headers()
         self.wfile.write(body)
 
