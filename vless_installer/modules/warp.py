@@ -81,6 +81,16 @@ from vless_installer.modules.box_renderer import (
     RED, GREEN, BLUE, CYAN, YELLOW, NC,
 )
 
+# Курируемые auto-update списки доменов (itdoginfo/allow-domains) — модуль
+# полностью автономен (собственный кэш, собственный cron), warp.py только
+# подмешивает его домены в SELECTIVE-режим через get_enabled_curated_domains().
+# См. vless_installer/modules/warp_curated_lists.py — там же вся логика
+# скачивания/кэширования и подменю управления (do_manage_curated_lists).
+from vless_installer.modules.warp_curated_lists import (
+    get_enabled_curated_domains,
+    do_manage_curated_lists,
+)
+
 
 # =============================================================================
 #  ОТЛОЖЕННАЯ ПРИВЯЗКА К ЯДРУ (_core.py) — см. архитектурное замечание выше
@@ -844,11 +854,23 @@ def _warp_apply_selective_mode(ips: list[str], domains: list[str]) -> None:
     _clear_active_routes()
     for ip in ips:
         _add_route(ip if "/" in ip else f"{ip}/32")
-    for cidr in _resolve_domains(domains):
+
+    # Курируемые списки (RU/GeoBlock/Google AI) подмешиваются к собственным
+    # доменам пользователя — см. warp_curated_lists.py. Если ни один список
+    # не включён, get_enabled_curated_domains() вернёт [] и поведение не
+    # отличается от того, что было до этой правки.
+    curated = get_enabled_curated_domains()
+    all_domains = sorted(set(domains) | set(curated))
+    for cidr in _resolve_domains(all_domains):
         _add_route(cidr)
+
     _manage_cron(True)
     _warp_state_save_autonomously()
-    success(f"Режим SELECTIVE активирован (IP: {len(ips)}, доменов: {len(domains)}).")
+    success(
+        f"Режим SELECTIVE активирован (IP: {len(ips)}, доменов: {len(domains)} свои"
+        + (f" + {len(curated)} курируемых" if curated else "")
+        + ")."
+    )
 
 
 def _warp_apply_runet_mode() -> None:
@@ -1078,8 +1100,14 @@ def _standalone_sync() -> None:
                 custom_domains = state.get("warp_custom_domains", [])
                 old_routes     = state.get("warp_active_routes", [])
 
+                # Курируемые списки (RU/GeoBlock/Google AI, warp_curated_lists.py)
+                # ререзолвятся здесь наравне с собственными доменами пользователя —
+                # у них свой суточный cron на ОБНОВЛЕНИЕ списка доменов, а этот,
+                # 5-минутный, как и раньше просто резолвит текущий набор доменов в IP.
+                all_domains = list(custom_domains) + get_enabled_curated_domains()
+
                 desired = {ip if "/" in ip else f"{ip}/32" for ip in custom_ips}
-                desired |= set(_resolve_domains(custom_domains))
+                desired |= set(_resolve_domains(all_domains))
                 desired = sorted(desired)
 
                 if desired == sorted(old_routes):
@@ -1991,6 +2019,9 @@ def do_manage_warp() -> None:
             _box_row(f"  {GREEN}4{NC}  Статус, диагностика и проверка SSH")
             _box_row(f"  {GREEN}5{NC}  Отключить и удалить WARP")
             _box_row(f"  {GREEN}6{NC}  Изменить Endpoint WARP (узел подключения)")
+            _box_row(f"  {GREEN}7{NC}  Курируемые списки доменов (RU/GeoBlock/Google AI)")
+            if mode != MODE_SELECTIVE:
+                _box_row(f"      {YELLOW}⚠ применяются только в режиме SELECTIVE{NC}")
         _box_row()
         _box_row(f"  {RED}0{NC}  ← Назад")
         _box_bottom()
@@ -2047,6 +2078,17 @@ def do_manage_warp() -> None:
 
         elif ch == "6" and installed:
             _menu_endpoint_manager()
+
+        elif ch == "7" and installed:
+            do_manage_curated_lists()
+            # Если сейчас активен SELECTIVE — сразу переприменяем маршруты,
+            # чтобы включение/выключение списка не ждало ближайшего тика
+            # 5-минутного cron.
+            if _state_get("WARP_MODE", "") == MODE_SELECTIVE and active:
+                _warp_apply_selective_mode(
+                    _state_get("WARP_CUSTOM_IPS", []),
+                    _state_get("WARP_CUSTOM_DOMAINS", []),
+                )
 
         else:
             warn("Неверный выбор.")
