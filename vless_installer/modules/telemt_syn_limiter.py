@@ -33,11 +33,13 @@ conntrack-таблиц и нет смысла тащить новую завис
         --hashlimit-upto <RATE>/sec --hashlimit-burst <BURST> \
         --hashlimit-htable-expire <EXPIRE_MS> \
         -j ACCEPT
-    iptables -A INPUT -p tcp --dport <PORT> --syn -j DROP
+    iptables -A INPUT -p tcp --dport <PORT> --syn -j REJECT --reject-with tcp-reset
 
 Первое правило пропускает SYN в пределах лимита на src-IP (через скрытую
 hash-таблицу ядра), второе — отбрасывает всё, что превысило лимит для
-данного IP. Не-SYN пакеты (уже установленные соединения) правило не трогает.
+данного IP, сразу с TCP RST (а не тихим DROP), чтобы клиент не ждал таймаут
+и реконнектился мгновенно. Не-SYN пакеты (уже установленные соединения)
+правило не трогает.
 
 Пресеты (по аналогии с mtpr.sh, адаптированы под iptables hashlimit):
   • жёсткий   — 1/sec  burst 1   (рекомендуется по умолчанию)
@@ -341,22 +343,25 @@ def _apply_rules(cfg: SynLimiterConfig) -> tuple[bool, str]:
         "-m", "comment", "--comment", _COMMENT_TAG,
         "-j", "ACCEPT",
     ]
-    drop_cmd = [
+    # REJECT+tcp-reset вместо DROP: DROP молча топит пакет → клиент ждёт
+    # таймаут (3-5 сек) и только потом ретраит с бэкоффом. RST даёт клиенту
+    # мгновенный сигнал "соединение разорвано" → реконнект без ожидания.
+    reject_cmd = [
         "iptables", "-I", "INPUT", "2",
         "-p", "tcp", "--dport", str(cfg.port), "--syn",
         "-m", "comment", "--comment", _COMMENT_TAG,
-        "-j", "DROP",
+        "-j", "REJECT", "--reject-with", "tcp-reset",
     ]
 
     r1 = _run(accept_cmd, capture=True)
     if r1.returncode != 0:
         return False, f"Ошибка применения ACCEPT-правила: {r1.stderr.strip()[:120]}"
 
-    r2 = _run(drop_cmd, capture=True)
+    r2 = _run(reject_cmd, capture=True)
     if r2.returncode != 0:
         # откатываем ACCEPT-правило, чтобы не оставить половинчатое состояние
         _remove_rules()
-        return False, f"Ошибка применения DROP-правила: {r2.stderr.strip()[:120]}"
+        return False, f"Ошибка применения REJECT-правила: {r2.stderr.strip()[:120]}"
 
     return True, "Правила hashlimit применены."
 
@@ -382,10 +387,10 @@ def _persist_rules() -> None:
             pass
 
 def _get_drop_counter(port: int) -> tuple[int, int]:
-    """Возвращает (packets, bytes) для DROP-правила нашего тега."""
+    """Возвращает (packets, bytes) для REJECT-правила нашего тега (счётчик 'отброшенных' SYN)."""
     r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x"], capture=True)
     for line in (r.stdout or "").splitlines():
-        if _COMMENT_TAG in line and "DROP" in line:
+        if _COMMENT_TAG in line and "REJECT" in line:
             parts = line.split()
             if len(parts) >= 2 and parts[0].isdigit():
                 return int(parts[0]), int(parts[1])
