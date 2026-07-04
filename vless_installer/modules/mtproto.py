@@ -1291,6 +1291,33 @@ def _full_uninstall(silent: bool = False) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВЫБОР TLS-ДОМЕНА
 # ══════════════════════════════════════════════════════════════════════════════
+# Отметка доменов по поддержке постквантового гибридного key exchange (X25519+ML-KEM):
+# без неё при insecure+pinSHA256 возможна блокировка iOS-клиентов при хендшейке.
+# Списки — по данным стороннего SNI-чекера (@Sni_checker_bot, проект MEKO
+# MTPROTO_FIX), нами напрямую не перепроверялись — при сомнении сверьте сами.
+_PQ_RISKY = {
+    "vk.com", "github.com", "habr.com", "yandex.ru", "amazon.com",
+    "microsoft.com", "amazonaws.com", "mail.ru", "dzen.ru", "linkedin.com",
+    "live.com", "office.com", "azure.com", "bing.com", "fastly.net",
+    "netflix.com", "sharepoint.com", "skype.com", "gandi.net",
+    "cloud.microsoft", "yahoo.com", "msn.com", "tiktok.com", "roblox.com",
+    "spotify.com", "adobe.com", "ntp.org", "myfritz.net", "qq.com",
+    "baidu.com", "nginx.org", "windows.com", "yandex.net", "tiktokv.com",
+    "mozilla.org", "nic.ru", "opera.com", "samsung.com", "sentry.io",
+}
+_PQ_CONFIRMED = {
+    "cloudflare.com", "rutube.ru", "my.aeza.ru", "wb.ru", "ozon.ru",
+    "youtube.com", "apple.com", "openai.com", "anthropic.com", "meta.com",
+    "facebook.com", "x.com", "wikipedia.org", "stackoverflow.com",
+    "rust-lang.org", "crates.io", "docs.rs", "instagram.com", "fbcdn.net",
+    "twitter.com", "googletagmanager.com", "whatsapp.net", "doubleclick.net",
+    "googleusercontent.com", "appsflyersdk.com", "wordpress.org",
+    "digicert.com", "youtu.be", "pinterest.com", "goo.gl", "whatsapp.com",
+    "icloud.com", "googlesyndication.com", "cloudflare.net",
+    "googledomains.com", "wa.me", "chatgpt.com", "vimeo.com", "zoom.us",
+    "workers.dev", "cloudflare-dns.com", "wordpress.com", "reddit.com",
+}
+
 _DOMAINS: dict = {
     "1":  ("🔍 Поисковики и почта",
            ["yandex.ru", "ya.ru", "mail.ru", "rambler.ru", "maps.yandex.ru"]),
@@ -1342,12 +1369,24 @@ def _select_domain() -> str:
                 d = input().strip()
             except KeyboardInterrupt:
                 print(); raise _Cancelled()
+            if d in _PQ_RISKY:
+                _box_warn(f"{d}: возможен блок iOS без OpenSSL 3.5+ (по стороннему тесту).")
             return d if _validate_domain(d) else "ivi.ru"
         if cat in _DOMAINS:
             label, doms = _DOMAINS[cat]
             _banner(); _box_top(label); _box_row()
+            any_marked = False
             for i, d in enumerate(doms, 1):
-                _box_item(str(i), d)
+                if d in _PQ_RISKY:
+                    _box_item(str(i), f"{d}  {RED}⚠{NC}"); any_marked = True
+                elif d in _PQ_CONFIRMED:
+                    _box_item(str(i), f"{d}  {GREEN}✓{NC}"); any_marked = True
+                else:
+                    _box_item(str(i), d)
+            if any_marked:
+                _box_row()
+                _box_row(f"  {DIM}{RED}⚠{NC}{DIM} возможен блок iOS без OpenSSL 3.5+, "
+                         f"{GREEN}✓{NC}{DIM} подтверждено (не проверено нами){NC}")
             _box_sep(); _box_item("Q", "← Назад"); _box_bot(); print()
             p = _ask(f"{CYAN}Выбор [1-{len(doms)}]: {NC}", c=True).strip()
             if p.lower() == "q": continue
