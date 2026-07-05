@@ -10512,6 +10512,38 @@ def setup_logrotate() -> None:
     """))
     LOGROTATE_XRAY_AUX.chmod(0o644)
 
+    # --- ИСПРАВЛЕНИЕ: лог инсталлятора (log_to_file()) и логи cron-модулей
+    # (autoban/watchdog) раньше НЕ входили ни в один logrotate-конфиг, хотя
+    # меню "Ротация логов" в logrotate.py показывало их размер, создавая
+    # ложное впечатление, что они под ротацией. vless-install.log пишется
+    # непрерывно (info()/success()/warn() на каждое действие) и без ротации
+    # рос неограниченно вплоть до полного заполнения диска. Здесь — daily +
+    # maxsize как аварийный триггер (если между суточными прогонами
+    # logrotate файл распухнет раньше срока, ротация всё равно сработает).
+    LOGROTATE_XRAY_HEAVY = Path("/etc/logrotate.d/xray-heavy")
+    heavy_entries = [
+        "/var/log/vless-install.log",
+        "/var/log/xray-autoban.log",
+        "/var/log/xray-watchdog.log",
+    ]
+    heavy_block = "\n".join(heavy_entries)
+    LOGROTATE_XRAY_HEAVY.write_text(textwrap.dedent(f"""\
+        # Лог инсталлятора и cron-модулей (autoban/watchdog)
+        # Создано автоматически установщиком VLESS Ultimate Installer
+        # missingok — не все три файла обязательно существуют на любой системе
+        {heavy_block} {{
+            daily
+            rotate 14
+            compress
+            delaycompress
+            missingok
+            notifempty
+            maxsize 50M
+            create 0600 root root
+        }}
+    """))
+    LOGROTATE_XRAY_HEAVY.chmod(0o644)
+
     # Проверяем синтаксис (не фатально — logrotate сам сообщит об ошибке)
     r = _run(["logrotate", "--debug", str(LOGROTATE_XRAY)],
              check=False, quiet=True)
@@ -10519,8 +10551,13 @@ def setup_logrotate() -> None:
         warn("logrotate: проверьте конфиг вручную: /etc/logrotate.d/xray")
     else:
         success("logrotate настроен: /etc/logrotate.d/xray (daily, 14 дней, gzip)")
+    r2 = _run(["logrotate", "--debug", str(LOGROTATE_XRAY_HEAVY)],
+              check=False, quiet=True)
+    if r2.returncode != 0:
+        warn("logrotate: проверьте конфиг вручную: /etc/logrotate.d/xray-heavy")
     dim("  access.log + error.log: ежедневно, 14 архивов")
     dim("  autoupdate/geo-update:  еженедельно, 4 архива")
+    dim("  vless-install/autoban/watchdog: ежедневно, 14 архивов, maxsize 50M")
 
 
 def build_split_tunnel_routing_rules(

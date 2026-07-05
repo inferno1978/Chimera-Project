@@ -100,6 +100,7 @@ def do_manage_logrotate() -> None:
     """
     _LOGROTATE_XRAY     = Path("/etc/logrotate.d/xray")
     _LOGROTATE_XRAY_AUX = Path("/etc/logrotate.d/xray-aux")
+    _LOGROTATE_XRAY_HEAVY = Path("/etc/logrotate.d/xray-heavy")
     _LOG_DIR            = Path("/var/log/xray")
     _AUX_LOGS           = [
         Path("/var/log/xray-autoupdate.log"),
@@ -162,6 +163,11 @@ def do_manage_logrotate() -> None:
                  f"  {DIM}(частота: {freq_main or '?'}, хранить: {rot_main or '?'} архивов){NC}")
         _box_row(f"  Конфиг xray-aux:  {_config_exists(_LOGROTATE_XRAY_AUX)}"
                  f"  {DIM}(частота: {freq_aux or '?'}, хранить: {rot_aux or '?'} архивов){NC}")
+        freq_heavy = _parse_rotate_param(_LOGROTATE_XRAY_HEAVY, "daily") or \
+                     _parse_rotate_param(_LOGROTATE_XRAY_HEAVY, "weekly")
+        rot_heavy  = _parse_rotate_param(_LOGROTATE_XRAY_HEAVY, "rotate")
+        _box_row(f"  Конфиг xray-heavy:{_config_exists(_LOGROTATE_XRAY_HEAVY)}"
+                 f"  {DIM}(vless-install/autoban/watchdog, частота: {freq_heavy or '?'}, хранить: {rot_heavy or '?'} архивов){NC}")
         _box_sep()
 
         _box_item("1", "Применить/обновить конфиг logrotate (настройки по умолчанию)")
