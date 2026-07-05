@@ -184,6 +184,11 @@ def do_manage_logrotate() -> None:
 
         # ── [1] Применить дефолтный конфиг ──────────────────────────────────
         if ch == "1":
+            # Ленивый импорт: setup_logrotate() живёт в _core.py, а _core.py
+            # сам импортирует do_manage_logrotate из этого файла при старте —
+            # импорт наверху файла зациклил бы модули. Импортируем только
+            # здесь, в момент нажатия, когда _core.py уже полностью загружен.
+            from vless_installer._core import setup_logrotate
             setup_logrotate()
             input(f"{BLUE}Нажмите Enter...{NC}")
 
