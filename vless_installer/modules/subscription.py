@@ -146,6 +146,9 @@ _STATE_FILE   = Path("/var/lib/xray-installer/state.json")
 _TELEMT_TOML  = Path("/etc/telemt/telemt.toml")
 _MIERU_STATE  = Path("/var/lib/xray-installer/mieru.json")
 _NAIVE_STATE  = Path("/var/lib/xray-installer/naiveproxy.json")
+_FPTN_STATE   = Path("/var/lib/xray-installer/fptn.json")
+_FPTN_USERS_FILE = Path("/etc/fptn/users.list")
+_FPTN_CERT_FILE  = Path("/etc/fptn/server.crt")
 _HYBRID_STATE = Path("/var/lib/xray-installer/hybrid_mieru_state.json")
 _MITA_HYBRID_CFG = Path("/etc/mita/hybrid_server_config.json")
 _SUB_CONF    = Path("/var/lib/xray-installer/subscription.json")
@@ -289,7 +292,7 @@ def _candidate_names(user: dict) -> set[str]:
 
 def _identity_overrides() -> dict:
     """Ручные переопределения из subscription.json:
-    {"identity_map": {"<uuid>": {"mieru": "username", "naive": "...", "telemt": "..."}}}
+    {"identity_map": {"<uuid>": {"mieru": "username", "naive": "...", "telemt": "...", "fptn": "..."}}}
     Заполняется через do_subscription_menu → пункт 5, если автоматическое
     сопоставление по имени не сработало (например у сателлитных протоколов
     юзеры создавались вручную под другими логинами)."""
@@ -401,6 +404,64 @@ def _build_naive_uris(user: dict) -> list[str]:
         return []
 
 # ══════════════════════════════════════════════════════════════════════════
+# FPTN (самостоятельный L3 VPN, свой users.list — не Xray-inbound)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _fptn_cert_md5_fingerprint() -> str:
+    """Копия fptn._cert_md5_fingerprint() — не импортируем модуль целиком
+    (у него своя интерактивная CLI и systemctl-вызовы), только эта чистая
+    команда openssl нужна для сборки токена."""
+    if not _FPTN_CERT_FILE.exists():
+        return ""
+    r = subprocess.run(
+        ["openssl", "x509", "-noout", "-fingerprint", "-md5",
+         "-in", str(_FPTN_CERT_FILE)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    out = (r.stdout or "").strip()
+    if r.returncode != 0 or "=" not in out:
+        return ""
+    return out.split("=", 1)[1].replace(":", "").lower()
+
+def _gen_fptn_token(username: str, password: str, server_ip: str,
+                     service_name: str, port: int) -> str:
+    md5_fp = _fptn_cert_md5_fingerprint()
+    token_data = {
+        "version": 1,
+        "service_name": service_name,
+        "username": username,
+        "password": password,
+        "servers": [{
+            "name": service_name, "host": server_ip,
+            "md5_fingerprint": md5_fp, "port": port,
+        }],
+        "censored_zone_servers": [],
+    }
+    json_str = json.dumps(token_data, separators=(",", ":"))
+    b64 = base64.b64encode(json_str.encode("utf-8")).decode("utf-8").rstrip("=")
+    return f"fptn:{b64}"
+
+def _build_fptn_uris(user: dict, server_ip: str) -> list[str]:
+    if not _FPTN_STATE.exists():
+        return []
+    try:
+        st = json.loads(_FPTN_STATE.read_text())
+        if not st.get("installed"):
+            return []
+        users_by_name = {u["username"]: u for u in st.get("users", [])}
+        match = _match_by_name(user, "fptn", users_by_name.keys())
+        if not match:
+            return []
+        u = users_by_name[match]
+        port = int(st.get("port", 443))
+        service_name = st.get("service_name", "MyFptnServer")
+        host = st.get("server_ip") or server_ip
+        return [_gen_fptn_token(match, u["password"], host, service_name, port)]
+    except Exception as e:
+        _warn(f"Не удалось прочитать fptn.json: {e}")
+        return []
+
+# ══════════════════════════════════════════════════════════════════════════
 # СБОРКА ТЕЛА ПОДПИСКИ
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -471,6 +532,7 @@ def build_subscription_body(user: dict) -> bytes:
 
     links += _build_mieru_uris(user, ipv4 or state.get("domain", ""))
     links += _build_naive_uris(user)
+    links += _build_fptn_uris(user, ipv4 or state.get("domain", ""))
 
     telemt = _build_telemt_uri(user, ipv4 or state.get("domain", ""))
     if telemt:
