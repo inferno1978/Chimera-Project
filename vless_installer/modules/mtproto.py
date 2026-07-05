@@ -556,12 +556,15 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
     CONFIG_FILE.chmod(0o640)
 
-    # Записываем секцию [middle_proxy] с параметрами fallback (если передана)
+    # Записываем секцию [middle_proxy] с параметрами fallback (если передана).
+    # ВАЖНО: это состояние инсталлера, а не Telemt — пишется в отдельный
+    # файл (см. _FALLBACK_STATE_FILE в telemt_fallback.py), НЕ в telemt.toml,
+    # иначе Telemt со strict_keys ругается на неизвестный ключ при загрузке.
     if fallback_cfg is not None:
         _fb_mod = _get_fallback_module()
         if _fb_mod is not None:
             try:
-                _fb_mod.append_fallback_section(CONFIG_FILE, fallback_cfg)
+                _fb_mod.append_fallback_section(fallback_cfg)
             except Exception as _e:
                 _warn(f"Не удалось записать [middle_proxy]: {_e}")
 
@@ -569,12 +572,25 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
 def ensure_api_enabled(token: str, host: str = "127.0.0.1", port: int = 9091,
                         grant_read_to: str = "") -> tuple:
     """
-    Включает/обновляет секцию [api] в telemt.toml — единая точка правды для
-    файла конфига Telemt (используется telemt_panel.py, чтобы не плодить
-    вторую параллельную логику записи этого файла).
+    Включает/обновляет секцию [server.api] в telemt.toml — единая точка
+    правды для файла конфига Telemt (используется telemt_panel.py, чтобы не
+    плодить вторую параллельную логику записи этого файла).
 
-    Идемпотентно: если секция уже есть — просто обновляет listen/token,
-    ничего больше в файле не трогает (порядок остальных секций сохраняется).
+    ВАЖНО: реальная схема Telemt называет эту секцию именно "[server.api]"
+    (устаревший алиас — "[server.admin_api]"); ключ верхнего уровня "[api]"
+    telemt НЕ распознаёт вовсе. Раньше эта функция писала "[api]", из-за
+    чего Telemt со strict_keys молча игнорировал всю секцию как неизвестный
+    ключ ("key=api suggestion=api" в логах) и продолжал использовать
+    встроенные дефолты "[server.api]" — а они таковы: enabled=true,
+    listen="0.0.0.0:9091". Т.е. панель API включалась и торчала наружу на
+    0.0.0.0:9091 совершенно независимо от host/port, переданных сюда.
+    Явная запись "[server.api]" с host="127.0.0.1" — единственный способ
+    реально ограничить бинд localhost'ом.
+
+    Идемпотентно: если секция уже есть — просто обновляет enabled/listen/
+    auth_header, ничего больше в файле не трогает (порядок остальных
+    секций сохраняется). Заодно подчищает старую ошибочную секцию "[api]",
+    если она осталась от прежних версий инсталлера.
 
     grant_read_to — если указано системное имя группы/пользователя (обычно
     telemt-panel), файлу назначается эта группа-владелец с правом чтения
@@ -588,24 +604,35 @@ def ensure_api_enabled(token: str, host: str = "127.0.0.1", port: int = 9091,
         return False, "Telemt не установлен — нечего включать."
 
     text = CONFIG_FILE.read_text()
+
+    # Подчищаем устаревшую ошибочную секцию "[api]" (писалась версиями
+    # инсталлера до этого фикса) — telemt её никогда не читал, но оставлять
+    # мусор в конфиге ни к чему.
+    stale_pattern = re.compile(r"(?m)^\[api\]\n(?:(?!\n?\[)[^\n]*\n?)*")
+    text = stale_pattern.sub("", text)
+
     new_section = (
-        "[api]\n"
+        "[server.api]\n"
+        "enabled = true\n"
         f'listen = "{host}:{port}"\n'
         f'auth_header = "{token}"\n'
     )
 
-    if "[api]" in text:
+    if "[server.api]" in text or "[server.admin_api]" in text:
         # Заменяем существующую секцию целиком (до следующего заголовка [...]
-        # или до конца файла), не трогая ничего вокруг.
-        pattern = re.compile(r"\[api\]\n(?:(?!\n\[)[^\n]*\n?)*", re.MULTILINE)
+        # или до конца файла), не трогая ничего вокруг. Учитываем оба
+        # варианта названия секции (актуальное и устаревший алиас).
+        pattern = re.compile(
+            r"\[server\.(?:api|admin_api)\]\n(?:(?!\n?\[)[^\n]*\n?)*", re.MULTILINE
+        )
         if not pattern.search(text):
             # На случай нестандартного форматирования — не рискуем ломать файл.
-            return False, "Секция [api] найдена, но не удалось безопасно её заменить."
+            return False, "Секция [server.api] найдена, но не удалось безопасно её заменить."
         text = pattern.sub(new_section, text, count=1)
         action = "обновлена"
     else:
         sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
-        text = text + sep + new_section
+        text = text.rstrip("\n") + "\n" + sep + new_section
         action = "добавлена"
 
     CONFIG_FILE.write_text(text)
@@ -617,8 +644,8 @@ def ensure_api_enabled(token: str, host: str = "127.0.0.1", port: int = 9091,
 
     r = _run(["systemctl", "restart", SERVICE_NAME])
     if r.returncode != 0:
-        return False, f"Секция [api] {action}, но перезапуск Telemt не удался."
-    return True, f"Секция [api] {action}, Telemt перезапущен ({host}:{port})."
+        return False, f"Секция [server.api] {action}, но перезапуск Telemt не удался."
+    return True, f"Секция [server.api] {action}, Telemt перезапущен ({host}:{port})."
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2218,7 +2245,7 @@ def mtproto_menu() -> None:
                 _banner()
                 _box_top("🔀  HYBRID FALLBACK  •  MIDDLE PROXY → DIRECT")
                 _box_row()
-                _fb_now = _fb_mod.read_fallback_config(CONFIG_FILE)
+                _fb_now = _fb_mod.read_fallback_config()
                 _mp_now = _fb_mod.read_runtime_middle_proxy(CONFIG_FILE)
                 _box_kv("Текущий режим:",    f"{'Middle Proxy' if _mp_now else 'Direct'}")
                 _box_kv("fallback_to_direct:",       f"{GREEN if _fb_now.fallback_to_direct else RED}{_fb_now.fallback_to_direct}{NC}")
@@ -2242,7 +2269,7 @@ def mtproto_menu() -> None:
 
                 if fb_ch == "1":
                     new_fb_cfg = _fb_mod.me_probe_menu(CONFIG_FILE)
-                    _fb_mod.append_fallback_section(CONFIG_FILE, new_fb_cfg)
+                    _fb_mod.append_fallback_section(new_fb_cfg)
                     _ok("Параметры fallback обновлены в конфиге.")
                     _pause()
 

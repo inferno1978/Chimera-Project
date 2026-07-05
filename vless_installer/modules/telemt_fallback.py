@@ -61,6 +61,18 @@ _SERVICE_NAME = "telemt"
 _CONFIG_FILE  = Path("/etc/telemt/telemt.toml")
 _LOG_FILE     = Path("/var/log/telemt_install.log")
 
+# Параметры FallbackConfig (fallback_to_direct, fallback_after_attempts, ...)
+# — это состояние ТОЛЬКО инсталлера/Python-оркестратора, а не ключи, которые
+# понимает сам Telemt (Rust-бинарник). Раньше append_fallback_section()
+# писала их прямо в telemt.toml как секцию "[middle_proxy]" — реальная схема
+# Telemt такой секции не знает вовсе (есть только плоский булев ключ
+# "use_middle_proxy" в [general]), поэтому Telemt со strict_keys заваливал
+# лог предупреждениями "Unknown config key ignored ... key=middle_proxy
+# suggestion=use_middle_proxy" при каждой загрузке конфига. Храним это
+# состояние в отдельном файле рядом с telemt.toml, который Telemt никогда
+# не читает (в ExecStart передаётся только telemt.toml).
+_FALLBACK_STATE_FILE = Path("/etc/telemt/fallback.toml")
+
 # ── Цвета (self-contained, не импортируем из mtproto) ────────────────────────
 def _colors() -> dict:
     if sys.stdout.isatty():
@@ -250,9 +262,11 @@ class FallbackConfig:
 #  ЧТЕНИЕ КОНФИГА
 # ══════════════════════════════════════════════════════════════════════════════
 
-def read_fallback_config(config_file: Path = _CONFIG_FILE) -> FallbackConfig:
+def read_fallback_config(config_file: Path = _FALLBACK_STATE_FILE) -> FallbackConfig:
     """
-    Читает параметры секции [middle_proxy] из telemt.toml.
+    Читает параметры секции [middle_proxy] из отдельного файла состояния
+    инсталлера (_FALLBACK_STATE_FILE), НЕ из telemt.toml — see комментарий
+    у _FALLBACK_STATE_FILE выше.
     Если секция отсутствует или файл не найден — возвращает дефолты.
     Полностью безопасна: никогда не бросает исключений.
     """
@@ -314,18 +328,24 @@ def read_runtime_middle_proxy(config_file: Path = _CONFIG_FILE) -> Optional[bool
 # ══════════════════════════════════════════════════════════════════════════════
 
 def append_fallback_section(
-    config_file: Path,
     fb: FallbackConfig,
+    config_file: Path = _FALLBACK_STATE_FILE,
 ) -> None:
     """
-    Добавляет или обновляет секцию [middle_proxy] в telemt.toml.
+    Добавляет или обновляет секцию [middle_proxy] в отдельном файле
+    состояния инсталлера (_FALLBACK_STATE_FILE), НЕ в telemt.toml — see
+    комментарий у _FALLBACK_STATE_FILE выше. Telemt эту секцию никогда не
+    читал, а раньше запись прямо в telemt.toml приводила к спаму
+    предупреждений "Unknown config key ignored ... key=middle_proxy" в
+    логах Telemt при каждой загрузке/hot-reload конфига.
 
     Если секция уже есть — заменяет её целиком.
-    Если нет — добавляет в конец файла.
-    Не меняет остальные части конфига.
+    Если нет — добавляет в конец файла (файл создаётся, если его ещё нет).
+    Не меняет остальные части файла.
     """
     if not config_file.exists():
-        return
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        config_file.write_text("", encoding="utf-8")
 
     text = config_file.read_text(encoding="utf-8", errors="replace")
 
@@ -995,7 +1015,7 @@ def run_post_install_fallback_check(
       None   — fallback не нужен (ME доступен или fallback отключён)
       str    — сообщение об ошибке/fallback для отображения в UI
     """
-    fb_config = read_fallback_config(config_file)
+    fb_config = read_fallback_config()
     want_middle = read_runtime_middle_proxy(config_file)
 
     if not want_middle:
@@ -1036,7 +1056,7 @@ def me_probe_menu(config_file: Path = _CONFIG_FILE) -> FallbackConfig:
 
     Текущие настройки читаются из существующего конфига (если есть).
     """
-    current = read_fallback_config(config_file)
+    current = read_fallback_config()
 
     _BOX_W = 66
     def _plain(s: str) -> str:
@@ -1170,7 +1190,7 @@ def fallback_status_line(config_file: Path = _CONFIG_FILE) -> str:
     Краткая строка статуса для отображения в _box_kv в меню Telemt.
     Читает конфиг и возвращает цветную строку.
     """
-    fb  = read_fallback_config(config_file)
+    fb  = read_fallback_config()
     cur = read_runtime_middle_proxy(config_file)
 
     if not fb.fallback_to_direct:
@@ -1258,12 +1278,12 @@ port = 8443
         tmp_path = Path(f.name)
     try:
         fb = FallbackConfig(fallback_to_direct=True, fallback_after_attempts=5)
-        append_fallback_section(tmp_path, fb)
+        append_fallback_section(fb, tmp_path)
         text = tmp_path.read_text()
         _assert("[middle_proxy]" in text,              "append: секция добавлена")
         _assert("fallback_after_attempts = 5" in text, "append: значение записано")
         # Повторная запись не дублирует секцию
-        append_fallback_section(tmp_path, fb)
+        append_fallback_section(fb, tmp_path)
         _assert(text.count("[middle_proxy]") <= 1,    "append: нет дублирования")
     finally:
         tmp_path.unlink(missing_ok=True)

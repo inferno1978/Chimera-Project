@@ -15,7 +15,7 @@ vless_installer/modules/telemt_panel.py
   • config_edit_mode = "api" всегда (см. обоснование в шапке _generate_config) —
     так panel структурно не может задеть [server]/[network]/[access] в
     конфиге telemt (client_mss, MSS-clamp порты и т.д.), даже случайно.
-  • [api]-секцию в конфиге telemt включает/обновляет mtproto.ensure_api_enabled() —
+  • [server.api]-секцию в конфиге telemt включает/обновляет mtproto.ensure_api_enabled() —
     единая точка правды для файла telemt.toml остаётся в mtproto.py.
   • Ctrl+C на любом шаге → возврат в меню (через _Cancelled).
 ───────────────────────────────────────────────────────────────────────────────
@@ -584,11 +584,11 @@ def _run_install() -> None:
     _box_bot()
     print()
 
-    # ── 1. Системный пользователь + группа — ДО включения [api], иначе
+    # ── 1. Системный пользователь + группа — ДО включения [server.api], иначе
     #      chgrp внутри ensure_api_enabled() бьёт мимо ещё не созданной группы.
     _create_system_user()
 
-    # ── 2. Включаем [api] в конфиге telemt (единая точка правды — mtproto.py)
+    # ── 2. Включаем [server.api] в конфиге telemt (единая точка правды — mtproto.py)
     _info("Проверяю/включаю API у Telemt...")
     telemt_api_token = secrets.token_hex(24)
     ok, msg = mp.ensure_api_enabled(telemt_api_token, host=TELEMT_API_HOST, port=TELEMT_API_PORT,
@@ -715,7 +715,7 @@ def _uninstall() -> None:
     BIN_PATH.unlink(missing_ok=True)
     _run(["userdel", SYSTEM_USER], check=False)
     _ok("Telemt Panel полностью удалена.")
-    _box_info("API у Telemt (секция [api] в telemt.toml) оставлена как есть —")
+    _box_info("API у Telemt (секция [server.api] в telemt.toml) оставлена как есть —")
     _box_info("отключить можно из меню самого Telemt при необходимости.")
     _pause()
 
