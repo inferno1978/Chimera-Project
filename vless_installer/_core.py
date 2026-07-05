@@ -29994,6 +29994,16 @@ def main_menu() -> None:
             print_banner()
             print()
 
+            # Панель "Состояние" — см. status_panel.py. Единственная точка
+            # сопряжения: этот вызов. Сам модуль ни во что в _core.py не
+            # лезет, только читает то, что ему нужно, через свои функции.
+            try:
+                from vless_installer.modules.status_panel import render as _render_status_panel
+                _render_status_panel()
+                print()
+            except Exception:
+                pass
+
             current_mode = "—"
             if STATE_FILE.exists():
                 try:
