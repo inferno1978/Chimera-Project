@@ -656,9 +656,23 @@ def process_update(update):
 def main():
     global OFFSET
     _log("Bot started")
+    fail_count = 0
     while True:
         try:
             r = api("getUpdates", offset=OFFSET, timeout=25, limit=10)
+            # api() гасит исключения сама и при ошибке возвращает {{}} —
+            # поэтому проверяем результат явно, а не полагаемся на except
+            # ниже (иначе при недоступности сети, например блокировке
+            # Telegram на РФ-адресе entry-ноды или упавшем WARP/AWG
+            # туннеле, цикл крутится без задержки и заливает лог тысячами
+            # одинаковых строк в минуту).
+            if not r:
+                fail_count += 1
+                if fail_count in (1, 10) or fail_count % 60 == 0:
+                    _log(f"Poll: нет ответа от API ({{fail_count}} попыток подряд)")
+                time.sleep(5)
+                continue
+            fail_count = 0
             for upd in r.get("result", []):
                 OFFSET = upd["update_id"] + 1
                 try:
