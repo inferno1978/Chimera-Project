@@ -304,6 +304,10 @@ sudo python3 /opt/vless-ultimate/main.py --scheduled-backup
 > **Спасибо всем, кто использует проект с уважением к тому, что он создан
 > бесплатно и на энтузиазме.**
 
+## 🔗 Связанные проекты
+
+- [HYDRA-ULTIMATE](https://github.com/gr33nimax/HYDRA-ULTIMATE) — форк на базе Sing-Box как единого оркестратора трафика, с плагинной архитектурой и собственным набором транспортов.
+
 ## 📄 Лицензия
 
 MIT — см. [LICENSE](https://github.com/inferno1978/VLESS-Ultimate-Installer/blob/main/LICENSE)
