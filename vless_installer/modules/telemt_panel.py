@@ -359,12 +359,22 @@ def _install_binary(url: str) -> bool:
         if not found:
             _err("Бинарник не найден в архиве")
             return False
-        shutil.copy2(str(found[0]), str(BIN_PATH))
-        BIN_PATH.chmod(0o755)
+        # Атомарная замена: пишем во временный файл РЯДОМ с BIN_PATH (та же ФС —
+        # обязательное условие для os.replace) и переименовываем поверх старого.
+        # Прямая перезапись (shutil.copy2 в BIN_PATH) падает с "Text file busy",
+        # если сервис в этот момент активен и держит бинарник открытым на исполнение.
+        # rename(2) же атомарен и разрешён ядром даже для занятого файла: старый
+        # процесс доработает со старой inode, новый бинарник подхватится рестартом.
+        staging = BIN_PATH.parent / f".{BIN_PATH.name}.new"
+        shutil.copy2(str(found[0]), str(staging))
+        staging.chmod(0o755)
+        os.replace(str(staging), str(BIN_PATH))
         _ok(f"Установлено: {BIN_PATH}")
         return True
     except Exception as e:
         _err(f"Ошибка: {e}")
+        staging = BIN_PATH.parent / f".{BIN_PATH.name}.new"
+        staging.unlink(missing_ok=True)
         return False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
