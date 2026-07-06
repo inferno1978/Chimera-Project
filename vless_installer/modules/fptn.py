@@ -142,7 +142,11 @@ _GITHUB_API   = "https://api.github.com/repos/fptn-project/fptn/releases/latest"
 _DEFAULT_PORT           = 443
 _DEFAULT_TUN_IFACE      = "fptn0"
 _DEFAULT_PROXY_DOMAIN   = "www.wikipedia.org"
-_DEFAULT_BANDWIDTH_MB   = 100
+_DEFAULT_BANDWIDTH_MB   = 10000  # де-факто "без лимита": семантика 0 у fptn-passwd
+                                  # не задокументирована (может значить "заблокирован",
+                                  # а не "без лимита" — leaky bucket с rate=0 пропускал бы
+                                  # 0 байт), поэтому вместо риска ставим заведомо
+                                  # недостижимый потолок в 10 Гбит/с
 _DEFAULT_MAX_SESSIONS   = 3
 _BOX_W                  = 66
 
