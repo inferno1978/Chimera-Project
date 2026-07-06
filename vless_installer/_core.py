@@ -165,6 +165,14 @@ from vless_installer.modules.fail2ban_setup import (
 from vless_installer.modules.ssh_hardening import (
     _SSHD_CONFIG, _SSHD_BACKUP, _ssh_2fa_install, do_ssh_hardening,
 )
+# ── Tier-1 рефакторинг: фундаментальные хелперы (resources) ──────────────────
+from vless_installer.modules.resources import (
+    _get_total_ram_mb, _get_total_cpu,
+    gen_uuid, gen_hex, gen_spiderx,
+    get_server_ip, country_flag_emoji,
+    get_server_country, get_server_country_cached,
+    get_adaptive_value, generate_self_signed_cert,
+)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -512,21 +520,8 @@ def _apply_stats_to_config(config: dict) -> None:
     if not any(ob.get("tag") == "xray-stats-api" for ob in outbounds):
         outbounds.append({"protocol": "freedom", "tag": "xray-stats-api"})
 
-def _get_total_ram_mb() -> int:
-    try:
-        result = subprocess.run(["free", "-m"], capture_output=True, text=True)
-        for line in result.stdout.splitlines():
-            if line.startswith("Mem:"):
-                return int(line.split()[1])
-    except Exception:
-        pass
-    return 1024
-
-def _get_total_cpu() -> int:
-    try:
-        return os.cpu_count() or 1
-    except Exception:
-        return 1
+# (_get_total_ram_mb, _get_total_cpu вынесены в vless_installer.modules.resources;
+#  импорт — в верхней секции этого файла.)
 
 TOTAL_RAM = _get_total_ram_mb()
 TOTAL_CPU = _get_total_cpu()
@@ -898,148 +893,11 @@ def _run(
     return result
 
 
-def get_adaptive_value(param: str) -> str:
-    if TOTAL_RAM < 512:
-        mapping: dict[str, str] = {
-            "overcommit": "0", "swappiness": "1",
-            "conntrack": "262144", "file_max": "524288",
-        }
-    elif TOTAL_RAM < 1024:
-        mapping = {
-            "overcommit": "0", "swappiness": "5",
-            "conntrack": "524288", "file_max": "1048576",
-        }
-    else:
-        mapping = {
-            "overcommit": "1", "swappiness": "10",
-            "conntrack": "2000000", "file_max": "2097152",
-        }
-    return mapping.get(param, "")
-
-
-def gen_uuid() -> str:
-    return str(uuid.uuid4())
-
-
-def gen_hex(n: int = 8) -> str:
-    try:
-        result = _run(["openssl", "rand", "-hex", str(n)], capture=True, check=False)
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return ''.join(random.choices('0123456789abcdef', k=n * 2))
-
-
-def gen_spiderx() -> str:
-    chars = string.ascii_lowercase + string.digits
-    length = random.randint(6, 15)
-    return '/' + ''.join(random.choices(chars, k=length))
-
-
-def get_server_ip(ip_type: str = "4") -> str:
-    if ip_type == "6":
-        urls = ["https://api64.ipify.org"]
-        flag = "-6"
-    else:
-        urls = ["https://api4.ipify.org"]
-        flag = "-4"
-    for url in urls:
-        try:
-            r = _run(["curl", "-s", flag, "-m", "5", url],
-                     capture=True, check=False)
-            if r.returncode == 0 and r.stdout.strip():
-                return r.stdout.strip()
-        except Exception:
-            pass
-
-    # ПАТЧ: fallback через 'ip route get 8.8.8.8' — работает без доступа в интернет,
-    # на серверах со сложной маршрутизацией или несколькими интерфейсами.
-    # Критично для awg_apply_policy_routing: без корректного локального IP
-    # исключение из AWG-маршрутизации не будет добавлено → потеря SSH после ребута.
-    if ip_type == "4":
-        try:
-            r2 = _run(["ip", "route", "get", "8.8.8.8"],
-                      capture=True, check=False)
-            if r2.returncode == 0:
-                # Парсим строку вида: "8.8.8.8 via ... src 1.2.3.4 uid ..."
-                for token in r2.stdout.split():
-                    if token == "src":
-                        idx = r2.stdout.split().index("src")
-                        candidate = r2.stdout.split()[idx + 1]
-                        if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", candidate):
-                            return candidate
-        except Exception:
-            pass
-
-    return ""
-
-
-def country_flag_emoji(country_code: str) -> str:
-    """
-    Возвращает эмодзи флага страны по двухбуквенному коду ISO 3166-1 alpha-2.
-    Принцип: буквы A-Z маппятся на региональные индикаторы Unicode (U+1F1E6..U+1F1FF).
-    """
-    cc = country_code.upper().strip()
-    if len(cc) != 2 or not cc.isalpha():
-        return "🌐"
-    return "".join(chr(0x1F1E6 + ord(c) - ord('A')) for c in cc)
-
-
-def get_server_country() -> tuple[str, str, str]:
-    """
-    Определяет страну сервера по его публичному IPv4 через ip-api.com.
-    Возвращает (country_code, country_name, flag_emoji).
-    """
-    try:
-        r = _run(
-            ["curl", "-s", "--max-time", "8",
-             "http://ip-api.com/json?fields=status,country,countryCode,city"],
-            capture=True, check=False
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            data = json.loads(r.stdout.strip())
-            if data.get("status") == "success":
-                cc   = data.get("countryCode", "??")
-                name = data.get("country", "Unknown")
-                return cc, name, country_flag_emoji(cc)
-    except Exception:
-        pass
-    return "??", "Unknown", "🌐"
-
-
-# Кеш страны сервера — заполняется один раз при первом вызове get_server_country_cached()
-_SERVER_CC:   str = ""
-_SERVER_NAME: str = ""
-_SERVER_FLAG: str = ""
-
-
-def get_server_country_cached() -> tuple[str, str, str]:
-    """Возвращает (country_code, country_name, flag_emoji), кешируя результат."""
-    global _SERVER_CC, _SERVER_NAME, _SERVER_FLAG
-    if not _SERVER_CC:
-        _SERVER_CC, _SERVER_NAME, _SERVER_FLAG = get_server_country()
-    return _SERVER_CC, _SERVER_NAME, _SERVER_FLAG
-
-
-def generate_self_signed_cert(domain: str) -> None:
-    le_path = Path(f"/etc/letsencrypt/live/{domain}")
-    info(f"Генерация самоподписанного сертификата для {domain}...")
-    le_path.mkdir(parents=True, exist_ok=True)
-    _run([
-        "openssl", "req", "-x509", "-nodes", "-days", "365",
-        "-newkey", "rsa:2048",
-        "-keyout", str(le_path / "privkey.pem"),
-        "-out",    str(le_path / "fullchain.pem"),
-        "-subj",   f"/CN={domain}/O=SelfSigned/C=US",
-        "-addext", f"subjectAltName=DNS:{domain}",
-    ], quiet=True, check=False)
-    try:
-        (le_path / "privkey.pem").chmod(0o600)
-        (le_path / "fullchain.pem").chmod(0o644)
-    except Exception:
-        pass
-    success("Самоподписанный сертификат создан")
+# (get_adaptive_value, gen_uuid, gen_hex, gen_spiderx, get_server_ip,
+#  country_flag_emoji, get_server_country, get_server_country_cached,
+#  _SERVER_CC/_SERVER_NAME/_SERVER_FLAG cache, generate_self_signed_cert —
+#  вынесены в vless_installer.modules.resources; импорт — в верхней секции
+#  этого файла.)
 
 # =============================================================================
 #  ПРОВЕРКА РЕСУРСОВ
