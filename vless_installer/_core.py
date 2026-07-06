@@ -145,6 +145,13 @@ from vless_installer.modules.node_health_monitor import do_health_monitor_menu
 # ── Новые модули (DPI-цензура снаружи + бенчмарк сервера) ────────────────────
 from vless_installer.modules.dpi_censor_check    import do_dpi_censor_check_menu
 from vless_installer.modules.network_bench       import do_network_bench_menu
+# ── Tier-1 рефакторинг: ASN cache + IP→ASN lookup ────────────────────────────
+from vless_installer.modules.asn_cache import (
+    ASN_CACHE_DB, ASN_CACHE_MAX_AGE_DAYS,
+    _asn_cache_connect, _asn_cache_save, _asn_cache_load,
+    _asn_cache_delete, _asn_cache_info,
+    _lookup_asn, _fmt_asn_short,
+)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -23922,125 +23929,8 @@ RIPE_DELEGATED_URL        = "https://ftp.ripe.net/ripe/stats/delegated-ripencc-l
 RIPE_DELEGATED_URL_MIRROR = "https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-latest"
 _RU_SUBNET_RULE_COMMENT   = "ru_subnets_ripe"
 
-# =============================================================================
-#  ЛОКАЛЬНЫЙ SQLITE-КЭШ ПРЕФИКСОВ ASN
-#
-#  Кэш хранит:
-#    • prefixes_asn  — префиксы конкретного ASN (RIPE Stat API)
-#    • prefixes_ru   — делегированные подсети РФ (delegated-ripencc-latest)
-#
-#  Логика использования:
-#    1. При успешной загрузке из RIPE → обновляем кэш.
-#    2. При недоступности RIPE → берём данные из кэша (если есть).
-#    3. Кэш считается «свежим» если возраст < ASN_CACHE_MAX_AGE_DAYS суток.
-#       Устаревший кэш всё равно используется как запасной вариант, но
-#       пользователь получает предупреждение с датой последнего обновления.
-# =============================================================================
-ASN_CACHE_DB      = Path("/var/lib/xray-installer/asn_prefix_cache.sqlite3")
-ASN_CACHE_MAX_AGE_DAYS = 30   # предупреждать если кэш старше N дней
-
-
-def _asn_cache_connect():
-    """Открывает (и при необходимости инициализирует) БД кэша. Возвращает sqlite3.Connection."""
-    import sqlite3
-    ASN_CACHE_DB.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(ASN_CACHE_DB), timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS prefix_cache (
-            key        TEXT PRIMARY KEY,   -- 'asn:AS12345' или 'ru_delegated'
-            updated_at INTEGER NOT NULL,   -- unix timestamp последнего обновления
-            cidrs_json TEXT NOT NULL       -- JSON-массив строк CIDR
-        )
-    """)
-    conn.commit()
-    return conn
-
-
-def _asn_cache_save(key: str, cidrs: list) -> None:
-    """Сохраняет список CIDR в кэш под указанным ключом."""
-    try:
-        import sqlite3
-        conn = _asn_cache_connect()
-        conn.execute(
-            "INSERT OR REPLACE INTO prefix_cache (key, updated_at, cidrs_json) VALUES (?, ?, ?)",
-            (key, int(time.time()), json.dumps(cidrs, ensure_ascii=False))
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        warn(f"  [кэш ASN] Не удалось сохранить '{key}': {e}")
-
-
-def _asn_cache_load(key: str) -> tuple:
-    """
-    Загружает список CIDR из кэша.
-    Возвращает (cidrs: list, age_days: float) или ([], None) если записи нет.
-    """
-    try:
-        import sqlite3
-        if not ASN_CACHE_DB.exists():
-            return [], None
-        conn = _asn_cache_connect()
-        row = conn.execute(
-            "SELECT updated_at, cidrs_json FROM prefix_cache WHERE key = ?", (key,)
-        ).fetchone()
-        conn.close()
-        if row is None:
-            return [], None
-        updated_at, cidrs_json = row
-        age_days = (time.time() - updated_at) / 86400
-        cidrs = json.loads(cidrs_json)
-        return cidrs, age_days
-    except Exception as e:
-        warn(f"  [кэш ASN] Не удалось прочитать '{key}': {e}")
-        return [], None
-
-
-def _asn_cache_delete(key: str) -> None:
-    """Удаляет запись из кэша (например, при явном сбросе)."""
-    try:
-        if not ASN_CACHE_DB.exists():
-            return
-        conn = _asn_cache_connect()
-        conn.execute("DELETE FROM prefix_cache WHERE key = ?", (key,))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        warn(f"  [кэш ASN] Не удалось удалить '{key}': {e}")
-
-
-def _asn_cache_info() -> list:
-    """
-    Возвращает список dict с информацией о записях кэша:
-    [{"key": ..., "count": ..., "age_days": ..., "updated_str": ...}, ...]
-    """
-    result = []
-    try:
-        if not ASN_CACHE_DB.exists():
-            return result
-        import sqlite3, json as _json
-        conn = _asn_cache_connect()
-        rows = conn.execute(
-            "SELECT key, updated_at, cidrs_json FROM prefix_cache ORDER BY key"
-        ).fetchall()
-        conn.close()
-        for key, updated_at, cidrs_json in rows:
-            try:
-                count = len(_json.loads(cidrs_json))
-            except Exception:
-                count = 0
-            age_days = (time.time() - updated_at) / 86400
-            updated_str = datetime.fromtimestamp(updated_at).strftime("%Y-%m-%d %H:%M")
-            result.append({
-                "key":         key,
-                "count":       count,
-                "age_days":    age_days,
-                "updated_str": updated_str,
-            })
-    except Exception as e:
-        warn(f"  [кэш ASN] Ошибка при чтении списка записей: {e}")
-    return result
+# (Блок локального SQLite-кэша ASN вынесен в vless_installer.modules.asn_cache;
+#  импортируется в верхней секции импортов этого файла.)
 
 
 def _fetch_ru_subnets_from_ripe() -> list:
@@ -25798,52 +25688,8 @@ _BAN_THRESHOLD_DEFAULT   = 10   # ошибок за период
 _BAN_WINDOW_MINUTES      = 10   # минут для подсчёта
 _BAN_WHITELIST_DEFAULT   = ["127.0.0.1", "::1"]
 
-
-_asn_cache: dict = {}  # кеш: ip -> {"asn": "AS12345", "org": "...", "isp": "..."}
-
-
-def _lookup_asn(ip: str) -> dict:
-    """
-    Запрашивает ASN и провайдера для IP через ip-api.com (бесплатно, без ключа).
-    Возвращает словарь с ключами asn, org, isp.
-    При ошибке возвращает пустой словарь.
-    Кеширует результаты в _asn_cache.
-    """
-    if ip in _asn_cache:
-        return _asn_cache[ip]
-    result: dict = {}
-    try:
-        import urllib.request as _ur
-        import urllib.error as _ue
-        url = f"http://ip-api.com/json/{ip}?fields=as,org,isp,status"
-        req = _ur.Request(url, headers={"User-Agent": "xray-installer/3.99"})
-        with _ur.urlopen(req, timeout=4) as resp:
-            data = json.loads(resp.read().decode())
-        if data.get("status") == "success":
-            result = {
-                "asn": data.get("as", ""),    # "AS12345 SomeName"
-                "org": data.get("org", ""),
-                "isp": data.get("isp", ""),
-            }
-    except Exception:
-        pass
-    _asn_cache[ip] = result
-    return result
-
-
-def _fmt_asn_short(info: dict) -> str:
-    """Форматирует ASN-инфо в короткую строку для отображения в рамке.
-    Пример: AS12345 · Cloudflare Inc."""
-    if not info:
-        return ""
-    asn_raw = info.get("asn", "")            # "AS12345 FullName"
-    isp     = info.get("isp", "")
-    # Берём только номер ASN (первое слово)
-    asn_num = asn_raw.split()[0] if asn_raw else ""
-    label   = isp or info.get("org", "")
-    if asn_num and label:
-        return f"{asn_num} · {label}"
-    return asn_num or label or ""
+# (_asn_cache / _lookup_asn / _fmt_asn_short вынесены в
+#  vless_installer.modules.asn_cache; импорт — в верхней секции этого файла.)
 
 
 # ---------------------------------------------------------------------------
