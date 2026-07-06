@@ -310,6 +310,35 @@ def _get_server_ip() -> str:
     except Exception: pass
     return "ВАШ_IP"
 
+def _port_conflict(port: int, ignore_own: Optional[int] = None) -> str:
+    """Возвращает непустую строку с описанием, если TCP-порт уже занят
+    ЧУЖИМ процессом — например, Xray/VLESS на том же порту, который FPTN
+    молча не может забиндить (или молча перехватывает чужой SNI-роутинг,
+    как в кейсе с alert'ом unrecognized_name на общем 443).
+
+    ignore_own — порт, на котором уже стоит НАШ СОБСТВЕННЫЙ fptn-server
+    (при переустановке на тот же порт): в этом случае "занятость" —
+    это сам сервис, который мы сейчас остановим/перезапустим, а не
+    конфликт, так что проверку пропускаем.
+    """
+    if ignore_own is not None and port == ignore_own and _is_installed():
+        return ""
+    if shutil.which("ss"):
+        r = _run(["ss", "-H", "-tlnp", "sport", "=", f":{port}"], capture=True)
+        if r.returncode == 0:
+            out = (r.stdout or "").strip()
+            return out.splitlines()[0] if out else ""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("0.0.0.0", port))
+        return ""
+    except OSError:
+        return "(детали недоступны: ss не сработал/не установлен, но порт точно занят — bind не прошёл)"
+    finally:
+        s.close()
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  СОСТОЯНИЕ МОДУЛЯ
 # ══════════════════════════════════════════════════════════════════════════════
@@ -829,8 +858,16 @@ def _run_install_inner() -> None:
     _box_bot(); print()
 
     try:
-        raw_port = _ask(f"  {CYAN}Порт [{old_port}]: {NC}", default=str(old_port), c=True)
-        port = int(raw_port) if raw_port.isdigit() else old_port
+        while True:
+            raw_port = _ask(f"  {CYAN}Порт [{old_port}]: {NC}", default=str(old_port), c=True)
+            port = int(raw_port) if raw_port.isdigit() else old_port
+            conflict = _port_conflict(port, ignore_own=old_port if reinstall_keep_users else None)
+            if conflict:
+                _box_warn(f"Порт {port} уже занят: {conflict}")
+                _box_warn("Если там VLESS/Xray или другой протокол этого "
+                          "инсталлятора — выберите другой порт.")
+                continue
+            break
 
         service_name = _ask(
             f"  {CYAN}Имя сервиса (для токена, любое) [{old_service_name}]: {NC}",
