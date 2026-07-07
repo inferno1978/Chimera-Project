@@ -401,6 +401,8 @@ from vless_installer.modules.chain_nodes import (
     generate_chain_summary, _speed_test_node_latency, _speed_test_node_geo,
     _access_log_bytes_per_node, do_node_health_matrix,
 )
+# ── Веб-панель + REST API + User Portal ──────────────────────────────────────
+from vless_installer.modules.rest_api import do_manage_web_panel
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -7451,6 +7453,10 @@ def main_menu() -> None:
             _box_row(f"     {DIM}Свой L3 VPN (Protobuf/TLS) — honeypot-прокси вместо отказа зондам{NC}")
             _box_row()
             _box_sep()
+            _box_row(f"  {CYAN}W{NC}  🌐 {TITLE}Веб-панель управления{NC}")
+            _box_row(f"     {DIM}Admin Panel + User Portal + REST API{NC}")
+            _box_row()
+            _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
@@ -7550,6 +7556,9 @@ def main_menu() -> None:
             except ImportError as _e:
                 warn(f"Модуль FPTN не найден: {_e}")
                 time.sleep(2)
+
+        elif choice.lower() == "w":
+            do_manage_web_panel()
 
         elif choice == "0":
             print(f"{GREEN}До свидания! 👋{NC}")
