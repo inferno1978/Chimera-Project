@@ -824,6 +824,8 @@ def do_manage_as_direct() -> None:
     DIM                      = core.DIM
     GREEN                    = core.GREEN
     NC                       = core.NC
+    CYAN = core.CYAN
+    NC = core.NC
     RED                      = core.RED
     YELLOW                   = core.YELLOW
     _asn_cache_info          = core._asn_cache_info

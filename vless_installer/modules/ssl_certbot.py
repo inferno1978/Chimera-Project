@@ -449,6 +449,12 @@ def do_manage_certbot_monitor() -> None:
     _box_item   = core._box_item
     _box_bottom = core._box_bottom
     STATE_FILE  = core.STATE_FILE
+    BLUE = core.BLUE
+    CYAN = core.CYAN
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     CYAN, NC, GREEN, RED, YELLOW, BLUE = (core.CYAN, core.NC, core.GREEN, core.RED,
                                           core.YELLOW, core.BLUE)
     # _certbot_renew_and_notify / _certbot_install_monitor_cron — модуль-локальные

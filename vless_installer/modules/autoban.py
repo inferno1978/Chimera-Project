@@ -541,6 +541,15 @@ def do_manage_autoban() -> None:
     info            = core.info
     warn            = core.warn
     success         = core.success
+    BLUE = core.BLUE
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    WHITE = core.WHITE
+    YELLOW = core.YELLOW
     CYAN, NC, GREEN, YELLOW, RED, DIM, BOLD, BLUE, WHITE = (
         core.CYAN, core.NC, core.GREEN, core.YELLOW, core.RED,
         core.DIM, core.BOLD, core.BLUE, core.WHITE,

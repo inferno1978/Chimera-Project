@@ -155,6 +155,14 @@ def do_view_logs() -> None:
     _BOX_W       = core._BOX_W
     LOG_FILE     = core.LOG_FILE
     warn         = core.warn
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    WHITE = core.WHITE
+    YELLOW = core.YELLOW
     CYAN, NC, DIM, GREEN, RED, YELLOW, WHITE, BOLD = (
         core.CYAN, core.NC, core.DIM, core.GREEN, core.RED, core.YELLOW, core.WHITE, core.BOLD
     )
@@ -435,6 +443,12 @@ def do_system_dashboard() -> None:
     _box_top     = core._box_top
     _box_row     = core._box_row
     _box_bottom  = core._box_bottom
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     CYAN, NC, DIM, GREEN, YELLOW, RED = (
         core.CYAN, core.NC, core.DIM, core.GREEN, core.YELLOW, core.RED
     )

@@ -180,6 +180,13 @@ def do_failover_status() -> None:
     _box_bottom             = core._box_bottom
     _box_item               = core._box_item
     _box_warn               = core._box_warn
+    BLUE = core.BLUE
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     CYAN, NC, GREEN, YELLOW, RED, DIM, BLUE = (
         core.CYAN, core.NC, core.GREEN, core.YELLOW, core.RED, core.DIM, core.BLUE
     )
@@ -467,6 +474,12 @@ def do_manage_auto_fallback() -> None:
     _box_bottom = core._box_bottom
     _box_item   = core._box_item
     _box_warn   = core._box_warn
+    BLUE = core.BLUE
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    YELLOW = core.YELLOW
     CYAN, NC, GREEN, YELLOW, DIM, BLUE = (
         core.CYAN, core.NC, core.GREEN, core.YELLOW, core.DIM, core.BLUE
     )

@@ -331,6 +331,13 @@ def do_manage_geo_update() -> None:
     GEOSITE_DAT = core.GEOSITE_DAT
     GEOIP_DAT   = core.GEOIP_DAT
     _apply_split_tunnel_config_from_state = core._apply_split_tunnel_config_from_state
+    BLUE = core.BLUE
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     CYAN, NC, DIM, GREEN, YELLOW, RED, BLUE = (
         core.CYAN, core.NC, core.DIM, core.GREEN, core.YELLOW, core.RED, core.BLUE
     )
