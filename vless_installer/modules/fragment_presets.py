@@ -225,7 +225,7 @@ def _generate_one(preset: dict) -> Optional[Path]:
         uuid_val      = state.get("uuid", "")
         pub_key       = state.get("public_key", "")
         short_id      = state.get("short_id", "")
-        reality_dest  = state.get("reality_dest", "www.microsoft.com")
+        reality_dest  = state.get("reality_dest", "www.cloudflare.com")
         xtls_flow     = state.get("xtls_flow", "xtls-rprx-vision")
 
         if not server_host or not uuid_val:

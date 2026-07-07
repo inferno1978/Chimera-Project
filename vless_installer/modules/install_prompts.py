@@ -758,29 +758,43 @@ def prompt_awg_exit_mode() -> None:
     _box_wrap_msg(f"  {DIM}", 2,
         f"Не используйте собственный домен — это создаст петлю маршрутизации.{NC}")
     _box_row()
-    # ВНИМАНИЕ: www.microsoft.com (Akamai CDN) НЕЛЬЗЯ использовать с AWG-транспортом!
-    # Akamai возвращает большой TLS ServerHello + цепочку сертификатов (~5KB),
-    # что на MTU=1280 awg0 вызывает фрагментацию и REALITY-handshake падает с
-    # "handshake did not complete successfully" для любого клиента.
-    # Cloudflare возвращает компактный TLS-ответ и работает стабильно через AWG.
+    # ВНИМАНИЕ: www.microsoft.com НЕЛЬЗЯ использовать как REALITY dest!
+    # Баг в TLS-парсере REALITY (xtls/reality, github.com/XTLS/Xray-core):
+    # жёсткий лимит 8192 байта на TLS Certificate record. У www.microsoft.com
+    # (Akamai CDN) Certificate с цепочкой/OCSP stapling сейчас 8273 байта —
+    # на 81 байт больше лимита. REALITY обрывает разбор и валит соединение
+    # с "handshake did not complete successfully" для ЛЮБОГО клиента.
+    # Это НЕ связано с MTU/AWG — лимит внутри самого TLS-парсера REALITY,
+    # до всякой маршрутизации. Прямой TLS к microsoft.com (curl/openssl)
+    # при этом работает нормально.
+    # Cloudflare использует ECDSA-сертификаты с минимальной цепочкой —
+    # Certificate record гарантированно укладывается в 8192 байта.
+    # Баг воспроизведён на Xray 26.3.27 (issue открыт ~2 недели назад).
+    # Cloudflare исторически рекомендуемый target для REALITY — не только
+    # из-за анонимности (слишком большой CDN, чтобы блокировать), но и из-за
+    # предсказуемо маленького TLS-хендшейка.
     _box_wrap_msg(f"  {YELLOW}", 2,
-        f"⚠️  ВНИМАНИЕ для AWG-режима: НЕ используйте www.microsoft.com!{NC}")
+        f"⚠️  ВНИМАНИЕ: НЕ используйте www.microsoft.com как REALITY dest!{NC}")
     _box_wrap_msg(f"  {DIM}", 2,
-        f"Akamai CDN (microsoft.com) шлёт большой TLS ServerHello, который "
-        f"фрагментируется на MTU=1280 awg0 → REALITY-handshake падает. "
-        f"Используйте Cloudflare или аналогичный CDN с компактным TLS-ответом.{NC}")
+        f"Баг в TLS-парсере REALITY (Xray-core): лимит 8192 байт на "
+        f"Certificate record, у microsoft.com — 8273 байта → handshake "
+        f"падает для любого клиента. Cloudflare (ECDSA, компактная цепочка) "
+        f"работает стабильно. Баг не связан с AWG/MTU — это лимит внутри "
+        f"самого REALITY-парсера.{NC}")
     _box_row()
     try:
         _rd = input(f"  {CYAN}Домен маскировки REALITY [www.cloudflare.com]: {NC}").strip()
     except KeyboardInterrupt:
         print()
         raise
-    # Дефолт — www.cloudflare.com (стабильно работает через AWG-туннель).
+    # Дефолт — www.cloudflare.com (Certificate record укладывается в лимит REALITY).
     # Если пользователь явно ввёл microsoft.com — предупреждаем, но не блокируем.
     PARAM_REALITY_DEST = _rd if _rd else "www.cloudflare.com"
     if "microsoft.com" in PARAM_REALITY_DEST.lower():
-        warn(f"  ⚠️  {PARAM_REALITY_DEST} может не работать с AWG "
-             f"(TLS-фрагментация на MTU 1280). Рекомендуется www.cloudflare.com.")
+        warn(f"  ⚠️  {PARAM_REALITY_DEST} НЕ рекомендуется: баг REALITY "
+             f"(лимит 8192 байт на Certificate, у microsoft.com — 8273). "
+             f"Handshake будет падать для всех клиентов. Рекомендуется "
+             f"www.cloudflare.com.")
     setattr(core, "PARAM_REALITY_DEST", PARAM_REALITY_DEST)
     success(f"   REALITY dest/sni: {PARAM_REALITY_DEST}")
 
