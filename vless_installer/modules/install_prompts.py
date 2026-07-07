@@ -758,12 +758,29 @@ def prompt_awg_exit_mode() -> None:
     _box_wrap_msg(f"  {DIM}", 2,
         f"Не используйте собственный домен — это создаст петлю маршрутизации.{NC}")
     _box_row()
+    # ВНИМАНИЕ: www.microsoft.com (Akamai CDN) НЕЛЬЗЯ использовать с AWG-транспортом!
+    # Akamai возвращает большой TLS ServerHello + цепочку сертификатов (~5KB),
+    # что на MTU=1280 awg0 вызывает фрагментацию и REALITY-handshake падает с
+    # "handshake did not complete successfully" для любого клиента.
+    # Cloudflare возвращает компактный TLS-ответ и работает стабильно через AWG.
+    _box_wrap_msg(f"  {YELLOW}", 2,
+        f"⚠️  ВНИМАНИЕ для AWG-режима: НЕ используйте www.microsoft.com!{NC}")
+    _box_wrap_msg(f"  {DIM}", 2,
+        f"Akamai CDN (microsoft.com) шлёт большой TLS ServerHello, который "
+        f"фрагментируется на MTU=1280 awg0 → REALITY-handshake падает. "
+        f"Используйте Cloudflare или аналогичный CDN с компактным TLS-ответом.{NC}")
+    _box_row()
     try:
-        _rd = input(f"  {CYAN}Домен маскировки REALITY [www.microsoft.com]: {NC}").strip()
+        _rd = input(f"  {CYAN}Домен маскировки REALITY [www.cloudflare.com]: {NC}").strip()
     except KeyboardInterrupt:
         print()
         raise
-    PARAM_REALITY_DEST = _rd if _rd else "www.microsoft.com"
+    # Дефолт — www.cloudflare.com (стабильно работает через AWG-туннель).
+    # Если пользователь явно ввёл microsoft.com — предупреждаем, но не блокируем.
+    PARAM_REALITY_DEST = _rd if _rd else "www.cloudflare.com"
+    if "microsoft.com" in PARAM_REALITY_DEST.lower():
+        warn(f"  ⚠️  {PARAM_REALITY_DEST} может не работать с AWG "
+             f"(TLS-фрагментация на MTU 1280). Рекомендуется www.cloudflare.com.")
     setattr(core, "PARAM_REALITY_DEST", PARAM_REALITY_DEST)
     success(f"   REALITY dest/sni: {PARAM_REALITY_DEST}")
 
