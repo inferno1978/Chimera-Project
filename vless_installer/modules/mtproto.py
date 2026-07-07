@@ -33,6 +33,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from vless_installer.modules.proto_common import (
+    ProtoCancelled, proto_ask, proto_get_installed_version,
+)
+# _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
+# `raise _Cancelled` code works unchanged after the local class definition
+# was removed in favour of proto_common.ProtoCancelled.
+_Cancelled = ProtoCancelled
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЦВЕТА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -265,8 +273,10 @@ def _warn(msg: str) -> None: print(f"  {YELLOW}⚠{NC}  {msg}"); _log(f"[WARN] {
 def _info(msg: str) -> None: print(f"  {CYAN}→{NC}  {msg}"); _log(f"[INFO] {msg}")
 def _err(msg: str)  -> None: print(f"  {RED}✗{NC}  {msg}"); _log(f"[ERR] {msg}")
 
-class _Cancelled(Exception):
-    """Пользователь нажал Ctrl+C — возврат в вызывающее меню."""
+# _Cancelled was a local Exception subclass; it is now an alias for
+# proto_common.ProtoCancelled (see the `_Cancelled = ProtoCancelled` line
+# near the top of this file). proto_ask raises ProtoCancelled, and existing
+# `except _Cancelled:` / `raise _Cancelled` code keeps working unchanged.
 
 def _pause() -> None:
     try:
@@ -275,18 +285,9 @@ def _pause() -> None:
     except (KeyboardInterrupt, EOFError, UnicodeDecodeError):
         print()
 
-def _ask(prompt: str, default: str = "", c: bool = False) -> str:
-    """c=True → при Ctrl+C бросает _Cancelled вместо возврата default."""
-    try:
-        print(prompt, end="", flush=True)
-        val = input().strip()
-        return val if val else default
-    except (EOFError, UnicodeDecodeError):
-        print(); return default
-    except KeyboardInterrupt:
-        print()
-        if c: raise _Cancelled()
-        return default
+# _ask — вынесен в proto_common (proto_ask). proto_ask raises ProtoCancelled,
+# which is what local `_Cancelled` aliases to, so `except _Cancelled:` handlers
+# and `raise _Cancelled` continue to work unchanged.
 
 def _generate_secret() -> str:
     try:
@@ -416,10 +417,9 @@ def _is_direct_ip(ipv4: str) -> bool:
 #  ВЕРСИЯ И РЕЛИЗ
 # ══════════════════════════════════════════════════════════════════════════════
 def _get_installed_version() -> Optional[str]:
-    if not BIN_PATH.exists(): return None
-    r = _run([str(BIN_PATH), "--version"], capture=True)
-    m = re.search(r'(\d+\.\d+[\.\d]*)', r.stdout + r.stderr)
-    return m.group(1) if m else "unknown"
+    # Delegated to proto_common.proto_get_installed_version.
+    # telemt binary supports `--version`, output has no leading 'v'.
+    return proto_get_installed_version(BIN_PATH, "--version")
 
 def _get_latest_release() -> tuple:
     try:
@@ -1266,7 +1266,7 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_item("N", "Нет, отмена")
         _box_bot()
         print()
-        ans = _ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
+        ans = proto_ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
         if ans != "y":
             _info("Удаление отменено."); _pause(); return False
 
@@ -1387,7 +1387,7 @@ def _select_domain() -> str:
         _box_item(" Q", "← Назад (ivi.ru)")
         _box_bot(); print()
 
-        cat = _ask(f"{CYAN}Категория: {NC}", c=True).strip()
+        cat = proto_ask(f"{CYAN}Категория: {NC}", c=True).strip()
         if cat.lower() == "q" or not cat:
             return "ivi.ru"
         if cat == "99":
@@ -1415,7 +1415,7 @@ def _select_domain() -> str:
                 _box_row(f"  {DIM}{RED}⚠{NC}{DIM} возможен блок iOS без OpenSSL 3.5+, "
                          f"{GREEN}✓{NC}{DIM} подтверждено (не проверено нами){NC}")
             _box_sep(); _box_item("Q", "← Назад"); _box_bot(); print()
-            p = _ask(f"{CYAN}Выбор [1-{len(doms)}]: {NC}", c=True).strip()
+            p = proto_ask(f"{CYAN}Выбор [1-{len(doms)}]: {NC}", c=True).strip()
             if p.lower() == "q": continue
             try:
                 idx = int(p) - 1
@@ -1448,7 +1448,7 @@ def _menu_users(server_ip: str) -> None:
         _box_sep(); _box_item("Q", "← Назад"); _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled:
             break
 
@@ -1548,7 +1548,7 @@ def _menu_update() -> None:
     if cur == tag:
         print(); _info("Уже последняя версия."); _pause(); return
     print()
-    if _ask(f"  {CYAN}Обновить до {tag}? [y/N]: {NC}", c=True).strip().lower() != "y":
+    if proto_ask(f"  {CYAN}Обновить до {tag}? [y/N]: {NC}", c=True).strip().lower() != "y":
         return
     _run(["systemctl", "stop", SERVICE_NAME])
     if _install_binary(url):
@@ -1588,7 +1588,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
         _box_item("2", "♻️   Переустановить поверх  (конфиг и данные сохраняются)")
         _box_item("0", "← Отмена  (Ctrl+C)")
         _box_bot(); print()
-        ch = _ask(f"{CYAN}Выбор [1/2/0]: {NC}", c=True).strip()
+        ch = proto_ask(f"{CYAN}Выбор [1/2/0]: {NC}", c=True).strip()
         if ch in ("0", "Q", "q", ""): return
         if ch == "1":
             if not _full_uninstall(silent=True): return
@@ -1608,11 +1608,11 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     _box_item("C", "Свой порт...")
     _box_bot(); print()
 
-    proto = _ask(f"{CYAN}Протокол [1-3] (Enter=3): {NC}", default="3", c=True).strip() or "3"
+    proto = proto_ask(f"{CYAN}Протокол [1-3] (Enter=3): {NC}", default="3", c=True).strip() or "3"
     ipv4  = proto in ("1", "3")
     ipv6  = proto in ("2", "3")
 
-    pc = _ask(f"{CYAN}Порт [A/B/C] (Enter=B): {NC}", default="B", c=True).strip().upper() or "B"
+    pc = proto_ask(f"{CYAN}Порт [A/B/C] (Enter=B): {NC}", default="B", c=True).strip().upper() or "B"
     if pc == "A":
         port = 443
     elif pc == "C":
@@ -1655,7 +1655,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     _box_item("Y", f"Да, сервер в РФ / регионе с блокировкой  {GREEN}(Direct Mode){NC}")
     _box_item("N", f"Нет, Telegram доступен напрямую  {DIM}(Middle Proxy){NC}")
     _box_bot(); print()
-    _region_blocked = _ask(
+    _region_blocked = proto_ask(
         f"{CYAN}Telegram заблокирован на этом сервере? [Y/n]: {NC}",
         default="y", c=True,
     ).strip().lower()
@@ -1682,7 +1682,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
                 _box_item("Y", f"Настроить fallback  {GREEN}(рекомендуется){NC}")
                 _box_item("N", f"Пропустить (всегда Middle Proxy)")
                 _box_bot(); print()
-                _fb_ans = _ask(
+                _fb_ans = proto_ask(
                     f"{CYAN}Настроить hybrid fallback? [Y/n]: {NC}",
                     default="y", c=True,
                 ).strip().lower()
@@ -1723,7 +1723,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
 
     _use_tproxy = False
     if _cascade != "none":
-        _use_xray = _ask(
+        _use_xray = proto_ask(
             f"{CYAN}Использовать xray для проксирования? [Y/n]: {NC}",
             default="y", c=True,
         ).strip().lower()
@@ -1736,7 +1736,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     _box_info("Ctrl+C — отмена.")
     _box_bot(); print()
     while True:
-        first_name = _ask(f"  {CYAN}Имя первого пользователя: {NC}", c=True).strip()
+        first_name = proto_ask(f"  {CYAN}Имя первого пользователя: {NC}", c=True).strip()
         if not first_name:
             first_name = "user1"; break
         if _validate_username(first_name): break
@@ -1745,7 +1745,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     _ok(f"Пользователь: {first_name}")
     print()
     while True:
-        ans = _ask(f"  {CYAN}Добавить ещё пользователя? [y/N]: {NC}", c=True).strip().lower()
+        ans = proto_ask(f"  {CYAN}Добавить ещё пользователя? [y/N]: {NC}", c=True).strip().lower()
         if ans != "y": break
         try:
             print(f"  {CYAN}Имя (3-16): {NC}", end="", flush=True)
@@ -1918,7 +1918,7 @@ def _menu_xray_integration() -> None:
             _box_info("2. Вернуться в это меню и включить интеграцию.")
             _box_row(); _box_sep()
             _box_item("Q", "← Назад"); _box_bot(); print()
-            _ask(f"{CYAN}Выбор: {NC}", c=True)
+            proto_ask(f"{CYAN}Выбор: {NC}", c=True)
             break
 
         cascade_label = "AWG 2.0" if cascade == "awg" else "VLESS+REALITY"
@@ -1962,7 +1962,7 @@ def _menu_xray_integration() -> None:
         _box_item("Q", "← Назад"); _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled:
             break
 
@@ -1989,7 +1989,7 @@ def _menu_xray_integration() -> None:
             print()
             if _sr["return_rule"] and _sr["after_xray"]:
                 _info("Маршрутизация DC/ME уже включена. Отключить?")
-                if _ask(f"{CYAN}Отключить? [y/N]: {NC}", c=True).strip().lower() == "y":
+                if proto_ask(f"{CYAN}Отключить? [y/N]: {NC}", c=True).strip().lower() == "y":
                     ok, msg = _sr_disable()
                     _ok(msg) if ok else _err(msg)
             else:
@@ -2143,7 +2143,7 @@ def mtproto_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled:
             break
 
@@ -2263,7 +2263,7 @@ def mtproto_menu() -> None:
                 _box_bot(); print()
 
                 try:
-                    fb_ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+                    fb_ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
                 except _Cancelled:
                     fb_ch = "q"
 
@@ -2379,7 +2379,7 @@ def mtproto_menu() -> None:
             _box_item("N", "← Отмена")
             _box_bot(); print()
             try:
-                ans = _ask(f"{CYAN}Выбор [Y/n]: {NC}", default="y", c=True).strip().lower()
+                ans = proto_ask(f"{CYAN}Выбор [Y/n]: {NC}", default="y", c=True).strip().lower()
             except _Cancelled:
                 continue
             if ans not in ("y", ""):
