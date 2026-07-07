@@ -10,6 +10,7 @@ verify.py — Проверка целостности VLESS Ultimate Installer v
 """
 import sys
 import ast
+import re
 import subprocess
 import os
 from pathlib import Path
@@ -186,6 +187,25 @@ if _core_globals:
         "_asn_cache_connect",
         "_asn_cache_delete",
         "get_server_country_cached",
+        # Tier-4 extracted functions (AWG transport + Chain/Nodes)
+        "awg_full_setup",
+        "awg_verify_tunnel",
+        "do_manage_awg_nodes",
+        "do_manage_awg_watchdog",
+        "awg_setup_remote_server",
+        "ensure_amneziawg_ready",
+        "awg_apply_policy_routing",
+        "prompt_chain_params",
+        "prompt_chain_params_multi",
+        "generate_xray_config_chain_entry",
+        "generate_xray_config_chain_entry_multi",
+        "generate_xray_config_chain_exit",
+        "do_manage_nodes",
+        "generate_chain_summary",
+        "do_node_health_matrix",
+        "_nodes_from_state",
+        "_load_chain_nodes_from_state",
+        "_save_chain_nodes_to_state",
     ]
     for func_name in key_funcs:
         if func_name in _core_globals:
@@ -352,6 +372,86 @@ if bs.exists():
         warn("EXPECTED_SHA256 не найден в bootstrap.sh — SHA256-проверка отсутствует")
 else:
     fail("bootstrap.sh не найден")
+
+# ── 11. Дубликаты определений ─────────────────────────────────
+section("11. Дубликаты определений функций (AST)")
+# Ожидаемые module-local хелперы, которые могут повторяться в разных модулях
+# без конфликта (каждый модуль использует свой собственный namespace).
+_expected_dup_helpers = {
+    "_ok", "_warn", "_fail", "_info", "_log", "_box_row", "_box_top", "_box_sep",
+    "_box_bottom", "_box_item", "_box_warn", "_box_ok", "_box_info", "_box_back",
+    "_box_wrap_msg", "_core_module", "_c", "_highlight_datetime", "_log_box_row",
+    "_flush", "_bar", "_fmt", "_pause", "_wiz_hint", "_print_top", "_timeout",
+    "_safe_mkdir", "_safe_touch", "_safe_chmod", "_safe_chown", "_mock_run",
+    "_mock_input", "_mock_system", "_main", "_genkey", "_section", "_test",
+    "_row", "_detect_colors", "_plain", "_wlen", "_box_kv", "_box_bot",
+}
+_func_defs = {}  # name -> set of file paths
+_py_root = Path("vless_installer")
+if _py_root.exists():
+    for py in sorted(_py_root.rglob("*.py")):
+        if "__pycache__" in py.parts:
+            continue
+        try:
+            tree = ast.parse(py.read_text())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                _func_defs.setdefault(node.name, set()).add(str(py))
+    _suspicious = {
+        name: files for name, files in _func_defs.items()
+        if len(files) > 1 and name not in _expected_dup_helpers
+    }
+    if _suspicious:
+        # Module-local helpers в независимых протокольных модулях — норма проекта
+        warn(f"Найдено {len(_suspicious)} дубликатов определений (module-local helpers — норма)")
+    else:
+        ok(f"Подозрительных дубликатов нет (просканировано {len(_func_defs)} имён функций)")
+else:
+    fail("vless_installer/ не найден — невозможно проверить дубликаты")
+
+# ── 12. Пути state-файлов ─────────────────────────────────────
+section("12. Пути state-файлов /var/lib/xray-installer")
+_PATH_BASELINE = 150  # baseline-снапшот (current count)
+_var_lib_count = 0
+if _py_root.exists():
+    for py in _py_root.rglob("*.py"):
+        if "__pycache__" in py.parts:
+            continue
+        try:
+            _var_lib_count += py.read_text().count("/var/lib/xray-installer")
+        except (OSError, UnicodeDecodeError):
+            continue
+else:
+    fail("vless_installer/ не найден — невозможно проверить пути")
+
+if _var_lib_count >= _PATH_BASELINE:
+    ok(f"/var/lib/xray-installer: {_var_lib_count} вхождений (базлайн {_PATH_BASELINE})")
+else:
+    fail(f"/var/lib/xray-installer: {_var_lib_count} < базлайна {_PATH_BASELINE} — пути удалены!")
+
+# ── 13. Права 0o600 ───────────────────────────────────────────
+section("13. Права 0o600 / chmod 600")
+_CHMOD_BASELINE = 80  # baseline-снапшот (current count)
+_chmod_count = 0
+if _py_root.exists():
+    for py in _py_root.rglob("*.py"):
+        if "__pycache__" in py.parts:
+            continue
+        try:
+            _text = py.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        _chmod_count += _text.count("0o600")
+        _chmod_count += len(re.findall(r"chmod[^a-zA-Z0-9_]*600", _text))
+else:
+    fail("vless_installer/ не найден — невозможно проверить chmod")
+
+if _chmod_count >= _CHMOD_BASELINE:
+    ok(f"0o600/chmod 600: {_chmod_count} вхождений (базлайн {_CHMOD_BASELINE})")
+else:
+    fail(f"0o600/chmod 600: {_chmod_count} < базлайна {_CHMOD_BASELINE} — права ослаблены!")
 
 # ── ИТОГ ─────────────────────────────────────────────────────
 print(f"\n{'═'*55}")

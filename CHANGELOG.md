@@ -2,6 +2,29 @@
 
 ---
 
+## Unreleased
+
+### Refactoring — модульная архитектура
+
+- `_core.py` декомпозирован с 32 557 → 7 770 строк (−76%): вынесено 40 модулей
+  в `vless_installer/modules/` (ASN cache, standalone screens, fail2ban, SSH hardening,
+  resources, MTU tuning, GeoIP block, connection audit, backup/rollback, DNSCrypt,
+  network setup, geo files, SSL/certbot, failover, client config export, uninstall,
+  TTL users, credential rotation, health report, traffic tracking, system deps,
+  nginx setup, RU subnets, AS-direct, autoban, backup manager, speed test,
+  reconfigure, migration, quick status, switch mode, traffic history, split tunnel,
+  diagnostics, xray install, install prompts, users manager, emergency repair,
+  AWG transport, chain/nodes).
+- Все модули используют `_core_module()` lazy binding через importlib —
+  нет циклических импортов.
+- Добавлен `PROJECT_MAP.md` — полная карта 124 модулей по 19 логическим группам.
+- Добавлен `verify.py` v2 — проверка через exec()+getattr() вместо grep.
+- Добавлен `full_test.py` — постоянный автотест (py_compile + import + duplicate defs +
+  paths baseline + chmod baseline + git hygiene).
+- Добавлен `tests/baseline_paths.json` — baseline-снапшот для будущих проверок.
+
+---
+
 ## ✨ Новый протокол: FPTN — независимый L3 VPN с honeypot-анти-пробингом — 6 июля 2026
 
 ### Контекст и причины
