@@ -91,7 +91,7 @@ from typing import Optional
 
 from vless_installer.modules.proto_common import (
     ProtoCancelled, proto_load_state, proto_save_state,
-    proto_ask, proto_gen_password, proto_ipt_persist,
+    proto_ask, proto_gen_password, proto_ipt_persist, proto_ipt_rule_exists,
 )
 # _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
 # `raise _Cancelled` code works unchanged after the local class definition
@@ -595,9 +595,9 @@ def _build_wdtt_server() -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 #  IPTABLES
 # ══════════════════════════════════════════════════════════════════════════════
+# _ipt_rule_exists — вынесен в proto_common (proto_ipt_rule_exists).
 def _ipt_rule_exists(table: str, chain: str, args: list) -> bool:
-    r = _run(["iptables", "-t", table, "-C", chain] + args, capture=True)
-    return r.returncode == 0
+    return proto_ipt_rule_exists(table, chain, args)
 
 def _fw_tool() -> str:
     """ufw, если он есть и активен — иначе raw iptables (fallback)."""
