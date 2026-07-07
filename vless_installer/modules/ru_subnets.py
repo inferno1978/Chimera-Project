@@ -175,7 +175,7 @@ def _ru_subnets_restore_if_needed(silent: bool = False) -> bool:
     cidrs = _ru_subnets_load_from_file()
     if not cidrs:
         return False
-    # AWG-режим: РФ-подсети должны идти через "direct-local" (без fwmark → eth0),
+    # AWG-режим: РФ-подсети должны идти через "direct-local" (без fwmark → default route ОС),
     # а не через "direct" (с fwmark → awg0 → exit-VPS). Иначе RIPE-маршрутизация
     # бесполезна — 2ip.ru и прочие РФ-сайты увидят IP exit-VPS вместо IP entry.
     _ripe_outbound = "direct-local" if AWG_EXIT_ENABLED else "direct"

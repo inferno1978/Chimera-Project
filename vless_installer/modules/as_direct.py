@@ -420,7 +420,7 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
             pass
 
     comment = _as_direct_comment(asn)
-    # AWG-режим: action="direct" должен идти через "direct-local" (без fwmark → eth0),
+    # AWG-режим: action="direct" должен идти через "direct-local" (без fwmark → default route ОС),
     # иначе РФ/AS-префиксы уйдут через awg0 (exit-VPS) и AS-direct бесполезен.
     _as_direct_outbound = "direct-local" if (AWG_EXIT_ENABLED and action == "direct") else None
     written: set = set()
@@ -448,7 +448,7 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
             # Шаг 2: убеждаемся что нужный outbound существует
             if action == "direct":
                 if AWG_EXIT_ENABLED:
-                    # AWG: "direct-local" (без fwmark → eth0)
+                    # AWG: "direct-local" (без fwmark → default route ОС)
                     outbound_tag = "direct-local"
                     if not any(ob.get("tag") == "direct-local" for ob in outbounds):
                         outbounds.append({

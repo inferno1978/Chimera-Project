@@ -936,7 +936,7 @@ def generate_xray_config() -> None:
     # split tunneling: РФ-домены/IP, отправленные в "direct", тоже идут через
     # туннель → 2ip.ru видит exit-IP вместо entry-IP.
     # Решение: второй outbound "direct-local" (freedom БЕЗ fwmark) — пакеты идут
-    # напрямую через eth0 (default route ОС, не AWG-таблица).
+    # напрямую через default route ОС (физический интерфейс) (default route ОС, не AWG-таблица).
     # IPv6: domainStrategy=UseIPv4 принудительно, если на entry нет IPv6
     # (IS_IPV6_AVAILABLE проверяется через _check_ipv6_preflight — пинг до
     # 2001:4860:4860::8888 + curl ipv6.icanhazip.com). Иначе freedom попытается
@@ -947,10 +947,10 @@ def generate_xray_config() -> None:
             "protocol": "freedom",
             "tag":      "direct-local",
             "settings": {"domainStrategy": _dl_strategy},
-            # НЕТ sockopt.mark → ОС использует default route (eth0), не awg0.
+            # НЕТ sockopt.mark → ОС использует default route ОС, не awg0.
         })
         info(f"AWG + Split tunnel: добавлен outbound direct-local "
-             f"(domainStrategy={_dl_strategy}, без fwmark → РФ-трафик напрямую через eth0)")
+             f"(domainStrategy={_dl_strategy}, без fwmark → РФ-трафик напрямую через default route ОС (физический интерфейс))")
 
     # ── Split tunneling (Режим A, REALITY) ───────────────────────────────────
     if SPLIT_TUNNEL_ENABLED:
@@ -1144,7 +1144,7 @@ def generate_xray_config_xhttp() -> None:
     # ── AWG + Split tunnel: добавляем direct-local (БЕЗ fwmark) ──────────────
     # См. подробный комментарий в generate_xray_config() — тут та же логика:
     # в AWG-режиме "direct" имеет fwmark → весь трафик через awg0 (exit-VPS).
-    # Для split tunneling нужен второй outbound без fwmark → РФ-трафик через eth0.
+    # Для split tunneling нужен второй outbound без fwmark → РФ-трафик через default route ОС (физический интерфейс).
     # IPv6: UseIPv4 принудительно при отсутствии IPv6 на entry (см. _check_ipv6_preflight).
     if AWG_EXIT_ENABLED and SPLIT_TUNNEL_ENABLED:
         _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
@@ -1154,7 +1154,7 @@ def generate_xray_config_xhttp() -> None:
             "settings": {"domainStrategy": _dl_strategy},
         })
         info(f"AWG + Split tunnel: добавлен outbound direct-local "
-             f"(domainStrategy={_dl_strategy}, без fwmark → РФ-трафик напрямую через eth0)")
+             f"(domainStrategy={_dl_strategy}, без fwmark → РФ-трафик напрямую через default route ОС (физический интерфейс))")
 
     # ── Split tunneling (Режим A, xHTTP TLS) ─────────────────────────────────
     if SPLIT_TUNNEL_ENABLED:
