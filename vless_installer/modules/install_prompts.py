@@ -1,0 +1,897 @@
+"""
+vless_installer/modules/install_prompts.py
+───────────────────────────────────────────────────────────────────────────────
+Интерактивные запросы параметров установки.
+
+Содержит 4 функции, вынесенные из _core.py:
+  • ``prompt_parameters()``      — большая (~385 строк) функция, опрашивающая
+    пользователя по 11 пунктам (UUID, ShortID, REALITY-ключи, SpiderX, сокет,
+    домен, email, domainStrategy, шаблон сайта, DNSCrypt, fingerprint).
+    Мутирует глобалы ядра: ``PARAM_UUID``, ``PARAM_SHORTID``,
+    ``PARAM_PRIVATE_KEY``, ``PARAM_PUBLIC_KEY``, ``PARAM_SPIDERX``,
+    ``PARAM_SOCKET_PATH``, ``PARAM_DOMAIN``, ``PARAM_EMAIL``,
+    ``PARAM_DOMAIN_STRATEGY``, ``PARAM_SITE_TEMPLATE``, ``PARAM_USE_DNSCRYPT``,
+    ``PARAM_FINGERPRINT``, ``PRIVATE_KEY_MODE``.
+  • ``prompt_install_mode()``    — выбор одиночный сервер (A) или каскад (B);
+    мутирует ``INSTALL_MODE``.
+  • ``prompt_protocol_mode()``   — выбор VLESS+REALITY или VLESS+xHTTP+TLS +
+    выбор порта; мутирует ``PROTOCOL_MODE``, ``SERVER_PORT``, ``XHTTP_PORT``.
+  • ``prompt_awg_exit_mode()``   — выбор транспорта для exit-ноды (VLESS/AWG/H2)
+    + параметры AWG-обфускации + метод SSH-аутентификации; мутирует
+    ``AWG_EXIT_ENABLED``, ``AWG_EXIT_HOST``, ``AWG_EXIT_PORT``, ``AWG_JC`` и
+    прочие ``AWG_*``, ``AWG_SSH_AUTH_METHOD``, ``AWG_SSH_PASSWORD``,
+    ``PARAM_REALITY_DEST``, ``H2_EXIT_ENABLED``.
+
+Точки входа из _core.py:
+    from vless_installer.modules.install_prompts import (
+        prompt_parameters, prompt_install_mode, prompt_protocol_mode,
+        prompt_awg_exit_mode,
+    )
+
+Глобалы ядра мутируются через dual-form паттерн:
+    X = value
+    setattr(core, "X", X)
+Это сохраняет и локальную переменную (для последующих чтений в той же
+функции), и атрибут модуля ``_core`` (для других модулей).
+
+Доступ к helpers ядра (``_box_*``, ``info``/``warn``/``success``, ``gen_uuid``,
+``gen_hex``, ``gen_spiderx``, ``_fm_prompt_fingerprint``, ``STATE_FILE``,
+ANSI-цвета, ``IS_IPV6_AVAILABLE``, ``XHTTP_*``, ``SERVER_PORT``,
+``PROTOCOL_MODE``, ``AWG_*``, ``_prompt_xhttp_options``,
+``_prompt_awg_additional_nodes``, ``getpass``) — через importlib.
+───────────────────────────────────────────────────────────────────────────────
+"""
+from __future__ import annotations
+
+import getpass
+import random
+import re
+from pathlib import Path
+
+
+# =============================================================================
+#  ОТЛОЖЕННАЯ ПРИВЯЗКА К ЯДРУ (_core.py)
+# =============================================================================
+def _core_module():
+    """Возвращает модуль vless_installer._core, импортируя его лениво."""
+    import importlib
+    return importlib.import_module("vless_installer._core")
+
+
+# =============================================================================
+#  ИНТЕРАКТИВНЫЙ ЗАПРОС ПАРАМЕТРОВ
+# =============================================================================
+def prompt_parameters() -> None:
+    core = _core_module()
+    # ── Bind helpers ──────────────────────────────────────────────────────────
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_sep    = core._box_sep
+    _box_bottom = core._box_bottom
+    _box_item   = core._box_item
+    _box_desc   = core._box_desc
+    _box_link   = core._box_link
+    info    = core.info
+    warn    = core.warn
+    success = core.success
+    gen_uuid    = core.gen_uuid
+    gen_hex     = core.gen_hex
+    gen_spiderx = core.gen_spiderx
+    _fm_prompt_fingerprint = core._fm_prompt_fingerprint
+    # ── Bind globals (for reads) ───────────────────────────────────────────────
+    PROTOCOL_MODE         = core.PROTOCOL_MODE
+    PARAM_FINGERPRINT     = core.PARAM_FINGERPRINT
+    PRIVATE_KEY_MODE      = core.PRIVATE_KEY_MODE
+    IS_IPV6_AVAILABLE     = core.IS_IPV6_AVAILABLE
+    STATE_FILE            = core.STATE_FILE
+    SERVER_PORT           = core.SERVER_PORT
+    XHTTP_MODE            = core.XHTTP_MODE
+    XHTTP_PATH            = core.XHTTP_PATH
+    XHTTP_PERF_PRESET     = core.XHTTP_PERF_PRESET
+    XHTTP_PADDING_BYTES           = core.XHTTP_PADDING_BYTES
+    XHTTP_NO_SSE_HEADER           = core.XHTTP_NO_SSE_HEADER
+    XHTTP_NO_GRPC_HEADER          = core.XHTTP_NO_GRPC_HEADER
+    XHTTP_HOST                    = core.XHTTP_HOST
+    XHTTP_SC_STREAM_UP_SERVER_SECS = core.XHTTP_SC_STREAM_UP_SERVER_SECS
+    XHTTP_SC_MAX_EACH_POST_BYTES   = core.XHTTP_SC_MAX_EACH_POST_BYTES
+    XHTTP_SC_MIN_POSTS_INTERVAL_MS = core.XHTTP_SC_MIN_POSTS_INTERVAL_MS
+    XHTTP_SC_MAX_BUFFERED_POSTS    = core.XHTTP_SC_MAX_BUFFERED_POSTS
+    XHTTP_XMUX_ENABLED             = core.XHTTP_XMUX_ENABLED
+    XHTTP_XMUX_MAX_CONCURRENCY     = core.XHTTP_XMUX_MAX_CONCURRENCY
+    XHTTP_TCP_NO_DELAY             = core.XHTTP_TCP_NO_DELAY
+    XHTTP_ENABLE_SESSION_RESUMPTION = core.XHTTP_ENABLE_SESSION_RESUMPTION
+    # ── Bind colors ────────────────────────────────────────────────────────────
+    BLUE    = core.BLUE
+    CYAN    = core.CYAN
+    GREEN   = core.GREEN
+    YELLOW  = core.YELLOW
+    MAGENTA = core.MAGENTA
+    BOLD    = core.BOLD
+    DIM     = core.DIM
+    NC      = core.NC
+
+    _box_top(f"Настройка параметров установки")
+    _box_row()
+
+    # --- 1. UUID ---
+    _box_sep()
+    _box_row(f" {BLUE}[1/9] UUID клиента:{NC}")
+    auto_uuid = gen_uuid()
+    _box_item("1", f"Сгенерировать автоматически: {DIM}{auto_uuid}{NC}")
+    _box_item("2", f"Ввести вручную")
+    _box_bottom()
+    while True:
+        try:
+            choice = input("   Выбор [1/2]: ").strip() or "1"
+        except KeyboardInterrupt:
+            print()
+            raise
+        if choice == "1":
+            PARAM_UUID = auto_uuid
+            setattr(core, "PARAM_UUID", PARAM_UUID)
+            success(f"   UUID: {PARAM_UUID}")
+            break
+        elif choice == "2":
+            _box_bottom()
+            while True:
+                try:
+                    v = input("   UUID: ").strip()
+                except KeyboardInterrupt:
+                    print()
+                    raise
+                if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', v):
+                    PARAM_UUID = v
+                    setattr(core, "PARAM_UUID", PARAM_UUID)
+                    success(f"   UUID: {PARAM_UUID}")
+                    break
+                warn("   Неверный UUID (формат: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)")
+            break
+        else:
+            warn("   Введите 1 или 2")
+
+    # --- 2. ShortID ---
+    _box_top(f" {BLUE}[2/9] ShortID (REALITY):{NC}")
+    auto_sid = gen_hex(8)
+    _box_item("1", f"Сгенерировать автоматически: {DIM}{auto_sid}{NC}")
+    _box_item("2", f"Ввести вручную (hex, чётная длина 2-16)")
+    _box_bottom()
+    while True:
+        try:
+            choice = input("   Выбор [1/2]: ").strip() or "1"
+        except KeyboardInterrupt:
+            print()
+            raise
+        if choice == "1":
+            PARAM_SHORTID = auto_sid
+            setattr(core, "PARAM_SHORTID", PARAM_SHORTID)
+            success(f"   ShortID: {PARAM_SHORTID}")
+            break
+        elif choice == "2":
+            _box_bottom()
+            while True:
+                try:
+                    v = input("   ShortID (hex, 2-16 символов): ").strip()
+                except KeyboardInterrupt:
+                    print()
+                    raise
+                if re.match(r'^[0-9a-f]{2,16}$', v) and len(v) % 2 == 0:
+                    PARAM_SHORTID = v
+                    setattr(core, "PARAM_SHORTID", PARAM_SHORTID)
+                    success(f"   ShortID: {PARAM_SHORTID}")
+                    break
+                warn("   Неверный ShortID (нужна hex строка чётной длины 2-16)")
+            break
+        else:
+            warn("   Введите 1 или 2")
+
+    # --- 3. Ключи REALITY (только для REALITY) ---
+    key_mode = "auto"
+    if PROTOCOL_MODE == "reality":
+        _box_top(f" {BLUE}[3/9] Ключи REALITY (x25519) — будут сгенерированы после установки Xray:{NC}")
+        _box_item("1", f"Сгенерировать автоматически (рекомендуется)")
+        _box_item("2", f"Ввести вручную (если уже есть пара ключей)")
+        _box_bottom()
+        while True:
+            try:
+                choice = input("   Выбор [1/2]: ").strip() or "1"
+            except KeyboardInterrupt:
+                print()
+                raise
+            if choice == "1":
+                key_mode = "auto"
+                info("   Ключи будут сгенерированы после установки Xray")
+                break
+            elif choice == "2":
+                key_mode = "manual"
+                _box_bottom()
+                while True:
+                    try:
+                        PARAM_PRIVATE_KEY = input("   Private Key: ").strip()
+                    except KeyboardInterrupt:
+                        print()
+                        raise
+                    if len(PARAM_PRIVATE_KEY) >= 40:
+                        break
+                    warn("   Private Key слишком короткий (мин. 40 символов)")
+                setattr(core, "PARAM_PRIVATE_KEY", PARAM_PRIVATE_KEY)
+                _box_bottom()
+                while True:
+                    try:
+                        PARAM_PUBLIC_KEY = input("   Public Key:  ").strip()
+                    except KeyboardInterrupt:
+                        print()
+                        raise
+                    if len(PARAM_PUBLIC_KEY) >= 40:
+                        break
+                    warn("   Public Key слишком короткий (мин. 40 символов)")
+                setattr(core, "PARAM_PUBLIC_KEY", PARAM_PUBLIC_KEY)
+                success("   Ключи введены вручную")
+                break
+            else:
+                warn("   Введите 1 или 2")
+    else:
+        info("[3/9] Ключи REALITY: пропущено (xHTTP TLS использует TLS-сертификат Let's Encrypt)")
+
+    # --- 4. SpiderX (только для REALITY) ---
+    if PROTOCOL_MODE == "reality":
+        _box_top(f" {BLUE}[4/9] SpiderX (путь краулера REALITY):{NC}")
+        auto_spx = gen_spiderx()
+        _box_item("1", f"Сгенерировать автоматически: {DIM}{auto_spx}{NC}")
+        _box_item("2", f"Ввести вручную")
+        _box_bottom()
+        while True:
+            try:
+                choice = input("   Выбор [1/2]: ").strip() or "1"
+            except KeyboardInterrupt:
+                print()
+                raise
+            if choice == "1":
+                PARAM_SPIDERX = auto_spx
+                setattr(core, "PARAM_SPIDERX", PARAM_SPIDERX)
+                success(f"   SpiderX: {PARAM_SPIDERX}")
+                break
+            elif choice == "2":
+                _box_bottom()
+                while True:
+                    try:
+                        v = input("   SpiderX (начинается с /): ").strip()
+                    except KeyboardInterrupt:
+                        print()
+                        raise
+                    if v.startswith('/'):
+                        PARAM_SPIDERX = v
+                        setattr(core, "PARAM_SPIDERX", PARAM_SPIDERX)
+                        success(f"   SpiderX: {PARAM_SPIDERX}")
+                        break
+                    warn("   Путь должен начинаться с /")
+                break
+            else:
+                warn("   Введите 1 или 2")
+    else:
+        PARAM_SPIDERX = gen_spiderx()   # значение не используется, но задаём
+        setattr(core, "PARAM_SPIDERX", PARAM_SPIDERX)
+        info(f"[4/9] SpiderX: пропущено (xHTTP TLS)")
+
+    # --- 5. Unix Socket (только для REALITY) ---
+    if PROTOCOL_MODE == "reality":
+        # Переиспользуем сокет из xray конфига или state.json если уже установлено
+        _existing_sock = ""
+        try:
+            import json as _json
+            _xray_cfg = _json.loads(Path("/etc/xray/config.json").read_text())
+            for _inb in _xray_cfg.get("inbounds", []):
+                _dest = _inb.get("streamSettings", {}).get("realitySettings", {}).get("dest", "")
+                if _dest and _dest.endswith(".socket"):
+                    _existing_sock = _dest
+                    break
+        except Exception:
+            pass
+        if not _existing_sock and STATE_FILE.exists():
+            try:
+                _existing_sock = _json.loads(STATE_FILE.read_text()).get("socket", "")
+            except Exception:
+                pass
+        auto_sock = _existing_sock if _existing_sock else f"/dev/shm/{gen_hex(4)}.socket"
+        _box_top(f" {BLUE}[5/9] Unix socket path:{NC}")
+        _box_item("1", f"Использовать: {DIM}{auto_sock}{NC}")
+        _box_item("2", f"Ввести вручную")
+        _box_bottom()
+        while True:
+            try:
+                choice = input("   Выбор [1/2]: ").strip() or "1"
+            except KeyboardInterrupt:
+                print()
+                raise
+            if choice == "1":
+                PARAM_SOCKET_PATH = auto_sock
+                setattr(core, "PARAM_SOCKET_PATH", PARAM_SOCKET_PATH)
+                success(f"   Socket: {PARAM_SOCKET_PATH}")
+                break
+            elif choice == "2":
+                _box_bottom()
+                while True:
+                    try:
+                        v = input("   Socket path (абсолютный, .socket): ").strip()
+                    except KeyboardInterrupt:
+                        print()
+                        raise
+                    if v.startswith('/') and v.endswith('.socket'):
+                        PARAM_SOCKET_PATH = v
+                        setattr(core, "PARAM_SOCKET_PATH", PARAM_SOCKET_PATH)
+                        success(f"   Socket: {PARAM_SOCKET_PATH}")
+                        break
+                    warn("   Путь должен быть абсолютным и заканчиваться на .socket")
+                break
+            else:
+                warn("   Введите 1 или 2")
+    else:
+        PARAM_SOCKET_PATH = f"/dev/shm/{gen_hex(4)}.socket"  # заглушка
+        setattr(core, "PARAM_SOCKET_PATH", PARAM_SOCKET_PATH)
+        info(f"[5/9] Unix socket: пропущено (xHTTP TLS не использует сокет)")
+
+    # --- 6. Домен ---
+    _box_top(f" {BLUE}[6/9] Домен (SNI):{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input("   Домен (напр. example.com): ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if not v:
+            warn("   Домен не может быть пустым")
+            continue
+        if re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*\.[a-zA-Z]{2,}$', v):
+            PARAM_DOMAIN = v
+            setattr(core, "PARAM_DOMAIN", PARAM_DOMAIN)
+            success(f"   Домен: {PARAM_DOMAIN}")
+            break
+        warn("   Некорректный домен. Введите FQDN вида my.example.com")
+
+    # --- 7. Email ---
+    _box_top(f" {BLUE}[7/9] Email для Let's Encrypt:{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input(f"   Email [admin@{PARAM_DOMAIN}]: ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        PARAM_EMAIL = v if v else f"admin@{PARAM_DOMAIN}"
+        if re.match(r'^[^@]+@[^@]+\.[^@]+$', PARAM_EMAIL):
+            setattr(core, "PARAM_EMAIL", PARAM_EMAIL)
+            success(f"   Email: {PARAM_EMAIL}")
+            break
+        warn("   Некорректный email")
+
+    # --- 8. domainStrategy ---
+    _box_top(f" {BLUE}[8/9] Стратегия исходящих соединений:{NC}")
+    if IS_IPV6_AVAILABLE:
+        _box_row(f"   {GREEN}ℹ IPv6 обнаружен на сервере{NC}")
+    _box_item("1", f"UseIPv6v4 — сначала IPv6, fallback IPv4 {GREEN}(рекомендуется){NC}")
+    _box_item("2", f"UseIPv4v6 — сначала IPv4, fallback IPv6")
+    _box_item("3", f"UseIP     — системный DNS")
+    _box_item("4", f"UseIPv4   — только IPv4")
+    strat_map = {"1": "UseIPv6v4", "2": "UseIPv4v6", "3": "UseIP", "4": "UseIPv4"}
+    _box_bottom()
+    while True:
+        try:
+            choice = input("   Выбор [1]: ").strip() or "1"
+        except KeyboardInterrupt:
+            print()
+            raise
+        if choice in strat_map:
+            PARAM_DOMAIN_STRATEGY = strat_map[choice]
+            setattr(core, "PARAM_DOMAIN_STRATEGY", PARAM_DOMAIN_STRATEGY)
+            break
+        warn("   Введите 1, 2, 3 или 4")
+    success(f"   domainStrategy: {PARAM_DOMAIN_STRATEGY}")
+
+    # --- 9. Шаблон сайта ---
+    _box_top(f" {BLUE}[9/9] Шаблон сайта-заглушки:{NC}")
+    _box_item("1", f"TechHub        — компьютерные технологии (RU)")
+    _box_item("2", f"NexCloud        — корпоративный SaaS (EN, многостраничный)")
+    _box_item("3", f"Holm & Oak      — e-commerce / homeware (EN, многостраничный)")
+    _box_item("4", f"Ember & Grain   — ресторан / бистро (EN, многостраничный)")
+    _box_item("5", f"NexHub          — форум + облачное хранилище (EN, многостраничный)")
+    _box_item("6", f"ByteForge       — технический форум (EN, многостраничный)")
+    _box_item("0", f"Случайный")
+    _box_bottom()
+    while True:
+        try:
+            choice = input("   Выбор [0]: ").strip() or "0"
+        except KeyboardInterrupt:
+            print()
+            raise
+        if choice == "0":
+            PARAM_SITE_TEMPLATE = str(random.randint(1, 6))
+            setattr(core, "PARAM_SITE_TEMPLATE", PARAM_SITE_TEMPLATE)
+            break
+        elif choice in "123456":
+            PARAM_SITE_TEMPLATE = choice
+            setattr(core, "PARAM_SITE_TEMPLATE", PARAM_SITE_TEMPLATE)
+            break
+        warn("   Введите 0-6")
+
+    tmpl_names = ["", "TechHub", "NexCloud", "Holm & Oak",
+                  "Ember & Grain", "NexHub", "ByteForge"]
+    success(f"   Шаблон: {tmpl_names[int(PARAM_SITE_TEMPLATE)]}")
+
+    # --- 10. DNSCrypt-proxy ---
+    _box_top(f" {BLUE}[10/11] DNSCrypt-proxy (зашифрованный DNS):{NC}")
+    _box_item("Y", f"Установить DNSCrypt-proxy {GREEN}(рекомендуется){NC}")
+    _box_desc(f"Шифрует DNS-запросы, защищает от слежки провайдера")
+    _box_item("N", f"Использовать публичные DNS напрямую (1.1.1.1 / 8.8.8.8)")
+    _box_desc(f"Проще, меньше компонентов, чуть быстрее первый запрос")
+    _box_row()
+    _box_bottom()
+    while True:
+        try:
+            choice = input("   Установить DNSCrypt-proxy? [Y/n]: ").strip().lower()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if choice in ('y', 'yes', ''):
+            PARAM_USE_DNSCRYPT = True
+            setattr(core, "PARAM_USE_DNSCRYPT", PARAM_USE_DNSCRYPT)
+            success("   DNSCrypt-proxy: будет установлен")
+            break
+        elif choice in ('n', 'no'):
+            PARAM_USE_DNSCRYPT = False
+            setattr(core, "PARAM_USE_DNSCRYPT", PARAM_USE_DNSCRYPT)
+            info("   DNSCrypt-proxy: пропускаем, используем публичные DNS")
+            break
+        warn("   Введите Y или N")
+
+    # --- 11. Fingerprint ---
+    _box_top(f" {BLUE}[11/11] TLS Fingerprint (uTLS):{NC}")
+    _box_row(f"   Определяет, под какой браузер маскируется TLS-хендшейк клиента.")
+    _box_row(f"   Влияет на обход DPI. Должен совпадать в клиенте и на сервере.")
+    _box_bottom()
+    PARAM_FINGERPRINT = _fm_prompt_fingerprint(current=PARAM_FINGERPRINT)
+    setattr(core, "PARAM_FINGERPRINT", PARAM_FINGERPRINT)
+
+    # --- Сводка ---
+    _box_bottom()
+    _box_top(f"Сводка параметров")
+    _box_row()
+    proto_str = f"xHTTP TLS (mode={XHTTP_MODE}, path={XHTTP_PATH}, preset={XHTTP_PERF_PRESET})" if PROTOCOL_MODE == "xhttp" else "VLESS + TCP + REALITY"
+    _box_row(f"  {CYAN}Протокол:{NC}        {proto_str}")
+    if PROTOCOL_MODE == "xhttp":
+        _box_row(f"  {CYAN}xPaddingBytes:{NC}   {XHTTP_PADDING_BYTES}")
+        _box_row(f"  {CYAN}noSSEHeader:{NC}     {XHTTP_NO_SSE_HEADER}")
+        _box_row(f"  {CYAN}noGRPCHeader:{NC}    {XHTTP_NO_GRPC_HEADER}")
+        if XHTTP_HOST:
+            _box_row(f"  {CYAN}host:{NC}            {XHTTP_HOST}")
+        if XHTTP_MODE in ("streamup", "streamone", "auto"):
+            _box_row(f"  {CYAN}StreamUpSrvSecs:{NC} {XHTTP_SC_STREAM_UP_SERVER_SECS}")
+        if XHTTP_MODE in ("packetup", "auto"):
+            _box_row(f"  {CYAN}MaxEachPostBytes:{NC}{XHTTP_SC_MAX_EACH_POST_BYTES}")
+            _box_row(f"  {CYAN}MinPostsIntervalMs:{NC}{XHTTP_SC_MIN_POSTS_INTERVAL_MS}")
+            _box_row(f"  {CYAN}MaxBufferedPosts:{NC}{XHTTP_SC_MAX_BUFFERED_POSTS}")
+        if XHTTP_XMUX_ENABLED:
+            _box_row(f"  {CYAN}xmux:{NC}            включён (concurrency={XHTTP_XMUX_MAX_CONCURRENCY})")
+        else:
+            _box_row(f"  {CYAN}xmux:{NC}            отключён")
+        _box_row(f"  {CYAN}tcpNoDelay:{NC}      {XHTTP_TCP_NO_DELAY}")
+        _box_row(f"  {CYAN}SessionResumption:{NC}{XHTTP_ENABLE_SESSION_RESUMPTION}")
+    _box_row(f"  {CYAN}Порт:{NC}            {SERVER_PORT}")
+    _box_row(f"  {CYAN}UUID:{NC}            {PARAM_UUID}")
+    _box_row(f"  {CYAN}ShortID:{NC}         {PARAM_SHORTID}")
+    if PROTOCOL_MODE == "reality":
+        if key_mode == "manual":
+            _box_row(f"  {CYAN}Public Key:{NC}      {PARAM_PUBLIC_KEY}")
+        else:
+            _box_row(f"  {CYAN}Ключи:{NC}           (авто — после установки Xray)")
+        _box_row(f"  {CYAN}SpiderX:{NC}         {PARAM_SPIDERX}")
+        _box_row(f"  {CYAN}Socket:{NC}          {PARAM_SOCKET_PATH}")
+    _box_row(f"  {CYAN}Домен:{NC}           {PARAM_DOMAIN}")
+    _box_row(f"  {CYAN}Email (LE):{NC}      {PARAM_EMAIL}")
+    _box_row(f"  {CYAN}Strategy:{NC}        {PARAM_DOMAIN_STRATEGY}")
+    _box_row(f"  {CYAN}IPv6:{NC}            {IS_IPV6_AVAILABLE}")
+    _box_row(f"  {CYAN}Шаблон:{NC}          {tmpl_names[int(PARAM_SITE_TEMPLATE)]}")
+    dc_str = "да (зашифрованный DNS)" if PARAM_USE_DNSCRYPT else "нет (1.1.1.1 / 8.8.8.8)"
+    _box_row(f"  {CYAN}DNSCrypt:{NC}        {dc_str}")
+    _box_row()
+    _box_bottom()
+
+    try:
+        ans = input(f"{YELLOW}Продолжить установку? [y/N]:{NC} ").strip().lower()
+    except KeyboardInterrupt:
+        print()
+        raise
+    if ans != 'y':
+        info("Отменено — возврат в меню.")
+        raise KeyboardInterrupt
+
+    PRIVATE_KEY_MODE = key_mode
+    setattr(core, "PRIVATE_KEY_MODE", PRIVATE_KEY_MODE)
+
+
+# =============================================================================
+#  ВЫБОР РЕЖИМА УСТАНОВКИ (A / B)
+# =============================================================================
+def prompt_install_mode() -> None:
+    """Спросить пользователя: одиночный сервер (A) или каскадный прокси (B)."""
+    core = _core_module()
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_item   = core._box_item
+    _box_desc   = core._box_desc
+    _box_bottom = core._box_bottom
+    success = core.success
+    warn    = core.warn
+    BOLD   = core.BOLD
+    CYAN   = core.CYAN
+    YELLOW = core.YELLOW
+    NC     = core.NC
+
+    _box_top(f"Режим установки")
+    _box_row()
+    _box_item("A", f"🌐 Обычный сервер (Режим A)")
+    _box_desc(f"Клиент → {BOLD}этот VPS{NC} → Интернет")
+    _box_desc(f"Один сервер выполняет роль точки выхода.")
+    _box_row()
+    _box_item("B", f"🔗 Каскадный прокси (Режим B) — Chained")
+    _box_desc(f"Клиент (RU) → {BOLD}этот VPS (RU){NC} → зарубежный VPS → Интернет")
+    _box_desc(f"Используйте, если прямой коннект к зарубежному VPS нестабилен.")
+    _box_desc(f"{YELLOW}Скрипт сгенерирует конфиги для ОБОИХ серверов.{NC}")
+    _box_row()
+    _box_bottom()
+    while True:
+        try:
+            choice = input(f"  {CYAN}Выбор [A/B]:{NC} ").strip().upper()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if choice in ('A', ''):
+            INSTALL_MODE = "A"
+            setattr(core, "INSTALL_MODE", INSTALL_MODE)
+            success("Режим A: одиночный сервер")
+            break
+        elif choice == 'B':
+            INSTALL_MODE = "B"
+            setattr(core, "INSTALL_MODE", INSTALL_MODE)
+            success("Режим B: каскадный прокси")
+            break
+        warn("Введите A или B")
+
+
+def prompt_protocol_mode() -> None:
+    """Выбор режима протокола: VLESS+TCP+REALITY или VLESS+xHTTP+TLS."""
+    core = _core_module()
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_item   = core._box_item
+    _box_desc   = core._box_desc
+    _box_bottom = core._box_bottom
+    success = core.success
+    warn    = core.warn
+    _prompt_xhttp_options = core._prompt_xhttp_options
+    GREEN = core.GREEN
+    CYAN  = core.CYAN
+    NC    = core.NC
+
+    _box_top(f"Режим протокола")
+    _box_row()
+    _box_item("1", f"🔒 VLESS + TCP + REALITY (xtls-rprx-vision) {GREEN}(рекомендуется){NC}")
+    _box_desc(f"Максимальная производительность, аппаратное ускорение TLS.")
+    _box_desc(f"Идеален как exit-нода и для прямых подключений.")
+    _box_row()
+    _box_item("2", f"🌐 VLESS + xHTTP + TLS")
+    _box_desc(f"Трафик выглядит как обычный HTTPS-поток.")
+    _box_desc(f"Обходит DPI через маскировку под HTTP/2 или chunked-streaming.")
+    _box_row()
+    _box_bottom()
+    while True:
+        try:
+            choice = input(f"  {CYAN}Выбор [1/2]:{NC} ").strip() or "1"
+        except KeyboardInterrupt:
+            print()
+            raise
+        if choice == "1":
+            PROTOCOL_MODE = "reality"
+            setattr(core, "PROTOCOL_MODE", PROTOCOL_MODE)
+            success("Протокол: VLESS + TCP + REALITY")
+            break
+        elif choice == "2":
+            PROTOCOL_MODE = "xhttp"
+            setattr(core, "PROTOCOL_MODE", PROTOCOL_MODE)
+            _prompt_xhttp_options()
+            break
+        else:
+            warn("Введите 1 или 2")
+
+    # ── Выбор порта (общий для обоих протоколов) ─────────────────────────────
+    _box_top(f"Порт прослушивания Xray")
+    _box_row()
+    _box_row()
+    _box_item("1", f"443  {GREEN}(рекомендуется — стандартный HTTPS, меньше блокировок){NC}")
+    _box_item("2", f"8443 (альтернатива, часто не блокируется)")
+    _box_item("3", f"Ввести вручную (1–65535)")
+    _box_bottom()
+    while True:
+        try:
+            ch = input(f"  {CYAN}Выбор [1]: {NC}").strip() or "1"
+        except KeyboardInterrupt:
+            print()
+            raise
+        if ch == "1":
+            SERVER_PORT = 443
+            setattr(core, "SERVER_PORT", SERVER_PORT)
+            break
+        elif ch == "2":
+            SERVER_PORT = 8443
+            setattr(core, "SERVER_PORT", SERVER_PORT)
+            break
+        elif ch == "3":
+            while True:
+                try:
+                    raw = input("  Порт (1–65535): ").strip()
+                except KeyboardInterrupt:
+                    print()
+                    raise
+                if raw.isdigit() and 1 <= int(raw) <= 65535:
+                    SERVER_PORT = int(raw)
+                    setattr(core, "SERVER_PORT", SERVER_PORT)
+                    break
+                warn("  Введите число от 1 до 65535")
+            break
+        else:
+            warn("Введите 1, 2 или 3")
+    XHTTP_PORT = SERVER_PORT   # синхронизируем alias
+    setattr(core, "XHTTP_PORT", XHTTP_PORT)
+    print(f"  {GREEN}✓ Порт: {SERVER_PORT}{NC}")
+
+
+# =============================================================================
+#  ВЫБОР ТРАНСПОРТА EXIT-НОДЫ (VLESS / AWG / Hysteria2)
+# =============================================================================
+def prompt_awg_exit_mode() -> None:
+    """
+    Спрашивает пользователя: использовать ли AWG как транспорт exit-ноды.
+    Если да — запрашивает IP зарубежного VPS, параметры AWG и метод SSH-аутентификации.
+
+    Решение проблемы фейковых VLESS-данных:
+        Эта функция вызывается ДО prompt_chain_params_multi().
+        do_full_install() затем проверяет AWG_EXIT_ENABLED:
+            if not AWG_EXIT_ENABLED:
+                prompt_chain_params_multi()
+        При выборе AWG ввод VLESS-нод полностью пропускается.
+    """
+    core = _core_module()
+    # ── Bind helpers ──────────────────────────────────────────────────────────
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_item   = core._box_item
+    _box_bottom = core._box_bottom
+    _box_wrap_msg = core._box_wrap_msg
+    success = core.success
+    warn    = core.warn
+    _prompt_awg_additional_nodes = core._prompt_awg_additional_nodes
+    # ── Bind globals (for reads) ───────────────────────────────────────────────
+    AWG_EXIT_PORT = core.AWG_EXIT_PORT
+    AWG_JC        = core.AWG_JC
+    AWG_JMIN      = core.AWG_JMIN
+    AWG_JMAX      = core.AWG_JMAX
+    AWG_S1        = core.AWG_S1
+    AWG_S2        = core.AWG_S2
+    AWG_H1        = core.AWG_H1
+    AWG_H2        = core.AWG_H2
+    AWG_H3        = core.AWG_H3
+    AWG_H4        = core.AWG_H4
+    AWG_MTU       = core.AWG_MTU
+    # ── Bind colors ────────────────────────────────────────────────────────────
+    BLUE   = core.BLUE
+    CYAN   = core.CYAN
+    GREEN  = core.GREEN
+    YELLOW = core.YELLOW
+    DIM    = core.DIM
+    NC     = core.NC
+
+    print()
+    _box_top("Транспорт для выхода в Интернет (Режим B)")
+    _box_row()
+    _box_wrap_msg(f"  {YELLOW}", 2,
+        f"Выберите, как трафик Xray будет выходить в интернет с RU-сервера:{NC}")
+    _box_row()
+    _box_item("1", f"{GREEN}VLESS{NC}        — через цепочку VLESS-нод (классика, текущий режим)")
+    _box_item("2", f"{CYAN}AmneziaWG 2.0{NC} — через AWG-туннель на зарубежный VPS (рекомендуется)")
+    _box_item("3", f"{YELLOW}Hysteria2{NC}     — через QUIC/UDP туннель на зарубежный VPS")
+    _box_row()
+    _box_wrap_msg(f"  {DIM}", 2,
+        f"AWG: устойчив к DPI, обфусцирован, не требует VLESS на exit-ноде.{NC}")
+    _box_wrap_msg(f"  {DIM}", 2,
+        f"H2: QUIC/UDP, высокая скорость, устойчив к потерям пакетов.{NC}")
+    _box_bottom()
+
+    while True:
+        try:
+            choice = input(f"  {CYAN}Выбор транспорта [1/2/3, Enter=1]:{NC} ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if choice in ("", "1"):
+            AWG_EXIT_ENABLED = False
+            setattr(core, "AWG_EXIT_ENABLED", AWG_EXIT_ENABLED)
+            H2_EXIT_ENABLED  = False
+            setattr(core, "H2_EXIT_ENABLED", H2_EXIT_ENABLED)
+            success("Транспорт: VLESS (стандарт)")
+            return
+        if choice == "2":
+            AWG_EXIT_ENABLED = True
+            setattr(core, "AWG_EXIT_ENABLED", AWG_EXIT_ENABLED)
+            H2_EXIT_ENABLED  = False
+            setattr(core, "H2_EXIT_ENABLED", H2_EXIT_ENABLED)
+            success("Транспорт: AmneziaWG 2.0")
+            break
+        if choice == "3":
+            AWG_EXIT_ENABLED = False
+            setattr(core, "AWG_EXIT_ENABLED", AWG_EXIT_ENABLED)
+            H2_EXIT_ENABLED  = True
+            setattr(core, "H2_EXIT_ENABLED", H2_EXIT_ENABLED)
+            success("Транспорт: Hysteria2 (QUIC/UDP)")
+            # H2 не требует ввода параметров здесь — настраивается через меню 7
+            # после завершения установки. Ввод VLESS-нод пропускается.
+            _box_top("Hysteria2 — информация")
+            _box_row()
+            _box_row(f"  {YELLOW}Hysteria2 выбран как транспорт exit-ноды.{NC}")
+            _box_row()
+            _box_row(f"  {DIM}Установка Xray (entry-нода) будет выполнена стандартным{NC}")
+            _box_row(f"  {DIM}образом. После завершения установки:{NC}")
+            _box_row()
+            _box_row(f"  {CYAN}→{NC}  Перейдите в меню {BOLD}7 — Hysteria2 транспорт{NC}")
+            _box_row(f"  {CYAN}→{NC}  Пункт {BOLD}1 — Exit-нода{NC}  (установка H2 на exit-VPS)")
+            _box_row(f"  {CYAN}→{NC}  Пункт {BOLD}2 — Выбор транспорта{NC}  (активация H2)")
+            _box_row()
+            _box_bottom()
+            input(f"  {CYAN}Нажмите Enter для продолжения установки...{NC}")
+            return
+        warn("Введите 1, 2 или 3")
+
+    # --- Домен маскировки REALITY (dest/sni) ---
+    _box_top("Домен маскировки REALITY (dest/sni)")
+    _box_row()
+    _box_wrap_msg(f"  {YELLOW}", 2,
+        f"Укажите чужой популярный сайт с TLS 1.3 для маскировки.{NC}")
+    _box_wrap_msg(f"  {DIM}", 2,
+        f"Не используйте собственный домен — это создаст петлю маршрутизации.{NC}")
+    _box_row()
+    try:
+        _rd = input(f"  {CYAN}Домен маскировки REALITY [www.microsoft.com]: {NC}").strip()
+    except KeyboardInterrupt:
+        print()
+        raise
+    PARAM_REALITY_DEST = _rd if _rd else "www.microsoft.com"
+    setattr(core, "PARAM_REALITY_DEST", PARAM_REALITY_DEST)
+    success(f"   REALITY dest/sni: {PARAM_REALITY_DEST}")
+
+    # --- Ввод IP зарубежного VPS ---
+    _box_top("Параметры AWG exit-ноды")
+    _box_row()
+    _box_wrap_msg(f"  {YELLOW}", 2,
+        f"На зарубежном VPS будет автоматически установлен AWG-сервер.{NC}")
+    _box_wrap_msg(f"  {YELLOW}", 2,
+        f"Убедитесь, что у вас есть SSH-доступ к нему (root, по ключу).{NC}")
+    _box_row()
+
+    while True:
+        try:
+            host = input(f"  {CYAN}[A1] IP зарубежного VPS (для AWG-сервера):{NC} ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if host:
+            AWG_EXIT_HOST = host
+            setattr(core, "AWG_EXIT_HOST", AWG_EXIT_HOST)
+            success(f"   AWG exit host: {AWG_EXIT_HOST}")
+            break
+        warn("IP не может быть пустым")
+
+    _box_row(f"  {BLUE}[A2] UDP-порт AWG-сервера [{AWG_EXIT_PORT}]:{NC}")
+    try:
+        raw = input(f"  Enter для [{AWG_EXIT_PORT}]: ").strip()
+        if raw.isdigit() and 1024 <= int(raw) <= 65535:
+            AWG_EXIT_PORT = int(raw)
+            setattr(core, "AWG_EXIT_PORT", AWG_EXIT_PORT)
+    except (KeyboardInterrupt, ValueError):
+        pass
+    success(f"   AWG UDP-порт: {AWG_EXIT_PORT}")
+
+    # --- Параметры обфускации (расширенный режим) ---
+    _box_row()
+    _box_row(f"  {YELLOW}Параметры обфускации AmneziaWG{NC}")
+    _box_wrap_msg(f"  {DIM}", 2,
+        f"Значения по умолчанию оптимальны для большинства случаев.{NC}")
+    _box_row()
+
+    try:
+        adv = input(f"  {CYAN}Изменить параметры обфускации? [y/N]:{NC} ").strip().lower()
+    except KeyboardInterrupt:
+        print()
+        adv = ""
+
+    if adv == "y":
+        def _ask_int(prompt: str, default: int, lo: int, hi: int) -> int:
+            try:
+                raw2 = input(f"  {prompt} [{default}]: ").strip()
+                v = int(raw2)
+                if lo <= v <= hi:
+                    return v
+            except (ValueError, KeyboardInterrupt):
+                pass
+            return default
+
+        AWG_JC   = _ask_int("Junk packet count (Jc, 1-128)",   AWG_JC,   1,   128)
+        setattr(core, "AWG_JC",   AWG_JC)
+        AWG_JMIN = _ask_int("Junk min size (Jmin, 10-1000)",   AWG_JMIN, 10,  1000)
+        setattr(core, "AWG_JMIN", AWG_JMIN)
+        AWG_JMAX = _ask_int("Junk max size (Jmax, 10-1000)",   AWG_JMAX, AWG_JMIN, 1000)
+        setattr(core, "AWG_JMAX", AWG_JMAX)
+        AWG_S1   = _ask_int("Init junk size S1 (0-1000)",      AWG_S1,   0,   1000)
+        setattr(core, "AWG_S1",   AWG_S1)
+        AWG_S2   = _ask_int("Response junk size S2 (0-1000)",  AWG_S2,   0,   1000)
+        setattr(core, "AWG_S2",   AWG_S2)
+        AWG_H1   = _ask_int("Magic header H1 (1-2147483647)",  AWG_H1,   1,   2147483647)
+        setattr(core, "AWG_H1",   AWG_H1)
+        AWG_H2   = _ask_int("Magic header H2 (1-2147483647)",  AWG_H2,   1,   2147483647)
+        setattr(core, "AWG_H2",   AWG_H2)
+        AWG_H3   = _ask_int("Magic header H3 (1-2147483647)",  AWG_H3,   1,   2147483647)
+        setattr(core, "AWG_H3",   AWG_H3)
+        AWG_H4   = _ask_int("Magic header H4 (1-2147483647)",  AWG_H4,   1,   2147483647)
+        setattr(core, "AWG_H4",   AWG_H4)
+        AWG_MTU  = _ask_int("MTU интерфейса (1200-1420)",      AWG_MTU,  1200, 1420)
+        setattr(core, "AWG_MTU",  AWG_MTU)
+
+    # --- Метод SSH-аутентификации для удалённой настройки exit-VPS ---
+    _box_top("SSH-доступ к exit-VPS")
+    _box_row()
+    _box_wrap_msg(f"  {YELLOW}", 2,
+        f"Скрипт подключится к {AWG_EXIT_HOST} по SSH для автонастройки AWG-сервера.{NC}")
+    _box_row()
+    _box_item("1", f"{GREEN}SSH-ключ{NC}  — использовать ~/.ssh/id_ed25519 / id_rsa (рекомендуется)")
+    _box_item("2", f"{CYAN}Пароль{NC}    — ввести пароль root-пользователя")
+    _box_row()
+
+    while True:
+        try:
+            _ssh_ch = input(f"  {CYAN}Метод аутентификации [1/2, Enter=1]:{NC} ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if _ssh_ch in ("", "1"):
+            AWG_SSH_AUTH_METHOD = "key"
+            setattr(core, "AWG_SSH_AUTH_METHOD", AWG_SSH_AUTH_METHOD)
+            success("   SSH-аутентификация: по ключу")
+            break
+        if _ssh_ch == "2":
+            AWG_SSH_AUTH_METHOD = "password"
+            setattr(core, "AWG_SSH_AUTH_METHOD", AWG_SSH_AUTH_METHOD)
+            success("   SSH-аутентификация: по паролю")
+            try:
+                AWG_SSH_PASSWORD = getpass.getpass(
+                    f"  Пароль для root@{AWG_EXIT_HOST}: "
+                )
+            except KeyboardInterrupt:
+                print()
+                AWG_SSH_AUTH_METHOD = "key"
+                setattr(core, "AWG_SSH_AUTH_METHOD", AWG_SSH_AUTH_METHOD)
+                AWG_SSH_PASSWORD    = ""
+                setattr(core, "AWG_SSH_PASSWORD", AWG_SSH_PASSWORD)
+                warn("Ввод пароля отменён — откат к SSH-ключу")
+            else:
+                setattr(core, "AWG_SSH_PASSWORD", AWG_SSH_PASSWORD)
+            break
+        warn("Введите 1 или 2")
+
+    _box_row()
+    _box_row(f"  AWG exit:      {AWG_EXIT_HOST}:{AWG_EXIT_PORT}/udp")
+    _box_row(f"  SSH auth:      {AWG_SSH_AUTH_METHOD}")
+    _box_row(f"  Jc/Jmin/Jmax:  {AWG_JC}/{AWG_JMIN}/{AWG_JMAX}")
+    _box_row(f"  S1/S2:         {AWG_S1}/{AWG_S2}")
+    _box_row(f"  H1-H4:         {AWG_H1}/{AWG_H2}/{AWG_H3}/{AWG_H4}")
+    _box_row(f"  MTU:           {AWG_MTU}")
+    _box_bottom()
+    success("Параметры AWG сохранены")
+    # === PATCH v2: спрашиваем о дополнительных нодах ===
+    _prompt_awg_additional_nodes()
