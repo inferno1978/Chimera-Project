@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from vless_installer.modules.proto_common import (
-    ProtoCancelled, proto_ask, proto_get_installed_version,
+    ProtoCancelled, proto_ask, proto_get_installed_version, proto_ipt_rule_exists,
 )
 # _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
 # `raise _Cancelled` code works unchanged after the local class definition
@@ -811,15 +811,22 @@ def _xray_write_and_test(cfg_path: Path, cfg: dict) -> Optional[str]:
 
 # ── iptables REDIRECT для Telegram-подсетей ───────────────────────────────────
 
+# _ipt_rule_exists — вынесен в proto_common (proto_ipt_rule_exists).
+# Выбор iptables vs ip6tables (по ":" в net) остаётся здесь — proto_common
+# работает только с iptables. Для IPv6 вызываем _run напрямую.
 def _ipt_rule_exists(net: str, port: int) -> bool:
     """Проверяет наличие REDIRECT-правила через iptables -C (не дублирует)."""
     v6  = ":" in net
-    ipt = "ip6tables" if v6 else "iptables"
-    r   = _run([ipt, "-t", "nat", "-C", "OUTPUT",
-                "-d", net, "-p", "tcp",
-                "-j", "REDIRECT", "--to-port", str(port)],
-               capture=True)
-    return r.returncode == 0
+    if v6:
+        # IPv6 — ip6tables, не покрывается proto_ipt_rule_exists
+        r = _run(["ip6tables", "-t", "nat", "-C", "OUTPUT",
+                  "-d", net, "-p", "tcp",
+                  "-j", "REDIRECT", "--to-port", str(port)],
+                 capture=True)
+        return r.returncode == 0
+    return proto_ipt_rule_exists("nat", "OUTPUT",
+                                ["-d", net, "-p", "tcp",
+                                 "-j", "REDIRECT", "--to-port", str(port)])
 
 
 def _ipt_add_redirect(net: str, port: int) -> bool:

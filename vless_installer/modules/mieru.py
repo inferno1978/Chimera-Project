@@ -84,7 +84,7 @@ from typing import Optional
 
 from vless_installer.modules.proto_common import (
     ProtoCancelled, proto_load_state, proto_save_state,
-    proto_ask, proto_gen_password, proto_ipt_persist,
+    proto_ask, proto_gen_password, proto_ipt_persist, proto_ipt_rule_exists,
     proto_get_latest_version, proto_get_installed_version,
 )
 # _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
@@ -489,13 +489,9 @@ def _apply_server_config(cfg: dict) -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 #  IPTABLES
 # ══════════════════════════════════════════════════════════════════════════════
+# _ipt_rule_exists — вынесен в proto_common (proto_ipt_rule_exists).
 def _ipt_rule_exists(proto: str, port: int) -> bool:
-    r = _run(
-        ["iptables", "-t", "filter", "-C", "INPUT",
-         "-p", proto.lower(), "--dport", str(port), "-j", "ACCEPT"],
-        capture=True,
-    )
-    return r.returncode == 0
+    return proto_ipt_rule_exists("filter", "INPUT", ["-p", proto.lower(), "--dport", str(port), "-j", "ACCEPT"])
 
 def _ipt_open_port(proto: str, port_start: int, port_end: int) -> None:
     proto = proto.lower()

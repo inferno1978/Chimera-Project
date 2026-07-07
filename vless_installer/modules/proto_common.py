@@ -282,3 +282,16 @@ def proto_full_uninstall(service_name: str, config_path, state_path,
         "proto_full_uninstall is a placeholder; each protocol module "
         "implements its own _full_uninstall with protocol-specific cleanup."
     )
+
+
+def proto_ipt_rule_exists(table: str, chain: str, args: list) -> bool:
+    """Проверяет наличие iptables-правила через ``iptables -t {table} -C {chain} {args}``.
+
+    Возвращает True если правило существует, False — если нет.
+    Все 5 протокольных модулей (wdtt, mieru, turnable, turntunnel, mtproto)
+    делегируют сюда свои _ipt_rule_exists, собирая table/chain/args под свой кейс.
+    """
+    core = _core_module()
+    _run = core._run
+    r = _run(["iptables", "-t", table, "-C", chain] + args, capture=True)
+    return r.returncode == 0
