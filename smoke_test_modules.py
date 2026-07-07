@@ -38,8 +38,10 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 from contextlib import redirect_stdout, redirect_stderr
 
-os.chdir("/home/z/my-project/VLESS-Ultimate-Installer")
-sys.path.insert(0, "/home/z/my-project/VLESS-Ultimate-Installer")
+# Авто-определение корня проекта: скрипт лежит в корне, рядом с main.py
+_PROJECT_ROOT = Path(__file__).resolve().parent
+os.chdir(str(_PROJECT_ROOT))
+sys.path.insert(0, str(_PROJECT_ROOT))
 
 # Список (модуль, функция, описание) — только функции-меню и публичные API
 TEST_CASES = [
