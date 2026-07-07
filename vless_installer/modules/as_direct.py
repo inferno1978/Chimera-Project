@@ -396,6 +396,7 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
     smoke_test_xray          = core.smoke_test_xray
     success                  = core.success
     warn                     = core.warn
+    AWG_EXIT_ENABLED         = getattr(core, "AWG_EXIT_ENABLED", False)
     import ipaddress
 
     action = action.lower()
@@ -419,6 +420,9 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
             pass
 
     comment = _as_direct_comment(asn)
+    # AWG-режим: action="direct" должен идти через "direct-local" (без fwmark → eth0),
+    # иначе РФ/AS-префиксы уйдут через awg0 (exit-VPS) и AS-direct бесполезен.
+    _as_direct_outbound = "direct-local" if (AWG_EXIT_ENABLED and action == "direct") else None
     written: set = set()
     ok = False
     for cfg_path in (CONFIG_DIR / "config.json",
@@ -443,9 +447,20 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
 
             # Шаг 2: убеждаемся что нужный outbound существует
             if action == "direct":
-                outbound_tag = "direct"
-                if not any(ob.get("tag") == "direct" for ob in outbounds):
-                    outbounds.append({"protocol": "freedom", "tag": "direct"})
+                if AWG_EXIT_ENABLED:
+                    # AWG: "direct-local" (без fwmark → eth0)
+                    outbound_tag = "direct-local"
+                    if not any(ob.get("tag") == "direct-local" for ob in outbounds):
+                        outbounds.append({
+                            "protocol": "freedom",
+                            "tag":      "direct-local",
+                            "settings": {"domainStrategy": "UseIPv4"},
+                        })
+                        info("AWG: добавлен outbound direct-local для AS-direct")
+                else:
+                    outbound_tag = "direct"
+                    if not any(ob.get("tag") == "direct" for ob in outbounds):
+                        outbounds.append({"protocol": "freedom", "tag": "direct"})
 
             elif action == "proxy":
                 outbound_tag = _as_get_proxy_outbound_tag(cfg)

@@ -171,9 +171,14 @@ def _ru_subnets_restore_if_needed(silent: bool = False) -> bool:
     _set_config_owner        = core._set_config_owner
     info                     = core.info
     warn                     = core.warn
+    AWG_EXIT_ENABLED         = getattr(core, "AWG_EXIT_ENABLED", False)
     cidrs = _ru_subnets_load_from_file()
     if not cidrs:
         return False
+    # AWG-режим: РФ-подсети должны идти через "direct-local" (без fwmark → eth0),
+    # а не через "direct" (с fwmark → awg0 → exit-VPS). Иначе RIPE-маршрутизация
+    # бесполезна — 2ip.ru и прочие РФ-сайты увидят IP exit-VPS вместо IP entry.
+    _ripe_outbound = "direct-local" if AWG_EXIT_ENABLED else "direct"
     # Применяем без перезапуска Xray — перезапуск сделает вызывающий код
     written: set = set()
     ok = False
@@ -199,7 +204,7 @@ def _ru_subnets_restore_if_needed(silent: bool = False) -> bool:
                 new_rules.append({
                     "type":        "field",
                     "ip":          cidrs[i:i + 500],
-                    "outboundTag": "direct",
+                    "outboundTag": _ripe_outbound,
                     "comment":     _RU_SUBNET_RULE_COMMENT,
                 })
             # BUGFIX: убеждаемся что catch-all существует перед вставкой RIPE-правил.
@@ -212,7 +217,7 @@ def _ru_subnets_restore_if_needed(silent: bool = False) -> bool:
                 for r in rules
             )
             if not _has_catchall and not _has_balancer:
-                _service_tags = {"direct", "BLOCK", "block", "xray-stats-api"}
+                _service_tags = {"direct", "direct-local", "BLOCK", "block", "xray-stats-api"}
                 _catchall_tag = "direct"
                 outbounds = cfg.get("outbounds", [])
                 for _ob in outbounds:
@@ -236,7 +241,7 @@ def _ru_subnets_restore_if_needed(silent: bool = False) -> bool:
                 warn(f"Ошибка восстановления RIPE-правил в {cfg_path}: {e}")
     if ok and not silent:
         info(f"РФ подсети RIPE восстановлены в конфиге ({len(cidrs)} CIDR, "
-             f"{(len(cidrs) + 499) // 500} правил)")
+             f"{(len(cidrs) + 499) // 500} правил, outbound={_ripe_outbound})")
     return ok
 
 
@@ -258,6 +263,8 @@ def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
     if not cidrs:
         warn("Список подсетей пуст")
         return False
+    # AWG-режим: РФ-подсети через "direct-local" (без fwmark), иначе через "direct".
+    _ripe_outbound = "direct-local" if AWG_EXIT_ENABLED else "direct"
     written: set = set()
     ok = False
     for cfg_path in (CONFIG_DIR / "config.json",
@@ -277,14 +284,25 @@ def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
             rules    = [r for r in routing.setdefault("rules", [])
                         if r.get("comment") != _RU_SUBNET_RULE_COMMENT]
             outbounds = cfg.setdefault("outbounds", [])
-            if not any(ob.get("tag") == "direct" for ob in outbounds):
-                outbounds.append({"protocol": "freedom", "tag": "direct"})
+            # В AWG-режиме нужен "direct-local" (без fwmark). Если его нет — добавляем.
+            # В классическом режиме — "direct" (как и раньше).
+            if AWG_EXIT_ENABLED:
+                if not any(ob.get("tag") == "direct-local" for ob in outbounds):
+                    outbounds.append({
+                        "protocol": "freedom",
+                        "tag":      "direct-local",
+                        "settings": {"domainStrategy": "UseIPv4"},
+                    })
+                    info("AWG: добавлен outbound direct-local для RIPE-маршрутизации")
+            else:
+                if not any(ob.get("tag") == "direct" for ob in outbounds):
+                    outbounds.append({"protocol": "freedom", "tag": "direct"})
             new_rules = []
             for i in range(0, len(cidrs), 500):
                 new_rules.append({
                     "type":        "field",
                     "ip":          cidrs[i:i + 500],
-                    "outboundTag": "direct",
+                    "outboundTag": _ripe_outbound,
                     "comment":     _RU_SUBNET_RULE_COMMENT,
                 })
             # BUGFIX: убеждаемся что catch-all существует перед вставкой RIPE-правил.
@@ -298,7 +316,7 @@ def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
                 for r in rules
             )
             if not _has_catchall and not _has_balancer:
-                _service_tags = {"direct", "BLOCK", "block", "xray-stats-api"}
+                _service_tags = {"direct", "direct-local", "BLOCK", "block", "xray-stats-api"}
                 _catchall_tag = "direct"
                 for _ob in outbounds:
                     _t = _ob.get("tag", "")
@@ -314,7 +332,8 @@ def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
             routing["rules"] = new_rules + rules
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             _set_config_owner(cfg_path)
-            info(f"Конфиг: {cfg_path} ({len(new_rules)} правил, {len(cidrs)} CIDR)")
+            info(f"Конфиг: {cfg_path} ({len(new_rules)} правил, {len(cidrs)} CIDR, "
+                 f"outbound={_ripe_outbound})")
             ok = True
         except Exception as e:
             warn(f"Ошибка патча {cfg_path}: {e}")

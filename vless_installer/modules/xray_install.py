@@ -930,13 +930,40 @@ def generate_xray_config() -> None:
         },
     }
 
+    # ── AWG + Split tunnel: добавляем direct-local (БЕЗ fwmark) ──────────────
+    # В AWG-режиме outbound "direct" имеет sockopt.mark = AWG_FWMARK → весь трафик
+    # уходит через awg0 (exit-VPS). Это правильно для не-РФ трафика, но ломает
+    # split tunneling: РФ-домены/IP, отправленные в "direct", тоже идут через
+    # туннель → 2ip.ru видит exit-IP вместо entry-IP.
+    # Решение: второй outbound "direct-local" (freedom БЕЗ fwmark) — пакеты идут
+    # напрямую через eth0 (default route ОС, не AWG-таблица).
+    # IPv6: domainStrategy=UseIPv4 принудительно, если на entry нет IPv6
+    # (IS_IPV6_AVAILABLE проверяется через _check_ipv6_preflight — пинг до
+    # 2001:4860:4860::8888 + curl ipv6.icanhazip.com). Иначе freedom попытается
+    # AAAA-резолв и получит IPv6 blackhole → EOF для клиентов на РФ-доменах.
+    if AWG_EXIT_ENABLED and SPLIT_TUNNEL_ENABLED:
+        _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+        config["outbounds"].insert(0, {
+            "protocol": "freedom",
+            "tag":      "direct-local",
+            "settings": {"domainStrategy": _dl_strategy},
+            # НЕТ sockopt.mark → ОС использует default route (eth0), не awg0.
+        })
+        info(f"AWG + Split tunnel: добавлен outbound direct-local "
+             f"(domainStrategy={_dl_strategy}, без fwmark → РФ-трафик напрямую через eth0)")
+
     # ── Split tunneling (Режим A, REALITY) ───────────────────────────────────
     if SPLIT_TUNNEL_ENABLED:
-        st_rules = build_split_tunnel_routing_rules(proxy_tag="direct", direct_tag="direct")
+        # В AWG-режиме РФ-домены/IP должны идти через direct-local (без fwmark),
+        # а не через direct (с fwmark → awg0). Иначе split tunnel бесполезен.
+        _st_direct_tag = "direct-local" if AWG_EXIT_ENABLED else "direct"
+        st_rules = build_split_tunnel_routing_rules(
+            proxy_tag="direct", direct_tag=_st_direct_tag)
         if st_rules:
             config["routing"]["rules"] = st_rules + config["routing"]["rules"]
             config["routing"]["geoDataBasePath"] = str(CONFIG_DIR)
-            info(f"Split tunneling: добавлено {len(st_rules)} правил (Режим A, REALITY)")
+            info(f"Split tunneling: добавлено {len(st_rules)} правил "
+                 f"(Режим A, REALITY, AWG direct_tag={_st_direct_tag})")
 
     cfg_file = CONFIG_DIR / "config.json"
     _apply_stats_to_config(config)
@@ -1114,13 +1141,31 @@ def generate_xray_config_xhttp() -> None:
         },
     }
 
+    # ── AWG + Split tunnel: добавляем direct-local (БЕЗ fwmark) ──────────────
+    # См. подробный комментарий в generate_xray_config() — тут та же логика:
+    # в AWG-режиме "direct" имеет fwmark → весь трафик через awg0 (exit-VPS).
+    # Для split tunneling нужен второй outbound без fwmark → РФ-трафик через eth0.
+    # IPv6: UseIPv4 принудительно при отсутствии IPv6 на entry (см. _check_ipv6_preflight).
+    if AWG_EXIT_ENABLED and SPLIT_TUNNEL_ENABLED:
+        _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+        config["outbounds"].insert(0, {
+            "protocol": "freedom",
+            "tag":      "direct-local",
+            "settings": {"domainStrategy": _dl_strategy},
+        })
+        info(f"AWG + Split tunnel: добавлен outbound direct-local "
+             f"(domainStrategy={_dl_strategy}, без fwmark → РФ-трафик напрямую через eth0)")
+
     # ── Split tunneling (Режим A, xHTTP TLS) ─────────────────────────────────
     if SPLIT_TUNNEL_ENABLED:
-        st_rules = build_split_tunnel_routing_rules(proxy_tag="direct", direct_tag="direct")
+        _st_direct_tag = "direct-local" if AWG_EXIT_ENABLED else "direct"
+        st_rules = build_split_tunnel_routing_rules(
+            proxy_tag="direct", direct_tag=_st_direct_tag)
         if st_rules:
             config["routing"]["rules"] = st_rules + config["routing"]["rules"]
             config["routing"]["geoDataBasePath"] = str(CONFIG_DIR)
-            info(f"Split tunneling: добавлено {len(st_rules)} правил (Режим A, xHTTP TLS)")
+            info(f"Split tunneling: добавлено {len(st_rules)} правил "
+                 f"(Режим A, xHTTP TLS, AWG direct_tag={_st_direct_tag})")
 
     cfg_file = CONFIG_DIR / "config.json"
     _apply_stats_to_config(config)

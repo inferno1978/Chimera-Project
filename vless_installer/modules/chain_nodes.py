@@ -675,6 +675,11 @@ def generate_xray_config_chain_entry() -> None:
     }
 
     # === MERGE FROM install_split.py: split tunnel block (generate_xray_config_chain_entry) ===
+    # Классический VLESS-каскад (без AWG): split tunnel через "direct" outbound.
+    # AWG-режим: эта функция не вызывается (см. generate_xray_config_chain_entry_multi —
+    # ветка elif AWG_EXIT_ENABLED уходит в generate_xray_config()). Но если всё же
+    # вызвана с AWG_EXIT_ENABLED — нужен direct-local (без fwmark), иначе РФ-трафик
+    # уйдёт через awg0 (exit-VPS), и split tunnel бесполезен.
     if SPLIT_TUNNEL_ENABLED and not AWG_EXIT_ENABLED:
         if not any(ob.get("tag") == "direct" for ob in config.get("outbounds", [])):
             config["outbounds"].insert(0, {
@@ -687,6 +692,20 @@ def generate_xray_config_chain_entry() -> None:
             config["routing"]["rules"] = st_rules + config["routing"]["rules"]
             config["routing"]["geoDataBasePath"] = str(CONFIG_DIR)
             info(f"Split tunneling: добавлено {len(st_rules)} правил (Режим B, одиночная нода)")
+    elif SPLIT_TUNNEL_ENABLED and AWG_EXIT_ENABLED:
+        _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+        config["outbounds"].insert(0, {
+            "protocol": "freedom",
+            "tag":      "direct-local",
+            "settings": {"domainStrategy": _dl_strategy},
+        })
+        st_rules = build_split_tunnel_routing_rules(
+            proxy_tag="direct", direct_tag="direct-local")
+        if st_rules:
+            config["routing"]["rules"] = st_rules + config["routing"]["rules"]
+            config["routing"]["geoDataBasePath"] = str(CONFIG_DIR)
+            info(f"Split tunneling: добавлено {len(st_rules)} правил "
+                 f"(Режим B + AWG, одиночная нода, direct-local)")
     # === END MERGE ===
 
     cfg_file = CONFIG_DIR / "config.json"
@@ -2022,21 +2041,38 @@ def generate_xray_config_chain_entry_multi() -> None:
     # ── Split tunneling (Режим B — Entry Node) ────────────────────────────────
     # В Режиме B заблокированный трафик идёт через exit-ноду (proxy_tag),
     # российский трафик идёт напрямую (direct), не проксируется.
+    # В AWG-режиме "direct" имеет fwmark=AWG_FWMARK → весь трафик через awg0.
+    # Для split tunnel нужен "direct-local" (без fwmark) → РФ-трафик через eth0.
     if SPLIT_TUNNEL_ENABLED:
         # В Режиме B "direct" = прямой выход с Entry Node (российский VPS),
-        # proxy_tag = первая exit-нода (или балансировщик)
-        if not any(ob.get("tag") == "direct" for ob in config.get("outbounds", [])):
-            config["outbounds"].insert(0, {
-                "protocol": "freedom",
-                "tag":      "direct",
-                "settings": {"domainStrategy": "UseIP"},
-            })
-        proxy_t = "chain-balancer" if balancers else (outbound_tags[0] if outbound_tags else "direct")
-        st_rules = build_split_tunnel_routing_rules(proxy_tag=proxy_t, direct_tag="direct")
+        # proxy_tag = первая exit-нода (или балансировщик).
+        # В AWG-режиме proxy_tag = "direct" (с fwmark → awg0 → exit-VPS),
+        # direct_tag = "direct-local" (без fwmark → eth0 → IP entry-сервера).
+        if AWG_EXIT_ENABLED:
+            _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+            if not any(ob.get("tag") == "direct-local" for ob in config.get("outbounds", [])):
+                config["outbounds"].insert(0, {
+                    "protocol": "freedom",
+                    "tag":      "direct-local",
+                    "settings": {"domainStrategy": _dl_strategy},
+                })
+            proxy_t = "direct"
+            direct_t = "direct-local"
+        else:
+            if not any(ob.get("tag") == "direct" for ob in config.get("outbounds", [])):
+                config["outbounds"].insert(0, {
+                    "protocol": "freedom",
+                    "tag":      "direct",
+                    "settings": {"domainStrategy": "UseIP"},
+                })
+            proxy_t = "chain-balancer" if balancers else (outbound_tags[0] if outbound_tags else "direct")
+            direct_t = "direct"
+        st_rules = build_split_tunnel_routing_rules(proxy_tag=proxy_t, direct_tag=direct_t)
         if st_rules:
             config["routing"]["rules"] = st_rules + config["routing"]["rules"]
             config["routing"]["geoDataBasePath"] = str(CONFIG_DIR)
-            info(f"Split tunneling: добавлено {len(st_rules)} правил (Режим B, Entry Node)")
+            info(f"Split tunneling: добавлено {len(st_rules)} правил "
+                 f"(Режим B, Entry Node, AWG={AWG_EXIT_ENABLED}, direct_tag={direct_t})")
 
     cfg_file = CONFIG_DIR / "config.json"
     _apply_stats_to_config(config)
