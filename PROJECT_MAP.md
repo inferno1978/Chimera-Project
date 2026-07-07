@@ -261,6 +261,22 @@
 
 ---
 
+## 20. Mode B — AWG Transport
+
+| Файл | За что отвечает |
+|---|---|
+| `awg_transport.py` | AWG transport (Mode B): 45 функций — install/keys/config/policy-routing/tunnel-verify, single-node + multi-node + watchdog |
+
+---
+
+## 21. Mode B — Chain/Nodes
+
+| Файл | За что отвечает |
+|---|---|
+| `chain_nodes.py` | Chain/Nodes management (Mode B): 22 функции — chain config builders, node CRUD, health/speed tests |
+
+---
+
 ## Структура каталогов
 
 ```

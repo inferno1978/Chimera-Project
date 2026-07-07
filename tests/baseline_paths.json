@@ -1,0 +1,6 @@
+{
+  "var_lib_paths_count": 150,
+  "chmod_600_count": 80,
+  "core_py_max_lines": 8000,
+  "modules_min_count": 122
+}
