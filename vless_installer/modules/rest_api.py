@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -45,7 +46,7 @@ import sys
 import threading
 import time
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
@@ -65,6 +66,22 @@ def _core_module():
 WEB_CONFIG_FILE = Path("/var/lib/xray-installer/web_config.json")
 WEB_SERVICE_FILE = Path("/etc/systemd/system/vless-web.service")
 DEFAULT_WEB_PORT = 8443
+# По умолчанию панель слушает только loopback — доступ через SSH-туннель
+# (ssh -L 8443:127.0.0.1:8443 user@server). Внешний доступ включается явно
+# через do_manage_web_panel() пункт 5, с предупреждением о HTTP без TLS.
+DEFAULT_WEB_HOST = "127.0.0.1"
+
+# Cap на размер тела JSON-запроса — защита от memory-exhaustion.
+MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB
+
+# In-memory sliding-window rate-limit для auth-попыток (общий для всех потоков
+# ThreadingHTTPServer). Не персистентный — сброс при рестарте сервиса, этого
+# достаточно для отсечения brute-force на этом масштабе.
+_AUTH_FAIL_LOG: dict[str, list[float]] = {}
+_AUTH_FAIL_LOCK = threading.Lock()
+AUTH_FAIL_WINDOW = 60     # секунд — окно подсчёта неудачных попыток
+AUTH_FAIL_MAX = 10        # попыток в окне до включения троттлинга
+AUTH_FAIL_REJECT = 30     # секунд — 429 Retry-After
 
 
 def _web_config_load() -> dict:
@@ -88,14 +105,18 @@ def _web_config_save(cfg: dict) -> None:
 
 
 def _web_config_init(port: int = None, admin_user: str = None,
-                     admin_pass: str = None) -> dict:
-    """Инициализирует конфиг веб-панели при первой установке."""
-    import secrets as _secrets
+                     admin_pass: str = None, host: str = None) -> dict:
+    """Инициализирует конфиг веб-панели при первой установке.
+    host=None — оставить существующее значение (или поставить default при первой установке)."""
     cfg = _web_config_load()
     if port:
         cfg["port"] = port
     elif "port" not in cfg:
         cfg["port"] = DEFAULT_WEB_PORT
+    if host:
+        cfg["host"] = host
+    elif "host" not in cfg:
+        cfg["host"] = DEFAULT_WEB_HOST
     if admin_user:
         cfg["admin_user"] = admin_user
     elif "admin_user" not in cfg:
@@ -103,7 +124,7 @@ def _web_config_init(port: int = None, admin_user: str = None,
     if admin_pass:
         cfg["admin_pass"] = admin_pass
     elif "admin_pass" not in cfg:
-        cfg["admin_pass"] = _secrets.token_urlsafe(16)
+        cfg["admin_pass"] = secrets.token_urlsafe(16)
     cfg["enabled"] = True
     _web_config_save(cfg)
     return cfg
@@ -486,59 +507,123 @@ def _generate_singbox_config(user: dict) -> str:
 class _VLESSHandler(BaseHTTPRequestHandler):
     """HTTP request handler для REST API + Admin + Portal."""
 
+    # Per-connection timeout (seconds). Каждый запрос синхронный и быстрый
+    # (медленные — geoip/backup — укладываются в 30с). Без этого таймаута
+    # (= None по умолчанию в stdlib) клиент может держать соединение бесконечно.
+    timeout = 30
+
     def log_message(self, fmt, *args):
         pass  # тихий лог
+
+    # ── Rate-limit (in-memory sliding window, общий для всех потоков) ───────
+
+    def _client_ip(self) -> str:
+        try:
+            return self.client_address[0] if self.client_address else "?"
+        except Exception:
+            return "?"
+
+    def _is_rate_limited(self) -> bool:
+        """True если IP превысил AUTH_FAIL_MAX попыток за AUTH_FAIL_WINDOW
+        и всё ещё находится в окне AUTH_FAIL_REJECT с момента последней неудачи."""
+        ip = self._client_ip()
+        now = time.time()
+        with _AUTH_FAIL_LOCK:
+            ts = [t for t in _AUTH_FAIL_LOG.get(ip, [])
+                  if t > now - AUTH_FAIL_WINDOW]
+            _AUTH_FAIL_LOG[ip] = ts
+            if len(ts) >= AUTH_FAIL_MAX and (now - ts[-1]) < AUTH_FAIL_REJECT:
+                return True
+        return False
+
+    def _record_auth_failure(self) -> None:
+        ip = self._client_ip()
+        now = time.time()
+        with _AUTH_FAIL_LOCK:
+            _AUTH_FAIL_LOG.setdefault(ip, []).append(now)
+            _AUTH_FAIL_LOG[ip] = [t for t in _AUTH_FAIL_LOG[ip]
+                                  if t > now - AUTH_FAIL_WINDOW]
 
     # ── Авторизация ──────────────────────────────────────────────────────────
 
     def _check_admin_auth(self) -> bool:
-        """Проверяет Basic Auth для админа."""
+        """Проверяет креды админа. БЕЗ сайд-эффектов (401/429 не отправляет).
+        Использует secrets.compare_digest для постоянного времени сравнения."""
         cfg = _web_config_load()
         expected_user = cfg.get("admin_user", "admin")
         expected_pass = cfg.get("admin_pass", "")
-
+        if not expected_pass:
+            # Конфиг не инициализирован — отказываем (не пускаем по пустому паролю).
+            return False
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Basic "):
             return False
-
         try:
             decoded = base64.b64decode(auth[6:]).decode("utf-8")
             user, _, passwd = decoded.partition(":")
-            return user == expected_user and passwd == expected_pass
+            return (secrets.compare_digest(user, expected_user) and
+                    secrets.compare_digest(passwd, expected_pass))
         except Exception:
             return False
 
     def _check_user_auth(self) -> Optional[dict]:
-        """Проверяет Basic Auth для пользователя. Возвращает user dict или None."""
+        """Проверяет креды пользователя. БЕЗ сайд-эффектов.
+        portal_password обязателен. Fallback на uuid убран намеренно:
+        uuid — это публичная часть vless:// ссылки (в QR-коде клиента),
+        любой, кто видел ссылку подключения, не должен уметь залогиниться."""
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Basic "):
             return None
-
         try:
             decoded = base64.b64decode(auth[6:]).decode("utf-8")
             user_or_email, _, password = decoded.partition(":")
-
             users = _get_users()
             for u in users:
-                # Проверяем по name или email, пароль — по полю portal_password
                 if (u.get("name", "") == user_or_email or
                     u.get("email", "") == user_or_email):
                     stored = u.get("portal_password", "")
-                    if stored and stored == password:
+                    # Без portal_password вход запрещён. compare_digest даёт
+                    # constant-time сравнение, но вызываем только при непустом stored
+                    # (compare_digest с пустой строкой тоже работает, но семантически
+                    # empty stored = пользователь ещё не установлен пароль).
+                    if stored and secrets.compare_digest(stored, password):
                         return u
-                    # Fallback: если portal_password не задан, проверяем по uuid
-                    if not stored and u.get("uuid", "") == password:
-                        return u
-            return None
+                    return None  # пользователь найден, пароль не совпал / не задан
         except Exception:
             return None
+        return None
+
+    def _require_admin(self, realm: str = "Admin") -> bool:
+        """Возвращает True если админ-авторизация пройдена.
+        Иначе сам отправляет 401 (с записью в rate-limit) или 429 и возвращает False.
+        Вызывающему коду нужно только `if not self._require_admin(): return`."""
+        if self._is_rate_limited():
+            self._send_429()
+            return False
+        if not self._check_admin_auth():
+            self._record_auth_failure()
+            self._send_401(realm)
+            return False
+        return True
+
+    def _require_user(self) -> Optional[dict]:
+        """Возвращает user dict если авторизация пройдена, иначе None
+        (и сам отправляет 401/429)."""
+        if self._is_rate_limited():
+            self._send_429()
+            return None
+        u = self._check_user_auth()
+        if u is None:
+            self._record_auth_failure()
+            self._send_401("User Portal")
+            return None
+        return u
 
     def _send_json(self, data: dict, status: int = 200) -> None:
         body = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 
@@ -557,13 +642,28 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"error": "Unauthorized"}')
 
+    def _send_429(self) -> None:
+        self.send_response(429)
+        self.send_header("Retry-After", str(AUTH_FAIL_REJECT))
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error": "Too Many Requests"}')
+
     def _send_404(self) -> None:
         self._send_json({"error": "Not found"}, 404)
 
-    def _read_body(self) -> dict:
-        length = int(self.headers.get("Content-Length", 0))
-        if length == 0:
+    def _read_body(self) -> Optional[dict]:
+        """Читает и парсит JSON-тело. Возвращает dict (возможно пустой).
+        Возвращает None если тело превышает MAX_BODY_BYTES — вызывающий код
+        должен в этом случае отправить 413 Payload Too Large."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
             return {}
+        if length <= 0:
+            return {}
+        if length > MAX_BODY_BYTES:
+            return None
         try:
             return json.loads(self.rfile.read(length))
         except Exception:
@@ -582,8 +682,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
 
         # Admin Panel HTML
         if path == "/admin" or path == "/admin/":
-            if not self._check_admin_auth():
-                self._send_401("Admin Panel")
+            if not self._require_admin("Admin Panel"):
                 return
             from vless_installer.modules.admin_panel import get_admin_html
             self._send_html(get_admin_html())
@@ -591,9 +690,8 @@ class _VLESSHandler(BaseHTTPRequestHandler):
 
         # User Portal HTML
         if path == "/portal" or path == "/portal/":
-            user = self._check_user_auth()
+            user = self._require_user()
             if user is None:
-                self._send_401("User Portal")
                 return
             from vless_installer.modules.user_portal import get_portal_html
             self._send_html(get_portal_html(user))
@@ -602,8 +700,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         # ── REST API (admin only) ────────────────────────────────────────────
 
         if path == "/api/users":
-            if not self._check_admin_auth():
-                self._send_401()
+            if not self._require_admin():
                 return
             users = _get_users()
             # Не отдаём пароли
@@ -615,8 +712,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         # GET /api/users/{email}/traffic
         m = re.match(r"^/api/users/(.+)/traffic$", path)
         if m:
-            if not self._check_admin_auth():
-                self._send_401()
+            if not self._require_admin():
                 return
             email = m.group(1)
             traffic = _get_user_traffic(email)
@@ -626,8 +722,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
 
         # GET /api/geoip/rules
         if path == "/api/geoip/rules":
-            if not self._check_admin_auth():
-                self._send_401()
+            if not self._require_admin():
                 return
             try:
                 from vless_installer.modules.geoip_block import _geoip_block_get_rules
@@ -639,8 +734,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
 
         # GET /api/backup/list
         if path == "/api/backup/list":
-            if not self._check_admin_auth():
-                self._send_401()
+            if not self._require_admin():
                 return
             core = _core_module()
             backups = []
@@ -660,10 +754,12 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         # ── REST API (admin only) ────────────────────────────────────────────
 
         if path == "/api/users":
-            if not self._check_admin_auth():
-                self._send_401()
+            if not self._require_admin():
                 return
             body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
             email = body.get("email", "").strip()
             name = body.get("name", "").strip() or email.split("@")[0]
             if not email:
@@ -672,11 +768,17 @@ class _VLESSHandler(BaseHTTPRequestHandler):
 
             core = _core_module()
             new_uuid = core.gen_uuid()
+            # portal_password генерируется отдельно от uuid и возвращается ОДИН раз
+            # в ответе POST /api/users. В дальнейшем посмотреть нельзя, только сменить
+            # через POST /api/portal/password. Fallback на uuid как пароль убран —
+            # uuid это публичная часть vless:// ссылки и не может быть паролем.
+            portal_password = secrets.token_urlsafe(12)
             users = _get_users()
             users.append({
                 "uuid": new_uuid,
                 "email": email,
                 "name": name,
+                "portal_password": portal_password,
                 "created": datetime.now().isoformat(),
             })
             _save_users(users)
@@ -687,12 +789,17 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-            self._send_json({"status": "created", "uuid": new_uuid, "email": email}, 201)
+            self._send_json({
+                "status": "created",
+                "uuid": new_uuid,
+                "email": email,
+                "portal_login": name or email,
+                "portal_password": portal_password,
+            }, 201)
             return
 
         if path == "/api/rotate/uuid":
-            if not self._check_admin_auth():
-                self._send_401()
+            if not self._require_admin():
                 return
             try:
                 from vless_installer.modules.credential_rotation import _uuid_rotate_now
@@ -706,8 +813,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/rotate/reality":
-            if not self._check_admin_auth():
-                self._send_401()
+            if not self._require_admin():
                 return
             try:
                 from vless_installer.modules.credential_rotation import _rotate_reality_keys
@@ -721,10 +827,12 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/geoip/rules":
-            if not self._check_admin_auth():
-                self._send_401()
+            if not self._require_admin():
                 return
             body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
             codes = body.get("codes", [])
             mode = body.get("mode", "block")  # block / allow
             try:
@@ -741,8 +849,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/backup":
-            if not self._check_admin_auth():
-                self._send_401()
+            if not self._require_admin():
                 return
             try:
                 from vless_installer.modules.backup_rollback import create_backup
@@ -755,18 +862,16 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         # ── User Portal API ──────────────────────────────────────────────────
 
         if path == "/api/portal/links":
-            user = self._check_user_auth()
+            user = self._require_user()
             if user is None:
-                self._send_401("User Portal")
                 return
             links = _generate_vless_links(user)
             self._send_json({"links": links, "count": len(links)})
             return
 
         if path == "/api/portal/traffic":
-            user = self._check_user_auth()
+            user = self._require_user()
             if user is None:
-                self._send_401("User Portal")
                 return
             email = user.get("email", "")
             traffic = _get_user_traffic(email)
@@ -775,9 +880,8 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/portal/health":
-            user = self._check_user_auth()
+            user = self._require_user()
             if user is None:
-                self._send_401("User Portal")
                 return
             health = _get_health()
             # Ограниченный набор для юзера
@@ -794,9 +898,8 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/portal/clash":
-            user = self._check_user_auth()
+            user = self._require_user()
             if user is None:
-                self._send_401("User Portal")
                 return
             clash = _generate_clash_config(user)
             self.send_response(200)
@@ -808,9 +911,8 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/portal/singbox":
-            user = self._check_user_auth()
+            user = self._require_user()
             if user is None:
-                self._send_401("User Portal")
                 return
             singbox = _generate_singbox_config(user)
             self.send_response(200)
@@ -822,14 +924,16 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/portal/password":
-            user = self._check_user_auth()
+            user = self._require_user()
             if user is None:
-                self._send_401("User Portal")
                 return
             body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
             new_pass = body.get("new_password", "").strip()
-            if len(new_pass) < 6:
-                self._send_json({"error": "Пароль минимум 6 символов"}, 400)
+            if len(new_pass) < 8:
+                self._send_json({"error": "Пароль минимум 8 символов"}, 400)
                 return
             email = user.get("email", "")
             users = _get_users()
@@ -851,8 +955,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         # DELETE /api/users/{email}
         m = re.match(r"^/api/users/(.+)$", path)
         if m:
-            if not self._check_admin_auth():
-                self._send_401()
+            if not self._require_admin():
                 return
             email = m.group(1)
             users = _get_users()
@@ -871,8 +974,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
 
         # DELETE /api/geoip/rules
         if path == "/api/geoip/rules":
-            if not self._check_admin_auth():
-                self._send_401()
+            if not self._require_admin():
                 return
             try:
                 from vless_installer.modules.geoip_block import _geoip_remove_all
@@ -885,10 +987,10 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         self._send_404()
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        # CORS отключён — панель работает same-origin. Если нужен cross-origin
+        # доступ (например, отдельный frontend), настройте reverse-proxy с
+        # явным Access-Control-Allow-Origin для конкретных доменов.
+        self.send_response(204)
         self.end_headers()
 
 
@@ -896,15 +998,31 @@ class _VLESSHandler(BaseHTTPRequestHandler):
 #  SERVER
 # ============================================================================
 
-def start_server(port: int = None, host: str = "0.0.0.0") -> None:
-    """Запускает HTTP-сервер (блокирующий вызов)."""
+def start_server(port: int = None, host: str = None) -> None:
+    """Запускает HTTP-сервер (блокирующий вызов).
+    По умолчанию bind 127.0.0.1 (читается из web_config.json) — доступ только
+    через SSH-туннель: ssh -L 8443:127.0.0.1:8443 user@server.
+    Для внешнего доступа включите пункт 5 в do_manage_web_panel() —
+    будет напечатано предупреждение о HTTP без TLS."""
     cfg = _web_config_load()
     if port is None:
         port = cfg.get("port", DEFAULT_WEB_PORT)
+    if host is None:
+        host = cfg.get("host", DEFAULT_WEB_HOST)
 
-    server = HTTPServer((host, port), _VLESSHandler)
-    server.timeout = None
-    print(f"[VLESS Web] Сервер запущен на {host}:{port}")
+    # ThreadingHTTPServer: каждый запрос в отдельном потоке, иначе
+    # single-threaded HTTPServer + медленный клиент = тривиальный DoS.
+    server = ThreadingHTTPServer((host, port), _VLESSHandler)
+    # Per-connection timeout задаётся классом _VLESSHandler.timeout (30с).
+    # serve_forever() не требует server.timeout.
+    print(f"[VLESS Web] Сервер запущен на {host}:{port} (ThreadingHTTPServer)")
+    if host == "0.0.0.0":
+        print("[VLESS Web] ⚠️  ВНИМАНИЕ: HTTP без TLS на 0.0.0.0!")
+        print("[VLESS Web] ⚠️  Basic Auth = base64, НЕ шифрование.")
+        print("[VLESS Web] ⚠️  Используйте reverse-proxy (nginx) с TLS или SSH-туннель.")
+    else:
+        print(f"[VLESS Web] Локальный bind. Доступ через SSH-туннель:")
+        print(f"[VLESS Web]   ssh -L {port}:127.0.0.1:{port} user@<server>")
     print(f"[VLESS Web] Admin:  http://<IP>:{port}/admin/")
     print(f"[VLESS Web] Portal: http://<IP>:{port}/portal/")
     try:
@@ -926,19 +1044,43 @@ def _run_in_thread(port: int = None) -> threading.Thread:
 # ============================================================================
 
 def install_web_service(port: int = None, admin_user: str = None,
-                        admin_pass: str = None) -> dict:
-    """Устанавливает systemd-сервис для веб-панели."""
-    cfg = _web_config_init(port=port, admin_user=admin_user, admin_pass=admin_pass)
+                        admin_pass: str = None,
+                        expose: Optional[bool] = None) -> dict:
+    """Устанавливает systemd-сервис для веб-панели.
+    По умолчанию bind 127.0.0.1 — ufw НЕ открывается (доступ через SSH-туннель).
+    expose=True  — bind 0.0.0.0 + открытие порта в ufw + предупреждение о HTTP.
+    expose=False — принудительно 127.0.0.1 (даже если в конфиге было 0.0.0.0).
+    expose=None  — оставить текущий host в конфиге как есть."""
+    host_arg = None
+    if expose is True:
+        host_arg = "0.0.0.0"
+    elif expose is False:
+        host_arg = "127.0.0.1"
+    cfg = _web_config_init(port=port, admin_user=admin_user,
+                           admin_pass=admin_pass, host=host_arg)
     port = cfg["port"]
+    current_host = cfg.get("host", DEFAULT_WEB_HOST)
 
-    # Открываем порт
     core = _core_module()
     _run = core._run
-    if shutil.which("ufw"):
-        _run(["ufw", "allow", str(port), "tcp", "comment", "VLESS Web Panel"],
-             check=False, quiet=True)
 
-    # systemd unit
+    # Открываем порт в ufw ТОЛЬКО при явном внешнем доступе (host=0.0.0.0).
+    # По умолчанию (127.0.0.1) — не открываем, доступ через SSH-туннель.
+    if current_host == "0.0.0.0" and shutil.which("ufw"):
+        _run(["ufw", "allow", str(port), "tcp",
+              "comment", "VLESS Web Panel (exposed, no TLS)"],
+             check=False, quiet=True)
+        warn_msg = (
+            f"ВНИМАНИЕ: веб-панель открыта наружу на 0.0.0.0:{port} без TLS! "
+            "Basic Auth = base64, НЕ шифрование. "
+            "Используйте reverse-proxy (nginx) с TLS или SSH-туннель."
+        )
+        try:
+            core.warn(warn_msg)
+        except Exception:
+            print("[VLESS Web] " + warn_msg)
+
+    # systemd unit — start_server() читает host из cfg
     main_py = Path(sys.argv[0]).resolve() if sys.argv[0] else Path("/opt/vless-ultimate/main.py")
     project_root = main_py.parent
 
@@ -1020,8 +1162,11 @@ def do_manage_web_panel() -> None:
         running = is_web_running()
         port = cfg.get("port", DEFAULT_WEB_PORT)
         admin_user = cfg.get("admin_user", "admin")
+        host = cfg.get("host", DEFAULT_WEB_HOST)
+        exposed = (host == "0.0.0.0")
 
         _box_row(f"  Сервис:       {GREEN+'активен'+NC if running else YELLOW+'остановлен'+NC}")
+        _box_row(f"  Хост:         {CYAN}{host}{NC} {YELLOW+'(открыто наружу, без TLS!)'+NC if exposed else '(локально, SSH-туннель)'}")
         _box_row(f"  Порт:         {CYAN}{port}{NC}")
         _box_row(f"  Admin:        {CYAN}http://<IP>:{port}/admin/{NC}")
         _box_row(f"  Portal:       {CYAN}http://<IP>:{port}/portal/{NC}")
@@ -1040,6 +1185,7 @@ def do_manage_web_panel() -> None:
         _box_item("2", "Изменить порт")
         _box_item("3", "Изменить admin-пароль")
         _box_item("4", "Переустановить (сброс конфига)")
+        _box_item("5", f"{'Закрыть доступ снаружи' if exposed else 'Открыть доступ снаружи (ВНИМАНИЕ: без TLS!)'}")
         _box_item("Q", "Назад")
         _box_bottom()
 
@@ -1072,26 +1218,47 @@ def do_manage_web_panel() -> None:
 
         elif ch == "3":
             new_pass = _input("  Новый admin-пароль: ").strip()
-            if len(new_pass) >= 6:
+            if len(new_pass) >= 8:
                 cfg["admin_pass"] = new_pass
                 _web_config_save(cfg)
                 success("Пароль изменён")
             else:
-                warn("Минимум 6 символов")
+                warn("Минимум 8 символов")
             _input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "4":
             confirm = _input(f"  {RED}Переустановить? (сброс пароля/порта) [y/N]:{NC} ").strip().lower()
             if confirm == "y":
-                import secrets as _secrets
                 cfg = _web_config_init(
                     port=DEFAULT_WEB_PORT,
                     admin_user="admin",
-                    admin_pass=_secrets.token_urlsafe(16)
+                    admin_pass=secrets.token_urlsafe(16)
                 )
                 install_web_service(port=cfg["port"])
                 success(f"Переустановлено. Порт: {cfg['port']}, логин: admin")
                 _box_row(f"  {YELLOW}Новый пароль: {cfg['admin_pass']}{NC}")
+            _input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "5":
+            # Переключатель: 127.0.0.1 (по умолчанию, доступ через SSH-туннель)
+            # ↔ 0.0.0.0 (открыто наружу, БЕЗ TLS — осознанный риск администратора).
+            if exposed:
+                confirm = _input(
+                    f"  Закрыть доступ снаружи (только 127.0.0.1)? [y/N]: "
+                ).strip().lower()
+                if confirm == "y":
+                    install_web_service(port=cfg["port"], expose=False)
+                    success("Доступ закрыт. Только 127.0.0.1 (SSH-туннель).")
+            else:
+                warn("  ВНИМАНИЕ: HTTP без TLS! Basic Auth = base64, НЕ шифрование.")
+                warn("  Любой, кто перехватит трафик, увидит пароль в открытом виде.")
+                warn("  Рекомендуется reverse-proxy (nginx) с TLS вместо прямого открытия.")
+                confirm = _input(
+                    f"  {RED}Открыть панель наружу (0.0.0.0:{port})? [y/N]:{NC} "
+                ).strip().lower()
+                if confirm == "y":
+                    install_web_service(port=cfg["port"], expose=True)
+                    success(f"Открыто на 0.0.0.0:{port} (без TLS!)")
             _input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch in ("q", ""):
