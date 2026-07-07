@@ -323,7 +323,9 @@ def prompt_chain_params_multi() -> None:
     _box_warn = core._box_warn
     _box_info = core._box_info
     _box_ok = core._box_ok
-    _sb_install_cron = core._sb_install_cron
+    # _sb_install_cron() вынесен в модуль smart_balancer при рефакторинге —
+    # берём оттуда, не из core (который этот атрибут больше не содержит).
+    from vless_installer.modules.smart_balancer import _sb_install_cron
     warn = core.warn
     success = core.success
     YELLOW = core.YELLOW
