@@ -4,7 +4,7 @@ full_test.py — Постоянный автотест VLESS Ultimate Installer 
 Запуск: python3 full_test.py
 
 Самодостаточный тест: нет зависимостей кроме Python stdlib.
-7 секций:
+8 секций:
   1. py_compile всех .py (включая _vendor/)
   2. Импорт всех модулей (с патчами Path.mkdir / os.geteuid)
   3. exec(_core.py) + getattr() для всех public-функций
@@ -12,6 +12,7 @@ full_test.py — Постоянный автотест VLESS Ultimate Installer 
   5. Пути state-файлов /var/lib/xray-installer (baseline 150)
   6. Права 0o600 / chmod 600 (baseline 80)
   7. Git hygiene (нет __pycache__/.pyc в git ls-files)
+  8. Web panel security invariants (rest_api.py — static checks)
 """
 import sys
 import os
@@ -490,6 +491,72 @@ if _r.returncode == 0:
 else:
     warn("git ls-files — не git-репозиторий или git недоступен")
     section_results["7. git hygiene"] = (1, 0)  # warn не считается fail
+
+
+# ══════════════════════════════════════════════════════════════
+# Секция 8. Web panel security invariants (rest_api.py)
+# Статическая проверка (grep/regex) — ловит регресс, если кто-то
+# откатит security-фиксы (UUID-fallback, ThreadingHTTPServer, timeout=None,
+# CORS wildcard) не глядя.
+# ══════════════════════════════════════════════════════════════
+section("8. Web panel security invariants (rest_api.py)")
+
+_rest_api_path = _PROJECT_ROOT / "vless_installer" / "modules" / "rest_api.py"
+_sec8_pass = 0
+_sec8_fail = 0
+
+if not _rest_api_path.exists():
+    fail(f"rest_api.py не найден: {_rest_api_path}")
+    _sec8_fail += 1
+else:
+    _rest_src = _rest_api_path.read_text(encoding="utf-8")
+
+    # 8.1 Fallback пароля через uuid убран (uuid — публичная часть vless:// ссылки,
+    # не пароль). Ловим точную строку, которая была в исходном коде до фикса.
+    if 'u.get("uuid", "") == password' in _rest_src:
+        fail("rest_api.py: UUID-as-password fallback всё ещё присутствует "
+             "(приватный пароль = публичная часть ссылки — критическая дыра)")
+        _sec8_fail += 1
+    else:
+        ok("rest_api.py: UUID-as-password fallback убран")
+        _sec8_pass += 1
+
+    # 8.2 Используется ThreadingHTTPServer, не голый HTTPServer.
+    # Single-threaded HTTPServer + медленный клиент = тривиальный DoS.
+    # Regex с negative lookbehind: HTTPServer( не должно быть без префикса Threading.
+    _has_threading = "ThreadingHTTPServer" in _rest_src
+    _bare_httpserver = re.search(r'(?<!Threading)HTTPServer\(', _rest_src) is not None
+    if _has_threading and not _bare_httpserver:
+        ok("rest_api.py: используется ThreadingHTTPServer (не голый HTTPServer)")
+        _sec8_pass += 1
+    else:
+        fail(f"rest_api.py: ThreadingHTTPServer={_has_threading}, "
+             f"bare HTTPServer( call={_bare_httpserver} — DoS-риск")
+        _sec8_fail += 1
+
+    # 8.3 Нет 'timeout = None' рядом с сервером (бесконечное ожидание = DoS).
+    # _VLESSHandler.timeout = 30 (class attr) — это ОК, мы ищем именно literal
+    # `timeout = None` или `server.timeout = None`.
+    if "timeout = None" in _rest_src:
+        fail("rest_api.py: найдено 'timeout = None' — сервер ждёт соединение "
+             "бесконечно (DoS через slowloris-подобные клиенты)")
+        _sec8_fail += 1
+    else:
+        ok("rest_api.py: нет 'timeout = None' (per-connection timeout активен)")
+        _sec8_pass += 1
+
+    # 8.4 Нет wildcard CORS — Access-Control-Allow-Origin: * разрешает любому
+    # стороннему сайту делать запросы к API с базовой авторизацией.
+    # Ловим точную строку заголовка со звёздочкой.
+    if 'Access-Control-Allow-Origin", "*"' in _rest_src:
+        fail("rest_api.py: wildcard Access-Control-Allow-Origin: * всё ещё "
+             "присутствует — любой сторонний сайт может дёргать API")
+        _sec8_fail += 1
+    else:
+        ok("rest_api.py: wildcard CORS убран (панель same-origin)")
+        _sec8_pass += 1
+
+section_results["8. web panel invariants"] = (_sec8_pass, _sec8_fail)
 
 
 # ══════════════════════════════════════════════════════════════

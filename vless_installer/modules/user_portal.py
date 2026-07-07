@@ -7,6 +7,7 @@ User Self-Service Portal — HTML/CSS/JS для конечных пользов�
 Вызывается из rest_api.py при GET /portal/.
 ───────────────────────────────────────────────────────────────────────────────
 """
+import html
 
 
 def get_portal_html(user: dict) -> str:
@@ -14,12 +15,18 @@ def get_portal_html(user: dict) -> str:
     email = user.get("email", "user")
     name = user.get("name", email.split("@")[0] if email else "user")
 
+    # Все пользовательские строки экранируются перед вставкой в HTML
+    # (name, email могут содержать любые символы — защита от XSS).
+    email_safe = html.escape(email)
+    name_safe = html.escape(name)
+    initial_safe = html.escape(name[0].upper()) if name else "U"
+
     return f'''<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>VLESS Portal — {name}</title>
+<title>VLESS Portal — {name_safe}</title>
 <style>
 :root {{
   --bg: #0f172a;
@@ -328,9 +335,9 @@ body {{
 <div class="container">
   <!-- Header -->
   <div class="header fade-in">
-    <div class="avatar">{name[0].upper() if name else 'U'}</div>
-    <h1>{name}</h1>
-    <div class="subtitle">{email}</div>
+    <div class="avatar">{initial_safe}</div>
+    <h1>{name_safe}</h1>
+    <div class="subtitle">{email_safe}</div>
   </div>
 
   <!-- VLESS Links + QR -->
@@ -375,7 +382,7 @@ body {{
   <!-- Change password -->
   <div class="card fade-in" style="animation-delay: 0.6s">
     <div class="card-title">🔒 Смена пароля портала</div>
-    <input type="password" class="input-field" id="new-pass" placeholder="Новый пароль (мин. 6 символов)">
+    <input type="password" class="input-field" id="new-pass" placeholder="Новый пароль (мин. 8 символов)">
     <button class="btn btn-primary btn-full" onclick="changePassword()">Сменить пароль</button>
   </div>
 </div>
@@ -530,7 +537,7 @@ async function loadHealth() {{
 // ── Change password ─────────────────────────────────────────────────────────
 async function changePassword() {{
   const newPass = document.getElementById('new-pass').value.trim();
-  if (newPass.length < 6) {{ showToast('Минимум 6 символов', 'error'); return; }}
+  if (newPass.length < 8) {{ showToast('Минимум 8 символов', 'error'); return; }}
 
   const res = await fetch('/api/portal/password', {{
     method: 'POST',

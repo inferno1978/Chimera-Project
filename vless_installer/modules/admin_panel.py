@@ -319,6 +319,14 @@ tr:hover { background: rgba(56,189,248,0.05); }
 <script>
 const API = '';
 
+// Escape пользовательских данных перед вставкой в innerHTML (XSS защита).
+// email/name приходят с сервера и могут содержать < > " ' & и т.п.
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+
 function authHeader() {
   // Используем кэшированные креды из URL (Basic Auth уже в заголовке)
   return {};
@@ -411,13 +419,13 @@ async function loadUsers() {
 
   tbody.innerHTML = data.users.map(u => `
     <tr>
-      <td>${u.email || '—'}</td>
-      <td style="font-family:monospace;font-size:0.82rem">${(u.uuid || '').slice(0,8)}...</td>
-      <td>${u.created ? u.created.slice(0,10) : '—'}</td>
-      <td id="traffic-${u.email}">—</td>
-      <td id="ttl-${u.email}">—</td>
+      <td>${esc(u.email) || '—'}</td>
+      <td style="font-family:monospace;font-size:0.82rem">${esc((u.uuid || '').slice(0,8))}...</td>
+      <td>${esc(u.created ? u.created.slice(0,10) : '—')}</td>
+      <td id="traffic-${esc(u.email)}">—</td>
+      <td id="ttl-${esc(u.email)}">—</td>
       <td>
-        <button class="btn btn-sm btn-danger" onclick="deleteUser('${u.email}')">🗑 Удалить</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.email)}')">🗑 Удалить</button>
       </td>
     </tr>
   `).join('');
@@ -458,7 +466,15 @@ async function addUser() {
 
   const data = await api('/api/users', 'POST', { email, name });
   if (data && data.status === 'created') {
-    showToast('Пользователь создан: ' + email);
+    // portal_password возвращается ОДИН раз — показываем админу для передачи пользователю.
+    if (data.portal_password) {
+      alert('Пользователь создан: ' + email +
+            '\n\nportal_login: ' + (data.portal_login || email) +
+            '\nportal_password: ' + data.portal_password +
+            '\n\n⚠️ Сохраните пароль — он больше не будет показан.');
+    } else {
+      showToast('Пользователь создан: ' + email);
+    }
     closeModal('add-user-modal');
     loadUsers();
   } else {

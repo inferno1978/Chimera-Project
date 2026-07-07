@@ -88,6 +88,9 @@ TEST_CASES = [
     ("ssl_certbot", "do_manage_certbot_monitor", "мониторинг certbot"),
     ("geo_files", "do_manage_geo_update", "управление geo-файлами"),
     ("network_setup", "apply_sysctl_and_limits", "применение sysctl"),
+    # Web panel menu — безопасно для мока: input='q' сразу выходит из while-цикла,
+    # реальный start_server() не вызывается в этом пути.
+    ("rest_api", "do_manage_web_panel", "меню веб-панели"),
     # CLI entry points
     ("ttl_users", "_ttl_check_and_expire", "CLI: --ttl-check"),
     ("autoban", "_autoban_run_once", "CLI: --autoban"),
