@@ -433,7 +433,7 @@ else:
 
 # ── 13. Права 0o600 ───────────────────────────────────────────
 section("13. Права 0o600 / chmod 600")
-_CHMOD_BASELINE = 80  # baseline-снапшот (current count)
+_CHMOD_BASELINE = 76  # baseline после proto_common extraction (4 chmod консолидированы в proto_common.py)
 _chmod_count = 0
 if _py_root.exists():
     for py in _py_root.rglob("*.py"):

@@ -167,6 +167,7 @@
 
 | Файл | За что отвечает |
 |---|---|
+| `proto_common.py` | Общие хелперы для протокольных модулей — proto_load_state/save_state, proto_ask, proto_gen_password, proto_ipt_persist, proto_get_latest/installed_version, proto_install_service, proto_show_status, proto_full_uninstall |
 | `mtproto.py` | MTProto proxy (Telegram) — установка/управление |
 | `mtproto_stats.py` | Статистика MTProto |
 | `naiveproxy.py` | NaiveProxy — установка/управление |
