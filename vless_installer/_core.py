@@ -7503,7 +7503,8 @@ def do_full_install() -> None:
         pass
 
     print()
-    _box_row(f"{GREEN}Сайт-заглушка: {BOLD}https://{PARAM_DOMAIN}{NC}")
+    if PARAM_DOMAIN:
+        _box_row(f"{GREEN}Сайт-заглушка: {BOLD}https://{PARAM_DOMAIN}{NC}")
 
     if _config_creation_failed:
         # Раньше тут безусловно печаталось "завершена успешно", даже когда
