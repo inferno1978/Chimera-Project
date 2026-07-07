@@ -123,6 +123,11 @@ def run_unit_tests() -> None:
     STATE_FILE = core.STATE_FILE
     XRAY_BIN   = core.XRAY_BIN
     TOTAL_RAM  = core.TOTAL_RAM
+    BOLD = core.BOLD
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    YELLOW = core.YELLOW
     PROTOCOL_MODE = getattr(core, "PROTOCOL_MODE", "reality")
     INSTALL_MODE  = getattr(core, "INSTALL_MODE", "A")
     GREEN, YELLOW, BOLD, DIM, NC = (

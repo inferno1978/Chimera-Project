@@ -387,6 +387,13 @@ def do_manage_reality_keys() -> None:
     _box_back          = core._box_back
     _box_item          = core._box_item
     _box_bottom        = core._box_bottom
+    BLUE = core.BLUE
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     CYAN, NC, GREEN, YELLOW, BLUE, RED, DIM = (
         core.CYAN, core.NC, core.GREEN, core.YELLOW, core.BLUE, core.RED, core.DIM,
     )

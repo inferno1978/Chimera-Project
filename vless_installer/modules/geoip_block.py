@@ -77,6 +77,14 @@ def do_manage_geoip_block() -> None:
     info                   = core.info
     warn                   = core.warn
     success                = core.success
+    BLUE = core.BLUE
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     BOLD, NC, RED, GREEN, YELLOW, DIM, CYAN, BLUE = (
         core.BOLD, core.NC, core.RED, core.GREEN, core.YELLOW, core.DIM, core.CYAN, core.BLUE
     )

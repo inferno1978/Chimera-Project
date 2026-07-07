@@ -210,6 +210,14 @@ def do_mtu_tuning() -> None:
     STATE_FILE    = core.STATE_FILE
     AWG_EXIT_HOST = getattr(core, "AWG_EXIT_HOST", "")
     _nodes_from_state = core._nodes_from_state
+    BLUE = core.BLUE
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     CYAN, NC, DIM, GREEN, YELLOW, RED, BOLD, BLUE = (
         core.CYAN, core.NC, core.DIM, core.GREEN, core.YELLOW, core.RED,
         core.BOLD, core.BLUE
@@ -500,6 +508,14 @@ def do_mtu_tracepath_diag() -> None:
     warn          = core.warn
     STATE_FILE    = core.STATE_FILE
     _nodes_from_state = core._nodes_from_state
+    BLUE = core.BLUE
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     CYAN, NC, DIM, GREEN, YELLOW, RED, BOLD, BLUE = (
         core.CYAN, core.NC, core.DIM, core.GREEN, core.YELLOW, core.RED,
         core.BOLD, core.BLUE
@@ -596,6 +612,13 @@ def _mtu_tracepath_one(host: str, label: str) -> None:
     _box_warn      = core._box_warn
     command_exists = core.command_exists
     _log_change    = core._log_change
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     CYAN, NC, DIM, GREEN, YELLOW, RED, BOLD = (
         core.CYAN, core.NC, core.DIM, core.GREEN, core.YELLOW, core.RED, core.BOLD
     )

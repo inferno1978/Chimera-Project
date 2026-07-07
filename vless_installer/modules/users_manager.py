@@ -401,6 +401,7 @@ def _show_qr(link: str, label: str, png_path: str) -> None:
     _box_ok     = core._box_ok
     _box_warn   = core._box_warn
     CYAN        = core.CYAN
+    NC          = core.NC
     _run        = core._run
     print()
     _box_top(f"QR-код [{label}]")
