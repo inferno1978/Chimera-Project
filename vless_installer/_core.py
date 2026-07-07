@@ -349,6 +349,22 @@ from vless_installer.modules.xray_install import (
     _xray_safe_apply_config, _xray_rollback, do_xray_update_interactive,
     setup_xray_autoupdate, _install_autoupdate_service,
 )
+# ── Tier-4 рефакторинг: Install prompts ──────────────────────────────────────
+from vless_installer.modules.install_prompts import (
+    prompt_parameters, prompt_install_mode, prompt_protocol_mode,
+    prompt_awg_exit_mode,
+)
+# ── Tier-4 рефакторинг: Users manager ────────────────────────────────────────
+from vless_installer.modules.users_manager import (
+    _users_load, _users_save, _users_get_config, _users_apply_config,
+    _users_apply_to_config, _users_patch_config_no_restart, _users_gen_link,
+    do_user_list, do_user_add, do_user_delete, do_user_show_link, do_user_menu,
+    _show_qr, _gen_vless_link, generate_client_links,
+    _unified_load_users, _unified_save_users, _unified_show_links,
+    _do_user_stats_screen, _do_user_stats_screen_v2,
+)
+# ── Tier-4 рефакторинг: Emergency repair ─────────────────────────────────────
+from vless_installer.modules.emergency_repair import do_emergency_repair
 # ─────────────────────────────────────────────────────────────────────────────
 
 
