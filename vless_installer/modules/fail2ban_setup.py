@@ -254,6 +254,12 @@ def do_manage_watchdog() -> None:
     _box_item = core._box_item
     _box_bottom = core._box_bottom
     _BOX_W   = core._BOX_W
+    BLUE = core.BLUE
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    YELLOW = core.YELLOW
     GREEN, YELLOW, NC, CYAN, BLUE, DIM = (
         core.GREEN, core.YELLOW, core.NC, core.CYAN, core.BLUE, core.DIM
     )

@@ -688,6 +688,7 @@ def prompt_awg_exit_mode() -> None:
     YELLOW = core.YELLOW
     DIM    = core.DIM
     NC     = core.NC
+    BOLD = core.BOLD
 
     print()
     _box_top("Транспорт для выхода в Интернет (Режим B)")

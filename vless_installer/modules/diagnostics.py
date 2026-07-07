@@ -320,6 +320,12 @@ def _diag_render_traffic_table(bytes_by_tag: dict, source_label: str) -> None:
     _box_info = core._box_info
     _box_row  = core._box_row
     _box_dim  = core._box_dim
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     CYAN, GREEN, RED, YELLOW, DIM, NC = (
         core.CYAN, core.GREEN, core.RED, core.YELLOW, core.DIM, core.NC)
     # Служебные теги исключаем из пользовательской статистики
@@ -389,6 +395,8 @@ def _diag_print_traffic_from_ss() -> None:
     _box_warn = core._box_warn
     _box_row  = core._box_row
     _box_info = core._box_info
+    DIM = core.DIM
+    NC = core.NC
     try:
         r = _diag_run(["ss", "-tni"])
         lines = r.stdout.splitlines()
@@ -957,6 +965,13 @@ def _diag_top_hosts(n: int = 15) -> None:
     _box_row  = core._box_row
     _box_dim  = core._box_dim
     DIAG_ACCESS_LOG = core.DIAG_ACCESS_LOG
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     BOLD, NC, YELLOW, GREEN, DIM, CYAN, RED = (
         core.BOLD, core.NC, core.YELLOW, core.GREEN, core.DIM, core.CYAN, core.RED)
     _diag_head("8. Топ хостов по маршрутизации")
@@ -1052,6 +1067,11 @@ def _diag_check_state(counters: list) -> None:
     _box_info = core._box_info
     STATE_FILE               = core.STATE_FILE
     SPLIT_TUNNEL_CUSTOM_FILE = core.SPLIT_TUNNEL_CUSTOM_FILE
+    BOLD = core.BOLD
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    YELLOW = core.YELLOW
     _diag_head("9. State файл установки")
     if not STATE_FILE.exists():
         _box_warn(f"{STATE_FILE} не найден — установка через скрипт не выполнялась?")
@@ -1167,6 +1187,12 @@ def run_split_tunnel_diagnostics() -> None:
     """
     core = _core_module()
     _box_row = core._box_row
+    BOLD = core.BOLD
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     _box_row()
 
     counters = _diag_make_counters()
@@ -1206,6 +1232,12 @@ def do_live_traffic_dashboard() -> None:
     XRAY_BIN            = core.XRAY_BIN
     XRAY_STATS_API_PORT = core.XRAY_STATS_API_PORT
     _BOX_W              = core._BOX_W
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    WHITE = core.WHITE
+    YELLOW = core.YELLOW
     CYAN, NC, DIM, GREEN, YELLOW, WHITE = (
         core.CYAN, core.NC, core.DIM, core.GREEN, core.YELLOW, core.WHITE)
     xray_bin = shutil.which("xray") or str(XRAY_BIN)
@@ -1379,6 +1411,13 @@ def do_full_diagnostic() -> None:
     XRAY_BIN            = core.XRAY_BIN
     XRAY_STATS_API_PORT = core.XRAY_STATS_API_PORT
     LOG_FILE            = core.LOG_FILE
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     TG_CONFIG_FILE      = getattr(core, "TG_CONFIG_FILE", None)
     AWG_INTERFACE       = core.AWG_INTERFACE
     AWG_FWMARK          = core.AWG_FWMARK

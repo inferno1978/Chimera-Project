@@ -53,6 +53,12 @@ def _ssh_2fa_install() -> bool:
     _run           = core._run
     log_to_file    = core.log_to_file
     _box_row       = core._box_row
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    YELLOW = core.YELLOW
     CYAN, GREEN, YELLOW, BOLD, DIM, NC = (
         core.CYAN, core.GREEN, core.YELLOW, core.BOLD, core.DIM, core.NC
     )
@@ -142,6 +148,14 @@ def do_ssh_hardening() -> None:
     _box_warn      = core._box_warn
     _box_ok        = core._box_ok
     _box_info      = core._box_info
+    BLUE = core.BLUE
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     CYAN, GREEN, YELLOW, RED, BLUE, BOLD, DIM, NC = (
         core.CYAN, core.GREEN, core.YELLOW, core.RED, core.BLUE,
         core.BOLD, core.DIM, core.NC

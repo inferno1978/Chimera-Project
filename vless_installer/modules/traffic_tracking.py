@@ -197,6 +197,13 @@ def do_manage_traffic_limits() -> None:
     _xray_safe_apply_config = core._xray_safe_apply_config
     _tg_notify_event        = core._tg_notify_event
     _BOX_W                  = core._BOX_W
+    BLUE = core.BLUE
+    CYAN = core.CYAN
+    DIM = core.DIM
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
     CYAN, NC, RED, YELLOW, GREEN, BLUE, DIM = (
         core.CYAN, core.NC, core.RED, core.YELLOW, core.GREEN, core.BLUE, core.DIM,
     )
