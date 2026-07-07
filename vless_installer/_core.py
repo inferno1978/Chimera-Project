@@ -106,16 +106,17 @@ from vless_installer.modules.smart_balancer import (
     PROBE_INTERVAL_MIN,
     _AUTO_FALLBACK_CRON, _AUTO_FALLBACK_SCRIPT, _AUTO_FALLBACK_LOGFILE,
     _AWG_WATCHDOG_CRON, _AWG_WATCHDOG_SCRIPT, _AWG_WATCHDOG_LOG, _AWG_WATCHDOG_STATE,
+    _awg_guard_cron,
 )
 from vless_installer.modules.health import (
     health_check_xray, health_check_nginx, health_check_ssl,
     health_check_ports, run_full_health_check, do_check_tls_cert,
     HEALTH_CHECK_FILE,
 )
-from vless_installer.modules.dpi_detector import do_manage_dpi_detector
+from vless_installer.modules.dpi_detector import do_manage_dpi_detector, _dpi_run_once, _pinned_node_check_and_fallback
 from vless_installer.modules.ingress_geoip import (
     do_manage_ingress_geoip,
-    _ingress_state_load, _ingress_enable,
+    _ingress_state_load, _ingress_enable, _ingress_remove,
     INGRESS_CRON_FILE, INGRESS_CRON_SCRIPT,
     INGRESS_GEOIP_FILE, INGRESS_IPSET_NAME, INGRESS_IPSET6_NAME, INGRESS_LOG,
 )
