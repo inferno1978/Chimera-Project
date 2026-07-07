@@ -67,6 +67,16 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from vless_installer.modules.proto_common import (
+    ProtoCancelled, proto_load_state, proto_save_state,
+    proto_ask, proto_ipt_persist,
+    proto_get_latest_version, proto_get_installed_version,
+)
+# _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
+# `raise _Cancelled` code works unchanged after the local class definition
+# was removed in favour of proto_common.ProtoCancelled.
+_Cancelled = ProtoCancelled
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЦВЕТА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -255,27 +265,12 @@ def _warn(msg: str) -> None: print(f"  {YELLOW}⚠{NC}  {msg}"); _log(f"[WARN] {
 def _info(msg: str) -> None: print(f"  {CYAN}→{NC}  {msg}"); _log(f"[INFO] {msg}")
 def _err(msg: str)  -> None: print(f"  {RED}✗{NC}  {msg}"); _log(f"[ERR] {msg}")
 
-class _Cancelled(Exception):
-    pass
-
 def _pause() -> None:
     try:
         print(f"\n  {DIM}Нажмите Enter...{NC}", end="", flush=True)
         input()
     except (KeyboardInterrupt, EOFError, UnicodeDecodeError):
         print()
-
-def _ask(prompt: str, default: str = "", c: bool = False) -> str:
-    try:
-        print(prompt, end="", flush=True)
-        val = input().strip()
-        return val if val else default
-    except (EOFError, UnicodeDecodeError):
-        print(); return default
-    except KeyboardInterrupt:
-        print()
-        if c: raise _Cancelled()
-        return default
 
 def _is_amd64() -> bool:
     return platform.machine().lower() in ("x86_64", "amd64")
@@ -286,26 +281,14 @@ def _gen_uuid() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 #  STATE
 # ══════════════════════════════════════════════════════════════════════════════
-def _load_state() -> dict:
-    if not _MODULE_STATE.exists():
-        return {}
-    try:
-        return json.loads(_MODULE_STATE.read_text())
-    except Exception:
-        return {}
-
-def _save_state(data: dict) -> None:
-    try:
-        _MODULE_STATE.parent.mkdir(parents=True, exist_ok=True)
-        _MODULE_STATE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        _MODULE_STATE.chmod(0o600)
-    except Exception as e:
-        _warn(f"Не удалось сохранить turnable.json: {e}")
+# State load/save, prompt, iptables-persist helpers are imported from
+# vless_installer.modules.proto_common (see top of file). Call sites use
+# proto_load_state / proto_save_state / proto_ask / proto_ipt_persist directly.
 
 def _is_installed() -> bool:
     if not _BIN_PATH.exists() or not _SERVICE_FILE.exists():
         return False
-    return _load_state().get("installed", False)
+    return proto_load_state(_MODULE_STATE).get("installed", False)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  XRAY CONFIG
@@ -403,31 +386,14 @@ def _ipt_close_udp(port: int) -> None:
             capture=True,
         )
 
-def _ipt_persist() -> None:
-    if shutil.which("netfilter-persistent"):
-        _run(["netfilter-persistent", "save"], capture=True)
-        return
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r4 = _run(["iptables-save"], capture=True)
-    if r4.returncode == 0 and r4.stdout:
-        (rules_dir / "rules.v4").write_text(r4.stdout)
+# _ipt_persist — вынесен в proto_common (использует subprocess.run напрямую,
+# не зависит от module-local _run). Call sites: proto_ipt_persist.
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  БИНАРНИК
 # ══════════════════════════════════════════════════════════════════════════════
-def _get_latest_version() -> str:
-    try:
-        req = urllib.request.Request(
-            _GITHUB_API_URL,
-            headers={"User-Agent": "VLESS-Ultimate-Installer"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = json.loads(r.read())
-        return data.get("tag_name", "unknown")
-    except Exception:
-        return "unknown"
-
+# _get_latest_version — вынесен в proto_common. Turnable's GitHub release
+# tags have no leading 'v' prefix → strip_v=False (default) at call sites.
 def _download_binary() -> bool:
     if not _is_amd64():
         _err(f"Архитектура {platform.machine()} не поддерживается (только amd64).")
@@ -458,12 +424,9 @@ def _download_binary() -> bool:
         shutil.rmtree(tmp, ignore_errors=True)
 
 def _get_installed_version() -> Optional[str]:
-    if not _BIN_PATH.exists():
-        return None
-    r = _run([str(_BIN_PATH), "--version"], capture=True)
-    out = (r.stdout or "") + (r.stderr or "")
-    m = re.search(r'(\d+\.\d+[\.\d]*)', out)
-    return m.group(1) if m else "unknown"
+    # Delegated to proto_common.proto_get_installed_version.
+    # Turnable binary supports `--version`, output has no leading 'v'.
+    return proto_get_installed_version(_BIN_PATH, "--version")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  KEYGEN — генерация ML-KEM-768 ключей (постквантовая криптография)
@@ -702,7 +665,7 @@ def _get_server_ip() -> str:
 #  СТАТУС
 # ══════════════════════════════════════════════════════════════════════════════
 def _get_status() -> dict:
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     listen_port = state.get("listen_port", _DEFAULT_LISTEN_PORT)
     xray_port   = state.get("xray_port",   _DEFAULT_XRAY_PORT)
 
@@ -766,13 +729,13 @@ def _run_install_inner() -> None:  # noqa: C901
         _box_item("2", f"Переустановить полностью  {YELLOW}(новые ключи и UUID){NC}")
         _box_item("0", "← Отмена")
         _box_bot(); print()
-        ch = _ask(f"{CYAN}Выбор [1/2/0]: {NC}", default="0", c=True).strip()
+        ch = proto_ask(f"{CYAN}Выбор [1/2/0]: {NC}", default="0", c=True).strip()
         if ch == "0" or not ch:
             return
         if ch == "2":
             _full_uninstall(silent=True)
 
-    old = _load_state()
+    old = proto_load_state(_MODULE_STATE)
     old_listen    = old.get("listen_port", _DEFAULT_LISTEN_PORT)
     old_xport     = old.get("xray_port",   _DEFAULT_XRAY_PORT)
     old_uuid      = old.get("vless_uuid",  "")
@@ -792,11 +755,11 @@ def _run_install_inner() -> None:  # noqa: C901
     _box_bot(); print()
 
     try:
-        raw = _ask(f"  {CYAN}UDP-порт Turnable [{old_listen}]: {NC}",
+        raw = proto_ask(f"  {CYAN}UDP-порт Turnable [{old_listen}]: {NC}",
                    default=str(old_listen), c=True)
         listen_port = int(raw) if raw.isdigit() else old_listen
 
-        raw = _ask(f"  {CYAN}TCP-порт Xray inbound [{old_xport}]: {NC}",
+        raw = proto_ask(f"  {CYAN}TCP-порт Xray inbound [{old_xport}]: {NC}",
                    default=str(old_xport), c=True)
         xray_port = int(raw) if raw.isdigit() else old_xport
     except _Cancelled:
@@ -823,7 +786,7 @@ def _run_install_inner() -> None:  # noqa: C901
     try:
         old_call = old.get("call_id", "")
         prompt = f"  {CYAN}Call ID{f' [{old_call}]' if old_call else ''}: {NC}"
-        call_id = _ask(prompt, default=old_call, c=True).strip()
+        call_id = proto_ask(prompt, default=old_call, c=True).strip()
         # принимаем и полную ссылку и только ID
         m = re.search(r'/call/join/([A-Za-z0-9_\-]+)', call_id)
         if m:
@@ -904,7 +867,7 @@ def _run_install_inner() -> None:  # noqa: C901
     # ── iptables ──────────────────────────────────────────────────────────────
     _box_info(f"Открываю UDP-порт {listen_port} в iptables...")
     if _ipt_open_udp(listen_port):
-        _ipt_persist()
+        proto_ipt_persist()
         _box_ok(f"UDP {listen_port} открыт.")
     else:
         _box_warn(f"Не удалось открыть UDP {listen_port} в iptables.")
@@ -930,7 +893,7 @@ def _run_install_inner() -> None:  # noqa: C901
         turnable_link = ""
 
     # ── Сохраняем состояние ───────────────────────────────────────────────────
-    _save_state({
+    proto_save_state(_MODULE_STATE, {
         "installed":     True,
         "listen_port":   listen_port,
         "xray_port":     xray_port,
@@ -1049,11 +1012,11 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_item("Y", f"{RED}Да, удалить{NC}")
         _box_item("N", "Нет, отмена")
         _box_bot(); print()
-        ans = _ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
+        ans = proto_ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
         if ans != "y":
             _info("Удаление отменено."); _pause(); return False
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     listen_port = state.get("listen_port", _DEFAULT_LISTEN_PORT)
 
     _run(["systemctl", "stop",    _SERVICE_NAME])
@@ -1084,7 +1047,7 @@ def _full_uninstall(silent: bool = False) -> bool:
             if not silent: _warn(f"Не удалось обновить Xray config: {e}")
 
     _ipt_close_udp(listen_port)
-    _ipt_persist()
+    proto_ipt_persist()
     if not silent: _ok(f"iptables UDP {listen_port} закрыт.")
 
     try:
@@ -1110,7 +1073,7 @@ def _run_update() -> None:
     _box_info("Проверяю последний релиз на GitHub...")
     _box_bot(); print()
 
-    latest = _get_latest_version()
+    latest = proto_get_latest_version(_GITHUB_API_URL)
     os.system("clear")
     _box_top("⬆️  ОБНОВЛЕНИЕ  •  TURNABLE")
     _box_row()
@@ -1127,7 +1090,7 @@ def _run_update() -> None:
     _box_bot(); print()
 
     try:
-        ans = _ask(f"{CYAN}Обновить? [Y/n]: {NC}", default="y", c=True).strip().lower()
+        ans = proto_ask(f"{CYAN}Обновить? [Y/n]: {NC}", default="y", c=True).strip().lower()
     except _Cancelled:
         return
     if ans not in ("y", ""):
@@ -1187,7 +1150,7 @@ def _show_status() -> None:
 #  РЕГЕНЕРАЦИЯ ССЫЛКИ
 # ══════════════════════════════════════════════════════════════════════════════
 def _regen_link() -> None:
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     if not state.get("installed"):
         _warn("Turnable не установлен."); _pause(); return
 
@@ -1195,7 +1158,7 @@ def _regen_link() -> None:
     link = _generate_link(state.get("vless_uuid", ""))
     if link:
         state["turnable_link"] = link
-        _save_state(state)
+        proto_save_state(_MODULE_STATE, state)
         _ok("Ссылка обновлена.")
         _show_wireturn_config(
             state.get("listen_port", _DEFAULT_LISTEN_PORT),
@@ -1261,7 +1224,7 @@ def do_turnable_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled:
             break
 
@@ -1269,7 +1232,7 @@ def do_turnable_menu() -> None:
             _run_install()
 
         elif ch == "2" and st["installed"]:
-            state = _load_state()
+            state = proto_load_state(_MODULE_STATE)
             _show_wireturn_config(
                 state.get("listen_port",   _DEFAULT_LISTEN_PORT),
                 state.get("xray_port",     _DEFAULT_XRAY_PORT),

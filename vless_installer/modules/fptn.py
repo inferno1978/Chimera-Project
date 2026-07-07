@@ -96,6 +96,15 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from vless_installer.modules.proto_common import (
+    ProtoCancelled, proto_load_state, proto_save_state,
+    proto_ask, proto_gen_password, proto_ipt_persist,
+)
+# _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
+# `raise _Cancelled` code works unchanged after the local class definition
+# was removed in favour of proto_common.ProtoCancelled.
+_Cancelled = ProtoCancelled
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЦВЕТА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -255,26 +264,11 @@ def _print_qr(data: str, label: str = "") -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
-class _Cancelled(Exception):
-    pass
-
 def _pause() -> None:
     try:
         print(f"\n  {DIM}Нажмите Enter...{NC}", end="", flush=True); input()
     except (KeyboardInterrupt, EOFError, UnicodeDecodeError):
         print()
-
-def _ask(prompt: str, default: str = "", c: bool = False) -> str:
-    try:
-        print(prompt, end="", flush=True)
-        val = input().strip()
-        return val if val else default
-    except (EOFError, UnicodeDecodeError):
-        print(); return default
-    except KeyboardInterrupt:
-        print()
-        if c: raise _Cancelled()
-        return default
 
 def _run(cmd: list, capture: bool = False, check: bool = False,
          cwd: Optional[str] = None, input_text: Optional[str] = None,
@@ -292,10 +286,6 @@ def _run(cmd: list, capture: bool = False, check: bool = False,
         return subprocess.run(cmd, **kw)
     except subprocess.TimeoutExpired as e:
         return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=str(e))
-
-def _gen_password(length: int = 20) -> str:
-    chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
-    return ''.join(secrets.choice(chars) for _ in range(length))
 
 def _valid_username(username: str) -> bool:
     """fptn-passwd (CommonUserManager::ValidateUsername) допускает ТОЛЬКО
@@ -346,18 +336,10 @@ def _port_conflict(port: int, ignore_own: Optional[int] = None) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 #  СОСТОЯНИЕ МОДУЛЯ
 # ══════════════════════════════════════════════════════════════════════════════
-def _load_state() -> dict:
-    if not _MODULE_STATE.exists(): return {}
-    try: return json.loads(_MODULE_STATE.read_text())
-    except Exception: return {}
-
-def _save_state(data: dict) -> None:
-    try:
-        _MODULE_STATE.parent.mkdir(parents=True, exist_ok=True)
-        _MODULE_STATE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        _MODULE_STATE.chmod(0o600)
-    except Exception as e:
-        print(f"  {YELLOW}⚠{NC}  Не удалось сохранить fptn.json: {e}")
+# State load/save, prompt, password-gen, iptables-persist helpers are imported
+# from vless_installer.modules.proto_common (see top of file). Call sites use
+# proto_load_state / proto_save_state / proto_ask / proto_gen_password /
+# proto_ipt_persist directly.
 
 def _is_installed() -> bool:
     return _BIN_SERVER.exists() and _SERVICE_FILE.exists() and _CFG_FILE.exists()
@@ -367,18 +349,18 @@ def _save_user_to_state(username: str, password: str, bandwidth: int) -> None:
     users.list у fptn-passwd хранит только sha256-хэш, а subscription.py
     (как и для mieru.json/naiveproxy.json) нужен именно plaintext-пароль,
     чтобы собрать fptn:// токен в агрегированной подписке."""
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     users = state.get("users", [])
     users = [u for u in users if u.get("username") != username]
     users.append({"username": username, "password": password, "bandwidth": bandwidth})
     state["users"] = users
-    _save_state(state)
+    proto_save_state(_MODULE_STATE, state)
 
 def _remove_user_from_state(username: str) -> None:
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     users = [u for u in state.get("users", []) if u.get("username") != username]
     state["users"] = users
-    _save_state(state)
+    proto_save_state(_MODULE_STATE, state)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  БИНАРНИКИ (.deb → dpkg-deb -x, БЕЗ dpkg -i и без Docker)
@@ -529,14 +511,8 @@ def _ipt_close_tcp(port: int) -> None:
         _run(["iptables", "-t", "filter", "-D", "INPUT",
               "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"])
 
-def _ipt_persist() -> None:
-    if shutil.which("netfilter-persistent"):
-        _run(["netfilter-persistent", "save"], capture=True); return
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r = _run(["iptables-save"], capture=True)
-    if r.returncode == 0 and r.stdout:
-        (rules_dir / "rules.v4").write_text(r.stdout)
+# _ipt_persist — вынесен в proto_common (использует subprocess.run напрямую,
+# не зависит от module-local _run). Call sites: proto_ipt_persist.
 
 def _ufw_is_active() -> bool:
     if not shutil.which("ufw"):
@@ -549,7 +525,7 @@ def _open_port(port: int) -> str:
         _run(["ufw", "allow", f"{port}/tcp", "comment", "FPTN"], capture=True)
         return f"UFW: TCP {port} открыт."
     _ipt_open_tcp(port)
-    _ipt_persist()
+    proto_ipt_persist()
     return f"iptables: TCP {port} открыт."
 
 def _close_port(port: int) -> None:
@@ -557,7 +533,7 @@ def _close_port(port: int) -> None:
         _run(["ufw", "delete", "allow", f"{port}/tcp"], capture=True)
     else:
         _ipt_close_tcp(port)
-        _ipt_persist()
+        proto_ipt_persist()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ФАЙРВОЛ: снимок политики + автовосстановление после каждого старта
@@ -834,7 +810,7 @@ def _run_install_inner() -> None:
         _box_item("Q", "← Отмена")
         _box_bot(); print()
         try:
-            ch = _ask(f"{CYAN}Выбор [1/2/Q]: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор [1/2/Q]: {NC}", c=True).strip().lower()
         except _Cancelled: return
         if ch == "q" or not ch: return
         if ch == "1":
@@ -844,7 +820,7 @@ def _run_install_inner() -> None:
         else:
             return
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     old_port    = state.get("port", _DEFAULT_PORT)
     old_service_name = state.get("service_name", "MyFptnServer")
     old_proxy_domain = state.get("default_proxy_domain", _DEFAULT_PROXY_DOMAIN)
@@ -863,7 +839,7 @@ def _run_install_inner() -> None:
 
     try:
         while True:
-            raw_port = _ask(f"  {CYAN}Порт [{old_port}]: {NC}", default=str(old_port), c=True)
+            raw_port = proto_ask(f"  {CYAN}Порт [{old_port}]: {NC}", default=str(old_port), c=True)
             port = int(raw_port) if raw_port.isdigit() else old_port
             conflict = _port_conflict(port, ignore_own=old_port if reinstall_keep_users else None)
             if conflict:
@@ -873,17 +849,17 @@ def _run_install_inner() -> None:
                 continue
             break
 
-        service_name = _ask(
+        service_name = proto_ask(
             f"  {CYAN}Имя сервиса (для токена, любое) [{old_service_name}]: {NC}",
             default=old_service_name, c=True,
         ).strip() or old_service_name
 
-        proxy_domain = _ask(
+        proxy_domain = proto_ask(
             f"  {CYAN}Домен для маскировки не-VPN трафика [{old_proxy_domain}]: {NC}",
             default=old_proxy_domain, c=True,
         ).strip() or old_proxy_domain
 
-        allowed_sni = _ask(
+        allowed_sni = proto_ask(
             f"  {CYAN}Белый список SNI через запятую (Enter=пропустить, "
             f"пускать все на их собственный SNI) [{old_allowed_sni or '—'}]: {NC}",
             default=old_allowed_sni, c=True,
@@ -909,7 +885,7 @@ def _run_install_inner() -> None:
     if not out_iface:
         _box_warn("Не удалось автоопределить исходящий интерфейс — укажите вручную.")
         try:
-            out_iface = _ask(f"  {CYAN}Исходящий сетевой интерфейс: {NC}", c=True).strip()
+            out_iface = proto_ask(f"  {CYAN}Исходящий сетевой интерфейс: {NC}", c=True).strip()
         except _Cancelled: raise
     print(f"  {GREEN}✓{NC}  Исходящий интерфейс: {out_iface}")
 
@@ -956,7 +932,7 @@ def _run_install_inner() -> None:
     existing_users = _passwd_list_usernames() if reinstall_keep_users else []
     first_user_created = None
     if not existing_users:
-        first_user, first_pass = "admin", _gen_password()
+        first_user, first_pass = "admin", proto_gen_password()
         ok, msg2 = _passwd_add_user(first_user, first_pass, _DEFAULT_BANDWIDTH_MB)
         if ok:
             first_user_created = (first_user, first_pass)
@@ -971,7 +947,7 @@ def _run_install_inner() -> None:
 
     svc_ok = _restart_and_reconcile()
 
-    _save_state({
+    proto_save_state(_MODULE_STATE, {
         "installed": True, "port": port, "service_name": service_name,
         "default_proxy_domain": proxy_domain, "allowed_sni_list": allowed_sni,
         "out_iface": out_iface, "server_ip": server_ip,
@@ -1014,7 +990,7 @@ def _run_install_inner() -> None:
 def _users_menu() -> None:
     while True:
         os.system("clear")
-        state = _load_state()
+        state = proto_load_state(_MODULE_STATE)
         usernames = _passwd_list_usernames()
         server_ip = state.get("server_ip") or _get_server_ip()
         port = state.get("port", _DEFAULT_PORT)
@@ -1040,7 +1016,7 @@ def _users_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled: break
 
         if ch == "1":
@@ -1062,20 +1038,20 @@ def _add_user_flow() -> None:
     _box_bot(); print()
 
     try:
-        username = _ask(f"  {CYAN}Логин: {NC}", c=True).strip()
+        username = proto_ask(f"  {CYAN}Логин: {NC}", c=True).strip()
         if not username:
             print(f"  {RED}✗{NC}  Логин не может быть пустым."); _pause(); return
         if not _valid_username(username):
             print(f"  {RED}✗{NC}  Только латинские буквы и цифры."); _pause(); return
 
-        raw_bw = _ask(
+        raw_bw = proto_ask(
             f"  {CYAN}Лимит скорости, Мбит/с [{_DEFAULT_BANDWIDTH_MB}]: {NC}",
             default=str(_DEFAULT_BANDWIDTH_MB), c=True,
         )
         bandwidth = int(raw_bw) if raw_bw.isdigit() else _DEFAULT_BANDWIDTH_MB
 
-        raw_pass = _ask(f"  {CYAN}Пароль (Enter=авто): {NC}", default="", c=True).strip()
-        password = raw_pass or _gen_password()
+        raw_pass = proto_ask(f"  {CYAN}Пароль (Enter=авто): {NC}", default="", c=True).strip()
+        password = raw_pass or proto_gen_password()
     except _Cancelled: raise
 
     ok, msg = _passwd_add_user(username, password, bandwidth)
@@ -1083,7 +1059,7 @@ def _add_user_flow() -> None:
         print(f"  {RED}✗{NC}  {msg}"); _pause(); return
     _save_user_to_state(username, password, bandwidth)
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     server_ip = state.get("server_ip") or _get_server_ip()
     port = state.get("port", _DEFAULT_PORT)
     service_name = state.get("service_name", "MyFptnServer")
@@ -1118,7 +1094,7 @@ def _show_user_token(usernames: list, server_ip: str, port: int) -> None:
     _box_row(); _box_item("Q", "← Отмена"); _box_bot(); print()
 
     try:
-        num = _ask(f"{CYAN}Номер: {NC}", c=True).strip()
+        num = proto_ask(f"{CYAN}Номер: {NC}", c=True).strip()
     except _Cancelled: raise
     if num.lower() == "q" or not num: return
     try:
@@ -1131,14 +1107,14 @@ def _show_user_token(usernames: list, server_ip: str, port: int) -> None:
     _box_warn("перегенерировать только с НОВЫМ паролем, старый клиент придётся")
     _box_warn("переподключить заново.")
     try:
-        confirm = _ask(
+        confirm = proto_ask(
             f"  {YELLOW}Сгенерировать новый пароль для {username} и выдать новый токен? [y/N]: {NC}",
             default="n", c=True,
         ).strip().lower()
     except _Cancelled: raise
     if confirm != "y": return
 
-    new_password = _gen_password()
+    new_password = proto_gen_password()
     if not _passwd_del_user(username):
         print(f"  {RED}✗{NC}  Не удалось удалить старую запись."); _pause(); return
     ok, msg = _passwd_add_user(username, new_password, _DEFAULT_BANDWIDTH_MB)
@@ -1146,7 +1122,7 @@ def _show_user_token(usernames: list, server_ip: str, port: int) -> None:
         print(f"  {RED}✗{NC}  {msg}"); _pause(); return
     _save_user_to_state(username, new_password, _DEFAULT_BANDWIDTH_MB)
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     service_name = state.get("service_name", "MyFptnServer")
     token = _gen_fptn_token(username, new_password, server_ip, service_name, port)
 
@@ -1176,7 +1152,7 @@ def _delete_user_flow(usernames: list) -> None:
     _box_row(); _box_item("Q", "← Отмена"); _box_bot(); print()
 
     try:
-        num = _ask(f"{CYAN}Номер: {NC}", c=True).strip()
+        num = proto_ask(f"{CYAN}Номер: {NC}", c=True).strip()
     except _Cancelled: raise
     if num.lower() == "q" or not num: return
     try:
@@ -1185,7 +1161,7 @@ def _delete_user_flow(usernames: list) -> None:
         print(f"  {RED}✗{NC}  Неверный номер."); _pause(); return
 
     try:
-        confirm = _ask(
+        confirm = proto_ask(
             f"  {YELLOW}Удалить {username}? [y/N]: {NC}", default="n", c=True,
         ).strip().lower()
     except _Cancelled: raise
@@ -1203,7 +1179,7 @@ def _delete_user_flow(usernames: list) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 def _show_status() -> None:
     os.system("clear")
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     _box_top("📊  СТАТУС  •  FPTN")
     _box_row()
 
@@ -1264,7 +1240,7 @@ def _show_guide() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled: break
 
         if ch == "1":   _guide_how()
@@ -1407,12 +1383,12 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_item("N", "Нет, отмена")
         _box_bot(); print()
         try:
-            ans = _ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
+            ans = proto_ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
         except _Cancelled: return False
         if ans != "y":
             print(f"  {DIM}Отменено.{NC}"); _pause(); return False
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     port = state.get("port", _DEFAULT_PORT)
 
     _run(["systemctl", "stop", _SERVICE_NAME])
@@ -1445,7 +1421,7 @@ def do_fptn_menu() -> None:
     while True:
         os.system("clear")
         installed = _is_installed()
-        state = _load_state()
+        state = proto_load_state(_MODULE_STATE)
 
         r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
         svc_ok = r.stdout.strip() == "active"
@@ -1483,7 +1459,7 @@ def do_fptn_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled: break
 
         if ch == "1":

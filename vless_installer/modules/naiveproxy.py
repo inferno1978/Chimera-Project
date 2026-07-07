@@ -84,6 +84,16 @@ import urllib.parse
 from pathlib import Path
 from typing import Optional
 
+from vless_installer.modules.proto_common import (
+    ProtoCancelled, proto_load_state, proto_save_state,
+    proto_ask, proto_gen_password, proto_ipt_persist,
+    proto_get_latest_version,
+)
+# _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
+# `raise _Cancelled` code works unchanged after the local class definition
+# was removed in favour of proto_common.ProtoCancelled.
+_Cancelled = ProtoCancelled
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЦВЕТА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -252,26 +262,11 @@ def _print_qr(data: str, label: str = "") -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
-class _Cancelled(Exception):
-    pass
-
 def _pause() -> None:
     try:
         print(f"\n  {DIM}Нажмите Enter...{NC}", end="", flush=True); input()
     except (KeyboardInterrupt, EOFError, UnicodeDecodeError):
         print()
-
-def _ask(prompt: str, default: str = "", c: bool = False) -> str:
-    try:
-        print(prompt, end="", flush=True)
-        val = input().strip()
-        return val if val else default
-    except (EOFError, UnicodeDecodeError):
-        print(); return default
-    except KeyboardInterrupt:
-        print()
-        if c: raise _Cancelled()
-        return default
 
 def _run(cmd: list, capture: bool = False, check: bool = False,
          cwd: Optional[str] = None) -> subprocess.CompletedProcess:
@@ -282,10 +277,6 @@ def _run(cmd: list, capture: bool = False, check: bool = False,
     else:
         kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return subprocess.run(cmd, **kw)
-
-def _gen_password(length: int = 16) -> str:
-    chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
-    return ''.join(secrets.choice(chars) for _ in range(length))
 
 def _build_naive_link(domain: str, port: int, username: str, password: str, tag: str = "") -> str:
     """
@@ -344,30 +335,22 @@ def _get_server_ip() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 #  СОСТОЯНИЕ МОДУЛЯ
 # ══════════════════════════════════════════════════════════════════════════════
-def _load_state() -> dict:
-    if not _MODULE_STATE.exists(): return {}
-    try: return json.loads(_MODULE_STATE.read_text())
-    except Exception: return {}
-
-def _save_state(data: dict) -> None:
-    try:
-        _MODULE_STATE.parent.mkdir(parents=True, exist_ok=True)
-        _MODULE_STATE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        _MODULE_STATE.chmod(0o600)
-    except Exception as e:
-        print(f"  {YELLOW}⚠{NC}  Не удалось сохранить naiveproxy.json: {e}")
+# State load/save, prompt, password-gen, iptables-persist and latest-version
+# helpers are imported from vless_installer.modules.proto_common (see top).
+# Call sites use proto_load_state / proto_save_state / proto_ask /
+# proto_gen_password / proto_ipt_persist / proto_get_latest_version directly.
 
 def _is_installed() -> bool:
     return _BIN_PATH.exists() and _SERVICE_FILE.exists() and _CADDYFILE.exists()
 
 def _load_users() -> list:
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     return state.get("users", [])
 
 def _save_users(users: list) -> None:
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     state["users"] = users
-    _save_state(state)
+    protoproto_save_state(_MODULE_STATE, _MODULE_STATE, state)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  БИНАРНИК
@@ -375,14 +358,8 @@ def _save_users(users: list) -> None:
 def _is_amd64() -> bool:
     return platform.machine().lower() in ("x86_64", "amd64")
 
-def _get_latest_version() -> str:
-    try:
-        req = urllib.request.Request(
-            _GITHUB_API, headers={"User-Agent": "VLESS-Ultimate-Installer"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read()).get("tag_name", "unknown").lstrip("v")
-    except Exception: return "unknown"
-
+# _get_latest_version — вынесен в proto_common. NaiveProxy's GitHub release
+# tags have a leading 'v' (e.g. 'v1.0.1') → strip_v=True at call sites.
 def _download_binary() -> bool:
     if not _is_amd64():
         print(f"  {RED}✗{NC}  caddy-forwardproxy-naive только amd64. "
@@ -521,14 +498,8 @@ def _ipt_close_tcp(port: int) -> None:
         _run(["iptables", "-t", "filter", "-D", "INPUT",
               "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"])
 
-def _ipt_persist() -> None:
-    if shutil.which("netfilter-persistent"):
-        _run(["netfilter-persistent", "save"], capture=True); return
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r = _run(["iptables-save"], capture=True)
-    if r.returncode == 0 and r.stdout:
-        (rules_dir / "rules.v4").write_text(r.stdout)
+# _ipt_persist — вынесен в proto_common (использует subprocess.run напрямую,
+# не зависит от module-local _run). Call sites: proto_ipt_persist.
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  UFW
@@ -557,7 +528,7 @@ def _open_port(port: int) -> str:
         _ufw_open_tcp(port)
         return f"UFW: TCP {port} открыт."
     _ipt_open_tcp(port)
-    _ipt_persist()
+    proto_ipt_persist()
     return f"iptables: TCP {port} открыт."
 
 def _close_port(port: int) -> None:
@@ -566,7 +537,7 @@ def _close_port(port: int) -> None:
         _ufw_close_tcp(port)
     else:
         _ipt_close_tcp(port)
-        _ipt_persist()
+        proto_ipt_persist()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SYSTEMD
@@ -661,13 +632,13 @@ def _run_install_inner() -> None:
         _box_item("Q", "← Отмена")
         _box_bot(); print()
         try:
-            ch = _ask(f"{CYAN}Выбор [1/2/Q]: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор [1/2/Q]: {NC}", c=True).strip().lower()
         except _Cancelled: return
         if ch == "q" or not ch: return
         if ch == "2": _full_uninstall(silent=True)
 
     # ── Ввод параметров ───────────────────────────────────────────────────────
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     old_domain    = state.get("domain", "")
     old_port      = state.get("port", _DEFAULT_PORT)
     old_fake      = state.get("fake_url", _DEFAULT_FAKE)
@@ -683,25 +654,25 @@ def _run_install_inner() -> None:
     _box_bot(); print()
 
     try:
-        domain = _ask(
+        domain = proto_ask(
             f"  {CYAN}Домен (например vpn.example.com) [{old_domain or 'обязательно'}]: {NC}",
             default=old_domain, c=True,
         ).strip()
         if not domain:
             print(f"  {RED}✗{NC}  Домен обязателен."); _pause(); return
 
-        raw = _ask(
+        raw = proto_ask(
             f"  {CYAN}Порт [{old_port}]: {NC}",
             default=str(old_port), c=True,
         )
         port = int(raw) if raw.isdigit() else old_port
 
-        fake_url = _ask(
+        fake_url = proto_ask(
             f"  {CYAN}URL фейкового сайта [{old_fake}]: {NC}",
             default=old_fake, c=True,
         ).strip() or old_fake
 
-        upstream = _ask(
+        upstream = proto_ask(
             f"  {CYAN}Upstream (каскад Entry→Exit, Enter=пропустить): {NC}",
             default=old_upstream, c=True,
         ).strip()
@@ -728,7 +699,7 @@ def _run_install_inner() -> None:
     users = state.get("users") or []
     if not users:
         first_user = "admin"
-        first_pass = _gen_password()
+        first_pass = proto_gen_password()
         first_hash = _hash_password(first_pass)
         users = [{"username": first_user, "password": first_pass,
                   "password_hash": first_hash}]
@@ -753,7 +724,7 @@ def _run_install_inner() -> None:
     # (только если нет готового сертификата)
     _nginx_was_running = False
     r80 = _run(["ss", "-tlpn"], capture=True)
-    if not existing_cert and (":80 " in r80.stdout or ":80	" in r80.stdout or " :80" in r80.stdout):
+    if not existing_cert and (":80 " in r80.stdout or ":80      " in r80.stdout or " :80" in r80.stdout):
         r_nginx = _run(["systemctl", "is-active", "nginx"], capture=True)
         if r_nginx.stdout.strip() == "active":
             _run(["systemctl", "stop", "nginx"])
@@ -776,7 +747,7 @@ def _run_install_inner() -> None:
     print(f"  {GREEN}✓{NC}  {fw_msg}")
 
     # 7. Сохраняем состояние
-    _save_state({
+    proto_save_state(_MODULE_STATE, {
         "installed":    True,
         "domain":       domain,
         "port":         port,
@@ -849,7 +820,7 @@ def _show_singbox_json(domain: str, port: int, username: str, password: str) -> 
 def _users_menu() -> None:
     while True:
         os.system("clear")
-        state = _load_state()
+        state = proto_load_state(_MODULE_STATE)
         users = state.get("users", [])
         domain = state.get("domain", "—")
         port   = state.get("port", _DEFAULT_PORT)
@@ -879,7 +850,7 @@ def _users_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled: break
 
         if ch == "1":
@@ -900,7 +871,7 @@ def _add_user(state: dict) -> None:
     _box_bot(); print()
 
     try:
-        username = _ask(f"  {CYAN}Логин: {NC}", c=True).strip()
+        username = proto_ask(f"  {CYAN}Логин: {NC}", c=True).strip()
         if not username:
             print(f"  {RED}✗{NC}  Логин не может быть пустым."); _pause(); return
 
@@ -908,11 +879,11 @@ def _add_user(state: dict) -> None:
         if any(u["username"] == username for u in users):
             print(f"  {YELLOW}⚠{NC}  Пользователь уже существует."); _pause(); return
 
-        raw_pass = _ask(
+        raw_pass = proto_ask(
             f"  {CYAN}Пароль (Enter=авто): {NC}",
             default="", c=True,
         ).strip()
-        password = raw_pass or _gen_password()
+        password = raw_pass or proto_gen_password()
     except _Cancelled: raise
 
     print(f"  {CYAN}→{NC}  Хэширую пароль...")
@@ -924,7 +895,7 @@ def _add_user(state: dict) -> None:
         "password_hash": password_hash,
     })
     state["users"] = users
-    _save_state(state)
+    proto_save_state(_MODULE_STATE, state)
 
     # Применяем новый конфиг
     err = _apply_config(
@@ -968,7 +939,7 @@ def _show_user_link(users: list, domain: str, port: int) -> None:
     _box_row(); _box_item("Q", "← Отмена"); _box_bot(); print()
 
     try:
-        num = _ask(f"{CYAN}Номер: {NC}", c=True).strip()
+        num = proto_ask(f"{CYAN}Номер: {NC}", c=True).strip()
     except _Cancelled: raise
     if num.lower() == "q" or not num: return
     try:
@@ -1007,7 +978,7 @@ def _delete_user(users: list, state: dict) -> None:
     _box_row(); _box_item("Q", "← Отмена"); _box_bot(); print()
 
     try:
-        num = _ask(f"{CYAN}Номер: {NC}", c=True).strip()
+        num = proto_ask(f"{CYAN}Номер: {NC}", c=True).strip()
     except _Cancelled: raise
     if num.lower() == "q" or not num: return
     try:
@@ -1016,7 +987,7 @@ def _delete_user(users: list, state: dict) -> None:
         print(f"  {RED}✗{NC}  Неверный номер."); _pause(); return
 
     try:
-        confirm = _ask(
+        confirm = proto_ask(
             f"  {YELLOW}Удалить {user['username']}? [y/N]: {NC}",
             default="n", c=True,
         ).strip().lower()
@@ -1025,7 +996,7 @@ def _delete_user(users: list, state: dict) -> None:
 
     users.pop(idx)
     state["users"] = users
-    _save_state(state)
+    proto_save_state(_MODULE_STATE, state)
 
     _apply_config(
         state["domain"], state["port"], users,
@@ -1042,7 +1013,7 @@ def _delete_user(users: list, state: dict) -> None:
 def _cascade_menu() -> None:
     """Настройка upstream для Entry→Exit каскада."""
     os.system("clear")
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     current = state.get("upstream", "")
 
     _box_top("🔗  КАСКАД ENTRY→EXIT  •  NAIVEPROXY")
@@ -1065,12 +1036,12 @@ def _cascade_menu() -> None:
     _box_bot(); print()
 
     try:
-        ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+        ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
     except _Cancelled: return
 
     if ch == "1":
         try:
-            new_upstream = _ask(
+            new_upstream = proto_ask(
                 f"  {CYAN}Upstream URL: {NC}",
                 default=current, c=True,
             ).strip()
@@ -1079,7 +1050,7 @@ def _cascade_menu() -> None:
             print(f"  {RED}✗{NC}  URL не может быть пустым."); _pause(); return
 
         state["upstream"] = new_upstream
-        _save_state(state)
+        proto_save_state(_MODULE_STATE, state)
         err = _apply_config(
             state["domain"], state["port"], state.get("users", []),
             state.get("fake_url", _DEFAULT_FAKE),
@@ -1092,7 +1063,7 @@ def _cascade_menu() -> None:
 
     elif ch == "2" and current:
         state["upstream"] = ""
-        _save_state(state)
+        proto_save_state(_MODULE_STATE, state)
         _apply_config(
             state["domain"], state["port"], state.get("users", []),
             state.get("fake_url", _DEFAULT_FAKE),
@@ -1107,7 +1078,7 @@ def _cascade_menu() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 def _show_status() -> None:
     os.system("clear")
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     _box_top("📊  СТАТУС  •  NAIVEPROXY")
     _box_row()
 
@@ -1153,7 +1124,7 @@ def _show_guide() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled: break
 
         if ch == "1":   _guide_how()
@@ -1212,7 +1183,7 @@ def _guide_dns() -> None:
 
 def _guide_clients() -> None:
     os.system("clear")
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     domain = state.get("domain", "ваш-домен.com")
     port   = state.get("port", 443)
 
@@ -1315,12 +1286,12 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_item("N", "Нет, отмена")
         _box_bot(); print()
         try:
-            ans = _ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
+            ans = proto_ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
         except _Cancelled: return False
         if ans != "y":
             print(f"  {DIM}Отменено.{NC}"); _pause(); return False
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     port = state.get("port", _DEFAULT_PORT)
 
     _run(["systemctl", "stop",    _SERVICE_NAME])
@@ -1352,7 +1323,7 @@ def do_naiveproxy_menu() -> None:
     while True:
         os.system("clear")
         installed = _is_installed()
-        state     = _load_state()
+        state     = proto_load_state(_MODULE_STATE)
 
         r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
         svc_ok = r.stdout.strip() == "active"
@@ -1397,7 +1368,7 @@ def do_naiveproxy_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled: break
 
         if ch == "1":
@@ -1418,7 +1389,7 @@ def do_naiveproxy_menu() -> None:
         elif ch == "5" and installed:
             _show_status()
         elif ch == "6" and installed:
-            state = _load_state()
+            state = proto_load_state(_MODULE_STATE)
             users = state.get("users", [])
             if users:
                 _show_singbox_json(state.get("domain", ""), state.get("port", _DEFAULT_PORT),

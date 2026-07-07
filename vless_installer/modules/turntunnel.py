@@ -59,6 +59,16 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from vless_installer.modules.proto_common import (
+    ProtoCancelled, proto_load_state, proto_save_state,
+    proto_ask, proto_ipt_persist,
+    proto_get_latest_version, proto_get_installed_version,
+)
+# _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
+# `raise _Cancelled` code works unchanged after the local class definition
+# was removed in favour of proto_common.ProtoCancelled.
+_Cancelled = ProtoCancelled
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЦВЕТА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -217,8 +227,10 @@ def _warn(msg: str) -> None: print(f"  {YELLOW}⚠{NC}  {msg}"); _log(f"[WARN] {
 def _info(msg: str) -> None: print(f"  {CYAN}→{NC}  {msg}"); _log(f"[INFO] {msg}")
 def _err(msg: str)  -> None: print(f"  {RED}✗{NC}  {msg}"); _log(f"[ERR] {msg}")
 
-class _Cancelled(Exception):
-    pass
+# _Cancelled was a local Exception subclass; it is now an alias for
+# proto_common.ProtoCancelled (see the `_Cancelled = ProtoCancelled` line
+# near the top of this file). proto_ask raises ProtoCancelled, and existing
+# `except _Cancelled:` / `raise _Cancelled` code keeps working unchanged.
 
 def _pause() -> None:
     try:
@@ -227,17 +239,7 @@ def _pause() -> None:
     except (KeyboardInterrupt, EOFError, UnicodeDecodeError):
         print()
 
-def _ask(prompt: str, default: str = "", c: bool = False) -> str:
-    try:
-        print(prompt, end="", flush=True)
-        val = input().strip()
-        return val if val else default
-    except (EOFError, UnicodeDecodeError):
-        print(); return default
-    except KeyboardInterrupt:
-        print()
-        if c: raise _Cancelled()
-        return default
+# _ask — вынесен в proto_common (proto_ask).
 
 def _is_amd64() -> bool:
     return platform.machine().lower() in ("x86_64", "amd64")
@@ -245,26 +247,14 @@ def _is_amd64() -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 #  STATE
 # ══════════════════════════════════════════════════════════════════════════════
-def _load_state() -> dict:
-    if not _MODULE_STATE.exists():
-        return {}
-    try:
-        return json.loads(_MODULE_STATE.read_text())
-    except Exception:
-        return {}
-
-def _save_state(data: dict) -> None:
-    try:
-        _MODULE_STATE.parent.mkdir(parents=True, exist_ok=True)
-        _MODULE_STATE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        _MODULE_STATE.chmod(0o600)
-    except Exception as e:
-        _warn(f"Не удалось сохранить turntunnel.json: {e}")
+# State load/save, prompt, iptables-persist helpers are imported from
+# vless_installer.modules.proto_common (see top of file). Call sites use
+# proto_load_state / proto_save_state / proto_ask / proto_ipt_persist directly.
 
 def _is_installed() -> bool:
     if not _BIN_PATH.exists() or not _SERVICE_FILE.exists():
         return False
-    return _load_state().get("installed", False)
+    return proto_load_state(_MODULE_STATE).get("installed", False)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  IPTABLES
@@ -297,30 +287,16 @@ def _ipt_close_udp(port: int) -> None:
             capture=True,
         )
 
-def _ipt_persist() -> None:
-    if shutil.which("netfilter-persistent"):
-        _run(["netfilter-persistent", "save"], capture=True)
-        return
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r4 = _run(["iptables-save"], capture=True)
-    if r4.returncode == 0 and r4.stdout:
-        (rules_dir / "rules.v4").write_text(r4.stdout)
+# _ipt_persist — вынесен в proto_common (использует subprocess.run напрямую,
+# не зависит от module-local _run). Call sites: proto_ipt_persist.
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  БИНАРНИК
 # ══════════════════════════════════════════════════════════════════════════════
-def _get_latest_version() -> str:
-    try:
-        req = urllib.request.Request(
-            _GITHUB_API_URL,
-            headers={"User-Agent": "VLESS-Ultimate-Installer"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = json.loads(r.read())
-        return data.get("tag_name", "unknown")
-    except Exception:
-        return "unknown"
+# _get_latest_version — вынесен в proto_common. vk-turn-proxy's GitHub
+# release tags have no leading 'v' → strip_v=False (default) at call sites.
+# _get_installed_version — also in proto_common; vk-turn-proxy uses the
+# `-version` flag (single dash). Call sites use proto_get_installed_version.
 
 def _download_binary() -> bool:
     if not _is_amd64():
@@ -350,13 +326,9 @@ def _download_binary() -> bool:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-def _get_installed_version() -> Optional[str]:
-    if not _BIN_PATH.exists():
-        return None
-    r = _run([str(_BIN_PATH), "-version"], capture=True)
-    out = (r.stdout or "") + (r.stderr or "")
-    m = re.search(r'(\d+\.\d+[\.\d]*)', out)
-    return m.group(1) if m else "unknown"
+# _get_installed_version — вынесен в proto_common. vk-turn-proxy binary
+# uses single-dash `-version` flag, output has no leading 'v' prefix.
+# Call sites use proto_get_installed_version(_BIN_PATH, "-version").
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SYSTEMD СЕРВИС
@@ -471,7 +443,7 @@ def _get_server_ip() -> str:
 #  СТАТУС
 # ══════════════════════════════════════════════════════════════════════════════
 def _get_status() -> dict:
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     listen_port = state.get("listen_port", _DEFAULT_LISTEN_PORT)
     target_port = state.get("target_port", _DEFAULT_TARGET_PORT)
 
@@ -486,7 +458,7 @@ def _get_status() -> dict:
         "listen_port": listen_port,
         "target_port": target_port,
         "target_type": state.get("target_type", "wireguard"),
-        "bin_version": _get_installed_version(),
+        "bin_version": proto_get_installed_version(_BIN_PATH, "-version"),
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -516,13 +488,13 @@ def _run_install_inner() -> None:
         _box_item("2", f"Переустановить полностью")
         _box_item("0", "← Отмена")
         _box_bot(); print()
-        ch = _ask(f"{CYAN}Выбор [1/2/0]: {NC}", default="0", c=True).strip()
+        ch = proto_ask(f"{CYAN}Выбор [1/2/0]: {NC}", default="0", c=True).strip()
         if ch == "0" or not ch:
             return
         if ch == "2":
             _full_uninstall(silent=True)
 
-    old = _load_state()
+    old = proto_load_state(_MODULE_STATE)
     old_listen  = old.get("listen_port", _DEFAULT_LISTEN_PORT)
     old_target  = old.get("target_port", _DEFAULT_TARGET_PORT)
     old_ttype   = old.get("target_type", "wireguard")
@@ -541,17 +513,17 @@ def _run_install_inner() -> None:
     _box_bot(); print()
 
     try:
-        raw = _ask(f"  {CYAN}UDP-порт vk-turn-proxy [{old_listen}]: {NC}",
+        raw = proto_ask(f"  {CYAN}UDP-порт vk-turn-proxy [{old_listen}]: {NC}",
                    default=str(old_listen), c=True)
         listen_port = int(raw) if raw.isdigit() else old_listen
 
-        ttype_ch = _ask(f"  {CYAN}Целевой сервис [1=WG/2=H2, Enter={old_ttype}]: {NC}",
+        ttype_ch = proto_ask(f"  {CYAN}Целевой сервис [1=WG/2=H2, Enter={old_ttype}]: {NC}",
                         default="", c=True).strip()
         target_type = "hysteria2" if ttype_ch == "2" else (
             "wireguard" if ttype_ch == "1" else old_ttype
         )
 
-        raw = _ask(f"  {CYAN}Целевой порт [{old_target}]: {NC}",
+        raw = proto_ask(f"  {CYAN}Целевой порт [{old_target}]: {NC}",
                    default=str(old_target), c=True)
         target_port = int(raw) if raw.isdigit() else old_target
     except _Cancelled:
@@ -577,7 +549,7 @@ def _run_install_inner() -> None:
 
     _box_info(f"Открываю UDP-порт {listen_port} в iptables...")
     if _ipt_open_udp(listen_port):
-        _ipt_persist()
+        proto_ipt_persist()
         _box_ok(f"UDP {listen_port} открыт.")
     else:
         _box_warn(f"Не удалось открыть UDP {listen_port} в iptables.")
@@ -591,7 +563,7 @@ def _run_install_inner() -> None:
     else:
         _box_warn("Сервис не запустился — проверьте: journalctl -u vk-turn-proxy -n 30")
 
-    _save_state({
+    proto_save_state(_MODULE_STATE, {
         "installed":   True,
         "listen_port": listen_port,
         "target_port": target_port,
@@ -681,11 +653,11 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_item("Y", f"{RED}Да, удалить{NC}")
         _box_item("N", "Нет, отмена")
         _box_bot(); print()
-        ans = _ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
+        ans = proto_ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
         if ans != "y":
             _info("Удаление отменено."); _pause(); return False
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     listen_port = state.get("listen_port", _DEFAULT_LISTEN_PORT)
 
     _run(["systemctl", "stop",    _SERVICE_NAME])
@@ -704,7 +676,7 @@ def _full_uninstall(silent: bool = False) -> bool:
         if not silent: _warn(f"Не удалось удалить {_BIN_DIR}: {e}")
 
     _ipt_close_udp(listen_port)
-    _ipt_persist()
+    proto_ipt_persist()
     if not silent: _ok(f"iptables UDP {listen_port} закрыт.")
 
     try:
@@ -725,12 +697,12 @@ def _run_update() -> None:
     os.system("clear")
     _box_top("⬆️  ОБНОВЛЕНИЕ  •  VK TURN PROXY")
     _box_row()
-    cur = _get_installed_version()
+    cur = proto_get_installed_version(_BIN_PATH, "-version")
     _box_kv("Установлена:", cur or "—")
     _box_info("Проверяю последний релиз на GitHub...")
     _box_bot(); print()
 
-    latest = _get_latest_version()
+    latest = proto_get_latest_version(_GITHUB_API_URL)
     os.system("clear")
     _box_top("⬆️  ОБНОВЛЕНИЕ  •  VK TURN PROXY")
     _box_row()
@@ -747,7 +719,7 @@ def _run_update() -> None:
     _box_bot(); print()
 
     try:
-        ans = _ask(f"{CYAN}Обновить? [Y/n]: {NC}", default="y", c=True).strip().lower()
+        ans = proto_ask(f"{CYAN}Обновить? [Y/n]: {NC}", default="y", c=True).strip().lower()
     except _Cancelled:
         return
     if ans not in ("y", ""):
@@ -805,7 +777,7 @@ def _show_status() -> None:
 #  СМЕНА ПОРТА
 # ══════════════════════════════════════════════════════════════════════════════
 def _change_port() -> None:
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     if not state.get("installed"):
         _warn("VK Turn Proxy не установлен."); _pause(); return
 
@@ -821,11 +793,11 @@ def _change_port() -> None:
     _box_row(); _box_bot(); print()
 
     try:
-        raw = _ask(f"  {CYAN}Новый UDP-порт [{old_listen}]: {NC}",
+        raw = proto_ask(f"  {CYAN}Новый UDP-порт [{old_listen}]: {NC}",
                    default=str(old_listen), c=True)
         new_listen = int(raw) if raw.isdigit() else old_listen
 
-        raw = _ask(f"  {CYAN}Новый целевой порт [{old_target}]: {NC}",
+        raw = proto_ask(f"  {CYAN}Новый целевой порт [{old_target}]: {NC}",
                    default=str(old_target), c=True)
         new_target = int(raw) if raw.isdigit() else old_target
     except _Cancelled:
@@ -842,7 +814,7 @@ def _change_port() -> None:
     if new_listen != old_listen:
         _ipt_close_udp(old_listen)
         _ipt_open_udp(new_listen)
-        _ipt_persist()
+        proto_ipt_persist()
         _ok(f"iptables: UDP {old_listen} → {new_listen}.")
 
     _run(["systemctl", "stop", _SERVICE_NAME])
@@ -851,7 +823,7 @@ def _change_port() -> None:
 
     state["listen_port"] = new_listen
     state["target_port"] = new_target
-    _save_state(state)
+    proto_save_state(_MODULE_STATE, state)
 
     _ok(f"Порты обновлены. UDP: {new_listen}, цель: {new_target}.")
     _pause()
@@ -908,7 +880,7 @@ def do_turntunnel_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled:
             break
 
@@ -916,7 +888,7 @@ def do_turntunnel_menu() -> None:
             _run_install()
 
         elif ch == "2" and st["installed"]:
-            state = _load_state()
+            state = proto_load_state(_MODULE_STATE)
             _show_freeturn_config(
                 state.get("listen_port", _DEFAULT_LISTEN_PORT),
                 state.get("target_port", _DEFAULT_TARGET_PORT),

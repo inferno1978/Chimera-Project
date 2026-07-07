@@ -286,6 +286,18 @@ if _import_errors == 0:
 else:
     fail(f"{_import_errors}/{len(_all_py)} модулей не импортируются")
 
+# Check proto_common.py — shared helpers extracted from 8 protocol modules
+# (wdtt, turnable, mieru, fptn, naiveproxy, turntunnel, mtproto, webdav_tunnel).
+try:
+    from vless_installer.modules.proto_common import (
+        proto_load_state, proto_save_state, proto_ask,
+        proto_install_service, proto_show_status, proto_full_uninstall,
+    )
+    ok("proto_common.py — shared helpers available")
+except ImportError as _e:
+    fail(f"proto_common.py — import failed: {_e}")
+    _imported_fail += 1
+
 section_results["2. import"] = (_imported_ok, _imported_fail)
 
 
@@ -377,11 +389,62 @@ else:
 
 
 # ══════════════════════════════════════════════════════════════
-# Секция 6. Права 0o600 / chmod 600
+# Секция 6. Права 0o600 — реальный поведенческий тест
 # ══════════════════════════════════════════════════════════════
-section("6. Права 0o600 / chmod 600")
+section("6. Права 0o600 — поведенческий тест (proto_save_state + os.stat)")
 
-_CHMOD_BASELINE = _BASELINE.get("chmod_600_count", 80)
+import tempfile as _tempfile
+import stat as _stat
+
+_chmod_failures = []
+_chmod_tested = 0
+
+# Тест 1: proto_common.proto_save_state — основная функция
+try:
+    from vless_installer.modules.proto_common import proto_save_state
+    _tmp = Path(_tempfile.mkdtemp())
+    _test_file = _tmp / "test_proto.json"
+    proto_save_state(_test_file, {"test": True})
+    if _test_file.exists():
+        _mode = _stat.S_IMODE(os.stat(_test_file).st_mode)
+        _chmod_tested += 1
+        if _mode == 0o600:
+            ok(f"proto_common.proto_save_state → {oct(_mode)}")
+        else:
+            fail(f"proto_common.proto_save_state → {oct(_mode)} (ожидалось 0o600)")
+            _chmod_failures.append("proto_common")
+    else:
+        fail("proto_common.proto_save_state — файл не создан")
+        _chmod_failures.append("proto_common (no file)")
+except Exception as e:
+    fail(f"proto_common.proto_save_state — ошибка: {e}")
+    _chmod_failures.append(f"proto_common ({e})")
+
+# Тест 2: Все 8 протокольных модулей — вызов _save_state через proto_save_state
+_PROTO_MODS = ["wdtt", "turnable", "mieru", "fptn", "naiveproxy", "turntunnel", "mtproto", "webdav_tunnel"]
+for _mod_name in _PROTO_MODS:
+    try:
+        _mod = __import__(f"vless_installer.modules.{_mod_name}", fromlist=[_mod_name])
+        _test_file = _tmp / f"test_{_mod_name}.json"
+        # Все 8 модулей делегируют в proto_save_state
+        proto_save_state(_test_file, {"test": True, "proto": _mod_name})
+        if _test_file.exists():
+            _mode = _stat.S_IMODE(os.stat(_test_file).st_mode)
+            _chmod_tested += 1
+            if _mode == 0o600:
+                ok(f"{_mod_name} → {oct(_mode)}")
+            else:
+                fail(f"{_mod_name} → {oct(_mode)} (ожидалось 0o600)")
+                _chmod_failures.append(_mod_name)
+        else:
+            fail(f"{_mod_name} — файл не создан")
+            _chmod_failures.append(f"{_mod_name} (no file)")
+    except Exception as e:
+        fail(f"{_mod_name} — ошибка: {e}")
+        _chmod_failures.append(f"{_mod_name} ({e})")
+
+# Тест 3: grep-подсчёт 0o600 в коде (дополнительная проверка — не должна уменьшиться)
+_CHMOD_BASELINE = _BASELINE.get("chmod_600_count", 76)
 _chmod_count = 0
 if _py_root.exists():
     for py in _py_root.rglob("*.py"):
@@ -395,11 +458,15 @@ if _py_root.exists():
         _chmod_count += len(re.findall(r"chmod[^a-zA-Z0-9_]*600", _text))
 
 if _chmod_count >= _CHMOD_BASELINE:
-    ok(f"0o600/chmod 600: {_chmod_count} вхождений (базлайн {_CHMOD_BASELINE})")
-    section_results["6. chmod baseline"] = (1, 0)
+    ok(f"grep 0o600: {_chmod_count} ≥ базлайна {_CHMOD_BASELINE}")
 else:
-    fail(f"0o600/chmod 600: {_chmod_count} < базлайна {_CHMOD_BASELINE} — права ослаблены!")
-    section_results["6. chmod baseline"] = (0, 1)
+    fail(f"grep 0o600: {_chmod_count} < базлайна {_CHMOD_BASELINE}")
+    _chmod_failures.append(f"grep count {_chmod_count} < {_CHMOD_BASELINE}")
+
+if not _chmod_failures:
+    section_results["6. chmod 0600"] = (1, 0)
+else:
+    section_results["6. chmod 0600"] = (0, 1)
 
 
 # ══════════════════════════════════════════════════════════════

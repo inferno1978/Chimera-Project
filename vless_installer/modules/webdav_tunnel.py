@@ -98,6 +98,15 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from vless_installer.modules.proto_common import (
+    ProtoCancelled, proto_load_state, proto_save_state,
+    proto_ask, proto_gen_password, proto_ipt_persist,
+)
+# _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
+# `raise _Cancelled` code works unchanged after the local class definition
+# was removed in favour of proto_common.ProtoCancelled.
+_Cancelled = ProtoCancelled
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЦВЕТА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -280,27 +289,12 @@ def _print_link_file_path(path: Path) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
-class _Cancelled(Exception):
-    pass
-
 def _pause() -> None:
     try:
         print(f"\n  {DIM}Нажмите Enter...{NC}", end="", flush=True)
         input()
     except (KeyboardInterrupt, EOFError, UnicodeDecodeError):
         print()
-
-def _ask(prompt: str, default: str = "", c: bool = False) -> str:
-    try:
-        print(prompt, end="", flush=True)
-        val = input().strip()
-        return val if val else default
-    except (EOFError, UnicodeDecodeError):
-        print(); return default
-    except KeyboardInterrupt:
-        print()
-        if c: raise _Cancelled()
-        return default
 
 def _run(cmd: list, capture: bool = False, check: bool = False,
          env: Optional[dict] = None, cwd: Optional[str] = None) -> subprocess.CompletedProcess:
@@ -314,10 +308,6 @@ def _run(cmd: list, capture: bool = False, check: bool = False,
     else:
         kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return subprocess.run(cmd, **kw)
-
-def _gen_password(length: int = 20) -> str:
-    chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
-    return ''.join(secrets.choice(chars) for _ in range(length))
 
 def _gen_login() -> str:
     return "user" + ''.join(secrets.choice("23456789") for _ in range(4))
@@ -334,21 +324,10 @@ def _get_server_ip() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 #  СОСТОЯНИЕ
 # ══════════════════════════════════════════════════════════════════════════════
-def _load_state() -> dict:
-    if not _MODULE_STATE.exists():
-        return {}
-    try:
-        return json.loads(_MODULE_STATE.read_text())
-    except Exception:
-        return {}
-
-def _save_state(data: dict) -> None:
-    try:
-        _MODULE_STATE.parent.mkdir(parents=True, exist_ok=True)
-        _MODULE_STATE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        _MODULE_STATE.chmod(0o600)
-    except Exception as e:
-        print(f"  {YELLOW}⚠{NC}  Не удалось сохранить webdav_tunnel.json: {e}")
+# State load/save, prompt, password-gen, iptables-persist helpers are imported
+# from vless_installer.modules.proto_common (see top of file). Call sites use
+# proto_load_state / proto_save_state / proto_ask / proto_gen_password /
+# proto_ipt_persist directly.
 
 def _is_installed() -> bool:
     return _BIN_PATH.exists() and _SERVICE_FILE.exists()
@@ -531,14 +510,8 @@ def _ipt_close_tcp(port: int) -> None:
         _run(["iptables", "-t", "filter", "-D", "INPUT",
               "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"])
 
-def _ipt_persist() -> None:
-    if shutil.which("netfilter-persistent"):
-        _run(["netfilter-persistent", "save"], capture=True); return
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r = _run(["iptables-save"], capture=True)
-    if r.returncode == 0 and r.stdout:
-        (rules_dir / "rules.v4").write_text(r.stdout)
+# _ipt_persist — вынесен в proto_common (использует subprocess.run напрямую,
+# не зависит от module-local _run). Call sites: proto_ipt_persist.
 
 def _ufw_is_active() -> bool:
     if not shutil.which("ufw"):
@@ -551,7 +524,7 @@ def _open_port(port: int) -> str:
         _run(["ufw", "allow", f"{port}/tcp", "comment", "webdav-tunnel"], capture=True)
         return f"UFW: TCP {port} открыт."
     _ipt_open_tcp(port)
-    _ipt_persist()
+    proto_ipt_persist()
     return f"iptables: TCP {port} открыт."
 
 def _close_port(port: int) -> None:
@@ -559,7 +532,7 @@ def _close_port(port: int) -> None:
         _run(["ufw", "delete", "allow", f"{port}/tcp"], capture=True)
     else:
         _ipt_close_tcp(port)
-        _ipt_persist()
+        proto_ipt_persist()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SYSTEMD
@@ -661,7 +634,7 @@ def _run_install_inner() -> None:
         _box_item("Q", "← Отмена")
         _box_bot(); print()
         try:
-            ch = _ask(f"{CYAN}Выбор [1/2/Q]: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор [1/2/Q]: {NC}", c=True).strip().lower()
         except _Cancelled:
             return
         if ch == "q" or not ch:
@@ -669,7 +642,7 @@ def _run_install_inner() -> None:
         if ch == "2":
             _full_uninstall(silent=True)
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     keep = _is_installed()  # после "2" уже False, после "1" — True
 
     os.system("clear")
@@ -687,7 +660,7 @@ def _run_install_inner() -> None:
     _box_bot(); print()
 
     try:
-        mch = _ask(f"{CYAN}Выбор [1/2]: {NC}",
+        mch = proto_ask(f"{CYAN}Выбор [1/2]: {NC}",
                     default="1" if not keep else state.get("mode", "selfhosted")[0].replace("s", "1").replace("e", "2"),
                     c=True).strip()
     except _Cancelled:
@@ -707,29 +680,29 @@ def _run_install_inner() -> None:
 
     try:
         if mode == "selfhosted":
-            raw = _ask(f"  {CYAN}TCP порт [{port}]: {NC}", default=str(port), c=True)
+            raw = proto_ask(f"  {CYAN}TCP порт [{port}]: {NC}", default=str(port), c=True)
             port = int(raw) if raw.isdigit() else port
 
             _box_info("TLS опционален — нужен домен с уже выпущенным сертификатом.")
             _box_info("Пустой ввод = без TLS (обычный HTTP, см. гайд про риски).")
-            tls_cert = _ask(f"  {CYAN}Путь к cert.pem [{tls_cert or 'пропустить'}]: {NC}",
+            tls_cert = proto_ask(f"  {CYAN}Путь к cert.pem [{tls_cert or 'пропустить'}]: {NC}",
                              default=tls_cert, c=True)
             tls_key = ""
             if tls_cert:
-                tls_key = _ask(f"  {CYAN}Путь к key.pem: {NC}", default=tls_key, c=True)
+                tls_key = proto_ask(f"  {CYAN}Путь к key.pem: {NC}", default=tls_key, c=True)
                 if not tls_key or not Path(tls_cert).exists() or not Path(tls_key).exists():
                     print(f"  {RED}✗{NC}  Файлы сертификата не найдены — продолжаю без TLS.")
                     tls_cert = tls_key = ""
         else:
-            webdav_url = _ask(f"  {CYAN}WebDAV URL [{webdav_url or 'https://dav.example.com'}]: {NC}",
+            webdav_url = proto_ask(f"  {CYAN}WebDAV URL [{webdav_url or 'https://dav.example.com'}]: {NC}",
                                default=webdav_url, c=True)
             if not webdav_url:
                 print(f"  {RED}✗{NC}  WebDAV URL обязателен."); _pause(); return
 
-        login = _ask(f"  {CYAN}Логин [{login or 'авто'}]: {NC}", default=login, c=True) or _gen_login()
-        password = _ask(f"  {CYAN}Пароль [{password or 'авто'}]: {NC}", default=password, c=True) or _gen_password()
+        login = proto_ask(f"  {CYAN}Логин [{login or 'авто'}]: {NC}", default=login, c=True) or _gen_login()
+        password = proto_ask(f"  {CYAN}Пароль [{password or 'авто'}]: {NC}", default=password, c=True) or proto_gen_password()
 
-        proxy = _ask(f"  {CYAN}Upstream SOCKS5 proxy (если сервер сам за proxy) [пропустить]: {NC}",
+        proxy = proto_ask(f"  {CYAN}Upstream SOCKS5 proxy (если сервер сам за proxy) [пропустить]: {NC}",
                       default="", c=True)
     except _Cancelled:
         raise
@@ -771,7 +744,7 @@ def _run_install_inner() -> None:
     else:
         print(f"  {YELLOW}⚠{NC}  Сервис не запустился — проверьте логи (пункт статуса).")
 
-    _save_state({
+    proto_save_state(_MODULE_STATE, {
         "installed": True, "mode": mode, "port": port,
         "login": login, "password": password,
         "webdav_url": webdav_url, "tls": bool(tls_cert and tls_key),
@@ -779,7 +752,7 @@ def _run_install_inner() -> None:
     })
 
     # ── Итог ──────────────────────────────────────────────────────────────
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     uri = _build_client_uri(state)
     print()
     _box_top("✅  УСТАНОВКА ЗАВЕРШЕНА  •  webdav-tunnel")
@@ -813,7 +786,7 @@ def _run_install_inner() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 def _show_status() -> None:
     os.system("clear")
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     _box_top("📊  СТАТУС  •  webdav-tunnel")
     _box_row()
 
@@ -845,7 +818,7 @@ def _show_status() -> None:
 
 def _show_link() -> None:
     os.system("clear")
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     uri = _build_client_uri(state)
     _box_top("🔗  КЛИЕНТСКАЯ ССЫЛКА  •  webdav-tunnel")
     _box_row()
@@ -879,13 +852,13 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_item("N", "Нет, отмена")
         _box_bot(); print()
         try:
-            ans = _ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
+            ans = proto_ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
         except _Cancelled:
             return False
         if ans != "y":
             print(f"  {DIM}Отменено.{NC}"); _pause(); return False
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
 
     _run(["systemctl", "stop", _SERVICE_NAME])
     _run(["systemctl", "disable", _SERVICE_NAME])
@@ -930,7 +903,7 @@ def _show_guide() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled:
             break
 
@@ -980,7 +953,7 @@ def do_webdav_tunnel_menu() -> None:
     while True:
         os.system("clear")
         installed = _is_installed()
-        state     = _load_state()
+        state     = proto_load_state(_MODULE_STATE)
 
         r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
         svc_ok = r.stdout.strip() == "active"
@@ -1019,7 +992,7 @@ def do_webdav_tunnel_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled:
             break
 

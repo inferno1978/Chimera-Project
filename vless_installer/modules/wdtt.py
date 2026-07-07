@@ -89,6 +89,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from vless_installer.modules.proto_common import (
+    ProtoCancelled, proto_load_state, proto_save_state,
+    proto_ask, proto_gen_password, proto_ipt_persist,
+)
+# _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
+# `raise _Cancelled` code works unchanged after the local class definition
+# was removed in favour of proto_common.ProtoCancelled.
+_Cancelled = ProtoCancelled
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЦВЕТА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -297,27 +306,12 @@ def _print_link_file_path(path: Path) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
-class _Cancelled(Exception):
-    pass
-
 def _pause() -> None:
     try:
         print(f"\n  {DIM}Нажмите Enter...{NC}", end="", flush=True)
         input()
     except (KeyboardInterrupt, EOFError, UnicodeDecodeError):
         print()
-
-def _ask(prompt: str, default: str = "", c: bool = False) -> str:
-    try:
-        print(prompt, end="", flush=True)
-        val = input().strip()
-        return val if val else default
-    except (EOFError, UnicodeDecodeError):
-        print(); return default
-    except KeyboardInterrupt:
-        print()
-        if c: raise _Cancelled()
-        return default
 
 def _run(cmd: list, capture: bool = False, check: bool = False,
          env: Optional[dict] = None, cwd: Optional[str] = None) -> subprocess.CompletedProcess:
@@ -338,10 +332,6 @@ def _run_interactive(cmd: list, cwd: Optional[str] = None) -> int:
         kw["cwd"] = cwd
     return subprocess.call(cmd, **kw)
 
-def _gen_password(length: int = 16) -> str:
-    chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
-    return ''.join(secrets.choice(chars) for _ in range(length))
-
 def _get_server_ip() -> str:
     try:
         import socket
@@ -360,21 +350,10 @@ def _get_server_ip() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 #  СОСТОЯНИЕ МОДУЛЯ
 # ══════════════════════════════════════════════════════════════════════════════
-def _load_state() -> dict:
-    if not _MODULE_STATE.exists():
-        return {}
-    try:
-        return json.loads(_MODULE_STATE.read_text())
-    except Exception:
-        return {}
-
-def _save_state(data: dict) -> None:
-    try:
-        _MODULE_STATE.parent.mkdir(parents=True, exist_ok=True)
-        _MODULE_STATE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        _MODULE_STATE.chmod(0o600)
-    except Exception as e:
-        print(f"  {YELLOW}⚠{NC}  Не удалось сохранить wdtt.json: {e}")
+# State load/save, prompt, password-gen and iptables-persist helpers are
+# imported from vless_installer.modules.proto_common (see top of file).
+# Call sites use proto_load_state / proto_save_state / proto_ask /
+# proto_gen_password / proto_ipt_persist directly.
 
 def _is_installed() -> bool:
     return _BIN_PATH.exists() and _SERVICE_FILE.exists()
@@ -668,16 +647,6 @@ def _ipt_remove_masquerade() -> None:
         _run(["iptables", "-t", "nat", "-D", "POSTROUTING",
               "-s", _WG_SUBNET, "!", "-d", _WG_SUBNET, "-j", "MASQUERADE"])
 
-def _ipt_persist() -> None:
-    if shutil.which("netfilter-persistent"):
-        _run(["netfilter-persistent", "save"], capture=True)
-        return
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r = _run(["iptables-save"], capture=True)
-    if r.returncode == 0 and r.stdout:
-        (rules_dir / "rules.v4").write_text(r.stdout)
-
 def _enable_ip_forward() -> None:
     """Включает IP forwarding — нужен для WireGuard NAT."""
     _run(["sysctl", "-w", "net.ipv4.ip_forward=1"])
@@ -738,7 +707,7 @@ def _run_install_inner() -> None:
         _box_item("Q", "← Отмена")
         _box_bot(); print()
         try:
-            ch = _ask(f"{CYAN}Выбор [1/2/Q]: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор [1/2/Q]: {NC}", c=True).strip().lower()
         except _Cancelled:
             return
         if ch == "q" or not ch:
@@ -747,7 +716,7 @@ def _run_install_inner() -> None:
             _full_uninstall(silent=True)
 
     # ── Конфигурация ──────────────────────────────────────────────────────────
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     old_pass  = state.get("main_password", "")
     old_dtls  = state.get("dtls_port", _DEFAULT_DTLS_PORT)
     old_wg    = state.get("wg_port",   _DEFAULT_WG_PORT)
@@ -766,31 +735,31 @@ def _run_install_inner() -> None:
     _box_bot(); print()
 
     try:
-        raw = _ask(
+        raw = proto_ask(
             f"  {CYAN}Главный пароль [{old_pass or 'авто'}]: {NC}",
             default=old_pass, c=True,
         )
-        main_pass = raw if raw else (_gen_password() if not old_pass else old_pass)
+        main_pass = raw if raw else (proto_gen_password() if not old_pass else old_pass)
 
-        raw = _ask(
+        raw = proto_ask(
             f"  {CYAN}UDP порт DTLS [{old_dtls}]: {NC}",
             default=str(old_dtls), c=True,
         )
         dtls_port = int(raw) if raw.isdigit() else old_dtls
 
-        raw = _ask(
+        raw = proto_ask(
             f"  {CYAN}UDP порт WireGuard [{old_wg}]: {NC}",
             default=str(old_wg), c=True,
         )
         wg_port = int(raw) if raw.isdigit() else old_wg
 
-        admin_id = _ask(
+        admin_id = proto_ask(
             f"  {CYAN}Telegram Admin ID [{old_admin or 'пропустить'}]: {NC}",
             default=old_admin, c=True,
         )
         bot_token = ""
         if admin_id:
-            bot_token = _ask(
+            bot_token = proto_ask(
                 f"  {CYAN}Telegram Bot Token [{old_bot or 'пропустить'}]: {NC}",
                 default=old_bot, c=True,
             )
@@ -849,7 +818,7 @@ def _run_install_inner() -> None:
     fw_tool = _fw_tool()
     _ipt_open_udp(dtls_port)
     _ipt_add_masquerade()
-    _ipt_persist()
+    proto_ipt_persist()
     print(f"  {GREEN}✓{NC}  {fw_tool}: UDP {dtls_port} открыт, NAT настроен.")
 
     # 5. Systemd
@@ -866,7 +835,7 @@ def _run_install_inner() -> None:
         print(f"  {YELLOW}⚠{NC}  Сервис не запустился — проверьте логи (пункт 5).")
 
     # 7. Сохраняем состояние
-    _save_state({
+    proto_save_state(_MODULE_STATE, {
         "installed":     True,
         "main_password": main_pass,
         "dtls_port":     dtls_port,
@@ -919,7 +888,7 @@ def _passwords_menu() -> None:
         os.system("clear")
         data = _load_passwords()
         passwords = data.get("passwords", {})
-        state = _load_state()
+        state = proto_load_state(_MODULE_STATE)
         server_ip = _get_server_ip()
         dtls_port = state.get("dtls_port", _DEFAULT_DTLS_PORT)
 
@@ -977,7 +946,7 @@ def _passwords_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled:
             break
 
@@ -1008,21 +977,21 @@ def _create_password() -> None:
     _box_bot(); print()
 
     try:
-        raw_days = _ask(
+        raw_days = proto_ask(
             f"  {CYAN}Дней действия (1-365, Enter=30): {NC}",
             default="30", c=True,
         )
         days = int(raw_days) if raw_days.isdigit() else 30
         days = max(1, min(365, days))
 
-        raw_devs = _ask(
+        raw_devs = proto_ask(
             f"  {CYAN}Макс. устройств (Enter=1): {NC}",
             default="1", c=True,
         )
         max_devs = int(raw_devs) if raw_devs.isdigit() else 1
         max_devs = max(1, min(10, max_devs))
 
-        vk_hash = _ask(
+        vk_hash = proto_ask(
             f"  {CYAN}VK хеш звонка (Enter=пропустить): {NC}",
             default="", c=True,
         ).strip()
@@ -1035,7 +1004,7 @@ def _create_password() -> None:
     if len(passwords) >= 10:
         print(f"  {RED}✗{NC}  Лимит: максимум 10 паролей."); _pause(); return
 
-    new_pass = _gen_password()
+    new_pass = proto_gen_password()
     expires_at = int((datetime.now() + timedelta(days=days)).timestamp())
 
     passwords[new_pass] = {
@@ -1054,7 +1023,7 @@ def _create_password() -> None:
     # Hot reload
     _hot_reload()
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     server_ip = _get_server_ip()
     dtls_port = state.get("dtls_port", _DEFAULT_DTLS_PORT)
 
@@ -1099,7 +1068,7 @@ def _show_password_link(passwords: dict, server_ip: str, dtls_port: int) -> None
     _box_row(); _box_item("Q", "← Отмена"); _box_bot(); print()
 
     try:
-        num = _ask(f"{CYAN}Номер: {NC}", c=True).strip()
+        num = proto_ask(f"{CYAN}Номер: {NC}", c=True).strip()
     except _Cancelled:
         raise
     if num.lower() == "q" or not num:
@@ -1145,7 +1114,7 @@ def _delete_password(passwords: dict) -> None:
     _box_row(); _box_item("Q", "← Отмена"); _box_bot(); print()
 
     try:
-        num = _ask(f"{CYAN}Номер: {NC}", c=True).strip()
+        num = proto_ask(f"{CYAN}Номер: {NC}", c=True).strip()
     except _Cancelled:
         raise
     if num.lower() == "q" or not num:
@@ -1157,7 +1126,7 @@ def _delete_password(passwords: dict) -> None:
         print(f"  {RED}✗{NC}  Неверный номер."); _pause(); return
 
     try:
-        confirm = _ask(
+        confirm = proto_ask(
             f"  {YELLOW}Удалить пароль {pw[:12]}...? [y/N]: {NC}",
             default="n", c=True,
         ).strip().lower()
@@ -1178,7 +1147,7 @@ def _delete_password(passwords: dict) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 def _show_status() -> None:
     os.system("clear")
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     _box_top("📊  СТАТУС  •  qWDTT")
     _box_row()
 
@@ -1245,13 +1214,13 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_item("N", "Нет, отмена")
         _box_bot(); print()
         try:
-            ans = _ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
+            ans = proto_ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
         except _Cancelled:
             return False
         if ans != "y":
             print(f"  {DIM}Отменено.{NC}"); _pause(); return False
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     dtls_port = state.get("dtls_port", _DEFAULT_DTLS_PORT)
 
     _run(["systemctl", "stop",    _SERVICE_NAME])
@@ -1269,7 +1238,7 @@ def _full_uninstall(silent: bool = False) -> bool:
 
     _ipt_close_udp(dtls_port)
     _ipt_remove_masquerade()
-    _ipt_persist()
+    proto_ipt_persist()
 
     sysctl = Path("/etc/sysctl.d/99-wdtt.conf")
     if sysctl.exists():
@@ -1304,7 +1273,7 @@ def _show_guide() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled:
             break
 
@@ -1470,7 +1439,7 @@ def do_wdtt_menu() -> None:
     while True:
         os.system("clear")
         installed = _is_installed()
-        state     = _load_state()
+        state     = proto_load_state(_MODULE_STATE)
 
         r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
         svc_ok = r.stdout.strip() == "active"
@@ -1516,7 +1485,7 @@ def do_wdtt_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled:
             break
 
@@ -1531,7 +1500,7 @@ def do_wdtt_menu() -> None:
 
         elif ch == "3" and installed:
             os.system("clear")
-            state = _load_state()
+            state = proto_load_state(_MODULE_STATE)
             server_ip = _get_server_ip()
             dtls_port = state.get("dtls_port", _DEFAULT_DTLS_PORT)
             main_pass = state.get("main_password", "")

@@ -82,6 +82,16 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from vless_installer.modules.proto_common import (
+    ProtoCancelled, proto_load_state, proto_save_state,
+    proto_ask, proto_gen_password, proto_ipt_persist,
+    proto_get_latest_version, proto_get_installed_version,
+)
+# _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
+# `raise _Cancelled` code works unchanged after the local class definition
+# was removed in favour of proto_common.ProtoCancelled.
+_Cancelled = ProtoCancelled
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЦВЕТА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -246,26 +256,11 @@ def _print_qr(data: str, label: str = "") -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
-class _Cancelled(Exception):
-    pass
-
 def _pause() -> None:
     try:
         print(f"\n  {DIM}Нажмите Enter...{NC}", end="", flush=True); input()
     except (KeyboardInterrupt, EOFError, UnicodeDecodeError):
         print()
-
-def _ask(prompt: str, default: str = "", c: bool = False) -> str:
-    try:
-        print(prompt, end="", flush=True)
-        val = input().strip()
-        return val if val else default
-    except (EOFError, UnicodeDecodeError):
-        print(); return default
-    except KeyboardInterrupt:
-        print()
-        if c: raise _Cancelled()
-        return default
 
 def _run(cmd: list, capture: bool = False, check: bool = False,
          cwd: Optional[str] = None) -> subprocess.CompletedProcess:
@@ -276,10 +271,6 @@ def _run(cmd: list, capture: bool = False, check: bool = False,
     else:
         kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return subprocess.run(cmd, **kw)
-
-def _gen_password(length: int = 16) -> str:
-    chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
-    return ''.join(secrets.choice(chars) for _ in range(length))
 
 def _get_server_ip() -> str:
     try:
@@ -299,18 +290,10 @@ def _is_amd64() -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 #  СОСТОЯНИЕ МОДУЛЯ
 # ══════════════════════════════════════════════════════════════════════════════
-def _load_state() -> dict:
-    if not _MODULE_STATE.exists(): return {}
-    try: return json.loads(_MODULE_STATE.read_text())
-    except Exception: return {}
-
-def _save_state(data: dict) -> None:
-    try:
-        _MODULE_STATE.parent.mkdir(parents=True, exist_ok=True)
-        _MODULE_STATE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        _MODULE_STATE.chmod(0o600)
-    except Exception as e:
-        print(f"  {YELLOW}⚠{NC}  Не удалось сохранить mieru.json: {e}")
+# State load/save, prompt, password-gen and iptables-persist helpers are
+# imported from vless_installer.modules.proto_common (see top of file).
+# Call sites use proto_load_state / proto_save_state / proto_ask /
+# proto_gen_password / proto_ipt_persist directly.
 
 def _is_installed() -> bool:
     return _MITA_BIN.exists() and _SERVICE_FILE.exists()
@@ -318,15 +301,9 @@ def _is_installed() -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 #  БИНАРНИКИ
 # ══════════════════════════════════════════════════════════════════════════════
-def _get_latest_version() -> str:
-    try:
-        req = urllib.request.Request(
-            _GITHUB_API, headers={"User-Agent": "VLESS-Ultimate-Installer"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = json.loads(r.read())
-        return data.get("tag_name", "unknown").lstrip("v")
-    except Exception: return "unknown"
-
+# _get_latest_version / _get_installed_version — вынесены в proto_common.
+# mieru's GitHub API strips leading 'v' (release tags look like 'v1.x.y')
+# and the mita binary prints versions prefixed with 'v' → strip_v=True.
 def _get_download_urls(version: str) -> tuple[str, str]:
     """Возвращает (mita_url, mieru_url) для текущей архитектуры."""
     arch = "amd64" if _is_amd64() else "arm64"
@@ -457,12 +434,9 @@ def _download_binary(url: str, dest: Path, name: str) -> bool:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-def _get_installed_version() -> Optional[str]:
-    if not _MITA_BIN.exists(): return None
-    r = _run([str(_MITA_BIN), "version"], capture=True)
-    out = (r.stdout or "") + (r.stderr or "")
-    m = re.search(r'v?(\d+\.\d+[\.\d]*)', out)
-    return m.group(1) if m else "unknown"
+# _get_installed_version — вынесен в proto_common (mita binary uses
+# subcommand `version`, output prefix `v` → strip_v=True at call sites).
+# Local call sites use proto_get_installed_version(_MITA_BIN, "version", strip_v=True).
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  КОНФИГ СЕРВЕРА
@@ -558,14 +532,8 @@ def _ipt_close_port(proto: str, port_start: int, port_end: int) -> None:
             _run(["iptables", "-t", "filter", "-D", "INPUT",
                   "-p", proto, "--dport", f"{port_start}:{port_end}", "-j", "ACCEPT"])
 
-def _ipt_persist() -> None:
-    if shutil.which("netfilter-persistent"):
-        _run(["netfilter-persistent", "save"], capture=True); return
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r = _run(["iptables-save"], capture=True)
-    if r.returncode == 0 and r.stdout:
-        (rules_dir / "rules.v4").write_text(r.stdout)
+# _ipt_persist — вынесен в proto_common (использует subprocess.run напрямую,
+# не зависит от module-local _run). Call sites: proto_ipt_persist().
 
 def _ufw_is_active() -> bool:
     """Проверяет активен ли UFW."""
@@ -603,7 +571,7 @@ def _open_ports(proto: str, port_start: int, port_end: int) -> str:
         return f"UFW: {proto} {port_start}-{port_end} открыт."
     else:
         _ipt_open_port(proto, port_start, port_end)
-        _ipt_persist()
+        proto_ipt_persist()
         return f"iptables: {proto} {port_start}-{port_end} открыт."
 
 def _close_ports(proto: str, port_start: int, port_end: int) -> None:
@@ -612,7 +580,7 @@ def _close_ports(proto: str, port_start: int, port_end: int) -> None:
         _ufw_close_port(proto, port_start, port_end)
     else:
         _ipt_close_port(proto, port_start, port_end)
-        _ipt_persist()
+        proto_ipt_persist()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SYSTEMD
@@ -755,13 +723,13 @@ def _run_install_inner() -> None:
         _box_item("Q", "← Отмена")
         _box_bot(); print()
         try:
-            ch = _ask(f"{CYAN}Выбор [1/2/Q]: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор [1/2/Q]: {NC}", c=True).strip().lower()
         except _Cancelled: return
         if ch == "q" or not ch: return
         if ch == "2": _full_uninstall(silent=True)
 
     # ── Параметры ─────────────────────────────────────────────────────────────
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     old_port_start = state.get("port_start", _DEFAULT_PORT_START)
     old_port_end   = state.get("port_end",   _DEFAULT_PORT_END)
     old_protocol   = state.get("protocol",   _DEFAULT_PROTOCOL)
@@ -776,13 +744,13 @@ def _run_install_inner() -> None:
     _box_bot(); print()
 
     try:
-        raw = _ask(
+        raw = proto_ask(
             f"  {CYAN}Начальный порт [{old_port_start}]: {NC}",
             default=str(old_port_start), c=True,
         )
         port_start = int(raw) if raw.isdigit() else old_port_start
 
-        raw = _ask(
+        raw = proto_ask(
             f"  {CYAN}Конечный порт [{old_port_end}] (=начальный для одного порта): {NC}",
             default=str(old_port_end), c=True,
         )
@@ -790,7 +758,7 @@ def _run_install_inner() -> None:
         if port_end < port_start:
             port_end = port_start
 
-        raw = _ask(
+        raw = proto_ask(
             f"  {CYAN}Протокол [TCP/UDP, Enter={old_protocol}]: {NC}",
             default=old_protocol, c=True,
         ).strip().upper()
@@ -806,7 +774,7 @@ def _run_install_inner() -> None:
     # 1. Версия
     _box_info("Определяю последнюю версию...")
     _box_bot(); print()
-    version = _get_latest_version()
+    version = proto_get_latest_version(_GITHUB_API, strip_v=True)
     if version == "unknown":
         print(f"  {YELLOW}⚠{NC}  Не удалось определить версию, использую 3.33.0")
         version = "3.33.0"
@@ -830,7 +798,7 @@ def _run_install_inner() -> None:
     users = state.get("users") or []
     if not users:
         first_user = "admin"
-        first_pass = _gen_password()
+        first_pass = proto_gen_password()
         users = [{"username": first_user, "password": first_pass}]
         print(f"  {GREEN}✓{NC}  Создан первый пользователь: "
               f"{YELLOW}{first_user}{NC} / {YELLOW}{first_pass}{NC}")
@@ -887,7 +855,7 @@ def _run_install_inner() -> None:
     print(f"  {GREEN}✓{NC}  {fw_msg}")
 
     # 9. Сохраняем состояние
-    _save_state({
+    proto_save_state(_MODULE_STATE, {
         "installed":  True,
         "port_start": port_start,
         "port_end":   port_end,
@@ -938,7 +906,7 @@ def _run_install_inner() -> None:
 def _users_menu() -> None:
     while True:
         os.system("clear")
-        state  = _load_state()
+        state  = proto_load_state(_MODULE_STATE)
         users  = state.get("users", [])
         server_ip  = _get_server_ip()
         port_start = state.get("port_start", _DEFAULT_PORT_START)
@@ -974,7 +942,7 @@ def _users_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled: break
 
         if ch == "1":
@@ -998,7 +966,7 @@ def _add_user(state: dict) -> None:
 
     try:
         while True:
-            username = _ask(f"  {CYAN}Логин: {NC}", c=True).strip()
+            username = proto_ask(f"  {CYAN}Логин: {NC}", c=True).strip()
             if not username:
                 print(f"  {RED}✗{NC}  Логин не может быть пустым."); _pause(); return
 
@@ -1016,15 +984,15 @@ def _add_user(state: dict) -> None:
         if any(u["username"] == username for u in users):
             print(f"  {YELLOW}⚠{NC}  Пользователь уже существует."); _pause(); return
 
-        raw_pass = _ask(
+        raw_pass = proto_ask(
             f"  {CYAN}Пароль (Enter=авто): {NC}", default="", c=True,
         ).strip()
-        password = raw_pass or _gen_password()
+        password = raw_pass or proto_gen_password()
     except _Cancelled: raise
 
     users.append({"username": username, "password": password})
     state["users"] = users
-    _save_state(state)
+    proto_save_state(_MODULE_STATE, state)
 
     # Применяем новый конфиг
     cfg = _build_server_config(
@@ -1077,7 +1045,7 @@ def _show_user_link(users: list, server_ip: str,
     _box_row(); _box_item("Q", "← Отмена"); _box_bot(); print()
 
     try:
-        num = _ask(f"{CYAN}Номер: {NC}", c=True).strip()
+        num = proto_ask(f"{CYAN}Номер: {NC}", c=True).strip()
     except _Cancelled: raise
     if num.lower() == "q" or not num: return
     try:
@@ -1120,7 +1088,7 @@ def _show_singbox_json(users: list, server_ip: str,
     _box_row(); _box_item("Q", "← Отмена"); _box_bot(); print()
 
     try:
-        num = _ask(f"{CYAN}Номер: {NC}", c=True).strip()
+        num = proto_ask(f"{CYAN}Номер: {NC}", c=True).strip()
     except _Cancelled: raise
     if num.lower() == "q" or not num: return
     try:
@@ -1181,7 +1149,7 @@ def _delete_user(users: list, state: dict) -> None:
     _box_row(); _box_item("Q", "← Отмена"); _box_bot(); print()
 
     try:
-        num = _ask(f"{CYAN}Номер: {NC}", c=True).strip()
+        num = proto_ask(f"{CYAN}Номер: {NC}", c=True).strip()
     except _Cancelled: raise
     if num.lower() == "q" or not num: return
     try:
@@ -1190,7 +1158,7 @@ def _delete_user(users: list, state: dict) -> None:
         print(f"  {RED}✗{NC}  Неверный номер."); _pause(); return
 
     try:
-        confirm = _ask(
+        confirm = proto_ask(
             f"  {YELLOW}Удалить {user['username']}? [y/N]: {NC}",
             default="n", c=True,
         ).strip().lower()
@@ -1199,7 +1167,7 @@ def _delete_user(users: list, state: dict) -> None:
 
     users.pop(idx)
     state["users"] = users
-    _save_state(state)
+    proto_save_state(_MODULE_STATE, state)
 
     cfg = _build_server_config(
         users,
@@ -1218,7 +1186,7 @@ def _delete_user(users: list, state: dict) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 def _show_status() -> None:
     os.system("clear")
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     _box_top("📊  СТАТУС  •  MIERU")
     _box_row()
 
@@ -1226,7 +1194,7 @@ def _show_status() -> None:
     svc_ok = r.stdout.strip() == "active"
     _box_kv("Сервис:",
             f"{GREEN}● активен{NC}" if svc_ok else f"{RED}● остановлен{NC}")
-    _box_kv("Версия:", state.get("version", _get_installed_version() or "—"))
+    _box_kv("Версия:", state.get("version", proto_get_installed_version(_MITA_BIN, "version", strip_v=True) or "—"))
 
     port_start = state.get("port_start", "—")
     port_end   = state.get("port_end",   "—")
@@ -1272,7 +1240,7 @@ def _show_guide() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled: break
 
         if ch == "1":   _guide_how()
@@ -1333,7 +1301,7 @@ def _guide_time() -> None:
 
 def _guide_clients() -> None:
     os.system("clear")
-    state     = _load_state()
+    state     = proto_load_state(_MODULE_STATE)
     server_ip = _get_server_ip()
     port_start = state.get("port_start", _DEFAULT_PORT_START)
     port_end   = state.get("port_end",   _DEFAULT_PORT_END)
@@ -1431,12 +1399,12 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_item("N", "Нет, отмена")
         _box_bot(); print()
         try:
-            ans = _ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
+            ans = proto_ask(f"{CYAN}Подтверждение [y/N]: {NC}", c=True).strip().lower()
         except _Cancelled: return False
         if ans != "y":
             print(f"  {DIM}Отменено.{NC}"); _pause(); return False
 
-    state = _load_state()
+    state = proto_load_state(_MODULE_STATE)
     port_start = state.get("port_start", _DEFAULT_PORT_START)
     port_end   = state.get("port_end",   _DEFAULT_PORT_END)
     protocol   = state.get("protocol",   _DEFAULT_PROTOCOL)
@@ -1471,7 +1439,7 @@ def do_mieru_menu() -> None:
     while True:
         os.system("clear")
         installed  = _is_installed()
-        state      = _load_state()
+        state      = proto_load_state(_MODULE_STATE)
 
         r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
         svc_ok = r.stdout.strip() == "active"
@@ -1519,7 +1487,7 @@ def do_mieru_menu() -> None:
         _box_bot(); print()
 
         try:
-            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled: break
 
         if ch == "1":
