@@ -89,7 +89,7 @@ def create_website() -> None:
     web_root = Path(f"/var/www/{PARAM_DOMAIN}")
     web_root.mkdir(parents=True, exist_ok=True)
     info(f"Создание шаблона сайта #{PARAM_SITE_TEMPLATE}...")
-    tmpl = int(PARAM_SITE_TEMPLATE)
+    tmpl = int(PARAM_SITE_TEMPLATE or "0")
     if tmpl == 1:
         _create_techhub(web_root)
     elif tmpl == 2:
