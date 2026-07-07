@@ -292,7 +292,13 @@ def _geoip_block_get_rules() -> list:
 
 
 def _geoip_apply_routing(extra_rules: list) -> None:
-    """Применяет routing-правила к Xray конфигу. Добавляет blackhole outbound."""
+    """Применяет routing-правила к Xray конфигу. Добавляет blackhole outbound.
+
+    В AWG-режиме также гарантирует наличие outbound "direct-local" (freedom без
+    fwmark) — он нужен, если в extra_rules есть правила с outboundTag="direct-local"
+    (например, allowlist). Без этого outbound Xray упадёт при старте с
+    "no such outbound".
+    """
     core = _core_module()
     CONFIG_DIR               = core.CONFIG_DIR
     _set_config_owner        = core._set_config_owner
@@ -300,6 +306,7 @@ def _geoip_apply_routing(extra_rules: list) -> None:
     _nginx_restart_if_reality = core._nginx_restart_if_reality
     warn                     = core.warn
     success                  = core.success
+    AWG_EXIT_ENABLED         = getattr(core, "AWG_EXIT_ENABLED", False)
 
     written: set = set()
     for cfg_path in (CONFIG_DIR / "config.json",
@@ -326,6 +333,18 @@ def _geoip_apply_routing(extra_rules: list) -> None:
                     "tag": "block",
                     "settings": {"response": {"type": "none"}},
                 })
+            # AWG-режим: если в extra_rules есть ссылка на "direct-local" —
+            # убеждаемся что этот outbound существует. Без fwmark → default route ОС.
+            # См. аналогичный паттерн в ru_subnets.py:_ru_subnets_apply_to_xray.
+            if AWG_EXIT_ENABLED and any(r.get("outboundTag") == "direct-local"
+                                        for r in extra_rules):
+                if not any(ob.get("tag") == "direct-local" for ob in outbounds):
+                    outbounds.append({
+                        "protocol": "freedom",
+                        "tag":      "direct-local",
+                        "settings": {"domainStrategy": "UseIPv4"},
+                    })
+                    warn("AWG: добавлен outbound direct-local для GeoIP-allowlist")
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             _set_config_owner(cfg_path)
         except Exception as e:
@@ -343,20 +362,31 @@ def _geoip_apply_routing(extra_rules: list) -> None:
 
 
 def _geoip_set_allowlist(codes: list) -> None:
-    """Принимаем только из указанных стран, остальное — block."""
+    """Принимаем только из указанных стран, остальное — block.
+
+    В AWG-режиме outbound "direct" имеет sockopt.mark=AWG_FWMARK → трафик
+    уходит через awg0 (exit-VPS). Для allowlist нужна семантика "напрямую,
+    без туннеля" — используем "direct-local" (freedom без fwmark → default
+    route ОС). См. аналогичный фикс в ru_subnets.py / as_direct.py /
+    chain_nodes.py / xray_install.py.
+    """
     core = _core_module()
     info    = core.info
     success = core.success
     warn    = core.warn
+    AWG_EXIT_ENABLED = getattr(core, "AWG_EXIT_ENABLED", False)
 
-    info(f"Настройка allowlist: {', '.join(codes)}")
-    # Разрешить из allowlist → direct, всё остальное → block
+    # AWG-режим: allowlist-трафик должен идти напрямую (eth0/default route),
+    # а не через awg0 (exit-VPS). Используем "direct-local" без fwmark.
+    _allow_outbound = "direct-local" if AWG_EXIT_ENABLED else "direct"
+    info(f"Настройка allowlist: {', '.join(codes)} (outbound={_allow_outbound})")
+    # Разрешить из allowlist → direct(-local), всё остальное → block
     rules = [
-        {"type": "field", "geoip": [c.lower() for c in codes], "outboundTag": "direct"},
+        {"type": "field", "geoip": [c.lower() for c in codes], "outboundTag": _allow_outbound},
         {"type": "field", "ip":    ["0.0.0.0/0", "::/0"],      "outboundTag": "block"},
     ]
     _geoip_apply_routing(rules)
-    success(f"Allowlist: {', '.join(codes)}")
+    success(f"Allowlist: {', '.join(codes)} (outbound={_allow_outbound})")
     warn("Убедитесь что ваш IP входит в разрешённые страны — иначе потеряете SSH!")
 
 
