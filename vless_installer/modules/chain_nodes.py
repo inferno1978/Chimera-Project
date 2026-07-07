@@ -2042,12 +2042,12 @@ def generate_xray_config_chain_entry_multi() -> None:
     # В Режиме B заблокированный трафик идёт через exit-ноду (proxy_tag),
     # российский трафик идёт напрямую (direct), не проксируется.
     # В AWG-режиме "direct" имеет fwmark=AWG_FWMARK → весь трафик через awg0.
-    # Для split tunnel нужен "direct-local" (без fwmark) → РФ-трафик через eth0.
+    # Для split tunnel нужен "direct-local" (без fwmark) → РФ-трафик через default route ОС (физический интерфейс).
     if SPLIT_TUNNEL_ENABLED:
         # В Режиме B "direct" = прямой выход с Entry Node (российский VPS),
         # proxy_tag = первая exit-нода (или балансировщик).
         # В AWG-режиме proxy_tag = "direct" (с fwmark → awg0 → exit-VPS),
-        # direct_tag = "direct-local" (без fwmark → eth0 → IP entry-сервера).
+        # direct_tag = "direct-local" (без fwmark → default route ОС → IP entry-сервера).
         if AWG_EXIT_ENABLED:
             _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
             if not any(ob.get("tag") == "direct-local" for ob in config.get("outbounds", [])):
