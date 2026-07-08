@@ -507,6 +507,11 @@ def _generate_singbox_config(user: dict) -> str:
 class _VLESSHandler(BaseHTTPRequestHandler):
     """HTTP request handler для REST API + Admin + Portal."""
 
+    # HTTP/1.1 вместо дефолтного HTTP/1.0 — современные браузеры лучше работают
+    # с Basic Auth + fetch() по HTTP/1.1 (keep-alive, корректная передача кредов).
+    # HTTP/1.0 мог вызывать проблемы с JS-запросами из admin_panel/user_portal.
+    protocol_version = "HTTP/1.1"
+
     # Per-connection timeout (seconds). Каждый запрос синхронный и быстрый
     # (медленные — geoip/backup — укладываются в 30с). Без этого таймаута
     # (= None по умолчанию в stdlib) клиент может держать соединение бесконечно.

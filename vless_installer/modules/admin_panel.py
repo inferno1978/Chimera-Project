@@ -333,7 +333,13 @@ function authHeader() {
 }
 
 async function api(path, method = 'GET', body = null) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  const opts = {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    // credentials: same-origin — чтобы браузер передавал Basic Auth креды
+    // в JS-запросах (fetch по умолчанию не всегда передаёт их для same-origin).
+    credentials: 'same-origin'
+  };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(API + path, opts);
   if (res.status === 401) { alert('Требуется авторизация'); location.reload(); return null; }
