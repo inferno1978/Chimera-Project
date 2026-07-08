@@ -1008,9 +1008,15 @@ def generate_xray_config() -> None:
 def generate_xray_config_xhttp() -> None:
     """
     Генерация конфига Xray для VLESS + xHTTP + TLS (Режим A).
-    Слушает на SERVER_PORT (по умолчанию 443), принимает VLESS через xHTTP с TLS-терминацией.
-    Nginx в этом случае не используется как reverse proxy для xHTTP —
-    Xray сам принимает TLS (сертификат Let's Encrypt).
+
+    Схема Nginx → Xray (см. https://github.com/XTLS/Xray-core/discussions/4113 —
+    fallbacks для xHTTP НЕ поддерживаются в Xray-core):
+      • Nginx терминирует TLS на SERVER_PORT (по умолч. 443), отдаёт сайт-заглушку
+        для "/" и проксирует xhttp path на 127.0.0.1:XHTTP_BACKEND_PORT.
+      • Xray принимает xHTTP на 127.0.0.1:XHTTP_BACKEND_PORT с security: none
+        (TLS-трафик уже расшифрован Nginx).
+
+    Это позволяет одновременно держать рабочий сайт-заглушку и прокси на одном :443.
     """
     core = _core_module()
     DNSCRYPT_LISTEN_PORT = core.DNSCRYPT_LISTEN_PORT
@@ -1025,6 +1031,7 @@ def generate_xray_config_xhttp() -> None:
     _build_xhttp_settings = core._build_xhttp_settings
     XHTTP_MODE = core.XHTTP_MODE
     XHTTP_PATH = core.XHTTP_PATH
+    XHTTP_BACKEND_PORT = core.XHTTP_BACKEND_PORT
     _xray_log_block = core._xray_log_block
     SERVER_PORT = core.SERVER_PORT
     PARAM_UUID = core.PARAM_UUID
@@ -1081,6 +1088,12 @@ def generate_xray_config_xhttp() -> None:
     key_path  = f"/etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem"
     _xhttp_s3, _sockopt_s3 = _build_xhttp_settings(XHTTP_MODE, XHTTP_PATH)
 
+    # Сертификат здесь НЕ используется самим Xray — TLS терминирует Nginx на :SERVER_PORT.
+    # cert_path / key_path оставлены для обратной совместимости с возможными хуками,
+    # но в streamSettings.security стоит "none" → tlsSettings не добавляется.
+    info(f"xHTTP backend: Xray слушает 127.0.0.1:{XHTTP_BACKEND_PORT} (security: none, "
+         f"TLS терминирует Nginx на :{SERVER_PORT})")
+
     config: dict[str, Any] = {
         "log": _xray_log_block(),
         "dns": {
@@ -1097,8 +1110,8 @@ def generate_xray_config_xhttp() -> None:
         },
         "inbounds": [{
             "tag":      "inbound-xhttp",
-            "port":     SERVER_PORT,
-            "listen":   "::",
+            "port":     XHTTP_BACKEND_PORT,   # loopback-only, Nginx проксирует сюда
+            "listen":   "127.0.0.1",         # только loopback — извне не доступно
             "protocol": "vless",
             "settings": {
                 "clients": [{
@@ -1116,10 +1129,8 @@ def generate_xray_config_xhttp() -> None:
             },
             "streamSettings": {
                 "network":       "xhttp",
-                "security":      "tls",
+                "security":      "none",      # TLS терминирован Nginx, тут уже голый HTTP
                 "sockopt":       _sockopt_s3,
-                "tlsSettings":   _build_tls_settings_xhttp(
-                                     PARAM_DOMAIN, cert_path, key_path),
                 "xhttpSettings": _xhttp_s3,
             },
         }],
@@ -1205,7 +1216,9 @@ def generate_xray_config_xhttp() -> None:
     r = _run([str(XRAY_BIN), "run", "-test", "-config", str(cfg_file)],
              capture=True, check=False)
     if r.returncode == 0:
-        success(f"Конфигурация xHTTP TLS валидирована (mode={XHTTP_MODE}, path={XHTTP_PATH})")
+        success(f"Конфигурация xHTTP TLS валидирована "
+                f"(mode={XHTTP_MODE}, path={XHTTP_PATH}, "
+                f"backend=127.0.0.1:{XHTTP_BACKEND_PORT}, TLS=Nginx:{SERVER_PORT})")
     else:
         warn("Конфигурация создана (валидация вернула предупреждение — возможно, сертификат ещё не получен)")
         log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
@@ -1219,6 +1232,9 @@ def create_xray_service() -> None:
     PARAM_USE_DNSCRYPT = core.PARAM_USE_DNSCRYPT
     PROTOCOL_MODE = core.PROTOCOL_MODE
     AWG_EXIT_ENABLED = core.AWG_EXIT_ENABLED
+    INSTALL_MODE = core.INSTALL_MODE
+    CHAIN_NODES = core.CHAIN_NODES
+    CHAIN_EXIT_HOST = core.CHAIN_EXIT_HOST
     _run    = core._run
     XRAY_SERVICE = core.XRAY_SERVICE
     XRAY_BIN = core.XRAY_BIN
@@ -1236,10 +1252,25 @@ def create_xray_service() -> None:
         after_line += " dnscrypt-proxy.service"
         wants_line  = "Wants=network-online.target dnscrypt-proxy.service"
 
-    # Для xHTTP TLS сокет не нужен — Xray слушает напрямую на 443
+    # Признак chain-mode с exit-нодами: в этом случае generate_xray_config_chain_entry_multi()
+    # строит inbound с TLS на :SERVER_PORT напрямую — Xray сам владеет 443.
+    # В противном случае (single-node xhttp, или B+AWG/H2+xhttp) Xray слушает loopback.
+    _chain_has_exit_nodes = (
+        INSTALL_MODE == "B"
+        and (bool(CHAIN_NODES) or bool(CHAIN_EXIT_HOST))
+    )
+
+    # Для xHTTP TLS:
+    #   • single-node или B+AWG/H2 (без exit-нод): Xray слушает 127.0.0.1:XHTTP_BACKEND_PORT
+    #     с security:none; Nginx терминирует TLS и проксирует сюда.
+    #   • B+exit-nodes: Xray слушает :SERVER_PORT напрямую с TLS (chain_nodes.py).
+    #   Сокет не нужен, rm -f не нужен в обоих случаях.
     if PROTOCOL_MODE == "xhttp":
         pre_cmds = ""
-        svc_desc = "Xray Service (VLESS xHTTP TLS)"
+        if _chain_has_exit_nodes:
+            svc_desc = "Xray Service (VLESS xHTTP chain — TLS on :SERVER_PORT)"
+        else:
+            svc_desc = "Xray Service (VLESS xHTTP — backend for Nginx TLS)"
     elif AWG_EXIT_ENABLED:
         # === FIX 1c/AWG: В AWG-режиме unix socket не используется.
         # Xray слушает напрямую на 0.0.0.0:SERVER_PORT (TCP).

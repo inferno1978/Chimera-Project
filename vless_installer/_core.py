@@ -921,6 +921,19 @@ XHTTP_MODE: str = "streamup"
 SERVER_PORT: int = 443
 XHTTP_PORT:  int = 443   # backward-compat alias, всегда == SERVER_PORT
 
+# Loopback-порт Xray, на который Nginx проксирует xHTTP-трафик в режиме
+# PROTOCOL_MODE == "xhttp". См. setup_nginx_final() / generate_xray_config_xhttp().
+#
+# Контекст: механизм fallbacks в Xray-core НЕ поддерживается для xHTTP
+# (задокументированное ограничение XHTTP: Beyond REALITY). Поэтому заглушка
+# реализуется схемой Nginx → Xray:
+#   • Nginx терминирует TLS на SERVER_PORT (по умолч. 443), отдаёт сайт-заглушку
+#     для пути "/" и проксирует xhttp path на 127.0.0.1:XHTTP_BACKEND_PORT.
+#   • Xray принимает xHTTP на loopback-порту с security: none (TLS не нужен —
+#     трафик уже расшифрован Nginx).
+# Это позволяет сохранить рабочий сайт-заглушку и прокси одновременно.
+XHTTP_BACKEND_PORT: int = 8443
+
 # Путь (path) xHTTP endpoint
 XHTTP_PATH: str = ""   # авто-генерируется если пусто
 XHTTP_MODE_SUPPORTED: bool = False  # True только после _detect_xhttp_mode_support(); безопасный дефолт — False
