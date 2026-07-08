@@ -475,9 +475,9 @@ async function addUser() {
     // portal_password возвращается ОДИН раз — показываем админу для передачи пользователю.
     if (data.portal_password) {
       alert('Пользователь создан: ' + email +
-            '\n\nportal_login: ' + (data.portal_login || email) +
-            '\nportal_password: ' + data.portal_password +
-            '\n\n⚠️ Сохраните пароль — он больше не будет показан.');
+            '\\n\\nportal_login: ' + (data.portal_login || email) +
+            '\\nportal_password: ' + data.portal_password +
+            '\\n\\n⚠️ Сохраните пароль — он больше не будет показан.');
     } else {
       showToast('Пользователь создан: ' + email);
     }
