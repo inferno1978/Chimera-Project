@@ -55,6 +55,7 @@ bash bootstrap.sh
 | **v4.12.8**        | Интерактивный выбор TLS Fingerprint (11 вариантов) при установке и для каждой exit-ноды; единый модуль `fingerprint_manager.py`; FP сохраняется в state.json и применяется во всех режимах (A, B, AWG, WARP) |
 | **v4.12.8** 🛡️ | Telemt MSS-фрагментация против TSPU JA4 DPI: новый модуль `telemt_mss_selector.py`, 10 пресетов (tspu★/2in8/extreme-low/…) с интерактивным выбором при установке Telemt |
 | **v4.12.9 NEW** 📊 | Статистика трафика NaiveProxy и Mieru: новые модули `naiveproxy_stats.py` и `mieru_stats.py`; метрики из iptables, journalctl, ss; гистограммы активности, топ клиентов, NTP-мониторинг; живое обновление каждые 30 сек |
+| **v4.13 NEW** 🚀 | Полный рефакторинг кодовой базы; добавлены Web Admin Panel, User Portal и REST API |
 
 ## 📋 Требования
 
