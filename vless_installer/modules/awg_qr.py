@@ -1,0 +1,266 @@
+"""
+vless_installer/modules/awg_qr.py
+───────────────────────────────────────────────────────────────────────────────
+Генерация QR-кодов и vpn:// URI для клиентов AmneziaWG.
+
+QR-коды рендерятся в терминал (через qrencode -t ANSIUTF8) и сохраняются
+в PNG (через qrencode -t PNG). Делегирует в core._show_qr для consistency.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import urllib.parse
+from pathlib import Path
+from typing import Optional
+
+from .awg_constants import AWGS_KEYS_DIR
+
+
+def _core_module():
+    import importlib
+    return importlib.import_module("vless_installer._core")
+
+
+# ── Генерация клиентского конфига (.conf) ───────────────────────────────────
+
+def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
+    """
+    Генерирует содержимое клиентского .conf файла.
+    peer: dict из awgs_state (с client_privkey, client_ip, и т.д.)
+    server_state: dict из awgs_state (с server_pubkey, port, params, endpoint)
+    """
+    params = server_state.get("params", {})
+    endpoint = server_state.get("endpoint_host") or server_state.get("endpoint", "")
+    port = server_state.get("port", 51820)
+    server_pubkey = server_state.get("server_pubkey", "")
+    mtu = server_state.get("mtu", 1280)
+    allow_ipv6 = server_state.get("allow_ipv6_tunnel", False)
+
+    client_ip = peer.get("client_ip", "")
+    client_ipv6 = peer.get("client_ipv6", "")
+    client_privkey = peer.get("client_privkey", "")
+    psk = peer.get("preshared_key", "")
+    dns1 = peer.get("dns1", "1.1.1.1")
+    dns2 = peer.get("dns2", "8.8.8.8")
+
+    # AllowedIPs: 0.0.0.0/0 (route all). Если каскад — клиенту не нужно знать.
+    allowed_ips = "0.0.0.0/0"
+    if allow_ipv6 and client_ipv6:
+        allowed_ips += f", ::/0"
+
+    lines = [
+        "[Interface]",
+        f"PrivateKey = {client_privkey}",
+        f"Address = {client_ip}/32",
+    ]
+    if allow_ipv6 and client_ipv6:
+        lines.append(f"Address = {client_ipv6}/128")
+    lines.append(f"DNS = {dns1}, {dns2}")
+    lines.append(f"MTU = {mtu}")
+    lines.append("")
+    lines.append("[Peer]")
+    lines.append(f"PublicKey = {server_pubkey}")
+    if endpoint:
+        lines.append(f"Endpoint = {endpoint}:{port}")
+    lines.append(f"AllowedIPs = {allowed_ips}")
+    if psk:
+        lines.append(f"PresharedKey = {psk}")
+    lines.append("PersistentKeepalive = 25")
+    lines.append("")
+    # Параметры AWG 2.0
+    lines.append(f"Jc = {params.get('jc', 4)}")
+    lines.append(f"Jmin = {params.get('jmin', 40)}")
+    lines.append(f"Jmax = {params.get('jmax', 70)}")
+    lines.append(f"S1 = {params.get('s1', 0)}")
+    lines.append(f"S2 = {params.get('s2', 0)}")
+    lines.append(f"S3 = {params.get('s3', 0)}")
+    lines.append(f"S4 = {params.get('s4', 0)}")
+    lines.append(f"H1 = {params.get('h1', 1)}")
+    lines.append(f"H2 = {params.get('h2', 2)}")
+    lines.append(f"H3 = {params.get('h3', 3)}")
+    lines.append(f"H4 = {params.get('h4', 4)}")
+    if params.get("i1"):
+        lines.append(f"I1 = {params['i1']}")
+    if params.get("i2"):
+        lines.append(f"I2 = {params['i2']}")
+
+    return "\n".join(lines) + "\n"
+
+
+# ── Сохранение клиентского конфига в файл ───────────────────────────────────
+
+def awgs_qr_save_client_conf(peer: dict, server_state: dict) -> Optional[Path]:
+    """Сохраняет .conf файл клиента в /root/awg/keys/<name>.conf."""
+    try:
+        AWGS_KEYS_DIR.mkdir(parents=True, exist_ok=True)
+        name = peer.get("name", "client")
+        path = AWGS_KEYS_DIR / f"{name}.conf"
+        content = awgs_qr_build_client_conf(peer, server_state)
+        path.write_text(content)
+        path.chmod(0o600)
+        return path
+    except Exception as e:
+        core = _core_module()
+        core.log_to_file("ERROR", f"awgs_qr_save_client_conf: {e}")
+        return None
+
+
+# ── Генерация vpn:// URI ────────────────────────────────────────────────────
+
+def awgs_qr_build_vpn_uri(peer: dict, server_state: dict) -> str:
+    """
+    Генерирует vpn:// URI для импорта в Amnezia Client одним тапом.
+    Формат перенесён из bivlked (awg_common.sh, _build_vpnuri).
+    """
+    params = server_state.get("params", {})
+    endpoint = server_state.get("endpoint_host") or server_state.get("endpoint", "")
+    port = server_state.get("port", 51820)
+    server_pubkey = server_state.get("server_pubkey", "")
+    mtu = server_state.get("mtu", 1280)
+
+    client_ip = peer.get("client_ip", "")
+    client_ipv6 = peer.get("client_ipv6", "")
+    client_privkey = peer.get("client_privkey", "")
+    psk = peer.get("preshared_key", "")
+
+    # Build inner config (raw .conf content)
+    raw_conf = awgs_qr_build_client_conf(peer, server_state)
+
+    # Build inner JSON (как в bivlked _build_vpnuri)
+    inner = {
+        "H1": str(params.get("h1", 1)),
+        "H2": str(params.get("h2", 2)),
+        "H3": str(params.get("h3", 3)),
+        "H4": str(params.get("h4", 4)),
+        "Jc": str(params.get("jc", 4)),
+        "Jmin": str(params.get("jmin", 40)),
+        "Jmax": str(params.get("jmax", 70)),
+        "S1": str(params.get("s1", 0)),
+        "S2": str(params.get("s2", 0)),
+        "S3": str(params.get("s3", 0)),
+        "S4": str(params.get("s4", 0)),
+    }
+    # I1-I5 (опционально)
+    for k in ("i1", "i2", "i3", "i4", "i5"):
+        v = params.get(k, "")
+        if v:
+            inner[k.upper()] = str(v)
+    inner["allowed_ips"] = ["0.0.0.0/0"]
+    inner["client_ip"] = client_ip
+    inner["client_ipv6"] = client_ipv6 or ""
+    inner["client_priv_key"] = client_privkey
+    if psk:
+        inner["psk_key"] = psk
+    inner["config"] = raw_conf
+    inner["hostName"] = endpoint
+    inner["mtu"] = str(mtu)
+    inner["persistent_keep_alive"] = "25"
+    inner["port"] = port
+    inner["server_pub_key"] = server_pubkey
+
+    inner_json = json.dumps(inner, ensure_ascii=False)
+    inner_b64 = base64.b64encode(inner_json.encode("utf-8")).decode("ascii")
+
+    outer = {
+        "containers": [{
+            "awg": {
+                "isThirdPartyConfig": True,
+                "last_config": inner_json,
+                "port": str(port),
+                "protocol_version": "2",
+                "transport_proto": "udp",
+            },
+            "container": "amnezia-awg",
+        }],
+        "defaultContainer": "amnezia-awg",
+    }
+    outer_json = json.dumps(outer, ensure_ascii=False)
+    outer_b64 = base64.b64encode(outer_json.encode("utf-8")).decode("ascii")
+
+    return f"vpn://free/{outer_b64}/{inner_b64}"
+
+
+# ── QR-код в терминал ───────────────────────────────────────────────────────
+
+def awgs_qr_show_terminal(content: str, label: str = "") -> bool:
+    """
+    Показывает QR-код в терминале через `qrencode -t ANSIUTF8`.
+    content может быть .conf файлом или vpn:// URI.
+    """
+    core = _core_module()
+    r = core._run(["which", "qrencode"], capture=True, check=False)
+    if r.returncode != 0:
+        core.warn("qrencode не установлен — QR показать нельзя")
+        return False
+    if label:
+        print(f"\n{core.CYAN}{label}{core.NC}")
+    r = core._run(
+        ["qrencode", "-t", "ANSIUTF8", "-o", "-"],
+        input_text=content,
+        capture=True, check=False,
+    )
+    if r.returncode == 0:
+        print(r.stdout)
+        return True
+    core.warn(f"qrencode: {r.stderr}")
+    return False
+
+
+def awgs_qr_save_png(content: str, path: Path) -> bool:
+    """Сохраняет QR-код в PNG файл."""
+    core = _core_module()
+    r = core._run(["which", "qrencode"], capture=True, check=False)
+    if r.returncode != 0:
+        return False
+    r = core._run(
+        ["qrencode", "-t", "PNG", "-o", str(path), "-s", "8"],
+        input_text=content,
+        capture=True, check=False,
+    )
+    return r.returncode == 0
+
+
+# ── Полный экспорт пира ─────────────────────────────────────────────────────
+
+def awgs_qr_export_peer(peer: dict) -> dict:
+    """
+    Полный экспорт пира:
+      • .conf файл (для AmneziaWG Windows client)
+      • vpn:// URI (для Amnezia Client одним тапом)
+      • QR-код в терминале
+      • PNG файл с QR-кодом (для vpn:// URI)
+    Возвращает dict с путями.
+    """
+    core = _core_module()
+    from .awg_state import awgs_state_load
+    server_state = awgs_state_load()
+    name = peer.get("name", "client")
+
+    # 1. .conf файл
+    conf_path = awgs_qr_save_client_conf(peer, server_state)
+
+    # 2. vpn:// URI
+    vpn_uri = awgs_qr_build_vpn_uri(peer, server_state)
+
+    # 3. QR в терминале (vpn:// URI)
+    awgs_qr_show_terminal(vpn_uri, label=f"QR-код для {name} (vpn:// URI):")
+
+    # 4. PNG с QR
+    png_path = AWGS_KEYS_DIR / f"{name}_qr.png"
+    awgs_qr_save_png(vpn_uri, png_path)
+
+    # 5. Сохраняем vpn:// URI в файл
+    uri_path = AWGS_KEYS_DIR / f"{name}.vpnuri"
+    try:
+        uri_path.write_text(vpn_uri + "\n")
+        uri_path.chmod(0o600)
+    except Exception:
+        pass
+
+    return {
+        "conf_path":  conf_path,
+        "vpn_uri":    vpn_uri,
+        "uri_path":   uri_path,
+        "png_path":   png_path,
+    }

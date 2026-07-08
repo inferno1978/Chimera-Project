@@ -152,6 +152,11 @@ VLESS-Ultimate-Installer/
         │
         └── 19. Вендорные модули
             └── _vendor/dpi_detector/ (Python)
+
+        ── 20. AmneziaWG 2.0 standalone (13 модулей, NEW v4.14.0) ──
+           awg_constants/state/presets/hw_tuning/apply/standalone/
+           peers/qr/expires/backup/cascade/diagnose/uninstall
+           — полный порт bivlked/amneziawg-installer, carrier-пресеты, каскад
 ```
 
 > 📋 **Полная карта по 24 категориям** с описанием каждого файла — в [`PROJECT_MAP.md`](PROJECT_MAP.md).
