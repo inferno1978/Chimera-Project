@@ -166,6 +166,63 @@ def _save_users(users: list[dict]) -> None:
     core._set_config_owner(users_file)
 
 
+def _sync_users_from_config() -> None:
+    """Синхронизирует users.json с config.json Xray.
+
+    Проблема: при первичной установке юзер создаётся только в config.json
+    (через _users_apply_to_config), минуя users.json. Когда admin panel
+    создаёт нового юзера через _save_users() + _users_apply_to_config(),
+    старый юзер (которого нет в users.json) затирается в config.json.
+
+    Фикс: перед созданием нового юзера подтянуть существующих клиентов из
+    config.json в users.json (если их там нет). portal_password для
+    импортированных юзеров пустой — они должны установить его через админку
+    или скрипт (uuid-fallback убран в security-фиксе).
+    """
+    core = _core_module()
+    CONFIG_DIR = core.CONFIG_DIR
+    cfg_path = CONFIG_DIR / "config.json"
+    if not cfg_path.exists():
+        return
+    try:
+        cfg = json.loads(cfg_path.read_text())
+    except Exception:
+        return
+    # Собираем всех clients из всех VLESS inbounds
+    config_clients = []
+    for inb in cfg.get("inbounds", []):
+        if inb.get("protocol") == "vless":
+            for c in inb.get("settings", {}).get("clients", []):
+                cid = c.get("id", "")
+                if cid and cid != "00000000-0000-0000-0000-000000000000":
+                    config_clients.append({
+                        "uuid": cid,
+                        "email": c.get("email", ""),
+                    })
+    if not config_clients:
+        return
+    # Читаем текущий users.json
+    users = _get_users()
+    existing_uuids = {u.get("uuid", "") for u in users}
+    # Добавляем тех, кого нет в users.json
+    added = 0
+    for c in config_clients:
+        if c["uuid"] not in existing_uuids:
+            email = c.get("email", "") or f"user-{c['uuid'][:8]}"
+            users.append({
+                "uuid": c["uuid"],
+                "email": email,
+                "name": email.split("@")[0] if "@" in email else email,
+                "portal_password": "",  # пустой — юзер должен установить
+                "created": "",
+            })
+            existing_uuids.add(c["uuid"])
+            added += 1
+    if added:
+        _save_users(users)
+        print(f"[VLESS Web] Синхронизация: добавлено {added} юзеров из config.json в users.json")
+
+
 def _get_user_traffic(email: str) -> dict:
     """Возвращает трафик пользователя (uplink + downlink)."""
     core = _core_module()
@@ -867,6 +924,10 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             # через POST /api/portal/password. Fallback на uuid как пароль убран —
             # uuid это публичная часть vless:// ссылки и не может быть паролем.
             portal_password = secrets.token_urlsafe(12)
+            # Синхронизируем users.json с config.json — подтягиваем юзеров, которые
+            # были созданы при установке (только в config.json), чтобы не затереть
+            # их при _users_apply_to_config() ниже.
+            _sync_users_from_config()
             users = _get_users()
             users.append({
                 "uuid": new_uuid,
