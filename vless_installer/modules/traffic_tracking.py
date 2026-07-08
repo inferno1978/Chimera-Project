@@ -89,7 +89,7 @@ def _query_user_traffic_bytes(email: str) -> int:
             r = _run([
                 str(XRAY_BIN), "api", "statsquery",
                 f"--server=127.0.0.1:{XRAY_STATS_API_PORT}",
-                f"--pattern=user>>>{email}>>>{direction}",
+                f"--pattern=user>>>{email}>>>traffic>>>{direction}",
             ], capture=True, check=False)
             for line in r.stdout.splitlines():
                 m = re.search(r'"value"\s*:\s*"?(\d+)"?', line)
