@@ -1,8 +1,8 @@
 # VLESS Ultimate Installer — Карта проекта
 
-Полная карта всех модулей `vless_installer/modules/` (122 файла) + `_core.py`.
+Полная карта всех модулей `vless_installer/modules/` (129 файлов) + `_core.py`.
 
-`_core.py` (13 992 строки) — ядро установщика: глобальное состояние, главный orchestrator `main_menu()`, `_load_state_into_globals()`, функции которые мутируют много globals (AWG, chain multi-node, install orchestration). Все модули ниже обращаются к ядру через `_core_module()` lazy binding.
+`_core.py` (7 779 строк) — ядро установщика: глобальное состояние, главный orchestrator `main_menu()`, `_load_state_into_globals()`, функции которые мутируют много globals (AWG, chain multi-node, install orchestration). Все модули ниже обращаются к ядру через `_core_module()` lazy binding.
 
 ---
 
@@ -282,14 +282,14 @@
 
 ```
 vless_installer/
-├── _core.py              (13 992 строк — ядро, главный orchestrator)
+├── _core.py              (7 779 строк — ядро, главный orchestrator)
 ├── __init__.py           (version = "4.12.10")
 ├── __all_exports.py      (реэкспорт API для программного доступа)
-└── modules/              (122 модуля)
+└── modules/              (129 модулей)
     ├── __init__.py
     ├── _vendor/          (вендорные модули)
     │   └── dpi_detector/
-    └── *.py              (122 файла, см. группы выше)
+    └── *.py              (129 файлов, см. группы выше)
 ```
 
 ## Паттерн доступа к ядру
