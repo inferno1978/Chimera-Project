@@ -930,32 +930,42 @@ def generate_xray_config() -> None:
         },
     }
 
-    # ── AWG + Split tunnel: добавляем direct-local (БЕЗ fwmark) ──────────────
+    # ── AWG: всегда добавляем direct-local (БЕЗ fwmark) + IP-проверка ─────────
     # В AWG-режиме outbound "direct" имеет sockopt.mark = AWG_FWMARK → весь трафик
-    # уходит через awg0 (exit-VPS). Это правильно для не-РФ трафика, но ломает
-    # split tunneling: РФ-домены/IP, отправленные в "direct", тоже идут через
-    # туннель → 2ip.ru видит exit-IP вместо entry-IP.
+    # уходит через awg0 (exit-VPS). Для IP-проверочных доменов (2ip.ru, myip.ru,
+    # whoer.net) нужна семантика "напрямую, без туннеля" — чтобы пользователь мог
+    # проверить работу туннеля (2ip.ru → entry-IP, speedtest.net → exit-IP).
     # Решение: второй outbound "direct-local" (freedom БЕЗ fwmark) — пакеты идут
-    # напрямую через default route ОС (физический интерфейс) (default route ОС, не AWG-таблица).
+    # напрямую через default route ОС (физический интерфейс), не AWG-таблицу.
     # IPv6: domainStrategy=UseIPv4 принудительно, если на entry нет IPv6
     # (IS_IPV6_AVAILABLE проверяется через _check_ipv6_preflight — пинг до
     # 2001:4860:4860::8888 + curl ipv6.icanhazip.com). Иначе freedom попытается
     # AAAA-резолв и получит IPv6 blackhole → EOF для клиентов на РФ-доменах.
-    if AWG_EXIT_ENABLED and SPLIT_TUNNEL_ENABLED:
+    # Это правило применяется ВСЕГДА при AWG_EXIT_ENABLED=True, независимо от
+    # SPLIT_TUNNEL_ENABLED — это базовая диагностика туннеля. Полный split tunnel
+    # (geosite:category-ru, geoip:ru, RIPE) — см. ниже, только если включён.
+    if AWG_EXIT_ENABLED:
         _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
-        config["outbounds"].insert(0, {
-            "protocol": "freedom",
-            "tag":      "direct-local",
-            "settings": {"domainStrategy": _dl_strategy},
-            # НЕТ sockopt.mark → ОС использует default route ОС, не awg0.
-        })
-        info(f"AWG + Split tunnel: добавлен outbound direct-local "
-             f"(domainStrategy={_dl_strategy}, без fwmark → РФ-трафик напрямую через default route ОС (физический интерфейс))")
+        if not any(ob.get("tag") == "direct-local" for ob in config["outbounds"]):
+            config["outbounds"].insert(0, {
+                "protocol": "freedom",
+                "tag":      "direct-local",
+                "settings": {"domainStrategy": _dl_strategy},
+                # НЕТ sockopt.mark → ОС использует default route ОС, не awg0.
+            })
+            info(f"AWG: добавлен outbound direct-local "
+                 f"(domainStrategy={_dl_strategy}, без fwmark → напрямую через default route ОС)")
+        # IP-проверочные домены → direct-local (всегда, даже без split tunnel)
+        from vless_installer.modules.split_tunnel import build_awg_ip_check_rule
+        _ip_check_rule = build_awg_ip_check_rule("direct-local")
+        # Вставляем ПЕРВЫМ правилом (высший приоритет) — до loopback/bittorrent/catch-all
+        config["routing"]["rules"].insert(0, _ip_check_rule)
+        info("AWG: IP-проверочные домены (2ip.ru, 2ip.io, myip.ru, whoer.net) → direct-local")
 
     # ── Split tunneling (Режим A, REALITY) ───────────────────────────────────
+    # Полный split tunnel: geosite:category-ru + geoip:ru + пользовательские
+    # домены/IP. В AWG-режиме РФ-домены идут через direct-local (без fwmark).
     if SPLIT_TUNNEL_ENABLED:
-        # В AWG-режиме РФ-домены/IP должны идти через direct-local (без fwmark),
-        # а не через direct (с fwmark → awg0). Иначе split tunnel бесполезен.
         _st_direct_tag = "direct-local" if AWG_EXIT_ENABLED else "direct"
         st_rules = build_split_tunnel_routing_rules(
             proxy_tag="direct", direct_tag=_st_direct_tag)
@@ -1141,22 +1151,30 @@ def generate_xray_config_xhttp() -> None:
         },
     }
 
-    # ── AWG + Split tunnel: добавляем direct-local (БЕЗ fwmark) ──────────────
-    # См. подробный комментарий в generate_xray_config() — тут та же логика:
-    # в AWG-режиме "direct" имеет fwmark → весь трафик через awg0 (exit-VPS).
-    # Для split tunneling нужен второй outbound без fwmark → РФ-трафик через default route ОС (физический интерфейс).
+    # ── AWG: всегда добавляем direct-local (БЕЗ fwmark) + IP-проверка ─────────
+    # См. подробный комментарий в generate_xray_config() — тут та же логика.
+    # В AWG-режиме "direct" имеет fwmark → весь трафик через awg0 (exit-VPS).
+    # Для IP-проверочных доменов (2ip.ru, myip.ru, whoer.net) нужен второй
+    # outbound без fwmark → напрямую через default route ОС.
     # IPv6: UseIPv4 принудительно при отсутствии IPv6 на entry (см. _check_ipv6_preflight).
-    if AWG_EXIT_ENABLED and SPLIT_TUNNEL_ENABLED:
+    # Применяется ВСЕГДА при AWG_EXIT_ENABLED=True, независимо от split tunnel.
+    if AWG_EXIT_ENABLED:
         _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
-        config["outbounds"].insert(0, {
-            "protocol": "freedom",
-            "tag":      "direct-local",
-            "settings": {"domainStrategy": _dl_strategy},
-        })
-        info(f"AWG + Split tunnel: добавлен outbound direct-local "
-             f"(domainStrategy={_dl_strategy}, без fwmark → РФ-трафик напрямую через default route ОС (физический интерфейс))")
+        if not any(ob.get("tag") == "direct-local" for ob in config["outbounds"]):
+            config["outbounds"].insert(0, {
+                "protocol": "freedom",
+                "tag":      "direct-local",
+                "settings": {"domainStrategy": _dl_strategy},
+            })
+            info(f"AWG: добавлен outbound direct-local "
+                 f"(domainStrategy={_dl_strategy}, без fwmark → напрямую через default route ОС)")
+        from vless_installer.modules.split_tunnel import build_awg_ip_check_rule
+        _ip_check_rule = build_awg_ip_check_rule("direct-local")
+        config["routing"]["rules"].insert(0, _ip_check_rule)
+        info("AWG: IP-проверочные домены (2ip.ru, 2ip.io, myip.ru, whoer.net) → direct-local")
 
     # ── Split tunneling (Режим A, xHTTP TLS) ─────────────────────────────────
+    # Полный split tunnel: geosite:category-ru + geoip:ru + пользовательские.
     if SPLIT_TUNNEL_ENABLED:
         _st_direct_tag = "direct-local" if AWG_EXIT_ENABLED else "direct"
         st_rules = build_split_tunnel_routing_rules(
