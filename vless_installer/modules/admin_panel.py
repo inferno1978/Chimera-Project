@@ -454,8 +454,8 @@ async function loadUsers() {
     const isDisabled = u.disabled;
     const rowStyle = isDisabled ? 'opacity:0.5;text-decoration:line-through' : '';
     const toggleBtn = isDisabled
-      ? `<button class="btn btn-sm btn-primary" onclick="toggleUser('${esc(u.email)}')">🔓</button>`
-      : `<button class="btn btn-sm btn-ghost" onclick="toggleUser('${esc(u.email)}')">🔒</button>`;
+      ? `<button class="btn btn-sm btn-primary" onclick="toggleUser('${esc(u.email)}')">🔓 Разблокировать</button>`
+      : `<button class="btn btn-sm btn-ghost" onclick="toggleUser('${esc(u.email)}')">🔒 Заблокировать</button>`;
     return `
     <tr style="${rowStyle}">
       <td>${esc(u.email) || '—'}</td>
@@ -465,7 +465,7 @@ async function loadUsers() {
       <td id="ttl-${esc(u.email)}">—</td>
       <td>
         ${toggleBtn}
-        <button class="btn btn-sm btn-warn" onclick="showSetPassModal('${esc(u.email)}')">🔑</button>
+        <button class="btn btn-sm btn-warn" onclick="showSetPassModal('${esc(u.email)}')">🔑 Пароль</button>
         <button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.email)}')">🗑 Удалить</button>
       </td>
     </tr>
