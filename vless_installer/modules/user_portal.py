@@ -412,7 +412,7 @@ function showToast(msg, type = 'success') {{
 }}
 
 async function api(path) {{
-  const res = await fetch(path);
+  const res = await fetch(path, {{ credentials: 'same-origin' }});
   if (res.status === 401) {{ alert('Требуется авторизация'); location.reload(); return null; }}
   return res.json();
 }}
@@ -542,6 +542,7 @@ async function changePassword() {{
   const res = await fetch('/api/portal/password', {{
     method: 'POST',
     headers: {{ 'Content-Type': 'application/json' }},
+    credentials: 'same-origin',
     body: JSON.stringify({{ new_password: newPass }})
   }});
   const data = await res.json();
