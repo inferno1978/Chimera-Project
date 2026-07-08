@@ -187,6 +187,11 @@ def awgs_qr_show_terminal(content: str, label: str = "") -> bool:
     """
     Показывает QR-код в терминале через `qrencode -t ANSIUTF8`.
     content может быть .conf файлом или vpn:// URI.
+
+    Для длинных vpn:// URI (1500-2000+ символов) использует флаг -l L
+    (низший уровень error correction) — это позволяет вместить больше данных.
+    Если всё равно не помещается — возвращает False (вызывающий код может
+    показать .conf QR вместо него, он короче).
     """
     core = _core_module()
     r = core._run(["which", "qrencode"], capture=True, check=False)
@@ -195,26 +200,39 @@ def awgs_qr_show_terminal(content: str, label: str = "") -> bool:
         return False
     if label:
         print(f"\n{core.CYAN}{label}{core.NC}")
+    # -l L — низший уровень error correction (вместо дефолтного M)
+    # Это позволяет вместить больше данных в QR-код
     r = core._run(
-        ["qrencode", "-t", "ANSIUTF8", "-o", "-"],
+        ["qrencode", "-t", "ANSIUTF8", "-o", "-", "-l", "L"],
         input_text=content,
         capture=True, check=False,
     )
-    if r.returncode == 0:
+    if r.returncode == 0 and r.stdout.strip():
         print(r.stdout)
         return True
-    core.warn(f"qrencode: {r.stderr}")
+    # QR не помещается — это нормально для длинных vpn:// URI
+    if "too large" in (r.stderr or "").lower():
+        core.warn("QR из vpn:// URI слишком большой для терминала — используйте .conf QR ниже")
+    else:
+        core.warn(f"qrencode: {r.stderr}")
     return False
 
 
 def awgs_qr_save_png(content: str, path: Path) -> bool:
-    """Сохраняет QR-код в PNG файл."""
+    """
+    Сохраняет QR-код в PNG файл.
+    Для длинных vpn:// URI использует -l L (низший error correction) —
+    как в bivlked awg_common.sh:1824 (issue #72).
+    """
     core = _core_module()
     r = core._run(["which", "qrencode"], capture=True, check=False)
     if r.returncode != 0:
         return False
+    # -l L — низший уровень error correction (вместо дефолтного M)
+    # -s 6 — размер модуля 6px (читаемый на экране телефона)
+    # -m 4 — margin 4 модуля (минимум для сканирования)
     r = core._run(
-        ["qrencode", "-t", "PNG", "-o", str(path), "-s", "8"],
+        ["qrencode", "-t", "PNG", "-l", "L", "-s", "6", "-m", "4", "-o", str(path)],
         input_text=content,
         capture=True, check=False,
     )
@@ -228,8 +246,8 @@ def awgs_qr_export_peer(peer: dict) -> dict:
     Полный экспорт пира:
       • .conf файл (для AmneziaWG Windows client)
       • vpn:// URI (для Amnezia Client одним тапом)
-      • QR-код в терминале
-      • PNG файл с QR-кодом (для vpn:// URI)
+      • QR-код в терминале (vpn:// URI, fallback на .conf если слишком длинный)
+      • PNG файлы с QR-кодом (vpn:// URI + .conf)
     Возвращает dict с путями.
     """
     core = _core_module()
@@ -243,14 +261,29 @@ def awgs_qr_export_peer(peer: dict) -> dict:
     # 2. vpn:// URI
     vpn_uri = awgs_qr_build_vpn_uri(peer, server_state)
 
-    # 3. QR в терминале (vpn:// URI)
-    awgs_qr_show_terminal(vpn_uri, label=f"QR-код для {name} (vpn:// URI):")
+    # 3. QR в терминале — сначала пробуем vpn:// URI
+    # (для импорта в Amnezia Client на телефоне одним тапом)
+    qr_shown = awgs_qr_show_terminal(vpn_uri, label=f"QR-код для {name} (vpn:// URI):")
 
-    # 4. PNG с QR
-    png_path = AWGS_KEYS_DIR / f"{name}_qr.png"
-    awgs_qr_save_png(vpn_uri, png_path)
+    # 4. Если vpn:// QR не помещается — показываем QR из .conf файла
+    # (.conf короче ~600 символов, всегда помещается в QR)
+    if not qr_shown and conf_path and conf_path.exists():
+        conf_content = conf_path.read_text()
+        awgs_qr_show_terminal(
+            conf_content,
+            label=f"QR-код для {name} (из .conf файла — для AmneziaWG Windows client):",
+        )
 
-    # 5. Сохраняем vpn:// URI в файл
+    # 5. PNG с QR из vpn:// URI (с -l L для длинных URI, как в bivlked)
+    png_vpnuri_path = AWGS_KEYS_DIR / f"{name}_qr.png"
+    png_vpnuri_ok = awgs_qr_save_png(vpn_uri, png_vpnuri_path)
+
+    # 6. PNG с QR из .conf файла (всегда помещается)
+    png_conf_path = AWGS_KEYS_DIR / f"{name}_qr_conf.png"
+    if conf_path and conf_path.exists():
+        awgs_qr_save_png(conf_path.read_text(), png_conf_path)
+
+    # 7. Сохраняем vpn:// URI в файл
     uri_path = AWGS_KEYS_DIR / f"{name}.vpnuri"
     try:
         uri_path.write_text(vpn_uri + "\n")
@@ -259,8 +292,9 @@ def awgs_qr_export_peer(peer: dict) -> dict:
         pass
 
     return {
-        "conf_path":  conf_path,
-        "vpn_uri":    vpn_uri,
-        "uri_path":   uri_path,
-        "png_path":   png_path,
+        "conf_path":       conf_path,
+        "vpn_uri":         vpn_uri,
+        "uri_path":        uri_path,
+        "png_path":        png_vpnuri_path if png_vpnuri_ok else None,
+        "png_conf_path":   png_conf_path,
     }
