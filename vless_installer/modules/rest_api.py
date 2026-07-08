@@ -204,6 +204,19 @@ def _sync_users_from_config() -> None:
     # Читаем текущий users.json
     users = _get_users()
     existing_uuids = {u.get("uuid", "") for u in users}
+    # Дата изменения config.json — приблизительная дата создания юзера
+    # (для юзеров, созданных при установке — реальная дата неизвестна).
+    try:
+        import time as _time
+        _created_ts = _time.time()
+        try:
+            _created_ts = cfg_path.stat().st_mtime
+        except Exception:
+            pass
+        from datetime import datetime as _dt
+        _created_iso = _dt.fromtimestamp(_created_ts).isoformat()
+    except Exception:
+        _created_iso = ""
     # Добавляем тех, кого нет в users.json
     added = 0
     for c in config_clients:
@@ -214,7 +227,7 @@ def _sync_users_from_config() -> None:
                 "email": email,
                 "name": email.split("@")[0] if "@" in email else email,
                 "portal_password": "",  # пустой — юзер должен установить
-                "created": "",
+                "created": _created_iso,
             })
             existing_uuids.add(c["uuid"])
             added += 1
