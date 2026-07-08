@@ -1173,6 +1173,16 @@ def do_manage_web_panel() -> None:
         admin_user = cfg.get("admin_user", "admin")
         host = cfg.get("host", DEFAULT_WEB_HOST)
         exposed = (host == "0.0.0.0")
+        # Проверяем — установлен ли systemd-unit веб-панели.
+        # Если нет (например, после fresh install без вызова install_web_service),
+        # "Запустить сервис" молча ничего не делает. В этом случае пункт 1
+        # меняется на "Установить веб-панель" — логичнее, чем неработающий старт.
+        _installed = WEB_SERVICE_FILE.exists()
+
+        if not _installed:
+            _box_row(f"  {YELLOW}⚠️  Веб-панель НЕ установлена!{NC}")
+            _box_row(f"  {DIM}Используйте пункт 1 для установки.{NC}")
+            _box_row()
 
         _box_row(f"  Сервис:       {GREEN+'активен'+NC if running else YELLOW+'остановлен'+NC}")
         _box_row(f"  Хост:         {CYAN}{host}{NC} {YELLOW+'(открыто наружу, без TLS!)'+NC if exposed else '(локально, SSH-туннель)'}")
@@ -1190,7 +1200,10 @@ def do_manage_web_panel() -> None:
             pass
 
         _box_sep()
-        _box_item("1", f"{'Остановить' if running else 'Запустить'} сервис")
+        if not _installed:
+            _box_item("1", "Установить веб-панель")
+        else:
+            _box_item("1", f"{'Остановить' if running else 'Запустить'} сервис")
         _box_item("2", "Изменить порт")
         _box_item("3", "Изменить admin-пароль")
         _box_item("4", "Переустановить (сброс конфига)")
@@ -1204,7 +1217,16 @@ def do_manage_web_panel() -> None:
             break
 
         if ch == "1":
-            if running:
+            if not _installed:
+                # Установка веб-панели: создаёт web_config.json, systemd-unit,
+                # запускает сервис. Пароль генерируется и показывается ОДИН раз.
+                info("Установка веб-панели...")
+                cfg = install_web_service()
+                success(f"Веб-панель установлена. Порт: {cfg['port']}, логин: {cfg['admin_user']}")
+                _box_row(f"  {YELLOW}Пароль: {cfg['admin_pass']}{NC}")
+                warn("  ⚠️  Сохраните пароль — он показан только один раз!")
+                _box_row(f"  {DIM}Доступ через SSH-туннель: ssh -L {cfg['port']}:127.0.0.1:{cfg['port']} user@<server>{NC}")
+            elif running:
                 core._run(["systemctl", "stop", "vless-web"], check=False, quiet=True)
                 success("Сервис остановлен")
             else:
