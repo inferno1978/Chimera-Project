@@ -313,6 +313,19 @@ tr:hover { background: rgba(56,189,248,0.05); }
   </div>
 </div>
 
+<!-- Set Password Modal -->
+<div class="modal-overlay" id="set-pass-modal">
+  <div class="modal">
+    <h2>🔑 Сменить пароль портала</h2>
+    <input type="text" id="set-pass-email" readonly style="opacity:0.6">
+    <input type="text" id="set-pass-value" placeholder="Новый пароль (мин. 8 символов)">
+    <div class="modal-actions">
+      <button class="btn btn-danger" onclick="closeModal('set-pass-modal')">Отмена</button>
+      <button class="btn btn-primary" onclick="setUserPassword()">Сохранить</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
@@ -431,6 +444,7 @@ async function loadUsers() {
       <td id="traffic-${esc(u.email)}">—</td>
       <td id="ttl-${esc(u.email)}">—</td>
       <td>
+        <button class="btn btn-sm btn-ghost" onclick="showSetPassModal('${esc(u.email)}')">🔑</button>
         <button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.email)}')">🗑 Удалить</button>
       </td>
     </tr>
@@ -496,6 +510,27 @@ async function deleteUser(email) {
     loadUsers();
   } else {
     showToast('Ошибка удаления', 'error');
+  }
+}
+
+// ── Set user password (admin) ──────────────────────────────────────────────
+function showSetPassModal(email) {
+  document.getElementById('set-pass-email').value = email;
+  document.getElementById('set-pass-value').value = '';
+  showModal('set-pass-modal');
+  setTimeout(() => document.getElementById('set-pass-value').focus(), 100);
+}
+
+async function setUserPassword() {
+  const email = document.getElementById('set-pass-email').value;
+  const newPass = document.getElementById('set-pass-value').value.trim();
+  if (newPass.length < 8) { showToast('Минимум 8 символов', 'error'); return; }
+  const data = await api(`/api/users/${encodeURIComponent(email)}/password`, 'POST', { new_password: newPass });
+  if (data && data.status === 'changed') {
+    showToast('Пароль изменён для ' + email);
+    closeModal('set-pass-modal');
+  } else {
+    showToast(data && data.error ? data.error : 'Ошибка', 'error');
   }
 }
 
