@@ -1697,6 +1697,7 @@ def generate_xray_config_chain_entry_multi() -> None:
     XTLS_FLOW = getattr(core, "XTLS_FLOW", "")
     XHTTP_MODE = getattr(core, "XHTTP_MODE", "streamup")
     XHTTP_PATH = getattr(core, "XHTTP_PATH", "/")
+    XHTTP_BACKEND_PORT = getattr(core, "XHTTP_BACKEND_PORT", 8443)
     XHTTP_TCP_NO_DELAY = getattr(core, "XHTTP_TCP_NO_DELAY", False)
     XHTTP_ENABLE_SESSION_RESUMPTION = getattr(core, "XHTTP_ENABLE_SESSION_RESUMPTION", False)
     AWG_EXIT_ENABLED = getattr(core, "AWG_EXIT_ENABLED", False)
@@ -1881,13 +1882,19 @@ def generate_xray_config_chain_entry_multi() -> None:
 
     # Inbound от клиента — зависит от PROTOCOL_MODE
     if PROTOCOL_MODE == "xhttp":
-        cert_path = f"/etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem"
-        key_path  = f"/etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem"
+        # Схема Nginx → Xray (loopback backend):
+        # Xray-core не поддерживает fallbacks для xHTTP (задокументированное
+        # ограничение — https://github.com/XTLS/Xray-core/discussions/4113).
+        # Nginx терминирует TLS на :SERVER_PORT, отдаёт заглушку для "/" и
+        # проксирует xhttp path сюда — на 127.0.0.1:XHTTP_BACKEND_PORT.
+        # Сертификат тут не нужен — трафик уже расшифрован Nginx.
         _xhttp_s2, _sockopt_s2 = _build_xhttp_settings(XHTTP_MODE, XHTTP_PATH)
+        info(f"chain B + xHTTP: inbound на 127.0.0.1:{XHTTP_BACKEND_PORT} (security: none, "
+             f"TLS терминирует Nginx на :{SERVER_PORT})")
         client_inbound = {
             "tag":      "inbound-xhttp",
-            "port":     SERVER_PORT,
-            "listen":   "::",
+            "port":     XHTTP_BACKEND_PORT,   # loopback-only, Nginx проксирует сюда
+            "listen":   "127.0.0.1",          # только loopback — извне не доступно
             "protocol": "vless",
             "settings": {
                 "clients": [{
@@ -1904,10 +1911,8 @@ def generate_xray_config_chain_entry_multi() -> None:
             },
             "streamSettings": {
                 "network":       "xhttp",
-                "security":      "tls",
+                "security":      "none",      # TLS терминирован Nginx
                 "sockopt":       _sockopt_s2,
-                "tlsSettings":   _build_tls_settings_xhttp(
-                                     PARAM_DOMAIN, cert_path, key_path),
                 "xhttpSettings": _xhttp_s2,
             },
         }
