@@ -116,32 +116,54 @@ def _users_gen_link(cfg: Path, uuid_str: str, email: str) -> str:
     PARAM_DOMAIN              = core.PARAM_DOMAIN
     _fp_from_state            = core._fp_from_state
     log_to_file               = core.log_to_file
+    STATE_FILE                = getattr(core, "STATE_FILE", Path("/var/lib/xray-installer/state.json"))
     try:
         with cfg.open() as f:
             c = json.load(f)
         inb = c.get("inbounds", [{}])[0]
         ss  = inb.get("streamSettings", {})
         net = ss.get("network", "tcp")
-        domain = ""
-        port   = inb.get("port", 443)
         import urllib.parse
         _, _, _flag = get_server_country_cached()
         _flag_prefix = f"{_flag} " if _flag and _flag != "🌐" else ""
         label  = _flag_prefix + urllib.parse.quote(email)
 
         if net == "xhttp":
-            tls_s  = ss.get("tlsSettings", {})
             xhttp_s = ss.get("xhttpSettings", {})
-            domain = tls_s.get("serverName", "")
-            path   = xhttp_s.get("path", "/")
-            mode   = xhttp_s.get("mode", "streamup")
+            path = xhttp_s.get("path", "/")
+            mode = xhttp_s.get("mode", "streamup")
             path_enc = urllib.parse.quote(path, safe="/")
             _fp = _fp_from_state()
-            return (f"vless://{uuid_str}@{domain}:{port}"
+            # ВАЖНО: после перехода на схему Nginx→Xray (loopback backend) Xray-inbound
+            # слушает 127.0.0.1:XHTTP_BACKEND_PORT с security:none — без tlsSettings.
+            # Поэтому port и domain больше нельзя читать из inbound-конфига
+            # (там будет 8443 и пустой serverName). Берём их из state.json —
+            # там хранятся SERVER_PORT (443, Nginx-сторона) и PARAM_DOMAIN.
+            _st_domain = ""
+            _st_port   = 443
+            try:
+                if STATE_FILE.exists():
+                    _st = json.loads(STATE_FILE.read_text())
+                    _st_domain = _st.get("domain", "") or PARAM_DOMAIN
+                    _st_port   = int(_st.get("server_port", 443))
+            except Exception:
+                # fallback на PARAM_DOMAIN и 443 — не идеально, но ссылка будет рабочей
+                _st_domain = PARAM_DOMAIN
+                _st_port   = 443
+            domain = _st_domain
+            port   = _st_port
+            # host = домен сервера (клиент подключается к Nginx на :443)
+            host   = domain or get_server_ip("4") or ""
+            return (f"vless://{uuid_str}@{host}:{port}"
                     f"?type=xhttp&security=tls&sni={domain}"
                     f"&path={path_enc}&mode={mode}"
                     f"&fp={_fp}#{label}")
         else:
+            # REALITY-ветка: Xray сам слушает :SERVER_PORT с TLS, inbound-конфиг
+            # содержит корректный port (== SERVER_PORT), realitySettings и т.д.
+            # Тут чтение из inbound безопасно — оставляем как было.
+            domain = ""
+            port   = inb.get("port", 443)
             rs     = ss.get("realitySettings", {})
             sni    = (rs.get("serverNames") or [""])[0]
             pbk    = rs.get("publicKey", "")

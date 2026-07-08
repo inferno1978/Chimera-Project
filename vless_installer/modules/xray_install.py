@@ -1232,9 +1232,6 @@ def create_xray_service() -> None:
     PARAM_USE_DNSCRYPT = core.PARAM_USE_DNSCRYPT
     PROTOCOL_MODE = core.PROTOCOL_MODE
     AWG_EXIT_ENABLED = core.AWG_EXIT_ENABLED
-    INSTALL_MODE = core.INSTALL_MODE
-    CHAIN_NODES = core.CHAIN_NODES
-    CHAIN_EXIT_HOST = core.CHAIN_EXIT_HOST
     _run    = core._run
     XRAY_SERVICE = core.XRAY_SERVICE
     XRAY_BIN = core.XRAY_BIN
@@ -1252,25 +1249,13 @@ def create_xray_service() -> None:
         after_line += " dnscrypt-proxy.service"
         wants_line  = "Wants=network-online.target dnscrypt-proxy.service"
 
-    # Признак chain-mode с exit-нодами: в этом случае generate_xray_config_chain_entry_multi()
-    # строит inbound с TLS на :SERVER_PORT напрямую — Xray сам владеет 443.
-    # В противном случае (single-node xhttp, или B+AWG/H2+xhttp) Xray слушает loopback.
-    _chain_has_exit_nodes = (
-        INSTALL_MODE == "B"
-        and (bool(CHAIN_NODES) or bool(CHAIN_EXIT_HOST))
-    )
-
-    # Для xHTTP TLS:
-    #   • single-node или B+AWG/H2 (без exit-нод): Xray слушает 127.0.0.1:XHTTP_BACKEND_PORT
-    #     с security:none; Nginx терминирует TLS и проксирует сюда.
-    #   • B+exit-nodes: Xray слушает :SERVER_PORT напрямую с TLS (chain_nodes.py).
-    #   Сокет не нужен, rm -f не нужен в обоих случаях.
+    # Для xHTTP TLS Xray слушает только loopback-порт (Nginx терминирует TLS на 443
+    # и проксирует xhttp path сюда). Сокет не нужен, rm -f не нужен.
+    # Применимо ко всем xHTTP-режимам: A, B+AWG, B+H2, B+exit-ноды — везде Xray
+    # слушает 127.0.0.1:XHTTP_BACKEND_PORT с security:none.
     if PROTOCOL_MODE == "xhttp":
         pre_cmds = ""
-        if _chain_has_exit_nodes:
-            svc_desc = "Xray Service (VLESS xHTTP chain — TLS on :SERVER_PORT)"
-        else:
-            svc_desc = "Xray Service (VLESS xHTTP — backend for Nginx TLS)"
+        svc_desc = "Xray Service (VLESS xHTTP — backend for Nginx TLS)"
     elif AWG_EXIT_ENABLED:
         # === FIX 1c/AWG: В AWG-режиме unix socket не используется.
         # Xray слушает напрямую на 0.0.0.0:SERVER_PORT (TCP).
