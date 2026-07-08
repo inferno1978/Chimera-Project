@@ -436,19 +436,26 @@ async function loadUsers() {
     return;
   }
 
-  tbody.innerHTML = data.users.map(u => `
-    <tr>
+  tbody.innerHTML = data.users.map(u => {
+    const isDisabled = u.disabled;
+    const rowStyle = isDisabled ? 'opacity:0.5;text-decoration:line-through' : '';
+    const toggleBtn = isDisabled
+      ? `<button class="btn btn-sm btn-primary" onclick="toggleUser('${esc(u.email)}')">🔓</button>`
+      : `<button class="btn btn-sm btn-ghost" onclick="toggleUser('${esc(u.email)}')">🔒</button>`;
+    return `
+    <tr style="${rowStyle}">
       <td>${esc(u.email) || '—'}</td>
       <td style="font-family:monospace;font-size:0.82rem">${esc((u.uuid || '').slice(0,8))}...</td>
       <td>${esc(u.created ? u.created.slice(0,10) : '—')}</td>
       <td id="traffic-${esc(u.email)}">—</td>
       <td id="ttl-${esc(u.email)}">—</td>
       <td>
+        ${toggleBtn}
         <button class="btn btn-sm btn-ghost" onclick="showSetPassModal('${esc(u.email)}')">🔑</button>
         <button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.email)}')">🗑 Удалить</button>
       </td>
     </tr>
-  `).join('');
+  `}).join('');
 
   // Загружаем трафик для каждого
   data.users.forEach(async u => {
@@ -465,7 +472,7 @@ async function loadUsers() {
             ? `<span style="color:var(--red)">истёк</span>`
             : `<span style="color:var(--yellow)">${t.expires_str || ''}</span>`;
         } else {
-          ttlEl.textContent = '—';
+          ttlEl.innerHTML = `<span style="color:var(--green)">∞</span>`;
         }
       }
     }
@@ -499,6 +506,22 @@ async function addUser() {
     loadUsers();
   } else {
     showToast('Ошибка создания', 'error');
+  }
+}
+
+// ── Toggle user (block/unblock) ────────────────────────────────────────────
+async function toggleUser(email) {
+  const action = confirm(`Изменить статус блокировки для ${email}?`);
+  if (!action) return;
+  const data = await api(`/api/users/${encodeURIComponent(email)}/toggle`, 'POST');
+  if (data && data.status === 'disabled') {
+    showToast('Юзер заблокирован: ' + email);
+    loadUsers();
+  } else if (data && data.status === 'enabled') {
+    showToast('Юзер разблокирован: ' + email);
+    loadUsers();
+  } else {
+    showToast('Ошибка', 'error');
   }
 }
 
