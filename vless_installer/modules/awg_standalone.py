@@ -134,9 +134,12 @@ def awgs_detect_os() -> dict:
 
 def awgs_install_dkms() -> bool:
     """
-    Устанавливает amneziawg-tools + DKMS kernel module.
-    Ubuntu: PPA amneziawg (нужен GPG-ключ)
-    Debian: PPA amneziawg через маппинг codename на focal/noble
+    Устанавливает amneziawg-tools + DKMS kernel module через PPA amnezia/ppa.
+    Перенесено из bivlked install_amneziawg.sh (steps 1-2).
+
+    Правильный PPA: amnezia/ppa (НЕ amnezia/awg)
+    GPG fingerprint: 75C9DD72C799870E310542E24166F2C257290828
+    DEB822 формат для Ubuntu 24.04+ и Debian 13+, legacy .list для Debian 12.
     """
     core = _core_module()
     info = awgs_detect_os()
@@ -145,78 +148,201 @@ def awgs_install_dkms() -> bool:
 
     core.info(f"ОС: {distro} {info['version']} ({codename})")
 
-    # Устанавливаем зависимости для сборки DKMS
+    # ── Шаг 1: зависимости для DKMS-сборки ──────────────────────────────────
     core.info("Установка зависимостей для DKMS-сборки...")
-    deps = ["dkms", "linux-headers-generic", "build-essential", "curl", "qrencode"]
+    deps = ["dkms", "linux-headers-generic", "build-essential",
+            "curl", "qrencode", "wireguard-tools", "gpg"]
     if distro == "debian":
-        deps = ["dkms", "linux-headers-amd64", "build-essential", "curl", "qrencode"]
+        # На Debian linux-headers-generic нет — ставим под архитектуру
+        arch = core._run(["uname", "-m"], capture=True, check=False).stdout.strip()
+        if arch == "aarch64":
+            headers_pkg = "linux-headers-arm64"
+        elif arch == "armv7l":
+            headers_pkg = "linux-headers-armmp"
+        else:
+            headers_pkg = "linux-headers-amd64"
+        deps = ["dkms", headers_pkg, "build-essential",
+                "curl", "qrencode", "wireguard-tools", "gpg"]
     core._run(["apt-get", "update", "-y"], check=False, quiet=True)
     r = core._run(["apt-get", "install", "-y"] + deps, capture=True, check=False)
     if r.returncode != 0:
         core.log_to_file("WARN", f"apt install deps: {r.stderr[-500:]}")
+        # Не падаем — некоторые пакеты могут уже быть установлены
 
-    # PPA для Ubuntu/Debian
+    # ── Шаг 2: PPA amnezia/ppa (правильный!) ────────────────────────────────
+    # Маппинг codename на поддерживаемый PPA (как в bivlked)
     ppa_mapping = {
         # Debian
         "bookworm": "focal",
         "trixie":   "noble",
-        # Ubuntu
+        # Ubuntu LTS
         "focal":    "focal",
         "jammy":    "jammy",
         "noble":    "noble",
-        "oracular": "noble",   # fallback
-        "plucky":   "noble",   # fallback
+        # Ubuntu non-LTS → fallback на noble (DKMS соберётся под текущее ядро)
+        "oracular": "noble",
+        "plucky":   "noble",
+        "questing": "noble",
     }
     ppa_codename = ppa_mapping.get(codename, "noble")
+
+    # Для non-LTS Ubuntu проверяем доступность PPA, fallback на noble
+    if codename not in ("focal", "jammy", "noble", "bookworm", "trixie"):
+        core.info(f"Проверка доступности PPA Amnezia для '{ppa_codename}'...")
+        r = core._run(
+            ["curl", "-fsI", "--max-time", "15", "--retry", "2", "--retry-delay", "5",
+             f"https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu/dists/{ppa_codename}/Release"],
+            capture=True, check=False,
+        )
+        if r.returncode != 0:
+            core.warn(f"PPA Amnezia не публикует пакеты для '{ppa_codename}' — переключаюсь на 'noble'")
+            ppa_codename = "noble"
+
     core.info(f"PPA codename: {ppa_codename} (маппинг из {codename})")
 
-    # Добавляем PPA amneziawg
-    ppa_line = f"deb https://ppa.launchpadcontent.net/amnezia/awg/ubuntu {ppa_codename} main"
-    sources_list = Path("/etc/apt/sources.list.d/amneziawg.list")
+    # GPG keyring с проверкой fingerprint (как в bivlked)
+    keyring_dir = Path("/etc/apt/keyrings")
+    keyring_file = keyring_dir / "amnezia-ppa.gpg"
+    ppa_sources = Path("/etc/apt/sources.list.d/amnezia-ppa.sources")
+    ppa_list = Path("/etc/apt/sources.list.d/amnezia-ppa.list")
 
-    # Сначала пробуем DEB822 формат (Debian 13+)
-    deb822_file = Path("/etc/apt/sources.list.d/amneziawg.sources")
+    # Полный fingerprint GPG-ключа Amnezia PPA (40 символов)
+    PPA_KEY_FINGERPRINT = "75C9DD72C799870E310542E24166F2C257290828"
+
     try:
-        if not sources_list.exists() and not deb822_file.exists():
-            sources_list.write_text(ppa_line + "\n")
-        # GPG-ключ
-        core._run(
-            ["bash", "-c",
-             "curl -fsSL https://ppa.launchpadcontent.net/amnezia/awg/ubuntu/gpg "
-             "| gpg --dearmor -o /etc/apt/trusted.gpg.d/amneziawg.gpg"],
-            check=False, quiet=True,
-        )
-        # apt update с PPA
-        r = core._run(["apt-get", "update", "-y"], capture=True, check=False)
-        if r.returncode != 0:
-            core.log_to_file("WARN", f"apt update after PPA: {r.stderr[-500:]}")
+        keyring_dir.mkdir(parents=True, exist_ok=True)
 
-        # Устанавливаем amneziawg + dkms module
+        # Скачиваем GPG-ключ с keyserver.ubuntu.com по полному fingerprint
+        if not keyring_file.exists():
+            core.info("Импорт GPG-ключа Amnezia PPA...")
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".gpg", delete=False) as tmp:
+                tmp_path = Path(tmp.name)
+            try:
+                r = core._run(
+                    ["bash", "-c",
+                     f"curl -fsSL 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x{PPA_KEY_FINGERPRINT}' "
+                     f"| gpg --batch --no-tty --yes --dearmor -o {tmp_path}"],
+                    capture=True, check=False,
+                )
+                if r.returncode != 0:
+                    core.warn(f"Не удалось импортировать GPG-ключ: {r.stderr}")
+                    return _awgs_install_dkms_fallback()
+
+                # Проверка fingerprint (pin)
+                r = core._run(
+                    ["bash", "-c",
+                     f"gpg --batch --no-tty --show-keys --with-colons {tmp_path} 2>/dev/null "
+                     f"| awk -F: '/^fpr:/{{print $10; exit}}'"],
+                    capture=True, check=False,
+                )
+                got_fpr = r.stdout.strip()
+                if got_fpr != PPA_KEY_FINGERPRINT:
+                    core.warn(f"GPG fingerprint mismatch: получен '{got_fpr}', ожидается '{PPA_KEY_FINGERPRINT}'")
+                    tmp_path.unlink(missing_ok=True)
+                    return _awgs_install_dkms_fallback()
+
+                tmp_path.chmod(0o644)
+                tmp_path.replace(keyring_file)
+                core.info("GPG-ключ импортирован и проверен")
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+        # Удаляем старые legacy-файлы (могли остаться от предыдущих версий)
+        for legacy in (
+            f"/etc/apt/sources.list.d/amnezia-ubuntu-ppa-{codename}.list",
+            f"/etc/apt/sources.list.d/amnezia-ubuntu-ppa-{codename}.sources",
+            "/etc/apt/sources.list.d/amneziawg.list",
+            "/etc/apt/sources.list.d/amneziawg.sources",
+        ):
+            Path(legacy).unlink(missing_ok=True)
+
+        # Создаём sources-файл в правильном формате
+        # Debian 12 → legacy .list; Debian 13+ и Ubuntu 24.04+ → DEB822 .sources
+        use_deb822 = not (distro == "debian" and info["version"].startswith("12"))
+
+        if use_deb822:
+            # Проверяем, не пересоздать ли существующий .sources (suite может быть устаревшим)
+            existing_suite = ""
+            if ppa_sources.exists():
+                r = core._run(
+                    ["bash", "-c",
+                     f"awk '/^Suites:/{{print $2; exit}}' {ppa_sources} 2>/dev/null"],
+                    capture=True, check=False,
+                )
+                existing_suite = r.stdout.strip()
+            if not ppa_sources.exists() or existing_suite != ppa_codename:
+                deb822_content = (
+                    "Types: deb\n"
+                    "URIs: https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu\n"
+                    f"Suites: {ppa_codename}\n"
+                    "Components: main\n"
+                    f"Signed-By: {keyring_file}\n"
+                )
+                ppa_sources.write_text(deb822_content)
+                ppa_sources.chmod(0o644)
+            ppa_list.unlink(missing_ok=True)
+        else:
+            # Debian 12 — legacy .list формат
+            list_content = (
+                f"deb [signed-by={keyring_file}] "
+                f"https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu {ppa_codename} main\n"
+            )
+            ppa_list.write_text(list_content)
+            ppa_list.chmod(0o644)
+            ppa_sources.unlink(missing_ok=True)
+
+        core.info("PPA amnezia/ppa добавлен")
+
+        # apt update (толерантный к кратковременному outage PPA)
+        r = core._run(["apt-get", "update", "-y"], capture=True, check=False, timeout=120)
+        if r.returncode != 0:
+            # Если ошибка только на PPA Amnezia — продолжаем (issue #68 bivlked)
+            stderr = r.stderr or ""
+            if "amnezia" in stderr.lower():
+                core.warn("PPA Amnezia временно недоступен — retry через 30 сек...")
+                time.sleep(30)
+                core._run(["apt-get", "update", "-y"], check=False, quiet=True, timeout=120)
+            else:
+                core.log_to_file("WARN", f"apt update: {stderr[-500:]}")
+
+        # Проверяем, что пакет amneziawg-dkms появился в apt-cache
+        r = core._run(["apt-cache", "show", "amneziawg-dkms"],
+                      capture=True, check=False)
+        if r.returncode != 0 or not r.stdout.strip():
+            core.warn("Пакет amneziawg-dkms не найден в apt-cache после обновления PPA")
+            return _awgs_install_dkms_fallback()
+
+        # Устанавливаем amneziawg-tools + amneziawg-dkms + wireguard-tools
+        core.info("Установка пакетов amneziawg-tools + amneziawg-dkms...")
         r = core._run(
-            ["apt-get", "install", "-y", "amneziawg-tools", "amneziawg-dkms"],
-            capture=True, check=False, timeout=300,
+            ["apt-get", "install", "-y",
+             "amneziawg-tools", "amneziawg-dkms", "wireguard-tools", "qrencode"],
+            capture=True, check=False, timeout=600,  # 10 мин на DKMS-сборку
         )
         if r.returncode != 0:
             core.log_to_file("ERROR", f"apt install amneziawg: {r.stderr[-1000:]}")
-            core.warn("Установка из PPA не удалась — пробуем альтернативный путь")
+            core.warn("Установка из PPA не удалась — пробуем Go-версию (userspace)")
             return _awgs_install_dkms_fallback()
     except Exception as e:
         core.log_to_file("ERROR", f"awgs_install_dkms: {e}")
         return _awgs_install_dkms_fallback()
 
-    # Проверяем, что модуль загрузился
+    # ── Шаг 3: проверка модуля ─────────────────────────────────────────────
+    # modprobe amnezia (DKMS должен был собрать и загрузить модуль)
     core._run(["modprobe", "amnezia"], check=False, quiet=True)
     r = core._run(["lsmod"], capture=True, check=False)
     if "amnezia" not in r.stdout:
-        core.warn("DKMS-модуль amnezia не загрузился — проверьте лог")
-        return False
+        # Возможно, нужен reboot (DKMS собрал модуль, но ядро его не подгрузило)
+        core.warn("DKMS-модуль amnezia не загрузился в runtime — может потребоваться reboot")
+        # Не возвращаем False — бинарники awg/awg-quick всё равно должны работать
 
     # Проверяем бинарники
-    for binary in (AWGS_BIN, AWGS_QUICK_BIN):
-        r = core._run(["which", binary], capture=True, check=False)
-        if r.returncode != 0:
-            core.warn(f"Бинарник {binary} не найден после установки")
-            return False
+    awg_bin = core._run(["which", AWGS_BIN], capture=True, check=False).stdout.strip()
+    awg_quick_bin = core._run(["which", AWGS_QUICK_BIN], capture=True, check=False).stdout.strip()
+    if not awg_bin or not awg_quick_bin:
+        core.warn(f"Бинарники {AWGS_BIN}/{AWGS_QUICK_BIN} не найдены после установки")
+        return _awgs_install_dkms_fallback()
 
     core.success("AmneziaWG DKMS-модуль установлен")
     return True
@@ -245,30 +371,62 @@ def _awgs_install_dkms_fallback() -> bool:
 
 def awgs_generate_keys() -> tuple:
     """
-    Генерирует пару ключей сервера (priv+pub) через `awg genkey` / `awg pubkey`.
+    Генерирует пару ключей сервера (priv+pub).
+    Пробует `awg genkey`/`awg pubkey` (kernel-module версия), fallback на
+    `wg genkey`/`wg pubkey` (из wireguard-tools — всегда установлен).
+    Ключи Curve25519 совместимы между WG и AWG.
     Возвращает (privkey, pubkey) или ("", "") при ошибке.
     """
     core = _core_module()
+
+    # Определяем, какой бинарник доступен
+    awg_path = core._run(["which", AWGS_BIN], capture=True, check=False).stdout.strip()
+    wg_path = core._run(["which", "wg"], capture=True, check=False).stdout.strip()
+
+    bin_for_genkey = awg_path or wg_path
+    if not bin_for_genkey:
+        core.log_to_file("ERROR", "awgs_generate_keys: ни awg, ни wg не найдены в PATH")
+        return "", ""
+
+    if not awg_path and wg_path:
+        core.info("Используем wg (wireguard-tools) для генерации ключей — awg недоступен")
+
     # Приватный ключ
-    r = core._run(["bash", "-c", f"{AWGS_BIN} genkey"], capture=True, check=False)
+    r = core._run(["bash", "-c", f"{bin_for_genkey} genkey"],
+                  capture=True, check=False, input_text="")
     if r.returncode != 0:
-        core.log_to_file("ERROR", f"awg genkey: {r.stderr}")
+        core.log_to_file("ERROR", f"{bin_for_genkey} genkey: {r.stderr}")
         return "", ""
     privkey = r.stdout.strip()
+
     # Публичный из приватного
-    r = core._run(["bash", "-c", f"echo '{privkey}' | {AWGS_BIN} pubkey"],
-                  capture=True, check=False)
+    r = core._run(["bash", "-c", f"echo '{privkey}' | {bin_for_genkey} pubkey"],
+                  capture=True, check=False, input_text=privkey + "\n")
     if r.returncode != 0:
-        core.log_to_file("ERROR", f"awg pubkey: {r.stderr}")
+        core.log_to_file("ERROR", f"{bin_for_genkey} pubkey: {r.stderr}")
         return "", ""
     pubkey = r.stdout.strip()
+
+    if not privkey or not pubkey:
+        core.log_to_file("ERROR", "awgs_generate_keys: пустые ключи")
+        return "", ""
+
     return privkey, pubkey
 
 
 def awgs_generate_preshared_key() -> str:
-    """Генерирует PresharedKey (опциональный, для per-client PSK)."""
+    """
+    Генерирует PresharedKey (опциональный, для per-client PSK).
+    Пробует `awg genpsk`, fallback на `wg genpsk`.
+    """
     core = _core_module()
-    r = core._run(["bash", "-c", f"{AWGS_BIN} genpsk"], capture=True, check=False)
+    awg_path = core._run(["which", AWGS_BIN], capture=True, check=False).stdout.strip()
+    wg_path = core._run(["which", "wg"], capture=True, check=False).stdout.strip()
+    bin_for_genpsk = awg_path or wg_path
+    if not bin_for_genpsk:
+        return ""
+    r = core._run(["bash", "-c", f"{bin_for_genpsk} genpsk"],
+                  capture=True, check=False, input_text="")
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
