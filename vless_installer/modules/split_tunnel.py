@@ -197,6 +197,35 @@ def _load_split_tunnel_custom() -> None:
 # =============================================================================
 #  ФОРМИРОВАНИЕ ROUTING-ПРАВИЛ XRAY
 # =============================================================================
+
+# Домены IP-проверок — всегда идут напрямую (через entry-IP) в AWG-режиме,
+# чтобы пользователь мог проверить работу туннеля: 2ip.ru покажет entry-IP,
+# а speedtest.net — exit-IP. Без этого правила 2ip.ru уходит через awg0
+# (exit-VPS) и показывает exit-IP, что не позволяет отличить "туннель работает"
+# от "туннель не работает".
+IP_CHECK_DOMAINS = [
+    "domain:2ip.ru",
+    "domain:2ip.io",
+    "domain:myip.ru",
+    "domain:whoer.net",
+]
+
+
+def build_awg_ip_check_rule(direct_tag: str = "direct-local") -> dict:
+    """Возвращает routing rule для IP-проверочных доменов → direct-local.
+
+    В AWG-режиме эти домены должны идти напрямую (через entry-IP), а не через
+    exit-туннель. Применяется ВСЕГДА при AWG_EXIT_ENABLED=True, независимо от
+    SPLIT_TUNNEL_ENABLED — это базовая диагностика туннеля.
+    """
+    return {
+        "type":        "field",
+        "domain":      list(IP_CHECK_DOMAINS),
+        "outboundTag": direct_tag,
+        "comment":     "awg: IP-проверочные домены напрямую (без туннеля)",
+    }
+
+
 def build_split_tunnel_routing_rules(
     proxy_tag: str = "direct",
     direct_tag: str = "direct",
@@ -249,11 +278,7 @@ def build_split_tunnel_routing_rules(
         # Xray применяет правила в порядке списка.
         rules.append({
             "type":        "field",
-            "domain":      [
-                "domain:2ip.ru",
-                "domain:2ip.io",
-                "domain:myip.ru",
-                "domain:whoer.net",
+            "domain":      IP_CHECK_DOMAINS + [
                 "geosite:category-ru",
                 "geosite:ru-available-only-inside",
             ],
