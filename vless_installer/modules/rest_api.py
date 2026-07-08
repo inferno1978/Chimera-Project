@@ -641,18 +641,22 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_401(self, realm: str = "Admin") -> None:
+        body = b'{"error": "Unauthorized"}'
         self.send_response(401)
         self.send_header("WWW-Authenticate", f'Basic realm="{realm}"')
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b'{"error": "Unauthorized"}')
+        self.wfile.write(body)
 
     def _send_429(self) -> None:
+        body = b'{"error": "Too Many Requests"}'
         self.send_response(429)
         self.send_header("Retry-After", str(AUTH_FAIL_REJECT))
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b'{"error": "Too Many Requests"}')
+        self.wfile.write(body)
 
     def _send_404(self) -> None:
         self._send_json({"error": "Not found"}, 404)
