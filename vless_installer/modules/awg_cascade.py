@@ -147,8 +147,14 @@ def awgs_cascade_setup_awg0(
             warn("Не удалось сгенерировать ключ туннеля")
             return False
     else:
-        # Считаем pubkey из переданного privkey
-        r = core._run(["bash", "-c", f"echo '{exit_peer_privkey}' | awg pubkey"],
+        # Считаем pubkey из переданного privkey (fallback awg → wg)
+        awg_path = core._run(["which", "awg"], capture=True, check=False).stdout.strip()
+        wg_path = core._run(["which", "wg"], capture=True, check=False).stdout.strip()
+        bin_for_pubkey = awg_path or wg_path
+        if not bin_for_pubkey:
+            warn("Ни awg, ни wg не найдены — не могу вычислить pubkey")
+            return False
+        r = core._run(["bash", "-c", f"echo '{exit_peer_privkey}' | {bin_for_pubkey} pubkey"],
                       capture=True, check=False)
         exit_peer_pubkey = r.stdout.strip() if r.returncode == 0 else ""
 
