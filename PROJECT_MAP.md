@@ -278,6 +278,48 @@
 
 ---
 
+## 22. Веб-панель, Admin Panel и User Portal
+
+| Файл | За что отвечает |
+|---|---|
+| `rest_api.py` | REST API + Admin Panel + User Portal — единый HTTP-сервер (ThreadingHTTPServer, bind 127.0.0.1). Endpoints: /api/health, /api/users (CRUD), /api/rotate/*, /api/geoip/*, /api/backup, /api/portal/* (links/traffic/health/clash/singbox/password). Rate-limit, Content-Length, HTTP/1.1, Basic Auth (secrets.compare_digest). Управление веб-панелью: install_web_service, do_manage_web_panel (меню с установкой/запуском/сменой порта/пароля/expose). |
+| `admin_panel.py` | HTML/CSS/JS Admin Panel — glassmorphism дизайн. Управление юзерами (создание/удаление/блокировка/пароль), ротация UUID/REALITY, бэкап. Кнопки: 🔒 Заблокировать, 🔑 Пароль, 🗑 Удалить. XSS-защита (esc()), credentials:same-origin в fetch. |
+| `user_portal.py` | HTML/CSS/JS User Portal — анимированный интерфейс для юзеров. VLESS-ссылки + QR-коды (flexbox, рядом по центру), трафик, TTL, health, скачивание Clash/Sing-box, смена пароля. html.escape() для name/email. |
+
+---
+
+## 23. Hysteria2 (15 модулей)
+
+| Файл | За что отвечает |
+|---|---|
+| `hysteria2_transport.py` | Hysteria2 как транспорт exit-ноды в Mode B (QUIC/UDP туннель) |
+| `hysteria2_common.py` | Общие хелперы для Hysteria2 (state, конфиг, бинарник) |
+| `hysteria2_menu.py` | Меню управления Hysteria2 (установка, настройка, удаление) |
+| `hysteria2_exit_mgr.py` | Управление exit-нодой Hysteria2 (сервер + клиент) |
+| `hysteria2_cert_mgr.py` | Управление сертификатами для Hysteria2 (self-signed + Let's Encrypt) |
+| `hysteria2_traffic.py` | Учёт трафика Hysteria2 |
+| `hysteria2_health.py` | Health-чеки Hysteria2 (проверка туннеля, latency) |
+| `hysteria2_watchdog.py` | Watchdog — мониторинг и авто-восстановление Hysteria2 туннеля |
+| `hysteria2_auto_update.py` | Автообновление бинарника Hysteria2 |
+| `hysteria2_smoke_test.py` | Smoke-тест Hysteria2 после установки |
+| `hysteria2_balancer.py` | Балансировщик между несколькими Hysteria2 exit-нодами |
+| `hysteria2_cluster.py` | Кластер Hysteria2 нод (multi-node) |
+| `hysteria2_quality.py` | Quality-метрики Hysteria2 (packet loss, jitter) |
+| `hysteria2_dpi.py` | Настройка Hysteria2 для обхода DPI (port hopping, обфускация) |
+| `hysteria2_backup.py` | Бэкап/восстановление конфигурации Hysteria2 |
+
+---
+
+## 24. Мониторинг и watchdog
+
+| Файл | За что отвечает |
+|---|---|
+| `nginx_watchdog.py` | Watchdog для Nginx — мониторинг и авто-перезапуск при падении |
+| `fail2ban_manager.py` | Управление fail2ban (меню, просмотр логов, разбан) |
+| `fail2ban_setup.py` | Установка и настройка fail2ban для защиты SSH/Xray |
+
+---
+
 ## Структура каталогов
 
 ```
