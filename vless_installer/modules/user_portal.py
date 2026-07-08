@@ -423,10 +423,16 @@ async function loadLinks() {{
   if (!data || !data.links) return;
 
   const container = document.getElementById('links-container');
+  // Flex-контейнер: QR-коды рядом, по центру, с переносом на новую строку.
+  container.style.display = 'flex';
+  container.style.flexWrap = 'wrap';
+  container.style.justifyContent = 'center';
+  container.style.gap = '20px';
+
   container.innerHTML = data.links.map((item, i) => {{
     const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(item.link);
     return `
-      <div style="margin-bottom:16px">
+      <div style="flex:0 1 280px;min-width:260px;text-align:center">
         <div style="font-size:0.85rem;color:var(--text-dim);margin-bottom:6px">${{item.label}} (${{item.protocol}})</div>
         <div class="link-box" id="link-${{i}}">${{item.link}}</div>
         <div class="qr-container">
