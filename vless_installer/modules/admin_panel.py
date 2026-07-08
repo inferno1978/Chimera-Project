@@ -202,6 +202,20 @@ tr:hover { background: rgba(56,189,248,0.05); }
 }
 .btn-danger:hover { background: rgba(248,113,113,0.3); }
 
+.btn-ghost {
+  background: rgba(148,163,184,0.12);
+  color: var(--text-dim);
+  border: 1px solid rgba(148,163,184,0.25);
+}
+.btn-ghost:hover { background: rgba(148,163,184,0.22); color: var(--text); }
+
+.btn-warn {
+  background: rgba(251,191,36,0.15);
+  color: var(--yellow);
+  border: 1px solid rgba(251,191,36,0.3);
+}
+.btn-warn:hover { background: rgba(251,191,36,0.25); }
+
 .btn-sm { padding: 6px 14px; font-size: 0.82rem; }
 
 /* Actions */
@@ -451,7 +465,7 @@ async function loadUsers() {
       <td id="ttl-${esc(u.email)}">—</td>
       <td>
         ${toggleBtn}
-        <button class="btn btn-sm btn-ghost" onclick="showSetPassModal('${esc(u.email)}')">🔑</button>
+        <button class="btn btn-sm btn-warn" onclick="showSetPassModal('${esc(u.email)}')">🔑</button>
         <button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.email)}')">🗑 Удалить</button>
       </td>
     </tr>
