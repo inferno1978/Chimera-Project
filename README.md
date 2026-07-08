@@ -79,35 +79,82 @@ sudo python3 main.py
 
 ## 🗂️ Структура проекта
 
-```
+```text
 VLESS-Ultimate-Installer/
 ├── main.py                      # Точка входа
 ├── bootstrap.sh                 # Установка одной командой
-├── verify.py                    # Проверка целостности
-├── README.md
-├── TROUBLESHOOTING.md           # Решение частых проблем
-├── INSTALL.md                   # Детальная инструкция
-├── CHANGELOG.md                 # История изменений
+├── verify.py                    # Проверка целостности (232 теста, ~10/10)
+├── full_test.py                 # Полный автотест (8 секций)
+├── smoke_test_modules.py        # 42 smoke-теста в стен-режиме
+├── README.md / INSTALL.md / CHANGELOG.md / TROUBLESHOOTING.md
+├── PROJECT_MAP.md               # Полная карта 129 модулей по 24 категориям
+├── SECURITY.md / CONTRIBUTING.md / INTEGRATION.md / HYSTERIA2.md
 ├── LICENSE
 └── vless_installer/
     ├── __init__.py
-    ├── _core.py                 # Основной код установщика (~37 000 строк)
-    └── modules/
-        ├── mtproto.py           # MTProto-прокси [v4.11.4: xray-каскад интеграция]
-        ├── mtproto_stats.py     # Статистика MTProto
-        ├── smoke_test.py        # [v4.11.4] Автодиагностика после apply
-        ├── xray_safe_apply.py   # [v4.11.4] Атомарное применение конфига
-        ├── nginx_watchdog.py    # [v4.11.4] Watchdog для nginx [NW]
-        ├── ipset_persist.py     # [v4.11.4] Persistent ipset при reboot [IP]
-        ├── ripe_file_age.py     # [v4.11.4] Проверка возраста RIPE-файла
-        ├── cluster_ops.py       # [v4.11.4] Управление кластером Exit Nodes [CL]
-        ├── fragment_config.py   # [v4.12.1] Генератор конфигов с фрагментацией
-        ├── fragment_fuzzer.py   # [v4.12.1] Автоподбор параметров фрагментации
-        ├── fragment_log_viewer.py # [v4.12.1] Визуализация фрагментации в логах
-        ├── fragment_presets.py  # [v4.12.1] Полный набор пресетов (9 конфигов)
-        ├── fragment_link.py     # [v4.12.1] Ссылки+QR для Happ/Incy/Nekoray/v2rayNG
-        └── fragment_guide.py    # [v4.12.1] Интерактивный гайд по тестированию
+    ├── _core.py                 # Ядро: orchestrator + globals (~7 779 строк, −76% от 32 557)
+    ├── __all_exports.py         # Реестр экспортируемых имён
+    └── modules/                 # 129 модулей по 24 категориям (см. PROJECT_MAP.md)
+        │
+        ├── 1. Ядро и утилиты
+        │   └── box_renderer, resources, system_deps, tui, scheduler, smoke_test, xray_safe_apply
+        │
+        ├── 2. Установка и конфиг Xray
+        │   └── xray_install, install_prompts, nginx_setup, ssl_certbot, network_setup, dnscrypt_setup/selector, geo_files, backup_rollback, emergency_repair, uninstall
+        │
+        ├── 3. Пользователи и доступ
+        │   └── users_manager, ttl_users, credential_rotation, user_fp_manager, fingerprint_manager, subscription
+        │
+        ├── 4. Маршрутизация и split-tunnel
+        │   └── split_tunnel, ru_subnets, as_direct, geoip_block, dns_rules, ingress_geoip, ripe_file_age
+        │
+        ├── 5. Безопасность и баны
+        │   └── autoban, fail2ban_setup/manager, ipban, ipset_persist, ssh_hardening, honeypot
+        │
+        ├── 6. Мониторинг и диагностика
+        │   └── diagnostics, connection_audit, health, health_report, traffic_tracking, traffic_history, node_health_monitor, network_bench, status_panel, standalone_screens
+        │
+        ├── 7. Статус, скорость, реконфигурация
+        │   └── quick_status, speed_test, reconfigure, switch_mode, migration, cold_boot_restore, config_backup
+        │
+        ├── 8. Telegram и уведомления
+        │   └── tg_bot, tg_nets
+        │
+        ├── 9. Фрагментация (TLS fragmentation)
+        │   └── fragment_config/fuzzer/log_viewer/presets/link/guide/share/stats/mux/noise/watchdog (11 мод.)
+        │
+        ├── 10. Hysteria2 (15 модулей)
+        │   └── hysteria2_common/menu/transport/cert_mgr/balancer/cluster/dpi/exit_mgr/health/quality/smoke_test/traffic/watchdog/backup/auto_update
+        │
+        ├── 11. Альтернативные протоколы
+        │   └── mtproto(+_stats), naiveproxy(+_stats), mieru(+_stats), fptn, olcrtc, wdtt, webdav_tunnel, turnable, turntunnel(+_links), vkturn_menu, port_hopping, proto_common
+        │
+        ├── 12. WARP и зеркала
+        │   └── warp, warp_curated_lists, entry_mirrors, slipgate
+        │
+        ├── 13. Кластер и балансировка
+        │   └── cluster_ops, smart_balancer, failover, chain_nodes
+        │
+        ├── 14. Telemt (телеметрия)
+        │   └── telemt_panel/fallback/ios_fix/mss_selector/syn_limiter/self_route/warp_route
+        │
+        ├── 15. DPI-детекторы
+        │   └── dpi_detector, dpi_censor_check
+        │
+        ├── 16. Клиентские конфиги и MTU
+        │   └── client_config_export, pq_vless, mtu_tuning, asn_cache
+        │
+        ├── 17. Веб-панель, Admin, Portal
+        │   └── rest_api, admin_panel, user_portal
+        │
+        ├── 18. AWG Transport (Mode B)
+        │   └── awg_transport (45 функций)
+        │
+        └── 19. Вендорные модули
+            └── _vendor/dpi_detector/ (Python)
 ```
+
+> 📋 **Полная карта по 24 категориям** с описанием каждого файла — в [`PROJECT_MAP.md`](PROJECT_MAP.md).
 
 ## 🏗️ Архитектура
 
