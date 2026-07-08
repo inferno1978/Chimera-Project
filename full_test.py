@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-full_test.py — Постоянный автотест VLESS Ultimate Installer v4.13.0
+full_test.py — Постоянный автотест VLESS Ultimate Installer v4.14.0
 Запуск: python3 full_test.py
 
 Самодостаточный тест: нет зависимостей кроме Python stdlib.
