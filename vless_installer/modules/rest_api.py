@@ -49,7 +49,7 @@ from datetime import datetime
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 
 # ── Ленивый доступ к ядру ────────────────────────────────────────────────────
@@ -723,7 +723,8 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         if m:
             if not self._require_admin():
                 return
-            email = m.group(1)
+            # unquote — см. комментарий в do_DELETE. Браузер кодирует @ как %40.
+            email = unquote(m.group(1))
             traffic = _get_user_traffic(email)
             ttl = _get_ttl_info(email)
             self._send_json({**traffic, **ttl})
@@ -966,7 +967,11 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         if m:
             if not self._require_admin():
                 return
-            email = m.group(1)
+            # unquote — декодирует %40 → @, %2B → +, и т.д.
+            # Браузер кодирует email через encodeURIComponent(), и сервер
+            # получает test%40local вместо test@local. Без unquote — user
+            # не находится в users.json → 404 → "Ошибка удаления" в admin panel.
+            email = unquote(m.group(1))
             users = _get_users()
             new_users = [u for u in users if u.get("email") != email]
             if len(new_users) == len(users):
