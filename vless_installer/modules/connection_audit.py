@@ -157,11 +157,12 @@ def _parse_access_log() -> list:
 
 def _audit_user_summary() -> None:
     core = _core_module()
-    _box_top = core._box_top
-    _box_row = core._box_row
-    _box_sep = core._box_sep
-    info     = core.info
-    warn     = core.warn
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_sep    = core._box_sep
+    _box_bottom = core._box_bottom
+    info        = core.info
+    warn        = core.warn
     BOLD, NC, CYAN, DIM = core.BOLD, core.NC, core.CYAN, core.DIM
 
     print()
