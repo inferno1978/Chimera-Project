@@ -2,6 +2,97 @@
 
 ---
 
+## v4.14.0 — AmneziaWG 2.0 standalone VPN (полный порт bivlked) — 9 июля 2026
+
+### 🔒 Standalone AWG как отдельный пункт меню
+
+Полный порт [bivlked/amneziawg-installer](https://github.com/bivlked/amneziawg-installer) v5.18.4 (10 500+ строк bash) на Python, интегрированный в основной проект как 13 новых модулей. Теперь standalone AmneziaWG 2.0 доступен как отдельный протокол в главном меню (пункт 16), не зависит от VLESS-инфраструктуры.
+
+**13 новых модулей в `vless_installer/modules/awg_*.py`:**
+
+| Модуль | Назначение |
+|--------|-----------|
+| `awg_constants.py` | Константы, пути, defaults (префикс AWGS_* — не конфликтует с chain Mode B) |
+| `awg_state.py` | State management (отдельный `awg_standalone_state.json`) |
+| `awg_presets.py` | 9 carrier-пресетов (default/mobile/Yota/Tele2 MSK+Krasnoyarsk/Таттелеком/Мегафон/Билайн/T-Mobile US) |
+| `awg_hw_tuning.py` | Hardware-aware tuning (sysctl/swap/NIC) — idempotent |
+| `awg_apply.py` | Apply config (syncconf без даунтайма / restart fallback) |
+| `awg_standalone.py` | Главный модуль: install/uninstall/menu |
+| `awg_peers.py` | CRUD пиров + TUI меню (add/remove/list/stats/regen/modify) |
+| `awg_qr.py` | QR-коды (terminal + PNG) + `vpn://` URI для Amnezia Client |
+| `awg_expires.py` | Временные клиенты (`--expires=1h\|7d\|30d\|4w`) + cron автоудаления |
+| `awg_backup.py` | Backup/Restore с rollback при ошибке |
+| `awg_cascade.py` | Каскад AWG0 (вход, РФ) ↔ AWG1 (выход, зарубеж) + split-routing по RU-сетям |
+| `awg_diagnose.py` | Diagnostic + carrier-compare (kernel/sysctl/UFW/service/tunnel) |
+| `awg_uninstall.py` | Полное удаление (с сохранением backup'ов опционально) |
+
+### 🎯 Carrier-пресеты (реальные данные от bivlked)
+
+Перенесены точные значения Jc/Jmin/Jmax/I1 по операторам из issues/discussions bivlked:
+- **Yota MSK** — узкий Jmax (markmokrenko: Jmax=70 OK, Jmax>300 блокируется)
+- **Tele2 MSK** — Jc=3 фиксированный (alkorrnd: Jc=3 >95% успеха, Jc=4 ~30%)
+- **Tele2 Красноярск** — без I1 (майская волна 2026)
+- **Мегафон регионы** — без I1
+- **Билайн Москва** — default preset
+- **T-Mobile US** — Jc=6, узкие Jmin/Jmax, I1 как binary
+- **Таттелеком/Летай** — mobile preset
+- **Mobile (универсальный)** — Jc=3, узкий Jmax
+- **Default** — для проводного интернета
+
+### 🔄 Каскад RU → зарубеж
+
+Полноценный каскад из 2 серверов, доступный из меню standalone AWG:
+- **AWG0 (вход, РФ)**: принимает клиентов, делит трафик: RU-сети напрямую, остальное через AWG1
+- **AWG1 (выход, зарубеж)**: стандартный standalone AWG + спец-пир `cascade_entry` для AWG0
+- Авто-загрузка `ru.zone` (8626 сетей) с ipdeny.com + fallback на GitHub raw
+- ipset + iptables-маршрутизация (fwmark=0x2000, не конфликтует с chain Mode B который использует 1000)
+- `awg-routing.sh` + systemd-юнит `awg-cascade-routing.service`
+- Cron для еженедельного обновления ru.zone
+
+### 🛡️ Защита от регрессий
+
+`awgs_check_conflicts()` проверяет перед установкой:
+1. **Chain Mode B**: если в `state.json` есть `awg_exit_enabled=True` + `install_mode=B` — отказ (конфликт интерфейса awg0)
+2. **Интерфейс awg0**: если уже существует — отказ
+3. **UDP-порт 51820**: если занят — отказ
+4. **Конфиг awg0.conf**: если уже существует — отказ (или `--force`)
+5. **State**: если standalone уже установлен — отказ
+
+Все константы имеют префикс `AWGS_*` (AWG Standalone) — **не переиспользуют** globals `AWG_*` из `_core.py` (те относятся к chain Mode B transport).
+
+### 🔧 Архитектурные решения
+
+- **State storage**: отдельный файл `/var/lib/xray-installer/awg_standalone_state.json` (не смешивается с основным `state.json`)
+- **Имя интерфейса**: `awg0` (как в upstream), отказ при конфликте с chain Mode B
+- **Peer management**: отдельный модуль `awg_peers.py` + отдельный пункт меню (не смешивается с `users_manager.py`)
+- **sysctl/firewall**: idempotent — проверяет через `sysctl -n`, применяет только если значение не оптимально. UFW — только открыть UDP-порт AWG (без переделки deny-all). Fail2Ban не трогает.
+- **Каскад**: один пункт «Каскад» в меню, внутри выбор роли (AWG0/AWG1)
+
+### ✨ Возможности standalone AWG
+
+- Установка одной командой (TUI-мастер с выбором пресета/оператора)
+- Carrier-пресеты под мобильных операторов (Yota/Tele2/Мегафон/Билайн/Tattelecom/T-Mobile US)
+- Тонкая настройка: порт, подсеть, MTU, IPv6 dual-stack, endpoint (для NAT)
+- Управление пирами: add/remove/list/stats/regen/modify
+- Временные клиенты с авто-удалением (`--expires=1h/12h/1d/7d/30d/4w`)
+- Per-client PresharedKey (опционально)
+- QR-коды в терминале + PNG файлы
+- `vpn://` URI для импорта в Amnezia Client одним тапом
+- Backup/Restore с rollback при ошибке
+- Diagnostic: kernel/sysctl/UFW/service/tunnel + carrier-compare
+- Каскад из 2 серверов с split-routing по RU-сетям
+- Полное удаление (с сохранением backup'ов опционально)
+
+### 📊 Цифры
+
+- Новых модулей: 13
+- Новых строк Python: ~3500
+- Изменено файлов: 2 (`_core.py` — добавлен пункт меню 16, `CHANGELOG.md`)
+- `verify.py`: **245/245 ✓** (было 232, +13 новых проверок)
+- Регрессий на существующий код: 0 (гарантировано `awgs_check_conflicts()`)
+
+---
+
 ## v4.13.0 — Рефакторинг архитектуры + Web Admin Panel + User Portal + Security Hardening — 8 июля 2026
 
 ### 🏗️ Рефакторинг — модульная архитектура (продолжение)

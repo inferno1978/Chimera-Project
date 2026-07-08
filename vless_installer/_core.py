@@ -7464,6 +7464,10 @@ def main_menu() -> None:
             _box_sep()
             _box_row(f"  {CYAN}15{NC} 🐙 {TITLE}FPTN{NC}  {DIM}(Beta){NC}")
             _box_row(f"     {DIM}Свой L3 VPN (Protobuf/TLS) — honeypot-прокси вместо отказа зондам{NC}")
+            _box_sep()
+            _box_row()
+            _box_row(f"  {CYAN}16{NC} 🔒 {TITLE}AmneziaWG 2.0 (standalone VPN){NC}")
+            _box_row(f"     {DIM}Standalone AWG-сервер + carrier-пресеты + каскад RU→зарубеж{NC}")
             _box_row()
             _box_sep()
             _box_row(f"  {CYAN}W{NC}  🌐 {TITLE}Веб-панель управления{NC}")
@@ -7474,7 +7478,7 @@ def main_menu() -> None:
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–15 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–16 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -7568,6 +7572,14 @@ def main_menu() -> None:
                 do_fptn_menu()
             except ImportError as _e:
                 warn(f"Модуль FPTN не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "16":
+            try:
+                from vless_installer.modules.awg_standalone import do_manage_awg_standalone
+                do_manage_awg_standalone()
+            except ImportError as _e:
+                warn(f"Модуль AmneziaWG standalone не найден: {_e}")
                 time.sleep(2)
 
         elif choice.lower() == "w":
