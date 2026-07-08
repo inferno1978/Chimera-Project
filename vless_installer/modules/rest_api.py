@@ -991,6 +991,36 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "user not found"}, 404)
             return
 
+        # POST /api/users/{email}/toggle — заблокировать/разблокировать юзера.
+        # Блокировка = disabled=True → юзер убирается из config.json (не может
+        # подключиться). Разблокировка = disabled=False → юзер возвращается.
+        m = re.match(r"^/api/users/(.+)/toggle$", path)
+        if m:
+            if not self._require_admin():
+                return
+            email = unquote(m.group(1))
+            users = _get_users()
+            for u in users:
+                if u.get("email") == email:
+                    u["disabled"] = not u.get("disabled", False)
+                    if u["disabled"]:
+                        from datetime import datetime as _dt
+                        u["disabled_at"] = _dt.now().isoformat()
+                    else:
+                        u.pop("disabled_at", None)
+                    _save_users(users)
+                    # Применяем к config.json — отключённые убираются из clients
+                    try:
+                        core = _core_module()
+                        core._users_apply_to_config(users)
+                    except Exception:
+                        pass
+                    _new_state = "disabled" if u["disabled"] else "enabled"
+                    self._send_json({"status": _new_state, "email": email})
+                    return
+            self._send_json({"error": "user not found"}, 404)
+            return
+
         if path == "/api/rotate/uuid":
             if not self._require_admin():
                 return

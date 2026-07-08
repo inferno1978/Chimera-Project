@@ -713,10 +713,16 @@ def _users_apply_to_config(users: list[dict]) -> bool:
     _nginx_restart_if_reality = core._nginx_restart_if_reality
     warn               = core.warn
     # Xray падает с "failed to build inbound" если clients пуст.
-    # Если все пользователи отключены — добавляем placeholder с невалидным UUID,
-    # чтобы inbound оставался рабочим, но реально никто не мог подключиться.
+    # Если все пользователи отключены (или список пуст) — добавляем placeholder
+    # с невалидным UUID, чтобы inbound оставался рабочим, но реально никто не
+    # мог подключиться.
     _PLACEHOLDER_UUID = "00000000-0000-0000-0000-000000000000"
-    effective_users = users if users else [{"uuid": _PLACEHOLDER_UUID, "email": "disabled@placeholder"}]
+    # Фильтруем отключённых юзеров — они не должны попадать в config.json.
+    # disabled=True означает что админ временно заблокировал юзера (через
+    # admin panel кнопку 🔒). Без этой фильтрации отключённый юзер всё равно
+    # мог бы подключаться — _users_apply_to_config просто перезаписывал clients.
+    active_users = [u for u in users if not u.get("disabled")]
+    effective_users = active_users if active_users else [{"uuid": _PLACEHOLDER_UUID, "email": "disabled@placeholder"}]
     written: set = set()
     # CONFIG_DIR первичен; /usr/local/etc может быть симлинком — пишем один раз
     for cfg_path in (CONFIG_DIR / "config.json",
