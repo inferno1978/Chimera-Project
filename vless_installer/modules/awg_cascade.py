@@ -67,7 +67,7 @@ def awgs_cascade_download_ru_zone() -> bool:
         info(f"Загрузка ru.zone: {url}")
         r = core._run(
             ["curl", "-fsSL", "--connect-timeout", "15", "-o", str(AWGS_RU_ZONE_FILE), url],
-            capture=True, check=False, timeout=60,
+            capture=True, check=False,
         )
         if r.returncode == 0 and AWGS_RU_ZONE_FILE.exists():
             lines_count = sum(1 for _ in AWGS_RU_ZONE_FILE.open())
@@ -101,7 +101,7 @@ def awgs_cascade_load_ipset() -> bool:
 
     try:
         r = core._run(["ipset", "restore", "-exist", "-file", tmp_path],
-                      capture=True, check=False, timeout=30)
+                      capture=True, check=False)
         if r.returncode != 0:
             core.log_to_file("WARN", f"awgs_cascade_load_ipset: {r.stderr}")
             return False
@@ -182,7 +182,7 @@ def awgs_cascade_setup_awg0(
     info("Запуск awg-quick@awg1...")
     core._run(["systemctl", "enable", "awg-quick@awg1"], check=False, quiet=True)
     r = core._run(["systemctl", "start", "awg-quick@awg1"],
-                  capture=True, check=False, timeout=30)
+                  capture=True, check=False)
     if r.returncode != 0:
         warn(f"awg1 не запустился: {r.stderr}")
         return False
@@ -210,7 +210,7 @@ def awgs_cascade_setup_awg0(
     core._run(["systemctl", "enable", "awg-cascade-routing"],
               check=False, quiet=True)
     r = core._run(["systemctl", "start", "awg-cascade-routing"],
-                  capture=True, check=False, timeout=30)
+                  capture=True, check=False)
     if r.returncode != 0:
         warn(f"awg-cascade-routing не запустился: {r.stderr}")
 

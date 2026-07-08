@@ -153,11 +153,11 @@ def awgs_install_dkms() -> bool:
     # он даёт бинарник `wg`, который используется для генерации ключей
     # (awg genkey не существует в userspace-режиме amneziawg-go).
     core.info("Установка базовых зависимостей (wireguard-tools, curl, qrencode)...")
-    core._run(["apt-get", "update", "-y"], check=False, quiet=True, timeout=120)
+    core._run(["apt-get", "update", "-y"], check=False, quiet=True)
     # Ставим по одному пакету — если один упадёт, остальные всё равно установятся
     for pkg in ("curl", "qrencode", "wireguard-tools", "gpg", "dkms", "build-essential"):
         r = core._run(["apt-get", "install", "-y", pkg],
-                      capture=True, check=False, quiet=True, timeout=180)
+                      capture=True, check=False, quiet=True)
         if r.returncode != 0:
             core.log_to_file("WARN", f"apt install {pkg}: {r.stderr[-300:]}")
 
@@ -174,7 +174,7 @@ def awgs_install_dkms() -> bool:
         # Ubuntu — linux-headers-generic работает на всех arch
         headers_pkg = "linux-headers-generic"
     r = core._run(["apt-get", "install", "-y", headers_pkg],
-                  capture=True, check=False, quiet=True, timeout=180)
+                  capture=True, check=False, quiet=True)
     if r.returncode != 0:
         core.log_to_file("WARN", f"apt install {headers_pkg}: {r.stderr[-300:]}")
 
@@ -312,14 +312,14 @@ def awgs_install_dkms() -> bool:
         core.info("PPA amnezia/ppa добавлен")
 
         # apt update (толерантный к кратковременному outage PPA)
-        r = core._run(["apt-get", "update", "-y"], capture=True, check=False, timeout=120)
+        r = core._run(["apt-get", "update", "-y"], capture=True, check=False)
         if r.returncode != 0:
             # Если ошибка только на PPA Amnezia — продолжаем (issue #68 bivlked)
             stderr = r.stderr or ""
             if "amnezia" in stderr.lower():
                 core.warn("PPA Amnezia временно недоступен — retry через 30 сек...")
                 time.sleep(30)
-                core._run(["apt-get", "update", "-y"], check=False, quiet=True, timeout=120)
+                core._run(["apt-get", "update", "-y"], check=False, quiet=True)
             else:
                 core.log_to_file("WARN", f"apt update: {stderr[-500:]}")
 
@@ -337,7 +337,7 @@ def awgs_install_dkms() -> bool:
         r = core._run(
             ["apt-get", "install", "-y",
              "amneziawg-tools", "amneziawg-dkms", "wireguard-tools", "qrencode"],
-            capture=True, check=False, timeout=600,  # 10 мин на DKMS-сборку
+            capture=True, check=False,  # 10 мин на DKMS-сборку
         )
         if r.returncode != 0:
             err_tail = (r.stderr or "")[-800:]
@@ -413,9 +413,9 @@ def awgs_generate_keys() -> tuple:
     # Если ни одного нет — пробуем установить wireguard-tools
     if not awg_path and not wg_path:
         core.warn("Ни awg, ни wg не найдены — устанавливаем wireguard-tools...")
-        core._run(["apt-get", "update", "-y"], check=False, quiet=True, timeout=120)
+        core._run(["apt-get", "update", "-y"], check=False, quiet=True)
         core._run(["apt-get", "install", "-y", "wireguard-tools"],
-                  check=False, quiet=True, timeout=180)
+                  check=False, quiet=True)
         wg_path = core._run(["which", "wg"], capture=True, check=False).stdout.strip()
         if not wg_path:
             core.log_to_file("ERROR", "awgs_generate_keys: wg не установлен даже после apt install")
@@ -625,7 +625,7 @@ def awgs_setup_systemd() -> bool:
     core._run(["systemctl", "enable", AWGS_SYSTEMD_AWG_QUICK],
               check=False, quiet=True)
     r = core._run(["systemctl", "start", AWGS_SYSTEMD_AWG_QUICK],
-                  capture=True, check=False, timeout=30)
+                  capture=True, check=False)
     if r.returncode != 0:
         core.log_to_file("ERROR", f"awgs_setup_systemd start: {r.stderr}")
         return False
@@ -642,7 +642,7 @@ def awgs_stop_systemd() -> bool:
     """Останавливает и выключает awg-quick@awg0.service."""
     core = _core_module()
     core._run(["systemctl", "stop", AWGS_SYSTEMD_AWG_QUICK],
-              check=False, quiet=True, timeout=30)
+              check=False, quiet=True)
     core._run(["systemctl", "disable", AWGS_SYSTEMD_AWG_QUICK],
               check=False, quiet=True)
     return True

@@ -45,7 +45,7 @@ def awgs_apply_syncconf() -> bool:
     try:
         # strip — убирает комментарии и форматирует для syncconf
         r = core._run([AWGS_QUICK_BIN, "strip", str(AWGS_SERVER_CONF)],
-                      capture=True, check=False, timeout=AWGS_SYNC_TIMEOUT_SEC)
+                      capture=True, check=False)
         if r.returncode != 0:
             core.log_to_file("ERROR", f"awg syncconf strip: {r.stderr}")
             return False
@@ -54,7 +54,7 @@ def awgs_apply_syncconf() -> bool:
         # syncconf — атомарное обновление
         r = core._run(
             [AWGS_BIN, "syncconf", AWGS_INTERFACE, tmp_path],
-            capture=True, check=False, timeout=AWGS_SYNC_TIMEOUT_SEC,
+            capture=True, check=False,
         )
         if r.returncode != 0:
             core.log_to_file("ERROR", f"awg syncconf: {r.stderr}")
@@ -76,7 +76,7 @@ def awgs_apply_restart() -> bool:
     core = _core_module()
     from .awg_constants import AWGS_SYSTEMD_AWG_QUICK
     r = core._run(["systemctl", "restart", AWGS_SYSTEMD_AWG_QUICK],
-                  capture=True, check=False, timeout=AWGS_RESTART_TIMEOUT_SEC)
+                  capture=True, check=False)
     if r.returncode != 0:
         core.log_to_file("ERROR", f"awgs_apply_restart: {r.stderr}")
         return False
@@ -122,7 +122,7 @@ def awgs_show_handshakes() -> str:
     """Возвращает вывод `awg show` (peers + handshakes + transfer)."""
     core = _core_module()
     r = core._run([AWGS_BIN, "show", AWGS_INTERFACE],
-                  capture=True, check=False, timeout=10)
+                  capture=True, check=False)
     return r.stdout if r.returncode == 0 else ""
 
 
@@ -133,7 +133,7 @@ def awgs_show_dump() -> list:
     """
     core = _core_module()
     r = core._run([AWGS_BIN, "show", "all", "dump"],
-                  capture=True, check=False, timeout=10)
+                  capture=True, check=False)
     if r.returncode != 0:
         return []
     return [line for line in r.stdout.splitlines() if line.strip()]
