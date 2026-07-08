@@ -2,26 +2,129 @@
 
 ---
 
-## Unreleased
+## v4.13.0 — Рефакторинг архитектуры + Web Admin Panel + User Portal + Security Hardening — 8 июля 2026
 
-### Refactoring — модульная архитектура
+### 🏗️ Рефакторинг — модульная архитектура (продолжение)
 
-- `_core.py` декомпозирован с 32 557 → 7 770 строк (−76%): вынесено 40 модулей
-  в `vless_installer/modules/` (ASN cache, standalone screens, fail2ban, SSH hardening,
-  resources, MTU tuning, GeoIP block, connection audit, backup/rollback, DNSCrypt,
-  network setup, geo files, SSL/certbot, failover, client config export, uninstall,
-  TTL users, credential rotation, health report, traffic tracking, system deps,
-  nginx setup, RU subnets, AS-direct, autoban, backup manager, speed test,
-  reconfigure, migration, quick status, switch mode, traffic history, split tunnel,
-  diagnostics, xray install, install prompts, users manager, emergency repair,
-  AWG transport, chain/nodes).
-- Все модули используют `_core_module()` lazy binding через importlib —
-  нет циклических импортов.
-- Добавлен `PROJECT_MAP.md` — полная карта 124 модулей по 19 логическим группам.
-- Добавлен `verify.py` v2 — проверка через exec()+getattr() вместо grep.
-- Добавлен `full_test.py` — постоянный автотест (py_compile + import + duplicate defs +
-  paths baseline + chmod baseline + git hygiene).
-- Добавлен `tests/baseline_paths.json` — baseline-снапшот для будущих проверок.
+Продолжение декомпозиции монолитного `_core.py` (32 557 строк) в модульную архитектуру. В этой версии вынесено ещё 40+ модулей, ядро уменьшилось с 32 557 → 7 779 строк (−76%). Всего в `vless_installer/modules/` теперь 129 файлов, сгруппированных по 24 логическим категориям (см. `PROJECT_MAP.md`).
+
+**Принцип рефакторинга:**
+- `_core.py` остаётся главным orchestrator-ом: глобальное состояние, `main_menu()`, `_load_state_into_globals()`, функции которые мутируют много globals (AWG, chain multi-node, install orchestration).
+- Все модули обращаются к ядру через `_core_module()` lazy binding (importlib) — нет циклических импортов, модули грузятся по требованию.
+- Каждый модуль самостоятелен: свой `from __future__ import annotations`, свой блок `core = _core_module()` для доступа к глобалам, свой `setattr(core, ...)` для синхронизации state обратно в ядро.
+- `proto_common.py` — общие хелперы для 8 протокольных модулей (wdtt, turnable, mieru, fptn, naiveproxy, turntunnel, mtproto, webdav_tunnel): `proto_load_state/proto_save_state/proto_ask/proto_install_service/proto_show_status/proto_full_uninstall`.
+- `awg_transport.py` — 45 функций AWG-транспорта вынесены из `_core.py` (install/keys/config/policy-routing/tunnel-verify, single-node + multi-node + watchdog).
+- `chain_nodes.py` — 22 функции chain/nodes management (Mode B) вынесены из `_core.py` (chain config builders, node CRUD, health/speed tests).
+
+**Полный список вынесенных модулей (40+):**
+ASN cache, standalone screens, fail2ban, SSH hardening, resources, MTU tuning, GeoIP block, connection audit, backup/rollback, DNSCrypt, network setup, geo files, SSL/certbot, failover, client config export, uninstall, TTL users, credential rotation, health report, traffic tracking, system deps, nginx setup, RU subnets, AS-direct, autoban, backup manager, speed test, reconfigure, migration, quick status, switch mode, traffic history, split tunnel, diagnostics, xray install, install prompts, users manager, emergency repair, AWG transport, chain/nodes, proto_common.
+
+**Документация и тесты:**
+- `PROJECT_MAP.md` — полная карта всех 129 модулей по 24 логическим группам с описанием каждого файла.
+- `verify.py` v2 — проверка через `exec()+getattr()` вместо grep (точнее, ловит больше багов).
+- `full_test.py` — постоянный автотест (8 секций): py_compile всех .py + импорт всех модулей + getattr для ключевых функций + дубликаты определений (AST) + пути state-файлов /var/lib/xray-installer (baseline 150) + права 0o600 (baseline 76) + git hygiene + **web panel security invariants** (UUID-fallback, ThreadingHTTPServer, timeout=None, wildcard CORS).
+- `tests/baseline_paths.json` — baseline-снапшот для будущих проверок.
+- `smoke_test_modules.py` — 42 тестовых случая (стен-режим: input='q', subprocess=mock), проверяет что все функции-меню вызываются без NameError/AttributeError.
+
+---
+
+### 🌐 Web Admin Panel + User Portal + REST API
+
+**Новый модуль `rest_api.py`** — единый HTTP-сервер (ThreadingHTTPServer) для REST API, Admin Panel и User Portal. Запускается как отдельный systemd-сервис `vless-web.service`.
+
+**Архитектура безопасности:**
+- **Bind 127.0.0.1 по умолчанию** — панель доступна только через SSH-туннель (`ssh -L 8443:127.0.0.1:8443 user@server`). Внешний доступ (0.0.0.0) включается явно через пункт меню 5 в `do_manage_web_panel()`, с предупреждением о HTTP без TLS.
+- **Basic Auth с `secrets.compare_digest`** — constant-time сравнение, защита от timing-атак.
+- **Portal password генерируется отдельно от UUID** — `secrets.token_urlsafe(12)` при создании юзера. UUID больше не используется как fallback-пароль (uuid — публичная часть vless:// ссылки, не может быть паролем).
+- **Rate-limiting** — in-memory sliding window (10 попыток / 60 сек → 429 с `Retry-After: 30`), общий для admin и portal auth.
+- **HTTP/1.1 + Content-Length** — корректная работа с keep-alive и fetch() из браузера.
+- **credentials: 'same-origin'** в JS fetch — гарантированная передача Basic Auth кредов.
+- **XSS-защита** — `html.escape()` для всех пользовательских данных в HTML (user_portal.py), `esc()` функция в admin_panel.py.
+- **Body size cap** — `MAX_BODY_BYTES = 1MB`, 413 Payload Too Large при превышении.
+- **CORS отключён** — wildcard `Access-Control-Allow-Origin: *` убран, панель работает same-origin.
+- **ThreadingHTTPServer** вместо голого HTTPServer — каждый запрос в отдельном потоке, защита от DoS через slowloris.
+- **Per-connection timeout = 30с** — `server.timeout = None` убран, клиенты не могут держать соединение бесконечно.
+
+**REST API endpoints (admin):**
+- `GET /api/health` — статус сервисов, SSL, RAM, Disk, CPU, uptime, connections (без авторизации — для мониторинга)
+- `GET /api/users` — список пользователей (без portal_password)
+- `POST /api/users` — создать пользователя (генерирует UUID + portal_password, возвращает пароль ОДИН раз)
+- `DELETE /api/users/{email}` — удалить пользователя
+- `POST /api/users/{email}/password` — админ задаёт portal_password юзеру
+- `POST /api/users/{email}/toggle` — заблокировать/разблокировать юзера (disabled=True → убирается из config.json)
+- `GET /api/users/{email}/traffic` — трафик пользователя (uplink + downlink через Xray Stats API)
+- `POST /api/rotate/uuid` — ротация UUID
+- `POST /api/rotate/reality` — ротация REALITY-ключей
+- `GET /api/geoip/rules` / `POST /api/geoip/rules` / `DELETE /api/geoip/rules` — управление GeoIP
+- `POST /api/backup` / `GET /api/backup/list` — бэкап/список бэкапов
+
+**REST API endpoints (user portal):**
+- `GET /api/portal/links` — VLESS-ссылки + QR (только для активных сервисов — проверка через systemctl is-active)
+- `GET /api/portal/traffic` — трафик пользователя
+- `GET /api/portal/health` — ограниченный health (domain, port, protocol, xray, SSL, uptime)
+- `GET /api/portal/clash` — скачать Clash Meta YAML
+- `GET /api/portal/singbox` — скачать Sing-box JSON
+- `POST /api/portal/password` — смена пароля (мин 8 символов)
+
+**Admin Panel (`admin_panel.py`):**
+- Glassmorphism дизайн, серо-голубые тона, анимации.
+- Health-карточки: домен, диск, RAM, соединения, uptime, SSL.
+- Управление пользователями: создание (с генерацией portal_password), удаление, **блокировка/разблокировка** (🔒/🔓 — юзер убирается из config.json), **смена пароля** (🔑).
+- Ротация UUID и REALITY-ключей.
+- Создание бэкапов.
+- Трафик и TTL для каждого юзера (∞ для бессрочных).
+- Кнопки: 🔒 Заблокировать (серая), 🔑 Пароль (жёлтая), 🗑 Удалить (красная) — все одинакового размера.
+
+**User Portal (`user_portal.py`):**
+- Анимированный интерфейс, плавающие частицы, gradient-фон.
+- VLESS-ссылки + QR-коды (flexbox, рядом по центру, с переносом).
+- Трафик (progress bar если есть лимит).
+- TTL (срок действия, countdown badge).
+- Состояние сервера (Xray, домен, протокол, SSL, uptime, порт).
+- Скачивание Clash Meta / Sing-box конфигов.
+- Смена пароля (мин 8 символов).
+- `html.escape()` для всех пользовательских данных (name, email).
+
+**Управление через TUI:**
+- `do_manage_web_panel()` — меню управления веб-панелью:
+  - Пункт 1: **"Установить веб-панель"** (если не установлена) или "Запустить/Остановить сервис" (если установлена). При установке — генерируется admin_password, показывается ОДИН раз, подсказка про SSH-туннель.
+  - Пункт 2: Изменить порт.
+  - Пункт 3: Изменить admin-пароль (мин 8 символов).
+  - Пункт 4: Переустановить (сброс конфига).
+  - Пункт 5: Открыть/закрыть доступ снаружи (0.0.0.0 ↔ 127.0.0.1, с предупреждением о HTTP без TLS).
+- `install_web_service()` — создаёт `web_config.json` (admin_user/admin_pass/host/port), systemd-unit `vless-web.service`, запускает сервис. При expose=True — открывает порт в ufw + warning о HTTP.
+- `uninstall_web_service()` — останавливает и удаляет сервис.
+
+**Синхронизация пользователей:**
+- `_sync_users_from_config()` — при создании юзера через admin panel, существующие юзеры из `config.json` (clients) подтягиваются в `users.json` (если их там нет). Предотвращает затирание старых юзеров при `_users_apply_to_config()`.
+- `_users_apply_to_config()` — фильтрует `disabled=True` юзеров (они не попадают в `config.json` clients, не могут подключиться).
+- `unquote(email)` в DELETE/traffic/password/toggle endpoints — корректная обработка `@` в URL (браузер кодирует через `encodeURIComponent()`).
+
+**Генерация VLESS-ссылок (умная фильтрация):**
+- Hysteria2 — ссылка генерируется только если `h2_exit_enabled=True` **И** есть `h2_host` + `h2_password` **И** `systemctl is-active hysteria-server` = active.
+- MTProto — только если state-файл существует и содержит `port` + `secret`.
+- VLESS — всегда (основной протокол), с правильным SNI (reality_dest при AWG, domain в остальных случаях).
+
+**Трафик через Xray Stats API:**
+- `_query_user_traffic_bytes(email)` — запрос через `xray api statsquery --pattern=user>>>{email}>>>traffic>>>{direction}` (uplink + downlink).
+- Stats API настраивается автоматически: секции `stats` + `policy` (statsUserUplink/Downlink) + inbound `xray-stats-api` (dokodemo-door на 127.0.0.1:10085).
+
+---
+
+### 🔒 Security Hardening
+
+**Web Panel:**
+- UUID-as-password fallback **полностью убран** — uuid это публичная часть vless:// ссылки (в QR-коде клиента), любой кто видел ссылку не должен уметь залогиниться в портал.
+- Single-threaded HTTPServer + `timeout=None` → **ThreadingHTTPServer + timeout=30с** — защита от DoS через slowloris.
+- HTTP без TLS на 0.0.0.0 + auto `ufw allow` → **bind 127.0.0.1 по умолчанию**, ufw НЕ открывается. Внешний доступ — через явный toggle с warning.
+- `Access-Control-Allow-Origin: *` → **убран полностью**, панель same-origin.
+- Min password length: 6 → **8** (в `/api/portal/password`, `do_manage_web_panel` пункт 3, JS user_portal).
+- `_read_body()` без лимита → **MAX_BODY_BYTES = 1MB**, 413 Payload Too Large.
+- `full_test.py` секция 8 — статические инварианты web panel security (UUID-fallback, ThreadingHTTPServer, timeout=None, wildcard CORS) — ловит регресс.
+
+**REALITY dest:**
+- Дефолт `PARAM_REALITY_DEST` изменён с `www.microsoft.com` на `www.cloudflare.com` — обход бага TLS-парсера REALITY (Xray-core): жёсткий лимит 8192 байт на Certificate record, у microsoft.com (Akamai CDN) Certificate с цепочкой/OCSP stapling — 8273 байта. REALITY обрывает разбор и валит соединение. Cloudflare (ECDSA, компактная цепочка) работает стабильно. Баг не связан с AWG/MTU — лимит внутри самого REALITY-парсера, до всякой маршрутизации.
+- Warning в flow установки (`prompt_awg_exit_mode`) при выборе microsoft.com.
 
 ---
 
