@@ -755,6 +755,74 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             self._send_json({"backups": backups, "count": len(backups)})
             return
 
+        # ── User Portal API (GET) ──────────────────────────────────────────────
+        # links / traffic / health / clash / singbox — это GET-запросы (browser
+        # шлёт fetch(path) без method). password — POST (меняет состояние).
+        # Раньше все portal endpoints были в do_POST — это баг, browser получал
+        # 404 на каждый GET-запрос из user_portal.js.
+
+        if path == "/api/portal/links":
+            user = self._require_user()
+            if user is None:
+                return
+            links = _generate_vless_links(user)
+            self._send_json({"links": links, "count": len(links)})
+            return
+
+        if path == "/api/portal/traffic":
+            user = self._require_user()
+            if user is None:
+                return
+            email = user.get("email", "")
+            traffic = _get_user_traffic(email)
+            ttl = _get_ttl_info(email)
+            self._send_json({**traffic, **ttl})
+            return
+
+        if path == "/api/portal/health":
+            user = self._require_user()
+            if user is None:
+                return
+            health = _get_health()
+            # Ограниченный набор для юзера
+            safe = {
+                "domain": health.get("domain", ""),
+                "server_port": health.get("server_port", 443),
+                "protocol_mode": health.get("protocol_mode", "reality"),
+                "xray": health.get("xray", "unknown"),
+                "ssl_days_left": health.get("ssl_days_left", -1),
+                "uptime_hours": health.get("uptime_hours", 0),
+                "timestamp": health.get("timestamp", ""),
+            }
+            self._send_json(safe)
+            return
+
+        if path == "/api/portal/clash":
+            user = self._require_user()
+            if user is None:
+                return
+            clash = _generate_clash_config(user)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/yaml; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="clash-meta.yaml"')
+            self.send_header("Content-Length", str(len(clash.encode("utf-8"))))
+            self.end_headers()
+            self.wfile.write(clash.encode("utf-8"))
+            return
+
+        if path == "/api/portal/singbox":
+            user = self._require_user()
+            if user is None:
+                return
+            singbox = _generate_singbox_config(user)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="sing-box.json"')
+            self.send_header("Content-Length", str(len(singbox.encode("utf-8"))))
+            self.end_headers()
+            self.wfile.write(singbox.encode("utf-8"))
+            return
+
         self._send_404()
 
     def do_POST(self):
@@ -869,69 +937,10 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, 500)
             return
 
-        # ── User Portal API ──────────────────────────────────────────────────
-
-        if path == "/api/portal/links":
-            user = self._require_user()
-            if user is None:
-                return
-            links = _generate_vless_links(user)
-            self._send_json({"links": links, "count": len(links)})
-            return
-
-        if path == "/api/portal/traffic":
-            user = self._require_user()
-            if user is None:
-                return
-            email = user.get("email", "")
-            traffic = _get_user_traffic(email)
-            ttl = _get_ttl_info(email)
-            self._send_json({**traffic, **ttl})
-            return
-
-        if path == "/api/portal/health":
-            user = self._require_user()
-            if user is None:
-                return
-            health = _get_health()
-            # Ограниченный набор для юзера
-            safe = {
-                "domain": health.get("domain", ""),
-                "server_port": health.get("server_port", 443),
-                "protocol_mode": health.get("protocol_mode", "reality"),
-                "xray": health.get("xray", "unknown"),
-                "ssl_days_left": health.get("ssl_days_left", -1),
-                "uptime_hours": health.get("uptime_hours", 0),
-                "timestamp": health.get("timestamp", ""),
-            }
-            self._send_json(safe)
-            return
-
-        if path == "/api/portal/clash":
-            user = self._require_user()
-            if user is None:
-                return
-            clash = _generate_clash_config(user)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/yaml; charset=utf-8")
-            self.send_header("Content-Disposition", 'attachment; filename="clash-meta.yaml"')
-            self.send_header("Content-Length", str(len(clash.encode("utf-8"))))
-            self.end_headers()
-            self.wfile.write(clash.encode("utf-8"))
-            return
-
-        if path == "/api/portal/singbox":
-            user = self._require_user()
-            if user is None:
-                return
-            singbox = _generate_singbox_config(user)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Disposition", 'attachment; filename="sing-box.json"')
-            self.send_header("Content-Length", str(len(singbox.encode("utf-8"))))
-            self.end_headers()
-            self.wfile.write(singbox.encode("utf-8"))
-            return
+        # ── User Portal API (POST) ─────────────────────────────────────────────
+        # Только /api/portal/password — меняет состояние (нужен body).
+        # Остальные portal endpoints (links/traffic/health/clash/singbox) — GET,
+        # см. do_GET выше. Раньше они были тут (в do_POST) — это был баг.
 
         if path == "/api/portal/password":
             user = self._require_user()
