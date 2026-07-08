@@ -193,8 +193,12 @@ def awg_peer_add(
         success(f"Пир '{name}' добавлен: {client_ip}")
         if result.get("conf_path"):
             info(f"Конфиг клиента: {result['conf_path']}")
+        if result.get("uri_path"):
+            info(f"vpn:// URI: {result['uri_path']}")
         if result.get("png_path"):
-            info(f"QR-код (PNG): {result['png_path']}")
+            info(f"QR-код (PNG, vpn://): {result['png_path']}")
+        if result.get("png_conf_path"):
+            info(f"QR-код (PNG, .conf): {result['png_conf_path']}")
     else:
         success(f"Пир '{name}' добавлен: {client_ip}")
 
