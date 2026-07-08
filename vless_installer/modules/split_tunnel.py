@@ -210,20 +210,48 @@ IP_CHECK_DOMAINS = [
     "domain:whoer.net",
 ]
 
+# Известные IP-адреса IP-проверочных доменов.
+# Нужны для случая, когда клиентский TUN-резолвер (sing-box/Nekobox в TUN-режиме)
+# сам резолвит DNS (через DoT/DoH к 1.1.1.1:853) и отправляет на сервер уже IP,
+# а не домен. В этом случае domain-правило не срабатывает — нужно IP-правило.
+# Xray требует, чтобы domain и ip были в РАЗНЫХ правилах (в одном правиле они
+# объединяются логическим AND — никогда не сработает).
+# Список может устареть (IP-проверочные сервисы меняют адреса), но для базовой
+# диагностики этого достаточно. При устаревании IP — domain-правило всё равно
+# работает для клиентов, которые не резолвят DNS сами (Proxy-режим).
+IP_CHECK_IPS = [
+    # 2ip.ru (Hetzner, DE — но сайт считается "псевдо-РФ" по аудитории)
+    "188.40.167.82",
+]
 
-def build_awg_ip_check_rule(direct_tag: str = "direct-local") -> dict:
-    """Возвращает routing rule для IP-проверочных доменов → direct-local.
 
-    В AWG-режиме эти домены должны идти напрямую (через entry-IP), а не через
+def build_awg_ip_check_rule(direct_tag: str = "direct-local") -> list:
+    """Возвращает список routing rules для IP-проверочных доменов → direct-local.
+
+    Возвращает СПИСОК из 1-2 правил (не dict!):
+      1. domain-правило — для клиентов, которые отправляют домен (Proxy-режим)
+      2. ip-правило — для клиентов, которые сами резолвят DNS (TUN-режим с DoT)
+
+    В AWG-режиме эти домены/IP должны идти напрямую (через entry-IP), а не через
     exit-туннель. Применяется ВСЕГДА при AWG_EXIT_ENABLED=True, независимо от
     SPLIT_TUNNEL_ENABLED — это базовая диагностика туннеля.
+
+    Возвращает list (не dict) — вызывающий код должен делать extend/+=, не insert.
     """
-    return {
+    rules = [{
         "type":        "field",
         "domain":      list(IP_CHECK_DOMAINS),
         "outboundTag": direct_tag,
         "comment":     "awg: IP-проверочные домены напрямую (без туннеля)",
-    }
+    }]
+    if IP_CHECK_IPS:
+        rules.append({
+            "type":        "field",
+            "ip":          list(IP_CHECK_IPS),
+            "outboundTag": direct_tag,
+            "comment":     "awg: IP-проверочные IP напрямую (TUN-резолвер на клиенте)",
+        })
+    return rules
 
 
 def build_split_tunnel_routing_rules(

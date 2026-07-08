@@ -957,9 +957,10 @@ def generate_xray_config() -> None:
                  f"(domainStrategy={_dl_strategy}, без fwmark → напрямую через default route ОС)")
         # IP-проверочные домены → direct-local (всегда, даже без split tunnel)
         from vless_installer.modules.split_tunnel import build_awg_ip_check_rule
-        _ip_check_rule = build_awg_ip_check_rule("direct-local")
-        # Вставляем ПЕРВЫМ правилом (высший приоритет) — до loopback/bittorrent/catch-all
-        config["routing"]["rules"].insert(0, _ip_check_rule)
+        _ip_check_rules = build_awg_ip_check_rule("direct-local")
+        # Вставляем в НАЧАЛО списка (высший приоритет) — до loopback/bittorrent/catch-all.
+        # build_awg_ip_check_rule возвращает list (domain + ip правило), вставляем весь список.
+        config["routing"]["rules"][:0] = _ip_check_rules
         info("AWG: IP-проверочные домены (2ip.ru, 2ip.io, myip.ru, whoer.net) → direct-local")
 
     # ── Split tunneling (Режим A, REALITY) ───────────────────────────────────
@@ -1169,8 +1170,9 @@ def generate_xray_config_xhttp() -> None:
             info(f"AWG: добавлен outbound direct-local "
                  f"(domainStrategy={_dl_strategy}, без fwmark → напрямую через default route ОС)")
         from vless_installer.modules.split_tunnel import build_awg_ip_check_rule
-        _ip_check_rule = build_awg_ip_check_rule("direct-local")
-        config["routing"]["rules"].insert(0, _ip_check_rule)
+        _ip_check_rules = build_awg_ip_check_rule("direct-local")
+        # build_awg_ip_check_rule возвращает list (domain + ip правило).
+        config["routing"]["rules"][:0] = _ip_check_rules
         info("AWG: IP-проверочные домены (2ip.ru, 2ip.io, myip.ru, whoer.net) → direct-local")
 
     # ── Split tunneling (Режим A, xHTTP TLS) ─────────────────────────────────

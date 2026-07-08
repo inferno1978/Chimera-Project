@@ -700,8 +700,9 @@ def generate_xray_config_chain_entry() -> None:
             "settings": {"domainStrategy": _dl_strategy},
         })
         # IP-проверочные домены → direct-local (всегда в AWG-режиме)
+        # build_awg_ip_check_rule возвращает list (domain + ip правило).
         from vless_installer.modules.split_tunnel import build_awg_ip_check_rule
-        config["routing"]["rules"].insert(0, build_awg_ip_check_rule("direct-local"))
+        config["routing"]["rules"][:0] = build_awg_ip_check_rule("direct-local")
         st_rules = build_split_tunnel_routing_rules(
             proxy_tag="direct", direct_tag="direct-local")
         if st_rules:
