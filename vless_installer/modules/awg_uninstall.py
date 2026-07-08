@@ -79,11 +79,11 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     if is_cascade:
         # Каскад: останавливаем awg1 + routing
         core._run(["systemctl", "stop", "awg-quick@awg1"],
-                  check=False, quiet=True, timeout=30)
+                  check=False, quiet=True)
         core._run(["systemctl", "disable", "awg-quick@awg1"],
                   check=False, quiet=True)
         core._run(["systemctl", "stop", "awg-cascade-routing"],
-                  check=False, quiet=True, timeout=30)
+                  check=False, quiet=True)
         core._run(["systemctl", "disable", "awg-cascade-routing"],
                   check=False, quiet=True)
 
