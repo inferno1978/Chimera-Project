@@ -351,19 +351,35 @@ def _generate_vless_links(user: dict) -> list[dict]:
                      f"&fp={fp}&type=http&path={xhttp_path_enc}#VLESS-xHTTP-IPv6")
         links.append({"label": "IPv6", "link": link6, "protocol": proto})
 
-    # Hysteria2 (если включён)
+    # Hysteria2 (если включён И реально настроен И сервис активен)
+    # Проверяем не только флаг h2_exit_enabled, но и:
+    #   1. Наличие h2_password/host — иначе генерируется кастрированная ссылка
+    #      hysteria2://@:443 без пароля.
+    #   2. Что H2-сервис реально запущен (systemctl is-active) — чтобы не
+    #      отдавать ссылки на несуществующие сервисы.
     if state.get("h2_exit_enabled", False):
-        h2_host = state.get("awg_exit_host", domain)
+        h2_host = state.get("h2_exit_host", "") or state.get("awg_exit_host", "")
         h2_port = state.get("h2_port", 443)
         h2_pass = state.get("h2_password", "")
-        h2_link = f"hysteria2://{h2_pass}@{h2_host}:{h2_port}?insecure=1&sni={domain}#Hysteria2"
-        links.append({"label": "Hysteria2", "link": h2_link, "protocol": "hysteria2"})
+        # Проверяем что H2-сервис активен на entry-сервере.
+        _h2_active = False
+        try:
+            core = _core_module()
+            r = core._run(["systemctl", "is-active", "hysteria-server"],
+                          capture=True, check=False)
+            _h2_active = (r.returncode == 0 and r.stdout.strip() == "active")
+        except Exception:
+            pass
+        # Только если есть host+password И сервис активен — иначе ссылка битая.
+        if h2_host and h2_pass and _h2_active:
+            h2_link = f"hysteria2://{h2_pass}@{h2_host}:{h2_port}?insecure=1&sni={domain}#Hysteria2"
+            links.append({"label": "Hysteria2", "link": h2_link, "protocol": "hysteria2"})
 
-    # MTProto (если установлен)
+    # MTProto (если установлен — проверяем что state-файл существует и имеет port+secret)
     try:
         from vless_installer.modules.mtproto import _load_state as _mtproto_load
         mt_state = _mtproto_load(Path("/var/lib/xray-installer/mtproto_state.json"))
-        if mt_state.get("port"):
+        if mt_state.get("port") and mt_state.get("secret"):
             mt_port = mt_state["port"]
             mt_secret = mt_state.get("secret", "")
             mt_link = f"https://t.me/proxy?server={domain}&port={mt_port}&secret={mt_secret}"
