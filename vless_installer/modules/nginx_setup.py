@@ -380,6 +380,11 @@ def setup_nginx_final() -> None:
     PROTOCOL_MODE = core.PROTOCOL_MODE
     SERVER_PORT = core.SERVER_PORT
     AWG_EXIT_ENABLED = core.AWG_EXIT_ENABLED
+    XHTTP_PATH = core.XHTTP_PATH
+    XHTTP_BACKEND_PORT = core.XHTTP_BACKEND_PORT
+    INSTALL_MODE = core.INSTALL_MODE
+    CHAIN_NODES = core.CHAIN_NODES
+    CHAIN_EXIT_HOST = core.CHAIN_EXIT_HOST
     info("Настройка финального конфига Nginx...")
     web_root = Path(f"/var/www/{PARAM_DOMAIN}")
 
@@ -387,31 +392,180 @@ def setup_nginx_final() -> None:
     NGINX_CONF_DIR.mkdir(parents=True, exist_ok=True)
     NGINX_ENABLED_DIR.mkdir(parents=True, exist_ok=True)
 
-    # === xHTTP TLS: Xray сам принимает :443, Nginx только :80 → 301 ===
+    # === xHTTP TLS: Nginx терминирует TLS на :SERVER_PORT и проксирует ===
+    # xHTTP path на Xray (127.0.0.1:XHTTP_BACKEND_PORT, security: none).
+    # Заглушка сайта отдаётся для всех остальных путей (location /).
+    # Это решает проблему отсутствия fallbacks для xHTTP в Xray-core.
+    #
+    # ИСКЛЮЧЕНИЕ: Режим B с exit-нодами. В этом случае generate_xray_config_chain_entry_multi()
+    # строит multi-node inbound с TLS на :SERVER_PORT напрямую (см. chain_nodes.py:553).
+    # Xray сам владеет 443, и Nginx не должен пытаться слушать тот же порт —
+    # используем старое поведение (только HTTP→HTTPS редирект на :80).
+    # Также см. generate_xray_config_chain_entry_multi — там xHTTP inbound имеет security:tls.
     if PROTOCOL_MODE == "xhttp":
-        info(f"xHTTP TLS: Nginx настраивается только как HTTP→HTTPS редирект (TLS на Xray :{SERVER_PORT})")
+        # Признак chain-mode с exit-нодами: CHAIN_NODES непустой ИЛИ задан legacy CHAIN_EXIT_HOST.
+        # В режиме B + AWG/H2 (без exit-нод) chain_nodes.py вызывает generate_xray_config_xhttp(),
+        # т.е. Xray слушает loopback → применяем новую схему Nginx→Xray.
+        _chain_has_exit_nodes = (
+            INSTALL_MODE == "B"
+            and (bool(CHAIN_NODES) or bool(CHAIN_EXIT_HOST))
+        )
+        # Определяем версию nginx для выбора синтаксиса http2
+        _xhttp_nginx_bin = find_nginx_bin() or "/usr/sbin/nginx"
+        try:
+            r_ver = _run([_xhttp_nginx_bin, "-v"], capture=True, check=False)
+            m_ver = re.search(r'(\d+)\.(\d+)\.(\d+)', r_ver.stderr or r_ver.stdout or "")
+            _nx_major = int(m_ver.group(1)) if m_ver else 1
+            _nx_minor = int(m_ver.group(2)) if m_ver else 18
+        except Exception:
+            _nx_major, _nx_minor = 1, 18
+
+        if _nx_major > 1 or (_nx_major == 1 and _nx_minor >= 25):
+            # nginx ≥ 1.25: новая директива http2 on;
+            _http2_line = "    http2 on;"
+            _listen_tls = f"listen {SERVER_PORT} ssl;"
+            _listen_tls_v6 = f"listen [::]:{SERVER_PORT} ssl;" if core.IS_IPV6_AVAILABLE else ""
+        else:
+            # nginx < 1.25: http2 указывается в строке listen
+            _http2_line = ""
+            _listen_tls = f"listen {SERVER_PORT} ssl http2;"
+            _listen_tls_v6 = f"listen [::]:{SERVER_PORT} ssl http2;" if core.IS_IPV6_AVAILABLE else ""
+
+        # ── ИСКЛЮЧЕНИЕ: chain-mode (B) с exit-нодами ─────────────────────────
+        # В этом случае generate_xray_config_chain_entry_multi() строит multi-node
+        # inbound с TLS на :SERVER_PORT (см. chain_nodes.py:553) — Xray сам владеет 443.
+        # Nginx НЕ должен слушать 443 (конфликт портов). Возвращаем старое поведение:
+        # только HTTP→HTTPS редирект на :80.
+        if _chain_has_exit_nodes:
+            info(f"xHTTP TLS (chain B + exit-nodes): Nginx настраивается только как "
+                 f"HTTP→HTTPS редирект (Xray сам слушает :{SERVER_PORT} с TLS)")
+            cfg = NGINX_CONF_DIR / PARAM_DOMAIN
+            cfg.write_text(textwrap.dedent(f"""\
+                # HTTP → HTTPS redirect (chain B + xHTTP — Xray слушает :{SERVER_PORT} напрямую)
+                server {{
+                    listen 80;
+                    listen [::]:80;
+                    server_name {PARAM_DOMAIN};
+                    root {web_root};
+                    index index.html;
+                    location /.well-known/acme-challenge/ {{ root {web_root}; }}
+                    location / {{ return 301 https://$host$request_uri; }}
+                }}
+            """))
+            link = NGINX_ENABLED_DIR / PARAM_DOMAIN
+            link.unlink(missing_ok=True)
+            link.symlink_to(cfg)
+            r = _run([_xhttp_nginx_bin, "-t"], capture=True, check=False)
+            if r.returncode == 0:
+                _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
+                success(f"Nginx настроен (только HTTP→HTTPS редирект, Xray владеет :{SERVER_PORT})")
+            else:
+                _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
+                success("Nginx перезапущен (chain B + xHTTP режим)")
+            return
+
+        # Нормализуем path: ведущий слэш обязателен, без trailing slash (кроме корня).
+        _xhttp_path = (XHTTP_PATH or "/").strip()
+        if not _xhttp_path.startswith("/"):
+            _xhttp_path = "/" + _xhttp_path
+        _xhttp_path = _xhttp_path.rstrip("/") or "/"
+
+        # Nginx location для xHTTP path. Используем префиксный матч (без знака =),
+        # чтобы Nginx передавал upstream оригинальный URI с query-string.
+        # proxy_pass без URI → Nginx передаёт запрос как есть (нужно для xHTTP).
+        _backend = f"127.0.0.1:{XHTTP_BACKEND_PORT}"
+
+        info(f"xHTTP TLS: Nginx терминирует TLS на :{SERVER_PORT}, "
+             f"заглушка для /, проксирование {_xhttp_path} → http://{_backend}")
+
         cfg = NGINX_CONF_DIR / PARAM_DOMAIN
         cfg.write_text(textwrap.dedent(f"""\
-            # HTTP → HTTPS redirect (xHTTP TLS — Xray слушает :{SERVER_PORT} напрямую)
+            # =============================================================================
+            # VLESS + xHTTP + TLS — Nginx → Xray (loopback backend)
+            #
+            # Xray-core НЕ поддерживает fallbacks для xHTTP (задокументированное
+            # ограничение). Поэтому:
+            #   • Nginx терминирует TLS на :{SERVER_PORT}, отдаёт сайт-заглушку для /
+            #   • xHTTP path ({_xhttp_path}) проксируется на Xray 127.0.0.1:{XHTTP_BACKEND_PORT}
+            #     (security: none — TLS уже расшифрован Nginx)
+            # =============================================================================
+
+            # HTTP → HTTPS redirect
             server {{
                 listen 80;
                 listen [::]:80;
                 server_name {PARAM_DOMAIN};
-                root {web_root};
-                index index.html;
                 location /.well-known/acme-challenge/ {{ root {web_root}; }}
                 location / {{ return 301 https://$host$request_uri; }}
+            }}
+
+            # Main HTTPS server: сайт-заглушка + reverse-proxy на Xray для xHTTP path
+            server {{
+                {_listen_tls}
+                {_listen_tls_v6}
+            {_http2_line}
+                server_name {PARAM_DOMAIN};
+
+                ssl_certificate     /etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem;
+                ssl_certificate_key /etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem;
+                ssl_protocols TLSv1.2 TLSv1.3;
+                ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+                ssl_prefer_server_ciphers on;
+                ssl_session_cache shared:SSL:10m;
+                ssl_session_timeout 1h;
+
+                root {web_root};
+                index index.html;
+
+                add_header X-Robots-Tag "noindex, nofollow" always;
+
+                # ── xHTTP path → Xray backend (loopback) ─────────────────────────
+                # ВАЖНО для stream-up / packet-up режимов xHTTP:
+                #   • proxy_http_version 1.1 + Connection "" — keep-alive к upstream
+                #   • proxy_request_buffering off — НЕ буферизовать тело POST
+                #     (иначе стриминг ломается и CDN/middlebox рвёт соединение)
+                #   • proxy_buffering off — отдавать ответ клиенту сразу
+                #   • proxy_read_timeout / send_timeout = 1h — длинные стримы
+                #   • proxy_max_temp_file_size 0 — без буферизации на диск
+                location {_xhttp_path} {{
+                    proxy_pass http://{_backend};
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_set_header Connection "";
+                    proxy_request_buffering off;
+                    proxy_buffering off;
+                    proxy_max_temp_file_size 0;
+                    proxy_read_timeout 3600s;
+                    proxy_send_timeout 3600s;
+                    proxy_connect_timeout 60s;
+                }}
+
+                # ── Заглушка: сайт отдаётся для всех прочих путей ─────────────────
+                location / {{
+                    try_files $uri $uri/ =404;
+                }}
+            }}
+
+            # Default server: reject all other SNI (аналог REALITY-режима)
+            server {{
+                listen {SERVER_PORT} ssl default_server;
+                {"listen [::]:" + str(SERVER_PORT) + " ssl default_server;" if core.IS_IPV6_AVAILABLE else ""}
+                server_name _;
+                ssl_reject_handshake on;
             }}
         """))
         link = NGINX_ENABLED_DIR / PARAM_DOMAIN
         link.unlink(missing_ok=True)
         link.symlink_to(cfg)
-        _xhttp_nginx_bin = find_nginx_bin() or "/usr/sbin/nginx"
         r = _run([_xhttp_nginx_bin, "-t"], capture=True, check=False)
         if r.returncode == 0:
             _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
-            success(f"Nginx настроен (только HTTP→HTTPS редирект, Xray владеет :{SERVER_PORT})")
+            success(f"Nginx настроен (xHTTP TLS: заглушка + proxy / → http://{_backend})")
         else:
+            log_to_file("WARN", r.stderr or "")
             _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
             success("Nginx перезапущен (xHTTP TLS режим)")
         return
@@ -582,17 +736,38 @@ def setup_nginx_systemd_override() -> None:
     _run = core._run
     PROTOCOL_MODE = core.PROTOCOL_MODE
     PARAM_USE_DNSCRYPT = core.PARAM_USE_DNSCRYPT
+    INSTALL_MODE = core.INSTALL_MODE
+    CHAIN_NODES = core.CHAIN_NODES
+    CHAIN_EXIT_HOST = core.CHAIN_EXIT_HOST
     info("Настройка зависимости Nginx → Xray в systemd...")
     override_dir = Path("/etc/systemd/system/nginx.service.d")
     override_dir.mkdir(parents=True, exist_ok=True)
 
-    # При xHTTP Nginx не зависит от сокета Xray — можно запускать независимо
-    if PROTOCOL_MODE == "xhttp":
+    # Признак chain-mode с exit-нодами (Xray сам владеет :443 с TLS,
+    # Nginx только HTTP→HTTPS редирект — независимый запуск).
+    _chain_has_exit_nodes = (
+        INSTALL_MODE == "B"
+        and (bool(CHAIN_NODES) or bool(CHAIN_EXIT_HOST))
+    )
+
+    # При xHTTP (single-node или B+AWG/H2 без exit-нод) Nginx проксирует xhttp path
+    # на 127.0.0.1:XHTTP_BACKEND_PORT — стартуем после Xray, чтобы 502 не появлялся
+    # при одновременном старте.
+    #
+    # ИСКЛЮЧЕНИЕ: B + xHTTP + exit-ноды → Nginx не зависит от Xray (только редирект на :80).
+    if PROTOCOL_MODE == "xhttp" and not _chain_has_exit_nodes:
+        content = textwrap.dedent("""\
+            [Unit]
+            After=network.target xray.service
+            Wants=xray.service
+        """)
+        msg = "Nginx: запуск после Xray (xHTTP TLS — Nginx проксирует на loopback backend)"
+    elif PROTOCOL_MODE == "xhttp" and _chain_has_exit_nodes:
         content = textwrap.dedent("""\
             [Unit]
             After=network.target
         """)
-        msg = "Nginx: независимый запуск (xHTTP TLS — сокет не нужен)"
+        msg = "Nginx: независимый запуск (chain B + xHTTP — Nginx только HTTP→HTTPS редирект)"
     elif PARAM_USE_DNSCRYPT:
         # REALITY: xray создаёт сокет, nginx к нему подключается.
         # Nginx стартует ПОСЛЕ xray и dnscrypt.
