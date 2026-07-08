@@ -149,25 +149,42 @@ def awgs_install_dkms() -> bool:
     core.info(f"ОС: {distro} {info['version']} ({codename})")
 
     # ── Шаг 1: зависимости для DKMS-сборки ──────────────────────────────────
-    core.info("Установка зависимостей для DKMS-сборки...")
-    deps = ["dkms", "linux-headers-generic", "build-essential",
-            "curl", "qrencode", "wireguard-tools", "gpg"]
+    # ВАЖНО: wireguard-tools ставим первым, гарантированно и отдельно —
+    # он даёт бинарник `wg`, который используется для генерации ключей
+    # (awg genkey не существует в userspace-режиме amneziawg-go).
+    core.info("Установка базовых зависимостей (wireguard-tools, curl, qrencode)...")
+    core._run(["apt-get", "update", "-y"], check=False, quiet=True, timeout=120)
+    # Ставим по одному пакету — если один упадёт, остальные всё равно установятся
+    for pkg in ("curl", "qrencode", "wireguard-tools", "gpg", "dkms", "build-essential"):
+        r = core._run(["apt-get", "install", "-y", pkg],
+                      capture=True, check=False, quiet=True, timeout=180)
+        if r.returncode != 0:
+            core.log_to_file("WARN", f"apt install {pkg}: {r.stderr[-300:]}")
+
+    # linux-headers — отдельно, зависит от архитектуры и дистрибутива
+    arch = core._run(["uname", "-m"], capture=True, check=False).stdout.strip()
     if distro == "debian":
-        # На Debian linux-headers-generic нет — ставим под архитектуру
-        arch = core._run(["uname", "-m"], capture=True, check=False).stdout.strip()
         if arch == "aarch64":
             headers_pkg = "linux-headers-arm64"
         elif arch == "armv7l":
             headers_pkg = "linux-headers-armmp"
         else:
             headers_pkg = "linux-headers-amd64"
-        deps = ["dkms", headers_pkg, "build-essential",
-                "curl", "qrencode", "wireguard-tools", "gpg"]
-    core._run(["apt-get", "update", "-y"], check=False, quiet=True)
-    r = core._run(["apt-get", "install", "-y"] + deps, capture=True, check=False)
+    else:
+        # Ubuntu — linux-headers-generic работает на всех arch
+        headers_pkg = "linux-headers-generic"
+    r = core._run(["apt-get", "install", "-y", headers_pkg],
+                  capture=True, check=False, quiet=True, timeout=180)
     if r.returncode != 0:
-        core.log_to_file("WARN", f"apt install deps: {r.stderr[-500:]}")
-        # Не падаем — некоторые пакеты могут уже быть установлены
+        core.log_to_file("WARN", f"apt install {headers_pkg}: {r.stderr[-300:]}")
+
+    # Проверяем, что wg реально установлен
+    wg_check = core._run(["which", "wg"], capture=True, check=False)
+    if wg_check.returncode != 0:
+        core.warn("wireguard-tools НЕ установлен — генерация ключей будет невозможна!")
+        core.log_to_file("ERROR", f"wg not found after install. which wg: {wg_check.stderr}")
+    else:
+        core.info(f"wg доступен: {wg_check.stdout.strip()}")
 
     # ── Шаг 2: PPA amnezia/ppa (правильный!) ────────────────────────────────
     # Маппинг codename на поддерживаемый PPA (как в bivlked)
@@ -311,6 +328,8 @@ def awgs_install_dkms() -> bool:
                       capture=True, check=False)
         if r.returncode != 0 or not r.stdout.strip():
             core.warn("Пакет amneziawg-dkms не найден в apt-cache после обновления PPA")
+            core.warn(f"apt-cache stderr: {r.stderr[-300:] if r.stderr else '(пусто)'}")
+            core.warn("Возможно PPA amnezia/ppa временно недоступен или GPG-ключ не подошёл")
             return _awgs_install_dkms_fallback()
 
         # Устанавливаем amneziawg-tools + amneziawg-dkms + wireguard-tools
@@ -321,11 +340,18 @@ def awgs_install_dkms() -> bool:
             capture=True, check=False, timeout=600,  # 10 мин на DKMS-сборку
         )
         if r.returncode != 0:
-            core.log_to_file("ERROR", f"apt install amneziawg: {r.stderr[-1000:]}")
-            core.warn("Установка из PPA не удалась — пробуем Go-версию (userspace)")
+            err_tail = (r.stderr or "")[-800:]
+            core.log_to_file("ERROR", f"apt install amneziawg: {err_tail}")
+            core.warn("Установка пакетов amneziawg из PPA не удалась:")
+            # Покажем последние 5 строк stderr для диагностики
+            for line in err_tail.splitlines()[-5:]:
+                if line.strip():
+                    core.warn(f"  {line.strip()}")
+            core.warn("→ Пробуем Go-версию (userspace) как fallback")
             return _awgs_install_dkms_fallback()
     except Exception as e:
-        core.log_to_file("ERROR", f"awgs_install_dkms: {e}")
+        core.log_to_file("ERROR", f"awgs_install_dkms exception: {e}")
+        core.warn(f"Исключение при установке DKMS: {e}")
         return _awgs_install_dkms_fallback()
 
     # ── Шаг 3: проверка модуля ─────────────────────────────────────────────
@@ -373,8 +399,9 @@ def awgs_generate_keys() -> tuple:
     """
     Генерирует пару ключей сервера (priv+pub).
     Пробует `awg genkey`/`awg pubkey` (kernel-module версия), fallback на
-    `wg genkey`/`wg pubkey` (из wireguard-tools — всегда установлен).
+    `wg genkey`/`wg pubkey` (из wireguard-tools).
     Ключи Curve25519 совместимы между WG и AWG.
+    Если ни awg, ни wg не доступны — пытается доустановить wireguard-tools.
     Возвращает (privkey, pubkey) или ("", "") при ошибке.
     """
     core = _core_module()
@@ -383,32 +410,49 @@ def awgs_generate_keys() -> tuple:
     awg_path = core._run(["which", AWGS_BIN], capture=True, check=False).stdout.strip()
     wg_path = core._run(["which", "wg"], capture=True, check=False).stdout.strip()
 
-    bin_for_genkey = awg_path or wg_path
-    if not bin_for_genkey:
-        core.log_to_file("ERROR", "awgs_generate_keys: ни awg, ни wg не найдены в PATH")
-        return "", ""
+    # Если ни одного нет — пробуем установить wireguard-tools
+    if not awg_path and not wg_path:
+        core.warn("Ни awg, ни wg не найдены — устанавливаем wireguard-tools...")
+        core._run(["apt-get", "update", "-y"], check=False, quiet=True, timeout=120)
+        core._run(["apt-get", "install", "-y", "wireguard-tools"],
+                  check=False, quiet=True, timeout=180)
+        wg_path = core._run(["which", "wg"], capture=True, check=False).stdout.strip()
+        if not wg_path:
+            core.log_to_file("ERROR", "awgs_generate_keys: wg не установлен даже после apt install")
+            return "", ""
 
-    if not awg_path and wg_path:
-        core.info("Используем wg (wireguard-tools) для генерации ключей — awg недоступен")
+    # ВАЖНО: prefer wg over awg для генерации ключей.
+    # Причина: stub-обёртка awg (после fallback на amneziawg-go) проксирует
+    # вызовы на amneziawg-go, который НЕ поддерживает genkey/pubkey/genpsk.
+    # wg (из wireguard-tools) — нативный бинарник, всегда работает.
+    bin_for_genkey = wg_path or awg_path
+    if wg_path:
+        core.info(f"Генерация ключей через wg ({wg_path})")
+    else:
+        core.info(f"Генерация ключей через awg ({awg_path}) — wg недоступен")
 
-    # Приватный ключ
-    r = core._run(["bash", "-c", f"{bin_for_genkey} genkey"],
+    # Приватный ключ (genkey читает /dev/urandom, не требует stdin, но подаём пустой)
+    r = core._run([bin_for_genkey, "genkey"],
                   capture=True, check=False, input_text="")
     if r.returncode != 0:
-        core.log_to_file("ERROR", f"{bin_for_genkey} genkey: {r.stderr}")
+        core.log_to_file("ERROR", f"{bin_for_genkey} genkey failed (rc={r.returncode}): {r.stderr}")
         return "", ""
     privkey = r.stdout.strip()
 
-    # Публичный из приватного
-    r = core._run(["bash", "-c", f"echo '{privkey}' | {bin_for_genkey} pubkey"],
+    if not privkey:
+        core.log_to_file("ERROR", "awgs_generate_keys: пустой privkey")
+        return "", ""
+
+    # Публичный из приватного (pubkey читает privkey из stdin)
+    r = core._run([bin_for_genkey, "pubkey"],
                   capture=True, check=False, input_text=privkey + "\n")
     if r.returncode != 0:
-        core.log_to_file("ERROR", f"{bin_for_genkey} pubkey: {r.stderr}")
+        core.log_to_file("ERROR", f"{bin_for_genkey} pubkey failed (rc={r.returncode}): {r.stderr}")
         return "", ""
     pubkey = r.stdout.strip()
 
-    if not privkey or not pubkey:
-        core.log_to_file("ERROR", "awgs_generate_keys: пустые ключи")
+    if not pubkey:
+        core.log_to_file("ERROR", "awgs_generate_keys: пустой pubkey")
         return "", ""
 
     return privkey, pubkey
@@ -417,15 +461,15 @@ def awgs_generate_keys() -> tuple:
 def awgs_generate_preshared_key() -> str:
     """
     Генерирует PresharedKey (опциональный, для per-client PSK).
-    Пробует `awg genpsk`, fallback на `wg genpsk`.
+    Prefer wg (нативный), fallback на awg.
     """
     core = _core_module()
-    awg_path = core._run(["which", AWGS_BIN], capture=True, check=False).stdout.strip()
     wg_path = core._run(["which", "wg"], capture=True, check=False).stdout.strip()
-    bin_for_genpsk = awg_path or wg_path
+    awg_path = core._run(["which", AWGS_BIN], capture=True, check=False).stdout.strip()
+    bin_for_genpsk = wg_path or awg_path
     if not bin_for_genpsk:
         return ""
-    r = core._run(["bash", "-c", f"{bin_for_genpsk} genpsk"],
+    r = core._run([bin_for_genpsk, "genpsk"],
                   capture=True, check=False, input_text="")
     return r.stdout.strip() if r.returncode == 0 else ""
 
