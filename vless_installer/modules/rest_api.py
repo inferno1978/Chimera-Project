@@ -953,6 +953,31 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             }, 201)
             return
 
+        # POST /api/users/{email}/password — админ задаёт portal_password юзеру
+        # (нужно для юзеров, созданных при установке — у них portal_password пустой).
+        m = re.match(r"^/api/users/(.+)/password$", path)
+        if m:
+            if not self._require_admin():
+                return
+            email = unquote(m.group(1))
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            new_pass = body.get("new_password", "").strip()
+            if len(new_pass) < 8:
+                self._send_json({"error": "Пароль минимум 8 символов"}, 400)
+                return
+            users = _get_users()
+            for u in users:
+                if u.get("email") == email:
+                    u["portal_password"] = new_pass
+                    _save_users(users)
+                    self._send_json({"status": "changed", "email": email})
+                    return
+            self._send_json({"error": "user not found"}, 404)
+            return
+
         if path == "/api/rotate/uuid":
             if not self._require_admin():
                 return
