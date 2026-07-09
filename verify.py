@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-verify.py — Проверка целостности VLESS Ultimate Installer v4.14.0
+verify.py — Проверка целостности VLESS Ultimate Installer v4.15.0
 Запуск: python3 verify.py
 
 Актуализировано под новую модульную архитектуру (post-_core.py refactor):
