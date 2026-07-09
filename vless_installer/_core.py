@@ -4361,6 +4361,46 @@ def _do_export_users_zip(users: list, install_mode: str) -> None:
     _box_bottom()
 
 
+def _show_device_limit_info_core() -> None:
+    """Информация: ограничение доступа по устройствам в VLESS/REALITY."""
+    print()
+    _box_top("Ограничение доступа по устройствам")
+    _box_row()
+    _box_row(f"  {BOLD}Как работает VLESS/REALITY:{NC}")
+    _box_row(f"  {DIM}UUID в ссылке — это идентификатор пользователя, не устройства.{NC}")
+    _box_row(f"  {DIM}Xray-core не ограничивает количество одновременных подключений{NC}")
+    _box_row(f"  {DIM}с одним UUID. Ссылку можно скопировать на сколько угодно устройств.{NC}")
+    _box_row()
+    _box_sep()
+    _box_row(f"  {YELLOW}Рекомендуемый способ — отдельный UUID на каждое устройство:{NC}")
+    _box_row()
+    _box_row(f"  {DIM}Пример: создаёте 2 пользователя:{NC}")
+    _box_row(f"    {CYAN}alice-iphone{NC}  {DIM}→ ссылка для iPhone{NC}")
+    _box_row(f"    {CYAN}alice-macbook{NC}  {DIM}→ ссылка для MacBook{NC}")
+    _box_row(f"  {DIM}Каждое устройство получает свою ссылку со своим UUID.{NC}")
+    _box_row(f"  {DIM}Если одна ссылка утечёт — не затронет вторую.{NC}")
+    _box_row(f"  {DIM}При удалении пользователя — отключается только его устройство.{NC}")
+    _box_row()
+    _box_row(f"  {GREEN}Это единственный надёжный способ в VLESS/REALITY.{NC}")
+    _box_row()
+    _box_sep()
+    _box_row(f"  {YELLOW}Что насчёт HWID (Hardware ID)?{NC}")
+    _box_row()
+    _box_row(f"  {DIM}Коммерческие панели (Marzban, Hiddify Next, 3X-UI) используют{NC}")
+    _box_row(f"  {DIM}кастомные форки Xray со своим proxy-слоем, который добавляет{NC}")
+    _box_row(f"  {DIM}HWID-поле в handshake. Стандартный Xray-core HWID не поддерживает —{NC}")
+    _box_row(f"  {DIM}VLESS-протокол просто не имеет такого поля.{NC}")
+    _box_row()
+    _box_row(f"  {DIM}Альтернативы, которые НЕ работают надёжно:{NC}")
+    _box_row(f"  {DIM}• connlimit по IP — ломает NAT (2 устройства за роутером){NC}")
+    _box_row(f"  {DIM}• Мониторинг access.log — race condition, хрупко{NC}")
+    _box_row(f"  {DIM}• Блокировка по source IP — меняется при перезде/Wi-Fi смене{NC}")
+    _box_row()
+    _box_row(f"  {BOLD}Итог: создавайте отдельного пользователя на каждое устройство.{NC}")
+    _box_bottom()
+    input(f"  {CYAN}Нажмите Enter для возврата...{NC}")
+
+
 def do_unified_user_manager() -> None:
     """
     Единый менеджер пользователей — работает в обоих режимах A и B.
@@ -4425,6 +4465,7 @@ def do_unified_user_manager() -> None:
             _box_item("7", f"Отключить / Восстановить пользователя")
             _box_item("8", f"Редактировать пользователя (имя / email)")
             _box_item("E", f"Экспорт всех пользователей (ZIP с QR-кодами)")
+            _box_item("I", f"Информация: ограничение доступа по устройствам")
             _box_item("Q", f"Назад")
             _box_bottom()
             ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -4673,6 +4714,9 @@ def do_unified_user_manager() -> None:
                     continue
                 _do_export_users_zip(users, install_mode)
                 input(f"{BLUE}Нажмите Enter...{NC}")
+
+            elif ch == "i":
+                _show_device_limit_info_core()
 
             elif ch in ("q", ""):
                 break
