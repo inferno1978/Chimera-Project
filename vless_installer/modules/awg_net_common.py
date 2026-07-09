@@ -24,13 +24,27 @@ vless_installer/modules/awg_net_common.py
 
 Публичные функции:
   • iptables_ensure(core, args)        — idempotent -A через -C check
-  • build_nat_rule_args(...)           — список iptables-правил для NAT
-  • build_nat_idempotent_shell(...)    — bash-сниппет для PostUp (с -C check)
-  • build_nat_cleanup_shell(...)       — bash-сниппет для PostDown (с -D)
+  • build_nat_rule_args(...)           — список iptables-правил для NAT (IPv4)
+  • build_nat_idempotent_shell(...)    — bash-сниппет для PostUp (с -C check, IPv4)
+  • build_nat_cleanup_shell(...)       — bash-сниппет для PostDown (с -D, IPv4)
+  • build_nat6_rule_args(...)          — список ip6tables-правил для NAT (IPv6)
+  • build_nat6_idempotent_shell(...)   — bash-сниппет для PostUp (с -C check, IPv6)
+  • build_nat6_cleanup_shell(...)      — bash-сниппет для PostDown (с -D, IPv6)
   • build_sysctl_lines(...)            — строки для /etc/sysctl.d/XX-awg.conf
   • detect_wan_iface(core)             — имя WAN-интерфейса (default route)
   • apply_rp_filter_per_iface(core, awg_iface, wan_iface, value=2)
                                         — runtime sysctl -w для per-interface
+
+MASQUERADE scope (scope_source parameter):
+  • scope_source=True (default)  → MASQUERADE только трафика из awg_subnet
+    (`-s {subnet} -o {wan} -j MASQUERADE`). Используется в standalone.
+  • scope_source=False           → blanket MASQUERADE всего исходящего через WAN
+    (`-o {wan} -j MASQUERADE`, без -s). Используется в Mode B exit-VPS для
+    сохранения поведения до коммита 47f56d3 (см. docstring _awg_server_conf_text).
+  Выбор blanket для exit-VPS — намеренное сохранение обратной совместимости:
+  на exit-VPS в chain-режиме кроме AWG-трафика могут быть другие исходящие
+  потоки (например системные обновления, monitoring-агенты), которые тоже
+  должны маскарадиться через WAN. Сужение до `-s awg_subnet` сломало бы их.
 """
 from __future__ import annotations
 
@@ -96,27 +110,36 @@ def iptables_ensure(core, args: list) -> None:
 
 
 # ============================================================================
-#  NAT RULE BUILDERS
+#  NAT RULE BUILDERS (IPv4 — iptables)
 # ============================================================================
 
-def build_nat_rule_args(subnet: str, awg_iface: str, wan_iface: str) -> List[list]:
+def build_nat_rule_args(subnet: str, awg_iface: str, wan_iface: str,
+                        scope_source: bool = True) -> List[list]:
     """
     Возвращает список из 3 iptables-правил для NAT/FORWARD (как списки аргументов).
 
     Правила:
-      1. MASQUERADE трафика из awg_subnet → WAN (nat/POSTROUTING)
+      1. MASQUERADE трафика → WAN (nat/POSTROUTING).
+         При scope_source=True (default) — только из awg_subnet: `-s {subnet} -o {wan}`
+         При scope_source=False — blanket: `-o {wan}` без -s
       2. FORWARD IN from awg_iface (новые соединения от клиентов)
       3. FORWARD OUT to awg_iface (ESTABLISHED,RELATED — обратный трафик)
 
     Эти правила идентичны для:
-      • standalone (runtime через iptables_ensure + awg-nat.service)
-      • Mode B exit-VPS (через PostUp в awg0.conf)
+      • standalone (runtime через iptables_ensure + awg-nat.service) —
+        использует scope_source=True (default), MASQUERADE ограничен подсетью awg0.
+      • Mode B exit-VPS (через PostUp в awg0.conf) — использует scope_source=False
+        для сохранения поведения до 47f56d3 (blanket MASQUERADE на exit-VPS).
       • cascade (но там 2 интерфейса — awg0↔awg1, этот билдер НЕ применяется)
     """
+    if scope_source:
+        masq_rule = ["iptables", "-t", "nat", "-A", "POSTROUTING",
+                     "-s", subnet, "-o", wan_iface, "-j", "MASQUERADE"]
+    else:
+        masq_rule = ["iptables", "-t", "nat", "-A", "POSTROUTING",
+                     "-o", wan_iface, "-j", "MASQUERADE"]
     return [
-        # 1. MASQUERADE: трафик из awg_subnet → WAN интерфейс
-        ["iptables", "-t", "nat", "-A", "POSTROUTING",
-         "-s", subnet, "-o", wan_iface, "-j", "MASQUERADE"],
+        masq_rule,
         # 2. FORWARD: awg_iface → anywhere (новые соединения от клиентов)
         ["iptables", "-A", "FORWARD",
          "-i", awg_iface, "-j", "ACCEPT"],
@@ -127,9 +150,10 @@ def build_nat_rule_args(subnet: str, awg_iface: str, wan_iface: str) -> List[lis
     ]
 
 
-def build_nat_idempotent_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN") -> str:
+def build_nat_idempotent_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN",
+                               scope_source: bool = True) -> str:
     """
-    Bash-сниппет для PostUp в awg0.conf (wg-quick).
+    Bash-сниппет для PostUp в awg0.conf (wg-quick) — IPv4.
 
     Использует идиому `iptables -C ... || iptables -A ...` для идемпотентности
     (безопасно при повторных `awg-quick up awg0` без промежуточного `down`).
@@ -138,27 +162,128 @@ def build_nat_idempotent_shell(subnet: str, awg_iface: str, wan_iface_expr: str 
     По умолчанию '$WAN' (ожидает что $WAN определена ранее в PostUp).
     Для standalone systemd-юнита awg-nat.service там делается
     `WAN=$(ip route show default | awk '{print $5; exit}')`.
+
+    scope_source=True (default) → MASQUERADE scoped до awg_subnet (`-s {subnet} -o $WAN`).
+    scope_source=False          → MASQUERADE blanket (`-o $WAN` без -s).
     """
+    if scope_source:
+        masq_pair = (
+            f"iptables -t nat -C POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || "
+            f"iptables -t nat -A POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE"
+        )
+    else:
+        masq_pair = (
+            f"iptables -t nat -C POSTROUTING -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || "
+            f"iptables -t nat -A POSTROUTING -o {wan_iface_expr} -j MASQUERADE"
+        )
     return (
-        f"iptables -t nat -C POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || "
-        f"iptables -t nat -A POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE; "
-        f"iptables -C FORWARD -i {awg_iface} -j ACCEPT 2>/dev/null || "
-        f"iptables -A FORWARD -i {awg_iface} -j ACCEPT; "
-        f"iptables -C FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || "
-        f"iptables -A FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT"
+        masq_pair + "; "
+        + f"iptables -C FORWARD -i {awg_iface} -j ACCEPT 2>/dev/null || "
+          f"iptables -A FORWARD -i {awg_iface} -j ACCEPT; "
+        + f"iptables -C FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || "
+          f"iptables -A FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT"
     )
 
 
-def build_nat_cleanup_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN") -> str:
+def build_nat_cleanup_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN",
+                            scope_source: bool = True) -> str:
     """
-    Bash-сниппет для PostDown в awg0.conf — безопасное удаление правил.
+    Bash-сниппет для PostDown в awg0.conf — безопасное удаление правил (IPv4).
     Каждое удаление обёрнуто в `... 2>/dev/null || true` чтобы PostDown
     не падал даже если какого-то правила уже нет (например после ручной очистки).
+
+    scope_source должен совпадать с тем, что использовался в build_nat_idempotent_shell
+    (иначе -D не найдёт правило для удаления — но `|| true` спасёт от падения).
     """
+    if scope_source:
+        masq_del = (
+            f"iptables -t nat -D POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || true"
+        )
+    else:
+        masq_del = (
+            f"iptables -t nat -D POSTROUTING -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || true"
+        )
     return (
-        f"iptables -t nat -D POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || true; "
-        f"iptables -D FORWARD -i {awg_iface} -j ACCEPT 2>/dev/null || true; "
-        f"iptables -D FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true"
+        masq_del + "; "
+        + f"iptables -D FORWARD -i {awg_iface} -j ACCEPT 2>/dev/null || true; "
+        + f"iptables -D FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true"
+    )
+
+
+# ============================================================================
+#  NAT RULE BUILDERS (IPv6 — ip6tables)
+# ============================================================================
+# IPv6 NAT-паттерн идентичен IPv4 по структуре (MASQUERADE + FORWARD in/out),
+# отличается только бинарником (ip6tables vs iptables). Вынесен в отдельные
+# функции для читаемости и чтобы type-checkers не путались в family-параметре.
+#
+# subnet для IPv6 обычно = "fd66:66:66::/64" (AWG_SUBNET_V6 из _core.py globals).
+
+def build_nat6_rule_args(subnet: str, awg_iface: str, wan_iface: str,
+                         scope_source: bool = True) -> List[list]:
+    """
+    Возвращает список из 3 ip6tables-правил для NAT/FORWARD (IPv6).
+    Аналог build_nat_rule_args, но для ip6tables.
+    """
+    if scope_source:
+        masq_rule = ["ip6tables", "-t", "nat", "-A", "POSTROUTING",
+                     "-s", subnet, "-o", wan_iface, "-j", "MASQUERADE"]
+    else:
+        masq_rule = ["ip6tables", "-t", "nat", "-A", "POSTROUTING",
+                     "-o", wan_iface, "-j", "MASQUERADE"]
+    return [
+        masq_rule,
+        ["ip6tables", "-A", "FORWARD",
+         "-i", awg_iface, "-j", "ACCEPT"],
+        ["ip6tables", "-A", "FORWARD",
+         "-o", awg_iface, "-m", "state",
+         "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+    ]
+
+
+def build_nat6_idempotent_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN",
+                                scope_source: bool = True) -> str:
+    """
+    Bash-сниппет для PostUp в awg0.conf (wg-quick) — IPv6, ip6tables.
+    Аналог build_nat_idempotent_shell, но для ip6tables.
+    """
+    if scope_source:
+        masq_pair = (
+            f"ip6tables -t nat -C POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || "
+            f"ip6tables -t nat -A POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE"
+        )
+    else:
+        masq_pair = (
+            f"ip6tables -t nat -C POSTROUTING -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || "
+            f"ip6tables -t nat -A POSTROUTING -o {wan_iface_expr} -j MASQUERADE"
+        )
+    return (
+        masq_pair + "; "
+        + f"ip6tables -C FORWARD -i {awg_iface} -j ACCEPT 2>/dev/null || "
+          f"ip6tables -A FORWARD -i {awg_iface} -j ACCEPT; "
+        + f"ip6tables -C FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || "
+          f"ip6tables -A FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT"
+    )
+
+
+def build_nat6_cleanup_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN",
+                             scope_source: bool = True) -> str:
+    """
+    Bash-сниппет для PostDown в awg0.conf — безопасное удаление правил (IPv6).
+    Аналог build_nat_cleanup_shell, но для ip6tables.
+    """
+    if scope_source:
+        masq_del = (
+            f"ip6tables -t nat -D POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || true"
+        )
+    else:
+        masq_del = (
+            f"ip6tables -t nat -D POSTROUTING -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || true"
+        )
+    return (
+        masq_del + "; "
+        + f"ip6tables -D FORWARD -i {awg_iface} -j ACCEPT 2>/dev/null || true; "
+        + f"ip6tables -D FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true"
     )
 
 
