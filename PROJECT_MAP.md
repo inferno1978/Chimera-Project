@@ -1,8 +1,8 @@
 # VLESS Ultimate Installer — Карта проекта
 
-Полная карта всех модулей `vless_installer/modules/` (129 файлов) + `_core.py`.
+Полная карта всех модулей `vless_installer/modules/` (143 файла) + `_core.py`.
 
-`_core.py` (7 779 строк) — ядро установщика: глобальное состояние, главный orchestrator `main_menu()`, `_load_state_into_globals()`, функции которые мутируют много globals (AWG, chain multi-node, install orchestration). Все модули ниже обращаются к ядру через `_core_module()` lazy binding.
+`_core.py` (8 093 строк) — ядро установщика: глобальное состояние, главный orchestrator `main_menu()`, `_load_state_into_globals()`, функции которые мутируют много globals (AWG, chain multi-node, install orchestration). Все модули ниже обращаются к ядру через `_core_module()` lazy binding.
 
 ---
 
@@ -282,9 +282,10 @@
 
 | Файл | За что отвечает |
 |---|---|
-| `rest_api.py` | REST API + Admin Panel + User Portal — единый HTTP-сервер (ThreadingHTTPServer, bind 127.0.0.1). Endpoints: /api/health, /api/users (CRUD), /api/rotate/*, /api/geoip/*, /api/backup, /api/portal/* (links/traffic/health/clash/singbox/password). Rate-limit, Content-Length, HTTP/1.1, Basic Auth (secrets.compare_digest). Управление веб-панелью: install_web_service, do_manage_web_panel (меню с установкой/запуском/сменой порта/пароля/expose). |
-| `admin_panel.py` | HTML/CSS/JS Admin Panel — glassmorphism дизайн. Управление юзерами (создание/удаление/блокировка/пароль), ротация UUID/REALITY, бэкап. Кнопки: 🔒 Заблокировать, 🔑 Пароль, 🗑 Удалить. XSS-защита (esc()), credentials:same-origin в fetch. |
-| `user_portal.py` | HTML/CSS/JS User Portal — анимированный интерфейс для юзеров. VLESS-ссылки + QR-коды (flexbox, рядом по центру), трафик, TTL, health, скачивание Clash/Sing-box, смена пароля. html.escape() для name/email. |
+| `rest_api.py` | REST API + Admin Panel + User Portal — единый HTTP-сервер (ThreadingHTTPServer, bind 127.0.0.1). Endpoints: /api/health, /api/users (CRUD), /api/rotate/*, /api/geoip/*, /api/backup, /api/portal/* (links/traffic/health/clash/singbox/password), /api/awg/* (делегирует в `awg_rest_api.py`). Rate-limit, Content-Length, HTTP/1.1, Basic Auth (secrets.compare_digest). Управление веб-панелью: install_web_service, do_manage_web_panel (меню с установкой/запуском/сменой порта/пароля/expose). do_PATCH — новый HTTP-метод для PATCH /api/awg/peers/{name}. |
+| `awg_rest_api.py` | **REST API хендлеры для AmneziaWG-пиров** — встраивается в `rest_api.py` через `awg_handle_get/post/delete/patch`. Admin endpoints: GET /api/awg/status, GET /api/awg/peers, POST /api/awg/peers, DELETE /api/awg/peers/{name}, POST /api/awg/peers/{name}/regen, PATCH /api/awg/peers/{name}, GET /api/awg/peers/{name}/config, GET /api/awg/peers/{name}/qr, GET /api/awg/stats. User endpoints: GET /api/awg/my-peer, GET /api/awg/my-peer/config, GET /api/awg/my-peer/qr, POST /api/awg/my-peer/regen. Модель доступа: admin видит все пиры, user — только свой (по owner_email). Все /api/awg/* → 404 если AWG не установлен. _safe_peer_for_json фильтрует client_privkey/preshared_key/server_privkey. Валидация имени пира (path traversal protection). |
+| `admin_panel.py` | HTML/CSS/JS Admin Panel — glassmorphism дизайн. Управление юзерами (создание/удаление/блокировка/пароль), ротация UUID/REALITY, бэкап. Секция AmneziaWG: статус службы, таблица пиров (имя/IP/владелец/Rx/Tx/handshake/expires/статус/действия), формы добавления и изменения пира (owner_email select из VLESS-пользователей). Кнопки: 🔒 Заблокировать, 🔑 Пароль, 🗑 Удалить. XSS-защита (esc()), credentials:same-origin в fetch. |
+| `user_portal.py` | HTML/CSS/JS User Portal — анимированный интерфейс для юзеров. VLESS-ссылки + QR-коды (flexbox, рядом по центру), трафик, TTL, health, скачивание Clash/Sing-box, смена пароля. Карточка «Мой AmneziaWG» — показывается только если к юзеру привязан AWG-пир (через owner_email): QR-код, скачать .conf, перевыпустить ключи. html.escape() для name/email. |
 
 ---
 
@@ -320,18 +321,43 @@
 
 ---
 
+## 25. AmneziaWG 2.0 Standalone (14 модулей)
+
+Standalone AmneziaWG 2.0 — отдельный VPN-протокол (не зависит от VLESS-инфраструктуры), полный порт bivlked/amneziawg-installer v5.18.4. Доступен как пункт меню 16. Все константы имеют префикс `AWGS_*` (не конфликтуют с chain Mode B `AWG_*`). State в отдельном файле `/var/lib/xray-installer/awg_standalone_state.json`.
+
+| Файл | За что отвечает |
+|---|---|
+| `awg_constants.py` | Константы, пути, defaults (префикс AWGS_* — не конфликтует с chain Mode B) |
+| `awg_state.py` | State management (отдельный `awg_standalone_state.json`) — load/save/peer CRUD/owner_email миграция/find_peer_by_owner |
+| `awg_presets.py` | 9 carrier-пресетов (default/mobile/Yota/Tele2 MSK+Krasnoyarsk/Таттелеком/Мегафон/Билайн/T-Mobile US) |
+| `awg_hw_tuning.py` | Hardware-aware tuning (sysctl/swap/NIC) — idempotent |
+| `awg_apply.py` | Apply config (syncconf без даунтайма / restart fallback), `awgs_service_status`, `awgs_show_dump` |
+| `awg_standalone.py` | Главный модуль: install/uninstall/menu, конфликт-чек (chain Mode B, кросс-протокольная проверка портов через `check_port_used_by_other_protocol`) |
+| `awg_peers.py` | CRUD пиров + TUI меню (add/remove/list/stats/regen/modify), `owner_email` параметр, `_validate_email` |
+| `awg_qr.py` | QR-коды (terminal + PNG) + `vpn://` URI для Amnezia Client. `awgs_qr_export_peer(show_terminal=True)` — API-режим передаёт False (не печатает ключ в journal). PNG chmod 0o600, AWGS_KEYS_DIR chmod 0o700. |
+| `awg_expires.py` | Временные клиенты (`--expires=1h\|7d\|30d\|4w`) + cron автоудаления |
+| `awg_backup.py` | Backup/Restore с rollback при ошибке |
+| `awg_cascade.py` | Каскад AWG0 (вход, РФ) ↔ AWG1 (выход, зарубеж) + split-routing по RU-сетям |
+| `awg_diagnose.py` | Diagnostic + carrier-compare (kernel/sysctl/UFW/service/tunnel) |
+| `awg_uninstall.py` | Полное удаление (с сохранением backup'ов опционально) |
+| `awg_net_common.py` | Общий сетевой слой для AWG-модулей: NAT/MASQUERADE + sysctl + iptables-idempotency. `iptables_ensure` (idempotent -A через -C check), `build_nat_rule_args`/`build_nat_idempotent_shell`/`build_nat_cleanup_shell` (IPv4), `build_nat6_*` (IPv6), `build_sysctl_lines` (per-interface rp_filter=2 loose mode), `detect_wan_iface`. Используется из `awg_standalone.awgs_setup_nat_and_routing` и `awg_transport._awg_server_conf_text` (PostUp/PostDown). |
+
+**Дополнительно:** `awg_rest_api.py` (REST API хендлеры для веб-панели) — см. секцию 22.
+
+---
+
 ## Структура каталогов
 
 ```
 vless_installer/
-├── _core.py              (7 779 строк — ядро, главный orchestrator)
+├── _core.py              (8 093 строки — ядро, главный orchestrator)
 ├── __init__.py           (version = "4.15.0")
 ├── __all_exports.py      (реэкспорт API для программного доступа)
-└── modules/              (129 модулей)
+└── modules/              (143 модуля)
     ├── __init__.py
     ├── _vendor/          (вендорные модули)
     │   └── dpi_detector/
-    └── *.py              (129 файлов, см. группы выше)
+    └── *.py              (143 файла, см. группы выше)
 ```
 
 ## Паттерн доступа к ядру
