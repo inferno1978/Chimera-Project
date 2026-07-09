@@ -495,12 +495,18 @@ def awgs_build_server_conf(
     """
     peers = peers or []
 
-    # Серверный IP в подсети (первый адрес)
+    # Серверный IP в подсети (первый адрес).
+    # ВАЖНО: используем префикс подсети из аргумента (например /24), НЕ /32.
+    # При /32 ядро не добавляет маршрут "10.66.66.0/24 dev awg0" →
+    # ответный трафик к клиентам не идёт через туннель → "подключение есть,
+    # но интернета нет" (баг зафиксирован в тестировании v4.14.0).
     base = subnet.split("/")[0].rsplit(".", 1)[0]
-    server_ip = f"{base}.1/32"
-    # IPv6 сервера
+    prefix = subnet.split("/")[1] if "/" in subnet else "24"
+    server_ip = f"{base}.1/{prefix}"
+    # IPv6 сервера (префикс из подсети, не /128 — иначе та же проблема с маршрутом)
     v6_base = subnet_v6.split("::")[0]
-    server_ipv6 = f"{v6_base}::1/128"
+    v6_prefix = subnet_v6.split("/")[1] if "/" in subnet_v6 else "64"
+    server_ipv6 = f"{v6_base}::1/{v6_prefix}"
 
     lines = []
     lines.append("[Interface]")
@@ -609,6 +615,150 @@ def awgs_setup_firewall(port: int) -> bool:
         return True
     core.warn(f"UFW: не удалось открыть порт {port}/udp: {r.stderr}")
     return False
+
+
+# ============================================================================
+#  NAT / МАРШРУТИЗАЦИЯ — критично для standalone AWG
+# ============================================================================
+
+def awgs_detect_wan_interface() -> str:
+    """Возвращает имя WAN-интерфейса (через который идёт default route)."""
+    core = _core_module()
+    r = core._run(["ip", "route", "show", "default"], capture=True, check=False)
+    if r.returncode == 0:
+        # default via X.X.X.X dev eth0 ...
+        import re
+        m = re.search(r"\bdev\s+(\S+)", r.stdout)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
+    """
+    Настраивает NAT/MASQUERADE + FORWARD + sysctl для standalone AWG.
+
+    КРИТИЧНО: без этого "подключение есть, но интернета нет" —
+    пакеты от клиента (10.66.66.x) уходят в интернет через awg0,
+    но без MASQUERADE они имеют source=10.66.66.x (приватный IP),
+    который не маршрутизируется в интернете → ответы не приходят.
+
+    Также включает:
+    • net.ipv4.ip_forward=1 (если ещё не включён)
+    • rp_filter=0 на awg0 и WAN (иначе ядро может отбрасывать обратный трафик)
+    • iptables MASQUERADE для подсети awg0 → WAN
+    • iptables FORWARD: awg0 → anywhere (ACCEPT)
+    • iptables FORWARD: anywhere → awg0 (ESTABLISHED,RELATED ACCEPT)
+    • systemd-юнит awg-nat.service для перманентности (After=awg-quick@awg0)
+    """
+    core = _core_module()
+    info = core.info
+    success = core.success
+    warn = core.warn
+    from .awg_constants import AWGS_INTERFACE
+
+    if not wan_iface:
+        wan_iface = awgs_detect_wan_interface()
+    if not wan_iface:
+        warn("Не удалось определить WAN-интерфейс — NAT не настроен")
+        return False
+
+    info(f"WAN-интерфейс: {wan_iface}")
+
+    # 1. sysctl: ip_forward=1
+    info("Настройка sysctl (ip_forward, rp_filter)...")
+    r = core._run(["sysctl", "-n", "net.ipv4.ip_forward"], capture=True, check=False)
+    if r.stdout.strip() != "1":
+        core._run(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=False, quiet=True)
+        info("  net.ipv4.ip_forward: 0 → 1")
+    else:
+        info("  net.ipv4.ip_forward: уже 1")
+
+    # rp_filter=0 на awg0 и WAN (loose mode = 2 обычно OK, но strict = 1 ломает NAT)
+    for iface in (AWGS_INTERFACE, wan_iface, "all", "default"):
+        r = core._run(["sysctl", "-n", f"net.ipv4.conf.{iface}.rp_filter"],
+                      capture=True, check=False)
+        if r.returncode == 0 and r.stdout.strip() not in ("0", "2"):
+            core._run(["sysctl", "-w", f"net.ipv4.conf.{iface}.rp_filter=0"],
+                      check=False, quiet=True)
+            info(f"  rp_filter {iface}: {r.stdout.strip()} → 0")
+
+    # Перманентим sysctl
+    sysctl_conf = Path("/etc/sysctl.d/99-awg-standalone.conf")
+    try:
+        sysctl_lines = []
+        if sysctl_conf.exists():
+            sysctl_lines = [
+                l for l in sysctl_conf.read_text().splitlines()
+                if not l.startswith("net.ipv4.ip_forward")
+                and not l.startswith("net.ipv4.conf.all.rp_filter")
+                and not l.startswith("net.ipv4.conf.default.rp_filter")
+            ]
+        sysctl_lines.extend([
+            "net.ipv4.ip_forward = 1",
+            "net.ipv4.conf.all.rp_filter = 0",
+            "net.ipv4.conf.default.rp_filter = 0",
+        ])
+        sysctl_conf.write_text("\n".join(sysctl_lines) + "\n")
+    except Exception as e:
+        core.log_to_file("WARN", f"awgs_setup_nat sysctl persist: {e}")
+
+    # 2. iptables: MASQUERADE + FORWARD
+    info("Настройка iptables (MASQUERADE + FORWARD)...")
+    # Извлекаем подсеть без префикса для правил (10.66.66.0/24)
+    # Используем как есть — subnet уже в формате CIDR
+    awg_subnet = subnet
+
+    # MASQUERADE: трафик из awg_subnet → WAN интерфейс
+    core._run(
+        ["iptables", "-t", "nat", "-A", "POSTROUTING",
+         "-s", awg_subnet, "-o", wan_iface, "-j", "MASQUERADE"],
+        check=False, quiet=True,
+    )
+    # FORWARD: awg0 → anywhere (новые соединения от клиентов)
+    core._run(
+        ["iptables", "-A", "FORWARD",
+         "-i", AWGS_INTERFACE, "-j", "ACCEPT"],
+        check=False, quiet=True,
+    )
+    # FORWARD: anywhere → awg0 (ответы на установленные соединения)
+    core._run(
+        ["iptables", "-A", "FORWARD",
+         "-o", AWGS_INTERFACE, "-m", "state",
+         "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+        check=False, quiet=True,
+    )
+    success(f"iptables: MASQUERADE {awg_subnet} → {wan_iface} + FORWARD правила")
+
+    # 3. systemd-юнит awg-nat.service — для перманентности после reboot
+    info("Создание systemd-юнита awg-nat.service...")
+    from .awg_constants import AWGS_SYSTEMD_AWG_QUICK
+    nat_unit = Path("/etc/systemd/system/awg-nat.service")
+    nat_unit_content = f"""[Unit]
+Description=AWG standalone NAT + FORWARD rules
+After={AWGS_SYSTEMD_AWG_QUICK}
+Requires={AWGS_SYSTEMD_AWG_QUICK}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'WAN=$(ip route show default | awk "{{print \\$5; exit}}"); iptables -t nat -A POSTROUTING -s {awg_subnet} -o $WAN -j MASQUERADE; iptables -A FORWARD -i {AWGS_INTERFACE} -j ACCEPT; iptables -A FORWARD -o {AWGS_INTERFACE} -m state --state ESTABLISHED,RELATED -j ACCEPT'
+ExecStop=/bin/bash -c 'iptables -t nat -D POSTROUTING -s {awg_subnet} -j MASQUERADE 2>/dev/null; iptables -D FORWARD -i {AWGS_INTERFACE} -j ACCEPT 2>/dev/null; iptables -D FORWARD -o {AWGS_INTERFACE} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; true'
+
+[Install]
+WantedBy=multi-user.target
+"""
+    try:
+        nat_unit.write_text(nat_unit_content)
+        core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
+        core._run(["systemctl", "enable", "awg-nat.service"],
+                  check=False, quiet=True)
+        success("awg-nat.service создан и включен (NAT после reboot)")
+    except Exception as e:
+        warn(f"Не удалось создать awg-nat.service: {e}")
+        warn("NAT правила применены в runtime, но не переживут reboot")
+
+    return True
 
 
 # ============================================================================
@@ -771,6 +921,12 @@ def awgs_install(
     if not awgs_setup_systemd():
         warn("Не удалось запустить сервис — проверьте journalctl")
         # Не возвращаем False — конфиг создан, можно дебажить
+
+    # 11.1 NAT / маршрутизация — КРИТИЧНО для standalone AWG
+    # Без MASQUERADE + ip_forward + FORWARD правил клиенты подключаются,
+    # но не получают интернет (ответный трафик не доходит).
+    info("Настройка NAT/MASQUERADE + ip_forward (для интернета у клиентов)...")
+    awgs_setup_nat_and_routing(subnet=subnet)
 
     # 12. Сохранение state
     info("Сохранение state...")
