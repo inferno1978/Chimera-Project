@@ -295,8 +295,9 @@ tr:hover { background: rgba(56,189,248,0.05); }
   <!-- Actions -->
   <div class="actions">
     <button class="btn btn-primary" onclick="showAddUserModal()">➕ Добавить пользователя</button>
-    <button class="btn btn-primary" onclick="rotateUUID()">🔄 Ротация UUID</button>
-    <button class="btn btn-primary" onclick="rotateReality()">🔑 Ротация REALITY</button>
+    <button class="btn btn-primary" onclick="syncUsers()">🔄 Синхронизация пользователей</button>
+    <button class="btn btn-primary" onclick="rotateUUID()">🔑 Ротация UUID</button>
+    <button class="btn btn-primary" onclick="rotateReality()">🔐 Ротация REALITY</button>
     <button class="btn btn-primary" onclick="createBackup()">💾 Создать бэкап</button>
   </div>
 
@@ -586,6 +587,26 @@ async function addUser() {
     loadUsers();
   } else {
     showToast('Ошибка создания', 'error');
+  }
+}
+
+// ── Sync users (подтянуть TUI-юзеров из config.json в users.json) ──────────
+async function syncUsers() {
+  if (!confirm('Синхронизировать список пользователей?\n\n' +
+               'Подтягивает юзеров, созданных через TUI (они есть в config.json Xray, ' +
+               'но отсутствуют в users.json) в список админ-панели.\n\n' +
+               'Импортированным юзерам нужно будет задать пароль портала (🔑 Пароль).')) return;
+  showToast('Синхронизация...');
+  const data = await api('/api/users/sync', 'POST');
+  if (data && data.status === 'synced') {
+    if (data.added > 0) {
+      showToast('Синхронизировано: ' + data.added + ' новых юзеров');
+    } else {
+      showToast('Новых юзеров не найдено — список уже актуален');
+    }
+    loadUsers();
+  } else {
+    showToast('Ошибка синхронизации', 'error');
   }
 }
 

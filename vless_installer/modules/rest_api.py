@@ -166,7 +166,7 @@ def _save_users(users: list[dict]) -> None:
     core._set_config_owner(users_file)
 
 
-def _sync_users_from_config() -> None:
+def _sync_users_from_config() -> int:
     """Синхронизирует users.json с config.json Xray.
 
     Проблема: при первичной установке юзер создаётся только в config.json
@@ -178,16 +178,18 @@ def _sync_users_from_config() -> None:
     config.json в users.json (если их там нет). portal_password для
     импортированных юзеров пустой — они должны установить его через админку
     или скрипт (uuid-fallback убран в security-фиксе).
+
+    Возвращает количество добавленных юзеров (0 если ничего не изменилось).
     """
     core = _core_module()
     CONFIG_DIR = core.CONFIG_DIR
     cfg_path = CONFIG_DIR / "config.json"
     if not cfg_path.exists():
-        return
+        return 0
     try:
         cfg = json.loads(cfg_path.read_text())
     except Exception:
-        return
+        return 0
     # Собираем всех clients из всех VLESS inbounds
     config_clients = []
     for inb in cfg.get("inbounds", []):
@@ -200,7 +202,7 @@ def _sync_users_from_config() -> None:
                         "email": c.get("email", ""),
                     })
     if not config_clients:
-        return
+        return 0
     # Читаем текущий users.json
     users = _get_users()
     existing_uuids = {u.get("uuid", "") for u in users}
@@ -234,6 +236,7 @@ def _sync_users_from_config() -> None:
     if added:
         _save_users(users)
         print(f"[VLESS Web] Синхронизация: добавлено {added} юзеров из config.json в users.json")
+    return added
 
 
 def _get_user_traffic(email: str) -> dict:
@@ -1090,6 +1093,28 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 from vless_installer.modules.backup_rollback import create_backup
                 create_backup()
                 self._send_json({"status": "backup_created"})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # POST /api/users/sync — синхронизация users.json с config.json Xray.
+        # Подтягивает юзеров, созданных через TUI (они есть в config.json,
+        # но отсутствуют в users.json) в users.json. Нужно чтобы:
+        #   1. Эти юзеры появились в списке админ-панели
+        #   2. Им можно было задать portal_password (для входа в User Portal)
+        #   3. При следующем создании юзера через админку они не затёрлись
+        #      (раньше _save_users затирал config.json clients, потеря TUI-юзеров)
+        if path == "/api/users/sync":
+            if not self._require_admin():
+                return
+            try:
+                added = _sync_users_from_config()
+                self._send_json({
+                    "status": "synced",
+                    "added": added,
+                    "message": (f"Синхронизировано {added} новых юзеров из config.json"
+                                if added else "Новых юзеров в config.json не найдено — users.json уже актуален"),
+                })
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
             return
