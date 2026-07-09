@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# === v4.14.0 ===
+# === v4.15.0 ===
 """
-VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.14.0
+VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.15.0
 Python 3.12+ port
 
 Поддержка: Ubuntu 20.04/22.04/24.04, Debian 11/12/13
@@ -498,7 +498,7 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.14.0 ===")
+log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.15.0 ===")
 log_to_file("INFO", f"Время начала: {datetime.now()}")
 
 # =============================================================================
@@ -525,7 +525,7 @@ def _make_banner(show_ram_warning: bool = True) -> str:
         "  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝",
     ]
     _info_lines = [
-        "VLESS REALITY + xHTTP TLS INSTALLER v4.14.0",
+        "VLESS REALITY + xHTTP TLS INSTALLER v4.15.0",
         "IPv6 DualStack | 6 Templates | SHA256 Verify",
         "Balancer: RoundRobin | LeastPing | LeastLoad",
         "Dashboard | FP Rotate | GeoCheck | Multi-User",
@@ -7691,7 +7691,7 @@ def main_menu() -> None:
             _BOX_W_saved = _BOX_W
             _BOX_W = 64
             _box_top()
-            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.14.0{NC}  {DIM}│{NC}  {mode_str}")
+            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.15.0{NC}  {DIM}│{NC}  {mode_str}")
             _box_sep()
             _box_row()
             _box_row(f"  {CYAN}1{NC}  ⚙️  {TITLE}Установка и Система{NC}")

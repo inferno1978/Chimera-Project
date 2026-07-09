@@ -2,6 +2,162 @@
 
 ---
 
+## v4.15.0 — AmneziaWG peer management в Web Admin Panel + User Portal + security hardening — 9 июля 2026
+
+### 🛡️ AmneziaWG-управление в веб-панели
+
+Полноценное управление пирами AmneziaWG standalone через REST API и веб-интерфейс — как из Admin Panel (все пиры, полный CRUD), так и из User Portal (собственный пир, ограниченный self-service). Пользователь теперь может скачать свой AWG-конфиг, посмотреть QR-код и перевыпустить ключи без обращения к админу.
+
+**Новый модуль `awg_rest_api.py`** — HTTP-хендлеры для встраивания в `rest_api.py`. Делегирует авторизацию в `_require_admin()`/`_require_user()` (не дублирует rate-limit / auth). Все `/api/awg/*` отдают 404 (не 500) если AWG не установлен.
+
+**REST API endpoints (admin, через `_require_admin`):**
+- `GET /api/awg/status` — статус сервиса (active/enabled) + interface/port/subnet/endpoint/peers_count
+- `GET /api/awg/peers` — список всех пиров с owner_email, трафиком (rx/tx), handshake, expires, статусом; **без client_privkey и preshared_key**
+- `POST /api/awg/peers` — создать пир `{name, expires?, psk?, owner_email?}`
+- `DELETE /api/awg/peers/{name}` — удалить пир
+- `POST /api/awg/peers/{name}/regen` — перегенерировать ключи (admin: любой пир)
+- `PATCH /api/awg/peers/{name}` — изменить параметр `{param, value}`; param ∈ `dns1`/`dns2`/`expires_at`/`owner_email`
+- `GET /api/awg/peers/{name}/config` — `.conf` файл (admin видит все)
+- `GET /api/awg/peers/{name}/qr` — PNG QR-код (admin видит все)
+- `GET /api/awg/stats` — статистика трафика по пирам (`awg show` → JSON, **без raw_dump** — секреты не утекают)
+
+**REST API endpoints (user, через `_require_user`):**
+- `GET /api/awg/my-peer` — собственный пир по `owner_email == user.email` (если нет — `{"peer": null}`)
+- `GET /api/awg/my-peer/config` — `.conf` только своего пира (404 если нет)
+- `GET /api/awg/my-peer/qr` — PNG QR только своего пира (404 если нет)
+- `POST /api/awg/my-peer/regen` — перевыпустить свои ключи
+- `POST /api/awg/peers/{name}/regen` — regen по имени (admin: любой; user: только свой, иначе 404 — не раскрывает существование чужого)
+
+**Модель доступа:**
+- **Админ** управляет всеми пирами без ограничений: создание, удаление, regen, изменение параметров, привязка/отвязка/переназначение пира к любому VLESS-пользователю (`owner_email`) в любой момент.
+- **Пользователь** через User Portal видит и может действовать только на пир, у которого `owner_email == его email`: скачать конфиг, посмотреть QR, посмотреть свой трафик/expires, перевыпустить ключи. Привязку, удаление, чужие пиры — не может.
+- **Пир без `owner_email`** — "технический"/неразобранный, виден только админу, в User Portal не всплывает.
+
+**Интеграция в `rest_api.py`:**
+- `do_GET`/`do_POST`/`do_DELETE` — добавлены ветки `/api/awg/*` → `awg_rest_api.py`
+- `do_PATCH` — **новый HTTP-метод** (раньше отсутствовал) → `awg_rest_api.py` (для `PATCH /api/awg/peers/{name}`)
+- Авторизация переиспользуется через `self._require_admin()`/`self._require_user()` — без дублирования rate-limit
+
+**Точечные изменения в `awg_state.py` и `awg_peers.py`:**
+- Поле `owner_email: ""` добавлено в структуру peer (миграция: `awgs_state_ensure_peer_owner_field()` добавляет поле существующим пирам, если отсутствует — idempotent)
+- `awgs_state_find_peer_by_owner(email)` — lookup пира по владельцу для User Portal
+- `awg_peer_add(owner_email="")` — новый параметр, простая email-валидация (не проверяет существование VLESS-юзера физически — админ может привязать к любому email)
+- `awg_peer_modify` — `owner_email` добавлен в список поддерживаемых param (`""` = снять привязку)
+- `_validate_email()` — простая regex, пустая строка допустима
+
+---
+
+### 🌐 Admin Panel — вкладка AmneziaWG
+
+Новая секция "🛡 AmneziaWG" в Admin Panel (`admin_panel.py`), в стиле проекта (существующие CSS-переменные `--bg-card`/`--accent`/`--radius`, без новой палитры).
+
+**Карточка статуса службы AWG:**
+- Сервис: активен/остановлен (status-badge)
+- Autostart: вкл/выкл
+- Интерфейс (awg0), порт (51820), подсеть (10.66.66.0/24), endpoint, количество пиров
+
+**Таблица всех пиров:**
+- Колонки: имя, IP, владелец (owner_email или "— не привязан —"), Rx, Tx, Handshake, истекает, статус (active/expired), действия
+- Действия на пира: QR (PNG в новой вкладке), скачать .conf, 🔄 Regen, ✏ Изменить, 🗑 Удалить
+- Владелец — dropdown/select с привязкой к email из существующего списка VLESS-пользователей + "не привязан"
+- Авто-скрытие секции если AWG не установлен (API возвращает 404)
+
+**Форма "Добавить пира":**
+- Имя, expires (опционально), PSK (checkbox), владелец (select из VLESS-пользователей)
+- JS-паттерн `fetch()` + Basic Auth — тот же что в остальных разделах панели
+
+**Форма "Изменить пира":**
+- Параметр: owner_email / expires_at / dns1 / dns2 (select)
+- Значение: для owner_email — select из VLESS-пользователей; для остальных — text input
+
+**Автообновление:** статус и пиры обновляются каждые 60 секунд.
+
+---
+
+### 👤 User Portal — блок "Мой AmneziaWG"
+
+Новая карточка в User Portal (`user_portal.py`), между "Подключение" и "Трафик".
+
+- При загрузке дёргает `GET /api/awg/my-peer`
+- Если `peer: null` — карточка **скрыта** (без заглушек "недоступно")
+- Если пир есть — показывает: имя, IP, статус (active/expired), истекает, Rx/Tx, handshake, **QR-код** (через `/api/awg/my-peer/qr`), кнопки "📥 Скачать .conf" и "🔄 Перевыпустить ключи"
+- regen вызывает `POST /api/awg/my-peer/regen` с подтверждением
+- Карточка обновляется каждые 60 секунд
+
+---
+
+### 🔒 Security hardening (3 фикса после code-review)
+
+**1. PSK не утекает в JSON** (`awg_rest_api.py`)
+- `_safe_peer_for_json()` фильтровал только `client_privkey`, но `preshared_key` отдавался в `GET /api/awg/peers` и `GET /api/awg/my-peer`. PSK — боевой секрет (post-quantum resistance layer), утечка ослабляет туннель.
+- Фикс: `preshared_key` (и `server_privkey` дефенсивно) добавлены в `_NEVER_IN_JSON` tuple.
+
+**2. QR PNG пишутся с chmod 0o600** (`awg_qr.py`)
+- `awgs_qr_save_png()` не делал chmod — PNG создавался с umask-правами (часто 0o644). PNG содержит vpn:// URI с приватным ключом + PSK — читается любым локальным юзером.
+- Фикс: `path.chmod(0o600)` после успешной генерации. Также `AWGS_KEYS_DIR.chmod(0o700)` в `awgs_qr_save_client_conf` и явный `AWGS_KEYS_DIR.chmod(0o700)` в начале `awgs_qr_export_peer` (не полагается на побочный эффект `save_client_conf`).
+- Тихий провал chmod заменён на `core.log_to_file("WARNING", ...)` — админ заметит в `/var/log/vless-install.log`.
+
+**3. Приватный ключ не утекает в systemd journal** (`awg_qr.py` + `awg_rest_api.py`)
+- `GET /api/awg/.../qr` вызывал `awgs_qr_export_peer(peer)`, который дёргал `awgs_qr_show_terminal()` — `print(r.stdout)` ANSI QR с vpn:// URI (приватный ключ + PSK). Под systemd stdout уходит в journal (`journalctl -u vless-web`). На каждый просмотр QR юзером ключ буквально писался в системный лог.
+- Фикс: параметр `show_terminal: bool = True` в `awgs_qr_export_peer()`. Default `True` сохраняет TUI-поведение (`awg_peers.py` без изменений). REST API хендлеры передают `show_terminal=False` — файлы генерируются, но `print()` не вызывается.
+
+**Дополнительно:** `raw_dump` убран из `GET /api/awg/stats` — необработанный вывод `awg show all dump` содержал приватный ключ сервера (поле 1 interface-строки) и PSK каждого пира (поле 2 peer-строки). Фронтенду он не нужен (есть распарсенные `peers`).
+
+---
+
+### 🐛 Bug fixes (install flow)
+
+**1. Порядок запуска Nginx → Unix-сокет** (`_core.py`)
+- В основном flow установки код ждал сокет ДО запуска nginx — deadlock, потому что сокет создаёт именно nginx (`listen unix:`), а не xray. Цикл `range(1, 31)` всегда завершался `else` → гарантированный warning "Сокет не появился" после 30 сек. Увеличение timeout не помогало — проблема не в длительности, а в порядке операций.
+- Фикс: сначала запускаем nginx (он создаёт сокет), потом проверяем сокет (цикл `range(20)`, обычно <1 сек). Та же логика что уже работала в `_nginx_restart_if_reality()` и `emergency_repair.py`.
+
+**2. state.json сохраняется ДО health check** (`_core.py`)
+- `run_full_health_check()` вызывался ДО сохранения `state.json`. `health.py` читает `domain` и `server_port` из state.json (через `_get_state_value`, без импорта `_core` — чтобы избежать циклической зависимости). При первой установке state ещё не сохранён → `health_check_ssl()` получала пустой domain → ложный warning "SSL проверка пропущена: домен не задан" даже когда домен указан и сертификат получен. Аналогично `health_check_ports()` получала `server_port=443` (fallback) вместо реального порта.
+- Фикс: блок сохранения state.json перемещён ДО `run_full_health_check()`. Бонус: если исключение произойдёт между health check и финальным выводом — state.json уже сохранён (раньше терялся полностью).
+
+---
+
+### 🧪 Тесты и anti-regression
+
+**`tests/test_awg_rest_api.py`** — 57 unit-тестов (новый файл):
+- `TestAWGRestAPIAwgNotInstalled` (6) — все `/api/awg/*` → 404 если AWG off
+- `TestAWGRestAPIAdminAuth` (7) — admin endpoints → 401 без admin auth
+- `TestAWGRestAPIStatsNoSecretLeak` (5) — `/api/awg/stats` не утекает server_privkey/PSK
+- `TestAWGRestAPIPeerNameValidation` (3) — path traversal блокируется
+- `TestAWGRestAPIUserEndpoints` (5) — my-peer auth, peer:null, privkey не утекает
+- `TestAWGRestAPISafePeerForJson` (4) — client_privkey + preshared_key + server_privkey фильтруются
+- `TestAWGStateOwnerEmailMigration` (3) — миграция owner_email
+- `TestAWGPeerAddOwnerEmail` (3) — add с/без/невалидным owner_email
+- `TestAWGPeerModifyOwnerEmail` (3) — modify valid/empty(unbind)/invalid
+- `TestValidateEmail` (3) — empty/valid/invalid emails
+- `TestUserCannotRegenOthersPeer` (3) — user→чужой пир=404, admin→любой=200, user→свой=200
+- `TestUserCannotAccessAdminEndpoints` (2) — user DELETE/PATCH → 401
+- `TestAWGQRPngChmod` (3) — PNG 0o600, AWGS_KEYS_DIR 0o700
+- `TestAWGQRExportNoPrintInApiMode` (5) — show_terminal=False не печатает в stdout
+- `TestAWGQREndToEndChmod` (1) — E2E: `GET /api/awg/peers/{name}/qr` → PNG с `stat.S_IMODE == 0o600` на диске
+
+**`full_test.py`** — 2 новые секции (9 anti-regression проверок):
+- **Секция 9** (5 проверок) — порядок запуска Nginx → Unix-сокет: строка "Ожидание Unix-сокета от Xray" не должна вернуться; `range(1, 31)` цикл не должен вернуться; `nginx start` должен идти ДО `is_socket()`; `nginx_setup.py` должен содержать `listen unix:`; `xray_install.py` не должен делать `rm -f PARAM_SOCKET_PATH`
+- **Секция 10** (4 проверки) — state.json сохранён ДО health check: `STATE_FILE.write_text` должен идти ДО `run_full_health_check()` (regex для реального вызова, не упоминания в комментариях); `health_check_ssl` должен читать domain через `_get_state_value`; `health_check_ports` должен читать `server_port` через `_get_state_value`; warning-строка должна существовать
+
+**Тестовые результаты:**
+- `tests/`: 121/121 PASS (64 awg_net_common + 57 awg_rest_api)
+- `full_test.py`: 74/74 PASS (10.0/10 readiness, 10 секций)
+- `smoke_test_modules.py`: 42/42 PASS
+- `py_compile`: OK
+
+---
+
+### 📊 Цифры
+
+- Новых модулей: 1 (`awg_rest_api.py`)
+- Изменено файлов: 8 (`awg_qr.py`, `awg_peers.py`, `awg_state.py`, `awg_rest_api.py` [новый], `rest_api.py`, `admin_panel.py`, `user_portal.py`, `_core.py`)
+- Новых строк Python: ~1800
+- Новых тестов: 57 unit + 9 anti-regression статических
+- `full_test.py` секций: 8 → 10
+
+---
+
 ## v4.14.0 — AmneziaWG 2.0 standalone VPN (полный порт bivlked) — 9 июля 2026
 
 ### 🔒 Standalone AWG как отдельный пункт меню

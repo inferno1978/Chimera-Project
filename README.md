@@ -1,6 +1,6 @@
-# VLESS Ultimate Installer v4.14.0
+# VLESS Ultimate Installer v4.15.0
 
-[![Version](https://img.shields.io/badge/version-4.14.0-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
+[![Version](https://img.shields.io/badge/version-4.15.0-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
@@ -14,7 +14,7 @@
 ╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║
  ╚████╔╝ ███████╗███████╗███████║███████║
   ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝
-  Ultimate Installer v4.14.0
+  Ultimate Installer v4.15.0
 ```
 
 ## ⚡ Быстрый старт
@@ -154,7 +154,7 @@ VLESS-Ultimate-Installer/
         └── 19. Вендорные модули
             └── _vendor/dpi_detector/ (Python)
 
-        ── 20. AmneziaWG 2.0 standalone (13 модулей, NEW v4.14.0) ──
+        ── 20. AmneziaWG 2.0 standalone (13 модулей, NEW v4.15.0) ──
            awg_constants/state/presets/hw_tuning/apply/standalone/
            peers/qr/expires/backup/cascade/diagnose/uninstall
            — полный порт bivlked/amneziawg-installer, carrier-пресеты, каскад
@@ -194,7 +194,7 @@ VLESS-Ultimate-Installer/
 │                                                             │
 │  bootstrap.sh ──► main.py ──exec──► _core.py                │
 │                                         │                   │
-│                               modules/ (v4.14.0)           │
+│                               modules/ (v4.15.0)           │
 │                                         │                   │
 │         Xray-core              Nginx (TLS)                  │
 │         /etc/xray/             /etc/nginx/                  │
