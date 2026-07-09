@@ -200,35 +200,61 @@ def awgs_presets_validate_params(params: dict) -> tuple[bool, str]:
     """
     Валидирует параметры обфускации.
     Возвращает (ok, error_message).
-    Перенесено из validate_jc_value/validate_junk_size в bivlked.
+    Перенесено из validate_jc_value/validate_junk_size в bivlked + расширено
+    для S1/S2 (нет явного max в bivlked, используем 1280 как для Jmin/Jmax)
+    и H1-H4 (0-255, magic header byte).
     """
     from .awg_constants import (
         AWGS_JC_MIN, AWGS_JC_MAX, AWGS_JMIN_MAX, AWGS_JMAX_MAX,
         AWGS_S3_MAX, AWGS_S4_MAX,
     )
 
+    # Jc: 1-128
     jc = params.get("jc", 0)
     if not isinstance(jc, int) or jc < AWGS_JC_MIN or jc > AWGS_JC_MAX:
         return False, f"Jc={jc} вне диапазона ({AWGS_JC_MIN}-{AWGS_JC_MAX})"
 
+    # Jmin: 0-1280
     jmin = params.get("jmin", 0)
     if not isinstance(jmin, int) or jmin < 0 or jmin > AWGS_JMIN_MAX:
         return False, f"Jmin={jmin} вне диапазона (0-{AWGS_JMIN_MAX})"
 
+    # Jmax: 0-1280, >= Jmin
     jmax = params.get("jmax", 0)
     if not isinstance(jmax, int) or jmax < 0 or jmax > AWGS_JMAX_MAX:
         return False, f"Jmax={jmax} вне диапазона (0-{AWGS_JMAX_MAX})"
-
     if jmax < jmin:
         return False, f"Jmax ({jmax}) меньше Jmin ({jmin})"
 
+    # S1, S2: 0-1280 (junk size, как Jmin/Jmax)
+    for key in ("s1", "s2"):
+        v = params.get(key, 0)
+        if not isinstance(v, int) or v < 0 or v > AWGS_JMIN_MAX:
+            return False, f"{key.upper()}={v} вне диапазона (0-{AWGS_JMIN_MAX})"
+
+    # S3: 0-64
     s3 = params.get("s3", 0)
     if not isinstance(s3, int) or s3 < 0 or s3 > AWGS_S3_MAX:
         return False, f"S3={s3} вне диапазона (0-{AWGS_S3_MAX})"
 
+    # S4: 0-32
     s4 = params.get("s4", 0)
     if not isinstance(s4, int) or s4 < 0 or s4 > AWGS_S4_MAX:
         return False, f"S4={s4} вне диапазона (0-{AWGS_S4_MAX})"
+
+    # H1-H4: 0-255 (magic header byte)
+    for key in ("h1", "h2", "h3", "h4"):
+        v = params.get(key, 0)
+        if not isinstance(v, int) or v < 0 or v > 255:
+            return False, f"{key.upper()}={v} вне диапазона (0-255)"
+
+    # I1-I5: опциональные hex-строки (если не пустые — проверяем что hex)
+    for key in ("i1", "i2", "i3", "i4", "i5"):
+        v = params.get(key, "")
+        if v and not isinstance(v, str):
+            return False, f"{key.upper()} должен быть строкой"
+        if v and not all(c in "0123456789abcdefABCDEF" for c in v):
+            return False, f"{key.upper()} содержит не-hex символы"
 
     return True, ""
 

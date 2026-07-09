@@ -475,6 +475,183 @@ def awgs_generate_preshared_key() -> str:
 
 
 # ============================================================================
+#  РУЧНОЙ ВВОД ПАРАМЕТРОВ ОБФУСКАЦИИ
+# ============================================================================
+
+# Полный список параметров AWG 2.0 с описанием, диапазонами и рекомендациями.
+# Перенесено из upstream AmneziaWG + bivlked validation + real-world reports.
+AWGS_PARAMS_SPEC = [
+    # (key, label, min, max, recommended, description)
+    ("jc", "Jc (Junk packet count)",
+     1, 128, 4,
+     "Количество junk-пакетов перед реальным handshake. "
+     "Больше = сильнее обфускация, но больше overhead. "
+     "Mobile DPI (Tele2/Yota): фиксируйте 3."),
+    ("jmin", "Jmin (Junk packet min size)",
+     0, 1280, 40,
+     "Минимальный размер junk-пакета в байтах. "
+     "Default: 40-89. Mobile: 30-50."),
+    ("jmax", "Jmax (Junk packet max size)",
+     0, 1280, 70,
+     "Максимальный размер junk-пакета. Должен быть >= Jmin. "
+     "ВАЖНО для mobile: узкий Jmax (≤150) — Yota блокирует при Jmax>300. "
+     "Default: Jmin+50..250. Mobile: Jmin+20..80."),
+    ("s1", "S1 (Init packet junk size)",
+     0, 1280, 0,
+     "Доп. junk в init-пакете. 0 = выключено. "
+     "Рекомендуется 0 — S-параметры редко нужны и могут ломать handshake."),
+    ("s2", "S2 (Response packet junk size)",
+     0, 1280, 0,
+     "Доп. junk в response-пакете. 0 = выключено. Рекомендуется 0."),
+    ("s3", "S3 (Under-load packet junk size)",
+     0, 64, 0,
+     "Доп. junk в under-load пакетах (при загрузке сервера). 0 = выключено."),
+    ("s4", "S4 (Transport packet junk size)",
+     0, 32, 0,
+     "Доп. junk в transport-пакетах. 0 = выключено."),
+    ("h1", "H1 (Init packet magic header)",
+     0, 255, 1,
+     "Magic header для init-пакета (0-255). "
+     "Стандартные значения: H1=1, H2=2, H3=3, H4=4 (как в upstream)."),
+    ("h2", "H2 (Response packet magic header)",
+     0, 255, 2,
+     "Magic header для response-пакета."),
+    ("h3", "H3 (Under-load packet magic header)",
+     0, 255, 3,
+     "Magic header для under-load пакетов."),
+    ("h4", "H4 (Transport packet magic header)",
+     0, 255, 4,
+     "Magic header для transport-пакетов."),
+]
+
+# I1-I5 — опциональные, hex-строки (не числа)
+AWGS_PARAMS_SPEC_HEX = [
+    # (key, label, recommended, description)
+    ("i1", "I1 (Init packet junk allowed IP)",
+     "random",
+     "Hex-строка (48-64 hex chars = 24-32 байта). "
+     "Опционально — оставьте пустым если не уверены. "
+     "Tele2 Красноярск/Мегафон: ОСТАВИТЬ ПУСТЫМ (иначе блокировка). "
+     "Введите 'auto' для случайной генерации, или hex вручную."),
+    ("i2", "I2 (Response packet junk allowed IP)",
+     "",
+     "Опционально. Рекомендуется пустым."),
+    ("i3", "I3 (Under-load packet junk allowed IP)",
+     "",
+     "Опционально. Рекомендуется пустым."),
+    ("i4", "I4 (Transport packet junk allowed IP)",
+     "",
+     "Опционально. Рекомендуется пустым."),
+    ("i5", "I5 (Transport packet junk IPv6 allowed IP)",
+     "",
+     "Опционально. Рекомендуется пустым."),
+]
+
+
+def awgs_prompt_custom_params() -> dict:
+    """
+    Интерактивный ввод всех параметров обфускации AWG 2.0.
+    Для каждого параметра показывает: описание, диапазон, рекомендуемое значение.
+    Пользователь может Enter (значение по умолчанию) или ввести своё.
+    Возвращает dict с ключами jc/jmin/jmax/s1-s4/h1-h4/i1-i5.
+    """
+    core = _core_module()
+    info = core.info
+    warn = core.warn
+    CYAN, NC, GREEN, YELLOW, DIM, BOLD = (
+        core.CYAN, core.NC, core.GREEN, core.YELLOW, core.DIM, core.BOLD
+    )
+    import random
+
+    print()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_sep = core._box_sep
+    _box_bottom = core._box_bottom
+
+    _box_top(f"Ручная настройка параметров обфускации AWG 2.0")
+    _box_row()
+    _box_row(f"  {DIM}Для каждого параметра укажите значение или Enter для рекомендуемого.{NC}")
+    _box_row(f"  {DIM}Рекомендации основаны на тестах bivlked/amneziawg-installer.{NC}")
+    _box_row()
+    _box_bottom()
+    print()
+
+    params = {}
+
+    # Числовые параметры
+    for key, label, vmin, vmax, recommended, desc in AWGS_PARAMS_SPEC:
+        print(f"{BOLD}{label}{NC}")
+        print(f"  {DIM}{desc}{NC}")
+        print(f"  {GREEN}Рекомендуется:{NC} {recommended}  {DIM}(диапазон: {vmin}-{vmax}){NC}")
+        while True:
+            val_str = input(f"  {CYAN}Значение [{recommended}]: {NC}").strip()
+            if not val_str:
+                val = recommended
+                break
+            if not val_str.isdigit():
+                print(f"  {YELLOW}Нужно целое число{NC}")
+                continue
+            val = int(val_str)
+            if val < vmin or val > vmax:
+                print(f"  {YELLOW}Вне диапазона ({vmin}-{vmax}){NC}")
+                continue
+            # Спец-проверка: Jmax >= Jmin
+            if key == "jmax" and val < params.get("jmin", 0):
+                print(f"  {YELLOW}Jmax ({val}) не может быть меньше Jmin ({params['jmin']}){NC}")
+                continue
+            break
+        params[key] = val
+        print()
+
+    # Hex-параметры (I1-I5)
+    print(f"{BOLD}Опциональные параметры (I1-I5):{NC}")
+    print(f"  {DIM}Оставьте пустым (Enter) если не уверены — большинство операторов не требуют.{NC}")
+    print()
+    for key, label, recommended, desc in AWGS_PARAMS_SPEC_HEX:
+        print(f"{BOLD}{label}{NC}")
+        print(f"  {DIM}{desc}{NC}")
+        if recommended == "random":
+            print(f"  {GREEN}Рекомендуется:{NC} auto (случайная генерация 24-32 байта)")
+        elif recommended:
+            print(f"  {GREEN}Рекомендуется:{NC} {recommended}")
+        else:
+            print(f"  {GREEN}Рекомендуется:{NC} пусто")
+        val = input(f"  {CYAN}Значение (Enter=пусто, 'auto'=случайный): {NC}").strip()
+        if val.lower() == "auto":
+            # Генерируем случайный hex 28 байт (56 hex chars)
+            i1_len = random.randint(24, 32)
+            val = "".join(random.choices("0123456789abcdef", k=i1_len * 2))
+            info(f"  Сгенерирован {key}: {val[:32]}...")
+        elif val and not all(c in "0123456789abcdefABCDEF" for c in val):
+            warn(f"  '{val}' не hex — игнорирую (оставляю пустым)")
+            val = ""
+        params[key] = val
+        print()
+
+    # Итоговая сводка
+    _box_top(f"Итоговые параметры")
+    _box_row()
+    for key, label, _, _, _, _ in AWGS_PARAMS_SPEC:
+        _box_row(f"  {CYAN}{key.upper():<6}{NC} = {params[key]}")
+    for key, label, _, _ in AWGS_PARAMS_SPEC_HEX:
+        val = params[key]
+        if val:
+            _box_row(f"  {CYAN}{key.upper():<6}{NC} = {val[:40]}{'...' if len(val) > 40 else ''}")
+        else:
+            _box_row(f"  {CYAN}{key.upper():<6}{NC} = {DIM}(пусто){NC}")
+    _box_bottom()
+
+    # Валидация
+    ok, err = awgs_presets_validate_params(params)
+    if not ok:
+        warn(f"Валидация: {err}")
+        return None
+
+    return params
+
+
+# ============================================================================
 #  ГЕНЕРАЦИЯ КОНФИГОВ
 # ============================================================================
 
@@ -812,6 +989,7 @@ def awgs_install(
     allow_ipv6_tunnel: bool = False,
     skip_hw_tuning: bool = False,
     force: bool = False,
+    custom_params: dict = None,
 ) -> bool:
     """
     Полный цикл установки standalone AWG.
@@ -835,10 +1013,17 @@ def awgs_install(
     if port < AWGS_PORT_MIN or port > AWGS_PORT_MAX:
         warn(f"Порт {port} вне диапазона ({AWGS_PORT_MIN}-{AWGS_PORT_MAX})")
         return False
-    ok, err = awgs_presets_validate_params(awgs_presets_generate(carrier_preset))
-    if not ok:
-        warn(f"Пресет '{carrier_preset}': {err}")
-        return False
+    # Если переданы custom_params — валидируем их, иначе проверяем пресет
+    if custom_params:
+        ok, err = awgs_presets_validate_params(custom_params)
+        if not ok:
+            warn(f"Пользовательские параметры: {err}")
+            return False
+    else:
+        ok, err = awgs_presets_validate_params(awgs_presets_generate(carrier_preset))
+        if not ok:
+            warn(f"Пресет '{carrier_preset}': {err}")
+            return False
 
     # 2. Конфликт-чек
     info("Проверка конфликтов...")
@@ -887,14 +1072,23 @@ def awgs_install(
     if not endpoint:
         warn("Не удалось определить публичный IP — клиентские конфиги будут без endpoint")
 
-    # 8. Параметры обфускации (по пресету)
-    info(f"Генерация параметров обфускации (preset: {carrier_preset})...")
-    params = awgs_presets_generate(carrier_preset)
-    preset_info = awgs_presets_get(carrier_preset)
-    if preset_info:
-        info(f"  Пресет: {preset_info['label']}")
-    info(f"  Jc={params['jc']}, Jmin={params['jmin']}, Jmax={params['jmax']}, "
-         f"I1={'задан' if params['i1'] else 'отсутствует'}")
+    # 8. Параметры обфускации
+    if custom_params:
+        info("Используются пользовательские параметры обфускации...")
+        params = custom_params
+        info(f"  Jc={params['jc']}, Jmin={params['jmin']}, Jmax={params['jmax']}, "
+             f"S1={params['s1']}, S2={params['s2']}, S3={params['s3']}, S4={params['s4']}, "
+             f"H1={params['h1']}, H2={params['h2']}, H3={params['h3']}, H4={params['h4']}")
+        if params.get("i1"):
+            info(f"  I1={'задан' if params['i1'] else 'отсутствует'}")
+    else:
+        info(f"Генерация параметров обфускации (preset: {carrier_preset})...")
+        params = awgs_presets_generate(carrier_preset)
+        preset_info = awgs_presets_get(carrier_preset)
+        if preset_info:
+            info(f"  Пресет: {preset_info['label']}")
+        info(f"  Jc={params['jc']}, Jmin={params['jmin']}, Jmax={params['jmax']}, "
+             f"I1={'задан' if params['i1'] else 'отсутствует'}")
 
     # 9. Генерация awg0.conf
     info("Генерация awg0.conf...")
@@ -1071,10 +1265,12 @@ def _awgs_menu_install() -> None:
     _box_desc("Универсальный пресет, работает в большинстве сетей.")
     _box_item("2", f"Mobile preset (мобильные DPI: Yota/Tele2/Мегафон)")
     _box_desc("Jc=3, узкий Jmax — для ТСПУ и мобильных операторов.")
-    _box_item("3", f"Выбрать оператора вручную (8 пресетов)")
+    _box_item("3", f"Выбрать оператора вручную (9 пресетов)")
     _box_desc("Yota MSK, Tele2 MSK/Krasnoyarsk, Таттелеком, Мегафон, Билайн, T-Mobile US")
     _box_item("4", f"Расширенные параметры (порт, подсеть, MTU, IPv6, endpoint)")
     _box_desc("Тонкая настройка под конкретный сервер.")
+    _box_item("5", f"Ручная настройка ВСЕХ параметров обфускации {GREEN}(эксперт){NC}")
+    _box_desc("Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5 — каждый параметр вручную с рекомендациями.")
     _box_item("Q", f"Назад")
     _box_bottom()
     ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -1087,8 +1283,60 @@ def _awgs_menu_install() -> None:
         _awgs_menu_carrier()
     elif ch == "4":
         _awgs_menu_advanced()
+    elif ch == "5":
+        _awgs_menu_custom_params()
     elif ch in ("q", ""):
         return
+
+
+def _awgs_menu_custom_params() -> None:
+    """Подменю ручной настройки параметров обфускации."""
+    core = _core_module()
+    info = core.info
+    warn = core.warn
+    CYAN, NC = core.CYAN, core.NC
+
+    # Сначала спрашиваем базовые параметры (порт/подсеть/MTU/IPv6/endpoint)
+    print()
+    info("Ручная настройка параметров обфускации.")
+    info("Сначала базовые параметры, затем — параметры обфускации.")
+    print()
+
+    port_str = input(f"{CYAN}UDP-порт [51820]: {NC}").strip()
+    port = int(port_str) if port_str.isdigit() else AWGS_DEFAULT_PORT
+
+    subnet = input(f"{CYAN}Подсеть IPv4 [10.66.66.0/24]: {NC}").strip() or AWGS_DEFAULT_SUBNET
+
+    ipv6_ch = input(f"{CYAN}Включить IPv6 в туннеле? [y/N]: {NC}").strip().lower()
+    allow_ipv6 = ipv6_ch in ("y", "yes", "д", "да")
+    subnet_v6 = AWGS_DEFAULT_SUBNET_V6 if allow_ipv6 else ""
+
+    mtu_str = input(f"{CYAN}MTU [1280]: {NC}").strip()
+    mtu = int(mtu_str) if mtu_str.isdigit() else AWGS_DEFAULT_MTU
+
+    endpoint = input(f"{CYAN}Endpoint (если за NAT, иначе пусто) []: {NC}").strip()
+
+    # Теперь — параметры обфускации
+    custom_params = awgs_prompt_custom_params()
+    if custom_params is None:
+        warn("Параметры не валидны — отмена")
+        return
+
+    print()
+    confirm = input(f"{CYAN}Начать установку с этими параметрами? [Y/n]: {NC}").strip().lower()
+    if confirm in ("n", "no", "н", "нет"):
+        return
+
+    print()
+    awgs_install(
+        port=port,
+        subnet=subnet,
+        subnet_v6=subnet_v6,
+        mtu=mtu,
+        endpoint_host=endpoint,
+        allow_ipv6_tunnel=allow_ipv6,
+        custom_params=custom_params,
+    )
 
 
 def _awgs_menu_carrier() -> None:
