@@ -229,11 +229,20 @@ def awg_handle_get(handler, path: str, query: dict) -> bool:
             dump = _awg_apply().awgs_show_dump()
             peers = _awg_state().awgs_state_peers_get()
             stats = _parse_peer_stats(dump, peers)
+            # ВАЖНО: НЕ отдаём raw_dump в JSON-ответе.
+            # Формат `awg show all dump`:
+            #   interface-строка: interface\t<server_privkey>\tport\t...
+            #   peer-строка:      peer\t<pubkey>\t<psk>\tendpoint\t...
+            # raw_dump содержал бы приватный ключ сервера (поле 1 interface)
+            # и PSK каждого пира (поле 2 peer) — прямая утечка боевых секретов
+            # через JSON API, нарушающая инвариант модуля ("приватные ключи
+            # никогда не попадают в JSON-ответы"). Фронтенду raw_dump не нужен
+            # — там уже есть распарсенные "peers" со статистикой. Для отладки
+            # админ может запустить `awg show all dump` в терминале.
             handler._send_json({
                 "peers": [
                     {"name": name, **st} for name, st in stats.items()
                 ],
-                "raw_dump": dump,
             })
         except Exception as e:
             handler._send_json({"error": str(e)}, 500)
