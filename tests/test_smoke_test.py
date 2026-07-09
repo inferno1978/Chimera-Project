@@ -314,7 +314,8 @@ class TestSmokeTestXrayFullFlow(unittest.TestCase):
 
         with patch.object(smoke_test, "_STATE_FILE", self._state_file), \
              patch.object(smoke_test, "_tcp_connect",
-                          return_value=(False, 'connection refused')):
+                          return_value=(False, 'connection refused')), \
+             patch("builtins.input", return_value="n"):
             result = smoke_test.smoke_test_xray()
             self.assertFalse(result)
 
@@ -330,7 +331,8 @@ class TestSmokeTestXrayFullFlow(unittest.TestCase):
              patch.object(smoke_test, "_tcp_connect",
                           return_value=(True, '')), \
              patch.object(smoke_test, "_tls_handshake",
-                          return_value=(False, 'timeout 5s')):
+                          return_value=(False, 'timeout 5s')), \
+             patch("builtins.input", return_value="n"):
             result = smoke_test.smoke_test_xray()
             self.assertFalse(result)
 
