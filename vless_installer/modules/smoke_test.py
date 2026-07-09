@@ -82,9 +82,17 @@ def _tls_handshake(host: str, port: int, timeout: float,
         return False, f'TLS timeout {timeout}s'
     except ssl.SSLError as e:
         msg = str(e).lower()
-        # Сервер ответил — handshake состоялся, Reality отбросил неверный fingerprint
+        # Сервер ответил — handshake состоялся, Reality отбросил неверный
+        # fingerprint или SNI. Любой TLS alert означает что сервер ЖИВ —
+        # это SUCCESS, не провал.
+        # 'unrecognized_name' — REALITY отклонил SNI=127.0.0.1 (не домен),
+        #   но сервер ответил. Возникает когда smoke-test подключается к
+        #   127.0.0.1 без правильного SNI (state.json key was wrong before fix).
+        # 'protocol' — covers 'unsupported protocol' and 'protocol version'
         if any(x in msg for x in ('alert', 'handshake', 'certificate',
-                                   'unknown ca', 'unsupported protocol')):
+                                   'unknown ca', 'unsupported protocol',
+                                   'unrecognized name', 'unrecognized_name',
+                                   'protocol')):
             return True, f'сервер ответил ({str(e)[:60]})'
         return False, f'SSLError: {e}'
     except ConnectionRefusedError:
@@ -117,7 +125,11 @@ def smoke_test_xray(
     """
     state = _read_state()
     _port = port if port is not None else int(state.get('server_port', 443))
-    _sni  = sni  or state.get('param_domain') or state.get('param_sni') or host
+    # SNI: берём из state.json (ключ 'domain', не 'param_domain' —
+    # param_domain это глобальная переменная _core.py, в state.json
+    # она сохраняется как 'domain'). Без правильного SNI REALITY
+    # отклоняет соединение с TLS alert 'unrecognized_name'.
+    _sni  = sni  or state.get('domain') or state.get('param_domain') or host
     if tls is None:
         _tls = state.get('protocol_mode', 'reality') in ('reality', 'tls')
     else:
