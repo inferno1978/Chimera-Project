@@ -589,6 +589,99 @@ def _generate_singbox_config(user: dict) -> str:
     return json.dumps(config, indent=2, ensure_ascii=False)
 
 
+def _generate_hiddify_config(user: dict) -> str:
+    """Генерирует Hiddify JSON конфиг для пользователя.
+
+    Hiddify (https://github.com/hiddify/hiddify-app) — популярный
+    мультиплатформенный клиент. Импортирует VLESS-ссылку, но полнофункциональный
+    конфиг удобнее — включает все параметры REALITY одним файлом.
+    Формат: JSON с outbound (VLESS + REALITY), как в sing-box, но с
+    дополнительными полями для Hiddify-совместимости.
+    """
+    state = _get_state()
+    domain = state.get("domain", "")
+    port = state.get("server_port", 443)
+    uuid_val = user.get("uuid", "")
+    pub_key = state.get("public_key", "")
+    short_id = state.get("short_id", "")
+    fp = state.get("fingerprint", "chrome")
+    proto = state.get("protocol_mode", "reality")
+    sni = domain
+    xhttp_path = state.get("xhttp_path", "/")
+    xtls_flow = state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision"
+
+    # SNI: Mode B + AWG → reality_dest, else domain (как в _generate_vless_links)
+    install_mode = state.get("install_mode", "A")
+    awg_exit = state.get("awg_exit_enabled", False) and install_mode == "B"
+    reality_dest = state.get("reality_dest", "")
+    if proto == "reality" and awg_exit and reality_dest:
+        sni = reality_dest
+    elif proto == "reality":
+        sni = domain
+
+    if proto == "reality":
+        config = {
+            "outbounds": [{
+                "type": "vless",
+                "tag": "vless-out",
+                "server": domain,
+                "server_port": port,
+                "uuid": uuid_val,
+                "flow": xtls_flow,
+                "tls": {
+                    "enabled": True,
+                    "server_name": sni,
+                    "utls": {"enabled": True, "fingerprint": fp},
+                    "reality": {
+                        "enabled": True,
+                        "public_key": pub_key,
+                        "short_id": short_id,
+                    }
+                }
+            }],
+            "routing": {
+                "rules": [
+                    {"type": "default", "outbound": "vless-out"}
+                ]
+            }
+        }
+    else:
+        config = {
+            "outbounds": [{
+                "type": "vless",
+                "tag": "vless-out",
+                "server": domain,
+                "server_port": port,
+                "uuid": uuid_val,
+                "transport": {"type": "http", "path": xhttp_path},
+                "tls": {
+                    "enabled": True,
+                    "server_name": domain,
+                    "utls": {"enabled": True, "fingerprint": fp},
+                }
+            }],
+            "routing": {
+                "rules": [
+                    {"type": "default", "outbound": "vless-out"}
+                ]
+            }
+        }
+    return json.dumps(config, indent=2, ensure_ascii=False)
+
+
+def _generate_vless_link_plain(user: dict) -> str:
+    """Возвращает VLESS-ссылку как plain text (для скачивания файлом).
+
+    Многие юзеры не понимают что длинная ссылка в QR — это и есть конфиг.
+    Скачать файлом с понятным именем (vless-link.txt) проще.
+    Берёт первую ссылку из _generate_vless_links (IPv4/Domain).
+    """
+    links = _generate_vless_links(user)
+    if not links:
+        return ""
+    return links[0]["link"]
+
+
 # ============================================================================
 #  HTTP HANDLER
 # ============================================================================
@@ -910,6 +1003,32 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(singbox.encode("utf-8"))))
             self.end_headers()
             self.wfile.write(singbox.encode("utf-8"))
+            return
+
+        if path == "/api/portal/hiddify":
+            user = self._require_user()
+            if user is None:
+                return
+            hiddify = _generate_hiddify_config(user)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="hiddify.json"')
+            self.send_header("Content-Length", str(len(hiddify.encode("utf-8"))))
+            self.end_headers()
+            self.wfile.write(hiddify.encode("utf-8"))
+            return
+
+        if path == "/api/portal/vless-link":
+            user = self._require_user()
+            if user is None:
+                return
+            vless_link = _generate_vless_link_plain(user)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="vless-link.txt"')
+            self.send_header("Content-Length", str(len(vless_link.encode("utf-8"))))
+            self.end_headers()
+            self.wfile.write(vless_link.encode("utf-8"))
             return
 
         # ── AmneziaWG standalone API (/api/awg/*) ─────────────────────────────

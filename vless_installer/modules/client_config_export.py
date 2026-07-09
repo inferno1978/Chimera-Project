@@ -216,18 +216,46 @@ def do_generate_client_config() -> None:
     out_dir.mkdir(exist_ok=True)
     clash_file   = out_dir / "clash-meta.yaml"
     singbox_file = out_dir / "sing-box.json"
+    hiddify_file = out_dir / "hiddify.json"
+    vless_link_file = out_dir / "vless-link.txt"
 
     clash_file.write_text(clash_proxy)
     singbox_file.write_text(json.dumps(singbox, indent=2, ensure_ascii=False))
 
-    _box_ok(f"Clash Meta → {clash_file}")
-    _box_ok(f"Sing-box   → {singbox_file}")
+    # --- Hiddify JSON --- (тот же формат что sing-box, с routing)
+    hiddify_config = dict(singbox)
+    hiddify_config["routing"] = {
+        "rules": [{"type": "default", "outbound": "vless-out"}]
+    }
+    hiddify_file.write_text(json.dumps(hiddify_config, indent=2, ensure_ascii=False))
+
+    # --- VLESS-ссылка --- (plain text, для импорта в v2rayN/Karing/NekoBox)
+    if proto == "reality":
+        vless_link = (f"vless://{vuuid}@{domain}:{port}"
+                      f"?encryption=none&flow={xtls_flow_val}"
+                      f"&security=reality&sni={sni}"
+                      f"&fp={fp}&pbk={pub_key}&sid={short_id}"
+                      f"&type=tcp#VLESS-Reality")
+    else:
+        from urllib.parse import quote as _url_quote
+        xhttp_path_enc = _url_quote(xhttp_path, safe="")
+        vless_link = (f"vless://{vuuid}@{domain}:{port}"
+                      f"?encryption=none&security=tls&sni={domain}"
+                      f"&fp={fp}&type=http&path={xhttp_path_enc}#VLESS-xHTTP")
+    vless_link_file.write_text(vless_link + "\n")
+
+    _box_ok(f"Clash Meta   → {clash_file}")
+    _box_ok(f"Sing-box     → {singbox_file}")
+    _box_ok(f"Hiddify      → {hiddify_file}")
+    _box_ok(f"VLESS-ссылка → {vless_link_file}")
     _box_row()
     _box_row(f"  {DIM}Скопируйте файлы на клиентское устройство:{NC}")
     _box_row(f"    {CYAN}scp root@{domain}:{clash_file} .{NC}")
     _box_row(f"    {CYAN}scp root@{domain}:{singbox_file} .{NC}")
+    _box_row(f"    {CYAN}scp root@{domain}:{hiddify_file} .{NC}")
+    _box_row(f"    {CYAN}scp root@{domain}:{vless_link_file} .{NC}")
     _box_bottom()
-    log_to_file("INFO", f"Client configs generated: {clash_file}, {singbox_file}")
+    log_to_file("INFO", f"Client configs generated: {clash_file}, {singbox_file}, {hiddify_file}, {vless_link_file}")
 
 
 # =============================================================================
