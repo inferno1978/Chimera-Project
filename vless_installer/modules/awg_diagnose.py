@@ -119,6 +119,82 @@ def _diag_tunnel() -> dict:
     }
 
 
+def _diag_nat_routing() -> dict:
+    """
+    Проверка NAT/MASQUERADE + ip_forward + маршрутизации.
+    КРИТИЧНО: без этого 'подключение есть, но интернета нет'.
+    """
+    core = _core_module()
+    from .awg_constants import AWGS_INTERFACE
+    from .awg_state import awgs_state_load
+    state = awgs_state_load()
+    subnet = state.get("subnet", "10.66.66.0/24")
+
+    checks = []
+
+    # 1. ip_forward
+    r = core._run(["sysctl", "-n", "net.ipv4.ip_forward"],
+                  capture=True, check=False)
+    ip_fwd = r.stdout.strip()
+    checks.append({
+        "name":    "ip_forward",
+        "ok":      ip_fwd == "1",
+        "status":  "OK" if ip_fwd == "1" else "FAIL",
+        "msg":     f"net.ipv4.ip_forward = {ip_fwd} (нужно 1)",
+    })
+
+    # 2. MASQUERADE правило
+    r = core._run(["iptables", "-t", "nat", "-L", "POSTROUTING", "-n", "-v"],
+                  capture=True, check=False)
+    has_masq = "MASQUERADE" in r.stdout and subnet.split("/")[0].rsplit(".", 1)[0] in r.stdout
+    checks.append({
+        "name":    "MASQUERADE",
+        "ok":      has_masq,
+        "status":  "OK" if has_masq else "FAIL",
+        "msg":     f"MASQUERADE для {subnet}: {'есть' if has_masq else 'ОТСУТСТВУЕТ — клиенты не получат интернет!'}",
+    })
+
+    # 3. FORWARD правило (awg0 → anywhere)
+    r = core._run(["iptables", "-L", "FORWARD", "-n", "-v"],
+                  capture=True, check=False)
+    has_fwd = AWGS_INTERFACE in r.stdout and "ACCEPT" in r.stdout
+    checks.append({
+        "name":    "FORWARD",
+        "ok":      has_fwd,
+        "status":  "OK" if has_fwd else "WARN",
+        "msg":     f"FORWARD через {AWGS_INTERFACE}: {'разрешён' if has_fwd else 'не найден (может быть в дефолтной политике)'}",
+    })
+
+    # 4. Маршрут к подсети awg0
+    r = core._run(["ip", "route", "show"], capture=True, check=False)
+    has_route = subnet in r.stdout or AWGS_INTERFACE in r.stdout
+    checks.append({
+        "name":    "Route awg0",
+        "ok":      has_route,
+        "status":  "OK" if has_route else "FAIL",
+        "msg":     f"Маршрут {subnet} dev {AWGS_INTERFACE}: {'есть' if has_route else 'ОТСУТСТВУЕТ — проверьте Address в awg0.conf (должен быть /24 не /32)'}",
+    })
+
+    # 5. rp_filter (предупреждение, не блок)
+    r = core._run(["sysctl", "-n", f"net.ipv4.conf.{AWGS_INTERFACE}.rp_filter"],
+                  capture=True, check=False)
+    rp = r.stdout.strip() if r.returncode == 0 else "?"
+    checks.append({
+        "name":    "rp_filter",
+        "ok":      rp in ("0", "2"),
+        "status":  "OK" if rp in ("0", "2") else "WARN",
+        "msg":     f"rp_filter {AWGS_INTERFACE} = {rp} (0 или 2 — OK, 1 — может ломать NAT)",
+    })
+
+    has_fail = any(c["status"] == "FAIL" for c in checks)
+    has_warn = any(c["status"] == "WARN" for c in checks)
+    return {
+        "ok":      not has_fail,
+        "status":  "FAIL" if has_fail else ("WARN" if has_warn else "OK"),
+        "checks":  checks,
+    }
+
+
 def _diag_carrier_compare(carrier: str) -> dict:
     """Сравнение текущих параметров с профилем оператора."""
     state = awgs_state_load()
@@ -143,6 +219,7 @@ def awgs_diagnose_full(carrier: str = "") -> dict:
         "sysctl":        _diag_sysctl(),
         "ufw":           _diag_ufw(port),
         "service":       _diag_service(),
+        "nat_routing":   _diag_nat_routing(),
         "tunnel":        _diag_tunnel(),
     }
 
@@ -244,6 +321,22 @@ def do_awg_diagnose_menu() -> None:
         _box_row(f"  ✅ Tunnel: peers={t['peers']}, handshakes={t['handshakes']}")
     else:
         _box_row(f"  ⚠️ Tunnel: {t.get('msg', 'нет данных')}")
+    _box_sep()
+
+    # NAT / Routing (КРИТИЧНО для интернета у клиентов)
+    nr = report["nat_routing"]
+    _box_row(f"  {BOLD}NAT / Routing:{NC} {'✅' if nr['ok'] else '❌'}")
+    for c in nr["checks"]:
+        if c["status"] == "OK":
+            icon = "✅"
+            color = GREEN
+        elif c["status"] == "WARN":
+            icon = "⚠️"
+            color = YELLOW
+        else:
+            icon = "❌"
+            color = RED
+        _box_row(f"    {icon} {color}{c['name']}{NC}: {c['msg']}")
     _box_sep()
 
     # Carrier compare (если выбран)
