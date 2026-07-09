@@ -685,6 +685,115 @@ section_results["9. nginx-socket order"] = (_sec9_pass, _sec9_fail)
 
 
 # ══════════════════════════════════════════════════════════════
+# Секция 10. state.json сохранён ДО health check (anti-regression)
+# ══════════════════════════════════════════════════════════════
+# Статическая проверка _core.py: в основном flow установки state.json
+# должен быть сохранён ДО вызова run_full_health_check(). health.py
+# читает domain и server_port из state.json (через _get_state_value,
+# без импорта _core — чтобы избежать циклической зависимости). Если state
+# сохраняется ПОСЛЕ health check, health_check_ssl() получает пустой
+# domain → ложный warning "SSL проверка пропущена: домен не задан"
+# даже когда домен указан и сертификат получен.
+#
+# Регрессия которую ловим: старый порядок "health check → сохранение state"
+# давал ложный warning при каждой первой установке. Фикс: сохранение state
+# ДО health check.
+section("10. state.json сохранён ДО health check (anti-regression)")
+
+_sec10_pass = 0
+_sec10_fail = 0
+
+# Перезитываем _core.py (могло измениться в этой же сессии)
+_core_src = _CORE_PATH.read_text(encoding="utf-8")
+
+# 10.1 В основном flow установки STATE_FILE.write_text должен идти
+# ДО run_full_health_check(). Ищем обе позиции в _core.py и сравниваем.
+# Берём первое вхождение run_full_health_check() после маркера "Шаг 3/3"
+# (чтобы не поймать определение функции или импорт).
+# ВАЖНО: ищем вызов (с отступом в начале строки), а не упоминание в комментарии.
+# Используем regex: строка начинающаяся с пробелов + run_full_health_check()
+import re as _re_10
+_step3_idx_10 = _core_src.find('Шаг 3/3: запуск Nginx')
+if _step3_idx_10 < 0:
+    fail("_core.py: не найден маркер 'Шаг 3/3: запуск Nginx' — "
+         "структура install flow изменилась, проверьте секцию вручную")
+    _sec10_fail += 1
+else:
+    _block_after_step3 = _core_src[_step3_idx_10:_step3_idx_10 + 8000]
+    # Ищем реальный ВЫЗОВ run_full_health_check() — строка с отступом,
+    # не в комментарии (#) и не в строке/импорте.
+    _health_match = _re_10.search(r'^[ \t]+run_full_health_check\(\)', _block_after_step3, _re_10.MULTILINE)
+    # STATE_FILE.write_text — тоже реальный вызов (с отступом)
+    _state_match = _re_10.search(r'^[ \t]+STATE_FILE\.write_text', _block_after_step3, _re_10.MULTILINE)
+    if _health_match is None:
+        warn("_core.py: не найден вызов run_full_health_check() после 'Шаг 3/3' — "
+             "структура могла измениться, проверьте вручную")
+        _sec10_pass += 1
+    elif _state_match is None:
+        warn("_core.py: не найден STATE_FILE.write_text после 'Шаг 3/3' — "
+             "структура могла измениться, проверьте вручную")
+        _sec10_pass += 1
+    elif _state_match.start() < _health_match.start():
+        ok("_core.py: STATE_FILE.write_text идёт ДО run_full_health_check() — "
+           "health check будет читать корректный domain/server_port из state")
+        _sec10_pass += 1
+    else:
+        fail("_core.py: РЕГРЕССИЯ — run_full_health_check() идёт ДО "
+             "STATE_FILE.write_text. health.py читает domain из state.json, "
+             "но state ещё не сохранён → ложный warning 'SSL проверка "
+             "пропущена: домен не задан' при первой установке.")
+        _sec10_fail += 1
+
+# 10.2 Проверяем что health_check_ssl() действительно читает domain из state.json
+# (это та самая зависимость, ради которой порядок важен). Если вдруг health.py
+# перепишут на чтение из global — порядок сохранения state станет неважен, и
+# эта проверка потеряет смысл. Но пока health.py читает state.json — порядок
+# критичен.
+_health_path = _PROJECT_ROOT / "vless_installer" / "modules" / "health.py"
+if not _health_path.exists():
+    fail(f"health.py не найден: {_health_path}")
+    _sec10_fail += 1
+else:
+    _health_src = _health_path.read_text(encoding="utf-8")
+    # health_check_ssl должна использовать _get_state_value("domain", ...)
+    if '_get_state_value("domain"' in _health_src or "_get_state_value('domain'" in _health_src:
+        ok("health.py: health_check_ssl читает domain из state.json "
+           "(через _get_state_value) — порядок сохранения state критичен")
+        _sec10_pass += 1
+    else:
+        warn("health.py: health_check_ssl НЕ использует _get_state_value('domain') — "
+             "возможно переписана на global. Проверьте вручную, порядок сохранения "
+             "state может быть больше не критичен.")
+        _sec10_pass += 1
+
+    # health_check_ports должна использовать _get_state_value("server_port", ...)
+    if '_get_state_value("server_port"' in _health_src or "_get_state_value('server_port'" in _health_src:
+        ok("health.py: health_check_ports читает server_port из state.json "
+           "(через _get_state_value) — порядок сохранения state критичен")
+        _sec10_pass += 1
+    else:
+        warn("health.py: health_check_ports НЕ использует _get_state_value('server_port') — "
+             "возможно переписана. Проверьте вручную.")
+        _sec10_pass += 1
+
+# 10.3 Ложный warning "SSL проверка пропущена: домен не задан" должен быть
+# в health.py (это та самая строка которую мы фиксим). Проверяем что она
+# существует — если её удалят, значит логику health_check_ssl переписали и
+# секция 10.1/10.2 может потерять актуальность.
+if "SSL проверка пропущена: домен не задан" in _health_src:
+    ok("health.py: содержит warning 'SSL проверка пропущена: домен не задан' "
+       "(появляется при пустом domain — фикс порядка сохранения state "
+       "гарантирует что domain не пустой к моменту проверки)")
+    _sec10_pass += 1
+else:
+    warn("health.py: warning 'SSL проверка пропущена: домен не задан' "
+         "не найден — возможно логика изменена, проверьте вручную")
+    _sec10_pass += 1
+
+section_results["10. state-before-healthcheck"] = (_sec10_pass, _sec10_fail)
+
+
+# ══════════════════════════════════════════════════════════════
 # ИТОГ
 # ══════════════════════════════════════════════════════════════
 print(f"\n{'═'*55}")
