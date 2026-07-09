@@ -436,6 +436,29 @@ def _awg_server_conf_text() -> str:
     AWG_SERVER_IPv6 = getattr(core, "AWG_SERVER_IPv6", "fd66:66:66::1/128")
     AWG_SERVER_PRIVKEY = getattr(core, "AWG_SERVER_PRIVKEY", "")
     default_iface_cmd = "$(ip route | awk '/default/ {print $5; exit}')"
+    # NAT/MASQUERADE/FORWARD правила — через общий awg_net_common, тот же
+    # слой что использует awg_standalone.awgs_setup_nat_and_routing.
+    # Идемпотентная shell-идиома `iptables -C ... || iptables -A ...`:
+    # безопасна при повторных `awg-quick up awg0` без промежуточного `down`.
+    # WAN-интерфейс определяется в runtime через `ip route` (не хардкодим —
+    # после ребута udev может переименовать eth0 → ens3 и т.п.).
+    from .awg_net_common import (
+        build_nat_idempotent_shell as _build_nat_up,
+        build_nat_cleanup_shell as _build_nat_down,
+    )
+    _awg_subnet = "10.66.66.0/24"  # AWG_SUBNET из _core.py globals (см. ниже)
+    try:
+        _awg_subnet = getattr(core, "AWG_SUBNET", "10.66.66.0/24")
+    except Exception:
+        pass
+    _postup_v4 = (
+        "WAN=$(ip route | awk '/default/ {print $5; exit}'); "
+        + _build_nat_up(_awg_subnet, "awg0", "$WAN")
+    )
+    _postdown_v4 = (
+        "WAN=$(ip route | awk '/default/ {print $5; exit}'); "
+        + _build_nat_down(_awg_subnet, "awg0", "$WAN")
+    )
     return (
         f"[Interface]\n"
         f"PrivateKey = {AWG_SERVER_PRIVKEY}\n"
@@ -451,18 +474,19 @@ def _awg_server_conf_text() -> str:
         f"H2 = {AWG_H2}\n"
         f"H3 = {AWG_H3}\n"
         f"H4 = {AWG_H4}\n"
-        f"PostUp = iptables -A FORWARD -i awg0 -j ACCEPT; "
-        f"iptables -A FORWARD -o awg0 -j ACCEPT; "
-        f"iptables -t nat -A POSTROUTING -o {default_iface_cmd} -j MASQUERADE; "
-        f"ip6tables -A FORWARD -i awg0 -j ACCEPT; "
-        f"ip6tables -A FORWARD -o awg0 -j ACCEPT; "
+        f"PostUp = iptables -C FORWARD -i awg0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i awg0 -j ACCEPT; "
+        f"iptables -C FORWARD -o awg0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -o awg0 -j ACCEPT; "
+        f"{_postup_v4}; "
+        f"ip6tables -C FORWARD -i awg0 -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i awg0 -j ACCEPT; "
+        f"ip6tables -C FORWARD -o awg0 -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -o awg0 -j ACCEPT; "
+        f"ip6tables -t nat -C POSTROUTING -o {default_iface_cmd} -j MASQUERADE 2>/dev/null || "
         f"ip6tables -t nat -A POSTROUTING -o {default_iface_cmd} -j MASQUERADE\n"
-        f"PostDown = iptables -D FORWARD -i awg0 -j ACCEPT; "
-        f"iptables -D FORWARD -o awg0 -j ACCEPT; "
-        f"iptables -t nat -D POSTROUTING -o {default_iface_cmd} -j MASQUERADE; "
-        f"ip6tables -D FORWARD -i awg0 -j ACCEPT; "
-        f"ip6tables -D FORWARD -o awg0 -j ACCEPT; "
-        f"ip6tables -t nat -D POSTROUTING -o {default_iface_cmd} -j MASQUERADE\n"
+        f"PostDown = iptables -D FORWARD -i awg0 -j ACCEPT 2>/dev/null || true; "
+        f"iptables -D FORWARD -o awg0 -j ACCEPT 2>/dev/null || true; "
+        f"{_postdown_v4}; "
+        f"ip6tables -D FORWARD -i awg0 -j ACCEPT 2>/dev/null || true; "
+        f"ip6tables -D FORWARD -o awg0 -j ACCEPT 2>/dev/null || true; "
+        f"ip6tables -t nat -D POSTROUTING -o {default_iface_cmd} -j MASQUERADE 2>/dev/null || true\n"
         f"\n"
         f"[Peer]\n"
         f"# RU-VPS (Xray client)\n"

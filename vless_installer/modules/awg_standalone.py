@@ -42,6 +42,18 @@ from .awg_presets import (
 )
 from .awg_hw_tuning import awgs_hw_tune_all
 from .awg_apply import awgs_apply, awgs_service_status
+from .awg_net_common import (
+    iptables_ensure,
+    build_nat_rule_args,
+    build_nat_idempotent_shell,
+    build_nat_cleanup_shell,
+    build_sysctl_lines,
+    apply_rp_filter_per_iface,
+    apply_ip_forward,
+    write_sysctl_conf,
+    detect_wan_iface as _awg_net_detect_wan_iface,
+    RP_FILTER_DEFAULT,
+)
 
 
 def _core_module():
@@ -56,7 +68,7 @@ def _core_module():
 def awgs_check_conflicts(port: int = AWGS_DEFAULT_PORT) -> list:
     """
     Проверяет конфликты перед установкой standalone AWG.
-    Возвращает список строк-конфликтов (пустой = установка безопасна).
+    Возвращает список строк-конфликтов (пустой = установка безопаса).
     """
     core = _core_module()
     conflicts = []
@@ -84,13 +96,38 @@ def awgs_check_conflicts(port: int = AWGS_DEFAULT_PORT) -> list:
             f"или ручная установка AWG. Standalone AWG требует чистый awg0."
         )
 
-    # 3. Конфликт порта
+    # 3. Конфликт порта — общесистемная проверка через ss
     r = core._run(["ss", "-ulnp"], capture=True, check=False)
     if r.returncode == 0 and f":{port} " in r.stdout:
         conflicts.append(
             f"UDP-порт {port} уже занят. Укажите другой --port "
             f"(доступные: 51820-51830, 11100 не использовать — занят chain)."
         )
+
+    # 3.1 Конфликт порта — кросс-модульная проверка через state-файлы.
+    # Проверяет, не занят ли этот порт другим автономным протокол-модулем
+    # проекта (Hysteria2, Mieru, NaiveProxy, WDTT, TurnTunnel, Turnable,
+    # OLCrtc, SlipGate, FPTN, VLESS Mode B). ss не видит будущих портов
+    # (если модуль установлен но сервис остановлен), поэтому state.json —
+    # единственный надёжный источник для preemptive-конфликта.
+    try:
+        other_proto_conflict = core.check_port_used_by_other_protocol(
+            port, exclude_module="vless_state"
+        )
+        # exclude_module="vless_state" — потому что конфликт с Mode B chain
+        # уже проверен в шаге 1 выше (через awg_exit_enabled + install_mode == "B"),
+        # и он выдаёт более информативное сообщение. Если Mode B не активен
+        # (awg_exit_enabled=False), но в state.json остались awg_exit_port
+        # записи — формальный конфликт по порту возможен, но это не блокирует
+        # standalone (старый AWG chain удалён). Поэтому пропускаем.
+        if other_proto_conflict:
+            conflicts.append(other_proto_conflict)
+    except AttributeError:
+        # core.check_port_used_by_other_protocol может отсутствовать в
+        # старых версиях _core.py при работе из cron — silently skip.
+        pass
+    except Exception:
+        pass
 
     # 4. Конфликт конфига
     if AWGS_SERVER_CONF.exists():
@@ -799,16 +836,13 @@ def awgs_setup_firewall(port: int) -> bool:
 # ============================================================================
 
 def awgs_detect_wan_interface() -> str:
-    """Возвращает имя WAN-интерфейса (через который идёт default route)."""
+    """Возвращает имя WAN-интерфейса (через который идёт default route).
+
+    Делегирует в общий awg_net_common.detect_wan_iface (используется также
+    Mode B exit-VPS для подстановки $WAN в PostUp).
+    """
     core = _core_module()
-    r = core._run(["ip", "route", "show", "default"], capture=True, check=False)
-    if r.returncode == 0:
-        # default via X.X.X.X dev eth0 ...
-        import re
-        m = re.search(r"\bdev\s+(\S+)", r.stdout)
-        if m:
-            return m.group(1)
-    return ""
+    return _awg_net_detect_wan_iface(core)
 
 
 def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
@@ -822,17 +856,39 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
 
     Также включает:
     • net.ipv4.ip_forward=1 (если ещё не включён)
-    • rp_filter=0 на awg0 и WAN (иначе ядро может отбрасывать обратный трафик)
-    • iptables MASQUERADE для подсети awg0 → WAN
-    • iptables FORWARD: awg0 → anywhere (ACCEPT)
-    • iptables FORWARD: anywhere → awg0 (ESTABLISHED,RELATED ACCEPT)
+    • rp_filter=2 (loose mode) ТОЛЬКО на awg0 и WAN — точечно, не глобально.
+      Loose mode сохраняет anti-spoofing защиту (в отличие от 0=off) и
+      достаточно для корректной работы NAT. Раньше сбрасывался global
+      all/default rp_filter=0 — это ослабляло защиту всей системы.
+    • iptables MASQUERADE для подсети awg0 → WAN (idempotent через -C check)
+    • iptables FORWARD: awg0 → anywhere (ACCEPT), idempotent
+    • iptables FORWARD: anywhere → awg0 (ESTABLISHED,RELATED ACCEPT), idempotent
     • systemd-юнит awg-nat.service для перманентности (After=awg-quick@awg0)
+
+    Идемпотентность: при повторных вызовах (переустановка, --force, повторный
+    запуск после сбоя) правила НЕ дублируются — каждое добавляется через
+    _iptables_ensure (iptables -C → iptables -A только если -C не нашёл).
+    То же касается systemd-юнита: его ExecStart использует bash-idiому
+    `iptables -C ... || iptables -A ...`, безопасную при многократных
+    `systemctl restart awg-nat`.
+
+    Общий сетевой слой: NAT-правила и sysctl-конфиг генерируются через
+    vless_installer.modules.awg_net_common — тот же слой использует
+    awg_transport._awg_server_conf_text для генерации PostUp/PostDown строк
+    в awg0.conf на exit-VPS (Mode B chain). Это устраняет дублирование
+    NAT/MASQUERADE/sysctl логики между standalone и Mode B exit-VPS.
+
+    Уникально для standalone-режима (а также для exit-VPS стороны Mode B):
+    тут нужен NAT/MASQUERADE, потому что клиенты подключаются к этому серверу
+    через awg0 и их трафик должен выйти в интернет через WAN-интерфейс сервера.
+    Для RU-VPS стороны Mode B NAT не нужен — там применяется policy routing
+    по fwmark (xray-процесс маркируется, ip rule отправляет marked-трафик
+    через таблицу AWG → awg0 → exit-VPS, где уже exit-VPS делает MASQUERADE).
     """
     core = _core_module()
     info = core.info
     success = core.success
     warn = core.warn
-    from .awg_constants import AWGS_INTERFACE
 
     if not wan_iface:
         wan_iface = awgs_detect_wan_interface()
@@ -842,85 +898,68 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
 
     info(f"WAN-интерфейс: {wan_iface}")
 
-    # 1. sysctl: ip_forward=1
-    info("Настройка sysctl (ip_forward, rp_filter)...")
-    r = core._run(["sysctl", "-n", "net.ipv4.ip_forward"], capture=True, check=False)
-    if r.stdout.strip() != "1":
-        core._run(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=False, quiet=True)
-        info("  net.ipv4.ip_forward: 0 → 1")
-    else:
-        info("  net.ipv4.ip_forward: уже 1")
+    # 1. sysctl: ip_forward=1 (idempotent)
+    info("Настройка sysctl (ip_forward, per-interface rp_filter=2 loose mode)...")
+    apply_ip_forward(core)
 
-    # rp_filter=0 на awg0 и WAN (loose mode = 2 обычно OK, но strict = 1 ломает NAT)
-    for iface in (AWGS_INTERFACE, wan_iface, "all", "default"):
-        r = core._run(["sysctl", "-n", f"net.ipv4.conf.{iface}.rp_filter"],
-                      capture=True, check=False)
-        if r.returncode == 0 and r.stdout.strip() not in ("0", "2"):
-            core._run(["sysctl", "-w", f"net.ipv4.conf.{iface}.rp_filter=0"],
-                      check=False, quiet=True)
-            info(f"  rp_filter {iface}: {r.stdout.strip()} → 0")
+    # rp_filter=2 (loose mode) ТОЛЬКО на awg0 и WAN — точечно, не глобально.
+    # Раньше сбрасывались all/default rp_filter=0 — ослабляло anti-spoofing
+    # на всей системе. Loose mode (2) достаточен для NAT и сохраняет защиту.
+    apply_rp_filter_per_iface(core, AWGS_INTERFACE, wan_iface,
+                              value=RP_FILTER_DEFAULT)
 
-    # Перманентим sysctl
+    # Перманентим sysctl — через общий хелпер (вычищает старые global all/default
+    # записи, оставляет только per-interface)
     sysctl_conf = Path("/etc/sysctl.d/99-awg-standalone.conf")
     try:
-        sysctl_lines = []
-        if sysctl_conf.exists():
-            sysctl_lines = [
-                l for l in sysctl_conf.read_text().splitlines()
-                if not l.startswith("net.ipv4.ip_forward")
-                and not l.startswith("net.ipv4.conf.all.rp_filter")
-                and not l.startswith("net.ipv4.conf.default.rp_filter")
-            ]
-        sysctl_lines.extend([
-            "net.ipv4.ip_forward = 1",
-            "net.ipv4.conf.all.rp_filter = 0",
-            "net.ipv4.conf.default.rp_filter = 0",
-        ])
-        sysctl_conf.write_text("\n".join(sysctl_lines) + "\n")
+        if write_sysctl_conf(sysctl_conf, AWGS_INTERFACE, wan_iface,
+                             rp_filter_value=RP_FILTER_DEFAULT):
+            info(f"  sysctl-конфиг: {sysctl_conf} (per-interface rp_filter=2)")
+        else:
+            warn(f"  Не удалось записать {sysctl_conf}")
     except Exception as e:
         core.log_to_file("WARN", f"awgs_setup_nat sysctl persist: {e}")
 
-    # 2. iptables: MASQUERADE + FORWARD
-    info("Настройка iptables (MASQUERADE + FORWARD)...")
-    # Извлекаем подсеть без префикса для правил (10.66.66.0/24)
-    # Используем как есть — subnet уже в формате CIDR
-    awg_subnet = subnet
+    # 2. iptables: MASQUERADE + FORWARD (idempotent через _iptables_ensure)
+    info("Настройка iptables (MASQUERADE + FORWARD, idempotent)...")
+    awg_subnet = subnet  # уже в формате CIDR (например 10.66.66.0/24)
 
-    # MASQUERADE: трафик из awg_subnet → WAN интерфейс
-    core._run(
-        ["iptables", "-t", "nat", "-A", "POSTROUTING",
-         "-s", awg_subnet, "-o", wan_iface, "-j", "MASQUERADE"],
-        check=False, quiet=True,
-    )
-    # FORWARD: awg0 → anywhere (новые соединения от клиентов)
-    core._run(
-        ["iptables", "-A", "FORWARD",
-         "-i", AWGS_INTERFACE, "-j", "ACCEPT"],
-        check=False, quiet=True,
-    )
-    # FORWARD: anywhere → awg0 (ответы на установленные соединения)
-    core._run(
-        ["iptables", "-A", "FORWARD",
-         "-o", AWGS_INTERFACE, "-m", "state",
-         "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
-        check=False, quiet=True,
-    )
+    # Получаем список правил из общего билдера — тот же самый, что использует
+    # Mode B exit-VPS через PostUp (см. awg_transport._awg_server_conf_text).
+    nat_rules = build_nat_rule_args(awg_subnet, AWGS_INTERFACE, wan_iface)
+    for rule_args in nat_rules:
+        # rule_args[0] == "iptables" — iptables_ensure ожидает args без "iptables"
+        # (он сам добавляет "iptables" префикс). Передаём args[1:].
+        iptables_ensure(core, rule_args[1:])
     success(f"iptables: MASQUERADE {awg_subnet} → {wan_iface} + FORWARD правила")
 
-    # 3. systemd-юнит awg-nat.service — для перманентности после reboot
-    info("Создание systemd-юнита awg-nat.service...")
+    # 3. systemd-юнит awg-nat.service — для перманентности после reboot.
+    # ExecStart использует bash-идиому `iptables -C || iptables -A` (через
+    # build_nat_idempotent_shell) — безопасен при многократных restart.
+    # WAN определяется в runtime через `ip route show default` (не хардкодим
+    # wan_iface, т.к. после ребута интерфейс может переименовать — udev).
+    info("Создание systemd-юнита awg-nat.service (idempotent ExecStart)...")
     from .awg_constants import AWGS_SYSTEMD_AWG_QUICK
     nat_unit = Path("/etc/systemd/system/awg-nat.service")
+    # Bash-сниппет: определяем $WAN, затем идемпотентно добавляем правила.
+    exec_start_body = (
+        "WAN=$(ip route show default | awk '{print $5; exit}'); "
+        + build_nat_idempotent_shell(awg_subnet, AWGS_INTERFACE, "$WAN")
+    )
+    exec_stop_body = (
+        "WAN=$(ip route show default | awk '{print $5; exit}'); "
+        + build_nat_cleanup_shell(awg_subnet, AWGS_INTERFACE, "$WAN")
+    )
     nat_unit_content = f"""[Unit]
-Description=AWG standalone NAT + FORWARD rules
+Description=AWG standalone NAT + FORWARD rules (idempotent)
 After={AWGS_SYSTEMD_AWG_QUICK}
 Requires={AWGS_SYSTEMD_AWG_QUICK}
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'WAN=$(ip route show default | awk "{{print \\$5; exit}}"); iptables -t nat -A POSTROUTING -s {awg_subnet} -o $WAN -j MASQUERADE; iptables -A FORWARD -i {AWGS_INTERFACE} -j ACCEPT; iptables -A FORWARD -o {AWGS_INTERFACE} -m state --state ESTABLISHED,RELATED -j ACCEPT'
-ExecStop=/bin/bash -c 'iptables -t nat -D POSTROUTING -s {awg_subnet} -j MASQUERADE 2>/dev/null; iptables -D FORWARD -i {AWGS_INTERFACE} -j ACCEPT 2>/dev/null; iptables -D FORWARD -o {AWGS_INTERFACE} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; true'
+ExecStart=/bin/bash -c '{exec_start_body}'
+ExecStop=/bin/bash -c '{exec_stop_body}'
 
 [Install]
 WantedBy=multi-user.target
@@ -930,7 +969,7 @@ WantedBy=multi-user.target
         core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
         core._run(["systemctl", "enable", "awg-nat.service"],
                   check=False, quiet=True)
-        success("awg-nat.service создан и включен (NAT после reboot)")
+        success("awg-nat.service создан и включен (NAT после reboot, idempotent)")
     except Exception as e:
         warn(f"Не удалось создать awg-nat.service: {e}")
         warn("NAT правила применены в runtime, но не переживут reboot")

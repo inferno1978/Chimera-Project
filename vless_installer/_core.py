@@ -1072,6 +1072,261 @@ def command_exists(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
+# =============================================================================
+#  GENERIC PORT-CONFLICT CHECK AGAINST OTHER PROTOCOL MODULES
+# =============================================================================
+# Реестр известных автономных протокол-модулей и их state-файлов.
+# Используется check_port_used_by_other_protocol() для обнаружения конфликтов
+# по порту между модулями (например: AWG standalone хочет UDP/51820, а
+# Hysteria2 уже слушает UDP/51820 — нужно явно сообщить пользователю).
+#
+# Структура записи:
+#   "proto_key": {
+#       "label":      "человекочитаемое имя протокола",
+#       "state_file": Path — путь к JSON state-файлу модуля,
+#       "extractor":  функция(state_dict) -> list[int] портов, которые
+#                     этот модуль слушает (внешние, не loopback).
+#                     Возвращает [] если модуль не установлен или
+#                     state-файл отсутствует/битый.
+#   }
+# Если state_file хранится внутри общего state.json (например hysteria2),
+# extractor получает весь state.json, а не отдельный файл.
+
+def _extract_hysteria2_ports(st: dict) -> list:
+    """Порты Hysteria2: firewall.udp_ports + fallback_ports + exit_nodes[].ports.
+    Hysteria2 хранит свой state внутри общего state.json под ключом 'hysteria2'."""
+    h2 = st.get("hysteria2", {}) if isinstance(st, dict) else {}
+    if not h2:
+        return []
+    ports = []
+    fw = h2.get("firewall", {}) or {}
+    ports.extend(fw.get("udp_ports", []) or [])
+    ports.extend(fw.get("fallback_ports", []) or [])
+    for node in (h2.get("exit_nodes", []) or []):
+        node_ports = node.get("ports", []) or []
+        ports.extend(node_ports)
+    # Фильтруем демоны/не-числа, уникализируем
+    return sorted({int(p) for p in ports if isinstance(p, (int, str)) and str(p).isdigit()})
+
+
+def _extract_mieru_ports(st: dict) -> list:
+    """Mieru: state.json (m.json) — port_start..port_end диапазон (TCP или UDP).
+    Возвращаем весь диапазон как набор портов."""
+    if not isinstance(st, dict) or not st.get("installed"):
+        return []
+    start = st.get("port_start")
+    end = st.get("port_end")
+    if not (isinstance(start, int) and isinstance(end, int)):
+        return []
+    if end < start:
+        start, end = end, start
+    return list(range(start, end + 1))
+
+
+def _extract_naiveproxy_ports(st: dict) -> list:
+    """NaiveProxy: TCP-порт (HTTPS-обратный-прокси). state['port']."""
+    if not isinstance(st, dict) or not st.get("installed"):
+        return []
+    p = st.get("port")
+    return [int(p)] if isinstance(p, (int, str)) and str(p).isdigit() else []
+
+
+def _extract_wdtt_ports(st: dict) -> list:
+    """WDTT: dtls_port + wg_port (оба UDP)."""
+    if not isinstance(st, dict) or not st.get("installed"):
+        return []
+    ports = []
+    for k in ("dtls_port", "wg_port"):
+        v = st.get(k)
+        if isinstance(v, (int, str)) and str(v).isdigit():
+            ports.append(int(v))
+    return ports
+
+
+def _extract_turntunnel_ports(st: dict) -> list:
+    """TurnTunnel (FreeTurn): listen_port (UDP)."""
+    if not isinstance(st, dict) or not st.get("installed"):
+        return []
+    p = st.get("listen_port")
+    return [int(p)] if isinstance(p, (int, str)) and str(p).isdigit() else []
+
+
+def _extract_turnable_ports(st: dict) -> list:
+    """Turnable (vk-turn): listen_port (UDP)."""
+    if not isinstance(st, dict) or not st.get("installed"):
+        return []
+    p = st.get("listen_port")
+    return [int(p)] if isinstance(p, (int, str)) and str(p).isdigit() else []
+
+
+def _extract_olcrtc_ports(st: dict) -> list:
+    """OLCrtc: socks_port — это локальный loopback-порт для Xray listener.
+    Внешних портов не открывает (туннели через публичные Jitsi/Телемост/WB).
+    Возвращаем [] — конфликтов по внешним портам нет."""
+    return []
+
+
+def _extract_slipgate_ports(st: dict) -> list:
+    """SlipGate: не имеет фиксированного порта — управляет DNS/HTTP-туннелями
+    через внешний установщик. Внешние порты определяются конфигом туннеля,
+    не module state. Возвращаем [] — формальный конфликт не детектируется."""
+    return []
+
+
+def _extract_fptn_ports(st: dict) -> list:
+    """FPTN: TCP-порт (TLS-туннель). state['port']."""
+    if not isinstance(st, dict) or not st.get("installed"):
+        return []
+    p = st.get("port")
+    return [int(p)] if isinstance(p, (int, str)) and str(p).isdigit() else []
+
+
+def _extract_vless_state_ports(st: dict) -> list:
+    """VLESS/REALITY основной state.json — порты xray/awg из Mode B chain.
+    AWG_EXIT_PORT (UDP) и AWG_CLIENT_LISTEN_PORT (UDP) — могут конфликтовать
+    с standalone AWG (тоже UDP)."""
+    if not isinstance(st, dict):
+        return []
+    ports = []
+    for k in ("awg_exit_port", "awg_client_listen_port"):
+        v = st.get(k)
+        if isinstance(v, (int, str)) and str(v).isdigit():
+            ports.append(int(v))
+    return ports
+
+
+# Реестр модулей. Порядок важен только для детерминированного вывода.
+# state_file = None означает "читаем из основного state.json".
+PROTOCOL_PORT_REGISTRY = [
+    {
+        "key": "vless_state",
+        "label": "VLESS Ultimate (Mode B chain: AWG exit/client)",
+        "state_file": None,  # основной state.json
+        "extractor": _extract_vless_state_ports,
+    },
+    {
+        "key": "hysteria2",
+        "label": "Hysteria2 (UDP)",
+        "state_file": None,  # внутри state.json под ключом "hysteria2"
+        "extractor": _extract_hysteria2_ports,
+    },
+    {
+        "key": "mieru",
+        "label": "Mieru (TCP/UDP)",
+        "state_file": Path("/var/lib/xray-installer/mieru.json"),
+        "extractor": _extract_mieru_ports,
+    },
+    {
+        "key": "naiveproxy",
+        "label": "NaiveProxy (TCP)",
+        "state_file": Path("/var/lib/xray-installer/naiveproxy.json"),
+        "extractor": _extract_naiveproxy_ports,
+    },
+    {
+        "key": "wdtt",
+        "label": "WDTT (UDP: DTLS+WG)",
+        "state_file": Path("/var/lib/xray-installer/wdtt.json"),
+        "extractor": _extract_wdtt_ports,
+    },
+    {
+        "key": "turntunnel",
+        "label": "TurnTunnel / FreeTurn (UDP)",
+        "state_file": Path("/var/lib/xray-installer/turntunnel.json"),
+        "extractor": _extract_turntunnel_ports,
+    },
+    {
+        "key": "turnable",
+        "label": "Turnable / vk-turn (UDP)",
+        "state_file": Path("/var/lib/xray-installer/turnable.json"),
+        "extractor": _extract_turnable_ports,
+    },
+    {
+        "key": "olcrtc",
+        "label": "OLCrtc (WebRTC, без внешних портов)",
+        "state_file": Path("/var/lib/xray-installer/olcrtc.json"),
+        "extractor": _extract_olcrtc_ports,
+    },
+    {
+        "key": "slipgate",
+        "label": "SlipGate (DNS/HTTP tunnels)",
+        "state_file": Path("/var/lib/xray-installer/slipgate.json"),
+        "extractor": _extract_slipgate_ports,
+    },
+    {
+        "key": "fptn",
+        "label": "FPTN (TCP/TLS)",
+        "state_file": Path("/var/lib/xray-installer/fptn.json"),
+        "extractor": _extract_fptn_ports,
+    },
+]
+
+
+def check_port_used_by_other_protocol(port: int,
+                                      exclude_module: str = "") -> str:
+    """
+    Проверяет, занят ли порт другим автономным протокол-модулем проекта.
+
+    Идёт по реестру PROTOCOL_PORT_REGISTRY, читает state-файл каждого
+    модуля (или секцию в основном state.json), извлекает порты, которые
+    модуль слушает, и сравнивает с запрошенным `port`.
+
+    Параметры:
+      • port           — порт для проверки (int).
+      • exclude_module — ключ модуля в реестре, который ПРОПУСКАЕМ
+                         (чтобы модуль не конфликтовал сам с собой).
+                         Например "vless_state" для AWG standalone
+                         (т.к. awg_exit_port хранится в VLESS state.json,
+                         но это Mode B chain — отдельный deployment).
+
+    Возвращает:
+      • пустую строку "" если конфликтов нет;
+      • читаемую русскую строку с описанием конфликта (готовую для
+        добавления в список conflicts) если порт занят другим модулем.
+    """
+    if not isinstance(port, int) or port <= 0 or port > 65535:
+        return ""
+
+    # Загружаем основной state.json один раз (используется несколькими
+    # модулями в реестре — vless_state, hysteria2).
+    main_state = {}
+    try:
+        if STATE_FILE.exists():
+            main_state = json.loads(STATE_FILE.read_text())
+    except Exception:
+        main_state = {}
+
+    for entry in PROTOCOL_PORT_REGISTRY:
+        key = entry["key"]
+        if exclude_module and key == exclude_module:
+            continue
+
+        state_data = {}
+        if entry["state_file"] is None:
+            state_data = main_state
+        else:
+            sf = entry["state_file"]
+            if not sf.exists():
+                continue
+            try:
+                state_data = json.loads(sf.read_text())
+            except Exception:
+                continue
+
+        try:
+            ports = entry["extractor"](state_data) or []
+        except Exception:
+            ports = []
+
+        if port in ports:
+            return (
+                f"UDP/TCP-порт {port} уже занят другим модулем: "
+                f"{entry['label']}. Укажите другой порт для AWG standalone "
+                f"(доступные: 51820-51830, избегайте 11100 — занят chain)."
+            )
+
+    return ""
+
+
 def find_nginx_bin() -> str | None:
     """Возвращает полный путь к бинарнику nginx, проверяя реальное существование файла."""
     found = shutil.which("nginx")
