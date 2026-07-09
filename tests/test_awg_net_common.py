@@ -235,6 +235,420 @@ class TestBuildNatCleanupShell(unittest.TestCase):
         self.assertGreaterEqual(s.count("2>/dev/null"), 3)
 
 
+class TestScopeSourceParam(unittest.TestCase):
+    """Тесты параметра scope_source для v4 и v6 билдеров (после фикса 47f56d3)."""
+
+    def test_v4_rule_args_scoped_has_source(self):
+        """scope_source=True (default) → MASQUERADE содержит -s {subnet}."""
+        from vless_installer.modules.awg_net_common import build_nat_rule_args
+        rules = build_nat_rule_args("10.66.66.0/24", "awg0", "eth0", scope_source=True)
+        masq = rules[0]
+        self.assertIn("-s", masq)
+        self.assertIn("10.66.66.0/24", masq)
+
+    def test_v4_rule_args_blanket_no_source(self):
+        """scope_source=False → MASQUERADE БЕЗ -s (blanket, поведение до 47f56d3)."""
+        from vless_installer.modules.awg_net_common import build_nat_rule_args
+        rules = build_nat_rule_args("10.66.66.0/24", "awg0", "eth0", scope_source=False)
+        masq = rules[0]
+        self.assertNotIn("-s", masq)
+        self.assertEqual(masq, [
+            "iptables", "-t", "nat", "-A", "POSTROUTING",
+            "-o", "eth0", "-j", "MASQUERADE",
+        ])
+
+    def test_v4_rule_args_default_is_scoped(self):
+        """Если scope_source не передан — default = True (scoped)."""
+        from vless_installer.modules.awg_net_common import build_nat_rule_args
+        rules = build_nat_rule_args("10.66.66.0/24", "awg0", "eth0")
+        masq = rules[0]
+        self.assertIn("-s", masq)
+
+    def test_v4_idempotent_shell_scoped_has_source(self):
+        from vless_installer.modules.awg_net_common import build_nat_idempotent_shell
+        s = build_nat_idempotent_shell("10.66.66.0/24", "awg0", "$WAN", scope_source=True)
+        self.assertIn("-s 10.66.66.0/24 -o $WAN", s)
+
+    def test_v4_idempotent_shell_blanket_no_source(self):
+        """scope_source=False → MASQUERADE без -s (blanket) в shell-сниппете."""
+        from vless_installer.modules.awg_net_common import build_nat_idempotent_shell
+        s = build_nat_idempotent_shell("10.66.66.0/24", "awg0", "$WAN", scope_source=False)
+        # MASQUERADE pair без -s
+        self.assertIn("iptables -t nat -C POSTROUTING -o $WAN -j MASQUERADE", s)
+        self.assertIn("iptables -t nat -A POSTROUTING -o $WAN -j MASQUERADE", s)
+        # -s нигде не должно быть в MASQUERADE-части
+        self.assertNotIn("-s 10.66.66.0/24", s)
+
+    def test_v4_cleanup_shell_blanket_no_source(self):
+        from vless_installer.modules.awg_net_common import build_nat_cleanup_shell
+        s = build_nat_cleanup_shell("10.66.66.0/24", "awg0", "$WAN", scope_source=False)
+        self.assertIn("iptables -t nat -D POSTROUTING -o $WAN -j MASQUERADE", s)
+        self.assertNotIn("-s 10.66.66.0/24", s)
+
+
+class TestBuildNat6RuleArgs(unittest.TestCase):
+    """Тесты генератора списка правил NAT для IPv6 (ip6tables)."""
+
+    def test_returns_three_rules_with_ip6tables(self):
+        from vless_installer.modules.awg_net_common import build_nat6_rule_args
+        rules = build_nat6_rule_args("fd66:66:66::/64", "awg0", "eth0")
+        self.assertEqual(len(rules), 3)
+        for rule in rules:
+            self.assertEqual(rule[0], "ip6tables")
+
+    def test_masquerade_rule_correct_scoped(self):
+        from vless_installer.modules.awg_net_common import build_nat6_rule_args
+        rules = build_nat6_rule_args("fd66:66:66::/64", "awg0", "eth0", scope_source=True)
+        masq = rules[0]
+        self.assertEqual(masq, [
+            "ip6tables", "-t", "nat", "-A", "POSTROUTING",
+            "-s", "fd66:66:66::/64", "-o", "eth0", "-j", "MASQUERADE",
+        ])
+
+    def test_masquerade_rule_correct_blanket(self):
+        from vless_installer.modules.awg_net_common import build_nat6_rule_args
+        rules = build_nat6_rule_args("fd66:66:66::/64", "awg0", "eth0", scope_source=False)
+        masq = rules[0]
+        self.assertEqual(masq, [
+            "ip6tables", "-t", "nat", "-A", "POSTROUTING",
+            "-o", "eth0", "-j", "MASQUERADE",
+        ])
+
+    def test_forward_in_rule_correct(self):
+        from vless_installer.modules.awg_net_common import build_nat6_rule_args
+        rules = build_nat6_rule_args("fd66:66:66::/64", "awg0", "eth0")
+        fwd_in = rules[1]
+        self.assertEqual(fwd_in, [
+            "ip6tables", "-A", "FORWARD",
+            "-i", "awg0", "-j", "ACCEPT",
+        ])
+
+    def test_forward_out_rule_correct(self):
+        from vless_installer.modules.awg_net_common import build_nat6_rule_args
+        rules = build_nat6_rule_args("fd66:66:66::/64", "awg0", "eth0")
+        fwd_out = rules[2]
+        self.assertEqual(fwd_out, [
+            "ip6tables", "-A", "FORWARD",
+            "-o", "awg0", "-m", "state",
+            "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT",
+        ])
+
+
+class TestBuildNat6IdempotentShell(unittest.TestCase):
+    """Тесты bash-сниппета для PostUp IPv6 (ip6tables с -C/-A парами)."""
+
+    def test_contains_check_before_add_for_masquerade(self):
+        from vless_installer.modules.awg_net_common import build_nat6_idempotent_shell
+        s = build_nat6_idempotent_shell("fd66:66:66::/64", "awg0", "$WAN6")
+        self.assertIn("ip6tables -t nat -C POSTROUTING -s fd66:66:66::/64 -o $WAN6 -j MASQUERADE", s)
+        self.assertIn("ip6tables -t nat -A POSTROUTING -s fd66:66:66::/64 -o $WAN6 -j MASQUERADE", s)
+        # -C должен идти ДО -A
+        self.assertLess(s.index("-t nat -C POSTROUTING"), s.index("-t nat -A POSTROUTING"))
+
+    def test_contains_check_for_forward_in(self):
+        from vless_installer.modules.awg_net_common import build_nat6_idempotent_shell
+        s = build_nat6_idempotent_shell("fd66:66:66::/64", "awg0", "$WAN6")
+        self.assertIn("ip6tables -C FORWARD -i awg0 -j ACCEPT", s)
+        self.assertIn("ip6tables -A FORWARD -i awg0 -j ACCEPT", s)
+
+    def test_contains_check_for_forward_out(self):
+        from vless_installer.modules.awg_net_common import build_nat6_idempotent_shell
+        s = build_nat6_idempotent_shell("fd66:66:66::/64", "awg0", "$WAN6")
+        self.assertIn("ip6tables -C FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT", s)
+        self.assertIn("ip6tables -A FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT", s)
+
+    def test_blanket_no_source_in_masquerade(self):
+        """scope_source=False → MASQUERADE без -s в v6 shell-сниппете."""
+        from vless_installer.modules.awg_net_common import build_nat6_idempotent_shell
+        s = build_nat6_idempotent_shell("fd66:66:66::/64", "awg0", "$WAN6", scope_source=False)
+        self.assertIn("ip6tables -t nat -C POSTROUTING -o $WAN6 -j MASQUERADE", s)
+        self.assertIn("ip6tables -t nat -A POSTROUTING -o $WAN6 -j MASQUERADE", s)
+        self.assertNotIn("-s fd66:66:66::/64", s)
+
+
+class TestBuildNat6CleanupShell(unittest.TestCase):
+    """Тесты bash-сниппета для PostDown IPv6 (ip6tables с -D)."""
+
+    def test_contains_delete_for_all_three_rules(self):
+        from vless_installer.modules.awg_net_common import build_nat6_cleanup_shell
+        s = build_nat6_cleanup_shell("fd66:66:66::/64", "awg0", "$WAN6")
+        self.assertIn("ip6tables -t nat -D POSTROUTING -s fd66:66:66::/64 -o $WAN6 -j MASQUERADE", s)
+        self.assertIn("ip6tables -D FORWARD -i awg0 -j ACCEPT", s)
+        self.assertIn("ip6tables -D FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT", s)
+
+    def test_all_deletes_have_silent_fallback(self):
+        from vless_installer.modules.awg_net_common import build_nat6_cleanup_shell
+        s = build_nat6_cleanup_shell("fd66:66:66::/64", "awg0", "$WAN6")
+        self.assertGreaterEqual(s.count("2>/dev/null"), 3)
+
+
+class TestNoDuplicateRulesInPostUp(unittest.TestCase):
+    """
+    Тест, что итоговый PostUp из _awg_server_conf_text() НЕ содержит
+    дублирующихся iptables-правил с одинаковым rule spec. Это регрессионный
+    тест на баг после коммита 47f56d3, когда PostUp содержал дублирующиеся
+    FORWARD -i и мёртвый FORWARD -o (без state-фильтра).
+    """
+
+    def setUp(self):
+        # Загружаем _core.py с патчами системных путей (как в full_test.py)
+        _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(_PROJECT_ROOT))
+        core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("vless_core_test_v2", core_path)
+        self.core_mod = importlib.util.module_from_spec(spec)
+        with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
+             patch.object(Path, 'touch', lambda self, *a, **kw: None), \
+             patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
+             patch('os.chown', lambda *a, **kw: None), \
+             patch('os.geteuid', return_value=0):
+            spec.loader.exec_module(self.core_mod)
+        # Регистрируем как vless_installer._core, чтобы lazy import в модулях работал
+        sys.modules['vless_installer._core'] = self.core_mod
+
+    def _get_postup_postdown(self):
+        """Возвращает (postup, postdown) строки из _awg_server_conf_text()."""
+        from vless_installer.modules.awg_transport import _awg_server_conf_text
+        text = _awg_server_conf_text()
+        postup = ""
+        postdown = ""
+        for line in text.splitlines():
+            if line.startswith("PostUp = "):
+                postup = line[len("PostUp = "):]
+            elif line.startswith("PostDown = "):
+                postdown = line[len("PostDown = "):]
+        return postup, postdown
+
+    # ── Хелперы для подсчёта вхождений конкретных правил ──────────────────
+    # Каждое правило в идемпотентной форме имеет вид:
+    #   <binary> -C <spec> 2>/dev/null || <binary> -A <spec>
+    # Т.е. для каждого правила ожидается РОВНО 1 вхождение как -A (и 1 как -C).
+    # Дубликаты -A одного и того же rule spec = регрессия 47f56d3.
+    # ВАЖНО: для MASQUERADE формат: `<binary> -t nat -A POSTROUTING ... MASQUERADE`
+    # (т.е. -t nat стоит ПЕРЕД -A). Для FORWARD формат: `<binary> -A FORWARD ...`.
+
+    def _count_add(self, s: str, binary: str, spec: str) -> int:
+        """Считает вхождения `<binary> -A <spec>` (для FORWARD-правил)."""
+        needle = f"{binary} -A {spec}"
+        return s.count(needle)
+
+    def _count_add_nat(self, s: str, binary: str, spec: str) -> int:
+        """Считает вхождения `<binary> -t nat -A <spec>` (для MASQUERADE-правил)."""
+        needle = f"{binary} -t nat -A {spec}"
+        return s.count(needle)
+
+    def _count_delete(self, s: str, binary: str, spec: str) -> int:
+        """Считает вхождения `<binary> -D <spec>` (для FORWARD-правил)."""
+        needle = f"{binary} -D {spec}"
+        return s.count(needle)
+
+    def _count_delete_nat(self, s: str, binary: str, spec: str) -> int:
+        """Считает вхождения `<binary> -t nat -D <spec>` (для MASQUERADE-правил)."""
+        needle = f"{binary} -t nat -D {spec}"
+        return s.count(needle)
+
+    # ── Тесты на отсутствие дубликатов IPv4 (iptables) в PostUp ────────────
+
+    def test_postup_v4_masquerade_add_appears_once(self):
+        """Регрессионный: `iptables -t nat -A ... MASQUERADE` ровно 1 раз в PostUp."""
+        postup, _ = self._get_postup_postdown()
+        # MASQUERADE spec (blanket, без -s — поведение до 47f56d3)
+        n = self._count_add_nat(postup, "iptables",
+                                "POSTROUTING -o $WAN -j MASQUERADE")
+        self.assertEqual(n, 1,
+                         f"iptables -t nat -A MASQUERADE должен встречаться 1 раз, "
+                         f"найдено {n} (дубликат = регрессия 47f56d3)")
+
+    def test_postup_v4_forward_in_add_appears_once(self):
+        """Регрессионный: `iptables -A FORWARD -i awg0 -j ACCEPT` ровно 1 раз."""
+        postup, _ = self._get_postup_postdown()
+        n = self._count_add(postup, "iptables", "FORWARD -i awg0 -j ACCEPT")
+        self.assertEqual(n, 1,
+                         f"FORWARD -i awg0 -j ACCEPT (-A) должен встречаться 1 раз, "
+                         f"найдено {n} (дубликат = ручная строка + строка из билдера)")
+
+    def test_postup_v4_forward_out_add_appears_once(self):
+        """`iptables -A FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT` ровно 1 раз."""
+        postup, _ = self._get_postup_postdown()
+        spec = "FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT"
+        n = self._count_add(postup, "iptables", spec)
+        self.assertEqual(n, 1,
+                         f"FORWARD -o awg0 ESTABLISHED,RELATED (-A) должен встречаться 1 раз, "
+                         f"найдено {n}")
+
+    def test_postup_v4_no_blanket_forward_out(self):
+        """Регрессионный: нет blanket `iptables -A FORWARD -o awg0 -j ACCEPT` (без state-фильтра).
+
+        До этого фикса ручная строка `iptables -A FORWARD -o awg0 -j ACCEPT`
+        создавала blanket-ACCEPT, который делал мёртвым правило с
+        ESTABLISHED,RELATED из build_nat_idempotent_shell (оно никогда не
+        достигалось, т.к. blanket выше по цепочке уже всё принимал).
+        """
+        postup, _ = self._get_postup_postdown()
+        # Используем regex с негативным look-ahead: ищем "FORWARD -o awg0 -j ACCEPT"
+        # НЕ сопровождаемый " -m state" сразу после (что отличает blanket от scoped).
+        import re
+        blanket_count = len(re.findall(
+            r"iptables -A FORWARD -o awg0 -j ACCEPT(?!\s+-m\s)",
+            postup,
+        ))
+        self.assertEqual(blanket_count, 0,
+                         f"Найден blanket FORWARD -o awg0 -j ACCEPT (без state-фильтра): "
+                         f"{blanket_count} вхождений. Это мёртвый код — делает "
+                         f"правило ESTABLISHED,RELATED недостижимым.")
+
+    def test_postup_v4_uses_blanket_masquerade_no_source(self):
+        """Регрессионный: MASQUERADE на exit-VPS = blanket (без -s).
+
+        Коммит 47f56d3 по ошибке сделал MASQUERADE scoped (-s awg_subnet),
+        что сломало бы маскарадинг не-AWG трафика на exit-VPS. Этот тест
+        гарантирует, что восстановлено поведение до 47f56d3.
+        """
+        postup, _ = self._get_postup_postdown()
+        # MASQUERADE -A в iptables (IPv4) должна быть без -s
+        import re
+        masq_adds = re.findall(
+            r"iptables -t nat -A POSTROUTING [^;]*?MASQUERADE",
+            postup,
+        )
+        self.assertEqual(len(masq_adds), 1,
+                         f"Ожидался 1 iptables -t nat -A MASQUERADE, найдено: {masq_adds}")
+        for spec in masq_adds:
+            self.assertNotIn(" -s ", spec,
+                             f"MASQUERADE на exit-VPS должен быть blanket (без -s), "
+                             f"но найдено -s: {spec}")
+
+    # ── Тесты на отсутствие дубликатов IPv4 (iptables) в PostDown ──────────
+
+    def test_postdown_v4_masquerade_delete_appears_once(self):
+        """`iptables -t nat -D ... MASQUERADE` ровно 1 раз в PostDown."""
+        _, postdown = self._get_postup_postdown()
+        n = self._count_delete_nat(postdown, "iptables",
+                                   "POSTROUTING -o $WAN -j MASQUERADE")
+        self.assertEqual(n, 1,
+                         f"iptables -t nat -D MASQUERADE должен встречаться 1 раз, "
+                         f"найдено {n}")
+
+    def test_postdown_v4_forward_in_delete_appears_once(self):
+        _, postdown = self._get_postup_postdown()
+        n = self._count_delete(postdown, "iptables", "FORWARD -i awg0 -j ACCEPT")
+        self.assertEqual(n, 1,
+                         f"FORWARD -i awg0 -j ACCEPT (-D) должен встречаться 1 раз, "
+                         f"найдено {n}")
+
+    def test_postdown_v4_forward_out_delete_appears_once(self):
+        _, postdown = self._get_postup_postdown()
+        spec = "FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT"
+        n = self._count_delete(postdown, "iptables", spec)
+        self.assertEqual(n, 1,
+                         f"FORWARD -o awg0 ESTABLISHED,RELATED (-D) должен встречаться 1 раз, "
+                         f"найдено {n}")
+
+    # ── Тесты на отсутствие дубликатов IPv6 (ip6tables) в PostUp ───────────
+
+    def test_postup_v6_masquerade_add_appears_once(self):
+        """`ip6tables -t nat -A ... MASQUERADE` ровно 1 раз в PostUp."""
+        postup, _ = self._get_postup_postdown()
+        n = self._count_add_nat(postup, "ip6tables",
+                                "POSTROUTING -o $WAN6 -j MASQUERADE")
+        self.assertEqual(n, 1,
+                         f"ip6tables -t nat -A MASQUERADE должен встречаться 1 раз, "
+                         f"найдено {n}")
+
+    def test_postup_v6_forward_in_add_appears_once(self):
+        postup, _ = self._get_postup_postdown()
+        n = self._count_add(postup, "ip6tables", "FORWARD -i awg0 -j ACCEPT")
+        self.assertEqual(n, 1,
+                         f"ip6tables -A FORWARD -i awg0 -j ACCEPT должен встречаться 1 раз, "
+                         f"найдено {n}")
+
+    def test_postup_v6_forward_out_add_appears_once(self):
+        postup, _ = self._get_postup_postdown()
+        spec = "FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT"
+        n = self._count_add(postup, "ip6tables", spec)
+        self.assertEqual(n, 1,
+                         f"ip6tables -A FORWARD -o awg0 ESTABLISHED,RELATED должен встречаться 1 раз, "
+                         f"найдено {n}")
+
+    # ── Тесты на отсутствие дубликатов IPv6 (ip6tables) в PostDown ─────────
+
+    def test_postdown_v6_masquerade_delete_appears_once(self):
+        _, postdown = self._get_postup_postdown()
+        n = self._count_delete_nat(postdown, "ip6tables",
+                                   "POSTROUTING -o $WAN6 -j MASQUERADE")
+        self.assertEqual(n, 1,
+                         f"ip6tables -t nat -D MASQUERADE должен встречаться 1 раз, "
+                         f"найдено {n}")
+
+    def test_postdown_v6_forward_in_delete_appears_once(self):
+        _, postdown = self._get_postup_postdown()
+        n = self._count_delete(postdown, "ip6tables", "FORWARD -i awg0 -j ACCEPT")
+        self.assertEqual(n, 1,
+                         f"ip6tables -D FORWARD -i awg0 -j ACCEPT должен встречаться 1 раз, "
+                         f"найдено {n}")
+
+    def test_postdown_v6_forward_out_delete_appears_once(self):
+        _, postdown = self._get_postup_postdown()
+        spec = "FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT"
+        n = self._count_delete(postdown, "ip6tables", spec)
+        self.assertEqual(n, 1,
+                         f"ip6tables -D FORWARD -o awg0 ESTABLISHED,RELATED должен встречаться 1 раз, "
+                         f"найдено {n}")
+
+    # ── Тест на идемпотентность IPv6 (ip6tables через -C/-A) ───────────────
+
+    def test_postup_v6_has_check_before_add(self):
+        """Регрессионный: ip6tables правила идут через -C/-A (идемпотентно).
+
+        До этого фикса ip6tables правила добавлялись через -A без -C-проверки
+        (тот же баг №1 из ревью, только для IPv6 — забыт при первичном рефакторинге).
+        """
+        postup, _ = self._get_postup_postdown()
+        # Для каждого -A ip6tables правила должен быть соответствующий -C
+        # MASQUERADE
+        self.assertIn("ip6tables -t nat -C POSTROUTING", postup)
+        self.assertIn("ip6tables -t nat -A POSTROUTING", postup)
+        # FORWARD -i
+        self.assertIn("ip6tables -C FORWARD -i awg0", postup)
+        self.assertIn("ip6tables -A FORWARD -i awg0", postup)
+        # FORWARD -o ESTABLISHED,RELATED
+        self.assertIn("ip6tables -C FORWARD -o awg0 -m state --state ESTABLISHED,RELATED", postup)
+        self.assertIn("ip6tables -A FORWARD -o awg0 -m state --state ESTABLISHED,RELATED", postup)
+
+    # ── Тест на общую структуру PostUp (3 правила × 2 binary = 6 -A вхождений) ──
+
+    def test_postup_total_add_count(self):
+        """Сводный тест: ровно 6 вхождений `-A` (3 iptables + 3 ip6tables) в PostUp.
+
+        Для MASQUERADE формат: `iptables -t nat -A POSTROUTING ...`
+        Для FORWARD формат: `iptables -A FORWARD ...`
+        Поэтому считаем оба паттерна и суммируем.
+        """
+        postup, _ = self._get_postup_postdown()
+        import re
+        # iptables: либо `-t nat -A POSTROUTING`, либо `-A FORWARD`
+        ipt_masq_add = len(re.findall(r"\biptables\s+-t\s+nat\s+-A\s+POSTROUTING", postup))
+        ipt_fwd_add = len(re.findall(r"\biptables\s+-A\s+FORWARD", postup))
+        ipt_adds = ipt_masq_add + ipt_fwd_add
+        # ip6tables: аналогично
+        ip6_masq_add = len(re.findall(r"\bip6tables\s+-t\s+nat\s+-A\s+POSTROUTING", postup))
+        ip6_fwd_add = len(re.findall(r"\bip6tables\s+-A\s+FORWARD", postup))
+        ip6_adds = ip6_masq_add + ip6_fwd_add
+        self.assertEqual(ipt_adds, 3,
+                         f"Ожидалось 3 iptables -A правила в PostUp "
+                         f"(1 MASQUERADE + 2 FORWARD), найдено {ipt_adds} "
+                         f"(MASQUERADE={ipt_masq_add}, FORWARD={ipt_fwd_add}) — "
+                         f"дубликаты = регрессия 47f56d3")
+        self.assertEqual(ip6_adds, 3,
+                         f"Ожидалось 3 ip6tables -A правила в PostUp, найдено {ip6_adds} "
+                         f"(MASQUERADE={ip6_masq_add}, FORWARD={ip6_fwd_add}) — "
+                         f"IPv6 идемпотентность")
+        self.assertEqual(ipt_adds + ip6_adds, 6,
+                         f"Ожидалось 6 -A правил суммарно (3 v4 + 3 v6), "
+                         f"найдено {ipt_adds + ip6_adds}")
+
+
 class TestBuildSysctlLines(unittest.TestCase):
     """Тесты генератора строк /etc/sysctl.d/XX-awg.conf (пункт 2 ревью)."""
 
