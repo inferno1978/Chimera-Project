@@ -245,6 +245,188 @@ class TestAWGRestAPIAdminAuth(unittest.TestCase):
         self.assertEqual(h.status, 401)
 
 
+class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
+    """Регрессионный тест: /api/awg/stats НЕ должен утекать секреты.
+
+    До фикса этот endpoint возвращал "raw_dump": dump — необработанный вывод
+    `awg show all dump`, формат которого:
+      interface-строка: interface\t<server_privkey>\tport\t...
+      peer-строка:      peer\t<pubkey>\t<psk>\tendpoint\tallowed_ips\thandshake\trx\ttx
+    raw_dump содержал приватный ключ сервера (поле 1 interface-строки) и
+    PSK каждого пира (поле 2 peer-строки) — прямая утечка боевых секретов
+    через JSON API, нарушающая инвариант модуля ("приватные ключи никогда
+    не попадают в JSON-ответы").
+
+    Фикс: raw_dump полностью убран из ответа. Фронтенду он не нужен —
+    там уже есть распарсенные "peers" со статистикой.
+
+    Этот тест собирает fake dump с заведомо узнаваемыми значениями
+    (SERVER_PRIVKEY_MUST_NOT_LEAK, PSK_MUST_NOT_LEAK) и проверяет что
+    они НЕ встречаются нигде в JSON-ответе.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._patch1 = patch("vless_installer.modules.awg_rest_api._is_awg_installed",
+                             return_value=True)
+        self._patch1.start()
+
+    def tearDown(self):
+        self._patch1.stop()
+
+    def _build_fake_dump_with_secrets(self):
+        """
+        Собирает fake `awg show all dump` с узнаваемыми секретами.
+
+        Формат (tab-separated):
+          interface\t<privkey>\t<port>\t...
+          peer\t<pubkey>\t<psk>\t<endpoint>\t<allowed_ips>\t<handshake>\t<rx>\t<tx>
+
+        ВАЖНО: используем заведомо узнаваемые строки-маркеры для секретов,
+        чтобы assertNotIn однозначно ловил утечку.
+        """
+        return [
+            # interface-строка: поле 1 = приватный ключ сервера
+            "interface\tSERVER_PRIVKEY_MUST_NOT_LEAK\t51820\tawg0",
+            # peer-строка: поле 2 = PSK пира
+            "peer\talice_pubkey\tPSK_MUST_NOT_LEAK\t1.2.3.4:54321\t10.66.66.2/32\t1700000000\t1024\t2048",
+        ]
+
+    def test_stats_response_does_not_contain_server_privkey(self):
+        """JSON-ответ /api/awg/stats не содержит server_privkey."""
+        from vless_installer.modules import awg_rest_api
+        fake_dump = self._build_fake_dump_with_secrets()
+        # peers из state — нужны для матчинга по pubkey в _parse_peer_stats
+        fake_peers = [{
+            "name": "alice",
+            "client_pubkey": "alice_pubkey",
+            "client_privkey": "irrelevant",
+            "client_ip": "10.66.66.2",
+        }]
+        with patch("vless_installer.modules.awg_apply.awgs_show_dump",
+                   return_value=fake_dump), \
+             patch("vless_installer.modules.awg_state.awgs_state_peers_get",
+                   return_value=fake_peers):
+            h = _MockHandler(admin_authed=True)
+            awg_rest_api.awg_handle_get(h, "/api/awg/stats", {})
+            self.assertEqual(h.status, 200)
+            # Сериализуем весь ответ в строку и проверяем отсутствие секрета
+            response_str = json.dumps(h._get_json_body(), ensure_ascii=False)
+            self.assertNotIn("SERVER_PRIVKEY_MUST_NOT_LEAK", response_str,
+                             "Приватный ключ сервера утёк в /api/awg/stats. "
+                             "raw_dump должен быть убран из ответа.")
+
+    def test_stats_response_does_not_contain_psk(self):
+        """JSON-ответ /api/awg/stats не содержит PSK пира."""
+        from vless_installer.modules import awg_rest_api
+        fake_dump = self._build_fake_dump_with_secrets()
+        fake_peers = [{
+            "name": "alice",
+            "client_pubkey": "alice_pubkey",
+            "client_privkey": "irrelevant",
+            "client_ip": "10.66.66.2",
+        }]
+        with patch("vless_installer.modules.awg_apply.awgs_show_dump",
+                   return_value=fake_dump), \
+             patch("vless_installer.modules.awg_state.awgs_state_peers_get",
+                   return_value=fake_peers):
+            h = _MockHandler(admin_authed=True)
+            awg_rest_api.awg_handle_get(h, "/api/awg/stats", {})
+            self.assertEqual(h.status, 200)
+            response_str = json.dumps(h._get_json_body(), ensure_ascii=False)
+            self.assertNotIn("PSK_MUST_NOT_LEAK", response_str,
+                             "PSK пира утёк в /api/awg/stats. "
+                             "raw_dump должен быть убран из ответа.")
+
+    def test_stats_response_does_not_contain_raw_dump_key(self):
+        """В JSON-ответе нет ключа 'raw_dump' вообще."""
+        from vless_installer.modules import awg_rest_api
+        fake_dump = self._build_fake_dump_with_secrets()
+        fake_peers = [{
+            "name": "alice",
+            "client_pubkey": "alice_pubkey",
+            "client_privkey": "irrelevant",
+            "client_ip": "10.66.66.2",
+        }]
+        with patch("vless_installer.modules.awg_apply.awgs_show_dump",
+                   return_value=fake_dump), \
+             patch("vless_installer.modules.awg_state.awgs_state_peers_get",
+                   return_value=fake_peers):
+            h = _MockHandler(admin_authed=True)
+            awg_rest_api.awg_handle_get(h, "/api/awg/stats", {})
+            self.assertEqual(h.status, 200)
+            data = h._get_json_body()
+            self.assertNotIn("raw_dump", data,
+                             "Ключ 'raw_dump' не должен присутствовать в ответе "
+                             "/api/awg/stats — он содержит необработанный вывод "
+                             "awg show dump с секретами.")
+
+    def test_stats_response_contains_parsed_peers_without_secrets(self):
+        """JSON-ответ содержит распарсенные peers со статистикой, но без секретов.
+
+        Проверка что после фикса endpoint всё ещё отдаёт полезную статистику
+        (rx_bytes, tx_bytes, handshake, endpoint) — просто без raw_dump.
+        """
+        from vless_installer.modules import awg_rest_api
+        fake_dump = self._build_fake_dump_with_secrets()
+        fake_peers = [{
+            "name": "alice",
+            "client_pubkey": "alice_pubkey",
+            "client_privkey": "irrelevant",
+            "client_ip": "10.66.66.2",
+        }]
+        with patch("vless_installer.modules.awg_apply.awgs_show_dump",
+                   return_value=fake_dump), \
+             patch("vless_installer.modules.awg_state.awgs_state_peers_get",
+                   return_value=fake_peers):
+            h = _MockHandler(admin_authed=True)
+            awg_rest_api.awg_handle_get(h, "/api/awg/stats", {})
+            self.assertEqual(h.status, 200)
+            data = h._get_json_body()
+            # peers должен быть в ответе
+            self.assertIn("peers", data)
+            self.assertEqual(len(data["peers"]), 1)
+            peer_stat = data["peers"][0]
+            self.assertEqual(peer_stat["name"], "alice")
+            self.assertEqual(peer_stat["rx_bytes"], 1024)
+            self.assertEqual(peer_stat["tx_bytes"], 2048)
+            # Секретов быть не должно
+            response_str = json.dumps(data, ensure_ascii=False)
+            self.assertNotIn("SERVER_PRIVKEY_MUST_NOT_LEAK", response_str)
+            self.assertNotIn("PSK_MUST_NOT_LEAK", response_str)
+
+    def test_peers_endpoint_also_does_not_leak_secrets(self):
+        """Дополнительно: /api/awg/peers тоже не утекает секреты из dump.
+
+        /api/awg/peers парсит dump через _parse_peer_stats (который извлекает
+        только rx/tx/handshake/endpoint), но проверим что raw dump не попадает
+        в ответ случайно (например через debug-поле).
+        """
+        from vless_installer.modules import awg_rest_api
+        fake_dump = self._build_fake_dump_with_secrets()
+        fake_peers = [{
+            "name": "alice",
+            "client_pubkey": "alice_pubkey",
+            "client_privkey": "irrelevant",
+            "client_ip": "10.66.66.2",
+            "owner_email": "",
+            "expires_at": "",
+        }]
+        with patch("vless_installer.modules.awg_apply.awgs_show_dump",
+                   return_value=fake_dump), \
+             patch("vless_installer.modules.awg_state.awgs_state_peers_get",
+                   return_value=fake_peers), \
+             patch("vless_installer.modules.awg_state.awgs_state_ensure_peer_owner_field"):
+            h = _MockHandler(admin_authed=True)
+            awg_rest_api.awg_handle_get(h, "/api/awg/peers", {})
+            self.assertEqual(h.status, 200)
+            response_str = json.dumps(h._get_json_body(), ensure_ascii=False)
+            self.assertNotIn("SERVER_PRIVKEY_MUST_NOT_LEAK", response_str,
+                             "Приватный ключ сервера не должен утекать в /api/awg/peers")
+            self.assertNotIn("PSK_MUST_NOT_LEAK", response_str,
+                             "PSK не должен утекать в /api/awg/peers")
+
+
 class TestAWGRestAPIPeerNameValidation(unittest.TestCase):
     """Валидация имени пира: path traversal блокируется."""
 
