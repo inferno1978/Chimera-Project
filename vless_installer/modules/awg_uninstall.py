@@ -86,11 +86,19 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
                   check=False, quiet=True)
         core._run(["systemctl", "disable", "awg-cascade-routing"],
                   check=False, quiet=True)
+    # NAT-юнит (если создавался при установке)
+    core._run(["systemctl", "stop", "awg-nat.service"],
+              check=False, quiet=True)
+    core._run(["systemctl", "disable", "awg-nat.service"],
+              check=False, quiet=True)
 
     # 2. Удаляем systemd-юниты
     info("Удаление systemd-юнитов...")
     core._run(["systemctl", "disable", AWGS_SYSTEMD_AWG_QUICK],
               check=False, quiet=True)
+    # awg-nat.service
+    awg_nat_unit = Path("/etc/systemd/system/awg-nat.service")
+    awg_nat_unit.unlink(missing_ok=True)
     if AWGS_SYSTEMD_CASCADE.exists():
         AWGS_SYSTEMD_CASCADE.unlink(missing_ok=True)
     core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
@@ -146,6 +154,26 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     info(f"Удаление UFW-правила для UDP {port}...")
     core._run(["ufw", "delete", "allow", f"{port}/udp"],
               check=False, quiet=True)
+
+    # 8.1 NAT iptables правила (если создавались при установке)
+    info("Удаление iptables NAT правил...")
+    subnet = state.get("subnet", "10.66.66.0/24")
+    # MASQUERADE правило
+    core._run(
+        ["iptables", "-t", "nat", "-D", "POSTROUTING",
+         "-s", subnet, "-j", "MASQUERADE"],
+        check=False, quiet=True,
+    )
+    # FORWARD правила
+    core._run(
+        ["iptables", "-D", "FORWARD", "-i", AWGS_INTERFACE, "-j", "ACCEPT"],
+        check=False, quiet=True,
+    )
+    core._run(
+        ["iptables", "-D", "FORWARD", "-o", AWGS_INTERFACE, "-m", "state",
+         "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+        check=False, quiet=True,
+    )
 
     # 9. Init-файл и лог
     AWGS_INIT_FILE.unlink(missing_ok=True)
