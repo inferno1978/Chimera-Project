@@ -83,15 +83,31 @@ def _validate_peer_name(name: str) -> bool:
 def _safe_peer_for_json(peer: dict) -> dict:
     """
     Возвращает копию пира без приватных ключей (для JSON-ответов API).
-    server_privkey живёт в state.json (не в peer), но client_privkey — в peer.
-    Оба никогда не должны попадать в JSON.
+
+    Никогда не отдаём в JSON:
+      • client_privkey  — приватный ключ клиента (Curve25519), даёт полный
+                          доступ к туннелю от имени этого пира.
+      • preshared_key   — PresharedKey (PSK), дополнительный симметричный
+                          секрет для post-quantum resistance. Утечка PSK
+                          ослабляет туннель (атакующий может расшифровать
+                          handshake при компрометации приватного ключа).
+                          Для админа это не новая экспозиция (у него есть
+                          /config endpoint), но для user-портала PSK чужого
+                          пира утекать не должен.
+
+    server_privkey живёт в state.json (не в peer), но если бы оказался в peer —
+    тоже был бы отфильтрован этим списком.
     """
+    # Список полей, которые НИКОГДА не попадают в JSON-ответы API.
+    # Приватные ключи и PSK — боевые секреты, отдаются только в .conf-файле
+    # владельцу/админу через /api/awg/.../config и /api/awg/my-peer/config.
+    _NEVER_IN_JSON = ("client_privkey", "preshared_key", "server_privkey")
     if not isinstance(peer, dict):
         return {}
     safe = {}
     for k, v in peer.items():
-        if k in ("client_privkey",):
-            continue  # никогда не отдаём
+        if k in _NEVER_IN_JSON:
+            continue
         safe[k] = v
     return safe
 
@@ -267,8 +283,13 @@ def awg_handle_get(handler, path: str, query: dict) -> bool:
         try:
             from .awg_constants import AWGS_KEYS_DIR
             png_path = AWGS_KEYS_DIR / f"{name}_qr.png"
-            # Перегенерируем на случай если .conf изменился
-            _awg_qr().awgs_qr_export_peer(peer)
+            # Перегенерируем на случай если .conf изменился.
+            # show_terminal=False — КРИТИЧНО: API-контекст работает под
+            # systemd, stdout уходит в journal. awgs_qr_show_terminal()
+            # печатает ANSI QR с vpn:// URI (приватный ключ + PSK) в stdout.
+            # Без show_terminal=False приватный ключ утекал бы в journal
+            # на каждый GET-запрос QR.
+            _awg_qr().awgs_qr_export_peer(peer, show_terminal=False)
             if not png_path.exists():
                 handler._send_json({"error": "QR PNG not generated"}, 500)
                 return True
@@ -350,8 +371,11 @@ def awg_handle_get(handler, path: str, query: dict) -> bool:
         try:
             from .awg_constants import AWGS_KEYS_DIR
             name = peer.get("name", "client")
-            # Перегенерируем QR на случай если .conf изменился
-            _awg_qr().awgs_qr_export_peer(peer)
+            # Перегенерируем QR на случай если .conf изменился.
+            # show_terminal=False — КРИТИЧНО для API-контекста (см. комментарий
+            # в /api/awg/peers/{name}/qr выше): без этого приватный ключ
+            # утекает в systemd journal на каждый просмотр QR юзером.
+            _awg_qr().awgs_qr_export_peer(peer, show_terminal=False)
             png_path = AWGS_KEYS_DIR / f"{name}_qr.png"
             if not png_path.exists():
                 handler._send_json({"error": "QR PNG not generated"}, 500)

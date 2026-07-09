@@ -338,11 +338,12 @@ class TestAWGRestAPIUserEndpoints(unittest.TestCase):
             self.assertEqual(h.status, 404)
 
     def test_my_peer_returns_safe_peer_without_privkey(self):
-        """my-peer отдаёт пира БЕЗ client_privkey (приватные ключи не утекают)."""
+        """my-peer отдаёт пира БЕЗ client_privkey И preshared_key (секреты не утекают)."""
         from vless_installer.modules import awg_rest_api
         fake_peer = {
             "name": "alice",
             "client_privkey": "SECRET_PRIVATE_KEY_MUST_NOT_LEAK",
+            "preshared_key": "SECRET_PSK_MUST_NOT_LEAK",
             "client_pubkey": "pubkey123",
             "client_ip": "10.66.66.2",
             "owner_email": "alice@example.com",
@@ -358,12 +359,14 @@ class TestAWGRestAPIUserEndpoints(unittest.TestCase):
             peer = data.get("peer", {})
             self.assertNotIn("client_privkey", peer,
                              "Приватный ключ не должен попадать в JSON-ответ")
+            self.assertNotIn("preshared_key", peer,
+                             "PSK не должен попадать в JSON-ответ (регрессионный тест)")
             self.assertEqual(peer.get("name"), "alice")
             self.assertEqual(peer.get("client_pubkey"), "pubkey123")
 
 
 class TestAWGRestAPISafePeerForJson(unittest.TestCase):
-    """_safe_peer_for_json убирает приватные ключи."""
+    """_safe_peer_for_json убирает приватные ключи и PSK."""
 
     def test_safe_peer_strips_client_privkey(self):
         from vless_installer.modules import awg_rest_api
@@ -378,6 +381,44 @@ class TestAWGRestAPISafePeerForJson(unittest.TestCase):
         self.assertNotIn("client_privkey", safe)
         self.assertEqual(safe.get("client_pubkey"), "pub")
         self.assertEqual(safe.get("owner_email"), "alice@example.com")
+
+    def test_safe_peer_strips_preshared_key(self):
+        """preshared_key (PSK) НЕ должен попадать в JSON-ответы API.
+
+        Регрессионный тест на баг из ревью: _safe_peer_for_json фильтровал
+        только client_privkey, но PSK утекал в GET /api/awg/peers и
+        /api/awg/my-peer. PSK — боевой секрет (дополнительный симметричный
+        ключ для post-quantum resistance), утечка ослабляет туннель.
+        """
+        from vless_installer.modules import awg_rest_api
+        peer = {
+            "name": "alice",
+            "client_privkey": "SECRET_PRIV",
+            "client_pubkey": "pub",
+            "preshared_key": "SECRET_PSK_MUST_NOT_LEAK",
+            "client_ip": "10.66.66.2",
+            "owner_email": "alice@example.com",
+        }
+        safe = awg_rest_api._safe_peer_for_json(peer)
+        self.assertNotIn("client_privkey", safe,
+                         "Приватный ключ не должен попадать в JSON")
+        self.assertNotIn("preshared_key", safe,
+                         "PSK не должен попадать в JSON (регрессионный тест)")
+        # Остальные поля сохраняются
+        self.assertEqual(safe.get("client_pubkey"), "pub")
+        self.assertEqual(safe.get("owner_email"), "alice@example.com")
+        self.assertEqual(safe.get("name"), "alice")
+
+    def test_safe_peer_strips_server_privkey_if_present(self):
+        """server_privkey (если бы оказался в peer) тоже фильтруется."""
+        from vless_installer.modules import awg_rest_api
+        peer = {
+            "name": "alice",
+            "server_privkey": "SERVER_SECRET",
+            "client_pubkey": "pub",
+        }
+        safe = awg_rest_api._safe_peer_for_json(peer)
+        self.assertNotIn("server_privkey", safe)
 
     def test_safe_peer_handles_empty(self):
         from vless_installer.modules import awg_rest_api
@@ -639,6 +680,230 @@ class TestUserCannotAccessAdminEndpoints(unittest.TestCase):
         awg_rest_api.awg_handle_patch(h, "/api/awg/peers/alice",
                                        {"param": "owner_email", "value": "hacker@ex.com"})
         self.assertEqual(h.status, 401)
+
+
+class TestAWGQRPngChmod(unittest.TestCase):
+    """П.2: PNG-файлы QR-кодов создаются с chmod 0o600.
+
+    Регрессионный тест: раньше awgs_qr_save_png() не делал chmod, и PNG
+    создавался с umask-правами (часто 0o644), что позволяло любому локальному
+    юзеру на сервере прочитать приватный ключ + PSK (они закодированы в PNG
+    как vpn:// URI). После начала отдачи PNG через REST API это стало
+    подтверждённой боевой экспозицией.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_save_png_calls_chmod_600(self):
+        """awgs_qr_save_png вызывает path.chmod(0o600) после успешной генерации."""
+        import tempfile
+        from vless_installer.modules import awg_qr
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            png_path = Path(td) / "test_qr.png"
+            # Мокаем _core_module()._run чтобы qrencode "отработал" успешно
+            mock_core = MagicMock()
+            mock_core._run = MagicMock(
+                return_value=MagicMock(returncode=0, stdout="", stderr="")
+            )
+            with patch.object(awg_qr, "_core_module", return_value=mock_core):
+                # Создаём файл чтобы chmod не падал на несуществующем файле
+                png_path.write_bytes(b"fake-png-content")
+                ok = awg_qr.awgs_qr_save_png("test content", png_path)
+            self.assertTrue(ok)
+            # Проверяем права — должны быть 0o600
+            import os, stat
+            mode = stat.S_IMODE(os.stat(png_path).st_mode)
+            self.assertEqual(mode, 0o600,
+                             f"PNG должен иметь права 0o600, имеет {oct(mode)}")
+
+    def test_save_png_no_chmod_on_failure(self):
+        """При неудаче qrencode chmod не вызывается (файла нет)."""
+        from vless_installer.modules import awg_qr
+        from pathlib import Path
+        mock_core = MagicMock()
+        mock_core._run = MagicMock(
+            return_value=MagicMock(returncode=1, stdout="", stderr="qrencode error")
+        )
+        with patch.object(awg_qr, "_core_module", return_value=mock_core):
+            ok = awg_qr.awgs_qr_save_png("test", Path("/tmp/nonexistent_xyz.png"))
+        self.assertFalse(ok)
+
+    def test_save_client_conf_sets_dir_chmod_700(self):
+        """awgs_qr_save_client_conf устанавливает AWGS_KEYS_DIR chmod 0o700."""
+        import tempfile
+        from vless_installer.modules import awg_qr
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            keys_dir = Path(td) / "keys"
+            with patch.object(awg_qr, "AWGS_KEYS_DIR", keys_dir), \
+                 patch.object(awg_qr, "_core_module",
+                              return_value=MagicMock(log_to_file=MagicMock())):
+                awg_qr.awgs_qr_save_client_conf(
+                    {"name": "alice", "client_privkey": "k", "client_ip": "10.66.66.2"},
+                    {"server_pubkey": "pk", "port": 51820, "endpoint": "1.2.3.4",
+                     "params": {}, "mtu": 1280, "allow_ipv6_tunnel": False}
+                )
+            import os, stat
+            dir_mode = stat.S_IMODE(os.stat(keys_dir).st_mode)
+            self.assertEqual(dir_mode, 0o700,
+                             f"AWGS_KEYS_DIR должен иметь права 0o700, имеет {oct(dir_mode)}")
+            conf_path = keys_dir / "alice.conf"
+            conf_mode = stat.S_IMODE(os.stat(conf_path).st_mode)
+            self.assertEqual(conf_mode, 0o600,
+                             f".conf должен иметь права 0o600, имеет {oct(conf_mode)}")
+
+
+class TestAWGQRExportNoPrintInApiMode(unittest.TestCase):
+    """П.3: awgs_qr_export_peer(show_terminal=False) не печатает QR в stdout.
+
+    Регрессионный тест на серьёзный баг: при вызове из REST API
+    /api/awg/.../qr функция дёргала awgs_qr_show_terminal(), которая делает
+    print(r.stdout) — ANSI QR с vpn:// URI (приватный ключ + PSK). Под
+    systemd это уходит в journal (journalctl -u vless-web), читаемый любым
+    с доступом к journalctl. На каждый просмотр QR юзером приватный ключ
+    буквально писался в системный лог.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_export_with_show_terminal_false_does_not_print(self):
+        """show_terminal=False → awgs_qr_show_terminal НЕ вызывается."""
+        from vless_installer.modules import awg_qr
+        peer = {
+            "name": "alice",
+            "client_privkey": "SECRET",
+            "client_pubkey": "pub",
+            "client_ip": "10.66.66.2",
+            "preshared_key": "PSK_SECRET",
+        }
+        server_state = {
+            "server_pubkey": "srv_pub",
+            "port": 51820,
+            "endpoint": "1.2.3.4",
+            "params": {},
+            "mtu": 1280,
+            "allow_ipv6_tunnel": False,
+        }
+        with patch.object(awg_qr, "_core_module",
+                          return_value=MagicMock(log_to_file=MagicMock())), \
+             patch("vless_installer.modules.awg_state.awgs_state_load",
+                   return_value=server_state), \
+             patch.object(awg_qr, "AWGS_KEYS_DIR",
+                          Path("/tmp/test_awg_qr_keys")), \
+             patch.object(awg_qr, "awgs_qr_show_terminal") as mock_show_term, \
+             patch.object(awg_qr, "awgs_qr_save_png", return_value=True), \
+             patch.object(awg_qr, "awgs_qr_save_client_conf",
+                          return_value=Path("/tmp/test.conf")):
+            awg_qr.awgs_qr_export_peer(peer, show_terminal=False)
+            # awgs_qr_show_terminal НЕ должен вызываться в API-режиме
+            mock_show_term.assert_not_called()
+
+    def test_export_with_show_terminal_true_calls_show_terminal(self):
+        """show_terminal=True (TUI-режим, default) → awgs_qr_show_terminal вызывается."""
+        from vless_installer.modules import awg_qr
+        peer = {
+            "name": "alice",
+            "client_privkey": "SECRET",
+            "client_pubkey": "pub",
+            "client_ip": "10.66.66.2",
+        }
+        server_state = {
+            "server_pubkey": "srv_pub",
+            "port": 51820,
+            "endpoint": "1.2.3.4",
+            "params": {},
+            "mtu": 1280,
+            "allow_ipv6_tunnel": False,
+        }
+        with patch.object(awg_qr, "_core_module",
+                          return_value=MagicMock(log_to_file=MagicMock())), \
+             patch("vless_installer.modules.awg_state.awgs_state_load",
+                   return_value=server_state), \
+             patch.object(awg_qr, "AWGS_KEYS_DIR",
+                          Path("/tmp/test_awg_qr_keys")), \
+             patch.object(awg_qr, "awgs_qr_show_terminal", return_value=True) as mock_show_term, \
+             patch.object(awg_qr, "awgs_qr_save_png", return_value=True), \
+             patch.object(awg_qr, "awgs_qr_save_client_conf",
+                          return_value=Path("/tmp/test.conf")):
+            awg_qr.awgs_qr_export_peer(peer, show_terminal=True)
+            # awgs_qr_show_terminal ДОЛЖЕН вызываться в TUI-режиме
+            mock_show_term.assert_called()
+
+    def test_export_default_is_show_terminal_true(self):
+        """Default (без аргумента) = TUI-режим (show_terminal=True) — обратная совместимость."""
+        import inspect
+        from vless_installer.modules import awg_qr
+        sig = inspect.signature(awg_qr.awgs_qr_export_peer)
+        self.assertIn("show_terminal", sig.parameters)
+        self.assertEqual(sig.parameters["show_terminal"].default, True,
+                         "Default show_terminal=True для обратной совместимости с TUI")
+
+    def test_rest_api_qr_endpoint_uses_show_terminal_false(self):
+        """REST API /api/awg/peers/{name}/qr передаёт show_terminal=False.
+
+        Интеграционный тест: хендлер REST API не должен дёргать
+        awgs_qr_show_terminal (иначе приватный ключ в journal).
+        """
+        from vless_installer.modules import awg_rest_api
+        peer = {"name": "alice", "owner_email": "", "client_privkey": "k",
+                "client_pubkey": "pub", "client_ip": "10.66.66.2"}
+        with patch("vless_installer.modules.awg_rest_api._is_awg_installed",
+                   return_value=True), \
+             patch("vless_installer.modules.awg_state.awgs_state_peer_find",
+                   return_value=peer), \
+             patch("vless_installer.modules.awg_qr.awgs_qr_export_peer") as mock_export, \
+             patch("vless_installer.modules.awg_constants.AWGS_KEYS_DIR",
+                   Path("/tmp/test_awg_keys")), \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("pathlib.Path.read_bytes", return_value=b"fake-png"):
+            # Создаём mock handler с admin auth
+            h = MagicMock()
+            h._require_admin = MagicMock(return_value=True)
+            h._send_json = MagicMock()
+            h.send_response = MagicMock()
+            h.send_header = MagicMock()
+            h.end_headers = MagicMock()
+            h.wfile = MagicMock()
+            awg_rest_api.awg_handle_get(h, "/api/awg/peers/alice/qr", {})
+            # Проверяем что awgs_qr_export_peer вызван с show_terminal=False
+            mock_export.assert_called_once()
+            call_kwargs = mock_export.call_args.kwargs
+            self.assertIn("show_terminal", call_kwargs,
+                          "Хендлер должен явно передавать show_terminal=False")
+            self.assertFalse(call_kwargs["show_terminal"],
+                             "show_terminal=False — иначе приватный ключ утекает в journal")
+
+    def test_rest_api_my_peer_qr_uses_show_terminal_false(self):
+        """REST API /api/awg/my-peer/qr передаёт show_terminal=False."""
+        from vless_installer.modules import awg_rest_api
+        peer = {"name": "alice", "owner_email": "alice@ex.com",
+                "client_privkey": "k", "client_pubkey": "pub",
+                "client_ip": "10.66.66.2"}
+        with patch("vless_installer.modules.awg_rest_api._is_awg_installed",
+                   return_value=True), \
+             patch("vless_installer.modules.awg_state.awgs_state_find_peer_by_owner",
+                   return_value=peer), \
+             patch("vless_installer.modules.awg_qr.awgs_qr_export_peer") as mock_export, \
+             patch("vless_installer.modules.awg_constants.AWGS_KEYS_DIR",
+                   Path("/tmp/test_awg_keys")), \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("pathlib.Path.read_bytes", return_value=b"fake-png"):
+            h = MagicMock()
+            h._require_user = MagicMock(return_value={"email": "alice@ex.com"})
+            h._send_json = MagicMock()
+            h.send_response = MagicMock()
+            h.send_header = MagicMock()
+            h.end_headers = MagicMock()
+            h.wfile = MagicMock()
+            awg_rest_api.awg_handle_get(h, "/api/awg/my-peer/qr", {})
+            mock_export.assert_called_once()
+            call_kwargs = mock_export.call_args.kwargs
+            self.assertIn("show_terminal", call_kwargs)
+            self.assertFalse(call_kwargs["show_terminal"],
+                             "show_terminal=False для my-peer/qr — иначе ключ в journal")
 
 
 if __name__ == "__main__":

@@ -94,6 +94,12 @@ def awgs_qr_save_client_conf(peer: dict, server_state: dict) -> Optional[Path]:
     """Сохраняет .conf файл клиента в /root/awg/keys/<name>.conf."""
     try:
         AWGS_KEYS_DIR.mkdir(parents=True, exist_ok=True)
+        # AWGS_KEYS_DIR содержит приватные ключи (.conf, .vpnuri, _qr.png) —
+        # 0o700 чтобы другие локальные юзеры не могли читать содержимое.
+        try:
+            AWGS_KEYS_DIR.chmod(0o700)
+        except Exception:
+            pass
         name = peer.get("name", "client")
         path = AWGS_KEYS_DIR / f"{name}.conf"
         content = awgs_qr_build_client_conf(peer, server_state)
@@ -223,6 +229,13 @@ def awgs_qr_save_png(content: str, path: Path) -> bool:
     Сохраняет QR-код в PNG файл.
     Для длинных vpn:// URI использует -l L (низший error correction) —
     как в bivlked awg_common.sh:1824 (issue #72).
+
+    ВАЖНО: PNG содержит vpn:// URI с приватным ключом клиента + PSK —
+    это боевой секрет. Файл создаётся с правами 0o600, чтобы другие
+    локальные юзеры на сервере не могли его прочитать. Раньше (до фикса)
+    PNG создавался с дефолтными правами umask (часто 0o644) — что было
+    "тихим" багом, пока PNG не начал активно отдаваться через REST API
+    /api/awg/peers/{name}/qr и /api/awg/my-peer/qr.
     """
     core = _core_module()
     r = core._run(["which", "qrencode"], capture=True, check=False)
@@ -236,19 +249,42 @@ def awgs_qr_save_png(content: str, path: Path) -> bool:
         input_text=content,
         capture=True, check=False,
     )
-    return r.returncode == 0
+    if r.returncode != 0:
+        return False
+    # chmod 0o600 — PNG содержит приватный ключ + PSK в виде vpn:// URI.
+    # Без этого файл создаётся с umask-правами (часто 0o644) и читается
+    # любым локальным юзером на сервере.
+    try:
+        path.chmod(0o600)
+    except Exception:
+        pass
+    return True
 
 
 # ── Полный экспорт пира ─────────────────────────────────────────────────────
 
-def awgs_qr_export_peer(peer: dict) -> dict:
+def awgs_qr_export_peer(peer: dict, show_terminal: bool = True) -> dict:
     """
     Полный экспорт пира:
       • .conf файл (для AmneziaWG Windows client)
       • vpn:// URI (для Amnezia Client одним тапом)
       • QR-код в терминале (vpn:// URI, fallback на .conf если слишком длинный)
+        — только при show_terminal=True (TUI-контекст)
       • PNG файлы с QR-кодом (vpn:// URI + .conf)
     Возвращает dict с путями.
+
+    Параметр show_terminal:
+      • True (default) — TUI-режим: после генерации файлов рисует ANSI QR-код
+        в stdout через awgs_qr_show_terminal(). Используется из awg_peers.py
+        (TUI-меню), CLI, и подобных интерактивных контекстов.
+      • False — API-режим (REST API /api/awg/.../qr, /api/awg/my-peer/qr):
+        НЕ печатает QR в stdout. Это критично, потому что под systemd
+        stdout процесса уходит в journal (journalctl -u vless-web), а
+        ANSI QR-код содержит vpn:// URI с приватным ключом клиента + PSK.
+        Печать в journal = утечка боевого секрета в системный лог,
+        читаемый любым, у кого есть доступ к journalctl.
+        Файлы (.conf, .vpnuri, .png) всё равно создаются — они нужны
+        для последующей отдачи через HTTP.
     """
     core = _core_module()
     from .awg_state import awgs_state_load
@@ -261,29 +297,32 @@ def awgs_qr_export_peer(peer: dict) -> dict:
     # 2. vpn:// URI
     vpn_uri = awgs_qr_build_vpn_uri(peer, server_state)
 
-    # 3. QR в терминале — сначала пробуем vpn:// URI
-    # (для импорта в Amnezia Client на телефоне одним тапом)
-    qr_shown = awgs_qr_show_terminal(vpn_uri, label=f"QR-код для {name} (vpn:// URI):")
+    # 3. QR в терминале — только в TUI-режиме (show_terminal=True).
+    # В API-режиме (show_terminal=False) пропускаем, чтобы не печатать
+    # приватный ключ в stdout → journal.
+    qr_shown = False
+    if show_terminal:
+        # Сначала пробуем vpn:// URI (для импорта в Amnezia Client одним тапом)
+        qr_shown = awgs_qr_show_terminal(vpn_uri, label=f"QR-код для {name} (vpn:// URI):")
+        # Если vpn:// QR не помещается — показываем QR из .conf файла
+        # (.conf короче ~600 символов, всегда помещается в QR)
+        if not qr_shown and conf_path and conf_path.exists():
+            conf_content = conf_path.read_text()
+            awgs_qr_show_terminal(
+                conf_content,
+                label=f"QR-код для {name} (из .conf файла — для AmneziaWG Windows client):",
+            )
 
-    # 4. Если vpn:// QR не помещается — показываем QR из .conf файла
-    # (.conf короче ~600 символов, всегда помещается в QR)
-    if not qr_shown and conf_path and conf_path.exists():
-        conf_content = conf_path.read_text()
-        awgs_qr_show_terminal(
-            conf_content,
-            label=f"QR-код для {name} (из .conf файла — для AmneziaWG Windows client):",
-        )
-
-    # 5. PNG с QR из vpn:// URI (с -l L для длинных URI, как в bivlked)
+    # 4. PNG с QR из vpn:// URI (с -l L для длинных URI, как в bivlked)
     png_vpnuri_path = AWGS_KEYS_DIR / f"{name}_qr.png"
     png_vpnuri_ok = awgs_qr_save_png(vpn_uri, png_vpnuri_path)
 
-    # 6. PNG с QR из .conf файла (всегда помещается)
+    # 5. PNG с QR из .conf файла (всегда помещается)
     png_conf_path = AWGS_KEYS_DIR / f"{name}_qr_conf.png"
     if conf_path and conf_path.exists():
         awgs_qr_save_png(conf_path.read_text(), png_conf_path)
 
-    # 7. Сохраняем vpn:// URI в файл
+    # 6. Сохраняем vpn:// URI в файл
     uri_path = AWGS_KEYS_DIR / f"{name}.vpnuri"
     try:
         uri_path.write_text(vpn_uri + "\n")
