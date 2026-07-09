@@ -3141,15 +3141,15 @@ def do_full_install() -> None:
         warn("  Nginx не запустился — journalctl -u nginx -n 20")
     # === END FIX ===
 
-    PROGRESS.update(5, "Проверки")
-
-    time.sleep(3)
-    run_full_health_check()
-    _box_top("Проверка сетевой доступности")
-    verify_connectivity()
-    _box_bottom()
-
-    # Сохранение state.json
+    # ── Сохранение state.json ДО health check ─────────────────────────────────
+    # ВАЖНО: state.json должен быть сохранён ДО run_full_health_check(), потому
+    # что health.py читает из него domain и server_port (через _get_state_value,
+    # без импорта _core — чтобы избежать циклической зависимости). Раньше state
+    # сохранялся ПОСЛЕ health check → health_check_ssl() получала пустой domain
+    # → ложный warning "SSL проверка пропущена: домен не задан" даже когда домен
+    # был указан и сертификат получен. Аналогично health_check_ports() получала
+    # server_port=443 (fallback) вместо реального порта при первой установке.
+    # Фикс: сохраняем state сразу после запуска сервисов, до любых проверок.
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     state = {
         "installed":      True,
@@ -3231,6 +3231,14 @@ def do_full_install() -> None:
             "h2_exit_enabled":   H2_EXIT_ENABLED,
         })
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+
+    PROGRESS.update(5, "Проверки")
+
+    time.sleep(3)
+    run_full_health_check()
+    _box_top("Проверка сетевой доступности")
+    verify_connectivity()
+    _box_bottom()
 
     # ── Финальная проверка: /etc/xray/config.json должен существовать ─────────
     _cfg_final = CONFIG_DIR / "config.json"
