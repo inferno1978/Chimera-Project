@@ -384,6 +384,17 @@ body {{
     <div style="display:flex; gap:12px; flex-wrap:wrap">
       <a class="btn btn-ghost" href="/api/portal/clash" download>Clash Meta</a>
       <a class="btn btn-ghost" href="/api/portal/singbox" download>Sing-box</a>
+      <a class="btn btn-ghost" href="/api/portal/hiddify" download>Hiddify</a>
+      <a class="btn btn-ghost" href="/api/portal/vless-link" download>VLESS-ссылка</a>
+    </div>
+    <div style="margin-top:16px; padding:12px; background:rgba(15,23,42,0.5); border-radius:10px; font-size:0.85rem; color:var(--text-dim); line-height:1.6">
+      <strong style="color:var(--accent-light)">📱 Подсказка по клиентам:</strong><br>
+      • <strong>Clash Meta</strong> / <strong>Mihomo</strong> — скачайте файл Clash Meta выше, импортируйте в приложение<br>
+      • <strong>Sing-box</strong> — скачайте файл Sing-box выше, импортируйте в приложение<br>
+      • <strong>Hiddify</strong> — скачайте файл Hiddify выше или отсканируйте QR-код<br>
+      • <strong>v2rayN</strong> / <strong>v2rayNG</strong> / <strong>Karing</strong> / <strong>NekoBox</strong> — отсканируйте QR-код или скопируйте VLESS-ссылку<br>
+      • <strong>Streisand</strong> / <strong>Shadowrocket</strong> (iOS) — отсканируйте QR-код<br>
+      • <strong>AmneziaWG</strong> — если у вас есть AWG-пир, конфиг доступен в блоке «Мой AmneziaWG» выше
     </div>
   </div>
 
