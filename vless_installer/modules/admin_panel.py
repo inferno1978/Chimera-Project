@@ -312,6 +312,25 @@ tr:hover { background: rgba(56,189,248,0.05); }
       </tbody>
     </table>
   </div>
+
+  <!-- AmneziaWG section -->
+  <div class="table-card" id="awg-section">
+    <h2>🛡 AmneziaWG <button class="btn btn-sm btn-primary" onclick="loadAWG()">↻</button></h2>
+    <div id="awg-status" style="margin-bottom:16px">
+      <div class="loading"><span class="spinner"></span></div>
+    </div>
+    <div class="actions" style="margin-bottom:16px">
+      <button class="btn btn-primary" onclick="showAddAWGPeerModal()">➕ Добавить пира</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Имя</th><th>IP</th><th>Владелец</th><th>Rx</th><th>Tx</th><th>Handshake</th><th>Истекает</th><th>Статус</th><th>Действия</th></tr>
+      </thead>
+      <tbody id="awg-peers-tbody">
+        <tr><td colspan="9" class="loading"><span class="spinner"></span></td></tr>
+      </tbody>
+    </table>
+  </div>
 </div>
 
 <!-- Add User Modal -->
@@ -336,6 +355,53 @@ tr:hover { background: rgba(56,189,248,0.05); }
     <div class="modal-actions">
       <button class="btn btn-danger" onclick="closeModal('set-pass-modal')">Отмена</button>
       <button class="btn btn-primary" onclick="setUserPassword()">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add AWG Peer Modal -->
+<div class="modal-overlay" id="add-awg-peer-modal">
+  <div class="modal">
+    <h2>➕ Новый AmneziaWG-пир</h2>
+    <input type="text" id="awg-new-name" placeholder="Имя (1-32 симв, [a-zA-Z0-9_-])">
+    <input type="text" id="awg-new-expires" placeholder="Срок (1h/12h/7d/30d/4w, пусто = бессрочно)">
+    <label style="display:block;margin-bottom:12px;color:var(--text-dim);font-size:0.9rem">
+      <input type="checkbox" id="awg-new-psk"> Сгенерировать PresharedKey
+    </label>
+    <label style="display:block;margin-bottom:6px;color:var(--text-dim);font-size:0.85rem">Владелец (VLESS-пользователь):</label>
+    <select id="awg-new-owner" style="width:100%;padding:12px 16px;background:rgba(15,23,42,0.6);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:1rem;margin-bottom:16px">
+      <option value="">— не привязан —</option>
+    </select>
+    <div class="modal-actions">
+      <button class="btn btn-danger" onclick="closeModal('add-awg-peer-modal')">Отмена</button>
+      <button class="btn btn-primary" onclick="addAWGPeer()">Создать</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modify AWG Peer Modal -->
+<div class="modal-overlay" id="modify-awg-peer-modal">
+  <div class="modal">
+    <h2>✏ Изменить пира</h2>
+    <input type="text" id="awg-mod-name" readonly style="opacity:0.6">
+    <label style="display:block;margin-bottom:6px;color:var(--text-dim);font-size:0.85rem">Параметр:</label>
+    <select id="awg-mod-param" style="width:100%;padding:12px 16px;background:rgba(15,23,42,0.6);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:1rem;margin-bottom:12px" onchange="onAWGModParamChange()">
+      <option value="owner_email">Владелец (owner_email)</option>
+      <option value="expires_at">Срок действия (expires_at)</option>
+      <option value="dns1">DNS1</option>
+      <option value="dns2">DNS2</option>
+    </select>
+    <div id="awg-mod-value-text-wrap">
+      <input type="text" id="awg-mod-value-text" placeholder="Значение (пусто = снять для expires_at/owner_email)">
+    </div>
+    <div id="awg-mod-value-select-wrap" style="display:none">
+      <select id="awg-mod-value-select" style="width:100%;padding:12px 16px;background:rgba(15,23,42,0.6);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:1rem;margin-bottom:16px">
+        <option value="">— не привязан —</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-danger" onclick="closeModal('modify-awg-peer-modal')">Отмена</button>
+      <button class="btn btn-primary" onclick="modifyAWGPeer()">Сохранить</button>
     </div>
   </div>
 </div>
@@ -604,10 +670,241 @@ async function createBackup() {
   }
 }
 
+// ── AmneziaWG ───────────────────────────────────────────────────────────────
+
+function _fmtBytes(b) {
+  if (!b || b <= 0) return '0 B';
+  const units = ['B','KiB','MiB','GiB','TiB'];
+  let v = b;
+  for (const u of units) {
+    if (v < 1024) return v.toFixed(1) + ' ' + u;
+    v /= 1024;
+  }
+  return v.toFixed(1) + ' PiB';
+}
+
+function _fmtHandshake(ts) {
+  if (!ts || ts === '0') return 'никогда';
+  const ago = Math.floor(Date.now()/1000) - parseInt(ts);
+  if (ago < 60) return ago + ' сек назад';
+  if (ago < 3600) return Math.floor(ago/60) + ' мин назад';
+  if (ago < 86400) return Math.floor(ago/3600) + ' ч назад';
+  return Math.floor(ago/86400) + ' дн назад';
+}
+
+function _fmtExpires(iso) {
+  if (!iso) return '∞';
+  try {
+    const d = new Date(iso);
+    const days = Math.floor((d - Date.now()) / 86400000);
+    if (days < 0) return 'истёк';
+    if (days === 0) return 'сегодня';
+    return days + ' дн';
+  } catch { return iso; }
+}
+
+async function loadAWG() {
+  // Загружаем статус службы и список пиров параллельно
+  const [statusRes, peersRes] = await Promise.allSettled([
+    api('/api/awg/status'),
+    api('/api/awg/peers')
+  ]);
+
+  // Если AWG не установлен — прячем секцию (404 отдаёт API).
+  // loadAWG вызывается при init, но также может вызываться вручную — поэтому
+  // проверяем статус ответа. Promise.allSettled не выбрасывает, мы смотрим value.
+  if (statusRes.status === 'fulfilled' && statusRes.value && statusRes.value.error && statusRes.value.error.includes('not installed')) {
+    document.getElementById('awg-section').style.display = 'none';
+    return;
+  }
+  if (peersRes.status === 'fulfilled' && peersRes.value && peersRes.value.error && peersRes.value.error.includes('not installed')) {
+    document.getElementById('awg-section').style.display = 'none';
+    return;
+  }
+
+  // Статус
+  const statusEl = document.getElementById('awg-status');
+  if (statusRes.status === 'fulfilled' && statusRes.value) {
+    const s = statusRes.value;
+    const active = s.service && s.service.active;
+    const enabled = s.service && s.service.enabled;
+    statusEl.innerHTML = `
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+        <span class="status-badge ${active ? 'active' : 'inactive'}">Сервис: ${active ? 'активен' : 'остановлен'}</span>
+        <span class="status-badge ${enabled ? 'active' : 'inactive'}">Autostart: ${enabled ? 'вкл' : 'выкл'}</span>
+        <span style="color:var(--text-dim);font-size:0.9rem">Интерфейс: <strong style="color:var(--text)">${esc(s.interface || 'awg0')}</strong></span>
+        <span style="color:var(--text-dim);font-size:0.9rem">Порт: <strong style="color:var(--text)">${s.port || '?'}</strong></span>
+        <span style="color:var(--text-dim);font-size:0.9rem">Подсеть: <strong style="color:var(--text)">${esc(s.subnet || '?')}</strong></span>
+        <span style="color:var(--text-dim);font-size:0.9rem">Endpoint: <strong style="color:var(--text)">${esc(s.endpoint || '?')}</strong></span>
+        <span style="color:var(--text-dim);font-size:0.9rem">Пиров: <strong style="color:var(--text)">${s.peers_count || 0}</strong></span>
+      </div>
+    `;
+  } else {
+    statusEl.innerHTML = '<div style="color:var(--text-dim)">Статус недоступен</div>';
+  }
+
+  // Пиры
+  const tbody = document.getElementById('awg-peers-tbody');
+  if (peersRes.status !== 'fulfilled' || !peersRes.value || !peersRes.value.peers) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-dim)">Нет данных</td></tr>';
+    return;
+  }
+  const peers = peersRes.value.peers;
+  if (peers.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-dim)">Нет пиров. Добавьте через кнопку выше.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = peers.map(p => {
+    const owner = p.owner_email ? esc(p.owner_email) : '<span style="color:var(--text-dim)">— не привязан —</span>';
+    const statusBadge = p.status === 'expired'
+      ? '<span class="status-badge inactive">истёк</span>'
+      : '<span class="status-badge active">активен</span>';
+    return `
+      <tr>
+        <td><strong>${esc(p.name)}</strong></td>
+        <td style="font-family:monospace;font-size:0.82rem">${esc(p.client_ip || '?')}</td>
+        <td>${owner}</td>
+        <td>${_fmtBytes(p.rx_bytes || 0)}</td>
+        <td>${_fmtBytes(p.tx_bytes || 0)}</td>
+        <td style="font-size:0.85rem">${_fmtHandshake(p.handshake_ago)}</td>
+        <td style="font-size:0.85rem">${_fmtExpires(p.expires_at)}</td>
+        <td>${statusBadge}</td>
+        <td>
+          <a class="btn btn-sm btn-ghost" href="/api/awg/peers/${encodeURIComponent(p.name)}/qr" target="_blank">QR</a>
+          <a class="btn btn-sm btn-ghost" href="/api/awg/peers/${encodeURIComponent(p.name)}/config" download>Конфиг</a>
+          <button class="btn btn-sm btn-warn" onclick="regenAWGPeer('${esc(p.name)}')">🔄 Regen</button>
+          <button class="btn btn-sm btn-ghost" onclick="showModifyAWGPeerModal('${esc(p.name)}')">✏ Изменить</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteAWGPeer('${esc(p.name)}')">🗑</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function showAddAWGPeerModal() {
+  document.getElementById('awg-new-name').value = '';
+  document.getElementById('awg-new-expires').value = '';
+  document.getElementById('awg-new-psk').checked = false;
+  // Заполняем select владельцев из текущего списка пользователей
+  populateAWGOwnerSelect('awg-new-owner', '');
+  showModal('add-awg-peer-modal');
+  document.getElementById('awg-new-name').focus();
+}
+
+async function populateAWGOwnerSelect(selectId, currentValue) {
+  const sel = document.getElementById(selectId);
+  if (!sel) return;
+  // Сохраняем текущее значение чтобы восстановить после перезаполнения
+  const prev = currentValue !== undefined ? currentValue : sel.value;
+  sel.innerHTML = '<option value="">— не привязан —</option>';
+  try {
+    const data = await api('/api/users');
+    if (data && data.users) {
+      for (const u of data.users) {
+        if (u.email) {
+          const opt = document.createElement('option');
+          opt.value = u.email;
+          opt.textContent = u.email + (u.name ? ' (' + u.name + ')' : '');
+          sel.appendChild(opt);
+        }
+      }
+    }
+  } catch {}
+  // Восстанавливаем значение
+  if (prev) {
+    sel.value = prev;
+  }
+}
+
+async function addAWGPeer() {
+  const name = document.getElementById('awg-new-name').value.trim();
+  const expires = document.getElementById('awg-new-expires').value.trim();
+  const psk = document.getElementById('awg-new-psk').checked;
+  const owner_email = document.getElementById('awg-new-owner').value;
+  if (!name) { showToast('Имя обязательно', 'error'); return; }
+  const data = await api('/api/awg/peers', 'POST', { name, expires, psk, owner_email });
+  if (data && data.status === 'created') {
+    showToast('Пир создан: ' + name);
+    closeModal('add-awg-peer-modal');
+    loadAWG();
+  } else {
+    showToast(data && data.error ? data.error : 'Ошибка создания', 'error');
+  }
+}
+
+async function regenAWGPeer(name) {
+  if (!confirm(`Перевыпустить ключи для пира ${name}? Старый .conf перестанет работать.`)) return;
+  const data = await api(`/api/awg/peers/${encodeURIComponent(name)}/regen`, 'POST');
+  if (data && data.status === 'regenerated') {
+    showToast('Ключи перевыпущены для ' + name);
+    loadAWG();
+  } else {
+    showToast(data && data.error ? data.error : 'Ошибка regen', 'error');
+  }
+}
+
+async function deleteAWGPeer(name) {
+  if (!confirm(`Удалить пира ${name}? Это отключит его от AWG.`)) return;
+  const data = await api(`/api/awg/peers/${encodeURIComponent(name)}`, 'DELETE');
+  if (data && data.status === 'deleted') {
+    showToast('Пир удалён: ' + name);
+    loadAWG();
+  } else {
+    showToast(data && data.error ? data.error : 'Ошибка удаления', 'error');
+  }
+}
+
+function showModifyAWGPeerModal(name) {
+  document.getElementById('awg-mod-name').value = name;
+  document.getElementById('awg-mod-param').value = 'owner_email';
+  document.getElementById('awg-mod-value-text').value = '';
+  onAWGModParamChange();
+  showModal('modify-awg-peer-modal');
+}
+
+function onAWGModParamChange() {
+  const param = document.getElementById('awg-mod-param').value;
+  const textWrap = document.getElementById('awg-mod-value-text-wrap');
+  const selectWrap = document.getElementById('awg-mod-value-select-wrap');
+  if (param === 'owner_email') {
+    textWrap.style.display = 'none';
+    selectWrap.style.display = 'block';
+    populateAWGOwnerSelect('awg-mod-value-select', '');
+  } else {
+    textWrap.style.display = 'block';
+    selectWrap.style.display = 'none';
+    const ph = param === 'expires_at'
+      ? 'Срок (1h/12h/7d/30d/4w, пусто = снять)'
+      : 'IP (например 1.1.1.1)';
+    document.getElementById('awg-mod-value-text').placeholder = ph;
+  }
+}
+
+async function modifyAWGPeer() {
+  const name = document.getElementById('awg-mod-name').value;
+  const param = document.getElementById('awg-mod-param').value;
+  let value;
+  if (param === 'owner_email') {
+    value = document.getElementById('awg-mod-value-select').value;
+  } else {
+    value = document.getElementById('awg-mod-value-text').value;
+  }
+  const data = await api(`/api/awg/peers/${encodeURIComponent(name)}`, 'PATCH', { param, value });
+  if (data && data.status === 'modified') {
+    showToast('Параметр изменён для ' + name);
+    closeModal('modify-awg-peer-modal');
+    loadAWG();
+  } else {
+    showToast(data && data.error ? data.error : 'Ошибка изменения', 'error');
+  }
+}
+
 // ── Init ────────────────────────────────────────────────────────────────────
 loadHealth();
 loadUsers();
+loadAWG();
 setInterval(loadHealth, 30000); // обновление каждые 30с
+setInterval(loadAWG, 60000); // AWG статус/пиры каждые 60с
 </script>
 </body>
 </html>'''

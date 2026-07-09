@@ -909,6 +909,18 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             self.wfile.write(singbox.encode("utf-8"))
             return
 
+        # ── AmneziaWG standalone API (/api/awg/*) ─────────────────────────────
+        # Делегирует в awg_rest_api.py. Авторизация проверяется внутри хендлеров
+        # (admin endpoints → _require_admin, user endpoints → _require_user).
+        # Все /api/awg/* отдают 404 если AWG не установлен (не 500).
+        if path.startswith("/api/awg/"):
+            from vless_installer.modules import awg_rest_api
+            parsed_query = parse_qs(parsed.query)
+            handled = awg_rest_api.awg_handle_get(self, path, parsed_query)
+            if handled:
+                return
+            # если не обработано — fall through к 404
+
         self._send_404()
 
     def do_POST(self):
@@ -1110,6 +1122,18 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "user not found"}, 404)
             return
 
+        # ── AmneziaWG standalone API — POST ───────────────────────────────────
+        if path.startswith("/api/awg/"):
+            from vless_installer.modules import awg_rest_api
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            handled = awg_rest_api.awg_handle_post(self, path, body)
+            if handled:
+                return
+            # если не обработано — fall through к 404
+
         self._send_404()
 
     def do_DELETE(self):
@@ -1151,6 +1175,35 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
             return
+
+        # ── AmneziaWG standalone API — DELETE ─────────────────────────────────
+        if path.startswith("/api/awg/"):
+            from vless_installer.modules import awg_rest_api
+            handled = awg_rest_api.awg_handle_delete(self, path)
+            if handled:
+                return
+            # если не обработано — fall through к 404
+
+        self._send_404()
+
+    def do_PATCH(self):
+        """PATCH — частичное обновление ресурса (RFC 5789).
+        Используется для /api/awg/peers/{name} (изменение параметров пира).
+        Делегирует в awg_rest_api.py."""
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+
+        # ── AmneziaWG standalone API — PATCH ──────────────────────────────────
+        if path.startswith("/api/awg/"):
+            from vless_installer.modules import awg_rest_api
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            handled = awg_rest_api.awg_handle_patch(self, path, body)
+            if handled:
+                return
+            # если не обработано — fall through к 404
 
         self._send_404()
 

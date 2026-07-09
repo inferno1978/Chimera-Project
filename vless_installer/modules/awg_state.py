@@ -38,7 +38,8 @@ State management для AmneziaWG 2.0 standalone-режима.
       "added_at":       "2026-07-09T12:00:00Z",
       "expires_at":     "",          # ISO или пусто (бессрочный)
       "dns1":           "1.1.1.1",
-      "dns2":           "8.8.8.8"
+      "dns2":           "8.8.8.8",
+      "owner_email":    ""           # email VLESS-юзера-владельца ("" = технический/неразобранный)
     }
   ],
   "cascade_role": "",                # "entry" | "exit" | "" (не каскад)
@@ -207,6 +208,42 @@ def awgs_state_peer_update(name: str, **fields) -> bool:
             state["peers"] = peers
             return awgs_state_save(state)
     return False
+
+
+def awgs_state_ensure_peer_owner_field() -> None:
+    """
+    Миграция: гарантирует что у каждого пира есть поле owner_email.
+    Если поле отсутствует в существующем state.json (создано до введения
+    owner_email) — добавляет его со значением "" (технический/неразобранный пир).
+    Идемпотентно: ничего не делает если все пиры уже имеют поле.
+    """
+    state = awgs_state_load()
+    peers = state.get("peers", [])
+    if not peers:
+        return
+    dirty = False
+    for p in peers:
+        if "owner_email" not in p:
+            p["owner_email"] = ""
+            dirty = True
+    if dirty:
+        state["peers"] = peers
+        awgs_state_save(state)
+
+
+def awgs_state_find_peer_by_owner(owner_email: str) -> Optional[dict]:
+    """
+    Находит пира по owner_email (для user-портала).
+    Возвращает dict или None. Если несколько пиров привязаны к одному email —
+    возвращает первый (по порядку в state.json). Это нормальная ситуация
+    только в edge-case когда админ перевыдал пира без отвязки старого.
+    """
+    if not owner_email:
+        return None
+    for p in awgs_state_peers_get():
+        if p.get("owner_email", "") == owner_email:
+            return p
+    return None
 
 
 # ── IP allocation ────────────────────────────────────────────────────────────
