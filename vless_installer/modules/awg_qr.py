@@ -92,14 +92,17 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
 
 def awgs_qr_save_client_conf(peer: dict, server_state: dict) -> Optional[Path]:
     """Сохраняет .conf файл клиента в /root/awg/keys/<name>.conf."""
+    core = _core_module()
     try:
         AWGS_KEYS_DIR.mkdir(parents=True, exist_ok=True)
         # AWGS_KEYS_DIR содержит приватные ключи (.conf, .vpnuri, _qr.png) —
         # 0o700 чтобы другие локальные юзеры не могли читать содержимое.
         try:
             AWGS_KEYS_DIR.chmod(0o700)
-        except Exception:
-            pass
+        except Exception as e:
+            # Тихий провал chmod на директории с секретами недопустим —
+            # логируем WARNING, чтобы админ заметил в /var/log/vless-install.log.
+            core.log_to_file("WARNING", f"chmod 0o700 failed for {AWGS_KEYS_DIR}: {e}")
         name = peer.get("name", "client")
         path = AWGS_KEYS_DIR / f"{name}.conf"
         content = awgs_qr_build_client_conf(peer, server_state)
@@ -256,8 +259,12 @@ def awgs_qr_save_png(content: str, path: Path) -> bool:
     # любым локальным юзером на сервере.
     try:
         path.chmod(0o600)
-    except Exception:
-        pass
+    except Exception as e:
+        # Тихий провал chmod на файле с приватным ключом недопустим —
+        # логируем WARNING, файл остаётся с umask-правами (возможно читаем
+        # другими юзерами), но отдавать 500 на QR-запрос тоже неправильно
+        # (QR валиден). Админ должен заметить в логе и починить права.
+        core.log_to_file("WARNING", f"chmod 0o600 failed for PNG {path}: {e}")
     return True
 
 
@@ -290,6 +297,24 @@ def awgs_qr_export_peer(peer: dict, show_terminal: bool = True) -> dict:
     from .awg_state import awgs_state_load
     server_state = awgs_state_load()
     name = peer.get("name", "client")
+
+    # 0. Гарантируем что AWGS_KEYS_DIR существует и имеет права 0o700.
+    # Делаем это ЯВНО в начале export_peer, не полагаясь на побочный эффект
+    # awgs_qr_save_client_conf() ниже — потому что export_peer может быть
+    # вызван для перегенерации QR у уже существующего пира, когда путь
+    # создания директории с правильными правами не гарантированно прошёл
+    # (например директория была создана раньше, до ввода chmod 0o700 в коде,
+    # или права сбросились внешним скриптом). Если директория уже существует
+    # с неправильными правами — mkdir(exist_ok=True) не меняет права, поэтому
+    # нужен явный chmod.
+    try:
+        AWGS_KEYS_DIR.mkdir(parents=True, exist_ok=True)
+        AWGS_KEYS_DIR.chmod(0o700)
+    except Exception as e:
+        # Тихий провал chmod на директории с секретами недопустим —
+        # логируем WARNING. Продолжаем работу: файлы всё равно запишутся,
+        # но возможно с некорректными правами (админ должен заметить в логе).
+        core.log_to_file("WARNING", f"chmod 0o700 failed for {AWGS_KEYS_DIR}: {e}")
 
     # 1. .conf файл
     conf_path = awgs_qr_save_client_conf(peer, server_state)
@@ -327,8 +352,10 @@ def awgs_qr_export_peer(peer: dict, show_terminal: bool = True) -> dict:
     try:
         uri_path.write_text(vpn_uri + "\n")
         uri_path.chmod(0o600)
-    except Exception:
-        pass
+    except Exception as e:
+        # .vpnuri содержит приватный ключ + PSK в vpn:// URI — тихий провал
+        # chmod недопустим, логируем WARNING.
+        core.log_to_file("WARNING", f"chmod 0o600 failed for {uri_path}: {e}")
 
     return {
         "conf_path":       conf_path,

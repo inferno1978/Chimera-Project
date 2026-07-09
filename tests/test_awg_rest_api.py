@@ -906,5 +906,169 @@ class TestAWGQRExportNoPrintInApiMode(unittest.TestCase):
                              "show_terminal=False для my-peer/qr — иначе ключ в journal")
 
 
+class TestAWGQREndToEndChmod(unittest.TestCase):
+    """E2E тест: GET /api/awg/peers/{name}/qr реально генерирует PNG с chmod 0o600.
+
+    В отличие от TestAWGQRPngChmod (который тестирует awgs_qr_save_png изолированно)
+    и TestAWGQRExportNoPrintInApiMode (который мокает awgs_qr_export_peer целиком),
+    этот тест идёт через ВЕСЬ стек: awg_handle_get → awgs_qr_export_peer (реальный)
+    → awgs_qr_save_png (реальный) → qrencode (замокан на уровне core._run, но с
+    side-effect создания файла) → chmod (реальный на реальном файле).
+
+    Цель: убедиться что end-to-end путь от HTTP-запроса до файла на диске
+    создаёт PNG с правами 0o600, а не просто что какой-то изолированный вызов
+    chmod работает.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = tempfile.mkdtemp(prefix="awg_e2e_test_")
+        self._keys_dir = Path(self._tmpdir) / "keys"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _make_mock_core_with_qrencode(self):
+        """
+        Создаёт mock core, где _run эмулирует qrencode:
+          • `which qrencode` → returncode=0 (как будто установлен)
+          • `qrencode -t PNG -o {path}` → создаёт реальный PNG-файл (fake bytes),
+            returncode=0. Это позволяет chmod отработать на реальном файле.
+          • `qrencode -t ANSIUTF8 -o -` → returncode=0, stdout пустой (не печатаем)
+          • прочие вызовы → returncode=0
+        """
+        def _fake_run(args, **kwargs):
+            # args — список аргументов команды
+            if not args:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            cmd = args[0]
+            if cmd == "which" and len(args) > 1 and args[1] == "qrencode":
+                return MagicMock(returncode=0, stdout="/usr/bin/qrencode", stderr="")
+            if cmd == "qrencode":
+                # qrencode -t PNG -o {path} — нужно создать файл
+                if "-t" in args and "PNG" in args and "-o" in args:
+                    try:
+                        out_idx = args.index("-o")
+                        out_path = args[out_idx + 1] if out_idx + 1 < len(args) else None
+                        if out_path:
+                            # Создаём реальный файл (fake PNG content)
+                            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+                            Path(out_path).write_bytes(b"\x89PNG\r\n\x1a\n fake PNG content")
+                    except Exception:
+                        pass
+                    return MagicMock(returncode=0, stdout="", stderr="")
+                # qrencode -t ANSIUTF8 -o - (для terminal) — возвращаем пустой stdout
+                if "-t" in args and "ANSIUTF8" in args:
+                    return MagicMock(returncode=0, stdout="", stderr="")
+            # Прочие команды — успех
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_core = MagicMock()
+        mock_core._run = MagicMock(side_effect=_fake_run)
+        mock_core.log_to_file = MagicMock()
+        mock_core.warn = MagicMock()
+        mock_core.info = MagicMock()
+        mock_core.CYAN = ""
+        mock_core.NC = ""
+        return mock_core
+
+    def test_e2e_admin_qr_endpoint_creates_png_with_0600(self):
+        """E2E: GET /api/awg/peers/{name}/qr → PNG файл с правами 0o600 на диске.
+
+        Полный путь:
+          awg_handle_get(/api/awg/peers/alice/qr)
+            → _require_admin() (mocked: True)
+            → awgs_qr_export_peer(peer, show_terminal=False)  [РЕАЛЬНЫЙ]
+              → awgs_qr_save_client_conf  [РЕАЛЬНЫЙ, .conf создаётся]
+              → awgs_qr_build_vpn_uri      [РЕАЛЬНЫЙ]
+              → awgs_qr_show_terminal      [show_terminal=False → пропускается]
+              → awgs_qr_save_png           [РЕАЛЬНЫЙ, qrencode замокан на core._run]
+                → qrencode -t PNG -o ...   [side-effect: создаёт файл]
+                → path.chmod(0o600)        [РЕАЛЬНЫЙ на реальном файле]
+            → png_path.read_bytes() → HTTP 200
+        """
+        import os, stat
+        from vless_installer.modules import awg_rest_api, awg_qr, awg_constants
+
+        peer = {
+            "name": "alice",
+            "owner_email": "",
+            "client_privkey": "SECRET_PRIV_KEY",
+            "client_pubkey": "pubkey123",
+            "client_ip": "10.66.66.2",
+            "client_ipv6": "",
+            "preshared_key": "SECRET_PSK",
+            "dns1": "1.1.1.1",
+            "dns2": "8.8.8.8",
+        }
+        server_state = {
+            "server_pubkey": "server_pub",
+            "port": 51820,
+            "endpoint": "1.2.3.4",
+            "endpoint_host": "",
+            "params": {"jc": 4, "jmin": 40, "jmax": 70, "s1": 0, "s2": 0,
+                       "s3": 0, "s4": 0, "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+                       "i1": "", "i2": "", "i3": "", "i4": "", "i5": ""},
+            "mtu": 1280,
+            "allow_ipv6_tunnel": False,
+        }
+        mock_core = self._make_mock_core_with_qrencode()
+
+        with patch("vless_installer.modules.awg_rest_api._is_awg_installed",
+                   return_value=True), \
+             patch("vless_installer.modules.awg_state.awgs_state_peer_find",
+                   return_value=peer), \
+             patch("vless_installer.modules.awg_state.awgs_state_load",
+                   return_value=server_state), \
+             patch.object(awg_qr, "_core_module", return_value=mock_core), \
+             patch.object(awg_qr, "AWGS_KEYS_DIR", self._keys_dir), \
+             patch.object(awg_constants, "AWGS_KEYS_DIR", self._keys_dir):
+            # Создаём mock handler с admin auth
+            h = MagicMock()
+            h._require_admin = MagicMock(return_value=True)
+            h._send_json = MagicMock()
+            h.send_response = MagicMock()
+            h.send_header = MagicMock()
+            h.end_headers = MagicMock()
+            # wfile.write должен принять bytes
+            written = []
+            h.wfile = MagicMock()
+            h.wfile.write = lambda data: written.append(data)
+
+            awg_rest_api.awg_handle_get(h, "/api/awg/peers/alice/qr", {})
+
+            # Проверяем что HTTP статус 200 (PNG отдан)
+            self.assertEqual(h.send_response.call_args.args[0], 200,
+                             "QR endpoint должен отдать 200")
+
+            # Проверяем что PNG файл реально создан на диске
+            png_path = self._keys_dir / "alice_qr.png"
+            self.assertTrue(png_path.exists(),
+                            f"PNG файл должен быть создан: {png_path}")
+
+            # Проверяем права файла — должны быть 0o600
+            mode = stat.S_IMODE(os.stat(png_path).st_mode)
+            self.assertEqual(mode, 0o600,
+                             f"PNG должен иметь права 0o600 (E2E), имеет {oct(mode)}. "
+                             f"Без этого приватный ключ + PSK читаемы другими юзерами.")
+
+            # Проверяем что PNG реально отдан в HTTP-ответе
+            self.assertTrue(len(written) > 0, "PNG bytes должны быть записаны в wfile")
+            self.assertTrue(isinstance(written[0], bytes))
+
+            # Дополнительно: .conf файл тоже должен быть 0o600
+            conf_path = self._keys_dir / "alice.conf"
+            if conf_path.exists():
+                conf_mode = stat.S_IMODE(os.stat(conf_path).st_mode)
+                self.assertEqual(conf_mode, 0o600,
+                                 f".conf должен иметь права 0o600, имеет {oct(conf_mode)}")
+
+            # Дополнительно: AWGS_KEYS_DIR должен быть 0o700
+            dir_mode = stat.S_IMODE(os.stat(self._keys_dir).st_mode)
+            self.assertEqual(dir_mode, 0o700,
+                             f"AWGS_KEYS_DIR должен иметь права 0o700, имеет {oct(dir_mode)}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
