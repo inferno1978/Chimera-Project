@@ -592,9 +592,9 @@ async function addUser() {
 
 // ── Sync users (подтянуть TUI-юзеров из config.json в users.json) ──────────
 async function syncUsers() {
-  if (!confirm('Синхронизировать список пользователей?\n\n' +
+  if (!confirm('Синхронизировать список пользователей?\\n\\n' +
                'Подтягивает юзеров, созданных через TUI (они есть в config.json Xray, ' +
-               'но отсутствуют в users.json) в список админ-панели.\n\n' +
+               'но отсутствуют в users.json) в список админ-панели.\\n\\n' +
                'Импортированным юзерам нужно будет задать пароль портала (🔑 Пароль).')) return;
   showToast('Синхронизация...');
   const data = await api('/api/users/sync', 'POST');
