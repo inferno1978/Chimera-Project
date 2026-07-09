@@ -348,6 +348,14 @@ body {{
     </div>
   </div>
 
+  <!-- My AmneziaWG (показывается только если у юзера есть привязанный пир) -->
+  <div class="card fade-in" id="awg-card" style="animation-delay: 0.15s; display:none">
+    <div class="card-title">🛡 Мой AmneziaWG</div>
+    <div id="awg-container">
+      <div class="loading"><span class="spinner"></span></div>
+    </div>
+  </div>
+
   <!-- Traffic -->
   <div class="card fade-in" style="animation-delay: 0.2s">
     <div class="card-title">📊 Трафик</div>
@@ -561,12 +569,122 @@ async function changePassword() {{
   }}
 }}
 
+// ── My AmneziaWG ────────────────────────────────────────────────────────────
+function _fmtBytes(b) {{
+  if (!b || b <= 0) return '0 B';
+  const units = ['B','KiB','MiB','GiB','TiB'];
+  let v = b;
+  for (const u of units) {{
+    if (v < 1024) return v.toFixed(1) + ' ' + u;
+    v /= 1024;
+  }}
+  return v.toFixed(1) + ' PiB';
+}}
+
+function _fmtHandshake(ts) {{
+  if (!ts || ts === '0') return 'никогда';
+  const ago = Math.floor(Date.now()/1000) - parseInt(ts);
+  if (ago < 60) return ago + ' сек назад';
+  if (ago < 3600) return Math.floor(ago/60) + ' мин назад';
+  if (ago < 86400) return Math.floor(ago/3600) + ' ч назад';
+  return Math.floor(ago/86400) + ' дн назад';
+}}
+
+function _fmtExpires(iso) {{
+  if (!iso) return '∞ (бессрочно)';
+  try {{
+    const d = new Date(iso);
+    const days = Math.floor((d - Date.now()) / 86400000);
+    if (days < 0) return 'истёк';
+    if (days === 0) return 'сегодня';
+    return days + ' дн';
+  }} catch {{ return iso; }}
+}}
+
+async function loadMyAWG() {{
+  let data;
+  try {{
+    data = await api('/api/awg/my-peer');
+  }} catch (e) {{
+    // AWG не установлен или endpoint недоступен — просто прячем блок
+    document.getElementById('awg-card').style.display = 'none';
+    return;
+  }}
+  if (!data || !data.peer) {{
+    // Нет привязанного пира — блок не показываем (без заглушек "недоступно")
+    document.getElementById('awg-card').style.display = 'none';
+    return;
+  }}
+  const p = data.peer;
+  const container = document.getElementById('awg-container');
+  const statusColor = p.status === 'expired' ? 'var(--red)' : 'var(--green)';
+  const statusText = p.status === 'expired' ? 'истёк' : 'активен';
+  container.innerHTML = `
+    <div class="sys-grid" style="margin-bottom:16px">
+      <div class="sys-item">
+        <div class="label">Имя пира</div>
+        <div class="value" style="font-size:0.95rem">${{p.name || '—'}}</div>
+      </div>
+      <div class="sys-item">
+        <div class="label">IP</div>
+        <div class="value" style="font-size:0.9rem;font-family:monospace">${{p.client_ip || '—'}}</div>
+      </div>
+      <div class="sys-item">
+        <div class="label">Статус</div>
+        <div class="value" style="color:${{statusColor}}">${{statusText}}</div>
+      </div>
+      <div class="sys-item">
+        <div class="label">Истекает</div>
+        <div class="value" style="font-size:0.95rem">${{_fmtExpires(p.expires_at)}}</div>
+      </div>
+      <div class="sys-item">
+        <div class="label">Принято (Rx)</div>
+        <div class="value" style="font-size:0.95rem">${{_fmtBytes(p.rx_bytes || 0)}}</div>
+      </div>
+      <div class="sys-item">
+        <div class="label">Отправлено (Tx)</div>
+        <div class="value" style="font-size:0.95rem">${{_fmtBytes(p.tx_bytes || 0)}}</div>
+      </div>
+      <div class="sys-item">
+        <div class="label">Handshake</div>
+        <div class="value" style="font-size:0.85rem">${{_fmtHandshake(p.handshake_ago)}}</div>
+      </div>
+    </div>
+    <div class="qr-container">
+      <img src="/api/awg/my-peer/qr" alt="QR AmneziaWG" style="max-width:200px">
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
+      <a class="btn btn-ghost" href="/api/awg/my-peer/config" download>📥 Скачать .conf</a>
+      <button class="btn btn-primary" onclick="regenMyAWG()">🔄 Перевыпустить ключи</button>
+    </div>
+  `;
+  document.getElementById('awg-card').style.display = 'block';
+}}
+
+async function regenMyAWG() {{
+  if (!confirm('Перевыпустить ключи AmneziaWG? Старый .conf перестанет работать.')) return;
+  const res = await fetch('/api/awg/my-peer/regen', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    credentials: 'same-origin'
+  }});
+  const data = await res.json();
+  if (data.status === 'regenerated') {{
+    showToast('Ключи перевыпущены!');
+    loadMyAWG();
+  }} else {{
+    showToast(data.error || 'Ошибка', 'error');
+  }}
+}}
+
 // ── Init ────────────────────────────────────────────────────────────────────
 loadLinks();
 loadTraffic();
 loadHealth();
+loadMyAWG();
 setInterval(loadHealth, 30000);
 setInterval(loadTraffic, 60000);
+setInterval(loadMyAWG, 60000);
 </script>
 </body>
 </html>'''

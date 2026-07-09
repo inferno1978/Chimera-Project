@@ -55,6 +55,29 @@ def _validate_peer_name(name: str) -> bool:
     return bool(re.match(r"^[a-zA-Z0-9_-]+$", name))
 
 
+# ── Валидация email ─────────────────────────────────────────────────────────
+
+_EMAIL_RE = None
+
+
+def _validate_email(email: str) -> bool:
+    """
+    Простая валидация формата email.
+    Пустая строка допустима (снимает привязку owner_email).
+    НЕ проверяет что такой VLESS-юзер физически существует в users.json —
+    админ может привязать пира к любому email (это не обязано совпадать с
+    существующими юзерами, UI лишь подсказывает существующих).
+    """
+    if not email:
+        return True  # пустая строка = снять привязку — допустимо
+    global _EMAIL_RE
+    if _EMAIL_RE is None:
+        import re
+        # Простая regex: локальная часть @ домен с точкой
+        _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+    return bool(_EMAIL_RE.match(email))
+
+
 # ── Перестроение awg0.conf из state ─────────────────────────────────────────
 
 def awg_peer_rebuild_conf(apply: bool = True) -> bool:
@@ -97,6 +120,7 @@ def awg_peer_add(
     apply: bool = True,
     save_state: bool = True,
     show_qr: bool = True,
+    owner_email: str = "",
 ) -> bool:
     """
     Добавляет нового клиента.
@@ -106,6 +130,8 @@ def awg_peer_add(
     apply: применить через syncconf
     save_state: сохранить в state.json
     show_qr: показать QR-код после добавления
+    owner_email: email VLESS-юзера-владельца ("" = технический/неразобранный,
+                 виден только админу; непустое — попадёт в user-портал этого юзера)
     """
     core = _core_module()
     info = core.info
@@ -118,6 +144,12 @@ def awg_peer_add(
 
     if awgs_state_peer_find(name):
         warn(f"Пир '{name}' уже существует")
+        return False
+
+    # Валидация owner_email (простой формат, НЕ проверяем существование юзера)
+    owner_email = (owner_email or "").strip()
+    if not _validate_email(owner_email):
+        warn(f"Невалидный owner_email='{owner_email}'")
         return False
 
     # Парсим expires
@@ -170,6 +202,7 @@ def awg_peer_add(
         "expires_at":      expires_at,
         "dns1":            "1.1.1.1",
         "dns2":            "8.8.8.8",
+        "owner_email":     owner_email,
     }
 
     # Сохраняем в state
@@ -457,7 +490,7 @@ def awg_peer_regen(name: str) -> bool:
 def awg_peer_modify(name: str, param: str, value: str) -> bool:
     """
     Изменяет параметр пира.
-    Поддерживаемые параметры: dns1, dns2, expires_at
+    Поддерживаемые параметры: dns1, dns2, expires_at, owner_email
     """
     core = _core_module()
     warn = core.warn
@@ -484,8 +517,19 @@ def awg_peer_modify(name: str, param: str, value: str) -> bool:
                 warn(f"Невалидный duration: {value}")
                 return False
             awgs_state_peer_update(name, expires_at=awgs_expires_compute_iso(delta))
+    elif param == "owner_email":
+        # value="" — снять привязку (допустимо).
+        # value=непустое — простая валидация формата email.
+        # НЕ проверяем существование такого VLESS-юзера физически —
+        # админ может привязать пира к любому email.
+        value = (value or "").strip()
+        if not _validate_email(value):
+            warn(f"Невалидный owner_email='{value}'")
+            return False
+        awgs_state_peer_update(name, owner_email=value)
     else:
-        warn(f"Неподдерживаемый параметр: {param}. Допустимые: dns1, dns2, expires_at")
+        warn(f"Неподдерживаемый параметр: {param}. "
+             f"Допустимые: dns1, dns2, expires_at, owner_email")
         return False
 
     # Перегенерируем клиентский конфиг
@@ -548,8 +592,8 @@ def do_manage_awg_peers() -> None:
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "5":
             name = input(f"{CYAN}Имя клиента: {NC}").strip()
-            param = input(f"{CYAN}Параметр (dns1/dns2/expires_at): {NC}").strip()
-            value = input(f"{CYAN}Значение (пусто = снять expires_at): {NC}").strip()
+            param = input(f"{CYAN}Параметр (dns1/dns2/expires_at/owner_email): {NC}").strip()
+            value = input(f"{CYAN}Значение (пусто = снять expires_at/owner_email): {NC}").strip()
             if name and param:
                 awg_peer_modify(name, param, value)
             input(f"{BLUE}Нажмите Enter...{NC}")
