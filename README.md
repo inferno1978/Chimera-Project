@@ -56,7 +56,8 @@ bash bootstrap.sh
 | **v4.12.8** 🛡️ | Telemt MSS-фрагментация против TSPU JA4 DPI: новый модуль `telemt_mss_selector.py`, 10 пресетов (tspu★/2in8/extreme-low/…) с интерактивным выбором при установке Telemt |
 | **v4.12.9** 📊 | Статистика трафика NaiveProxy и Mieru: новые модули `naiveproxy_stats.py` и `mieru_stats.py`; метрики из iptables, journalctl, ss; гистограммы активности, топ клиентов, NTP-мониторинг; живое обновление каждые 30 сек |
 | **v4.13** 🚀 | Полный рефакторинг кодовой базы; добавлены Web Admin Panel, User Portal и REST API |
-| **v4.14 NEW** 🔒 | AmneziaWG 2.0 standalone VPN: 13 новых модулей `awg_*.py` (полный порт bivlked/amneziawg-installer), 9 carrier-пресетов (Yota/Tele2/Мегафон/Билайн/T-Mobile US), каскад RU→зарубеж с split-routing, QR+`vpn://` URI, временные клиенты, backup/restore, diagnose с carrier-compare |
+| **v4.14** 🔒 | AmneziaWG 2.0 standalone VPN: 13 новых модулей `awg_*.py` (полный порт bivlked/amneziawg-installer), 9 carrier-пресетов (Yota/Tele2/Мегафон/Билайн/T-Mobile US), каскад RU→зарубеж с split-routing, QR+`vpn://` URI, временные клиенты, backup/restore, diagnose с carrier-compare |
+| **v4.15 NEW** 🛡️ | AmneziaWG peer management в веб-панели: новый модуль `awg_rest_api.py` (15 REST endpoints), `owner_email` model (admin видит все пиры, user — только свой), Admin Panel — секция AmneziaWG с CRUD, User Portal — карточка «Мой AmneziaWG» (QR/conf/regen). Security: PSK фильтрация из JSON, QR PNG chmod 0o600, нет print ключа в journal. Bug fixes: порядок nginx→сокет, state.json ДО health check. |
 
 ## 📋 Требования
 
@@ -85,17 +86,17 @@ VLESS-Ultimate-Installer/
 ├── main.py                      # Точка входа
 ├── bootstrap.sh                 # Установка одной командой
 ├── verify.py                    # Проверка целостности (232 теста, ~10/10)
-├── full_test.py                 # Полный автотест (8 секций)
+├── full_test.py                 # Полный автотест (10 секций)
 ├── smoke_test_modules.py        # 42 smoke-теста в стен-режиме
 ├── README.md / INSTALL.md / CHANGELOG.md / TROUBLESHOOTING.md
-├── PROJECT_MAP.md               # Полная карта 129 модулей по 24 категориям
+├── PROJECT_MAP.md               # Полная карта 143 модулей по 25 категориям
 ├── SECURITY.md / CONTRIBUTING.md / INTEGRATION.md / HYSTERIA2.md
 ├── LICENSE
 └── vless_installer/
     ├── __init__.py
-    ├── _core.py                 # Ядро: orchestrator + globals (~7 779 строк, −76% от 32 557)
+    ├── _core.py                 # Ядро: orchestrator + globals (~8 093 строк, −75% от 32 557)
     ├── __all_exports.py         # Реестр экспортируемых имён
-    └── modules/                 # 129 модулей по 24 категориям (см. PROJECT_MAP.md)
+    └── modules/                 # 143 модуля по 25 категориям (см. PROJECT_MAP.md)
         │
         ├── 1. Ядро и утилиты
         │   └── box_renderer, resources, system_deps, tui, scheduler, smoke_test, xray_safe_apply
@@ -146,7 +147,7 @@ VLESS-Ultimate-Installer/
         │   └── client_config_export, pq_vless, mtu_tuning, asn_cache
         │
         ├── 17. Веб-панель, Admin, Portal
-        │   └── rest_api, admin_panel, user_portal
+        │   └── rest_api, admin_panel, user_portal, awg_rest_api
         │
         ├── 18. AWG Transport (Mode B)
         │   └── awg_transport (45 функций)
@@ -154,13 +155,15 @@ VLESS-Ultimate-Installer/
         └── 19. Вендорные модули
             └── _vendor/dpi_detector/ (Python)
 
-        ── 20. AmneziaWG 2.0 standalone (13 модулей, NEW v4.15.0) ──
+        ── 20. AmneziaWG 2.0 standalone (14 модулей + awg_net_common, NEW v4.15.0) ──
            awg_constants/state/presets/hw_tuning/apply/standalone/
-           peers/qr/expires/backup/cascade/diagnose/uninstall
-           — полный порт bivlked/amneziawg-installer, carrier-пресеты, каскад
+           peers/qr/expires/backup/cascade/diagnose/uninstall/
+           net_common (общий NAT/sysctl слой) + awg_rest_api (REST API для веб-панели)
+           — полный порт bivlked/amneziawg-installer, carrier-пресеты, каскад,
+             управление пирами через Admin Panel + User Portal
 ```
 
-> 📋 **Полная карта по 24 категориям** с описанием каждого файла — в [`PROJECT_MAP.md`](PROJECT_MAP.md).
+> 📋 **Полная карта по 25 категориям** с описанием каждого файла — в [`PROJECT_MAP.md`](PROJECT_MAP.md).
 
 ## 🏗️ Архитектура
 
