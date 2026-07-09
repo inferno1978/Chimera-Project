@@ -325,7 +325,7 @@
 ```
 vless_installer/
 ├── _core.py              (7 779 строк — ядро, главный orchestrator)
-├── __init__.py           (version = "4.14.0")
+├── __init__.py           (version = "4.15.0")
 ├── __all_exports.py      (реэкспорт API для программного доступа)
 └── modules/              (129 модулей)
     ├── __init__.py
