@@ -392,7 +392,7 @@ body {{
       • <strong>Clash Meta</strong> / <strong>Mihomo</strong> — скачайте файл Clash Meta выше, импортируйте в приложение<br>
       • <strong>Sing-box</strong> — скачайте файл Sing-box выше, импортируйте в приложение<br>
       • <strong>Hiddify</strong> — скачайте файл Hiddify выше или отсканируйте QR-код<br>
-      • <strong>v2rayN</strong> / <strong>v2rayNG</strong> / <strong>Karing</strong> / <strong>NekoBox</strong> — отсканируйте QR-код или скопируйте VLESS-ссылку<br>
+      • <strong>v2rayN</strong> / <strong>v2rayNG</strong> / <strong>Karing</strong> / <strong>NekoBox</strong> / <strong>INCY</strong> / <strong>HAPP</strong> — отсканируйте QR-код или скопируйте VLESS-ссылку<br>
       • <strong>Streisand</strong> / <strong>Shadowrocket</strong> (iOS) — отсканируйте QR-код<br>
       • <strong>AmneziaWG</strong> — если у вас есть AWG-пир, конфиг доступен в блоке «Мой AmneziaWG» выше
     </div>
