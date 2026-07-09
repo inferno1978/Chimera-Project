@@ -384,8 +384,13 @@ def do_user_menu() -> None:
     _box_top    = core._box_top
     _box_item   = core._box_item
     _box_bottom = core._box_bottom
+    _box_row    = core._box_row
+    _box_sep    = core._box_sep
+    _box_info   = core._box_info
     CYAN        = core.CYAN
     NC          = core.NC
+    DIM         = core.DIM
+    YELLOW      = core.YELLOW
     die         = core.die
     warn        = core.warn
     if not (Path("/etc/xray/config.json").exists()
@@ -397,6 +402,7 @@ def do_user_menu() -> None:
         _box_item("A", f"Добавить пользователя")
         _box_item("D", f"Удалить пользователя")
         _box_item("S", f"Показать ссылку / QR-код")
+        _box_item("I", f"Информация: ограничение доступа по устройствам")
         _box_item("Q", f"Назад")
         _box_bottom()
         choice = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -404,10 +410,67 @@ def do_user_menu() -> None:
         elif choice == 'a': do_user_add()
         elif choice == 'd': do_user_delete()
         elif choice == 's': do_user_show_link()
+        elif choice == 'i': _show_device_limit_info()
         elif choice in ('q', ''):
             return
         else:
-            warn("Введите L, A, D, S или Q")
+            warn("Введите L, A, D, S, I или Q")
+
+
+def _show_device_limit_info() -> None:
+    """Информационный блок: ограничение доступа по устройствам."""
+    core = _core_module()
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_sep    = core._box_sep
+    _box_bottom = core._box_bottom
+    _box_ok     = core._box_ok
+    _box_warn   = core._box_warn
+    _box_info   = core._box_info
+    CYAN        = core.CYAN
+    NC          = core.NC
+    DIM         = core.DIM
+    YELLOW      = core.YELLOW
+    GREEN       = core.GREEN
+    BOLD        = core.BOLD
+
+    print()
+    _box_top("Ограничение доступа по устройствам")
+    _box_row()
+    _box_row(f"  {BOLD}Как работает VLESS/REALITY:{NC}")
+    _box_row(f"  {DIM}UUID в ссылке — это идентификатор пользователя, не устройства.{NC}")
+    _box_row(f"  {DIM}Xray-core не ограничивает количество одновременных подключений{NC}")
+    _box_row(f"  {DIM}с одним UUID. Ссылку можно скопировать на сколько угодно устройств.{NC}")
+    _box_row()
+    _box_sep()
+    _box_row(f"  {YELLOW}Ограничение «одно устройство = одна ссылка»:{NC}")
+    _box_row()
+    _box_row(f"  {BOLD}Рекомендуемый способ — отдельный UUID на каждое устройство:{NC}")
+    _box_row(f"  {DIM}Пример: создаёте 2 пользователя:{NC}")
+    _box_row(f"    {CYAN}alice-iphone{NC}  {DIM}→ ссылка для iPhone{NC}")
+    _box_row(f"    {CYAN}alice-macbook{NC}  {DIM}→ ссылка для MacBook{NC}")
+    _box_row(f"  {DIM}Каждое устройство получает свою ссылку со своим UUID.{NC}")
+    _box_row(f"  {DIM}Если одна ссылка утечёт — не затронет вторую.{NC}")
+    _box_row(f"  {DIM}При удалении пользователя — отключается только его устройство.{NC}")
+    _box_row()
+    _box_ok("Это единственный надёжный способ в VLESS/REALITY.")
+    _box_row()
+    _box_sep()
+    _box_row(f"  {YELLOW}Что насчёт HWID (Hardware ID)?{NC}")
+    _box_row()
+    _box_row(f"  {DIM}Коммерческие панели (Marzban, Hiddify Next, 3X-UI) используют{NC}")
+    _box_row(f"  {DIM}кастомные форки Xray со своим proxy-слоем, который добавляет{NC}")
+    _box_row(f"  {DIM}HWID-поле в handshake. Стандартный Xray-core HWID не поддерживает —{NC}")
+    _box_row(f"  {DIM}VLESS-протокол просто не имеет такого поля.{NC}")
+    _box_row()
+    _box_row(f"  {DIM}Альтернативы, которые НЕ работают надёжно:{NC}")
+    _box_row(f"  {DIM}• connlimit по IP — ломает NAT (2 устройства за роутером){NC}")
+    _box_row(f"  {DIM}• Мониторинг access.log — race condition, хрупко{NC}")
+    _box_row(f"  {DIM}• Блокировка по source IP — меняется при перезде/Wi-Fi смене{NC}")
+    _box_row()
+    _box_info(f"  {BOLD}Итог: создавайте отдельного пользователя на каждое устройство.{NC}")
+    _box_bottom()
+    input(f"  {CYAN}Нажмите Enter для возврата...{NC}")
 
 
 # =============================================================================
