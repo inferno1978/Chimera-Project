@@ -560,6 +560,131 @@ section_results["8. web panel invariants"] = (_sec8_pass, _sec8_fail)
 
 
 # ══════════════════════════════════════════════════════════════
+# Секция 9. Порядок запуска Nginx → Unix-сокет (anti-regression)
+# ══════════════════════════════════════════════════════════════
+# Статическая проверка _core.py: в основном flow установки (функция
+# install_xray / "Шаг 3: запуск Nginx") nginx должен запускаться ДО
+# проверки сокета. Сокет создаёт именно nginx (listen unix:), а не xray.
+#
+# Регрессия которую ловим: старый код ждал сокет ДО запуска nginx —
+# deadlock, давал гарантированный warning "Сокет не появился" после
+# 30 сек бесполезного ожидания. Фикс: nginx start → проверка сокета.
+#
+# Эта же логика уже работает в _nginx_restart_if_reality() и
+# emergency_repair.py — секция гарантирует что основной flow не
+# откатится к старому багованному порядку.
+section("9. Порядок запуска Nginx → Unix-сокет (anti-regression)")
+
+_core_src = _CORE_PATH.read_text(encoding="utf-8")
+_sec9_pass = 0
+_sec9_fail = 0
+
+# 9.1 Старый баг: "Ожидание Unix-сокета от Xray" ДО запуска nginx.
+# Эта строка была в багованном коде — ждала сокет от Xray, но сокет
+# создаёт nginx. Если строка вернулась — регрессия.
+if "Ожидание Unix-сокета от Xray" in _core_src:
+    fail("_core.py: найден старый баг — 'Ожидание Unix-сокета от Xray' "
+         "ДО запуска nginx. Сокет создаёт nginx (listen unix:), не xray. "
+         "Этот цикл ждёт 30 сек зря и выдаёт гарантированный warning.")
+    _sec9_fail += 1
+else:
+    ok("_core.py: старый баг 'Ожидание Unix-сокета от Xray' убран")
+    _sec9_pass += 1
+
+# 9.2 Старый баг: цикл ожидания сокета range(1, 31) (30 сек) ДО nginx.
+# После фикса цикл сокращён до range(20) и идёт ПОСЛЕ start nginx.
+# Ловим именно старый 30-секундный цикл по точной строке.
+if "for i in range(1, 31):" in _core_src and "is_socket()" in _core_src:
+    # Дополнительная проверка: этот 30-сек цикл должен быть именно в
+    # контексте сокета (а не какого-то другого цикла). Ищем близость.
+    _idx_30 = _core_src.find("for i in range(1, 31):")
+    _idx_sock = _core_src.find("is_socket()", _idx_30) if _idx_30 >= 0 else -1
+    if _idx_30 >= 0 and _idx_sock >= 0 and (_idx_sock - _idx_30) < 300:
+        fail("_core.py: найден старый 30-сек цикл ожидания сокета "
+             "range(1, 31) рядом с is_socket() — это багованный цикл "
+             "ДО запуска nginx. Должен быть range(20) ПОСЛЕ start nginx.")
+        _sec9_fail += 1
+    else:
+        ok("_core.py: 30-сек цикл range(1, 31) не связан с сокетом (OK)")
+        _sec9_pass += 1
+else:
+    ok("_core.py: старый 30-сек цикл ожидания сокета range(1, 31) убран")
+    _sec9_pass += 1
+
+# 9.3 Правильный порядок: nginx start должен идти ДО проверки is_socket().
+# Ищем блок "Шаг 3/3: запуск Nginx" и проверяем что в нём start nginx
+# идёт раньше чем is_socket(). Используем позиционный анализ.
+_step3_idx = _core_src.find('Шаг 3/3: запуск Nginx')
+if _step3_idx < 0:
+    fail("_core.py: не найден маркер 'Шаг 3/3: запуск Nginx' — "
+         "структура install flow изменилась, проверьте секцию вручную")
+    _sec9_fail += 1
+else:
+    # Берём кусок кода от "Шаг 3/3" до конца блока (до следующего
+    # PROGRESS.update или section_results). 2000 символов достаточно.
+    _step3_block = _core_src[_step3_idx:_step3_idx + 2000]
+    _nginx_start_idx = _step3_block.find('"start", "nginx"')
+    if _nginx_start_idx < 0:
+        _nginx_start_idx = _step3_block.find('"start", "nginx"')
+    _socket_check_idx = _step3_block.find("is_socket()")
+    if _nginx_start_idx >= 0 and _socket_check_idx >= 0:
+        if _nginx_start_idx < _socket_check_idx:
+            ok("_core.py: nginx start идёт ДО проверки is_socket() — "
+               "порядок корректный (сокет создаёт nginx)")
+            _sec9_pass += 1
+        else:
+            fail("_core.py: РЕГРЕССИЯ — проверка is_socket() идёт ДО "
+                 "nginx start. Сокет не может появиться пока nginx не "
+                 "запущен. Это тот самый баг с гарантированным warning.")
+            _sec9_fail += 1
+    elif _nginx_start_idx >= 0 and _socket_check_idx < 0:
+        # nginx запускается, но проверки сокета нет — может быть AWG-режим
+        # или xHTTP. Это не ошибка, просто нет проверки.
+        ok("_core.py: nginx start есть, проверка сокета отсутствует "
+           "(возможно AWG/xHTTP режим — OK)")
+        _sec9_pass += 1
+    else:
+        warn("_core.py: не удалось найти start nginx в блоке 'Шаг 3/3' — "
+             "структура могла измениться, проверьте вручную")
+        _sec9_pass += 1
+
+# 9.4 Архитектурный инвариант: nginx слушает unix: сокет (nginx_setup.py),
+# а xray service НЕ делает ExecStartPre: rm -f сокета (это ломало бы nginx).
+_nginx_setup_src = (_PROJECT_ROOT / "vless_installer" / "modules" /
+                    "nginx_setup.py").read_text(encoding="utf-8")
+if "listen unix:" in _nginx_setup_src and "PARAM_SOCKET_PATH" in _nginx_setup_src:
+    ok("nginx_setup.py: nginx слушает unix: сокет (подтверждено — "
+       "сокет создаёт nginx, не xray)")
+    _sec9_pass += 1
+else:
+    fail("nginx_setup.py: не найдено 'listen unix:' — архитектура "
+         "REALITY+Unix-сокет нарушена")
+    _sec9_fail += 1
+
+_xray_install_src = (_PROJECT_ROOT / "vless_installer" / "modules" /
+                     "xray_install.py").read_text(encoding="utf-8")
+# Xray НЕ должен делать rm -f PARAM_SOCKET_PATH (это удаляло бы сокет nginx).
+# Должен быть только mkdir -p в ExecStartPre.
+if "rm -f" in _xray_install_src and "PARAM_SOCKET_PATH" in _xray_install_src:
+    # Проверяем что rm -f не в ExecStartPre рядом с сокетом
+    _rm_idx = _xray_install_src.find("rm -f")
+    _sock_idx = _xray_install_src.find("PARAM_SOCKET_PATH", _rm_idx) if _rm_idx >= 0 else -1
+    if _rm_idx >= 0 and _sock_idx >= 0 and (_sock_idx - _rm_idx) < 200:
+        fail("xray_install.py: найден 'rm -f ... PARAM_SOCKET_PATH' — "
+             "это удаляет сокет который создаёт nginx, ломает REALITY")
+        _sec9_fail += 1
+    else:
+        ok("xray_install.py: rm -f не связан с PARAM_SOCKET_PATH (OK)")
+        _sec9_pass += 1
+else:
+    ok("xray_install.py: нет rm -f PARAM_SOCKET_PATH — xray не удаляет "
+       "сокет nginx (корректно, сокет принадлежит nginx)")
+    _sec9_pass += 1
+
+section_results["9. nginx-socket order"] = (_sec9_pass, _sec9_fail)
+
+
+# ══════════════════════════════════════════════════════════════
 # ИТОГ
 # ══════════════════════════════════════════════════════════════
 print(f"\n{'═'*55}")

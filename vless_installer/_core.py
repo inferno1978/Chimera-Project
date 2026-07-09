@@ -3090,31 +3090,56 @@ def do_full_install() -> None:
     if not xray_started:
         warn("Xray не запустился — проверьте: journalctl -u xray -n 30")
 
-    # Шаг 3: Nginx ВТОРЫМ — подключается к сокету созданному xray
+    # Шаг 3: Nginx ВТОРЫМ.
+    # === FIX: порядок запуска "nginx → сокет" вместо "сокет → nginx" ===
+    # АРХИТЕКТУРА REALITY+Unix-сокет (см. nginx_setup.py:573-579):
+    #   Nginx слушает на `listen unix:PARAM_SOCKET_PATH ssl proxy_protocol` —
+    #   именно NGINX создаёт unix-сокет при своём bind(). Xray НЕ создаёт
+    #   сокет — он только делает connect к нему при fallback (dest в
+    #   realitySettings). Это документировано в create_xray_service()
+    #   (xray_install.py:1276-1283) и в _nginx_restart_if_reality()
+    #   (xray_install.py:1871-1874).
+    #
+    # СТАРЫЙ БАГ: код ждал сокет ДО запуска nginx — deadlock, потому что
+    # сокет физически не может появиться пока nginx не запущен. Цикл
+    # range(1, 31) всегда завершался else → гарантированный warning
+    # "Сокет не появился" после 30 сек ожидания. Увеличение timeout не
+    # помогало (пользователь пробовал) — проблема не в длительности, а в
+    # порядке операций.
+    #
+    # ИСПРАВЛЕНИЕ: сначала запускаем nginx (он создаёт сокет), потом
+    # проверяем что сокет появился. Это та же логика что уже работает в
+    # _nginx_restart_if_reality() (xray_install.py:1897-1905) и в
+    # emergency_repair.py (строки 773-777).
     info("Шаг 3/3: запуск Nginx...")
-    # === FIX 4: Ожидание socket только в классическом режиме (не AWG) ===
-    # В AWG-режиме Xray слушает напрямую на TCP-порту, unix socket не создаётся.
-    # Без этой проверки цикл ждёт 30 секунд зря при каждой AWG-установке.
-    if PROTOCOL_MODE == "reality" and xray_started and not AWG_EXIT_ENABLED:
-        info("  Ожидание Unix-сокета от Xray...")
-        for i in range(1, 31):
+    _run(["systemctl", "stop",  "nginx"], check=False, quiet=True)
+    time.sleep(1)
+    _run(["systemctl", "start", "nginx"], check=False, quiet=True)
+    nginx_ok = _wait_service_active("nginx", 15)
+
+    # Проверка сокета — только в классическом REALITY (не AWG, не xHTTP).
+    # В AWG-режиме Xray слушает напрямую TCP-порт, unix-сокета нет.
+    # В xHTTP-режиме Xray слушает loopback backend, unix-сокета нет.
+    if PROTOCOL_MODE == "reality" and nginx_ok and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
+        # Nginx уже запущен выше — он создаёт сокет при bind (listen unix:).
+        # Ждём подтверждения (обычно <1 сек, но даём 20 сек как в
+        # _nginx_restart_if_reality для надёжности на медленных VPS).
+        for _i in range(20):
             if Path(PARAM_SOCKET_PATH).is_socket():
                 success(f"  Сокет готов: {PARAM_SOCKET_PATH}")
                 break
             time.sleep(1)
         else:
-            warn("  Сокет не появился — проверьте journalctl -u xray -n 20")
+            warn(f"  Сокет {PARAM_SOCKET_PATH} не появился после запуска nginx — "
+                 f"проверьте: journalctl -u nginx -n 20")
     elif AWG_EXIT_ENABLED:
         info("  AWG-режим: unix socket не используется, Xray слушает TCP напрямую")
-    # === END FIX 4 ===
 
-    _run(["systemctl", "stop",  "nginx"], check=False, quiet=True)
-    time.sleep(1)
-    _run(["systemctl", "start", "nginx"], check=False, quiet=True)
-    if not _wait_service_active("nginx", 15):
-        warn("  Nginx не запустился — journalctl -u nginx -n 20")
-    else:
+    if nginx_ok:
         success("  Nginx активен")
+    else:
+        warn("  Nginx не запустился — journalctl -u nginx -n 20")
+    # === END FIX ===
 
     PROGRESS.update(5, "Проверки")
 
