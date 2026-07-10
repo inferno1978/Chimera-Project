@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""
+tests/test_admin_panel.py
+───────────────────────────────────────────────────────────────────────────────
+Smoke-тест для vless_installer/modules/admin_panel.py.
+
+Проверяет: get_admin_html() возвращает непустую строку валидного HTML
+без исключений.
+"""
+from __future__ import annotations
+import sys, unittest
+from pathlib import Path
+from unittest.mock import patch
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
+
+def _setup_core():
+    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    src = core_path.read_text(); g = {}
+    with patch.object(Path, 'mkdir', lambda s,*a,**k: None), \
+         patch.object(Path, 'touch', lambda s,*a,**k: None), \
+         patch.object(Path, 'chmod', lambda s,*a,**k: None), \
+         patch('os.chown', lambda *a,**k: None), \
+         patch('os.geteuid', return_value=0):
+        exec(compile(src, str(core_path), "exec"), g)
+    import types; m = types.ModuleType("vless_installer._core"); m.__dict__.update(g)
+    sys.modules["vless_installer._core"] = m
+
+class TestGetAdminHtml(unittest.TestCase):
+    """Smoke: get_admin_html() → непустой валидный HTML."""
+
+    def setUp(self): _setup_core()
+
+    def test_returns_nonempty_string(self):
+        from vless_installer.modules.admin_panel import get_admin_html
+        html = get_admin_html()
+        self.assertIsInstance(html, str)
+        self.assertGreater(len(html), 100)
+
+    def test_starts_with_doctype(self):
+        from vless_installer.modules.admin_panel import get_admin_html
+        html = get_admin_html().strip()
+        self.assertTrue(html.startswith("<!DOCTYPE html>"))
+
+    def test_contains_html_tags(self):
+        from vless_installer.modules.admin_panel import get_admin_html
+        html = get_admin_html()
+        self.assertIn("<html", html)
+        self.assertIn("</html>", html)
+        self.assertIn("<head>", html)
+        self.assertIn("<body", html)
+
+    def test_contains_title(self):
+        from vless_installer.modules.admin_panel import get_admin_html
+        html = get_admin_html()
+        self.assertIn("<title>", html)
+
+    def test_no_exceptions_on_multiple_calls(self):
+        """Несколько вызовов подряд не вызывают исключений."""
+        from vless_installer.modules.admin_panel import get_admin_html
+        for _ in range(3):
+            html = get_admin_html()
+            self.assertGreater(len(html), 0)
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
