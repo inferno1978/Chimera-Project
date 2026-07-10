@@ -245,3 +245,93 @@ def build_mirror_urls(
         urls.append(f"https://cdn.statically.io/gh/{owner}/{repo}/{ref}/{filename}")
 
     return urls
+
+
+# ============================================================================
+#  СБОРЩИК URL ДЛЯ SOURCE-АРХИВОВ (archive/refs/heads/{branch}.tar.gz)
+# ============================================================================
+# Отдельная функция от build_mirror_urls(), т.к. source-архивы живут по
+# другому пути (archive/refs/heads/...) и поддерживаются другим набором
+# зеркал. jsDelivr CDN НЕ поддерживает выдачу tarball'а репозитория целиком
+# (только отдельные файлы через /gh/...), поэтому здесь отсутствует.
+# Statically CDN аналогично — только отдельные файлы.
+#
+# Применение: wdtt.py (proxy-turn-vk-android-master.tar.gz),
+# webdav_tunnel.py (webdav-tunnel-main.tar.gz), а также потенциально
+# git-clone случаи (Wave 6) — Variant A (HTTP tarball вместо git clone).
+
+def build_source_archive_mirror_urls(
+    owner: str,
+    repo: str,
+    branch: str = "main",
+    *,
+    include_codeload: bool = True,
+    proxy_hosts: list[str] | None = None,
+) -> list[str]:
+    """Собирает упорядоченный список URL для скачивания исходников репозитория
+    как tar.gz-архива ветки.
+
+    Порядок:
+      1. Прямой GitHub: https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.tar.gz
+      2. Codeload (отдельный домен GitHub для tarball'ов, чуть быстрее):
+         https://codeload.github.com/{owner}/{repo}/tar.gz/refs/heads/{branch}
+      3. GitHub-прокси family (7 хостов по умолчанию) — каждый оборачивает
+         прямой GitHub URL.
+
+    Параметры:
+      owner:           GitHub owner (например "SpaceNeuroX")
+      repo:            GitHub repo (например "proxy-turn-vk-android")
+      branch:          Ветка для архива (например "master", "main").
+      include_codeload: Включать codeload.github.com URL (по умолчанию True).
+      proxy_hosts:     Список GitHub-прокси хостов (по умолчанию GITHUB_PROXY_HOSTS).
+
+    Возвращает:
+      Упорядоченный список URL.
+
+    Пример:
+      build_source_archive_mirror_urls("SpaceNeuroX", "proxy-turn-vk-android", "master")
+        → [
+            "https://github.com/SpaceNeuroX/proxy-turn-vk-android/archive/refs/heads/master.tar.gz",
+            "https://codeload.github.com/SpaceNeuroX/proxy-turn-vk-android/tar.gz/refs/heads/master",
+            "https://ghproxy.net/https://github.com/SpaceNeuroX/proxy-turn-vk-android/archive/refs/heads/master.tar.gz",
+            ...
+          ]
+
+    Отличия от build_mirror_urls():
+      • jsDelivr/Statically НЕ поддерживают tarball целиком — отсутствуют.
+      • raw GitHub неприменим (это для отдельных файлов, не архивов).
+      • release-assets неприменим (это для релизных артефактов, не исходников
+        ветки).
+      • Добавлен codeload.github.com — официальный домен GitHub для tarball'ов,
+        работает быстрее основного домена на больших архивах.
+    """
+    if proxy_hosts is None:
+        proxy_hosts = GITHUB_PROXY_HOSTS
+
+    # Валидация
+    if not owner or not repo or not branch:
+        return []
+
+    urls: list[str] = []
+
+    # 1) Прямой GitHub
+    urls.append(
+        f"https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.tar.gz"
+    )
+
+    # 2) Codeload (альтернативный домен GitHub)
+    if include_codeload:
+        urls.append(
+            f"https://codeload.github.com/{owner}/{repo}/tar.gz/refs/heads/{branch}"
+        )
+
+    # 3) GitHub-прокси family — каждый прокси оборачивает полный GitHub URL
+    for proxy_host in proxy_hosts:
+        if not proxy_host:
+            continue
+        urls.append(
+            f"https://{proxy_host}/https://github.com/{owner}/{repo}/"
+            f"archive/refs/heads/{branch}.tar.gz"
+        )
+
+    return urls
