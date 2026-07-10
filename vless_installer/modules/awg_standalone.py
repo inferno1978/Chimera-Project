@@ -1473,9 +1473,12 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
     Алгоритм:
       1. Генерируем новые параметры через awgs_presets_generate(preset)
          (использует текущий carrier-пресет из state, или заданный)
-      2. Обновляем state["params"] через awgs_state_update
-      3. Перестраиваем awg0.conf через awg_peer_rebuild_conf(apply=True)
-         — он вызывает awgs_apply() с syncconf (без даунтайма)
+      2. Перестраиваем awg0.conf через awg_peer_rebuild_conf(apply=True,
+         params_override=new_params) — конфиг строится с NEW_PARAMS,
+         но state на диске пока НЕ меняется
+      3. При успехе apply — коммитим state["params"]=new_params
+         При неудаче — state не трогаем, туннель продолжает работать
+         на старых параметрах
 
     Параметры:
       preset_name: имя carrier-пресета для генерации
@@ -1515,11 +1518,14 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
         return False, str(e)
 
     # Перестраиваем конфиг и применяем через syncconf (без даунтайма).
-    # ВАЖНО: state обновляем ТОЛЬКО при успехе apply — иначе state будет
-    # противоречить реальности на интерфейсе (старые параметры в файле,
-    # новые в state).
+    # ВАЖНО: передаём new_params через params_override, чтобы конфиг строился
+    # с НОВЫМИ параметрами (а не со старыми из state на диске).
+    # State на диске коммитим ТОЛЬКО при подтверждённом успехе apply —
+    # иначе state будет противоречить реальности на интерфейсе
+    # (регрессия 225c2ba: state коммитился после rebuild_conf, который
+    #  читал СТАРЫЕ params с диска → ротация молча не работала).
     info("Применение через awg syncconf (без разрыва туннеля)...")
-    if awg_peer_rebuild_conf(apply=True):
+    if awg_peer_rebuild_conf(apply=True, params_override=new_params):
         # Apply успешен — теперь безопасно коммитить state
         awgs_state_update(params=new_params)
         i1_display = new_params.get("i1", "")[:16] + "..." if new_params.get("i1") else "отсутствует"

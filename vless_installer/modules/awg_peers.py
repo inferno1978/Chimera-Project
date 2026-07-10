@@ -80,20 +80,34 @@ def _validate_email(email: str) -> bool:
 
 # ── Перестроение awg0.conf из state ─────────────────────────────────────────
 
-def awg_peer_rebuild_conf(apply: bool = True) -> bool:
+def awg_peer_rebuild_conf(apply: bool = True, params_override: dict = None) -> bool:
     """
     Перестраивает awg0.conf из state (все пиры) и применяет через syncconf.
     Вызывается после любого изменения набора пиров.
+
+    params_override: если передан (не None), используется вместо
+        state.get("params", ...) при построении конфига. Состояние state
+        на диске при этом НЕ меняется — только конфиг строится с этими
+        параметрами. Это нужно для awgs_rotate_obfuscation(): apply должен
+        выполниться с NEW_PARAMS (не со старыми из state), но state на
+        диске должен коммититься только при подтверждённом успехе apply.
+        Без params_override rebuild_conf читает state с диска и строит
+        конфиг со СТАРЫМИ параметрами — ротация ничего не ротирует, но
+        репортит успех (регрессия, внесённая 225c2ba, исправлена).
     """
     core = _core_module()
     state = awgs_state_load()
+    # params_override имеет приоритет — позволяет строить конфиг с новыми
+    # параметрами ДО того, как они записаны в state.
+    params = params_override if params_override is not None \
+        else state.get("params", AWGS_DEFAULT_PARAMS)
     conf_content = awgs_build_server_conf(
         server_privkey=state.get("server_privkey", ""),
         port=state.get("port", 51820),
         subnet=state.get("subnet", "10.66.66.0/24"),
         subnet_v6=state.get("subnet_v6", ""),
         mtu=state.get("mtu", 1280),
-        params=state.get("params", AWGS_DEFAULT_PARAMS),
+        params=params,
         peers=state.get("peers", []),
         endpoint_host=state.get("endpoint_host", ""),
         cascade_role=state.get("cascade_role", ""),
