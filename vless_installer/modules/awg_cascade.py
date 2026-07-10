@@ -342,7 +342,7 @@ if [ -f "{AWGS_RU_ZONE_FILE}" ]; then
     while IFS= read -r line; do
         line=$(echo "$line" | tr -d '[:space:]')
         [ -z "$line" ] && continue
-        [ "${line:0:1}" = "#" ] && continue
+        [ "${{line:0:1}}" = "#" ] && continue
         ipset add {AWGS_IPSET_NAME} "$line" -exist
     done < "{AWGS_RU_ZONE_FILE}"
 fi
