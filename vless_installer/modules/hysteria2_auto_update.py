@@ -71,6 +71,19 @@ def h2_update_apply(force: bool = False) -> bool:
     """
     Скачивает и устанавливает новую версию бинарника.
     Если force=False — проверяет необходимость обновления.
+
+    МИГРАЦИЯ: раньше использовался subprocess curl с ОДНИМ прямым URL,
+    БЕЗ зеркал, БЕЗ проверки ELF magic (только запуск `version`), БЕЗ
+    проверки ручного размещения. Теперь использует fetch_package(
+    HYSTERIA2_SPEC, arch=...) — тот же spec что и в
+    hysteria2_exit_mgr._install_h2_binary(). Это УНИФИЦИРУЕТ два пути
+    скачивания (раньше они были независимыми с разным поведением при
+    сбое сети) и даёт auto_update бесплатно:
+      • 14 зеркал fallback вместо одного URL.
+      • WinSCP-friendly ручное размещение в /root/.
+      • min_size=1 MB защита (раньше не было).
+      • ELF magic проверка в post_install (раньше только запуск version).
+      • Atomic-replace через post_install (stop → unlink → copy2 → start).
     """
     check = h2_update_check()
     if not check["update_available"] and not force:
@@ -81,32 +94,23 @@ def h2_update_apply(force: bool = False) -> bool:
     info(f"Обновляю Hysteria2: {check['current'] or '—'} → {check['latest']}")
 
     try:
-        url, tag = _h2_latest_url()
-        r = _run(["curl", "-L", "--max-time", "90", "-o", str(_TMP_BINARY), url],
-                 capture=True, timeout=120)
-        if r.returncode != 0 or not _TMP_BINARY.exists():
+        from vless_installer.modules.download_manager import fetch_package
+        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+
+        arch = _detect_arch()
+        ok = fetch_package(HYSTERIA2_SPEC, arch=arch)
+        if not ok:
             error("Не удалось скачать обновление")
             return False
 
-        # Проверяем что скачанный файл исполняем
-        _TMP_BINARY.chmod(0o755)
-        v_check = _run([str(_TMP_BINARY), "version"], capture=True, timeout=10)
-        if v_check.returncode != 0:
-            error("Скачанный бинарник не запускается, откат")
-            _TMP_BINARY.unlink(missing_ok=True)
+        # post_install HYSTERIA2_SPEC уже сделал atomic-replace. Но если
+        # сервис был активен, он уже перезапущен внутри post_install.
+        # Дополнительно проверяем что бинарник действительно обновился.
+        new_ver = _h2_binary_version()
+        if not new_ver:
+            error("Бинарник не запускается после обновления, откат невозможен")
             return False
 
-        # Атомарная замена
-        if was_active:
-            _systemctl("stop", H2_SERVICE)
-        shutil.move(str(_TMP_BINARY), str(H2_BINARY))
-        H2_BINARY.chmod(0o755)
-
-        if was_active:
-            _systemctl("start", H2_SERVICE)
-            time.sleep(2)
-
-        new_ver = _h2_binary_version()
         success(f"Hysteria2 обновлён до v{new_ver}")
         _tg_h2_event("h2_update", f"Обновлён до v{new_ver}")
         log_to_file("INFO", f"H2 updated: {check['current']} → {new_ver}")
@@ -122,7 +126,6 @@ def h2_update_apply(force: bool = False) -> bool:
 
     except Exception as e:
         error(f"Ошибка обновления: {e}")
-        _TMP_BINARY.unlink(missing_ok=True)
         if was_active:
             _systemctl("start", H2_SERVICE)
         return False

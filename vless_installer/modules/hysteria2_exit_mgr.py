@@ -97,47 +97,45 @@ def _h2_latest_url() -> str:
 
 # ── Установка бинарника ───────────────────────────────────────────────────────
 def _install_h2_binary() -> bool:
-    info("Скачиваю бинарник Hysteria2...")
-    url, tag = _h2_latest_url()
-    tmp = Path("/tmp/hysteria.bin")
-    # Зеркала на случай если github.com медленный или недоступен
-    mirrors = [
-        url,
-        url.replace("https://github.com/",
-                    "https://ghproxy.net/https://github.com/"),
-        url.replace("https://github.com/",
-                    "https://mirror.ghproxy.com/https://github.com/"),
-    ]
-    r = None
-    for _url in mirrors:
-        tmp.unlink(missing_ok=True)
-        r = _run(["curl", "-fsSL", "--connect-timeout", "15",
-                  "--max-time", "180", "-o", str(tmp), _url],
-                 capture=True, check=False)
-        if r.returncode == 0 and tmp.exists() and tmp.stat().st_size >= 1024 * 1024:
-            break
-        sz = tmp.stat().st_size if tmp.exists() else 0
-        warn(f"curl {_url.split('/')[2]}: код {r.returncode}, {sz} Б — пробую зеркало...")
-    if r is None or r.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 1024 * 1024:
-        error(f"Не удалось скачать hysteria2 ни с одного зеркала")
-        tmp.unlink(missing_ok=True)
-        return False
-    # Проверяем, что скачали настоящий ELF-бинарник, а не HTML/JSON с ошибкой
-    magic = tmp.read_bytes()[:4]
-    if magic != b"\x7fELF":
-        error(
-            f"Скачанный файл не является ELF-бинарником (магия: {magic!r}). "
-            "Возможно, GitHub недоступен или отдал страницу с ошибкой."
-        )
-        tmp.unlink(missing_ok=True)
-        return False
-    H2_BINARY.parent.mkdir(parents=True, exist_ok=True)
-    import shutil
-    shutil.move(str(tmp), str(H2_BINARY))
-    H2_BINARY.chmod(0o755)
-    success(f"Hysteria2 {tag} установлен → {H2_BINARY}")
-    log_to_file("INFO", f"H2 binary installed: {tag}")
-    return True
+    """Скачивает бинарник Hysteria2 через download_manager.fetch_package().
+
+    МИГРАЦИЯ: раньше использовался subprocess curl с inline списком из 3
+    зеркал (прямой GitHub + ghproxy.net + mirror.ghproxy.com), БЕЗ
+    проверки ручного размещения. Список зеркал был захардкожен в самой
+    функции, не вынесен в реестр.
+
+    Теперь используется fetch_package(HYSTERIA2_SPEC, arch=...) из
+    download_manager.py. fetch_package сам:
+      1. Проверяет /root/hysteria-linux-{arch} (manual_incoming_dir из
+         spec) — если найден и размер >= 1 MB, использует без сети
+         (WinSCP-friendly).
+      2. Иначе — перебирает 14 зеркал (jsDelivr CDN + raw + release
+         GitHub + 7 gh-proxy + Statically) по очереди через urllib.
+      3. При успехе — post_install проверяет ELF magic и atomic-replaces
+         /usr/local/bin/hysteria (stop service → unlink → copy2 → restart).
+      4. При провале — print_manual_hint() с инструкцией.
+
+    Версия и URL разрешаются через _h2_latest_url() (API metadata —
+    non-migration, остаётся здесь). Само скачивание бинарника теперь
+    идёт через fetch_package.
+    """
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+
+    info("Скачиваю бинарник Hysteria2 (через download_manager)...")
+    arch = _detect_arch()
+    ok = fetch_package(HYSTERIA2_SPEC, arch=arch)
+    if ok:
+        # Получаем тег для логирования (не для скачивания — оно уже прошло)
+        try:
+            _, tag = _h2_latest_url()
+        except Exception:
+            tag = "unknown"
+        success(f"Hysteria2 {tag} установлен → {H2_BINARY}")
+        log_to_file("INFO", f"H2 binary installed: {tag}")
+    else:
+        error("Не удалось скачать Hysteria2 ни с одного зеркала")
+    return ok
 
 
 # ── Генерация конфига ─────────────────────────────────────────────────────────

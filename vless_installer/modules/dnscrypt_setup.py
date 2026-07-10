@@ -129,32 +129,30 @@ def install_dnscrypt() -> None:
         return
 
     info(f"DNSCrypt-proxy: {dc_tag} ({dc_arch})")
-    dc_url = (f"https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/"
-              f"{dc_tag}/dnscrypt-proxy-{dc_arch}-{dc_tag}.tar.gz")
 
-    with tempfile.TemporaryDirectory(prefix="dnscrypt.") as dc_tmp:
-        dc_archive = Path(dc_tmp) / "dnscrypt.tar.gz"
-        r = _run(["curl", "-fsSL", "--connect-timeout", "30", "--retry", "3",
-                  dc_url, "-o", str(dc_archive)], check=False, quiet=True)
-        if r.returncode != 0:
-            warn("Не удалось скачать DNSCrypt-proxy — пропускаем")
-            return
+    # МИГРАЦИЯ: раньше использовался subprocess curl с ОДНИМ прямым URL
+    # (https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/{tag}/
+    # dnscrypt-proxy-{arch}-{tag}.tar.gz) БЕЗ зеркал, БЕЗ fallback, БЕЗ
+    # проверки ручного размещения. Только curl с --retry 3 (повтор того
+    # же URL).
+    #
+    # Теперь используется fetch_package(DNSCRYPT_SPEC, tag=..., arch=...)
+    # из download_manager.py. fetch_package сам:
+    #   1. Проверяет /root/dnscrypt-proxy-{arch}-{tag}.tar.gz
+    #      (manual_incoming_dir из spec) — если найден, использует без сети.
+    #   2. Иначе — перебирает 14 зеркал по очереди через urllib.
+    #   3. При успехе — post_install распаковывает tar.gz, находит
+    #      dnscrypt-proxy бинарник через rglob, копирует в
+    #      /usr/local/bin/dnscrypt-proxy (chmod 0o755).
+    #   4. При провале — print_manual_hint() с инструкцией.
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.dnscrypt_packages import DNSCRYPT_SPEC
 
-        _run(["tar", "-xzf", str(dc_archive), "-C", dc_tmp],
-             check=False, quiet=True)
-
-        bin_found: Path | None = None
-        for p in Path(dc_tmp).rglob("dnscrypt-proxy"):
-            if p.is_file():
-                bin_found = p
-                break
-
-        if not bin_found:
-            warn("Бинарник dnscrypt-proxy не найден в архиве — пропускаем")
-            return
-
-        shutil.copy2(bin_found, DNSCRYPT_BIN)
-        DNSCRYPT_BIN.chmod(0o755)
+    ok = fetch_package(DNSCRYPT_SPEC, tag=dc_tag, arch=dc_arch)
+    if not ok:
+        warn("Не удалось скачать DNSCrypt-proxy — пропускаем")
+        warn("Xray будет использовать публичные DNS (1.1.1.1 / 8.8.8.8)")
+        return
 
     success(f"Бинарник DNSCrypt-proxy установлен: {DNSCRYPT_BIN}")
     DNSCRYPT_CONF_DIR.mkdir(parents=True, exist_ok=True)
