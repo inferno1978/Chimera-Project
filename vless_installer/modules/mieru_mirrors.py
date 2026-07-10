@@ -61,58 +61,33 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
+from vless_installer.modules.github_mirrors import build_mirror_urls
+
 
 # ============================================================================
-#  ФАБРИКИ ЗЕРКАЛ
+#  УНИФИЦИРОВАННЫЕ ЗЕРКАЛА — thin wrapper над build_mirror_urls
 # ============================================================================
-# Каждая фабрика принимает (version, filename) и возвращает полный URL.
-# Это позволяет единообразно работать с зеркалами, у которых разные URL-шаблоны.
+# Раньше здесь был собственный список _MIRROR_FACTORIES (9 зеркал).
+# Теперь делегируем в единый build_mirror_urls() из github_mirrors.py.
+# Это даёт 14 зеркал (4 jsDelivr + raw GitHub + release GitHub + 7 прокси +
+# Statically) — строгий superset старых 9.
+#
+# Порядок зеркал изменился: старый (release → proxy → jsDelivr) → новый
+# (jsDelivr → raw → release → proxy → Statically). Новый порядок совпадает
+# с geo_mirrors — единообразие между всеми протоколами.
 
-# --- Прямой GitHub release-assets -------------------------------------------
-def _github_release(version: str, filename: str) -> str:
-    return f"https://github.com/enfein/mieru/releases/download/v{version}/{filename}"
+_OWNER = "enfein"
+_REPO  = "mieru"
 
 
-# --- GitHub-прокси (проксируют release-assets) ------------------------------
-def _gh_proxy(proxy_host: str) -> Callable[[str, str], str]:
-    """Возвращает фабрику URL для конкретного GitHub-прокси."""
-    return lambda ver, fn: (
-        f"https://{proxy_host}/https://github.com/enfein/mieru/"
-        f"releases/download/v{ver}/{fn}"
+def _build_mieru_urls(filename: str, version: str) -> list[str]:
+    """Собирает URL для mieru через единый build_mirror_urls."""
+    return build_mirror_urls(
+        owner=_OWNER,
+        repo=_REPO,
+        filename=filename,
+        tag=f"v{version}",
     )
-
-
-# --- jsDelivr CDN -----------------------------------------------------------
-# jsDelivr умеет проксировать release-assets через /gh/USER/REPO@TAG/PATH,
-# НО только для тегов, не для "latest". Поэтому мы строим URL с конкретным
-# тегом v{version}. Иногда jsDelivr кеширует с задержкой несколько часов
-# после релиза, поэтому jsDelivr идёт последним fallback'ом.
-def _jsdelivr(version: str, filename: str) -> str:
-    return (
-        f"https://cdn.jsdelivr.net/gh/enfein/mieru@v{version}/{filename}"
-    )
-
-
-# ============================================================================
-#  УПОРЯДОЧЕННЫЙ СПИСОК ЗЕРКАЛ
-# ============================================================================
-# Порядок = порядок попыток скачивания. Первые — самые быстрые/доступные.
-_MIRROR_FACTORIES: list[Callable[[str, str], str]] = [
-    # 1) Прямой GitHub — самый быстрый, когда не заблокирован
-    _github_release,
-
-    # 2) GitHub-прокси (китайские + комьюнити)
-    _gh_proxy("ghproxy.net"),
-    _gh_proxy("ghproxy.com"),
-    _gh_proxy("mirror.ghproxy.com"),
-    _gh_proxy("gh.con.sh"),
-    _gh_proxy("hub.gitmirror.com"),
-    _gh_proxy("github.moeyy.xyz"),
-    _gh_proxy("ghps.cc"),
-
-    # 3) jsDelivr CDN — последний fallback (может отставать на часы)
-    _jsdelivr,
-]
 
 
 # ============================================================================
@@ -122,28 +97,28 @@ def get_mita_mirrors(version: str) -> list[str]:
     """Упорядоченный список URL для скачивания mita tar.gz."""
     arch = "amd64" if _is_amd64() else "arm64"
     filename = f"mita_{version}_linux_{arch}.tar.gz"
-    return [f(version, filename) for f in _MIRROR_FACTORIES]
+    return _build_mieru_urls(filename, version)
 
 
 def get_mieru_mirrors(version: str) -> list[str]:
     """Упорядоченный список URL для скачивания mieru tar.gz (клиент)."""
     arch = "amd64" if _is_amd64() else "arm64"
     filename = f"mieru_{version}_linux_{arch}.tar.gz"
-    return [f(version, filename) for f in _MIRROR_FACTORIES]
+    return _build_mieru_urls(filename, version)
 
 
 def get_deb_mirrors(version: str) -> list[str]:
     """Упорядоченный список URL для скачивания mita .deb пакета."""
     arch = "amd64" if _is_amd64() else "arm64"
     filename = f"mita_{version}_{arch}.deb"
-    return [f(version, filename) for f in _MIRROR_FACTORIES]
+    return _build_mieru_urls(filename, version)
 
 
 def get_rpm_mirrors(version: str) -> list[str]:
     """Упорядоченный список URL для скачивания mita .rpm пакета."""
     rpm_arch = "x86_64" if _is_amd64() else "aarch64"
     filename = f"mita-{version}-1.{rpm_arch}.rpm"
-    return [f(version, filename) for f in _MIRROR_FACTORIES]
+    return _build_mieru_urls(filename, version)
 
 
 def get_all_mirrors(version: str) -> dict[str, list[str]]:
@@ -161,11 +136,11 @@ def get_all_mirrors(version: str) -> dict[str, list[str]]:
         f"mita_{version}_linux_{arch}.tar.gz",
         f"mieru_{version}_linux_{arch}.tar.gz",
     ):
-        result[filename] = [f(version, filename) for f in _MIRROR_FACTORIES]
+        result[filename] = _build_mieru_urls(filename, version)
     return result
 
 
-MIERU_MIRRORS_COUNT: int = len(_MIRROR_FACTORIES)
+MIERU_MIRRORS_COUNT: int = 14
 """Количество зеркал на каждый файл (для отображения в TUI)."""
 
 

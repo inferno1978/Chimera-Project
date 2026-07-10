@@ -74,9 +74,10 @@ class TestMirrorListStructure(unittest.TestCase):
         self.assertEqual(MIERU_MIRRORS_COUNT,
                          len(get_mita_mirrors(self.TEST_VERSION)))
 
-    def test_at_least_9_mirrors(self):
-        """Должно быть ≥9 зеркал: 1 GitHub + 7 прокси + 1 jsDelivr."""
-        self.assertGreaterEqual(MIERU_MIRRORS_COUNT, 9)
+    def test_at_least_14_mirrors(self):
+        """После миграции на build_mirror_urls: ≥14 зеркал (4 jsDelivr + raw
+        + release + 7 прокси + Statically). Старый код давал 9 — теперь 14."""
+        self.assertGreaterEqual(MIERU_MIRRORS_COUNT, 14)
 
     def test_no_duplicate_urls(self):
         for fn in (get_mita_mirrors, get_mieru_mirrors,
@@ -184,19 +185,32 @@ class TestMirrorCategories(unittest.TestCase):
 
 
 class TestUrlOrdering(unittest.TestCase):
-    """Порядок зеркал: прямой GitHub → прокси → jsDelivr."""
+    """Порядок зеркал: jsDelivr → raw GitHub → release GitHub → прокси → Statically.
+
+    После миграции на build_mirror_urls() порядок изменился: теперь
+    совпадает с geo_mirrors (jsDelivr first, Statically last).
+    """
 
     TEST_VERSION = "3.33.0"
 
-    def test_direct_github_goes_first(self):
+    def test_jsdelivr_goes_first(self):
+        """Первые 4 URL — jsDelivr CDN family (как в geo_mirrors)."""
         urls = get_mita_mirrors(self.TEST_VERSION)
-        self.assertIn("github.com/enfein/mieru/releases/download", urls[0])
-        # Первый URL НЕ должен быть прокси (т.е. не ghproxy.net/https://...)
-        self.assertFalse(urls[0].startswith("https://ghproxy.net/https://"))
+        for url in urls[:4]:
+            self.assertIn("jsdelivr.net", url)
 
-    def test_jsdelivr_goes_last(self):
+    def test_statically_goes_last(self):
+        """Последний URL — Statically CDN (как в geo_mirrors)."""
         urls = get_mita_mirrors(self.TEST_VERSION)
-        self.assertIn("cdn.jsdelivr.net", urls[-1])
+        self.assertIn("cdn.statically.io", urls[-1])
+
+    def test_direct_github_present(self):
+        """Прямой GitHub release-assets присутствует (не обязательно первый)."""
+        urls = get_mita_mirrors(self.TEST_VERSION)
+        self.assertTrue(
+            any("github.com/enfein/mieru/releases" in u for u in urls),
+            "Прямой GitHub release-assets должен присутствовать",
+        )
 
 
 class TestManualUploadPaths(unittest.TestCase):

@@ -214,6 +214,8 @@ class TestBuildMirrorUrlsMieruSetMatch(unittest.TestCase):
     """
 
     def test_mita_mirrors_set_match(self):
+        """После миграции mieru_mirrors на build_mirror_urls: SET должен
+        совпадать с полным build_mirror_urls (14 зеркал, без ограничений)."""
         from vless_installer.modules.mieru_mirrors import get_mita_mirrors
 
         old_urls = get_mita_mirrors("3.33.0")
@@ -222,27 +224,21 @@ class TestBuildMirrorUrlsMieruSetMatch(unittest.TestCase):
             repo="mieru",
             filename="mita_3.33.0_linux_amd64.tar.gz",
             tag="v3.33.0",
-            jsdelivr_hosts=("cdn.jsdelivr.net",),
-            include_raw_github=False,
-            include_statically=False,
         )
 
         self.assertEqual(set(old_urls), set(new_urls),
-                         "URL как SET должны совпадать (порядок может отличаться)")
+                         "URL как SET должны совпадать (теперь обе используют build_mirror_urls)")
 
-    def test_mieru_url_count_9(self):
-        """mieru даёт 9 зеркал: 1 release + 7 proxy + 1 jsDelivr."""
+    def test_mieru_url_count_14(self):
+        """После миграции mieru даёт 14 зеркал (как geo — полный набор)."""
         urls = build_mirror_urls(
             owner="enfein",
             repo="mieru",
             filename="mita.tar.gz",
             tag="v3.33.0",
-            jsdelivr_hosts=("cdn.jsdelivr.net",),
-            include_raw_github=False,
-            include_statically=False,
         )
-        # 1 jsDelivr + 0 raw + 1 release + 7 proxy + 0 Statically = 9
-        self.assertEqual(len(urls), 9)
+        # 4 jsDelivr + 1 raw + 1 release + 7 proxy + 1 Statically = 14
+        self.assertEqual(len(urls), 14)
 
 
 class TestBuildMirrorUrlsTelemtSetMatch(unittest.TestCase):
