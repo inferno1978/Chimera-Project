@@ -882,7 +882,8 @@ def _run_install_inner() -> None:
     server_ip      = _get_server_ip()
     uname          = users[0]["username"]
     pwd            = users[0]["password"]
-    share_link     = _gen_client_share_link(server_ip, port_start, port_end, protocol, uname, pwd)
+    share_link     = _gen_client_share_link(server_ip, port_start, port_end, protocol, uname, pwd,
+                                              traffic_preset=state.get("traffic_preset", "basic"))
     share_link_neko = _gen_client_share_link_nekobox(server_ip, port_start, protocol, uname, pwd)
 
     os.system("clear")
@@ -1023,7 +1024,8 @@ def _add_user(state: dict) -> None:
     port_start = state.get("port_start", _DEFAULT_PORT_START)
     port_end   = state.get("port_end",   _DEFAULT_PORT_END)
     protocol   = state.get("protocol",   _DEFAULT_PROTOCOL)
-    share_link      = _gen_client_share_link(server_ip, port_start, port_end, protocol, username, password)
+    share_link      = _gen_client_share_link(server_ip, port_start, port_end, protocol, username, password,
+                                               traffic_preset=state.get("traffic_preset", "basic"))
     share_link_neko = _gen_client_share_link_nekobox(server_ip, port_start, protocol, username, password)
 
     os.system("clear")
@@ -1068,7 +1070,8 @@ def _show_user_link(users: list, server_ip: str,
         print(f"  {RED}✗{NC}  Неверный номер."); _pause(); return
 
     share_link      = _gen_client_share_link(server_ip, port_start, port_end, protocol,
-                                               user["username"], user["password"])
+                                               user["username"], user["password"],
+                                               traffic_preset=state.get("traffic_preset", "basic"))
     share_link_neko = _gen_client_share_link_nekobox(server_ip, port_start, protocol,
                                                       user["username"], user["password"])
     os.system("clear")

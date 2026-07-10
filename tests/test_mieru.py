@@ -265,6 +265,42 @@ class TestGenClientShareLink(unittest.TestCase):
         link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "TCP", "u", "p")
         self.assertNotIn("traffic-pattern", link)
 
+    def test_share_link_uses_preset_from_state(self):
+        """Integration: при traffic_preset='aggressive' в state — ссылка
+        содержит traffic-pattern соответствующий aggressive, а не basic.
+
+        Это regression-тест на баг: _gen_client_share_link вызывался без
+        передачи traffic_preset — всегда дефолт 'basic', даже если админ
+        выбрал 'aggressive' на сервере. Клиент и сервер расходились.
+        """
+        from vless_installer.modules.mieru import _gen_client_share_link
+        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        import urllib.parse
+
+        # Генерируем ссылку с aggressive
+        link_aggr = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p",
+                                            traffic_preset="aggressive")
+        # Извлекаем traffic-pattern
+        tp_part = [p for p in link_aggr.split("&") if p.startswith("traffic-pattern=")][0]
+        tp_value = urllib.parse.unquote(tp_part.split("=", 1)[1])
+
+        # Должен соответствовать aggressive, а не basic
+        expected_aggr = get_preset_base64("aggressive")
+        expected_basic = get_preset_base64("basic")
+        self.assertEqual(tp_value, expected_aggr)
+        self.assertNotEqual(tp_value, expected_basic)
+
+    def test_default_uses_basic_when_no_preset_in_state(self):
+        """При отсутствии traffic_preset в state — дефолт 'basic'."""
+        from vless_installer.modules.mieru import _gen_client_share_link
+        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        import urllib.parse
+
+        link = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p")
+        tp_part = [p for p in link.split("&") if p.startswith("traffic-pattern=")][0]
+        tp_value = urllib.parse.unquote(tp_part.split("=", 1)[1])
+        self.assertEqual(tp_value, get_preset_base64("basic"))
+
 
 class TestGenClientShareLinkNekobox(unittest.TestCase):
     """_gen_client_share_link_nekobox — Nekobox формат."""
