@@ -111,6 +111,173 @@ class TestAwgsCascadeBuildAwg1Conf(unittest.TestCase):
         # PSK пустой → PresharedKey не добавляется
         self.assertNotIn("PresharedKey", conf)
 
+    # ── Regression: Table = off (SSH lockout fix) ────────────────────────────
+
+    def test_config_contains_table_off(self):
+        """Regression: awg1.conf должен содержать 'Table = off' в [Interface].
+
+        Без Table = off awg-quick автоматически создаёт маршрут
+        0.0.0.0/0 dev awg1, перехватывая весь трафик сервера (включая
+        SSH-ответы) — сессия обрывается. Фикс: коммит 33970c2.
+        """
+        from vless_installer.modules import awg_cascade
+        self._state.write_text(json.dumps({
+            "installed": True,
+            "params": {"jc": 4, "jmin": 40, "jmax": 70,
+                        "s1": 0, "s2": 0, "s3": 0, "s4": 0,
+                        "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+                        "i1": "", "i2": "", "i3": "", "i4": "", "i5": ""},
+        }))
+        with self._patch():
+            conf = awg_cascade._awgs_cascade_build_awg1_conf(
+                exit_host="1.2.3.4", exit_port=51820,
+                exit_pubkey="PUB", client_privkey="PRIV",
+                psk="", exit_subnet="172.16.61.0/24",
+            )
+        self.assertIn("Table = off", conf)
+        # Table = off должен быть в [Interface] секции, а не в [Peer]
+        iface_section = conf.split("[Peer]")[0]
+        self.assertIn("Table = off", iface_section)
+
+    def test_table_off_present_regardless_of_mtu_or_params(self):
+        """Table = off присутствует независимо от params/mtu — безусловная строка."""
+        from vless_installer.modules import awg_cascade
+        # Тест с пустыми params и кастомным mtu
+        self._state.write_text(json.dumps({
+            "installed": True, "params": {}, "mtu": 1400,
+        }))
+        with self._patch():
+            conf = awg_cascade._awgs_cascade_build_awg1_conf(
+                exit_host="1.2.3.4", exit_port=51820,
+                exit_pubkey="PUB", client_privkey="PRIV",
+                psk="", exit_subnet="172.16.61.0/24",
+            )
+        self.assertIn("Table = off", conf)
+        # Тест с полными params и дефолтным mtu
+        self._state.write_text(json.dumps({
+            "installed": True,
+            "params": {"jc": 9, "jmin": 50, "jmax": 200,
+                        "s1": 1, "s2": 2, "s3": 3, "s4": 4,
+                        "h1": 5, "h2": 6, "h3": 7, "h4": 8,
+                        "i1": "dead", "i2": "", "i3": "", "i4": "", "i5": ""},
+        }))
+        with self._patch():
+            conf = awg_cascade._awgs_cascade_build_awg1_conf(
+                exit_host="5.6.7.8", exit_port=9999,
+                exit_pubkey="PUB2", client_privkey="PRIV2",
+                psk="PSK", exit_subnet="10.0.0.0/24",
+            )
+        self.assertIn("Table = off", conf)
+
+
+class TestAwgsCascadeApplyIptablesRules(unittest.TestCase):
+    """_awgs_cascade_apply_iptables — regression: SSH lockout fix (OUTPUT → FORWARD).
+
+    ВНИМАНИЕ: эти тесты проверяют только корректность генерируемой конфигурации/
+    команд. Они не могут подтвердить отсутствие SSH lockout на реальном сервере
+    — это требует ручной проверки на тестовом VPS перед использованием в проде.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _mock_core(self):
+        """Создаёт mock core, записывающий все _run вызовы."""
+        core = MagicMock()
+        core.log_to_file = MagicMock()
+        core.info = MagicMock()
+        core.warn = MagicMock()
+        # Записываем все команды для последующего анализа
+        self._run_calls = []
+
+        def _capture_run(cmd, **kwargs):
+            self._run_calls.append(cmd)
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+
+        core._run = _capture_run
+        return core
+
+    def test_mark_rule_uses_forward_not_output(self):
+        """Regression: MARK-правило использует '-A FORWARD -i awg0',
+        а НЕ '-A OUTPUT'.
+
+        До фикса (коммит 33970c2) правило было '-A OUTPUT', что маркировало
+        весь исходящий трафик сервера (включая SSH-ответы) → SSH lockout.
+        """
+        from vless_installer.modules import awg_cascade
+
+        mock_core = self._mock_core()
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core):
+            awg_cascade._awgs_cascade_apply_iptables("172.16.61.0/24")
+
+        # Собираем все команды в одну строку для анализа
+        all_cmds = [" ".join(cmd) for cmd in self._run_calls]
+        all_text = "\n".join(all_cmds)
+
+        # Должна быть команда с FORWARD -i awg0 и MARK
+        has_forward_mark = any(
+            "FORWARD" in c and "-i" in c and "awg0" in c and "MARK" in c
+            for c in all_cmds
+        )
+        self.assertTrue(has_forward_mark,
+                        f"Expected FORWARD -i awg0 MARK rule, got: {all_cmds}")
+
+        # НЕ должно быть команды с OUTPUT и MARK одновременно
+        has_output_mark = any(
+            "OUTPUT" in c and "MARK" in c
+            for c in all_cmds
+        )
+        self.assertFalse(has_output_mark,
+                         f"OUTPUT + MARK rule found (SSH lockout bug), got: {all_cmds}")
+
+    def test_no_leftover_conntrack_output_rule(self):
+        """Regression: удалённое conntrack OUTPUT-правило отсутствует.
+
+        До фикса в списке правил было:
+          'iptables -t mangle -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT'
+        Это была компенсация для OUTPUT MARK-бага. После перехода на FORWARD
+        это правило больше не нужно.
+        """
+        from vless_installer.modules import awg_cascade
+
+        mock_core = self._mock_core()
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core):
+            awg_cascade._awgs_cascade_apply_iptables("172.16.61.0/24")
+
+        all_cmds = [" ".join(cmd) for cmd in self._run_calls]
+        all_text = "\n".join(all_cmds)
+
+        # Не должно быть conntrack в OUTPUT
+        has_conntrack_output = any(
+            "OUTPUT" in c and "conntrack" in c
+            for c in all_cmds
+        )
+        self.assertFalse(has_conntrack_output,
+                         f"Leftover conntrack OUTPUT rule found, got: {all_cmds}")
+
+    def test_forward_mark_rule_not_for_ru_networks(self):
+        """Дополнительно: FORWARD MARK правило исключает RU-сети через ipset."""
+        from vless_installer.modules import awg_cascade
+
+        mock_core = self._mock_core()
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core):
+            awg_cascade._awgs_cascade_apply_iptables("172.16.61.0/24")
+
+        all_cmds = [" ".join(cmd) for cmd in self._run_calls]
+        all_text = "\n".join(all_cmds)
+
+        # FORWARD MARK правило должно содержать ! --match-set
+        has_ipset_exclude = any(
+            "FORWARD" in c and "MARK" in c and "match-set" in c and "!" in c
+            for c in all_cmds
+        )
+        self.assertTrue(has_ipset_exclude,
+                        f"Expected ipset exclusion in FORWARD MARK rule, got: {all_cmds}")
+
 
 class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
     """_awgs_cascade_create_routing_script — генерация bash-скрипта."""
