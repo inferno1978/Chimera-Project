@@ -75,6 +75,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from vless_installer.modules.geo_mirrors import (
+    get_geosite_urls, get_geoip_urls, get_all_mirrors,
+    MANUAL_UPLOAD_PATHS, XRAY_LOOKUP_DIRS, MIN_SIZES,
+    GEO_MIRRORS_COUNT, recommended_manual_path,
+)
+
 
 # =============================================================================
 #  ОТЛОЖЕННАЯ ПРИВЯЗКА К ЯДРУ (_core.py)
@@ -1426,6 +1432,9 @@ def _geo_print_manual_download_hint() -> None:
     """
     Выводит инструкцию для ручного скачивания geosite.dat и geoip.dat
     со всеми известными зеркалами и путями размещения.
+
+    Источники зеркал и путей — vless_installer.modules.geo_mirrors
+    (единый реестр для всех точек скачивания geo-файлов).
     """
     core = _core_module()
     YELLOW, NC = core.YELLOW, core.NC
@@ -1433,30 +1442,8 @@ def _geo_print_manual_download_hint() -> None:
     CYAN, GREEN = core.CYAN, core.GREEN
     DIM = core.DIM
 
-    _GEO_MANUAL = {
-        "geosite.dat": [
-            "https://cdn.jsdelivr.net/gh/runetfreedom/russia-v2ray-rules-dat@release/geosite.dat",
-            "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat",
-            "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-            "https://ghproxy.net/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-            "https://ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-            "https://mirror.ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-            "https://gh.con.sh/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-            "https://hub.gitmirror.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-            "https://github.moeyy.xyz/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        ],
-        "geoip.dat": [
-            "https://cdn.jsdelivr.net/gh/runetfreedom/russia-v2ray-rules-dat@release/geoip.dat",
-            "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat",
-            "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-            "https://ghproxy.net/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-            "https://ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-            "https://mirror.ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-            "https://gh.con.sh/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-            "https://hub.gitmirror.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-            "https://github.moeyy.xyz/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        ],
-    }
+    _GEO_MANUAL = get_all_mirrors()  # {"geosite.dat": [urls], "geoip.dat": [urls]}
+
     sep = f"{YELLOW}{'─'*64}{NC}"
     print()
     print(sep)
@@ -1465,24 +1452,31 @@ def _geo_print_manual_download_hint() -> None:
     print(sep)
     print()
     for fname, urls in _GEO_MANUAL.items():
-        print(f"{CYAN}📦  {fname}:{NC}")
+        print(f"{CYAN}📦  {fname}  {DIM}({len(urls)} зеркал){NC}")
         for i, url in enumerate(urls, 1):
-            print(f"    {DIM}{i}){NC} {url}")
+            print(f"    {DIM}{i:>2}){NC} {url}")
         print()
 
+    # Пути ручного размещения — первый (рекомендуемый) подсвечен зелёным
     print(f"{CYAN}📂  Разместите файлы в ОДНО из следующих мест:{NC}")
-    print(f"    {BOLD}{GREEN}/root/geosite.dat{NC}  и  {BOLD}{GREEN}/root/geoip.dat{NC}  ← рекомендуется")
-    print(f"    {BOLD}/usr/local/share/xray/{NC}")
-    print(f"    {BOLD}/etc/xray/{NC}")
-    print(f"    {BOLD}/usr/local/etc/xray/{NC}")
+    recommended = recommended_manual_path()
+    for i, p in enumerate(MANUAL_UPLOAD_PATHS):
+        if p == recommended:
+            print(f"    {BOLD}{GREEN}{p}/{NC}  {BOLD}{GREEN}← рекомендуется (WinSCP-friendly){NC}")
+        else:
+            print(f"    {BOLD}{p}/{NC}")
     print()
-    print(f"{WHITE}💡  Команда для скачивания (выполните в другом окне/на другом ПК):{NC}")
-    _geo_site_url = _GEO_MANUAL['geosite.dat'][3]
-    _geo_ip_url = _GEO_MANUAL['geoip.dat'][3]
-    print(f"    {DIM}curl -L \"{_geo_site_url}\" -o /root/geosite.dat{NC}")
-    print(f"    {DIM}curl -L \"{_geo_ip_url}\" -o /root/geoip.dat{NC}")
-    print(f"    {DIM}# Или SCP с вашего ПК:{NC}")
-    print(f"    {DIM}scp geosite.dat geoip.dat root@<IP>:/root/{NC}")
+    print(f"{WHITE}💡  Команда для скачивания на сервере (через любое живое зеркало):{NC}")
+    # Берём первое зеркало (jsDelivr CDN — обычно самое доступное)
+    _geo_site_url = _GEO_MANUAL['geosite.dat'][0]
+    _geo_ip_url = _GEO_MANUAL['geoip.dat'][0]
+    print(f"    {DIM}curl -fL \"{_geo_site_url}\" -o /root/geosite.dat{NC}")
+    print(f"    {DIM}curl -fL \"{_geo_ip_url}\"   -o /root/geoip.dat{NC}")
+    print(f"    {DIM}# Или SCP с вашего ПК (после ручного скачивания в браузере):{NC}")
+    print(f"    {DIM}scp geosite.dat geoip.dat root@<IP>:{recommended}/{NC}")
+    print()
+    print(f"{WHITE}💡  После размещения файлов в {recommended}/ повторите установку{NC}")
+    print(f"{WHITE}   или выберите в меню Geo → «Обновить прямо сейчас».{NC}")
     print()
     print(sep)
     print()
@@ -1494,10 +1488,10 @@ def _xray_update_geo_runetfreedom() -> bool:
     во ВСЕ директории где Xray ищет geo-файлы.
     При неудаче — предлагает ручное размещение файлов.
     Возвращает True если geosite.dat скачан и установлен успешно.
+
+    Источник зеркал — vless_installer.modules.geo_mirrors (единый реестр).
     """
     core = _core_module()
-    GEOSITE_URL = core.GEOSITE_URL
-    GEOIP_URL   = core.GEOIP_URL
     info    = core.info
     DIM, NC = core.DIM, core.NC
     _run    = core._run
@@ -1505,33 +1499,13 @@ def _xray_update_geo_runetfreedom() -> bool:
     CYAN    = core.CYAN
     success = core.success
 
-    # Все известные зеркала — jsDelivr идёт первым (лучше доступен с РФ)
-    GEOSITE_URLS = [
-        "https://cdn.jsdelivr.net/gh/runetfreedom/russia-v2ray-rules-dat@release/geosite.dat",
-        GEOSITE_URL,  # raw.githubusercontent.com
-        "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://ghproxy.net/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://mirror.ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://gh.con.sh/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://hub.gitmirror.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://github.moeyy.xyz/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-    ]
-    GEOIP_URLS = [
-        "https://cdn.jsdelivr.net/gh/runetfreedom/russia-v2ray-rules-dat@release/geoip.dat",
-        GEOIP_URL,    # raw.githubusercontent.com
-        "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://ghproxy.net/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://mirror.ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://gh.con.sh/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://hub.gitmirror.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://github.moeyy.xyz/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-    ]
+    # Зеркала импортируются из единого реестра (geo_mirrors.py)
+    GEOSITE_URLS = get_geosite_urls()
+    GEOIP_URLS   = get_geoip_urls()
 
-    # Выводим ссылки в терминал
+    # Выводим ссылки в терминал (первые 4 зеркала для краткости)
     print()
-    info("  Ссылки для скачивания geo-файлов:")
+    info(f"  Ссылки для скачивания geo-файлов (всего зеркал: {GEO_MIRRORS_COUNT}):")
     print(f"  {DIM}geosite.dat:{NC}")
     for url in GEOSITE_URLS[:4]:
         print(f"    {DIM}{url}{NC}")
@@ -1542,12 +1516,7 @@ def _xray_update_geo_runetfreedom() -> bool:
 
     # Все директории где Xray ищет geo-файлы
     xray_bin = shutil.which("xray") or "/usr/local/bin/xray"
-    dest_dirs_raw = [
-        Path("/usr/local/share/xray"),
-        Path("/etc/xray"),
-        Path("/usr/local/etc/xray"),
-        Path(xray_bin).parent,
-    ]
+    dest_dirs_raw = list(XRAY_LOOKUP_DIRS) + [Path(xray_bin).parent]
     seen: set = set()
     geo_dirs = []
     for d in dest_dirs_raw:
@@ -1560,15 +1529,16 @@ def _xray_update_geo_runetfreedom() -> bool:
                 if d.exists():
                     geo_dirs.append(d)
 
-    # Пути ручного размещения — /root/ проверяем тоже
-    _MANUAL_ROOTS = [Path("/root")]
+    # Пути ручного размещения — из единого реестра
+    # (/root/ — первое, рекомендуется; плюс все Xray lookup dirs)
+    _MANUAL_ROOTS = list(MANUAL_UPLOAD_PATHS)
 
     geosite_ok = False
     failed_files: list[str] = []
 
     for urls, fname, min_size in (
-        (GEOSITE_URLS, "geosite.dat", 3_000_000),
-        (GEOIP_URLS,   "geoip.dat",   10_000),
+        (GEOSITE_URLS, "geosite.dat", MIN_SIZES["geosite.dat"]),
+        (GEOIP_URLS,   "geoip.dat",   MIN_SIZES["geoip.dat"]),
     ):
         tmp = Path(f"/tmp/runet_{fname}")
         downloaded = False
@@ -1644,7 +1614,10 @@ def _xray_update_geo_runetfreedom() -> bool:
             ans = "n"
         if ans != "n":
             # Повторная проверка наличия файлов вручную
-            for fname, min_size in (("geosite.dat", 3_000_000), ("geoip.dat", 10_000)):
+            for fname, min_size in (
+                ("geosite.dat", MIN_SIZES["geosite.dat"]),
+                ("geoip.dat",   MIN_SIZES["geoip.dat"]),
+            ):
                 if fname not in failed_files:
                     continue
                 for manual_dir in _MANUAL_ROOTS + geo_dirs:

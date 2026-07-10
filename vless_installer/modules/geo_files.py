@@ -3,14 +3,16 @@ vless_installer/modules/geo_files.py
 ───────────────────────────────────────────────────────────────────────────────
 Загрузка и обновление geosite.dat / geoip.dat для split tunneling.
 
-  • download_geo_files()      — скачивает с runetfreedom (с 8 зеркал-фолбэков),
-                                 проверяет min size, копирует в /etc/xray,
-                                 /usr/local/share/xray, /usr/local/etc/xray.
+  • download_geo_files()      — скачивает (через vless_installer.modules.geo_mirrors,
+                                 14 зеркал-фолбэков), проверяет min size, копирует
+                                 в /etc/xray, /usr/local/share/xray, /usr/local/etc/xray.
                                  Поддерживает ручное размещение в /root/.
   • setup_geo_autoupdate()    — cron every Sunday 03:00 + bash-скрипт с
-                                 restart xray+nginx (для REALITY+Unix-сокет).
+                                 multi-mirror fallback и restart xray+nginx
+                                 (для REALITY+Unix-сокет).
   • do_manage_geo_update()    — меню: обновить сейчас / вкл-выкл cron /
-                                 показать лог. Мутирует SPLIT_TUNNEL_ENABLED
+                                 показать лог / показать ссылки для ручного
+                                 скачивания. Мутирует SPLIT_TUNNEL_ENABLED
                                  в _core (через setattr, для форсирования
                                  загрузки).
 
@@ -29,6 +31,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from vless_installer.modules.geo_mirrors import (
+    get_geosite_urls, get_geoip_urls,
+    MANUAL_UPLOAD_PATHS, XRAY_LOOKUP_DIRS, MIN_SIZES,
+    GEO_MIRRORS_COUNT,
+)
+
 
 # ── Ленивый доступ к ядру ────────────────────────────────────────────────────
 def _core_module():
@@ -41,7 +49,7 @@ def _core_module():
 #  ЗАГРУЗКА GEO-ФАЙЛОВ
 # ============================================================================
 def download_geo_files() -> bool:
-    """Скачивает актуальные geosite.dat и geoip.dat с runetfreedom.
+    """Скачивает актуальные geosite.dat и geoip.dat через реестр зеркал.
 
     FIX: Xray ищет dat-файлы в нескольких местах (/etc/xray/ и /usr/local/share/xray/).
     Официальный установщик XTLS кладёт их только в /usr/local/share/xray/, поэтому
@@ -57,11 +65,9 @@ def download_geo_files() -> bool:
     CONFIG_DIR  = core.CONFIG_DIR
     GEOSITE_DAT = core.GEOSITE_DAT
     GEOIP_DAT   = core.GEOIP_DAT
-    GEOSITE_URL = core.GEOSITE_URL
-    GEOIP_URL   = core.GEOIP_URL
     CYAN, NC, DIM = core.CYAN, core.NC, core.DIM
 
-    info("Загрузка geosite.dat и geoip.dat (runetfreedom)...")
+    info(f"Загрузка geosite.dat и geoip.dat (через {GEO_MIRRORS_COUNT} зеркал)...")
     info("  (первый запуск может занять 1–3 мин — скачивается ~30 МБ)")
 
     # Гарантируем наличие обеих директорий
@@ -70,48 +76,28 @@ def download_geo_files() -> bool:
     for d in (CONFIG_DIR, XRAY_SHARE_DIR, XRAY_ETC_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
-    # Все известные зеркала
-    GEOSITE_URLS = [
-        "https://cdn.jsdelivr.net/gh/runetfreedom/russia-v2ray-rules-dat@release/geosite.dat",
-        GEOSITE_URL,
-        "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://ghproxy.net/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://mirror.ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://gh.con.sh/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://hub.gitmirror.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-        "https://github.moeyy.xyz/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat",
-    ]
-    GEOIP_URLS = [
-        "https://cdn.jsdelivr.net/gh/runetfreedom/russia-v2ray-rules-dat@release/geoip.dat",
-        GEOIP_URL,
-        "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://ghproxy.net/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://mirror.ghproxy.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://gh.con.sh/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://hub.gitmirror.com/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-        "https://github.moeyy.xyz/https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat",
-    ]
+    # Зеркала импортируются из единого реестра (geo_mirrors.py)
+    GEOSITE_URLS = get_geosite_urls()
+    GEOIP_URLS   = get_geoip_urls()
 
     print()
-    info("  Зеркала geosite.dat:")
+    info("  Зеркала geosite.dat (первые 4 из списка):")
     for url in GEOSITE_URLS[:4]:
         print(f"    {DIM}{url}{NC}")
-    info("  Зеркала geoip.dat:")
+    info("  Зеркала geoip.dat (первые 4 из списка):")
     for url in GEOIP_URLS[:4]:
         print(f"    {DIM}{url}{NC}")
     print()
 
     dest_dirs = [CONFIG_DIR, XRAY_SHARE_DIR, XRAY_ETC_DIR]
-    _MANUAL_ROOTS = [Path("/root")]
+    _MANUAL_ROOTS = MANUAL_UPLOAD_PATHS  # /root/ — первое, рекомендуется
 
     success_count = 0
     failed_files: list[str] = []
 
     for urls, fname, min_size in (
-        (GEOSITE_URLS, "geosite.dat", 3_000_000),
-        (GEOIP_URLS,   "geoip.dat",   10_000),
+        (GEOSITE_URLS, "geosite.dat", MIN_SIZES["geosite.dat"]),
+        (GEOIP_URLS,   "geoip.dat",   MIN_SIZES["geoip.dat"]),
     ):
         info(f"  Загрузка {fname}...")
         tmp_path = Path(f"/tmp/{fname}")
@@ -187,7 +173,10 @@ def download_geo_files() -> bool:
         except (EOFError, KeyboardInterrupt):
             ans = "n"
         if ans != "n":
-            for fname, min_size in (("geosite.dat", 3_000_000), ("geoip.dat", 10_000)):
+            for fname, min_size in (
+                ("geosite.dat", MIN_SIZES["geosite.dat"]),
+                ("geoip.dat",   MIN_SIZES["geoip.dat"]),
+            ):
                 if fname not in failed_files:
                     continue
                 for manual_dir in _MANUAL_ROOTS + dest_dirs:
@@ -222,55 +211,102 @@ def download_geo_files() -> bool:
 #  АВТООБНОВЛЕНИЕ GEO-ФАЙЛОВ (cron)
 # ============================================================================
 def setup_geo_autoupdate() -> None:
-    """Создаёт cron-задачу для еженедельного обновления geo-файлов."""
+    """Создаёт cron-задачу для еженедельного обновления geo-файлов.
+
+    FIX (multi-mirror): ранее cron-скрипт использовал ОДИН URL
+    (raw.githubusercontent.com), что приводит к тихому провалу
+    еженедельного обновления на серверах, где GitHub заблокирован.
+    Теперь в скрипт встраивается весь список зеркал из geo_mirrors.py
+    и bash-функция download_file() перебирает их по очереди.
+    """
     core = _core_module()
     success = core.success
     warn    = core.warn
     SPLIT_TUNNEL_ENABLED = getattr(core, "SPLIT_TUNNEL_ENABLED", False)
     GEOSITE_DAT = core.GEOSITE_DAT
     GEOIP_DAT   = core.GEOIP_DAT
-    GEOSITE_URL = core.GEOSITE_URL
-    GEOIP_URL   = core.GEOIP_URL
 
     if not SPLIT_TUNNEL_ENABLED:
         return
+
+    # Получаем списки зеркал из единого реестра
+    geosite_urls = get_geosite_urls()
+    geoip_urls   = get_geoip_urls()
+
+    # Формируем bash-массивы зеркал (с экранированием кавычек)
+    geosite_urls_bash = "\n".join(f'        "{u}"' for u in geosite_urls)
+    geoip_urls_bash   = "\n".join(f'        "{u}"' for u in geoip_urls)
 
     script = Path("/usr/local/bin/xray-geo-update.sh")
     script.write_text(textwrap.dedent(f"""\
         #!/bin/bash
         # Автообновление geosite/geoip для split tunneling (runetfreedom)
-        set -euo pipefail
+        # Multi-mirror fallback: перебирает {GEO_MIRRORS_COUNT} зеркал по очереди.
+        set -uo pipefail
         LOG="/var/log/xray-geo-update.log"
         DATE=$(date '+%Y-%m-%d %H:%M:%S')
-        echo "[$DATE] Обновление geo-файлов..." >> "$LOG"
+        echo "[$DATE] Обновление geo-файлов (попытка {GEO_MIRRORS_COUNT} зеркал)..." >> "$LOG"
 
         # FIX: гарантируем наличие обеих директорий
-        mkdir -p /etc/xray /usr/local/share/xray
+        mkdir -p /etc/xray /usr/local/share/xray /usr/local/etc/xray
+
+        # Минимальные размеры (защита от усечённых загрузок)
+        GEOSITE_MIN=3000000
+        GEOIP_MIN=10000
+
+        # Bash-массивы зеркал (генерируются из vless_installer.modules.geo_mirrors)
+        GEOSITE_URLS=(
+{geosite_urls_bash}
+        )
+        GEOIP_URLS=(
+{geoip_urls_bash}
+        )
 
         download_file() {{
-            local url="$1" dest_etc="$2" dest_share="$3" name="$4"
+            local name="$1" dest_etc="$2" dest_share="$3" dest_etc3="$4" min_size="$5"
+            shift 5
+            local urls=("$@")
             local tmp="/tmp/${{name}}.tmp"
-            if curl -fsSL --connect-timeout 30 -m 120 --retry 3 -o "$tmp" "$url"; then
-                SIZE=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
-                if [ "$SIZE" -gt 10000 ]; then
-                    # FIX: копируем в обе директории, где Xray ищет dat-файлы
-                    cp "$tmp" "$dest_etc"
-                    cp "$tmp" "$dest_share"
-                    chmod 644 "$dest_etc" "$dest_share"
-                    chown root:xray "$dest_etc" "$dest_share" 2>/dev/null || true
-                    rm -f "$tmp"
-                    echo "[$DATE] ✓ $name обновлён ($(($SIZE / 1024)) КБ)" >> "$LOG"
+
+            # 1) Сначала проверяем ручное размещение в /root/ (WinSCP-friendly)
+            if [ -f "/root/$name" ]; then
+                local rsize=$(stat -c%s "/root/$name" 2>/dev/null || echo 0)
+                if [ "$rsize" -ge "$min_size" ]; then
+                    cp "/root/$name" "$dest_etc" "$dest_share" "$dest_etc3" 2>/dev/null || \\
+                        cp "/root/$name" "$dest_etc" && cp "/root/$name" "$dest_share" && cp "/root/$name" "$dest_etc3"
+                    chmod 644 "$dest_etc" "$dest_share" "$dest_etc3" 2>/dev/null || true
+                    chown root:xray "$dest_etc" "$dest_share" "$dest_etc3" 2>/dev/null || true
+                    echo "[$DATE] ✓ $name взят из /root/ ($((rsize / 1024)) КБ)" >> "$LOG"
                     return 0
                 fi
             fi
+
+            # 2) Перебираем зеркала по очереди
+            for url in "${{urls[@]}}"; do
+                rm -f "$tmp"
+                if curl -fsSL --connect-timeout 20 -m 120 --retry 1 -o "$tmp" "$url" 2>/dev/null; then
+                    local sz=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
+                    if [ "$sz" -ge "$min_size" ]; then
+                        cp "$tmp" "$dest_etc"
+                        cp "$tmp" "$dest_share"
+                        cp "$tmp" "$dest_etc3" 2>/dev/null || true
+                        chmod 644 "$dest_etc" "$dest_share" "$dest_etc3" 2>/dev/null || true
+                        chown root:xray "$dest_etc" "$dest_share" "$dest_etc3" 2>/dev/null || true
+                        rm -f "$tmp"
+                        local host=$(echo "$url" | sed -E 's|https?://([^/]+)/.*|\\1|')
+                        echo "[$DATE] ✓ $name обновлён с $host ($((sz / 1024)) КБ)" >> "$LOG"
+                        return 0
+                    fi
+                fi
+            done
             rm -f "$tmp"
-            echo "[$DATE] ✗ Не удалось обновить $name" >> "$LOG"
+            echo "[$DATE] ✗ Не удалось обновить $name (все зеркала недоступны)" >> "$LOG"
             return 1
         }}
 
         CHANGED=0
-        download_file "{GEOSITE_URL}" "{GEOSITE_DAT}" "/usr/local/share/xray/geosite.dat" "geosite.dat" && CHANGED=1
-        download_file "{GEOIP_URL}"   "{GEOIP_DAT}"   "/usr/local/share/xray/geoip.dat"   "geoip.dat"   && CHANGED=1
+        download_file "geosite.dat" "{GEOSITE_DAT}" "/usr/local/share/xray/geosite.dat" "/usr/local/etc/xray/geosite.dat" "$GEOSITE_MIN" "${{GEOSITE_URLS[@]}}" && CHANGED=1
+        download_file "geoip.dat"   "{GEOIP_DAT}"   "/usr/local/share/xray/geoip.dat"   "/usr/local/etc/xray/geoip.dat"   "$GEOIP_MIN"   "${{GEOIP_URLS[@]}}"   && CHANGED=1
 
         if [ "$CHANGED" = "1" ]; then
             # Xray 26.x не поддерживает горячий reload через SIGHUP —
@@ -308,9 +344,9 @@ def setup_geo_autoupdate() -> None:
     cron_line = f"0 3 * * 0 root {script}\n"
     cron_file = Path("/etc/cron.d/xray-geo-update")
     try:
-        cron_file.write_text(f"# Автообновление geo-файлов для Xray split tunneling\n{cron_line}")
+        cron_file.write_text(f"# Автообновление geo-файлов для Xray split tunneling (multi-mirror)\n{cron_line}")
         cron_file.chmod(0o644)
-        success("Автообновление geo-файлов: каждое воскресенье в 03:00")
+        success(f"Автообновление geo-файлов: каждое воскресенье в 03:00 ({GEO_MIRRORS_COUNT} зеркал в fallback)")
     except Exception as e:
         warn(f"Не удалось создать cron для geo-файлов: {e}")
 
@@ -366,9 +402,11 @@ def do_manage_geo_update() -> None:
 
         cron_active = cron_path.exists()
         _box_row(f"  Авто-обновление:  {''+GREEN+'ВКЛЮЧЕНО'+NC if cron_active else ''+YELLOW+'ОТКЛЮЧЕНО'+NC}")
+        _box_row(f"  Зеркал в fallback: {GREEN}{GEO_MIRRORS_COUNT}{NC}")
         _box_item("1", f"Обновить geo-файлы прямо сейчас")
         _box_item("2", f"{'Отключить' if cron_active else 'Включить'} еженедельное авто-обновление (cron)")
         _box_item("3", f"Показать лог обновлений")
+        _box_item("4", f"Показать ссылки для ручного скачивания (WinSCP/scp)")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -429,6 +467,17 @@ def do_manage_geo_update() -> None:
                 _box_bottom()
             else:
                 warn("Лог /var/log/xray-geo-update.log не найден (обновлений ещё не было)")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "4":
+            # Показываем все зеркала и пути ручного размещения.
+            # Дублирует _geo_print_manual_download_hint, но доступно
+            # ПРОАКТИВНО (без ожидания ошибки загрузки).
+            try:
+                _geo_print_manual_download_hint = core._geo_print_manual_download_hint
+                _geo_print_manual_download_hint()
+            except Exception as _e:
+                warn(f"Не удалось показать подсказку: {_e}")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch in ("q", "Q", ""):
