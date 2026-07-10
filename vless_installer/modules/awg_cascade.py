@@ -240,6 +240,12 @@ def _awgs_cascade_build_awg1_conf(
         f"PrivateKey = {client_privkey}",
         f"Address = {client_ip}",
         f"MTU = {state.get('mtu', 1280)}",
+        # Table = off — КРИТИЧЕСКИ важно для каскада: awg-quick НЕ должен
+        # автоматически создавать маршрут 0.0.0.0/0 dev awg1, иначе весь
+        # трафик сервера (включая SSH-ответы) уходит через туннель и
+        # сессия обрывается. Маршрутизация управляется через iptables +
+        # policy routing (table 2000, fwmark) в _awgs_cascade_apply_iptables.
+        "Table = off",
         # Параметры обфускации (должны совпадать с сервером AWG1)
         f"Jc = {params.get('jc', 4)}",
         f"Jmin = {params.get('jmin', 40)}",
@@ -278,11 +284,10 @@ def _awgs_cascade_apply_iptables(exit_subnet: str) -> bool:
         # (через `ip route add default dev awg1 table 2000`)
         # Но проще: policy routing по fwmark
 
-        # mark весь исходящий трафик, кроме RU
-        f"iptables -t mangle -A OUTPUT -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
-
-        # Сохранение соединений (connection tracking)
-        "iptables -t mangle -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+        # mark трафик от клиентов awg0 (НЕ весь OUTPUT сервера!), кроме RU
+        # Используем -i awg0 в FORWARD (не OUTPUT), чтобы не маркировать
+        # собственный трафик сервера (SSH-ответы и т.п.)
+        f"iptables -t mangle -A FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
 
         # NAT для выхода через awg1
         f"iptables -t nat -A POSTROUTING -o awg1 -j MASQUERADE",
