@@ -42,6 +42,8 @@ fallback через:
 
 from __future__ import annotations
 
+from vless_installer.modules.text_width import wlen as _wlen, plain as _plain
+
 import re
 import socket
 import subprocess
@@ -1059,15 +1061,9 @@ def me_probe_menu(config_file: Path = _CONFIG_FILE) -> FallbackConfig:
     current = read_fallback_config()
 
     _BOX_W = 66
-    def _plain(s: str) -> str:
-        return re.sub(r'\033\[[0-9;]*m', '', s)
-    def _wlen(s: str) -> int:
-        import unicodedata as _ud
-        plain = _plain(s); width = 0
-        for ch in list(plain):
-            eaw = _ud.east_asian_width(ch)
-            width += 2 if eaw in ('W', 'F') else 1
-        return width
+
+    # Локальные box-drawing хелперы (используют модульный _wlen из text_width).
+    # Ранее здесь была своя копия _wlen() — мигрирована в vless_installer.modules.text_width.
     def _box_row(text: str = "") -> None:
         pad = max(0, _BOX_W - _wlen(text))
         print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
