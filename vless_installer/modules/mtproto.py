@@ -1471,7 +1471,7 @@ def _select_domain() -> str:
                     _box_item(str(i), d)
             if any_marked:
                 _box_row()
-                _box_row(f"  {DIM}{RED}[!]{NC}{DIM} возможен блок iOS без OpenSSL 3.5+, "
+                _box_row(f"  {DIM}{RED}возможен блок iOS без OpenSSL 3.5+, "
                          f"{GREEN}✓{NC}{DIM} подтверждено (не проверено нами){NC}")
             _box_sep(); _box_item("Q", "← Назад"); _box_bot(); print()
             p = proto_ask(f"{CYAN}Выбор [1-{len(doms)}]: {NC}", c=True).strip()
