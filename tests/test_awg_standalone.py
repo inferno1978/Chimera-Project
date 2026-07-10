@@ -251,8 +251,9 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
         # сообщение содержит новые значения
         self.assertIn("Jc=", msg)
 
-    def test_returns_false_when_syncconf_fails(self):
-        """syncconf не удался → fallback на restart → False."""
+    def test_returns_false_when_apply_fails(self):
+        """Apply зафейлился (syncconf + restart оба провалились) → False,
+        state НЕ обновлён, сообщение честно говорит о неудаче."""
         from vless_installer.modules import awg_standalone
 
         mock_core = self._mock_core()
@@ -268,13 +269,18 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
                           return_value=True), \
              patch.object(awg_standalone, "awgs_state_load",
                           return_value=state), \
-             patch("vless_installer.modules.awg_state.awgs_state_update"), \
+             patch("vless_installer.modules.awg_state.awgs_state_update") as mock_update, \
              patch("vless_installer.modules.awg_peers.awg_peer_rebuild_conf",
                           return_value=False):
             ok, msg = awg_standalone.awgs_rotate_obfuscation("default")
 
         self.assertFalse(ok)
+        # Сообщение честно говорит о неудаче обоих методов
         self.assertIn("syncconf", msg.lower())
+        self.assertIn("restart", msg.lower())
+        self.assertIn("ручное", msg.lower())
+        # state НЕ обновлён при неудаче apply
+        mock_update.assert_not_called()
 
     def test_uses_current_preset_when_not_specified(self):
         """Пустой preset_name → используется carrier_preset из state."""
