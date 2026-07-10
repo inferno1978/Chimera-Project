@@ -98,6 +98,64 @@ class TestBuildServerConfig(unittest.TestCase):
         self.assertEqual(cfg["loggingLevel"], "INFO")
         self.assertEqual(cfg["mtu"], 1400)
 
+    # ── Фича 1: trafficPattern в server config ──────────────────────────────
+
+    def test_traffic_pattern_added_when_provided(self):
+        """_build_server_config с traffic_pattern → cfg["trafficPattern"] present."""
+        from vless_installer.modules.mieru import _build_server_config
+        tp = {"nonce": {"type": "NONCE_TYPE_PRINTABLE"}}
+        cfg = _build_server_config([], 2012, 2022, "TCP", traffic_pattern=tp)
+        self.assertIn("trafficPattern", cfg)
+        self.assertEqual(cfg["trafficPattern"], tp)
+
+    def test_traffic_pattern_omitted_when_none(self):
+        """_build_server_config без traffic_pattern → нет поля trafficPattern."""
+        from vless_installer.modules.mieru import _build_server_config
+        cfg = _build_server_config([], 2012, 2022, "TCP")
+        self.assertNotIn("trafficPattern", cfg)
+
+    def test_traffic_pattern_omitted_when_none_explicit(self):
+        """_build_server_config с traffic_pattern=None → нет поля."""
+        from vless_installer.modules.mieru import _build_server_config
+        cfg = _build_server_config([], 2012, 2022, "TCP", traffic_pattern=None)
+        self.assertNotIn("trafficPattern", cfg)
+
+
+class TestMieruTrafficPresets(unittest.TestCase):
+    """_MIERU_TRAFFIC_PRESETS — структура пресетов для server config."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_has_4_presets(self):
+        from vless_installer.modules.mieru import _MIERU_TRAFFIC_PRESETS
+        for name in ("disabled", "basic", "medium", "aggressive"):
+            self.assertIn(name, _MIERU_TRAFFIC_PRESETS)
+
+    def test_each_preset_has_label_description_config(self):
+        from vless_installer.modules.mieru import _MIERU_TRAFFIC_PRESETS
+        for name, preset in _MIERU_TRAFFIC_PRESETS.items():
+            with self.subTest(preset=name):
+                self.assertIn("label", preset)
+                self.assertIn("description", preset)
+                self.assertIn("config", preset)
+
+    def test_disabled_has_none_config(self):
+        from vless_installer.modules.mieru import _MIERU_TRAFFIC_PRESETS
+        self.assertIsNone(_MIERU_TRAFFIC_PRESETS["disabled"]["config"])
+
+    def test_basic_has_nonce(self):
+        from vless_installer.modules.mieru import _MIERU_TRAFFIC_PRESETS
+        cfg = _MIERU_TRAFFIC_PRESETS["basic"]["config"]
+        self.assertIn("nonce", cfg)
+
+    def test_aggressive_has_all_fields(self):
+        from vless_installer.modules.mieru import _MIERU_TRAFFIC_PRESETS
+        cfg = _MIERU_TRAFFIC_PRESETS["aggressive"]["config"]
+        self.assertIn("nonce", cfg)
+        self.assertIn("tcpFragment", cfg)
+        self.assertIn("padding", cfg)
+
 
 class TestGenSingboxOutbound(unittest.TestCase):
     """_gen_singbox_outbound — генерация sing-box outbound."""
