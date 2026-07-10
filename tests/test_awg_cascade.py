@@ -9,6 +9,9 @@ Unit-тесты для vless_installer/modules/awg_cascade.py.
   2. _awgs_cascade_create_routing_script — генерация bash-скрипта
   3. _awgs_cascade_create_systemd_unit — генерация systemd-unit
   4. _awgs_cascade_setup_cron — генерация cron-файла
+  5. awgs_cascade_setup_awg1 — regression: NameError на голом NC (core.NC fix)
+  6. _awgs_cascade_status — smoke: нет NameError на цветовые переменные
+  7. do_manage_awg_cascade — smoke: нет NameError в TUI (mock input → 'q')
 """
 from __future__ import annotations
 
@@ -217,6 +220,254 @@ class TestAwgsCascadeSetupCron(unittest.TestCase):
             _awgs_cascade_setup_cron()
         mode = stat.S_IMODE(os.stat(self._cron).st_mode)
         self.assertEqual(mode, 0o644)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+#  Regression: awgs_cascade_setup_awg1 — NameError на голом NC
+# ────────────────────────────────────────────────────────────────────────────
+
+def _mock_core_for_cascade():
+    """Создаёт mock core с цветами и box-функциями для awg_cascade."""
+    core = MagicMock()
+    # Цвета как пустые строки (non-tty режим)
+    for attr in ("GREEN", "NC", "RED", "YELLOW", "CYAN", "BLUE", "DIM", "BOLD"):
+        setattr(core, attr, "")
+    # Box-функции — no-op
+    for attr in ("_box_top", "_box_row", "_box_sep", "_box_bottom",
+                 "_box_item", "_box_desc", "_box_wrap_msg"):
+        setattr(core, attr, MagicMock())
+    # info/success/warn — no-op
+    for attr in ("info", "success", "warn", "error", "log_to_file"):
+        setattr(core, attr, MagicMock())
+    # _run для systemctl/ipset — возвращает неактивный статус
+    run_result = MagicMock()
+    run_result.returncode = 1
+    run_result.stdout = ""
+    run_result.stderr = ""
+    core._run = MagicMock(return_value=run_result)
+    return core
+
+
+class TestAwgsCascadeSetupAwg1(unittest.TestCase):
+    """awgs_cascade_setup_awg1 — regression: NameError на голом NC.
+
+    До фикса (коммит 86a5b97) переменная NC использовалась в f-string без
+    префикса core. — NameError при каждом вызове функции после успешной
+    настройки AWG1. Заменено на core.NC.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_runs_without_nameerror(self):
+        """Функция отрабатывает без NameError — главный regression-тест.
+
+        Мокаются все внешние вызовы: awgs_state_is_installed (True → skip
+        install), awg_peer_add (True), awgs_state_set_cascade_role (no-op),
+        awgs_state_load (returns state), awgs_state_peer_find (returns peer),
+        core._box_* (no-op), core.info/success (no-op).
+        """
+        from vless_installer.modules import awg_cascade
+
+        mock_core = _mock_core_for_cascade()
+
+        state = {
+            "installed": True,
+            "endpoint": "1.2.3.4",
+            "port": 51820,
+            "server_pubkey": "AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDD" * 2,
+            "subnet": "10.66.66.0/24",
+        }
+        peer = {"name": "cascade_entry", "client_ip": "10.66.66.2/32"}
+
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(awg_cascade, "awgs_state_is_installed", return_value=True), \
+             patch.object(awg_cascade, "awg_peer_add", return_value=True), \
+             patch.object(awg_cascade, "awgs_state_set_cascade_role"), \
+             patch.object(awg_cascade, "awgs_state_load", return_value=state), \
+             patch("vless_installer.modules.awg_state.awgs_state_peer_find", return_value=peer), \
+             patch("vless_installer.modules.awg_state.awgs_state_peer_remove"), \
+             patch("builtins.print"):
+            # Не должно поднять NameError или любое другое исключение
+            result = awg_cascade.awgs_cascade_setup_awg1()
+
+        self.assertTrue(result)
+
+    def test_box_row_called_with_core_nc_not_bare_nc(self):
+        """core._box_row вызывается — проверяем что core.NC доступен.
+
+        Если NC не определена, f-string внутри awgs_cascade_setup_awg1
+        поднимет NameError ДО вызова _box_row. Тест проверяет что
+        _box_row действительно вызывается (значит f-string отработал).
+        """
+        from vless_installer.modules import awg_cascade
+
+        mock_core = _mock_core_for_cascade()
+
+        state = {
+            "installed": True,
+            "endpoint": "1.2.3.4",
+            "port": 51820,
+            "server_pubkey": "PUBKEY",
+            "subnet": "10.66.66.0/24",
+        }
+        peer = {"name": "cascade_entry", "client_ip": "10.66.66.2/32"}
+
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(awg_cascade, "awgs_state_is_installed", return_value=True), \
+             patch.object(awg_cascade, "awg_peer_add", return_value=True), \
+             patch.object(awg_cascade, "awgs_state_set_cascade_role"), \
+             patch.object(awg_cascade, "awgs_state_load", return_value=state), \
+             patch("vless_installer.modules.awg_state.awgs_state_peer_find", return_value=peer), \
+             patch("vless_installer.modules.awg_state.awgs_state_peer_remove"), \
+             patch("builtins.print"):
+            awg_cascade.awgs_cascade_setup_awg1()
+
+        # _box_row должен был вызваться (минимум 5 раз для вывода данных AWG0)
+        self.assertGreaterEqual(mock_core._box_row.call_count, 5)
+
+    def test_box_row_contains_endpoint_value(self):
+        """В выводе _box_row присутствует значение endpoint из state."""
+        from vless_installer.modules import awg_cascade
+
+        mock_core = _mock_core_for_cascade()
+
+        state = {
+            "installed": True,
+            "endpoint": "5.6.7.8",
+            "port": 9999,
+            "server_pubkey": "TESTPUBKEY",
+            "subnet": "10.66.66.0/24",
+        }
+        peer = {"name": "cascade_entry", "client_ip": "10.66.66.5/32"}
+
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(awg_cascade, "awgs_state_is_installed", return_value=True), \
+             patch.object(awg_cascade, "awg_peer_add", return_value=True), \
+             patch.object(awg_cascade, "awgs_state_set_cascade_role"), \
+             patch.object(awg_cascade, "awgs_state_load", return_value=state), \
+             patch("vless_installer.modules.awg_state.awgs_state_peer_find", return_value=peer), \
+             patch("vless_installer.modules.awg_state.awgs_state_peer_remove"), \
+             patch("builtins.print"):
+            awg_cascade.awgs_cascade_setup_awg1()
+
+        # Проверяем что endpoint, port, subnet и client_ip попали в вывод
+        all_calls = " ".join(str(c) for c in mock_core._box_row.call_args_list)
+        self.assertIn("5.6.7.8", all_calls)
+        self.assertIn("9999", all_calls)
+        self.assertIn("10.66.66.0/24", all_calls)
+        self.assertIn("10.66.66.5", all_calls)
+
+    def test_returns_false_when_peer_add_fails(self):
+        """Если awg_peer_add возвращает False — функция возвращает False."""
+        from vless_installer.modules import awg_cascade
+
+        mock_core = _mock_core_for_cascade()
+
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(awg_cascade, "awgs_state_is_installed", return_value=True), \
+             patch.object(awg_cascade, "awg_peer_add", return_value=False), \
+             patch("vless_installer.modules.awg_state.awgs_state_peer_find", return_value=None), \
+             patch("vless_installer.modules.awg_state.awgs_state_peer_remove"), \
+             patch("builtins.print"):
+            result = awg_cascade.awgs_cascade_setup_awg1()
+
+        self.assertFalse(result)
+
+
+class TestAwgsCascadeStatus(unittest.TestCase):
+    """_awgs_cascade_status — smoke: нет NameError на цветовые переменные.
+
+    Функция определяет GREEN, NC, RED, DIM, CYAN локально через core.* —
+    тест проверяет что при вызове с замоканными зависимостями не возникает
+    NameError или AttributeError.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_runs_without_nameerror_no_role(self):
+        """Нет cascade_role → выводит 'Каскад не настроен' без NameError."""
+        from vless_installer.modules import awg_cascade
+
+        mock_core = _mock_core_for_cascade()
+
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(awg_cascade, "awgs_state_load", return_value={}), \
+             patch("builtins.print"):
+            # Не должно поднять NameError
+            awg_cascade._awgs_cascade_status()
+
+        # _box_row вызывался (значит f-string с {DIM}...{NC} отработал)
+        self.assertGreater(mock_core._box_row.call_count, 0)
+
+    def test_runs_without_nameerror_entry_role(self):
+        """role='entry' → проверка systemctl/ipset без NameError."""
+        from vless_installer.modules import awg_cascade
+
+        mock_core = _mock_core_for_cascade()
+
+        state = {
+            "cascade_role": "entry",
+            "cascade_peer_host": "1.2.3.4",
+            "cascade_peer_port": 51820,
+            "cascade_subnet": "172.16.61.0/24",
+        }
+
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(awg_cascade, "awgs_state_load", return_value=state), \
+             patch("builtins.print"):
+            awg_cascade._awgs_cascade_status()
+
+        self.assertGreater(mock_core._box_row.call_count, 0)
+
+    def test_runs_without_nameerror_exit_role(self):
+        """role='exit' → проверка standalone AWG без NameError."""
+        from vless_installer.modules import awg_cascade
+
+        mock_core = _mock_core_for_cascade()
+
+        state = {"cascade_role": "exit"}
+
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(awg_cascade, "awgs_state_load", return_value=state), \
+             patch.object(awg_cascade, "awgs_service_status",
+                          return_value={"active": True, "enabled": True}), \
+             patch("vless_installer.modules.awg_state.awgs_state_peer_find",
+                          return_value={"client_ip": "10.66.66.2/32"}), \
+             patch("builtins.print"):
+            awg_cascade._awgs_cascade_status()
+
+        self.assertGreater(mock_core._box_row.call_count, 0)
+
+
+class TestDoManageAwgCascade(unittest.TestCase):
+    """do_manage_awg_cascade — smoke: нет NameError в TUI.
+
+    TUI-меню с while True + input(). Мокаем input() → 'q' для немедленного
+    выхода. Проверяем что рендеринг меню (f-string с NC/GREEN/DIM) не
+    вызывает NameError.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_menu_renders_without_nameerror(self):
+        """Меню рендерится и выходит по 'q' без NameError."""
+        from vless_installer.modules import awg_cascade
+
+        mock_core = _mock_core_for_cascade()
+
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(awg_cascade, "awgs_state_load", return_value={}), \
+             patch("builtins.input", return_value="q"), \
+             patch("os.system"), \
+             patch("builtins.print"):
+            # Не должно поднять NameError
+            awg_cascade.do_manage_awg_cascade()
+
+        # _box_top вызывался (значит меню отрендерилось)
+        self.assertGreater(mock_core._box_top.call_count, 0)
 
 
 if __name__ == "__main__":
