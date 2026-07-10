@@ -7806,11 +7806,15 @@ def main_menu() -> None:
             _box_row(f"     {DIM}Admin Panel + User Portal + REST API{NC}")
             _box_row()
             _box_sep()
+            _box_row(f"  {CYAN}T{NC}  🧪 {TITLE}Диагностические тесты{NC}")
+            _box_row(f"     {DIM}Unit-тесты по группам: AWG, Hysteria2, Mieru, Fragment, безопасность{NC}")
+            _box_row()
+            _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–16 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–16 / T / W / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -7916,6 +7920,14 @@ def main_menu() -> None:
 
         elif choice.lower() == "w":
             do_manage_web_panel()
+
+        elif choice.lower() == "t":
+            try:
+                from vless_installer.modules.test_runner import do_test_runner_menu
+                do_test_runner_menu()
+            except ImportError as _e:
+                warn(f"Модуль тестов не найден: {_e}")
+                time.sleep(2)
 
         elif choice == "0":
             print(f"{GREEN}До свидания! 👋{NC}")
