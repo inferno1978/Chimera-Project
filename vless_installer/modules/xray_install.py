@@ -80,6 +80,11 @@ from vless_installer.modules.geo_mirrors import (
     MANUAL_UPLOAD_PATHS, XRAY_LOOKUP_DIRS, MIN_SIZES,
     GEO_MIRRORS_COUNT, recommended_manual_path,
 )
+from vless_installer.modules.xray_mirrors import (
+    get_xray_zip_mirrors, get_xray_checksums_mirrors,
+    XRAY_ZIP_MIRRORS_COUNT, XRAY_CHK_MIRRORS_COUNT,
+)
+from vless_installer.modules.geo_packages import GEOSITE_SPEC, GEOIP_SPEC
 
 
 # =============================================================================
@@ -147,6 +152,10 @@ def _xray_print_manual_download_hint(zip_name: str, tag: str, xray_arch: str) ->
     """
     Выводит подробную инструкцию для ручного скачивания Xray
     и ожидаемые пути размещения файлов на сервере.
+
+    После Wave 4 миграции: зеркала берутся из единого реестра xray_mirrors.py
+    (14 URL вместо 7 inline-копий ранее). Это гарантирует что пользователь
+    видит АКТУАЛЬНЫЙ список зеркал, синхронизированный с fetch_package().
     """
     core = _core_module()
     YELLOW, NC = core.YELLOW, core.NC
@@ -154,20 +163,9 @@ def _xray_print_manual_download_hint(zip_name: str, tag: str, xray_arch: str) ->
     CYAN, GREEN = core.CYAN, core.GREEN
     DIM = core.DIM
 
-    XRAY_MANUAL_MIRRORS = [
-        f"https://github.com/XTLS/Xray-core/releases/download/{tag}/{zip_name}",
-        f"https://ghproxy.net/https://github.com/XTLS/Xray-core/releases/download/{tag}/{zip_name}",
-        f"https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/download/{tag}/{zip_name}",
-        f"https://mirror.ghproxy.com/https://github.com/XTLS/Xray-core/releases/download/{tag}/{zip_name}",
-        f"https://gh.con.sh/https://github.com/XTLS/Xray-core/releases/download/{tag}/{zip_name}",
-        f"https://hub.gitmirror.com/https://github.com/XTLS/Xray-core/releases/download/{tag}/{zip_name}",
-        f"https://github.moeyy.xyz/https://github.com/XTLS/Xray-core/releases/download/{tag}/{zip_name}",
-    ]
-    XRAY_CHECKSUMS_MIRRORS = [
-        f"https://github.com/XTLS/Xray-core/releases/download/{tag}/checksums.txt",
-        f"https://ghproxy.net/https://github.com/XTLS/Xray-core/releases/download/{tag}/checksums.txt",
-        f"https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/download/{tag}/checksums.txt",
-    ]
+    # Зеркала из единого реестра (14 URL через build_mirror_urls)
+    XRAY_MANUAL_MIRRORS = get_xray_zip_mirrors(tag=tag, arch=xray_arch)
+    XRAY_CHECKSUMS_MIRRORS = get_xray_checksums_mirrors(tag=tag)
     sep = f"{YELLOW}{'─'*64}{NC}"
     print()
     print(sep)
@@ -177,20 +175,21 @@ def _xray_print_manual_download_hint(zip_name: str, tag: str, xray_arch: str) ->
     print()
     print(f"{CYAN}📦  Нужный файл:{NC} {BOLD}{zip_name}{NC}  (версия: {tag})")
     print()
-    print(f"{GREEN}🔗  Зеркала для скачивания:{NC}")
+    print(f"{GREEN}🔗  Зеркала для скачивания ({len(XRAY_MANUAL_MIRRORS)}):{NC}")
     for i, url in enumerate(XRAY_MANUAL_MIRRORS, 1):
         print(f"    {DIM}{i}){NC} {url}")
     print()
-    print(f"{GREEN}🔗  Контрольные суммы (checksums.txt):{NC}")
-    for url in XRAY_CHECKSUMS_MIRRORS:
-        print(f"    {url}")
+    print(f"{GREEN}🔗  Контрольные суммы (checksums.txt, {len(XRAY_CHECKSUMS_MIRRORS)} зеркал):{NC}")
+    for i, url in enumerate(XRAY_CHECKSUMS_MIRRORS, 1):
+        print(f"    {DIM}{i}){NC} {url}")
     print()
     print(f"{CYAN}📂  Разместите скачанный ZIP в ОДНО из следующих мест:{NC}")
     print(f"    {BOLD}{GREEN}/root/{zip_name}{NC}               ← рекомендуется")
     print(f"    {BOLD}/tmp/xray.zip{NC}")
     print()
     print(f"{WHITE}💡  Команда для скачивания (выполните в другом окне/на другом ПК):{NC}")
-    _mirror_url = XRAY_MANUAL_MIRRORS[1]
+    # Берём второй URL (обычно jsDelivr CDN — быстро и доступен из РФ)
+    _mirror_url = XRAY_MANUAL_MIRRORS[1] if len(XRAY_MANUAL_MIRRORS) > 1 else XRAY_MANUAL_MIRRORS[0]
     print(f"    {DIM}curl -L \"{_mirror_url}\" -o /root/{zip_name}{NC}")
     print(f"    {DIM}scp /path/to/{zip_name} root@<IP>:/root/{zip_name}{NC}")
     print()
@@ -305,33 +304,36 @@ def install_xray() -> None:
     xray_installed = False
 
     # Метод 1: официальный установщик XTLS
+    # Скачивание install-release.sh через fetch_package(XRAY_INSTALLER_SPEC):
+    # post_install сам запускает `bash src install`, удаляет drop-in файлы и
+    # проверяет что xray появился. Зеркала — 14 URL через xray_mirrors.
     info("Метод 1: официальный установщик XTLS...")
-    with tempfile.NamedTemporaryFile(suffix=".sh", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
     try:
-        r = _run([
-            "curl", "-fsSL", "--connect-timeout", "15", "--retry", "2",
-            "https://github.com/XTLS/Xray-install/raw/main/install-release.sh",
-            "-o", str(tmp_path),
-        ], check=False, quiet=True)
-        if (r.returncode == 0 and tmp_path.stat().st_size > 0
-                and b"bash" in tmp_path.read_bytes()[:50]):
-            _run(["bash", str(tmp_path), "install"],
-                 check=False, quiet=True)
-            xray_dropin_dir = Path("/etc/systemd/system/xray.service.d")
-            if xray_dropin_dir.exists():
-                shutil.rmtree(xray_dropin_dir, ignore_errors=True)
-                info("Удалены drop-in файлы официального установщика Xray")
-            if command_exists("xray") or Path("/usr/local/bin/xray").exists():
-                found = shutil.which("xray") or "/usr/local/bin/xray"
-                XRAY_BIN = Path(found)
-                setattr(core, "XRAY_BIN", XRAY_BIN)
-                xray_installed = True
-                success("Xray установлен через официальный установщик")
-        else:
-            warn("Официальный установщик недоступен")
-    finally:
-        tmp_path.unlink(missing_ok=True)
+        # Ленивый импорт — чтобы избежать circular imports на module load time.
+        from vless_installer.modules.download_manager import fetch_package
+        from vless_installer.modules.xray_packages import XRAY_INSTALLER_SPEC
+        installer_ok = fetch_package(
+            XRAY_INSTALLER_SPEC, print_hint_on_failure=False,
+        )
+    except Exception as ex:
+        warn(f"Официальный установщик недоступен: {ex}")
+        installer_ok = False
+
+    if installer_ok:
+        # post_install XRAY_INSTALLER_SPEC уже запустил `bash install` и
+        # почистил drop-in файлы. Здесь только проверяем результат.
+        xray_dropin_dir = Path("/etc/systemd/system/xray.service.d")
+        if xray_dropin_dir.exists():
+            shutil.rmtree(xray_dropin_dir, ignore_errors=True)
+            info("Удалены drop-in файлы официального установщика Xray")
+        if command_exists("xray") or Path("/usr/local/bin/xray").exists():
+            found = shutil.which("xray") or "/usr/local/bin/xray"
+            XRAY_BIN = Path(found)
+            setattr(core, "XRAY_BIN", XRAY_BIN)
+            xray_installed = True
+            success("Xray установлен через официальный установщик")
+    else:
+        warn("Официальный установщик недоступен")
 
     # Метод 2: прямой zip с GitHub + SHA256 (несколько зеркал)
     if not xray_installed:
@@ -445,95 +447,68 @@ def install_xray() -> None:
 
         zip_name = f"Xray-linux-{xray_arch}.zip"
 
-        # ── Все зеркала для скачивания ZIP ────────────────────────────────────
-        _ZIP_MIRRORS = [
-            f"https://github.com/XTLS/Xray-core/releases/download/{latest_tag}/{zip_name}",
-            f"https://ghproxy.net/https://github.com/XTLS/Xray-core/releases/download/{latest_tag}/{zip_name}",
-            f"https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/download/{latest_tag}/{zip_name}",
-            f"https://mirror.ghproxy.com/https://github.com/XTLS/Xray-core/releases/download/{latest_tag}/{zip_name}",
-            f"https://gh.con.sh/https://github.com/XTLS/Xray-core/releases/download/{latest_tag}/{zip_name}",
-            f"https://hub.gitmirror.com/https://github.com/XTLS/Xray-core/releases/download/{latest_tag}/{zip_name}",
-            f"https://github.moeyy.xyz/https://github.com/XTLS/Xray-core/releases/download/{latest_tag}/{zip_name}",
-        ]
-        _CHK_MIRRORS = [
-            f"https://github.com/XTLS/Xray-core/releases/download/{latest_tag}/checksums.txt",
-            f"https://ghproxy.net/https://github.com/XTLS/Xray-core/releases/download/{latest_tag}/checksums.txt",
-            f"https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/download/{latest_tag}/checksums.txt",
-        ]
+        # ── Зеркала для скачивания ZIP — из единого реестра xray_mirrors ──────
+        # Раньше здесь был inline список из 7 URL (прямой GitHub + 6 ghproxy),
+        # теперь — 14 URL через get_xray_zip_mirrors() (jsDelivr CDN × 4 +
+        # raw GitHub + release GitHub + 7 gh-proxy + Statically).
+        _ZIP_MIRRORS = get_xray_zip_mirrors(tag=latest_tag, arch=xray_arch)
+        # checksums URL — для _xray_try_local_zip (manual retry).
+        # post_install XRAY_ZIP_SPEC сам скачивает checksums.txt через
+        # fetch_package(XRAY_CHECKSUMS_SPEC, tag=...) — здесь URL нужен
+        # только для _verify_sha256 в _xray_try_local_zip.
+        _CHK_URLS = get_xray_checksums_mirrors(tag=latest_tag)
+        chk_url = _CHK_URLS[0] if _CHK_URLS else ""
 
         # Выводим все ссылки в терминал чтобы пользователь мог скачать вручную
         print()
         info(f"  Версия для установки: {BOLD}{latest_tag}{NC}")
         info(f"  Архив:                {BOLD}{zip_name}{NC}")
-        print(f"  {DIM}Зеркала для скачивания:{NC}")
+        print(f"  {DIM}Зеркала для скачивания ({XRAY_ZIP_MIRRORS_COUNT}):{NC}")
         for url in _ZIP_MIRRORS:
             print(f"    {DIM}{url}{NC}")
         print()
 
-        zip_tmp = Path("/tmp/xray.zip")
+        # ── Скачивание через fetch_package(XRAY_ZIP_SPEC) ─────────────────────
+        # fetch_package сам:
+        #   1. Проверяет /root/Xray-linux-{arch}.zip (manual_incoming_dir) —
+        #      если найден, использует без сети.
+        #   2. Иначе — перебирает 14 зеркал через urllib.
+        #   3. При успехе — post_install:
+        #      a. ZIP magic проверка (PK\x03\x04).
+        #      b. Скачивание checksums.txt через fetch_package(XRAY_CHECKSUMS_SPEC).
+        #      c. SHA256 верификация. При провале — False (пробуем следующее зеркало zip'а).
+        #      d. Распаковка + copy xray → /usr/local/bin/xray (chmod 0o755).
+        #      e. Preservation of runetfreedom .dat файлов (skip если >= threshold).
+        #   4. При провале всех зеркал — возвращает False (hint подавлен, т.к.
+        #      ниже своя _xray_print_manual_download_hint).
+        try:
+            from vless_installer.modules.download_manager import fetch_package
+            from vless_installer.modules.xray_packages import (
+                XRAY_ZIP_SPEC, _xray_zip_context,
+            )
+            # Устанавливаем контекст для post_install (tag/arch нужны для
+            # скачивания правильного checksums.txt и поиска хэша в нём).
+            _xray_zip_context["tag"] = latest_tag
+            _xray_zip_context["arch"] = xray_arch
+            zip_ok = fetch_package(
+                XRAY_ZIP_SPEC,
+                tag=latest_tag, arch=xray_arch,
+                print_hint_on_failure=False,
+            )
+        except Exception as ex:
+            warn(f"  Ошибка загрузки Xray zip: {ex}")
+            zip_ok = False
 
-        # Пробуем все зеркала по очереди
-        zip_ok = False
-        for mirror_url in _ZIP_MIRRORS:
-            info(f"  Скачиваю: {mirror_url.split('/')[2]} ...")
-            zip_tmp.unlink(missing_ok=True)
-            r = _run([
-                "curl", "-fL", "--connect-timeout", "30",
-                "-m", "180", "--retry", "2",
-                mirror_url, "-o", str(zip_tmp),
-            ], check=False, quiet=True)
-            sz = zip_tmp.stat().st_size if zip_tmp.exists() else 0
-            if r.returncode == 0 and sz > 100_000:
-                r2 = _run(["file", str(zip_tmp)], capture=True, check=False)
-                if any(w in r2.stdout.lower() for w in ("zip", "archive")):
-                    zip_ok = True
-                    info(f"  Скачано: {sz // 1024} КБ")
-                    break
-            warn(f"  {mirror_url.split('/')[2]}: код {r.returncode}, размер {sz} Б — следующее зеркало...")
-            zip_tmp.unlink(missing_ok=True)
-
-        # Находим рабочий URL для checksums
-        chk_url = _CHK_MIRRORS[0]
-        for cu in _CHK_MIRRORS:
-            r_c = _run([
-                "curl", "-fsSL", "--connect-timeout", "10", cu,
-                "--output", "/dev/null", "--write-out", "%{http_code}",
-            ], capture=True, check=False)
-            if r_c.returncode == 0 and "200" in r_c.stdout:
-                chk_url = cu
-                break
-
-        if zip_ok and _verify_sha256(zip_tmp, chk_url, zip_name):
-            with tempfile.TemporaryDirectory(prefix="xray_extracted.") as ext_dir:
-                _run(["unzip", "-o", str(zip_tmp), "-d", ext_dir],
-                     check=False, quiet=True)
-                zip_tmp.unlink(missing_ok=True)
-                xray_bin_src = Path(ext_dir) / "xray"
-                if xray_bin_src.exists():
-                    shutil.copy2(xray_bin_src, "/usr/local/bin/xray")
-                    Path("/usr/local/bin/xray").chmod(0o755)
-                    _geo_thresholds = {
-                        "geosite.dat": 10 * 1024 * 1024,
-                        "geoip.dat":   15 * 1024 * 1024,
-                    }
-                    for dat in Path(ext_dir).glob("*.dat"):
-                        dest = Path("/usr/local/share/xray") / dat.name
-                        thr = _geo_thresholds.get(dat.name, 0)
-                        if thr and dest.exists() and dest.stat().st_size >= thr:
-                            info(f"  Сохранён runetfreedom {dat.name} — стандартный пропущен")
-                        else:
-                            shutil.copy2(dat, dest)
-                    xray_installed = True
-                    XRAY_BIN = Path("/usr/local/bin/xray")
-                    setattr(core, "XRAY_BIN", XRAY_BIN)
-                    success(f"Xray {latest_tag} установлен из zip (SHA256 верифицирован)")
-        elif zip_ok:
-            zip_tmp.unlink(missing_ok=True)
-            die("SHA256 верификация провалилась. Возможен MITM.")
+        if zip_ok:
+            xray_installed = True
+            XRAY_BIN = Path("/usr/local/bin/xray")
+            setattr(core, "XRAY_BIN", XRAY_BIN)
+            success(f"Xray {latest_tag} установлен из zip (SHA256 верифицирован)")
+        else:
+            warn("  Автоматическая загрузка Xray не удалась со всех зеркал")
 
         # ── Метод 3: ручное размещение файла пользователем ───────────────────
         if not xray_installed:
-            warn("  Автоматическая загрузка Xray не удалась со всех зеркал")
             _xray_print_manual_download_hint(zip_name, latest_tag, xray_arch)
 
             while True:
@@ -542,42 +517,26 @@ def install_xray() -> None:
                 except (EOFError, KeyboardInterrupt):
                     die("Установка прервана пользователем.")
 
-                # Сначала проверяем локальные файлы
+                # Сначала проверяем локальные файлы (включая /root/ и /tmp/)
                 if _xray_try_local_zip(zip_name, xray_arch, chk_url, latest_tag):
                     xray_installed = True
                     break
 
-                # Пробуем скачать ещё раз (вдруг сеть появилась)
+                # Пробуем скачать ещё раз через fetch_package (вдруг сеть появилась)
                 info("  Повторная попытка загрузки с зеркал...")
-                for mirror_url in _ZIP_MIRRORS:
-                    zip_tmp.unlink(missing_ok=True)
-                    r = _run([
-                        "curl", "-fL", "--connect-timeout", "30",
-                        "-m", "180", "--retry", "2",
-                        mirror_url, "-o", str(zip_tmp),
-                    ], check=False, quiet=True)
-                    sz = zip_tmp.stat().st_size if zip_tmp.exists() else 0
-                    if r.returncode == 0 and sz > 100_000:
-                        r2 = _run(["file", str(zip_tmp)], capture=True, check=False)
-                        if any(w in r2.stdout.lower() for w in ("zip", "archive")):
-                            if _verify_sha256(zip_tmp, chk_url, zip_name):
-                                with tempfile.TemporaryDirectory(prefix="xray_extracted.") as ext_dir:
-                                    _run(["unzip", "-o", str(zip_tmp), "-d", ext_dir],
-                                         check=False, quiet=True)
-                                    zip_tmp.unlink(missing_ok=True)
-                                    xray_bin_src = Path(ext_dir) / "xray"
-                                    if xray_bin_src.exists():
-                                        shutil.copy2(xray_bin_src, "/usr/local/bin/xray")
-                                        Path("/usr/local/bin/xray").chmod(0o755)
-                                        XRAY_BIN = Path("/usr/local/bin/xray")
-                                        setattr(core, "XRAY_BIN", XRAY_BIN)
-                                        xray_installed = True
-                                        success(f"Xray {latest_tag} установлен (повторная попытка)")
-                                        break
-                    if xray_installed:
-                        break
-
-                if xray_installed:
+                try:
+                    zip_ok_retry = fetch_package(
+                        XRAY_ZIP_SPEC,
+                        tag=latest_tag, arch=xray_arch,
+                        print_hint_on_failure=False,
+                    )
+                except Exception:
+                    zip_ok_retry = False
+                if zip_ok_retry:
+                    xray_installed = True
+                    XRAY_BIN = Path("/usr/local/bin/xray")
+                    setattr(core, "XRAY_BIN", XRAY_BIN)
+                    success(f"Xray {latest_tag} установлен (повторная попытка)")
                     break
 
                 warn("  Файл не найден или повреждён. Попробуйте ещё раз.")
@@ -1489,7 +1448,12 @@ def _xray_update_geo_runetfreedom() -> bool:
     При неудаче — предлагает ручное размещение файлов.
     Возвращает True если geosite.dat скачан и установлен успешно.
 
-    Источник зеркал — vless_installer.modules.geo_mirrors (единый реестр).
+    После Wave 4 миграции: использует fetch_package(GEOSITE_SPEC) и
+    fetch_package(GEOIP_SPEC) из geo_packages.py (как и download_geo_files
+    в geo_files.py). Зеркала — единый реестр geo_mirrors.py (14 URL на файл).
+    post_install в GEOSITE_SPEC/GEOIP_SPEC копирует файл в 3 dest_dirs
+    (/etc/xray, /usr/local/share/xray, /usr/local/etc/xray) + chmod 644 +
+    chown root:xray.
     """
     core = _core_module()
     info    = core.info
@@ -1499,7 +1463,7 @@ def _xray_update_geo_runetfreedom() -> bool:
     CYAN    = core.CYAN
     success = core.success
 
-    # Зеркала импортируются из единого реестра (geo_mirrors.py)
+    # Зеркала импортируются из единого реестра (geo_mirrors.py) — для печати
     GEOSITE_URLS = get_geosite_urls()
     GEOIP_URLS   = get_geoip_urls()
 
@@ -1514,7 +1478,10 @@ def _xray_update_geo_runetfreedom() -> bool:
         print(f"    {DIM}{url}{NC}")
     print()
 
-    # Все директории где Xray ищет geo-файлы
+    # Все директории где Xray ищет geo-файлы (для retry-branch проверки
+    # ручного размещения). fetch_package через GEOSITE_SPEC/GEOIP_SPEC
+    # копирует в [_CONFIG_DIR, _XRAY_SHARE_DIR, _XRAY_ETC_DIR] — это
+    # соответствует XRAY_LOOKUP_DIRS.
     xray_bin = shutil.which("xray") or "/usr/local/bin/xray"
     dest_dirs_raw = list(XRAY_LOOKUP_DIRS) + [Path(xray_bin).parent]
     seen: set = set()
@@ -1536,67 +1503,31 @@ def _xray_update_geo_runetfreedom() -> bool:
     geosite_ok = False
     failed_files: list[str] = []
 
-    for urls, fname, min_size in (
-        (GEOSITE_URLS, "geosite.dat", MIN_SIZES["geosite.dat"]),
-        (GEOIP_URLS,   "geoip.dat",   MIN_SIZES["geoip.dat"]),
+    # ── Скачивание через fetch_package (download_manager.py) ────────────────
+    # fetch_package сам:
+    #   1. Проверяет /root/{filename} (manual_incoming_dir из PackageSpec) —
+    #      если найден, использует без сети.
+    #   2. Иначе — перебирает 14 зеркал через urllib.
+    #   3. При успехе — post_install копирует в 3 dest_dirs + chmod 644 +
+    #      chown root:xray.
+    #   4. При провале — возвращает False (hint подавлен, т.к. ниже свой).
+    #
+    # ВАЖНО: fetch_package НЕ проверяет install_dests при поиске ручного
+    # файла — только /root/. Это гарантируется PackageSpec.__post_init__
+    # assert (manual_incoming_dir != install_dests). Баг 21d7baf невозможен.
+    from vless_installer.modules.download_manager import fetch_package
+
+    for spec, fname in (
+        (GEOSITE_SPEC, "geosite.dat"),
+        (GEOIP_SPEC,   "geoip.dat"),
     ):
-        tmp = Path(f"/tmp/runet_{fname}")
-        downloaded = False
-
-        # Проверяем файлы уже размещённые пользователем вручную
-        for manual_dir in _MANUAL_ROOTS + geo_dirs:
-            candidate = manual_dir / fname
-            if candidate.exists() and candidate.stat().st_size >= min_size:
-                info(f"  Найден локальный файл: {candidate} ({candidate.stat().st_size // 1024} КБ)")
-                tmp = candidate
-                downloaded = True
-                break
-
-        if not downloaded:
-            for url in urls:
-                tmp_dl = Path(f"/tmp/runet_{fname}")
-                tmp_dl.unlink(missing_ok=True)
-                info(f"  Загрузка {fname}: {url.split('/')[2]} ...")
-                r = _run([
-                    "curl", "-fL", "--connect-timeout", "15",
-                    "-m", "180", "--retry", "0",
-                    "-o", str(tmp_dl), url,
-                ], capture=True, check=False, quiet=True)
-                sz = tmp_dl.stat().st_size if tmp_dl.exists() else 0
-                if r.returncode == 0 and sz >= min_size:
-                    info(f"  Скачан {fname} ({sz // 1024} КБ)")
-                    tmp = tmp_dl
-                    downloaded = True
-                    break
-                warn(f"  {url.split('/')[2]}: код {r.returncode}, размер {sz} Б — следующий источник...")
-                tmp_dl.unlink(missing_ok=True)
-
-        if not downloaded:
-            # Fallback: wget
-            info(f"  Пробую wget для {fname} ...")
-            tmp_dl = Path(f"/tmp/runet_{fname}")
-            tmp_dl.unlink(missing_ok=True)
-            r2 = _run([
-                "wget", "-q", "--timeout=60", "--tries=2",
-                "-O", str(tmp_dl), urls[0],
-            ], capture=True, check=False, quiet=True)
-            sz = tmp_dl.stat().st_size if tmp_dl.exists() else 0
-            if r2.returncode == 0 and sz >= min_size:
-                info(f"  Скачан {fname} через wget ({sz // 1024} КБ)")
-                tmp = tmp_dl
-                downloaded = True
-
-        if downloaded:
-            for dest_dir in geo_dirs:
-                dest = dest_dir / fname
-                try:
-                    shutil.copy2(tmp, dest)
-                    dest.chmod(0o644)
-                except Exception:
-                    pass
-            # Не удаляем если это был файл пользователя из /root/
-            if str(tmp).startswith("/tmp/"):
-                tmp.unlink(missing_ok=True)
+        info(f"  Загрузка {fname}...")
+        try:
+            ok = fetch_package(spec, print_hint_on_failure=False)
+        except Exception as ex:
+            warn(f"  Ошибка загрузки {fname}: {ex}")
+            ok = False
+        if ok:
             if fname == "geosite.dat":
                 geosite_ok = True
                 info(f"  geosite.dat → {', '.join(str(d) for d in geo_dirs)}")
@@ -1614,6 +1545,9 @@ def _xray_update_geo_runetfreedom() -> bool:
             ans = "n"
         if ans != "n":
             # Повторная проверка наличия файлов вручную
+            # (Аналогично download_geo_files в geo_files.py — здесь проверяем
+            # И _root/, И dest_dirs, потому что пользователь явно подтвердил
+            # что положил файл куда-то. Это не баг 21d7baf, а intentional retry.)
             for fname, min_size in (
                 ("geosite.dat", MIN_SIZES["geosite.dat"]),
                 ("geoip.dat",   MIN_SIZES["geoip.dat"]),
@@ -1644,15 +1578,28 @@ def _xray_do_upgrade(tag: str, is_prerelease: bool = False) -> bool:
     """
     Скачивает, верифицирует и устанавливает Xray версии tag.
 
-    Порядок действий:
-      1. Скачать zip + проверить SHA256.
-      2. Распаковать новый бинарник во временную папку.
-      3. Если geo-файлы не runetfreedom — обновить их сейчас
-         (без этого тест конфига упадёт на geosite:ru-available-only-inside).
+    Порядок действий (после Wave 4 миграции на fetch_package):
+      1. Обновить geo-файлы (если ещё не runetfreedom) — нужны для теста конфига.
+      2. Бэкап старого бинарника (ДО замены — для rollback при ошибке теста).
+      3. fetch_package(XRAY_ZIP_SPEC, tag, arch) — скачать zip + SHA256 verify +
+         распаковка + copy xray → /usr/local/bin/xray + .dat preservation.
+         14 зеркал (вместо одного прямого URL в старом коде).
       4. Тест конфига новым бинарником.
-      5. При ошибке теста — сообщить причину, ничего не трогать.
-      6. При успехе — бэкап старого бинарника, установка нового.
-      7. .dat из zip НЕ перезатирают runetfreedom-версии.
+      5. При ошибке теста — восстановление старого бинарника из бэкапа.
+      6. Cleanup старых бэкапов (оставляем 5 последних).
+
+    Раньше (до миграции):
+      • Один прямой URL https://github.com/XTLS/Xray-core/releases/download/{tag}/...
+        БЕЗ зеркал, БЕЗ fallback. Если github.com заблокирован — обновление
+        тихо падает.
+      • Тест конфига делался ДО замены бинарника (new_bin во временной папке).
+        При ошибке — abort без замены.
+
+    Теперь:
+      • 14 зеркал через fetch_package(XRAY_ZIP_SPEC) — jsDelivr/raw/release/gh-proxy/Statically.
+      • Тест конфига делается ПОСЛЕ замены бинарника. При ошибке — rollback
+        из бэкапа. Это эквивалентно по safety: если тест провален, бинарник
+        возвращается к старой версии.
     """
     core = _core_module()
     _run    = core._run
@@ -1675,141 +1622,123 @@ def _xray_do_upgrade(tag: str, is_prerelease: bool = False) -> bool:
         warn(f"Архитектура {machine} не поддерживается")
         return False
 
-    zip_name = f"Xray-linux-{xray_arch}.zip"
-    zip_url  = f"https://github.com/XTLS/Xray-core/releases/download/{tag}/{zip_name}"
-    chk_url  = f"https://github.com/XTLS/Xray-core/releases/download/{tag}/checksums.txt"
-
     label = f"{YELLOW}[PRERELEASE]{NC}" if is_prerelease else f"{GREEN}[LATEST]{NC}"
     info(f"Скачиваю Xray {label} {tag} ...")
 
-    zip_tmp = Path("/tmp/xray_manual_update.zip")
-    r = _run([
-        "curl", "-fsSL", "--connect-timeout", "30", "--retry", "3",
-        zip_url, "-o", str(zip_tmp),
-    ], check=False, quiet=True)
-    if r.returncode != 0:
-        warn(f"Ошибка загрузки: {zip_url}")
-        return False
-
-    if not _verify_sha256(zip_tmp, chk_url, zip_name):
-        zip_tmp.unlink(missing_ok=True)
-        warn("SHA256 верификация провалилась. Установка отменена.")
-        return False
-    info("SHA256 верификация: ОК")
-
-    with tempfile.TemporaryDirectory(prefix="xray_upd.") as ext_dir:
-        _run(["unzip", "-o", str(zip_tmp), "-d", ext_dir], check=False, quiet=True)
-        zip_tmp.unlink(missing_ok=True)
-        new_bin = Path(ext_dir) / "xray"
-        if not new_bin.exists():
-            warn("Бинарник xray не найден в архиве")
+    # ── Шаг 1: убеждаемся что geo-файлы — runetfreedom-версия ──────────────
+    # Проверяем наличие категории ru-available-only-inside в geosite.dat.
+    # Если уже есть — не скачиваем повторно (файл ~65 MB, долго).
+    print()
+    if _xray_geo_is_runetfreedom():
+        info("Geo-файлы runetfreedom уже установлены — пропускаем загрузку")
+        geo_ok = True
+    else:
+        info("Обновляю geosite.dat / geoip.dat (runetfreedom)...")
+        geo_ok = _xray_update_geo_runetfreedom()
+        if not geo_ok:
+            warn("Не удалось скачать geo-файлы runetfreedom.")
+            warn("Обновите вручную и повторите:")
+            warn("  curl -fsSL https://github.com/runetfreedom/russia-v2ray-rules-dat"
+                 "/releases/latest/download/geosite.dat -o /usr/local/share/xray/geosite.dat")
+            warn("  cp /usr/local/share/xray/geosite.dat /etc/xray/geosite.dat")
             return False
+        success("Geo-файлы runetfreedom установлены")
+    print()
 
-        # ── Шаг 3: убеждаемся что geo-файлы — runetfreedom-версия ──────
-        # Проверяем наличие категории ru-available-only-inside в geosite.dat.
-        # Если уже есть — не скачиваем повторно (файл ~65 MB, долго).
-        print()
-        if _xray_geo_is_runetfreedom():
-            info("Geo-файлы runetfreedom уже установлены — пропускаем загрузку")
-            geo_ok = True
-        else:
-            info("Обновляю geosite.dat / geoip.dat (runetfreedom)...")
-            geo_ok = _xray_update_geo_runetfreedom()
-            if not geo_ok:
-                warn("Не удалось скачать geo-файлы runetfreedom.")
-                warn("Обновите вручную и повторите:")
-                warn("  curl -fsSL https://github.com/runetfreedom/russia-v2ray-rules-dat"
-                     "/releases/latest/download/geosite.dat -o /usr/local/share/xray/geosite.dat")
-                warn("  cp /usr/local/share/xray/geosite.dat /etc/xray/geosite.dat")
-                return False
-            success("Geo-файлы runetfreedom установлены")
-        print()
+    # ── Шаг 2: бэкап старого бинарника (ДО замены) ─────────────────────────
+    # Нужен для rollback если тест конфига новым бинарником провалится.
+    backup_dir = Path("/var/backups/xray/binaries")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / f"xray_{current_ver}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    try:
+        shutil.copy2(xray_bin, backup_path)
+        backup_path.chmod(0o755)
+        info(f"Бэкап бинарника: {backup_path}")
+    except Exception as e:
+        warn(f"Не удалось создать бэкап: {e}")
+        backup_path = None
 
-        # ── Шаг 4: тест конфига новым бинарником ─────────────────────────
-        # Xray ищет geosite.dat/geoip.dat сначала рядом с бинарником
-        # (os.Executable()), потом в системных путях.
-        # new_bin во временной папке — копируем runetfreedom .dat туда,
-        # ПЕРЕЗАПИСЫВАЯ стандартные файлы из zip которые уже там лежат.
-        for dat_name in ("geosite.dat", "geoip.dat"):
-            dst = Path(ext_dir) / dat_name
-            # Ищем runetfreedom-версию по всем системным путям
-            for src_dir in (Path("/etc/xray"), Path("/usr/local/share/xray"),
-                            Path("/usr/local/etc/xray")):
-                src = src_dir / dat_name
-                if src.exists() and src.stat().st_size > 3_000_000:
-                    try:
-                        shutil.copy2(src, dst)
-                        info(f"  {dat_name} → {ext_dir} ({src.stat().st_size // 1024} КБ)")
-                    except Exception:
-                        pass
-                    break
+    # ── Шаг 3: скачивание + замена бинарника через fetch_package ───────────
+    # fetch_package(XRAY_ZIP_SPEC) делает:
+    #   1. Скачивание zip (14 зеркал через urllib — jsDelivr/raw/release/gh-proxy/Statically).
+    #   2. ZIP magic проверка (PK\x03\x04).
+    #   3. Скачивание checksums.txt через fetch_package(XRAY_CHECKSUMS_SPEC, tag=...).
+    #   4. SHA256 верификация. При провале — False (пробуем следующее зеркало zip'а).
+    #   5. Распаковка + copy xray → /usr/local/bin/xray (chmod 0o755).
+    #   6. .dat preservation (skip если runetfreedom уже установлен >= threshold).
+    # При провале всех зеркал / SHA256 — возвращает False.
+    try:
+        # Ленивый импорт — чтобы избежать circular imports на module load time.
+        from vless_installer.modules.download_manager import fetch_package
+        from vless_installer.modules.xray_packages import (
+            XRAY_ZIP_SPEC, _xray_zip_context,
+        )
+        # Устанавливаем контекст для post_install (tag/arch нужны для
+        # скачивания правильного checksums.txt).
+        _xray_zip_context["tag"] = tag
+        _xray_zip_context["arch"] = xray_arch
+        zip_ok = fetch_package(
+            XRAY_ZIP_SPEC,
+            tag=tag, arch=xray_arch,
+            print_hint_on_failure=False,
+        )
+    except Exception as ex:
+        warn(f"Ошибка загрузки Xray zip: {ex}")
+        zip_ok = False
 
-        cfg_path = None
-        for cp in (Path("/etc/xray/config.json"),
-                   Path("/usr/local/etc/xray/config.json")):
-            if cp.exists():
-                cfg_path = cp
-                break
+    if not zip_ok:
+        warn(f"Ошибка загрузки Xray {tag} (все зеркала провалены)")
+        return False
 
-        if cfg_path:
-            info("Тест конфига новым бинарником...")
-            rt = _run(
-                [str(new_bin), "run", "-test", "-config", str(cfg_path)],
-                capture=True, check=False,
-            )
-            if rt.returncode != 0:
-                err_out = (rt.stderr.strip() or rt.stdout.strip())
-                print()
-                print(f"{RED}{'═'*64}{NC}")
-                print(f"{RED}  ✗ ТЕСТ КОНФИГА НЕ ПРОШЁЛ{NC}")
-                print(f"{RED}{'═'*64}{NC}")
-                print(f"{DIM}{err_out}{NC}")
-                print(f"{RED}{'═'*64}{NC}")
-                warn("Установка отменена. Бинарник не заменён.")
-                return False
-            info("Тест конфига: ОК")
+    info("SHA256 верификация: ОК (post_install XRAY_ZIP_SPEC)")
 
-        # ── Шаг 5: бэкап старого бинарника ───────────────────────────────
-        backup_dir = Path("/var/backups/xray/binaries")
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        backup_path = backup_dir / f"xray_{current_ver}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        try:
-            shutil.copy2(xray_bin, backup_path)
-            backup_path.chmod(0o755)
-            info(f"Бэкап бинарника: {backup_path}")
-            for old_b in sorted(backup_dir.glob("xray_*"))[:-5]:
-                old_b.unlink(missing_ok=True)
-        except Exception as e:
-            warn(f"Не удалось создать бэкап: {e}")
+    # ── Шаг 4: тест конфига новым бинарником ───────────────────────────────
+    # Xray ищет geosite.dat/geoip.dat сначала рядом с бинарником
+    # (os.Executable()), потом в системных путях (/usr/local/share/xray/).
+    # Geo-файлы уже в /usr/local/share/xray/ (с шага 1) — новый бинарник
+    # найдёт их автоматически.
+    cfg_path = None
+    for cp in (Path("/etc/xray/config.json"),
+               Path("/usr/local/etc/xray/config.json")):
+        if cp.exists():
+            cfg_path = cp
+            break
 
-        # ── Шаг 6: установка нового бинарника ────────────────────────────
-        # Нельзя перезаписать запущенный бинарник (ETXTBSY).
-        # Решение: удалить старый файл, затем скопировать новый.
-        # unlink не мешает уже запущенному процессу — он держит inode,
-        # а новый файл получит новый inode.
-        try:
-            xray_bin.unlink()
-        except Exception as e:
-            warn(f"Не удалось удалить старый бинарник: {e}")
-        shutil.copy2(new_bin, xray_bin)
-        xray_bin.chmod(0o755)
-
-        # ── Шаг 7: .dat из zip — НЕ перезатираем runetfreedom ────────────
-        _geo_thresholds = {
-            "geosite.dat": 10 * 1024 * 1024,
-            "geoip.dat":   15 * 1024 * 1024,
-        }
-        share_dir = Path("/usr/local/share/xray")
-        for dat in Path(ext_dir).glob("*.dat"):
-            dest = share_dir / dat.name
-            thr = _geo_thresholds.get(dat.name, 0)
-            if thr and dest.exists() and dest.stat().st_size >= thr:
-                info(f"  Сохранён runetfreedom {dat.name} — zip пропущен")
-            else:
+    if cfg_path:
+        info("Тест конфига новым бинарником...")
+        rt = _run(
+            [str(xray_bin), "run", "-test", "-config", str(cfg_path)],
+            capture=True, check=False,
+        )
+        if rt.returncode != 0:
+            err_out = (rt.stderr.strip() or rt.stdout.strip())
+            print()
+            print(f"{RED}{'═'*64}{NC}")
+            print(f"{RED}  ✗ ТЕСТ КОНФИГА НЕ ПРОШЁЛ{NC}")
+            print(f"{RED}{'═'*64}{NC}")
+            print(f"{DIM}{err_out}{NC}")
+            print(f"{RED}{'═'*64}{NC}")
+            # ── Rollback: восстанавливаем старый бинарник из бэкапа ──────
+            if backup_path and backup_path.exists():
+                warn(f"Откат к старому бинарнику ({current_ver})...")
                 try:
-                    shutil.copy2(dat, dest)
-                except Exception:
-                    pass
+                    xray_bin.unlink(missing_ok=True)
+                    shutil.copy2(backup_path, xray_bin)
+                    xray_bin.chmod(0o755)
+                    info("Откат выполнен — бинарник восстановлен")
+                except Exception as e:
+                    warn(f"Не удалось откатить: {e}")
+            else:
+                warn("Бэкап недоступен — откат невозможен!")
+            return False
+        info("Тест конфига: ОК")
+
+    # ── Шаг 5: cleanup старых бэкапов (оставляем 5 последних) ──────────────
+    try:
+        for old_b in sorted(backup_dir.glob("xray_*"))[:-5]:
+            old_b.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     return True
 

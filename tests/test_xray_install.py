@@ -635,5 +635,445 @@ class TestCreateXrayService(unittest.TestCase):
         self.assertIn("ExecReload=/bin/systemctl restart xray", content)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Wave 4 миграция: install_xray / _xray_do_upgrade / _xray_update_geo_runetfreedom
+#  → fetch_package(XRAY_INSTALLER_SPEC) / fetch_package(XRAY_ZIP_SPEC) /
+#    fetch_package(GEOSITE_SPEC) / fetch_package(GEOIP_SPEC)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestInstallXrayMigration(unittest.TestCase):
+    """install_xray после Wave 4 миграции: использует fetch_package() вместо
+    inline curl-циклов.
+
+    4 сценария:
+      1. success  — Метод 1 (XRAY_INSTALLER_SPEC) сразу успешен.
+      2. fallback — Метод 1 fails, Метод 2 (XRAY_ZIP_SPEC) успешен.
+      3. manual   — Все сети упали, manual hint + retry → success.
+      4. fail     — Все методы упали → die().
+    """
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+        c = self._fake_core
+        # Базовые атрибуты
+        c.info = MagicMock()
+        c.warn = MagicMock()
+        c.success = MagicMock()
+        c.die = MagicMock(side_effect=SystemExit(1))
+        c._run = MagicMock()
+        c.command_exists = MagicMock(return_value=True)
+        c.XRAY_BIN = Path("/usr/local/bin/xray")
+        c.STAGE_XRAY_DONE = False
+        c.CONFIG_DIR = Path("/etc/xray")
+        c.XRAY_BACKUP_DIR = Path("/var/backups/xray")
+        c.PROGRESS = MagicMock()
+        c.XHTTP_MODE_SUPPORTED = False
+        # Цвета — пустые строки (для print())
+        for attr in ("YELLOW", "NC", "BOLD", "WHITE", "CYAN", "GREEN", "DIM",
+                     "RED", "BLUE"):
+            setattr(c, attr, "")
+        # Patch shutil.which и Path.mkdir/chmod
+        self._shutil_which_patcher = patch("shutil.which",
+                                           return_value="/usr/local/bin/xray")
+        self._shutil_which_patcher.start()
+        self._path_mkdir_patcher = patch.object(Path, "mkdir",
+                                                lambda self, *a, **kw: None)
+        self._path_mkdir_patcher.start()
+        self._path_chmod_patcher = patch.object(Path, "chmod",
+                                                lambda self, *a, **kw: None)
+        self._path_chmod_patcher.start()
+        self._os_chown_patcher = patch("os.chown", lambda *a, **kw: None)
+        self._os_chown_patcher.start()
+        # _detect_xhttp_mode_support мокаем чтобы не запускать xray
+        self._xhttp_patcher = patch(
+            "vless_installer.modules.xray_install._detect_xhttp_mode_support",
+            return_value=None,
+        )
+        self._xhttp_patcher.start()
+
+    def tearDown(self):
+        self._shutil_which_patcher.stop()
+        self._path_mkdir_patcher.stop()
+        self._path_chmod_patcher.stop()
+        self._os_chown_patcher.stop()
+        self._xhttp_patcher.stop()
+
+    def _mock_run_responses(self, arch="x86_64", xray_version="Xray 25.4.30\n"):
+        """Настраивает _run mock для возврата разных ответов на разные команды."""
+        def _run_side_effect(cmd, *a, **kw):
+            # cmd может быть list
+            if isinstance(cmd, (list, tuple)):
+                cmd_list = list(cmd)
+            else:
+                cmd_list = [str(cmd)]
+            cmd_str = " ".join(str(x) for x in cmd_list)
+            if "uname" in cmd_str:
+                return MagicMock(returncode=0, stdout=arch, stderr="")
+            if "id" in cmd_str and "xray" in cmd_str:
+                # xray user exists → returncode 0
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "useradd" in cmd_str:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "chown" in cmd_str:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "curl" in cmd_str and "api.github.com" in cmd_str:
+                # GitHub API response
+                if "releases/latest" in cmd_str:
+                    return MagicMock(returncode=0,
+                                     stdout=json.dumps({"tag_name": "v25.4.30"}),
+                                     stderr="")
+                if "releases?per_page" in cmd_str or "per_page" in cmd_str:
+                    return MagicMock(returncode=0,
+                                     stdout=json.dumps([
+                                         {"tag_name": "v25.4.30", "prerelease": False}
+                                     ]),
+                                     stderr="")
+                return MagicMock(returncode=0, stdout="{}", stderr="")
+            if "version" in cmd_str:
+                return MagicMock(returncode=0, stdout=xray_version, stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        self._fake_core._run.side_effect = _run_side_effect
+
+    def _patch_xray_bin_exists(self, exists=True):
+        """Патчит Path.exists так что /usr/local/bin/xray 'существует' или нет."""
+        original_exists = Path.exists
+        def mock_exists(self, *a, **kw):
+            s = str(self)
+            if s == "/usr/local/bin/xray":
+                return exists
+            return original_exists(self, *a, **kw)
+        return patch.object(Path, "exists", mock_exists)
+
+    def test_method1_installer_spec_success(self):
+        """Сценарий 1 (success): Метод 1 — fetch_package(XRAY_INSTALLER_SPEC) → True.
+        install_xray успешно завершается, XRAY_BIN установлен, STAGE_XRAY_DONE=True.
+        """
+        from vless_installer.modules import xray_install
+        self._mock_run_responses()
+
+        with patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=True) as mock_fetch, \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("os.access", return_value=True):
+            xray_install.install_xray()
+
+        # fetch_package был вызван минимум 1 раз (Метод 1)
+        self.assertTrue(mock_fetch.called)
+        # Первый вызов — с XRAY_INSTALLER_SPEC (name="Xray-installer")
+        first_call = mock_fetch.call_args_list[0]
+        spec_arg = first_call[0][0] if first_call[0] else first_call[1].get('spec')
+        self.assertIsNotNone(spec_arg)
+        self.assertEqual(spec_arg.name, "Xray-installer")
+        # XRAY_BIN установлен
+        self.assertEqual(self._fake_core.XRAY_BIN, Path("/usr/local/bin/xray"))
+        # STAGE_XRAY_DONE = True
+        self.assertTrue(self._fake_core.STAGE_XRAY_DONE)
+
+    def test_method2_zip_spec_fallback(self):
+        """Сценарий 2 (fallback): Метод 1 fails, Метод 2 — fetch_package(XRAY_ZIP_SPEC, tag=, arch=) → True.
+        Проверяем что fetch_package вызывается с XRAY_ZIP_SPEC и kwargs tag/arch.
+        """
+        from vless_installer.modules import xray_install
+        self._mock_run_responses()
+
+        call_count = [0]
+        def _fetch_side_effect(spec, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Метод 1 — XRAY_INSTALLER_SPEC — fail
+                return False
+            # Метод 2 — XRAY_ZIP_SPEC — success
+            return True
+
+        with patch("vless_installer.modules.download_manager.fetch_package",
+                   side_effect=_fetch_side_effect) as mock_fetch, \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("os.access", return_value=True):
+            xray_install.install_xray()
+
+        # fetch_package вызван минимум 2 раза (Метод 1 + Метод 2)
+        self.assertGreaterEqual(mock_fetch.call_count, 2)
+        # Первый вызов — XRAY_INSTALLER_SPEC
+        first_spec = mock_fetch.call_args_list[0][0][0]
+        self.assertEqual(first_spec.name, "Xray-installer")
+        # Второй вызов — XRAY_ZIP_SPEC с tag= и arch=
+        second_call = mock_fetch.call_args_list[1]
+        second_spec = second_call[0][0]
+        self.assertEqual(second_spec.name, "Xray-core")
+        self.assertIn("tag", second_call[1],
+                      "Метод 2 должен передавать tag= kwarg в fetch_package")
+        self.assertIn("arch", second_call[1],
+                      "Метод 2 должен передавать arch= kwarg в fetch_package")
+        # XRAY_BIN установлен
+        self.assertEqual(self._fake_core.XRAY_BIN, Path("/usr/local/bin/xray"))
+        self.assertTrue(self._fake_core.STAGE_XRAY_DONE)
+
+    def test_manual_hint_retry_success(self):
+        """Сценарий 3 (manual): все сети падают, manual hint + retry → success.
+
+        Метод 1 fails, Метод 2 fails, manual hint показывается, retry через
+        fetch_package → True → xray_installed.
+        """
+        from vless_installer.modules import xray_install
+        self._mock_run_responses()
+
+        call_count = [0]
+        def _fetch_side_effect(spec, **kw):
+            call_count[0] += 1
+            # Первые 2 вызова (Метод 1 + Метод 2) — fail
+            if call_count[0] <= 2:
+                return False
+            # Retry в manual loop — success
+            return True
+
+        with patch("vless_installer.modules.download_manager.fetch_package",
+                   side_effect=_fetch_side_effect) as mock_fetch, \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("os.access", return_value=True), \
+             patch("builtins.input", return_value=""), \
+             patch("vless_installer.modules.xray_install._xray_try_local_zip",
+                   return_value=False) as mock_local:
+            xray_install.install_xray()
+
+        # fetch_package вызван минимум 3 раза (Метод 1 + Метод 2 + retry)
+        self.assertGreaterEqual(mock_fetch.call_count, 3)
+        # _xray_try_local_zip вызван (manual retry проверяет локальные файлы)
+        self.assertTrue(mock_local.called)
+        # XRAY_BIN установлен
+        self.assertEqual(self._fake_core.XRAY_BIN, Path("/usr/local/bin/xray"))
+        self.assertTrue(self._fake_core.STAGE_XRAY_DONE)
+
+    def test_all_methods_fail(self):
+        """Сценарий 4 (fail): все методы упали → die().
+
+        Метод 1 fails, Метод 2 fails, manual retry fails, input() raises
+        EOFError → die("Установка прервана пользователем.") → SystemExit.
+        """
+        from vless_installer.modules import xray_install
+        self._mock_run_responses()
+
+        def _input_side_effect(*a, **kw):
+            raise EOFError("simulated user interrupt")
+
+        with patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=False) as mock_fetch, \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("os.access", return_value=True), \
+             patch("builtins.input", side_effect=_input_side_effect), \
+             patch("vless_installer.modules.xray_install._xray_try_local_zip",
+                   return_value=False):
+            # die() должна вызвать SystemExit (через side_effect в setUp)
+            with self.assertRaises(SystemExit):
+                xray_install.install_xray()
+            # die была вызвана
+            self._fake_core.die.assert_called()
+        # fetch_package вызван минимум 2 раза (Метод 1 + Метод 2)
+        self.assertGreaterEqual(mock_fetch.call_count, 2)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  _xray_do_upgrade — Wave 4 миграция: fetch_package(XRAY_ZIP_SPEC, tag, arch)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestXrayDoUpgradeMigration(unittest.TestCase):
+    """_xray_do_upgrade после Wave 4: использует fetch_package(XRAY_ZIP_SPEC)
+    вместо одного прямого URL (без зеркал)."""
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+        c = self._fake_core
+        c.info = MagicMock()
+        c.warn = MagicMock()
+        c.success = MagicMock()
+        c._run = MagicMock()
+        c.XRAY_BIN = Path("/usr/local/bin/xray")
+        for attr in ("YELLOW", "NC", "BOLD", "WHITE", "CYAN", "GREEN", "DIM",
+                     "RED", "BLUE"):
+            setattr(c, attr, "")
+        self._shutil_which_patcher = patch("shutil.which",
+                                           return_value="/usr/local/bin/xray")
+        self._shutil_which_patcher.start()
+        self._path_mkdir_patcher = patch.object(Path, "mkdir",
+                                                lambda self, *a, **kw: None)
+        self._path_mkdir_patcher.start()
+        self._path_chmod_patcher = patch.object(Path, "chmod",
+                                                lambda self, *a, **kw: None)
+        self._path_chmod_patcher.start()
+
+    def tearDown(self):
+        self._shutil_which_patcher.stop()
+        self._path_mkdir_patcher.stop()
+        self._path_chmod_patcher.stop()
+
+    def test_uses_fetch_package_with_zip_spec(self):
+        """_xray_do_upgrade вызывает fetch_package(XRAY_ZIP_SPEC, tag=, arch=)."""
+        from vless_installer.modules import xray_install
+
+        # _run mock: uname -m → x86_64, xray version → v25.4.30
+        def _run_side_effect(cmd, *a, **kw):
+            cmd_list = list(cmd) if isinstance(cmd, (list, tuple)) else [str(cmd)]
+            cmd_str = " ".join(str(x) for x in cmd_list)
+            if "uname" in cmd_str:
+                return MagicMock(returncode=0, stdout="x86_64", stderr="")
+            if "version" in cmd_str:
+                return MagicMock(returncode=0, stdout="Xray 25.4.30\n", stderr="")
+            if "test" in cmd_str:
+                # xray run -test
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        self._fake_core._run.side_effect = _run_side_effect
+
+        # _xray_geo_is_runetfreedom → True (skip geo update)
+        # _xray_current_version → "v25.4.30"
+        with patch("vless_installer.modules.xray_install._xray_geo_is_runetfreedom",
+                   return_value=True), \
+             patch("vless_installer.modules.xray_install._xray_current_version",
+                   return_value="v25.4.30"), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=True) as mock_fetch, \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("shutil.copy2", return_value=None), \
+             patch("shutil.which", return_value="/usr/local/bin/xray"):
+            result = xray_install._xray_do_upgrade(tag="v25.4.30")
+
+        # fetch_package вызван
+        self.assertTrue(mock_fetch.called)
+        # С XRAY_ZIP_SPEC
+        call_args = mock_fetch.call_args
+        spec_arg = call_args[0][0]
+        self.assertEqual(spec_arg.name, "Xray-core")
+        # С tag= и arch= kwargs
+        self.assertEqual(call_args[1].get("tag"), "v25.4.30")
+        self.assertIn("arch", call_args[1])
+        # Результат True
+        self.assertTrue(result)
+
+    def test_returns_false_when_fetch_package_fails(self):
+        """fetch_package возвращает False → _xray_do_upgrade возвращает False."""
+        from vless_installer.modules import xray_install
+
+        def _run_side_effect(cmd, *a, **kw):
+            cmd_list = list(cmd) if isinstance(cmd, (list, tuple)) else [str(cmd)]
+            cmd_str = " ".join(str(x) for x in cmd_list)
+            if "uname" in cmd_str:
+                return MagicMock(returncode=0, stdout="x86_64", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        self._fake_core._run.side_effect = _run_side_effect
+
+        with patch("vless_installer.modules.xray_install._xray_geo_is_runetfreedom",
+                   return_value=True), \
+             patch("vless_installer.modules.xray_install._xray_current_version",
+                   return_value="v25.4.30"), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=False) as mock_fetch, \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("shutil.copy2", return_value=None):
+            result = xray_install._xray_do_upgrade(tag="v25.4.30")
+
+        self.assertFalse(result)
+        self.assertTrue(mock_fetch.called)
+
+    def test_returns_false_on_unsupported_arch(self):
+        """Неподдерживаемая архитектура → False (без fetch_package)."""
+        from vless_installer.modules import xray_install
+
+        def _run_side_effect(cmd, *a, **kw):
+            cmd_list = list(cmd) if isinstance(cmd, (list, tuple)) else [str(cmd)]
+            cmd_str = " ".join(str(x) for x in cmd_list)
+            if "uname" in cmd_str:
+                return MagicMock(returncode=0, stdout="mips64", stderr="")  # unsupported
+            return MagicMock(returncode=0, stdout="", stderr="")
+        self._fake_core._run.side_effect = _run_side_effect
+
+        # _xray_do_upgrade использует subprocess.check_output(["uname", "-m"])
+        # напрямую (не через _run) — патчим subprocess.check_output.
+        with patch("vless_installer.modules.xray_install.subprocess.check_output",
+                   return_value=b"mips64"), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=True) as mock_fetch:
+            result = xray_install._xray_do_upgrade(tag="v25.4.30")
+
+        self.assertFalse(result)
+        # fetch_package НЕ вызван (abort до скачивания)
+        self.assertFalse(mock_fetch.called)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  _xray_update_geo_runetfreedom — Wave 4 миграция: fetch_package(GEOSITE_SPEC/GEOIP_SPEC)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestXrayUpdateGeoRunetfreedomMigration(unittest.TestCase):
+    """_xray_update_geo_runetfreedom после Wave 4: использует fetch_package
+    (GEOSITE_SPEC, GEOIP_SPEC) вместо inline curl+wget цикла."""
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+        c = self._fake_core
+        c.info = MagicMock()
+        c.warn = MagicMock()
+        c.success = MagicMock()
+        c._run = MagicMock()
+        for attr in ("YELLOW", "NC", "BOLD", "WHITE", "CYAN", "GREEN", "DIM",
+                     "RED", "BLUE"):
+            setattr(c, attr, "")
+        self._shutil_which_patcher = patch("shutil.which",
+                                           return_value="/usr/local/bin/xray")
+        self._shutil_which_patcher.start()
+        self._path_mkdir_patcher = patch.object(Path, "mkdir",
+                                                lambda self, *a, **kw: None)
+        self._path_mkdir_patcher.start()
+
+    def tearDown(self):
+        self._shutil_which_patcher.stop()
+        self._path_mkdir_patcher.stop()
+
+    def test_calls_fetch_package_for_both_geo_specs(self):
+        """Вызывает fetch_package(GEOSITE_SPEC) и fetch_package(GEOIP_SPEC)."""
+        from vless_installer.modules import xray_install
+
+        with patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=True) as mock_fetch, \
+             patch("pathlib.Path.exists", return_value=False), \
+             patch("builtins.input", return_value="n"):
+            result = xray_install._xray_update_geo_runetfreedom()
+
+        # fetch_package вызван дважды (geosite + geoip)
+        self.assertEqual(mock_fetch.call_count, 2)
+        # Первый вызов — GEOSITE_SPEC (name="geosite.dat")
+        first_spec = mock_fetch.call_args_list[0][0][0]
+        self.assertEqual(first_spec.name, "geosite.dat")
+        # Второй вызов — GEOIP_SPEC (name="geoip.dat")
+        second_spec = mock_fetch.call_args_list[1][0][0]
+        self.assertEqual(second_spec.name, "geoip.dat")
+        # Результат True (geosite.dat скачан)
+        self.assertTrue(result)
+
+    def test_returns_true_when_only_geosite_succeeds(self):
+        """Если только geosite.dat скачан → True (geoip может провалиться)."""
+        from vless_installer.modules import xray_install
+
+        def _fetch_side_effect(spec, **kw):
+            if spec.name == "geosite.dat":
+                return True
+            return False  # geoip fails
+
+        with patch("vless_installer.modules.download_manager.fetch_package",
+                   side_effect=_fetch_side_effect), \
+             patch("pathlib.Path.exists", return_value=False), \
+             patch("builtins.input", return_value="n"):
+            result = xray_install._xray_update_geo_runetfreedom()
+
+        self.assertTrue(result)
+
+    def test_returns_false_when_both_fail(self):
+        """Если оба geo-файла провалились → False (после manual retry тоже fail)."""
+        from vless_installer.modules import xray_install
+
+        with patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=False), \
+             patch("pathlib.Path.exists", return_value=False), \
+             patch("builtins.input", return_value="n"):
+            result = xray_install._xray_update_geo_runetfreedom()
+
+        self.assertFalse(result)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
