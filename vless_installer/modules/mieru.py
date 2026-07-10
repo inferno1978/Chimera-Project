@@ -868,15 +868,22 @@ def _run_install_inner() -> None:
     fw_msg = _open_ports(protocol, port_start, port_end)
     print(f"  {GREEN}✓{NC}  {fw_msg}")
 
-    # 9. Сохраняем состояние
-    proto_save_state(_MODULE_STATE, {
+    # 9. Сохраняем состояние (сохраняем traffic_preset если был)
+    new_state = {
         "installed":  True,
         "port_start": port_start,
         "port_end":   port_end,
         "protocol":   protocol,
         "version":    version,
         "users":      users,
-    })
+    }
+    # Сохраняем traffic_preset из старого state (если был установлен)
+    old_tp = state.get("traffic_preset")
+    if old_tp:
+        new_state["traffic_preset"] = old_tp
+    proto_save_state(_MODULE_STATE, new_state)
+    # Обновляем локальную переменную для использования ниже
+    state = new_state
 
     # ── Итог ──────────────────────────────────────────────────────────────────
     server_ip      = _get_server_ip()
@@ -1009,12 +1016,15 @@ def _add_user(state: dict) -> None:
     state["users"] = users
     proto_save_state(_MODULE_STATE, state)
 
-    # Применяем новый конфиг
+    # Применяем новый конфиг (с traffic_pattern если установлен)
+    _tp_name = state.get("traffic_preset", "basic")
+    _tp_config = _MIERU_TRAFFIC_PRESETS.get(_tp_name, {}).get("config")
     cfg = _build_server_config(
         users,
         state.get("port_start", _DEFAULT_PORT_START),
         state.get("port_end",   _DEFAULT_PORT_END),
         state.get("protocol",   _DEFAULT_PROTOCOL),
+        traffic_pattern=_tp_config,
     )
     err = _apply_server_config(cfg)
     if not err:
@@ -1069,9 +1079,11 @@ def _show_user_link(users: list, server_ip: str,
     except (ValueError, IndexError):
         print(f"  {RED}✗{NC}  Неверный номер."); _pause(); return
 
+    # Загружаем state для получения traffic_preset
+    _state = proto_load_state(_MODULE_STATE)
     share_link      = _gen_client_share_link(server_ip, port_start, port_end, protocol,
                                                user["username"], user["password"],
-                                               traffic_preset=state.get("traffic_preset", "basic"))
+                                               traffic_preset=_state.get("traffic_preset", "basic"))
     share_link_neko = _gen_client_share_link_nekobox(server_ip, port_start, protocol,
                                                       user["username"], user["password"])
     os.system("clear")
