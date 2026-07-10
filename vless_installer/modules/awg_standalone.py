@@ -1514,12 +1514,14 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
     except ValueError as e:
         return False, str(e)
 
-    # Сохраняем в state
-    awgs_state_update(params=new_params)
-
-    # Перестраиваем конфиг и применяем через syncconf (без даунтайма)
+    # Перестраиваем конфиг и применяем через syncconf (без даунтайма).
+    # ВАЖНО: state обновляем ТОЛЬКО при успехе apply — иначе state будет
+    # противоречить реальности на интерфейсе (старые параметры в файле,
+    # новые в state).
     info("Применение через awg syncconf (без разрыва туннеля)...")
     if awg_peer_rebuild_conf(apply=True):
+        # Apply успешен — теперь безопасно коммитить state
+        awgs_state_update(params=new_params)
         i1_display = new_params.get("i1", "")[:16] + "..." if new_params.get("i1") else "отсутствует"
         msg = (f"Параметры обновлены: Jc={new_params['jc']} "
                f"Jmin={new_params['jmin']} Jmax={new_params['jmax']} "
@@ -1528,8 +1530,12 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
         core.log_to_file("INFO", f"awgs_rotate_obfuscation: {msg}")
         return True, msg
     else:
-        warn("syncconf не удался — применён restart (кратковременный разрыв)")
-        return False, "syncconf не удался, применён restart"
+        # awgs_apply() уже пробовала syncconf → fallback restart → оба провалились.
+        # Туннель работает на старых параметрах (state не изменён).
+        warn("Не удалось применить конфиг ни через syncconf, ни через restart — "
+             "туннель работает на старых параметрах, требуется ручное вмешательство")
+        return False, ("Не удалось применить конфиг ни через syncconf, ни через restart. "
+                       "Туннель работает на старых параметрах, требуется ручное вмешательство")
 
 
 def do_awgs_rotate_menu() -> None:
