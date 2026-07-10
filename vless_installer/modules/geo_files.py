@@ -3,18 +3,25 @@ vless_installer/modules/geo_files.py
 ───────────────────────────────────────────────────────────────────────────────
 Загрузка и обновление geosite.dat / geoip.dat для split tunneling.
 
-  • download_geo_files()      — скачивает (через vless_installer.modules.geo_mirrors,
-                                 14 зеркал-фолбэков), проверяет min size, копирует
-                                 в /etc/xray, /usr/local/share/xray, /usr/local/etc/xray.
-                                 Поддерживает ручное размещение в /root/.
+  • download_geo_files()      — скачивает через download_manager.fetch_package()
+                                 с PackageSpec из geo_packages.py.
+                                 14 зеркал-фолбэков (через github_mirrors.py),
+                                 копирование в /etc/xray, /usr/local/share/xray,
+                                 /usr/local/etc/xray. Ручное размещение в /root/.
   • setup_geo_autoupdate()    — cron every Sunday 03:00 + bash-скрипт с
                                  multi-mirror fallback и restart xray+nginx
                                  (для REALITY+Unix-сокет).
   • do_manage_geo_update()    — меню: обновить сейчас / вкл-выкл cron /
                                  показать лог / показать ссылки для ручного
-                                 скачивания. Мутирует SPLIT_TUNNEL_ENABLED
-                                 в _core (через setattr, для форсирования
-                                 загрузки).
+                                 скачивания.
+
+АРХИТЕКТУРНАЯ ЗАЩИТА ОТ БАГА 21d7baf:
+  download_geo_files() вызывает fetch_package(GEOSITE_SPEC) / fetch_package(GEOIP_SPEC).
+  PackageSpec.__post_init__ assert гарантирует что manual_incoming_dir (/root/)
+  НЕ совпадает ни с одним install_dest. Поэтому безусловная проверка ручного
+  размещения ищет ТОЛЬКО в /root/ — файл в install_dests (от предыдущего
+  запуска) НЕ блокирует повторное сетевое скачивание. Баг 21d7baf физически
+  невозможен по конструкции.
 
 Точки входа из _core.py:
     from vless_installer.modules.geo_files import (
@@ -36,6 +43,8 @@ from vless_installer.modules.geo_mirrors import (
     MANUAL_UPLOAD_PATHS, XRAY_LOOKUP_DIRS, MIN_SIZES,
     GEO_MIRRORS_COUNT, recommended_manual_path,
 )
+from vless_installer.modules.download_manager import fetch_package
+from vless_installer.modules.geo_packages import GEOSITE_SPEC, GEOIP_SPEC
 
 
 # ── Ленивый доступ к ядру ────────────────────────────────────────────────────
@@ -49,7 +58,13 @@ def _core_module():
 #  ЗАГРУЗКА GEO-ФАЙЛОВ
 # ============================================================================
 def download_geo_files() -> bool:
-    """Скачивает актуальные geosite.dat и geoip.dat через реестр зеркал.
+    """Скачивает актуальные geosite.dat и geoip.dat через download_manager.
+
+    Использует fetch_package() с PackageSpec из geo_packages.py.
+    PackageSpec.__post_init__ assert гарантирует что manual_incoming_dir
+    (/root/) не совпадает ни с одним install_dest — баг 21d7baf (повторный
+    вызов находит свой же файл в install_dests и не идёт в сеть) физически
+    невозможен.
 
     FIX: Xray ищет dat-файлы в нескольких местах (/etc/xray/ и /usr/local/share/xray/).
     Официальный установщик XTLS кладёт их только в /usr/local/share/xray/, поэтому
@@ -60,7 +75,6 @@ def download_geo_files() -> bool:
     info    = core.info
     warn    = core.warn
     success = core.success
-    _run    = core._run
     _geo_print_manual_download_hint = core._geo_print_manual_download_hint
     CONFIG_DIR  = core.CONFIG_DIR
     GEOSITE_DAT = core.GEOSITE_DAT
@@ -76,10 +90,9 @@ def download_geo_files() -> bool:
     for d in (CONFIG_DIR, XRAY_SHARE_DIR, XRAY_ETC_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
-    # Зеркала импортируются из единого реестра (geo_mirrors.py)
+    # Показываем зеркала (первые 4) — для информативности
     GEOSITE_URLS = get_geosite_urls()
     GEOIP_URLS   = get_geoip_urls()
-
     print()
     info("  Зеркала geosite.dat (первые 4 из списка):")
     for url in GEOSITE_URLS[:4]:
@@ -90,89 +103,42 @@ def download_geo_files() -> bool:
     print()
 
     dest_dirs = [CONFIG_DIR, XRAY_SHARE_DIR, XRAY_ETC_DIR]
-    # БЕЗУСЛОВНАЯ проверка ручного размещения — ТОЛЬКО /root/ (WinSCP-friendly).
-    # НЕ проверяем dest_dirs здесь, потому что dest_dirs — это те же директории
-    # куда функция сама пишет geosite.dat/geoip.dat при успехе. Если проверять
-    # их безусловно, то после первого успешного запуска любой повторный вызов
-    # найдёт "уже лежащий" файл, скопирует сам на себя и репортит успех БЕЗ
-    # похода в сеть — geo-правила замораживаются навсегда (регрессия 21d7baf).
-    # Полный список MANUAL_UPLOAD_PATHS (+ dest_dirs) используется только в
-    # retry-блоке ниже, после явного подтверждения пользователя.
-    _MANUAL_ROOTS = [recommended_manual_path()]  # = [Path("/root")]
 
     success_count = 0
     failed_files: list[str] = []
 
-    for urls, fname, min_size in (
-        (GEOSITE_URLS, "geosite.dat", MIN_SIZES["geosite.dat"]),
-        (GEOIP_URLS,   "geoip.dat",   MIN_SIZES["geoip.dat"]),
+    # ── Скачивание через fetch_package (download_manager.py) ────────────────
+    # fetch_package сам:
+    #   1. Проверяет /root/{filename} (manual_incoming_dir из PackageSpec) —
+    #      если найден, использует без сети.
+    #   2. Иначе — перебирает 14 зеркал через urllib.
+    #   3. При успехе — post_install копирует в 3 dest_dirs + chmod + chown.
+    #   4. При провале — возвращает False (hint подавлен, т.к. ниже свой).
+    #
+    # ВАЖНО: fetch_package НЕ проверяет install_dests при поиске ручного
+    # файла — только /root/. Это гарантируется PackageSpec.__post_init__
+    # assert (manual_incoming_dir != install_dests). Баг 21d7baf невозможен.
+    for spec, fname in (
+        (GEOSITE_SPEC, "geosite.dat"),
+        (GEOIP_SPEC,   "geoip.dat"),
     ):
         info(f"  Загрузка {fname}...")
-        tmp_path = Path(f"/tmp/{fname}")
-        downloaded = False
-
         try:
-            # Сначала проверяем ручно размещённые файлы
-            for manual_dir in _MANUAL_ROOTS:
-                candidate = manual_dir / fname
-                if candidate.exists() and candidate.stat().st_size >= min_size:
-                    info(f"  Найден файл пользователя: {candidate} ({candidate.stat().st_size // 1024} КБ)")
-                    shutil.copy2(candidate, tmp_path)
-                    downloaded = True
-                    break
-
-            if not downloaded:
-                for url in urls:
-                    tmp_path.unlink(missing_ok=True)
-                    r = _run([
-                        "curl", "-fL", "--connect-timeout", "15",
-                        "-m", "180", "--retry", "0",
-                        "-o", str(tmp_path), url,
-                    ], capture=True, check=False, quiet=True)
-                    if r.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > min_size:
-                        downloaded = True
-                        info(f"  Загружено с: {url.split('/')[2]}")
-                        break
-                    actual = tmp_path.stat().st_size if tmp_path.exists() else 0
-                    warn(f"  curl {url.split('/')[2]}: код {r.returncode}, размер {actual} Б — пробую следующий...")
-
-            if not downloaded:
-                # Последняя попытка: wget
-                tmp_path.unlink(missing_ok=True)
-                r2 = _run([
-                    "wget", "-q", "--timeout=60", "--tries=2",
-                    "-O", str(tmp_path), urls[0],
-                ], capture=True, check=False, quiet=True)
-                if r2.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > min_size:
-                    downloaded = True
-                else:
-                    warn(f"  ✗ Не удалось скачать {fname} из всех источников — split tunneling будет частично отключён")
-                    tmp_path.unlink(missing_ok=True)
-                    failed_files.append(fname)
-                    continue
-
-            if downloaded:
-                size_kb = tmp_path.stat().st_size // 1024
-                for dest_dir in dest_dirs:
-                    dest = dest_dir / fname
-                    try:
-                        shutil.copy2(str(tmp_path), str(dest))
-                        dest.chmod(0o644)
-                        try:
-                            _run(["chown", "root:xray", str(dest)], check=False, quiet=True)
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-                tmp_path.unlink(missing_ok=True)
-                success(f"  ✓ {fname} ({size_kb} КБ) → {', '.join(str(d) for d in dest_dirs)}")
+            ok = fetch_package(spec, print_hint_on_failure=False)
+            if ok:
                 success_count += 1
-
+            else:
+                failed_files.append(fname)
         except Exception as ex:
             warn(f"  Ошибка загрузки {fname}: {ex}")
-            tmp_path.unlink(missing_ok=True)
             failed_files.append(fname)
 
+    # ── Retry-branch: "Разместили файлы вручную? Повторить проверку?" ──────
+    # Это ОСОЗНАННО более широкий поиск чем безусловная проверка в
+    # fetch_package: здесь проверяем И /root/, И dest_dirs — потому что
+    # пользователь явно подтвердил что положил файл куда-то. Это не баг
+    # 21d7baf (который был про БЕЗУСЛОВНУЮ проверку на каждый вызов), а
+    # intentional retry после подтверждения.
     if failed_files:
         warn("Не удалось загрузить гео-файлы — проверьте интернет-соединение")
         _geo_print_manual_download_hint()
@@ -181,6 +147,7 @@ def download_geo_files() -> bool:
         except (EOFError, KeyboardInterrupt):
             ans = "n"
         if ans != "n":
+            _MANUAL_ROOTS = [recommended_manual_path()]  # /root/
             for fname, min_size in (
                 ("geosite.dat", MIN_SIZES["geosite.dat"]),
                 ("geoip.dat",   MIN_SIZES["geoip.dat"]),

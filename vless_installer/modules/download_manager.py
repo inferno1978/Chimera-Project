@@ -116,6 +116,7 @@ def fetch_package(
     spec: PackageSpec,
     *,
     dry_run: bool = False,
+    print_hint_on_failure: bool = True,
     **filename_kwargs,
 ) -> bool:
     """Скачивает пакет по spec.
@@ -128,14 +129,21 @@ def fetch_package(
       3. Иначе — перебор mirror_urls по очереди через urllib.
          connect-timeout=15s, max-time=180s, без бесконечных ретраев.
          При успехе — копирует во ВСЕ install_dests, post_install, True.
-      4. При полном провале — print_manual_hint(spec, filename=...), False.
+      4. При полном провале — print_manual_hint(spec, filename=...), False
+         (если print_hint_on_failure=True).
 
     Параметры:
-      spec:             PackageSpec с описанием пакета.
-      dry_run:          True — не делать реальных сетевых вызовов и
-                        копирований. Возвращает False (для тестов).
-      **filename_kwargs: Дополнительные аргументы для filename_builder и
-                         mirror_urls_builder.
+      spec:                  PackageSpec с описанием пакета.
+      dry_run:               True — не делать реальных сетевых вызовов и
+                             копирований. Возвращает False (для тестов).
+      print_hint_on_failure: True (по умолчанию) — печатать инструкцию для
+                             ручного скачивания при провале всех зеркал.
+                             False — вызывающий код сам напечатает свою
+                             подсказку (например geo_files использует
+                             _geo_print_manual_download_hint с полным
+                             списком путей).
+      **filename_kwargs:     Дополнительные аргументы для filename_builder и
+                             mirror_urls_builder.
 
     Возвращает:
       True при успехе (файл найден локально ИЛИ скачан).
@@ -210,7 +218,8 @@ def fetch_package(
 
     # ── 3) Все зеркала провалились — подсказка ─────────────────────────────
     tmp_path.unlink(missing_ok=True)
-    print_manual_hint(spec, filename=filename)
+    if print_hint_on_failure:
+        print_manual_hint(spec, filename=filename)
     return False
 
 
