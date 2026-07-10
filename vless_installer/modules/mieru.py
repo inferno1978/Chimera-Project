@@ -87,6 +87,12 @@ from vless_installer.modules.proto_common import (
     proto_ask, proto_gen_password, proto_ipt_persist, proto_ipt_rule_exists,
     proto_get_latest_version, proto_get_installed_version,
 )
+from vless_installer.modules.mieru_mirrors import (
+    get_mita_mirrors, get_mieru_mirrors, get_deb_mirrors, get_rpm_mirrors,
+    MANUAL_UPLOAD_PATHS as _MIERU_MANUAL_PATHS,
+    MIERU_MIRRORS_COUNT, find_manual_upload as _find_mieru_manual_upload,
+    print_mieru_manual_download_hint as _print_mieru_manual_hint,
+)
 # _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
 # `raise _Cancelled` code works unchanged after the local class definition
 # was removed in favour of proto_common.ProtoCancelled.
@@ -339,11 +345,58 @@ def _atomic_install_binary(src: Path, dest: Path) -> None:
     finally:
         tmp_dest.unlink(missing_ok=True)
 
+def _download_with_mirrors(urls: list[str], dest: Path, name: str) -> bool:
+    """
+    Скачивает файл `dest`, перебирая зеркала из `urls` по очереди.
+    Перед сетевыми попытками проверяет ручное размещение файла в
+    MANUAL_UPLOAD_PATHS (через find_manual_upload).
+
+    Возвращает True при успехе.
+    """
+    # 1) Сначала проверяем ручное размещение (WinSCP-friendly)
+    manual = _find_mieru_manual_upload(dest.name)
+    if manual is not None:
+        size_kb = manual.stat().st_size // 1024
+        print(f"  {GREEN}✓{NC}  Найден локальный файл: {manual} ({size_kb} КБ)")
+        try:
+            shutil.copy2(str(manual), str(dest))
+            dest.chmod(0o644)
+            return True
+        except Exception as e:
+            print(f"  {YELLOW}⚠{NC}  Не удалось скопировать {manual}: {e}, пробую зеркала...")
+
+    # 2) Перебираем зеркала
+    for i, url in enumerate(urls, 1):
+        try:
+            host = url.split('/')[2]
+            print(f"  {CYAN}→{NC}  [{i}/{len(urls)}] Скачиваю {name} с {host}...")
+            req = urllib.request.Request(url, headers={"User-Agent": "VLESS-Ultimate-Installer"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                with open(dest, 'wb') as f:
+                    while True:
+                        chunk = r.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+            if dest.stat().st_size > 0:
+                return True
+            print(f"  {YELLOW}⚠{NC}  {host}: пустой ответ, следующее зеркало...")
+        except Exception as e:
+            print(f"  {YELLOW}⚠{NC}  {url.split('/')[2]}: {e}")
+            dest.unlink(missing_ok=True)
+    return False
+
+
 def _install_mita_package(version: str) -> bool:
     """
     Устанавливает mita используя пакетный менеджер (deb/rpm) если доступен,
     иначе fallback на tar.gz. После установки через пакет бинарник оказывается
     в /usr/bin/mita — создаём симлинк на _MITA_BIN если нужно.
+
+    MULTI-MIRROR FIX: ранее использовался ОДИН прямой URL github.com/...
+    что приводило к падению установки при блокировке GitHub (Telemt
+    отваливался у пользователей). Теперь перебираем {MIERU_MIRRORS_COUNT}
+    зеркал из mieru_mirrors.py + проверяем ручное размещение в /root/.
     """
     arch = "amd64" if _is_amd64() else "arm64"
     tmp = Path(tempfile.mkdtemp())
@@ -351,63 +404,82 @@ def _install_mita_package(version: str) -> bool:
         # --- Debian/Ubuntu (.deb) ---
         if shutil.which("dpkg"):
             deb_file = f"mita_{version}_{arch}.deb"
-            url = f"https://github.com/enfein/mieru/releases/download/v{version}/{deb_file}"
             local = tmp / deb_file
-            print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.deb)...")
-            try:
-                urllib.request.urlretrieve(url, str(local))
-                r = _run(["dpkg", "-i", str(local)], capture=True)
-                if r.returncode == 0:
-                    # dpkg кладёт бинарник в /usr/bin/mita
-                    sys_bin = Path("/usr/bin/mita")
-                    if sys_bin.exists() and not _MITA_BIN.exists():
-                        _atomic_install_binary(sys_bin, _MITA_BIN)
-                    elif sys_bin.exists():
-                        _atomic_install_binary(sys_bin, _MITA_BIN)
-                    print(f"  {GREEN}✓{NC}  mita {version} установлен через dpkg.")
-                    return True
-                else:
-                    print(f"  {YELLOW}⚠{NC}  dpkg завершился с ошибкой, пробую tar.gz...")
-            except Exception as e:
-                print(f"  {YELLOW}⚠{NC}  Ошибка .deb: {e}, пробую tar.gz...")
+            print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.deb, {MIERU_MIRRORS_COUNT} зеркал в fallback)...")
+            urls = get_deb_mirrors(version)
+            if not _download_with_mirrors(urls, local, deb_file):
+                print(f"  {YELLOW}⚠{NC}  .deb не удалось скачать, пробую tar.gz...")
+            else:
+                try:
+                    r = _run(["dpkg", "-i", str(local)], capture=True)
+                    if r.returncode == 0:
+                        # dpkg кладёт бинарник в /usr/bin/mita
+                        sys_bin = Path("/usr/bin/mita")
+                        if sys_bin.exists() and not _MITA_BIN.exists():
+                            _atomic_install_binary(sys_bin, _MITA_BIN)
+                        elif sys_bin.exists():
+                            _atomic_install_binary(sys_bin, _MITA_BIN)
+                        print(f"  {GREEN}✓{NC}  mita {version} установлен через dpkg.")
+                        return True
+                    else:
+                        print(f"  {YELLOW}⚠{NC}  dpkg завершился с ошибкой, пробую tar.gz...")
+                except Exception as e:
+                    print(f"  {YELLOW}⚠{NC}  Ошибка .deb: {e}, пробую tar.gz...")
 
         # --- RPM (RedHat/CentOS) ---
         elif shutil.which("rpm"):
             rpm_arch = "x86_64" if _is_amd64() else "aarch64"
             rpm_file = f"mita-{version}-1.{rpm_arch}.rpm"
-            url = f"https://github.com/enfein/mieru/releases/download/v{version}/{rpm_file}"
             local = tmp / rpm_file
-            print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.rpm)...")
-            try:
-                urllib.request.urlretrieve(url, str(local))
-                r = _run(["rpm", "-Uvh", "--force", str(local)], capture=True)
-                if r.returncode == 0:
-                    sys_bin = Path("/usr/bin/mita")
-                    if sys_bin.exists():
-                        _atomic_install_binary(sys_bin, _MITA_BIN)
-                    print(f"  {GREEN}✓{NC}  mita {version} установлен через rpm.")
-                    return True
-                else:
-                    print(f"  {YELLOW}⚠{NC}  rpm завершился с ошибкой, пробую tar.gz...")
-            except Exception as e:
-                print(f"  {YELLOW}⚠{NC}  Ошибка .rpm: {e}, пробую tar.gz...")
+            print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.rpm, {MIERU_MIRRORS_COUNT} зеркал в fallback)...")
+            urls = get_rpm_mirrors(version)
+            if not _download_with_mirrors(urls, local, rpm_file):
+                print(f"  {YELLOW}⚠{NC}  .rpm не удалось скачать, пробую tar.gz...")
+            else:
+                try:
+                    r = _run(["rpm", "-Uvh", "--force", str(local)], capture=True)
+                    if r.returncode == 0:
+                        sys_bin = Path("/usr/bin/mita")
+                        if sys_bin.exists():
+                            _atomic_install_binary(sys_bin, _MITA_BIN)
+                        print(f"  {GREEN}✓{NC}  mita {version} установлен через rpm.")
+                        return True
+                    else:
+                        print(f"  {YELLOW}⚠{NC}  rpm завершился с ошибкой, пробую tar.gz...")
+                except Exception as e:
+                    print(f"  {YELLOW}⚠{NC}  Ошибка .rpm: {e}, пробую tar.gz...")
 
-        # --- Fallback: tar.gz ---
-        mita_url, mieru_url = _get_download_urls(version)
-        result = _download_binary(mita_url, _MITA_BIN, "mita")
+        # --- Fallback: tar.gz (тоже multi-mirror) ---
+        # _download_binary теперь принимает список зеркал, а не один URL
+        mita_urls = get_mita_mirrors(version)
+        result = _download_binary(mita_urls, _MITA_BIN, "mita")
         if result:
-            _download_binary(mieru_url, _MIERU_BIN, "mieru")
+            mieru_urls = get_mieru_mirrors(version)
+            _download_binary(mieru_urls, _MIERU_BIN, "mieru")
         return result
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-def _download_binary(url: str, dest: Path, name: str) -> bool:
+def _download_binary(urls: list[str], dest: Path, name: str) -> bool:
+    """
+    Скачивает tar.gz-архив, перебирая зеркала из `urls` по очереди,
+    распаковывает и атомарно устанавливает бинарник в `dest`.
+
+    MULTI-MIRROR FIX: раньше принимал ОДИН url; теперь принимает список.
+    Совместимость со старыми вызовами: если передать строку вместо списка,
+    обёрнёт в список из одного элемента.
+    """
+    # Совместимость со старыми вызовами (строка вместо списка)
+    if isinstance(urls, str):
+        urls = [urls]
+
     tmp = Path(tempfile.mkdtemp())
     try:
-        archive = tmp / "bin.tar.gz"
-        print(f"  {CYAN}→{NC}  Скачиваю {name}...")
-        urllib.request.urlretrieve(url, str(archive))
+        archive = tmp / f"{name}.tar.gz"
+        if not _download_with_mirrors(urls, archive, name):
+            print(f"  {RED}✗{NC}  Не удалось скачать {name} из всех зеркал.")
+            return False
 
         _run(["tar", "-xzf", str(archive), "-C", str(tmp)], check=True)
 
@@ -796,7 +868,23 @@ def _run_install_inner() -> None:
 
     # 2. Бинарники — используем .deb если доступен dpkg, иначе tar.gz
     if not _install_mita_package(version):
-        print(f"  {RED}✗{NC}  Не удалось установить mita."); _pause(); return
+        print(f"  {RED}✗{NC}  Не удалось установить mita из всех зеркал.")
+        # Показываем инструкцию для ручного скачивания (WinSCP-friendly)
+        _print_mieru_manual_hint(version)
+        try:
+            ans = input(f"{CYAN}  Разместили файлы вручную? Повторить установку? [Y/n]:{NC} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans != "n":
+            # Повторная попытка — _install_mita_package теперь найдёт файл
+            # в /root/ автоматически через _find_mieru_manual_upload.
+            if _install_mita_package(version):
+                print(f"  {GREEN}✓{NC}  mita установлен из ручного размещения.")
+            else:
+                print(f"  {RED}✗{NC}  Файлы не найдены в {', '.join(str(p) for p in _MIERU_MANUAL_PATHS)}.")
+                _pause(); return
+        else:
+            _pause(); return
 
     # 3. Синхронизация времени
     print(f"  {CYAN}→{NC}  Проверяю синхронизацию времени...")
