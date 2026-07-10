@@ -154,6 +154,59 @@ class TestGenClientShareLink(unittest.TestCase):
         self.assertIn("mtu=1400", link)
         self.assertIn("multiplexing=MULTIPLEXING_HIGH", link)
 
+    # ── Фича 2: traffic-pattern для Karing ──────────────────────────────────
+
+    def test_contains_traffic_pattern(self):
+        """Ссылка содержит traffic-pattern= параметр (base64-protobuf)."""
+        from vless_installer.modules.mieru import _gen_client_share_link
+        link = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p")
+        self.assertIn("traffic-pattern=", link)
+
+    def test_traffic_pattern_is_url_encoded(self):
+        """base64 padding '=' → '%3D' (URL-safe)."""
+        from vless_installer.modules.mieru import _gen_client_share_link
+        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        import urllib.parse
+        link = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p",
+                                      traffic_preset="medium")
+        # Извлекаем traffic-pattern значение
+        tp_part = [p for p in link.split("&") if p.startswith("traffic-pattern=")][0]
+        tp_value = tp_part.split("=", 1)[1]
+        # Декодируем URL-encoding
+        decoded = urllib.parse.unquote(tp_value)
+        # Должно быть валидным base64
+        import base64
+        base64.b64decode(decoded)  # не должно поднять исключение
+
+    def test_default_preset_is_basic(self):
+        """Дефолтный traffic_preset='basic' → base64 = GgQIARAK."""
+        from vless_installer.modules.mieru import _gen_client_share_link
+        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        import urllib.parse
+        link = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p")
+        tp_part = [p for p in link.split("&") if p.startswith("traffic-pattern=")][0]
+        tp_value = urllib.parse.unquote(tp_part.split("=", 1)[1])
+        expected = get_preset_base64("basic")
+        self.assertEqual(tp_value, expected)
+
+    def test_different_presets_produce_different_patterns(self):
+        """Разные пресеты → разные traffic-pattern значения."""
+        from vless_installer.modules.mieru import _gen_client_share_link
+        import urllib.parse
+        link_basic = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p",
+                                            traffic_preset="basic")
+        link_aggressive = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p",
+                                                  traffic_preset="aggressive")
+        tp_basic = [p for p in link_basic.split("&") if p.startswith("traffic-pattern=")][0]
+        tp_aggr = [p for p in link_aggressive.split("&") if p.startswith("traffic-pattern=")][0]
+        self.assertNotEqual(tp_basic, tp_aggr)
+
+    def test_nekobox_link_does_not_have_traffic_pattern(self):
+        """Nekobox-ссылка не должна содержать traffic-pattern (не поддерживается)."""
+        from vless_installer.modules.mieru import _gen_client_share_link_nekobox
+        link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "TCP", "u", "p")
+        self.assertNotIn("traffic-pattern", link)
+
 
 class TestGenClientShareLinkNekobox(unittest.TestCase):
     """_gen_client_share_link_nekobox — Nekobox формат."""

@@ -669,18 +669,27 @@ def _gen_singbox_outbound(server_ip: str, port_start: int, port_end: int,
     }
 
 def _gen_client_share_link(server_ip: str, port_start: int, port_end: int,
-                            protocol: str, username: str, password: str) -> str:
+                            protocol: str, username: str, password: str,
+                            traffic_preset: str = "basic") -> str:
     """
     Генерирует mierus:// share link для Karing (sing-box).
     Karing парсит ссылку в sing-box outbound JSON.
     Требования (проверено на рабочем конфиге):
       - server_port должен быть одним портом (int), не диапазоном
       - multiplexing=MULTIPLEXING_HIGH обязателен
+      - traffic-pattern — base64-protobuf TrafficPattern для синхронизации
+        обфускации между клиентом и сервером (поддерживается Karing/sing-box-extended)
     Используем port_start как основной порт.
     """
+    import urllib.parse
+    from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+    pattern_b64 = get_preset_base64(traffic_preset)
+    pattern_encoded = urllib.parse.quote(pattern_b64, safe="")
     return (
         f"mierus://{username}:{password}@{server_ip}"
-        f"?port={port_start}&protocol={protocol.upper()}&profile=default&mtu=1400&multiplexing=MULTIPLEXING_HIGH"
+        f"?port={port_start}&protocol={protocol.upper()}&profile=default"
+        f"&mtu=1400&multiplexing=MULTIPLEXING_HIGH"
+        f"&traffic-pattern={pattern_encoded}"
     )
 
 def _gen_client_share_link_nekobox(server_ip: str, port_start: int,
