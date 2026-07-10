@@ -36,6 +36,14 @@ from typing import Optional
 from vless_installer.modules.proto_common import (
     ProtoCancelled, proto_ask, proto_get_installed_version, proto_ipt_rule_exists,
 )
+from vless_installer.modules.telemt_mirrors import (
+    get_telemt_mirrors as _get_telemt_mirror_urls,
+    MANUAL_UPLOAD_PATHS as _TELEMT_MANUAL_PATHS,
+    TELEMT_MIRRORS_COUNT,
+    find_manual_upload as _find_telemt_manual_upload,
+    print_telemt_manual_download_hint as _print_telemt_manual_hint,
+    detect_arch_libc as _detect_arch_libc,
+)
 # _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
 # `raise _Cancelled` code works unchanged after the local class definition
 # was removed in favour of proto_common.ProtoCancelled.
@@ -422,18 +430,27 @@ def _get_installed_version() -> Optional[str]:
     return proto_get_installed_version(BIN_PATH, "--version")
 
 def _get_latest_release() -> tuple:
+    """Возвращает (tag, urls) — где urls это СПИСОК зеркал.
+
+    MULTI-MIRROR FIX: раньше возвращал (tag, url) с одним прямым URL.
+    Теперь возвращает (tag, urls) где urls — список из {TELEMT_MIRRORS_COUNT}
+    зеркал (прямой GitHub + 7 GitHub-прокси). Если api.github.com заблокирован,
+    tag будет пустой, но urls всё равно содержат валидные ссылки (через
+    /releases/latest/download/ который сам делает редирект на нужный тег).
+    """
     try:
         req = urllib.request.Request(GITHUB_API, headers={"User-Agent": "VLESS-Ultimate-Installer"})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
         tag  = data.get("tag_name", "").lstrip("v")
-        arch = "aarch64" if platform.machine().lower() in ("aarch64", "arm64") else "x86_64"
-        libc = "musl" if "musl" in _run(["ldd", "--version"], capture=True).stdout.lower() else "gnu"
-        url  = (f"https://github.com/telemt/telemt/releases/latest/download/"
-                f"telemt-{arch}-linux-{libc}.tar.gz")
-        return tag, url
     except Exception:
-        return "", ""
+        tag = ""
+
+    # Список зеркал доступен ВСЕГДА — даже если api.github.com заблокирован.
+    # /releases/latest/download/ делает HTTP-редирект на нужный тег, так что
+    # нам не обязательно знать tag заранее.
+    urls = _get_telemt_mirror_urls()
+    return tag, urls
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  КОНФИГ
@@ -1122,12 +1139,70 @@ def _xray_tproxy_status() -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 #  УСТАНОВКА БИНАРНИКА
 # ══════════════════════════════════════════════════════════════════════════════
-def _install_binary(url: str) -> bool:
-    _info("Загрузка telemt...")
+def _download_with_mirrors(urls, dest: Path, name: str) -> bool:
+    """
+    Скачивает tar.gz-архив в `dest`, перебирая зеркала из `urls` по очереди.
+    Перед сетевыми попытками проверяет ручное размещение файла в
+    MANUAL_UPLOAD_PATHS (через find_manual_upload).
+
+    Возвращает True при успехе.
+
+    MULTI-MIRROR FIX: раньше _install_binary использовал ОДИН url через
+    urllib.request.urlretrieve(). Теперь перебираем {TELEMT_MIRRORS_COUNT}
+    зеркал + проверяем /root/ для ручного размещения (WinSCP-friendly).
+    """
+    # Совместимость: если передали строку вместо списка — обернём
+    if isinstance(urls, str):
+        urls = [urls]
+
+    # 1) Сначала проверяем ручное размещение (WinSCP-friendly)
+    arch, libc = _detect_arch_libc()
+    expected_filename = f"telemt-{arch}-linux-{libc}.tar.gz"
+    manual = _find_telemt_manual_upload(expected_filename)
+    if manual is not None:
+        size_kb = manual.stat().st_size // 1024
+        _info(f"Найден локальный файл: {manual} ({size_kb} КБ)")
+        try:
+            shutil.copy2(str(manual), str(dest))
+            return True
+        except Exception as e:
+            _warn(f"Не удалось скопировать {manual}: {e}, пробую зеркала...")
+
+    # 2) Перебираем зеркала
+    for i, url in enumerate(urls, 1):
+        try:
+            host = url.split('/')[2]
+            _info(f"[{i}/{len(urls)}] Скачиваю {name} с {host}...")
+            req = urllib.request.Request(url, headers={"User-Agent": "VLESS-Ultimate-Installer"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                with open(dest, 'wb') as f:
+                    while True:
+                        chunk = r.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+            if dest.stat().st_size > 0:
+                return True
+            _warn(f"{host}: пустой ответ, следующее зеркало...")
+        except Exception as e:
+            _warn(f"{url.split('/')[2]}: {e}")
+            dest.unlink(missing_ok=True)
+    return False
+
+
+def _install_binary(url) -> bool:
+    """Устанавливает бинарник telemt из tar.gz-архива.
+
+    MULTI-MIRROR FIX: раньше принимал ОДИН url (строка); теперь принимает
+    либо строку, либо список URL — перебирает зеркала по очереди.
+    """
+    _info(f"Загрузка telemt ({TELEMT_MIRRORS_COUNT} зеркал в fallback)...")
     tmp = Path(tempfile.mkdtemp())
     archive = tmp / "telemt.tar.gz"
     try:
-        urllib.request.urlretrieve(url, archive)
+        if not _download_with_mirrors(url, archive, "telemt"):
+            _err("Не удалось скачать telemt из всех зеркал.")
+            return False
         with tarfile.open(archive) as tf:
             tf.extractall(tmp)
         found = list(tmp.rglob("telemt"))
@@ -1546,23 +1621,39 @@ def _menu_users(server_ip: str) -> None:
 def _menu_update() -> None:
     _info("Проверяю обновления...")
     cur = _get_installed_version()
-    tag, url = _get_latest_release()
+    tag, urls = _get_latest_release()
+    if not urls:
+        _warn("Не удалось получить зеркала. Проверьте соединение."); _pause(); return
     if not tag:
-        _warn("Не удалось получить данные с GitHub."); _pause(); return
+        # api.github.com заблокирован, но зеркала рабочие — продолжаем
+        _warn("Не удалось определить версию с api.github.com, но зеркала активны.")
+        tag = "последней версии"
     print()
     _ok(f"Установлена:  {cur or '—'}")
     _ok(f"Последняя:    {tag}")
-    if cur == tag:
+    if cur and tag != "последней версии" and cur == tag:
         print(); _info("Уже последняя версия."); _pause(); return
     print()
     if proto_ask(f"  {CYAN}Обновить до {tag}? [y/N]: {NC}", c=True).strip().lower() != "y":
         return
     _run(["systemctl", "stop", SERVICE_NAME])
-    if _install_binary(url):
+    if _install_binary(urls):
         _run(["systemctl", "start", SERVICE_NAME])
         _ok(f"Обновлено до {tag}.")
     else:
         _err("Обновление не удалось.")
+        # Показываем инструкцию для ручного скачивания (WinSCP-friendly)
+        _print_telemt_manual_hint("telemt")
+        try:
+            ans = input(f"  {CYAN}Разместили файлы вручную? Повторить? [Y/n]: {NC}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans != "n":
+            if _install_binary(urls):
+                _run(["systemctl", "start", SERVICE_NAME])
+                _ok(f"Обновлено до {tag} (из ручного размещения).")
+            else:
+                _err("Файлы не найдены в /root/ и других путях.")
         _run(["systemctl", "start", SERVICE_NAME])
     _pause()
 
@@ -1783,12 +1874,28 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
           "curl", "wget", "ca-certificates", "openssl", "iproute2", "procps", "iptables"])
 
     _info("Получаю последнюю версию telemt...")
-    tag, url = _get_latest_release()
-    if not url:
-        _err("Не удалось получить URL. Проверьте соединение."); _pause(); return
+    tag, urls = _get_latest_release()
+    if not urls:
+        _err("Не удалось получить зеркала. Проверьте соединение."); _pause(); return
+    if not tag:
+        _warn("api.github.com недоступен — продолжаю через зеркала (/releases/latest/download/).")
+        tag = "последней версии"
     _info(f"Скачиваю telemt {tag}...")
-    if not _install_binary(url):
-        _pause(); return
+    if not _install_binary(urls):
+        # Показываем инструкцию для ручного скачивания (WinSCP-friendly)
+        _print_telemt_manual_hint("telemt")
+        try:
+            ans = input(f"  {CYAN}Разместили файлы вручную? Повторить установку? [Y/n]: {NC}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans != "n":
+            # Повторная попытка — _install_binary найдёт файл в /root/ через
+            # _find_telemt_manual_upload.
+            if not _install_binary(urls):
+                _err(f"Файлы не найдены в {', '.join(str(p) for p in _TELEMT_MANUAL_PATHS)}.")
+                _pause(); return
+        else:
+            _pause(); return
 
     _info("Оптимизация ядра...")
     _apply_optimizations()
