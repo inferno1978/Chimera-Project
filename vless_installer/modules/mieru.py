@@ -330,27 +330,13 @@ def _atomic_install_binary(src: Path, dest: Path) -> None:
     finally:
         tmp_dest.unlink(missing_ok=True)
 
-def _download_with_mirrors(urls: list[str], dest: Path, name: str) -> bool:
+def _download_with_mirrors(urls, dest: Path, name: str) -> bool:
+    """DEPRECATED: оставлен для обратной совместимости со старыми тестами.
+    Новый код использует fetch_package() из download_manager.py.
     """
-    Скачивает файл `dest`, перебирая зеркала из `urls` по очереди.
-    Перед сетевыми попытками проверяет ручное размещение файла в
-    MANUAL_UPLOAD_PATHS (через find_manual_upload).
-
-    Возвращает True при успехе.
-    """
-    # 1) Сначала проверяем ручное размещение (WinSCP-friendly)
-    manual = _find_mieru_manual_upload(dest.name)
-    if manual is not None:
-        size_kb = manual.stat().st_size // 1024
-        print(f"  {GREEN}✓{NC}  Найден локальный файл: {manual} ({size_kb} КБ)")
-        try:
-            shutil.copy2(str(manual), str(dest))
-            dest.chmod(0o644)
-            return True
-        except Exception as e:
-            print(f"  {YELLOW}⚠{NC}  Не удалось скопировать {manual}: {e}, пробую зеркала...")
-
-    # 2) Перебираем зеркала
+    # Совместимость: строка вместо списка
+    if isinstance(urls, str):
+        urls = [urls]
     for i, url in enumerate(urls, 1):
         try:
             host = url.split('/')[2]
@@ -365,7 +351,6 @@ def _download_with_mirrors(urls: list[str], dest: Path, name: str) -> bool:
                         f.write(chunk)
             if dest.stat().st_size > 0:
                 return True
-            print(f"  {YELLOW}⚠{NC}  {host}: пустой ответ, следующее зеркало...")
         except Exception as e:
             print(f"  {YELLOW}⚠{NC}  {url.split('/')[2]}: {e}")
             dest.unlink(missing_ok=True)
@@ -375,85 +360,66 @@ def _download_with_mirrors(urls: list[str], dest: Path, name: str) -> bool:
 def _install_mita_package(version: str) -> bool:
     """
     Устанавливает mita используя пакетный менеджер (deb/rpm) если доступен,
-    иначе fallback на tar.gz. После установки через пакет бинарник оказывается
-    в /usr/bin/mita — создаём симлинк на _MITA_BIN если нужно.
+    иначе fallback на tar.gz.
 
-    MULTI-MIRROR FIX: ранее использовался ОДИН прямой URL github.com/...
-    что приводило к падению установки при блокировке GitHub (Telemt
-    отваливался у пользователей). Теперь перебираем {MIERU_MIRRORS_COUNT}
-    зеркал из mieru_mirrors.py + проверяем ручное размещение в /root/.
+    МИГРАЦИЯ: использует fetch_package() из download_manager.py с PackageSpec
+    из mieru_packages.py. fetch_package сам:
+      1. Проверяет /root/{filename} (manual_incoming_dir) — если найден,
+         использует без сети (WinSCP-friendly).
+      2. Иначе — перебирает зеркала через urllib (14 зеркал).
+      3. При успехе — вызывает post_install (dpkg -i / rpm -Uvh / tar -xzf).
+      4. При провале — возвращает False.
+
+    PackageSpec.__post_init__ assert гарантирует manual_incoming_dir (/root/)
+    != install_dests (/tmp/mieru_packages) — баг 21d7baf невозможен.
     """
     arch = "amd64" if _is_amd64() else "arm64"
-    tmp = Path(tempfile.mkdtemp())
-    try:
-        # --- Debian/Ubuntu (.deb) ---
-        if shutil.which("dpkg"):
-            deb_file = f"mita_{version}_{arch}.deb"
-            local = tmp / deb_file
-            print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.deb, {MIERU_MIRRORS_COUNT} зеркал в fallback)...")
-            urls = get_deb_mirrors(version)
-            if not _download_with_mirrors(urls, local, deb_file):
-                print(f"  {YELLOW}⚠{NC}  .deb не удалось скачать, пробую tar.gz...")
-            else:
-                try:
-                    r = _run(["dpkg", "-i", str(local)], capture=True)
-                    if r.returncode == 0:
-                        # dpkg кладёт бинарник в /usr/bin/mita
-                        sys_bin = Path("/usr/bin/mita")
-                        if sys_bin.exists() and not _MITA_BIN.exists():
-                            _atomic_install_binary(sys_bin, _MITA_BIN)
-                        elif sys_bin.exists():
-                            _atomic_install_binary(sys_bin, _MITA_BIN)
-                        print(f"  {GREEN}✓{NC}  mita {version} установлен через dpkg.")
-                        return True
-                    else:
-                        print(f"  {YELLOW}⚠{NC}  dpkg завершился с ошибкой, пробую tar.gz...")
-                except Exception as e:
-                    print(f"  {YELLOW}⚠{NC}  Ошибка .deb: {e}, пробую tar.gz...")
+    rpm_arch = "x86_64" if _is_amd64() else "aarch64"
 
-        # --- RPM (RedHat/CentOS) ---
-        elif shutil.which("rpm"):
-            rpm_arch = "x86_64" if _is_amd64() else "aarch64"
-            rpm_file = f"mita-{version}-1.{rpm_arch}.rpm"
-            local = tmp / rpm_file
-            print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.rpm, {MIERU_MIRRORS_COUNT} зеркал в fallback)...")
-            urls = get_rpm_mirrors(version)
-            if not _download_with_mirrors(urls, local, rpm_file):
-                print(f"  {YELLOW}⚠{NC}  .rpm не удалось скачать, пробую tar.gz...")
-            else:
-                try:
-                    r = _run(["rpm", "-Uvh", "--force", str(local)], capture=True)
-                    if r.returncode == 0:
-                        sys_bin = Path("/usr/bin/mita")
-                        if sys_bin.exists():
-                            _atomic_install_binary(sys_bin, _MITA_BIN)
-                        print(f"  {GREEN}✓{NC}  mita {version} установлен через rpm.")
-                        return True
-                    else:
-                        print(f"  {YELLOW}⚠{NC}  rpm завершился с ошибкой, пробую tar.gz...")
-                except Exception as e:
-                    print(f"  {YELLOW}⚠{NC}  Ошибка .rpm: {e}, пробую tar.gz...")
+    # Ленивый импорт specs (избегает циклического импорта на module load)
+    from vless_installer.modules.mieru_packages import (
+        MITA_DEB_SPEC, MITA_RPM_SPEC, MITA_TARGZ_SPEC, MIERU_TARGZ_SPEC,
+    )
+    from vless_installer.modules.download_manager import fetch_package
 
-        # --- Fallback: tar.gz (тоже multi-mirror) ---
-        # _download_binary теперь принимает список зеркал, а не один URL
-        mita_urls = get_mita_mirrors(version)
-        result = _download_binary(mita_urls, _MITA_BIN, "mita")
-        if result:
-            mieru_urls = get_mieru_mirrors(version)
-            _download_binary(mieru_urls, _MIERU_BIN, "mieru")
-        return result
+    # --- Debian/Ubuntu (.deb) ---
+    if shutil.which("dpkg"):
+        print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.deb, 14 зеркал в fallback)...")
+        try:
+            ok = fetch_package(MITA_DEB_SPEC, print_hint_on_failure=False,
+                               version=version, arch=arch)
+            if ok:
+                return True
+            print(f"  {YELLOW}⚠{NC}  .deb не удалось скачать/установить, пробую tar.gz...")
+        except Exception as e:
+            print(f"  {YELLOW}⚠{NC}  Ошибка .deb: {e}, пробую tar.gz...")
 
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    # --- RPM (RedHat/CentOS) ---
+    elif shutil.which("rpm"):
+        print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.rpm, 14 зеркал в fallback)...")
+        try:
+            ok = fetch_package(MITA_RPM_SPEC, print_hint_on_failure=False,
+                               version=version, rpm_arch=rpm_arch)
+            if ok:
+                return True
+            print(f"  {YELLOW}⚠{NC}  .rpm не удалось скачать/установить, пробую tar.gz...")
+        except Exception as e:
+            print(f"  {YELLOW}⚠{NC}  Ошибка .rpm: {e}, пробую tar.gz...")
 
-def _download_binary(urls: list[str], dest: Path, name: str) -> bool:
-    """
-    Скачивает tar.gz-архив, перебирая зеркала из `urls` по очереди,
-    распаковывает и атомарно устанавливает бинарник в `dest`.
+    # --- Fallback: tar.gz ---
+    print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.tar.gz, 14 зеркал в fallback)...")
+    result = fetch_package(MITA_TARGZ_SPEC, print_hint_on_failure=False,
+                           version=version, arch=arch)
+    if result:
+        # Клиентский mieru — опционально, не критично если упадёт
+        fetch_package(MIERU_TARGZ_SPEC, print_hint_on_failure=False,
+                      version=version, arch=arch)
+    return result
 
-    MULTI-MIRROR FIX: раньше принимал ОДИН url; теперь принимает список.
-    Совместимость со старыми вызовами: если передать строку вместо списка,
-    обёрнёт в список из одного элемента.
+
+def _download_binary(urls, dest: Path, name: str) -> bool:
+    """DEPRECATED: оставлен для обратной совместимости.
+    Новый код использует fetch_package() с PackageSpec из mieru_packages.py.
     """
     # Совместимость со старыми вызовами (строка вместо списка)
     if isinstance(urls, str):
