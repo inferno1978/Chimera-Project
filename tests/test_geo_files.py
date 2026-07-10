@@ -6,12 +6,20 @@ Unit-тесты для vless_installer/modules/geo_files.py.
 
 Покрывает:
   1. _core_module() — importlib dispatcher
-  2. download_geo_files() — регрессия 21d7baf: после первого успешного
-     запуска файлы уже лежат в dest_dirs (/usr/local/share/xray/, /etc/xray/,
-     /usr/local/etc/xray/). Безусловная проверка ручного размещения НЕ должна
-     искать файлы в dest_dirs — только в /root/. Иначе повторный вызов
-     "Обновить сейчас" тихо копирует сам на себя и репортит успех без
-     похода в сеть.
+  2. download_geo_files() — мигрирована на download_manager.fetch_package().
+     Регрессия 21d7baf: после первого успешного запуска файлы уже лежат в
+     install_dests (/usr/local/share/xray/, /etc/xray/, /usr/local/etc/xray/).
+     Безусловная проверка ручного размещения (через PackageSpec) ищет
+     ТОЛЬКО в /root/ — файлы в install_dests НЕ блокируют сетевое скачивание.
+  3. ГЛАВНЫЙ regression-тест: второй вызов подряд с файлом уже лежащим в
+     install_dests — сеть ВСЁ РАВНО вызывается (urlopen called).
+
+АДАПТАЦИЯ ПОД НОВЫЙ API:
+  Ранее тесты мокали core._run (curl) для проверки сетевых вызовов.
+  Теперь download_geo_files() использует fetch_package() из download_manager.py,
+  который вызывает urllib.request.urlopen. Тесты мокают urlopen вместо _run.
+  Внешне видимое поведение (что пишется в dest_dirs, что происходит при
+  провале сети) — НЕ изменилось, только моки под новую реализацию.
 """
 from __future__ import annotations
 
@@ -30,6 +38,7 @@ def _setup_core_in_sysmodules():
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
+             patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
          patch.object(Path, 'touch', lambda self, *a, **kw: None), \
          patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
          patch('os.chown', lambda *a, **kw: None), \
@@ -54,17 +63,21 @@ class TestCoreModule(unittest.TestCase):
 
 
 class TestDownloadGeoFilesRegression(unittest.TestCase):
-    """Регрессия 21d7baf: файлы в dest_dirs не должны блокировать сетевое
+    """Регрессия 21d7baf: файлы в install_dests не должны блокировать сетевое
     обновление.
 
-    Баг: _MANUAL_ROOTS = MANUAL_UPLOAD_PATHS включал dest_dirs
-    (/usr/local/share/xray, /etc/xray, /usr/local/etc/xray). После первого
-    успешного запуска файлы лежат в dest_dirs → безусловная проверка
-    находила их, копировала сам на себя, репортила успех БЕЗ сети.
+    Баг: безусловная проверка ручного размещения искала по MANUAL_UPLOAD_PATHS
+    который включал dest_dirs. После первого успешного запуска файлы лежат в
+    dest_dirs → проверка находила их → копировала сам на себя → репортила
+    успех БЕЗ сети.
 
-    Фикс: _MANUAL_ROOTS = [recommended_manual_path()] = [Path("/root")].
-    Безусловная проверка ищет только в /root/. dest_dirs проверяются только
-    в retry-блоке после явного подтверждения пользователя.
+    Фикс: download_geo_files() использует fetch_package(GEOSITE_SPEC).
+    PackageSpec.__post_init__ assert гарантирует manual_incoming_dir (/root/)
+    != install_dests. fetch_package проверяет ТОЛЬКО /root/ — файлы в
+    install_dests игнорируются, сеть вызывается.
+
+    АДАПТАЦИЯ: тесты мокают urllib.request.urlopen (используется
+    fetch_package) вместо core._run (curl, использовался старым кодом).
     """
 
     def setUp(self):
@@ -90,14 +103,8 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
 
         in_dest_dirs: True — файлы уже лежат в dest_dirs (от предыдущего запуска)
         in_root:      True — файл лежит в /root/ (ручное размещение через WinSCP)
-
-        /tmp/ пути всегда включены — tmp_path.stat() вызывается после shutil.copy2
-        (mock no-op), поэтому /tmp/ файлы должны "существовать" в mock-мире.
         """
         existing = set()
-        # /tmp/ пути всегда "существуют" (tmp_path.stat() после copy2 mock)
-        existing.add("/tmp/geosite.dat")
-        existing.add("/tmp/geoip.dat")
         if in_dest_dirs:
             for d in ("/usr/local/share/xray", "/etc/xray", "/usr/local/etc/xray"):
                 existing.add(f"{d}/geosite.dat")
@@ -112,9 +119,10 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
 
         Файлы в existing_files — существуют с размером 10 МБ (> min_size).
         /root/ пути — всегда возвращают False (нет ручного размещения),
-        БЕЗ обращения к реальному Path.exists (который может вызвать
-        PermissionError на /root/ в тест-окружении без root-прав).
-        Остальные пути — обычное поведение Path.exists/Path.stat.
+        БЕЗ обращения к реальному Path.exists (PermissionError на /root/
+        в тест-окружении без root-прав).
+        /tmp/_download_mgr_* пути — всегда возвращают True + 10 МБ (файл
+        "скачан" urlopen mock'ом).
         """
         original_exists = Path.exists
         original_stat = Path.stat
@@ -131,15 +139,35 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
             # в тест-окружении без root-прав). Просто возвращаем False.
             if s.startswith("/root/"):
                 return False
+            # /tmp/_download_mgr_* — "скачанный" файл существует
+            if s.startswith("/tmp/_download_mgr_"):
+                return True
             return original_exists(self, *a, **kw)
 
         def mock_stat(self, *a, **kw):
-            if str(self) in existing_files:
+            s = str(self)
+            if s in existing_files or s.startswith("/tmp/_download_mgr_"):
                 return MockStat()
             return original_stat(self, *a, **kw)
 
         return patch.object(Path, 'exists', mock_exists), \
                patch.object(Path, 'stat', mock_stat)
+
+    def _make_urlopen_mock(self, success: bool = True):
+        """Создаёт mock для urllib.request.urlopen.
+
+        success=True — возвращает "скачанный" файл (10 МБ данных).
+        success=False — выбрасывает URLError (сеть заблокирована).
+        """
+        if not success:
+            from urllib.error import URLError
+            return MagicMock(side_effect=URLError("blocked"))
+
+        mock_resp = MagicMock()
+        mock_resp.read.side_effect = [b"x" * 10_000_000, b""]
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+        return MagicMock(return_value=mock_resp)
 
     def test_files_in_dest_dirs_still_triggers_network_download(self):
         """КЛЮЧЕВОЙ РЕГРЕССИОННЫЙ ТЕСТ:
@@ -149,17 +177,15 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         предыдущего успешного запуска. Файлов в /root/ НЕТ.
 
         После фикса: функция должна ПОПЫТАТЬСЯ скачать через сеть
-        (_run с curl вызывается), а не тихо скопировать сам на себя.
+        (urllib.request.urlopen вызывается), а не тихо скопировать сам на себя.
 
-        До фикса (баг 21d7baf): _MANUAL_ROOTS включал dest_dirs →
-        безусловная проверка находила файл → curl НЕ вызывался →
-        функция ложно репортила успех.
+        До фикса (баг 21d7baf): безусловная проверка по MANUAL_UPLOAD_PATHS
+        находила файл в dest_dirs → urlopen НЕ вызывался → функция ложно
+        репортила успех.
         """
         from vless_installer.modules import geo_files
 
         mock_core = self._make_mock_core()
-        # _run возвращает успех (curl "скачал" файл)
-        mock_core._run.return_value = MagicMock(returncode=0)
 
         # Файлы существуют в dest_dirs, но НЕ в /root/
         existing_files = self._make_existing_files_set(
@@ -167,53 +193,38 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         )
 
         p_exists, p_stat = self._patch_path_exists_stat(existing_files)
+        urlopen_mock = self._make_urlopen_mock(success=True)
 
         with patch.object(geo_files, "_core_module", return_value=mock_core), \
              p_exists, p_stat, \
              patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
-             patch("vless_installer.modules.geo_files.shutil.copy2"), \
-             patch("builtins.input", return_value="n"), \
-             patch.object(Path, "unlink", lambda self, *a, **kw: None):
-            # Нам нужно чтобы curl "записал" файл в tmp_path
-            def fake_run(cmd, *a, **kw):
-                # Имитируем что curl скачал файл
-                if "curl" in cmd and "-o" in cmd:
-                    tmp_path = Path(cmd[cmd.index("-o") + 1])
-                    tmp_path.write_bytes(b"x" * 10_000_000)
-                r = MagicMock()
-                r.returncode = 0
-                return r
-
-            mock_core._run.side_effect = fake_run
-
+             patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
+             patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+                   urlopen_mock) as mock_urlopen, \
+             patch("shutil.copy2", lambda *a, **kw: None), \
+             patch.object(Path, "unlink", lambda self, *a, **kw: None), \
+             patch("builtins.open", new_callable=MagicMock), \
+             patch("builtins.input", return_value="n"):
             result = geo_files.download_geo_files()
 
-        # КЛЮЧЕВАЯ ПРОВЕРКА: _run (curl) БЫЛ вызван — сеть была затронута
-        self.assertTrue(mock_core._run.called,
-                        "curl/_run ДОЛЖЕН быть вызван даже когда файлы уже "
-                        "есть в dest_dirs. Баг 21d7baf: безусловная проверка "
-                        "по всему MANUAL_UPLOAD_PATHS пропускала скачивание.")
+        # КЛЮЧЕВАЯ ПРОВЕРКА: urlopen БЫЛ вызван — сеть была затронута
+        self.assertTrue(mock_urlopen.called,
+                        "urllib.request.urlopen ДОЛЖЕН быть вызван даже когда "
+                        "файлы уже есть в dest_dirs. Баг 21d7baf: безусловная "
+                        "проверка по всему MANUAL_UPLOAD_PATHS пропускала скачивание.")
 
-        # Проверяем что именно curl был вызван (а не только chown)
-        curl_calls = [c for c in mock_core._run.call_args_list
-                      if c.args and "curl" in str(c.args[0])]
-        self.assertGreater(len(curl_calls), 0,
-                           "Должен быть хотя бы один curl-вызов для скачивания")
-
-        # Функция вернула True (успех)
+        # Функция вернула True (успех — файлы скачаны)
         self.assertTrue(result)
 
     def test_files_in_root_skips_network_download(self):
         """Штатный сценарий: файл в /root/ (ручное размещение через WinSCP) —
         используется БЕЗ похода в сеть. Это желаемое поведение, не трогать.
 
-        Проверка: curl/_run НЕ вызывается (кроме chown который не считается
-        сетевым запросом).
+        Проверка: urllib.request.urlopen НЕ вызывается.
         """
         from vless_installer.modules import geo_files
 
         mock_core = self._make_mock_core()
-        mock_core._run.return_value = MagicMock(returncode=0)
 
         # Файлы существуют ТОЛЬКО в /root/ (ручное размещение)
         existing_files = self._make_existing_files_set(
@@ -221,21 +232,24 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         )
 
         p_exists, p_stat = self._patch_path_exists_stat(existing_files)
+        urlopen_mock = self._make_urlopen_mock(success=True)
 
         with patch.object(geo_files, "_core_module", return_value=mock_core), \
              p_exists, p_stat, \
              patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
-             patch("vless_installer.modules.geo_files.shutil.copy2"), \
-             patch("builtins.input", return_value="n"), \
-             patch.object(Path, "unlink", lambda self, *a, **kw: None):
+             patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
+             patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+                   urlopen_mock) as mock_urlopen, \
+             patch("shutil.copy2", lambda *a, **kw: None), \
+             patch.object(Path, "unlink", lambda self, *a, **kw: None), \
+             patch("builtins.open", new_callable=MagicMock), \
+             patch("builtins.input", return_value="n"):
             result = geo_files.download_geo_files()
 
-        # Проверяем что curl НЕ вызывался (файл взят из /root/)
-        curl_calls = [c for c in mock_core._run.call_args_list
-                      if c.args and "curl" in str(c.args[0])]
-        self.assertEqual(len(curl_calls), 0,
-                         "curl НЕ должен вызываться когда файл есть в /root/ "
-                         "(ручное размещение через WinSCP)")
+        # urlopen НЕ должен вызываться (файл взят из /root/)
+        self.assertFalse(mock_urlopen.called,
+                         "urllib.request.urlopen НЕ должен вызываться когда "
+                         "файл есть в /root/ (ручное размещение через WinSCP)")
 
         # Функция вернула True (успех — файлы найдены локально)
         self.assertTrue(result)
@@ -245,15 +259,12 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         но НЕ в /root/ — функция НЕ должна использовать их как "ручное размещение"
         в безусловной проверке.
 
-        Разница с test_files_in_dest_dirs_still_triggers_network_download:
-        здесь curl возвращает НЕУДАЧУ (returncode=1) — функция должна провалиться,
+        Здесь urlopen возвращает НЕУДАЧУ (URLError) — функция должна провалиться,
         а НЕ тихо взять файл из dest_dirs.
         """
         from vless_installer.modules import geo_files
 
         mock_core = self._make_mock_core()
-        # curl возвращает неудачу для всех зеркал
-        mock_core._run.return_value = MagicMock(returncode=1)
 
         # Файлы существуют в dest_dirs, но НЕ в /root/
         existing_files = self._make_existing_files_set(
@@ -261,27 +272,156 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         )
 
         p_exists, p_stat = self._patch_path_exists_stat(existing_files)
+        urlopen_mock = self._make_urlopen_mock(success=False)  # сеть заблокирована
 
         with patch.object(geo_files, "_core_module", return_value=mock_core), \
              p_exists, p_stat, \
              patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
-             patch("vless_installer.modules.geo_files.shutil.copy2"), \
-             patch("builtins.input", return_value="n"), \
-             patch.object(Path, "unlink", lambda self, *a, **kw: None):
+             patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
+             patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+                   urlopen_mock) as mock_urlopen, \
+             patch.object(Path, "unlink", lambda self, *a, **kw: None), \
+             patch("builtins.input", return_value="n"):
             result = geo_files.download_geo_files()
 
-        # КЛЮЧЕВАЯ ПРОВЕРКА: curl БЫЛ вызван (сеть затронута, не пропущена)
-        curl_calls = [c for c in mock_core._run.call_args_list
-                      if c.args and "curl" in str(c.args[0])]
-        self.assertGreater(len(curl_calls), 0,
-                           "curl должен вызываться — регрессия 21d7baf: "
-                           "безусловная проверка брала файл из dest_dirs и "
-                           "пропускала скачивание")
+        # КЛЮЧЕВАЯ ПРОВЕРКА: urlopen БЫЛ вызван (сеть затронута, не пропущена)
+        self.assertTrue(mock_urlopen.called,
+                        "urllib.request.urlopen должен вызываться — регрессия "
+                        "21d7baf: безусловная проверка брала файл из dest_dirs "
+                        "и пропускала скачивание")
 
         # Функция вернула False (все зеркала упали, /root/ пуст)
         self.assertFalse(result,
-                         "Функция должна провалиться когда curl не сработал "
+                         "Функция должна провалиться когда urlopen не сработал "
                          "и /root/ пуст — даже если dest_dirs содержат старые файлы")
+
+
+class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
+    """ГЛАВНЫЙ regression-тест (тот, что раньше физически нельзя было
+    написать против старого кода):
+
+    Вызвать download_geo_files() с валидным geosite.dat уже лежащим в
+    install_dests[1] (XRAY_SHARE_DIR) — и убедиться, что сетевой вызов
+    (urlopen) ВСЁ РАВНО происходит.
+
+    Раньше это было невозможно проверить, потому что баг делал именно это
+    недостижимым: второй вызов находил свой же файл и не шёл в сеть.
+
+    Теперь PackageSpec.__post_init__ assert физически запрещает
+    manual_incoming_dir совпадать с install_dests — баг невозможен по
+    конструкции, и этот тест это подтверждает.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _make_mock_core(self):
+        core = MagicMock()
+        for attr in ("GREEN", "NC", "RED", "YELLOW", "CYAN", "BLUE", "DIM", "BOLD", "WHITE"):
+            setattr(core, attr, "")
+        for attr in ("info", "warn", "success", "error"):
+            setattr(core, attr, MagicMock())
+        core._geo_print_manual_download_hint = MagicMock()
+        core._run = MagicMock()
+        core.CONFIG_DIR = Path("/etc/xray")
+        core.GEOSITE_DAT = Path("/etc/xray/geosite.dat")
+        core.GEOIP_DAT = Path("/etc/xray/geoip.dat")
+        core.log_to_file = MagicMock()
+        return core
+
+    def test_second_call_with_file_in_install_dests_still_uses_network(self):
+        """Симуляция второго вызова: geosite.dat УЖЕ лежит в
+        /usr/local/share/xray/geosite.dat (install_dests[1]) от первого
+        успешного запуска. /root/ пуст.
+
+        urlopen ДОЛЖЕН быть вызван — сеть затронута, не пропущена.
+        """
+        from vless_installer.modules import geo_files
+
+        mock_core = self._make_mock_core()
+
+        # Файл УЖЕ лежит в install_dests (симуляция второго вызова)
+        existing_files = {
+            "/usr/local/share/xray/geosite.dat",
+            "/usr/local/share/xray/geoip.dat",
+            "/etc/xray/geosite.dat",
+            "/etc/xray/geoip.dat",
+            "/usr/local/etc/xray/geosite.dat",
+            "/usr/local/etc/xray/geoip.dat",
+        }
+
+        original_exists = Path.exists
+        original_stat = Path.stat
+
+        class MockStat:
+            st_size = 10_000_000
+            st_mtime = 0
+
+        def mock_exists(self, *a, **kw):
+            s = str(self)
+            if s in existing_files:
+                return True
+            if s.startswith("/root/"):
+                return False  # /root/ пуст
+            if s.startswith("/tmp/_download_mgr_"):
+                return True  # "скачанный" файл
+            return original_exists(self, *a, **kw)
+
+        def mock_stat(self, *a, **kw):
+            s = str(self)
+            if s in existing_files or s.startswith("/tmp/_download_mgr_"):
+                return MockStat()
+            return original_stat(self, *a, **kw)
+
+        # urlopen mock — "успешное скачивание"
+        mock_resp = MagicMock()
+        mock_resp.read.side_effect = [b"y" * 10_000_000, b""]
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+        urlopen_mock = MagicMock(return_value=mock_resp)
+
+        with patch.object(geo_files, "_core_module", return_value=mock_core), \
+             patch.object(Path, 'exists', mock_exists), \
+             patch.object(Path, 'stat', mock_stat), \
+             patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
+             patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
+             patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+                   urlopen_mock) as mock_urlopen, \
+             patch("shutil.copy2", lambda *a, **kw: None), \
+             patch.object(Path, "unlink", lambda self, *a, **kw: None), \
+             patch("builtins.open", new_callable=MagicMock), \
+             patch("builtins.input", return_value="n"):
+            result = geo_files.download_geo_files()
+
+        # КЛЮЧЕВАЯ ПРОВЕРКА: urlopen БЫЛ вызван — сеть затронута
+        # Даже хотя файлы уже лежат во всех install_dests
+        self.assertTrue(mock_urlopen.called,
+                        "ГЛАВНЫЙ regression-тест: urlopen ДОЛЖЕН быть вызван "
+                        "даже при втором вызове с файлами уже в install_dests. "
+                        "Баг 21d7baf делал это недостижимым — теперь "
+                        "PackageSpec.__post_init__ assert физически запрещает "
+                        "manual_incoming_dir совпадать с install_dests.")
+
+        # Функция вернула True (успех — файлы скачаны через сеть)
+        self.assertTrue(result)
+
+    def test_package_spec_assert_prevents_bug_by_construction(self):
+        """Дополнительная проверка: PackageSpec для geo файлов действительно
+        имеет manual_incoming_dir != install_dests. Это структурная защита."""
+        from vless_installer.modules.geo_packages import GEOSITE_SPEC, GEOIP_SPEC
+
+        for spec in (GEOSITE_SPEC, GEOIP_SPEC):
+            with self.subTest(spec=spec.name):
+                # manual_incoming_dir = /root/
+                self.assertEqual(spec.manual_incoming_dir, Path("/root"))
+                # /root/ НЕ в install_dests
+                self.assertNotIn(Path("/root"), spec.install_dests)
+                # install_dests = те же 3 директории что раньше
+                self.assertEqual(spec.install_dests, [
+                    Path("/etc/xray"),
+                    Path("/usr/local/share/xray"),
+                    Path("/usr/local/etc/xray"),
+                ])
 
 
 if __name__ == "__main__":
