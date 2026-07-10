@@ -4,15 +4,30 @@ vless_installer/modules/test_runner.py
 TUI-интерфейс для запуска unit-тестов из главного меню установщика.
 
 Группирует 122 тестовых файла в 10 логических категорий, соответствующих
-разделам главного меню. Запускает тесты через unittest.TextTestRunner,
-формирует отчёт в /var/log/vless-test-report.log.
+разделам главного меню. Запускает тесты в ИЗОЛИРОВАННОМ САБПРОЦЕССЕ через
+`python -m unittest`, парсит вывод и формирует отчёт в
+/var/log/vless-test-report.log.
 
 Безопасность: тесты используют mock/tempfile, НЕ меняют систему.
+ДОПОЛНИТЕЛЬНО: запуск в сабпроцессе гарантирует что даже если какой-то
+тест случайно тронет sys.modules или другой module-level state
+родительского процесса, это не повлияет на живую TUI-сессию администратора.
+
+ВАЖНО (регрессия исправлена): до этого фикса тесты запускались in-process
+через unittest.TestLoader. Каждый test-файл в setUp() делал
+    sys.modules["vless_installer._core"] = types.ModuleType(...)
+БЕЗ tearDown. В pytest-процессе это безопасно (процесс завершается),
+но при запуске из живого TUI (тот же процесс что main_menu()) подмена
+оставалась навсегда — module-level state (PROGRESS, INSTALL_START_TIME,
+TOTAL_RAM, BANNER) пересоздавался, и весь последующий код получал другой
+объект модуля через importlib.import_module("vless_installer._core").
 """
 from __future__ import annotations
 
 import io
 import os
+import re
+import subprocess
 import sys
 import time
 import unittest
@@ -158,44 +173,251 @@ def _run_py_compile() -> tuple[int, int, list[str]]:
 
 
 def _run_test_modules(test_names: list[str]) -> dict:
-    """Запускает список тестовых модулей через unittest.
-    Возвращает dict с результатами."""
-    loader = unittest.TestLoader()
-    suite = unittest.TestSuite()
+    """Запускает список тестовых модулей в ИЗОЛИРОВАННОМ САБПРОЦЕССЕ.
 
+    Возвращает dict с результатами (тот же формат что и раньше, чтобы
+    _format_report / _run_and_display не менять):
+        found: list[str]         — найденные модули
+        not_found: list[str]     — ненайденные модули
+        tests_run: int           — кол-во запущенных тестов
+        failures: int            — кол-во проваленных
+        errors: int              — кол-во ошибок
+        skipped: int             — кол-во пропущенных
+        expected_failures: int   — кол-во ожидаемых провалов
+        output: str              — текстовый вывод unittest (для _run_and_display)
+        result_obj: object       — pseudo-result с .failures и .errors (list of
+                                   (test_name_str, traceback_str) tuples) для
+                                   _format_report
+        returncode: int          — exit code сабпроцесса
+
+    ИЗОЛЯЦИЯ (фикс регрессии):
+      Раньше тесты запускались in-process через unittest.TestLoader.
+      Каждый test-файл в setUp() делал sys.modules["vless_installer._core"]
+      = types.ModuleType(...) БЕЗ tearDown. В pytest-процессе это безопасно
+      (процесс завершается), но при запуске из живого TUI подмена оставалась
+      навсегда — module-level state (PROGRESS, INSTALL_START_TIME, TOTAL_RAM,
+      BANNER) пересоздавался.
+
+      Теперь тесты запускаются в отдельном процессе через
+      `sys.executable -m unittest tests.test_xxx tests.test_yyy ...`.
+      Сабпроцесс имеет свой собственный sys.modules — любые подмены
+      остаются в нём и не влияют на родительский процесс TUI.
+    """
     not_found = []
     found = []
+    test_paths = []
 
     for name in test_names:
-        module_path = f"tests.test_{name}"
-        try:
-            # Проверяем что модуль существует
-            test_file = _TESTS_DIR / f"test_{name}.py"
-            if not test_file.exists():
-                not_found.append(name)
-                continue
-            module_tests = loader.loadTestsFromName(module_path)
-            suite.addTest(module_tests)
-            found.append(name)
-        except Exception:
+        test_file = _TESTS_DIR / f"test_{name}.py"
+        if not test_file.exists():
             not_found.append(name)
+            continue
+        test_paths.append(f"tests.test_{name}")
+        found.append(name)
 
-    # Запускаем
-    buf = io.StringIO()
-    runner = unittest.TextTestRunner(stream=buf, verbosity=2, descriptions=True)
-    result = runner.run(suite)
+    if not test_paths:
+        # Нет найденных тестов — возвращаем пустой результат
+        return {
+            "found": found,
+            "not_found": not_found,
+            "tests_run": 0,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 0,
+            "expected_failures": 0,
+            "output": "",
+            "result_obj": _PseudoResult([]),
+            "returncode": 0,
+        }
+
+    # Запускаем в сабпроцессе.
+    # -u: unbuffered (чтобы вывод шёл в реальном времени, но мы всё равно
+    #   ждём завершения процесса — это для будущего streaming-режима).
+    # -m unittest: запускает unittest как модуль.
+    # verbosity 2: показывает каждый тест по имени + результат.
+    cmd = [sys.executable, "-u", "-m", "unittest", "-v"] + test_paths
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(_PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 минут максимум на группу
+        )
+        output = proc.stdout + proc.stderr
+        returncode = proc.returncode
+    except subprocess.TimeoutExpired as e:
+        output = (e.stdout or "") + (e.stderr or "") if isinstance(e.stdout, str) else ""
+        output += "\n\nTIMEOUT: тесты превысили 10-минутный лимит\n"
+        returncode = 124
+    except Exception as e:
+        output = f"Не удалось запустить сабпроцесс: {e}\n"
+        returncode = 1
+
+    # Парсим вывод unittest чтобы извлечь статистику и список проваленных тестов.
+    stats, failures_list, errors_list = _parse_unittest_output(output, found)
 
     return {
         "found": found,
         "not_found": not_found,
-        "tests_run": result.testsRun,
-        "failures": len(result.failures),
-        "errors": len(result.errors),
-        "skipped": len(result.skipped),
-        "expected_failures": len(getattr(result, "expectedFailures", [])),
-        "output": buf.getvalue(),
-        "result_obj": result,
+        "tests_run": stats["tests_run"],
+        "failures": stats["failures"],
+        "errors": stats["errors"],
+        "skipped": stats["skipped"],
+        "expected_failures": stats["expected_failures"],
+        "output": output,
+        "result_obj": _PseudoResult(failures_list + errors_list,
+                                    failures_list, errors_list),
+        "returncode": returncode,
     }
+
+
+class _PseudoResult:
+    """Pseudo-result объект, имитирующий unittest.TestResult интерфейс.
+
+    Нужен чтобы _format_report и _run_and_display (которые обращаются к
+    result.failures и result.errors как к list of (test, traceback) tuples)
+    продолжали работать без изменений.
+
+    Атрибуты:
+      failures: list[tuple[str, str]]  — (test_name, traceback)
+      errors:   list[tuple[str, str]]  — (test_name, traceback)
+    """
+
+    def __init__(self, combined: list, failures: list = None, errors: list = None):
+        # Для обратной совместимости: если передан только combined, используем
+        # его для обоих (старый код использовал result.failures + result.errors)
+        self._combined = combined
+        self.failures = failures if failures is not None else combined
+        self.errors = errors if errors is not None else []
+
+
+# Regex для парсинга итоговой строки unittest:
+#   Ran 42 tests in 0.123s
+_RE_RAN = re.compile(r'^Ran\s+(\d+)\s+tests?\s+in\s+([\d.]+)s', re.MULTILINE)
+# Regex для парсинга строки результата:
+#   OK
+#   FAILED (failures=2, errors=1, skipped=3, expected failures=1)
+_RE_RESULT = re.compile(
+    r'^(OK|FAILED)\s*(?:\(([^)]*)\))?',
+    re.MULTILINE
+)
+
+
+def _parse_unittest_output(output: str, found_modules: list[str]) -> tuple[dict, list, list]:
+    """Парсит вывод unittest -v.
+
+    Возвращает (stats_dict, failures_list, errors_list) где:
+      stats_dict: {tests_run, failures, errors, skipped, expected_failures}
+      failures_list: list[tuple[str, str]] — (test_name, traceback) для FAILED
+      errors_list:   list[tuple[str, str]] — (test_name, traceback) для ERRORS
+    """
+    stats = {
+        "tests_run": 0,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "expected_failures": 0,
+    }
+
+    # 1) "Ran N tests in X.Ys"
+    m = _RE_RAN.search(output)
+    if m:
+        stats["tests_run"] = int(m.group(1))
+
+    # 2) "OK" или "FAILED (failures=X, errors=Y, skipped=Z, expected failures=W)"
+    m = _RE_RESULT.search(output)
+    if m:
+        status = m.group(1)
+        details = m.group(2) or ""
+        if status == "FAILED":
+            # Парсим "failures=2, errors=1, skipped=3, expected failures=1"
+            for kv in details.split(","):
+                kv = kv.strip()
+                if "=" in kv:
+                    k, v = kv.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    try:
+                        v_int = int(v)
+                    except ValueError:
+                        continue
+                    if k == "failures":
+                        stats["failures"] = v_int
+                    elif k == "errors":
+                        stats["errors"] = v_int
+                    elif k == "skipped":
+                        stats["skipped"] = v_int
+                    elif k == "expected failures":
+                        stats["expected_failures"] = v_int
+        # OK — все нули (уже инициализированы)
+
+    # 3) Извлекаем список проваленных тестов и ошибок.
+    # unittest -v выводит для каждого теста строку вида:
+    #   test_method (tests.test_xxx.TestClass) ... ok
+    #   test_method (tests.test_xxx.TestClass) ... FAIL
+    #   test_method (tests.test_xxx.TestClass) ... ERROR
+    # А затем блоки:
+    #   ======================================================================
+    #   FAIL: test_method (tests.test_xxx.TestClass)
+    #   ----------------------------------------------------------------------
+    #   Traceback (most recent call last):
+    #     ...
+    #
+    #   ======================================================================
+    #   ERROR: test_method (tests.test_xxx.TestClass)
+    #   ...
+    failures_list = _extract_failures_or_errors(output, "FAIL")
+    errors_list = _extract_failures_or_errors(output, "ERROR")
+
+    # Подстраховка: если парсинг деталей не сработал, используем длины списков
+    if stats["failures"] == 0 and failures_list:
+        stats["failures"] = len(failures_list)
+    if stats["errors"] == 0 and errors_list:
+        stats["errors"] = len(errors_list)
+
+    return stats, failures_list, errors_list
+
+
+def _extract_failures_or_errors(output: str, kind: str) -> list[tuple[str, str]]:
+    """Извлекает из вывода unittest блоки FAIL: или ERROR:.
+
+    Возвращает list of (test_name, traceback) tuples.
+
+    Формат вывода unittest -v:
+        ======================================================================
+        FAIL: test_name (tests.test_xxx.TestClass.test_method)
+        ----------------------------------------------------------------------
+        Traceback (most recent call last):
+          File "...", line N, in test_method
+            ...
+        AssertionError: ...
+
+        ======================================================================
+        ERROR: test_name (tests.test_xxx.TestClass.test_method)
+        ----------------------------------------------------------------------
+        Traceback (most recent call last):
+          ...
+
+        ----------------------------------------------------------------------
+        Ran N tests in X.Ys
+
+    Блок заканчивается либо следующим `====*` (начало следующего FAIL/ERROR),
+    либо `----*` (разделитель перед итоговой строкой "Ran N tests").
+    """
+    result = []
+    # Pattern: "====*\nKIND: test_name\n----*\n<traceback>\n(?====*|----*)"
+    # Используем lookahead чтобы не "съедать" разделитель следующего блока.
+    pattern = re.compile(
+        r'={70,}\n' + kind + r': (.+?)\n' + r'-{70,}\n(.*?)\n(?=={70,}|-{70,})',
+        re.DOTALL
+    )
+    for m in pattern.finditer(output):
+        test_name = m.group(1).strip()
+        traceback = m.group(2).strip()
+        result.append((test_name, traceback))
+    return result
 
 
 def _format_report(group_label: str, stats: dict, duration: float) -> str:
