@@ -200,7 +200,14 @@ def _read_users(primary_uuid: str = "") -> list[dict]:
 
 def _port_is_free(port: int) -> bool:
     for family in (socket.AF_INET, socket.AF_INET6):
-        s = socket.socket(family, socket.SOCK_STREAM)
+        # Создание сокета оборачиваем отдельно: на хостах без IPv6 в сетевом
+        # стеке socket.socket(AF_INET6, ...) падает с
+        # OSError("Address family not supported by protocol") — мягко
+        # пропускаем недоступное семейство, проверяя только то, что есть.
+        try:
+            s = socket.socket(family, socket.SOCK_STREAM)
+        except OSError:
+            continue  # семейство адресов недоступно в этом окружении
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("", port))
