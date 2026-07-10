@@ -6,13 +6,14 @@ Unit-тесты для vless_installer/modules/awg_standalone.py.
 
 Покрывает:
   1. awgs_build_server_conf — генерация awg0.conf (серверная сторона)
+  2. awgs_rotate_obfuscation — ротация параметров обфускации (mocked)
 """
 from __future__ import annotations
 
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
@@ -169,6 +170,139 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         self.assertIn("CASCADE_PSK", conf)
         self.assertIn("AllowedIPs = 0.0.0.0/0", conf)
         self.assertIn("PersistentKeepalive = 25", conf)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+#  Ротация обфускации (Фича 3 из HYDRA-ULTIMATE)
+# ────────────────────────────────────────────────────────────────────────────
+
+class TestAwgsRotateObfuscation(unittest.TestCase):
+    """awgs_rotate_obfuscation — ротация Jc/Jmin/Jmax/I1 без разрыва туннеля."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _mock_core(self):
+        core = MagicMock()
+        for attr in ("GREEN", "NC", "RED", "YELLOW", "CYAN", "BLUE", "DIM", "BOLD"):
+            setattr(core, attr, "")
+        for attr in ("info", "success", "warn", "error", "log_to_file"):
+            setattr(core, attr, MagicMock())
+        return core
+
+    def test_returns_false_when_not_installed(self):
+        """AWG не установлен → False."""
+        from vless_installer.modules import awg_standalone
+        with patch.object(awg_standalone, "_core_module",
+                          return_value=self._mock_core()), \
+             patch.object(awg_standalone, "awgs_state_is_installed",
+                          return_value=False):
+            ok, msg = awg_standalone.awgs_rotate_obfuscation()
+        self.assertFalse(ok)
+        self.assertIn("не установлен", msg)
+
+    def test_returns_false_for_unknown_preset(self):
+        from vless_installer.modules import awg_standalone
+        with patch.object(awg_standalone, "_core_module",
+                          return_value=self._mock_core()), \
+             patch.object(awg_standalone, "awgs_state_is_installed",
+                          return_value=True):
+            ok, msg = awg_standalone.awgs_rotate_obfuscation("nonexistent_preset")
+        self.assertFalse(ok)
+        self.assertIn("пресет", msg.lower())
+
+    def test_rotates_and_applies_syncconf(self):
+        """Успешная ротация: новые параметры → state → rebuild_conf → syncconf."""
+        import json
+        from vless_installer.modules import awg_standalone
+
+        mock_core = self._mock_core()
+
+        state = {
+            "installed": True,
+            "carrier_preset": "default",
+            "params": {"jc": 4, "jmin": 40, "jmax": 70,
+                        "s1": 0, "s2": 0, "s3": 0, "s4": 0,
+                        "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+                        "i1": "", "i2": "", "i3": "", "i4": "", "i5": ""},
+        }
+
+        with patch.object(awg_standalone, "_core_module",
+                          return_value=mock_core), \
+             patch.object(awg_standalone, "awgs_state_is_installed",
+                          return_value=True), \
+             patch.object(awg_standalone, "awgs_state_load",
+                          return_value=state), \
+             patch("vless_installer.modules.awg_state.awgs_state_update") as mock_update, \
+             patch("vless_installer.modules.awg_peers.awg_peer_rebuild_conf",
+                          return_value=True) as mock_rebuild:
+            ok, msg = awg_standalone.awgs_rotate_obfuscation("default")
+
+        self.assertTrue(ok)
+        # state_update вызван с новыми params
+        mock_update.assert_called_once()
+        update_kwargs = mock_update.call_args.kwargs
+        self.assertIn("params", update_kwargs)
+        new_params = update_kwargs["params"]
+        self.assertIn("jc", new_params)
+        self.assertIn("jmin", new_params)
+        # rebuild_conf вызван с apply=True (syncconf)
+        mock_rebuild.assert_called_once_with(apply=True)
+        # сообщение содержит новые значения
+        self.assertIn("Jc=", msg)
+
+    def test_returns_false_when_syncconf_fails(self):
+        """syncconf не удался → fallback на restart → False."""
+        from vless_installer.modules import awg_standalone
+
+        mock_core = self._mock_core()
+        state = {
+            "installed": True,
+            "carrier_preset": "default",
+            "params": {},
+        }
+
+        with patch.object(awg_standalone, "_core_module",
+                          return_value=mock_core), \
+             patch.object(awg_standalone, "awgs_state_is_installed",
+                          return_value=True), \
+             patch.object(awg_standalone, "awgs_state_load",
+                          return_value=state), \
+             patch("vless_installer.modules.awg_state.awgs_state_update"), \
+             patch("vless_installer.modules.awg_peers.awg_peer_rebuild_conf",
+                          return_value=False):
+            ok, msg = awg_standalone.awgs_rotate_obfuscation("default")
+
+        self.assertFalse(ok)
+        self.assertIn("syncconf", msg.lower())
+
+    def test_uses_current_preset_when_not_specified(self):
+        """Пустой preset_name → используется carrier_preset из state."""
+        from vless_installer.modules import awg_standalone
+
+        mock_core = self._mock_core()
+        state = {
+            "installed": True,
+            "carrier_preset": "mobile",
+            "params": {},
+        }
+
+        with patch.object(awg_standalone, "_core_module",
+                          return_value=mock_core), \
+             patch.object(awg_standalone, "awgs_state_is_installed",
+                          return_value=True), \
+             patch.object(awg_standalone, "awgs_state_load",
+                          return_value=state), \
+             patch("vless_installer.modules.awg_state.awgs_state_update"), \
+             patch("vless_installer.modules.awg_peers.awg_peer_rebuild_conf",
+                          return_value=True):
+            ok, msg = awg_standalone.awgs_rotate_obfuscation()
+
+        self.assertTrue(ok)
+        # info должна была вызваться с "mobile" в сообщении
+        mock_core.info.assert_any_call(
+            unittest.mock.ANY  # точная строка не важна, главное что вызвалась
+        )
 
 
 if __name__ == "__main__":

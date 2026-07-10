@@ -1257,6 +1257,7 @@ def do_manage_awg_standalone() -> None:
         _box_item("4", f"Диагностика (kernel/sysctl/UFW + carrier-compare)")
         _box_item("5", f"Backup / Restore")
         _box_item("6", f"Полное удаление")
+        _box_item("7", f"Ротация обфускации (Jc/Jmin/Jmax/I1 без разрыва)")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -1280,6 +1281,8 @@ def do_manage_awg_standalone() -> None:
         elif ch == "6":
             from .awg_uninstall import do_awg_uninstall_menu
             do_awg_uninstall_menu()
+        elif ch == "7":
+            do_awgs_rotate_menu()
         elif ch in ("q", ""):
             break
         else:
@@ -1456,3 +1459,166 @@ def _awgs_menu_advanced() -> None:
         endpoint_host=endpoint,
         allow_ipv6_tunnel=allow_ipv6,
     )
+
+
+# ============================================================================
+#  РОТАЦИЯ ПАРАМЕТРОВ ОБФУСКАЦИИ (без разрыва туннеля)
+# ============================================================================
+
+def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
+    """
+    Ротация параметров обфускации Jc/Jmin/Jmax/S1-S4/H1-H4/I1
+    без разрыва туннеля (через awg syncconf).
+
+    Алгоритм:
+      1. Генерируем новые параметры через awgs_presets_generate(preset)
+         (использует текущий carrier-пресет из state, или заданный)
+      2. Обновляем state["params"] через awgs_state_update
+      3. Перестраиваем awg0.conf через awg_peer_rebuild_conf(apply=True)
+         — он вызывает awgs_apply() с syncconf (без даунтайма)
+
+    Параметры:
+      preset_name: имя carrier-пресета для генерации
+                   (пусто = использовать текущий из state)
+
+    Возвращает:
+      (True, "Параметры обновлены: Jc=X Jmin=Y Jmax=Z I1=...") при успехе
+      (False, "сообщение об ошибке") при неудаче
+    """
+    core = _core_module()
+    info = core.info
+    success = core.success
+    warn = core.warn
+
+    from .awg_state import awgs_state_load, awgs_state_update
+    from .awg_presets import awgs_presets_generate, awgs_presets_list
+    from .awg_peers import awg_peer_rebuild_conf
+
+    # Проверяем что AWG установлен
+    if not awgs_state_is_installed():
+        return False, "Standalone AWG не установлен"
+
+    state = awgs_state_load()
+
+    # Определяем пресет для генерации
+    if not preset_name:
+        preset_name = state.get("carrier_preset", "default")
+    if preset_name not in awgs_presets_list():
+        return False, f"Неизвестный пресет: {preset_name}"
+
+    info(f"Ротация параметров обфускации (пресет: {preset_name})...")
+
+    # Генерируем новые параметры
+    try:
+        new_params = awgs_presets_generate(preset_name)
+    except ValueError as e:
+        return False, str(e)
+
+    # Сохраняем в state
+    awgs_state_update(params=new_params)
+
+    # Перестраиваем конфиг и применяем через syncconf (без даунтайма)
+    info("Применение через awg syncconf (без разрыва туннеля)...")
+    if awg_peer_rebuild_conf(apply=True):
+        i1_display = new_params.get("i1", "")[:16] + "..." if new_params.get("i1") else "отсутствует"
+        msg = (f"Параметры обновлены: Jc={new_params['jc']} "
+               f"Jmin={new_params['jmin']} Jmax={new_params['jmax']} "
+               f"I1={i1_display}")
+        success(msg)
+        core.log_to_file("INFO", f"awgs_rotate_obfuscation: {msg}")
+        return True, msg
+    else:
+        warn("syncconf не удался — применён restart (кратковременный разрыв)")
+        return False, "syncconf не удался, применён restart"
+
+
+def do_awgs_rotate_menu() -> None:
+    """TUI-меню ротации параметров обфускации."""
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_sep = core._box_sep
+    _box_bottom = core._box_bottom
+    _box_item = core._box_item
+    _box_desc = core._box_desc
+    info = core.info
+    warn = core.warn
+    success = core.success
+    CYAN, NC, GREEN, YELLOW, DIM = core.CYAN, core.NC, core.GREEN, core.YELLOW, core.DIM
+
+    from .awg_state import awgs_state_load, awgs_state_is_installed
+    from .awg_presets import awgs_presets_list, awgs_presets_get
+
+    if not awgs_state_is_installed():
+        print()
+        warn("Standalone AWG не установлен")
+        input(f"\n{CYAN}Нажмите Enter...{NC}")
+        return
+
+    state = awgs_state_load()
+    current_preset = state.get("carrier_preset", "default")
+    current_params = state.get("params", {})
+
+    import os
+    os.system("clear")
+    print()
+    _box_top(f"Ротация параметров обфускации")
+    _box_row()
+    _box_row(f"  Текущий пресет: {CYAN}{current_preset}{NC}")
+    if current_params:
+        _box_row(f"  Текущие параметры:")
+        _box_row(f"    Jc={current_params.get('jc', '?')} "
+                 f"Jmin={current_params.get('jmin', '?')} "
+                 f"Jmax={current_params.get('jmax', '?')}")
+        i1 = current_params.get("i1", "")
+        i1_display = i1[:16] + "..." if i1 else "отсутствует"
+        _box_row(f"    I1={i1_display}")
+    _box_row()
+    _box_sep()
+    _box_row(f"  {DIM}Ротация генерирует новые случайные значения{NC}")
+    _box_row(f"  {DIM}в рамках текущего carrier-пресета.{NC}")
+    _box_row(f"  {DIM}Применяется через awg syncconf — без разрыва.{NC}")
+    _box_row()
+    _box_sep()
+    _box_row()
+    _box_item("1", f"Ротировать ({current_preset})")
+    _box_desc("Новые Jc/Jmin/Jmax/I1 в рамках того же пресета")
+    _box_item("2", f"Сменить пресет + ротировать")
+    _box_desc("Выбрать другой carrier-пресет, затем ротировать")
+    _box_item("Q", f"Назад")
+    _box_bottom()
+
+    ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+
+    if ch == "1":
+        ok, msg = awgs_rotate_obfuscation(current_preset)
+        if ok:
+            success(msg)
+        else:
+            warn(msg)
+        input(f"\n{CYAN}Нажмите Enter...{NC}")
+    elif ch == "2":
+        # Показать список пресетов
+        print()
+        presets = awgs_presets_list()
+        for i, p in enumerate(presets, 1):
+            preset = awgs_presets_get(p)
+            marker = f" {GREEN}← текущий{NC}" if p == current_preset else ""
+            print(f"  [{i}] {p} — {preset.get('label', '')}{marker}")
+        print()
+        choice = input(f"{CYAN}Выберите пресет [1-{len(presets)}]: {NC}").strip()
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(presets):
+                selected = presets[idx]
+                ok, msg = awgs_rotate_obfuscation(selected)
+                if ok:
+                    awgs_state_update(carrier_preset=selected)
+                    success(msg)
+                else:
+                    warn(msg)
+            else:
+                warn("Неверный выбор")
+        except ValueError:
+            warn("Неверный ввод")
+        input(f"\n{CYAN}Нажмите Enter...{NC}")
