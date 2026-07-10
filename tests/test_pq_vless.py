@@ -279,6 +279,78 @@ class TestPortIsFree(unittest.TestCase):
         finally:
             s.close()
 
+    def test_returns_true_when_ipv6_unavailable_and_port_free(self):
+        """Regression: на хосте без IPv6 socket.socket(AF_INET6, ...) падает
+        с OSError — _port_is_free должен пропустить IPv6 и проверить только IPv4."""
+        from vless_installer.modules.pq_vless import _port_is_free
+        # находим свободный IPv4-порт
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("", 0))
+        free_port = s.getsockname()[1]
+        s.close()
+
+        real_socket = socket.socket
+
+        def _fake_socket(family, *args, **kwargs):
+            if family == socket.AF_INET6:
+                raise OSError("Address family not supported by protocol")
+            return real_socket(family, *args, **kwargs)
+
+        with patch("vless_installer.modules.pq_vless.socket.socket",
+                   side_effect=_fake_socket):
+            # не должно падать, IPv4-проверка проходит → True
+            self.assertTrue(_port_is_free(free_port))
+
+    def test_returns_false_when_ipv6_unavailable_and_port_taken(self):
+        """Regression: на хосте без IPv6 _port_is_free всё ещё возвращает False
+        для занятого IPv4-порта (не падает, корректно проверяет IPv4)."""
+        from vless_installer.modules.pq_vless import _port_is_free
+        # занимаем IPv4-порт
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("", 0))
+        s.listen(1)
+        taken_port = s.getsockname()[1]
+
+        real_socket = socket.socket
+
+        def _fake_socket(family, *args, **kwargs):
+            if family == socket.AF_INET6:
+                raise OSError("Address family not supported by protocol")
+            return real_socket(family, *args, **kwargs)
+
+        try:
+            with patch("vless_installer.modules.pq_vless.socket.socket",
+                       side_effect=_fake_socket):
+                # IPv4 занят → False, не падает на IPv6
+                self.assertFalse(_port_is_free(taken_port))
+        finally:
+            s.close()
+
+    def test_find_unused_port_works_without_ipv6(self):
+        """Regression: find_unused_port делегирует в _port_is_free — должен
+        работать на хосте без IPv6 (через фикс в _port_is_free)."""
+        from vless_installer.modules import pq_vless
+        # находим свободный IPv4-порт
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("", 0))
+        free_port = s.getsockname()[1]
+        s.close()
+
+        real_socket = socket.socket
+
+        def _fake_socket(family, *args, **kwargs):
+            if family == socket.AF_INET6:
+                raise OSError("Address family not supported by protocol")
+            return real_socket(family, *args, **kwargs)
+
+        with patch("vless_installer.modules.pq_vless.socket.socket",
+                   side_effect=_fake_socket):
+            # не падает, возвращает свободный порт
+            result = pq_vless.find_unused_port(free_port)
+            self.assertIsInstance(result, int)
+            self.assertGreaterEqual(result, 1)
+
 
 class TestFindUnusedPort(unittest.TestCase):
     """find_unused_port."""
