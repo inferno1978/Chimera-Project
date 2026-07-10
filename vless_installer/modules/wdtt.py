@@ -138,8 +138,12 @@ _MODULE_STATE     = Path("/var/lib/xray-installer/wdtt.json")
 
 # GitHub
 _GITHUB_REPO      = "SpaceNeuroX/proxy-turn-vk-android"
-_GITHUB_API       = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
-_SOURCE_URL       = f"https://github.com/{_GITHUB_REPO}/archive/refs/heads/master.tar.gz"
+# _GITHUB_API — удалён при миграции на download_manager (был dead code,
+# ни разу не использовался — модуль всегда собирает из master.tar.gz, а
+# не из релизных артефактов).
+# _SOURCE_URL — удалён при миграции. Теперь зеркала (прямой GitHub +
+# codeload + 7 gh-proxy) собираются в wdtt_mirrors.get_wdtt_source_mirrors()
+# и перебираются автоматически через fetch_package(WDTT_SOURCE_SPEC).
 
 # Порты по умолчанию
 _DEFAULT_DTLS_PORT = 56000   # входящий от TURN-сервера
@@ -417,6 +421,11 @@ def _go_required_version(gomod: Path) -> str:
     return "1.21.0"
 
 def _http_download(url: str, dest: Path, timeout: int = 180) -> bool:
+    """DEPRECATED: оставлен для обратной совместимости со старыми тестами.
+
+    Новый код использует fetch_package() из download_manager.py с
+    PackageSpec из go_toolchain_packages.py / wdtt_packages.py.
+    """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp, dest.open("wb") as f:
             shutil.copyfileobj(resp, f)
@@ -426,10 +435,29 @@ def _http_download(url: str, dest: Path, timeout: int = 180) -> bool:
 
 def _install_go_toolchain(required: str) -> Optional[str]:
     """
-    Скачивает официальный архив Go с go.dev в /usr/local/go и линкует
-    /usr/local/bin/go — apt в большинстве дистрибутивов даёт версию Go
-    старше, чем требуют современные go.mod (см. golang-go в Ubuntu).
+    Скачивает официальный архив Go через download_manager.fetch_package().
+
+    МИГРАЦИЯ: раньше использовался _http_download() с ОДНИМ прямым URL
+    (https://go.dev/dl/{version}.linux-{arch}.tar.gz) БЕЗ зеркал, БЕЗ
+    fallback, БЕЗ проверки ручного размещения.
+
+    Теперь используется fetch_package(GO_TOOLCHAIN_SPEC, version=..., arch=...)
+    из download_manager.py. fetch_package сам:
+      1. Проверяет /root/{version}.linux-{arch}.tar.gz (manual_incoming_dir
+         из spec) — если найден, использует без сети (WinSCP-friendly).
+      2. Иначе — перебирает 4 зеркала (go.dev + golang.google.cn +
+         mirrors.aliyun.com + mirrors.tencent.com) по очереди через urllib.
+      3. При успехе — post_install распаковывает в /usr/local/go и создаёт
+         симлинки в /usr/local/bin/.
+      4. При провале — print_manual_hint() с инструкцией.
+
+    Версия Go разрешается динамически через go.dev/VERSION?m=text (API
+    metadata — non-migration, остаётся здесь). Если запрос падает — fallback
+    на go{required}.
     """
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+
     arch = _go_arch()
     try:
         with urllib.request.urlopen("https://go.dev/VERSION?m=text", timeout=15) as resp:
@@ -439,34 +467,17 @@ def _install_go_toolchain(required: str) -> Optional[str]:
     except Exception:
         version = f"go{required}"
 
-    url = f"https://go.dev/dl/{version}.linux-{arch}.tar.gz"
-    tarball = Path(f"/tmp/{version}.linux-{arch}.tar.gz")
-    print(f"  {CYAN}→{NC}  Скачиваю {version} ({arch})...")
-    if not _http_download(url, tarball):
-        print(f"  {RED}✗{NC}  Не удалось скачать {url}")
+    print(f"  {CYAN}→{NC}  Скачиваю {version} ({arch}, через download_manager)...")
+    ok = fetch_package(GO_TOOLCHAIN_SPEC, version=version, arch=arch)
+    if not ok:
+        print(f"  {RED}✗{NC}  Не удалось скачать Go {version} ({arch}).")
         return None
 
-    go_dir = Path("/usr/local/go")
-    if go_dir.exists():
-        _run(["rm", "-rf", str(go_dir)])
-    r = _run(["tar", "-C", "/usr/local", "-xzf", str(tarball)])
-    tarball.unlink(missing_ok=True)
-    if r.returncode != 0:
-        print(f"  {RED}✗{NC}  Не удалось распаковать архив Go.")
+    go = _check_go()
+    if not go:
+        print(f"  {RED}✗{NC}  Go скачан и распакован, но /usr/local/bin/go не работает.")
         return None
-
-    for exe in ("go", "gofmt"):
-        src = go_dir / "bin" / exe
-        dst = Path("/usr/local/bin") / exe
-        if src.exists():
-            try:
-                if dst.exists() or dst.is_symlink():
-                    dst.unlink()
-                dst.symlink_to(src)
-            except Exception:
-                pass
-
-    return _check_go()
+    return go
 
 def _ensure_go(required: str) -> Optional[str]:
     """Возвращает путь к go, удовлетворяющему required, ставя свежий Go при необходимости."""
@@ -479,96 +490,48 @@ def _ensure_go(required: str) -> Optional[str]:
 
 def _build_wdtt_server() -> bool:
     """
-    Скачивает исходники qWDTT и собирает wdtt-server.
+    Скачивает исходники qWDTT и собирает wdtt-server через
+    download_manager.fetch_package().
+
+    МИГРАЦИЯ: раньше использовался urllib.request.urlretrieve() с ОДНИМ
+    прямым URL (https://github.com/SpaceNeuroX/proxy-turn-vk-android/
+    archive/refs/heads/master.tar.gz) БЕЗ зеркал, БЕЗ fallback, БЕЗ
+    проверки ручного размещения.
+
+    Теперь используется fetch_package(WDTT_SOURCE_SPEC) из download_manager.py.
+    fetch_package сам:
+      1. Проверяет /root/proxy-turn-vk-android-master.tar.gz
+         (manual_incoming_dir из spec) — если найден, использует без сети.
+      2. Иначе — перебирает 9 зеркал (прямой GitHub + codeload + 7
+         gh-proxy) по очереди через urllib.
+      3. При успехе — post_install распаковывает, собирает через go build,
+         atomic-replaces /usr/local/bin/wdtt-server.
+      4. При провале — print_manual_hint() с инструкцией.
+
+    Go toolchain устанавливается ОТДЕЛЬНО через _ensure_go() — это
+    ответственность вызывающего кода, не WDTT_SOURCE_SPEC.post_install.
+
     Бинарник помещается в /usr/local/bin/wdtt-server.
     """
-    tmp = Path(tempfile.mkdtemp())
-    try:
-        archive = tmp / "master.tar.gz"
-        print(f"  {CYAN}→{NC}  Скачиваю исходники qWDTT...")
-        urllib.request.urlretrieve(_SOURCE_URL, str(archive))
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
 
-        print(f"  {CYAN}→{NC}  Распаковываю...")
-        _run(["tar", "-xzf", str(archive), "-C", str(tmp)], check=True)
-
-        # Ищем директорию с исходниками
-        src_dirs = list(tmp.glob("proxy-turn-vk-android-*"))
-        if not src_dirs:
-            print(f"  {RED}✗{NC}  Не найдена директория с исходниками.")
-            return False
-        src_dir = src_dirs[0]
-
-        # go.mod исходников требует конкретную версию Go (например 1.25.0) —
-        # ставим официальный тулчейн с go.dev под эту версию, чтобы не зависеть
-        # от устаревшего пакета golang-go из apt и от GOTOOLCHAIN-автодокачки.
-        required = _go_required_version(src_dir / "go.mod")
-        go = _ensure_go(required)
-        if not go:
-            print(f"  {RED}✗{NC}  Не удалось установить подходящий Go ({required}+).")
-            return False
-
-        # Исходники qWDTT содержат go.mod, но НЕ содержат go.sum.
-        # При -mod=readonly (по умолчанию с Go 1.16+) это даёт ошибку
-        # "missing go.sum entry" — поэтому сначала достраиваем go.sum.
-        print(f"  {CYAN}→{NC}  Разрешаю зависимости Go-модуля...")
-        r = _run([go, "mod", "tidy"], capture=True, env=dict(os.environ), cwd=str(src_dir))
-        if r.returncode != 0:
-            # Запасной путь — на серверах без доступа к sumdb/proxy.
-            offline_env = {**os.environ, "GOSUMDB": "off"}
-            r2 = _run([go, "mod", "tidy"], capture=True, env=offline_env, cwd=str(src_dir))
-            if r2.returncode != 0:
-                print(f"  {RED}✗{NC}  Не удалось разрешить зависимости Go (go mod tidy):")
-                print(f"  {DIM}{(r.stderr or r.stdout or '')[:500]}{NC}")
-                print(f"  {DIM}Проверьте доступ к proxy.golang.org с этого сервера.{NC}")
-                return False
-
-        print(f"  {CYAN}→{NC}  Компилирую wdtt-server (это займёт ~1-2 минуты)...")
-        env = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"}
-        r = _run(
-            [go, "build", "-o", str(tmp / "wdtt-server"),
-             "-ldflags", "-s -w", "./server.go"],
-            capture=True, env=env, cwd=str(src_dir),
-        )
-        if r.returncode != 0:
-            print(f"  {RED}✗{NC}  Ошибка компиляции:")
-            print(f"  {DIM}{(r.stderr or r.stdout or '')[:500]}{NC}")
-            return False
-
-        built = tmp / "wdtt-server"
-        if not built.exists():
-            print(f"  {RED}✗{NC}  Бинарник не создан после компиляции.")
-            return False
-
-        # Перед заменой бинарника останавливаем сервис если он запущен.
-        # shutil.copy2() на работающий процесс вызывает [Errno 26] Text file
-        # busy — Linux запрещает перезаписывать исполняемый файл напрямую.
-        # Правильный способ: удалить старый файл (unlink), затем скопировать
-        # новый — или остановить сервис, скопировать, потом запустить снова.
-        _svc_was_active = False
-        if _SERVICE_FILE.exists():
-            _chk = _run(["systemctl", "is-active", "--quiet", "wdtt"],
-                        capture=True, check=False)
-            _svc_was_active = (_chk.returncode == 0)
-            if _svc_was_active:
-                _run(["systemctl", "stop", "wdtt"], capture=True, check=False)
-
-        # Атомарная замена: unlink + copy вместо перезаписи
-        if _BIN_PATH.exists():
-            _BIN_PATH.unlink()
-        shutil.copy2(str(built), str(_BIN_PATH))
-        _BIN_PATH.chmod(0o755)
-
-        if _svc_was_active:
-            _run(["systemctl", "start", "wdtt"], capture=True, check=False)
-
-        print(f"  {GREEN}✓{NC}  wdtt-server установлен: {_BIN_PATH}")
-        return True
-
-    except Exception as e:
-        print(f"  {RED}✗{NC}  Ошибка: {e}")
+    # Сначала убеждаемся что Go toolchain доступен — post_install WDTT_SOURCE_SPEC
+    # будет звать go build и упадёт без Go.
+    # _ensure_go() сам вызывает _install_go_toolchain → fetch_package(GO_TOOLCHAIN_SPEC)
+    # если текущий Go старее требуемого или отсутствует.
+    # Используем _go_required_version с пустым go.mod Path — вернёт дефолт "1.21.0".
+    required = _go_required_version(Path("/nonexistent/go.mod"))
+    go = _ensure_go(required)
+    if not go:
+        print(f"  {RED}✗{NC}  Не удалось установить подходящий Go ({required}+).")
         return False
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+
+    print(f"  {CYAN}→{NC}  Скачиваю исходники qWDTT (через download_manager)...")
+    ok = fetch_package(WDTT_SOURCE_SPEC)
+    if ok:
+        print(f"  {GREEN}✓{NC}  wdtt-server установлен: {_BIN_PATH}")
+    return ok
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  IPTABLES

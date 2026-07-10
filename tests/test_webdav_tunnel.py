@@ -176,5 +176,165 @@ class TestIsInstalled(unittest.TestCase):
             self.assertTrue(_is_installed())
 
 
+# ============================================================================
+#  ТЕСТЫ _build_webdav_tunnel / _install_go_toolchain — интеграция с
+#  download_manager.fetch_package (Волна 2)
+# ============================================================================
+# После миграции _build_webdav_tunnel() и _install_go_toolchain() делегируют
+# в fetch_package() с PackageSpec из webdav_packages.py / go_toolchain_packages.py.
+# Покрываем 4 сценария из ТЗ + sanity-проверки specs.
+class TestBuildWebdavTunnelMigrated(unittest.TestCase):
+    """_build_webdav_tunnel — делегирует в fetch_package(WEBDAV_SOURCE_SPEC)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_build_calls_fetch_package_with_webdav_spec(self):
+        """_build_webdav_tunnel вызывает fetch_package(WEBDAV_SOURCE_SPEC)."""
+        from vless_installer.modules import webdav_tunnel
+        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+
+        with patch("vless_installer.modules.webdav_tunnel._ensure_go",
+                   return_value="/usr/local/bin/go"), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=True) as mock_fp:
+            result = webdav_tunnel._build_webdav_tunnel()
+
+        self.assertTrue(result)
+        mock_fp.assert_called_once()
+        spec_arg = mock_fp.call_args.args[0]
+        self.assertIs(spec_arg, WEBDAV_SOURCE_SPEC)
+
+    def test_build_returns_false_when_go_unavailable(self):
+        """Если _ensure_go вернул None — _build_webdav_tunnel сразу False,
+        fetch_package НЕ вызывается."""
+        from vless_installer.modules import webdav_tunnel
+        with patch("vless_installer.modules.webdav_tunnel._ensure_go",
+                   return_value=None), \
+             patch("vless_installer.modules.download_manager.fetch_package") as mock_fp:
+            result = webdav_tunnel._build_webdav_tunnel()
+        self.assertFalse(result)
+        mock_fp.assert_not_called()
+
+    def test_build_returns_false_when_fetch_package_fails(self):
+        """Сценарий 4: полный провал всех зеркал → False."""
+        from vless_installer.modules import webdav_tunnel
+        with patch("vless_installer.modules.webdav_tunnel._ensure_go",
+                   return_value="/usr/local/bin/go"), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=False) as mock_fp:
+            result = webdav_tunnel._build_webdav_tunnel()
+        self.assertFalse(result)
+        mock_fp.assert_called_once()
+
+
+class TestInstallGoToolchainMigrated(unittest.TestCase):
+    """_install_go_toolchain — делегирует в fetch_package(GO_TOOLCHAIN_SPEC)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_install_calls_fetch_package_with_go_spec(self):
+        """_install_go_toolchain вызывает fetch_package(GO_TOOLCHAIN_SPEC,
+        version=..., arch=...)."""
+        from vless_installer.modules import webdav_tunnel
+        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.read.return_value = b"go1.23.4\n"
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+
+        with patch("vless_installer.modules.webdav_tunnel.urllib.request.urlopen",
+                   return_value=mock_resp), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=True) as mock_fp, \
+             patch("vless_installer.modules.webdav_tunnel._check_go",
+                   return_value="/usr/local/bin/go"):
+            result = webdav_tunnel._install_go_toolchain("1.22.0")
+
+        self.assertEqual(result, "/usr/local/bin/go")
+        mock_fp.assert_called_once()
+        spec_arg = mock_fp.call_args.args[0]
+        self.assertIs(spec_arg, GO_TOOLCHAIN_SPEC)
+        self.assertEqual(mock_fp.call_args.kwargs.get("version"), "go1.23.4")
+        self.assertEqual(mock_fp.call_args.kwargs.get("arch"), "amd64")
+
+    def test_install_returns_none_when_fetch_fails(self):
+        from vless_installer.modules import webdav_tunnel
+
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.read.return_value = b"go1.23.4\n"
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+
+        with patch("vless_installer.modules.webdav_tunnel.urllib.request.urlopen",
+                   return_value=mock_resp), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=False):
+            result = webdav_tunnel._install_go_toolchain("1.22.0")
+        self.assertIsNone(result)
+
+    def test_install_fallback_version_on_metadata_failure(self):
+        """Если go.dev/VERSION?m=text недоступен — fallback на go{required}."""
+        from vless_installer.modules import webdav_tunnel
+        from urllib.error import URLError
+
+        with patch("vless_installer.modules.webdav_tunnel.urllib.request.urlopen",
+                   side_effect=URLError("blocked")), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=True) as mock_fp, \
+             patch("vless_installer.modules.webdav_tunnel._check_go",
+                   return_value="/usr/local/bin/go"):
+            webdav_tunnel._install_go_toolchain("1.22.0")
+
+        self.assertEqual(mock_fp.call_args.kwargs.get("version"), "go1.22.0")
+
+
+class TestWebdavSpecSanity(unittest.TestCase):
+    """Sanity-проверки WEBDAV_SOURCE_SPEC — что мигрированный spec корректен."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_spec_filename_is_main_tarball(self):
+        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        self.assertEqual(
+            WEBDAV_SOURCE_SPEC.filename_builder(),
+            "webdav-tunnel-main.tar.gz",
+        )
+
+    def test_spec_install_dests_is_tmp_webdav_packages(self):
+        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        self.assertEqual(WEBDAV_SOURCE_SPEC.install_dests, [Path("/tmp/webdav_packages")])
+
+    def test_spec_manual_dir_is_root(self):
+        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        self.assertEqual(WEBDAV_SOURCE_SPEC.manual_incoming_dir, Path("/root"))
+
+    def test_spec_manual_dir_not_in_install_dests(self):
+        """КРИТИЧЕСКИЙ ИНВАРИАНТ: manual_dir != install_dests (баг 21d7baf)."""
+        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        for dest in WEBDAV_SOURCE_SPEC.install_dests:
+            self.assertNotEqual(WEBDAV_SOURCE_SPEC.manual_incoming_dir, dest)
+
+    def test_spec_min_size_is_1kb(self):
+        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        self.assertEqual(WEBDAV_SOURCE_SPEC.min_size, 1000)
+
+    def test_spec_post_install_is_set(self):
+        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        self.assertIsNotNone(WEBDAV_SOURCE_SPEC.post_install)
+
+    def test_spec_has_multiple_mirrors_for_fallback(self):
+        """Сценарий 2: spec имеет >1 зеркало для fallback."""
+        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        urls = WEBDAV_SOURCE_SPEC.mirror_urls_builder(
+            filename="webdav-tunnel-main.tar.gz",
+        )
+        self.assertGreaterEqual(len(urls), 2,
+            "WEBDAV_SOURCE_SPEC должен иметь минимум 2 зеркала для fallback")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

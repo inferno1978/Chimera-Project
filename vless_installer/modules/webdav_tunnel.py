@@ -145,7 +145,10 @@ _SERVICE_NAME  = "webdav-tunnel"
 _MODULE_STATE  = Path("/var/lib/xray-installer/webdav_tunnel.json")
 
 _GITHUB_REPO  = "spkprsnts/webdav-tunnel"
-_SOURCE_URL   = f"https://github.com/{_GITHUB_REPO}/archive/refs/heads/main.tar.gz"
+# _SOURCE_URL — удалён при миграции на download_manager. Теперь зеркала
+# (прямой GitHub + codeload + 7 gh-proxy) собираются в
+# webdav_mirrors.get_webdav_source_mirrors() и перебираются автоматически
+# через fetch_package(WEBDAV_SOURCE_SPEC).
 
 _DEFAULT_PORT = 8443
 
@@ -349,6 +352,11 @@ def _go_required_version(gomod: Path) -> str:
     return "1.22.0"
 
 def _http_download(url: str, dest: Path, timeout: int = 180) -> bool:
+    """DEPRECATED: оставлен для обратной совместимости со старыми тестами.
+
+    Новый код использует fetch_package() из download_manager.py с
+    PackageSpec из go_toolchain_packages.py / webdav_packages.py.
+    """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp, dest.open("wb") as f:
             shutil.copyfileobj(resp, f)
@@ -357,8 +365,29 @@ def _http_download(url: str, dest: Path, timeout: int = 180) -> bool:
         return False
 
 def _install_go_toolchain(required: str) -> Optional[str]:
-    """Качает официальный архив Go с go.dev в /usr/local/go — apt-версия
-    в большинстве дистрибутивов старее, чем требует современный go.mod."""
+    """Качает официальный архив Go через download_manager.fetch_package().
+
+    МИГРАЦИЯ: раньше использовался _http_download() с ОДНИМ прямым URL
+    (https://go.dev/dl/{version}.linux-{arch}.tar.gz) БЕЗ зеркал, БЕЗ
+    fallback, БЕЗ проверки ручного размещения.
+
+    Теперь используется fetch_package(GO_TOOLCHAIN_SPEC, version=..., arch=...)
+    из download_manager.py. fetch_package сам:
+      1. Проверяет /root/{version}.linux-{arch}.tar.gz (manual_incoming_dir
+         из spec) — если найден, использует без сети (WinSCP-friendly).
+      2. Иначе — перебирает 4 зеркала (go.dev + golang.google.cn +
+         mirrors.aliyun.com + mirrors.tencent.com) по очереди через urllib.
+      3. При успехе — post_install распаковывает в /usr/local/go и создаёт
+         симлинки в /usr/local/bin/.
+      4. При провале — print_manual_hint() с инструкцией.
+
+    Версия Go разрешается динамически через go.dev/VERSION?m=text (API
+    metadata — non-migration, остаётся здесь). Если запрос падает — fallback
+    на go{required}.
+    """
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+
     arch = _go_arch()
     try:
         with urllib.request.urlopen("https://go.dev/VERSION?m=text", timeout=15) as resp:
@@ -368,34 +397,17 @@ def _install_go_toolchain(required: str) -> Optional[str]:
     except Exception:
         version = f"go{required}"
 
-    url = f"https://go.dev/dl/{version}.linux-{arch}.tar.gz"
-    tarball = Path(f"/tmp/{version}.linux-{arch}.tar.gz")
-    print(f"  {CYAN}→{NC}  Скачиваю {version} ({arch})...")
-    if not _http_download(url, tarball):
-        print(f"  {RED}✗{NC}  Не удалось скачать {url}")
+    print(f"  {CYAN}→{NC}  Скачиваю {version} ({arch}, через download_manager)...")
+    ok = fetch_package(GO_TOOLCHAIN_SPEC, version=version, arch=arch)
+    if not ok:
+        print(f"  {RED}✗{NC}  Не удалось скачать Go {version} ({arch}).")
         return None
 
-    go_dir = Path("/usr/local/go")
-    if go_dir.exists():
-        _run(["rm", "-rf", str(go_dir)])
-    r = _run(["tar", "-C", "/usr/local", "-xzf", str(tarball)])
-    tarball.unlink(missing_ok=True)
-    if r.returncode != 0:
-        print(f"  {RED}✗{NC}  Не удалось распаковать архив Go.")
+    go = _check_go()
+    if not go:
+        print(f"  {RED}✗{NC}  Go скачан и распакован, но /usr/local/bin/go не работает.")
         return None
-
-    for exe in ("go", "gofmt"):
-        src = go_dir / "bin" / exe
-        dst = Path("/usr/local/bin") / exe
-        if src.exists():
-            try:
-                if dst.exists() or dst.is_symlink():
-                    dst.unlink()
-                dst.symlink_to(src)
-            except Exception:
-                pass
-
-    return _check_go()
+    return go
 
 def _ensure_go(required: str) -> Optional[str]:
     go = _check_go()
@@ -409,65 +421,47 @@ def _ensure_go(required: str) -> Optional[str]:
 #  СБОРКА БИНАРНИКА
 # ══════════════════════════════════════════════════════════════════════════════
 def _build_webdav_tunnel() -> bool:
-    """Скачивает исходники webdav-tunnel и собирает бинарник в
-    /usr/local/bin/webdav-tunnel (go build -o webdav-tunnel . — как
-    описано в README апстрима, единый бинарник для всех -mode)."""
-    tmp = Path(tempfile.mkdtemp())
-    try:
-        archive = tmp / "main.tar.gz"
-        print(f"  {CYAN}→{NC}  Скачиваю исходники webdav-tunnel...")
-        urllib.request.urlretrieve(_SOURCE_URL, str(archive))
+    """Скачивает исходники webdav-tunnel и собирает бинарник через
+    download_manager.fetch_package().
 
-        print(f"  {CYAN}→{NC}  Распаковываю...")
-        _run(["tar", "-xzf", str(archive), "-C", str(tmp)], check=True)
+    МИГРАЦИЯ: раньше использовался urllib.request.urlretrieve() с ОДНИМ
+    прямым URL (https://github.com/spkprsnts/webdav-tunnel/archive/
+    refs/heads/main.tar.gz) БЕЗ зеркал, БЕЗ fallback, БЕЗ проверки
+    ручного размещения.
 
-        src_dirs = list(tmp.glob("webdav-tunnel-*"))
-        if not src_dirs:
-            print(f"  {RED}✗{NC}  Не найдена директория с исходниками.")
-            return False
-        src_dir = src_dirs[0]
+    Теперь используется fetch_package(WEBDAV_SOURCE_SPEC) из
+    download_manager.py. fetch_package сам:
+      1. Проверяет /root/webdav-tunnel-main.tar.gz (manual_incoming_dir
+         из spec) — если найден, использует без сети (WinSCP-friendly).
+      2. Иначе — перебирает 9 зеркал (прямой GitHub + codeload + 7
+         gh-proxy) по очереди через urllib.
+      3. При успехе — post_install распаковывает, собирает через go build,
+         копирует в /usr/local/bin/webdav-tunnel (chmod 0o755).
+      4. При провале — print_manual_hint() с инструкцией.
 
-        required = _go_required_version(src_dir / "go.mod")
-        go = _ensure_go(required)
-        if not go:
-            print(f"  {RED}✗{NC}  Не удалось установить подходящий Go ({required}+).")
-            return False
+    Go toolchain устанавливается ОТДЕЛЬНО через _ensure_go() — это
+    ответственность вызывающего кода, не WEBDAV_SOURCE_SPEC.post_install.
 
-        print(f"  {CYAN}→{NC}  Компилирую webdav-tunnel (это займёт ~1-2 минуты)...")
-        env = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"}
-        r = _run(
-            [go, "build", "-o", str(tmp / "webdav-tunnel"), "-ldflags", "-s -w", "."],
-            capture=True, env=env, cwd=str(src_dir),
-        )
-        if r.returncode != 0:
-            # go.sum может не покрывать все зависимости в офлайн-среде — добираем.
-            print(f"  {DIM}Доразрешаю зависимости (go mod tidy)...{NC}")
-            offline_env = {**env, "GOSUMDB": "off"}
-            _run([go, "mod", "tidy"], capture=True, env=offline_env, cwd=str(src_dir))
-            r = _run(
-                [go, "build", "-o", str(tmp / "webdav-tunnel"), "-ldflags", "-s -w", "."],
-                capture=True, env=env, cwd=str(src_dir),
-            )
-        if r.returncode != 0:
-            print(f"  {RED}✗{NC}  Ошибка компиляции:")
-            print(f"  {DIM}{(r.stderr or r.stdout or '')[:500]}{NC}")
-            return False
+    Бинарник помещается в /usr/local/bin/webdav-tunnel (go build -o
+    webdav-tunnel . — как описано в README апстрима, единый бинарник для
+    всех -mode).
+    """
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
 
-        built = tmp / "webdav-tunnel"
-        if not built.exists():
-            print(f"  {RED}✗{NC}  Бинарник не создан после компиляции.")
-            return False
-
-        shutil.copy2(str(built), str(_BIN_PATH))
-        _BIN_PATH.chmod(0o755)
-        print(f"  {GREEN}✓{NC}  webdav-tunnel установлен: {_BIN_PATH}")
-        return True
-
-    except Exception as e:
-        print(f"  {RED}✗{NC}  Ошибка: {e}")
+    # Сначала убеждаемся что Go toolchain доступен.
+    # Используем _go_required_version с пустым go.mod Path — вернёт дефолт "1.22.0".
+    required = _go_required_version(Path("/nonexistent/go.mod"))
+    go = _ensure_go(required)
+    if not go:
+        print(f"  {RED}✗{NC}  Не удалось установить подходящий Go ({required}+).")
         return False
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+
+    print(f"  {CYAN}→{NC}  Скачиваю исходники webdav-tunnel (через download_manager)...")
+    ok = fetch_package(WEBDAV_SOURCE_SPEC)
+    if ok:
+        print(f"  {GREEN}✓{NC}  webdav-tunnel установлен: {_BIN_PATH}")
+    return ok
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  IPTABLES / UFW  (только режим selfhosted — у external нет входящего порта)

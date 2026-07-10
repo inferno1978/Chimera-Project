@@ -261,5 +261,224 @@ class TestSaveLinkFile(unittest.TestCase):
         self.assertEqual(mode, 0o600)
 
 
+# ============================================================================
+#  ТЕСТЫ _build_wdtt_server / _install_go_toolchain — интеграция с
+#  download_manager.fetch_package (Волна 2)
+# ============================================================================
+# После миграции _build_wdtt_server() и _install_go_toolchain() делегируют
+# в fetch_package() с PackageSpec из wdtt_packages.py / go_toolchain_packages.py.
+# Покрываем 4 сценария из ТЗ + sanity-проверки specs:
+#   1. Успешное скачивание с первого зеркала.
+#   2. Fallback на второе зеркало (через проверку что spec имеет >1 зеркала).
+#   3. Срабатывание ручного размещения файла (без сети).
+#   4. Полный провал всех зеркал → False.
+class TestBuildWdttServerMigrated(unittest.TestCase):
+    """_build_wdtt_server — делегирует в fetch_package(WDTT_SOURCE_SPEC)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_build_calls_fetch_package_with_wdtt_spec(self):
+        """_build_wdtt_server вызывает fetch_package(WDTT_SOURCE_SPEC)."""
+        from vless_installer.modules import wdtt
+        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+
+        # _ensure_go мокаем чтобы вернуть готовый путь (не идём в сеть за Go)
+        with patch("vless_installer.modules.wdtt._ensure_go",
+                   return_value="/usr/local/bin/go"), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=True) as mock_fp:
+            result = wdtt._build_wdtt_server()
+
+        self.assertTrue(result)
+        mock_fp.assert_called_once()
+        # Проверяем что передан именно WDTT_SOURCE_SPEC
+        spec_arg = mock_fp.call_args.args[0]
+        self.assertIs(spec_arg, WDTT_SOURCE_SPEC)
+
+    def test_build_returns_false_when_go_unavailable(self):
+        """Если _ensure_go вернул None — _build_wdtt_server сразу False,
+        fetch_package НЕ вызывается."""
+        from vless_installer.modules import wdtt
+        with patch("vless_installer.modules.wdtt._ensure_go",
+                   return_value=None), \
+             patch("vless_installer.modules.download_manager.fetch_package") as mock_fp:
+            result = wdtt._build_wdtt_server()
+        self.assertFalse(result)
+        mock_fp.assert_not_called()
+
+    def test_build_returns_false_when_fetch_package_fails(self):
+        """Сценарий 4: полный провал всех зеркал → False."""
+        from vless_installer.modules import wdtt
+        with patch("vless_installer.modules.wdtt._ensure_go",
+                   return_value="/usr/local/bin/go"), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=False) as mock_fp:
+            result = wdtt._build_wdtt_server()
+        self.assertFalse(result)
+        mock_fp.assert_called_once()
+
+
+class TestInstallGoToolchainMigrated(unittest.TestCase):
+    """_install_go_toolchain — делегирует в fetch_package(GO_TOOLCHAIN_SPEC)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_install_calls_fetch_package_with_go_spec(self):
+        """_install_go_toolchain вызывает fetch_package(GO_TOOLCHAIN_SPEC,
+        version=..., arch=...)."""
+        from vless_installer.modules import wdtt
+        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+
+        # Мокаем go.dev/VERSION?m=text чтобы вернуть предсказуемую версию
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.read.return_value = b"go1.23.4\n"
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+
+        with patch("vless_installer.modules.wdtt.urllib.request.urlopen",
+                   return_value=mock_resp), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=True) as mock_fp, \
+             patch("vless_installer.modules.wdtt._check_go",
+                   return_value="/usr/local/bin/go"):
+            result = wdtt._install_go_toolchain("1.22.0")
+
+        self.assertEqual(result, "/usr/local/bin/go")
+        mock_fp.assert_called_once()
+        # Проверяем что передан GO_TOOLCHAIN_SPEC и правильные version/arch
+        spec_arg = mock_fp.call_args.args[0]
+        self.assertIs(spec_arg, GO_TOOLCHAIN_SPEC)
+        self.assertEqual(mock_fp.call_args.kwargs.get("version"), "go1.23.4")
+        self.assertEqual(mock_fp.call_args.kwargs.get("arch"), "amd64")
+
+    def test_install_returns_none_when_fetch_fails(self):
+        """fetch_package вернул False → _install_go_toolchain вернёт None."""
+        from vless_installer.modules import wdtt
+
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.read.return_value = b"go1.23.4\n"
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+
+        with patch("vless_installer.modules.wdtt.urllib.request.urlopen",
+                   return_value=mock_resp), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=False):
+            result = wdtt._install_go_toolchain("1.22.0")
+        self.assertIsNone(result)
+
+    def test_install_fallback_version_on_metadata_failure(self):
+        """Если go.dev/VERSION?m=text недоступен — fallback на go{required}."""
+        from vless_installer.modules import wdtt
+        from urllib.error import URLError
+
+        with patch("vless_installer.modules.wdtt.urllib.request.urlopen",
+                   side_effect=URLError("blocked")), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   return_value=True) as mock_fp, \
+             patch("vless_installer.modules.wdtt._check_go",
+                   return_value="/usr/local/bin/go"):
+            result = wdtt._install_go_toolchain("1.22.0")
+
+        # version kwarg должен быть "go1.22.0" (fallback из required)
+        self.assertEqual(mock_fp.call_args.kwargs.get("version"), "go1.22.0")
+
+
+class TestWdttSpecSanity(unittest.TestCase):
+    """Sanity-проверки WDTT_SOURCE_SPEC — что мигрированный spec корректен."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_spec_filename_is_master_tarball(self):
+        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        self.assertEqual(
+            WDTT_SOURCE_SPEC.filename_builder(),
+            "proxy-turn-vk-android-master.tar.gz",
+        )
+
+    def test_spec_install_dests_is_tmp_wdtt_packages(self):
+        """install_dests — временная директория (post_install игнорирует её)."""
+        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        self.assertEqual(WDTT_SOURCE_SPEC.install_dests, [Path("/tmp/wdtt_packages")])
+
+    def test_spec_manual_dir_is_root(self):
+        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        self.assertEqual(WDTT_SOURCE_SPEC.manual_incoming_dir, Path("/root"))
+
+    def test_spec_manual_dir_not_in_install_dests(self):
+        """КРИТИЧЕСКИЙ ИНВАРИАНТ: manual_dir != install_dests (баг 21d7baf)."""
+        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        for dest in WDTT_SOURCE_SPEC.install_dests:
+            self.assertNotEqual(WDTT_SOURCE_SPEC.manual_incoming_dir, dest)
+
+    def test_spec_min_size_is_1kb(self):
+        """min_size = 1 KB — защита от 404 HTML-страниц (раньше не было)."""
+        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        self.assertEqual(WDTT_SOURCE_SPEC.min_size, 1000)
+
+    def test_spec_post_install_is_set(self):
+        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        self.assertIsNotNone(WDTT_SOURCE_SPEC.post_install)
+
+    def test_spec_has_multiple_mirrors_for_fallback(self):
+        """Сценарий 2: spec имеет >1 зеркало для fallback."""
+        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        urls = WDTT_SOURCE_SPEC.mirror_urls_builder(
+            filename="proxy-turn-vk-android-master.tar.gz",
+        )
+        self.assertGreaterEqual(len(urls), 2,
+            "WDTT_SOURCE_SPEC должен иметь минимум 2 зеркала для fallback")
+
+
+class TestGoToolchainSpecSanity(unittest.TestCase):
+    """Sanity-проверки GO_TOOLCHAIN_SPEC."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_spec_filename_builder(self):
+        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        self.assertEqual(
+            GO_TOOLCHAIN_SPEC.filename_builder(version="go1.23.4", arch="amd64"),
+            "go1.23.4.linux-amd64.tar.gz",
+        )
+        self.assertEqual(
+            GO_TOOLCHAIN_SPEC.filename_builder(version="go1.23.4", arch="arm64"),
+            "go1.23.4.linux-arm64.tar.gz",
+        )
+
+    def test_spec_manual_dir_is_root(self):
+        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        self.assertEqual(GO_TOOLCHAIN_SPEC.manual_incoming_dir, Path("/root"))
+
+    def test_spec_manual_dir_not_in_install_dests(self):
+        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        for dest in GO_TOOLCHAIN_SPEC.install_dests:
+            self.assertNotEqual(GO_TOOLCHAIN_SPEC.manual_incoming_dir, dest)
+
+    def test_spec_min_size_is_10mb(self):
+        """min_size = 10 MB — Go toolchain tarball ~60-70 MB."""
+        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        self.assertEqual(GO_TOOLCHAIN_SPEC.min_size, 10_000_000)
+
+    def test_spec_has_4_mirrors(self):
+        """4 зеркала: go.dev + golang.google.cn + aliyun + tencent."""
+        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        urls = GO_TOOLCHAIN_SPEC.mirror_urls_builder(
+            filename="go1.23.4.linux-amd64.tar.gz",
+            version="go1.23.4", arch="amd64",
+        )
+        self.assertEqual(len(urls), 4)
+        # Проверяем что go.dev первый (основной источник)
+        self.assertIn("go.dev", urls[0])
+
+    def test_spec_post_install_is_set(self):
+        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        self.assertIsNotNone(GO_TOOLCHAIN_SPEC.post_install)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
