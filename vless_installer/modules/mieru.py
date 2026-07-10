@@ -1651,10 +1651,6 @@ def _obfuscation_menu() -> None:
     # Применяем
     _box_info(f"Применение пресета '{selected_name}'...")
 
-    # Обновляем state
-    state["traffic_preset"] = selected_name
-    proto_save_state(_MODULE_STATE, state)
-
     # Перегенерация server.json
     users = state.get("users", [])
     port_start = state.get("port_start", _DEFAULT_PORT_START)
@@ -1667,6 +1663,7 @@ def _obfuscation_menu() -> None:
     err = _apply_server_config(cfg)
     if err:
         _box_warn(f"Ошибка применения конфига: {err}")
+        _box_warn("State не изменён — сервер работает с прежним пресетом.")
         _pause()
         return
 
@@ -1677,19 +1674,27 @@ def _obfuscation_menu() -> None:
 
     r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
     if r.stdout.strip() == "active":
-        _box_ok(f"Пресет '{selected_name}' применён. mita перезапущен.")
-        # Обновляем клиентские ссылки с новым traffic-pattern
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
-        # Сохраняем base64-pattern в state для клиентских ссылок
-        state["traffic_pattern_b64"] = get_preset_base64(
-            "disabled" if selected_name == "disabled" else
-            "basic" if selected_name == "basic" else
-            "medium" if selected_name == "medium" else
-            "aggressive"
-        )
+        # mita успешно перезапущен — теперь безопасно коммитить state
+        state["traffic_preset"] = selected_name
         proto_save_state(_MODULE_STATE, state)
+        _box_ok(f"Пресет '{selected_name}' применён. mita перезапущен.")
     else:
-        _box_warn(f"mita не запустился после restart. Проверьте: journalctl -u {_SERVICE_NAME}")
+        # mita не поднялся — state НЕ меняем, пользователю нужно разобраться
+        _box_warn(f"mita не запустился после restart. "
+                  f"State не изменён — пресет '{current}' остаётся активным.")
+        _box_warn(f"Проверьте: journalctl -u {_SERVICE_NAME}")
+        # Пытаемся откатить server.json на прежний конфиг
+        old_tp = _MIERU_TRAFFIC_PRESETS.get(current, {}).get("config")
+        old_cfg = _build_server_config(users, port_start, port_end, protocol,
+                                       traffic_pattern=old_tp)
+        _apply_server_config(old_cfg)
+        _run(["systemctl", "restart", _SERVICE_NAME])
+        time.sleep(2)
+        r2 = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
+        if r2.stdout.strip() == "active":
+            _box_info("Откат на прежний пресет выполнен, mita активна.")
+        else:
+            _box_warn("Откат не удался — mita не активна. Требуется ручное вмешательство.")
 
     _pause()
 
