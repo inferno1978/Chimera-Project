@@ -253,19 +253,25 @@ def _probe_node(host: str, port: int) -> dict:
 
 def _compute_score(lat_ms: float | None,
                    bw_ms:  float | None,
-                   load:   int,
+                   load:   int | None,
                    weights: dict) -> float:
     """
     Composite score [0..1]: меньше = лучше.
     Нормализует каждую метрику и взвешивает.
+
+    None для любой метрики = нет данных → берётся NORM_*_WORST (наихудший
+    вариант). Реальное значение 0 (например lat=0.0 мс — идеальный пинг)
+    используется как есть: `0.0 or X` в Python равно X (потому что 0.0
+    falsy), что ранее ломало оценку идеальных узлов. Явная проверка
+    `is not None` отличает «нет данных» от «значение 0».
     """
     w_lat = weights.get("latency",   W_LATENCY)
     w_bw  = weights.get("bandwidth", W_BANDWIDTH)
     w_ld  = weights.get("load",      W_LOAD)
 
-    lat_norm  = min(1.0, (lat_ms or NORM_LAT_MS_WORST)  / NORM_LAT_MS_WORST)
-    bw_norm   = min(1.0, (bw_ms  or NORM_BW_MS_WORST)   / NORM_BW_MS_WORST)
-    load_norm = min(1.0,  load                           / NORM_LOAD_WORST)
+    lat_norm  = min(1.0, (lat_ms if lat_ms is not None else NORM_LAT_MS_WORST) / NORM_LAT_MS_WORST)
+    bw_norm   = min(1.0, (bw_ms  if bw_ms  is not None else NORM_BW_MS_WORST)  / NORM_BW_MS_WORST)
+    load_norm = min(1.0, (load   if load   is not None else NORM_LOAD_WORST)   / NORM_LOAD_WORST)
 
     return round(w_lat * lat_norm + w_bw * bw_norm + w_ld * load_norm, 4)
 

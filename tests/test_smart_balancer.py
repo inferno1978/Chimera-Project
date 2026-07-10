@@ -54,35 +54,46 @@ class TestComputeScore(unittest.TestCase):
         return {"latency": 0.5, "bandwidth": 0.3, "load": 0.2}
 
     def test_perfect_metrics_returns_zero(self):
-        """lat=1, bw=1, load=0 → нормированные значения близки к 0.
-        NOTE: lat=0 даёт NORM_LAT_MS_WORST (потому что 0 falsy в `lat or NORM`)."""
-        from vless_installer.modules.smart_balancer import _compute_score
-        # 1ms latency, 1ms bandwidth, 0 load → очень маленький score
-        score = _compute_score(1, 1, 0, self._weights())
-        self.assertLess(score, 0.01)  # близко к 0
-
-    def test_zero_metrics_treated_as_worst(self):
-        """lat=0 → `0 or NORM` = NORM → normalized=1.0 (известное поведение)."""
+        """lat=0, bw=0, load=0 → все нормированные значения = 0 → score = 0.
+        После фикса: lat=0 трактуется как идеальный пинг (0 falsy больше не
+        подменяется на NORM_LAT_MS_WORST)."""
         from vless_installer.modules.smart_balancer import _compute_score
         score = _compute_score(0, 0, 0, self._weights())
-        # w_lat*1 + w_bw*1 + w_ld*0 = 0.8
-        self.assertAlmostEqual(score, 0.8, places=4)
+        # w_lat*0 + w_bw*0 + w_ld*0 = 0.0
+        self.assertEqual(score, 0.0)
+
+    def test_zero_latency_not_treated_as_worst(self):
+        """Regression: lat=0 (идеальный пинг) НЕ должен трактоваться как worst.
+        Раньше `0 or NORM` = NORM из-за falsy-семантики 0.0 в Python.
+        После фикса: `0 if 0 is not None else NORM` = 0 → lat_norm = 0."""
+        from vless_installer.modules.smart_balancer import _compute_score
+        perfect = _compute_score(0, 100, 100, self._weights())
+        worst = _compute_score(2000, 100, 100, self._weights())  # lat=NORM_WORST
+        self.assertLess(perfect, worst,
+                        "lat=0 (идеальный пинг) должен давать МЕНЬШИЙ score, чем lat=NORM_WORST")
 
     def test_none_metrics_returns_one(self):
-        """lat=None, bw=None → берётся NORM_*_WORST → normalized=1.0.
-        load — int, не None (None упадёт в load/NORM_LOAD_WORST)."""
+        """lat=None, bw=None, load=None → все берут NORM_*_WORST → score = 1.0.
+        После фикса: load=None поддерживается (раньше падал с TypeError)."""
         from vless_installer.modules.smart_balancer import _compute_score
-        # load=200 → load_norm=1.0 (max)
-        score = _compute_score(None, None, 200, self._weights())
+        score = _compute_score(None, None, None, self._weights())
         # w_lat*1 + w_bw*1 + w_ld*1 = 1.0
         self.assertAlmostEqual(score, 1.0, places=4)
 
-    def test_none_load_not_supported(self):
-        """load=None → TypeError (load не имеет `or NORM` fallback).
-        Это известное ограничение — load всегда должен быть int."""
+    def test_none_load_treated_as_worst(self):
+        """Regression: load=None → берётся NORM_LOAD_WORST (200) → load_norm=1.0.
+        Раньше load=None падал с TypeError (не было `or NORM` fallback).
+        После фикса: `load if load is not None else NORM_LOAD_WORST`."""
         from vless_installer.modules.smart_balancer import _compute_score
-        with self.assertRaises(TypeError):
-            _compute_score(None, None, None, self._weights())
+        score = _compute_score(None, None, None, self._weights())
+        # load_norm = 1.0 → w_ld*1 = 0.2
+        # но проще проверить через изолированный load=None vs load=200
+        score_none = _compute_score(0, 0, None, self._weights())
+        score_worst = _compute_score(0, 0, 200, self._weights())  # load=NORM_LOAD_WORST
+        self.assertAlmostEqual(score_none, score_worst, places=4)
+        # и это больше чем score при load=0
+        score_zero = _compute_score(0, 0, 0, self._weights())
+        self.assertGreater(score_none, score_zero)
 
     def test_high_latency_higher_score(self):
         from vless_installer.modules.smart_balancer import _compute_score
