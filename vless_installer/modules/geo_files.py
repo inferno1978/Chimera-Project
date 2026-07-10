@@ -34,7 +34,7 @@ from typing import Optional
 from vless_installer.modules.geo_mirrors import (
     get_geosite_urls, get_geoip_urls,
     MANUAL_UPLOAD_PATHS, XRAY_LOOKUP_DIRS, MIN_SIZES,
-    GEO_MIRRORS_COUNT,
+    GEO_MIRRORS_COUNT, recommended_manual_path,
 )
 
 
@@ -90,7 +90,15 @@ def download_geo_files() -> bool:
     print()
 
     dest_dirs = [CONFIG_DIR, XRAY_SHARE_DIR, XRAY_ETC_DIR]
-    _MANUAL_ROOTS = MANUAL_UPLOAD_PATHS  # /root/ — первое, рекомендуется
+    # БЕЗУСЛОВНАЯ проверка ручного размещения — ТОЛЬКО /root/ (WinSCP-friendly).
+    # НЕ проверяем dest_dirs здесь, потому что dest_dirs — это те же директории
+    # куда функция сама пишет geosite.dat/geoip.dat при успехе. Если проверять
+    # их безусловно, то после первого успешного запуска любой повторный вызов
+    # найдёт "уже лежащий" файл, скопирует сам на себя и репортит успех БЕЗ
+    # похода в сеть — geo-правила замораживаются навсегда (регрессия 21d7baf).
+    # Полный список MANUAL_UPLOAD_PATHS (+ dest_dirs) используется только в
+    # retry-блоке ниже, после явного подтверждения пользователя.
+    _MANUAL_ROOTS = [recommended_manual_path()]  # = [Path("/root")]
 
     success_count = 0
     failed_files: list[str] = []
