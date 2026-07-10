@@ -177,7 +177,34 @@ class TestAwgsBuildServerConf(unittest.TestCase):
 # ────────────────────────────────────────────────────────────────────────────
 
 class TestAwgsRotateObfuscation(unittest.TestCase):
-    """awgs_rotate_obfuscation — ротация Jc/Jmin/Jmax/I1 без разрыва туннеля."""
+    """awgs_rotate_obfuscation — ротация Jc/Jmin/Jmax/I1 без разрыва туннеля.
+
+    ВАЖНО: эти тесты НЕ мокают awg_peer_rebuild_conf как чёрный ящик —
+    иначе регрессия 225c2ba (state коммитился после rebuild_conf, который
+    читал СТАРЫЕ params → ротация молча не работала) не ловится.
+    Вместо этого мокаются нижележащие функции:
+      • awgs_build_server_conf — чтобы проверить с какими params построен конфиг
+      • awgs_write_server_conf — чтобы не писать на диск
+      • awgs_apply — чтобы контролировать успех/провал syncconf+restart
+      • awgs_state_load — чтобы вернуть state со СТАРЫМИ params
+    Это позволяет утверждать что в awgs_build_server_conf ушли NEW_PARAMS,
+    а не OLD_PARAMS из state.
+    """
+
+    # Старые параметры (как в state на диске до ротации)
+    OLD_PARAMS = {
+        "jc": 4, "jmin": 40, "jmax": 70,
+        "s1": 0, "s2": 0, "s3": 0, "s4": 0,
+        "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+        "i1": "OLD_I1_VALUE", "i2": "", "i3": "", "i4": "", "i5": "",
+    }
+    # Новые параметры (что вернёт awgs_presets_generate)
+    NEW_PARAMS = {
+        "jc": 50, "jmin": 100, "jmax": 200,
+        "s1": 10, "s2": 20, "s3": 30, "s4": 40,
+        "h1": 5, "h2": 6, "h3": 7, "h4": 8,
+        "i1": "NEW_I1_VALUE", "i2": "", "i3": "", "i4": "", "i5": "",
+    }
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -189,6 +216,22 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
         for attr in ("info", "success", "warn", "error", "log_to_file"):
             setattr(core, attr, MagicMock())
         return core
+
+    def _make_state(self, params=None):
+        """Создаёт state-объект с заданными params (по умолчанию OLD_PARAMS)."""
+        return {
+            "installed": True,
+            "carrier_preset": "default",
+            "params": params if params is not None else dict(self.OLD_PARAMS),
+            "server_privkey": "server_priv_key_xxx",
+            "port": 51820,
+            "subnet": "10.66.66.0/24",
+            "subnet_v6": "",
+            "mtu": 1280,
+            "peers": [],
+            "endpoint_host": "",
+            "cascade_role": "",
+        }
 
     def test_returns_false_when_not_installed(self):
         """AWG не установлен → False."""
@@ -211,21 +254,21 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("пресет", msg.lower())
 
-    def test_rotates_and_applies_syncconf(self):
-        """Успешная ротация: новые параметры → state → rebuild_conf → syncconf."""
-        import json
+    def test_rotates_and_applies_syncconf_with_new_params(self):
+        """Успешная ротация: конфиг строится с NEW_PARAMS (не OLD_PARAMS),
+        state коммитится только после успеха apply.
+
+        Regression test for 225c2ba: до фикса awg_peer_rebuild_conf() читал
+        state с диска (где OLD_PARAMS) и строил конфиг со СТАРЫМИ параметрами,
+        затем возвращал True, и только тогда new_params писались в state.
+        Итог: интерфейс оставался на OLD_PARAMS, но state врал что применены NEW.
+        """
         from vless_installer.modules import awg_standalone
+        from vless_installer.modules import awg_peers
+        from vless_installer.modules import awg_presets
 
         mock_core = self._mock_core()
-
-        state = {
-            "installed": True,
-            "carrier_preset": "default",
-            "params": {"jc": 4, "jmin": 40, "jmax": 70,
-                        "s1": 0, "s2": 0, "s3": 0, "s4": 0,
-                        "h1": 1, "h2": 2, "h3": 3, "h4": 4,
-                        "i1": "", "i2": "", "i3": "", "i4": "", "i5": ""},
-        }
+        state = self._make_state()  # state со OLD_PARAMS
 
         with patch.object(awg_standalone, "_core_module",
                           return_value=mock_core), \
@@ -234,34 +277,71 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
              patch.object(awg_standalone, "awgs_state_load",
                           return_value=state), \
              patch("vless_installer.modules.awg_state.awgs_state_update") as mock_update, \
-             patch("vless_installer.modules.awg_peers.awg_peer_rebuild_conf",
-                          return_value=True) as mock_rebuild:
+             patch.object(awg_presets, "awgs_presets_generate",
+                          return_value=dict(self.NEW_PARAMS)) as mock_gen, \
+             patch.object(awg_peers, "awgs_state_load",
+                          return_value=state), \
+             patch.object(awg_peers, "awgs_build_server_conf",
+                          return_value="[Interface]\nPrivateKey = xxx\n") as mock_build, \
+             patch.object(awg_peers, "awgs_write_server_conf",
+                          return_value=True), \
+             patch.object(awg_peers, "awgs_apply",
+                          return_value=True):
             ok, msg = awg_standalone.awgs_rotate_obfuscation("default")
 
         self.assertTrue(ok)
-        # state_update вызван с новыми params
+
+        # awgs_presets_generate был вызван (с "default")
+        mock_gen.assert_called_once_with("default")
+
+        # ── КЛЮЧЕВАЯ ПРОВЕРКА: awgs_build_server_conf вызван с NEW_PARAMS ──
+        mock_build.assert_called_once()
+        build_kwargs = mock_build.call_args.kwargs
+        self.assertIn("params", build_kwargs,
+                      "awgs_build_server_conf должен принимать params как kwarg")
+        applied_params = build_kwargs["params"]
+
+        # Проверяем что это именно NEW_PARAMS, не OLD_PARAMS
+        self.assertNotEqual(applied_params.get("jc"), self.OLD_PARAMS["jc"],
+                            "Применён jc не должен быть OLD_PARAMS.jc — регрессия 225c2ba")
+        self.assertEqual(applied_params.get("jc"), self.NEW_PARAMS["jc"],
+                         f"awgs_build_server_conf должен получить NEW jc={self.NEW_PARAMS['jc']}, "
+                         f"получили {applied_params.get('jc')}")
+        self.assertEqual(applied_params.get("jmin"), self.NEW_PARAMS["jmin"])
+        self.assertEqual(applied_params.get("jmax"), self.NEW_PARAMS["jmax"])
+        self.assertEqual(applied_params.get("i1"), self.NEW_PARAMS["i1"],
+                         "I1 должен быть NEW_I1_VALUE — это и есть ротация обфускации")
+
+        # State коммитится с new_params (после успеха apply)
         mock_update.assert_called_once()
         update_kwargs = mock_update.call_args.kwargs
         self.assertIn("params", update_kwargs)
-        new_params = update_kwargs["params"]
-        self.assertIn("jc", new_params)
-        self.assertIn("jmin", new_params)
-        # rebuild_conf вызван с apply=True (syncconf)
-        mock_rebuild.assert_called_once_with(apply=True)
-        # сообщение содержит новые значения
-        self.assertIn("Jc=", msg)
+        committed_params = update_kwargs["params"]
+        self.assertEqual(committed_params.get("jc"), self.NEW_PARAMS["jc"])
+        self.assertEqual(committed_params.get("i1"), self.NEW_PARAMS["i1"])
 
-    def test_returns_false_when_apply_fails(self):
+        # Сообщение содержит новые значения
+        self.assertIn("Jc=", msg)
+        self.assertIn(str(self.NEW_PARAMS["jc"]), msg)
+
+    def test_returns_false_when_apply_fails_state_unchanged(self):
         """Apply зафейлился (syncconf + restart оба провалились) → False,
-        state НЕ обновлён, сообщение честно говорит о неудаче."""
+        state НЕ обновлён, и ПОДТВЕРЖДЕНО что на интерфейс ушли НОВЫЕ
+        параметры (через write_conf+apply), но state откатился к OLD.
+
+        ВАЖНО: даже при неудаче apply конфиг БЫЛ построен с NEW_PARAMS
+        (это нормально — write_conf записал new конфиг на диск, но apply
+        не смог его активировать). Проверяем что:
+          (a) awgs_build_server_conf вызвана с NEW_PARAMS (не OLD)
+          (b) awgs_state_update НЕ вызвана (state не закоммичен)
+          (c) сообщение честно говорит о неудаче
+        """
         from vless_installer.modules import awg_standalone
+        from vless_installer.modules import awg_peers
+        from vless_installer.modules import awg_presets
 
         mock_core = self._mock_core()
-        state = {
-            "installed": True,
-            "carrier_preset": "default",
-            "params": {},
-        }
+        state = self._make_state()  # state со OLD_PARAMS
 
         with patch.object(awg_standalone, "_core_module",
                           return_value=mock_core), \
@@ -270,28 +350,45 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
              patch.object(awg_standalone, "awgs_state_load",
                           return_value=state), \
              patch("vless_installer.modules.awg_state.awgs_state_update") as mock_update, \
-             patch("vless_installer.modules.awg_peers.awg_peer_rebuild_conf",
-                          return_value=False):
+             patch.object(awg_presets, "awgs_presets_generate",
+                          return_value=dict(self.NEW_PARAMS)), \
+             patch.object(awg_peers, "awgs_state_load",
+                          return_value=state), \
+             patch.object(awg_peers, "awgs_build_server_conf",
+                          return_value="[Interface]\nPrivateKey = xxx\n") as mock_build, \
+             patch.object(awg_peers, "awgs_write_server_conf",
+                          return_value=True), \
+             patch.object(awg_peers, "awgs_apply",
+                          return_value=False):  # ← apply зафейлился
             ok, msg = awg_standalone.awgs_rotate_obfuscation("default")
 
         self.assertFalse(ok)
-        # Сообщение честно говорит о неудаче обоих методов
+
+        # (a) Конфиг был построен с NEW_PARAMS (не OLD) — даже при неудаче apply
+        mock_build.assert_called_once()
+        build_kwargs = mock_build.call_args.kwargs
+        applied_params = build_kwargs["params"]
+        self.assertEqual(applied_params.get("jc"), self.NEW_PARAMS["jc"],
+                         "Даже при неудаче apply конфиг должен строиться с NEW_PARAMS")
+        self.assertEqual(applied_params.get("i1"), self.NEW_PARAMS["i1"])
+
+        # (b) State НЕ обновлён при неудаче apply
+        mock_update.assert_not_called()
+
+        # (c) Сообщение честно говорит о неудаче обоих методов
         self.assertIn("syncconf", msg.lower())
         self.assertIn("restart", msg.lower())
         self.assertIn("ручное", msg.lower())
-        # state НЕ обновлён при неудаче apply
-        mock_update.assert_not_called()
 
     def test_uses_current_preset_when_not_specified(self):
         """Пустой preset_name → используется carrier_preset из state."""
         from vless_installer.modules import awg_standalone
+        from vless_installer.modules import awg_peers
+        from vless_installer.modules import awg_presets
 
         mock_core = self._mock_core()
-        state = {
-            "installed": True,
-            "carrier_preset": "mobile",
-            "params": {},
-        }
+        state = self._make_state()
+        state["carrier_preset"] = "mobile"
 
         with patch.object(awg_standalone, "_core_module",
                           return_value=mock_core), \
@@ -300,7 +397,15 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
              patch.object(awg_standalone, "awgs_state_load",
                           return_value=state), \
              patch("vless_installer.modules.awg_state.awgs_state_update"), \
-             patch("vless_installer.modules.awg_peers.awg_peer_rebuild_conf",
+             patch.object(awg_presets, "awgs_presets_generate",
+                          return_value=dict(self.NEW_PARAMS)), \
+             patch.object(awg_peers, "awgs_state_load",
+                          return_value=state), \
+             patch.object(awg_peers, "awgs_build_server_conf",
+                          return_value="[Interface]\n"), \
+             patch.object(awg_peers, "awgs_write_server_conf",
+                          return_value=True), \
+             patch.object(awg_peers, "awgs_apply",
                           return_value=True):
             ok, msg = awg_standalone.awgs_rotate_obfuscation()
 
