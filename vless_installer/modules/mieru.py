@@ -442,10 +442,16 @@ def _download_binary(url: str, dest: Path, name: str) -> bool:
 #  КОНФИГ СЕРВЕРА
 # ══════════════════════════════════════════════════════════════════════════════
 def _build_server_config(users: list, port_start: int, port_end: int,
-                          protocol: str) -> dict:
+                          protocol: str,
+                          traffic_pattern: dict = None) -> dict:
     """
     Генерирует server config для mita apply config.
     Формат: https://github.com/enfein/mieru/blob/main/docs/server-config.md
+
+    traffic_pattern — опциональный dict для поля trafficPattern (server-side).
+    Формат: {"tcpFragment": {...}, "nonce": {...}, "padding": {...}, "unlockAll": bool}
+    ВАЖНО: mita не поддерживает hot-reload trafficPattern — после изменения
+    конфига нужен systemctl restart mita (см. _apply_server_config_with_restart).
     """
     port_bindings = []
     if port_start == port_end:
@@ -466,12 +472,15 @@ def _build_server_config(users: list, port_start: int, port_end: int,
             "password": u["password"],
         })
 
-    return {
+    cfg = {
         "portBindings": port_bindings,
         "users": user_entries,
         "loggingLevel": "INFO",
         "mtu": 1400,
     }
+    if traffic_pattern:
+        cfg["trafficPattern"] = traffic_pattern
+    return cfg
 
 def _apply_server_config(cfg: dict) -> Optional[str]:
     """Применяет конфиг через mita apply config. Возвращает ошибку или None."""
@@ -1467,6 +1476,9 @@ def do_mieru_menu() -> None:
                           else f"{port_start}-{port_end}")
             _box_kv("Порт(ы):",       f"{YELLOW}{port_str}/{protocol}{NC}")
             _box_kv("Пользователей:", str(len(state.get("users", []))))
+            # Показываем текущий пресет обфускации
+            tp_name = state.get("traffic_preset", "basic")
+            _box_kv("Обфускация:",    f"{CYAN}{tp_name}{NC}")
             sync_ok, _ = _check_time_sync()
             _box_kv("Время NTP:",
                     f"{GREEN}✓ синхронизировано{NC}" if sync_ok
@@ -1482,6 +1494,7 @@ def do_mieru_menu() -> None:
             _box_item("3", "🔄  Перезапустить сервис")
             _box_item("4", "📊  Статус / логи")
             _box_item("5", "📈  Статистика трафика")
+            _box_item("6", "🔒  Пресеты обфускации (traffic pattern)")
             _box_sep()
             _box_item("9", f"{RED}🗑️   Удалить Mieru{NC}")
 
@@ -1517,6 +1530,9 @@ def do_mieru_menu() -> None:
                 print(f"\n  {RED}✗{NC}  Модуль статистики не найден: {_e}"); _pause()
             except _Cancelled:
                 pass
+        elif ch == "6" and installed:
+            try: _obfuscation_menu()
+            except _Cancelled: pass
         elif ch == "9" and installed:
             try: _full_uninstall(silent=False)
             except _Cancelled:
@@ -1526,6 +1542,156 @@ def do_mieru_menu() -> None:
             except _Cancelled: pass
         elif ch in ("q", ""):
             break
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ПРЕСЕТЫ ОБФУСКАЦИИ (traffic pattern)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Пресеты для серверного конфига mita (JSON-объект trafficPattern).
+# Формат: https://github.com/enfein/mieru/blob/main/docs/traffic-pattern.md
+# ВАЖНО: mita НЕ поддерживает hot-reload trafficPattern — нужен restart.
+_MIERU_TRAFFIC_PRESETS = {
+    "disabled": {
+        "label": "🔓 Disabled (без обфускации)",
+        "description": "Минимум оверхеда, максимальная скорость",
+        "config": None,  # trafficPattern не добавляется в конфиг
+    },
+    "basic": {
+        "label": "🔒 Basic (базовый)",
+        "description": "Лёгкая обфускация: printable-нонсы. Рекомендуется по умолчанию.",
+        "config": {
+            "nonce": {"type": "NONCE_TYPE_PRINTABLE"},
+        },
+    },
+    "medium": {
+        "label": "🔒 Medium (средний)",
+        "description": "Нонсы + TCP-фрагментация с задержкой 10мс",
+        "config": {
+            "nonce": {"type": "NONCE_TYPE_PRINTABLE"},
+            "tcpFragment": {"enable": True, "maxSleepMs": 10},
+        },
+    },
+    "aggressive": {
+        "label": "🔒 Aggressive (максимальный)",
+        "description": "Нонсы + агрессивная фрагментация + паддинг",
+        "config": {
+            "nonce": {"type": "NONCE_TYPE_PRINTABLE"},
+            "tcpFragment": {"enable": True, "maxSleepMs": 20},
+            "padding": {"maxMiddlePaddingLen": 64, "maxEndPaddingLen": 128},
+        },
+    },
+}
+
+
+def _obfuscation_menu() -> None:
+    """TUI-меню выбора пресета обфускации Mieru (traffic pattern).
+
+    Выбор пресета = немедленное применение: обновление state,
+    перегенерация server.json с trafficPattern, mita apply config +
+    systemctl restart mita (mita не поддерживает hot-reload trafficPattern).
+    """
+    state = proto_load_state(_MODULE_STATE)
+    current = state.get("traffic_preset", "basic")
+
+    os.system("clear")
+    print()
+    _box_top("🔒  Пресеты обфускации Mieru (traffic pattern)")
+    _box_row()
+    _box_kv("Текущий пресет:", f"{CYAN}{current}{NC}")
+    _box_row()
+    _box_sep()
+
+    presets = list(_MIERU_TRAFFIC_PRESETS.items())
+    for i, (name, preset) in enumerate(presets, 1):
+        marker = f" {GREEN}← текущий{NC}" if name == current else ""
+        _box_item(str(i), f"{preset['label']}{marker}")
+        _box_row(f"    {DIM}{preset['description']}{NC}")
+
+    _box_row()
+    _box_sep()
+    _box_item("Q", "← Назад")
+    _box_bot()
+    print()
+
+    try:
+        ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+    except _Cancelled:
+        return
+
+    if ch in ("q", ""):
+        return
+
+    try:
+        idx = int(ch) - 1
+    except ValueError:
+        _box_warn("Неверный выбор")
+        _pause()
+        return
+
+    if not (0 <= idx < len(presets)):
+        _box_warn("Неверный выбор")
+        _pause()
+        return
+
+    selected_name, selected_preset = presets[idx]
+    if selected_name == current:
+        _box_info("Этот пресет уже активен")
+        _pause()
+        return
+
+    # Подтверждение
+    print()
+    if not proto_ask(f"{CYAN}Применить пресет '{selected_name}'?{NC} "
+                     f"(mita будет перезапущен) [y/N]: ", default="").strip().lower() in ("y", "yes", "д", "да"):
+        print(f"  {DIM}Отменено.{NC}")
+        _pause()
+        return
+
+    # Применяем
+    _box_info(f"Применение пресета '{selected_name}'...")
+
+    # Обновляем state
+    state["traffic_preset"] = selected_name
+    proto_save_state(_MODULE_STATE, state)
+
+    # Перегенерация server.json
+    users = state.get("users", [])
+    port_start = state.get("port_start", _DEFAULT_PORT_START)
+    port_end = state.get("port_end", _DEFAULT_PORT_END)
+    protocol = state.get("protocol", _DEFAULT_PROTOCOL)
+    tp_config = selected_preset["config"]
+
+    cfg = _build_server_config(users, port_start, port_end, protocol,
+                               traffic_pattern=tp_config)
+    err = _apply_server_config(cfg)
+    if err:
+        _box_warn(f"Ошибка применения конфига: {err}")
+        _pause()
+        return
+
+    # mita НЕ поддерживает hot-reload trafficPattern — нужен restart
+    _box_info("Перезапуск mita (trafficPattern не поддерживает hot-reload)...")
+    _run(["systemctl", "restart", _SERVICE_NAME])
+    time.sleep(2)
+
+    r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
+    if r.stdout.strip() == "active":
+        _box_ok(f"Пресет '{selected_name}' применён. mita перезапущен.")
+        # Обновляем клиентские ссылки с новым traffic-pattern
+        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        # Сохраняем base64-pattern в state для клиентских ссылок
+        state["traffic_pattern_b64"] = get_preset_base64(
+            "disabled" if selected_name == "disabled" else
+            "basic" if selected_name == "basic" else
+            "medium" if selected_name == "medium" else
+            "aggressive"
+        )
+        proto_save_state(_MODULE_STATE, state)
+    else:
+        _box_warn(f"mita не запустился после restart. Проверьте: journalctl -u {_SERVICE_NAME}")
+
+    _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  АВТОНОМНЫЙ ЗАПУСК
