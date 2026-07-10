@@ -38,6 +38,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from vless_installer.modules.telemt_mirrors import (
+    get_telemt_panel_mirrors as _get_panel_mirror_urls,
+    MANUAL_UPLOAD_PATHS as _TELEMT_MANUAL_PATHS,
+    TELEMT_MIRRORS_COUNT,
+    find_manual_upload as _find_telemt_manual_upload,
+    print_telemt_manual_download_hint as _print_telemt_manual_hint,
+    detect_arch_libc as _detect_arch_libc,
+)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЦВЕТА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -329,29 +338,89 @@ def _geoip_update_flow() -> None:
 #  СКАЧИВАНИЕ / УСТАНОВКА БИНАРНИКА ПАНЕЛИ
 # ══════════════════════════════════════════════════════════════════════════════
 def _get_latest_release() -> tuple:
-    """Возвращает (tag, url) под текущую архитектуру/libc или ('', '') при ошибке."""
+    """Возвращает (tag, urls) — где urls это СПИСОК зеркал.
+
+    MULTI-MIRROR FIX: раньше возвращал (tag, url) с одним прямым URL.
+    Теперь возвращает (tag, urls) где urls — список из {TELEMT_MIRRORS_COUNT}
+    зеркал (прямой GitHub + 7 GitHub-прокси). Если api.github.com заблокирован,
+    tag будет пустой, но urls всё равно содержат валидные ссылки.
+    """
     try:
         req = urllib.request.Request(GITHUB_API, headers={"User-Agent": "VLESS-Ultimate-Installer"})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
         tag  = data.get("tag_name", "").lstrip("v")
-        arch = "aarch64" if platform.machine().lower() in ("aarch64", "arm64") else "x86_64"
-        # Ассеты релиза — tar.gz, суффикс gnu/musl (см. release.yml проекта).
-        # Определяем libc так же, как это уже делает mtproto.py для Telemt.
-        libc = "musl" if "musl" in _run(["ldd", "--version"], capture=True).stdout.lower() else "gnu"
-        url  = (f"https://github.com/amirotin/telemt_panel/releases/latest/download/"
-                f"telemt-panel-{arch}-linux-{libc}.tar.gz")
-        return tag, url
     except Exception as e:
-        _err(f"Не удалось получить релиз: {e}")
-        return "", ""
+        _err(f"api.github.com недоступен: {e} — продолжаю через зеркала")
+        tag = ""
 
-def _install_binary(url: str) -> bool:
-    _info("Загрузка telemt-panel...")
+    urls = _get_panel_mirror_urls()
+    return tag, urls
+
+
+def _download_with_mirrors(urls, dest: Path, name: str) -> bool:
+    """
+    Скачивает tar.gz-архив в `dest`, перебирая зеркала из `urls` по очереди.
+    Перед сетевыми попытками проверяет ручное размещение файла в
+    MANUAL_UPLOAD_PATHS (через find_manual_upload).
+
+    MULTI-MIRROR FIX: раньше _install_binary использовал ОДИН url через
+    urllib.request.urlretrieve(). Теперь перебираем {TELEMT_MIRRORS_COUNT}
+    зеркал + проверяем /root/ для ручного размещения (WinSCP-friendly).
+    """
+    # Совместимость: если передали строку вместо списка — обернём
+    if isinstance(urls, str):
+        urls = [urls]
+
+    # 1) Сначала проверяем ручное размещение (WinSCP-friendly)
+    arch, libc = _detect_arch_libc()
+    expected_filename = f"telemt-panel-{arch}-linux-{libc}.tar.gz"
+    manual = _find_telemt_manual_upload(expected_filename)
+    if manual is not None:
+        size_kb = manual.stat().st_size // 1024
+        _info(f"Найден локальный файл: {manual} ({size_kb} КБ)")
+        try:
+            shutil.copy2(str(manual), str(dest))
+            return True
+        except Exception as e:
+            _err(f"Не удалось скопировать {manual}: {e}, пробую зеркала...")
+
+    # 2) Перебираем зеркала
+    for i, url in enumerate(urls, 1):
+        try:
+            host = url.split('/')[2]
+            _info(f"[{i}/{len(urls)}] Скачиваю {name} с {host}...")
+            req = urllib.request.Request(url, headers={"User-Agent": "VLESS-Ultimate-Installer"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                with open(dest, 'wb') as f:
+                    while True:
+                        chunk = r.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+            if dest.stat().st_size > 0:
+                return True
+            _err(f"{host}: пустой ответ, следующее зеркало...")
+        except Exception as e:
+            _err(f"{url.split('/')[2]}: {e}")
+            dest.unlink(missing_ok=True)
+    return False
+
+
+def _install_binary(url) -> bool:
+    """Устанавливает бинарник telemt-panel из tar.gz-архива.
+
+    MULTI-MIRROR FIX: раньше принимал ОДИН url (строка); теперь принимает
+    либо строку, либо список URL — перебирает зеркала по очереди.
+    """
+    _info(f"Загрузка telemt-panel ({TELEMT_MIRRORS_COUNT} зеркал в fallback)...")
     tmp = Path(tempfile.mkdtemp())
     archive = tmp / "telemt-panel.tar.gz"
+    staging = BIN_PATH.parent / f".{BIN_PATH.name}.new"
     try:
-        urllib.request.urlretrieve(url, archive)
+        if not _download_with_mirrors(url, archive, "telemt-panel"):
+            _err("Не удалось скачать telemt-panel из всех зеркал.")
+            return False
         import tarfile
         with tarfile.open(archive) as tf:
             tf.extractall(tmp)
@@ -365,7 +434,6 @@ def _install_binary(url: str) -> bool:
         # если сервис в этот момент активен и держит бинарник открытым на исполнение.
         # rename(2) же атомарен и разрешён ядром даже для занятого файла: старый
         # процесс доработает со старой inode, новый бинарник подхватится рестартом.
-        staging = BIN_PATH.parent / f".{BIN_PATH.name}.new"
         shutil.copy2(str(found[0]), str(staging))
         staging.chmod(0o755)
         os.replace(str(staging), str(BIN_PATH))
@@ -373,7 +441,6 @@ def _install_binary(url: str) -> bool:
         return True
     except Exception as e:
         _err(f"Ошибка: {e}")
-        staging = BIN_PATH.parent / f".{BIN_PATH.name}.new"
         staging.unlink(missing_ok=True)
         return False
     finally:
@@ -600,12 +667,23 @@ def _run_install() -> None:
     _ok(msg)
 
     # ── 3. Скачиваем бинарник панели
-    tag, url = _get_latest_release()
-    if not url:
+    tag, urls = _get_latest_release()
+    if not urls:
         _pause(); return
     _info(f"Последний релиз: {tag or '?'}")
-    if not _install_binary(url):
-        _pause(); return
+    if not _install_binary(urls):
+        # Показываем инструкцию для ручного скачивания (WinSCP-friendly)
+        _print_telemt_manual_hint("panel")
+        try:
+            ans = input(f"  {CYAN}Разместили файлы вручную? Повторить установку? [Y/n]: {NC}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans != "n":
+            if not _install_binary(urls):
+                _err(f"Файлы не найдены в {', '.join(str(p) for p in _TELEMT_MANUAL_PATHS)}.")
+                _pause(); return
+        else:
+            _pause(); return
 
     # ── 4. Учётные данные панели
     print()
@@ -692,13 +770,24 @@ def _show_status() -> None:
 def _update() -> None:
     if not _is_installed():
         _warn("Telemt Panel не установлена."); _pause(); return
-    tag, url = _get_latest_release()
-    if not url:
+    tag, urls = _get_latest_release()
+    if not urls:
         _pause(); return
     _info(f"Обновляю до {tag or 'последней версии'}...")
-    if _install_binary(url):
+    if _install_binary(urls):
         _run(["systemctl", "restart", SERVICE_NAME])
         _ok("Обновлено и перезапущено")
+    else:
+        # Показываем инструкцию для ручного скачивания (WinSCP-friendly)
+        _print_telemt_manual_hint("panel")
+        try:
+            ans = input(f"  {CYAN}Разместили файлы вручную? Повторить? [Y/n]: {NC}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans != "n":
+            if _install_binary(urls):
+                _run(["systemctl", "restart", SERVICE_NAME])
+                _ok("Обновлено и перезапущено (из ручного размещения)")
     _pause()
 
 def _uninstall() -> None:
