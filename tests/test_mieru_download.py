@@ -123,25 +123,28 @@ class TestDownloadWithMirrors(unittest.TestCase):
             self.assertFalse(result)
 
     def test_uses_manual_upload_when_file_in_root(self):
-        """Если файл лежит в /root/ (WinSCP) — берём его без скачивания."""
-        with tempfile.TemporaryDirectory() as td:
-            # Создаём "ручной" файл
-            manual_dir = Path(td) / "manual"
-            manual_dir.mkdir()
-            manual_file = manual_dir / "mita.deb"
-            manual_file.write_bytes(b"manually placed deb")
+        """Если файл лежит в /root/ (WinSCP) — берём его без скачивания.
 
+        АДАПТАЦИЯ: _download_with_mirrors теперь deprecated и НЕ проверяет
+        manual upload (это делает fetch_package). Этот тест проверяет что
+        deprecated функция всё ещё работает для прямого скачивания по URL,
+        но НЕ проверяет manual upload (это теперь в download_manager тестах).
+        """
+        with tempfile.TemporaryDirectory() as td:
             dest = Path(td) / "mita.deb"
             urls = ["https://github.com/.../mita.deb"]
 
-            # urlopen НЕ должен вызываться — файл уже есть локально
+            # Мокаем urlopen чтобы вернуть "скачанный" файл
+            mock_resp = MagicMock()
+            mock_resp.read.side_effect = [b"downloaded deb content", b""]
+            mock_resp.__enter__ = lambda self: self
+            mock_resp.__exit__ = lambda self, *a: None
+
             with patch("vless_installer.modules.mieru.urllib.request.urlopen",
-                       side_effect=AssertionError("urlopen не должен вызываться когда файл уже в /root/")), \
-                 patch("vless_installer.modules.mieru._find_mieru_manual_upload",
-                       return_value=manual_file):
+                       return_value=mock_resp):
                 result = self.mieru._download_with_mirrors(urls, dest, "mita.deb")
             self.assertTrue(result)
-            self.assertEqual(dest.read_bytes(), b"manually placed deb")
+            self.assertEqual(dest.read_bytes(), b"downloaded deb content")
 
 
 class TestDownloadBinarySignature(unittest.TestCase):
@@ -221,67 +224,138 @@ class TestInstallMitaPackageUsesMirrors(unittest.TestCase):
         from vless_installer.modules import mieru
         cls.mieru = mieru
 
-    def test_deb_path_uses_get_deb_mirrors(self):
-        """Если есть dpkg — должен идти по .deb пути с multi-mirror."""
-        with tempfile.TemporaryDirectory() as td:
-            # Создаём фейковый deb-файл, который _download_with_mirrors "скачает"
-            fake_deb = Path(td) / "fake.deb"
-            fake_deb.write_bytes(b"fake deb content")
+    def test_deb_path_uses_fetch_package(self):
+        """Если есть dpkg — должен идти по .deb пути через fetch_package.
 
-            deb_mirrors_called = [False]
-            original_get_deb_mirrors = self.mieru.get_deb_mirrors
+        АДАПТАЦИЯ: старый тест проверял что get_deb_mirrors() вызывается.
+        Новый код использует fetch_package(MITA_DEB_SPEC) — проверяем что
+        fetch_package вызывается с правильным spec.
+        """
+        from vless_installer.modules import mieru_packages
 
-            def tracking_get_deb_mirrors(version):
-                deb_mirrors_called[0] = True
-                return original_get_deb_mirrors(version)
+        fetch_called = [False]
+        def tracking_fetch(spec, **kw):
+            fetch_called[0] = True
+            # Проверяем что это DEB spec
+            self.assertIn("deb", spec.name)
+            return True  # успех
 
-            # _run для dpkg вернёт успех, sys_bin существует
-            def fake_run(cmd, *a, **kw):
-                m = MagicMock()
-                if "dpkg" in cmd and "-i" in cmd:
-                    m.returncode = 0
-                else:
-                    m.returncode = 0
-                return m
+        with patch("vless_installer.modules.mieru.shutil.which",
+                   lambda x: "/usr/bin/dpkg" if x == "dpkg" else None), \
+             patch("vless_installer.modules.mieru.fetch_package",
+                   side_effect=tracking_fetch) if hasattr(self.mieru, "fetch_package") else \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   side_effect=tracking_fetch):
+            result = self.mieru._install_mita_package("3.33.0")
+        self.assertTrue(result)
+        self.assertTrue(fetch_called[0],
+                        "fetch_package() должен быть вызван в .deb пути")
 
-            def fake_dl(urls, dest, name):
-                __import__("shutil").copy2(str(fake_deb), str(dest))
+    def test_tar_gz_fallback_uses_fetch_package(self):
+        """Если нет dpkg/rpm — должен идти по tar.gz пути через fetch_package.
+
+        АДАПТАЦИЯ: старый тест проверял что get_mita_mirrors() вызывается.
+        Новый код использует fetch_package(MITA_TARGZ_SPEC).
+        """
+        fetch_called = [False]
+        def tracking_fetch(spec, **kw):
+            fetch_called[0] = True
+            self.assertIn("tar.gz", spec.name)
+            return False  # провал — нет сети
+
+        with patch("vless_installer.modules.mieru.shutil.which",
+                   lambda x: None), \
+             patch("vless_installer.modules.download_manager.fetch_package",
+                   side_effect=tracking_fetch):
+            result = self.mieru._install_mita_package("3.33.0")
+        self.assertFalse(result)  # установка не удалась
+        self.assertTrue(fetch_called[0],
+                        "fetch_package() должен быть вызван в tar.gz fallback")
+
+
+class TestInstallMitaDebMirrorFailover(unittest.TestCase):
+    """Regression-тест: .deb скачивание — первое зеркало падает → второе
+    успешно → dpkg -i вызван с правильным путём.
+
+    Это проверяет что fetch_package с MITA_DEB_SPEC корректно перебирает
+    зеркала и вызывает post_install (_post_install_deb → dpkg -i).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _setup_core_in_sysmodules()
+        from vless_installer.modules import mieru
+        cls.mieru = mieru
+
+    def test_deb_mirror1_fail_mirror2_ok_dpkg_called(self):
+        """Первое зеркало падает (URLError) → второе успешно → dpkg -i вызван."""
+        from urllib.error import URLError
+        from vless_installer.modules import mieru_packages
+        from vless_installer.modules.download_manager import fetch_package
+
+        # Мокаем urlopen: первое зеркало падает, второе отдаёт .deb
+        mock_resp_ok = MagicMock()
+        mock_resp_ok.read.side_effect = [b"fake deb content", b""]
+        mock_resp_ok.__enter__ = lambda self: self
+        mock_resp_ok.__exit__ = lambda self, *a: None
+
+        call_count = [0]
+        def fake_urlopen(req, timeout):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise URLError("connection refused")
+            return mock_resp_ok
+
+        dpkg_called = [False]
+        def fake_run(cmd, *a, **kw):
+            m = MagicMock()
+            m.returncode = 0
+            if "dpkg" in cmd and "-i" in cmd:
+                dpkg_called[0] = True
+            return m
+
+        tmp_path = Path("/tmp/_download_mgr_mita_3.33.0_amd64.deb")
+
+        def fake_open(path, *a, **kw):
+            if "wb" in str(a) or "wb" in str(kw.get("mode", "")):
+                tmp_path.write_bytes(b"fake deb content")
+            return MagicMock()
+
+        original_exists = Path.exists
+
+        def smart_exists(self, *a, **kw):
+            s = str(self)
+            # /root/ paths — NO manual file (force network download)
+            if s.startswith("/root/"):
+                return False
+            # tmp download path — exists (file "downloaded" by urlopen mock)
+            if s.startswith("/tmp/_download_mgr_"):
                 return True
+            # /usr/bin/mita — exists (so post_install finds it)
+            if s == "/usr/bin/mita":
+                return True
+            return original_exists(self, *a, **kw)
 
-            with patch("vless_installer.modules.mieru.shutil.which",
-                       lambda x: "/usr/bin/dpkg" if x == "dpkg" else None), \
-                 patch.object(self.mieru, "get_deb_mirrors",
-                              side_effect=tracking_get_deb_mirrors), \
-                 patch.object(self.mieru, "_download_with_mirrors",
-                              side_effect=fake_dl), \
-                 patch.object(self.mieru, "_run", side_effect=fake_run), \
-                 patch.object(self.mieru, "_atomic_install_binary"), \
-                 patch("pathlib.Path.exists", lambda self: True if self.name == "mita" else Path.exists(self)):
-                result = self.mieru._install_mita_package("3.33.0")
-            self.assertTrue(deb_mirrors_called[0],
-                            "get_deb_mirrors() не был вызван в .deb пути")
+        with patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen), \
+             patch("vless_installer.modules.download_manager.Path.unlink"), \
+             patch("builtins.open", side_effect=fake_open), \
+             patch.object(Path, 'stat', return_value=MagicMock(st_size=10000)), \
+             patch.object(Path, 'exists', smart_exists), \
+             patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
+             patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
+             patch("shutil.copy2", lambda *a, **kw: None), \
+             patch.object(self.mieru, "_run", side_effect=fake_run), \
+             patch.object(self.mieru, "_atomic_install_binary"):
+            ok = fetch_package(mieru_packages.MITA_DEB_SPEC,
+                               print_hint_on_failure=False,
+                               version="3.33.0", arch="amd64")
 
-    def test_tar_gz_fallback_uses_get_mita_mirrors(self):
-        """Если нет dpkg/rpm — должен идти по tar.gz пути с multi-mirror."""
-        with tempfile.TemporaryDirectory() as td:
-            # _download_with_mirrors вернёт False → _install_mita_package вернёт False,
-            # но мы проверяем что get_mita_mirrors был вызван
-            mita_mirrors_called = [False]
-            original_get_mita_mirrors = self.mieru.get_mita_mirrors
-
-            def tracking_get_mita_mirrors(version):
-                mita_mirrors_called[0] = True
-                return original_get_mita_mirrors(version)
-
-            with patch("vless_installer.modules.mieru.shutil.which",
-                       lambda x: None), \
-                 patch.object(self.mieru, "get_mita_mirrors",
-                              side_effect=tracking_get_mita_mirrors), \
-                 patch.object(self.mieru, "_download_binary", return_value=False):
-                result = self.mieru._install_mita_package("3.33.0")
-            self.assertFalse(result)  # установка не удалась
-            self.assertTrue(mita_mirrors_called[0],
-                            "get_mita_mirrors() не был вызван в tar.gz fallback")
+        self.assertTrue(ok, "fetch_package должен вернуть True при успехе")
+        self.assertEqual(call_count[0], 2,
+                         "Оба зеркала должны быть попытаны (первый упал, второй ок)")
+        self.assertTrue(dpkg_called[0],
+                        "dpkg -i должен быть вызван при успешном скачивании .deb")
 
 
 if __name__ == "__main__":
