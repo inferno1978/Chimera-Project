@@ -376,10 +376,32 @@ def _run_install_inner() -> None:
         return
 
     print()
-    ret = _run_interactive(
-        ["bash", "-c",
-         f"curl -fsSL {_INSTALL_SCRIPT} | sudo bash"]
+    # МИГРАЦИЯ: раньше использовался `curl -fsSL | sudo bash` — пайп в bash,
+    # БЕЗ зеркал, БЕЗ fallback, БЕЗ проверки ручного размещения.
+    # Теперь: fetch_package(SLIPGATE_INSTALLER_SPEC) скачивает install.sh в
+    # /tmp/slipgate-install.sh (через post_install), затем bash запускает
+    # скрипт. fetch_package перебирает 13 зеркал (jsDelivr + raw + 7 gh-proxy
+    # + Statically) и проверяет /root/install.sh для ручного размещения.
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.slipgate_packages import (
+        SLIPGATE_INSTALLER_SPEC, _SLIPGATE_DEST_FILENAME,
     )
+
+    ok = fetch_package(SLIPGATE_INSTALLER_SPEC, print_hint_on_failure=False)
+    if not ok:
+        print(f"  {RED}✗{NC}  Не удалось скачать install.sh SlipGate.")
+        print(f"  {DIM}Проверьте доступность GitHub или скачайте install.sh вручную.{NC}")
+        _pause()
+        return
+
+    installer_path = SLIPGATE_INSTALLER_SPEC.install_dests[0] / _SLIPGATE_DEST_FILENAME
+    ret = _run_interactive(["bash", "-c", f"sudo bash {installer_path}"])
+
+    # Cleanup временного скрипта
+    try:
+        installer_path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     if ret == 0:
         _save_state({"installed": True})

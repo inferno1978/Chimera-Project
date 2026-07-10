@@ -496,15 +496,35 @@ def install_iperf3() -> bool:
         return True
 
     print(" Trying to install static binary...")
-    arch = os.uname().machine
-    url = STATIC_IPERF3_URLS.get(arch)
-    if not url:
+    arch_raw = os.uname().machine
+    # Нормализуем архитектуру под iperf3-static naming
+    if arch_raw in ("x86_64", "amd64"):
+        arch = "amd64"
+    elif arch_raw in ("aarch64", "arm64"):
+        arch = "arm64"
+    else:
+        print(f" Unsupported arch {arch_raw}. Skipping speed tests...")
+        return False
+
+    # МИГРАЦИЯ: раньше использовался urllib.request.urlretrieve с ОДНИМ прямым
+    # URL (STATIC_IPERF3_URLS[arch]) БЕЗ зеркал, БЕЗ fallback, БЕЗ проверки
+    # ручного размещения.
+    #
+    # Теперь: fetch_package(IPERF3_SPEC, arch=...) из download_manager.py.
+    # fetch_package перебирает 8 зеркал (release GitHub + 7 gh-proxy) и
+    # проверяет /root/iperf3-{arch} для ручного размещения.
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.iperf3_packages import IPERF3_SPEC
+
+    ok = fetch_package(IPERF3_SPEC, arch=arch, print_hint_on_failure=False)
+    if not ok:
         print(" Failed to install iperf3. Skipping speed tests...")
         return False
+
+    # post_install IPERF3_SPEC уже скопировал бинарник в /tmp/iperf3
+    # (chmod 0o755 + ELF magic проверка). Проверяем что он запускается.
     dest = Path("/tmp/iperf3")
     try:
-        urllib.request.urlretrieve(url, dest)
-        dest.chmod(0o755)
         subprocess.run([str(dest), "--version"], capture_output=True, timeout=10, check=True)
     except Exception:
         print(" Failed to install iperf3. Skipping speed tests...")

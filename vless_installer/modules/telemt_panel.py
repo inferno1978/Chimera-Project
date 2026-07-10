@@ -255,21 +255,45 @@ def _geoip_fetch(url: str, dest: Path) -> bool:
     return True
 
 def _geoip_auto_download(use_maxmind_mirror: bool = False) -> tuple:
-    """Возвращает (city_mmdb_path, asn_mmdb_path); пустая строка при неудаче."""
-    city_key = "maxmind" if use_maxmind_mirror else "dbip"
-    city_url, city_name = GEOIP_SOURCES[city_key]
-    asn_url, asn_name = GEOIP_SOURCES["asn"]
-    city_dest, asn_dest = GEOIP_DIR / city_name, GEOIP_DIR / asn_name
+    """Возвращает (city_mmdb_path, asn_mmdb_path); пустая строка при неудаче.
+
+    МИГРАЦИЯ: раньше использовался _http_get (urllib.request.urlopen) с
+    ОДНИМ прямым URL (cdn.jsdelivr.net/npm/...), БЕЗ зеркал, БЕЗ fallback,
+    БЕЗ проверки ручного размещения. Прямой аналог geo_files.py (geoip.dat),
+    который уже мигрирован.
+
+    Теперь используется fetch_package(TELEMT_GEOIP_CITY_SPEC или
+    TELEMT_GEOIP_CITY_MAXMIND_SPEC) и fetch_package(TELEMT_GEOIP_ASN_SPEC)
+    из download_manager.py. fetch_package сам:
+      1. Проверяет /root/{filename} (manual_incoming_dir из spec) — если
+         найден, использует без сети (WinSCP-friendly).
+      2. Иначе — перебирает 5 CDN зеркал по очереди через urllib.
+      3. При успехе — post_install делает gzip-decompress + запись .mmdb
+         в GEOIP_DIR + chown telemt:telemt.
+      4. При провале — print_manual_hint() с инструкцией.
+    """
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.telemt_geoip_packages import (
+        TELEMT_GEOIP_CITY_SPEC, TELEMT_GEOIP_CITY_MAXMIND_SPEC,
+        TELEMT_GEOIP_ASN_SPEC,
+        _DBIP_CITY_DEST_FILENAME, _MAXMIND_CITY_DEST_FILENAME, _ASN_DEST_FILENAME,
+    )
+
+    city_spec = TELEMT_GEOIP_CITY_MAXMIND_SPEC if use_maxmind_mirror else TELEMT_GEOIP_CITY_SPEC
+    city_name = _MAXMIND_CITY_DEST_FILENAME if use_maxmind_mirror else _DBIP_CITY_DEST_FILENAME
+    asn_name = _ASN_DEST_FILENAME
+    city_dest = GEOIP_DIR / city_name
+    asn_dest = GEOIP_DIR / asn_name
 
     _info(f"Скачиваю City-базу ({'MaxMind mirror' if use_maxmind_mirror else 'DB-IP Lite'})...")
-    city_ok = _geoip_fetch(city_url, city_dest)
+    city_ok = fetch_package(city_spec, print_hint_on_failure=False)
     if city_ok:
         _ok(f"City-база сохранена: {city_dest}")
     else:
         _warn("Не удалось скачать City-базу.")
 
     _info("Скачиваю ASN-базу...")
-    asn_ok = _geoip_fetch(asn_url, asn_dest)
+    asn_ok = fetch_package(TELEMT_GEOIP_ASN_SPEC, print_hint_on_failure=False)
     if asn_ok:
         _ok(f"ASN-база сохранена: {asn_dest}")
     else:

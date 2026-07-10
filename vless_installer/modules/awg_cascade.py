@@ -53,8 +53,24 @@ def _core_module():
 
 def awgs_cascade_download_ru_zone() -> bool:
     """
-    Скачивает актуальный ru.zone с ipdeny.com.
-    Fallback на GitHub raw (bivlked репо).
+    Скачивает актуальный ru.zone через download_manager.fetch_package().
+
+    МИГРАЦИЯ: раньше использовался subprocess curl с inline списком из 2
+    URL (ipdeny.com + GitHub raw bivlked), БЕЗ проверки ручного размещения.
+    Аналогично старому geo_files.py, который уже мигрирован.
+
+    Теперь используется fetch_package(RU_ZONE_SPEC) из download_manager.py.
+    fetch_package сам:
+      1. Проверяет /root/ru.zone (manual_incoming_dir из spec) — если
+         найден и размер >= 1 KB, использует без сети (WinSCP-friendly).
+      2. Иначе — перебирает 9 зеркал (ipdeny + GitHub raw + 7 gh-proxy)
+         по очереди через urllib.
+      3. При успехе — post_install копирует в /etc/amneziawg/cascade/ru.zone
+         + sanity check (lines_count > 100).
+      4. При провале — print_manual_hint() с инструкцией.
+
+    Fallback поведение сохранено: если все зеркала упали, создаётся пустой
+    файл (будет обновлён cron'ом).
     """
     core = _core_module()
     info = core.info
@@ -62,19 +78,17 @@ def awgs_cascade_download_ru_zone() -> bool:
 
     AWGS_CASCADE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Пробуем основной источник
-    for url in (AWGS_RU_ZONE_URL, AWGS_RU_ZONE_FALLBACK_GH):
-        info(f"Загрузка ru.zone: {url}")
-        r = core._run(
-            ["curl", "-fsSL", "--connect-timeout", "15", "-o", str(AWGS_RU_ZONE_FILE), url],
-            capture=True, check=False,
-        )
-        if r.returncode == 0 and AWGS_RU_ZONE_FILE.exists():
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.awg_cascade_packages import RU_ZONE_SPEC
+
+    ok = fetch_package(RU_ZONE_SPEC, print_hint_on_failure=False)
+    if ok:
+        try:
             lines_count = sum(1 for _ in AWGS_RU_ZONE_FILE.open())
-            if lines_count > 100:  # sanity check
-                info(f"ru.zone загружен: {lines_count} сетей")
-                return True
-        warn(f"  не удалось (exit {r.returncode})")
+            info(f"ru.zone загружен: {lines_count} сетей")
+        except Exception:
+            info("ru.zone загружен")
+        return True
 
     # Если ничего не вышло — создаём пустой файл (будет обновлён cron'ом)
     warn("Все источники недоступны — создан пустой ru.zone (обновится cron'ом)")
