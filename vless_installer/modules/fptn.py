@@ -372,7 +372,24 @@ def _pick_server_asset(release: dict, arch: str) -> Optional[str]:
     return None
 
 def _download_binaries() -> tuple:
-    """Возвращает (ok, message)."""
+    """Возвращает (ok, message).
+
+    МИГРАЦИЯ: раньше использовался urllib.request.urlretrieve() с ОДНИМ
+    прямым URL (полученным из GitHub API) БЕЗ зеркал, БЕЗ fallback, БЕЗ
+    проверки ручного размещения.
+
+    Теперь используется fetch_package(FPTN_SPEC, tag=..., filename=...) из
+    download_manager.py. fetch_package сам:
+      1. Проверяет /root/{filename} (manual_incoming_dir из spec) — если
+         найден и размер >= 100 KB, использует без сети (WinSCP-friendly).
+      2. Иначе — перебирает 14 зеркал (4 jsDelivr + raw + release + 7
+         gh-proxy + Statically) по очереди через urllib.
+      3. При успехе — post_install делает dpkg-deb -x и копирует
+         fptn-server + fptn-passwd в /usr/bin/ (chmod 0o755).
+      4. При провале — print_manual_hint() с инструкцией.
+
+    tag и filename получаются из GitHub API (non-migration, metadata).
+    """
     arch = _detect_arch()
     if not arch:
         return False, f"Неподдерживаемая архитектура: {platform.machine()} (нужна amd64/arm64)."
@@ -387,27 +404,17 @@ def _download_binaries() -> tuple:
         return False, f"Не найден .deb пакет сервера для архитектуры {arch}."
     version = release.get("tag_name", "unknown")
 
-    tmp_deb = Path(tempfile.mktemp(suffix=".deb"))
-    tmp_dir = Path(tempfile.mkdtemp(prefix="fptn-extract-"))
-    try:
-        urllib.request.urlretrieve(url, str(tmp_deb))
-        r = _run(["dpkg-deb", "-x", str(tmp_deb), str(tmp_dir)], capture=True)
-        if r.returncode != 0:
-            return False, f"dpkg-deb -x не смог распаковать пакет: {(r.stderr or '')[:200]}"
+    # Извлекаем filename из URL (последний сегмент path)
+    # URL имеет вид: https://github.com/fptn-project/fptn/releases/download/{tag}/{filename}
+    filename = url.rstrip("/").split("/")[-1]
 
-        server_bin = tmp_dir / "usr" / "bin" / "fptn-server"
-        passwd_bin = tmp_dir / "usr" / "bin" / "fptn-passwd"
-        if not server_bin.exists() or not passwd_bin.exists():
-            return False, "В .deb не найдены /usr/bin/fptn-server и/или fptn-passwd."
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.fptn_packages import FPTN_SPEC
 
-        shutil.copy2(str(server_bin), str(_BIN_SERVER)); _BIN_SERVER.chmod(0o755)
-        shutil.copy2(str(passwd_bin), str(_BIN_PASSWD)); _BIN_PASSWD.chmod(0o755)
+    ok = fetch_package(FPTN_SPEC, tag=version, filename=filename)
+    if ok:
         return True, f"fptn-server {version} ({arch}) установлен."
-    except Exception as e:
-        return False, f"Ошибка загрузки: {e}"
-    finally:
-        tmp_deb.unlink(missing_ok=True)
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return False, "Не удалось скачать fptn-server .deb ни с одного зеркала."
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  СЕРТИФИКАТ (самоподписанный — как hysteria2_cert_mgr.py)

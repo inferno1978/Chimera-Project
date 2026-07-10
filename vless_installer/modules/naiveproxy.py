@@ -136,15 +136,11 @@ _MODULE_STATE    = Path("/var/lib/xray-installer/naiveproxy.json")
 
 # GitHub: caddy-forwardproxy-naive — только amd64
 _GITHUB_API      = "https://api.github.com/repos/klzgrad/naiveproxy/releases/latest"
-_BIN_URL_AMD64   = (
-    "https://github.com/klzgrad/naiveproxy/releases/latest/download/"
-    "naiveproxy-linux-amd64.tar.xz"
-)
-# Caddy с forwardproxy плагином (альтернатива)
-_CADDY_NAIVE_URL = (
-    "https://github.com/Michaol/caddy-naive/releases/latest/download/"
-    "caddy-linux-amd64"
-)
+# _BIN_URL_AMD64 — удалён при миграции (был dead code, ни разу не использовался —
+# модуль использует caddy-naive binary, не naiveproxy tarball).
+# _CADDY_NAIVE_URL — удалён при миграции. Теперь зеркала (4 jsDelivr + release
+# GitHub + 7 gh-proxy) собираются в naiveproxy_mirrors.get_naiveproxy_mirrors()
+# и перебираются автоматически через fetch_package(NAIVEPROXY_SPEC).
 
 _DEFAULT_PORT    = 443
 _DEFAULT_FAKE    = "https://www.bing.com"
@@ -340,28 +336,36 @@ def _is_amd64() -> bool:
 # _get_latest_version — вынесен в proto_common. NaiveProxy's GitHub release
 # tags have a leading 'v' (e.g. 'v1.0.1') → strip_v=True at call sites.
 def _download_binary() -> bool:
+    """Скачивает caddy-forwardproxy-naive binary через download_manager.fetch_package().
+
+    МИГРАЦИЯ: раньше использовался urllib.request.urlretrieve() с ОДНИМ
+    прямым URL (https://github.com/Michaol/caddy-naive/releases/latest/
+    download/caddy-linux-amd64) БЕЗ зеркал, БЕЗ fallback, БЕЗ проверки
+    ручного размещения.
+
+    Теперь используется fetch_package(NAIVEPROXY_SPEC) из download_manager.py.
+    fetch_package сам:
+      1. Проверяет /root/caddy-linux-amd64 (manual_incoming_dir из spec) —
+         если найден и размер >= 1 MB, использует без сети (WinSCP-friendly).
+      2. Иначе — перебирает 12 зеркал (4 jsDelivr + release GitHub + 7
+         gh-proxy) по очереди через urllib.
+      3. При успехе — post_install проверяет ELF magic и копирует в
+         /usr/local/bin/caddy-naive (chmod 0o755).
+      4. При провале — print_manual_hint() с инструкцией.
+    """
     if not _is_amd64():
         print(f"  {RED}✗{NC}  caddy-forwardproxy-naive только amd64. "
               f"Текущая: {platform.machine()}")
         return False
 
-    print(f"  {CYAN}→{NC}  Скачиваю caddy-forwardproxy-naive...")
-    tmp = Path(tempfile.mktemp(suffix=".bin"))
-    try:
-        urllib.request.urlretrieve(_CADDY_NAIVE_URL, str(tmp))
-        with tmp.open("rb") as f:
-            if f.read(4) != b'\x7fELF':
-                print(f"  {RED}✗{NC}  Скачанный файл не ELF-бинарник.")
-                return False
-        shutil.copy2(str(tmp), str(_BIN_PATH))
-        _BIN_PATH.chmod(0o755)
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.naiveproxy_packages import NAIVEPROXY_SPEC
+
+    print(f"  {CYAN}→{NC}  Скачиваю caddy-forwardproxy-naive (через download_manager)...")
+    ok = fetch_package(NAIVEPROXY_SPEC)
+    if ok:
         print(f"  {GREEN}✓{NC}  caddy-naive установлен: {_BIN_PATH}")
-        return True
-    except Exception as e:
-        print(f"  {RED}✗{NC}  Ошибка загрузки: {e}")
-        return False
-    finally:
-        tmp.unlink(missing_ok=True)
+    return ok
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CADDYFILE
