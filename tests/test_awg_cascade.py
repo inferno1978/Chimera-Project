@@ -128,12 +128,10 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
             patch("vless_installer.modules.awg_cascade.AWGS_ROUTING_SCRIPT", self._script),
         )
 
-    @unittest.expectedFailure
     def test_writes_script_with_ipset_references(self):
-        """BAG: f-string конфликтует с bash ${line:0:1} → NameError при вызове.
-        Функция _awgs_cascade_create_routing_script содержит f-string с
-        bash-переменной ${line:0:1}, которую Python пытается интерпретировать
-        как f-string выражение. Тест документирует этот баг."""
+        """Скрипт содержит ссылки на ipset и exit_gw (base.1 из exit_subnet).
+        Ранее f-string конфликтовал с bash ${line:0:1} → NameError при вызове
+        (фикс: экранирование через ${{line:0:1}})."""
         from vless_installer.modules.awg_cascade import (
             _awgs_cascade_create_routing_script, AWGS_IPSET_NAME,
         )
@@ -141,11 +139,14 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
             _awgs_cascade_create_routing_script("172.16.61.0/24")
         content = self._script.read_text()
         self.assertIn(AWGS_IPSET_NAME, content)
-        self.assertIn("172.16.61.0/24", content)
+        # exit_gw = base.1 где base = exit_subnet без последнего октета и /CIDR
+        # 172.16.61.0/24 → base=172.16.61 → exit_gw=172.16.61.1
+        self.assertIn("172.16.61.1", content)
+        # bash-конструкция ${line:0:1} должна остаться в скрипте как есть
+        self.assertIn("${line:0:1}", content)
 
-    @unittest.expectedFailure
     def test_script_is_executable(self):
-        """BAG: та же проблема f-string — функция падает до записи файла."""
+        """Скрипт создаётся с executable bit (0o755)."""
         import stat
         from vless_installer.modules.awg_cascade import (
             _awgs_cascade_create_routing_script,
