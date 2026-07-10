@@ -1,8 +1,25 @@
 """
-hydra/plugins/mieru/presets.py — Mieru traffic pattern presets.
+vless_installer/modules/mieru_traffic_presets.py — Mieru traffic pattern presets.
 
 Предоставляет 4 уровня обфускации трафика для Mieru (disabled / basic / medium / aggressive).
 Кодирует параметры в base64-protobuf формат, ожидаемый sing-box/mita.
+
+Формат: base64-protobuf TrafficPattern message (proto3, all fields optional).
+Проверен против реального proto-определения из mieru:
+  github.com/enfein/mieru/pkg/appctl/proto/base.proto
+
+Правила сериализации (proto3 optional = явное presence):
+- optional scalar = false/0, ЯВНО SET → СЕРИАЛИЗУЕТСЯ (1000 / 0800)
+- optional scalar = false/0, NOT SET → НЕ сериализуется
+- вложенный message nil → НЕ сериализуется
+- вложенный message set, все поля not-set → пустой length-delimited (1a00)
+- repeated string пустой → НЕ сериализуется
+
+ВАЖНО: форматы base64 этого модуля (для клиентских mierus:// ссылок) и
+JSON-объекты в mieru.py:_MIERU_TRAFFIC_PRESETS (для серверного конфига mita)
+— РАЗНЫЕ представления одного и того же TrafficPattern. JSON идёт в server.json
+(mita понимает JSON), base64 идёт в mierus:// ссылку (Karing/sing-box понимает
+protobuf-base64).
 """
 from __future__ import annotations
 
@@ -161,8 +178,10 @@ def get_preset_base64(name: str) -> str:
         }, PADDING_PATTERN_TYPES)
         
     # 4. TrafficPattern
+    # unlockAll кодируется всегда (proto3 optional → явное presence):
+    # unlockAll=True → 1001, unlockAll=False → 1000.
     tp_bytes = encode_message({
-        2: cfg.get("unlockAll") if cfg.get("unlockAll") else None,
+        2: cfg.get("unlockAll", False),  # всегда сериализуем (явное presence)
         3: tcp_bytes,
         4: nonce_bytes,
         5: pad_bytes
