@@ -203,11 +203,13 @@ def _install_monitor_cron() -> None:
         _warn("Сначала настройте токен и Chat ID")
         return
 
+    # Экранируем через shlex.quote для безопасной вставки в bash-скрипт
+    import shlex
     script = Path("/usr/local/bin/xray-tg-monitor.sh")
     script.write_text(
         "#!/bin/bash\n"
-        f"TOKEN=\"{token}\"\n"
-        f"CHAT=\"{chat_id}\"\n"
+        f"TOKEN={shlex.quote(token)}\n"
+        f"CHAT={shlex.quote(chat_id)}\n"
         "send() { curl -s -o /dev/null -m 10 "
         "\"https://api.telegram.org/bot$TOKEN/sendMessage\" "
         "-d \"chat_id=$CHAT\" -d \"text=$1\" -d \"parse_mode=HTML\" || true; }\n"
@@ -361,10 +363,10 @@ def _generate_bot_script(bot_cfg: dict, notif_cfg: dict) -> str:
     Генерирует Python-скрипт бота (long-polling, без внешних зависимостей).
     Скрипт запускается как systemd-сервис.
     """
-    token        = bot_cfg.get("token") or notif_cfg.get("token", "")
-    admin_id     = str(bot_cfg.get("admin_id") or notif_cfg.get("chat_id", ""))
-    allowed      = json.dumps(bot_cfg.get("allowed_users", []))
-    invite_tokens = json.dumps(bot_cfg.get("invite_tokens", {}))
+    token        = json.dumps(bot_cfg.get("token") or notif_cfg.get("token", ""), ensure_ascii=False)
+    admin_id     = json.dumps(str(bot_cfg.get("admin_id") or notif_cfg.get("chat_id", "")), ensure_ascii=False)
+    allowed      = json.dumps(bot_cfg.get("allowed_users", []), ensure_ascii=False)
+    invite_tokens = json.dumps(bot_cfg.get("invite_tokens", {}), ensure_ascii=False)
     state_file   = str(_STATE_FILE)
     bot_file     = str(_BOT_FILE)
 
@@ -377,8 +379,8 @@ import json, os, sys, time, re, subprocess, urllib.request, urllib.parse, urllib
 from pathlib import Path
 from datetime import datetime
 
-TOKEN    = "{token}"
-ADMIN_ID = "{admin_id}"
+TOKEN    = {token}
+ADMIN_ID = {admin_id}
 BOT_FILE = Path("{bot_file}")
 STATE_F  = Path("{state_file}")
 LOG_F    = Path("/var/log/vless-install.log")
