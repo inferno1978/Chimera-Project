@@ -110,10 +110,10 @@ _MODULE_STATE    = Path("/var/lib/xray-installer/turntunnel.json")
 _DEFAULT_LISTEN_PORT = 56000   # UDP — порт на который подключается FreeTurn
 _DEFAULT_TARGET_PORT = 51820   # порт WireGuard / Hysteria2 на VPS (редактируется)
 
-_GITHUB_RELEASES_URL = (
-    "https://github.com/cacggghp/vk-turn-proxy/releases/latest/download/"
-    "server-linux-amd64"
-)
+# _GITHUB_RELEASES_URL — удалён при миграции на download_manager.
+# Теперь зеркала (jsDelivr CDN + raw GitHub + release GitHub + 7 gh-proxy +
+# Statically) собираются в turn_mirrors.get_turntunnel_mirrors() и
+# перебираются автоматически через fetch_package(TURNTUNNEL_SPEC).
 _GITHUB_API_URL = "https://api.github.com/repos/cacggghp/vk-turn-proxy/releases/latest"
 
 _BOX_W = 66
@@ -272,32 +272,40 @@ def _ipt_close_udp(port: int) -> None:
 # `-version` flag (single dash). Call sites use proto_get_installed_version.
 
 def _download_binary() -> bool:
+    """Скачивает vk-turn-proxy binary через download_manager.fetch_package().
+
+    МИГРАЦИЯ: раньше использовался urllib.request.urlretrieve() с ОДНИМ прямым
+    URL (https://github.com/cacggghp/vk-turn-proxy/releases/latest/download/
+    server-linux-amd64) БЕЗ зеркал, БЕЗ fallback, БЕЗ проверки ручного
+    размещения.
+
+    Теперь используется fetch_package(TURNTUNNEL_SPEC) из download_manager.py.
+    fetch_package сам:
+      1. Проверяет /root/server-linux-amd64 (manual_incoming_dir из spec) —
+         если найден и размер >= min_size, использует без сети
+         (WinSCP-friendly).
+      2. Иначе — перебирает зеркала (turn_mirrors.get_turntunnel_mirrors())
+         по очереди через urllib, с таймаутом 15s на connect.
+      3. При успехе — post_install копирует в /opt/vk-turn-proxy/server
+         (chmod 0o755 + ELF magic проверка).
+      4. При провале всех зеркал — print_manual_hint() с инструкцией.
+
+    Архитектурная проверка (_is_amd64) остаётся здесь — это бизнес-логика,
+    не ответственность download_manager.
+    """
     if not _is_amd64():
         _err(f"Архитектура {platform.machine()} не поддерживается (только amd64).")
         return False
 
-    _BIN_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp())
-    tmp_bin = tmp / "server"
+    # Ленивый импорт (избегает циклического импорта на module load).
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.turn_packages import TURNTUNNEL_SPEC
 
-    try:
-        _info("Скачиваю vk-turn-proxy с GitHub...")
-        urllib.request.urlretrieve(_GITHUB_RELEASES_URL, str(tmp_bin))
-        tmp_bin.chmod(0o755)
-        with tmp_bin.open("rb") as f:
-            magic = f.read(4)
-        if magic != b'\x7fELF':
-            _err("Скачанный файл не является ELF-бинарником.")
-            return False
-        shutil.copy2(str(tmp_bin), str(_BIN_PATH))
-        _BIN_PATH.chmod(0o755)
+    _info("Скачиваю vk-turn-proxy (через download_manager)...")
+    ok = fetch_package(TURNTUNNEL_SPEC)
+    if ok:
         _ok(f"Установлено: {_BIN_PATH}")
-        return True
-    except Exception as e:
-        _err(f"Ошибка загрузки: {e}")
-        return False
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
 
 # _get_installed_version — вынесен в proto_common. vk-turn-proxy binary
 # uses single-dash `-version` flag, output has no leading 'v' prefix.
