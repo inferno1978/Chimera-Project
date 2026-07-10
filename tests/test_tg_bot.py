@@ -303,38 +303,68 @@ class TestGenerateBotScriptSyntax(unittest.TestCase):
         ast.parse(script)
 
     def test_token_with_double_quotes_produces_valid_syntax(self):
-        """Token с двойными кавычками — проверка что экранирование не ломает синтаксис.
+        """Token с двойными кавычками — json.dumps корректно экранирует ".
 
-        ВНИМАНИЕ: token с " вставляется в f"{token}" внутри строкового литерала
-        Python-скрипта. Если token содержит ", это сломает строковый литерал.
-        Но _generate_bot_script НЕ экранирует token — это реальная уязвимость,
-        которую тест фиксирует. ast.parse должен поднять SyntaxError в этом случае.
+        После фикса: token проходит через json.dumps(ensure_ascii=False),
+        который добавляет внешние кавычки и экранирует внутренние как \\".
+        ast.parse должен пройти БЕЗ исключения, а значение TOKEN в AST
+        должно совпадать с исходным token (кавычка сохранена как часть строки).
         """
         import ast
         from vless_installer.modules.tg_bot import _generate_bot_script
         cfg = self._bot_cfg(token='abc"def')
         script = _generate_bot_script(cfg, self._notif_cfg())
-        # token с " ломает строковый литерал — ast.parse поднимает SyntaxError
-        with self.assertRaises(SyntaxError):
-            ast.parse(script)
+        # ast.parse должен пройти без SyntaxError
+        tree = ast.parse(script)
+        # Проверяем что TOKEN содержит исходное значение с кавычкой
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "TOKEN":
+                        self.assertIsInstance(node.value, ast.Constant)
+                        self.assertEqual(node.value.value, 'abc"def')
 
     def test_token_with_backslash_produces_valid_syntax(self):
-        r"""Token с обратным слэшем — проверка что \n не интерпретируется как newline.
+        r"""Token с обратным слэшем — json.dumps корректно экранирует \.
 
-        ВНИМАНИЕ: token с \ вставляется в f"{token}" и может сломать строковый
-        литерал (например \n → newline, \" → escaped quote). _generate_bot_script
-        НЕ экранирует token — это реальная уязвимость, которую тест фиксирует.
+        После фикса: token проходит через json.dumps, который экранирует \ как \\.
+        ast.parse проходит чисто, а значение TOKEN в AST соответствует исходному
+        token с обратным слэшем как есть (без интерпретации как escape-последовательности).
         """
         import ast
         from vless_installer.modules.tg_bot import _generate_bot_script
         cfg = self._bot_cfg(token=r"abc\def")
         script = _generate_bot_script(cfg, self._notif_cfg())
-        # \d в строковом литерале — это invalid escape sequence (DeprecationWarning),
-        # но не SyntaxError. Проверяем что ast.parse хотя бы не падает с SyntaxError.
-        try:
-            ast.parse(script)
-        except SyntaxError:
-            pass  # \ перед " или другими спецсимволами может вызвать SyntaxError
+        # ast.parse должен пройти без SyntaxError
+        tree = ast.parse(script)
+        # Проверяем что TOKEN содержит исходное значение с \
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "TOKEN":
+                        self.assertIsInstance(node.value, ast.Constant)
+                        self.assertEqual(node.value.value, r"abc\def")
+
+    def test_token_with_newline_and_unicode_produces_valid_syntax(self):
+        """Token с переносом строки и юникодом (эмодзи) — json.dumps корректно
+        экранирует \\n как \\\\n и сохраняет emoji через ensure_ascii=False.
+
+        ast.parse проходит чисто, а значение TOKEN в AST соответствует
+        исходному token с переносом строки и эмодзи как есть.
+        """
+        import ast
+        from vless_installer.modules.tg_bot import _generate_bot_script
+        cfg = self._bot_cfg(token="abc\ndef🚀")
+        script = _generate_bot_script(cfg, self._notif_cfg())
+        # ast.parse должен пройти без SyntaxError
+        tree = ast.parse(script)
+        # Проверяем что TOKEN содержит исходное значение
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "TOKEN":
+                        self.assertIsInstance(node.value, ast.Constant)
+                        self.assertEqual(node.value.value, "abc\ndef🚀")
 
     def test_token_with_curly_braces_produces_valid_syntax(self):
         """Token с фигурными скобками — проверка что { } не ломают f-string.
