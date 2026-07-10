@@ -225,7 +225,7 @@ def _box_item(key: str, label: str) -> None:
     _box_row(f"  {DIM}[{NC}{col}{key}{NC}{DIM}]{NC}  {label}")
 
 def _box_ok(msg: str)   -> None: _box_row(f"  {GREEN}✓{NC}  {msg}")
-def _box_warn(msg: str) -> None: _box_row(f"  {YELLOW}⚠{NC}  {msg}")
+def _box_warn(msg: str) -> None: _box_row(f"  {YELLOW}[!]{NC}  {msg}")
 def _box_info(msg: str) -> None: _box_row(f"  {CYAN}→{NC}  {msg}")
 def _box_err(msg: str)  -> None: _box_row(f"  {RED}✗{NC}  {msg}")
 
@@ -254,7 +254,7 @@ def _log(msg: str) -> None:
         pass
 
 def _ok(msg: str)   -> None: print(f"  {GREEN}✓{NC}  {msg}"); _log(f"[OK] {msg}")
-def _warn(msg: str) -> None: print(f"  {YELLOW}⚠{NC}  {msg}"); _log(f"[WARN] {msg}")
+def _warn(msg: str) -> None: print(f"  {YELLOW}[!]{NC}  {msg}"); _log(f"[WARN] {msg}")
 def _info(msg: str) -> None: print(f"  {CYAN}→{NC}  {msg}"); _log(f"[INFO] {msg}")
 def _err(msg: str)  -> None: print(f"  {RED}✗{NC}  {msg}"); _log(f"[ERR] {msg}")
 
@@ -1464,14 +1464,14 @@ def _select_domain() -> str:
             any_marked = False
             for i, d in enumerate(doms, 1):
                 if d in _PQ_RISKY:
-                    _box_item(str(i), f"{d}  {RED}⚠{NC}"); any_marked = True
+                    _box_item(str(i), f"{d}  {RED}[!]{NC}"); any_marked = True
                 elif d in _PQ_CONFIRMED:
                     _box_item(str(i), f"{d}  {GREEN}✓{NC}"); any_marked = True
                 else:
                     _box_item(str(i), d)
             if any_marked:
                 _box_row()
-                _box_row(f"  {DIM}{RED}⚠{NC}{DIM} возможен блок iOS без OpenSSL 3.5+, "
+                _box_row(f"  {DIM}{RED}[!]{NC}{DIM} возможен блок iOS без OpenSSL 3.5+, "
                          f"{GREEN}✓{NC}{DIM} подтверждено (не проверено нами){NC}")
             _box_sep(); _box_item("Q", "← Назад"); _box_bot(); print()
             p = proto_ask(f"{CYAN}Выбор [1-{len(doms)}]: {NC}", c=True).strip()
