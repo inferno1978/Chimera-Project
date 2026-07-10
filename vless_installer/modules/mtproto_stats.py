@@ -20,6 +20,8 @@ vless_installer/modules/mtproto_stats.py
 
 from __future__ import annotations
 
+from vless_installer.modules.text_width import wlen as _wlen, plain as _plain
+
 import json
 import os
 import re
@@ -71,11 +73,7 @@ except ImportError:
         return subprocess.run(cmd, **kw)
 
     def _plain(s): return re.sub(r'\033\[[0-9;]*m', '', s)
-    def _wlen(s):
-        import unicodedata as _ud
-        return sum(2 if _ud.east_asian_width(c) in ('W','F') else 1
-                   for c in _plain(s))
-
+    
     _BOX_W = 68
     def _box_top(title=""):
         print(f"{CYAN}╔{'═'*_BOX_W}╗{NC}")

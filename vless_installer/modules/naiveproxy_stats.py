@@ -33,6 +33,8 @@ vless_installer/modules/naiveproxy_stats.py
 """
 from __future__ import annotations
 
+from vless_installer.modules.text_width import wlen as _wlen, plain as _plain
+
 import json
 import os
 import re
@@ -84,14 +86,7 @@ _DEFAULT_PORT = 443
 import re as _re
 import unicodedata as _ud
 
-def _plain(s: str) -> str:
-    return _re.sub(r'\033\[[0-9;]*m', '', s)
 
-def _wlen(s: str) -> int:
-    w = 0
-    for ch in _plain(s):
-        w += 2 if _ud.east_asian_width(ch) in ('W', 'F') else 1
-    return w
 
 _BOX_W = 66
 

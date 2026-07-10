@@ -82,6 +82,8 @@ FPTN — самостоятельный L3 VPN-протокол (свой TUN-т
 """
 from __future__ import annotations
 
+from vless_installer.modules.text_width import wlen as _wlen, plain as _plain
+
 import json
 import os
 import platform
@@ -162,30 +164,7 @@ _BOX_W                  = 66
 # ══════════════════════════════════════════════════════════════════════════════
 #  BOX-РЕНДЕРИНГ (самодостаточно, без общих модулей — как naiveproxy.py/mieru.py)
 # ══════════════════════════════════════════════════════════════════════════════
-def _plain(s: str) -> str:
-    return re.sub(r'\033\[[0-9;]*m', '', s)
 
-def _wlen(s: str) -> int:
-    import unicodedata as _ud
-    plain = _plain(s)
-    width, chars = 0, list(plain)
-    i = 0
-    while i < len(chars):
-        ch = chars[i]; cp = ord(ch)
-        next_cp = ord(chars[i + 1]) if i + 1 < len(chars) else 0
-        if next_cp == 0xFE0F:
-            width += 2; i += 2; continue
-        if cp == 0x200D or (0x300 <= cp <= 0x36F) or (0xFE00 <= cp <= 0xFE0F):
-            i += 1; continue
-        eaw = _ud.east_asian_width(ch)
-        if eaw in ('W', 'F'):
-            width += 2
-        elif eaw == 'N' and (0x1F300 <= cp <= 0x1FAFF or 0x2B00 <= cp <= 0x2BFF):
-            width += 2
-        else:
-            width += 1
-        i += 1
-    return width
 
 def _box_top(title: str = "") -> None:
     print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
