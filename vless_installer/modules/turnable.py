@@ -123,10 +123,10 @@ _ROUTE_ID_VLESS  = "vless"
 _XRAY_INBOUND_TAG = "vless-turnable-inbound"
 
 _TURNABLE_VERSION = "0.4.1"
-_GITHUB_RELEASES_URL = (
-    f"https://github.com/TheAirBlow/Turnable/releases/download/"
-    f"{_TURNABLE_VERSION}/turnable-linux-amd64"
-)
+# _GITHUB_RELEASES_URL — удалён при миграции на download_manager.
+# Теперь зеркала (jsDelivr CDN + release GitHub + 7 gh-proxy) собираются в
+# turn_mirrors.get_turnable_mirrors(version) и перебираются автоматически
+# через fetch_package(TURNABLE_SPEC, version=_TURNABLE_VERSION).
 _GITHUB_API_URL = "https://api.github.com/repos/TheAirBlow/Turnable/releases/latest"
 
 _XRAY_CONFIG_PATHS = [
@@ -368,33 +368,40 @@ def _ipt_close_udp(port: int) -> None:
 # _get_latest_version — вынесен в proto_common. Turnable's GitHub release
 # tags have no leading 'v' prefix → strip_v=False (default) at call sites.
 def _download_binary() -> bool:
+    """Скачивает turnable binary через download_manager.fetch_package().
+
+    МИГРАЦИЯ: раньше использовался urllib.request.urlretrieve() с ОДНИМ прямым
+    URL (https://github.com/TheAirBlow/Turnable/releases/download/
+    {0.4.1}/turnable-linux-amd64) БЕЗ зеркал, БЕЗ fallback, БЕЗ проверки
+    ручного размещения.
+
+    Теперь используется fetch_package(TURNABLE_SPEC, version=_TURNABLE_VERSION)
+    из download_manager.py. fetch_package сам:
+      1. Проверяет /root/turnable-linux-amd64 (manual_incoming_dir из spec) —
+         если найден и размер >= min_size, использует без сети
+         (WinSCP-friendly).
+      2. Иначе — перебирает зеркала (turn_mirrors.get_turnable_mirrors(ver))
+         по очереди через urllib, с таймаутом 15s на connect.
+      3. При успехе — post_install копирует в /opt/turnable/turnable
+         (chmod 0o755 + ELF magic проверка).
+      4. При провале всех зеркал — print_manual_hint() с инструкцией.
+
+    Архитектурная проверка (_is_amd64) остаётся здесь — это бизнес-логика,
+    не ответственность download_manager.
+    """
     if not _is_amd64():
         _err(f"Архитектура {platform.machine()} не поддерживается (только amd64).")
         return False
 
-    _BIN_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp())
-    tmp_bin = tmp / "turnable"
+    # Ленивый импорт (избегает циклического импорта на module load).
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.turn_packages import TURNABLE_SPEC
 
-    try:
-        _info("Скачиваю Turnable с GitHub...")
-        urllib.request.urlretrieve(_GITHUB_RELEASES_URL, str(tmp_bin))
-        tmp_bin.chmod(0o755)
-        with tmp_bin.open("rb") as f:
-            magic = f.read(4)
-        if magic != b'\x7fELF':
-            _err("Скачанный файл не является ELF-бинарником.")
-            _err("Проверьте доступность GitHub или URL релиза.")
-            return False
-        shutil.copy2(str(tmp_bin), str(_BIN_PATH))
-        _BIN_PATH.chmod(0o755)
+    _info("Скачиваю Turnable (через download_manager)...")
+    ok = fetch_package(TURNABLE_SPEC, version=_TURNABLE_VERSION)
+    if ok:
         _ok(f"Установлено: {_BIN_PATH}")
-        return True
-    except Exception as e:
-        _err(f"Ошибка загрузки: {e}")
-        return False
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
 
 def _get_installed_version() -> Optional[str]:
     # Delegated to proto_common.proto_get_installed_version.
