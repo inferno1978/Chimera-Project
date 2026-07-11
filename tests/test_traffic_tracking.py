@@ -105,14 +105,28 @@ class TestStatsApiIsConfigured(unittest.TestCase):
         from vless_installer.modules import traffic_tracking
         core = MagicMock()
         core.CONFIG_DIR = Path("/tmp/nonexistent_cfg_dir")
-        with patch.object(traffic_tracking, "_core_module", return_value=core):
+        # На проде /usr/local/etc/xray/config.json существует — патчим.
+        _orig_exists = Path.exists
+        def _exists(self):
+            if str(self) in ("/usr/local/etc/xray/config.json", "/etc/xray/config.json"):
+                return False
+            return _orig_exists(self)
+        with patch.object(traffic_tracking, "_core_module", return_value=core), \
+             patch.object(Path, "exists", _exists):
             self.assertFalse(traffic_tracking._stats_api_is_configured())
 
     def test_returns_false_when_missing_stats(self):
         from vless_installer.modules import traffic_tracking
         cfg = {"inbounds": [], "outbounds": []}
+        # На проде /usr/local/etc/xray/config.json существует — патчим.
+        _orig_exists = Path.exists
+        def _exists(self):
+            if str(self) in ("/usr/local/etc/xray/config.json", "/etc/xray/config.json"):
+                return False
+            return _orig_exists(self)
         with patch.object(traffic_tracking, "_core_module",
-                          return_value=self._mock_core(cfg)):
+                          return_value=self._mock_core(cfg)), \
+             patch.object(Path, "exists", _exists):
             self.assertFalse(traffic_tracking._stats_api_is_configured())
 
     def test_returns_true_when_all_present(self):
@@ -123,8 +137,16 @@ class TestStatsApiIsConfigured(unittest.TestCase):
             "inbounds": [{"tag": "xray-stats-api"}],
             "outbounds": [{"tag": "xray-stats-api"}],
         }
+        # На проде /usr/local/etc/xray/config.json может существовать с
+        # другой конфигурацией — патчим чтобы тест шёл по CONFIG_DIR пути.
+        _orig_exists = Path.exists
+        def _exists(self):
+            if str(self) in ("/usr/local/etc/xray/config.json", "/etc/xray/config.json"):
+                return False
+            return _orig_exists(self)
         with patch.object(traffic_tracking, "_core_module",
-                          return_value=self._mock_core(cfg)):
+                          return_value=self._mock_core(cfg)), \
+             patch.object(Path, "exists", _exists):
             self.assertTrue(traffic_tracking._stats_api_is_configured())
 
     def test_returns_false_when_missing_policy(self):
@@ -134,8 +156,15 @@ class TestStatsApiIsConfigured(unittest.TestCase):
             "inbounds": [{"tag": "xray-stats-api"}],
             "outbounds": [{"tag": "xray-stats-api"}],
         }
+        # На проде /usr/local/etc/xray/config.json существует — патчим.
+        _orig_exists = Path.exists
+        def _exists(self):
+            if str(self) in ("/usr/local/etc/xray/config.json", "/etc/xray/config.json"):
+                return False
+            return _orig_exists(self)
         with patch.object(traffic_tracking, "_core_module",
-                          return_value=self._mock_core(cfg)):
+                          return_value=self._mock_core(cfg)), \
+             patch.object(Path, "exists", _exists):
             self.assertFalse(traffic_tracking._stats_api_is_configured())
 
 
