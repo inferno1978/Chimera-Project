@@ -1776,6 +1776,119 @@ class TestNginxHardeningUnlinkBeforeRestart(unittest.TestCase):
                          f"Найдены unlink после symlink_to: {unlink_after_symlink}")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Тесты v4.20.7: retry логика в _setup_own_site + race condition fix
+# ══════════════════════════════════════════════════════════════════════════════
+class TestSetupOwnSiteRetryLogic(unittest.TestCase):
+    """v4.20.7: _setup_own_site шаг 7 — retry 3 попытки для _check_mask_backend_ready.
+
+    Раньше одна попытка с timeout=3.0 — race condition: systemctl reload nginx
+    async, nginx не успевал поднять listener → TCP-connect падал → откат в
+    donor-режим. Теперь 3 попытки по 2 сек + диагностика при провале.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_retry_succeeds_on_second_attempt(self):
+        """Если _check_mask_backend_ready возвращает False, True, True —
+        _setup_own_site должен вернуть OwnSiteConfig с mask_port > 0
+        (не откатывать в donor-режим)."""
+        from vless_installer.modules import mtproto
+
+        # Мокаем _check_mask_backend_ready: первая попытка False (race), вторая True
+        check_calls = []
+        def _fake_check(host, port, timeout=2.0):
+            check_calls.append((host, port))
+            return len(check_calls) >= 2  # False, True, True
+
+        mock_core = MagicMock()
+        mock_core.PARAM_DOMAIN = "vless.example.com"
+        original_core = sys.modules.get("vless_installer._core")
+        sys.modules["vless_installer._core"] = mock_core
+
+        try:
+            with ExitStack() as stack:
+                _enter_mtproto_ui_patches(stack, mtproto)
+                stack.enter_context(patch.object(mtproto, "_pick_local_nginx_port", return_value=8444))
+                stack.enter_context(patch.object(mtproto, "_is_cert_self_signed", return_value=False))
+                stack.enter_context(patch.object(mtproto, "_cleanup_own_site"))
+                stack.enter_context(patch.object(mtproto, "_check_mask_backend_ready",
+                                                  side_effect=_fake_check))
+                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_temp"))
+                stack.enter_context(patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"))
+                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_final"))
+                stack.enter_context(patch.object(mtproto, "time"))
+                result = mtproto._setup_own_site("telemt.example.com", 8443)
+        finally:
+            if original_core is not None:
+                sys.modules["vless_installer._core"] = original_core
+            else:
+                sys.modules.pop("vless_installer._core", None)
+
+        self.assertIsInstance(result, mtproto.OwnSiteConfig)
+        self.assertEqual(result.mask_port, 8444,
+                         "Retry должен дать own-site успех (mask_port=8444)")
+        self.assertGreaterEqual(len(check_calls), 2,
+                                "Должно быть минимум 2 попытки (первая False, вторая True)")
+
+    def test_retry_fails_after_3_attempts_with_diagnostics(self):
+        """Если _check_mask_backend_ready возвращает False 3 раза —
+        _setup_own_site должен откатить в donor-режим + показать диагностику."""
+        from vless_installer.modules import mtproto
+
+        check_calls = []
+        def _fake_check(host, port, timeout=2.0):
+            check_calls.append(1)
+            return False  # всегда False
+
+        mock_core = MagicMock()
+        mock_core.PARAM_DOMAIN = "vless.example.com"
+        original_core = sys.modules.get("vless_installer._core")
+        sys.modules["vless_installer._core"] = mock_core
+
+        cleanup_calls = []
+        err_calls = []
+
+        try:
+            with ExitStack() as stack:
+                _enter_mtproto_ui_patches(stack, mtproto)
+                stack.enter_context(patch.object(mtproto, "_pick_local_nginx_port", return_value=8444))
+                stack.enter_context(patch.object(mtproto, "_is_cert_self_signed", return_value=False))
+                stack.enter_context(patch.object(mtproto, "_cleanup_own_site",
+                                                  side_effect=lambda d: cleanup_calls.append(d)))
+                stack.enter_context(patch.object(mtproto, "_check_mask_backend_ready",
+                                                  side_effect=_fake_check))
+                stack.enter_context(patch.object(mtproto, "_err",
+                                                  side_effect=lambda m: err_calls.append(m)))
+                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_temp"))
+                stack.enter_context(patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"))
+                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_final"))
+                stack.enter_context(patch.object(mtproto, "time"))
+                stack.enter_context(patch.object(mtproto, "_run",
+                                                  return_value=MagicMock(returncode=0, stdout="", stderr="nginx: OK")))
+                result = mtproto._setup_own_site("telemt.example.com", 8443)
+        finally:
+            if original_core is not None:
+                sys.modules["vless_installer._core"] = original_core
+            else:
+                sys.modules.pop("vless_installer._core", None)
+
+        self.assertIsInstance(result, mtproto.OwnSiteConfig)
+        self.assertEqual(result.mask_port, 0,
+                         "3 неудачные попытки → mask_port=0 (donor-режим)")
+        self.assertEqual(len(check_calls), 3,
+                         "Должно быть ровно 3 попытки")
+        self.assertEqual(cleanup_calls, ["telemt.example.com"],
+                         "_cleanup_own_site должен быть вызван при откате")
+        # Диагностика должна выводиться (ss + nginx -t)
+        err_text = " ".join(err_calls)
+        self.assertIn("Диагностика", err_text,
+                      "Должна быть секция диагностики при провале")
+        self.assertIn("ss -tlnH", err_text,
+                      "Диагностика должна показывать ss вывод")
+
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Доп. тест: _select_domain возвращает str для donor-домена

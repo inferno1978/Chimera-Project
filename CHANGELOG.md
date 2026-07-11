@@ -2,6 +2,93 @@
 
 ---
 
+## v4.20.7 — FIX: race condition — nginx reload async, _check_mask_backend_ready вызывался слишком рано → откат в donor-режим — 12 июля 2026
+
+### 🐛 Баг
+
+При установке Telemt own-site с нуля — own-site режим фейлился, Telemt отходил в donor-режим. Из лога:
+```
+[INFO] Поднятие nginx-сайта tg.fleet-b.example на порту 8444...
+[INFO] Проверяю, что nginx слушает 127.0.0.1:8444...
+[ERR] nginx НЕ слушает 127.0.0.1:8444 после setup_nginx_final.
+[ERR] Откат к donor-режиму + cleanup orphaned-файлов.
+```
+
+При ручном создании того же конфига + `sleep 1` после `reload` — всё работало.
+
+**Причина:** `systemctl reload nginx` — **асинхронная** операция. systemd отправляет SIGHUP и сразу возвращает управление. nginx должен:
+1. Пере-прочитать конфиг
+2. Запустить новый worker с новым listener
+3. Завершить старый worker
+
+Это занимает 1-3 секунды. В коде `_check_mask_backend_ready` вызывался **сразу** после `reload` — nginx ещё не успел поднять listener на 8444 → TCP-connect падал → guard откатывал в donor-режим.
+
+В v4.20.6 я добавил TLS-handshake проверку (Fix 3), которая ещё строже — она не просто TCP-connect, а полный handshake + проверка cert-chain. Это сделало race condition более вероятным: даже если TCP-connect проходит, TLS-handshake может упасть если nginx ещё не закончил настройку SSL-context.
+
+### 🔧 Фикс
+
+#### A. `nginx_setup.py` own-site TCP ветка — `sleep` после reload + fallback на restart
+
+После `systemctl reload nginx`:
+1. `time.sleep(2)` — даём nginx время поднять listener
+2. Проверка `ss -tlnH | grep 127.0.0.1:PORT` — действительно ли listener поднялся
+3. Если нет — `systemctl restart nginx` (более надёжный, но дорогой) + `time.sleep(3)`
+
+Если `nginx -t` прошёл OK — конфиг валидный, проблема только в timing. `sleep(2)` + проверка `ss` закрывают race condition.
+
+#### B. `mtproto.py` `_setup_own_site` шаг 7 — retry 3 попытки + диагностика
+
+Раньше: одна попытка `_check_mask_backend_ready(timeout=3.0)` → откат.
+Теперь: 3 попытки с паузами по 2 сек между ними:
+```python
+for _attempt in range(3):
+    if _check_mask_backend_ready("127.0.0.1", mask_port, timeout=3.0):
+        _nginx_ready = True
+        break
+    _warn(f"Попытка {_attempt+1}/3: nginx ещё не готов, жду 2с...")
+    time.sleep(2)
+```
+
+При провале всех 3 попыток — **диагностика**:
+- `ss -tlnH` (порт mask_port / nginx) — что слушает
+- `nginx -t` returncode + последние 5 строк stderr — валиден ли конфиг
+
+Это закрывает gap: пользователь видит конкретную причину (конфликт портов, битый конфиг, nginx не запущен) вместо общего "nginx НЕ слушает".
+
+### 🧪 Регрессионные тесты (2 новых)
+
+`tests/test_telemt_nginx_fallback.py` → `TestSetupOwnSiteRetryLogic`:
+
+1. **`test_retry_succeeds_on_second_attempt`** — `_check_mask_backend_ready` возвращает False, True, True → `_setup_own_site` возвращает `OwnSiteConfig(mask_port=8444)` (НЕ откатывает в donor-режим). Проверяет что retry работает.
+
+2. **`test_retry_fails_after_3_attempts_with_diagnostics`** — `_check_mask_backend_ready` всегда False → после 3 попыток `_setup_own_site` возвращает `mask_port=0` (donor-режим) + вызывает `_cleanup_own_site` + выводит диагностику (`ss -tlnH`, `nginx -t`). Проверяет что диагностика появляется.
+
+Все 187 связанных тестов (108 mtproto + 25 ssl/nginx/telemt_fallback + 54 telemt_nginx_fallback) — зелёные.
+
+### 📋 Реальный вывод тестов
+
+```
+$ python3 -m py_compile tests/test_telemt_nginx_fallback.py && echo COMPILE_OK
+COMPILE_OK
+
+$ python3 -m pytest tests/test_telemt_nginx_fallback.py::TestSetupOwnSiteRetryLogic -v
+tests/test_telemt_nginx_fallback.py::TestSetupOwnSiteRetryLogic::test_retry_fails_after_3_attempts_with_diagnostics PASSED [ 50%]
+tests/test_telemt_nginx_fallback.py::TestSetupOwnSiteRetryLogic::test_retry_succeeds_on_second_attempt PASSED [100%]
+============================== 2 passed in 0.75s ===============================
+
+$ python3 -m pytest tests/test_mtproto.py tests/test_ssl_certbot.py tests/test_nginx_watchdog.py tests/test_telemt_fallback.py tests/test_telemt_nginx_fallback.py 2>&1 | tail -5
+...
+============================= 187 passed in 47.84s =============================
+```
+
+### 🚫 Что НЕ трогали
+
+- `_core.py`, `telemt_fallback.py`, AWG-модули, mirrors/downloader, TUI test runner — не тронуты
+- Существующий VLESS install flow — byte-for-byte идентичен
+- `obtain_ssl_cert()` — НЕ менялся
+
+---
+
 ## v4.20.6 — FIX: 3 полишн-фикса по итогам реальной установки на проде — 12 июля 2026
 
 После успешной установки Telemt own-site на реальном сервере выявлены 3 проблемы, не ловившиеся тестами. Все 3 фикса — реакция на конкретные баги, обнаруженные при инсталляции у пользователя.
