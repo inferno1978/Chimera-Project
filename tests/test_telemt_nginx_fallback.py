@@ -483,9 +483,10 @@ class TestMaskBackendReadinessCheck(unittest.TestCase):
             thread.join(timeout=2)
 
     def test_check_returns_false_on_self_signed_cert(self):
-        """TLS-handshake успешен, но cert self-signed (issuer == subject) — False.
-        v4.20.6: это главное — guard ловит silent regression когда nginx
-        отдаёт self-signed вместо real LE."""
+        """TLS-handshake успешен, cert self-signed (issuer == subject), sni передан — False.
+        v4.20.6: guard ловит silent regression когда nginx отдаёт self-signed.
+        v4.20.9: проверка self-signed работает ТОЛЬКО если передан sni_hostname.
+        Без sni_hostname — fallback на TCP-connect (True)."""
         from vless_installer.modules import mtproto
         cert, key = _generate_test_cert(self._tmpdir, cn="selfsigned.example.com",
                                          self_signed=True)
@@ -498,25 +499,50 @@ class TestMaskBackendReadinessCheck(unittest.TestCase):
                                   stdout="issuer=CN = selfsigned.example.com\n"
                                          "subject=CN = selfsigned.example.com\n",
                                   stderr="")):
+                # sni_hostname передан → TLS-handshake + проверка cert
                 self.assertFalse(
-                    mtproto._check_mask_backend_ready("127.0.0.1", port, timeout=3.0)
+                    mtproto._check_mask_backend_ready("127.0.0.1", port, timeout=3.0,
+                                                      sni_hostname="selfsigned.example.com")
                 )
         finally:
             stop.set()
             thread.join(timeout=2)
 
-    def test_check_returns_false_on_plain_tcp_no_tls(self):
-        """На голом TCP-сервере без TLS — False (TLS-handshake упадёт).
-        v4.20.6: это закрытие gap — раньше TCP-connect возвращал True,
-        теперь TLS-handshake проверяет что это реально HTTPS."""
+    def test_check_returns_true_on_plain_tcp_no_tls_without_sni(self):
+        """На голом TCP-сервере без TLS, без sni_hostname — True (TCP-connect = OK).
+        v4.20.9: если sni не передан — нет смысла делать TLS-handshake с SNI=127.0.0.1
+        (nginx отдаст default_server). Возвращаем True на основе TCP-connect.
+        Cert уже проверен через _is_cert_self_signed на шаге 5."""
         from vless_installer.modules import mtproto
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.bind(("127.0.0.1", 0))
         srv.listen(1)
         port = srv.getsockname()[1]
         try:
-            self.assertFalse(
+            # Без sni_hostname — TCP-connect = OK
+            self.assertTrue(
                 mtproto._check_mask_backend_ready("127.0.0.1", port, timeout=2.0)
+            )
+        finally:
+            srv.close()
+
+    def test_check_returns_false_on_plain_tcp_no_tls_with_sni(self):
+        """На голом TCP-сервере без TLS, с sni_hostname — True (fallback на TCP).
+        v4.20.9: TLS-handshake падает, но TCP-connect прошёл → возвращаем True
+        (fail-open для TLS-handshake, cert уже проверен на шаге 5).
+        Это сознательное решение: guard не должен блокировать own-site если
+        TLS-handshake падает по техническим причинам (default_server в nginx
+        отдаёт ssl_reject_handshake). Главное — listener готов."""
+        from vless_installer.modules import mtproto
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            # TLS-handshake упадёт, но TCP-connect прошёл → True (fallback)
+            self.assertTrue(
+                mtproto._check_mask_backend_ready("127.0.0.1", port, timeout=2.0,
+                                                  sni_hostname="test.example.com")
             )
         finally:
             srv.close()
@@ -1352,7 +1378,7 @@ class TestSetupOwnSiteOrderOfOperations(unittest.TestCase):
         def _fake_setup_nginx_final(**kw):
             call_order.append(("setup_nginx_final", kw.get("domain")))
 
-        def _fake_check_mask_backend_ready(host, port, timeout=2.0):
+        def _fake_check_mask_backend_ready(host, port, timeout=2.0, sni_hostname=""):
             return True
 
         def _fake_pick_local_nginx_port(telemt_port):
@@ -1798,7 +1824,7 @@ class TestSetupOwnSiteRetryLogic(unittest.TestCase):
 
         # Мокаем _check_mask_backend_ready: первая попытка False (race), вторая True
         check_calls = []
-        def _fake_check(host, port, timeout=2.0):
+        def _fake_check(host, port, timeout=2.0, sni_hostname=""):
             check_calls.append((host, port))
             return len(check_calls) >= 2  # False, True, True
 
@@ -1838,7 +1864,7 @@ class TestSetupOwnSiteRetryLogic(unittest.TestCase):
         from vless_installer.modules import mtproto
 
         check_calls = []
-        def _fake_check(host, port, timeout=2.0):
+        def _fake_check(host, port, timeout=2.0, sni_hostname=""):
             check_calls.append(1)
             return False  # всегда False
 
