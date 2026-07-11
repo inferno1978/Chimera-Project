@@ -238,6 +238,10 @@ def _go_ok(required: str) -> bool:
 
 
 def _http_get_text(url: str, timeout: int = 15) -> str | None:
+    """DEPRECATED: оставлен для обратной совместимости.
+
+    Новый код использует fetch_package() из download_manager.py.
+    """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="replace").strip()
@@ -246,6 +250,7 @@ def _http_get_text(url: str, timeout: int = 15) -> str | None:
 
 
 def _http_download(url: str, dest: Path, timeout: int = 180) -> bool:
+    """DEPRECATED: оставлен для обратной совместимости."""
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp, dest.open("wb") as f:
             shutil.copyfileobj(resp, f)
@@ -255,36 +260,29 @@ def _http_download(url: str, dest: Path, timeout: int = 180) -> bool:
 
 
 def _install_go(required: str) -> bool:
-    """Скачивает официальный архив Go с go.dev и кладёт в /usr/local/go."""
+    """Скачивает официальный архив Go через download_manager.fetch_package().
+
+    МИГРАЦИЯ: раньше использовал _http_download (urlopen) с ОДНИМ прямым
+    URL (https://go.dev/dl/...), без зеркал. Теперь переиспользует
+    GO_TOOLCHAIN_SPEC из go_toolchain_packages.py (Wave 2) — 4 зеркала
+    (go.dev + golang.google.cn + mirrors.aliyun.com + mirrors.tencent.com).
+    """
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+
     arch = _go_arch()
     version = _http_get_text("https://go.dev/VERSION?m=text")
     if not version or not version.startswith("go"):
         version = f"go{required}"
     else:
         version = version.splitlines()[0].strip()
-    url = f"https://go.dev/dl/{version}.linux-{arch}.tar.gz"
-    tarball = Path(f"/tmp/{version}.linux-{arch}.tar.gz")
-    _info(f"Скачиваю {version} ({arch})...")
-    if not _http_download(url, tarball, timeout=180):
-        _warn(f"Не удалось скачать {url}")
+
+    _info(f"Скачиваю {version} ({arch}, через download_manager)...")
+    ok = fetch_package(GO_TOOLCHAIN_SPEC, version=version, arch=arch,
+                       print_hint_on_failure=False)
+    if not ok:
+        _warn(f"Не удалось скачать Go {version} ({arch})")
         return False
-    if OLC_GO_DIR.exists():
-        _run(["rm", "-rf", str(OLC_GO_DIR)], check=False, quiet=True)
-    r = _run(["tar", "-C", "/usr/local", "-xzf", str(tarball)], check=False, timeout=120)
-    tarball.unlink(missing_ok=True)
-    if r.returncode != 0:
-        _warn("Не удалось распаковать архив Go")
-        return False
-    for exe in ("go", "gofmt"):
-        src = OLC_GO_DIR / "bin" / exe
-        dst = Path("/usr/local/bin") / exe
-        if src.exists():
-            try:
-                if dst.exists() or dst.is_symlink():
-                    dst.unlink()
-                dst.symlink_to(src)
-            except Exception:
-                pass
     return _go_ok(required)
 
 
@@ -296,38 +294,70 @@ def _olcrtc_installed() -> bool:
 
 
 def _olcrtc_clone_or_update() -> bool:
-    if OLC_SRC_DIR.exists() and (OLC_SRC_DIR / ".git").exists():
-        r = _run(["git", "-C", str(OLC_SRC_DIR), "pull", "--ff-only"],
-                  capture=True, check=False, timeout=60)
-        if r.returncode == 0:
-            return True
-        _run(["rm", "-rf", str(OLC_SRC_DIR)], check=False, quiet=True)
-    OLC_SRC_DIR.parent.mkdir(parents=True, exist_ok=True)
-    r = _run(["git", "clone", "--depth", "1", OLC_REPO, str(OLC_SRC_DIR)],
-              capture=True, check=False, timeout=180)
-    return r.returncode == 0 and OLC_SRC_DIR.exists()
+    """Скачивает/обновляет исходники olcrtc через download_manager.fetch_package().
+
+    МИГРАЦИЯ (Wave 6, Variant A): раньше `git clone --depth 1` (или
+    `git pull --ff-only` для обновления), без зеркал. Теперь
+    fetch_package(OLCRTC_SOURCE_SPEC) — HTTP tarball через codeload.github.com.
+
+    Variant A применим согласно анализу:
+      • Build — pure `go build`, не требует .git/.
+      • Submodules отсутствуют.
+      • Commit SHA получается через отдельный GitHub API call (см.
+        _olcrtc_fetch_commit_sha), вместо `git rev-parse --short HEAD`.
+
+    post_install OLCRTC_SOURCE_SPEC делает:
+      1. extract tarball → olcrtc-master/
+      2. go build → /usr/local/bin/olcrtc (chmod 0o755)
+      3. cleanup
+
+    Go toolchain должен быть установлен ДО этого вызова.
+    """
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
+
+    ok = fetch_package(OLCRTC_SOURCE_SPEC, print_hint_on_failure=False)
+    return ok
+
+
+def _olcrtc_fetch_commit_sha() -> str:
+    """Получает SHA последнего коммита через GitHub API.
+
+    Заменяет `git rev-parse --short HEAD` при Variant A (HTTP tarball
+    вместо git clone — .git/ отсутствует).
+
+    Возвращает короткий SHA (7 символов) или "?" при ошибке.
+    """
+    import json
+    from vless_installer.modules.olcrtc_mirrors import get_olcrtc_commits_api_url
+    api_url = get_olcrtc_commits_api_url()
+    try:
+        version = _http_get_text(api_url)
+        if not version:
+            return "?"
+        data = json.loads(version)
+        sha = data.get("sha", "")
+        return sha[:7] if sha else "?"
+    except Exception:
+        return "?"
 
 
 def _olcrtc_build() -> bool:
-    gobin = "/usr/local/bin/go" if Path("/usr/local/bin/go").exists() else (shutil.which("go") or "go")
-    env = dict(os.environ)
-    env["CGO_ENABLED"] = "0"
-    env["GOOS"] = "linux"
-    env["GOARCH"] = _go_arch()
-    r = _run([gobin, "build", "-trimpath", "-ldflags", "-s -w",
-              "-o", str(OLC_BIN), "./cmd/olcrtc"],
-             capture=True, check=False, timeout=900, env=env, cwd=str(OLC_SRC_DIR))
-    if r.returncode != 0:
-        _warn("go build завершился с ошибкой:")
-        for line in (r.stderr or r.stdout or "").splitlines()[-15:]:
-            _box_row(f"  {DIM}{line[:100]}{NC}")
-    return r.returncode == 0 and _olcrtc_installed()
+    """DEPRECATED: сборка теперь делается внутри post_install OLCRTC_SOURCE_SPEC.
+
+    Оставлен для обратной совместимости — вызывает fetch_package, который
+    сам делает extract + go build.
+    """
+    return _olcrtc_clone_or_update()
 
 
 def _olcrtc_commit() -> str:
-    r = _run(["git", "-C", str(OLC_SRC_DIR), "rev-parse", "--short", "HEAD"],
-              capture=True, check=False, timeout=10)
-    return r.stdout.strip() if r.returncode == 0 else "?"
+    """Возвращает короткий SHA последнего коммита.
+
+    МИГРАЦИЯ: раньше `git rev-parse --short HEAD` (требует .git/).
+    Теперь GitHub API call к /commits/master (см. _olcrtc_fetch_commit_sha).
+    """
+    return _olcrtc_fetch_commit_sha()
 
 
 def _ensure_unit_file() -> None:
