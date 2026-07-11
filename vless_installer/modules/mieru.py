@@ -330,32 +330,6 @@ def _atomic_install_binary(src: Path, dest: Path) -> None:
     finally:
         tmp_dest.unlink(missing_ok=True)
 
-def _download_with_mirrors(urls, dest: Path, name: str) -> bool:
-    """DEPRECATED: оставлен для обратной совместимости со старыми тестами.
-    Новый код использует fetch_package() из download_manager.py.
-    """
-    # Совместимость: строка вместо списка
-    if isinstance(urls, str):
-        urls = [urls]
-    for i, url in enumerate(urls, 1):
-        try:
-            host = url.split('/')[2]
-            print(f"  {CYAN}→{NC}  [{i}/{len(urls)}] Скачиваю {name} с {host}...")
-            req = urllib.request.Request(url, headers={"User-Agent": "VLESS-Ultimate-Installer"})
-            with urllib.request.urlopen(req, timeout=60) as r:
-                with open(dest, 'wb') as f:
-                    while True:
-                        chunk = r.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-            if dest.stat().st_size > 0:
-                return True
-        except Exception as e:
-            print(f"  {YELLOW}⚠{NC}  {url.split('/')[2]}: {e}")
-            dest.unlink(missing_ok=True)
-    return False
-
 
 def _install_mita_package(version: str) -> bool:
     """
@@ -416,46 +390,6 @@ def _install_mita_package(version: str) -> bool:
                       version=version, arch=arch)
     return result
 
-
-def _download_binary(urls, dest: Path, name: str) -> bool:
-    """DEPRECATED: оставлен для обратной совместимости.
-    Новый код использует fetch_package() с PackageSpec из mieru_packages.py.
-    """
-    # Совместимость со старыми вызовами (строка вместо списка)
-    if isinstance(urls, str):
-        urls = [urls]
-
-    tmp = Path(tempfile.mkdtemp())
-    try:
-        archive = tmp / f"{name}.tar.gz"
-        if not _download_with_mirrors(urls, archive, name):
-            print(f"  {RED}✗{NC}  Не удалось скачать {name} из всех зеркал.")
-            return False
-
-        _run(["tar", "-xzf", str(archive), "-C", str(tmp)], check=True)
-
-        # Ищем бинарник в распакованном
-        candidates = list(tmp.glob(f"**/{name}"))
-        if not candidates:
-            candidates = list(tmp.glob("**/mita")) + list(tmp.glob("**/mieru"))
-        if not candidates:
-            print(f"  {RED}✗{NC}  {name} не найден в архиве.")
-            return False
-
-        bin_file = candidates[0]
-        with bin_file.open("rb") as f:
-            if f.read(4) != b'\x7fELF':
-                print(f"  {RED}✗{NC}  {name} — не ELF бинарник.")
-                return False
-
-        _atomic_install_binary(bin_file, dest)
-        print(f"  {GREEN}✓{NC}  {name} установлен: {dest}")
-        return True
-    except Exception as e:
-        print(f"  {RED}✗{NC}  Ошибка загрузки {name}: {e}")
-        return False
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
 
 # _get_installed_version — вынесен в proto_common (mita binary uses
 # subcommand `version`, output prefix `v` → strip_v=True at call sites).

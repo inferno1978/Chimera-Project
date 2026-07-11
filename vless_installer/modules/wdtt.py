@@ -420,19 +420,6 @@ def _go_required_version(gomod: Path) -> str:
             pass
     return "1.21.0"
 
-def _http_download(url: str, dest: Path, timeout: int = 180) -> bool:
-    """DEPRECATED: оставлен для обратной совместимости со старыми тестами.
-
-    Новый код использует fetch_package() из download_manager.py с
-    PackageSpec из go_toolchain_packages.py / wdtt_packages.py.
-    """
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp, dest.open("wb") as f:
-            shutil.copyfileobj(resp, f)
-        return dest.exists() and dest.stat().st_size > 0
-    except Exception:
-        return False
-
 def _install_go_toolchain(required: str) -> Optional[str]:
     """
     Скачивает официальный архив Go через download_manager.fetch_package().

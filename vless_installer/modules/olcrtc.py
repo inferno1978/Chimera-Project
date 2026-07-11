@@ -238,25 +238,17 @@ def _go_ok(required: str) -> bool:
 
 
 def _http_get_text(url: str, timeout: int = 15) -> str | None:
-    """DEPRECATED: оставлен для обратной совместимости.
+    """HTTP GET для текстовых ответов (API metadata, version strings).
 
-    Новый код использует fetch_package() из download_manager.py.
+    Используется для:
+      • go.dev/VERSION?m=text — последняя версия Go
+      • api.github.com/.../commits/master — SHA последнего коммита olcrtc
     """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="replace").strip()
     except Exception:
         return None
-
-
-def _http_download(url: str, dest: Path, timeout: int = 180) -> bool:
-    """DEPRECATED: оставлен для обратной совместимости."""
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp, dest.open("wb") as f:
-            shutil.copyfileobj(resp, f)
-        return dest.exists() and dest.stat().st_size > 0
-    except Exception:
-        return False
 
 
 def _install_go(required: str) -> bool:
