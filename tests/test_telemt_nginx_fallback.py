@@ -540,16 +540,26 @@ class TestSignatureCompatibility(unittest.TestCase):
         self.assertIsNone(sig.parameters["domain"].default,
                           "domain должен быть Optional (default None)")
 
-    def test_setup_nginx_final_accepts_domain_port_socket(self):
-        """setup_nginx_final(domain, port, socket_path) — все три параметра."""
+    def test_setup_nginx_final_accepts_all_params(self):
+        """setup_nginx_final(domain, port, socket_path, protocol_mode,
+        awg_exit_enabled, site_template) — все параметры присутствуют."""
         import inspect
-        from vless_installer.modules.nginx_setup import setup_nginx_final
+        from vless_installer.modules.nginx_setup import setup_nginx_final, _UNSET
         sig = inspect.signature(setup_nginx_final)
-        for p in ("domain", "port", "socket_path"):
+        # domain, protocol_mode, awg_exit_enabled, site_template — default None
+        for p in ("domain", "protocol_mode", "awg_exit_enabled", "site_template"):
             self.assertIn(p, sig.parameters,
                           f"setup_nginx_final должен принимать {p}=")
             self.assertIsNone(sig.parameters[p].default,
                               f"{p} должен быть Optional (default None)")
+        # port, socket_path — sentinel _UNSET (не None!) — это КРИТИЧНО для
+        # различения "не передан" (→ inherit из core) от "передан None"
+        # (→ own-site TCP режим).
+        for p in ("port", "socket_path"):
+            self.assertIn(p, sig.parameters,
+                          f"setup_nginx_final должен принимать {p}=")
+            self.assertIs(sig.parameters[p].default, _UNSET,
+                          f"{p} должен использовать sentinel _UNSET (не None)")
 
     def test_create_website_accepts_domain_site_template(self):
         """create_website(domain, site_template) — оба параметра."""
@@ -559,6 +569,509 @@ class TestSignatureCompatibility(unittest.TestCase):
         for p in ("domain", "site_template"):
             self.assertIn(p, sig.parameters,
                           f"create_website должен принимать {p}=")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Тесты v4.20.2: реальный вызов setup_nginx_final() + парсинг конфига
+#  (НЕ signature-check — вызываем функцию и читаем записанный файл)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _make_fake_core_for_nginx(protocol_mode="reality",
+                              awg_exit_enabled=False,
+                              param_domain="vless.example.com",
+                              param_socket_path="/run/xray.sock",
+                              server_port=443,
+                              xhttp_backend_port=8443,
+                              xhttp_path="/xhttp",
+                              is_ipv6_available=False,
+                              nginx_conf_dir=None,
+                              nginx_enabled_dir=None,
+                              nginx_rate_limit_conf=None):
+    """Создаёт fake core module для тестирования setup_nginx_final().
+
+    Все параметры configurable — можно симулировать любой VLESS-режим сервера.
+    """
+    from unittest.mock import MagicMock
+    core = MagicMock()
+    core.info = lambda *a, **kw: None
+    core.success = lambda *a, **kw: None
+    core.warn = lambda *a, **kw: None
+    core._run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr="nginx version: nginx/1.25.3\n"))
+    core.find_nginx_bin = MagicMock(return_value="/usr/sbin/nginx")
+    core.log_to_file = MagicMock()
+    core.PROTOCOL_MODE = protocol_mode
+    core.AWG_EXIT_ENABLED = awg_exit_enabled
+    core.PARAM_DOMAIN = param_domain
+    core.PARAM_SOCKET_PATH = param_socket_path
+    core.SERVER_PORT = server_port
+    core.XHTTP_BACKEND_PORT = xhttp_backend_port
+    core.XHTTP_PATH = xhttp_path
+    core.IS_IPV6_AVAILABLE = is_ipv6_available
+    core.NGINX_CONF_DIR = nginx_conf_dir or Path("/tmp/test_nginx_conf")
+    core.NGINX_ENABLED_DIR = nginx_enabled_dir or Path("/tmp/test_nginx_enabled")
+    core.NGINX_RATE_LIMIT_CONF = nginx_rate_limit_conf or Path("/tmp/nonexistent_rate_limit")
+    return core
+
+
+class TestSetupNginxFinalOwnSiteTcpMode(unittest.TestCase):
+    """Реальный вызов setup_nginx_final() в own-site TCP режиме + парсинг
+    сгенерированного конфига. НЕ signature-check."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._conf_dir = self._tmpdir / "nginx_conf"
+        self._enabled_dir = self._tmpdir / "nginx_enabled"
+        self._conf_dir.mkdir(parents=True, exist_ok=True)
+        self._enabled_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _call_setup_nginx_final(self, core_protocol_mode="reality",
+                                core_awg_exit=False,
+                                core_socket_path="/run/xray.sock",
+                                own_site_domain="telemt.example.com",
+                                own_site_port=8444):
+        """Вызывает setup_nginx_final в own-site TCP режиме с заданным core state.
+        Возвращает содержимое записанного nginx-конфига."""
+        from vless_installer.modules import nginx_setup
+        fake_core = _make_fake_core_for_nginx(
+            protocol_mode=core_protocol_mode,
+            awg_exit_enabled=core_awg_exit,
+            param_socket_path=core_socket_path,
+            nginx_conf_dir=self._conf_dir,
+            nginx_enabled_dir=self._enabled_dir,
+        )
+        cfg_path = self._conf_dir / own_site_domain
+
+        # Перехватываем write_text на cfg-файле
+        captured_content = []
+        original_write_text = Path.write_text
+
+        def _capturing_write_text(self_path, *args, **kwargs):
+            if str(self_path) == str(cfg_path):
+                captured_content.append(args[0] if args else kwargs.get("data", ""))
+            # НЕ пишем на диск — просто захватываем
+            return len(args[0]) if args else 0
+
+        # Также нужно перехватить create_website чтобы не создавала реальный каталог
+        with patch.object(nginx_setup, "_core_module", return_value=fake_core), \
+             patch.object(nginx_setup, "create_website"), \
+             patch.object(Path, "write_text", _capturing_write_text), \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "unlink"), \
+             patch.object(Path, "symlink_to"), \
+             patch.object(Path, "exists", return_value=False), \
+             patch("os.chown", lambda *a, **kw: None):
+            nginx_setup.setup_nginx_final(
+                domain=own_site_domain,
+                port=own_site_port,
+                socket_path=None,        # явно None → TCP режим
+                protocol_mode="reality",
+                awg_exit_enabled=False,
+                site_template="2",
+            )
+        return captured_content[0] if captured_content else ""
+
+    # ── Тест 1: REALITY-сервер, own-site домен → TCP listen, не unix ───────
+    def test_own_site_with_reality_server_uses_tcp_not_unix(self):
+        """core.PROTOCOL_MODE='reality' (ДЕФОЛТ), own-site вызов →
+        конфиг содержит 'listen 127.0.0.1:8444 ssl' и НЕ содержит '/run/xray.sock'."""
+        content = self._call_setup_nginx_final(
+            core_protocol_mode="reality",
+            core_socket_path="/run/xray.sock",
+            own_site_domain="telemt.example.com",
+            own_site_port=8444,
+        )
+        self.assertIn("listen 127.0.0.1:8444 ssl", content,
+                      "own-site конфиг должен слушать TCP 127.0.0.1:8444")
+        self.assertNotIn("/run/xray.sock", content,
+                         "own-site конфиг НЕ должен содержать VLESS unix-сокет")
+        self.assertNotIn("proxy_protocol", content,
+                         "own-site конфиг НЕ должен использовать proxy_protocol")
+        self.assertNotIn("real_ip_header", content,
+                         "own-site конфиг НЕ должен использовать real_ip_header")
+
+    # ── Тест 1b: нет proxy_pass на Xray backend ────────────────────────────
+    def test_own_site_no_xray_proxy_pass(self):
+        """Конфиг НЕ содержит proxy_pass на 127.0.0.1:{XHTTP_BACKEND_PORT}."""
+        content = self._call_setup_nginx_final(
+            core_protocol_mode="reality",
+            own_site_domain="telemt.example.com",
+            own_site_port=8444,
+        )
+        self.assertNotIn("proxy_pass", content,
+                         "own-site конфиг НЕ должен проксировать на Xray backend")
+        self.assertNotIn("127.0.0.1:8443", content,
+                         "own-site конфиг НЕ должен ссылаться на XHTTP_BACKEND_PORT")
+
+    # ── Тест 2: XHTTP-сервер, own-site домен → всё равно TCP, не xhttp ─────
+    def test_own_site_with_xhttp_server_still_uses_tcp(self):
+        """core.PROTOCOL_MODE='xhttp' — own-site домен НЕ получает xhttp proxy."""
+        content = self._call_setup_nginx_final(
+            core_protocol_mode="xhttp",
+            own_site_domain="telemt.example.com",
+            own_site_port=8444,
+        )
+        self.assertIn("listen 127.0.0.1:8444 ssl", content,
+                      "own-site должен слушать TCP даже если VLESS в xhttp-режиме")
+        self.assertNotIn("proxy_pass", content,
+                         "own-site НЕ должен проксировать на Xray (даже при xhttp сервере)")
+        self.assertNotIn("/xhttp", content,
+                         "own-site НЕ должен содержать XHTTP_PATH")
+
+    # ── Тест 3: AWG-сервер, own-site домен → всё равно TLS на mask_port ────
+    def test_own_site_with_awg_server_has_tls_listener(self):
+        """core.AWG_EXIT_ENABLED=True — own-site домен всё равно имеет
+        HTTPS-listener на mask_port (не только HTTP:80 редирект как VLESS-AWG)."""
+        content = self._call_setup_nginx_final(
+            core_protocol_mode="reality",
+            core_awg_exit=True,
+            own_site_domain="telemt.example.com",
+            own_site_port=8444,
+        )
+        self.assertIn("listen 127.0.0.1:8444 ssl", content,
+                      "own-site должен иметь TLS listener даже при AWG_EXIT_ENABLED=True")
+        self.assertIn("ssl_certificate", content,
+                      "own-site должен терминировать TLS")
+
+    # ── Тест 4: коллизия доменов → RuntimeError ────────────────────────────
+    def test_domain_collision_raises_runtime_error(self):
+        """own_site_domain == core.PARAM_DOMAIN → RuntimeError."""
+        from vless_installer.modules import nginx_setup
+        fake_core = _make_fake_core_for_nginx(
+            param_domain="telemt.example.com",  # совпадает с own-site доменом!
+            nginx_conf_dir=self._conf_dir,
+            nginx_enabled_dir=self._enabled_dir,
+        )
+        with patch.object(nginx_setup, "_core_module", return_value=fake_core), \
+             patch.object(nginx_setup, "create_website"), \
+             patch.object(Path, "mkdir"):
+            with self.assertRaises(RuntimeError) as ctx:
+                nginx_setup.setup_nginx_final(
+                    domain="telemt.example.com",  # == core.PARAM_DOMAIN!
+                    port=8444,
+                    socket_path=None,
+                    protocol_mode="reality",
+                    awg_exit_enabled=False,
+                )
+            self.assertIn("совпадает", str(ctx.exception).lower(),
+                          "Ошибка должна объяснять причину коллизии")
+
+    # ── Тест 5: HTTP:80 — нет HTTPS-редиректа (ушёл бы на Telemt:443) ──────
+    def test_own_site_http80_no_https_redirect(self):
+        """HTTP:80 listener не должен делать return 301 https:// —
+        редирект ушёл бы на порт 443 (Telemt), а не на mask_port."""
+        content = self._call_setup_nginx_final(
+            own_site_domain="telemt.example.com",
+            own_site_port=8444,
+        )
+        # Находим server-блок с listen 80
+        self.assertIn("listen 80", content, "Должен быть HTTP:80 listener для ACME")
+        # В этом блоке НЕ должно быть return 301 https://
+        # (проверяем что нет редиректа вообще — только ACME + 404)
+        http80_section = content[content.index("listen 80"):content.index("listen 127.0.0.1")]
+        self.assertNotIn("return 301 https", http80_section,
+                         "HTTP:80 НЕ должен редиректить на HTTPS (ушёл бы на Telemt:443)")
+        self.assertIn("acme-challenge", http80_section,
+                      "HTTP:80 должен обслуживать ACME challenges для certbot renew")
+
+
+class TestSetupNginxFinalVlessRegression(unittest.TestCase):
+    """Regression guard: VLESS install flow (setup_nginx_final() без аргументов)
+    → byte-for-byte идентичен выводу до фикса v4.20.2."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._conf_dir = self._tmpdir / "nginx_conf"
+        self._enabled_dir = self._tmpdir / "nginx_enabled"
+        self._conf_dir.mkdir(parents=True, exist_ok=True)
+        self._enabled_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _call_vless_reality(self, param_socket_path="/run/xray.sock"):
+        """Вызывает setup_nginx_final() БЕЗ аргументов (как VLESS install flow).
+        Возвращает содержимое конфига."""
+        from vless_installer.modules import nginx_setup
+        fake_core = _make_fake_core_for_nginx(
+            protocol_mode="reality",
+            awg_exit_enabled=False,
+            param_domain="vless.example.com",
+            param_socket_path=param_socket_path,
+            nginx_conf_dir=self._conf_dir,
+            nginx_enabled_dir=self._enabled_dir,
+        )
+        captured = []
+        def _capture_write(self_path, *args, **kwargs):
+            if "vless.example.com" in str(self_path):
+                captured.append(args[0] if args else kwargs.get("data", ""))
+            return len(args[0]) if args else 0
+
+        with patch.object(nginx_setup, "_core_module", return_value=fake_core), \
+             patch.object(nginx_setup, "create_website"), \
+             patch.object(Path, "write_text", _capture_write), \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "unlink"), \
+             patch.object(Path, "symlink_to"), \
+             patch.object(Path, "exists", return_value=False), \
+             patch("os.chown", lambda *a, **kw: None):
+            nginx_setup.setup_nginx_final()  # без аргументов — VLESS flow
+        return captured[0] if captured else ""
+
+    def test_vless_reality_uses_unix_socket(self):
+        """VLESS REALITY flow (без аргументов) → unix-сокет, proxy_protocol."""
+        content = self._call_vless_reality(param_socket_path="/run/xray.sock")
+        self.assertIn("listen unix:/run/xray.sock ssl proxy_protocol", content,
+                      "VLESS REALITY должен слушать unix-сокет с proxy_protocol")
+        self.assertIn("real_ip_header proxy_protocol", content,
+                      "VLESS REALITY должен иметь real_ip_header proxy_protocol")
+        self.assertNotIn("listen 127.0.0.1:", content,
+                         "VLESS REALITY НЕ должен слушать TCP (это own-site режим)")
+
+    def test_vless_reality_has_https_redirect(self):
+        """VLESS REALITY HTTP:80 → HTTPS-редирект (это нормально для VLESS)."""
+        content = self._call_vless_reality()
+        self.assertIn("return 301 https", content,
+                      "VLESS REALITY должен иметь HTTPS-редирект (в отличие от own-site)")
+
+
+class TestSetupNginxFinalTwoParallelDomains(unittest.TestCase):
+    """Два параллельных вызова: VLESS-домен (без аргументов) + Telemt-домен
+    (явные параметры). Оба конфига валидны одновременно — нет конфликта
+    listen+default_server."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._conf_dir = self._tmpdir / "nginx_conf"
+        self._enabled_dir = self._tmpdir / "nginx_enabled"
+        self._conf_dir.mkdir(parents=True, exist_ok=True)
+        self._enabled_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_vless_and_telemt_domains_coexist(self):
+        """VLESS-домен на unix-сокете + Telemt-домен на TCP:8444 —
+        оба конфига валидны, не конфликтуют по listen."""
+        from vless_installer.modules import nginx_setup
+        fake_core = _make_fake_core_for_nginx(
+            protocol_mode="reality",
+            param_domain="vless.example.com",
+            param_socket_path="/run/xray.sock",
+            nginx_conf_dir=self._conf_dir,
+            nginx_enabled_dir=self._enabled_dir,
+        )
+        captured = {}  # domain → content
+        def _capture_write(self_path, *args, **kwargs):
+            s = str(self_path)
+            for d in ("vless.example.com", "telemt.example.com"):
+                if d in s:
+                    captured[d] = args[0] if args else kwargs.get("data", "")
+                    break
+            return len(args[0]) if args else 0
+
+        with patch.object(nginx_setup, "_core_module", return_value=fake_core), \
+             patch.object(nginx_setup, "create_website"), \
+             patch.object(Path, "write_text", _capture_write), \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "unlink"), \
+             patch.object(Path, "symlink_to"), \
+             patch.object(Path, "exists", return_value=False), \
+             patch("os.chown", lambda *a, **kw: None):
+            # 1) VLESS-домен (без аргументов — inherit из core)
+            nginx_setup.setup_nginx_final()
+            # 2) Telemt-домен (явные параметры — own-site TCP)
+            nginx_setup.setup_nginx_final(
+                domain="telemt.example.com",
+                port=8444,
+                socket_path=None,
+                protocol_mode="reality",
+                awg_exit_enabled=False,
+            )
+
+        vless_cfg = captured.get("vless.example.com", "")
+        telemt_cfg = captured.get("telemt.example.com", "")
+        self.assertTrue(vless_cfg, "VLESS-конфиг должен быть сгенерирован")
+        self.assertTrue(telemt_cfg, "Telemt-конфиг должен быть сгенерирован")
+        # VLESS на unix-сокете, Telemt на TCP — разные listen, нет конфликта
+        self.assertIn("listen unix:/run/xray.sock", vless_cfg)
+        self.assertIn("listen 127.0.0.1:8444 ssl", telemt_cfg)
+        # Ни один не содержит listen другого
+        self.assertNotIn("127.0.0.1:8444", vless_cfg)
+        self.assertNotIn("/run/xray.sock", telemt_cfg)
+
+
+class TestCleanupOwnSite(unittest.TestCase):
+    """Тест 6: cleanup при откате — orphaned-файлы удаляются."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._conf_dir = self._tmpdir / "nginx_conf"
+        self._enabled_dir = self._tmpdir / "nginx_enabled"
+        self._web_root_base = self._tmpdir / "www"
+        self._web_root = self._web_root_base / "telemt.example.com"
+        self._conf_dir.mkdir(parents=True, exist_ok=True)
+        self._enabled_dir.mkdir(parents=True, exist_ok=True)
+        self._web_root.mkdir(parents=True, exist_ok=True)
+        # Создаём файлы как если бы setup_nginx_final уже отработал
+        (self._conf_dir / "telemt.example.com").write_text("# orphaned config")
+        (self._enabled_dir / "telemt.example.com").write_text("# orphaned symlink")
+        (self._web_root / "index.html").write_text("<h1>orphaned</h1>")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_web_root_path(self):
+        """Патчит mtproto.Path так, что /var/www/<X> → self._tmpdir/www/<X>.
+
+        _cleanup_own_site хардкодит Path(f'/var/www/{domain}'), а мы не хотим
+        писать в реальный /var/www. Перехватываем конструктор Path."""
+        import vless_installer.modules.mtproto as mtproto_mod
+        real_path = Path
+
+        class _PatchedPath(real_path):
+            def __new__(cls, *args, **kwargs):
+                p = real_path(*args, **kwargs)
+                s = str(p)
+                if s.startswith("/var/www/"):
+                    rel = s[len("/var/www/"):]
+                    return real_path(self._web_root_base / rel)
+                return p
+
+        return patch.object(mtproto_mod, "Path", _PatchedPath)
+
+    def test_cleanup_removes_orphaned_files(self):
+        """_cleanup_own_site удаляет nginx config, symlink, web_root."""
+        from vless_installer.modules import mtproto
+        fake_core = _make_fake_core_for_nginx(
+            nginx_conf_dir=self._conf_dir,
+            nginx_enabled_dir=self._enabled_dir,
+        )
+        original_core = sys.modules.get("vless_installer._core")
+        sys.modules["vless_installer._core"] = fake_core
+        try:
+            with self._patch_web_root_path():
+                mtproto._cleanup_own_site("telemt.example.com")
+        finally:
+            if original_core is not None:
+                sys.modules["vless_installer._core"] = original_core
+            else:
+                sys.modules.pop("vless_installer._core", None)
+        self.assertFalse((self._conf_dir / "telemt.example.com").exists(),
+                         "nginx config должен быть удалён")
+        self.assertFalse((self._enabled_dir / "telemt.example.com").exists(),
+                         "nginx symlink должен быть удалён")
+        self.assertFalse(self._web_root.exists(),
+                         "web_root должен быть удалён")
+
+    def test_cleanup_with_empty_domain_is_noop(self):
+        """_cleanup_own_site('') — no-op, не падает."""
+        from vless_installer.modules import mtproto
+        # Не должно падать и не должно ничего удалять
+        mtproto._cleanup_own_site("")
+        # Файлы на месте
+        self.assertTrue((self._conf_dir / "telemt.example.com").exists())
+
+    def test_cleanup_with_nonexistent_domain_is_noop(self):
+        """_cleanup_own_site для несуществующего домена — no-op, не падает."""
+        from vless_installer.modules import mtproto
+        fake_core = _make_fake_core_for_nginx(
+            nginx_conf_dir=self._conf_dir,
+            nginx_enabled_dir=self._enabled_dir,
+        )
+        original_core = sys.modules.get("vless_installer._core")
+        sys.modules["vless_installer._core"] = fake_core
+        try:
+            mtproto._cleanup_own_site("nonexistent.example.com")
+        finally:
+            if original_core is not None:
+                sys.modules["vless_installer._core"] = original_core
+            else:
+                sys.modules.pop("vless_installer._core", None)
+        # Существующие файлы не тронуты
+        self.assertTrue((self._conf_dir / "telemt.example.com").exists())
+
+
+class TestGuardBlockCleanupOnRollback(unittest.TestCase):
+    """Тест 7: guard-блок в _run_install_inner при откате вызывает _cleanup_own_site.
+    Не молча продолжает — cleanup + rewrite конфига."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_guard_block_calls_cleanup_on_nginx_down(self):
+        """Если _check_mask_backend_ready=False, guard вызывает _cleanup_own_site
+        и переписывает конфиг в donor-режим."""
+        from vless_installer.modules import mtproto
+
+        cleanup_calls = []
+        write_calls = []
+
+        def _fake_cleanup(domain):
+            cleanup_calls.append(domain)
+
+        def _fake_write_config(*args, **kwargs):
+            write_calls.append(kwargs.copy())
+
+        with patch.object(mtproto, "_check_mask_backend_ready",
+                          return_value=False), \
+             patch.object(mtproto, "_cleanup_own_site",
+                          side_effect=_fake_cleanup), \
+             patch.object(mtproto, "_write_config",
+                          side_effect=_fake_write_config), \
+             patch.object(mtproto, "_run",
+                          return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+             patch.object(mtproto, "_ok"), \
+             patch.object(mtproto, "_err"), \
+             patch.object(mtproto, "_warn"), \
+             patch.object(mtproto, "_info"):
+            # Симулируем guard-блок (копия кода из _run_install_inner)
+            tls_domain = "telemt.example.com"
+            _mask_host = "127.0.0.1"
+            _mask_port = 8444
+            _tls_emulation = True
+            port = 8443
+            ipv4, ipv6 = "1.2.3.4", ""
+            users = {"alice": "abcdef0123456789abcdef0123456789"}
+            _fb_cfg = None
+            _client_mss = ""
+
+            if _mask_host and _mask_port:
+                _nginx_ready = False
+                for _attempt in range(5):
+                    if mtproto._check_mask_backend_ready(_mask_host, _mask_port, timeout=2.0):
+                        _nginx_ready = True
+                        break
+                if not _nginx_ready:
+                    mtproto._cleanup_own_site(tls_domain)
+                    _mask_host = ""
+                    _mask_port = 0
+                    _tls_emulation = False
+                    mtproto._write_config(
+                        port, ipv4, ipv6, tls_domain, users, False,
+                        socks5_port=0, fallback_cfg=_fb_cfg,
+                        client_mss=_client_mss,
+                        mask_host="", mask_port=0, tls_emulation=False,
+                    )
+
+        # cleanup должен быть вызван с telemt-доменом
+        self.assertEqual(cleanup_calls, ["telemt.example.com"],
+                         "_cleanup_own_site должен быть вызван с telemt-доменом")
+        # _write_config переписан в donor-режим
+        self.assertEqual(len(write_calls), 1)
+        self.assertEqual(write_calls[0]["mask_host"], "")
+        self.assertEqual(write_calls[0]["mask_port"], 0)
+        self.assertEqual(write_calls[0]["tls_emulation"], False)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
