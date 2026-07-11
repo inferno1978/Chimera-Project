@@ -62,8 +62,16 @@ def _core_module():
 # =============================================================================
 #  ВЫПУСК СЕРТИФИКАТА LET'S ENCRYPT
 # =============================================================================
-def obtain_ssl_cert() -> None:
-    """Получение SSL-сертификата Let's Encrypt для PARAM_DOMAIN (с fallback)."""
+def obtain_ssl_cert(domain: Optional[str] = None) -> None:
+    """Получение SSL-сертификата Let's Encrypt для PARAM_DOMAIN (с fallback).
+
+    Если domain передан явно — сертификат выпускается для этого домена (а не
+    для core.PARAM_DOMAIN). Используется в Telemt nginx-fallback, где домен
+    Telemt-маскировки может отличаться от основного VLESS-домена сервера.
+
+    Если domain не передан — поведение идентично предыдущему (VLESS install
+    flow не меняется ни в одном байте вывода).
+    """
     core = _core_module()
     info    = core.info
     warn    = core.warn
@@ -77,7 +85,7 @@ def obtain_ssl_cert() -> None:
     _box_bottom = core._box_bottom
     get_server_ip          = core.get_server_ip
     generate_self_signed_cert = core.generate_self_signed_cert
-    PARAM_DOMAIN = core.PARAM_DOMAIN
+    PARAM_DOMAIN = domain if domain is not None else core.PARAM_DOMAIN
     PARAM_EMAIL  = core.PARAM_EMAIL
     PROTOCOL_MODE = core.PROTOCOL_MODE
     CYAN, NC, GREEN, RED, YELLOW = core.CYAN, core.NC, core.GREEN, core.RED, core.YELLOW

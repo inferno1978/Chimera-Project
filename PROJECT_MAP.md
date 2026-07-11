@@ -220,12 +220,14 @@
 | Файл | За что отвечает |
 |---|---|
 | `telemt_panel.py` | Веб-панель телеметрии (real-time статистика) |
-| `telemt_fallback.py` | Fallback телеметрии |
+| `telemt_fallback.py` | Fallback телеметрии (Middle Proxy → Direct Mode, гибрид ME) — **НЕ путать** с nginx-fallback для маскировки (тот в `mtproto.py:_setup_own_site`) |
 | `telemt_self_route.py` | Self-route телеметрии |
 | `telemt_warp_route.py` | WARP-route телеметрии |
 | `telemt_syn_limiter.py` | SYN-лимитер телеметрии (защита от SYN-flood) |
 | `telemt_mss_selector.py` | Селектор MSS телеметрии |
 | `telemt_ios_fix.py` | iOS-фикс телеметрии |
+
+> **v4.20.1 NEW** — Telemt nginx-fallback (свой домен + свой сайт): новые функции в `mtproto.py` — `OwnSiteConfig`, `_pick_local_nginx_port`, `_check_mask_backend_ready`, `_select_own_domain_submenu`, `_setup_own_site`. Параметры `mask_host`/`mask_port`/`tls_emulation` в `_write_config()`. Рефакторинг сигнатур в `nginx_setup.py` (`create_website`, `setup_nginx_final`) и `ssl_certbot.py` (`obtain_ssl_cert`) — опциональные `domain`/`port`/`socket_path` перекрывают `core.PARAM_*` без мутации глобального state. Тесты: `tests/test_telemt_nginx_fallback.py` (24 теста). См. CHANGELOG v4.20.1.
 
 ---
 

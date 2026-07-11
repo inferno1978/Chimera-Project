@@ -2,6 +2,71 @@
 
 ---
 
+## v4.20.1 — Telemt nginx-fallback: собственный домен и сайт вместо чужого donor-домена — 12 июля 2026
+
+### 🎭 Telemt mask: новый режим "own-site" (свой домен + свой сайт на локальном nginx)
+
+Раньше секция `[censorship]` в `telemt.toml` писалась фиксированно:
+```toml
+tls_domain = "<донор, напр. microsoft.com>"
+mask = true
+mask_port = 443
+fake_cert_len = 2048
+```
+Без `mask_host` Telemt по умолчанию использует `mask_host = tls_domain`, т.е. весь неопознанный/failed-handshake трафик реально сплайсится на **чужой внешний домен**. Без `tls_emulation` Telemt отдаёт synthetic fake-cert (~2048 байт) — это и есть **детектируемая аномалия**, по которой TSPU/DPI отличают настоящий HTTPS-сайт от маскирующегося MTProxy.
+
+Теперь добавлен альтернативный режим: **свой домен + свой сайт на локальном nginx**. Telemt слушает 443/8443 снаружи как раньше; локальный nginx с реальным Let's Encrypt сертификатом того же домена сидит **СЗАДИ** (за Telemt, не перед ним); Telemt получает `mask_host`/`mask_port` + `tls_emulation=true` и сплайсит на него. Параметры `censorship.mask_host` / `mask_port` / `mask_unix_sock` / `tls_emulation` уже поддержаны бинарником Telemt (`docs/Config_params/CONFIG_PARAMS.ru.md` в telemt/telemt) — патчить исходники Telemt не нужно.
+
+### 🔧 Изменения в модулях
+
+#### `vless_installer/modules/nginx_setup.py` (Задача 1)
+- `create_website(domain=None, site_template=None)` — параметры, переданные явно, **ПЕРЕКРЫВАЮТ** значения из `core.PARAM_DOMAIN` / `core.PARAM_SITE_TEMPLATE`. Если не переданы — поведение 100% идентично предыдущему (VLESS install flow не меняется ни в одном байте вывода).
+- `setup_nginx_final(domain=None, port=None, socket_path=None)` — аналогично для `PARAM_DOMAIN` / `SERVER_PORT` / `PARAM_SOCKET_PATH`. `PROTOCOL_MODE`, `AWG_EXIT_ENABLED`, `XHTTP_PATH`, `XHTTP_BACKEND_PORT`, `IS_IPV6_AVAILABLE` остаются из core (они касаются только VLESS-флоу).
+- Это позволяет **параллельно** поднять сайт для VLESS-домена и отдельный сайт для Telemt-домена на одном сервере — без мутации глобального state в `_core.py`.
+
+#### `vless_installer/modules/ssl_certbot.py`
+- `obtain_ssl_cert(domain=None)` — если `domain` передан явно, сертификат выпускается для этого домена (а не для `core.PARAM_DOMAIN`). Используется в Telemt nginx-fallback, где домен маскировки может отличаться от основного VLESS-домена сервера. `PARAM_EMAIL` и `PROTOCOL_MODE` остаются из core.
+
+#### `vless_installer/modules/mtproto.py` (Задача 2)
+- **`OwnSiteConfig` dataclass** — параметры локального nginx-сайта для маскировки Telemt: `domain`, `mask_host` (всегда `"127.0.0.1"` в этой итерации), `mask_port`.
+- **`_pick_local_nginx_port(telemt_port)`** — подбирает свободный TCP-порт на 127.0.0.1 из диапазона 8444–9998 (избегая 9000 и `telemt_port`), проверяя занятость через `ss -tlnH`.
+- **`_check_mask_backend_ready(mask_host, mask_port, timeout)`** — TCP-connect проверка готовности nginx. **КРИТИЧНО** для `tls_emulation=true` (telemt/telemt issues #330, #713): Telemt при старте делает живой TLS-fetch cert-chain с `mask_host`; если nginx ещё не поднялся — fetch падает с "early eof" и Telemt уходит в restart-loop.
+- **`_select_domain(telemt_port=8443)`** — теперь возвращает `str` (donor-домен, текущее поведение) ИЛИ `OwnSiteConfig` (новое). Пункт "99 ✏️ Свой домен" превращён в подменю `_select_own_domain_submenu()` с двумя вариантами:
+  - **1) Donor-домен (как раньше)** — просто домен, без своего сайта. Backward-compat.
+  - **2) Свой домен + свой сайт (nginx fallback)** — вызывает `_setup_own_site()`: подбор `mask_port` → certbot → `create_website(domain=…)` → `setup_nginx_final(domain=…, port=…, socket_path=None)` → проверка готовности nginx (TCP connect). Возвращает `OwnSiteConfig` с `mask_port>0` при успехе, `mask_port=0` при отказе (caller видит это и не пишет `mask_host` в конфиг).
+- **`_write_config(...)`** — добавлены опциональные параметры `mask_host: str = ""`, `mask_port: int = 0`, `tls_emulation: bool = False`. Если `mask_host` пуст — поведение **byte-for-byte идентично** предыдущему (donor-режим, regression guard). Если задан — censorship-секция дополнительно пишет `mask_host`, `mask_port` (только если >0), `tls_emulation = true/false`. `mask_host` и `mask_unix_sock` взаимоисключающи по спецификации Telemt; в этой итерации поддерживается только TCP `mask_host` (unix-сокет не реализуем — см. ниже "Почему не unix-сокет").
+- **Call site в `_run_install_inner`** — после `_select_domain(telemt_port=port)` разветвление: если вернулся `OwnSiteConfig` — передаём `mask_host`/`mask_port`/`tls_emulation=True` в `_write_config`; если `str` — передаём пустые (donor-режим).
+- **Guard перед стартом Telemt** — если включён own-site режим, 5 попыток с интервалом 1с проверяем `_check_mask_backend_ready(mask_host, mask_port)`. Если nginx не готов — переписываем конфиг в donor-режим (без `mask_host`), чтобы избежать silent regression в духе AWG rotation no-op.
+
+### 🚫 Почему не unix-сокет в первой итерации
+
+`mask_unix_sock` был бы чище (не занимает TCP-порт), но требует, чтобы nginx слушал unix-сокет, а не TCP — это дополнительная развилка в `setup_nginx_final()`, которая сейчас везде оперирует TCP-портом (`SERVER_PORT`). Не расширяем эту сложность без необходимости. TCP на `127.0.0.1:<порт>` достаточно и проще для отладки. Валидация "ровно одно из `mask_host`/`mask_unix_sock`" добавлена в docstring `_write_config()` для будущей итерации.
+
+### 🚫 Что НЕ трогали (строгие границы задачи)
+
+- `vless_installer/modules/telemt_fallback.py` — это **ДРУГОЙ** fallback (Middle Proxy → Direct Mode, гибрид ME). Не путать, не переиспользовать имена `fallback_to_direct` / `FallbackConfig` для этой задачи. Никаких правок.
+- `awg*.py`, `telemt_mss_selector.py`, `telemt_syn_limiter.py`, `telemt_geoip_*` — AWG-трек, не трогаем.
+- `telemt_mirrors.py`, `telemt_packages.py`, `telemt_geoip_mirrors.py` — mirrors/downloader, не трогаем.
+- TUI diagnostic test runner — не трогаем.
+- **`_core.py`** — НЕ добавлены новые module-level глобалы (`PARAM_*` и т.п.). Никакой новой бизнес-логики. Если функциям из `nginx_setup.py`/`ssl_certbot.py` нужно читать что-то из core — используется только уже существующие атрибуты через `_core_module()`, как и раньше.
+
+### 🧪 Регрессионные тесты
+
+`tests/test_telemt_nginx_fallback.py` — 24 теста в 7 классах:
+
+1. **`TestWriteConfigDonorModeRegression`** — `_write_config(mask_host="")` → censorship-секция побайтово идентична baseline (`[censorship]` + `tls_domain` + `mask=true` + `mask_port=443` + `fake_cert_len=2048`). Также проверка что `mask_host` и `tls_emulation` отсутствуют в donor-режиме.
+2. **`TestWriteConfigOwnSiteMode`** — `_write_config(mask_host="127.0.0.1", mask_port=8443, tls_emulation=True)` → парсим сгенерированный TOML и проверяем реальные строки `mask_host = "127.0.0.1"`, `mask_port = 8443`, `tls_emulation = true` (НЕ тавтологичный assert на аргумент). Также: `mask_port=0` → строка `mask_port` не пишется; `tls_emulation=False` → пишется `false`.
+3. **`TestCreateWebsiteIsolationFromGlobalState`** — два последовательных вызова `create_website(domain="a.com", ...)` и `create_website(domain="b.com", ...)` создают **ДВА разных** `web_root` (`/var/www/a.com` и `/var/www/b.com`), а не перезаписывают `PARAM_DOMAIN` друг другом. Также: явный `domain=` перекрывает `core.PARAM_DOMAIN="wrong.example.com"`; без явного `domain=` используется `core.PARAM_DOMAIN` (backward-compat).
+4. **`TestMaskBackendReadinessCheck`** — `_check_mask_backend_ready` возвращает True на слушающем TCP-сокете, False на закрытом порту, False на timeout (RFC 5737 TEST-NET-1). **ГЛАВНЫЙ guard-тест**: mock где `_check_mask_backend_ready → False` → install flow переписывает конфиг в donor-режим (`_write_config(mask_host="", ...)`) и НЕ продолжает молча в own-site режиме.
+5. **`TestOwnSiteConfigDataclass`** — поля и значения по умолчанию (`mask_host="127.0.0.1"`, `mask_port=0`).
+6. **`TestPickLocalNginxPort`** — НЕ возвращает порт, совпадающий с `telemt_port`; возвращает 0 если все кандидаты заняты; пропускает порты, которые `ss` видит как LISTEN.
+7. **`TestSignatureCompatibility`** — `obtain_ssl_cert(domain=None)`, `setup_nginx_final(domain, port, socket_path)`, `create_website(domain, site_template)` — сигнатуры соответствуют.
+8. **`TestSelectDomainReturns`** — `_select_domain` возвращает `str` для выбора из готовой категории (sanity-check backward-compat).
+
+Все 24 теста проходят. Существующие `tests/test_mtproto.py` (108 тестов), `tests/test_ssl_certbot.py`, `tests/test_nginx_watchdog.py`, `tests/test_telemt_fallback.py` (25 тестов суммарно) — проходят без изменений.
+
+---
+
 ## v4.20.0 — Унификация скачивания: единый download_manager.py для всех модулей — 11 июля 2026
 
 ### 📦 Миграция всех модулей на `download_manager.fetch_package()`
