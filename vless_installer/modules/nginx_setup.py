@@ -48,6 +48,14 @@ from pathlib import Path
 from typing import Optional
 
 
+# ── Sentinel для различения "не передан" от "передан None" ───────────────────
+# Нужно для параметров port/socket_path в setup_nginx_final():
+#   • VLESS install flow вызывает без аргументов → должны inherit из core
+#   • Telemt own-site вызывает socket_path=None явно → должны использовать TCP
+# Обычный default=None не различает эти два случая — sentinel решает.
+_UNSET = object()
+
+
 # ── Ленивый доступ к ядру ────────────────────────────────────────────────────
 def _core_module():
     """Возвращает модуль vless_installer._core (импорт лениво)."""
@@ -379,18 +387,27 @@ def setup_nginx_temp() -> None:
 #  vless_installer.modules.ssl_certbot; импорт — в верхней секции _core.py.)
 
 def setup_nginx_final(domain: Optional[str] = None,
-                      port: Optional[int] = None,
-                      socket_path: Optional[str] = None) -> None:
+                      port=_UNSET,
+                      socket_path=_UNSET,
+                      protocol_mode: Optional[str] = None,
+                      awg_exit_enabled: Optional[bool] = None,
+                      site_template: Optional[str] = None) -> None:
     """Финальная настройка Nginx: HTTPS-сайт + reverse-proxy на Xray backend.
 
-    Параметры domain/port/socket_path, переданные явно, ПЕРЕКРЫВАЮТ значения
-    из core.PARAM_DOMAIN / core.SERVER_PORT / core.PARAM_SOCKET_PATH. Если не
-    переданы — поведение идентично предыдущему (VLESS install flow не меняется
-    ни в одном байте вывода).
+    Параметры domain/port/socket_path/protocol_mode/awg_exit_enabled/site_template,
+    переданные явно, ПЕРЕКРЫВАЮТ значения из core.* Если не переданы — поведение
+    идентично предыдущему (VLESS install flow не меняется ни в одном байте вывода).
 
-    Telemt nginx-fallback вызывает эту функцию с domain=<домен Telemt>,
-    port=<свободный локальный порт>, socket_path=None — Nginx поднимает
-    отдельный HTTPS-сайт для маскировки Telemt, параллельно с VLESS-сайтом.
+    Telemt nginx-fallback (own-site режим) вызывает эту функцию с:
+        domain=<домен Telemt>, port=<mask_port>, socket_path=None,
+        protocol_mode="reality", awg_exit_enabled=False
+    — это форсирует простую статическую HTTPS-сайт-заглушку на TCP-порту
+    127.0.0.1:{port}, независимо от того, в каком режиме установлен VLESS
+    на этом сервере (xhttp/reality/awg). Никакого проксирования на Xray,
+    никакого reuse unix-сокета, никакого proxy_protocol.
+
+    Sentinel _UNSET для port/socket_path позволяет различить "не передан"
+    (→ inherit из core) от "передан None" (→ own-site TCP режим).
     """
     core = _core_module()
     info = core.info
@@ -403,20 +420,155 @@ def setup_nginx_final(domain: Optional[str] = None,
     NGINX_ENABLED_DIR = core.NGINX_ENABLED_DIR
     NGINX_RATE_LIMIT_CONF = core.NGINX_RATE_LIMIT_CONF
     PARAM_DOMAIN = domain if domain is not None else core.PARAM_DOMAIN
-    PARAM_SOCKET_PATH = (
-        socket_path if socket_path is not None else core.PARAM_SOCKET_PATH
-    )
-    PROTOCOL_MODE = core.PROTOCOL_MODE
-    SERVER_PORT = port if port is not None else core.SERVER_PORT
-    AWG_EXIT_ENABLED = core.AWG_EXIT_ENABLED
+
+    # Sentinel-разрешение: _UNSET → inherit из core; явный None → own-site TCP.
+    if socket_path is _UNSET:
+        PARAM_SOCKET_PATH = core.PARAM_SOCKET_PATH
+        _socket_explicit = False
+    else:
+        PARAM_SOCKET_PATH = socket_path  # может быть None или str
+        _socket_explicit = True
+    if port is _UNSET:
+        SERVER_PORT = core.SERVER_PORT
+        _port_explicit = False
+    else:
+        SERVER_PORT = port if port is not None else 0
+        _port_explicit = True
+    PROTOCOL_MODE = protocol_mode if protocol_mode is not None else core.PROTOCOL_MODE
+    AWG_EXIT_ENABLED = awg_exit_enabled if awg_exit_enabled is not None else core.AWG_EXIT_ENABLED
     XHTTP_PATH = core.XHTTP_PATH
     XHTTP_BACKEND_PORT = core.XHTTP_BACKEND_PORT
+
+    # ── Detect own-site TCP mode ────────────────────────────────────────────
+    # Telemt own-site: socket_path явно None + port явно задан → TCP listen на
+    # 127.0.0.1:{port}, без proxy_protocol, без real_ip_header, без Xray proxy.
+    _own_site_tcp = (
+        _socket_explicit and PARAM_SOCKET_PATH is None
+        and _port_explicit and SERVER_PORT
+    )
+
+    # ── Domain collision check ─────────────────────────────────────────────
+    # Own-site домен Telemt НЕ должен совпадать с VLESS-доменом (core.PARAM_DOMAIN)
+    # — иначе два server{} блока с одинаковым server_name конфликтуют.
+    if _own_site_tcp and core.PARAM_DOMAIN and PARAM_DOMAIN == core.PARAM_DOMAIN:
+        raise RuntimeError(
+            f"setup_nginx_final: own-site domain {PARAM_DOMAIN!r} совпадает с "
+            f"core.PARAM_DOMAIN (VLESS-домен этого сервера). Own-site домен "
+            f"Telemt должен быть ОТЛИЧЕН от VLESS-домена — иначе nginx-конфиги "
+            f"конфликтуют (duplicate server_name / duplicate default_server)."
+        )
+
     info("Настройка финального конфига Nginx...")
     web_root = Path(f"/var/www/{PARAM_DOMAIN}")
 
-    create_website(domain=PARAM_DOMAIN)
+    create_website(domain=PARAM_DOMAIN, site_template=site_template)
     NGINX_CONF_DIR.mkdir(parents=True, exist_ok=True)
     NGINX_ENABLED_DIR.mkdir(parents=True, exist_ok=True)
+
+    # === OWN-SITE TCP: простой статический HTTPS-сайт на 127.0.0.1:{port} ===
+    # Telemt own-site режим — генерируется ВСЕГДА как простая статическая
+    # заглушка на TCP-порту, независимо от PROTOCOL_MODE/AWG_EXIT_ENABLED
+    # сервера. proxy_protocol НЕ используется (Telemt подключается напрямую
+    # по TCP, не через Xray xver=1). real_ip_header/set_real_ip_from тоже
+    # не нужны — источник соединения сам Telemt на loopback.
+    if _own_site_tcp:
+        _os_nginx_bin = find_nginx_bin() or "/usr/sbin/nginx"
+        try:
+            r_ver = _run([_os_nginx_bin, "-v"], capture=True, check=False)
+            m_ver = re.search(r'(\d+)\.(\d+)\.(\d+)', r_ver.stderr or r_ver.stdout or "")
+            _os_major = int(m_ver.group(1)) if m_ver else 1
+            _os_minor = int(m_ver.group(2)) if m_ver else 18
+        except Exception:
+            _os_major, _os_minor = 1, 18
+
+        if _os_major > 1 or (_os_major == 1 and _os_minor >= 25):
+            _os_listen_main = f"listen 127.0.0.1:{SERVER_PORT} ssl;"
+            _os_listen_default = f"listen 127.0.0.1:{SERVER_PORT} ssl default_server;"
+            _os_http2_line = "    http2 on;"
+        else:
+            _os_listen_main = f"listen 127.0.0.1:{SERVER_PORT} ssl http2;"
+            _os_listen_default = f"listen 127.0.0.1:{SERVER_PORT} ssl http2 default_server;"
+            _os_http2_line = ""
+
+        # ssl_reject_handshake для default_server (старые nginx → fallback)
+        if _os_major > 1 or (_os_major == 1 and _os_minor >= 19):
+            _os_default_ssl = "ssl_reject_handshake on;"
+        else:
+            _os_default_ssl = (
+                f"ssl_certificate     /etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem;\n"
+                f"            ssl_certificate_key /etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem;\n"
+                f"            return 444;"
+            )
+
+        _os_rate_limit = ""
+        if NGINX_RATE_LIMIT_CONF.exists():
+            _os_rate_limit = ("    limit_req zone=general burst=20 nodelay;\n"
+                              "    limit_conn conn_limit 10;")
+
+        info(f"Own-site TCP: nginx слушает 127.0.0.1:{SERVER_PORT} "
+             f"(статический HTTPS, без proxy_protocol)")
+
+        cfg = NGINX_CONF_DIR / PARAM_DOMAIN
+        cfg.write_text(textwrap.dedent(f"""\
+            # =============================================================================
+            # Own-site HTTPS-сайт для Telemt mask (свой домен + свой сайт)
+            # Nginx слушает 127.0.0.1:{SERVER_PORT} — Telemt сплайсит failed
+            # handshakes сюда. PROXY protocol НЕ используется.
+            # =============================================================================
+
+            # HTTP:80 — только для ACME-челленджей (certbot renew).
+            # Без HTTPS-редиректа: редирект на https://$host/ ушёл бы на порт 443
+            # (Telemt), а не на mask_port.
+            server {{
+                listen 80;
+                listen [::]:80;
+                server_name {PARAM_DOMAIN};
+                location /.well-known/acme-challenge/ {{ root {web_root}; }}
+                location / {{ return 404; }}
+            }}
+
+            # HTTPS на 127.0.0.1:{SERVER_PORT} — статический сайт-заглушка
+            server {{
+                {_os_listen_main}
+            {_os_http2_line}
+                server_name {PARAM_DOMAIN};
+
+                ssl_certificate     /etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem;
+                ssl_certificate_key /etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem;
+                ssl_protocols TLSv1.2 TLSv1.3;
+                ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+                ssl_prefer_server_ciphers on;
+
+                root {web_root};
+                index index.html;
+
+                add_header X-Robots-Tag "noindex, nofollow" always;
+            {_os_rate_limit}
+
+                location / {{
+                    try_files $uri $uri/ =404;
+                }}
+            }}
+
+            # Default server: reject all other SNI на этом порту
+            server {{
+                {_os_listen_default}
+                server_name _;
+                {_os_default_ssl}
+            }}
+        """))
+        link = NGINX_ENABLED_DIR / PARAM_DOMAIN
+        link.unlink(missing_ok=True)
+        link.symlink_to(cfg)
+        r = _run([_os_nginx_bin, "-t"], capture=True, check=False, quiet=True)
+        if r.returncode == 0:
+            _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
+            success(f"Own-site nginx настроен: 127.0.0.1:{SERVER_PORT} (статический HTTPS)")
+        else:
+            log_to_file("WARN", r.stderr or "")
+            _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
+            warn(f"nginx -t упал, nginx перезапущен. Проверьте: {_os_nginx_bin} -t")
+        return
 
     # === xHTTP TLS: Nginx терминирует TLS на :SERVER_PORT и проксирует ===
     # xHTTP path на Xray (127.0.0.1:XHTTP_BACKEND_PORT, security: none).
@@ -583,7 +735,9 @@ def setup_nginx_final(domain: Optional[str] = None,
         success(f"Nginx настроен (только HTTP→HTTPS редирект для AWG, Xray владеет :{SERVER_PORT})")
         return
 
-    # === REALITY: стандартный конфиг через Unix-сокет ===
+    # === REALITY: стандартный конфиг через Unix-сокет (VLESS) ===
+    # Эта ветка выполняется только для VLESS install flow (без явных port/
+    # socket_path). Own-site TCP-режим обработан и return-ут выше.
     _nginx_bin = find_nginx_bin() or "/usr/sbin/nginx"
     try:
         r = _run([_nginx_bin, "-v"], capture=True, check=False)
