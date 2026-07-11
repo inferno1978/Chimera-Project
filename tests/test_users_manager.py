@@ -418,7 +418,17 @@ class TestUnifiedLoadUsers(unittest.TestCase):
             {"uuid": "u1", "email": "a@x", "name": "alice",
              "created": "2024-01-01", "source": "B"},
         ]))
-        result = _unified_load_users()
+        # На продакшен-сервере /etc/xray/config.json существует с реальными
+        # клиентами — без этого mock _unified_load_users вернёт их тоже,
+        # и len(result) != 1. Патчим exists() для config.json путей.
+        _cfg_paths = {"/etc/xray/config.json", "/usr/local/etc/xray/config.json"}
+        _orig_exists = Path.exists
+        def _exists(self):
+            if str(self) in _cfg_paths:
+                return False
+            return _orig_exists(self)
+        with patch.object(Path, "exists", _exists):
+            result = _unified_load_users()
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["uuid"], "u1")
         self.assertEqual(result[0]["source"], "B")
@@ -523,7 +533,15 @@ class TestUnifiedLoadUsers(unittest.TestCase):
             {"uuid": "u1", "email": "a@x", "name": "alice",
              "disabled": True, "disabled_at": "2024-06-01"},
         ]))
-        result = _unified_load_users()
+        # На продакшен-сервере /etc/xray/config.json существует — патчим.
+        _cfg_paths = {"/etc/xray/config.json", "/usr/local/etc/xray/config.json"}
+        _orig_exists = Path.exists
+        def _exists(self):
+            if str(self) in _cfg_paths:
+                return False
+            return _orig_exists(self)
+        with patch.object(Path, "exists", _exists):
+            result = _unified_load_users()
         self.assertEqual(len(result), 1)
         self.assertTrue(result[0]["disabled"])
         self.assertEqual(result[0]["disabled_at"], "2024-06-01")

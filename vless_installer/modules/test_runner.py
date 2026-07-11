@@ -499,31 +499,67 @@ def do_test_runner_menu() -> None:
         c["RED"], c["GREEN"], c["YELLOW"], c["CYAN"], c["DIM"], c["BOLD"], c["NC"]
     )
 
+    _BOX_W = 66
+
+    def _box_top(title: str = "") -> None:
+        print(f"  {CYAN}╔{'═' * _BOX_W}╗{NC}")
+        if title:
+            pad = _BOX_W - len(title)
+            lpad = pad // 2
+            rpad = pad - lpad
+            print(f"  {CYAN}║{NC}{' ' * lpad}{BOLD}{title}{NC}{' ' * rpad}{CYAN}║{NC}")
+            print(f"  {CYAN}╠{'═' * _BOX_W}║{NC}")
+
+    def _box_sep() -> None:
+        print(f"  {CYAN}╠{'═' * _BOX_W}║{NC}")
+
+    def _box_bot() -> None:
+        print(f"  {CYAN}╚{'═' * _BOX_W}╝{NC}")
+
+    def _box_row(text: str = "") -> None:
+        # Обрезаем длинный текст
+        plain = text
+        # Убираем ANSI для расчёта ширины
+        import re as _re
+        clean = _re.sub(r'\033\[[0-9;]*m', '', plain)
+        w = len(clean)
+        if w > _BOX_W:
+            clean = clean[:_BOX_W - 1] + "…"
+            w = len(clean)
+        pad = max(0, _BOX_W - w)
+        print(f"  {CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
+
+    def _box_item(key: str, label: str) -> None:
+        col = RED + BOLD if key.strip().upper() in ("Q", "0") else CYAN + BOLD
+        _box_row(f"  {DIM}[{NC}{col}{key}{NC}{DIM}]{NC}  {label}")
+
     while True:
         os.system("clear")
         print()
-        print(f"  {BOLD}{CYAN}🧪  ДИАГНОСТИЧЕСКИЕ ТЕСТЫ{NC}")
-        print()
-        print(f"  {DIM}Запуск unit-тестов проекта. Тесты используют mock/tempfile{NC}")
-        print(f"  {DIM}и НЕ меняют систему. Результаты сохраняются в лог.{NC}")
-        print()
+        _box_top("🧪  ДИАГНОСТИЧЕСКИЕ ТЕСТЫ")
+        _box_row()
+        _box_row(f"  {DIM}Запуск unit-тестов проекта. Тесты используют mock/tempfile{NC}")
+        _box_row(f"  {DIM}и НЕ меняют систему. Результаты сохраняются в лог.{NC}")
+        _box_sep()
 
-        # Подсчитываем тесты в каждой группе
+        # Группы тестов
         for key, group in TEST_GROUPS.items():
             count = len(group["tests"])
             label = group["label"]
             desc = group["description"]
-            print(f"  {CYAN}[{key}]{NC}  {BOLD}{label}{NC} ({count} модулей)")
-            print(f"       {DIM}{desc}{NC}")
-            print()
+            _box_item(key, f"{BOLD}{label}{NC} ({count} модулей)")
+            _box_row(f"       {DIM}{desc}{NC}")
 
-        print(f"  {CYAN}[A]{NC}  {BOLD}Все тесты{NC} ({sum(len(g['tests']) for g in TEST_GROUPS.values())} модулей)")
-        print(f"       {DIM}Полный прогон всех групп{NC}")
-        print()
-        print(f"  {CYAN}[0]{NC}  py_compile — проверка синтаксиса всех .py")
-        print(f"       {DIM}Быстрая проверка без запуска тестов{NC}")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
+        _box_sep()
+        # Все тесты — используем [T] (не [A], т.к. [A] занят группой "Утилиты и UI")
+        total = sum(len(g["tests"]) for g in TEST_GROUPS.values())
+        _box_item("T", f"{BOLD}Все тесты{NC} ({total} модулей)")
+        _box_row(f"       {DIM}Полный прогон всех групп{NC}")
+        _box_item("0", f"py_compile — проверка синтаксиса всех .py")
+        _box_row(f"       {DIM}Быстрая проверка без запуска тестов{NC}")
+        _box_row()
+        _box_item("Q", "← Назад")
+        _box_bot()
         print()
 
         try:
@@ -539,7 +575,7 @@ def do_test_runner_menu() -> None:
             _run_py_compile_menu(c)
             continue
 
-        if choice == "a":
+        if choice == "t":
             # Все тесты
             all_tests = []
             for group in TEST_GROUPS.values():
