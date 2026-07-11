@@ -893,19 +893,22 @@ def setup_nginx_final(domain: Optional[str] = None,
             _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
         success(f"Nginx финально настроен (Nginx {nginx_ver})")
     else:
-        # Hardening (v4.20.3): unlink symlink ДО restart/reload — иначе restart
-        # с битым конфигом кладёт весь nginx. Для REALITY-ветки это особенно
-        # критично: unix-сокет создаётся искусственно выше, и при ошибке
-        # сокет-пути restart может уронить уже работавший VLESS REALITY fallback.
-        try:
-            link.unlink()
-        except Exception:
-            pass
-        _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
+        # ВНИМАНИЕ: этот else-блок НЕ подлежит hardening "unlink symlink при
+        # nginx -t failure" (который применяется в 3 других местах nginx_setup.py).
+        # Здесь провал nginx -t — это ЗАПЛАНИРОВАННОЕ состояние на каждой
+        # свежей VLESS REALITY-установке: конфиг тестируется через ВРЕМЕННЫЙ
+        # unix-сокет (socket.bind()+close() выше, строка ~878), который НИЧЕГО
+        # не слушает — Xray, который реально принимает соединения на этом сокете,
+        # ещё не запущен. Реальный сокет появится позже, nginx стартует "до Xray"
+        # на финальном шаге установки, за пределами этой функции.
+        # Если здесь удалить symlink (как делает hardening v4.20.3 в других
+        # ветках), то при финальном старте nginx VLESS-сайта уже не будет в
+        # sites-enabled — ломается каждая свежая REALITY-установка.
+        # Симлинк ДОЛЖЕН остаться, nginx стартует позже на финальном шаге.
         warn("nginx -t: проверка с временным сокетом (предупреждение ожидаемо):")
         for line in r.stderr.splitlines()[-5:]:
             warn(f"  {line}")
-        info(f"Симлинк {PARAM_DOMAIN} удалён. Nginx будет запущен до Xray (финальный шаг установки)")
+        info("Nginx будет запущен до Xray (финальный шаг установки)")
 
     # Удаляем временный сокет; финальный старт nginx — до xray
     sock_path.unlink(missing_ok=True)

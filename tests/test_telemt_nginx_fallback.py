@@ -1577,8 +1577,26 @@ class TestNginxHardeningUnlinkBeforeRestart(unittest.TestCase):
         self.assertTrue(unlink_calls,
                         f"symlink {expected_link} должен быть удалён в AWG-ветке при nginx -t failure")
 
-    def test_setup_nginx_final_reality_unlinks_on_failure(self):
-        """Тест 4.4: setup_nginx_final REALITY-ветка — symlink удалён при fail."""
+    def test_setup_nginx_final_reality_keeps_symlink_on_expected_failure(self):
+        """Тест 4.4 (v4.20.4 revert): setup_nginx_final REALITY-ветка — symlink
+        СОХРАНЁН при ожидаемом temp-socket warning.
+
+        В REALITY-ветке nginx -t проваливается ЗАВЕДОМО на каждой свежей
+        установке: конфиг тестируется через ВРЕМЕННЫЙ unix-сокет (socket.bind()
+        +close()), который НИЧЕГО не слушает — Xray ещё не запущен. Реальный
+        сокет появится позже, nginx стартует "до Xray" на финальном шаге
+        установки, за пределами этой функции.
+
+        Hardening "unlink symlink при nginx -t failure" (применён в 3 других
+        ветках в v4.20.3) здесь НЕ применяется — иначе ломается каждая свежая
+        REALITY-установка (симлинка не будет в sites-enabled при финальном
+        старте nginx).
+
+        Тест проверяет: при returncode=1 (ожидаемый temp-socket warning)
+        symlink ОСТАЁТСЯ. Учитываем что link.unlink(missing_ok=True) на
+        строке ~884 (перед symlink_to) — это легитимная очистка старого
+        symlink'а, его не считаем. Считаем только unlink ПОСЛЕ symlink_to.
+        """
         from vless_installer.modules import nginx_setup
         domain = "vless.example.com"
         fake_core = _make_fake_core_for_nginx(
@@ -1589,14 +1607,22 @@ class TestNginxHardeningUnlinkBeforeRestart(unittest.TestCase):
             nginx_conf_dir=self._conf_dir,
             nginx_enabled_dir=self._enabled_dir,
         )
-        # nginx -t возвращает failure
+        # nginx -t возвращает failure (ожидаемый temp-socket warning)
         fake_core._run = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="nginx: [emerg] fake error"))
 
         expected_link = self._enabled_dir / domain
-        unlink_calls = []
+        # Различаем "unlink до symlink_to" (легитимный, строка 884) от
+        # "unlink после symlink_to" (баг v4.20.3, теперь должен отсутствовать).
+        symlink_to_done = [False]
+        unlink_after_symlink = []
         def _tracking_unlink(self, *a, **kw):
             if str(self) == str(expected_link):
-                unlink_calls.append(str(self))
+                if symlink_to_done[0]:
+                    unlink_after_symlink.append(str(self))
+            return None
+        def _tracking_symlink_to(self, *a, **kw):
+            if str(self) == str(expected_link):
+                symlink_to_done[0] = True
             return None
 
         with patch.object(nginx_setup, "_core_module", return_value=fake_core), \
@@ -1604,13 +1630,16 @@ class TestNginxHardeningUnlinkBeforeRestart(unittest.TestCase):
              patch.object(Path, "write_text", lambda self, *a, **kw: None), \
              patch.object(Path, "mkdir"), \
              patch.object(Path, "unlink", _tracking_unlink), \
-             patch.object(Path, "symlink_to"), \
+             patch.object(Path, "symlink_to", _tracking_symlink_to), \
              patch.object(Path, "exists", return_value=False), \
              patch("os.chown", lambda *a, **kw: None):
             nginx_setup.setup_nginx_final()  # VLESS REALITY flow
 
-        self.assertTrue(unlink_calls,
-                        f"symlink {expected_link} должен быть удалён в REALITY-ветке при nginx -t failure")
+        self.assertFalse(unlink_after_symlink,
+                         f"symlink {expected_link} НЕ должен быть удалён в REALITY-ветке "
+                         f"ПОСЛЕ symlink_to — провал nginx -t здесь ожидаем (temp-socket "
+                         f"warning), симлинк нужен для финального старта nginx. "
+                         f"Найдены unlink после symlink_to: {unlink_after_symlink}")
 
 
 
