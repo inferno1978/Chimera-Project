@@ -214,7 +214,7 @@ def _mieru_mirror_urls(filename: str, version: str = "", **kw) -> list[str]:
 # ============================================================================
 MITA_DEB_SPEC = PackageSpec(
     name="mita .deb",
-    filename_builder=lambda version, arch: f"mita_{version}_{arch}.deb",
+    filename_builder=lambda version, arch, **kw: f"mita_{version}_{arch}.deb",
     mirror_urls_builder=_mieru_mirror_urls,
     install_dests=[_INSTALL_TMP],
     manual_incoming_dir=_MANUAL_DIR,
@@ -228,7 +228,7 @@ MITA_DEB_SPEC = PackageSpec(
 # ============================================================================
 MITA_RPM_SPEC = PackageSpec(
     name="mita .rpm",
-    filename_builder=lambda version, rpm_arch: f"mita-{version}-1.{rpm_arch}.rpm",
+    filename_builder=lambda version, rpm_arch, **kw: f"mita-{version}-1.{rpm_arch}.rpm",
     mirror_urls_builder=_mieru_mirror_urls,
     install_dests=[_INSTALL_TMP],
     manual_incoming_dir=_MANUAL_DIR,
@@ -242,7 +242,7 @@ MITA_RPM_SPEC = PackageSpec(
 # ============================================================================
 MITA_TARGZ_SPEC = PackageSpec(
     name="mita tar.gz",
-    filename_builder=lambda version, arch: f"mita_{version}_linux_{arch}.tar.gz",
+    filename_builder=lambda version, arch, **kw: f"mita_{version}_linux_{arch}.tar.gz",
     mirror_urls_builder=_mieru_mirror_urls,
     install_dests=[_INSTALL_TMP],
     manual_incoming_dir=_MANUAL_DIR,
@@ -256,7 +256,7 @@ MITA_TARGZ_SPEC = PackageSpec(
 # ============================================================================
 MIERU_TARGZ_SPEC = PackageSpec(
     name="mieru tar.gz",
-    filename_builder=lambda version, arch: f"mieru_{version}_linux_{arch}.tar.gz",
+    filename_builder=lambda version, arch, **kw: f"mieru_{version}_linux_{arch}.tar.gz",
     mirror_urls_builder=_mieru_mirror_urls,
     install_dests=[_INSTALL_TMP],
     manual_incoming_dir=_MANUAL_DIR,

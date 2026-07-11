@@ -411,7 +411,10 @@ def _download_binaries() -> tuple:
     from vless_installer.modules.download_manager import fetch_package
     from vless_installer.modules.fptn_packages import FPTN_SPEC
 
-    ok = fetch_package(FPTN_SPEC, tag=version, filename=filename)
+    # ВАЖНО: передаём deb_filename (НЕ filename) — download_manager сам
+    # передаёт filename= в mirror_urls_builder, и если caller тоже передаст
+    # filename= будет TypeError (multiple values for keyword argument).
+    ok = fetch_package(FPTN_SPEC, tag=version, deb_filename=filename)
     if ok:
         return True, f"fptn-server {version} ({arch}) установлен."
     return False, "Не удалось скачать fptn-server .deb ни с одного зеркала."

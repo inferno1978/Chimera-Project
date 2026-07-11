@@ -142,7 +142,7 @@ def _post_install_dnscrypt(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 DNSCRYPT_SPEC = PackageSpec(
     name="dnscrypt-proxy",
-    filename_builder=lambda tag, arch: f"dnscrypt-proxy-{arch}-{tag}.tar.gz",
+    filename_builder=lambda tag, arch, **kw: f"dnscrypt-proxy-{arch}-{tag}.tar.gz",
     mirror_urls_builder=_dnscrypt_mirror_urls,
     install_dests=_DNSCRYPT_INSTALL_DESTS,    # [/usr/local/bin]
     manual_incoming_dir=_MANUAL_DIR,          # /root/

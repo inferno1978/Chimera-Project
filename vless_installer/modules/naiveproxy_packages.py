@@ -109,7 +109,7 @@ def _post_install_naiveproxy(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 NAIVEPROXY_SPEC = PackageSpec(
     name="caddy-naive",
-    filename_builder=lambda: "caddy-linux-amd64",
+    filename_builder=lambda **kw: "caddy-linux-amd64",
     mirror_urls_builder=_naiveproxy_mirror_urls,
     install_dests=_NAIVEPROXY_INSTALL_DESTS,    # [/usr/local/bin]
     manual_incoming_dir=_MANUAL_DIR,            # /root/

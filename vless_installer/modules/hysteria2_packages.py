@@ -220,7 +220,7 @@ def _post_install_hysteria2(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 HYSTERIA2_SPEC = PackageSpec(
     name="Hysteria2",
-    filename_builder=lambda arch: f"hysteria-linux-{arch}",
+    filename_builder=lambda arch, **kw: f"hysteria-linux-{arch}",
     mirror_urls_builder=_hysteria2_mirror_urls,
     install_dests=_H2_INSTALL_DESTS,            # [/usr/local/bin]
     manual_incoming_dir=_MANUAL_DIR,            # /root/

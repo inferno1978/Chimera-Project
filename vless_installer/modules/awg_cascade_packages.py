@@ -108,7 +108,7 @@ def _post_install_ru_zone(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 RU_ZONE_SPEC = PackageSpec(
     name="ru.zone",
-    filename_builder=lambda: "ru.zone",
+    filename_builder=lambda **kw: "ru.zone",
     mirror_urls_builder=_ru_zone_mirror_urls,
     install_dests=_RU_ZONE_INSTALL_DESTS,       # [/etc/amneziawg/cascade]
     manual_incoming_dir=_MANUAL_DIR,            # /root/
