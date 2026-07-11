@@ -597,7 +597,7 @@ def do_test_runner_menu() -> None:
 
 def _run_py_compile_menu(c: dict) -> None:
     """Запуск py_compile и отображение результатов."""
-    GREEN, RED, YELLOW, DIM, NC = c["GREEN"], c["RED"], c["YELLOW"], c["DIM"], c["NC"]
+    GREEN, RED, YELLOW, CYAN, DIM, NC = c["GREEN"], c["RED"], c["YELLOW"], c["CYAN"], c["DIM"], c["NC"]
 
     print(f"\n  {DIM}Проверка синтаксиса всех .py файлов...{NC}\n")
     ok, fail, errors = _run_py_compile()
