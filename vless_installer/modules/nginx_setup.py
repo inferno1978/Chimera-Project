@@ -403,7 +403,12 @@ def setup_nginx_temp(domain: Optional[str] = None) -> None:
         log_to_file("WARN", r.stderr)
         _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
         setattr(core, "STAGE_NGINX_DONE", True)
-        warn(f"Nginx -t упал для временного vhost {PARAM_DOMAIN}; симлинк удалён, nginx не перезапущен")
+        # v4.20.6: явный вывод stderr — раньше просто info("Nginx перезапущен")
+        # без указания что nginx -t упал. Для certbot ACME это критично: если
+        # временный vhost не валиден, certbot не сможет выпустить сертификат.
+        warn(f"Nginx -t упал для временного vhost {PARAM_DOMAIN}; симлинк удалён, nginx не перезапущен:")
+        for _err_line in (r.stderr or "").splitlines()[-10:]:
+            warn(f"  {_err_line}")
 
 # =============================================================================
 #  ШАГ 11: SSL СЕРТИФИКАТ
@@ -598,7 +603,13 @@ def setup_nginx_final(domain: Optional[str] = None,
                 pass
             log_to_file("WARN", r.stderr or "")
             _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
-            warn(f"nginx -t упал для own-site vhost {PARAM_DOMAIN}; симлинк удалён, nginx не перезапущен. Проверьте: {_os_nginx_bin} -t")
+            # v4.20.6: явный вывод stderr в warn — раньше quiet=True глотал ошибку,
+            # пользователь не видел почему nginx -t упал (например unknown directive
+            # "http2" на nginx < 1.25). Теперь stderr выводится полностью.
+            warn(f"nginx -t упал для own-site vhost {PARAM_DOMAIN}; симлинк удалён, nginx не перезапущен.")
+            for _err_line in (r.stderr or "").splitlines()[-10:]:
+                warn(f"  {_err_line}")
+            warn(f"Проверьте вручную: {_os_nginx_bin} -t")
         return
 
     # === xHTTP TLS: Nginx терминирует TLS на :SERVER_PORT и проксирует ===
@@ -733,8 +744,13 @@ def setup_nginx_final(domain: Optional[str] = None,
             success(f"Nginx настроен (xHTTP TLS: заглушка + proxy / → http://{_backend})")
         else:
             log_to_file("WARN", r.stderr or "")
+            # v4.20.6: явный вывод stderr — раньше просто success("Nginx перезапущен")
+            # без указания что nginx -t упал, пользователь не видел ошибку.
+            warn(f"nginx -t упал для xHTTP vhost {PARAM_DOMAIN}:")
+            for _err_line in (r.stderr or "").splitlines()[-10:]:
+                warn(f"  {_err_line}")
             _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
-            success("Nginx перезапущен (xHTTP TLS режим)")
+            warn("nginx перезапущен в xHTTP TLS режиме (проверьте конфиг вручную)")
         return
 
     # === AWG 2.0 + REALITY: Xray слушает на PORT напрямую, Nginx только HTTP→HTTPS ===
@@ -769,7 +785,10 @@ def setup_nginx_final(domain: Optional[str] = None,
             except Exception:
                 pass
             _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
-            warn(f"nginx -t упал для AWG vhost {PARAM_DOMAIN}; симлинк удалён, nginx не перезапущен")
+            # v4.20.6: явный вывод stderr — раньше warn без деталей.
+            warn(f"nginx -t упал для AWG vhost {PARAM_DOMAIN}; симлинк удалён, nginx не перезапущен:")
+            for _err_line in (r.stderr or "").splitlines()[-10:]:
+                warn(f"  {_err_line}")
         success(f"Nginx настроен (только HTTP→HTTPS редирект для AWG, Xray владеет :{SERVER_PORT})")
         return
 
