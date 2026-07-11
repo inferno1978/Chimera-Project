@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from vless_installer.modules.text_width import wlen as _wlen, plain as _plain
 
-import gzip
 import json
 import os
 import platform
@@ -35,7 +34,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -226,33 +224,10 @@ def _telemt_is_installed(mp) -> bool:
 # зеркалируемые через jsDelivr CDN (проект wp-statistics): формат полностью
 # совместим со схемой MaxMind, скачивание без ключей и аккаунта.
 GEOIP_DIR = DATA_DIR / "geoip"
-GEOIP_SOURCES = {
-    "dbip":    ("https://cdn.jsdelivr.net/npm/dbip-city-lite/dbip-city-lite.mmdb.gz", "dbip-city-lite.mmdb"),
-    "maxmind": ("https://cdn.jsdelivr.net/npm/geolite2-city/GeoLite2-City.mmdb.gz",   "GeoLite2-City.mmdb"),
-    "asn":     ("https://cdn.jsdelivr.net/npm/geolite2-asn/GeoLite2-ASN.mmdb.gz",     "GeoLite2-ASN.mmdb"),
-}
-
-def _http_get(url: str, timeout: int = 60) -> Optional[bytes]:
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "VLESS-Ultimate-Installer"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read()
-    except Exception:
-        return None
-
-def _geoip_fetch(url: str, dest: Path) -> bool:
-    raw = _http_get(url)
-    if not raw:
-        return False
-    try:
-        data = gzip.decompress(raw)
-    except OSError:
-        return False
-    if len(data) < 1024:
-        return False
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
-    return True
+# GEOIP_SOURCES, _http_get, _geoip_fetch — удалены при финальном cleanup.
+# URL'ы перенесены в telemt_geoip_mirrors.py, скачивание через fetch_package
+# в _geoip_auto_download(). gzip-decompress делается в post_install
+# TELEMT_GEOIP_*_SPEC.
 
 def _geoip_auto_download(use_maxmind_mirror: bool = False) -> tuple:
     """Возвращает (city_mmdb_path, asn_mmdb_path); пустая строка при неудаче.
