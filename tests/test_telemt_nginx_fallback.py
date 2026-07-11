@@ -39,11 +39,44 @@ import tempfile
 import threading
 import types
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
+
+
+# ─── Helper для тестов _setup_own_site ──────────────────────────────────────
+# Все 3 теста (TestSetupOwnSiteOrderOfOperations.test_setup_nginx_temp_called_before_obtain_ssl_cert,
+# TestSelfSignedDetection.test_setup_own_site_rolls_back_on_self_signed,
+# TestSelfSignedDetection.test_setup_own_site_proceeds_on_valid_le_cert) мокают
+# один и тот же набор из 13 box/log-хелперов mtproto. Раньше это был один
+# гигантский `with A, B, C, ...:` на ~20 context managers — упирался в лимит
+# CPython на statically nested blocks (parser limit). Через ExitStack лимит
+# не срабатывает: каждый patch активен ровно там же, отменяется в том же порядке.
+#
+# Использование:
+#     with ExitStack() as stack:
+#         _enter_mtproto_ui_patches(stack, mtproto_mod)
+#         # ... дополнительные stack.enter_context(patch.object(...)) для
+#         # специфичных для теста моков
+#         result = mtproto_mod._setup_own_site("telemt.example.com", 8443)
+def _enter_mtproto_ui_patches(stack: ExitStack, mtproto_mod) -> None:
+    """Добавляет в stack 13 стандартных UI/log-патчей для mtproto.
+
+    Все патчи no-op (MagicMock по умолчанию) — тесты не полагаются на вывод
+    _banner/_box_*/_ok/_err/_warn/_info/proto_ask/print, только на то что
+    они не падают. proto_ask возвращает "2" (дефолтный шаблон сайта).
+    """
+    ui_targets = [
+        "_banner", "_box_top", "_box_row", "_box_sep", "_box_item",
+        "_box_bot", "_box_info", "_ok", "_err", "_warn", "_info",
+    ]
+    for name in ui_targets:
+        stack.enter_context(patch.object(mtproto_mod, name))
+    stack.enter_context(patch.object(mtproto_mod, "proto_ask", return_value="2"))
+    stack.enter_context(patch("builtins.print"))
 
 
 def _setup_core_in_sysmodules():
@@ -1209,32 +1242,25 @@ class TestSetupOwnSiteOrderOfOperations(unittest.TestCase):
         sys.modules["vless_installer._core"] = mock_core
 
         try:
-            with patch.object(mtproto, "_pick_local_nginx_port",
-                              side_effect=_fake_pick_local_nginx_port), \
-                 patch.object(mtproto, "_is_cert_self_signed",
-                              side_effect=_fake_is_cert_self_signed), \
-                 patch.object(mtproto, "_check_mask_backend_ready",
-                              side_effect=_fake_check_mask_backend_ready), \
-                 patch.object(mtproto, "_cleanup_own_site"), \
-                 patch.object(mtproto, "_banner"), \
-                 patch.object(mtproto, "_box_top"), \
-                 patch.object(mtproto, "_box_row"), \
-                 patch.object(mtproto, "_box_sep"), \
-                 patch.object(mtproto, "_box_item"), \
-                 patch.object(mtproto, "_box_bot"), \
-                 patch.object(mtproto, "_box_info"), \
-                 patch.object(mtproto, "_ok"), \
-                 patch.object(mtproto, "_err"), \
-                 patch.object(mtproto, "_warn"), \
-                 patch.object(mtproto, "_info"), \
-                 patch.object(mtproto, "proto_ask", return_value="2"), \
-                 patch("builtins.print"), \
-                 patch("vless_installer.modules.nginx_setup.setup_nginx_temp",
-                       side_effect=_fake_setup_nginx_temp), \
-                 patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert",
-                       side_effect=_fake_obtain_ssl_cert), \
-                 patch("vless_installer.modules.nginx_setup.setup_nginx_final",
-                       side_effect=_fake_setup_nginx_final):
+            # Раньше: один гигантский `with A, B, C, ...:` на 20 context managers
+            # — упирался в лимит CPython на statically nested blocks.
+            # Теперь: ExitStack + общий helper _enter_mtproto_ui_patches для 13
+            # UI/log-хелперов + специфичные для теста патчи отдельно.
+            with ExitStack() as stack:
+                _enter_mtproto_ui_patches(stack, mtproto)
+                stack.enter_context(patch.object(mtproto, "_pick_local_nginx_port",
+                                                  side_effect=_fake_pick_local_nginx_port))
+                stack.enter_context(patch.object(mtproto, "_is_cert_self_signed",
+                                                  side_effect=_fake_is_cert_self_signed))
+                stack.enter_context(patch.object(mtproto, "_check_mask_backend_ready",
+                                                  side_effect=_fake_check_mask_backend_ready))
+                stack.enter_context(patch.object(mtproto, "_cleanup_own_site"))
+                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_temp",
+                                          side_effect=_fake_setup_nginx_temp))
+                stack.enter_context(patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert",
+                                          side_effect=_fake_obtain_ssl_cert))
+                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_final",
+                                          side_effect=_fake_setup_nginx_final))
                 result = mtproto._setup_own_site("telemt.example.com", 8443)
         finally:
             if original_core is not None:
@@ -1335,25 +1361,16 @@ class TestSelfSignedDetection(unittest.TestCase):
         sys.modules["vless_installer._core"] = mock_core
 
         try:
-            with patch.object(mtproto, "_pick_local_nginx_port", return_value=8444), \
-                 patch.object(mtproto, "_is_cert_self_signed", return_value=True), \
-                 patch.object(mtproto, "_cleanup_own_site",
-                              side_effect=lambda d: cleanup_calls.append(d)), \
-                 patch.object(mtproto, "_banner"), \
-                 patch.object(mtproto, "_box_top"), \
-                 patch.object(mtproto, "_box_row"), \
-                 patch.object(mtproto, "_box_sep"), \
-                 patch.object(mtproto, "_box_item"), \
-                 patch.object(mtproto, "_box_bot"), \
-                 patch.object(mtproto, "_box_info"), \
-                 patch.object(mtproto, "_ok"), \
-                 patch.object(mtproto, "_err"), \
-                 patch.object(mtproto, "_warn"), \
-                 patch.object(mtproto, "_info"), \
-                 patch.object(mtproto, "proto_ask", return_value="2"), \
-                 patch("builtins.print"), \
-                 patch("vless_installer.modules.nginx_setup.setup_nginx_temp"), \
-                 patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"):
+            # Раньше: один гигантский `with A, B, C, ...:` на 18 context managers.
+            # Теперь: ExitStack + общий helper _enter_mtproto_ui_patches.
+            with ExitStack() as stack:
+                _enter_mtproto_ui_patches(stack, mtproto)
+                stack.enter_context(patch.object(mtproto, "_pick_local_nginx_port", return_value=8444))
+                stack.enter_context(patch.object(mtproto, "_is_cert_self_signed", return_value=True))
+                stack.enter_context(patch.object(mtproto, "_cleanup_own_site",
+                                                  side_effect=lambda d: cleanup_calls.append(d)))
+                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_temp"))
+                stack.enter_context(patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"))
                 result = mtproto._setup_own_site("telemt.example.com", 8443)
         finally:
             if original_core is not None:
@@ -1377,26 +1394,17 @@ class TestSelfSignedDetection(unittest.TestCase):
         sys.modules["vless_installer._core"] = mock_core
 
         try:
-            with patch.object(mtproto, "_pick_local_nginx_port", return_value=8444), \
-                 patch.object(mtproto, "_is_cert_self_signed", return_value=False), \
-                 patch.object(mtproto, "_cleanup_own_site"), \
-                 patch.object(mtproto, "_check_mask_backend_ready", return_value=True), \
-                 patch.object(mtproto, "_banner"), \
-                 patch.object(mtproto, "_box_top"), \
-                 patch.object(mtproto, "_box_row"), \
-                 patch.object(mtproto, "_box_sep"), \
-                 patch.object(mtproto, "_box_item"), \
-                 patch.object(mtproto, "_box_bot"), \
-                 patch.object(mtproto, "_box_info"), \
-                 patch.object(mtproto, "_ok"), \
-                 patch.object(mtproto, "_err"), \
-                 patch.object(mtproto, "_warn"), \
-                 patch.object(mtproto, "_info"), \
-                 patch.object(mtproto, "proto_ask", return_value="2"), \
-                 patch("builtins.print"), \
-                 patch("vless_installer.modules.nginx_setup.setup_nginx_temp"), \
-                 patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"), \
-                 patch("vless_installer.modules.nginx_setup.setup_nginx_final"):
+            # Раньше: один гигантский `with A, B, C, ...:` на 20 context managers.
+            # Теперь: ExitStack + общий helper _enter_mtproto_ui_patches.
+            with ExitStack() as stack:
+                _enter_mtproto_ui_patches(stack, mtproto)
+                stack.enter_context(patch.object(mtproto, "_pick_local_nginx_port", return_value=8444))
+                stack.enter_context(patch.object(mtproto, "_is_cert_self_signed", return_value=False))
+                stack.enter_context(patch.object(mtproto, "_cleanup_own_site"))
+                stack.enter_context(patch.object(mtproto, "_check_mask_backend_ready", return_value=True))
+                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_temp"))
+                stack.enter_context(patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"))
+                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_final"))
                 result = mtproto._setup_own_site("telemt.example.com", 8443)
         finally:
             if original_core is not None:
@@ -1488,16 +1496,19 @@ class TestNginxHardeningUnlinkBeforeRestart(unittest.TestCase):
         # Запоминаем существует ли link_path ДО вызова
         self.assertTrue(link_path.exists(), "precondition: symlink должен существовать")
 
-        with patch.object(nginx_setup, "_core_module", return_value=fake_core), \
-             patch.object(nginx_setup, "_ensure_nginx_sites_enabled_include"), \
-             patch.object(nginx_setup, "Path", side_effect=_patched_path), \
-             patch.object(Path, "write_text", lambda self, *a, **kw: None), \
-             patch.object(Path, "mkdir"), \
-             patch.object(Path, "unlink"), \
-             patch.object(Path, "symlink_to"), \
-             patch.object(Path, "exists", return_value=False), \
-             patch.object(Path, "is_symlink", return_value=False), \
-             patch("os.chown", lambda *a, **kw: None):
+        # ExitStack вместо цепного with на 10 context managers — единый стиль
+        # с другими тестами файла после v4.20.5.
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(nginx_setup, "_core_module", return_value=fake_core))
+            stack.enter_context(patch.object(nginx_setup, "_ensure_nginx_sites_enabled_include"))
+            stack.enter_context(patch.object(nginx_setup, "Path", side_effect=_patched_path))
+            stack.enter_context(patch.object(Path, "write_text", lambda self, *a, **kw: None))
+            stack.enter_context(patch.object(Path, "mkdir"))
+            stack.enter_context(patch.object(Path, "unlink"))
+            stack.enter_context(patch.object(Path, "symlink_to"))
+            stack.enter_context(patch.object(Path, "exists", return_value=False))
+            stack.enter_context(patch.object(Path, "is_symlink", return_value=False))
+            stack.enter_context(patch("os.chown", lambda *a, **kw: None))
             nginx_setup.setup_nginx_temp(domain=domain)
 
         # Проверяем порядок: nginx -t ДО reload
