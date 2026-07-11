@@ -2,6 +2,102 @@
 
 ---
 
+## v4.20.3 — FIX (BLOCKING): own-site домен Telemt не получает реальный LE-сертификат — certbot падает молча, self-signed fallback остаётся невидимым для гвардов — 12 июля 2026
+
+### 🐛 Баг
+
+Коммит `6e9d7fb` (v4.20.2) исправил три блокера с `PROTOCOL_MODE`, но появился четвёртый, того же архитектурного класса: часть кода в own-site-flow всё ещё завязана на `core.PARAM_DOMAIN` там, где нужен явный домен.
+
+`_setup_own_site()` в `mtproto.py` делал:
+1. `obtain_ssl_cert(domain=domain)` — certbot, webroot-метод, `--webroot-path /var/www/{domain}`
+2. `setup_nginx_final(domain=domain, ...)` — ЗДЕСЬ впервые создавался nginx vhost для `{domain}` на порту 80 с `location /.well-known/acme-challenge/`
+
+На шаге 1 nginx **ещё не знает** про `{domain}` — vhost появится только на шаге 2. HTTP-01 challenge с `Host: {domain}` не совпадёт ни с одним `server_name`, уйдёт в дефолтный vhost (VLESS-домен), там нет файла челленджа → 404 → certbot падает.
+
+В штатном VLESS-флоу это решено: `_core.py` вызывает `setup_nginx_temp()` **ДО** `obtain_ssl_cert()` — временный vhost для `PARAM_DOMAIN` на порту 80. Для own-site эквивалента этого шага не было. Плюс сам `setup_nginx_temp()` по-прежнему не был параметризован — читал `core.PARAM_DOMAIN` безусловно, та же болезнь, что чинили в `setup_nginx_final()`/`create_website()`/`obtain_ssl_cert()`, просто не долечили здесь.
+
+**Почему это тихо, а не просто "не работает":** `obtain_ssl_cert()` уже содержит fallback — если certbot падает, молча генерируется self-signed сертификат (`generate_self_signed_cert`), установка продолжается. `_check_mask_backend_ready()` — голый TCP-connect, ему всё равно, самоподписанный сертификат или нет — проверка зелёная. Ни один из гвардов v4.20.2 этот случай не ловил: инсталлятор репортил успех own-site режима, а Telemt с `tls_emulation=true` живьём фетчил и отдавал self-signed сертификат — для DPI/censor это заметная аномалия, **ХУЖЕ** исходного `fake_cert_len=2048`, который и должны были устранить.
+
+### 🔧 Фикс
+
+#### A. `nginx_setup.py: setup_nginx_temp(domain=None)`
+
+Добавлен опциональный параметр `domain: Optional[str] = None`, перекрывающий `core.PARAM_DOMAIN` — по той же схеме, что уже применена в `create_website()`/`setup_nginx_final()`/`obtain_ssl_cert()`. Если не передан — поведение идентично предыдущему (VLESS install flow не меняется ни в одном байте вывода). Функция создаёт временный HTTP:80 vhost с `location /.well-known/acme-challenge/ { root /var/www/{domain}; }`.
+
+#### B. `_setup_own_site()` — порядок операций
+
+Вставлен вызов `setup_nginx_temp(domain=domain)` **ПЕРЕД** `obtain_ssl_cert(domain=domain)`. При исключении — тот же паттерн отката: `_err` + `_cleanup_own_site(domain)` + `return OwnSiteConfig(mask_port=0)`. Без этого шага certbot получает 404 → silent self-signed fallback → вся фича теряет смысл.
+
+#### C. Self-signed detection — fail-loud для own-site
+
+Новый helper `_is_cert_self_signed(domain)` в `mtproto.py`: читает `/etc/letsencrypt/live/{domain}/cert.pem` (или `fullchain.pem` как fallback) через `openssl x509 -issuer -subject -noout` и сравнивает issuer с subject. Если совпадают — сертификат self-signed.
+
+`obtain_ssl_cert()` менять нельзя для VLESS-кейса (там self-signed fallback — осознанное поведение "лучше так, чем никак"), но для own-site он бессмысленен. Поэтому в `_setup_own_site()` **ПОСЛЕ** `obtain_ssl_cert(domain=domain)` — explicit-проверка через `_is_cert_self_signed(domain)`:
+- Self-signed → `_err` + `_cleanup_own_site(domain)` + `return OwnSiteConfig(mask_port=0)` (откат к donor-режиму)
+- Валидный LE (issuer != subject) → own-site продолжает штатно
+
+Это даёт **fail-loud вместо fail-silent** конкретно для own-site сценария, не трогая поведение `obtain_ssl_cert()` для VLESS. Сертификата нет вообще → тоже True (fail-safe).
+
+#### D. Hardening — unlink symlink ДО restart при `nginx -t` failure
+
+Во всех 4 местах в `nginx_setup.py` где встречается паттерн "написать cfg → symlink → `nginx -t` → если fail, всё равно `systemctl restart nginx`":
+1. `setup_nginx_temp` (строки ~383-406)
+2. `setup_nginx_final` own-site TCP ветка (строки ~585-602)
+3. `setup_nginx_final` AWG-ветка (строки ~757-774)
+4. `setup_nginx_final` REALITY-ветка (строки ~883-908)
+
+При провале `nginx -t` сначала откатывается just-created симлинк (`link.unlink()`), и ТОЛЬКО ПОТОМ `systemctl reload nginx` (НЕ `restart` — restart с битым конфигом может не подняться). Сейчас restart выполнялся с уже подключённым битым конфигом — если процесс не поднимется, ляжет весь nginx, включая рабочие VLESS-сайты, даже если ошибка была локальна для одного нового vhost. Также: `restart` заменён на `reload` — reload загружает старый (валидный) конфиг, restart с битым конфигом может привести к неработающему nginx.
+
+Применимо ко всем четырём местам консистентно — это НЕ требует нового параметра/сигнатуры, чисто внутренняя правка порядка операций.
+
+### 🧪 Регрессионные тесты (50 тестов, все 5 обязательных сценариев)
+
+`tests/test_telemt_nginx_fallback.py` — 13 НОВЫХ тестов (поверх 37 существующих):
+
+1. **`TestSetupNginxTempParameterized`** (3 теста) — РЕАЛЬНЫЙ вызов `setup_nginx_temp()` + парсинг конфига:
+   - `test_setup_nginx_temp_with_explicit_domain_uses_it` — `domain="telemt.example.com"` при `core.PARAM_DOMAIN="vless.example.com"` → конфиг для `telemt.example.com`, НЕ для `vless.example.com`
+   - `test_setup_nginx_temp_without_domain_uses_core_param` — regression guard: без аргументов → `core.PARAM_DOMAIN` (VLESS flow не сломан)
+   - `test_setup_nginx_temp_has_acme_challenge_location` — конфиг содержит `/.well-known/acme-challenge/` для certbot webroot
+
+2. **`TestSetupOwnSiteOrderOfOperations`** (1 тест) — порядок вызовов через mock call order:
+   - `test_setup_nginx_temp_called_before_obtain_ssl_cert` — `setup_nginx_temp(domain=…)` вызывается СТРОГО до `obtain_ssl_cert(domain=…)` (проверка через список call_order + assertLess)
+
+3. **`TestSelfSignedDetection`** (5 тестов) — `_is_cert_self_signed` + интеграция в `_setup_own_site`:
+   - `test_is_cert_self_signed_returns_true_when_issuer_equals_subject` — self-signed (issuer == subject) → True
+   - `test_is_cert_self_signed_returns_false_when_issuer_neq_subject` — валидный LE (issuer != subject) → False
+   - `test_is_cert_self_signed_returns_true_when_cert_missing` — сертификат не найден → True (fail-safe)
+   - `test_setup_own_site_rolls_back_on_self_signed` — `_is_cert_self_signed → True` → `OwnSiteConfig(mask_port=0)` + `_cleanup_own_site` вызван
+   - `test_setup_own_site_proceeds_on_valid_le_cert` — `_is_cert_self_signed → False` → `mask_port=8444` (own-site активен)
+
+4. **`TestNginxHardeningUnlinkBeforeRestart`** (4 теста) — hardening для всех 4 мест:
+   - `test_setup_nginx_temp_unlinks_symlink_before_restart_on_failure` — `nginx -t` failure → symlink удалён ДО reload
+   - `test_setup_nginx_final_own_site_unlinks_on_failure` — own-site TCP ветка → symlink удалён
+   - `test_setup_nginx_final_awg_unlinks_on_failure` — AWG-ветка → symlink удалён
+   - `test_setup_nginx_final_reality_unlinks_on_failure` — REALITY-ветка → symlink удалён
+
+Все 183 связанных теста (108 mtproto + 25 ssl/nginx/telemt_fallback + 50 telemt_nginx_fallback) — зелёные. Существующий VLESS install flow — byte-for-byte идентичен предыдущему.
+
+### 📋 Что конкретно проверено реальным вызовом (не signature-check) для каждого из 5 тестов
+
+| Тест | Что проверяется | Метод |
+|---|---|---|
+| 1. `test_setup_nginx_temp_with_explicit_domain_uses_it` | `setup_nginx_temp(domain="telemt.example.com")` создаёт конфиг с `server_name telemt.example.com` и `/var/www/telemt.example.com`, НЕ `vless.example.com` | Реальный вызов + парсинг записанного конфига (assertIn/assertNotIn на содержимом) |
+| 2. `test_setup_nginx_temp_called_before_obtain_ssl_cert` | `setup_nginx_temp` вызывается ДО `obtain_ssl_cert` в `_setup_own_site` | Mock с `side_effect` записывает порядок вызовов в `call_order` список + `assertLess(idx_temp, idx_ssl)` |
+| 3. `test_setup_own_site_rolls_back_on_self_signed` | Self-signed сертификат → `_setup_own_site` возвращает `mask_port=0` + вызывает `_cleanup_own_site` | Mock `_is_cert_self_signed → True`, проверка результата + `cleanup_calls` список |
+| 3. `test_setup_own_site_proceeds_on_valid_le_cert` | Валидный LE → `mask_port=8444` (own-site активен) | Mock `_is_cert_self_signed → False`, проверка `result.mask_port == 8444` |
+| 4. `test_setup_nginx_final_*_unlinks_on_failure` (×3) + `test_setup_nginx_temp_unlinks_symlink_before_restart_on_failure` | При `nginx -t` failure symlink удаляется ДО restart/reload | Mock `_run` возвращает `returncode=1`, `_tracking_unlink` записывает вызовы для конкретного symlink-пути |
+| 5. `test_setup_nginx_temp_without_domain_uses_core_param` | VLESS flow (без аргументов) → `core.PARAM_DOMAIN` (regression guard) | Реальный вызов + парсинг: `assertIn("server_name vless.example.com", content)` |
+
+### 🚫 Что НЕ трогали
+
+- `_core.py` — никаких новых module-level глобалов
+- `telemt_fallback.py` — это ДРУГОЙ fallback (Middle Proxy → Direct Mode), не путать
+- `obtain_ssl_cert()` — НЕ менялся; self-signed fallback остался для VLESS-кейса (там это осознанное поведение)
+- AWG-модули, mirrors/downloader, TUI test runner — не тронуты
+- Существующий VLESS install flow — byte-for-byte идентичен (regression guard `test_setup_nginx_temp_without_domain_uses_core_param` + `test_vless_reality_uses_unix_socket` + `test_vless_reality_has_https_redirect` из v4.20.2)
+
+---
+
 ## v4.20.2 — FIX (BLOCKING): setup_nginx_final() parameterized по PROTOCOL_MODE — own-site режим Telemt ломает nginx в дефолтной REALITY-конфигурации — 12 июля 2026
 
 ### 🐛 Баг

@@ -312,14 +312,30 @@ def _ensure_nginx_sites_enabled_include() -> None:
     info("nginx.conf: добавлен include /etc/nginx/sites-enabled/* (nginx.org репо)")
 
 
-def setup_nginx_temp() -> None:
+def setup_nginx_temp(domain: Optional[str] = None) -> None:
+    """Создаёт временный HTTP:80 vhost для certbot ACME-челленджа.
+
+    Используется ПЕРЕД obtain_ssl_cert() — certbot'у нужен отвечающий
+    HTTP:80 endpoint с location /.well-known/acme-challenge/ чтобы выпустить
+    сертификат через webroot-метод. Без этого vhost'а challenge уходит в
+    дефолтный server и certbot получает 404.
+
+    Параметр domain (v4.20.3), переданный явно, перекрывает core.PARAM_DOMAIN —
+    по той же схеме, что в create_website()/setup_nginx_final()/
+    obtain_ssl_cert(). Если не передан — поведение идентично предыдущему
+    (VLESS install flow не меняется ни в одном байте вывода).
+
+    Telemt own-site вызывает с domain=<домен Telemt> — certbot выпускает
+    сертификат для Telemt-домена, а не для VLESS-домена сервера.
+    """
     core = _core_module()
     info = core.info
     success = core.success
+    warn = core.warn
     _run = core._run
     find_nginx_bin = core.find_nginx_bin
     log_to_file = core.log_to_file
-    PARAM_DOMAIN = core.PARAM_DOMAIN
+    PARAM_DOMAIN = domain if domain is not None else core.PARAM_DOMAIN
     NGINX_CONF_DIR = core.NGINX_CONF_DIR
     NGINX_ENABLED_DIR = core.NGINX_ENABLED_DIR
     info("Настройка Nginx для certbot (временный конфиг)...")
@@ -375,10 +391,19 @@ def setup_nginx_temp() -> None:
         setattr(core, "STAGE_NGINX_DONE", True)
         success("Nginx запущен для certbot")
     else:
+        # Hardening (v4.20.3): при провале nginx -t сначала откатываем just-created
+        # симлинк, и ТОЛЬКО ПОТОМ restart/reload. Иначе restart выполняется с
+        # уже подключённым битым конфигом — если процесс не поднимется, ляжет
+        # весь nginx, включая рабочие VLESS-сайты, даже если ошибка локальна
+        # для одного нового vhost.
+        try:
+            link.unlink()
+        except Exception:
+            pass
         log_to_file("WARN", r.stderr)
-        _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
+        _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
         setattr(core, "STAGE_NGINX_DONE", True)
-        info("Nginx перезапущен (certbot)")
+        warn(f"Nginx -t упал для временного vhost {PARAM_DOMAIN}; симлинк удалён, nginx не перезапущен")
 
 # =============================================================================
 #  ШАГ 11: SSL СЕРТИФИКАТ
@@ -565,9 +590,15 @@ def setup_nginx_final(domain: Optional[str] = None,
             _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
             success(f"Own-site nginx настроен: 127.0.0.1:{SERVER_PORT} (статический HTTPS)")
         else:
+            # Hardening (v4.20.3): unlink symlink ДО restart — иначе restart с
+            # битым конфигом кладёт весь nginx (включая рабочие VLESS-сайты).
+            try:
+                link.unlink()
+            except Exception:
+                pass
             log_to_file("WARN", r.stderr or "")
-            _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
-            warn(f"nginx -t упал, nginx перезапущен. Проверьте: {_os_nginx_bin} -t")
+            _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
+            warn(f"nginx -t упал для own-site vhost {PARAM_DOMAIN}; симлинк удалён, nginx не перезапущен. Проверьте: {_os_nginx_bin} -t")
         return
 
     # === xHTTP TLS: Nginx терминирует TLS на :SERVER_PORT и проксирует ===
@@ -731,7 +762,14 @@ def setup_nginx_final(domain: Optional[str] = None,
         if r.returncode == 0:
             _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
         else:
-            _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
+            # Hardening (v4.20.3): unlink symlink ДО restart — иначе restart с
+            # битым конфигом кладёт весь nginx (включая рабочие VLESS-сайты).
+            try:
+                link.unlink()
+            except Exception:
+                pass
+            _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
+            warn(f"nginx -t упал для AWG vhost {PARAM_DOMAIN}; симлинк удалён, nginx не перезапущен")
         success(f"Nginx настроен (только HTTP→HTTPS редирект для AWG, Xray владеет :{SERVER_PORT})")
         return
 
@@ -855,10 +893,19 @@ def setup_nginx_final(domain: Optional[str] = None,
             _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
         success(f"Nginx финально настроен (Nginx {nginx_ver})")
     else:
+        # Hardening (v4.20.3): unlink symlink ДО restart/reload — иначе restart
+        # с битым конфигом кладёт весь nginx. Для REALITY-ветки это особенно
+        # критично: unix-сокет создаётся искусственно выше, и при ошибке
+        # сокет-пути restart может уронить уже работавший VLESS REALITY fallback.
+        try:
+            link.unlink()
+        except Exception:
+            pass
+        _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
         warn("nginx -t: проверка с временным сокетом (предупреждение ожидаемо):")
         for line in r.stderr.splitlines()[-5:]:
             warn(f"  {line}")
-        info("Nginx будет запущен до Xray (финальный шаг установки)")
+        info(f"Симлинк {PARAM_DOMAIN} удалён. Nginx будет запущен до Xray (финальный шаг установки)")
 
     # Удаляем временный сокет; финальный старт nginx — до xray
     sock_path.unlink(missing_ok=True)

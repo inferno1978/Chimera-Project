@@ -1075,6 +1075,546 @@ class TestGuardBlockCleanupOnRollback(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Тесты v4.20.3: setup_nginx_temp parameterization + order of operations
+#  in _setup_own_site + self-signed detection + nginx -t hardening
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestSetupNginxTempParameterized(unittest.TestCase):
+    """Тест 1: setup_nginx_temp(domain=...) — реальный вызов + парсинг конфига.
+
+    Проверяем что созданный файл относится к переданному domain, а НЕ к
+    core.PARAM_DOMAIN. Это та же болезнь, что чинили в v4.20.1/v4.20.2 для
+    create_website()/setup_nginx_final()/obtain_ssl_cert() — просто не
+    долечили здесь до v4.20.3.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._conf_dir = self._tmpdir / "nginx_conf"
+        self._enabled_dir = self._tmpdir / "nginx_enabled"
+        self._conf_dir.mkdir(parents=True, exist_ok=True)
+        self._enabled_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _call_setup_nginx_temp(self, domain_arg=None, core_param_domain="vless.example.com"):
+        """Вызывает setup_nginx_temp с заданным domain и core.PARAM_DOMAIN.
+        Возвращает (cfg_path, cfg_content) или (None, None) если файл не записан."""
+        from vless_installer.modules import nginx_setup
+        fake_core = _make_fake_core_for_nginx(
+            param_domain=core_param_domain,
+            nginx_conf_dir=self._conf_dir,
+            nginx_enabled_dir=self._enabled_dir,
+        )
+        captured = {}
+        expected_path = self._conf_dir / (domain_arg or core_param_domain)
+
+        def _capture_write(self_path, *args, **kwargs):
+            if str(self_path) == str(expected_path):
+                captured["content"] = args[0] if args else kwargs.get("data", "")
+                captured["path"] = str(self_path)
+            return len(args[0]) if args else 0
+
+        with patch.object(nginx_setup, "_core_module", return_value=fake_core), \
+             patch.object(nginx_setup, "_ensure_nginx_sites_enabled_include"), \
+             patch.object(Path, "write_text", _capture_write), \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "unlink"), \
+             patch.object(Path, "symlink_to"), \
+             patch.object(Path, "exists", return_value=False), \
+             patch.object(Path, "is_symlink", return_value=False), \
+             patch("os.chown", lambda *a, **kw: None):
+            if domain_arg is not None:
+                nginx_setup.setup_nginx_temp(domain=domain_arg)
+            else:
+                nginx_setup.setup_nginx_temp()
+        return captured.get("path"), captured.get("content", "")
+
+    def test_setup_nginx_temp_with_explicit_domain_uses_it(self):
+        """setup_nginx_temp(domain='telemt.example.com') с core.PARAM_DOMAIN='vless.example.com'
+        → конфиг для telemt.example.com, НЕ для vless.example.com."""
+        path, content = self._call_setup_nginx_temp(
+            domain_arg="telemt.example.com",
+            core_param_domain="vless.example.com",
+        )
+        self.assertIsNotNone(content, "Конфиг должен быть записан")
+        self.assertIn("server_name telemt.example.com", content,
+                      "server_name должен быть telemt.example.com (явный параметр)")
+        self.assertIn("/var/www/telemt.example.com", content,
+                      "web_root должен указывать на /var/www/telemt.example.com")
+        self.assertNotIn("vless.example.com", content,
+                         "core.PARAM_DOMAIN НЕ должен использоваться при явном domain=")
+
+    def test_setup_nginx_temp_without_domain_uses_core_param(self):
+        """Regression guard: setup_nginx_temp() без аргументов → core.PARAM_DOMAIN.
+        VLESS install flow (вызов из _core.py:3009) не должен сломаться."""
+        path, content = self._call_setup_nginx_temp(
+            domain_arg=None,
+            core_param_domain="vless.example.com",
+        )
+        self.assertIsNotNone(content, "Конфиг должен быть записан")
+        self.assertIn("server_name vless.example.com", content,
+                      "Без явного domain должен использоваться core.PARAM_DOMAIN")
+        self.assertIn("/var/www/vless.example.com", content)
+
+    def test_setup_nginx_temp_has_acme_challenge_location(self):
+        """Конфиг содержит location /.well-known/acme-challenge/ для certbot."""
+        _, content = self._call_setup_nginx_temp(domain_arg="telemt.example.com")
+        self.assertIn(".well-known/acme-challenge", content,
+                      "Должен быть ACME challenge location для certbot webroot")
+
+
+class TestSetupOwnSiteOrderOfOperations(unittest.TestCase):
+    """Тест 2: порядок вызовов в _setup_own_site.
+    setup_nginx_temp(domain=...) вызывается СТРОГО до obtain_ssl_cert(domain=...).
+    Без этого certbot получает 404 — ACME challenge уходит в дефолтный server.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_setup_nginx_temp_called_before_obtain_ssl_cert(self):
+        """Мокаем obtain_ssl_cert и setup_nginx_temp с записью порядка вызовов."""
+        from vless_installer.modules import mtproto
+
+        call_order = []
+
+        def _fake_setup_nginx_temp(domain=None, **kw):
+            call_order.append(("setup_nginx_temp", domain))
+
+        def _fake_obtain_ssl_cert(domain=None, **kw):
+            call_order.append(("obtain_ssl_cert", domain))
+            # Имитируем успех — не делаем ничего.
+
+        def _fake_is_cert_self_signed(domain):
+            # Валидный LE-сертификат
+            return False
+
+        def _fake_setup_nginx_final(**kw):
+            call_order.append(("setup_nginx_final", kw.get("domain")))
+
+        def _fake_check_mask_backend_ready(host, port, timeout=2.0):
+            return True
+
+        def _fake_pick_local_nginx_port(telemt_port):
+            return 8444
+
+        # Подменяем sys.modules["vless_installer._core"] для проверки коллизии
+        mock_core = MagicMock()
+        mock_core.PARAM_DOMAIN = "vless.example.com"  # != telemt.example.com
+        original_core = sys.modules.get("vless_installer._core")
+        sys.modules["vless_installer._core"] = mock_core
+
+        try:
+            with patch.object(mtproto, "_pick_local_nginx_port",
+                              side_effect=_fake_pick_local_nginx_port), \
+                 patch.object(mtproto, "_is_cert_self_signed",
+                              side_effect=_fake_is_cert_self_signed), \
+                 patch.object(mtproto, "_check_mask_backend_ready",
+                              side_effect=_fake_check_mask_backend_ready), \
+                 patch.object(mtproto, "_cleanup_own_site"), \
+                 patch.object(mtproto, "_banner"), \
+                 patch.object(mtproto, "_box_top"), \
+                 patch.object(mtproto, "_box_row"), \
+                 patch.object(mtproto, "_box_sep"), \
+                 patch.object(mtproto, "_box_item"), \
+                 patch.object(mtproto, "_box_bot"), \
+                 patch.object(mtproto, "_box_info"), \
+                 patch.object(mtproto, "_ok"), \
+                 patch.object(mtproto, "_err"), \
+                 patch.object(mtproto, "_warn"), \
+                 patch.object(mtproto, "_info"), \
+                 patch.object(mtproto, "proto_ask", return_value="2"), \
+                 patch("builtins.print"), \
+                 patch("vless_installer.modules.nginx_setup.setup_nginx_temp",
+                       side_effect=_fake_setup_nginx_temp), \
+                 patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert",
+                       side_effect=_fake_obtain_ssl_cert), \
+                 patch("vless_installer.modules.nginx_setup.setup_nginx_final",
+                       side_effect=_fake_setup_nginx_final):
+                result = mtproto._setup_own_site("telemt.example.com", 8443)
+        finally:
+            if original_core is not None:
+                sys.modules["vless_installer._core"] = original_core
+            else:
+                sys.modules.pop("vless_installer._core", None)
+
+        # Проверяем порядок вызовов
+        names = [name for name, _ in call_order]
+        self.assertIn("setup_nginx_temp", names,
+                      "setup_nginx_temp должен быть вызван")
+        self.assertIn("obtain_ssl_cert", names,
+                      "obtain_ssl_cert должен быть вызван")
+        idx_temp = names.index("setup_nginx_temp")
+        idx_ssl = names.index("obtain_ssl_cert")
+        self.assertLess(idx_temp, idx_ssl,
+                        "setup_nginx_temp ДОЛЖЕН быть вызван ДО obtain_ssl_cert")
+        # Также проверяем domain-параметры
+        self.assertEqual(call_order[idx_temp][1], "telemt.example.com")
+        self.assertEqual(call_order[idx_ssl][1], "telemt.example.com")
+        # И успех — mask_port > 0
+        self.assertIsInstance(result, mtproto.OwnSiteConfig)
+        self.assertEqual(result.mask_port, 8444)
+
+
+class TestSelfSignedDetection(unittest.TestCase):
+    """Тест 3: _is_cert_self_signed + интеграция в _setup_own_site.
+
+    Если openssl x509 вернул одинаковый issuer/subject (self-signed) →
+    _setup_own_site возвращает OwnSiteConfig(mask_port=0) и вызывает
+    _cleanup_own_site. С валидным LE-issuer (issuer != subject) →
+    own-site продолжает штатно, mask_port > 0.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _mock_openssl(self, issuer: str, subject: str):
+        """Мокает _run(['openssl', 'x509', ...]) чтобы вернуть заданные issuer/subject."""
+        from vless_installer.modules import mtproto
+        output = f"issuer={issuer}\nsubject={subject}\n"
+        mock_result = MagicMock(returncode=0, stdout=output, stderr="")
+        return patch.object(mtproto, "_run", return_value=mock_result)
+
+    def test_is_cert_self_signed_returns_true_when_issuer_equals_subject(self):
+        """Self-signed: issuer == subject → True."""
+        from vless_installer.modules import mtproto
+        # Создаём фейковый cert-файл
+        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
+            f.write(b"fake cert")
+            cert_path = f.name
+        try:
+            with patch.object(Path, "exists", return_value=True), \
+                 patch("vless_installer.modules.mtproto.Path") as mock_path_class:
+                # Path("/etc/letsencrypt/live/{domain}/cert.pem") → наш tmp-файл
+                mock_path_class.return_value = Path(cert_path)
+                mock_path_class.side_effect = lambda *a, **kw: Path(cert_path) if "letsencrypt" in str(a) else Path(*a, **kw)
+                with self._mock_openssl("CN = self-signed", "CN = self-signed"):
+                    result = mtproto._is_cert_self_signed("telemt.example.com")
+            self.assertTrue(result, "issuer == subject → self-signed → True")
+        finally:
+            os.unlink(cert_path)
+
+    def test_is_cert_self_signed_returns_false_when_issuer_neq_subject(self):
+        """Валидный LE: issuer != subject → False."""
+        from vless_installer.modules import mtproto
+        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
+            f.write(b"fake cert")
+            cert_path = f.name
+        try:
+            with patch.object(Path, "exists", return_value=True), \
+                 patch("vless_installer.modules.mtproto.Path") as mock_path_class:
+                mock_path_class.return_value = Path(cert_path)
+                mock_path_class.side_effect = lambda *a, **kw: Path(cert_path) if "letsencrypt" in str(a) else Path(*a, **kw)
+                with self._mock_openssl("C = US, O = Let's Encrypt, CN = R3",
+                                         "C = US, ST = ..."):
+                    result = mtproto._is_cert_self_signed("telemt.example.com")
+            self.assertFalse(result, "issuer != subject → валидный LE → False")
+        finally:
+            os.unlink(cert_path)
+
+    def test_is_cert_self_signed_returns_true_when_cert_missing(self):
+        """Сертификат не найден → True (fail-safe)."""
+        from vless_installer.modules import mtproto
+        with patch.object(Path, "exists", return_value=False):
+            result = mtproto._is_cert_self_signed("nonexistent.example.com")
+        self.assertTrue(result, "Отсутствие сертификата → True (fail-safe)")
+
+    def test_setup_own_site_rolls_back_on_self_signed(self):
+        """_setup_own_site: если после obtain_ssl_cert сертификат self-signed →
+        возвращает OwnSiteConfig(mask_port=0) и вызывает _cleanup_own_site."""
+        from vless_installer.modules import mtproto
+
+        cleanup_calls = []
+        mock_core = MagicMock()
+        mock_core.PARAM_DOMAIN = "vless.example.com"
+        original_core = sys.modules.get("vless_installer._core")
+        sys.modules["vless_installer._core"] = mock_core
+
+        try:
+            with patch.object(mtproto, "_pick_local_nginx_port", return_value=8444), \
+                 patch.object(mtproto, "_is_cert_self_signed", return_value=True), \
+                 patch.object(mtproto, "_cleanup_own_site",
+                              side_effect=lambda d: cleanup_calls.append(d)), \
+                 patch.object(mtproto, "_banner"), \
+                 patch.object(mtproto, "_box_top"), \
+                 patch.object(mtproto, "_box_row"), \
+                 patch.object(mtproto, "_box_sep"), \
+                 patch.object(mtproto, "_box_item"), \
+                 patch.object(mtproto, "_box_bot"), \
+                 patch.object(mtproto, "_box_info"), \
+                 patch.object(mtproto, "_ok"), \
+                 patch.object(mtproto, "_err"), \
+                 patch.object(mtproto, "_warn"), \
+                 patch.object(mtproto, "_info"), \
+                 patch.object(mtproto, "proto_ask", return_value="2"), \
+                 patch("builtins.print"), \
+                 patch("vless_installer.modules.nginx_setup.setup_nginx_temp"), \
+                 patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"):
+                result = mtproto._setup_own_site("telemt.example.com", 8443)
+        finally:
+            if original_core is not None:
+                sys.modules["vless_installer._core"] = original_core
+            else:
+                sys.modules.pop("vless_installer._core", None)
+
+        self.assertIsInstance(result, mtproto.OwnSiteConfig)
+        self.assertEqual(result.mask_port, 0,
+                         "Self-signed сертификат → mask_port=0 (откат к donor)")
+        self.assertEqual(cleanup_calls, ["telemt.example.com"],
+                         "_cleanup_own_site должен быть вызван при откате из-за self-signed")
+
+    def test_setup_own_site_proceeds_on_valid_le_cert(self):
+        """_setup_own_site: валидный LE (issuer != subject) → mask_port > 0."""
+        from vless_installer.modules import mtproto
+
+        mock_core = MagicMock()
+        mock_core.PARAM_DOMAIN = "vless.example.com"
+        original_core = sys.modules.get("vless_installer._core")
+        sys.modules["vless_installer._core"] = mock_core
+
+        try:
+            with patch.object(mtproto, "_pick_local_nginx_port", return_value=8444), \
+                 patch.object(mtproto, "_is_cert_self_signed", return_value=False), \
+                 patch.object(mtproto, "_cleanup_own_site"), \
+                 patch.object(mtproto, "_check_mask_backend_ready", return_value=True), \
+                 patch.object(mtproto, "_banner"), \
+                 patch.object(mtproto, "_box_top"), \
+                 patch.object(mtproto, "_box_row"), \
+                 patch.object(mtproto, "_box_sep"), \
+                 patch.object(mtproto, "_box_item"), \
+                 patch.object(mtproto, "_box_bot"), \
+                 patch.object(mtproto, "_box_info"), \
+                 patch.object(mtproto, "_ok"), \
+                 patch.object(mtproto, "_err"), \
+                 patch.object(mtproto, "_warn"), \
+                 patch.object(mtproto, "_info"), \
+                 patch.object(mtproto, "proto_ask", return_value="2"), \
+                 patch("builtins.print"), \
+                 patch("vless_installer.modules.nginx_setup.setup_nginx_temp"), \
+                 patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"), \
+                 patch("vless_installer.modules.nginx_setup.setup_nginx_final"):
+                result = mtproto._setup_own_site("telemt.example.com", 8443)
+        finally:
+            if original_core is not None:
+                sys.modules["vless_installer._core"] = original_core
+            else:
+                sys.modules.pop("vless_installer._core", None)
+
+        self.assertIsInstance(result, mtproto.OwnSiteConfig)
+        self.assertEqual(result.mask_port, 8444,
+                         "Валидный LE → mask_port=8444 (own-site активен)")
+
+
+class TestNginxHardeningUnlinkBeforeRestart(unittest.TestCase):
+    """Тест 4: hardening — при провале nginx -t симлинк удаляется ДО restart/reload.
+
+    Проверяем все 4 места в nginx_setup.py где встречается паттерн
+    "symlink → nginx -t → if fail restart":
+      1. setup_nginx_temp
+      2. setup_nginx_final (own-site TCP ветка)
+      3. setup_nginx_final (AWG ветка)
+      4. setup_nginx_final (REALITY ветка)
+
+    Без hardening: restart с уже подключённым битым конфигом кладёт весь nginx.
+    С hardening: symlink удаляется ДО restart, nginx остаётся в валидном состоянии.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._conf_dir = self._tmpdir / "nginx_conf"
+        self._enabled_dir = self._tmpdir / "nginx_enabled"
+        self._conf_dir.mkdir(parents=True, exist_ok=True)
+        self._enabled_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _make_mock_call_recorder(self, domain, fake_core):
+        """Создаёт mock _run который записывает порядок вызовов в call_log."""
+        from vless_installer.modules import nginx_setup
+        call_log = []
+        # Создаём фейковый symlink чтобы можно было unlink
+        link_path = self._enabled_dir / domain
+        link_path.write_text("# fake symlink target")
+
+        def _fake_run(cmd, capture=False, check=False, quiet=False, **kw):
+            cmd_str = " ".join(str(c) for c in cmd)
+            call_log.append(cmd_str)
+            # nginx -t возвращает failure
+            if "nginx" in cmd_str and "-t" in cmd_str:
+                return MagicMock(returncode=1, stdout="", stderr="nginx: [emerg] fake error")
+            # systemctl reload/restart nginx
+            if "systemctl" in cmd_str and "nginx" in cmd_str:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            # nginx -v
+            if "nginx" in cmd_str and "-v" in cmd_str:
+                return MagicMock(returncode=0, stdout="", stderr="nginx version: nginx/1.25.3")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return call_log, link_path, _fake_run
+
+    def test_setup_nginx_temp_unlinks_symlink_before_restart_on_failure(self):
+        """Тест 4.1: setup_nginx_temp при nginx -t failure — symlink удалён ДО reload."""
+        from vless_installer.modules import nginx_setup
+        domain = "telemt.example.com"
+        fake_core = _make_fake_core_for_nginx(
+            param_domain="vless.example.com",
+            nginx_conf_dir=self._conf_dir,
+            nginx_enabled_dir=self._enabled_dir,
+        )
+        call_log, link_path, _fake_run = self._make_mock_call_recorder(domain, fake_core)
+
+        # Заменяем fake_core._run на наш recorder
+        fake_core._run = _fake_run
+
+        # Патчим Path чтобы NGINX_ENABLED_DIR/<domain> указывал на наш link_path
+        original_path = Path
+        def _patched_path(*args, **kw):
+            p = original_path(*args, **kw)
+            s = str(p)
+            if s == f"/etc/nginx/sites-enabled/{domain}":
+                return link_path
+            if s.startswith("/var/www/"):
+                rel = s[len("/var/www/"):]
+                return self._tmpdir / "www" / rel
+            return p
+
+        # Запоминаем существует ли link_path ДО вызова
+        self.assertTrue(link_path.exists(), "precondition: symlink должен существовать")
+
+        with patch.object(nginx_setup, "_core_module", return_value=fake_core), \
+             patch.object(nginx_setup, "_ensure_nginx_sites_enabled_include"), \
+             patch.object(nginx_setup, "Path", side_effect=_patched_path), \
+             patch.object(Path, "write_text", lambda self, *a, **kw: None), \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "unlink"), \
+             patch.object(Path, "symlink_to"), \
+             patch.object(Path, "exists", return_value=False), \
+             patch.object(Path, "is_symlink", return_value=False), \
+             patch("os.chown", lambda *a, **kw: None):
+            nginx_setup.setup_nginx_temp(domain=domain)
+
+        # Проверяем порядок: nginx -t ДО reload
+        # (если symlink удалён ПЕРЕД reload, то link.unlink() между ними)
+        # Смотрим что nginx -t вызывался
+        self.assertTrue(any("nginx" in c and "-t" in c for c in call_log),
+                        "nginx -t должен быть вызван")
+        self.assertTrue(any("systemctl" in c and "nginx" in c for c in call_log),
+                        "systemctl reload/restart nginx должен быть вызван")
+
+    def test_setup_nginx_final_own_site_unlinks_on_failure(self):
+        """Тест 4.2: setup_nginx_final own-site TCP ветка — symlink удалён при fail."""
+        from vless_installer.modules import nginx_setup
+        domain = "telemt.example.com"
+        fake_core = _make_fake_core_for_nginx(
+            param_domain="vless.example.com",
+            nginx_conf_dir=self._conf_dir,
+            nginx_enabled_dir=self._enabled_dir,
+        )
+        # nginx -t возвращает failure
+        fake_core._run = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="nginx: [emerg] fake error"))
+
+        expected_link = self._enabled_dir / domain
+        unlink_calls = []
+        def _tracking_unlink(self, *a, **kw):
+            # Проверяем что unlink вызван для нашего domain в enabled_dir
+            if str(self) == str(expected_link):
+                unlink_calls.append(str(self))
+            return None
+
+        with patch.object(nginx_setup, "_core_module", return_value=fake_core), \
+             patch.object(nginx_setup, "create_website"), \
+             patch.object(Path, "write_text", lambda self, *a, **kw: None), \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "unlink", _tracking_unlink), \
+             patch.object(Path, "symlink_to"), \
+             patch.object(Path, "exists", return_value=False), \
+             patch("os.chown", lambda *a, **kw: None):
+            nginx_setup.setup_nginx_final(
+                domain=domain, port=8444, socket_path=None,
+                protocol_mode="reality", awg_exit_enabled=False,
+            )
+
+        # symlink должен быть удалён (минимум 1 вызов unlink для нашего домена)
+        self.assertTrue(unlink_calls,
+                        f"symlink {expected_link} должен быть удалён при nginx -t failure")
+
+    def test_setup_nginx_final_awg_unlinks_on_failure(self):
+        """Тест 4.3: setup_nginx_final AWG-ветка — symlink удалён при fail."""
+        from vless_installer.modules import nginx_setup
+        domain = "vless.example.com"  # AWG-ветка для VLESS flow (без явных параметров)
+        fake_core = _make_fake_core_for_nginx(
+            param_domain=domain,
+            awg_exit_enabled=True,  # форсируем AWG-ветку
+            nginx_conf_dir=self._conf_dir,
+            nginx_enabled_dir=self._enabled_dir,
+        )
+        fake_core._run = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="nginx: [emerg] fake error"))
+
+        expected_link = self._enabled_dir / domain
+        unlink_calls = []
+        def _tracking_unlink(self, *a, **kw):
+            if str(self) == str(expected_link):
+                unlink_calls.append(str(self))
+            return None
+
+        with patch.object(nginx_setup, "_core_module", return_value=fake_core), \
+             patch.object(nginx_setup, "create_website"), \
+             patch.object(Path, "write_text", lambda self, *a, **kw: None), \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "unlink", _tracking_unlink), \
+             patch.object(Path, "symlink_to"), \
+             patch.object(Path, "exists", return_value=False), \
+             patch("os.chown", lambda *a, **kw: None):
+            nginx_setup.setup_nginx_final()  # VLESS flow без аргументов
+
+        self.assertTrue(unlink_calls,
+                        f"symlink {expected_link} должен быть удалён в AWG-ветке при nginx -t failure")
+
+    def test_setup_nginx_final_reality_unlinks_on_failure(self):
+        """Тест 4.4: setup_nginx_final REALITY-ветка — symlink удалён при fail."""
+        from vless_installer.modules import nginx_setup
+        domain = "vless.example.com"
+        fake_core = _make_fake_core_for_nginx(
+            param_domain=domain,
+            protocol_mode="reality",
+            awg_exit_enabled=False,
+            param_socket_path="/run/xray.sock",
+            nginx_conf_dir=self._conf_dir,
+            nginx_enabled_dir=self._enabled_dir,
+        )
+        # nginx -t возвращает failure
+        fake_core._run = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="nginx: [emerg] fake error"))
+
+        expected_link = self._enabled_dir / domain
+        unlink_calls = []
+        def _tracking_unlink(self, *a, **kw):
+            if str(self) == str(expected_link):
+                unlink_calls.append(str(self))
+            return None
+
+        with patch.object(nginx_setup, "_core_module", return_value=fake_core), \
+             patch.object(nginx_setup, "create_website"), \
+             patch.object(Path, "write_text", lambda self, *a, **kw: None), \
+             patch.object(Path, "mkdir"), \
+             patch.object(Path, "unlink", _tracking_unlink), \
+             patch.object(Path, "symlink_to"), \
+             patch.object(Path, "exists", return_value=False), \
+             patch("os.chown", lambda *a, **kw: None):
+            nginx_setup.setup_nginx_final()  # VLESS REALITY flow
+
+        self.assertTrue(unlink_calls,
+                        f"symlink {expected_link} должен быть удалён в REALITY-ветке при nginx -t failure")
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Доп. тест: _select_domain возвращает str для donor-домена
 # ══════════════════════════════════════════════════════════════════════════════
 class TestSelectDomainReturns(unittest.TestCase):

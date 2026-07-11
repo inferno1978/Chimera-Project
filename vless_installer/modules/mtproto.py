@@ -374,6 +374,59 @@ def _check_mask_backend_ready(mask_host: str, mask_port: int,
     except (OSError, _sock.timeout):
         return False
 
+
+def _is_cert_self_signed(domain: str) -> bool:
+    """Проверяет, является ли сертификат для domain самоподписанным.
+
+    Читает /etc/letsencrypt/live/{domain}/cert.pem (или fullchain.pem как
+    fallback) через `openssl x509 -issuer -subject -noout` и сравнивает
+    issuer с subject. Если они совпадают — сертификат self-signed.
+
+    Используется в _setup_own_site() ПОСЛЕ obtain_ssl_cert() для fail-loud
+    проверки: obtain_ssl_cert() имеет silent fallback на generate_self_signed_cert
+    при провале certbot — для VLESS это осознанное поведение, но для own-site
+    self-signed сертификат бессмысленен (вся фича — реальный LE-сертификат,
+    иначе Telemt с tls_emulation=true будет отдавать self-signed, что для
+    DPI/censor заметная аномалия ХУЖЕ исходного fake_cert_len=2048).
+
+    Возвращает:
+      True  — сертификат self-signed (провал own-site проверки)
+      False — сертификат валидный LE (issuer != subject) ИЛИ файл не найден
+              (в последнем случае _setup_own_site всё равно откатит через
+              _check_mask_backend_ready или _is_cert_self_signed→True в
+              следующем вызове, но мы не блокируем здесь — пусть решает caller)
+    """
+    cert_path = Path(f"/etc/letsencrypt/live/{domain}/cert.pem")
+    if not cert_path.exists():
+        cert_path = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem")
+    if not cert_path.exists():
+        # Сертификата нет вообще — это явно провал, возвращаем True
+        # (treat as self-signed: caller откатит к donor-режиму).
+        return True
+    try:
+        r = _run(["openssl", "x509", "-issuer", "-subject", "-noout", "-in", str(cert_path)],
+                 capture=True, check=False)
+        out = (r.stdout or "") + (r.stderr or "")
+        # Парсим строки вида:
+        #   issuer=C = US, O = Let's Encrypt, CN = R3
+        #   subject=C = US, ST = ...
+        issuer = ""
+        subject = ""
+        for line in out.splitlines():
+            line = line.strip()
+            if line.lower().startswith("issuer="):
+                issuer = line.split("=", 1)[1].strip()
+            elif line.lower().startswith("subject="):
+                subject = line.split("=", 1)[1].strip()
+        if not issuer or not subject:
+            # Не удалось распарсить — считаем self-signed (fail-safe).
+            return True
+        return issuer == subject
+    except Exception:
+        # openssl упал — fail-safe, считаем self-signed.
+        return True
+
+
 def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1689,15 +1742,20 @@ def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
       0. Проверка коллизии домена с VLESS-доменом (core.PARAM_DOMAIN).
       1. Подбирает свободный mask_port на 127.0.0.1 (НЕ == telemt_port).
       2. Спрашивает site_template (аналогично VLESS-инсталлятору).
-      3. Вызывает obtain_ssl_cert(domain=domain) → Let's Encrypt сертификат.
-      4. Вызывает setup_nginx_final(domain=domain, port=mask_port, socket_path=None,
+      3. setup_nginx_temp(domain=domain) — временный HTTP:80 vhost для ACME.
+         КРИТИЧНО: certbot'у нужен отвечающий HTTP:80 endpoint с
+         /.well-known/acme-challenge/ — без этого vhost'а challenge уходит
+         в дефолтный server и certbot получает 404 (v4.20.3 fix).
+      4. obtain_ssl_cert(domain=domain) → Let's Encrypt сертификат.
+      5. Self-signed detection: если сертификат self-signed (certbot упал,
+         obtain_ssl_cert молча сделал generate_self_signed_cert) — откат.
+         Для own-site self-signed бессмысленен: tls_emulation=true будет
+         отдавать его живьём, что для DPI ХУЖЕ fake_cert_len=2048 (v4.20.3 fix).
+      6. setup_nginx_final(domain=domain, port=mask_port, socket_path=None,
          protocol_mode="reality", awg_exit_enabled=False, site_template=tmpl).
-         Это форсирует простую статическую HTTPS-заглушку на TCP 127.0.0.1:mask_port,
-         независимо от PROTOCOL_MODE/AWG_EXIT_ENABLED сервера.
-      5. Проверяет, что nginx реально слушает mask_host:mask_port (TCP connect).
-         Если НЕ слушает — _err + _cleanup_own_site + откат к donor-режиму.
+      7. Проверяет, что nginx реально слушает mask_host:mask_port (TCP connect).
 
-    При любой ошибке на этапах 3-5 вызывает _cleanup_own_site(domain) для
+    При любой ошибке на этапах 3-7 вызывает _cleanup_own_site(domain) для
     удаления orphaned-файлов (nginx config, symlink, web_root) — иначе
     сломанный конфиг в NGINX_ENABLED_DIR может ронять nginx -t.
 
@@ -1744,7 +1802,22 @@ def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
         _info("Откат к donor-режиму.")
         return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
 
-    # 3) Let's Encrypt сертификат.
+    # 3) Временный HTTP:80 vhost для certbot ACME challenge (v4.20.3).
+    #    Без него certbot получает 404 — challenge уходит в дефолтный server,
+    #    где нет /.well-known/acme-challenge/ root для Telemt-домена.
+    #    obtain_ssl_cert() при этом молча падает в self-signed fallback.
+    _info(f"Создаю временный HTTP:80 vhost для {domain} (certbot ACME)...")
+    try:
+        from vless_installer.modules.nginx_setup import setup_nginx_temp
+        setup_nginx_temp(domain=domain)
+    except Exception as _e:
+        _err(f"setup_nginx_temp(domain={domain}) упал: {_e}")
+        _err("Без временного vhost certbot не сможет выпустить сертификат.")
+        _err("Откат к donor-режиму.")
+        _cleanup_own_site(domain)
+        return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
+
+    # 4) Let's Encrypt сертификат.
     _info(f"Запуск certbot для {domain}...")
     try:
         from vless_installer.modules.ssl_certbot import obtain_ssl_cert
@@ -1755,12 +1828,30 @@ def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
         _cleanup_own_site(domain)
         return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
 
-    # 4) setup_nginx_final — генерирует статический HTTPS-сайт на TCP mask_port.
+    # 5) Self-signed detection (v4.20.3) — fail-loud для own-site.
+    #    obtain_ssl_cert() имеет silent fallback на generate_self_signed_cert
+    #    при провале certbot — для VLESS это осознанное поведение, но для
+    #    own-site self-signed бессмысленен. _check_mask_backend_ready не ловит
+    #    (TCP-connect ему всё равно, real LE или self-signed), ни один гвард
+    #    v4.20.2 этот случай не покрывал. Теперь покрываем явно.
+    if _is_cert_self_signed(domain):
+        _err(f"Сертификат для {domain} — self-signed (certbot упал, obtain_ssl_cert")
+        _err("сделал silent fallback на generate_self_signed_cert). Для own-site")
+        _err("это бессмысленно: tls_emulation=true будет отдавать self-signed живьём,")
+        _err("что для DPI/censor ЗАМЕТНЕЕ исходного fake_cert_len=2048.")
+        _err("Откат к donor-режиму + cleanup orphaned-файлов.")
+        _cleanup_own_site(domain)
+        return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
+    _ok(f"Сертификат для {domain} — валидный LE (issuer != subject).")
+
+    # 6) setup_nginx_final — генерирует статический HTTPS-сайт на TCP mask_port.
     #    protocol_mode="reality" + awg_exit_enabled=False — форсирует простую
     #    заглушку, независимо от VLESS-режима сервера (xhttp/reality/awg).
     #    socket_path=None (явно) → own-site TCP режим (см. _UNSET sentinel в
     #    nginx_setup.py). create_website вызывается ВНУТРИ setup_nginx_final
     #    с site_template=tmpl — НЕ вызываем отдельно (иначе двойной write).
+    #    Временный vhost из шага 3 будет перезаписан финальным конфигом
+    #    (HTTP:80 listener с ACME + HTTPS на mask_port).
     _info(f"Поднятие nginx-сайта {domain} на порту {mask_port}...")
     try:
         from vless_installer.modules.nginx_setup import setup_nginx_final
@@ -1778,7 +1869,7 @@ def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
         _cleanup_own_site(domain)
         return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
 
-    # 5) Проверка готовности nginx (КРИТИЧНО — см. _check_mask_backend_ready).
+    # 7) Проверка готовности nginx (КРИТИЧНО — см. _check_mask_backend_ready).
     _info(f"Проверяю, что nginx слушает 127.0.0.1:{mask_port}...")
     if not _check_mask_backend_ready("127.0.0.1", mask_port, timeout=3.0):
         _err(f"nginx НЕ слушает 127.0.0.1:{mask_port} после setup_nginx_final.")
