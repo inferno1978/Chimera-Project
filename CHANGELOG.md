@@ -2,6 +2,116 @@
 
 ---
 
+## v4.20.2 — FIX (BLOCKING): setup_nginx_final() parameterized по PROTOCOL_MODE — own-site режим Telemt ломает nginx в дефолтной REALITY-конфигурации — 12 июля 2026
+
+### 🐛 Баг
+
+Коммит `b935c34` (v4.20.1) параметризовал `setup_nginx_final(domain, port, socket_path)`, но НЕ параметризовал `PROTOCOL_MODE` и `AWG_EXIT_ENABLED` — они читались из `core.PROTOCOL_MODE` / `core.AWG_EXIT_ENABLED` безусловно. Эта переменная выбирает одну из трёх веток генерации nginx-конфига (xhttp / AWG / reality-default), и все три ветки для own-site-сценария Telemt вели себя не так, как заявлено в докстринге функции.
+
+**Проверенные баги (чтением кода):**
+
+1. **REALITY-ветка (ДЕФОЛТ, `core.PROTOCOL_MODE == "reality"`)** — самый частый кейс (одиночный VLESS-сервер). Игнорирует параметр `port` целиком. Слушает `listen unix:{PARAM_SOCKET_PATH}`. Когда `_setup_own_site()` вызывает `setup_nginx_final(domain=…, port=mask_port, socket_path=None)`, `None` откатывается на `core.PARAM_SOCKET_PATH` — на ТОТ ЖЕ unix-сокет, который использует VLESS-сайт. Результат: два `server{}` блока с `listen unix:{один и тот же путь} ... default_server;` — duplicate default server, `nginx -t` падает, но код безусловно делает `systemctl restart nginx`. На живом сервере это роняет nginx насовсем — ломает уже работавший VLESS REALITY fallback.
+
+2. **XHTTP-ветка** — Telemt-домен получает `location {xhttp_path} { proxy_pass http://127.0.0.1:{XHTTP_BACKEND_PORT}; }` — маскировочный домен проксирует прямо в боевой Xray-бэкенд VLESS.
+
+3. **AWG_EXIT_ENABLED-ветка** — TLS вообще не терминируется nginx (только HTTP:80 редирект). `mask_port` никогда не слушает TLS → `_check_mask_backend_ready` корректно фейлится → откат в donor-режим. Ветка "случайно безопасна" тем, что молча не работает.
+
+4. **Тесты не ловили** — `test_setup_nginx_final_accepts_domain_port_socket` был тавтологичным (только `inspect.signature()`, функция ни разу не вызывалась).
+
+5. **Откат не чистил** — guard-блок при неготовности nginx переписывал только `telemt.toml`, но НЕ удалял уже созданные `/var/www/<telemt-domain>`, файл в `NGINX_CONF_DIR/<telemt-domain>` и симлинк в `NGINX_ENABLED_DIR/<telemt-domain>`. Сломанный конфиг оставался на диске и enabled.
+
+### 🔧 Фикс
+
+#### A. `nginx_setup.py: setup_nginx_final()` — новые параметры + sentinel
+
+- Добавлены параметры `protocol_mode: Optional[str] = None`, `awg_exit_enabled: Optional[bool] = None`, `site_template: Optional[str] = None` — перекрывают `core.PROTOCOL_MODE` / `core.AWG_EXIT_ENABLED` / `core.PARAM_SITE_TEMPLATE` по той же схеме, что `domain`.
+- `port` и `socket_path` переведены с `Optional[int/str] = None` на **sentinel `_UNSET`** — это КРИТИЧНО для различения "не передан" (→ inherit из core, VLESS flow) от "передан None" (→ own-site TCP режим). Обычный `default=None` не различает эти два случая.
+- `_own_site_tcp` detection: `_socket_explicit and PARAM_SOCKET_PATH is None and _port_explicit and SERVER_PORT` → own-site TCP-режим.
+
+#### B. Новая own-site TCP ветка в `setup_nginx_final()`
+
+Когда `_own_site_tcp=True`, генерируется **простой статический HTTPS-сайт** на `listen 127.0.0.1:{port} ssl`:
+- БЕЗ `proxy_protocol` (Telemt подключается напрямую по TCP, не через Xray xver=1)
+- БЕЗ `real_ip_header proxy_protocol` / `set_real_ip_from unix:` (эта логика — только для VLESS REALITY unix-socket)
+- БЕЗ `proxy_pass` на Xray backend
+- HTTP:80 listener только для ACME challenges (БЕЗ `return 301 https://` — редирект ушёл бы на порт 443, который слушает Telemt, а не на mask_port)
+- `default_server` с `ssl_reject_handshake on` (или fallback для старых nginx)
+
+Ветка ставится **до** проверок `PROTOCOL_MODE == "xhttp"` / `AWG_EXIT_ENABLED` — own-site обрабатывается первым и return-ит. VLESS-ветки (xhttp/AWG/REALITY-unix-socket) выполняются только когда own-site не активен.
+
+#### C. Domain collision check
+
+Перед записью конфига: если `_own_site_tcp and PARAM_DOMAIN == core.PARAM_DOMAIN` → `RuntimeError` с понятным текстом. Защита от человеческой ошибки при вводе домена в `_select_own_domain_submenu`. Дополнительно — ранний чек в `_setup_own_site()` ДО certbot, чтобы не выпускать сертификат зря.
+
+#### D. `_cleanup_own_site(domain)` в `mtproto.py`
+
+Новый helper — удаляет orphaned-файлы при откате к donor-режиму:
+- `NGINX_CONF_DIR/<domain>` (nginx config)
+- `NGINX_ENABLED_DIR/<domain>` (symlink)
+- `/var/www/<domain>` (web_root)
+- `nginx -t` + `systemctl reload/restart nginx` после cleanup — вернуть nginx в валидное состояние
+- Сертификат Let's Encrypt НЕ удаляем (отзыв не критичен, не тема этого фикса)
+
+Вызывается из:
+- `_setup_own_site()` — при ошибке на любом этапе (certbot упал, setup_nginx_final упал, nginx не готов)
+- Guard-блока в `_run_install_inner()` — при откате из-за неготовности nginx перед стартом Telemt
+
+#### E. `_setup_own_site()` обновлён
+
+- Передаёт `protocol_mode="reality", awg_exit_enabled=False, site_template=tmpl` в `setup_nginx_final()` — форсирует простую статическую HTTPS-заглушку, независимо от VLESS-режима сервера.
+- Убран отдельный вызов `create_website(domain=…, site_template=tmpl)` — `create_website` теперь вызывается ВНУТРИ `setup_nginx_final` с `site_template=tmpl` (фикс двойного write, который перезаписывал выбранный шаблон на `core.PARAM_SITE_TEMPLATE`).
+- Ранний чек коллизии домена с `core.PARAM_DOMAIN` — ДО certbot.
+- Все except-блоки вызывают `_cleanup_own_site(domain)` перед откатом.
+
+### 🧪 Регрессионные тесты (37 тестов, все 7 обязательных сценариев)
+
+`tests/test_telemt_nginx_fallback.py` — 13 НОВЫХ тестов (поверх 24 существующих):
+
+1. **`TestSetupNginxFinalOwnSiteTcpMode`** (6 тестов) — РЕАЛЬНЫЙ вызов `setup_nginx_final()` с замоканным core, парсинг сгенерированного конфига:
+   - `test_own_site_with_reality_server_uses_tcp_not_unix` — REALITY-сервер → own-site на TCP, НЕ unix-сокет, БЕЗ proxy_protocol/real_ip_header
+   - `test_own_site_no_xray_proxy_pass` — НЕ содержит `proxy_pass` на XHTTP_BACKEND_PORT
+   - `test_own_site_with_xhttp_server_still_uses_tcp` — XHTTP-сервер → own-site всё равно TCP, НЕ проксирует на Xray
+   - `test_own_site_with_awg_server_has_tls_listener` — AWG-сервер → own-site имеет TLS listener на mask_port (не только HTTP:80 редирект)
+   - `test_domain_collision_raises_runtime_error` — own_site_domain == core.PARAM_DOMAIN → RuntimeError
+   - `test_own_site_http80_no_https_redirect` — HTTP:80 БЕЗ `return 301 https` (ушёл бы на Telemt:443), только ACME + 404
+
+2. **`TestSetupNginxFinalVlessRegression`** (2 теста) — Regression guard: VLESS install flow `setup_nginx_final()` без аргументов:
+   - `test_vless_reality_uses_unix_socket` — unix-сокет с proxy_protocol, БЕЗ TCP
+   - `test_vless_reality_has_https_redirect` — HTTP:80 → HTTPS-редирект (это нормально для VLESS, в отличие от own-site)
+
+3. **`TestSetupNginxFinalTwoParallelDomains`** (1 тест) — VLESS-домен + Telemt-домен одновременно:
+   - `test_vless_and_telemt_domains_coexist` — VLESS на unix-сокете, Telemt на TCP:8444, оба валидны, нет конфликта listen
+
+4. **`TestCleanupOwnSite`** (3 теста) — cleanup orphaned-файлов:
+   - `test_cleanup_removes_orphaned_files` — удаляет nginx config, symlink, web_root
+   - `test_cleanup_with_empty_domain_is_noop` — `""` → no-op
+   - `test_cleanup_with_nonexistent_domain_is_noop` — несуществующий домен → no-op
+
+5. **`TestGuardBlockCleanupOnRollback`** (1 тест) — guard-блок при откате:
+   - `test_guard_block_calls_cleanup_on_nginx_down` — `_check_mask_backend_ready=False` → `_cleanup_own_site` вызван, конфиг переписан в donor-режим
+
+Все 170 связанных тестов (108 mtproto + 25 ssl/nginx/telemt_fallback + 37 telemt_nginx_fallback) — зелёные. Существующий VLESS install flow (`setup_nginx_final()` без аргументов) — byte-for-byte идентичен предыдущему.
+
+### 📋 Какие PROTOCOL_MODE-ветки протестированы вызовом функции с парсингом вывода
+
+| Ветка | core.PROTOCOL_MODE | core.AWG_EXIT_ENABLED | Тест |
+|---|---|---|---|
+| REALITY (own-site TCP) | `"reality"` | `False` | `test_own_site_with_reality_server_uses_tcp_not_unix` |
+| XHTTP (own-site TCP) | `"xhttp"` | `False` | `test_own_site_with_xhttp_server_still_uses_tcp` |
+| AWG (own-site TCP) | `"reality"` | `True` | `test_own_site_with_awg_server_has_tls_listener` |
+| REALITY (VLESS unix-socket) | `"reality"` | `False` | `test_vless_reality_uses_unix_socket` |
+
+Все 4 комбинации протестированы реальным вызовом `setup_nginx_final()` + парсингом сгенерированного nginx-конфига (НЕ signature-check).
+
+### 🚫 Что НЕ трогали
+
+- `_core.py` — никаких новых module-level глобалов (требование из исходного тикета сохранено)
+- `telemt_fallback.py` — это ДРУГОЙ fallback (Middle Proxy → Direct Mode), не путать
+- AWG-модули, mirrors/downloader, TUI test runner — не тронуты
+- Существующий VLESS install flow — byte-for-byte идентичен (regression guard `test_vless_reality_uses_unix_socket` + `test_vless_reality_has_https_redirect`)
+
+---
+
 ## v4.20.1 — Telemt nginx-fallback: собственный домен и сайт вместо чужого donor-домена — 12 июля 2026
 
 ### 🎭 Telemt mask: новый режим "own-site" (свой домен + свой сайт на локальном nginx)

@@ -1608,21 +1608,113 @@ def _select_own_domain_submenu(telemt_port: int):
     return d
 
 
+def _cleanup_own_site(domain: str) -> None:
+    """Удаляет созданные для own-site домена файлы: nginx config, symlink, web_root.
+
+    Используется при откате к donor-режиму: если own-site не взлетел (nginx не
+    готов, certbot упал, и т.п.) — надо вернуть nginx в валидное состояние,
+    иначе orphaned-файлы в NGINX_ENABLED_DIR могут ломать nginx -t.
+
+    Сертификат Let's Encrypt НЕ удаляем — его отзыв не критичен и не тема этого фикса.
+    """
+    if not domain:
+        return
+    try:
+        import importlib
+        core = importlib.import_module("vless_installer._core")
+    except ImportError:
+        return
+
+    NGINX_CONF_DIR = getattr(core, "NGINX_CONF_DIR", None)
+    NGINX_ENABLED_DIR = getattr(core, "NGINX_ENABLED_DIR", None)
+    _run = getattr(core, "_run", None)
+    find_nginx_bin = getattr(core, "find_nginx_bin", None)
+    _info = getattr(core, "info", None) or _info_local
+    _warn = getattr(core, "warn", None) or _warn_local
+
+    # 1) nginx config file
+    if NGINX_CONF_DIR:
+        cfg = NGINX_CONF_DIR / domain
+        if cfg.exists():
+            try:
+                cfg.unlink()
+                _info(f"Удалён nginx-конфиг: {cfg}")
+            except Exception as e:
+                _warn(f"Не удалось удалить {cfg}: {e}")
+
+    # 2) nginx symlink in sites-enabled
+    if NGINX_ENABLED_DIR:
+        link = NGINX_ENABLED_DIR / domain
+        if link.exists() or link.is_symlink():
+            try:
+                link.unlink()
+                _info(f"Удалён nginx-симлинк: {link}")
+            except Exception as e:
+                _warn(f"Не удалось удалить {link}: {e}")
+
+    # 3) web_root
+    web_root = Path(f"/var/www/{domain}")
+    if web_root.exists():
+        try:
+            import shutil
+            shutil.rmtree(web_root)
+            _info(f"Удалён web_root: {web_root}")
+        except Exception as e:
+            _warn(f"Не удалось удалить {web_root}: {e}")
+
+    # 4) nginx -t + reload после cleanup — вернуть nginx в валидное состояние
+    if _run and find_nginx_bin:
+        nginx_bin = find_nginx_bin() or "/usr/sbin/nginx"
+        r = _run([nginx_bin, "-t"], capture=True, check=False, quiet=True)
+        if r.returncode == 0:
+            _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
+            _info("nginx перезагружен после cleanup own-site")
+        else:
+            _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
+            _warn(f"nginx -t упал после cleanup, restart: {r.stderr}")
+
+
+# Локальные fallback'и для _info/_warn если core недоступен (не должно случаться)
+def _info_local(msg: str) -> None:
+    print(f"  → {msg}")
+
+def _warn_local(msg: str) -> None:
+    print(f"  [!] {msg}")
+
+
 def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
     """Поднимает nginx + Let's Encrypt сертификат для domain и возвращает OwnSiteConfig.
 
     Шаги:
+      0. Проверка коллизии домена с VLESS-доменом (core.PARAM_DOMAIN).
       1. Подбирает свободный mask_port на 127.0.0.1 (НЕ == telemt_port).
       2. Спрашивает site_template (аналогично VLESS-инсталлятору).
       3. Вызывает obtain_ssl_cert(domain=domain) → Let's Encrypt сертификат.
-      4. Вызывает create_website(domain=domain, site_template=...).
-      5. Вызывает setup_nginx_final(domain=domain, port=mask_port, socket_path=None).
-      6. Проверяет, что nginx реально слушает mask_host:mask_port (TCP connect).
-         Если НЕ слушает — _err + откат к donor-режиму (вернёт OwnSiteConfig с
-         mask_port=0; caller видит это и не пишет mask_host в конфиг).
+      4. Вызывает setup_nginx_final(domain=domain, port=mask_port, socket_path=None,
+         protocol_mode="reality", awg_exit_enabled=False, site_template=tmpl).
+         Это форсирует простую статическую HTTPS-заглушку на TCP 127.0.0.1:mask_port,
+         независимо от PROTOCOL_MODE/AWG_EXIT_ENABLED сервера.
+      5. Проверяет, что nginx реально слушает mask_host:mask_port (TCP connect).
+         Если НЕ слушает — _err + _cleanup_own_site + откат к donor-режиму.
+
+    При любой ошибке на этапах 3-5 вызывает _cleanup_own_site(domain) для
+    удаления orphaned-файлов (nginx config, symlink, web_root) — иначе
+    сломанный конфиг в NGINX_ENABLED_DIR может ронять nginx -t.
 
     Возвращает OwnSiteConfig с mask_port > 0 при успехе, mask_port=0 при отказе.
     """
+    # 0) Проверка коллизии с VLESS-доменом — ДО любых действий.
+    try:
+        import importlib
+        _core = importlib.import_module("vless_installer._core")
+        _vless_domain = getattr(_core, "PARAM_DOMAIN", "")
+        if _vless_domain and domain == _vless_domain:
+            _err(f"Домен '{domain}' совпадает с VLESS-доменом сервера ({_vless_domain}).")
+            _err("Own-site домен Telemt должен быть ОТЛИЧЕН — иначе nginx-конфиги конфликтуют.")
+            return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
+    except ImportError:
+        pass
+
     # 1) Подбор порта.
     mask_port = _pick_local_nginx_port(telemt_port)
     if not mask_port:
@@ -1660,31 +1752,39 @@ def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
     except Exception as _e:
         _err(f"obtain_ssl_cert(domain={domain}) упал: {_e}")
         _err("Откат к donor-режиму — nginx-fallback без сертификата невозможен.")
+        _cleanup_own_site(domain)
         return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
 
-    # 4+5) create_website + setup_nginx_final (передаём domain/port явно —
-    # это НЕ мутирует core.PARAM_DOMAIN, см. Задачу 1 в nginx_setup.py).
+    # 4) setup_nginx_final — генерирует статический HTTPS-сайт на TCP mask_port.
+    #    protocol_mode="reality" + awg_exit_enabled=False — форсирует простую
+    #    заглушку, независимо от VLESS-режима сервера (xhttp/reality/awg).
+    #    socket_path=None (явно) → own-site TCP режим (см. _UNSET sentinel в
+    #    nginx_setup.py). create_website вызывается ВНУТРИ setup_nginx_final
+    #    с site_template=tmpl — НЕ вызываем отдельно (иначе двойной write).
     _info(f"Поднятие nginx-сайта {domain} на порту {mask_port}...")
     try:
-        from vless_installer.modules.nginx_setup import (
-            create_website as _create_website,
-            setup_nginx_final as _setup_nginx_final,
+        from vless_installer.modules.nginx_setup import setup_nginx_final
+        setup_nginx_final(
+            domain=domain,
+            port=mask_port,
+            socket_path=None,       # явно None → TCP-режим (не unix-сокет)
+            protocol_mode="reality",# форсируем REALITY-ветку (не xhttp, не awg)
+            awg_exit_enabled=False, # форсируем не-AWG (TLS терминирует nginx)
+            site_template=tmpl,
         )
-        _create_website(domain=domain, site_template=tmpl)
-        # socket_path=None — явно используем TCP на 127.0.0.1:mask_port,
-        # не unix-сокет (см. CHANGELOG — "Почему не unix-сокет в 1-й итерации").
-        _setup_nginx_final(domain=domain, port=mask_port, socket_path=None)
     except Exception as _e:
         _err(f"setup_nginx_final(domain={domain}, port={mask_port}) упал: {_e}")
         _err("Откат к donor-режиму — nginx-fallback без сайта невозможен.")
+        _cleanup_own_site(domain)
         return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
 
-    # 6) Проверка готовности nginx (КРИТИЧНО — см. _check_mask_backend_ready).
+    # 5) Проверка готовности nginx (КРИТИЧНО — см. _check_mask_backend_ready).
     _info(f"Проверяю, что nginx слушает 127.0.0.1:{mask_port}...")
     if not _check_mask_backend_ready("127.0.0.1", mask_port, timeout=3.0):
         _err(f"nginx НЕ слушает 127.0.0.1:{mask_port} после setup_nginx_final.")
         _err("Без готового nginx tls_emulation=true приведёт к 'early eof' в Telemt.")
-        _err("Откат к donor-режиму.")
+        _err("Откат к donor-режиму + cleanup orphaned-файлов.")
+        _cleanup_own_site(domain)
         return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
     _ok(f"nginx готов: 127.0.0.1:{mask_port} отвечает.")
 
@@ -2147,6 +2247,10 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
             # tls_domain остаётся тем же — это домен, к которому привязан
             # certbot-сертификат; Telemt просто использует synthetic fake-cert
             # вместо живого TLS-fetch.
+            # ALSO: cleanup orphaned nginx-файлов (config, symlink, web_root),
+            # иначе сломанный конфиг в NGINX_ENABLED_DIR может ронять nginx -t
+            # и ломать уже работавший VLESS REALITY fallback.
+            _cleanup_own_site(tls_domain)
             _mask_host = ""
             _mask_port = 0
             _tls_emulation = False
