@@ -225,7 +225,7 @@ def _box_link(link: str, color: str = "") -> None:
     color = color or YELLOW; max_w = _BOX_W - 2; plain_link = _plain(link); i = 0
     while i < len(plain_link):
         chunk = plain_link[i:i + max_w]
-        pad = max(0, _BOX_W - 2 - len(chunk))
+        pad = max(0, _BOX_W - 2 - _wlen(chunk))
         print(f"{CYAN}║{NC}  {color}{chunk}{NC}{' ' * pad}{CYAN}║{NC}")
         i += max_w
 
