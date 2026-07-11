@@ -586,8 +586,8 @@ def do_test_runner_menu() -> None:
             _run_and_display("Все тесты", all_tests, c)
             continue
 
-        if choice in TEST_GROUPS:
-            group = TEST_GROUPS[choice]
+        if choice.upper() in TEST_GROUPS:
+            group = TEST_GROUPS[choice.upper()]
             _run_and_display(group["label"], group["tests"], c)
             continue
 
