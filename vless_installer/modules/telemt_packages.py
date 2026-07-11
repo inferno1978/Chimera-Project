@@ -144,7 +144,7 @@ def _post_install_panel(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 TELEMT_SPEC = PackageSpec(
     name="telemt",
-    filename_builder=lambda: f"telemt-{detect_arch_libc()[0]}-linux-{detect_arch_libc()[1]}.tar.gz",
+    filename_builder=lambda **kw: f"telemt-{detect_arch_libc()[0]}-linux-{detect_arch_libc()[1]}.tar.gz",
     mirror_urls_builder=lambda filename: build_mirror_urls(
         owner="telemt",
         repo="telemt",
@@ -166,7 +166,7 @@ TELEMT_SPEC = PackageSpec(
 # ============================================================================
 TELEMT_PANEL_SPEC = PackageSpec(
     name="telemt-panel",
-    filename_builder=lambda: f"telemt-panel-{detect_arch_libc()[0]}-linux-{detect_arch_libc()[1]}.tar.gz",
+    filename_builder=lambda **kw: f"telemt-panel-{detect_arch_libc()[0]}-linux-{detect_arch_libc()[1]}.tar.gz",
     mirror_urls_builder=lambda filename: build_mirror_urls(
         owner="amirotin",
         repo="telemt_panel",

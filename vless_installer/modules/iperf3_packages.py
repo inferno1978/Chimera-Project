@@ -102,7 +102,7 @@ def _post_install_iperf3(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 IPERF3_SPEC = PackageSpec(
     name="iperf3 static",
-    filename_builder=lambda arch: f"iperf3-{arch}",
+    filename_builder=lambda arch, **kw: f"iperf3-{arch}",
     mirror_urls_builder=_iperf3_mirror_urls,
     install_dests=_IPERF3_INSTALL_DESTS,        # [/tmp]
     manual_incoming_dir=_MANUAL_DIR,            # /root/

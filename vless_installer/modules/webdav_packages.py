@@ -186,7 +186,7 @@ def _find_go_binary() -> str | None:
 # ============================================================================
 WEBDAV_SOURCE_SPEC = PackageSpec(
     name="webdav-tunnel source",
-    filename_builder=lambda: "webdav-tunnel-main.tar.gz",
+    filename_builder=lambda **kw: "webdav-tunnel-main.tar.gz",
     mirror_urls_builder=_webdav_source_mirror_urls,
     install_dests=[_INSTALL_TMP],              # [/tmp/webdav_packages] — placeholder
     manual_incoming_dir=_MANUAL_DIR,           # /root/

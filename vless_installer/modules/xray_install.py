@@ -1690,7 +1690,20 @@ def _xray_do_upgrade(tag: str, is_prerelease: bool = False) -> bool:
         warn(f"Ошибка загрузки Xray {tag} (все зеркала провалены)")
         return False
 
-    info("SHA256 верификация: ОК (post_install XRAY_ZIP_SPEC)")
+    # Сообщаем реальный статус SHA256 верификации (не печатаем ложное "ОК").
+    # _XRAY_SHA256_STATUS устанавливается post_install'ом XRAY_ZIP_SPEC.
+    from vless_installer.modules.xray_packages import _XRAY_SHA256_STATUS
+    if _XRAY_SHA256_STATUS == "verified":
+        success("SHA256 верификация: ОК")
+    elif _XRAY_SHA256_STATUS == "skipped":
+        warn("SHA256 верификация пропущена (checksums.txt недоступен по сети)")
+    elif _XRAY_SHA256_STATUS == "no_tag":
+        warn("SHA256 верификация пропущена (tag неизвестен)")
+    elif _XRAY_SHA256_STATUS == "failed":
+        # Этого не должно происходить — post_install возвращает False при failed.
+        warn("SHA256 верификация провалилась (MITM?)")
+    else:
+        warn("SHA256 верификация: статус неизвестен")
 
     # ── Шаг 4: тест конфига новым бинарником ───────────────────────────────
     # Xray ищет geosite.dat/geoip.dat сначала рядом с бинарником

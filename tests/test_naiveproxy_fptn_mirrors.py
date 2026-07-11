@@ -254,10 +254,15 @@ class TestFptnSpecSanity(unittest.TestCase):
         self.assertEqual(FPTN_SPEC.name, "fptn-server .deb")
 
     def test_filename_builder_passes_through(self):
-        """filename_builder возвращает динамическое имя как есть."""
+        """filename_builder возвращает динамическое имя как есть.
+
+        После фикса бага №1: используем deb_filename (НЕ filename) чтобы
+        не конфликтовать с download_manager который сам передаёт filename=
+        в mirror_urls_builder.
+        """
         from vless_installer.modules.fptn_packages import FPTN_SPEC
         self.assertEqual(
-            FPTN_SPEC.filename_builder(filename="fptn-server-ubuntu22.04-amd64.deb"),
+            FPTN_SPEC.filename_builder(deb_filename="fptn-server-ubuntu22.04-amd64.deb"),
             "fptn-server-ubuntu22.04-amd64.deb",
         )
 

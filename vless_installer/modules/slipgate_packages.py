@@ -92,7 +92,7 @@ def _post_install_slipgate(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 SLIPGATE_INSTALLER_SPEC = PackageSpec(
     name="SlipGate install.sh",
-    filename_builder=lambda: "install.sh",
+    filename_builder=lambda **kw: "install.sh",
     mirror_urls_builder=_slipgate_installer_mirror_urls,
     install_dests=_SLIPGATE_INSTALL_DESTS,       # [/tmp]
     manual_incoming_dir=_MANUAL_DIR,             # /root/

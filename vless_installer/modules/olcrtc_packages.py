@@ -183,7 +183,7 @@ def _post_install_olcrtc_source(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 OLCRTC_SOURCE_SPEC = PackageSpec(
     name="olcrtc source",
-    filename_builder=lambda: "olcrtc-master.tar.gz",
+    filename_builder=lambda **kw: "olcrtc-master.tar.gz",
     mirror_urls_builder=_olcrtc_source_mirror_urls,
     install_dests=_OLCRTC_INSTALL_DESTS,        # [/usr/local/bin]
     manual_incoming_dir=_MANUAL_DIR,            # /root/

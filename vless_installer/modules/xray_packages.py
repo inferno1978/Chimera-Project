@@ -158,7 +158,9 @@ def _fetch_checksums_content(tag: str) -> str | None:
         # Решение: создаём временный spec с install_dests=[tmp_dir].
         chk_spec = PackageSpec(
             name="xray-checksums-tmp",
-            filename_builder=lambda: "checksums.txt",
+            # ВАЖНО: **kw обязателен — fetch_package(chk_spec, tag=tag, ...)
+            # передаёт tag в filename_kwargs. Без **kw будет TypeError.
+            filename_builder=lambda **kw: "checksums.txt",
             mirror_urls_builder=_xray_checksums_mirror_urls,
             install_dests=[tmp_dir],
             manual_incoming_dir=Path("/nonexistent_manual_dir_for_chk_tmp"),
@@ -171,7 +173,16 @@ def _fetch_checksums_content(tag: str) -> str | None:
         if not chk_file.exists():
             return None
         return chk_file.read_text()
-    except Exception:
+    except (TypeError, AttributeError, ValueError) as e:
+        # ВНУТРЕННЯЯ ОШИБКА — баг в spec'е или логике (не сеть).
+        # Логируем в stderr чтобы не маскировать регрессии под "сеть недоступна".
+        import sys
+        print(f"[xray_packages._fetch_checksums_content] ВНУТРЕННЯЯ ОШИБКА: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return None
+    except Exception as e:
+        # Сетевые ошибки (URLError, TimeoutError, OSError и т.д.) — штатный
+        # случай "сеть недоступна", возвращаем None без шума.
         return None
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -208,16 +219,23 @@ def _post_install_xray_zip(src: Path, install_dests: list[Path]) -> bool:
     zip_name = f"Xray-linux-{arch}.zip"
 
     # 1. SHA256 верификация
-    if tag:
+    global _XRAY_SHA256_STATUS
+    _XRAY_SHA256_STATUS = ""  # сброс перед новой попыткой
+    if not tag:
+        _XRAY_SHA256_STATUS = "no_tag"
+    else:
         chk_content = _fetch_checksums_content(tag)
-        if chk_content is not None:
+        if chk_content is None:
+            _XRAY_SHA256_STATUS = "skipped"
+        else:
             if not _verify_sha256_from_content(src, chk_content, zip_name):
                 # SHA256 не совпал — возможен MITM, отказываемся
+                _XRAY_SHA256_STATUS = "failed"
                 return False
-            # SHA256 OK или hash не найден (пропуск) — продолжаем
-        # Если checksums.txt не скачался — пропускаем верификацию
-        # (как в старом _verify_sha256: "Не удалось загрузить checksums.txt
-        # — верификация пропущена")
+            _XRAY_SHA256_STATUS = "verified"
+        # Если _XRAY_SHA256_STATUS == "skipped" — продолжаем (как в старом
+        # _verify_sha256: "Не удалось загрузить checksums.txt — верификация
+        # пропущена").
 
     # 2. Распаковка
     tmp_dir = Path(tempfile.mkdtemp(prefix="xray_extract_"))
@@ -269,6 +287,13 @@ def _post_install_xray_zip(src: Path, install_dests: list[Path]) -> bool:
 _XRAY_CURRENT_TAG: str = ""
 _XRAY_CURRENT_ARCH: str = "64"
 
+# Результат последней SHA256 верификации. Устанавливается post_install'ом,
+# читается вызывающим кодом чтобы НЕ печатать ложное "SHA256 ОК" когда
+# верификация была пропущена (checksums.txt недоступен).
+# Значения: "verified" (SHA256 совпал), "skipped" (checksums недоступен),
+# "no_tag" (tag не передан), "" (post_install не вызывался).
+_XRAY_SHA256_STATUS: str = ""
+
 # Альтернативный dict-based интерфейс для tag/arch контекста.
 # Некоторые вызывающие сайты (в xray_install.py) используют _xray_zip_context
 # dict вместо двух отдельных глобалов — поддерживаем оба для совместимости.
@@ -315,7 +340,11 @@ def _post_install_xray_installer(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 XRAY_ZIP_SPEC = PackageSpec(
     name="Xray-core",                            # short name (для тестов и логов)
-    filename_builder=lambda arch: f"Xray-linux-{arch}.zip",
+    # ВАЖНО: filename_builder обязан принимать ВСЕ kwargs из **filename_kwargs.
+    # Call site в xray_install.py передаёт tag=latest_tag, arch=xray_arch.
+    # filename строится только из arch, но tag тоже принимается (через **kw),
+    # иначе TypeError при вызове spec.filename_builder(tag=..., arch=...).
+    filename_builder=lambda arch, **kw: f"Xray-linux-{arch}.zip",
     mirror_urls_builder=_xray_zip_mirror_urls,
     install_dests=_XRAY_INSTALL_DESTS,            # [/usr/local/bin]
     manual_incoming_dir=_MANUAL_DIR,              # /root/
@@ -332,7 +361,8 @@ XRAY_ZIP_SPEC = PackageSpec(
 # _fetch_checksums_content с временным spec (см. выше).
 XRAY_CHECKSUMS_SPEC = PackageSpec(
     name="Xray checksums.txt",
-    filename_builder=lambda: "checksums.txt",
+    # **kw обязателен — может вызываться с tag=kwarg.
+    filename_builder=lambda **kw: "checksums.txt",
     mirror_urls_builder=_xray_checksums_mirror_urls,
     install_dests=[Path("/tmp")],
     manual_incoming_dir=_MANUAL_DIR,
@@ -346,7 +376,7 @@ XRAY_CHECKSUMS_SPEC = PackageSpec(
 # ============================================================================
 XRAY_INSTALLER_SPEC = PackageSpec(
     name="Xray-installer",                        # short name (для тестов и логов)
-    filename_builder=lambda: "install-release.sh",
+    filename_builder=lambda **kw: "install-release.sh",
     mirror_urls_builder=_xray_installer_mirror_urls,
     install_dests=[Path("/tmp")],
     manual_incoming_dir=_MANUAL_DIR,

@@ -91,7 +91,7 @@ def _post_install_geo(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 GEOSITE_SPEC = PackageSpec(
     name="geosite.dat",
-    filename_builder=lambda: "geosite.dat",
+    filename_builder=lambda **kw: "geosite.dat",
     mirror_urls_builder=lambda filename: build_mirror_urls(
         owner="runetfreedom",
         repo="russia-v2ray-rules-dat",
@@ -111,7 +111,7 @@ GEOSITE_SPEC = PackageSpec(
 # ============================================================================
 GEOIP_SPEC = PackageSpec(
     name="geoip.dat",
-    filename_builder=lambda: "geoip.dat",
+    filename_builder=lambda **kw: "geoip.dat",
     mirror_urls_builder=lambda filename: build_mirror_urls(
         owner="runetfreedom",
         repo="russia-v2ray-rules-dat",

@@ -170,7 +170,7 @@ def _turnable_mirror_urls(filename: str, version: str = "0.4.1", **kw) -> list[s
 # ============================================================================
 TURNTUNNEL_SPEC = PackageSpec(
     name="vk-turn-proxy",
-    filename_builder=lambda: "server-linux-amd64",
+    filename_builder=lambda **kw: "server-linux-amd64",
     mirror_urls_builder=_turntunnel_mirror_urls,
     install_dests=_TURNTUNNEL_INSTALL_DESTS,    # [/opt/vk-turn-proxy]
     manual_incoming_dir=_MANUAL_DIR,            # /root/
@@ -184,7 +184,13 @@ TURNTUNNEL_SPEC = PackageSpec(
 # ============================================================================
 TURNABLE_SPEC = PackageSpec(
     name="turnable",
-    filename_builder=lambda: "turnable-linux-amd64",
+    # ВАЖНО: filename_builder обязан принимать ВСЕ kwargs, которые
+    # fetch_package получает через **filename_kwargs. Call site в turnable.py
+    # передаёт version=_TURNABLE_VERSION. Добавляем **kw catch-all для
+    # защиты от будущих изменений call site (контракт документирован в
+    # download_manager.py: spec.filename_builder(**filename_kwargs) без
+    # фильтрации).
+    filename_builder=lambda **kw: "turnable-linux-amd64",
     mirror_urls_builder=_turnable_mirror_urls,
     install_dests=_TURNABLE_INSTALL_DESTS,      # [/opt/turnable]
     manual_incoming_dir=_MANUAL_DIR,            # /root/

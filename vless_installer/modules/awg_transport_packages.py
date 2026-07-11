@@ -299,8 +299,7 @@ def _post_install_awg_kmod_source(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 AWG_TOOLS_SPEC = PackageSpec(
     name="amneziawg-tools",
-    filename_builder=lambda tag, arch: (
-        "ubuntu-22.04-arm64-amneziawg-tools.zip" if arch == "arm64"
+    filename_builder=lambda tag, arch, **kw: ("ubuntu-22.04-arm64-amneziawg-tools.zip" if arch == "arm64"
         else "ubuntu-22.04-amneziawg-tools.zip"
     ),
     mirror_urls_builder=_awg_tools_mirror_urls,
@@ -316,7 +315,7 @@ AWG_TOOLS_SPEC = PackageSpec(
 # ============================================================================
 AWG_GO_SOURCE_SPEC = PackageSpec(
     name="amneziawg-go source",
-    filename_builder=lambda: "amneziawg-go-master.tar.gz",
+    filename_builder=lambda **kw: "amneziawg-go-master.tar.gz",
     mirror_urls_builder=_awg_go_source_mirror_urls,
     install_dests=_AWG_BIN_INSTALL_DESTS,         # [/usr/local/bin]
     manual_incoming_dir=_MANUAL_DIR,              # /root/
@@ -330,7 +329,7 @@ AWG_GO_SOURCE_SPEC = PackageSpec(
 # ============================================================================
 AWG_KMOD_SOURCE_SPEC = PackageSpec(
     name="amneziawg-kernel-module source",
-    filename_builder=lambda: "amneziawg-linux-kernel-module-master.tar.gz",
+    filename_builder=lambda **kw: "amneziawg-linux-kernel-module-master.tar.gz",
     mirror_urls_builder=_awg_kmod_source_mirror_urls,
     install_dests=_AWG_BUILD_TMP,                 # [/tmp/awg_build] — placeholder
     manual_incoming_dir=_MANUAL_DIR,              # /root/
