@@ -2,6 +2,72 @@
 
 ---
 
+## v4.20.8 — FIX: diagnostic блок в _setup_own_site падал с TypeError (_run не поддерживает quiet) + явное логирование setup_nginx_final — 12 июля 2026
+
+### 🐛 Баг 1: TypeError в diagnostic блоке
+
+Из лога установки v4.20.7:
+```
+[ERR]   ss недоступен: _run() got an unexpected keyword argument 'quiet'
+[ERR]   nginx -t недоступен: _run() got an unexpected keyword argument 'quiet'
+```
+
+В v4.20.7 я добавил diagnostic блок в `_setup_own_site` шаг 7, который вызывал `_run([...], quiet=True)`. Но `mtproto._run` имеет сигнатуру `_run(cmd, capture=False, check=False)` — **не поддерживает `quiet` kwarg**. `core._run` (используется в `nginx_setup.py`) поддерживает, а локальный `mtproto._run` — нет. Diagnostic блок падал с TypeError, и мы не видели реальную причину own-site fail.
+
+**Фикс:** убрал `quiet=True` из всех вызовов `_run` в diagnostic блоке. `mtproto._run` без `capture=True` уже пишет stdout/stderr в DEVNULL — это эквивалент `quiet`.
+
+### 🐛 Баг 2: success/warn из setup_nginx_final не попадали в telemt_install.log
+
+Из лога:
+```
+[INFO] Поднятие nginx-сайта tg.total-shadows.online на порту 8444...
+[INFO] Проверяю, что nginx слушает 127.0.0.1:8444 (3 попытки)...
+[WARN] Попытка 1/3: nginx ещё не готов...
+```
+
+Между `[INFO] Поднятие...` и `[INFO] Проверяю...` — **нет ни `[OK] Own-site nginx настроен`, ни ошибки**. Причина: `setup_nginx_final` (в `nginx_setup.py`) использует `core.success`/`core.warn`/`core.info`, которые пишут в `core.LOG_FILE` (обычно `/var/log/xray_install.log`). А `_setup_own_site` (в `mtproto.py`) использует локальные `_ok`/`_warn`/`_info`, которые пишут в `LOG_FILE = /var/log/telemt_install.log`. **Разные лог-файлы** — мы не видели что произошло внутри `setup_nginx_final`.
+
+**Фикс:** в `_setup_own_site` шаг 6 добавлено явное логирование в `telemt_install.log`:
+- `_ok(f"setup_nginx_final отработал для {domain}:{mask_port}")` после успешного вызова
+- `_err(f"setup_nginx_final(...) упал: {_e}")` в except-блоке (уже было)
+
+### 🐛 Баг 3: нет проверки что конфиг реально создан
+
+Даже если `setup_nginx_final` вернулся без exception, конфиг мог не создаться (например `nginx -t` упал внутри, hardening удалил symlink, но exception не выбросился). Теперь шаг 6.5 — явная проверка:
+- `NGINX_CONF_DIR/<domain>` существует?
+- `NGINX_ENABLED_DIR/<domain>` symlink существует?
+- Если нет — откат к donor-режиму с явным сообщением
+
+### 🔧 Расширенная диагностика при провале
+
+В шаге 7 при провале 3 retry попыток теперь выводится:
+1. `ss -tlnH` (порт mask_port / nginx) — что слушает
+2. `nginx -t` returncode + последние 5 строк stderr
+3. **`cat <конфиг>` (первые 30 строк)** — v4.20.8 NEW: если конфиг кривой, увидим
+4. **`systemctl is-active nginx`** — v4.20.8 NEW: если nginx в failed state
+
+Это закрывает gap: пользователь видит конкретную причину (конфликт портов, битый конфиг, nginx не запущен, кривой cert-путь) вместо общего "nginx НЕ слушает".
+
+### 🧪 Регрессионные тесты
+
+Все 187 связанных тестов проходят без изменений. Diagnostic логика не покрывается unit-тестами (она вызывает внешние команды `ss`/`nginx`/`systemctl`), но логирование успеха/провала `setup_nginx_final` покрыто существующими тестами `TestSetupOwnSiteOrderOfOperations` и `TestSelfSignedDetection`.
+
+### 📋 Реальный вывод тестов
+
+```
+$ python3 -m pytest tests/test_mtproto.py tests/test_ssl_certbot.py tests/test_nginx_watchdog.py tests/test_telemt_fallback.py tests/test_telemt_nginx_fallback.py 2>&1 | tail -5
+...
+============================= 187 passed in 47.21s =============================
+```
+
+### 🚫 Что НЕ трогали
+
+- `_core.py`, `telemt_fallback.py`, AWG-модули, mirrors/downloader, TUI test runner — не тронуты
+- Существующий VLESS install flow — byte-for-byte идентичен
+- `obtain_ssl_cert()` — НЕ менялся
+
+---
+
 ## v4.20.7 — FIX: race condition — nginx reload async, _check_mask_backend_ready вызывался слишком рано → откат в donor-режим — 12 июля 2026
 
 ### 🐛 Баг
