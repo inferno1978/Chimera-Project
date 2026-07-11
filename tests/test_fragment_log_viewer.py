@@ -110,10 +110,24 @@ class TestFindXrayLog(unittest.TestCase):
 
     def test_returns_none_when_no_log(self):
         from vless_installer.modules.fragment_log_viewer import _find_xray_log
+        # На продакшен-сервере /var/log/xray.log, /tmp/xray-error.log или
+        # /etc/xray/config.json (с log.error путём) могут существовать —
+        # патчим ВСЕ кандидаты + config.json чтобы гарантировать None.
+        _no_log_paths = {
+            "/tmp/nonexistent_log1", "/tmp/nonexistent_log2",
+            "/var/log/xray.log", "/tmp/xray-error.log",
+            "/etc/xray/config.json", "/usr/local/etc/xray/config.json",
+        }
+        _orig_exists = Path.exists
+        def _exists(self):
+            if str(self) in _no_log_paths:
+                return False
+            return _orig_exists(self)
         with patch("vless_installer.modules.fragment_log_viewer._XRAY_LOG",
                    Path("/tmp/nonexistent_log1")), \
              patch("vless_installer.modules.fragment_log_viewer._ALT_LOG",
-                   Path("/tmp/nonexistent_log2")):
+                   Path("/tmp/nonexistent_log2")), \
+             patch.object(Path, "exists", _exists):
             result = _find_xray_log()
         self.assertIsNone(result)
 
@@ -129,9 +143,21 @@ class TestFindXrayLog(unittest.TestCase):
     def test_skips_empty_file(self):
         from vless_installer.modules.fragment_log_viewer import _find_xray_log
         self._log.write_text("")  # пустой
+        # На проде /var/log/xray.log, /tmp/xray-error.log или config.json
+        # могут существовать — патчим их exists() → False.
+        _no_log_paths = {
+            "/var/log/xray.log", "/tmp/xray-error.log",
+            "/etc/xray/config.json", "/usr/local/etc/xray/config.json",
+        }
+        _orig_exists = Path.exists
+        def _exists(self):
+            if str(self) in _no_log_paths:
+                return False
+            return _orig_exists(self)
         with patch("vless_installer.modules.fragment_log_viewer._XRAY_LOG", self._log), \
              patch("vless_installer.modules.fragment_log_viewer._ALT_LOG",
-                   Path("/tmp/nonexistent_alt")):
+                   Path("/tmp/nonexistent_alt")), \
+             patch.object(Path, "exists", _exists):
             result = _find_xray_log()
         self.assertIsNone(result)
 
