@@ -503,7 +503,19 @@ def install_xray() -> None:
             xray_installed = True
             XRAY_BIN = Path("/usr/local/bin/xray")
             setattr(core, "XRAY_BIN", XRAY_BIN)
-            success(f"Xray {latest_tag} установлен из zip (SHA256 верифицирован)")
+            # Сообщаем реальный статус SHA256 (не печатаем ложное "верифицирован").
+            # _XRAY_SHA256_STATUS устанавливается post_install'ом XRAY_ZIP_SPEC.
+            from vless_installer.modules.xray_packages import _XRAY_SHA256_STATUS
+            if _XRAY_SHA256_STATUS == "verified":
+                success(f"Xray {latest_tag} установлен из zip (SHA256 верифицирован)")
+            elif _XRAY_SHA256_STATUS == "skipped":
+                warn(f"Xray {latest_tag} установлен из zip (SHA256 верификация пропущена — checksums.txt недоступен)")
+                success(f"Xray {latest_tag} установлен из zip")
+            elif _XRAY_SHA256_STATUS == "no_tag":
+                warn(f"Xray {latest_tag} установлен из zip (SHA256 верификация пропущена — tag неизвестен)")
+                success(f"Xray {latest_tag} установлен из zip")
+            else:
+                success(f"Xray {latest_tag} установлен из zip")
         else:
             warn("  Автоматическая загрузка Xray не удалась со всех зеркал")
 
