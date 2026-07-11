@@ -1940,14 +1940,43 @@ def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
         return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
 
     # 7) Проверка готовности nginx (КРИТИЧНО — см. _check_mask_backend_ready).
-    _info(f"Проверяю, что nginx слушает 127.0.0.1:{mask_port}...")
-    if not _check_mask_backend_ready("127.0.0.1", mask_port, timeout=3.0):
-        _err(f"nginx НЕ слушает 127.0.0.1:{mask_port} после setup_nginx_final.")
+    #    v4.20.7: retry 3 попытки с паузами. reload nginx — async, может
+    #    занять 1-3 сек чтобы поднять listener. Раньше одна попытка с
+    #    timeout=3.0 — race condition, если nginx не успевал → откат в
+    #    donor-режим. Теперь 3 попытки по 2 сек + диагностика при провале.
+    _info(f"Проверяю, что nginx слушает 127.0.0.1:{mask_port} (3 попытки)...")
+    _nginx_ready = False
+    for _attempt in range(3):
+        if _check_mask_backend_ready("127.0.0.1", mask_port, timeout=3.0):
+            _nginx_ready = True
+            break
+        _warn(f"Попытка {_attempt+1}/3: nginx ещё не готов на 127.0.0.1:{mask_port}, жду 2с...")
+        time.sleep(2)
+    if not _nginx_ready:
+        _err(f"nginx НЕ слушает 127.0.0.1:{mask_port} после 3 попыток (6 сек).")
         _err("Без готового nginx tls_emulation=true приведёт к 'early eof' в Telemt.")
+        # v4.20.7: диагностика — покажем что именно не так, чтобы пользователь
+        # мог понять причину (конфликт портов, битый конфиг, nginx не запущен).
+        _err("=== Диагностика ===")
+        try:
+            _ss_out = _run(["ss", "-tlnH"], capture=True, check=False, quiet=True)
+            _ss_lines = [l for l in (_ss_out.stdout or "").splitlines() if f":{mask_port}" in l or "nginx" in l]
+            _err(f"ss -tlnH (порт {mask_port} / nginx):")
+            for l in (_ss_lines or ["(ничего не слушает)"]):
+                _err(f"  {l}")
+        except Exception as _e:
+            _err(f"  ss недоступен: {_e}")
+        try:
+            _nt = _run(["nginx", "-t"], capture=True, check=False, quiet=True)
+            _err(f"nginx -t: returncode={_nt.returncode}")
+            for l in ((_nt.stderr or "")[-500:]).splitlines()[-5:]:
+                _err(f"  {l}")
+        except Exception as _e:
+            _err(f"  nginx -t недоступен: {_e}")
         _err("Откат к donor-режиму + cleanup orphaned-файлов.")
         _cleanup_own_site(domain)
         return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
-    _ok(f"nginx готов: 127.0.0.1:{mask_port} отвечает.")
+    _ok(f"nginx готов: 127.0.0.1:{mask_port} отвечает real LE сертификатом.")
 
     return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=mask_port)
 
