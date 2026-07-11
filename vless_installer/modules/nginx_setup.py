@@ -592,7 +592,22 @@ def setup_nginx_final(domain: Optional[str] = None,
         link.symlink_to(cfg)
         r = _run([_os_nginx_bin, "-t"], capture=True, check=False, quiet=True)
         if r.returncode == 0:
+            # v4.20.7: reload — async операция. systemd отправляет SIGHUP и сразу
+            # возвращает управление, nginx пере-читает конфиг и поднимает новый
+            # worker с новым listener за 1-3 сек. Если _check_mask_backend_ready
+            # вызывается сразу после reload — TCP-connect падает (listener ещё
+            # не готов) → guard откатывает в donor-режим. sleep(2) даёт nginx
+            # время поднять listener.
             _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
+            import time as _time
+            _time.sleep(2)
+            # Проверяем что listener реально поднялся. Если нет — reload мог
+            # молча провалиться (например nginx в degraded state). Пробуем restart.
+            _listener_check = _run(["ss", "-tlnH"], capture=True, check=False, quiet=True)
+            if f"127.0.0.1:{SERVER_PORT}" not in (_listener_check.stdout or ""):
+                info(f"reload не поднял listener на 127.0.0.1:{SERVER_PORT}, пробую restart...")
+                _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
+                _time.sleep(3)
             success(f"Own-site nginx настроен: 127.0.0.1:{SERVER_PORT} (статический HTTPS)")
         else:
             # Hardening (v4.20.3): unlink symlink ДО restart — иначе restart с
