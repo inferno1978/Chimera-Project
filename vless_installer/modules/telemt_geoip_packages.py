@@ -158,7 +158,7 @@ def _post_install_asn(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 TELEMT_GEOIP_CITY_SPEC = PackageSpec(
     name="Telemt GeoIP City (DB-IP)",
-    filename_builder=lambda: "dbip-city-lite.mmdb.gz",
+    filename_builder=lambda **kw: "dbip-city-lite.mmdb.gz",
     mirror_urls_builder=_telemt_geoip_city_mirror_urls,
     install_dests=_TELEMT_GEOIP_INSTALL_DESTS,
     manual_incoming_dir=_MANUAL_DIR,
@@ -172,7 +172,7 @@ TELEMT_GEOIP_CITY_SPEC = PackageSpec(
 # ============================================================================
 TELEMT_GEOIP_CITY_MAXMIND_SPEC = PackageSpec(
     name="Telemt GeoIP City (MaxMind)",
-    filename_builder=lambda: "GeoLite2-City.mmdb.gz",
+    filename_builder=lambda **kw: "GeoLite2-City.mmdb.gz",
     mirror_urls_builder=lambda filename, **kw: get_telemt_geoip_city_mirrors(use_maxmind=True),
     install_dests=_TELEMT_GEOIP_INSTALL_DESTS,
     manual_incoming_dir=_MANUAL_DIR,
@@ -186,7 +186,7 @@ TELEMT_GEOIP_CITY_MAXMIND_SPEC = PackageSpec(
 # ============================================================================
 TELEMT_GEOIP_ASN_SPEC = PackageSpec(
     name="Telemt GeoIP ASN",
-    filename_builder=lambda: "GeoLite2-ASN.mmdb.gz",
+    filename_builder=lambda **kw: "GeoLite2-ASN.mmdb.gz",
     mirror_urls_builder=_telemt_geoip_asn_mirror_urls,
     install_dests=_TELEMT_GEOIP_INSTALL_DESTS,
     manual_incoming_dir=_MANUAL_DIR,

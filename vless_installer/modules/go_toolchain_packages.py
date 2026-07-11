@@ -151,7 +151,7 @@ def _post_install_go_toolchain(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 GO_TOOLCHAIN_SPEC = PackageSpec(
     name="Go toolchain",
-    filename_builder=lambda version, arch: f"{version}.linux-{arch}.tar.gz",
+    filename_builder=lambda version, arch, **kw: f"{version}.linux-{arch}.tar.gz",
     mirror_urls_builder=_go_toolchain_mirror_urls,
     install_dests=_GO_INSTALL_DESTS,           # [/usr/local] — для assert'а
     manual_incoming_dir=_MANUAL_DIR,           # /root/

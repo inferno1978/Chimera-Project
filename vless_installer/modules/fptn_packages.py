@@ -65,19 +65,29 @@ _MIN_FPTN_DEB_SIZE = 100_000  # 100 KB
 # ============================================================================
 #  mirror_urls_builder — обёртка для PackageSpec API
 # ============================================================================
+# ВАЖНО: download_manager.py L176 вызывает mirror_urls_builder как
+# spec.mirror_urls_builder(filename=filename, **filename_kwargs).
+# Если caller передаёт `filename` через filename_kwargs — будет TypeError
+# (got multiple values for keyword argument 'filename'). Поэтому
+# используем `deb_filename` вместо `filename` в filename_kwargs.
 def _fptn_mirror_urls(
     filename: str,
     tag: str = "0.7.6",
+    deb_filename: str = "",
     **kw,
 ) -> list[str]:
     """Собирает URL для fptn .deb через fptn_mirrors.
 
-    filename параметр передаётся как есть (динамическое имя .deb файла),
+    filename — передаётся download_manager'ом (имя файла из filename_builder).
+    deb_filename — передаётся caller'ом (динамическое имя .deb из GitHub API).
+    Берём deb_filename если передан, иначе filename.
     tag — release tag.
     """
-    if not filename:
+    # Приоритет: deb_filename (из caller kwargs) > filename (из download_manager)
+    actual_filename = deb_filename or filename
+    if not actual_filename:
         return []
-    return get_fptn_mirrors(tag=tag, filename=filename)
+    return get_fptn_mirrors(tag=tag, filename=actual_filename)
 
 
 # ============================================================================
@@ -148,7 +158,10 @@ def _post_install_fptn(src: Path, install_dests: list[Path]) -> bool:
 # ============================================================================
 FPTN_SPEC = PackageSpec(
     name="fptn-server .deb",
-    filename_builder=lambda filename: filename,  # динамическое имя из API
+    # ВАЖНО: filename_builder получает **filename_kwargs (без `filename=`).
+    # Caller передаёт deb_filename=... (НЕ filename=, чтобы не конфликтовать
+    # с download_manager'ом который сам передаёт filename= в mirror_urls_builder).
+    filename_builder=lambda deb_filename, **kw: deb_filename,  # динамическое имя из API
     mirror_urls_builder=_fptn_mirror_urls,
     install_dests=_FPTN_INSTALL_DESTS,           # [/usr/bin]
     manual_incoming_dir=_MANUAL_DIR,             # /root/

@@ -266,7 +266,7 @@ def _atomic_replace_binary(
 # ============================================================================
 WDTT_SOURCE_SPEC = PackageSpec(
     name="qWDTT source",
-    filename_builder=lambda: "proxy-turn-vk-android-master.tar.gz",
+    filename_builder=lambda **kw: "proxy-turn-vk-android-master.tar.gz",
     mirror_urls_builder=_wdtt_source_mirror_urls,
     install_dests=[_INSTALL_TMP],              # [/tmp/wdtt_packages] — placeholder
     manual_incoming_dir=_MANUAL_DIR,           # /root/
