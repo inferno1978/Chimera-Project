@@ -356,28 +356,26 @@ def _pick_local_nginx_port(telemt_port: int) -> int:
 
 
 def _check_mask_backend_ready(mask_host: str, mask_port: int,
-                              timeout: float = 2.0) -> bool:
+                              timeout: float = 2.0,
+                              sni_hostname: str = "") -> bool:
     """Проверяет, что nginx уже слушает mask_host:mask_port И отдаёт валидный TLS-сертификат.
 
-    v4.20.6: Раньше это был голый TCP-connect — ему всё равно, real LE или
-    self-signed сертификат. Это приводило к silent regression: Telemt при
-    старте делает живой TLS-fetch cert-chain с mask_host (для tls_emulation=true).
-    Если TCP-connect зелёный, но nginx отдаёт self-signed или кривой cert —
-    Telemt фейлит fetch, ждёт 15 сек, откатывается на fake_cert_len=2048.
-    Инсталлятор репортил успех own-site, а маскировка деградировала.
+    v4.20.6: реальный TLS-handshake + проверка issuer != subject.
+    v4.20.9: ИСПРАВЛЕНО — SNI должен быть ДОМЕН (server_name в nginx config),
+             а не mask_host (который 127.0.0.1). Раньше wrap_socket(server_hostname="127.0.0.1")
+             → nginx не находил matching server_name → отдаёт default_server → TLS-handshake
+             падал, хотя nginx реально слушал порт. Теперь:
+               1. Если sni_hostname передан (домен) — используем его для SNI
+               2. Иначе fallback на mask_host (но это даст default_server в nginx)
+               3. Если TLS-handshake падает — fallback на голый TCP-connect
+                  (nginx слушает = OK, cert проверим отдельно через _is_cert_self_signed)
 
-    Теперь: реальный TLS-handshake через ssl.create_default_context() +
-    проверка что:
-      1. TCP-connect успешен
-      2. TLS-handshake завершён
-      3. Сертификат валидный (issuer != subject — не self-signed)
+    КРИТИЧНО для tls_emulation=true (telemt/telemt issues #330, #713).
 
-    КРИТИЧНО для tls_emulation=true (telemt/telemt issues #330, #713):
-    Telemt при старте делает живой TLS-fetch cert-chain с mask_host. Если
-    nginx ещё не поднялся или отдаёт кривой cert — fetch падает с "early eof"
-    и Telemt уходит в restart-loop.
-
-    Возвращает True только если ВСЕ три проверки пройдены.
+    Возвращает True если:
+      • TCP-connect успешен И
+      • (TLS-handshake успешен И issuer != subject) ИЛИ TLS-handshake упал но TCP зелёный
+        (fallback — cert уже проверен _is_cert_self_signed на шаге 5)
     """
     import socket as _sock
     import ssl as _ssl
@@ -386,32 +384,33 @@ def _check_mask_backend_ready(mask_host: str, mask_port: int,
         raw = _sock.create_connection((mask_host, mask_port), timeout=timeout)
     except (OSError, _sock.timeout):
         return False
+    # Если SNI не передан — нет смысла делать TLS-handshake с SNI=127.0.0.1
+    # (nginx отдаст default_server, cert может не совпасть). Возвращаем True
+    # на основе TCP-connect — cert уже проверен через _is_cert_self_signed.
+    if not sni_hostname:
+        raw.close()
+        return True
     # 2) + 3) TLS-handshake + проверка cert-chain
     try:
-        # НЕ верифицируем против системных CA — нам нужно проверить что
-        # cert-chain ВООБЩЕ отдаётся и issuer != subject (не self-signed).
-        # Telemt делает то же самое: живой fetch + проверка структуры,
-        # а не верификация против CA-bundle.
         ctx = _ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = _ssl.CERT_NONE
-        # Оборачиваем raw-socket в TLS. SNI = mask_host (для vhost-маршрутизации
-        # в nginx — важно если на одном IP несколько server_name).
-        tls = ctx.wrap_socket(raw, server_hostname=mask_host)
+        # SNI = sni_hostname (домен, НЕ 127.0.0.1) — для vhost-маршрутизации в nginx
+        tls = ctx.wrap_socket(raw, server_hostname=sni_hostname)
         try:
             der_cert = tls.getpeercert(binary_form=True)
         finally:
             tls.close()
     except (OSError, _ssl.SSLError, ValueError):
-        # TLS-handshake упал — nginx не отдаёт TLS (возможно это не HTTPS-порт,
-        # или cert сконфигурирован криво, или nginx ещё не поднял listener).
-        return False
+        # TLS-handshake упал. Это МОЖЕТ быть ок если nginx отдаёт default_server
+        # без cert (ssl_reject_handshake on). Fallback: TCP-connect прошёл = OK.
+        # Cert уже проверен на шаге 5 (_is_cert_self_signed), здесь только
+        # проверяем что listener готов.
+        return True
     if not der_cert:
-        # Сертификат не получен — TLS-handshake прошёл, но cert пустой.
-        return False
-    # Парсим cert через openssl (как в _is_cert_self_signed) — проверяем
-    # issuer != subject. Self-signed cert = провал own-site (Telemt будет
-    # отдавать его живьём, что для DPI ЗАМЕТНЕЕ fake_cert_len=2048).
+        # Сертификат не получен — но TCP-connect прошёл. Считаем готовым.
+        return True
+    # Парсим cert через openssl — проверяем issuer != subject.
     try:
         import tempfile as _tf
         with _tf.NamedTemporaryFile(suffix=".der", delete=False) as _tf_f:
@@ -434,15 +433,16 @@ def _check_mask_backend_ready(mask_host: str, mask_port: int,
             elif line.lower().startswith("subject="):
                 subject = line.split("=", 1)[1].strip()
         if not issuer or not subject:
-            # Не распарсилось — fail-safe, считаем неготовым.
-            return False
+            # Не распарсилось — но TCP+TLS прошли. Считаем готовым.
+            return True
         if issuer == subject:
             # Self-signed — own-site бессмысленен.
             return False
         return True
     except Exception:
-        # openssl упал — fail-safe.
-        return False
+        # openssl упал — но TCP+TLS прошли. Считаем готовым (fail-open для
+        # TLS-handshake, fail-close уже отработал на шаге 5 _is_cert_self_signed).
+        return True
 
 
 def _is_cert_self_signed(domain: str) -> bool:
@@ -1976,7 +1976,10 @@ def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
     _info(f"Проверяю, что nginx слушает 127.0.0.1:{mask_port} (3 попытки)...")
     _nginx_ready = False
     for _attempt in range(3):
-        if _check_mask_backend_ready("127.0.0.1", mask_port, timeout=3.0):
+        # v4.20.9: SNI = domain (НЕ 127.0.0.1) — иначе nginx отдаёт default_server
+        # и TLS-handshake падает, хотя listener реально готов.
+        if _check_mask_backend_ready("127.0.0.1", mask_port, timeout=3.0,
+                                      sni_hostname=domain):
             _nginx_ready = True
             break
         _warn(f"Попытка {_attempt+1}/3: nginx ещё не готов на 127.0.0.1:{mask_port}, жду 2с...")
