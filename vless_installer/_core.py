@@ -6169,6 +6169,8 @@ def _menu_install_system() -> None:
         _box_item("7", "🗑️  Удалить установку")
         _box_item("8", "🧪 Запустить unit-тесты")
         _box_item("9", f"🔀 Mieru Hybrid Addon  {DIM}(Mieru поверх Xray на Entry-ноде, SOCKS-петля){NC}")
+        _box_sep()
+        _box_item("W", f"🌐 Веб-панель управления  {DIM}(Admin Panel + User Portal + REST API){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -6209,6 +6211,8 @@ def _menu_install_system() -> None:
             except ImportError as _e:
                 warn(f"Модуль Mieru Hybrid Addon не найден: {_e}")
                 time.sleep(2)
+        elif ch.lower() == "w":
+            do_manage_web_panel()
         elif ch.lower() == "q" or ch == "":
             break
         else:
@@ -7132,6 +7136,8 @@ def _menu_diagnostics() -> None:
         _box_item("F7", f"🔀 Фрагментация + Mux  {DIM}(мультиплексирование потоков){NC}")
         _box_item("F8", f"🔄 Watchdog  {DIM}(автопереключение пресетов при RST){NC}")
         _box_item("F9", f"📈 Статистика эффективности фрагментации")
+        _box_sep()
+        _box_item("DT", f"🧪 Диагностические тесты  {DIM}(unit-тесты по группам){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -7219,6 +7225,13 @@ def _menu_diagnostics() -> None:
             do_fragment_watchdog_menu()
         elif ch.lower() in ("f9",):
             do_fragment_stats_menu()
+        elif ch.lower() == "dt":
+            try:
+                from vless_installer.modules.test_runner import do_test_runner_menu
+                do_test_runner_menu()
+            except ImportError as _e:
+                warn(f"Модуль тестов не найден: {_e}")
+                time.sleep(2)
         elif ch.lower() == "q" or ch == "":
             break
         else:
@@ -7802,19 +7815,11 @@ def main_menu() -> None:
             _box_row(f"     {DIM}Standalone AWG-сервер + carrier-пресеты + каскад RU→зарубеж{NC}")
             _box_row()
             _box_sep()
-            _box_row(f"  {CYAN}W{NC}  🌐 {TITLE}Веб-панель управления{NC}")
-            _box_row(f"     {DIM}Admin Panel + User Portal + REST API{NC}")
-            _box_row()
-            _box_sep()
-            _box_row(f"  {CYAN}T{NC}  🧪 {TITLE}Диагностические тесты{NC}")
-            _box_row(f"     {DIM}Unit-тесты по группам: AWG, Hysteria2, Mieru, Fragment, безопасность{NC}")
-            _box_row()
-            _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–16 / T / W / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–16 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -7916,17 +7921,6 @@ def main_menu() -> None:
                 do_manage_awg_standalone()
             except ImportError as _e:
                 warn(f"Модуль AmneziaWG standalone не найден: {_e}")
-                time.sleep(2)
-
-        elif choice.lower() == "w":
-            do_manage_web_panel()
-
-        elif choice.lower() == "t":
-            try:
-                from vless_installer.modules.test_runner import do_test_runner_menu
-                do_test_runner_menu()
-            except ImportError as _e:
-                warn(f"Модуль тестов не найден: {_e}")
                 time.sleep(2)
 
         elif choice == "0":
