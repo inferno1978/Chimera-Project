@@ -2,6 +2,105 @@
 
 ---
 
+## v4.20.5 — FIX (BLOCKING): tests/test_telemt_nginx_fallback.py не компилировался — "все тесты зелёные" в v4.20.3/v4.20.4 непроверяемо — 12 июля 2026
+
+### 🐛 Регресс инфраструктуры тестов
+
+`python3 -m py_compile tests/test_telemt_nginx_fallback.py` падал с `SyntaxError: too many statically nested blocks` на строках 1212/1338/1380. Файл не импортировался ни через pytest, ни через голый py_compile — соответственно ни одно из заявлений "183/170/157 тестов зелёные" в коммит-мессаджах v4.20.3 и v4.20.4 **не могло быть реально проверено запуском**.
+
+**Причина:** Python парсит `with A, B, C, ...:` как вложенные `with` блоки на уровне AST — каждый context manager в одном with-выражении добавляет уровень вложенности. В CPython есть жёсткий лимит на statically nested blocks (parser limit), и 3 теста из v4.20.3 имели один `with` на 18-20 сцепленных `patch.object(...)`/`patch(...)` подряд. В некоторых окружениях (зависит от версии Python и сборки) лимит ниже, и файл не компилировался.
+
+Бисект по коммитам подтвердил: было OK на `b935c34`/`6e9d7fb`, сломано начиная с `5823df7` (v4.20.3), не починено в `5dd6551` (v4.20.4).
+
+### 🔧 Фикс
+
+#### A. `tests/test_telemt_nginx_fallback.py` — 3 места переписаны через `contextlib.ExitStack()`
+
+Вместо одного цепного `with A, B, C, ...:` на 18-20 context managers — `ExitStack` + `stack.enter_context(patch.object(...))` для каждого патча отдельно. Семантика не изменилась: каждый patch активен ровно там же, где и раньше, отменяется в том же порядке при выходе из блока. Ассерты после блока не тронуты.
+
+**Найденные и исправленные места (аудит через `ast.NodeVisitor` на `with`-узлы с ≥10 context managers):**
+
+| Было (line) | Context managers | Тест |
+|---|---|---|
+| ~1212 | **20** | `TestSetupOwnSiteOrderOfOperations.test_setup_nginx_temp_called_before_obtain_ssl_cert` |
+| ~1338 | **18** | `TestSelfSignedDetection.test_setup_own_site_rolls_back_on_self_signed` |
+| ~1380 | **20** | `TestSelfSignedDetection.test_setup_own_site_proceeds_on_valid_le_cert` |
+| ~1499 | 10 | `TestNginxHardeningUnlinkBeforeRestart.test_setup_nginx_temp_unlinks_symlink_before_restart_on_failure` (заодно для единообразия) |
+
+#### B. Общий helper `_enter_mtproto_ui_patches(stack, mtproto_mod)`
+
+Все 3 теста мокали одинаковый набор из 13 UI/log-хелперов mtproto (`_banner`, `_box_top`, `_box_row`, `_box_sep`, `_box_item`, `_box_bot`, `_box_info`, `_ok`, `_err`, `_warn`, `_info`, `proto_ask`, `builtins.print`). Вынесено в общий helper в начале файла — меньше дублирования на будущее. Использование:
+
+```python
+with ExitStack() as stack:
+    _enter_mtproto_ui_patches(stack, mtproto)
+    # ... специфичные для теста stack.enter_context(patch.object(...))
+    result = mtproto._setup_own_site("telemt.example.com", 8443)
+```
+
+#### C. Аудит остальных `tests/*.py`
+
+Прошёлся по всем `tests/*.py` через `ast.NodeVisitor` на `with`-узлы с ≥15 context managers (порог из тикета). **Ничего похожего не найдено** — максимальное значение в других файлах 12 CM (`tests/test_dpi_detector.py:239`), что ниже порога 15+. Список всех with-цепочек с 8+ CM в репо (для будущего аудита):
+
+```
+tests/test_awg_cascade.py:450: 8 CM
+tests/test_awg_cascade.py:483: 8 CM
+tests/test_awg_cascade.py:511: 8 CM
+tests/test_awg_standalone.py:273: 9 CM
+tests/test_awg_standalone.py:346: 9 CM
+tests/test_awg_standalone.py:393: 9 CM
+tests/test_awg_diagnose.py:331: 8 CM
+tests/test_dpi_detector.py:239: 12 CM
+tests/test_dpi_detector.py:291: 8 CM
+tests/test_dpi_detector.py:332: 8 CM
+tests/test_dpi_detector.py:376: 8 CM
+tests/test_geo_files.py:198: 10 CM
+tests/test_geo_files.py:237: 10 CM
+tests/test_geo_files.py:277: 8 CM
+tests/test_geo_files.py:383: 10 CM
+tests/test_mieru_download.py:169: 10 CM
+```
+
+Ничего из этого не тронуто — все ниже порога 15+, и пользователь явно указал "если где-то ещё есть аналогичная цепочка на 15+ patch".
+
+### 🧪 Реальный вывод тестов (не текстовое заявление)
+
+```
+$ python3 -m py_compile tests/test_telemt_nginx_fallback.py && echo COMPILE_OK
+COMPILE_OK
+
+$ python3 -m pytest tests/test_telemt_nginx_fallback.py -v 2>&1 | tail -10
+tests/test_telemt_nginx_fallback.py::TestSetupOwnSiteOrderOfOperations::test_setup_nginx_temp_called_before_obtain_ssl_cert PASSED [ 78%]
+tests/test_telemt_nginx_fallback.py::TestSelfSignedDetection::test_is_cert_self_signed_returns_false_when_issuer_neq_subject PASSED [ 80%]
+tests/test_telemt_nginx_fallback.py::TestSelfSignedDetection::test_is_cert_self_signed_returns_true_when_cert_missing PASSED [ 82%]
+tests/test_telemt_nginx_fallback.py::TestSelfSignedDetection::test_is_cert_self_signed_returns_true_when_issuer_equals_subject PASSED [ 84%]
+tests/test_telemt_nginx_fallback.py::TestSelfSignedDetection::test_setup_own_site_proceeds_on_valid_le_cert PASSED [ 86%]
+tests/test_telemt_nginx_fallback.py::TestSelfSignedDetection::test_setup_own_site_rolls_back_on_self_signed PASSED [ 88%]
+tests/test_telemt_nginx_fallback.py::TestNginxHardeningUnlinkBeforeRestart::test_setup_nginx_final_awg_unlinks_on_failure PASSED [ 90%]
+tests/test_telemt_nginx_fallback.py::TestNginxHardeningUnlinkBeforeRestart::test_setup_nginx_final_own_site_unlinks_on_failure PASSED [ 92%]
+tests/test_telemt_nginx_fallback.py::TestNginxHardeningUnlinkBeforeRestart::test_setup_nginx_final_reality_keeps_symlink_on_expected_failure PASSED [ 94%]
+tests/test_telemt_nginx_fallback.py::TestNginxHardeningUnlinkBeforeRestart::test_setup_nginx_temp_unlinks_symlink_before_restart_on_failure PASSED [ 96%]
+tests/test_telemt_nginx_fallback.py::TestSelectDomainReturns::test_known_category_returns_str PASSED [ 98%]
+tests/test_telemt_nginx_fallback.py::TestSelectDomainReturns::test_q_returns_ivi_default PASSED [100%]
+
+============================== 50 passed in 4.61s ==============================
+
+$ python3 -m pytest tests/test_mtproto.py tests/test_ssl_certbot.py tests/test_nginx_watchdog.py tests/test_telemt_fallback.py tests/test_telemt_nginx_fallback.py 2>&1 | tail -5
+tests/test_telemt_fallback.py .....................                      [ 72%]
+tests/test_telemt_nginx_fallback.py .................................... [ 92%]
+..............                                                           [100%]
+============================= 183 passed in 13.91s =============================
+```
+
+### 🚫 Что НЕ трогали
+
+- **Production-код** (`mtproto.py`, `nginx_setup.py`, `ssl_certbot.py`) — НЕ менялся в этом фиксе вообще. Это чисто тестовая инфраструктурная проблема.
+- `_core.py`, `telemt_fallback.py`, AWG-модули, mirrors/downloader, TUI test runner — не тронуты.
+- Логика самих тестов (что мокается и что проверяется) — не менялась, только механика множественных patch.
+- Остальные тестовые файлы (`tests/*.py`) — аудит проведён, ничего 15+ CM не найдено, ничего не тронуто.
+
+---
+
 ## v4.20.4 — FIX (BLOCKING): revert hardening в REALITY-ветке setup_nginx_final() — ломает обычную установку VLESS — 12 июля 2026
 
 ### 🐛 Регресс
