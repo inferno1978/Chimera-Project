@@ -2340,8 +2340,8 @@ def awg_full_setup() -> None:
     print()
     _AWG_TITLE       = "AmneziaWG 2.0 — Установка"
     _AWG_TITLE_COLOR = '\033[1;33m'   # жёлтый + жирный
-    _title_lpad = (_BOX_W - len(_AWG_TITLE)) // 2
-    _title_rpad = _BOX_W - len(_AWG_TITLE) - _title_lpad
+    _title_lpad = (_BOX_W - _wcslen(_AWG_TITLE)) // 2
+    _title_rpad = _BOX_W - _wcslen(_AWG_TITLE) - _title_lpad
     print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
     print(f"{CYAN}║{NC}{' ' * _title_lpad}{_AWG_TITLE_COLOR}{_AWG_TITLE}{NC}{' ' * _title_rpad}{CYAN}║{NC}")
     _scheme_text = f"  Схема: Клиент → Xray(RU) → awg0 → {AWG_EXIT_HOST} → Интернет"
@@ -2460,8 +2460,8 @@ def awg_full_setup() -> None:
         # ── Финальный бокс — полностью зелёный ───────────────────────────
         print()
         _AWG_DONE     = "AmneziaWG 2.0 установлен и настроен"
-        _done_lpad    = (_BOX_W - len(_AWG_DONE)) // 2
-        _done_rpad    = _BOX_W - len(_AWG_DONE) - _done_lpad
+        _done_lpad    = (_BOX_W - _wcslen(_AWG_DONE)) // 2
+        _done_rpad    = _BOX_W - _wcslen(_AWG_DONE) - _done_lpad
         print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
         print(f"{CYAN}║{NC}{' ' * _done_lpad}{GREEN}{BOLD}{_AWG_DONE}{NC}{' ' * _done_rpad}{CYAN}║{NC}")
         print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
