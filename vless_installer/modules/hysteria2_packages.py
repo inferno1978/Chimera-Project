@@ -97,7 +97,16 @@ def _post_install_hysteria2(src: Path, install_dests: list[Path]) -> bool:
     Шаги:
       1. Проверка ELF magic (первые 4 байта == b'\\x7fELF') — защита от
          усечённых/HTML-загрузок, которые прошли min_size проверку.
-      2. Atomic-replace /usr/local/bin/hysteria:
+      2. RUNTIME-проверка (не путать с ELF magic): запускаем скачанный
+         бинарник с `version` subcommand. Если returncode != 0 — файл
+         битый/несовместимый, возвращаем False БЕЗ удаления старого.
+         Это критическая защита от регрессии: раньше (до Wave 3)
+         h2_update_apply проверял запуск ДО замены; после миграции
+         проверка ушла в post_install, но только ELF magic недостаточен —
+         файл может пройти magic-check и быть битым. Теперь runtime-проверка
+         снова на месте, и защищает ОБА вызова: _install_h2_binary
+         (первичная установка) и h2_update_apply (обновление).
+      3. Atomic-replace /usr/local/bin/hysteria:
          - systemctl stop hysteria-server (если активен — защита от ETXTBSY)
          - unlink старый бинарник (если есть)
          - copy2 нового
@@ -111,10 +120,11 @@ def _post_install_hysteria2(src: Path, install_dests: list[Path]) -> bool:
                      Бинарник ставится как {install_dest}/hysteria.
 
     Возвращает:
-      True если скопировано. False если файл не ELF или копирование упало —
-      даёт fetch_package шанс попробовать следующее зеркало.
+      True если скопировано. False если файл не ELF, не запускается, или
+      копирование упало — даёт fetch_package шанс попробовать следующее
+      зеркало. ВАЖНО: при False старый бинарник НЕ трогается.
     """
-    # 1. Проверка ELF magic
+    # 1. Проверка ELF magic (быстрая, дешёвая)
     try:
         with src.open("rb") as f:
             magic = f.read(4)
@@ -123,7 +133,37 @@ def _post_install_hysteria2(src: Path, install_dests: list[Path]) -> bool:
     except Exception:
         return False
 
-    # 2. Atomic-replace в install_dests[0]/hysteria
+    # 2. RUNTIME-проверка: запускаем бинарник с `version` ДО замены.
+    # Это защищает от битых/несовместимых бинарников которые прошли ELF
+    # magic-check. Если returncode != 0 — возвращаем False, старый
+    # бинарник не трогаем, fetch_package пробует следующее зеркало.
+    try:
+        # Копируем во временный файл с правом исполнения для проверки.
+        # Нельзя chmod сам src — он может быть в /root/ (ручное размещение)
+        # или в /tmp/_download_mgr_* (сетевое скачивание).
+        import tempfile as _tmpmod
+        verify_tmp = Path(_tmpmod.mktemp(suffix="_h2_verify"))
+        shutil.copy2(str(src), str(verify_tmp))
+        verify_tmp.chmod(0o755)
+        try:
+            r = subprocess.run(
+                [str(verify_tmp), "version"],
+                capture_output=True, timeout=15, check=False,
+            )
+        finally:
+            verify_tmp.unlink(missing_ok=True)
+        if r.returncode != 0:
+            # Бинарник не запускается — НЕ трогаем старый, возвращаем False.
+            return False
+    except Exception:
+        # Если не удалось провести runtime-проверку (например, нет прав на
+        # исполнение в tempdir) — отказываемся от замены, возвращаем False.
+        # Это безопаснее чем ставить непроверенный бинарник.
+        return False
+
+    # 3. Atomic-replace в install_dests[0]/hysteria (только после успешной
+    # runtime-проверки — старый бинарник гарантированно не тронут если
+    # новый битый).
     if not install_dests:
         return False
     dest_dir = install_dests[0]

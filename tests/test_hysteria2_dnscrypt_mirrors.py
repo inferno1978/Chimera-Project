@@ -22,8 +22,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from urllib.parse import urlparse
+import subprocess
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
@@ -201,6 +202,89 @@ class TestHysteria2SpecInvariants(unittest.TestCase):
 
 
 # ============================================================================
+#  HYSTERIA2_SPEC post_install — runtime-проверка ДО atomic-replace
+# ============================================================================
+# Regression-тест: h2_update_apply проверял запуск ДО замены; после Wave 3
+# миграции проверка ушла в post_install, но только ELF magic недостаточен.
+# Теперь post_install запускает `<binary> version` ДО unlink старого.
+class TestHysteria2PostInstallRuntimeCheck(unittest.TestCase):
+    """post_install HYSTERIA2_SPEC — runtime-проверка ДО atomic-replace.
+
+    КРИТИЧЕСКИЙ regression-тест: если бинарник проходит ELF magic но не
+    запускается (битый/несовместимый) — post_install должен вернуть False
+    БЕЗ удаления старого бинарника.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        # Создаём "старый" бинарник в install_dest — он НЕ должен быть удалён
+        # если новый не проходит runtime-проверку.
+        self._install_dir = self._tmpdir / "install"
+        self._install_dir.mkdir()
+        self._old_binary = self._install_dir / "hysteria"
+        self._old_binary.write_bytes(b'\x7fELF' + b'old_binary' * 1000)
+        self._old_binary.chmod(0o755)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _make_elf_that_fails_version(self) -> Path:
+        """Создаёт ELF-бинарник который проходит magic-check но падает при запуске."""
+        # Это просто ELF header + мусор — не реальный исполняемый файл.
+        # `subprocess.run([path, "version"])` вернёт ненулевой returncode.
+        src = self._tmpdir / "hysteria-linux-amd64"
+        src.write_bytes(b'\x7fELF' + b'\x00' * 1000)
+        return src
+
+    def test_post_install_returns_false_when_version_check_fails(self):
+        """Бинарник проходит ELF magic но не запускается → False, старый не тронут."""
+        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+
+        src = self._make_elf_that_fails_version()
+        ok = HYSTERIA2_SPEC.post_install(src, [self._install_dir])
+        self.assertFalse(ok, "post_install должен вернуть False если binary не запускается")
+        # Старый бинарник должен быть сохранён
+        self.assertTrue(self._old_binary.exists(),
+                        "Старый бинарник НЕ должен быть удалён при неудачной runtime-проверке")
+        # Содержимое старого бинарника не изменено
+        self.assertIn(b'old_binary', self._old_binary.read_bytes())
+
+    def test_post_install_preserves_old_when_runtime_check_fails(self):
+        """Двойная проверка: старый бинарник survives неудачную попытку."""
+        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+
+        old_size = self._old_binary.stat().st_size
+        src = self._make_elf_that_fails_version()
+        ok = HYSTERIA2_SPEC.post_install(src, [self._install_dir])
+        self.assertFalse(ok)
+        self.assertTrue(self._old_binary.exists())
+        self.assertEqual(self._old_binary.stat().st_size, old_size,
+                         "Старый бинарник не должен быть изменён")
+
+    def test_post_install_replaces_when_runtime_check_passes(self):
+        """Если бинарник запускается успешно — atomic-replace выполняется."""
+        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+
+        # Создаём "бинарник" который успешно запускается.
+        # Используем /bin/true (всегда returncode 0) как заглушку.
+        import shutil as _shutil
+        true_bin = _shutil.which("true") or "/bin/true"
+        src = self._tmpdir / "hysteria-linux-amd64"
+        _shutil.copy2(true_bin, src)
+        # Добавляем ELF magic в начало чтобы пройти magic-check.
+        # /bin/true уже ELF, так что magic есть.
+        ok = HYSTERIA2_SPEC.post_install(src, [self._install_dir])
+        self.assertTrue(ok, "post_install должен вернуть True если binary запускается")
+        # Старый бинарник заменён новым
+        self.assertTrue(self._old_binary.exists())  # путь существует
+        # Содержимое изменилось (больше не содержит 'old_binary')
+        new_content = self._old_binary.read_bytes()
+        self.assertNotIn(b'old_binary', new_content)
+
+
+# ============================================================================
 #  DNSCRYPT_SPEC — инварианты PackageSpec
 # ============================================================================
 class TestDnscryptSpecInvariants(unittest.TestCase):
@@ -246,8 +330,16 @@ class TestPostInstallHysteria2ELFCheck(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _make_elf(self, name: str = "fake-hysteria") -> Path:
+        """Создаёт валидный ELF-бинарник который РЕАЛЬНО запускается.
+
+        Используем /bin/true (всегда returncode 0) — это проходит и ELF
+        magic-check, и runtime-проверку (`<binary> version` → returncode 0).
+        После Wave 3 fix post_install проверяет не только ELF magic, но и
+        реальный запуск бинарника.
+        """
+        import shutil as _shutil
         p = self._tmpdir / name
-        p.write_bytes(b'\x7fELF' + b'\x00' * 100)
+        _shutil.copy2(_shutil.which("true") or "/bin/true", p)
         return p
 
     def _make_non_elf(self, name: str = "fake-html") -> Path:
@@ -256,14 +348,24 @@ class TestPostInstallHysteria2ELFCheck(unittest.TestCase):
         return p
 
     def test_post_install_copies_elf_to_hysteria(self):
-        """post_install копирует ELF → install_dests/hysteria (chmod 0o755)."""
+        """post_install копирует валидный ELF → install_dests/hysteria (chmod 0o755).
+
+        После Wave 3 fix: 'валидный' = проходит ELF magic И запускается
+        (`<binary> version` → returncode 0). Используем /bin/true.
+        """
         from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
 
         install_dir = self._tmpdir / "install"
         src = self._make_elf("hysteria-linux-amd64")
-        # Мокаем systemctl чтобы не трогать реальный сервис
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = unittest.mock.MagicMock(returncode=1)  # service not active
+        # НЕ мокаем subprocess.run полностью — runtime-проверка должна
+        # реально запустить бинарник. Мокаем только systemctl is-active/stop/start
+        # чтобы не трогать реальный hysteria-server сервис.
+        _orig_run = subprocess.run
+        def _mock_run(cmd, *a, **kw):
+            if cmd and cmd[0] == "systemctl":
+                return unittest.mock.MagicMock(returncode=1)  # service not active
+            return _orig_run(cmd, *a, **kw)
+        with patch("subprocess.run", side_effect=_mock_run):
             ok = HYSTERIA2_SPEC.post_install(src, [install_dir])
         self.assertTrue(ok)
         dest = install_dir / "hysteria"
@@ -280,12 +382,18 @@ class TestPostInstallHysteria2ELFCheck(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_post_install_creates_install_dir(self):
+        """install_dest создаётся если не существует (с реальным /bin/true)."""
         from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
 
         install_dir = self._tmpdir / "deeply" / "nested" / "install"
         src = self._make_elf("hysteria-linux-amd64")
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = unittest.mock.MagicMock(returncode=1)
+        # Мокаем только systemctl, runtime-проверка идёт через реальный subprocess
+        _orig_run = subprocess.run
+        def _mock_run(cmd, *a, **kw):
+            if cmd and cmd[0] == "systemctl":
+                return unittest.mock.MagicMock(returncode=1)
+            return _orig_run(cmd, *a, **kw)
+        with patch("subprocess.run", side_effect=_mock_run):
             ok = HYSTERIA2_SPEC.post_install(src, [install_dir])
         self.assertTrue(ok)
         self.assertTrue(install_dir.exists())
