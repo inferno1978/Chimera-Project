@@ -1933,11 +1933,40 @@ def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
             awg_exit_enabled=False, # форсируем не-AWG (TLS терминирует nginx)
             site_template=tmpl,
         )
+        # v4.20.8: явное логирование успеха setup_nginx_final в telemt_install.log
+        # (раньше success/warn из nginx_setup.py писались в core.LOG_FILE, не в
+        # telemt_install.log — мы не видели что произошло внутри setup_nginx_final).
+        _ok(f"setup_nginx_final отработал для {domain}:{mask_port}")
     except Exception as _e:
         _err(f"setup_nginx_final(domain={domain}, port={mask_port}) упал: {_e}")
         _err("Откат к donor-режиму — nginx-fallback без сайта невозможен.")
         _cleanup_own_site(domain)
         return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
+
+    # v4.20.8: проверяем что конфиг реально создан и listener поднялся ДО retry.
+    # Если конфига нет или listener не слушает после reload+sleep — выводим
+    # диагностику (cat конфига + nginx -t stderr) чтобы понять root cause.
+    try:
+        import importlib
+        _core_diag = importlib.import_module("vless_installer._core")
+        _nginx_conf_path = getattr(_core_diag, "NGINX_CONF_DIR", Path("/etc/nginx/conf.d")) / domain
+        _nginx_enabled_path = getattr(_core_diag, "NGINX_ENABLED_DIR", Path("/etc/nginx/sites-enabled")) / domain
+        if not _nginx_conf_path.exists():
+            _err(f"После setup_nginx_final конфиг НЕ создан: {_nginx_conf_path}")
+            _err("Это означает что setup_nginx_final упал молча внутри (без exception).")
+            _err("Откат к donor-режиму.")
+            _cleanup_own_site(domain)
+            return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
+        _ok(f"Конфиг создан: {_nginx_conf_path}")
+        if not _nginx_enabled_path.exists() and not _nginx_enabled_path.is_symlink():
+            _err(f"После setup_nginx_final симлинк НЕ создан: {_nginx_enabled_path}")
+            _err("Возможно nginx -t упал внутри setup_nginx_final и hardening удалил symlink.")
+            _err("Откат к donor-режиму.")
+            _cleanup_own_site(domain)
+            return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
+        _ok(f"Симлинк создан: {_nginx_enabled_path}")
+    except Exception as _e:
+        _warn(f"Диагностика конфига недоступна: {_e}")
 
     # 7) Проверка готовности nginx (КРИТИЧНО — см. _check_mask_backend_ready).
     #    v4.20.7: retry 3 попытки с паузами. reload nginx — async, может
@@ -1957,9 +1986,11 @@ def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
         _err("Без готового nginx tls_emulation=true приведёт к 'early eof' в Telemt.")
         # v4.20.7: диагностика — покажем что именно не так, чтобы пользователь
         # мог понять причину (конфликт портов, битый конфиг, nginx не запущен).
+        # v4.20.8: ИСПРАВЛЕНО — mtproto._run не поддерживает quiet kwarg,
+        # убрал quiet=True (был TypeError → диагностика не выводилась).
         _err("=== Диагностика ===")
         try:
-            _ss_out = _run(["ss", "-tlnH"], capture=True, check=False, quiet=True)
+            _ss_out = _run(["ss", "-tlnH"], capture=True, check=False)
             _ss_lines = [l for l in (_ss_out.stdout or "").splitlines() if f":{mask_port}" in l or "nginx" in l]
             _err(f"ss -tlnH (порт {mask_port} / nginx):")
             for l in (_ss_lines or ["(ничего не слушает)"]):
@@ -1967,12 +1998,32 @@ def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
         except Exception as _e:
             _err(f"  ss недоступен: {_e}")
         try:
-            _nt = _run(["nginx", "-t"], capture=True, check=False, quiet=True)
+            _nt = _run(["nginx", "-t"], capture=True, check=False)
             _err(f"nginx -t: returncode={_nt.returncode}")
             for l in ((_nt.stderr or "")[-500:]).splitlines()[-5:]:
                 _err(f"  {l}")
         except Exception as _e:
             _err(f"  nginx -t недоступен: {_e}")
+        # v4.20.8: выводим содержимое конфига — если конфиг кривой, увидим
+        try:
+            import importlib
+            _core_diag2 = importlib.import_module("vless_installer._core")
+            _cfg_path = getattr(_core_diag2, "NGINX_CONF_DIR", Path("/etc/nginx/conf.d")) / domain
+            if _cfg_path.exists():
+                _err(f"=== Конфиг {_cfg_path} (первые 30 строк) ===")
+                _cfg_text = _cfg_path.read_text()
+                for l in _cfg_text.splitlines()[:30]:
+                    _err(f"  {l}")
+            else:
+                _err(f"Конфиг {_cfg_path} НЕ существует (cleanup уже отработал?)")
+        except Exception as _e:
+            _err(f"  чтение конфига недоступно: {_e}")
+        # v4.20.8: systemctl status nginx — если nginx в failed state
+        try:
+            _st = _run(["systemctl", "is-active", "nginx"], capture=True, check=False)
+            _err(f"systemctl is-active nginx: {_st.stdout.strip() or '(пусто)'}")
+        except Exception as _e:
+            _err(f"  systemctl недоступен: {_e}")
         _err("Откат к donor-режиму + cleanup orphaned-файлов.")
         _cleanup_own_site(domain)
         return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
