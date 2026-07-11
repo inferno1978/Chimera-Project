@@ -2,6 +2,93 @@
 
 ---
 
+## v4.20.6 — FIX: 3 полишн-фикса по итогам реальной установки на проде — 12 июля 2026
+
+После успешной установки Telemt own-site на реальном сервере выявлены 3 проблемы, не ловившиеся тестами. Все 3 фикса — реакция на конкретные баги, обнаруженные при инсталляции у пользователя.
+
+### 🐛 Fix 1: UX-баг — валидация ввода протокола (1/2/3) и порта (A/B/C)
+
+**Симптом на проде:** `telemt.toml` записался с `ipv4 = false\nipv6 = false` → Telemt падал с `Config error: Both ipv4 and ipv6 are disabled in [network]`.
+
+**Причина:** `mtproto.py:_run_install_inner` при вводе "q"/"0"/любого символа отличного от "1"/"2"/"3" в `proto_ask("Протокол [1-3]")` — оба флага `ipv4`/`ipv6` становились `False` (`proto in ("1","3")` → False). Установка продолжалась с сломанным конфигом. Аналогично для порта: `pc == "C"` с некорректным вводом → `except Exception: port = 8443` (молчаливый fallback, не переспрашивал).
+
+**Фикс:** `while True` циклы с валидацией ввода. Для протокола — переспрашиваем пока не будет "1"/"2"/"3" (или Enter=3). Для порта — "A"/"B"/"C" (или Enter=B), плюс проверка `1024 <= port <= 65535` для опции C. При некорректном вводе — `_warn()` с пояснением и повторный запрос.
+
+### 🐛 Fix 2: `nginx -t` silent failure — логирование stderr
+
+**Симптом на проде:** При установке own-site nginx не поднялся на mask_port, но в логе установки было только `[ERR] nginx НЕ слушает 127.0.0.1:8444` без указания причины. Реальная причина — `unknown directive "http2"` (на сервере nginx 1.24.0 < 1.25, нужен старый синтаксис `listen ... ssl http2;`) — была в stderr `nginx -t`, но `_run([nginx, "-t"], quiet=True)` глотал ошибку.
+
+**Причина:** В 4 местах `nginx_setup.py` (setup_nginx_temp, own-site TCP, xHTTP, AWG) при провале `nginx -t` вызывался `warn(...)` с общим текстом, но **без stderr**. Пользователь не видел конкретную ошибку nginx.
+
+**Фикс:** Во всех 4 местах добавлен цикл вывода stderr построчно:
+```python
+warn(f"nginx -t упал для ... vhost {PARAM_DOMAIN}; ...:")
+for _err_line in (r.stderr or "").splitlines()[-10:]:
+    warn(f"  {_err_line}")
+```
+Теперь пользователь видит конкретную ошибку (`unknown directive "http2"`, `duplicate server_name`, `cannot load certificate` и т.п.) и может её исправить.
+
+### 🐛 Fix 3: `_check_mask_backend_ready` — реальный TLS-handshake + проверка cert-chain
+
+**Симптом на проде:** После установки own-site режима Telemt логировал `WARN telemt::maestro::tls_bootstrap: TLS-front fetch not ready within timeout; using cache/default fake cert fallback` — то есть Telemt **не смог** сделать живой TLS-fetch cert-chain с mask_host, откатился на `fake_cert_len=2048`. Инсталлятор при этом репортил успех own-site, потому что `_check_mask_backend_ready` возвращал True.
+
+**Причина:** `_check_mask_backend_ready` был голым TCP-connect (`socket.create_connection`). Ему всё равно, real LE или self-signed сертификат отдаёт nginx — TCP зелёный, проверка проходит. Но Telemt при старте делает **свой собственный** TLS-fetch и проверяет структуру cert-chain. Если cert кривой или self-signed — Telemt фейлит fetch, откатывается на synthetic fake-cert. **Gap между "TCP-connect зелёный" и "nginx реально отдаёт валидный LE-сертификат по TLS"**.
+
+**Фикс:** `_check_mask_backend_ready` теперь:
+1. TCP-connect к `mask_host:mask_port`
+2. TLS-handshake через `ssl.create_default_context()` + `wrap_socket(server_hostname=mask_host)` (SNI для vhost-маршрутизации)
+3. `getpeercert(binary_form=True)` → DER-сертификат
+4. Парсинг через `openssl x509 -issuer -subject -noout -inform DER` → issuer != subject (не self-signed)
+
+Возвращает True **только если все 3 проверки пройдены**. Если TLS-handshake упал (nginx не отдаёт HTTPS) или cert self-signed (issuer == subject) — False → guard в `_run_install_inner` откатывает к donor-режиму с cleanup.
+
+Это закрывает gap: теперь silent regression "TCP зелёный, но Telemt отдаёт fake_cert" невозможен — guard поймает его на этапе установки.
+
+### 🧪 Регрессионные тесты (52 теста в файле, +2 новых)
+
+`tests/test_telemt_nginx_fallback.py`:
+
+**`TestMaskBackendReadinessCheck`** переписан (5 тестов, +2 новых):
+- `test_check_returns_true_on_listening_tls_with_valid_cert` — TLS-сервер с real cert (issuer != subject) → True
+- `test_check_returns_false_on_self_signed_cert` — TLS-handshake успешен, но cert self-signed (issuer == subject) → False (главный guard)
+- `test_check_returns_false_on_plain_tcp_no_tls` — голый TCP без TLS → False (TLS-handshake падает)
+- `test_check_returns_false_on_closed_port` — закрытый порт → False
+- `test_check_returns_false_on_timeout` — RFC 5737 TEST-NET-1 → False
+
+Хелперы `_generate_test_cert` (openssl gen self-signed/CA-signed) + `_start_tls_server` (threaded TLS-сервер на ephemeral порту) для реалистичного тестирования TLS-handshake.
+
+Все 185 связанных тестов (108 mtproto + 25 ssl/nginx/telemt_fallback + 52 telemt_nginx_fallback) — зелёные.
+
+### 📋 Реальный вывод тестов
+
+```
+$ python3 -m py_compile tests/test_telemt_nginx_fallback.py && echo COMPILE_OK
+COMPILE_OK
+
+$ python3 -m pytest tests/test_telemt_nginx_fallback.py -v 2>&1 | tail -15
+tests/test_telemt_nginx_fallback.py::TestNginxHardeningUnlinkBeforeRestart::test_setup_nginx_final_awg_unlinks_on_failure PASSED [ 90%]
+tests/test_telemt_nginx_fallback.py::TestNginxHardeningUnlinkBeforeRestart::test_setup_nginx_final_own_site_unlinks_on_failure PASSED [ 92%]
+tests/test_telemt_nginx_fallback.py::TestNginxHardeningUnlinkBeforeRestart::test_setup_nginx_final_reality_keeps_symlink_on_expected_failure PASSED [ 94%]
+tests/test_telemt_nginx_fallback.py::TestNginxHardeningUnlinkBeforeRestart::test_setup_nginx_temp_unlinks_symlink_before_restart_on_failure PASSED [ 96%]
+tests/test_telemt_nginx_fallback.py::TestSelectDomainReturns::test_known_category_returns_str PASSED [ 98%]
+tests/test_telemt_nginx_fallback.py::TestSelectDomainReturns::test_q_returns_ivi_default PASSED [100%]
+============================== 52 passed in 8.01s ==============================
+
+$ python3 -m pytest tests/test_mtproto.py tests/test_ssl_certbot.py tests/test_nginx_watchdog.py tests/test_telemt_fallback.py tests/test_telemt_nginx_fallback.py 2>&1 | tail -5
+tests/test_telemt_fallback.py .....................                      [ 71%]
+tests/test_telemt_nginx_fallback.py .................................... [ 91%]
+................                                                         [100%]
+============================= 185 passed in 17.32s =============================
+```
+
+### 🚫 Что НЕ трогали
+
+- `_core.py`, `telemt_fallback.py`, AWG-модули, mirrors/downloader, TUI test runner — не тронуты
+- Существующий VLESS install flow — byte-for-byte идентичен (regression guards из v4.20.2 сохранены)
+- `obtain_ssl_cert()` — НЕ менялся; self-signed fallback остался для VLESS-кейса
+
+---
+
 ## v4.20.5 — FIX (BLOCKING): tests/test_telemt_nginx_fallback.py не компилировался — "все тесты зелёные" в v4.20.3/v4.20.4 непроверяемо — 12 июля 2026
 
 ### 🐛 Регресс инфраструктуры тестов

@@ -357,21 +357,91 @@ def _pick_local_nginx_port(telemt_port: int) -> int:
 
 def _check_mask_backend_ready(mask_host: str, mask_port: int,
                               timeout: float = 2.0) -> bool:
-    """Проверяет, что nginx уже слушает mask_host:mask_port (TCP connect).
+    """Проверяет, что nginx уже слушает mask_host:mask_port И отдаёт валидный TLS-сертификат.
+
+    v4.20.6: Раньше это был голый TCP-connect — ему всё равно, real LE или
+    self-signed сертификат. Это приводило к silent regression: Telemt при
+    старте делает живой TLS-fetch cert-chain с mask_host (для tls_emulation=true).
+    Если TCP-connect зелёный, но nginx отдаёт self-signed или кривой cert —
+    Telemt фейлит fetch, ждёт 15 сек, откатывается на fake_cert_len=2048.
+    Инсталлятор репортил успех own-site, а маскировка деградировала.
+
+    Теперь: реальный TLS-handshake через ssl.create_default_context() +
+    проверка что:
+      1. TCP-connect успешен
+      2. TLS-handshake завершён
+      3. Сертификат валидный (issuer != subject — не self-signed)
 
     КРИТИЧНО для tls_emulation=true (telemt/telemt issues #330, #713):
     Telemt при старте делает живой TLS-fetch cert-chain с mask_host. Если
-    nginx ещё не поднялся — fetch падает с "early eof" и Telemt уходит в
-    restart-loop. Эта проверка — явный guard против silent regression в
-    духе AWG rotation no-op.
+    nginx ещё не поднялся или отдаёт кривой cert — fetch падает с "early eof"
+    и Telemt уходит в restart-loop.
 
-    Возвращает True если TCP-connect успешен, False иначе.
+    Возвращает True только если ВСЕ три проверки пройдены.
     """
     import socket as _sock
+    import ssl as _ssl
+    # 1) TCP-connect
     try:
-        with _sock.create_connection((mask_host, mask_port), timeout=timeout):
-            return True
+        raw = _sock.create_connection((mask_host, mask_port), timeout=timeout)
     except (OSError, _sock.timeout):
+        return False
+    # 2) + 3) TLS-handshake + проверка cert-chain
+    try:
+        # НЕ верифицируем против системных CA — нам нужно проверить что
+        # cert-chain ВООБЩЕ отдаётся и issuer != subject (не self-signed).
+        # Telemt делает то же самое: живой fetch + проверка структуры,
+        # а не верификация против CA-bundle.
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        # Оборачиваем raw-socket в TLS. SNI = mask_host (для vhost-маршрутизации
+        # в nginx — важно если на одном IP несколько server_name).
+        tls = ctx.wrap_socket(raw, server_hostname=mask_host)
+        try:
+            der_cert = tls.getpeercert(binary_form=True)
+        finally:
+            tls.close()
+    except (OSError, _ssl.SSLError, ValueError):
+        # TLS-handshake упал — nginx не отдаёт TLS (возможно это не HTTPS-порт,
+        # или cert сконфигурирован криво, или nginx ещё не поднял listener).
+        return False
+    if not der_cert:
+        # Сертификат не получен — TLS-handshake прошёл, но cert пустой.
+        return False
+    # Парсим cert через openssl (как в _is_cert_self_signed) — проверяем
+    # issuer != subject. Self-signed cert = провал own-site (Telemt будет
+    # отдавать его живьём, что для DPI ЗАМЕТНЕЕ fake_cert_len=2048).
+    try:
+        import tempfile as _tf
+        with _tf.NamedTemporaryFile(suffix=".der", delete=False) as _tf_f:
+            _tf_f.write(der_cert)
+            _der_path = _tf_f.name
+        try:
+            r = _run(["openssl", "x509", "-issuer", "-subject", "-noout",
+                      "-inform", "DER", "-in", _der_path],
+                     capture=True, check=False)
+        finally:
+            try: os.unlink(_der_path)
+            except OSError: pass
+        out = (r.stdout or "") + (r.stderr or "")
+        issuer = ""
+        subject = ""
+        for line in out.splitlines():
+            line = line.strip()
+            if line.lower().startswith("issuer="):
+                issuer = line.split("=", 1)[1].strip()
+            elif line.lower().startswith("subject="):
+                subject = line.split("=", 1)[1].strip()
+        if not issuer or not subject:
+            # Не распарсилось — fail-safe, считаем неготовым.
+            return False
+        if issuer == subject:
+            # Self-signed — own-site бессмысленен.
+            return False
+        return True
+    except Exception:
+        # openssl упал — fail-safe.
         return False
 
 
@@ -2080,24 +2150,44 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     _box_item("C", "Свой порт...")
     _box_bot(); print()
 
-    proto = proto_ask(f"{CYAN}Протокол [1-3] (Enter=3): {NC}", default="3", c=True).strip() or "3"
-    ipv4  = proto in ("1", "3")
-    ipv6  = proto in ("2", "3")
+    # v4.20.6: валидация ввода протокола. Раньше при вводе "q"/"0"/пусто/любой
+    # другой символ оба флага (ipv4, ipv6) становились False → в telemt.toml
+    # писалось "ipv4 = false\nipv6 = false" → Telemt падал с
+    # "Config error: Both ipv4 and ipv6 are disabled in [network]".
+    # Теперь переспрашиваем пока не будет валидный ввод.
+    ipv4 = False
+    ipv6 = False
+    while True:
+        proto = proto_ask(f"{CYAN}Протокол [1-3] (Enter=3): {NC}", default="3", c=True).strip() or "3"
+        if proto in ("1", "2", "3"):
+            ipv4 = proto in ("1", "3")
+            ipv6 = proto in ("2", "3")
+            break
+        _warn(f"'{proto}' — недопустимый выбор. Введите 1, 2 или 3 (или Enter для 3).")
 
-    pc = proto_ask(f"{CYAN}Порт [A/B/C] (Enter=B): {NC}", default="B", c=True).strip().upper() or "B"
-    if pc == "A":
-        port = 443
-    elif pc == "C":
-        try:
-            print(f"  {CYAN}Порт (1024-65535): {NC}", end="", flush=True)
-            port = int(input())
-            assert 1024 <= port <= 65535
-        except KeyboardInterrupt:
-            print(); raise _Cancelled()
-        except Exception:
+    # v4.20.6: аналогичная валидация для порта (A/B/C).
+    port = 8443
+    while True:
+        pc = proto_ask(f"{CYAN}Порт [A/B/C] (Enter=B): {NC}", default="B", c=True).strip().upper() or "B"
+        if pc == "A":
+            port = 443
+            break
+        elif pc == "B":
             port = 8443
-    else:
-        port = 8443
+            break
+        elif pc == "C":
+            try:
+                print(f"  {CYAN}Порт (1024-65535): {NC}", end="", flush=True)
+                port = int(input())
+                if 1024 <= port <= 65535:
+                    break
+                _warn(f"Порт {port} вне диапазона 1024-65535.")
+            except ValueError:
+                _warn("Нужно число.")
+            except KeyboardInterrupt:
+                print(); raise _Cancelled()
+        else:
+            _warn(f"'{pc}' — недопустимый выбор. Введите A, B или C (или Enter для B).")
 
     # ── Выбор fake-TLS домена ──────────────────────────────────────────────
     # Возвращает str (donor-домен) ИЛИ OwnSiteConfig (свой домен + nginx

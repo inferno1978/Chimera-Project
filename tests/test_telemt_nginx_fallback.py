@@ -372,25 +372,150 @@ class TestCreateWebsiteIsolationFromGlobalState(unittest.TestCase):
 # ══════════════════════════════════════════════════════════════════════════════
 #  Тест 5: проверка порядка операций (КРИТИЧНО — guard от silent regression)
 # ══════════════════════════════════════════════════════════════════════════════
+def _generate_test_cert(tmpdir, cn="test.example.com", self_signed=True):
+    """Генерирует тестовый сертификат через openssl.
+    Возвращает (cert_path, key_path).
+    self_signed=True  → issuer == subject (self-signed)
+    self_signed=False → добавляет fake CA + подписывает им leaf cert
+    """
+    import subprocess
+    cert_path = str(tmpdir / "cert.pem")
+    key_path = str(tmpdir / "key.pem")
+    if self_signed:
+        subprocess.run([
+            "openssl", "req", "-x509", "-newkey", "rsa:2048",
+            "-keyout", key_path, "-out", cert_path,
+            "-days", "1", "-nodes", "-subj", f"/CN={cn}",
+        ], capture_output=True, check=True)
+    else:
+        ca_key = str(tmpdir / "ca.key")
+        ca_cert = str(tmpdir / "ca.crt")
+        subprocess.run([
+            "openssl", "req", "-x509", "-newkey", "rsa:2048",
+            "-keyout", ca_key, "-out", ca_cert,
+            "-days", "1", "-nodes", "-subj", "/CN=Test CA",
+        ], capture_output=True, check=True)
+        subprocess.run([
+            "openssl", "req", "-newkey", "rsa:2048",
+            "-keyout", key_path, "-out", str(tmpdir / "leaf.csr"),
+            "-days", "1", "-nodes", "-subj", f"/CN={cn}",
+        ], capture_output=True, check=True)
+        subprocess.run([
+            "openssl", "x509", "-req", "-in", str(tmpdir / "leaf.csr"),
+            "-CA", ca_cert, "-CAkey", ca_key, "-CAcreateserial",
+            "-out", cert_path, "-days", "1",
+        ], capture_output=True, check=True)
+    return cert_path, key_path
+
+
+def _start_tls_server(cert_path, key_path, host="127.0.0.1"):
+    """Поднимает TLS-сервер на ephemeral порту. Возвращает (port, thread, stop_event)."""
+    import ssl as _ssl
+    import threading as _threading
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind((host, 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+    ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert_path, key_path)
+    stop_event = _threading.Event()
+    def _serve():
+        srv.settimeout(0.5)
+        while not stop_event.is_set():
+            try:
+                conn, _ = srv.accept()
+                try:
+                    tls = ctx.wrap_socket(conn, server_side=True)
+                    tls.recv(1024)
+                    tls.close()
+                except Exception:
+                    pass
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+        srv.close()
+    t = _threading.Thread(target=_serve, daemon=True)
+    t.start()
+    return port, t, stop_event
+
+
 class TestMaskBackendReadinessCheck(unittest.TestCase):
     """Проверка порядка операций из 2.5: если nginx не слушает mask_port,
     _check_mask_backend_ready должен вернуть False (а вызывающий код в
     _run_install_inner — откатиться к donor-режиму, НЕ молча продолжать).
+
+    v4.20.6: теперь _check_mask_backend_ready делает реальный TLS-handshake
+    и проверяет issuer != subject (не self-signed). Тесты переписаны:
+    вместо голого TCP-сервера поднимается TLS-сервер с real cert.
     """
 
     def setUp(self):
         _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
 
-    def test_check_returns_true_on_listening_port(self):
-        """На реальном слушающем TCP-сокете — True."""
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_check_returns_true_on_listening_tls_with_valid_cert(self):
+        """На TLS-сервере с валидным (не self-signed) cert — True.
+        v4.20.6: теперь это TLS-handshake + issuer != subject проверка,
+        не голый TCP-connect."""
         from vless_installer.modules import mtproto
-        # Поднимаем ephemeral TCP-сервер на 127.0.0.1.
+        cert, key = _generate_test_cert(self._tmpdir, cn="127.0.0.1",
+                                         self_signed=False)
+        port, thread, stop = _start_tls_server(cert, key)
+        try:
+            # Мокаем _run (для openssl x509 -issuer -subject) — возвращаем
+            # разные issuer/subject (валидный LE-подобный cert).
+            from unittest.mock import MagicMock
+            with patch.object(mtproto, "_run",
+                              return_value=MagicMock(
+                                  returncode=0,
+                                  stdout="issuer=CN = Test CA\nsubject=CN = 127.0.0.1\n",
+                                  stderr="")):
+                self.assertTrue(
+                    mtproto._check_mask_backend_ready("127.0.0.1", port, timeout=3.0)
+                )
+        finally:
+            stop.set()
+            thread.join(timeout=2)
+
+    def test_check_returns_false_on_self_signed_cert(self):
+        """TLS-handshake успешен, но cert self-signed (issuer == subject) — False.
+        v4.20.6: это главное — guard ловит silent regression когда nginx
+        отдаёт self-signed вместо real LE."""
+        from vless_installer.modules import mtproto
+        cert, key = _generate_test_cert(self._tmpdir, cn="selfsigned.example.com",
+                                         self_signed=True)
+        port, thread, stop = _start_tls_server(cert, key)
+        try:
+            from unittest.mock import MagicMock
+            with patch.object(mtproto, "_run",
+                              return_value=MagicMock(
+                                  returncode=0,
+                                  stdout="issuer=CN = selfsigned.example.com\n"
+                                         "subject=CN = selfsigned.example.com\n",
+                                  stderr="")):
+                self.assertFalse(
+                    mtproto._check_mask_backend_ready("127.0.0.1", port, timeout=3.0)
+                )
+        finally:
+            stop.set()
+            thread.join(timeout=2)
+
+    def test_check_returns_false_on_plain_tcp_no_tls(self):
+        """На голом TCP-сервере без TLS — False (TLS-handshake упадёт).
+        v4.20.6: это закрытие gap — раньше TCP-connect возвращал True,
+        теперь TLS-handshake проверяет что это реально HTTPS."""
+        from vless_installer.modules import mtproto
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.bind(("127.0.0.1", 0))
         srv.listen(1)
         port = srv.getsockname()[1]
         try:
-            self.assertTrue(
+            self.assertFalse(
                 mtproto._check_mask_backend_ready("127.0.0.1", port, timeout=2.0)
             )
         finally:
@@ -399,12 +524,10 @@ class TestMaskBackendReadinessCheck(unittest.TestCase):
     def test_check_returns_false_on_closed_port(self):
         """На закрытом порту — False (не raise)."""
         from vless_installer.modules import mtproto
-        # Подбираем точно свободный порт: открываем и сразу закрываем.
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
         s.close()
-        # С очень высокой вероятностью порт всё ещё свободен.
         self.assertFalse(
             mtproto._check_mask_backend_ready("127.0.0.1", port, timeout=0.5)
         )
