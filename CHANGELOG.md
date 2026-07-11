@@ -2,6 +2,71 @@
 
 ---
 
+## v4.20.4 — FIX (BLOCKING): revert hardening в REALITY-ветке setup_nginx_final() — ломает обычную установку VLESS — 12 июля 2026
+
+### 🐛 Регресс
+
+Коммит `5823df7` (v4.20.3) применил hardening "при провале `nginx -t` сначала `unlink` симлинка, потом `reload` вместо `restart`" одинаково к 4 местам в `nginx_setup.py`. Для 3 из 4 это правильно. Для REALITY-ветки (основной финальный шаг установки VLESS, вызывается `setup_nginx_final()` БЕЗ аргументов из штатного install flow) — это **регресс, ломающий каждую свежую установку в REALITY-режиме** (дефолтный протокол).
+
+**Почему это регресс:** `nginx_setup.py:870-905` ("=== REALITY: стандартный конфиг через Unix-сокет (VLESS) ===") тестирует итоговый конфиг через **заведомо временный** unix-сокет (создан вручную `socket.bind()+close()`, ничего реально не слушает — строка 870, комментарий "Создаём временный unix-сокет если нет"). Комментарий в коде на строке 905 прямым текстом: *"nginx -t: проверка с временным сокетом (предупреждение ожидаемо)"*. Сразу следом — `sock_path.unlink()` и `systemctl stop nginx` — то есть код изначально рассчитан на **регулярный fail** этой проверки на каждой свежей установке, это не ошибка, а особенность двухфазного бутстрапа: реальный сокет появится позже, nginx стартует "до Xray" уже на финальном шаге установки, за пределами этой функции.
+
+Hardening v4.20.3 добавил в этот else-блок `unlink(link)` — то есть теперь на **каждой обычной REALITY-установке** удалялся только что созданный симлинк основного продакшн-сайта VLESS (`link = NGINX_ENABLED_DIR / PARAM_DOMAIN` — это VLESS-домен сервера, не Telemt-домен). Когда nginx стартует позже финальным шагом, сайта VLESS в `sites-enabled` уже не было → установка завершалась "успешно", но VLESS не работал.
+
+Тест `tests/test_telemt_nginx_fallback.py:1580` (`test_setup_nginx_final_reality_unlinks_on_failure`) закреплял это как "правильное" поведение — мокал `_run` на `returncode=1` для `-t` и assert'ил `unlink`. Тест проверял, что баг работает как задуман, а не что система делает то, что нужно в реальности. Не было ни одного теста на "нормальный REALITY-инсталл переживает ожидаемый temp-socket warning и сайт остаётся включён".
+
+### 🔧 Фикс
+
+#### A. `nginx_setup.py` REALITY-ветка — revert hardening
+
+`setup_nginx_final()` REALITY-ветка else-блок (строки ~895-911) возвращён к оригинальному состоянию (до v4.20.3):
+- Удалён `try: link.unlink() except: pass`
+- Удалён `_run(["systemctl", "reload", "nginx"], …)` — этот reload в v4.20.3 был добавлен "вместо restart", но в REALITY-ветке он тоже не нужен: nginx ещё не запущен (он стартует на финальном шаге установки), reload пустого nginx бессмысленен
+- Восстановлены оригинальные `warn("nginx -t: проверка с временным сокетом (предупреждение ожидаемо):")` + `info("Nginx будет запущен до Xray (финальный шаг установки)")`
+- Добавлен подробный комментарий-предупреждение: "ВНИМАНИЕ: этот else-блок НЕ подлежит hardening …" с объяснением двухфазного бутстрапа — чтобы следующий разработчик не повторил ошибку v4.20.3
+
+#### B. Тест заменён на обратный
+
+`tests/test_telemt_nginx_fallback.py`:
+- Удалён `test_setup_nginx_final_reality_unlinks_on_failure` (закреплял баг как "правильное" поведение)
+- Добавлен `test_setup_nginx_final_reality_keeps_symlink_on_expected_failure` — проверяет обратное: при `returncode=1` (ожидаемый temp-socket warning) symlink **СОХРАНЁН** (нет `unlink` ПОСЛЕ `symlink_to`). Учитывает что `link.unlink(missing_ok=True)` на строке ~884 (перед `symlink_to`) — это легитимная очистка старого symlink'а, его не считаем. Считаем только `unlink` после `symlink_to` через флаг `symlink_to_done`.
+
+### 🚫 Что НЕ трогали (3 остальных места hardening сохранены)
+
+Hardening v4.20.3 **оставлен без изменений** в 3 местах, где провал `nginx -t` — реальная ошибка, не запланированный сценарий:
+
+1. **`setup_nginx_temp()`** (`nginx_setup.py:315-411`) — временный vhost для certbot ACME. Провал `-t` тут — реальная ошибка (домен ещё не резолвится, синтаксис, и т.п.). Тест `test_setup_nginx_temp_unlinks_symlink_before_restart_on_failure` подтверждает.
+2. **`setup_nginx_final()` own-site TCP-ветка** (~570-600) — это НОВЫЙ конфиг для Telemt-домена, никакого "ожидаемого" временного состояния тут нет. Тест `test_setup_nginx_final_own_site_unlinks_on_failure` подтверждает.
+3. **`setup_nginx_final()` AWG-ветка** (~720-770) — тот же довод. Тест `test_setup_nginx_final_awg_unlinks_on_failure` подтверждает.
+
+xHTTP-ветка (~660-715) hardening в v4.20.3 не трогалась и сейчас не трогается — там else уже означает настоящую ошибку без всяких "ожидаемых" сценариев, это было учтено правильно с самого начала.
+
+### 🧪 Регрессионные тесты
+
+`tests/test_telemt_nginx_fallback.py` — 50 тестов (37 v4.20.1/v4.20.2 + 12 v4.20.3 + 1 изменённый v4.20.4):
+
+- **`test_setup_nginx_final_reality_keeps_symlink_on_expected_failure`** (ЗАМЕНЁН) — реальный вызов `setup_nginx_final()` в REALITY-режиме с mock `nginx -t → returncode=1` (ожидаемый temp-socket warning). Проверка через `_tracking_unlink` + `symlink_to_done` флаг: `unlink` для `expected_link` **НЕ вызывается** после `symlink_to`. Симлинк остаётся в `sites-enabled` для финального старта nginx.
+
+Все 183 связанных теста (108 mtproto + 25 ssl/nginx/telemt_fallback + 50 telemt_nginx_fallback) — зелёные.
+
+### 📋 Что проверено реальным вызовом (не signature-check)
+
+| Тест | Что проверяется | Метод |
+|---|---|---|
+| `test_setup_nginx_final_reality_keeps_symlink_on_expected_failure` | При `nginx -t` failure (ожидаемый temp-socket warning) symlink ОСТАЁТСЯ (нет `unlink` после `symlink_to`) | Реальный вызов + mock `_run` returncode=1 + `_tracking_unlink` с флагом `symlink_to_done` для различения легитимного unlink до symlink_to от бага unlink после |
+| `test_setup_nginx_temp_unlinks_symlink_before_restart_on_failure` (не тронут) | `setup_nginx_temp` при failure — symlink удалён | Реальный вызов + mock |
+| `test_setup_nginx_final_own_site_unlinks_on_failure` (не тронут) | own-site TCP ветка при failure — symlink удалён | Реальный вызов + mock |
+| `test_setup_nginx_final_awg_unlinks_on_failure` (не тронут) | AWG-ветка при failure — symlink удалён | Реальный вызов + mock |
+
+### 🚫 Что НЕ трогали (границы)
+
+- `_core.py` — никаких новых module-level глобалов
+- `telemt_fallback.py` — это ДРУГОЙ fallback (Middle Proxy → Direct Mode), не путать
+- `obtain_ssl_cert()` — НЕ менялся
+- AWG-модули, mirrors/downloader, TUI test runner — не тронуты
+- Существующий VLESS install flow — byte-for-byte идентичен (regression guards из v4.20.2: `test_vless_reality_uses_unix_socket`, `test_vless_reality_has_https_redirect`)
+
+---
+
 ## v4.20.3 — FIX (BLOCKING): own-site домен Telemt не получает реальный LE-сертификат — certbot падает молча, self-signed fallback остаётся невидимым для гвардов — 12 июля 2026
 
 ### 🐛 Баг
