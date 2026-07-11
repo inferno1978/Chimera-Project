@@ -31,6 +31,7 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -290,6 +291,89 @@ def _validate_domain(domain: str) -> bool:
         re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9.\-]{0,253}[a-zA-Z0-9])?$', domain)
     )
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  OWN-SITE CONFIG (nginx fallback для Telemt mask)
+# ────────────────────────────────────────────────────────────────────────────
+# Возвращается из _select_domain() когда пользователь выбирает "свой домен +
+# свой сайт (nginx fallback)". None означает donor-режим (текущее поведение).
+# См. CHANGELOG — "Telemt nginx-fallback: собственный домен и сайт вместо
+# чужого donor-домена".
+# ────────────────────────────────────────────────────────────────────────────
+@dataclass
+class OwnSiteConfig:
+    """Параметры локального nginx-сайта для маскировки Telemt.
+
+    domain     — публичный домен (тот же, что и tls_domain в telemt.toml).
+                 К нему привязан A-record → IP сервера; certbot выпускает
+                 Let's Encrypt сертификат.
+    mask_host  — хост, на который Telemt сплайсит failed handshakes.
+                 Всегда "127.0.0.1" в этой итерации (TCP на localhost).
+    mask_port  — TCP-порт nginx на 127.0.0.1 (НЕ должен конфликтовать с
+                 портом самого Telemt). Подбирается helper'ом _pick_local_nginx_port.
+    """
+    domain: str
+    mask_host: str = "127.0.0.1"
+    mask_port: int = 0
+
+
+# Диапазон кандидатов для mask_port. Нижняя граница 8444 — чуть выше
+# дефолтного порта Telemt (8443), верхняя 9999 — ниже регистрационных
+# портов xray/dokodemo (10808, 10811). Избегаем 9000 (часто занят php-fpm).
+_MASK_PORT_CANDIDATES = list(range(8444, 9000)) + list(range(9001, 9999))
+
+
+def _pick_local_nginx_port(telemt_port: int) -> int:
+    """Подбирает свободный TCP-порт на 127.0.0.1 для nginx (mask_host backend).
+
+    Критерии:
+      • НЕ совпадает с портом самого Telemt (telemt_port) — иначе nginx и
+        TelemtListener дерутся за один порт.
+      • НЕ слушается другим процессом на 127.0.0.1 (проверка через ss).
+      • Входит в предопределённый диапазон 8444-9998 (см. _MASK_PORT_CANDIDATES).
+
+    Возвращает 0 если свободный порт не найден (в этом случае caller должен
+    показать ошибку — без mask_port own-site режим не имеет смысла).
+    """
+    try:
+        # Собираем уже занятые порты на loopback (v4+v6).
+        r = _run(["ss", "-tlnH"], capture=True, check=False, quiet=True)
+        listening: set[int] = set()
+        for line in (r.stdout or "").splitlines():
+            # Формат: "LISTEN 0  4096  0.0.0.0:8443  0.0.0.0:*"
+            m = re.search(r'[:\]](\d+)\s', line)
+            if m:
+                listening.add(int(m.group(1)))
+    except Exception:
+        listening = set()
+    for cand in _MASK_PORT_CANDIDATES:
+        if cand == telemt_port:
+            continue
+        if cand in listening:
+            continue
+        return cand
+    return 0
+
+
+def _check_mask_backend_ready(mask_host: str, mask_port: int,
+                              timeout: float = 2.0) -> bool:
+    """Проверяет, что nginx уже слушает mask_host:mask_port (TCP connect).
+
+    КРИТИЧНО для tls_emulation=true (telemt/telemt issues #330, #713):
+    Telemt при старте делает живой TLS-fetch cert-chain с mask_host. Если
+    nginx ещё не поднялся — fetch падает с "early eof" и Telemt уходит в
+    restart-loop. Эта проверка — явный guard против silent regression в
+    духе AWG rotation no-op.
+
+    Возвращает True если TCP-connect успешен, False иначе.
+    """
+    import socket as _sock
+    try:
+        with _sock.create_connection((mask_host, mask_port), timeout=timeout):
+            return True
+    except (OSError, _sock.timeout):
+        return False
+
 def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -477,11 +561,30 @@ def _save_users(users: dict) -> None:
 
 def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
                   socks5_port: int = 0, fallback_cfg=None,
-                  client_mss: str = "") -> None:
+                  client_mss: str = "",
+                  mask_host: str = "",
+                  mask_port: int = 0,
+                  tls_emulation: bool = False) -> None:
     """
     socks5_port > 0  →  upstream через локальный SOCKS5 (xray), иначе direct.
     fallback_cfg     →  FallbackConfig (из telemt_fallback); None = не писать секцию.
     client_mss       →  пресет MSS для TSPU anti-JA4 ("tspu", "2in8", числовой или "").
+    mask_host        →  censorship.mask_host: Telemt сплайсит failed handshakes на
+                        локальный nginx с реальным Let's Encrypt сертификатом
+                        (свой домен + свой сайт). Пустая строка = donor-режим
+                        (поведение идентично предыдущему, byte-for-byte).
+    mask_port        →  censorship.mask_port: TCP-порт nginx на 127.0.0.1.
+                        Если 0 — не пишем (donor-режим использует захардкоженный
+                        mask_port = 443 по умолчанию Telemt-бинарника).
+    tls_emulation    →  censorship.tls_emulation = true: живой TLS-fetch реального
+                        cert-chain с mask_host при старте Telemt (вместо synthetic
+                        fake_cert_len=2048). Требует, чтобы nginx уже слушал
+                        mask_host:mask_port ДО старта Telemt — иначе "early eof"
+                        (telemt/telemt issues #330, #713).
+
+    ВАЖНО: mask_host и mask_unix_sock взаимоисключающи по спецификации Telemt.
+    В этой итерации поддерживается только TCP mask_host (см. CHANGELOG —
+    "Почему не unix-сокет в первой итерации"). Unix-сокет не реализуем.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -509,11 +612,40 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
     ]
     if ipv4: lines += ['[[server.listeners]]', 'ip = "0.0.0.0"', ""]
     if ipv6: lines += ['[[server.listeners]]', 'ip = "::"', ""]
+    # ── Censorship-секция: два режима ────────────────────────────────────────
+    # 1) donor-режим (mask_host=""): поведение byte-for-byte идентично
+    #    предыдущему — Telemt отдаёт synthetic fake-cert (~2048 байт) и
+    #    сплайсит на mask_host = tls_domain (т.е. на ЧУЖОЙ домен-донор).
+    #    Вывод фиксирован: mask=true, mask_port=443, fake_cert_len=2048.
+    # 2) own-site-режим (mask_host="127.0.0.1"): Telemt сплайсит failed
+    #    handshakes на локальный nginx с реальным Let's Encrypt сертификатом
+    #    того же домена (tls_domain). tls_emulation=true — живой TLS-fetch
+    #    cert-chain с mask_host вместо synthetic fake-cert. Это убирает
+    #    детектируемую аномалию fake_cert_len=2048.
+    #
+    # ВАЖНО: mask_host и mask_unix_sock взаимоисключающи (см. шапку функции).
+    # mask_port пишем только в donor-режиме (443, hardcoded) либо в own-site
+    # если явно передан (>0). В own-site при mask_port=0 — не пишем; Telemt
+    # в этом случае использует свой internal default для mask_port.
     censorship_lines = [
         "[timeouts]", "client_handshake = 300", "client_keepalive = 60", "client_ack = 300",
         "", "[censorship]", f'tls_domain = "{tls_domain}"',
-        "mask = true", "mask_port = 443", "fake_cert_len = 2048",
+        "mask = true",
     ]
+    if mask_host:
+        # own-site-режим: добавляем mask_host + tls_emulation (+ mask_port если явно).
+        # fake_cert_len=2048 оставляем — он игнорируется при tls_emulation=true,
+        # но не мешает (Telemt-spec: ключи из donor-режима сохраняются для
+        # обратной совместимости, активен только тот, что соответствует режиму).
+        censorship_lines.append(f'mask_host = "{mask_host}"')
+        if mask_port:
+            censorship_lines.append(f'mask_port = {mask_port}')
+        censorship_lines.append("fake_cert_len = 2048")
+        censorship_lines.append(f'tls_emulation = {str(tls_emulation).lower()}')
+    else:
+        # donor-режим: byte-identical предыдущему выводу.
+        censorship_lines.append("mask_port = 443")
+        censorship_lines.append("fake_cert_len = 2048")
     if client_mss:
         # client_mss принадлежит секции [server] (ServerConfig struct).
         # Тип всегда String — числа тоже в кавычках ("256", "tspu", "2in8" и т.д.)
@@ -1370,8 +1502,21 @@ _DOMAINS: dict = {
            ["microsoft.com", "apple.com", "google.com", "cloudflare.com"]),
 }
 
-def _select_domain() -> str:
-    """Возвращает выбранный домен. Бросает _Cancelled при Ctrl+C."""
+def _select_domain(telemt_port: int = 8443):
+    """Возвращает выбранный домен. Бросает _Cancelled при Ctrl+C.
+
+    Возвращаемое значение:
+      • str            — donor-домен (текущее поведение: microsoft.com, ivi.ru и т.д.).
+                         Caller записывает его в tls_domain без mask_host.
+      • OwnSiteConfig  — own-site режим (новое): пользователь указал свой домен
+                         и хочет nginx-fallback с реальным Let's Encrypt сертификатом.
+                         Caller передаёт config.domain в tls_domain, а
+                         config.mask_host/mask_port/tls_emulation=True — в _write_config().
+
+    Параметр telemt_port нужен для подбора свободного mask_port (НЕ должен
+    конфликтовать с портом самого Telemt). По умолчанию 8443 — стандартный
+    порт Telemt; caller должен передать актуальный выбранный порт.
+    """
     while True:
         _banner()
         _box_top("ВЫБОР FAKE TLS ДОМЕНА")
@@ -1389,14 +1534,7 @@ def _select_domain() -> str:
         if cat.lower() == "q" or not cat:
             return "ivi.ru"
         if cat == "99":
-            try:
-                print("  Домен: ", end="", flush=True)
-                d = input().strip()
-            except KeyboardInterrupt:
-                print(); raise _Cancelled()
-            if d in _PQ_RISKY:
-                _box_warn(f"{d}: возможен блок iOS без OpenSSL 3.5+ (по стороннему тесту).")
-            return d if _validate_domain(d) else "ivi.ru"
+            return _select_own_domain_submenu(telemt_port)
         if cat in _DOMAINS:
             label, doms = _DOMAINS[cat]
             _banner(); _box_top(label); _box_row()
@@ -1421,6 +1559,136 @@ def _select_domain() -> str:
             except ValueError:
                 pass
             return doms[0]
+
+
+def _select_own_domain_submenu(telemt_port: int):
+    """Подменю 'Свой домен' — выбор между donor-режимом и own-site (nginx fallback).
+
+    Возвращает:
+      • str           — donor-режим (как было раньше): просто домен, без nginx.
+      • OwnSiteConfig — own-site режим: домен + mask_host + mask_port; caller
+                        поднимает nginx с Let's Encrypt сертификатом этого домена
+                        и передаёт mask_* в _write_config().
+    """
+    _banner()
+    _box_top("СВОЙ ДОМЕН — ВЫБОР РЕЖИМА")
+    _box_row()
+    _box_info("Donor-режим: Telemt отдаёт synthetic fake-cert (~2048 байт)")
+    _box_info("и сплайсит на ЧУЖОЙ домен. Это детектируемая аномалия.")
+    _box_row()
+    _box_info(f"{GREEN}Own-site{NC}: Telemt сплайсит на локальный nginx с реальным")
+    _box_info(f"Let's Encrypt сертификатом {GREEN}вашего{NC} домена — выглядит как")
+    _box_info(f"настоящий HTTPS-сайт. Один IP, один домен, реальный сайт.")
+    _box_row()
+    _box_item("1", "Donor-домен (как раньше) — просто домен, без сайта")
+    _box_item("2", f"{GREEN}Свой домен + свой сайт (nginx fallback){NC}  ✓ рекомендуется")
+    _box_sep(); _box_item("Q", "← Назад")
+    _box_bot(); print()
+
+    mode = proto_ask(f"{CYAN}Режим [1/2] (Enter=1): {NC}", default="1", c=True).strip() or "1"
+
+    # ── Ввод домена (общий для обоих режимов) ──────────────────────────────
+    try:
+        print(f"  {CYAN}Домен: {NC}", end="", flush=True)
+        d = input().strip()
+    except KeyboardInterrupt:
+        print(); raise _Cancelled()
+
+    if not _validate_domain(d):
+        _warn(f"'{d}' не похож на домен — откат к donor-режиму с ivi.ru.")
+        return "ivi.ru"
+    if d in _PQ_RISKY:
+        _box_warn(f"{d}: возможен блок iOS без OpenSSL 3.5+ (по стороннему тесту).")
+
+    if mode == "2":
+        # ── Own-site режим: подбор mask_port + вызов certbot/nginx_setup ───
+        return _setup_own_site(d, telemt_port)
+
+    # mode == "1" — donor-режим с пользовательским доменом (как раньше).
+    return d
+
+
+def _setup_own_site(domain: str, telemt_port: int) -> OwnSiteConfig:
+    """Поднимает nginx + Let's Encrypt сертификат для domain и возвращает OwnSiteConfig.
+
+    Шаги:
+      1. Подбирает свободный mask_port на 127.0.0.1 (НЕ == telemt_port).
+      2. Спрашивает site_template (аналогично VLESS-инсталлятору).
+      3. Вызывает obtain_ssl_cert(domain=domain) → Let's Encrypt сертификат.
+      4. Вызывает create_website(domain=domain, site_template=...).
+      5. Вызывает setup_nginx_final(domain=domain, port=mask_port, socket_path=None).
+      6. Проверяет, что nginx реально слушает mask_host:mask_port (TCP connect).
+         Если НЕ слушает — _err + откат к donor-режиму (вернёт OwnSiteConfig с
+         mask_port=0; caller видит это и не пишет mask_host в конфиг).
+
+    Возвращает OwnSiteConfig с mask_port > 0 при успехе, mask_port=0 при отказе.
+    """
+    # 1) Подбор порта.
+    mask_port = _pick_local_nginx_port(telemt_port)
+    if not mask_port:
+        _err(f"Не удалось подобрать свободный порт для nginx в диапазоне "
+             f"{_MASK_PORT_CANDIDATES[0]}-{_MASK_PORT_CANDIDATES[-1]} "
+             f"(конфликт с telemt_port={telemt_port}?). Откат к donor-режиму.")
+        return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
+    _ok(f"Свободный порт nginx для маскировки: {mask_port}")
+
+    # 2) Выбор шаблона сайта.
+    _banner()
+    _box_top("ШАБЛОН САЙТА ДЛЯ МАСКИРОВКИ")
+    _box_row()
+    _box_info("Nginx будет отдавать этот сайт для всех не-Telemt запросов.")
+    _box_info("Шаблон можно сменить позже — файлы в /var/www/<домен>/.")
+    _box_row()
+    _box_item("1", "TechHub — IT-портал")
+    _box_item("2", "NexCloud — облачное хранилище")
+    _box_item("3", "Holm & Oak — хоумстейл")
+    _box_item("4", "Ember & Grain — ресторан")
+    _box_item("5", "NexHub — community + cloud")
+    _box_item("6", "ByteForge — tech-форум")
+    _box_sep(); _box_item("Q", "← Отмена (donor-режим)")
+    _box_bot(); print()
+    tmpl = proto_ask(f"{CYAN}Шаблон [1-6] (Enter=2): {NC}", default="2", c=True).strip() or "2"
+    if tmpl.lower() == "q":
+        _info("Откат к donor-режиму.")
+        return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
+
+    # 3) Let's Encrypt сертификат.
+    _info(f"Запуск certbot для {domain}...")
+    try:
+        from vless_installer.modules.ssl_certbot import obtain_ssl_cert
+        obtain_ssl_cert(domain=domain)
+    except Exception as _e:
+        _err(f"obtain_ssl_cert(domain={domain}) упал: {_e}")
+        _err("Откат к donor-режиму — nginx-fallback без сертификата невозможен.")
+        return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
+
+    # 4+5) create_website + setup_nginx_final (передаём domain/port явно —
+    # это НЕ мутирует core.PARAM_DOMAIN, см. Задачу 1 в nginx_setup.py).
+    _info(f"Поднятие nginx-сайта {domain} на порту {mask_port}...")
+    try:
+        from vless_installer.modules.nginx_setup import (
+            create_website as _create_website,
+            setup_nginx_final as _setup_nginx_final,
+        )
+        _create_website(domain=domain, site_template=tmpl)
+        # socket_path=None — явно используем TCP на 127.0.0.1:mask_port,
+        # не unix-сокет (см. CHANGELOG — "Почему не unix-сокет в 1-й итерации").
+        _setup_nginx_final(domain=domain, port=mask_port, socket_path=None)
+    except Exception as _e:
+        _err(f"setup_nginx_final(domain={domain}, port={mask_port}) упал: {_e}")
+        _err("Откат к donor-режиму — nginx-fallback без сайта невозможен.")
+        return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
+
+    # 6) Проверка готовности nginx (КРИТИЧНО — см. _check_mask_backend_ready).
+    _info(f"Проверяю, что nginx слушает 127.0.0.1:{mask_port}...")
+    if not _check_mask_backend_ready("127.0.0.1", mask_port, timeout=3.0):
+        _err(f"nginx НЕ слушает 127.0.0.1:{mask_port} после setup_nginx_final.")
+        _err("Без готового nginx tls_emulation=true приведёт к 'early eof' в Telemt.")
+        _err("Откат к donor-режиму.")
+        return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=0)
+    _ok(f"nginx готов: 127.0.0.1:{mask_port} отвечает.")
+
+    return OwnSiteConfig(domain=domain, mask_host="127.0.0.1", mask_port=mask_port)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ
@@ -1640,7 +1908,23 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     else:
         port = 8443
 
-    tls_domain = _select_domain()
+    # ── Выбор fake-TLS домена ──────────────────────────────────────────────
+    # Возвращает str (donor-домен) ИЛИ OwnSiteConfig (свой домен + nginx
+    # fallback с реальным Let's Encrypt сертификатом). В последнем случае
+    # _select_domain уже успел запустить certbot и поднять nginx на
+    # mask_port — осталось только передать mask_* в _write_config и
+    # проверить готовность nginx перед стартом Telemt.
+    _domain_choice = _select_domain(telemt_port=port)
+    if isinstance(_domain_choice, OwnSiteConfig):
+        tls_domain = _domain_choice.domain
+        _mask_host = _domain_choice.mask_host if _domain_choice.mask_port > 0 else ""
+        _mask_port = _domain_choice.mask_port
+        _tls_emulation = _domain_choice.mask_port > 0
+    else:
+        tls_domain = _domain_choice
+        _mask_host = ""
+        _mask_port = 0
+        _tls_emulation = False
 
     # ── MSS-фрагментация против TSPU JA4 DPI ─────────────────────────────────
     # Шаг обязателен при сервере в РФ; safe skip для прочих регионов.
@@ -1780,8 +2064,12 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     # telemt всегда в режиме direct — xray перехватывается на уровне iptables REDIRECT.
     # use_middle_proxy=True несовместим с каскадом: ME-серверы на :8888 попадают под REDIRECT.
     # Всегда передаём False независимо от ответа пользователя.
+    # _mask_host/_mask_port/_tls_emulation — пустые для donor-режима (поведение
+    # идентично предыдущему), заполненные для own-site режима (см. _select_domain).
     _write_config(port, ipv4, ipv6, tls_domain, users, False, socks5_port=0,
-                  fallback_cfg=_fb_cfg, client_mss=_client_mss)
+                  fallback_cfg=_fb_cfg, client_mss=_client_mss,
+                  mask_host=_mask_host, mask_port=_mask_port,
+                  tls_emulation=_tls_emulation)
     _ok(f"Конфиг: {CONFIG_FILE}")
 
     _info("Устанавливаю зависимости...")
@@ -1833,6 +2121,41 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     _info("Настройка учёта трафика (iptables)...")
     ipt_ok = _setup_accounting(port)
     if ipt_ok: _ok("Учёт трафика активирован.")
+
+    # ── КРИТИЧНЫЙ GUARD: nginx готов ДО старта Telemt? ──────────────────────
+    # Если включён own-site режим (tls_emulation=true), Telemt при старте
+    # делает живой TLS-fetch cert-chain с mask_host:mask_port. Если nginx
+    # ещё не слушает — fetch падает с "early eof" и Telemt уходит в
+    # restart-loop (telemt/telemt issues #330, #713). Это будет silent
+    # regression в духе AWG rotation no-op, поэтому проверяем явно.
+    #
+    # В donor-режиме (_mask_host="") guard пропускается — там нет
+    # живого TLS-fetch, Telemt использует synthetic fake-cert.
+    if _mask_host and _mask_port:
+        _info(f"Проверка готовности nginx { _mask_host}:{_mask_port} перед стартом Telemt...")
+        _nginx_ready = False
+        for _attempt in range(5):
+            if _check_mask_backend_ready(_mask_host, _mask_port, timeout=2.0):
+                _nginx_ready = True
+                break
+            time.sleep(1)
+        if not _nginx_ready:
+            _err(f"nginx НЕ слушает {_mask_host}:{_mask_port} после 5 попыток.")
+            _err("tls_emulation=true без готового nginx приведёт к 'early eof' в Telemt")
+            _err("(telemt/telemt issues #330, #713). Отключаю own-site режим.")
+            # Откатываемся к donor-режиму: переписываем конфиг без mask_host.
+            # tls_domain остаётся тем же — это домен, к которому привязан
+            # certbot-сертификат; Telemt просто использует synthetic fake-cert
+            # вместо живого TLS-fetch.
+            _mask_host = ""
+            _mask_port = 0
+            _tls_emulation = False
+            _write_config(port, ipv4, ipv6, tls_domain, users, False, socks5_port=0,
+                          fallback_cfg=_fb_cfg, client_mss=_client_mss,
+                          mask_host="", mask_port=0, tls_emulation=False)
+            _warn(f"Конфиг переписан в donor-режим: {CONFIG_FILE}")
+        else:
+            _ok(f"nginx готов: {_mask_host}:{_mask_port} отвечает — tls_emulation безопасен.")
 
     _info("Запуск telemt...")
     _run(["systemctl", "start", SERVICE_NAME])
