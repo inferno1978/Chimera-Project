@@ -191,33 +191,20 @@ def awg_install_local() -> bool:
         import json as _json
         tag = _json.loads(r_tag.stdout).get("tag_name", "")
         if tag and _awg_zip_suffix:
-            zip_url = (f"https://github.com/amnezia-vpn/amneziawg-tools/releases/download/"
-                       f"{tag}/{_awg_zip_suffix}")
-            zip_tmp = Path("/tmp/awg-tools.zip")
-            r_dl = _run(
-                ["curl", "-fsSL", "--connect-timeout", "30", "--retry", "3",
-                 zip_url, "-o", str(zip_tmp)],
-                check=False, quiet=True
+            # МИГРАЦИЯ: раньше один прямой URL через curl, без зеркал.
+            # Теперь fetch_package(AWG_TOOLS_SPEC, tag=..., arch=...) — 14
+            # зеркал через urllib (jsDelivr + raw + release + 7 gh-proxy +
+            # Statically), проверка /root/ для ручного размещения.
+            from vless_installer.modules.download_manager import fetch_package
+            from vless_installer.modules.awg_transport_packages import AWG_TOOLS_SPEC
+            # arch нужен для mirror_urls_builder
+            _awg_arch_for_spec = "arm64" if "arm64" in _awg_zip_suffix else "amd64"
+            ok = fetch_package(
+                AWG_TOOLS_SPEC, tag=tag, arch=_awg_arch_for_spec,
+                print_hint_on_failure=False,
             )
-            if r_dl.returncode == 0 and zip_tmp.exists() and zip_tmp.stat().st_size > 1000:
-                extract_dir = Path("/tmp/awg-tools-extracted")
-                extract_dir.mkdir(exist_ok=True)
-                _run(["unzip", "-o", str(zip_tmp), "-d", str(extract_dir)],
-                     check=False, quiet=True)
-                # Ищем бинарники в извлечённой директории
-                for sub in [extract_dir] + list(extract_dir.iterdir()):
-                    awg_bin = sub / "awg" if sub.is_dir() else None
-                    awg_quick_bin = sub / "awg-quick" if sub.is_dir() else None
-                    if awg_bin and awg_bin.exists() and awg_quick_bin and awg_quick_bin.exists():
-                        import shutil as _shutil
-                        _shutil.copy2(str(awg_bin), "/usr/local/bin/awg")
-                        _shutil.copy2(str(awg_quick_bin), "/usr/local/bin/awg-quick")
-                        os.chmod("/usr/local/bin/awg", 0o755)
-                        os.chmod("/usr/local/bin/awg-quick", 0o755)
-                        zip_tmp.unlink(missing_ok=True)
-                        success(f"AWG: amneziawg-tools установлены из GitHub releases ({tag})")
-                        break
-                zip_tmp.unlink(missing_ok=True)
+            if ok:
+                success(f"AWG: amneziawg-tools установлены из GitHub releases ({tag})")
     except Exception as exc:
         warn(f"AWG: не удалось загрузить из GitHub releases: {exc}")
 
@@ -250,28 +237,19 @@ def _awg_install_go_version_binary_only() -> bool:
         success("AWG: amneziawg-go уже установлен")
         return True
 
-    build_dir = Path("/tmp/awg-go-build")
-    build_dir.mkdir(exist_ok=True)
-    src = build_dir / "amneziawg-go"
-    r_clone = _run(
-        ["git", "clone", "--depth=1",
-         "https://github.com/amnezia-vpn/amneziawg-go.git", str(src)],
-        check=False, quiet=True
-    )
-    if r_clone.returncode != 0 or not src.exists():
-        warn("AWG: не удалось клонировать amneziawg-go")
-        return awg_check_tool(AWG_BIN)
-    r_make = _run(["make"], check=False, quiet=True, cwd=str(src),
-                  env={**os.environ, "HOME": str(Path.home())})
-    bin_path = src / "amneziawg-go"
-    if bin_path.exists():
-        shutil.copy2(str(bin_path), str(awg_go_bin))
-        os.chmod(str(awg_go_bin), 0o755)
+    # МИГРАЦИЯ (Wave 6, Variant A): раньше `git clone --depth=1` без зеркал.
+    # Теперь fetch_package(AWG_GO_SOURCE_SPEC) — HTTP tarball через
+    # codeload.github.com (Variant A согласно анализу: Makefile tolerates
+    # missing .git/, submodules отсутствуют). 9 зеркал (прямой GitHub +
+    # codeload + 7 gh-proxy), проверка /root/ для ручного размещения.
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.awg_transport_packages import AWG_GO_SOURCE_SPEC
+
+    ok = fetch_package(AWG_GO_SOURCE_SPEC, print_hint_on_failure=False)
+    if ok:
         success("AWG: amneziawg-go установлен (userspace)")
-        shutil.rmtree(str(build_dir), ignore_errors=True)
         return True
-    warn(f"AWG: сборка amneziawg-go не удалась (rc={r_make.returncode})")
-    shutil.rmtree(str(build_dir), ignore_errors=True)
+    warn("AWG: не удалось скачать/собрать amneziawg-go")
     return awg_check_tool(AWG_BIN)
 
 
@@ -291,35 +269,22 @@ def _awg_install_go_version() -> bool:
         return False
 
     # Используем постоянную директорию вместо tempdir — make падает в /tmp с некоторыми настройками
-    build_dir = Path("/tmp/awg-go-build")
-    build_dir.mkdir(exist_ok=True)
-    src = build_dir / "amneziawg-go"
+    # МИГРАЦИЯ (Wave 6, Variant A): раньше `git clone --depth=1` без зеркал.
+    # Теперь fetch_package(AWG_GO_SOURCE_SPEC) — HTTP tarball (Variant A).
+    # post_install сам делает extract + make + copy в /usr/local/bin/.
+    from vless_installer.modules.download_manager import fetch_package
+    from vless_installer.modules.awg_transport_packages import AWG_GO_SOURCE_SPEC
+
     try:
-        r_clone = _run(
-            ["git", "clone", "--depth=1",
-             "https://github.com/amnezia-vpn/amneziawg-go.git", str(src)],
-            check=False, quiet=True
-        )
-        if r_clone.returncode != 0 or not src.exists():
-            warn("AWG: не удалось клонировать amneziawg-go")
-            return False
-        # ВАЖНО: передаём cwd=src чтобы make работал в правильной директории
-        r_make = _run(["make"], check=False, quiet=True, cwd=str(src),
-                      env={**os.environ, "HOME": str(Path.home())})
-        bin_path = src / "amneziawg-go"
-        if bin_path.exists():
-            shutil.copy2(str(bin_path), "/usr/local/bin/amneziawg-go")
-            os.chmod("/usr/local/bin/amneziawg-go", 0o755)
+        ok = fetch_package(AWG_GO_SOURCE_SPEC, print_hint_on_failure=False)
+        if ok:
             _awg_create_userspace_stubs()
             success("AWG: amneziawg-go установлен (userspace режим)")
-            shutil.rmtree(str(build_dir), ignore_errors=True)
             return True
-        warn(f"AWG: сборка amneziawg-go не удалась (rc={r_make.returncode})")
-        shutil.rmtree(str(build_dir), ignore_errors=True)
+        warn("AWG: не удалось скачать/собрать amneziawg-go")
         return False
     except Exception as exc:
         warn(f"AWG: ошибка сборки amneziawg-go: {exc}")
-        shutil.rmtree(str(build_dir), ignore_errors=True)
         return False
 
 
@@ -937,34 +902,30 @@ def ensure_amneziawg_ready(remote_host: str = None, ssh_fn=None) -> None:
     if "DKMS_DEPS_FAIL" in (r_dkms_deps.stdout or ""):
         warn(f"AWG {_where} ЭТАП 4: не удалось установить зависимости для DKMS")
     else:
-        # Клонируем репозиторий с модулем ядра во временную директорию
-        # Сначала пробуем dkms-install.sh, если нет — make && make install
-        r_dkms = _exec(
-            "TMPDIR=$(mktemp -d) && "
-            "git clone --depth=1 "
-            "  https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git "
-            "  $TMPDIR/awg-kmod 2>/dev/null && "
-            "cd $TMPDIR/awg-kmod && "
-            "(bash ./dkms-install.sh 2>/dev/null || "
-            " (make 2>/dev/null && make install 2>/dev/null)) && "
-            "echo DKMS_BUILD_OK || echo DKMS_BUILD_FAIL",
-            capture=True, check=False,
-        )
+        # МИГРАЦИЯ (Wave 6, Variant A): раньше `git clone --depth=1` внутри
+        # bash one-liner, без зеркал. Теперь fetch_package(AWG_KMOD_SOURCE_SPEC)
+        # — HTTP tarball (Variant A согласно анализу: Makefile в src/ не
+        # использует git, версия hardcoded 1.0.0, submodules отсутствуют).
+        # 9 зеркал (прямой GitHub + codeload + 7 gh-proxy).
+        #
+        # post_install AWG_KMOD_SOURCE_SPEC делает:
+        #   1. extract tarball → amneziawg-linux-kernel-module-master/
+        #   2. cd src/ (ИСПРАВЛЕНО: раньше cd в root, но Makefile в src/)
+        #   3. make dkms-install (fallback: make && make install)
+        #   4. modprobe amneziawg
+        #   5. verify: ip link add test_awg0 type amneziawg && delete
+        from vless_installer.modules.download_manager import fetch_package
+        from vless_installer.modules.awg_transport_packages import AWG_KMOD_SOURCE_SPEC
 
-        if "DKMS_BUILD_OK" in (r_dkms.stdout or ""):
-            # Загружаем только что собранный модуль
-            _exec("modprobe amneziawg 2>/dev/null || true", check=False)
-            r_v3 = _exec(
-                "ip link add test_awg0 type amneziawg 2>/dev/null && "
-                "ip link delete dev test_awg0 2>/dev/null && echo OK || echo FAIL",
-                capture=True, check=False,
-            )
-            if "OK" in (r_v3.stdout or ""):
-                success(f"AWG {_where} ЭТАП 4: модуль собран через DKMS — готово!")
-                success(f"AWG {_where}: [OK] Модуль AmneziaWG установлен и готов")
-                return
-            else:
-                warn(f"AWG {_where} ЭТАП 4: DKMS-сборка прошла, но ip link type amneziawg не работает")
+        try:
+            ok = fetch_package(AWG_KMOD_SOURCE_SPEC, print_hint_on_failure=False)
+        except Exception:
+            ok = False
+
+        if ok:
+            success(f"AWG {_where} ЭТАП 4: модуль собран через DKMS — готово!")
+            success(f"AWG {_where}: [OK] Модуль AmneziaWG установлен и готов")
+            return
         else:
             warn(f"AWG {_where} ЭТАП 4: DKMS-сборка не удалась")
 
