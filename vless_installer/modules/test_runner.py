@@ -92,7 +92,7 @@ TEST_GROUPS: dict[str, dict] = {
     },
     "6": {
         "label": "Протоколы",
-        "description": "MTProto, NaiveProxy, WDTT, Turnable, TurnTunnel, SlipGate, WebDAV, FPTN, olcRTC",
+        "description": "MTProto, NaiveProxy, WDTT, Turnable, TurnTunnel,\nSlipGate, WebDAV, FPTN, olcRTC",
         "tests": [
             "mtproto", "mtproto_stats", "naiveproxy", "naiveproxy_stats",
             "wdtt", "turnable", "turntunnel", "turntunnel_links",
@@ -548,7 +548,10 @@ def do_test_runner_menu() -> None:
             label = group["label"]
             desc = group["description"]
             _box_item(key, f"{BOLD}{label}{NC} ({count} модулей)")
-            _box_row(f"       {DIM}{desc}{NC}")
+            # description может содержать \n для длинных списков —
+            # каждая строка выводится как отдельная _box_row
+            for desc_line in desc.split("\n"):
+                _box_row(f"       {DIM}{desc_line}{NC}")
 
         _box_sep()
         # Все тесты — используем [T] (не [A], т.к. [A] занят группой "Утилиты и UI")
