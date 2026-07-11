@@ -351,7 +351,7 @@ Standalone AmneziaWG 2.0 — отдельный VPN-протокол (не за�
 ```
 vless_installer/
 ├── _core.py              (8 093 строки — ядро, главный orchestrator)
-├── __init__.py           (version = "4.15.0")
+├── __init__.py           (version = "4.20.0")
 ├── __all_exports.py      (реэкспорт API для программного доступа)
 └── modules/              (143 модуля)
     ├── __init__.py

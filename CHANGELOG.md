@@ -2,6 +2,53 @@
 
 ---
 
+## v4.20.0 — Унификация скачивания: единый download_manager.py для всех модулей — 11 июля 2026
+
+### 📦 Миграция всех модулей на `download_manager.fetch_package()`
+
+Все модули проекта, скачивающие бинарники/архивы/исходники для установки, переведены на единый декларативный механизм `PackageSpec` + `fetch_package()` из `vless_installer/modules/download_manager.py`. Устранена дублирующаяся ad-hoc логика скачивания (свои таймауты, свои циклы retry, свои функции «подсказка для ручного скачивания») — теперь каждый пакет описывается одним `PackageSpec`, а `fetch_package()` сам перебирает зеркала, проверяет ручное размещение через WinSCP, копирует в `install_dests` с нужными правами и печатает единообразную подсказку при полном провале.
+
+**Что мигрировано (29 PackageSpec-ов, волны 1-6):**
+- **Волна 1:** `turntunnel.py`, `turnable.py` — бинарники vk-turn-proxy и turnable.
+- **Волна 2:** `wdtt.py`, `webdav_tunnel.py` — source-tarball'ы + общий `GO_TOOLCHAIN_SPEC` для Go toolchain (4 зеркала: go.dev + golang.google.cn + mirrors.aliyun.com + mirrors.tencent.com).
+- **Волна 3:** `hysteria2_auto_update.py`, `hysteria2_exit_mgr.py` (локальная установка), `dnscrypt_setup.py` — бинарник Hysteria2 + tarball dnscrypt-proxy.
+- **Волна 4:** `xray_install.py` (zip + checksums.txt + install-release.sh + geo-файлы), `naiveproxy.py`, `fptn.py`.
+- **Волна 5:** `awg_cascade.py` (ru.zone data feed), `slipgate.py` (install.sh), `telemt_panel.py` (GeoIP .mmdb), `network_bench.py` (iperf3).
+- **Волна 6:** `awg_transport.py` (amneziawg-tools zip + 2 source-tarball'а), `olcrtc.py` (source-tarball + Go toolchain). Все 3 `git clone` кейса переведены на HTTP-tarball через `codeload.github.com` (Variant A) — ни один build-скрипт не требует `.git/`-метаданных или submodule'ов.
+
+**Что НЕ мигрировано (подтверждённые исключения):**
+- `hybrid_addon.py` — standalone-модуль (запускается без клонирования репозитория, только stdlib).
+- `system_deps.py` — apt-repo bootstrap (nginx GPG key + sources.list), не файл-пакет.
+- `hysteria2_exit_mgr.py` remote SSH install — push на удалённый хост по SSH, `install_dests` подразумевает локальные пути.
+- Health-check'и, IP-lookups (api.ipify.org), API-metadata (api.github.com за tag_name), runtime-config fetches (Telegram ME endpoints), bash-скрипты генерируемые в файл — всё это не является «скачиванием пакета для установки» и не мигрировалось.
+
+### 🛡️ Найденные и исправленные баги
+
+- **`filename_builder` kwargs mismatch** (5 случаев): `TURNABLE_SPEC`, `XRAY_ZIP_SPEC`, внутренний `chk_spec`, `FPTN_SPEC` (2 бага — filename_builder и mirror_urls_builder conflict). `fetch_package()` вызывает `spec.filename_builder(**filename_kwargs)` без фильтрации — лямбды с фиксированными параметрами падали с `TypeError`, краша установку turnable/xray/fptn и тихо отключая SHA256-верификацию xray. Ко всем 31 `filename_builder` добавлен `**kw` catch-all для защиты от будущих регрессий.
+- **Потеря safety-инварианта в `hysteria2_auto_update`**: после миграции `post_install` делал atomic-replace (только ELF magic проверка), а runtime-проверка (`<binary> version`) ушла в вызывающий код ПОСЛЕ `fetch_package` — к этому моменту старый бинарник уже удалён. Восстановлён invariant «проверить, потом заменить»: `HYSTERIA2_SPEC.post_install` теперь запускает бинарник ДО atomic-replace, при неудаче возвращает `False` не трогая старый.
+- **Ложный статус SHA256 верификации в `xray_install.py`**: `install_xray()` и `_xray_do_upgrade()` безусловно печатали «SHA256 верифицирован», даже когда `checksums.txt` был недоступен и верификация пропускалась. Добавлена модуль-уровневая переменная `_XRAY_SHA256_STATUS` (`verified`/`skipped`/`no_tag`/`failed`); сообщение печатается только при `verified`, при `skipped`/`no_tag` — `warn`.
+
+### 🧪 Регрессионные тесты
+
+- `tests/test_all_specs_real_fetch_package.py` — 31 тест, по одному на каждый `PackageSpec`. Каждый вызывает НАСТОЯЩИЙ `fetch_package(SPEC, dry_run=True, **real_kwargs)` (НЕ замоканный) с теми же kwargs, что использует call site. `dry_run=True` не лезет в сеть, но выполняет `filename_builder` и `mirror_urls_builder` — единственный способ поймать `TypeError` при рассинхроне сигнатур. Этот тип теста поймал бы все 5 багов `filename_builder` сразу, если бы существовал с самого начала.
+
+### 🧹 Очистка мёртвого кода
+
+Удалены deprecated stubs и неиспользуемые импорты после завершения миграции:
+- `_download_with_mirrors` в `mieru.py`/`mtproto.py`/`telemt_panel.py` — заменены на `fetch_package()`.
+- `_download_binary` stub в `mieru.py` (active `_download_binary` в `turntunnel.py`/`turnable.py`/`naiveproxy.py` остались — это мигрированные функции).
+- `_http_download` в `wdtt.py`/`webdav_tunnel.py`/`olcrtc.py` — заменён на `fetch_package(GO_TOOLCHAIN_SPEC)` / `fetch_package(*_SOURCE_SPEC)`.
+- `GEOIP_SOURCES`, `_http_get`, `_geoip_fetch` в `telemt_panel.py` — заменены на `fetch_package(TELEMT_GEOIP_*_SPEC)`.
+- `tempfile` import в `turntunnel.py`/`turnable.py` — стал unused после миграции.
+
+### 🔧 Прочее
+
+- `honeypot.py`: хардкоженный `v4.11` в генерируемом конфиге заменён на динамическую вставку `vless_installer.__version__` — при следующем бампе версии не отстанет снова.
+- `github_mirrors.py`: добавлена `build_source_archive_mirror_urls()` для `archive/refs/heads/{branch}.tar.gz` URL'ов (используется Wave 2 и Wave 6 для source-tarball'ов).
+- `go_toolchain_mirrors.py` + `go_toolchain_packages.py` — общий `GO_TOOLCHAIN_SPEC` для `wdtt.py`, `webdav_tunnel.py`, `olcrtc.py` (раньше каждый модуль имел свою копию `_http_download` + `_install_go_toolchain`).
+
+---
+
 ## v4.15.0 — AmneziaWG peer management в Web Admin Panel + User Portal + security hardening — 9 июля 2026
 
 ### 🛡️ AmneziaWG-управление в веб-панели

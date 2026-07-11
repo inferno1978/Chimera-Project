@@ -132,12 +132,19 @@ def _honeypot_write_script(port: int, whitelist: list) -> None:
     - Работает как systemd-сервис (бесконечный цикл)
     """
     wl_repr = repr(whitelist)
+    # Динамическая версия — берётся из vless_installer.__version__, чтобы
+    # при бампе версии не нужно было вручную обновлять хардкод здесь.
+    # Раньше был хардкод "v4.11" который отставал от реальной версии.
+    try:
+        from vless_installer import __version__ as _installer_version
+    except Exception:
+        _installer_version = "unknown"
     # Формируем скрипт конкатенацией — без f-string, чтобы не конфликтовать
     # с фигурными скобками Python внутри тела скрипта (format-строки Xray-honeypot)
     script = (
         "#!/usr/bin/env python3\n"
         f"# xray-honeypot.py — автономный honeypot, порт {port}\n"
-        "# Генерируется установщиком VLESS v4.11. Не редактируйте вручную.\n"
+        f"# Генерируется установщиком VLESS v{_installer_version}. Не редактируйте вручную.\n"
         "import socket, subprocess, json, time, os\n"
         "from pathlib import Path\n"
         "from datetime import datetime\n"
