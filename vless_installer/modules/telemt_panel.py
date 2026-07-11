@@ -352,32 +352,6 @@ def _get_latest_release() -> tuple:
     return "latest", urls
 
 
-def _download_with_mirrors(urls, dest: Path, name: str) -> bool:
-    """DEPRECATED: оставлен для обратной совместимости со старыми тестами.
-    Новый код использует fetch_package() из download_manager.py.
-    """
-    if isinstance(urls, str):
-        urls = [urls]
-    for i, url in enumerate(urls, 1):
-        try:
-            host = url.split('/')[2]
-            _info(f"[{i}/{len(urls)}] Скачиваю {name} с {host}...")
-            req = urllib.request.Request(url, headers={"User-Agent": "VLESS-Ultimate-Installer"})
-            with urllib.request.urlopen(req, timeout=60) as r:
-                with open(dest, 'wb') as f:
-                    while True:
-                        chunk = r.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-            if dest.stat().st_size > 0:
-                return True
-        except Exception as e:
-            _err(f"{url.split('/')[2]}: {e}")
-            dest.unlink(missing_ok=True)
-    return False
-
-
 def _install_binary(url) -> bool:
     """Устанавливает бинарник telemt-panel из tar.gz-архива.
 
