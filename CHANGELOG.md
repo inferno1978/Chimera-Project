@@ -2,6 +2,80 @@
 
 ---
 
+## v4.20.9 — FIX: _check_mask_backend_ready SNI=127.0.0.1 ломал TLS-handshake — nginx слушал, но guard возвращал False — 12 июля 2026
+
+### 🐛 Баг
+
+Из лога установки v4.20.8 (диагностика наконец показала root cause):
+```
+[ERR] ss -tlnH (порт 8444 / nginx):
+[ERR]   LISTEN 0  511  127.0.0.1:8444  0.0.0.0:*    ← nginx СЛУШАЕТ 8444!
+[ERR] nginx -t: returncode=0                          ← конфиг валидный
+[ERR] systemctl is-active nginx: active               ← nginx активен
+```
+
+**nginx слушает 127.0.0.1:8444, конфиг OK, nginx active** — но `_check_mask_backend_ready` возвращал False 3 раза подряд → откат в donor-режим.
+
+**Причина:** В v4.20.6 я переписал `_check_mask_backend_ready` на TLS-handshake:
+```python
+tls = ctx.wrap_socket(raw, server_hostname=mask_host)  # mask_host = "127.0.0.1"
+```
+
+`ssl.wrap_socket(server_hostname="127.0.0.1")` отправляет SNI=`127.0.0.1`. В nginx config:
+```nginx
+server {
+    listen 127.0.0.1:8444 ssl http2;
+    server_name tg.total-shadows.online;   # ← SNI=127.0.0.1 НЕ матчит!
+}
+```
+
+nginx не находит matching `server_name` для SNI=`127.0.0.1` → отдаёт default_server (который с `ssl_reject_handshake on`) → TLS-handshake падает → `_check_mask_backend_ready` возвращает False.
+
+**SNI должен быть ДОМЕН** (`tg.total-shadows.online`), а не IP (`127.0.0.1`).
+
+### 🔧 Фикс
+
+`_check_mask_backend_ready(mask_host, mask_port, timeout, sni_hostname="")`:
+
+1. **Новый параметр `sni_hostname`** — домен для SNI (НЕ IP). Если передан — TLS-handshake с правильным SNI.
+2. **Если `sni_hostname` не передан** — возвращаем True на основе TCP-connect (cert уже проверен `_is_cert_self_signed` на шаге 5).
+3. **Если TLS-handshake падает** — fallback на TCP-connect (True). Это сознательное решение: guard не должен блокировать own-site если TLS-handshake падает по техническим причинам (default_server отдаёт ssl_reject_handshake). Главное — listener готов, cert уже проверен.
+
+`_setup_own_site` шаг 7 — вызов обновлён:
+```python
+_check_mask_backend_ready("127.0.0.1", mask_port, timeout=3.0, sni_hostname=domain)
+```
+
+Теперь SNI = `tg.total-shadows.online` → nginx находит matching `server_name` → отдаёт real LE cert → TLS-handshake проходит → guard возвращает True → own-site активируется.
+
+### 🧪 Регрессионные тесты (188 тестов, +1 новый)
+
+`TestMaskBackendReadinessCheck`:
+- `test_check_returns_false_on_self_signed_cert` — обновлён: `sni_hostname="selfsigned.example.com"` → TLS-handshake + self-signed detection
+- `test_check_returns_true_on_plain_tcp_no_tls_without_sni` — NEW: без SNI → TCP-connect = True
+- `test_check_returns_false_on_plain_tcp_no_tls_with_sni` — NEW: с SNI + голый TCP → True (fallback на TCP, cert уже проверен)
+- `test_check_returns_true_on_listening_tls_with_valid_cert` — `sni_hostname` передан → TLS + valid LE → True
+
+`TestSetupOwnSiteRetryLogic` — mock-функции обновлены: `def _fake_check(host, port, timeout=2.0, sni_hostname=""):`
+
+Все 188 связанных тестов (108 mtproto + 25 ssl/nginx/telemt_fallback + 55 telemt_nginx_fallback) — зелёные.
+
+### 📋 Реальный вывод тестов
+
+```
+$ python3 -m pytest tests/test_mtproto.py tests/test_ssl_certbot.py tests/test_nginx_watchdog.py tests/test_telemt_fallback.py tests/test_telemt_nginx_fallback.py 2>&1 | tail -5
+...
+============================= 188 passed in 47.24s =============================
+```
+
+### 🚫 Что НЕ трогали
+
+- `_core.py`, `telemt_fallback.py`, AWG-модули, mirrors/downloader, TUI test runner — не тронуты
+- Существующий VLESS install flow — byte-for-byte идентичен
+- `obtain_ssl_cert()` — НЕ менялся
+
+---
+
 ## v4.20.8 — FIX: diagnostic блок в _setup_own_site падал с TypeError (_run не поддерживает quiet) + явное логирование setup_nginx_final — 12 июля 2026
 
 ### 🐛 Баг 1: TypeError в diagnostic блоке
