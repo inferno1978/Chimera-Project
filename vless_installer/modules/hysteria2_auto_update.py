@@ -98,18 +98,31 @@ def h2_update_apply(force: bool = False) -> bool:
         from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
 
         arch = _detect_arch()
+        # fetch_package(HYSTERIA2_SPEC) вызывает post_install, который:
+        #   1. Проверяет ELF magic.
+        #   2. Запускает `<binary> version` для runtime-проверки ДО замены.
+        #      Если бинарник не запускается — возвращает False, старый
+        #      бинарник НЕ трогается, fetch_package пробует следующее зеркало.
+        #   3. Только после успешной runtime-проверки делает atomic-replace
+        #      (stop → unlink → copy2 → start).
+        # Это восстанавливает invariant "проверить, потом заменить" который
+        # был в старом h2_update_apply и был случайно утерян в исходной
+        # Wave 3 миграции.
         ok = fetch_package(HYSTERIA2_SPEC, arch=arch)
         if not ok:
-            error("Не удалось скачать обновление")
+            error("Не удалось скачать/верифицировать обновление — старый бинарник сохранён")
             return False
 
-        # post_install HYSTERIA2_SPEC уже сделал atomic-replace. Но если
-        # сервис был активен, он уже перезапущен внутри post_install.
-        # Дополнительно проверяем что бинарник действительно обновился.
+        # post_install уже гарантировал что бинарник запускается (runtime-
+        # проверка). Просто читаем версию для лога/state.
         new_ver = _h2_binary_version()
         if not new_ver:
-            error("Бинарник не запускается после обновления, откат невозможен")
-            return False
+            # Этого не должно происходить — post_install уже проверил запуск.
+            # Но если вдруг — логируем warning, не откатываем (binary уже стоит
+            # и прошёл runtime-проверку, _h2_binary_version может просто не
+            # сматчить regex).
+            warn("Версия не определена, но бинарник прошёл runtime-проверку")
+            new_ver = "unknown"
 
         success(f"Hysteria2 обновлён до v{new_ver}")
         _tg_h2_event("h2_update", f"Обновлён до v{new_ver}")
