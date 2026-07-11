@@ -79,13 +79,27 @@ def setup_nginx_rate_limit() -> None:
 # =============================================================================
 #  ШАГ 9: САЙТЫ-ЗАГЛУШКИ
 # =============================================================================
-def create_website() -> None:
+def create_website(domain: Optional[str] = None,
+                   site_template: Optional[str] = None) -> None:
+    """Создаёт сайт-заглушку в /var/www/<domain>/.
+
+    Параметры domain/site_template, переданные явно, ПЕРЕКРЫВАЮТ значения
+    из core.PARAM_DOMAIN / core.PARAM_SITE_TEMPLATE. Если не переданы —
+    поведение идентично предыдущему (VLESS install flow не меняется ни
+    в одном байте вывода).
+
+    Это позволяет параллельно поднимать сайт для VLESS-домена и отдельный
+    сайт для Telemt-домена на одном сервере — без мутации глобального state
+    в _core.py (см. задачу Telemt nginx-fallback в CHANGELOG).
+    """
     core = _core_module()
     info = core.info
     success = core.success
     _run = core._run
-    PARAM_DOMAIN = core.PARAM_DOMAIN
-    PARAM_SITE_TEMPLATE = core.PARAM_SITE_TEMPLATE
+    PARAM_DOMAIN = domain if domain is not None else core.PARAM_DOMAIN
+    PARAM_SITE_TEMPLATE = (
+        site_template if site_template is not None else core.PARAM_SITE_TEMPLATE
+    )
     web_root = Path(f"/var/www/{PARAM_DOMAIN}")
     web_root.mkdir(parents=True, exist_ok=True)
     info(f"Создание шаблона сайта #{PARAM_SITE_TEMPLATE}...")
@@ -364,7 +378,20 @@ def setup_nginx_temp() -> None:
 # (obtain_ssl_cert, fix_letsencrypt_permissions вынесены в
 #  vless_installer.modules.ssl_certbot; импорт — в верхней секции _core.py.)
 
-def setup_nginx_final() -> None:
+def setup_nginx_final(domain: Optional[str] = None,
+                      port: Optional[int] = None,
+                      socket_path: Optional[str] = None) -> None:
+    """Финальная настройка Nginx: HTTPS-сайт + reverse-proxy на Xray backend.
+
+    Параметры domain/port/socket_path, переданные явно, ПЕРЕКРЫВАЮТ значения
+    из core.PARAM_DOMAIN / core.SERVER_PORT / core.PARAM_SOCKET_PATH. Если не
+    переданы — поведение идентично предыдущему (VLESS install flow не меняется
+    ни в одном байте вывода).
+
+    Telemt nginx-fallback вызывает эту функцию с domain=<домен Telemt>,
+    port=<свободный локальный порт>, socket_path=None — Nginx поднимает
+    отдельный HTTPS-сайт для маскировки Telemt, параллельно с VLESS-сайтом.
+    """
     core = _core_module()
     info = core.info
     success = core.success
@@ -375,17 +402,19 @@ def setup_nginx_final() -> None:
     NGINX_CONF_DIR = core.NGINX_CONF_DIR
     NGINX_ENABLED_DIR = core.NGINX_ENABLED_DIR
     NGINX_RATE_LIMIT_CONF = core.NGINX_RATE_LIMIT_CONF
-    PARAM_DOMAIN = core.PARAM_DOMAIN
-    PARAM_SOCKET_PATH = core.PARAM_SOCKET_PATH
+    PARAM_DOMAIN = domain if domain is not None else core.PARAM_DOMAIN
+    PARAM_SOCKET_PATH = (
+        socket_path if socket_path is not None else core.PARAM_SOCKET_PATH
+    )
     PROTOCOL_MODE = core.PROTOCOL_MODE
-    SERVER_PORT = core.SERVER_PORT
+    SERVER_PORT = port if port is not None else core.SERVER_PORT
     AWG_EXIT_ENABLED = core.AWG_EXIT_ENABLED
     XHTTP_PATH = core.XHTTP_PATH
     XHTTP_BACKEND_PORT = core.XHTTP_BACKEND_PORT
     info("Настройка финального конфига Nginx...")
     web_root = Path(f"/var/www/{PARAM_DOMAIN}")
 
-    create_website()
+    create_website(domain=PARAM_DOMAIN)
     NGINX_CONF_DIR.mkdir(parents=True, exist_ok=True)
     NGINX_ENABLED_DIR.mkdir(parents=True, exist_ok=True)
 

@@ -1,6 +1,6 @@
-# VLESS Ultimate Installer v4.20.0
+# VLESS Ultimate Installer v4.20.1
 
-[![Version](https://img.shields.io/badge/version-4.20.0-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
+[![Version](https://img.shields.io/badge/version-4.20.1-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
@@ -14,7 +14,7 @@
 ╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║
  ╚████╔╝ ███████╗███████╗███████║███████║
   ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝
-  Ultimate Installer v4.20.0
+  Ultimate Installer v4.20.1
 ```
 
 ## ⚡ Быстрый старт
@@ -58,6 +58,7 @@ bash bootstrap.sh
 | **v4.13** 🚀 | Полный рефакторинг кодовой базы; добавлены Web Admin Panel, User Portal и REST API |
 | **v4.14** 🔒 | AmneziaWG 2.0 standalone VPN: 13 новых модулей `awg_*.py` (полный порт bivlked/amneziawg-installer), 9 carrier-пресетов (Yota/Tele2/Мегафон/Билайн/T-Mobile US), каскад RU→зарубеж с split-routing, QR+`vpn://` URI, временные клиенты, backup/restore, diagnose с carrier-compare |
 | **v4.15 NEW** 🛡️ | AmneziaWG peer management в веб-панели: новый модуль `awg_rest_api.py` (15 REST endpoints), `owner_email` model (admin видит все пиры, user — только свой), Admin Panel — секция AmneziaWG с CRUD, User Portal — карточка «Мой AmneziaWG» (QR/conf/regen). Security: PSK фильтрация из JSON, QR PNG chmod 0o600, нет print ключа в journal. Bug fixes: порядок nginx→сокет, state.json ДО health check. |
+| **v4.20.1** 🎭 | Telemt nginx-fallback: режим "own-site" — свой домен + свой сайт на локальном nginx вместо чужого donor-домена. Telemt сплайсит failed handshakes на локальный nginx с реальным Let's Encrypt сертификатом (`censorship.mask_host` + `tls_emulation=true`), убирая детектируемую аномалию `fake_cert_len=2048`. Рефакторинг сигнатур `create_website()` / `setup_nginx_final()` / `obtain_ssl_cert()` — опциональные `domain`/`port`/`socket_path` перекрывают `core.PARAM_*` без мутации глобального state. Guard перед стартом Telemt: проверка готовности nginx (TCP connect) — откат к donor-режиму если nginx не слушает (защита от silent regression в духе AWG rotation no-op, telemt/telemt #330 #713). 24 новых регресс-теста. |
 
 ## 📋 Требования
 
