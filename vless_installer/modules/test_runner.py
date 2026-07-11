@@ -504,7 +504,11 @@ def do_test_runner_menu() -> None:
     def _box_top(title: str = "") -> None:
         print(f"  {CYAN}╔{'═' * _BOX_W}╗{NC}")
         if title:
-            pad = _BOX_W - len(title)
+            # Используем display width (не len), чтобы эмодзи и широкие
+            # символы корректно учитывались при центрировании.
+            import unicodedata as _ud
+            w = sum(2 if _ud.east_asian_width(ch) in ('W', 'F') else 1 for ch in title)
+            pad = _BOX_W - w
             lpad = pad // 2
             rpad = pad - lpad
             print(f"  {CYAN}║{NC}{' ' * lpad}{BOLD}{title}{NC}{' ' * rpad}{CYAN}║{NC}")
@@ -521,11 +525,22 @@ def do_test_runner_menu() -> None:
         plain = text
         # Убираем ANSI для расчёта ширины
         import re as _re
+        import unicodedata as _ud
         clean = _re.sub(r'\033\[[0-9;]*m', '', plain)
-        w = len(clean)
+        # display width: эмодзи и wide chars = 2 колонки
+        w = sum(2 if _ud.east_asian_width(ch) in ('W', 'F') else 1 for ch in clean)
         if w > _BOX_W:
-            clean = clean[:_BOX_W - 1] + "…"
-            w = len(clean)
+            # Обрезаем по display width, не по len
+            cut = 0
+            new_clean = ""
+            for ch in clean:
+                cw = 2 if _ud.east_asian_width(ch) in ('W', 'F') else 1
+                if cut + cw > _BOX_W - 1:
+                    break
+                new_clean += ch
+                cut += cw
+            clean = new_clean + "…"
+            w = cut + 1
         pad = max(0, _BOX_W - w)
         print(f"  {CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
 
