@@ -366,5 +366,96 @@ class TestListUsersShowsPassword(_Base):
         self.assertTrue(callable(self.menu._list_users_for_protocol))
 
 
+# ============================================================================
+#  8. _is_valid_listen_ip (v4.23.13)
+# ============================================================================
+class TestIsValidListenIp(_Base):
+    def test_loopback_ipv4(self):
+        self.assertTrue(self.menu._is_valid_listen_ip("127.0.0.1"))
+
+    def test_loopback_ipv6(self):
+        self.assertTrue(self.menu._is_valid_listen_ip("::1"))
+
+    def test_all_ipv4(self):
+        self.assertTrue(self.menu._is_valid_listen_ip("0.0.0.0"))
+
+    def test_all_ipv6(self):
+        self.assertTrue(self.menu._is_valid_listen_ip("::"))
+
+    def test_localhost(self):
+        self.assertTrue(self.menu._is_valid_listen_ip("localhost"))
+
+    def test_concrete_ipv4(self):
+        self.assertTrue(self.menu._is_valid_listen_ip("192.168.1.1"))
+        self.assertTrue(self.menu._is_valid_listen_ip("203.0.113.42"))
+
+    def test_concrete_ipv6(self):
+        self.assertTrue(self.menu._is_valid_listen_ip("2001:db8::1"))
+        self.assertTrue(self.menu._is_valid_listen_ip("::ffff:192.0.2.1"))
+
+    def test_invalid_strings(self):
+        self.assertFalse(self.menu._is_valid_listen_ip(""))
+        self.assertFalse(self.menu._is_valid_listen_ip("not-an-ip"))
+        self.assertFalse(self.menu._is_valid_listen_ip("999.999.999.999"))
+        self.assertFalse(self.menu._is_valid_listen_ip("192.168.1"))
+        self.assertFalse(self.menu._is_valid_listen_ip("192.168.1.1:8080"))
+
+    def test_domain_name_rejected(self):
+        # Имена доменов не должны проходить — только IP/0.0.0.0/::/localhost
+        self.assertFalse(self.menu._is_valid_listen_ip("example.com"))
+
+
+# ============================================================================
+#  9. _build_shadowtls_inbound / _build_anytls_inbound с listen= (v4.23.13)
+# ============================================================================
+class TestBuildInboundListen(_Base):
+    """Тестируем что _build_*_inbound читает listen из state-словаря.
+
+    Прямой unit-тест на builder (без state_init), чтобы не зависеть от
+    тест-изоляции state-файла. Интеграционные тесты на singbox_enable_*
+    с state-файлом уже есть в test_singbox_config.py.
+    """
+    def test_shadowtls_build_reads_listen_from_state(self):
+        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        state_ib = {
+            "listen": "0.0.0.0",
+            "listen_port": 9443,
+            "version": 3,
+            "users": [{"password": "pw", "name": "u1"}],
+            "handshake": {"server": "www.cloudflare.com", "server_port": 443},
+        }
+        built = _build_shadowtls_inbound(state_ib)
+        self.assertEqual(built["listen"], "0.0.0.0")
+        self.assertEqual(built["listen_port"], 9443)
+
+    def test_shadowtls_build_defaults_to_loopback(self):
+        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        # state без listen → дефолт 127.0.0.1 (безопасно)
+        state_ib = {"listen_port": 9443, "users": []}
+        built = _build_shadowtls_inbound(state_ib)
+        self.assertEqual(built["listen"], "127.0.0.1")
+
+    def test_anytls_build_reads_listen_from_state(self):
+        from vless_installer.modules.singbox_config import _build_anytls_inbound
+        state_ib = {
+            "listen": "0.0.0.0",
+            "listen_port": 8444,
+            "users": [{"password": "pw", "name": "u1"}],
+        }
+        built = _build_anytls_inbound(state_ib)
+        self.assertEqual(built["listen"], "0.0.0.0")
+        self.assertEqual(built["listen_port"], 8444)
+
+    def test_anytls_build_defaults_to_loopback(self):
+        from vless_installer.modules.singbox_config import _build_anytls_inbound
+        state_ib = {"listen_port": 8444, "users": []}
+        built = _build_anytls_inbound(state_ib)
+        self.assertEqual(built["listen"], "127.0.0.1")
+
+    def test_change_listen_ip_callable(self):
+        # Дымовой тест — функция существует и callable
+        self.assertTrue(callable(self.menu._change_listen_ip))
+
+
 if __name__ == "__main__":
     unittest.main()
