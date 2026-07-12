@@ -66,104 +66,128 @@ LE_LIVE_DIR = Path("/etc/letsencrypt/live")
 
 
 # ============================================================================
-#  VLESS-WS-CDN — порты и CDN-провайдеры (v4.23)
+#  VLESS-WS-CDN — порты и CDN-провайдеры (v4.23, fixed v4.23.1)
 # ============================================================================
-# ПРОВЕРКА ПОРТОВ CDN (web search 2026-07-12):
+# ПРОВЕРКА ПОРТОВ CDN (web search 2026-07-12, перепроверено v4.23.1):
 #
 # Cloudflare (developers.cloudflare.com/fundamentals/reference/network-ports):
-#   HTTPS-порты, проксируемые CF: 443, 2053, 2083, 2087, 2096, 8443
-#   HTTP-порты: 80, 8080, 8880, 2052, 2082, 2086, 2095
-#   CF terminates TLS своим cert, форвардит на origin по тому же порту
-#   (или по настроенному Origin Rules). 8443 — официально поддерживаемый HTTPS-порт.
+#   HTTP-порты, проксируемые CF: 80, 8080, 8880, 2052, 2082, 2086, 2095
+#   HTTPS-порты: 443, 2053, 2083, 2087, 2096, 8443
+#
+#   v4.23.1: origin НЕ поднимает TLS (см. _build_vless_ws_cdn_inbound —
+#   никакого tls{} блока). Поэтому CDN↔origin должен быть HTTP, не HTTPS.
+#   Для Cloudflare это режим SSL = Flexible (CF↔client = HTTPS, CF↔origin = HTTP).
+#   8443 — HTTPS-only порт в списке CF, НЕ подходит для HTTP origin pull.
+#   Per-provider дефолт для Cloudflare: 8080 (из CF HTTP-списка).
 #
 # Gcore (gcore.com/docs/cdn/cdn-resource-options/general/specify-an-origin-and-the-origin-pull-protocol):
-#   Документация не перечисляет фиксированный список портов.
-#   Origin pull protocol: HTTP / HTTPS / HTTP and HTTPS.
-#   Кастомный порт указывается в origin URL: https://origin.example.com:8443
-#   Default: 80 (HTTP) / 443 (HTTPS). 8443 работает как кастомный origin port.
+#   Origin Pull Protocol: HTTP / HTTPS / HTTP and HTTPS.
+#   Кастомный порт указывается в origin URL: http://origin.example.com:8443
+#   Для HTTP pull: default 80, кастомный — через URL.
+#   8443 работает как кастомный origin port с HTTP scheme.
 #
 # Bunny.net (docs.bunny.net/api-reference/core/pull-zone/add-pull-zone):
 #   Поле OriginPort в API/dashboard — поддерживает произвольный порт.
-#   Default: 80 (HTTP) / 443 (HTTPS). 8443 работает как кастомный origin port.
+#   DnsOriginScheme: HTTP или HTTPS.
+#   Для HTTP pull: OriginPort = 8443, scheme = HTTP.
 #
-# ИТОГ: 8443 — безопасный дефолт для всех трёх CDN.
-# Cloudflare: официально поддержанный HTTPS-порт (HTTPS origin pull на тот же порт).
-# Gcore/Bunny: кастомный origin port через URL или OriginPort field.
+# ИТОГ (v4.23.1): per-provider default port.
+#   Cloudflare: 8080 (из CF HTTP port list — валиден для Flexible mode)
+#   Gcore: 8443 (custom origin URL port, HTTP scheme)
+#   Bunny: 8443 (OriginPort field, HTTP scheme)
 #
-# НЕ использовать 80/8080 — это HTTP-порты Cloudflare, TLS не терминируется,
-# трафик пойдёт plaintext на origin. Для VLESS-WS-CDN обязательно HTTPS origin
-# (CDN terminates TLS своим cert, origin получает plain WS внутри TLS-туннеля).
-DEFAULT_PORT_VLESS_WS_CDN = 8443   # TCP, plain WS внутри TLS-туннеля CDN
+# КРИТИЧНО: origin слушает НЕ по TLS. CDN обязан ходить к origin по HTTP (Flexible),
+# а не HTTPS. Если поставить Full/Full(strict) — CF попытается TLS-handshake к
+# origin, который не отвечает TLS → 521/525 ошибка на стороне CF.
+DEFAULT_PORT_VLESS_WS_CDN = 8080   # Fallback default (Cloudflare HTTP port)
 
 
 # Реестр поддерживаемых CDN-провайдеров.
 # cdn_provider в state — это ключ из этого dict.
 # Каждый провайдер содержит:
-#   display_name — для TUI
-#   instructions — многострочный текст для вывода при enable (что создать
-#                  в панели CDN: DNS-запись, SSL mode, WS support)
+#   display_name  — для TUI
+#   default_port  — рекомендуемый listen_port для этого CDN (v4.23.1)
+#   instructions  — многострочный текст для вывода при enable
+#   ip_source     — URL для live-fetch IP-диапазонов (allowlist, v4.23.1)
+#   ip_format     — "plaintext" | "json_addresses" | "html_scrape"
 CDN_PROVIDERS: dict = {
     "cloudflare": {
         "display_name": "Cloudflare",
+        "default_port": 8080,   # из CF HTTP port list, валиден для Flexible mode
+        "ip_source": "https://www.cloudflare.com/ips-v4",
+        "ip_format": "plaintext",
         "instructions": [
             "1. В Cloudflare Dashboard → DNS → создайте A/AAAA-запись",
             "   для вашего домена (например vless.example.com) с IP сервера.",
             "   Включите оранжевое облако (Proxied) — это обязательно для CDN.",
             "",
-            "2. SSL/TLS → Overview → установите режим 'Full' или 'Full (strict)'.",
-            "   НЕ используйте 'Flexible' — это создаст redirect loop.",
+            "2. SSL/TLS → Overview → установите режим 'Flexible'.",
+            "   Flexible: CF↔client = HTTPS (CF cert), CF↔origin = HTTP (plain).",
+            "   НЕ используйте 'Full' или 'Full (strict)' — origin не имеет TLS,",
+            "   CF получит 521/525 ошибку при попытке HTTPS-handshake к origin.",
             "",
-            "3. SSL/TLS → Edge Certificates → убедитесь что WebSocket включён",
-            "   (по умолчанию ON для всех платных и бесплатных планов).",
+            "3. Rules → Origin Rules → создайте правило:",
+            "   If hostname = vless.example.com, then Destination Port = 8080.",
+            "   Это заставит CF подключаться к origin на порт 8080 (HTTP).",
             "",
-            "4. Network → убедитесь что HTTP/3 (QUIC) и WebSockets ON.",
+            "4. SSL/TLS → Edge Certificates → убедитесь что WebSocket включён",
+            "   (по умолчанию ON для всех планов).",
             "",
-            "5. Cloudflare автоматически терминирует TLS своим cert.",
-            "   Origin (ваш sing-box) слушает plain WS на порту 8443.",
-            "   CF проксирует HTTPS:443 → https://origin:8443 (plain WS).",
+            "5. Network → убедитесь что WebSockets ON.",
             "",
-            "6. Для premium-фич (WAF rules, Bot Fight Mode) — в Security разделе.",
+            "6. Cloudflare терминирует TLS своим cert (CF↔client).",
+            "   Origin (sing-box) слушает plain WS на порту 8080 (CF↔origin = HTTP).",
         ],
     },
     "gcore": {
         "display_name": "Gcore",
+        "default_port": 8443,
+        "ip_source": "https://api.gcore.com/cdn/public-ip-list",
+        "ip_format": "json_addresses",
         "instructions": [
             "1. В Gcore Dashboard → CDN → Resources → Create CDN resource.",
             "",
-            "2. Origin: укажите https://<IP-сервера>:8443",
-            "   (или https://<your-domain>:8443 если есть A-запись).",
-            "   Origin Pull Protocol: HTTPS.",
+            "2. Origin: укажите http://<IP-сервера>:8443",
+            "   (или http://<your-domain>:8443 если есть A-запись).",
+            "   Origin Pull Protocol: HTTP (НЕ HTTPS — origin не имеет TLS).",
             "",
             "3. В Settings → SSL — получите бесплатный SSL-сертификат",
             "   (Let's Encrypt через Gcore, автоматически)",
-            "   для вашего CDN CNAME.",
+            "   для вашего CDN CNAME. Этот cert терминирует TLS клиент↔CDN.",
             "",
             "4. В Settings → WebSocket — включите (по умолчанию может быть OFF).",
             "",
             "5. Назначьте Custom Domain (CNAME на Gcore CDN hostname).",
             "   Создайте CNAME-запись в DNS вашего домена.",
             "",
-            "6. Gcore терминирует TLS своим cert, origin получает plain WS на 8443.",
+            "6. Gcore терминирует TLS своим cert (CDN↔client = HTTPS).",
+            "   Origin получает plain WS на порту 8443 (CDN↔origin = HTTP).",
         ],
     },
     "bunny": {
         "display_name": "Bunny.net",
+        "default_port": 8443,
+        "ip_source": "https://docs.bunny.net/magic-containers/ip-addresses",
+        "ip_format": "html_scrape",
         "instructions": [
             "1. В Bunny.net Dashboard → CDN → Pull Zones → Add Pull Zone.",
             "",
-            "2. Origin URL: https://<IP-сервера>:8443",
+            "2. Origin URL: http://<IP-сервера>:8443",
             "   Origin Port: 8443 (поле OriginPort в API/dashboard).",
+            "   Origin Scheme: HTTP (НЕ HTTPS — origin не имеет TLS).",
             "   Origin Type: URL.",
             "",
             "3. Bunny.net автоматически терминирует TLS своим cert",
             "   (бесплатный SSL через Let's Encrypt для CNAME).",
+            "   Этот cert терминирует TLS клиент↔CDN.",
             "",
             "4. В Pull Zone → Settings → включите WebSocket (если есть toggle).",
             "",
             "5. Назначьте Custom Hostname (CNAME на bunny.net pull zone hostname).",
             "   Создайте CNAME-запись в DNS вашего домена.",
             "",
-            "6. Bunny.net терминирует TLS своим cert, origin получает plain WS на 8443.",
+            "6. Bunny.net терминирует TLS своим cert (CDN↔client = HTTPS).",
+            "   Origin получает plain WS на порту 8443 (CDN↔origin = HTTP).",
         ],
     },
 }
