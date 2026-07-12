@@ -2086,12 +2086,25 @@ def _show_client_links(protocol: str) -> None:
     _box_row(f"  {BOLD}Полный sing-box client config.json (v4.23.15):{NC}")
     _box_row(f"  {DIM}Сохраните как config.json → sing-box run -c config.json{NC}")
     _box_row(f"  {DIM}Прокси 127.0.0.1:2080 (mixed). НЕ включайте системный{NC}")
-    _box_row(f"  {DIM}прокси Windows — используйте SwitchyOmega или импорт в Hiddify.{NC}")
+    _box_row(f"  {DIM}прокси Windows — используйте SwitchyOmega или импорт в клиент.{NC}")
     _box_row(f"  {DIM}Запуск на Windows: sing-box.exe run -c config.json{NC}")
     json_str = _gen_singbox_client_json(protocol, state_ib, public_ip, port)
     if json_str:
         for line in json_str.splitlines():
             _box_row(f"  {DIM}{line}{NC}")
+
+    # v4.23.17: примечание про клиентов и импорт JSON
+    if protocol == "shadowtls":
+        _box_sep()
+        _box_row(f"  {YELLOW}⚠  Про клиентов (важно):{NC}")
+        _box_row(f"  {DIM}• URI (ссылка выше) в Hiddify/Nekobox НЕ работает для ShadowTLS v3 —{NC}")
+        _box_row(f"  {DIM}  баг парсера URI: shadowtls_password теряется → 'hmac mismatch'.{NC}")
+        _box_row(f"  {DIM}• Karing: импорт JSON работает. Создаёт 2 профиля (proxy и proxy-out) —{NC}")
+        _box_row(f"  {DIM}  используйте proxy-out (с detour), proxy НЕ подключается.{NC}")
+        _box_row(f"  {DIM}• v2rayN (Windows): импорт JSON возможен, но не проверен.{NC}")
+        _box_row(f"  {DIM}  Если работает — используйте его.{NC}")
+        _box_row(f"  {DIM}• sing-box CLI (Linux/macOS/Windows): sing-box run -c config.json{NC}")
+        _box_row(f"  {DIM}  + SwitchyOmega в браузере на 127.0.0.1:2080.{NC}")
 
     # QR-код
     _box_sep()
