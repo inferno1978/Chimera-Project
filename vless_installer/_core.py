@@ -7839,11 +7839,16 @@ def main_menu() -> None:
             _box_row(f"     {DIM}Standalone AWG-сервер + carrier-пресеты + каскад RU→зарубеж{NC}")
             _box_row()
             _box_sep()
+            _box_row()
+            _box_row(f"  {CYAN}17{NC} 📦 {TITLE}Sing-box (ShadowTLS/AnyTLS/TUIC){NC}  {DIM}(NEW){NC}")
+            _box_row(f"     {DIM}Параллельный backend: TLS-camouflage + QUIC-резерв к Hysteria2{NC}")
+            _box_row()
+            _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–16 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–17 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -7945,6 +7950,14 @@ def main_menu() -> None:
                 do_manage_awg_standalone()
             except ImportError as _e:
                 warn(f"Модуль AmneziaWG standalone не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "17":
+            try:
+                from vless_installer.modules.singbox_menu import do_singbox_menu
+                do_singbox_menu()
+            except ImportError as _e:
+                warn(f"Модуль sing-box не найден: {_e}")
                 time.sleep(2)
 
         elif choice == "0":
