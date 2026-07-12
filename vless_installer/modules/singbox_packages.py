@@ -68,7 +68,7 @@ _MIN_SINGBOX_TARBALL_SIZE = 100_000  # 100 KB
 # используем `tarball_filename` вместо `filename` в filename_kwargs.
 def _singbox_mirror_urls(
     filename: str,
-    tag: str = "1.11.4",
+    tag: str = "",
     tarball_filename: str = "",
     **kw,
 ) -> list[str]:
@@ -77,11 +77,11 @@ def _singbox_mirror_urls(
     filename — передаётся download_manager'ом (имя файла из filename_builder).
     tarball_filename — передаётся caller'ом (динамическое имя tar.gz из GitHub API).
     Берём tarball_filename если передан, иначе filename.
-    tag — release tag.
+    tag — release tag (动态, из GitHub API).
     """
     # Приоритет: tarball_filename (из caller kwargs) > filename (из download_manager)
     actual_filename = tarball_filename or filename
-    if not actual_filename:
+    if not actual_filename or not tag:
         return []
     return get_singbox_mirrors(tag=tag, filename=actual_filename)
 
