@@ -827,6 +827,9 @@ def _switch_cdn_provider() -> None:
     """Переключение CDN-провайдера без потери uuid/ws_path/host (manual switch).
 
     v4.23.1: allowlist переприменяется под новый провайдер.
+    v4.23.2: авто-смена listen_port если текущий = дефолтный порт СТАРОГО провайдера.
+             Если порт был custom (не равен дефолту старого) — порт НЕ трогаем,
+             но warn() о возможной невалидности.
     """
     state = singbox_state_load()
     ib = state.get("inbounds", {}).get("vless_ws_cdn", {})
@@ -837,22 +840,52 @@ def _switch_cdn_provider() -> None:
     new_provider = _pick_cdn_provider(exclude=current)
     if not new_provider:
         return
-    # Сохраняем все остальные поля — меняем только cdn_provider
+
+    # v4.23.2: авто-смена listen_port
+    # Логика: сравниваем текущий listen_port с CDN_PROVIDERS[current]["default_port"].
+    # Если равен — пользователь не менял порт вручную, переключаем на дефолт нового.
+    # Если не равен — custom-порт, не трогаем, но warn().
+    # Это менее надёжно чем отдельный флаг (listen_port_is_custom: bool) при совпадении
+    # дефолтов двух провайдеров, но Gcore и Bunny имеют одинаковый дефолт (8443) —
+    # switch между ними порт не меняет, что корректно. Cloudflare (8080) ≠ Gcore/Bunny
+    # (8443) — switch всегда меняет порт, что тоже корректно.
+    current_default = CDN_PROVIDERS.get(current, {}).get("default_port", 0)
+    new_default = CDN_PROVIDERS.get(new_provider, {}).get("default_port", 0)
+    old_port = port
+
+    if port == current_default:
+        # Порт = дефолт старого провайдера → переключаем на дефолт нового
+        port = new_default
+        if old_port != port:
+            info(f"Порт изменён: {old_port} → {port} "
+                 f"({CDN_PROVIDERS[new_provider]['display_name']} требует порт {port})")
+    elif port != new_default:
+        # Custom-порт, не равен дефолту нового провайдера → warn
+        warn(f"Текущий порт {port} может быть невалиден для "
+             f"{CDN_PROVIDERS[new_provider]['display_name']} "
+             f"(рекомендуется {new_default}). Проверьте вручную.")
+
+    # Сохраняем все остальные поля — меняем cdn_provider (+ порт если сменился)
     ib["cdn_provider"] = new_provider
+    ib["listen_port"] = port
     singbox_state_update_inbound("vless_ws_cdn", **ib)
     singbox_generate_config()
     if _service_active():
         singbox_restart()
 
     # v4.23.1: переприменяем allowlist под новый провайдер
-    if port:
+    # v4.23.2: если порт изменился — снимаем allowlist со старого, применяем на новый
+    if old_port:
         try:
             from vless_installer.modules.singbox_cdn_nets import (
                 remove_cdn_allowlist, apply_cdn_allowlist,
             )
-            # Сначала снимаем старый allowlist
+            # Если порт изменился — снимаем allowlist со старого порта
+            if old_port != port:
+                remove_cdn_allowlist(old_port)
+            # Снимаем allowlist с нового порта (если был старый от другого провайдера)
             remove_cdn_allowlist(port)
-            # Потом применяем новый
+            # Применяем новый allowlist
             apply_cdn_allowlist(new_provider, port)
         except Exception as e:
             warn(f"Allowlist не переприменён: {e}")

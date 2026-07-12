@@ -550,12 +550,16 @@ def singbox_enable_vless_ws_cdn(
     new_ib["enabled"] = True
     new_ib["cdn_provider"] = cdn_provider
     # Per-provider default port (v4.23.1): Cloudflare=8080 (HTTP port list),
-    # Gcore/Bunny=8443. Если listen_port не передан явнo и поле пустое —
-    # берём per-provider default. Если уже задан — сохраняем (не меняем).
+    # Gcore/Bunny=8443. Если listen_port не передан явно:
+    # - Если поле пустое или равно DEFAULT_PORT_VLESS_WS_CDN (общий fallback из
+    #   state init, не per-provider) → берём per-provider default.
+    # - Если уже задан custom → сохраняем (не меняем).
+    from vless_installer.modules.singbox_common import DEFAULT_PORT_VLESS_WS_CDN
     if listen_port:
         new_ib["listen_port"] = listen_port
-    elif not new_ib.get("listen_port"):
-        new_ib["listen_port"] = CDN_PROVIDERS[cdn_provider].get("default_port", 8080)
+    elif (not new_ib.get("listen_port")
+          or new_ib["listen_port"] == DEFAULT_PORT_VLESS_WS_CDN):
+        new_ib["listen_port"] = CDN_PROVIDERS[cdn_provider].get("default_port", DEFAULT_PORT_VLESS_WS_CDN)
     if host:
         new_ib["host"] = host
 

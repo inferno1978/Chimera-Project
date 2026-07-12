@@ -393,18 +393,16 @@ class TestFetchCdnNetsBunny(unittest.TestCase):
     def setUp(self):
         _setup_core()
 
-    def test_fetch_parses_html_ips(self):
-        from vless_installer.modules.singbox_cdn_nets import fetch_cdn_nets
-        html = b"""
-        <html><body>
-        <p>You can use the following IP addresses to whitelist:</p>
-        <code>104.166.147.46</code>
-        <code>109.61.83.105</code>
-        <code>109.61.83.248</code>
-        </body></html>
+    def test_fetch_parses_plain_ips(self):
+        """v4.23.2: Bunny теперь использует plaintext format (edge server list).
+
+        Старый тест test_fetch_parses_html_ips (v4.23.1) проверял html_scrape —
+        формат удалён в v4.23.2. Bunny CDN edge server list = plain text,
+        один IP на строку БЕЗ /32. fetch_cdn_nets добавляет /32.
         """
+        from vless_installer.modules.singbox_cdn_nets import fetch_cdn_nets
         mock_response = MagicMock()
-        mock_response.read.return_value = html
+        mock_response.read.return_value = b"89.187.188.227\n89.187.188.228\n109.61.83.105\n"
         mock_response.__enter__ = lambda self: mock_response
         mock_response.__exit__ = lambda self, *a: None
         with patch("urllib.request.urlopen", return_value=mock_response):
@@ -413,6 +411,7 @@ class TestFetchCdnNetsBunny(unittest.TestCase):
         # Bunny IPs → /32
         for cidr in cidrs:
             ipaddress.ip_network(cidr, strict=False)
+            self.assertIn("/32", cidr)
 
     def test_fetch_handles_no_ips_in_html(self):
         from vless_installer.modules.singbox_cdn_nets import fetch_cdn_nets
@@ -509,9 +508,9 @@ class TestRemoveCdnAllowlist(unittest.TestCase):
         from vless_installer.modules.singbox_cdn_nets import remove_cdn_allowlist
         mock_run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
         with patch("vless_installer.modules.singbox_cdn_nets._run", mock_run):
-            remove_cdn_allowlist(8080)
-        # mock_run.call_args_list — список call объектов
-        # c[0] = positional args tuple, c[0][0] = первый positional arg (cmd list)
+            with patch("vless_installer.modules.singbox_cdn_nets._ipset_remove_from_persist"):
+                with patch("vless_installer.modules.singbox_cdn_nets._iptables_persist"):
+                    remove_cdn_allowlist(8080)
         calls = [c[0][0] if c[0] else [] for c in mock_run.call_args_list]
         delete_calls = [c for c in calls if "iptables" in c and "-D" in c and "8080" in c]
         self.assertGreater(len(delete_calls), 0,
@@ -521,7 +520,9 @@ class TestRemoveCdnAllowlist(unittest.TestCase):
         from vless_installer.modules.singbox_cdn_nets import remove_cdn_allowlist
         mock_run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
         with patch("vless_installer.modules.singbox_cdn_nets._run", mock_run):
-            remove_cdn_allowlist(8080)
+            with patch("vless_installer.modules.singbox_cdn_nets._ipset_remove_from_persist"):
+                with patch("vless_installer.modules.singbox_cdn_nets._iptables_persist"):
+                    remove_cdn_allowlist(8080)
         calls = [c[0][0] if c[0] else [] for c in mock_run.call_args_list]
         destroy_calls = [c for c in calls if "ipset" in c and "destroy" in c
                          and "singbox_cdn_allowlist_8080" in c]
@@ -532,7 +533,9 @@ class TestRemoveCdnAllowlist(unittest.TestCase):
         from vless_installer.modules.singbox_cdn_nets import remove_cdn_allowlist
         mock_run = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="not found"))
         with patch("vless_installer.modules.singbox_cdn_nets._run", mock_run):
-            result = remove_cdn_allowlist(8080)
+            with patch("vless_installer.modules.singbox_cdn_nets._ipset_remove_from_persist"):
+                with patch("vless_installer.modules.singbox_cdn_nets._iptables_persist"):
+                    result = remove_cdn_allowlist(8080)
         self.assertTrue(result, "remove должен возвращать True даже если правил не было (idempotent)")
 
 
@@ -682,7 +685,7 @@ class TestCdnIpSources(unittest.TestCase):
 
     def test_all_providers_have_ip_format(self):
         from vless_installer.modules.singbox_common import CDN_PROVIDERS
-        valid_formats = ("plaintext", "json_addresses", "html_scrape")
+        valid_formats = ("plaintext", "json_addresses")  # v4.23.2: html_scrape удалён
         for provider, meta in CDN_PROVIDERS.items():
             self.assertIn("ip_format", meta,
                           f"{provider} должен иметь ip_format")
@@ -694,10 +697,10 @@ class TestCdnIpSources(unittest.TestCase):
         self.assertEqual(CDN_PROVIDERS["cloudflare"]["ip_source"],
                          "https://www.cloudflare.com/ips-v4")
 
-    def test_gcore_ip_source_is_api(self):
+    def test_bunny_ip_source_is_api(self):
         from vless_installer.modules.singbox_common import CDN_PROVIDERS
-        self.assertEqual(CDN_PROVIDERS["gcore"]["ip_source"],
-                         "https://api.gcore.com/cdn/public-ip-list")
+        self.assertEqual(CDN_PROVIDERS["bunny"]["ip_source"],
+                         "https://bunnycdn.com/api/system/edgeserverlist/plain")
 
 
 if __name__ == "__main__":
