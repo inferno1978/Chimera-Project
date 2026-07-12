@@ -285,6 +285,7 @@ def _shadowtls_menu() -> None:
             _box_item("2", f"🔑 Сменить пароль            {DIM}перегенерировать password{NC}")
             _box_item("3", f"🌐 Сменить handshake-домен    {DIM}маскировочный сайт{NC}")
             _box_item("4", f"👥 Показать пользователей     {DIM}список Trojan-users{NC}")
+            _box_item("5", f"🔗 Клиентские ссылки          {DIM}URI + QR + JSON для импорта{NC}")
         else:
             _box_item("1", f"🟢 Включить ShadowTLS         {DIM}с настройкой по умолчанию{NC}")
             _box_item("2", f"⚙️  Включить с custom-параметрами {DIM}домен/порт{NC}")
@@ -316,6 +317,8 @@ def _shadowtls_menu() -> None:
             elif ch == "4":
                 _list_users_for_protocol("shadowtls")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "5":
+                _show_client_links("shadowtls")
         else:
             if ch == "1":
                 _enable_shadowtls_default()
@@ -577,6 +580,7 @@ def _anytls_menu() -> None:
             _box_item("1", f"🔴 Выключить AnyTLS")
             _box_item("2", f"🔑 Сменить пароль")
             _box_item("3", f"👥 Показать пользователей")
+            _box_item("4", f"🔗 Клиентские ссылки          {DIM}URI + QR + JSON{NC}")
         else:
             _box_item("1", f"🟢 Включить AnyTLS  {DIM}с self-signed cert{NC}")
         _box_row()
@@ -604,6 +608,8 @@ def _anytls_menu() -> None:
             elif ch == "3":
                 _list_users_for_protocol("anytls")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "4":
+                _show_client_links("anytls")
         else:
             if ch == "1":
                 if not _ensure_binary_installed():
@@ -682,6 +688,7 @@ def _tuic_menu() -> None:
             _box_item("2", f"🔑 Перегенерировать пароли пользователей")
             _box_item("3", f"👥 Показать пользователей")
             _box_item("4", f"📦 Настроить initial_packet_size  {DIM}частичный DPI-митигейт{NC}")
+            _box_item("5", f"🔗 Клиентские ссылки            {DIM}URI + QR + JSON{NC}")
         else:
             _box_item("1", f"🟢 Включить TUIC v5  {DIM}с self-signed cert{NC}")
         _box_row()
@@ -711,6 +718,8 @@ def _tuic_menu() -> None:
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
             elif ch == "4":
                 _configure_tuic_initial_packet_size()
+            elif ch == "5":
+                _show_client_links("tuic")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
         else:
             if ch == "1":
@@ -776,6 +785,7 @@ def _vless_ws_cdn_menu() -> None:
             _box_item("4", f"🔑 Перегенерировать WS path     {DIM}новый случайный path{NC}")
             _box_item("5", f"🔑 Перегенерировать UUID        {DIM}новый клиентский UUID{NC}")
             _box_item("6", f"📖 Показать инструкцию CDN      {DIM}что настроить в панели{NC}")
+            _box_item("7", f"🔗 Клиентские ссылки            {DIM}vless:// URI + QR + JSON{NC}")
         else:
             _box_item("1", f"🟢 Включить VLESS-WS-CDN        {DIM}с настройкой по умолчанию{NC}")
             _box_item("2", f"⚙️  Включить с custom-параметрами {DIM}provider/host/path{NC}")
@@ -814,6 +824,8 @@ def _vless_ws_cdn_menu() -> None:
             elif ch == "6":
                 _show_cdn_instructions(cdn_provider)
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "7":
+                _show_client_links("vless_ws_cdn")
         else:
             if ch == "1":
                 _enable_vless_ws_cdn_default()
@@ -1551,6 +1563,340 @@ def _list_users_for_protocol(protocol: str) -> None:
     else:
         for u in users:
             name = u.get("name", "")[:32]
-            uuid_short = u.get("uuid", "")[:8]
-            _box_row(f"  {GREEN}•{NC} {name:<32}  {DIM}{uuid_short}…{NC}")
+            # v4.23.12: показываем полный пароль (раньше только обрезанный uuid,
+            # что бесполезно для подключения клиента).
+            pw = u.get("password", "")
+            uuid_full = u.get("uuid", "")
+            if uuid_full:
+                # TUIC: uuid + password
+                _box_row(f"  {GREEN}•{NC} {name:<24}  "
+                         f"{CYAN}uuid={uuid_full}{NC}")
+                _box_row(f"    {DIM}password={pw}{NC}")
+            else:
+                # ShadowTLS/AnyTLS/Trojan: только password
+                _box_row(f"  {GREEN}•{NC} {name:<24}  "
+                         f"{CYAN}password={pw}{NC}")
+    _box_bottom()
+
+
+# ============================================================================
+#  Генерация клиентских ссылок (v4.23.12)
+# ============================================================================
+def _get_public_endpoint(state_ib: dict, default_listen: str = "127.0.0.1") -> tuple:
+    """Возвращает (host, port) для подключения клиента извне.
+
+    Логика:
+      • Если listen == 0.0.0.0 или :: — клиент подключается к публичному IP сервера.
+      • Если listen == 127.0.0.1 (loopback) — клиент НЕ может подключиться напрямую;
+        нужно либо SNI-dispatch (TCP:443 → nginx stream → backend), либо сменить listen.
+        Возвращаем публичный IP с пометкой 'loopback_warning'.
+    """
+    listen = state_ib.get("listen", default_listen)
+    port = state_ib.get("listen_port", 0)
+    is_loopback = listen in ("127.0.0.1", "::1", "localhost")
+    # Публичный IP сервера
+    public_ip = ""
+    try:
+        from vless_installer.modules.resources import get_server_ip
+        public_ip = get_server_ip("4") or ""
+    except Exception:
+        pass
+    if is_loopback:
+        return public_ip, port, True
+    return public_ip or listen, port, False
+
+
+def _gen_shadowtls_client_uri(state_ib: dict, public_ip: str, port: int,
+                              password: str) -> str:
+    """Генерирует trojan:// URI для ShadowTLS v3 + Trojan.
+
+    Формат (понимается Hiddify/Nekobox/Karing/sing-box):
+      trojan://<password>@<host>:<port>?security=tls&sni=<handshake_domain>
+        &shadowtls=3&shadowtls_password=<password>#<name>
+
+    Важно: в sing-box клиентский outbound для ShadowTLS v3 использует
+    type=trojan + transport=shadowtls. URI выше — устоявшийся де-факто
+    стандарт, понимаемый GUI-клиентами.
+    """
+    handshake = state_ib.get("handshake", {})
+    sni = handshake.get("server", "www.cloudflare.com")
+    name = state_ib.get("users", [{}])[0].get("name", "shadowtls-user") \
+        if state_ib.get("users") else "shadowtls-user"
+    from urllib.parse import quote, urlencode
+    params = urlencode({
+        "security": "tls",
+        "sni": sni,
+        "shadowtls": "3",
+        "shadowtls_password": password,
+        "fp": "chrome",
+    })
+    return f"trojan://{quote(password, safe='')}@{public_ip}:{port}?{params}#{quote(name)}"
+
+
+def _gen_anytls_client_uri(state_ib: dict, public_ip: str, port: int,
+                           password: str) -> str:
+    """Генерирует anytls:// URI (sing-box >= 1.10)."""
+    name = state_ib.get("users", [{}])[0].get("name", "anytls-user") \
+        if state_ib.get("users") else "anytls-user"
+    from urllib.parse import quote, urlencode
+    # SNI для AnyTLS: общий домен (если есть), иначе публичный IP
+    sni = state_ib.get("common_name") or public_ip
+    params = urlencode({
+        "sni": sni,
+        "insecure": "1" if state_ib.get("cert_source") == "self-signed" else "0",
+    })
+    return f"anytls://{quote(password, safe='')}@{public_ip}:{port}?{params}#{quote(name)}"
+
+
+def _gen_tuic_client_uri(state_ib: dict, public_ip: str, port: int) -> str:
+    """Генерирует tuic:// URI для TUIC v5."""
+    users = state_ib.get("users", [])
+    if not users:
+        return ""
+    u = users[0]
+    uuid = u.get("uuid", "")
+    password = u.get("password", "")
+    name = u.get("name", "tuic-user")
+    from urllib.parse import quote, urlencode
+    congestion = state_ib.get("congestion_control", "bbr")
+    params = urlencode({
+        "congestion_control": congestion,
+        "alpn": "h3",
+        "sni": public_ip,
+        "allow_insecure": "1" if state_ib.get("cert_source") == "self-signed" else "0",
+    })
+    return f"tuic://{uuid}:{quote(password, safe='')}@{public_ip}:{port}?{params}#{quote(name)}"
+
+
+def _gen_vless_ws_cdn_client_uri(state_ib: dict) -> str:
+    """Генерирует vless:// URI для VLESS+WS+CDN."""
+    uuid = state_ib.get("uuid", "")
+    host = state_ib.get("host", "")
+    port = 443  # CDN endpoint всегда 443 (CDN терминирует TLS)
+    ws_path = state_ib.get("ws_path", "/")
+    from urllib.parse import quote, urlencode
+    params = urlencode({
+        "encryption": "none",
+        "security": "tls",
+        "sni": host,
+        "type": "ws",
+        "host": host,
+        "path": ws_path,
+    })
+    return f"vless://{uuid}@{host}:{port}?{params}#{quote(host)}"
+
+
+def _gen_singbox_client_json(protocol: str, state_ib: dict,
+                             public_ip: str, port: int) -> str:
+    """Генерирует JSON-фрагмент outbound для sing-box клиента.
+
+    Готов к вставке в client config.json → outbounds[].
+    """
+    import json as _json
+    if protocol == "shadowtls":
+        handshake = state_ib.get("handshake", {})
+        sni = handshake.get("server", "www.cloudflare.com")
+        password = state_ib.get("password", "")
+        if not password and state_ib.get("users"):
+            password = state_ib["users"][0].get("password", "")
+        return _json.dumps({
+            "type": "trojan",
+            "tag": "shadowtls-out",
+            "server": public_ip,
+            "server_port": port,
+            "password": password,
+            "tls": {
+                "enabled": True,
+                "server_name": sni,
+                "utls": {"enabled": True, "fingerprint": "chrome"},
+            },
+            "transport": {
+                "type": "shadowtls",
+                "version": 3,
+                "password": password,
+            },
+        }, indent=2, ensure_ascii=False)
+    if protocol == "anytls":
+        password = state_ib.get("password", "")
+        if not password and state_ib.get("users"):
+            password = state_ib["users"][0].get("password", "")
+        sni = state_ib.get("common_name") or public_ip
+        return _json.dumps({
+            "type": "anytls",
+            "tag": "anytls-out",
+            "server": public_ip,
+            "server_port": port,
+            "password": password,
+            "tls": {
+                "enabled": True,
+                "server_name": sni,
+                "insecure": state_ib.get("cert_source") == "self-signed",
+            },
+        }, indent=2, ensure_ascii=False)
+    if protocol == "tuic":
+        users = state_ib.get("users", [])
+        if not users:
+            return ""
+        u = users[0]
+        return _json.dumps({
+            "type": "tuic",
+            "tag": "tuic-out",
+            "server": public_ip,
+            "server_port": port,
+            "uuid": u.get("uuid", ""),
+            "password": u.get("password", ""),
+            "congestion_control": state_ib.get("congestion_control", "bbr"),
+            "tls": {
+                "enabled": True,
+                "server_name": public_ip,
+                "insecure": state_ib.get("cert_source") == "self-signed",
+            },
+        }, indent=2, ensure_ascii=False)
+    if protocol == "vless_ws_cdn":
+        return _json.dumps({
+            "type": "vless",
+            "tag": "vless-ws-cdn-out",
+            "server": state_ib.get("host", ""),
+            "server_port": 443,
+            "uuid": state_ib.get("uuid", ""),
+            "tls": {
+                "enabled": True,
+                "server_name": state_ib.get("host", ""),
+            },
+            "transport": {
+                "type": "ws",
+                "path": state_ib.get("ws_path", "/"),
+                "headers": {"Host": state_ib.get("host", "")},
+            },
+        }, indent=2, ensure_ascii=False)
+    return ""
+
+
+def _show_client_links(protocol: str) -> None:
+    """Показывает клиентские ссылки/QR/JSON для протокола.
+
+    v4.23.12: решает проблему 'где взять ссылку для подключения клиента?'.
+    Раньше пункт 'Показать пользователей' показывал только обрезанный uuid,
+    без пароля и без готового URI. Теперь показывает:
+      • Внешний endpoint (host:port)
+      • Предупреждение о loopback, если listen=127.0.0.1
+      • URI для импорта в GUI-клиент (Hiddify/Nekobox/Karing/sing-box)
+      • JSON outbound для ручной конфигурации sing-box
+      • QR-код в терминале (если установлен qrencode)
+    """
+    state = singbox_state_load()
+    inbounds = state.get("inbounds", {})
+    state_ib = inbounds.get(protocol, {})
+    if not state_ib.get("enabled", False):
+        warn(f"Протокол {protocol} не включён — ссылки недоступны")
+        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        return
+
+    # Определяем публичный endpoint
+    default_listen = "127.0.0.1" if protocol in ("shadowtls", "anytls") else "::"
+    public_ip, port, is_loopback = _get_public_endpoint(state_ib, default_listen)
+
+    # Пароль/uuid для URI
+    password = state_ib.get("password", "")
+    if not password and state_ib.get("users"):
+        password = state_ib["users"][0].get("password", "")
+
+    # Генерируем URI
+    if protocol == "shadowtls":
+        uri = _gen_shadowtls_client_uri(state_ib, public_ip, port, password)
+    elif protocol == "anytls":
+        uri = _gen_anytls_client_uri(state_ib, public_ip, port, password)
+    elif protocol == "tuic":
+        uri = _gen_tuic_client_uri(state_ib, public_ip, port)
+    elif protocol == "vless_ws_cdn":
+        uri = _gen_vless_ws_cdn_client_uri(state_ib)
+    else:
+        warn(f"Для протокола {protocol} генерация ссылок не поддерживается")
+        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        return
+
+    os.system("clear")
+    print()
+    _box_top(f"🔗  КЛИЕНТСКИЕ ССЫЛКИ — {protocol.upper()}")
+
+    # Endpoint
+    _box_row(f"  {BOLD}Endpoint:{NC}  {CYAN}{public_ip}:{port}{NC}")
+    if is_loopback:
+        _box_sep()
+        _box_row(f"  {YELLOW}⚠  Внимание: listen=127.0.0.1 (loopback){NC}")
+        _box_row(f"  {DIM}Клиент извне НЕ сможет подключиться напрямую.{NC}")
+        _box_row(f"  {DIM}Варианты:{NC}")
+        _box_row(f"  {DIM}  1. Включить SNI-dispatch (меню 5) — TCP:443 → nginx stream{NC}")
+        _box_row(f"  {DIM}     маршрутизирует по SNI на backend {public_ip}:{port}{NC}")
+        _box_row(f"  {DIM}  2. Пересоздать протокол с listen=0.0.0.0 (custom-режим){NC}")
+        _box_row(f"  {DIM}     и открыть порт в firewall: ufw allow {port}/tcp{NC}")
+
+    # URI
+    _box_sep()
+    _box_row(f"  {BOLD}URI для импорта в клиент:{NC}")
+    _box_row(f"  {CYAN}{uri}{NC}")
+
+    # JSON
+    _box_sep()
+    _box_row(f"  {BOLD}JSON outbound (sing-box config.json):{NC}")
+    json_str = _gen_singbox_client_json(protocol, state_ib, public_ip, port)
+    if json_str:
+        for line in json_str.splitlines():
+            _box_row(f"  {DIM}{line}{NC}")
+
+    # QR-код
+    _box_sep()
+    try:
+        import shutil as _sh
+        qrencode = _sh.which("qrencode")
+    except Exception:
+        qrencode = None
+    if qrencode:
+        import subprocess as _sp
+        _box_row(f"  {BOLD}QR-код:{NC}")
+        r = _sp.run(
+            [qrencode, "-t", "ANSIUTF8", "-m", "1", "-o", "-", uri],
+            capture_output=True, text=True
+        )
+        if r.stdout:
+            for line in r.stdout.splitlines():
+                _box_row(f"  {line}")
+        else:
+            _box_row(f"  {DIM}(qrencode не смог сгенерировать QR){NC}")
+    else:
+        _box_row(f"  {DIM}Для QR-кода установите: apt install qrencode{NC}")
+
+    _box_sep()
+    _box_row(f"  {DIM}Клиенты: Hiddify, Nekobox, Karing, sing-box GUI, v2rayN{NC}")
+    _box_row(f"  {DIM}Импорт: скопируйте URI → вставьте в клиент → Connect{NC}")
+    _box_bottom()
+    try:
+        input(f"{CYAN}Нажмите Enter...{NC}")
+    except KeyboardInterrupt:
+        pass
+
+
+def _list_users_for_protocol(protocol: str) -> None:
+    users = singbox_state_list_users(protocol)
+    os.system("clear")
+    print()
+    _box_top(f"👥  ПОЛЬЗОВАТЕЛИ {protocol.upper()}")
+    if not users:
+        _box_row(f"  {DIM}нет пользователей{NC}")
+    else:
+        for u in users:
+            name = u.get("name", "")[:32]
+            # v4.23.12: показываем полный пароль (раньше только обрезанный uuid,
+            # что бесполезно для подключения клиента).
+            pw = u.get("password", "")
+            uuid_full = u.get("uuid", "")
+            if uuid_full:
+                # TUIC: uuid + password
+                _box_row(f"  {GREEN}•{NC} {name:<24}  "
+                         f"{CYAN}uuid={uuid_full}{NC}")
+                _box_row(f"    {DIM}password={pw}{NC}")
+            else:
+                # ShadowTLS/AnyTLS/Trojan: только password
+                _box_row(f"  {GREEN}•{NC} {name:<24}  "
+                         f"{CYAN}password={pw}{NC}")
     _box_bottom()
