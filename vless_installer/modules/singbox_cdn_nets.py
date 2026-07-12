@@ -252,26 +252,47 @@ def _ipset_restore_unit_install() -> None:
     По образцу ipset_persist.py::ipset_restore_unit_install(), но с другим
     именем юнита (singbox-cdn-ipset-restore) чтобы не конфликтовать с xray-ipset-restore.
 
-    v4.23.3: Before=netfilter-persistent.service ДОБАВЛЕНО.
-    Проблема: netfilter-persistent.service (стандартная поставка Debian/Ubuntu)
-    запускается Before=network-pre.target и пытается restore iptables-правил.
-    Если iptables-правила ссылаются на ipset, который ещё не создан (наш restore
-    юнит стартует After=network-pre.target) — restore падает, либо правило не
-    грузится (allowlist пропадает при каждом ребуте), либо (если iptables-restore
-    атомарен) падает восстановление ВСЕГО файла правил — задевает firewall
-    других протоколов.
-    Решение: Before=netfilter-persistent.service — наш ipset restore отрабатывает
-    ДО netfilter-persistent. Safe даже если netfilter-persistent не установлен —
-    systemd игнорирует Before= на несуществующий юнит.
+    v4.23.3: Before=netfilter-persistent.service добавлено.
+    v4.23.4: Убран After=network-pre.target — создавал ordering cycle
+    (Debian bug #832802). Наш юнит After=network-pre.target, но
+    netfilter-persistent Before=network-pre.target → транзитивный цикл.
+    systemd резолвит такие циклы, молча выкидывая одно из рёбер — какое
+    именно выживет не гарантировано, Before=netfilter-persistent мог вылететь.
+
+    Решение v4.23.4:
+    - Убрать After=network-pre.target — ipset restore чисто локальная kernel-
+      операция, сеть ему не нужна, строка давала только цикл.
+    - DefaultDependencies=no — иначе implicit-зависимости от DefaultDependencies=yes
+      (через basic.target/sysinit.target) могут снова создать цикл (Debian bug #832802).
+      Тот же паттерн что у netfilter-persistent.service в реальной поставке Debian.
+    - After=local-fs.target — ConditionPathExists читает файл с диска (/etc/ipset-
+      singbox-cdn.conf), local-fs.target должен быть смонтирован. local-fs.target
+      не имеет Before на netfilter-persistent — цикла не создаёт.
+      (Проверено: netfilter-persistent.service тоже After=local-fs.target, но
+      это параллельная зависимость, не создающая цикл.)
+
+    Граф зависимостей после фикса (проверено эмпирически через systemd-analyze):
+      singbox-cdn-ipset-restore.service
+        → Before → sing-box.service
+        → Before → netfilter-persistent.service
+        → After  → local-fs.target
+      netfilter-persistent.service (реальная поставка Debian/Ubuntu):
+        → Before → network-pre.target
+        → Before → shutdown.target
+        → After  → systemd-modules-load.service
+        → After  → local-fs.target
+      Цикла нет: все рёбра идут в одном направлении (local-fs.target → ... →
+      singbox-cdn-ipset-restore → netfilter-persistent → network-pre.target).
     """
     if _RESTORE_SVC.exists():
         return  # уже установлен
     _RESTORE_SVC.write_text(textwrap.dedent(f"""\
         [Unit]
         Description=Restore ipset for sing-box CDN allowlist (VLESS Ultimate)
+        DefaultDependencies=no
         Before=sing-box.service
         Before=netfilter-persistent.service
-        After=network-pre.target
+        After=local-fs.target
         ConditionPathExists={_IPSET_CONF}
 
         [Service]

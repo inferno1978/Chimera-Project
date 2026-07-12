@@ -2,6 +2,95 @@
 
 ---
 
+## v4.23.4 — FIX: systemd ordering cycle в ipset restore unit — 12 июля 2026
+
+### 🐛 Проблема
+
+`_ipset_restore_unit_install()` генерировал юнит с одновременно:
+- `Before=netfilter-persistent.service` (фикс v4.23.3)
+- `After=network-pre.target`
+
+`netfilter-persistent.service` (реальная поставка Debian/Ubuntu, пакет
+`netfilter-persistent` 1.0.23) имеет `Before=network-pre.target` — то есть
+должен запуститься ДО `network-pre.target`.
+
+Наш юнит `After=network-pre.target` — должен запуститься ПОСЛЕ `network-pre.target`.
+
+Цепочка: `наш юнит → After → network-pre.target → After(обратное от Before)
+← netfilter-persistent ← Before(наш)`. Транзитивный **ordering cycle**.
+
+systemd резолвит такие циклы, **молча выкидывая одно из рёбер** (Debian bug
+#832802) — какое именно выживет не гарантировано. `Before=netfilter-persistent`
+мог быть тем, что вылетит, отменяя фикс v4.23.3.
+
+### Фикс
+
+В [Unit]-секции `singbox-cdn-ipset-restore.service`:
+- **Убран** `After=network-pre.target` — ipset restore чисто локальная kernel-
+  операция, сеть ему не нужна, строка давала только цикл.
+- **Добавлен** `DefaultDependencies=no` — иначе implicit-зависимости от
+  `DefaultDependencies=yes` (через `basic.target`/`sysinit.target`) могут снова
+  создать цикл (Debian bug #832802 даже без явного `After=`). Тот же паттерн
+  что у `netfilter-persistent.service` в реальной поставке Debian.
+- **Добавлен** `After=local-fs.target` — `ConditionPathExists` читает файл с
+  диска (`/etc/ipset-singbox-cdn.conf`), `local-fs.target` должен быть
+  смонтирован. `local-fs.target` не имеет `Before` на `netfilter-persistent` —
+  цикла не создаёт.
+
+Граф после фикса (проверено эмпирически):
+```
+singbox-cdn-ipset-restore.service
+  → Before → sing-box.service
+  → Before → netfilter-persistent.service
+  → After  → local-fs.target
+netfilter-persistent.service (реальная Debian поставка):
+  → Before → network-pre.target, shutdown.target
+  → After  → systemd-modules-load.service, local-fs.target
+```
+Цикла нет: все рёбра направлены (local-fs.target → ... → наш юнит →
+netfilter-persistent → network-pre.target).
+
+### Эмпирическая проверка
+
+1. **systemd-analyze verify** — exit code 0, без warnings/errors
+2. **DFS на графе зависимостей** — построен граф из нашего юнита + реального
+   `netfilter-persistent.service` (Debian trixie, пакет 1.0.23) +
+   `local-fs.target` (systemd 257). DFS с цветовой разметкой (WHITE/GRAY/BLACK)
+   — back edge = цикл. **Цикла нет.**
+3. **Регрессионный тест** — тот же DFS на **старом** юните (с
+   `After=network-pre.target`) — **цикл детектирован**, доказывает что тест
+   реально ловит проблему, а не проходит тривиально.
+
+Реальный `netfilter-persistent.service` получен через:
+```
+apt-get download netfilter-persistent
+dpkg-deb -x netfilter-persistent*.deb /tmp/extract
+cat /tmp/extract/usr/lib/systemd/system/netfilter-persistent.service
+```
+
+### 🧪 Тесты (6 новых)
+
+`tests/test_singbox_vless_ws_cdn_fix3.py::TestNoOrderingCycle`:
+
+- `test_no_after_network_pre_target` — строка убрана из юнита
+- `test_has_default_dependencies_no` — DefaultDependencies=no присутствует
+- `test_has_after_local_fs_target` — After=local-fs.target присутствует
+- `test_no_ordering_cycle_in_dependency_graph` — DFS на графе из нашего юнита +
+  реального netfilter-persistent.service (fixture) + local-fs.target (fixture) →
+  **assert цикла нет**
+- `test_old_unit_had_cycle` — тот же DFS на старом юните (с After=network-pre.target) →
+  **assert цикл ЕСТЬ** (доказывает что тест работает)
+- `test_systemd_analyze_verify_passes` — реальный `systemd-analyze verify` →
+  exit 0 (skip если systemd-analyze недоступен)
+
+Fixtures включают реальный `netfilter-persistent.service` из Debian trixie
+(пакет 1.0.23) и `local-fs.target` из systemd 257 — захардкожены с указанием
+источника, не выдуманы.
+
+Полный прогон: **346 тестов, 0 регрессий**, 8 skip.
+
+---
+
 ## v4.23.3 — FIX: 2 фикса порядка операций — окно с открытым портом — 12 июля 2026
 
 ### 🐛 Фикс 1: _switch_cdn_provider() — restart раньше apply_cdn_allowlist
