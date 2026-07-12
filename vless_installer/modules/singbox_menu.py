@@ -1916,9 +1916,15 @@ def _gen_singbox_client_json(protocol: str, state_ib: dict,
         password = state_ib.get("password", "")
         if not password and state_ib.get("users"):
             password = state_ib["users"][0].get("password", "")
-        # v4.23.15: правильная схема для sing-box 1.12+
-        # shadowtls-out — внешний outbound, делает shadowtls-handshake
-        # trojan-out — внутренний, использует shadowtls-out через detour
+        # v4.23.16: правильная схема для sing-box 1.12+
+        # shadowtls outbound — НЕ имеет detour (конечный outbound, делает
+        # TLS-handshake к handshake.server, например www.cloudflare.com)
+        # trojan outbound — имеет detour: "proxy" (использует shadowtls
+        # как транспорт для своего трафика)
+        #
+        # ВАЖНО: detour в shadowtls outbound создавать НЕЛЬЗЯ — это создаёт
+        # circular dependency (proxy → trojan-out → proxy), sing-box падает
+        # с 'circular outbound dependency' (найдено через Karing).
         base["outbounds"] = [
             {
                 "type": "shadowtls",
@@ -1932,7 +1938,7 @@ def _gen_singbox_client_json(protocol: str, state_ib: dict,
                     "server_name": sni,
                     "utls": {"enabled": True, "fingerprint": "chrome"},
                 },
-                "detour": "trojan-out",
+                # НЕ добавляем detour здесь — это создаст цикл!
             },
             {
                 "type": "trojan",
@@ -1940,7 +1946,7 @@ def _gen_singbox_client_json(protocol: str, state_ib: dict,
                 "server": public_ip,
                 "server_port": port,
                 "password": password,
-                "detour": "proxy",
+                "detour": "proxy",  # trojan использует shadowtls как транспорт
             },
             {"type": "direct", "tag": "direct"},
         ]

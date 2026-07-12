@@ -252,13 +252,15 @@ class TestVlessWsCdnUri(_Base):
 #  5. _gen_singbox_client_json (v4.23.15 — полный клиентский конфиг)
 # ============================================================================
 class TestSingboxClientJson(_Base):
-    def test_shadowtls_json_structure_v4_23_15(self):
-        """v4.23.15: ShadowTLS — отдельный outbound, не transport.
+    def test_shadowtls_json_structure_v4_23_16(self):
+        """v4.23.16: ShadowTLS без circular dependency.
 
         Правильная схема (sing-box 1.12+):
-          - shadowtls outbound с detour на trojan-out
-          - trojan outbound с detour на shadowtls (proxy)
-        Старый формат с transport: shadowtls НЕ работает в 1.13+.
+          - shadowtls outbound БЕЗ detour (конечный outbound)
+          - trojan outbound с detour: "proxy" (использует shadowtls)
+        Старый формат с detour в обоих outbounds создавал цикл
+        (proxy → trojan-out → proxy), sing-box падал с
+        'circular outbound dependency' (найдено через Karing).
         """
         state = {
             "handshake": {"server": "www.cloudflare.com", "server_port": 443},
@@ -271,12 +273,12 @@ class TestSingboxClientJson(_Base):
         self.assertIn("inbounds", d)
         self.assertIn("outbounds", d)
         self.assertIn("route", d)
-        # Два outbound: shadowtls (proxy) + trojan (trojan-out) + direct
+        # Три outbound: shadowtls (proxy) + trojan (trojan-out) + direct
         outbounds = d["outbounds"]
         self.assertEqual(len(outbounds), 3)
         proxy = outbounds[0]
         trojan = outbounds[1]
-        # shadowtls outbound
+        # shadowtls outbound — БЕЗ detour (иначе circular dependency)
         self.assertEqual(proxy["type"], "shadowtls")
         self.assertEqual(proxy["tag"], "proxy")
         self.assertEqual(proxy["server"], "203.0.113.42")
@@ -285,13 +287,15 @@ class TestSingboxClientJson(_Base):
         self.assertEqual(proxy["password"], "pw123")
         self.assertEqual(proxy["tls"]["server_name"], "www.cloudflare.com")
         self.assertTrue(proxy["tls"]["utls"]["enabled"])
-        self.assertEqual(proxy["detour"], "trojan-out")
-        # trojan outbound (внутренний)
+        # КРИТИЧНО: proxy НЕ должен иметь detour (иначе цикл)
+        self.assertNotIn("detour", proxy,
+                         "shadowtls outbound не должен иметь detour — это создаёт circular dependency")
+        # trojan outbound — ИМЕЕТ detour: "proxy"
         self.assertEqual(trojan["type"], "trojan")
         self.assertEqual(trojan["tag"], "trojan-out")
         self.assertEqual(trojan["password"], "pw123")
         self.assertEqual(trojan["detour"], "proxy")
-        # НЕ должно быть transport: shadowtls
+        # НЕ должно быть transport: shadowtls (старый формат)
         self.assertNotIn("transport", proxy)
 
     def test_anytls_json_structure(self):
