@@ -219,7 +219,7 @@ def fetch_package(
     # ── 3) Все зеркала провалились — подсказка ─────────────────────────────
     tmp_path.unlink(missing_ok=True)
     if print_hint_on_failure:
-        print_manual_hint(spec, filename=filename)
+        print_manual_hint(spec, filename=filename, **filename_kwargs)
     return False
 
 
@@ -239,11 +239,16 @@ def _default_copy_to_dests(src: Path, dests: list[Path]) -> None:
             pass
 
 
-def print_manual_hint(spec: PackageSpec, *, filename: str) -> None:
+def print_manual_hint(spec: PackageSpec, *, filename: str, **filename_kwargs) -> None:
     """Печатает инструкцию для ручного скачивания.
 
     Формат — как в существующих print_*_manual_download_hint() функциях.
     Использует цвета из _core (через importlib), с fallback на пустые.
+
+    filename_kwargs передаются в mirror_urls_builder чтобы отображаемые URL
+    совпадали с теми, которые реально пытался скачать fetch_package (tag,
+    tarball_filename и т.д.). Без этого print_manual_hint показывал URL с
+    дефолтными параметрами (например tag="0.7.6" вместо реального "1.13.14").
     """
     import importlib
     try:
@@ -258,9 +263,9 @@ def print_manual_hint(spec: PackageSpec, *, filename: str) -> None:
     except Exception:
         YELLOW = NC = BOLD = WHITE = CYAN = GREEN = DIM = ""
 
-    # Собираем URLs для отображения
+    # Собираем URLs для отображения (с теми же filename_kwargs, что и при реальной попытке)
     try:
-        urls = spec.mirror_urls_builder(filename=filename)
+        urls = spec.mirror_urls_builder(filename=filename, **filename_kwargs)
     except Exception:
         urls = []
 
