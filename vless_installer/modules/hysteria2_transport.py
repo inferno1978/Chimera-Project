@@ -382,6 +382,14 @@ def h2_transport_apply(
     h2["active_transport"] = "hysteria2"
     _save_h2_state(h2)
 
+    # Если Salamander был включён — _write_h2_client_config только что
+    # перезаписал client.yaml без секции obfs. Пере-применяем obfs.
+    try:
+        from vless_installer.modules.hysteria2_salamander import h2_salamander_ensure_state
+        h2_salamander_ensure_state()
+    except ImportError:
+        pass
+
     success(f"Hysteria2 транспорт активирован: "
             f"Xray → SOCKS5:10809 → hysteria-client → {exit_ip}:{exit_port}")
     _tg_h2_event("h2_switch", f"Транспорт → H2 native ({exit_ip}:{exit_port})")

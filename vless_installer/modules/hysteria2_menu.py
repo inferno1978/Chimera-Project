@@ -22,6 +22,7 @@ vless_installer/modules/hysteria2_menu.py
   9  Кластер      (hysteria2_cluster.do_h2_cluster_menu)
   B  Бэкап        (hysteria2_backup.do_h2_backup_menu)
   D  DPI детектор (hysteria2_dpi.do_h2_dpi_menu)
+  O  Salamander   (hysteria2_salamander.h2_salamander_menu)  ← NEW
   Q  Качество     (hysteria2_quality.do_h2_quality_menu)
   S  Smoke Test   (hysteria2_smoke_test.do_h2_smoke_test_menu)
   L  Логи H2
@@ -128,6 +129,12 @@ def do_hysteria2_menu() -> None:
         _box_item("S", f"🔬 Smoke Test           {DIM}Полная проверка после установки{NC}")
         _box_item("L", f"📋 Логи H2              {DIM}Просмотр /var/log/hysteria.log{NC}")
         _box_row()
+        _box_sep()
+
+        # ── Anti-DPI / Obfuscation ────────────────────────────────────────────
+        _box_row()
+        _box_item("O", f"🦎 Salamander obfs      {DIM}XOR-обфускация QUIC (ломает ТСПУ-классификацию){NC}")
+        _box_row()
         _box_item_exit("0", "← Назад в главное меню")
         _box_bottom()
 
@@ -218,6 +225,12 @@ def do_hysteria2_menu() -> None:
                 error(f"Модуль недоступен: {e}"); time.sleep(2)
         elif ch == "L":
             _show_h2_logs()
+        elif ch == "O":
+            try:
+                from vless_installer.modules.hysteria2_salamander import h2_salamander_menu
+                h2_salamander_menu()
+            except ImportError as e:
+                error(f"Модуль Salamander недоступен: {e}"); time.sleep(2)
         else:
             warn("Неверный выбор")
             time.sleep(0.8)
