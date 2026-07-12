@@ -27,6 +27,7 @@ from vless_installer.modules.singbox_common import (
     _run, _systemctl, _service_active, _service_enabled,
     _singbox_binary_exists, _singbox_binary_version,
     _detect_arch, _get_latest_release_info,
+    _is_port_free, _who_owns_port,
     SINGBOX_BINARY, SINGBOX_CONFIG_DIR, SINGBOX_CONFIG_FILE,
     SINGBOX_LOG_FILE, SINGBOX_SERVICE,
 )
@@ -218,6 +219,62 @@ def singbox_uninstall_binary() -> bool:
 # ============================================================================
 #  Старт/стоп/рестарт сервиса
 # ============================================================================
+def _preflight_port_check() -> Optional[str]:
+    """Pre-flight проверка listen-портов из config.json.
+
+    Возвращает None если все порты свободны, иначе строку с описанием
+    конфликта (для печати через error()).
+
+    Решает проблему crash-loop из 100+ рестартов systemd: sing-box пытается
+    bind() на занятый порт, падает с EADDRINUSE, systemd рестартует — цикл.
+    Ловим ошибку ДО systemctl restart, чтобы:
+      • пользователь сразу видел занятый pid и inbound
+      • не плодились 100+ рестартов в journalctl
+      • не было ложного success() в вызывающем коде
+    """
+    if not SINGBOX_CONFIG_FILE.exists():
+        return None  # конфига нет — singbox_start() и так ругнётся
+
+    try:
+        cfg = json.loads(SINGBOX_CONFIG_FILE.read_text())
+    except Exception:
+        return None  # невалидный JSON — sing-box check поймает
+
+    inbounds = cfg.get("inbounds", []) or []
+    if not inbounds:
+        return None
+
+    conflicts = []
+    for ib in inbounds:
+        if not isinstance(ib, dict):
+            continue
+        port = ib.get("listen_port")
+        if not isinstance(port, int) or port == 0:
+            continue  # 0 = только через detour, не bind'ится
+        listen = ib.get("listen", "0.0.0.0")
+        # Определяем протокол: TUIC/Hysteria/Hysteria2 — UDP, остальные TCP
+        ib_type = ib.get("type", "")
+        proto = "udp" if ib_type in ("tuic", "hysteria", "hysteria2") else "tcp"
+
+        if _is_port_free(port, listen, proto=proto):
+            continue
+
+        who = _who_owns_port(port, listen, proto=proto)
+        tag = ib.get("tag", ib_type or "?")
+        who_str = f" — занят {who}" if who else " — занят"
+        conflicts.append(
+            f"  • {proto.upper()} {listen}:{port} (inbound '{tag}'){who_str}"
+        )
+
+    if conflicts:
+        return (
+            "listen-порты sing-box заняты — сервис не сможет запуститься:\n"
+            + "\n".join(conflicts)
+            + "\nОсвободите порт (stop процесса / смените listen_port) и повторите."
+        )
+    return None
+
+
 def singbox_start() -> bool:
     """Запускает сервис sing-box. Возвращает True если активен."""
     if not _singbox_binary_exists():
@@ -233,6 +290,14 @@ def singbox_start() -> bool:
     if r.returncode != 0:
         error("Конфиг sing-box невалиден:")
         error((r.stdout + r.stderr)[:400])
+        return False
+
+    # Pre-flight port-check: ловим EADDRINUSE ДО systemctl restart,
+    # иначе systemd уходит в crash-loop из 100+ рестартов (restart=on-failure,
+    # RestartSec=5 — пока пользователь читает лог, счётчик улетает за 100).
+    conflict = _preflight_port_check()
+    if conflict:
+        error(conflict)
         return False
 
     if not _systemctl("restart"):

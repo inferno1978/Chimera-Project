@@ -34,6 +34,7 @@ from vless_installer.modules.singbox_common import (
     info, success, warn, error,
     _run, _singbox_binary_exists, _singbox_binary_version,
     _service_active, _service_enabled,
+    _is_port_free, _who_owns_port,
     SINGBOX_BINARY, SINGBOX_CONFIG_FILE, SINGBOX_LOG_FILE,
     SINGBOX_CERT_DIR,
     DEFAULT_PORT_SHADOWTLS, DEFAULT_PORT_ANYTLS,
@@ -182,6 +183,69 @@ def do_singbox_menu() -> None:
 
 
 # ============================================================================
+#  Общие хелперы для всех _enable_* / _regen_* / _change_* (v4.23.9)
+# ============================================================================
+def _apply_and_check(fail_msg: str = "sing-box не запустился") -> bool:
+    """Рестарт/старт sing-box с проверкой результата.
+
+    Если sing-box не стартует — печатает понятную ошибку и возвращает False,
+    чтобы вызывающий код не печатал ложный success().
+
+    Решает баг: _enable_*_default/custom() вызывали singbox_restart() без
+    проверки return — даже при crash-loop пользователь видел «включено».
+    """
+    ok = singbox_restart() if _service_active() else singbox_start()
+    if not ok:
+        error(fail_msg)
+        warn(f"Проверьте:  journalctl -u sing-box -n 50 --no-pager")
+        warn(f"Конфиг:     {SINGBOX_CONFIG_FILE}")
+        return False
+    return True
+
+
+def _prompt_alt_port(default_port: int, listen: str = "127.0.0.1",
+                     proto: str = "tcp") -> int | None:
+    """Если default_port занят — спрашивает альтернативу.
+
+    Возвращает:
+      • default_port, если он свободен
+      • введённый пользователем порт, если он валиден и свободен
+      • None, если пользователь отменил или ввёл невалидный порт
+    """
+    if _is_port_free(default_port, listen, proto=proto):
+        return default_port
+
+    who = _who_owns_port(default_port, listen, proto=proto)
+    warn(f"Порт {default_port}/{proto} ({listen}) уже занят"
+         + (f" {who}" if who else "") + ".")
+    try:
+        alt = input(
+            f"{CYAN}Введите альтернативный порт {DIM}"
+            f"(Enter — отмена):{NC} "
+        ).strip()
+    except KeyboardInterrupt:
+        return None
+    if not alt:
+        info("Отменено")
+        return None
+    try:
+        port = int(alt)
+        if not (1 <= port <= 65535):
+            raise ValueError
+    except ValueError:
+        error(f"Некорректный порт: {alt}")
+        return None
+    if port == default_port:
+        error(f"Порт {port} занят (см. выше)")
+        return None
+    if not _is_port_free(port, listen, proto=proto):
+        who2 = _who_owns_port(port, listen, proto=proto)
+        error(f"Порт {port} тоже занят{(' ' + who2) if who2 else ''}")
+        return None
+    return port
+
+
+# ============================================================================
 #  Подменю: ShadowTLS v3
 # ============================================================================
 def _shadowtls_menu() -> None:
@@ -265,10 +329,20 @@ def _enable_shadowtls_default() -> None:
 
     v4.22.3: cert_path/key_path больше не передаются — ShadowTLS v3 не
     поддерживает локальный TLS-сертификат на inbound (см. _build_shadowtls_inbound).
+
+    v4.23.9: pre-flight port-check — если дефолтный 8443 занят, предлагаем
+    пользователю ввести альтернативу вместо crash-loop из 100+ рестартов.
     """
     if not _ensure_binary_installed():
         return
-    ok = singbox_enable_shadowtls()
+
+    # Pre-flight: дефолтный порт 8443 может быть занят (xray REALITY на loopback,
+    # admin_panel.py, и т.д.). Спросим альтернативу ДО записи в state.
+    listen_port = _prompt_alt_port(DEFAULT_PORT_SHADOWTLS, "127.0.0.1", "tcp")
+    if listen_port is None:
+        return
+
+    ok = singbox_enable_shadowtls(listen_port=listen_port)
     if not ok:
         return
     # Синхронизируем users
@@ -278,10 +352,8 @@ def _enable_shadowtls_default() -> None:
     if not singbox_validate_config():
         warn("Конфиг невалиден — проверьте логи")
         return
-    if _service_active():
-        singbox_restart()
-    else:
-        singbox_start()
+    if not _apply_and_check("ShadowTLS v3 + Trojan НЕ включены — sing-box не запустился"):
+        return
     success("ShadowTLS v3 + Trojan включены")
 
 
@@ -290,6 +362,8 @@ def _enable_shadowtls_custom() -> None:
 
     v4.22.3: cert_path/key_path убраны — ShadowTLS v3 не поддерживает локальный
     TLS-сертификат. Custom-режим спрашивает только handshake-домен/порт и listen-порт.
+
+    v4.23.9: listen-порт проверяется на занятость сразу после ввода.
     """
     if not _ensure_binary_installed():
         return
@@ -308,6 +382,18 @@ def _enable_shadowtls_custom() -> None:
     except KeyboardInterrupt:
         info("Отменено")
         return
+    except ValueError:
+        error("Некорректный порт (должно быть число 1-65535)")
+        return
+
+    if not (1 <= port <= 65535):
+        error(f"Listen порт вне диапазона: {port}")
+        return
+    if not _is_port_free(port, "127.0.0.1", proto="tcp"):
+        who = _who_owns_port(port, "127.0.0.1", proto="tcp")
+        error(f"Listen порт {port} уже занят{(' ' + who) if who else ''}")
+        warn("Выберите другой порт (ss -ltnp | grep ':<port> ')")
+        return
 
     ok = singbox_enable_shadowtls(
         handshake_server=hs_server,
@@ -322,10 +408,8 @@ def _enable_shadowtls_custom() -> None:
     if not singbox_validate_config():
         warn("Конфиг невалиден")
         return
-    if _service_active():
-        singbox_restart()
-    else:
-        singbox_start()
+    if not _apply_and_check("ShadowTLS v3 НЕ включён — sing-box не запустился"):
+        return
     success("ShadowTLS v3 включён с custom-параметрами")
 
 
@@ -342,8 +426,8 @@ def _regen_password_shadowtls() -> None:
             u["password"] = new_pw
         singbox_state_update_inbound(proto, users=users, password=new_pw)
     singbox_generate_config()
-    if _service_active():
-        singbox_restart()
+    if not _apply_and_check("Пароль обновлён, но sing-box не запустился"):
+        return
     success("Пароль ShadowTLS/Trojan перегенерирован")
     warn("ВНИМАНИЕ: клиентам нужно раздать новые ссылки/пароли!")
 
@@ -364,8 +448,8 @@ def _change_handshake_domain() -> None:
     ib["handshake"] = {"server": new_host, "server_port": new_port}
     singbox_state_update_inbound("shadowtls", **ib)
     singbox_generate_config()
-    if _service_active():
-        singbox_restart()
+    if not _apply_and_check("Handshake изменён, но sing-box не запустился"):
+        return
     success(f"Handshake: {new_host}:{new_port}")
 
 
@@ -414,8 +498,8 @@ def _configure_tuic_initial_packet_size() -> None:
         ib.pop("initial_packet_size", None)
         singbox_state_update_inbound("tuic", **ib)
         singbox_generate_config()
-        if _service_active():
-            singbox_restart()
+        if not _apply_and_check("initial_packet_size сброшен, но sing-box не запустился"):
+            return
         success("initial_packet_size сброшен к sing-box default")
         return
 
@@ -443,8 +527,8 @@ def _configure_tuic_initial_packet_size() -> None:
     ib["initial_packet_size"] = value
     singbox_state_update_inbound("tuic", **ib)
     singbox_generate_config()
-    if _service_active():
-        singbox_restart()
+    if not _apply_and_check(f"initial_packet_size установлен, но sing-box не запустился"):
+        return
     success(f"initial_packet_size = {value} байт")
 
 
@@ -544,11 +628,10 @@ def _anytls_menu() -> None:
                     singbox_sync_users()
                     singbox_generate_config()
                     if singbox_validate_config():
-                        if _service_active():
-                            singbox_restart()
+                        if not _apply_and_check("AnyTLS НЕ включён — sing-box не запустился"):
+                            pass
                         else:
-                            singbox_start()
-                        success("AnyTLS включён")
+                            success("AnyTLS включён")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
 
 
@@ -642,11 +725,10 @@ def _tuic_menu() -> None:
                     singbox_sync_users()
                     singbox_generate_config()
                     if singbox_validate_config():
-                        if _service_active():
-                            singbox_restart()
+                        if not _apply_and_check("TUIC v5 НЕ включён — sing-box не запустился"):
+                            pass
                         else:
-                            singbox_start()
-                        success("TUIC v5 включён")
+                            success("TUIC v5 включён")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
 
 
@@ -773,10 +855,8 @@ def _enable_vless_ws_cdn_default() -> None:
     if not singbox_validate_config():
         warn("Конфиг невалиден — проверьте логи")
         return
-    if _service_active():
-        singbox_restart()
-    else:
-        singbox_start()
+    if not _apply_and_check("VLESS-WS-CDN НЕ включён — sing-box не запустился"):
+        return
     success("VLESS-WS-CDN включён (Cloudflare)")
     _show_cdn_instructions("cloudflare")
 
@@ -826,10 +906,8 @@ def _enable_vless_ws_cdn_custom() -> None:
     if not singbox_validate_config():
         warn("Конфиг невалиден")
         return
-    if _service_active():
-        singbox_restart()
-    else:
-        singbox_start()
+    if not _apply_and_check("VLESS-WS-CDN НЕ включён — sing-box не запустился"):
+        return
     success(f"VLESS-WS-CDN включён ({CDN_PROVIDERS[provider]['display_name']})")
     _show_cdn_instructions(provider)
 
@@ -947,8 +1025,8 @@ def _change_vless_ws_cdn_host() -> None:
     ib["host"] = new_host
     singbox_state_update_inbound("vless_ws_cdn", **ib)
     singbox_generate_config()
-    if _service_active():
-        singbox_restart()
+    if not _apply_and_check("Host изменён, но sing-box не запустился"):
+        return
     success(f"Host: {new_host}")
 
 
@@ -959,8 +1037,8 @@ def _regen_vless_ws_cdn_path() -> None:
     ib["ws_path"] = new_path
     singbox_state_update_inbound("vless_ws_cdn", **ib)
     singbox_generate_config()
-    if _service_active():
-        singbox_restart()
+    if not _apply_and_check("WS path изменён, но sing-box не запустился"):
+        return
     success(f"WS path: {new_path}")
     warn("ВНИМАНИЕ: клиентам нужно раздать новый WS path!")
 
@@ -973,8 +1051,8 @@ def _regen_vless_ws_cdn_uuid() -> None:
     ib["uuid"] = new_uuid
     singbox_state_update_inbound("vless_ws_cdn", **ib)
     singbox_generate_config()
-    if _service_active():
-        singbox_restart()
+    if not _apply_and_check("UUID изменён, но sing-box не запустился"):
+        return
     success(f"UUID: {new_uuid}")
     warn("ВНИМАНИЕ: клиентам нужно раздать новый UUID!")
 
@@ -1157,8 +1235,8 @@ def _sync_users_menu() -> None:
 
     result = singbox_sync_users()
     singbox_generate_config()
-    if _service_active():
-        singbox_restart()
+    if not _apply_and_check("Синхронизация выполнена, но sing-box не запустился"):
+        return
 
     print()
     success(f"Синхронизация завершена: +{result['added']} добавлено, "
@@ -1456,8 +1534,8 @@ def _regen_password(protocol: str) -> None:
     ib["users"] = users
     singbox_state_update_inbound(protocol, **ib)
     singbox_generate_config()
-    if _service_active():
-        singbox_restart()
+    if not _apply_and_check(f"Пароли {protocol} обновлены, но sing-box не запустился"):
+        return
     success(f"Пароли {protocol} перегенерированы")
     warn("ВНИМАНИЕ: клиентам нужно раздать новые ссылки/пароли!")
 
