@@ -2,6 +2,77 @@
 
 ---
 
+## v4.23.6 — FIX: common_name прокинут + тесты auto-config + TUI-меню — 12 июля 2026
+
+### 🐛 Фикс: common_name не прокидывался в singbox_enable_anytls
+
+**Проблема:** `_ensure_self_signed_cert("anytls")` генерировал `common_name`
+локально, но не возвращал его. `singbox_enable_anytls(common_name=...)` —
+параметр добавлен в v4.23.5, но вызов из меню (`singbox_menu.py:526`) не
+передавал значение. Auto-detect SNI для AnyTLS работал только через fallback
+(CN-парсинг из cert), что не то, что задумывалось для новых установок.
+
+**Фикс:**
+- `_ensure_self_signed_cert()` — изменена сигнатура: возвращает
+  `(cert_path, key_path, common_name)` вместо `(cert_path, key_path)`.
+  `common_name` — домен сервера (из `state.json["domain"]`) для AnyTLS,
+  `f"sing-box-{prefix}"` для остальных (TUIC и т.д.).
+- `singbox_menu.py` — AnyTLS enable вызывает `_ensure_self_signed_cert("anytls", common_name=server_domain)`
+  и передаёт `cn` в `singbox_enable_anytls(common_name=cn)`.
+- TUIC enable — распаковывает 3 значения (`cert_path, key_path, _ = ...`).
+
+### 🧪 Тесты (21 новых)
+
+`tests/test_singbox_sni_autoconfig.py`:
+
+**_detect_reality_backend (4 теста):**
+- Возвращает `127.0.0.1:8442` для REALITY режима
+- Пустая строка для xHTTP и AWG
+- НЕ использует `state.json["socket"]` (decoy-сокет, отдельная логика)
+
+**_detect_shadowtls_sni (2 теста):**
+- Возвращает `handshake.server` когда ShadowTLS включён
+- Пустая строка когда выключен
+
+**_detect_anytls_sni (4 теста — 3 сценария из тикета):**
+- `common_name` из state (новые установки v4.23.5+)
+- CN из cert через `openssl x509` (старые установки)
+- Пустая строка (нет ни common_name ни cert) — НЕ придумывает домен
+
+**_ensure_self_signed_cert (2 теста):**
+- Возвращает 3 значения (cert, key, cn)
+- Custom common_name возвращается правильно
+
+**singbox_enable_anytls (2 теста):**
+- `common_name` сохраняется в state
+- Повторный enable без common_name НЕ затирает существующее значение
+
+**proxy_protocol on (2 теста — fail2ban regression):**
+- `proxy_protocol on;` присутствует в stream{} конфиге (незакомментирован)
+- Старый закомментированный вариант НЕ присутствует
+
+**_comment_out_listen_443 / _uncomment_listen_443 (5 тестов):**
+- Комментирует `listen 443` (с тегом `# [SNI-DISPATCH]`)
+- Создаёт бэкап `.pre-sni-dispatch`
+- Раскомментирует обратно
+- Сохраняет другие комментарии
+- НЕ комментирует `listen unix:` (decoy-сокет)
+
+### TUI-меню
+
+`_sni_dispatch_menu()` обновлён:
+- Пункт "1. 🤖 Auto-config" (NEW) — вызывает `auto_enable_sni_dispatch()`
+- Пункт "2. ⚙️ Включить вручную" — старый ручной режим
+- При выключении — `auto_disable_sni_dispatch()` (с раскомментированием listen 443)
+- Default backend в ручном режиме изменён с `/dev/shm/vless-reality.socket`
+  на `127.0.0.1:8442`
+
+### Регрессии
+
+347 тестов — 0 регрессий, 8 skip.
+
+---
+
 ## v4.23.5 — FEAT: SNI-dispatch auto-config (фаза 1) — 12 июля 2026
 
 ### 🎯 Что добавлено
