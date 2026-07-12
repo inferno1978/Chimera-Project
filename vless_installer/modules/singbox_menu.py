@@ -523,11 +523,22 @@ def _anytls_menu() -> None:
             if ch == "1":
                 if not _ensure_binary_installed():
                     continue
-                cert_path, key_path = _ensure_self_signed_cert("anytls")
+                # v4.23.6: common_name = домен сервера (для auto-detect SNI)
+                main_state = singbox_state_load()
+                # Читаем domain из основного state.json
+                import json as _json
+                from vless_installer.modules.singbox_common import MAIN_STATE_FILE
+                try:
+                    _ms = _json.loads(MAIN_STATE_FILE.read_text()) if MAIN_STATE_FILE.exists() else {}
+                    server_domain = _ms.get("domain", "")
+                except Exception:
+                    server_domain = ""
+                cert_path, key_path, cn = _ensure_self_signed_cert("anytls", common_name=server_domain)
                 ok = singbox_enable_anytls(
                     cert_path=str(cert_path),
                     key_path=str(key_path),
                     cert_source="self-signed",
+                    common_name=cn,
                 )
                 if ok:
                     singbox_sync_users()
@@ -621,7 +632,7 @@ def _tuic_menu() -> None:
             if ch == "1":
                 if not _ensure_binary_installed():
                     continue
-                cert_path, key_path = _ensure_self_signed_cert("tuic")
+                cert_path, key_path, _ = _ensure_self_signed_cert("tuic")
                 ok = singbox_enable_tuic(
                     cert_path=str(cert_path),
                     key_path=str(key_path),
@@ -1040,7 +1051,7 @@ def _sni_dispatch_menu() -> None:
             "SNI-dispatch через nginx stream{} + ssl_preread — диспетчеризация "
             "TCP:443 по полю SNI в ClientHello. Reality, ShadowTLS, AnyTLS "
             "живут на одном порту под разными доменами. ВНИМАНИЕ: при "
-            "включении Reality переезжает на backend (unix-socket/port)!"
+            "включении Reality переезжает на backend (loopback:8442)!"
         )
         _box_sep()
         _box_row()
@@ -1048,7 +1059,8 @@ def _sni_dispatch_menu() -> None:
             _box_item("1", f"🔴 Выключить SNI-dispatch  {DIM}вернуть Reality на :443{NC}")
             _box_item("2", f"🧪 Проверить конфиг        {DIM}nginx -t{NC}")
         else:
-            _box_item("1", f"🟢 Включить SNI-dispatch   {DIM}с указанием SNI-доменов{NC}")
+            _box_item("1", f"🤖 Auto-config              {DIM}auto-detect SNI + backend + миграция listen 443{NC}  {DIM}(NEW){NC}")
+            _box_item("2", f"⚙️  Включить вручную         {DIM}с указанием SNI-доменов{NC}")
         _box_row()
         _box_item_exit("0", "← Назад")
         _box_bottom()
@@ -1063,7 +1075,9 @@ def _sni_dispatch_menu() -> None:
 
         if enabled:
             if ch == "1":
-                disable_sni_dispatch()
+                # v4.23.6: используем auto_disable если auto_configured
+                from vless_installer.modules.singbox_nginx import auto_disable_sni_dispatch
+                auto_disable_sni_dispatch(interactive=True)
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
             elif ch == "2":
                 from vless_installer.modules.singbox_nginx import validate_sni_dispatch_config
@@ -1074,12 +1088,18 @@ def _sni_dispatch_menu() -> None:
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
         else:
             if ch == "1":
+                # v4.23.6: auto-config
+                from vless_installer.modules.singbox_nginx import auto_enable_sni_dispatch
+                auto_enable_sni_dispatch(interactive=True)
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "2":
+                # Ручной режим (старый путь)
                 try:
                     sh_sni = input(f"{CYAN}ShadowTLS SNI {DIM}(напр. shadowtls.example.com):{NC} ").strip()
                     an_sni = input(f"{CYAN}AnyTLS SNI {DIM}(напр. anytls.example.com):{NC} ").strip()
                     backend = input(
-                        f"{CYAN}Default backend {DIM}(Enter=unix:/dev/shm/vless-reality.socket):{NC} "
-                    ).strip() or "/dev/shm/vless-reality.socket"
+                        f"{CYAN}Default backend {DIM}(Enter=127.0.0.1:8442):{NC} "
+                    ).strip() or "127.0.0.1:8442"
                 except KeyboardInterrupt:
                     continue
                 enable_sni_dispatch(
@@ -1335,18 +1355,25 @@ def _ensure_binary_installed() -> bool:
     return singbox_install_binary()
 
 
-def _ensure_self_signed_cert(prefix: str) -> tuple[Path, Path]:
-    """Генерирует self-signed cert для sing-box протокола."""
+def _ensure_self_signed_cert(prefix: str, common_name: str = "") -> tuple[Path, Path, str]:
+    """Генерирует self-signed cert для sing-box протокола.
+
+    v4.23.6: возвращает (cert_path, key_path, common_name) — common_name
+    нужен для сохранения в state (auto-detect SNI в auto_enable_sni_dispatch).
+    Если common_name не передан — используется f"sing-box-{prefix}" как раньше.
+    """
     from vless_installer.modules.singbox_common import generate_self_signed_cert
     cert_path = SINGBOX_CERT_DIR / f"{prefix}.crt"
     key_path = SINGBOX_CERT_DIR / f"{prefix}.key"
+    cn = common_name or f"sing-box-{prefix}"
     if cert_path.exists() and key_path.exists():
-        return cert_path, key_path
-    return generate_self_signed_cert(
-        common_name=f"sing-box-{prefix}",
+        return cert_path, key_path, cn
+    generate_self_signed_cert(
+        common_name=cn,
         cert_path=cert_path,
         key_path=key_path,
     )
+    return cert_path, key_path, cn
 
 
 def _pick_letsencrypt_cert() -> tuple[Path, Path, str]:
