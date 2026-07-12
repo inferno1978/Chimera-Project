@@ -135,6 +135,12 @@ from vless_installer.modules.fragment_mux        import do_fragment_mux_menu
 from vless_installer.modules.fragment_watchdog   import do_fragment_watchdog_menu
 from vless_installer.modules.fragment_stats      import do_fragment_stats_menu
 from vless_installer.modules.fragment_share      import do_fragment_share_menu
+# ── Server-side TLS fragmentation (v4.21 — anti-DPI symmetry) ────────────────
+from vless_installer.modules.server_fragment     import (
+    do_server_fragment_menu,
+    server_fragment_reapply_after_rebuild,
+    server_fragment_status,
+)
 from vless_installer.modules.port_hopping        import do_port_hopping_menu, ph_status
 from vless_installer.modules.tg_bot              import do_tg_bot_menu, do_manage_telegram, _tg_notify_event, _tg_load, tg_send
 # ── Hysteria2 transport (аддитивно, v4.12.9+) ────────────────────────────────
@@ -2599,6 +2605,14 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
         pass
     except Exception as _pq_e:
         warn(f"PQ VLESS восстановление: {_pq_e}")
+
+    # Восстанавливаем server-side TLS fragment (v4.21 — anti-DPI symmetry).
+    # generate_* полностью переписывает config.json, поэтому sockopt.fragment
+    # на REALITY inbound теряется. Если в state включён — пере-применяем.
+    try:
+        server_fragment_reapply_after_rebuild()
+    except Exception as _sf_e:
+        warn(f"Server fragment восстановление: {_sf_e}")
 
     # Финальный рестарт
     _run(["systemctl", "restart", "xray"], check=False, quiet=True)
@@ -7139,6 +7153,8 @@ def _menu_diagnostics() -> None:
         _box_item("F8", f"🔄 Watchdog  {DIM}(автопереключение пресетов при RST){NC}")
         _box_item("F9", f"📈 Статистика эффективности фрагментации")
         _box_sep()
+        _box_item("SF", f"🖥️  Server-side Fragment  {DIM}(Fragment на INBOUND — ServerHello/Cert, симметрия с клиентом){NC}")
+        _box_sep()
         _box_item("DT", f"🧪 Диагностические тесты  {DIM}(unit-тесты по группам){NC}")
         _box_row()
         _box_back()
@@ -7227,6 +7243,12 @@ def _menu_diagnostics() -> None:
             do_fragment_watchdog_menu()
         elif ch.lower() in ("f9",):
             do_fragment_stats_menu()
+        elif ch.lower() == "sf":
+            try:
+                do_server_fragment_menu()
+            except Exception as _e:
+                warn(f"Модуль server_fragment недоступен: {_e}")
+                time.sleep(2)
         elif ch.lower() == "dt":
             try:
                 from vless_installer.modules.test_runner import do_test_runner_menu
