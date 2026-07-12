@@ -770,7 +770,7 @@ PARAM_SPIDERX:         str  = ""
 PARAM_SOCKET_PATH:     str  = ""
 PARAM_REALITY_DEST:    str  = ""   # dest/sni для REALITY при AWG-транспорте (чужой сайт, напр. www.cloudflare.com)
 PARAM_DOMAIN_STRATEGY: str  = ""
-PARAM_SITE_TEMPLATE:   str  = "0"   # индекс шаблона сайта (0-6), дефолт "0" — должен быть int-конвертируемой строкой
+PARAM_SITE_TEMPLATE:   str  = "0"   # индекс шаблона сайта (0-15), дефолт "0" — должен быть int-конвертируемой строкой
 PARAM_FINGERPRINT:     str  = "chrome"   # TLS/uTLS fingerprint, выбирается при установке
 PRIVATE_KEY_MODE:      str  = "auto"
 
@@ -3268,8 +3268,10 @@ def do_full_install() -> None:
     install_end  = time.time()
     install_dur  = int(install_end - INSTALL_START_TIME)
     ipv4_show    = get_server_ip("4")
-    tmpl_names   = ["", "TechHub", "NexCloud", "Holm & Oak",
-                    "Ember & Grain", "NexHub", "ByteForge"]
+    # Имена шаблонов берутся из единого источника, чтобы финальный статус,
+    # меню install_prompts и состояние emergency_repair всегда совпадали.
+    from vless_installer.modules.nginx_setup_templates import get_template_names as _get_tmpl_names
+    tmpl_names   = _get_tmpl_names()
 
     try:
         r = _run(["sysctl", "-n", "net.ipv4.tcp_congestion_control"],
