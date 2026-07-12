@@ -233,6 +233,87 @@ class TestMainStateRegistration(_StateTestBase):
             main = json.loads(self._main_state.read_text())
         self.assertIn("singbox_state_file", main)
 
+    def test_register_returns_true_on_success(self):
+        """register_singbox_in_main_state() возвращает True при успехе."""
+        from vless_installer.modules.singbox_common import (
+            register_singbox_in_main_state,
+        )
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            result = register_singbox_in_main_state()
+        self.assertTrue(result)
+
+    def test_register_returns_true_when_already_registered(self):
+        """Повторный register возвращает True (идемпотентность)."""
+        from vless_installer.modules.singbox_common import (
+            register_singbox_in_main_state,
+        )
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            register_singbox_in_main_state()
+            result = register_singbox_in_main_state()  # повторный
+        self.assertTrue(result)
+
+    def test_register_returns_false_when_save_fails(self):
+        """register возвращает False если _save_main_state провалился.
+
+        Баг №2 из v4.22.1: раньше register возвращал None (молча проглатывал
+        ошибку). Теперь должен вернуть False.
+        """
+        from vless_installer.modules.singbox_common import (
+            register_singbox_in_main_state,
+        )
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            stack.enter_context(patch("vless_installer.modules.singbox_common._save_main_state",
+                                      return_value=False))
+            result = register_singbox_in_main_state()
+        self.assertFalse(result)
+
+    def test_state_save_logs_error_when_registration_fails(self):
+        """singbox_state_save логирует ERROR если регистрация в main state провалилась.
+
+        Баг №2 из v4.22.1: раньше save молча возвращал True даже при провале
+        регистрации. Теперь должен записать ERROR в лог о рассинхроне.
+        """
+        from vless_installer.modules.singbox_state import singbox_state_save
+        log_calls: list = []
+        fake_core = MagicMock()
+        fake_core.log_to_file = lambda level, msg: log_calls.append((level, msg))
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            stack.enter_context(patch("vless_installer.modules.singbox_common._save_main_state",
+                                      return_value=False))
+            stack.enter_context(patch("vless_installer.modules.singbox_state._core_module",
+                                      return_value=fake_core))
+            # save всё равно возвращает True — state-файл записан OK
+            result = singbox_state_save({"installed": True, "version": "1.0.0"})
+        self.assertTrue(result)
+        # Но в лог ушла ERROR-запись о рассинхроне
+        error_logs = [(lvl, msg) for lvl, msg in log_calls if lvl == "ERROR"]
+        self.assertGreater(len(error_logs), 0,
+                           "ERROR-запись о провале регистрации должна быть в логе")
+        # Проверяем что сообщение про рассинхрон
+        self.assertTrue(any("регистрация" in msg.lower() or "main state" in msg.lower()
+                            for _, msg in error_logs),
+                        f"ERROR-запись должна упоминать регистрацию/main state, "
+                        f"получено: {error_logs}")
+
+    def test_state_save_does_not_log_error_when_registration_succeeds(self):
+        """При успешной регистрации ERROR-записи быть не должно."""
+        from vless_installer.modules.singbox_state import singbox_state_save
+        log_calls: list = []
+        fake_core = MagicMock()
+        fake_core.log_to_file = lambda level, msg: log_calls.append((level, msg))
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            stack.enter_context(patch("vless_installer.modules.singbox_state._core_module",
+                                      return_value=fake_core))
+            singbox_state_save({"installed": True, "version": "1.0.0"})
+        error_logs = [(lvl, msg) for lvl, msg in log_calls if lvl == "ERROR"]
+        self.assertEqual(error_logs, [],
+                         "При успешной регистрации ERROR-записей быть не должно")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Поведение при отсутствующем/битом state
@@ -274,16 +355,57 @@ class TestCorruptStateHandling(_StateTestBase):
         self.assertEqual(result, {})
 
     def test_load_returns_empty_on_array(self):
-        """JSON array (не dict) — тоже невалидный state."""
+        """JSON array (не dict) — невалидный state, должна вернуть {}.
+
+        ВАЖНО: раньше здесь стоял self.assertIsNotNone(result) — он проходил
+        даже на сломанном коде (load возвращал list, not None). Теперь
+        assert строгий: result обязан быть пустым dict. Тест ЛОМАЕТСЯ на
+        старом коде (где load возвращал [1,2,3]) и проходит только после
+        фикса isinstance(result, dict).
+        """
         from vless_installer.modules.singbox_state import singbox_state_load
         self._state.write_text("[1, 2, 3]")
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             result = singbox_state_load()
-        # load возвращает то, что распарсил — если это list, то list
-        # Но все вызывающие коды используют .get() который упадёт на list.
-        # Проверяем что хотя бы не падает при загрузке.
-        self.assertIsNotNone(result)
+        self.assertEqual(result, {})
+        self.assertIsInstance(result, dict)
+
+    def test_load_returns_empty_on_string(self):
+        """JSON string (не dict) — невалидный state, должна вернуть {}."""
+        from vless_installer.modules.singbox_state import singbox_state_load
+        self._state.write_text('"just a string"')
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            result = singbox_state_load()
+        self.assertEqual(result, {})
+
+    def test_load_returns_empty_on_int(self):
+        """JSON number (не dict) — невалидный state, должна вернуть {}."""
+        from vless_installer.modules.singbox_state import singbox_state_load
+        self._state.write_text("42")
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            result = singbox_state_load()
+        self.assertEqual(result, {})
+
+    def test_load_returns_empty_on_null(self):
+        """JSON null — невалидный state, должна вернуть {}."""
+        from vless_installer.modules.singbox_state import singbox_state_load
+        self._state.write_text("null")
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            result = singbox_state_load()
+        self.assertEqual(result, {})
+
+    def test_load_returns_empty_on_bool(self):
+        """JSON boolean (не dict) — невалидный state, должна вернуть {}."""
+        from vless_installer.modules.singbox_state import singbox_state_load
+        self._state.write_text("true")
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            result = singbox_state_load()
+        self.assertEqual(result, {})
 
     def test_is_installed_returns_false_when_no_file(self):
         from vless_installer.modules.singbox_state import singbox_state_is_installed
