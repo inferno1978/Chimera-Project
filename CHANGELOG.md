@@ -2,6 +2,95 @@
 
 ---
 
+## v4.22.1 — FIX: sing-box скачивание + тестовое покрытие state/install — 12 июля 2026
+
+### 🐛 Баг №1: sing-box скачивание падало на всех 14 зеркалах
+
+**Симптом:** При установке sing-box (меню → 17 → 1) все 14 зеркал возвращали 404,
+пользователь видел `Не удалось скачать sing-box ни с одного зеркала`.
+
+**Две причины:**
+
+1. **jsDelivr (4 URL), raw.githubusercontent (1 URL), Statically (1 URL) не могут
+   отдавать GitHub release assets** — они работают только с файлами из repo tree.
+   sing-box бинарник — это release asset. Из 14 зеркал 6 были гарантированным 404.
+
+2. **`print_manual_hint` в `download_manager.py` не передавал `filename_kwargs`**
+   в `mirror_urls_builder` — отображаемые URL содержали дефолтный `tag="1.11.4"`
+   вместо актуального `"1.13.14"`, вводя в заблуждение при ручном скачивании.
+
+**Фикс:**
+
+- `singbox_mirrors.py`: исключены jsDelivr/raw.githubusercontent/Statically через
+  `jsdelivr_hosts=()`, `include_raw_github=False`, `include_statically=False`.
+  Осталось 8 рабочих зеркал (1 release GitHub + 7 gh-proxy).
+  `SINGBOX_MIRRORS_COUNT` обновлён с 14 до 8.
+
+- `singbox_packages.py`: `tag` default изменён с `"1.11.4"` на `""` — защита от
+  генерации URL с устаревшим дефолтным тегом.
+
+- `download_manager.py::print_manual_hint`: добавлен `**filename_kwargs` в сигнатуру,
+  теперь отображаемые URL совпадают с теми, которые реально пытался скачать
+  `fetch_package`. Бэквард-совместимо — существующие вызовы без kwargs работают.
+
+### 🧪 Баг №2: тестовое покрытие singbox_state.py и singbox_install.py
+
+В v4.22 добавлен sing-box backend (9 модулей, ~3500 строк). Тестами покрыты
+только `singbox_config.py`, `singbox_nginx.py`, `singbox_packages.py` (90 тестов).
+Без покрытия остались `singbox_state.py` (295 строк) и `singbox_install.py`
+(279 строк) — самые чувствительные модули: persistence состояния и systemd-unit
+с capability hardening.
+
+**Добавлены:**
+
+- `tests/test_singbox_state.py` — 53 теста
+  • Round-trip: init → load → совпадение
+  • Регистрация singbox_state_file в основном state.json (идемпотентность)
+  • Поведение при отсутствующем/битом JSON
+  • SNI-dispatch state: set/get/update без потери полей
+  • Два последовательных save — не бьют файл
+  • Helpers: is_installed, get_version, get_binary_path, get_config_path
+  • Права 0o600 на state-файл
+
+- `tests/test_singbox_install.py` — 45 тестов
+  • _SYSTEMD_UNIT: assert на конкретные hardening-строки (NoNewPrivileges,
+    ProtectSystem=strict, CapabilityBoundingSet с CAP_NET_BIND_SERVICE/
+    CAP_NET_RAW/CAP_NET_ADMIN, AmbientCapabilities, ReadWritePaths)
+  • _install_systemd_unit: создание файла + daemon-reload + enable
+  • singbox_install_binary: idempotent (повторный вызов не плодит дубли)
+  • Ошибочные сценарии: GitHub API недоступен, fetch_package провалился,
+    бинарник не отвечает на --version
+  • singbox_uninstall_binary: полное удаление + отмена регистрации
+  • singbox_start/stop/restart/status: все пути
+
+**Всего:** 98 новых тестов, все зелёные.
+
+### 📋 Замеченные баги (НЕ починены — для отдельного тикета)
+
+При написании тестов найдены два потенциальных бага в `singbox_state.py`:
+
+1. **`singbox_state_load()` не валидирует тип данных.** Если state-файл содержит
+   JSON-массив `[1, 2, 3]` вместо объекта, `singbox_state_load()` возвращает list,
+   а не dict. Все вызывающие коды используют `.get()` который упадёт с
+   `AttributeError: 'list' object has no attribute 'get'`. Тест
+   `test_load_returns_empty_on_array` отмечает это — он проходит (не падает),
+   но возвращается list, а не `{}`.
+
+2. **`register_singbox_in_main_state()` при ошибке записи в main_state.json
+   молча проглатывает исключение** — функция `_save_main_state()` в
+   `singbox_common.py` логирует ошибку, но возвращает False, и
+   `register_singbox_in_main_state()` это игнорирует. Если основной state.json
+   заблокирован (permission denied), singbox_state_save вернёт True (потому что
+   сам singbox_state.json записан OK), но регистрация не произойдёт.
+
+Оба бага некритичны (не ломают функциональность в нормальных условиях), но
+могут привести к тихим рассинхронам в edge cases. Чинить или нет — отдельный
+тикет.
+
+---
+
+## v4.22 — sing-box как параллельный backend (ShadowTLS/AnyTLS/TUIC) — 12 июля 2026
+
 ## v4.20.9 — FIX: _check_mask_backend_ready SNI=127.0.0.1 ломал TLS-handshake — nginx слушал, но guard возвращал False — 12 июля 2026
 
 ### 🐛 Баг

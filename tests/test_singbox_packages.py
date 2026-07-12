@@ -200,6 +200,70 @@ class TestGetSingboxMirrors(unittest.TestCase):
         from vless_installer.modules.singbox_mirrors import MANUAL_UPLOAD_PATHS_SINGBOX
         self.assertNotIn(Path("/usr/local/bin"), MANUAL_UPLOAD_PATHS_SINGBOX)
 
+    def test_excludes_jsdelivr_for_release_assets(self):
+        """jsDelivr не может отдавать release assets — исключён."""
+        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        urls = get_singbox_mirrors(tag="1.13.14",
+                                   filename="sing-box-1.13.14-linux-amd64.tar.gz")
+        for url in urls:
+            self.assertNotIn("jsdelivr.net", url,
+                             f"jsDelivr URL не должен быть в списке: {url}")
+
+    def test_excludes_raw_githubusercontent_for_release_assets(self):
+        """raw.githubusercontent не может отдавать release assets — исключён."""
+        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        urls = get_singbox_mirrors(tag="1.13.14",
+                                   filename="sing-box-1.13.14-linux-amd64.tar.gz")
+        for url in urls:
+            self.assertNotIn("raw.githubusercontent.com", url,
+                             f"raw.githubusercontent URL не должен быть: {url}")
+
+    def test_excludes_statically_for_release_assets(self):
+        """Statically CDN не может отдавать release assets — исключён."""
+        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        urls = get_singbox_mirrors(tag="1.13.14",
+                                   filename="sing-box-1.13.14-linux-amd64.tar.gz")
+        for url in urls:
+            self.assertNotIn("statically.io", url,
+                             f"Statically URL не должен быть: {url}")
+
+    def test_includes_release_github_url(self):
+        """release GitHub URL должен быть в списке."""
+        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        urls = get_singbox_mirrors(tag="1.13.14",
+                                   filename="sing-box-1.13.14-linux-amd64.tar.gz")
+        has_release = any(
+            "github.com/SagerNet/sing-box/releases/download/1.13.14/" in u
+            for u in urls
+        )
+        self.assertTrue(has_release, "Нет release GitHub URL")
+
+    def test_includes_gh_proxy_urls(self):
+        """gh-proxy зеркала должны быть в списке (проксируют release assets)."""
+        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        urls = get_singbox_mirrors(tag="1.13.14",
+                                   filename="sing-box-1.13.14-linux-amd64.tar.gz")
+        # Должно быть минимум 5 gh-proxy URL
+        gh_proxy_count = sum(1 for u in urls if "ghproxy" in u or "gh.con.sh" in u
+                             or "gitmirror" in u or "moeyy" in u or "ghps.cc" in u)
+        self.assertGreaterEqual(gh_proxy_count, 5,
+                                f"Слишком мало gh-proxy URL: {gh_proxy_count}")
+
+    def test_mirror_count_is_8_after_exclusion(self):
+        """После исключения jsDelivr/raw/Statically должно быть 8 зеркал."""
+        from vless_installer.modules.singbox_mirrors import (
+            SINGBOX_MIRRORS_COUNT, get_singbox_mirrors,
+        )
+        urls = get_singbox_mirrors(tag="1.13.14",
+                                   filename="sing-box-1.13.14-linux-amd64.tar.gz")
+        self.assertEqual(len(urls), SINGBOX_MIRRORS_COUNT)
+        self.assertEqual(SINGBOX_MIRRORS_COUNT, 8)
+
+    def test_tag_empty_returns_empty(self):
+        """Без tag URL не генерируются (защита от дефолтных тегов)."""
+        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        self.assertEqual(get_singbox_mirrors(tag="", filename="file.tar.gz"), [])
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. post_install — извлечение бинарника

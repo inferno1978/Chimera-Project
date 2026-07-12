@@ -55,18 +55,22 @@ def get_singbox_mirrors(tag: str, filename: str) -> list[str]:
     """Упорядоченный список URL для скачивания sing-box бинарника.
 
     Параметры:
-      tag:      Release tag (например "1.11.4", БЕЗ префикса "v").
+      tag:      Release tag (например "1.13.14", БЕЗ префикса "v").
                 Получается из GitHub API в singbox_install.py.
-      filename: Ия tar.gz файла (например "sing-box-1.11.4-linux-amd64.tar.gz").
+      filename: Имя tar.gz файла (например "sing-box-1.13.14-linux-amd64.tar.gz").
                 Получается из GitHub API assets в singbox_install.py.
 
     Возвращает:
       Упорядоченный список URL (через build_mirror_urls):
-        1. jsDelivr CDN family (4 бэкенда)
-        2. raw.githubusercontent.com/{tag}/{filename}
-        3. release GitHub (/releases/download/{tag}/{filename})
-        4. 7 GitHub-прокси
-        5. Statically CDN
+        1. release GitHub (/releases/download/{tag}/{filename})
+        2. 7 GitHub-прокси
+
+    ВАЖНО: jsDelivr (4 URL), raw.githubusercontent (1 URL), Statically (1 URL)
+    ИСКЛЮЧЕНЫ, потому что они могут отдавать ТОЛЬКО файлы из repo tree, а не
+    GitHub release assets. sing-box бинарник — это release asset. Включение
+    этих зеркал приводило к 6 из 14 гарантированным 404, что замедляло
+    скачивание и вводило в заблуждение (print_manual_hint показывал
+    несуществующие URL).
     """
     if not tag or not filename:
         return []
@@ -76,12 +80,16 @@ def get_singbox_mirrors(tag: str, filename: str) -> list[str]:
         repo=_SINGBOX_REPO,
         filename=filename,
         tag=tag,
-        # ref = tag. Тег без префикса "v" — все зеркала принимают.
+        # Release assets — исключаем зеркала, которые работают только с repo tree
+        jsdelivr_hosts=(),           # исключаем все 4 jsDelivr URL
+        include_raw_github=False,    # исключаем raw.githubusercontent.com
+        include_statically=False,    # исключаем cdn.statically.io
     )
 
 
-# Количество зеркал — 14 (4 jsDelivr + raw + release + 7 proxy + Statically).
-SINGBOX_MIRRORS_COUNT: int = 14  # константа для TUI
+# Количество зеркал — 8 (1 release GitHub + 7 gh-proxy).
+# jsDelivr/raw/Statically исключены — не могут отдавать release assets.
+SINGBOX_MIRRORS_COUNT: int = 8  # константа для TUI
 
 
 # ============================================================================
