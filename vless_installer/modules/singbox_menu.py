@@ -70,6 +70,44 @@ from vless_installer.modules.singbox_users import (
 from vless_installer.modules.singbox_nginx import (
     enable_sni_dispatch, disable_sni_dispatch, sni_dispatch_status,
 )
+from vless_installer.modules.singbox_ufw import (
+    singbox_ufw_ensure_open, singbox_ufw_close, singbox_ufw_close_all,
+    singbox_ufw_status,
+)
+# v4.23.14: alias для удобства — loopback-проверка
+def _is_loopback_listen_ip(ip: str) -> bool:
+    return ip in ("127.0.0.1", "::1", "localhost")
+
+
+def _disable_protocol_and_close_ufw(protocol: str) -> None:
+    """Выключает протокол sing-box и закрывает его порт в UFW (v4.23.14).
+
+    Общий путь для ShadowTLS / AnyTLS / TUIC / VLESS-WS-CDN.
+    Читает state ДО выключения — чтобы знать listen/listen_port для close.
+    """
+    state = singbox_state_load()
+    ib = state.get("inbounds", {}).get(protocol, {})
+    listen = ib.get("listen", "127.0.0.1")
+    port = ib.get("listen_port", 0)
+    proto_ufw = "udp" if protocol == "tuic" else "tcp"
+
+    # Выключаем протокол
+    if protocol == "shadowtls":
+        singbox_disable_shadowtls()
+    elif protocol == "anytls":
+        singbox_disable_anytls()
+    elif protocol == "tuic":
+        singbox_disable_tuic()
+    elif protocol == "vless_ws_cdn":
+        singbox_disable_vless_ws_cdn()
+
+    singbox_generate_config()
+    if _service_active():
+        singbox_restart()
+
+    # Закрываем порт в UFW (только если был не-loopback)
+    if port and not _is_loopback_listen_ip(listen):
+        singbox_ufw_close(port, proto_ufw, protocol, listen=listen)
 
 
 # ============================================================================
@@ -339,9 +377,17 @@ def _change_listen_ip(protocol: str) -> None:
         return
     if not _apply_and_check(f"Listen IP изменён, но sing-box не запустился"):
         return
+    # v4.23.14: умное управление UFW
+    # Если старый listen был не-loopback — закрыть старый порт.
+    # Если новый listen не-loopback — открыть новый порт.
+    proto_ufw = "udp" if protocol == "tuic" else "tcp"
+    if not _is_loopback_listen_ip(cur_listen):
+        singbox_ufw_close(cur_port, proto_ufw, protocol, listen=cur_listen)
+    if not _is_loopback_listen_ip(new_listen):
+        singbox_ufw_ensure_open(cur_port, proto_ufw, protocol, listen=new_listen)
+    else:
+        info("Listen loopback — порт в firewall не нужен (используйте SNI-dispatch)")
     success(f"Listen IP для {protocol}: {cur_listen} → {new_listen}")
-    if new_listen not in ("127.0.0.1", "::1", "localhost"):
-        info(f"Не забудьте открыть порт в firewall: ufw allow {cur_port}/tcp")
 
 
 # ============================================================================
@@ -402,10 +448,7 @@ def _shadowtls_menu() -> None:
 
         if enabled:
             if ch == "1":
-                singbox_disable_shadowtls()
-                singbox_generate_config()
-                if _service_active():
-                    singbox_restart()
+                _disable_protocol_and_close_ufw("shadowtls")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
             elif ch == "2":
                 _regen_password_shadowtls()
@@ -460,6 +503,9 @@ def _enable_shadowtls_default() -> None:
         return
     if not _apply_and_check("ShadowTLS v3 + Trojan НЕ включены — sing-box не запустился"):
         return
+    # v4.23.14: автоматически открыть порт в UFW (если активен)
+    singbox_ufw_ensure_open(listen_port, "tcp", "shadowtls",
+                            listen="127.0.0.1")  # default-режим — loopback
     success("ShadowTLS v3 + Trojan включены")
 
 
@@ -544,9 +590,11 @@ def _enable_shadowtls_custom() -> None:
         return
     if not _apply_and_check("ShadowTLS v3 НЕ включён — sing-box не запустился"):
         return
+    # v4.23.14: автоматически открыть порт в UFW (если активен и не loopback)
+    singbox_ufw_ensure_open(port, "tcp", "shadowtls", listen=listen_ip)
     success("ShadowTLS v3 включён с custom-параметрами")
-    if listen_ip not in ("127.0.0.1", "::1", "localhost"):
-        info(f"Не забудьте открыть порт в firewall: ufw allow {port}/tcp")
+    if listen_ip in ("127.0.0.1", "::1", "localhost"):
+        info("Listen loopback — порт в firewall не открывается (используйте SNI-dispatch)")
 
 
 def _regen_password_shadowtls() -> None:
@@ -730,10 +778,7 @@ def _anytls_menu() -> None:
 
         if enabled:
             if ch == "1":
-                singbox_disable_anytls()
-                singbox_generate_config()
-                if _service_active():
-                    singbox_restart()
+                _disable_protocol_and_close_ufw("anytls")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
             elif ch == "2":
                 _regen_password("anytls")
@@ -774,6 +819,10 @@ def _anytls_menu() -> None:
                         if not _apply_and_check("AnyTLS НЕ включён — sing-box не запустился"):
                             pass
                         else:
+                            # v4.23.14: UFW для AnyTLS (loopback по умолчанию)
+                            singbox_ufw_ensure_open(
+                                DEFAULT_PORT_ANYTLS, "tcp", "anytls",
+                                listen="127.0.0.1")
                             success("AnyTLS включён")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
 
@@ -841,10 +890,7 @@ def _tuic_menu() -> None:
 
         if enabled:
             if ch == "1":
-                singbox_disable_tuic()
-                singbox_generate_config()
-                if _service_active():
-                    singbox_restart()
+                _disable_protocol_and_close_ufw("tuic")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
             elif ch == "2":
                 _regen_password("tuic")
@@ -874,6 +920,10 @@ def _tuic_menu() -> None:
                         if not _apply_and_check("TUIC v5 НЕ включён — sing-box не запустился"):
                             pass
                         else:
+                            # v4.23.14: UFW для TUIC (UDP, listen=::)
+                            singbox_ufw_ensure_open(
+                                DEFAULT_PORT_TUIC_ALTERNATIVE, "udp", "tuic",
+                                listen="::")
                             success("TUIC v5 включён")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
 
@@ -940,10 +990,7 @@ def _vless_ws_cdn_menu() -> None:
 
         if enabled:
             if ch == "1":
-                singbox_disable_vless_ws_cdn()
-                singbox_generate_config()
-                if _service_active():
-                    singbox_restart()
+                _disable_protocol_and_close_ufw("vless_ws_cdn")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
             elif ch == "2":
                 _switch_cdn_provider()
@@ -1006,6 +1053,9 @@ def _enable_vless_ws_cdn_default() -> None:
         return
     if not _apply_and_check("VLESS-WS-CDN НЕ включён — sing-box не запустился"):
         return
+    # v4.23.14: UFW для VLESS-WS-CDN (listen=0.0.0.0 по умолчанию)
+    singbox_ufw_ensure_open(
+        DEFAULT_PORT_VLESS_WS_CDN, "tcp", "vless_ws_cdn", listen="0.0.0.0")
     success("VLESS-WS-CDN включён (Cloudflare)")
     _show_cdn_instructions("cloudflare")
 
@@ -1057,6 +1107,9 @@ def _enable_vless_ws_cdn_custom() -> None:
         return
     if not _apply_and_check("VLESS-WS-CDN НЕ включён — sing-box не запустился"):
         return
+    # v4.23.14: UFW для VLESS-WS-CDN (listen=0.0.0.0)
+    singbox_ufw_ensure_open(
+        listen_port, "tcp", "vless_ws_cdn", listen="0.0.0.0")
     success(f"VLESS-WS-CDN включён ({CDN_PROVIDERS[provider]['display_name']})")
     _show_cdn_instructions(provider)
 
@@ -1543,6 +1596,7 @@ def _uninstall_menu() -> None:
     _box_row(f"  • конфиг /etc/sing-box/ (включая сертификаты)")
     _box_row(f"  • state-файл singbox_state.json")
     _box_row(f"  • SNI-dispatch конфиг (если включён)")
+    _box_row(f"  • UFW-правила sing-box (только наши, чужие не трогаем)")
     _box_sep()
     _box_warn("Xray / Nginx / Hysteria2 / AWG — НЕ затрагиваются.")
     _box_bottom()
@@ -1560,6 +1614,10 @@ def _uninstall_menu() -> None:
     if sd["enabled"]:
         info("Выключаю SNI-dispatch...")
         disable_sni_dispatch(interactive=False)
+
+    # v4.23.14: закрываем все наши UFW-правила (только sing-box-*)
+    info("Закрываю UFW-правила sing-box...")
+    singbox_ufw_close_all()
 
     singbox_uninstall_binary()
     input(f"\n{BLUE}Нажмите Enter...{NC}")
