@@ -178,6 +178,17 @@ def _build_tuic_inbound(state_ib: dict) -> dict:
     """Строит TUIC v5 inbound.
 
     TUIC users format: [{"uuid": "...", "password": "..."}]
+
+    initial_packet_size (v4.22.4): общее поле из "QUIC Fields" применимо к
+    TUIC (и Hysteria/Hysteria2). Регулирует размер начального QUIC-пакета —
+    это единственный доступный рычаг против DPI, классифицирующего по длине
+    initial-packet.
+
+    ВАЖНО: obfs (salamander/gecko) в схеме sing-box существует ТОЛЬКО для
+    Hysteria/Hysteria2-inbound. У TUIC такого поля НЕТ ВООБЩЕ — добавление
+    "obfs" в TUIC-конфиг было бы мёртвым JSON-полем (класс ошибки v4.22.3
+    с ShadowTLS TLS-блоком). initial_packet_size — НЕ полная замена обфускации,
+    а частичный митигейт: меняет размер пакета, но не шифрует содержимое.
     """
     users = state_ib.get("users", [])
     sb_users = [{"uuid": u["uuid"], "password": u["password"]}
@@ -202,6 +213,18 @@ def _build_tuic_inbound(state_ib: dict) -> dict:
             "certificate": [cert_path],
             "key":         [key_path],
         }
+
+    # initial_packet_size — передаём в конфиг ТОЛЬКО если явно задано в state.
+    # НЕ подставляем дефолт sing-box насильно — существующие установки не должны
+    # менять поведение без явного действия пользователя.
+    initial_packet_size = state_ib.get("initial_packet_size")
+    if initial_packet_size is not None:
+        # Принимаем int или строку — sing-box ожидает int, но строка тоже
+        # парсится (например "1200"). Приводим к int для надёжности.
+        try:
+            inbound["initial_packet_size"] = int(initial_packet_size)
+        except (ValueError, TypeError):
+            pass  # некорректное значение — игнорируем, не ломаем генерацию
 
     return inbound
 

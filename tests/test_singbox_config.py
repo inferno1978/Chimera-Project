@@ -446,6 +446,94 @@ class TestTuicInboundBuilder(unittest.TestCase):
             })
             self.assertIn("tls", ib)
 
+    # ── v4.22.4: initial_packet_size ──────────────────────────────────────
+
+    def test_initial_packet_size_omitted_when_not_in_state(self):
+        """v4.22.4: если initial_packet_size не задан в state — поле отсутствует.
+
+        НЕ должно навязываться дефолт sing-box насильно — существующие установки
+        не должны менять поведение без явного действия пользователя.
+        """
+        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        ib = _build_tuic_inbound({"enabled": True, "users": _SAMPLE_TUIC_USERS})
+        self.assertNotIn("initial_packet_size", ib,
+                         "Без явного задания initial_packet_size в state — "
+                         "поле не должно появляться в конфиге")
+
+    def test_initial_packet_size_present_when_set_in_state(self):
+        """v4.22.4: если initial_packet_size задан в state — попадает в конфиг."""
+        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        ib = _build_tuic_inbound({
+            "enabled": True,
+            "users": _SAMPLE_TUIC_USERS,
+            "initial_packet_size": 1200,
+        })
+        self.assertIn("initial_packet_size", ib)
+        self.assertEqual(ib["initial_packet_size"], 1200)
+        self.assertIsInstance(ib["initial_packet_size"], int)
+
+    def test_initial_packet_size_string_coerced_to_int(self):
+        """Строковое значение приводится к int (например из ручного JSON)."""
+        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        ib = _build_tuic_inbound({
+            "enabled": True,
+            "users": _SAMPLE_TUIC_USERS,
+            "initial_packet_size": "1400",
+        })
+        self.assertEqual(ib["initial_packet_size"], 1400)
+        self.assertIsInstance(ib["initial_packet_size"], int)
+
+    def test_initial_packet_size_invalid_string_ignored(self):
+        """Некорректное строковое значение — игнорируется, поле не появляется."""
+        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        ib = _build_tuic_inbound({
+            "enabled": True,
+            "users": _SAMPLE_TUIC_USERS,
+            "initial_packet_size": "not-a-number",
+        })
+        self.assertNotIn("initial_packet_size", ib,
+                         "Некорректное значение не должно ломать генерацию")
+
+    def test_initial_packet_size_zero_allowed(self):
+        """0 — валидное значение (sing-box трактует как default)."""
+        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        ib = _build_tuic_inbound({
+            "enabled": True,
+            "users": _SAMPLE_TUIC_USERS,
+            "initial_packet_size": 0,
+        })
+        self.assertIn("initial_packet_size", ib)
+        self.assertEqual(ib["initial_packet_size"], 0)
+
+    def test_initial_packet_size_none_does_not_add_field(self):
+        """Явный None — поле не добавляется (аналог отсутствия)."""
+        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        ib = _build_tuic_inbound({
+            "enabled": True,
+            "users": _SAMPLE_TUIC_USERS,
+            "initial_packet_size": None,
+        })
+        self.assertNotIn("initial_packet_size", ib)
+
+    def test_no_obfs_field_generated_for_tuic(self):
+        """v4.22.4: TUIC НЕ должен содержать поле 'obfs' — его нет в схеме.
+
+        Регрессия: раньше в роадмапе был пункт 'добавить obfs.type: salamander
+        для TUIC'. Это НЕВЫПОЛНИМО — obfs (salamander/gecko) в схеме sing-box
+        существует только для Hysteria/Hysteria2-inbound. У TUIC такого поля
+        нет вообще. Тест гарантирует что мы не добавили мёртвое JSON-поле.
+        """
+        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        ib = _build_tuic_inbound({
+            "enabled": True,
+            "users": _SAMPLE_TUIC_USERS,
+            "initial_packet_size": 1200,
+        })
+        self.assertNotIn("obfs", ib,
+                         "TUIC не поддерживает obfs — это поле схемы только "
+                         "для Hysteria/Hysteria2-inbound")
+        self.assertNotIn("salamander", ib)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. singbox_generate_config — полный config.json
