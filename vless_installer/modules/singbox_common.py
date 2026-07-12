@@ -167,8 +167,14 @@ CDN_PROVIDERS: dict = {
     "bunny": {
         "display_name": "Bunny.net",
         "default_port": 8443,
-        "ip_source": "https://docs.bunny.net/magic-containers/ip-addresses",
-        "ip_format": "html_scrape",
+        # v4.23.2: правильный источник — CDN edge-серверы, не Magic Containers.
+        # https://bunnycdn.com/api/system/edgeserverlist/plain — plain text,
+        # один IPv4 на строку БЕЗ /32 суффикса (fetch_cdn_nets добавляет /32).
+        # IPv6: https://bunnycdn.com/api/system/edgeserverlist/IPv6 — JSON array,
+        # но listen = "0.0.0.0" (IPv4 only), IPv6 трафик не дойдёт до этого
+        # инбаунда → IPv6 явно игнорируем, не тащим лишний код.
+        "ip_source": "https://bunnycdn.com/api/system/edgeserverlist/plain",
+        "ip_format": "plaintext",
         "instructions": [
             "1. В Bunny.net Dashboard → CDN → Pull Zones → Add Pull Zone.",
             "",
