@@ -2,6 +2,64 @@
 
 ---
 
+## v4.22.2 — FIX: два бага из v4.22.1 (state type validation + register error handling) — 12 июля 2026
+
+В v4.22.1 в разделе "Замеченные баги" были описаны два бага с пометкой
+"НЕ починены — для отдельного тикета". Этот тикет их чинит.
+
+### 🐛 Баг №1: singbox_state_load() не валидирует тип данных
+
+**Симптом:** Если state-файл содержит JSON-массив `[1, 2, 3]` или скаляр
+`"string"` / `42` / `true` / `null` вместо объекта, `singbox_state_load()`
+возвращала этот list/str/int/bool/None, а не dict. Все вызывающие коды
+используют `.get()` который падает с `AttributeError: 'list' object has
+no attribute 'get'`.
+
+**Фикс:** Добавлена проверка `isinstance(result, dict)` после `json.loads()`.
+Если не dict — возвращаем `{}` и логируем WARN с реальным типом
+(`list` / `str` / `int` / `bool` / `NoneType`), не молчим.
+
+### 🐛 Баг №2: register_singbox_in_main_state() молча глотал ошибку
+
+**Симптом:** При ошибке записи в main_state.json (например permission denied)
+`register_singbox_in_main_state()` возвращал `None` и не сообщал об ошибке.
+`singbox_state_save()` возвращал True (свой файл записал OK), но регистрация
+не происходила — тихий рассинхрон.
+
+**Фикс:**
+- `register_singbox_in_main_state()`: сигнатура `-> None` заменена на `-> bool`.
+  Возвращает True при успехе (записано или уже было зарегистрировано),
+  False при ошибке `_save_main_state()`.
+- `singbox_state_save()`: если `register_singbox_in_main_state()` вернула False,
+  логирует ERROR явно: "state сохранён, но регистрация в main state.json
+  провалилась — singbox_state_file не зарегистрирован, возможен рассинхрон
+  при diagnostic/backup". Save всё ещё возвращает True (state-файл записан),
+  но админ видит проблему в логе.
+
+### 🧪 Тесты
+
+- `test_load_returns_empty_on_array` — ПЕРЕПИСАН. Раньше стоял
+  `self.assertIsNotNone(result)` — проходил даже на сломанном коде (load
+  возвращал list, not None). Теперь `self.assertEqual(result, {})` —
+  тест ЛОМАЕТСЯ на старом коде и проходит только после фикса.
+
+- Добавлены тесты на другие не-dict типы: `test_load_returns_empty_on_string`,
+  `test_load_returns_empty_on_int`, `test_load_returns_empty_on_null`,
+  `test_load_returns_empty_on_bool`.
+
+- Добавлены тесты на баг №2:
+  • `test_register_returns_true_on_success`
+  • `test_register_returns_true_when_already_registered` (идемпотентность)
+  • `test_register_returns_false_when_save_fails` (mock _save_main_state → False)
+  • `test_state_save_logs_error_when_registration_fails` (проверка ERROR-лога
+    с mock _core_module для перехвата log_to_file)
+  • `test_state_save_does_not_log_error_when_registration_succeeds` (негативный)
+
+Всего: 9 новых тестов, все зелёные. Полный прогон sing-box + download_manager:
+224 теста, 0 регрессий.
+
+---
+
 ## v4.22.1 — FIX: sing-box скачивание + тестовое покрытие state/install — 12 июля 2026
 
 ### 🐛 Баг №1: sing-box скачивание падало на всех 14 зеркалах

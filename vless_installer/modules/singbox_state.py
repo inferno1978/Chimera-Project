@@ -97,11 +97,31 @@ def _core_module():
 # ── State load/save ──────────────────────────────────────────────────────────
 
 def singbox_state_load() -> dict:
-    """Загружает state. Возвращает {} если файл не существует или corrupt."""
+    """Загружает state. Возвращает {} если файл не существует, corrupt или
+    содержит не-dict (например JSON-массив или скаляр).
+
+    ВАЖНО: возвращает dict ВСЕГДА. Если в файле лежит JSON-массив [1,2,3] или
+    скаляр "string" — это невалидный state, возвращаем {} и логируем WARN
+    с реальным типом (list/str/int/etc), не молчать.
+    """
     try:
         if not SINGBOX_STATE_FILE.exists():
             return {}
-        return json.loads(SINGBOX_STATE_FILE.read_text())
+        result = json.loads(SINGBOX_STATE_FILE.read_text())
+        # Валидация типа — state обязан быть dict. JSON-массив/скаляр невалиден.
+        if not isinstance(result, dict):
+            actual_type = type(result).__name__
+            try:
+                core = _core_module()
+                core.log_to_file(
+                    "WARN",
+                    f"singbox_state_load: state file contains {actual_type}, "
+                    f"expected dict — treating as empty"
+                )
+            except Exception:
+                pass
+            return {}
+        return result
     except Exception as e:
         try:
             core = _core_module()
@@ -112,7 +132,12 @@ def singbox_state_load() -> dict:
 
 
 def singbox_state_save(state: dict) -> bool:
-    """Атомарно сохраняет state. Возвращает True при успехе."""
+    """Атомарно сохраняет state. Возвращает True при успехе.
+
+    ВАЖНО: возвращает True даже если регистрация в main_state.json провалилась —
+    сам singbox_state.json записан OK, это первичная цель. Но в лог уходит
+    ERROR-запись о рассинхроне, чтобы админ видел проблему.
+    """
     try:
         SINGBOX_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = SINGBOX_STATE_FILE.with_suffix(".tmp")
@@ -121,7 +146,20 @@ def singbox_state_save(state: dict) -> bool:
         # Права 0600 — внутри state есть пароли и сертификаты
         SINGBOX_STATE_FILE.chmod(0o600)
         # Регистрируем в основном state.json
-        register_singbox_in_main_state()
+        register_ok = register_singbox_in_main_state()
+        if not register_ok:
+            # state сохранён, но регистрация в main state.json провалилась.
+            # Не проглатываем молча — логируем ERROR явно.
+            try:
+                core = _core_module()
+                core.log_to_file(
+                    "ERROR",
+                    "singbox_state_save: state сохранён, но регистрация в "
+                    "main state.json провалилась — singbox_state_file не "
+                    "зарегистрирован, возможен рассинхрон при diagnostic/backup"
+                )
+            except Exception:
+                pass
         return True
     except Exception as e:
         try:
