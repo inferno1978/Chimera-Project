@@ -795,6 +795,13 @@ def _anytls_menu() -> None:
             if ch == "1":
                 if not _ensure_binary_installed():
                     continue
+                # v4.23.18: pre-flight port-check — дефолтный 8444 часто занят
+                # nginx (SNI-dispatch backend) или другими сервисами.
+                # Спрашиваем альтернативу ДО записи в state, как в ShadowTLS.
+                listen_port = _prompt_alt_port(DEFAULT_PORT_ANYTLS, "127.0.0.1", "tcp")
+                if listen_port is None:
+                    input(f"\n{BLUE}Нажмите Enter...{NC}")
+                    continue
                 # v4.23.6: common_name = домен сервера (для auto-detect SNI)
                 main_state = singbox_state_load()
                 # Читаем domain из основного state.json
@@ -811,6 +818,7 @@ def _anytls_menu() -> None:
                     key_path=str(key_path),
                     cert_source="self-signed",
                     common_name=cn,
+                    listen_port=listen_port,
                 )
                 if ok:
                     singbox_sync_users()
@@ -821,7 +829,7 @@ def _anytls_menu() -> None:
                         else:
                             # v4.23.14: UFW для AnyTLS (loopback по умолчанию)
                             singbox_ufw_ensure_open(
-                                DEFAULT_PORT_ANYTLS, "tcp", "anytls",
+                                listen_port, "tcp", "anytls",
                                 listen="127.0.0.1")
                             success("AnyTLS включён")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
