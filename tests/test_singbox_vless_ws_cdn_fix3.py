@@ -350,5 +350,242 @@ class TestSystemdUnitBeforeNetfilterPersistent(unittest.TestCase):
                          "Повторный вызов не должен перезаписывать существующий юнит")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ФИКС v4.23.4: Ordering cycle — After=network-pre.target убран,
+# DefaultDependencies=no + After=local-fs.target добавлены
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Реальный netfilter-persistent.service из Debian/Ubuntu поставки (пакет
+# netfilter-persistent 1.0.23, Debian trixie). Захардкожен как fixture —
+# не выдумываем, берём из реальной системы.
+# Источник: apt-get download netfilter-persistent → dpkg-deb -x →
+# /usr/lib/systemd/system/netfilter-persistent.service
+_NETFILTER_PERSISTENT_UNIT = """
+[Unit]
+Description=netfilter persistent configuration
+DefaultDependencies=no
+Wants=network-pre.target systemd-modules-load.service local-fs.target
+Before=network-pre.target shutdown.target
+After=systemd-modules-load.service local-fs.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/netfilter-persistent start
+ExecStop=/usr/sbin/netfilter-persistent stop
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+# local-fs.target из systemd (проверено на Debian trixie, systemd 257).
+# Не имеет Before/After на netfilter-persistent или наш юнит — безопасная
+# зависимость для ConditionPathExists.
+_LOCAL_FS_TARGET = """
+[Unit]
+Description=Local File Systems
+DefaultDependencies=no
+After=local-fs-pre.target
+Conflicts=shutdown.target
+"""
+
+
+def _parse_unit_before_after(unit_text: str, unit_name: str) -> dict:
+    """Парсит Before= и After= из юнит-файла.
+
+    Returns dict: {"before": [targets...], "after": [targets...]}
+    """
+    before = []
+    after = []
+    in_unit_section = False
+    for line in unit_text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_unit_section = (line == "[Unit]")
+            continue
+        if not in_unit_section:
+            continue
+        if line.startswith("Before="):
+            targets = line[len("Before="):].strip().split()
+            before.extend(targets)
+        elif line.startswith("After="):
+            targets = line[len("After="):].strip().split()
+            after.extend(targets)
+    return {"before": before, "after": after}
+
+
+def _build_dependency_graph(units: dict[str, str]) -> dict[str, list[str]]:
+    """Строит граф зависимостей из юнит-файлов.
+
+    Args:
+      units: {unit_name: unit_text}
+
+    Returns:
+      adjacency list: {unit_name: [units_that_must_run_AFTER_this_one]}
+      (Before=X means X runs after this unit → edge this→X)
+    """
+    graph: dict[str, list[str]] = {name: [] for name in units}
+    for name, text in units.items():
+        deps = _parse_unit_before_after(text, name)
+        # Before=X → X runs after this → edge name→X
+        for target in deps["before"]:
+            target_name = target
+            if target_name in graph:
+                graph[name].append(target_name)
+            # If target not in graph (external like shutdown.target), skip
+        # After=X → this runs after X → edge X→name
+        for target in deps["after"]:
+            target_name = target
+            if target_name in graph:
+                graph[target_name].append(name)
+    return graph
+
+
+def _has_cycle_dfs(graph: dict[str, list[str]]) -> bool:
+    """Проверяет наличие цикла в графе через DFS.
+
+    Возвращает True если найден цикл.
+    """
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {node: WHITE for node in graph}
+
+    def dfs(node):
+        color[node] = GRAY
+        for neighbor in graph.get(node, []):
+            if neighbor not in color:
+                continue  # external node, skip
+            if color[neighbor] == GRAY:
+                return True  # back edge → cycle
+            if color[neighbor] == WHITE:
+                if dfs(neighbor):
+                    return True
+        color[node] = BLACK
+        return False
+
+    for node in graph:
+        if color[node] == WHITE:
+            if dfs(node):
+                return True
+    return False
+
+
+class TestNoOrderingCycle(unittest.TestCase):
+    """v4.23.4: ordering cycle между After=network-pre.target и Before=netfilter-persistent."""
+
+    def setUp(self):
+        _setup_core()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._unit_path = self._tmpdir / "singbox-cdn-ipset-restore.service"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _generate_unit(self) -> str:
+        """Генерирует юнит через _ipset_restore_unit_install и возвращает текст."""
+        from vless_installer.modules.singbox_cdn_nets import _ipset_restore_unit_install
+        from vless_installer.modules import singbox_cdn_nets
+        with patch.object(singbox_cdn_nets, "_RESTORE_SVC", self._unit_path):
+            with patch.object(singbox_cdn_nets, "_IPSET_CONF", self._tmpdir / "ipset.conf"):
+                with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+                    _ipset_restore_unit_install()
+        return self._unit_path.read_text()
+
+    def test_no_after_network_pre_target(self):
+        """After=network-pre.target убран — он создавал ordering cycle."""
+        content = self._generate_unit()
+        self.assertNotIn("After=network-pre.target", content,
+                         "After=network-pre.target должен быть убран (v4.23.4) — "
+                         "создавал cycle с Before=netfilter-persistent.service")
+
+    def test_has_default_dependencies_no(self):
+        """DefaultDependencies=no — иначе implicit deps могут создать cycle."""
+        content = self._generate_unit()
+        self.assertIn("DefaultDependencies=no", content,
+                      "DefaultDependencies=no должен присутствовать (v4.23.4) — "
+                      "по паттерну netfilter-persistent.service из Debian")
+
+    def test_has_after_local_fs_target(self):
+        """After=local-fs.target — ConditionPathExists читает файл с диска."""
+        content = self._generate_unit()
+        self.assertIn("After=local-fs.target", content,
+                      "After=local-fs.target должен присутствовать — "
+                      "ConditionPathExists нуждается в смонтированном диске")
+
+    def test_no_ordering_cycle_in_dependency_graph(self):
+        """DFS на графе Before/After зависимостей → цикла нет.
+
+        Граф строится из:
+        - Нашего сгенерированного юнита
+        - Реального netfilter-persistent.service (Debian/Ubuntu, fixture)
+        - local-fs.target (systemd, fixture)
+
+        Цикл = путь A→B→...→A по рёбрам Before/After.
+        """
+        our_unit = self._generate_unit()
+        units = {
+            "singbox-cdn-ipset-restore.service": our_unit,
+            "netfilter-persistent.service": _NETFILTER_PERSISTENT_UNIT,
+            "local-fs.target": _LOCAL_FS_TARGET,
+            "network-pre.target": "[Unit]\nDescription=Preparation for Network\n",
+            "sing-box.service": "[Unit]\nDescription=sing-box\n",
+            "shutdown.target": "[Unit]\nDescription=Shutdown\n",
+            "systemd-modules-load.service": "[Unit]\nDescription=modules\n",
+        }
+        graph = _build_dependency_graph(units)
+        has_cycle = _has_cycle_dfs(graph)
+        self.assertFalse(has_cycle,
+                         f"Ordering cycle detected in dependency graph!\n"
+                         f"Graph: {graph}")
+
+    def test_old_unit_had_cycle(self):
+        """Старый юнит (с After=network-pre.target) создавал цикл — регрессионный тест.
+
+        Доказывает что тест на цикл реально ловит проблему, а не просто
+        проходит тривиально.
+        """
+        old_unit = textwrap.dedent("""\
+            [Unit]
+            Description=Restore ipset for sing-box CDN allowlist (VLESS Ultimate)
+            Before=sing-box.service
+            Before=netfilter-persistent.service
+            After=network-pre.target
+            ConditionPathExists=/etc/ipset-singbox-cdn.conf
+        """)
+        units = {
+            "singbox-cdn-ipset-restore.service": old_unit,
+            "netfilter-persistent.service": _NETFILTER_PERSISTENT_UNIT,
+            "local-fs.target": _LOCAL_FS_TARGET,
+            "network-pre.target": "[Unit]\nDescription=Preparation for Network\n",
+            "sing-box.service": "[Unit]\nDescription=sing-box\n",
+            "shutdown.target": "[Unit]\nDescription=Shutdown\n",
+            "systemd-modules-load.service": "[Unit]\nDescription=modules\n",
+        }
+        graph = _build_dependency_graph(units)
+        has_cycle = _has_cycle_dfs(graph)
+        # Старый юнит ДОЛЖЕН иметь цикл — это доказывает что тест работает
+        self.assertTrue(has_cycle,
+                        "Старый юнит (с After=network-pre.target) должен иметь "
+                        "ordering cycle — если этого нет, тест на цикл не работает")
+
+    def test_systemd_analyze_verify_passes(self):
+        """systemd-analyze verify на сгенерированном юните — без ошибок.
+
+        Если systemd-analyze недоступен — skip с явной причиной.
+        """
+        import shutil
+        if not shutil.which("systemd-analyze"):
+            self.skipTest("systemd-analyze not available in test environment")
+        our_unit = self._generate_unit()
+        tmp_unit = self._tmpdir / "singbox-cdn-ipset-restore.service"
+        tmp_unit.write_text(our_unit)
+        import subprocess
+        r = subprocess.run(["systemd-analyze", "verify", str(tmp_unit)],
+                         capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0,
+                         f"systemd-analyze verify failed:\n{r.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
