@@ -206,7 +206,7 @@ server {{
     listen [::]:443;
     ssl_preread on;
     proxy_pass $singbox_backend;
-    # proxy_protocol on;  # включить если backend поддерживает PROXY protocol
+    proxy_protocol on;  # v4.23.5: передаёт реальный IP — fail2ban зависит от этого
     proxy_connect_timeout 5s;
     proxy_timeout 30s;
 }}
@@ -402,3 +402,428 @@ def validate_sni_dispatch_config() -> bool:
         return False
     r = _run(["nginx", "-t"], capture=True, quiet=True)
     return r.returncode == 0
+
+
+# ============================================================================
+#  v4.23.5: Auto-config — автоматическое определение параметров SNI-dispatch
+# ============================================================================
+# Архитектура (v4.23.5):
+#
+#  REALITY-инбаунд в config.json слушает на :443 напрямую (без SNI-dispatch).
+#  При включении SNI-dispatch:
+#    1. nginx stream{} перехватывает :443, диспетчеризует по SNI
+#    2. REALITY-инбаунд должен переехать с :443 на backend (loopback:8442)
+#    3. stream{} default → 127.0.0.1:8442 (с proxy_protocol on)
+#    4. Xray REALITY inbound: listen=127.0.0.1:8442, sockopt.acceptProxyProtocol=true
+#    5. realitySettings.dest (decoy-сокет) НЕ ТРОГАЕМ — это downstream Xray
+#
+#  Важно: realitySettings.dest (PARAM_SOCKET_PATH, decoy-сайт) — НЕ является
+#  backend для SNI-dispatch. Это fallback для non-REALITY трафика внутри самого
+#  Xray. SNI-dispatch направляет REALITY SNI на 127.0.0.1:8442, где Xray
+#  слушает REALITY-инбаунд с acceptProxyProtocol.
+#
+#  Автоматический патч config.json Xray (перенос listen + acceptProxyProtocol) —
+#  следующим шагом. В этом коммите: auto-detect параметров + генерация stream{}
+#  + комментирование listen 443 в http{}. Ручной патч config.json — с явным
+#  warn() пользователю.
+
+import json as _json
+from pathlib import Path as _Path
+from datetime import datetime as _datetime
+
+# Loopback порт для REALITY-инбаунда при SNI-dispatch
+_REALITY_LOOPBACK_PORT = 8442
+
+# Comment-tag для бэкапа http{} конфига
+_NGINX_HTTP_BACKUP_SUFFIX = ".pre-sni-dispatch"
+
+
+def _read_main_state() -> dict:
+    """Читает основной state.json (/var/lib/xray-installer/state.json)."""
+    try:
+        p = _Path("/var/lib/xray-installer/state.json")
+        if not p.exists():
+            return {}
+        return _json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
+def _detect_reality_backend() -> str:
+    """Определяет backend для REALITY при SNI-dispatch.
+
+    Читает state.json → protocol_mode, awg_exit_enabled.
+    Если REALITY (не xHTTP, не AWG) — возвращает loopback адрес 127.0.0.1:8442.
+    REALITY-инбаунд должен слушать на этом адресе с acceptProxyProtocol=true.
+
+    НЕ использует state.json["socket"] (PARAM_SOCKET_PATH) — это decoy-сокет
+    для realitySettings.dest, отдельная downstream-логика Xray.
+
+    Returns:
+      "127.0.0.1:8442" если REALITY режим.
+      "" если xHTTP или AWG — auto-config неприменим.
+    """
+    state = _read_main_state()
+    proto = state.get("protocol_mode", "reality")
+    awg = state.get("awg_exit_enabled", False)
+
+    if proto != "reality":
+        return ""  # xHTTP — SNI-dispatch неприменим (nginx http{} уже на :443)
+    if awg:
+        return ""  # AWG — Xray на :443 напрямую, конфликт
+
+    return f"127.0.0.1:{_REALITY_LOOPBACK_PORT}"
+
+
+def _detect_shadowtls_sni() -> str:
+    """Auto-detect SNI для ShadowTLS из singbox_state.
+
+    Читает singbox_state["inbounds"]["shadowtls"]["handshake"]["server"],
+    если shadowtls enabled.
+    """
+    state = singbox_state_load()
+    ib = state.get("inbounds", {}).get("shadowtls", {})
+    if not ib.get("enabled"):
+        return ""
+    handshake = ib.get("handshake", {})
+    return handshake.get("server", "")
+
+
+def _detect_anytls_sni() -> str:
+    """Auto-detect SNI для AnyTLS.
+
+    v4.23.5: читает common_name из singbox_state (новые установки).
+    Fallback для старых установок: парсит CN из cert_path через openssl.
+    Если ни то ни другое — пустая строка (пользователь должен ввести вручную).
+    """
+    state = singbox_state_load()
+    ib = state.get("inbounds", {}).get("anytls", {})
+    if not ib.get("enabled"):
+        return ""
+
+    # 1. common_name из state (v4.23.5+)
+    cn = ib.get("common_name", "")
+    if cn:
+        return cn
+
+    # 2. Fallback: парсим CN из существующего сертификата
+    cert_path = ib.get("cert_path", "")
+    if cert_path and _Path(cert_path).exists():
+        try:
+            r = _run(["openssl", "x509", "-noout", "-subject", "-in", cert_path],
+                     capture=True, quiet=True)
+            if r.returncode == 0 and r.stdout:
+                # Вывод: "subject=C=XX, CN=example.com" или "subject=/CN=example.com"
+                subject = r.stdout.strip()
+                # Извлекаем CN
+                if "CN=" in subject:
+                    cn_part = subject.split("CN=")[-1].split(",")[0].split("/")[0].strip()
+                    if cn_part:
+                        return cn_part
+        except Exception:
+            pass
+
+    return ""
+
+
+def _find_nginx_http_443_configs() -> list[_Path]:
+    """Находит nginx http{} конфиги с активным listen 443.
+
+    Ищет в /etc/nginx/sites-enabled/ и /etc/nginx/conf.d/.
+    Возвращает список путей к файлам, содержащим незакомментированный listen 443.
+    """
+    result = []
+    search_dirs = [_Path("/etc/nginx/sites-enabled"), _Path("/etc/nginx/conf.d")]
+    for d in search_dirs:
+        if not d.is_dir():
+            continue
+        for f in d.glob("*.conf"):
+            try:
+                text = f.read_text()
+                for line in text.splitlines():
+                    stripped = line.strip()
+                    # Пропускаем закомментированные строки
+                    if stripped.startswith("#"):
+                        continue
+                    # Ищем активный listen 443 (не в stream{}, не закомментированный)
+                    if "listen" in stripped and "443" in stripped:
+                        result.append(f)
+                        break
+            except Exception:
+                pass
+    return result
+
+
+def _comment_out_listen_443(config_path: _Path) -> bool:
+    """Комментирует строки `listen ... 443 ...` в http{} конфиге.
+
+    Создаёт бэкап .pre-sni-dispatch перед изменением.
+    Возвращает True при успехе.
+    """
+    try:
+        text = config_path.read_text()
+        # Бэкап
+        backup_path = config_path.with_suffix(config_path.suffix + _NGINX_HTTP_BACKUP_SUFFIX)
+        if not backup_path.exists():
+            backup_path.write_text(text)
+            info(f"Бэкап: {backup_path}")
+
+        new_lines = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if (not stripped.startswith("#")
+                    and "listen" in stripped
+                    and "443" in stripped
+                    and "unix:" not in stripped):
+                # Комментируем — добавляем # в начало (с сохранением отступа)
+                indent = line[:len(line) - len(line.lstrip())]
+                new_lines.append(f"{indent}# [SNI-DISPATCH] {stripped}")
+            else:
+                new_lines.append(line)
+
+        config_path.write_text("\n".join(new_lines) + "\n")
+        return True
+    except Exception as e:
+        error(f"Не удалось закомментировать listen 443 в {config_path}: {e}")
+        return False
+
+
+def _uncomment_listen_443(config_path: _Path) -> bool:
+    """Раскомментирует строки `# [SNI-DISPATCH] listen ... 443 ...` в http{} конфиге.
+
+    Возвращает True при успехе.
+    """
+    try:
+        text = config_path.read_text()
+        new_lines = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# [SNI-DISPATCH]"):
+                # Раскомментируем
+                indent = line[:len(line) - len(line.lstrip())]
+                content = stripped.replace("# [SNI-DISPATCH] ", "")
+                new_lines.append(f"{indent}{content}")
+            else:
+                new_lines.append(line)
+
+        config_path.write_text("\n".join(new_lines) + "\n")
+        return True
+    except Exception as e:
+        error(f"Не удалось раскомментировать listen 443 в {config_path}: {e}")
+        return False
+
+
+def auto_enable_sni_dispatch(
+    reality_sni: str = "",
+    interactive: bool = True,
+) -> bool:
+    """Автоматически включает SNI-dispatch с auto-detect параметров.
+
+    v4.23.5: Автоматизирует:
+    1. Detect REALITY backend (loopback:8442, не decoy-сокет)
+    2. Detect ShadowTLS SNI из singbox_state (handshake.server)
+    3. Detect AnyTLS SNI из singbox_state (common_name или CN из cert)
+    4. Комментирует listen 443 в http{} (с бэкапом)
+    5. Генерирует stream{} конфиг с proxy_protocol on
+    6. nginx -t → reload
+
+    НЕ патчит config.json Xray (перенос REALITY listen + acceptProxyProtocol) —
+    это следующий шаг. Пока warn() пользователю о необходимости ручного патча.
+
+    Args:
+      reality_sni: SNI домен сервера REALITY (для default backend).
+                   Если пусто — читается из state.json domain.
+      interactive: Если True — подтверждение пользователя.
+
+    Returns:
+      True при успехе, False при ошибке.
+    """
+    # 1. Detect REALITY backend
+    default_backend = _detect_reality_backend()
+    if not default_backend:
+        state = _read_main_state()
+        proto = state.get("protocol_mode", "reality")
+        awg = state.get("awg_exit_enabled", False)
+        if proto == "xhttp":
+            error("SNI-dispatch неприменим в xHTTP-режиме: nginx http{} уже на :443")
+        elif awg:
+            error("SNI-dispatch неприменим в AWG-режиме: Xray на :443 напрямую")
+        else:
+            error("Не удалось определить REALITY backend")
+        return False
+
+    # 2. Detect SNI для ShadowTLS
+    shadowtls_sni = _detect_shadowtls_sni()
+    if shadowtls_sni:
+        info(f"ShadowTLS SNI auto-detected: {shadowtls_sni}")
+
+    # 3. Detect SNI для AnyTLS
+    anytls_sni = _detect_anytls_sni()
+    if anytls_sni:
+        info(f"AnyTLS SNI auto-detected: {anytls_sni}")
+    else:
+        # Проверим — AnyTLS включён но SNI не найден
+        state = singbox_state_load()
+        anytls_enabled = state.get("inbounds", {}).get("anytls", {}).get("enabled", False)
+        if anytls_enabled:
+            warn("AnyTLS SNI не определён автоматически — введите вручную")
+            warn("(common_name не сохранён в state и CN не извлечён из cert)")
+
+    # 4. REALITY SNI — из state.json domain
+    if not reality_sni:
+        main_state = _read_main_state()
+        reality_sni = main_state.get("domain", "")
+
+    # 5. Подтверждение
+    if interactive:
+        print()
+        info(f"REALITY backend: {default_backend} (loopback, proxy_protocol)")
+        info(f"ShadowTLS SNI:   {shadowtls_sni or '(не задан)'}")
+        info(f"AnyTLS SNI:      {anytls_sni or '(не задан)'}")
+        info(f"REALITY SNI:     {reality_sni or '(не задан)'}")
+        print()
+        warn("ВНИМАНИЕ: SNI-dispatch перехватит :443 в nginx stream{}.")
+        warn("listen 443 в http{} будет закомментирован (с бэкапом).")
+        warn(f"REALITY-инбаунд должен слушать на {default_backend}")
+        warn("с sockopt.acceptProxyProtocol=true.")
+        warn("Автоматический патч config.json Xray — следующим шагом.")
+        warn("ПОКА: нужно вручную перевести REALITY на loopback:8442!")
+        try:
+            confirm = input(f"{YELLOW}Продолжить? (y/N):{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            confirm = ""
+        if confirm != "y":
+            info("Отменено пользователем")
+            return False
+
+    # 6. Комментируем listen 443 в http{}
+    http_configs = _find_nginx_http_443_configs()
+    if not http_configs:
+        warn("Не найден http{} конфиг с listen 443 — возможно уже закомментирован")
+    else:
+        for cfg_path in http_configs:
+            if not _comment_out_listen_443(cfg_path):
+                error(f"Не удалось закомментировать listen 443 в {cfg_path}")
+                return False
+            info(f"listen 443 закомментирован в {cfg_path.name}")
+
+    # 7. Включаем SNI-dispatch через существующую функцию
+    #    proxy_protocol on — для передачи реального IP (fail2ban зависит от этого)
+    ok = enable_sni_dispatch(
+        shadowtls_sni=shadowtls_sni,
+        anytls_sni=anytls_sni,
+        default_backend=default_backend,
+        interactive=False,  # уже подтвердили выше
+    )
+    if not ok:
+        # Откат: раскомментируем listen 443
+        for cfg_path in http_configs:
+            _uncomment_listen_443(cfg_path)
+        return False
+
+    # 8. Дополняем state — сохраняем auto-config метаданные
+    sd_state = singbox_state_get_sni_dispatch()
+    sd_state["auto_configured"] = True
+    sd_state["reality_sni"] = reality_sni
+    sd_state["reality_backend"] = default_backend
+    sd_state["http_configs_patched"] = [str(p) for p in http_configs]
+    sd_state["auto_enabled_at"] = _datetime.now().isoformat()
+    singbox_state_set_sni_dispatch(sd_state)
+
+    success("SNI-dispatch auto-config включён")
+    success(f"  REALITY backend: {default_backend} (proxy_protocol on)")
+    if shadowtls_sni:
+        success(f"  ShadowTLS SNI:   {shadowtls_sni}")
+    if anytls_sni:
+        success(f"  AnyTLS SNI:      {anytls_sni}")
+    print()
+    warn(f"ДЕЙСТВИЕ ТРЕБУЕТСЯ: переведите REALITY-инбаунд на {default_backend}")
+    warn("В config.json Xray:")
+    warn(f'  listen: "127.0.0.1:{_REALITY_LOOPBACK_PORT}"')
+    warn(f'  sockopt.acceptProxyProtocol: true')
+    warn("  (realitySettings.dest НЕ трогать — decoy-сокет остаётся)")
+    log_to_file("INFO", f"SNI-dispatch auto-enabled: backend={default_backend}, "
+                        f"shadowtls_sni={shadowtls_sni}, anytls_sni={anytls_sni}")
+    return True
+
+
+def auto_disable_sni_dispatch(interactive: bool = True) -> bool:
+    """Автоматически выключает SNI-dispatch и возвращает listen 443 в http{}.
+
+    v4.23.5:
+    1. Удаляет stream{} конфиг (через существующую disable_sni_dispatch)
+    2. Раскомментирует listen 443 в http{} конфигах
+    3. nginx -t → reload
+
+    НЕ патчит config.json Xray (возврат REALITY на :443) —
+    warn() пользователю о необходимости ручного патча.
+
+    Args:
+      interactive: Если True — подтверждение пользователя.
+
+    Returns:
+      True при успехе, False при ошибке.
+    """
+    sd_state = singbox_state_get_sni_dispatch()
+    if not sd_state.get("enabled"):
+        info("SNI-dispatch уже выключен")
+        return True
+
+    if interactive:
+        warn("При выключении SNI-dispatch:")
+        warn("  1. stream{} конфиг будет удалён")
+        warn("  2. listen 443 в http{} будет раскомментирован")
+        warn("  3. REALITY-инбаунд должен вернуться на :443 напрямую")
+        warn("     (sockopt.acceptProxyProtocol убрать, listen :443)")
+        try:
+            confirm = input(f"{YELLOW}Продолжить? (y/N):{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            confirm = ""
+        if confirm != "y":
+            info("Отменено пользователем")
+            return False
+
+    # 1. Удаляем stream{} конфиг
+    ok = disable_sni_dispatch(interactive=False)
+    if not ok:
+        return False
+
+    # 2. Раскомментируем listen 443 в http{}
+    patched_paths = sd_state.get("http_configs_patched", [])
+    if not patched_paths:
+        # Fallback: ищем сами
+        patched_paths = [str(p) for p in _find_nginx_http_443_configs()]
+
+    for path_str in patched_paths:
+        cfg_path = _Path(path_str)
+        if cfg_path.exists():
+            if _uncomment_listen_443(cfg_path):
+                info(f"listen 443 раскомментирован в {cfg_path.name}")
+            else:
+                warn(f"Не удалось раскомментировать listen 443 в {cfg_path.name}")
+
+    # 3. nginx -t → reload
+    r = _run(["nginx", "-t"], capture=True, quiet=True)
+    if r.returncode != 0:
+        warn("nginx -t провален после раскомментирования:")
+        warn((r.stderr or "")[:300])
+    else:
+        _run(["systemctl", "reload", "nginx"], capture=True, quiet=True)
+
+    # 4. State update
+    sd_state = singbox_state_get_sni_dispatch()
+    sd_state["auto_configured"] = False
+    sd_state.pop("reality_sni", None)
+    sd_state.pop("reality_backend", None)
+    sd_state.pop("http_configs_patched", None)
+    sd_state.pop("auto_enabled_at", None)
+    singbox_state_set_sni_dispatch(sd_state)
+
+    success("SNI-dispatch auto-config выключен")
+    success("  listen 443 возвращён в http{}")
+    warn("ДЕЙСТВИЕ ТРЕБУЕТСЯ: верните REALITY-инбаунд на :443 напрямую")
+    warn("В config.json Xray:")
+    warn('  listen: "0.0.0.0:443" (или как было)')
+    warn("  sockopt.acceptProxyProtocol: убрать (или false)")
+    log_to_file("INFO", "SNI-dispatch auto-disabled, listen 443 restored")
+    return True
