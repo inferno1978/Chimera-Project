@@ -62,6 +62,18 @@ State management для sing-box backend.
       "listen": "127.0.0.1",
       "listen_port": 0,               // sing-box внутренний pipe через detour
       "users": [{"password": "...", "name": "default"}]
+    },
+    "vless_ws_cdn": {                 // v4.23 — VLESS+WS за CDN (Cloudflare/Gcore/Bunny)
+      "enabled": false,
+      "listen": "0.0.0.0",            // bound externally — CDN подключается к этому порту
+      "listen_port": 8443,            // DEFAULT_PORT_VLESS_WS_CDN — поддержан всеми 3 CDN
+      "uuid": "...",                  // VLESS UUID клиента
+      "ws_path": "/a3f4b2c1",         // случайный hex path, генерируется при enable
+      "host": "vless.example.com",    // real Host header (домен через CDN)
+      "cdn_provider": "cloudflare"    // "cloudflare" | "gcore" | "bunny"
+      // cert_path/key_path/cert_source НЕ создаются — CDN терминирует TLS своим
+      // cert, origin слушает plain WS. Это тот же принцип что в shadowtls v4.22.3:
+      // поле не нужно — не создаём, не тащим мёртвые ключи в state.
     }
   },
   "sni_dispatch": {
@@ -85,6 +97,7 @@ from .singbox_common import (
     SINGBOX_STATE_FILE, SINGBOX_BINARY, SINGBOX_CONFIG_FILE,
     DEFAULT_PORT_SHADOWTLS, DEFAULT_PORT_ANYTLS, DEFAULT_PORT_TUIC,
     DEFAULT_PORT_TUIC_ALTERNATIVE,
+    DEFAULT_PORT_VLESS_WS_CDN,
     DEFAULT_SHADOWTLS_HANDSHAKE_HOST, DEFAULT_SHADOWTLS_HANDSHAKE_PORT,
     register_singbox_in_main_state, unregister_singbox_from_main_state,
 )
@@ -246,6 +259,18 @@ def singbox_state_init(version: str = "") -> dict:
                 "listen":       "127.0.0.1",
                 "listen_port":  0,
                 "users":         [],
+            },
+            # v4.23 — VLESS-WS-CDN: VLESS+WebSocket за CDN (Cloudflare/Gcore/Bunny).
+            # CDN терминирует TLS своим cert, origin (sing-box) слушает plain WS.
+            # cert_path/key_path НЕ создаются — см. _build_vless_ws_cdn_inbound docstring.
+            "vless_ws_cdn": {
+                "enabled":      False,
+                "listen":       "0.0.0.0",     # bound externally — CDN подключается
+                "listen_port":  DEFAULT_PORT_VLESS_WS_CDN,
+                "uuid":         "",            # генерируется при enable
+                "ws_path":      "",            # генерируется при enable (случайный hex)
+                "host":         "",            # real Host header (домен через CDN)
+                "cdn_provider": "",            # "cloudflare" | "gcore" | "bunny"
             },
         },
         "sni_dispatch": {
