@@ -249,10 +249,17 @@ class TestVlessWsCdnUri(_Base):
 
 
 # ============================================================================
-#  5. _gen_singbox_client_json
+#  5. _gen_singbox_client_json (v4.23.15 — полный клиентский конфиг)
 # ============================================================================
 class TestSingboxClientJson(_Base):
-    def test_shadowtls_json_structure(self):
+    def test_shadowtls_json_structure_v4_23_15(self):
+        """v4.23.15: ShadowTLS — отдельный outbound, не transport.
+
+        Правильная схема (sing-box 1.12+):
+          - shadowtls outbound с detour на trojan-out
+          - trojan outbound с detour на shadowtls (proxy)
+        Старый формат с transport: shadowtls НЕ работает в 1.13+.
+        """
         state = {
             "handshake": {"server": "www.cloudflare.com", "server_port": 443},
             "password": "pw123",
@@ -260,15 +267,32 @@ class TestSingboxClientJson(_Base):
         s = self.menu._gen_singbox_client_json(
             "shadowtls", state, "203.0.113.42", 9443)
         d = json.loads(s)
-        self.assertEqual(d["type"], "trojan")
-        self.assertEqual(d["server"], "203.0.113.42")
-        self.assertEqual(d["server_port"], 9443)
-        self.assertEqual(d["password"], "pw123")
-        self.assertEqual(d["tls"]["server_name"], "www.cloudflare.com")
-        self.assertTrue(d["tls"]["utls"]["enabled"])
-        self.assertEqual(d["transport"]["type"], "shadowtls")
-        self.assertEqual(d["transport"]["version"], 3)
-        self.assertEqual(d["transport"]["password"], "pw123")
+        # Полный конфиг, не фрагмент
+        self.assertIn("inbounds", d)
+        self.assertIn("outbounds", d)
+        self.assertIn("route", d)
+        # Два outbound: shadowtls (proxy) + trojan (trojan-out) + direct
+        outbounds = d["outbounds"]
+        self.assertEqual(len(outbounds), 3)
+        proxy = outbounds[0]
+        trojan = outbounds[1]
+        # shadowtls outbound
+        self.assertEqual(proxy["type"], "shadowtls")
+        self.assertEqual(proxy["tag"], "proxy")
+        self.assertEqual(proxy["server"], "203.0.113.42")
+        self.assertEqual(proxy["server_port"], 9443)
+        self.assertEqual(proxy["version"], 3)
+        self.assertEqual(proxy["password"], "pw123")
+        self.assertEqual(proxy["tls"]["server_name"], "www.cloudflare.com")
+        self.assertTrue(proxy["tls"]["utls"]["enabled"])
+        self.assertEqual(proxy["detour"], "trojan-out")
+        # trojan outbound (внутренний)
+        self.assertEqual(trojan["type"], "trojan")
+        self.assertEqual(trojan["tag"], "trojan-out")
+        self.assertEqual(trojan["password"], "pw123")
+        self.assertEqual(trojan["detour"], "proxy")
+        # НЕ должно быть transport: shadowtls
+        self.assertNotIn("transport", proxy)
 
     def test_anytls_json_structure(self):
         state = {
@@ -279,9 +303,10 @@ class TestSingboxClientJson(_Base):
         s = self.menu._gen_singbox_client_json(
             "anytls", state, "203.0.113.42", 8444)
         d = json.loads(s)
-        self.assertEqual(d["type"], "anytls")
-        self.assertEqual(d["password"], "anytls-pw")
-        self.assertTrue(d["tls"]["insecure"])  # self-signed
+        proxy = d["outbounds"][0]
+        self.assertEqual(proxy["type"], "anytls")
+        self.assertEqual(proxy["password"], "anytls-pw")
+        self.assertTrue(proxy["tls"]["insecure"])  # self-signed
 
     def test_tuic_json_structure(self):
         state = {
@@ -292,11 +317,12 @@ class TestSingboxClientJson(_Base):
         s = self.menu._gen_singbox_client_json(
             "tuic", state, "203.0.113.42", 443)
         d = json.loads(s)
-        self.assertEqual(d["type"], "tuic")
-        self.assertEqual(d["uuid"], "uuid-1234")
-        self.assertEqual(d["password"], "tuic-pw")
-        self.assertEqual(d["congestion_control"], "bbr")
-        self.assertTrue(d["tls"]["insecure"])
+        proxy = d["outbounds"][0]
+        self.assertEqual(proxy["type"], "tuic")
+        self.assertEqual(proxy["uuid"], "uuid-1234")
+        self.assertEqual(proxy["password"], "tuic-pw")
+        self.assertEqual(proxy["congestion_control"], "bbr")
+        self.assertTrue(proxy["tls"]["insecure"])
 
     def test_vless_ws_cdn_json_structure(self):
         state = {
@@ -307,13 +333,14 @@ class TestSingboxClientJson(_Base):
         s = self.menu._gen_singbox_client_json(
             "vless_ws_cdn", state, "203.0.113.42", 8443)
         d = json.loads(s)
-        self.assertEqual(d["type"], "vless")
-        self.assertEqual(d["server"], "vpn.example.net")
-        self.assertEqual(d["server_port"], 443)
-        self.assertEqual(d["uuid"], "vless-uuid")
-        self.assertEqual(d["transport"]["type"], "ws")
-        self.assertEqual(d["transport"]["path"], "/abc")
-        self.assertEqual(d["transport"]["headers"]["Host"], "vpn.example.net")
+        proxy = d["outbounds"][0]
+        self.assertEqual(proxy["type"], "vless")
+        self.assertEqual(proxy["server"], "vpn.example.net")
+        self.assertEqual(proxy["server_port"], 443)
+        self.assertEqual(proxy["uuid"], "vless-uuid")
+        self.assertEqual(proxy["transport"]["type"], "ws")
+        self.assertEqual(proxy["transport"]["path"], "/abc")
+        self.assertEqual(proxy["transport"]["headers"]["Host"], "vpn.example.net")
 
     def test_unknown_protocol_returns_empty(self):
         s = self.menu._gen_singbox_client_json(
@@ -325,6 +352,22 @@ class TestSingboxClientJson(_Base):
         s = self.menu._gen_singbox_client_json(
             "tuic", state, "1.2.3.4", 443)
         self.assertEqual(s, "")
+
+    def test_full_config_has_inbound_mixed(self):
+        """Полный конфиг должен иметь mixed-in на 127.0.0.1:2080."""
+        s = self.menu._gen_singbox_client_json(
+            "anytls", {"password": "x"}, "1.2.3.4", 8444)
+        d = json.loads(s)
+        self.assertEqual(d["inbounds"][0]["type"], "mixed")
+        self.assertEqual(d["inbounds"][0]["listen"], "127.0.0.1")
+        self.assertEqual(d["inbounds"][0]["listen_port"], 2080)
+
+    def test_full_config_route_final_proxy(self):
+        """route.final должен быть 'proxy'."""
+        s = self.menu._gen_singbox_client_json(
+            "anytls", {"password": "x"}, "1.2.3.4", 8444)
+        d = json.loads(s)
+        self.assertEqual(d["route"]["final"], "proxy")
 
 
 # ============================================================================

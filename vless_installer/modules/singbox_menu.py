@@ -1882,88 +1882,133 @@ def _gen_vless_ws_cdn_client_uri(state_ib: dict) -> str:
 
 def _gen_singbox_client_json(protocol: str, state_ib: dict,
                              public_ip: str, port: int) -> str:
-    """Генерирует JSON-фрагмент outbound для sing-box клиента.
+    """Генерирует полный клиентский config.json для sing-box 1.12+.
 
-    Готов к вставке в client config.json → outbounds[].
+    v4.23.15: ПОЛНЫЙ КОНФИГ, не фрагмент. Готов к запуску:
+      sing-box run -c client-config.json
+
+    ВАЖНО для ShadowTLS (v4.23.15):
+      В sing-box 1.12+ ShadowTLS — это отдельный тип outbound (type: shadowtls),
+      НЕ transport. Правильная схема:
+        - shadowtls-out: подключается к серверу, делает shadowtls-handshake
+        - trojan-out: использует shadowtls-out как транспорт (detour)
+      Старый формат с transport: shadowtls больше НЕ работает (sing-box 1.13
+      выдаёт 'unknown transport type: shadowtls').
     """
     import json as _json
+    # Базовый шаблон полного клиентского конфига
+    # listen_port 2080 — стандартный SOCKS/mixed-прокси для клиента
+    base = {
+        "log": {"level": "info", "timestamp": True},
+        "inbounds": [{
+            "type": "mixed",
+            "tag": "mixed-in",
+            "listen": "127.0.0.1",
+            "listen_port": 2080,
+        }],
+        "outbounds": [],
+        "route": {"final": "proxy"},
+    }
+
     if protocol == "shadowtls":
         handshake = state_ib.get("handshake", {})
         sni = handshake.get("server", "www.cloudflare.com")
         password = state_ib.get("password", "")
         if not password and state_ib.get("users"):
             password = state_ib["users"][0].get("password", "")
-        return _json.dumps({
-            "type": "trojan",
-            "tag": "shadowtls-out",
-            "server": public_ip,
-            "server_port": port,
-            "password": password,
-            "tls": {
-                "enabled": True,
-                "server_name": sni,
-                "utls": {"enabled": True, "fingerprint": "chrome"},
-            },
-            "transport": {
+        # v4.23.15: правильная схема для sing-box 1.12+
+        # shadowtls-out — внешний outbound, делает shadowtls-handshake
+        # trojan-out — внутренний, использует shadowtls-out через detour
+        base["outbounds"] = [
+            {
                 "type": "shadowtls",
+                "tag": "proxy",
+                "server": public_ip,
+                "server_port": port,
                 "version": 3,
                 "password": password,
+                "tls": {
+                    "enabled": True,
+                    "server_name": sni,
+                    "utls": {"enabled": True, "fingerprint": "chrome"},
+                },
+                "detour": "trojan-out",
             },
-        }, indent=2, ensure_ascii=False)
-    if protocol == "anytls":
+            {
+                "type": "trojan",
+                "tag": "trojan-out",
+                "server": public_ip,
+                "server_port": port,
+                "password": password,
+                "detour": "proxy",
+            },
+            {"type": "direct", "tag": "direct"},
+        ]
+    elif protocol == "anytls":
         password = state_ib.get("password", "")
         if not password and state_ib.get("users"):
             password = state_ib["users"][0].get("password", "")
         sni = state_ib.get("common_name") or public_ip
-        return _json.dumps({
-            "type": "anytls",
-            "tag": "anytls-out",
-            "server": public_ip,
-            "server_port": port,
-            "password": password,
-            "tls": {
-                "enabled": True,
-                "server_name": sni,
-                "insecure": state_ib.get("cert_source") == "self-signed",
+        base["outbounds"] = [
+            {
+                "type": "anytls",
+                "tag": "proxy",
+                "server": public_ip,
+                "server_port": port,
+                "password": password,
+                "tls": {
+                    "enabled": True,
+                    "server_name": sni,
+                    "insecure": state_ib.get("cert_source") == "self-signed",
+                },
             },
-        }, indent=2, ensure_ascii=False)
-    if protocol == "tuic":
+            {"type": "direct", "tag": "direct"},
+        ]
+    elif protocol == "tuic":
         users = state_ib.get("users", [])
         if not users:
             return ""
         u = users[0]
-        return _json.dumps({
-            "type": "tuic",
-            "tag": "tuic-out",
-            "server": public_ip,
-            "server_port": port,
-            "uuid": u.get("uuid", ""),
-            "password": u.get("password", ""),
-            "congestion_control": state_ib.get("congestion_control", "bbr"),
-            "tls": {
-                "enabled": True,
-                "server_name": public_ip,
-                "insecure": state_ib.get("cert_source") == "self-signed",
+        base["outbounds"] = [
+            {
+                "type": "tuic",
+                "tag": "proxy",
+                "server": public_ip,
+                "server_port": port,
+                "uuid": u.get("uuid", ""),
+                "password": u.get("password", ""),
+                "congestion_control": state_ib.get("congestion_control", "bbr"),
+                "tls": {
+                    "enabled": True,
+                    "server_name": public_ip,
+                    "insecure": state_ib.get("cert_source") == "self-signed",
+                },
             },
-        }, indent=2, ensure_ascii=False)
-    if protocol == "vless_ws_cdn":
-        return _json.dumps({
-            "type": "vless",
-            "tag": "vless-ws-cdn-out",
-            "server": state_ib.get("host", ""),
-            "server_port": 443,
-            "uuid": state_ib.get("uuid", ""),
-            "tls": {
-                "enabled": True,
-                "server_name": state_ib.get("host", ""),
+            {"type": "direct", "tag": "direct"},
+        ]
+    elif protocol == "vless_ws_cdn":
+        base["outbounds"] = [
+            {
+                "type": "vless",
+                "tag": "proxy",
+                "server": state_ib.get("host", ""),
+                "server_port": 443,
+                "uuid": state_ib.get("uuid", ""),
+                "tls": {
+                    "enabled": True,
+                    "server_name": state_ib.get("host", ""),
+                },
+                "transport": {
+                    "type": "ws",
+                    "path": state_ib.get("ws_path", "/"),
+                    "headers": {"Host": state_ib.get("host", "")},
+                },
             },
-            "transport": {
-                "type": "ws",
-                "path": state_ib.get("ws_path", "/"),
-                "headers": {"Host": state_ib.get("host", "")},
-            },
-        }, indent=2, ensure_ascii=False)
-    return ""
+            {"type": "direct", "tag": "direct"},
+        ]
+    else:
+        return ""
+    return _json.dumps(base, indent=2, ensure_ascii=False)
 
 
 def _show_client_links(protocol: str) -> None:
@@ -2032,7 +2077,11 @@ def _show_client_links(protocol: str) -> None:
 
     # JSON
     _box_sep()
-    _box_row(f"  {BOLD}JSON outbound (sing-box config.json):{NC}")
+    _box_row(f"  {BOLD}Полный sing-box client config.json (v4.23.15):{NC}")
+    _box_row(f"  {DIM}Сохраните как config.json → sing-box run -c config.json{NC}")
+    _box_row(f"  {DIM}Прокси 127.0.0.1:2080 (mixed). НЕ включайте системный{NC}")
+    _box_row(f"  {DIM}прокси Windows — используйте SwitchyOmega или импорт в Hiddify.{NC}")
+    _box_row(f"  {DIM}Запуск на Windows: sing-box.exe run -c config.json{NC}")
     json_str = _gen_singbox_client_json(protocol, state_ib, public_ip, port)
     if json_str:
         for line in json_str.splitlines():
