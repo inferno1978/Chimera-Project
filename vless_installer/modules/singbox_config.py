@@ -385,12 +385,20 @@ def singbox_enable_shadowtls(
     handshake_server: str = "",
     handshake_port: int = 0,
     listen_port: int = 0,
+    listen: str = "",
     # cert_path/key_path/cert_source НЕ принимаются — ShadowTLS v3 не поддерживает
     # локальный TLS-сертификат на inbound (см. _build_shadowtls_inbound docstring).
     # Параметры убраны в v4.22.3; вызовы, передающие их, получат TypeError
     # (намеренно — скрытый ignore привёл бы к тихому накоплению мусора в state).
 ) -> bool:
-    """Включает ShadowTLS v3 inbound."""
+    """Включает ShadowTLS v3 inbound.
+
+    v4.23.13: добавлен параметр listen — по умолчанию '127.0.0.1' (loopback,
+    безопасно: доступ только через SNI-dispatch или локально). Для прямой
+    доступности извне передавать listen='0.0.0.0' (все IPv4) или '::' (все IPv6).
+    ВАЖНО: при listen=0.0.0.0 обязательно открыть порт в firewall и понимать,
+    что ShadowTLS будет доступен для прямого зондирования цензором.
+    """
     from vless_installer.modules.singbox_state import singbox_state_update_inbound
     from vless_installer.modules.singbox_users import singbox_gen_password
 
@@ -402,6 +410,8 @@ def singbox_enable_shadowtls(
     new_ib["version"] = 3
     if listen_port:
         new_ib["listen_port"] = listen_port
+    if listen:
+        new_ib["listen"] = listen
     if handshake_server:
         new_ib.setdefault("handshake", {})["server"] = handshake_server
     if handshake_port:
@@ -446,12 +456,16 @@ def singbox_enable_anytls(
     key_path: str = "",
     cert_source: str = "",
     common_name: str = "",
+    listen: str = "",
 ) -> bool:
     """Включает AnyTLS inbound.
 
     v4.23.5: common_name — сохраняется в state для auto-detect SNI
     (auto_enable_sni_dispatch читает anytls common_name как SNI домен).
     Для старых установок без common_name — fallback через CN-парсинг из cert_path.
+
+    v4.23.13: добавлен параметр listen — по умолчанию '127.0.0.1' (loopback).
+    Для прямой доступности извне передавать listen='0.0.0.0'.
     """
     from vless_installer.modules.singbox_state import singbox_state_update_inbound
     from vless_installer.modules.singbox_users import singbox_gen_password
@@ -463,6 +477,8 @@ def singbox_enable_anytls(
     new_ib["enabled"] = True
     if listen_port:
         new_ib["listen_port"] = listen_port
+    if listen:
+        new_ib["listen"] = listen
     if cert_path:
         new_ib["cert_path"] = cert_path
     if key_path:
