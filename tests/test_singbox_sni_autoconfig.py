@@ -279,6 +279,52 @@ class TestEnsureSelfSignedCertReturnsCn(unittest.TestCase):
         cert_path, key_path, cn = result
         self.assertEqual(cn, "vless.example.com")
 
+    def test_existing_cert_returns_real_cn_not_passed(self):
+        """v4.23.7: Если cert уже существует — возвращает РЕАЛЬНЫЙ CN из файла,
+        не переданный common_name.
+
+        Сценарий: cert создан с CN=old-domain.example.com. При повторном вызове
+        с common_name='new-domain.example.com' (смена домена сервера) — функция
+        должна вернуть 'old-domain.example.com' (реальный CN из файла),
+        не 'new-domain.example.com' (переданный аргумент).
+        Без этого auto-detect SNI в auto_enable_sni_dispatch получит
+        несоответствующий сертификату CN → неверная маршрутизация.
+        """
+        from vless_installer.modules.singbox_menu import _ensure_self_signed_cert
+        cert_dir = self._tmpdir / "certs"
+        cert_dir.mkdir(parents=True, exist_ok=True)
+        # Создаём существующий cert + key файлы
+        (cert_dir / "anytls.crt").write_text("fake cert")
+        (cert_dir / "anytls.key").write_text("fake key")
+        # Мокаем openssl — возвращает CN=old-domain.example.com
+        mock_run = MagicMock(returncode=0,
+                             stdout="subject=C=XX, CN=old-domain.example.com\n")
+        with patch("vless_installer.modules.singbox_menu.SINGBOX_CERT_DIR", cert_dir):
+            with patch("vless_installer.modules.singbox_menu._parse_cn_from_cert",
+                       return_value="old-domain.example.com"):
+                result = _ensure_self_signed_cert("anytls",
+                                                  common_name="new-domain.example.com")
+        cert_path, key_path, cn = result
+        self.assertEqual(cn, "old-domain.example.com",
+                         "Должен вернуть РЕАЛЬНЫЙ CN из cert файла, "
+                         "не переданный common_name='new-domain.example.com'")
+
+    def test_existing_cert_falls_back_to_passed_cn_on_parse_error(self):
+        """Если openssl парсинг не удался — fallback на переданный common_name."""
+        from vless_installer.modules.singbox_menu import _ensure_self_signed_cert
+        cert_dir = self._tmpdir / "certs"
+        cert_dir.mkdir(parents=True, exist_ok=True)
+        (cert_dir / "anytls.crt").write_text("corrupt cert")
+        (cert_dir / "anytls.key").write_text("fake key")
+        with patch("vless_installer.modules.singbox_menu.SINGBOX_CERT_DIR", cert_dir):
+            with patch("vless_installer.modules.singbox_menu._parse_cn_from_cert",
+                       return_value=""):
+                result = _ensure_self_signed_cert("anytls",
+                                                  common_name="fallback.example.com")
+        cert_path, key_path, cn = result
+        self.assertEqual(cn, "fallback.example.com",
+                         "При ошибке парсинга — fallback на переданный common_name")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. singbox_enable_anytls — common_name сохраняется в state
