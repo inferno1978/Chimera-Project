@@ -1361,12 +1361,23 @@ def _ensure_self_signed_cert(prefix: str, common_name: str = "") -> tuple[Path, 
     v4.23.6: возвращает (cert_path, key_path, common_name) — common_name
     нужен для сохранения в state (auto-detect SNI в auto_enable_sni_dispatch).
     Если common_name не передан — используется f"sing-box-{prefix}" как раньше.
+
+    v4.23.7: Если cert уже существует на диске — парсит РЕАЛЬНЫЙ CN из файла
+    через openssl x509 -noout -subject, а не возвращает переданный common_name.
+    Иначе при смене домена сервера и повторном вызове с новым common_name
+    функция вернёт cn, не соответствующий физическому сертификату, что
+    приведёт к неверной SNI-маршрутизации в auto_enable_sni_dispatch().
     """
     from vless_installer.modules.singbox_common import generate_self_signed_cert
     cert_path = SINGBOX_CERT_DIR / f"{prefix}.crt"
     key_path = SINGBOX_CERT_DIR / f"{prefix}.key"
     cn = common_name or f"sing-box-{prefix}"
     if cert_path.exists() and key_path.exists():
+        # v4.23.7: парсим реальный CN из существующего сертификата
+        real_cn = _parse_cn_from_cert(cert_path)
+        if real_cn:
+            return cert_path, key_path, real_cn
+        # Если парсинг не удался — возвращаем переданный cn как fallback
         return cert_path, key_path, cn
     generate_self_signed_cert(
         common_name=cn,
@@ -1374,6 +1385,27 @@ def _ensure_self_signed_cert(prefix: str, common_name: str = "") -> tuple[Path, 
         key_path=key_path,
     )
     return cert_path, key_path, cn
+
+
+def _parse_cn_from_cert(cert_path: Path) -> str:
+    """Парсит CN (Common Name) из существующего сертификата через openssl.
+
+    Возвращает пустую строку при ошибке.
+    """
+    try:
+        from vless_installer.modules.singbox_common import _run
+        r = _run(["openssl", "x509", "-noout", "-subject", "-in", str(cert_path)],
+                 capture=True, quiet=True)
+        if r.returncode == 0 and r.stdout:
+            subject = r.stdout.strip()
+            # Вывод: "subject=C=XX, CN=example.com" или "subject=/CN=example.com"
+            if "CN=" in subject:
+                cn_part = subject.split("CN=")[-1].split(",")[0].split("/")[0].strip()
+                if cn_part:
+                    return cn_part
+    except Exception:
+        pass
+    return ""
 
 
 def _pick_letsencrypt_cert() -> tuple[Path, Path, str]:

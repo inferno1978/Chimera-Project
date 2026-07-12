@@ -2,6 +2,32 @@
 
 ---
 
+## v4.23.7 — FIX: _ensure_self_signed_cert парсит реальный CN из существующего cert — 13 июля 2026
+
+### 🐛 Фикс
+
+**Проблема:** `_ensure_self_signed_cert()` при уже существующем cert_path/key_path
+на диске возвращал переданный `common_name` как есть, не проверяя реальный CN
+в файле. При смене домена сервера и повторном вызове с новым `common_name`
+функция возвращала CN, не соответствующий физическому сертификату →
+неверная SNI-маршрутизация в `auto_enable_sni_dispatch()`.
+
+**Фикс:** При существующем cert — парсит реальный CN через
+`openssl x509 -noout -subject` (новая функция `_parse_cn_from_cert()`).
+Если парсинг не удался — fallback на переданный `common_name`.
+
+### 🧪 Тесты (2 новых)
+
+- `test_existing_cert_returns_real_cn_not_passed` — cert с CN=old-domain →
+  вызов с common_name=new-domain → результат = old-domain (реальный CN)
+- `test_existing_cert_falls_back_to_passed_cn_on_parse_error` —
+  парсинг не удался → fallback на переданный common_name
+
+Полный прогон: 23 теста в test_singbox_sni_autoconfig (21 прежних + 2 новых),
+0 регрессий.
+
+---
+
 ## v4.23.6 — FIX: common_name прокинут + тесты auto-config + TUI-меню — 12 июля 2026
 
 ### 🐛 Фикс: common_name не прокидывался в singbox_enable_anytls
