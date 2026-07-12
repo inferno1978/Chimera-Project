@@ -251,6 +251,18 @@ def _ipset_restore_unit_install() -> None:
 
     По образцу ipset_persist.py::ipset_restore_unit_install(), но с другим
     именем юнита (singbox-cdn-ipset-restore) чтобы не конфликтовать с xray-ipset-restore.
+
+    v4.23.3: Before=netfilter-persistent.service ДОБАВЛЕНО.
+    Проблема: netfilter-persistent.service (стандартная поставка Debian/Ubuntu)
+    запускается Before=network-pre.target и пытается restore iptables-правил.
+    Если iptables-правила ссылаются на ipset, который ещё не создан (наш restore
+    юнит стартует After=network-pre.target) — restore падает, либо правило не
+    грузится (allowlist пропадает при каждом ребуте), либо (если iptables-restore
+    атомарен) падает восстановление ВСЕГО файла правил — задевает firewall
+    других протоколов.
+    Решение: Before=netfilter-persistent.service — наш ipset restore отрабатывает
+    ДО netfilter-persistent. Safe даже если netfilter-persistent не установлен —
+    systemd игнорирует Before= на несуществующий юнит.
     """
     if _RESTORE_SVC.exists():
         return  # уже установлен
@@ -258,6 +270,7 @@ def _ipset_restore_unit_install() -> None:
         [Unit]
         Description=Restore ipset for sing-box CDN allowlist (VLESS Ultimate)
         Before=sing-box.service
+        Before=netfilter-persistent.service
         After=network-pre.target
         ConditionPathExists={_IPSET_CONF}
 

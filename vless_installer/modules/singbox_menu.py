@@ -830,6 +830,9 @@ def _switch_cdn_provider() -> None:
     v4.23.2: авто-смена listen_port если текущий = дефолтный порт СТАРОГО провайдера.
              Если порт был custom (не равен дефолту старого) — порт НЕ трогаем,
              но warn() о возможной невалидности.
+    v4.23.3: allowlist применяется ДО generate_config/restart — НЕ оставляем
+             окно с открытым портом без защиты. Старый порт (если изменился)
+             снимается ПОСЛЕ restart — он больше не слушается, экспозиции нет.
     """
     state = singbox_state_load()
     ib = state.get("inbounds", {}).get("vless_ws_cdn", {})
@@ -869,27 +872,49 @@ def _switch_cdn_provider() -> None:
     ib["cdn_provider"] = new_provider
     ib["listen_port"] = port
     singbox_state_update_inbound("vless_ws_cdn", **ib)
-    singbox_generate_config()
-    if _service_active():
-        singbox_restart()
 
-    # v4.23.1: переприменяем allowlist под новый провайдер
-    # v4.23.2: если порт изменился — снимаем allowlist со старого, применяем на новый
-    if old_port:
+    # v4.23.3: allowlist применяется ДО generate_config/restart.
+    # Порядок критичен: если restart откроет порт ДО apply_cdn_allowlist,
+    # возникает окно (от секунды до нескольких, пока идёт сетевой fetch
+    # CDN IP-листа) когда порт открыт всем интернету без allowlist.
+    # Правильный порядок:
+    #   1. remove_cdn_allowlist(port) — очистка старого allowlist на новом порту
+    #      (мог остаться от предыдущего провайдера на том же порту)
+    #   2. apply_cdn_allowlist(new_provider, port) — новый allowlist встаёт
+    #   3. singbox_generate_config() + singbox_restart() — sing-box стартует
+    #      на уже защищённом порту
+    #   4. remove_cdn_allowlist(old_port) — старый порт больше не слушается,
+    #      снимаем allowlist (если port != old_port). Это не создаёт экспозиции —
+    #      sing-box уже не слушает old_port.
+    if port:
         try:
             from vless_installer.modules.singbox_cdn_nets import (
                 remove_cdn_allowlist, apply_cdn_allowlist,
             )
-            # Если порт изменился — снимаем allowlist со старого порта
-            if old_port != port:
-                remove_cdn_allowlist(old_port)
-            # Снимаем allowlist с нового порта (если был старый от другого провайдера)
+            # 1. Очищаем старый allowlist на новом порту (если был)
             remove_cdn_allowlist(port)
-            # Применяем новый allowlist
-            apply_cdn_allowlist(new_provider, port)
+            # 2. Применяем новый allowlist ДО restart
+            allowlist_ok = apply_cdn_allowlist(new_provider, port)
+            if not allowlist_ok:
+                warn(f"Allowlist не применён — sing-box restart произойдёт "
+                     f"на НЕЗАЩИЩЁННЫЙ порт {port}!")
         except Exception as e:
-            warn(f"Allowlist не переприменён: {e}")
-            warn(f"Порт {port} может быть открыт всем интернету!")
+            warn(f"Allowlist не применён: {e}")
+            warn(f"Sing-box restart произойдёт на НЕЗАЩИЩЁННЫЙ порт {port}!")
+
+    # 3. Генерируем конфиг и перезапускаем sing-box (порт уже защищён)
+    singbox_generate_config()
+    if _service_active():
+        singbox_restart()
+
+    # 4. Снимаем allowlist со старого порта (если порт изменился).
+    # Старый порт больше не слушается sing-box — экспозиции нет.
+    if old_port and old_port != port:
+        try:
+            from vless_installer.modules.singbox_cdn_nets import remove_cdn_allowlist
+            remove_cdn_allowlist(old_port)
+        except Exception:
+            pass  # не критично — порт больше не слушается
 
     success(f"CDN переключён: {CDN_PROVIDERS[current]['display_name'] if current else '—'} → "
             f"{CDN_PROVIDERS[new_provider]['display_name']}")
