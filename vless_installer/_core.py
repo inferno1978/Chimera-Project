@@ -2614,6 +2614,22 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
     except Exception as _sf_e:
         warn(f"Server fragment восстановление: {_sf_e}")
 
+    # v4.23.8: SNI-dispatch patch (если включён auto_configured=True).
+    # generate_* перезаписывает config.json — REALITY-инбаунд возвращается
+    # на публичный :443, конфликт с nginx stream{}. Пере-применяем патч
+    # ДО рестарта xray. nginx НЕ трогаем — он уже настроен отдельным
+    # потоком auto_enable_sni_dispatch() и не зависит от regenerate.
+    # Порядок: sni_dispatch_reapply идёт ПОСЛЕ server_fragment (оба патчат
+    # sockopt одного и того же inbound, но разные поля — fragment vs
+    # acceptProxyProtocol/listen/port — конфликта нет).
+    try:
+        from vless_installer.modules.singbox_nginx import sni_dispatch_reapply_after_rebuild
+        sni_dispatch_reapply_after_rebuild()
+    except ImportError:
+        pass
+    except Exception as _sd_e:
+        warn(f"SNI-dispatch восстановление: {_sd_e}")
+
     # Финальный рестарт
     _run(["systemctl", "restart", "xray"], check=False, quiet=True)
     time.sleep(3)

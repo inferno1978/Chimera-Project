@@ -2,6 +2,161 @@
 
 ---
 
+## v4.23.8 — FEAT: SNI-dispatch auto-patches Xray config.json (фаза 2) — 13 июля 2026
+
+### 🎯 Что добавлено
+
+`apply_reality_sni_dispatch_patch()`, `revert_reality_sni_dispatch_patch()` и
+`sni_dispatch_reapply_after_rebuild()` в `singbox_nginx.py` — автоматически
+патчат `/etc/xray/config.json` при включении SNI-dispatch, перенося REALITY-инбаунд
+с публичного `:443` на loopback `127.0.0.1:8442` и добавляя
+`streamSettings.sockopt.acceptProxyProtocol=true`.
+
+До v4.23.8 `auto_enable_sni_dispatch()` (v4.23.5) настраивала nginx stream{},
+но НЕ патчила config.json — REALITY-инбаунд оставался на публичном `:443`,
+создавая конфликт биндинга с nginx stream{}. Пользователь был вынужден патчить
+вручную. Теперь патч применяется автоматически.
+
+### Архитектура
+
+```
+Без SNI-dispatch (классика):
+  client:443 → Xray REALITY (listen [::]:443, xver=1) → unix:/dev/shm/xxx.socket
+                                                          ↓
+                                                       nginx http{} (decoy)
+
+С SNI-dispatch (auto-config v4.23.5 + auto-patch v4.23.8):
+  client:443 → nginx stream{} (ssl_preread, proxy_protocol on)
+    ├─ SNI=shadowtls → 127.0.0.1:8443
+    ├─ SNI=anytls    → 127.0.0.1:8444
+    └─ default       → 127.0.0.1:8442 (REALITY backend, loopback)
+                          ↓
+                       Xray REALITY (listen 127.0.0.1:8442,
+                                     sockopt.acceptProxyProtocol=true)
+                       realitySettings.dest — НЕ ТРОГАЕМ (decoy-сокет,
+                       отдельная downstream-логика Xray, неизменна с v4.23.5)
+```
+
+### 📦 Изменения по файлам
+
+**`vless_installer/modules/singbox_nginx.py`** (+ ~400 строк):
+- Новая функция `apply_reality_sni_dispatch_patch()` — патчит config.json:
+  - `port: SERVER_PORT (443)` → `8442` (`_REALITY_LOOPBACK_PORT`)
+  - `listen: "::"` → `"127.0.0.1"`
+  - `streamSettings.sockopt.acceptProxyProtocol: true` (добавляет)
+  - Бэкап `.pre-sni-dispatch` (по аналогии с nginx-конфигом)
+  - `xray -test` валидация (если binary доступен)
+  - `systemctl restart xray` + active-check
+  - Откат из бэкапа при ошибке
+  - Идемпотентна — безопасно вызывать многократно
+- Новая функция `revert_reality_sni_dispatch_patch()` — откат:
+  - Восстановление из `.pre-sni-dispatch` бэкапа (предпочтительный путь)
+  - Reverse-patch без бэкапа: `listen`/`port` из state, удаление `acceptProxyProtocol`
+- Новая функция `sni_dispatch_reapply_after_rebuild()` — хук для
+  `_core._rebuild_and_restart_xray()`, пере-применяет патч после регенерации
+  config.json (mirror `server_fragment_reapply_after_rebuild()`)
+- Новые хелперы: `_xray_config_paths()`, `_find_reality_inbound()`,
+  `_xray_test_config()`
+- `auto_enable_sni_dispatch()` — `warn()`-плейсхолдеры заменены на вызов
+  `apply_reality_sni_dispatch_patch()`, с откатом SNI-dispatch при ошибке патча
+- `auto_disable_sni_dispatch()` — `warn()`-плейсхолдеры заменены на вызов
+  `revert_reality_sni_dispatch_patch()`
+
+**`vless_installer/_core.py`** (+ ~16 строк):
+- `_rebuild_and_restart_xray()` — добавлен вызов `sni_dispatch_reapply_after_rebuild()`
+  после `server_fragment_reapply_after_rebuild()` и до финального
+  `systemctl restart xray`. Порядок операций сохранён: nginx restart (если нужен)
+  происходит ПОСЛЕ — патч применяется к свежему config.json до рестарта xray.
+
+**`tests/test_sni_dispatch_xray_patch.py`** (+ ~580 строк, 24 новых теста).
+
+### 🧪 Тесты (24 новых)
+
+`tests/test_sni_dispatch_xray_patch.py`:
+
+**apply_reality_sni_dispatch_patch — корректность патча (4 теста):**
+- `test_patch_changes_listen_to_loopback` — listen → `127.0.0.1`
+- `test_patch_changes_port_to_8442` — port → `8442`
+- `test_patch_adds_acceptProxyProtocol_true` — acceptProxyProtocol: true добавлен
+- `test_patch_preserves_other_sockopt_fields` — tcpFastOpen, tcpCongestion и др. сохранены
+
+**Идемпотентность (3 теста):**
+- `test_double_patch_is_idempotent` — повторный патч не ломает конфиг
+- `test_double_patch_does_not_create_second_backup` — бэкап не перезаписывается
+- `test_double_patch_does_not_overwrite_original_listen_in_state` — original_listen в state неизменен
+
+**realitySettings.dest НЕ ТРОНУТ (3 теста — критичный регресс-барьер):**
+- `test_reality_dest_unchanged_after_patch` — dest неизменен после patch
+- `test_reality_other_fields_unchanged` — все поля realitySettings сохранены
+- `test_reality_dest_unchanged_after_revert` — dest неизменен даже после revert
+
+**Не трогает другие инбаунды (1 тест):**
+- `test_other_inbound_untouched` — dokodemo-in не тронут, только REALITY-инбаунд
+
+**Откат (2 теста):**
+- `test_revert_via_backup_restores_original` — восстановление из бэкапа
+- `test_revert_reverse_patch_without_backup` — reverse-patch по state когда бэкапа нет
+
+**Re-apply после регенерации (3 теста):**
+- `test_reapply_noop_when_disabled` — выключен → noop
+- `test_reapply_repatches_after_regenerate` — config.json перезаписан → патч переприменяется
+- `test_reapply_skipped_in_manual_mode` — auto_configured=False → пропускается
+
+**AWG/xHTTP отказ (3 теста):**
+- `test_patch_refuses_xhttp_mode` — xHTTP → False, config не тронут
+- `test_patch_refuses_awg_mode` — AWG → False, config не тронут
+- `test_patch_skip_mode_check_bypasses_guard` — skip_mode_check=True обходит guard
+
+**Бэкап (2 теста):**
+- `test_backup_created_on_first_patch` — бэкап создаётся при первом патче
+- `test_backup_suffix_matches_nginx_convention` — suffix `.pre-sni-dispatch` как у nginx
+
+**_find_reality_inbound fallback (3 теста):**
+- `test_finds_by_tag_inbound_vless` — находит по каноническому tag
+- `test_falls_back_to_security_reality` — fallback по security=="reality"
+- `test_returns_none_when_no_reality_inbound` — None если нет REALITY-инбаунда
+
+### ✅ Проверка
+
+- **`py_compile`**: OK для `singbox_nginx.py`, `_core.py`, `test_sni_dispatch_xray_patch.py`
+- **`pytest tests/test_sni_dispatch_xray_patch.py`**: 24 passed in 2.31s
+- **`pytest tests/test_singbox_nginx.py tests/test_singbox_sni_autoconfig.py tests/test_singbox_state.py`**: 111 passed in 8.57s (0 регрессий)
+- **Targeted regression suite** (singbox_* + xray_install + xray_safe_apply + server_fragment): 460 passed, 8 skipped, 0 failed in 55.94s
+- **`xray -test`**: НЕ ЗАПУСКАЛСЯ — в песочнице нет xray binary
+  (`_xray_test_config()` возвращает `(True, "(xray binary not available — skipped)")`,
+  патч-функция gracefully деградирует, не блокируя применение)
+
+### ⚠️ Степень сквозной проверки (ОБЯЗАТЕЛЬНО ПРОЧИТАТЬ ПЕРЕД ПРОДАКШЕНОМ)
+
+Сквозная проверка REALITY-handshake с `proxy_protocol + acceptProxyProtocol`
+на реальном Xray-сервере в песочнице **НЕ ВЫПОЛНЕНА** — нет xray binary.
+Проверено только:
+
+1. ✅ JSON-структура — 24 unit-теста покрывают port/listen/sockopt/dest/idempotency/revert
+2. ✅ `py_compile` — оба изменённых модуля компилируются
+3. ✅ Регрессии — 460 существующих тестов в затронутых модулях проходят
+4. ❌ `xray -test -config config.json` — не запускался (нет binary в песочнице)
+5. ❌ Реальное REALITY-подключение через `nginx stream{}` — НЕ проверено
+6. ❌ Подтверждение что в логе Xray виден РЕАЛЬНЫЙ IP клиента
+   (а не `127.0.0.1`) — НЕ проверено
+7. ❌ Регресс Xray-core issue #1972 (proxy_protocol + REALITY →
+   `ERR_SSL_PROTOCOL_ERROR` на некоторых версиях) — НЕ проверен на используемой
+   версии Xray
+
+**ОБЯЗАННОСТЬ ПОЛЬЗОВАТЕЛЯ перед продакшн-включением:**
+1. Установить/обновить Xray до актуальной версии (>= 25.x, где issue #1972 закрыт)
+2. На тестовом сервере: включить SNI-dispatch через TUI → подключиться реальным
+   клиентом (v2rayN/Nekobox) → проверить в `journalctl -u xray -f` что виден
+   РЕАЛЬНЫЙ IP клиента (не 127.0.0.1)
+3. Если виден 127.0.0.1 — `acceptProxyProtocol` не работает с этой версией Xray,
+   откатить SNI-dispatch (`auto_disable_sni_dispatch()`) и завести тикет
+
+### Регрессии
+
+460 существующих тестов (singbox_*, xray_install, xray_safe_apply, server_fragment) — 0 регрессий, 8 skip.
+
+---
+
 ## v4.23.7 — FIX: _ensure_self_signed_cert парсит реальный CN из существующего cert — 13 июля 2026
 
 ### 🐛 Фикс
