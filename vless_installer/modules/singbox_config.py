@@ -445,7 +445,14 @@ def singbox_enable_anytls(
     cert_path: str = "",
     key_path: str = "",
     cert_source: str = "",
+    common_name: str = "",
 ) -> bool:
+    """Включает AnyTLS inbound.
+
+    v4.23.5: common_name — сохраняется в state для auto-detect SNI
+    (auto_enable_sni_dispatch читает anytls common_name как SNI домен).
+    Для старых установок без common_name — fallback через CN-парсинг из cert_path.
+    """
     from vless_installer.modules.singbox_state import singbox_state_update_inbound
     from vless_installer.modules.singbox_users import singbox_gen_password
 
@@ -462,6 +469,9 @@ def singbox_enable_anytls(
         new_ib["key_path"] = key_path
     if cert_source:
         new_ib["cert_source"] = cert_source
+    # v4.23.5: common_name для auto-detect SNI
+    if common_name:
+        new_ib["common_name"] = common_name
     if not new_ib.get("password"):
         new_ib["password"] = singbox_gen_password()
     if not new_ib.get("users"):

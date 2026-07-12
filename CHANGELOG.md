@@ -2,6 +2,104 @@
 
 ---
 
+## v4.23.5 — FEAT: SNI-dispatch auto-config (фаза 1) — 12 июля 2026
+
+### 🎯 Что добавлено
+
+`auto_enable_sni_dispatch()` и `auto_disable_sni_dispatch()` в `singbox_nginx.py`
+— автоматизируют определение параметров SNI-dispatch и миграцию listen 443
+между http{} и stream{}. Строятся поверх существующих `enable_sni_dispatch()` /
+`disable_sni_dispatch()`, не заменяют их.
+
+### Архитектура
+
+```
+Без SNI-dispatch:
+  client:443 → nginx http{} (listen :443 ssl) → fallback site
+  Xray (dest=unix:/dev/shm/xxx.socket, xver=1) → PP → nginx http{} (decoy)
+
+С SNI-dispatch (auto-config):
+  client:443 → nginx stream{} (ssl_preread, proxy_protocol on)
+    ├─ SNI=shadowtls → 127.0.0.1:8443
+    ├─ SNI=anytls → 127.0.0.1:8444
+    └─ default → 127.0.0.1:8442 (REALITY backend, loopback)
+
+  Xray REALITY-инбаунд: listen=127.0.0.1:8442, sockopt.acceptProxyProtocol=true
+  realitySettings.dest (decoy-сокет) — НЕ ТРОГАЕМ, отдельная downstream-логика Xray
+```
+
+**Ключевое архитектурное решение (пункт E из тикета):**
+
+Использован `proxy_protocol on;` в stream{} (не отдельный loopback без PP).
+Причина: fail2ban `xray-reality` jail парсит `/var/log/xray/*.log` через
+`failregex = ^.*<HOST>.*blocked.*$` — `<HOST>` = IP клиента из логов Xray.
+Без proxy_protocol, Xray видит только `127.0.0.1` (nginx) вместо реального
+IP → fail2ban не сможет забанить сканера/брутфорсера. С `proxy_protocol on;`
+в stream{} + `sockopt.acceptProxyProtocol: true` на REALITY-инбаунде, Xray
+получает реальный IP из PROXY protocol header → fail2ban работает.
+
+**Важно:** `realitySettings.dest` (PARAM_SOCKET_PATH, decoy-сайт) — НЕ является
+backend для SNI-dispatch. Это fallback для non-REALITY трафика внутри самого Xray.
+SNI-dispatch направляет REALITY SNI на `127.0.0.1:8442`, где Xray слушает
+REALITY-инбаунд с `acceptProxyProtocol`.
+
+### Что автоматизировано
+
+**`auto_enable_sni_dispatch()`:**
+1. Detect REALITY backend: читает `state.json` → `protocol_mode == "reality"`
+   и `awg_exit_enabled == False` → `127.0.0.1:8442`. НЕ использует
+   `state.json["socket"]` (это decoy-сокет, отдельная логика).
+   Отказ с explicit ошибкой если xHTTP или AWG.
+2. Auto-detect ShadowTLS SNI: `singbox_state["inbounds"]["shadowtls"]["handshake"]["server"]`
+3. Auto-detect AnyTLS SNI: `singbox_state["inbounds"]["anytls"]["common_name"]` (v4.23.5+),
+   fallback — парсинг CN из `cert_path` через `openssl x509 -noout -subject`
+4. Detect REALITY SNI: `state.json["domain"]`
+5. Комментирует `listen 443` в http{} конфигах (с бэкапом `.pre-sni-dispatch`)
+6. Генерирует stream{} конфиг с `proxy_protocol on;`
+7. `nginx -t` → reload
+8. **warn() пользователю**: нужно вручную перевести REALITY-инбаунд на
+   `127.0.0.1:8442` с `sockopt.acceptProxyProtocol: true` в config.json Xray.
+   Автоматический патч config.json — следующим шагом.
+
+**`auto_disable_sni_dispatch()`:**
+1. Удаляет stream{} конфиг (через `disable_sni_dispatch`)
+2. Раскомментирует `listen 443` в http{} конфигах
+3. `nginx -t` → reload
+4. **warn() пользователю**: нужно вернуть REALITY-инбаунд на `:443` напрямую.
+
+### Дополнительно
+
+**`singbox_enable_anytls()`:** добавлен параметр `common_name` — сохраняется
+в state для auto-detect SNI. Для старых установок (без common_name в state) —
+fallback через парсинг CN из существующего сертификата.
+
+**`_build_nginx_stream_conf()`:** `proxy_protocol on;` раскомментирован (был
+закомментирован). Это критично для fail2ban — без PP реальный IP теряется.
+
+### Что НЕ сделано (следующий шаг)
+
+- Автоматический патч config.json Xray (перенос REALITY listen + acceptProxyProtocol)
+- Тесты (следующий заход)
+- Интеграция в TUI-меню (пункт в `_sni_dispatch_menu()`)
+
+### 📦 Изменения по файлам
+
+**singbox_nginx.py** (+425 строк):
+- `auto_enable_sni_dispatch()` / `auto_disable_sni_dispatch()`
+- `_detect_reality_backend()` / `_detect_shadowtls_sni()` / `_detect_anytls_sni()`
+- `_find_nginx_http_443_configs()` / `_comment_out_listen_443()` / `_uncomment_listen_443()`
+- `_read_main_state()` — читает `/var/lib/xray-installer/state.json`
+- `_build_nginx_stream_conf()` — `proxy_protocol on;` раскомментирован
+
+**singbox_config.py** (+8 строк):
+- `singbox_enable_anytls()` — параметр `common_name` добавлен
+
+### Регрессии
+
+184 существующих теста — 0 регрессий, 8 skip.
+
+---
+
 ## v4.23.4 — FIX: systemd ordering cycle в ipset restore unit — 12 июля 2026
 
 ### 🐛 Проблема
