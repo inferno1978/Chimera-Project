@@ -343,6 +343,54 @@ def _service_enabled(service: str = SINGBOX_SERVICE) -> bool:
 
 
 # ============================================================================
+#  Port helpers (v4.23.9)
+# ============================================================================
+# Pre-flight проверка listen-портов ДО systemctl restart.
+# Без этого sing-box падает с EADDRINUSE, systemd уходит в crash-loop
+# из 100+ рестартов (см. issue: ShadowTLS + Trojan / sing-box.service
+# failed with result 'exit-code'). Ловим ошибку ДО запуска юнита.
+def _is_port_free(port: int, listen: str = "127.0.0.1",
+                  proto: str = "tcp") -> bool:
+    """True если порт свободен для bind().
+
+    proto: 'tcp' (SOCK_STREAM) или 'udp' (SOCK_DGRAM).
+    Для listen='0.0.0.0' или '::' проверяет любой интерфейс.
+    """
+    import socket as _socket
+    family = _socket.AF_INET6 if ":" in listen else _socket.AF_INET
+    sock_type = _socket.SOCK_STREAM if proto == "tcp" else _socket.SOCK_DGRAM
+    try:
+        s = _socket.socket(family, sock_type)
+        try:
+            s.bind((listen, port))
+        finally:
+            s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _who_owns_port(port: int, listen: str = "127.0.0.1",
+                   proto: str = "tcp") -> str:
+    """Возвращает строку 'pid=12345 (procname)' или '' если не удалось узнать.
+
+    Использует ss -ltnp / ss -lunp. Требует root для просмотра pid чужих
+    процессов.
+    """
+    flag = "-ltnp" if proto == "tcp" else "-lunp"
+    r = _run(["ss", flag], capture=True, quiet=True)
+    if r.returncode != 0:
+        return ""
+    needle = f":{port} "
+    for line in (r.stdout + r.stderr).splitlines():
+        if needle in line and "users:" in line:
+            m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', line)
+            if m:
+                return f"pid={m.group(2)} ({m.group(1)})"
+    return ""
+
+
+# ============================================================================
 #  Binary helpers
 # ============================================================================
 def _singbox_binary_exists() -> bool:
