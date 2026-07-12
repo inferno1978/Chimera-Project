@@ -138,7 +138,7 @@ def do_singbox_menu() -> None:
         _box_row()
         _box_item("8", f"🔄 Старт/стоп/рестарт           {DIM}управление systemd-юнитом{NC}")
         _box_item("9", f"📊 Статус                       {DIM}полная информация о состоянии{NC}")
-        _box_item("L", f"📋 Логи                         {DIM}просмотр /var/log/singbox.log{NC}")
+        _box_item("L", f"📋 Логи                         {DIM}journalctl -u sing-box{NC}")
         _box_item("U", f"🗑️  Удалить sing-box             {DIM}сервис + бинарник + конфиг + state{NC}")
         _box_row()
         _box_item_exit("0", "← Назад в главное меню")
@@ -1350,28 +1350,28 @@ def _show_status() -> None:
 #  Подменю: Логи
 # ============================================================================
 def _show_logs() -> None:
+    """Просмотр логов sing-box через journalctl (v4.23.10).
+
+    Раньше читал /var/log/singbox.log напрямую, но после перехода на
+    StandardOutput/Error=journal логи пишутся только в journald.
+    """
     os.system("clear")
     print()
-    _box_top("📋  ЛОГИ SING-BOX")
-    log_paths = [
-        SINGBOX_LOG_FILE,
-        Path("/var/log/singbox.log"),
-        Path("/var/log/syslog"),
-    ]
-    found = False
-    for lp in log_paths:
-        if lp.exists():
-            found = True
-            _box_row(f"  {CYAN}{lp}{NC}")
-            _box_sep()
-            r = _run(["tail", "-n", "30", str(lp)], capture=True, quiet=True)
-            for line in (r.stdout or "(пуст)").splitlines():
-                _box_row(f"  {DIM}{line[:120]}{NC}")
-            _box_row()
-            break
-    if not found:
-        _box_row(f"  {YELLOW}Лог-файлы не найдены{NC}")
-        _box_row(f"  {DIM}systemctl status sing-box — для системных логов{NC}")
+    _box_top("📋  ЛОГИ SING-BOX (journalctl)")
+    _box_row(f"  {DIM}Источник: journald (StandardOutput/Error=journal){NC}")
+    _box_row()
+    r = _run(["journalctl", "-u", SINGBOX_SERVICE, "-n", "40",
+              "--no-pager"], capture=True, quiet=True)
+    lines = (r.stdout or "").splitlines()
+    if not lines:
+        _box_row(f"  {YELLOW}Логи пусты — сервис ни разу не запускался{NC}")
+        _box_row()
+    else:
+        for line in lines:
+            _box_row(f"  {DIM}{line[:140]}{NC}")
+        _box_row()
+        _box_row(f"  {CYAN}Хвост лога в реальном времени:{NC}")
+        _box_row(f"  {DIM}journalctl -u {SINGBOX_SERVICE} -f{NC}")
         _box_row()
     _box_item_exit("0", "← Назад")
     _box_bottom()
