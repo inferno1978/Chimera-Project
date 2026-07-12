@@ -229,6 +229,54 @@ def _build_tuic_inbound(state_ib: dict) -> dict:
     return inbound
 
 
+def _build_vless_ws_cdn_inbound(state_ib: dict) -> dict:
+    """Строит VLESS-WS-CDN inbound (v4.23).
+
+    VLESS+WebSocket за CDN (Cloudflare/Gcore/Bunny). CDN терминирует TLS своим
+    сертификатом и форвардит plain WebSocket на origin (sing-box).
+
+    state_ib fields:
+      listen, listen_port, uuid, ws_path, host
+
+    ВАЖНО (аналог регрессии v4.22.3 с ShadowTLS TLS-блоком): inbound НЕ содержит
+    поля "tls" НИ ПРИ КАКИХ УСЛОВИЯХ. TLS живёт только на грани CDN — sing-box
+    слушает plain WS. Добавление "tls" сюда было бы мёртвым JSON-полем.
+    cert_path/key_path/cert_source в state (если есть от старых конфигов) —
+    игнорируются безусловно.
+
+    Архитектура:
+      Клиент → TLS к CDN (CDN cert) → CDN форвардит plain WS → sing-box inbound
+              ↓
+              sing-box VLESS-inbound (type="vless", transport ws, NO tls{})
+              ↓
+              direct outbound → интернет
+    """
+    uuid_val = state_ib.get("uuid", "")
+    ws_path = state_ib.get("ws_path", "/")
+    host = state_ib.get("host", "")
+
+    inbound = {
+        "type":         "vless",
+        "tag":          "vless-ws-cdn-in",
+        "listen":       state_ib.get("listen", "0.0.0.0"),
+        "listen_port":  state_ib.get("listen_port", 8443),
+        "users":        [{"uuid": uuid_val}] if uuid_val else [],
+        "transport": {
+            "type":    "ws",
+            "path":    ws_path,
+        },
+    }
+
+    # Host header — только если задан (передаётся в ws-connection)
+    if host:
+        inbound["transport"]["headers"] = {"Host": host}
+
+    # НЕ добавляем "tls" — CDN терминирует TLS, origin слушает plain WS.
+    # cert_path/key_path в state_ib игнорируются (см. docstring выше).
+
+    return inbound
+
+
 # ============================================================================
 #  Главная функция — генерация полного config.json
 # ============================================================================
@@ -260,6 +308,10 @@ def singbox_generate_config() -> bool:
     # TUIC
     if inbounds_state.get("tuic", {}).get("enabled"):
         inbounds.append(_build_tuic_inbound(inbounds_state["tuic"]))
+
+    # VLESS-WS-CDN (v4.23)
+    if inbounds_state.get("vless_ws_cdn", {}).get("enabled"):
+        inbounds.append(_build_vless_ws_cdn_inbound(inbounds_state["vless_ws_cdn"]))
 
     if not inbounds:
         warn("Нет включённых inbound'ов — конфиг будет пустым (только direct outbound)")
@@ -457,3 +509,86 @@ def singbox_disable_tuic() -> bool:
     from vless_installer.modules.singbox_state import singbox_state_update_inbound
     singbox_state_update_inbound("tuic", enabled=False)
     return True
+
+
+# ============================================================================
+#  VLESS-WS-CDN enable/disable (v4.23)
+# ============================================================================
+def singbox_enable_vless_ws_cdn(
+    cdn_provider: str = "cloudflare",
+    host: str = "",
+    ws_path: str = "",
+    listen_port: int = 0,
+    uuid_val: str = "",
+) -> bool:
+    """Включает VLESS-WS-CDN inbound.
+
+    Args:
+      cdn_provider: "cloudflare" | "gcore" | "bunny"
+      host: real Host header (домен, проксируемый через CDN)
+      ws_path: WS path (если пусто — генерируется случайный hex)
+      listen_port: TCP-порт для прослушивания (default 8443 — DEFAULT_PORT_VLESS_WS_CDN)
+      uuid_val: VLESS UUID клиента (если пусто — генерируется)
+
+    ВАЖНО: cert_path/key_path/cert_source НЕ принимаются — CDN терминирует TLS,
+    origin слушает plain WS. Это аналог fixed-логики shadowtls v4.22.3: поле не
+    нужно — не принимаем (передача cert_path вызовет TypeError).
+    """
+    from vless_installer.modules.singbox_state import singbox_state_update_inbound
+    from vless_installer.modules.singbox_common import CDN_PROVIDERS
+
+    # Валидация cdn_provider
+    if cdn_provider not in CDN_PROVIDERS:
+        error(f"Неизвестный CDN-провайдер: {cdn_provider}")
+        warn(f"Доступные: {', '.join(CDN_PROVIDERS.keys())}")
+        return False
+
+    state = singbox_state_load()
+    ib = state.get("inbounds", {}).get("vless_ws_cdn", {})
+
+    new_ib = dict(ib)
+    new_ib["enabled"] = True
+    new_ib["cdn_provider"] = cdn_provider
+    if listen_port:
+        new_ib["listen_port"] = listen_port
+    if host:
+        new_ib["host"] = host
+
+    # ws_path: НЕ регенерируем молча при повторных enable/regen.
+    # Только если явно передан или поле пустое.
+    if ws_path:
+        new_ib["ws_path"] = ws_path
+    elif not new_ib.get("ws_path"):
+        new_ib["ws_path"] = _gen_random_ws_path()
+
+    # uuid: аналогично — не перегенерируем если уже есть.
+    if uuid_val:
+        new_ib["uuid"] = uuid_val
+    elif not new_ib.get("uuid"):
+        new_ib["uuid"] = _gen_vless_uuid()
+
+    # cert_path/key_path/cert_source НЕ записываем — CDN терминирует TLS.
+    # Старые поля (если остались от экспериментов) НЕ чистим принудительно (backcompat).
+
+    singbox_state_update_inbound("vless_ws_cdn", **new_ib)
+    return True
+
+
+def singbox_disable_vless_ws_cdn() -> bool:
+    from vless_installer.modules.singbox_state import singbox_state_update_inbound
+    singbox_state_update_inbound("vless_ws_cdn", enabled=False)
+    return True
+
+
+# ── Генераторы случайных значений для VLESS-WS-CDN ───────────────────────────
+
+def _gen_random_ws_path(length: int = 16) -> str:
+    """Генерирует случайный WS path вида /a3f4b2c1d5e6f7a8 (hex)."""
+    import secrets
+    return "/" + secrets.token_hex(length // 2)
+
+
+def _gen_vless_uuid() -> str:
+    """Генерирует VLESS UUID v4."""
+    import uuid as _uuid
+    return str(_uuid.uuid4())

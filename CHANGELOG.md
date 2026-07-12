@@ -2,6 +2,151 @@
 
 ---
 
+## v4.23 — FEAT: VLESS-WS-CDN — VLESS+WebSocket за Cloudflare/Gcore/Bunny — 12 июля 2026
+
+### 🎯 Что добавлено
+
+Новый inbound в sing-box-модуле: VLESS+WebSocket за CDN (Cloudflare / Gcore /
+Bunny.net). CDN терминирует TLS своим сертификатом и форвардит plain WebSocket
+на origin (sing-box). Цензор видит TLS к CDN IP — заблокировать = заблокировать
+весь CDN.
+
+### 🏗 Архитектура
+
+```
+Клиент → TLS к CDN (CDN cert, IP CDN) → CDN форвардит plain WS → sing-box inbound
+        ↓
+        sing-box VLESS-inbound
+          type: "vless"
+          transport: {type: "ws", path: "/random-hex", headers: {Host: ...}}
+          БЕЗ tls{} блока — TLS живёт только на грани CDN
+        ↓
+        direct outbound → интернет
+```
+
+**Ключевые решения (по итогам confirm preferences):**
+
+1. **CDN-провайдеры — все три:** Cloudflare / Gcore / Bunny.net. Переключаемые
+   вручную через меню (manual switch), без auto-failover.
+2. **Сертификаты — CDN terminates TLS:** origin НЕ поднимает TLS на этом
+   инбаунде. cert_path/key_path/cert_source НЕ добавляются в state — по
+   аналогии с фиксом v4.22.3 для ShadowTLS (поле не нужно — не создаём).
+3. **Случайный WS path + real Host:** path генерируется как `/<16 hex chars>`
+   при первом enable, НЕ регенерируется молча при повторных enable/regen —
+   только по явному действию пользователя.
+4. **Single CDN active, manual switch:** без auto-failover/health-check между
+   CDN — это отдельная фича, не входит в scope.
+5. **Origin-only + instructions:** НЕ дёргает Cloudflare/Gcore/Bunny API.
+   При enable — выводит текстовую инструкцию (что создать в панели CDN)
+   под выбранного провайдера.
+6. **Отдельный порт, без SNI-dispatch:** singbox_nginx.py НЕ тронут.
+   VLESS-WS-CDN слушает на TCP:8443, CDN подключается к этому порту.
+
+### 🔍 Предварительная проверка портов CDN (web search 2026-07-12)
+
+Проверены актуальные порты для каждого CDN (не из общих знаний):
+
+- **Cloudflare** (developers.cloudflare.com/fundamentals/reference/network-ports):
+  HTTPS-порты, проксируемые CF: 443, 2053, 2083, 2087, 2096, 8443.
+  CF terminates TLS своим cert, форвардит на origin по тому же порту.
+
+- **Gcore** (gcore.com/docs/cdn/cdn-resource-options/general/specify-an-origin-and-the-origin-pull-protocol):
+  Не перечисляет фиксированный список портов. Кастомный порт указывается в
+  origin URL: `https://origin.example.com:8443`. Default: 80/443.
+
+- **Bunny.net** (docs.bunny.net/api-reference/core/pull-zone/add-pull-zone):
+  Поле `OriginPort` в API/dashboard — поддерживает произвольный порт.
+  Default: 80/443.
+
+**ИТОГ:** `DEFAULT_PORT_VLESS_WS_CDN = 8443` — безопасный дефолт для всех
+трёх CDN. Cloudflare — официально поддержанный HTTPS-порт. Gcore/Bunny —
+кастомный origin port через URL или OriginPort field.
+
+Подробный комментарий с источниками — в `singbox_common.py` рядом с константой.
+
+### 📦 Изменения по файлам
+
+**singbox_common.py** (только добавления, существующие DEFAULT_PORT_* НЕ тронуты):
+- `DEFAULT_PORT_VLESS_WS_CDN = 8443` — с подробным комментарием о проверке портов
+- `CDN_PROVIDERS` — dict с метаданными на 3 провайдера (display_name + instructions)
+- `PROTOCOL_VLESS_WS_CDN` + добавлен в `ALL_PROTOCOLS`
+
+**singbox_state.py** (только добавления, существующие секции НЕ тронуты):
+- Секция `"vless_ws_cdn"` в `singbox_state_init()` с полями:
+  enabled, listen, listen_port, uuid, ws_path, host, cdn_provider
+- cert_path/key_path/cert_source НЕ создаются (регрессия v4.22.3)
+
+**singbox_config.py** (только добавления, чужие builders НЕ тронуты):
+- `_build_vless_ws_cdn_inbound(state_ib)` — type "vless", transport ws,
+  БЕЗ tls{} блока (см. docstring — аналог фикса v4.22.3)
+- `singbox_enable_vless_ws_cdn(cdn_provider, host, ws_path, listen_port, uuid_val)`
+  — НЕ принимает cert_path/key_path (TypeError если передать)
+- `singbox_disable_vless_ws_cdn()`
+- `_gen_random_ws_path()` / `_gen_vless_uuid()` — генераторы
+- Подключение в `singbox_generate_config()` по существующему паттерну
+
+**singbox_menu.py** (только добавления + перенумерация пунктов):
+- `_vless_ws_cdn_menu()` — подменю с просмотром статуса, вкл/выкл,
+  сменой CDN-провайдера, Host, WS path, UUID, инструкцией CDN
+- `_enable_vless_ws_cdn_default()` / `_enable_vless_ws_cdn_custom()`
+- `_switch_cdn_provider()` — manual switch без потери uuid/path/host
+- `_change_vless_ws_cdn_host()` / `_regen_vless_ws_cdn_path()` /
+  `_regen_vless_ws_cdn_uuid()`
+- `_pick_cdn_provider()` / `_show_cdn_instructions(provider)`
+- Пункт "5. ☁️ VLESS-WS-CDN" в `do_singbox_menu()`
+- Перенумерация: SNI-dispatch 5→6, sync users 6→7, service 7→8,
+  status 8→9, logs 9→L
+
+**singbox_nginx.py** — НЕ ТРОНУТ (VLESS-WS-CDN не входит в SNI-dispatch).
+
+### 🧪 Тесты (36 новых, 1 skip)
+
+`tests/test_singbox_vless_ws_cdn.py`:
+
+- **Структура inbound** (10 тестов):
+  type/transport/listen/uuid/ws_path/Host header, отсутствие tls{} даже
+  если cert_path/key_path заданы и файлы существуют (регрессия v4.22.3)
+
+- **enable/disable** (8 тестов):
+  генерация uuid/ws_path при отсутствии, НЕ перегенерация при повторных
+  enable, reject неизвестного cdn_provider, TypeError при передаче cert_path,
+  отсутствие cert-полей в state после enable
+
+- **disable** (2 теста):
+  снимает enabled, сохраняет uuid/ws_path/host/cdn_provider
+
+- **Переключение cdn_provider** (2 теста):
+  cloudflare → gcore → bunny → cloudflare без потери секретов
+
+- **singbox_generate_config** (3 теста):
+  реальный вызов → парсинг config.json → проверка structure (type, transport,
+  path, Host, uuid, отсутствие tls), skip при enabled=False
+
+- **singbox_validate_config** (1 тест, SKIP если бинарник недоступен):
+  реальный запуск `sing-box check -c <generated config>`. Skip с explicit
+  причиной — НЕ тихий pass.
+
+- **CDN_PROVIDERS registry** (6 тестов):
+  наличие всех трёх провайдеров, display_name, instructions,
+  Cloudflare упоминает Proxied DNS, Bunny упоминает Origin Port,
+  DEFAULT_PORT = 8443
+
+- **State init** (5 тестов):
+  секция vless_ws_cdn создаётся, disabled по умолчанию, все required fields,
+  отсутствие cert-полей, default port 8443
+
+Полный прогон sing-box + download_manager: **271 тест, 0 регрессий**
+(235 прежних + 36 новых), 1 skip (sing-box binary).
+
+### 🚫 Что НЕ сделано (вне scope)
+
+- Auto-failover между CDN — отдельная фича
+- CDN-side конфиг через API — только origin-side + instructions
+- Интеграция в SNI-dispatch (singbox_nginx.py) — отдельный порт
+- LE-сертификаты на origin — CDN терминирует TLS, не нужно
+
+---
+
 ## v4.22.4 — FIX: TUIC v5 — initial_packet_size вместо несуществующего obfs — 12 июля 2026
 
 ### 🐛 Контекст: исходная идея была нереализуема

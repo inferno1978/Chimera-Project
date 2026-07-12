@@ -39,6 +39,8 @@ from vless_installer.modules.singbox_common import (
     DEFAULT_PORT_SHADOWTLS, DEFAULT_PORT_ANYTLS,
     DEFAULT_SHADOWTLS_HANDSHAKE_HOST, DEFAULT_SHADOWTLS_HANDSHAKE_PORT,
     DEFAULT_PORT_TUIC_ALTERNATIVE,
+    DEFAULT_PORT_VLESS_WS_CDN,
+    CDN_PROVIDERS,
     LE_LIVE_DIR,
 )
 from vless_installer.modules.singbox_state import (
@@ -57,6 +59,8 @@ from vless_installer.modules.singbox_config import (
     singbox_enable_shadowtls, singbox_disable_shadowtls,
     singbox_enable_anytls, singbox_disable_anytls,
     singbox_enable_tuic, singbox_disable_tuic,
+    singbox_enable_vless_ws_cdn, singbox_disable_vless_ws_cdn,
+    _gen_random_ws_path,
 )
 from vless_installer.modules.singbox_users import (
     singbox_sync_users, singbox_get_users, singbox_state_list_users,
@@ -118,21 +122,22 @@ def do_singbox_menu() -> None:
         _box_item("2", f"🎭 ShadowTLS v3 + Trojan        {DIM}маскировка под TLS-handshake к домену{NC}")
         _box_item("3", f"🔒 AnyTLS                       {DIM}новый TLS-camouflage протокол{NC}")
         _box_item("4", f"⚡ TUIC v5                      {DIM}QUIC-резерв к Hysteria2{NC}")
+        _box_item("5", f"☁️  VLESS-WS-CDN                {DIM}VLESS+WS за Cloudflare/Gcore/Bunny{NC}  {DIM}(NEW){NC}")
         _box_row()
         _box_sep()
 
         # ── Диспетчеризация и пользователи ─────────────────────────────────
         _box_row()
-        _box_item("5", f"🔀 SNI-dispatch                 {DIM}nginx stream{{}} + ssl_preread{NC}")
-        _box_item("6", f"👥 Синхронизация users          {DIM}привязать unified users к sing-box{NC}")
+        _box_item("6", f"🔀 SNI-dispatch                 {DIM}nginx stream{{}} + ssl_preread{NC}")
+        _box_item("7", f"👥 Синхронизация users          {DIM}привязать unified users к sing-box{NC}")
         _box_row()
         _box_sep()
 
         # ── Управление сервисом ────────────────────────────────────────────
         _box_row()
-        _box_item("7", f"🔄 Старт/стоп/рестарт           {DIM}управление systemd-юнитом{NC}")
-        _box_item("8", f"📊 Статус                       {DIM}полная информация о состоянии{NC}")
-        _box_item("9", f"📋 Логи                         {DIM}просмотр /var/log/singbox.log{NC}")
+        _box_item("8", f"🔄 Старт/стоп/рестарт           {DIM}управление systemd-юнитом{NC}")
+        _box_item("9", f"📊 Статус                       {DIM}полная информация о состоянии{NC}")
+        _box_item("L", f"📋 Логи                         {DIM}просмотр /var/log/singbox.log{NC}")
         _box_item("U", f"🗑️  Удалить sing-box             {DIM}сервис + бинарник + конфиг + state{NC}")
         _box_row()
         _box_item_exit("0", "← Назад в главное меню")
@@ -157,15 +162,17 @@ def do_singbox_menu() -> None:
         elif ch == "4":
             _tuic_menu()
         elif ch == "5":
-            _sni_dispatch_menu()
+            _vless_ws_cdn_menu()
         elif ch == "6":
-            _sync_users_menu()
+            _sni_dispatch_menu()
         elif ch == "7":
-            _service_menu()
+            _sync_users_menu()
         elif ch == "8":
+            _service_menu()
+        elif ch == "9":
             _show_status()
             input(f"\n{BLUE}Нажмите Enter...{NC}")
-        elif ch == "9":
+        elif ch == "L":
             _show_logs()
         elif ch == "U":
             _uninstall_menu()
@@ -630,6 +637,301 @@ def _tuic_menu() -> None:
                             singbox_start()
                         success("TUIC v5 включён")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
+
+
+# ============================================================================
+#  Подменю: VLESS-WS-CDN (v4.23)
+# ============================================================================
+def _vless_ws_cdn_menu() -> None:
+    while True:
+        os.system("clear")
+        print()
+        state = singbox_state_load()
+        ib = state.get("inbounds", {}).get("vless_ws_cdn", {})
+        enabled = ib.get("enabled", False)
+        col = GREEN if enabled else YELLOW
+        listen = ib.get("listen", "0.0.0.0")
+        port = ib.get("listen_port", DEFAULT_PORT_VLESS_WS_CDN)
+        host = ib.get("host", "")
+        ws_path = ib.get("ws_path", "")
+        uuid_val = ib.get("uuid", "")
+        cdn_provider = ib.get("cdn_provider", "")
+        cdn_display = CDN_PROVIDERS.get(cdn_provider, {}).get("display_name", "(не задан)")
+
+        _box_top("☁️   VLESS-WS-CDN")
+        _box_row(f"  Статус:       {col}{'включён' if enabled else 'выключен'}{NC}")
+        _box_row(f"  Listen:       {CYAN}{listen}:{port}{NC}  {DIM}(TCP, externally bound){NC}")
+        _box_row(f"  CDN Provider: {CYAN}{cdn_display}{NC}")
+        _box_row(f"  Host:         {CYAN}{host or '—'}{NC}")
+        _box_row(f"  WS Path:      {CYAN}{ws_path or '—'}{NC}")
+        if uuid_val:
+            _box_row(f"  UUID:         {DIM}{uuid_val}{NC}")
+        _box_sep()
+        _box_desc(
+            "VLESS+WebSocket за CDN (Cloudflare/Gcore/Bunny). CDN терминирует "
+            "TLS своим сертификатом, origin (sing-box) слушает plain WS. "
+            "Цензор видит TLS к CDN IP — заблокировать = заблокировать весь CDN. "
+            "Локальный сертификат НЕ нужен и НЕ используется."
+        )
+        _box_sep()
+        _box_row()
+        if enabled:
+            _box_item("1", f"🔴 Выключить VLESS-WS-CDN")
+            _box_item("2", f"🔄 Сменить CDN-провайдера       {DIM}cloudflare/gcore/bunny{NC}")
+            _box_item("3", f"🌐 Сменить Host                 {DIM}домен через CDN{NC}")
+            _box_item("4", f"🔑 Перегенерировать WS path     {DIM}новый случайный path{NC}")
+            _box_item("5", f"🔑 Перегенерировать UUID        {DIM}новый клиентский UUID{NC}")
+            _box_item("6", f"📖 Показать инструкцию CDN      {DIM}что настроить в панели{NC}")
+        else:
+            _box_item("1", f"🟢 Включить VLESS-WS-CDN        {DIM}с настройкой по умолчанию{NC}")
+            _box_item("2", f"⚙️  Включить с custom-параметрами {DIM}provider/host/path{NC}")
+            _box_item("6", f"📖 Показать инструкцию CDN      {DIM}до включения — что настроить{NC}")
+        _box_row()
+        _box_item_exit("0", "← Назад")
+        _box_bottom()
+
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()
+        except KeyboardInterrupt:
+            break
+
+        if ch in ("0", ""):
+            break
+
+        if enabled:
+            if ch == "1":
+                singbox_disable_vless_ws_cdn()
+                singbox_generate_config()
+                if _service_active():
+                    singbox_restart()
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "2":
+                _switch_cdn_provider()
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "3":
+                _change_vless_ws_cdn_host()
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "4":
+                _regen_vless_ws_cdn_path()
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "5":
+                _regen_vless_ws_cdn_uuid()
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "6":
+                _show_cdn_instructions(cdn_provider)
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+        else:
+            if ch == "1":
+                _enable_vless_ws_cdn_default()
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "2":
+                _enable_vless_ws_cdn_custom()
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "6":
+                # Если провайдер не выбран — покажем выбор
+                provider = _pick_cdn_provider()
+                if provider:
+                    _show_cdn_instructions(provider)
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+
+
+def _enable_vless_ws_cdn_default() -> None:
+    """Включение с дефолтами: Cloudflare, random WS path, random UUID."""
+    if not _ensure_binary_installed():
+        return
+    # Спросим Host — это обязательный параметр (домен через CDN)
+    try:
+        host = input(
+            f"{CYAN}Host (домен через CDN, напр. vless.example.com):{NC} "
+        ).strip()
+    except KeyboardInterrupt:
+        return
+    if not host:
+        warn("Host обязателен — без него CDN не будет знать куда направлять Host header")
+        time.sleep(1.5)
+        return
+
+    ok = singbox_enable_vless_ws_cdn(
+        cdn_provider="cloudflare",
+        host=host,
+    )
+    if not ok:
+        return
+    if not singbox_generate_config():
+        return
+    if not singbox_validate_config():
+        warn("Конфиг невалиден — проверьте логи")
+        return
+    if _service_active():
+        singbox_restart()
+    else:
+        singbox_start()
+    success("VLESS-WS-CDN включён (Cloudflare)")
+    _show_cdn_instructions("cloudflare")
+
+
+def _enable_vless_ws_cdn_custom() -> None:
+    """Включение с custom-параметрами."""
+    if not _ensure_binary_installed():
+        return
+    provider = _pick_cdn_provider()
+    if not provider:
+        return
+    try:
+        host = input(
+            f"{CYAN}Host (домен через CDN):{NC} "
+        ).strip()
+        ws_path_in = input(
+            f"{CYAN}WS Path {DIM}(Enter = случайный):{NC} "
+        ).strip()
+        port_in = input(
+            f"{CYAN}Listen порт {DIM}(Enter={DEFAULT_PORT_VLESS_WS_CDN}):{NC} "
+        ).strip()
+    except KeyboardInterrupt:
+        return
+    if not host:
+        warn("Host обязателен")
+        time.sleep(1.5)
+        return
+    listen_port = 0
+    if port_in:
+        try:
+            listen_port = int(port_in)
+        except ValueError:
+            warn("Некорректный порт")
+            time.sleep(1.5)
+            return
+
+    ok = singbox_enable_vless_ws_cdn(
+        cdn_provider=provider,
+        host=host,
+        ws_path=ws_path_in if ws_path_in else "",
+        listen_port=listen_port,
+    )
+    if not ok:
+        return
+    if not singbox_generate_config():
+        return
+    if not singbox_validate_config():
+        warn("Конфиг невалиден")
+        return
+    if _service_active():
+        singbox_restart()
+    else:
+        singbox_start()
+    success(f"VLESS-WS-CDN включён ({CDN_PROVIDERS[provider]['display_name']})")
+    _show_cdn_instructions(provider)
+
+
+def _switch_cdn_provider() -> None:
+    """Переключение CDN-провайдера без потери uuid/ws_path/host (manual switch)."""
+    state = singbox_state_load()
+    ib = state.get("inbounds", {}).get("vless_ws_cdn", {})
+    current = ib.get("cdn_provider", "")
+    print()
+    info(f"Текущий CDN: {CDN_PROVIDERS.get(current, {}).get('display_name', '—')}")
+    new_provider = _pick_cdn_provider(exclude=current)
+    if not new_provider:
+        return
+    # Сохраняем все остальные поля — меняем только cdn_provider
+    ib["cdn_provider"] = new_provider
+    singbox_state_update_inbound("vless_ws_cdn", **ib)
+    singbox_generate_config()
+    if _service_active():
+        singbox_restart()
+    success(f"CDN переключён: {CDN_PROVIDERS[current]['display_name'] if current else '—'} → "
+            f"{CDN_PROVIDERS[new_provider]['display_name']}")
+    info("WS path, Host и UUID сохранены — клиентам нужно только сменить адрес подключения")
+    _show_cdn_instructions(new_provider)
+
+
+def _change_vless_ws_cdn_host() -> None:
+    state = singbox_state_load()
+    ib = state.get("inbounds", {}).get("vless_ws_cdn", {})
+    try:
+        new_host = input(
+            f"{CYAN}Новый Host {DIM}(текущий={ib.get('host', '')}):{NC} "
+        ).strip()
+    except KeyboardInterrupt:
+        return
+    if not new_host:
+        return
+    ib["host"] = new_host
+    singbox_state_update_inbound("vless_ws_cdn", **ib)
+    singbox_generate_config()
+    if _service_active():
+        singbox_restart()
+    success(f"Host: {new_host}")
+
+
+def _regen_vless_ws_cdn_path() -> None:
+    state = singbox_state_load()
+    ib = state.get("inbounds", {}).get("vless_ws_cdn", {})
+    new_path = _gen_random_ws_path()
+    ib["ws_path"] = new_path
+    singbox_state_update_inbound("vless_ws_cdn", **ib)
+    singbox_generate_config()
+    if _service_active():
+        singbox_restart()
+    success(f"WS path: {new_path}")
+    warn("ВНИМАНИЕ: клиентам нужно раздать новый WS path!")
+
+
+def _regen_vless_ws_cdn_uuid() -> None:
+    from vless_installer.modules.singbox_config import _gen_vless_uuid
+    state = singbox_state_load()
+    ib = state.get("inbounds", {}).get("vless_ws_cdn", {})
+    new_uuid = _gen_vless_uuid()
+    ib["uuid"] = new_uuid
+    singbox_state_update_inbound("vless_ws_cdn", **ib)
+    singbox_generate_config()
+    if _service_active():
+        singbox_restart()
+    success(f"UUID: {new_uuid}")
+    warn("ВНИМАНИЕ: клиентам нужно раздать новый UUID!")
+
+
+def _pick_cdn_provider(exclude: str = "") -> str:
+    """Интерактивный выбор CDN-провайдера. Возвращает ключ или пустую строку."""
+    print()
+    info("Выберите CDN-провайдера:")
+    providers = [(k, v) for k, v in CDN_PROVIDERS.items() if k != exclude]
+    for i, (key, meta) in enumerate(providers, 1):
+        info(f"  {i}. {meta['display_name']}")
+    try:
+        choice = input(f"{CYAN}Выбор (1-{len(providers)}):{NC} ").strip()
+        idx = int(choice) - 1
+        if 0 <= idx < len(providers):
+            return providers[idx][0]
+    except (ValueError, KeyboardInterrupt):
+        pass
+    warn("Неверный выбор")
+    return ""
+
+
+def _show_cdn_instructions(cdn_provider: str) -> None:
+    """Показывает инструкцию по настройке CDN-панели для выбранного провайдера."""
+    meta = CDN_PROVIDERS.get(cdn_provider)
+    if not meta:
+        warn(f"Неизвестный CDN-провайдер: {cdn_provider}")
+        return
+    os.system("clear")
+    print()
+    _box_top(f"📖  ИНСТРУКЦИЯ НАСТРОЙКИ {meta['display_name'].upper()}")
+    _box_desc(
+        "Эти шаги нужно выполнить в панели CDN ВРУЧНУЮ. "
+        "Установщик не дёргает CDN API — только origin-side конфиг."
+    )
+    _box_sep()
+    for line in meta["instructions"]:
+        if line:
+            _box_row(f"  {line}")
+        else:
+            _box_row()
+    _box_sep()
+    _box_info("После настройки панели — проверьте подключение клиентом.")
+    _box_info(f"CDN CNAME должен указывать на ваш origin (IP сервера, порт 8443).")
+    _box_bottom()
 
 
 # ============================================================================
