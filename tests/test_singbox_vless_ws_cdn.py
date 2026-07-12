@@ -649,10 +649,10 @@ class TestCdnProvidersRegistry(unittest.TestCase):
         self.assertIn("origin port", full_text,
                       "Bunny.net instructions должны упоминать Origin Port field")
 
-    def test_default_port_vless_ws_cdn_is_8443(self):
-        """8443 — безопасный дефолт, поддержан всеми 3 CDN (см. комментарий в singbox_common.py)."""
+    def test_default_port_vless_ws_cdn_is_8080(self):
+        """v4.23.1: default port = 8080 (Cloudflare HTTP port list, Flexible mode)."""
         from vless_installer.modules.singbox_common import DEFAULT_PORT_VLESS_WS_CDN
-        self.assertEqual(DEFAULT_PORT_VLESS_WS_CDN, 8443)
+        self.assertEqual(DEFAULT_PORT_VLESS_WS_CDN, 8080)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -722,13 +722,14 @@ class TestStateInitVlessWsCdn(unittest.TestCase):
         self.assertNotIn("cert_source", ib)
         self.assertNotIn("cert_sha256", ib)
 
-    def test_init_vless_ws_cdn_default_port_8443(self):
+    def test_init_vless_ws_cdn_default_port_8080(self):
+        """v4.23.1: default port changed to 8080 (Cloudflare HTTP port list)."""
         from vless_installer.modules.singbox_state import singbox_state_init, singbox_state_load
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
             state = singbox_state_load()
-        self.assertEqual(state["inbounds"]["vless_ws_cdn"]["listen_port"], 8443)
+        self.assertEqual(state["inbounds"]["vless_ws_cdn"]["listen_port"], 8080)
 
 
 if __name__ == "__main__":

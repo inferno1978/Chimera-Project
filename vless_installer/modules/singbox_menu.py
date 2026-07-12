@@ -824,10 +824,14 @@ def _enable_vless_ws_cdn_custom() -> None:
 
 
 def _switch_cdn_provider() -> None:
-    """Переключение CDN-провайдера без потери uuid/ws_path/host (manual switch)."""
+    """Переключение CDN-провайдера без потери uuid/ws_path/host (manual switch).
+
+    v4.23.1: allowlist переприменяется под новый провайдер.
+    """
     state = singbox_state_load()
     ib = state.get("inbounds", {}).get("vless_ws_cdn", {})
     current = ib.get("cdn_provider", "")
+    port = ib.get("listen_port", 0)
     print()
     info(f"Текущий CDN: {CDN_PROVIDERS.get(current, {}).get('display_name', '—')}")
     new_provider = _pick_cdn_provider(exclude=current)
@@ -839,6 +843,21 @@ def _switch_cdn_provider() -> None:
     singbox_generate_config()
     if _service_active():
         singbox_restart()
+
+    # v4.23.1: переприменяем allowlist под новый провайдер
+    if port:
+        try:
+            from vless_installer.modules.singbox_cdn_nets import (
+                remove_cdn_allowlist, apply_cdn_allowlist,
+            )
+            # Сначала снимаем старый allowlist
+            remove_cdn_allowlist(port)
+            # Потом применяем новый
+            apply_cdn_allowlist(new_provider, port)
+        except Exception as e:
+            warn(f"Allowlist не переприменён: {e}")
+            warn(f"Порт {port} может быть открыт всем интернету!")
+
     success(f"CDN переключён: {CDN_PROVIDERS[current]['display_name'] if current else '—'} → "
             f"{CDN_PROVIDERS[new_provider]['display_name']}")
     info("WS path, Host и UUID сохранены — клиентам нужно только сменить адрес подключения")

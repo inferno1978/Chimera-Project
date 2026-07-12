@@ -549,8 +549,13 @@ def singbox_enable_vless_ws_cdn(
     new_ib = dict(ib)
     new_ib["enabled"] = True
     new_ib["cdn_provider"] = cdn_provider
+    # Per-provider default port (v4.23.1): Cloudflare=8080 (HTTP port list),
+    # Gcore/Bunny=8443. Если listen_port не передан явнo и поле пустое —
+    # берём per-provider default. Если уже задан — сохраняем (не меняем).
     if listen_port:
         new_ib["listen_port"] = listen_port
+    elif not new_ib.get("listen_port"):
+        new_ib["listen_port"] = CDN_PROVIDERS[cdn_provider].get("default_port", 8080)
     if host:
         new_ib["host"] = host
 
@@ -571,11 +576,35 @@ def singbox_enable_vless_ws_cdn(
     # Старые поля (если остались от экспериментов) НЕ чистим принудительно (backcompat).
 
     singbox_state_update_inbound("vless_ws_cdn", **new_ib)
+
+    # v4.23.1: применяем CDN allowlist на listen_port.
+    # Если fetch провалился — warn (fail-open с явным предупреждением, не fail-closed).
+    # Enable НЕ откатываем — sing-box конфиг валиден, просто порт открыт всем.
+    try:
+        from vless_installer.modules.singbox_cdn_nets import apply_cdn_allowlist
+        allowlist_ok = apply_cdn_allowlist(cdn_provider, new_ib["listen_port"])
+        if not allowlist_ok:
+            warn(f"Порт {new_ib['listen_port']} открыт всем интернету — нет CDN allowlist!")
+    except Exception as e:
+        warn(f"CDN allowlist не применён: {e}")
+        warn(f"Порт {new_ib['listen_port']} открыт всем интернету!")
+
     return True
 
 
 def singbox_disable_vless_ws_cdn() -> bool:
-    from vless_installer.modules.singbox_state import singbox_state_update_inbound
+    from vless_installer.modules.singbox_state import (
+        singbox_state_update_inbound, singbox_state_get_inbound,
+    )
+    # v4.23.1: снимаем CDN allowlist перед disable
+    ib = singbox_state_get_inbound("vless_ws_cdn")
+    port = ib.get("listen_port", 0)
+    if port:
+        try:
+            from vless_installer.modules.singbox_cdn_nets import remove_cdn_allowlist
+            remove_cdn_allowlist(port)
+        except Exception:
+            pass  # не блокируем disable если allowlist не снялся
     singbox_state_update_inbound("vless_ws_cdn", enabled=False)
     return True
 

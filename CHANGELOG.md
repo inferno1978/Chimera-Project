@@ -2,6 +2,163 @@
 
 ---
 
+## v4.23.1 — FIX: VLESS-WS-CDN — HTTPS origin pull → HTTP + CDN IP allowlist — 12 июля 2026
+
+### 🐛 Баг 1: Инструкции требовали HTTPS/TLS origin pull, а origin TLS не поднимает
+
+**Симптом:** VLESS-WS-CDN inbound в sing-box не имеет `tls{}` блока (CDN
+терминирует TLS своим сертификатом, origin слушает plain WS). Но инструкции
+CDN_PROVIDERS говорили:
+- Cloudflare: "SSL mode = Full или Full (strict)" — CF пытается HTTPS-handshake
+  к origin → 521/525 ошибка (origin не отвечает TLS)
+- Gcore: "Origin Pull Protocol: HTTPS" — та же проблема
+- Bunny: "Origin URL: https://..." — та же проблема
+
+Соединение не заработало бы ни с одним из трёх CDN.
+
+**Фикс:**
+
+- **Cloudflare**: SSL mode = **Flexible** (CF↔client = HTTPS с CF cert,
+  CF↔origin = HTTP plain). Origin Rules для override origin port на 8080.
+- **Gcore**: Origin Pull Protocol = **HTTP**. Origin URL = `http://origin:8443`.
+- **Bunny**: Origin Scheme = **HTTP**. Origin URL = `http://origin:8443`.
+
+**Per-provider default port** (v4.23.1):
+- Cloudflare: **8080** (из CF HTTP port list: 80/8080/8880/2052/2082/2086/2095)
+  8443 — HTTPS-only порт в CF, НЕ подходит для Flexible mode.
+- Gcore: 8443 (custom origin URL port, HTTP scheme)
+- Bunny: 8443 (OriginPort field, HTTP scheme)
+
+Проверка портов (web search 2026-07-12, developers.cloudflare.com/fundamentals/
+reference/network-ports):
+- CF HTTP ports: 80, 8080, 8880, 2052, 2082, 2086, 2095
+- CF HTTPS ports: 443, 2053, 2083, 2087, 2096, 8443
+- 8443 входит в HTTPS-only список, не в HTTP → заменён на 8080 для Cloudflare.
+
+Комментарий над `DEFAULT_PORT_VLESS_WS_CDN` переписан: убрана формулировка
+"TLS-туннель до origin" (самопротиворечивая — если TLS-туннель до origin,
+origin обязан его терминировать, а он не может). Теперь явно: "origin слушает
+НЕ по TLS. CDN обязан ходить к origin по HTTP (Flexible), а не HTTPS."
+
+### 🐛 Баг 2: 0.0.0.0:8443 без ограничения по IP CDN — origin достижим напрямую
+
+**Симптом:** listen_port vless_ws_cdn открыт на 0.0.0.0 — origin достижим
+напрямую по IP:port, минуя CDN. Это ломает заявленную защиту ("заблокировать
+CDN = заблокировать всё"): цензор может просканировать IP-адреса и найти
+открытый VLESS-WS-порт напрямую.
+
+**Фикс:** Новый модуль `singbox_cdn_nets.py` — CDN IP allowlist через ipset +
+iptables. Только IP-диапазоны активного CDN-провайдера могут подключаться к
+listen_port. Остальное — DROP.
+
+**Источники IP-диапазонов (live-fetch, не хардкод):**
+- Cloudflare: `https://www.cloudflare.com/ips-v4` — plain text, без auth
+- Gcore: `https://api.gcore.com/cdn/public-ip-list` — JSON, без auth
+  (подтверждено в документации: "This request does not require authorization")
+- Bunny.net: `https://docs.bunny.net/magic-containers/ip-addresses` — HTML scrape
+
+Проверено web search 2026-07-12 — все три источника работают и возвращают
+валидные CIDR.
+
+**Архитектура (по образцу tg_nets.py + ingress_geoip.py):**
+1. `fetch_cdn_nets(provider)` — live-fetch через urllib.request
+2. `apply_cdn_allowlist(provider, port)` — ipset create + iptables DROP
+3. `remove_cdn_allowlist(port)` — cleanup iptables + ipset destroy
+
+iptables-правило: `iptables -A INPUT -p tcp --dport <port> -m set !
+--match-set singbox_cdn_allowlist_<port> src -j DROP` — DROP всего, что НЕ
+из CDN-диапазона. Comment-tag `singbox-cdn-allowlist-<port>` для безопасного
+удаления.
+
+**Интеграция:**
+- `singbox_enable_vless_ws_cdn()` — вызывает `apply_cdn_allowlist()` после
+  успешного enable. Если allowlist не применился (fetch провалился / iptables
+  недоступен) — **warn() пользователю явно**, но enable НЕ откатывается
+  (fail-open с предупреждением, не fail-closed без объяснения).
+- `singbox_disable_vless_ws_cdn()` — вызывает `remove_cdn_allowlist()`.
+- `_switch_cdn_provider()` в меню — allowlist переприменяется под новый
+  провайдер (remove старого → apply нового), без утечки старых правил.
+
+**Границы:** allowlist только на vless_ws_cdn listen_port. НЕ трогает
+iptables-правила других протоколов (shadowtls/anytls/tuic/reality). tg_nets.py
+не тронут.
+
+### 📦 Изменения по файлам
+
+**singbox_common.py:**
+- `DEFAULT_PORT_VLESS_WS_CDN` изменён с 8443 на 8080 (CF HTTP port)
+- `CDN_PROVIDERS` — переписаны все instructions (Flexible/HTTP, не HTTPS)
+- Добавлены `default_port`, `ip_source`, `ip_format` для каждого провайдера
+- Комментарий переписан: убрано "TLS-туннель до origin"
+
+**singbox_config.py:**
+- `singbox_enable_vless_ws_cdn()` — per-provider default port
+- Интеграция `apply_cdn_allowlist()` после enable (fail-open с warn)
+- `singbox_disable_vless_ws_cdn()` — `remove_cdn_allowlist()` перед disable
+
+**singbox_cdn_nets.py** (НОВЫЙ):
+- `fetch_cdn_nets(provider)` — live-fetch IP-диапазонов
+- `apply_cdn_allowlist(provider, port)` — ipset + iptables
+- `remove_cdn_allowlist(port)` — cleanup
+- `get_cdn_allowlist_status(port)` — для TUI
+
+**singbox_menu.py:**
+- `_switch_cdn_provider()` — allowlist переприменяется при switch
+
+**singbox_nginx.py** — НЕ ТРОНУТ.
+**tg_nets.py** — НЕ ТРОНУТ.
+
+### 🧪 Тесты (39 новых + 4 обновлённых)
+
+`tests/test_singbox_vless_ws_cdn_fix.py` (39 тестов, 4 skip):
+
+**Баг 1 — Instructions (14 тестов):**
+- Cloudflare: содержит "Flexible", не рекомендует "Full"
+- Gcore/Bunny: origin URL `http://`, не `https://`
+- Pull protocol/scheme = HTTP, не HTTPS
+- Нет упоминаний "TLS-туннель" для CDN→origin
+- CDN↔origin явно описан как HTTP
+
+**Баг 1 — Per-provider port (6 тестов):**
+- Cloudflare: 8080 (из CF HTTP port list, НЕ HTTPS)
+- Gcore/Bunny: 8443
+- enable использует per-provider default
+
+**Баг 1 — Комментарий обновлён (2 теста):**
+- Нет "TLS-туннель" в комментарии
+- Есть упоминание "НЕ по TLS" / "HTTP"
+
+**Баг 2 — fetch_cdn_nets (9 тестов):**
+- Cloudflare: мок urllib → валидные CIDR, правильный URL
+- Gcore: JSON parse, правильный API URL
+- Bunny: HTML scrape, /32 для plain IP
+- Empty/error handling, unknown provider
+
+**Баг 2 — apply/remove (7 тестов, 4 skip без iptables):**
+- apply: вызывает ipset create + iptables DROP
+- apply: возвращает False при failed fetch
+- remove: вызывает iptables -D + ipset destroy
+- remove: idempotent (True даже если ничего нет)
+
+**Баг 2 — Integration (3 теста):**
+- enable вызывает apply_cdn_allowlist
+- disable вызывает remove_cdn_allowlist
+- enable warn() при провале allowlist (fail-open, не silent)
+
+**Баг 2 — IP sources (4 теста):**
+- Все провайдеры имеют ip_source (HTTPS URL)
+- Все провайдеры имеют ip_format
+- Cloudflare = www.cloudflare.com/ips-v4
+- Gcore = api.gcore.com/cdn/public-ip-list
+
+Обновлённые тесты в `test_singbox_vless_ws_cdn.py` (4 теста):
+- `test_default_port_vless_ws_cdn_is_8443` → `test_default_port_vless_ws_cdn_is_8080`
+- `test_init_vless_ws_cdn_default_port_8443` → `test_init_vless_ws_cdn_default_port_8080`
+
+Полный прогон: **314 тестов, 0 регрессий**, 5 skip (iptables/sing-box binary).
+
+---
+
 ## v4.23 — FEAT: VLESS-WS-CDN — VLESS+WebSocket за Cloudflare/Gcore/Bunny — 12 июля 2026
 
 ### 🎯 Что добавлено
