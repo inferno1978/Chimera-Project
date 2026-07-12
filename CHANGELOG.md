@@ -2,6 +2,85 @@
 
 ---
 
+## v4.23.3 — FIX: 2 фикса порядка операций — окно с открытым портом — 12 июля 2026
+
+### 🐛 Фикс 1: _switch_cdn_provider() — restart раньше apply_cdn_allowlist
+
+**Проблема:** При переключении CDN-провайдера порядок операций был:
+```
+state update → generate_config → restart → remove/apply allowlist
+```
+sing-box restart открывал новый порт ДО того, как на него вставал allowlist —
+окно от секунды до нескольких (пока идёт сетевой fetch CDN IP-листа), порт
+открыт всем интернету без защиты.
+
+**Фикс:** Переставлен порядок:
+```
+state update →
+  remove_cdn_allowlist(port)      [очистка старого allowlist на новом порту]
+  apply_cdn_allowlist(new, port)  [новый allowlist встаёт ДО restart]
+  → generate_config → restart     [sing-box стартует на уже защищённом порту]
+  → remove_cdn_allowlist(old_port) [старый порт больше не слушается — безопасно]
+```
+
+Если `apply_cdn_allowlist()` вернул False (fetch не удался) — НЕ блокирует switch
+(fail-open с явным warn: "sing-box restart произойдёт на НЕЗАЩИЩЁННЫЙ порт").
+
+### 🐛 Фикс 2: systemd unit — Before=netfilter-persistent.service
+
+**Проблема:** `singbox-cdn-ipset-restore.service` имел `After=network-pre.target`,
+но `netfilter-persistent.service` (стандартная поставка Debian/Ubuntu) запускается
+`Before=network-pre.target` — то есть ДО достижения `network-pre.target`.
+Наш юнит стартует ПОСЛЕ `network-pre.target` → строго после того, как
+netfilter-persistent уже попытался restore iptables-правил, ссылающихся на ещё
+не созданный ipset.
+
+Результат: либо DROP-правило не грузится (allowlist пропадает при каждом ребуте),
+либо (если iptables-restore атомарен) падает восстановление ВСЕГО файла правил —
+задевает firewall других протоколов, не только vless_ws_cdn.
+
+**Фикс:** Добавлен `Before=netfilter-persistent.service` в unit-файл (доп. к уже
+существующему `Before=sing-box.service`). Теперь:
+```
+[Unit]
+Before=sing-box.service
+Before=netfilter-persistent.service
+After=network-pre.target
+```
+ipset restore отрабатывает ДО netfilter-persistent → iptables-restore находит
+существующий ipset → правила грузятся корректно.
+
+Safe даже если netfilter-persistent не установлен — systemd игнорирует `Before=`
+на несуществующий юнит, не падает.
+
+**TODO (technical debt, не в этом фиксе):** Та же проблема теоретически есть в
+`ipset_persist.py` (`xray-ipset-restore.service`) — юнит для ingress GeoIP
+блокировки тоже имеет `Before=xray.service` без `Before=netfilter-persistent`.
+Это отдельный технический долг существующего модуля, не часть фичи vless_ws_cdn.
+
+### 🧪 Тесты (7 новых)
+
+`tests/test_singbox_vless_ws_cdn_fix3.py`:
+
+**Фикс 1 — порядок операций (3 теста):**
+- `test_allowlist_applied_before_generate_config_and_restart` — side_effect
+  записывает порядок вызовов в общий список → assert:
+  `apply_cdn_allowlist` раньше `singbox_generate_config` раньше `singbox_restart`
+- `test_restart_not_before_allowlist` — singbox_restart НЕ вызывается раньше
+  apply_cdn_allowlist
+- `test_old_port_allowlist_removed_after_restart` — `remove_cdn_allowlist(old_port)`
+  вызывается ПОСЛЕ restart (не раньше) — записывает (имя, порт) в call_log
+
+**Фикс 2 — Before=netfilter-persistent.service (4 теста):**
+- `test_unit_contains_before_netfilter_persistent` — строка присутствует в юните
+- `test_unit_contains_before_sing_box_service` — sing-box.service тоже присутствует
+- `test_unit_has_two_separate_before_lines` — два отдельных Before= (не одна строка)
+- `test_unit_idempotent` — повторный вызов не перезаписывает существующий юнит
+
+Полный прогон: **340 тестов, 0 регрессий**, 8 skip (iptables/ipset/sing-box binary).
+
+---
+
 ## v4.23.2 — FIX: VLESS-WS-CDN — 4 продакшн-фикса allowlist-модуля — 12 июля 2026
 
 ### 🐛 Фикс 1: iptables -A → -I INPUT 1 — правило ПЕРВОЕ в цепочке
