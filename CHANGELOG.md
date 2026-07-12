@@ -2,6 +2,86 @@
 
 ---
 
+## v4.22.4 — FIX: TUIC v5 — initial_packet_size вместо несуществующего obfs — 12 июля 2026
+
+### 🐛 Контекст: исходная идея была нереализуема
+
+В роадмапе (после v4.22) был пункт **"добавить obfs.type: salamander для TUIC
+по аналогии с Hysteria2"**. Это **НЕВЫПОЛНИМО** — obfs (salamander/gecko) в
+схеме sing-box существует **только для Hysteria/Hysteria2-inbound**. У TUIC
+такого поля нет вообще (проверено по официальной документации sing-box: полный
+набор полей TUIC — `users/congestion_control/auth_timeout/heartbeat/tls/
+zero_rtt_handshake/udp_relay_mode`, `obfs` отсутствует).
+
+Добавление `"obfs"` в TUIC-конфиг было бы **мёртвым JSON-полем** — тем же
+классом ошибки, что уже чинили в v4.22.3 с ShadowTLS TLS-блоком.
+
+### ✅ Что реально доступно: `initial_packet_size`
+
+`initial_packet_size` — общее поле из "QUIC Fields", применимо к TUIC
+(и Hysteria/Hysteria2). Регулирует размер начального QUIC-пакета — это прямой
+рычаг против DPI, классифицирующего по длине initial-packet (исходное опасение
+из роадмапа).
+
+**ВАЖНО:** `initial_packet_size` — **НЕ полная замена** обфускации, а
+**единственный доступный частичный митигейт**: меняет размер пакета, но
+**не шифрует содержимое**. Для полной обфускации QUIC используйте Hysteria2 +
+Salamander (меню 7 → O).
+
+### Фикс
+
+**`singbox_config.py::_build_tuic_inbound()`:**
+- Добавлена поддержка `initial_packet_size` из state (`state_ib.get
+  ("initial_packet_size")`)
+- Поле передаётся в конфиг **ТОЛЬКО если явно задано** — не насильно меняется
+  поведение по умолчанию для существующих установок
+- Принимает int или строку (приводится к int); некорректные значения
+  игнорируются без падения генерации
+- Добавлен подробный docstring с объяснением, почему obfs не применим к TUIC
+
+**`singbox_menu.py` — TUIC-подменю:**
+- Добавлен пункт "4. 📦 Настроить initial_packet_size — частичный DPI-митигейт"
+- В статусе TUIC добавлена строка `InitPkt:` с текущим значением
+- В описании протокола убрана некорректная фраза "С Tuic+obfs — план Б"
+- Добавлено явное предупреждение: "TUIC не поддерживает obfs (salamander/gecko)
+  — это поле схемы только для Hysteria/Hysteria2. Единственный доступный
+  рычаг против DPI по длине initial-packet — initial_packet_size (пункт 4).
+  Это НЕ обфускация, а частичный митигейт: меняет размер пакета, но не шифрует
+  содержимое."
+- Новая функция `_configure_tuic_initial_packet_size()` — интерактивный ввод
+  с валидацией, предупреждением о слишком маленьких значениях (< 100 байт),
+  сбросом к default при вводе 0 или пустой строки
+
+### 🔍 Аудит упоминаний "TUIC + salamander/obfs"
+
+Полный поиск по коду и документации:
+- `singbox_menu.py:488` — найдена и исправлена некорректная фраза
+  "С Tuic+obfs — план Б если ТСПУ научится резать Hysteria2"
+- README.md, PROJECT_MAP.md, INSTALL.md, CONTRIBUTING.md — упоминаний
+  "TUIC + salamander/obfs" как будущей фичи не найдено
+- Заглушек/TODO под "TUIC obfs" в коде нет — удалять нечего
+- Все упоминания `obfs`/`salamander` в `hysteria2_salamander.py` и
+  `hysteria2_menu.py` корректны — относятся к Hysteria2, где obfs реально работает
+
+### 🧪 Тесты (+7 новых)
+
+- `test_initial_packet_size_omitted_when_not_in_state` — без поля в state →
+  поле отсутствует в конфиге (не навязывается дефолт sing-box)
+- `test_initial_packet_size_present_when_set_in_state` — задано 1200 →
+  попадает в конфиг как int
+- `test_initial_packet_size_string_coerced_to_int` — "1400" → 1400 (int)
+- `test_initial_packet_size_invalid_string_ignored` — "not-a-number" →
+  поле не появляется, генерация не падает
+- `test_initial_packet_size_zero_allowed` — 0 валиден (sing-box default)
+- `test_initial_packet_size_none_does_not_add_field` — None → поле отсутствует
+- `test_no_obfs_field_generated_for_tuic` — регрессия: TUIC не должен
+  содержать поля `obfs` или `salamander` (класс ошибки v4.22.3)
+
+Полный прогон sing-box + download_manager: **235 тестов, 0 регрессий**.
+Hysteria2 salamander, ShadowTLS, AnyTLS — НЕ изменялись.
+
+---
+
 ## v4.22.3 — FIX: sing-box download (v-prefix) + ShadowTLS TLS-поле — 12 июля 2026
 
 ### 🐛 Баг №1: скачивание sing-box падало на всех 8 зеркалах

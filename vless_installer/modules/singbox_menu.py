@@ -362,6 +362,85 @@ def _change_handshake_domain() -> None:
     success(f"Handshake: {new_host}:{new_port}")
 
 
+def _configure_tuic_initial_packet_size() -> None:
+    """Настройка initial_packet_size для TUIC v5 (v4.22.4).
+
+    ВАЖНО: это НЕ замена obfs (salamander/gecko) — TUIC не поддерживает obfs
+    в схеме sing-box вообще. initial_packet_size — общее поле QUIC Fields,
+    регулирует размер начального QUIC-пакета. Это частичный митигейт против
+    DPI, классифицирующего по длине initial-packet: меняет размер, но не
+    шифрует содержимое. Для полной обфускации QUIC используйте Hysteria2 +
+    Salamander (меню 7 → O).
+    """
+    state = singbox_state_load()
+    ib = state.get("inbounds", {}).get("tuic", {})
+    current = ib.get("initial_packet_size")
+
+    print()
+    _box_top("📦  INITIAL_PACKET_SIZE ДЛЯ TUIC v5")
+    _box_row(f"  Текущее: {CYAN}{current if current is not None else 'не задан (sing-box default)'}{NC}")
+    _box_sep()
+    _box_desc(
+        "initial_packet_size — размер начального QUIC-пакета в байтах. "
+        "Прямой рычаг против DPI, классифицирующего по длине initial-packet. "
+        "Рекомендуемый диапазон: 1200-1400 (MTU-safe). 0 = sing-box default."
+    )
+    _box_sep()
+    _box_warn("Это НЕ obfs и НЕ обфускация трафика. TUIC не поддерживает")
+    _box_warn("salamander/gecko — это поле схемы только для Hysteria/Hysteria2.")
+    _box_warn("initial_packet_size меняет только размер пакета, не шифруя")
+    _box_warn("содержимое. Для полной обфускации QUIC используйте Hysteria2")
+    _box_warn("с Salamander (меню 7 → O).")
+    _box_bottom()
+
+    print()
+    info("Введите новое значение initial_packet_size (в байтах).")
+    info("  Рекомендуемый диапазон: 1200-1400")
+    info("  0 или пустой ввод — сбросить к sing-box default (поле убирается из конфига)")
+    try:
+        raw = input(f"{CYAN}initial_packet_size:{NC} ").strip()
+    except KeyboardInterrupt:
+        return
+
+    if not raw or raw == "0":
+        # Сброс — убираем поле из state
+        ib.pop("initial_packet_size", None)
+        singbox_state_update_inbound("tuic", **ib)
+        singbox_generate_config()
+        if _service_active():
+            singbox_restart()
+        success("initial_packet_size сброшен к sing-box default")
+        return
+
+    try:
+        value = int(raw)
+    except ValueError:
+        warn("Некорректное значение — ожидается целое число")
+        time.sleep(1.5)
+        return
+
+    if value < 0:
+        warn("Значение должно быть >= 0")
+        time.sleep(1.5)
+        return
+
+    if value > 0 and value < 100:
+        warn("Очень маленькое значение (< 100) — может сломать QUIC handshake")
+        try:
+            confirm = input(f"{YELLOW}Продолжить? (y/N):{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            return
+        if confirm != "y":
+            return
+
+    ib["initial_packet_size"] = value
+    singbox_state_update_inbound("tuic", **ib)
+    singbox_generate_config()
+    if _service_active():
+        singbox_restart()
+    success(f"initial_packet_size = {value} байт")
+
+
 # _change_cert_shadowtls() удалён в v4.22.3 — ShadowTLS v3 не поддерживает
 # локальный TLS-сертификат на inbound (протокол проксирует handshake на
 # handshake.server, наблюдатель видит настоящий сертификат реального сайта).
@@ -471,12 +550,15 @@ def _tuic_menu() -> None:
         cc = ib.get("congestion_control", "bbr")
         cert_path = ib.get("cert_path", "")
         cert_src = ib.get("cert_source", "(не задан)")
+        ips = ib.get("initial_packet_size")
+        ips_str = f"{CYAN}{ips}{NC}" if ips is not None else f"{DIM}не задан (sing-box default){NC}"
         n_users = len(ib.get("users", []))
 
         _box_top("⚡  TUIC v5")
         _box_row(f"  Статус:    {col}{'включён' if enabled else 'выключен'}{NC}")
         _box_row(f"  Listen:    {CYAN}{listen}:{port}{NC}  {DIM}(UDP, не конфликтует с TCP:443){NC}")
         _box_row(f"  CongCtrl:  {CYAN}{cc}{NC}")
+        _box_row(f"  InitPkt:   {ips_str}  {DIM}(QUIC initial-packet size){NC}")
         _box_row(f"  Cert:      {DIM}{cert_src}{NC}")
         if cert_path:
             _box_row(f"             {DIM}{cert_path}{NC}")
@@ -485,8 +567,11 @@ def _tuic_menu() -> None:
         _box_desc(
             "TUIC v5 — QUIC-протокол, резерв к Hysteria2. Другой fingerprint, "
             "другая congestion control (BBRv2 native), нативный UDP-relay без "
-            "Hysteria-специфичных 'brutal'. С Tuic+obfs — план Б если ТСПУ "
-            "научится резать Hysteria2."
+            "Hysteria-специфичных 'brutal'. ВАЖНО: TUIC не поддерживает obfs "
+            "(salamander/gecko) — это поле схемы только для Hysteria/Hysteria2. "
+            "Единственный доступный рычаг против DPI по длине initial-packet — "
+            "initial_packet_size (пункт 4). Это НЕ обфускация, а частичный "
+            "митигейт: меняет размер пакета, но не шифрует содержимое."
         )
         _box_sep()
         _box_row()
@@ -494,6 +579,7 @@ def _tuic_menu() -> None:
             _box_item("1", f"🔴 Выключить TUIC")
             _box_item("2", f"🔑 Перегенерировать пароли пользователей")
             _box_item("3", f"👥 Показать пользователей")
+            _box_item("4", f"📦 Настроить initial_packet_size  {DIM}частичный DPI-митигейт{NC}")
         else:
             _box_item("1", f"🟢 Включить TUIC v5  {DIM}с self-signed cert{NC}")
         _box_row()
@@ -520,6 +606,9 @@ def _tuic_menu() -> None:
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
             elif ch == "3":
                 _list_users_for_protocol("tuic")
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "4":
+                _configure_tuic_initial_packet_size()
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
         else:
             if ch == "1":
