@@ -47,6 +47,15 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
+# 15 анимированных многостраничных шаблонов сайтов-заглушек.
+# См. vless_installer/modules/nginx_setup_templates.py для полного списка.
+from vless_installer.modules.nginx_setup_templates import (
+    build_template as _build_template,
+    get_template_names as _get_template_names,
+    create_techhub as _tmpl_create_techhub,
+    create_nexcloud as _tmpl_create_nexcloud,
+)
+
 
 # ── Sentinel для различения "не передан" от "передан None" ───────────────────
 # Нужно для параметров port/socket_path в setup_nginx_final():
@@ -112,20 +121,11 @@ def create_website(domain: Optional[str] = None,
     web_root.mkdir(parents=True, exist_ok=True)
     info(f"Создание шаблона сайта #{PARAM_SITE_TEMPLATE}...")
     tmpl = int(PARAM_SITE_TEMPLATE or "0")
-    if tmpl == 1:
-        _create_techhub(web_root)
-    elif tmpl == 2:
-        _create_nexcloud(web_root)
-    elif tmpl == 3:
-        _create_simple_site(web_root, "Holm & Oak",    "Curated Homeware",         "#faf9f7", "#44403c", "#78716c")
-    elif tmpl == 4:
-        _create_simple_site(web_root, "Ember & Grain", "Wood-Fired Bistro",         "#1a1208", "#e8a832", "#a89070")
-    elif tmpl == 5:
-        _create_simple_site(web_root, "NexHub",        "Community & Cloud Storage", "#0e1117", "#2f81f7", "#8b949e")
-    elif tmpl == 6:
-        _create_simple_site(web_root, "ByteForge",     "Tech Community Forum",      "#080c10", "#58a6ff", "#768390")
-    else:
-        _create_nexcloud(web_root)
+    # 0 (или любое невалидное значение) → fallback на NexCloud (template #2),
+    # как и в предыдущей версии. Иначе — один из 15 шаблонов.
+    if tmpl < 1 or tmpl > 15:
+        tmpl = 2
+    _build_template(tmpl, web_root)
 
     (web_root / "robots.txt").write_text("User-agent: *\n")
     try:
@@ -135,148 +135,47 @@ def create_website(domain: Optional[str] = None,
     success(f"Сайт создан в {web_root}")
 
 
+# ── Backward-compat shims ────────────────────────────────────────────────────
+# Старые имена _create_techhub / _create_nexcloud / _create_simple_site
+# импортируются в _core.py (строка ~268). Делегируем в новый модуль шаблонов,
+# чтобы не ломать существующие импорты и тесты.
+#
+# Полная реализация 15 шаблонов живёт в
+# vless_installer/modules/nginx_setup_templates.py — каждая функция пишет
+# style.css + index.html + 4 подстраницы с рабочей навигацией между ними.
 def _create_techhub(web_root: Path) -> None:
-    (web_root / "index.html").write_text(
-        '<!DOCTYPE html>\n<html lang="ru">\n<head>\n'
-        '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">\n'
-        '<title>TechHub - Компьютерные технологии</title>\n'
-        '<style>\n'
-        '*{margin:0;padding:0;box-sizing:border-box}\n'
-        'body{font-family:\'Segoe UI\',Tahoma,sans-serif;line-height:1.6;color:#333;background:#f5f5f5}\n'
-        'header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:2rem;text-align:center}\n'
-        'nav{background:#333;padding:1rem;display:flex;justify-content:center;flex-wrap:wrap}\n'
-        'nav a{color:#fff;text-decoration:none;padding:.5rem 1rem;margin:.25rem;border-radius:4px;transition:background .3s}\n'
-        'nav a:hover{background:#667eea}\n'
-        'section{padding:3rem 2rem;max-width:1200px;margin:2rem auto;background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1)}\n'
-        'h2{color:#667eea;margin-bottom:1.5rem;border-bottom:3px solid #667eea;padding-bottom:.5rem;display:inline-block}\n'
-        '.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:2rem}\n'
-        '.card{background:#f9f9f9;padding:1.5rem;border-radius:8px;border-left:4px solid #667eea;transition:transform .3s}\n'
-        '.card:hover{transform:translateY(-5px)}\n'
-        '.card h3{color:#764ba2;margin-bottom:1rem}\n'
-        'footer{background:#333;color:#fff;text-align:center;padding:2rem;margin-top:3rem}\n'
-        '.btn{display:inline-block;background:#667eea;color:#fff;padding:.75rem 1.5rem;text-decoration:none;border-radius:4px;margin-top:1rem}\n'
-        '</style>\n</head>\n<body>\n'
-        '<header><h1>🖥️ TechHub</h1><p>Ваш портал в мир компьютерных технологий</p></header>\n'
-        '<nav>\n'
-        '<a href="#about">О нас</a><a href="#hardware">Железо</a><a href="#software">Софт</a>\n'
-        '<a href="#network">Сети</a><a href="#security">Безопасность</a><a href="#cloud">Облака</a>\n'
-        '<a href="#dev">Разработка</a><a href="#ai">ИИ</a><a href="#iot">IoT</a>\n'
-        '<a href="#gaming">Гейминг</a><a href="#mobile">Мобильные</a><a href="#contact">Контакты</a>\n'
-        '</nav>\n'
-        '<section id="about"><h2>📌 О проекте</h2><p>TechHub — современный информационный портал о компьютерных технологиях.</p>'
-        '<a href="#" class="btn">Узнать больше</a></section>\n'
-        '<section id="hardware"><h2>🔧 Железо</h2><div class="grid">'
-        '<div class="card"><h3>Процессоры</h3><p>Обзоры CPU от Intel и AMD</p></div>'
-        '<div class="card"><h3>Видеокарты</h3><p>Тесты GPU для игр и работы</p></div>'
-        '<div class="card"><h3>Память</h3><p>RAM и накопители SSD/NVMe</p></div></div></section>\n'
-        '<section id="software"><h2>💻 Софт</h2><div class="grid">'
-        '<div class="card"><h3>ОС</h3><p>Windows, Linux, macOS</p></div>'
-        '<div class="card"><h3>Утилиты</h3><p>Полезные программы</p></div>'
-        '<div class="card"><h3>Офис</h3><p>Альтернативы Microsoft Office</p></div></div></section>\n'
-        '<section id="contact"><h2>📧 Контакты</h2><p>Email: info@techhub.example | Tel: +1-234-567-8900</p>'
-        '<a href="#" class="btn">Написать нам</a></section>\n'
-        '<footer><p>&copy; 2025 TechHub. Все права защищены.</p></footer>\n'
-        '</body></html>\n'
-    )
+    """Шаблон #1 — TechHub (IT-портал, RU). Делегирует в nginx_setup_templates."""
+    _tmpl_create_techhub(web_root)
 
 
 def _create_nexcloud(web_root: Path) -> None:
-    for sub in ("images", "pricing", "about", "blog", "contact"):
-        (web_root / sub).mkdir(exist_ok=True)
-
-    (web_root / "style.css").write_text(
-        '*{margin:0;padding:0;box-sizing:border-box}\n'
-        ':root{--bg:#0f172a;--accent:#6366f1;--text:#e2e8f0;--muted:#94a3b8;--card:#1e293b;--border:#334155}\n'
-        'body{font-family:"Inter",system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}\n'
-        'a{color:inherit;text-decoration:none}\n'
-        'header{padding:1.25rem 5%;display:flex;justify-content:space-between;align-items:center;'
-        'border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:100}\n'
-        '.logo{font-size:1.3rem;font-weight:800;letter-spacing:-.5px}.logo span{color:var(--accent)}\n'
-        '.btn{display:inline-block;padding:.6rem 1.4rem;border-radius:7px;font-size:.875rem;font-weight:600}\n'
-        '.btn-p{background:var(--accent);color:#fff}\n'
-        '.page{max-width:1100px;margin:0 auto;padding:4rem 5%}\n'
-        'h1{font-size:clamp(2rem,5vw,3.5rem);font-weight:800;line-height:1.15;margin-bottom:1.25rem}\n'
-        '.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1.5rem;margin-top:2.5rem}\n'
-        '.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:2rem}\n'
-        'footer{border-top:1px solid var(--border);padding:3rem 5%;display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:2rem}\n'
-        '.ft-bottom{border-top:1px solid var(--border);padding:1.25rem 5%;font-size:.8rem;color:var(--muted)}\n'
-    )
-
-    (web_root / "index.html").write_text(
-        '<!DOCTYPE html><html lang="en"><head>\n'
-        '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n'
-        '<title>NexCloud — Serverless Cloud Platform</title>\n'
-        '<link rel="stylesheet" href="/style.css"></head><body>\n'
-        '<header><a href="/" class="logo">Nex<span>Cloud</span></a>\n'
-        '<nav><a href="/">Home</a><a href="/pricing/">Pricing</a>'
-        '<a href="/about/">About</a><a href="/blog/">Blog</a><a href="/contact/">Contact</a></nav>\n'
-        '<a href="/pricing/" class="btn btn-p">Get Started</a></header>\n'
-        '<div class="page" style="text-align:center">\n'
-        '<h1>Deploy faster with NexCloud</h1>\n'
-        '<p>Serverless infrastructure that scales with your business. Zero config, full power.</p>\n'
-        '</div>\n'
-        '<div class="page"><div class="grid3">\n'
-        '<div class="card"><h3>⚡ Edge Functions</h3><p>Run your code at the edge, 50ms cold starts.</p></div>\n'
-        '<div class="card"><h3>🗄️ Managed Databases</h3><p>Postgres, Redis, and object storage.</p></div>\n'
-        '<div class="card"><h3>🔒 Zero-Trust Security</h3><p>OIDC, mTLS, and WAF baked in.</p></div>\n'
-        '</div></div>\n'
-        '<footer>\n'
-        '<div class="ft-brand"><div class="logo">Nex<span>Cloud</span></div></div>\n'
-        '<div><h4>Product</h4><a href="/pricing/">Pricing</a><a href="/about/">About</a></div>\n'
-        '<div><h4>Resources</h4><a href="/contact/">Support</a></div>\n'
-        '<div><h4>Company</h4><a href="/about/">Team</a></div>\n'
-        '</footer>\n'
-        '<div class="ft-bottom"><span>&copy; 2025 NexCloud Inc.</span></div>\n'
-        '</body></html>\n'
-    )
-
-    for page_dir in ("pricing", "about", "blog", "contact"):
-        title = page_dir.capitalize()
-        (web_root / page_dir / "index.html").write_text(
-            f'<!DOCTYPE html><html lang="en"><head>\n'
-            f'<meta charset="UTF-8"><title>{title} — NexCloud</title>'
-            f'<link rel="stylesheet" href="/style.css"></head><body>\n'
-            f'<header><a href="/" class="logo">Nex<span>Cloud</span></a></header>\n'
-            f'<div class="page"><h1>{title}</h1>'
-            f'<p style="margin-top:1rem;color:var(--muted)">Content for the {title} page.</p>\n'
-            f'<a href="/" style="display:inline-block;margin-top:2rem;color:var(--accent)">'
-            f'&larr; Back to Home</a></div>\n'
-            f'<div class="ft-bottom"><span>&copy; 2025 NexCloud Inc.</span></div>\n'
-            f'</body></html>\n'
-        )
+    """Шаблон #2 — NexCloud (SaaS). Делегирует в nginx_setup_templates."""
+    _tmpl_create_nexcloud(web_root)
 
 
 def _create_simple_site(
     web_root: Path, site_name: str, tagline: str,
     bg: str, accent: str, muted: str,
 ) -> None:
-    (web_root / "index.html").write_text(
-        f'<!DOCTYPE html>\n<html lang="en">\n<head>\n'
-        f'<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n'
-        f'<title>{site_name}</title>\n'
-        f'<style>\n'
-        f'*{{margin:0;padding:0;box-sizing:border-box}}\n'
-        f'body{{font-family:system-ui,sans-serif;background:{bg};color:#fff;min-height:100vh;display:flex;flex-direction:column}}\n'
-        f'header{{padding:1.5rem 5%;border-bottom:1px solid rgba(255,255,255,.1);display:flex;justify-content:space-between;align-items:center}}\n'
-        f'.logo{{font-size:1.25rem;font-weight:700;color:#fff}}\n'
-        f'nav a{{color:{muted};margin-left:1.5rem;font-size:.875rem;text-decoration:none}}\n'
-        f'.hero{{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:4rem 2rem}}\n'
-        f'h1{{font-size:clamp(2rem,5vw,4rem);font-weight:700;margin-bottom:1rem}}\n'
-        f'h1 span{{color:{accent}}}\n'
-        f'p{{color:{muted};font-size:1.05rem;max-width:500px;margin:0 auto 2rem;line-height:1.7}}\n'
-        f'.btn{{display:inline-block;background:{accent};color:#000;padding:.875rem 2.5rem;border-radius:8px;font-weight:700;text-decoration:none;margin:.5rem}}\n'
-        f'footer{{padding:2rem 5%;border-top:1px solid rgba(255,255,255,.1);text-align:center;color:{muted};font-size:.8rem}}\n'
-        f'</style>\n</head>\n<body>\n'
-        f'<header><div class="logo">{site_name}</div>\n'
-        f'<nav><a href="/">Home</a><a href="#">About</a><a href="#">Features</a><a href="#">Contact</a></nav></header>\n'
-        f'<div class="hero">\n'
-        f'<h1>{site_name}<br><span>{tagline}</span></h1>\n'
-        f'<p>A modern, professional platform built for people who demand quality and reliability.</p>\n'
-        f'<a href="#" class="btn">Get Started</a>\n'
-        f'</div>\n'
-        f'<footer><p>&copy; 2025 {site_name}. All rights reserved.</p></footer>\n'
-        f'</body></html>\n'
-    )
+    """Старая сигнатура (web_root, site_name, tagline, bg, accent, muted).
+
+    Сохранена для обратной совместимости со старым кодом, который мог вызывать
+    эту функцию напрямую. Цвета/таглайн игнорируются — вместо этого выбирается
+    один из 15 новых анимированных шаблонов по имени site_name:
+        "Holm & Oak"     → шаблон #3
+        "Ember & Grain"  → шаблон #4
+        "NexHub"         → шаблон #5
+        "ByteForge"      → шаблон #6
+        прочее           → шаблон #2 (NexCloud) как fallback
+    """
+    _name_to_idx = {
+        "Holm & Oak":    3,
+        "Ember & Grain": 4,
+        "NexHub":        5,
+        "ByteForge":     6,
+    }
+    idx = _name_to_idx.get(site_name, 2)
+    _build_template(idx, web_root)
 
 # =============================================================================
 #  ШАГ 10: NGINX ВРЕМЕННЫЙ КОНФИГ

@@ -389,13 +389,22 @@ def prompt_parameters() -> None:
 
     # --- 9. Шаблон сайта ---
     _box_top(f" {BLUE}[9/9] Шаблон сайта-заглушки:{NC}")
-    _box_item("1", f"TechHub        — компьютерные технологии (RU)")
-    _box_item("2", f"NexCloud        — корпоративный SaaS (EN, многостраничный)")
-    _box_item("3", f"Holm & Oak      — e-commerce / homeware (EN, многостраничный)")
-    _box_item("4", f"Ember & Grain   — ресторан / бистро (EN, многостраничный)")
-    _box_item("5", f"NexHub          — форум + облачное хранилище (EN, многостраничный)")
-    _box_item("6", f"ByteForge       — технический форум (EN, многостраничный)")
-    _box_item("0", f"Случайный")
+    _box_item("1",  f"TechHub             — IT-портал (RU) · fade-up reveal")
+    _box_item("2",  f"NexCloud            — serverless SaaS · gradient mesh")
+    _box_item("3",  f"Holm & Oak          — homeware store · parallax")
+    _box_item("4",  f"Ember & Grain       — wood-fired bistro · steam rise")
+    _box_item("5",  f"NexHub              — community + storage · card flip")
+    _box_item("6",  f"ByteForge           — developer forum · code rain")
+    _box_item("7",  f"Lumen Architects    — architecture studio · line draw")
+    _box_item("8",  f"Verdant Botanical   — plant shop · leaf sway")
+    _box_item("9",  f"Northwind Coffee    — coffee roastery · steam wisps")
+    _box_item("10", f"Solstice Wellness   — spa & wellness · breathing pulse")
+    _box_item("11", f"Atelier Meridian    — design studio · shape morph")
+    _box_item("12", f"Harborline Logistics— shipping & freight · wave motion")
+    _box_item("13", f"Quietude Library    — digital library · page flip")
+    _box_item("14", f"Mensara Consulting  — strategy consulting · slide reveal")
+    _box_item("15", f"Cascade Analytics   — analytics SaaS · data flow")
+    _box_item("0",  f"Случайный")
     _box_bottom()
     while True:
         try:
@@ -404,17 +413,19 @@ def prompt_parameters() -> None:
             print()
             raise
         if choice == "0":
-            PARAM_SITE_TEMPLATE = str(random.randint(1, 6))
+            PARAM_SITE_TEMPLATE = str(random.randint(1, 15))
             setattr(core, "PARAM_SITE_TEMPLATE", PARAM_SITE_TEMPLATE)
             break
-        elif choice in "123456":
+        elif choice.isdigit() and 1 <= int(choice) <= 15:
             PARAM_SITE_TEMPLATE = choice
             setattr(core, "PARAM_SITE_TEMPLATE", PARAM_SITE_TEMPLATE)
             break
-        warn("   Введите 0-6")
+        warn("   Введите 0-15")
 
-    tmpl_names = ["", "TechHub", "NexCloud", "Holm & Oak",
-                  "Ember & Grain", "NexHub", "ByteForge"]
+    # Имена шаблонов берутся из единого источника (nginx_setup_templates),
+    # чтобы меню, сводка и финальный статус всегда показывали одно и то же.
+    from vless_installer.modules.nginx_setup_templates import get_template_names
+    tmpl_names = get_template_names()
     success(f"   Шаблон: {tmpl_names[int(PARAM_SITE_TEMPLATE)]}")
 
     # --- 10. DNSCrypt-proxy ---
