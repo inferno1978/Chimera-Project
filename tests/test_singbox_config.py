@@ -251,7 +251,18 @@ class TestShadowtlsInboundBuilder(unittest.TestCase):
         self.assertEqual(len(ib["users"]), 1)
         self.assertEqual(ib["users"][0]["name"], "alice")
 
-    def test_tls_block_included_when_cert_paths_exist(self):
+    def test_tls_block_never_present_even_if_cert_paths_exist(self):
+        """v4.22.3: ShadowTLS v3 НЕ поддерживает локальный TLS-сертификат.
+
+        Протокол проксирует TLS-handshake на внешний сервер (handshake.server),
+        наблюдатель видит настоящий сертификат реального сайта. Поле "tls" в
+        inbound НЕ должно генерироваться НИ ПРИ КАКИХ УСЛОВИЯХ — даже если
+        cert_path/key_path заданы в state и файлы существуют на диске.
+
+        Старый тест test_tls_block_included_when_cert_paths_exist (v4.22.0)
+        проверял ОБРАТНОЕ — что tls-блок добавляется. Это было ошибкой
+        понимания протокола, исправлено в v4.22.3.
+        """
         from vless_installer.modules.singbox_config import _build_shadowtls_inbound
         with tempfile.TemporaryDirectory() as td:
             cert = Path(td) / "cert.pem"
@@ -264,11 +275,13 @@ class TestShadowtlsInboundBuilder(unittest.TestCase):
                 "cert_path": str(cert),
                 "key_path":  str(key),
             })
-            self.assertIn("tls", ib)
-            self.assertEqual(ib["tls"]["certificate"], [str(cert)])
-            self.assertEqual(ib["tls"]["key"], [str(key)])
+            # КРИТИЧНО: "tls" не должно быть в inbound, даже если файлы существуют
+            self.assertNotIn("tls", ib,
+                              "ShadowTLS v3 не должен генерировать TLS-блок — "
+                              "протокол проксирует handshake на handshake.server")
 
     def test_tls_block_omitted_when_cert_missing(self):
+        """cert_path/key_path могут отсутствовать — TLS-блока тоже нет."""
         from vless_installer.modules.singbox_config import _build_shadowtls_inbound
         ib = _build_shadowtls_inbound({
             "enabled": True,
@@ -277,6 +290,31 @@ class TestShadowtlsInboundBuilder(unittest.TestCase):
             "key_path":  "/nonexistent/key.pem",
         })
         self.assertNotIn("tls", ib)
+
+    def test_cert_path_key_path_in_state_ignored(self):
+        """v4.22.3: cert_path/key_path в state игнорируются безусловно.
+
+        Даже если файлы существуют и пути валидны — ShadowTLS не должен
+        использовать их для локального TLS. Это backcompat-носитель:
+        старые state-файлы (v4.22.0-v4.22.2) могут содержать эти поля,
+        но генератор их не читает.
+        """
+        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        with tempfile.TemporaryDirectory() as td:
+            cert = Path(td) / "cert.pem"
+            key = Path(td) / "key.pem"
+            cert.write_text("fake cert")
+            key.write_text("fake key")
+            ib = _build_shadowtls_inbound({
+                "enabled": True,
+                "users": [],
+                "cert_path": str(cert),
+                "key_path":  str(key),
+                "cert_source": "letsencrypt",  # тоже игнорируется
+            })
+            self.assertNotIn("tls", ib)
+            self.assertNotIn("certificate", ib)
+            self.assertNotIn("key", ib)
 
     def test_defaults_applied(self):
         """Если поля отсутствуют — должны подставляться defaults."""
@@ -583,6 +621,7 @@ class TestEnableDisableFunctions(unittest.TestCase):
         ]
 
     def test_enable_shadowtls_sets_state(self):
+        """v4.22.3: singbox_enable_shadowtls() не принимает cert_path/key_path."""
         from vless_installer.modules.singbox_config import singbox_enable_shadowtls
         from vless_installer.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
@@ -590,16 +629,33 @@ class TestEnableDisableFunctions(unittest.TestCase):
         with ExitStack() as stack:
             _enter_patches(stack, self._patch())
             singbox_state_init(version="1.0.0")
-            singbox_enable_shadowtls(
-                cert_path="/tmp/cert.pem",
-                key_path="/tmp/key.pem",
-                cert_source="self-signed",
-            )
+            singbox_enable_shadowtls()  # без cert-параметров
             ib = singbox_state_get_inbound("shadowtls")
         self.assertTrue(ib["enabled"])
-        self.assertEqual(ib["cert_path"], "/tmp/cert.pem")
-        self.assertEqual(ib["cert_source"], "self-signed")
         self.assertTrue(ib.get("password"))
+        # cert_path/key_path/cert_source НЕ должны быть в state (v4.22.3)
+        self.assertNotIn("cert_path", ib)
+        self.assertNotIn("key_path", ib)
+        self.assertNotIn("cert_source", ib)
+
+    def test_enable_shadowtls_rejects_cert_params(self):
+        """v4.22.3: передача cert_path должна вызвать TypeError.
+
+        Это намеренно — скрытый ignore привёл бы к тихому накоплению мусора
+        в state. Лучше явная ошибка, чтобы вызывающий код не передавал
+        больше не нужные параметры.
+        """
+        from vless_installer.modules.singbox_config import singbox_enable_shadowtls
+        from vless_installer.modules.singbox_state import singbox_state_init
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patch())
+            singbox_state_init(version="1.0.0")
+            with self.assertRaises(TypeError):
+                singbox_enable_shadowtls(cert_path="/tmp/cert.pem")
+            with self.assertRaises(TypeError):
+                singbox_enable_shadowtls(key_path="/tmp/key.pem")
+            with self.assertRaises(TypeError):
+                singbox_enable_shadowtls(cert_source="self-signed")
 
     def test_enable_shadowtls_also_enables_trojan(self):
         from vless_installer.modules.singbox_config import singbox_enable_shadowtls

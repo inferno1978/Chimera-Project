@@ -251,8 +251,16 @@ def _get_latest_release_info() -> tuple[str, str]:
     """Возвращает (tag, tarball_filename) для последнего релиза sing-box.
 
     Returns:
-      ("1.11.4", "sing-box-1.11.4-linux-amd64.tar.gz")
+      ("v1.13.14", "sing-box-1.13.14-linux-amd64.tar.gz")
       или ("", "") при ошибке.
+
+    ВАЖНО: tag возвращается С префиксом "v" (как в GitHub tag_name), потому что
+    реальные URL release assets используют /releases/download/v{tag}/.
+    Если отрезать "v" (как делалось раньше в v4.22.0-v4.22.2), URL получается
+    /releases/download/1.13.14/ и GitHub возвращает 404 — все 8 зеркал падали.
+
+    Filename же строится БЕЗ v, потому что в asset name нет v:
+    "sing-box-1.13.14-linux-amd64.tar.gz" (не "sing-box-v1.13.14-...").
     """
     arch = _detect_arch()
     try:
@@ -260,11 +268,14 @@ def _get_latest_release_info() -> tuple[str, str]:
         if r.returncode != 0:
             return "", ""
         data = json.loads(r.stdout)
-        tag = data.get("tag_name", "").lstrip("v")
+        # НЕ отрезаем "v" — tag нужен для URL как есть (v1.13.14)
+        tag = data.get("tag_name", "")
         if not tag:
             return "", ""
-        # Ищем asset под нашу архитектуру: sing-box-{tag}-linux-{arch}.tar.gz
-        wanted = f"sing-box-{tag}-linux-{arch}.tar.gz"
+        # Для построения filename нужна версия БЕЗ v
+        version = tag.lstrip("v")
+        # Ищем asset под нашу архитектуру: sing-box-{version}-linux-{arch}.tar.gz
+        wanted = f"sing-box-{version}-linux-{arch}.tar.gz"
         for asset in data.get("assets", []):
             if asset.get("name") == wanted:
                 return tag, wanted
