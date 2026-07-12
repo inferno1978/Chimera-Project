@@ -165,16 +165,19 @@ def _save_main_state(st: dict) -> bool:
         return False
 
 
-def register_singbox_in_main_state() -> None:
+def register_singbox_in_main_state() -> bool:
     """Регистрирует путь к singbox_state.json в основном state.json.
     Аналогично тому, как awg_standalone_state.json регистрируется в основном state.
     Идемпотентно — не перезаписывает если уже зарегистрирован.
+
+    Возвращает True при успехе (записано или уже было зарегистрировано),
+    False при ошибке записи в main_state.json.
     """
     st = _load_main_state()
     if st.get("singbox_state_file") == str(SINGBOX_STATE_FILE):
-        return
+        return True  # уже зарегистрировано
     st["singbox_state_file"] = str(SINGBOX_STATE_FILE)
-    _save_main_state(st)
+    return _save_main_state(st)
 
 
 def unregister_singbox_from_main_state() -> None:
