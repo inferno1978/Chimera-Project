@@ -246,6 +246,104 @@ def _prompt_alt_port(default_port: int, listen: str = "127.0.0.1",
     return port
 
 
+def _is_valid_listen_ip(ip: str) -> bool:
+    """True если строка — корректный listen-адрес.
+
+    Принимает:
+      • 0.0.0.0 (все IPv4)
+      • :: (все IPv6)
+      • конкретные IPv4/IPv6
+      • 127.0.0.1, ::1, localhost
+    """
+    if not ip:
+        return False
+    if ip in ("0.0.0.0", "::", "localhost"):
+        return True
+    import socket as _socket
+    try:
+        _socket.inet_pton(_socket.AF_INET, ip)
+        return True
+    except OSError:
+        pass
+    try:
+        _socket.inet_pton(_socket.AF_INET6, ip)
+        return True
+    except OSError:
+        pass
+    return False
+
+
+def _change_listen_ip(protocol: str) -> None:
+    """Смена listen-IP для уже включённого протокола (v4.23.13).
+
+    Для ShadowTLS и AnyTLS — у них listen был жёстко 127.0.0.1 до v4.23.13.
+    TUIC уже использует '::' по умолчанию, VLESS-WS-CDN — 0.0.0.0.
+    """
+    state = singbox_state_load()
+    inbounds = state.get("inbounds", {})
+    state_ib = inbounds.get(protocol, {})
+    if not state_ib.get("enabled", False):
+        warn(f"Протокол {protocol} не включён")
+        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        return
+
+    cur_listen = state_ib.get("listen", "127.0.0.1")
+    cur_port = state_ib.get("listen_port", 0)
+    print()
+    info(f"Текущий listen: {cur_listen}:{cur_port}")
+    print(f"  {DIM}Варианты:{NC}")
+    print(f"  {DIM}  127.0.0.1 — loopback (только SNI-dispatch/локально){NC}")
+    print(f"  {DIM}  0.0.0.0   — все IPv4 (доступ извне, нужен firewall){NC}")
+    print(f"  {DIM}  ::        — все IPv6{NC}")
+    print(f"  {DIM}  <IP>      — конкретный интерфейс{NC}")
+    try:
+        new_listen = input(
+            f"{CYAN}Новый Listen IP {DIM}(Enter — отмена):{NC} "
+        ).strip()
+    except KeyboardInterrupt:
+        return
+    if not new_listen:
+        info("Отменено")
+        return
+    if not _is_valid_listen_ip(new_listen):
+        error(f"Некорректный IP: {new_listen}")
+        return
+    if new_listen == cur_listen:
+        info("Listen IP не изменился")
+        return
+
+    # Port-check на новом listen
+    if cur_port and not _is_port_free(cur_port, new_listen, proto="tcp"):
+        who = _who_owns_port(cur_port, new_listen, proto="tcp")
+        error(f"Порт {cur_port} на {new_listen} занят"
+              + (f" {who}" if who else ""))
+        return
+
+    if new_listen not in ("127.0.0.1", "::1", "localhost"):
+        warn(f"⚠  {new_listen} — протокол будет доступен извне.")
+        try:
+            confirm = input(f"{YELLOW}Продолжить? (y/N):{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            return
+        if confirm != "y":
+            info("Отменено")
+            return
+
+    # Обновляем state
+    state_ib["listen"] = new_listen
+    singbox_state_update_inbound(protocol, **state_ib)
+    if not singbox_generate_config():
+        return
+    if not singbox_validate_config():
+        warn("Конфиг невалиден")
+        return
+    if not _apply_and_check(f"Listen IP изменён, но sing-box не запустился"):
+        return
+    success(f"Listen IP для {protocol}: {cur_listen} → {new_listen}")
+    if new_listen not in ("127.0.0.1", "::1", "localhost"):
+        info(f"Не забудьте открыть порт в firewall: ufw allow {cur_port}/tcp")
+
+
 # ============================================================================
 #  Подменю: ShadowTLS v3
 # ============================================================================
@@ -266,7 +364,7 @@ def _shadowtls_menu() -> None:
 
         _box_top("🎭  SHADOWTLS v3 + TROJAN")
         _box_row(f"  Статус:    {col}{'включён' if enabled else 'выключен'}{NC}")
-        _box_row(f"  Listen:    {CYAN}{listen}:{port}{NC}  {DIM}(TCP, loopback){NC}")
+        _box_row(f"  Listen:    {CYAN}{listen}:{port}{NC}  {DIM}(TCP){NC}")
         _box_row(f"  Handshake: {CYAN}{hs_server}:{hs_port}{NC}  {DIM}(маскировочный домен){NC}")
         _box_row(f"  Users:     {CYAN}{n_users}{NC}")
         _box_sep()
@@ -286,6 +384,7 @@ def _shadowtls_menu() -> None:
             _box_item("3", f"🌐 Сменить handshake-домен    {DIM}маскировочный сайт{NC}")
             _box_item("4", f"👥 Показать пользователей     {DIM}список Trojan-users{NC}")
             _box_item("5", f"🔗 Клиентские ссылки          {DIM}URI + QR + JSON для импорта{NC}")
+            _box_item("6", f"🖥  Сменить Listen IP          {DIM}127.0.0.1 ↔ 0.0.0.0{NC}")
         else:
             _box_item("1", f"🟢 Включить ShadowTLS         {DIM}с настройкой по умолчанию{NC}")
             _box_item("2", f"⚙️  Включить с custom-параметрами {DIM}домен/порт{NC}")
@@ -319,6 +418,9 @@ def _shadowtls_menu() -> None:
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
             elif ch == "5":
                 _show_client_links("shadowtls")
+            elif ch == "6":
+                _change_listen_ip("shadowtls")
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
         else:
             if ch == "1":
                 _enable_shadowtls_default()
@@ -368,6 +470,9 @@ def _enable_shadowtls_custom() -> None:
     TLS-сертификат. Custom-режим спрашивает только handshake-домен/порт и listen-порт.
 
     v4.23.9: listen-порт проверяется на занятость сразу после ввода.
+
+    v4.23.13: добавлен запрос Listen IP — по умолчанию 127.0.0.1 (loopback),
+    но можно указать 0.0.0.0 для прямой доступности извне.
     """
     if not _ensure_binary_installed():
         return
@@ -383,6 +488,11 @@ def _enable_shadowtls_custom() -> None:
             f"{CYAN}Listen порт {DIM}(Enter={DEFAULT_PORT_SHADOWTLS}):{NC} "
         ).strip()
         port = int(port_str) if port_str else DEFAULT_PORT_SHADOWTLS
+        # v4.23.13: Listen IP — 127.0.0.1 (loopback) по умолчанию.
+        # Для доступа извне — 0.0.0.0 (все IPv4) или конкретный IP.
+        listen_ip = input(
+            f"{CYAN}Listen IP {DIM}(Enter=127.0.0.1, варианты: 0.0.0.0=все IPv4, :: =все IPv6):{NC} "
+        ).strip() or "127.0.0.1"
     except KeyboardInterrupt:
         info("Отменено")
         return
@@ -393,16 +503,36 @@ def _enable_shadowtls_custom() -> None:
     if not (1 <= port <= 65535):
         error(f"Listen порт вне диапазона: {port}")
         return
-    if not _is_port_free(port, "127.0.0.1", proto="tcp"):
-        who = _who_owns_port(port, "127.0.0.1", proto="tcp")
-        error(f"Listen порт {port} уже занят{(' ' + who) if who else ''}")
+    # Валидация listen IP
+    if not _is_valid_listen_ip(listen_ip):
+        error(f"Некорректный Listen IP: {listen_ip}")
+        warn("Допустимо: IP-адрес, 0.0.0.0 (все IPv4), :: (все IPv6), "
+             "127.0.0.1 (loopback)")
+        return
+    if not _is_port_free(port, listen_ip, proto="tcp"):
+        who = _who_owns_port(port, listen_ip, proto="tcp")
+        error(f"Listen порт {port} на {listen_ip} уже занят"
+              + (f" {who}" if who else ""))
         warn("Выберите другой порт (ss -ltnp | grep ':<port> ')")
         return
+
+    if listen_ip not in ("127.0.0.1", "::1", "localhost"):
+        warn(f"⚠  Listen IP = {listen_ip} — ShadowTLS будет доступен извне.")
+        warn("Цензор сможет напрямую зондировать порт. Для скрытности")
+        warn("рекомендуется SNI-dispatch (меню 5) на loopback-бэкенде.")
+        try:
+            confirm = input(f"{YELLOW}Продолжить? (y/N):{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            return
+        if confirm != "y":
+            info("Отменено")
+            return
 
     ok = singbox_enable_shadowtls(
         handshake_server=hs_server,
         handshake_port=hs_port,
         listen_port=port,
+        listen=listen_ip,
     )
     if not ok:
         return
@@ -415,6 +545,8 @@ def _enable_shadowtls_custom() -> None:
     if not _apply_and_check("ShadowTLS v3 НЕ включён — sing-box не запустился"):
         return
     success("ShadowTLS v3 включён с custom-параметрами")
+    if listen_ip not in ("127.0.0.1", "::1", "localhost"):
+        info(f"Не забудьте открыть порт в firewall: ufw allow {port}/tcp")
 
 
 def _regen_password_shadowtls() -> None:
@@ -562,7 +694,7 @@ def _anytls_menu() -> None:
 
         _box_top("🔒  ANYTLS")
         _box_row(f"  Статус:  {col}{'включён' if enabled else 'выключен'}{NC}")
-        _box_row(f"  Listen:  {CYAN}{listen}:{port}{NC}  {DIM}(TCP, loopback){NC}")
+        _box_row(f"  Listen:  {CYAN}{listen}:{port}{NC}  {DIM}(TCP){NC}")
         _box_row(f"  Cert:    {DIM}{cert_src}{NC}")
         if cert_path:
             _box_row(f"           {DIM}{cert_path}{NC}")
@@ -581,6 +713,7 @@ def _anytls_menu() -> None:
             _box_item("2", f"🔑 Сменить пароль")
             _box_item("3", f"👥 Показать пользователей")
             _box_item("4", f"🔗 Клиентские ссылки          {DIM}URI + QR + JSON{NC}")
+            _box_item("5", f"🖥  Сменить Listen IP          {DIM}127.0.0.1 ↔ 0.0.0.0{NC}")
         else:
             _box_item("1", f"🟢 Включить AnyTLS  {DIM}с self-signed cert{NC}")
         _box_row()
@@ -610,6 +743,9 @@ def _anytls_menu() -> None:
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
             elif ch == "4":
                 _show_client_links("anytls")
+            elif ch == "5":
+                _change_listen_ip("anytls")
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
         else:
             if ch == "1":
                 if not _ensure_binary_installed():
@@ -1826,10 +1962,10 @@ def _show_client_links(protocol: str) -> None:
         _box_row(f"  {YELLOW}⚠  Внимание: listen=127.0.0.1 (loopback){NC}")
         _box_row(f"  {DIM}Клиент извне НЕ сможет подключиться напрямую.{NC}")
         _box_row(f"  {DIM}Варианты:{NC}")
-        _box_row(f"  {DIM}  1. Включить SNI-dispatch (меню 5) — TCP:443 → nginx stream{NC}")
-        _box_row(f"  {DIM}     маршрутизирует по SNI на backend {public_ip}:{port}{NC}")
-        _box_row(f"  {DIM}  2. Пересоздать протокол с listen=0.0.0.0 (custom-режим){NC}")
-        _box_row(f"  {DIM}     и открыть порт в firewall: ufw allow {port}/tcp{NC}")
+        _box_row(f"  {DIM}  1. SNI-dispatch (меню 5) — TCP:443 → nginx stream → backend{NC}")
+        _box_row(f"  {DIM}     маршрутизирует по SNI на {public_ip}:{port}{NC}")
+        _box_row(f"  {DIM}  2. Сменить Listen IP на 0.0.0.0 (меню 6 для ShadowTLS,{NC}")
+        _box_row(f"  {DIM}     меню 5 для AnyTLS) + ufw allow {port}/tcp{NC}")
 
     # URI
     _box_sep()
