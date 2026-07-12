@@ -1,0 +1,295 @@
+"""
+vless_installer/modules/singbox_state.py
+───────────────────────────────────────────────────────────────────────────────
+State management для sing-box backend.
+
+Полностью автономный state-файл /var/lib/xray-installer/singbox_state.json
+НЕ смешивается с основным state.json (который относится к VLESS-установке).
+
+В основном state.json только регистрируется путь (singbox_state_file) —
+аналогично awg_standalone_state.json.
+
+Структура state:
+{
+  "installed": true,
+  "version": "1.11.4",
+  "installed_at": "2026-07-12T12:00:00Z",
+  "binary_path": "/usr/local/bin/sing-box",
+  "config_path": "/etc/sing-box/config.json",
+  "inbounds": {
+    "shadowtls": {
+      "enabled": true,
+      "listen": "127.0.0.1",
+      "listen_port": 8443,
+      "version": 3,
+      "password": "...",
+      "handshake": {
+        "server": "www.cloudflare.com",
+        "server_port": 443
+      },
+      "detour": "trojan-in",
+      "cert_source": "letsencrypt",   // или "self-signed"
+      "cert_path": "/etc/letsencrypt/live/example.com/fullchain.pem",
+      "key_path":  "/etc/letsencrypt/live/example.com/privkey.pem"
+    },
+    "anytls": {
+      "enabled": true,
+      "listen": "127.0.0.1",
+      "listen_port": 8444,
+      "password": "...",
+      "cert_source": "self-signed",
+      "cert_path": "/etc/sing-box/certs/anytls.crt",
+      "key_path":  "/etc/sing-box/certs/anytls.key",
+      "cert_sha256": "abcdef..."
+    },
+    "tuic": {
+      "enabled": true,
+      "listen": "::",
+      "listen_port": 443,            // UDP
+      "users": [                     // UUID + пароль
+        {"uuid": "...", "password": "..."}
+      ],
+      "congestion_control": "bbr",
+      "cert_source": "self-signed",
+      "cert_path": "/etc/sing-box/certs/tuic.crt",
+      "key_path":  "/etc/sing-box/certs/tuic.key",
+      "cert_sha256": "abcdef..."
+    },
+    "trojan": {
+      "enabled": true,                // внутренний, под ShadowTLS
+      "listen": "127.0.0.1",
+      "listen_port": 0,               // sing-box внутренний pipe через detour
+      "users": [{"password": "...", "name": "default"}]
+    }
+  },
+  "sni_dispatch": {
+    "enabled": false,
+    "nginx_stream_conf": "/etc/nginx/streams-enabled/singbox-dispatch.conf",
+    "shadowtls_sni": "shadowtls.example.com",
+    "anytls_sni": "anytls.example.com",
+    "default_backend": "unix:/dev/shm/vless-reality.socket"
+  },
+  "last_applied": "2026-07-12T12:00:00Z"
+}
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from .singbox_common import (
+    SINGBOX_STATE_FILE, SINGBOX_BINARY, SINGBOX_CONFIG_FILE,
+    DEFAULT_PORT_SHADOWTLS, DEFAULT_PORT_ANYTLS, DEFAULT_PORT_TUIC,
+    DEFAULT_PORT_TUIC_ALTERNATIVE,
+    DEFAULT_SHADOWTLS_HANDSHAKE_HOST, DEFAULT_SHADOWTLS_HANDSHAKE_PORT,
+    register_singbox_in_main_state, unregister_singbox_from_main_state,
+)
+
+
+def _core_module():
+    """Ленивый импорт _core (как во всех модулях проекта)."""
+    import importlib
+    return importlib.import_module("vless_installer._core")
+
+
+# ── State load/save ──────────────────────────────────────────────────────────
+
+def singbox_state_load() -> dict:
+    """Загружает state. Возвращает {} если файл не существует или corrupt."""
+    try:
+        if not SINGBOX_STATE_FILE.exists():
+            return {}
+        return json.loads(SINGBOX_STATE_FILE.read_text())
+    except Exception as e:
+        try:
+            core = _core_module()
+            core.log_to_file("WARN", f"singbox_state_load: {e}")
+        except Exception:
+            pass
+        return {}
+
+
+def singbox_state_save(state: dict) -> bool:
+    """Атомарно сохраняет state. Возвращает True при успехе."""
+    try:
+        SINGBOX_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SINGBOX_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+        tmp.replace(SINGBOX_STATE_FILE)
+        # Права 0600 — внутри state есть пароли и сертификаты
+        SINGBOX_STATE_FILE.chmod(0o600)
+        # Регистрируем в основном state.json
+        register_singbox_in_main_state()
+        return True
+    except Exception as e:
+        try:
+            core = _core_module()
+            core.log_to_file("ERROR", f"singbox_state_save: {e}")
+        except Exception:
+            pass
+        return False
+
+
+def singbox_state_update(**kwargs: Any) -> dict:
+    """Частичное обновление state (merge top-level keys). Возвращает обновлённый state."""
+    state = singbox_state_load()
+    state.update(kwargs)
+    singbox_state_save(state)
+    return state
+
+
+def singbox_state_delete() -> bool:
+    """Полностью удаляет state-файл (при uninstall)."""
+    try:
+        if SINGBOX_STATE_FILE.exists():
+            SINGBOX_STATE_FILE.unlink()
+        unregister_singbox_from_main_state()
+        return True
+    except Exception:
+        return False
+
+
+# ── State initialization ────────────────────────────────────────────────────
+
+def singbox_state_init(version: str = "") -> dict:
+    """Создаёт начальный state при первой установке бинарника.
+
+    Все inbound'ы по умолчанию disabled — пользователь включает через меню.
+    """
+    state = {
+        "installed":         True,
+        "version":           version,
+        "installed_at":      datetime.now(timezone.utc).isoformat(),
+        "binary_path":       str(SINGBOX_BINARY),
+        "config_path":       str(SINGBOX_CONFIG_FILE),
+        "inbounds": {
+            "shadowtls": {
+                "enabled":      False,
+                "listen":       "127.0.0.1",
+                "listen_port":  DEFAULT_PORT_SHADOWTLS,
+                "version":      3,
+                "password":     "",
+                "handshake": {
+                    "server":      DEFAULT_SHADOWTLS_HANDSHAKE_HOST,
+                    "server_port": DEFAULT_SHADOWTLS_HANDSHAKE_PORT,
+                },
+                "detour":       "trojan-in",
+                "cert_source":  "",
+                "cert_path":    "",
+                "key_path":     "",
+            },
+            "anytls": {
+                "enabled":      False,
+                "listen":       "127.0.0.1",
+                "listen_port":  DEFAULT_PORT_ANYTLS,
+                "password":     "",
+                "cert_source":  "",
+                "cert_path":    "",
+                "key_path":     "",
+                "cert_sha256":  "",
+            },
+            "tuic": {
+                "enabled":            False,
+                "listen":             "::",
+                "listen_port":        DEFAULT_PORT_TUIC_ALTERNATIVE,
+                "users":              [],
+                "congestion_control": "bbr",
+                "cert_source":        "",
+                "cert_path":          "",
+                "key_path":           "",
+                "cert_sha256":        "",
+            },
+            "trojan": {
+                "enabled":      False,
+                "listen":       "127.0.0.1",
+                "listen_port":  0,
+                "users":         [],
+            },
+        },
+        "sni_dispatch": {
+            "enabled":            False,
+            "nginx_stream_conf":  "/etc/nginx/streams-enabled/singbox-dispatch.conf",
+            "shadowtls_sni":      "",
+            "anytls_sni":         "",
+            "default_backend":    "",
+        },
+        "last_applied": "",
+    }
+    singbox_state_save(state)
+    return state
+
+
+# ── Inbound management ──────────────────────────────────────────────────────
+
+def singbox_state_get_inbound(protocol: str) -> dict:
+    """Возвращает подсекцию inbound'а по имени протокола."""
+    state = singbox_state_load()
+    return state.get("inbounds", {}).get(protocol, {})
+
+
+def singbox_state_set_inbound(protocol: str, inbound: dict) -> bool:
+    """Полностью заменяет подсекцию inbound'а."""
+    state = singbox_state_load()
+    inbounds = state.setdefault("inbounds", {})
+    inbounds[protocol] = inbound
+    return singbox_state_save(state)
+
+
+def singbox_state_update_inbound(protocol: str, **fields) -> bool:
+    """Частичное обновление inbound'а (merge)."""
+    state = singbox_state_load()
+    inbounds = state.setdefault("inbounds", {})
+    ib = inbounds.setdefault(protocol, {})
+    ib.update(fields)
+    return singbox_state_save(state)
+
+
+def singbox_state_is_protocol_enabled(protocol: str) -> bool:
+    return bool(singbox_state_get_inbound(protocol).get("enabled", False))
+
+
+def singbox_state_get_enabled_protocols() -> list[str]:
+    """Возвращает список включённых протоколов."""
+    state = singbox_state_load()
+    inbounds = state.get("inbounds", {})
+    return [p for p, ib in inbounds.items() if ib.get("enabled", False)]
+
+
+# ── SNI-dispatch ────────────────────────────────────────────────────────────
+
+def singbox_state_get_sni_dispatch() -> dict:
+    return singbox_state_load().get("sni_dispatch", {})
+
+
+def singbox_state_set_sni_dispatch(sni_state: dict) -> bool:
+    state = singbox_state_load()
+    state["sni_dispatch"] = sni_state
+    return singbox_state_save(state)
+
+
+def singbox_state_update_sni_dispatch(**fields) -> bool:
+    state = singbox_state_load()
+    sd = state.setdefault("sni_dispatch", {})
+    sd.update(fields)
+    return singbox_state_save(state)
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def singbox_state_is_installed() -> bool:
+    """Была ли установка sing-box."""
+    return bool(singbox_state_load().get("installed", False))
+
+
+def singbox_state_get_version() -> str:
+    return singbox_state_load().get("version", "")
+
+
+def singbox_state_get_binary_path() -> str:
+    return singbox_state_load().get("binary_path", str(SINGBOX_BINARY))
+
+
+def singbox_state_get_config_path() -> str:
+    return singbox_state_load().get("config_path", str(SINGBOX_CONFIG_FILE))
