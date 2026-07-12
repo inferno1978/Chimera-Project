@@ -36,6 +36,7 @@ from vless_installer.modules.singbox_common import (
     _service_active, _service_enabled,
     _is_port_free, _who_owns_port,
     SINGBOX_BINARY, SINGBOX_CONFIG_FILE, SINGBOX_LOG_FILE,
+    SINGBOX_SERVICE,
     SINGBOX_CERT_DIR,
     DEFAULT_PORT_SHADOWTLS, DEFAULT_PORT_ANYTLS,
     DEFAULT_SHADOWTLS_HANDSHAKE_HOST, DEFAULT_SHADOWTLS_HANDSHAKE_PORT,
