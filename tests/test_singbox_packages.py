@@ -264,6 +264,40 @@ class TestGetSingboxMirrors(unittest.TestCase):
         from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
         self.assertEqual(get_singbox_mirrors(tag="", filename="file.tar.gz"), [])
 
+    def test_v_prefix_in_tag_preserved_in_urls(self):
+        """Регрессия v4.22.3: tag с 'v' префиксом должен сохраняться в URL.
+
+        Баг v4.22.0-v4.22.2: _get_latest_release_info() делал tag.lstrip('v'),
+        отрезая 'v' из 'v1.13.14'. Это ломало URL — GitHub возвращает 404 для
+        /releases/download/1.13.14/ (нужно /releases/download/v1.13.14/).
+        Все 8 зеркал падали. Тест гарантирует что 'v' сохраняется.
+        """
+        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        urls = get_singbox_mirrors(tag="v1.13.14",
+                                   filename="sing-box-1.13.14-linux-amd64.tar.gz")
+        self.assertGreater(len(urls), 0)
+        # Все URL должны содержать /v1.13.14/ в пути
+        for url in urls:
+            self.assertIn("/v1.13.14/", url,
+                          f"URL должен содержать /v1.13.14/ (с v-префиксом): {url}")
+
+    def test_tag_without_v_also_works(self):
+        """tag без 'v' тоже работает (для совместимости со старыми вызовами).
+
+        ВАЖНО: sing-box releases используют tag_name='v1.13.14', поэтому
+        _get_latest_release_info() теперь возвращает tag С 'v'. Но если
+        кто-то передаст tag без 'v' (например '1.13.14'), URL будет
+        /releases/download/1.13.14/ и GitHub вернёт 404. Это поведение
+        не наше дело — мы должны передавать tag как есть.
+        """
+        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        urls = get_singbox_mirrors(tag="1.13.14",
+                                   filename="sing-box-1.13.14-linux-amd64.tar.gz")
+        # URL будут с /1.13.14/ — это БЫЛО багом, но get_singbox_mirrors
+        # не должна трансформировать tag. Тест фиксирует что tag передаётся as-is.
+        self.assertGreater(len(urls), 0)
+        self.assertIn("/1.13.14/", urls[0])
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. post_install — извлечение бинарника

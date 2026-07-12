@@ -2,6 +2,114 @@
 
 ---
 
+## v4.22.3 — FIX: sing-box download (v-prefix) + ShadowTLS TLS-поле — 12 июля 2026
+
+### 🐛 Баг №1: скачивание sing-box падало на всех 8 зеркалах
+
+**Симптом:** После фикса v4.22.1 (исключение jsDelivr/raw/Statically) все 8
+оставшихся зеркал всё равно возвращали 404. URL выглядел корректно:
+
+```
+https://github.com/SagerNet/sing-box/releases/download/1.13.14/sing-box-1.13.14-linux-amd64.tar.gz
+```
+
+**Причина:** GitHub API возвращает `tag_name: "v1.13.14"` (с префиксом `v`),
+реальные URL release assets используют `/releases/download/v1.13.14/`.
+`_get_latest_release_info()` делал `tag.lstrip("v")`, отрезая `v` — URL
+получался `/releases/download/1.13.14/` и GitHub возвращал 404.
+
+**Фикс:** `_get_latest_release_info()` в `singbox_common.py` — НЕ отрезаем `v`
+из tag. Filename строится БЕЗ v (потому что в asset name нет v:
+`sing-box-1.13.14-linux-amd64.tar.gz`), для этого отдельно вычисляется
+`version = tag.lstrip("v")` только для построения имени файла.
+
+Проверено: `curl -sI -L .../v1.13.14/...` → 200, `curl -sI -L .../1.13.14/...` → 404.
+
+### 🐛 Баг №2: ShadowTLS генерировал несуществующее TLS-поле
+
+**Контекст:** ShadowTLS v3 в sing-box НЕ поддерживает локальный TLS-сертификат
+на inbound — протокол проксирует TLS-handshake целиком на реальный внешний
+сервер (`handshake.server`), наблюдатель видит настоящий сертификат реального
+сайта. Официальная схема shadowtls-inbound: только `handshake/users/version/
+strict_mode/wildcard_sni` — поля `"tls"` в схеме нет вообще.
+
+**Симптом:** `singbox_config.py::_build_shadowtls_inbound()` добавлял блок
+`"tls": {"certificate": [...], "key": [...]}` — скопировано из AnyTLS-билдера
+(там TLS обязателен и корректен). Для ShadowTLS это ошибка понимания протокола.
+Вся сопутствующая UI-логика выбора LE/self-signed сертификата для ShadowTLS
+в `singbox_menu.py` — тоже основана на этой ошибке.
+
+**Фикс:**
+
+- `singbox_config.py::_build_shadowtls_inbound()` — убран блок с `tls`/
+  `cert_path`/`key_path` целиком. Поле `"tls"` НЕ генерируется НИ ПРИ КАКИХ
+  УСЛОВИЯХ, даже если `cert_path`/`key_path` заданы в state и файлы существуют.
+
+- `singbox_config.py::singbox_enable_shadowtls()` — убраны параметры
+  `cert_path`/`key_path`/`cert_source` из сигнатуры. Вызовы, передающие их,
+  получат `TypeError` (намеренно — скрытый ignore привёл бы к тихому накоплению
+  мусора в state).
+
+- `singbox_menu.py` — убран выбор сертификата для ShadowTLS:
+  • `_enable_shadowtls_default()` — не генерирует self-signed cert, не передаёт
+    cert-параметры
+  • `_enable_shadowtls_custom()` — убран шаг "Сертификат для ShadowTLS
+    (LE/self-signed)", спрашивает только handshake-домен/порт и listen-порт
+  • `_change_cert_shadowtls()` — удалена целиком
+  • Пункт меню "📜 Сменить сертификат" убран из подменю ShadowTLS
+  • В статусе ShadowTLS убраны строки `Cert:` и путь к сертификату
+  • В описании протокола добавлено: "Локальный сертификат НЕ используется —
+    протокол проксирует handshake на handshake.server"
+
+- `singbox_state.py::singbox_state_init()` — `cert_path`/`key_path`/
+  `cert_source` больше НЕ создаются для shadowtls в default state.
+  Обратная совместимость: старые state-файлы (созданные в v4.22.0-v4.22.2) с
+  этими полями НЕ мигрируются принудительно — генератор их игнорирует.
+
+### 🔍 Аудит других протоколов (по требованию тикета)
+
+Проверены `_build_trojan_inbound()`, `_build_anytls_inbound()`,
+`_build_tuic_inbound()` на предмет аналогичного копипаста:
+
+- **Trojan** — TLS-блока нет, корректно (внутренний inbound, TLS терминирует
+  ShadowTLS через `detour`)
+- **AnyTLS** — TLS-блок корректен (AnyTLS требует локальный TLS, реализован
+  верно) — НЕ ТРОГАТЬ
+- **TUIC** — TLS-блок корректен (TUIC требует локальный TLS для QUIC-handshake) —
+  НЕ ТРОГАТЬ
+
+Других случаев копипаста не найдено.
+
+### 🧪 Тесты
+
+- `test_tls_block_included_when_cert_paths_exist` — ПЕРЕПИСАН в
+  `test_tls_block_never_present_even_if_cert_paths_exist`. Старый тест
+  проверял ОБРАТНОЕ (что tls-блок добавляется) — это было ошибкой. Новый тест
+  ломается на старом коде, проходит после фикса.
+
+- `test_cert_path_key_path_in_state_ignored` — новый тест: cert_path/key_path
+  в state игнорируются безусловно, даже если файлы существуют.
+
+- `test_enable_shadowtls_sets_state` — обновлён: проверяет что cert_path/
+  key_path/cert_source ОТСУТСТВУЮТ в state после enable.
+
+- `test_enable_shadowtls_rejects_cert_params` — новый тест: передача
+  cert_path/key_path/cert_source вызывает TypeError.
+
+- `test_v_prefix_in_tag_preserved_in_urls` — новый регрессионный тест на
+  баг №1 (v-prefix должен сохраняться в URL).
+
+- `test_tag_without_v_also_works` — тест что `get_singbox_mirrors()` передаёт
+  tag as-is без трансформаций.
+
+- Mock-значения в `test_singbox_install.py` обновлены: `("1.13.14", ...)` →
+  `("v1.13.14", ...)` (реальное возвращаемое значение).
+
+Полный прогон sing-box + download_manager: 228 тестов, 0 регрессий.
+AnyTLS/TUIC/Trojan/singbox_nginx.py — НЕ изменялись, тесты продолжают проходить.
+
+---
+
 ## v4.22.2 — FIX: два бага из v4.22.1 (state type validation + register error handling) — 12 июля 2026
 
 В v4.22.1 в разделе "Замеченные баги" были описаны два бага с пометкой

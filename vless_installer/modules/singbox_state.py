@@ -27,10 +27,12 @@ State management для sing-box backend.
         "server": "www.cloudflare.com",
         "server_port": 443
       },
-      "detour": "trojan-in",
-      "cert_source": "letsencrypt",   // или "self-signed"
-      "cert_path": "/etc/letsencrypt/live/example.com/fullchain.pem",
-      "key_path":  "/etc/letsencrypt/live/example.com/privkey.pem"
+      "detour": "trojan-in"
+      // v4.22.3: cert_path/key_path/cert_source больше НЕ создаются для
+      // shadowtls — протокол проксирует TLS-handshake на handshake.server,
+      // локальный сертификат не нужен и не поддерживается схемой inbound.
+      // Старые state-файлы с этими полями (созданные в v4.22.0-v4.22.2)
+      // обратно совместимы — генератор их игнорирует безусловно.
     },
     "anytls": {
       "enabled": true,
@@ -214,9 +216,9 @@ def singbox_state_init(version: str = "") -> dict:
                     "server_port": DEFAULT_SHADOWTLS_HANDSHAKE_PORT,
                 },
                 "detour":       "trojan-in",
-                "cert_source":  "",
-                "cert_path":    "",
-                "key_path":     "",
+                # v4.22.3: cert_path/key_path/cert_source НЕ создаются для
+                # shadowtls — протокол не поддерживает локальный TLS-сертификат
+                # (см. _build_shadowtls_inbound docstring).
             },
             "anytls": {
                 "enabled":      False,

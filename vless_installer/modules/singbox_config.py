@@ -96,7 +96,16 @@ def _build_shadowtls_inbound(state_ib: dict) -> dict:
     """Строит ShadowTLS inbound из state.
 
     state_ib fields:
-      listen, listen_port, version, users, handshake, detour, cert_path, key_path
+      listen, listen_port, version, users, handshake, detour
+
+    ВАЖНО (v4.22.3): ShadowTLS v3 в sing-box НЕ поддерживает локальный TLS-сертификат
+    на inbound — протокол проксирует TLS-handshake целиком на реальный внешний сервер
+    (handshake.server), наблюдатель видит настоящий сертификат реального сайта.
+    Поэтому поле "tls" здесь НЕ генерируется НИ ПРИ КАКИХ УСЛОВИЯХ.
+
+    Поля cert_path/key_path в state_ib (если есть) игнорируются безусловно —
+    они могли остаться от старых конфигов v4.22.0-v4.22.2, когда ShadowTLS
+    ошибочно генерировал TLS-блок. Это backcompat-носитель, генератор их не читает.
     """
     handshake = state_ib.get("handshake", {})
     users = state_ib.get("users", [])
@@ -118,14 +127,9 @@ def _build_shadowtls_inbound(state_ib: dict) -> dict:
         "detour":       state_ib.get("detour", "trojan-in"),
     }
 
-    # TLS — только если есть сертификаты (LE для честного TLS-handshake)
-    cert_path = state_ib.get("cert_path", "")
-    key_path = state_ib.get("key_path", "")
-    if cert_path and key_path and Path(cert_path).exists() and Path(key_path).exists():
-        inbound["tls"] = {
-            "certificate": [cert_path],
-            "key":         [key_path],
-        }
+    # НЕ добавляем "tls" — ShadowTLS проксирует handshake на внешний сервер,
+    # локальный сертификат не нужен и не поддерживается схемой протокола.
+    # cert_path/key_path в state_ib игнорируются (см. docstring выше).
 
     return inbound
 
@@ -306,9 +310,10 @@ def singbox_enable_shadowtls(
     handshake_server: str = "",
     handshake_port: int = 0,
     listen_port: int = 0,
-    cert_path: str = "",
-    key_path: str = "",
-    cert_source: str = "",
+    # cert_path/key_path/cert_source НЕ принимаются — ShadowTLS v3 не поддерживает
+    # локальный TLS-сертификат на inbound (см. _build_shadowtls_inbound docstring).
+    # Параметры убраны в v4.22.3; вызовы, передающие их, получат TypeError
+    # (намеренно — скрытый ignore привёл бы к тихому накоплению мусора в state).
 ) -> bool:
     """Включает ShadowTLS v3 inbound."""
     from vless_installer.modules.singbox_state import singbox_state_update_inbound
@@ -326,12 +331,9 @@ def singbox_enable_shadowtls(
         new_ib.setdefault("handshake", {})["server"] = handshake_server
     if handshake_port:
         new_ib.setdefault("handshake", {})["server_port"] = handshake_port
-    if cert_path:
-        new_ib["cert_path"] = cert_path
-    if key_path:
-        new_ib["key_path"] = key_path
-    if cert_source:
-        new_ib["cert_source"] = cert_source
+    # cert_path/key_path/cert_source НЕ записываем в state для shadowtls —
+    # протокол их не использует (см. _build_shadowtls_inbound). Старые поля,
+    # оставшиеся от v4.22.0-v4.22.2, НЕ чистим принудительно (backcompat).
 
     # Если ещё нет пароля — генерируем
     if not new_ib.get("password"):

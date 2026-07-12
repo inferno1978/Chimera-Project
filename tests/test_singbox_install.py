@@ -298,7 +298,7 @@ class TestInstallBinaryIdempotent(unittest.TestCase):
             stack.enter_context(patch("vless_installer.modules.singbox_install.fetch_package",
                                       return_value=False))
             stack.enter_context(patch("vless_installer.modules.singbox_install._get_latest_release_info",
-                                      return_value=("1.13.14", "sing-box-1.13.14-linux-amd64.tar.gz")))
+                                      return_value=("v1.13.14", "sing-box-1.13.14-linux-amd64.tar.gz")))
             stack.enter_context(patch("vless_installer.modules.singbox_install._detect_arch",
                                       return_value="amd64"))
             result = singbox_install_binary(force=True)
@@ -366,7 +366,7 @@ class TestInstallBinaryErrors(unittest.TestCase):
         with ExitStack() as stack:
             _enter_patches(stack, self._patches_no_binary())
             stack.enter_context(patch("vless_installer.modules.singbox_install._get_latest_release_info",
-                                      return_value=("1.13.14", "sing-box-1.13.14-linux-amd64.tar.gz")))
+                                      return_value=("v1.13.14", "sing-box-1.13.14-linux-amd64.tar.gz")))
             stack.enter_context(patch("vless_installer.modules.singbox_install._detect_arch",
                                       return_value="amd64"))
             stack.enter_context(patch("vless_installer.modules.singbox_install.fetch_package",
@@ -382,7 +382,7 @@ class TestInstallBinaryErrors(unittest.TestCase):
         with ExitStack() as stack:
             _enter_patches(stack, self._patches_no_binary())
             stack.enter_context(patch("vless_installer.modules.singbox_install._get_latest_release_info",
-                                      return_value=("1.13.14", "sing-box-1.13.14-linux-amd64.tar.gz")))
+                                      return_value=("v1.13.14", "sing-box-1.13.14-linux-amd64.tar.gz")))
             stack.enter_context(patch("vless_installer.modules.singbox_install._detect_arch",
                                       return_value="amd64"))
             stack.enter_context(patch("vless_installer.modules.singbox_install.fetch_package",
@@ -413,7 +413,7 @@ class TestInstallBinaryErrors(unittest.TestCase):
                 patch("vless_installer.modules.singbox_install.singbox_state_is_installed", return_value=False),
                 patch("vless_installer.modules.singbox_install._install_systemd_unit", return_value=True),
                 patch("vless_installer.modules.singbox_install._get_latest_release_info",
-                      return_value=("1.13.14", "sing-box-1.13.14-linux-amd64.tar.gz")),
+                      return_value=("v1.13.14", "sing-box-1.13.14-linux-amd64.tar.gz")),
                 patch("vless_installer.modules.singbox_install._detect_arch", return_value="amd64"),
                 patch("vless_installer.modules.singbox_install.fetch_package", return_value=True),
                 patch.object(Path, "mkdir", _safe_mkdir),

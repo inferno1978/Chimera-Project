@@ -190,24 +190,21 @@ def _shadowtls_menu() -> None:
         handshake = ib.get("handshake", {})
         hs_server = handshake.get("server", DEFAULT_SHADOWTLS_HANDSHAKE_HOST)
         hs_port = handshake.get("server_port", DEFAULT_SHADOWTLS_HANDSHAKE_PORT)
-        cert_path = ib.get("cert_path", "")
-        cert_src = ib.get("cert_source", "(не задан)")
         n_users = len(ib.get("users", []))
 
         _box_top("🎭  SHADOWTLS v3 + TROJAN")
         _box_row(f"  Статус:    {col}{'включён' if enabled else 'выключен'}{NC}")
         _box_row(f"  Listen:    {CYAN}{listen}:{port}{NC}  {DIM}(TCP, loopback){NC}")
         _box_row(f"  Handshake: {CYAN}{hs_server}:{hs_port}{NC}  {DIM}(маскировочный домен){NC}")
-        _box_row(f"  Cert:      {DIM}{cert_src}{NC}")
-        if cert_path:
-            _box_row(f"             {DIM}{cert_path}{NC}")
         _box_row(f"  Users:     {CYAN}{n_users}{NC}")
         _box_sep()
         _box_desc(
             "ShadowTLS v3 — зеркальный TLS-handshake: клиент устанавливает "
             "настоящий TLS к маскировочному домену, после handshake тихо "
             "переключается на внутренний Trojan. Активный зонд цензора "
-            "получает честный TLS-ответ от маскировочного сайта."
+            "получает честный TLS-ответ от маскировочного сайта. "
+            "Локальный сертификат НЕ используется — протокол проксирует "
+            "handshake на handshake.server."
         )
         _box_sep()
         _box_row()
@@ -215,11 +212,10 @@ def _shadowtls_menu() -> None:
             _box_item("1", f"🔴 Выключить ShadowTLS")
             _box_item("2", f"🔑 Сменить пароль            {DIM}перегенерировать password{NC}")
             _box_item("3", f"🌐 Сменить handshake-домен    {DIM}маскировочный сайт{NC}")
-            _box_item("4", f"📜 Сменить сертификат         {DIM}LE / self-signed{NC}")
-            _box_item("5", f"👥 Показать пользователей     {DIM}список Trojan-users{NC}")
+            _box_item("4", f"👥 Показать пользователей     {DIM}список Trojan-users{NC}")
         else:
             _box_item("1", f"🟢 Включить ShadowTLS         {DIM}с настройкой по умолчанию{NC}")
-            _box_item("2", f"⚙️  Включить с custom-параметрами {DIM}домен/порт/cert{NC}")
+            _box_item("2", f"⚙️  Включить с custom-параметрами {DIM}домен/порт{NC}")
         _box_row()
         _box_item_exit("0", "← Назад")
         _box_bottom()
@@ -246,9 +242,6 @@ def _shadowtls_menu() -> None:
                 _change_handshake_domain()
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
             elif ch == "4":
-                _change_cert_shadowtls()
-                input(f"\n{BLUE}Нажмите Enter...{NC}")
-            elif ch == "5":
                 _list_users_for_protocol("shadowtls")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
         else:
@@ -261,16 +254,14 @@ def _shadowtls_menu() -> None:
 
 
 def _enable_shadowtls_default() -> None:
-    """Включение ShadowTLS с дефолтными параметрами."""
+    """Включение ShadowTLS с дефолтными параметрами.
+
+    v4.22.3: cert_path/key_path больше не передаются — ShadowTLS v3 не
+    поддерживает локальный TLS-сертификат на inbound (см. _build_shadowtls_inbound).
+    """
     if not _ensure_binary_installed():
         return
-    # Self-signed cert для ShadowTLS (можно потом сменить на LE через меню)
-    cert_path, key_path = _ensure_self_signed_cert("shadowtls")
-    ok = singbox_enable_shadowtls(
-        cert_path=str(cert_path),
-        key_path=str(key_path),
-        cert_source="self-signed",
-    )
+    ok = singbox_enable_shadowtls()
     if not ok:
         return
     # Синхронизируем users
@@ -288,7 +279,11 @@ def _enable_shadowtls_default() -> None:
 
 
 def _enable_shadowtls_custom() -> None:
-    """Включение ShadowTLS с пользовательскими параметрами."""
+    """Включение ShadowTLS с пользовательскими параметрами.
+
+    v4.22.3: cert_path/key_path убраны — ShadowTLS v3 не поддерживает локальный
+    TLS-сертификат. Custom-режим спрашивает только handshake-домен/порт и listen-порт.
+    """
     if not _ensure_binary_installed():
         return
     try:
@@ -303,23 +298,6 @@ def _enable_shadowtls_custom() -> None:
             f"{CYAN}Listen порт {DIM}(Enter={DEFAULT_PORT_SHADOWTLS}):{NC} "
         ).strip()
         port = int(port_str) if port_str else DEFAULT_PORT_SHADOWTLS
-
-        # Сертификат: LE или self-signed
-        print()
-        info("Сертификат для ShadowTLS:")
-        info("  1. Let's Encrypt (нужен PARAM_DOMAIN + A-запись)")
-        info("  2. Self-signed (быстро, не требует домена)")
-        cert_choice = input(f"{CYAN}Выбор (1/2, Enter=2):{NC} ").strip() or "2"
-
-        if cert_choice == "1":
-            cert_path, key_path, cert_src = _pick_letsencrypt_cert()
-            if not cert_path:
-                warn("LE-сертификат не найден — откатываемся на self-signed")
-                cert_path, key_path = _ensure_self_signed_cert("shadowtls")
-                cert_src = "self-signed"
-        else:
-            cert_path, key_path = _ensure_self_signed_cert("shadowtls")
-            cert_src = "self-signed"
     except KeyboardInterrupt:
         info("Отменено")
         return
@@ -328,9 +306,6 @@ def _enable_shadowtls_custom() -> None:
         handshake_server=hs_server,
         handshake_port=hs_port,
         listen_port=port,
-        cert_path=str(cert_path),
-        key_path=str(key_path),
-        cert_source=cert_src,
     )
     if not ok:
         return
@@ -387,33 +362,11 @@ def _change_handshake_domain() -> None:
     success(f"Handshake: {new_host}:{new_port}")
 
 
-def _change_cert_shadowtls() -> None:
-    print()
-    info("Сертификат для ShadowTLS:")
-    info("  1. Let's Encrypt (если уже есть для PARAM_DOMAIN)")
-    info("  2. Self-signed")
-    try:
-        choice = input(f"{CYAN}Выбор (1/2):{NC} ").strip()
-    except KeyboardInterrupt:
-        return
-    if choice == "1":
-        cert_path, key_path, cert_src = _pick_letsencrypt_cert()
-        if not cert_path:
-            warn("LE-сертификат не найден")
-            return
-    else:
-        cert_path, key_path = _ensure_self_signed_cert("shadowtls")
-        cert_src = "self-signed"
-    state = singbox_state_load()
-    ib = state.get("inbounds", {}).get("shadowtls", {})
-    ib["cert_path"] = str(cert_path)
-    ib["key_path"] = str(key_path)
-    ib["cert_source"] = cert_src
-    singbox_state_update_inbound("shadowtls", **ib)
-    singbox_generate_config()
-    if _service_active():
-        singbox_restart()
-    success(f"Сертификат ShadowTLS: {cert_src}")
+# _change_cert_shadowtls() удалён в v4.22.3 — ShadowTLS v3 не поддерживает
+# локальный TLS-сертификат на inbound (протокол проксирует handshake на
+# handshake.server, наблюдатель видит настоящий сертификат реального сайта).
+# Поля cert_path/key_path/cert_source в state игнорируются генератором конфига.
+# См. _build_shadowtls_inbound() docstring.
 
 
 # ============================================================================
