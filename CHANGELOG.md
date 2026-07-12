@@ -2,6 +2,163 @@
 
 ---
 
+## v4.23.2 — FIX: VLESS-WS-CDN — 4 продакшн-фикса allowlist-модуля — 12 июля 2026
+
+### 🐛 Фикс 1: iptables -A → -I INPUT 1 — правило ПЕРВОЕ в цепочке
+
+**Проблема:** `apply_cdn_allowlist()` использовал `iptables -A INPUT` (append
+в конец цепочки). Чужие ACCEPT-правила (от других модулей или системы) могли
+оказаться ВЫШЕ DROP-правила allowlist, перехватывая трафик раньше и делая
+allowlist бесполезным.
+
+**Фикс:** `iptables -I INPUT 1` — insert в позицию 1 (начало цепочки). По
+образцу `fptn.py:494` (`iptables -t filter -I INPUT 1 ...`). При re-apply
+(switch провайдера) — правило всегда остаётся первым, не сползает вниз.
+
+### 🐛 Фикс 2: Persistence — allowlist переживает reboot
+
+**Проблема:** `apply_cdn_allowlist()` применял правила в живую память
+(iptables + ipset), но НЕ сохранял их на диск. После reboot:
+- ipset уничтожается (ядро не персистит ipset)
+- iptables-restore может упасть на ссылке на несуществующий ipset
+- DROP-правило ссылается в никуда
+
+**Фикс:** После успешного apply — три шага persistence (по образцу
+`ipset_persist.py` + `proto_common.py::proto_ipt_persist`):
+1. `ipset save <name>` → `/etc/ipset-singbox-cdn.conf`
+2. Systemd unit `singbox-cdn-ipset-restore.service` — restore при boot
+   (`Before=sing-box.service`, `ConditionPathExists=/etc/ipset-singbox-cdn.conf`)
+3. `proto_ipt_persist()` — netfilter-persistent save (или iptables-save >
+   /etc/iptables/rules.v4 fallback)
+
+`remove_cdn_allowlist()` — тоже обновляет persisted state (удаляет записи
+порта из `/etc/ipset-singbox-cdn.conf` + iptables persist), иначе после
+disable+reboot старое правило "воскреснет".
+
+### 🐛 Фикс 3: Bunny.net — правильный источник IP (CDN edge, не Magic Containers)
+
+**Проблема:** `CDN_PROVIDERS["bunny"]["ip_source"]` указывал на
+`https://docs.bunny.net/magic-containers/ip-addresses` — это IP-адреса
+Magic Containers (compute-платформа Bunny), НЕ CDN edge-серверов.
+Allowlist пропускал реальный CDN-трафик и блокировал легитимный.
+
+**Фикс:** Заменён на `https://bunnycdn.com/api/system/edgeserverlist/plain` —
+CDN edge server list, plain text, один IPv4 на строку БЕЗ /32 суффикса.
+`fetch_cdn_nets()` теперь добавляет `/32` для plain IP (Cloudflare уже
+возвращает CIDR с суффиксом, Bunny — без).
+
+`ip_format` изменён с `"html_scrape"` на `"plaintext"` — список
+машиночитаемый, HTML-парсинг больше не нужен. Ветка `html_scrape` удалена
+из `fetch_cdn_nets()`.
+
+IPv6: `https://bunnycdn.com/api/system/edgeserverlist/IPv6` — JSON array,
+но `listen = "0.0.0.0"` (IPv4 only) → IPv6 трафик не дойдёт до этого
+инбаунда. IPv6 явно игнорируется с комментарием.
+
+Перепроверены СВЕЖИМ web search (2026-07-12):
+- Cloudflare `https://www.cloudflare.com/ips-v4` — всё ещё актуален ✓
+- Gcore `https://api.gcore.com/cdn/public-ip-list` — всё ещё актуален ✓
+- Bunny `https://bunnycdn.com/api/system/edgeserverlist/plain` — проверен,
+  возвращает plain text IPv4 ✓
+
+### 🐛 Фикс 4: _switch_cdn_provider() — авто-смена listen_port
+
+**Проблема:** При переключении CDN-провайдера (например gcore→cloudflare)
+`listen_port` сохранялся как есть. Если текущий порт = дефолтный порт
+СТАРОГО провайдера (8443 для Gcore) и он невалиден для НОВОГО (Cloudflare
+требует HTTP-порт из списка 80/8080/8880/2052/2082/2086/2095, 8443 туда
+не входит) — переключение молча ломало соединение.
+
+**Фикс:** При switch:
+- Если текущий `listen_port` = `CDN_PROVIDERS[current]["default_port"]`
+  (т.е. пользователь не менял порт вручную) → автоматически переключить
+  на `CDN_PROVIDERS[new]["default_port"]` + `info()` о смене порта.
+- Если `listen_port` ≠ дефолту старого провайдера (custom) → порт НЕ
+  трогать, но `warn()` о возможной невалидности.
+
+Логика выбора (обоснование в комментарии): сравнение текущего значения с
+`CDN_PROVIDERS[current]["default_port"]` на момент switch. Менее надёжно
+чем отдельный флаг `listen_port_is_custom: bool` при совпадении дефолтов,
+но Gcore и Bunny имеют одинаковый дефолт (8443) — switch между ними порт
+не меняет, что корректно. Cloudflare (8080) ≠ Gcore/Bunny (8443) — switch
+всегда меняет порт, что тоже корректно.
+
+Также исправлена логика в `singbox_enable_vless_ws_cdn()`: при enable,
+если `listen_port` не передан явно и текущее значение равно
+`DEFAULT_PORT_VLESS_WS_CDN` (общий fallback из state init) → заменить на
+per-provider default. Раньше общий fallback (8080) не заменялся на
+per-provider (8443 для Gcore/Bunny).
+
+### 📦 Изменения по файлам
+
+**singbox_cdn_nets.py:**
+- `apply_cdn_allowlist()`: `-A INPUT` → `-I INPUT 1` (фикс 1)
+- Добавлены `_ipset_save_port()`, `_ipset_remove_from_persist()`,
+  `_iptables_persist()`, `_ipset_restore_unit_install()` (фикс 2)
+- `apply_cdn_allowlist()`: вызывает persistence-функции после apply (фикс 2)
+- `remove_cdn_allowlist()`: вызывает persistence-функции после remove (фикс 2)
+- `fetch_cdn_nets()`: `plaintext` формат теперь обрабатывает plain IP без
+  /32 (добавляет /32) — для Bunny CDN edge server list (фикс 3)
+- `html_scrape` ветка удалена (фикс 3)
+
+**singbox_common.py:**
+- `CDN_PROVIDERS["bunny"]["ip_source"]`: `docs.bunny.net/magic-containers` →
+  `bunnycdn.com/api/system/edgeserverlist/plain` (фикс 3)
+- `CDN_PROVIDERS["bunny"]["ip_format"]`: `html_scrape` → `plaintext` (фикс 3)
+
+**singbox_config.py:**
+- `singbox_enable_vless_ws_cdn()`: per-provider default port — если текущий
+  listen_port = DEFAULT_PORT_VLESS_WS_CDN, заменить на per-provider (фикс 4)
+
+**singbox_menu.py:**
+- `_switch_cdn_provider()`: авто-смена listen_port + warn для custom (фикс 4)
+- Allowlist переприменяется на новый порт при switch (если порт изменился)
+
+### 🧪 Тесты (16 новых + 4 обновлённых)
+
+`tests/test_singbox_vless_ws_cdn_fix2.py` (16 тестов, 3 skip):
+
+**Фикс 1 — iptables -I INPUT 1 (2 теста, 2 skip без iptables):**
+- `test_apply_uses_insert_not_append` — проверка -I INPUT 1, НЕ -A
+- `test_drop_rule_is_before_other_accept_rules` — реальный iptables:
+  добавляем ложное ACCEPT через -A, затем apply, проверяем что DROP
+  стоит ВЫШЕ (раньше) ACCEPT в `iptables -L INPUT --line-numbers`
+
+**Фикс 2 — Persistence (4 теста, 1 skip без ipset):**
+- `test_apply_calls_ipset_save` — apply вызывает _ipset_save_port
+- `test_remove_updates_persisted_state` — remove вызывает _ipset_remove_from_persist
+- `test_ipset_save_writes_to_file` — реальный ipset: save → файл существует и
+  содержит запись
+- `test_ipset_remove_from_persist_removes_entries` — remove удаляет записи
+  из персистентного файла
+
+**Фикс 3 — Bunny IP source (8 тестов):**
+- `test_bunny_ip_source_is_edge_server_list` — URL = edgeserverlist/plain
+- `test_bunny_ip_source_not_magic_containers` — старый URL отсутствует
+- `test_bunny_ip_format_is_plaintext` — формат = plaintext, не html_scrape
+- `test_fetch_bunny_returns_cidrs_with_32_suffix` — mock urllib → /32 CIDR
+- `test_fetch_bunny_hits_correct_url` — реальный URL вызывается
+- `test_no_html_scrape_format_anywhere` — html_scrape не используется
+- `test_cloudflare_source_still_correct` — перепроверка CF
+- `test_gcore_source_still_correct` — перепроверка Gcore
+
+**Фикс 4 — switch auto-port (5 тестов):**
+- `test_switch_gcore_to_cloudflare_changes_port` — 8443→8080
+- `test_switch_logic_changes_port_from_default_to_new_default` — симуляция
+- `test_switch_logic_keeps_custom_port_with_warn` — custom 9999 сохранён
+- `test_switch_cloudflare_to_gcore_changes_port` — 8080→8443
+- `test_switch_gcore_to_bunny_keeps_port` — 8443→8443 (дефолты совпадают)
+
+Обновлённые тесты в `test_singbox_vless_ws_cdn_fix.py` (4 теста):
+- `test_fetch_parses_html_ips` → `test_fetch_parses_plain_ips` (plaintext, не html)
+- `test_remove_*` — добавлены mock для persistence-функций
+- `valid_formats` — убран `html_scrape`
+- `test_gcore_ip_source_is_api` → `test_bunny_ip_source_is_api`
+
+Полный прогон: **333 теста, 0 регрессий**, 8 skip (iptables/ipset/sing-box binary).
+
+---
+
 ## v4.23.1 — FIX: VLESS-WS-CDN — HTTPS origin pull → HTTP + CDN IP allowlist — 12 июля 2026
 
 ### 🐛 Баг 1: Инструкции требовали HTTPS/TLS origin pull, а origin TLS не поднимает
