@@ -47,6 +47,12 @@ _SYSTEMD_UNIT = """\
 Description=sing-box (VLESS Ultimate Installer)
 After=network-online.target
 Wants=network-online.target
+# v4.23.10: ограничение рестартов — без этого при crash-loop (EADDRINUSE,
+# невалидный конфиг и т.п.) systemd крутит 100+ рестартов с RestartSec=5.
+# 5 рестартов за 60 сек → сервис переходит в failed state, скрипт видит
+# это через systemctl is-active и не рапортует ложный success.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -54,8 +60,14 @@ ExecStart={binary} run -c {config}
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=1048576
-StandardOutput=append:{log}
-StandardError=append:{log}
+# v4.23.10: stderr/stdout → journald. Раньше было append:/var/log/singbox.log,
+# но тогда journalctl -u sing-box НЕ показывал ошибки sing-box (только
+# сообщения systemd). Теперь journalctl -u sing-box -f работает как ожидается.
+# Лог-файл /var/log/singbox.log больше не пишется — для persistent storage
+# используйте /var/log/journal/ (journald persistent storage).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sing-box
 # Hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -69,22 +81,65 @@ WantedBy=multi-user.target
 """
 
 
-def _install_systemd_unit() -> bool:
-    """Создаёт /etc/systemd/system/sing-box.service."""
-    unit_text = _SYSTEMD_UNIT.format(
+def _render_systemd_unit() -> str:
+    """Рендерит текст systemd-юнита с подставленными путями."""
+    return _SYSTEMD_UNIT.format(
         binary=SINGBOX_BINARY,
         config=SINGBOX_CONFIG_FILE,
-        log=SINGBOX_LOG_FILE,
     )
+
+
+def _install_systemd_unit() -> bool:
+    """Создаёт /etc/systemd/system/sing-box.service (idempotent).
+
+    v4.23.10: если существующий юнит совпадает с новым — не делаем write
+    и daemon-reload (ускоряет повторные запуски, не дёргает systemd
+    без необходимости).
+    """
+    unit_text = _render_systemd_unit()
     unit_path = Path(f"/etc/systemd/system/{SINGBOX_SERVICE}.service")
     try:
-        unit_path.write_text(unit_text)
-        _run(["systemctl", "daemon-reload"], quiet=True)
+        existing = unit_path.read_text() if unit_path.exists() else ""
+        if existing != unit_text:
+            unit_path.write_text(unit_text)
+            _run(["systemctl", "daemon-reload"], quiet=True)
         _run(["systemctl", "enable", SINGBOX_SERVICE], quiet=True)
         return True
     except Exception as e:
         error(f"Не удалось создать {SINGBOX_SERVICE}.service: {e}")
         return False
+
+
+def _ensure_systemd_unit_current() -> None:
+    """Авто-апгрейд systemd-юнита при изменении template (v4.23.10).
+
+    Вызывается из singbox_start() перед restart. Если существующий юнит
+    отличается от актуального template — переписывает + daemon-reload.
+    Если юнит совпадает — ничего не делает (быстро, без daemon-reload).
+
+    Решает проблему: пользователи, у которых sing-box уже установлен со
+    старым юнитом (StandardError=append, без StartLimit), получают
+    обновление автоматически при следующем включении протокола — без
+    необходимости переустанавливать бинарник.
+    """
+    unit_path = Path(f"/etc/systemd/system/{SINGBOX_SERVICE}.service")
+    if not unit_path.exists():
+        return  # юнита нет — singbox_start() и так упадёт с понятной ошибкой
+    try:
+        existing = unit_path.read_text()
+    except Exception:
+        return
+    expected = _render_systemd_unit()
+    if existing == expected:
+        return
+    # Юнит изменился — переписываем + daemon-reload.
+    try:
+        unit_path.write_text(expected)
+        _run(["systemctl", "daemon-reload"], quiet=True)
+        info(f"systemd-юнит {SINGBOX_SERVICE}.service обновлён до v4.23.10 "
+             f"(journal logging + StartLimit)")
+    except Exception as e:
+        warn(f"Не удалось обновить systemd-юнит: {e}")
 
 
 def _uninstall_systemd_unit() -> bool:
@@ -283,6 +338,11 @@ def singbox_start() -> bool:
     if not SINGBOX_CONFIG_FILE.exists():
         error(f"Конфиг не найден: {SINGBOX_CONFIG_FILE}")
         return False
+
+    # v4.23.10: авто-апгрейд systemd-юнита при изменении template
+    # (StandardOutput/Error → journal, StartLimitIntervalSec/Burst и т.п.).
+    # Идемпотентно — если юнит уже актуален, ничего не делает.
+    _ensure_systemd_unit_current()
 
     # Тест конфига перед стартом
     r = _run([str(SINGBOX_BINARY), "check", "-c", str(SINGBOX_CONFIG_FILE)],

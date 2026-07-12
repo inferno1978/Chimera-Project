@@ -129,19 +129,37 @@ class TestSystemdUnitText(unittest.TestCase):
         self.assertIn("After=network-online.target", _SYSTEMD_UNIT)
 
     def test_unit_format_substitutes_placeholders(self):
-        """format() подставляет binary, config, log."""
+        """format() подставляет binary, config.
+
+        v4.23.10: placeholder {log} убран — юнит перешёл на StandardOutput/Error=journal,
+        лог-файл /var/log/singbox.log больше не используется.
+        """
         from vless_installer.modules.singbox_install import _SYSTEMD_UNIT
         formatted = _SYSTEMD_UNIT.format(
             binary="/usr/local/bin/sing-box",
             config="/etc/sing-box/config.json",
-            log="/var/log/singbox.log",
         )
         self.assertIn("/usr/local/bin/sing-box run -c /etc/sing-box/config.json", formatted)
-        self.assertIn("/var/log/singbox.log", formatted)
         # Не осталось format-placeholders
         self.assertNotIn("{binary}", formatted)
         self.assertNotIn("{config}", formatted)
         self.assertNotIn("{log}", formatted)
+
+    def test_unit_uses_journal_logging(self):
+        """v4.23.10: StandardOutput/Error=journal — логи в journald, не в файл."""
+        from vless_installer.modules.singbox_install import _SYSTEMD_UNIT
+        self.assertIn("StandardOutput=journal", _SYSTEMD_UNIT)
+        self.assertIn("StandardError=journal", _SYSTEMD_UNIT)
+        self.assertIn("SyslogIdentifier=sing-box", _SYSTEMD_UNIT)
+        # Старый file-append больше не должен использоваться
+        self.assertNotIn("StandardOutput=append:", _SYSTEMD_UNIT)
+        self.assertNotIn("StandardError=append:", _SYSTEMD_UNIT)
+
+    def test_unit_has_start_limit(self):
+        """v4.23.10: StartLimitIntervalSec/Burst — защита от crash-loop из 100+ рестартов."""
+        from vless_installer.modules.singbox_install import _SYSTEMD_UNIT
+        self.assertIn("StartLimitIntervalSec=60", _SYSTEMD_UNIT)
+        self.assertIn("StartLimitBurst=5", _SYSTEMD_UNIT)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
