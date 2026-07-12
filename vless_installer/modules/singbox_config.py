@@ -320,7 +320,12 @@ def singbox_generate_config() -> bool:
         "log": {
             "level":     "info",
             "timestamp": True,
-            "output":    str(SINGBOX_CONFIG_FILE.parent / "singbox.log"),
+            # v4.23.17: убран output: file. Раньше логи писались в
+            # /etc/sing-box/singbox.log, что перекрывало StandardOutput=journal
+            # из systemd-юнита (v4.23.10). Из-за этого journalctl -u sing-box
+            # показывал только сообщения systemd, а ошибки sing-box (hmac
+            # mismatch, auth failed и т.п.) уходили в файл и были невидимы.
+            # Теперь логи идут в stdout/stderr → journald → journalctl -u sing-box.
         },
         "inbounds": inbounds,
         "outbounds": [
