@@ -127,7 +127,30 @@ def _stats_api_is_configured() -> bool:
 
 
 def _check_traffic_limits_once() -> None:
-    """Проверяет лимиты трафика. При превышении удаляет клиента из конфига."""
+    """Проверяет лимиты трафика. При превышении блокирует клиента.
+
+    ДЕЛЕГИРУЕТ в vless_installer.modules.user_lifecycle.check_traffic_limits()
+    для централизованной multi-protocol блокировки.
+    Сохраняет обратную совместимость с cron-скриптом xray-traffic-limits.sh.
+
+    ЗАМЕЧАНИЕ: ранее эта функция УДАЛЯЛА пользователя из users.json. Теперь
+    она БЛОКИРУЕТ его (block_user) — менее деструктивно, позволяет разблокировать.
+    """
+    try:
+        from vless_installer.modules.user_lifecycle import check_traffic_limits
+        check_traffic_limits()
+    except Exception as e:
+        try:
+            core = _core_module()
+            core.log_to_file("WARN",
+                f"_check_traffic_limits_once: user_lifecycle failed ({e}), using legacy path")
+        except Exception:
+            pass
+        _check_traffic_limits_once_legacy()
+
+
+def _check_traffic_limits_once_legacy() -> None:
+    """Legacy-реализация — fallback если user_lifecycle недоступен."""
     core = _core_module()
     log_to_file              = core.log_to_file
     _users_load              = core._users_load
