@@ -274,6 +274,26 @@ def singbox_uninstall_binary() -> bool:
 # ============================================================================
 #  Старт/стоп/рестарт сервиса
 # ============================================================================
+def _get_current_singbox_pid() -> Optional[int]:
+    """Возвращает PID текущего sing-box процесса, если он запущен.
+
+    Используется в _preflight_port_check чтобы исключить самопересечение:
+    если sing-box уже слушает порт X, и мы хотим его рестартовать (не
+    запускать с нуля) — порт X не должен считаться 'занятым чужим процессом'.
+    """
+    try:
+        # Читаем PID systemd-юнита напрямую — быстрее и надёжнее pgrep
+        r = _run(["systemctl", "show", "-p", "MainPID", "--value", SINGBOX_SERVICE],
+                 capture=True, quiet=True)
+        if r.returncode == 0 and r.stdout.strip().isdigit():
+            pid = int(r.stdout.strip())
+            if pid > 0:
+                return pid
+    except Exception:
+        pass
+    return None
+
+
 def _preflight_port_check() -> Optional[str]:
     """Pre-flight проверка listen-портов из config.json.
 
@@ -286,6 +306,11 @@ def _preflight_port_check() -> Optional[str]:
       • пользователь сразу видел занятый pid и inbound
       • не плодились 100+ рестартов в journalctl
       • не было ложного success() в вызывающем коде
+
+    v4.23.22: если порт занят самим sing-box (текущий PID из systemd) —
+    НЕ считаем конфликтом. Это нормально при restart: sing-box отпустит
+    порт и сразу же займёт его снова. Раньше 'Сменить пароль' падало с
+    'порт занят pid=90481 (sing-box)' — самопересечение.
     """
     if not SINGBOX_CONFIG_FILE.exists():
         return None  # конфига нет — singbox_start() и так ругнётся
@@ -298,6 +323,9 @@ def _preflight_port_check() -> Optional[str]:
     inbounds = cfg.get("inbounds", []) or []
     if not inbounds:
         return None
+
+    # PID текущего sing-box процесса — его порты не считаем конфликтными
+    own_pid = _get_current_singbox_pid()
 
     conflicts = []
     for ib in inbounds:
@@ -314,7 +342,15 @@ def _preflight_port_check() -> Optional[str]:
         if _is_port_free(port, listen, proto=proto):
             continue
 
+        # Порт занят. Кто занял?
         who = _who_owns_port(port, listen, proto=proto)
+
+        # v4.23.22: если занял сам sing-box (текущий PID) — НЕ конфликт.
+        # Это restart сценарий: sing-box отпустит порт при stop и займёт
+        # снова при start. systemctl restart делает это атомарно.
+        if own_pid and who and f"pid={own_pid}" in who:
+            continue
+
         tag = ib.get("tag", ib_type or "?")
         who_str = f" — занят {who}" if who else " — занят"
         conflicts.append(
