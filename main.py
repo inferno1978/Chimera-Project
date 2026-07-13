@@ -198,6 +198,43 @@ if "--ttl-check" in sys.argv:
         print("[TTL] Истёкших пользователей нет")
     sys.exit(0)
 
+# --- Проверка лимитов трафика (из cron каждые 15 мин) ---
+# Единая точка входа через user_lifecycle.check_traffic_limits() —
+# централизованная multi-protocol блокировка при превышении лимита.
+if "--traffic-check" in sys.argv:
+    if os.geteuid() != 0:
+        print("ERROR: требуются права root", file=sys.stderr)
+        sys.exit(1)
+    try:
+        from vless_installer.modules.user_lifecycle import check_traffic_limits
+        blocked = check_traffic_limits()
+        if blocked:
+            print(f"[TRAFFIC] Заблокировано {blocked} пользователей превысивших лимит")
+        else:
+            print("[TRAFFIC] Превышений лимита нет")
+    except Exception as e:
+        print(f"[TRAFFIC] Ошибка: {e}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+# --- Единый lifecycle cleanup (TTL + traffic + AWG peers) ---
+# Заменяет несколько разрозненных cron-задач одной. Можно вызывать из cron
+# каждые 5 минут вместо отдельных --ttl-check / --traffic-check.
+if "--lifecycle-cleanup" in sys.argv:
+    if os.geteuid() != 0:
+        print("ERROR: требуются права root", file=sys.stderr)
+        sys.exit(1)
+    try:
+        from vless_installer.modules.user_lifecycle import run_cleanup
+        result = run_cleanup()
+        print(f"[LIFECYCLE] TTL blocked: {result['ttl_blocked']}, "
+              f"traffic blocked: {result['traffic_blocked']}, "
+              f"AWG peers removed: {result['awg_peers_removed']}")
+    except Exception as e:
+        print(f"[LIFECYCLE] Ошибка: {e}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
 # --- Обновление ingress GeoIP блокировки (из cron еженедельно) ---
 if "--ingress-geoip-update" in sys.argv:
     if os.geteuid() != 0:
