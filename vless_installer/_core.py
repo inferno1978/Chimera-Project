@@ -144,6 +144,7 @@ from vless_installer.modules.server_fragment     import (
 from vless_installer.modules.port_hopping        import do_port_hopping_menu, ph_status
 from vless_installer.modules.tg_bot              import do_tg_bot_menu, do_manage_telegram, _tg_notify_event, _tg_load, tg_send
 from vless_installer.modules.tg_client_bot       import do_tg_client_bot_menu
+from vless_installer.modules.dns_redirect        import do_manage_dns_redirect, health_check_dns_redirect
 # ── Hysteria2 transport (аддитивно, v4.12.9+) ────────────────────────────────
 from vless_installer.modules.hysteria2_menu      import do_hysteria2_menu
 # ── Новые модули (бэкап, cold boot, health monitor) ──────────────────────────
@@ -6606,6 +6607,7 @@ def _menu_network() -> None:
         _box_item("0", "🌐 Геопроверка выходного IP")
         _box_sep()
         _box_item("D", f"🌐 Кастомные DNS правила  {DIM}(hosts / routing override){NC}")
+        _box_item("DR", f"🔒 Принудительный DNS REDIRECT  {DIM}(NAT на dnscrypt-proxy, anti-leak){NC}")
         _box_item("M", f"📏 MTU/MSS автотюнинг  {DIM}(оптимизация для exit-нод){NC}")
         _box_item("X", f"⚡ XTLS-flow режим  {DIM}(Vision / Splice / none — только REALITY){NC}")
         _box_item("P", f"🧪 Постквантовый VLESS  {DIM}(экспериментально, отдельный порт){NC}")
@@ -6684,6 +6686,8 @@ def _menu_network() -> None:
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch.lower() == "r":
             do_dnscrypt_selector_menu()
+        elif ch.lower() == "dr":
+            do_manage_dns_redirect()
         elif ch.lower() == "d":
             do_manage_dns_rules()
         elif ch.lower() == "m":
@@ -7130,6 +7134,38 @@ def do_dns_leak_test() -> None:
 # =============================================================================
 #  ПОДМЕНЮ: 4 — ДИАГНОСТИКА И МОНИТОРИНГ
 # =============================================================================
+def _do_dns_redirect_health_screen() -> None:
+    """Экран health-check для принудительного DNS REDIRECT (диагностика)."""
+    print()
+    _box_top("🔒  DNS Redirect Health Check")
+    hc = health_check_dns_redirect()
+    _box_row(f"  Включён в state:     {GREEN if hc['enabled'] else DIM}"
+             f"{'да' if hc['enabled'] else 'нет'}{NC}")
+    _box_row(f"  dnscrypt-proxy:      {GREEN if hc['dnscrypt_active'] else RED}"
+             f"{'активен' if hc['dnscrypt_active'] else 'НЕ активен'}{NC}")
+    _box_row(f"  Порт {hc.get('port', 5300)}/udp:     "
+             f"{GREEN if hc['port_listening_udp'] else RED}"
+             f"{'слушается' if hc['port_listening_udp'] else 'НЕ слушается'}{NC}")
+    _box_row(f"  Порт {hc.get('port', 5300)}/tcp:     "
+             f"{GREEN if hc['port_listening_tcp'] else RED}"
+             f"{'слушается' if hc['port_listening_tcp'] else 'НЕ слушается'}{NC}")
+    _box_row(f"  Правила iptables:    {GREEN if hc['rules_applied'] else DIM}"
+             f"{'применены' if hc['rules_applied'] else 'отсутствуют'}{NC}")
+    _box_row(f"  IPv6 support:        {GREEN if hc['ipv6_supported'] else YELLOW}"
+             f"{'да' if hc['ipv6_supported'] else 'нет (только IPv4)'}{NC}")
+    _box_sep()
+    if hc["issues"]:
+        _box_warn("  Обнаружены проблемы:")
+        for issue in hc["issues"]:
+            _box_warn(f"    • {issue}")
+    else:
+        _box_row(f"  {GREEN}OK — проблем не обнаружено{NC}")
+    _box_sep()
+    _box_row(f"  {DIM}Рекомендация: {hc['recommendation']}{NC}")
+    _box_bottom()
+    input(f"{BLUE}Нажмите Enter...{NC}")
+
+
 def _menu_diagnostics() -> None:
     while True:
         os.system("clear")
@@ -7158,6 +7194,7 @@ def _menu_diagnostics() -> None:
         _box_item("L", "📋 Просмотр логов")
         _box_item("P", f"🔧 Патч Stats API  {DIM}(починить статистику трафика){NC}")
         _box_item("N", f"🔍 DNS Leak Test  {DIM}(проверить утечку DNS-запросов){NC}")
+        _box_item("DN", f"🔒 DNS Redirect health-check  {DIM}(проверка iptables NAT REDIRECT){NC}")
         _box_item("T", f"🔒 Проверка TLS-сертификата  {DIM}(цепочка, срок, SAN){NC}")
         _box_sep()
         _box_item("F1", f"🔀 Генератор конфига с фрагментацией  {DIM}(один пресет){NC}")
@@ -7235,6 +7272,8 @@ def _menu_diagnostics() -> None:
             do_patch_stats_api()
         elif ch.lower() == "n":
             do_dns_leak_test()
+        elif ch.lower() == "dn":
+            _do_dns_redirect_health_screen()
         elif ch.lower() == "t":
             do_check_tls_cert()
             input(f"{BLUE}Нажмите Enter...{NC}")
