@@ -77,7 +77,12 @@ def _limits_save(data: dict) -> None:
 
 
 def _query_user_traffic_bytes(email: str) -> int:
-    """Возвращает суммарный трафик пользователя (up+down) в байтах через Stats API."""
+    """Возвращает суммарный трафик пользователя (up+down) в байтах через Stats API.
+
+    ЗАМЕЧАНИЕ: возвращает RAW значение из xray Stats API, которое СБРАСЫВАЕТСЯ
+    В 0 при `systemctl restart xray`. Для получения накопленного значения,
+    переживающего рестарт, используйте _query_user_traffic_bytes_accumulated().
+    """
     core = _core_module()
     _run = core._run
     XRAY_BIN = core.XRAY_BIN
@@ -98,6 +103,36 @@ def _query_user_traffic_bytes(email: str) -> int:
         except Exception:
             pass
     return total
+
+
+def _query_user_traffic_bytes_accumulated(email: str) -> int:
+    """
+    Возвращает накопленный трафик пользователя с защитой от сброса счётчика
+    при рестарте xray.
+
+    Использует traffic_accounting.record_traffic_sample() с baseline-offset
+    механизмом: при обнаружении что raw < last_raw (счётчик сбросился) —
+    накопленное baseline сохраняется, новый raw начинает копиться с нуля.
+
+    Args:
+      email: email пользователя (как в /etc/xray/users.json)
+
+    Returns:
+      int — accumulated total bytes (переживает restart xray)
+    """
+    try:
+        from vless_installer.modules.traffic_accounting import record_traffic_sample
+        raw = _query_user_traffic_bytes(email)
+        return record_traffic_sample(email, "xray", raw)
+    except Exception as e:
+        # Fallback на raw если traffic_accounting недоступен
+        try:
+            core = _core_module()
+            core.log_to_file("WARN",
+                f"_query_user_traffic_bytes_accumulated: fallback to raw ({e})")
+        except Exception:
+            pass
+        return _query_user_traffic_bytes(email)
 
 
 def _stats_api_is_configured() -> bool:

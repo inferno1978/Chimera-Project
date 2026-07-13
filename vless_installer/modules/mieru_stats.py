@@ -890,6 +890,85 @@ def _reset_cache() -> None:
         print(f"\n  {RED}✗{NC}  Ошибка: {e}")
     _pause()
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ИНТЕГРАЦИЯ С traffic_accounting (baseline-offset для переживания рестарта)
+# ══════════════════════════════════════════════════════════════════════════════
+def mieru_collect_traffic() -> dict:
+    """
+    Собирает raw bytes из iptables (TCP+UDP порты mita) и feed'ит в
+    traffic_accounting.record_traffic_sample() с baseline-offset.
+
+    Защищает от сброса счётчика при `systemctl restart mita` или reboot —
+    накопленный трафик сохраняется в state.json.
+
+    Returns:
+      dict — {username: accumulated_bytes} для всех пользователей mieru.
+      username берётся из journalctl [metrics - user - NAME] если доступен,
+      иначе используется "_global_" (суммарный трафик mita).
+    """
+    try:
+        from vless_installer.modules.traffic_accounting import record_traffic_sample
+    except Exception:
+        return {}
+
+    try:
+        port_start, port_end = _get_mita_ports()
+    except Exception:
+        return {}
+
+    # Суммарный raw по TCP+UDP
+    raw_total = 0
+    for proto in ("tcp", "udp"):
+        try:
+            stats = _iptables_stats(port_start, port_end, proto.upper())
+            raw_total += stats.get("bytes", 0)
+        except Exception:
+            pass
+
+    # Пытаемся разбить per-user из journalctl
+    per_user = {}
+    try:
+        journal = _parse_journal(window_minutes=60)
+        users = journal.get("users", {})
+        for username, ustats in users.items():
+            user_bytes = ustats.get("rx", 0) + ustats.get("tx", 0)
+            per_user[username] = user_bytes
+    except Exception:
+        pass
+
+    result = {}
+    if per_user:
+        # Per-user из journal — feed каждого
+        for username, raw in per_user.items():
+            accumulated = record_traffic_sample(username, "mieru", raw)
+            result[username] = accumulated
+    else:
+        # Fallback на global счётчик
+        accumulated = record_traffic_sample("_global_", "mieru", raw_total)
+        result["_global_"] = accumulated
+
+    return result
+
+
+def mieru_get_traffic_accumulated(username: str) -> int:
+    """
+    Возвращает накопленный трафик mieru для пользователя.
+    Не делает новый снимок — читает из state.
+
+    Args:
+      username: имя пользователя mieru (или "_global_")
+
+    Returns:
+      int — accumulated bytes (или 0)
+    """
+    try:
+        from vless_installer.modules.traffic_accounting import get_accumulated_bytes
+        return get_accumulated_bytes(username, "mieru")
+    except Exception:
+        return 0
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ДИАГНОСТИКА (отдельная страница)
 # ══════════════════════════════════════════════════════════════════════════════
