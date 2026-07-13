@@ -43,11 +43,26 @@ from vless_installer.modules.singbox_state import (
 # ============================================================================
 #  Генерация паролей
 # ============================================================================
-def singbox_gen_password(length: int = 22) -> str:
-    """Генерирует пароль для ShadowTLS/AnyTLS/Trojan (base64-urlsafe, 22 символа)."""
-    # 16 байт -> 22 символа base64-urlsafe (без padding)
+def singbox_gen_password(length: int = 22, padded: bool = True) -> str:
+    """Генерирует пароль для ShadowTLS/AnyTLS/Trojan (base64-urlsafe).
+
+    v4.23.21: padded=True по умолчанию — генерирует валидный base64 с паддингом
+    '==' (24 символа для 16 байт). Раньше был padded=False (22 символа без
+    '=='), что ломало AnyTLS — sing-box AnyTLS inbound ожидает валидный base64
+    в поле users[].password, а клиент кодирует свой пароль по тем же правилам.
+    Без паддинга сервер декодирует в другие 16 байт, чем клиент →
+    'unknown user password: fallback disabled'.
+
+    ShadowTLS/Trojan/TUIC работали и без паддинга (используют пароль как
+    plaintext HMAC-key, не base64-decoded bytes). Но с паддингом тоже работают.
+
+    Параметр padded оставлен для обратной совместимости со старыми тестами.
+    """
     import base64
-    return base64.urlsafe_b64encode(secrets.token_bytes(16)).decode().rstrip("=")
+    raw = base64.urlsafe_b64encode(secrets.token_bytes(16)).decode()
+    if not padded:
+        return raw.rstrip("=")
+    return raw  # с паддингом '==' (валидный base64)
 
 
 def singbox_gen_tuic_password(length: int = 22) -> str:
