@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# === v4.25.0 ===
+# === main core ===
 """
-VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.25.0
+VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer
 Python 3.12+ port
 
 Поддержка: Ubuntu 20.04/22.04/24.04, Debian 11/12/13
 Режимы протокола: VLESS+TCP+REALITY | VLESS+xHTTP+TLS
 Балансировка (Режим B): Round Robin | Least Ping | Least Load | Random
 Новое в v3.99: AutoBan | CertBot Monitor | TTFB Test | Config Changelog | Telegram | Traffic Limits | Health Report | Migration | GeoIP Block | Audit
+
+Версия проекта: см. vless_installer.__version__ (динамически, не хардкод).
 """
 
 # =============================================================================
@@ -506,7 +508,30 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.25.0 ===")
+# ── Динамическая версия проекта ──────────────────────────────────────────────
+# Берётся из vless_installer.__version__ (defined в __init__.py).
+# Кэшируется после первого вызова в _CACHED_VERSION, чтобы не импортировать
+# повторно при каждом вызове _get_version() (баннер/лог/меню вызываются часто).
+# По той же схеме работает honeypot.py и main.py — при бампе версии в
+# __init__.py все три файла автоматически подхватывают новое значение.
+_CACHED_VERSION: str = ""
+
+def _get_version() -> str:
+    """Возвращает версию проекта из vless_installer.__version__.
+    При первом вызове — импортирует и кэширует. При ошибке — fallback "unknown".
+    """
+    global _CACHED_VERSION
+    if _CACHED_VERSION:
+        return _CACHED_VERSION
+    try:
+        from vless_installer import __version__ as _v
+        _CACHED_VERSION = _v
+    except Exception:
+        _CACHED_VERSION = "unknown"
+    return _CACHED_VERSION
+
+
+log_to_file("INFO", f"=== Запуск VLESS Ultimate Installer v{_get_version()} ===")
 log_to_file("INFO", f"Время начала: {datetime.now()}")
 
 # =============================================================================
@@ -533,7 +558,7 @@ def _make_banner(show_ram_warning: bool = True) -> str:
         "  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝",
     ]
     _info_lines = [
-        "VLESS REALITY + xHTTP TLS INSTALLER v4.25.0",
+        f"VLESS REALITY + xHTTP TLS INSTALLER v{_get_version()}",
         "IPv6 DualStack | 6 Templates | SHA256 Verify",
         "Balancer: RoundRobin | LeastPing | LeastLoad",
         "Dashboard | FP Rotate | GeoCheck | Multi-User",
@@ -7836,7 +7861,7 @@ def main_menu() -> None:
             _BOX_W_saved = _BOX_W
             _BOX_W = 64
             _box_top()
-            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.25.0{NC}  {DIM}│{NC}  {mode_str}")
+            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v{_get_version()}{NC}  {DIM}│{NC}  {mode_str}")
             _box_sep()
             _box_row()
             _box_row(f"  {CYAN}1{NC}  ⚙️  {TITLE}Установка и Система{NC}")
