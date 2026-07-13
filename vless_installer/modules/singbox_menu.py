@@ -2088,6 +2088,10 @@ def _gen_singbox_client_json(protocol: str, state_ib: dict,
     elif protocol == "anytls":
         password = _get_effective_password(state_ib)
         sni = state_ib.get("common_name") or public_ip
+        # v4.23.24: padding_scheme в outbound тоже — клиент должен знать схему
+        # padding, иначе сервер reject'нет с 'unknown user password'.
+        # См. DEFAULT_ANYTLS_PADDING_SCHEME в singbox_config.py.
+        from vless_installer.modules.singbox_config import DEFAULT_ANYTLS_PADDING_SCHEME
         base["outbounds"] = [
             {
                 "type": "anytls",
@@ -2095,6 +2099,7 @@ def _gen_singbox_client_json(protocol: str, state_ib: dict,
                 "server": public_ip,
                 "server_port": port,
                 "password": password,
+                "padding_scheme": DEFAULT_ANYTLS_PADDING_SCHEME,
                 "tls": {
                     "enabled": True,
                     "server_name": sni,

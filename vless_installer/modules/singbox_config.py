@@ -149,8 +149,37 @@ def _build_trojan_inbound(state_ib: dict) -> dict:
     }
 
 
+# v4.23.24: AnyTLS padding_scheme — обязателен для корректной аутентификации.
+# Взят из HYDRA-ULTIMATE (hydra/plugins/anytls/plugin.py:18-28) — рабочего
+# референса. Без padding_scheme sing-box AnyTLS inbound может reject'ить
+# клиентов с 'unknown user password: fallback disabled' даже при совпадении
+# пароля — padding используется в самом протоколе AnyTLS для маскировки
+# трафика, и без него auth-flow ломается.
+DEFAULT_ANYTLS_PADDING_SCHEME = [
+    "stop=8",
+    "0=30-30",
+    "1=100-400",
+    "2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000",
+    "3=9-9,500-1000",
+    "4=500-1000",
+    "5=500-1000",
+    "6=500-1000",
+    "7=500-1000",
+]
+
+
 def _build_anytls_inbound(state_ib: dict) -> dict:
-    """Строит AnyTLS inbound."""
+    """Строит AnyTLS inbound.
+
+    v4.23.24: добавлен padding_scheme (обязательное поле, см. DEFAULT_ANYTLS_PADDING_SCHEME).
+    v4.23.24: TLS field names приведены к формату HYDRA-ULTIMATE —
+      certificate_path (string) вместо certificate (array),
+      key_path (string) вместо key (array),
+      + enabled: true + server_name.
+    Раньше использовался array-формат certificate: [path], key: [path] —
+    он работает для trojan/vless, но AnyTLS в sing-box 1.12+ может
+    требовать string-формат (certificate_path/key_path).
+    """
     users = state_ib.get("users", [])
     sb_users = [{"password": u["password"], "name": u.get("name", u.get("uuid", "")[:8])}
                 for u in users if u.get("password")]
@@ -161,14 +190,18 @@ def _build_anytls_inbound(state_ib: dict) -> dict:
         "listen":       state_ib.get("listen", "127.0.0.1"),
         "listen_port":  state_ib.get("listen_port", 8444),
         "users":        sb_users,
+        "padding_scheme": DEFAULT_ANYTLS_PADDING_SCHEME,  # v4.23.24
     }
 
     cert_path = state_ib.get("cert_path", "")
     key_path = state_ib.get("key_path", "")
     if cert_path and key_path and Path(cert_path).exists() and Path(key_path).exists():
+        # v4.23.24: HYDRA-формат — string fields + enabled + server_name
         inbound["tls"] = {
-            "certificate": [cert_path],
-            "key":         [key_path],
+            "enabled":          True,
+            "server_name":      state_ib.get("common_name", ""),
+            "certificate_path": cert_path,
+            "key_path":         key_path,
         }
 
     return inbound
