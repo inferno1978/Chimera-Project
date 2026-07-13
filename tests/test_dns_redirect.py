@@ -886,5 +886,221 @@ class TestIngressGeoipCompatibility(unittest.TestCase):
         self.assertNotIn("xray-ru-ingress-block", args)
 
 
+# =============================================================================
+#  РЕГРЕССИОННЫЕ ТЕСТЫ (Bug 1-4 из коммита 17e207b)
+# =============================================================================
+# Эти тесты ДОЛЖНЫ падать на старом коде (до фикса) и проходить на новом.
+# Они НЕ мокают _check_rules_applied / state_save в проверяемых assertions —
+# проверяют реальное поведение кода.
+# =============================================================================
+
+class TestBug1ApplyFailureDoesNotPersistEnabledState(unittest.TestCase):
+    """Bug 1: apply_dns_redirect() не должен писать enabled=True в state
+    если applied_v4=False (правила не встали).
+
+    На старом коде: state.update(enabled=True, ...) вызывался ДО проверки
+    result["success"], поэтому при провале apply state показывал enabled=True
+    (ложное «всё ок»), и _install_restore_service() тоже вызывался.
+
+    На новом коде: state.save() и _install_restore_service() вызываются
+    ТОЛЬКО если result["applied_v4"] is True.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "dns_redirect.json"
+        # State с enabled=False — это стартовое состояние
+        self._state.write_text(json.dumps({
+            "enabled": False,
+            "target_port": 5300,
+            "iface_filter": "awg0",
+            "applied_at": "",
+            "ipv6_enabled": False,
+        }))
+        self._toml = self._tmpdir / "dnscrypt-proxy.toml"
+        self._toml.write_text("listen_addresses = ['127.0.0.1:5300']\n")
+
+    def tearDown(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_apply_failure_does_not_persist_enabled_state(self):
+        """Если _ipt_add_rule_idempotent падает и правила не встают —
+        state.enabled должен остаться False."""
+        from vless_installer.modules import dns_redirect
+
+        # НЕ мокаем _check_rules_applied — пусть реально вызывается.
+        # Мокаем только _ipt_add_rule_idempotent (возвращает False = не смог добавить)
+        # и _ipt_rule_exists (возвращает False = правила нет, fallback реальный).
+        # Это эмулирует ситуацию: добавить не удалось, проверить тоже не находит.
+        with patch("vless_installer.modules.dns_redirect._STATE_FILE", self._state), \
+             patch("vless_installer.modules.dns_redirect._DNSCRYPT_TOML", self._toml), \
+             patch("vless_installer.modules.dns_redirect._install_restore_service") as install_mock, \
+             patch("vless_installer.modules.dns_redirect.is_dnscrypt_active",
+                   return_value=True), \
+             patch("vless_installer.modules.dns_redirect.is_port_listening",
+                   return_value=True), \
+             patch("vless_installer.modules.dns_redirect._ipt_add_rule_idempotent",
+                   return_value=False), \
+             patch("vless_installer.modules.dns_redirect._ipt_rule_exists",
+                   return_value=False), \
+             patch("vless_installer.modules.dns_redirect.get_dnscrypt_listen_ipv6",
+                   return_value=False):
+            result = dns_redirect.apply_dns_redirect("awg0", 5300)
+            # Читаем state ВНУТРИ patch — иначе state_load() прочтёт
+            # оригинальный /var/lib/... (которого нет в CI)
+            state = dns_redirect.state_load()
+
+        # 1) result["success"] должен быть False
+        self.assertFalse(result["success"],
+                         f"Expected success=False when rules not applied, got: {result}")
+        self.assertFalse(result["applied_v4"])
+
+        # 2) state.enabled должен остаться False (НЕ переписан на True)
+        self.assertFalse(state.get("enabled"),
+                         f"state.enabled should remain False after failed apply, "
+                         f"got state: {state}")
+        # applied_at не должен обновляться
+        self.assertEqual(state.get("applied_at"), "",
+                         "applied_at should not be set on failed apply")
+
+        # 3) _install_restore_service НЕ должен вызываться (правила не встали)
+        install_mock.assert_not_called()
+
+
+class TestBug2CheckRulesAppliedUsesPassedPort(unittest.TestCase):
+    """Bug 2: _check_rules_applied() должен использовать переданный port,
+    а не вызывать get_dnscrypt_port() внутри себя.
+
+    На старом коде: _check_rules_applied(iface) вызывал get_dnscrypt_port()
+    внутри, что приводило к рассинхрону если caller передал порт 6000,
+    а TOML содержит 5300 — проверка шла по 5300 и не находила правило для 6000.
+
+    На новом коде: _check_rules_applied(iface, port) использует переданный port.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "dns_redirect.json"
+        # State с enabled=False и target_port=5300 (как было до apply).
+        # После успешного apply с port=6000 — state.target_port должен стать 6000.
+        self._state.write_text(json.dumps({
+            "enabled": False, "target_port": 5300,
+            "iface_filter": "awg0", "applied_at": "",
+            "ipv6_enabled": False,
+        }))
+        self._toml = self._tmpdir / "dnscrypt-proxy.toml"
+        # TOML говорит что порт 5300 — это «живой» порт dnscrypt-proxy.
+        # Если _check_rules_applied ошибочно вызовет get_dnscrypt_port()
+        # внутри себя, он вернёт 5300 (из TOML), а не 6000 (переданный).
+        self._toml.write_text("listen_addresses = ['127.0.0.1:5300']\n")
+
+    def tearDown(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_check_rules_applied_uses_passed_port_not_live_toml(self):
+        """apply_dns_redirect('awg0', 6000) — даже если TOML говорит 5300,
+        _check_rules_applied должен проверить правило с port=6000.
+
+        Эмулируем: _ipt_rule_exists возвращает True ТОЛЬКО если в rule_args
+        есть '6000' (т.е. проверка идёт по правильному порту). Если бы
+        _check_rules_applied использовал get_dnscrypt_port() (5300), то
+        _ipt_rule_exists не нашёл бы '6000' и вернул бы False → apply failed.
+        """
+        from vless_installer.modules import dns_redirect
+
+        # side_effect для _ipt_rule_exists: проверяет, что в rule_args есть '6000'
+        def rule_exists_checker(family, table, chain, rule_args):
+            # Возвращает True только если правило содержит '6000' как --to-ports
+            return "6000" in rule_args
+
+        with patch("vless_installer.modules.dns_redirect._STATE_FILE", self._state), \
+             patch("vless_installer.modules.dns_redirect._DNSCRYPT_TOML", self._toml), \
+             patch("vless_installer.modules.dns_redirect._install_restore_service"), \
+             patch("vless_installer.modules.dns_redirect.is_dnscrypt_active",
+                   return_value=True), \
+             patch("vless_installer.modules.dns_redirect.is_port_listening",
+                   return_value=True), \
+             patch("vless_installer.modules.dns_redirect._ipt_add_rule_idempotent",
+                   return_value=True), \
+             patch("vless_installer.modules.dns_redirect._ipt_rule_exists",
+                   side_effect=rule_exists_checker), \
+             patch("vless_installer.modules.dns_redirect.get_dnscrypt_listen_ipv6",
+                   return_value=False):
+            # НЕ мокаем _check_rules_applied — пусть реально вызывается
+            # с target_port=6000
+            result = dns_redirect.apply_dns_redirect("awg0", 6000)
+            # Читаем state ВНУТРИ patch — иначе state_load() прочтёт
+            # оригинальный /var/lib/... (которого нет в CI)
+            state = dns_redirect.state_load()
+
+        # Если бы _check_rules_applied использовал get_dnscrypt_port() (5300),
+        # то rule_exists_checker не нашёл бы '6000' в rule_args и вернул бы False
+        # → applied_v4=False → success=False.
+        # На фиксе: _check_rules_applied использует port=6000 → rule_exists_checker
+        # находит '6000' → applied_v4=True → success=True.
+        self.assertTrue(result["success"],
+                        f"Expected success=True with port=6000, got: {result}")
+        self.assertTrue(result["applied_v4"],
+                        "applied_v4 should be True when rules for port=6000 exist")
+
+        # State должен сохранить target_port=6000 (не 5300 из TOML)
+        self.assertEqual(state.get("target_port"), 6000,
+                         f"state.target_port should be 6000, got: {state}")
+
+
+class TestBug3RemoveReportsFailureWhenRulesRemain(unittest.TestCase):
+    """Bug 3: remove_dns_redirect() должен возвращать success=False если
+    правила остались в iptables после -D.
+
+    На старом коде: result = {"success": True, ...} инициализировался
+    один раз и никогда не переприсваивался — даже если _ipt_rule_exists
+    после -D возвращал True (правило осталось), success всё равно был True.
+
+    На новом коде: success = removed_v4 and (removed_v6 if ipv6_enabled else True).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "dns_redirect.json"
+        # State: правила были применены (enabled=True)
+        self._state.write_text(json.dumps({
+            "enabled": True,
+            "target_port": 5300,
+            "iface_filter": "awg0",
+            "applied_at": "2025-01-01T00:00:00+00:00",
+            "ipv6_enabled": False,
+        }))
+
+    def tearDown(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_remove_reports_failure_when_rules_remain(self):
+        """_ipt_delete_rule(return_value=True) — якобы удалил, но
+        _ipt_rule_exists(return_value=True) — правило всё ещё стоит.
+        remove_dns_redirect должен вернуть success=False."""
+        from vless_installer.modules import dns_redirect
+
+        with patch("vless_installer.modules.dns_redirect._STATE_FILE", self._state), \
+             patch("vless_installer.modules.dns_redirect._remove_restore_service"), \
+             patch("vless_installer.modules.dns_redirect._cleanup_all_dns_redirect_rules"), \
+             patch("vless_installer.modules.dns_redirect._ipt_delete_rule",
+                   return_value=True), \
+             patch("vless_installer.modules.dns_redirect._ipt_rule_exists",
+                   return_value=True), \
+             patch("vless_installer.modules.dns_redirect.get_dnscrypt_port",
+                   return_value=5300):
+            result = dns_redirect.remove_dns_redirect()
+
+        # На старом коде: success всегда True (инициализирован и не переприсвоен)
+        # На новом коде: success = removed_v4 and (...) = (not True) and ... = False
+        self.assertFalse(result["success"],
+                         f"Expected success=False when rules remain in iptables, got: {result}")
+        self.assertFalse(result["removed_v4"],
+                         "removed_v4 should be False when _ipt_rule_exists still returns True")
+
+
 if __name__ == "__main__":
     unittest.main()

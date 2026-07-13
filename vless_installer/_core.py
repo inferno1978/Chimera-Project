@@ -7139,14 +7139,19 @@ def _do_dns_redirect_health_screen() -> None:
     print()
     _box_top("🔒  DNS Redirect Health Check")
     hc = health_check_dns_redirect()
+    # hc["port"] — реальный порт из state (target_port), добавлен в
+    # health_check_dns_redirect() начиная с commit фиксинга 4 багов.
+    # Ранее использовался hc.get('port', 5300) — но ключа 'port' не было,
+    # поэтому всегда рисовался дефолт 5300 даже если state.target_port=6000.
+    _port = hc.get("port", 5300)
     _box_row(f"  Включён в state:     {GREEN if hc['enabled'] else DIM}"
              f"{'да' if hc['enabled'] else 'нет'}{NC}")
     _box_row(f"  dnscrypt-proxy:      {GREEN if hc['dnscrypt_active'] else RED}"
              f"{'активен' if hc['dnscrypt_active'] else 'НЕ активен'}{NC}")
-    _box_row(f"  Порт {hc.get('port', 5300)}/udp:     "
+    _box_row(f"  Порт {_port}/udp:     "
              f"{GREEN if hc['port_listening_udp'] else RED}"
              f"{'слушается' if hc['port_listening_udp'] else 'НЕ слушается'}{NC}")
-    _box_row(f"  Порт {hc.get('port', 5300)}/tcp:     "
+    _box_row(f"  Порт {_port}/tcp:     "
              f"{GREEN if hc['port_listening_tcp'] else RED}"
              f"{'слушается' if hc['port_listening_tcp'] else 'НЕ слушается'}{NC}")
     _box_row(f"  Правила iptables:    {GREEN if hc['rules_applied'] else DIM}"
