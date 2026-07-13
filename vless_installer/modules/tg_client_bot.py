@@ -605,6 +605,29 @@ def _generate_client_bot_script(bot_cfg: dict) -> str:
     blocked_file = str(_BLOCKED_FILE)
     qr_dir       = str(_QR_TMP_DIR)
 
+    # ── ПРОБЛЕМА: inner-скрипт запускается как отдельный systemd-процесс и
+    #    не имеет vless_installer.* на PYTHONPATH. Ему нужно как-то найти
+    #    linkqr_lib.py для построения AWG/Mieru/NaiveProxy/sing-box/subscription
+    #    ссылок.
+    #
+    # РЕШЕНИЕ: вычисляем PROJECT_ROOT В МОМЕНТ ГЕНЕРАЦИИ скрипта — здесь мы
+    #    гарантированно находимся внутри правильно установленного пакета
+    #    vless_installer.modules.tg_client_bot (этот файл = .../vless_installer/
+    #    modules/tg_client_bot.py), поэтому parents[2] = корень проекта,
+    #    содержащий папку vless_installer/. Зашиваем путь как литерал в
+    #    inner-скрипт. Никакого угадывания с диска во время выполнения.
+    #
+    #    Важно: не используем Path(__file__) ВНУТРИ inner-скрипта, потому что
+    #    он лежит в /usr/local/bin/, а не в проекте — это и было источником
+    #    бага. Только внешний Path(__file__) здесь, в момент генерации.
+    _here = Path(__file__).resolve()
+    # _here = .../vless_installer/modules/tg_client_bot.py
+    # parents[0] = .../vless_installer/modules/
+    # parents[1] = .../vless_installer/
+    # parents[2] = .../  (корень проекта, где лежит main.py)
+    _project_root = str(_here.parents[2])
+    project_root_literal = json.dumps(_project_root, ensure_ascii=False)
+
     # ВНИМАНИЕ: все фигурные скобки внутри f-string-скрипта удвоены,
     # чтобы пережить f-string-интерполяцию на нашей стороне.
     script = f'''#!/usr/bin/env python3
@@ -624,6 +647,14 @@ from datetime import datetime, timezone
 TOKEN        = {token}
 ADMIN_ID     = {admin_id}
 RATE_LIMIT_S = {rate_limit_s}
+# Корень проекта — вычислен В МОМЕНТ ГЕНЕРАЦИИ скрипта (а не во время
+# выполнения) через Path(__file__).resolve().parents[2] от расположения
+# vless_installer/modules/tg_client_bot.py. Гарантированно указывает на
+# каталог, содержащий vless_installer/modules/linkqr_lib.py — нужен для
+# subprocess-вызовов linkqr_lib из inner-скрипта (см. _call_linkqr_helper).
+# Если проект перемещён после установки — fallback в _call_linkqr_helper
+# попробует канонические пути (/opt/vless-ultimate и legacy-варианты).
+PROJECT_ROOT = {project_root_literal}
 BOT_FILE     = Path("{bot_file}")
 MAP_FILE     = Path("{map_file}")
 USERS_FILE   = Path("{users_file}")
@@ -923,40 +954,74 @@ def _call_linkqr_helper(action, **kwargs):
     Вызывает vless_installer.modules.linkqr_lib через subprocess-вызов
     python3 -c '...'. Это НЕ дублирует код ссылок, а переиспользует его.
     Возвращает распарсенный JSON-ответ или None.
+
+    Поиск корня проекта:
+      1. PROJECT_ROOT — зашитый в момент генерации путь (главный, надёжный).
+         Вычислен через Path(__file__).resolve().parents[2] от расположения
+         vless_installer/modules/tg_client_bot.py — это канонический путь
+         установки (например /opt/vless-ultimate по bootstrap.sh).
+      2. Fallback на случай нестандартной установки/переустановки:
+         проверяем канонические пути из bootstrap.sh, ВКЛЮЧАЯ правильный
+         /opt/vless-ultimate (legacy /opt/VLESS-Ultimate-Installer оставлен
+         только для обратной совместимости со старыми установками).
+      3. Если ничего не найдено — возвращаем None, вызывающий код должен
+         ЯВНО сообщить пользователю о невозможности построить ссылку.
     """
-    # Подготавливаем env с PYTHONPATH на проект (главная папка vless-installer)
-    # Пытаемся определить автоматически: стандартные пути установки.
+    def _has_linkqr(p):
+        """Безопасная проверка что по пути p лежит linkqr_lib.py.
+        Path.exists() может поднять PermissionError (например для
+        /root/VLESS-Ultimate-Installer если бот запущен не от root) —
+        ловим и считаем что пути нет."""
+        try:
+            return Path(p).exists() and (Path(p) / "vless_installer" / "modules" / "linkqr_lib.py").exists()
+        except (OSError, PermissionError):
+            return False
+
     project_root = None
-    for p in ("/opt/VLESS-Ultimate-Installer", "/root/VLESS-Ultimate-Installer",
-              "/usr/local/share/VLESS-Ultimate-Installer"):
-        if Path(p).exists() and (Path(p) / "vless_installer" / "modules" / "linkqr_lib.py").exists():
-            project_root = p
-            break
+    # 1) Зашитый в момент генерации путь
+    if PROJECT_ROOT and _has_linkqr(PROJECT_ROOT):
+        project_root = PROJECT_ROOT
+    # 2) Fallback: канонические пути в порядке приоритета
     if not project_root:
-        # Fallback: ищем относительно этого скрипта
-        here = Path(__file__).resolve().parent
-        for ancestor in [here] + list(here.parents):
-            if (ancestor / "vless_installer" / "modules" / "linkqr_lib.py").exists():
-                project_root = str(ancestor)
+        for p in (
+            "/opt/vless-ultimate",                          # канонический (bootstrap.sh:INSTALL_DIR)
+            "/opt/VLESS-Ultimate-Installer",                # legacy регистр (старые установки)
+            "/root/VLESS-Ultimate-Installer",
+            "/root/vless-ultimate",
+            "/usr/local/share/vless-ultimate",
+            "/usr/local/share/VLESS-Ultimate-Installer",
+        ):
+            if _has_linkqr(p):
+                project_root = p
                 break
     if not project_root:
-        _log(f"linkqr_lib not found, cannot build link for action={{action}}")
+        _log(f"linkqr_lib not found (PROJECT_ROOT={{PROJECT_ROOT!r}}), cannot build link for action={{action}}")
         return None
     env = dict(os.environ)
     env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
     payload = json.dumps({{"action": action, **kwargs}})
+    # ВАЖНО: код ниже исполняется как отдельная строка через `python3 -c`.
+    # Использовать `; elif` НЕЛЬЗЯ — Python это не парсит (SyntaxError).
+    # Поэтому if/elif разложены через полноценные переводы строк (\\n).
+    # Каждая строка заканчивается \\n (после f-string-интерполяции станет
+    # реальным \\n в строке-аргументе `python3 -c`).
     code = (
-        "import json, sys; "
-        "from vless_installer.modules import linkqr_lib; "
-        "args = json.loads(sys.stdin.read()); "
-        "action = args.pop('action'); "
-        "if action == 'awg_link': r = linkqr_lib.build_awg_link_for_user(args.get('email','')); "
-        "elif action == 'mieru_link': r = linkqr_lib.build_mieru_link_for_user(args.get('email','')); "
-        "elif action == 'naive_link': r = linkqr_lib.build_naive_link_for_user(args.get('email','')); "
-        "elif action == 'singbox_links': r = linkqr_lib.build_singbox_links_for_user(args.get('uuid','')); "
-        "elif action == 'subscription_url': r = linkqr_lib.build_subscription_url_for_user(args.get('user',{{}})); "
-        "else: r = None; "
-        "sys.stdout.write(json.dumps(r));"
+        "import json, sys\\n"
+        "from vless_installer.modules import linkqr_lib\\n"
+        "args = json.loads(sys.stdin.read())\\n"
+        "action = args.pop('action')\\n"
+        "r = None\\n"
+        "if action == 'awg_link':\\n"
+        "    r = linkqr_lib.build_awg_link_for_user(args.get('email', ''))\\n"
+        "elif action == 'mieru_link':\\n"
+        "    r = linkqr_lib.build_mieru_link_for_user(args.get('email', ''))\\n"
+        "elif action == 'naive_link':\\n"
+        "    r = linkqr_lib.build_naive_link_for_user(args.get('email', ''))\\n"
+        "elif action == 'singbox_links':\\n"
+        "    r = linkqr_lib.build_singbox_links_for_user(args.get('uuid', ''))\\n"
+        "elif action == 'subscription_url':\\n"
+        "    r = linkqr_lib.build_subscription_url_for_user(args.get('user', {{}}))\\n"
+        "sys.stdout.write(json.dumps(r))\\n"
     )
     try:
         r = subprocess.run(["python3", "-c", code], input=payload, capture_output=True,
@@ -971,35 +1036,110 @@ def _call_linkqr_helper(action, **kwargs):
 
 # ── Сборка всех ссылок пользователя ───────────────────────────────────────────
 def _build_all_links(user):
+    """
+    Возвращает (links: dict, errors: list[str]).
+      links  — {{proto_key: link_str}} для всех успешно построенных протоколов.
+      errors — список читабельных описаний ошибок (например,
+               'AWG: не удалось найти linkqr_lib'). Если errors непустой —
+               вызывающий код должен показать его пользователю, чтобы тот
+               понимал, что это технический сбой, а не отсутствие протокола.
+    """
     if not user:
-        return {{}}
+        return {{}}, []
     uuid_val = user.get("uuid", "")
     email = user.get("email", "")
     links = {{}}
+    errors = []
     vless = _build_vless_link(uuid_val)
     if vless:
         links["vless"] = vless
     if email:
+        # AWG: различаем «нет пира» (нормально) от «helper упал» (баг)
+        awg_peer_exists = False
+        try:
+            awg_state_file = Path("/var/lib/xray-installer/awg_standalone_state.json")
+            if awg_state_file.exists():
+                awg_state = json.loads(awg_state_file.read_text())
+                awg_peer_exists = any(p.get("owner_email") == email for p in awg_state.get("peers", []))
+        except Exception:
+            pass
         awg = _build_awg_link(email)
         if awg:
             links["awg"] = awg
+        elif awg_peer_exists:
+            # Пир есть, но ссылку построить не удалось — это баг linkqr_lib
+            errors.append("AWG: не удалось построить ссылку (ошибка linkqr_lib на сервере)")
+        # Аналогично для Mieru / NaiveProxy: проверяем есть ли пользователь
+        mieru_user_exists = False
+        try:
+            mieru_state_file = Path("/var/lib/xray-installer/mieru.json")
+            if mieru_state_file.exists():
+                ms = json.loads(mieru_state_file.read_text())
+                uname = (email or "").split("@")[0]
+                mieru_user_exists = any(u.get("username") == uname for u in ms.get("users", []))
+        except Exception:
+            pass
         mieru = _build_mieru_link(email)
         if mieru:
             links["mieru"] = mieru
+        elif mieru_user_exists:
+            errors.append("Mieru: не удалось построить ссылку (ошибка linkqr_lib на сервере)")
+        naive_user_exists = False
+        try:
+            naive_state_file = Path("/var/lib/xray-installer/naiveproxy.json")
+            if naive_state_file.exists():
+                ns = json.loads(naive_state_file.read_text())
+                uname = (email or "").split("@")[0]
+                naive_user_exists = any(u.get("username") == uname for u in ns.get("users", []))
+        except Exception:
+            pass
         naive = _build_naive_link(email)
         if naive:
             links["naive"] = naive
+        elif naive_user_exists:
+            errors.append("NaiveProxy: не удалось построить ссылку (ошибка linkqr_lib на сервере)")
     if uuid_val:
+        # sing-box: проверяем есть ли UUID в каком-то включённом inbound
+        sb_user_exists = False
+        try:
+            sb_state_file = Path("/var/lib/xray-installer/singbox_state.json")
+            if sb_state_file.exists():
+                sbs = json.loads(sb_state_file.read_text())
+                for proto_name, ib in sbs.get("inbounds", {{}}).items():
+                    if not ib.get("enabled"):
+                        continue
+                    ib_uuid = ib.get("uuid", "")
+                    if ib_uuid and ib_uuid == uuid_val:
+                        sb_user_exists = True
+                        break
+                    if any(u.get("uuid") == uuid_val for u in (ib.get("users", []) or [])):
+                        sb_user_exists = True
+                        break
+        except Exception:
+            pass
         sb = _build_singbox_links(uuid_val)
         for proto, link in sb:
             links[f"singbox_{{proto}}"] = link
+        if sb_user_exists and not sb:
+            errors.append("sing-box: не удалось построить ссылку (ошибка linkqr_lib на сервере)")
     h2 = _build_hysteria2_link()
     if h2:
         links["hysteria2"] = h2
+    # Subscription: проверяем есть ли pepper в sub_conf
+    sub_pepper_set = False
+    try:
+        sub_conf_file = Path("/var/lib/xray-installer/subscription.json")
+        if sub_conf_file.exists():
+            sc = json.loads(sub_conf_file.read_text())
+            sub_pepper_set = bool(sc.get("pepper"))
+    except Exception:
+        pass
     sub_url = _build_subscription_url(user)
     if sub_url:
         links["subscription"] = sub_url
-    return links
+    elif sub_pepper_set:
+        errors.append("Subscription URL: не удалось построить (ошибка linkqr_lib на сервере)")
+    return links, errors
 
 # ── Генерация QR PNG ──────────────────────────────────────────────────────────
 def _generate_qr_png(text, out_path):
@@ -1130,8 +1270,8 @@ def handle_config(msg):
     if blocked:
         send(chat_id, _format_blocked_msg(email, reason))
         return
-    links = _build_all_links(user)
-    if not links:
+    links, errors = _build_all_links(user)
+    if not links and not errors:
         send(chat_id, "⚠️ Нет активных протоколов. Обратитесь к администратору.")
         return
     proto_labels = {{
@@ -1155,19 +1295,34 @@ def handle_config(msg):
         lines.append(f"   <code>{{_safe_html(links[key])}}</code>")
         lines.append("")
         keys.append(key)
-    lines.append("Нажмите кнопку для QR-кода протокола:")
-    # Inline-кнопки: по 2 в ряд
-    inline_keyboard = []
-    row = []
-    for k in keys:
-        label = proto_labels.get(k, k).replace("SB: ", "")[:20]
-        row.append({{"text": f"QR: {{label}}", "callback_data": f"qr:{{k}}"}})
-        if len(row) == 2:
+    # Если есть ошибки построения ссылок — показываем их ЯВНО пользователю,
+    # чтобы он понимал, что это технический сбой на сервере, а не отсутствие
+    # протокола. Молчаливое пропускание в списке /config было источником
+    # трудноотлаживаемых пользовательских жалоб.
+    if errors:
+        lines.append("⚠️ <b>Не удалось построить некоторые ссылки:</b>")
+        for err in errors:
+            lines.append(f"   — {{_safe_html(err)}}")
+        lines.append("")
+        lines.append("Обратитесь к администратору — проверьте установку linkqr_lib.")
+        lines.append("")
+    if keys:
+        lines.append("Нажмите кнопку для QR-кода протокола:")
+        # Inline-кнопки: по 2 в ряд
+        inline_keyboard = []
+        row = []
+        for k in keys:
+            label = proto_labels.get(k, k).replace("SB: ", "")[:20]
+            row.append({{"text": f"QR: {{label}}", "callback_data": f"qr:{{k}}"}})
+            if len(row) == 2:
+                inline_keyboard.append(row)
+                row = []
+        if row:
             inline_keyboard.append(row)
-            row = []
-    if row:
-        inline_keyboard.append(row)
-    send(chat_id, "\\n".join(lines), reply_markup={{"inline_keyboard": inline_keyboard}})
+        send(chat_id, "\\n".join(lines), reply_markup={{"inline_keyboard": inline_keyboard}})
+    else:
+        # Только ошибки, без успешно построенных ссылок — кнопок нет
+        send(chat_id, "\\n".join(lines))
 
 def handle_qr(msg, args):
     chat_id = msg["chat"]["id"]
@@ -1188,10 +1343,17 @@ def handle_qr(msg, args):
     if blocked:
         send(chat_id, _format_blocked_msg(email, reason))
         return
-    links = _build_all_links(user)
+    links, errors = _build_all_links(user)
     link = links.get(protocol)
     if not link:
-        send(chat_id, f"❌ Протокол <code>{{_safe_html(protocol)}}</code> не активен.")
+        # Если протокол в списке ошибок — показываем причину, а не «не активен»
+        err_for_proto = [e for e in errors if protocol.lower() in e.lower()]
+        if err_for_proto:
+            send(chat_id, f"❌ Не удалось построить ссылку для <code>{{_safe_html(protocol)}}</code>:\\n"
+                          f"<i>{{_safe_html(err_for_proto[0])}}</i>\\n\\n"
+                          f"Обратитесь к администратору.")
+        else:
+            send(chat_id, f"❌ Протокол <code>{{_safe_html(protocol)}}</code> не активен.")
         return
     try:
         QR_DIR.mkdir(parents=True, exist_ok=True)
