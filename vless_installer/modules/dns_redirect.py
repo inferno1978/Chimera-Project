@@ -259,6 +259,7 @@ def health_check_dns_redirect() -> dict:
     Возвращает dict:
       {
         "enabled": bool,           # включён ли в state
+        "port": int,               # порт dnscrypt-proxy (target_port из state)
         "dnscrypt_active": bool,   # запущен ли сервис
         "port_listening_udp": bool,
         "port_listening_tcp": bool,
@@ -272,10 +273,11 @@ def health_check_dns_redirect() -> dict:
     port = state.get("target_port", _DEFAULT_PORT)
     result = {
         "enabled":            state.get("enabled", False),
+        "port":               port,
         "dnscrypt_active":    is_dnscrypt_active(),
         "port_listening_udp": is_port_listening(port, "udp"),
         "port_listening_tcp": is_port_listening(port, "tcp"),
-        "rules_applied":      _check_rules_applied(state.get("iface_filter", "")),
+        "rules_applied":      _check_rules_applied(state.get("iface_filter", ""), port),
         "ipv6_supported":     get_dnscrypt_listen_ipv6(),
         "issues":             [],
         "recommendation":     "",
@@ -359,9 +361,18 @@ def _build_redirect_rule_args(iface: str, proto: str, target_port: int) -> list:
     ]
 
 
-def _check_rules_applied(iface: str) -> bool:
-    """Проверяет есть ли в iptables наши правила REDIRECT для указанного интерфейса."""
-    port = get_dnscrypt_port()
+def _check_rules_applied(iface: str, port: int) -> bool:
+    """Проверяет есть ли в iptables наши правила REDIRECT для указанного
+    интерфейса и порта.
+
+    Аргументы:
+      iface — VPN-интерфейс ('awg0', 'tun0', ...)
+      port  — целевой порт dnscrypt-proxy (например 5300), для которого
+              строится правило `--to-ports <port>`. НЕ вызывает
+              get_dnscrypt_port() внутри себя — caller обязан передать
+              корректный порт (это нужно чтобы проверка шла по
+              сохранённому в state порту, а не по живому TOML).
+    """
     for proto in ("udp", "tcp"):
         rule_args = _build_redirect_rule_args(iface, proto, port)
         if not _ipt_rule_exists("iptables", "nat", "PREROUTING", rule_args):
@@ -429,8 +440,9 @@ def apply_dns_redirect(iface: Optional[str] = None,
             result["warnings"].append(
                 f"не удалось добавить IPv4 {proto} правило"
             )
-    # Проверяем что оба правила реально стоят
-    result["applied_v4"] = _check_rules_applied(iface)
+    # Проверяем что оба правила реально стоят (по переданному target_port,
+    # а не по живому TOML — см. _check_rules_applied).
+    result["applied_v4"] = _check_rules_applied(iface, target_port)
 
     # 3) IPv6 — только если dnscrypt слушает ::1
     ipv6_supported = get_dnscrypt_listen_ipv6()
@@ -453,19 +465,22 @@ def apply_dns_redirect(iface: Optional[str] = None,
             "Добавьте '[::1]:5300' в listen_addresses TOML для IPv6 поддержки."
         )
 
-    # 4) Сохраняем state
-    state = state_load()
-    state.update({
-        "enabled":       True,
-        "target_port":   target_port,
-        "iface_filter":  iface,
-        "applied_at":    datetime.now(timezone.utc).isoformat(),
-        "ipv6_enabled":  ipv6_supported,
-    })
-    state_save(state)
-
-    # 5) Persist после reboot
-    _install_restore_service(iface, target_port)
+    # 4) Сохраняем state ТОЛЬКО если правила v4 реально применены.
+    # Если applied_v4=False — НЕ трогаем enabled/applied_at в state,
+    # НЕ устанавливаем restore-service (иначе после reboot правила
+    # попробуют примениться для неработающего сетапа).
+    if result["applied_v4"]:
+        state = state_load()
+        state.update({
+            "enabled":       True,
+            "target_port":   target_port,
+            "iface_filter":  iface,
+            "applied_at":    datetime.now(timezone.utc).isoformat(),
+            "ipv6_enabled":  ipv6_supported,
+        })
+        state_save(state)
+        # 5) Persist после reboot — только при успешном apply
+        _install_restore_service(iface, target_port)
 
     result["success"] = result["applied_v4"]
     _log("INFO", f"apply_dns_redirect: success={result['success']}, "
@@ -518,6 +533,15 @@ def remove_dns_redirect() -> dict:
     # (если admin сменил iface_filter между apply и remove)
     _cleanup_all_dns_redirect_rules()
 
+    # Честный success: правила реально отсутствуют в iptables.
+    # Если ipv6_enabled было True — проверяем и v6; иначе только v4.
+    # state.update(enabled=False, ...) остаётся безусловным — remove это
+    # best-effort отключение, но success должен отражать реальное
+    # состояние iptables.
+    result["success"] = result["removed_v4"] and (
+        result["removed_v6"] if state.get("ipv6_enabled") else True
+    )
+
     # Обновляем state
     state.update({
         "enabled":      False,
@@ -529,7 +553,8 @@ def remove_dns_redirect() -> dict:
     # Удаляем restore-service
     _remove_restore_service()
 
-    _log("INFO", f"remove_dns_redirect: v4={result['removed_v4']}, v6={result['removed_v6']}")
+    _log("INFO", f"remove_dns_redirect: success={result['success']}, "
+                 f"v4={result['removed_v4']}, v6={result['removed_v6']}")
     return result
 
 
