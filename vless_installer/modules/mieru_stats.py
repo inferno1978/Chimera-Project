@@ -896,43 +896,37 @@ def _reset_cache() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 def mieru_collect_traffic() -> dict:
     """
-    Собирает raw bytes из iptables (TCP+UDP порты mita) и feed'ит в
-    traffic_accounting.record_traffic_sample() с baseline-offset.
+    Собирает raw bytes из journalctl [metrics - user - NAME] и feed'ит
+    в traffic_accounting.record_traffic_sample() с baseline-offset.
 
     Защищает от сброса счётчика при `systemctl restart mita` или reboot —
     накопленный трафик сохраняется в state.json.
 
+    ИСТОЧНИК ДАННЫХ:
+      journalctl -u mita → [metrics - user - NAME] DownloadBytes=N UploadBytes=N
+      Это монотонно растущие cumulative counters с момента старта процесса mita
+      (стандартное поведение Go-метрик в mita). Сбрасываются ТОЛЬКО при
+      `systemctl restart mita` — именно этот случай обрабатывает baseline-offset.
+
     Returns:
       dict — {username: accumulated_bytes} для всех пользователей mieru.
       username берётся из journalctl [metrics - user - NAME] если доступен,
-      иначе используется "_global_" (суммарный трафик mita).
+      иначе используется "_global_" (суммарный трафик mita из iptables).
     """
     try:
         from vless_installer.modules.traffic_accounting import record_traffic_sample
     except Exception:
         return {}
 
-    try:
-        port_start, port_end = _get_mita_ports()
-    except Exception:
-        return {}
-
-    # Суммарный raw по TCP+UDP
-    raw_total = 0
-    for proto in ("tcp", "udp"):
-        try:
-            stats = _iptables_stats(port_start, port_end, proto.upper())
-            raw_total += stats.get("bytes", 0)
-        except Exception:
-            pass
-
-    # Пытаемся разбить per-user из journalctl
+    # Пытаемся получить per-user из journalctl
     per_user = {}
     try:
         journal = _parse_journal(window_minutes=60)
         users = journal.get("users", {})
+        # _parse_journal кладёт {"download": dl, "upload": ul} per-user
+        # (см. mieru_stats.py:513). НЕ "rx"/"tx" — это была ошибка.
         for username, ustats in users.items():
-            user_bytes = ustats.get("rx", 0) + ustats.get("tx", 0)
+            user_bytes = ustats.get("download", 0) + ustats.get("upload", 0)
             per_user[username] = user_bytes
     except Exception:
         pass
@@ -944,9 +938,20 @@ def mieru_collect_traffic() -> dict:
             accumulated = record_traffic_sample(username, "mieru", raw)
             result[username] = accumulated
     else:
-        # Fallback на global счётчик
-        accumulated = record_traffic_sample("_global_", "mieru", raw_total)
-        result["_global_"] = accumulated
+        # Fallback на global счётчик из iptables (TCP+UDP порты mita)
+        try:
+            port_start, port_end = _get_mita_ports()
+            raw_total = 0
+            for proto in ("tcp", "udp"):
+                try:
+                    stats = _iptables_stats(port_start, port_end, proto.upper())
+                    raw_total += stats.get("bytes", 0)
+                except Exception:
+                    pass
+            accumulated = record_traffic_sample("_global_", "mieru", raw_total)
+            result["_global_"] = accumulated
+        except Exception:
+            pass
 
     return result
 
