@@ -442,6 +442,82 @@ def _format_bytes(b: int) -> str:
     return f"{b:.1f} PiB"
 
 
+def awg_collect_peer_traffic() -> dict:
+    """
+    Собирает raw rx+tx байты per-peer из `awg show all dump` и feed'ит
+    в traffic_accounting.record_traffic_sample() с baseline-offset.
+
+    Защищает от сброса счётчика при `systemctl restart awg-quick@awg0`
+    или reboot — накопленный трафик сохраняется в state.json.
+
+    Returns:
+      dict — {owner_email: accumulated_bytes} для всех пиров с owner_email.
+      Пиры без owner_email (технические) пропускаются.
+    """
+    try:
+        from vless_installer.modules.traffic_accounting import record_traffic_sample
+    except Exception:
+        return {}
+
+    try:
+        from .awg_apply import awgs_show_dump
+        dump = awgs_show_dump()
+    except Exception:
+        return {}
+
+    state = awgs_state_load()
+    peers = state.get("peers", [])
+
+    # Матчим pubkey → peer → owner_email
+    result = {}
+    for line in dump:
+        parts = line.split("\t")
+        if len(parts) < 8 or parts[0] != "peer":
+            continue
+        pubkey = parts[1]
+        rx_bytes = int(parts[6]) if parts[6].isdigit() else 0
+        tx_bytes = int(parts[7]) if parts[7].isdigit() else 0
+        raw_total = rx_bytes + tx_bytes
+
+        # Находим peer по pubkey
+        peer = None
+        for p in peers:
+            if p.get("client_pubkey") == pubkey:
+                peer = p
+                break
+        if not peer:
+            continue
+
+        owner_email = peer.get("owner_email", "")
+        if not owner_email:
+            # Технический пир без owner_email — пропускаем
+            continue
+
+        # Feed в traffic_accounting с baseline-offset
+        accumulated = record_traffic_sample(owner_email, "awg", raw_total)
+        result[owner_email] = accumulated
+
+    return result
+
+
+def awg_get_peer_traffic_accumulated(owner_email: str) -> int:
+    """
+    Возвращает накопленный трафик AWG-пира по owner_email.
+    Не делает новый снимок — читает из state.
+
+    Args:
+      owner_email: email VLESS-пользователя-владельца пира
+
+    Returns:
+      int — accumulated bytes (или 0 если записей нет)
+    """
+    try:
+        from vless_installer.modules.traffic_accounting import get_accumulated_bytes
+        return get_accumulated_bytes(owner_email, "awg")
+    except Exception:
+        return 0
+
+
 def _format_handshake(ts_str: str) -> str:
     """Форматирует timestamp handshake в человекочитаемый вид."""
     if not ts_str or ts_str == "0":
