@@ -450,6 +450,17 @@ def awg_collect_peer_traffic() -> dict:
     Защищает от сброса счётчика при `systemctl restart awg-quick@awg0`
     или reboot — накопленный трафик сохраняется в state.json.
 
+    Формат `awg show all dump` (TSV, как `wg show all dump`):
+      interface-строка: <iface>\t<private-key>\t<listen-port>\t<fwmark>
+                        (4 поля)
+      peer-строка:      <iface>\t<pubkey>\t<preshared-key>\t<endpoint>\t
+                        <allowed-ips>\t<handshake>\t<rx>\t<tx>\t<keepalive>
+                        (9 полей)
+
+    Отличаем peer от interface по количеству полей (>= 8 = peer), а НЕ
+    по несуществующему литералу "peer" в первом поле — в реальном выводе
+    там имя интерфейса (awg0), а не "peer".
+
     Returns:
       dict — {owner_email: accumulated_bytes} для всех пиров с owner_email.
       Пиры без owner_email (технические) пропускаются.
@@ -472,9 +483,14 @@ def awg_collect_peer_traffic() -> dict:
     result = {}
     for line in dump:
         parts = line.split("\t")
-        if len(parts) < 8 or parts[0] != "peer":
+        # peer-строка имеет 9 полей, interface-строка — 4 поля.
+        # Берём >= 8 для устойчивости (некоторые версии wg/awg могут
+        # не выводить persistent-keepalive = 8 полей вместо 9).
+        if len(parts) < 8:
             continue
+        # parts[0] = interface name (awg0), parts[1] = pubkey
         pubkey = parts[1]
+        # transfer-rx = parts[6], transfer-tx = parts[7]
         rx_bytes = int(parts[6]) if parts[6].isdigit() else 0
         tx_bytes = int(parts[7]) if parts[7].isdigit() else 0
         raw_total = rx_bytes + tx_bytes
