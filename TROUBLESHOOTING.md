@@ -442,3 +442,174 @@ ipset list | grep -E "^Name:|elements:"
 
 Если `/etc/ipset.conf` отсутствует — сначала сохраните текущий ipset
 через меню `[IP]` → пункт `2`.
+
+## У меня прописан свой DNS, но он не используется — это нормально?
+
+**Краткий ответ:** Да, это ожидаемое поведение если включён **Принудительный DNS REDIRECT**.
+
+### Что происходит
+
+Когда включена опция **Принудительный DNS REDIRECT** (меню → Настройки сети → `DR`),
+на сервере создаются iptables-правила в таблице `nat`, цепочке `PREROUTING`:
+
+```
+iptables -t nat -A PREROUTING -i awg0 -p udp --dport 53 -j REDIRECT --to-ports 5300
+iptables -t nat -A PREROUTING -i awg0 -p tcp --dport 53 -j REDIRECT --to-ports 5300
+```
+
+Эти правила перехватывают **все** DNS-запросы (порт 53, UDP+TCP), приходящие от
+VPN-клиентов через интерфейс `awg0`, и принудительно перенаправляют их на локальный
+`dnscrypt-proxy` (по умолчанию `127.0.0.1:5300`).
+
+**Клиент не может это обойти** на уровне приложения — даже если в настройках
+VPN-клиента прописан `8.8.8.8` или `1.1.1.1`, запрос всё равно уйдёт на dnscrypt-proxy.
+
+### Зачем это нужно
+
+- **Защита от DNS leak** — провайдер не видит, какие домены запрашивает клиент
+- **Защита от DPI-блокировки по DNS** — ТСПУ не может подменить ответ
+- **Единый резолвер для всех клиентов** — dnscrypt-proxy использует DoH/DoT
+  к Cloudflare/Google, что защищает от перехвата на участке клиент→DNS-сервер
+
+### Как проверить, что это работает
+
+**Способ 1: с клиентского устройства**
+
+```bash
+# На клиенте через VPN-туннель:
+dig @8.8.8.8 google.com +short
+# Если редирект работает — ответ придёт от Cloudflare (dnscrypt-proxy),
+# а не от Google. Проверить через:
+dig @8.8.8.8 whoami.akamai.net +short
+# Должен вернуть IP exit-ноды (Cloudflare), а не 8.8.8.8
+```
+
+**Способ 2: на сервере**
+
+```bash
+# Меню → Диагностика → DN (DNS Redirect health-check)
+# Или напрямую:
+python3 -c "
+from vless_installer.modules.dns_redirect import health_check_dns_redirect
+import json
+print(json.dumps(health_check_dns_redirect(), indent=2))
+"
+
+# Проверить правила iptables:
+iptables -t nat -S PREROUTING | grep dns-redirect
+# Должно показать 2 правила (udp + tcp)
+```
+
+### Как отключить
+
+Если вам нужно использовать **кастомный DNS-сетап** (например, ваш собственный
+Pi-hole или AdGuard Home), отключите принудительный редирект:
+
+**Через меню:**
+
+1. `sudo python3 /opt/vless-ultimate/main.py`
+2. Меню → `4` (Настройки сети) → `DR` (Принудительный DNS REDIRECT)
+3. Пункт `2` — Отключить
+
+**Через команду:**
+
+```bash
+python3 -c "
+from vless_installer.modules.dns_redirect import remove_dns_redirect
+result = remove_dns_redirect()
+print(result)
+"
+```
+
+После отключения:
+- iptables-правила удаляются (UDP + TCP, IPv4 + IPv6 если были)
+- State-файл `/var/lib/xray-installer/dns_redirect.json` помечается `enabled: false`
+- Systemd-unit `dns-redirect-restore.service` удаляется (правила не вернутся после reboot)
+- Клиенты снова смогут использовать любой DNS-сервер на свой выбор
+
+### Типичные проблемы
+
+**1. После включения DNS не работает вообще**
+
+```bash
+# Проверить что dnscrypt-proxy запущен:
+systemctl status dnscrypt-proxy
+
+# Проверить что он слушает порт 5300:
+ss -ulnp | grep 5300
+ss -tlnp | grep 5300
+
+# Если не запущен — перезапустить:
+systemctl restart dnscrypt-proxy
+sleep 2
+systemctl is-active dnscrypt-proxy
+```
+
+Если dnscrypt-proxy не запускается — применяя редирект вы создадите **black-hole**
+(DNS-запросы будут перехвачены, но некому ответить). Модуль `dns_redirect.py`
+проверяет это перед apply и откажется применять правила если сервис не активен.
+
+**2. IPv6 DNS не редиректится**
+
+По умолчанию dnscrypt-proxy слушает только `127.0.0.1:5300` (IPv4). Если ваши
+клиенты используют IPv6 DNS (например `::1` или `[2001:db8::1]:53`), их запросы
+получат `connection refused`.
+
+Решение — добавить `[::1]:5300` в `listen_addresses` в `/etc/dnscrypt-proxy/dnscrypt-proxy.toml`:
+
+```toml
+listen_addresses = ['127.0.0.1:5300', '[::1]:5300']
+```
+
+Затем перезапустить dnscrypt-proxy и переприменить DNS REDIRECT через меню `DR` → пункт `1`.
+
+**3. Правила не восстанавливаются после reboot**
+
+```bash
+# Проверить systemd-unit:
+systemctl status dns-redirect-restore.service
+
+# Если disabled — включить:
+systemctl enable dns-redirect-restore.service
+
+# Запустить вручную:
+systemctl start dns-redirect-restore.service
+```
+
+**4. Конфликт с ingress-блокировкой РФ-подсетей**
+
+Принудительный DNS REDIRECT использует таблицу `nat`, цепочку `PREROUTING`.
+Ingress-блокировка РФ использует таблицу `filter`, цепочку `INPUT`. Это **разные
+цепочки** — конфликта быть не должно. Порядок правил (ESTABLISHED/RELATED,
+whitelist ACCEPT, DROP) в `INPUT` не нарушается.
+
+Если вы видите проблему — проверьте, что правила стоят в правильных цепочках:
+
+```bash
+# DNS REDIRECT — nat PREROUTING:
+iptables -t nat -S PREROUTING | grep dns-redirect
+
+# Ingress block — filter INPUT:
+iptables -L INPUT -n --line-numbers | head -20
+```
+
+**5. После отключения AWG-интерфейса правила остались висеть**
+
+Это нормально — iptables-правила с `-i awg0` не удаляются автоматически при
+`ip link delete awg0`. Они просто не срабатывают (нет интерфейса = нет трафика).
+Когда интерфейс вернётся — правила снова начнут работать.
+
+Если хотите explicitly очистить:
+
+```bash
+python3 -c "
+from vless_installer.modules.dns_redirect import remove_dns_redirect
+remove_dns_redirect()
+"
+```
+
+### См. также
+
+- **DNS Leak Test**: Меню → Диагностика → `N` — проверка утечки DNS-запросов
+- **DNSCrypt-proxy управление**: Меню → Настройки сети → `3` (оптимизация) / `R` (выбор резолверов)
+- **Кастомные DNS правила**: Меню → Настройки сети → `D` (hosts / routing override в Xray)
