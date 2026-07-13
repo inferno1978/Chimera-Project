@@ -143,6 +143,7 @@ from vless_installer.modules.server_fragment     import (
 )
 from vless_installer.modules.port_hopping        import do_port_hopping_menu, ph_status
 from vless_installer.modules.tg_bot              import do_tg_bot_menu, do_manage_telegram, _tg_notify_event, _tg_load, tg_send
+from vless_installer.modules.tg_client_bot       import do_tg_client_bot_menu
 # ── Hysteria2 transport (аддитивно, v4.12.9+) ────────────────────────────────
 from vless_installer.modules.hysteria2_menu      import do_hysteria2_menu
 # ── Новые модули (бэкап, cold boot, health monitor) ──────────────────────────
@@ -7535,6 +7536,7 @@ def _menu_security() -> None:
         _box_item("4", "🔑 Ротация UUID и Fingerprint")
         _box_item("5", f"📬 Telegram-уведомления  {DIM}(бот + мониторинг){NC}")
         _box_item("TB", f"🤖 Telegram Config Bot  {DIM}(раздача конфигов пользователям){NC}")
+        _box_item("TC", f"🤖 Telegram Client Bot  {DIM}(self-service: /config /qr /status){NC}")
         _box_item("PH", f"⚡ Port Hopping  {DIM}(диапазон портов против блокировки){NC}")
         _box_sep()
         _box_item("6", f"📡 Failover статус exit-нод{_awg_na}")
@@ -7586,6 +7588,8 @@ def _menu_security() -> None:
             do_manage_telegram()
         elif ch.lower() == "tb":
             do_tg_bot_menu()
+        elif ch.lower() == "tc":
+            do_tg_client_bot_menu()
         elif ch.lower() == "ph":
             do_port_hopping_menu()
         elif ch == "6":
