@@ -2,6 +2,93 @@
 
 ---
 
+## v4.25.0 — FEAT: Client Telegram Bot, Unified User Lifecycle, Forced DNS Redirect, Baseline-Offset Traffic Accounting — 14 июля 2026
+
+Крупный релиз: 4 новые подсистемы, ~6000 строк нового кода, ~470 новых тестов.
+
+### 🎯 Что добавлено
+
+#### 1. Client-facing Telegram-бот для self-service конечных пользователей
+
+**Модули:** `vless_installer/modules/tg_client_bot.py`, `vless_installer/modules/linkqr_lib.py`
+
+Отдельный от admin-бота модуль с командами `/start` (deep-link binding), `/config`, `/qr`, `/status`, `/help`. Единая shared-библиотека `linkqr_lib.py` для генерации ссылок/QR, переиспользуемая обоими ботами. Строгий one-to-one binding Telegram user_id ↔ UUID через одноразовые invite-токены. Rate-limiting (1 команда / 2 сек, настраиваемо). Приватные ключи/PSK никогда не попадают в ответы бота. Отдельный systemd-юнит `xray-tg-client.service`, отдельный конфиг `/var/lib/xray-installer/tg_client_bot.json`, отдельная карта привязок `tg_client_bot_map.json`.
+
+Управление: главное меню → 5 (Безопасность и Автоматизация) → `TC`.
+
+#### 2. Единый multi-protocol user_lifecycle-слой
+
+**Модуль:** `vless_installer/modules/user_lifecycle.py`
+
+Централизованные транзакционные `add_user` / `remove_user` / `block_user` / `unblock_user` / `update_limits` с атомарным rollback при частичном сбое синхронизации хотя бы одного из 8 протоколов (VLESS/Xray, AWG, sing-box, Mieru, MTProto, NaiveProxy, FPTN, Hysteria2). Снапшот state-файлов перед операцией, восстановление при исключении. Существующие cron-флаги (`--ttl-check`, `--autoban`, новые `--traffic-check`, `--lifecycle-cleanup`) делегируют в новый слой с fallback на legacy-логику при недоступности модуля.
+
+Поведенческое исправление: `check_traffic_limits` теперь **блокирует** пользователей (а не удаляет, как раньше), позволяя разблокировать через `unblock_user`. `block_user` fan-out во все протоколы (раньше TTL expiry блокировал только в Xray, пользователь мог подключиться через AWG/sing-box).
+
+#### 3. Принудительный DNS через dnscrypt-proxy
+
+**Модуль:** `vless_installer/modules/dns_redirect.py`
+
+iptables/ip6tables NAT REDIRECT для UDP/TCP порта 53 от клиентских интерфейсов (awg0) на локальный dnscrypt-proxy (127.0.0.1:5300). Защита от DNS leak даже при ручном DNS на клиенте. Black-hole guard — проверка что dnscrypt реально слушает порт перед применением правил. Идемпотентное применение через `-C` check. Переключаемо через конфиг (`/var/lib/xray-installer/dns_redirect.json`). Persist после reboot через systemd `dns-redirect-restore.service`. Health-check в диагностике (пункт `DN`).
+
+Управление: главное меню → 3 (Настройки сети) → `DR`. Документация в `TROUBLESHOOTING.md`.
+
+#### 4. Унифицированный учёт трафика с baseline-offset
+
+**Модуль:** `vless_installer/modules/traffic_accounting.py`
+
+Переживает рестарт сервиса, ротацию логов и сброс интерфейса для VLESS/Xray, AWG, Mieru и NaiveProxy. Универсальный парсер человекочитаемых размеров `parse_human_readable_bytes` (IEC KiB/MiB/GiB, SI KB/MB/GB, bare-letter K/M/G) и форматтер `format_bytes` (en/ru локали). Thread/process-safe через `fcntl.flock`. Для NaiveProxy — инкрементальное чтение access.log с отслеживанием inode для устойчивости к ротации Caddy `roll_size 10mb`. Для AWG — корректный парсер `awg show all dump` (peer vs interface по количеству полей). Для Mieru — правильные ключи `download`/`upload` из journalctl `[metrics - user - NAME]`.
+
+### 📦 Изменения по файлам
+
+**Новые модули:**
+- `vless_installer/modules/tg_client_bot.py` (+1738 строк) — клиентский бот
+- `vless_installer/modules/linkqr_lib.py` (+624 строки) — shared-библиотека ссылок/QR
+- `vless_installer/modules/user_lifecycle.py` (+1643 строки) — unified lifecycle
+- `vless_installer/modules/dns_redirect.py` (+917 строк) — DNS REDIRECT
+- `vless_installer/modules/traffic_accounting.py` (+559 строк) — baseline-offset
+
+**Новые тесты:**
+- `tests/test_tg_client_bot.py` (+738 строк, 56 тестов)
+- `tests/test_tg_client_bot_inner_script.py` (+874 строки, 16 тестов)
+- `tests/test_linkqr_lib.py` (+449 строк, 21 тестов)
+- `tests/test_user_lifecycle.py` (+1150 строк, 47 тестов)
+- `tests/test_dns_redirect.py` (+890 строк, 46 тестов)
+- `tests/test_core_dns_redirect_integration.py` (+170 строк, 3 теста)
+- `tests/test_traffic_accounting.py` (+833 строки, 61 тест)
+- `tests/test_traffic_collectors.py` (+470 строк, 10 тестов)
+
+**Интеграция в `_core.py`:**
+- Импорт + пункт меню `TC` (главное → 5 → TC) для клиентского бота
+- Импорт + пункт меню `DR` (главное → 3 → DR) для DNS REDIRECT
+- Импорт + пункт меню `DN` (главное → 4 → DN) для DNS health-check
+- `_ttl_check_and_expire` делегирует в `user_lifecycle.check_ttl_expired`
+- `_check_traffic_limits_once` делегирует в `user_lifecycle.check_traffic_limits`
+
+**Интеграция в `main.py`:**
+- Новые CLI-флаги: `--traffic-check`, `--lifecycle-cleanup`
+- Health-check info использует динамическую версию из `vless_installer.__version__`
+
+**Интеграция в `traffic_tracking.py`:**
+- Новая функция `_query_user_traffic_bytes_accumulated` — обёртка с baseline-offset
+
+**Интеграция в `awg_peers.py`:**
+- Новые функции `awg_collect_peer_traffic`, `awg_get_peer_traffic_accumulated`
+- Фикс парсера `awg show all dump` (peer vs interface по количеству полей)
+
+**Интеграция в `mieru_stats.py`:**
+- Новые функции `mieru_collect_traffic`, `mieru_get_traffic_accumulated`
+- Фикс ключей `download`/`upload` (не `rx`/`tx`)
+
+**Интеграция в `naiveproxy_stats.py`:**
+- Новые функции `naiveproxy_collect_traffic`, `naiveproxy_get_traffic_accumulated`
+- Инкрементальное чтение access.log с offset-отслеживанием (`_read_new_log_lines`)
+
+### 🔄 Версия
+
+Обновлена с 4.20.0 до 4.25.0. Версия в `main.py` теперь берётся динамически из `vless_installer.__version__` (по аналогии с `honeypot.py`) — при следующем бампе не отстанет.
+
+---
+
 ## v4.23.8 — FEAT: SNI-dispatch auto-patches Xray config.json (фаза 2) — 13 июля 2026
 
 ### 🎯 Что добавлено
