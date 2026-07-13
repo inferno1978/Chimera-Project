@@ -292,7 +292,26 @@ def _ttl_check_and_expire() -> int:
         Это позволяет продлить срок и разблокировать без повторного добавления.
 
     Возвращает количество заблокированных пользователей.
+
+    ДЕЛЕГИРУЕТ в vless_installer.modules.user_lifecycle.check_ttl_expired()
+    для централизованной multi-protocol блокировки (VLESS + AWG + sing-box + ...).
+    Сохраняет обратную совместимость: те же TG-нотификации, тот же TTL-state.
     """
+    try:
+        from vless_installer.modules.user_lifecycle import check_ttl_expired
+        return check_ttl_expired()
+    except Exception as e:
+        # Fallback: оригинальная реализация (на случай если user_lifecycle недоступен)
+        try:
+            core = _core_module()
+            core.log_to_file("WARN", f"_ttl_check_and_expire: user_lifecycle failed ({e}), using legacy path")
+        except Exception:
+            pass
+        return _ttl_check_and_expire_legacy()
+
+
+def _ttl_check_and_expire_legacy() -> int:
+    """Legacy-реализация — fallback если user_lifecycle недоступен."""
     core = _core_module()
     log_to_file = core.log_to_file
     _tg_notify_event = core._tg_notify_event
