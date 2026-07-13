@@ -1993,6 +1993,27 @@ def _gen_vless_ws_cdn_client_uri(state_ib: dict) -> str:
     return f"vless://{uuid}@{host}:{port}?{params}#{quote(host)}"
 
 
+def _get_effective_password(state_ib: dict) -> str:
+    """Возвращает пароль, который РЕАЛЬНО работает в sing-box (v4.23.20).
+
+    Приоритет:
+      1. state_ib['users'][0]['password'] — это то, что попадает в config.json
+         и проверяется sing-box при авторизации.
+      2. state_ib['password'] — fallback для старых state-файлов без users[].
+
+    Раньше генераторы URI/JSON брали state_ib['password'], но он рассинхронизирован
+    с users[].password при singbox_enable_*() — password обновляется, users[].password
+    остаётся старый. Отсюда 'unknown user password' в логе sing-box.
+
+    См. коммит v4.23.20 — подробное описание бага.
+    """
+    if state_ib.get("users"):
+        pw = state_ib["users"][0].get("password", "")
+        if pw:
+            return pw
+    return state_ib.get("password", "")
+
+
 def _gen_singbox_client_json(protocol: str, state_ib: dict,
                              public_ip: str, port: int) -> str:
     """Генерирует полный клиентский config.json для sing-box 1.12+.
@@ -2007,6 +2028,9 @@ def _gen_singbox_client_json(protocol: str, state_ib: dict,
         - trojan-out: использует shadowtls-out как транспорт (detour)
       Старый формат с transport: shadowtls больше НЕ работает (sing-box 1.13
       выдаёт 'unknown transport type: shadowtls').
+
+    v4.23.20: пароль берётся через _get_effective_password() — из users[].password,
+    не из state.password (рассинхрон).
     """
     import json as _json
     # Базовый шаблон полного клиентского конфига
@@ -2026,9 +2050,7 @@ def _gen_singbox_client_json(protocol: str, state_ib: dict,
     if protocol == "shadowtls":
         handshake = state_ib.get("handshake", {})
         sni = handshake.get("server", "www.cloudflare.com")
-        password = state_ib.get("password", "")
-        if not password and state_ib.get("users"):
-            password = state_ib["users"][0].get("password", "")
+        password = _get_effective_password(state_ib)
         # v4.23.16: правильная схема для sing-box 1.12+
         # shadowtls outbound — НЕ имеет detour (конечный outbound, делает
         # TLS-handshake к handshake.server, например www.cloudflare.com)
@@ -2064,9 +2086,7 @@ def _gen_singbox_client_json(protocol: str, state_ib: dict,
             {"type": "direct", "tag": "direct"},
         ]
     elif protocol == "anytls":
-        password = state_ib.get("password", "")
-        if not password and state_ib.get("users"):
-            password = state_ib["users"][0].get("password", "")
+        password = _get_effective_password(state_ib)
         sni = state_ib.get("common_name") or public_ip
         base["outbounds"] = [
             {
@@ -2154,10 +2174,10 @@ def _show_client_links(protocol: str) -> None:
     default_listen = "127.0.0.1" if protocol in ("shadowtls", "anytls") else "::"
     public_ip, port, is_loopback = _get_public_endpoint(state_ib, default_listen)
 
-    # Пароль/uuid для URI
-    password = state_ib.get("password", "")
-    if not password and state_ib.get("users"):
-        password = state_ib["users"][0].get("password", "")
+    # v4.23.20: пароль для URI/JSON берём через _get_effective_password() —
+    # из users[0].password (то, что реально работает в sing-box), не из
+    # state.password (рассинхрон с users[].password).
+    password = _get_effective_password(state_ib)
 
     # Генерируем URI
     if protocol == "shadowtls":
