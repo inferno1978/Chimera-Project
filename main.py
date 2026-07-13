@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-VLESS Ultimate Installer v4.20.0 — Entry Point
-=============================================
+VLESS Ultimate Installer — Entry Point
+======================================
 Запуск: sudo python3 main.py
 
 Этот файл — тонкая обёртка. Вся логика находится в vless_installer/_core.py.
+Версия берётся динамически из vless_installer.__version__ — при бампе
+версии в __init__.py не нужно вручную обновлять хардкод здесь.
 """
 
 import sys
@@ -448,7 +450,13 @@ for _attempt in range(_MAX_RETRIES + 1):
             print_banner()
             print()
             _cc, _cn, _flag = get_server_country_cached()
-            info(f"VLESS Ultimate Installer v4.20.0 | RAM: {TOTAL_RAM}MB | CPU: {TOTAL_CPU} | {_flag} {_cn} ({_cc})")
+            # Динамическая версия — берётся из vless_installer.__version__,
+            # чтобы при бампе версии не нужно было вручную обновлять хардкод.
+            try:
+                from vless_installer import __version__ as _ver
+            except Exception:
+                _ver = "unknown"
+            info(f"VLESS Ultimate Installer v{_ver} | RAM: {TOTAL_RAM}MB | CPU: {TOTAL_CPU} | {_flag} {_cn} ({_cc})")
             print()
             _time.sleep(1)
 
