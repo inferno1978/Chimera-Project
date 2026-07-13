@@ -764,6 +764,7 @@ def _anytls_menu() -> None:
             _box_item("5", f"🖥  Сменить Listen IP          {DIM}127.0.0.1 ↔ 0.0.0.0{NC}")
         else:
             _box_item("1", f"🟢 Включить AnyTLS  {DIM}с self-signed cert{NC}")
+            _box_item("2", f"⚙️  Включить с custom-параметрами {DIM}порт/IP{NC}")
         _box_row()
         _box_item_exit("0", "← Назад")
         _box_bottom()
@@ -793,46 +794,150 @@ def _anytls_menu() -> None:
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
         else:
             if ch == "1":
-                if not _ensure_binary_installed():
-                    continue
-                # v4.23.18: pre-flight port-check — дефолтный 8444 часто занят
-                # nginx (SNI-dispatch backend) или другими сервисами.
-                # Спрашиваем альтернативу ДО записи в state, как в ShadowTLS.
-                listen_port = _prompt_alt_port(DEFAULT_PORT_ANYTLS, "127.0.0.1", "tcp")
-                if listen_port is None:
-                    input(f"\n{BLUE}Нажмите Enter...{NC}")
-                    continue
-                # v4.23.6: common_name = домен сервера (для auto-detect SNI)
-                main_state = singbox_state_load()
-                # Читаем domain из основного state.json
-                import json as _json
-                from vless_installer.modules.singbox_common import MAIN_STATE_FILE
-                try:
-                    _ms = _json.loads(MAIN_STATE_FILE.read_text()) if MAIN_STATE_FILE.exists() else {}
-                    server_domain = _ms.get("domain", "")
-                except Exception:
-                    server_domain = ""
-                cert_path, key_path, cn = _ensure_self_signed_cert("anytls", common_name=server_domain)
-                ok = singbox_enable_anytls(
-                    cert_path=str(cert_path),
-                    key_path=str(key_path),
-                    cert_source="self-signed",
-                    common_name=cn,
-                    listen_port=listen_port,
-                )
-                if ok:
-                    singbox_sync_users()
-                    singbox_generate_config()
-                    if singbox_validate_config():
-                        if not _apply_and_check("AnyTLS НЕ включён — sing-box не запустился"):
-                            pass
-                        else:
-                            # v4.23.14: UFW для AnyTLS (loopback по умолчанию)
-                            singbox_ufw_ensure_open(
-                                listen_port, "tcp", "anytls",
-                                listen="127.0.0.1")
-                            success("AnyTLS включён")
+                _enable_anytls_default()
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
+            elif ch == "2":
+                _enable_anytls_custom()
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+
+
+def _enable_anytls_default() -> None:
+    """Включение AnyTLS с дефолтными параметрами (v4.23.19 вынесено из меню).
+
+    v4.23.18: pre-flight port-check — если дефолтный 8444 занят, предлагаем
+    альтернативу вместо crash-loop.
+    """
+    if not _ensure_binary_installed():
+        return
+    # Pre-flight: дефолтный порт 8444 может быть занят nginx (SNI-dispatch backend)
+    listen_port = _prompt_alt_port(DEFAULT_PORT_ANYTLS, "127.0.0.1", "tcp")
+    if listen_port is None:
+        return
+    # common_name = домен сервера (для auto-detect SNI)
+    import json as _json
+    from vless_installer.modules.singbox_common import MAIN_STATE_FILE
+    try:
+        _ms = _json.loads(MAIN_STATE_FILE.read_text()) if MAIN_STATE_FILE.exists() else {}
+        server_domain = _ms.get("domain", "")
+    except Exception:
+        server_domain = ""
+    cert_path, key_path, cn = _ensure_self_signed_cert("anytls", common_name=server_domain)
+    ok = singbox_enable_anytls(
+        cert_path=str(cert_path),
+        key_path=str(key_path),
+        cert_source="self-signed",
+        common_name=cn,
+        listen_port=listen_port,
+    )
+    if not ok:
+        return
+    singbox_sync_users()
+    if not singbox_generate_config():
+        return
+    if not singbox_validate_config():
+        warn("Конфиг невалиден — проверьте логи")
+        return
+    if not _apply_and_check("AnyTLS НЕ включён — sing-box не запустился"):
+        return
+    # UFW для AnyTLS (loopback по умолчанию)
+    singbox_ufw_ensure_open(listen_port, "tcp", "anytls", listen="127.0.0.1")
+    success("AnyTLS включён")
+
+
+def _enable_anytls_custom() -> None:
+    """Включение AnyTLS с пользовательскими параметрами (v4.23.19).
+
+    Запрашивает:
+      • Listen порт (с pre-flight проверкой занятости)
+      • Listen IP (127.0.0.1 loopback или 0.0.0.0 извне)
+      • Common name для self-signed cert (для SNI)
+
+    По образцу _enable_shadowtls_custom().
+    """
+    if not _ensure_binary_installed():
+        return
+    try:
+        port_str = input(
+            f"{CYAN}Listen порт {DIM}(Enter={DEFAULT_PORT_ANYTLS}):{NC} "
+        ).strip()
+        port = int(port_str) if port_str else DEFAULT_PORT_ANYTLS
+        listen_ip = input(
+            f"{CYAN}Listen IP {DIM}(Enter=127.0.0.1, варианты: 0.0.0.0=все IPv4, :: =все IPv6):{NC} "
+        ).strip() or "127.0.0.1"
+        # Common name для self-signed cert (для SNI)
+        cn_input = input(
+            f"{CYAN}Common Name (SNI) {DIM}(Enter=домен сервера из state):{NC} "
+        ).strip()
+    except KeyboardInterrupt:
+        info("Отменено")
+        return
+    except ValueError:
+        error("Некорректный порт (должно быть число 1-65535)")
+        return
+
+    if not (1 <= port <= 65535):
+        error(f"Listen порт вне диапазона: {port}")
+        return
+    if not _is_valid_listen_ip(listen_ip):
+        error(f"Некорректный Listen IP: {listen_ip}")
+        warn("Допустимо: IP-адрес, 0.0.0.0 (все IPv4), :: (все IPv6), 127.0.0.1 (loopback)")
+        return
+    if not _is_port_free(port, listen_ip, proto="tcp"):
+        who = _who_owns_port(port, listen_ip, proto="tcp")
+        error(f"Listen порт {port} на {listen_ip} уже занят" + (f" {who}" if who else ""))
+        warn("Выберите другой порт (ss -ltnp | grep ':<port> ')")
+        return
+
+    if listen_ip not in ("127.0.0.1", "::1", "localhost"):
+        warn(f"⚠  Listen IP = {listen_ip} — AnyTLS будет доступен извне.")
+        warn("Цензор сможет напрямую зондировать порт. Для скрытности")
+        warn("рекомендуется SNI-dispatch (меню 5) на loopback-бэкенде.")
+        try:
+            confirm = input(f"{YELLOW}Продолжить? (y/N):{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            return
+        if confirm != "y":
+            info("Отменено")
+            return
+
+    # Common name: если пользователь не указал — берём из основного state
+    if cn_input:
+        common_name = cn_input
+    else:
+        import json as _json
+        from vless_installer.modules.singbox_common import MAIN_STATE_FILE
+        try:
+            _ms = _json.loads(MAIN_STATE_FILE.read_text()) if MAIN_STATE_FILE.exists() else {}
+            common_name = _ms.get("domain", "")
+        except Exception:
+            common_name = ""
+
+    cert_path, key_path, cn = _ensure_self_signed_cert("anytls", common_name=common_name)
+    ok = singbox_enable_anytls(
+        cert_path=str(cert_path),
+        key_path=str(key_path),
+        cert_source="self-signed",
+        common_name=cn,
+        listen_port=port,
+        listen=listen_ip,
+    )
+    if not ok:
+        return
+    singbox_sync_users()
+    if not singbox_generate_config():
+        return
+    if not singbox_validate_config():
+        warn("Конфиг невалиден")
+        return
+    if not _apply_and_check("AnyTLS НЕ включён — sing-box не запустился"):
+        return
+    # v4.23.14: UFW для AnyTLS
+    singbox_ufw_ensure_open(port, "tcp", "anytls", listen=listen_ip)
+    success("AnyTLS включён с custom-параметрами")
+    if listen_ip in ("127.0.0.1", "::1", "localhost"):
+        info("Listen loopback — порт в firewall не открывается (используйте SNI-dispatch)")
+    else:
+        info(f"Не забудьте: порт {port}/tcp открыт в UFW автоматически (если UFW активен)")
 
 
 # ============================================================================
