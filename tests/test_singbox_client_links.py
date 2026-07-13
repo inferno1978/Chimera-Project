@@ -504,5 +504,83 @@ class TestBuildInboundListen(_Base):
         self.assertTrue(callable(self.menu._change_listen_ip))
 
 
+# ============================================================================
+#  10. _get_effective_password (v4.23.20 — фикс рассинхрона password vs users[].password)
+# ============================================================================
+class TestGetEffectivePassword(_Base):
+    """v4.23.20: пароль берётся из users[0].password, не из state.password.
+
+    Баг: при singbox_enable_*() поле state.password обновляется, а
+    state.users[].password остаётся старым. config.json берёт из users[],
+    а генераторы URI/JSON брали из state.password — рассинхрон.
+    Фикс: _get_effective_password() всегда берёт из users[0].password.
+    """
+
+    def test_users_password_takes_priority(self):
+        """Если есть users[].password — берём его, не state.password."""
+        state = {
+            "password": "OLD_PASSWORD_FROM_STATE",
+            "users": [{"password": "REAL_PASSWORD_FROM_USERS", "name": "user"}],
+        }
+        pw = self.menu._get_effective_password(state)
+        self.assertEqual(pw, "REAL_PASSWORD_FROM_USERS")
+
+    def test_fallback_to_state_password_if_no_users(self):
+        """Если users[] нет — fallback на state.password."""
+        state = {"password": "ONLY_PASSWORD"}
+        pw = self.menu._get_effective_password(state)
+        self.assertEqual(pw, "ONLY_PASSWORD")
+
+    def test_fallback_to_state_password_if_users_empty(self):
+        """Если users[] пустой — fallback на state.password."""
+        state = {"password": "ONLY_PASSWORD", "users": []}
+        pw = self.menu._get_effective_password(state)
+        self.assertEqual(pw, "ONLY_PASSWORD")
+
+    def test_fallback_if_users_password_empty(self):
+        """Если users[0].password пустой — fallback на state.password."""
+        state = {
+            "password": "STATE_PASSWORD",
+            "users": [{"password": "", "name": "user"}],
+        }
+        pw = self.menu._get_effective_password(state)
+        self.assertEqual(pw, "STATE_PASSWORD")
+
+    def test_empty_state_returns_empty(self):
+        """Пустой state → пустая строка."""
+        self.assertEqual(self.menu._get_effective_password({}), "")
+
+    def test_anytls_json_uses_users_password(self):
+        """v4.23.20: AnyTLS JSON должен использовать users[].password."""
+        state = {
+            "password": "OLD_PASSWORD",
+            "users": [{"password": "REAL_PASSWORD", "name": "user"}],
+            "common_name": "example.com",
+            "cert_source": "self-signed",
+        }
+        s = self.menu._gen_singbox_client_json(
+            "anytls", state, "1.2.3.4", 8444)
+        d = json.loads(s)
+        proxy = d["outbounds"][0]
+        self.assertEqual(proxy["password"], "REAL_PASSWORD")
+        self.assertNotEqual(proxy["password"], "OLD_PASSWORD")
+
+    def test_shadowtls_json_uses_users_password(self):
+        """v4.23.20: ShadowTLS JSON должен использовать users[].password."""
+        state = {
+            "password": "OLD_PASSWORD",
+            "users": [{"password": "REAL_PASSWORD", "name": "user"}],
+            "handshake": {"server": "www.cloudflare.com", "server_port": 443},
+        }
+        s = self.menu._gen_singbox_client_json(
+            "shadowtls", state, "1.2.3.4", 9443)
+        d = json.loads(s)
+        proxy = d["outbounds"][0]
+        trojan = d["outbounds"][1]
+        self.assertEqual(proxy["password"], "REAL_PASSWORD")
+        self.assertEqual(trojan["password"], "REAL_PASSWORD")
+        self.assertNotEqual(proxy["password"], "OLD_PASSWORD")
+
+
 if __name__ == "__main__":
     unittest.main()
