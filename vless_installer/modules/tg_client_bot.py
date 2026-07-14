@@ -528,6 +528,7 @@ def format_config_message(tg_user_id: int) -> tuple[str, list[str]]:
         "singbox_tuic":       "sing-box: TUIC",
         "singbox_trojan":     "sing-box: Trojan",
         "singbox_vless_ws_cdn": "sing-box: VLESS-WS-CDN",
+        "trusttunnel":        "TrustTunnel (tt://)",
         "subscription":       "Subscription URL (агато)",
     }
     lines = [

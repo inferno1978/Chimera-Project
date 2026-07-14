@@ -80,6 +80,8 @@ _LOCK_FILE  = Path("/var/lib/xray-installer/traffic_accounting.lock")
 # Поддерживаемые протоколы (для валидации)
 SUPPORTED_PROTOCOLS = frozenset({
     "xray", "awg", "mieru", "naiveproxy",
+    "trusttunnel",  # aggregate-only (D5): upstream /metrics has no per-user label.
+                    # Recorded under synthetic "_aggregate" user_id by trusttunnel_stats.py.
     # "mtproto" — уже имеет свой baseline, не мигрируем
     # "singbox" — нет источника данных
     # "fptn"    — нет per-user byte counter

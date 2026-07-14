@@ -1215,6 +1215,15 @@ def _extract_fptn_ports(st: dict) -> list:
     return [int(p)] if isinstance(p, (int, str)) and str(p).isdigit() else []
 
 
+def _extract_trusttunnel_ports(st: dict) -> list:
+    """TrustTunnel: TCP+UDP порт (HTTP/2 over TLS + HTTP/3 over QUIC).
+    state['listen_port']."""
+    if not isinstance(st, dict) or not st.get("installed"):
+        return []
+    p = st.get("listen_port")
+    return [int(p)] if isinstance(p, (int, str)) and str(p).isdigit() else []
+
+
 def _extract_vless_state_ports(st: dict) -> list:
     """VLESS/REALITY основной state.json — порты xray/awg из Mode B chain.
     AWG_EXIT_PORT (UDP) и AWG_CLIENT_LISTEN_PORT (UDP) — могут конфликтовать
@@ -1291,6 +1300,12 @@ PROTOCOL_PORT_REGISTRY = [
         "label": "FPTN (TCP/TLS)",
         "state_file": Path("/var/lib/xray-installer/fptn.json"),
         "extractor": _extract_fptn_ports,
+    },
+    {
+        "key": "trusttunnel",
+        "label": "TrustTunnel (TCP+UDP, HTTP/2+HTTP/3)",
+        "state_file": Path("/var/lib/xray-installer/trusttunnel.json"),
+        "extractor": _extract_trusttunnel_ports,
     },
 ]
 
@@ -7973,11 +7988,16 @@ def main_menu() -> None:
             _box_row(f"     {DIM}Параллельный backend: TLS-camouflage + QUIC-резерв к Hysteria2{NC}")
             _box_row()
             _box_sep()
+            _box_row()
+            _box_row(f"  {CYAN}18{NC} 🔐 {TITLE}TrustTunnel{NC}  {DIM}(NEW){NC}")
+            _box_row(f"     {DIM}AdGuard VPN protocol (HTTP/2+HTTP/3 over TLS) — tt:// deep-link{NC}")
+            _box_row()
+            _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–17 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–18 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -8087,6 +8107,14 @@ def main_menu() -> None:
                 do_singbox_menu()
             except ImportError as _e:
                 warn(f"Модуль sing-box не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "18":
+            try:
+                from vless_installer.modules.trusttunnel import do_trusttunnel_menu
+                do_trusttunnel_menu()
+            except ImportError as _e:
+                warn(f"Модуль TrustTunnel не найден: {_e}")
                 time.sleep(2)
 
         elif choice == "0":

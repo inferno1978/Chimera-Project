@@ -302,6 +302,22 @@ if "--h2-health" in sys.argv:
     h2_health_check_cron()
     sys.exit(0)
 
+# --- TrustTunnel: health check (из cron) ---
+if "--trusttunnel-health" in sys.argv:
+    if os.geteuid() != 0:
+        sys.exit(1)
+    from vless_installer.modules.trusttunnel_health import trusttunnel_health_check_cron
+    trusttunnel_health_check_cron()
+    sys.exit(0)
+
+# --- TrustTunnel: traffic stats (из cron) ---
+if "--trusttunnel-stats" in sys.argv:
+    if os.geteuid() != 0:
+        sys.exit(1)
+    from vless_installer.modules.trusttunnel_stats import trusttunnel_stats_cron
+    trusttunnel_stats_cron()
+    sys.exit(0)
+
 # --- Hysteria2: watchdog (из cron каждые 2 мин) ---
 if "--h2-watchdog-run" in sys.argv:
     if os.geteuid() != 0:
