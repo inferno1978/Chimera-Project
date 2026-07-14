@@ -661,20 +661,35 @@ class TestStep0Closure(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_core_menu_no_k_item(self):
-        """В _core.py пункт меню K (generate_client_links_ios) должен быть
-        закомментирован."""
+        """В ГЛАВНОМ меню _core.py (main_menu, пункт 2 → generate_client_links_ios)
+        пункт K должен быть закомментирован. В do_unified_user_manager
+        (подменю пользователей) пункт K АКТИВЕН — это легитимный путь из
+        патча №3, и его НЕ надо закрывать.
+
+        Этот тест защищает от случайного возврата пункта K в ГЛАВНОЕ меню
+        (которое ведёт к generate_client_links_ios — закрытой поверхности
+        из патча №2, всё ещё рвёт REALITY-юзеров)."""
+        import re
         src = (_PROJECT_ROOT / "vless_installer" / "_core.py").read_text()
-        # Строка пункта меню должна быть в комментарии.
-        # Ищем НЕ закомментированный _box_item("K" — это была бы ошибка.
-        # Берём блок меню и проверяем.
-        lines = src.split("\n")
-        for i, line in enumerate(lines):
+
+        # Извлекаем блок main_menu — от `def main_menu` до конца функции.
+        # main_menu — последняя функция в _core.py, поэтому после неё может
+        # не быть `def `, берём до конца файла.
+        m = re.search(
+            r'def main_menu\(\).*',
+            src, re.DOTALL
+        )
+        self.assertIsNotNone(m, "main_menu не найдена в _core.py")
+        main_menu_block = m.group(0)
+
+        # Внутри main_menu ищем активный _box_item("K" — это баг.
+        for i, line in enumerate(main_menu_block.split("\n"), 1):
             stripped = line.strip()
-            # Активная (не закомментированная) строка с _box_item("K"
-            if stripped.startswith('_box_item("K"') and not stripped.startswith("#"):
+            if stripped.startswith('_box_item("K"'):
                 self.fail(
-                    f"Строка {i+1} в _core.py: пункт меню K должен быть "
-                    f"закрыт (в комментарии), got: {line!r}"
+                    f"Строка {i} в main_menu: пункт K должен быть закрыт "
+                    f"(он вызывает generate_client_links_ios, который рвёт "
+                    f"REALITY-юзеров без shadow). Got: {line!r}"
                 )
 
     def test_subscription_route_ios_commented(self):

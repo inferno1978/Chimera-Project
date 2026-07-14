@@ -569,6 +569,81 @@ def do_user_show_link_ios() -> None:
         _show_qr(link, f"{u_email} (iOS)", f"/root/vless_qr_ios_{u_email}.png")
 
 
+def do_user_show_link_ios_by_uuid(uuid_str: str) -> None:
+    """iOS/Karing-совместимая ссылка по UUID — для интеграции в
+    do_unified_user_manager (пункт K).
+
+    КЛЮЧЕВОЕ ОТЛИЧИЕ от do_user_show_link_ios(): email берётся НАПРЯМУЮ
+    из clients[] config.json по UUID, а не из аргумента или из
+    _unified_load_users() (где email может быть рассинхронизирован с
+    clients[] — users.json хранит свою копию, и пункт "8. Редактировать"
+    в do_unified_user_manager мог обновить одну сторону без другой).
+
+    Почему это важно: _users_get_or_create_ios_shadow(cfg, base_email)
+    ищет клиента в clients[] по email. Если передать email из
+    _unified_load_users(), а он не совпадает с тем, что в clients[] —
+    функция молча вернёт None ("юзер не найден"), админ не поймёт,
+    почему для конкретного человека iOS-ссылка не генерируется.
+
+    Фолбэк: если UUID не найден в clients[] — явное предупреждение, а не
+    молчаливый None.
+    """
+    core = _core_module()
+    _box_link = core._box_link
+    BOLD      = core.BOLD
+    NC        = core.NC
+    DIM       = core.DIM
+    warn      = core.warn
+    info      = core.info
+    cfg = _users_get_config()
+
+    # 1. Ищем client в config.json по UUID — это единый источник правды.
+    try:
+        with cfg.open() as f:
+            c = json.load(f)
+        clients = (c.get("inbounds", [{}])[0]
+                   .get("settings", {}).get("clients", []))
+        found = next((cl for cl in clients if cl.get("id", "") == uuid_str), None)
+    except Exception as e:
+        warn(f"Ошибка чтения config.json: {e}")
+        return
+
+    if not found:
+        # Явный фолбэк: UUID есть в users.json, но в clients[] его нет —
+        # значит юзер не применён (пункт "5. Применить список") либо
+        # UUID был удалён из config.json вручную. iOS-ссылку дать нельзя —
+        # Xray не пустит такого юзера и с оригинальной ссылкой, не только
+        # с iOS. Предупреждаем явно.
+        warn(f"UUID '{uuid_str[:8]}…' не найден в clients[] config.json.")
+        info("Возможно, список пользователей не применён (пункт 5 в меню).")
+        return
+
+    u_email = found.get("email", "")
+    if not u_email:
+        # В clients[] email может отсутствовать — тогда shadow-функция не
+        # сможет найти клиента по email (она именно так и ищет).
+        warn(f"У клиента с UUID '{uuid_str[:8]}…' в config.json нет email.")
+        info("Без email в clients[] невозможно создать iOS-shadow — "
+             "он ищется по email. Добавьте email юзеру и примените список [5].")
+        return
+
+    # 2. Дальше — та же логика, что и в do_user_show_link_ios.
+    shadow = _users_get_or_create_ios_shadow(cfg, u_email)
+    if shadow is None:
+        # xHTTP-режим — flow не используется, обычная ссылка на оригинальном
+        # UUID уже iOS-совместима.
+        link = _users_gen_link_ios(cfg, uuid_str, u_email)
+    else:
+        shadow_uuid, shadow_email = shadow
+        link = _users_gen_link_ios(cfg, shadow_uuid, shadow_email)
+    if link:
+        print(f"{BOLD}📱 iOS/Karing-совместимая VLESS-ссылка для '{u_email}':{NC}")
+        print(f"{DIM}  (без &flow=xtls-rprx-vision и без эмодзи-флага){NC}")
+        _box_link(link)
+        # Отдельное имя файла — не перезаписывать существующий QR.
+        _show_qr(link, f"{u_email} (iOS)", f"/root/vless_qr_ios_{u_email}.png")
+
+
 def do_user_menu() -> None:
     core = _core_module()
     _box_top    = core._box_top

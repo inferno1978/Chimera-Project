@@ -370,6 +370,7 @@ from vless_installer.modules.users_manager import (
     _users_load, _users_save, _users_get_config, _users_apply_config,
     _users_apply_to_config, _users_patch_config_no_restart, _users_gen_link,
     do_user_list, do_user_add, do_user_delete, do_user_show_link, do_user_menu,
+    do_user_show_link_ios_by_uuid,
     _show_qr, _gen_vless_link, generate_client_links, generate_client_links_ios,
     _unified_load_users, _unified_save_users, _unified_show_links,
     _do_user_stats_screen, _do_user_stats_screen_v2,
@@ -4523,6 +4524,7 @@ def do_unified_user_manager() -> None:
             _box_item("6", f"Изменить метку устройства")
             _box_item("7", f"Отключить / Восстановить пользователя")
             _box_item("8", f"Редактировать пользователя (имя / email)")
+            _box_item("K", f"📱 iOS/Karing-ссылка для пользователя  {DIM}(без Vision flow){NC}")
             _box_item("E", f"Экспорт всех пользователей (ZIP с QR-кодами)")
             _box_item("I", f"Информация: ограничение доступа по устройствам")
             _box_item("Q", f"Назад")
@@ -4772,6 +4774,29 @@ def do_unified_user_manager() -> None:
                     input(f"{BLUE}Нажмите Enter...{NC}")
                     continue
                 _do_export_users_zip(users, install_mode)
+                input(f"{BLUE}Нажмите Enter...{NC}")
+
+            elif ch == "k":
+                # iOS/Karing-ссылка для пользователя.
+                # Логика выбора — ДОСЛОВНАЯ копия пункта "3" (Показать ссылку):
+                # тот же паттерн `if not users`, `raw = input(...)`,
+                # `raw.isdigit() and 1 <= int(raw) <= len(users)`,
+                # `u = users[int(raw) - 1]`. Любая другая схема матчинга
+                # (email/uuid) создала бы второй источник правды в одном меню.
+                if not users:
+                    warn("Нет пользователей")
+                    time.sleep(1)
+                    continue
+                raw = input("  Номер пользователя: ").strip()
+                if not (raw.isdigit() and 1 <= int(raw) <= len(users)):
+                    warn("Неверный номер")
+                    input(f"{BLUE}Нажмите Enter...{NC}")
+                    continue
+                u = users[int(raw) - 1]
+                # do_user_show_link_ios_by_uuid берёт email НАПРЯМУЮ из
+                # clients[] config.json по UUID (а не из этого объекта u),
+                # чтобы избежать рассинхрона между users.json и clients[].
+                do_user_show_link_ios_by_uuid(u["uuid"])
                 input(f"{BLUE}Нажмите Enter...{NC}")
 
             elif ch == "i":
