@@ -115,8 +115,12 @@ def _print_qr(data: str, label: str = "") -> None:
     print()
 
 # ── Делегирование в _core.py (без circular import, без дублирования) ──────
+def _core_module():
+    """Возвращает модуль vless_installer._core (lazy import)."""
+    return importlib.import_module("vless_installer._core")
+
 def _core_call(func_name: str, *args, **kwargs):
-    core = importlib.import_module("vless_installer._core")
+    core = _core_module()
     return getattr(core, func_name)(*args, **kwargs)
 
 def _gen_vless_link(host, uuid_str, pbk, sid, domain, fp="chrome",
@@ -745,13 +749,16 @@ def _unit_text(python_bin: str, module_path: str, port: int) -> str:
     return (
         "[Unit]\n"
         "Description=Chimera unified subscription endpoint\n"
-        "After=network.target\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
         "\n"
         "[Service]\n"
         f"ExecStart={python_bin} -m vless_installer.modules.subscription serve {port}\n"
         f"WorkingDirectory={module_path}\n"
         "Restart=always\n"
         "RestartSec=3\n"
+        "StartLimitBurst=10\n"
+        "StartLimitIntervalSec=60\n"
         "User=root\n"
         "NoNewPrivileges=true\n"
         "ProtectSystem=strict\n"
@@ -762,16 +769,20 @@ def _unit_text(python_bin: str, module_path: str, port: int) -> str:
         "WantedBy=multi-user.target\n"
     )
 
-_NGINX_SNIPPET_TEXT = (
+_NGINX_SNIPPET_TEMPLATE = (
     "# vless-subscription — включить одной строкой внутри существующего\n"
     "# `server { listen 443 ssl; ... }` для домена:\n"
     "#   include /etc/nginx/snippets/vless-subscription.conf;\n"
-    "location /sub/ {\n"
-    "    proxy_pass https://127.0.0.1:8443;\n"
+    "location /sub/ {{\n"
+    "    proxy_pass https://127.0.0.1:{port};\n"
     "    proxy_ssl_verify off;\n"
     "    proxy_set_header Host $host;\n"
-    "}\n"
+    "}}\n"
 )
+
+def _nginx_snippet_text(port: int) -> str:
+    """Build the nginx snippet for the given port (was hardcoded to 8443)."""
+    return _NGINX_SNIPPET_TEMPLATE.format(port=port)
 
 def _fw_open_tcp(port: int) -> str:
     """Открывает TCP-порт подписки в файрволе. ufw, если активен (как
@@ -826,9 +837,19 @@ def _install_service(port: int) -> bool:
         repo_root  = str(Path(__file__).resolve().parents[2])
         _UNIT_PATH.write_text(_unit_text(python_bin, repo_root, port))
         _NGINX_SNIP.parent.mkdir(parents=True, exist_ok=True)
-        _NGINX_SNIP.write_text(_NGINX_SNIPPET_TEXT)
+        _NGINX_SNIP.write_text(_nginx_snippet_text(port))
         subprocess.run(["systemctl", "daemon-reload"], check=True)
-        subprocess.run(["systemctl", "enable", "--now", SERVICE_NAME], check=True)
+        # Clear any prior start-limit-hit failure so `restart` is not refused.
+        # Without this, `enable --now` (or `start`) is silently rejected by
+        # systemd when the unit is in failed state — which is why menu [1]
+        # alone couldn't recover from a port-bind crash (e.g. TrustTunnel on
+        # the same port). The user had to run [4] (stop/disable) first to
+        # clear the failed state, then [1]. Now [1] is self-healing.
+        subprocess.run(["systemctl", "reset-failed", SERVICE_NAME], check=False)
+        subprocess.run(["systemctl", "enable", SERVICE_NAME], check=True)
+        # `restart` (not `start`) so a unit-file change (new port, new cert)
+        # takes effect even if the service is already running on the old port.
+        subprocess.run(["systemctl", "restart", SERVICE_NAME], check=True)
         return True
     except Exception as e:
         _err(f"Не удалось установить сервис: {e}")
@@ -877,6 +898,26 @@ def do_subscription_menu() -> None:
                 port = int(input(f"Порт [{port}]: ").strip() or port)
             except ValueError:
                 pass
+            # Port-conflict check: prevent binding a port already taken by
+            # another protocol (TrustTunnel defaults to 8443, sing-box
+            # ShadowTLS/AnyTLS/TUIC use 8442-8444). Without this, the
+            # ThreadingHTTPServer constructor raises OSError: Address
+            # already in use → systemd start-limit-hit → subscription
+            # silently dies and [1] can't recover (until Fix B above).
+            try:
+                core = _core_module()
+                if hasattr(core, "check_port_used_by_other_protocol"):
+                    conflict = core.check_port_used_by_other_protocol(
+                        port, exclude_module="subscription",
+                    )
+                    if conflict:
+                        _err(f"Порт {port} занят другим протоколом:")
+                        _err(conflict)
+                        _warn("Выберите другой порт (например 8445, 8446, 9443).")
+                        input(f"\n{BOLD}Enter…{NC}")
+                        continue
+            except Exception as _e:
+                _warn(f"Не удалось проверить конфликт портов: {_e}")
             cfg["enabled"] = True
             cfg["listen_port"] = port
             _ensure_pepper(cfg)
