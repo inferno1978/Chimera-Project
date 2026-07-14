@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-VLESS Ultimate Installer — Entry Point
+Chimera Project — Entry Point
 ======================================
+Multi-Protocol Anti-DPI Installer
+
 Запуск: sudo python3 main.py
 
 Этот файл — тонкая обёртка. Вся логика находится в chimera/_core.py.
@@ -472,7 +474,7 @@ for _attempt in range(_MAX_RETRIES + 1):
                 from chimera import __version__ as _ver
             except Exception:
                 _ver = "unknown"
-            info(f"VLESS Ultimate Installer v{_ver} | RAM: {TOTAL_RAM}MB | CPU: {TOTAL_CPU} | {_flag} {_cn} ({_cc})")
+            info(f"Chimera Project v{_ver} | RAM: {TOTAL_RAM}MB | CPU: {TOTAL_CPU} | {_flag} {_cn} ({_cc})")
             print()
             _time.sleep(1)
 
