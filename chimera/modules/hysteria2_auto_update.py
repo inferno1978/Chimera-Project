@@ -148,7 +148,7 @@ def h2_autoupdate_install() -> None:
     """Устанавливает cron для ежесуточной проверки обновлений."""
     cron = "0 3 * * * root /usr/bin/python3 /opt/vless-installer/main.py --h2-autoupdate\n"
     _UPDATE_CRON.write_text(
-        "# H2 AutoUpdate — VLESS Ultimate Installer\n" + cron
+        "# H2 AutoUpdate — Chimera Project\n" + cron
     )
     success(f"AutoUpdate cron → {_UPDATE_CRON}")
     log_to_file("INFO", "H2 autoupdate cron installed")

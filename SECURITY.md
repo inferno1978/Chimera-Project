@@ -17,7 +17,7 @@
 Если вы обнаружили уязвимость — **не публикуйте её в Issues**.
 
 Напишите напрямую: откройте **приватное Security Advisory** на GitHub:
-`https://github.com/inferno1978/VLESS-Ultimate-Installer/security/advisories/new`
+`https://github.com/inferno1978/Chimera-Project/security/advisories/new`
 
 Либо свяжитесь через контакты в профиле. Ответ — в течение 72 часов.
 
