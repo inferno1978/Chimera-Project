@@ -1224,6 +1224,15 @@ def _extract_trusttunnel_ports(st: dict) -> list:
     return [int(p)] if isinstance(p, (int, str)) and str(p).isdigit() else []
 
 
+def _extract_subscription_ports(st: dict) -> list:
+    """VLESS Ultimate subscription endpoint: TCP-порт HTTPS-хендлера подписки.
+    state['listen_port'] (default 8443). Условие: state['enabled'] is True."""
+    if not isinstance(st, dict) or not st.get("enabled"):
+        return []
+    p = st.get("listen_port", 8443)
+    return [int(p)] if isinstance(p, (int, str)) and str(p).isdigit() else []
+
+
 def _extract_vless_state_ports(st: dict) -> list:
     """VLESS/REALITY основной state.json — порты xray/awg из Mode B chain.
     AWG_EXIT_PORT (UDP) и AWG_CLIENT_LISTEN_PORT (UDP) — могут конфликтовать
@@ -1306,6 +1315,12 @@ PROTOCOL_PORT_REGISTRY = [
         "label": "TrustTunnel (TCP+UDP, HTTP/2+HTTP/3)",
         "state_file": Path("/var/lib/xray-installer/trusttunnel.json"),
         "extractor": _extract_trusttunnel_ports,
+    },
+    {
+        "key": "subscription",
+        "label": "VLESS Ultimate subscription endpoint (TCP)",
+        "state_file": Path("/var/lib/xray-installer/subscription.json"),
+        "extractor": _extract_subscription_ports,
     },
 ]
 

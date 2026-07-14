@@ -496,7 +496,7 @@ def build_subscription_url_for_user(user_dict: dict,
     domain = state.get("domain", "")
     if not domain:
         return None
-    port = sub_conf.get("port", 8443)
+    port = sub_conf.get("listen_port", sub_conf.get("port", 8443))
 
     try:
         from vless_installer.modules.subscription import _token_for
