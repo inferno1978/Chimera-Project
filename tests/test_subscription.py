@@ -216,6 +216,51 @@ class TestUnitText(unittest.TestCase):
         self.assertIn("Restart=always", result)
 
 
+class TestNginxSnippetText(unittest.TestCase):
+    """_nginx_snippet_text — regression test for KeyError: ' listen 443 ssl; '.
+
+    The nginx snippet template contains a COMMENT with the text
+    `server { listen 443 ssl; ... }`. Python's str.format() interprets
+    `{ listen 443 ssl; ... }` as a named placeholder and raises KeyError
+    because no such argument is passed. The fix escapes literal braces
+    as {{ }} in the template.
+
+    This test ensures the template can be formatted for ANY port without
+    raising KeyError — regression guard for the production bug where
+    menu [1] crashed with:
+        [ERR] Не удалось установить сервис: ' listen 443 ssl; '
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_does_not_raise_keyerror_for_port_8443(self):
+        from vless_installer.modules.subscription import _nginx_snippet_text
+        # Should not raise KeyError
+        result = _nginx_snippet_text(8443)
+        self.assertIn("proxy_pass https://127.0.0.1:8443", result)
+
+    def test_does_not_raise_keyerror_for_arbitrary_port(self):
+        from vless_installer.modules.subscription import _nginx_snippet_text
+        # The user had listen_port=63876 in subscription.json
+        result = _nginx_snippet_text(63876)
+        self.assertIn("proxy_pass https://127.0.0.1:63876", result)
+
+    def test_contains_location_sub_block(self):
+        from vless_installer.modules.subscription import _nginx_snippet_text
+        result = _nginx_snippet_text(8443)
+        self.assertIn("location /sub/ {", result)
+        self.assertIn("}", result)
+
+    def test_comment_braces_are_literal_not_placeholders(self):
+        """The comment `server { listen 443 ssl; ... }` must appear literally
+        in the output — { and } must NOT be consumed by .format()."""
+        from vless_installer.modules.subscription import _nginx_snippet_text
+        result = _nginx_snippet_text(8443)
+        self.assertIn("server { listen 443 ssl; ... }", result,
+                      "literal braces in comment must survive .format()")
+
+
 class TestGenMieruShareLink(unittest.TestCase):
     """_gen_mieru_share_link — pure URL builder."""
 
