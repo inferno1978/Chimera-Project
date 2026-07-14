@@ -2,7 +2,7 @@
 """
 tests/test_hysteria2_traffic.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/hysteria2_traffic.py.
+Unit-тесты для chimera/modules/hysteria2_traffic.py.
 
 Покрывает:
   1. _bytes_to_human — форматирование байт
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -35,24 +35,24 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestH2TrafficBytesToHuman(unittest.TestCase):
     def setUp(self): _setup_core()
     def test_zero(self):
-        from vless_installer.modules.hysteria2_traffic import _bytes_to_human
+        from chimera.modules.hysteria2_traffic import _bytes_to_human
         self.assertIn("B", _bytes_to_human(0))
     def test_kb(self):
-        from vless_installer.modules.hysteria2_traffic import _bytes_to_human
+        from chimera.modules.hysteria2_traffic import _bytes_to_human
         self.assertIn("KB", _bytes_to_human(1024))
     def test_mb(self):
-        from vless_installer.modules.hysteria2_traffic import _bytes_to_human
+        from chimera.modules.hysteria2_traffic import _bytes_to_human
         self.assertIn("MB", _bytes_to_human(1024**2))
     def test_pb(self):
-        from vless_installer.modules.hysteria2_traffic import _bytes_to_human
+        from chimera.modules.hysteria2_traffic import _bytes_to_human
         self.assertIn("PB", _bytes_to_human(1024**5))
 
 
@@ -63,12 +63,12 @@ class TestH2TrafficCache(unittest.TestCase):
     def tearDown(self):
         import shutil; shutil.rmtree(self._tmp, ignore_errors=True)
     def _patch(self):
-        return patch("vless_installer.modules.hysteria2_traffic._STATS_CACHE", self._c)
+        return patch("chimera.modules.hysteria2_traffic._STATS_CACHE", self._c)
     def test_load_empty(self):
-        from vless_installer.modules.hysteria2_traffic import _load_cache
+        from chimera.modules.hysteria2_traffic import _load_cache
         with self._patch(): self.assertEqual(_load_cache(), {})
     def test_save_load(self):
-        from vless_installer.modules.hysteria2_traffic import _load_cache, _save_cache
+        from chimera.modules.hysteria2_traffic import _load_cache, _save_cache
         with self._patch():
             _save_cache({"bytes":100}); self.assertEqual(_load_cache()["bytes"], 100)
 

@@ -4,8 +4,8 @@ VLESS Ultimate Installer — Entry Point
 ======================================
 Запуск: sudo python3 main.py
 
-Этот файл — тонкая обёртка. Вся логика находится в vless_installer/_core.py.
-Версия берётся динамически из vless_installer.__version__ — при бампе
+Этот файл — тонкая обёртка. Вся логика находится в chimera/_core.py.
+Версия берётся динамически из chimera.__version__ — при бампе
 версии в __init__.py не нужно вручную обновлять хардкод здесь.
 """
 
@@ -20,21 +20,21 @@ from pathlib import Path
 # Используем exec чтобы _core.py выполнился в глобальном пространстве имён —
 # так все его переменные, функции и monkey-patch input() работают точно так же
 # как в оригинальном install.py
-_core_path = Path(__file__).parent / "vless_installer" / "_core.py"
+_core_path = Path(__file__).parent / "chimera" / "_core.py"
 with open(_core_path, encoding="utf-8") as _f:
     _core_src = _f.read()
 
 exec(compile(_core_src, str(_core_path), "exec"), globals())  # noqa: S102
 
 # =============================================================================
-#  Регистрируем __main__ как vless_installer._core в sys.modules
+#  Регистрируем __main__ как chimera._core в sys.modules
 #  КРИТИЧНО: без этого _core_module() в вынесенных модулях создаёт ОТДЕЛЬНЫЙ
 #  экземпляр _core.py (через importlib), и setattr(core, "PARAM_DOMAIN", ...)
 #  пишет в другой namespace — do_full_install и main_menu не видят изменения.
 #  С этой строкой _core_module() возвращает __main__ — тот же namespace,
 #  где _core.py был exec'нут, и мутации глобалей распространяются корректно.
 # =============================================================================
-sys.modules["vless_installer._core"] = sys.modules["__main__"]
+sys.modules["chimera._core"] = sys.modules["__main__"]
 
 # =============================================================================
 #  Точка входа (перенесена из оригинального if __name__ == "__main__":)
@@ -119,7 +119,7 @@ if "--dpi-check" in sys.argv:
     if os.geteuid() != 0:
         print("ERROR: требуются права root", file=sys.stderr)
         sys.exit(1)
-    from vless_installer.modules.dpi_detector import _dpi_run_once
+    from chimera.modules.dpi_detector import _dpi_run_once
     n = _dpi_run_once()
     if n:
         print(f"[DPI] Заблокировано: {n}")
@@ -130,7 +130,7 @@ if "--smart-balance" in sys.argv:
     if os.geteuid() != 0:
         print("ERROR: требуются права root", file=sys.stderr)
         sys.exit(1)
-    from vless_installer.modules.smart_balancer import _awg_guard_cron, _smart_balancer_run_once
+    from chimera.modules.smart_balancer import _awg_guard_cron, _smart_balancer_run_once
     if not _awg_guard_cron("SmartBalancer"):
         _smart_balancer_run_once()
     sys.exit(0)
@@ -140,8 +140,8 @@ if "--pinned-fallback-check" in sys.argv:
     if os.geteuid() != 0:
         print("ERROR: требуются права root", file=sys.stderr)
         sys.exit(1)
-    from vless_installer.modules.smart_balancer import _awg_guard_cron
-    from vless_installer.modules.dpi_detector import _pinned_node_check_and_fallback
+    from chimera.modules.smart_balancer import _awg_guard_cron
+    from chimera.modules.dpi_detector import _pinned_node_check_and_fallback
     if _awg_guard_cron("PinnedFallback"):
         sys.exit(0)
     if STATE_FILE.exists():
@@ -208,7 +208,7 @@ if "--traffic-check" in sys.argv:
         print("ERROR: требуются права root", file=sys.stderr)
         sys.exit(1)
     try:
-        from vless_installer.modules.user_lifecycle import check_traffic_limits
+        from chimera.modules.user_lifecycle import check_traffic_limits
         blocked = check_traffic_limits()
         if blocked:
             print(f"[TRAFFIC] Заблокировано {blocked} пользователей превысивших лимит")
@@ -227,7 +227,7 @@ if "--lifecycle-cleanup" in sys.argv:
         print("ERROR: требуются права root", file=sys.stderr)
         sys.exit(1)
     try:
-        from vless_installer.modules.user_lifecycle import run_cleanup
+        from chimera.modules.user_lifecycle import run_cleanup
         result = run_cleanup()
         print(f"[LIFECYCLE] TTL blocked: {result['ttl_blocked']}, "
               f"traffic blocked: {result['traffic_blocked']}, "
@@ -242,7 +242,7 @@ if "--ingress-geoip-update" in sys.argv:
     if os.geteuid() != 0:
         print("ERROR: требуются права root", file=sys.stderr)
         sys.exit(1)
-    from vless_installer.modules.ingress_geoip import _ingress_remove, _ingress_enable, _ingress_state_load
+    from chimera.modules.ingress_geoip import _ingress_remove, _ingress_enable, _ingress_state_load
     _st = _ingress_state_load()
     if not _st.get("enabled"):
         print("[ingress-geoip] Блокировка не включена — пропуск")
@@ -259,7 +259,7 @@ if "--telemt-panel-geoip-update" in sys.argv:
     if os.geteuid() != 0:
         print("ERROR: требуются права root", file=sys.stderr)
         sys.exit(1)
-    from vless_installer.modules import telemt_panel as _tp
+    from chimera.modules import telemt_panel as _tp
     if not _tp._is_installed():
         print("[telemt-panel-geoip] Панель не установлена — пропуск")
         sys.exit(0)
@@ -278,7 +278,7 @@ if "--h2-install-exit" in sys.argv:
     if os.geteuid() != 0:
         print("ERROR: требуются права root", file=sys.stderr)
         sys.exit(1)
-    from vless_installer.modules.hysteria2_exit_mgr import h2_exit_install
+    from chimera.modules.hysteria2_exit_mgr import h2_exit_install
     _h2_raw = ""
     if "--h2-port" in sys.argv:
         _idx = sys.argv.index("--h2-port")
@@ -290,7 +290,7 @@ if "--h2-install-exit" in sys.argv:
 
 # --- Hysteria2: статус ---
 if "--h2-status" in sys.argv:
-    from vless_installer.modules.hysteria2_exit_mgr import h2_exit_status
+    from chimera.modules.hysteria2_exit_mgr import h2_exit_status
     print(json.dumps(h2_exit_status(), indent=2, ensure_ascii=False))
     sys.exit(0)
 
@@ -298,7 +298,7 @@ if "--h2-status" in sys.argv:
 if "--h2-health" in sys.argv:
     if os.geteuid() != 0:
         sys.exit(1)
-    from vless_installer.modules.hysteria2_health import h2_health_check_cron
+    from chimera.modules.hysteria2_health import h2_health_check_cron
     h2_health_check_cron()
     sys.exit(0)
 
@@ -306,7 +306,7 @@ if "--h2-health" in sys.argv:
 if "--trusttunnel-health" in sys.argv:
     if os.geteuid() != 0:
         sys.exit(1)
-    from vless_installer.modules.trusttunnel_health import trusttunnel_health_check_cron
+    from chimera.modules.trusttunnel_health import trusttunnel_health_check_cron
     trusttunnel_health_check_cron()
     sys.exit(0)
 
@@ -314,7 +314,7 @@ if "--trusttunnel-health" in sys.argv:
 if "--trusttunnel-stats" in sys.argv:
     if os.geteuid() != 0:
         sys.exit(1)
-    from vless_installer.modules.trusttunnel_stats import trusttunnel_stats_cron
+    from chimera.modules.trusttunnel_stats import trusttunnel_stats_cron
     trusttunnel_stats_cron()
     sys.exit(0)
 
@@ -322,7 +322,7 @@ if "--trusttunnel-stats" in sys.argv:
 if "--h2-watchdog-run" in sys.argv:
     if os.geteuid() != 0:
         sys.exit(1)
-    from vless_installer.modules.hysteria2_watchdog import h2_watchdog_run
+    from chimera.modules.hysteria2_watchdog import h2_watchdog_run
     h2_watchdog_run()
     sys.exit(0)
 
@@ -330,13 +330,13 @@ if "--h2-watchdog-run" in sys.argv:
 if "--h2-autoupdate" in sys.argv:
     if os.geteuid() != 0:
         sys.exit(1)
-    from vless_installer.modules.hysteria2_auto_update import h2_autoupdate_cron
+    from chimera.modules.hysteria2_auto_update import h2_autoupdate_cron
     h2_autoupdate_cron()
     sys.exit(0)
 
 # --- Hysteria2: мониторинг сертификата (из cron еженедельно) ---
 if "--h2-cert-monitor" in sys.argv:
-    from vless_installer.modules.hysteria2_cert_mgr import h2_cert_monitor
+    from chimera.modules.hysteria2_cert_mgr import h2_cert_monitor
     h2_cert_monitor()
     sys.exit(0)
 
@@ -344,19 +344,19 @@ if "--h2-cert-monitor" in sys.argv:
 if "--h2-dpi-check" in sys.argv:
     if os.geteuid() != 0:
         sys.exit(1)
-    from vless_installer.modules.hysteria2_dpi import h2_dpi_auto_fallback
+    from chimera.modules.hysteria2_dpi import h2_dpi_auto_fallback
     h2_dpi_auto_fallback()
     sys.exit(0)
 
 # --- Hysteria2: статистика трафика ---
 if "--h2-traffic" in sys.argv:
-    from vless_installer.modules.hysteria2_traffic import h2_traffic_report
+    from chimera.modules.hysteria2_traffic import h2_traffic_report
     print(h2_traffic_report())
     sys.exit(0)
 
 # --- Hysteria2: отчёт качества ---
 if "--h2-quality-report" in sys.argv:
-    from vless_installer.modules.hysteria2_quality import h2_quality_report
+    from chimera.modules.hysteria2_quality import h2_quality_report
     print(h2_quality_report(send_tg="--tg" in sys.argv))
     sys.exit(0)
 
@@ -378,10 +378,10 @@ if "--h2-transport" in sys.argv:
     _idx = sys.argv.index("--h2-transport")
     _val = sys.argv[_idx + 1] if _idx + 1 < len(sys.argv) else "h2"
     if _val.lower() == "awg":
-        from vless_installer.modules.hysteria2_transport import h2_transport_remove
+        from chimera.modules.hysteria2_transport import h2_transport_remove
         h2_transport_remove()
     else:
-        from vless_installer.modules.hysteria2_transport import h2_transport_apply
+        from chimera.modules.hysteria2_transport import h2_transport_apply
         h2_transport_apply()
     sys.exit(0)
 
@@ -391,13 +391,13 @@ if "--h2-cluster" in sys.argv:
         sys.exit(1)
     _idx = sys.argv.index("--h2-cluster")
     _op  = sys.argv[_idx + 1] if _idx + 1 < len(sys.argv) else "status"
-    from vless_installer.modules.hysteria2_cluster import h2_cluster_run
+    from chimera.modules.hysteria2_cluster import h2_cluster_run
     h2_cluster_run(_op)
     sys.exit(0)
 
 # --- Hysteria2: smoke test ---
 if "--h2-smoke" in sys.argv:
-    from vless_installer.modules.hysteria2_smoke_test import h2_smoke_test
+    from chimera.modules.hysteria2_smoke_test import h2_smoke_test
     sys.exit(0 if h2_smoke_test(verbose=True) else 1)
 
 # --- Hysteria2: веса балансировщика ---
@@ -405,7 +405,7 @@ if "--h2-weights" in sys.argv:
     _idx = sys.argv.index("--h2-weights")
     _raw = sys.argv[_idx + 1] if _idx + 1 < len(sys.argv) else ""
     if _raw:
-        from vless_installer.modules.hysteria2_common import _load_h2_state, _save_h2_state
+        from chimera.modules.hysteria2_common import _load_h2_state, _save_h2_state
         _h2s = _load_h2_state()
         for _pair in _raw.split(","):
             if ":" in _pair:
@@ -466,10 +466,10 @@ for _attempt in range(_MAX_RETRIES + 1):
             print_banner()
             print()
             _cc, _cn, _flag = get_server_country_cached()
-            # Динамическая версия — берётся из vless_installer.__version__,
+            # Динамическая версия — берётся из chimera.__version__,
             # чтобы при бампе версии не нужно было вручную обновлять хардкод.
             try:
-                from vless_installer import __version__ as _ver
+                from chimera import __version__ as _ver
             except Exception:
                 _ver = "unknown"
             info(f"VLESS Ultimate Installer v{_ver} | RAM: {TOTAL_RAM}MB | CPU: {TOTAL_CPU} | {_flag} {_cn} ({_cc})")

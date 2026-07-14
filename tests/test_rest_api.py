@@ -2,7 +2,7 @@
 """
 tests/test_rest_api.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/rest_api.py — функции генерации
+Unit-тесты для chimera/modules/rest_api.py — функции генерации
 конфигов и синхронизации пользователей.
 
 Покрывает:
@@ -29,7 +29,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core_in_sysmodules():
     """Загружает _core.py через exec и регистрирует в sys.modules."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -39,9 +39,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -61,8 +61,8 @@ class _MockState:
         self._patches = []
 
     def __enter__(self):
-        from vless_installer.modules import rest_api
-        core = sys.modules.get("vless_installer._core")
+        from chimera.modules import rest_api
+        core = sys.modules.get("chimera._core")
         self._patches = [
             patch.object(rest_api, "_get_state", return_value=self.state_dict),
             patch.object(rest_api, "_get_users", return_value=self.users),
@@ -149,7 +149,7 @@ class TestGenerateVlessLinks(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_reality_link_contains_all_params(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY):
             links = rest_api._generate_vless_links(_FAKE_USER)
         self.assertEqual(len(links), 1)
@@ -164,7 +164,7 @@ class TestGenerateVlessLinks(unittest.TestCase):
         self.assertIn("flow=xtls-rprx-vision", link)
 
     def test_xhttp_link_contains_path(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_XHTTP):
             links = rest_api._generate_vless_links(_FAKE_USER)
         self.assertEqual(len(links), 1)
@@ -174,7 +174,7 @@ class TestGenerateVlessLinks(unittest.TestCase):
         self.assertIn("path=%2Fxhttp", link)  # URL-encoded /xhttp
 
     def test_ipv6_link_present_when_ipv6_in_state(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         state = {**_FAKE_STATE_REALITY, "ipv6": "2001:db8::1"}
         with patch.object(rest_api, "_get_state", return_value=state):
             links = rest_api._generate_vless_links(_FAKE_USER)
@@ -183,7 +183,7 @@ class TestGenerateVlessLinks(unittest.TestCase):
         self.assertIn("[2001:db8::1]", links[1]["link"])
 
     def test_no_ipv6_link_when_empty(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY):
             links = rest_api._generate_vless_links(_FAKE_USER)
         self.assertEqual(len(links), 1)
@@ -196,7 +196,7 @@ class TestGenerateClashConfig(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_reality_clash_has_all_fields(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY):
             clash = rest_api._generate_clash_config(_FAKE_USER)
         self.assertIn("type: vless", clash)
@@ -209,7 +209,7 @@ class TestGenerateClashConfig(unittest.TestCase):
         self.assertIn("client-fingerprint: firefox", clash)
 
     def test_xhttp_clash_has_http_opts(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_XHTTP):
             clash = rest_api._generate_clash_config(_FAKE_USER)
         self.assertIn("network: http", clash)
@@ -223,7 +223,7 @@ class TestGenerateSingboxConfig(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_reality_singbox_valid_json(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY):
             singbox_str = rest_api._generate_singbox_config(_FAKE_USER)
         config = json.loads(singbox_str)
@@ -240,7 +240,7 @@ class TestGenerateSingboxConfig(unittest.TestCase):
         self.assertEqual(ob["tls"]["utls"]["fingerprint"], "firefox")
 
     def test_xhttp_singbox_has_transport(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_XHTTP):
             singbox_str = rest_api._generate_singbox_config(_FAKE_USER)
         config = json.loads(singbox_str)
@@ -256,7 +256,7 @@ class TestGenerateHiddifyConfig(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_reality_hiddify_valid_json_with_routing(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY):
             hiddify_str = rest_api._generate_hiddify_config(_FAKE_USER)
         config = json.loads(hiddify_str)
@@ -273,7 +273,7 @@ class TestGenerateHiddifyConfig(unittest.TestCase):
         self.assertEqual(rule["outbound"], "vless-out")
 
     def test_xhttp_hiddify_has_transport(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_XHTTP):
             hiddify_str = rest_api._generate_hiddify_config(_FAKE_USER)
         config = json.loads(hiddify_str)
@@ -283,7 +283,7 @@ class TestGenerateHiddifyConfig(unittest.TestCase):
 
     def test_hiddify_sni_correct_for_awg_mode(self):
         """SNI = reality_dest в Mode B + AWG (не domain)."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         state = {
             **_FAKE_STATE_REALITY,
             "install_mode": "B",
@@ -304,7 +304,7 @@ class TestGenerateVlessLinkPlain(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_first_link(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY):
             link = rest_api._generate_vless_link_plain(_FAKE_USER)
         self.assertTrue(link.startswith("vless://"))
@@ -312,7 +312,7 @@ class TestGenerateVlessLinkPlain(unittest.TestCase):
         self.assertIn("total-shadows.online", link)
 
     def test_empty_when_no_links(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         empty_state = {"domain": "", "server_port": 443, "protocol_mode": "reality"}
         with patch.object(rest_api, "_get_state", return_value=empty_state):
             link = rest_api._generate_vless_link_plain(_FAKE_USER)
@@ -338,7 +338,7 @@ class TestSyncUsersFromConfig(unittest.TestCase):
 
     def test_adds_missing_users_from_config(self):
         """Юзеры из config.json подтягиваются в users.json."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         config = self._make_config_with_clients([
             {"id": "uuid-1", "email": "alice@xray"},
             {"id": "uuid-2", "email": "bob@xray"},
@@ -349,7 +349,7 @@ class TestSyncUsersFromConfig(unittest.TestCase):
              patch.object(rest_api, "_get_users", return_value=list(existing_users)), \
              patch.object(rest_api, "_save_users") as mock_save:
             # Мокаем config.json
-            core = sys.modules.get("vless_installer._core")
+            core = sys.modules.get("chimera._core")
             with patch.object(core, "CONFIG_DIR", Path("/tmp/test_config_dir")), \
                  patch("pathlib.Path.exists", return_value=True), \
                  patch("pathlib.Path.read_text", return_value=json.dumps(config)):
@@ -363,7 +363,7 @@ class TestSyncUsersFromConfig(unittest.TestCase):
 
     def test_no_duplicates_when_already_synced(self):
         """Если юзеры уже в users.json — ничего не добавляется."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         config = self._make_config_with_clients([
             {"id": "uuid-1", "email": "alice@xray"},
         ])
@@ -372,7 +372,7 @@ class TestSyncUsersFromConfig(unittest.TestCase):
         with patch.object(rest_api, "_get_state", return_value={}), \
              patch.object(rest_api, "_get_users", return_value=list(existing_users)), \
              patch.object(rest_api, "_save_users") as mock_save:
-            core = sys.modules.get("vless_installer._core")
+            core = sys.modules.get("chimera._core")
             with patch.object(core, "CONFIG_DIR", Path("/tmp/test_config_dir")), \
                  patch("pathlib.Path.exists", return_value=True), \
                  patch("pathlib.Path.read_text", return_value=json.dumps(config)):
@@ -383,7 +383,7 @@ class TestSyncUsersFromConfig(unittest.TestCase):
 
     def test_returns_zero_when_no_config(self):
         """Если config.json не существует — return 0."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         with patch.object(rest_api, "_get_state", return_value={}), \
              patch.object(rest_api, "_get_users", return_value=[]), \
              patch("pathlib.Path.exists", return_value=False):
@@ -392,7 +392,7 @@ class TestSyncUsersFromConfig(unittest.TestCase):
 
     def test_returns_zero_when_no_vless_clients(self):
         """Если в config.json нет VLESS inbounds — return 0."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         config = {"inbounds": [{"protocol": "shadowsocks"}]}
         with patch.object(rest_api, "_get_state", return_value={}), \
              patch.object(rest_api, "_get_users", return_value=[]), \
@@ -403,7 +403,7 @@ class TestSyncUsersFromConfig(unittest.TestCase):
 
     def test_skips_zero_uuid(self):
         """UUID '00000000-...' пропускается (дефолтный placeholder)."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         config = self._make_config_with_clients([
             {"id": "00000000-0000-0000-0000-000000000000", "email": "placeholder"},
             {"id": "real-uuid", "email": "real@xray"},
@@ -412,7 +412,7 @@ class TestSyncUsersFromConfig(unittest.TestCase):
         with patch.object(rest_api, "_get_state", return_value={}), \
              patch.object(rest_api, "_get_users", return_value=[]), \
              patch.object(rest_api, "_save_users") as mock_save:
-            core = sys.modules.get("vless_installer._core")
+            core = sys.modules.get("chimera._core")
             with patch.object(core, "CONFIG_DIR", Path("/tmp/test_config_dir")), \
                  patch("pathlib.Path.exists", return_value=True), \
                  patch("pathlib.Path.read_text", return_value=json.dumps(config)):

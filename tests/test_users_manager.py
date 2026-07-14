@@ -2,7 +2,7 @@
 """
 tests/test_users_manager.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/users_manager.py — управление
+Unit-тесты для chimera/modules/users_manager.py — управление
 пользователями Xray, генерация VLESS-ссылок, синхронизация config.json.
 
 Покрывает:
@@ -33,7 +33,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core_in_sysmodules():
     """Эталонный паттерн из tests/test_health.py."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -42,9 +42,9 @@ def _setup_core_in_sysmodules():
          patch('os.chown', lambda *a, **kw: None), \
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -61,7 +61,7 @@ class TestGenVlessLink(unittest.TestCase):
             return_value=("RU", "Russia", ""))
 
     def test_reality_link_contains_all_params(self):
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         link = _gen_vless_link(
             host="1.2.3.4", uuid_str="uuid-1234", pbk="PUB",
             sid="abcd1234", domain="example.com",
@@ -77,7 +77,7 @@ class TestGenVlessLink(unittest.TestCase):
         self.assertIn("flow=xtls-rprx-vision", link)
 
     def test_xhttp_link_contains_path_and_mode(self):
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         link = _gen_vless_link(
             host="1.2.3.4", uuid_str="uuid-1234", pbk="",
             sid="", domain="example.com",
@@ -98,7 +98,7 @@ class TestGenVlessLink(unittest.TestCase):
 
     def test_flag_emoji_added_to_label(self):
         """Флаг-эмодзи добавляется к label, если не '🌐' и не пустой."""
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         self._fake_core.get_server_country_cached = MagicMock(
             return_value=("RU", "Russia", "🇷🇺"))
         link = _gen_vless_link(
@@ -110,7 +110,7 @@ class TestGenVlessLink(unittest.TestCase):
 
     def test_no_flag_when_emoji_is_globe(self):
         """Если флаг == '🌐' — не добавляется префикс."""
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         self._fake_core.get_server_country_cached = MagicMock(
             return_value=("XX", "Unknown", "🌐"))
         link = _gen_vless_link(
@@ -122,7 +122,7 @@ class TestGenVlessLink(unittest.TestCase):
 
     def test_domain_is_url_encoded_in_label(self):
         """Domain URL-кодируется в label (после #)."""
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         # domain с пробелом — должен быть URL-encoded
         link = _gen_vless_link(
             host="1.2.3.4", uuid_str="uuid", pbk="P", sid="S",
@@ -133,7 +133,7 @@ class TestGenVlessLink(unittest.TestCase):
 
     def test_xhttp_path_with_spaces_url_encoded(self):
         """xhttp_path с пробелами URL-кодируется."""
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         link = _gen_vless_link(
             host="1.2.3.4", uuid_str="uuid", pbk="", sid="",
             domain="example.com", proto="xhttp",
@@ -145,7 +145,7 @@ class TestGenVlessLink(unittest.TestCase):
     def test_ipv6_host_keeps_brackets(self):
         """IPv6-хост должен передаваться в формате [::1] (вызывающая сторона
         обязана обернуть адрес в [], функция не убирает скобки)."""
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         link = _gen_vless_link(
             host="[2001:db8::1]", uuid_str="uuid", pbk="P", sid="S",
             domain="example.com", proto="reality", port=443,
@@ -153,7 +153,7 @@ class TestGenVlessLink(unittest.TestCase):
         self.assertIn("[2001:db8::1]:443", link)
 
     def test_non_default_port_in_link(self):
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         link = _gen_vless_link(
             host="1.2.3.4", uuid_str="uuid", pbk="P", sid="S",
             domain="example.com", proto="reality", port=8443,
@@ -184,7 +184,7 @@ class TestUsersLoad(unittest.TestCase):
         c.STATE_FILE = self._state_file
 
     def test_returns_list_from_users_file(self):
-        from vless_installer.modules.users_manager import _users_load
+        from chimera.modules.users_manager import _users_load
         self._patch_paths()
         users = [
             {"uuid": "u1", "email": "a@x", "name": "alice"},
@@ -196,14 +196,14 @@ class TestUsersLoad(unittest.TestCase):
         self.assertEqual(result[0]["uuid"], "u1")
 
     def test_returns_empty_when_no_users_file_no_state(self):
-        from vless_installer.modules.users_manager import _users_load
+        from chimera.modules.users_manager import _users_load
         self._patch_paths()
         result = _users_load()
         self.assertEqual(result, [])
 
     def test_initializes_from_state_when_no_users_file(self):
         """users.json отсутствует, но state.json содержит uuid → 1 default user."""
-        from vless_installer.modules.users_manager import _users_load
+        from chimera.modules.users_manager import _users_load
         self._patch_paths()
         self._state_file.write_text(json.dumps({
             "uuid": "test-uuid",
@@ -218,7 +218,7 @@ class TestUsersLoad(unittest.TestCase):
         self.assertEqual(result[0]["created"], "2024-01-01")
 
     def test_returns_empty_on_corrupt_users_file(self):
-        from vless_installer.modules.users_manager import _users_load
+        from chimera.modules.users_manager import _users_load
         self._patch_paths()
         self._users_file.write_text("{invalid json!!!")
         result = _users_load()
@@ -242,7 +242,7 @@ class TestUsersSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_writes_valid_json(self):
-        from vless_installer.modules.users_manager import _users_save
+        from chimera.modules.users_manager import _users_save
         users = [{"uuid": "u1", "email": "a@x", "name": "alice"}]
         _users_save(users)
         data = json.loads(self._users_file.read_text())
@@ -250,7 +250,7 @@ class TestUsersSave(unittest.TestCase):
         self.assertEqual(data[0]["uuid"], "u1")
 
     def test_sets_chmod_640(self):
-        from vless_installer.modules.users_manager import _users_save
+        from chimera.modules.users_manager import _users_save
         _users_save([{"uuid": "u", "email": "e@x", "name": "n"}])
         mode = stat.S_IMODE(os.stat(self._users_file).st_mode)
         self.assertEqual(mode, 0o640,
@@ -258,7 +258,7 @@ class TestUsersSave(unittest.TestCase):
 
     def test_creates_parent_dir(self):
         """Родительская директория создаётся при отсутствии."""
-        from vless_installer.modules.users_manager import _users_save
+        from chimera.modules.users_manager import _users_save
         # _users_file уже указывает на subdir/users.json, но subdir не существует
         # Path.mkdir патчится в _setup_core_in_sysmodules — распатчим для этого теста
         with patch.object(Path, 'mkdir', Path.mkdir.__wrapped__ if hasattr(Path.mkdir, '__wrapped__') else Path.mkdir):
@@ -266,7 +266,7 @@ class TestUsersSave(unittest.TestCase):
         self.assertTrue(self._users_file.exists())
 
     def test_overwrites_existing(self):
-        from vless_installer.modules.users_manager import _users_save
+        from chimera.modules.users_manager import _users_save
         _users_save([{"uuid": "v1", "email": "a@x", "name": "n1"}])
         _users_save([{"uuid": "v2", "email": "b@x", "name": "n2"}])
         data = json.loads(self._users_file.read_text())
@@ -327,7 +327,7 @@ class TestUsersPatchConfigNoRestart(unittest.TestCase):
 
     def test_reality_inbound_gets_flow(self):
         """REALITY inbound → clients получают 'flow' поле."""
-        from vless_installer.modules.users_manager import _users_patch_config_no_restart
+        from chimera.modules.users_manager import _users_patch_config_no_restart
         self._write_reality_config()
         users = [{"uuid": "u1", "email": "a@x"}]
         result = _users_patch_config_no_restart(users)
@@ -341,7 +341,7 @@ class TestUsersPatchConfigNoRestart(unittest.TestCase):
 
     def test_xhttp_inbound_no_flow(self):
         """xhttp inbound → clients БЕЗ 'flow' поля."""
-        from vless_installer.modules.users_manager import _users_patch_config_no_restart
+        from chimera.modules.users_manager import _users_patch_config_no_restart
         self._write_xhttp_config()
         users = [{"uuid": "u1", "email": "a@x"}]
         result = _users_patch_config_no_restart(users)
@@ -353,7 +353,7 @@ class TestUsersPatchConfigNoRestart(unittest.TestCase):
 
     def test_returns_true_when_no_config(self):
         """Если config.json не существует — True (ничего не делаем)."""
-        from vless_installer.modules.users_manager import _users_patch_config_no_restart
+        from chimera.modules.users_manager import _users_patch_config_no_restart
         # Удаляем конфиг
         if self._cfg.exists():
             self._cfg.unlink()
@@ -362,7 +362,7 @@ class TestUsersPatchConfigNoRestart(unittest.TestCase):
 
     def test_user_without_email_skipped_email_field(self):
         """Если у пользователя нет email — поле email не добавляется в client."""
-        from vless_installer.modules.users_manager import _users_patch_config_no_restart
+        from chimera.modules.users_manager import _users_patch_config_no_restart
         self._write_reality_config()
         users = [{"uuid": "u1"}]  # без email
         result = _users_patch_config_no_restart(users)
@@ -374,7 +374,7 @@ class TestUsersPatchConfigNoRestart(unittest.TestCase):
 
     def test_skips_inbounds_without_clients(self):
         """Inbound без секции 'clients' — пропускается."""
-        from vless_installer.modules.users_manager import _users_patch_config_no_restart
+        from chimera.modules.users_manager import _users_patch_config_no_restart
         cfg = {
             "inbounds": [
                 {"tag": "dokodemo", "protocol": "dokodemo-door",
@@ -413,7 +413,7 @@ class TestUnifiedLoadUsers(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_loads_from_users_json(self):
-        from vless_installer.modules.users_manager import _unified_load_users
+        from chimera.modules.users_manager import _unified_load_users
         self._users_file.write_text(json.dumps([
             {"uuid": "u1", "email": "a@x", "name": "alice",
              "created": "2024-01-01", "source": "B"},
@@ -434,7 +434,7 @@ class TestUnifiedLoadUsers(unittest.TestCase):
         self.assertEqual(result[0]["source"], "B")
 
     def test_loads_from_config_json_when_no_users_file(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         # _unified_load_users хардкодит /etc/xray/config.json и /usr/local/etc/xray/config.json
         # Патчим только эти пути — на чтение из нашего tmp cfg.
         cfg = {
@@ -476,7 +476,7 @@ class TestUnifiedLoadUsers(unittest.TestCase):
 
     def test_deduplicates_by_uuid(self):
         """Один и тот же UUID в users.json и config.json — один пользователь (приоритет users.json)."""
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         self._users_file.write_text(json.dumps([
             {"uuid": "shared-uuid", "email": "from_users@x", "name": "alice"},
         ]))
@@ -521,14 +521,14 @@ class TestUnifiedLoadUsers(unittest.TestCase):
         self.assertEqual(result[0]["email"], "from_users@x")
 
     def test_empty_when_no_sources(self):
-        from vless_installer.modules.users_manager import _unified_load_users
+        from chimera.modules.users_manager import _unified_load_users
         with patch.object(Path, "exists", return_value=False):
             result = _unified_load_users()
         self.assertEqual(result, [])
 
     def test_preserves_disabled_flag(self):
         """Флаг disabled из users.json сохраняется."""
-        from vless_installer.modules.users_manager import _unified_load_users
+        from chimera.modules.users_manager import _unified_load_users
         self._users_file.write_text(json.dumps([
             {"uuid": "u1", "email": "a@x", "name": "alice",
              "disabled": True, "disabled_at": "2024-06-01"},
@@ -570,7 +570,7 @@ class TestUnifiedSaveUsers(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_writes_users_json(self):
-        from vless_installer.modules.users_manager import _unified_save_users
+        from chimera.modules.users_manager import _unified_save_users
         users = [{"uuid": "u1", "email": "a@x", "name": "alice"}]
         _unified_save_users(users)
         data = json.loads(self._users_file.read_text())
@@ -580,7 +580,7 @@ class TestUnifiedSaveUsers(unittest.TestCase):
         self.assertEqual(data[0]["source"], "A")
 
     def test_syncs_to_config_json(self):
-        from vless_installer.modules.users_manager import _unified_save_users
+        from chimera.modules.users_manager import _unified_save_users
         cfg = {
             "inbounds": [{
                 "protocol": "vless",
@@ -597,7 +597,7 @@ class TestUnifiedSaveUsers(unittest.TestCase):
         self.assertEqual(clients[0]["id"], "u1")
 
     def test_preserves_disabled_flag_in_users_json(self):
-        from vless_installer.modules.users_manager import _unified_save_users
+        from chimera.modules.users_manager import _unified_save_users
         users = [{"uuid": "u1", "email": "a@x", "name": "alice",
                   "disabled": True, "disabled_at": "2024-06-01"}]
         _unified_save_users(users)
@@ -607,14 +607,14 @@ class TestUnifiedSaveUsers(unittest.TestCase):
 
     def test_name_defaults_from_email(self):
         """Если name не указан — берётся из email (часть до @)."""
-        from vless_installer.modules.users_manager import _unified_save_users
+        from chimera.modules.users_manager import _unified_save_users
         _unified_save_users([{"uuid": "u", "email": "alice@example.com"}])
         data = json.loads(self._users_file.read_text())
         self.assertEqual(data[0]["name"], "alice")
 
     def test_xhttp_inbound_no_flow(self):
         """xhttp inbound → clients БЕЗ flow (use_flow=False, но net='xhttp' исключён)."""
-        from vless_installer.modules.users_manager import _unified_save_users
+        from chimera.modules.users_manager import _unified_save_users
         cfg = {
             "inbounds": [{
                 "protocol": "vless",
@@ -666,14 +666,14 @@ class TestUnifiedShowLinks(unittest.TestCase):
         self._state_file.write_text(json.dumps(state_dict))
 
     def test_returns_empty_when_no_state(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         with patch.object(users_manager, "_show_qr"):
             result = users_manager._unified_show_links(
                 {"uuid": "u", "name": "alice"}, print_output=False)
         self.assertEqual(result, [])
 
     def test_returns_empty_when_state_corrupt(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         self._state_file.write_text("{invalid json")
         with patch.object(users_manager, "_show_qr"):
             result = users_manager._unified_show_links(
@@ -681,7 +681,7 @@ class TestUnifiedShowLinks(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_generates_ipv4_link_for_reality(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         self._write_state({
             "domain": "example.com",
             "server_port": 443,
@@ -706,7 +706,7 @@ class TestUnifiedShowLinks(unittest.TestCase):
         self.assertIn("pbk=PUBKEY", ipv4_link)
 
     def test_generates_ipv6_link_when_install_mode_a(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         self._write_state({
             "domain": "example.com",
             "server_port": 443,
@@ -730,7 +730,7 @@ class TestUnifiedShowLinks(unittest.TestCase):
 
     def test_no_ipv6_link_in_mode_b(self):
         """В install_mode='B' IPv6-ссылка не генерируется."""
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         self._write_state({
             "domain": "example.com",
             "server_port": 443,
@@ -752,7 +752,7 @@ class TestUnifiedShowLinks(unittest.TestCase):
 
     def test_awg_mode_uses_reality_dest_as_sni(self):
         """Mode B + AWG + reality → SNI = reality_dest (домен маскировки)."""
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         self._write_state({
             "domain": "example.com",
             "server_port": 443,
@@ -777,7 +777,7 @@ class TestUnifiedShowLinks(unittest.TestCase):
 
     def test_label_replaces_domain_in_fragment(self):
         """В fragment (#label) домен заменяется на label пользователя."""
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         self._write_state({
             "domain": "example.com",
             "server_port": 443,
@@ -823,7 +823,7 @@ class TestUsersGenLink(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_reality_link_from_config(self):
-        from vless_installer.modules.users_manager import _users_gen_link
+        from chimera.modules.users_manager import _users_gen_link
         cfg = {
             "inbounds": [{
                 "protocol": "vless",
@@ -845,7 +845,7 @@ class TestUsersGenLink(unittest.TestCase):
         self.assertIn("sid=abcd1234", link)
 
     def test_returns_empty_on_corrupt_config(self):
-        from vless_installer.modules.users_manager import _users_gen_link
+        from chimera.modules.users_manager import _users_gen_link
         self._cfg.write_text("{invalid json")
         self._state.write_text(json.dumps({}))
         link = _users_gen_link(self._cfg, "u", "e@x")

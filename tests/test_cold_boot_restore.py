@@ -2,7 +2,7 @@
 """
 tests/test_cold_boot_restore.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/cold_boot_restore.py.
+Unit-тесты для chimera/modules/cold_boot_restore.py.
 
 Покрывает:
   1. _is_installed — проверка установки
@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -34,19 +34,19 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestColdBootRestore(unittest.TestCase):
     def setUp(self): _setup_core()
     def test_is_installed_false(self):
-        from vless_installer.modules import cold_boot_restore
+        from chimera.modules import cold_boot_restore
         with patch("pathlib.Path.exists", return_value=False):
             self.assertFalse(cold_boot_restore._is_installed())
     def test_is_installed_true(self):
-        from vless_installer.modules import cold_boot_restore
+        from chimera.modules import cold_boot_restore
         with patch("pathlib.Path.exists", return_value=True):
             self.assertTrue(cold_boot_restore._is_installed())
 

@@ -2,7 +2,7 @@
 """
 tests/test_failover.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/failover.py.
+Unit-тесты для chimera/modules/failover.py.
 
 Покрывает:
   1. _failover_load / _failover_save — JSON I/O
@@ -23,7 +23,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -33,9 +33,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestFailoverLoadSave(unittest.TestCase):
@@ -51,21 +51,21 @@ class TestFailoverLoadSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.failover._FAILOVER_STATE", self._state)
+        return patch("chimera.modules.failover._FAILOVER_STATE", self._state)
 
     def test_load_returns_empty_when_no_file(self):
-        from vless_installer.modules.failover import _failover_load
+        from chimera.modules.failover import _failover_load
         with self._patch():
             self.assertEqual(_failover_load(), {})
 
     def test_load_returns_empty_on_corrupt(self):
-        from vless_installer.modules.failover import _failover_load
+        from chimera.modules.failover import _failover_load
         self._state.write_text("{invalid")
         with self._patch():
             self.assertEqual(_failover_load(), {})
 
     def test_save_then_load(self):
-        from vless_installer.modules.failover import _failover_load, _failover_save
+        from chimera.modules.failover import _failover_load, _failover_save
         data = {"enabled": True, "last_fallback": "2026-07-10"}
         with self._patch():
             _failover_save(data)
@@ -87,7 +87,7 @@ class TestAutoFallbackSetFlag(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_sets_flag_true(self):
-        from vless_installer.modules import failover
+        from chimera.modules import failover
         self._state.write_text(json.dumps({"uuid": "abc"}))
         mock_core = MagicMock()
         mock_core.STATE_FILE = self._state
@@ -99,7 +99,7 @@ class TestAutoFallbackSetFlag(unittest.TestCase):
         self.assertEqual(state["uuid"], "abc")
 
     def test_sets_flag_false(self):
-        from vless_installer.modules import failover
+        from chimera.modules import failover
         self._state.write_text(json.dumps({"uuid": "abc", "auto_fallback_to_direct": True}))
         mock_core = MagicMock()
         mock_core.STATE_FILE = self._state
@@ -110,7 +110,7 @@ class TestAutoFallbackSetFlag(unittest.TestCase):
         self.assertFalse(state["auto_fallback_to_direct"])
 
     def test_warns_when_no_state_file(self):
-        from vless_installer.modules import failover
+        from chimera.modules import failover
         mock_core = MagicMock()
         mock_core.STATE_FILE = Path("/tmp/nonexistent_failover_state.json")
         mock_core.warn = MagicMock()

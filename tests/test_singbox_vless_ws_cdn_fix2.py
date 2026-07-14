@@ -27,7 +27,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -37,9 +37,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 def _enter_patches(stack, patches):
@@ -62,14 +62,14 @@ class TestIptablesInsertAtPosition1(unittest.TestCase):
 
     def test_apply_uses_insert_not_append(self):
         """iptables -I INPUT 1, а НЕ -A INPUT."""
-        from vless_installer.modules.singbox_cdn_nets import apply_cdn_allowlist
+        from chimera.modules.singbox_cdn_nets import apply_cdn_allowlist
         mock_fetch = MagicMock(return_value=(["1.2.3.0/24"], "1 CIDR"))
         mock_run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
-        with patch("vless_installer.modules.singbox_cdn_nets.fetch_cdn_nets", mock_fetch):
-            with patch("vless_installer.modules.singbox_cdn_nets._run", mock_run):
-                with patch("vless_installer.modules.singbox_cdn_nets._ipset_save_port", return_value=True):
-                    with patch("vless_installer.modules.singbox_cdn_nets._ipset_restore_unit_install"):
-                        with patch("vless_installer.modules.singbox_cdn_nets._iptables_persist"):
+        with patch("chimera.modules.singbox_cdn_nets.fetch_cdn_nets", mock_fetch):
+            with patch("chimera.modules.singbox_cdn_nets._run", mock_run):
+                with patch("chimera.modules.singbox_cdn_nets._ipset_save_port", return_value=True):
+                    with patch("chimera.modules.singbox_cdn_nets._ipset_restore_unit_install"):
+                        with patch("chimera.modules.singbox_cdn_nets._iptables_persist"):
                             apply_cdn_allowlist("cloudflare", 8080)
         # Извлекаем все команды
         calls = [c[0][0] if c[0] else [] for c in mock_run.call_args_list]
@@ -111,12 +111,12 @@ class TestIptablesInsertAtPosition1(unittest.TestCase):
                            "--dport", str(port), "-j", "ACCEPT"],
                           capture_output=True)
             # Применяем allowlist
-            from vless_installer.modules.singbox_cdn_nets import apply_cdn_allowlist
-            with patch("vless_installer.modules.singbox_cdn_nets.fetch_cdn_nets",
+            from chimera.modules.singbox_cdn_nets import apply_cdn_allowlist
+            with patch("chimera.modules.singbox_cdn_nets.fetch_cdn_nets",
                        return_value=(["1.2.3.0/24"], "1 CIDR")):
-                with patch("vless_installer.modules.singbox_cdn_nets._ipset_save_port", return_value=True):
-                    with patch("vless_installer.modules.singbox_cdn_nets._ipset_restore_unit_install"):
-                        with patch("vless_installer.modules.singbox_cdn_nets._iptables_persist"):
+                with patch("chimera.modules.singbox_cdn_nets._ipset_save_port", return_value=True):
+                    with patch("chimera.modules.singbox_cdn_nets._ipset_restore_unit_install"):
+                        with patch("chimera.modules.singbox_cdn_nets._iptables_persist"):
                             apply_cdn_allowlist("cloudflare", port)
             # Проверяем порядок правил в INPUT
             r = subprocess.run(["iptables", "-L", "INPUT", "--line-numbers", "-n"],
@@ -159,17 +159,17 @@ class TestPersistenceOnReboot(unittest.TestCase):
 
     def test_apply_calls_ipset_save(self):
         """apply_cdn_allowlist вызывает _ipset_save_port для persistence."""
-        from vless_installer.modules.singbox_cdn_nets import apply_cdn_allowlist
+        from chimera.modules.singbox_cdn_nets import apply_cdn_allowlist
         mock_save = MagicMock(return_value=True)
         mock_install = MagicMock()
         mock_persist = MagicMock()
-        with patch("vless_installer.modules.singbox_cdn_nets.fetch_cdn_nets",
+        with patch("chimera.modules.singbox_cdn_nets.fetch_cdn_nets",
                    return_value=(["1.2.3.0/24"], "1 CIDR")):
-            with patch("vless_installer.modules.singbox_cdn_nets._run",
+            with patch("chimera.modules.singbox_cdn_nets._run",
                        return_value=MagicMock(returncode=0, stdout="", stderr="")):
-                with patch("vless_installer.modules.singbox_cdn_nets._ipset_save_port", mock_save):
-                    with patch("vless_installer.modules.singbox_cdn_nets._ipset_restore_unit_install", mock_install):
-                        with patch("vless_installer.modules.singbox_cdn_nets._iptables_persist", mock_persist):
+                with patch("chimera.modules.singbox_cdn_nets._ipset_save_port", mock_save):
+                    with patch("chimera.modules.singbox_cdn_nets._ipset_restore_unit_install", mock_install):
+                        with patch("chimera.modules.singbox_cdn_nets._iptables_persist", mock_persist):
                             apply_cdn_allowlist("cloudflare", 8080)
         mock_save.assert_called_once_with(8080)
         mock_install.assert_called_once()
@@ -177,13 +177,13 @@ class TestPersistenceOnReboot(unittest.TestCase):
 
     def test_remove_updates_persisted_state(self):
         """remove_cdn_allowlist удаляет правило из персистентного файла."""
-        from vless_installer.modules.singbox_cdn_nets import remove_cdn_allowlist
+        from chimera.modules.singbox_cdn_nets import remove_cdn_allowlist
         mock_remove_persist = MagicMock()
         mock_persist = MagicMock()
-        with patch("vless_installer.modules.singbox_cdn_nets._run",
+        with patch("chimera.modules.singbox_cdn_nets._run",
                    return_value=MagicMock(returncode=0, stdout="", stderr="")):
-            with patch("vless_installer.modules.singbox_cdn_nets._ipset_remove_from_persist", mock_remove_persist):
-                with patch("vless_installer.modules.singbox_cdn_nets._iptables_persist", mock_persist):
+            with patch("chimera.modules.singbox_cdn_nets._ipset_remove_from_persist", mock_remove_persist):
+                with patch("chimera.modules.singbox_cdn_nets._iptables_persist", mock_persist):
                     remove_cdn_allowlist(8080)
         mock_remove_persist.assert_called_once_with(8080)
         mock_persist.assert_called_once()
@@ -193,7 +193,7 @@ class TestPersistenceOnReboot(unittest.TestCase):
         import shutil
         if not shutil.which("ipset"):
             self.skipTest("ipset not available — cannot test real file persistence")
-        from vless_installer.modules.singbox_cdn_nets import (
+        from chimera.modules.singbox_cdn_nets import (
             _ipset_save_port, _IPSET_CONF, _ipset_name,
         )
         port = 18098
@@ -215,12 +215,12 @@ class TestPersistenceOnReboot(unittest.TestCase):
             # Cleanup
             subprocess.run(["ipset", "destroy", ipset], capture_output=True)
             # Удаляем только наши записи из файла
-            from vless_installer.modules.singbox_cdn_nets import _ipset_remove_from_persist
+            from chimera.modules.singbox_cdn_nets import _ipset_remove_from_persist
             _ipset_remove_from_persist(port)
 
     def test_ipset_remove_from_persist_removes_entries(self):
         """_ipset_remove_from_persist удаляет записи порта из персистентного файла."""
-        from vless_installer.modules.singbox_cdn_nets import (
+        from chimera.modules.singbox_cdn_nets import (
             _ipset_remove_from_persist, _ipset_name,
         )
         port = 18097
@@ -230,7 +230,7 @@ class TestPersistenceOnReboot(unittest.TestCase):
         tmp_conf = tmpdir / "ipset-singbox-cdn.conf"
         tmp_conf.write_text(f"create {ipset} hash:net\nadd {ipset} 1.2.3.0/24\n")
         try:
-            with patch("vless_installer.modules.singbox_cdn_nets._IPSET_CONF", tmp_conf):
+            with patch("chimera.modules.singbox_cdn_nets._IPSET_CONF", tmp_conf):
                 _ipset_remove_from_persist(port)
                 if tmp_conf.exists():
                     content = tmp_conf.read_text()
@@ -253,13 +253,13 @@ class TestBunnyIpSourceCorrect(unittest.TestCase):
 
     def test_bunny_ip_source_is_edge_server_list(self):
         """ip_source = bunnycdn.com/api/system/edgeserverlist/plain, не docs.bunny.net."""
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         self.assertEqual(CDN_PROVIDERS["bunny"]["ip_source"],
                          "https://bunnycdn.com/api/system/edgeserverlist/plain")
 
     def test_bunny_ip_source_not_magic_containers(self):
         """Старый URL (magic-containers) не должен нигде остаться."""
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         source = CDN_PROVIDERS["bunny"]["ip_source"]
         self.assertNotIn("magic-containers", source,
                          "Старый URL magic-containers не должен использоваться")
@@ -268,12 +268,12 @@ class TestBunnyIpSourceCorrect(unittest.TestCase):
 
     def test_bunny_ip_format_is_plaintext(self):
         """ip_format = plaintext (не html_scrape — список теперь машиночитаемый)."""
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         self.assertEqual(CDN_PROVIDERS["bunny"]["ip_format"], "plaintext")
 
     def test_fetch_bunny_returns_cidrs_with_32_suffix(self):
         """fetch_cdn_nets('bunny') с plain IP → возвращает CIDR с /32."""
-        from vless_installer.modules.singbox_cdn_nets import fetch_cdn_nets
+        from chimera.modules.singbox_cdn_nets import fetch_cdn_nets
         # Мокаем ответ Bunny API: plain IP, БЕЗ /32
         mock_response = MagicMock()
         mock_response.read.return_value = b"89.187.188.227\n89.187.188.228\n89.187.162.249\n"
@@ -288,7 +288,7 @@ class TestBunnyIpSourceCorrect(unittest.TestCase):
 
     def test_fetch_bunny_hits_correct_url(self):
         """fetch_cdn_nets('bunny') реально бьёт в bunnycdn.com/api/system/edgeserverlist/plain."""
-        from vless_installer.modules.singbox_cdn_nets import fetch_cdn_nets
+        from chimera.modules.singbox_cdn_nets import fetch_cdn_nets
         mock_response = MagicMock()
         mock_response.read.return_value = b"89.187.188.227\n"
         mock_response.__enter__ = lambda self: mock_response
@@ -301,20 +301,20 @@ class TestBunnyIpSourceCorrect(unittest.TestCase):
 
     def test_no_html_scrape_format_anywhere(self):
         """html_scrape больше не используется ни одним провайдером."""
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         for provider, meta in CDN_PROVIDERS.items():
             self.assertNotEqual(meta.get("ip_format"), "html_scrape",
                                 f"{provider} не должен использовать html_scrape (упрощено в v4.23.2)")
 
     def test_cloudflare_source_still_correct(self):
         """Перепроверка: Cloudflare ips-v4 всё ещё актуален."""
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         self.assertEqual(CDN_PROVIDERS["cloudflare"]["ip_source"],
                          "https://www.cloudflare.com/ips-v4")
 
     def test_gcore_source_still_correct(self):
         """Перепроверка: Gcore public-ip-list всё ещё актуален."""
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         self.assertEqual(CDN_PROVIDERS["gcore"]["ip_source"],
                          "https://api.gcore.com/cdn/public-ip-list")
 
@@ -338,11 +338,11 @@ class TestSwitchCdnProviderAutoPort(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
         ]
 
     def test_switch_gcore_to_cloudflare_changes_port(self):
@@ -352,14 +352,14 @@ class TestSwitchCdnProviderAutoPort(unittest.TestCase):
         НЕ в singbox_enable_vless_ws_cdn(). Этот тест проверяет что state init
         создаёт per-provider default, а switch-логика меняет порт.
         """
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_load,
         )
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
-            stack.enter_context(patch("vless_installer.modules.singbox_cdn_nets.apply_cdn_allowlist", return_value=True))
+            stack.enter_context(patch("chimera.modules.singbox_cdn_nets.apply_cdn_allowlist", return_value=True))
             singbox_state_init(version="1.0.0")
             # Enable на gcore → listen_port должен быть 8443 (gcore default)
             singbox_enable_vless_ws_cdn(cdn_provider="gcore", host="test.example.com")
@@ -384,7 +384,7 @@ class TestSwitchCdnProviderAutoPort(unittest.TestCase):
 
     def test_switch_logic_changes_port_from_default_to_new_default(self):
         """Симуляция логики switch: gcore(8443) → cloudflare(8080)."""
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         # Логика из _switch_cdn_provider():
         current = "gcore"
         new_provider = "cloudflare"
@@ -399,7 +399,7 @@ class TestSwitchCdnProviderAutoPort(unittest.TestCase):
 
     def test_switch_logic_keeps_custom_port_with_warn(self):
         """Симуляция: custom listen_port=9999 → switch → порт сохранён, warn вызван."""
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         current = "gcore"
         new_provider = "cloudflare"
         port = 9999  # custom, не равен дефолту gcore (8443)
@@ -414,7 +414,7 @@ class TestSwitchCdnProviderAutoPort(unittest.TestCase):
 
     def test_switch_cloudflare_to_gcore_changes_port(self):
         """Симуляция: cloudflare(8080) → gcore(8443)."""
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         current = "cloudflare"
         new_provider = "gcore"
         port = CDN_PROVIDERS[current]["default_port"]  # 8080
@@ -427,7 +427,7 @@ class TestSwitchCdnProviderAutoPort(unittest.TestCase):
 
     def test_switch_gcore_to_bunny_keeps_port(self):
         """Симуляция: gcore(8443) → bunny(8443) — дефолты совпадают, порт не меняется."""
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         current = "gcore"
         new_provider = "bunny"
         port = CDN_PROVIDERS[current]["default_port"]  # 8443

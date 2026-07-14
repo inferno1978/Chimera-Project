@@ -2,7 +2,7 @@
 """
 tests/test_traffic_tracking.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/traffic_tracking.py.
+Unit-тесты для chimera/modules/traffic_tracking.py.
 
 Покрывает:
   1. _limits_load / _limits_save — JSON I/O
@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -34,9 +34,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestLimitsLoadSave(unittest.TestCase):
@@ -52,22 +52,22 @@ class TestLimitsLoadSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.traffic_tracking.TRAFFIC_LIMITS_FILE",
+        return patch("chimera.modules.traffic_tracking.TRAFFIC_LIMITS_FILE",
                      self._limits)
 
     def test_load_returns_empty_when_no_file(self):
-        from vless_installer.modules.traffic_tracking import _limits_load
+        from chimera.modules.traffic_tracking import _limits_load
         with self._patch():
             self.assertEqual(_limits_load(), {})
 
     def test_load_returns_empty_on_corrupt(self):
-        from vless_installer.modules.traffic_tracking import _limits_load
+        from chimera.modules.traffic_tracking import _limits_load
         self._limits.write_text("{invalid")
         with self._patch():
             self.assertEqual(_limits_load(), {})
 
     def test_save_then_load(self):
-        from vless_installer.modules.traffic_tracking import _limits_load, _limits_save
+        from chimera.modules.traffic_tracking import _limits_load, _limits_save
         data = {"alice@x.com": {"limit_gb": 10, "used_bytes": 0}}
         with self._patch():
             _limits_save(data)
@@ -76,7 +76,7 @@ class TestLimitsLoadSave(unittest.TestCase):
         self.assertEqual(loaded["alice@x.com"]["limit_gb"], 10)
 
     def test_save_sets_chmod_600(self):
-        from vless_installer.modules.traffic_tracking import _limits_save
+        from chimera.modules.traffic_tracking import _limits_save
         with self._patch():
             _limits_save({})
         mode = stat.S_IMODE(os.stat(self._limits).st_mode)
@@ -102,7 +102,7 @@ class TestStatsApiIsConfigured(unittest.TestCase):
         return core
 
     def test_returns_false_when_no_config(self):
-        from vless_installer.modules import traffic_tracking
+        from chimera.modules import traffic_tracking
         core = MagicMock()
         core.CONFIG_DIR = Path("/tmp/nonexistent_cfg_dir")
         # На проде /usr/local/etc/xray/config.json существует — патчим.
@@ -116,7 +116,7 @@ class TestStatsApiIsConfigured(unittest.TestCase):
             self.assertFalse(traffic_tracking._stats_api_is_configured())
 
     def test_returns_false_when_missing_stats(self):
-        from vless_installer.modules import traffic_tracking
+        from chimera.modules import traffic_tracking
         cfg = {"inbounds": [], "outbounds": []}
         # На проде /usr/local/etc/xray/config.json существует — патчим.
         _orig_exists = Path.exists
@@ -130,7 +130,7 @@ class TestStatsApiIsConfigured(unittest.TestCase):
             self.assertFalse(traffic_tracking._stats_api_is_configured())
 
     def test_returns_true_when_all_present(self):
-        from vless_installer.modules import traffic_tracking
+        from chimera.modules import traffic_tracking
         cfg = {
             "stats": {},
             "policy": {},
@@ -150,7 +150,7 @@ class TestStatsApiIsConfigured(unittest.TestCase):
             self.assertTrue(traffic_tracking._stats_api_is_configured())
 
     def test_returns_false_when_missing_policy(self):
-        from vless_installer.modules import traffic_tracking
+        from chimera.modules import traffic_tracking
         cfg = {
             "stats": {},
             "inbounds": [{"tag": "xray-stats-api"}],

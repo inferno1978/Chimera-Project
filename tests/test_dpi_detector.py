@@ -2,7 +2,7 @@
 """
 tests/test_dpi_detector.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/dpi_detector.py.
+Unit-тесты для chimera/modules/dpi_detector.py.
 
 Покрывает:
   1. _dpi_state_load — чтение JSON state
@@ -27,7 +27,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -37,9 +37,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestDpiStateLoad(unittest.TestCase):
@@ -55,11 +55,11 @@ class TestDpiStateLoad(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.dpi_detector._DPI_STATE_FILE",
+        return patch("chimera.modules.dpi_detector._DPI_STATE_FILE",
                      self._state)
 
     def test_returns_defaults_when_no_file(self):
-        from vless_installer.modules.dpi_detector import (
+        from chimera.modules.dpi_detector import (
             _dpi_state_load, _DPI_THRESHOLD_DEFAULT, _DPI_WINDOW_DEFAULT,
         )
         with self._patch():
@@ -71,14 +71,14 @@ class TestDpiStateLoad(unittest.TestCase):
         self.assertIn("::1", cfg["whitelist"])
 
     def test_returns_defaults_when_corrupt(self):
-        from vless_installer.modules.dpi_detector import _dpi_state_load
+        from chimera.modules.dpi_detector import _dpi_state_load
         self._state.write_text("{invalid")
         with self._patch():
             cfg = _dpi_state_load()
         self.assertFalse(cfg["enabled"])
 
     def test_returns_state_when_valid(self):
-        from vless_installer.modules.dpi_detector import _dpi_state_load
+        from chimera.modules.dpi_detector import _dpi_state_load
         self._state.write_text(json.dumps({
             "enabled": True, "threshold": 10, "window_min": 30,
             "whitelist": ["1.2.3.4"],
@@ -103,11 +103,11 @@ class TestDpiStateSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.dpi_detector._DPI_STATE_FILE",
+        return patch("chimera.modules.dpi_detector._DPI_STATE_FILE",
                      self._state)
 
     def test_writes_json(self):
-        from vless_installer.modules.dpi_detector import _dpi_state_save
+        from chimera.modules.dpi_detector import _dpi_state_save
         with self._patch():
             _dpi_state_save({"enabled": True, "threshold": 8})
         data = json.loads(self._state.read_text())
@@ -115,7 +115,7 @@ class TestDpiStateSave(unittest.TestCase):
         self.assertEqual(data["threshold"], 8)
 
     def test_sets_chmod_600(self):
-        from vless_installer.modules.dpi_detector import _dpi_state_save
+        from chimera.modules.dpi_detector import _dpi_state_save
         with self._patch():
             _dpi_state_save({"enabled": False})
         mode = stat.S_IMODE(os.stat(self._state).st_mode)
@@ -129,18 +129,18 @@ class TestDpiPatterns(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_patterns_count_at_least_5(self):
-        from vless_installer.modules.dpi_detector import _DPI_PATTERNS
+        from chimera.modules.dpi_detector import _DPI_PATTERNS
         self.assertGreaterEqual(len(_DPI_PATTERNS), 5)
 
     def test_pattern_matches_tls_no_sni(self):
-        from vless_installer.modules.dpi_detector import _DPI_PATTERNS
+        from chimera.modules.dpi_detector import _DPI_PATTERNS
         # первый паттерн — TLS без SNI
         pattern, desc, weight = _DPI_PATTERNS[0]
         self.assertTrue(pattern.search("TLS: no SNI from client"))
         self.assertTrue(pattern.search("missing SNI in handshake"))
 
     def test_reality_auth_fail_pattern(self):
-        from vless_installer.modules.dpi_detector import _DPI_PATTERNS
+        from chimera.modules.dpi_detector import _DPI_PATTERNS
         reality_pattern = None
         for p, d, w in _DPI_PATTERNS:
             if "REALITY" in d:
@@ -151,7 +151,7 @@ class TestDpiPatterns(unittest.TestCase):
         self.assertTrue(reality_pattern.search("invalid public key"))
 
     def test_all_patterns_have_positive_weight(self):
-        from vless_installer.modules.dpi_detector import _DPI_PATTERNS
+        from chimera.modules.dpi_detector import _DPI_PATTERNS
         for pattern, desc, weight in _DPI_PATTERNS:
             with self.subTest(desc=desc):
                 self.assertGreater(weight, 0)
@@ -178,7 +178,7 @@ class TestDpiRunOnce(unittest.TestCase):
         return f"{ts:%Y/%m/%d} {ts:%H:%M:%S} [{ip}] {content}"
 
     def test_returns_zero_when_no_error_log(self):
-        from vless_installer.modules import dpi_detector
+        from chimera.modules import dpi_detector
         # Патчим Path так, чтобы /var/log/xray/error.log не существовал
         original_path = Path
 
@@ -211,7 +211,7 @@ class TestDpiRunOnce(unittest.TestCase):
 
     def test_bans_ip_when_score_exceeds_threshold(self):
         """REALITY auth fail (weight=4) × 2 = 8 > threshold 6 → бан."""
-        from vless_installer.modules import dpi_detector
+        from chimera.modules import dpi_detector
         # 2 строки с REALITY auth fail от одного IP
         now = datetime.now()
         lines = "\n".join([
@@ -265,7 +265,7 @@ class TestDpiRunOnce(unittest.TestCase):
 
     def test_skips_whitelisted_ip(self):
         """IP в whitelist — не банится даже при высоком score."""
-        from vless_installer.modules import dpi_detector
+        from chimera.modules import dpi_detector
         now = datetime.now()
         lines = "\n".join([
             self._make_line("127.0.0.1", "REALITY auth fail: short id mismatch", now),
@@ -306,7 +306,7 @@ class TestDpiRunOnce(unittest.TestCase):
 
     def test_skips_already_banned_ip(self):
         """IP уже в banned — не баним второй раз."""
-        from vless_installer.modules import dpi_detector
+        from chimera.modules import dpi_detector
         now = datetime.now()
         lines = "\n".join([
             self._make_line("9.9.9.9", "REALITY auth fail: short id mismatch", now),
@@ -348,7 +348,7 @@ class TestDpiRunOnce(unittest.TestCase):
 
     def test_filters_old_entries_by_window(self):
         """Записи старше window_min минут — игнорируются."""
-        from vless_installer.modules import dpi_detector
+        from chimera.modules import dpi_detector
         old_ts = datetime.now() - timedelta(hours=2)
         now = datetime.now()
         # Старая запись (должна быть отфильтрована) + свежая
@@ -404,10 +404,10 @@ class TestLogFunctions(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.dpi_detector._LOG_FILE", self._log)
+        return patch("chimera.modules.dpi_detector._LOG_FILE", self._log)
 
     def test_log_to_file_writes_line(self):
-        from vless_installer.modules.dpi_detector import log_to_file
+        from chimera.modules.dpi_detector import log_to_file
         with self._patch():
             log_to_file("INFO", "test message")
         content = self._log.read_text()
@@ -416,7 +416,7 @@ class TestLogFunctions(unittest.TestCase):
 
     def test_log_strips_ansi(self):
         """Лог-файл не должен содержать ANSI-кодов."""
-        from vless_installer.modules.dpi_detector import log_to_file
+        from chimera.modules.dpi_detector import log_to_file
         with self._patch():
             log_to_file("INFO", "\033[1;31mred text\033[0m")
         content = self._log.read_text()

@@ -81,8 +81,8 @@ required = [
     "CONTRIBUTING.md",
     "LICENSE",
     ".gitignore",
-    "vless_installer/__init__.py",
-    "vless_installer/_core.py",
+    "chimera/__init__.py",
+    "chimera/_core.py",
 ]
 for f in required:
     if Path(f).exists():
@@ -93,10 +93,10 @@ for f in required:
 # ── 2. Синтаксис Python файлов ───────────────────────────────
 section("2. Синтаксис Python файлов")
 syntax_files = ["main.py", "verify.py",
-                "vless_installer/__init__.py",
-                "vless_installer/_core.py"]
+                "chimera/__init__.py",
+                "chimera/_core.py"]
 # Добавляем все .py в modules/
-modules_dir = Path("vless_installer/modules")
+modules_dir = Path("chimera/modules")
 if modules_dir.exists():
     for py in sorted(modules_dir.glob("*.py")):
         if py.name == "__init__.py":
@@ -114,7 +114,7 @@ for py in syntax_files:
 
 # ── 3. Целостность архитектуры ───────────────────────────────
 section("3. Целостность архитектуры (_core.py + модули)")
-core = Path("vless_installer/_core.py")
+core = Path("chimera/_core.py")
 if core.exists():
     lines = len(core.read_text().splitlines())
     # После рефакторинга _core.py ~14К строк (было 32К)
@@ -129,9 +129,9 @@ else:
 # Проверяем что модули существуют
 mod_count = len(list(modules_dir.glob("*.py"))) - 1  # минус __init__.py
 if mod_count > 30:
-    ok(f"vless_installer/modules/: {mod_count} модулей")
+    ok(f"chimera/modules/: {mod_count} модулей")
 else:
-    fail(f"vless_installer/modules/: {mod_count} модулей — ожидалось >30")
+    fail(f"chimera/modules/: {mod_count} модулей — ожидалось >30")
 
 # ── 4. Ключевые функции доступны (через exec + getattr) ─────
 section("4. Ключевые функции доступны в рантайме")
@@ -151,14 +151,14 @@ except Exception as e:
     fail(f"exec(_core.py) — ошибка: {e}")
 
 if _core_globals:
-    # Регистрируем _core_globals как vless_installer._core (как делает main.py)
+    # Регистрируем _core_globals как chimera._core (как делает main.py)
     # Используем __dict__.update() — копия, но для проверки наличия функций
     # этого достаточно. Мутации через setattr(core, X, val) в вынесенных
     # модулях не будут видны в _core_globals, но это OK для verify.py
     # (мы проверяем наличие функций, а не мутации globals).
-    _fake_core = type(sys)("vless_installer._core")
+    _fake_core = type(sys)("chimera._core")
     _fake_core.__dict__.update(_core_globals)
-    sys.modules["vless_installer._core"] = _fake_core
+    sys.modules["chimera._core"] = _fake_core
 
     key_funcs = [
         "main_menu",
@@ -268,7 +268,7 @@ if _core_globals:
     # _init_pkg_mgr пишет через setattr(core, "PKG_MGR", ...) — читаем из _fake_core
     try:
         _core_globals["_init_pkg_mgr"]()
-        pkg_mgr = getattr(sys.modules.get("vless_installer._core"), "PKG_MGR", "")
+        pkg_mgr = getattr(sys.modules.get("chimera._core"), "PKG_MGR", "")
         if pkg_mgr in ("apt", "dnf"):
             ok(f"  _init_pkg_mgr() → PKG_MGR='{pkg_mgr}'")
         else:
@@ -281,14 +281,14 @@ if _core_globals:
         fail(f"  _init_pkg_mgr() — ошибка: {e}")
 
 # ── 6. Импорт всех модулей ───────────────────────────────────
-section("6. Импорт всех модулей vless_installer/modules/")
+section("6. Импорт всех модулей chimera/modules/")
 if modules_dir.exists():
     mod_files = sorted(modules_dir.glob("*.py"))
     mod_files = [f for f in mod_files if f.name != "__init__.py"]
     import_errors = 0
     for mf in mod_files:
         mod_name = mf.stem
-        full_name = f"vless_installer.modules.{mod_name}"
+        full_name = f"chimera.modules.{mod_name}"
         try:
             __import__(full_name)
         except Exception as e:
@@ -297,7 +297,7 @@ if modules_dir.exists():
     if import_errors == 0:
         ok(f"  Все {len(mod_files)} модулей импортируются без ошибок")
 else:
-    fail("  vless_installer/modules/ не найден")
+    fail("  chimera/modules/ не найден")
 
 # ── 7. bootstrap.sh ──────────────────────────────────────────
 section("7. bootstrap.sh")
@@ -387,7 +387,7 @@ _expected_dup_helpers = {
     "_row", "_detect_colors", "_plain", "_wlen", "_box_kv", "_box_bot",
 }
 _func_defs = {}  # name -> set of file paths
-_py_root = Path("vless_installer")
+_py_root = Path("chimera")
 if _py_root.exists():
     for py in sorted(_py_root.rglob("*.py")):
         if "__pycache__" in py.parts:
@@ -409,7 +409,7 @@ if _py_root.exists():
     else:
         ok(f"Подозрительных дубликатов нет (просканировано {len(_func_defs)} имён функций)")
 else:
-    fail("vless_installer/ не найден — невозможно проверить дубликаты")
+    fail("chimera/ не найден — невозможно проверить дубликаты")
 
 # ── 12. Пути state-файлов ─────────────────────────────────────
 section("12. Пути state-файлов /var/lib/xray-installer")
@@ -424,7 +424,7 @@ if _py_root.exists():
         except (OSError, UnicodeDecodeError):
             continue
 else:
-    fail("vless_installer/ не найден — невозможно проверить пути")
+    fail("chimera/ не найден — невозможно проверить пути")
 
 if _var_lib_count >= _PATH_BASELINE:
     ok(f"/var/lib/xray-installer: {_var_lib_count} вхождений (базлайн {_PATH_BASELINE})")
@@ -446,7 +446,7 @@ if _py_root.exists():
         _chmod_count += _text.count("0o600")
         _chmod_count += len(re.findall(r"chmod[^a-zA-Z0-9_]*600", _text))
 else:
-    fail("vless_installer/ не найден — невозможно проверить chmod")
+    fail("chimera/ не найден — невозможно проверить chmod")
 
 if _chmod_count >= _CHMOD_BASELINE:
     ok(f"0o600/chmod 600: {_chmod_count} вхождений (базлайн {_CHMOD_BASELINE})")

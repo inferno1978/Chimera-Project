@@ -2,7 +2,7 @@
 """
 tests/test_traffic_accounting.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/traffic_accounting.py.
+Unit-тесты для chimera/modules/traffic_accounting.py.
 
 ПОКРЫТИЕ:
   1. parse_human_readable_bytes — все единицы (IEC + SI), дробные, регистр,
@@ -37,8 +37,8 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Создаёт фейковый vless_installer._core (как в test_tg_bot.py)."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    """Создаёт фейковый chimera._core (как в test_tg_bot.py)."""
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -48,9 +48,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 # =============================================================================
@@ -65,7 +65,7 @@ class TestParseHumanReadableBytes(unittest.TestCase):
     # ── IEC (binary, 1024-based) ──────────────────────────────────────────────
 
     def test_iec_bytes(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1024"), 1024)
         self.assertEqual(parse_human_readable_bytes("1024B"), 1024)
         self.assertEqual(parse_human_readable_bytes("1024 B"), 1024)
@@ -73,70 +73,70 @@ class TestParseHumanReadableBytes(unittest.TestCase):
         self.assertEqual(parse_human_readable_bytes("0 B"), 0)
 
     def test_iec_kib(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 KiB"), 1024)
         self.assertEqual(parse_human_readable_bytes("2 KiB"), 2048)
         self.assertEqual(parse_human_readable_bytes("1.5 KiB"), 1536)
 
     def test_iec_mib(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 MiB"), 1024 ** 2)
         self.assertEqual(parse_human_readable_bytes("1.5 MiB"), int(1.5 * 1024 ** 2))
 
     def test_iec_gib(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 GiB"), 1024 ** 3)
         self.assertEqual(parse_human_readable_bytes("1.5 GiB"), int(1.5 * 1024 ** 3))
         self.assertEqual(parse_human_readable_bytes("10 GiB"), 10 * 1024 ** 3)
 
     def test_iec_tib(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 TiB"), 1024 ** 4)
         self.assertEqual(parse_human_readable_bytes("2.5 TiB"), int(2.5 * 1024 ** 4))
 
     def test_iec_pib(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 PiB"), 1024 ** 5)
 
     def test_iec_eib(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 EiB"), 1024 ** 6)
 
     # ── SI (decimal, 1000-based) ──────────────────────────────────────────────
 
     def test_si_kb(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 KB"), 1000)
         self.assertEqual(parse_human_readable_bytes("2 KB"), 2000)
 
     def test_si_mb(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 MB"), 1000 ** 2)
         self.assertEqual(parse_human_readable_bytes("1.5 MB"), int(1.5 * 1000 ** 2))
 
     def test_si_gb(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 GB"), 1000 ** 3)
         self.assertEqual(parse_human_readable_bytes("10 GB"), 10 * 1000 ** 3)
 
     def test_si_tb(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 TB"), 1000 ** 4)
 
     # ── Bare letters (VPN-конвенция: IEC) ────────────────────────────────────
 
     def test_bare_letter_k(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1K"), 1024)  # IEC, не SI
         self.assertEqual(parse_human_readable_bytes("2K"), 2048)
 
     def test_bare_letter_g(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1G"), 1024 ** 3)  # IEC
         self.assertEqual(parse_human_readable_bytes("10G"), 10 * 1024 ** 3)
 
     def test_bare_letter_m_t_p(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1M"), 1024 ** 2)
         self.assertEqual(parse_human_readable_bytes("1T"), 1024 ** 4)
         self.assertEqual(parse_human_readable_bytes("1P"), 1024 ** 5)
@@ -144,7 +144,7 @@ class TestParseHumanReadableBytes(unittest.TestCase):
     # ── Регистр (case-insensitive) ───────────────────────────────────────────
 
     def test_case_insensitive(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 GiB"), 1024 ** 3)
         self.assertEqual(parse_human_readable_bytes("1 gib"), 1024 ** 3)
         self.assertEqual(parse_human_readable_bytes("1 GIB"), 1024 ** 3)
@@ -156,7 +156,7 @@ class TestParseHumanReadableBytes(unittest.TestCase):
     # ── Пробел опционален ────────────────────────────────────────────────────
 
     def test_space_optional(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1 GiB"), 1024 ** 3)
         self.assertEqual(parse_human_readable_bytes("1GiB"), 1024 ** 3)
         self.assertEqual(parse_human_readable_bytes("  1   GiB  "), 1024 ** 3)
@@ -165,7 +165,7 @@ class TestParseHumanReadableBytes(unittest.TestCase):
     # ── Дробные значения ─────────────────────────────────────────────────────
 
     def test_fractional(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         self.assertEqual(parse_human_readable_bytes("1.5 GiB"), 1610612736)
         self.assertEqual(parse_human_readable_bytes("0.5 KiB"), 512)
         self.assertEqual(parse_human_readable_bytes("2.5 MB"), 2500000)
@@ -174,7 +174,7 @@ class TestParseHumanReadableBytes(unittest.TestCase):
     # ── default_unit ─────────────────────────────────────────────────────────
 
     def test_default_unit_gib(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         # Если в строке нет единицы — используем default_unit
         self.assertEqual(parse_human_readable_bytes("10", default_unit="GiB"),
                          10 * 1024 ** 3)
@@ -182,43 +182,43 @@ class TestParseHumanReadableBytes(unittest.TestCase):
                          int(1.5 * 1024 ** 2))
 
     def test_default_unit_b(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         # По умолчанию — байты
         self.assertEqual(parse_human_readable_bytes("1024"), 1024)
 
     # ── Edge cases / ошибки ──────────────────────────────────────────────────
 
     def test_empty_string_raises(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         with self.assertRaises(ValueError):
             parse_human_readable_bytes("")
 
     def test_whitespace_only_raises(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         with self.assertRaises(ValueError):
             parse_human_readable_bytes("   ")
 
     def test_negative_raises(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         with self.assertRaises(ValueError):
             parse_human_readable_bytes("-1 KiB")
 
     def test_unknown_unit_raises(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         with self.assertRaises(ValueError):
             parse_human_readable_bytes("1 XB")
         with self.assertRaises(ValueError):
             parse_human_readable_bytes("1 Foobar")
 
     def test_non_numeric_raises(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         with self.assertRaises(ValueError):
             parse_human_readable_bytes("abc")
         with self.assertRaises(ValueError):
             parse_human_readable_bytes("GiB")
 
     def test_non_string_raises(self):
-        from vless_installer.modules.traffic_accounting import parse_human_readable_bytes
+        from chimera.modules.traffic_accounting import parse_human_readable_bytes
         with self.assertRaises(ValueError):
             parse_human_readable_bytes(1024)  # int, not str
         with self.assertRaises(ValueError):
@@ -235,48 +235,48 @@ class TestFormatBytes(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_zero(self):
-        from vless_installer.modules.traffic_accounting import format_bytes
+        from chimera.modules.traffic_accounting import format_bytes
         self.assertEqual(format_bytes(0), "0 B")
 
     def test_zero_with_zero_str(self):
-        from vless_installer.modules.traffic_accounting import format_bytes
+        from chimera.modules.traffic_accounting import format_bytes
         self.assertEqual(format_bytes(0, zero_str="—"), "—")
         self.assertEqual(format_bytes(0, zero_str="нет данных"), "нет данных")
 
     def test_bytes(self):
-        from vless_installer.modules.traffic_accounting import format_bytes
+        from chimera.modules.traffic_accounting import format_bytes
         self.assertEqual(format_bytes(1), "1 B")
         self.assertEqual(format_bytes(512), "512 B")
         self.assertEqual(format_bytes(1023), "1023 B")
 
     def test_kib(self):
-        from vless_installer.modules.traffic_accounting import format_bytes
+        from chimera.modules.traffic_accounting import format_bytes
         self.assertEqual(format_bytes(1024), "1.0 KiB")
         self.assertEqual(format_bytes(1536), "1.5 KiB")
 
     def test_mib(self):
-        from vless_installer.modules.traffic_accounting import format_bytes
+        from chimera.modules.traffic_accounting import format_bytes
         self.assertEqual(format_bytes(1024 ** 2), "1.0 MiB")
         self.assertEqual(format_bytes(int(1.5 * 1024 ** 2)), "1.5 MiB")
 
     def test_gib(self):
-        from vless_installer.modules.traffic_accounting import format_bytes
+        from chimera.modules.traffic_accounting import format_bytes
         self.assertEqual(format_bytes(1024 ** 3), "1.0 GiB")
         self.assertEqual(format_bytes(int(1.5 * 1024 ** 3)), "1.5 GiB")
 
     def test_tib_pib(self):
-        from vless_installer.modules.traffic_accounting import format_bytes
+        from chimera.modules.traffic_accounting import format_bytes
         self.assertEqual(format_bytes(1024 ** 4), "1.0 TiB")
         self.assertEqual(format_bytes(1024 ** 5), "1.0 PiB")
 
     def test_locale_ru(self):
-        from vless_installer.modules.traffic_accounting import format_bytes
+        from chimera.modules.traffic_accounting import format_bytes
         self.assertEqual(format_bytes(0, locale="ru"), "0 Б")
         self.assertEqual(format_bytes(1024, locale="ru"), "1.0 КБ")
         self.assertEqual(format_bytes(1024 ** 3, locale="ru"), "1.0 ГБ")
 
     def test_precision(self):
-        from vless_installer.modules.traffic_accounting import format_bytes
+        from chimera.modules.traffic_accounting import format_bytes
         self.assertEqual(format_bytes(1536, precision=2), "1.50 KiB")
         # precision=0 использует банковское округление Python (1.5 → 2, не 1)
         self.assertEqual(format_bytes(1536, precision=0), "2 KiB")
@@ -285,14 +285,14 @@ class TestFormatBytes(unittest.TestCase):
         self.assertEqual(format_bytes(1024, precision=0), "1 KiB")
 
     def test_negative(self):
-        from vless_installer.modules.traffic_accounting import format_bytes
+        from chimera.modules.traffic_accounting import format_bytes
         # Для delta-вывода
         self.assertEqual(format_bytes(-1024), "-1.0 KiB")
         self.assertEqual(format_bytes(-512), "-512 B")
 
     def test_round_trip(self):
         """parse(format(x)) == x для целых значений."""
-        from vless_installer.modules.traffic_accounting import (
+        from chimera.modules.traffic_accounting import (
             parse_human_readable_bytes, format_bytes,
         )
         for val in [0, 1024, 1024 ** 2, 1024 ** 3, 1024 ** 4, 1536, 1024 ** 2 * 5]:
@@ -319,15 +319,15 @@ class TestRecordTrafficSample(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.traffic_accounting._STATE_FILE",
+            patch("chimera.modules.traffic_accounting._STATE_FILE",
                   self._state_file),
-            patch("vless_installer.modules.traffic_accounting._LOCK_FILE",
+            patch("chimera.modules.traffic_accounting._LOCK_FILE",
                   self._lock_file),
         ]
 
     def test_first_sample_sets_baseline(self):
         """Первый снимок: baseline=0, last_raw=raw, accumulated=raw."""
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -344,7 +344,7 @@ class TestRecordTrafficSample(unittest.TestCase):
 
     def test_normal_growth_accumulates(self):
         """Нормальный рост: raw2 > raw1 → accumulated = raw2 (baseline=0)."""
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -377,7 +377,7 @@ class TestRecordTrafficSample(unittest.TestCase):
              new_baseline = 5000 + 600 = 5600,
              new_total = 5600 + 50 = 5650.
         """
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -398,7 +398,7 @@ class TestRecordTrafficSample(unittest.TestCase):
 
     def test_idempotent_same_raw(self):
         """Повторный вызов с тем же raw → accumulated не меняется (delta=0)."""
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -414,7 +414,7 @@ class TestRecordTrafficSample(unittest.TestCase):
 
     def test_multiple_users_isolated(self):
         """Разные пользователи — изолированные счётчики."""
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -430,7 +430,7 @@ class TestRecordTrafficSample(unittest.TestCase):
 
     def test_multiple_protocols_isolated(self):
         """Разные протоколы для одного юзера — изолированные счётчики."""
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -446,7 +446,7 @@ class TestRecordTrafficSample(unittest.TestCase):
 
     def test_unsupported_protocol_raises(self):
         """Неподдерживаемый протокол → ValueError."""
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -461,7 +461,7 @@ class TestRecordTrafficSample(unittest.TestCase):
                 p.stop()
 
     def test_empty_user_id_raises(self):
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -472,7 +472,7 @@ class TestRecordTrafficSample(unittest.TestCase):
                 p.stop()
 
     def test_negative_raw_clamped_to_zero(self):
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -500,14 +500,14 @@ class TestGetResetAccumulated(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.traffic_accounting._STATE_FILE",
+            patch("chimera.modules.traffic_accounting._STATE_FILE",
                   self._state_file),
-            patch("vless_installer.modules.traffic_accounting._LOCK_FILE",
+            patch("chimera.modules.traffic_accounting._LOCK_FILE",
                   self._lock_file),
         ]
 
     def test_get_returns_zero_for_unknown_user(self):
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -520,7 +520,7 @@ class TestGetResetAccumulated(unittest.TestCase):
                 p.stop()
 
     def test_get_returns_zero_for_unsupported_protocol(self):
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -531,7 +531,7 @@ class TestGetResetAccumulated(unittest.TestCase):
                 p.stop()
 
     def test_get_after_record(self):
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -544,7 +544,7 @@ class TestGetResetAccumulated(unittest.TestCase):
                 p.stop()
 
     def test_reset_clears_accumulated(self):
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -562,7 +562,7 @@ class TestGetResetAccumulated(unittest.TestCase):
                 p.stop()
 
     def test_get_all_accumulated(self):
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -580,7 +580,7 @@ class TestGetResetAccumulated(unittest.TestCase):
                 p.stop()
 
     def test_get_all_accumulated_empty_user(self):
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -609,16 +609,16 @@ class TestConcurrentAccess(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.traffic_accounting._STATE_FILE",
+            patch("chimera.modules.traffic_accounting._STATE_FILE",
                   self._state_file),
-            patch("vless_installer.modules.traffic_accounting._LOCK_FILE",
+            patch("chimera.modules.traffic_accounting._LOCK_FILE",
                   self._lock_file),
         ]
 
     def test_concurrent_different_users(self):
         """10 потоков пишут разных пользователей — все 10 записей должны быть
         в state после завершения."""
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -649,7 +649,7 @@ class TestConcurrentAccess(unittest.TestCase):
         """10 потоков пишут ТОГО ЖЕ пользователя с растущими значениями.
         Финальный accumulated должен быть >= max(raw values).
         Без lock — возможна гонка и потеря данных."""
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -692,7 +692,7 @@ class TestConcurrentAccess(unittest.TestCase):
 
     def test_concurrent_no_state_corruption(self):
         """100 потоков — state.json должен остаться валидным JSON."""
-        from vless_installer.modules import traffic_accounting
+        from chimera.modules import traffic_accounting
         for p in self._patches():
             p.start()
         try:
@@ -737,13 +737,13 @@ class TestVlessAccumulatedIntegration(unittest.TestCase):
     def test_accumulated_survives_xray_restart(self):
         """Симуляция: xray restart сбрасывает raw в 0, но accumulated
         сохраняется благодаря baseline-offset."""
-        from vless_installer.modules import traffic_accounting
-        from vless_installer.modules import traffic_tracking
+        from chimera.modules import traffic_accounting
+        from chimera.modules import traffic_tracking
         # Патчим _query_user_traffic_bytes чтобы вернуть raw значения
         # (имитируя xray api statsquery)
-        with patch("vless_installer.modules.traffic_accounting._STATE_FILE",
+        with patch("chimera.modules.traffic_accounting._STATE_FILE",
                    self._state_file), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE",
+             patch("chimera.modules.traffic_accounting._LOCK_FILE",
                    self._lock_file):
             # 1) xray reports 5 GB used
             with patch.object(traffic_tracking, "_query_user_traffic_bytes",
@@ -784,7 +784,7 @@ class TestComputeAccumulated(unittest.TestCase):
 
     def test_first_sample(self):
         """Первый снимок: baseline=0, last_raw=0, raw=1000 → 1000."""
-        from vless_installer.modules.traffic_accounting import _compute_accumulated
+        from chimera.modules.traffic_accounting import _compute_accumulated
         entry = {"baseline_bytes": 0, "last_raw": 0}
         # raw=1000 >= last_raw=0 → normal growth → baseline + raw = 0 + 1000
         result = _compute_accumulated(entry, 1000)
@@ -792,7 +792,7 @@ class TestComputeAccumulated(unittest.TestCase):
 
     def test_normal_growth(self):
         """Нормальный рост: baseline=0, last_raw=1000, raw=1500 → 1500."""
-        from vless_installer.modules.traffic_accounting import _compute_accumulated
+        from chimera.modules.traffic_accounting import _compute_accumulated
         entry = {"baseline_bytes": 0, "last_raw": 1000}
         # raw=1500 >= last_raw=1000 → normal growth → baseline + raw = 0 + 1500
         result = _compute_accumulated(entry, 1500)
@@ -800,14 +800,14 @@ class TestComputeAccumulated(unittest.TestCase):
 
     def test_normal_growth_with_baseline(self):
         """baseline=5000, last_raw=1000, raw=1500 → 5000+1500=6500."""
-        from vless_installer.modules.traffic_accounting import _compute_accumulated
+        from chimera.modules.traffic_accounting import _compute_accumulated
         entry = {"baseline_bytes": 5000, "last_raw": 1000}
         result = _compute_accumulated(entry, 1500)
         self.assertEqual(result, 6500)
 
     def test_reset_case(self):
         """Сброс: baseline=0, last_raw=5000, raw=100 → (0+5000)+100=5100."""
-        from vless_installer.modules.traffic_accounting import _compute_accumulated
+        from chimera.modules.traffic_accounting import _compute_accumulated
         entry = {"baseline_bytes": 0, "last_raw": 5000}
         # raw=100 < last_raw=5000 → reset → (baseline + last_raw) + raw = (0+5000)+100
         result = _compute_accumulated(entry, 100)
@@ -815,14 +815,14 @@ class TestComputeAccumulated(unittest.TestCase):
 
     def test_reset_with_existing_baseline(self):
         """baseline=5000, last_raw=3000, raw=500 → (5000+3000)+500=8500."""
-        from vless_installer.modules.traffic_accounting import _compute_accumulated
+        from chimera.modules.traffic_accounting import _compute_accumulated
         entry = {"baseline_bytes": 5000, "last_raw": 3000}
         result = _compute_accumulated(entry, 500)
         self.assertEqual(result, 8500)
 
     def test_equal_raw(self):
         """raw == last_raw → normal growth (>=), total = baseline + raw."""
-        from vless_installer.modules.traffic_accounting import _compute_accumulated
+        from chimera.modules.traffic_accounting import _compute_accumulated
         entry = {"baseline_bytes": 1000, "last_raw": 2000}
         # raw=2000 == last_raw=2000 → >= → normal → 1000 + 2000 = 3000
         result = _compute_accumulated(entry, 2000)

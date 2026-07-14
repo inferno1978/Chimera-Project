@@ -2,7 +2,7 @@
 """
 tests/test_singbox_ufw.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/singbox_ufw.py (v4.23.14).
+Unit-тесты для chimera/modules/singbox_ufw.py (v4.23.14).
 
 Покрывает:
   1. _ufw_parse_rules — парсинг `ufw status numbered`
@@ -27,7 +27,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -37,9 +37,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class _Base(unittest.TestCase):
@@ -56,7 +56,7 @@ class _Base(unittest.TestCase):
         ]:
             self.stack.enter_context(p)
         _setup_core()
-        from vless_installer.modules import singbox_ufw
+        from chimera.modules import singbox_ufw
         self.ufw = singbox_ufw
         # Список вызовов _run
         self.run_calls = []
@@ -76,7 +76,7 @@ class _Base(unittest.TestCase):
                 return m
             return response
 
-        self.run_patcher = patch('vless_installer.modules.singbox_ufw._run',
+        self.run_patcher = patch('chimera.modules.singbox_ufw._run',
                                  side_effect=fake_run)
         self.run_patcher.start()
 
@@ -267,7 +267,7 @@ class TestClose(_Base):
         )
         # close проверяет, не использует ли порт другой sing-box протокол
         # Мокаем singbox_state_load — нет других протоколов
-        with patch('vless_installer.modules.singbox_state.singbox_state_load',
+        with patch('chimera.modules.singbox_state.singbox_state_load',
                    return_value={"inbounds": {}}):
             self._mock_response("ufw delete allow 9443/tcp comment sing-box-shadowtls")
             result = self.ufw.singbox_ufw_close(9443, "tcp", "shadowtls")
@@ -312,7 +312,7 @@ class TestClose(_Base):
                 },
             }
         }
-        with patch('vless_installer.modules.singbox_state.singbox_state_load',
+        with patch('chimera.modules.singbox_state.singbox_state_load',
                    return_value=mock_state):
             result = self.ufw.singbox_ufw_close(9443, "tcp", "shadowtls")
         self.assertTrue(result)

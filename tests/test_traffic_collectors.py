@@ -42,8 +42,8 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Создаёт фейковый vless_installer._core (как в test_tg_bot.py)."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    """Создаёт фейковый chimera._core (как в test_tg_bot.py)."""
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -53,9 +53,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 # =============================================================================
@@ -155,13 +155,13 @@ class TestAwgCollectPeerTraffic(unittest.TestCase):
         """На реальном выводе awg show all dump — alice и bob должны получить
         ненулевые accumulated bytes. Technical peer (без owner_email) пропускается.
         """
-        from vless_installer.modules import awg_peers, traffic_accounting
+        from chimera.modules import awg_peers, traffic_accounting
 
-        with patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
-             patch("vless_installer.modules.awg_peers.awgs_state_load",
+        with patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
+             patch("chimera.modules.awg_peers.awgs_state_load",
                    return_value=json.loads(self._awg_state.read_text())), \
-             patch("vless_installer.modules.awg_apply.awgs_show_dump",
+             patch("chimera.modules.awg_apply.awgs_show_dump",
                    return_value=_REAL_AWG_DUMP):
             result = awg_peers.awg_collect_peer_traffic()
 
@@ -182,28 +182,28 @@ class TestAwgCollectPeerTraffic(unittest.TestCase):
 
     def test_interface_line_skipped(self):
         """interface-строка (4 поля) не должна парситься как peer."""
-        from vless_installer.modules import awg_peers
+        from chimera.modules import awg_peers
         # Только interface-строка, без peer-строк
         dump_with_only_interface = ["awg0\tAAAA=\t51820\t0x3e8"]
-        with patch("vless_installer.modules.awg_peers.awgs_state_load",
+        with patch("chimera.modules.awg_peers.awgs_state_load",
                    return_value={"peers": []}), \
-             patch("vless_installer.modules.awg_apply.awgs_show_dump",
+             patch("chimera.modules.awg_apply.awgs_show_dump",
                    return_value=dump_with_only_interface), \
-             patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock):
+             patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock):
             result = awg_peers.awg_collect_peer_traffic()
         self.assertEqual(result, {})
 
     def test_counter_reset_preserves_accumulated(self):
         """При рестарте awg-quick (счётчик сбросился) — accumulated сохраняется."""
-        from vless_installer.modules import awg_peers, traffic_accounting
+        from chimera.modules import awg_peers, traffic_accounting
 
         # Первый снимок: alice rx=1234567 tx=7654321 → 8888888
-        with patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
-             patch("vless_installer.modules.awg_peers.awgs_state_load",
+        with patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
+             patch("chimera.modules.awg_peers.awgs_state_load",
                    return_value=json.loads(self._awg_state.read_text())), \
-             patch("vless_installer.modules.awg_apply.awgs_show_dump",
+             patch("chimera.modules.awg_apply.awgs_show_dump",
                    return_value=_REAL_AWG_DUMP):
             r1 = awg_peers.awg_collect_peer_traffic()
         self.assertEqual(r1["alice@xray"], 8888888)
@@ -213,11 +213,11 @@ class TestAwgCollectPeerTraffic(unittest.TestCase):
             "awg0\tAAAA=\t51820\t0x3e8",
             "awg0\tBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=\tCCCC=\t1.2.3.4:54321\t10.66.66.2/32\t1719500500\t100\t200\t25",
         ]
-        with patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
-             patch("vless_installer.modules.awg_peers.awgs_state_load",
+        with patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
+             patch("chimera.modules.awg_peers.awgs_state_load",
                    return_value=json.loads(self._awg_state.read_text())), \
-             patch("vless_installer.modules.awg_apply.awgs_show_dump",
+             patch("chimera.modules.awg_apply.awgs_show_dump",
                    return_value=dump_after_restart):
             r2 = awg_peers.awg_collect_peer_traffic()
         # accumulated = 8888888 (baseline) + 300 (new raw) = 8889188
@@ -259,12 +259,12 @@ class TestMieruCollectTraffic(unittest.TestCase):
     def test_extracts_nonzero_bytes_with_correct_keys(self):
         """С правильными ключами download/upload — alice и bob получают
         ненулевые accumulated bytes. Со старыми ключами rx/tx было бы 0."""
-        from vless_installer.modules import mieru_stats
+        from chimera.modules import mieru_stats
 
         mock_journal = self._make_mock_journal_result()
-        with patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
-             patch("vless_installer.modules.mieru_stats._parse_journal",
+        with patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
+             patch("chimera.modules.mieru_stats._parse_journal",
                    return_value=mock_journal):
             result = mieru_stats.mieru_collect_traffic()
 
@@ -283,7 +283,7 @@ class TestMieruCollectTraffic(unittest.TestCase):
     def test_old_keys_rx_tx_would_return_zero(self):
         """Проверка что со старыми ключами rx/tx результат был бы 0.
         Это regression-тест — если кто-то вернёт баг, тест поймает."""
-        from vless_installer.modules import mieru_stats
+        from chimera.modules import mieru_stats
 
         # Имитируем багованный journal result (с rx/tx вместо download/upload)
         buggy_journal = {
@@ -291,9 +291,9 @@ class TestMieruCollectTraffic(unittest.TestCase):
                 "alice": {"download": 1048576, "upload": 524288},  # правильные ключи
             },
         }
-        with patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
-             patch("vless_installer.modules.mieru_stats._parse_journal",
+        with patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
+             patch("chimera.modules.mieru_stats._parse_journal",
                    return_value=buggy_journal):
             # Если бы код использовал ustats.get("rx", 0) + ustats.get("tx", 0),
             # результат был бы 0 (нет таких ключей). С фиксом — 1572864.
@@ -304,22 +304,22 @@ class TestMieruCollectTraffic(unittest.TestCase):
 
     def test_counter_reset_preserves_accumulated(self):
         """При рестарте mita (счётчик сбросился) — accumulated сохраняется."""
-        from vless_installer.modules import mieru_stats
+        from chimera.modules import mieru_stats
 
         # Первый снимок: alice download=1048576 upload=524288 → 1572864
         journal1 = {"users": {"alice": {"download": 1048576, "upload": 524288}}}
-        with patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
-             patch("vless_installer.modules.mieru_stats._parse_journal",
+        with patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
+             patch("chimera.modules.mieru_stats._parse_journal",
                    return_value=journal1):
             r1 = mieru_stats.mieru_collect_traffic()
         self.assertEqual(r1["alice"], 1572864)
 
         # Рестарт mita — счётчик сбросился, alice теперь download=100 upload=200
         journal2 = {"users": {"alice": {"download": 100, "upload": 200}}}
-        with patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
-             patch("vless_installer.modules.mieru_stats._parse_journal",
+        with patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock), \
+             patch("chimera.modules.mieru_stats._parse_journal",
                    return_value=journal2):
             r2 = mieru_stats.mieru_collect_traffic()
         # accumulated = 1572864 (baseline) + 300 (new raw) = 1573164
@@ -366,12 +366,12 @@ class TestNaiveproxyCollectTraffic(unittest.TestCase):
         """На реальном access.log — alice и bob должны получить
         ненулевые accumulated bytes.
         """
-        from vless_installer.modules import naiveproxy_stats
+        from chimera.modules import naiveproxy_stats
 
-        with patch("vless_installer.modules.naiveproxy_stats._ACCESS_LOG", self._access_log), \
-             patch("vless_installer.modules.naiveproxy_stats._NAIVE_OFFSET_FILE", self._offset_state), \
-             patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock):
+        with patch("chimera.modules.naiveproxy_stats._ACCESS_LOG", self._access_log), \
+             patch("chimera.modules.naiveproxy_stats._NAIVE_OFFSET_FILE", self._offset_state), \
+             patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock):
             result = naiveproxy_stats.naiveproxy_collect_traffic()
 
         # alice: 100 + 200 + 300 = 600
@@ -389,12 +389,12 @@ class TestNaiveproxyCollectTraffic(unittest.TestCase):
     def test_incremental_reading_no_duplicate(self):
         """Повторный вызов без новых строк — accumulated не меняется
         (delta=0, новых строк нет)."""
-        from vless_installer.modules import naiveproxy_stats
+        from chimera.modules import naiveproxy_stats
 
-        with patch("vless_installer.modules.naiveproxy_stats._ACCESS_LOG", self._access_log), \
-             patch("vless_installer.modules.naiveproxy_stats._NAIVE_OFFSET_FILE", self._offset_state), \
-             patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock):
+        with patch("chimera.modules.naiveproxy_stats._ACCESS_LOG", self._access_log), \
+             patch("chimera.modules.naiveproxy_stats._NAIVE_OFFSET_FILE", self._offset_state), \
+             patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock):
             # Первый вызов — читает все строки
             r1 = naiveproxy_stats.naiveproxy_collect_traffic()
             # Второй вызов — новых строк нет, result должен быть пустым
@@ -405,12 +405,12 @@ class TestNaiveproxyCollectTraffic(unittest.TestCase):
 
     def test_incremental_reading_accumulates_new_lines(self):
         """При дописывании новых строк — accumulated растёт на delta."""
-        from vless_installer.modules import naiveproxy_stats
+        from chimera.modules import naiveproxy_stats
 
-        with patch("vless_installer.modules.naiveproxy_stats._ACCESS_LOG", self._access_log), \
-             patch("vless_installer.modules.naiveproxy_stats._NAIVE_OFFSET_FILE", self._offset_state), \
-             patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock):
+        with patch("chimera.modules.naiveproxy_stats._ACCESS_LOG", self._access_log), \
+             patch("chimera.modules.naiveproxy_stats._NAIVE_OFFSET_FILE", self._offset_state), \
+             patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock):
             # Первый вызов — alice = 600
             r1 = naiveproxy_stats.naiveproxy_collect_traffic()
             self.assertEqual(r1["alice"], 600)
@@ -437,12 +437,12 @@ class TestNaiveproxyCollectTraffic(unittest.TestCase):
     def test_log_rotation_handled_by_inode_check(self):
         """При ротации лога (новый inode) — читаем с начала нового файла,
         не теряя накопленное."""
-        from vless_installer.modules import naiveproxy_stats
+        from chimera.modules import naiveproxy_stats
 
-        with patch("vless_installer.modules.naiveproxy_stats._ACCESS_LOG", self._access_log), \
-             patch("vless_installer.modules.naiveproxy_stats._NAIVE_OFFSET_FILE", self._offset_state), \
-             patch("vless_installer.modules.traffic_accounting._STATE_FILE", self._acc_state), \
-             patch("vless_installer.modules.traffic_accounting._LOCK_FILE", self._acc_lock):
+        with patch("chimera.modules.naiveproxy_stats._ACCESS_LOG", self._access_log), \
+             patch("chimera.modules.naiveproxy_stats._NAIVE_OFFSET_FILE", self._offset_state), \
+             patch("chimera.modules.traffic_accounting._STATE_FILE", self._acc_state), \
+             patch("chimera.modules.traffic_accounting._LOCK_FILE", self._acc_lock):
             # Первый вызов — alice = 600
             r1 = naiveproxy_stats.naiveproxy_collect_traffic()
             self.assertEqual(r1["alice"], 600)

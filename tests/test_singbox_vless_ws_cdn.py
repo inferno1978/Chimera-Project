@@ -32,7 +32,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -42,9 +42,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 def _enter_patches(stack, patches):
@@ -63,7 +63,7 @@ class TestBuildVlessWsCdnInbound(unittest.TestCase):
         _setup_core()
 
     def test_returns_dict_with_required_fields(self):
-        from vless_installer.modules.singbox_config import _build_vless_ws_cdn_inbound
+        from chimera.modules.singbox_config import _build_vless_ws_cdn_inbound
         ib = _build_vless_ws_cdn_inbound({
             "enabled": True,
             "uuid": "11111111-1111-1111-1111-111111111111",
@@ -77,17 +77,17 @@ class TestBuildVlessWsCdnInbound(unittest.TestCase):
 
     def test_listen_defaults_to_0_0_0_0(self):
         """VLESS-WS-CDN bound externally — CDN подключается к этому порту."""
-        from vless_installer.modules.singbox_config import _build_vless_ws_cdn_inbound
+        from chimera.modules.singbox_config import _build_vless_ws_cdn_inbound
         ib = _build_vless_ws_cdn_inbound({"enabled": True, "uuid": "x"})
         self.assertEqual(ib["listen"], "0.0.0.0")
 
     def test_listen_port_default_8443(self):
-        from vless_installer.modules.singbox_config import _build_vless_ws_cdn_inbound
+        from chimera.modules.singbox_config import _build_vless_ws_cdn_inbound
         ib = _build_vless_ws_cdn_inbound({"enabled": True, "uuid": "x"})
         self.assertEqual(ib["listen_port"], 8443)
 
     def test_ws_path_in_transport(self):
-        from vless_installer.modules.singbox_config import _build_vless_ws_cdn_inbound
+        from chimera.modules.singbox_config import _build_vless_ws_cdn_inbound
         ib = _build_vless_ws_cdn_inbound({
             "enabled": True,
             "uuid": "x",
@@ -96,7 +96,7 @@ class TestBuildVlessWsCdnInbound(unittest.TestCase):
         self.assertEqual(ib["transport"]["path"], "/my-secret-path")
 
     def test_host_header_in_transport(self):
-        from vless_installer.modules.singbox_config import _build_vless_ws_cdn_inbound
+        from chimera.modules.singbox_config import _build_vless_ws_cdn_inbound
         ib = _build_vless_ws_cdn_inbound({
             "enabled": True,
             "uuid": "x",
@@ -107,7 +107,7 @@ class TestBuildVlessWsCdnInbound(unittest.TestCase):
         self.assertEqual(ib["transport"]["headers"]["Host"], "vless.example.com")
 
     def test_host_header_omitted_when_empty(self):
-        from vless_installer.modules.singbox_config import _build_vless_ws_cdn_inbound
+        from chimera.modules.singbox_config import _build_vless_ws_cdn_inbound
         ib = _build_vless_ws_cdn_inbound({
             "enabled": True,
             "uuid": "x",
@@ -117,7 +117,7 @@ class TestBuildVlessWsCdnInbound(unittest.TestCase):
         self.assertNotIn("headers", ib["transport"])
 
     def test_uuid_in_users(self):
-        from vless_installer.modules.singbox_config import _build_vless_ws_cdn_inbound
+        from chimera.modules.singbox_config import _build_vless_ws_cdn_inbound
         ib = _build_vless_ws_cdn_inbound({
             "enabled": True,
             "uuid": "11111111-1111-1111-1111-111111111111",
@@ -126,7 +126,7 @@ class TestBuildVlessWsCdnInbound(unittest.TestCase):
         self.assertEqual(ib["users"][0]["uuid"], "11111111-1111-1111-1111-111111111111")
 
     def test_users_empty_when_no_uuid(self):
-        from vless_installer.modules.singbox_config import _build_vless_ws_cdn_inbound
+        from chimera.modules.singbox_config import _build_vless_ws_cdn_inbound
         ib = _build_vless_ws_cdn_inbound({"enabled": True, "uuid": ""})
         self.assertEqual(ib["users"], [])
 
@@ -139,7 +139,7 @@ class TestBuildVlessWsCdnInbound(unittest.TestCase):
         своим сертификатом, origin (sing-box) слушает plain WS. Добавление
         'tls' было бы мёртвым JSON-полем.
         """
-        from vless_installer.modules.singbox_config import _build_vless_ws_cdn_inbound
+        from chimera.modules.singbox_config import _build_vless_ws_cdn_inbound
         ib = _build_vless_ws_cdn_inbound({
             "enabled": True,
             "uuid": "x",
@@ -157,7 +157,7 @@ class TestBuildVlessWsCdnInbound(unittest.TestCase):
 
     def test_no_tls_block_even_if_cert_paths_exist_on_disk(self):
         """Даже если cert_path/key_path указывают на существующие файлы — tls не добавляется."""
-        from vless_installer.modules.singbox_config import _build_vless_ws_cdn_inbound
+        from chimera.modules.singbox_config import _build_vless_ws_cdn_inbound
         with tempfile.TemporaryDirectory() as td:
             cert = Path(td) / "cert.pem"
             key = Path(td) / "key.pem"
@@ -191,16 +191,16 @@ class TestEnableVlessWsCdn(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
         ]
 
     def test_enable_generates_uuid_if_missing(self):
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -216,8 +216,8 @@ class TestEnableVlessWsCdn(unittest.TestCase):
                          r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
     def test_enable_generates_ws_path_if_missing(self):
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -230,8 +230,8 @@ class TestEnableVlessWsCdn(unittest.TestCase):
 
     def test_enable_does_not_regenerate_uuid_if_exists(self):
         """Повторный enable НЕ перегенерирует UUID (только по явному действию)."""
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -249,8 +249,8 @@ class TestEnableVlessWsCdn(unittest.TestCase):
 
     def test_enable_does_not_regenerate_ws_path_if_exists(self):
         """Повторный enable НЕ перегенерирует ws_path."""
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -264,8 +264,8 @@ class TestEnableVlessWsCdn(unittest.TestCase):
         self.assertEqual(path1, ib2["ws_path"])
 
     def test_enable_rejects_unknown_cdn_provider(self):
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -277,8 +277,8 @@ class TestEnableVlessWsCdn(unittest.TestCase):
 
         Аналог fixed-логики shadowtls v4.22.3: поле не нужно — не принимаем.
         """
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -292,8 +292,8 @@ class TestEnableVlessWsCdn(unittest.TestCase):
 
     def test_enable_does_not_create_tls_fields_in_state(self):
         """После enable в state не должно быть cert_path/key_path/cert_source."""
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -325,18 +325,18 @@ class TestDisableVlessWsCdn(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
         ]
 
     def test_disable_sets_enabled_false(self):
-        from vless_installer.modules.singbox_config import (
+        from chimera.modules.singbox_config import (
             singbox_enable_vless_ws_cdn, singbox_disable_vless_ws_cdn,
         )
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -349,10 +349,10 @@ class TestDisableVlessWsCdn(unittest.TestCase):
 
     def test_disable_preserves_other_fields(self):
         """Disable не должен стирать uuid/ws_path/host — только снимает enabled."""
-        from vless_installer.modules.singbox_config import (
+        from chimera.modules.singbox_config import (
             singbox_enable_vless_ws_cdn, singbox_disable_vless_ws_cdn,
         )
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -387,17 +387,17 @@ class TestCdnProviderSwitch(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
         ]
 
     def test_switch_preserves_uuid_path_host(self):
         """Manual switch между CDN не должен регенерировать секреты."""
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_load,
         )
         with ExitStack() as stack:
@@ -424,8 +424,8 @@ class TestCdnProviderSwitch(unittest.TestCase):
 
     def test_switch_to_all_three_providers(self):
         """Переключение по цепочке cloudflare → gcore → bunny → cloudflare."""
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_load,
         )
         with ExitStack() as stack:
@@ -468,21 +468,21 @@ class TestGenerateConfigWithVlessWsCdn(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_CONFIG_DIR", self._config_dir),
-            patch("vless_installer.modules.singbox_common.SINGBOX_CONFIG_FILE", self._config_file),
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_DIR", self._config_dir),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_FILE", self._config_file),
+            patch("chimera.modules.singbox_common.SINGBOX_CONFIG_DIR", self._config_dir),
+            patch("chimera.modules.singbox_common.SINGBOX_CONFIG_FILE", self._config_file),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_DIR", self._config_dir),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_FILE", self._config_file),
         ]
 
     def test_generate_config_creates_vless_ws_cdn_inbound(self):
         """Реальный вызов singbox_generate_config() → парсинг config.json → проверка structure."""
-        from vless_installer.modules.singbox_config import (
+        from chimera.modules.singbox_config import (
             singbox_generate_config, singbox_enable_vless_ws_cdn,
         )
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -511,8 +511,8 @@ class TestGenerateConfigWithVlessWsCdn(unittest.TestCase):
 
     def test_generate_config_skips_vless_ws_cdn_when_disabled(self):
         """При enabled=False singbox_generate_config() не добавляет vless_ws_cdn inbound."""
-        from vless_installer.modules.singbox_config import singbox_generate_config
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_config import singbox_generate_config
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -525,10 +525,10 @@ class TestGenerateConfigWithVlessWsCdn(unittest.TestCase):
 
     def test_generate_config_with_only_vless_ws_cdn(self):
         """Только VLESS-WS-CDN включён — в config.json ровно 1 inbound."""
-        from vless_installer.modules.singbox_config import (
+        from chimera.modules.singbox_config import (
             singbox_generate_config, singbox_enable_vless_ws_cdn,
         )
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -564,13 +564,13 @@ class TestValidateConfigWithRealBinary(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_CONFIG_DIR", self._config_dir),
-            patch("vless_installer.modules.singbox_common.SINGBOX_CONFIG_FILE", self._config_file),
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_DIR", self._config_dir),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_FILE", self._config_file),
+            patch("chimera.modules.singbox_common.SINGBOX_CONFIG_DIR", self._config_dir),
+            patch("chimera.modules.singbox_common.SINGBOX_CONFIG_FILE", self._config_file),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_DIR", self._config_dir),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_FILE", self._config_file),
         ]
 
     def test_generated_config_passes_singbox_check(self):
@@ -578,15 +578,15 @@ class TestValidateConfigWithRealBinary(unittest.TestCase):
 
         Skip если sing-box бинарник недоступен — НЕ тихий pass.
         """
-        from vless_installer.modules.singbox_common import _singbox_binary_exists, SINGBOX_BINARY
+        from chimera.modules.singbox_common import _singbox_binary_exists, SINGBOX_BINARY
         if not _singbox_binary_exists():
             self.skipTest(f"sing-box binary not available at {SINGBOX_BINARY} — "
                          "cannot run real `sing-box check`. Install sing-box to enable this test.")
-        from vless_installer.modules.singbox_config import (
+        from chimera.modules.singbox_config import (
             singbox_generate_config, singbox_validate_config,
             singbox_enable_vless_ws_cdn,
         )
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -612,13 +612,13 @@ class TestCdnProvidersRegistry(unittest.TestCase):
         _setup_core()
 
     def test_has_all_three_providers(self):
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         for provider in ("cloudflare", "gcore", "bunny"):
             self.assertIn(provider, CDN_PROVIDERS,
                           f"CDN_PROVIDERS должен содержать {provider}")
 
     def test_each_provider_has_display_name(self):
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         for key, meta in CDN_PROVIDERS.items():
             self.assertIn("display_name", meta,
                           f"{key} должен иметь display_name")
@@ -626,7 +626,7 @@ class TestCdnProvidersRegistry(unittest.TestCase):
             self.assertTrue(meta["display_name"])
 
     def test_each_provider_has_instructions(self):
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         for key, meta in CDN_PROVIDERS.items():
             self.assertIn("instructions", meta,
                           f"{key} должен иметь instructions")
@@ -635,7 +635,7 @@ class TestCdnProvidersRegistry(unittest.TestCase):
                                f"{key} должен иметь минимум 4 строки инструкций")
 
     def test_cloudflare_instructions_mention_proxied_dns(self):
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         instructions = CDN_PROVIDERS["cloudflare"]["instructions"]
         full_text = " ".join(instructions).lower()
         self.assertIn("proxied", full_text,
@@ -643,7 +643,7 @@ class TestCdnProvidersRegistry(unittest.TestCase):
         self.assertIn("dns", full_text)
 
     def test_bunny_instructions_mention_origin_port(self):
-        from vless_installer.modules.singbox_common import CDN_PROVIDERS
+        from chimera.modules.singbox_common import CDN_PROVIDERS
         instructions = CDN_PROVIDERS["bunny"]["instructions"]
         full_text = " ".join(instructions).lower()
         self.assertIn("origin port", full_text,
@@ -651,7 +651,7 @@ class TestCdnProvidersRegistry(unittest.TestCase):
 
     def test_default_port_vless_ws_cdn_is_8080(self):
         """v4.23.1: default port = 8080 (Cloudflare HTTP port list, Flexible mode)."""
-        from vless_installer.modules.singbox_common import DEFAULT_PORT_VLESS_WS_CDN
+        from chimera.modules.singbox_common import DEFAULT_PORT_VLESS_WS_CDN
         self.assertEqual(DEFAULT_PORT_VLESS_WS_CDN, 8080)
 
 
@@ -674,13 +674,13 @@ class TestStateInitVlessWsCdn(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
         ]
 
     def test_init_creates_vless_ws_cdn_section(self):
-        from vless_installer.modules.singbox_state import singbox_state_init, singbox_state_load
+        from chimera.modules.singbox_state import singbox_state_init, singbox_state_load
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -688,7 +688,7 @@ class TestStateInitVlessWsCdn(unittest.TestCase):
         self.assertIn("vless_ws_cdn", state["inbounds"])
 
     def test_init_vless_ws_cdn_disabled_by_default(self):
-        from vless_installer.modules.singbox_state import singbox_state_init, singbox_state_load
+        from chimera.modules.singbox_state import singbox_state_init, singbox_state_load
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -696,7 +696,7 @@ class TestStateInitVlessWsCdn(unittest.TestCase):
         self.assertFalse(state["inbounds"]["vless_ws_cdn"]["enabled"])
 
     def test_init_vless_ws_cdn_has_required_fields(self):
-        from vless_installer.modules.singbox_state import singbox_state_init, singbox_state_load
+        from chimera.modules.singbox_state import singbox_state_init, singbox_state_load
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -711,7 +711,7 @@ class TestStateInitVlessWsCdn(unittest.TestCase):
 
         Регрессия v4.22.3 (ShadowTLS): поле не нужно — не создаём.
         """
-        from vless_installer.modules.singbox_state import singbox_state_init, singbox_state_load
+        from chimera.modules.singbox_state import singbox_state_init, singbox_state_load
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -724,7 +724,7 @@ class TestStateInitVlessWsCdn(unittest.TestCase):
 
     def test_init_vless_ws_cdn_default_port_8080(self):
         """v4.23.1: default port changed to 8080 (Cloudflare HTTP port list)."""
-        from vless_installer.modules.singbox_state import singbox_state_init, singbox_state_load
+        from chimera.modules.singbox_state import singbox_state_init, singbox_state_load
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")

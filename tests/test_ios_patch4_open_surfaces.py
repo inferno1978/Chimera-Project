@@ -42,7 +42,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -51,9 +51,9 @@ def _setup_core_in_sysmodules():
          patch('os.chown', lambda *a, **kw: None), \
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -148,7 +148,7 @@ class TestGenerateClientLinksIosUsesShadow(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_links_no_flow_and_use_shadow_uuid(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         captured_links = []
         self._fake_core._box_link = lambda link: captured_links.append(link)
@@ -197,7 +197,7 @@ class TestClientConfigExportIosLink(unittest.TestCase):
 
     def test_reality_ios_link_no_flow_uses_shadow_uuid(self):
         """Для REALITY: vless-link-ios.txt не содержит flow=, UUID = shadow."""
-        from vless_installer.modules import client_config_export
+        from chimera.modules import client_config_export
 
         tmpdir = Path(tempfile.mkdtemp())
         cfg_path = tmpdir / "config.json"
@@ -260,9 +260,9 @@ class TestClientConfigExportIosLink(unittest.TestCase):
              patch.object(client_config_export, "_core_module", return_value=self._fake_core), \
              patch.object(Path, "write_text", _capture_write), \
              patch.object(Path, "mkdir", lambda self, *a, **kw: None), \
-             patch("vless_installer.modules.users_manager._users_get_config", return_value=cfg_path), \
-             patch("vless_installer.modules.users_manager._core_module", return_value=self._fake_core), \
-             patch("vless_installer.modules.users_manager._users_apply_config", lambda cfg: None):
+             patch("chimera.modules.users_manager._users_get_config", return_value=cfg_path), \
+             patch("chimera.modules.users_manager._core_module", return_value=self._fake_core), \
+             patch("chimera.modules.users_manager._users_apply_config", lambda cfg: None):
             client_config_export.do_generate_client_config()
 
         # vless-link.txt — обычная REALITY-ссылка (с flow=).
@@ -288,7 +288,7 @@ class TestClientConfigExportIosLink(unittest.TestCase):
 
     def test_xhttp_ios_link_identical_to_plain(self):
         """Для xHTTP: vless-link-ios.txt идентичен vless-link.txt (shadow не нужен)."""
-        from vless_installer.modules import client_config_export
+        from chimera.modules import client_config_export
         import os
 
         tmpdir = Path(tempfile.mkdtemp())
@@ -394,7 +394,7 @@ class TestShadowDoesNotDoubleCount(unittest.TestCase):
 
         Используем временную директорию и monkey-patch Path в
         users_manager namespace, чтобы указать на наш тестовый config.json."""
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         tmpdir, cfg_path = self._make_cfg_with_shadow(real_count=2, with_shadow=True)
         cfg_text = cfg_path.read_text()
@@ -460,7 +460,7 @@ class TestShadowDoesNotDoubleCount(unittest.TestCase):
 
         Патчим _core_module() в status_panel, чтобы вернуть fake_core
         с предзаполненным _unified_load_users."""
-        from vless_installer.modules import status_panel
+        from chimera.modules import status_panel
 
         fake_users = [
             {"uuid": "u1", "email": "user0@example.com", "name": "u0", "source": "A"},
@@ -481,7 +481,7 @@ class TestShadowDoesNotDoubleCount(unittest.TestCase):
 
     def test_users_counts_without_shadow_unchanged(self):
         """Без shadow — поведение идентичное допатчевому (golden)."""
-        from vless_installer.modules import status_panel
+        from chimera.modules import status_panel
 
         fake_users = [
             {"uuid": "u1", "email": "a@x.com", "name": "a", "source": "A"},
@@ -513,7 +513,7 @@ class TestMenuUsersKItemUncommented(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def _extract_menu_users_block(self):
-        src = (_PROJECT_ROOT / "vless_installer" / "_core.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "_core.py").read_text()
         m = re.search(r'def _menu_users\(\).*?(?=\ndef [a-z_])',
                       src, re.DOTALL)
         self.assertIsNotNone(m, "_menu_users не найдена в _core.py")
@@ -558,7 +558,7 @@ class TestDoUserListRendersShadowSeparately(unittest.TestCase):
         _mock_core_for_users_manager(self._fake_core)
 
     def test_shadow_in_separate_block(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         tmpdir, cfg_path = _make_reality_config([
             {"id": "aaaaaaaa-0000-0000-0000-000000000001",
@@ -592,7 +592,7 @@ class TestUnifiedManagerKItemStillActive(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_k_item_in_unified_manager(self):
-        src = (_PROJECT_ROOT / "vless_installer" / "_core.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "_core.py").read_text()
         m = re.search(r'def do_unified_user_manager\(\).*?(?=\ndef [a-z_])',
                       src, re.DOTALL)
         self.assertIsNotNone(m, "do_unified_user_manager не найдена")

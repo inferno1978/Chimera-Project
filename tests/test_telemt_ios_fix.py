@@ -2,7 +2,7 @@
 """
 tests/test_telemt_ios_fix.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/telemt_ios_fix.py.
+Unit-тесты для chimera/modules/telemt_ios_fix.py.
 
 Покрывает:
   1. _get_telemt_port — чтение порта
@@ -26,7 +26,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -36,9 +36,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestGetTelemtPort(unittest.TestCase):
@@ -54,16 +54,16 @@ class TestGetTelemtPort(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.telemt_ios_fix._CONFIG_FILE",
+        return patch("chimera.modules.telemt_ios_fix._CONFIG_FILE",
                      self._cfg)
 
     def test_returns_zero_when_no_file(self):
-        from vless_installer.modules.telemt_ios_fix import _get_telemt_port
+        from chimera.modules.telemt_ios_fix import _get_telemt_port
         with self._patch():
             self.assertEqual(_get_telemt_port(), 0)
 
     def test_returns_port(self):
-        from vless_installer.modules.telemt_ios_fix import _get_telemt_port
+        from chimera.modules.telemt_ios_fix import _get_telemt_port
         self._cfg.write_text('port = 443\n')
         with self._patch():
             self.assertEqual(_get_telemt_port(), 443)
@@ -82,22 +82,22 @@ class TestGetCurrentMss(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.telemt_ios_fix._CONFIG_FILE",
+        return patch("chimera.modules.telemt_ios_fix._CONFIG_FILE",
                      self._cfg)
 
     def test_returns_empty_when_no_file(self):
-        from vless_installer.modules.telemt_ios_fix import _get_current_mss
+        from chimera.modules.telemt_ios_fix import _get_current_mss
         with self._patch():
             self.assertEqual(_get_current_mss(), "")
 
     def test_returns_value_with_quotes(self):
-        from vless_installer.modules.telemt_ios_fix import _get_current_mss
+        from chimera.modules.telemt_ios_fix import _get_current_mss
         self._cfg.write_text('client_mss = "92"\n')
         with self._patch():
             self.assertEqual(_get_current_mss(), "92")
 
     def test_returns_empty_when_no_setting(self):
-        from vless_installer.modules.telemt_ios_fix import _get_current_mss
+        from chimera.modules.telemt_ios_fix import _get_current_mss
         self._cfg.write_text('port = 443\n')
         with self._patch():
             self.assertEqual(_get_current_mss(), "")
@@ -116,22 +116,22 @@ class TestStripClientMss(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.telemt_ios_fix._CONFIG_FILE",
+        return patch("chimera.modules.telemt_ios_fix._CONFIG_FILE",
                      self._cfg)
 
     def test_returns_false_when_no_file(self):
-        from vless_installer.modules.telemt_ios_fix import _strip_client_mss
+        from chimera.modules.telemt_ios_fix import _strip_client_mss
         with self._patch():
             self.assertFalse(_strip_client_mss())
 
     def test_returns_false_when_no_mss(self):
-        from vless_installer.modules.telemt_ios_fix import _strip_client_mss
+        from chimera.modules.telemt_ios_fix import _strip_client_mss
         self._cfg.write_text('port = 443\n')
         with self._patch():
             self.assertFalse(_strip_client_mss())
 
     def test_removes_mss_line(self):
-        from vless_installer.modules.telemt_ios_fix import _strip_client_mss
+        from chimera.modules.telemt_ios_fix import _strip_client_mss
         self._cfg.write_text('port = 443\nclient_mss = "92"\nother = "x"\n')
         with self._patch():
             self.assertTrue(_strip_client_mss())
@@ -148,24 +148,24 @@ class TestPickFreePort(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_start_when_free(self):
-        from vless_installer.modules import telemt_ios_fix
+        from chimera.modules import telemt_ios_fix
         with patch.object(telemt_ios_fix, "_port_in_use", return_value=False):
             self.assertEqual(telemt_ios_fix._pick_free_port(8443, 0), 8443)
 
     def test_skips_exclude(self):
-        from vless_installer.modules import telemt_ios_fix
+        from chimera.modules import telemt_ios_fix
         with patch.object(telemt_ios_fix, "_port_in_use", return_value=False):
             self.assertEqual(telemt_ios_fix._pick_free_port(8443, 8443), 8444)
 
     def test_skips_used_ports(self):
-        from vless_installer.modules import telemt_ios_fix
+        from chimera.modules import telemt_ios_fix
         # 8443 занят, 8444 свободен
         with patch.object(telemt_ios_fix, "_port_in_use",
                           side_effect=[True, False]):
             self.assertEqual(telemt_ios_fix._pick_free_port(8443, 0), 8444)
 
     def test_returns_zero_when_all_taken(self):
-        from vless_installer.modules import telemt_ios_fix
+        from chimera.modules import telemt_ios_fix
         with patch.object(telemt_ios_fix, "_port_in_use", return_value=True):
             self.assertEqual(telemt_ios_fix._pick_free_port(8443, 0), 0)
 
@@ -177,7 +177,7 @@ class TestIosFixConfig(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_defaults(self):
-        from vless_installer.modules.telemt_ios_fix import IosFixConfig
+        from chimera.modules.telemt_ios_fix import IosFixConfig
         cfg = IosFixConfig()
         self.assertFalse(cfg.enabled)
         self.assertEqual(cfg.ext_port, 0)
@@ -198,17 +198,17 @@ class TestLoadSaveState(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.telemt_ios_fix._STATE_FILE",
+        return patch("chimera.modules.telemt_ios_fix._STATE_FILE",
                      self._state)
 
     def test_load_returns_default_when_no_file(self):
-        from vless_installer.modules.telemt_ios_fix import _load_state
+        from chimera.modules.telemt_ios_fix import _load_state
         with self._patch():
             cfg = _load_state()
         self.assertFalse(cfg.enabled)
 
     def test_load_filters_unknown_keys(self):
-        from vless_installer.modules.telemt_ios_fix import _load_state
+        from chimera.modules.telemt_ios_fix import _load_state
         self._state.write_text(json.dumps({
             "enabled": True, "ext_port": 8443, "target_port": 443,
             "mss": 92, "unknown_key": "ignored",
@@ -219,7 +219,7 @@ class TestLoadSaveState(unittest.TestCase):
         self.assertEqual(cfg.ext_port, 8443)
 
     def test_save_then_load(self):
-        from vless_installer.modules.telemt_ios_fix import (
+        from chimera.modules.telemt_ios_fix import (
             _load_state, _save_state, IosFixConfig,
         )
         cfg = IosFixConfig(enabled=True, ext_port=8443, target_port=443, mss=92)

@@ -2,7 +2,7 @@
 """
 tests/test_scheduler.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/scheduler.py.
+Unit-тесты для chimera/modules/scheduler.py.
 
 Покрывает:
   1. _cron_exists — проверка файла
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -35,23 +35,23 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestScheduler(unittest.TestCase):
     def setUp(self): _setup_core()
     def test_cron_exists_true(self):
-        from vless_installer.modules.scheduler import _cron_exists
+        from chimera.modules.scheduler import _cron_exists
         with patch("pathlib.Path.exists", return_value=True):
             self.assertTrue(_cron_exists("/some/path"))
     def test_cron_exists_false(self):
-        from vless_installer.modules.scheduler import _cron_exists
+        from chimera.modules.scheduler import _cron_exists
         with patch("pathlib.Path.exists", return_value=False):
             self.assertFalse(_cron_exists("/some/path"))
     def test_pad_short_string(self):
-        from vless_installer.modules.scheduler import _pad
+        from chimera.modules.scheduler import _pad
         result = _pad("hi", 10)
         self.assertEqual(len(result), 10)
 

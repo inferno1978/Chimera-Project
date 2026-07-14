@@ -2,7 +2,7 @@
 """
 tests/test_download_manager.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/download_manager.py.
+Unit-тесты для chimera/modules/download_manager.py.
 
 КЛЮЧЕВЫЕ ПРОВЕРКИ:
   1. PackageSpec.__post_init__ assert: manual_incoming_dir == install_dest
@@ -28,7 +28,7 @@ from unittest.mock import patch, MagicMock
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from vless_installer.modules.download_manager import (
+from chimera.modules.download_manager import (
     PackageSpec,
     fetch_package,
     print_manual_hint,
@@ -147,8 +147,8 @@ class TestFetchPackageManualUpload(unittest.TestCase):
             min_size=50,
         )
 
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen") as mock_urlopen, \
-             patch("vless_installer.modules.download_manager._default_copy_to_dests"):
+        with patch("chimera.modules.download_manager.urllib.request.urlopen") as mock_urlopen, \
+             patch("chimera.modules.download_manager._default_copy_to_dests"):
             result = fetch_package(spec)
 
         self.assertTrue(result)
@@ -177,10 +177,10 @@ class TestFetchPackageManualUpload(unittest.TestCase):
 
         # tmp_path будет создан через open(tmp_path, 'wb')
         tmp_path = Path("/tmp") / "_download_mgr_test.dat"
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    return_value=mock_resp), \
-             patch("vless_installer.modules.download_manager._default_copy_to_dests") as mock_copy, \
-             patch("vless_installer.modules.download_manager.Path.unlink"):
+             patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
+             patch("chimera.modules.download_manager.Path.unlink"):
             # Записываем файл в tmp_path чтобы stat() прошёл
             def fake_open(path, *a, **kw):
                 if "wb" in str(a) or "wb" in str(kw.get("mode", "")):
@@ -248,10 +248,10 @@ class TestFetchPackageNetworkDownload(unittest.TestCase):
                 tmp_path.write_bytes(b"x" * 100)
             return MagicMock()
 
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    side_effect=fake_urlopen), \
-             patch("vless_installer.modules.download_manager._default_copy_to_dests") as mock_copy, \
-             patch("vless_installer.modules.download_manager.Path.unlink"), \
+             patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
+             patch("chimera.modules.download_manager.Path.unlink"), \
              patch("builtins.open", side_effect=fake_open):
             result = fetch_package(spec)
 
@@ -276,10 +276,10 @@ class TestFetchPackageNetworkDownload(unittest.TestCase):
             min_size=50,
         )
 
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    side_effect=URLError("blocked")), \
-             patch("vless_installer.modules.download_manager.Path.unlink"), \
-             patch("vless_installer.modules.download_manager.print_manual_hint") as mock_hint:
+             patch("chimera.modules.download_manager.Path.unlink"), \
+             patch("chimera.modules.download_manager.print_manual_hint") as mock_hint:
             result = fetch_package(spec)
 
         self.assertFalse(result)
@@ -298,10 +298,10 @@ class TestFetchPackageNetworkDownload(unittest.TestCase):
             min_size=50,
         )
 
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    side_effect=URLError("blocked")), \
-             patch("vless_installer.modules.download_manager.Path.unlink"), \
-             patch("vless_installer.modules.download_manager.print_manual_hint") as mock_hint:
+             patch("chimera.modules.download_manager.Path.unlink"), \
+             patch("chimera.modules.download_manager.print_manual_hint") as mock_hint:
             result = fetch_package(spec)
 
         self.assertFalse(result)
@@ -372,10 +372,10 @@ class TestFetchPackageRegression21d7baf(unittest.TestCase):
                 tmp_path.write_bytes(b"y" * 100)
             return MagicMock()
 
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    return_value=mock_resp) as mock_urlopen, \
-             patch("vless_installer.modules.download_manager._default_copy_to_dests"), \
-             patch("vless_installer.modules.download_manager.Path.unlink"), \
+             patch("chimera.modules.download_manager._default_copy_to_dests"), \
+             patch("chimera.modules.download_manager.Path.unlink"), \
              patch("builtins.open", side_effect=fake_open):
             result = fetch_package(spec)
 
@@ -400,10 +400,10 @@ class TestFetchPackageRegression21d7baf(unittest.TestCase):
 
         # urlopen возвращает неудачу
         from urllib.error import URLError
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    side_effect=URLError("blocked")), \
-             patch("vless_installer.modules.download_manager.Path.unlink"), \
-             patch("vless_installer.modules.download_manager.print_manual_hint"):
+             patch("chimera.modules.download_manager.Path.unlink"), \
+             patch("chimera.modules.download_manager.print_manual_hint"):
             result = fetch_package(spec)
 
         # Функция провалилась — сеть была затронута, но не сработала
@@ -479,9 +479,9 @@ class TestPostInstallCallback(unittest.TestCase):
                 tmp_path.write_bytes(b"x" * 100)
             return MagicMock()
 
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    return_value=mock_resp), \
-             patch("vless_installer.modules.download_manager.Path.unlink"), \
+             patch("chimera.modules.download_manager.Path.unlink"), \
              patch("builtins.open", side_effect=fake_open):
             result = fetch_package(spec)
 
@@ -502,10 +502,10 @@ class TestPostInstallCallback(unittest.TestCase):
             post_install=post_install,
         )
 
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    side_effect=URLError("blocked")), \
-             patch("vless_installer.modules.download_manager.Path.unlink"), \
-             patch("vless_installer.modules.download_manager.print_manual_hint"):
+             patch("chimera.modules.download_manager.Path.unlink"), \
+             patch("chimera.modules.download_manager.print_manual_hint"):
             result = fetch_package(spec)
 
         self.assertFalse(result)
@@ -544,9 +544,9 @@ class TestPostInstallCallback(unittest.TestCase):
                 tmp_path.write_bytes(b"x" * 100)
             return MagicMock()
 
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    side_effect=lambda req, timeout: make_mock_resp()), \
-             patch("vless_installer.modules.download_manager.Path.unlink"), \
+             patch("chimera.modules.download_manager.Path.unlink"), \
              patch("builtins.open", side_effect=fake_open):
             result = fetch_package(spec)
 
@@ -583,7 +583,7 @@ class TestFetchPackageDryRun(unittest.TestCase):
             min_size=50,
         )
 
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen") as mock_urlopen:
+        with patch("chimera.modules.download_manager.urllib.request.urlopen") as mock_urlopen:
             result = fetch_package(spec, dry_run=True)
 
         self.assertFalse(result)

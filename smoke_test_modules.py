@@ -173,7 +173,7 @@ def run_test(mod_name, func_name, description):
     import signal
 
     try:
-        mod = importlib.import_module(f"vless_installer.modules.{mod_name}")
+        mod = importlib.import_module(f"chimera.modules.{mod_name}")
     except Exception as e:
         return ("IMPORT_ERROR", f"не удалось импортировать модуль: {e}")
 
@@ -254,7 +254,7 @@ def run_test(mod_name, func_name, description):
     except Exception as e:
         signal.alarm(0)
         tb = traceback.format_exc()
-        if f"vless_installer/modules/{mod_name}.py" in tb:
+        if f"chimera/modules/{mod_name}.py" in tb:
             return (type(e).__name__, str(e)[:200])
         return ("PASS", "")
 
@@ -297,7 +297,7 @@ def main():
 
     # Сначала загружаем _core.py как main.py это делает
     print("Загрузка _core.py...")
-    _core_path = Path("vless_installer/_core.py")
+    _core_path = Path("chimera/_core.py")
     with open(_core_path, encoding="utf-8") as f:
         _core_src = f.read()
 
@@ -312,8 +312,8 @@ def main():
          patch('shutil.which', lambda *a, **kw: None):
         exec(compile(_core_src, str(_core_path), "exec"), globals())
 
-    # КРИТИЧЕСКИЙ ФИКС: регистрируем __main__ как vless_installer._core
-    sys.modules["vless_installer._core"] = sys.modules["__main__"]
+    # КРИТИЧЕСКИЙ ФИКС: регистрируем __main__ как chimera._core
+    sys.modules["chimera._core"] = sys.modules["__main__"]
     print("✓ _core.py загружен, sys.modules зарегистрирован")
     print()
     

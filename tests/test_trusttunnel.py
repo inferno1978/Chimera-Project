@@ -2,7 +2,7 @@
 """
 tests/test_trusttunnel.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/trusttunnel.py (main module).
+Unit-тесты для chimera/modules/trusttunnel.py (main module).
 
 Покрывает:
   1. credentials.toml CRUD (parse, format, add, remove, update, list, exists)
@@ -38,7 +38,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -48,9 +48,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 # Real credentials.toml content from Phase 0 sanity-check
@@ -94,7 +94,7 @@ class TestCredentialsTomlParser(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_parse_real_3_user_file(self):
-        from vless_installer.modules.trusttunnel import _parse_credentials_toml
+        from chimera.modules.trusttunnel import _parse_credentials_toml
         clients = _parse_credentials_toml(_REAL_CREDS_3_USERS)
         self.assertEqual(len(clients), 3)
         self.assertEqual(clients[0]["username"], "alice@example.com")
@@ -103,25 +103,25 @@ class TestCredentialsTomlParser(unittest.TestCase):
         self.assertEqual(clients[2]["max_http3_conns"], 2)
 
     def test_parse_empty_file(self):
-        from vless_installer.modules.trusttunnel import _parse_credentials_toml
+        from chimera.modules.trusttunnel import _parse_credentials_toml
         self.assertEqual(_parse_credentials_toml(""), [])
 
     def test_parse_comments_ignored(self):
-        from vless_installer.modules.trusttunnel import _parse_credentials_toml
+        from chimera.modules.trusttunnel import _parse_credentials_toml
         text = "# comment\n[[client]]\n# another comment\nusername = \"x\"\npassword = \"y\"\n"
         clients = _parse_credentials_toml(text)
         self.assertEqual(len(clients), 1)
         self.assertEqual(clients[0]["username"], "x")
 
     def test_format_single_user(self):
-        from vless_installer.modules.trusttunnel import _format_credentials_toml
+        from chimera.modules.trusttunnel import _format_credentials_toml
         out = _format_credentials_toml([{"username": "u", "password": "p"}])
         self.assertIn('[[client]]', out)
         self.assertIn('username = "u"', out)
         self.assertIn('password = "p"', out)
 
     def test_format_with_conn_limits(self):
-        from vless_installer.modules.trusttunnel import _format_credentials_toml
+        from chimera.modules.trusttunnel import _format_credentials_toml
         out = _format_credentials_toml([{
             "username": "u", "password": "p",
             "max_http2_conns": 32, "max_http3_conns": 4,
@@ -130,7 +130,7 @@ class TestCredentialsTomlParser(unittest.TestCase):
         self.assertIn("max_http3_conns = 4", out)
 
     def test_roundtrip_preserves_all_fields(self):
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             _parse_credentials_toml, _format_credentials_toml,
         )
         original = _parse_credentials_toml(_REAL_CREDS_3_USERS)
@@ -158,13 +158,13 @@ class TestCredentialsCrud(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.trusttunnel._CREDS_TOML", self.creds),
-            patch("vless_installer.modules.trusttunnel._STATE_FILE", self.state),
-            patch("vless_installer.modules.trusttunnel._BINARY_PATH", self.binary),
+            patch("chimera.modules.trusttunnel._CREDS_TOML", self.creds),
+            patch("chimera.modules.trusttunnel._STATE_FILE", self.state),
+            patch("chimera.modules.trusttunnel._BINARY_PATH", self.binary),
         ]
 
     def test_list_users_empty_when_no_file(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_list_users
+        from chimera.modules.trusttunnel import trusttunnel_list_users
         for p in self._patches():
             p.start()
         try:
@@ -173,7 +173,7 @@ class TestCredentialsCrud(unittest.TestCase):
             patch.stopall()
 
     def test_list_users_returns_parsed_clients(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_list_users
+        from chimera.modules.trusttunnel import trusttunnel_list_users
         self.creds.write_text(_REAL_CREDS_3_USERS)
         for p in self._patches():
             p.start()
@@ -184,7 +184,7 @@ class TestCredentialsCrud(unittest.TestCase):
             patch.stopall()
 
     def test_user_exists_true_for_existing(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_user_exists
+        from chimera.modules.trusttunnel import trusttunnel_user_exists
         self.creds.write_text(_REAL_CREDS_3_USERS)
         for p in self._patches():
             p.start()
@@ -197,7 +197,7 @@ class TestCredentialsCrud(unittest.TestCase):
             patch.stopall()
 
     def test_add_user_creates_new_entry(self):
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             trusttunnel_add_user, trusttunnel_list_users,
         )
         self.creds.write_text("")
@@ -215,7 +215,7 @@ class TestCredentialsCrud(unittest.TestCase):
 
     def test_add_user_idempotent_no_duplicate(self):
         """D5: calling add twice with same username should update, not duplicate."""
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             trusttunnel_add_user, trusttunnel_list_users,
         )
         self.creds.write_text("")
@@ -231,7 +231,7 @@ class TestCredentialsCrud(unittest.TestCase):
             patch.stopall()
 
     def test_add_user_with_conn_limits(self):
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             trusttunnel_add_user, trusttunnel_list_users,
         )
         self.creds.write_text("")
@@ -246,7 +246,7 @@ class TestCredentialsCrud(unittest.TestCase):
             patch.stopall()
 
     def test_remove_user_existing(self):
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             trusttunnel_remove_user, trusttunnel_list_users,
         )
         self.creds.write_text(_REAL_CREDS_3_USERS)
@@ -263,7 +263,7 @@ class TestCredentialsCrud(unittest.TestCase):
             patch.stopall()
 
     def test_remove_user_nonexistent_is_noop(self):
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             trusttunnel_remove_user, trusttunnel_list_users,
         )
         self.creds.write_text(_REAL_CREDS_3_USERS)
@@ -278,7 +278,7 @@ class TestCredentialsCrud(unittest.TestCase):
             patch.stopall()
 
     def test_update_user_existing(self):
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             trusttunnel_update_user, trusttunnel_list_users,
         )
         self.creds.write_text(_REAL_CREDS_3_USERS)
@@ -294,7 +294,7 @@ class TestCredentialsCrud(unittest.TestCase):
             patch.stopall()
 
     def test_update_user_nonexistent_returns_false(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_update_user
+        from chimera.modules.trusttunnel import trusttunnel_update_user
         self.creds.write_text(_REAL_CREDS_3_USERS)
         for p in self._patches():
             p.start()
@@ -315,19 +315,19 @@ class TestDeeplinkCodec(unittest.TestCase):
 
     def test_varint_encode_small(self):
         """Values < 64 encode to single byte."""
-        from vless_installer.modules.trusttunnel import _varint_encode
+        from chimera.modules.trusttunnel import _varint_encode
         self.assertEqual(_varint_encode(0), b"\x00")
         self.assertEqual(_varint_encode(63), b"\x3f")
 
     def test_varint_encode_medium(self):
         """Values 64-16383 encode to 2 bytes with prefix 01."""
-        from vless_installer.modules.trusttunnel import _varint_encode
+        from chimera.modules.trusttunnel import _varint_encode
         b = _varint_encode(64)
         self.assertEqual(len(b), 2)
         self.assertEqual(b[0] & 0xC0, 0x40)
 
     def test_varint_decode_roundtrip(self):
-        from vless_installer.modules.trusttunnel import _varint_encode, _varint_decode
+        from chimera.modules.trusttunnel import _varint_encode, _varint_decode
         for val in [0, 1, 63, 64, 16383, 16384, 1073741823]:
             encoded = _varint_encode(val)
             decoded, offset = _varint_decode(encoded, 0)
@@ -336,7 +336,7 @@ class TestDeeplinkCodec(unittest.TestCase):
 
     def test_decode_real_upstream_deeplink(self):
         """Decode the REAL tt:// URI from Phase 0 sanity-check."""
-        from vless_installer.modules.trusttunnel import trusttunnel_deeplink_decode
+        from chimera.modules.trusttunnel import trusttunnel_deeplink_decode
         d = trusttunnel_deeplink_decode(_REAL_DEEPLINK)
         self.assertEqual(d["hostname"], "test.example.com")
         self.assertEqual(d["username"], "alice")
@@ -345,7 +345,7 @@ class TestDeeplinkCodec(unittest.TestCase):
         self.assertEqual(d["upstream_protocol"], "http2")
 
     def test_encode_produes_tt_scheme(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_deeplink_encode
+        from chimera.modules.trusttunnel import trusttunnel_deeplink_encode
         uri = trusttunnel_deeplink_encode(
             hostname="h.com", addresses=["h.com:443"],
             username="u", password="p",
@@ -353,7 +353,7 @@ class TestDeeplinkCodec(unittest.TestCase):
         self.assertTrue(uri.startswith("tt://?"))
 
     def test_encode_decode_roundtrip_all_fields(self):
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             trusttunnel_deeplink_encode, trusttunnel_deeplink_decode,
         )
         uri = trusttunnel_deeplink_encode(
@@ -383,13 +383,13 @@ class TestDeeplinkCodec(unittest.TestCase):
         self.assertEqual(d["dns_upstreams"], ["8.8.8.8", "1.1.1.1"])
 
     def test_decode_rejects_non_tt_uri(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_deeplink_decode
+        from chimera.modules.trusttunnel import trusttunnel_deeplink_decode
         with self.assertRaises(ValueError):
             trusttunnel_deeplink_decode("https://example.com/foo")
 
     def test_decode_accepts_old_tt_prefix(self):
         """v1.0.12 backward compat: tt://<payload> (without ?) is also accepted."""
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             trusttunnel_deeplink_decode, trusttunnel_deeplink_encode,
         )
         uri_new = trusttunnel_deeplink_encode(
@@ -412,13 +412,13 @@ class TestDeterministicPassword(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_password_is_64_char_hex(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_derive_password
+        from chimera.modules.trusttunnel import trusttunnel_derive_password
         p = trusttunnel_derive_password("some-uuid")
         self.assertEqual(len(p), 64)
         self.assertTrue(all(c in "0123456789abcdef" for c in p))
 
     def test_password_deterministic(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_derive_password
+        from chimera.modules.trusttunnel import trusttunnel_derive_password
         self.assertEqual(
             trusttunnel_derive_password("abc"),
             trusttunnel_derive_password("abc"),
@@ -426,13 +426,13 @@ class TestDeterministicPassword(unittest.TestCase):
 
     def test_password_matches_sha256_formula(self):
         import hashlib
-        from vless_installer.modules.trusttunnel import trusttunnel_derive_password
+        from chimera.modules.trusttunnel import trusttunnel_derive_password
         uuid_str = "test-uuid-123"
         expected = hashlib.sha256(b"trusttunnel-pass|" + uuid_str.encode()).hexdigest()
         self.assertEqual(trusttunnel_derive_password(uuid_str), expected)
 
     def test_password_raises_on_empty_uuid(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_derive_password
+        from chimera.modules.trusttunnel import trusttunnel_derive_password
         with self.assertRaises(ValueError):
             trusttunnel_derive_password("")
 
@@ -449,15 +449,15 @@ class TestStateFile(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
 
     def test_load_state_empty_when_no_file(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_load_state
-        with patch("vless_installer.modules.trusttunnel._STATE_FILE", self.state):
+        from chimera.modules.trusttunnel import trusttunnel_load_state
+        with patch("chimera.modules.trusttunnel._STATE_FILE", self.state):
             self.assertEqual(trusttunnel_load_state(), {})
 
     def test_save_then_load_roundtrip(self):
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             trusttunnel_load_state, trusttunnel_save_state,
         )
-        with patch("vless_installer.modules.trusttunnel._STATE_FILE", self.state):
+        with patch("chimera.modules.trusttunnel._STATE_FILE", self.state):
             state = {
                 "installed": True,
                 "version": "1.0.33",
@@ -469,11 +469,11 @@ class TestStateFile(unittest.TestCase):
             self.assertEqual(loaded, state)
 
     def test_is_installed_requires_state_and_binary(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_is_installed
+        from chimera.modules.trusttunnel import trusttunnel_is_installed
         binary = self.tmpdir / "trusttunnel_endpoint"
         binary.write_text("#!/bin/sh\nexit 0\n")
-        with patch("vless_installer.modules.trusttunnel._STATE_FILE", self.state), \
-             patch("vless_installer.modules.trusttunnel._BINARY_PATH", binary):
+        with patch("chimera.modules.trusttunnel._STATE_FILE", self.state), \
+             patch("chimera.modules.trusttunnel._BINARY_PATH", binary):
             # Not installed — state file missing
             self.assertFalse(trusttunnel_is_installed())
             # Write state
@@ -490,17 +490,17 @@ class TestPackageSpec(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_spec_exists(self):
-        from vless_installer.modules.trusttunnel_packages import TRUSTTUNNEL_SPEC
+        from chimera.modules.trusttunnel_packages import TRUSTTUNNEL_SPEC
         self.assertEqual(TRUSTTUNNEL_SPEC.name, "trusttunnel prebuilt binaries")
         self.assertTrue(len(TRUSTTUNNEL_SPEC.install_dests) >= 1)
         self.assertEqual(TRUSTTUNNEL_SPEC.manual_incoming_dir, Path("/root"))
 
     def test_spec_post_install_is_callable(self):
-        from vless_installer.modules.trusttunnel_packages import TRUSTTUNNEL_SPEC
+        from chimera.modules.trusttunnel_packages import TRUSTTUNNEL_SPEC
         self.assertTrue(callable(TRUSTTUNNEL_SPEC.post_install))
 
     def test_filename_builder_produces_correct_name(self):
-        from vless_installer.modules.trusttunnel_packages import _build_filename
+        from chimera.modules.trusttunnel_packages import _build_filename
         with patch("platform.machine", return_value="x86_64"):
             name = _build_filename(tag="v1.0.33")
             self.assertEqual(name, "trusttunnel-v1.0.33-linux-x86_64.tar.gz")
@@ -510,14 +510,14 @@ class TestPackageSpec(unittest.TestCase):
 
     def test_dry_run_returns_false(self):
         """fetch_package(dry_run=True) should return False without network."""
-        from vless_installer.modules.download_manager import fetch_package
-        from vless_installer.modules.trusttunnel_packages import TRUSTTUNNEL_SPEC
+        from chimera.modules.download_manager import fetch_package
+        from chimera.modules.trusttunnel_packages import TRUSTTUNNEL_SPEC
         ok = fetch_package(TRUSTTUNNEL_SPEC, tag="v1.0.33", dry_run=True,
                            print_hint_on_failure=False)
         self.assertFalse(ok, "dry_run should return False")
 
     def test_mirror_urls_builder(self):
-        from vless_installer.modules.trusttunnel_mirrors import get_trusttunnel_mirrors
+        from chimera.modules.trusttunnel_mirrors import get_trusttunnel_mirrors
         urls = get_trusttunnel_mirrors(tag="v1.0.33",
                                         filename="trusttunnel-v1.0.33-linux-x86_64.tar.gz")
         self.assertEqual(len(urls), 1)
@@ -536,15 +536,15 @@ class TestSystemdUnitTemplate(unittest.TestCase):
     def test_template_contains_exec_reload(self):
         """D9: the unit template MUST include ExecReload for SIGHUP-based
         cert renewal (no restart = no active session disconnect)."""
-        from vless_installer.modules.trusttunnel import _SYSTEMD_UNIT_TEMPLATE
+        from chimera.modules.trusttunnel import _SYSTEMD_UNIT_TEMPLATE
         self.assertIn("ExecReload=/bin/kill -HUP $MAINPID", _SYSTEMD_UNIT_TEMPLATE)
 
     def test_template_contains_restart_on_failure(self):
-        from vless_installer.modules.trusttunnel import _SYSTEMD_UNIT_TEMPLATE
+        from chimera.modules.trusttunnel import _SYSTEMD_UNIT_TEMPLATE
         self.assertIn("Restart=on-failure", _SYSTEMD_UNIT_TEMPLATE)
 
     def test_template_uses_correct_binary_path(self):
-        from vless_installer.modules.trusttunnel import _SYSTEMD_UNIT_TEMPLATE, _BINARY_PATH
+        from chimera.modules.trusttunnel import _SYSTEMD_UNIT_TEMPLATE, _BINARY_PATH
         # The template uses {binary} placeholder, format with the actual path
         formatted = _SYSTEMD_UNIT_TEMPLATE.format(
             install_dir=Path("/opt/trusttunnel"),
@@ -566,7 +566,7 @@ class TestPortDomainConflictChecks(unittest.TestCase):
 
     def test_check_port_available_calls_core(self):
         """_check_port_available should delegate to core.check_port_used_by_other_protocol."""
-        from vless_installer.modules import trusttunnel
+        from chimera.modules import trusttunnel
         with patch.object(trusttunnel._core_module(),
                           "check_port_used_by_other_protocol",
                           return_value="port 443 taken by VLESS") as mock_check:
@@ -576,7 +576,7 @@ class TestPortDomainConflictChecks(unittest.TestCase):
 
     def test_check_domain_available_detects_vless_collision(self):
         """D7: domain collision with VLESS PARAM_DOMAIN should be detected."""
-        from vless_installer.modules import trusttunnel
+        from chimera.modules import trusttunnel
         # Mock the core module to have PARAM_DOMAIN = "vless.example.com"
         with patch.object(trusttunnel._core_module(), "PARAM_DOMAIN",
                           "vless.example.com"):
@@ -585,14 +585,14 @@ class TestPortDomainConflictChecks(unittest.TestCase):
             self.assertIn("VLESS", result)
 
     def test_check_domain_available_passes_for_unused_domain(self):
-        from vless_installer.modules import trusttunnel
+        from chimera.modules import trusttunnel
         with patch.object(trusttunnel._core_module(), "PARAM_DOMAIN",
                           "vless.example.com"):
             result = trusttunnel._check_domain_available("new-tt.example.com")
             self.assertEqual(result, "")
 
     def test_check_domain_available_rejects_empty(self):
-        from vless_installer.modules import trusttunnel
+        from chimera.modules import trusttunnel
         result = trusttunnel._check_domain_available("")
         self.assertNotEqual(result, "")
 
@@ -606,7 +606,7 @@ class TestServiceControl(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_restart_service_calls_systemctl(self):
-        from vless_installer.modules import trusttunnel
+        from chimera.modules import trusttunnel
         with patch("subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
             ok = trusttunnel.trusttunnel_restart_service()
             self.assertTrue(ok)
@@ -615,13 +615,13 @@ class TestServiceControl(unittest.TestCase):
             self.assertEqual(args[:3], ["systemctl", "restart", "trusttunnel"])
 
     def test_restart_service_returns_false_on_failure(self):
-        from vless_installer.modules import trusttunnel
+        from chimera.modules import trusttunnel
         with patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="error")):
             ok = trusttunnel.trusttunnel_restart_service()
             self.assertFalse(ok)
 
     def test_reload_service_calls_systemctl_reload(self):
-        from vless_installer.modules import trusttunnel
+        from chimera.modules import trusttunnel
         with patch("subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
             ok = trusttunnel.trusttunnel_reload_service()
             self.assertTrue(ok)
@@ -629,7 +629,7 @@ class TestServiceControl(unittest.TestCase):
             self.assertEqual(args[:3], ["systemctl", "reload", "trusttunnel"])
 
     def test_service_active_returns_true_when_is_active_succeeds(self):
-        from vless_installer.modules import trusttunnel
+        from chimera.modules import trusttunnel
         with patch("subprocess.run", return_value=MagicMock(returncode=0)):
             self.assertTrue(trusttunnel.trusttunnel_service_active())
 
@@ -658,14 +658,14 @@ class TestGenerateDeeplink(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.trusttunnel._CREDS_TOML", self.creds),
-            patch("vless_installer.modules.trusttunnel._STATE_FILE", self.state),
-            patch("vless_installer.modules.trusttunnel._BINARY_PATH", self.binary),
+            patch("chimera.modules.trusttunnel._CREDS_TOML", self.creds),
+            patch("chimera.modules.trusttunnel._STATE_FILE", self.state),
+            patch("chimera.modules.trusttunnel._BINARY_PATH", self.binary),
         ]
 
     def test_generate_deeplink_nonexistent_user_raises(self):
         """D4: non-existent user → ValueError BEFORE binary invocation."""
-        from vless_installer.modules.trusttunnel import trusttunnel_generate_deeplink
+        from chimera.modules.trusttunnel import trusttunnel_generate_deeplink
         for p in self._patches():
             p.start()
         try:
@@ -677,7 +677,7 @@ class TestGenerateDeeplink(unittest.TestCase):
             patch.stopall()
 
     def test_generate_deeplink_existing_user_calls_binary(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_generate_deeplink
+        from chimera.modules.trusttunnel import trusttunnel_generate_deeplink
         for p in self._patches():
             p.start()
         try:
@@ -692,7 +692,7 @@ class TestGenerateDeeplink(unittest.TestCase):
             patch.stopall()
 
     def test_generate_deeplink_not_installed_raises(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_generate_deeplink
+        from chimera.modules.trusttunnel import trusttunnel_generate_deeplink
         # Overwrite state to mark as not installed
         self.state.write_text(json.dumps({"installed": False}))
         for p in self._patches():
@@ -727,13 +727,13 @@ class TestDeeplinkForUser(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.trusttunnel._CREDS_TOML", self.creds),
-            patch("vless_installer.modules.trusttunnel._STATE_FILE", self.state),
-            patch("vless_installer.modules.trusttunnel._BINARY_PATH", self.binary),
+            patch("chimera.modules.trusttunnel._CREDS_TOML", self.creds),
+            patch("chimera.modules.trusttunnel._STATE_FILE", self.state),
+            patch("chimera.modules.trusttunnel._BINARY_PATH", self.binary),
         ]
 
     def test_returns_valid_tt_uri_for_existing_user(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_deeplink_for_user
+        from chimera.modules.trusttunnel import trusttunnel_deeplink_for_user
         for p in self._patches():
             p.start()
         try:
@@ -743,7 +743,7 @@ class TestDeeplinkForUser(unittest.TestCase):
             link = trusttunnel_deeplink_for_user("alice@example.com", uuid_str)
             self.assertTrue(link.startswith("tt://?"))
             # Decode and verify
-            from vless_installer.modules.trusttunnel import trusttunnel_deeplink_decode
+            from chimera.modules.trusttunnel import trusttunnel_deeplink_decode
             d = trusttunnel_deeplink_decode(link)
             self.assertEqual(d["username"], "alice@example.com")
             self.assertEqual(d["password"], expected_pass)
@@ -753,7 +753,7 @@ class TestDeeplinkForUser(unittest.TestCase):
             patch.stopall()
 
     def test_returns_empty_for_nonexistent_user(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_deeplink_for_user
+        from chimera.modules.trusttunnel import trusttunnel_deeplink_for_user
         for p in self._patches():
             p.start()
         try:
@@ -763,7 +763,7 @@ class TestDeeplinkForUser(unittest.TestCase):
             patch.stopall()
 
     def test_returns_empty_when_not_installed(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_deeplink_for_user
+        from chimera.modules.trusttunnel import trusttunnel_deeplink_for_user
         self.state.write_text(json.dumps({"installed": False}))
         for p in self._patches():
             p.start()
@@ -793,14 +793,14 @@ class TestCronInstallUninstall(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.trusttunnel._CRON_FILE", self.cron_file),
-            patch("vless_installer.modules.trusttunnel._SCRIPT_FILE", self.script_file),
-            patch("vless_installer.modules.trusttunnel._PROJECT_ROOT", self.tmpdir),
+            patch("chimera.modules.trusttunnel._CRON_FILE", self.cron_file),
+            patch("chimera.modules.trusttunnel._SCRIPT_FILE", self.script_file),
+            patch("chimera.modules.trusttunnel._PROJECT_ROOT", self.tmpdir),
         ]
 
     def test_install_cron_creates_both_files(self):
         """_install_cron() should create both the cron file and the wrapper script."""
-        from vless_installer.modules.trusttunnel import _install_cron, _CRON_INTERVAL_MIN
+        from chimera.modules.trusttunnel import _install_cron, _CRON_INTERVAL_MIN
         for p in self._patches():
             p.start()
         try:
@@ -815,7 +815,7 @@ class TestCronInstallUninstall(unittest.TestCase):
     def test_cron_file_contains_expected_content(self):
         """The cron file should contain both --trusttunnel-health and
         --trusttunnel-stats entries with the correct interval."""
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             _install_cron, _CRON_INTERVAL_MIN,
         )
         for p in self._patches():
@@ -837,7 +837,7 @@ class TestCronInstallUninstall(unittest.TestCase):
 
     def test_script_file_contains_main_py_reference(self):
         """The wrapper script should reference main.py and both CLI flags."""
-        from vless_installer.modules.trusttunnel import _install_cron
+        from chimera.modules.trusttunnel import _install_cron
         for p in self._patches():
             p.start()
         try:
@@ -852,7 +852,7 @@ class TestCronInstallUninstall(unittest.TestCase):
 
     def test_script_file_is_executable(self):
         """The wrapper script should be chmod 0o755."""
-        from vless_installer.modules.trusttunnel import _install_cron
+        from chimera.modules.trusttunnel import _install_cron
         for p in self._patches():
             p.start()
         try:
@@ -864,7 +864,7 @@ class TestCronInstallUninstall(unittest.TestCase):
 
     def test_install_cron_is_idempotent(self):
         """Calling _install_cron() twice should not error — overwrites."""
-        from vless_installer.modules.trusttunnel import _install_cron
+        from chimera.modules.trusttunnel import _install_cron
         for p in self._patches():
             p.start()
         try:
@@ -876,7 +876,7 @@ class TestCronInstallUninstall(unittest.TestCase):
 
     def test_remove_cron_deletes_both_files(self):
         """_remove_cron() should delete both the cron file and the wrapper script."""
-        from vless_installer.modules.trusttunnel import _install_cron, _remove_cron
+        from chimera.modules.trusttunnel import _install_cron, _remove_cron
         for p in self._patches():
             p.start()
         try:
@@ -891,7 +891,7 @@ class TestCronInstallUninstall(unittest.TestCase):
 
     def test_remove_cron_idempotent_when_not_installed(self):
         """_remove_cron() should not error if files don't exist."""
-        from vless_installer.modules.trusttunnel import _remove_cron
+        from chimera.modules.trusttunnel import _remove_cron
         for p in self._patches():
             p.start()
         try:
@@ -903,7 +903,7 @@ class TestCronInstallUninstall(unittest.TestCase):
 
     def test_cron_installed_check(self):
         """trusttunnel_cron_installed() should return True after install, False after remove."""
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             _install_cron, _remove_cron, trusttunnel_cron_installed,
         )
         for p in self._patches():
@@ -923,7 +923,7 @@ class TestCronInstallUninstall(unittest.TestCase):
         ALL the heavy install steps + the cron functions themselves, and
         verifies the call wiring (not the file creation — that's covered by
         the unit tests above)."""
-        from vless_installer.modules import trusttunnel
+        from chimera.modules import trusttunnel
         install_cron_called = []
         remove_cron_called = []
 
@@ -944,7 +944,7 @@ class TestCronInstallUninstall(unittest.TestCase):
                          return_value=(True, "1.0.33")),
             patch.object(trusttunnel, "_import_gpg_key"),
             patch.object(trusttunnel, "_verify_gpg_signature", return_value=True),
-            patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"),
+            patch("chimera.modules.ssl_certbot.obtain_ssl_cert"),
             patch.object(trusttunnel, "_check_domain_available", return_value=""),
             patch.object(trusttunnel, "_check_port_available", return_value=""),
             patch.object(trusttunnel, "_open_port"),

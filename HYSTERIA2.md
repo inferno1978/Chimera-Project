@@ -79,7 +79,7 @@ sudo python3 main.py --h2-status
 
 ```python
 # В блоке импортов:
-from vless_installer.modules.hysteria2_menu import do_hysteria2_menu
+from chimera.modules.hysteria2_menu import do_hysteria2_menu
 
 # В main_menu() — новый пункт 7:
 elif choice == "7":

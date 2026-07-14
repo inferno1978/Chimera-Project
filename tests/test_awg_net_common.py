@@ -2,7 +2,7 @@
 """
 tests/test_awg_net_common.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/awg_net_common.py.
+Unit-тесты для chimera/modules/awg_net_common.py.
 
 Покрывает:
   1. iptables_ensure — идемпотентность (правило добавляется один раз
@@ -40,7 +40,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _make_mock_core():
     """
-    Создаёт mock-объект core, который ведёт себя как vless_installer._core:
+    Создаёт mock-объект core, который ведёт себя как chimera._core:
       • core._run(args, ...) — возвращает MagicMock с returncode/stdout/stderr
       • core.info / core.warn / core.log_to_file — no-op
     """
@@ -59,7 +59,7 @@ class TestIptablesEnsure(unittest.TestCase):
 
     def test_rule_added_once_when_absent(self):
         """Правило добавляется один раз даже при двух вызовах."""
-        from vless_installer.modules.awg_net_common import iptables_ensure
+        from chimera.modules.awg_net_common import iptables_ensure
 
         core = _make_mock_core()
         # Первый вызов -C: returncode=1 (правила нет) → -A выполняется
@@ -95,7 +95,7 @@ class TestIptablesEnsure(unittest.TestCase):
 
     def test_check_args_converts_A_to_C(self):
         """-A корректно заменяется на -C в check-вызове, исходные args не мутируют."""
-        from vless_installer.modules.awg_net_common import iptables_ensure
+        from chimera.modules.awg_net_common import iptables_ensure
 
         core = _make_mock_core()
         # -C возвращает 0 (правило уже есть) → -A не вызывается
@@ -116,7 +116,7 @@ class TestIptablesEnsure(unittest.TestCase):
 
     def test_no_A_in_args_is_safe_noop(self):
         """Если в args нет '-A', функция не вызывает _run и пишет WARN."""
-        from vless_installer.modules.awg_net_common import iptables_ensure
+        from chimera.modules.awg_net_common import iptables_ensure
 
         core = _make_mock_core()
         # args с -D (не должно было сюда попасть, но защита от ошибок вызова)
@@ -132,7 +132,7 @@ class TestIptablesEnsure(unittest.TestCase):
 
     def test_idempotent_multiple_consecutive_calls(self):
         """10 последовательных вызовов с одинаковыми args: -A выполняется 1 раз."""
-        from vless_installer.modules.awg_net_common import iptables_ensure
+        from chimera.modules.awg_net_common import iptables_ensure
 
         core = _make_mock_core()
         # Симулируем: первый -C=1 (правила нет), все последующие -C=0 (правило есть)
@@ -157,14 +157,14 @@ class TestBuildNatRuleArgs(unittest.TestCase):
     """Тесты генератора списка правил NAT."""
 
     def test_returns_three_rules(self):
-        from vless_installer.modules.awg_net_common import build_nat_rule_args
+        from chimera.modules.awg_net_common import build_nat_rule_args
         rules = build_nat_rule_args("10.66.66.0/24", "awg0", "eth0")
         self.assertEqual(len(rules), 3)
         for rule in rules:
             self.assertEqual(rule[0], "iptables")
 
     def test_masquerade_rule_correct(self):
-        from vless_installer.modules.awg_net_common import build_nat_rule_args
+        from chimera.modules.awg_net_common import build_nat_rule_args
         rules = build_nat_rule_args("10.66.66.0/24", "awg0", "eth0")
         masq = rules[0]
         self.assertEqual(masq, [
@@ -173,7 +173,7 @@ class TestBuildNatRuleArgs(unittest.TestCase):
         ])
 
     def test_forward_in_rule_correct(self):
-        from vless_installer.modules.awg_net_common import build_nat_rule_args
+        from chimera.modules.awg_net_common import build_nat_rule_args
         rules = build_nat_rule_args("10.66.66.0/24", "awg0", "eth0")
         fwd_in = rules[1]
         self.assertEqual(fwd_in, [
@@ -182,7 +182,7 @@ class TestBuildNatRuleArgs(unittest.TestCase):
         ])
 
     def test_forward_out_rule_correct(self):
-        from vless_installer.modules.awg_net_common import build_nat_rule_args
+        from chimera.modules.awg_net_common import build_nat_rule_args
         rules = build_nat_rule_args("10.66.66.0/24", "awg0", "eth0")
         fwd_out = rules[2]
         self.assertEqual(fwd_out, [
@@ -196,7 +196,7 @@ class TestBuildNatIdempotentShell(unittest.TestCase):
     """Тесты bash-сниппета для PostUp (с -C/-A парами)."""
 
     def test_contains_check_before_add_for_masquerade(self):
-        from vless_installer.modules.awg_net_common import build_nat_idempotent_shell
+        from chimera.modules.awg_net_common import build_nat_idempotent_shell
         s = build_nat_idempotent_shell("10.66.66.0/24", "awg0", "$WAN")
         # Для MASQUERADE: -C ... || -A ...
         self.assertIn("iptables -t nat -C POSTROUTING -s 10.66.66.0/24 -o $WAN -j MASQUERADE", s)
@@ -205,13 +205,13 @@ class TestBuildNatIdempotentShell(unittest.TestCase):
         self.assertLess(s.index("-t nat -C POSTROUTING"), s.index("-t nat -A POSTROUTING"))
 
     def test_contains_check_for_forward_in(self):
-        from vless_installer.modules.awg_net_common import build_nat_idempotent_shell
+        from chimera.modules.awg_net_common import build_nat_idempotent_shell
         s = build_nat_idempotent_shell("10.66.66.0/24", "awg0", "$WAN")
         self.assertIn("iptables -C FORWARD -i awg0 -j ACCEPT", s)
         self.assertIn("iptables -A FORWARD -i awg0 -j ACCEPT", s)
 
     def test_contains_check_for_forward_out(self):
-        from vless_installer.modules.awg_net_common import build_nat_idempotent_shell
+        from chimera.modules.awg_net_common import build_nat_idempotent_shell
         s = build_nat_idempotent_shell("10.66.66.0/24", "awg0", "$WAN")
         self.assertIn("iptables -C FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT", s)
         self.assertIn("iptables -A FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT", s)
@@ -221,14 +221,14 @@ class TestBuildNatCleanupShell(unittest.TestCase):
     """Тесты bash-сниппета для PostDown (с -D)."""
 
     def test_contains_delete_for_all_three_rules(self):
-        from vless_installer.modules.awg_net_common import build_nat_cleanup_shell
+        from chimera.modules.awg_net_common import build_nat_cleanup_shell
         s = build_nat_cleanup_shell("10.66.66.0/24", "awg0", "$WAN")
         self.assertIn("iptables -t nat -D POSTROUTING -s 10.66.66.0/24 -o $WAN -j MASQUERADE", s)
         self.assertIn("iptables -D FORWARD -i awg0 -j ACCEPT", s)
         self.assertIn("iptables -D FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT", s)
 
     def test_all_deletes_have_silent_fallback(self):
-        from vless_installer.modules.awg_net_common import build_nat_cleanup_shell
+        from chimera.modules.awg_net_common import build_nat_cleanup_shell
         s = build_nat_cleanup_shell("10.66.66.0/24", "awg0", "$WAN")
         # Каждое -D должно быть обёрнуто в 2>/dev/null || true (или || true)
         # для безопасного PostDown даже если правила уже нет.
@@ -240,7 +240,7 @@ class TestScopeSourceParam(unittest.TestCase):
 
     def test_v4_rule_args_scoped_has_source(self):
         """scope_source=True (default) → MASQUERADE содержит -s {subnet}."""
-        from vless_installer.modules.awg_net_common import build_nat_rule_args
+        from chimera.modules.awg_net_common import build_nat_rule_args
         rules = build_nat_rule_args("10.66.66.0/24", "awg0", "eth0", scope_source=True)
         masq = rules[0]
         self.assertIn("-s", masq)
@@ -248,7 +248,7 @@ class TestScopeSourceParam(unittest.TestCase):
 
     def test_v4_rule_args_blanket_no_source(self):
         """scope_source=False → MASQUERADE БЕЗ -s (blanket, поведение до 47f56d3)."""
-        from vless_installer.modules.awg_net_common import build_nat_rule_args
+        from chimera.modules.awg_net_common import build_nat_rule_args
         rules = build_nat_rule_args("10.66.66.0/24", "awg0", "eth0", scope_source=False)
         masq = rules[0]
         self.assertNotIn("-s", masq)
@@ -259,19 +259,19 @@ class TestScopeSourceParam(unittest.TestCase):
 
     def test_v4_rule_args_default_is_scoped(self):
         """Если scope_source не передан — default = True (scoped)."""
-        from vless_installer.modules.awg_net_common import build_nat_rule_args
+        from chimera.modules.awg_net_common import build_nat_rule_args
         rules = build_nat_rule_args("10.66.66.0/24", "awg0", "eth0")
         masq = rules[0]
         self.assertIn("-s", masq)
 
     def test_v4_idempotent_shell_scoped_has_source(self):
-        from vless_installer.modules.awg_net_common import build_nat_idempotent_shell
+        from chimera.modules.awg_net_common import build_nat_idempotent_shell
         s = build_nat_idempotent_shell("10.66.66.0/24", "awg0", "$WAN", scope_source=True)
         self.assertIn("-s 10.66.66.0/24 -o $WAN", s)
 
     def test_v4_idempotent_shell_blanket_no_source(self):
         """scope_source=False → MASQUERADE без -s (blanket) в shell-сниппете."""
-        from vless_installer.modules.awg_net_common import build_nat_idempotent_shell
+        from chimera.modules.awg_net_common import build_nat_idempotent_shell
         s = build_nat_idempotent_shell("10.66.66.0/24", "awg0", "$WAN", scope_source=False)
         # MASQUERADE pair без -s
         self.assertIn("iptables -t nat -C POSTROUTING -o $WAN -j MASQUERADE", s)
@@ -280,7 +280,7 @@ class TestScopeSourceParam(unittest.TestCase):
         self.assertNotIn("-s 10.66.66.0/24", s)
 
     def test_v4_cleanup_shell_blanket_no_source(self):
-        from vless_installer.modules.awg_net_common import build_nat_cleanup_shell
+        from chimera.modules.awg_net_common import build_nat_cleanup_shell
         s = build_nat_cleanup_shell("10.66.66.0/24", "awg0", "$WAN", scope_source=False)
         self.assertIn("iptables -t nat -D POSTROUTING -o $WAN -j MASQUERADE", s)
         self.assertNotIn("-s 10.66.66.0/24", s)
@@ -290,14 +290,14 @@ class TestBuildNat6RuleArgs(unittest.TestCase):
     """Тесты генератора списка правил NAT для IPv6 (ip6tables)."""
 
     def test_returns_three_rules_with_ip6tables(self):
-        from vless_installer.modules.awg_net_common import build_nat6_rule_args
+        from chimera.modules.awg_net_common import build_nat6_rule_args
         rules = build_nat6_rule_args("fd66:66:66::/64", "awg0", "eth0")
         self.assertEqual(len(rules), 3)
         for rule in rules:
             self.assertEqual(rule[0], "ip6tables")
 
     def test_masquerade_rule_correct_scoped(self):
-        from vless_installer.modules.awg_net_common import build_nat6_rule_args
+        from chimera.modules.awg_net_common import build_nat6_rule_args
         rules = build_nat6_rule_args("fd66:66:66::/64", "awg0", "eth0", scope_source=True)
         masq = rules[0]
         self.assertEqual(masq, [
@@ -306,7 +306,7 @@ class TestBuildNat6RuleArgs(unittest.TestCase):
         ])
 
     def test_masquerade_rule_correct_blanket(self):
-        from vless_installer.modules.awg_net_common import build_nat6_rule_args
+        from chimera.modules.awg_net_common import build_nat6_rule_args
         rules = build_nat6_rule_args("fd66:66:66::/64", "awg0", "eth0", scope_source=False)
         masq = rules[0]
         self.assertEqual(masq, [
@@ -315,7 +315,7 @@ class TestBuildNat6RuleArgs(unittest.TestCase):
         ])
 
     def test_forward_in_rule_correct(self):
-        from vless_installer.modules.awg_net_common import build_nat6_rule_args
+        from chimera.modules.awg_net_common import build_nat6_rule_args
         rules = build_nat6_rule_args("fd66:66:66::/64", "awg0", "eth0")
         fwd_in = rules[1]
         self.assertEqual(fwd_in, [
@@ -324,7 +324,7 @@ class TestBuildNat6RuleArgs(unittest.TestCase):
         ])
 
     def test_forward_out_rule_correct(self):
-        from vless_installer.modules.awg_net_common import build_nat6_rule_args
+        from chimera.modules.awg_net_common import build_nat6_rule_args
         rules = build_nat6_rule_args("fd66:66:66::/64", "awg0", "eth0")
         fwd_out = rules[2]
         self.assertEqual(fwd_out, [
@@ -338,7 +338,7 @@ class TestBuildNat6IdempotentShell(unittest.TestCase):
     """Тесты bash-сниппета для PostUp IPv6 (ip6tables с -C/-A парами)."""
 
     def test_contains_check_before_add_for_masquerade(self):
-        from vless_installer.modules.awg_net_common import build_nat6_idempotent_shell
+        from chimera.modules.awg_net_common import build_nat6_idempotent_shell
         s = build_nat6_idempotent_shell("fd66:66:66::/64", "awg0", "$WAN6")
         self.assertIn("ip6tables -t nat -C POSTROUTING -s fd66:66:66::/64 -o $WAN6 -j MASQUERADE", s)
         self.assertIn("ip6tables -t nat -A POSTROUTING -s fd66:66:66::/64 -o $WAN6 -j MASQUERADE", s)
@@ -346,20 +346,20 @@ class TestBuildNat6IdempotentShell(unittest.TestCase):
         self.assertLess(s.index("-t nat -C POSTROUTING"), s.index("-t nat -A POSTROUTING"))
 
     def test_contains_check_for_forward_in(self):
-        from vless_installer.modules.awg_net_common import build_nat6_idempotent_shell
+        from chimera.modules.awg_net_common import build_nat6_idempotent_shell
         s = build_nat6_idempotent_shell("fd66:66:66::/64", "awg0", "$WAN6")
         self.assertIn("ip6tables -C FORWARD -i awg0 -j ACCEPT", s)
         self.assertIn("ip6tables -A FORWARD -i awg0 -j ACCEPT", s)
 
     def test_contains_check_for_forward_out(self):
-        from vless_installer.modules.awg_net_common import build_nat6_idempotent_shell
+        from chimera.modules.awg_net_common import build_nat6_idempotent_shell
         s = build_nat6_idempotent_shell("fd66:66:66::/64", "awg0", "$WAN6")
         self.assertIn("ip6tables -C FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT", s)
         self.assertIn("ip6tables -A FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT", s)
 
     def test_blanket_no_source_in_masquerade(self):
         """scope_source=False → MASQUERADE без -s в v6 shell-сниппете."""
-        from vless_installer.modules.awg_net_common import build_nat6_idempotent_shell
+        from chimera.modules.awg_net_common import build_nat6_idempotent_shell
         s = build_nat6_idempotent_shell("fd66:66:66::/64", "awg0", "$WAN6", scope_source=False)
         self.assertIn("ip6tables -t nat -C POSTROUTING -o $WAN6 -j MASQUERADE", s)
         self.assertIn("ip6tables -t nat -A POSTROUTING -o $WAN6 -j MASQUERADE", s)
@@ -370,14 +370,14 @@ class TestBuildNat6CleanupShell(unittest.TestCase):
     """Тесты bash-сниппета для PostDown IPv6 (ip6tables с -D)."""
 
     def test_contains_delete_for_all_three_rules(self):
-        from vless_installer.modules.awg_net_common import build_nat6_cleanup_shell
+        from chimera.modules.awg_net_common import build_nat6_cleanup_shell
         s = build_nat6_cleanup_shell("fd66:66:66::/64", "awg0", "$WAN6")
         self.assertIn("ip6tables -t nat -D POSTROUTING -s fd66:66:66::/64 -o $WAN6 -j MASQUERADE", s)
         self.assertIn("ip6tables -D FORWARD -i awg0 -j ACCEPT", s)
         self.assertIn("ip6tables -D FORWARD -o awg0 -m state --state ESTABLISHED,RELATED -j ACCEPT", s)
 
     def test_all_deletes_have_silent_fallback(self):
-        from vless_installer.modules.awg_net_common import build_nat6_cleanup_shell
+        from chimera.modules.awg_net_common import build_nat6_cleanup_shell
         s = build_nat6_cleanup_shell("fd66:66:66::/64", "awg0", "$WAN6")
         self.assertGreaterEqual(s.count("2>/dev/null"), 3)
 
@@ -394,7 +394,7 @@ class TestNoDuplicateRulesInPostUp(unittest.TestCase):
         # Загружаем _core.py с патчами системных путей (как в full_test.py)
         _PROJECT_ROOT = Path(__file__).resolve().parent.parent
         sys.path.insert(0, str(_PROJECT_ROOT))
-        core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+        core_path = _PROJECT_ROOT / "chimera" / "_core.py"
         import importlib.util
         spec = importlib.util.spec_from_file_location("vless_core_test_v2", core_path)
         self.core_mod = importlib.util.module_from_spec(spec)
@@ -404,12 +404,12 @@ class TestNoDuplicateRulesInPostUp(unittest.TestCase):
              patch('os.chown', lambda *a, **kw: None), \
              patch('os.geteuid', return_value=0):
             spec.loader.exec_module(self.core_mod)
-        # Регистрируем как vless_installer._core, чтобы lazy import в модулях работал
-        sys.modules['vless_installer._core'] = self.core_mod
+        # Регистрируем как chimera._core, чтобы lazy import в модулях работал
+        sys.modules['chimera._core'] = self.core_mod
 
     def _get_postup_postdown(self):
         """Возвращает (postup, postdown) строки из _awg_server_conf_text()."""
-        from vless_installer.modules.awg_transport import _awg_server_conf_text
+        from chimera.modules.awg_transport import _awg_server_conf_text
         text = _awg_server_conf_text()
         postup = ""
         postdown = ""
@@ -654,7 +654,7 @@ class TestBuildSysctlLines(unittest.TestCase):
 
     def test_no_global_all_default_rp_filter(self):
         """НЕ должно быть net.ipv4.conf.all.rp_filter / .default.rp_filter."""
-        from vless_installer.modules.awg_net_common import build_sysctl_lines
+        from chimera.modules.awg_net_common import build_sysctl_lines
         lines = build_sysctl_lines("awg0", "eth0")
         for line in lines:
             self.assertFalse(
@@ -664,19 +664,19 @@ class TestBuildSysctlLines(unittest.TestCase):
 
     def test_per_interface_rp_filter_2(self):
         """Должны быть per-interface rp_filter=2 (loose mode) для awg0 и WAN."""
-        from vless_installer.modules.awg_net_common import build_sysctl_lines
+        from chimera.modules.awg_net_common import build_sysctl_lines
         lines = build_sysctl_lines("awg0", "eth0")
         joined = "\n".join(lines)
         self.assertIn("net.ipv4.conf.awg0.rp_filter = 2", joined)
         self.assertIn("net.ipv4.conf.eth0.rp_filter = 2", joined)
 
     def test_ip_forward_1_present(self):
-        from vless_installer.modules.awg_net_common import build_sysctl_lines
+        from chimera.modules.awg_net_common import build_sysctl_lines
         lines = build_sysctl_lines("awg0", "eth0")
         self.assertIn("net.ipv4.ip_forward = 1", lines)
 
     def test_default_rp_filter_value_is_2_loose_mode(self):
-        from vless_installer.modules.awg_net_common import build_sysctl_lines, RP_FILTER_DEFAULT
+        from chimera.modules.awg_net_common import build_sysctl_lines, RP_FILTER_DEFAULT
         self.assertEqual(RP_FILTER_DEFAULT, 2)
         lines = build_sysctl_lines("awg0", "eth0")
         for line in lines:
@@ -685,14 +685,14 @@ class TestBuildSysctlLines(unittest.TestCase):
 
     def test_explicit_value_0_only_as_fallback(self):
         """Если явно передан value=0 — должно быть 0 (явный fallback)."""
-        from vless_installer.modules.awg_net_common import build_sysctl_lines
+        from chimera.modules.awg_net_common import build_sysctl_lines
         lines = build_sysctl_lines("awg0", "eth0", rp_filter_value=0)
         joined = "\n".join(lines)
         self.assertIn("net.ipv4.conf.awg0.rp_filter = 0", joined)
 
     def test_invalid_value_falls_back_to_default_2(self):
         """Невалидное значение (7) должно сброситься в default=2."""
-        from vless_installer.modules.awg_net_common import build_sysctl_lines
+        from chimera.modules.awg_net_common import build_sysctl_lines
         lines = build_sysctl_lines("awg0", "eth0", rp_filter_value=7)
         joined = "\n".join(lines)
         self.assertIn("net.ipv4.conf.awg0.rp_filter = 2", joined)
@@ -703,7 +703,7 @@ class TestWriteSysctlConf(unittest.TestCase):
 
     def test_cleans_old_global_all_default_lines(self):
         """Если в существующем файле есть all/default rp_filter — они удаляются."""
-        from vless_installer.modules.awg_net_common import write_sysctl_conf
+        from chimera.modules.awg_net_common import write_sysctl_conf
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "99-test.conf"
             # Старый файл с глобальным rp_filter=0 (баг из ревью)
@@ -726,7 +726,7 @@ class TestWriteSysctlConf(unittest.TestCase):
 
     def test_replaces_old_per_iface_with_new_value(self):
         """Если в файле есть старая per-interface запись — заменяется на новую."""
-        from vless_installer.modules.awg_net_common import write_sysctl_conf
+        from chimera.modules.awg_net_common import write_sysctl_conf
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "99-test.conf"
             p.write_text(
@@ -747,7 +747,7 @@ class TestApplyRpFilterPerIface(unittest.TestCase):
 
     def test_does_not_touch_all_or_default(self):
         """apply_rp_filter_per_iface НЕ должна вызывать sysctl для all/default."""
-        from vless_installer.modules.awg_net_common import apply_rp_filter_per_iface
+        from chimera.modules.awg_net_common import apply_rp_filter_per_iface
         core = _make_mock_core()
         # Текущее значение для awg0 и eth0 — 1 (strict), ожидаем изменение на 2
         core._run.side_effect = [
@@ -767,7 +767,7 @@ class TestApplyRpFilterPerIface(unittest.TestCase):
 
     def test_skips_when_already_at_target_value(self):
         """Если интерфейс уже имеет целевое значение — sysctl -w не вызывается."""
-        from vless_installer.modules.awg_net_common import apply_rp_filter_per_iface
+        from chimera.modules.awg_net_common import apply_rp_filter_per_iface
         core = _make_mock_core()
         # Оба интерфейса уже на 2 → sysctl -w не нужен
         core._run.side_effect = [
@@ -780,7 +780,7 @@ class TestApplyRpFilterPerIface(unittest.TestCase):
 
     def test_handles_missing_interface_gracefully(self):
         """Если интерфейса ещё нет (awg0 до awg-quick up) — не падает."""
-        from vless_installer.modules.awg_net_common import apply_rp_filter_per_iface
+        from chimera.modules.awg_net_common import apply_rp_filter_per_iface
         core = _make_mock_core()
         # sysctl -n возвращает ненулевой код (интерфейс не существует)
         core._run.return_value = MagicMock(returncode=1, stdout="", stderr="sysctl: cannot stat")
@@ -793,7 +793,7 @@ class TestDetectWanIface(unittest.TestCase):
     """Тесты определения WAN-интерфейса."""
 
     def test_extracts_dev_from_ip_route(self):
-        from vless_installer.modules.awg_net_common import detect_wan_iface
+        from chimera.modules.awg_net_common import detect_wan_iface
         core = _make_mock_core()
         core._run.return_value = MagicMock(
             returncode=0,
@@ -804,7 +804,7 @@ class TestDetectWanIface(unittest.TestCase):
         self.assertEqual(iface, "eth0")
 
     def test_returns_empty_on_failure(self):
-        from vless_installer.modules.awg_net_common import detect_wan_iface
+        from chimera.modules.awg_net_common import detect_wan_iface
         core = _make_mock_core()
         core._run.return_value = MagicMock(returncode=1, stdout="", stderr="")
         iface = detect_wan_iface(core)
@@ -817,7 +817,7 @@ class TestCheckPortUsedByOtherProtocol(unittest.TestCase):
     def setUp(self):
         # Импортируем _core.py как модуль, чтобы получить доступ к функции.
         # Используем importlib + патч Path.mkdir (как в full_test.py).
-        core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+        core_path = _PROJECT_ROOT / "chimera" / "_core.py"
         self._orig_mkdir = Path.mkdir
         self._orig_touch = Path.touch
         self._orig_chmod = Path.chmod

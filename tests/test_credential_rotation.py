@@ -2,7 +2,7 @@
 """
 tests/test_credential_rotation.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/credential_rotation.py.
+Unit-тесты для chimera/modules/credential_rotation.py.
 
 Покрывает:
   1. _uuid_rotate_now — ротация UUID (mocked config/state/users)
@@ -23,7 +23,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -33,9 +33,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestUuidRotateNow(unittest.TestCase):
@@ -61,7 +61,7 @@ class TestUuidRotateNow(unittest.TestCase):
         return core
 
     def test_returns_new_uuid(self):
-        from vless_installer.modules import credential_rotation
+        from chimera.modules import credential_rotation
         cfg = {"inbounds": [{"settings": {"clients": [{"id": "old-uuid"}]}}]}
         self._cfg.write_text(json.dumps(cfg))
         self._state.write_text(json.dumps({"uuid": "old-uuid"}))
@@ -84,7 +84,7 @@ class TestUuidRotateNow(unittest.TestCase):
     def test_returns_uuid_even_without_config(self):
         """Если config.json не существует — функция пропускает его
         и возвращает новый UUID (не возвращает "")."""
-        from vless_installer.modules import credential_rotation
+        from chimera.modules import credential_rotation
         with patch.object(credential_rotation, "_core_module",
                           return_value=self._mock_core()):
             result = credential_rotation._uuid_rotate_now()
@@ -124,7 +124,7 @@ class TestRotateRealityKeys(unittest.TestCase):
         return core
 
     def test_returns_new_keys(self):
-        from vless_installer.modules import credential_rotation
+        from chimera.modules import credential_rotation
         cfg = {"inbounds": [{"streamSettings": {"realitySettings": {
             "privateKey": "old_priv", "publicKey": "old_pub",
             "shortIds": ["old_sid"],
@@ -150,7 +150,7 @@ class TestRotateRealityKeys(unittest.TestCase):
         self.assertEqual(result["public_key"], "NEW_PUB")
 
     def test_returns_empty_on_failure(self):
-        from vless_installer.modules import credential_rotation
+        from chimera.modules import credential_rotation
         core = self._mock_core()
         run_result = MagicMock()
         run_result.returncode = 1

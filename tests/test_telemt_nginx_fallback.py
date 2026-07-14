@@ -81,7 +81,7 @@ def _enter_mtproto_ui_patches(stack: ExitStack, mtproto_mod) -> None:
 
 def _setup_core_in_sysmodules():
     """Эталонный паттерн из tests/test_mtproto.py — патчит Path/os."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -90,9 +90,9 @@ def _setup_core_in_sysmodules():
          patch('os.chown', lambda *a, **kw: None), \
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -121,9 +121,9 @@ class TestWriteConfigDonorModeRegression(unittest.TestCase):
         self._cfg_dir = self._tmpdir / "etc"
         self._work_dir = self._tmpdir / "var"
         self._patches = [
-            patch("vless_installer.modules.mtproto.CONFIG_FILE", self._cfg),
-            patch("vless_installer.modules.mtproto.CONFIG_DIR", self._cfg_dir),
-            patch("vless_installer.modules.mtproto.WORK_DIR", self._work_dir),
+            patch("chimera.modules.mtproto.CONFIG_FILE", self._cfg),
+            patch("chimera.modules.mtproto.CONFIG_DIR", self._cfg_dir),
+            patch("chimera.modules.mtproto.WORK_DIR", self._work_dir),
         ]
         for p in self._patches:
             p.start()
@@ -146,7 +146,7 @@ class TestWriteConfigDonorModeRegression(unittest.TestCase):
 
     def test_donor_mode_mask_host_empty(self):
         """mask_host="" (по умолчанию) → секция идентична baseline."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="example.com",
             users={"alice": "abcdef0123456789abcdef0123456789"},
@@ -159,7 +159,7 @@ class TestWriteConfigDonorModeRegression(unittest.TestCase):
 
     def test_donor_mode_mask_host_explicit_empty_string(self):
         """Явная передача mask_host="" тоже даёт donor-режим."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="example.com",
             users={"alice": "abcdef0123456789abcdef0123456789"},
@@ -171,7 +171,7 @@ class TestWriteConfigDonorModeRegression(unittest.TestCase):
 
     def test_donor_mode_does_not_contain_mask_host(self):
         """В donor-режиме mask_host и tls_emulation отсутствуют."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="example.com",
             users={}, use_middle_proxy=False,
@@ -199,9 +199,9 @@ class TestWriteConfigOwnSiteMode(unittest.TestCase):
         self._cfg_dir = self._tmpdir / "etc"
         self._work_dir = self._tmpdir / "var"
         self._patches = [
-            patch("vless_installer.modules.mtproto.CONFIG_FILE", self._cfg),
-            patch("vless_installer.modules.mtproto.CONFIG_DIR", self._cfg_dir),
-            patch("vless_installer.modules.mtproto.WORK_DIR", self._work_dir),
+            patch("chimera.modules.mtproto.CONFIG_FILE", self._cfg),
+            patch("chimera.modules.mtproto.CONFIG_DIR", self._cfg_dir),
+            patch("chimera.modules.mtproto.WORK_DIR", self._work_dir),
         ]
         for p in self._patches:
             p.start()
@@ -213,7 +213,7 @@ class TestWriteConfigOwnSiteMode(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_own_site_writes_mask_host_and_tls_emulation(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="my.example.com",
             users={"alice": "abcdef0123456789abcdef0123456789"},
@@ -231,7 +231,7 @@ class TestWriteConfigOwnSiteMode(unittest.TestCase):
 
     def test_own_site_keeps_tls_domain_and_mask_true(self):
         """Own-site не ломает остальные ключи censorship-секции."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="my.example.com",
             users={}, use_middle_proxy=False,
@@ -244,7 +244,7 @@ class TestWriteConfigOwnSiteMode(unittest.TestCase):
 
     def test_own_site_without_mask_port_omits_line(self):
         """Если mask_port=0 — строка mask_port не пишется (но mask_host есть)."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x.example.com",
             users={}, use_middle_proxy=False,
@@ -259,7 +259,7 @@ class TestWriteConfigOwnSiteMode(unittest.TestCase):
 
     def test_own_site_tls_emulation_false_writes_false(self):
         """tls_emulation=False (нестандартно, но допустимо) — пишется 'false'."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x.example.com",
             users={}, use_middle_proxy=False,
@@ -286,12 +286,12 @@ class TestCreateWebsiteIsolationFromGlobalState(unittest.TestCase):
         self._var_www.mkdir(parents=True, exist_ok=True)
         # Перехватываем Path("/var/www/...") → self._var_www/...
         self._patch_var_www = patch(
-            "vless_installer.modules.nginx_setup.Path",
+            "chimera.modules.nginx_setup.Path",
             self._make_path_wrapper(),
         )
         self._patch_var_www.start()
         # Также глушим chown и _run чтобы не пытаться реально выполнять.
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         self._patch_run = patch.object(nginx_setup, "_core_module",
                                        return_value=self._make_fake_core())
         self._fake_core = self._patch_run.start()
@@ -331,7 +331,7 @@ class TestCreateWebsiteIsolationFromGlobalState(unittest.TestCase):
 
     def test_two_distinct_domains_create_two_distinct_web_roots(self):
         """Два последовательных вызова с разными domain → два web_root."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         # Создаём wrapper заново — замыкание на self._var_www уже корректное.
         # (т.к. setUp уже запустил patch, в nginx_setup.Path подменён)
         nginx_setup.create_website(domain="a.com", site_template="2")
@@ -350,7 +350,7 @@ class TestCreateWebsiteIsolationFromGlobalState(unittest.TestCase):
         """Если core.PARAM_DOMAIN='wrong.example.com', а мы передали
         domain='correct.example.com' — должен создаться correct.example.com,
         а НЕ wrong.example.com. Это и есть смысл рефактора."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         nginx_setup.create_website(domain="correct.example.com", site_template="2")
         correct_root = self._var_www / "correct.example.com"
         wrong_root = self._var_www / "wrong.example.com"
@@ -362,7 +362,7 @@ class TestCreateWebsiteIsolationFromGlobalState(unittest.TestCase):
     def test_no_explicit_domain_uses_core_param_domain(self):
         """Если domain не передан — используется core.PARAM_DOMAIN
         (backward-compat для VLESS install flow)."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         nginx_setup.create_website()  # без параметров
         default_root = self._var_www / "wrong.example.com"
         self.assertTrue(default_root.exists(),
@@ -462,7 +462,7 @@ class TestMaskBackendReadinessCheck(unittest.TestCase):
         """На TLS-сервере с валидным (не self-signed) cert — True.
         v4.20.6: теперь это TLS-handshake + issuer != subject проверка,
         не голый TCP-connect."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         cert, key = _generate_test_cert(self._tmpdir, cn="127.0.0.1",
                                          self_signed=False)
         port, thread, stop = _start_tls_server(cert, key)
@@ -487,7 +487,7 @@ class TestMaskBackendReadinessCheck(unittest.TestCase):
         v4.20.6: guard ловит silent regression когда nginx отдаёт self-signed.
         v4.20.9: проверка self-signed работает ТОЛЬКО если передан sni_hostname.
         Без sni_hostname — fallback на TCP-connect (True)."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         cert, key = _generate_test_cert(self._tmpdir, cn="selfsigned.example.com",
                                          self_signed=True)
         port, thread, stop = _start_tls_server(cert, key)
@@ -513,7 +513,7 @@ class TestMaskBackendReadinessCheck(unittest.TestCase):
         v4.20.9: если sni не передан — нет смысла делать TLS-handshake с SNI=127.0.0.1
         (nginx отдаст default_server). Возвращаем True на основе TCP-connect.
         Cert уже проверен через _is_cert_self_signed на шаге 5."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.bind(("127.0.0.1", 0))
         srv.listen(1)
@@ -533,7 +533,7 @@ class TestMaskBackendReadinessCheck(unittest.TestCase):
         Это сознательное решение: guard не должен блокировать own-site если
         TLS-handshake падает по техническим причинам (default_server в nginx
         отдаёт ssl_reject_handshake). Главное — listener готов."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.bind(("127.0.0.1", 0))
         srv.listen(1)
@@ -549,7 +549,7 @@ class TestMaskBackendReadinessCheck(unittest.TestCase):
 
     def test_check_returns_false_on_closed_port(self):
         """На закрытом порту — False (не raise)."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -560,7 +560,7 @@ class TestMaskBackendReadinessCheck(unittest.TestCase):
 
     def test_check_returns_false_on_timeout(self):
         """На RFC-5737 TEST-NET-1 (192.0.2.0/24) — гарантированный timeout."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         # 192.0.2.1 — RFC 5737 TEST-NET-1, маршрутизируется в никуда.
         self.assertFalse(
             mtproto._check_mask_backend_ready("192.0.2.1", 8443, timeout=0.5)
@@ -574,7 +574,7 @@ class TestMaskBackendReadinessCheck(unittest.TestCase):
         Мы мокируем _check_mask_backend_ready → всегда False, и проверяем,
         что _write_config вызывается повторно с mask_host="" (откат).
         """
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
 
         # Мокаем _check_mask_backend_ready → False (nginx "не готов").
         # Мокаем _write_config → считаем вызовы с какими mask_host приходили.
@@ -646,13 +646,13 @@ class TestOwnSiteConfigDataclass(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_default_mask_host_is_loopback(self):
-        from vless_installer.modules.mtproto import OwnSiteConfig
+        from chimera.modules.mtproto import OwnSiteConfig
         cfg = OwnSiteConfig(domain="x.example.com")
         self.assertEqual(cfg.mask_host, "127.0.0.1")
         self.assertEqual(cfg.mask_port, 0)
 
     def test_explicit_mask_port(self):
-        from vless_installer.modules.mtproto import OwnSiteConfig
+        from chimera.modules.mtproto import OwnSiteConfig
         cfg = OwnSiteConfig(domain="x.example.com", mask_port=8444)
         self.assertEqual(cfg.mask_port, 8444)
         self.assertEqual(cfg.mask_host, "127.0.0.1")
@@ -667,7 +667,7 @@ class TestPickLocalNginxPort(unittest.TestCase):
     def test_does_not_return_telemt_port(self):
         """Даже если telemt_port в нашем диапазоне кандидатов — функция
         должна вернуть ДРУГОЙ порт."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         # Мокаем _run чтобы ss вернул пустую строку (никто не слушает).
         with patch.object(mtproto, "_run",
                           return_value=MagicMock(stdout="", returncode=0)):
@@ -679,7 +679,7 @@ class TestPickLocalNginxPort(unittest.TestCase):
 
     def test_returns_zero_when_all_candidates_taken(self):
         """Если все порты в диапазоне заняты — возвращает 0."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         # Симулируем что ss видит все наши кандидаты как LISTEN.
         fake_stdout = "\n".join(
             f"LISTEN 0 4096 0.0.0.0:{p} 0.0.0.0:*"
@@ -692,7 +692,7 @@ class TestPickLocalNginxPort(unittest.TestCase):
 
     def test_skips_listened_ports(self):
         """Порт, который ss видит как LISTEN, пропускается."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         # 8444 занят, остальные свободны.
         fake_stdout = "LISTEN 0 4096 0.0.0.0:8444 0.0.0.0:*"
         with patch.object(mtproto, "_run",
@@ -715,7 +715,7 @@ class TestSignatureCompatibility(unittest.TestCase):
     def test_obtain_ssl_cert_accepts_domain(self):
         """obtain_ssl_cert(domain=...) — есть параметр domain."""
         import inspect
-        from vless_installer.modules.ssl_certbot import obtain_ssl_cert
+        from chimera.modules.ssl_certbot import obtain_ssl_cert
         sig = inspect.signature(obtain_ssl_cert)
         self.assertIn("domain", sig.parameters,
                       "obtain_ssl_cert должен принимать domain=")
@@ -726,7 +726,7 @@ class TestSignatureCompatibility(unittest.TestCase):
         """setup_nginx_final(domain, port, socket_path, protocol_mode,
         awg_exit_enabled, site_template) — все параметры присутствуют."""
         import inspect
-        from vless_installer.modules.nginx_setup import setup_nginx_final, _UNSET
+        from chimera.modules.nginx_setup import setup_nginx_final, _UNSET
         sig = inspect.signature(setup_nginx_final)
         # domain, protocol_mode, awg_exit_enabled, site_template — default None
         for p in ("domain", "protocol_mode", "awg_exit_enabled", "site_template"):
@@ -746,7 +746,7 @@ class TestSignatureCompatibility(unittest.TestCase):
     def test_create_website_accepts_domain_site_template(self):
         """create_website(domain, site_template) — оба параметра."""
         import inspect
-        from vless_installer.modules.nginx_setup import create_website
+        from chimera.modules.nginx_setup import create_website
         sig = inspect.signature(create_website)
         for p in ("domain", "site_template"):
             self.assertIn(p, sig.parameters,
@@ -818,7 +818,7 @@ class TestSetupNginxFinalOwnSiteTcpMode(unittest.TestCase):
                                 own_site_port=8444):
         """Вызывает setup_nginx_final в own-site TCP режиме с заданным core state.
         Возвращает содержимое записанного nginx-конфига."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         fake_core = _make_fake_core_for_nginx(
             protocol_mode=core_protocol_mode,
             awg_exit_enabled=core_awg_exit,
@@ -922,7 +922,7 @@ class TestSetupNginxFinalOwnSiteTcpMode(unittest.TestCase):
     # ── Тест 4: коллизия доменов → RuntimeError ────────────────────────────
     def test_domain_collision_raises_runtime_error(self):
         """own_site_domain == core.PARAM_DOMAIN → RuntimeError."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         fake_core = _make_fake_core_for_nginx(
             param_domain="telemt.example.com",  # совпадает с own-site доменом!
             nginx_conf_dir=self._conf_dir,
@@ -980,7 +980,7 @@ class TestSetupNginxFinalVlessRegression(unittest.TestCase):
     def _call_vless_reality(self, param_socket_path="/run/xray.sock"):
         """Вызывает setup_nginx_final() БЕЗ аргументов (как VLESS install flow).
         Возвращает содержимое конфига."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         fake_core = _make_fake_core_for_nginx(
             protocol_mode="reality",
             awg_exit_enabled=False,
@@ -1043,7 +1043,7 @@ class TestSetupNginxFinalTwoParallelDomains(unittest.TestCase):
     def test_vless_and_telemt_domains_coexist(self):
         """VLESS-домен на unix-сокете + Telemt-домен на TCP:8444 —
         оба конфига валидны, не конфликтуют по listen."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         fake_core = _make_fake_core_for_nginx(
             protocol_mode="reality",
             param_domain="vless.example.com",
@@ -1118,7 +1118,7 @@ class TestCleanupOwnSite(unittest.TestCase):
 
         _cleanup_own_site хардкодит Path(f'/var/www/{domain}'), а мы не хотим
         писать в реальный /var/www. Перехватываем конструктор Path."""
-        import vless_installer.modules.mtproto as mtproto_mod
+        import chimera.modules.mtproto as mtproto_mod
         real_path = Path
 
         class _PatchedPath(real_path):
@@ -1134,21 +1134,21 @@ class TestCleanupOwnSite(unittest.TestCase):
 
     def test_cleanup_removes_orphaned_files(self):
         """_cleanup_own_site удаляет nginx config, symlink, web_root."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         fake_core = _make_fake_core_for_nginx(
             nginx_conf_dir=self._conf_dir,
             nginx_enabled_dir=self._enabled_dir,
         )
-        original_core = sys.modules.get("vless_installer._core")
-        sys.modules["vless_installer._core"] = fake_core
+        original_core = sys.modules.get("chimera._core")
+        sys.modules["chimera._core"] = fake_core
         try:
             with self._patch_web_root_path():
                 mtproto._cleanup_own_site("telemt.example.com")
         finally:
             if original_core is not None:
-                sys.modules["vless_installer._core"] = original_core
+                sys.modules["chimera._core"] = original_core
             else:
-                sys.modules.pop("vless_installer._core", None)
+                sys.modules.pop("chimera._core", None)
         self.assertFalse((self._conf_dir / "telemt.example.com").exists(),
                          "nginx config должен быть удалён")
         self.assertFalse((self._enabled_dir / "telemt.example.com").exists(),
@@ -1158,7 +1158,7 @@ class TestCleanupOwnSite(unittest.TestCase):
 
     def test_cleanup_with_empty_domain_is_noop(self):
         """_cleanup_own_site('') — no-op, не падает."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         # Не должно падать и не должно ничего удалять
         mtproto._cleanup_own_site("")
         # Файлы на месте
@@ -1166,20 +1166,20 @@ class TestCleanupOwnSite(unittest.TestCase):
 
     def test_cleanup_with_nonexistent_domain_is_noop(self):
         """_cleanup_own_site для несуществующего домена — no-op, не падает."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         fake_core = _make_fake_core_for_nginx(
             nginx_conf_dir=self._conf_dir,
             nginx_enabled_dir=self._enabled_dir,
         )
-        original_core = sys.modules.get("vless_installer._core")
-        sys.modules["vless_installer._core"] = fake_core
+        original_core = sys.modules.get("chimera._core")
+        sys.modules["chimera._core"] = fake_core
         try:
             mtproto._cleanup_own_site("nonexistent.example.com")
         finally:
             if original_core is not None:
-                sys.modules["vless_installer._core"] = original_core
+                sys.modules["chimera._core"] = original_core
             else:
-                sys.modules.pop("vless_installer._core", None)
+                sys.modules.pop("chimera._core", None)
         # Существующие файлы не тронуты
         self.assertTrue((self._conf_dir / "telemt.example.com").exists())
 
@@ -1194,7 +1194,7 @@ class TestGuardBlockCleanupOnRollback(unittest.TestCase):
     def test_guard_block_calls_cleanup_on_nginx_down(self):
         """Если _check_mask_backend_ready=False, guard вызывает _cleanup_own_site
         и переписывает конфиг в donor-режим."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
 
         cleanup_calls = []
         write_calls = []
@@ -1285,7 +1285,7 @@ class TestSetupNginxTempParameterized(unittest.TestCase):
     def _call_setup_nginx_temp(self, domain_arg=None, core_param_domain="vless.example.com"):
         """Вызывает setup_nginx_temp с заданным domain и core.PARAM_DOMAIN.
         Возвращает (cfg_path, cfg_content) или (None, None) если файл не записан."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         fake_core = _make_fake_core_for_nginx(
             param_domain=core_param_domain,
             nginx_conf_dir=self._conf_dir,
@@ -1360,7 +1360,7 @@ class TestSetupOwnSiteOrderOfOperations(unittest.TestCase):
 
     def test_setup_nginx_temp_called_before_obtain_ssl_cert(self):
         """Мокаем obtain_ssl_cert и setup_nginx_temp с записью порядка вызовов."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
 
         call_order = []
 
@@ -1384,11 +1384,11 @@ class TestSetupOwnSiteOrderOfOperations(unittest.TestCase):
         def _fake_pick_local_nginx_port(telemt_port):
             return 8444
 
-        # Подменяем sys.modules["vless_installer._core"] для проверки коллизии
+        # Подменяем sys.modules["chimera._core"] для проверки коллизии
         mock_core = MagicMock()
         mock_core.PARAM_DOMAIN = "vless.example.com"  # != telemt.example.com
-        original_core = sys.modules.get("vless_installer._core")
-        sys.modules["vless_installer._core"] = mock_core
+        original_core = sys.modules.get("chimera._core")
+        sys.modules["chimera._core"] = mock_core
 
         try:
             # Раньше: один гигантский `with A, B, C, ...:` на 20 context managers
@@ -1404,18 +1404,18 @@ class TestSetupOwnSiteOrderOfOperations(unittest.TestCase):
                 stack.enter_context(patch.object(mtproto, "_check_mask_backend_ready",
                                                   side_effect=_fake_check_mask_backend_ready))
                 stack.enter_context(patch.object(mtproto, "_cleanup_own_site"))
-                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_temp",
+                stack.enter_context(patch("chimera.modules.nginx_setup.setup_nginx_temp",
                                           side_effect=_fake_setup_nginx_temp))
-                stack.enter_context(patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert",
+                stack.enter_context(patch("chimera.modules.ssl_certbot.obtain_ssl_cert",
                                           side_effect=_fake_obtain_ssl_cert))
-                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_final",
+                stack.enter_context(patch("chimera.modules.nginx_setup.setup_nginx_final",
                                           side_effect=_fake_setup_nginx_final))
                 result = mtproto._setup_own_site("telemt.example.com", 8443)
         finally:
             if original_core is not None:
-                sys.modules["vless_installer._core"] = original_core
+                sys.modules["chimera._core"] = original_core
             else:
-                sys.modules.pop("vless_installer._core", None)
+                sys.modules.pop("chimera._core", None)
 
         # Проверяем порядок вызовов
         names = [name for name, _ in call_order]
@@ -1449,21 +1449,21 @@ class TestSelfSignedDetection(unittest.TestCase):
 
     def _mock_openssl(self, issuer: str, subject: str):
         """Мокает _run(['openssl', 'x509', ...]) чтобы вернуть заданные issuer/subject."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         output = f"issuer={issuer}\nsubject={subject}\n"
         mock_result = MagicMock(returncode=0, stdout=output, stderr="")
         return patch.object(mtproto, "_run", return_value=mock_result)
 
     def test_is_cert_self_signed_returns_true_when_issuer_equals_subject(self):
         """Self-signed: issuer == subject → True."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         # Создаём фейковый cert-файл
         with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
             f.write(b"fake cert")
             cert_path = f.name
         try:
             with patch.object(Path, "exists", return_value=True), \
-                 patch("vless_installer.modules.mtproto.Path") as mock_path_class:
+                 patch("chimera.modules.mtproto.Path") as mock_path_class:
                 # Path("/etc/letsencrypt/live/{domain}/cert.pem") → наш tmp-файл
                 mock_path_class.return_value = Path(cert_path)
                 mock_path_class.side_effect = lambda *a, **kw: Path(cert_path) if "letsencrypt" in str(a) else Path(*a, **kw)
@@ -1475,13 +1475,13 @@ class TestSelfSignedDetection(unittest.TestCase):
 
     def test_is_cert_self_signed_returns_false_when_issuer_neq_subject(self):
         """Валидный LE: issuer != subject → False."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
             f.write(b"fake cert")
             cert_path = f.name
         try:
             with patch.object(Path, "exists", return_value=True), \
-                 patch("vless_installer.modules.mtproto.Path") as mock_path_class:
+                 patch("chimera.modules.mtproto.Path") as mock_path_class:
                 mock_path_class.return_value = Path(cert_path)
                 mock_path_class.side_effect = lambda *a, **kw: Path(cert_path) if "letsencrypt" in str(a) else Path(*a, **kw)
                 with self._mock_openssl("C = US, O = Let's Encrypt, CN = R3",
@@ -1493,7 +1493,7 @@ class TestSelfSignedDetection(unittest.TestCase):
 
     def test_is_cert_self_signed_returns_true_when_cert_missing(self):
         """Сертификат не найден → True (fail-safe)."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with patch.object(Path, "exists", return_value=False):
             result = mtproto._is_cert_self_signed("nonexistent.example.com")
         self.assertTrue(result, "Отсутствие сертификата → True (fail-safe)")
@@ -1501,13 +1501,13 @@ class TestSelfSignedDetection(unittest.TestCase):
     def test_setup_own_site_rolls_back_on_self_signed(self):
         """_setup_own_site: если после obtain_ssl_cert сертификат self-signed →
         возвращает OwnSiteConfig(mask_port=0) и вызывает _cleanup_own_site."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
 
         cleanup_calls = []
         mock_core = MagicMock()
         mock_core.PARAM_DOMAIN = "vless.example.com"
-        original_core = sys.modules.get("vless_installer._core")
-        sys.modules["vless_installer._core"] = mock_core
+        original_core = sys.modules.get("chimera._core")
+        sys.modules["chimera._core"] = mock_core
 
         try:
             # Раньше: один гигантский `with A, B, C, ...:` на 18 context managers.
@@ -1518,14 +1518,14 @@ class TestSelfSignedDetection(unittest.TestCase):
                 stack.enter_context(patch.object(mtproto, "_is_cert_self_signed", return_value=True))
                 stack.enter_context(patch.object(mtproto, "_cleanup_own_site",
                                                   side_effect=lambda d: cleanup_calls.append(d)))
-                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_temp"))
-                stack.enter_context(patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"))
+                stack.enter_context(patch("chimera.modules.nginx_setup.setup_nginx_temp"))
+                stack.enter_context(patch("chimera.modules.ssl_certbot.obtain_ssl_cert"))
                 result = mtproto._setup_own_site("telemt.example.com", 8443)
         finally:
             if original_core is not None:
-                sys.modules["vless_installer._core"] = original_core
+                sys.modules["chimera._core"] = original_core
             else:
-                sys.modules.pop("vless_installer._core", None)
+                sys.modules.pop("chimera._core", None)
 
         self.assertIsInstance(result, mtproto.OwnSiteConfig)
         self.assertEqual(result.mask_port, 0,
@@ -1535,12 +1535,12 @@ class TestSelfSignedDetection(unittest.TestCase):
 
     def test_setup_own_site_proceeds_on_valid_le_cert(self):
         """_setup_own_site: валидный LE (issuer != subject) → mask_port > 0."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
 
         mock_core = MagicMock()
         mock_core.PARAM_DOMAIN = "vless.example.com"
-        original_core = sys.modules.get("vless_installer._core")
-        sys.modules["vless_installer._core"] = mock_core
+        original_core = sys.modules.get("chimera._core")
+        sys.modules["chimera._core"] = mock_core
 
         try:
             # Раньше: один гигантский `with A, B, C, ...:` на 20 context managers.
@@ -1551,15 +1551,15 @@ class TestSelfSignedDetection(unittest.TestCase):
                 stack.enter_context(patch.object(mtproto, "_is_cert_self_signed", return_value=False))
                 stack.enter_context(patch.object(mtproto, "_cleanup_own_site"))
                 stack.enter_context(patch.object(mtproto, "_check_mask_backend_ready", return_value=True))
-                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_temp"))
-                stack.enter_context(patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"))
-                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_final"))
+                stack.enter_context(patch("chimera.modules.nginx_setup.setup_nginx_temp"))
+                stack.enter_context(patch("chimera.modules.ssl_certbot.obtain_ssl_cert"))
+                stack.enter_context(patch("chimera.modules.nginx_setup.setup_nginx_final"))
                 result = mtproto._setup_own_site("telemt.example.com", 8443)
         finally:
             if original_core is not None:
-                sys.modules["vless_installer._core"] = original_core
+                sys.modules["chimera._core"] = original_core
             else:
-                sys.modules.pop("vless_installer._core", None)
+                sys.modules.pop("chimera._core", None)
 
         self.assertIsInstance(result, mtproto.OwnSiteConfig)
         self.assertEqual(result.mask_port, 8444,
@@ -1594,7 +1594,7 @@ class TestNginxHardeningUnlinkBeforeRestart(unittest.TestCase):
 
     def _make_mock_call_recorder(self, domain, fake_core):
         """Создаёт mock _run который записывает порядок вызовов в call_log."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         call_log = []
         # Создаём фейковый symlink чтобы можно было unlink
         link_path = self._enabled_dir / domain
@@ -1618,7 +1618,7 @@ class TestNginxHardeningUnlinkBeforeRestart(unittest.TestCase):
 
     def test_setup_nginx_temp_unlinks_symlink_before_restart_on_failure(self):
         """Тест 4.1: setup_nginx_temp при nginx -t failure — symlink удалён ДО reload."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         domain = "telemt.example.com"
         fake_core = _make_fake_core_for_nginx(
             param_domain="vless.example.com",
@@ -1670,7 +1670,7 @@ class TestNginxHardeningUnlinkBeforeRestart(unittest.TestCase):
 
     def test_setup_nginx_final_own_site_unlinks_on_failure(self):
         """Тест 4.2: setup_nginx_final own-site TCP ветка — symlink удалён при fail."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         domain = "telemt.example.com"
         fake_core = _make_fake_core_for_nginx(
             param_domain="vless.example.com",
@@ -1707,7 +1707,7 @@ class TestNginxHardeningUnlinkBeforeRestart(unittest.TestCase):
 
     def test_setup_nginx_final_awg_unlinks_on_failure(self):
         """Тест 4.3: setup_nginx_final AWG-ветка — symlink удалён при fail."""
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         domain = "vless.example.com"  # AWG-ветка для VLESS flow (без явных параметров)
         fake_core = _make_fake_core_for_nginx(
             param_domain=domain,
@@ -1757,7 +1757,7 @@ class TestNginxHardeningUnlinkBeforeRestart(unittest.TestCase):
         строке ~884 (перед symlink_to) — это легитимная очистка старого
         symlink'а, его не считаем. Считаем только unlink ПОСЛЕ symlink_to.
         """
-        from vless_installer.modules import nginx_setup
+        from chimera.modules import nginx_setup
         domain = "vless.example.com"
         fake_core = _make_fake_core_for_nginx(
             param_domain=domain,
@@ -1820,7 +1820,7 @@ class TestSetupOwnSiteRetryLogic(unittest.TestCase):
         """Если _check_mask_backend_ready возвращает False, True, True —
         _setup_own_site должен вернуть OwnSiteConfig с mask_port > 0
         (не откатывать в donor-режим)."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
 
         # Мокаем _check_mask_backend_ready: первая попытка False (race), вторая True
         check_calls = []
@@ -1830,8 +1830,8 @@ class TestSetupOwnSiteRetryLogic(unittest.TestCase):
 
         mock_core = MagicMock()
         mock_core.PARAM_DOMAIN = "vless.example.com"
-        original_core = sys.modules.get("vless_installer._core")
-        sys.modules["vless_installer._core"] = mock_core
+        original_core = sys.modules.get("chimera._core")
+        sys.modules["chimera._core"] = mock_core
 
         try:
             with ExitStack() as stack:
@@ -1841,16 +1841,16 @@ class TestSetupOwnSiteRetryLogic(unittest.TestCase):
                 stack.enter_context(patch.object(mtproto, "_cleanup_own_site"))
                 stack.enter_context(patch.object(mtproto, "_check_mask_backend_ready",
                                                   side_effect=_fake_check))
-                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_temp"))
-                stack.enter_context(patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"))
-                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_final"))
+                stack.enter_context(patch("chimera.modules.nginx_setup.setup_nginx_temp"))
+                stack.enter_context(patch("chimera.modules.ssl_certbot.obtain_ssl_cert"))
+                stack.enter_context(patch("chimera.modules.nginx_setup.setup_nginx_final"))
                 stack.enter_context(patch.object(mtproto, "time"))
                 result = mtproto._setup_own_site("telemt.example.com", 8443)
         finally:
             if original_core is not None:
-                sys.modules["vless_installer._core"] = original_core
+                sys.modules["chimera._core"] = original_core
             else:
-                sys.modules.pop("vless_installer._core", None)
+                sys.modules.pop("chimera._core", None)
 
         self.assertIsInstance(result, mtproto.OwnSiteConfig)
         self.assertEqual(result.mask_port, 8444,
@@ -1861,7 +1861,7 @@ class TestSetupOwnSiteRetryLogic(unittest.TestCase):
     def test_retry_fails_after_3_attempts_with_diagnostics(self):
         """Если _check_mask_backend_ready возвращает False 3 раза —
         _setup_own_site должен откатить в donor-режим + показать диагностику."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
 
         check_calls = []
         def _fake_check(host, port, timeout=2.0, sni_hostname=""):
@@ -1870,8 +1870,8 @@ class TestSetupOwnSiteRetryLogic(unittest.TestCase):
 
         mock_core = MagicMock()
         mock_core.PARAM_DOMAIN = "vless.example.com"
-        original_core = sys.modules.get("vless_installer._core")
-        sys.modules["vless_installer._core"] = mock_core
+        original_core = sys.modules.get("chimera._core")
+        sys.modules["chimera._core"] = mock_core
 
         cleanup_calls = []
         err_calls = []
@@ -1887,18 +1887,18 @@ class TestSetupOwnSiteRetryLogic(unittest.TestCase):
                                                   side_effect=_fake_check))
                 stack.enter_context(patch.object(mtproto, "_err",
                                                   side_effect=lambda m: err_calls.append(m)))
-                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_temp"))
-                stack.enter_context(patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"))
-                stack.enter_context(patch("vless_installer.modules.nginx_setup.setup_nginx_final"))
+                stack.enter_context(patch("chimera.modules.nginx_setup.setup_nginx_temp"))
+                stack.enter_context(patch("chimera.modules.ssl_certbot.obtain_ssl_cert"))
+                stack.enter_context(patch("chimera.modules.nginx_setup.setup_nginx_final"))
                 stack.enter_context(patch.object(mtproto, "time"))
                 stack.enter_context(patch.object(mtproto, "_run",
                                                   return_value=MagicMock(returncode=0, stdout="", stderr="nginx: OK")))
                 result = mtproto._setup_own_site("telemt.example.com", 8443)
         finally:
             if original_core is not None:
-                sys.modules["vless_installer._core"] = original_core
+                sys.modules["chimera._core"] = original_core
             else:
-                sys.modules.pop("vless_installer._core", None)
+                sys.modules.pop("chimera._core", None)
 
         self.assertIsInstance(result, mtproto.OwnSiteConfig)
         self.assertEqual(result.mask_port, 0,
@@ -1932,17 +1932,17 @@ class TestSelectDomainReturns(unittest.TestCase):
         """Выбор домена из категории '1' (Поисковики) возвращает строку.
         Категория '1' — ['yandex.ru', 'ya.ru', 'mail.ru', ...]; выбор '1' → yandex.ru.
         """
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         # Мокаем proto_ask: сначала ввод "1" (категория), затем "1" (домен).
-        with patch("vless_installer.modules.mtproto.proto_ask",
+        with patch("chimera.modules.mtproto.proto_ask",
                    side_effect=["1", "1"]), \
-             patch("vless_installer.modules.mtproto._banner"), \
-             patch("vless_installer.modules.mtproto._box_top"), \
-             patch("vless_installer.modules.mtproto._box_row"), \
-             patch("vless_installer.modules.mtproto._box_sep"), \
-             patch("vless_installer.modules.mtproto._box_item"), \
-             patch("vless_installer.modules.mtproto._box_bot"), \
-             patch("vless_installer.modules.mtproto._box_info"), \
+             patch("chimera.modules.mtproto._banner"), \
+             patch("chimera.modules.mtproto._box_top"), \
+             patch("chimera.modules.mtproto._box_row"), \
+             patch("chimera.modules.mtproto._box_sep"), \
+             patch("chimera.modules.mtproto._box_item"), \
+             patch("chimera.modules.mtproto._box_bot"), \
+             patch("chimera.modules.mtproto._box_info"), \
              patch("builtins.print"):
             result = mtproto._select_domain(telemt_port=8443)
         self.assertIsInstance(result, str,
@@ -1952,16 +1952,16 @@ class TestSelectDomainReturns(unittest.TestCase):
 
     def test_q_returns_ivi_default(self):
         """Q (назад) возвращает дефолтный ivi.ru."""
-        from vless_installer.modules import mtproto
-        with patch("vless_installer.modules.mtproto.proto_ask",
+        from chimera.modules import mtproto
+        with patch("chimera.modules.mtproto.proto_ask",
                    side_effect=["q"]), \
-             patch("vless_installer.modules.mtproto._banner"), \
-             patch("vless_installer.modules.mtproto._box_top"), \
-             patch("vless_installer.modules.mtproto._box_row"), \
-             patch("vless_installer.modules.mtproto._box_sep"), \
-             patch("vless_installer.modules.mtproto._box_item"), \
-             patch("vless_installer.modules.mtproto._box_bot"), \
-             patch("vless_installer.modules.mtproto._box_info"), \
+             patch("chimera.modules.mtproto._banner"), \
+             patch("chimera.modules.mtproto._box_top"), \
+             patch("chimera.modules.mtproto._box_row"), \
+             patch("chimera.modules.mtproto._box_sep"), \
+             patch("chimera.modules.mtproto._box_item"), \
+             patch("chimera.modules.mtproto._box_bot"), \
+             patch("chimera.modules.mtproto._box_info"), \
              patch("builtins.print"):
             result = mtproto._select_domain(telemt_port=8443)
         self.assertEqual(result, "ivi.ru")

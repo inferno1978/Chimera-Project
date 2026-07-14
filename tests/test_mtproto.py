@@ -2,7 +2,7 @@
 """
 tests/test_mtproto.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/mtproto.py — Telemt MTProto Proxy.
+Unit-тесты для chimera/modules/mtproto.py — Telemt MTProto Proxy.
 
 Покрывает (только чистую логику, без subprocess/iptables/curl):
   1.  _plain — удаление ANSI-кодов.
@@ -39,7 +39,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core_in_sysmodules():
     """Эталонный паттерн из tests/test_health.py — патчит Path/os."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -48,9 +48,9 @@ def _setup_core_in_sysmodules():
          patch('os.chown', lambda *a, **kw: None), \
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -64,23 +64,23 @@ class TestPlain(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_strips_simple_color(self):
-        from vless_installer.modules.mtproto import _plain
+        from chimera.modules.mtproto import _plain
         self.assertEqual(_plain("\033[0;31mRED\033[0m"), "RED")
 
     def test_strips_multiple_codes(self):
-        from vless_installer.modules.mtproto import _plain
+        from chimera.modules.mtproto import _plain
         self.assertEqual(_plain("\033[1m\033[33mWARN\033[0m"), "WARN")
 
     def test_no_codes_returns_unchanged(self):
-        from vless_installer.modules.mtproto import _plain
+        from chimera.modules.mtproto import _plain
         self.assertEqual(_plain("hello world"), "hello world")
 
     def test_empty_string(self):
-        from vless_installer.modules.mtproto import _plain
+        from chimera.modules.mtproto import _plain
         self.assertEqual(_plain(""), "")
 
     def test_codes_in_middle(self):
-        from vless_installer.modules.mtproto import _plain
+        from chimera.modules.mtproto import _plain
         self.assertEqual(_plain("a\033[1mb\033[0mc"), "abc")
 
 
@@ -94,36 +94,36 @@ class TestWlen(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_ascii_width(self):
-        from vless_installer.modules.mtproto import _wlen
+        from chimera.modules.mtproto import _wlen
         self.assertEqual(_wlen("hello"), 5)
 
     def test_cjk_width_is_two(self):
         """Китайские/японские символы имеют ширину 2."""
-        from vless_installer.modules.mtproto import _wlen
+        from chimera.modules.mtproto import _wlen
         self.assertEqual(_wlen("中文"), 4)
 
     def test_cyrillic_width_is_one(self):
         """Кириллица — обычной ширины."""
-        from vless_installer.modules.mtproto import _wlen
+        from chimera.modules.mtproto import _wlen
         self.assertEqual(_wlen("Привет"), 6)
 
     def test_emoji_width(self):
         """Эмодзи имеют ширину 2."""
-        from vless_installer.modules.mtproto import _wlen
+        from chimera.modules.mtproto import _wlen
         self.assertEqual(_wlen("🚀"), 2)
 
     def test_ansi_codes_ignored(self):
         """ANSI-escape не учитываются в ширине."""
-        from vless_installer.modules.mtproto import _wlen
+        from chimera.modules.mtproto import _wlen
         self.assertEqual(_wlen("\033[1mhello\033[0m"), 5)
 
     def test_empty_string(self):
-        from vless_installer.modules.mtproto import _wlen
+        from chimera.modules.mtproto import _wlen
         self.assertEqual(_wlen(""), 0)
 
     def test_variation_selector_ignored(self):
         """Variation selector U+FE0F игнорируется (эмодзи остаётся шириной 2)."""
-        from vless_installer.modules.mtproto import _wlen
+        from chimera.modules.mtproto import _wlen
         # ⚠ + VS16 — должно быть width=2
         self.assertEqual(_wlen("⚠️"), 2)
 
@@ -138,13 +138,13 @@ class TestGenerateSecret(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_32_hex_chars(self):
-        from vless_installer.modules.mtproto import _generate_secret
+        from chimera.modules.mtproto import _generate_secret
         secret = _generate_secret()
         self.assertEqual(len(secret), 32)
         self.assertTrue(re.match(r'^[0-9a-f]{32}$', secret))
 
     def test_two_calls_return_different_secrets(self):
-        from vless_installer.modules.mtproto import _generate_secret
+        from chimera.modules.mtproto import _generate_secret
         s1 = _generate_secret()
         s2 = _generate_secret()
         self.assertNotEqual(s1, s2)
@@ -160,47 +160,47 @@ class TestValidateUsername(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_valid_simple_name(self):
-        from vless_installer.modules.mtproto import _validate_username
+        from chimera.modules.mtproto import _validate_username
         self.assertTrue(_validate_username("alice"))
 
     def test_valid_with_underscore_and_dash(self):
-        from vless_installer.modules.mtproto import _validate_username
+        from chimera.modules.mtproto import _validate_username
         self.assertTrue(_validate_username("alice_bob"))
         self.assertTrue(_validate_username("alice-bob"))
         self.assertTrue(_validate_username("a_b-c"))
 
     def test_valid_with_digits(self):
-        from vless_installer.modules.mtproto import _validate_username
+        from chimera.modules.mtproto import _validate_username
         self.assertTrue(_validate_username("user123"))
 
     def test_invalid_starts_with_digit(self):
-        from vless_installer.modules.mtproto import _validate_username
+        from chimera.modules.mtproto import _validate_username
         self.assertFalse(_validate_username("1abc"))
 
     def test_invalid_starts_with_dash(self):
-        from vless_installer.modules.mtproto import _validate_username
+        from chimera.modules.mtproto import _validate_username
         self.assertFalse(_validate_username("-abc"))
 
     def test_invalid_too_short(self):
-        from vless_installer.modules.mtproto import _validate_username
+        from chimera.modules.mtproto import _validate_username
         self.assertFalse(_validate_username("ab"))   # 2 символа — слишком коротко
         self.assertFalse(_validate_username("a"))    # 1 символ
 
     def test_invalid_too_long(self):
-        from vless_installer.modules.mtproto import _validate_username
+        from chimera.modules.mtproto import _validate_username
         # 16 символов после первой буквы — слишком длинно (допустимо 2..15 после буквы)
         self.assertFalse(_validate_username("a" + "b" * 16))
 
     def test_invalid_empty(self):
-        from vless_installer.modules.mtproto import _validate_username
+        from chimera.modules.mtproto import _validate_username
         self.assertFalse(_validate_username(""))
 
     def test_invalid_cyrillic(self):
-        from vless_installer.modules.mtproto import _validate_username
+        from chimera.modules.mtproto import _validate_username
         self.assertFalse(_validate_username("пользователь"))
 
     def test_invalid_special_chars(self):
-        from vless_installer.modules.mtproto import _validate_username
+        from chimera.modules.mtproto import _validate_username
         self.assertFalse(_validate_username("alice@bob"))
         self.assertFalse(_validate_username("alice.bob"))
         self.assertFalse(_validate_username("alice!"))
@@ -216,32 +216,32 @@ class TestValidateDomain(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_valid_simple_domain(self):
-        from vless_installer.modules.mtproto import _validate_domain
+        from chimera.modules.mtproto import _validate_domain
         self.assertTrue(_validate_domain("example.com"))
         self.assertTrue(_validate_domain("a.b"))
 
     def test_valid_multi_level(self):
-        from vless_installer.modules.mtproto import _validate_domain
+        from chimera.modules.mtproto import _validate_domain
         self.assertTrue(_validate_domain("sub.example.com"))
 
     def test_valid_with_dash(self):
-        from vless_installer.modules.mtproto import _validate_domain
+        from chimera.modules.mtproto import _validate_domain
         self.assertTrue(_validate_domain("my-site.example.com"))
 
     def test_invalid_no_dot(self):
-        from vless_installer.modules.mtproto import _validate_domain
+        from chimera.modules.mtproto import _validate_domain
         self.assertFalse(_validate_domain("localhost"))
 
     def test_invalid_empty(self):
-        from vless_installer.modules.mtproto import _validate_domain
+        from chimera.modules.mtproto import _validate_domain
         self.assertFalse(_validate_domain(""))
 
     def test_invalid_starts_with_dash(self):
-        from vless_installer.modules.mtproto import _validate_domain
+        from chimera.modules.mtproto import _validate_domain
         self.assertFalse(_validate_domain("-bad.com"))
 
     def test_invalid_special_chars(self):
-        from vless_installer.modules.mtproto import _validate_domain
+        from chimera.modules.mtproto import _validate_domain
         # Regex разрешает дефис внутри (в [a-zA-Z0-9.\-]), но проверяет
         # только first/last char. Поэтому 'bad-.com' формально проходит —
         # это ограничение regex, не баг. Тестируем реальные invalid-кейсы.
@@ -262,33 +262,33 @@ class TestFmtBytes(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_zero_bytes(self):
-        from vless_installer.modules.mtproto import _fmt_bytes
+        from chimera.modules.mtproto import _fmt_bytes
         self.assertEqual(_fmt_bytes(0), "0 B")
 
     def test_below_kib(self):
-        from vless_installer.modules.mtproto import _fmt_bytes
+        from chimera.modules.mtproto import _fmt_bytes
         self.assertEqual(_fmt_bytes(512), "512 B")
         self.assertEqual(_fmt_bytes(1023), "1023 B")
 
     def test_one_kib(self):
-        from vless_installer.modules.mtproto import _fmt_bytes
+        from chimera.modules.mtproto import _fmt_bytes
         self.assertEqual(_fmt_bytes(1024), "1.0 KiB")
 
     def test_one_mib(self):
-        from vless_installer.modules.mtproto import _fmt_bytes
+        from chimera.modules.mtproto import _fmt_bytes
         self.assertEqual(_fmt_bytes(1024 ** 2), "1.0 MiB")
 
     def test_one_gib(self):
-        from vless_installer.modules.mtproto import _fmt_bytes
+        from chimera.modules.mtproto import _fmt_bytes
         self.assertEqual(_fmt_bytes(1024 ** 3), "1.0 GiB")
 
     def test_one_tib(self):
-        from vless_installer.modules.mtproto import _fmt_bytes
+        from chimera.modules.mtproto import _fmt_bytes
         self.assertEqual(_fmt_bytes(1024 ** 4), "1.0 TiB")
 
     def test_large_returns_pib(self):
         """5 PiB → '5.0 PiB' (или около того, зависит от float-округления)."""
-        from vless_installer.modules.mtproto import _fmt_bytes
+        from chimera.modules.mtproto import _fmt_bytes
         result = _fmt_bytes(5 * 1024 ** 5)
         self.assertIn("PiB", result)
 
@@ -303,7 +303,7 @@ class TestIsPublicIp(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_public_ipv4(self):
-        from vless_installer.modules.mtproto import _is_public_ip
+        from chimera.modules.mtproto import _is_public_ip
         self.assertTrue(_is_public_ip("8.8.8.8"))
         self.assertTrue(_is_public_ip("1.1.1.1"))
         # 203.0.113.x — это RFC 5737 TEST-NET-3, ipaddress считает его специальным
@@ -312,29 +312,29 @@ class TestIsPublicIp(unittest.TestCase):
         self.assertTrue(_is_public_ip("140.82.121.4"))   # github.com
 
     def test_private_rfc1918(self):
-        from vless_installer.modules.mtproto import _is_public_ip
+        from chimera.modules.mtproto import _is_public_ip
         self.assertFalse(_is_public_ip("10.0.0.1"))
         self.assertFalse(_is_public_ip("172.16.0.1"))
         self.assertFalse(_is_public_ip("192.168.1.1"))
 
     def test_loopback(self):
-        from vless_installer.modules.mtproto import _is_public_ip
+        from chimera.modules.mtproto import _is_public_ip
         self.assertFalse(_is_public_ip("127.0.0.1"))
 
     def test_link_local(self):
-        from vless_installer.modules.mtproto import _is_public_ip
+        from chimera.modules.mtproto import _is_public_ip
         self.assertFalse(_is_public_ip("169.254.1.1"))
 
     def test_ipv6_loopback(self):
-        from vless_installer.modules.mtproto import _is_public_ip
+        from chimera.modules.mtproto import _is_public_ip
         self.assertFalse(_is_public_ip("::1"))
 
     def test_ipv6_link_local(self):
-        from vless_installer.modules.mtproto import _is_public_ip
+        from chimera.modules.mtproto import _is_public_ip
         self.assertFalse(_is_public_ip("fe80::1"))
 
     def test_invalid_ip_returns_false(self):
-        from vless_installer.modules.mtproto import _is_public_ip
+        from chimera.modules.mtproto import _is_public_ip
         self.assertFalse(_is_public_ip("not-an-ip"))
         self.assertFalse(_is_public_ip(""))
         self.assertFalse(_is_public_ip("999.999.999.999"))
@@ -350,31 +350,31 @@ class TestMakeTlsSecret(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_simple_domain(self):
-        from vless_installer.modules.mtproto import _make_tls_secret
+        from chimera.modules.mtproto import _make_tls_secret
         # 'ivi.ru' → hex: 6976692e7275
         result = _make_tls_secret("abc123", "ivi.ru")
         self.assertEqual(result, "eeabc1236976692e7275")
 
     def test_utf8_domain(self):
         """Многобайтовый UTF-8 домен корректно кодируется в hex."""
-        from vless_installer.modules.mtproto import _make_tls_secret
+        from chimera.modules.mtproto import _make_tls_secret
         # 'рф.рф' → bytes → hex
         result = _make_tls_secret("sec", "рф.рф")
         expected_hex = "рф.рф".encode().hex()
         self.assertEqual(result, f"eesec{expected_hex}")
 
     def test_empty_domain(self):
-        from vless_installer.modules.mtproto import _make_tls_secret
+        from chimera.modules.mtproto import _make_tls_secret
         result = _make_tls_secret("sec", "")
         self.assertEqual(result, "eesec")
 
     def test_empty_base_secret(self):
-        from vless_installer.modules.mtproto import _make_tls_secret
+        from chimera.modules.mtproto import _make_tls_secret
         result = _make_tls_secret("", "x.com")
         self.assertEqual(result, "ee" + "x.com".encode().hex())
 
     def test_prefix_always_ee(self):
-        from vless_installer.modules.mtproto import _make_tls_secret
+        from chimera.modules.mtproto import _make_tls_secret
         self.assertTrue(_make_tls_secret("any", "any.com").startswith("ee"))
 
 
@@ -395,53 +395,53 @@ class TestReadConfig(unittest.TestCase):
 
     def _patch_cfg(self, content: str):
         self._cfg.write_text(content)
-        return patch("vless_installer.modules.mtproto.CONFIG_FILE", self._cfg)
+        return patch("chimera.modules.mtproto.CONFIG_FILE", self._cfg)
 
     def test_get_port_default_when_no_file(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with patch.object(mtproto, "CONFIG_FILE",
                           Path("/tmp/nonexistent_telemt_xyz.toml")):
             self.assertEqual(mtproto._get_port(), 8443)
 
     def test_get_port_reads_value(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with self._patch_cfg('port = 9999\n'):
             self.assertEqual(mtproto._get_port(), 9999)
 
     def test_get_port_with_spaces(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with self._patch_cfg('port   =   7777\n'):
             self.assertEqual(mtproto._get_port(), 7777)
 
     def test_get_port_default_when_no_match(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with self._patch_cfg('# no port here\nother = 1\n'):
             self.assertEqual(mtproto._get_port(), 8443)
 
     def test_get_domain_default_when_no_file(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with patch.object(mtproto, "CONFIG_FILE",
                           Path("/tmp/nonexistent_telemt_xyz.toml")):
             self.assertEqual(mtproto._get_domain(), "")
 
     def test_get_domain_reads_value(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with self._patch_cfg('tls_domain = "example.com"\n'):
             self.assertEqual(mtproto._get_domain(), "example.com")
 
     def test_get_domain_default_when_no_match(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with self._patch_cfg('port = 8443\n'):
             self.assertEqual(mtproto._get_domain(), "")
 
     def test_load_users_empty_when_no_file(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with patch.object(mtproto, "CONFIG_FILE",
                           Path("/tmp/nonexistent_telemt_xyz.toml")):
             self.assertEqual(mtproto._load_users(), {})
 
     def test_load_users_parses_section(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         toml = (
             "[general]\n"
             "port = 8443\n"
@@ -456,7 +456,7 @@ class TestReadConfig(unittest.TestCase):
         self.assertEqual(users["bob"], "fedcba9876543210fedcba9876543210")
 
     def test_load_users_stops_at_next_section(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         toml = (
             "[access.users]\n"
             'alice = "abcdef0123456789abcdef0123456789"\n'
@@ -471,7 +471,7 @@ class TestReadConfig(unittest.TestCase):
 
     def test_load_users_ignores_invalid_secret(self):
         """Секрет не 32 hex-символа — игнорируется."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         toml = (
             "[access.users]\n"
             'alice = "too_short"\n'
@@ -484,7 +484,7 @@ class TestReadConfig(unittest.TestCase):
 
     def test_load_users_ignores_invalid_name(self):
         """Имя, начинающееся с цифры — игнорируется."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         toml = (
             "[access.users]\n"
             '1invalid = "fedcba9876543210fedcba9876543210"\n'
@@ -512,7 +512,7 @@ class TestSaveUsers(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_overwrites_existing_section(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         self._cfg.write_text(
             "[access.users]\n"
             'olduser = "00000000000000000000000000000000"\n'
@@ -530,7 +530,7 @@ class TestSaveUsers(unittest.TestCase):
         self.assertIn("[other]", content)
 
     def test_appends_section_when_missing(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         self._cfg.write_text("[general]\nport = 8443\n")
         with patch.object(mtproto, "CONFIG_FILE", self._cfg):
             mtproto._save_users({
@@ -542,7 +542,7 @@ class TestSaveUsers(unittest.TestCase):
 
     def test_updates_show_array(self):
         """Список show = [...] обновляется вместе с пользователями."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         self._cfg.write_text(
             '[general.links]\nshow = ["olduser"]\n'
             "[access.users]\n"
@@ -561,7 +561,7 @@ class TestSaveUsers(unittest.TestCase):
 
     def test_round_trip_save_load(self):
         """save → load возвращает тот же dict."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         self._cfg.write_text("[general]\nport = 8443\n")
         original = {
             "alice": "abcdef0123456789abcdef0123456789",
@@ -587,9 +587,9 @@ class TestWriteConfig(unittest.TestCase):
         self._cfg_dir = Path(self._tmpdir) / "etc"
         self._work_dir = Path(self._tmpdir) / "var"
         self._patches = [
-            patch("vless_installer.modules.mtproto.CONFIG_FILE", self._cfg),
-            patch("vless_installer.modules.mtproto.CONFIG_DIR", self._cfg_dir),
-            patch("vless_installer.modules.mtproto.WORK_DIR", self._work_dir),
+            patch("chimera.modules.mtproto.CONFIG_FILE", self._cfg),
+            patch("chimera.modules.mtproto.CONFIG_DIR", self._cfg_dir),
+            patch("chimera.modules.mtproto.WORK_DIR", self._work_dir),
         ]
         for p in self._patches:
             p.start()
@@ -601,7 +601,7 @@ class TestWriteConfig(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_generates_all_required_sections(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="example.com",
             users={"alice": "abcdef0123456789abcdef0123456789"},
@@ -614,7 +614,7 @@ class TestWriteConfig(unittest.TestCase):
                           f"Секция {section} должна присутствовать в TOML")
 
     def test_writes_port(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=9999, ipv4="1.2.3.4", ipv6="", tls_domain="x",
             users={}, use_middle_proxy=False,
@@ -622,7 +622,7 @@ class TestWriteConfig(unittest.TestCase):
         self.assertIn("port = 9999", self._cfg.read_text())
 
     def test_writes_tls_domain(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="my.domain",
             users={}, use_middle_proxy=False,
@@ -630,7 +630,7 @@ class TestWriteConfig(unittest.TestCase):
         self.assertIn('tls_domain = "my.domain"', self._cfg.read_text())
 
     def test_writes_users(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
             users={"alice": "abcdef0123456789abcdef0123456789"},
@@ -641,7 +641,7 @@ class TestWriteConfig(unittest.TestCase):
 
     def test_socks5_upstream_when_port_positive(self):
         """socks5_port > 0 → upstream type = socks5."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
             users={}, use_middle_proxy=False,
@@ -655,7 +655,7 @@ class TestWriteConfig(unittest.TestCase):
 
     def test_direct_upstream_when_no_socks5(self):
         """socks5_port=0 → upstream type = direct."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
             users={}, use_middle_proxy=False,
@@ -667,7 +667,7 @@ class TestWriteConfig(unittest.TestCase):
 
     def test_dc_overrides_when_no_middle_proxy(self):
         """use_middle_proxy=False → секция [dc_overrides] с 6 DC."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
             users={}, use_middle_proxy=False,
@@ -681,7 +681,7 @@ class TestWriteConfig(unittest.TestCase):
 
     def test_no_dc_overrides_when_middle_proxy(self):
         """use_middle_proxy=True → секция [dc_overrides] отсутствует."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
             users={}, use_middle_proxy=True,
@@ -691,7 +691,7 @@ class TestWriteConfig(unittest.TestCase):
 
     def test_client_mss_inserted_when_set(self):
         """client_mss — пресет MSS в секции [server]."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
             users={}, use_middle_proxy=False,
@@ -706,7 +706,7 @@ class TestWriteConfig(unittest.TestCase):
         ВАЖНО: в коде `ipv4 = {str(ipv4).lower()}` — туда попадает переданный
         IP-адрес (строка), а не булево. Поэтому network.ipv4 = '1.2.3.4'.
         """
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
             users={}, use_middle_proxy=False,
@@ -721,7 +721,7 @@ class TestWriteConfig(unittest.TestCase):
 
     def test_dualstack_listeners(self):
         """IPv4 + IPv6 → оба listener'а."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         mtproto._write_config(
             port=8443, ipv4="1.2.3.4", ipv6="2001:db8::1",
             tls_domain="x", users={}, use_middle_proxy=False,
@@ -750,7 +750,7 @@ class TestEnsureApiEnabled(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_returns_false_when_no_config(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with patch.object(mtproto, "CONFIG_FILE",
                           Path("/tmp/nonexistent_xyz.toml")):
             ok, msg = mtproto.ensure_api_enabled("TOKEN")
@@ -758,7 +758,7 @@ class TestEnsureApiEnabled(unittest.TestCase):
         self.assertIn("нечего включать", msg)
 
     def test_adds_section_when_missing(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         self._cfg.write_text("[general]\nport = 8443\n")
         with patch.object(mtproto, "CONFIG_FILE", self._cfg), \
              patch.object(mtproto, "_run",
@@ -774,7 +774,7 @@ class TestEnsureApiEnabled(unittest.TestCase):
         self.assertIn('auth_header = "TOKEN"', content)
 
     def test_updates_existing_section(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         self._cfg.write_text(
             "[general]\nport = 8443\n"
             "[server.api]\n"
@@ -800,7 +800,7 @@ class TestEnsureApiEnabled(unittest.TestCase):
 
     def test_removes_stale_api_section(self):
         """Устаревшая секция [api] удаляется при вызове."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         self._cfg.write_text(
             "[api]\n"
             "enabled = true\n"
@@ -818,7 +818,7 @@ class TestEnsureApiEnabled(unittest.TestCase):
 
     def test_returns_false_when_restart_fails(self):
         """systemctl restart вернул ненулевой код → False."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         self._cfg.write_text("[general]\nport = 8443\n")
         with patch.object(mtproto, "CONFIG_FILE", self._cfg), \
              patch.object(mtproto, "_run",
@@ -854,42 +854,42 @@ class TestXrayCascadeMode(unittest.TestCase):
         if json_content is not None:
             mock_path_instance.read_text.return_value = json_content
         # Path(...) — конструктор, возвращаем mock_path_instance для любого аргумента
-        return patch("vless_installer.modules.mtproto.Path",
+        return patch("chimera.modules.mtproto.Path",
                      return_value=mock_path_instance)
 
     def test_returns_none_when_no_state(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with self._patch_state_path(exists=False):
             result = mtproto._xray_cascade_mode()
         self.assertEqual(result, "none")
 
     def test_returns_awg_when_awg_exit_enabled(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with self._patch_state_path(json.dumps({"awg_exit_enabled": True})):
             result = mtproto._xray_cascade_mode()
         self.assertEqual(result, "awg")
 
     def test_returns_vless_when_install_mode_b(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with self._patch_state_path(json.dumps({"install_mode": "B"})):
             result = mtproto._xray_cascade_mode()
         self.assertEqual(result, "vless")
 
     def test_returns_vless_when_mode_b_lowercase(self):
         """mode='b' (lower) тоже распознаётся."""
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with self._patch_state_path(json.dumps({"mode": "b"})):
             result = mtproto._xray_cascade_mode()
         self.assertEqual(result, "vless")
 
     def test_returns_none_for_mode_a(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with self._patch_state_path(json.dumps({"install_mode": "A"})):
             result = mtproto._xray_cascade_mode()
         self.assertEqual(result, "none")
 
     def test_returns_none_on_invalid_json(self):
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         with self._patch_state_path("{invalid json!!!"):
             result = mtproto._xray_cascade_mode()
         self.assertEqual(result, "none")
@@ -907,22 +907,22 @@ class TestXrayConfigManipulation(unittest.TestCase):
 
     # ── _xray_has_inbound ──────────────────────────────────────────────────────
     def test_has_inbound_true_when_present(self):
-        from vless_installer.modules.mtproto import _xray_has_inbound
+        from chimera.modules.mtproto import _xray_has_inbound
         cfg = {"inbounds": [{"tag": "vless-in"}, {"tag": "dokodemo"}]}
         self.assertTrue(_xray_has_inbound(cfg, "dokodemo"))
 
     def test_has_inbound_false_when_absent(self):
-        from vless_installer.modules.mtproto import _xray_has_inbound
+        from chimera.modules.mtproto import _xray_has_inbound
         cfg = {"inbounds": [{"tag": "vless-in"}]}
         self.assertFalse(_xray_has_inbound(cfg, "dokodemo"))
 
     def test_has_inbound_false_when_no_inbounds(self):
-        from vless_installer.modules.mtproto import _xray_has_inbound
+        from chimera.modules.mtproto import _xray_has_inbound
         self.assertFalse(_xray_has_inbound({}, "any"))
 
     # ── _xray_get_proxy_tag ────────────────────────────────────────────────────
     def test_get_proxy_tag_prefers_balancer_with_chain(self):
-        from vless_installer.modules.mtproto import _xray_get_proxy_tag
+        from chimera.modules.mtproto import _xray_get_proxy_tag
         cfg = {
             "routing": {
                 "balancers": [{"tag": "chain-balancer", "selector": ["chain-exit-1"]}],
@@ -934,14 +934,14 @@ class TestXrayConfigManipulation(unittest.TestCase):
         self.assertTrue(is_balancer)
 
     def test_get_proxy_tag_fallback_to_chain_exit_1(self):
-        from vless_installer.modules.mtproto import _xray_get_proxy_tag
+        from chimera.modules.mtproto import _xray_get_proxy_tag
         cfg = {"outbounds": [{"tag": "chain-exit-1", "protocol": "vless"}]}
         tag, is_balancer = _xray_get_proxy_tag(cfg)
         self.assertEqual(tag, "chain-exit-1")
         self.assertFalse(is_balancer)
 
     def test_get_proxy_tag_fallback_to_chain_exit(self):
-        from vless_installer.modules.mtproto import _xray_get_proxy_tag
+        from chimera.modules.mtproto import _xray_get_proxy_tag
         cfg = {"outbounds": [{"tag": "chain-exit", "protocol": "vless"}]}
         tag, is_balancer = _xray_get_proxy_tag(cfg)
         self.assertEqual(tag, "chain-exit")
@@ -949,7 +949,7 @@ class TestXrayConfigManipulation(unittest.TestCase):
 
     def test_get_proxy_tag_awg_freedom_with_fwmark(self):
         """AWG: freedom outbound с fwmark (тег не из стандартного набора)."""
-        from vless_installer.modules.mtproto import _xray_get_proxy_tag
+        from chimera.modules.mtproto import _xray_get_proxy_tag
         cfg = {
             "outbounds": [
                 {"tag": "BLOCK", "protocol": "blackhole"},
@@ -965,7 +965,7 @@ class TestXrayConfigManipulation(unittest.TestCase):
 
     def test_get_proxy_tag_fallback_default(self):
         """Ничего не найдено → ('chain-exit', False)."""
-        from vless_installer.modules.mtproto import _xray_get_proxy_tag
+        from chimera.modules.mtproto import _xray_get_proxy_tag
         cfg = {"outbounds": [{"tag": "BLOCK", "protocol": "blackhole"}]}
         tag, is_balancer = _xray_get_proxy_tag(cfg)
         self.assertEqual(tag, "chain-exit")
@@ -973,7 +973,7 @@ class TestXrayConfigManipulation(unittest.TestCase):
 
     # ── _xray_inject_dokodemo ──────────────────────────────────────────────────
     def test_inject_dokodemo_adds_inbound_and_rule(self):
-        from vless_installer.modules.mtproto import _xray_inject_dokodemo, XRAY_TPROXY_TAG
+        from chimera.modules.mtproto import _xray_inject_dokodemo, XRAY_TPROXY_TAG
         cfg = {
             "inbounds": [{"tag": "vless-in", "protocol": "vless"}],
             "outbounds": [{"tag": "chain-exit-1", "protocol": "vless"}],
@@ -997,7 +997,7 @@ class TestXrayConfigManipulation(unittest.TestCase):
 
     def test_inject_dokodemo_uses_balancer_tag_when_balancer_present(self):
         """Если есть balancer с 'chain' в теге — rule использует balancerTag."""
-        from vless_installer.modules.mtproto import _xray_inject_dokodemo
+        from chimera.modules.mtproto import _xray_inject_dokodemo
         cfg = {
             "inbounds": [],
             "routing": {
@@ -1013,7 +1013,7 @@ class TestXrayConfigManipulation(unittest.TestCase):
 
     def test_inject_dokodemo_idempotent(self):
         """Если dokodemo уже есть — возвращается False без изменений."""
-        from vless_installer.modules.mtproto import (
+        from chimera.modules.mtproto import (
             _xray_inject_dokodemo, XRAY_TPROXY_TAG,
         )
         cfg = {
@@ -1028,7 +1028,7 @@ class TestXrayConfigManipulation(unittest.TestCase):
 
     def test_inject_dokodemo_creates_routing_if_absent(self):
         """Если в cfg нет 'routing' ключа — он создаётся."""
-        from vless_installer.modules.mtproto import _xray_inject_dokodemo
+        from chimera.modules.mtproto import _xray_inject_dokodemo
         cfg = {"inbounds": []}
         result = _xray_inject_dokodemo(cfg, 10811)
         self.assertTrue(result)
@@ -1038,7 +1038,7 @@ class TestXrayConfigManipulation(unittest.TestCase):
 
     # ── _xray_remove_dokodemo ──────────────────────────────────────────────────
     def test_remove_dokodemo_removes_inbound_and_rule(self):
-        from vless_installer.modules.mtproto import (
+        from chimera.modules.mtproto import (
             _xray_remove_dokodemo, XRAY_TPROXY_TAG,
         )
         cfg = {
@@ -1065,14 +1065,14 @@ class TestXrayConfigManipulation(unittest.TestCase):
         self.assertEqual(rules[0]["outboundTag"], "y")
 
     def test_remove_dokodemo_returns_false_when_nothing_to_remove(self):
-        from vless_installer.modules.mtproto import _xray_remove_dokodemo
+        from chimera.modules.mtproto import _xray_remove_dokodemo
         cfg = {"inbounds": [{"tag": "vless"}], "routing": {"rules": []}}
         result = _xray_remove_dokodemo(cfg)
         self.assertFalse(result)
 
     def test_remove_dokodemo_handles_only_inbound(self):
         """Есть inbound, но нет rule — inbound удаляется, возвращается True."""
-        from vless_installer.modules.mtproto import (
+        from chimera.modules.mtproto import (
             _xray_remove_dokodemo, XRAY_TPROXY_TAG,
         )
         cfg = {
@@ -1085,24 +1085,24 @@ class TestXrayConfigManipulation(unittest.TestCase):
 
     # ── _xray_dokodemo_port ────────────────────────────────────────────────────
     def test_dokodemo_port_returns_port_when_present(self):
-        from vless_installer.modules.mtproto import (
+        from chimera.modules.mtproto import (
             _xray_dokodemo_port, XRAY_TPROXY_TAG,
         )
         cfg = {"inbounds": [{"tag": XRAY_TPROXY_TAG, "port": 10811}]}
         self.assertEqual(_xray_dokodemo_port(cfg), 10811)
 
     def test_dokodemo_port_returns_zero_when_absent(self):
-        from vless_installer.modules.mtproto import _xray_dokodemo_port
+        from chimera.modules.mtproto import _xray_dokodemo_port
         cfg = {"inbounds": [{"tag": "other", "port": 1234}]}
         self.assertEqual(_xray_dokodemo_port(cfg), 0)
 
     def test_dokodemo_port_returns_zero_when_no_inbounds(self):
-        from vless_installer.modules.mtproto import _xray_dokodemo_port
+        from chimera.modules.mtproto import _xray_dokodemo_port
         self.assertEqual(_xray_dokodemo_port({}), 0)
 
     def test_dokodemo_port_converts_string_to_int(self):
         """port как строка — корректно конвертируется в int."""
-        from vless_installer.modules.mtproto import (
+        from chimera.modules.mtproto import (
             _xray_dokodemo_port, XRAY_TPROXY_TAG,
         )
         cfg = {"inbounds": [{"tag": XRAY_TPROXY_TAG, "port": "10811"}]}
@@ -1111,7 +1111,7 @@ class TestXrayConfigManipulation(unittest.TestCase):
     # ── Idempotency: inject → remove → inject ─────────────────────────────────
     def test_inject_remove_inject_cycle(self):
         """Идемпотентность: inject → remove → inject даёт тот же результат."""
-        from vless_installer.modules.mtproto import (
+        from chimera.modules.mtproto import (
             _xray_inject_dokodemo, _xray_remove_dokodemo,
         )
         cfg = {

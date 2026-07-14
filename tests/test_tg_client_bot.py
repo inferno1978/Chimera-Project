@@ -2,7 +2,7 @@
 """
 tests/test_tg_client_bot.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/tg_client_bot.py.
+Unit-тесты для chimera/modules/tg_client_bot.py.
 
 Покрывает:
   1. Разбор /start токена (issue_invite_token → _consume_invite_token)
@@ -39,8 +39,8 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Создаёт фейковый vless_installer._core (как в test_tg_bot.py)."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    """Создаёт фейковый chimera._core (как в test_tg_bot.py)."""
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -50,9 +50,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestInviteTokenLifecycle(unittest.TestCase):
@@ -68,10 +68,10 @@ class TestInviteTokenLifecycle(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch_cfg(self):
-        return patch("vless_installer.modules.tg_client_bot._CLIENT_BOT_FILE", self._cfg_file)
+        return patch("chimera.modules.tg_client_bot._CLIENT_BOT_FILE", self._cfg_file)
 
     def test_issue_creates_unique_token(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         with self._patch_cfg():
             t1 = tg_client_bot.issue_invite_token("alice@xray")
             t2 = tg_client_bot.issue_invite_token("bob@xray")
@@ -79,20 +79,20 @@ class TestInviteTokenLifecycle(unittest.TestCase):
         self.assertGreaterEqual(len(t1), 16)
 
     def test_consume_returns_email_for_valid_token(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         with self._patch_cfg():
             tok = tg_client_bot.issue_invite_token("alice@xray")
             email = tg_client_bot._consume_invite_token(tok)
         self.assertEqual(email, "alice@xray")
 
     def test_consume_returns_none_for_invalid_token(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         with self._patch_cfg():
             self.assertIsNone(tg_client_bot._consume_invite_token("nonexistent"))
 
     def test_consume_returns_none_for_already_used_token(self):
         """Одноразовый токен — повторное использование невозможно."""
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         with self._patch_cfg():
             tok = tg_client_bot.issue_invite_token("alice@xray")
             first = tg_client_bot._consume_invite_token(tok)
@@ -101,7 +101,7 @@ class TestInviteTokenLifecycle(unittest.TestCase):
         self.assertIsNone(second)
 
     def test_token_marked_used_after_consume(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         with self._patch_cfg():
             tok = tg_client_bot.issue_invite_token("alice@xray")
             tg_client_bot._consume_invite_token(tok)
@@ -125,15 +125,15 @@ class TestBindTelegramUser(unittest.TestCase):
         ]))
         # Создаём patch-объекты ОДИН раз — чтобы один и тот же объект
         # использовался в with... и start/stop
-        self._p_map = patch("vless_installer.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file)
-        self._p_users = patch("vless_installer.modules.tg_client_bot._USERS_FILE", self._users_file)
+        self._p_map = patch("chimera.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file)
+        self._p_users = patch("chimera.modules.tg_client_bot._USERS_FILE", self._users_file)
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_bind_creates_entry(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         with self._p_map, self._p_users:
             user = tg_client_bot.bind_telegram_user(111111, "alice@xray")
             self.assertIsNotNone(user)
@@ -143,14 +143,14 @@ class TestBindTelegramUser(unittest.TestCase):
             self.assertEqual(data["111111"]["email"], "alice@xray")
 
     def test_bind_returns_none_for_unknown_email(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         with self._p_map, self._p_users:
             user = tg_client_bot.bind_telegram_user(222222, "nobody@xray")
         self.assertIsNone(user)
 
     def test_bind_blocks_double_binding_email(self):
         """Один email не может быть привязан к двум TG-аккаунтам."""
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         with self._p_map, self._p_users:
             tg_client_bot.bind_telegram_user(111, "alice@xray")
             user2 = tg_client_bot.bind_telegram_user(222, "alice@xray")
@@ -158,7 +158,7 @@ class TestBindTelegramUser(unittest.TestCase):
 
     def test_bind_allows_rebind_same_tg(self):
         """Перепривязка того же TG-аккаунта на новый email разрешена."""
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         with self._p_map, self._p_users:
             tg_client_bot.bind_telegram_user(111, "alice@xray")
             user2 = tg_client_bot.bind_telegram_user(111, "bob@xray")
@@ -167,7 +167,7 @@ class TestBindTelegramUser(unittest.TestCase):
             self.assertEqual(data["111"]["email"], "bob@xray")
 
     def test_lookup_returns_user(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         with self._p_map, self._p_users:
             tg_client_bot.bind_telegram_user(111, "alice@xray")
             user = tg_client_bot.lookup_user_by_tg_id(111)
@@ -175,7 +175,7 @@ class TestBindTelegramUser(unittest.TestCase):
         self.assertEqual(user["email"], "alice@xray")
 
     def test_lookup_returns_none_for_unbound(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         with self._p_map, self._p_users:
             user = tg_client_bot.lookup_user_by_tg_id(999999)
         self.assertIsNone(user)
@@ -203,14 +203,14 @@ class TestIsUserBlocked(unittest.TestCase):
 
     def _patches(self):
         return (
-            patch("vless_installer.modules.tg_client_bot._USERS_FILE", self._users_file),
-            patch("vless_installer.modules.tg_client_bot._TTL_FILE", self._ttl_file),
-            patch("vless_installer.modules.tg_client_bot._LIMITS_FILE", self._lim_file),
-            patch("vless_installer.modules.tg_client_bot._BLOCKED_FILE", self._blk_file),
+            patch("chimera.modules.tg_client_bot._USERS_FILE", self._users_file),
+            patch("chimera.modules.tg_client_bot._TTL_FILE", self._ttl_file),
+            patch("chimera.modules.tg_client_bot._LIMITS_FILE", self._lim_file),
+            patch("chimera.modules.tg_client_bot._BLOCKED_FILE", self._blk_file),
         )
 
     def test_active_user_returns_false(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         for p in self._patches():
             p.start()
         try:
@@ -222,7 +222,7 @@ class TestIsUserBlocked(unittest.TestCase):
         self.assertEqual(reason, "")
 
     def test_disabled_user(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         for p in self._patches():
             p.start()
         try:
@@ -234,7 +234,7 @@ class TestIsUserBlocked(unittest.TestCase):
         self.assertEqual(reason, "disabled")
 
     def test_blocked_user(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         for p in self._patches():
             p.start()
         try:
@@ -246,7 +246,7 @@ class TestIsUserBlocked(unittest.TestCase):
         self.assertEqual(reason, "blocked")
 
     def test_ttl_expired_user(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         self._ttl_file.write_text(json.dumps({
             "alice@xray": {
                 "expires_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
@@ -263,7 +263,7 @@ class TestIsUserBlocked(unittest.TestCase):
         self.assertEqual(reason, "ttl_expired")
 
     def test_traffic_limit_user(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         self._lim_file.write_text(json.dumps({
             "alice@xray": {"disabled": True, "limit_gb": 10}
         }))
@@ -278,7 +278,7 @@ class TestIsUserBlocked(unittest.TestCase):
         self.assertEqual(reason, "traffic_limit")
 
     def test_no_user(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         for p in self._patches():
             p.start()
         try:
@@ -297,37 +297,37 @@ class TestTtlHelpers(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_is_expired_true_for_past(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         self.assertTrue(tg_client_bot._ttl_is_expired(past))
 
     def test_is_expired_false_for_future(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
         self.assertFalse(tg_client_bot._ttl_is_expired(future))
 
     def test_is_expired_false_for_empty(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         self.assertFalse(tg_client_bot._ttl_is_expired(""))
 
     def test_is_expired_false_for_invalid(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         self.assertFalse(tg_client_bot._ttl_is_expired("not-a-date"))
 
     def test_expires_str_for_future(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         future = (datetime.now(timezone.utc) + timedelta(days=3, hours=5)).isoformat()
         s = tg_client_bot._ttl_expires_str(future)
         self.assertIn("д", s)
         self.assertIn("ч", s)
 
     def test_expires_str_for_past(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         self.assertEqual(tg_client_bot._ttl_expires_str(past), "ИСТЁК")
 
     def test_expires_str_for_empty(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         self.assertEqual(tg_client_bot._ttl_expires_str(""), "бессрочно")
 
 
@@ -338,7 +338,7 @@ class TestFormatBytesAndProgressBar(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_format_bytes_units(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         self.assertEqual(tg_client_bot._format_bytes(0), "0 B")
         self.assertEqual(tg_client_bot._format_bytes(512), "512 B")
         self.assertIn("KiB", tg_client_bot._format_bytes(2048))
@@ -346,19 +346,19 @@ class TestFormatBytesAndProgressBar(unittest.TestCase):
         self.assertIn("GiB", tg_client_bot._format_bytes(3 * 1024**3))
 
     def test_progress_bar_zero(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         bar = tg_client_bot._progress_bar(0)
         self.assertIn("0%", bar)
         self.assertIn("----------", bar)  # все 10 dashes
 
     def test_progress_bar_full(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         bar = tg_client_bot._progress_bar(100)
         self.assertIn("100%", bar)
         self.assertIn("██████████", bar)  # все 10 filled
 
     def test_progress_bar_70(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         bar = tg_client_bot._progress_bar(70)
         self.assertIn("70%", bar)
         # 7 filled + 3 dashes
@@ -366,7 +366,7 @@ class TestFormatBytesAndProgressBar(unittest.TestCase):
         self.assertIn("---", bar)
 
     def test_progress_bar_clamps_above_100(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         bar = tg_client_bot._progress_bar(150)
         self.assertIn("100%", bar)
 
@@ -399,15 +399,15 @@ class TestStatusMessage(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file),
-            patch("vless_installer.modules.tg_client_bot._USERS_FILE", self._users_file),
-            patch("vless_installer.modules.tg_client_bot._TTL_FILE", self._ttl_file),
-            patch("vless_installer.modules.tg_client_bot._LIMITS_FILE", self._lim_file),
-            patch("vless_installer.modules.tg_client_bot._BLOCKED_FILE", self._blk_file),
-            patch("vless_installer.modules.tg_client_bot._STATE_FILE", self._state_file),
+            patch("chimera.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file),
+            patch("chimera.modules.tg_client_bot._USERS_FILE", self._users_file),
+            patch("chimera.modules.tg_client_bot._TTL_FILE", self._ttl_file),
+            patch("chimera.modules.tg_client_bot._LIMITS_FILE", self._lim_file),
+            patch("chimera.modules.tg_client_bot._BLOCKED_FILE", self._blk_file),
+            patch("chimera.modules.tg_client_bot._STATE_FILE", self._state_file),
             # linkqr_lib использует свои собственные path-константы
-            patch("vless_installer.modules.linkqr_lib._MAIN_STATE_FILE", self._state_file),
-            patch("vless_installer.modules.linkqr_lib._USERS_FILE", self._users_file),
+            patch("chimera.modules.linkqr_lib._MAIN_STATE_FILE", self._state_file),
+            patch("chimera.modules.linkqr_lib._USERS_FILE", self._users_file),
         ]
 
     def _start_patches(self):
@@ -419,7 +419,7 @@ class TestStatusMessage(unittest.TestCase):
             p.stop()
 
     def test_no_binding(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         self._start_patches()
         try:
             msg = tg_client_bot.format_status_message(999999)
@@ -428,7 +428,7 @@ class TestStatusMessage(unittest.TestCase):
         self.assertIn("не зарегистрированы", msg)
 
     def test_active_user_shows_traffic_and_ttl(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         self._lim_file.write_text(json.dumps({
             "alice@xray": {"limit_gb": 50, "used_bytes": 35 * 1024**3, "disabled": False}
         }))
@@ -451,7 +451,7 @@ class TestStatusMessage(unittest.TestCase):
         self.assertNotIn("private_key", msg.lower())
 
     def test_blocked_by_traffic_limit(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         self._lim_file.write_text(json.dumps({
             "alice@xray": {"limit_gb": 10, "used_bytes": 11 * 1024**3, "disabled": True}
         }))
@@ -466,7 +466,7 @@ class TestStatusMessage(unittest.TestCase):
         self.assertNotIn("█", msg)
 
     def test_blocked_by_ttl_expired(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         self._ttl_file.write_text(json.dumps({
             "alice@xray": {
                 "expires_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
@@ -481,7 +481,7 @@ class TestStatusMessage(unittest.TestCase):
         self.assertIn("истёк", msg.lower())
 
     def test_unlimited_traffic_shows_bezlimit(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         # Без записи в limits_file — безлимит
         self._start_patches()
         try:
@@ -515,15 +515,15 @@ class TestConfigMessage(unittest.TestCase):
         }))
         # Создаём patch-объекты один раз
         self._patches = [
-            patch("vless_installer.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file),
-            patch("vless_installer.modules.tg_client_bot._USERS_FILE", self._users_file),
-            patch("vless_installer.modules.tg_client_bot._TTL_FILE", self._ttl_file),
-            patch("vless_installer.modules.tg_client_bot._LIMITS_FILE", self._lim_file),
-            patch("vless_installer.modules.tg_client_bot._BLOCKED_FILE", self._blk_file),
-            patch("vless_installer.modules.tg_client_bot._STATE_FILE", self._state_file),
+            patch("chimera.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file),
+            patch("chimera.modules.tg_client_bot._USERS_FILE", self._users_file),
+            patch("chimera.modules.tg_client_bot._TTL_FILE", self._ttl_file),
+            patch("chimera.modules.tg_client_bot._LIMITS_FILE", self._lim_file),
+            patch("chimera.modules.tg_client_bot._BLOCKED_FILE", self._blk_file),
+            patch("chimera.modules.tg_client_bot._STATE_FILE", self._state_file),
             # linkqr_lib использует свои собственные path-константы
-            patch("vless_installer.modules.linkqr_lib._MAIN_STATE_FILE", self._state_file),
-            patch("vless_installer.modules.linkqr_lib._USERS_FILE", self._users_file),
+            patch("chimera.modules.linkqr_lib._MAIN_STATE_FILE", self._state_file),
+            patch("chimera.modules.linkqr_lib._USERS_FILE", self._users_file),
         ]
 
     def tearDown(self):
@@ -531,7 +531,7 @@ class TestConfigMessage(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_no_binding_returns_empty_keys(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         for p in self._patches:
             p.start()
         try:
@@ -543,7 +543,7 @@ class TestConfigMessage(unittest.TestCase):
         self.assertEqual(keys, [])
 
     def test_active_user_returns_vless_key(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         for p in self._patches:
             p.start()
         try:
@@ -573,27 +573,27 @@ class TestConfigAndMapSaveLoad(unittest.TestCase):
 
     def test_cfg_save_sets_chmod_600(self):
         import stat as stat_mod
-        from vless_installer.modules import tg_client_bot
-        with patch("vless_installer.modules.tg_client_bot._CLIENT_BOT_FILE", self._cfg_file):
+        from chimera.modules import tg_client_bot
+        with patch("chimera.modules.tg_client_bot._CLIENT_BOT_FILE", self._cfg_file):
             tg_client_bot.client_bot_save({"token": "secret", "admin_id": "111"})
             mode = stat_mod.filemode(self._cfg_file.stat().st_mode)
             # 0o600 = rw------- = "-rw-------"
             self.assertEqual(self._cfg_file.stat().st_mode & 0o777, 0o600)
 
     def test_cfg_load_returns_empty_when_no_file(self):
-        from vless_installer.modules import tg_client_bot
-        with patch("vless_installer.modules.tg_client_bot._CLIENT_BOT_FILE", self._cfg_file):
+        from chimera.modules import tg_client_bot
+        with patch("chimera.modules.tg_client_bot._CLIENT_BOT_FILE", self._cfg_file):
             self.assertEqual(tg_client_bot.client_bot_load(), {})
 
     def test_map_save_sets_chmod_600(self):
-        from vless_installer.modules import tg_client_bot
-        with patch("vless_installer.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file):
+        from chimera.modules import tg_client_bot
+        with patch("chimera.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file):
             tg_client_bot.client_map_save({"111": {"uuid": "u1", "email": "a@x"}})
             self.assertEqual(self._map_file.stat().st_mode & 0o777, 0o600)
 
     def test_map_load_returns_empty_when_no_file(self):
-        from vless_installer.modules import tg_client_bot
-        with patch("vless_installer.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file):
+        from chimera.modules import tg_client_bot
+        with patch("chimera.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file):
             self.assertEqual(tg_client_bot.client_map_load(), {})
 
 
@@ -604,7 +604,7 @@ class TestGeneratedScriptSyntax(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_script_is_valid_python(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {
             "token": "12345:ABC-DEF",
             "admin_id": "987654321",
@@ -618,7 +618,7 @@ class TestGeneratedScriptSyntax(unittest.TestCase):
             self.fail(f"Generated script has invalid syntax: {e}")
 
     def test_script_contains_all_commands(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A", "rate_limit_seconds": 2}
         script = tg_client_bot._generate_client_bot_script(cfg)
         for cmd in ["/start", "/config", "/qr", "/status", "/help"]:
@@ -627,7 +627,7 @@ class TestGeneratedScriptSyntax(unittest.TestCase):
             self.assertIn(handler, script, f"Handler {handler} missing in generated script")
 
     def test_script_contains_rate_limiting(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A", "rate_limit_seconds": 5}
         script = tg_client_bot._generate_client_bot_script(cfg)
         self.assertIn("RATE_LIMIT_S = 5", script)
@@ -635,7 +635,7 @@ class TestGeneratedScriptSyntax(unittest.TestCase):
 
     def test_script_contains_callback_query_handler(self):
         """Inline-кнопки должны обрабатываться."""
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A"}
         script = tg_client_bot._generate_client_bot_script(cfg)
         self.assertIn("callback_query", script)
@@ -643,7 +643,7 @@ class TestGeneratedScriptSyntax(unittest.TestCase):
 
     def test_script_uses_token_safely(self):
         """Токен с спецсимволами должен безопасно вставляться."""
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         # Токен с кавычками и слэшами
         cfg = {"token": '12345:ABC"DEF\\GHI', "admin_id": "A"}
         script = tg_client_bot._generate_client_bot_script(cfg)
@@ -682,16 +682,16 @@ class TestSecurityNoSecretsInMessages(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file),
-            patch("vless_installer.modules.tg_client_bot._USERS_FILE", self._users_file),
-            patch("vless_installer.modules.tg_client_bot._TTL_FILE", self._ttl_file),
-            patch("vless_installer.modules.tg_client_bot._LIMITS_FILE", self._lim_file),
-            patch("vless_installer.modules.tg_client_bot._BLOCKED_FILE", self._blk_file),
-            patch("vless_installer.modules.tg_client_bot._STATE_FILE", self._state_file),
+            patch("chimera.modules.tg_client_bot._CLIENT_MAP_FILE", self._map_file),
+            patch("chimera.modules.tg_client_bot._USERS_FILE", self._users_file),
+            patch("chimera.modules.tg_client_bot._TTL_FILE", self._ttl_file),
+            patch("chimera.modules.tg_client_bot._LIMITS_FILE", self._lim_file),
+            patch("chimera.modules.tg_client_bot._BLOCKED_FILE", self._blk_file),
+            patch("chimera.modules.tg_client_bot._STATE_FILE", self._state_file),
         ]
 
     def test_private_key_not_in_status(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         for p in self._patches():
             p.start()
         try:
@@ -703,7 +703,7 @@ class TestSecurityNoSecretsInMessages(unittest.TestCase):
         self.assertNotIn("TOP_SECRET_PRIVATE_KEY_MUST_NOT_LEAK", msg)
 
     def test_private_key_not_in_config(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         for p in self._patches():
             p.start()
         try:
@@ -722,13 +722,13 @@ class TestRateLimiting(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_rate_limit_value_persisted_in_cfg(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A", "rate_limit_seconds": 5}
         script = tg_client_bot._generate_client_bot_script(cfg)
         self.assertIn("RATE_LIMIT_S = 5", script)
 
     def test_rate_limit_default_2_when_not_set(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A"}  # нет rate_limit_seconds
         script = tg_client_bot._generate_client_bot_script(cfg)
         self.assertIn("RATE_LIMIT_S = 2", script)

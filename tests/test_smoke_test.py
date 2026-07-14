@@ -2,7 +2,7 @@
 """
 tests/test_smoke_test.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/smoke_test.py.
+Unit-тесты для chimera/modules/smoke_test.py.
 
 Покрывает:
   1. SNI lookup — берётся из state.json ключ 'domain' (не 'param_domain')
@@ -29,7 +29,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core_in_sysmodules():
     """Загружает _core.py через exec и регистрирует в sys.modules."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -39,9 +39,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -60,12 +60,12 @@ class TestSmokeTestSniLookup(unittest.TestCase):
     def _patch_state(self, state_dict: dict):
         """Патчит _STATE_FILE в smoke_test на временный файл с state_dict."""
         self._state_file.write_text(json.dumps(state_dict))
-        return patch("vless_installer.modules.smoke_test._STATE_FILE",
+        return patch("chimera.modules.smoke_test._STATE_FILE",
                      self._state_file)
 
     def test_sni_from_domain_key(self):
         """SNI берётся из state['domain'] — правильный ключ."""
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
         with self._patch_state({"domain": "example.com", "server_port": 443,
                                 "protocol_mode": "reality"}):
             state = smoke_test._read_state()
@@ -75,7 +75,7 @@ class TestSmokeTestSniLookup(unittest.TestCase):
     def test_sni_not_from_param_domain(self):
         """Если state.json не содержит 'domain', но содержит 'param_domain' —
         fallback на param_domain (для обратной совместимости)."""
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
         with self._patch_state({"param_domain": "legacy.com", "server_port": 443}):
             state = smoke_test._read_state()
             # 'domain' отсутствует → fallback на 'param_domain'
@@ -84,7 +84,7 @@ class TestSmokeTestSniLookup(unittest.TestCase):
 
     def test_sni_fallback_to_host_when_no_domain(self):
         """Если state.json не содержит ни 'domain' ни 'param_domain' — fallback на host."""
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
         with self._patch_state({"server_port": 443, "protocol_mode": "reality"}):
             state = smoke_test._read_state()
             sni = state.get('domain') or state.get('param_domain') or '127.0.0.1'
@@ -92,7 +92,7 @@ class TestSmokeTestSniLookup(unittest.TestCase):
 
     def test_sni_regression_param_domain_returns_none(self):
         """Регрессия: state.get('param_domain') возвращает None когда ключ 'domain'."""
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
         with self._patch_state({"domain": "example.com", "server_port": 443}):
             state = smoke_test._read_state()
             # Старый баг: state.get('param_domain') = None даже когда domain есть
@@ -115,7 +115,7 @@ class TestTlsHandshakeAlertRecognition(unittest.TestCase):
         Раньше это не распознавалось как 'сервер ответил' → false-positive.
         """
         import ssl as _ssl
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         # Мокаем socket.create_connection чтобы вернуть mock сокет
         mock_sock = MagicMock()
@@ -139,7 +139,7 @@ class TestTlsHandshakeAlertRecognition(unittest.TestCase):
     def test_alert_treated_as_server_alive(self):
         """Стандартный TLS alert = сервер жив."""
         import ssl as _ssl
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         mock_sock = MagicMock()
         mock_ctx = MagicMock()
@@ -154,7 +154,7 @@ class TestTlsHandshakeAlertRecognition(unittest.TestCase):
     def test_handshake_failure_treated_as_server_alive(self):
         """'handshake failure' в сообщении = сервер жив."""
         import ssl as _ssl
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         mock_sock = MagicMock()
         mock_ctx = MagicMock()
@@ -169,7 +169,7 @@ class TestTlsHandshakeAlertRecognition(unittest.TestCase):
     def test_timeout_treated_as_failure(self):
         """Socket timeout = провал (сервер не отвечает)."""
         import socket as _socket
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         mock_sock = MagicMock()
         mock_ctx = MagicMock()
@@ -183,7 +183,7 @@ class TestTlsHandshakeAlertRecognition(unittest.TestCase):
 
     def test_connection_refused_treated_as_failure(self):
         """Connection refused = провал (порт не слушает)."""
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         with patch("socket.create_connection",
                    side_effect=ConnectionRefusedError()):
@@ -194,7 +194,7 @@ class TestTlsHandshakeAlertRecognition(unittest.TestCase):
     def test_successful_handshake(self):
         """Успешный TLS handshake = OK."""
         import ssl as _ssl
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         mock_sock = MagicMock()
         mock_tls = MagicMock()
@@ -217,7 +217,7 @@ class TestTcpConnect(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_successful_connect(self):
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
         with patch("socket.create_connection"):
             ok, err = smoke_test._tcp_connect("127.0.0.1", 443, 5.0)
             self.assertTrue(ok)
@@ -225,14 +225,14 @@ class TestTcpConnect(unittest.TestCase):
 
     def test_timeout(self):
         import socket as _socket
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
         with patch("socket.create_connection", side_effect=_socket.timeout()):
             ok, err = smoke_test._tcp_connect("127.0.0.1", 443, 5.0)
             self.assertFalse(ok)
             self.assertIn("timeout", err.lower())
 
     def test_connection_refused(self):
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
         with patch("socket.create_connection",
                    side_effect=ConnectionRefusedError()):
             ok, err = smoke_test._tcp_connect("127.0.0.1", 443, 5.0)
@@ -258,7 +258,7 @@ class TestSmokeTestXrayFullFlow(unittest.TestCase):
         Регрессия: раньше брался state['param_domain'] = None → SNI=127.0.0.1
         → REALITY отклонял → false 'Xray не отвечает'.
         """
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         state = {
             "domain": "total-shadows.online",
@@ -286,7 +286,7 @@ class TestSmokeTestXrayFullFlow(unittest.TestCase):
 
     def test_xhttp_mode_skips_tls_check(self):
         """xHTTP режим: TLS-проверка пропускается."""
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         state = {
             "domain": "example.com",
@@ -306,7 +306,7 @@ class TestSmokeTestXrayFullFlow(unittest.TestCase):
 
     def test_tcp_failure_returns_false(self):
         """TCP connect failure → return False."""
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         state = {"domain": "example.com", "server_port": 443,
                  "protocol_mode": "reality"}
@@ -321,7 +321,7 @@ class TestSmokeTestXrayFullFlow(unittest.TestCase):
 
     def test_tls_failure_returns_false(self):
         """TLS handshake failure (not alert) → return False."""
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         state = {"domain": "example.com", "server_port": 443,
                  "protocol_mode": "reality"}
@@ -338,7 +338,7 @@ class TestSmokeTestXrayFullFlow(unittest.TestCase):
 
     def test_custom_port_from_state(self):
         """Порт берётся из state['server_port']."""
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         state = {"domain": "example.com", "server_port": 8443,
                  "protocol_mode": "reality"}
@@ -357,7 +357,7 @@ class TestSmokeTestXrayFullFlow(unittest.TestCase):
 
     def test_custom_port_override(self):
         """Явно переданный port переопределяет state."""
-        from vless_installer.modules import smoke_test
+        from chimera.modules import smoke_test
 
         state = {"domain": "example.com", "server_port": 443,
                  "protocol_mode": "reality"}

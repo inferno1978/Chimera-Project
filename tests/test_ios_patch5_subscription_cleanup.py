@@ -43,7 +43,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -52,9 +52,9 @@ def _setup_core_in_sysmodules():
          patch('os.chown', lambda *a, **kw: None), \
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -69,7 +69,7 @@ class TestBuildSubscriptionBodyUnchanged(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_build_subscription_body_byte_identical(self):
-        from vless_installer.modules import subscription
+        from chimera.modules import subscription
 
         fake_state = {
             "domain": "vpn.example.com",
@@ -93,7 +93,7 @@ class TestBuildSubscriptionBodyUnchanged(unittest.TestCase):
              patch.object(subscription, "_build_naive_uris", return_value=[]), \
              patch.object(subscription, "_build_fptn_uris", return_value=[]), \
              patch.object(subscription, "_build_telemt_uri", return_value=None), \
-             patch.dict(sys.modules, {"vless_installer.modules.entry_mirrors": MagicMock(
+             patch.dict(sys.modules, {"chimera.modules.entry_mirrors": MagicMock(
                  get_mirror_uris=MagicMock(return_value=["vless://mirror1"]))}):
             body = subscription.build_subscription_body(user)
 
@@ -160,7 +160,7 @@ class TestBuildSubscriptionBodyIosNoMirrorShadowUuid(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_ios_body_excludes_mirror_and_uses_shadow_uuid(self):
-        from vless_installer.modules import subscription, users_manager
+        from chimera.modules import subscription, users_manager
 
         fake_state = {
             "domain": "vpn.example.com",
@@ -186,13 +186,13 @@ class TestBuildSubscriptionBodyIosNoMirrorShadowUuid(unittest.TestCase):
              patch.object(subscription, "_build_naive_uris", return_value=[]), \
              patch.object(subscription, "_build_fptn_uris", return_value=[]), \
              patch.object(subscription, "_build_telemt_uri", return_value=None), \
-             patch("vless_installer.modules.users_manager._users_get_config",
+             patch("chimera.modules.users_manager._users_get_config",
                    return_value=self._cfg_path), \
-             patch("vless_installer.modules.users_manager._core_module",
+             patch("chimera.modules.users_manager._core_module",
                    return_value=self._fake_core), \
-             patch("vless_installer.modules.users_manager._users_apply_config",
+             patch("chimera.modules.users_manager._users_apply_config",
                    lambda cfg: None), \
-             patch.dict(sys.modules, {"vless_installer.modules.entry_mirrors": MagicMock(
+             patch.dict(sys.modules, {"chimera.modules.entry_mirrors": MagicMock(
                  get_mirror_uris=MagicMock(return_value=mirror_uris))}):
             body = subscription.build_subscription_body_ios(user)
 
@@ -267,12 +267,12 @@ class TestDeadCodeRemoved(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_do_user_menu_removed_from_users_manager(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         self.assertFalse(hasattr(users_manager, "do_user_menu"),
                          "do_user_menu должен быть удалён в патче №5")
 
     def test_do_user_show_link_removed_from_users_manager(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         self.assertFalse(hasattr(users_manager, "do_user_show_link"),
                          "do_user_show_link должен быть удалён в патче №5")
 
@@ -280,10 +280,10 @@ class TestDeadCodeRemoved(unittest.TestCase):
         """Импорт users_manager в _core.py не должен содержать
         do_user_show_link или do_user_menu (точное имя, с границей слова —
         do_user_show_link_ios_by_uuid НЕ считается совпадением)."""
-        src = (_PROJECT_ROOT / "vless_installer" / "_core.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "_core.py").read_text()
         # Извлекаем блок импорта.
         m = re.search(
-            r'from vless_installer\.modules\.users_manager import \(([^)]+)\)',
+            r'from chimera\.modules\.users_manager import \(([^)]+)\)',
             src, re.DOTALL
         )
         self.assertIsNotNone(m, "Блок импорта users_manager не найден")
@@ -371,7 +371,7 @@ class TestIosByUuidIntact(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_still_callable(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         self.assertTrue(hasattr(users_manager, "do_user_show_link_ios_by_uuid"))
         self.assertTrue(callable(users_manager.do_user_show_link_ios_by_uuid))
 
@@ -386,7 +386,7 @@ class TestIosRouteActive(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_m_ios_active_in_do_get(self):
-        src = (_PROJECT_ROOT / "vless_installer" / "modules" / "subscription.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "subscription.py").read_text()
         # Извлекаем do_GET.
         m = re.search(r'def do_GET\(self\).*?(?=\n    def |\nclass |\ndef )',
                       src, re.DOTALL)
@@ -412,7 +412,7 @@ class TestSubscriptionMenuShowsIosUrl(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_url_ios_active_in_menu(self):
-        src = (_PROJECT_ROOT / "vless_installer" / "modules" / "subscription.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "subscription.py").read_text()
         # Извлекаем do_subscription_menu.
         m = re.search(r'def do_subscription_menu\(\).*?(?=\n\ndef |\nif __name__)',
                       src, re.DOTALL)
@@ -439,7 +439,7 @@ class TestEntryMirrorsMenuHint(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_hint_present_when_mirrors_exist(self):
-        src = (_PROJECT_ROOT / "vless_installer" / "modules" / "entry_mirrors.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "entry_mirrors.py").read_text()
         # Извлекаем do_entry_mirrors_menu.
         m = re.search(r'def do_entry_mirrors_menu\(\).*?(?=\nif __name__)',
                       src, re.DOTALL)
@@ -459,7 +459,7 @@ class TestEntryMirrorsMenuHint(unittest.TestCase):
     def test_hint_only_shown_when_mirrors_exist(self):
         """Подсказка должна быть внутри `if n_total > 0:` — не показывается
         когда mirror-серверов нет (бессмысленно)."""
-        src = (_PROJECT_ROOT / "vless_installer" / "modules" / "entry_mirrors.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "entry_mirrors.py").read_text()
         m = re.search(r'def do_entry_mirrors_menu\(\).*?(?=\nif __name__)',
                       src, re.DOTALL)
         block = m.group(0)

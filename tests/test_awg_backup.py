@@ -2,7 +2,7 @@
 """
 tests/test_awg_backup.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/awg_backup.py.
+Unit-тесты для chimera/modules/awg_backup.py.
 
 Покрывает:
   1. awgs_backup_list — список бэкапов (sorted by mtime)
@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -34,9 +34,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestAwgBackup(unittest.TestCase):
@@ -46,15 +46,15 @@ class TestAwgBackup(unittest.TestCase):
     def tearDown(self):
         import shutil; shutil.rmtree(self._tmp, ignore_errors=True)
     def test_backup_list_empty(self):
-        from vless_installer.modules.awg_backup import awgs_backup_list
-        with patch("vless_installer.modules.awg_backup.AWGS_BACKUP_DIR", self._tmp):
+        from chimera.modules.awg_backup import awgs_backup_list
+        with patch("chimera.modules.awg_backup.AWGS_BACKUP_DIR", self._tmp):
             self.assertEqual(awgs_backup_list(), [])
     def test_backup_list_sorted(self):
-        from vless_installer.modules.awg_backup import awgs_backup_list
+        from chimera.modules.awg_backup import awgs_backup_list
         f1 = self._tmp / "h2_backup_1.tar.gz"; f1.write_text("x")
         time.sleep(0.01)
         f2 = self._tmp / "h2_backup_2.tar.gz"; f2.write_text("x")
-        with patch("vless_installer.modules.awg_backup.AWGS_BACKUP_DIR", self._tmp):
+        with patch("chimera.modules.awg_backup.AWGS_BACKUP_DIR", self._tmp):
             result = awgs_backup_list()
         self.assertEqual(len(result), 2)
         # newer first

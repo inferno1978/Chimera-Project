@@ -2,7 +2,7 @@
 """
 tests/test_client_config_export.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/client_config_export.py — TUI генерация
+Unit-тесты для chimera/modules/client_config_export.py — TUI генерация
 клиентских конфигов (Clash Meta, Sing-box, Hiddify, VLESS-ссылка).
 
 Покрывает:
@@ -26,7 +26,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -36,9 +36,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -81,11 +81,11 @@ class TestGenerateClientConfig(unittest.TestCase):
         """Запускает do_generate_client_config с замоканным state.
         Файлы пишутся во временную директорию (патч out_dir).
         """
-        from vless_installer.modules import client_config_export
+        from chimera.modules import client_config_export
         self._state_file.write_text(json.dumps(state_dict))
         self._out_dir = Path(self._tmpdir) / "configs"
 
-        core = sys.modules.get("vless_installer._core")
+        core = sys.modules.get("chimera._core")
 
         # Патчим Path("/root/xray-client-configs") на временную директорию.
         # do_generate_client_config использует: out_dir = Path("/root/xray-client-configs")

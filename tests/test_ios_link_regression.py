@@ -49,7 +49,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core_in_sysmodules():
     """Эталонный паттерн из tests/test_users_manager.py."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -58,9 +58,9 @@ def _setup_core_in_sysmodules():
          patch('os.chown', lambda *a, **kw: None), \
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -86,7 +86,7 @@ class TestGoldenOriginals(unittest.TestCase):
 
         Включает &flow=xtls-rprx-vision. Это ДОЛЖНО остаться —
         iOS-обёртка убирает его отдельно."""
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         link = _gen_vless_link(
             host="1.2.3.4", uuid_str="11111111-2222-3333-4444-555555555555",
             pbk="PUBKEY", sid="deadbeef", domain="example.com",
@@ -102,7 +102,7 @@ class TestGoldenOriginals(unittest.TestCase):
 
     def test_gen_vless_link_xhttp_golden(self):
         """_gen_vless_link для xHTTP — точная строка (golden)."""
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         link = _gen_vless_link(
             host="1.2.3.4", uuid_str="22222222-3333-4444-5555-666666666666",
             pbk="", sid="", domain="example.com",
@@ -123,7 +123,7 @@ class TestGoldenOriginals(unittest.TestCase):
     def test_gen_vless_link_reality_with_flag_golden(self):
         """С флагом-эмодзи — точная строка (golden), чтобы убедиться что
         обёртка корректно найдёт что резать."""
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         self._fake_core.get_server_country_cached = MagicMock(
             return_value=("DE", "Germany", "🇩🇪")
         )
@@ -159,7 +159,7 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
             через to_ios_karing_link.
           • mieru/naive/fptn/telemt идентичны тому, что дают их
             _build_*_uris функции напрямую."""
-        from vless_installer.modules import subscription
+        from chimera.modules import subscription
 
         # Полностью мокаем state и вспомогательные функции, чтобы
         # получить детерминированный вывод.
@@ -186,9 +186,9 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
              patch.object(subscription, "_build_fptn_uris", return_value=[]), \
              patch.object(subscription, "_build_telemt_uri", return_value=None):
             # Патчим get_mirror_uris чтобы не depended от entry_mirrors.
-            with patch("vless_installer.modules.entry_mirrors.get_mirror_uris",
+            with patch("chimera.modules.entry_mirrors.get_mirror_uris",
                        return_value=["vless://mirror1"]) if False else patch.dict(
-                sys.modules, {"vless_installer.modules.entry_mirrors": MagicMock(
+                sys.modules, {"chimera.modules.entry_mirrors": MagicMock(
                     get_mirror_uris=MagicMock(return_value=[]))}):
                 body = subscription.build_subscription_body(user)
 
@@ -213,7 +213,7 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
     def test_build_subscription_body_ios_strips_flow(self):
         """iOS-маршрут должен убрать flow= из vless-ссылки, но оставить
         mieru/naive/fptn/telemt как есть."""
-        from vless_installer.modules import subscription
+        from chimera.modules import subscription
 
         fake_state = {
             "domain": "vpn.example.com",
@@ -244,7 +244,7 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
              patch.object(subscription, "_build_fptn_uris", return_value=[]), \
              patch.object(subscription, "_build_telemt_uri", return_value=None), \
              patch.object(subscription, "_resolve_ios_shadow_user", side_effect=lambda u: u):
-            with patch.dict(sys.modules, {"vless_installer.modules.entry_mirrors": MagicMock(
+            with patch.dict(sys.modules, {"chimera.modules.entry_mirrors": MagicMock(
                     get_mirror_uris=MagicMock(return_value=[]))}):
                 body = subscription.build_subscription_body_ios(user)
 
@@ -268,7 +268,7 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
     def test_build_subscription_body_ios_preserves_satellite_links(self):
         """Все 4 сателлитных протокола (mieru/naive/fptn/telemt) не
         должны меняться между обычной и iOS-веткой."""
-        from vless_installer.modules import subscription
+        from chimera.modules import subscription
 
         fake_state = {
             "domain": "vpn.example.com", "server_port": 443,
@@ -300,7 +300,7 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
             p.start()
         try:
             entry_mirrors_mock = MagicMock(get_mirror_uris=MagicMock(return_value=[]))
-            with patch.dict(sys.modules, {"vless_installer.modules.entry_mirrors": entry_mirrors_mock}):
+            with patch.dict(sys.modules, {"chimera.modules.entry_mirrors": entry_mirrors_mock}):
                 body_plain = subscription.build_subscription_body(user)
                 body_ios = subscription.build_subscription_body_ios(user)
         finally:
@@ -383,13 +383,13 @@ class TestClientConfigExportXhttpFix(unittest.TestCase):
     def test_vless_link_xhttp_uses_xhttp_not_http(self):
         """В сгенерированной vless-link.txt для xHTTP-режима должно быть
         type=xhttp, не type=http. Это защита отката фикса."""
-        from vless_installer.modules import client_config_export
+        from chimera.modules import client_config_export
 
         # Читаем исходник и проверяем статически — это надёжнее, чем
         # гонять генерацию с моками (которая в этом файле сложная).
         # В исходнике должно быть РОВНО type=xhttp в ссылках, и ни одного
         # type=http (который был бы старым багом).
-        src = (_PROJECT_ROOT / "vless_installer" / "modules"
+        src = (_PROJECT_ROOT / "chimera" / "modules"
                / "client_config_export.py").read_text()
 
         # Контрольные точки — фиксированные подстроки в коде.
@@ -446,7 +446,7 @@ class TestSanityAllFourPoints(unittest.TestCase):
 
     def test_point1_users_gen_link_ios(self):
         """Точка 1: _users_gen_link_ios — обёртка над _users_gen_link."""
-        from vless_installer.modules.users_manager import _users_gen_link_ios
+        from chimera.modules.users_manager import _users_gen_link_ios
 
         # Создаём временный config.json для передачи в функцию.
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -475,8 +475,8 @@ class TestSanityAllFourPoints(unittest.TestCase):
         # Не запускаем generate_client_links_ios целиком (она пишет в
         # /root/...), а проверяем что связка «генератор → обёртка»
         # даёт корректный результат.
-        from vless_installer.modules.users_manager import _gen_vless_link
-        from vless_installer.modules.ios_link_variant import to_ios_karing_link
+        from chimera.modules.users_manager import _gen_vless_link
+        from chimera.modules.ios_link_variant import to_ios_karing_link
 
         link = _gen_vless_link(
             host="1.2.3.4", uuid_str="11111111-2222-3333-4444-555555555555",
@@ -490,7 +490,7 @@ class TestSanityAllFourPoints(unittest.TestCase):
         """Точка 3: client_config_export.py пишет vless-link-ios.txt с
         to_ios_karing_link(vless_link). Проверяем что REALITY-ссылка
         после обёртки не содержит flow."""
-        from vless_installer.modules.ios_link_variant import to_ios_karing_link
+        from chimera.modules.ios_link_variant import to_ios_karing_link
 
         # Та же строка, что генерируется в client_config_export.py.
         vless_link = (
@@ -506,7 +506,7 @@ class TestSanityAllFourPoints(unittest.TestCase):
     def test_point4_subscription_ios_body(self):
         """Точка 4: build_subscription_body_ios — vless-ссылка в теле
         подписки не содержит flow= и эмодзи в начале fragment."""
-        from vless_installer.modules import subscription
+        from chimera.modules import subscription
 
         fake_state = {
             "domain": "vpn.example.com", "server_port": 443,
@@ -518,7 +518,7 @@ class TestSanityAllFourPoints(unittest.TestCase):
         user = {"uuid": "u-1", "email": "alice@example.com"}
 
         # Мокаем get_server_country_cached чтобы вернуть эмодзи-флаг.
-        fake_core = sys.modules["vless_installer._core"]
+        fake_core = sys.modules["chimera._core"]
         fake_core.get_server_country_cached = MagicMock(
             return_value=("DE", "Germany", "🇩🇪")
         )
@@ -531,7 +531,7 @@ class TestSanityAllFourPoints(unittest.TestCase):
              patch.object(subscription, "_build_fptn_uris", return_value=[]), \
              patch.object(subscription, "_build_telemt_uri", return_value=None), \
              patch.object(subscription, "_resolve_ios_shadow_user", side_effect=lambda u: u), \
-             patch.dict(sys.modules, {"vless_installer.modules.entry_mirrors": MagicMock(
+             patch.dict(sys.modules, {"chimera.modules.entry_mirrors": MagicMock(
                  get_mirror_uris=MagicMock(return_value=[]))}):
             body = subscription.build_subscription_body_ios(user)
 

@@ -2,7 +2,7 @@
 """
 tests/test_ripe_file_age.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/ripe_file_age.py.
+Unit-тесты для chimera/modules/ripe_file_age.py.
 
 Покрывает:
   1. get_ripe_file_info — проверка exists/stale/critical
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -35,9 +35,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestRipeFileAge(unittest.TestCase):
@@ -50,28 +50,28 @@ class TestRipeFileAge(unittest.TestCase):
         self._f.write_text("10.0.0.0/8\n" * 20); t = time.time() - age_days * 86400
         os.utime(self._f, (t, t))
     def test_get_info_no_file(self):
-        from vless_installer.modules.ripe_file_age import get_ripe_file_info
+        from chimera.modules.ripe_file_age import get_ripe_file_info
         info = get_ripe_file_info(Path("/tmp/nonexistent_ripe_xyz.txt"))
         self.assertFalse(info["exists"])
     def test_get_info_fresh(self):
-        from vless_installer.modules.ripe_file_age import get_ripe_file_info
+        from chimera.modules.ripe_file_age import get_ripe_file_info
         self._write_file(0)
         info = get_ripe_file_info(self._f)
         self.assertTrue(info["exists"])
         self.assertFalse(info["stale"])
         self.assertFalse(info["critical"])
     def test_get_info_stale(self):
-        from vless_installer.modules.ripe_file_age import get_ripe_file_info, WARN_DAYS
+        from chimera.modules.ripe_file_age import get_ripe_file_info, WARN_DAYS
         self._write_file(WARN_DAYS + 5)
         info = get_ripe_file_info(self._f)
         self.assertTrue(info["stale"])
     def test_get_info_critical(self):
-        from vless_installer.modules.ripe_file_age import get_ripe_file_info, CRITICAL_DAYS
+        from chimera.modules.ripe_file_age import get_ripe_file_info, CRITICAL_DAYS
         self._write_file(CRITICAL_DAYS + 5)
         info = get_ripe_file_info(self._f)
         self.assertTrue(info["critical"])
     def test_banner_returns_string(self):
-        from vless_installer.modules.ripe_file_age import ripe_file_age_banner
+        from chimera.modules.ripe_file_age import ripe_file_age_banner
         self.assertIsInstance(ripe_file_age_banner(Path("/tmp/nonexistent.txt")), str)
 
 # ── fingerprint_manager ────────────────────────────────────────────────────

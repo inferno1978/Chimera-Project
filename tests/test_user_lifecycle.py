@@ -2,7 +2,7 @@
 """
 tests/test_user_lifecycle.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/user_lifecycle.py.
+Unit-тесты для chimera/modules/user_lifecycle.py.
 
 ПОКРЫТИЕ:
   1. Mock-тесты для каждого protocol adapter (VlessAdapter, AwgAdapter,
@@ -38,8 +38,8 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Создаёт фейковый vless_installer._core в sys.modules (как в test_tg_bot.py)."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    """Создаёт фейковый chimera._core в sys.modules (как в test_tg_bot.py)."""
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -49,9 +49,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 # =============================================================================
@@ -68,7 +68,7 @@ class TestStateSnapshot(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_capture_and_restore_existing_file(self):
-        from vless_installer.modules.user_lifecycle import StateSnapshot
+        from chimera.modules.user_lifecycle import StateSnapshot
         f = self._tmpdir / "users.json"
         f.write_text('{"original": true}')
         snap = StateSnapshot()
@@ -81,7 +81,7 @@ class TestStateSnapshot(unittest.TestCase):
         self.assertEqual(json.loads(f.read_text()), {"original": True})
 
     def test_capture_and_restore_nonexistent_file(self):
-        from vless_installer.modules.user_lifecycle import StateSnapshot
+        from chimera.modules.user_lifecycle import StateSnapshot
         f = self._tmpdir / "new.json"
         snap = StateSnapshot()
         snap.capture([f])
@@ -92,7 +92,7 @@ class TestStateSnapshot(unittest.TestCase):
         self.assertFalse(f.exists())
 
     def test_commit_forgets_snapshot(self):
-        from vless_installer.modules.user_lifecycle import StateSnapshot
+        from chimera.modules.user_lifecycle import StateSnapshot
         f = self._tmpdir / "users.json"
         f.write_text('{"original": true}')
         snap = StateSnapshot()
@@ -105,7 +105,7 @@ class TestStateSnapshot(unittest.TestCase):
 
     def test_restore_handles_missing_file_gracefully(self):
         """Если файл исчез между capture и restore — не падать."""
-        from vless_installer.modules.user_lifecycle import StateSnapshot
+        from chimera.modules.user_lifecycle import StateSnapshot
         f = self._tmpdir / "x.json"
         f.write_text('{"a": 1}')
         snap = StateSnapshot()
@@ -136,46 +136,46 @@ class TestIdentityResolution(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.user_lifecycle._USERS_FILE", self._users)
+        return patch("chimera.modules.user_lifecycle._USERS_FILE", self._users)
 
     def test_find_by_email(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         with self._patch():
             u = user_lifecycle.find_user_by_email("alice@xray")
         self.assertIsNotNone(u)
         self.assertEqual(u["uuid"], "u1")
 
     def test_find_by_email_missing(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         with self._patch():
             self.assertIsNone(user_lifecycle.find_user_by_email("nobody@xray"))
 
     def test_find_by_uuid(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         with self._patch():
             u = user_lifecycle.find_user_by_uuid("u2")
         self.assertIsNotNone(u)
         self.assertEqual(u["email"], "bob@xray")
 
     def test_resolve_user_email_priority(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         with self._patch():
             u = user_lifecycle.resolve_user(email="alice@xray")
         self.assertEqual(u["uuid"], "u1")
 
     def test_resolve_user_uuid_fallback(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         with self._patch():
             u = user_lifecycle.resolve_user(uuid_str="u2")
         self.assertEqual(u["email"], "bob@xray")
 
     def test_resolve_user_no_args(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         with self._patch():
             self.assertIsNone(user_lifecycle.resolve_user())
 
     def test_username_from_email(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         self.assertEqual(user_lifecycle._username_from_email("alice@xray"), "alice")
         self.assertEqual(user_lifecycle._username_from_email("bob.smith@xray"), "bob.smith")
         self.assertEqual(user_lifecycle._username_from_email(""), "")
@@ -204,21 +204,21 @@ class TestVlessAdapter(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.user_lifecycle._USERS_FILE", self._users),
-            patch("vless_installer.modules.user_lifecycle._BLOCKED_FILE", self._blocked),
+            patch("chimera.modules.user_lifecycle._USERS_FILE", self._users),
+            patch("chimera.modules.user_lifecycle._BLOCKED_FILE", self._blocked),
         ]
 
     def test_add_user_success(self):
-        from vless_installer.modules.user_lifecycle import VlessAdapter
+        from chimera.modules.user_lifecycle import VlessAdapter
         with self._patches()[0], self._patches()[1], \
-             patch("vless_installer.modules._core", create=True) as fake_core_module:
+             patch("chimera.modules._core", create=True) as fake_core_module:
             # Подменяем _core_module() чтобы вернуть mock с нужными методами
             with patch.object(VlessAdapter, "__init__", lambda self: None):
                 fake_core = MagicMock()
                 fake_core._users_load = MagicMock(return_value=[])
                 fake_core._users_save = self._save_mock
                 fake_core._users_apply_to_config = self._apply_mock
-                with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core):
+                with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core):
                     ok = VlessAdapter.add("alice@xray", "uuid-1", "alice")
         self.assertTrue(ok)
         self._apply_mock.assert_called_once()
@@ -230,39 +230,39 @@ class TestVlessAdapter(unittest.TestCase):
 
     def test_add_idempotent_same_uuid(self):
         """Повторный add для существующего юзера с тем же UUID → noop."""
-        from vless_installer.modules.user_lifecycle import VlessAdapter
+        from chimera.modules.user_lifecycle import VlessAdapter
         existing_user = [{"uuid": "u1", "email": "alice@xray", "name": "alice"}]
         with self._patches()[0], self._patches()[1]:
             fake_core = MagicMock()
             fake_core._users_load = MagicMock(return_value=existing_user)
             fake_core._users_save = self._save_mock
             fake_core._users_apply_to_config = self._apply_mock
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core):
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core):
                 ok = VlessAdapter.add("alice@xray", "u1", "alice")
         self.assertTrue(ok)
         # save не должен вызываться (noop)
         self._save_mock.assert_not_called()
 
     def test_add_rejects_different_uuid(self):
-        from vless_installer.modules.user_lifecycle import VlessAdapter
+        from chimera.modules.user_lifecycle import VlessAdapter
         existing_user = [{"uuid": "u1", "email": "alice@xray"}]
         with self._patches()[0], self._patches()[1]:
             fake_core = MagicMock()
             fake_core._users_load = MagicMock(return_value=existing_user)
             fake_core._users_save = self._save_mock
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core):
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core):
                 ok = VlessAdapter.add("alice@xray", "different-uuid", "alice")
         self.assertFalse(ok)
 
     def test_remove_user_success(self):
-        from vless_installer.modules.user_lifecycle import VlessAdapter
+        from chimera.modules.user_lifecycle import VlessAdapter
         existing = [{"uuid": "u1", "email": "alice@xray"}, {"uuid": "u2", "email": "bob@xray"}]
         with self._patches()[0], self._patches()[1]:
             fake_core = MagicMock()
             fake_core._users_load = MagicMock(return_value=existing)
             fake_core._users_save = self._save_mock
             fake_core._users_apply_to_config = self._apply_mock
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core):
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core):
                 ok = VlessAdapter.remove("alice@xray")
         self.assertTrue(ok)
         saved = self._save_mock.call_args[0][0]
@@ -270,26 +270,26 @@ class TestVlessAdapter(unittest.TestCase):
         self.assertEqual(saved[0]["email"], "bob@xray")
 
     def test_remove_idempotent(self):
-        from vless_installer.modules.user_lifecycle import VlessAdapter
+        from chimera.modules.user_lifecycle import VlessAdapter
         with self._patches()[0], self._patches()[1]:
             fake_core = MagicMock()
             fake_core._users_load = MagicMock(return_value=[{"uuid": "u1", "email": "bob@xray"}])
             fake_core._users_save = self._save_mock
             fake_core._users_apply_to_config = self._apply_mock
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core):
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core):
                 ok = VlessAdapter.remove("nobody@xray")  # нет такого
         self.assertTrue(ok)  # идемпотентно
         self._save_mock.assert_not_called()
 
     def test_block_user(self):
-        from vless_installer.modules.user_lifecycle import VlessAdapter
+        from chimera.modules.user_lifecycle import VlessAdapter
         existing = [{"uuid": "u1", "email": "alice@xray", "blocked": False}]
         with self._patches()[0], self._patches()[1]:
             fake_core = MagicMock()
             fake_core._users_load = MagicMock(return_value=existing)
             fake_core._users_save = self._save_mock
             fake_core._users_apply_to_config = self._apply_mock
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core):
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core):
                 ok = VlessAdapter.block("alice@xray", reason="manual")
         self.assertTrue(ok)
         saved = self._save_mock.call_args[0][0]
@@ -300,7 +300,7 @@ class TestVlessAdapter(unittest.TestCase):
         self.assertIn("alice@xray", blocked_db)
 
     def test_unblock_user(self):
-        from vless_installer.modules.user_lifecycle import VlessAdapter
+        from chimera.modules.user_lifecycle import VlessAdapter
         existing = [{"uuid": "u1", "email": "alice@xray",
                      "blocked": True, "block_reason": "manual"}]
         self._blocked.write_text(json.dumps({
@@ -311,7 +311,7 @@ class TestVlessAdapter(unittest.TestCase):
             fake_core._users_load = MagicMock(return_value=existing)
             fake_core._users_save = self._save_mock
             fake_core._users_apply_to_config = self._apply_mock
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core):
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core):
                 ok = VlessAdapter.unblock("alice@xray")
         self.assertTrue(ok)
         saved = self._save_mock.call_args[0][0]
@@ -328,25 +328,25 @@ class TestHysteria2Adapter(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_add_noop_when_disabled(self):
-        from vless_installer.modules.user_lifecycle import Hysteria2Adapter
-        with patch("vless_installer.modules.user_lifecycle._read_json",
+        from chimera.modules.user_lifecycle import Hysteria2Adapter
+        with patch("chimera.modules.user_lifecycle._read_json",
                    return_value={"hysteria2": {"enabled": False}}):
             ok = Hysteria2Adapter.add("alice@xray", "uuid-1")
         self.assertTrue(ok)
 
     def test_add_noop_when_enabled(self):
-        from vless_installer.modules.user_lifecycle import Hysteria2Adapter
-        with patch("vless_installer.modules.user_lifecycle._read_json",
+        from chimera.modules.user_lifecycle import Hysteria2Adapter
+        with patch("chimera.modules.user_lifecycle._read_json",
                    return_value={"hysteria2": {"enabled": True}}):
             ok = Hysteria2Adapter.add("alice@xray", "uuid-1")
         self.assertTrue(ok)
 
     def test_remove_noop(self):
-        from vless_installer.modules.user_lifecycle import Hysteria2Adapter
+        from chimera.modules.user_lifecycle import Hysteria2Adapter
         self.assertTrue(Hysteria2Adapter.remove("alice@xray"))
 
     def test_block_unblock_noop(self):
-        from vless_installer.modules.user_lifecycle import Hysteria2Adapter
+        from chimera.modules.user_lifecycle import Hysteria2Adapter
         self.assertTrue(Hysteria2Adapter.block("alice@xray"))
         self.assertTrue(Hysteria2Adapter.unblock("alice@xray"))
 
@@ -363,18 +363,18 @@ class TestCoordinatorSuccess(unittest.TestCase):
         self._users = self._tmpdir / "users.json"
         self._users.write_text("[]")
         self._patches = [
-            patch("vless_installer.modules.user_lifecycle._USERS_FILE", self._users),
-            patch("vless_installer.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"),
-            patch("vless_installer.modules.user_lifecycle._AWG_STATE_FILE", self._tmpdir / "awg.json"),
-            patch("vless_installer.modules.user_lifecycle._SINGBOX_STATE_FILE", self._tmpdir / "sb.json"),
-            patch("vless_installer.modules.user_lifecycle._MIERU_STATE_FILE", self._tmpdir / "mieru.json"),
-            patch("vless_installer.modules.user_lifecycle._NAIVE_STATE_FILE", self._tmpdir / "naive.json"),
-            patch("vless_installer.modules.user_lifecycle._FPTN_STATE_FILE", self._tmpdir / "fptn.json"),
-            patch("vless_installer.modules.user_lifecycle._FPTN_USERS_LIST", self._tmpdir / "users.list"),
-            patch("vless_installer.modules.user_lifecycle._TELEMT_TOML_FILE", self._tmpdir / "telemt.toml"),
-            patch("vless_installer.modules.user_lifecycle._TTL_FILE", self._tmpdir / "ttl.json"),
-            patch("vless_installer.modules.user_lifecycle._LIMITS_FILE", self._tmpdir / "limits.json"),
-            patch("vless_installer.modules.user_lifecycle._BLOCKED_FILE", self._tmpdir / "blocked.json"),
+            patch("chimera.modules.user_lifecycle._USERS_FILE", self._users),
+            patch("chimera.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"),
+            patch("chimera.modules.user_lifecycle._AWG_STATE_FILE", self._tmpdir / "awg.json"),
+            patch("chimera.modules.user_lifecycle._SINGBOX_STATE_FILE", self._tmpdir / "sb.json"),
+            patch("chimera.modules.user_lifecycle._MIERU_STATE_FILE", self._tmpdir / "mieru.json"),
+            patch("chimera.modules.user_lifecycle._NAIVE_STATE_FILE", self._tmpdir / "naive.json"),
+            patch("chimera.modules.user_lifecycle._FPTN_STATE_FILE", self._tmpdir / "fptn.json"),
+            patch("chimera.modules.user_lifecycle._FPTN_USERS_LIST", self._tmpdir / "users.list"),
+            patch("chimera.modules.user_lifecycle._TELEMT_TOML_FILE", self._tmpdir / "telemt.toml"),
+            patch("chimera.modules.user_lifecycle._TTL_FILE", self._tmpdir / "ttl.json"),
+            patch("chimera.modules.user_lifecycle._LIMITS_FILE", self._tmpdir / "limits.json"),
+            patch("chimera.modules.user_lifecycle._BLOCKED_FILE", self._tmpdir / "blocked.json"),
         ]
         for p in self._patches:
             p.start()
@@ -386,7 +386,7 @@ class TestCoordinatorSuccess(unittest.TestCase):
 
     def test_add_user_all_protocols_success(self):
         """add_user с protocols='all' — все adapter'ы возвращают True."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
 
         # Mock ВСЕХ adapter'ов
         with patch.object(user_lifecycle.VlessAdapter, "add", return_value=True) as vless_add, \
@@ -397,8 +397,8 @@ class TestCoordinatorSuccess(unittest.TestCase):
              patch.object(user_lifecycle.MtprotoAdapter, "add", return_value=True), \
              patch.object(user_lifecycle.FptnAdapter, "add", return_value=True), \
              patch.object(user_lifecycle.Hysteria2Adapter, "add", return_value=True), \
-             patch("vless_installer.modules.user_lifecycle._set_ttl") as ttl_mock, \
-             patch("vless_installer.modules.user_lifecycle._set_traffic_limit") as lim_mock:
+             patch("chimera.modules.user_lifecycle._set_ttl") as ttl_mock, \
+             patch("chimera.modules.user_lifecycle._set_traffic_limit") as lim_mock:
 
             result = user_lifecycle.add_user(
                 email="alice@xray",
@@ -437,15 +437,15 @@ class TestCoordinatorPartialFailure(unittest.TestCase):
 
     def test_add_user_rollback_on_failure(self):
         """Если AWG падает — VLESS изменения должны откатиться."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
 
         # Snapshot оригинального users.json (пустой список)
         original_users = json.loads(self._users.read_text())
         self.assertEqual(original_users, [])
 
-        with patch("vless_installer.modules.user_lifecycle._USERS_FILE", self._users), \
-             patch("vless_installer.modules.user_lifecycle._AWG_STATE_FILE", self._awg), \
-             patch("vless_installer.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
+        with patch("chimera.modules.user_lifecycle._USERS_FILE", self._users), \
+             patch("chimera.modules.user_lifecycle._AWG_STATE_FILE", self._awg), \
+             patch("chimera.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
              patch.object(user_lifecycle.VlessAdapter, "add", return_value=True) as vless_add, \
              patch.object(user_lifecycle.AwgAdapter, "add", side_effect=Exception("AWG explosion")):
 
@@ -467,7 +467,7 @@ class TestCoordinatorPartialFailure(unittest.TestCase):
         """Реальный VlessAdapter + замоканный AWG-failure → rollback VLESS state.
         Эта проверка ловит баги которые чистые моки пропускают.
         """
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
 
         # Подкладываем users.json
         self._users.write_text("[]")
@@ -478,10 +478,10 @@ class TestCoordinatorPartialFailure(unittest.TestCase):
         fake_core._users_save = MagicMock(side_effect=lambda u: self._users.write_text(json.dumps(u)))
         fake_core._users_apply_to_config = MagicMock(return_value=True)
 
-        with patch("vless_installer.modules.user_lifecycle._USERS_FILE", self._users), \
-             patch("vless_installer.modules.user_lifecycle._AWG_STATE_FILE", self._awg), \
-             patch("vless_installer.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
-             patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core), \
+        with patch("chimera.modules.user_lifecycle._USERS_FILE", self._users), \
+             patch("chimera.modules.user_lifecycle._AWG_STATE_FILE", self._awg), \
+             patch("chimera.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
+             patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core), \
              patch.object(user_lifecycle.AwgAdapter, "add", side_effect=Exception("AWG down")):
 
             result = user_lifecycle.add_user(
@@ -511,7 +511,7 @@ class TestCoordinatorIdempotency(unittest.TestCase):
 
     def test_add_same_user_twice_is_idempotent(self):
         """Повторный add_user с тем же UUID → noop (не создаёт дубликат)."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
 
         fake_core = MagicMock()
         # Первый вызов: users пустой. Второй: с alice.
@@ -526,9 +526,9 @@ class TestCoordinatorIdempotency(unittest.TestCase):
         fake_core._users_save = mock_save
         fake_core._users_apply_to_config = MagicMock(return_value=True)
 
-        with patch("vless_installer.modules.user_lifecycle._USERS_FILE", self._users), \
-             patch("vless_installer.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
-             patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core), \
+        with patch("chimera.modules.user_lifecycle._USERS_FILE", self._users), \
+             patch("chimera.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
+             patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core), \
              patch.object(user_lifecycle.AwgAdapter, "add", return_value=True), \
              patch.object(user_lifecycle.SingboxAdapter, "add", return_value=True), \
              patch.object(user_lifecycle.MieruAdapter, "add", return_value=True), \
@@ -557,16 +557,16 @@ class TestCoordinatorIdempotency(unittest.TestCase):
             self.assertEqual(len(users_state), 1)
 
     def test_remove_nonexistent_user_is_idempotent(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
 
         fake_core = MagicMock()
         fake_core._users_load = MagicMock(return_value=[])  # empty
         fake_core._users_save = MagicMock()
         fake_core._users_apply_to_config = MagicMock(return_value=True)
 
-        with patch("vless_installer.modules.user_lifecycle._USERS_FILE", self._users), \
-             patch("vless_installer.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
-             patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core), \
+        with patch("chimera.modules.user_lifecycle._USERS_FILE", self._users), \
+             patch("chimera.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
+             patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core), \
              patch.object(user_lifecycle.AwgAdapter, "remove", return_value=True), \
              patch.object(user_lifecycle.SingboxAdapter, "remove", return_value=True), \
              patch.object(user_lifecycle.MieruAdapter, "remove", return_value=True), \
@@ -579,7 +579,7 @@ class TestCoordinatorIdempotency(unittest.TestCase):
             self.assertTrue(r["success"], f"remove failed: {r['errors']}")
 
     def test_block_already_blocked_is_idempotent(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
 
         existing = [{"uuid": "u1", "email": "alice@xray",
                      "blocked": True, "block_reason": "manual"}]
@@ -588,10 +588,10 @@ class TestCoordinatorIdempotency(unittest.TestCase):
         fake_core._users_save = MagicMock()
         fake_core._users_apply_to_config = MagicMock(return_value=True)
 
-        with patch("vless_installer.modules.user_lifecycle._USERS_FILE", self._users), \
-             patch("vless_installer.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
-             patch("vless_installer.modules.user_lifecycle._BLOCKED_FILE", self._tmpdir / "blk.json"), \
-             patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core), \
+        with patch("chimera.modules.user_lifecycle._USERS_FILE", self._users), \
+             patch("chimera.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
+             patch("chimera.modules.user_lifecycle._BLOCKED_FILE", self._tmpdir / "blk.json"), \
+             patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core), \
              patch.object(user_lifecycle.AwgAdapter, "block", return_value=True), \
              patch.object(user_lifecycle.SingboxAdapter, "block", return_value=True), \
              patch.object(user_lifecycle.MieruAdapter, "block", return_value=True), \
@@ -604,7 +604,7 @@ class TestCoordinatorIdempotency(unittest.TestCase):
             self.assertTrue(r["success"])
 
     def test_unblock_not_blocked_is_idempotent(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
 
         existing = [{"uuid": "u1", "email": "alice@xray", "blocked": False}]
         fake_core = MagicMock()
@@ -612,9 +612,9 @@ class TestCoordinatorIdempotency(unittest.TestCase):
         fake_core._users_save = MagicMock()
         fake_core._users_apply_to_config = MagicMock(return_value=True)
 
-        with patch("vless_installer.modules.user_lifecycle._USERS_FILE", self._users), \
-             patch("vless_installer.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
-             patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core), \
+        with patch("chimera.modules.user_lifecycle._USERS_FILE", self._users), \
+             patch("chimera.modules.user_lifecycle._XRAY_CONFIG_FILE", self._tmpdir / "xray.json"), \
+             patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core), \
              patch.object(user_lifecycle.AwgAdapter, "unblock", return_value=True), \
              patch.object(user_lifecycle.SingboxAdapter, "unblock", return_value=True), \
              patch.object(user_lifecycle.MieruAdapter, "unblock", return_value=True), \
@@ -645,31 +645,31 @@ class TestUpdateLimits(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_set_ttl(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         ttl_set_mock = MagicMock()
-        with patch("vless_installer.modules.user_lifecycle._set_ttl", ttl_set_mock):
+        with patch("chimera.modules.user_lifecycle._set_ttl", ttl_set_mock):
             r = user_lifecycle.update_limits("alice@xray", ttl=7)
         self.assertTrue(r["success"])
         ttl_set_mock.assert_called_once_with("alice@xray", 7)
 
     def test_remove_ttl_with_zero(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         ttl_remove_mock = MagicMock()
-        with patch("vless_installer.modules.user_lifecycle._remove_ttl", ttl_remove_mock):
+        with patch("chimera.modules.user_lifecycle._remove_ttl", ttl_remove_mock):
             r = user_lifecycle.update_limits("alice@xray", ttl=0)
         self.assertTrue(r["success"])
         ttl_remove_mock.assert_called_once_with("alice@xray")
 
     def test_set_traffic_limit(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         lim_mock = MagicMock()
-        with patch("vless_installer.modules.user_lifecycle._set_traffic_limit", lim_mock):
+        with patch("chimera.modules.user_lifecycle._set_traffic_limit", lim_mock):
             r = user_lifecycle.update_limits("alice@xray", traffic_limit=50)
         self.assertTrue(r["success"])
         lim_mock.assert_called_once_with("alice@xray", 50)
 
     def test_no_change_when_both_none(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         r = user_lifecycle.update_limits("alice@xray", ttl=None, traffic_limit=None)
         self.assertTrue(r["success"])
         self.assertEqual(r["applied"], [])
@@ -709,18 +709,18 @@ class TestRealProtocolIntegration(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.user_lifecycle._USERS_FILE", self._users),
-            patch("vless_installer.modules.user_lifecycle._XRAY_CONFIG_FILE", self._xray_cfg),
-            patch("vless_installer.modules.user_lifecycle._BLOCKED_FILE", self._blocked),
-            patch("vless_installer.modules.user_lifecycle._TTL_FILE", self._ttl),
-            patch("vless_installer.modules.user_lifecycle._LIMITS_FILE", self._limits),
-            patch("vless_installer.modules.user_lifecycle._AWG_STATE_FILE", self._awg),
-            patch("vless_installer.modules.user_lifecycle._SINGBOX_STATE_FILE", self._sb),
+            patch("chimera.modules.user_lifecycle._USERS_FILE", self._users),
+            patch("chimera.modules.user_lifecycle._XRAY_CONFIG_FILE", self._xray_cfg),
+            patch("chimera.modules.user_lifecycle._BLOCKED_FILE", self._blocked),
+            patch("chimera.modules.user_lifecycle._TTL_FILE", self._ttl),
+            patch("chimera.modules.user_lifecycle._LIMITS_FILE", self._limits),
+            patch("chimera.modules.user_lifecycle._AWG_STATE_FILE", self._awg),
+            patch("chimera.modules.user_lifecycle._SINGBOX_STATE_FILE", self._sb),
         ]
 
     def test_real_add_user_vless_only(self):
         """Реальный add_user только для VLESS (AWG/sing-box не установлены)."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
 
         fake_core = MagicMock()
         fake_core._users_load = MagicMock(return_value=[])
@@ -730,7 +730,7 @@ class TestRealProtocolIntegration(unittest.TestCase):
         for p in self._patches():
             p.start()
         try:
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core):
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core):
                 r = user_lifecycle.add_user(
                     email="alice@xray",
                     protocols="all",
@@ -753,7 +753,7 @@ class TestRealProtocolIntegration(unittest.TestCase):
 
     def test_real_block_unblock_vless(self):
         """Реальный block_user/unblock_user для VLESS."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
 
         # Подготовим: alice уже в users.json
         self._users.write_text(json.dumps([
@@ -773,7 +773,7 @@ class TestRealProtocolIntegration(unittest.TestCase):
         for p in self._patches():
             p.start()
         try:
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core):
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core):
                 # Block
                 r1 = user_lifecycle.block_user("alice@xray", reason="manual", protocols=["vless"])
                 self.assertTrue(r1["success"], f"block failed: {r1['errors']}")
@@ -798,7 +798,7 @@ class TestRealProtocolIntegration(unittest.TestCase):
 
     def test_real_remove_user_vless(self):
         """Реальный remove_user для VLESS."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
 
         self._users.write_text(json.dumps([
             {"uuid": "u1", "email": "alice@xray", "name": "alice"},
@@ -821,7 +821,7 @@ class TestRealProtocolIntegration(unittest.TestCase):
         for p in self._patches():
             p.start()
         try:
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core):
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core):
                 r = user_lifecycle.remove_user("alice@xray", protocols=["vless"])
                 self.assertTrue(r["success"], f"remove failed: {r['errors']}")
                 users_after = json.loads(self._users.read_text())
@@ -833,7 +833,7 @@ class TestRealProtocolIntegration(unittest.TestCase):
 
     def test_real_rollback_on_awg_failure(self):
         """Реальный VLESS add + AWG падает → users.json откатан."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
 
         users_state = []
 
@@ -849,7 +849,7 @@ class TestRealProtocolIntegration(unittest.TestCase):
         for p in self._patches():
             p.start()
         try:
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core), \
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core), \
                  patch.object(user_lifecycle.AwgAdapter, "add",
                               side_effect=Exception("simulated AWG failure")):
                 r = user_lifecycle.add_user(
@@ -875,8 +875,8 @@ class TestRealProtocolIntegration(unittest.TestCase):
 
     def test_real_add_with_ttl_and_limit(self):
         """add_user с TTL и traffic_limit — реальные _set_ttl/_set_traffic_limit."""
-        from vless_installer.modules import user_lifecycle
-        from vless_installer.modules import ttl_users, traffic_tracking
+        from chimera.modules import user_lifecycle
+        from chimera.modules import ttl_users, traffic_tracking
 
         users_state = []
         fake_core = MagicMock()
@@ -892,7 +892,7 @@ class TestRealProtocolIntegration(unittest.TestCase):
         for p in self._patches():
             p.start()
         try:
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core), \
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core), \
                  patch.object(ttl_users, "TTL_FILE", self._ttl), \
                  patch.object(traffic_tracking, "TRAFFIC_LIMITS_FILE", self._limits), \
                  patch.object(ttl_users, "_core_module", return_value=fake_core), \
@@ -949,19 +949,19 @@ class TestCronEntrypoints(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.user_lifecycle._USERS_FILE", self._users),
-            patch("vless_installer.modules.user_lifecycle._XRAY_CONFIG_FILE", self._xray_cfg),
-            patch("vless_installer.modules.user_lifecycle._BLOCKED_FILE", self._blocked),
-            patch("vless_installer.modules.user_lifecycle._TTL_FILE", self._ttl),
-            patch("vless_installer.modules.user_lifecycle._LIMITS_FILE", self._limits),
-            patch("vless_installer.modules.user_lifecycle._AWG_STATE_FILE", self._awg),
-            patch("vless_installer.modules.user_lifecycle._SINGBOX_STATE_FILE", self._sb),
+            patch("chimera.modules.user_lifecycle._USERS_FILE", self._users),
+            patch("chimera.modules.user_lifecycle._XRAY_CONFIG_FILE", self._xray_cfg),
+            patch("chimera.modules.user_lifecycle._BLOCKED_FILE", self._blocked),
+            patch("chimera.modules.user_lifecycle._TTL_FILE", self._ttl),
+            patch("chimera.modules.user_lifecycle._LIMITS_FILE", self._limits),
+            patch("chimera.modules.user_lifecycle._AWG_STATE_FILE", self._awg),
+            patch("chimera.modules.user_lifecycle._SINGBOX_STATE_FILE", self._sb),
         ]
 
     def test_check_ttl_expired_blocks_past_ttl(self):
         """Истёкший TTL → пользователь блокируется."""
-        from vless_installer.modules import user_lifecycle
-        from vless_installer.modules import ttl_users
+        from chimera.modules import user_lifecycle
+        from chimera.modules import ttl_users
 
         # TTL в прошлом
         past_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
@@ -990,7 +990,7 @@ class TestCronEntrypoints(unittest.TestCase):
         for p in self._patches():
             p.start()
         try:
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core), \
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core), \
                  patch.object(ttl_users, "TTL_FILE", self._ttl), \
                  patch.object(ttl_users, "_core_module", return_value=fake_core), \
                  patch.object(user_lifecycle.AwgAdapter, "block", return_value=True), \
@@ -1012,8 +1012,8 @@ class TestCronEntrypoints(unittest.TestCase):
 
     def test_check_traffic_limits_blocks_overuser(self):
         """Превышение лимита → блокировка (не удаление)."""
-        from vless_installer.modules import user_lifecycle
-        from vless_installer.modules import traffic_tracking
+        from chimera.modules import user_lifecycle
+        from chimera.modules import traffic_tracking
 
         # alice имеет лимит 10 GiB и использовала 11 GiB
         self._limits.write_text(json.dumps({
@@ -1040,7 +1040,7 @@ class TestCronEntrypoints(unittest.TestCase):
         for p in self._patches():
             p.start()
         try:
-            with patch("vless_installer.modules.user_lifecycle._core_module", return_value=fake_core), \
+            with patch("chimera.modules.user_lifecycle._core_module", return_value=fake_core), \
                  patch.object(traffic_tracking, "TRAFFIC_LIMITS_FILE", self._limits), \
                  patch.object(traffic_tracking, "_stats_api_is_configured", return_value=True), \
                  patch.object(traffic_tracking, "_query_user_traffic_bytes",
@@ -1066,13 +1066,13 @@ class TestCronEntrypoints(unittest.TestCase):
 
     def test_run_cleanup_returns_dict(self):
         """run_cleanup возвращает dict с ключами ttl_blocked/traffic_blocked/awg_peers_removed."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         for p in self._patches():
             p.start()
         try:
             with patch.object(user_lifecycle, "check_ttl_expired", return_value=2), \
                  patch.object(user_lifecycle, "check_traffic_limits", return_value=1), \
-                 patch("vless_installer.modules.awg_expires.awgs_expires_check", return_value=0):
+                 patch("chimera.modules.awg_expires.awgs_expires_check", return_value=0):
                 r = user_lifecycle.run_cleanup()
             self.assertEqual(r["ttl_blocked"], 2)
             self.assertEqual(r["traffic_blocked"], 1)
@@ -1094,8 +1094,8 @@ class TestBackwardCompatibility(unittest.TestCase):
 
     def test_ttl_check_and_expire_delegates_to_user_lifecycle(self):
         """_ttl_check_and_expire должен вызывать user_lifecycle.check_ttl_expired."""
-        from vless_installer.modules import ttl_users
-        with patch("vless_installer.modules.user_lifecycle.check_ttl_expired",
+        from chimera.modules import ttl_users
+        with patch("chimera.modules.user_lifecycle.check_ttl_expired",
                    return_value=42) as mock_check:
             result = ttl_users._ttl_check_and_expire()
         self.assertEqual(result, 42)
@@ -1103,17 +1103,17 @@ class TestBackwardCompatibility(unittest.TestCase):
 
     def test_check_traffic_limits_once_delegates_to_user_lifecycle(self):
         """_check_traffic_limits_once должен вызывать user_lifecycle.check_traffic_limits."""
-        from vless_installer.modules import traffic_tracking
-        with patch("vless_installer.modules.user_lifecycle.check_traffic_limits",
+        from chimera.modules import traffic_tracking
+        with patch("chimera.modules.user_lifecycle.check_traffic_limits",
                    return_value=5) as mock_check:
             traffic_tracking._check_traffic_limits_once()
         mock_check.assert_called_once()
 
     def test_ttl_check_falls_back_to_legacy_on_error(self):
         """Если user_lifecycle недоступен — fallback на legacy реализацию."""
-        from vless_installer.modules import ttl_users
+        from chimera.modules import ttl_users
         # Заставляем import user_lifecycle упасть
-        with patch("vless_installer.modules.user_lifecycle.check_ttl_expired",
+        with patch("chimera.modules.user_lifecycle.check_ttl_expired",
                    side_effect=ImportError("simulated")):
             with patch.object(ttl_users, "_ttl_check_and_expire_legacy", return_value=99) as legacy:
                 result = ttl_users._ttl_check_and_expire()

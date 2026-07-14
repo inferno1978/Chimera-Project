@@ -7,13 +7,13 @@
 # ШАГ 1. Добавить импорты (в блок импортов модулей, примерно строки 62–140)
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Добавить после последнего from vless_installer.modules.* :
+# Добавить после последнего from chimera.modules.* :
 
-from vless_installer.modules.port_hopping import (
+from chimera.modules.port_hopping import (
     do_port_hopping_menu,
     ph_status,
 )
-from vless_installer.modules.tg_bot import (
+from chimera.modules.tg_bot import (
     do_manage_telegram,       # заменяет одноимённую функцию в _core.py
     do_tg_bot_menu,           # новая
     tg_load  as _tg_load,     # псевдоним — весь код в _core.py через _tg_load() продолжит работать

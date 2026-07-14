@@ -2,15 +2,15 @@
 """
 tests/test_core_dynamic_version.py
 ───────────────────────────────────────────────────────────────────────────────
-Тест динамической подстановки версии в vless_installer/_core.py.
+Тест динамической подстановки версии в chimera/_core.py.
 
-Проверяет что _get_version() берёт версию из vless_installer.__version__,
+Проверяет что _get_version() берёт версию из chimera.__version__,
 а не из хардкода. Monkey-patch'ит __version__ на "9.9.9" и проверяет,
 что баннер/лог/статус-бар реально подхватывают новое значение.
 
 Аналогично паттерну honeypot.py (см. CHANGELOG: "хардкоженный v4.11 в
 генерируемом конфиге заменён на динамическую вставку
-vless_installer.__version__").
+chimera.__version__").
 """
 from __future__ import annotations
 
@@ -26,12 +26,12 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Создаёт фейковый vless_installer._core (как в test_tg_bot.py).
+    """Создаёт фейковый chimera._core (как в test_tg_bot.py).
 
     Возвращает (fake_core, globals_dict) — globals_dict это тот самый dict
     который был передан в exec() и стал __globals__ для всех функций.
     """
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -41,9 +41,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core, g
 
 
@@ -54,10 +54,10 @@ class TestCoreDynamicVersion(unittest.TestCase):
         self._fake_core, self._core_globals = _setup_core_in_sysmodules()
 
     def test_get_version_returns_from_init(self):
-        """_get_version() возвращает значение из vless_installer.__version__."""
+        """_get_version() возвращает значение из chimera.__version__."""
         version = self._fake_core._get_version()
         # Должно совпадать с __version__ из __init__.py
-        from vless_installer import __version__ as real_version
+        from chimera import __version__ as real_version
         self.assertEqual(version, real_version,
                          f"_get_version() should return {real_version!r}, got {version!r}")
 
@@ -80,13 +80,13 @@ class TestCoreDynamicVersion(unittest.TestCase):
         self._core_globals["_CACHED_VERSION"] = ""
 
         # Monkey-patch __version__
-        import vless_installer
-        original_version = vless_installer.__version__
+        import chimera
+        original_version = chimera.__version__
         try:
-            vless_installer.__version__ = "9.9.9"
+            chimera.__version__ = "9.9.9"
             version = self._fake_core._get_version()
         finally:
-            vless_installer.__version__ = original_version
+            chimera.__version__ = original_version
 
         self.assertEqual(version, "9.9.9",
                          f"Expected '9.9.9' after monkey-patch, got {version!r}")
@@ -96,7 +96,7 @@ class TestCoreDynamicVersion(unittest.TestCase):
 
         print_banner() использует _get_version() в f-string для ASCII-баннера.
         Проверяем что "9.9.9" появляется в выводе, а оригинальная версия
-        (прочитанная динамически из vless_installer.__version__ ДО monkey-patch)
+        (прочитанная динамически из chimera.__version__ ДО monkey-patch)
         — НЕ появляется. Это защищает от регрессии: если баннер перестанет
         использовать _get_version() и вернётся к хардкоду, оригинальная
         версия останется в выводе даже после monkey-patch.
@@ -107,16 +107,16 @@ class TestCoreDynamicVersion(unittest.TestCase):
         # Читаем оригинальную версию ДО monkey-patch — это значение НЕ должно
         # появиться в выводе после подмены на "9.9.9". Динамическое чтение,
         # не хардкод — при следующем бампе версии тест сам подтянется.
-        import vless_installer
-        original_version = vless_installer.__version__
+        import chimera
+        original_version = chimera.__version__
         try:
-            vless_installer.__version__ = "9.9.9"
+            chimera.__version__ = "9.9.9"
             # Захватываем stdout
             captured = io.StringIO()
             with redirect_stdout(captured):
                 self._fake_core.print_banner()
         finally:
-            vless_installer.__version__ = original_version
+            chimera.__version__ = original_version
 
         output = captured.getvalue()
         self.assertIn("9.9.9", output,
@@ -138,13 +138,13 @@ class TestCoreDynamicVersion(unittest.TestCase):
         баннер должен показывать новое значение, а не старое и не "unknown".
 
         ВАЖНО: тест НЕ хардкодит "4.25.1" — читает текущую версию из
-        vless_installer.__version__ и проверяет, что она появилась в выводе.
+        chimera.__version__ и проверяет, что она появилась в выводе.
         При следующем бампе тест сам подтянется.
         """
         # Сбрасываем кэш — _core.py уже вызвал _get_version() при exec.
         self._core_globals["_CACHED_VERSION"] = ""
 
-        from vless_installer import __version__ as current_version
+        from chimera import __version__ as current_version
         # main_menu() — бесконечный цикл с input(). Мокаем чтобы выйти.
         call_count = [0]
         def mock_input(prompt):
@@ -182,10 +182,10 @@ class TestCoreDynamicVersion(unittest.TestCase):
         self._core_globals["_CACHED_VERSION"] = ""
 
         # Monkey-patch __version__
-        import vless_installer
-        original_version = vless_installer.__version__
+        import chimera
+        original_version = chimera.__version__
         try:
-            vless_installer.__version__ = "9.9.9"
+            chimera.__version__ = "9.9.9"
 
             # main_menu() — это бесконечный цикл с input(). Мокаем input
             # чтобы выйти после первой итерации.
@@ -209,7 +209,7 @@ class TestCoreDynamicVersion(unittest.TestCase):
                     pass  # menu exit
 
         finally:
-            vless_installer.__version__ = original_version
+            chimera.__version__ = original_version
 
         output = captured.getvalue()
         self.assertIn("9.9.9", output,
@@ -223,7 +223,7 @@ class TestCoreDynamicVersion(unittest.TestCase):
         текущей версии вместо _get_version(), тест поймает.
 
         ВАЖНО: тест НЕ хардкодит конкретную версию (типа "X.Y.Z" —
-        текущее значение). Он читает текущую версию из vless_installer.__version__
+        текущее значение). Он читает текущую версию из chimera.__version__
         в момент запуска и ищет её как литерал в _core.py. При следующем
         бампе версии тест сам подтянется — не нужно править тест руками.
 
@@ -231,14 +231,14 @@ class TestCoreDynamicVersion(unittest.TestCase):
         и т.д. в комментариях типа "# v4.23.8: ..." — это история, не хардкод
         текущей версии). Текущая версия в виде литерала запрещена — её
         единственное законное место в _core.py — это результат вызова
-        _get_version(), который возвращает её из vless_installer.__version__.
+        _get_version(), который возвращает её из chimera.__version__.
         """
         import re
-        core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+        core_path = _PROJECT_ROOT / "chimera" / "_core.py"
         content = core_path.read_text()
 
         # Динамически читаем текущую версию — НЕ хардкодим "4.25.x".
-        from vless_installer import __version__ as current_version
+        from chimera import __version__ as current_version
         # Экранируем для regex (точки — это метасимволы).
         version_pattern = re.escape(current_version)
 
@@ -258,7 +258,7 @@ class TestCoreDynamicVersion(unittest.TestCase):
                          f"{current_version!r} on lines: "
                          f"{lines_with_current_version}. "
                          f"Use _get_version() instead — version must come from "
-                         f"vless_installer.__version__, not from a string literal.")
+                         f"chimera.__version__, not from a string literal.")
 
 
 if __name__ == "__main__":

@@ -3,14 +3,14 @@
 tests/test_tg_client_bot_inner_script.py
 ───────────────────────────────────────────────────────────────────────────────
 End-to-end тесты для сгенерированного inner-скрипта клиентского бота
-(vless_installer/modules/tg_client_bot.py::_generate_client_bot_script).
+(chimera/modules/tg_client_bot.py::_generate_client_bot_script).
 
 В отличие от test_tg_client_bot.py, который делает только ast.parse для
 проверки синтаксиса, этот файл:
 
   1. Записывает сгенерированный inner-скрипт во временный файл.
   2. Подкладывает fake project_root с минимальным linkqr_lib-заглушкой
-     (по структуре /opt/vless-ultimate/vless_installer/modules/linkqr_lib.py).
+     (по структуре /opt/vless-ultimate/chimera/modules/linkqr_lib.py).
   3. Реально ИСПОЛНЯЕТ inner-скрипт через subprocess, импортируя его как модуль.
   4. Вызывает _call_linkqr_helper для каждого из 5 actions и проверяет,
      что subprocess-вызов РЕАЛЬНО находит linkqr_lib и возвращает не-None.
@@ -43,8 +43,8 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Создаёт фейковый vless_installer._core (как в test_tg_bot.py)."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    """Создаёт фейковый chimera._core (как в test_tg_bot.py)."""
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -54,15 +54,15 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 # ── Заглушка linkqr_lib ──────────────────────────────────────────────────────
 # Минимальный модуль с теми же публичными функциями, что и реальный
 # linkqr_lib, но с предсказуемыми ответами для тестов. Подкладывается в
-# fake project_root/vless_installer/modules/linkqr_lib.py.
+# fake project_root/chimera/modules/linkqr_lib.py.
 # Используем textwrap.dedent для читаемости, без хитрого escaping.
 _FAKE_LINKQR_LIB_SRC = textwrap.dedent('''\
     """Fake linkqr_lib for inner-script end-to-end tests."""
@@ -111,17 +111,17 @@ class TestInnerScriptExecutesLinkqrHelper(unittest.TestCase):
         #    с рабочим linkqr_lib.py
         self._fake_project = self._tmpdir / "fake-vless-ultimate"
         self._linkqr_lib_path = (
-            self._fake_project / "vless_installer" / "modules" / "linkqr_lib.py"
+            self._fake_project / "chimera" / "modules" / "linkqr_lib.py"
         )
         self._linkqr_lib_path.parent.mkdir(parents=True, exist_ok=True)
         # __init__.py для пакетов
-        (self._fake_project / "vless_installer" / "__init__.py").write_text("")
-        (self._fake_project / "vless_installer" / "modules" / "__init__.py").write_text("")
+        (self._fake_project / "chimera" / "__init__.py").write_text("")
+        (self._fake_project / "chimera" / "modules" / "__init__.py").write_text("")
         self._linkqr_lib_path.write_text(_FAKE_LINKQR_LIB_SRC)
         # 2) Сгенерировать inner-скрипт с PROJECT_ROOT = self._fake_project
         #    Для этого патчим __file__ в tg_client_bot (нужно для parents[2])
         #    Проще: вручную заменить PROJECT_ROOT в сгенерированном скрипте.
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A", "rate_limit_seconds": 2}
         script = tg_client_bot._generate_client_bot_script(cfg)
         # Заменяем PROJECT_ROOT на наш fake-путь
@@ -158,7 +158,7 @@ class TestInnerScriptExecutesLinkqrHelper(unittest.TestCase):
         if env_extra:
             env.update(env_extra)
         # ВАЖНО: cwd=fake_project — иначе Python видит '' в sys.path[0]
-        # (текущая директория теста, где лежит РЕАЛЬНЫЙ vless_installer/)
+        # (текущая директория теста, где лежит РЕАЛЬНЫЙ chimera/)
         # и подгружает настоящий linkqr_lib вместо нашей заглушки.
         # В production-боте этого нет, т.к. systemd запускает с cwd=/
         # и PROJECT_ROOT ставится первым в PYTHONPATH.
@@ -277,21 +277,21 @@ class TestInnerScriptProjectRootResolvesAtGenerationTime(unittest.TestCase):
     def test_project_root_literal_points_to_real_project(self):
         """PROJECT_ROOT в сгенерированном скрипте = корень проекта."""
         import re
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A"}
         script = tg_client_bot._generate_client_bot_script(cfg)
         m = re.search(r'^PROJECT_ROOT = "(.+?)"', script, re.MULTILINE)
         self.assertIsNotNone(m, "PROJECT_ROOT literal not found")
         project_root = m.group(1)
-        # Должен указывать на каталог, содержащий vless_installer/modules/linkqr_lib.py
-        linkqr = Path(project_root) / "vless_installer" / "modules" / "linkqr_lib.py"
+        # Должен указывать на каталог, содержащий chimera/modules/linkqr_lib.py
+        linkqr = Path(project_root) / "chimera" / "modules" / "linkqr_lib.py"
         self.assertTrue(linkqr.exists(),
                         f"linkqr_lib.py not found at {linkqr} — PROJECT_ROOT is wrong")
 
     def test_project_root_literal_includes_main_py(self):
         """PROJECT_ROOT должен содержать main.py (это корень проекта)."""
         import re
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A"}
         script = tg_client_bot._generate_client_bot_script(cfg)
         m = re.search(r'^PROJECT_ROOT = "(.+?)"', script, re.MULTILINE)
@@ -304,7 +304,7 @@ class TestInnerScriptProjectRootResolvesAtGenerationTime(unittest.TestCase):
         Проверяем, что PRIMARY lookup использует PROJECT_ROOT, а не угадывание.
         Старый код начинал с цикла for p in (...) — это и было источником бага.
         """
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A"}
         script = tg_client_bot._generate_client_bot_script(cfg)
         # Первая проверка в _call_linkqr_helper должна быть PROJECT_ROOT
@@ -331,7 +331,7 @@ class TestInnerScriptFallbackListOrder(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_canonical_path_first_in_fallback(self):
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A"}
         script = tg_client_bot._generate_client_bot_script(cfg)
         helper_start = script.find("def _call_linkqr_helper")
@@ -346,7 +346,7 @@ class TestInnerScriptFallbackListOrder(unittest.TestCase):
 
     def test_no_legacy_only_list(self):
         """Старый баг: только legacy-пути без /opt/vless-ultimate."""
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A"}
         script = tg_client_bot._generate_client_bot_script(cfg)
         # Не должно быть секции где ТОЛЬКО legacy-пути
@@ -384,7 +384,7 @@ class TestInnerScriptNegativeScenarioErrorMessage(unittest.TestCase):
         Если PROJECT_ROOT указывает на несуществующий путь и fallback не
         сработал — _call_linkqr_helper возвращает None (не исключение).
         """
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         import re
         cfg = {"token": "T", "admin_id": "A"}
         script = tg_client_bot._generate_client_bot_script(cfg)
@@ -401,7 +401,7 @@ class TestInnerScriptNegativeScenarioErrorMessage(unittest.TestCase):
 
         # Запускаем в чистом окружении — без /opt/vless-ultimate на диске.
         # Используем tmpdir как cwd, чтобы sys.path[0]='' указывал туда
-        # (где нет vless_installer/).
+        # (где нет chimera/).
         env = dict(os.environ)
         env["PYTHONPATH"] = self._tmpdir.as_posix() + os.pathsep + env.get("PYTHONPATH", "")
         snippet = (
@@ -420,7 +420,7 @@ class TestInnerScriptNegativeScenarioErrorMessage(unittest.TestCase):
         r = subprocess.run(
             ["python3", "-c", full_code],
             capture_output=True, text=True, env=env, timeout=30,
-            cwd=str(self._tmpdir),  # нет vless_installer/ здесь
+            cwd=str(self._tmpdir),  # нет chimera/ здесь
         )
         if r.returncode != 0:
             self.fail(f"Inner script failed:\nSTDERR:\n{r.stderr}\nSTDOUT:\n{r.stdout}")
@@ -434,7 +434,7 @@ class TestInnerScriptNegativeScenarioErrorMessage(unittest.TestCase):
         должен быть активен (пир/пользователь есть в state) —
         _build_all_links добавляет читабельное сообщение в errors.
         """
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         import re
         cfg = {"token": "T", "admin_id": "A"}
         script = tg_client_bot._generate_client_bot_script(cfg)
@@ -521,16 +521,16 @@ class TestInnerScriptRealLinkqrLibIntegration(unittest.TestCase):
         # Fake project_root с РЕАЛЬНЫМ linkqr_lib.py
         self._fake_project = self._tmpdir / "real-vless-ultimate"
         self._linkqr_lib_path = (
-            self._fake_project / "vless_installer" / "modules" / "linkqr_lib.py"
+            self._fake_project / "chimera" / "modules" / "linkqr_lib.py"
         )
         self._linkqr_lib_path.parent.mkdir(parents=True, exist_ok=True)
-        (self._fake_project / "vless_installer" / "__init__.py").write_text("")
-        (self._fake_project / "vless_installer" / "modules" / "__init__.py").write_text("")
+        (self._fake_project / "chimera" / "__init__.py").write_text("")
+        (self._fake_project / "chimera" / "modules" / "__init__.py").write_text("")
         # Копируем РЕАЛЬНЫЙ linkqr_lib.py
-        real_linkqr = _PROJECT_ROOT / "vless_installer" / "modules" / "linkqr_lib.py"
+        real_linkqr = _PROJECT_ROOT / "chimera" / "modules" / "linkqr_lib.py"
         shutil.copy(real_linkqr, self._linkqr_lib_path)
         # Также нужен фейковый _core.py (linkqr_lib делает lazy import)
-        fake_core = self._fake_project / "vless_installer" / "_core.py"
+        fake_core = self._fake_project / "chimera" / "_core.py"
         # Минимальный stub — функции, которые linkqr_lib реально вызывает
         fake_core.write_text(textwrap.dedent('''
             import subprocess
@@ -550,7 +550,7 @@ class TestInnerScriptRealLinkqrLibIntegration(unittest.TestCase):
 
     def test_real_linkqr_subscription_url_returns_https(self):
         """Реальный linkqr_lib.build_subscription_url_for_user через inner-скрипт."""
-        from vless_installer.modules import tg_client_bot
+        from chimera.modules import tg_client_bot
         import re
         cfg = {"token": "T", "admin_id": "A"}
         script = tg_client_bot._generate_client_bot_script(cfg)
@@ -593,7 +593,7 @@ class TestInnerScriptRealLinkqrLibIntegration(unittest.TestCase):
                 patch = (
                     "import os as _os; "
                     "from pathlib import Path as _P; "
-                    "from vless_installer.modules import linkqr_lib as _ll; "
+                    "from chimera.modules import linkqr_lib as _ll; "
                     f"_ll._MAIN_STATE_FILE = _P(_os.environ['VLESS_TEST_STATE_FILE']); "
                     f"_ll._SUB_CONF_FILE = _P(_os.environ['VLESS_TEST_SUB_FILE']); "
                 )
@@ -645,7 +645,7 @@ class TestInnerScriptRealLinkqrLibIntegration(unittest.TestCase):
         # Код аналогичен тому, что в inner-скрипте _call_linkqr_helper
         code = (
             "import json, sys; "
-            "from vless_installer.modules import linkqr_lib; "
+            "from chimera.modules import linkqr_lib; "
             f"linkqr_lib._MAIN_STATE_FILE = __import__('pathlib').Path({str(state_file)!r}); "
             "args = json.loads(sys.stdin.read()); "
             "r = linkqr_lib.build_vless_link_for_user(args.get('uuid','')); "
