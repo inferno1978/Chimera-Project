@@ -1,35 +1,39 @@
-# VLESS Ultimate Installer v4.25.1
+# Chimera Project v5.0.0
 
-[![Version](https://img.shields.io/badge/version-4.25.1-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
+[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](https://github.com/inferno1978/Chimera-Project)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://github.com/inferno1978/Chimera-Project/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
 
-Профессиональный установщик VLESS-сервера с поддержкой REALITY и xHTTP TLS. Полная автоматизация: от установки до мониторинга, с поддержкой обхода DPI, каскадных конфигураций и AmneziaWG.
+**Multi-Protocol Anti-DPI Installer** — мульти-протокольный установщик для обхода цензуры: VLESS REALITY/xHTTP, Hysteria2, AmneziaWG, TrustTunnel, MTProto, NaiveProxy, Mieru, FPTN, Slipgate и др. Полная автоматизация: от установки до мониторинга, с кластеризацией, балансировкой, веб-панелью и REST API.
+
+> **Почему Chimera?** Проект вырос из простого VLESS-installer в мульти-протокольный комбайн: 9+ протоколов, 143 модуля, 25 категорий — как мифическая химера, собранная из частей разных животных. Каждая «голова» (протокол) нужна для своего сценария: VLESS — основной, AmneziaWG — устойчивый к DPI, Hysteria2 — быстрый UDP, TrustTunnel — AdGuard VPN protocol, и т.д. Если цензор блокирует один протокол, химера «выращивает новую голову». Подробное обоснование — в CHANGELOG v5.0.0.
 
 ```
-██╗   ██╗██╗     ███████╗███████╗███████╗
-██║   ██║██║     ██╔════╝██╔════╝██╔════╝
-██║   ██║██║     █████╗  ███████╗███████╗
-╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║
- ╚████╔╝ ███████╗███████╗███████║███████║
-  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝
-  Ultimate Installer v4.25.1
+ ██████╗██╗  ██╗██╗███╗   ███╗███████╗██████╗  █████╗
+██╔════╝██║  ██║██║████╗ ████║██╔════╝██╔══██╗██╔══██╗
+██║     ███████║██║██╔████╔██║█████╗  ██████╔╝███████║
+██║     ██╔══██║██║██║╚██╔╝██║██╔══╝  ██╔══██╗██╔══██║
+╚██████╗██║  ██║██║██║ ╚═╝ ██║███████╗██║  ██║██║  ██║
+ ╚═════╝╚═╝  ╚═╝╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
+ Chimera Project v5.0.0 — Multi-Protocol Anti-DPI Installer
 ```
 
 ## ⚡ Быстрый старт
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
 ```
 
 Или с `wget`:
 
 ```bash
-wget -O bootstrap.sh https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh
+wget -O bootstrap.sh https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh
 chmod +x bootstrap.sh
 bash bootstrap.sh
 ```
+
+> **Note:** Старый URL `github.com/inferno1978/VLESS-Ultimate-Installer` продолжает работать — GitHub автоматически редиректит на новый `Chimera-Project`. Если у вас есть скрипты со старым URL, ничего сломается.
 
 ## 🎯 Возможности
 
@@ -95,7 +99,7 @@ sudo python3 main.py
 ## 🗂️ Структура проекта
 
 ```text
-VLESS-Ultimate-Installer/
+Chimera-Project/
 ├── main.py                      # Точка входа
 ├── bootstrap.sh                 # Установка одной командой
 ├── verify.py                    # Проверка целостности (232 теста, ~10/10)
@@ -206,7 +210,7 @@ VLESS-Ultimate-Installer/
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        VLESS Ultimate                       │
+│                        Chimera Project                      │
 │                                                             │
 │  bootstrap.sh ──► main.py ──exec──► _core.py                │
 │                                         │                   │

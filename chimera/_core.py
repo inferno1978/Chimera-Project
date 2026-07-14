@@ -532,15 +532,15 @@ def _get_version() -> str:
     return _CACHED_VERSION
 
 
-log_to_file("INFO", f"=== Запуск VLESS Ultimate Installer v{_get_version()} ===")
+log_to_file("INFO", f"=== Запуск Chimera Project v{_get_version()} ===")
 log_to_file("INFO", f"Время начала: {datetime.now()}")
 
 # =============================================================================
 #  БАННЕР
 # =============================================================================
 def _make_banner(show_ram_warning: bool = True) -> str:
-    _OW = 64   # внутренняя ширина внешней рамки
-    _IW = _OW - 6  # внутренняя ширина вложенной рамки (58)
+    _OW = 67   # внутренняя ширина внешней рамки (CHIMERA ansi_shadow art=54, info=59 → max+pad)
+    _IW = _OW - 6  # внутренняя ширина вложенной рамки (61)
     _blank  = "║" + " " * _OW + "║"
     _top    = "╔" + "═" * _OW + "╗"
     _bot    = "╚" + "═" * _OW + "╝"
@@ -551,27 +551,29 @@ def _make_banner(show_ram_warning: bool = True) -> str:
     def _irow(t):
         return "║  ║ " + t + " " * (_OW - 8 - len(t)) + " ║  ║"
     _art_lines = [
-        "██╗   ██╗██╗     ███████╗███████╗███████╗",
-        "██║   ██║██║     ██╔════╝██╔════╝██╔════╝",
-        "██║   ██║██║     █████╗  ███████╗███████╗",
-        "╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║",
-        " ╚████╔╝ ███████╗███████╗███████║███████║",
-        "  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝",
+        " ██████╗██╗  ██╗██╗███╗   ███╗███████╗██████╗  █████╗ ",
+        "██╔════╝██║  ██║██║████╗ ████║██╔════╝██╔══██╗██╔══██╗",
+        "██║     ███████║██║██╔████╔██║█████╗  ██████╔╝███████║",
+        "██║     ██╔══██║██║██║╚██╔╝██║██╔══╝  ██╔══██╗██╔══██║",
+        "╚██████╗██║  ██║██║██║ ╚═╝ ██║███████╗██║  ██║██║  ██║",
+        " ╚═════╝╚═╝  ╚═╝╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝",
     ]
     _info_lines = [
-        f"VLESS REALITY + xHTTP TLS INSTALLER v{_get_version()}",
-        "IPv6 DualStack | 6 Templates | SHA256 Verify",
-        "Balancer: RoundRobin | LeastPing | LeastLoad",
-        "Dashboard | FP Rotate | GeoCheck | Multi-User",
+        f"Chimera Project — Multi-Protocol Anti-DPI Installer v{_get_version()}",
+        "VLESS · Hysteria2 · AmneziaWG · TrustTunnel · MTProto",
+        "NaiveProxy · Mieru · FPTN · Slipgate · WARP · WDTT · +more",
+        "Anti-DPI: REALITY · xHTTP · Fragmentation · Port Hopping",
+        "Cluster: RoundRobin · LeastPing · LeastLoad · Failover A↔B",
+        "Dashboard · REST API · TG Bot · Admin Panel · User Portal",
     ]
     # Строки предупреждения о RAM (красные + жирные через ANSI)
     _BOLD_RED = '\033[1;31m'
     _NC_LOC   = '\033[0m'
     _ram_lines = [
-        f"{_BOLD_RED}⚠  ВНИМАНИЕ: для корректной работы всех функций   {_NC_LOC}",
-        f"{_BOLD_RED}⚠  рекомендуется ОЗУ VPS от 2 ГБ!                 {_NC_LOC}",
-        f"{_BOLD_RED}⚠  При меньшем объёме работа скрипта и ПО          {_NC_LOC}",
-        f"{_BOLD_RED}⚠  НЕ ГАРАНТИРУЕТСЯ.                               {_NC_LOC}",
+        f"{_BOLD_RED}⚠  ВНИМАНИЕ: для корректной работы всех функций     {_NC_LOC}",
+        f"{_BOLD_RED}⚠  рекомендуется ОЗУ VPS от 2 ГБ!                   {_NC_LOC}",
+        f"{_BOLD_RED}⚠  При меньшем объёме работа скрипта и ПО            {_NC_LOC}",
+        f"{_BOLD_RED}⚠  НЕ ГАРАНТИРУЕТСЯ.                                 {_NC_LOC}",
     ]
     # Вспомогательная функция: строка рамки с ANSI (учитываем скрытые символы)
     def _irow_ansi(raw: str) -> str:
@@ -1225,7 +1227,7 @@ def _extract_trusttunnel_ports(st: dict) -> list:
 
 
 def _extract_subscription_ports(st: dict) -> list:
-    """VLESS Ultimate subscription endpoint: TCP-порт HTTPS-хендлера подписки.
+    """Chimera subscription endpoint: TCP-порт HTTPS-хендлера подписки.
     state['listen_port'] (default 8443). Условие: state['enabled'] is True."""
     if not isinstance(st, dict) or not st.get("enabled"):
         return []
@@ -1252,7 +1254,7 @@ def _extract_vless_state_ports(st: dict) -> list:
 PROTOCOL_PORT_REGISTRY = [
     {
         "key": "vless_state",
-        "label": "VLESS Ultimate (Mode B chain: AWG exit/client)",
+        "label": "Chimera VLESS (Mode B chain: AWG exit/client)",
         "state_file": None,  # основной state.json
         "extractor": _extract_vless_state_ports,
     },
@@ -1318,7 +1320,7 @@ PROTOCOL_PORT_REGISTRY = [
     },
     {
         "key": "subscription",
-        "label": "VLESS Ultimate subscription endpoint (TCP)",
+        "label": "Chimera subscription endpoint (TCP)",
         "state_file": Path("/var/lib/xray-installer/subscription.json"),
         "extractor": _extract_subscription_ports,
     },
@@ -2831,7 +2833,7 @@ def setup_logrotate() -> None:
     # --- Основной конфиг: access.log + error.log ---
     LOGROTATE_XRAY.write_text(textwrap.dedent("""\
         # Ротация логов Xray-core
-        # Создано автоматически установщиком VLESS Ultimate Installer
+        # Создано автоматически установщиком Chimera Project
         /var/log/xray/access.log
         /var/log/xray/error.log {
             daily
@@ -2860,7 +2862,7 @@ def setup_logrotate() -> None:
     aux_block = "\n".join(aux_entries)
     LOGROTATE_XRAY_AUX.write_text(textwrap.dedent(f"""\
         # Ротация вспомогательных логов Xray
-        # Создано автоматически установщиком VLESS Ultimate Installer
+        # Создано автоматически установщиком Chimera Project
         {aux_block} {{
             weekly
             rotate 4
@@ -2890,7 +2892,7 @@ def setup_logrotate() -> None:
     heavy_block = "\n".join(heavy_entries)
     LOGROTATE_XRAY_HEAVY.write_text(textwrap.dedent(f"""\
         # Лог инсталлятора и cron-модулей (autoban/watchdog)
-        # Создано автоматически установщиком VLESS Ultimate Installer
+        # Создано автоматически установщиком Chimera Project
         # missingok — не все три файла обязательно существуют на любой системе
         {heavy_block} {{
             daily
@@ -5108,7 +5110,7 @@ def do_export_config(encrypt: bool = False) -> None:
         # Добавляем README с инструкцией
         readme = tmp / "README.txt"
         readme.write_text(textwrap.dedent(f"""\
-            VLESS Ultimate Installer — архив конфигурации
+            Chimera Project — архив конфигурации
             Создан: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             Включает: {', '.join(copied)}
             {'Зашифрован: AES-256-CBC (openssl enc -d -aes-256-cbc -pbkdf2)' if encrypt else 'Не зашифрован'}
@@ -7932,7 +7934,7 @@ def main_menu() -> None:
             _BOX_W_saved = _BOX_W
             _BOX_W = 64
             _box_top()
-            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v{_get_version()}{NC}  {DIM}│{NC}  {mode_str}")
+            _box_row(f"  {BOLD}{TITLE}Chimera Project v{_get_version()}{NC}  {DIM}│{NC}  {mode_str}")
             _box_sep()
             _box_row()
             _box_row(f"  {CYAN}1{NC}  ⚙️  {TITLE}Установка и Система{NC}")

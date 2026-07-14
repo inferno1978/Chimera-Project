@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-full_test.py — Постоянный автотест VLESS Ultimate Installer v4.25.1
+full_test.py — Постоянный автотест Chimera Project v5.0.0
 Запуск: python3 full_test.py
 
 Самодостаточный тест: нет зависимостей кроме Python stdlib.
