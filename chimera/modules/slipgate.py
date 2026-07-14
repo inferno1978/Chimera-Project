@@ -259,7 +259,7 @@ def _get_latest_version() -> str:
     try:
         req = urllib.request.Request(
             _GITHUB_API,
-            headers={"User-Agent": "VLESS-Ultimate-Installer"},
+            headers={"User-Agent": "Chimera-Project"},
         )
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())

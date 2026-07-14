@@ -191,7 +191,7 @@ def proto_get_latest_version(github_api_url: str,
     try:
         req = urllib.request.Request(
             github_api_url,
-            headers={"User-Agent": "VLESS-Ultimate-Installer"},
+            headers={"User-Agent": "Chimera-Project"},
         )
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())

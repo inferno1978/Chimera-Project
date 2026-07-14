@@ -6,7 +6,7 @@ multi-thread тест скорости сети через iperf3 по серв�
 
 Источник: bench.py — питоновский порт tlab_merged.sh (bench.sh by Teddysun,
 mod. Nikola Tesla, https://t.me/tracerlab). Адаптирован для встраивания в
-VLESS-Ultimate-Installer: убраны глобальные signal-хендлеры и sys.exit() —
+Chimera Project: убраны глобальные signal-хендлеры и sys.exit() —
 в оригинале они завершали бы ВЕСЬ процесс установщика, а не только это
 подменю. Логика сбора метрик и тестов скорости не менялась.
 

@@ -963,15 +963,15 @@ def _call_linkqr_helper(action, **kwargs):
          установки (например /opt/chimera по bootstrap.sh).
       2. Fallback на случай нестандартной установки/переустановки:
          проверяем канонические пути из bootstrap.sh, ВКЛЮЧАЯ правильный
-         /opt/chimera (legacy /opt/VLESS-Ultimate-Installer оставлен
-         только для обратной совместимости со старыми установками).
+         /opt/chimera (legacy /opt/vless-ultimate и /opt/VLESS-Ultimate-Installer
+         оставлены только для обратной совместимости со старыми установками).
       3. Если ничего не найдено — возвращаем None, вызывающий код должен
          ЯВНО сообщить пользователю о невозможности построить ссылку.
     """
     def _has_linkqr(p):
         """Безопасная проверка что по пути p лежит linkqr_lib.py.
         Path.exists() может поднять PermissionError (например для
-        /root/VLESS-Ultimate-Installer если бот запущен не от root) —
+        /root/chimera если бот запущен не от root) —
         ловим и считаем что пути нет."""
         try:
             return Path(p).exists() and (Path(p) / "chimera" / "modules" / "linkqr_lib.py").exists()
@@ -982,15 +982,13 @@ def _call_linkqr_helper(action, **kwargs):
     # 1) Зашитый в момент генерации путь
     if PROJECT_ROOT and _has_linkqr(PROJECT_ROOT):
         project_root = PROJECT_ROOT
-    # 2) Fallback: канонические пути в порядке приоритета
+    # 2) Fallback: канонические пути в порядке приоритета.
+    #    ВАЖНО: домашние директории НЕ проверяем — только системные пути.
     if not project_root:
         for p in (
-            "/opt/chimera",                          # канонический (bootstrap.sh:INSTALL_DIR)
-            "/opt/VLESS-Ultimate-Installer",                # legacy регистр (старые установки)
-            "/root/VLESS-Ultimate-Installer",
-            "/root/vless-ultimate",
-            "/usr/local/share/vless-ultimate",
-            "/usr/local/share/VLESS-Ultimate-Installer",
+            "/opt/chimera",                          # канонический (bootstrap.sh:INSTALL_DIR, Chimera Project v5.0+)
+            "/opt/vless-ultimate",                   # legacy (VLESS Ultimate Installer v4.x)
+            "/opt/VLESS-Ultimate-Installer",         # legacy регистр (ранние версии bootstrap)
         ):
             if _has_linkqr(p):
                 project_root = p
