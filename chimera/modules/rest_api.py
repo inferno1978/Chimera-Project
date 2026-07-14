@@ -1446,7 +1446,7 @@ def install_web_service(port: int = None, admin_user: str = None,
             print("[VLESS Web] " + warn_msg)
 
     # systemd unit — start_server() читает host из cfg
-    main_py = Path(sys.argv[0]).resolve() if sys.argv[0] else Path("/opt/vless-ultimate/main.py")
+    main_py = Path(sys.argv[0]).resolve() if sys.argv[0] else Path("/opt/chimera/main.py")
     project_root = main_py.parent
 
     unit = f"""[Unit]

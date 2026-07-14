@@ -78,7 +78,7 @@ BLUE=_C['BLUE']; BOLD=_C['BOLD']; DIM=_C['DIM']; WHITE=_C['WHITE']; NC=_C['NC']
 _NOTIF_FILE  = Path("/var/lib/xray-installer/telegram.json")   # уведомления (совместимость)
 _BOT_FILE    = Path("/var/lib/xray-installer/tg_bot.json")     # бот
 _STATE_FILE  = Path("/var/lib/xray-installer/state.json")
-_LOG_FILE    = Path("/var/log/vless-install.log")
+_LOG_FILE    = Path("/var/log/chimera.log")
 _BOT_SVC     = Path("/etc/systemd/system/xray-tg-bot.service")
 _BOT_SCRIPT  = Path("/usr/local/bin/xray-tg-bot.py")
 _MONITOR_SVC = Path("/etc/cron.d/xray-tg-monitor")
@@ -383,7 +383,7 @@ TOKEN    = {token}
 ADMIN_ID = {admin_id}
 BOT_FILE = Path("{bot_file}")
 STATE_F  = Path("{state_file}")
-LOG_F    = Path("/var/log/vless-install.log")
+LOG_F    = Path("/var/log/chimera.log")
 OFFSET   = 0
 
 def _log(msg):

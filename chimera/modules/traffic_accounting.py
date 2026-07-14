@@ -74,7 +74,7 @@ from typing import Optional, Union, Dict, Literal
 #  КОНСТАНТЫ
 # =============================================================================
 _STATE_FILE = Path("/var/lib/xray-installer/traffic_accounting.json")
-_LOG_FILE   = Path("/var/log/vless-install.log")
+_LOG_FILE   = Path("/var/log/chimera.log")
 _LOCK_FILE  = Path("/var/lib/xray-installer/traffic_accounting.lock")
 
 # Поддерживаемые протоколы (для валидации)

@@ -52,7 +52,7 @@ WHITE  = _C['WHITE']
 NC     = _C['NC']
 
 # ── Логирование ────────────────────────────────────────────────────────────────
-_LOG_FILE = Path("/var/log/vless-install.log")
+_LOG_FILE = Path("/var/log/chimera.log")
 
 def _log(level: str, msg: str) -> None:
     try:
@@ -107,7 +107,7 @@ def do_manage_logrotate() -> None:
         Path("/var/log/xray-geo-update.log"),
         Path("/var/log/xray-autoban.log"),
         Path("/var/log/xray-watchdog.log"),
-        Path("/var/log/vless-install.log"),
+        Path("/var/log/chimera.log"),
     ]
 
     def _log_size(p: Path) -> str:

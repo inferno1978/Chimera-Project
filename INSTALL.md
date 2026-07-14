@@ -9,7 +9,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/
 Bootstrap скрипт автоматически:
 1. Проверяет права root
 2. Устанавливает `python3`, `curl`, `git` если отсутствуют
-3. Клонирует репозиторий в `/opt/vless-ultimate`
+3. Клонирует репозиторий в `/opt/chimera`
 4. Запускает установщик
 
 ---
@@ -18,8 +18,8 @@ Bootstrap скрипт автоматически:
 
 ```bash
 # 1. Клонировать репозиторий
-git clone https://github.com/inferno1978/Chimera-Project /opt/vless-ultimate
-cd /opt/vless-ultimate
+git clone https://github.com/inferno1978/Chimera-Project /opt/chimera
+cd /opt/chimera
 
 # 2. Проверить целостность
 python3 verify.py
@@ -84,11 +84,11 @@ sudo apt-get install -y python3
 systemctl status xray nginx
 
 # Посмотреть сгенерированные ссылки
-sudo python3 /opt/vless-ultimate/main.py
+sudo python3 /opt/chimera/main.py
 # → Управление пользователями → Показать ссылки
 
 # Лог установки
-tail -50 /var/log/vless-install.log
+tail -50 /var/log/chimera.log
 ```
 
 ---
@@ -96,7 +96,7 @@ tail -50 /var/log/vless-install.log
 ## Обновление
 
 ```bash
-cd /opt/vless-ultimate
+cd /opt/chimera
 git pull
 sudo python3 main.py
 # → Установка и Система → Обновить Xray
@@ -108,14 +108,14 @@ sudo python3 main.py
 
 ```bash
 # Через меню
-sudo python3 /opt/vless-ultimate/main.py
+sudo python3 /opt/chimera/main.py
 # → Управление пользователями → Полное удаление
 
 # Или вручную
 systemctl stop xray nginx
 systemctl disable xray nginx
 apt-get remove --purge nginx certbot
-rm -rf /etc/xray /var/lib/xray-installer /opt/vless-ultimate
+rm -rf /etc/xray /var/lib/xray-installer /opt/chimera
 ```
 
 ---

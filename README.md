@@ -91,8 +91,8 @@ bash bootstrap.sh
 ## 🔧 Ручная установка
 
 ```bash
-git clone https://github.com/inferno1978/Chimera-Project /opt/vless-ultimate
-cd /opt/vless-ultimate
+git clone https://github.com/inferno1978/Chimera-Project /opt/chimera
+cd /opt/chimera
 sudo python3 main.py
 ```
 
@@ -291,22 +291,22 @@ journalctl -u xray -f
 ## 🖥️ CLI-флаги
 
 ```bash
-sudo python3 /opt/vless-ultimate/main.py                   # Меню
-sudo python3 /opt/vless-ultimate/main.py --status          # Быстрый статус
-sudo python3 /opt/vless-ultimate/main.py --scheduled-backup
-sudo python3 /opt/vless-ultimate/main.py --switch-mode-a
-sudo python3 /opt/vless-ultimate/main.py --switch-mode-b
-sudo python3 /opt/vless-ultimate/main.py --autoban
-sudo python3 /opt/vless-ultimate/main.py --ttl-check
-sudo python3 /opt/vless-ultimate/main.py --smart-balance
-sudo python3 /opt/vless-ultimate/main.py --dpi-check
-sudo python3 /opt/vless-ultimate/main.py --update-ru-subnets
-sudo python3 /opt/vless-ultimate/main.py --update-as-direct
-sudo python3 /opt/vless-ultimate/main.py --ingress-geoip-update
-sudo python3 /opt/vless-ultimate/main.py --telemt-panel-geoip-update   # DB-IP Lite, без MaxMind-аккаунта; --maxmind — зеркало GeoLite2
-sudo python3 /opt/vless-ultimate/main.py --pinned-fallback-check
-sudo python3 /opt/vless-ultimate/main.py --tg-event EVENT MSG
-sudo python3 /opt/vless-ultimate/main.py --clear-asn-cache
+sudo python3 /opt/chimera/main.py                   # Меню
+sudo python3 /opt/chimera/main.py --status          # Быстрый статус
+sudo python3 /opt/chimera/main.py --scheduled-backup
+sudo python3 /opt/chimera/main.py --switch-mode-a
+sudo python3 /opt/chimera/main.py --switch-mode-b
+sudo python3 /opt/chimera/main.py --autoban
+sudo python3 /opt/chimera/main.py --ttl-check
+sudo python3 /opt/chimera/main.py --smart-balance
+sudo python3 /opt/chimera/main.py --dpi-check
+sudo python3 /opt/chimera/main.py --update-ru-subnets
+sudo python3 /opt/chimera/main.py --update-as-direct
+sudo python3 /opt/chimera/main.py --ingress-geoip-update
+sudo python3 /opt/chimera/main.py --telemt-panel-geoip-update   # DB-IP Lite, без MaxMind-аккаунта; --maxmind — зеркало GeoLite2
+sudo python3 /opt/chimera/main.py --pinned-fallback-check
+sudo python3 /opt/chimera/main.py --tg-event EVENT MSG
+sudo python3 /opt/chimera/main.py --clear-asn-cache
 ```
 
 ## 🔗 Кластерное управление `[CL]`
@@ -334,20 +334,20 @@ Exit Nodes из Entry Node одной командой по SSH.
 
 ```bash
 # Полная диагностика через меню
-sudo python3 /opt/vless-ultimate/main.py
+sudo python3 /opt/chimera/main.py
 # → Диагностика и Мониторинг → Полная диагностика
 
-sudo python3 /opt/vless-ultimate/main.py --status
+sudo python3 /opt/chimera/main.py --status
 /usr/local/bin/xray run -test -config /etc/xray/config.json
-tail -100 /var/log/vless-install.log
+tail -100 /var/log/chimera.log
 ```
 
 ## 🔄 Обслуживание
 
 ```bash
-python3 /opt/vless-ultimate/verify.py
-cd /opt/vless-ultimate && git pull
-sudo python3 /opt/vless-ultimate/main.py --scheduled-backup
+python3 /opt/chimera/verify.py
+cd /opt/chimera && git pull
+sudo python3 /opt/chimera/main.py --scheduled-backup
 ```
 
 ## ❓ Решение проблем

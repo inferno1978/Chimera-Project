@@ -65,7 +65,7 @@ from typing import Optional, List, Tuple
 #  Константы
 # =============================================================================
 _STATE_FILE     = Path("/var/lib/xray-installer/dns_redirect.json")
-_LOG_FILE       = Path("/var/log/vless-install.log")
+_LOG_FILE       = Path("/var/log/chimera.log")
 _DNSCRYPT_TOML  = Path("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
 _DEFAULT_PORT   = 5300
 _DEFAULT_IFACE  = "awg0"  # standalone AWG и cascade — оба используют awg0

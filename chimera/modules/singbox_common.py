@@ -35,7 +35,7 @@ SINGBOX_CONFIG_FILE    = SINGBOX_CONFIG_DIR / "config.json"
 SINGBOX_CERT_DIR       = Path("/etc/sing-box/certs")
 SINGBOX_STATE_FILE     = Path("/var/lib/xray-installer/singbox_state.json")
 SINGBOX_LOG_FILE       = Path("/var/log/singbox.log")
-SINGBOX_INSTALL_LOG    = Path("/var/log/vless-install.log")
+SINGBOX_INSTALL_LOG    = Path("/var/log/chimera.log")
 SINGBOX_SERVICE        = "sing-box"
 
 # Регистрация в основном state.json (аналог awg_standalone_state.json).

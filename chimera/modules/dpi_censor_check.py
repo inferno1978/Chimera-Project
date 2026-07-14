@@ -68,7 +68,7 @@ from chimera.modules.box_renderer import (
 _VENDOR_DIR = Path(__file__).resolve().parent / "_vendor" / "dpi_detector"
 _ENTRY      = _VENDOR_DIR / "dpi_detector.py"
 _REQS       = _VENDOR_DIR / "requirements.txt"
-_LOG_FILE   = Path("/var/log/vless-install.log")
+_LOG_FILE   = Path("/var/log/chimera.log")
 _REPORT_DIR = Path("/var/log/xray-installer/dpi-censor-reports")
 
 # Имена пакетов для импорта (PyYAML импортируется как "yaml")

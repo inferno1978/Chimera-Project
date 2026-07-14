@@ -21,7 +21,7 @@
 
 ```bash
 # На тестовом VPS:
-cd /opt/vless-ultimate  # или где установлен проект
+cd /opt/chimera  # или где установлен проект
 sudo python3 main.py
 # Главное меню → 18 (TrustTunnel) → 1 (Установить)
 # Ввести:

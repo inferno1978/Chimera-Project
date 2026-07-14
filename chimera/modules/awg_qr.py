@@ -101,7 +101,7 @@ def awgs_qr_save_client_conf(peer: dict, server_state: dict) -> Optional[Path]:
             AWGS_KEYS_DIR.chmod(0o700)
         except Exception as e:
             # Тихий провал chmod на директории с секретами недопустим —
-            # логируем WARNING, чтобы админ заметил в /var/log/vless-install.log.
+            # логируем WARNING, чтобы админ заметил в /var/log/chimera.log.
             core.log_to_file("WARNING", f"chmod 0o700 failed for {AWGS_KEYS_DIR}: {e}")
         name = peer.get("name", "client")
         path = AWGS_KEYS_DIR / f"{name}.conf"

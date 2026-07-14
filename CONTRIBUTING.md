@@ -64,7 +64,7 @@ bash -n bootstrap.sh
 ```
 
 Если у вас есть тестовый VPS — проверьте полный цикл установки.
-Логи: `/var/log/vless-install.log`.
+Логи: `/var/log/chimera.log`.
 
 ## Лицензия
 

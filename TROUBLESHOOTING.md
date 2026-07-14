@@ -198,14 +198,14 @@ which xray
 
 ```bash
 # Полная диагностика через установщик
-sudo python3 /opt/vless-ultimate/main.py
+sudo python3 /opt/chimera/main.py
 # → Диагностика и Мониторинг → Полная диагностика
 
 # Быстрый статус
-sudo python3 /opt/vless-ultimate/main.py --status
+sudo python3 /opt/chimera/main.py --status
 
 # Логи установки
-tail -100 /var/log/vless-install.log
+tail -100 /var/log/chimera.log
 
 # Логи Xray
 journalctl -u xray --no-pager -n 50
@@ -223,10 +223,10 @@ curl -v "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS8359
 # Если блокировка — префиксы загрузятся из локального кэша (SQLite)
 
 # Принудительно сбросить кэш и перезагрузить
-sudo python3 /opt/vless-ultimate/main.py --clear-asn-cache
+sudo python3 /opt/chimera/main.py --clear-asn-cache
 
 # Обновить AS-direct префиксы
-sudo python3 /opt/vless-ultimate/main.py --update-as-direct
+sudo python3 /opt/chimera/main.py --update-as-direct
 ```
 
 **Правила AS не применяются:**
@@ -309,7 +309,7 @@ cat /etc/cron.d/xray-backup
 tail -20 /var/log/xray-scheduled-backup.log
 
 # Запустить вручную
-sudo python3 /opt/vless-ultimate/main.py --scheduled-backup
+sudo python3 /opt/chimera/main.py --scheduled-backup
 
 # Проверить, что cron запущен
 systemctl status cron || systemctl status crond
@@ -348,7 +348,7 @@ systemctl restart xray nginx
 |-----|------|
 | Конфиг Xray | `/etc/xray/config.json` |
 | Сервис Xray | `/etc/systemd/system/xray.service` |
-| Лог установки | `/var/log/vless-install.log` |
+| Лог установки | `/var/log/chimera.log` |
 | Лог Xray (ошибки) | `/var/log/xray/error.log` |
 | Лог Xray (доступ) | `/var/log/xray/access.log` |
 | State файл | `/var/lib/xray-installer/state.json` |
@@ -507,7 +507,7 @@ Pi-hole или AdGuard Home), отключите принудительный р
 
 **Через меню:**
 
-1. `sudo python3 /opt/vless-ultimate/main.py`
+1. `sudo python3 /opt/chimera/main.py`
 2. Меню → `4` (Настройки сети) → `DR` (Принудительный DNS REDIRECT)
 3. Пункт `2` — Отключить
 

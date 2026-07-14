@@ -474,7 +474,14 @@ else:
 # =============================================================================
 #  ЛОГИРОВАНИЕ
 # =============================================================================
-LOG_FILE          = Path("/var/log/vless-install.log")
+LOG_FILE          = Path("/var/log/chimera.log")
+# Legacy-путь лога до переименования в Chimera Project (v4.x).
+# Если у пользователя установка была сделана старой версией — логи писались сюда.
+# При первом запуске Chimera Project v5.0+ создаём symlink, чтобы:
+#   - администратор мог найти старые логи по привычному пути
+#   - cron-задачи со старым путём в команде продолжали работать
+#   - logrotate-конфиги со старым путём продолжали ротировать
+_LEGACY_LOG_FILE  = Path("/var/log/vless-install.log")
 BACKUP_DIR        = Path("/var/backups/xray")
 HEALTH_CHECK_FILE = Path("/var/lib/xray-installer/health.status")
 STATE_FILE        = Path("/var/lib/xray-installer/state.json")
@@ -486,6 +493,35 @@ try:
     LOG_FILE.touch()
     LOG_FILE.chmod(0o600)
 except Exception:
+    pass
+
+# Создаём symlink legacy-лога → новый лог, если:
+#   - старого файла нет (свежая установка) — symlink создаётся сразу
+#   - старый файл существует и это regular file (не symlink) — переносим содержимое
+#     в новый лог, затем заменяем старый файл на symlink
+#   - старый файл уже symlink — ничего не делаем (already migrated)
+try:
+    if _LEGACY_LOG_FILE.is_symlink():
+        pass  # уже мигрировано
+    elif _LEGACY_LOG_FILE.exists() and _LEGACY_LOG_FILE.is_file():
+        # Старый лог существует как regular file — переносим содержимое
+        if not LOG_FILE.exists() or LOG_FILE.stat().st_size == 0:
+            # Новый лог пуст — переносим старое содержимое
+            import shutil as _shutil_for_log
+            _shutil_for_log.copy2(str(_LEGACY_LOG_FILE), str(LOG_FILE))
+        # Делаем backup старого лога (на всякий случай), затем заменяем на symlink
+        _backup_legacy = _LEGACY_LOG_FILE.with_suffix('.log.pre-chimera.bak')
+        if not _backup_legacy.exists():
+            _LEGACY_LOG_FILE.rename(_backup_legacy)
+        else:
+            _LEGACY_LOG_FILE.unlink()
+        _LEGACY_LOG_FILE.symlink_to(str(LOG_FILE))
+    else:
+        # Старого файла нет — просто создаём symlink
+        if not _LEGACY_LOG_FILE.exists():
+            _LEGACY_LOG_FILE.symlink_to(str(LOG_FILE))
+except (OSError, PermissionError):
+    # symlink может не сработать без root или на некоторых FS — не критично
     pass
 
 
@@ -2878,14 +2914,14 @@ def setup_logrotate() -> None:
     # --- ИСПРАВЛЕНИЕ: лог инсталлятора (log_to_file()) и логи cron-модулей
     # (autoban/watchdog) раньше НЕ входили ни в один logrotate-конфиг, хотя
     # меню "Ротация логов" в logrotate.py показывало их размер, создавая
-    # ложное впечатление, что они под ротацией. vless-install.log пишется
+    # ложное впечатление, что они под ротацией. chimera.log пишется
     # непрерывно (info()/success()/warn() на каждое действие) и без ротации
     # рос неограниченно вплоть до полного заполнения диска. Здесь — daily +
     # maxsize как аварийный триггер (если между суточными прогонами
     # logrotate файл распухнет раньше срока, ротация всё равно сработает).
     LOGROTATE_XRAY_HEAVY = Path("/etc/logrotate.d/xray-heavy")
     heavy_entries = [
-        "/var/log/vless-install.log",
+        "/var/log/chimera.log",
         "/var/log/xray-autoban.log",
         "/var/log/xray-watchdog.log",
     ]
@@ -2920,7 +2956,7 @@ def setup_logrotate() -> None:
         warn("logrotate: проверьте конфиг вручную: /etc/logrotate.d/xray-heavy")
     dim("  access.log + error.log: ежедневно, 14 архивов")
     dim("  autoupdate/geo-update:  еженедельно, 4 архива")
-    dim("  vless-install/autoban/watchdog: ежедневно, 14 архивов, maxsize 50M")
+    dim("  chimera/autoban/watchdog: ежедневно, 14 архивов, maxsize 50M")
 
 
 # =============================================================================

@@ -146,7 +146,7 @@ _SERVICE_NAME = "trusttunnel"
 # traffic-check conventions).
 _CRON_FILE         = Path("/etc/cron.d/trusttunnel")
 _SCRIPT_FILE       = Path("/usr/local/bin/trusttunnel_cron.sh")
-_PROJECT_ROOT      = Path("/opt/vless-ultimate")  # bootstrap.sh installs here
+_PROJECT_ROOT      = Path("/opt/chimera")  # bootstrap.sh installs here
 _CRON_INTERVAL_MIN = 5
 
 _DEFAULT_PORT = 8443
@@ -846,12 +846,12 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 def _find_project_root() -> Path:
     """Найти корень проекта (где main.py).
-    Пробует _PROJECT_ROOT, затем /opt/vless-ultimate, /opt/vless-installer,
+    Пробует _PROJECT_ROOT, затем /opt/chimera, /opt/vless-installer,
     затем поднимается от расположения этого файла.
     """
     candidates = [
         _PROJECT_ROOT,
-        Path("/opt/vless-ultimate"),
+        Path("/opt/chimera"),
         Path("/opt/vless-installer"),
         Path(__file__).resolve().parent.parent.parent,
     ]

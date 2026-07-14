@@ -83,32 +83,34 @@ else
 fi
 
 # [4] Загрузка / обновление
-echo -e "\n${BOLD}[4/5] Загрузка VLESS Ultimate${NC}"
-INSTALL_DIR="/opt/vless-ultimate"
+echo -e "\n${BOLD}[4/5] Загрузка Chimera Project${NC}"
+INSTALL_DIR="/opt/chimera"
 REPO_URL="https://github.com/inferno1978/Chimera-Project"
 BRANCH="main"
 
-# Ищем существующую установку в нестандартных местах
+# Ищем существующую установку в стандартных системных путях.
+# ВАЖНО: домашние директории разработчиков НЕ проверяем — это личные пути,
+# бесполезные для конечных пользователей и засветящие структуру окружения.
+# Поддерживаемые legacy-пути (для обратной совместимости со старыми установками):
+#   - /opt/vless-ultimate     (старый путь до переименования в Chimera Project)
+#   - /opt/VLESS-Ultimate-Installer  (старый путь из ранних версий bootstrap)
+#   - /opt/chimera            (новый путь — совпадает с INSTALL_DIR)
 _found=""
 for _candidate in \
-    "/home/inferno1978/VLESS-Ultimate-Installer" \
-    "/root/VLESS-Ultimate-Installer" \
-    "/opt/VLESS-Ultimate-Installer"
+    "/opt/vless-ultimate" \
+    "/opt/VLESS-Ultimate-Installer" \
+    "/opt/chimera"
 do
     if [[ -f "${_candidate}/main.py" ]]; then
         _found="$_candidate"
         break
     fi
 done
-# Также ищем через glob в /home/*/
-if [[ -z "$_found" ]]; then
-    for _p in /home/*/VLESS-Ultimate-Installer/main.py; do
-        [[ -f "$_p" ]] && { _found="${_p%/main.py}"; break; }
-    done
-fi
 if [[ -n "$_found" && "$_found" != "$INSTALL_DIR" ]]; then
     warn "Найдена существующая установка: ${_found}"
     info "Обновляю её (а не ${INSTALL_DIR})..."
+    info "Примечание: путь /opt/chimera — новый стандарт. Если хотите мигрировать,"
+    info "          перенесите директорию вручную: mv ${_found} ${INSTALL_DIR}"
     INSTALL_DIR="$_found"
 fi
 
@@ -186,7 +188,7 @@ echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━�
 echo -e "${GREEN}${BOLD}  Запускаю установщик...${NC}"
 echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "  ${DIM}Директория: ${INSTALL_DIR}${NC}"
-echo -e "  ${DIM}Лог: /var/log/vless-install.log${NC}"
+echo -e "  ${DIM}Лог: /var/log/chimera.log${NC}"
 echo ""
 cd "$INSTALL_DIR"
 exec python3 main.py "$@"
