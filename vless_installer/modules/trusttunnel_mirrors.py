@@ -1,36 +1,37 @@
 """
 vless_installer/modules/trusttunnel_mirrors.py
 ───────────────────────────────────────────────────────────────────────────────
-URL builders for TrustTunnel release tarballs.
+URL-builder для скачивания TrustTunnel release tarball'а.
 
-Single source (GitHub Releases) — no mirror CDN exists for this project.
-If GitHub becomes unreachable, the user can manually place the tarball in
-/root/ (manual_incoming_dir in trusttunnel_packages.py) and fetch_package
-will pick it up.
+Один источник — GitHub Releases. У TrustTunnel нет mirror-CDN (как,
+например, у jsDelivr для fptn/mieru). Если GitHub недоступен с сервера
+пользователя, остаётся ручное размещение tarball'а в /root/ —
+download_manager.fetch_package проверяет /root/ до обращения в сеть.
 
-Naming convention (verified via GitHub API in Phase 0):
+Naming convention (подтверждён через GitHub API в Phase 0, v1.0.33):
   https://github.com/TrustTunnel/TrustTunnel/releases/download/v${VERSION}/trusttunnel-v${VERSION}-linux-${ARCH}.tar.gz
 
-Public API:
-    get_trusttunnel_mirrors(tag="v1.0.33", filename="trusttunnel-v1.0.33-linux-x86_64.tar.gz")
-        -> list[str]
+Точка входа:
+    from vless_installer.modules.trusttunnel_mirrors import get_trusttunnel_mirrors
+───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
 
 
 def get_trusttunnel_mirrors(tag: str = "v1.0.33", filename: str = "") -> list[str]:
-    """Return the list of download URLs for the TrustTunnel release tarball.
+    """Вернуть список download URLs для TrustTunnel release tarball'а.
 
-    Parameters:
-      tag:      Release tag WITH leading 'v' (e.g. 'v1.0.33').
-      filename: The tarball filename (e.g. 'trusttunnel-v1.0.33-linux-x86_64.tar.gz').
-                If empty, returns [] (caller must provide it via filename_builder).
+    Параметры:
+      tag:      Release tag С ведущей 'v' (например 'v1.0.33').
+      filename: Имя tarball'а (например
+                'trusttunnel-v1.0.33-linux-x86_64.tar.gz').
+                Если пусто — возвращает [] (caller должен передать через
+                filename_builder).
 
-    Returns:
-      List of URLs. Currently only the official GitHub Releases URL — no
-      mirrors exist. If GitHub is blocked from the user's server, they can
-      pre-place the tarball at /root/{filename} and fetch_package will use
-      it without hitting the network.
+    Возвращает:
+      Список URL. Сейчас один — официальный GitHub Releases. Зеркал нет:
+      если GitHub заблокирован, пользователь кладёт tarball в /root/
+      вручную, и fetch_package подхватывает его без сети.
     """
     if not filename:
         return []
