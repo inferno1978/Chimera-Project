@@ -114,6 +114,50 @@ if [[ -n "$_found" && "$_found" != "$INSTALL_DIR" ]]; then
     INSTALL_DIR="$_found"
 fi
 
+# =============================================================================
+#  Пост-апгрейд проверка: импорт chimera + авто-очистка старой vless_installer/
+# =============================================================================
+# Вызывается после успешного archive-fallback (когда cp -rf отработал, но
+# старая директория vless_installer/ могла остаться, т.к. cp не удаляет файлы,
+# отсутствующие в архиве).
+#
+# Логика:
+#   1. Проверяем, что chimera пакет действительно импортируется из INSTALL_DIR
+#      (это подтверждает, что обновление полное и рабочее).
+#   2. Если импорт прошёл — удаляем старую vless_installer/ если она существует
+#      (auto-cleanup, чтобы не путать пользователя неактивными старыми файлами).
+#   3. Если импорт НЕ прошёл — НЕ трогаем vless_installer/, чтобы оставить
+#      пользователю хоть что-то рабочее для восстановления.
+#   4. Дополнительно: удаляем stale __pycache__ из vless_installer/, если
+#      vless_installer/ решено оставить (defensive — должно быть пусто, но
+#      на всякий случай).
+_verify_and_cleanup_old_package() {
+    local install_dir="$1"
+
+    # Шаг 1: проверка импорта chimera
+    # Используем PYTHONPATH вместо sys.path.insert, чтобы команда была максимально простой
+    if PYTHONPATH="${install_dir}" python3 -c "import chimera; print('chimera version:', chimera.__version__)" >/dev/null 2>&1; then
+        ok "Импорт chimera проверен — обновление успешно"
+
+        # Шаг 2: авто-очистка старой vless_installer/ (если есть)
+        if [[ -d "${install_dir}/vless_installer" ]]; then
+            rm -rf "${install_dir}/vless_installer"
+            ok "Старая директория vless_installer/ удалена (auto-cleanup после успешного апгрейда)"
+        fi
+
+        # Шаг 3: defensive — удаляем stale __pycache__ от старого пакета, если остались
+        # (rm -rf vless_installer выше уже должен был их убрать, но если vless_installer/
+        # уже была удалена ранее, проверяем корень)
+        find "${install_dir}" -maxdepth 3 -type d -name "__pycache__" -path "*/vless_installer/*" -exec rm -rf {} + 2>/dev/null || true
+    else
+        # Импорт не прошёл — обновление неполное. НЕ трогаем старую vless_installer/.
+        warn "Импорт chimera не прошёл — обновление может быть неполным"
+        warn "Старая директория vless_installer/ оставлена (для возможного восстановления)"
+        warn "Проверьте ${install_dir}/chimera/ вручную или выполните:"
+        warn "  cd ${install_dir} && git reset --hard origin/${BRANCH}"
+    fi
+}
+
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
     info "Обновление существующей git-установки..."
     cd "$INSTALL_DIR"
@@ -139,6 +183,7 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
                 cp -rf "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
                 rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
                 ok "Файлы обновлены до последней версии через archive"
+                _verify_and_cleanup_old_package "$INSTALL_DIR"
             else
                 # Архив мог скачаться, но директория имеет другое имя
                 # (например, если GitHub ещё не переименован — будет VLESS-Ultimate-Installer-main)
@@ -147,6 +192,7 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
                     cp -rf "/tmp/${_alt_dir}/." "$INSTALL_DIR/"
                     rm -rf "/tmp/${_alt_dir}" "$ARCHIVE_TMP"
                     ok "Файлы обновлены через archive (legacy dir name)"
+                    _verify_and_cleanup_old_package "$INSTALL_DIR"
                 else
                     warn "Архив скачан, но директория не найдена. Проверьте /tmp/${ARCHIVE_DIR}"
                     warn "Возможно, репозиторий ещё не переименован на GitHub."
@@ -171,12 +217,14 @@ else
                 cp -rf "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
                 rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
                 ok "Файлы обновлены до последней версии через archive"
+                _verify_and_cleanup_old_package "$INSTALL_DIR"
             else
                 _alt_dir="VLESS-Ultimate-Installer-${BRANCH}"
                 if [[ -d "/tmp/${_alt_dir}" ]]; then
                     cp -rf "/tmp/${_alt_dir}/." "$INSTALL_DIR/"
                     rm -rf "/tmp/${_alt_dir}" "$ARCHIVE_TMP"
                     ok "Файлы обновлены через archive (legacy dir name)"
+                    _verify_and_cleanup_old_package "$INSTALL_DIR"
                 else
                     warn "Архив скачан, но директория не найдена. Проверьте /tmp/${ARCHIVE_DIR}"
                 fi
