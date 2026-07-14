@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================
-#  VLESS Ultimate Installer v4.25.1 — Bootstrap
-#  bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh)
+#  Chimera Project v5.0.0 — Bootstrap
+#  Multi-Protocol Anti-DPI Installer
+#  bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
 # ============================================================
 set -euo pipefail
 
@@ -19,13 +20,13 @@ info() { echo -e "  ${CYAN}→${NC} $*"; }
 
 echo -e "${CYAN}${BOLD}"
 cat << 'BANNER'
- ██╗   ██╗██╗     ███████╗███████╗███████╗
- ██║   ██║██║     ██╔════╝██╔════╝██╔════╝
- ██║   ██║██║     █████╗  ███████╗███████╗
- ╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║
-  ╚████╔╝ ███████╗███████╗███████║███████║
-   ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝
-   Ultimate Installer v4.25.1
+ ██████╗██╗  ██╗██╗███╗   ███╗███████╗██████╗  █████╗
+██╔════╝██║  ██║██║████╗ ████║██╔════╝██╔══██╗██╔══██╗
+██║     ███████║██║██╔████╔██║█████╗  ██████╔╝███████║
+██║     ██╔══██║██║██║╚██╔╝██║██╔══╝  ██╔══██╗██╔══██║
+╚██████╗██║  ██║██║██║ ╚═╝ ██║███████╗██║  ██║██║  ██║
+ ╚═════╝╚═╝  ╚═╝╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
+ Chimera Project v5.0.0 — Multi-Protocol Anti-DPI Installer
 BANNER
 echo -e "${NC}"
 
