@@ -1,4 +1,4 @@
-# VLESS Ultimate Installer — Карта проекта
+# Chimera Project — Карта проекта
 
 Полная карта всех модулей `chimera/modules/` (143 файла) + `_core.py`.
 

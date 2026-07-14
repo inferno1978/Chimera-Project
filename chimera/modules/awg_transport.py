@@ -2517,7 +2517,7 @@ def awg_watchdog_install(check_host: str = "1.1.1.1") -> None:
         #!/bin/bash
         # =============================================================================
         # AWG Tunnel Fallback Watchdog
-        # Автосгенерирован VLESS Ultimate Installer (install_final.py)
+        # Автосгенерирован Chimera Project (install_final.py)
         #
         # Проверяет ping через {AWG_INTERFACE} каждую минуту (из cron).
         # Туннель UP   → гарантирует наличие: ip rule fwmark {AWG_FWMARK} table {AWG_ROUTE_TABLE}
@@ -2610,7 +2610,7 @@ def awg_watchdog_install(check_host: str = "1.1.1.1") -> None:
 
     # Cron: каждую минуту, от root, stderr в /dev/null
     cron_line = (
-        f"# AWG Tunnel Fallback Watchdog — VLESS Ultimate Installer\n"
+        f"# AWG Tunnel Fallback Watchdog — Chimera Project\n"
         f"* * * * * root {_AWG_WATCHDOG_SCRIPT} 2>/dev/null\n"
     )
     try:
@@ -3534,7 +3534,7 @@ def awg_multinode_watchdog_install() -> None:
 
     script = textwrap.dedent(f"""\
         #!/bin/bash
-        # AWG Multi-Node Failover Watchdog — VLESS Ultimate Installer (patch v2)
+        # AWG Multi-Node Failover Watchdog — Chimera Project (patch v2)
         set -euo pipefail
 
         HOSTS=({hosts_arr})
@@ -3685,7 +3685,7 @@ except Exception as e: sys.stderr.write(str(e))
         return
 
     cron_line = (
-        f"# AWG Multi-Node Failover Watchdog — VLESS Ultimate Installer\n"
+        f"# AWG Multi-Node Failover Watchdog — Chimera Project\n"
         f"* * * * * root {_AWG_MULTINODE_WATCHDOG_SCRIPT} 2>/dev/null\n"
     )
     try:

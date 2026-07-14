@@ -706,7 +706,7 @@ def _sb_install_cron(interval_min: int = PROBE_INTERVAL_MIN) -> None:
     sh_script = textwrap.dedent(f"""\
         #!/bin/bash
         # Smart Balancer — автоматический выбор лучшей exit-ноды
-        # Установлен VLESS Ultimate Installer
+        # Установлен Chimera Project
         LOG="{_SB_LOG_FILE}"
         LOCK="/var/run/xray-smart-balancer.lock"
         DATE=$(date '+%Y-%m-%d %H:%M:%S')

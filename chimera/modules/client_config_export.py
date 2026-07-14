@@ -592,7 +592,7 @@ def do_share_config_server() -> None:
 <p class="warn">⚠️ Одноразовая ссылка — страница недоступна после этого просмотра</p>
 {body}
 <p style="font-size:11px;color:#aaa;text-align:center;margin-top:20px">
- VLESS Ultimate Installer</p>
+ Chimera Project</p>
 </body></html>"""
 
     html_content = _make_html()

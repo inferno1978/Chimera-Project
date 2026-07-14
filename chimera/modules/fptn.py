@@ -684,7 +684,7 @@ def _install_service() -> None:
 def _write_server_conf(cfg: dict) -> None:
     _CFG_DIR.mkdir(parents=True, exist_ok=True)
     lines = [
-        "# Автоматически сгенерировано VLESS Ultimate Installer — модуль fptn.py",
+        "# Автоматически сгенерировано Chimera Project — модуль fptn.py",
         "# Формат — systemd EnvironmentFile (KEY=VALUE, без кавычек)",
         "",
         f"OUT_NETWORK_INTERFACE={cfg['out_iface']}",

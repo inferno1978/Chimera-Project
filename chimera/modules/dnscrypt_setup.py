@@ -163,7 +163,7 @@ def install_dnscrypt() -> None:
         'server_names = ["cloudflare", "google"]'
     )
     DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
-        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.12.10
+        ## dnscrypt-proxy.toml — сгенерирован Chimera Project v4.12.10
         ## Слушает на {DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}
 
         listen_addresses = ['{DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}']
