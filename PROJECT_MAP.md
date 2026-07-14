@@ -1,6 +1,6 @@
 # VLESS Ultimate Installer — Карта проекта
 
-Полная карта всех модулей `vless_installer/modules/` (143 файла) + `_core.py`.
+Полная карта всех модулей `chimera/modules/` (143 файла) + `_core.py`.
 
 `_core.py` (8 093 строк) — ядро установщика: глобальное состояние, главный orchestrator `main_menu()`, `_load_state_into_globals()`, функции которые мутируют много globals (AWG, chain multi-node, install orchestration). Все модули ниже обращаются к ядру через `_core_module()` lazy binding.
 
@@ -351,7 +351,7 @@ Standalone AmneziaWG 2.0 — отдельный VPN-протокол (не за�
 ## Структура каталогов
 
 ```
-vless_installer/
+chimera/
 ├── _core.py              (8 093 строки — ядро, главный orchestrator)
 ├── __init__.py           (version = "4.25.1")
 ├── __all_exports.py      (реэкспорт API для программного доступа)
@@ -369,7 +369,7 @@ vless_installer/
 ```python
 def _core_module():
     import importlib
-    return importlib.import_module("vless_installer._core")
+    return importlib.import_module("chimera._core")
 
 def some_function():
     core = _core_module()

@@ -31,7 +31,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -41,9 +41,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 def _enter_patches(stack, patches):
@@ -133,17 +133,17 @@ class TestApplyPatchChangesCorrectFields(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_nginx._xray_config_paths",
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_nginx._xray_config_paths",
                   return_value=[self._xray_cfg]),
-            patch("vless_installer.modules.singbox_nginx._run",
+            patch("chimera.modules.singbox_nginx._run",
                   return_value=MagicMock(returncode=0, stdout="active\n", stderr="")),
         ]
 
     def test_patch_changes_listen_to_loopback(self):
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             ok = apply_reality_sni_dispatch_patch(restart_xray=False)
@@ -154,7 +154,7 @@ class TestApplyPatchChangesCorrectFields(unittest.TestCase):
                          "listen должен стать 127.0.0.1 после патча")
 
     def test_patch_changes_port_to_8442(self):
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             ok = apply_reality_sni_dispatch_patch(restart_xray=False)
@@ -165,7 +165,7 @@ class TestApplyPatchChangesCorrectFields(unittest.TestCase):
                          "port должен стать 8442 (_REALITY_LOOPBACK_PORT) после патча")
 
     def test_patch_adds_acceptProxyProtocol_true(self):
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             ok = apply_reality_sni_dispatch_patch(restart_xray=False)
@@ -180,7 +180,7 @@ class TestApplyPatchChangesCorrectFields(unittest.TestCase):
 
     def test_patch_preserves_other_sockopt_fields(self):
         """tcpFastOpen, tcpCongestion и т.д. — НЕ должны быть потеряны."""
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             ok = apply_reality_sni_dispatch_patch(restart_xray=False)
@@ -217,17 +217,17 @@ class TestPatchIdempotent(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_nginx._xray_config_paths",
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_nginx._xray_config_paths",
                   return_value=[self._xray_cfg]),
-            patch("vless_installer.modules.singbox_nginx._run",
+            patch("chimera.modules.singbox_nginx._run",
                   return_value=MagicMock(returncode=0, stdout="active\n", stderr="")),
         ]
 
     def test_double_patch_is_idempotent(self):
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             ok1 = apply_reality_sni_dispatch_patch(restart_xray=False)
@@ -242,7 +242,7 @@ class TestPatchIdempotent(unittest.TestCase):
 
     def test_double_patch_does_not_create_second_backup(self):
         """Бэкап .pre-sni-dispatch создаётся только при первом патче."""
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         backup = self._xray_cfg.with_suffix(".json.pre-sni-dispatch")
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
@@ -257,11 +257,11 @@ class TestPatchIdempotent(unittest.TestCase):
 
     def test_double_patch_does_not_overwrite_original_listen_in_state(self):
         """original_listen в state не должен перезаписываться при повторном патче."""
-        from vless_installer.modules.singbox_nginx import (
+        from chimera.modules.singbox_nginx import (
             apply_reality_sni_dispatch_patch,
             singbox_state_get_sni_dispatch,
         )
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -303,17 +303,17 @@ class TestRealityDestUntouched(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_nginx._xray_config_paths",
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_nginx._xray_config_paths",
                   return_value=[self._xray_cfg]),
-            patch("vless_installer.modules.singbox_nginx._run",
+            patch("chimera.modules.singbox_nginx._run",
                   return_value=MagicMock(returncode=0, stdout="active\n", stderr="")),
         ]
 
     def test_reality_dest_unchanged_after_patch(self):
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             apply_reality_sni_dispatch_patch(restart_xray=False)
@@ -324,7 +324,7 @@ class TestRealityDestUntouched(unittest.TestCase):
 
     def test_reality_other_fields_unchanged(self):
         """Все поля realitySettings (кроме явно затронутых) — неизменны."""
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         original_cfg = json.loads(self._xray_cfg.read_text())
         original_rs = dict(original_cfg["inbounds"][0]["streamSettings"]["realitySettings"])
         with ExitStack() as stack:
@@ -336,7 +336,7 @@ class TestRealityDestUntouched(unittest.TestCase):
                              f"realitySettings.{key} не должен измениться")
 
     def test_reality_dest_unchanged_after_revert(self):
-        from vless_installer.modules.singbox_nginx import (
+        from chimera.modules.singbox_nginx import (
             apply_reality_sni_dispatch_patch,
             revert_reality_sni_dispatch_patch,
         )
@@ -389,17 +389,17 @@ class TestPatchDoesNotTouchOtherInbounds(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_nginx._xray_config_paths",
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_nginx._xray_config_paths",
                   return_value=[self._xray_cfg]),
-            patch("vless_installer.modules.singbox_nginx._run",
+            patch("chimera.modules.singbox_nginx._run",
                   return_value=MagicMock(returncode=0, stdout="active\n", stderr="")),
         ]
 
     def test_other_inbound_untouched(self):
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             apply_reality_sni_dispatch_patch(restart_xray=False)
@@ -449,17 +449,17 @@ class TestRevertRestoresOriginal(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_nginx._xray_config_paths",
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_nginx._xray_config_paths",
                   return_value=[self._xray_cfg]),
-            patch("vless_installer.modules.singbox_nginx._run",
+            patch("chimera.modules.singbox_nginx._run",
                   return_value=MagicMock(returncode=0, stdout="active\n", stderr="")),
         ]
 
     def test_revert_via_backup_restores_original(self):
-        from vless_installer.modules.singbox_nginx import (
+        from chimera.modules.singbox_nginx import (
             apply_reality_sni_dispatch_patch,
             revert_reality_sni_dispatch_patch,
         )
@@ -479,7 +479,7 @@ class TestRevertRestoresOriginal(unittest.TestCase):
 
     def test_revert_reverse_patch_without_backup(self):
         """Если бэкап удалён — reverse-patch по state восстанавливает значения."""
-        from vless_installer.modules.singbox_nginx import (
+        from chimera.modules.singbox_nginx import (
             apply_reality_sni_dispatch_patch,
             revert_reality_sni_dispatch_patch,
         )
@@ -525,19 +525,19 @@ class TestReapplyAfterRebuild(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_nginx._xray_config_paths",
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_nginx._xray_config_paths",
                   return_value=[self._xray_cfg]),
-            patch("vless_installer.modules.singbox_nginx._run",
+            patch("chimera.modules.singbox_nginx._run",
                   return_value=MagicMock(returncode=0, stdout="active\n", stderr="")),
         ]
 
     def test_reapply_noop_when_disabled(self):
         """Если SNI-dispatch выключен — reapply ничего не делает."""
-        from vless_installer.modules.singbox_nginx import sni_dispatch_reapply_after_rebuild
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_nginx import sni_dispatch_reapply_after_rebuild
+        from chimera.modules.singbox_state import singbox_state_init
         # config.json НЕ существует — reapply должен молча вернуться
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
@@ -549,11 +549,11 @@ class TestReapplyAfterRebuild(unittest.TestCase):
 
     def test_reapply_repatches_after_regenerate(self):
         """Сценарий: config.json перезаписан generate_*, патч переприменяется."""
-        from vless_installer.modules.singbox_nginx import (
+        from chimera.modules.singbox_nginx import (
             sni_dispatch_reapply_after_rebuild,
             apply_reality_sni_dispatch_patch,
         )
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_set_sni_dispatch,
         )
         with ExitStack() as stack:
@@ -581,8 +581,8 @@ class TestReapplyAfterRebuild(unittest.TestCase):
 
     def test_reapply_skipped_in_manual_mode(self):
         """auto_configured=False (ручной режим) — reapply пропускается."""
-        from vless_installer.modules.singbox_nginx import sni_dispatch_reapply_after_rebuild
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_nginx import sni_dispatch_reapply_after_rebuild
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_set_sni_dispatch,
         )
         with ExitStack() as stack:
@@ -621,25 +621,25 @@ class TestPatchRefusesAwgXhttp(unittest.TestCase):
 
     def _patches(self, main_state_dict=None):
         patches = [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_nginx._xray_config_paths",
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_nginx._xray_config_paths",
                   return_value=[self._xray_cfg]),
-            patch("vless_installer.modules.singbox_nginx._run",
+            patch("chimera.modules.singbox_nginx._run",
                   return_value=MagicMock(returncode=0, stdout="active\n", stderr="")),
         ]
         if main_state_dict is not None:
             # _read_main_state() в singbox_nginx.py хардкодит путь — патчим саму функцию.
             # Это соответствует существующему паттерну test_singbox_sni_autoconfig.py.
             patches.append(
-                patch("vless_installer.modules.singbox_nginx._read_main_state",
+                patch("chimera.modules.singbox_nginx._read_main_state",
                       return_value=main_state_dict)
             )
         return patches
 
     def test_patch_refuses_xhttp_mode(self):
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         original_content = self._xray_cfg.read_text()
         with ExitStack() as stack:
             _enter_patches(stack, self._patches(main_state_dict={
@@ -652,7 +652,7 @@ class TestPatchRefusesAwgXhttp(unittest.TestCase):
                          "config.json НЕ должен быть изменён в xHTTP-режиме")
 
     def test_patch_refuses_awg_mode(self):
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         original_content = self._xray_cfg.read_text()
         with ExitStack() as stack:
             _enter_patches(stack, self._patches(main_state_dict={
@@ -666,7 +666,7 @@ class TestPatchRefusesAwgXhttp(unittest.TestCase):
 
     def test_patch_skip_mode_check_bypasses_guard(self):
         """skip_mode_check=True — для reapply где проверка уже выполнена выше."""
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         with ExitStack() as stack:
             _enter_patches(stack, self._patches(main_state_dict={
                 "protocol_mode": "xhttp",
@@ -705,17 +705,17 @@ class TestBackupCreation(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_nginx._xray_config_paths",
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_nginx._xray_config_paths",
                   return_value=[self._xray_cfg]),
-            patch("vless_installer.modules.singbox_nginx._run",
+            patch("chimera.modules.singbox_nginx._run",
                   return_value=MagicMock(returncode=0, stdout="active\n", stderr="")),
         ]
 
     def test_backup_created_on_first_patch(self):
-        from vless_installer.modules.singbox_nginx import apply_reality_sni_dispatch_patch
+        from chimera.modules.singbox_nginx import apply_reality_sni_dispatch_patch
         backup = self._xray_cfg.with_suffix(".json.pre-sni-dispatch")
         self.assertFalse(backup.exists(), "До патча бэкапа быть не должно")
         with ExitStack() as stack:
@@ -727,7 +727,7 @@ class TestBackupCreation(unittest.TestCase):
 
     def test_backup_suffix_matches_nginx_convention(self):
         """Suffix .pre-sni-dispatch — для консистентности с nginx бэкапом."""
-        from vless_installer.modules.singbox_nginx import (
+        from chimera.modules.singbox_nginx import (
             apply_reality_sni_dispatch_patch, _XRAY_CONFIG_BACKUP_SUFFIX,
             _NGINX_HTTP_BACKUP_SUFFIX,
         )
@@ -746,14 +746,14 @@ class TestFindRealityInboundFallback(unittest.TestCase):
         _setup_core()
 
     def test_finds_by_tag_inbound_vless(self):
-        from vless_installer.modules.singbox_nginx import _find_reality_inbound
+        from chimera.modules.singbox_nginx import _find_reality_inbound
         cfg = {"inbounds": [{"tag": "inbound-vless", "streamSettings": {"security": "reality"}}]}
         ib = _find_reality_inbound(cfg)
         self.assertIsNotNone(ib)
         self.assertEqual(ib["tag"], "inbound-vless")
 
     def test_falls_back_to_security_reality(self):
-        from vless_installer.modules.singbox_nginx import _find_reality_inbound
+        from chimera.modules.singbox_nginx import _find_reality_inbound
         cfg = {"inbounds": [
             {"tag": "other", "streamSettings": {"security": "tls"}},
             {"tag": "renamed-inbound", "streamSettings": {"security": "reality"}},
@@ -764,7 +764,7 @@ class TestFindRealityInboundFallback(unittest.TestCase):
                          "Должен найти REALITY-инбаунд по security, даже если tag переименован")
 
     def test_returns_none_when_no_reality_inbound(self):
-        from vless_installer.modules.singbox_nginx import _find_reality_inbound
+        from chimera.modules.singbox_nginx import _find_reality_inbound
         cfg = {"inbounds": [{"tag": "xhttp-in", "streamSettings": {"security": "tls"}}]}
         ib = _find_reality_inbound(cfg)
         self.assertIsNone(ib)

@@ -2,7 +2,7 @@
 """
 tests/test_chain_nodes.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/chain_nodes.py — управление exit-нодами
+Unit-тесты для chimera/modules/chain_nodes.py — управление exit-нодами
 каскада (Режим B), генерация Xray-конфигов для Entry/Exit, мульти-нодовая
 балансировка.
 
@@ -43,7 +43,7 @@ def _setup_core_in_sysmodules():
     выполнялся без побочных эффектов на ФС и без требования root.
     Копируется из tests/test_health.py без изменений (эталонный паттерн).
     """
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -52,9 +52,9 @@ def _setup_core_in_sysmodules():
          patch('os.chown', lambda *a, **kw: None), \
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -69,7 +69,7 @@ class TestNodesFromState(unittest.TestCase):
 
     def test_new_format_chain_nodes_list(self):
         """Новый формат: state['chain_nodes'] = [...] — возвращает как есть."""
-        from vless_installer.modules.chain_nodes import _nodes_from_state
+        from chimera.modules.chain_nodes import _nodes_from_state
         nodes = [
             {"host": "1.1.1.1", "port": 443, "uuid": "u1"},
             {"host": "2.2.2.2", "port": 8443, "uuid": "u2"},
@@ -79,12 +79,12 @@ class TestNodesFromState(unittest.TestCase):
 
     def test_new_format_empty_list(self):
         """chain_nodes = [] — возвращает пустой список."""
-        from vless_installer.modules.chain_nodes import _nodes_from_state
+        from chimera.modules.chain_nodes import _nodes_from_state
         self.assertEqual(_nodes_from_state({"chain_nodes": []}), [])
 
     def test_legacy_format_single_node(self):
         """Старый формат: chain_exit_host/port/uuid/... → список из одной ноды."""
-        from vless_installer.modules.chain_nodes import _nodes_from_state
+        from chimera.modules.chain_nodes import _nodes_from_state
         state = {
             "chain_exit_host":    "exit.example.com",
             "chain_exit_port":    8443,
@@ -107,7 +107,7 @@ class TestNodesFromState(unittest.TestCase):
 
     def test_legacy_format_default_fp_is_chrome(self):
         """В legacy-формате fp по умолчанию = 'chrome'."""
-        from vless_installer.modules.chain_nodes import _nodes_from_state
+        from chimera.modules.chain_nodes import _nodes_from_state
         state = {"chain_exit_host": "h.example.com"}
         # port также по умолчанию 443
         result = _nodes_from_state(state)
@@ -116,17 +116,17 @@ class TestNodesFromState(unittest.TestCase):
 
     def test_empty_state_returns_empty_list(self):
         """Пустой state — пустой список."""
-        from vless_installer.modules.chain_nodes import _nodes_from_state
+        from chimera.modules.chain_nodes import _nodes_from_state
         self.assertEqual(_nodes_from_state({}), [])
 
     def test_legacy_host_empty_returns_empty(self):
         """legacy-формат, но host пустой — пустой список."""
-        from vless_installer.modules.chain_nodes import _nodes_from_state
+        from chimera.modules.chain_nodes import _nodes_from_state
         self.assertEqual(_nodes_from_state({"chain_exit_host": ""}), [])
 
     def test_chain_nodes_null_falls_back_to_legacy(self):
         """chain_nodes=null + есть chain_exit_host → legacy fallback."""
-        from vless_installer.modules.chain_nodes import _nodes_from_state
+        from chimera.modules.chain_nodes import _nodes_from_state
         state = {
             "chain_nodes": None,  # не list → fallback на legacy
             "chain_exit_host": "legacy.example.com",
@@ -138,7 +138,7 @@ class TestNodesFromState(unittest.TestCase):
 
     def test_chain_nodes_not_list_ignored(self):
         """chain_nodes — не list (например dict) → fallback на legacy."""
-        from vless_installer.modules.chain_nodes import _nodes_from_state
+        from chimera.modules.chain_nodes import _nodes_from_state
         state = {
             "chain_nodes": {"host": "this is wrong type"},
             "chain_exit_host": "real.example.com",
@@ -159,7 +159,7 @@ class TestMakeExitNodeConfig(unittest.TestCase):
 
     def test_xhttp_branch_builds_tls_inbound(self):
         """xhttp-нода: inbound с tlsSettings + сертификаты по sni."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         # Патчим только две helpers из core — остальное берётся из fake_core.
         with patch.object(self._fake_core, "_build_exit_xhttp_settings",
                           return_value={"path": "/x", "mode": "streamup"}), \
@@ -195,7 +195,7 @@ class TestMakeExitNodeConfig(unittest.TestCase):
 
     def test_reality_branch_builds_reality_inbound(self):
         """reality-нода: inbound с realitySettings + placeholder приватного ключа."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         with patch.object(self._fake_core, "_build_exit_xhttp_settings",
                           return_value={}), \
              patch.object(self._fake_core, "_build_sockopt",
@@ -230,7 +230,7 @@ class TestMakeExitNodeConfig(unittest.TestCase):
 
     def test_default_proto_is_reality(self):
         """Если в nd нет поля 'proto' — fallback на reality-ветку."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         with patch.object(self._fake_core, "_build_exit_xhttp_settings",
                           return_value={}), \
              patch.object(self._fake_core, "_build_sockopt",
@@ -250,7 +250,7 @@ class TestMakeExitNodeConfig(unittest.TestCase):
 
     def test_config_has_dns_and_routing_blocks(self):
         """Конфиг содержит DNS, outbounds (direct+BLOCK), routing с правилами."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         with patch.object(self._fake_core, "_build_exit_xhttp_settings",
                           return_value={}), \
              patch.object(self._fake_core, "_build_sockopt",
@@ -282,7 +282,7 @@ class TestMakeExitNodeConfig(unittest.TestCase):
 
     def test_xhttp_tcp_no_delay_inserted_when_enabled(self):
         """XHTTP_TCP_NO_DELAY=True → sockopt.tcpNoDelay=True в inbound."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         with patch.object(self._fake_core, "_build_exit_xhttp_settings",
                           return_value={}), \
              patch.object(self._fake_core, "_build_sockopt",
@@ -311,7 +311,7 @@ class TestSpeedTestNodeLatency(unittest.TestCase):
         self._fake_core = _setup_core_in_sysmodules()
 
     def test_success_returns_ms(self):
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         fake_sock = MagicMock()
         with patch("socket.gethostbyname", return_value="1.2.3.4"), \
              patch("socket.create_connection", return_value=fake_sock):
@@ -320,7 +320,7 @@ class TestSpeedTestNodeLatency(unittest.TestCase):
         fake_sock.close.assert_called_once()
 
     def test_timeout_returns_timeout_string(self):
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         with patch("socket.gethostbyname", return_value="1.2.3.4"), \
              patch("socket.create_connection",
                    side_effect=socket.timeout("timed out")):
@@ -328,7 +328,7 @@ class TestSpeedTestNodeLatency(unittest.TestCase):
         self.assertIn("таймаут", result)
 
     def test_dns_failure_returns_error_string(self):
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         with patch("socket.gethostbyname",
                    side_effect=socket.gaierror("DNS fail")):
             result = chain_nodes._speed_test_node_latency("nonexistent.invalid", 443)
@@ -345,7 +345,7 @@ class TestSpeedTestNodeGeo(unittest.TestCase):
         self._fake_core = _setup_core_in_sysmodules()
 
     def test_success_returns_geo_tuple(self):
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         api_response = json.dumps({
             "status": "success",
             "country": "Germany",
@@ -367,7 +367,7 @@ class TestSpeedTestNodeGeo(unittest.TestCase):
         self.assertEqual(isp, "Hetzner")
 
     def test_failed_status_returns_unknown(self):
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         api_response = json.dumps({"status": "fail", "query": "1.2.3.4"})
         with patch("socket.gethostbyname", return_value="1.2.3.4"), \
              patch.object(self._fake_core, "_run",
@@ -380,7 +380,7 @@ class TestSpeedTestNodeGeo(unittest.TestCase):
         self.assertEqual(country, "неизвестно")
 
     def test_curl_failure_returns_unknown(self):
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         with patch("socket.gethostbyname", return_value="1.2.3.4"), \
              patch.object(self._fake_core, "_run",
                           return_value=MagicMock(returncode=1,
@@ -391,7 +391,7 @@ class TestSpeedTestNodeGeo(unittest.TestCase):
         self.assertEqual(cc, "??")
 
     def test_dns_failure_returns_host_as_ip(self):
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         with patch("socket.gethostbyname",
                    side_effect=socket.gaierror("DNS fail")):
             ip, cc, country, city, isp = chain_nodes._speed_test_node_geo("nonexist.invalid")
@@ -421,14 +421,14 @@ class TestAccessLogBytesPerNode(unittest.TestCase):
                             self._log_path, create=True)
 
     def test_empty_log_returns_zero_for_all_nodes(self):
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         nodes = [{"host": "1.1.1.1"}, {"host": "2.2.2.2"}]
         with self._patch_log(""):
             result = chain_nodes._access_log_bytes_per_node(nodes)
         self.assertEqual(result, {"1.1.1.1": 0, "2.2.2.2": 0})
 
     def test_log_missing_returns_zero_for_all_nodes(self):
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         nodes = [{"host": "1.1.1.1"}]
         with patch.object(self._fake_core, "DIAG_ACCESS_LOG",
                           Path("/tmp/nonexistent_log_xyz.log"), create=True):
@@ -437,7 +437,7 @@ class TestAccessLogBytesPerNode(unittest.TestCase):
 
     def test_chain_exit_tag_mapped_to_correct_node(self):
         """chain-exit-1 → nodes[0], chain-exit-2 → nodes[1]."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         from datetime import datetime as _dt
         import time as _time
         nodes = [{"host": "1.1.1.1"}, {"host": "2.2.2.2"}]
@@ -456,7 +456,7 @@ class TestAccessLogBytesPerNode(unittest.TestCase):
 
     def test_balancer_tag_mapped_to_first_node(self):
         """Тег 'balancer' / 'chain-balancer' всегда уходит в nodes[0] (последняя запись выигрывает)."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         from datetime import datetime as _dt
         import time as _time
         nodes = [{"host": "1.1.1.1"}, {"host": "2.2.2.2"}]
@@ -474,7 +474,7 @@ class TestAccessLogBytesPerNode(unittest.TestCase):
 
     def test_unknown_tag_ignored(self):
         """Тег, которого нет в tag_to_host — игнорируется."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         nodes = [{"host": "1.1.1.1"}]
         log = (
             "2025/01/01 12:00:00 "
@@ -486,7 +486,7 @@ class TestAccessLogBytesPerNode(unittest.TestCase):
 
     def test_old_entries_outside_window_ignored(self):
         """Записи старше hours — игнорируются."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         import time as _time
         nodes = [{"host": "1.1.1.1"}]
         # Запись 48 часов назад — за окном по умолчанию 24 часа
@@ -612,7 +612,7 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
         127.0.0.1:XHTTP_BACKEND_PORT (8443), НЕ 0.0.0.0:443.
         security='none', tlsSettings отсутствует.
         """
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         self._prepare_fake_core()
         # /usr/local/etc/xray не должен существовать, чтобы skip symlink-блок
         with patch.object(Path, "exists",
@@ -651,7 +651,7 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
 
     def test_xhttp_inbound_has_no_tls_certificates(self):
         """Доп. проверка: в inbound нет ссылок на сертификаты Let's Encrypt."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         self._prepare_fake_core()
         with patch.object(Path, "exists",
                           lambda self: False if "usr/local/etc/xray" in str(self)
@@ -670,7 +670,7 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
         Unix-сокет (PARAM_SOCKET_PATH) — это рабочая схема Nginx+Xray.
         Здесь проверяем что reality-ветка действительно использует socket.
         """
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         self._prepare_fake_core(PROTOCOL_MODE="reality")
         with patch.object(Path, "exists",
                           lambda self: False if "usr/local/etc/xray" in str(self)
@@ -687,7 +687,7 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
 
     def test_round_robin_single_node_no_balancer(self):
         """1 нода → balancers пустой, routing rule ссылается на chain-exit-1 напрямую."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         self._prepare_fake_core()
         with patch.object(Path, "exists",
                           lambda self: False if "usr/local/etc/xray" in str(self)
@@ -708,7 +708,7 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
 
     def test_least_ping_strategy_with_multiple_nodes_uses_observatory(self):
         """3 ноды + leastPing → balancers + observatory с probeUrl."""
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         self._prepare_fake_core(CHAIN_BALANCER_STRATEGY="leastPing")
         # Делаем 3 ноды
         self._fake_core.CHAIN_NODES = [
@@ -753,7 +753,7 @@ class TestSaveChainNodesToState(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_writes_chain_nodes_field(self):
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         c = self._fake_core
         c.STATE_FILE = self._state_file
         c.CHAIN_NODES = [{"host": "h", "port": 443, "uuid": "u",
@@ -770,7 +770,7 @@ class TestSaveChainNodesToState(unittest.TestCase):
         self.assertEqual(st["chain_exit_port"], 443)
 
     def test_warns_when_state_missing(self):
-        from vless_installer.modules import chain_nodes
+        from chimera.modules import chain_nodes
         c = self._fake_core
         c.STATE_FILE = Path("/tmp/nonexistent_state_xyz.json")
         c.CHAIN_NODES = []

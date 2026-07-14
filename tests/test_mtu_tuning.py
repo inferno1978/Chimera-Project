@@ -2,7 +2,7 @@
 """
 tests/test_mtu_tuning.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/mtu_tuning.py.
+Unit-тесты для chimera/modules/mtu_tuning.py.
 
 Покрывает:
   1. _mtu_state_load / _mtu_state_save — JSON I/O
@@ -21,7 +21,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -31,9 +31,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestMtuStateLoadSave(unittest.TestCase):
@@ -49,21 +49,21 @@ class TestMtuStateLoadSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.mtu_tuning._MTU_STATE_FILE", self._state)
+        return patch("chimera.modules.mtu_tuning._MTU_STATE_FILE", self._state)
 
     def test_load_returns_empty_when_no_file(self):
-        from vless_installer.modules.mtu_tuning import _mtu_state_load
+        from chimera.modules.mtu_tuning import _mtu_state_load
         with self._patch():
             self.assertEqual(_mtu_state_load(), {})
 
     def test_load_returns_empty_on_corrupt(self):
-        from vless_installer.modules.mtu_tuning import _mtu_state_load
+        from chimera.modules.mtu_tuning import _mtu_state_load
         self._state.write_text("{invalid")
         with self._patch():
             self.assertEqual(_mtu_state_load(), {})
 
     def test_save_then_load(self):
-        from vless_installer.modules.mtu_tuning import _mtu_state_load, _mtu_state_save
+        from chimera.modules.mtu_tuning import _mtu_state_load, _mtu_state_save
         data = {"mtu": 1280, "iface": "eth0"}
         with self._patch():
             _mtu_state_save(data)

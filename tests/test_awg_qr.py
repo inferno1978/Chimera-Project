@@ -2,7 +2,7 @@
 """
 tests/test_awg_qr.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/awg_qr.py.
+Unit-тесты для chimera/modules/awg_qr.py.
 
 Покрывает:
   1. awgs_qr_build_client_conf — генерация .conf
@@ -27,7 +27,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -37,9 +37,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 def _peer(name="alice", **overrides):
@@ -83,46 +83,46 @@ class TestBuildClientConf(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_has_interface_section(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
         self.assertIn("[Interface]", conf)
         self.assertIn("[Peer]", conf)
 
     def test_includes_private_key(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
         self.assertIn("PrivateKey = CLIENT_PRIV_KEY", conf)
 
     def test_includes_address_v4(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
         self.assertIn("Address = 10.66.66.2/32", conf)
 
     def test_includes_endpoint(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
         # endpoint_host приоритетнее endpoint
         self.assertIn("Endpoint = vpn.example.com:51820", conf)
 
     def test_endpoint_fallback_to_endpoint_ip(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         state = _server_state(endpoint_host="")
         conf = awgs_qr_build_client_conf(_peer(), state)
         self.assertIn("Endpoint = 1.2.3.4:51820", conf)
 
     def test_includes_psk_when_present(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
         self.assertIn("PresharedKey = PSK_KEY", conf)
 
     def test_omits_psk_when_empty(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         peer = _peer(preshared_key="")
         conf = awgs_qr_build_client_conf(peer, _server_state())
         self.assertNotIn("PresharedKey", conf)
 
     def test_includes_awg_params(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
         self.assertIn("Jc = 4", conf)
         self.assertIn("Jmin = 40", conf)
@@ -131,36 +131,36 @@ class TestBuildClientConf(unittest.TestCase):
         self.assertIn("H4 = 4", conf)
 
     def test_includes_i1_when_present(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         state = _server_state()
         state["params"]["i1"] = "deadbeef"
         conf = awgs_qr_build_client_conf(_peer(), state)
         self.assertIn("I1 = deadbeef", conf)
 
     def test_omits_i1_when_empty(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
         self.assertNotIn("I1 =", conf)
 
     def test_includes_ipv6_address_when_enabled(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         state = _server_state(allow_ipv6_tunnel=True)
         conf = awgs_qr_build_client_conf(_peer(), state)
         self.assertIn("fd66:66:66::2/128", conf)
         self.assertIn("::/0", conf)
 
     def test_omits_ipv6_address_when_disabled(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
         self.assertNotIn("::/0", conf)
 
     def test_persistent_keepalive(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
         self.assertIn("PersistentKeepalive = 25", conf)
 
     def test_custom_dns(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_client_conf
+        from chimera.modules.awg_qr import awgs_qr_build_client_conf
         peer = _peer(dns1="9.9.9.9", dns2="149.112.112.112")
         conf = awgs_qr_build_client_conf(peer, _server_state())
         self.assertIn("DNS = 9.9.9.9, 149.112.112.112", conf)
@@ -173,12 +173,12 @@ class TestBuildVpnUri(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_starts_with_vpn_scheme(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_vpn_uri
+        from chimera.modules.awg_qr import awgs_qr_build_vpn_uri
         uri = awgs_qr_build_vpn_uri(_peer(), _server_state())
         self.assertTrue(uri.startswith("vpn://free/"))
 
     def test_has_two_base64_segments(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_vpn_uri
+        from chimera.modules.awg_qr import awgs_qr_build_vpn_uri
         uri = awgs_qr_build_vpn_uri(_peer(), _server_state())
         # vpn://free/<outer_b64>/<inner_b64>
         parts = uri.split("/")
@@ -192,7 +192,7 @@ class TestBuildVpnUri(unittest.TestCase):
         self.assertIn("awg", outer["containers"][0])
 
     def test_inner_contains_awg_params(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_vpn_uri
+        from chimera.modules.awg_qr import awgs_qr_build_vpn_uri
         uri = awgs_qr_build_vpn_uri(_peer(), _server_state())
         parts = uri.split("/")
         inner = json.loads(base64.b64decode(parts[4]))
@@ -202,7 +202,7 @@ class TestBuildVpnUri(unittest.TestCase):
         self.assertEqual(inner["H1"], "1")
 
     def test_inner_contains_endpoint(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_vpn_uri
+        from chimera.modules.awg_qr import awgs_qr_build_vpn_uri
         uri = awgs_qr_build_vpn_uri(_peer(), _server_state())
         parts = uri.split("/")
         inner = json.loads(base64.b64decode(parts[4]))
@@ -210,7 +210,7 @@ class TestBuildVpnUri(unittest.TestCase):
         self.assertEqual(inner["port"], 51820)
 
     def test_inner_contains_keys(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_vpn_uri
+        from chimera.modules.awg_qr import awgs_qr_build_vpn_uri
         uri = awgs_qr_build_vpn_uri(_peer(), _server_state())
         parts = uri.split("/")
         inner = json.loads(base64.b64decode(parts[4]))
@@ -219,7 +219,7 @@ class TestBuildVpnUri(unittest.TestCase):
         self.assertEqual(inner["psk_key"], "PSK_KEY")
 
     def test_inner_omits_psk_when_empty(self):
-        from vless_installer.modules.awg_qr import awgs_qr_build_vpn_uri
+        from chimera.modules.awg_qr import awgs_qr_build_vpn_uri
         peer = _peer(preshared_key="")
         uri = awgs_qr_build_vpn_uri(peer, _server_state())
         parts = uri.split("/")
@@ -240,7 +240,7 @@ class TestSaveClientConf(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_saves_to_keys_dir(self):
-        from vless_installer.modules import awg_qr
+        from chimera.modules import awg_qr
         with patch.object(awg_qr, "AWGS_KEYS_DIR", self._keys_dir):
             path = awg_qr.awgs_qr_save_client_conf(_peer(), _server_state())
             self.assertIsNotNone(path)
@@ -249,14 +249,14 @@ class TestSaveClientConf(unittest.TestCase):
 
     def test_sets_chmod_600(self):
         """Приватный ключ в .conf — права 0o600."""
-        from vless_installer.modules import awg_qr
+        from chimera.modules import awg_qr
         with patch.object(awg_qr, "AWGS_KEYS_DIR", self._keys_dir):
             path = awg_qr.awgs_qr_save_client_conf(_peer(), _server_state())
             mode = stat.S_IMODE(os.stat(path).st_mode)
             self.assertEqual(mode, 0o600)
 
     def test_creates_keys_dir_with_0o700(self):
-        from vless_installer.modules import awg_qr
+        from chimera.modules import awg_qr
         with patch.object(awg_qr, "AWGS_KEYS_DIR", self._keys_dir):
             awg_qr.awgs_qr_save_client_conf(_peer(), _server_state())
             self.assertTrue(self._keys_dir.exists())
@@ -264,7 +264,7 @@ class TestSaveClientConf(unittest.TestCase):
             self.assertEqual(mode, 0o700)
 
     def test_returns_none_on_exception(self):
-        from vless_installer.modules import awg_qr
+        from chimera.modules import awg_qr
         # Директория read-only — chmod упадёт, но write_text тоже
         with patch.object(awg_qr, "AWGS_KEYS_DIR", Path("/proc/nonexistent/keys")):
             result = awg_qr.awgs_qr_save_client_conf(_peer(), _server_state())
@@ -278,15 +278,15 @@ class TestQrShowTerminal(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_false_when_qrencode_missing(self):
-        from vless_installer.modules import awg_qr
-        with patch("vless_installer._core._run") as mock_run:
+        from chimera.modules import awg_qr
+        with patch("chimera._core._run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
             result = awg_qr.awgs_qr_show_terminal("content")
             self.assertFalse(result)
 
     def test_returns_true_when_qrencode_ok(self):
-        from vless_installer.modules import awg_qr
-        with patch("vless_installer._core._run") as mock_run:
+        from chimera.modules import awg_qr
+        with patch("chimera._core._run") as mock_run:
             # which qrencode → 0, qrencode → 0 + stdout
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="/usr/bin/qrencode", stderr=""),
@@ -308,16 +308,16 @@ class TestQrSavePng(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_returns_false_when_qrencode_missing(self):
-        from vless_installer.modules import awg_qr
-        with patch("vless_installer._core._run") as mock_run:
+        from chimera.modules import awg_qr
+        with patch("chimera._core._run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
             result = awg_qr.awgs_qr_save_png("content", self._tmpdir / "out.png")
             self.assertFalse(result)
 
     def test_returns_true_on_success(self):
-        from vless_installer.modules import awg_qr
+        from chimera.modules import awg_qr
         png_path = self._tmpdir / "out.png"
-        with patch("vless_installer._core._run") as mock_run:
+        with patch("chimera._core._run") as mock_run:
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="/usr/bin/qrencode", stderr=""),
                 MagicMock(returncode=0, stdout="", stderr=""),

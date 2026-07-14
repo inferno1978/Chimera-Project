@@ -29,7 +29,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core_in_sysmodules():
     """Загружает _core.py в sys.modules как fake module (стандартный паттерн)."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -39,9 +39,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 # ============================================================================
@@ -57,7 +57,7 @@ class TestMtprotoGetLatestRelease(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import mtproto
+        from chimera.modules import mtproto
         cls.mtproto = mtproto
 
     def test_returns_tuple(self):
@@ -85,7 +85,7 @@ class TestPanelGetLatestRelease(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import telemt_panel
+        from chimera.modules import telemt_panel
         cls.panel = telemt_panel
 
     def test_returns_tuple(self):
@@ -118,7 +118,7 @@ class TestTelemtVsPanelDifferentRepos(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_telemt_urls_contain_telemt_telemt(self):
-        from vless_installer.modules.telemt_packages import TELEMT_SPEC
+        from chimera.modules.telemt_packages import TELEMT_SPEC
         urls = TELEMT_SPEC.mirror_urls_builder(
             filename=TELEMT_SPEC.filename_builder()
         )
@@ -128,7 +128,7 @@ class TestTelemtVsPanelDifferentRepos(unittest.TestCase):
                               "TELEMT_SPEC URLs должны содержать telemt/telemt")
 
     def test_panel_urls_contain_amirotin_telemt_panel(self):
-        from vless_installer.modules.telemt_packages import TELEMT_PANEL_SPEC
+        from chimera.modules.telemt_packages import TELEMT_PANEL_SPEC
         urls = TELEMT_PANEL_SPEC.mirror_urls_builder(
             filename=TELEMT_PANEL_SPEC.filename_builder()
         )
@@ -139,7 +139,7 @@ class TestTelemtVsPanelDifferentRepos(unittest.TestCase):
 
     def test_no_cross_contamination(self):
         """telemt URLs не содержат amirotin, panel URLs не содержат telemt/telemt."""
-        from vless_installer.modules.telemt_packages import TELEMT_SPEC, TELEMT_PANEL_SPEC
+        from chimera.modules.telemt_packages import TELEMT_SPEC, TELEMT_PANEL_SPEC
         telemt_urls = TELEMT_SPEC.mirror_urls_builder(
             filename=TELEMT_SPEC.filename_builder()
         )
@@ -157,7 +157,7 @@ class TestTelemtVsPanelDifferentRepos(unittest.TestCase):
 
     def test_different_specs_not_same_object(self):
         """TELEMT_SPEC и TELEMT_PANEL_SPEC — разные объекты."""
-        from vless_installer.modules.telemt_packages import TELEMT_SPEC, TELEMT_PANEL_SPEC
+        from chimera.modules.telemt_packages import TELEMT_SPEC, TELEMT_PANEL_SPEC
         self.assertIsNot(TELEMT_SPEC, TELEMT_PANEL_SPEC)
         self.assertNotEqual(TELEMT_SPEC.name, TELEMT_PANEL_SPEC.name)
 

@@ -35,14 +35,14 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Создаёт фейковый vless_installer._core (как в test_tg_bot.py).
+    """Создаёт фейковый chimera._core (как в test_tg_bot.py).
 
     Возвращает (fake_core, globals_dict) — globals_dict это тот самый dict
     который был передан в exec() и стал __globals__ для всех функций в
     _core.py. patch.dict на fake_core.__dict__ НЕ работает (это отдельная
     копия), нужно патчить именно globals_dict.
     """
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -52,9 +52,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core, g
 
 
@@ -149,18 +149,18 @@ class TestBug4HealthScreenShowsActualPort(unittest.TestCase):
     def test_health_check_dns_redirect_returns_port_key(self):
         """Прямая проверка: health_check_dns_redirect() возвращает dict
         с ключом 'port'. На старом коде этого ключа не было."""
-        from vless_installer.modules import dns_redirect
+        from chimera.modules import dns_redirect
         # Мокаем все внешние вызовы чтобы получить детерминированный результат
-        with patch("vless_installer.modules.dns_redirect.state_load",
+        with patch("chimera.modules.dns_redirect.state_load",
                    return_value={"enabled": False, "target_port": 6000,
                                  "iface_filter": "awg0"}), \
-             patch("vless_installer.modules.dns_redirect.is_dnscrypt_active",
+             patch("chimera.modules.dns_redirect.is_dnscrypt_active",
                    return_value=True), \
-             patch("vless_installer.modules.dns_redirect.is_port_listening",
+             patch("chimera.modules.dns_redirect.is_port_listening",
                    return_value=True), \
-             patch("vless_installer.modules.dns_redirect._check_rules_applied",
+             patch("chimera.modules.dns_redirect._check_rules_applied",
                    return_value=False), \
-             patch("vless_installer.modules.dns_redirect.get_dnscrypt_listen_ipv6",
+             patch("chimera.modules.dns_redirect.get_dnscrypt_listen_ipv6",
                    return_value=False):
             hc = dns_redirect.health_check_dns_redirect()
         # Bug 4: ключ "port" должен присутствовать

@@ -2,7 +2,7 @@
 """
 tests/test_config_backup.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/config_backup.py.
+Unit-тесты для chimera/modules/config_backup.py.
 
 Покрывает:
   1. _parse_backup_ts — парсинг timestamp
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -35,9 +35,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestConfigBackup(unittest.TestCase):
@@ -47,14 +47,14 @@ class TestConfigBackup(unittest.TestCase):
     def tearDown(self):
         import shutil; shutil.rmtree(self._tmp, ignore_errors=True)
     def test_parse_backup_ts_valid(self):
-        from vless_installer.modules.config_backup import _parse_backup_ts
+        from chimera.modules.config_backup import _parse_backup_ts
         ts = _parse_backup_ts("config-20260710-120000.json")
         self.assertGreater(ts, 0)
     def test_parse_backup_ts_invalid(self):
-        from vless_installer.modules.config_backup import _parse_backup_ts
+        from chimera.modules.config_backup import _parse_backup_ts
         self.assertEqual(_parse_backup_ts("invalid.json"), 0.0)
     def test_backup_filename_format(self):
-        from vless_installer.modules.config_backup import _backup_filename, BACKUP_PREFIX, BACKUP_SUFFIX
+        from chimera.modules.config_backup import _backup_filename, BACKUP_PREFIX, BACKUP_SUFFIX
         name = _backup_filename()
         self.assertTrue(name.startswith(BACKUP_PREFIX))
         self.assertTrue(name.endswith(BACKUP_SUFFIX))

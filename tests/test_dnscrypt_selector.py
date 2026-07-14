@@ -2,7 +2,7 @@
 """
 tests/test_dnscrypt_selector.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/dnscrypt_selector.py.
+Unit-тесты для chimera/modules/dnscrypt_selector.py.
 
 Покрывает:
   1. _get_dnscrypt_port — чтение порта из конфига
@@ -26,7 +26,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -36,9 +36,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestGetDnscryptPort(unittest.TestCase):
@@ -54,21 +54,21 @@ class TestGetDnscryptPort(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.dnscrypt_selector._DNSCRYPT_CONF", self._cfg)
+        return patch("chimera.modules.dnscrypt_selector._DNSCRYPT_CONF", self._cfg)
 
     def test_returns_default_when_no_file(self):
-        from vless_installer.modules.dnscrypt_selector import _get_dnscrypt_port
+        from chimera.modules.dnscrypt_selector import _get_dnscrypt_port
         with self._patch():
             self.assertEqual(_get_dnscrypt_port(), 5300)
 
     def test_returns_port_from_config(self):
-        from vless_installer.modules.dnscrypt_selector import _get_dnscrypt_port
+        from chimera.modules.dnscrypt_selector import _get_dnscrypt_port
         self._cfg.write_text("listen_addresses = ['127.0.0.1:5300']\n")
         with self._patch():
             self.assertEqual(_get_dnscrypt_port(), 5300)
 
     def test_returns_default_when_no_listen_addresses(self):
-        from vless_installer.modules.dnscrypt_selector import _get_dnscrypt_port
+        from chimera.modules.dnscrypt_selector import _get_dnscrypt_port
         self._cfg.write_text("server_names = ['cloudflare']\n")
         with self._patch():
             self.assertEqual(_get_dnscrypt_port(), 5300)
@@ -87,22 +87,22 @@ class TestGetCurrentServerNames(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.dnscrypt_selector._DNSCRYPT_CONF", self._cfg)
+        return patch("chimera.modules.dnscrypt_selector._DNSCRYPT_CONF", self._cfg)
 
     def test_returns_empty_when_no_file(self):
-        from vless_installer.modules.dnscrypt_selector import _get_current_server_names
+        from chimera.modules.dnscrypt_selector import _get_current_server_names
         with self._patch():
             self.assertEqual(_get_current_server_names(), [])
 
     def test_returns_server_names(self):
-        from vless_installer.modules.dnscrypt_selector import _get_current_server_names
+        from chimera.modules.dnscrypt_selector import _get_current_server_names
         self._cfg.write_text("server_names = ['cloudflare', 'google']\n")
         with self._patch():
             result = _get_current_server_names()
         self.assertEqual(result, ["cloudflare", "google"])
 
     def test_returns_empty_when_no_server_names(self):
-        from vless_installer.modules.dnscrypt_selector import _get_current_server_names
+        from chimera.modules.dnscrypt_selector import _get_current_server_names
         self._cfg.write_text("listen_addresses = ['127.0.0.1:5300']\n")
         with self._patch():
             self.assertEqual(_get_current_server_names(), [])
@@ -121,10 +121,10 @@ class TestApplyServerNames(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.dnscrypt_selector._DNSCRYPT_CONF", self._cfg)
+        return patch("chimera.modules.dnscrypt_selector._DNSCRYPT_CONF", self._cfg)
 
     def test_replaces_existing_server_names(self):
-        from vless_installer.modules.dnscrypt_selector import _apply_server_names
+        from chimera.modules.dnscrypt_selector import _apply_server_names
         self._cfg.write_text("server_names = ['old']\n")
         with self._patch():
             result = _apply_server_names(["new1", "new2"])
@@ -135,7 +135,7 @@ class TestApplyServerNames(unittest.TestCase):
         self.assertNotIn("old", content)
 
     def test_inserts_when_missing(self):
-        from vless_installer.modules.dnscrypt_selector import _apply_server_names
+        from chimera.modules.dnscrypt_selector import _apply_server_names
         self._cfg.write_text("listen_addresses = ['127.0.0.1:5300']\n")
         with self._patch():
             result = _apply_server_names(["cloudflare"])
@@ -145,7 +145,7 @@ class TestApplyServerNames(unittest.TestCase):
         self.assertIn("cloudflare", content)
 
     def test_returns_false_when_no_config(self):
-        from vless_installer.modules.dnscrypt_selector import _apply_server_names
+        from chimera.modules.dnscrypt_selector import _apply_server_names
         with self._patch():
             result = _apply_server_names(["cloudflare"])
         self.assertFalse(result)
@@ -176,13 +176,13 @@ class TestParseResolverIpsFromMd(unittest.TestCase):
         return f"sdns://{b64}"
 
     def test_returns_empty_when_no_file(self):
-        from vless_installer.modules.dnscrypt_selector import _parse_resolver_ips_from_md
+        from chimera.modules.dnscrypt_selector import _parse_resolver_ips_from_md
         with patch("pathlib.Path.exists", return_value=False):
             result = _parse_resolver_ips_from_md()
         self.assertEqual(result, {})
 
     def test_parses_valid_md_file(self):
-        from vless_installer.modules import dnscrypt_selector
+        from chimera.modules import dnscrypt_selector
         stamp = self._make_sdns_stamp("9.9.9.9", 443)
         md_content = f"## cloudflare\n\n{stamp}\n\n## google\n\nsdns://invalid\n"
         tmp_file = self._tmpdir / "public-resolvers.md"

@@ -2,7 +2,7 @@
 """
 tests/test_singbox_packages.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/singbox_packages.py и singbox_mirrors.py.
+Unit-тесты для chimera/modules/singbox_packages.py и singbox_mirrors.py.
 
 Покрывает:
   1. SINGBOX_SPEC — структура PackageSpec
@@ -30,7 +30,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core():
     """Загружает _core.py в sys.modules (модули singbox_* могут требовать _core)."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -40,9 +40,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 def _enter_patches(stack, patches):
@@ -62,30 +62,30 @@ class TestSingboxSpec(unittest.TestCase):
         _setup_core()
 
     def test_spec_exists(self):
-        from vless_installer.modules.singbox_packages import SINGBOX_SPEC
+        from chimera.modules.singbox_packages import SINGBOX_SPEC
         self.assertIsNotNone(SINGBOX_SPEC)
 
     def test_spec_name(self):
-        from vless_installer.modules.singbox_packages import SINGBOX_SPEC
+        from chimera.modules.singbox_packages import SINGBOX_SPEC
         self.assertIn("sing-box", SINGBOX_SPEC.name)
 
     def test_spec_install_dests(self):
-        from vless_installer.modules.singbox_packages import SINGBOX_SPEC
+        from chimera.modules.singbox_packages import SINGBOX_SPEC
         self.assertEqual(len(SINGBOX_SPEC.install_dests), 1)
         self.assertEqual(SINGBOX_SPEC.install_dests[0], Path("/usr/local/bin"))
 
     def test_spec_manual_dir_not_equal_install_dests(self):
         """КРИТИЧЕСКИЙ инвариант PackageSpec."""
-        from vless_installer.modules.singbox_packages import SINGBOX_SPEC
+        from chimera.modules.singbox_packages import SINGBOX_SPEC
         for dest in SINGBOX_SPEC.install_dests:
             self.assertNotEqual(SINGBOX_SPEC.manual_incoming_dir, dest)
 
     def test_spec_min_size_positive(self):
-        from vless_installer.modules.singbox_packages import SINGBOX_SPEC
+        from chimera.modules.singbox_packages import SINGBOX_SPEC
         self.assertGreater(SINGBOX_SPEC.min_size, 0)
 
     def test_spec_post_install_callable(self):
-        from vless_installer.modules.singbox_packages import SINGBOX_SPEC
+        from chimera.modules.singbox_packages import SINGBOX_SPEC
         self.assertTrue(callable(SINGBOX_SPEC.post_install))
 
 
@@ -100,7 +100,7 @@ class TestMirrorUrlsBuilder(unittest.TestCase):
         _setup_core()
 
     def test_returns_list(self):
-        from vless_installer.modules.singbox_packages import _singbox_mirror_urls
+        from chimera.modules.singbox_packages import _singbox_mirror_urls
         urls = _singbox_mirror_urls(
             filename="sing-box-1.11.4-linux-amd64.tar.gz",
             tag="1.11.4",
@@ -109,11 +109,11 @@ class TestMirrorUrlsBuilder(unittest.TestCase):
         self.assertGreater(len(urls), 0)
 
     def test_empty_filename_returns_empty(self):
-        from vless_installer.modules.singbox_packages import _singbox_mirror_urls
+        from chimera.modules.singbox_packages import _singbox_mirror_urls
         self.assertEqual(_singbox_mirror_urls(filename="", tag="1.11.4"), [])
 
     def test_empty_tag_returns_empty(self):
-        from vless_installer.modules.singbox_packages import _singbox_mirror_urls
+        from chimera.modules.singbox_packages import _singbox_mirror_urls
         self.assertEqual(
             _singbox_mirror_urls(filename="sing-box.tar.gz", tag=""),
             [],
@@ -121,7 +121,7 @@ class TestMirrorUrlsBuilder(unittest.TestCase):
 
     def test_tarball_filename_overrides_filename(self):
         """Если передан tarball_filename, он приоритетнее filename."""
-        from vless_installer.modules.singbox_packages import _singbox_mirror_urls
+        from chimera.modules.singbox_packages import _singbox_mirror_urls
         urls = _singbox_mirror_urls(
             filename="wrong.tar.gz",
             tag="1.11.4",
@@ -133,7 +133,7 @@ class TestMirrorUrlsBuilder(unittest.TestCase):
             self.assertIn("sing-box-1.11.4-linux-amd64.tar.gz", url)
 
     def test_urls_contain_github_com(self):
-        from vless_installer.modules.singbox_packages import _singbox_mirror_urls
+        from chimera.modules.singbox_packages import _singbox_mirror_urls
         urls = _singbox_mirror_urls(
             filename="sing-box-1.11.4-linux-amd64.tar.gz",
             tag="1.11.4",
@@ -143,7 +143,7 @@ class TestMirrorUrlsBuilder(unittest.TestCase):
         self.assertTrue(has_github, "Нет ни одного URL с github.com")
 
     def test_urls_contain_correct_owner_repo(self):
-        from vless_installer.modules.singbox_packages import _singbox_mirror_urls
+        from chimera.modules.singbox_packages import _singbox_mirror_urls
         urls = _singbox_mirror_urls(
             filename="sing-box-1.11.4-linux-amd64.tar.gz",
             tag="1.11.4",
@@ -167,19 +167,19 @@ class TestGetSingboxMirrors(unittest.TestCase):
         _setup_core()
 
     def test_returns_list(self):
-        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        from chimera.modules.singbox_mirrors import get_singbox_mirrors
         urls = get_singbox_mirrors(tag="1.11.4",
                                    filename="sing-box-1.11.4-linux-amd64.tar.gz")
         self.assertIsInstance(urls, list)
         self.assertGreater(len(urls), 5)  # минимум 5 зеркал
 
     def test_empty_inputs_return_empty(self):
-        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        from chimera.modules.singbox_mirrors import get_singbox_mirrors
         self.assertEqual(get_singbox_mirrors("", "file.tar.gz"), [])
         self.assertEqual(get_singbox_mirrors("1.11.4", ""), [])
 
     def test_constants_exist(self):
-        from vless_installer.modules.singbox_mirrors import (
+        from chimera.modules.singbox_mirrors import (
             SINGBOX_MIRRORS_COUNT,
             MANUAL_UPLOAD_PATHS_SINGBOX,
             recommended_manual_path,
@@ -192,17 +192,17 @@ class TestGetSingboxMirrors(unittest.TestCase):
 
     def test_manual_paths_include_root(self):
         """WinSCP-friendly /root/ должен быть в списке."""
-        from vless_installer.modules.singbox_mirrors import MANUAL_UPLOAD_PATHS_SINGBOX
+        from chimera.modules.singbox_mirrors import MANUAL_UPLOAD_PATHS_SINGBOX
         self.assertIn(Path("/root"), MANUAL_UPLOAD_PATHS_SINGBOX)
 
     def test_manual_paths_exclude_install_dests(self):
         """/usr/local/bin НЕ должен быть в manual_incoming — конфликт."""
-        from vless_installer.modules.singbox_mirrors import MANUAL_UPLOAD_PATHS_SINGBOX
+        from chimera.modules.singbox_mirrors import MANUAL_UPLOAD_PATHS_SINGBOX
         self.assertNotIn(Path("/usr/local/bin"), MANUAL_UPLOAD_PATHS_SINGBOX)
 
     def test_excludes_jsdelivr_for_release_assets(self):
         """jsDelivr не может отдавать release assets — исключён."""
-        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        from chimera.modules.singbox_mirrors import get_singbox_mirrors
         urls = get_singbox_mirrors(tag="1.13.14",
                                    filename="sing-box-1.13.14-linux-amd64.tar.gz")
         for url in urls:
@@ -211,7 +211,7 @@ class TestGetSingboxMirrors(unittest.TestCase):
 
     def test_excludes_raw_githubusercontent_for_release_assets(self):
         """raw.githubusercontent не может отдавать release assets — исключён."""
-        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        from chimera.modules.singbox_mirrors import get_singbox_mirrors
         urls = get_singbox_mirrors(tag="1.13.14",
                                    filename="sing-box-1.13.14-linux-amd64.tar.gz")
         for url in urls:
@@ -220,7 +220,7 @@ class TestGetSingboxMirrors(unittest.TestCase):
 
     def test_excludes_statically_for_release_assets(self):
         """Statically CDN не может отдавать release assets — исключён."""
-        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        from chimera.modules.singbox_mirrors import get_singbox_mirrors
         urls = get_singbox_mirrors(tag="1.13.14",
                                    filename="sing-box-1.13.14-linux-amd64.tar.gz")
         for url in urls:
@@ -229,7 +229,7 @@ class TestGetSingboxMirrors(unittest.TestCase):
 
     def test_includes_release_github_url(self):
         """release GitHub URL должен быть в списке."""
-        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        from chimera.modules.singbox_mirrors import get_singbox_mirrors
         urls = get_singbox_mirrors(tag="1.13.14",
                                    filename="sing-box-1.13.14-linux-amd64.tar.gz")
         has_release = any(
@@ -240,7 +240,7 @@ class TestGetSingboxMirrors(unittest.TestCase):
 
     def test_includes_gh_proxy_urls(self):
         """gh-proxy зеркала должны быть в списке (проксируют release assets)."""
-        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        from chimera.modules.singbox_mirrors import get_singbox_mirrors
         urls = get_singbox_mirrors(tag="1.13.14",
                                    filename="sing-box-1.13.14-linux-amd64.tar.gz")
         # Должно быть минимум 5 gh-proxy URL
@@ -251,7 +251,7 @@ class TestGetSingboxMirrors(unittest.TestCase):
 
     def test_mirror_count_is_8_after_exclusion(self):
         """После исключения jsDelivr/raw/Statically должно быть 8 зеркал."""
-        from vless_installer.modules.singbox_mirrors import (
+        from chimera.modules.singbox_mirrors import (
             SINGBOX_MIRRORS_COUNT, get_singbox_mirrors,
         )
         urls = get_singbox_mirrors(tag="1.13.14",
@@ -261,7 +261,7 @@ class TestGetSingboxMirrors(unittest.TestCase):
 
     def test_tag_empty_returns_empty(self):
         """Без tag URL не генерируются (защита от дефолтных тегов)."""
-        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        from chimera.modules.singbox_mirrors import get_singbox_mirrors
         self.assertEqual(get_singbox_mirrors(tag="", filename="file.tar.gz"), [])
 
     def test_v_prefix_in_tag_preserved_in_urls(self):
@@ -272,7 +272,7 @@ class TestGetSingboxMirrors(unittest.TestCase):
         /releases/download/1.13.14/ (нужно /releases/download/v1.13.14/).
         Все 8 зеркал падали. Тест гарантирует что 'v' сохраняется.
         """
-        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        from chimera.modules.singbox_mirrors import get_singbox_mirrors
         urls = get_singbox_mirrors(tag="v1.13.14",
                                    filename="sing-box-1.13.14-linux-amd64.tar.gz")
         self.assertGreater(len(urls), 0)
@@ -290,7 +290,7 @@ class TestGetSingboxMirrors(unittest.TestCase):
         /releases/download/1.13.14/ и GitHub вернёт 404. Это поведение
         не наше дело — мы должны передавать tag как есть.
         """
-        from vless_installer.modules.singbox_mirrors import get_singbox_mirrors
+        from chimera.modules.singbox_mirrors import get_singbox_mirrors
         urls = get_singbox_mirrors(tag="1.13.14",
                                    filename="sing-box-1.13.14-linux-amd64.tar.gz")
         # URL будут с /1.13.14/ — это БЫЛО багом, но get_singbox_mirrors
@@ -330,7 +330,7 @@ class TestPostInstall(unittest.TestCase):
         return archive_path
 
     def test_extracts_binary(self):
-        from vless_installer.modules.singbox_packages import _post_install_singbox
+        from chimera.modules.singbox_packages import _post_install_singbox
         archive = self._create_fake_tarball(b"#!/bin/sh\necho hello\n")
         dest_dir = self._tmpdir / "dest"
         dest_dir.mkdir(exist_ok=True)
@@ -341,7 +341,7 @@ class TestPostInstall(unittest.TestCase):
         self.assertEqual(bin_path.read_bytes(), b"#!/bin/sh\necho hello\n")
 
     def test_returns_false_on_invalid_archive(self):
-        from vless_installer.modules.singbox_packages import _post_install_singbox
+        from chimera.modules.singbox_packages import _post_install_singbox
         bad_archive = self._tmpdir / "not-a-tarball.tar.gz"
         bad_archive.write_bytes(b"not a real tar.gz")
         dest_dir = self._tmpdir / "dest"
@@ -350,7 +350,7 @@ class TestPostInstall(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_returns_false_when_no_binary_in_archive(self):
-        from vless_installer.modules.singbox_packages import _post_install_singbox
+        from chimera.modules.singbox_packages import _post_install_singbox
         # Создаём tar.gz без sing-box
         archive_path = self._tmpdir / "empty.tar.gz"
         src_dir = self._tmpdir / "empty-dir"
@@ -364,13 +364,13 @@ class TestPostInstall(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_returns_false_for_empty_install_dests(self):
-        from vless_installer.modules.singbox_packages import _post_install_singbox
+        from chimera.modules.singbox_packages import _post_install_singbox
         archive = self._create_fake_tarball()
         ok = _post_install_singbox(archive, [])
         self.assertFalse(ok)
 
     def test_chmod_executable(self):
-        from vless_installer.modules.singbox_packages import _post_install_singbox
+        from chimera.modules.singbox_packages import _post_install_singbox
         archive = self._create_fake_tarball()
         dest_dir = self._tmpdir / "dest"
         dest_dir.mkdir(exist_ok=True)
@@ -392,13 +392,13 @@ class TestArchDetection(unittest.TestCase):
         _setup_core()
 
     def test_returns_string(self):
-        from vless_installer.modules.singbox_common import _detect_arch
+        from chimera.modules.singbox_common import _detect_arch
         arch = _detect_arch()
         self.assertIsInstance(arch, str)
         self.assertGreater(len(arch), 0)
 
     def test_known_architectures(self):
-        from vless_installer.modules.singbox_common import _detect_arch
+        from chimera.modules.singbox_common import _detect_arch
         arch = _detect_arch()
         # Поддерживаемые sing-box'ом
         known = {"amd64", "arm64", "arm-7", "386"}
@@ -419,8 +419,8 @@ class TestFetchPackageIntegration(unittest.TestCase):
 
     def test_dry_run_returns_false(self):
         """В dry_run режиме fetch_package не делает сетевых вызовов и возвращает False."""
-        from vless_installer.modules.download_manager import fetch_package
-        from vless_installer.modules.singbox_packages import SINGBOX_SPEC
+        from chimera.modules.download_manager import fetch_package
+        from chimera.modules.singbox_packages import SINGBOX_SPEC
         ok = fetch_package(
             SINGBOX_SPEC,
             dry_run=True,
@@ -432,7 +432,7 @@ class TestFetchPackageIntegration(unittest.TestCase):
 
     def test_filename_builder_with_kwargs(self):
         """filename_builder принимает tarball_filename kwarg."""
-        from vless_installer.modules.singbox_packages import SINGBOX_SPEC
+        from chimera.modules.singbox_packages import SINGBOX_SPEC
         # Безопасный вызов filename_builder с kwargs
         fname = SINGBOX_SPEC.filename_builder(
             tarball_filename="sing-box-1.11.4-linux-amd64.tar.gz"

@@ -29,7 +29,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -39,9 +39,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 def _enter_patches(stack, patches):
@@ -73,11 +73,11 @@ class TestSwitchProviderOperationOrder(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
         ]
 
     def test_allowlist_applied_before_generate_config_and_restart(self):
@@ -86,9 +86,9 @@ class TestSwitchProviderOperationOrder(unittest.TestCase):
         side_effect записывает имя функции в общий список call_order.
         Проверяем позицию: apply_cdn_allowlist[0] раньше generate_config[1] раньше restart[2].
         """
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import singbox_state_init
-        from vless_installer.modules import singbox_menu
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import singbox_state_init
+        from chimera.modules import singbox_menu
 
         call_order: list[str] = []
 
@@ -103,15 +103,15 @@ class TestSwitchProviderOperationOrder(unittest.TestCase):
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             # Подготавливаем state с включённым gcore
-            stack.enter_context(patch("vless_installer.modules.singbox_cdn_nets.apply_cdn_allowlist",
+            stack.enter_context(patch("chimera.modules.singbox_cdn_nets.apply_cdn_allowlist",
                                       return_value=True))
             singbox_state_init(version="1.0.0")
             singbox_enable_vless_ws_cdn(cdn_provider="gcore", host="test.example.com")
 
             # Теперь мокаем функции для switch с записью порядка
-            stack.enter_context(patch("vless_installer.modules.singbox_cdn_nets.apply_cdn_allowlist",
+            stack.enter_context(patch("chimera.modules.singbox_cdn_nets.apply_cdn_allowlist",
                                       side_effect=make_recorder("apply_cdn_allowlist")))
-            stack.enter_context(patch("vless_installer.modules.singbox_cdn_nets.remove_cdn_allowlist",
+            stack.enter_context(patch("chimera.modules.singbox_cdn_nets.remove_cdn_allowlist",
                                       side_effect=make_recorder("remove_cdn_allowlist")))
             stack.enter_context(patch.object(singbox_menu, "singbox_generate_config",
                                              side_effect=make_recorder("singbox_generate_config")))
@@ -145,9 +145,9 @@ class TestSwitchProviderOperationOrder(unittest.TestCase):
 
     def test_restart_not_before_allowlist(self):
         """singbox_restart НЕ должен вызываться раньше apply_cdn_allowlist."""
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import singbox_state_init
-        from vless_installer.modules import singbox_menu
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import singbox_state_init
+        from chimera.modules import singbox_menu
 
         call_order: list[str] = []
 
@@ -161,14 +161,14 @@ class TestSwitchProviderOperationOrder(unittest.TestCase):
 
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
-            stack.enter_context(patch("vless_installer.modules.singbox_cdn_nets.apply_cdn_allowlist",
+            stack.enter_context(patch("chimera.modules.singbox_cdn_nets.apply_cdn_allowlist",
                                       return_value=True))
             singbox_state_init(version="1.0.0")
             singbox_enable_vless_ws_cdn(cdn_provider="gcore", host="test.example.com")
 
-            stack.enter_context(patch("vless_installer.modules.singbox_cdn_nets.apply_cdn_allowlist",
+            stack.enter_context(patch("chimera.modules.singbox_cdn_nets.apply_cdn_allowlist",
                                       side_effect=make_recorder("apply_cdn_allowlist")))
-            stack.enter_context(patch("vless_installer.modules.singbox_cdn_nets.remove_cdn_allowlist",
+            stack.enter_context(patch("chimera.modules.singbox_cdn_nets.remove_cdn_allowlist",
                                       side_effect=make_recorder("remove_cdn_allowlist")))
             stack.enter_context(patch.object(singbox_menu, "singbox_generate_config",
                                              side_effect=make_recorder("singbox_generate_config")))
@@ -192,9 +192,9 @@ class TestSwitchProviderOperationOrder(unittest.TestCase):
 
     def test_old_port_allowlist_removed_after_restart(self):
         """remove_cdn_allowlist(old_port) вызывается ПОСЛЕ restart (не раньше)."""
-        from vless_installer.modules.singbox_config import singbox_enable_vless_ws_cdn
-        from vless_installer.modules.singbox_state import singbox_state_init
-        from vless_installer.modules import singbox_menu
+        from chimera.modules.singbox_config import singbox_enable_vless_ws_cdn
+        from chimera.modules.singbox_state import singbox_state_init
+        from chimera.modules import singbox_menu
 
         # Записываем (имя_функции, аргумент_порта) в общем списке
         call_log: list[tuple[str, int]] = []
@@ -210,16 +210,16 @@ class TestSwitchProviderOperationOrder(unittest.TestCase):
 
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
-            stack.enter_context(patch("vless_installer.modules.singbox_cdn_nets.apply_cdn_allowlist",
+            stack.enter_context(patch("chimera.modules.singbox_cdn_nets.apply_cdn_allowlist",
                                       return_value=True))
             singbox_state_init(version="1.0.0")
             # Enable на gcore → listen_port = 8443
             singbox_enable_vless_ws_cdn(cdn_provider="gcore", host="test.example.com")
 
             # Теперь мокаем с записью (имя, порт)
-            stack.enter_context(patch("vless_installer.modules.singbox_cdn_nets.apply_cdn_allowlist",
+            stack.enter_context(patch("chimera.modules.singbox_cdn_nets.apply_cdn_allowlist",
                                       side_effect=make_recorder("apply_cdn_allowlist", is_allowlist=True)))
-            stack.enter_context(patch("vless_installer.modules.singbox_cdn_nets.remove_cdn_allowlist",
+            stack.enter_context(patch("chimera.modules.singbox_cdn_nets.remove_cdn_allowlist",
                                       side_effect=make_recorder("remove_cdn_allowlist")))
             # singbox_generate_config и singbox_restart не имеют port-аргумента
             stack.enter_context(patch.object(singbox_menu, "singbox_generate_config",
@@ -281,8 +281,8 @@ class TestSystemdUnitBeforeNetfilterPersistent(unittest.TestCase):
 
     def test_unit_contains_before_netfilter_persistent(self):
         """Before=netfilter-persistent.service присутствует в юните."""
-        from vless_installer.modules.singbox_cdn_nets import _ipset_restore_unit_install
-        from vless_installer.modules import singbox_cdn_nets
+        from chimera.modules.singbox_cdn_nets import _ipset_restore_unit_install
+        from chimera.modules import singbox_cdn_nets
 
         with patch.object(singbox_cdn_nets, "_RESTORE_SVC", self._unit_path):
             with patch.object(singbox_cdn_nets, "_IPSET_CONF", self._tmpdir / "ipset.conf"):
@@ -296,8 +296,8 @@ class TestSystemdUnitBeforeNetfilterPersistent(unittest.TestCase):
 
     def test_unit_contains_before_sing_box_service(self):
         """Before=sing-box.service тоже присутствует (не заменён, а добавлен)."""
-        from vless_installer.modules.singbox_cdn_nets import _ipset_restore_unit_install
-        from vless_installer.modules import singbox_cdn_nets
+        from chimera.modules.singbox_cdn_nets import _ipset_restore_unit_install
+        from chimera.modules import singbox_cdn_nets
 
         with patch.object(singbox_cdn_nets, "_RESTORE_SVC", self._unit_path):
             with patch.object(singbox_cdn_nets, "_IPSET_CONF", self._tmpdir / "ipset.conf"):
@@ -316,8 +316,8 @@ class TestSystemdUnitBeforeNetfilterPersistent(unittest.TestCase):
         systemd поддерживает оба варианта, но тест проверяет что оба target'а
         видны в юните как отдельные директивы — это формат, который мы генерируем.
         """
-        from vless_installer.modules.singbox_cdn_nets import _ipset_restore_unit_install
-        from vless_installer.modules import singbox_cdn_nets
+        from chimera.modules.singbox_cdn_nets import _ipset_restore_unit_install
+        from chimera.modules import singbox_cdn_nets
 
         with patch.object(singbox_cdn_nets, "_RESTORE_SVC", self._unit_path):
             with patch.object(singbox_cdn_nets, "_IPSET_CONF", self._tmpdir / "ipset.conf"):
@@ -335,8 +335,8 @@ class TestSystemdUnitBeforeNetfilterPersistent(unittest.TestCase):
 
     def test_unit_idempotent(self):
         """Повторный вызов _ipset_restore_unit_install не перезаписывает существующий юнит."""
-        from vless_installer.modules.singbox_cdn_nets import _ipset_restore_unit_install
-        from vless_installer.modules import singbox_cdn_nets
+        from chimera.modules.singbox_cdn_nets import _ipset_restore_unit_install
+        from chimera.modules import singbox_cdn_nets
 
         with patch.object(singbox_cdn_nets, "_RESTORE_SVC", self._unit_path):
             with patch.object(singbox_cdn_nets, "_IPSET_CONF", self._tmpdir / "ipset.conf"):
@@ -484,8 +484,8 @@ class TestNoOrderingCycle(unittest.TestCase):
 
     def _generate_unit(self) -> str:
         """Генерирует юнит через _ipset_restore_unit_install и возвращает текст."""
-        from vless_installer.modules.singbox_cdn_nets import _ipset_restore_unit_install
-        from vless_installer.modules import singbox_cdn_nets
+        from chimera.modules.singbox_cdn_nets import _ipset_restore_unit_install
+        from chimera.modules import singbox_cdn_nets
         with patch.object(singbox_cdn_nets, "_RESTORE_SVC", self._unit_path):
             with patch.object(singbox_cdn_nets, "_IPSET_CONF", self._tmpdir / "ipset.conf"):
                 with patch("subprocess.run", return_value=MagicMock(returncode=0)):

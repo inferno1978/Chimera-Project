@@ -192,7 +192,7 @@ def main():
             if str(project_root) not in sys.path:
                 sys.path.insert(0, str(project_root))
 
-            from vless_installer.modules.hysteria2_exit_mgr import (
+            from chimera.modules.hysteria2_exit_mgr import (
                 h2_exit_remote_install
             )
             import getpass

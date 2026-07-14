@@ -2,7 +2,7 @@
 """
 tests/test_singbox_config.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/singbox_config.py и singbox_state.py.
+Unit-тесты для chimera/modules/singbox_config.py и singbox_state.py.
 
 Покрывает:
   1. singbox_state_init / load / save / update
@@ -31,7 +31,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -41,9 +41,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 def _enter_patches(stack, patches):
@@ -84,19 +84,19 @@ class TestStateManagement(unittest.TestCase):
     def _patches_list(self):
         """Возвращает список patch-объектов для ExitStack."""
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._tmpdir / "main_state.json"),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._tmpdir / "main_state.json"),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
         ]
 
     def _patch(self):
         """Совместимость со старым API — возвращает один patch (SINGBOX_STATE_FILE).
         Использовать _patches_list() + ExitStack для надёжного тестирования.
         """
-        return patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state)
+        return patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state)
 
     def test_init_creates_default_state(self):
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches_list())
             state = singbox_state_init(version="1.11.4")
@@ -109,13 +109,13 @@ class TestStateManagement(unittest.TestCase):
         self.assertIn("trojan", state["inbounds"])
 
     def test_load_returns_empty_when_no_file(self):
-        from vless_installer.modules.singbox_state import singbox_state_load
+        from chimera.modules.singbox_state import singbox_state_load
         with ExitStack() as stack:
             _enter_patches(stack, self._patches_list())
             self.assertEqual(singbox_state_load(), {})
 
     def test_load_returns_state_after_save(self):
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_load,
         )
         with ExitStack() as stack:
@@ -125,7 +125,7 @@ class TestStateManagement(unittest.TestCase):
         self.assertTrue(state["installed"])
 
     def test_update_modifies_top_level_keys(self):
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_update, singbox_state_load,
         )
         with ExitStack() as stack:
@@ -137,7 +137,7 @@ class TestStateManagement(unittest.TestCase):
         self.assertEqual(state["last_applied"], "2026-01-01")
 
     def test_update_inbound_partial(self):
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_update_inbound, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -149,7 +149,7 @@ class TestStateManagement(unittest.TestCase):
         self.assertEqual(ib["password"], "newpw")
 
     def test_get_enabled_protocols_empty_by_default(self):
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_enabled_protocols,
         )
         with ExitStack() as stack:
@@ -159,7 +159,7 @@ class TestStateManagement(unittest.TestCase):
         self.assertEqual(protos, [])
 
     def test_get_enabled_protocols_after_enable(self):
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_update_inbound,
             singbox_state_get_enabled_protocols,
         )
@@ -175,7 +175,7 @@ class TestStateManagement(unittest.TestCase):
 
     def test_state_file_permissions_0600(self):
         """State содержит пароли/сертификаты — права 0o600."""
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches_list())
             singbox_state_init(version="1.0.0")
@@ -194,7 +194,7 @@ class TestShadowtlsInboundBuilder(unittest.TestCase):
         _setup_core()
 
     def test_returns_dict(self):
-        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        from chimera.modules.singbox_config import _build_shadowtls_inbound
         ib = _build_shadowtls_inbound({
             "enabled": True,
             "listen": "127.0.0.1",
@@ -207,7 +207,7 @@ class TestShadowtlsInboundBuilder(unittest.TestCase):
         self.assertIsInstance(ib, dict)
 
     def test_has_required_fields(self):
-        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        from chimera.modules.singbox_config import _build_shadowtls_inbound
         ib = _build_shadowtls_inbound({
             "enabled": True,
             "listen": "127.0.0.1",
@@ -228,7 +228,7 @@ class TestShadowtlsInboundBuilder(unittest.TestCase):
         self.assertEqual(ib["handshake"]["server_port"], 443)
 
     def test_users_format_password_name(self):
-        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        from chimera.modules.singbox_config import _build_shadowtls_inbound
         ib = _build_shadowtls_inbound({
             "enabled": True,
             "users": _SAMPLE_USERS,
@@ -240,7 +240,7 @@ class TestShadowtlsInboundBuilder(unittest.TestCase):
             self.assertNotIn("uuid", u)  # ShadowTLS не использует UUID
 
     def test_skips_users_without_password(self):
-        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        from chimera.modules.singbox_config import _build_shadowtls_inbound
         ib = _build_shadowtls_inbound({
             "enabled": True,
             "users": [
@@ -263,7 +263,7 @@ class TestShadowtlsInboundBuilder(unittest.TestCase):
         проверял ОБРАТНОЕ — что tls-блок добавляется. Это было ошибкой
         понимания протокола, исправлено в v4.22.3.
         """
-        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        from chimera.modules.singbox_config import _build_shadowtls_inbound
         with tempfile.TemporaryDirectory() as td:
             cert = Path(td) / "cert.pem"
             key = Path(td) / "key.pem"
@@ -282,7 +282,7 @@ class TestShadowtlsInboundBuilder(unittest.TestCase):
 
     def test_tls_block_omitted_when_cert_missing(self):
         """cert_path/key_path могут отсутствовать — TLS-блока тоже нет."""
-        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        from chimera.modules.singbox_config import _build_shadowtls_inbound
         ib = _build_shadowtls_inbound({
             "enabled": True,
             "users": [],
@@ -299,7 +299,7 @@ class TestShadowtlsInboundBuilder(unittest.TestCase):
         старые state-файлы (v4.22.0-v4.22.2) могут содержать эти поля,
         но генератор их не читает.
         """
-        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        from chimera.modules.singbox_config import _build_shadowtls_inbound
         with tempfile.TemporaryDirectory() as td:
             cert = Path(td) / "cert.pem"
             key = Path(td) / "key.pem"
@@ -318,7 +318,7 @@ class TestShadowtlsInboundBuilder(unittest.TestCase):
 
     def test_defaults_applied(self):
         """Если поля отсутствуют — должны подставляться defaults."""
-        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        from chimera.modules.singbox_config import _build_shadowtls_inbound
         ib = _build_shadowtls_inbound({"enabled": True, "users": []})
         self.assertEqual(ib["listen"], "127.0.0.1")
         self.assertEqual(ib["listen_port"], 8443)
@@ -339,7 +339,7 @@ class TestTrojanInboundBuilder(unittest.TestCase):
         _setup_core()
 
     def test_returns_dict_with_required_fields(self):
-        from vless_installer.modules.singbox_config import _build_trojan_inbound
+        from chimera.modules.singbox_config import _build_trojan_inbound
         ib = _build_trojan_inbound({"enabled": True, "users": _SAMPLE_USERS})
         self.assertEqual(ib["type"], "trojan")
         self.assertEqual(ib["tag"], "trojan-in")
@@ -348,7 +348,7 @@ class TestTrojanInboundBuilder(unittest.TestCase):
         self.assertEqual(len(ib["users"]), 2)
 
     def test_users_format(self):
-        from vless_installer.modules.singbox_config import _build_trojan_inbound
+        from chimera.modules.singbox_config import _build_trojan_inbound
         ib = _build_trojan_inbound({"enabled": True, "users": _SAMPLE_USERS})
         for u in ib["users"]:
             self.assertIn("password", u)
@@ -366,7 +366,7 @@ class TestAnytlsInboundBuilder(unittest.TestCase):
         _setup_core()
 
     def test_returns_dict_with_required_fields(self):
-        from vless_installer.modules.singbox_config import _build_anytls_inbound
+        from chimera.modules.singbox_config import _build_anytls_inbound
         ib = _build_anytls_inbound({"enabled": True, "users": _SAMPLE_USERS})
         self.assertEqual(ib["type"], "anytls")
         self.assertEqual(ib["tag"], "anytls-in")
@@ -375,7 +375,7 @@ class TestAnytlsInboundBuilder(unittest.TestCase):
         self.assertEqual(len(ib["users"]), 2)
 
     def test_tls_block_when_cert_paths_exist(self):
-        from vless_installer.modules.singbox_config import _build_anytls_inbound
+        from chimera.modules.singbox_config import _build_anytls_inbound
         with tempfile.TemporaryDirectory() as td:
             cert = Path(td) / "anytls.crt"
             key = Path(td) / "anytls.key"
@@ -401,7 +401,7 @@ class TestTuicInboundBuilder(unittest.TestCase):
         _setup_core()
 
     def test_returns_dict_with_required_fields(self):
-        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        from chimera.modules.singbox_config import _build_tuic_inbound
         ib = _build_tuic_inbound({"enabled": True, "users": _SAMPLE_TUIC_USERS})
         self.assertEqual(ib["type"], "tuic")
         self.assertEqual(ib["tag"], "tuic-in")
@@ -411,7 +411,7 @@ class TestTuicInboundBuilder(unittest.TestCase):
 
     def test_users_format_uuid_password(self):
         """TUIC users format: {uuid, password} (без name)."""
-        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        from chimera.modules.singbox_config import _build_tuic_inbound
         ib = _build_tuic_inbound({"enabled": True, "users": _SAMPLE_TUIC_USERS})
         self.assertEqual(len(ib["users"]), 1)
         u = ib["users"][0]
@@ -420,7 +420,7 @@ class TestTuicInboundBuilder(unittest.TestCase):
         self.assertNotIn("name", u)  # TUIC users не имеют name
 
     def test_skips_users_without_uuid(self):
-        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        from chimera.modules.singbox_config import _build_tuic_inbound
         ib = _build_tuic_inbound({
             "enabled": True,
             "users": [
@@ -432,7 +432,7 @@ class TestTuicInboundBuilder(unittest.TestCase):
         self.assertEqual(len(ib["users"]), 1)
 
     def test_tls_block_when_cert_paths_exist(self):
-        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        from chimera.modules.singbox_config import _build_tuic_inbound
         with tempfile.TemporaryDirectory() as td:
             cert = Path(td) / "tuic.crt"
             key = Path(td) / "tuic.key"
@@ -454,7 +454,7 @@ class TestTuicInboundBuilder(unittest.TestCase):
         НЕ должно навязываться дефолт sing-box насильно — существующие установки
         не должны менять поведение без явного действия пользователя.
         """
-        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        from chimera.modules.singbox_config import _build_tuic_inbound
         ib = _build_tuic_inbound({"enabled": True, "users": _SAMPLE_TUIC_USERS})
         self.assertNotIn("initial_packet_size", ib,
                          "Без явного задания initial_packet_size в state — "
@@ -462,7 +462,7 @@ class TestTuicInboundBuilder(unittest.TestCase):
 
     def test_initial_packet_size_present_when_set_in_state(self):
         """v4.22.4: если initial_packet_size задан в state — попадает в конфиг."""
-        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        from chimera.modules.singbox_config import _build_tuic_inbound
         ib = _build_tuic_inbound({
             "enabled": True,
             "users": _SAMPLE_TUIC_USERS,
@@ -474,7 +474,7 @@ class TestTuicInboundBuilder(unittest.TestCase):
 
     def test_initial_packet_size_string_coerced_to_int(self):
         """Строковое значение приводится к int (например из ручного JSON)."""
-        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        from chimera.modules.singbox_config import _build_tuic_inbound
         ib = _build_tuic_inbound({
             "enabled": True,
             "users": _SAMPLE_TUIC_USERS,
@@ -485,7 +485,7 @@ class TestTuicInboundBuilder(unittest.TestCase):
 
     def test_initial_packet_size_invalid_string_ignored(self):
         """Некорректное строковое значение — игнорируется, поле не появляется."""
-        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        from chimera.modules.singbox_config import _build_tuic_inbound
         ib = _build_tuic_inbound({
             "enabled": True,
             "users": _SAMPLE_TUIC_USERS,
@@ -496,7 +496,7 @@ class TestTuicInboundBuilder(unittest.TestCase):
 
     def test_initial_packet_size_zero_allowed(self):
         """0 — валидное значение (sing-box трактует как default)."""
-        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        from chimera.modules.singbox_config import _build_tuic_inbound
         ib = _build_tuic_inbound({
             "enabled": True,
             "users": _SAMPLE_TUIC_USERS,
@@ -507,7 +507,7 @@ class TestTuicInboundBuilder(unittest.TestCase):
 
     def test_initial_packet_size_none_does_not_add_field(self):
         """Явный None — поле не добавляется (аналог отсутствия)."""
-        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        from chimera.modules.singbox_config import _build_tuic_inbound
         ib = _build_tuic_inbound({
             "enabled": True,
             "users": _SAMPLE_TUIC_USERS,
@@ -523,7 +523,7 @@ class TestTuicInboundBuilder(unittest.TestCase):
         существует только для Hysteria/Hysteria2-inbound. У TUIC такого поля
         нет вообще. Тест гарантирует что мы не добавили мёртвое JSON-поле.
         """
-        from vless_installer.modules.singbox_config import _build_tuic_inbound
+        from chimera.modules.singbox_config import _build_tuic_inbound
         ib = _build_tuic_inbound({
             "enabled": True,
             "users": _SAMPLE_TUIC_USERS,
@@ -555,25 +555,25 @@ class TestGenerateConfig(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_CONFIG_DIR", self._config_dir),
-            patch("vless_installer.modules.singbox_common.SINGBOX_CONFIG_FILE", self._config_file),
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._tmpdir / "main_state.json"),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_DIR", self._config_dir),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_FILE", self._config_file),
+            patch("chimera.modules.singbox_common.SINGBOX_CONFIG_DIR", self._config_dir),
+            patch("chimera.modules.singbox_common.SINGBOX_CONFIG_FILE", self._config_file),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._tmpdir / "main_state.json"),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_DIR", self._config_dir),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_FILE", self._config_file),
         ]
 
     def test_returns_false_when_not_installed(self):
-        from vless_installer.modules.singbox_config import singbox_generate_config
+        from chimera.modules.singbox_config import singbox_generate_config
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             ok = singbox_generate_config()
         self.assertFalse(ok)
 
     def test_generates_empty_config_when_no_protocols(self):
-        from vless_installer.modules.singbox_config import singbox_generate_config
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_config import singbox_generate_config
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -585,8 +585,8 @@ class TestGenerateConfig(unittest.TestCase):
         self.assertEqual(cfg["outbounds"][1]["type"], "block")
 
     def test_generates_config_with_shadowtls_and_trojan(self):
-        from vless_installer.modules.singbox_config import singbox_generate_config
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_generate_config
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_update_inbound,
         )
         with ExitStack() as stack:
@@ -602,8 +602,8 @@ class TestGenerateConfig(unittest.TestCase):
         self.assertIn("trojan", types)
 
     def test_generates_config_with_anytls(self):
-        from vless_installer.modules.singbox_config import singbox_generate_config
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_generate_config
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_update_inbound,
         )
         with ExitStack() as stack:
@@ -617,8 +617,8 @@ class TestGenerateConfig(unittest.TestCase):
         self.assertIn("anytls", types)
 
     def test_generates_config_with_tuic(self):
-        from vless_installer.modules.singbox_config import singbox_generate_config
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_generate_config
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_update_inbound,
         )
         with ExitStack() as stack:
@@ -632,8 +632,8 @@ class TestGenerateConfig(unittest.TestCase):
         self.assertIn("tuic", types)
 
     def test_generates_config_with_all_protocols(self):
-        from vless_installer.modules.singbox_config import singbox_generate_config
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_generate_config
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_update_inbound,
         )
         with ExitStack() as stack:
@@ -649,8 +649,8 @@ class TestGenerateConfig(unittest.TestCase):
         self.assertEqual(len(cfg["inbounds"]), 4)
 
     def test_log_block_present(self):
-        from vless_installer.modules.singbox_config import singbox_generate_config
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_config import singbox_generate_config
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -660,8 +660,8 @@ class TestGenerateConfig(unittest.TestCase):
         self.assertIn("level", cfg["log"])
 
     def test_route_block_present(self):
-        from vless_installer.modules.singbox_config import singbox_generate_config
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_config import singbox_generate_config
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patches())
             singbox_state_init(version="1.0.0")
@@ -671,8 +671,8 @@ class TestGenerateConfig(unittest.TestCase):
         self.assertEqual(cfg["route"]["final"], "direct")
 
     def test_updates_last_applied(self):
-        from vless_installer.modules.singbox_config import singbox_generate_config
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_generate_config
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_load,
         )
         with ExitStack() as stack:
@@ -701,17 +701,17 @@ class TestEnableDisableFunctions(unittest.TestCase):
 
     def _patch(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._tmpdir / "main_state.json"),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._tmpdir / "main_state.json"),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._state),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
         ]
 
     def test_enable_shadowtls_sets_state(self):
         """v4.22.3: singbox_enable_shadowtls() не принимает cert_path/key_path."""
-        from vless_installer.modules.singbox_config import singbox_enable_shadowtls
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_shadowtls
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -733,8 +733,8 @@ class TestEnableDisableFunctions(unittest.TestCase):
         в state. Лучше явная ошибка, чтобы вызывающий код не передавал
         больше не нужные параметры.
         """
-        from vless_installer.modules.singbox_config import singbox_enable_shadowtls
-        from vless_installer.modules.singbox_state import singbox_state_init
+        from chimera.modules.singbox_config import singbox_enable_shadowtls
+        from chimera.modules.singbox_state import singbox_state_init
         with ExitStack() as stack:
             _enter_patches(stack, self._patch())
             singbox_state_init(version="1.0.0")
@@ -746,8 +746,8 @@ class TestEnableDisableFunctions(unittest.TestCase):
                 singbox_enable_shadowtls(cert_source="self-signed")
 
     def test_enable_shadowtls_also_enables_trojan(self):
-        from vless_installer.modules.singbox_config import singbox_enable_shadowtls
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_shadowtls
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -758,10 +758,10 @@ class TestEnableDisableFunctions(unittest.TestCase):
         self.assertTrue(trojan["enabled"])
 
     def test_disable_shadowtls_disables_trojan(self):
-        from vless_installer.modules.singbox_config import (
+        from chimera.modules.singbox_config import (
             singbox_enable_shadowtls, singbox_disable_shadowtls,
         )
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -775,8 +775,8 @@ class TestEnableDisableFunctions(unittest.TestCase):
         self.assertFalse(tr["enabled"])
 
     def test_enable_anytls(self):
-        from vless_installer.modules.singbox_config import singbox_enable_anytls
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_anytls
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -789,8 +789,8 @@ class TestEnableDisableFunctions(unittest.TestCase):
 
     def test_enable_tuic_does_not_generate_password(self):
         """TUIC не имеет общего пароля — пароли у пользователей."""
-        from vless_installer.modules.singbox_config import singbox_enable_tuic
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_tuic
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -823,7 +823,7 @@ class TestSelfSignedCert(unittest.TestCase):
         import shutil as _sh
         if not _sh.which("openssl"):
             self.skipTest("openssl not installed")
-        from vless_installer.modules.singbox_common import generate_self_signed_cert
+        from chimera.modules.singbox_common import generate_self_signed_cert
         cert = self._tmpdir / "test.crt"
         key = self._tmpdir / "test.key"
         result_cert, result_key = generate_self_signed_cert(

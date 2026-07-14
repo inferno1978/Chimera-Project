@@ -2,7 +2,7 @@
 """
 tests/test_fragment_guide.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/fragment_guide.py.
+Unit-тесты для chimera/modules/fragment_guide.py.
 
 Покрывает:
   1. _h / _p / _step / _bullet — форматирование вывода
@@ -20,7 +20,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -30,9 +30,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestH(unittest.TestCase):
@@ -42,7 +42,7 @@ class TestH(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_prints_header_with_underline(self):
-        from vless_installer.modules.fragment_guide import _h
+        from chimera.modules.fragment_guide import _h
         buf = io.StringIO()
         with patch("sys.stdout", buf):
             _h("Test Header")
@@ -58,7 +58,7 @@ class TestStep(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_prints_step_number_and_text(self):
-        from vless_installer.modules.fragment_guide import _step
+        from chimera.modules.fragment_guide import _step
         buf = io.StringIO()
         with patch("sys.stdout", buf):
             _step(1, "Do something")
@@ -74,7 +74,7 @@ class TestBullet(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_prints_bullet_with_text(self):
-        from vless_installer.modules.fragment_guide import _bullet
+        from chimera.modules.fragment_guide import _bullet
         buf = io.StringIO()
         with patch("sys.stdout", buf):
             _bullet("Item text")

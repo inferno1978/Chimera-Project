@@ -2,7 +2,7 @@
 """
 tests/test_pq_vless.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/pq_vless.py.
+Unit-тесты для chimera/modules/pq_vless.py.
 
 Покрывает:
   1. pq_state_load — чтение pq_vless_* ключей
@@ -30,7 +30,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -40,9 +40,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestPqStateLoad(unittest.TestCase):
@@ -58,22 +58,22 @@ class TestPqStateLoad(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.pq_vless.STATE_FILE", self._state)
+        return patch("chimera.modules.pq_vless.STATE_FILE", self._state)
 
     def test_returns_empty_when_no_file(self):
-        from vless_installer.modules.pq_vless import pq_state_load
+        from chimera.modules.pq_vless import pq_state_load
         with self._patch():
             self.assertEqual(pq_state_load(), {})
 
     def test_returns_empty_when_corrupt(self):
-        from vless_installer.modules.pq_vless import pq_state_load
+        from chimera.modules.pq_vless import pq_state_load
         self._state.write_text("{invalid")
         with self._patch():
             self.assertEqual(pq_state_load(), {})
 
     def test_returns_only_pq_keys(self):
         """Только pq_vless_* ключи, не UUID и не другие."""
-        from vless_installer.modules.pq_vless import pq_state_load
+        from chimera.modules.pq_vless import pq_state_load
         self._state.write_text(json.dumps({
             "uuid": "abc",
             "domain": "example.com",
@@ -85,7 +85,7 @@ class TestPqStateLoad(unittest.TestCase):
         self.assertEqual(state, {"pq_vless_enabled": True, "pq_vless_port": 8443})
 
     def test_returns_all_pq_keys_when_present(self):
-        from vless_installer.modules.pq_vless import pq_state_load
+        from chimera.modules.pq_vless import pq_state_load
         full = {
             "pq_vless_enabled": True,
             "pq_vless_port": 8443,
@@ -117,17 +117,17 @@ class TestPqStateSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.pq_vless.STATE_FILE", self._state)
+        return patch("chimera.modules.pq_vless.STATE_FILE", self._state)
 
     def test_does_nothing_when_no_file(self):
-        from vless_installer.modules.pq_vless import pq_state_load, pq_state_save
+        from chimera.modules.pq_vless import pq_state_load, pq_state_save
         with self._patch():
             pq_state_save({"pq_vless_enabled": True})
             self.assertFalse(self._state.exists())
             self.assertEqual(pq_state_load(), {})
 
     def test_merges_pq_keys_preserving_others(self):
-        from vless_installer.modules.pq_vless import pq_state_load, pq_state_save
+        from chimera.modules.pq_vless import pq_state_load, pq_state_save
         self._state.write_text(json.dumps({
             "uuid": "abc",
             "domain": "example.com",
@@ -144,7 +144,7 @@ class TestPqStateSave(unittest.TestCase):
         self.assertEqual(full["domain"], "example.com")
 
     def test_overwrites_existing_pq_keys(self):
-        from vless_installer.modules.pq_vless import pq_state_load, pq_state_save
+        from chimera.modules.pq_vless import pq_state_load, pq_state_save
         self._state.write_text(json.dumps({"pq_vless_port": 8443}))
         with self._patch():
             pq_state_save({"pq_vless_port": 9999})
@@ -158,7 +158,7 @@ class TestFindXrayBin(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_first_existing(self):
-        from vless_installer.modules import pq_vless
+        from chimera.modules import pq_vless
         def _fake_exists(self_path):
             return "xray" in str(self_path)
         with patch.object(Path, "exists", _fake_exists):
@@ -166,7 +166,7 @@ class TestFindXrayBin(unittest.TestCase):
             self.assertIsNotNone(result)
 
     def test_returns_none_when_not_found(self):
-        from vless_installer.modules import pq_vless
+        from chimera.modules import pq_vless
         with patch.object(Path, "exists", return_value=False), \
              patch("shutil.which", return_value=None):
             self.assertIsNone(pq_vless._find_xray_bin())
@@ -184,7 +184,7 @@ class TestXrayConfigPath(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_returns_first_existing(self):
-        from vless_installer.modules import pq_vless
+        from chimera.modules import pq_vless
         path1 = self._tmpdir / "config1.json"
         path1.write_text("{}")
         with patch.object(pq_vless, "XRAY_CONFIG_PATHS", [path1, Path("/nonexistent")]):
@@ -192,7 +192,7 @@ class TestXrayConfigPath(unittest.TestCase):
             self.assertEqual(result, path1)
 
     def test_returns_none_when_no_existing(self):
-        from vless_installer.modules import pq_vless
+        from chimera.modules import pq_vless
         with patch.object(pq_vless, "XRAY_CONFIG_PATHS",
                           [Path("/nonexistent1"), Path("/nonexistent2")]):
             self.assertIsNone(pq_vless._xray_config_path())
@@ -211,22 +211,22 @@ class TestReadUsers(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.pq_vless.USERS_FILE", self._users)
+        return patch("chimera.modules.pq_vless.USERS_FILE", self._users)
 
     def test_returns_empty_when_no_file_no_uuid(self):
-        from vless_installer.modules.pq_vless import _read_users
+        from chimera.modules.pq_vless import _read_users
         with self._patch():
             self.assertEqual(_read_users(), [])
 
     def test_returns_uuid_when_no_file(self):
-        from vless_installer.modules.pq_vless import _read_users
+        from chimera.modules.pq_vless import _read_users
         with self._patch():
             result = _read_users("UUID-123")
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["uuid"], "UUID-123")
 
     def test_returns_users_from_file(self):
-        from vless_installer.modules.pq_vless import _read_users
+        from chimera.modules.pq_vless import _read_users
         self._users.write_text(json.dumps([
             {"uuid": "uuid1", "email": "a@x"},
             {"uuid": "uuid2", "email": "b@x"},
@@ -236,7 +236,7 @@ class TestReadUsers(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
     def test_returns_uuid_when_file_corrupt(self):
-        from vless_installer.modules.pq_vless import _read_users
+        from chimera.modules.pq_vless import _read_users
         self._users.write_text("{invalid")
         with self._patch():
             result = _read_users("fallback-uuid")
@@ -245,7 +245,7 @@ class TestReadUsers(unittest.TestCase):
     def test_returns_uuid_fallback_when_file_empty_list(self):
         """Пустой список в users.json → fallback на primary_uuid
         (isinstance(data, list) and data — empty list falsy)."""
-        from vless_installer.modules.pq_vless import _read_users
+        from chimera.modules.pq_vless import _read_users
         self._users.write_text("[]")
         with self._patch():
             result = _read_users("fallback-uuid")
@@ -259,7 +259,7 @@ class TestPortIsFree(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_true_when_port_free(self):
-        from vless_installer.modules.pq_vless import _port_is_free
+        from chimera.modules.pq_vless import _port_is_free
         # находим реально свободный порт через bind
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(("", 0))
@@ -268,7 +268,7 @@ class TestPortIsFree(unittest.TestCase):
         self.assertTrue(_port_is_free(free_port))
 
     def test_returns_false_when_port_taken(self):
-        from vless_installer.modules.pq_vless import _port_is_free
+        from chimera.modules.pq_vless import _port_is_free
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("", 0))
@@ -282,7 +282,7 @@ class TestPortIsFree(unittest.TestCase):
     def test_returns_true_when_ipv6_unavailable_and_port_free(self):
         """Regression: на хосте без IPv6 socket.socket(AF_INET6, ...) падает
         с OSError — _port_is_free должен пропустить IPv6 и проверить только IPv4."""
-        from vless_installer.modules.pq_vless import _port_is_free
+        from chimera.modules.pq_vless import _port_is_free
         # находим свободный IPv4-порт
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(("", 0))
@@ -296,7 +296,7 @@ class TestPortIsFree(unittest.TestCase):
                 raise OSError("Address family not supported by protocol")
             return real_socket(family, *args, **kwargs)
 
-        with patch("vless_installer.modules.pq_vless.socket.socket",
+        with patch("chimera.modules.pq_vless.socket.socket",
                    side_effect=_fake_socket):
             # не должно падать, IPv4-проверка проходит → True
             self.assertTrue(_port_is_free(free_port))
@@ -304,7 +304,7 @@ class TestPortIsFree(unittest.TestCase):
     def test_returns_false_when_ipv6_unavailable_and_port_taken(self):
         """Regression: на хосте без IPv6 _port_is_free всё ещё возвращает False
         для занятого IPv4-порта (не падает, корректно проверяет IPv4)."""
-        from vless_installer.modules.pq_vless import _port_is_free
+        from chimera.modules.pq_vless import _port_is_free
         # занимаем IPv4-порт
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -320,7 +320,7 @@ class TestPortIsFree(unittest.TestCase):
             return real_socket(family, *args, **kwargs)
 
         try:
-            with patch("vless_installer.modules.pq_vless.socket.socket",
+            with patch("chimera.modules.pq_vless.socket.socket",
                        side_effect=_fake_socket):
                 # IPv4 занят → False, не падает на IPv6
                 self.assertFalse(_port_is_free(taken_port))
@@ -330,7 +330,7 @@ class TestPortIsFree(unittest.TestCase):
     def test_find_unused_port_works_without_ipv6(self):
         """Regression: find_unused_port делегирует в _port_is_free — должен
         работать на хосте без IPv6 (через фикс в _port_is_free)."""
-        from vless_installer.modules import pq_vless
+        from chimera.modules import pq_vless
         # находим свободный IPv4-порт
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(("", 0))
@@ -344,7 +344,7 @@ class TestPortIsFree(unittest.TestCase):
                 raise OSError("Address family not supported by protocol")
             return real_socket(family, *args, **kwargs)
 
-        with patch("vless_installer.modules.pq_vless.socket.socket",
+        with patch("chimera.modules.pq_vless.socket.socket",
                    side_effect=_fake_socket):
             # не падает, возвращает свободный порт
             result = pq_vless.find_unused_port(free_port)
@@ -359,19 +359,19 @@ class TestFindUnusedPort(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_preferred_when_free(self):
-        from vless_installer.modules import pq_vless
+        from chimera.modules import pq_vless
         with patch.object(pq_vless, "_port_is_free", return_value=True):
             self.assertEqual(pq_vless.find_unused_port(8443), 8443)
 
     def test_finds_next_free(self):
-        from vless_installer.modules import pq_vless
+        from chimera.modules import pq_vless
         # первые 5 заняты, 6-й свободен
         with patch.object(pq_vless, "_port_is_free",
                           side_effect=[False, False, False, False, False, True]):
             self.assertEqual(pq_vless.find_unused_port(8443), 8448)
 
     def test_returns_preferred_when_all_taken(self):
-        from vless_installer.modules import pq_vless
+        from chimera.modules import pq_vless
         with patch.object(pq_vless, "_port_is_free", return_value=False):
             self.assertEqual(pq_vless.find_unused_port(8443), 8443)
 
@@ -383,13 +383,13 @@ class TestGenShortid(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_8_hex_chars(self):
-        from vless_installer.modules.pq_vless import _gen_shortid
+        from chimera.modules.pq_vless import _gen_shortid
         sid = _gen_shortid()
         self.assertEqual(len(sid), 8)
         self.assertTrue(all(c in "0123456789abcdef" for c in sid))
 
     def test_different_from_existing(self):
-        from vless_installer.modules.pq_vless import _gen_shortid
+        from chimera.modules.pq_vless import _gen_shortid
         existing = "aabbccdd"
         # мокаем urandom чтобы первый раз вернуть existing, второй — другой
         with patch("os.urandom",
@@ -398,7 +398,7 @@ class TestGenShortid(unittest.TestCase):
             self.assertEqual(sid, "11223344")
 
     def test_unique_on_multiple_calls(self):
-        from vless_installer.modules.pq_vless import _gen_shortid
+        from chimera.modules.pq_vless import _gen_shortid
         ids = {_gen_shortid() for _ in range(10)}
         self.assertGreater(len(ids), 1)  # хотя бы 2 разных
 
@@ -413,7 +413,7 @@ class TestInjectPqInbound(unittest.TestCase):
         return [{"uuid": "uuid1", "email": "a@x"}]
 
     def test_appends_when_absent(self):
-        from vless_installer.modules.pq_vless import (
+        from chimera.modules.pq_vless import (
             inject_pq_inbound, PQ_TAG,
         )
         cfg = {"inbounds": []}
@@ -429,7 +429,7 @@ class TestInjectPqInbound(unittest.TestCase):
         self.assertEqual(cfg["inbounds"][0]["port"], 8443)
 
     def test_returns_false_when_identical(self):
-        from vless_installer.modules.pq_vless import inject_pq_inbound
+        from chimera.modules.pq_vless import inject_pq_inbound
         cfg = {"inbounds": []}
         # первый раз — append
         inject_pq_inbound(
@@ -448,7 +448,7 @@ class TestInjectPqInbound(unittest.TestCase):
         self.assertFalse(changed)
 
     def test_replaces_when_different(self):
-        from vless_installer.modules.pq_vless import inject_pq_inbound
+        from chimera.modules.pq_vless import inject_pq_inbound
         cfg = {"inbounds": []}
         inject_pq_inbound(
             cfg, port=8443, decryption="dec", shortid="abcd",
@@ -467,7 +467,7 @@ class TestInjectPqInbound(unittest.TestCase):
         self.assertEqual(cfg["inbounds"][0]["port"], 9999)
 
     def test_empty_users_uses_placeholder_uuid(self):
-        from vless_installer.modules.pq_vless import inject_pq_inbound
+        from chimera.modules.pq_vless import inject_pq_inbound
         cfg = {"inbounds": []}
         inject_pq_inbound(
             cfg, port=8443, decryption="dec", shortid="abcd",
@@ -480,7 +480,7 @@ class TestInjectPqInbound(unittest.TestCase):
         self.assertEqual(clients[0]["id"], "00000000-0000-0000-0000-000000000000")
 
     def test_includes_xtls_flow_when_provided(self):
-        from vless_installer.modules.pq_vless import inject_pq_inbound
+        from chimera.modules.pq_vless import inject_pq_inbound
         cfg = {"inbounds": []}
         inject_pq_inbound(
             cfg, port=8443, decryption="dec", shortid="abcd",
@@ -492,7 +492,7 @@ class TestInjectPqInbound(unittest.TestCase):
                          "xtls-rprx-vision")
 
     def test_omits_xtls_flow_when_empty(self):
-        from vless_installer.modules.pq_vless import inject_pq_inbound
+        from chimera.modules.pq_vless import inject_pq_inbound
         cfg = {"inbounds": []}
         inject_pq_inbound(
             cfg, port=8443, decryption="dec", shortid="abcd",
@@ -503,7 +503,7 @@ class TestInjectPqInbound(unittest.TestCase):
         self.assertNotIn("flow", cfg["inbounds"][0]["settings"]["clients"][0])
 
     def test_mldsa65_seed_added_when_provided(self):
-        from vless_installer.modules.pq_vless import inject_pq_inbound
+        from chimera.modules.pq_vless import inject_pq_inbound
         cfg = {"inbounds": []}
         inject_pq_inbound(
             cfg, port=8443, decryption="dec", shortid="abcd",
@@ -517,7 +517,7 @@ class TestInjectPqInbound(unittest.TestCase):
         )
 
     def test_mldsa65_seed_omitted_when_empty(self):
-        from vless_installer.modules.pq_vless import inject_pq_inbound
+        from chimera.modules.pq_vless import inject_pq_inbound
         cfg = {"inbounds": []}
         inject_pq_inbound(
             cfg, port=8443, decryption="dec", shortid="abcd",
@@ -531,7 +531,7 @@ class TestInjectPqInbound(unittest.TestCase):
         )
 
     def test_reality_dest_priority_over_domain(self):
-        from vless_installer.modules.pq_vless import inject_pq_inbound
+        from chimera.modules.pq_vless import inject_pq_inbound
         cfg = {"inbounds": []}
         inject_pq_inbound(
             cfg, port=8443, decryption="dec", shortid="abcd",
@@ -544,7 +544,7 @@ class TestInjectPqInbound(unittest.TestCase):
         self.assertEqual(rs["serverNames"], ["dest.example.com"])
 
     def test_domain_used_when_no_reality_dest(self):
-        from vless_installer.modules.pq_vless import inject_pq_inbound
+        from chimera.modules.pq_vless import inject_pq_inbound
         cfg = {"inbounds": []}
         inject_pq_inbound(
             cfg, port=8443, decryption="dec", shortid="abcd",
@@ -563,12 +563,12 @@ class TestRemovePqInbound(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_false_when_absent(self):
-        from vless_installer.modules.pq_vless import remove_pq_inbound
+        from chimera.modules.pq_vless import remove_pq_inbound
         cfg = {"inbounds": [{"tag": "other"}]}
         self.assertFalse(remove_pq_inbound(cfg))
 
     def test_returns_true_when_removed(self):
-        from vless_installer.modules.pq_vless import (
+        from chimera.modules.pq_vless import (
             remove_pq_inbound, inject_pq_inbound, PQ_TAG,
         )
         cfg = {"inbounds": []}
@@ -581,7 +581,7 @@ class TestRemovePqInbound(unittest.TestCase):
         self.assertEqual(len(cfg["inbounds"]), 0)
 
     def test_returns_false_when_no_inbounds_key(self):
-        from vless_installer.modules.pq_vless import remove_pq_inbound
+        from chimera.modules.pq_vless import remove_pq_inbound
         cfg = {}
         self.assertFalse(remove_pq_inbound(cfg))
 
@@ -593,16 +593,16 @@ class TestHasPqInbound(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_false_when_no_inbounds(self):
-        from vless_installer.modules.pq_vless import has_pq_inbound
+        from chimera.modules.pq_vless import has_pq_inbound
         self.assertFalse(has_pq_inbound({}))
 
     def test_false_when_no_pq(self):
-        from vless_installer.modules.pq_vless import has_pq_inbound
+        from chimera.modules.pq_vless import has_pq_inbound
         cfg = {"inbounds": [{"tag": "other"}]}
         self.assertFalse(has_pq_inbound(cfg))
 
     def test_true_when_pq_present(self):
-        from vless_installer.modules.pq_vless import (
+        from chimera.modules.pq_vless import (
             has_pq_inbound, inject_pq_inbound,
         )
         cfg = {"inbounds": []}
@@ -629,10 +629,10 @@ class TestBuildPqLink(unittest.TestCase):
     def _patch_users(self, users_list):
         if users_list:
             self._users.write_text(json.dumps(users_list))
-        return patch("vless_installer.modules.pq_vless.USERS_FILE", self._users)
+        return patch("chimera.modules.pq_vless.USERS_FILE", self._users)
 
     def test_returns_none_when_no_users(self):
-        from vless_installer.modules.pq_vless import _build_pq_link
+        from chimera.modules.pq_vless import _build_pq_link
         with self._patch_users([]):
             result = _build_pq_link(
                 {}, server_ip="1.2.3.4", domain="example.com",
@@ -641,7 +641,7 @@ class TestBuildPqLink(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_basic_link(self):
-        from vless_installer.modules.pq_vless import _build_pq_link
+        from chimera.modules.pq_vless import _build_pq_link
         users = [{"uuid": "uuid1", "email": "a@x"}]
         with self._patch_users(users):
             result = _build_pq_link(
@@ -661,7 +661,7 @@ class TestBuildPqLink(unittest.TestCase):
         self.assertIn("encryption=ENC", result)
 
     def test_uses_domain_when_no_server_ip(self):
-        from vless_installer.modules.pq_vless import _build_pq_link
+        from chimera.modules.pq_vless import _build_pq_link
         with self._patch_users([{"uuid": "u1"}]):
             result = _build_pq_link(
                 {"pq_vless_encryption": "ENC", "pq_vless_port": 8443,
@@ -672,7 +672,7 @@ class TestBuildPqLink(unittest.TestCase):
         self.assertIn("vpn.example.com:8443", result)
 
     def test_includes_flow_when_provided(self):
-        from vless_installer.modules.pq_vless import _build_pq_link
+        from chimera.modules.pq_vless import _build_pq_link
         with self._patch_users([{"uuid": "u1"}]):
             result = _build_pq_link(
                 {"pq_vless_encryption": "ENC", "pq_vless_port": 8443,
@@ -683,7 +683,7 @@ class TestBuildPqLink(unittest.TestCase):
         self.assertIn("&flow=xtls-rprx-vision", result)
 
     def test_omits_flow_when_empty(self):
-        from vless_installer.modules.pq_vless import _build_pq_link
+        from chimera.modules.pq_vless import _build_pq_link
         with self._patch_users([{"uuid": "u1"}]):
             result = _build_pq_link(
                 {"pq_vless_encryption": "ENC", "pq_vless_port": 8443,
@@ -693,7 +693,7 @@ class TestBuildPqLink(unittest.TestCase):
         self.assertNotIn("&flow=", result)
 
     def test_includes_mldsa65_verify_when_enabled(self):
-        from vless_installer.modules.pq_vless import _build_pq_link
+        from chimera.modules.pq_vless import _build_pq_link
         with self._patch_users([{"uuid": "u1"}]):
             result = _build_pq_link(
                 {"pq_vless_encryption": "ENC", "pq_vless_port": 8443,
@@ -705,7 +705,7 @@ class TestBuildPqLink(unittest.TestCase):
         self.assertIn("&mldsa65Verify=VERIFY123", result)
 
     def test_omits_mldsa65_verify_when_disabled(self):
-        from vless_installer.modules.pq_vless import _build_pq_link
+        from chimera.modules.pq_vless import _build_pq_link
         with self._patch_users([{"uuid": "u1"}]):
             result = _build_pq_link(
                 {"pq_vless_encryption": "ENC", "pq_vless_port": 8443,
@@ -717,7 +717,7 @@ class TestBuildPqLink(unittest.TestCase):
         self.assertNotIn("mldsa65Verify", result)
 
     def test_country_flag_in_label(self):
-        from vless_installer.modules.pq_vless import _build_pq_link
+        from chimera.modules.pq_vless import _build_pq_link
         import urllib.parse
         with self._patch_users([{"uuid": "u1"}]):
             result = _build_pq_link(
@@ -733,7 +733,7 @@ class TestBuildPqLink(unittest.TestCase):
 
     def test_no_flag_prefix_for_globe(self):
         """Флаг '🌐' (глобус) — без префикса в label."""
-        from vless_installer.modules.pq_vless import _build_pq_link
+        from chimera.modules.pq_vless import _build_pq_link
         import urllib.parse
         with self._patch_users([{"uuid": "u1"}]):
             result = _build_pq_link(

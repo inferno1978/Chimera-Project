@@ -57,7 +57,7 @@ sudo python3 main.py
 
 ```python
 sudo python3 -c "
-from vless_installer.modules.user_lifecycle import add_user
+from chimera.modules.user_lifecycle import add_user
 result = add_user(
     email='testuser@example.com',
     protocols=['trusttunnel'],
@@ -87,7 +87,7 @@ print(result)
 
 ```python
 sudo python3 -c "
-from vless_installer.modules.trusttunnel import trusttunnel_generate_deeplink
+from chimera.modules.trusttunnel import trusttunnel_generate_deeplink
 link = trusttunnel_generate_deeplink('testuser@example.com')
 print(link)
 "
@@ -100,7 +100,7 @@ print(link)
 - [ ] Deep-link декодируется (можно проверить локально):
   ```bash
   python3 -c "
-  from vless_installer.modules.trusttunnel import trusttunnel_deeplink_decode
+  from chimera.modules.trusttunnel import trusttunnel_deeplink_decode
   d = trusttunnel_deeplink_decode('tt://?...')
   print(d)
   "
@@ -153,7 +153,7 @@ watch -n 5 'curl -s http://127.0.0.1:1987/metrics | grep -E "client_sessions|inb
 ```python
 sudo python3 -c "
 import time
-from vless_installer.modules import user_lifecycle
+from chimera.modules import user_lifecycle
 from unittest.mock import patch
 
 # Мокаем restart чтобы считать вызовы
@@ -162,7 +162,7 @@ def mock_restart():
     calls.append(time.time())
     return True
 
-with patch('vless_installer.modules.trusttunnel.trusttunnel_restart_service',
+with patch('chimera.modules.trusttunnel.trusttunnel_restart_service',
            side_effect=mock_restart):
     with user_lifecycle.batch_context():
         for i in range(5):
@@ -219,7 +219,7 @@ journalctl -u trusttunnel --no-pager -n 50
 ```bash
 # Проверить, что deep-link декодируется нашим pure-Python кодеком:
 python3 -c "
-from vless_installer.modules.trusttunnel import trusttunnel_deeplink_decode
+from chimera.modules.trusttunnel import trusttunnel_deeplink_decode
 d = trusttunnel_deeplink_decode('tt://?...')
 print(d)
 "

@@ -105,7 +105,7 @@ VLESS-Ultimate-Installer/
 ├── PROJECT_MAP.md               # Полная карта 143 модулей по 25 категориям
 ├── SECURITY.md / CONTRIBUTING.md / INTEGRATION.md / HYSTERIA2.md
 ├── LICENSE
-└── vless_installer/
+└── chimera/
     ├── __init__.py
     ├── _core.py                 # Ядро: orchestrator + globals (~8 093 строк, −75% от 32 557)
     ├── __all_exports.py         # Реестр экспортируемых имён

@@ -38,8 +38,8 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Создаёт фейковый vless_installer._core в sys.modules."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    """Создаёт фейковый chimera._core в sys.modules."""
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -49,9 +49,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 # =============================================================================
@@ -115,12 +115,12 @@ class _TrustTunnelLifecycleFixture:
     def patches(self):
         """Returns a list of patch() context managers to apply."""
         return [
-            patch("vless_installer.modules.trusttunnel._CREDS_TOML", self.creds_toml),
-            patch("vless_installer.modules.trusttunnel._STATE_FILE", self.state_json),
-            patch("vless_installer.modules.trusttunnel._BINARY_PATH", self.binary_path),
-            patch("vless_installer.modules.user_lifecycle._TRUSTTUNNEL_CREDS_FILE", self.creds_toml),
-            patch("vless_installer.modules.user_lifecycle._TRUSTTUNNEL_STATE_FILE", self.state_json),
-            patch("vless_installer.modules.user_lifecycle._USERS_FILE", self.users_json),
+            patch("chimera.modules.trusttunnel._CREDS_TOML", self.creds_toml),
+            patch("chimera.modules.trusttunnel._STATE_FILE", self.state_json),
+            patch("chimera.modules.trusttunnel._BINARY_PATH", self.binary_path),
+            patch("chimera.modules.user_lifecycle._TRUSTTUNNEL_CREDS_FILE", self.creds_toml),
+            patch("chimera.modules.user_lifecycle._TRUSTTUNNEL_STATE_FILE", self.state_json),
+            patch("chimera.modules.user_lifecycle._USERS_FILE", self.users_json),
         ]
 
 
@@ -150,7 +150,7 @@ class TestTrustTunnelAdapterIdempotency(unittest.TestCase):
 
     def test_add_existing_user_updates_in_place(self):
         """Adding alice twice should NOT create a second [[client]] block."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         # Reset batch state
         user_lifecycle._PENDING_RESTARTS = set()
         user_lifecycle._BATCH_DEPTH = 0
@@ -165,7 +165,7 @@ class TestTrustTunnelAdapterIdempotency(unittest.TestCase):
         self.assertTrue(ok1, "first add should succeed")
 
         # Read credentials.toml — should still have exactly 3 users
-        from vless_installer.modules.trusttunnel import trusttunnel_list_users
+        from chimera.modules.trusttunnel import trusttunnel_list_users
         users_after_first = trusttunnel_list_users()
         self.assertEqual(len(users_after_first), 3,
                          f"expected 3 users after first add, got {len(users_after_first)}")
@@ -191,7 +191,7 @@ class TestTrustTunnelAdapterIdempotency(unittest.TestCase):
 
     def test_add_new_user_appends(self):
         """Adding a brand-new user should append a 4th [[client]] block."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         user_lifecycle._PENDING_RESTARTS = set()
         user_lifecycle._BATCH_DEPTH = 0
 
@@ -199,7 +199,7 @@ class TestTrustTunnelAdapterIdempotency(unittest.TestCase):
         ok = user_lifecycle.TrustTunnelAdapter.add("dave@example.com", uuid=uuid_str)
         self.assertTrue(ok)
 
-        from vless_installer.modules.trusttunnel import trusttunnel_list_users
+        from chimera.modules.trusttunnel import trusttunnel_list_users
         users = trusttunnel_list_users()
         self.assertEqual(len(users), 4, f"expected 4 users, got {len(users)}")
         dave = next(u for u in users if u["username"] == "dave@example.com")
@@ -233,7 +233,7 @@ class TestBatchedRestarts(unittest.TestCase):
         # Mock the restart function so we can count calls
         self.restart_calls = 0
         self.restart_patch = patch(
-            "vless_installer.modules.trusttunnel.trusttunnel_restart_service",
+            "chimera.modules.trusttunnel.trusttunnel_restart_service",
             side_effect=self._count_restart,
         )
         self.restart_patch.start()
@@ -248,7 +248,7 @@ class TestBatchedRestarts(unittest.TestCase):
 
     def test_batch_context_collapses_5_blocks_to_1_restart(self):
         """5 block_user() calls inside batch_context → 1 restart."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         user_lifecycle._PENDING_RESTARTS = set()
         user_lifecycle._BATCH_DEPTH = 0
 
@@ -269,7 +269,7 @@ class TestBatchedRestarts(unittest.TestCase):
     def test_no_batch_context_5_separate_ops_5_restarts(self):
         """Without batch_context, 5 separate block_user() calls → 5 restarts.
         This confirms the batching is what collapses them."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         user_lifecycle._PENDING_RESTARTS = set()
         user_lifecycle._BATCH_DEPTH = 0
 
@@ -297,7 +297,7 @@ class TestBatchedRestarts(unittest.TestCase):
 
     def test_nested_batch_context_still_one_restart(self):
         """Nested batch_context() should still produce only 1 restart."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         user_lifecycle._PENDING_RESTARTS = set()
         user_lifecycle._BATCH_DEPTH = 0
 
@@ -334,7 +334,7 @@ class TestRollbackOnPartialFailure(unittest.TestCase):
             self.addCleanup(p.stop)
         self.restart_calls = 0
         self.restart_patch = patch(
-            "vless_installer.modules.trusttunnel.trusttunnel_restart_service",
+            "chimera.modules.trusttunnel.trusttunnel_restart_service",
             side_effect=self._count_restart,
         )
         self.restart_patch.start()
@@ -350,7 +350,7 @@ class TestRollbackOnPartialFailure(unittest.TestCase):
     def test_rollback_restores_creds_and_no_restart(self):
         """If TrustTunnel add fails AFTER VLESS add succeeds, both files
         should be rolled back AND no restart should happen."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         user_lifecycle._PENDING_RESTARTS = set()
         user_lifecycle._BATCH_DEPTH = 0
 
@@ -362,7 +362,7 @@ class TestRollbackOnPartialFailure(unittest.TestCase):
         # But then mock trusttunnel_add_user to FAIL (simulates creds.toml
         # write failure — e.g. disk full or permissions).
         with patch.object(user_lifecycle.VlessAdapter, "add", return_value=True) as mock_vless_add, \
-             patch("vless_installer.modules.trusttunnel.trusttunnel_add_user",
+             patch("chimera.modules.trusttunnel.trusttunnel_add_user",
                    side_effect=IOError("simulated disk full")):
             result = user_lifecycle.add_user(
                 email="newuser@example.com",
@@ -395,13 +395,13 @@ class TestRollbackOnPartialFailure(unittest.TestCase):
     def test_rollback_when_trusttunnel_is_first_protocol(self):
         """Even if TrustTunnel is the FIRST protocol and fails, rollback
         should still work and no restart should happen."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         user_lifecycle._PENDING_RESTARTS = set()
         user_lifecycle._BATCH_DEPTH = 0
 
         original_creds = self.fx.creds_toml.read_text()
 
-        with patch("vless_installer.modules.trusttunnel.trusttunnel_add_user",
+        with patch("chimera.modules.trusttunnel.trusttunnel_add_user",
                    side_effect=IOError("simulated failure")):
             result = user_lifecycle.add_user(
                 email="newuser@example.com",
@@ -444,7 +444,7 @@ class TestNonExistentUserProtection(unittest.TestCase):
     def test_generate_deeplink_nonexistent_user_raises_valueerror(self):
         """trusttunnel_generate_deeplink for a non-existent user should
         raise ValueError BEFORE invoking the binary."""
-        from vless_installer.modules.trusttunnel import trusttunnel_generate_deeplink
+        from chimera.modules.trusttunnel import trusttunnel_generate_deeplink
 
         # eve is NOT in _REAL_CREDS_TOML (only alice, bob, carol)
         with self.assertRaises(ValueError) as ctx:
@@ -459,7 +459,7 @@ class TestNonExistentUserProtection(unittest.TestCase):
         """For an existing user, the function should proceed (and either
         succeed or fail at the binary invocation, but NOT raise ValueError
         for user-not-found)."""
-        from vless_installer.modules.trusttunnel import trusttunnel_generate_deeplink
+        from chimera.modules.trusttunnel import trusttunnel_generate_deeplink
 
         # Mock the subprocess call so we don't need a real binary
         mock_result = MagicMock(returncode=0, stdout="tt://?abc123\n\nTo connect...\n", stderr="")
@@ -471,7 +471,7 @@ class TestNonExistentUserProtection(unittest.TestCase):
     def test_deeplink_for_user_returns_empty_for_nonexistent(self):
         """trusttunnel_deeplink_for_user (pure Python, used by linkqr_lib)
         should return "" for a non-existent user — no exception."""
-        from vless_installer.modules.trusttunnel import trusttunnel_deeplink_for_user
+        from chimera.modules.trusttunnel import trusttunnel_deeplink_for_user
 
         # eve is not in credentials.toml
         link = trusttunnel_deeplink_for_user("eve@example.com", "some-uuid")
@@ -480,7 +480,7 @@ class TestNonExistentUserProtection(unittest.TestCase):
 
     def test_deeplink_for_user_returns_empty_when_not_installed(self):
         """When TrustTunnel is not installed, should return ""."""
-        from vless_installer.modules.trusttunnel import trusttunnel_deeplink_for_user
+        from chimera.modules.trusttunnel import trusttunnel_deeplink_for_user
         # Clear the state file so it looks uninstalled
         self.fx.state_json.unlink()
         link = trusttunnel_deeplink_for_user("alice@example.com", "some-uuid")
@@ -503,11 +503,11 @@ class TestNoRegressionOnExistingProtocols(unittest.TestCase):
 
     def test_pending_restarts_empty_for_vless_only_op(self):
         """A VLESS-only add_user should NOT queue any restarts."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         user_lifecycle._PENDING_RESTARTS = set()
         user_lifecycle._BATCH_DEPTH = 0
 
-        with patch("vless_installer.modules.user_lifecycle._USERS_FILE", self.users_json), \
+        with patch("chimera.modules.user_lifecycle._USERS_FILE", self.users_json), \
              patch.object(user_lifecycle.VlessAdapter, "add", return_value=True), \
              patch.object(user_lifecycle.VlessAdapter, "block", return_value=True):
             result = user_lifecycle.add_user(
@@ -522,7 +522,7 @@ class TestNoRegressionOnExistingProtocols(unittest.TestCase):
 
     def test_flush_pending_restarts_noop_when_empty(self):
         """_flush_pending_restarts() should be a no-op when the set is empty."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         user_lifecycle._PENDING_RESTARTS = set()
         # This should not raise and should not call any subprocess
         with patch("subprocess.run") as mock_run:
@@ -532,7 +532,7 @@ class TestNoRegressionOnExistingProtocols(unittest.TestCase):
     def test_cancel_pending_restarts_noop_when_no_match(self):
         """_cancel_pending_restarts should be a no-op when the protocols
         don't match what's pending."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         user_lifecycle._PENDING_RESTARTS = {"trusttunnel"}
         user_lifecycle._cancel_pending_restarts(["vless", "awg"])
         self.assertEqual(user_lifecycle._PENDING_RESTARTS, {"trusttunnel"},
@@ -540,7 +540,7 @@ class TestNoRegressionOnExistingProtocols(unittest.TestCase):
 
     def test_batch_context_flushes_on_normal_exit(self):
         """batch_context should flush pending restarts on normal exit."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         user_lifecycle._PENDING_RESTARTS = set()
         user_lifecycle._BATCH_DEPTH = 0
 
@@ -559,7 +559,7 @@ class TestNoRegressionOnExistingProtocols(unittest.TestCase):
 
     def test_batch_context_does_not_flush_on_exception(self):
         """batch_context should NOT flush on exception (rollback path)."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         user_lifecycle._PENDING_RESTARTS = set()
         user_lifecycle._BATCH_DEPTH = 0
 
@@ -593,7 +593,7 @@ class TestRealCredentialsTomlFormat(unittest.TestCase):
 
     def test_parse_real_creds_file(self):
         """Parse the real 3-user credentials.toml from Phase 0."""
-        from vless_installer.modules.trusttunnel import _parse_credentials_toml
+        from chimera.modules.trusttunnel import _parse_credentials_toml
         clients = _parse_credentials_toml(_REAL_CREDS_TOML)
         self.assertEqual(len(clients), 3)
         self.assertEqual(clients[0]["username"], "alice@example.com")
@@ -606,7 +606,7 @@ class TestRealCredentialsTomlFormat(unittest.TestCase):
 
     def test_format_roundtrip_preserves_structure(self):
         """Format → parse → format should be stable."""
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             _parse_credentials_toml, _format_credentials_toml,
         )
         clients = _parse_credentials_toml(_REAL_CREDS_TOML)
@@ -634,7 +634,7 @@ class TestRealDeeplinkFormat(unittest.TestCase):
 
     def test_decode_real_upstream_deeplink(self):
         """Decode a real tt:// URI generated by the upstream binary."""
-        from vless_installer.modules.trusttunnel import trusttunnel_deeplink_decode
+        from chimera.modules.trusttunnel import trusttunnel_deeplink_decode
         decoded = trusttunnel_deeplink_decode(_REAL_DEEPLINK_ALICE)
         self.assertEqual(decoded["hostname"], "test.example.com")
         self.assertEqual(decoded["username"], "alice")
@@ -645,7 +645,7 @@ class TestRealDeeplinkFormat(unittest.TestCase):
 
     def test_encode_decode_roundtrip(self):
         """Encode → decode should preserve all fields."""
-        from vless_installer.modules.trusttunnel import (
+        from chimera.modules.trusttunnel import (
             trusttunnel_deeplink_encode, trusttunnel_deeplink_decode,
         )
         uri = trusttunnel_deeplink_encode(
@@ -680,7 +680,7 @@ class TestDeterministicPassword(unittest.TestCase):
     def test_password_is_deterministic(self):
         """Same uuid → same password, across calls."""
         import hashlib
-        from vless_installer.modules.trusttunnel import trusttunnel_derive_password
+        from chimera.modules.trusttunnel import trusttunnel_derive_password
         uuid_str = "12345678-1234-1234-1234-123456789abc"
         p1 = trusttunnel_derive_password(uuid_str)
         p2 = trusttunnel_derive_password(uuid_str)
@@ -692,13 +692,13 @@ class TestDeterministicPassword(unittest.TestCase):
     def test_password_matches_expected_sha256(self):
         """Verify the exact formula."""
         import hashlib
-        from vless_installer.modules.trusttunnel import trusttunnel_derive_password
+        from chimera.modules.trusttunnel import trusttunnel_derive_password
         uuid_str = "abc-def"
         expected = hashlib.sha256(b"trusttunnel-pass|" + uuid_str.encode()).hexdigest()
         self.assertEqual(trusttunnel_derive_password(uuid_str), expected)
 
     def test_different_uuids_different_passwords(self):
-        from vless_installer.modules.trusttunnel import trusttunnel_derive_password
+        from chimera.modules.trusttunnel import trusttunnel_derive_password
         p1 = trusttunnel_derive_password("11111111-1111-1111-1111-111111111111")
         p2 = trusttunnel_derive_password("22222222-2222-2222-2222-222222222222")
         self.assertNotEqual(p1, p2)
@@ -715,11 +715,11 @@ class TestAdapterRegistration(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_trusttunnel_in_all_protocols(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         self.assertIn("trusttunnel", user_lifecycle.ALL_PROTOCOLS)
 
     def test_trusttunnel_in_protocol_adapters(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         self.assertIn("trusttunnel", user_lifecycle.PROTOCOL_ADAPTERS)
         self.assertIs(
             user_lifecycle.PROTOCOL_ADAPTERS["trusttunnel"],
@@ -727,7 +727,7 @@ class TestAdapterRegistration(unittest.TestCase):
         )
 
     def test_adapter_has_required_methods(self):
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         adapter = user_lifecycle.TrustTunnelAdapter
         for method in ("add", "remove", "block", "unblock"):
             self.assertTrue(hasattr(adapter, method),
@@ -736,7 +736,7 @@ class TestAdapterRegistration(unittest.TestCase):
 
     def test_state_files_includes_trusttunnel(self):
         """_state_files_for_protocols should include credentials.toml + state.json."""
-        from vless_installer.modules import user_lifecycle
+        from chimera.modules import user_lifecycle
         files = user_lifecycle._state_files_for_protocols(["trusttunnel"])
         paths_str = [str(f) for f in files]
         # Should include _TRUSTTUNNEL_CREDS_FILE and _TRUSTTUNNEL_STATE_FILE

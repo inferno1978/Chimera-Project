@@ -2,7 +2,7 @@
 """
 tests/test_geoip_block.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/geoip_block.py.
+Unit-тесты для chimera/modules/geoip_block.py.
 
 Покрывает:
   1. _geoip_block_get_rules — чтение block-правил из Xray config
@@ -21,7 +21,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -31,9 +31,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestGeoipBlockGetRules(unittest.TestCase):
@@ -56,13 +56,13 @@ class TestGeoipBlockGetRules(unittest.TestCase):
         return core
 
     def test_returns_empty_when_no_config(self):
-        from vless_installer.modules import geoip_block
+        from chimera.modules import geoip_block
         with patch.object(geoip_block, "_core_module",
                           return_value=self._mock_core()):
             self.assertEqual(geoip_block._geoip_block_get_rules(), [])
 
     def test_returns_block_rules(self):
-        from vless_installer.modules import geoip_block
+        from chimera.modules import geoip_block
         cfg = {"routing": {"rules": [
             {"outboundTag": "block", "domain": ["geosite:category-ads"]},
             {"outboundTag": "direct", "domain": ["geosite:ru"]},
@@ -74,7 +74,7 @@ class TestGeoipBlockGetRules(unittest.TestCase):
         self.assertEqual(result[0]["outboundTag"], "block")
 
     def test_returns_empty_when_no_block_rules(self):
-        from vless_installer.modules import geoip_block
+        from chimera.modules import geoip_block
         cfg = {"routing": {"rules": [
             {"outboundTag": "direct", "domain": ["geosite:ru"]},
         ]}}

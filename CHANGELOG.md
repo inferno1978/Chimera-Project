@@ -61,11 +61,11 @@
 
 #### 1. `test_core_dynamic_version.py` переписан на динамический паттерн
 
-`test_no_hardcoded_version_in_core_py` хардкодил `"4.25.0"` как искомый литерал — tautological-паттерн, после следующего бампа тест протухал молча. Переписан: читает текущую версию из `vless_installer.__version__` в момент запуска и ищет её как литерал в `_core.py`. При следующем бампе тест сам подтянется. Добавлен `test_main_menu_shows_current_version` — проверяет, что баннер главного меню показывает текущую версию (не "unknown" и не устаревшую).
+`test_no_hardcoded_version_in_core_py` хардкодил `"4.25.0"` как искомый литерал — tautological-паттерн, после следующего бампа тест протухал молча. Переписан: читает текущую версию из `chimera.__version__` в момент запуска и ищет её как литерал в `_core.py`. При следующем бампе тест сам подтянется. Добавлен `test_main_menu_shows_current_version` — проверяет, что баннер главного меню показывает текущую версию (не "unknown" и не устаревшую).
 
 #### 2. Version bump 4.25.0 → 4.25.1
 
-`vless_installer/__init__.py` — `__version__` + докстринг. Все публикациионные файлы обновлены вручную: `bootstrap.sh`, `README.md` (заголовок + badge + баннер + architecture-диаграмма), `INSTALL.md`, `PROJECT_MAP.md`, `full_test.py`, `verify.py`. `_core.py`, `honeypot.py`, `main.py` подхватывают версию динамически через `_get_version()` — ручных правок не требуют (проверено grep-аудитом).
+`chimera/__init__.py` — `__version__` + докстринг. Все публикациионные файлы обновлены вручную: `bootstrap.sh`, `README.md` (заголовок + badge + баннер + architecture-диаграмма), `INSTALL.md`, `PROJECT_MAP.md`, `full_test.py`, `verify.py`. `_core.py`, `honeypot.py`, `main.py` подхватывают версию динамически через `_get_version()` — ручных правок не требуют (проверено grep-аудитом).
 
 ### 📊 Статистика
 
@@ -86,7 +86,7 @@
 
 #### 1. Client-facing Telegram-бот для self-service конечных пользователей
 
-**Модули:** `vless_installer/modules/tg_client_bot.py`, `vless_installer/modules/linkqr_lib.py`
+**Модули:** `chimera/modules/tg_client_bot.py`, `chimera/modules/linkqr_lib.py`
 
 Отдельный от admin-бота модуль с командами `/start` (deep-link binding), `/config`, `/qr`, `/status`, `/help`. Единая shared-библиотека `linkqr_lib.py` для генерации ссылок/QR, переиспользуемая обоими ботами. Строгий one-to-one binding Telegram user_id ↔ UUID через одноразовые invite-токены. Rate-limiting (1 команда / 2 сек, настраиваемо). Приватные ключи/PSK никогда не попадают в ответы бота. Отдельный systemd-юнит `xray-tg-client.service`, отдельный конфиг `/var/lib/xray-installer/tg_client_bot.json`, отдельная карта привязок `tg_client_bot_map.json`.
 
@@ -94,7 +94,7 @@
 
 #### 2. Единый multi-protocol user_lifecycle-слой
 
-**Модуль:** `vless_installer/modules/user_lifecycle.py`
+**Модуль:** `chimera/modules/user_lifecycle.py`
 
 Централизованные транзакционные `add_user` / `remove_user` / `block_user` / `unblock_user` / `update_limits` с атомарным rollback при частичном сбое синхронизации хотя бы одного из 8 протоколов (VLESS/Xray, AWG, sing-box, Mieru, MTProto, NaiveProxy, FPTN, Hysteria2). Снапшот state-файлов перед операцией, восстановление при исключении. Существующие cron-флаги (`--ttl-check`, `--autoban`, новые `--traffic-check`, `--lifecycle-cleanup`) делегируют в новый слой с fallback на legacy-логику при недоступности модуля.
 
@@ -102,7 +102,7 @@
 
 #### 3. Принудительный DNS через dnscrypt-proxy
 
-**Модуль:** `vless_installer/modules/dns_redirect.py`
+**Модуль:** `chimera/modules/dns_redirect.py`
 
 iptables/ip6tables NAT REDIRECT для UDP/TCP порта 53 от клиентских интерфейсов (awg0) на локальный dnscrypt-proxy (127.0.0.1:5300). Защита от DNS leak даже при ручном DNS на клиенте. Black-hole guard — проверка что dnscrypt реально слушает порт перед применением правил. Идемпотентное применение через `-C` check. Переключаемо через конфиг (`/var/lib/xray-installer/dns_redirect.json`). Persist после reboot через systemd `dns-redirect-restore.service`. Health-check в диагностике (пункт `DN`).
 
@@ -110,13 +110,13 @@ iptables/ip6tables NAT REDIRECT для UDP/TCP порта 53 от клиентс
 
 #### 4. Унифицированный учёт трафика с baseline-offset
 
-**Модуль:** `vless_installer/modules/traffic_accounting.py`
+**Модуль:** `chimera/modules/traffic_accounting.py`
 
 Переживает рестарт сервиса, ротацию логов и сброс интерфейса для VLESS/Xray, AWG, Mieru и NaiveProxy. Универсальный парсер человекочитаемых размеров `parse_human_readable_bytes` (IEC KiB/MiB/GiB, SI KB/MB/GB, bare-letter K/M/G) и форматтер `format_bytes` (en/ru локали). Thread/process-safe через `fcntl.flock`. Для NaiveProxy — инкрементальное чтение access.log с отслеживанием inode для устойчивости к ротации Caddy `roll_size 10mb`. Для AWG — корректный парсер `awg show all dump` (peer vs interface по количеству полей). Для Mieru — правильные ключи `download`/`upload` из journalctl `[metrics - user - NAME]`.
 
 #### 5. TrustTunnel — интеграция официального upstream-бинарника AdGuard VPN
 
-**Модули:** `vless_installer/modules/trusttunnel.py`, `trusttunnel_packages.py`, `trusttunnel_mirrors.py`, `trusttunnel_health.py`, `trusttunnel_stats.py`
+**Модули:** `chimera/modules/trusttunnel.py`, `trusttunnel_packages.py`, `trusttunnel_mirrors.py`, `trusttunnel_health.py`, `trusttunnel_stats.py`
 
 Новый протокол как 9-й в реестре `user_lifecycle.PROTOCOL_ADAPTERS`. Использует **официальный upstream prebuilt-бинарник** `trusttunnel_endpoint` + `setup_wizard` (Rust, Apache 2.0, https://github.com/TrustTunnel/TrustTunnel), GPG-подписан ключом AdGuard `28645AC9776EC4C00BCE2AFC0FE641E7235E2EC6`. НЕ форк и НЕ реимплементация (в отличие от подхода в HYDRA-ULTIMATE, где TrustTunnel — кастомный sing-box inbound с несовместимым `tt://user:pass@host` URI). Транспорт: HTTP/2-over-TLS (TCP) + HTTP/3-over-QUIC (UDP) с мультиплексированием TCP/UDP/ICMP. Клиентская выдача — deep-link `tt://?<base64url-TLV>` (upstream-формат), встроен в `linkqr_lib.build_all_links_for_user` и существующий self-service Telegram-бот (команды `/config` и `/qr` работают без изменений UX).
 
@@ -133,16 +133,16 @@ iptables/ip6tables NAT REDIRECT для UDP/TCP порта 53 от клиентс
 ### 📦 Изменения по файлам
 
 **Новые модули:**
-- `vless_installer/modules/tg_client_bot.py` (+1738 строк) — клиентский бот
-- `vless_installer/modules/linkqr_lib.py` (+624 строки) — shared-библиотека ссылок/QR
-- `vless_installer/modules/user_lifecycle.py` (+1643 строки) — unified lifecycle
-- `vless_installer/modules/dns_redirect.py` (+917 строк) — DNS REDIRECT
-- `vless_installer/modules/traffic_accounting.py` (+559 строк) — baseline-offset
-- `vless_installer/modules/trusttunnel.py` (~700 строк) — TrustTunnel: install/menu/user CRUD/deep-link codec/systemd/service control
-- `vless_installer/modules/trusttunnel_packages.py` — PackageSpec для prebuilt binaries
-- `vless_installer/modules/trusttunnel_mirrors.py` — URL builder для GitHub Releases
-- `vless_installer/modules/trusttunnel_health.py` — cron health-check (service + /metrics + version)
-- `vless_installer/modules/trusttunnel_stats.py` — aggregate traffic collector (Prometheus /metrics → traffic_accounting)
+- `chimera/modules/tg_client_bot.py` (+1738 строк) — клиентский бот
+- `chimera/modules/linkqr_lib.py` (+624 строки) — shared-библиотека ссылок/QR
+- `chimera/modules/user_lifecycle.py` (+1643 строки) — unified lifecycle
+- `chimera/modules/dns_redirect.py` (+917 строк) — DNS REDIRECT
+- `chimera/modules/traffic_accounting.py` (+559 строк) — baseline-offset
+- `chimera/modules/trusttunnel.py` (~700 строк) — TrustTunnel: install/menu/user CRUD/deep-link codec/systemd/service control
+- `chimera/modules/trusttunnel_packages.py` — PackageSpec для prebuilt binaries
+- `chimera/modules/trusttunnel_mirrors.py` — URL builder для GitHub Releases
+- `chimera/modules/trusttunnel_health.py` — cron health-check (service + /metrics + version)
+- `chimera/modules/trusttunnel_stats.py` — aggregate traffic collector (Prometheus /metrics → traffic_accounting)
 
 **Новые тесты:**
 - `tests/test_tg_client_bot.py` (+738 строк, 56 тестов)
@@ -165,7 +165,7 @@ iptables/ip6tables NAT REDIRECT для UDP/TCP порта 53 от клиентс
 
 **Интеграция в `main.py`:**
 - Новые CLI-флаги: `--traffic-check`, `--lifecycle-cleanup`
-- Health-check info использует динамическую версию из `vless_installer.__version__`
+- Health-check info использует динамическую версию из `chimera.__version__`
 
 **Интеграция в `traffic_tracking.py`:**
 - Новая функция `_query_user_traffic_bytes_accumulated` — обёртка с baseline-offset
@@ -184,7 +184,7 @@ iptables/ip6tables NAT REDIRECT для UDP/TCP порта 53 от клиентс
 
 ### 🔄 Версия
 
-Обновлена с 4.20.0 до 4.25.0. Версия в `main.py` теперь берётся динамически из `vless_installer.__version__` (по аналогии с `honeypot.py`) — при следующем бампе не отстанет.
+Обновлена с 4.20.0 до 4.25.0. Версия в `main.py` теперь берётся динамически из `chimera.__version__` (по аналогии с `honeypot.py`) — при следующем бампе не отстанет.
 
 ---
 
@@ -225,7 +225,7 @@ iptables/ip6tables NAT REDIRECT для UDP/TCP порта 53 от клиентс
 
 ### 📦 Изменения по файлам
 
-**`vless_installer/modules/singbox_nginx.py`** (+ ~400 строк):
+**`chimera/modules/singbox_nginx.py`** (+ ~400 строк):
 - Новая функция `apply_reality_sni_dispatch_patch()` — патчит config.json:
   - `port: SERVER_PORT (443)` → `8442` (`_REALITY_LOOPBACK_PORT`)
   - `listen: "::"` → `"127.0.0.1"`
@@ -248,7 +248,7 @@ iptables/ip6tables NAT REDIRECT для UDP/TCP порта 53 от клиентс
 - `auto_disable_sni_dispatch()` — `warn()`-плейсхолдеры заменены на вызов
   `revert_reality_sni_dispatch_patch()`
 
-**`vless_installer/_core.py`** (+ ~16 строк):
+**`chimera/_core.py`** (+ ~16 строк):
 - `_rebuild_and_restart_xray()` — добавлен вызов `sni_dispatch_reapply_after_rebuild()`
   после `server_fragment_reapply_after_rebuild()` и до финального
   `systemctl restart xray`. Порядок операций сохранён: nginx restart (если нужен)
@@ -2201,15 +2201,15 @@ fake_cert_len = 2048
 
 ### 🔧 Изменения в модулях
 
-#### `vless_installer/modules/nginx_setup.py` (Задача 1)
+#### `chimera/modules/nginx_setup.py` (Задача 1)
 - `create_website(domain=None, site_template=None)` — параметры, переданные явно, **ПЕРЕКРЫВАЮТ** значения из `core.PARAM_DOMAIN` / `core.PARAM_SITE_TEMPLATE`. Если не переданы — поведение 100% идентично предыдущему (VLESS install flow не меняется ни в одном байте вывода).
 - `setup_nginx_final(domain=None, port=None, socket_path=None)` — аналогично для `PARAM_DOMAIN` / `SERVER_PORT` / `PARAM_SOCKET_PATH`. `PROTOCOL_MODE`, `AWG_EXIT_ENABLED`, `XHTTP_PATH`, `XHTTP_BACKEND_PORT`, `IS_IPV6_AVAILABLE` остаются из core (они касаются только VLESS-флоу).
 - Это позволяет **параллельно** поднять сайт для VLESS-домена и отдельный сайт для Telemt-домена на одном сервере — без мутации глобального state в `_core.py`.
 
-#### `vless_installer/modules/ssl_certbot.py`
+#### `chimera/modules/ssl_certbot.py`
 - `obtain_ssl_cert(domain=None)` — если `domain` передан явно, сертификат выпускается для этого домена (а не для `core.PARAM_DOMAIN`). Используется в Telemt nginx-fallback, где домен маскировки может отличаться от основного VLESS-домена сервера. `PARAM_EMAIL` и `PROTOCOL_MODE` остаются из core.
 
-#### `vless_installer/modules/mtproto.py` (Задача 2)
+#### `chimera/modules/mtproto.py` (Задача 2)
 - **`OwnSiteConfig` dataclass** — параметры локального nginx-сайта для маскировки Telemt: `domain`, `mask_host` (всегда `"127.0.0.1"` в этой итерации), `mask_port`.
 - **`_pick_local_nginx_port(telemt_port)`** — подбирает свободный TCP-порт на 127.0.0.1 из диапазона 8444–9998 (избегая 9000 и `telemt_port`), проверяя занятость через `ss -tlnH`.
 - **`_check_mask_backend_ready(mask_host, mask_port, timeout)`** — TCP-connect проверка готовности nginx. **КРИТИЧНО** для `tls_emulation=true` (telemt/telemt issues #330, #713): Telemt при старте делает живой TLS-fetch cert-chain с `mask_host`; если nginx ещё не поднялся — fetch падает с "early eof" и Telemt уходит в restart-loop.
@@ -2226,7 +2226,7 @@ fake_cert_len = 2048
 
 ### 🚫 Что НЕ трогали (строгие границы задачи)
 
-- `vless_installer/modules/telemt_fallback.py` — это **ДРУГОЙ** fallback (Middle Proxy → Direct Mode, гибрид ME). Не путать, не переиспользовать имена `fallback_to_direct` / `FallbackConfig` для этой задачи. Никаких правок.
+- `chimera/modules/telemt_fallback.py` — это **ДРУГОЙ** fallback (Middle Proxy → Direct Mode, гибрид ME). Не путать, не переиспользовать имена `fallback_to_direct` / `FallbackConfig` для этой задачи. Никаких правок.
 - `awg*.py`, `telemt_mss_selector.py`, `telemt_syn_limiter.py`, `telemt_geoip_*` — AWG-трек, не трогаем.
 - `telemt_mirrors.py`, `telemt_packages.py`, `telemt_geoip_mirrors.py` — mirrors/downloader, не трогаем.
 - TUI diagnostic test runner — не трогаем.
@@ -2253,7 +2253,7 @@ fake_cert_len = 2048
 
 ### 📦 Миграция всех модулей на `download_manager.fetch_package()`
 
-Все модули проекта, скачивающие бинарники/архивы/исходники для установки, переведены на единый декларативный механизм `PackageSpec` + `fetch_package()` из `vless_installer/modules/download_manager.py`. Устранена дублирующаяся ad-hoc логика скачивания (свои таймауты, свои циклы retry, свои функции «подсказка для ручного скачивания») — теперь каждый пакет описывается одним `PackageSpec`, а `fetch_package()` сам перебирает зеркала, проверяет ручное размещение через WinSCP, копирует в `install_dests` с нужными правами и печатает единообразную подсказку при полном провале.
+Все модули проекта, скачивающие бинарники/архивы/исходники для установки, переведены на единый декларативный механизм `PackageSpec` + `fetch_package()` из `chimera/modules/download_manager.py`. Устранена дублирующаяся ad-hoc логика скачивания (свои таймауты, свои циклы retry, свои функции «подсказка для ручного скачивания») — теперь каждый пакет описывается одним `PackageSpec`, а `fetch_package()` сам перебирает зеркала, проверяет ручное размещение через WinSCP, копирует в `install_dests` с нужными правами и печатает единообразную подсказку при полном провале.
 
 **Что мигрировано (29 PackageSpec-ов, волны 1-6):**
 - **Волна 1:** `turntunnel.py`, `turnable.py` — бинарники vk-turn-proxy и turnable.
@@ -2290,7 +2290,7 @@ fake_cert_len = 2048
 
 ### 🔧 Прочее
 
-- `honeypot.py`: хардкоженный `v4.11` в генерируемом конфиге заменён на динамическую вставку `vless_installer.__version__` — при следующем бампе версии не отстанет снова.
+- `honeypot.py`: хардкоженный `v4.11` в генерируемом конфиге заменён на динамическую вставку `chimera.__version__` — при следующем бампе версии не отстанет снова.
 - `github_mirrors.py`: добавлена `build_source_archive_mirror_urls()` для `archive/refs/heads/{branch}.tar.gz` URL'ов (используется Wave 2 и Wave 6 для source-tarball'ов).
 - `go_toolchain_mirrors.py` + `go_toolchain_packages.py` — общий `GO_TOOLCHAIN_SPEC` для `wdtt.py`, `webdav_tunnel.py`, `olcrtc.py` (раньше каждый модуль имел свою копию `_http_download` + `_install_go_toolchain`).
 
@@ -2458,7 +2458,7 @@ fake_cert_len = 2048
 
 Полный порт [bivlked/amneziawg-installer](https://github.com/bivlked/amneziawg-installer) v5.18.4 (10 500+ строк bash) на Python, интегрированный в основной проект как 13 новых модулей. Теперь standalone AmneziaWG 2.0 доступен как отдельный протокол в главном меню (пункт 16), не зависит от VLESS-инфраструктуры.
 
-**13 новых модулей в `vless_installer/modules/awg_*.py`:**
+**13 новых модулей в `chimera/modules/awg_*.py`:**
 
 | Модуль | Назначение |
 |--------|-----------|
@@ -2547,7 +2547,7 @@ fake_cert_len = 2048
 
 ### 🏗️ Рефакторинг — модульная архитектура (продолжение)
 
-Продолжение декомпозиции монолитного `_core.py` (32 557 строк) в модульную архитектуру. В этой версии вынесено ещё 40+ модулей, ядро уменьшилось с 32 557 → 7 779 строк (−76%). Всего в `vless_installer/modules/` теперь 129 файлов, сгруппированных по 24 логическим категориям (см. `PROJECT_MAP.md`).
+Продолжение декомпозиции монолитного `_core.py` (32 557 строк) в модульную архитектуру. В этой версии вынесено ещё 40+ модулей, ядро уменьшилось с 32 557 → 7 779 строк (−76%). Всего в `chimera/modules/` теперь 129 файлов, сгруппированных по 24 логическим категориям (см. `PROJECT_MAP.md`).
 
 **Принцип рефакторинга:**
 - `_core.py` остаётся главным orchestrator-ом: глобальное состояние, `main_menu()`, `_load_state_into_globals()`, функции которые мутируют много globals (AWG, chain multi-node, install orchestration).
@@ -2725,11 +2725,11 @@ Firewall-хук: синтаксическая проверка скрипта в
 
 ### Исправление
 
-Ленивый импорт `from vless_installer._core import setup_logrotate` непосредственно внутри обработчика `ch == "1"`, а не наверху файла — `_core.py` сам импортирует `do_manage_logrotate` из `logrotate.py` при старте, поэтому импорт в обратную сторону на уровне модуля зациклил бы загрузку. Внутри функции это безопасно: к моменту нажатия кнопки оба модуля уже полностью загружены. Тот же приём, что и в `warp.py`/`status_panel.py` (`_core_module()`), только явным импортом конкретного имени вместо `importlib`.
+Ленивый импорт `from chimera._core import setup_logrotate` непосредственно внутри обработчика `ch == "1"`, а не наверху файла — `_core.py` сам импортирует `do_manage_logrotate` из `logrotate.py` при старте, поэтому импорт в обратную сторону на уровне модуля зациклил бы загрузку. Внутри функции это безопасно: к моменту нажатия кнопки оба модуля уже полностью загружены. Тот же приём, что и в `warp.py`/`status_panel.py` (`_core_module()`), только явным импортом конкретного имени вместо `importlib`.
 
 ### Проверено на
 
-Сквозной прогон в реальном окружении: `import vless_installer._core` + `from vless_installer.modules import logrotate` — оба модуля загружаются без циклической ошибки; `core.setup_logrotate()` вызван напрямую и реально записал `/etc/logrotate.d/xray-heavy` — проверено `logrotate --debug` на результате (файлы корректно распознаны одним блоком, `missingok` отработал на отсутствующих autoban/watchdog-логах). `py_compile` обоих файлов.
+Сквозной прогон в реальном окружении: `import chimera._core` + `from chimera.modules import logrotate` — оба модуля загружаются без циклической ошибки; `core.setup_logrotate()` вызван напрямую и реально записал `/etc/logrotate.d/xray-heavy` — проверено `logrotate --debug` на результате (файлы корректно распознаны одним блоком, `missingok` отработал на отсутствующих autoban/watchdog-логах). `py_compile` обоих файлов.
 
 ---
 
@@ -2747,9 +2747,9 @@ Firewall-хук: синтаксическая проверка скрипта в
 
 ### Изменения в коде
 
-**`vless_installer/_core.py`**: `setup_logrotate()` — новый блок `LOGROTATE_XRAY_HEAVY`; в статусные `dim()`-сообщения после установки добавлена строка про новый конфиг.
+**`chimera/_core.py`**: `setup_logrotate()` — новый блок `LOGROTATE_XRAY_HEAVY`; в статусные `dim()`-сообщения после установки добавлена строка про новый конфиг.
 
-**`vless_installer/modules/logrotate.py`**: путь `_LOGROTATE_XRAY_HEAVY` + строка статуса в меню.
+**`chimera/modules/logrotate.py`**: путь `_LOGROTATE_XRAY_HEAVY` + строка статуса в меню.
 
 ### Проверено на
 
@@ -2784,9 +2784,9 @@ Firewall-хук: синтаксическая проверка скрипта в
 
 ### Изменения в коде
 
-**`vless_installer/modules/status_panel.py`** (новый) — проверки по трём категориям (`_protocol_checks`/`_network_checks`/`_security_checks`), системные метрики из `/proc` без внешних зависимостей, кэш со снапшотом (`get_snapshot`), рендер (`render`).
+**`chimera/modules/status_panel.py`** (новый) — проверки по трём категориям (`_protocol_checks`/`_network_checks`/`_security_checks`), системные метрики из `/proc` без внешних зависимостей, кэш со снапшотом (`get_snapshot`), рендер (`render`).
 
-**`vless_installer/_core.py`** — 10 строк в `main_menu()`: ленивый импорт `status_panel.render` + вызов перед отрисовкой главного меню.
+**`chimera/_core.py`** — 10 строк в `main_menu()`: ленивый импорт `status_panel.render` + вызов перед отрисовкой главного меню.
 
 ### Проверено на
 
@@ -2808,7 +2808,7 @@ Firewall-хук: синтаксическая проверка скрипта в
 
 ### Изменения в коде
 
-**`vless_installer/modules/subscription.py`**:
+**`chimera/modules/subscription.py`**:
 - `_TRAFFIC_LIMITS_FILE` — путь к уже существующему `traffic_limits.json` (только чтение, `_core.py` не изменяется и не импортируется для этого — файл читается напрямую, как и `state.json`/`mieru.json` в этом же модуле);
 - `_load_traffic_limits()` / `_build_userinfo_header(user)` — сборка значения заголовка по email пользователя;
 - `do_GET()` — заголовок `Subscription-Userinfo` добавляется в ответ, если для пользователя задан лимит.
@@ -2839,7 +2839,7 @@ Firewall-хук: синтаксическая проверка скрипта в
 
 ### Изменения в коде
 
-**`vless_installer/modules/warp_curated_lists.py`** (новый) — источники списков (`CURATED_SOURCES`), загрузка/парсинг (`_fetch_list`/`_parse_list_body`), атомарный кэш под `fcntl.flock` (`_cache_update`, по тому же рецепту, что `_warp_state_save_autonomously()` в `warp.py`), `sync_curated_lists()`, `get_enabled_curated_domains()`, подменю `do_manage_curated_lists()`, cron-точка входа `--sync-lists`.
+**`chimera/modules/warp_curated_lists.py`** (новый) — источники списков (`CURATED_SOURCES`), загрузка/парсинг (`_fetch_list`/`_parse_list_body`), атомарный кэш под `fcntl.flock` (`_cache_update`, по тому же рецепту, что `_warp_state_save_autonomously()` в `warp.py`), `sync_curated_lists()`, `get_enabled_curated_domains()`, подменю `do_manage_curated_lists()`, cron-точка входа `--sync-lists`.
 
 **`warp.py`**:
 - импорт `get_enabled_curated_domains`/`do_manage_curated_lists`;
@@ -2865,12 +2865,12 @@ Firewall-хук: синтаксическая проверка скрипта в
 
 ### Изменения в коде
 
-**`vless_installer/modules/telemt_syn_limiter.py`**:
+**`chimera/modules/telemt_syn_limiter.py`**:
 - финальное правило цепочки: `-j DROP` → `-j REJECT --reject-with tcp-reset`
 - счётчик "отброшено" (`_get_drop_counter`) теперь ищет `REJECT` вместо `DROP` в выводе `iptables -L`
 - docstring и live-счётчик в меню обновлены под новую формулировку
 
-**`vless_installer/modules/mtproto.py`**:
+**`chimera/modules/mtproto.py`**:
 - новые `_PQ_RISKY` / `_PQ_CONFIRMED` — множества доменов с известным статусом поддержки постквантового key exchange (источник — сторонний SNI-чекер, помечено в комментарии как непроверенное нами)
 - `_select_domain()`: домены в списке помечаются `⚠` (риск блока iOS) / `✓` (подтверждено), легенда показывается только при наличии отмеченных доменов в категории; ручной ввод домена (пункт `99`) тоже проверяется и выводит предупреждение при попадании в риск-список
 
@@ -2898,7 +2898,7 @@ Firewall-хук: синтаксическая проверка скрипта в
 
 ### Изменения в коде
 
-- **`vless_installer/modules/entry_mirrors.py`** (новый) — хранение mirror-нод (`/var/lib/xray-installer/entry_mirrors.json`), TCP health-проба (`probe_all()`, также как отдельный `python3 -m vless_installer.modules.entry_mirrors probe` для cron), генерация ссылок (`get_mirror_uris()`), меню управления (`do_entry_mirrors_menu()`)
+- **`chimera/modules/entry_mirrors.py`** (новый) — хранение mirror-нод (`/var/lib/xray-installer/entry_mirrors.json`), TCP health-проба (`probe_all()`, также как отдельный `python3 -m chimera.modules.entry_mirrors probe` для cron), генерация ссылок (`get_mirror_uris()`), меню управления (`do_entry_mirrors_menu()`)
 - **`subscription.py`** — `build_subscription_body()` подмешивает `get_mirror_uris(uuid, only_healthy=True)` в общий список ссылок (в try/except, отсутствие модуля не ломает подписку)
 - **`_core.py`** — новый пункт `[M]` в подменю `2 → Управление пользователями` (рядом с `[H]` Единая подписка), вызывает `do_entry_mirrors_menu()`
 
@@ -2932,7 +2932,7 @@ Firewall-хук: синтаксическая проверка скрипта в
 
 ### Изменения в коде
 
-**`vless_installer/_core.py`**:
+**`chimera/_core.py`**:
 - `generate_client_links()` — IPv6-ссылка через `get_server_ip("6")` вместо `IPV6_PREFLIGHT`
 - `switch_mode_ab()` — добавлены `AWG_EXIT_ENABLED`, `H2_EXIT_ENABLED`, `PARAM_REALITY_DEST` в `global`, синхронизация из `state` перед пересборкой конфига
 - новая `_assert_reality_dest_sane()`, вызывается в начале `generate_xray_config()`, `generate_xray_config_chain_entry()`, `generate_xray_config_chain_entry_multi()`
@@ -2967,14 +2967,14 @@ Firewall-хук: синтаксическая проверка скрипта в
 
 ### Изменения в коде
 
-**Новый модуль `vless_installer/modules/subscription.py`** — полностью изолированный, `_core.py` не модифицируется в части логики:
+**Новый модуль `chimera/modules/subscription.py`** — полностью изолированный, `_core.py` не модифицируется в части логики:
 - `_gen_vless_link`, `_unified_load_users` — делегирование в `_core.py` тем же паттерном, что и `fragment_link.py`
 - собственный `ThreadingHTTPServer` с TLS (переиспользует Let's Encrypt сертификат на домене, иначе — сертификат Hysteria2 из `state.json`)
 - systemd-юнит `vless-subscription.service`, генерируется и устанавливается через меню
 - меню на `box_renderer.py` — тот же стиль, что и в остальных разделах проекта
 - QR-коды к ссылкам подписки через `qrencode` (тот же паттерн, что в `mieru.py`), печатаются отдельным блоком **вне** рамки — `qrencode` рисует свою фиксированную ASCII-сетку, внутри `box_renderer` она ломает выравнивание
 
-**`vless_installer/_core.py`**:
+**`chimera/_core.py`**:
 - пункт `H` в `_menu_users()` (раздел 2 главного меню — Управление пользователями) — ленивый импорт `do_subscription_menu()` по образцу `F`/`G` (fragment_link/fragment_share)
 
 ### Пофиксенный баг
@@ -3046,7 +3046,7 @@ Xray-core 26.x имеет задокументированные неиспра�
 
 ### Изменения в коде
 
-**`vless_installer/modules/hysteria2_transport.py`** — полная переработка:
+**`chimera/modules/hysteria2_transport.py`** — полная переработка:
 - Убран весь код генерации Xray `protocol: "hysteria"` outbound
 - `h2_transport_apply()`: генерирует `/etc/hysteria/client.yaml`, создаёт и запускает `hysteria-client.service`, патчит Xray outbound на `protocol: "socks"` → `127.0.0.1:10809`, переключает catch-all routing-правило на тег `proxy`
 - `h2_transport_remove()`: останавливает `hysteria-client.service`, восстанавливает предыдущий outbound и routing
@@ -3055,12 +3055,12 @@ Xray-core 26.x имеет задокументированные неиспра�
 - `_write_h2_client_config()`: `insecure: true` + `pinSHA256` для самоподписанных сертификатов
 - `_ensure_hysteria_client_service()`: автоматическая загрузка бинаря на Entry-ноду если отсутствует
 
-**`vless_installer/modules/hysteria2_exit_mgr.py`**:
+**`chimera/modules/hysteria2_exit_mgr.py`**:
 - `_ensure_h2_cert()`: добавлен параметр `ip=`, сертификат генерируется с `-addext 'subjectAltName=IP:{ip}'` и `-addext 'basicConstraints=CA:FALSE'`; добавлен fallback через extfile для OpenSSL < 1.1.1; добавлена финальная проверка наличия SAN
 - `h2_exit_install()`: локальный IP определяется до вызова `_ensure_h2_cert()` и передаётся в него
 - `h2_exit_remote_install()`: определяет наличие IPv6 на удалённой ноде и выбирает `listen: "0.0.0.0:PORT"` или `listen: "[::]:PORT"` соответственно; команда генерации сертификата получила `-addext 'subjectAltName=IP:{host}'`
 
-**`vless_installer/_core.py`**:
+**`chimera/_core.py`**:
 - Добавлена функция `_h2_reapply_transport_if_active()` — вызывается после любой регенерации `config.json`, автоматически восстанавливает H2-транспорт если он был активен
 
 ---
@@ -3089,7 +3089,7 @@ Xray-core 26.x имеет задокументированные неиспра�
 
 **Добавлено**
 
-`vless_installer/modules/pq_vless.py` — VLESS Encryption (mlkem768x25519plus) и опциональная PQ-подпись REALITY (ML-DSA-65)
+`chimera/modules/pq_vless.py` — VLESS Encryption (mlkem768x25519plus) и опциональная PQ-подпись REALITY (ML-DSA-65)
 
 Новый пункт меню `[P] Постквантовый VLESS` в «Настройках сети», рядом с `[X] XTLS-flow режим`. Включает отдельный VLESS+REALITY инбаунд на собственном порту — отдельном от основного, существующая ссылка и конфиг не трогаются и продолжают работать как прежде. Ключи `encryption`/`decryption` генерируются через `xray vlessenc`, подпись REALITY (опционально, отдельная галка) — через `xray mldsa65`; оба требуют свежей сборки Xray-core с поддержкой этих команд. Переиспользует существующий REALITY-`dest`/ключи с отдельным `shortId` и тех же пользователей из `users.json` — никаких дополнительных учёток не создаёт.
 
@@ -3155,7 +3155,7 @@ WARP-режим (FULL/SELECTIVE/RUNET), который пользователь 
 
 ## 🎯 WARP: Endpoint-менеджер — интеллектуальный поиск и переключение узла подключения Cloudflare Anycast — 28 июня 2026
 
-**Файл:** `vless_installer/modules/warp.py`
+**Файл:** `chimera/modules/warp.py`
 **Тип изменения:** аддитивное расширение существующего модуля (новый функционал, рефакторинга нет)
 **Точка входа `do_manage_warp()` и весь публичный API не изменились — добавлен один пункт меню (`6`).**
 
@@ -3253,7 +3253,7 @@ HANDSHAKE_WAIT_ACTIVE_SEC / HANDSHAKE_SETTLE_SEC / HANDSHAKE_CURL_TIMEOUT = 5 / 
 | Проверка | Результат |
 |---|---|
 | `py_compile` + `pyflakes` | чисто, без предупреждений |
-| Реальный импорт модуля внутри пакета `vless_installer` (не изолированный синтаксис) | успешно |
+| Реальный импорт модуля внутри пакета `chimera` (не изолированный синтаксис) | успешно |
 | Round-trip кэша/истории на временном `state.json` | посторонние ключи не затёрты; обрезка истории до 10; дедуп при повторном использовании |
 | Пороговая логика `_pick_best_endpoint()` (УТ-4), 4 сценария | текущий недоступен → рекомендован лучший; новый быстрее на 35+мс с TCP+ICMP → рекомендовано переключение; разница 10мс (< порога) → не переключать; кандидат без ICMP → не переключать |
 | `_change_warp_endpoint()`: WARP не установлен | корректный отказ с предупреждением, без падения |
@@ -3270,7 +3270,7 @@ HANDSHAKE_WAIT_ACTIVE_SEC / HANDSHAKE_SETTLE_SEC / HANDSHAKE_CURL_TIMEOUT = 5 / 
 
 ## 🛡️ WARP: полный переход с warp-cli на WireGuard + wgcf, защита SSH и автоматический откат — 27 июня 2026
 
-**Файл:** `vless_installer/modules/warp.py`
+**Файл:** `chimera/modules/warp.py`
 **Тип изменения:** полный рефакторинг (breaking implementation, non-breaking API)
 **Точка входа `do_manage_warp()` и публичный API не изменились.**
 
@@ -3337,7 +3337,7 @@ split-tunnel настройки клиента и iptables mangle-метки + �
 | 2 | B | В имени файла ассета сохранялась буква `v` из тега (`wgcf_v2.2.31_...`) — реальный файл без `v` (`wgcf_2.2.31_...`), `v` только в пути тега | Та же проверка релизов | `v` обрезается только при формировании имени файла, не пути |
 | 3 | B | Сгенерированный профиль WireGuard искался по имени `wg-wgcf.conf` — у wgcf реальное имя `wgcf-profile.conf` | Документация wgcf | Поиск по правильному имени |
 | 4 | B | `_standalone_sync()` читал вложенный JSON-ключ `state["warp"]["WARP_MODE"]`, хотя весь остальной код модуля писал плоские ключи (`warp_mode` на верхнем уровне) — фоновая синхронизация в `selective` никогда не сработала бы | Сверка схемы записи/чтения state.json внутри самого прототипа | Плоские ключи во всём модуле, включая `--sync` |
-| 5 | оба | Циклический импорт: `_core.py` импортирует `do_manage_warp` из `warp.py` ДО определения `command_exists`/`log_to_file`/`STATE_FILE`/глобалей `WARP_*`. Прямой `from vless_installer._core import ...` гарантированно роняет установщик `ImportError` на старте | Чтение реального `_core.py`, проверка живым импортом всего пакета | Отложенное (lazy) связывание через `_core_module()`, вызывается только в момент фактического обращения |
+| 5 | оба | Циклический импорт: `_core.py` импортирует `do_manage_warp` из `warp.py` ДО определения `command_exists`/`log_to_file`/`STATE_FILE`/глобалей `WARP_*`. Прямой `from chimera._core import ...` гарантированно роняет установщик `ImportError` на старте | Чтение реального `_core.py`, проверка живым импортом всего пакета | Отложенное (lazy) связывание через `_core_module()`, вызывается только в момент фактического обращения |
 | 6 | (старый продакшн-модуль) | Голые (без кавычек) литералы `full`/`selective`/`runet` в сравнениях — реальный риск `NameError` при попадании в этот код путь | Грep по старому файлу | Везде заменено на строковые константы `MODE_FULL`/`MODE_SELECTIVE`/`MODE_RUNET` |
 
 ---
@@ -3470,7 +3470,7 @@ Juniper/Cisco `commit confirmed`:
 **Побочный фикс при той же правке:** при прямом запуске
 (`python3 warp.py --sync`/`--auto-rollback` из cron/systemd) Python
 подставляет в `sys.path[0]` каталог самого файла, а не корень проекта —
-`import vless_installer._core` падал с `ModuleNotFoundError` ещё до входа в
+`import chimera._core` падал с `ModuleNotFoundError` ещё до входа в
 `if __name__ == "__main__":`. Путь к корню проекта теперь вычисляется
 относительно `__file__` (а не хардкодится, как в `fragment_watchdog.py`).
 
@@ -3534,7 +3534,7 @@ configure_warp(), uninstall_warp()                           — публичн�
 
 ### Добавлено
 
-**`vless_installer/modules/hybrid_addon.py` — Traffic Obfuscation (trafficPattern) для Mieru**
+**`chimera/modules/hybrid_addon.py` — Traffic Obfuscation (trafficPattern) для Mieru**
 
 К установке Mieru Hybrid Addon добавлен шаг выбора маскировки трафика на
 уровне протокола mieru (серверное поле `trafficPattern`, см.
@@ -3562,7 +3562,7 @@ docs/traffic-pattern.md проекта enfein/mieru):
 
 ### Изменено
 
-**`vless_installer/modules/hybrid_addon.py` — рестайлинг визуального движка**
+**`chimera/modules/hybrid_addon.py` — рестайлинг визуального движка**
 
 Переписан рендер боксов/сообщений в едином стиле остального
 установщика (`_box_top/_box_row/_box_sep/_box_item/_box_kv` и т.д.,
@@ -3583,7 +3583,7 @@ docs/traffic-pattern.md проекта enfein/mieru):
 
 ### Исправлено
 
-**`vless_installer/modules/mtproto_stats.py` — учёт трафика Telemt не переживал ребут сервера**
+**`chimera/modules/mtproto_stats.py` — учёт трафика Telemt не переживал ребут сервера**
 
 `setup_iptables_accounting()` создавал цепочки `TELEMT_STATS_IN/OUT`
 и джамп-правила в `INPUT`/`OUTPUT`, но никогда не сохранял их —
@@ -3605,7 +3605,7 @@ docs/traffic-pattern.md проекта enfein/mieru):
 
 ### Добавлено
 
-**`vless_installer/modules/hybrid_addon.py` — гибридная надстройка Mieru поверх Xray на Entry-ноде**
+**`chimera/modules/hybrid_addon.py` — гибридная надстройка Mieru поверх Xray на Entry-ноде**
 
 Новый пункт меню: **Установка и Система → `9`**.
 
@@ -3686,7 +3686,7 @@ mieru-клиент  ──TCP/UDP──▶  Mieru (mita)
 Адаптация для встраивания в меню (сам модуль/CLI не менялись):
 
   • `hybrid_addon.py` остаётся самостоятельным CLI-скриптом
-    (`sudo python3 vless_installer/modules/hybrid_addon.py [--dry-run|--rollback|...]`)
+    (`sudo python3 chimera/modules/hybrid_addon.py [--dry-run|--rollback|...]`)
     — `main()` не тронут ни строкой;
   • для пункта меню добавлена отдельная обёртка `do_hybrid_addon_menu()`,
     использующая те же готовые функции, но без `argparse` и с
@@ -3701,7 +3701,7 @@ mieru-клиент  ──TCP/UDP──▶  Mieru (mita)
     чтобы не было двух источников истины по формату ссылок. Импорт —
     **ленивый**, внутри функции показа, а не в шапке файла: иначе
     автономный CLI-запуск выше сломался бы (`ModuleNotFoundError`,
-    проверено), т.к. при прямом запуске скрипта пакет `vless_installer`
+    проверено), т.к. при прямом запуске скрипта пакет `chimera`
     не резолвится без контекста `main.py`. `main()` эту функцию вообще
     не вызывает — для CLI ничего не изменилось;
   • в `mieru.py` добавлены только комментарии-маркеры над переиспользуемыми
@@ -3715,7 +3715,7 @@ mieru-клиент  ──TCP/UDP──▶  Mieru (mita)
 
 ### Добавлено
 
-**`vless_installer/modules/dpi_censor_check.py` — обёртка над сторонним [Runnin4ik/dpi-detector](https://github.com/Runnin4ik/dpi-detector) v3.3.0**
+**`chimera/modules/dpi_censor_check.py` — обёртка над сторонним [Runnin4ik/dpi-detector](https://github.com/Runnin4ik/dpi-detector) v3.3.0**
 
 Новый пункт меню **Безопасность → `CS`**: диагностика того, что именно
 блокирует провайдер снаружи — TLS/TCP/HTTP/DNS-блокировки, обрыв
@@ -3733,7 +3733,7 @@ mieru-клиент  ──TCP/UDP──▶  Mieru (mita)
     зависимостей в проекте раньше не было (весь проект — stdlib +
     `qrcode` + `kyber_py`). Чтобы не тащить их в основной интерпретатор
     установщика, апстрим **вендорится без изменений** в
-    `vless_installer/modules/_vendor/dpi_detector/` (см. там
+    `chimera/modules/_vendor/dpi_detector/` (см. там
     `VENDOR_INFO.md` — версия, commit, инструкция по обновлению) и
     запускается отдельным процессом через `subprocess`;
   • зависимости ставятся лениво (`pip install --break-system-packages`)
@@ -3759,7 +3759,7 @@ mieru-клиент  ──TCP/UDP──▶  Mieru (mita)
 
 ### Добавлено
 
-**`vless_installer/modules/network_bench.py` — порт bench.py (bench.sh by Teddysun, mod. Nikola Tesla)**
+**`chimera/modules/network_bench.py` — порт bench.py (bench.sh by Teddysun, mod. Nikola Tesla)**
 
 Новый пункт меню **Диагностика → `NB`**: сведения о системе (CPU/RAM/
 диск/виртуализация/ОС), тест дисковой I/O, multi-thread тест скорости
@@ -3858,7 +3858,7 @@ DC API у Telegram обычно доступен даже из РФ (это пр
 
 ### Добавлено
 
-**`vless_installer/modules/telemt_ios_fix.py` — точечный MSS-clamp для iOS-клиентов**
+**`chimera/modules/telemt_ios_fix.py` — точечный MSS-clamp для iOS-клиентов**
 
 Новый пункт **I** в меню Telemt (`mtproto_menu()`): отдельный внешний порт,
 на который iOS-клиенты Telegram заходят через тот же secret/IP, но с
@@ -3920,7 +3920,7 @@ iOS (и часть агрессивных Android-прошивок) сворач
 
 ### Добавлено
 
-**`vless_installer/modules/webdav_tunnel.py` — туннель TCP/SOCKS5 поверх WebDAV**
+**`chimera/modules/webdav_tunnel.py` — туннель TCP/SOCKS5 поверх WebDAV**
 
 Новый пункт главного меню **14. WebDAV Tunnel** — обёртка над сторонним
 проектом [spkprsnts/webdav-tunnel](https://github.com/spkprsnts/webdav-tunnel):
@@ -3992,7 +3992,7 @@ rsyslog (работает от `syslog:adm`) не мог создать этот
 
 ### Добавлено
 
-**`vless_installer/modules/olcrtc.py` — туннель TCP-over-WebRTC под видеозвонок**
+**`chimera/modules/olcrtc.py` — туннель TCP-over-WebRTC под видеозвонок**
 
 Новый пункт главного меню **13. olcRTC** — обёртка над сторонним проектом
 [openlibrecommunity/olcrtc](https://github.com/openlibrecommunity/olcrtc):
@@ -4037,7 +4037,7 @@ client-конфиг текстом для копирования.
 
 ### Добавлено
 
-**`vless_installer/modules/fail2ban_manager.py` — интерактивная панель Fail2ban**
+**`chimera/modules/fail2ban_manager.py` — интерактивная панель Fail2ban**
 
 Fail2ban и раньше устанавливался и настраивался автоматически на этапе
 установки (`setup_fail2ban()` в `_core.py`: джейлы `xray-reality`, `sshd`,
@@ -4199,8 +4199,8 @@ Mieru не пишет access.log с байтами — поэтому испол
 Оба модуля вызываются из соответствующих меню протоколов через новый пункт «Статистика трафика».
 Точки входа:
 ```python
-from vless_installer.modules.mieru_stats import do_mieru_stats_menu
-from vless_installer.modules.naiveproxy_stats import do_naiveproxy_stats_menu
+from chimera.modules.mieru_stats import do_mieru_stats_menu
+from chimera.modules.naiveproxy_stats import do_naiveproxy_stats_menu
 ```
 
 ### Также в этом релизе
@@ -4691,7 +4691,7 @@ ClientHello по нескольким сегментам — поля ALPN и si
 
 #### Модуль IP-Бан (`ipban.py`) — ручная блокировка на уровне iptables
 
-Новый модуль `vless_installer/modules/ipban.py` реализует ручной бан IP-адресов
+Новый модуль `chimera/modules/ipban.py` реализует ручной бан IP-адресов
 на уровне iptables через ipset — независимо от Xray и GeoIP-блокировки.
 
 **Доступ:** меню «🛡️ Безопасность» → `[IB] IP-Бан`
@@ -5114,9 +5114,9 @@ SyntaxError: f-string: unmatched '('
 
 **Исправлено 13 мест в трёх файлах:**
 
-- `vless_installer/_core.py` — 5 f-строк (включая внутри `f"""..."""` блока конфига DNSCrypt)
-- `vless_installer/modules/warp.py` — 8 f-строк с вызовами `_get_warp("KEY", "")`
-- `vless_installer/modules/health.py` — 1 f-строка с `_get_state_value("domain", "")`
+- `chimera/_core.py` — 5 f-строк (включая внутри `f"""..."""` блока конфига DNSCrypt)
+- `chimera/modules/warp.py` — 8 f-строк с вызовами `_get_warp("KEY", "")`
+- `chimera/modules/health.py` — 1 f-строка с `_get_state_value("domain", "")`
 
 ---
 
@@ -5217,7 +5217,7 @@ Failed to start: main: failed to load config files: [/etc/xray/config.json]
 `openssl enc -d`, независимо от того, зашифрован он или нет. Обычный `.tar.gz` через
 дешифратор не проходил → ошибка, импорт невозможен.
 
-**Исправление** (`vless_installer/_core.py`):
+**Исправление** (`chimera/_core.py`):
 - Добавлена проверка расширения файла: если суффикс `.enc` — запускается расшифровка,
   иначе — архив используется напрямую
 - Запрос пароля теперь появляется **только** для зашифрованных архивов; для `.tar.gz`
@@ -5452,7 +5452,7 @@ sudo python3 main.py --h2-dpi-check         # из cron
 
 - **Zero-breakage** — ни одна существующая функция не изменена.
   VLESS/xHTTP TLS, AWG, генерация ссылок и конфигов работают штатно
-- **15 новых модулей** в `vless_installer/modules/hysteria2_*.py`
+- **15 новых модулей** в `chimera/modules/hysteria2_*.py`
 - **Только +15 строк** в `_core.py` (импорт + 2 пункта меню)
 - **DualStack** — полная поддержка IPv4 и IPv6 на всех этапах
 - **Health Check через QUIC**, не TCP

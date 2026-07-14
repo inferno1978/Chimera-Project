@@ -2,7 +2,7 @@
 """
 tests/test_turntunnel.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/turntunnel.py.
+Unit-тесты для chimera/modules/turntunnel.py.
 
 Покрывает:
   1. _plain / _wlen — unicode helpers
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -35,9 +35,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestPlain(unittest.TestCase):
@@ -47,11 +47,11 @@ class TestPlain(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_plain_string_unchanged(self):
-        from vless_installer.modules.turntunnel import _plain
+        from chimera.modules.turntunnel import _plain
         self.assertEqual(_plain("hello"), "hello")
 
     def test_strips_ansi(self):
-        from vless_installer.modules.turntunnel import _plain
+        from chimera.modules.turntunnel import _plain
         self.assertEqual(_plain("\033[1;31mhi\033[0m"), "hi")
 
 
@@ -62,15 +62,15 @@ class TestWlen(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_ascii(self):
-        from vless_installer.modules.turntunnel import _wlen
+        from chimera.modules.turntunnel import _wlen
         self.assertEqual(_wlen("hello"), 5)
 
     def test_cjk_two_columns(self):
-        from vless_installer.modules.turntunnel import _wlen
+        from chimera.modules.turntunnel import _wlen
         self.assertEqual(_wlen("中文"), 4)
 
     def test_ansi_zero_width(self):
-        from vless_installer.modules.turntunnel import _wlen
+        from chimera.modules.turntunnel import _wlen
         self.assertEqual(_wlen("\033[1mhi\033[0m"), 2)
 
 
@@ -81,12 +81,12 @@ class TestIsAmd64(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_x86_64(self):
-        from vless_installer.modules.turntunnel import _is_amd64
+        from chimera.modules.turntunnel import _is_amd64
         with patch("platform.machine", return_value="x86_64"):
             self.assertTrue(_is_amd64())
 
     def test_aarch64(self):
-        from vless_installer.modules.turntunnel import _is_amd64
+        from chimera.modules.turntunnel import _is_amd64
         with patch("platform.machine", return_value="aarch64"):
             self.assertFalse(_is_amd64())
 
@@ -107,18 +107,18 @@ class TestIsInstalled(unittest.TestCase):
 
     def _patch(self):
         return (
-            patch("vless_installer.modules.turntunnel._BIN_PATH", self._bin),
-            patch("vless_installer.modules.turntunnel._SERVICE_FILE", self._svc),
-            patch("vless_installer.modules.turntunnel._MODULE_STATE", self._state),
+            patch("chimera.modules.turntunnel._BIN_PATH", self._bin),
+            patch("chimera.modules.turntunnel._SERVICE_FILE", self._svc),
+            patch("chimera.modules.turntunnel._MODULE_STATE", self._state),
         )
 
     def test_returns_false_when_neither(self):
-        from vless_installer.modules.turntunnel import _is_installed
+        from chimera.modules.turntunnel import _is_installed
         with self._patch()[0], self._patch()[1], self._patch()[2]:
             self.assertFalse(_is_installed())
 
     def test_returns_true_when_all(self):
-        from vless_installer.modules.turntunnel import _is_installed
+        from chimera.modules.turntunnel import _is_installed
         self._bin.write_text("x")
         self._svc.write_text("x")
         self._state.write_text(json.dumps({"installed": True}))
@@ -139,17 +139,17 @@ class TestLog(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.turntunnel._LOG_FILE", self._log)
+        return patch("chimera.modules.turntunnel._LOG_FILE", self._log)
 
     def test_writes_plain_text(self):
-        from vless_installer.modules.turntunnel import _log
+        from chimera.modules.turntunnel import _log
         with self._patch():
             _log("test message")
         content = self._log.read_text()
         self.assertIn("test message", content)
 
     def test_strips_ansi(self):
-        from vless_installer.modules.turntunnel import _log
+        from chimera.modules.turntunnel import _log
         with self._patch():
             _log("\033[1;31mred text\033[0m")
         content = self._log.read_text()
@@ -179,9 +179,9 @@ class TestDownloadBinaryArch(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_false_on_non_amd64(self):
-        from vless_installer.modules import turntunnel
+        from chimera.modules import turntunnel
         with patch("platform.machine", return_value="aarch64"), \
-             patch("vless_installer.modules.download_manager.fetch_package") as mock_fp:
+             patch("chimera.modules.download_manager.fetch_package") as mock_fp:
             result = turntunnel._download_binary()
         self.assertFalse(result)
         # fetch_package НЕ вызывается — отказ происходит до него
@@ -195,9 +195,9 @@ class TestDownloadBinaryFirstMirrorSuccess(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_first_mirror_success_returns_true(self):
-        from vless_installer.modules import turntunnel
+        from chimera.modules import turntunnel
         with patch("platform.machine", return_value="x86_64"), \
-             patch("vless_installer.modules.download_manager.fetch_package",
+             patch("chimera.modules.download_manager.fetch_package",
                    return_value=True) as mock_fp:
             result = turntunnel._download_binary()
         self.assertTrue(result)
@@ -222,7 +222,7 @@ class TestDownloadBinaryMirrorFallback(unittest.TestCase):
 
     def test_spec_has_multiple_mirrors_for_fallback(self):
         """TURNTUNNEL_SPEC.mirror_urls_builder возвращает >1 зеркало."""
-        from vless_installer.modules.turn_packages import TURNTUNNEL_SPEC
+        from chimera.modules.turn_packages import TURNTUNNEL_SPEC
         urls = TURNTUNNEL_SPEC.mirror_urls_builder(filename="server-linux-amd64")
         # Должно быть минимум 2 зеркала — иначе fallback физически невозможен
         self.assertGreaterEqual(len(urls), 2,
@@ -232,15 +232,15 @@ class TestDownloadBinaryMirrorFallback(unittest.TestCase):
         """Симулируем fallback: fetch_package вернул True (он внутри
         перебрал зеркала и второе сработало). Проверяем что _download_binary
         прокидывает True и передаёт spec с поддержкой fallback."""
-        from vless_installer.modules import turntunnel
-        from vless_installer.modules.turn_packages import TURNTUNNEL_SPEC
+        from chimera.modules import turntunnel
+        from chimera.modules.turn_packages import TURNTUNNEL_SPEC
 
         # Убеждается что в spec'е действительно несколько зеркал
         urls = TURNTUNNEL_SPEC.mirror_urls_builder(filename="server-linux-amd64")
         self.assertGreaterEqual(len(urls), 2)
 
         with patch("platform.machine", return_value="x86_64"), \
-             patch("vless_installer.modules.download_manager.fetch_package",
+             patch("chimera.modules.download_manager.fetch_package",
                    return_value=True) as mock_fp:
             result = turntunnel._download_binary()
         self.assertTrue(result)
@@ -264,14 +264,14 @@ class TestDownloadBinaryManualUpload(unittest.TestCase):
 
     def test_spec_manual_dir_is_root(self):
         """TURNTUNNEL_SPEC.manual_incoming_dir = /root/."""
-        from vless_installer.modules.turn_packages import TURNTUNNEL_SPEC
+        from chimera.modules.turn_packages import TURNTUNNEL_SPEC
         self.assertEqual(TURNTUNNEL_SPEC.manual_incoming_dir, Path("/root"))
 
     def test_spec_manual_dir_not_in_install_dests(self):
         """КРИТИЧЕСКИЙ ИНВАРИАНТ: manual_dir НЕ совпадает ни с одним
         install_dest. Это воспроизводит защиту от бага 21d7baf на уровне
         конструктора PackageSpec."""
-        from vless_installer.modules.turn_packages import TURNTUNNEL_SPEC
+        from chimera.modules.turn_packages import TURNTUNNEL_SPEC
         for dest in TURNTUNNEL_SPEC.install_dests:
             self.assertNotEqual(TURNTUNNEL_SPEC.manual_incoming_dir, dest,
                 "manual_incoming_dir не должен совпадать с install_dest "
@@ -280,9 +280,9 @@ class TestDownloadBinaryManualUpload(unittest.TestCase):
     def test_manual_upload_returns_true_via_fetch_package(self):
         """Когда fetch_package находит /root/server-linux-amd64 — он
         возвращает True, и _download_binary тоже."""
-        from vless_installer.modules import turntunnel
+        from chimera.modules import turntunnel
         with patch("platform.machine", return_value="x86_64"), \
-             patch("vless_installer.modules.download_manager.fetch_package",
+             patch("chimera.modules.download_manager.fetch_package",
                    return_value=True) as mock_fp:
             result = turntunnel._download_binary()
         self.assertTrue(result)
@@ -296,9 +296,9 @@ class TestDownloadBinaryAllMirrorsFail(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_all_mirrors_fail_returns_false(self):
-        from vless_installer.modules import turntunnel
+        from chimera.modules import turntunnel
         with patch("platform.machine", return_value="x86_64"), \
-             patch("vless_installer.modules.download_manager.fetch_package",
+             patch("chimera.modules.download_manager.fetch_package",
                    return_value=False) as mock_fp:
             result = turntunnel._download_binary()
         self.assertFalse(result)
@@ -312,26 +312,26 @@ class TestTurntunnelSpecSanity(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_spec_filename_is_server_linux_amd64(self):
-        from vless_installer.modules.turn_packages import TURNTUNNEL_SPEC
+        from chimera.modules.turn_packages import TURNTUNNEL_SPEC
         self.assertEqual(TURNTUNNEL_SPEC.filename_builder(), "server-linux-amd64")
 
     def test_spec_install_dest_is_opt_vk_turn_proxy(self):
-        from vless_installer.modules.turn_packages import TURNTUNNEL_SPEC
+        from chimera.modules.turn_packages import TURNTUNNEL_SPEC
         self.assertEqual(TURNTUNNEL_SPEC.install_dests, [Path("/opt/vk-turn-proxy")])
 
     def test_spec_min_size_is_1mb(self):
         """min_size = 1 MB — защита от 404 HTML-страниц (раньше не было)."""
-        from vless_installer.modules.turn_packages import TURNTUNNEL_SPEC
+        from chimera.modules.turn_packages import TURNTUNNEL_SPEC
         self.assertEqual(TURNTUNNEL_SPEC.min_size, 1_000_000)
 
     def test_spec_post_install_is_set(self):
-        from vless_installer.modules.turn_packages import TURNTUNNEL_SPEC
+        from chimera.modules.turn_packages import TURNTUNNEL_SPEC
         self.assertIsNotNone(TURNTUNNEL_SPEC.post_install)
 
     def test_spec_post_install_copies_elf_binary(self):
         """post_install копирует ELF-бинарник в install_dests/server."""
         import tempfile
-        from vless_installer.modules.turn_packages import TURNTUNNEL_SPEC
+        from chimera.modules.turn_packages import TURNTUNNEL_SPEC
 
         tmpdir = Path(tempfile.mkdtemp())
         try:
@@ -358,7 +358,7 @@ class TestTurntunnelSpecSanity(unittest.TestCase):
         """post_install возвращает False если файл не ELF — даёт fetch_package
         шанс попробовать следующее зеркало."""
         import tempfile
-        from vless_installer.modules.turn_packages import TURNTUNNEL_SPEC
+        from chimera.modules.turn_packages import TURNTUNNEL_SPEC
 
         tmpdir = Path(tempfile.mkdtemp())
         try:

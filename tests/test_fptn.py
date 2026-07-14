@@ -2,7 +2,7 @@
 """
 tests/test_fptn.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/fptn.py.
+Unit-тесты для chimera/modules/fptn.py.
 
 Покрывает:
   1. _valid_username — валидация имени пользователя
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -35,9 +35,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestValidUsername(unittest.TestCase):
@@ -47,28 +47,28 @@ class TestValidUsername(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_valid_alphanumeric(self):
-        from vless_installer.modules.fptn import _valid_username
+        from chimera.modules.fptn import _valid_username
         self.assertTrue(_valid_username("alice"))
         self.assertTrue(_valid_username("bob123"))
 
     def test_invalid_hyphen(self):
-        from vless_installer.modules.fptn import _valid_username
+        from chimera.modules.fptn import _valid_username
         self.assertFalse(_valid_username("alice-bob"))
 
     def test_invalid_underscore(self):
-        from vless_installer.modules.fptn import _valid_username
+        from chimera.modules.fptn import _valid_username
         self.assertFalse(_valid_username("alice_bob"))
 
     def test_invalid_empty(self):
-        from vless_installer.modules.fptn import _valid_username
+        from chimera.modules.fptn import _valid_username
         self.assertFalse(_valid_username(""))
 
     def test_invalid_dot(self):
-        from vless_installer.modules.fptn import _valid_username
+        from chimera.modules.fptn import _valid_username
         self.assertFalse(_valid_username("alice.bob"))
 
     def test_invalid_space(self):
-        from vless_installer.modules.fptn import _valid_username
+        from chimera.modules.fptn import _valid_username
         self.assertFalse(_valid_username("alice bob"))
 
 
@@ -79,27 +79,27 @@ class TestDetectArch(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_x86_64(self):
-        from vless_installer.modules.fptn import _detect_arch
+        from chimera.modules.fptn import _detect_arch
         with patch("platform.machine", return_value="x86_64"):
             self.assertEqual(_detect_arch(), "amd64")
 
     def test_amd64(self):
-        from vless_installer.modules.fptn import _detect_arch
+        from chimera.modules.fptn import _detect_arch
         with patch("platform.machine", return_value="amd64"):
             self.assertEqual(_detect_arch(), "amd64")
 
     def test_aarch64(self):
-        from vless_installer.modules.fptn import _detect_arch
+        from chimera.modules.fptn import _detect_arch
         with patch("platform.machine", return_value="aarch64"):
             self.assertEqual(_detect_arch(), "arm64")
 
     def test_arm64(self):
-        from vless_installer.modules.fptn import _detect_arch
+        from chimera.modules.fptn import _detect_arch
         with patch("platform.machine", return_value="arm64"):
             self.assertEqual(_detect_arch(), "arm64")
 
     def test_unsupported_returns_none(self):
-        from vless_installer.modules.fptn import _detect_arch
+        from chimera.modules.fptn import _detect_arch
         with patch("platform.machine", return_value="i386"):
             self.assertIsNone(_detect_arch())
         with patch("platform.machine", return_value="mips"):
@@ -113,7 +113,7 @@ class TestPickServerAsset(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_url_when_match(self):
-        from vless_installer.modules.fptn import _pick_server_asset
+        from chimera.modules.fptn import _pick_server_asset
         release = {"assets": [
             {"name": "fptn-server-1.0.0_linux_amd64.deb",
              "browser_download_url": "https://example.com/fptn.deb"},
@@ -122,14 +122,14 @@ class TestPickServerAsset(unittest.TestCase):
         self.assertEqual(result, "https://example.com/fptn.deb")
 
     def test_returns_none_when_no_match(self):
-        from vless_installer.modules.fptn import _pick_server_asset
+        from chimera.modules.fptn import _pick_server_asset
         release = {"assets": [
             {"name": "other-package.deb", "browser_download_url": "url"},
         ]}
         self.assertIsNone(_pick_server_asset(release, "amd64"))
 
     def test_returns_none_when_wrong_arch(self):
-        from vless_installer.modules.fptn import _pick_server_asset
+        from chimera.modules.fptn import _pick_server_asset
         release = {"assets": [
             {"name": "fptn-server-1.0.0_linux_arm64.deb",
              "browser_download_url": "url"},
@@ -137,11 +137,11 @@ class TestPickServerAsset(unittest.TestCase):
         self.assertIsNone(_pick_server_asset(release, "amd64"))
 
     def test_returns_none_when_empty_assets(self):
-        from vless_installer.modules.fptn import _pick_server_asset
+        from chimera.modules.fptn import _pick_server_asset
         self.assertIsNone(_pick_server_asset({"assets": []}, "amd64"))
 
     def test_returns_none_when_no_assets_key(self):
-        from vless_installer.modules.fptn import _pick_server_asset
+        from chimera.modules.fptn import _pick_server_asset
         self.assertIsNone(_pick_server_asset({}, "amd64"))
 
 
@@ -158,10 +158,10 @@ class TestSaveUserToState(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.fptn._MODULE_STATE", self._state)
+        return patch("chimera.modules.fptn._MODULE_STATE", self._state)
 
     def test_adds_new_user(self):
-        from vless_installer.modules.fptn import _save_user_to_state
+        from chimera.modules.fptn import _save_user_to_state
         with self._patch():
             _save_user_to_state("alice", "pass1", 10000)
         state = json.loads(self._state.read_text())
@@ -171,7 +171,7 @@ class TestSaveUserToState(unittest.TestCase):
         self.assertEqual(state["users"][0]["bandwidth"], 10000)
 
     def test_replaces_existing_user(self):
-        from vless_installer.modules.fptn import _save_user_to_state
+        from chimera.modules.fptn import _save_user_to_state
         with self._patch():
             _save_user_to_state("alice", "old", 5000)
             _save_user_to_state("alice", "new", 10000)
@@ -181,7 +181,7 @@ class TestSaveUserToState(unittest.TestCase):
         self.assertEqual(state["users"][0]["bandwidth"], 10000)
 
     def test_preserves_other_users(self):
-        from vless_installer.modules.fptn import _save_user_to_state
+        from chimera.modules.fptn import _save_user_to_state
         with self._patch():
             _save_user_to_state("alice", "p1", 100)
             _save_user_to_state("bob", "p2", 200)
@@ -202,10 +202,10 @@ class TestRemoveUserFromState(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.fptn._MODULE_STATE", self._state)
+        return patch("chimera.modules.fptn._MODULE_STATE", self._state)
 
     def test_removes_existing_user(self):
-        from vless_installer.modules.fptn import _save_user_to_state, _remove_user_from_state
+        from chimera.modules.fptn import _save_user_to_state, _remove_user_from_state
         with self._patch():
             _save_user_to_state("alice", "p1", 100)
             _save_user_to_state("bob", "p2", 200)
@@ -215,7 +215,7 @@ class TestRemoveUserFromState(unittest.TestCase):
         self.assertEqual(state["users"][0]["username"], "bob")
 
     def test_no_change_when_user_not_found(self):
-        from vless_installer.modules.fptn import _save_user_to_state, _remove_user_from_state
+        from chimera.modules.fptn import _save_user_to_state, _remove_user_from_state
         with self._patch():
             _save_user_to_state("alice", "p1", 100)
             _remove_user_from_state("nobody")
@@ -239,18 +239,18 @@ class TestIsInstalled(unittest.TestCase):
 
     def _patch(self):
         return (
-            patch("vless_installer.modules.fptn._BIN_SERVER", self._bin),
-            patch("vless_installer.modules.fptn._SERVICE_FILE", self._svc),
-            patch("vless_installer.modules.fptn._CFG_FILE", self._cfg),
+            patch("chimera.modules.fptn._BIN_SERVER", self._bin),
+            patch("chimera.modules.fptn._SERVICE_FILE", self._svc),
+            patch("chimera.modules.fptn._CFG_FILE", self._cfg),
         )
 
     def test_returns_false_when_neither(self):
-        from vless_installer.modules.fptn import _is_installed
+        from chimera.modules.fptn import _is_installed
         with self._patch()[0], self._patch()[1], self._patch()[2]:
             self.assertFalse(_is_installed())
 
     def test_returns_true_when_all(self):
-        from vless_installer.modules.fptn import _is_installed
+        from chimera.modules.fptn import _is_installed
         self._bin.write_text("x")
         self._svc.write_text("x")
         self._cfg.write_text("x")

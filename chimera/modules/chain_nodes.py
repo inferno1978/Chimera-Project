@@ -1,0 +1,3224 @@
+"""
+chimera/modules/chain_nodes.py
+───────────────────────────────────────────────────────────────────────────────
+Chain/Nodes (Режим B / каскад) — управление exit-нодами, генерация конфигов
+Entry/Exit, prompt-функции, мульти-нодовая балансировка, health-матрица.
+
+Содержит 22 функции, вынесенных из chimera._core.py:
+  • prompt_chain_params, _prompt_balancer_strategy, prompt_chain_params_multi
+  • generate_xray_config_chain_entry, _make_exit_node_config,
+    generate_xray_config_chain_exit, do_generate_chain_exit_additional_client
+  • _nodes_from_state, _load_chain_nodes_from_state, _save_chain_nodes_to_state
+  • _prompt_one_node, _prompt_one_node_from_link, _fix_node_fields,
+    _prompt_one_node_manual, _h2_reapply_transport_if_active
+  • generate_xray_config_chain_entry_multi, do_manage_nodes, generate_chain_summary
+  • _speed_test_node_latency, _speed_test_node_geo,
+    _access_log_bytes_per_node, do_node_health_matrix
+
+Точки входа из _core.py:
+    from chimera.modules.chain_nodes import (
+        prompt_chain_params, _prompt_balancer_strategy, prompt_chain_params_multi,
+        generate_xray_config_chain_entry, _make_exit_node_config,
+        generate_xray_config_chain_exit, do_generate_chain_exit_additional_client,
+        _nodes_from_state, _load_chain_nodes_from_state, _save_chain_nodes_to_state,
+        _prompt_one_node, _prompt_one_node_from_link, _fix_node_fields,
+        _prompt_one_node_manual, _h2_reapply_transport_if_active,
+        generate_xray_config_chain_entry_multi, do_manage_nodes,
+        generate_chain_summary, _speed_test_node_latency, _speed_test_node_geo,
+        _access_log_bytes_per_node, do_node_health_matrix,
+    )
+
+Все CHAIN_* / CHAIN_EXIT_* / PARAM_* / XHTTP_* / AWG_* / SPLIT_TUNNEL_* / etc.
+глобали ОСТАЮТСЯ в _core.py — модуль читает их через
+`getattr(core, "...", <default>)` и пишет через
+`setattr(core, "...", value)` (dual-form), что сохраняет семантику `global X`
+деклараций оригинала.
+
+Доступ к helpers ядра (info/warn/success/_run/_box_*/_fm_prompt_fingerprint/
+gen_hex/parse_vless_link/_show_qr/country_flag_emoji/get_server_country_cached/
+_rebuild_and_restart_xray/_load_split_tunnel_custom/_detect_xhttp_mode_support/
+_assert_reality_dest_sane/_build_xhttp_settings/_build_tls_settings_xhttp/
+_build_sockopt/_build_exit_xhttp_settings/_build_exit_xhttp_outbound_settings/
+_xray_log_block/_apply_stats_to_config/_set_config_owner/
+build_split_tunnel_routing_rules/_wcslen/_get_box_width/_fp_from_state/
+uuid/Path/...) — через importlib (см. _core_module()), как и в других
+извлечённых модулях (asn_cache.py, warp.py, awg_transport.py и т.д.).
+───────────────────────────────────────────────────────────────────────────────
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+
+# =============================================================================
+#  ОТЛОЖЕННАЯ ПРИВЯЗКА К ЯДРУ (_core.py)
+# =============================================================================
+def _core_module():
+    """Возвращает модуль chimera._core, импортируя его лениво.
+
+    При запуске через cron (python -c 'from ... import ...') модуль ещё не
+    загружен — importlib полноценно его импортирует. При вызове из
+    интерактивного инсталлятора модуль уже в sys.modules (был импортирован
+    одним из поздних lazy-вызовов внутри других модулей) — это просто lookup.
+    """
+    import importlib
+    return importlib.import_module("chimera._core")
+
+
+# =============================================================================
+#  Prompt-функции: параметры Exit Node (Режим B)
+# =============================================================================
+def prompt_chain_params() -> None:
+    """Ввод параметров зарубежного (exit) VPS для Режима B.
+    Устарела — используется только для совместимости. Новый код вызывает prompt_chain_params_multi()."""
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_bottom = core._box_bottom
+    _fm_prompt_fingerprint = core._fm_prompt_fingerprint
+    info = core.info
+    warn = core.warn
+    success = core.success
+    YELLOW = core.YELLOW
+    BLUE = core.BLUE
+    BOLD = core.BOLD
+    NC = core.NC
+    CHAIN_EXIT_HOST = getattr(core, "CHAIN_EXIT_HOST", "")
+    CHAIN_EXIT_PORT = getattr(core, "CHAIN_EXIT_PORT", 443)
+    CHAIN_EXIT_UUID = getattr(core, "CHAIN_EXIT_UUID", "")
+    CHAIN_EXIT_PUBKEY = getattr(core, "CHAIN_EXIT_PUBKEY", "")
+    CHAIN_EXIT_SHORTID = getattr(core, "CHAIN_EXIT_SHORTID", "")
+    CHAIN_EXIT_SNI = getattr(core, "CHAIN_EXIT_SNI", "")
+    CHAIN_EXIT_FP = getattr(core, "CHAIN_EXIT_FP", "chrome")
+
+    _box_top(f"Параметры зарубежного VPS (Exit Node)")
+    _box_row()
+    _box_row(f"  {YELLOW}На зарубежном VPS должен быть установлен этот же скрипт в Режиме A.{NC}")
+    _box_row(f"  После его установки вы получите все необходимые параметры.")
+    _box_row()
+
+    # IP / домен
+    _box_row(f"{BLUE}[E1] IP или домен зарубежного VPS:{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input("   IP или домен: ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if v:
+            CHAIN_EXIT_HOST = v
+            setattr(core, "CHAIN_EXIT_HOST", CHAIN_EXIT_HOST)
+            success(f"   Exit host: {CHAIN_EXIT_HOST}")
+            break
+        warn("   Не может быть пустым")
+
+    # Порт
+    _box_row(f"{BLUE}[E2] Порт зарубежного VPS [{CHAIN_EXIT_PORT}]:{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input(f"   Порт [443]: ").strip() or "443"
+        except KeyboardInterrupt:
+            print()
+            raise
+        if v.isdigit() and 1 <= int(v) <= 65535:
+            CHAIN_EXIT_PORT = int(v)
+            setattr(core, "CHAIN_EXIT_PORT", CHAIN_EXIT_PORT)
+            success(f"   Порт: {CHAIN_EXIT_PORT}")
+            break
+        warn("   Некорректный порт (1-65535)")
+
+    # UUID
+    _box_row(f"{BLUE}[E3] UUID пользователя на зарубежном VPS:{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input("   UUID: ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', v):
+            CHAIN_EXIT_UUID = v
+            setattr(core, "CHAIN_EXIT_UUID", CHAIN_EXIT_UUID)
+            success(f"   UUID: {CHAIN_EXIT_UUID}")
+            break
+        warn("   Неверный формат UUID")
+
+    # Public Key
+    _box_row(f"{BLUE}[E4] Public Key (pbk) зарубежного VPS:{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input("   Public Key: ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if len(v) >= 40:
+            CHAIN_EXIT_PUBKEY = v
+            setattr(core, "CHAIN_EXIT_PUBKEY", CHAIN_EXIT_PUBKEY)
+            success(f"   PublicKey: {v[:20]}...")
+            break
+        warn("   Слишком короткий (мин 40 символов)")
+
+    # Short ID
+    _box_row(f"{BLUE}[E5] ShortID зарубежного VPS:{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input("   ShortID (hex): ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if re.match(r'^[0-9a-f]{2,16}$', v) and len(v) % 2 == 0:
+            CHAIN_EXIT_SHORTID = v
+            setattr(core, "CHAIN_EXIT_SHORTID", CHAIN_EXIT_SHORTID)
+            success(f"   ShortID: {CHAIN_EXIT_SHORTID}")
+            break
+        warn("   Неверный ShortID")
+
+    # SNI
+    _box_row(f"{BLUE}[E6] SNI (домен) зарубежного VPS:{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input("   SNI/домен: ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*\.[a-zA-Z]{2,}$', v):
+            CHAIN_EXIT_SNI = v
+            setattr(core, "CHAIN_EXIT_SNI", CHAIN_EXIT_SNI)
+            success(f"   SNI: {CHAIN_EXIT_SNI}")
+            break
+        warn("   Некорректный домен")
+
+    # Fingerprint
+    _box_row(f"{BLUE}[E7] Fingerprint браузера:{NC}")
+    _box_bottom()
+    CHAIN_EXIT_FP = _fm_prompt_fingerprint(label="Exit Node", current=CHAIN_EXIT_FP or "chrome")
+    setattr(core, "CHAIN_EXIT_FP", CHAIN_EXIT_FP)
+
+    _box_row(f"{BOLD}Параметры Exit Node:{NC}")
+    _box_row(f"  Host:    {CHAIN_EXIT_HOST}:{CHAIN_EXIT_PORT}")
+    _box_row(f"  UUID:    {CHAIN_EXIT_UUID}")
+    _box_row(f"  PubKey:  {CHAIN_EXIT_PUBKEY[:20]}...")
+    _box_row(f"  ShortID: {CHAIN_EXIT_SHORTID}")
+    _box_row(f"  SNI:     {CHAIN_EXIT_SNI}")
+    _box_row(f"  FP:      {CHAIN_EXIT_FP}")
+    _box_bottom()
+    try:
+        ans = input(f"{YELLOW}Параметры верны? [y/N]:{NC} ").strip().lower()
+    except KeyboardInterrupt:
+        print()
+        raise
+    if ans != 'y':
+        info("Повторите ввод параметров Exit Node.")
+        prompt_chain_params()
+
+
+def _prompt_balancer_strategy() -> None:
+    """
+    Спрашивает стратегию балансировки между exit-нодами.
+    Вызывается из prompt_chain_params_multi() после ввода нод.
+    При одной ноде — балансировщик не нужен, пропускаем.
+    """
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_bottom = core._box_bottom
+    _box_item = core._box_item
+    _box_desc = core._box_desc
+    warn = core.warn
+    success = core.success
+    GREEN = core.GREEN
+    CYAN = core.CYAN
+    NC = core.NC
+    BOLD = core.BOLD
+    CHAIN_NODES = getattr(core, "CHAIN_NODES", [])
+    PROBE_INTERVAL_MIN = getattr(core, "PROBE_INTERVAL_MIN", 5)
+    CHAIN_BALANCER_STRATEGY = getattr(core, "CHAIN_BALANCER_STRATEGY", "roundRobin")
+
+    if len(CHAIN_NODES) < 2:
+        # При одной ноде balancer не задействован — оставляем roundRobin как дефолт,
+        # конфиг будет генерироваться без секции balancers.
+        CHAIN_BALANCER_STRATEGY = "roundRobin"
+        setattr(core, "CHAIN_BALANCER_STRATEGY", CHAIN_BALANCER_STRATEGY)
+        return
+
+    _box_top(f"Стратегия балансировки между нодами")
+    _box_row()
+    _box_item("1", f"🔄 Round Robin {GREEN}(рекомендуется){NC}")
+    _box_desc(f"Подключения распределяются по кругу: нода 1 → нода 2 → нода 1 → ...")
+    _box_desc(f"Равномерная нагрузка. Именно этот режим работает у вас сейчас.")
+    _box_desc(f"IP меняется при каждом новом подключении — это нормально.")
+    _box_row()
+    _box_item("2", f"⚡ Least Ping")
+    _box_desc(f"Xray замеряет RTT до каждой ноды и выбирает самую быструю.")
+    _box_desc(f"Трафик идёт через ту ноды, у которой меньше задержка в данный момент.")
+    _box_desc(f"Требует включения observatory (мониторинг нод) — добавляет ~1-2% overhead.")
+    _box_desc(f"IP меняется реже — только при смене «лидера» по пингу.")
+    _box_row()
+    _box_item("3", f"📊 Least Load")
+    _box_desc(f"Xray выбирает ноду с наименьшей текущей нагрузкой (активные соединения).")
+    _box_desc(f"Учитывает RTT и количество соединений одновременно — лучший баланс.")
+    _box_desc(f"Требует observatory. Оптимально при неравномерном трафике.")
+    _box_row()
+    _box_item("4", f"🎲 Random")
+    _box_desc(f"При каждом подключении нода выбирается случайно.")
+    _box_desc(f"Поведение похоже на Round Robin, но без строгой очерёдности.")
+    _box_desc(f"IP меняется непредсказуемо — хорошо для анонимности.")
+    _box_row()
+    _box_item("5", f"⚖️  Smart Balancer {GREEN}(авто){NC}")
+    _box_desc(f"Автоматически выбирает лучшую ноду по задержке, нагрузке и пропускной способности.")
+    _box_desc(f"Cron запускается каждые {PROBE_INTERVAL_MIN} мин и переключает ноду при необходимости.")
+    _box_desc(f"Не требует ручной настройки — включается сразу после установки.")
+    _box_row()
+
+    strategy_map = {
+        "1": "roundRobin",
+        "2": "leastPing",
+        "3": "leastLoad",
+        "4": "random",
+        "5": "smartBalancer",
+    }
+    _box_bottom()
+    while True:
+        try:
+            choice = input(f"  {CYAN}Выбор [1]: {NC}").strip() or "1"
+        except KeyboardInterrupt:
+            print()
+            raise
+        if choice in strategy_map:
+            CHAIN_BALANCER_STRATEGY = strategy_map[choice]
+            setattr(core, "CHAIN_BALANCER_STRATEGY", CHAIN_BALANCER_STRATEGY)
+            break
+        warn("  Введите 1, 2, 3, 4 или 5")
+
+    labels = {"roundRobin": "Round Robin", "leastPing": "Least Ping", "leastLoad": "Least Load", "random": "Random", "smartBalancer": "Smart Balancer"}
+    success(f"Стратегия балансировки: {labels[CHAIN_BALANCER_STRATEGY]}")
+
+
+def prompt_chain_params_multi() -> None:
+    """
+    Ввод параметров exit-нод для Режима B во время установки.
+    Позволяет добавить от 1 до MAX_CHAIN_NODES нод.
+    После ввода заполняет CHAIN_NODES и обновляет legacy CHAIN_EXIT_* переменные.
+    """
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_bottom = core._box_bottom
+    _box_wrap_msg = core._box_wrap_msg
+    _box_warn = core._box_warn
+    _box_info = core._box_info
+    _box_ok = core._box_ok
+    # _sb_install_cron() вынесен в модуль smart_balancer при рефакторинге —
+    # берём оттуда, не из core (который этот атрибут больше не содержит).
+    from chimera.modules.smart_balancer import _sb_install_cron
+    warn = core.warn
+    success = core.success
+    YELLOW = core.YELLOW
+    CYAN = core.CYAN
+    BOLD = core.BOLD
+    NC = core.NC
+    MAX_CHAIN_NODES = getattr(core, "MAX_CHAIN_NODES", 10)
+    PROBE_INTERVAL_MIN = getattr(core, "PROBE_INTERVAL_MIN", 5)
+    CHAIN_NODES = getattr(core, "CHAIN_NODES", [])
+    CHAIN_EXIT_HOST = getattr(core, "CHAIN_EXIT_HOST", "")
+    CHAIN_EXIT_PORT = getattr(core, "CHAIN_EXIT_PORT", 443)
+    CHAIN_EXIT_UUID = getattr(core, "CHAIN_EXIT_UUID", "")
+    CHAIN_EXIT_PUBKEY = getattr(core, "CHAIN_EXIT_PUBKEY", "")
+    CHAIN_EXIT_SHORTID = getattr(core, "CHAIN_EXIT_SHORTID", "")
+    CHAIN_EXIT_SNI = getattr(core, "CHAIN_EXIT_SNI", "")
+    CHAIN_EXIT_FP = getattr(core, "CHAIN_EXIT_FP", "chrome")
+    CHAIN_BALANCER_STRATEGY = getattr(core, "CHAIN_BALANCER_STRATEGY", "roundRobin")
+
+    CHAIN_NODES = []
+    setattr(core, "CHAIN_NODES", CHAIN_NODES)
+
+    _box_top(f"Настройка Exit Node(ов) для Режима B")
+    _box_row()
+    _box_wrap_msg(f"  {YELLOW}", 2, f"Вы можете добавить от 1 до {MAX_CHAIN_NODES} exit-нод.{NC}")
+    _box_wrap_msg(f"  {YELLOW}", 2, f"При нескольких нодах трафик распределяется между ними по выбранной стратегии (Round Robin / Least Ping / Random).{NC}")
+    _box_wrap_msg(f"  {YELLOW}", 2, f"На каждом зарубежном VPS должен быть установлен этот скрипт в Режиме A.{NC}")
+    _box_row()
+
+    while len(CHAIN_NODES) < MAX_CHAIN_NODES:
+        idx = len(CHAIN_NODES) + 1
+
+        _box_row()
+        _box_bottom()
+        _box_top(f"Exit Node #{idx}")
+        _box_row()
+
+        nd = _prompt_one_node(idx)
+        if nd is None:
+            # Пользователь ввёл 0 — прерываем ввод текущей ноды
+            if not CHAIN_NODES:
+                _box_warn("Нужна хотя бы одна exit-нода. Попробуйте снова.")
+                continue
+            else:
+                _box_info("Ввод нод завершён.")
+                break
+
+        CHAIN_NODES.append(nd)
+        _box_ok(f"Exit Node #{idx} добавлена: {nd['host']}:{nd['port']}")
+
+        if len(CHAIN_NODES) >= MAX_CHAIN_NODES:
+            _box_info(f"Достигнут максимум ({MAX_CHAIN_NODES} нод).")
+            break
+
+        _box_row()
+        _box_row(f"  Добавлено нод: {len(CHAIN_NODES)}/{MAX_CHAIN_NODES}")
+        try:
+            ans = input(f"  {CYAN}Добавить ещё одну exit-ноду? [y/N]:{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if ans != 'y':
+            break
+
+    # Итоговый список
+    _box_row()
+    _box_row(f"{BOLD}Итого exit-нод: {len(CHAIN_NODES)}{NC}")
+    for i, nd in enumerate(CHAIN_NODES):
+        _box_row(f"  {CYAN}#{i+1}{NC}  {nd['host']}:{nd['port']}  SNI={nd['sni']}")
+    _box_row()
+
+    # --- Стратегия балансировки (только если нод больше одной) ---
+    _prompt_balancer_strategy()
+    # _prompt_balancer_strategy() writes to core.CHAIN_BALANCER_STRATEGY via setattr;
+    # re-bind local to see the updated value below.
+    CHAIN_BALANCER_STRATEGY = getattr(core, "CHAIN_BALANCER_STRATEGY", "roundRobin")
+
+    # Если выбран Smart Balancer (п.5) — сразу устанавливаем cron
+    if CHAIN_BALANCER_STRATEGY == "smartBalancer":
+        try:
+            _sb_install_cron(PROBE_INTERVAL_MIN)
+            success(f"Smart Balancer: cron активирован (каждые {PROBE_INTERVAL_MIN} мин)")
+        except Exception as _sb_err:
+            warn(f"Smart Balancer: не удалось установить cron: {_sb_err}")
+        # Для xray используем roundRobin как базовую стратегию —
+        # Smart Balancer управляет переключением нод через state-файл
+        CHAIN_BALANCER_STRATEGY = "roundRobin"
+        setattr(core, "CHAIN_BALANCER_STRATEGY", CHAIN_BALANCER_STRATEGY)
+
+    _box_row()
+    _box_bottom()
+    # Синхронизируем legacy-переменные с первой нодой
+    if CHAIN_NODES:
+        n = CHAIN_NODES[0]
+        CHAIN_EXIT_HOST    = n["host"]
+        setattr(core, "CHAIN_EXIT_HOST", CHAIN_EXIT_HOST)
+        CHAIN_EXIT_PORT    = n["port"]
+        setattr(core, "CHAIN_EXIT_PORT", CHAIN_EXIT_PORT)
+        CHAIN_EXIT_UUID    = n["uuid"]
+        setattr(core, "CHAIN_EXIT_UUID", CHAIN_EXIT_UUID)
+        CHAIN_EXIT_PUBKEY  = n["pubkey"]
+        setattr(core, "CHAIN_EXIT_PUBKEY", CHAIN_EXIT_PUBKEY)
+        CHAIN_EXIT_SHORTID = n["shortid"]
+        setattr(core, "CHAIN_EXIT_SHORTID", CHAIN_EXIT_SHORTID)
+        CHAIN_EXIT_SNI     = n["sni"]
+        setattr(core, "CHAIN_EXIT_SNI", CHAIN_EXIT_SNI)
+        CHAIN_EXIT_FP      = n["fp"]
+        setattr(core, "CHAIN_EXIT_FP", CHAIN_EXIT_FP)
+
+
+# =============================================================================
+#  ГЕНЕРАЦИЯ КОНФИГА XRAY ДЛЯ РЕЖИМА B — российский (entry) VPS
+# =============================================================================
+def generate_xray_config_chain_entry() -> None:
+    """
+    Режим B, Entry node (российский VPS):
+    • Принимает VLESS+REALITY от клиента на порту 443
+    • Исходящий — VLESS+REALITY → зарубежный VPS (exit node)
+    """
+    core = _core_module()
+    _assert_reality_dest_sane = core._assert_reality_dest_sane
+    _run = core._run
+    _build_xhttp_settings = core._build_xhttp_settings
+    _build_tls_settings_xhttp = core._build_tls_settings_xhttp
+    _build_sockopt = core._build_sockopt
+    _xray_log_block = core._xray_log_block
+    _apply_stats_to_config = core._apply_stats_to_config
+    _set_config_owner = core._set_config_owner
+    build_split_tunnel_routing_rules = core.build_split_tunnel_routing_rules
+    info = core.info
+    warn = core.warn
+    success = core.success
+    log_to_file = core.log_to_file
+    DNSCRYPT_LISTEN_PORT = getattr(core, "DNSCRYPT_LISTEN_PORT", 5300)
+    DNSCRYPT_LISTEN_ADDR = getattr(core, "DNSCRYPT_LISTEN_ADDR", "127.0.0.1")
+    DNSCRYPT_INSTALLED = getattr(core, "DNSCRYPT_INSTALLED", False)
+    IS_IPV6_AVAILABLE = getattr(core, "IS_IPV6_AVAILABLE", False)
+    PROTOCOL_MODE = getattr(core, "PROTOCOL_MODE", "reality")
+    PARAM_DOMAIN = getattr(core, "PARAM_DOMAIN", "")
+    PARAM_UUID = getattr(core, "PARAM_UUID", "")
+    XTLS_FLOW = getattr(core, "XTLS_FLOW", "")
+    XHTTP_MODE = getattr(core, "XHTTP_MODE", "streamup")
+    XHTTP_PATH = getattr(core, "XHTTP_PATH", "/")
+    AWG_EXIT_ENABLED = getattr(core, "AWG_EXIT_ENABLED", False)
+    PARAM_REALITY_DEST = getattr(core, "PARAM_REALITY_DEST", "")
+    PARAM_SOCKET_PATH = getattr(core, "PARAM_SOCKET_PATH", "")
+    PARAM_SPIDERX = getattr(core, "PARAM_SPIDERX", "/")
+    PARAM_PRIVATE_KEY = getattr(core, "PARAM_PRIVATE_KEY", "")
+    PARAM_PUBLIC_KEY = getattr(core, "PARAM_PUBLIC_KEY", "")
+    PARAM_SHORTID = getattr(core, "PARAM_SHORTID", "")
+    CHAIN_EXIT_HOST = getattr(core, "CHAIN_EXIT_HOST", "")
+    CHAIN_EXIT_PORT = getattr(core, "CHAIN_EXIT_PORT", 443)
+    CHAIN_EXIT_UUID = getattr(core, "CHAIN_EXIT_UUID", "")
+    CHAIN_EXIT_FP = getattr(core, "CHAIN_EXIT_FP", "chrome")
+    CHAIN_EXIT_SNI = getattr(core, "CHAIN_EXIT_SNI", "")
+    CHAIN_EXIT_PUBKEY = getattr(core, "CHAIN_EXIT_PUBKEY", "")
+    CHAIN_EXIT_SHORTID = getattr(core, "CHAIN_EXIT_SHORTID", "")
+    AWG_FWMARK = getattr(core, "AWG_FWMARK", 1000)
+    SERVER_PORT = getattr(core, "SERVER_PORT", 443)
+    SPLIT_TUNNEL_ENABLED = getattr(core, "SPLIT_TUNNEL_ENABLED", False)
+    CONFIG_DIR = getattr(core, "CONFIG_DIR", Path("/etc/xray"))
+    XRAY_BIN = getattr(core, "XRAY_BIN", "/usr/local/bin/xray")
+    Any = getattr(core, "Any", None)
+
+    _assert_reality_dest_sane()
+    info("Режим B: создание конфига Entry Node (российский VPS)...")
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # ПАТЧ: гарантируем создание группы/пользователя xray ДО chown.
+    # Если установка Xray прервалась раньше — chown root:xray упадёт с "invalid group".
+    _run(["groupadd", "-f", "xray"], check=False, quiet=True)
+    _run(["useradd", "-r", "-g", "xray", "-s", "/sbin/nologin", "xray"],
+         check=False, quiet=True)
+    # ПАТЧ: права на директорию — root должен мочь писать config.json
+    try:
+        os.chmod(str(CONFIG_DIR), 0o755)
+        _run(["chown", "root:xray", str(CONFIG_DIR)], check=False, quiet=True)
+    except Exception:
+        pass
+
+    # DNS серверы — аналогично generate_xray_config()
+    r_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
+                    capture=True, check=False)
+    dnscrypt_running = (DNSCRYPT_INSTALLED or r_active.stdout.strip() == "active")
+
+    if dnscrypt_running:
+        dns_servers = [
+            {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
+             "network": "udp", "skipFallback": False},
+            {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
+            {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
+        ]
+    else:
+        dns_servers = [
+            {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": False},
+        ]
+
+    query_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+
+    if PROTOCOL_MODE == "xhttp":
+        cert_path_str = f"/etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem"
+        key_path_str  = f"/etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem"
+        _xhttp_s, _sockopt_s = _build_xhttp_settings(XHTTP_MODE, XHTTP_PATH)
+        inbound_block = {
+            "tag":      "inbound-xhttp",
+            "port":     SERVER_PORT,
+            "listen":   "::",
+            "protocol": "vless",
+            "settings": {
+                "clients": [{
+                    "id":    PARAM_UUID,
+                    "email": f"user@{PARAM_DOMAIN}",
+                }],
+                "decryption": "none",
+            },
+            "sniffing": {
+                "enabled":      True,
+                "destOverride": ["http", "tls"],
+                "metadataOnly": False,
+                "routeOnly":    False,
+            },
+            "streamSettings": {
+                "network":       "xhttp",
+                "security":      "tls",
+                "sockopt":       _sockopt_s,
+                "tlsSettings":   _build_tls_settings_xhttp(
+                                     PARAM_DOMAIN, cert_path_str, key_path_str),
+                "xhttpSettings": _xhttp_s,
+            },
+        }
+    else:
+        inbound_block = {
+            "tag":      "inbound-vless",
+            "port":     SERVER_PORT,
+            "listen":   "::",
+            "protocol": "vless",
+            "settings": {
+                "clients": [{
+                    "id":    PARAM_UUID,
+                    "email": f"user@{PARAM_DOMAIN}",
+                    **( {"flow": XTLS_FLOW} if XTLS_FLOW else {} ),
+                }],
+                "decryption": "none",
+            },
+            "sniffing": {
+                "enabled":      True,
+                "destOverride": ["http", "tls"],
+                # AWG использует маршрутизацию ядра — sniffing доменов не нужен (metadataOnly=True).
+                # Базовый VLESS/REALITY: metadataOnly=False обязателен — xray должен читать SNI/Host
+                # чтобы freedom мог резолвить домены и применять UseIPv6v4 domainStrategy.
+                "metadataOnly": True if AWG_EXIT_ENABLED else False,
+                "routeOnly":    False,
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "sockopt": _build_sockopt(),
+                "security": "reality",
+                "realitySettings": {
+                    "show":        False,
+                    "dest":        (PARAM_REALITY_DEST + ":443") if AWG_EXIT_ENABLED else PARAM_SOCKET_PATH,
+                    # xver=1 (Proxy Protocol) только в классическом режиме VLESS-каскада:
+                    # Nginx слушает на socket с proxy_protocol и шлёт PP-заголовок.
+                    # xver=0 при AWG: Xray слушает напрямую на TCP, PP-заголовка нет.
+                    "xver":        0 if AWG_EXIT_ENABLED else 1,
+                    "spiderX":     PARAM_SPIDERX,
+                    "serverNames": [PARAM_REALITY_DEST if AWG_EXIT_ENABLED else PARAM_DOMAIN],
+                    "privateKey":  PARAM_PRIVATE_KEY,
+                    "publicKey":   PARAM_PUBLIC_KEY,
+                    "shortIds":    [PARAM_SHORTID],
+                },
+            },
+        }
+
+    config: dict[str, Any] = {
+        "log": _xray_log_block(),
+        "dns": {
+            "servers": dns_servers,
+            "hosts": {
+                "dns.google":         "8.8.8.8",
+                "dns.cloudflare.com": "1.1.1.1",
+                "localhost":          "127.0.0.1",
+            },
+            "disableCache":           False,
+            "queryStrategy":          query_strategy,
+            "disableFallback":        False,
+            "disableFallbackIfMatch": True,
+        },
+        "inbounds": [inbound_block],
+        "outbounds": [
+            # Главный исходящий: VLESS → AWG туннель → exit-VPS
+            # domainStrategy здесь не применяется к клиентскому трафику —
+            # он применяется только к самому соединению RU→exit (по IP, не домену).
+            # IPv6 для клиентов обеспечивается Xray на exit-VPS (UseIPv6v4 там).
+            {
+                "tag":      "chain-exit",
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [{
+                        "address": CHAIN_EXIT_HOST,
+                        "port":    CHAIN_EXIT_PORT,
+                        "users":   [{
+                            "id":         CHAIN_EXIT_UUID,
+                            "encryption": "none",
+                            **( {"flow": XTLS_FLOW} if XTLS_FLOW else {} ),
+                        }],
+                    }],
+                },
+                "streamSettings": {
+                    "network":  "tcp",
+                    "security": "reality",
+                    "sockopt":  {**_build_sockopt(), **({"mark": AWG_FWMARK} if AWG_EXIT_ENABLED else {})},  # ПАТЧ: AWG mark
+                    "realitySettings": {
+                        "show":        False,
+                        "fingerprint": CHAIN_EXIT_FP,
+                        "serverName":  CHAIN_EXIT_SNI,
+                        "publicKey":   CHAIN_EXIT_PUBKEY,
+                        "shortId":     CHAIN_EXIT_SHORTID,
+                        "spiderX":     "/",
+                    },
+                },
+            },
+            {"protocol": "blackhole", "tag": "BLOCK"},
+            # ИСПРАВЛЕНИЕ: direct outbound нужен ВСЕГДА — не только при AWG.
+            # Xray резолвит домены через встроенный DNS (IPIfNonMatch), запросы идут
+            # к 127.0.0.1:5300 (DNSCrypt-proxy). Без direct outbound они попадают
+            # в chain-exit (VLESS TCP) и получают "read response: EOF".
+            # При AWG добавляем fwmark для корректной маршрутизации.
+            {
+                "protocol": "freedom",
+                "tag":      "direct",
+                "settings": {"domainStrategy": "UseIPv6v4"},
+                **({"streamSettings": {"sockopt": {"mark": AWG_FWMARK}}} if AWG_EXIT_ENABLED else {}),
+            },
+        ],
+        "routing": {
+            "domainStrategy": "IPIfNonMatch",
+            "rules": [
+                # ИСПРАВЛЕНИЕ: loopback → direct ВСЕГДА (не только при AWG).
+                # DNS-запросы Xray к 127.0.0.1:5300 (DNSCrypt) должны идти через
+                # direct (loopback), иначе попадают в chain-exit → EOF.
+                {"type": "field", "ip": ["127.0.0.1/8", "::1/128"], "outboundTag": "direct"},
+                # Блокируем торренты
+                {"type": "field", "protocol": ["bittorrent"], "outboundTag": "BLOCK"},
+                # Всё остальное — через exit node
+                {"type": "field", "network": "tcp,udp", "outboundTag": "chain-exit"},
+            ],
+        },
+    }
+
+    # === MERGE FROM install_split.py: split tunnel block (generate_xray_config_chain_entry) ===
+    # Классический VLESS-каскад (без AWG): split tunnel через "direct" outbound.
+    # AWG-режим: эта функция не вызывается (см. generate_xray_config_chain_entry_multi —
+    # ветка elif AWG_EXIT_ENABLED уходит в generate_xray_config()). Но если всё же
+    # вызвана с AWG_EXIT_ENABLED — нужен direct-local (без fwmark), иначе РФ-трафик
+    # уйдёт через awg0 (exit-VPS), и split tunnel бесполезен.
+    if SPLIT_TUNNEL_ENABLED and not AWG_EXIT_ENABLED:
+        if not any(ob.get("tag") == "direct" for ob in config.get("outbounds", [])):
+            config["outbounds"].insert(0, {
+                "protocol": "freedom",
+                "tag":      "direct",
+                "settings": {"domainStrategy": "UseIP"},
+            })
+        st_rules = build_split_tunnel_routing_rules(proxy_tag="chain-exit", direct_tag="direct")
+        if st_rules:
+            config["routing"]["rules"] = st_rules + config["routing"]["rules"]
+            config["routing"]["geoDataBasePath"] = str(CONFIG_DIR)
+            info(f"Split tunneling: добавлено {len(st_rules)} правил (Режим B, одиночная нода)")
+    elif SPLIT_TUNNEL_ENABLED and AWG_EXIT_ENABLED:
+        _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+        config["outbounds"].insert(0, {
+            "protocol": "freedom",
+            "tag":      "direct-local",
+            "settings": {"domainStrategy": _dl_strategy},
+        })
+        # IP-проверочные домены → direct-local (всегда в AWG-режиме)
+        # build_awg_ip_check_rule возвращает list (domain + ip правило).
+        from chimera.modules.split_tunnel import build_awg_ip_check_rule
+        config["routing"]["rules"][:0] = build_awg_ip_check_rule("direct-local")
+        st_rules = build_split_tunnel_routing_rules(
+            proxy_tag="direct", direct_tag="direct-local")
+        if st_rules:
+            config["routing"]["rules"] = st_rules + config["routing"]["rules"]
+            config["routing"]["geoDataBasePath"] = str(CONFIG_DIR)
+            info(f"Split tunneling: добавлено {len(st_rules)} правил "
+                 f"(Режим B + AWG, одиночная нода, direct-local)")
+    # === END MERGE ===
+
+    cfg_file = CONFIG_DIR / "config.json"
+    _apply_stats_to_config(config)
+    cfg_file.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+    _set_config_owner(cfg_file)
+
+    # Симлинк
+    alt_dir = Path("/usr/local/etc/xray")
+    if alt_dir.exists():
+        alt_cfg = alt_dir / "config.json"
+        alt_cfg.unlink(missing_ok=True)
+        try:
+            alt_cfg.symlink_to(cfg_file)
+        except Exception:
+            pass
+
+    # Валидация
+    r = _run([str(XRAY_BIN), "run", "-test", "-config", str(cfg_file)],
+             capture=True, check=False)
+    if r.returncode == 0:
+        success("Конфиг Entry Node (Режим B) создан и валиден")
+    else:
+        warn("Конфигурация создана с предупреждением")
+        log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
+
+
+# =============================================================================
+#  ГЕНЕРАЦИЯ КОНФИГА XRAY ДЛЯ РЕЖИМА B — зарубежный (exit) VPS
+# =============================================================================
+def _make_exit_node_config(nd: dict) -> dict:
+    """Строит словарь конфига Xray для одной exit-ноды."""
+    core = _core_module()
+    _build_exit_xhttp_settings = core._build_exit_xhttp_settings
+    _build_sockopt = core._build_sockopt
+    XHTTP_TCP_NO_DELAY = getattr(core, "XHTTP_TCP_NO_DELAY", False)
+    XHTTP_ENABLE_SESSION_RESUMPTION = getattr(core, "XHTTP_ENABLE_SESSION_RESUMPTION", False)
+    XTLS_FLOW = getattr(core, "XTLS_FLOW", "")
+    nd_proto = nd.get("proto", "reality")
+
+    if nd_proto == "xhttp":
+        inbound = {
+            "tag":      "inbound-xhttp",
+            "port":     nd["port"],
+            "listen":   "::",
+            "protocol": "vless",
+            "settings": {
+                "clients": [{
+                    "id":    nd["uuid"],
+                    "email": "entry@chain",
+                }],
+                "decryption": "none",
+            },
+            "sniffing": {
+                "enabled":      True,
+                "destOverride": ["http", "tls"],
+                "metadataOnly": False,
+                "routeOnly":    False,
+            },
+            "streamSettings": {
+                "network":  "xhttp",
+                "security": "tls",
+                "sockopt":  {
+                    "tcpFastOpen":        True,
+                    "tcpKeepAliveInterval": 15,
+                    "tcpKeepAliveIdle":   60,
+                    "tcpUserTimeout":     10000,
+                    "tcpCongestion":      "bbr",
+                    **({"tcpNoDelay": True} if XHTTP_TCP_NO_DELAY else {}),
+                },
+                "tlsSettings": {
+                    "serverName":   nd.get("sni", ""),
+                    "certificates": [{
+                        "certificateFile": f"/etc/letsencrypt/live/{nd.get('sni', 'example.com')}/fullchain.pem",
+                        "keyFile":         f"/etc/letsencrypt/live/{nd.get('sni', 'example.com')}/privkey.pem",
+                    }],
+                    "alpn":       ["h2", "http/1.1"],
+                    "minVersion": "1.2",
+                    **({"enableSessionResumption": True} if XHTTP_ENABLE_SESSION_RESUMPTION else {}),
+                },
+                "xhttpSettings": _build_exit_xhttp_settings(nd),
+            },
+        }
+        comment = (
+            "Этот конфиг предназначен для ЗАРУБЕЖНОГО VPS (exit node, xHTTP TLS). "
+            "Скопируйте его в /etc/xray/config.json на зарубежном сервере."
+        )
+    else:
+        inbound = {
+            "tag":      "inbound-chain-entry",
+            "port":     nd["port"],
+            "listen":   "::",
+            "protocol": "vless",
+            "settings": {
+                "clients": [{
+                    "id":    nd["uuid"],
+                    "email": "entry@chain",
+                    **( {"flow": XTLS_FLOW} if XTLS_FLOW else {} ),
+                }],
+                "decryption": "none",
+            },
+            "sniffing": {
+                "enabled":      True,
+                "destOverride": ["http", "tls"],
+                "metadataOnly": False,
+                "routeOnly":    False,
+            },
+            "streamSettings": {
+                "network":  "tcp",
+                "sockopt":  _build_sockopt(),
+                "security": "reality",
+                "realitySettings": {
+                    "show":        False,
+                    "dest":        f"{nd['sni']}:443",
+                    "xver":        0,
+                    "spiderX":     "/",
+                    "serverNames": [nd["sni"]],
+                    # ВАЖНО: privateKey нужно вставить вручную после: xray x25519
+                    "privateKey":  "<ВСТАВЬТЕ_PRIVATE_KEY_EXIT_NODE>",
+                    "publicKey":   nd["pubkey"],
+                    "shortIds":    [nd["shortid"]],
+                },
+            },
+        }
+        comment = (
+            "Этот конфиг предназначен для ЗАРУБЕЖНОГО VPS (exit node, REALITY). "
+            "Скопируйте его в /etc/xray/config.json на зарубежном сервере."
+        )
+
+    return {
+        "_comment": comment,
+        "log": {
+            "loglevel": "info",
+            "access": "/var/log/xray/access.log",
+            "error": "/var/log/xray/error.log"
+        },
+        "dns": {
+            "servers": [
+                # IPv6-capable DNS
+                {"address": "2606:4700:4700::1111", "port": 53, "network": "udp", "skipFallback": True},
+                {"address": "1.1.1.1",              "port": 53, "network": "udp", "skipFallback": False},
+                {"address": "2001:4860:4860::8888", "port": 53, "network": "udp", "skipFallback": True},
+                {"address": "8.8.8.8",              "port": 53, "network": "udp", "skipFallback": False},
+            ],
+            # UseIPv6v4: резолвим AAAA сначала — ключевое для видимости IPv6 клиентом
+            "queryStrategy": "UseIPv6v4",
+        },
+        "inbounds": [inbound],
+        "outbounds": [
+            {
+                "protocol": "freedom",
+                "tag":      "direct",
+                # UseIPv6v4: Xray предпочитает IPv6 при исходящем соединении
+                "settings": {"domainStrategy": "UseIPv6v4"},
+            },
+            {"protocol": "blackhole", "tag": "BLOCK"},
+        ],
+        "routing": {
+            "domainStrategy": "IPIfNonMatch",
+            "rules": [
+                {"type": "field", "protocol": ["bittorrent"],        "outboundTag": "BLOCK"},
+                {"type": "field", "ip": ["127.0.0.1/32", "::1/128"], "outboundTag": "direct"},
+                {"type": "field", "network": "tcp,udp",              "outboundTag": "direct"},
+            ],
+        },
+    }
+
+
+def generate_xray_config_chain_exit() -> None:
+    """
+    Генерирует конфиг(и) для зарубежных (exit) VPS Режима B.
+    Файлы НЕ применяются к текущему серверу — только сохраняются для
+    ручного копирования на зарубежные VPS.
+    При нескольких нодах создаётся отдельный файл для каждой:
+      /root/xray_config_exit_node_1.json, _2.json, ...
+    При одной ноде — /root/xray_config_exit_node.json (совместимость).
+    """
+    core = _core_module()
+    info = core.info
+    warn = core.warn
+    success = core.success
+    CHAIN_NODES = getattr(core, "CHAIN_NODES", [])
+    CHAIN_EXIT_HOST = getattr(core, "CHAIN_EXIT_HOST", "")
+    CHAIN_EXIT_PORT = getattr(core, "CHAIN_EXIT_PORT", 443)
+    CHAIN_EXIT_UUID = getattr(core, "CHAIN_EXIT_UUID", "")
+    CHAIN_EXIT_PUBKEY = getattr(core, "CHAIN_EXIT_PUBKEY", "")
+    CHAIN_EXIT_SHORTID = getattr(core, "CHAIN_EXIT_SHORTID", "")
+    CHAIN_EXIT_SNI = getattr(core, "CHAIN_EXIT_SNI", "")
+    CHAIN_EXIT_FP = getattr(core, "CHAIN_EXIT_FP", "chrome")
+
+    nodes = CHAIN_NODES if CHAIN_NODES else []
+    if not nodes and CHAIN_EXIT_HOST:
+        nodes = [{
+            "host":    CHAIN_EXIT_HOST,
+            "port":    CHAIN_EXIT_PORT,
+            "uuid":    CHAIN_EXIT_UUID,
+            "pubkey":  CHAIN_EXIT_PUBKEY,
+            "shortid": CHAIN_EXIT_SHORTID,
+            "sni":     CHAIN_EXIT_SNI,
+            "fp":      CHAIN_EXIT_FP,
+        }]
+
+    if not nodes:
+        warn("Нет exit-нод для генерации конфигов.")
+        return
+
+    info(f"Режим B: генерация конфигов Exit Node(ов) ({len(nodes)} шт.)...")
+
+    for i, nd in enumerate(nodes):
+        cfg = _make_exit_node_config(nd)
+        if len(nodes) == 1:
+            path = Path("/root/xray_config_exit_node.json")
+        else:
+            path = Path(f"/root/xray_config_exit_node_{i+1}.json")
+        path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+        path.chmod(0o600)
+        nd_proto = nd.get("proto", "reality")
+        success(f"  Конфиг Exit Node #{i+1} ({nd['host']}, {nd_proto.upper()}): {path}")
+
+    info("Скопируйте каждый файл на соответствующий зарубежный VPS: /etc/xray/config.json")
+    # Подсказки зависят от протокола нод
+    has_reality_nodes = any(nd.get("proto", "reality") == "reality" for nd in nodes)
+    has_xhttp_nodes   = any(nd.get("proto", "reality") == "xhttp"   for nd in nodes)
+    if has_reality_nodes:
+        info("REALITY exit nodes: сгенерируйте ключи: xray x25519")
+        info("И прописать приватный ключ вместо <ВСТАВЬТЕ_PRIVATE_KEY_EXIT_NODE>")
+    if has_xhttp_nodes:
+        info("xHTTP exit nodes: получите сертификат Let's Encrypt на exit VPS")
+        info("certbot certonly --standalone -d <ваш_домен> --non-interactive --agree-tos -m admin@<домен>")
+
+
+# =============================================================================
+#  ДОП. КЛИЕНТ ДЛЯ УЖЕ РАЗВЁРНУТОЙ EXIT-НОДЫ (для резервной Entry-ноды)
+# =============================================================================
+def do_generate_chain_exit_additional_client() -> None:
+    """
+    generate_xray_config_chain_exit() перезаписывает inbounds[0].settings.clients
+    ОДНИМ клиентом — это ломает доступ уже работающей entry-ноды, если
+    сгенерировать конфиг заново под вторую (резервную) entry. Эта функция
+    вместо полной перегенерации выдаёт JSON-сниппет с ОДНИМ новым клиентом
+    (новый UUID) — его нужно вручную добавить ЕЩЁ ОДНИМ элементом в уже
+    существующий массив clients на exit-VPS, не трогая остальные.
+
+    Если exit-нода — это обычная установка данного инсталлятора в Режиме A
+    (вариант "вставить VLESS-ссылку" при добавлении ноды, а не шаблон из
+    generate_xray_config_chain_exit()) — специальный сниппет не нужен:
+    проще добавить обычного пользователя через "Менеджер пользователей"
+    (меню 2 → 1) прямо на exit-VPS и взять его vless-ссылку.
+    """
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_bottom = core._box_bottom
+    warn = core.warn
+    success = core.success
+    uuid = core.uuid
+    YELLOW = core.YELLOW
+    CYAN = core.CYAN
+    BLUE = core.BLUE
+    BOLD = core.BOLD
+    DIM = core.DIM
+    NC = core.NC
+    XTLS_FLOW = getattr(core, "XTLS_FLOW", "")
+    CHAIN_NODES = getattr(core, "CHAIN_NODES", [])
+
+    _load_chain_nodes_from_state()
+    # _load_chain_nodes_from_state() writes to core.CHAIN_NODES via setattr;
+    # re-bind local to see the updated value below.
+    CHAIN_NODES = getattr(core, "CHAIN_NODES", [])
+
+    print()
+    _box_top("Доп. клиент для существующей Exit-ноды (резервная Entry)")
+    _box_row(f"  {DIM}Для entry-ноды, форвардящей трафик в УЖЕ развёрнутый exit —")
+    _box_row(f"  {DIM}не переписывает существующего клиента, только добавляет нового.{NC}")
+    _box_row()
+
+    nd: dict | None = None
+    if CHAIN_NODES:
+        for i, cnd in enumerate(CHAIN_NODES):
+            _box_row(f"  [{i+1}] {cnd['host']}:{cnd['port']}  SNI={cnd['sni']}")
+        _box_row(f"  [0] Ввести параметры exit-ноды вручную")
+        _box_bottom()
+        try:
+            v = input("  Номер exit-ноды (0 = вручную): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print(); return
+        if v.isdigit() and 1 <= int(v) <= len(CHAIN_NODES):
+            nd = CHAIN_NODES[int(v) - 1]
+    else:
+        _box_row(f"  {DIM}Список нод этой entry пуст — введите параметры exit-ноды вручную.{NC}")
+        _box_bottom()
+
+    if nd is None:
+        try:
+            host = input("  Host exit-ноды: ").strip()
+            if not host:
+                warn("Host обязателен."); return
+            port_raw = input("  Порт [443]: ").strip()
+            port = int(port_raw) if port_raw else 443
+            proto = (input("  Протокол [reality/xhttp, по умолчанию reality]: ").strip().lower() or "reality")
+            sni = input("  SNI: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print(); return
+        nd = {"host": host, "port": port, "sni": sni, "proto": proto}
+
+    try:
+        label = input("  Метка нового клиента [entry-backup]: ").strip() or "entry-backup"
+    except (KeyboardInterrupt, EOFError):
+        print(); return
+
+    new_uuid = str(uuid.uuid4())
+    client_obj: dict = {"id": new_uuid, "email": f"{label}@chain"}
+    if nd.get("proto", "reality") != "xhttp" and XTLS_FLOW:
+        client_obj["flow"] = XTLS_FLOW
+
+    snippet_path = Path(f"/root/exit_add_client_{new_uuid[:8]}.json")
+    snippet_path.write_text(json.dumps(client_obj, indent=2, ensure_ascii=False))
+    snippet_path.chmod(0o600)
+
+    print()
+    success(f"Сниппет клиента сохранён: {snippet_path}")
+    _box_top("Что сделать дальше")
+    _box_row(f"  1. Скопируйте файл на exit-VPS ({nd['host']}):")
+    _box_row(f"     {CYAN}scp {snippet_path} root@{nd['host']}:/root/{NC}")
+    _box_row(f"  2. На exit-VPS откройте /etc/xray/config.json,")
+    _box_row(f"     найдите inbounds[0].settings.clients (это список) и")
+    _box_row(f"     добавьте туда содержимое {snippet_path.name}")
+    _box_row(f"     ЕЩЁ ОДНИМ элементом через запятую — существующего")
+    _box_row(f"     клиента (основную entry) НЕ трогайте и не удаляйте.")
+    _box_row(f"  3. Перезапустите Xray на exit-VPS:")
+    _box_row(f"     {CYAN}systemctl restart xray{NC}")
+    _box_row()
+    _box_row(f"  {BOLD}Параметры для резервной entry-ноды{NC} {DIM}(ввести при настройке")
+    _box_row(f"  {DIM}её cascade / добавлении этой exit-ноды в её CHAIN_NODES):{NC}")
+    _box_row(f"     Host:      {nd['host']}")
+    _box_row(f"     Port:      {nd['port']}")
+    _box_row(f"     UUID:      {new_uuid}")
+    if nd.get("pubkey"):
+        _box_row(f"     PublicKey: {nd['pubkey']}")
+    if nd.get("shortid"):
+        _box_row(f"     ShortID:   {nd['shortid']}")
+    _box_row(f"     SNI:       {nd.get('sni', '')}")
+    _box_row(f"     FP:        {nd.get('fp', 'chrome')}")
+    if not nd.get("pubkey") or not nd.get("shortid"):
+        _box_row()
+        _box_row(f"  {YELLOW}PublicKey/ShortID exit-ноды не были указаны — возьмите их{NC}")
+        _box_row(f"  {YELLOW}из исходной VLESS-ссылки этой exit-ноды.{NC}")
+    _box_bottom()
+    input(f"{BLUE}Нажмите Enter...{NC}")
+
+
+# =============================================================================
+#  МУЛЬТИ-КАСКАД: ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (до 10 exit-нод)
+# =============================================================================
+
+def _nodes_from_state(state: dict) -> list[dict]:
+    """
+    Загружает список нод из state.json.
+    Поддерживает как новый формат (chain_nodes: [...]),
+    так и старый (chain_exit_host/port/uuid/...) — для обратной совместимости.
+    """
+    if "chain_nodes" in state and isinstance(state["chain_nodes"], list):
+        return state["chain_nodes"]
+    # Старый формат — одна нода
+    host = state.get("chain_exit_host", "")
+    if host:
+        return [{
+            "host":    host,
+            "port":    state.get("chain_exit_port",    443),
+            "uuid":    state.get("chain_exit_uuid",    ""),
+            "pubkey":  state.get("chain_exit_pubkey",  ""),
+            "shortid": state.get("chain_exit_shortid", ""),
+            "sni":     state.get("chain_exit_sni",     ""),
+            "fp":      state.get("chain_exit_fp",      "chrome"),
+        }]
+    return []
+
+
+def _load_chain_nodes_from_state() -> None:
+    """Загружает CHAIN_NODES (и legacy CHAIN_EXIT_*) из STATE_FILE."""
+    core = _core_module()
+    STATE_FILE = getattr(core, "STATE_FILE", None)
+    CHAIN_NODES = getattr(core, "CHAIN_NODES", [])
+    CHAIN_BALANCER_STRATEGY = getattr(core, "CHAIN_BALANCER_STRATEGY", "roundRobin")
+    CHAIN_EXIT_HOST = getattr(core, "CHAIN_EXIT_HOST", "")
+    CHAIN_EXIT_PORT = getattr(core, "CHAIN_EXIT_PORT", 443)
+    CHAIN_EXIT_UUID = getattr(core, "CHAIN_EXIT_UUID", "")
+    CHAIN_EXIT_PUBKEY = getattr(core, "CHAIN_EXIT_PUBKEY", "")
+    CHAIN_EXIT_SHORTID = getattr(core, "CHAIN_EXIT_SHORTID", "")
+    CHAIN_EXIT_SNI = getattr(core, "CHAIN_EXIT_SNI", "")
+    CHAIN_EXIT_FP = getattr(core, "CHAIN_EXIT_FP", "chrome")
+    if not STATE_FILE.exists():
+        return
+    try:
+        state = json.loads(STATE_FILE.read_text())
+        CHAIN_NODES = _nodes_from_state(state)
+        setattr(core, "CHAIN_NODES", CHAIN_NODES)
+        CHAIN_BALANCER_STRATEGY = state.get("chain_balancer_strategy", "roundRobin")
+        setattr(core, "CHAIN_BALANCER_STRATEGY", CHAIN_BALANCER_STRATEGY)
+        if CHAIN_NODES:
+            n = CHAIN_NODES[0]
+            CHAIN_EXIT_HOST    = n.get("host",    CHAIN_EXIT_HOST)
+            setattr(core, "CHAIN_EXIT_HOST", CHAIN_EXIT_HOST)
+            CHAIN_EXIT_PORT    = n.get("port",    CHAIN_EXIT_PORT)
+            setattr(core, "CHAIN_EXIT_PORT", CHAIN_EXIT_PORT)
+            CHAIN_EXIT_UUID    = n.get("uuid",    CHAIN_EXIT_UUID)
+            setattr(core, "CHAIN_EXIT_UUID", CHAIN_EXIT_UUID)
+            CHAIN_EXIT_PUBKEY  = n.get("pubkey",  CHAIN_EXIT_PUBKEY)
+            setattr(core, "CHAIN_EXIT_PUBKEY", CHAIN_EXIT_PUBKEY)
+            CHAIN_EXIT_SHORTID = n.get("shortid", CHAIN_EXIT_SHORTID)
+            setattr(core, "CHAIN_EXIT_SHORTID", CHAIN_EXIT_SHORTID)
+            CHAIN_EXIT_SNI     = n.get("sni",     CHAIN_EXIT_SNI)
+            setattr(core, "CHAIN_EXIT_SNI", CHAIN_EXIT_SNI)
+            CHAIN_EXIT_FP      = n.get("fp",      CHAIN_EXIT_FP)
+            setattr(core, "CHAIN_EXIT_FP", CHAIN_EXIT_FP)
+    except Exception:
+        pass
+
+
+def _save_chain_nodes_to_state() -> None:
+    """Записывает CHAIN_NODES обратно в STATE_FILE, не затрагивая остальные поля."""
+    core = _core_module()
+    warn = core.warn
+    STATE_FILE = getattr(core, "STATE_FILE", None)
+    CHAIN_NODES = getattr(core, "CHAIN_NODES", [])
+    CHAIN_BALANCER_STRATEGY = getattr(core, "CHAIN_BALANCER_STRATEGY", "roundRobin")
+    CHAIN_PINNED_NODE_INDEX = getattr(core, "CHAIN_PINNED_NODE_INDEX", -1)
+    if not STATE_FILE.exists():
+        warn("state.json не найден — сначала выполните установку (пункт 1).")
+        return
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except Exception:
+        state = {}
+    state["chain_nodes"] = CHAIN_NODES
+    state["chain_balancer_strategy"] = CHAIN_BALANCER_STRATEGY
+    state["chain_pinned_node_index"] = CHAIN_PINNED_NODE_INDEX
+    # Обновляем и legacy-поля первой ноды для совместимости
+    if CHAIN_NODES:
+        n = CHAIN_NODES[0]
+        state["chain_exit_host"]    = n["host"]
+        state["chain_exit_port"]    = n["port"]
+        state["chain_exit_uuid"]    = n["uuid"]
+        state["chain_exit_pubkey"]  = n["pubkey"]
+        state["chain_exit_shortid"] = n["shortid"]
+        state["chain_exit_sni"]     = n["sni"]
+        state["chain_exit_fp"]      = n["fp"]
+    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+
+
+def _prompt_one_node(index: int) -> dict | None:
+    """
+    Запрашивает параметры одной exit-ноды.
+    Поддерживает два режима ввода:
+      [L] — вставить VLESS-ссылку (парсинг автоматически)
+      [M] — ввод параметров вручную по полям
+    Возвращает dict или None, если пользователь отменил.
+    """
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_bottom = core._box_bottom
+    _box_item = core._box_item
+    _box_back = core._box_back
+    warn = core.warn
+    YELLOW = core.YELLOW
+    CYAN = core.CYAN
+    GREEN = core.GREEN
+    NC = core.NC
+
+    _box_top(f"Параметры Exit Node #{index}")
+    _box_row(f"  {YELLOW}На зарубежном VPS должен быть установлен этот же скрипт в Режиме A.{NC}")
+    _box_row(f"  Введите {CYAN}0{NC} для отмены.")
+    _box_row()
+    _box_item("L", f"Вставить VLESS-ссылку (сгенерированную на exit VPS) {GREEN}(рекомендуется){NC}")
+    _box_item("M", f"Ввести параметры вручную по полям")
+    _box_row()
+    _box_back()
+    _box_bottom()
+    while True:
+        try:
+            mode = input("  Выбор [L/M]: ").strip().lower()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if mode == "0":
+            return None
+        if mode in ("l", ""):
+            return _prompt_one_node_from_link(index)
+        elif mode == "m":
+            return _prompt_one_node_manual(index)
+        warn("  Введите L или M")
+
+
+def _prompt_one_node_from_link(index: int) -> dict | None:
+    """Ввод параметров exit-ноды через VLESS-ссылку."""
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_bottom = core._box_bottom
+    _box_sep = core._box_sep
+    _box_item = core._box_item
+    _box_item_exit = core._box_item_exit
+    _box_wrap_msg = core._box_wrap_msg
+    warn = core.warn
+    parse_vless_link = core.parse_vless_link
+    YELLOW = core.YELLOW
+    BOLD = core.BOLD
+    DIM = core.DIM
+    NC = core.NC
+
+    _box_top(f"Ввод Exit Node #{index} через VLESS-ссылку")
+    _box_row()
+    _box_wrap_msg(f"  {DIM}Пример: {NC}", 10, f"vless://UUID@host:443?type=tcp&security=reality&pbk=...&sid=...&sni=domain.com&flow=xtls-rprx-vision")
+    _box_wrap_msg(f"  {DIM}Или:    {NC}", 10, f"vless://UUID@host:443?type=xhttp&security=tls&sni=domain.com&path=/abc")
+    _box_row()
+
+    _box_bottom()
+    while True:
+        try:
+            raw = input("  VLESS ссылка (0=отмена): ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if raw == "0":
+            return None
+        if not raw:
+            warn("  Ссылка не может быть пустой")
+            continue
+        parsed = parse_vless_link(raw)
+        if parsed is None:
+            warn("  Не удалось разобрать ссылку. Проверьте формат.")
+            warn("  Ссылка должна начинаться с vless://")
+            try:
+                ans = input("  Попробовать ещё раз? [Y/n]: ").strip().lower()
+            except KeyboardInterrupt:
+                print()
+                raise
+            if ans == "n":
+                return None
+            continue
+
+        # Показываем разобранные параметры
+        _box_row(f"{BOLD}Разобрана Exit Node #{index}:{NC}")
+        _box_row(f"  Host:     {parsed['host']}:{parsed['port']}")
+        _box_row(f"  UUID:     {parsed['uuid']}")
+        if parsed['proto'] == 'reality':
+            pubkey_info = f"PubKey: {parsed['pubkey'][:20]}..." if parsed['pubkey'] else "PubKey: не найден!"
+            _box_row(f"  Proto:    {parsed['proto'].upper()} ({pubkey_info})")
+            _box_row(f"  ShortID:  {parsed['shortid']}")
+        else:
+            _box_row(f"  Proto:    {parsed['proto'].upper()} (xhttp mode: {parsed['xhttp_mode']}, path: {parsed['path']})")
+        _box_row(f"  SNI:      {parsed['sni']}")
+        _box_row(f"  FP:       {parsed['fp']}")
+
+        # Проверка обязательных полей
+        warnings = []
+        if parsed['proto'] == 'reality':
+            if not parsed['pubkey']:
+                warnings.append("PublicKey отсутствует в ссылке!")
+            if not parsed['shortid']:
+                warnings.append("ShortID отсутствует в ссылке!")
+        if not parsed['sni']:
+            warnings.append("SNI (домен) не указан в ссылке!")
+        if warnings:
+            for w in warnings:
+                warn(f"  ⚠ {w}")
+            _box_sep()
+            _box_item("F", f"Дозаполнить недостающие поля вручную")
+            _box_item("R", f"Ввести ссылку заново")
+            _box_item_exit("0", f"Отмена")
+            _box_bottom()
+            while True:
+                try:
+                    fix = input("  Выбор [F/R/0]: ").strip().lower()
+                except KeyboardInterrupt:
+                    print()
+                    raise
+                if fix == "0":
+                    return None
+                elif fix == "r":
+                    break  # повтор внешнего цикла
+                elif fix in ("f", ""):
+                    return _fix_node_fields(index, parsed)
+                warn("Введите F, R или 0")
+            continue  # повтор ввода ссылки
+
+        _box_bottom()
+        try:
+            ans = input(f"{YELLOW}Параметры верны? [Y/n]: {NC}").strip().lower()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if ans == "n":
+            try:
+                ans2 = input("  Ввести ссылку заново? [Y/n]: ").strip().lower()
+            except KeyboardInterrupt:
+                print()
+                raise
+            if ans2 != "n":
+                continue
+            return _prompt_one_node_manual(index)
+
+        # Строим финальный словарь ноды
+        node = {
+            "host":       parsed["host"],
+            "port":       parsed["port"],
+            "uuid":       parsed["uuid"],
+            "pubkey":     parsed["pubkey"],
+            "shortid":    parsed["shortid"],
+            "sni":        parsed["sni"],
+            "fp":         parsed["fp"],
+            "flow":       parsed.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision",
+            "proto":      parsed["proto"],
+            "path":       parsed.get("path", "/"),
+            "xhttp_mode": parsed.get("xhttp_mode", "streamup"),
+        }
+        return node
+
+
+def _fix_node_fields(index: int, parsed: dict) -> dict | None:
+    """Дозаполнение отсутствующих полей exit-ноды."""
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_bottom = core._box_bottom
+    warn = core.warn
+
+    _box_top(f"Дозаполнение полей Exit Node #{index}")
+    _box_row()
+
+    if parsed['proto'] == 'reality':
+        if not parsed['pubkey']:
+            _box_bottom()
+            while True:
+                try:
+                    v = input("  Public Key (pbk): ").strip()
+                except KeyboardInterrupt:
+                    print()
+                    raise
+                if v == "0":
+                    return None
+                if len(v) >= 40:
+                    parsed['pubkey'] = v
+                    break
+                warn("  Слишком короткий (мин 40 символов)")
+
+        if not parsed['shortid']:
+            _box_bottom()
+            while True:
+                try:
+                    v = input("  ShortID (hex, чётная длина 2-16): ").strip()
+                except KeyboardInterrupt:
+                    print()
+                    raise
+                if v == "0":
+                    return None
+                if re.match(r'^[0-9a-f]{2,16}$', v) and len(v) % 2 == 0:
+                    parsed['shortid'] = v
+                    break
+                warn("  Неверный ShortID")
+
+    if not parsed['sni']:
+        _box_bottom()
+        while True:
+            try:
+                v = input("  SNI/домен: ").strip()
+            except KeyboardInterrupt:
+                print()
+                raise
+            if v == "0":
+                return None
+            if re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*\.[a-zA-Z]{2,}$', v):
+                parsed['sni'] = v
+                break
+            warn("  Некорректный домен")
+
+    _box_bottom()
+    return {
+        "host":       parsed["host"],
+        "port":       parsed["port"],
+        "uuid":       parsed["uuid"],
+        "pubkey":     parsed["pubkey"],
+        "shortid":    parsed["shortid"],
+        "sni":        parsed["sni"],
+        "fp":         parsed.get("fp", "chrome"),
+        "flow":       parsed.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision",
+        "proto":      parsed["proto"],
+        "path":       parsed.get("path", "/"),
+        "xhttp_mode": parsed.get("xhttp_mode", "streamup"),
+    }
+
+
+def _prompt_one_node_manual(index: int) -> dict | None:
+    """Ввод параметров exit-ноды вручную по полям."""
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_bottom = core._box_bottom
+    warn = core.warn
+    info = core.info
+    _fm_prompt_fingerprint = core._fm_prompt_fingerprint
+    gen_hex = core.gen_hex
+    YELLOW = core.YELLOW
+    CYAN = core.CYAN
+    BLUE = core.BLUE
+    GREEN = core.GREEN
+    BOLD = core.BOLD
+    NC = core.NC
+    XTLS_FLOW = getattr(core, "XTLS_FLOW", "")
+
+    _box_top(f"Ручной ввод Exit Node #{index}")
+    _box_row(f"  Введите {CYAN}0{NC} в любом поле для отмены.")
+    _box_row()
+
+    # Host
+    _box_row(f"{BLUE}[E1] IP или домен зарубежного VPS:{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input("   IP или домен (0=отмена): ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if v == "0":
+            return None
+        if v:
+            host = v
+            break
+        warn("   Не может быть пустым")
+
+    # Port
+    _box_row(f"{BLUE}[E2] Порт зарубежного VPS [443]:{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input("   Порт [443]: ").strip() or "443"
+        except KeyboardInterrupt:
+            print()
+            raise
+        if v == "0":
+            return None
+        if v.isdigit() and 1 <= int(v) <= 65535:
+            port = int(v)
+            break
+        warn("   Некорректный порт (1–65535)")
+
+    # UUID
+    _box_row(f"{BLUE}[E3] UUID пользователя на зарубежном VPS:{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input("   UUID: ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if v == "0":
+            return None
+        if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', v):
+            node_uuid = v
+            break
+        warn("   Неверный формат UUID")
+
+    # Тип протокола exit-ноды
+    _box_row(f"{BLUE}[E4] Протокол exit-ноды:{NC}")
+    _box_row(f"   {CYAN}[1]{NC} VLESS + TCP + REALITY (xtls-rprx-vision) {GREEN}(рек.){NC}")
+    _box_row(f"   {CYAN}[2]{NC} VLESS + xHTTP + TLS")
+    _box_bottom()
+    while True:
+        try:
+            v = input("   Выбор [1]: ").strip() or "1"
+        except KeyboardInterrupt:
+            print()
+            raise
+        if v == "0":
+            return None
+        if v == "1":
+            exit_proto = "reality"
+            break
+        elif v == "2":
+            exit_proto = "xhttp"
+            break
+        warn("   Введите 1 или 2")
+
+    pubkey = ""
+    shortid = ""
+    xhttp_mode_val = "streamup"
+    path_val = "/"
+    flow_val = XTLS_FLOW
+
+    if exit_proto == "reality":
+        # Public Key
+        _box_row(f"{BLUE}[E5] Public Key (pbk) зарубежного VPS:{NC}")
+        _box_bottom()
+        while True:
+            try:
+                v = input("   Public Key: ").strip()
+            except KeyboardInterrupt:
+                print()
+                raise
+            if v == "0":
+                return None
+            if len(v) >= 40:
+                pubkey = v
+                break
+            warn("   Слишком короткий (мин 40 символов)")
+
+        # Short ID
+        _box_row(f"{BLUE}[E6] ShortID зарубежного VPS:{NC}")
+        _box_bottom()
+        while True:
+            try:
+                v = input("   ShortID (hex): ").strip()
+            except KeyboardInterrupt:
+                print()
+                raise
+            if v == "0":
+                return None
+            if re.match(r'^[0-9a-f]{2,16}$', v) and len(v) % 2 == 0:
+                shortid = v
+                break
+            warn("   Неверный ShortID (чётное число hex-символов, 2–16)")
+    else:
+        # xHTTP параметры
+        _box_row(f"{BLUE}[E5] xHTTP режим:{NC}")
+        _box_row(f"   {CYAN}[1]{NC} streamup {GREEN}(рек.){NC}  {CYAN}[2]{NC} streamone  {CYAN}[3]{NC} packetup {YELLOW}(⚠ проверьте версию Xray){NC}")
+        _box_bottom()
+        while True:
+            try:
+                v = input("   Выбор [1]: ").strip() or "1"
+            except KeyboardInterrupt:
+                print()
+                raise
+            if v == "0":
+                return None
+            if v == "1":
+                xhttp_mode_val = "streamup"
+                break
+            elif v == "2":
+                xhttp_mode_val = "streamone"
+                break
+            elif v == "3":
+                xhttp_mode_val = "packetup"
+                warn("packetup выбран — убедитесь что ваша версия Xray-core его поддерживает")
+                break
+            warn("   Введите 1, 2 или 3")
+
+        auto_path = "/" + gen_hex(4)
+        _box_row(f"{BLUE}[E6] xHTTP path [{auto_path}]:{NC}")
+        try:
+            v = input(f"   Path [{auto_path}]: ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if v == "0":
+            return None
+        path_val = v if v.startswith("/") else auto_path
+        flow_val = ""  # xHTTP не использует flow
+
+    # SNI
+    _box_row(f"{BLUE}[E7] SNI / домен зарубежного VPS:{NC}")
+    _box_bottom()
+    while True:
+        try:
+            v = input("   SNI/домен: ").strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if v == "0":
+            return None
+        if re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*\.[a-zA-Z]{2,}$', v):
+            sni = v
+            break
+        warn("   Некорректный домен")
+
+    # Fingerprint
+    _box_row(f"{BLUE}[E8] Fingerprint браузера:{NC}")
+    _box_bottom()
+    fp = _fm_prompt_fingerprint(label=f"Exit Node #{index}", current="chrome")
+
+    node = {
+        "host":       host,
+        "port":       port,
+        "uuid":       node_uuid,
+        "pubkey":     pubkey,
+        "shortid":    shortid,
+        "sni":        sni,
+        "fp":         fp,
+        "flow":       flow_val,
+        "proto":      exit_proto,
+        "path":       path_val,
+        "xhttp_mode": xhttp_mode_val,
+    }
+
+    _box_row(f"{BOLD}Параметры Exit Node #{index}:{NC}")
+    _box_row(f"  Host:     {host}:{port}")
+    _box_row(f"  UUID:     {node_uuid}")
+    _box_row(f"  Proto:    {exit_proto.upper()}")
+    if exit_proto == "reality":
+        _box_row(f"  PubKey:   {pubkey[:20]}...")
+        _box_row(f"  ShortID:  {shortid}")
+    else:
+        _box_row(f"  xHTTP:    {xhttp_mode_val}, path={path_val}")
+    _box_row(f"  SNI:      {sni}")
+    _box_row(f"  FP:       {fp}")
+    _box_bottom()
+    try:
+        ans = input(f"{YELLOW}Параметры верны? [y/N]:{NC} ").strip().lower()
+    except KeyboardInterrupt:
+        print()
+        raise
+    if ans != 'y':
+        info("Повторный ввод параметров ноды.")
+        return _prompt_one_node_manual(index)
+
+    return node
+
+
+def _h2_reapply_transport_if_active() -> None:
+    """
+    BUGFIX: generate_xray_config_chain_entry_multi() / generate_xray_config() /
+    generate_xray_config_xhttp() полностью перезаписывают config.json, включая
+    outbounds и routing. Если на момент вызова транспорт Hysteria2 уже был
+    активирован пользователем через меню 7 (h2_transport_apply), такая
+    перезапись "осиротевала" H2-outbound и откатывала catch-all routing-правило
+    обратно на "direct"/"chain-exit" — трафик начинал молча течь с Entry-ноды
+    напрямую, минуя Exit, до следующего ручного переключения транспорта.
+    Эта функция не меняет поведение, если H2 не был активен — это no-op.
+    """
+    core = _core_module()
+    info = core.info
+    warn = core.warn
+    try:
+        from chimera.modules.hysteria2_common import _load_h2_state
+        h2 = _load_h2_state()
+        if h2.get("active_transport") != "hysteria2":
+            return
+        nodes = [n for n in h2.get("exit_nodes", []) if n.get("status") == "active"]
+        if not nodes:
+            return
+        from chimera.modules.hysteria2_transport import h2_transport_apply
+        node = nodes[0]
+        ok = h2_transport_apply(
+            exit_ip=node["ip"],
+            exit_port=node.get("ports", [443])[0],
+            auth_password=node.get("auth", ""),
+        )
+        if ok:
+            info("Hysteria2-транспорт переприменён после регенерации config.json")
+    except Exception as e:
+        warn(f"Не удалось переприменить Hysteria2-транспорт после регенерации: {e}")
+
+
+def generate_xray_config_chain_entry_multi() -> None:
+    """
+    Аналог generate_xray_config_chain_entry(), но поддерживает несколько
+    exit-нод через механизм balancer Xray-core с выбранной стратегией
+    (roundRobin / leastPing / random).
+    Если нода одна — конфиг идентичен оригинальному (без balancer).
+    """
+    core = _core_module()
+    _assert_reality_dest_sane = core._assert_reality_dest_sane
+    _run = core._run
+    _build_xhttp_settings = core._build_xhttp_settings
+    _build_tls_settings_xhttp = core._build_tls_settings_xhttp
+    _build_sockopt = core._build_sockopt
+    _build_exit_xhttp_outbound_settings = core._build_exit_xhttp_outbound_settings
+    _xray_log_block = core._xray_log_block
+    _apply_stats_to_config = core._apply_stats_to_config
+    _set_config_owner = core._set_config_owner
+    build_split_tunnel_routing_rules = core.build_split_tunnel_routing_rules
+    generate_xray_config_xhttp = core.generate_xray_config_xhttp
+    generate_xray_config = core.generate_xray_config
+    info = core.info
+    warn = core.warn
+    success = core.success
+    log_to_file = core.log_to_file
+    DNSCRYPT_LISTEN_PORT = getattr(core, "DNSCRYPT_LISTEN_PORT", 5300)
+    DNSCRYPT_LISTEN_ADDR = getattr(core, "DNSCRYPT_LISTEN_ADDR", "127.0.0.1")
+    DNSCRYPT_INSTALLED = getattr(core, "DNSCRYPT_INSTALLED", False)
+    IS_IPV6_AVAILABLE = getattr(core, "IS_IPV6_AVAILABLE", False)
+    PROTOCOL_MODE = getattr(core, "PROTOCOL_MODE", "reality")
+    PARAM_DOMAIN = getattr(core, "PARAM_DOMAIN", "")
+    PARAM_UUID = getattr(core, "PARAM_UUID", "")
+    XTLS_FLOW = getattr(core, "XTLS_FLOW", "")
+    XHTTP_MODE = getattr(core, "XHTTP_MODE", "streamup")
+    XHTTP_PATH = getattr(core, "XHTTP_PATH", "/")
+    XHTTP_BACKEND_PORT = getattr(core, "XHTTP_BACKEND_PORT", 8443)
+    XHTTP_TCP_NO_DELAY = getattr(core, "XHTTP_TCP_NO_DELAY", False)
+    XHTTP_ENABLE_SESSION_RESUMPTION = getattr(core, "XHTTP_ENABLE_SESSION_RESUMPTION", False)
+    AWG_EXIT_ENABLED = getattr(core, "AWG_EXIT_ENABLED", False)
+    H2_EXIT_ENABLED = getattr(core, "H2_EXIT_ENABLED", False)
+    PARAM_REALITY_DEST = getattr(core, "PARAM_REALITY_DEST", "")
+    PARAM_SOCKET_PATH = getattr(core, "PARAM_SOCKET_PATH", "")
+    PARAM_SPIDERX = getattr(core, "PARAM_SPIDERX", "/")
+    PARAM_PRIVATE_KEY = getattr(core, "PARAM_PRIVATE_KEY", "")
+    PARAM_PUBLIC_KEY = getattr(core, "PARAM_PUBLIC_KEY", "")
+    PARAM_SHORTID = getattr(core, "PARAM_SHORTID", "")
+    CHAIN_NODES = getattr(core, "CHAIN_NODES", [])
+    CHAIN_EXIT_HOST = getattr(core, "CHAIN_EXIT_HOST", "")
+    CHAIN_EXIT_PORT = getattr(core, "CHAIN_EXIT_PORT", 443)
+    CHAIN_EXIT_UUID = getattr(core, "CHAIN_EXIT_UUID", "")
+    CHAIN_EXIT_PUBKEY = getattr(core, "CHAIN_EXIT_PUBKEY", "")
+    CHAIN_EXIT_SHORTID = getattr(core, "CHAIN_EXIT_SHORTID", "")
+    CHAIN_EXIT_SNI = getattr(core, "CHAIN_EXIT_SNI", "")
+    CHAIN_EXIT_FP = getattr(core, "CHAIN_EXIT_FP", "chrome")
+    CHAIN_BALANCER_STRATEGY = getattr(core, "CHAIN_BALANCER_STRATEGY", "roundRobin")
+    CHAIN_PINNED_NODE_INDEX = getattr(core, "CHAIN_PINNED_NODE_INDEX", -1)
+    AWG_FWMARK = getattr(core, "AWG_FWMARK", 1000)
+    SERVER_PORT = getattr(core, "SERVER_PORT", 443)
+    SPLIT_TUNNEL_ENABLED = getattr(core, "SPLIT_TUNNEL_ENABLED", False)
+    CONFIG_DIR = getattr(core, "CONFIG_DIR", Path("/etc/xray"))
+    XRAY_BIN = getattr(core, "XRAY_BIN", "/usr/local/bin/xray")
+    Any = getattr(core, "Any", None)
+
+    _assert_reality_dest_sane()
+    nodes = CHAIN_NODES if CHAIN_NODES else []
+    if not nodes:
+        # Fallback на legacy-переменные
+        if CHAIN_EXIT_HOST:
+            nodes = [{
+                "host":    CHAIN_EXIT_HOST,
+                "port":    CHAIN_EXIT_PORT,
+                "uuid":    CHAIN_EXIT_UUID,
+                "pubkey":  CHAIN_EXIT_PUBKEY,
+                "shortid": CHAIN_EXIT_SHORTID,
+                "sni":     CHAIN_EXIT_SNI,
+                "fp":      CHAIN_EXIT_FP,
+            }]
+        elif AWG_EXIT_ENABLED:
+            # AWG-режим: exit-нод нет (трафик идёт через AWG-туннель).
+            # Для xHTTP вызываем generate_xray_config_xhttp() — она не содержит
+            # realitySettings и не требует REALITY-ключей (используется TLS Let's Encrypt).
+            # Для REALITY-режимов вызываем generate_xray_config() с AWG fwmark.
+            if PROTOCOL_MODE == "xhttp":
+                info("Mode B + AWG + xHTTP: нет VLESS exit-нод, используем xHTTP-конфиг...")
+                generate_xray_config_xhttp()
+            else:
+                info("Mode B + AWG: нет VLESS exit-нод, используем AWG-конфиг...")
+                generate_xray_config()
+            return
+        elif H2_EXIT_ENABLED:
+            # H2-режим: как и в AWG-ветке выше, exit-нод для VLESS-цепочки нет —
+            # Hysteria2-туннель на exit-VPS настраивается отдельно через меню 7
+            # и патчит outbound (тег "proxy") уже ПОСЛЕ того, как этот стандартный
+            # конфиг записан. Раньше для H2 эта ветка отсутствовала, и установка
+            # проваливалась в "Нет exit-нод — конфиг Entry Node не может быть
+            # создан", оставляя ноду вообще без config.json.
+            if PROTOCOL_MODE == "xhttp":
+                info("Mode B + H2 + xHTTP: нет VLESS exit-нод, используем xHTTP-конфиг...")
+                generate_xray_config_xhttp()
+            else:
+                info("Mode B + H2: нет VLESS exit-нод, используем стандартный конфиг "
+                     "(outbound будет переключён на H2 через меню 7)...")
+                generate_xray_config()
+            _h2_reapply_transport_if_active()
+            return
+        else:
+            warn("Нет exit-нод — конфиг Entry Node не может быть создан.")
+            return
+
+    n_nodes = len(nodes)
+    info(f"Режим B: создание конфига Entry Node ({n_nodes} exit-нод)...")
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # ПАТЧ: гарантируем создание группы/пользователя xray ДО chown.
+    _run(["groupadd", "-f", "xray"], check=False, quiet=True)
+    _run(["useradd", "-r", "-g", "xray", "-s", "/sbin/nologin", "xray"],
+         check=False, quiet=True)
+    # ПАТЧ: права на директорию
+    try:
+        os.chmod(str(CONFIG_DIR), 0o755)
+        _run(["chown", "root:xray", str(CONFIG_DIR)], check=False, quiet=True)
+    except Exception:
+        pass
+
+    r_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
+                    capture=True, check=False)
+    dnscrypt_running = (DNSCRYPT_INSTALLED or r_active.stdout.strip() == "active")
+
+    if dnscrypt_running:
+        dns_servers = [
+            {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
+             "network": "udp", "skipFallback": False},
+            {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
+            {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
+        ]
+    else:
+        dns_servers = [
+            {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": False},
+        ]
+
+    query_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+
+    # Строим список outbound-ов для exit-нод
+    outbounds_exit = []
+    outbound_tags  = []
+    for i, nd in enumerate(nodes):
+        tag = f"chain-exit-{i+1}"
+        outbound_tags.append(tag)
+        nd_proto = nd.get("proto", "reality")
+
+        if nd_proto == "xhttp":
+            # xHTTP TLS исходящий к exit-ноде
+            out = {
+                "tag":      tag,
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [{
+                        "address": nd["host"],
+                        "port":    nd["port"],
+                        "users":   [{
+                            "id":         nd["uuid"],
+                            "encryption": "none",
+                            # xHTTP не использует flow xtls-rprx-vision
+                        }],
+                    }],
+                },
+                "streamSettings": {
+                    "network":  "xhttp",
+                    "security": "tls",
+                    "sockopt":  {
+                        "tcpFastOpen":        True,
+                        "tcpKeepAliveInterval": 15,
+                        "tcpKeepAliveIdle":   60,
+                        "tcpUserTimeout":     10000,
+                        "tcpCongestion":      "bbr",
+                        **({"tcpNoDelay": True} if XHTTP_TCP_NO_DELAY else {}),
+                    },
+                    "tlsSettings": {
+                        "serverName":  nd.get("sni", nd["host"]),
+                        "fingerprint": nd.get("fp", "chrome"),
+                        "alpn":        ["h2", "http/1.1"],
+                        **({"enableSessionResumption": True} if XHTTP_ENABLE_SESSION_RESUMPTION else {}),
+                    },
+                    "xhttpSettings": _build_exit_xhttp_outbound_settings(nd),
+                },
+            }
+        else:
+            # REALITY TCP исходящий к exit-ноде (стандарт)
+            out = {
+                "tag":      tag,
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [{
+                        "address": nd["host"],
+                        "port":    nd["port"],
+                        "users":   [{
+                            "id":         nd["uuid"],
+                            "encryption": "none",
+                            "flow":       nd.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision",
+                        }],
+                    }],
+                },
+                "streamSettings": {
+                    "network":  "tcp",
+                    "security": "reality",
+                    "sockopt":  {**_build_sockopt(), **({"mark": AWG_FWMARK} if AWG_EXIT_ENABLED else {})},  # ПАТЧ: AWG mark
+                    "realitySettings": {
+                        "show":        False,
+                        "fingerprint": nd.get("fp", "chrome"),
+                        "serverName":  nd.get("sni", ""),
+                        "publicKey":   nd.get("pubkey", ""),
+                        "shortId":     nd.get("shortid", ""),
+                        "spiderX":     "/",
+                    },
+                },
+            }
+        outbounds_exit.append(out)
+
+    # Inbound от клиента — зависит от PROTOCOL_MODE
+    if PROTOCOL_MODE == "xhttp":
+        # Схема Nginx → Xray (loopback backend):
+        # Xray-core не поддерживает fallbacks для xHTTP (задокументированное
+        # ограничение — https://github.com/XTLS/Xray-core/discussions/4113).
+        # Nginx терминирует TLS на :SERVER_PORT, отдаёт заглушку для "/" и
+        # проксирует xhttp path сюда — на 127.0.0.1:XHTTP_BACKEND_PORT.
+        # Сертификат тут не нужен — трафик уже расшифрован Nginx.
+        _xhttp_s2, _sockopt_s2 = _build_xhttp_settings(XHTTP_MODE, XHTTP_PATH)
+        info(f"chain B + xHTTP: inbound на 127.0.0.1:{XHTTP_BACKEND_PORT} (security: none, "
+             f"TLS терминирует Nginx на :{SERVER_PORT})")
+        client_inbound = {
+            "tag":      "inbound-xhttp",
+            "port":     XHTTP_BACKEND_PORT,   # loopback-only, Nginx проксирует сюда
+            "listen":   "127.0.0.1",          # только loopback — извне не доступно
+            "protocol": "vless",
+            "settings": {
+                "clients": [{
+                    "id":    PARAM_UUID,
+                    "email": f"user@{PARAM_DOMAIN}",
+                }],
+                "decryption": "none",
+            },
+            "sniffing": {
+                "enabled":      True,
+                "destOverride": ["http", "tls"],
+                "metadataOnly": False,
+                "routeOnly":    False,
+            },
+            "streamSettings": {
+                "network":       "xhttp",
+                "security":      "none",      # TLS терминирован Nginx
+                "sockopt":       _sockopt_s2,
+                "xhttpSettings": _xhttp_s2,
+            },
+        }
+    else:
+        # REALITY inbound (стандарт)
+        client_inbound = {
+            "tag":      "inbound-vless",
+            "port":     SERVER_PORT,
+            "listen":   "::",
+            "protocol": "vless",
+            "settings": {
+                "clients": [{
+                    "id":    PARAM_UUID,
+                    "email": f"user@{PARAM_DOMAIN}",
+                    **( {"flow": XTLS_FLOW} if XTLS_FLOW else {} ),
+                }],
+                "decryption": "none",
+            },
+            "sniffing": {
+                "enabled":      True,
+                "destOverride": ["http", "tls"],
+                # AWG использует маршрутизацию ядра — sniffing доменов не нужен (metadataOnly=True).
+                # Базовый VLESS/REALITY: metadataOnly=False обязателен — xray должен читать SNI/Host
+                # чтобы freedom мог резолвить домены и применять UseIPv6v4 domainStrategy.
+                "metadataOnly": True if AWG_EXIT_ENABLED else False,
+                "routeOnly":    False,
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "sockopt": _build_sockopt(),
+                "security": "reality",
+                "realitySettings": {
+                    "show":        False,
+                    "dest":        (PARAM_REALITY_DEST + ":443") if AWG_EXIT_ENABLED else PARAM_SOCKET_PATH,
+                    # xver=1 (Proxy Protocol) только в классическом режиме VLESS-каскада:
+                    # Nginx слушает на socket с proxy_protocol и шлёт PP-заголовок.
+                    # xver=0 при AWG: Xray слушает напрямую на TCP, PP-заголовка нет.
+                    "xver":        0 if AWG_EXIT_ENABLED else 1,
+                    "spiderX":     PARAM_SPIDERX,
+                    "serverNames": [PARAM_REALITY_DEST if AWG_EXIT_ENABLED else PARAM_DOMAIN],
+                    "privateKey":  PARAM_PRIVATE_KEY,
+                    "publicKey":   PARAM_PUBLIC_KEY,
+                    "shortIds":    [PARAM_SHORTID],
+                },
+            },
+        }
+
+    # Балансировка: одна нода, несколько нод, или принудительное закрепление (pinned)
+    pinned = CHAIN_PINNED_NODE_INDEX
+    if n_nodes == 1 or (0 <= pinned < n_nodes):
+        # Одна нода или pinned-режим — прямой outbound без балансировщика
+        effective_tag = outbound_tags[pinned] if (0 <= pinned < n_nodes) else outbound_tags[0]
+        if 0 <= pinned < n_nodes and n_nodes > 1:
+            info(f"Pinned-режим: весь трафик → нода #{pinned+1} ({nodes[pinned]['host']})")
+        balancers   = []
+        observatory = None
+        routing_rules = [
+            # ИСПРАВЛЕНИЕ: loopback → direct ВСЕГДА (не только при AWG).
+            # Без этого DNS-запросы Xray к 127.0.0.1:5300 (DNSCrypt-proxy) попадают
+            # в exit-outbound (VLESS TCP) и получают "read response: EOF",
+            # т.к. UDP к loopback невозможно туннелировать через VLESS.
+            {"type": "field", "ip": ["127.0.0.1/8", "::1/128"], "outboundTag": "direct"},
+            {"type": "field", "protocol": ["bittorrent"], "outboundTag": "BLOCK"},
+            {"type": "field", "network": "tcp,udp",       "outboundTag": effective_tag},
+        ]
+    else:
+        # Несколько нод — балансировщик с выбранной стратегией
+        strategy = CHAIN_BALANCER_STRATEGY  # "roundRobin" | "leastPing" | "random"
+        balancers = [{
+            "tag":      "chain-balancer",
+            "selector": outbound_tags,
+            "strategy": {"type": strategy},
+        }]
+        routing_rules = [
+            # ИСПРАВЛЕНИЕ: loopback → direct ВСЕГДА (не только при AWG).
+            # Xray резолвит домены клиентов через встроенный DNS (IPIfNonMatch),
+            # запросы идут к 127.0.0.1:5300 (DNSCrypt-proxy) — они должны уходить
+            # через direct (loopback), а не через balancer/VLESS → EOF.
+            {"type": "field", "ip": ["127.0.0.1/8", "::1/128"], "outboundTag": "direct"},
+            {"type": "field", "protocol": ["bittorrent"], "outboundTag": "BLOCK"},
+            {"type": "field", "network": "tcp,udp",       "balancerTag": "chain-balancer"},
+        ]
+        # leastPing / leastLoad требуют observatory — без него деградирует до random
+        if strategy in ("leastPing", "leastLoad"):
+            observatory = {
+                "subjectSelector":       ["chain-exit-"],
+                "probeUrl":              "https://1.1.1.1/cdn-cgi/trace",
+                "probeInterval":         "30s",
+                "enableConcurrency":     True,
+            }
+        else:
+            observatory = None
+
+    config: dict[str, Any] = {
+        "log": _xray_log_block(),
+        "dns": {
+            "servers": dns_servers,
+            "hosts": {
+                "dns.google":         "8.8.8.8",
+                "dns.cloudflare.com": "1.1.1.1",
+                "localhost":          "127.0.0.1",
+            },
+            "disableCache":           False,
+            "queryStrategy":          query_strategy,
+            "disableFallback":        False,
+            "disableFallbackIfMatch": True,
+        },
+        "inbounds": [client_inbound],
+        "outbounds": outbounds_exit + [
+            {"protocol": "blackhole", "tag": "BLOCK"},
+            # ИСПРАВЛЕНИЕ: direct outbound нужен ВСЕГДА — не только при AWG.
+            # Правило 127.0.0.1/8 → direct (выше в routing) требует этого outbound,
+            # иначе xray упадёт с ошибкой "unknown outbound tag".
+            # При AWG добавляем fwmark для корректной маршрутизации через AWG-таблицу.
+            {
+                "protocol": "freedom",
+                "tag":      "direct",
+                "settings": {"domainStrategy": "UseIPv6v4"},
+                **({"streamSettings": {"sockopt": {"mark": AWG_FWMARK}}} if AWG_EXIT_ENABLED else {}),
+            },
+        ],
+        "routing": {
+            "domainStrategy": "IPIfNonMatch",
+            "rules":          routing_rules,
+        },
+    }
+
+    if balancers:
+        config["routing"]["balancers"] = balancers
+
+    # observatory нужен только для leastPing и leastLoad
+    if observatory:
+        config["observatory"] = observatory
+
+    # ── Split tunneling (Режим B — Entry Node) ────────────────────────────────
+    # В Режиме B заблокированный трафик идёт через exit-ноду (proxy_tag),
+    # российский трафик идёт напрямую (direct), не проксируется.
+    # В AWG-режиме "direct" имеет fwmark=AWG_FWMARK → весь трафик через awg0.
+    # Для split tunnel нужен "direct-local" (без fwmark) → РФ-трафик через default route ОС (физический интерфейс).
+    if SPLIT_TUNNEL_ENABLED:
+        # В Режиме B "direct" = прямой выход с Entry Node (российский VPS),
+        # proxy_tag = первая exit-нода (или балансировщик).
+        # В AWG-режиме proxy_tag = "direct" (с fwmark → awg0 → exit-VPS),
+        # direct_tag = "direct-local" (без fwmark → default route ОС → IP entry-сервера).
+        if AWG_EXIT_ENABLED:
+            _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+            if not any(ob.get("tag") == "direct-local" for ob in config.get("outbounds", [])):
+                config["outbounds"].insert(0, {
+                    "protocol": "freedom",
+                    "tag":      "direct-local",
+                    "settings": {"domainStrategy": _dl_strategy},
+                })
+            proxy_t = "direct"
+            direct_t = "direct-local"
+        else:
+            if not any(ob.get("tag") == "direct" for ob in config.get("outbounds", [])):
+                config["outbounds"].insert(0, {
+                    "protocol": "freedom",
+                    "tag":      "direct",
+                    "settings": {"domainStrategy": "UseIP"},
+                })
+            proxy_t = "chain-balancer" if balancers else (outbound_tags[0] if outbound_tags else "direct")
+            direct_t = "direct"
+        st_rules = build_split_tunnel_routing_rules(proxy_tag=proxy_t, direct_tag=direct_t)
+        if st_rules:
+            config["routing"]["rules"] = st_rules + config["routing"]["rules"]
+            config["routing"]["geoDataBasePath"] = str(CONFIG_DIR)
+            info(f"Split tunneling: добавлено {len(st_rules)} правил "
+                 f"(Режим B, Entry Node, AWG={AWG_EXIT_ENABLED}, direct_tag={direct_t})")
+
+    cfg_file = CONFIG_DIR / "config.json"
+    _apply_stats_to_config(config)
+    cfg_file.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+    _set_config_owner(cfg_file)
+
+    alt_dir = Path("/usr/local/etc/xray")
+    if alt_dir.exists():
+        alt_cfg = alt_dir / "config.json"
+        alt_cfg.unlink(missing_ok=True)
+        try:
+            alt_cfg.symlink_to(cfg_file)
+        except Exception:
+            pass
+
+    r = _run([str(XRAY_BIN), "run", "-test", "-config", str(cfg_file)],
+             capture=True, check=False)
+    strategy_label = {"roundRobin": "Round Robin", "leastPing": "Least Ping", "leastLoad": "Least Load", "random": "Random"}.get(
+        CHAIN_BALANCER_STRATEGY, CHAIN_BALANCER_STRATEGY
+    )
+    if r.returncode == 0:
+        if n_nodes == 1:
+            success(f"Конфиг Entry Node (Режим B, 1 нода) создан и валиден")
+        else:
+            success(f"Конфиг Entry Node (Режим B, {n_nodes} нод, стратегия: {strategy_label}) создан и валиден")
+    else:
+        warn("Конфигурация создана с предупреждением")
+        log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
+    _h2_reapply_transport_if_active()
+
+
+def do_manage_nodes() -> None:
+    """
+    Пункт [E] главного меню: управление exit-нодами каскада (Режим B).
+    Позволяет добавить, удалить ноду и пересобрать конфиг Xray.
+    """
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_bottom = core._box_bottom
+    _box_item = core._box_item
+    _box_item_exit = core._box_item_exit
+    _box_sep = core._box_sep
+    _box_info = core._box_info
+    _box_warn = core._box_warn
+    _box_back = core._box_back
+    _run = core._run
+    info = core.info
+    warn = core.warn
+    success = core.success
+    country_flag_emoji = core.country_flag_emoji
+    _load_split_tunnel_custom = core._load_split_tunnel_custom
+    _detect_xhttp_mode_support = core._detect_xhttp_mode_support
+    _rebuild_and_restart_xray = core._rebuild_and_restart_xray
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    YELLOW = core.YELLOW
+    GREEN = core.GREEN
+    BLUE = core.BLUE
+    DIM = core.DIM
+    NC = core.NC
+    STATE_FILE = getattr(core, "STATE_FILE", None)
+    CONFIG_DIR = getattr(core, "CONFIG_DIR", Path("/etc/xray"))
+    MAX_CHAIN_NODES = getattr(core, "MAX_CHAIN_NODES", 10)
+    INSTALL_MODE = getattr(core, "INSTALL_MODE", "A")
+    PROTOCOL_MODE = getattr(core, "PROTOCOL_MODE", "reality")
+    SERVER_PORT = getattr(core, "SERVER_PORT", 443)
+    XHTTP_PORT = getattr(core, "XHTTP_PORT", 443)
+    XHTTP_MODE = getattr(core, "XHTTP_MODE", "streamup")
+    XHTTP_PATH = getattr(core, "XHTTP_PATH", "/")
+    XHTTP_PERF_PRESET = getattr(core, "XHTTP_PERF_PRESET", "")
+    PARAM_DOMAIN = getattr(core, "PARAM_DOMAIN", "")
+    PARAM_UUID = getattr(core, "PARAM_UUID", "")
+    PARAM_PUBLIC_KEY = getattr(core, "PARAM_PUBLIC_KEY", "")
+    PARAM_SHORTID = getattr(core, "PARAM_SHORTID", "")
+    PARAM_PRIVATE_KEY = getattr(core, "PARAM_PRIVATE_KEY", "")
+    PARAM_SOCKET_PATH = getattr(core, "PARAM_SOCKET_PATH", "")
+    PARAM_SPIDERX = getattr(core, "PARAM_SPIDERX", "/")
+    PARAM_DOMAIN_STRATEGY = getattr(core, "PARAM_DOMAIN_STRATEGY", "")
+    PARAM_REALITY_DEST = getattr(core, "PARAM_REALITY_DEST", "")
+    SPLIT_TUNNEL_ENABLED = getattr(core, "SPLIT_TUNNEL_ENABLED", False)
+    SPLIT_TUNNEL_EXTRA_DOMAINS = getattr(core, "SPLIT_TUNNEL_EXTRA_DOMAINS", [])
+    SPLIT_TUNNEL_EXTRA_IPS = getattr(core, "SPLIT_TUNNEL_EXTRA_IPS", [])
+    AWG_EXIT_ENABLED = getattr(core, "AWG_EXIT_ENABLED", False)
+    AWG_EXIT_HOST = getattr(core, "AWG_EXIT_HOST", "")
+    H2_EXIT_ENABLED = getattr(core, "H2_EXIT_ENABLED", False)
+    CHAIN_NODES = getattr(core, "CHAIN_NODES", [])
+    CHAIN_BALANCER_STRATEGY = getattr(core, "CHAIN_BALANCER_STRATEGY", "roundRobin")
+    CHAIN_PINNED_NODE_INDEX = getattr(core, "CHAIN_PINNED_NODE_INDEX", -1)
+
+    # Загружаем state
+    if not STATE_FILE.exists():
+        warn("state.json не найден. Сначала выполните установку (пункт 1).")
+        return
+
+    try:
+        state = json.loads(STATE_FILE.read_text())
+        INSTALL_MODE      = state.get("install_mode",  "A")
+        setattr(core, "INSTALL_MODE", INSTALL_MODE)
+        PARAM_DOMAIN      = state.get("domain",        PARAM_DOMAIN)
+        setattr(core, "PARAM_DOMAIN", PARAM_DOMAIN)
+        PARAM_UUID        = state.get("uuid",          PARAM_UUID)
+        setattr(core, "PARAM_UUID", PARAM_UUID)
+        PARAM_PUBLIC_KEY  = state.get("public_key",    PARAM_PUBLIC_KEY)
+        setattr(core, "PARAM_PUBLIC_KEY", PARAM_PUBLIC_KEY)
+        PARAM_SHORTID     = state.get("short_id",      PARAM_SHORTID)
+        setattr(core, "PARAM_SHORTID", PARAM_SHORTID)
+        PARAM_PRIVATE_KEY = state.get("private_key",   PARAM_PRIVATE_KEY)
+        setattr(core, "PARAM_PRIVATE_KEY", PARAM_PRIVATE_KEY)
+        PARAM_SOCKET_PATH = state.get("socket",        PARAM_SOCKET_PATH)
+        setattr(core, "PARAM_SOCKET_PATH", PARAM_SOCKET_PATH)
+        PARAM_SPIDERX     = state.get("spiderx",       PARAM_SPIDERX)
+        setattr(core, "PARAM_SPIDERX", PARAM_SPIDERX)
+        # Критично для пересборки конфига: без этих переменных generate_xray_config_chain_entry_multi()
+        # использует глобальные дефолты ("reality", 443, "") и собирает неверный конфиг.
+        PROTOCOL_MODE     = state.get("protocol_mode", PROTOCOL_MODE)
+        setattr(core, "PROTOCOL_MODE", PROTOCOL_MODE)
+        SERVER_PORT       = state.get("server_port",   SERVER_PORT)
+        setattr(core, "SERVER_PORT", SERVER_PORT)
+        XHTTP_PORT        = SERVER_PORT
+        setattr(core, "XHTTP_PORT", XHTTP_PORT)
+        XHTTP_MODE        = state.get("xhttp_mode",   XHTTP_MODE)
+        setattr(core, "XHTTP_MODE", XHTTP_MODE)
+        XHTTP_PATH        = state.get("xhttp_path",   XHTTP_PATH)
+        setattr(core, "XHTTP_PATH", XHTTP_PATH)
+        XHTTP_PERF_PRESET = state.get("xhttp_perf_preset", XHTTP_PERF_PRESET)
+        setattr(core, "XHTTP_PERF_PRESET", XHTTP_PERF_PRESET)
+        CHAIN_NODES = _nodes_from_state(state)
+        setattr(core, "CHAIN_NODES", CHAIN_NODES)
+        CHAIN_BALANCER_STRATEGY = state.get("chain_balancer_strategy", CHAIN_BALANCER_STRATEGY)
+        setattr(core, "CHAIN_BALANCER_STRATEGY", CHAIN_BALANCER_STRATEGY)
+        CHAIN_PINNED_NODE_INDEX = state.get("chain_pinned_node_index", -1)
+        setattr(core, "CHAIN_PINNED_NODE_INDEX", CHAIN_PINNED_NODE_INDEX)
+        AWG_EXIT_ENABLED  = state.get("awg_exit_enabled", False)
+        setattr(core, "AWG_EXIT_ENABLED", AWG_EXIT_ENABLED)
+        H2_EXIT_ENABLED   = state.get("h2_exit_enabled",  False)
+        # NB: H2_EXIT_ENABLED was NOT in the original `global` declaration —
+        # preserving original (local-only) behaviour: no setattr to core.
+        PARAM_REALITY_DEST = state.get("reality_dest",    PARAM_REALITY_DEST)
+        setattr(core, "PARAM_REALITY_DEST", PARAM_REALITY_DEST)
+    except Exception as e:
+        warn(f"Не удалось прочитать state.json: {e}")
+        return
+
+    # Загружаем настройки split tunnel — они должны сохраняться при любых
+    # операциях с нодами (добавление, удаление, пересборка конфига).
+    _load_split_tunnel_custom()
+
+    # BUGFIX: определяем поддержку "mode" для установленной версии Xray.
+    # Без этого вызова XHTTP_MODE_SUPPORTED остаётся False (дефолт),
+    # и "mode": "streamup" не пишется в конфиг — или пишется неверно.
+    _detect_xhttp_mode_support()
+
+    if INSTALL_MODE != "B":
+        warn("Установка выполнена в Режиме A — управление нодами недоступно.")
+        warn("Для каскадного прокси выберите Режим B при установке (пункт 1).")
+        return
+
+    # ── AWG-режим: нет VLESS exit-нод для управления ────────────────────────
+    if AWG_EXIT_ENABLED:
+        print()
+        _box_top("Управление Exit-нодами каскада (Режим B)")
+        _box_warn("Транспорт AWG 2.0 активен — VLESS exit-ноды не используются.")
+        _box_row(f"  {DIM}Выход осуществляется через туннель awg0 → {AWG_EXIT_HOST or 'exit-VPS'}.{NC}")
+        _box_row(f"  {DIM}Для настройки туннеля используйте пункт установки AWG.{NC}")
+        _box_row(f"  {DIM}Для мониторинга: Безопасность → [W] AWG Tunnel Watchdog{NC}")
+        _box_bottom()
+        input(f"{BLUE}Нажмите Enter...{NC}")
+        return
+
+    while True:
+        os.system("clear")
+        print()
+        print(f"{BOLD}{CYAN}══ Управление Exit-нодами каскада (Режим B) ══{NC}")
+        print(f"  Entry Node (этот сервер): {CYAN}{PARAM_DOMAIN}:{SERVER_PORT}{NC}")
+        print()
+
+        # ── Текущие настройки (статус) ─────────────────────────────────────────
+        _strat_labels = {
+            "roundRobin": "Round Robin",
+            "leastPing":  "Least Ping",
+            "leastLoad":  "Least Load",
+            "random":     "Random",
+        }
+        _ds_labels = {
+            "UseIPv6v4": "UseIPv6v4 (IPv6→IPv4)",
+            "UseIPv4v6": "UseIPv4v6 (IPv4→IPv6)",
+            "UseIP":     "UseIP (системный DNS)",
+            "UseIPv4":   "UseIPv4 (только IPv4)",
+        }
+        # Читаем стратегию из живого конфига если возможно
+        _live_ds = PARAM_DOMAIN_STRATEGY
+        _live_cfg_file = CONFIG_DIR / "config.json"
+        if not _live_ds and _live_cfg_file.exists():
+            try:
+                _c = json.loads(_live_cfg_file.read_text())
+                _live_ds = _c.get("routing", {}).get("domainStrategy", "")
+            except Exception:
+                pass
+        if not _live_ds and STATE_FILE.exists():
+            try:
+                _live_ds = json.loads(STATE_FILE.read_text()).get("strategy", "")
+            except Exception:
+                pass
+
+        _ds_label = _ds_labels.get(_live_ds, _live_ds or "—")
+        _bal_label = _strat_labels.get(CHAIN_BALANCER_STRATEGY, CHAIN_BALANCER_STRATEGY)
+
+        print(f"  {DIM}Стратегия исходящих (domainStrategy):{NC} {CYAN}{_ds_label}{NC}")
+        if len(CHAIN_NODES) >= 2:
+            print(f"  {DIM}Стратегия балансировки:{NC}                {CYAN}{_bal_label}{NC}")
+        print()
+        # ────────────────────────────────────────────────────────────────────────
+
+        if not CHAIN_NODES:
+            print(f"  {YELLOW}Нод пока нет.{NC}")
+        else:
+            print(f"  Текущие exit-ноды ({len(CHAIN_NODES)}/{MAX_CHAIN_NODES}):")
+            for i, nd in enumerate(CHAIN_NODES):
+                print(f"    {CYAN}[{i+1}]{NC} {nd['host']}:{nd['port']}  "
+                      f"SNI={nd['sni']}  FP={nd['fp']}")
+        print()
+        _box_top("Действия")
+        _box_item("A", f"Добавить ноду")
+        if CHAIN_NODES:
+            _box_item("D", f"Удалить ноду")
+            _box_item("R", f"Пересобрать конфиг Xray и перезапустить")
+            _box_item("S", f"Показать сводку и ссылку")
+            _box_item("T", f"Пинг всех Exit Node")
+            pinned_label = (
+                f"нода #{CHAIN_PINNED_NODE_INDEX+1} ({CHAIN_NODES[CHAIN_PINNED_NODE_INDEX]['host']})"
+                if 0 <= CHAIN_PINNED_NODE_INDEX < len(CHAIN_NODES)
+                else "выкл (балансировщик)"
+            )
+            _box_item("P", f"Закрепить exit-ноду  [{pinned_label}]")
+            if len(CHAIN_NODES) >= 2:
+                _box_item("B", f"Изменить стратегию балансировки  [{_bal_label}]")
+        _box_item("O", f"Изменить стратегию исходящих соединений  [{_ds_label}]")
+        _box_item("N", f"Доп. клиент для резервной Entry-ноды  {DIM}(на уже развёрнутый exit){NC}")
+        _box_item_exit("0", f"Назад в главное меню")
+        _box_bottom()
+
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            print()
+            break
+
+        if ch == "0" or ch == "":
+            break
+
+        elif ch == "a":
+            if len(CHAIN_NODES) >= MAX_CHAIN_NODES:
+                warn(f"Достигнут максимум нод ({MAX_CHAIN_NODES}).")
+                time.sleep(2)
+                continue
+            idx = len(CHAIN_NODES) + 1
+            nd = _prompt_one_node(idx)
+            if nd is None:
+                info("Добавление ноды отменено.")
+                time.sleep(1)
+                continue
+            CHAIN_NODES.append(nd)
+            _save_chain_nodes_to_state()
+            success(f"Нода #{idx} добавлена: {nd['host']}:{nd['port']}")
+            # Предложим сразу пересобрать конфиг
+            ans = input(f"{YELLOW}Пересобрать конфиг Xray и перезапустить сейчас? [y/N]:{NC} ").strip().lower()
+            if ans == 'y':
+                _rebuild_and_restart_xray("Xray активен — нода добавлена")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "d" and CHAIN_NODES:
+            print()
+            _box_top(f"Удалить ноду  (0 = отмена)")
+            for i, nd in enumerate(CHAIN_NODES):
+                _box_item(f"{i+1}", f"{nd['host']}:{nd['port']}  SNI={nd['sni']}")
+            _box_bottom()
+            v = input(f"  Номер: ").strip()
+            if not v.isdigit() or int(v) == 0:
+                info("Удаление отменено.")
+                time.sleep(1)
+                continue
+            idx = int(v) - 1
+            if idx < 0 or idx >= len(CHAIN_NODES):
+                warn("Нет такой ноды.")
+                time.sleep(1)
+                continue
+            removed = CHAIN_NODES.pop(idx)
+            _save_chain_nodes_to_state()
+            success(f"Нода {removed['host']}:{removed['port']} удалена.")
+            if CHAIN_NODES:
+                ans = input(f"{YELLOW}Пересобрать конфиг Xray и перезапустить сейчас? [y/N]:{NC} ").strip().lower()
+                if ans == 'y':
+                    _rebuild_and_restart_xray("Xray активен — нода удалена")
+            else:
+                warn("Список нод пуст. Трафик некуда отправлять!")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "r" and CHAIN_NODES:
+            if not CHAIN_NODES:
+                warn("Нет нод — нечего применять.")
+                time.sleep(2)
+                continue
+            _rebuild_and_restart_xray("Xray активен — конфиг применён")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "s" and CHAIN_NODES:
+            generate_chain_summary()
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "t" and CHAIN_NODES:
+            print()
+            _box_top("Пинг Exit Node")
+            _box_row(f"  {DIM}TCP-латентность до каждой ноды:{NC}")
+            _box_sep()
+            for i, nd in enumerate(CHAIN_NODES):
+                host, port = nd["host"], nd["port"]
+                _box_row(f"  {CYAN}[{i+1}]{NC} {host}:{port}  →  измеряю...")
+                lat = _speed_test_node_latency(host, port)
+                flag_str = ""
+                try:
+                    import socket as _s
+                    ip = _s.gethostbyname(host)
+                    r = _run(["curl", "-s", "--max-time", "4",
+                              f"http://ip-api.com/json/{ip}?fields=countryCode"],
+                             capture=True, check=False)
+                    if r.returncode == 0:
+                        import json as _j
+                        cc = _j.loads(r.stdout.strip()).get("countryCode", "")
+                        if cc:
+                            flag_str = f"  {country_flag_emoji(cc)}"
+                except Exception:
+                    pass
+                # Перерисовываем строку с результатом
+                _box_row(f"  {CYAN}[{i+1}]{NC} {host}:{port}{flag_str}  →  {lat}")
+            _box_bottom()
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "p" and CHAIN_NODES:
+            print()
+            _box_top(f"Закрепить exit-ноду  (0 = отключить)")
+            _box_row(f"  {DIM}Весь трафик идёт только через выбранную ноду; балансировщик выключен.{NC}")
+            _box_sep()
+            for i, nd in enumerate(CHAIN_NODES):
+                marker = f"  {GREEN}◀ активна{NC}" if i == CHAIN_PINNED_NODE_INDEX else ""
+                _box_item(f"{i+1}", f"{nd['host']}:{nd['port']}  SNI={nd['sni']}{marker}")
+            _box_item("0", f"Отключить закрепление (включить балансировщик)")
+            _box_bottom()
+            v = input(f"  Выбор: ").strip()
+            if v == "0":
+                CHAIN_PINNED_NODE_INDEX = -1
+                setattr(core, "CHAIN_PINNED_NODE_INDEX", CHAIN_PINNED_NODE_INDEX)
+                info("Pinned-режим отключён. Активен балансировщик.")
+            elif v.isdigit() and 1 <= int(v) <= len(CHAIN_NODES):
+                CHAIN_PINNED_NODE_INDEX = int(v) - 1
+                setattr(core, "CHAIN_PINNED_NODE_INDEX", CHAIN_PINNED_NODE_INDEX)
+                nd = CHAIN_NODES[CHAIN_PINNED_NODE_INDEX]
+                success(f"Закреплена нода #{CHAIN_PINNED_NODE_INDEX+1}: {nd['host']}:{nd['port']}")
+            else:
+                warn("Неверный выбор.")
+                time.sleep(1)
+                continue
+            _save_chain_nodes_to_state()
+            ans = input(f"{YELLOW}Пересобрать конфиг и перезапустить Xray? [y/N]:{NC} ").strip().lower()
+            if ans == 'y':
+                _rebuild_and_restart_xray("Xray активен — pinned-режим применён")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "b" and len(CHAIN_NODES) >= 2:
+            # ── Изменить стратегию балансировки без переустановки ─────────────
+            print()
+            print()
+            _box_top(f"Изменить стратегию балансировки")
+            _b_map = {
+                "roundRobin": "Round Robin  — по очереди, равномерно",
+                "leastPing":  "Least Ping   — к ноде с наименьшим RTT (нужен observatory)",
+                "leastLoad":  "Least Load   — к ноде с наименьшей нагрузкой (нужен observatory)",
+                "random":     "Random       — случайный выбор при каждом подключении",
+            }
+            _b_keys = list(_b_map.keys())
+            for idx2, k in enumerate(_b_keys, 1):
+                marker = f"  {GREEN}◀ текущая{NC}" if k == CHAIN_BALANCER_STRATEGY else ""
+                _box_item(f"{idx2}", f"{_b_map[k]}{marker}")
+            _box_bottom()
+            v = input(f"  {CYAN}Выбор [Enter = отмена]:{NC} ").strip()
+            if v.isdigit() and 1 <= int(v) <= len(_b_keys):
+                new_strat = _b_keys[int(v) - 1]
+                CHAIN_BALANCER_STRATEGY = new_strat
+                setattr(core, "CHAIN_BALANCER_STRATEGY", CHAIN_BALANCER_STRATEGY)
+                _save_chain_nodes_to_state()
+                _stl = {"roundRobin": "Round Robin", "leastPing": "Least Ping",
+                        "leastLoad": "Least Load", "random": "Random"}
+                success(f"Стратегия балансировки изменена → {_stl.get(new_strat, new_strat)}")
+                ans = input(f"{YELLOW}Пересобрать конфиг Xray и перезапустить? [y/N]:{NC} ").strip().lower()
+                if ans == 'y':
+                    _rebuild_and_restart_xray("Xray активен — новая стратегия балансировки применена")
+            else:
+                info("Изменение отменено.")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "o":
+            # ── Изменить domainStrategy без переустановки ──────────────────────
+            print()
+            print()
+            _box_top(f"Изменить стратегию исходящих соединений")
+            # Определяем текущее: state.json → freedom-outbound → глобальная переменная
+            _cur_ds = ""
+            _cfg_f = CONFIG_DIR / "config.json"
+            if STATE_FILE.exists():
+                try:
+                    _cur_ds = json.loads(STATE_FILE.read_text()).get("strategy", "")
+                except Exception:
+                    pass
+            if not _cur_ds and _cfg_f.exists():
+                try:
+                    _c = json.loads(_cfg_f.read_text())
+                    for _ob in _c.get("outbounds", []):
+                        if _ob.get("protocol") == "freedom" and _ob.get("tag") not in ("xray-stats-api",):
+                            _ds_val = _ob.get("settings", {}).get("domainStrategy", "")
+                            if _ds_val:
+                                _cur_ds = _ds_val
+                                break
+                except Exception:
+                    pass
+            if not _cur_ds:
+                _cur_ds = PARAM_DOMAIN_STRATEGY
+            # Показываем текущую стратегию
+            _ds_lbl_map = {
+                "UseIPv6v4": "UseIPv6v4 (IPv6→IPv4)",
+                "UseIPv4v6": "UseIPv4v6 (IPv4→IPv6)",
+                "UseIP":     "UseIP (системный DNS)",
+                "UseIPv4":   "UseIPv4 (только IPv4)",
+            }
+            _cur_lbl = _ds_lbl_map.get(_cur_ds, _cur_ds if _cur_ds else "не определена")
+            _box_row(f"  {DIM}Текущая стратегия:{NC} {CYAN}{_cur_lbl}{NC}")
+            _ds_opts = {
+                "1": ("UseIPv6v4", "UseIPv6v4 — сначала IPv6, fallback IPv4"),
+                "2": ("UseIPv4v6", "UseIPv4v6 — сначала IPv4, fallback IPv6"),
+                "3": ("UseIP",     "UseIP     — системный DNS"),
+                "4": ("UseIPv4",   "UseIPv4   — только IPv4"),
+            }
+            for k2, (val, desc) in _ds_opts.items():
+                marker = f"  {GREEN}◀ текущая{NC}" if val == _cur_ds else ""
+                _box_item(f"{k2}", f"{desc}{marker}")
+            _box_bottom()
+            v = input(f"  {CYAN}Выбор [Enter = отмена]:{NC} ").strip()
+            if v in _ds_opts:
+                new_ds, new_ds_desc = _ds_opts[v]
+                PARAM_DOMAIN_STRATEGY = new_ds
+                setattr(core, "PARAM_DOMAIN_STRATEGY", PARAM_DOMAIN_STRATEGY)
+                # Сохраняем в state.json
+                if STATE_FILE.exists():
+                    try:
+                        _st2 = json.loads(STATE_FILE.read_text())
+                        _st2["strategy"] = new_ds
+                        STATE_FILE.write_text(json.dumps(_st2, indent=2, ensure_ascii=False))
+                    except Exception as _e2:
+                        warn(f"Не удалось сохранить в state.json: {_e2}")
+                # Патчим живой конфиг напрямую (быстро, без полной пересборки)
+                if _cfg_f.exists():
+                    try:
+                        _c2 = json.loads(_cfg_f.read_text())
+                        _c2.setdefault("routing", {})["domainStrategy"] = new_ds
+                        # Обновляем domainStrategy в freedom-outbound (direct/UseIP)
+                        for _ob in _c2.get("outbounds", []):
+                            if _ob.get("protocol") == "freedom" and _ob.get("tag") not in ("xray-stats-api",):
+                                _ob.setdefault("settings", {})["domainStrategy"] = new_ds
+                        _cfg_f.write_text(json.dumps(_c2, indent=2, ensure_ascii=False))
+                        success(f"domainStrategy изменена → {new_ds_desc}")
+                    except Exception as _e3:
+                        warn(f"Не удалось обновить config.json: {_e3}")
+                ans = input(f"{YELLOW}Перезапустить Xray для применения? [y/N]:{NC} ").strip().lower()
+                if ans == 'y':
+                    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+                    time.sleep(3)
+                    rs = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+                    if rs.stdout.strip() == "active":
+                        success("Xray активен — новая domainStrategy применена")
+                    else:
+                        warn("Xray не запустился — проверьте: journalctl -u xray -n 30")
+            else:
+                info("Изменение отменено.")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "n":
+            do_generate_chain_exit_additional_client()
+
+        else:
+            warn("Неверный выбор.")
+            time.sleep(1)
+
+
+# =============================================================================
+#  ГЕНЕРАЦИЯ ИТОГОВЫХ ФАЙЛОВ ДЛЯ РЕЖИМА B
+# =============================================================================
+def generate_chain_summary() -> None:
+    """Записывает сводный файл с инструкцией и ссылкой для Режима B.
+    Поддерживает как одну, так и несколько exit-нод. При AWG — сводку туннеля."""
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_bottom = core._box_bottom
+    _box_sep = core._box_sep
+    _box_link = core._box_link
+    _run = core._run
+    _get_box_width = core._get_box_width
+    _show_qr = core._show_qr
+    get_server_country_cached = core.get_server_country_cached
+    _fp_from_state = core._fp_from_state
+    success = core.success
+    GREEN = core.GREEN
+    RED = core.RED
+    CYAN = core.CYAN
+    YELLOW = core.YELLOW
+    BOLD = core.BOLD
+    DIM = core.DIM
+    MAGENTA = core.MAGENTA
+    NC = core.NC
+    _BOX_W = getattr(core, "_BOX_W", 78)
+    AWG_EXIT_ENABLED = getattr(core, "AWG_EXIT_ENABLED", False)
+    INSTALL_MODE = getattr(core, "INSTALL_MODE", "A")
+    PARAM_DOMAIN = getattr(core, "PARAM_DOMAIN", "")
+    SERVER_IP = getattr(core, "SERVER_IP", "")
+    SERVER_PORT = getattr(core, "SERVER_PORT", 443)
+    AWG_EXIT_HOST = getattr(core, "AWG_EXIT_HOST", "")
+    AWG_EXIT_PORT = getattr(core, "AWG_EXIT_PORT", 51820)
+    AWG_INTERFACE = getattr(core, "AWG_INTERFACE", "awg0")
+    AWG_SUBNET = getattr(core, "AWG_SUBNET", "10.66.66.0/24")
+    AWG_SUBNET_V6 = getattr(core, "AWG_SUBNET_V6", "fd66:66:66::/64")
+    AWG_FWMARK = getattr(core, "AWG_FWMARK", 1000)
+    AWG_ROUTE_TABLE = getattr(core, "AWG_ROUTE_TABLE", 1000)
+    CHAIN_NODES = getattr(core, "CHAIN_NODES", [])
+    CHAIN_EXIT_HOST = getattr(core, "CHAIN_EXIT_HOST", "")
+    CHAIN_EXIT_PORT = getattr(core, "CHAIN_EXIT_PORT", 443)
+    CHAIN_EXIT_UUID = getattr(core, "CHAIN_EXIT_UUID", "")
+    CHAIN_EXIT_PUBKEY = getattr(core, "CHAIN_EXIT_PUBKEY", "")
+    CHAIN_EXIT_SHORTID = getattr(core, "CHAIN_EXIT_SHORTID", "")
+    CHAIN_EXIT_SNI = getattr(core, "CHAIN_EXIT_SNI", "")
+    CHAIN_EXIT_FP = getattr(core, "CHAIN_EXIT_FP", "chrome")
+    CHAIN_BALANCER_STRATEGY = getattr(core, "CHAIN_BALANCER_STRATEGY", "roundRobin")
+    PROTOCOL_MODE = getattr(core, "PROTOCOL_MODE", "reality")
+    XHTTP_MODE = getattr(core, "XHTTP_MODE", "streamup")
+    XHTTP_PATH = getattr(core, "XHTTP_PATH", "/")
+    PARAM_UUID = getattr(core, "PARAM_UUID", "")
+    PARAM_PUBLIC_KEY = getattr(core, "PARAM_PUBLIC_KEY", "")
+    PARAM_SHORTID = getattr(core, "PARAM_SHORTID", "")
+    PARAM_REALITY_DEST = getattr(core, "PARAM_REALITY_DEST", "")
+    PARAM_FINGERPRINT = getattr(core, "PARAM_FINGERPRINT", "chrome")
+    _BOX_W = _get_box_width()
+    setattr(core, "_BOX_W", _BOX_W)
+
+    # ── AWG-режим: показываем сводку туннеля вместо VLESS chain ─────────────
+    if AWG_EXIT_ENABLED and INSTALL_MODE == "B":
+        print()
+        _box_top("Сводка AWG 2.0 туннеля (Режим B)")
+        _box_row(f"  Транспорт:      {CYAN}AmneziaWG 2.0{NC}")
+        _box_row(f"  Entry-сервер:   {CYAN}{PARAM_DOMAIN or SERVER_IP}{NC}:{SERVER_PORT}")
+        _box_row(f"  AWG exit-VPS:   {CYAN}{AWG_EXIT_HOST}:{AWG_EXIT_PORT}/udp{NC}")
+        _box_row(f"  Интерфейс:      {CYAN}{AWG_INTERFACE}{NC}")
+        _box_row(f"  Подсеть IPv4:   {CYAN}{AWG_SUBNET}{NC}")
+        _box_row(f"  Подсеть IPv6:   {CYAN}{AWG_SUBNET_V6}{NC}")
+        _box_row()
+        _r_awg = _run(["ip", "link", "show", AWG_INTERFACE], capture=True, check=False)
+        _awg_up = _r_awg.returncode == 0
+        _awg_col = GREEN if _awg_up else RED
+        _awg_label = "активен" if _awg_up else "НЕ ПОДНЯТ"
+        _box_row(f"  Туннель:        {_awg_col}{_awg_label}{NC}")
+        _box_row()
+        _box_row(f"  {DIM}Трафик: Xray → fwmark {AWG_FWMARK} → ip rule → "
+                 f"table {AWG_ROUTE_TABLE} → awg0 → exit-VPS{NC}")
+        _box_bottom()
+        return
+
+    entry_host = PARAM_DOMAIN  # Патч: ссылка по домену вместо IP
+
+    # Собираем актуальный список нод
+    nodes = CHAIN_NODES if CHAIN_NODES else []
+    if not nodes and CHAIN_EXIT_HOST:
+        nodes = [{
+            "host":    CHAIN_EXIT_HOST,
+            "port":    CHAIN_EXIT_PORT,
+            "uuid":    CHAIN_EXIT_UUID,
+            "pubkey":  CHAIN_EXIT_PUBKEY,
+            "shortid": CHAIN_EXIT_SHORTID,
+            "sni":     CHAIN_EXIT_SNI,
+            "fp":      CHAIN_EXIT_FP,
+        }]
+
+    # Клиентская ссылка — подключаться к entry (российскому) VPS
+    import urllib.parse as _uparse
+    _, _, _chain_flag = get_server_country_cached()
+    _chain_flag_prefix = f"{_chain_flag} " if _chain_flag and _chain_flag != "🌐" else ""
+    _chain_label = _chain_flag_prefix + _uparse.quote(f"{PARAM_DOMAIN}-chain")
+    proto = PROTOCOL_MODE
+    if proto == "xhttp":
+        _path_enc = _uparse.quote(XHTTP_PATH, safe="/")
+        _cs_fp = PARAM_FINGERPRINT or _fp_from_state()
+        link = (
+            f"vless://{PARAM_UUID}@{entry_host}:{SERVER_PORT}"
+            f"?type=xhttp&security=tls&sni={PARAM_DOMAIN}"
+            f"&path={_path_enc}&mode={XHTTP_MODE}"
+            f"&fp={_cs_fp}#{_chain_label}"
+        )
+    else:
+        _reality_sni = PARAM_REALITY_DEST if AWG_EXIT_ENABLED else PARAM_DOMAIN
+        _cs_fp = PARAM_FINGERPRINT or _fp_from_state()
+        link = (
+            f"vless://{PARAM_UUID}@{entry_host}:{SERVER_PORT}"
+            f"?type=tcp&security=reality&pbk={PARAM_PUBLIC_KEY}"
+            f"&fp={_cs_fp}&sni={_reality_sni}&sid={PARAM_SHORTID}"
+            f"&flow=xtls-rprx-vision#{_chain_label}"
+        )
+
+    # Определяем метку стратегии ДО цикла — она нужна внутри него
+    strategy_labels = {
+        "roundRobin": "Round Robin",
+        "leastPing":  "Least Ping",
+        "leastLoad":  "Least Load",
+        "random":     "Random",
+    }
+    strategy_label = strategy_labels.get(CHAIN_BALANCER_STRATEGY, CHAIN_BALANCER_STRATEGY)
+
+    n_label = f"{len(nodes)} нод" if len(nodes) > 1 else "1 нода"
+
+    # Строим текст для exit-нод
+    nodes_text = ""
+    for i, nd in enumerate(nodes):
+        nd_proto = nd.get("proto", "reality")
+        if len(nodes) > 1:
+            lbl = f"балансировка {strategy_label}"
+        else:
+            lbl = "единственная нода"
+        if nd_proto == "xhttp":
+            nodes_text += f"""
+## ─── Exit Node #{i+1} ({lbl}, xHTTP TLS) ──
+Адрес:      {nd['host']}
+Порт:       {nd['port']}
+UUID:       {nd['uuid']}
+xHTTP mode: {nd.get('xhttp_mode', 'streamup')}
+xHTTP path: {nd.get('path', '/')}
+SNI:        {nd.get('sni', '')}
+FP:         {nd.get('fp', 'chrome')}
+"""
+        else:
+            nodes_text += f"""
+## ─── Exit Node #{i+1} ({lbl}, VLESS+REALITY) ──
+Адрес:      {nd['host']}
+Порт:       {nd['port']}
+UUID:       {nd['uuid']}
+PublicKey:  {nd.get('pubkey', '')}
+ShortID:    {nd.get('shortid', '')}
+SNI:        {nd.get('sni', '')}
+Flow:       xtls-rprx-vision
+FP:         {nd.get('fp', 'chrome')}
+"""
+
+    scp_cmds = "\n".join(
+        f"   scp /root/xray_config_exit_node_{i+1}.json root@{nd['host']}:/etc/xray/config.json"
+        for i, nd in enumerate(nodes)
+    ) if nodes else "   (нет нод)"
+    balancer_note = (
+        f"\nПримечание: при нескольких Exit Node трафик распределяется"
+        f" между ними по алгоритму {strategy_label} (Xray balancer)."
+        if len(nodes) > 1 else ""
+    )
+    proto = PROTOCOL_MODE
+    entry_proto_str = (
+        f"xHTTP TLS (mode={XHTTP_MODE}, path={XHTTP_PATH})"
+        if proto == "xhttp"
+        else "VLESS+TCP+REALITY (xtls-rprx-vision)"
+    )
+
+    summary = f"""# ═══════════════════════════════════════════════════════
+# VLESS — Режим B (Chained Proxy / Каскад)
+# Схема: Клиент → Entry VPS (RU) → Exit VPS × {len(nodes)} → Интернет
+# ═══════════════════════════════════════════════════════
+{balancer_note}
+## ─── Entry Node (российский VPS) ───────────────────────
+Адрес:      {entry_host}
+Порт:       {SERVER_PORT}
+UUID:       {PARAM_UUID}
+Протокол:   {entry_proto_str}
+PublicKey:  {PARAM_PUBLIC_KEY if proto == 'reality' else 'n/a (xHTTP TLS)'}
+ShortID:    {PARAM_SHORTID if proto == 'reality' else 'n/a (xHTTP TLS)'}
+SNI:        {PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) else PARAM_DOMAIN}
+{nodes_text}
+## ─── Клиентская ссылка (подключаться к Entry Node) ─────
+{link}
+
+## ─── Файлы ──────────────────────────────────────────────
+/etc/xray/config.json              — конфиг Entry Node (уже применён)
+/root/xray_config_exit_node_N.json — конфиги Exit Node (скопировать на каждый зарубежный VPS)
+/root/vless_link.txt               — клиентская ссылка (Entry Node)
+/root/vless_qr_chain.png           — QR-код для подключения клиента
+
+## ─── Инструкция по настройке Exit Node ─────────────────
+1. Скопируйте конфиг на каждый зарубежный VPS:
+{scp_cmds}
+
+2. На каждом зарубежном VPS сгенерируйте ключи REALITY:
+   xray x25519
+
+3. Запишите PrivateKey в /etc/xray/config.json (заменить <ВСТАВЬТЕ_PRIVATE_KEY_EXIT_NODE>).
+
+4. Откройте нужный порт на каждом зарубежном VPS:
+   ufw allow <PORT>/tcp
+
+5. Перезапустите Xray на каждом зарубежном VPS:
+   systemctl restart xray
+
+6. Клиент подключается ТОЛЬКО к Entry Node (российскому VPS) по ссылке выше.
+   Распределение по Exit Node происходит автоматически на стороне Entry Node.
+"""
+
+    summary_path = Path("/root/vless_chain_summary.txt")
+    summary_path.write_text(summary)
+    summary_path.chmod(0o600)
+    success(f"Сводка Режима B ({n_label}): {summary_path}")
+
+    # Записываем клиентскую ссылку
+    link_path = Path("/root/vless_link.txt")
+    link_path.write_text(link)
+    link_path.chmod(0o600)
+
+    # Консольный вывод
+    print()
+    n_title = f"РЕЖИМ B: КАСКАДНЫЙ ПРОКСИ — {n_label.upper()}"
+    _box_top(n_title)
+    if len(nodes) > 1:
+        _box_row(f"  Схема: Клиент → {CYAN}Entry RU{NC} → {GREEN}[{strategy_label}]{NC} → {GREEN}Exit ×{len(nodes)}{NC} → Интернет")
+    else:
+        _box_row(f"  Схема: Клиент → {CYAN}Entry RU{NC} → {GREEN}Exit Abroad{NC} → Интернет")
+    _box_row()
+    _box_row(f"  {YELLOW}Entry Node (этот сервер, RU):{NC}")
+    _box_row(f"    Адрес:   {CYAN}{entry_host}:{SERVER_PORT}{NC}")
+    _box_row(f"    UUID:    {CYAN}{PARAM_UUID}{NC}")
+    _box_row(f"    PubKey:  {CYAN}{PARAM_PUBLIC_KEY[:30]}...{NC}")
+    _box_row(f"    ShortID: {CYAN}{PARAM_SHORTID}{NC}")
+    _sni_display = PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) else PARAM_DOMAIN
+    _box_row(f"    SNI:     {CYAN}{_sni_display}{NC}")
+    for i, nd in enumerate(nodes):
+        _box_row()
+        lbl = f"Exit Node #{i+1}" if len(nodes) > 1 else "Exit Node"
+        _box_row(f"  {GREEN}{lbl}:{NC}")
+        _box_row(f"    Host:    {CYAN}{nd['host']}:{nd['port']}{NC}")
+        _box_row(f"    UUID:    {CYAN}{nd['uuid']}{NC}")
+        _box_row(f"    SNI:     {CYAN}{nd['sni']}{NC}")
+    _box_sep()
+    print(f"  {MAGENTA}Клиентская ссылка (Entry Node):{NC}")
+    _box_link(link)
+    print()
+    _box_top(f"Файлы")
+    # Определяем самый длинный путь для правильного выравнивания
+    _has_multi_nodes = len(nodes) > 1
+    _max_path_w = len("/root/xray_config_exit_node_1.json") if _has_multi_nodes else len("/root/xray_config_exit_node.json")
+    _col_w = max(_max_path_w, len("/root/vless_chain_summary.txt"))
+    _box_row(f"    {'/root/vless_link.txt':<{_col_w}}  — клиентская ссылка")
+    _box_row(f"    {'/root/vless_qr_chain.png':<{_col_w}}  — QR-код для клиента")
+    for i in range(len(nodes)):
+        suffix = f"_{i+1}" if _has_multi_nodes else ""
+        _path = f"/root/xray_config_exit_node{suffix}.json"
+        _box_row(f"    {_path:<{_col_w}}  — конфиг Exit Node #{i+1}")
+    _box_row(f"    {'/root/vless_chain_summary.txt':<{_col_w}}  — полная инструкция")
+    _box_bottom()
+    _show_qr(link, f"{entry_host}-chain", "/root/vless_qr_chain.png")
+
+
+# =============================================================================
+#  СКОРОСТНЫЕ ТЕСТЫ — latency/geo для exit-нод
+# =============================================================================
+def _speed_test_node_latency(host: str, port: int) -> str:
+    """
+    Измеряет TCP-латентность до хоста через прямое подключение (socket).
+    Возвращает строку с результатом.
+    """
+    core = _core_module()
+    GREEN = core.GREEN
+    RED = core.RED
+    NC = core.NC
+    try:
+        start = time.time()
+        ip = socket.gethostbyname(host)
+        s = socket.create_connection((ip, port), timeout=5)
+        s.close()
+        ms = (time.time() - start) * 1000
+        return f"{GREEN}{ms:.0f} мс{NC}"
+    except socket.timeout:
+        return f"{RED}таймаут{NC}"
+    except Exception as e:
+        return f"{RED}ошибка ({e}){NC}"
+
+
+def _speed_test_node_geo(host: str) -> tuple[str, str, str, str, str]:
+    """
+    Возвращает (ip, country_cc, country, city, isp) для хоста через ip-api.com.
+    """
+    core = _core_module()
+    _run = core._run
+    try:
+        ip = socket.gethostbyname(host)
+        r = _run(
+            ["curl", "-s", "--max-time", "8",
+             f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,city,isp,query"],
+            capture=True, check=False
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return ip, "??", "неизвестно", "?", "?"
+        data = json.loads(r.stdout.strip())
+        if data.get("status") != "success":
+            return ip, "??", "неизвестно", "?", "?"
+        return (
+            data.get("query", ip),
+            data.get("countryCode", "??"),
+            data.get("country", "неизвестно"),
+            data.get("city", "?"),
+            data.get("isp", "?"),
+        )
+    except Exception:
+        return host, "??", "неизвестно", "?", "?"
+
+
+# =============================================================================
+#  МАТРИЦА СОСТОЯНИЯ EXIT-НОД
+# =============================================================================
+
+def _access_log_bytes_per_node(nodes: list[dict], hours: int = 24) -> dict[str, int]:
+    """
+    Парсит /var/log/xray/access.log за последние `hours` часов.
+    Возвращает dict: host → суммарные байты (upload+download).
+    Сопоставление: ищем тег «chain-exit-N» в записях routing и связываем
+    с нодой по индексу (chain-exit-1 → nodes[0], chain-exit-2 → nodes[1] …).
+    """
+    core = _core_module()
+    DIAG_ACCESS_LOG = getattr(core, "DIAG_ACCESS_LOG", Path("/var/log/xray/access.log"))
+    result: dict[str, int] = {nd["host"]: 0 for nd in nodes}
+    if not DIAG_ACCESS_LOG.exists():
+        return result
+
+    cutoff = time.time() - hours * 3600
+
+    # Паттерны байт (те же что в _diag_check_access_log)
+    pat_ts      = re.compile(r'^(\d{4}/\d{2}/\d{2})\s+(\d{2}:\d{2}:\d{2})')
+    pat_bytes_a = re.compile(
+        r'\[([^\]]+)\]\s+(\d+)\s+bytes?\s+upload,?\s+(\d+)\s+bytes?\s+download',
+        re.IGNORECASE)
+    pat_bytes_b = re.compile(r'>>\s+([\w\-]+)\s+\|\s+(\d+)\s+(\d+)\s+\|')
+    pat_bytes_c = re.compile(r'\[([^\]]+)\s*->\s*([^\]]+)\]\s+(\d+)\s+(\d+)')
+    pat_bytes_d = re.compile(r'(chain-exit-\d+)\s+\|\s+(\d+)\s+\|\s+(\d+)')
+
+    # Индекс нод: "chain-exit-1" → nodes[0]
+    tag_to_host: dict[str, str] = {}
+    for i, nd in enumerate(nodes):
+        tag_to_host[f"chain-exit-{i+1}"] = nd["host"]
+        # Балансировщик часто пишет просто "balancer" или "chain-balancer"
+        tag_to_host["balancer"]       = nd["host"]
+        tag_to_host["chain-balancer"] = nd["host"]
+
+    try:
+        lines = DIAG_ACCESS_LOG.read_text(errors="replace").splitlines()[-60000:]
+    except Exception:
+        return result
+
+    for line in lines:
+        # Фильтр по времени
+        ts_m = pat_ts.match(line)
+        if ts_m:
+            try:
+                ts = datetime.strptime(
+                    f"{ts_m.group(1)} {ts_m.group(2)}", "%Y/%m/%d %H:%M:%S"
+                ).timestamp()
+                if ts < cutoff:
+                    continue
+            except Exception:
+                pass
+
+        def _add(tag: str, up: int, dn: int) -> None:
+            host = tag_to_host.get(tag)
+            if host and host in result:
+                result[host] += up + dn
+
+        m = pat_bytes_a.search(line)
+        if m:
+            tag = m.group(1).split("->")[-1].strip()
+            _add(tag, int(m.group(2)), int(m.group(3)))
+            continue
+        m = pat_bytes_b.search(line)
+        if m:
+            _add(m.group(1).strip(), int(m.group(2)), int(m.group(3)))
+            continue
+        m = pat_bytes_c.search(line)
+        if m:
+            _add(m.group(2).strip(), int(m.group(3)), int(m.group(4)))
+            continue
+        m = pat_bytes_d.search(line)
+        if m:
+            _add(m.group(1).strip(), int(m.group(2)), int(m.group(3)))
+
+    return result
+
+
+def do_node_health_matrix() -> None:
+    """
+    Матрица состояния всех exit-нод (Режим B / каскад).
+    Для каждой ноды в одной таблице:
+      • TCP ping (прямое подключение с этого сервера)
+      • HTTP latency через ноду (curl --connect-to)
+      • Трафик за 24ч (из access.log)
+      • Роль: pinned / balancer / dead
+    """
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_bottom = core._box_bottom
+    _box_sep = core._box_sep
+    _box_info = core._box_info
+    _box_warn = core._box_warn
+    _run = core._run
+    _wcslen = core._wcslen
+    BOLD = core.BOLD
+    CYAN = core.CYAN
+    YELLOW = core.YELLOW
+    GREEN = core.GREEN
+    RED = core.RED
+    DIM = core.DIM
+    BLUE = core.BLUE
+    NC = core.NC
+    STATE_FILE = getattr(core, "STATE_FILE", None)
+    AWG_FWMARK = getattr(core, "AWG_FWMARK", 1000)
+    _BOX_W = getattr(core, "_BOX_W", 78)
+
+    os.system("clear")
+    print()
+    _box_top("🗺️   МАТРИЦА СОСТОЯНИЯ EXIT-НОД")
+    _box_row(f"  {DIM}Проверяет все ноды каскада параллельно и выводит сводную таблицу.{NC}")
+    _box_row()
+
+    # ── Загрузка нод из state ────────────────────────────────────────────────
+    nodes: list[dict] = []
+    pinned_idx  = -1
+    install_mode = "A"
+    try:
+        if STATE_FILE.exists():
+            st = json.loads(STATE_FILE.read_text())
+            nodes        = st.get("chain_nodes", [])
+            pinned_idx   = st.get("chain_pinned_node_index", -1)
+            install_mode = st.get("install_mode", "A")
+    except Exception:
+        pass
+
+    if install_mode != "B" or not nodes:
+        # Проверяем, не AWG-режим ли это
+        _awg_on = False
+        try:
+            if STATE_FILE.exists():
+                _awg_on = json.loads(STATE_FILE.read_text()).get("awg_exit_enabled", False)
+        except Exception:
+            pass
+        if _awg_on:
+            _box_info("  Режим AWG: матрица нод недоступна — выход через туннель awg0")
+            _box_row(f"  {DIM}В режиме AWG нет VLESS exit-нод. Используйте AWG Watchdog{NC}")
+            _box_row(f"  {DIM}(Меню → Безопасность → [W] AWG Tunnel Watchdog){NC}")
+            # Покажем статус awg0 интерфейса
+            _r_awg = _run(["ip", "link", "show", "awg0"], capture=True, check=False)
+            if _r_awg.returncode == 0:
+                _box_row(f"  {GREEN}● awg0 интерфейс активен{NC}")
+            else:
+                _box_row(f"  {RED}✗ awg0 не найден — туннель не поднят!{NC}")
+            _r_rule = _run(["ip", "rule", "show"], capture=True, check=False)
+            _fwmark_ok = str(AWG_FWMARK) in (_r_rule.stdout or "")
+            if _fwmark_ok:
+                _box_row(f"  {GREEN}● ip rule fwmark {AWG_FWMARK} присутствует{NC}")
+            else:
+                _box_row(f"  {RED}✗ ip rule fwmark {AWG_FWMARK} ОТСУТСТВУЕТ{NC}")
+        else:
+            _box_warn("Режим B (каскад) не настроен — нет exit-нод для проверки")
+            _box_row(f"  {DIM}Матрица доступна только в Режиме B (chain-proxy).{NC}")
+        _box_bottom()
+        input(f"{BLUE}Нажмите Enter...{NC}")
+        return
+
+    _box_row(f"  Нод в каскаде: {CYAN}{len(nodes)}{NC}  |  "
+             f"Pinned: {CYAN}{'нода #'+str(pinned_idx+1) if pinned_idx >= 0 else 'нет (балансировщик)'}{NC}")
+    _box_row()
+    _box_info(f"Проверяем {len(nodes)} нод(у)...")
+
+    # ── Динамические ширины колонок ──────────────────────────────────────────
+    # "  " + № + " " + Host + " " + TCP + " " + HTTP + " " + Traffic + " " + Role
+    _W_NUM     = 3
+    _W_TCP     = 9   # "999 мс" / "таймаут"
+    _W_HTTP    = 9
+    _W_TRAFFIC = 9   # "1023 МБ"
+    _W_ROLE    = 10  # "pinned" / "balancer" / "dead"
+    _W_HOST    = (_BOX_W
+                  - 2              # indent "  "
+                  - _W_NUM - 1    # № + пробел
+                  - _W_TCP - 1    # TCP + пробел
+                  - _W_HTTP - 1   # HTTP + пробел
+                  - _W_TRAFFIC - 1  # 24ч + пробел
+                  - _W_ROLE - 1   # Роль + ведущий пробел
+                  )
+    _W_HOST    = max(16, _W_HOST)
+
+    def _fmt_bytes(b: int) -> str:
+        if b == 0:
+            return f"{DIM}—{NC}"
+        if b < 1024:
+            return f"{b} Б"
+        if b < 1024 ** 2:
+            return f"{b//1024} КБ"
+        if b < 1024 ** 3:
+            return f"{b//1024**2} МБ"
+        return f"{b//1024**3:.1f} ГБ"
+
+    def _tcp_ms(host: str, port: int) -> tuple[int, str]:
+        """Возвращает (ms_int, formatted_str). ms=-1 при недоступности."""
+        try:
+            t0 = time.time()
+            ip = socket.gethostbyname(host)
+            s  = socket.create_connection((ip, port), timeout=5)
+            s.close()
+            ms = int((time.time() - t0) * 1000)
+            col = GREEN if ms < 150 else YELLOW if ms < 400 else RED
+            return ms, f"{col}{ms} мс{NC}"
+        except Exception:
+            return -1, f"{RED}▼ down{NC}"
+
+    def _http_ms(host: str, port: int) -> str:
+        """HTTP latency через curl --connect-to (имитирует реальный клиент)."""
+        try:
+            r = _run([
+                "curl", "-s", "-o", "/dev/null",
+                "-w", "%{time_connect}",
+                "--max-time", "8",
+                "--connect-to", f"{host}:{port}:{host}:{port}",
+                f"https://{host}:{port}/",
+            ], capture=True, check=False)
+            if r.returncode != 0 or not r.stdout.strip():
+                return f"{DIM}—{NC}"
+            ms = int(float(r.stdout.strip()) * 1000)
+            col = GREEN if ms < 200 else YELLOW if ms < 500 else RED
+            return f"{col}{ms} мс{NC}"
+        except Exception:
+            return f"{DIM}—{NC}"
+
+    # ── Параллельный сбор данных ─────────────────────────────────────────────
+    import threading
+
+    n = len(nodes)
+    tcp_results:  list[tuple[int, str]] = [(-1, "")] * n
+    http_results: list[str]             = [""] * n
+
+    def _probe(i: int, nd: dict) -> None:
+        host = nd.get("host", "")
+        port = int(nd.get("port", 443))
+        tcp_results[i]  = _tcp_ms(host, port)
+        http_results[i] = _http_ms(host, port)
+
+    threads = [threading.Thread(target=_probe, args=(i, nd), daemon=True)
+               for i, nd in enumerate(nodes)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=12)
+
+    # Трафик из access.log (24ч)
+    bytes_per_host = _access_log_bytes_per_node(nodes, hours=24)
+
+    # ── Вывод таблицы ────────────────────────────────────────────────────────
+    _box_row()
+    _box_sep()
+
+    # Заголовок
+    hdr = (f"  {'№':{_W_NUM}}"
+           f" {'Хост':{_W_HOST}}"
+           f" {'TCP':>{_W_TCP}}"
+           f" {'HTTP':>{_W_HTTP}}"
+           f" {'24ч':>{_W_TRAFFIC}}"
+           f" {'Роль':{_W_ROLE}}")
+    _box_row(f"{BOLD}{hdr}{NC}")
+    sep = (f"  {'─'*_W_NUM} {'─'*_W_HOST}"
+           f" {'─'*_W_TCP} {'─'*_W_HTTP}"
+           f" {'─'*_W_TRAFFIC} {'─'*_W_ROLE}")
+    _box_row(sep)
+
+    dead_count = 0
+    for i, nd in enumerate(nodes):
+        host     = nd.get("host", "?")
+        port     = int(nd.get("port", 443))
+        tcp_ms_v, tcp_str = tcp_results[i]
+        http_str          = http_results[i]
+        traffic_b         = bytes_per_host.get(host, 0)
+        traffic_str       = _fmt_bytes(traffic_b)
+
+        # Роль ноды
+        is_dead   = tcp_ms_v < 0
+        is_pinned = (i == pinned_idx)
+        if is_dead:
+            dead_count += 1
+            role_str = f"{RED}dead{NC}"
+        elif is_pinned:
+            role_str = f"{CYAN}pinned{NC}"
+        else:
+            role_str = f"{DIM}balancer{NC}"
+
+        host_disp = host if len(host) <= _W_HOST else host[:_W_HOST - 1] + "…"
+
+        def _pad_ansi(s: str, width: int) -> str:
+            """Дополняет строку с ANSI до видимой ширины width."""
+            return s + " " * max(0, width - _wcslen(s))
+
+        line = (f"  {BOLD}{i+1:>{_W_NUM}}{NC}"
+                f" {CYAN if not is_dead else DIM}{host_disp:{_W_HOST}}{NC}"
+                f" {_pad_ansi(tcp_str,  _W_TCP)}"
+                f" {_pad_ansi(http_str, _W_HTTP)}"
+                f" {_pad_ansi(traffic_str, _W_TRAFFIC)}"
+                f" {_pad_ansi(role_str, _W_ROLE)}")
+        _box_row(line)
+
+    _box_row(sep)
+
+    # ── Итог ─────────────────────────────────────────────────────────────────
+    alive = len(nodes) - dead_count
+    _box_row()
+    if dead_count == 0:
+        _box_row(f"  {GREEN}✓ Все {len(nodes)} нод(а) доступны{NC}")
+    elif alive == 0:
+        _box_row(f"  {RED}✗ Все ноды недоступны! Xray не может использовать каскад{NC}")
+    else:
+        _box_row(f"  {YELLOW}⚠  Доступно: {alive}/{len(nodes)}  |  "
+                 f"Недоступно: {dead_count}/{len(nodes)}{NC}")
+
+    log_bytes = sum(bytes_per_host.values())
+    if log_bytes > 0:
+        _box_row(f"  {DIM}Трафик за 24ч (из access.log): {_fmt_bytes(log_bytes)} суммарно{NC}")
+    else:
+        _box_row(f"  {DIM}Трафик: нет данных в access.log (нужен loglevel=info){NC}")
+
+    _box_row()
+    _box_bottom()
+    input(f"{BLUE}Нажмите Enter...{NC}")

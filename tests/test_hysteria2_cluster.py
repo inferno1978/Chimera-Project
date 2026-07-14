@@ -2,7 +2,7 @@
 """
 tests/test_hysteria2_cluster.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/hysteria2_cluster.py.
+Unit-тесты для chimera/modules/hysteria2_cluster.py.
 
 Покрывает:
   1. _ssh_base_opts — базовые SSH опции
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -35,19 +35,19 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestH2Cluster(unittest.TestCase):
     def setUp(self): _setup_core()
     def test_ssh_base_opts_has_strict_host_checking(self):
-        from vless_installer.modules.hysteria2_cluster import _ssh_base_opts
+        from chimera.modules.hysteria2_cluster import _ssh_base_opts
         opts = _ssh_base_opts()
         self.assertIn("StrictHostKeyChecking=no", opts)
     def test_ssh_key_opts_adds_identity(self):
-        from vless_installer.modules.hysteria2_cluster import _ssh_key_opts
+        from chimera.modules.hysteria2_cluster import _ssh_key_opts
         opts = _ssh_key_opts("/path/to/key")
         self.assertIn("-i", opts)
         self.assertIn("/path/to/key", opts)

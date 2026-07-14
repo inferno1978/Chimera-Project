@@ -2,7 +2,7 @@
 """
 tests/test_hysteria2_smoke_test.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/hysteria2_smoke_test.py.
+Unit-тесты для chimera/modules/hysteria2_smoke_test.py.
 
 Покрывает:
   1. _check — возвращает bool, печатает результат
@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -34,15 +34,15 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestH2SmokeTest(unittest.TestCase):
     def setUp(self): _setup_core()
     def test_check_returns_bool(self):
-        from vless_installer.modules.hysteria2_smoke_test import _check
+        from chimera.modules.hysteria2_smoke_test import _check
         import io
         buf = io.StringIO()
         with patch("sys.stdout", buf):

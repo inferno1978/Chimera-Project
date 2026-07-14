@@ -2,7 +2,7 @@
 """
 tests/test_telemt_mirrors.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/telemt_mirrors.py.
+Unit-тесты для chimera/modules/telemt_mirrors.py.
 
 Это реальный regression-тест на баг "Telemt отвалился у двоих пользователей":
   • mtproto.py::_install_binary(url) качал через ОДИН прямой URL
@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from vless_installer.modules.telemt_mirrors import (
+from chimera.modules.telemt_mirrors import (
     get_telemt_mirrors,
     get_telemt_panel_mirrors,
     get_all_mirrors,
@@ -222,7 +222,7 @@ class TestFindManualUpload(unittest.TestCase):
             tmp_path = Path(f.name)
         try:
             filename = tmp_path.name
-            import vless_installer.modules.telemt_mirrors as tm
+            import chimera.modules.telemt_mirrors as tm
             with patch.object(tm, "MANUAL_UPLOAD_PATHS", [tmp_path.parent]):
                 result = find_manual_upload(filename)
             self.assertEqual(result, tmp_path)
@@ -231,7 +231,7 @@ class TestFindManualUpload(unittest.TestCase):
 
     def test_handles_permission_error_gracefully(self):
         """Если /root/ недоступен для чтения, не должен выбрасывать PermissionError."""
-        with patch("vless_installer.modules.telemt_mirrors.MANUAL_UPLOAD_PATHS",
+        with patch("chimera.modules.telemt_mirrors.MANUAL_UPLOAD_PATHS",
                    [Path("/root/__nonexistent__")]):
             result = find_manual_upload("__nonexistent__")
             self.assertIsNone(result)

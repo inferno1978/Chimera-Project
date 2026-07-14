@@ -2,7 +2,7 @@
 """
 tests/test_telemt_syn_limiter.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/telemt_syn_limiter.py.
+Unit-тесты для chimera/modules/telemt_syn_limiter.py.
 
 Покрывает:
   1. _plain / _wlen — unicode helpers
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -35,9 +35,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestPlain(unittest.TestCase):
@@ -47,11 +47,11 @@ class TestPlain(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_plain_string_unchanged(self):
-        from vless_installer.modules.telemt_syn_limiter import _plain
+        from chimera.modules.telemt_syn_limiter import _plain
         self.assertEqual(_plain("hello"), "hello")
 
     def test_strips_ansi(self):
-        from vless_installer.modules.telemt_syn_limiter import _plain
+        from chimera.modules.telemt_syn_limiter import _plain
         self.assertEqual(_plain("\033[1;31mhi\033[0m"), "hi")
 
 
@@ -62,19 +62,19 @@ class TestWlen(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_ascii(self):
-        from vless_installer.modules.telemt_syn_limiter import _wlen
+        from chimera.modules.telemt_syn_limiter import _wlen
         self.assertEqual(_wlen("hello"), 5)
 
     def test_cjk_two_columns(self):
-        from vless_installer.modules.telemt_syn_limiter import _wlen
+        from chimera.modules.telemt_syn_limiter import _wlen
         self.assertEqual(_wlen("中文"), 4)
 
     def test_emoji_two_columns(self):
-        from vless_installer.modules.telemt_syn_limiter import _wlen
+        from chimera.modules.telemt_syn_limiter import _wlen
         self.assertEqual(_wlen("🛡️"), 2)  # shield + VS16
 
     def test_ansi_zero_width(self):
-        from vless_installer.modules.telemt_syn_limiter import _wlen
+        from chimera.modules.telemt_syn_limiter import _wlen
         self.assertEqual(_wlen("\033[1mhi\033[0m"), 2)
 
 
@@ -85,7 +85,7 @@ class TestSynLimiterConfig(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_defaults(self):
-        from vless_installer.modules.telemt_syn_limiter import SynLimiterConfig
+        from chimera.modules.telemt_syn_limiter import SynLimiterConfig
         cfg = SynLimiterConfig()
         self.assertFalse(cfg.enabled)
         self.assertEqual(cfg.port, 0)
@@ -108,18 +108,18 @@ class TestLoadSaveState(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.telemt_syn_limiter._STATE_FILE",
+        return patch("chimera.modules.telemt_syn_limiter._STATE_FILE",
                      self._state)
 
     def test_load_returns_default_when_no_file(self):
-        from vless_installer.modules.telemt_syn_limiter import _load_state
+        from chimera.modules.telemt_syn_limiter import _load_state
         with self._patch():
             cfg = _load_state()
         self.assertFalse(cfg.enabled)
         self.assertEqual(cfg.preset_name, "hard")
 
     def test_load_returns_default_on_corrupt(self):
-        from vless_installer.modules.telemt_syn_limiter import _load_state
+        from chimera.modules.telemt_syn_limiter import _load_state
         self._state.write_text("{invalid")
         with self._patch():
             cfg = _load_state()
@@ -127,7 +127,7 @@ class TestLoadSaveState(unittest.TestCase):
 
     def test_load_filters_unknown_keys(self):
         """Лишние ключи игнорируются."""
-        from vless_installer.modules.telemt_syn_limiter import _load_state
+        from chimera.modules.telemt_syn_limiter import _load_state
         self._state.write_text(json.dumps({
             "enabled": True, "port": 443, "rate_per_sec": 5,
             "burst": 10, "htable_expire_ms": 30000, "preset_name": "soft",
@@ -140,7 +140,7 @@ class TestLoadSaveState(unittest.TestCase):
         self.assertEqual(cfg.rate_per_sec, 5)
 
     def test_save_then_load(self):
-        from vless_installer.modules.telemt_syn_limiter import (
+        from chimera.modules.telemt_syn_limiter import (
             _load_state, _save_state, SynLimiterConfig,
         )
         cfg = SynLimiterConfig(enabled=True, port=8443, rate_per_sec=10,
@@ -167,22 +167,22 @@ class TestGetTelemtPort(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.telemt_syn_limiter._CONFIG_FILE",
+        return patch("chimera.modules.telemt_syn_limiter._CONFIG_FILE",
                      self._cfg)
 
     def test_returns_zero_when_no_file(self):
-        from vless_installer.modules.telemt_syn_limiter import _get_telemt_port
+        from chimera.modules.telemt_syn_limiter import _get_telemt_port
         with self._patch():
             self.assertEqual(_get_telemt_port(), 0)
 
     def test_returns_port(self):
-        from vless_installer.modules.telemt_syn_limiter import _get_telemt_port
+        from chimera.modules.telemt_syn_limiter import _get_telemt_port
         self._cfg.write_text('port = 8443\n')
         with self._patch():
             self.assertEqual(_get_telemt_port(), 8443)
 
     def test_returns_zero_when_no_port(self):
-        from vless_installer.modules.telemt_syn_limiter import _get_telemt_port
+        from chimera.modules.telemt_syn_limiter import _get_telemt_port
         self._cfg.write_text('other = "x"\n')
         with self._patch():
             self.assertEqual(_get_telemt_port(), 0)
@@ -195,12 +195,12 @@ class TestPresets(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_has_presets(self):
-        from vless_installer.modules.telemt_syn_limiter import _PRESETS
+        from chimera.modules.telemt_syn_limiter import _PRESETS
         self.assertGreater(len(_PRESETS), 0)
 
     def test_each_preset_has_required_fields(self):
         """Структура: (preset_name, rate_per_sec, burst, label, detail, recommended)."""
-        from vless_installer.modules.telemt_syn_limiter import _PRESETS
+        from chimera.modules.telemt_syn_limiter import _PRESETS
         for name, preset in _PRESETS.items():
             with self.subTest(preset=name):
                 # preset — tuple из 6 элементов

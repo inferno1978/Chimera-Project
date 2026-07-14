@@ -490,7 +490,7 @@ dig @8.8.8.8 whoami.akamai.net +short
 # Меню → Диагностика → DN (DNS Redirect health-check)
 # Или напрямую:
 python3 -c "
-from vless_installer.modules.dns_redirect import health_check_dns_redirect
+from chimera.modules.dns_redirect import health_check_dns_redirect
 import json
 print(json.dumps(health_check_dns_redirect(), indent=2))
 "
@@ -515,7 +515,7 @@ Pi-hole или AdGuard Home), отключите принудительный р
 
 ```bash
 python3 -c "
-from vless_installer.modules.dns_redirect import remove_dns_redirect
+from chimera.modules.dns_redirect import remove_dns_redirect
 result = remove_dns_redirect()
 print(result)
 "
@@ -603,7 +603,7 @@ iptables -L INPUT -n --line-numbers | head -20
 
 ```bash
 python3 -c "
-from vless_installer.modules.dns_redirect import remove_dns_redirect
+from chimera.modules.dns_redirect import remove_dns_redirect
 remove_dns_redirect()
 "
 ```

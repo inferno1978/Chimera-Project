@@ -2,7 +2,7 @@
 """
 tests/test_diagnostics.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/diagnostics.py.
+Unit-тесты для chimera/modules/diagnostics.py.
 
 Покрывает:
   1. _diag_fmt_bytes — форматирование байт
@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -34,9 +34,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestDiagFmtBytes(unittest.TestCase):
@@ -46,23 +46,23 @@ class TestDiagFmtBytes(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_zero(self):
-        from vless_installer.modules.diagnostics import _diag_fmt_bytes
+        from chimera.modules.diagnostics import _diag_fmt_bytes
         self.assertEqual(_diag_fmt_bytes(0), "0 Б")
 
     def test_less_than_kib(self):
-        from vless_installer.modules.diagnostics import _diag_fmt_bytes
+        from chimera.modules.diagnostics import _diag_fmt_bytes
         self.assertEqual(_diag_fmt_bytes(500), "500 Б")
 
     def test_kib(self):
-        from vless_installer.modules.diagnostics import _diag_fmt_bytes
+        from chimera.modules.diagnostics import _diag_fmt_bytes
         self.assertEqual(_diag_fmt_bytes(1024), "1.0 КБ")
 
     def test_mib(self):
-        from vless_installer.modules.diagnostics import _diag_fmt_bytes
+        from chimera.modules.diagnostics import _diag_fmt_bytes
         self.assertEqual(_diag_fmt_bytes(1024 ** 2), "1.0 МБ")
 
     def test_gib(self):
-        from vless_installer.modules.diagnostics import _diag_fmt_bytes
+        from chimera.modules.diagnostics import _diag_fmt_bytes
         self.assertIn("ГБ", _diag_fmt_bytes(1024 ** 3))
 
 
@@ -73,7 +73,7 @@ class TestDiagMakeCounters(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_list_of_four_zeros(self):
-        from vless_installer.modules.diagnostics import _diag_make_counters
+        from chimera.modules.diagnostics import _diag_make_counters
         counters = _diag_make_counters()
         self.assertEqual(counters, [0, 0, 0, 0])
 
@@ -99,7 +99,7 @@ class TestDiagChk(unittest.TestCase):
         return core
 
     def test_returns_true_and_increments_passed(self):
-        from vless_installer.modules import diagnostics
+        from chimera.modules import diagnostics
         counters = diagnostics._diag_make_counters()
         with patch.object(diagnostics, "_core_module", return_value=self._mock_core()), \
              patch.object(diagnostics, "_diag_ok") as mock_ok:
@@ -110,7 +110,7 @@ class TestDiagChk(unittest.TestCase):
         mock_ok.assert_called_once_with("ok")
 
     def test_returns_false_and_increments_err(self):
-        from vless_installer.modules import diagnostics
+        from chimera.modules import diagnostics
         counters = diagnostics._diag_make_counters()
         with patch.object(diagnostics, "_core_module", return_value=self._mock_core()), \
              patch.object(diagnostics, "_diag_err") as mock_err:
@@ -121,7 +121,7 @@ class TestDiagChk(unittest.TestCase):
         mock_err.assert_called_once_with("fail")
 
     def test_warn_increments_warn_not_err(self):
-        from vless_installer.modules import diagnostics
+        from chimera.modules import diagnostics
         counters = diagnostics._diag_make_counters()
         with patch.object(diagnostics, "_core_module", return_value=self._mock_core()), \
              patch.object(diagnostics, "_diag_err") as mock_err:
@@ -156,7 +156,7 @@ class TestDiagResolveConfig(unittest.TestCase):
         return core
 
     def test_returns_none_when_no_config(self):
-        from vless_installer.modules import diagnostics
+        from chimera.modules import diagnostics
         core = self._mock_core()
         core.DIAG_CONFIG_FILE = Path("/tmp/nonexistent_main_cfg.json")
         with patch.object(diagnostics, "_core_module", return_value=core), \
@@ -166,7 +166,7 @@ class TestDiagResolveConfig(unittest.TestCase):
         self.assertEqual(cfg, {})
 
     def test_returns_config_when_valid(self):
-        from vless_installer.modules import diagnostics
+        from chimera.modules import diagnostics
         self._cfg.write_text(json.dumps({"inbounds": []}))
         with patch.object(diagnostics, "_core_module", return_value=self._mock_core()):
             path, cfg = diagnostics._diag_resolve_config()
@@ -174,7 +174,7 @@ class TestDiagResolveConfig(unittest.TestCase):
         self.assertIn("inbounds", cfg)
 
     def test_returns_empty_on_corrupt(self):
-        from vless_installer.modules import diagnostics
+        from chimera.modules import diagnostics
         self._cfg.write_text("{invalid json")
         with patch.object(diagnostics, "_core_module", return_value=self._mock_core()), \
              patch.object(diagnostics, "_diag_err"):

@@ -2,7 +2,7 @@
 """
 tests/test_mieru_stats.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/mieru_stats.py.
+Unit-тесты для chimera/modules/mieru_stats.py.
 
 Модуль автономен. Тестируем:
   1. _bytes_human — русские единицы
@@ -28,7 +28,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -38,9 +38,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestBytesHuman(unittest.TestCase):
@@ -50,23 +50,23 @@ class TestBytesHuman(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_zero(self):
-        from vless_installer.modules.mieru_stats import _bytes_human
+        from chimera.modules.mieru_stats import _bytes_human
         self.assertEqual(_bytes_human(0), "0.0 Б")
 
     def test_kib(self):
-        from vless_installer.modules.mieru_stats import _bytes_human
+        from chimera.modules.mieru_stats import _bytes_human
         self.assertEqual(_bytes_human(1024), "1.0 КБ")
 
     def test_mib(self):
-        from vless_installer.modules.mieru_stats import _bytes_human
+        from chimera.modules.mieru_stats import _bytes_human
         self.assertEqual(_bytes_human(1024 ** 2), "1.0 МБ")
 
     def test_gib(self):
-        from vless_installer.modules.mieru_stats import _bytes_human
+        from chimera.modules.mieru_stats import _bytes_human
         self.assertEqual(_bytes_human(1024 ** 3), "1.0 ГБ")
 
     def test_petabytes_fallback(self):
-        from vless_installer.modules.mieru_stats import _bytes_human
+        from chimera.modules.mieru_stats import _bytes_human
         result = _bytes_human(1024 ** 5)
         self.assertIn("ПБ", result)
 
@@ -84,23 +84,23 @@ class TestLoadMieruState(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.mieru_stats._MODULE_STATE",
+        return patch("chimera.modules.mieru_stats._MODULE_STATE",
                      self._state)
 
     def test_returns_empty_when_no_file(self):
-        from vless_installer.modules.mieru_stats import _load_mieru_state
+        from chimera.modules.mieru_stats import _load_mieru_state
         with self._patch():
             self.assertEqual(_load_mieru_state(), {})
 
     def test_returns_state(self):
-        from vless_installer.modules.mieru_stats import _load_mieru_state
+        from chimera.modules.mieru_stats import _load_mieru_state
         self._state.write_text(json.dumps({"port_start": 2012, "users": []}))
         with self._patch():
             state = _load_mieru_state()
         self.assertEqual(state["port_start"], 2012)
 
     def test_returns_empty_when_corrupt(self):
-        from vless_installer.modules.mieru_stats import _load_mieru_state
+        from chimera.modules.mieru_stats import _load_mieru_state
         self._state.write_text("{invalid")
         with self._patch():
             self.assertEqual(_load_mieru_state(), {})
@@ -119,24 +119,24 @@ class TestLoadSaveCache(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.mieru_stats._STATS_CACHE",
+        return patch("chimera.modules.mieru_stats._STATS_CACHE",
                      self._cache)
 
     def test_load_returns_empty_when_no_file(self):
-        from vless_installer.modules.mieru_stats import _load_cache
+        from chimera.modules.mieru_stats import _load_cache
         with self._patch():
             self.assertEqual(_load_cache(), {})
 
     def test_save_then_load(self):
-        from vless_installer.modules.mieru_stats import _load_cache, _save_cache
+        from chimera.modules.mieru_stats import _load_cache, _save_cache
         with self._patch():
             _save_cache({"ts": 12345, "bytes": 1000})
             loaded = _load_cache()
         self.assertEqual(loaded["ts"], 12345)
 
     def test_save_silently_fails(self):
-        from vless_installer.modules.mieru_stats import _save_cache
-        with patch("vless_installer.modules.mieru_stats._STATS_CACHE",
+        from chimera.modules.mieru_stats import _save_cache
+        with patch("chimera.modules.mieru_stats._STATS_CACHE",
                    Path("/proc/nonexistent/cache.json")):
             _save_cache({"x": 1})  # не должно бросать
 
@@ -172,37 +172,37 @@ class TestGetMitaPorts(unittest.TestCase):
         for attr in ("exists", "read_text", "write_text", "stat", "parent",
                      "name", "mkdir", "chmod", "touch", "open"):
             setattr(mock_path, attr, getattr(original_path, attr, None))
-        return patch("vless_installer.modules.mieru_stats.Path", mock_path)
+        return patch("chimera.modules.mieru_stats.Path", mock_path)
 
     def test_returns_default_when_no_file(self):
-        from vless_installer.modules.mieru_stats import _get_mita_ports
+        from chimera.modules.mieru_stats import _get_mita_ports
         with self._patch_open():
             ports = _get_mita_ports()
         self.assertEqual(ports, (2012, 2022))
 
     def test_single_port_string(self):
-        from vless_installer.modules.mieru_stats import _get_mita_ports
+        from chimera.modules.mieru_stats import _get_mita_ports
         self._cfg.write_text(json.dumps({"portRange": "2012"}))
         with self._patch_open():
             ports = _get_mita_ports()
         self.assertEqual(ports, (2012, 2012))
 
     def test_dash_separator(self):
-        from vless_installer.modules.mieru_stats import _get_mita_ports
+        from chimera.modules.mieru_stats import _get_mita_ports
         self._cfg.write_text(json.dumps({"portRange": "2012-2022"}))
         with self._patch_open():
             ports = _get_mita_ports()
         self.assertEqual(ports, (2012, 2022))
 
     def test_colon_separator(self):
-        from vless_installer.modules.mieru_stats import _get_mita_ports
+        from chimera.modules.mieru_stats import _get_mita_ports
         self._cfg.write_text(json.dumps({"portRange": "2012:2022"}))
         with self._patch_open():
             ports = _get_mita_ports()
         self.assertEqual(ports, (2012, 2022))
 
     def test_portBindings_first_element(self):
-        from vless_installer.modules.mieru_stats import _get_mita_ports
+        from chimera.modules.mieru_stats import _get_mita_ports
         self._cfg.write_text(json.dumps({
             "portBindings": [{"portRange": "3000-3010"}],
         }))
@@ -211,7 +211,7 @@ class TestGetMitaPorts(unittest.TestCase):
         self.assertEqual(ports, (3000, 3010))
 
     def test_corrupt_json_returns_default(self):
-        from vless_installer.modules.mieru_stats import _get_mita_ports
+        from chimera.modules.mieru_stats import _get_mita_ports
         self._cfg.write_text("{invalid")
         with self._patch_open():
             ports = _get_mita_ports()
@@ -225,15 +225,15 @@ class TestParseKv(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_empty_string(self):
-        from vless_installer.modules.mieru_stats import _parse_kv
+        from chimera.modules.mieru_stats import _parse_kv
         self.assertEqual(_parse_kv(""), {})
 
     def test_single_kv(self):
-        from vless_installer.modules.mieru_stats import _parse_kv
+        from chimera.modules.mieru_stats import _parse_kv
         self.assertEqual(_parse_kv("Key1=42"), {"Key1": "42"})
 
     def test_multiple_kv(self):
-        from vless_installer.modules.mieru_stats import _parse_kv
+        from chimera.modules.mieru_stats import _parse_kv
         result = _parse_kv("DownloadBytes=100 UploadBytes=200 OutputPaddingBytes=5")
         self.assertEqual(result, {
             "DownloadBytes": "100",
@@ -243,17 +243,17 @@ class TestParseKv(unittest.TestCase):
 
     def test_ignores_non_digit_values(self):
         r"""Только \w+=\d+ — строковые значения игнорируются."""
-        from vless_installer.modules.mieru_stats import _parse_kv
+        from chimera.modules.mieru_stats import _parse_kv
         result = _parse_kv("Key1=abc Key2=42")
         self.assertEqual(result, {"Key2": "42"})
 
     def test_duplicate_keys_last_wins(self):
-        from vless_installer.modules.mieru_stats import _parse_kv
+        from chimera.modules.mieru_stats import _parse_kv
         result = _parse_kv("Key=1 Key=2")
         self.assertEqual(result, {"Key": "2"})
 
     def test_no_kv_in_string(self):
-        from vless_installer.modules.mieru_stats import _parse_kv
+        from chimera.modules.mieru_stats import _parse_kv
         self.assertEqual(_parse_kv("just some text"), {})
 
 
@@ -271,7 +271,7 @@ class TestParseJournal(unittest.TestCase):
         return m
 
     def test_empty_journal_returns_zeros(self):
-        from vless_installer.modules import mieru_stats
+        from chimera.modules import mieru_stats
         with patch.object(mieru_stats, "_run",
                           return_value=self._mock_run("")):
             result = mieru_stats._parse_journal()
@@ -280,7 +280,7 @@ class TestParseJournal(unittest.TestCase):
         self.assertEqual(result["users"], {})
 
     def test_parses_connections_metrics(self):
-        from vless_installer.modules import mieru_stats
+        from chimera.modules import mieru_stats
         line = (
             "2026-07-10T12:00:00 [metrics - connections] "
             "ActiveOpens=100 CurrEstablished=10 PassiveOpens=200"
@@ -294,7 +294,7 @@ class TestParseJournal(unittest.TestCase):
         self.assertEqual(result["accepted"], 200)
 
     def test_parses_traffic_metrics(self):
-        from vless_installer.modules import mieru_stats
+        from chimera.modules import mieru_stats
         line = (
             "2026-07-10T12:00:00 [metrics - traffic] "
             "DownloadBytes=1024 UploadBytes=2048 OutputPaddingBytes=10"
@@ -307,7 +307,7 @@ class TestParseJournal(unittest.TestCase):
         self.assertEqual(result["padding_bytes"], 10)
 
     def test_parses_user_metrics(self):
-        from vless_installer.modules import mieru_stats
+        from chimera.modules import mieru_stats
         line = (
             "2026-07-10T12:00:00 [metrics - user - alice] "
             "DownloadBytes=100 UploadBytes=200"
@@ -320,7 +320,7 @@ class TestParseJournal(unittest.TestCase):
         self.assertEqual(result["users"]["alice"]["upload"], 200)
 
     def test_parses_errors(self):
-        from vless_installer.modules import mieru_stats
+        from chimera.modules import mieru_stats
         lines = "\n".join([
             "2026-07-10T12:00:00 some error happened",
             "2026-07-10T12:00:01 FATAL: crash",
@@ -333,7 +333,7 @@ class TestParseJournal(unittest.TestCase):
         self.assertGreaterEqual(result["warnings"], 1)
 
     def test_parses_replay_metrics(self):
-        from vless_installer.modules import mieru_stats
+        from chimera.modules import mieru_stats
         line = (
             "2026-07-10T12:00:00 [metrics - replay] "
             "KnownSession=50 NewSession=5"
@@ -345,7 +345,7 @@ class TestParseJournal(unittest.TestCase):
         self.assertEqual(result["new_sessions"], 5)
 
     def test_parses_auth_fail(self):
-        from vless_installer.modules import mieru_stats
+        from chimera.modules import mieru_stats
         line = (
             "2026-07-10T12:00:00 [metrics - cipher aes-128] "
             "FailedDirectDecrypt=3 FailedHintMatchDecrypt=1"
@@ -356,7 +356,7 @@ class TestParseJournal(unittest.TestCase):
         self.assertGreaterEqual(result["auth_fail"], 4)
 
     def test_raw_lines_count(self):
-        from vless_installer.modules import mieru_stats
+        from chimera.modules import mieru_stats
         lines = "line1\nline2\nline3"
         with patch.object(mieru_stats, "_run",
                           return_value=self._mock_run(lines)):
@@ -371,13 +371,13 @@ class TestCalcTrend(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_insufficient_data_less_than_3(self):
-        from vless_installer.modules.mieru_stats import _calc_trend
+        from chimera.modules.mieru_stats import _calc_trend
         slots = {"12:00": {"accepted": 10}}
         result = _calc_trend(slots)
         self.assertIn("недостаточно", result)
 
     def test_no_activity(self):
-        from vless_installer.modules.mieru_stats import _calc_trend
+        from chimera.modules.mieru_stats import _calc_trend
         slots = {
             "12:00": {"accepted": 0},
             "12:10": {"accepted": 0},
@@ -389,7 +389,7 @@ class TestCalcTrend(unittest.TestCase):
 
     def test_growth(self):
         """ratio >= 1.3 → рост."""
-        from vless_installer.modules.mieru_stats import _calc_trend
+        from chimera.modules.mieru_stats import _calc_trend
         slots = {
             "12:00": {"accepted": 10},
             "12:10": {"accepted": 10},
@@ -401,7 +401,7 @@ class TestCalcTrend(unittest.TestCase):
 
     def test_decline(self):
         """ratio <= 0.7 → спад."""
-        from vless_installer.modules.mieru_stats import _calc_trend
+        from chimera.modules.mieru_stats import _calc_trend
         slots = {
             "12:00": {"accepted": 100},
             "12:10": {"accepted": 100},
@@ -413,7 +413,7 @@ class TestCalcTrend(unittest.TestCase):
 
     def test_stable(self):
         """0.7 < ratio < 1.3 → стабильно."""
-        from vless_installer.modules.mieru_stats import _calc_trend
+        from chimera.modules.mieru_stats import _calc_trend
         slots = {
             "12:00": {"accepted": 100},
             "12:10": {"accepted": 100},
@@ -425,7 +425,7 @@ class TestCalcTrend(unittest.TestCase):
 
     def test_growth_when_older_zero(self):
         """Если older=0 и recent>0 → 'растёт'."""
-        from vless_installer.modules.mieru_stats import _calc_trend
+        from chimera.modules.mieru_stats import _calc_trend
         slots = {
             "12:00": {"accepted": 0},
             "12:10": {"accepted": 0},
@@ -437,7 +437,7 @@ class TestCalcTrend(unittest.TestCase):
 
     def test_three_slots_uses_first_two_as_older(self):
         """При 3 ключах older = keys[:2]."""
-        from vless_installer.modules.mieru_stats import _calc_trend
+        from chimera.modules.mieru_stats import _calc_trend
         slots = {
             "12:00": {"accepted": 100},  # older
             "12:10": {"accepted": 100},  # older

@@ -31,7 +31,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -41,9 +41,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 def _enter_patches(stack, patches):
@@ -63,11 +63,11 @@ class _Base(unittest.TestCase):
             patch.object(Path, 'touch', lambda s, *a, **k: None),
             patch.object(Path, 'chmod', lambda s, *a, **k: None),
             # Мокаем get_server_ip — не дёргаем сеть
-            patch('vless_installer.modules.resources.get_server_ip',
+            patch('chimera.modules.resources.get_server_ip',
                   return_value="203.0.113.42"),
         ])
         _setup_core()
-        from vless_installer.modules import singbox_menu
+        from chimera.modules import singbox_menu
         self.menu = singbox_menu
 
     def tearDown(self):
@@ -463,7 +463,7 @@ class TestBuildInboundListen(_Base):
     с state-файлом уже есть в test_singbox_config.py.
     """
     def test_shadowtls_build_reads_listen_from_state(self):
-        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        from chimera.modules.singbox_config import _build_shadowtls_inbound
         state_ib = {
             "listen": "0.0.0.0",
             "listen_port": 9443,
@@ -476,14 +476,14 @@ class TestBuildInboundListen(_Base):
         self.assertEqual(built["listen_port"], 9443)
 
     def test_shadowtls_build_defaults_to_loopback(self):
-        from vless_installer.modules.singbox_config import _build_shadowtls_inbound
+        from chimera.modules.singbox_config import _build_shadowtls_inbound
         # state без listen → дефолт 127.0.0.1 (безопасно)
         state_ib = {"listen_port": 9443, "users": []}
         built = _build_shadowtls_inbound(state_ib)
         self.assertEqual(built["listen"], "127.0.0.1")
 
     def test_anytls_build_reads_listen_from_state(self):
-        from vless_installer.modules.singbox_config import _build_anytls_inbound
+        from chimera.modules.singbox_config import _build_anytls_inbound
         state_ib = {
             "listen": "0.0.0.0",
             "listen_port": 8444,
@@ -494,7 +494,7 @@ class TestBuildInboundListen(_Base):
         self.assertEqual(built["listen_port"], 8444)
 
     def test_anytls_build_defaults_to_loopback(self):
-        from vless_installer.modules.singbox_config import _build_anytls_inbound
+        from chimera.modules.singbox_config import _build_anytls_inbound
         state_ib = {"listen_port": 8444, "users": []}
         built = _build_anytls_inbound(state_ib)
         self.assertEqual(built["listen"], "127.0.0.1")

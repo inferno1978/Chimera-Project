@@ -33,7 +33,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -43,10 +43,10 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
     fake_core.SPLIT_TUNNEL_ENABLED = True
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestGeoCronScript(unittest.TestCase):
@@ -72,7 +72,7 @@ class TestGeoCronScript(unittest.TestCase):
         cls._patch.start()
 
         with patch.object(Path, 'chmod', lambda *a, **kw: None):
-            from vless_installer.modules import geo_files
+            from chimera.modules import geo_files
             geo_files.setup_geo_autoupdate()
 
         cls.script = cls._captured.get('script', '')
@@ -107,7 +107,7 @@ class TestGeoCronScript(unittest.TestCase):
     # ── Multi-mirror fallback ────────────────────────────────────────────
     def test_script_contains_all_mirrors(self):
         """Все зеркала из geo_mirrors должны быть в скрипте."""
-        from vless_installer.modules.geo_mirrors import get_all_mirrors
+        from chimera.modules.geo_mirrors import get_all_mirrors
         for fname, urls in get_all_mirrors().items():
             for url in urls:
                 with self.subTest(url=url):

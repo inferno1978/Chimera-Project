@@ -2,7 +2,7 @@
 """
 tests/test_box_renderer.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/box_renderer.py.
+Unit-тесты для chimera/modules/box_renderer.py.
 
 Модуль автономен (не зависит от _core). Тестируем:
   1. _detect_colors — TTY/non-TTY/light
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -35,9 +35,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestDetectColors(unittest.TestCase):
@@ -47,7 +47,7 @@ class TestDetectColors(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_empty_when_not_tty(self):
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         with patch("sys.stdout") as mock_stdout, \
              patch.dict(os.environ, {}, clear=True):
             mock_stdout.isatty.return_value = False
@@ -56,7 +56,7 @@ class TestDetectColors(unittest.TestCase):
                 self.assertEqual(c[k], "")
 
     def test_returns_ansi_when_tty(self):
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         with patch("sys.stdout") as mock_stdout, \
              patch.dict(os.environ, {"VLESS_THEME": ""}, clear=True):
             mock_stdout.isatty.return_value = True
@@ -65,7 +65,7 @@ class TestDetectColors(unittest.TestCase):
             self.assertTrue(c["NC"].startswith("\033["))
 
     def test_light_theme_when_env_set(self):
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         with patch("sys.stdout") as mock_stdout, \
              patch.dict(os.environ, {"VLESS_THEME": "light"}, clear=True):
             mock_stdout.isatty.return_value = True
@@ -82,7 +82,7 @@ class TestGetBoxWidth(unittest.TestCase):
 
     def test_clamped_to_minimum_64(self):
         """Узкий терминал → минимум 64."""
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         with patch.dict(os.environ, {"COLUMNS": "40"}, clear=True), \
              patch("os.get_terminal_size", side_effect=OSError):
             w = box_renderer._get_box_width()
@@ -90,7 +90,7 @@ class TestGetBoxWidth(unittest.TestCase):
 
     def test_clamped_to_maximum_100(self):
         """Широкий терминал → максимум 100 (cols - 2)."""
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         with patch.dict(os.environ, {"COLUMNS": "300"}, clear=True), \
              patch("os.get_terminal_size",
                    return_value=os.terminal_size((300, 80))):
@@ -98,7 +98,7 @@ class TestGetBoxWidth(unittest.TestCase):
             self.assertEqual(w, 100)
 
     def test_fallback_80_when_columns_not_set(self):
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         with patch.dict(os.environ, {}, clear=True), \
              patch("os.get_terminal_size", side_effect=OSError):
             w = box_renderer._get_box_width()
@@ -106,14 +106,14 @@ class TestGetBoxWidth(unittest.TestCase):
             self.assertEqual(w, 78)
 
     def test_uses_columns_env_when_numeric(self):
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         with patch.dict(os.environ, {"COLUMNS": "120"}, clear=True), \
              patch("os.get_terminal_size", side_effect=OSError):
             w = box_renderer._get_box_width()
             self.assertEqual(w, 100)  # min(120-2, 100) = 100
 
     def test_falls_back_when_columns_not_numeric(self):
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         with patch.dict(os.environ, {"COLUMNS": "auto"}, clear=True), \
              patch("os.get_terminal_size", side_effect=OSError):
             w = box_renderer._get_box_width()
@@ -127,24 +127,24 @@ class TestPlain(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_plain_string_unchanged(self):
-        from vless_installer.modules.box_renderer import _plain
+        from chimera.modules.box_renderer import _plain
         self.assertEqual(_plain("hello"), "hello")
 
     def test_strips_simple_color(self):
-        from vless_installer.modules.box_renderer import _plain
+        from chimera.modules.box_renderer import _plain
         self.assertEqual(_plain("\033[1;31mhello\033[0m"), "hello")
 
     def test_strips_multiple_codes(self):
-        from vless_installer.modules.box_renderer import _plain
+        from chimera.modules.box_renderer import _plain
         self.assertEqual(_plain("\033[1m\033[31mhi\033[0m\033[0m"), "hi")
 
     def test_empty_string(self):
-        from vless_installer.modules.box_renderer import _plain
+        from chimera.modules.box_renderer import _plain
         self.assertEqual(_plain(""), "")
 
     def test_preserves_non_ansi_escape_chars(self):
         """Символы вне ANSI — не трогаются."""
-        from vless_installer.modules.box_renderer import _plain
+        from chimera.modules.box_renderer import _plain
         self.assertEqual(_plain("привет мир"), "привет мир")
 
 
@@ -155,63 +155,63 @@ class TestWcslen(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_ascii_one_per_char(self):
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         self.assertEqual(_wcslen("hello"), 5)
 
     def test_empty_string(self):
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         self.assertEqual(_wcslen(""), 0)
 
     def test_ansi_codes_zero_width(self):
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         self.assertEqual(_wcslen("\033[1;31mhi\033[0m"), 2)
 
     def test_cjk_two_columns(self):
         """CJK символы — 2 колонки каждый."""
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         self.assertEqual(_wcslen("中文"), 4)
 
     def test_cyrillic_one_per_char(self):
         """Кириллица — 1 колонка (eaw='N', не emoji)."""
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         self.assertEqual(_wcslen("привет"), 6)
 
     def test_box_drawing_one_column(self):
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         self.assertEqual(_wcslen("─│┌┐└┘"), 6)
 
     def test_block_elements_one_column(self):
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         self.assertEqual(_wcslen("█░▓▒"), 4)
 
     def test_emoji_outside_bmp_two_columns(self):
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         self.assertEqual(_wcslen("🚀"), 2)
 
     def test_force_width2_emoji(self):
         """❌ (U+274C) — явно 2 колонки."""
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         self.assertEqual(_wcslen("❌"), 2)
 
     def test_vs16_zero_width(self):
         """VS16 (U+FE0F) — нулевая ширина."""
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         self.assertEqual(_wcslen("⚡\ufe0f"), 2)  # ⚡ U+26A1 eaw='W' = 2, VS16 = 0
 
     def test_zwj_zero_width(self):
         """ZWJ (U+200D) — нулевая ширина."""
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         # 🇷🇺 — региональный индикатор пара = 2 колонки
         self.assertEqual(_wcslen("🇷🇺"), 2)
 
     def test_combining_mark_zero_width(self):
         """Combining mark (Mn) — нулевая ширина."""
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         # 'a' + combining acute = 1 колонка
         self.assertEqual(_wcslen("a\u0301"), 1)
 
     def test_mixed_string(self):
-        from vless_installer.modules.box_renderer import _wcslen
+        from chimera.modules.box_renderer import _wcslen
         # "hi ❤" = 2 + 1 + 2 = 5 (пробел=1, ❤ = 2)
         self.assertEqual(_wcslen("hi ❤"), 5)
 
@@ -223,14 +223,14 @@ class TestBoxLineRender(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def _capture(self, fn):
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         buf = io.StringIO()
         with patch("sys.stdout", buf):
             fn()
         return buf.getvalue()
 
     def test_top_has_corners(self):
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         # фиксируем ширину
         with patch.object(box_renderer, "_BOX_W", 64):
             out = self._capture(box_renderer._box_line_top)
@@ -238,14 +238,14 @@ class TestBoxLineRender(unittest.TestCase):
         self.assertIn("╗", out)
 
     def test_sep_has_corners(self):
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         with patch.object(box_renderer, "_BOX_W", 64):
             out = self._capture(box_renderer._box_line_sep)
         self.assertIn("╠", out)
         self.assertIn("║", out)
 
     def test_bot_has_corners(self):
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         with patch.object(box_renderer, "_BOX_W", 64):
             out = self._capture(box_renderer._box_line_bot)
         self.assertIn("╚", out)
@@ -257,7 +257,7 @@ class TestBoxRow(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         self._box_renderer = box_renderer
         self._patch_w = patch.object(box_renderer, "_BOX_W", 64)
         self._patch_w.start()
@@ -297,7 +297,7 @@ class TestBoxRow(unittest.TestCase):
 
     def test_preserves_ansi_color(self):
         """Цвет в начале не должен ломать отступ."""
-        from vless_installer.modules.box_renderer import RED, NC
+        from chimera.modules.box_renderer import RED, NC
         out = self._capture(f"{RED}hi{NC}")
         # результат должен содержать 'hi' и не содержать ANSI внутри паддинга
         self.assertIn("hi", out)
@@ -309,7 +309,7 @@ class TestBoxTop(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         self._box_renderer = box_renderer
         self._patch_w = patch.object(box_renderer, "_BOX_W", 64)
         self._patch_w.start()
@@ -340,7 +340,7 @@ class TestBoxItem(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         self._box_renderer = box_renderer
         self._patch_w = patch.object(box_renderer, "_BOX_W", 64)
         self._patch_w.start()
@@ -374,7 +374,7 @@ class TestBoxWrapMsg(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import box_renderer
+        from chimera.modules import box_renderer
         self._box_renderer = box_renderer
         self._patch_w = patch.object(box_renderer, "_BOX_W", 64)
         self._patch_w.start()
@@ -389,20 +389,20 @@ class TestBoxWrapMsg(unittest.TestCase):
         return buf.getvalue()
 
     def test_short_message_one_line(self):
-        from vless_installer.modules.box_renderer import GREEN, NC
+        from chimera.modules.box_renderer import GREEN, NC
         out = self._capture(f"{GREEN}OK{NC}", 2, "all good")
         self.assertIn("OK", out)
         self.assertIn("all good", out)
 
     def test_long_message_wraps(self):
-        from vless_installer.modules.box_renderer import GREEN, NC
+        from chimera.modules.box_renderer import GREEN, NC
         long_msg = "word " * 30
         out = self._capture(f"{GREEN}OK{NC}", 2, long_msg)
         # должно быть несколько строк
         self.assertGreater(out.count("║"), 2)
 
     def test_empty_message_only_prefix(self):
-        from vless_installer.modules.box_renderer import GREEN, NC
+        from chimera.modules.box_renderer import GREEN, NC
         out = self._capture(f"{GREEN}OK{NC}", 2, "")
         self.assertIn("OK", out)
 

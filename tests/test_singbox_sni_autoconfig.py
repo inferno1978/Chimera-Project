@@ -31,7 +31,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -41,9 +41,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 def _enter_patches(stack, patches):
@@ -68,38 +68,38 @@ class TestDetectRealityBackend(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_returns_loopback_8442_for_reality_mode(self):
-        from vless_installer.modules.singbox_nginx import _detect_reality_backend
+        from chimera.modules.singbox_nginx import _detect_reality_backend
         self._main_state.write_text(json.dumps({
             "protocol_mode": "reality",
             "awg_exit_enabled": False,
         }))
-        with patch("vless_installer.modules.singbox_nginx._Path") as mock_path:
+        with patch("chimera.modules.singbox_nginx._Path") as mock_path:
             mock_path.return_value = self._main_state
             mock_path.side_effect = lambda x: self._main_state if str(x) == "/var/lib/xray-installer/state.json" else Path(x)
             # Actually simpler: just patch _read_main_state
-        with patch("vless_installer.modules.singbox_nginx._read_main_state",
+        with patch("chimera.modules.singbox_nginx._read_main_state",
                    return_value={"protocol_mode": "reality", "awg_exit_enabled": False}):
             result = _detect_reality_backend()
         self.assertEqual(result, "127.0.0.1:8442")
 
     def test_returns_empty_for_xhttp_mode(self):
-        from vless_installer.modules.singbox_nginx import _detect_reality_backend
-        with patch("vless_installer.modules.singbox_nginx._read_main_state",
+        from chimera.modules.singbox_nginx import _detect_reality_backend
+        with patch("chimera.modules.singbox_nginx._read_main_state",
                    return_value={"protocol_mode": "xhttp", "awg_exit_enabled": False}):
             result = _detect_reality_backend()
         self.assertEqual(result, "")
 
     def test_returns_empty_for_awg_mode(self):
-        from vless_installer.modules.singbox_nginx import _detect_reality_backend
-        with patch("vless_installer.modules.singbox_nginx._read_main_state",
+        from chimera.modules.singbox_nginx import _detect_reality_backend
+        with patch("chimera.modules.singbox_nginx._read_main_state",
                    return_value={"protocol_mode": "reality", "awg_exit_enabled": True}):
             result = _detect_reality_backend()
         self.assertEqual(result, "")
 
     def test_does_not_use_state_socket(self):
         """НЕ использует state.json['socket'] — это decoy-сокет, отдельная логика."""
-        from vless_installer.modules.singbox_nginx import _detect_reality_backend
-        with patch("vless_installer.modules.singbox_nginx._read_main_state",
+        from chimera.modules.singbox_nginx import _detect_reality_backend
+        with patch("chimera.modules.singbox_nginx._read_main_state",
                    return_value={"protocol_mode": "reality", "awg_exit_enabled": False,
                                  "socket": "/dev/shm/abc123.socket"}):
             result = _detect_reality_backend()
@@ -127,14 +127,14 @@ class TestDetectShadowtlsSni(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_nginx.singbox_state_load"),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_nginx.singbox_state_load"),
         ]
 
     def test_returns_handshake_server_when_enabled(self):
-        from vless_installer.modules.singbox_nginx import _detect_shadowtls_sni
+        from chimera.modules.singbox_nginx import _detect_shadowtls_sni
         mock_state = {
             "inbounds": {
                 "shadowtls": {
@@ -146,20 +146,20 @@ class TestDetectShadowtlsSni(unittest.TestCase):
         with ExitStack() as stack:
             for p in self._patches():
                 stack.enter_context(p)
-            with patch("vless_installer.modules.singbox_nginx.singbox_state_load",
+            with patch("chimera.modules.singbox_nginx.singbox_state_load",
                        return_value=mock_state):
                 result = _detect_shadowtls_sni()
         self.assertEqual(result, "www.cloudflare.com")
 
     def test_returns_empty_when_disabled(self):
-        from vless_installer.modules.singbox_nginx import _detect_shadowtls_sni
+        from chimera.modules.singbox_nginx import _detect_shadowtls_sni
         mock_state = {
             "inbounds": {"shadowtls": {"enabled": False}}
         }
         with ExitStack() as stack:
             for p in self._patches():
                 stack.enter_context(p)
-            with patch("vless_installer.modules.singbox_nginx.singbox_state_load",
+            with patch("chimera.modules.singbox_nginx.singbox_state_load",
                        return_value=mock_state):
                 result = _detect_shadowtls_sni()
         self.assertEqual(result, "")
@@ -177,7 +177,7 @@ class TestDetectAnytlsSni(unittest.TestCase):
 
     def test_returns_common_name_from_state(self):
         """Новые установки (v4.23.5+): common_name сохранён в state."""
-        from vless_installer.modules.singbox_nginx import _detect_anytls_sni
+        from chimera.modules.singbox_nginx import _detect_anytls_sni
         mock_state = {
             "inbounds": {
                 "anytls": {
@@ -186,14 +186,14 @@ class TestDetectAnytlsSni(unittest.TestCase):
                 }
             }
         }
-        with patch("vless_installer.modules.singbox_nginx.singbox_state_load",
+        with patch("chimera.modules.singbox_nginx.singbox_state_load",
                    return_value=mock_state):
             result = _detect_anytls_sni()
         self.assertEqual(result, "vless.example.com")
 
     def test_returns_cn_from_cert_fallback(self):
         """Старые установки: нет common_name в state, но есть cert_path → парсим CN."""
-        from vless_installer.modules.singbox_nginx import _detect_anytls_sni
+        from chimera.modules.singbox_nginx import _detect_anytls_sni
         mock_state = {
             "inbounds": {
                 "anytls": {
@@ -204,17 +204,17 @@ class TestDetectAnytlsSni(unittest.TestCase):
             }
         }
         mock_run = MagicMock(returncode=0, stdout="subject=C=XX, CN=old-domain.example.com\n")
-        with patch("vless_installer.modules.singbox_nginx.singbox_state_load",
+        with patch("chimera.modules.singbox_nginx.singbox_state_load",
                    return_value=mock_state):
-            with patch("vless_installer.modules.singbox_nginx._Path") as mock_path:
+            with patch("chimera.modules.singbox_nginx._Path") as mock_path:
                 mock_path.return_value.exists.return_value = True
-                with patch("vless_installer.modules.singbox_nginx._run", return_value=mock_run):
+                with patch("chimera.modules.singbox_nginx._run", return_value=mock_run):
                     result = _detect_anytls_sni()
         self.assertEqual(result, "old-domain.example.com")
 
     def test_returns_empty_when_no_common_name_and_no_cert(self):
         """Полное отсутствие обоих источников — пустая строка, не тихий пропуск."""
-        from vless_installer.modules.singbox_nginx import _detect_anytls_sni
+        from chimera.modules.singbox_nginx import _detect_anytls_sni
         mock_state = {
             "inbounds": {
                 "anytls": {
@@ -223,17 +223,17 @@ class TestDetectAnytlsSni(unittest.TestCase):
                 }
             }
         }
-        with patch("vless_installer.modules.singbox_nginx.singbox_state_load",
+        with patch("chimera.modules.singbox_nginx.singbox_state_load",
                    return_value=mock_state):
             result = _detect_anytls_sni()
         self.assertEqual(result, "")
 
     def test_returns_empty_when_anytls_disabled(self):
-        from vless_installer.modules.singbox_nginx import _detect_anytls_sni
+        from chimera.modules.singbox_nginx import _detect_anytls_sni
         mock_state = {
             "inbounds": {"anytls": {"enabled": False}}
         }
-        with patch("vless_installer.modules.singbox_nginx.singbox_state_load",
+        with patch("chimera.modules.singbox_nginx.singbox_state_load",
                    return_value=mock_state):
             result = _detect_anytls_sni()
         self.assertEqual(result, "")
@@ -256,11 +256,11 @@ class TestEnsureSelfSignedCertReturnsCn(unittest.TestCase):
 
     def test_returns_three_values(self):
         """Возвращает tuple из 3 элементов, не 2."""
-        from vless_installer.modules.singbox_menu import _ensure_self_signed_cert
+        from chimera.modules.singbox_menu import _ensure_self_signed_cert
         cert_dir = self._tmpdir / "certs"
         cert_dir.mkdir(parents=True, exist_ok=True)
-        with patch("vless_installer.modules.singbox_menu.SINGBOX_CERT_DIR", cert_dir):
-            with patch("vless_installer.modules.singbox_common.generate_self_signed_cert",
+        with patch("chimera.modules.singbox_menu.SINGBOX_CERT_DIR", cert_dir):
+            with patch("chimera.modules.singbox_common.generate_self_signed_cert",
                        return_value=(cert_dir / "test.crt", cert_dir / "test.key")):
                 result = _ensure_self_signed_cert("test")
         self.assertEqual(len(result), 3)
@@ -269,11 +269,11 @@ class TestEnsureSelfSignedCertReturnsCn(unittest.TestCase):
 
     def test_returns_custom_common_name(self):
         """Переданный common_name возвращается в результате."""
-        from vless_installer.modules.singbox_menu import _ensure_self_signed_cert
+        from chimera.modules.singbox_menu import _ensure_self_signed_cert
         cert_dir = self._tmpdir / "certs"
         cert_dir.mkdir(parents=True, exist_ok=True)
-        with patch("vless_installer.modules.singbox_menu.SINGBOX_CERT_DIR", cert_dir):
-            with patch("vless_installer.modules.singbox_common.generate_self_signed_cert",
+        with patch("chimera.modules.singbox_menu.SINGBOX_CERT_DIR", cert_dir):
+            with patch("chimera.modules.singbox_common.generate_self_signed_cert",
                        return_value=(cert_dir / "test.crt", cert_dir / "test.key")):
                 result = _ensure_self_signed_cert("anytls", common_name="vless.example.com")
         cert_path, key_path, cn = result
@@ -290,7 +290,7 @@ class TestEnsureSelfSignedCertReturnsCn(unittest.TestCase):
         Без этого auto-detect SNI в auto_enable_sni_dispatch получит
         несоответствующий сертификату CN → неверная маршрутизация.
         """
-        from vless_installer.modules.singbox_menu import _ensure_self_signed_cert
+        from chimera.modules.singbox_menu import _ensure_self_signed_cert
         cert_dir = self._tmpdir / "certs"
         cert_dir.mkdir(parents=True, exist_ok=True)
         # Создаём существующий cert + key файлы
@@ -299,8 +299,8 @@ class TestEnsureSelfSignedCertReturnsCn(unittest.TestCase):
         # Мокаем openssl — возвращает CN=old-domain.example.com
         mock_run = MagicMock(returncode=0,
                              stdout="subject=C=XX, CN=old-domain.example.com\n")
-        with patch("vless_installer.modules.singbox_menu.SINGBOX_CERT_DIR", cert_dir):
-            with patch("vless_installer.modules.singbox_menu._parse_cn_from_cert",
+        with patch("chimera.modules.singbox_menu.SINGBOX_CERT_DIR", cert_dir):
+            with patch("chimera.modules.singbox_menu._parse_cn_from_cert",
                        return_value="old-domain.example.com"):
                 result = _ensure_self_signed_cert("anytls",
                                                   common_name="new-domain.example.com")
@@ -311,13 +311,13 @@ class TestEnsureSelfSignedCertReturnsCn(unittest.TestCase):
 
     def test_existing_cert_falls_back_to_passed_cn_on_parse_error(self):
         """Если openssl парсинг не удался — fallback на переданный common_name."""
-        from vless_installer.modules.singbox_menu import _ensure_self_signed_cert
+        from chimera.modules.singbox_menu import _ensure_self_signed_cert
         cert_dir = self._tmpdir / "certs"
         cert_dir.mkdir(parents=True, exist_ok=True)
         (cert_dir / "anytls.crt").write_text("corrupt cert")
         (cert_dir / "anytls.key").write_text("fake key")
-        with patch("vless_installer.modules.singbox_menu.SINGBOX_CERT_DIR", cert_dir):
-            with patch("vless_installer.modules.singbox_menu._parse_cn_from_cert",
+        with patch("chimera.modules.singbox_menu.SINGBOX_CERT_DIR", cert_dir):
+            with patch("chimera.modules.singbox_menu._parse_cn_from_cert",
                        return_value=""):
                 result = _ensure_self_signed_cert("anytls",
                                                   common_name="fallback.example.com")
@@ -345,16 +345,16 @@ class TestEnableAnytlsCommonName(unittest.TestCase):
 
     def _patches(self):
         return [
-            patch("vless_installer.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
-            patch("vless_installer.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
-            patch("vless_installer.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
+            patch("chimera.modules.singbox_common.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_common.MAIN_STATE_FILE", self._main_state),
+            patch("chimera.modules.singbox_state.SINGBOX_STATE_FILE", self._sb_state),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_DIR", self._tmpdir / "sb"),
+            patch("chimera.modules.singbox_config.SINGBOX_CONFIG_FILE", self._tmpdir / "sb" / "config.json"),
         ]
 
     def test_common_name_saved_in_state(self):
-        from vless_installer.modules.singbox_config import singbox_enable_anytls
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_anytls
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -372,8 +372,8 @@ class TestEnableAnytlsCommonName(unittest.TestCase):
 
     def test_common_name_not_overwritten_on_reenable(self):
         """Повторный enable без common_name НЕ затирает существующее значение."""
-        from vless_installer.modules.singbox_config import singbox_enable_anytls
-        from vless_installer.modules.singbox_state import (
+        from chimera.modules.singbox_config import singbox_enable_anytls
+        from chimera.modules.singbox_state import (
             singbox_state_init, singbox_state_get_inbound,
         )
         with ExitStack() as stack:
@@ -399,7 +399,7 @@ class TestProxyProtocolInStreamConf(unittest.TestCase):
 
     def test_proxy_protocol_on_in_config(self):
         """proxy_protocol on раскомментирован в stream{} конфиге."""
-        from vless_installer.modules.singbox_nginx import _build_nginx_stream_conf
+        from chimera.modules.singbox_nginx import _build_nginx_stream_conf
         conf = _build_nginx_stream_conf(
             shadowtls_sni="shadowtls.example.com",
             anytls_sni="anytls.example.com",
@@ -417,7 +417,7 @@ class TestProxyProtocolInStreamConf(unittest.TestCase):
 
     def test_proxy_protocol_not_commented_out(self):
         """Старый закомментированный вариант НЕ должен присутствовать."""
-        from vless_installer.modules.singbox_nginx import _build_nginx_stream_conf
+        from chimera.modules.singbox_nginx import _build_nginx_stream_conf
         conf = _build_nginx_stream_conf(
             shadowtls_sni="", anytls_sni="", default_backend="127.0.0.1:8442",
         )
@@ -441,7 +441,7 @@ class TestCommentUncommentListen443(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_comment_out_listen_443(self):
-        from vless_installer.modules.singbox_nginx import _comment_out_listen_443
+        from chimera.modules.singbox_nginx import _comment_out_listen_443
         cfg = self._tmpdir / "test.conf"
         cfg.write_text(
             "server {\n"
@@ -457,7 +457,7 @@ class TestCommentUncommentListen443(unittest.TestCase):
         self.assertIn("server_name example.com;", content)
 
     def test_comment_creates_backup(self):
-        from vless_installer.modules.singbox_nginx import _comment_out_listen_443
+        from chimera.modules.singbox_nginx import _comment_out_listen_443
         cfg = self._tmpdir / "test.conf"
         original = "server {\n    listen 443 ssl;\n}\n"
         cfg.write_text(original)
@@ -467,7 +467,7 @@ class TestCommentUncommentListen443(unittest.TestCase):
         self.assertEqual(backup.read_text(), original)
 
     def test_uncomment_listen_443(self):
-        from vless_installer.modules.singbox_nginx import _uncomment_listen_443
+        from chimera.modules.singbox_nginx import _uncomment_listen_443
         cfg = self._tmpdir / "test.conf"
         cfg.write_text(
             "server {\n"
@@ -482,7 +482,7 @@ class TestCommentUncommentListen443(unittest.TestCase):
         self.assertNotIn("# [SNI-DISPATCH]", content)
 
     def test_uncomment_preserves_other_comments(self):
-        from vless_installer.modules.singbox_nginx import _uncomment_listen_443
+        from chimera.modules.singbox_nginx import _uncomment_listen_443
         cfg = self._tmpdir / "test.conf"
         cfg.write_text(
             "server {\n"
@@ -497,7 +497,7 @@ class TestCommentUncommentListen443(unittest.TestCase):
 
     def test_does_not_comment_unix_socket_listen(self):
         """listen unix:/path НЕ должен комментироваться — это decoy-сокет."""
-        from vless_installer.modules.singbox_nginx import _comment_out_listen_443
+        from chimera.modules.singbox_nginx import _comment_out_listen_443
         cfg = self._tmpdir / "test.conf"
         cfg.write_text(
             "server {\n"

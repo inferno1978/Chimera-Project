@@ -2,7 +2,7 @@
 """
 tests/test_geo_mirrors.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/geo_mirrors.py.
+Unit-тесты для chimera/modules/geo_mirrors.py.
 
 Покрывает:
   • Структуру и инварианты списка зеркал
@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from vless_installer.modules.geo_mirrors import (
+from chimera.modules.geo_mirrors import (
     get_geosite_urls,
     get_geoip_urls,
     get_all_mirrors,

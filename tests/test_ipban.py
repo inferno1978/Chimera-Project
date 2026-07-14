@@ -2,7 +2,7 @@
 """
 tests/test_ipban.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/ipban.py.
+Unit-тесты для chimera/modules/ipban.py.
 
 Покрывает:
   1. _parse_ip — парсинг IPv4/IPv6
@@ -29,7 +29,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -39,9 +39,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestParseIp(unittest.TestCase):
@@ -51,16 +51,16 @@ class TestParseIp(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_ipv4(self):
-        from vless_installer.modules.ipban import _parse_ip
+        from chimera.modules.ipban import _parse_ip
         self.assertEqual(_parse_ip("1.2.3.4"), ["1.2.3.4/32"])
 
     def test_ipv6(self):
-        from vless_installer.modules.ipban import _parse_ip
+        from chimera.modules.ipban import _parse_ip
         self.assertEqual(_parse_ip("::1"), ["::1/128"])
         self.assertEqual(_parse_ip("2001:db8::1"), ["2001:db8::1/128"])
 
     def test_invalid_raises(self):
-        from vless_installer.modules.ipban import _parse_ip
+        from chimera.modules.ipban import _parse_ip
         with self.assertRaises(ValueError):
             _parse_ip("invalid")
 
@@ -72,16 +72,16 @@ class TestParseCidr(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_valid_cidr(self):
-        from vless_installer.modules.ipban import _parse_cidr
+        from chimera.modules.ipban import _parse_cidr
         self.assertEqual(_parse_cidr("10.0.0.0/24"), ["10.0.0.0/24"])
 
     def test_normalizes_non_strict(self):
         """10.0.0.5/24 нормализуется в 10.0.0.0/24."""
-        from vless_installer.modules.ipban import _parse_cidr
+        from chimera.modules.ipban import _parse_cidr
         self.assertEqual(_parse_cidr("10.0.0.5/24"), ["10.0.0.0/24"])
 
     def test_ipv6_cidr(self):
-        from vless_installer.modules.ipban import _parse_cidr
+        from chimera.modules.ipban import _parse_cidr
         self.assertEqual(_parse_cidr("2001:db8::/32"), ["2001:db8::/32"])
 
 
@@ -92,7 +92,7 @@ class TestParseRange(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_valid_range(self):
-        from vless_installer.modules.ipban import _parse_range
+        from chimera.modules.ipban import _parse_range
         result = _parse_range("1.2.3.0-1.2.3.255")
         self.assertGreater(len(result), 0)
         # summarize_address_range даёт ["1.2.3.0/24"]
@@ -100,12 +100,12 @@ class TestParseRange(unittest.TestCase):
 
     def test_reversed_range_swapped(self):
         """Если start > end — меняются местами."""
-        from vless_installer.modules.ipban import _parse_range
+        from chimera.modules.ipban import _parse_range
         result = _parse_range("1.2.3.255-1.2.3.0")
         self.assertIn("1.2.3.0/24", result)
 
     def test_no_hyphen_raises(self):
-        from vless_installer.modules.ipban import _parse_range
+        from chimera.modules.ipban import _parse_range
         with self.assertRaises(ValueError):
             _parse_range("1.2.3.4")
 
@@ -117,15 +117,15 @@ class TestAsnNormalize(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_adds_as_prefix(self):
-        from vless_installer.modules.ipban import _asn_normalize
+        from chimera.modules.ipban import _asn_normalize
         self.assertEqual(_asn_normalize("12345"), "AS12345")
 
     def test_uppercase(self):
-        from vless_installer.modules.ipban import _asn_normalize
+        from chimera.modules.ipban import _asn_normalize
         self.assertEqual(_asn_normalize("as12345"), "AS12345")
 
     def test_already_prefixed(self):
-        from vless_installer.modules.ipban import _asn_normalize
+        from chimera.modules.ipban import _asn_normalize
         self.assertEqual(_asn_normalize("AS12345"), "AS12345")
         self.assertEqual(_asn_normalize("as12345"), "AS12345")
 
@@ -137,28 +137,28 @@ class TestDetectInputKind(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_asn_with_prefix(self):
-        from vless_installer.modules.ipban import _detect_input_kind
+        from chimera.modules.ipban import _detect_input_kind
         self.assertEqual(_detect_input_kind("AS12345"), "asn")
 
     def test_asn_numeric(self):
-        from vless_installer.modules.ipban import _detect_input_kind
+        from chimera.modules.ipban import _detect_input_kind
         self.assertEqual(_detect_input_kind("12345"), "asn")
 
     def test_cidr(self):
-        from vless_installer.modules.ipban import _detect_input_kind
+        from chimera.modules.ipban import _detect_input_kind
         self.assertEqual(_detect_input_kind("10.0.0.0/24"), "cidr")
 
     def test_range(self):
-        from vless_installer.modules.ipban import _detect_input_kind
+        from chimera.modules.ipban import _detect_input_kind
         self.assertEqual(_detect_input_kind("1.2.3.0-1.2.3.255"), "range")
 
     def test_ip(self):
-        from vless_installer.modules.ipban import _detect_input_kind
+        from chimera.modules.ipban import _detect_input_kind
         self.assertEqual(_detect_input_kind("1.2.3.4"), "ip")
 
     def test_ipv6_is_ip(self):
         """IPv6 без / → 'ip' (нет дефиса, нет /)."""
-        from vless_installer.modules.ipban import _detect_input_kind
+        from chimera.modules.ipban import _detect_input_kind
         self.assertEqual(_detect_input_kind("2001:db8::1"), "ip")
 
 
@@ -175,23 +175,23 @@ class TestStateLoadSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.ipban._STATE_FILE", self._state)
+        return patch("chimera.modules.ipban._STATE_FILE", self._state)
 
     def test_load_returns_default_when_no_file(self):
-        from vless_installer.modules.ipban import _state_load
+        from chimera.modules.ipban import _state_load
         with self._patch():
             result = _state_load()
         self.assertEqual(result, {"entries": []})
 
     def test_load_returns_default_on_corrupt(self):
-        from vless_installer.modules.ipban import _state_load
+        from chimera.modules.ipban import _state_load
         self._state.write_text("{invalid")
         with self._patch():
             result = _state_load()
         self.assertEqual(result, {"entries": []})
 
     def test_save_then_load(self):
-        from vless_installer.modules.ipban import _state_load, _state_save
+        from chimera.modules.ipban import _state_load, _state_save
         with self._patch():
             _state_save({"entries": [{"display": "x"}]})
             loaded = _state_load()
@@ -211,10 +211,10 @@ class TestStateAddRemoveEntry(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.ipban._STATE_FILE", self._state)
+        return patch("chimera.modules.ipban._STATE_FILE", self._state)
 
     def test_add_new_entry(self):
-        from vless_installer.modules.ipban import (
+        from chimera.modules.ipban import (
             _state_add_entry, _state_load,
         )
         with self._patch():
@@ -226,7 +226,7 @@ class TestStateAddRemoveEntry(unittest.TestCase):
 
     def test_add_replaces_duplicate_by_display(self):
         """Добавление с тем же display — заменяет старую."""
-        from vless_installer.modules.ipban import (
+        from chimera.modules.ipban import (
             _state_add_entry, _state_load,
         )
         with self._patch():
@@ -237,7 +237,7 @@ class TestStateAddRemoveEntry(unittest.TestCase):
         self.assertEqual(state["entries"][0]["comment"], "new")
 
     def test_remove_existing_entry(self):
-        from vless_installer.modules.ipban import (
+        from chimera.modules.ipban import (
             _state_add_entry, _state_remove_entry, _state_load,
         )
         with self._patch():
@@ -247,7 +247,7 @@ class TestStateAddRemoveEntry(unittest.TestCase):
         self.assertEqual(len(state["entries"]), 0)
 
     def test_remove_nonexistent_returns_false(self):
-        from vless_installer.modules.ipban import _state_remove_entry
+        from chimera.modules.ipban import _state_remove_entry
         with self._patch():
             self.assertFalse(_state_remove_entry("nonexistent"))
 

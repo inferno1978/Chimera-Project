@@ -2,7 +2,7 @@
 """
 tests/test_asn_cache.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/asn_cache.py.
+Unit-тесты для chimera/modules/asn_cache.py.
 
 Покрывает:
   1. _asn_cache_save / _asn_cache_load / _asn_cache_delete — SQLite CRUD
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -35,9 +35,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestAsnCacheSaveLoad(unittest.TestCase):
@@ -53,17 +53,17 @@ class TestAsnCacheSaveLoad(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.asn_cache.ASN_CACHE_DB", self._db)
+        return patch("chimera.modules.asn_cache.ASN_CACHE_DB", self._db)
 
     def test_load_returns_empty_when_no_db(self):
-        from vless_installer.modules.asn_cache import _asn_cache_load
+        from chimera.modules.asn_cache import _asn_cache_load
         with self._patch():
             cidrs, age = _asn_cache_load("AS123")
         self.assertEqual(cidrs, [])
         self.assertIsNone(age)
 
     def test_save_then_load(self):
-        from vless_installer.modules.asn_cache import (
+        from chimera.modules.asn_cache import (
             _asn_cache_save, _asn_cache_load,
         )
         with self._patch():
@@ -75,7 +75,7 @@ class TestAsnCacheSaveLoad(unittest.TestCase):
         self.assertGreaterEqual(age, 0)
 
     def test_load_returns_empty_for_missing_key(self):
-        from vless_installer.modules.asn_cache import (
+        from chimera.modules.asn_cache import (
             _asn_cache_save, _asn_cache_load,
         )
         with self._patch():
@@ -84,7 +84,7 @@ class TestAsnCacheSaveLoad(unittest.TestCase):
         self.assertEqual(cidrs, [])
 
     def test_overwrites_existing_key(self):
-        from vless_installer.modules.asn_cache import (
+        from chimera.modules.asn_cache import (
             _asn_cache_save, _asn_cache_load,
         )
         with self._patch():
@@ -107,10 +107,10 @@ class TestAsnCacheDelete(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.asn_cache.ASN_CACHE_DB", self._db)
+        return patch("chimera.modules.asn_cache.ASN_CACHE_DB", self._db)
 
     def test_deletes_existing_key(self):
-        from vless_installer.modules.asn_cache import (
+        from chimera.modules.asn_cache import (
             _asn_cache_save, _asn_cache_load, _asn_cache_delete,
         )
         with self._patch():
@@ -120,7 +120,7 @@ class TestAsnCacheDelete(unittest.TestCase):
         self.assertEqual(cidrs, [])
 
     def test_does_not_raise_for_missing_key(self):
-        from vless_installer.modules.asn_cache import _asn_cache_delete
+        from chimera.modules.asn_cache import _asn_cache_delete
         with self._patch():
             _asn_cache_delete("nonexistent")  # не должно бросать
 
@@ -138,16 +138,16 @@ class TestAsnCacheInfo(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.asn_cache.ASN_CACHE_DB", self._db)
+        return patch("chimera.modules.asn_cache.ASN_CACHE_DB", self._db)
 
     def test_returns_empty_when_no_db(self):
-        from vless_installer.modules.asn_cache import _asn_cache_info
+        from chimera.modules.asn_cache import _asn_cache_info
         with self._patch():
             result = _asn_cache_info()
         self.assertEqual(result, [])
 
     def test_returns_list_of_dicts(self):
-        from vless_installer.modules.asn_cache import (
+        from chimera.modules.asn_cache import (
             _asn_cache_save, _asn_cache_info,
         )
         with self._patch():
@@ -168,23 +168,23 @@ class TestFmtAsnShort(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_empty_dict_returns_empty(self):
-        from vless_installer.modules.asn_cache import _fmt_asn_short
+        from chimera.modules.asn_cache import _fmt_asn_short
         self.assertEqual(_fmt_asn_short({}), "")
 
     def test_only_asn(self):
-        from vless_installer.modules.asn_cache import _fmt_asn_short
+        from chimera.modules.asn_cache import _fmt_asn_short
         result = _fmt_asn_short({"asn": "AS12345"})
         self.assertEqual(result, "AS12345")
 
     def test_asn_with_isp(self):
-        from vless_installer.modules.asn_cache import _fmt_asn_short
+        from chimera.modules.asn_cache import _fmt_asn_short
         result = _fmt_asn_short({"asn": "AS12345 Cloudflare", "isp": "Cloudflare Inc."})
         self.assertIn("AS12345", result)
         self.assertIn("Cloudflare Inc.", result)
         self.assertIn(" · ", result)
 
     def test_only_isp(self):
-        from vless_installer.modules.asn_cache import _fmt_asn_short
+        from chimera.modules.asn_cache import _fmt_asn_short
         result = _fmt_asn_short({"isp": "Some ISP"})
         self.assertIn("Some ISP", result)
 
@@ -195,11 +195,11 @@ class TestLookupAsn(unittest.TestCase):
     def setUp(self):
         _setup_core_in_sysmodules()
         # сбрасываем in-memory кеш
-        from vless_installer.modules import asn_cache
+        from chimera.modules import asn_cache
         asn_cache._asn_cache.clear()
 
     def test_returns_dict_on_success(self):
-        from vless_installer.modules import asn_cache
+        from chimera.modules import asn_cache
         mock_response = MagicMock()
         mock_response.__enter__.return_value = mock_response
         mock_response.__exit__.return_value = None
@@ -216,7 +216,7 @@ class TestLookupAsn(unittest.TestCase):
 
     def test_caches_result(self):
         """Повторный запрос не идёт в сеть."""
-        from vless_installer.modules import asn_cache
+        from chimera.modules import asn_cache
         mock_response = MagicMock()
         mock_response.__enter__.return_value = mock_response
         mock_response.__exit__.return_value = None
@@ -229,13 +229,13 @@ class TestLookupAsn(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_count, 1)
 
     def test_returns_empty_on_network_error(self):
-        from vless_installer.modules import asn_cache
+        from chimera.modules import asn_cache
         with patch("urllib.request.urlopen", side_effect=Exception("network error")):
             result = asn_cache._lookup_asn("1.1.1.1")
         self.assertEqual(result, {})
 
     def test_returns_empty_on_failure_status(self):
-        from vless_installer.modules import asn_cache
+        from chimera.modules import asn_cache
         mock_response = MagicMock()
         mock_response.__enter__.return_value = mock_response
         mock_response.__exit__.return_value = None

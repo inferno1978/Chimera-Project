@@ -1,0 +1,526 @@
+"""
+chimera/modules/ssl_certbot.py
+───────────────────────────────────────────────────────────────────────────────
+SSL / certbot: получение сертификата Let's Encrypt, фикс прав, автообновление,
+мониторинг certbot renew + алёрт.
+
+Содержит 4 логические части (объединены, т.к. все работают с SSL-сертификатами):
+
+1. **obtain_ssl_cert()** — интерактивный выпуск сертификата Let's Encrypt
+   через certbot --webroot (с fallback на самоподписанный).
+2. **fix_letsencrypt_permissions(domain)** — выставляет права на сертификаты
+   так, чтобы пользователь xray мог их читать (root:xray 640/644).
+3. **ensure_cert_fix_script(domain)** + **setup_cert_renewal()** — создает
+   systemd-хук и crontab для автообновления сертификата certbot renew.
+4. **Certbot monitor** — cron-задача дважды в день: certbot renew + проверка
+   срока + Telegram-алёрт. Управляется через do_manage_certbot_monitor().
+
+Точки входа из _core.py:
+    from chimera.modules.ssl_certbot import (
+        _CERTBOT_MONITOR_CRON, _CERTBOT_MONITOR_SCRIPT,
+        obtain_ssl_cert, fix_letsencrypt_permissions,
+        ensure_cert_fix_script, setup_cert_renewal,
+        _certbot_renew_and_notify, _certbot_install_monitor_cron,
+        do_manage_certbot_monitor,
+    )
+
+Доступ к helpers ядра (_run, _box_*, цвета, log_to_file, _tg_notify_event,
+_log_change, STATE_FILE, PARAM_*) — через importlib (lazy binding), как и в
+других извлечённых модулях (asn_cache.py, standalone_screens.py, geo_files.py).
+───────────────────────────────────────────────────────────────────────────────
+"""
+from __future__ import annotations
+
+import json
+import os
+import grp
+import time
+import textwrap
+from pathlib import Path
+from typing import Optional
+
+# ── Константы ─────────────────────────────────────────────────────────────────
+_CERTBOT_MONITOR_CRON    = Path("/etc/cron.d/xray-certbot-monitor")
+_CERTBOT_MONITOR_SCRIPT  = Path("/usr/local/bin/xray-certbot-monitor.sh")
+
+
+# =============================================================================
+#  ОТЛОЖЕННАЯ ПРИВЯЗКА К ЯДРУ (_core.py)
+# =============================================================================
+def _core_module():
+    """Возвращает модуль chimera._core, импортируя его лениво.
+
+    При запуске через cron (python -c 'from ... import ...') модуль ещё не
+    загружен — importlib полноценно его импортирует. При вызове из
+    интерактивного инсталлятора модуль уже в sys.modules (был импортиро­ван
+    одним из поздних lazy-вызовов внутри других модулей) — это просто lookup.
+    """
+    import importlib
+    return importlib.import_module("chimera._core")
+
+
+# =============================================================================
+#  ВЫПУСК СЕРТИФИКАТА LET'S ENCRYPT
+# =============================================================================
+def obtain_ssl_cert(domain: Optional[str] = None) -> None:
+    """Получение SSL-сертификата Let's Encrypt для PARAM_DOMAIN (с fallback).
+
+    Если domain передан явно — сертификат выпускается для этого домена (а не
+    для core.PARAM_DOMAIN). Используется в Telemt nginx-fallback, где домен
+    Telemt-маскировки может отличаться от основного VLESS-домена сервера.
+
+    Если domain не передан — поведение идентично предыдущему (VLESS install
+    flow не меняется ни в одном байте вывода).
+    """
+    core = _core_module()
+    info    = core.info
+    warn    = core.warn
+    success = core.success
+    _run    = core._run
+    die     = core.die
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_sep    = core._box_sep
+    _box_item   = core._box_item
+    _box_bottom = core._box_bottom
+    get_server_ip          = core.get_server_ip
+    generate_self_signed_cert = core.generate_self_signed_cert
+    PARAM_DOMAIN = domain if domain is not None else core.PARAM_DOMAIN
+    PARAM_EMAIL  = core.PARAM_EMAIL
+    PROTOCOL_MODE = core.PROTOCOL_MODE
+    CYAN, NC, GREEN, RED, YELLOW = core.CYAN, core.NC, core.GREEN, core.RED, core.YELLOW
+    # fix_letsencrypt_permissions — модуль-локальная (см. ниже)
+    info(f"Получение SSL-сертификата для {PARAM_DOMAIN}...")
+    # === Проверка DNS перед получением сертификата ===
+    ipv4 = get_server_ip("4")
+    if ipv4:
+        resolved = _run(["dig", "+short", PARAM_DOMAIN], capture=True, check=False).stdout.strip().split()
+        if ipv4 not in resolved and PARAM_DOMAIN not in resolved:
+            warn(f"Домен {PARAM_DOMAIN} НЕ резолвится в IP сервера ({ipv4})!")
+            warn("Это может привести к ошибке certbot.")
+            if input(f"{YELLOW}Продолжить всё равно? [y/N]:{NC} ").strip().lower() != 'y':
+                die("DNS не настроен корректно. Исправьте A-запись и запустите заново.")
+
+    cert_path = Path(f"/etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem")
+    key_path  = Path(f"/etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem")
+    web_root  = Path(f"/var/www/{PARAM_DOMAIN}")
+    request_new = True
+
+    if cert_path.exists() and key_path.exists():
+        try:
+            r = _run(["openssl", "x509", "-enddate", "-noout", "-in", str(cert_path)],
+                     capture=True, check=False)
+            expiry = r.stdout.strip().split("=", 1)[1]
+            r2 = _run(["date", "-d", expiry, "+%s"], capture=True, check=False)
+            expiry_epoch = int(r2.stdout.strip())
+            days_left = (expiry_epoch - int(time.time())) // 86400
+        except Exception:
+            expiry    = "unknown"
+            days_left = 0
+
+        print()
+        _box_top("Найден существующий сертификат")
+        _box_row()
+        _box_row(f"  Истекает: {CYAN}{expiry}{NC}")
+        color = GREEN if days_left > 0 else RED
+        label = f"{days_left} дней" if days_left > 0 else "ИСТЁК"
+        _box_row(f"  Осталось: {color}{label}{NC}")
+        _box_row()
+        _box_item("U", f"Использовать имеющийся")
+        _box_item("R", f"Перевыпустить новый")
+        _box_sep()
+        _box_bottom()
+        while True:
+            choice = input("  Выбор [U/R]: ").strip().lower() or "u"
+            if choice == "u":
+                request_new = False
+                success("Используется существующий сертификат")
+                break
+            elif choice == "r":
+                request_new = True
+                info("Будет выпущен новый сертификат")
+                break
+            warn("Введите U или R")
+
+    if request_new:
+        info("Выпуск сертификата Let's Encrypt...")
+        web_root.mkdir(parents=True, exist_ok=True)
+        (web_root / "index.html").write_text("<h1>ACME Verification</h1>")
+
+        le_ok = False
+        r = _run([
+            "certbot", "certonly", "--webroot",
+            "--webroot-path", str(web_root),
+            "--non-interactive", "--agree-tos",
+            "--email", PARAM_EMAIL,
+            "--force-renewal",
+            "-d", PARAM_DOMAIN,
+        ], capture=True, check=False)
+        if r.returncode == 0:
+            success("Сертификат Let's Encrypt успешно выпущен")
+            le_ok = True
+
+        if not le_ok:
+            warn("Не удалось получить сертификат LE — генерируем самоподписанный")
+            generate_self_signed_cert(PARAM_DOMAIN)
+
+        if not cert_path.exists():
+            warn(f"Сертификат не найден по пути {cert_path} — проверьте DNS и порт 80.")
+            warn("Установка продолжается, но HTTPS может не работать.")
+            warn(f"Для перевыпуска: certbot certonly --webroot -w {web_root} -d {PARAM_DOMAIN}")
+        else:
+            success(f"Сертификат на месте: {cert_path}")
+
+    # xHTTP TLS: Xray читает сертификаты напрямую — выставляем права
+    if PROTOCOL_MODE == "xhttp" and cert_path.exists():
+        fix_letsencrypt_permissions(PARAM_DOMAIN)
+
+
+def fix_letsencrypt_permissions(domain: str) -> None:
+    """Выставляет права на сертификаты так, чтобы пользователь xray мог их читать."""
+    core = _core_module()
+    warn    = core.warn
+    success = core.success
+    CYAN, NC, GREEN, RED, YELLOW = core.CYAN, core.NC, core.GREEN, core.RED, core.YELLOW
+    import os, grp
+    archive_dir     = Path(f"/etc/letsencrypt/archive/{domain}")
+    live_domain_dir = Path(f"/etc/letsencrypt/live/{domain}")
+
+    if not archive_dir.exists():
+        warn(f"fix_letsencrypt_permissions: {archive_dir} не найден — пропускаем")
+        return
+
+    # Гарантируем права на проход по директориям (execute bit).
+    # live/<domain> НЕ создаём через mkdir — эта директория принадлежит certbot.
+    for d in (Path("/etc/letsencrypt/live"), live_domain_dir,
+              Path("/etc/letsencrypt/archive"), archive_dir):
+        try:
+            if d.exists():
+                d.chmod(0o755)
+        except Exception as e:
+            warn(f"Ошибка установки прав на {d}: {e}")
+
+    # Получаем GID группы xray один раз
+    try:
+        xray_gid = grp.getgrnam('xray').gr_gid
+        has_xray = True
+    except KeyError:
+        has_xray = False
+
+    # privkey*.pem → 640 root:xray (только xray может читать приватный ключ)
+    for f_path in archive_dir.glob("privkey*.pem"):
+        try:
+            if has_xray:
+                os.chown(str(f_path), 0, xray_gid)
+            os.chmod(str(f_path), 0o640)
+        except Exception as e:
+            warn(f"Не удалось исправить права для {f_path}: {e}")
+
+    # fullchain/chain/cert → 644 root:root (публичные — читает nginx, xray и все)
+    for pattern in ("fullchain*.pem", "chain*.pem", "cert*.pem"):
+        for f_path in archive_dir.glob(pattern):
+            try:
+                os.chmod(str(f_path), 0o644)
+            except Exception as e:
+                warn(f"Не удалось исправить права для {f_path}: {e}")
+
+    success(f"Права на сертификаты для {domain} обновлены "
+            f"({'root:xray 640/644' if has_xray else '644 для всех'})")
+
+
+# =============================================================================
+#  АВТООБНОВЛЕНИЕ СЕРТИФИКАТА (systemd-хук + crontab)
+# =============================================================================
+def ensure_cert_fix_script(domain: str) -> Path:
+    """Создает внешний скрипт для исправления прав, вызываемый systemd перед стартом Xray."""
+    script_path = Path("/usr/local/bin/fix-xray-certs.sh")
+    script_content = f"""#!/bin/bash
+# Автоматический фикс прав для Xray xHTTP TLS (Created by install.py)
+DOMAIN="{domain}"
+ARCHIVE_DIR="/etc/letsencrypt/archive/$DOMAIN"
+LIVE_DIR="/etc/letsencrypt/live/$DOMAIN"
+
+[[ ! -d "$ARCHIVE_DIR" ]] && exit 0
+
+# Гарантируем права на проход по директориям
+chmod 755 /etc/letsencrypt/live 2>/dev/null || true
+chmod 755 "$LIVE_DIR" 2>/dev/null || true
+chmod 755 /etc/letsencrypt/archive 2>/dev/null || true
+chmod 755 "$ARCHIVE_DIR" 2>/dev/null || true
+
+# privkey → 640 root:xray (только xray читает приватный ключ)
+chown root:xray "$ARCHIVE_DIR"/privkey*.pem 2>/dev/null || true
+chmod 640 "$ARCHIVE_DIR"/privkey*.pem 2>/dev/null || true
+
+# Публичные сертификаты → 644 (читают все: xray, nginx, etc.)
+chmod 644 "$ARCHIVE_DIR"/fullchain*.pem 2>/dev/null || true
+chmod 644 "$ARCHIVE_DIR"/chain*.pem 2>/dev/null || true
+chmod 644 "$ARCHIVE_DIR"/cert*.pem 2>/dev/null || true
+"""
+    script_path.write_text(script_content)
+    script_path.chmod(0o750)
+    return script_path
+
+
+def setup_cert_renewal() -> None:
+    core = _core_module()
+    success = core.success
+    _run    = core._run
+    PROTOCOL_MODE = core.PROTOCOL_MODE
+    PARAM_DOMAIN  = core.PARAM_DOMAIN
+    deploy_dir = Path("/etc/letsencrypt/renewal-hooks/deploy")
+    deploy_dir.mkdir(parents=True, exist_ok=True)
+    hook = deploy_dir / "nginx-reload.sh"
+
+    if PROTOCOL_MODE == "xhttp":
+        # Хук восстанавливает права после certbot renew и перезапускает сервисы.
+        # privkey → 640 root:xray, публичные сертификаты → 644 (для xray и nginx).
+        hook.write_text(textwrap.dedent(f"""\
+#!/bin/bash
+# Автоматически создаётся установщиком VLESS xHTTP TLS
+DOMAIN="{PARAM_DOMAIN}"
+ARCHIVE_DIR="/etc/letsencrypt/archive/$DOMAIN"
+
+[[ ! -d "$ARCHIVE_DIR" ]] && exit 0
+
+chmod 755 /etc/letsencrypt/live 2>/dev/null || true
+chmod 755 /etc/letsencrypt/live/$DOMAIN 2>/dev/null || true
+chmod 755 /etc/letsencrypt/archive 2>/dev/null || true
+chmod 755 "$ARCHIVE_DIR" 2>/dev/null || true
+
+chown root:xray "$ARCHIVE_DIR"/privkey*.pem 2>/dev/null || true
+chmod 640 "$ARCHIVE_DIR"/privkey*.pem 2>/dev/null || true
+
+chmod 644 "$ARCHIVE_DIR"/fullchain*.pem 2>/dev/null || true
+chmod 644 "$ARCHIVE_DIR"/chain*.pem 2>/dev/null || true
+chmod 644 "$ARCHIVE_DIR"/cert*.pem 2>/dev/null || true
+
+systemctl restart xray 2>/dev/null || true
+systemctl reload nginx 2>/dev/null || true
+"""))
+    else:
+        hook.write_text("#!/bin/bash\nsystemctl reload nginx 2>/dev/null || true")
+
+    hook.chmod(0o755)
+
+    # crontab
+    r = _run(["crontab", "-l"], capture=True, check=False)
+    existing = r.stdout if r.returncode == 0 else ""
+    if "certbot" not in existing:
+        new_crontab = existing.rstrip('\n') + "\n0 3 * * * certbot renew --quiet\n"
+        _run(["crontab", "-"], input_text=new_crontab, check=False, quiet=True)
+    success("Автообновление сертификата настроено")
+
+
+# =============================================================================
+#  ФИЧА 2: МОНИТОРИНГ CERTBOT RENEW + АЛЕРТ
+# =============================================================================
+def _certbot_renew_and_notify() -> bool:
+    """Запускает certbot renew, при ошибке шлёт Telegram."""
+    core = _core_module()
+    info    = core.info
+    warn    = core.warn
+    success = core.success
+    _run    = core._run
+    log_to_file     = core.log_to_file
+    _tg_notify_event = core._tg_notify_event
+    _log_change      = core._log_change
+    STATE_FILE       = core.STATE_FILE
+    domain = ""
+    try:
+        if STATE_FILE.exists():
+            domain = json.loads(STATE_FILE.read_text()).get("domain", "")
+    except Exception:
+        pass
+
+    certbot = next(
+        (p for p in (Path("/snap/bin/certbot"), Path("/usr/bin/certbot"))
+         if p.exists()), None
+    )
+    if not certbot:
+        warn("certbot не найден")
+        return False
+
+    info("Запуск certbot renew...")
+    r = _run([str(certbot), "renew", "--quiet", "--non-interactive"],
+             check=False, capture=True)
+    ok = r.returncode == 0
+
+    if ok:
+        # Проверяем сколько дней осталось
+        if domain:
+            cert = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem")
+            if cert.exists():
+                try:
+                    r2 = _run(["openssl", "x509", "-in", str(cert),
+                               "-noout", "-enddate"], capture=True, check=False)
+                    expiry = r2.stdout.strip().split("=", 1)[1]
+                    r3 = _run(["date", "-d", expiry, "+%s"], capture=True, check=False)
+                    days = (int(r3.stdout.strip()) - int(time.time())) // 86400
+                    if days > 30:
+                        success(f"SSL сертификат действителен: {days} дн.")
+                    else:
+                        warn(f"SSL истекает через {days} дн.!")
+                        _tg_notify_event("cert_expire",
+                            f"⚠️ certbot renew OK, но срок истекает через {days} дн.! Домен: {domain}")
+                except Exception:
+                    pass
+        log_to_file("INFO", "certbot renew: success")
+        _log_change("certbot_renew", f"SSL сертификат успешно обновлён ({domain})")
+    else:
+        err = (r.stdout + r.stderr)[:300]
+        warn(f"certbot renew завершился с ошибкой:\n{err}")
+        log_to_file("ERROR", f"certbot renew failed: {err}")
+        _tg_notify_event("cert_expire",
+            f"❌ certbot renew <b>FAILED</b>!\nДомен: {domain}\n<code>{err[:200]}</code>")
+
+    return ok
+
+
+def _certbot_install_monitor_cron() -> None:
+    """Cron дважды в день: certbot renew + проверка срока."""
+    core = _core_module()
+    success   = core.success
+    STATE_FILE = core.STATE_FILE
+    domain = ""
+    try:
+        if STATE_FILE.exists():
+            domain = json.loads(STATE_FILE.read_text()).get("domain", "")
+    except Exception:
+        pass
+
+    sh = _CERTBOT_MONITOR_SCRIPT
+    sh.write_text(textwrap.dedent(f"""\
+        #!/bin/bash
+        # Certbot renew monitor (VLESS Installer)
+        LOG="/var/log/xray-certbot-monitor.log"
+        DATE=$(date '+%Y-%m-%d %H:%M:%S')
+        DOMAIN="{domain}"
+        TG_CONFIG="/var/lib/xray-installer/telegram.json"
+
+        send_tg() {{
+            python3 -c "
+import json, subprocess, sys
+from pathlib import Path
+msg=sys.argv[1]
+try:
+    cfg=json.loads(Path('$TG_CONFIG').read_text())
+    t,c=cfg.get('token'),cfg.get('chat_id')
+    if t and c:
+        subprocess.run(['curl','-s','-o','/dev/null','-m','10',
+            f'https://api.telegram.org/bot{{t}}/sendMessage',
+            '-d',f'chat_id={{c}}','-d',f'text={{msg}}'],capture_output=True)
+except: pass
+" "$1"
+        }}
+
+        echo "[$DATE] Running certbot renew..." >> "$LOG"
+        if certbot renew --quiet --non-interactive >> "$LOG" 2>&1; then
+            echo "[$DATE] certbot renew OK" >> "$LOG"
+            # Проверяем срок
+            if [ -n "$DOMAIN" ]; then
+                CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+                if [ -f "$CERT" ]; then
+                    EXPIRY=$(openssl x509 -in "$CERT" -noout -enddate 2>/dev/null | cut -d= -f2)
+                    EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || echo 0)
+                    DAYS=$(( (EPOCH - $(date +%s)) / 86400 ))
+                    echo "[$DATE] SSL days left: $DAYS" >> "$LOG"
+                    if [ "$DAYS" -lt 14 ]; then
+                        send_tg "⚠️ SSL сертификат истекает через $DAYS дн.! Домен: $DOMAIN"
+                    fi
+                fi
+            fi
+        else
+            echo "[$DATE] certbot renew FAILED" >> "$LOG"
+            send_tg "❌ certbot renew FAILED для домена $DOMAIN. Проверьте логи!"
+        fi
+        # Перезагружаем nginx после обновления
+        systemctl reload nginx >> "$LOG" 2>&1 || true
+    """))
+    sh.chmod(0o750)
+    # Дважды в день: 03:00 и 15:00
+    _CERTBOT_MONITOR_CRON.write_text(
+        f"0 3,15 * * * root {sh} >> /var/log/xray-certbot-monitor.log 2>&1\n"
+    )
+    _CERTBOT_MONITOR_CRON.chmod(0o644)
+    success("Certbot monitor cron установлен (03:00 и 15:00 ежедневно)")
+
+
+def do_manage_certbot_monitor() -> None:
+    """Меню управления мониторингом SSL-сертификата."""
+    core = _core_module()
+    warn    = core.warn
+    success = core.success
+    _run    = core._run
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_item   = core._box_item
+    _box_bottom = core._box_bottom
+    STATE_FILE  = core.STATE_FILE
+    BLUE = core.BLUE
+    CYAN = core.CYAN
+    GREEN = core.GREEN
+    NC = core.NC
+    RED = core.RED
+    YELLOW = core.YELLOW
+    CYAN, NC, GREEN, RED, YELLOW, BLUE = (core.CYAN, core.NC, core.GREEN, core.RED,
+                                          core.YELLOW, core.BLUE)
+    # _certbot_renew_and_notify / _certbot_install_monitor_cron — модуль-локальные
+    while True:
+        os.system("clear")
+        cron_active = _CERTBOT_MONITOR_CRON.exists()
+        domain = ""
+        days_left = 0
+        try:
+            if STATE_FILE.exists():
+                domain = json.loads(STATE_FILE.read_text()).get("domain", "")
+            if domain:
+                cert = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem")
+                if cert.exists():
+                    r = _run(["openssl", "x509", "-in", str(cert),
+                              "-noout", "-enddate"], capture=True, check=False)
+                    expiry = r.stdout.strip().split("=", 1)[1]
+                    r2 = _run(["date", "-d", expiry, "+%s"], capture=True, check=False)
+                    days_left = (int(r2.stdout.strip()) - int(time.time())) // 86400
+        except Exception:
+            pass
+
+        print()
+        _box_top(f"Мониторинг SSL-сертификата")
+        _box_row(f"  Домен:        {CYAN}{domain or '—'}{NC}")
+        if days_left:
+            col = GREEN if days_left > 30 else YELLOW if days_left > 14 else RED
+            _box_row(f"  Срок:         {col}{days_left} дн. до истечения{NC}")
+        _box_row(f"  Cron (2×день): {''+GREEN+'ВКЛЮЧЁН'+NC if cron_active else ''+YELLOW+'ОТКЛЮЧЁН'+NC}")
+        _box_item("1", f"{'Отключить' if cron_active else 'Включить'} авто-мониторинг (03:00 + 15:00)")
+        _box_item("2", f"Запустить certbot renew прямо сейчас")
+        _box_item("3", f"Показать лог")
+        _box_item("Q", f"Назад")
+        _box_bottom()
+        ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+
+        if ch == "1":
+            if cron_active:
+                _CERTBOT_MONITOR_CRON.unlink(missing_ok=True)
+                _CERTBOT_MONITOR_SCRIPT.unlink(missing_ok=True)
+                success("Certbot monitor отключён")
+            else:
+                _certbot_install_monitor_cron()
+            input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "2":
+            print()
+            _certbot_renew_and_notify()
+            input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "3":
+            lp = Path("/var/log/xray-certbot-monitor.log")
+            if lp.exists():
+                print()
+                print('\n'.join(lp.read_text().splitlines()[-30:]))
+            else:
+                warn("Лог пуст")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch in ("q", "Q", ""):
+            break
+        else:
+            warn("Неверный выбор")
+            time.sleep(1)

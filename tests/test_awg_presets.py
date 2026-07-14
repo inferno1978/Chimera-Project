@@ -2,7 +2,7 @@
 """
 tests/test_awg_presets.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/awg_presets.py.
+Unit-тесты для chimera/modules/awg_presets.py.
 
 Покрывает:
   1. AWGS_CARRIER_PRESETS — структура пресетов
@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -34,9 +34,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestCarrierPresetsStructure(unittest.TestCase):
@@ -46,15 +46,15 @@ class TestCarrierPresetsStructure(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_has_default_preset(self):
-        from vless_installer.modules.awg_presets import AWGS_CARRIER_PRESETS
+        from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
         self.assertIn("default", AWGS_CARRIER_PRESETS)
 
     def test_has_mobile_preset(self):
-        from vless_installer.modules.awg_presets import AWGS_CARRIER_PRESETS
+        from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
         self.assertIn("mobile", AWGS_CARRIER_PRESETS)
 
     def test_all_presets_have_required_keys(self):
-        from vless_installer.modules.awg_presets import AWGS_CARRIER_PRESETS
+        from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
         required = {
             "label", "jc_min", "jc_max", "jmin_min", "jmin_max",
             "jmax_delta_min", "jmax_delta_max", "i1_mode", "description",
@@ -66,19 +66,19 @@ class TestCarrierPresetsStructure(unittest.TestCase):
                                  f"preset {name}: missing keys {missing}")
 
     def test_i1_mode_is_valid_value(self):
-        from vless_installer.modules.awg_presets import AWGS_CARRIER_PRESETS
+        from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
         for name, preset in AWGS_CARRIER_PRESETS.items():
             with self.subTest(preset=name):
                 self.assertIn(preset["i1_mode"], ("random", "absent", "binary"))
 
     def test_jc_min_le_jc_max(self):
-        from vless_installer.modules.awg_presets import AWGS_CARRIER_PRESETS
+        from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
         for name, preset in AWGS_CARRIER_PRESETS.items():
             with self.subTest(preset=name):
                 self.assertLessEqual(preset["jc_min"], preset["jc_max"])
 
     def test_jmin_min_le_jmin_max(self):
-        from vless_installer.modules.awg_presets import AWGS_CARRIER_PRESETS
+        from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
         for name, preset in AWGS_CARRIER_PRESETS.items():
             with self.subTest(preset=name):
                 self.assertLessEqual(preset["jmin_min"], preset["jmin_max"])
@@ -91,13 +91,13 @@ class TestPresetsList(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_list(self):
-        from vless_installer.modules.awg_presets import awgs_presets_list
+        from chimera.modules.awg_presets import awgs_presets_list
         result = awgs_presets_list()
         self.assertIsInstance(result, list)
         self.assertGreater(len(result), 0)
 
     def test_includes_default(self):
-        from vless_installer.modules.awg_presets import awgs_presets_list
+        from chimera.modules.awg_presets import awgs_presets_list
         self.assertIn("default", awgs_presets_list())
 
 
@@ -108,13 +108,13 @@ class TestPresetsGet(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_preset_for_known_name(self):
-        from vless_installer.modules.awg_presets import awgs_presets_get
+        from chimera.modules.awg_presets import awgs_presets_get
         p = awgs_presets_get("default")
         self.assertIsNotNone(p)
         self.assertEqual(p["label"], "Default (проводной интернет)")
 
     def test_returns_none_for_unknown_name(self):
-        from vless_installer.modules.awg_presets import awgs_presets_get
+        from chimera.modules.awg_presets import awgs_presets_get
         self.assertIsNone(awgs_presets_get("nonexistent_operator_xyz"))
 
 
@@ -126,19 +126,19 @@ class TestPresetsGenerate(unittest.TestCase):
         random.seed(42)
 
     def test_raises_on_unknown_preset(self):
-        from vless_installer.modules.awg_presets import awgs_presets_generate
+        from chimera.modules.awg_presets import awgs_presets_generate
         with self.assertRaises(ValueError):
             awgs_presets_generate("nonexistent")
 
     def test_returns_dict_with_required_keys(self):
-        from vless_installer.modules.awg_presets import awgs_presets_generate
+        from chimera.modules.awg_presets import awgs_presets_generate
         params = awgs_presets_generate("default")
         required = {"jc", "jmin", "jmax", "s1", "s2", "s3", "s4",
                     "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4", "i5"}
         self.assertEqual(set(params.keys()), required)
 
     def test_jc_in_range(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_generate, AWGS_CARRIER_PRESETS,
         )
         for name in AWGS_CARRIER_PRESETS:
@@ -150,7 +150,7 @@ class TestPresetsGenerate(unittest.TestCase):
 
     def test_jmax_ge_jmin(self):
         """Jmax = Jmin + delta, delta >= 0 — должно быть >= Jmin."""
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_generate, AWGS_CARRIER_PRESETS,
         )
         for name in AWGS_CARRIER_PRESETS:
@@ -161,14 +161,14 @@ class TestPresetsGenerate(unittest.TestCase):
 
     def test_s_values_are_zero(self):
         """S1-S4 всегда 0 (как в bivlked default)."""
-        from vless_installer.modules.awg_presets import awgs_presets_generate
+        from chimera.modules.awg_presets import awgs_presets_generate
         p = awgs_presets_generate("default")
         for k in ("s1", "s2", "s3", "s4"):
             self.assertEqual(p[k], 0)
 
     def test_h_values_are_1_2_3_4(self):
         """H1-H4 — magic headers 1,2,3,4."""
-        from vless_installer.modules.awg_presets import awgs_presets_generate
+        from chimera.modules.awg_presets import awgs_presets_generate
         p = awgs_presets_generate("default")
         self.assertEqual(p["h1"], 1)
         self.assertEqual(p["h2"], 2)
@@ -176,7 +176,7 @@ class TestPresetsGenerate(unittest.TestCase):
         self.assertEqual(p["h4"], 4)
 
     def test_i1_random_mode_generates_hex(self):
-        from vless_installer.modules.awg_presets import awgs_presets_generate
+        from chimera.modules.awg_presets import awgs_presets_generate
         random.seed(42)
         p = awgs_presets_generate("default")  # i1_mode=random
         self.assertTrue(p["i1"])
@@ -184,20 +184,20 @@ class TestPresetsGenerate(unittest.TestCase):
 
     def test_i1_absent_mode_returns_empty(self):
         """Пресет tele2_krasnoyarsk использует i1_mode='absent'."""
-        from vless_installer.modules.awg_presets import awgs_presets_generate
+        from chimera.modules.awg_presets import awgs_presets_generate
         random.seed(42)
         p = awgs_presets_generate("tele2_krasnoyarsk")
         self.assertEqual(p["i1"], "")
 
     def test_i1_binary_mode_generates_short_hex(self):
         """T-Mobile US использует i1_mode='binary' — 16 hex символов."""
-        from vless_installer.modules.awg_presets import awgs_presets_generate
+        from chimera.modules.awg_presets import awgs_presets_generate
         random.seed(42)
         p = awgs_presets_generate("tmobile_us")
         self.assertEqual(len(p["i1"]), 16)
 
     def test_i2_to_i5_are_empty(self):
-        from vless_installer.modules.awg_presets import awgs_presets_generate
+        from chimera.modules.awg_presets import awgs_presets_generate
         p = awgs_presets_generate("default")
         for k in ("i2", "i3", "i4", "i5"):
             self.assertEqual(p[k], "")
@@ -218,7 +218,7 @@ class TestPresetsValidateParams(unittest.TestCase):
         }
 
     def test_valid_params_returns_true(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
         )
         ok, err = awgs_presets_validate_params(self._valid())
@@ -226,7 +226,7 @@ class TestPresetsValidateParams(unittest.TestCase):
         self.assertEqual(err, "")
 
     def test_jc_too_high(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
         )
         p = self._valid()
@@ -236,7 +236,7 @@ class TestPresetsValidateParams(unittest.TestCase):
         self.assertIn("Jc", err)
 
     def test_jc_zero_invalid(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
         )
         p = self._valid()
@@ -245,7 +245,7 @@ class TestPresetsValidateParams(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_jmax_less_than_jmin(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
         )
         p = self._valid()
@@ -256,7 +256,7 @@ class TestPresetsValidateParams(unittest.TestCase):
         self.assertIn("Jmax", err)
 
     def test_s3_too_high(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
         )
         p = self._valid()
@@ -266,7 +266,7 @@ class TestPresetsValidateParams(unittest.TestCase):
         self.assertIn("S3", err)
 
     def test_s4_too_high(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
         )
         p = self._valid()
@@ -276,7 +276,7 @@ class TestPresetsValidateParams(unittest.TestCase):
         self.assertIn("S4", err)
 
     def test_h_value_too_high(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
         )
         p = self._valid()
@@ -286,7 +286,7 @@ class TestPresetsValidateParams(unittest.TestCase):
         self.assertIn("H1", err)
 
     def test_i1_with_non_hex_chars(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
         )
         p = self._valid()
@@ -296,7 +296,7 @@ class TestPresetsValidateParams(unittest.TestCase):
         self.assertIn("I1", err)
 
     def test_i1_with_valid_hex(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
         )
         p = self._valid()
@@ -305,7 +305,7 @@ class TestPresetsValidateParams(unittest.TestCase):
         self.assertTrue(ok, msg=err)
 
     def test_jc_non_int(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
         )
         p = self._valid()
@@ -321,7 +321,7 @@ class TestPresetsCompareWithCarrier(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_unknown_carrier_returns_error(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_compare_with_carrier,
         )
         result = awgs_presets_compare_with_carrier({}, "nonexistent")
@@ -329,7 +329,7 @@ class TestPresetsCompareWithCarrier(unittest.TestCase):
         self.assertIn("error", result)
 
     def test_matching_params_returns_ok(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_compare_with_carrier,
         )
         # mobile preset: jc=3, jmin=30-50, jmax_delta=20-80
@@ -339,7 +339,7 @@ class TestPresetsCompareWithCarrier(unittest.TestCase):
         self.assertTrue(result["ok"])
 
     def test_jc_fail_when_wrong(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_compare_with_carrier,
         )
         # tele2_msk требует jc=3 — передаём 5
@@ -350,7 +350,7 @@ class TestPresetsCompareWithCarrier(unittest.TestCase):
 
     def test_i1_warn_when_absent_expected_but_present(self):
         """tele2_krasnoyarsk требует I1 absent — warn если он есть."""
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_compare_with_carrier,
         )
         params = {"jc": 3, "jmin": 40, "jmax": 80, "i1": "deadbeef"}
@@ -358,7 +358,7 @@ class TestPresetsCompareWithCarrier(unittest.TestCase):
         self.assertEqual(result["status"], "WARN")
 
     def test_i1_ok_when_absent_expected_and_absent(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_compare_with_carrier,
         )
         params = {"jc": 3, "jmin": 40, "jmax": 80, "i1": ""}
@@ -366,7 +366,7 @@ class TestPresetsCompareWithCarrier(unittest.TestCase):
         self.assertEqual(result["status"], "OK")
 
     def test_checks_list_present(self):
-        from vless_installer.modules.awg_presets import (
+        from chimera.modules.awg_presets import (
             awgs_presets_compare_with_carrier,
         )
         result = awgs_presets_compare_with_carrier({}, "default")

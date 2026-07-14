@@ -2,7 +2,7 @@
 """
 tests/test_fragment_link.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/fragment_link.py.
+Unit-тесты для chimera/modules/fragment_link.py.
 
 Покрывает:
   1. _resolve_sni — выбор SNI
@@ -27,7 +27,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -37,9 +37,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestResolveSni(unittest.TestCase):
@@ -49,12 +49,12 @@ class TestResolveSni(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_domain_for_reality_without_awg(self):
-        from vless_installer.modules.fragment_link import _resolve_sni
+        from chimera.modules.fragment_link import _resolve_sni
         state = {"protocol_mode": "reality", "domain": "vpn.example.com"}
         self.assertEqual(_resolve_sni(state), "vpn.example.com")
 
     def test_returns_reality_dest_for_awg_reality_mode_b(self):
-        from vless_installer.modules.fragment_link import _resolve_sni
+        from chimera.modules.fragment_link import _resolve_sni
         state = {
             "protocol_mode": "reality", "awg_exit_enabled": True,
             "install_mode": "B", "reality_dest": "dest.example.com:443",
@@ -63,7 +63,7 @@ class TestResolveSni(unittest.TestCase):
         self.assertEqual(_resolve_sni(state), "dest.example.com")
 
     def test_returns_domain_for_xhttp(self):
-        from vless_installer.modules.fragment_link import _resolve_sni
+        from chimera.modules.fragment_link import _resolve_sni
         state = {"protocol_mode": "xhttp", "domain": "vpn.example.com"}
         self.assertEqual(_resolve_sni(state), "vpn.example.com")
 
@@ -75,7 +75,7 @@ class TestGenHappLink(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_vless_uri_with_fragment(self):
-        from vless_installer.modules.fragment_link import _gen_happ_link
+        from chimera.modules.fragment_link import _gen_happ_link
         link = _gen_happ_link(
             host="1.2.3.4", uuid_str="uuid", pbk="PUBKEY", sid="abcd",
             sni="vpn.example.com", packets="1-3", length="3-7", interval="10-20",
@@ -86,7 +86,7 @@ class TestGenHappLink(unittest.TestCase):
 
     def test_fragment_format_is_length_interval_packets(self):
         """Happ формат: fragment=length,interval,packets (URL-encoded)."""
-        from vless_installer.modules.fragment_link import _gen_happ_link
+        from chimera.modules.fragment_link import _gen_happ_link
         import urllib.parse
         link = _gen_happ_link(
             host="1.2.3.4", uuid_str="uuid", pbk="PUBKEY", sid="abcd",
@@ -99,7 +99,7 @@ class TestGenHappLink(unittest.TestCase):
         self.assertEqual(frag_val, "3-7,10-20,1-3")
 
     def test_reality_includes_pbk_and_sid(self):
-        from vless_installer.modules.fragment_link import _gen_happ_link
+        from chimera.modules.fragment_link import _gen_happ_link
         link = _gen_happ_link(
             host="1.2.3.4", uuid_str="uuid", pbk="PUBKEY", sid="abcd",
             sni="vpn.example.com", packets="1-3", length="3-7", interval="10-20",
@@ -115,7 +115,7 @@ class TestGenIncyLink(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_vless_uri_with_fragment_length_and_interval(self):
-        from vless_installer.modules.fragment_link import _gen_incy_link
+        from chimera.modules.fragment_link import _gen_incy_link
         link = _gen_incy_link(
             host="1.2.3.4", uuid_str="uuid", pbk="PUBKEY", sid="abcd",
             sni="vpn.example.com", packets="1-3", length="3-7", interval="10-20",
@@ -127,7 +127,7 @@ class TestGenIncyLink(unittest.TestCase):
 
     def test_does_not_include_packets_in_uri(self):
         """Incy не использует packets в URI — только length+interval."""
-        from vless_installer.modules.fragment_link import _gen_incy_link
+        from chimera.modules.fragment_link import _gen_incy_link
         link = _gen_incy_link(
             host="1.2.3.4", uuid_str="uuid", pbk="PUBKEY", sid="abcd",
             sni="vpn.example.com", packets="1-3", length="3-7", interval="10-20",
@@ -142,7 +142,7 @@ class TestGenNekorayLink(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_vless_uri_with_fragment(self):
-        from vless_installer.modules.fragment_link import _gen_nekoray_link
+        from chimera.modules.fragment_link import _gen_nekoray_link
         link = _gen_nekoray_link(
             host="1.2.3.4", uuid_str="uuid", pbk="PUBKEY", sid="abcd",
             sni="vpn.example.com", packets="1-3", length="3-7", interval="10-20",
@@ -153,7 +153,7 @@ class TestGenNekorayLink(unittest.TestCase):
 
     def test_fragment_format_is_packets_length_interval(self):
         """Nekoray формат: fragment=packets,length,interval (порядок важен!)."""
-        from vless_installer.modules.fragment_link import _gen_nekoray_link
+        from chimera.modules.fragment_link import _gen_nekoray_link
         import urllib.parse
         link = _gen_nekoray_link(
             host="1.2.3.4", uuid_str="uuid", pbk="PUBKEY", sid="abcd",
@@ -183,20 +183,20 @@ class TestBuildXrayClientJson(unittest.TestCase):
         }
 
     def test_returns_dict_with_required_keys(self):
-        from vless_installer.modules.fragment_link import _build_xray_client_json
+        from chimera.modules.fragment_link import _build_xray_client_json
         cfg = _build_xray_client_json(self._state(), "1-3", "3-7", "10-20")
         for key in ("log", "inbounds", "outbounds", "routing"):
             self.assertIn(key, cfg)
 
     def test_has_socks_and_http_inbounds(self):
-        from vless_installer.modules.fragment_link import _build_xray_client_json
+        from chimera.modules.fragment_link import _build_xray_client_json
         cfg = _build_xray_client_json(self._state(), "1-3", "3-7", "10-20")
         protocols = [ib["protocol"] for ib in cfg["inbounds"]]
         self.assertIn("socks", protocols)
         self.assertIn("http", protocols)
 
     def test_has_proxy_direct_block_outbounds(self):
-        from vless_installer.modules.fragment_link import _build_xray_client_json
+        from chimera.modules.fragment_link import _build_xray_client_json
         cfg = _build_xray_client_json(self._state(), "1-3", "3-7", "10-20")
         tags = [ob["tag"] for ob in cfg["outbounds"]]
         self.assertIn("proxy", tags)
@@ -204,13 +204,13 @@ class TestBuildXrayClientJson(unittest.TestCase):
         self.assertIn("block", tags)
 
     def test_fragment_included_when_all_params_present(self):
-        from vless_installer.modules.fragment_link import _build_xray_client_json
+        from chimera.modules.fragment_link import _build_xray_client_json
         cfg = _build_xray_client_json(self._state(), "1-3", "3-7", "10-20")
         proxy = [ob for ob in cfg["outbounds"] if ob["tag"] == "proxy"][0]
         self.assertIn("fragment", proxy.get("streamSettings", {}).get("sockopt", {}))
 
     def test_fragment_omitted_when_params_empty(self):
-        from vless_installer.modules.fragment_link import _build_xray_client_json
+        from chimera.modules.fragment_link import _build_xray_client_json
         cfg = _build_xray_client_json(self._state(), "", "", "")
         proxy = [ob for ob in cfg["outbounds"] if ob["tag"] == "proxy"][0]
         sockopt = proxy.get("streamSettings", {}).get("sockopt", {})
@@ -235,20 +235,20 @@ class TestBuildSingboxJson(unittest.TestCase):
         }
 
     def test_returns_dict_with_required_keys(self):
-        from vless_installer.modules.fragment_link import _build_singbox_json
+        from chimera.modules.fragment_link import _build_singbox_json
         cfg = _build_singbox_json(self._state(), "1-3", "3-7", "10-20")
         for key in ("inbounds", "outbounds", "route"):
             self.assertIn(key, cfg)
 
     def test_has_socks_and_http_inbounds(self):
-        from vless_installer.modules.fragment_link import _build_singbox_json
+        from chimera.modules.fragment_link import _build_singbox_json
         cfg = _build_singbox_json(self._state(), "1-3", "3-7", "10-20")
         types = [ib["type"] for ib in cfg["inbounds"]]
         self.assertIn("socks", types)
         self.assertIn("http", types)
 
     def test_fragment_in_outbound_when_present(self):
-        from vless_installer.modules.fragment_link import _build_singbox_json
+        from chimera.modules.fragment_link import _build_singbox_json
         cfg = _build_singbox_json(self._state(), "1-3", "3-7", "10-20")
         proxy = cfg["outbounds"][0]
         # fragment может быть на верхнем уровне outbound или в dial_fields
@@ -257,7 +257,7 @@ class TestBuildSingboxJson(unittest.TestCase):
         self.assertTrue(frag["enabled"])
 
     def test_fragment_omitted_when_params_empty(self):
-        from vless_installer.modules.fragment_link import _build_singbox_json
+        from chimera.modules.fragment_link import _build_singbox_json
         cfg = _build_singbox_json(self._state(), "", "", "")
         proxy = cfg["outbounds"][0]
         frag = proxy.get("fragment") or proxy.get("dial_fields", {}).get("fragment")
@@ -277,21 +277,21 @@ class TestLoadState(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.fragment_link._STATE_FILE", self._state)
+        return patch("chimera.modules.fragment_link._STATE_FILE", self._state)
 
     def test_returns_none_when_no_file(self):
-        from vless_installer.modules.fragment_link import _load_state
+        from chimera.modules.fragment_link import _load_state
         with self._patch():
             self.assertIsNone(_load_state())
 
     def test_returns_none_when_no_domain(self):
-        from vless_installer.modules.fragment_link import _load_state
+        from chimera.modules.fragment_link import _load_state
         self._state.write_text(json.dumps({"uuid": "u"}))
         with self._patch():
             self.assertIsNone(_load_state())
 
     def test_returns_state_when_valid(self):
-        from vless_installer.modules.fragment_link import _load_state
+        from chimera.modules.fragment_link import _load_state
         self._state.write_text(json.dumps({"domain": "x.com", "uuid": "u"}))
         with self._patch():
             st = _load_state()

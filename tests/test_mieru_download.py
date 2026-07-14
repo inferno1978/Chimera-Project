@@ -2,7 +2,7 @@
 """
 tests/test_mieru_download.py
 ───────────────────────────────────────────────────────────────────────────────
-Тесты для multi-mirror логики скачивания mita/mieru в vless_installer/modules/mieru.py.
+Тесты для multi-mirror логики скачивания mita/mieru в chimera/modules/mieru.py.
 
 Покрывает:
   • _download_with_mirrors() — перебирает зеркала, fallback на следующее
@@ -30,7 +30,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core_in_sysmodules():
     """Загружает _core.py в sys.modules как fake module (стандартный паттерн тестов)."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -40,9 +40,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestInstallMitaPackageUsesMirrors(unittest.TestCase):
@@ -51,7 +51,7 @@ class TestInstallMitaPackageUsesMirrors(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import mieru
+        from chimera.modules import mieru
         cls.mieru = mieru
 
     def test_deb_path_uses_fetch_package(self):
@@ -61,7 +61,7 @@ class TestInstallMitaPackageUsesMirrors(unittest.TestCase):
         Новый код использует fetch_package(MITA_DEB_SPEC) — проверяем что
         fetch_package вызывается с правильным spec.
         """
-        from vless_installer.modules import mieru_packages
+        from chimera.modules import mieru_packages
 
         fetch_called = [False]
         def tracking_fetch(spec, **kw):
@@ -70,11 +70,11 @@ class TestInstallMitaPackageUsesMirrors(unittest.TestCase):
             self.assertIn("deb", spec.name)
             return True  # успех
 
-        with patch("vless_installer.modules.mieru.shutil.which",
+        with patch("chimera.modules.mieru.shutil.which",
                    lambda x: "/usr/bin/dpkg" if x == "dpkg" else None), \
-             patch("vless_installer.modules.mieru.fetch_package",
+             patch("chimera.modules.mieru.fetch_package",
                    side_effect=tracking_fetch) if hasattr(self.mieru, "fetch_package") else \
-             patch("vless_installer.modules.download_manager.fetch_package",
+             patch("chimera.modules.download_manager.fetch_package",
                    side_effect=tracking_fetch):
             result = self.mieru._install_mita_package("3.33.0")
         self.assertTrue(result)
@@ -93,9 +93,9 @@ class TestInstallMitaPackageUsesMirrors(unittest.TestCase):
             self.assertIn("tar.gz", spec.name)
             return False  # провал — нет сети
 
-        with patch("vless_installer.modules.mieru.shutil.which",
+        with patch("chimera.modules.mieru.shutil.which",
                    lambda x: None), \
-             patch("vless_installer.modules.download_manager.fetch_package",
+             patch("chimera.modules.download_manager.fetch_package",
                    side_effect=tracking_fetch):
             result = self.mieru._install_mita_package("3.33.0")
         self.assertFalse(result)  # установка не удалась
@@ -114,14 +114,14 @@ class TestInstallMitaDebMirrorFailover(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import mieru
+        from chimera.modules import mieru
         cls.mieru = mieru
 
     def test_deb_mirror1_fail_mirror2_ok_dpkg_called(self):
         """Первое зеркало падает (URLError) → второе успешно → dpkg -i вызван."""
         from urllib.error import URLError
-        from vless_installer.modules import mieru_packages
-        from vless_installer.modules.download_manager import fetch_package
+        from chimera.modules import mieru_packages
+        from chimera.modules.download_manager import fetch_package
 
         # Мокаем urlopen: первое зеркало падает, второе отдаёт .deb
         mock_resp_ok = MagicMock()
@@ -166,9 +166,9 @@ class TestInstallMitaDebMirrorFailover(unittest.TestCase):
                 return True
             return original_exists(self, *a, **kw)
 
-        with patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    side_effect=fake_urlopen), \
-             patch("vless_installer.modules.download_manager.Path.unlink"), \
+             patch("chimera.modules.download_manager.Path.unlink"), \
              patch("builtins.open", side_effect=fake_open), \
              patch.object(Path, 'stat', return_value=MagicMock(st_size=10000)), \
              patch.object(Path, 'exists', smart_exists), \

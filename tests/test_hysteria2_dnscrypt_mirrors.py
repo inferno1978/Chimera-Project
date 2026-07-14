@@ -3,10 +3,10 @@
 tests/test_hysteria2_dnscrypt_mirrors.py
 ───────────────────────────────────────────────────────────────────────────────
 Unit-тесты для mirror-реестров Волны 3:
-  • vless_installer/modules/hysteria2_mirrors.py
-  • vless_installer/modules/hysteria2_packages.py::HYSTERIA2_SPEC
-  • vless_installer/modules/dnscrypt_mirrors.py
-  • vless_installer/modules/dnscrypt_packages.py::DNSCRYPT_SPEC
+  • chimera/modules/hysteria2_mirrors.py
+  • chimera/modules/hysteria2_packages.py::HYSTERIA2_SPEC
+  • chimera/modules/dnscrypt_mirrors.py
+  • chimera/modules/dnscrypt_packages.py::DNSCRYPT_SPEC
 
 Покрывает:
   • Корректность URL-шаблонов
@@ -31,7 +31,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -41,9 +41,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 # ============================================================================
@@ -56,7 +56,7 @@ class TestHysteria2Mirrors(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_14_urls(self):
-        from vless_installer.modules.hysteria2_mirrors import (
+        from chimera.modules.hysteria2_mirrors import (
             get_hysteria2_mirrors, HYSTERIA2_MIRRORS_COUNT,
         )
         urls = get_hysteria2_mirrors(tag="latest", arch="amd64")
@@ -64,12 +64,12 @@ class TestHysteria2Mirrors(unittest.TestCase):
         self.assertEqual(HYSTERIA2_MIRRORS_COUNT, 14)
 
     def test_all_urls_are_https(self):
-        from vless_installer.modules.hysteria2_mirrors import get_hysteria2_mirrors
+        from chimera.modules.hysteria2_mirrors import get_hysteria2_mirrors
         for url in get_hysteria2_mirrors(tag="latest", arch="amd64"):
             self.assertEqual(urlparse(url).scheme, "https")
 
     def test_all_urls_contain_repo_and_filename(self):
-        from vless_installer.modules.hysteria2_mirrors import get_hysteria2_mirrors
+        from chimera.modules.hysteria2_mirrors import get_hysteria2_mirrors
         for url in get_hysteria2_mirrors(tag="latest", arch="amd64"):
             self.assertIn("apernet", url)
             self.assertIn("hysteria", url)
@@ -77,7 +77,7 @@ class TestHysteria2Mirrors(unittest.TestCase):
 
     def test_has_release_github_url(self):
         """release GitHub URL присутствует (основной путь для binary)."""
-        from vless_installer.modules.hysteria2_mirrors import get_hysteria2_mirrors
+        from chimera.modules.hysteria2_mirrors import get_hysteria2_mirrors
         urls = get_hysteria2_mirrors(tag="latest", arch="amd64")
         self.assertTrue(
             any("github.com/apernet/hysteria/releases/latest/download/" in u
@@ -86,27 +86,27 @@ class TestHysteria2Mirrors(unittest.TestCase):
         )
 
     def test_has_jsdelivr_cdn(self):
-        from vless_installer.modules.hysteria2_mirrors import get_hysteria2_mirrors
+        from chimera.modules.hysteria2_mirrors import get_hysteria2_mirrors
         urls = get_hysteria2_mirrors(tag="latest", arch="amd64")
         jsdelivr_count = sum(1 for u in urls if "jsdelivr.net" in u)
         self.assertGreaterEqual(jsdelivr_count, 1)
 
     def test_has_gh_proxy(self):
-        from vless_installer.modules.hysteria2_mirrors import get_hysteria2_mirrors
+        from chimera.modules.hysteria2_mirrors import get_hysteria2_mirrors
         urls = get_hysteria2_mirrors(tag="latest", arch="amd64")
         proxy_domains = ["ghproxy", "gh.con.sh", "gitmirror", "moeyy", "ghps.cc"]
         has_proxy = any(any(d in u for d in proxy_domains) for u in urls)
         self.assertTrue(has_proxy)
 
     def test_arm64_arch(self):
-        from vless_installer.modules.hysteria2_mirrors import get_hysteria2_mirrors
+        from chimera.modules.hysteria2_mirrors import get_hysteria2_mirrors
         urls = get_hysteria2_mirrors(tag="latest", arch="arm64")
         for url in urls:
             self.assertIn("hysteria-linux-arm64", url)
 
     def test_pinned_tag(self):
         """Конкретный tag 'app/v2.9.3' формирует /releases/download/app/v2.9.3/."""
-        from vless_installer.modules.hysteria2_mirrors import get_hysteria2_mirrors
+        from chimera.modules.hysteria2_mirrors import get_hysteria2_mirrors
         urls = get_hysteria2_mirrors(tag="app/v2.9.3", arch="amd64")
         self.assertTrue(
             any("/releases/download/app/v2.9.3/" in u for u in urls),
@@ -114,7 +114,7 @@ class TestHysteria2Mirrors(unittest.TestCase):
         )
 
     def test_recommended_manual_path_is_root(self):
-        from vless_installer.modules.hysteria2_mirrors import recommended_manual_path
+        from chimera.modules.hysteria2_mirrors import recommended_manual_path
         self.assertEqual(recommended_manual_path(), Path("/root"))
 
 
@@ -128,7 +128,7 @@ class TestDnscryptMirrors(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_14_urls(self):
-        from vless_installer.modules.dnscrypt_mirrors import (
+        from chimera.modules.dnscrypt_mirrors import (
             get_dnscrypt_mirrors, DNSCRYPT_MIRRORS_COUNT,
         )
         urls = get_dnscrypt_mirrors(tag="2.1.5", arch="linux_x86_64")
@@ -136,12 +136,12 @@ class TestDnscryptMirrors(unittest.TestCase):
         self.assertEqual(DNSCRYPT_MIRRORS_COUNT, 14)
 
     def test_all_urls_are_https(self):
-        from vless_installer.modules.dnscrypt_mirrors import get_dnscrypt_mirrors
+        from chimera.modules.dnscrypt_mirrors import get_dnscrypt_mirrors
         for url in get_dnscrypt_mirrors(tag="2.1.5", arch="linux_x86_64"):
             self.assertEqual(urlparse(url).scheme, "https")
 
     def test_all_urls_contain_repo_filename_and_tag(self):
-        from vless_installer.modules.dnscrypt_mirrors import get_dnscrypt_mirrors
+        from chimera.modules.dnscrypt_mirrors import get_dnscrypt_mirrors
         for url in get_dnscrypt_mirrors(tag="2.1.5", arch="linux_x86_64"):
             self.assertIn("DNSCrypt", url)
             self.assertIn("dnscrypt-proxy", url)
@@ -149,24 +149,24 @@ class TestDnscryptMirrors(unittest.TestCase):
             self.assertIn("2.1.5", url)
 
     def test_has_release_github_url(self):
-        from vless_installer.modules.dnscrypt_mirrors import get_dnscrypt_mirrors
+        from chimera.modules.dnscrypt_mirrors import get_dnscrypt_mirrors
         urls = get_dnscrypt_mirrors(tag="2.1.5", arch="linux_x86_64")
         self.assertTrue(
             any("/releases/download/2.1.5/" in u for u in urls)
         )
 
     def test_empty_tag_returns_empty_list(self):
-        from vless_installer.modules.dnscrypt_mirrors import get_dnscrypt_mirrors
+        from chimera.modules.dnscrypt_mirrors import get_dnscrypt_mirrors
         self.assertEqual(get_dnscrypt_mirrors(tag="", arch="linux_x86_64"), [])
 
     def test_arm64_arch(self):
-        from vless_installer.modules.dnscrypt_mirrors import get_dnscrypt_mirrors
+        from chimera.modules.dnscrypt_mirrors import get_dnscrypt_mirrors
         urls = get_dnscrypt_mirrors(tag="2.1.5", arch="linux_arm64")
         for url in urls:
             self.assertIn("dnscrypt-proxy-linux_arm64-2.1.5.tar.gz", url)
 
     def test_recommended_manual_path_is_root(self):
-        from vless_installer.modules.dnscrypt_mirrors import recommended_manual_path
+        from chimera.modules.dnscrypt_mirrors import recommended_manual_path
         self.assertEqual(recommended_manual_path(), Path("/root"))
 
 
@@ -180,24 +180,24 @@ class TestHysteria2SpecInvariants(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_manual_dir_is_root(self):
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
         self.assertEqual(HYSTERIA2_SPEC.manual_incoming_dir, Path("/root"))
 
     def test_manual_dir_not_in_install_dests(self):
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
         for dest in HYSTERIA2_SPEC.install_dests:
             self.assertNotEqual(HYSTERIA2_SPEC.manual_incoming_dir, dest)
 
     def test_install_dests_is_usr_local_bin(self):
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
         self.assertEqual(HYSTERIA2_SPEC.install_dests, [Path("/usr/local/bin")])
 
     def test_min_size_is_1mb(self):
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
         self.assertEqual(HYSTERIA2_SPEC.min_size, 1_000_000)
 
     def test_post_install_is_set(self):
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
         self.assertIsNotNone(HYSTERIA2_SPEC.post_install)
 
 
@@ -240,7 +240,7 @@ class TestHysteria2PostInstallRuntimeCheck(unittest.TestCase):
 
     def test_post_install_returns_false_when_version_check_fails(self):
         """Бинарник проходит ELF magic но не запускается → False, старый не тронут."""
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
 
         src = self._make_elf_that_fails_version()
         ok = HYSTERIA2_SPEC.post_install(src, [self._install_dir])
@@ -253,7 +253,7 @@ class TestHysteria2PostInstallRuntimeCheck(unittest.TestCase):
 
     def test_post_install_preserves_old_when_runtime_check_fails(self):
         """Двойная проверка: старый бинарник survives неудачную попытку."""
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
 
         old_size = self._old_binary.stat().st_size
         src = self._make_elf_that_fails_version()
@@ -265,7 +265,7 @@ class TestHysteria2PostInstallRuntimeCheck(unittest.TestCase):
 
     def test_post_install_replaces_when_runtime_check_passes(self):
         """Если бинарник запускается успешно — atomic-replace выполняется."""
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
 
         # Создаём "бинарник" который успешно запускается.
         # Используем /bin/true (всегда returncode 0) как заглушку.
@@ -294,24 +294,24 @@ class TestDnscryptSpecInvariants(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_manual_dir_is_root(self):
-        from vless_installer.modules.dnscrypt_packages import DNSCRYPT_SPEC
+        from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
         self.assertEqual(DNSCRYPT_SPEC.manual_incoming_dir, Path("/root"))
 
     def test_manual_dir_not_in_install_dests(self):
-        from vless_installer.modules.dnscrypt_packages import DNSCRYPT_SPEC
+        from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
         for dest in DNSCRYPT_SPEC.install_dests:
             self.assertNotEqual(DNSCRYPT_SPEC.manual_incoming_dir, dest)
 
     def test_install_dests_is_usr_local_bin(self):
-        from vless_installer.modules.dnscrypt_packages import DNSCRYPT_SPEC
+        from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
         self.assertEqual(DNSCRYPT_SPEC.install_dests, [Path("/usr/local/bin")])
 
     def test_min_size_is_100kb(self):
-        from vless_installer.modules.dnscrypt_packages import DNSCRYPT_SPEC
+        from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
         self.assertEqual(DNSCRYPT_SPEC.min_size, 100_000)
 
     def test_post_install_is_set(self):
-        from vless_installer.modules.dnscrypt_packages import DNSCRYPT_SPEC
+        from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
         self.assertIsNotNone(DNSCRYPT_SPEC.post_install)
 
 
@@ -353,7 +353,7 @@ class TestPostInstallHysteria2ELFCheck(unittest.TestCase):
         После Wave 3 fix: 'валидный' = проходит ELF magic И запускается
         (`<binary> version` → returncode 0). Используем /bin/true.
         """
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
 
         install_dir = self._tmpdir / "install"
         src = self._make_elf("hysteria-linux-amd64")
@@ -374,7 +374,7 @@ class TestPostInstallHysteria2ELFCheck(unittest.TestCase):
 
     def test_post_install_rejects_non_elf(self):
         """Не-ELF файл → False (даёт fetch_package шанс попробовать другое зеркало)."""
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
 
         install_dir = self._tmpdir / "install"
         src = self._make_non_elf("hysteria-linux-amd64")
@@ -383,7 +383,7 @@ class TestPostInstallHysteria2ELFCheck(unittest.TestCase):
 
     def test_post_install_creates_install_dir(self):
         """install_dest создаётся если не существует (с реальным /bin/true)."""
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
 
         install_dir = self._tmpdir / "deeply" / "nested" / "install"
         src = self._make_elf("hysteria-linux-amd64")
@@ -414,7 +414,7 @@ class TestPostInstallDnscryptArchive(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_post_install_returns_false_on_non_tarball(self):
-        from vless_installer.modules.dnscrypt_packages import DNSCRYPT_SPEC
+        from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
 
         src = self._tmpdir / "fake.tar.gz"
         src.write_bytes(b"not a tarball" * 100)
@@ -422,7 +422,7 @@ class TestPostInstallDnscryptArchive(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_post_install_returns_false_on_empty_file(self):
-        from vless_installer.modules.dnscrypt_packages import DNSCRYPT_SPEC
+        from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
 
         src = self._tmpdir / "empty.tar.gz"
         src.write_bytes(b"")
@@ -440,14 +440,14 @@ class TestMirrorUrlsBuilderSignature(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_hysteria2_builder_accepts_filename_and_arch(self):
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
         urls = HYSTERIA2_SPEC.mirror_urls_builder(
             filename="hysteria-linux-amd64", arch="amd64",
         )
         self.assertGreater(len(urls), 0)
 
     def test_hysteria2_builder_uses_arch_in_urls(self):
-        from vless_installer.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
         urls = HYSTERIA2_SPEC.mirror_urls_builder(
             filename="ignored", arch="arm64",
         )
@@ -455,14 +455,14 @@ class TestMirrorUrlsBuilderSignature(unittest.TestCase):
             self.assertIn("hysteria-linux-arm64", url)
 
     def test_dnscrypt_builder_accepts_filename_tag_and_arch(self):
-        from vless_installer.modules.dnscrypt_packages import DNSCRYPT_SPEC
+        from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
         urls = DNSCRYPT_SPEC.mirror_urls_builder(
             filename="ignored", tag="2.1.5", arch="linux_x86_64",
         )
         self.assertGreater(len(urls), 0)
 
     def test_dnscrypt_builder_uses_tag_and_arch_in_urls(self):
-        from vless_installer.modules.dnscrypt_packages import DNSCRYPT_SPEC
+        from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
         urls = DNSCRYPT_SPEC.mirror_urls_builder(
             filename="ignored", tag="2.1.5", arch="linux_arm64",
         )

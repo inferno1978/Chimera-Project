@@ -2,7 +2,7 @@
 """
 tests/test_traffic_history.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/traffic_history.py.
+Unit-тесты для chimera/modules/traffic_history.py.
 
 Smoke: TRAFFIC_HISTORY_FILE constant
 """
@@ -23,7 +23,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -33,15 +33,15 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestTrafficHistory(unittest.TestCase):
     def setUp(self): _setup_core()
     def test_file_constant(self):
-        from vless_installer.modules.traffic_history import TRAFFIC_HISTORY_FILE
+        from chimera.modules.traffic_history import TRAFFIC_HISTORY_FILE
         self.assertIsInstance(TRAFFIC_HISTORY_FILE, Path)
 
 # ── health_report ──────────────────────────────────────────────────────────

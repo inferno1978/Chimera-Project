@@ -2,7 +2,7 @@
 """
 tests/test_turnable.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/turnable.py.
+Unit-тесты для chimera/modules/turnable.py.
 
 Покрывает:
   1. _xray_has_turnable_inbound — проверка наличия inbound
@@ -26,7 +26,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -36,9 +36,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestXrayHasTurnableInbound(unittest.TestCase):
@@ -48,18 +48,18 @@ class TestXrayHasTurnableInbound(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_false_when_no_inbounds(self):
-        from vless_installer.modules.turnable import _xray_has_turnable_inbound
+        from chimera.modules.turnable import _xray_has_turnable_inbound
         self.assertFalse(_xray_has_turnable_inbound({}))
 
     def test_returns_true_when_tag_present(self):
-        from vless_installer.modules.turnable import (
+        from chimera.modules.turnable import (
             _xray_has_turnable_inbound, _XRAY_INBOUND_TAG,
         )
         cfg = {"inbounds": [{"tag": _XRAY_INBOUND_TAG}]}
         self.assertTrue(_xray_has_turnable_inbound(cfg))
 
     def test_returns_false_when_other_tags(self):
-        from vless_installer.modules.turnable import _xray_has_turnable_inbound
+        from chimera.modules.turnable import _xray_has_turnable_inbound
         cfg = {"inbounds": [{"tag": "other"}, {"tag": "another"}]}
         self.assertFalse(_xray_has_turnable_inbound(cfg))
 
@@ -71,7 +71,7 @@ class TestXrayInjectInbound(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_adds_inbound_to_empty_cfg(self):
-        from vless_installer.modules.turnable import (
+        from chimera.modules.turnable import (
             _xray_inject_inbound, _XRAY_INBOUND_TAG,
         )
         cfg = {}
@@ -87,7 +87,7 @@ class TestXrayInjectInbound(unittest.TestCase):
 
     def test_returns_false_when_already_present(self):
         """Идемпотентность — повторный вызов не дублирует."""
-        from vless_installer.modules.turnable import _xray_inject_inbound
+        from chimera.modules.turnable import _xray_inject_inbound
         cfg = {}
         _xray_inject_inbound(cfg, port=12767, vless_uuid="uuid1")
         changed = _xray_inject_inbound(cfg, port=12767, vless_uuid="uuid2")
@@ -95,13 +95,13 @@ class TestXrayInjectInbound(unittest.TestCase):
         self.assertEqual(len(cfg["inbounds"]), 1)
 
     def test_preserves_existing_inbounds(self):
-        from vless_installer.modules.turnable import _xray_inject_inbound
+        from chimera.modules.turnable import _xray_inject_inbound
         cfg = {"inbounds": [{"tag": "other", "protocol": "vless"}]}
         _xray_inject_inbound(cfg, port=12767, vless_uuid="uuid")
         self.assertEqual(len(cfg["inbounds"]), 2)
 
     def test_includes_sniffing(self):
-        from vless_installer.modules.turnable import _xray_inject_inbound
+        from chimera.modules.turnable import _xray_inject_inbound
         cfg = {}
         _xray_inject_inbound(cfg, port=12767, vless_uuid="uuid")
         ib = cfg["inbounds"][0]
@@ -109,7 +109,7 @@ class TestXrayInjectInbound(unittest.TestCase):
         self.assertTrue(ib["sniffing"]["enabled"])
 
     def test_stream_settings_tcp_none(self):
-        from vless_installer.modules.turnable import _xray_inject_inbound
+        from chimera.modules.turnable import _xray_inject_inbound
         cfg = {}
         _xray_inject_inbound(cfg, port=12767, vless_uuid="uuid")
         ib = cfg["inbounds"][0]
@@ -124,12 +124,12 @@ class TestXrayRemoveInbound(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_false_when_not_present(self):
-        from vless_installer.modules.turnable import _xray_remove_inbound
+        from chimera.modules.turnable import _xray_remove_inbound
         cfg = {"inbounds": [{"tag": "other"}]}
         self.assertFalse(_xray_remove_inbound(cfg))
 
     def test_removes_and_returns_true(self):
-        from vless_installer.modules.turnable import (
+        from chimera.modules.turnable import (
             _xray_remove_inbound, _xray_inject_inbound,
         )
         cfg = {}
@@ -138,7 +138,7 @@ class TestXrayRemoveInbound(unittest.TestCase):
         self.assertEqual(len(cfg["inbounds"]), 0)
 
     def test_preserves_other_inbounds(self):
-        from vless_installer.modules.turnable import (
+        from chimera.modules.turnable import (
             _xray_remove_inbound, _xray_inject_inbound,
         )
         cfg = {"inbounds": [{"tag": "other"}]}
@@ -160,13 +160,13 @@ class TestXrayConfigPath(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_returns_none_when_no_config(self):
-        from vless_installer.modules import turnable
+        from chimera.modules import turnable
         paths = [Path("/nonexistent1"), Path("/nonexistent2")]
         with patch.object(turnable, "_XRAY_CONFIG_PATHS", paths):
             self.assertIsNone(turnable._xray_config_path())
 
     def test_returns_first_existing(self):
-        from vless_installer.modules import turnable
+        from chimera.modules import turnable
         path1 = self._tmpdir / "config1.json"
         path1.write_text("{}")
         with patch.object(turnable, "_XRAY_CONFIG_PATHS",
@@ -182,13 +182,13 @@ class TestGenUuid(unittest.TestCase):
 
     def test_returns_valid_uuid_format(self):
         import re
-        from vless_installer.modules.turnable import _gen_uuid
+        from chimera.modules.turnable import _gen_uuid
         uuid_str = _gen_uuid()
         self.assertRegex(uuid_str,
                          r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
     def test_unique(self):
-        from vless_installer.modules.turnable import _gen_uuid
+        from chimera.modules.turnable import _gen_uuid
         uuids = {_gen_uuid() for _ in range(10)}
         self.assertEqual(len(uuids), 10)
 
@@ -200,12 +200,12 @@ class TestIsAmd64(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_x86_64(self):
-        from vless_installer.modules.turnable import _is_amd64
+        from chimera.modules.turnable import _is_amd64
         with patch("platform.machine", return_value="x86_64"):
             self.assertTrue(_is_amd64())
 
     def test_aarch64(self):
-        from vless_installer.modules.turnable import _is_amd64
+        from chimera.modules.turnable import _is_amd64
         with patch("platform.machine", return_value="aarch64"):
             self.assertFalse(_is_amd64())
 
@@ -233,9 +233,9 @@ class TestDownloadBinaryArch(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_false_on_non_amd64(self):
-        from vless_installer.modules import turnable
+        from chimera.modules import turnable
         with patch("platform.machine", return_value="aarch64"), \
-             patch("vless_installer.modules.download_manager.fetch_package") as mock_fp:
+             patch("chimera.modules.download_manager.fetch_package") as mock_fp:
             result = turnable._download_binary()
         self.assertFalse(result)
         # fetch_package НЕ вызывается — отказ происходит до него
@@ -249,9 +249,9 @@ class TestDownloadBinaryFirstMirrorSuccess(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_first_mirror_success_returns_true(self):
-        from vless_installer.modules import turnable
+        from chimera.modules import turnable
         with patch("platform.machine", return_value="x86_64"), \
-             patch("vless_installer.modules.download_manager.fetch_package",
+             patch("chimera.modules.download_manager.fetch_package",
                    return_value=True) as mock_fp:
             result = turnable._download_binary()
         self.assertTrue(result)
@@ -278,7 +278,7 @@ class TestDownloadBinaryMirrorFallback(unittest.TestCase):
 
     def test_spec_has_multiple_mirrors_for_fallback(self):
         """TURNABLE_SPEC.mirror_urls_builder возвращает >1 зеркало."""
-        from vless_installer.modules.turn_packages import TURNABLE_SPEC
+        from chimera.modules.turn_packages import TURNABLE_SPEC
         urls = TURNABLE_SPEC.mirror_urls_builder(
             filename="turnable-linux-amd64", version="0.4.1",
         )
@@ -290,8 +290,8 @@ class TestDownloadBinaryMirrorFallback(unittest.TestCase):
         """Симулируем fallback: fetch_package вернул True (он внутри
         перебрал зеркала и второе сработало). Проверяем что _download_binary
         прокидывает True и передаёт spec с поддержкой fallback."""
-        from vless_installer.modules import turnable
-        from vless_installer.modules.turn_packages import TURNABLE_SPEC
+        from chimera.modules import turnable
+        from chimera.modules.turn_packages import TURNABLE_SPEC
 
         # Убеждается что в spec'е действительно несколько зеркал
         urls = TURNABLE_SPEC.mirror_urls_builder(
@@ -300,7 +300,7 @@ class TestDownloadBinaryMirrorFallback(unittest.TestCase):
         self.assertGreaterEqual(len(urls), 2)
 
         with patch("platform.machine", return_value="x86_64"), \
-             patch("vless_installer.modules.download_manager.fetch_package",
+             patch("chimera.modules.download_manager.fetch_package",
                    return_value=True) as mock_fp:
             result = turnable._download_binary()
         self.assertTrue(result)
@@ -324,14 +324,14 @@ class TestDownloadBinaryManualUpload(unittest.TestCase):
 
     def test_spec_manual_dir_is_root(self):
         """TURNABLE_SPEC.manual_incoming_dir = /root/."""
-        from vless_installer.modules.turn_packages import TURNABLE_SPEC
+        from chimera.modules.turn_packages import TURNABLE_SPEC
         self.assertEqual(TURNABLE_SPEC.manual_incoming_dir, Path("/root"))
 
     def test_spec_manual_dir_not_in_install_dests(self):
         """КРИТИЧЕСКИЙ ИНВАРИАНТ: manual_dir НЕ совпадает ни с одним
         install_dest. Это воспроизводит защиту от бага 21d7baf на уровне
         конструктора PackageSpec."""
-        from vless_installer.modules.turn_packages import TURNABLE_SPEC
+        from chimera.modules.turn_packages import TURNABLE_SPEC
         for dest in TURNABLE_SPEC.install_dests:
             self.assertNotEqual(TURNABLE_SPEC.manual_incoming_dir, dest,
                 "manual_incoming_dir не должен совпадать с install_dest "
@@ -340,9 +340,9 @@ class TestDownloadBinaryManualUpload(unittest.TestCase):
     def test_manual_upload_returns_true_via_fetch_package(self):
         """Когда fetch_package находит /root/turnable-linux-amd64 — он
         возвращает True, и _download_binary тоже."""
-        from vless_installer.modules import turnable
+        from chimera.modules import turnable
         with patch("platform.machine", return_value="x86_64"), \
-             patch("vless_installer.modules.download_manager.fetch_package",
+             patch("chimera.modules.download_manager.fetch_package",
                    return_value=True) as mock_fp:
             result = turnable._download_binary()
         self.assertTrue(result)
@@ -356,9 +356,9 @@ class TestDownloadBinaryAllMirrorsFail(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_all_mirrors_fail_returns_false(self):
-        from vless_installer.modules import turnable
+        from chimera.modules import turnable
         with patch("platform.machine", return_value="x86_64"), \
-             patch("vless_installer.modules.download_manager.fetch_package",
+             patch("chimera.modules.download_manager.fetch_package",
                    return_value=False) as mock_fp:
             result = turnable._download_binary()
         self.assertFalse(result)
@@ -372,26 +372,26 @@ class TestTurnableSpecSanity(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_spec_filename_is_turnable_linux_amd64(self):
-        from vless_installer.modules.turn_packages import TURNABLE_SPEC
+        from chimera.modules.turn_packages import TURNABLE_SPEC
         self.assertEqual(TURNABLE_SPEC.filename_builder(), "turnable-linux-amd64")
 
     def test_spec_install_dest_is_opt_turnable(self):
-        from vless_installer.modules.turn_packages import TURNABLE_SPEC
+        from chimera.modules.turn_packages import TURNABLE_SPEC
         self.assertEqual(TURNABLE_SPEC.install_dests, [Path("/opt/turnable")])
 
     def test_spec_min_size_is_1mb(self):
         """min_size = 1 MB — защита от 404 HTML-страниц (раньше не было)."""
-        from vless_installer.modules.turn_packages import TURNABLE_SPEC
+        from chimera.modules.turn_packages import TURNABLE_SPEC
         self.assertEqual(TURNABLE_SPEC.min_size, 1_000_000)
 
     def test_spec_post_install_is_set(self):
-        from vless_installer.modules.turn_packages import TURNABLE_SPEC
+        from chimera.modules.turn_packages import TURNABLE_SPEC
         self.assertIsNotNone(TURNABLE_SPEC.post_install)
 
     def test_spec_post_install_copies_elf_binary(self):
         """post_install копирует ELF-бинарник в install_dests/turnable."""
         import tempfile
-        from vless_installer.modules.turn_packages import TURNABLE_SPEC
+        from chimera.modules.turn_packages import TURNABLE_SPEC
 
         tmpdir = Path(tempfile.mkdtemp())
         try:
@@ -415,7 +415,7 @@ class TestTurnableSpecSanity(unittest.TestCase):
         """post_install возвращает False если файл не ELF — даёт fetch_package
         шанс попробовать следующее зеркало."""
         import tempfile
-        from vless_installer.modules.turn_packages import TURNABLE_SPEC
+        from chimera.modules.turn_packages import TURNABLE_SPEC
 
         tmpdir = Path(tempfile.mkdtemp())
         try:

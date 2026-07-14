@@ -22,7 +22,7 @@
 ```
 bootstrap.sh           — точка входа (curl | bash), проверка зависимостей
 main.py                — тонкая обёртка: exec(_core.py)
-vless_installer/
+chimera/
   _core.py             — ВСЯ логика (≈37k строк), единый файл намеренно
   __init__.py          — пустой, для импорта
   __all_exports.py     — реэкспорт публичных символов
@@ -54,7 +54,7 @@ verify.py              — pre-publish sanity check
 
 ```bash
 # Синтаксис Python
-python3 -c "import ast; ast.parse(open('vless_installer/_core.py').read())"
+python3 -c "import ast; ast.parse(open('chimera/_core.py').read())"
 
 # Полный verify
 python3 verify.py

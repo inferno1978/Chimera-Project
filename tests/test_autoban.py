@@ -2,7 +2,7 @@
 """
 tests/test_autoban.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/autoban.py.
+Unit-тесты для chimera/modules/autoban.py.
 
 Покрывает:
   1. _autoban_load / _autoban_save — JSON I/O с дефолтами
@@ -17,7 +17,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text(); g = {}
     with patch.object(Path, 'mkdir', lambda s,*a,**k: None), \
          patch.object(Path, 'touch', lambda s,*a,**k: None), \
@@ -25,8 +25,8 @@ def _setup_core():
          patch('os.chown', lambda *a,**k: None), \
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
-    import types; m = types.ModuleType("vless_installer._core"); m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    import types; m = types.ModuleType("chimera._core"); m.__dict__.update(g)
+    sys.modules["chimera._core"] = m
 
 class TestAutobanLoadSave(unittest.TestCase):
     def setUp(self):
@@ -36,35 +36,35 @@ class TestAutobanLoadSave(unittest.TestCase):
     def tearDown(self):
         import shutil; shutil.rmtree(self._tmp, ignore_errors=True)
     def _patch(self):
-        return patch("vless_installer.modules.autoban._XRAY_BAN_STATE", self._state)
+        return patch("chimera.modules.autoban._XRAY_BAN_STATE", self._state)
     def test_load_returns_defaults_when_no_file(self):
-        from vless_installer.modules.autoban import _autoban_load
+        from chimera.modules.autoban import _autoban_load
         with self._patch():
             data = _autoban_load()
         self.assertFalse(data["enabled"])
         self.assertIn("banned", data)
         self.assertIn("whitelist", data)
     def test_load_returns_defaults_on_corrupt(self):
-        from vless_installer.modules.autoban import _autoban_load
+        from chimera.modules.autoban import _autoban_load
         self._state.write_text("{invalid")
         with self._patch():
             data = _autoban_load()
         self.assertFalse(data["enabled"])
     def test_save_then_load(self):
-        from vless_installer.modules.autoban import _autoban_load, _autoban_save
+        from chimera.modules.autoban import _autoban_load, _autoban_save
         with self._patch():
             _autoban_save({"enabled": True, "banned": {"1.2.3.4": {"count": 5}}})
             loaded = _autoban_load()
         self.assertTrue(loaded["enabled"])
         self.assertIn("1.2.3.4", loaded["banned"])
     def test_save_adds_ban_history(self):
-        from vless_installer.modules.autoban import _autoban_load, _autoban_save
+        from chimera.modules.autoban import _autoban_load, _autoban_save
         with self._patch():
             _autoban_save({"enabled": True, "banned": {}})
             loaded = _autoban_load()
         self.assertIn("ban_history", loaded)
     def test_save_sets_chmod_600(self):
-        from vless_installer.modules.autoban import _autoban_save
+        from chimera.modules.autoban import _autoban_save
         with self._patch():
             _autoban_save({"enabled": False})
         mode = stat.S_IMODE(os.stat(self._state).st_mode)

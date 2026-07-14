@@ -83,9 +83,9 @@ def _safe_chown(*a, **kw):
     except: return
 
 # ── Пути ──────────────────────────────────────────────────────
-_CORE_PATH     = _PROJECT_ROOT / "vless_installer" / "_core.py"
-_MODULES_DIR   = _PROJECT_ROOT / "vless_installer" / "modules"
-_PKG_INIT      = _PROJECT_ROOT / "vless_installer" / "__init__.py"
+_CORE_PATH     = _PROJECT_ROOT / "chimera" / "_core.py"
+_MODULES_DIR   = _PROJECT_ROOT / "chimera" / "modules"
+_PKG_INIT      = _PROJECT_ROOT / "chimera" / "__init__.py"
 _BASELINE_FILE = _PROJECT_ROOT / "tests" / "baseline_paths.json"
 
 # ── Ожидаемые module-local хелперы (дубликаты разрешены) ──────
@@ -181,8 +181,8 @@ _compile_files = [
     _PKG_INIT,
     _CORE_PATH,
 ]
-# Все .py в vless_installer/ (рекурсивно, включая _vendor/)
-for py in sorted((_PROJECT_ROOT / "vless_installer").rglob("*.py")):
+# Все .py в chimera/ (рекурсивно, включая _vendor/)
+for py in sorted((_PROJECT_ROOT / "chimera").rglob("*.py")):
     if "__pycache__" in py.parts:
         continue
     if py not in _compile_files:
@@ -217,14 +217,14 @@ section_results["1. py_compile"] = (_compiled_ok, _compiled_fail)
 # ══════════════════════════════════════════════════════════════
 # Секция 2. Импорт всех модулей (с патчами системных путей)
 # ══════════════════════════════════════════════════════════════
-section("2. Импорт всех модулей vless_installer/ (с патчами)")
+section("2. Импорт всех модулей chimera/ (с патчами)")
 
 _imported_ok = 0
 _imported_fail = 0
 _failed_modules = []
 
 # Сначала загрузим _core.py через exec и зарегистрируем в sys.modules,
-# чтобы lazy-импорты в модулях могли найти vless_installer._core.
+# чтобы lazy-импорты в модулях могли найти chimera._core.
 _core_globals = None
 try:
     with patch.object(Path, 'mkdir', _safe_mkdir), \
@@ -240,14 +240,14 @@ except Exception as e:
     fail(f"exec(_core.py) — ошибка: {e}")
 
 if _core_globals is not None:
-    _fake_core = type(sys)("vless_installer._core")
+    _fake_core = type(sys)("chimera._core")
     _fake_core.__dict__.update(_core_globals)
-    sys.modules["vless_installer._core"] = _fake_core
+    sys.modules["chimera._core"] = _fake_core
 
 # Импортируем все модули (с патчами)
 _all_py = []
-if (_PROJECT_ROOT / "vless_installer").exists():
-    for py in sorted((_PROJECT_ROOT / "vless_installer").rglob("*.py")):
+if (_PROJECT_ROOT / "chimera").exists():
+    for py in sorted((_PROJECT_ROOT / "chimera").rglob("*.py")):
         if "__pycache__" in py.parts:
             continue
         if py.name == "__init__.py":
@@ -261,10 +261,10 @@ if (_PROJECT_ROOT / "vless_installer").exists():
 
 _import_errors = 0
 for py in _all_py:
-    # Вычисляем module path: vless_installer.modules.<name> или vless_installer.<name>
+    # Вычисляем module path: chimera.modules.<name> или chimera.<name>
     try:
         rel = py.relative_to(_PROJECT_ROOT)
-        parts = list(rel.with_suffix("").parts)  # vless_installer, modules, name
+        parts = list(rel.with_suffix("").parts)  # chimera, modules, name
         mod_fqn = ".".join(parts)
     except ValueError:
         continue
@@ -290,7 +290,7 @@ else:
 # Check proto_common.py — shared helpers extracted from 8 protocol modules
 # (wdtt, turnable, mieru, fptn, naiveproxy, turntunnel, mtproto, webdav_tunnel).
 try:
-    from vless_installer.modules.proto_common import (
+    from chimera.modules.proto_common import (
         proto_load_state, proto_save_state, proto_ask,
         proto_install_service, proto_show_status, proto_full_uninstall,
     )
@@ -337,7 +337,7 @@ else:
 section("4. Дубликаты определений функций (AST)")
 
 _func_defs = {}  # name -> set of file paths
-_py_root = _PROJECT_ROOT / "vless_installer"
+_py_root = _PROJECT_ROOT / "chimera"
 if _py_root.exists():
     for py in sorted(_py_root.rglob("*.py")):
         if "__pycache__" in py.parts:
@@ -361,7 +361,7 @@ if _py_root.exists():
         ok(f"Подозрительных дубликатов нет (просканировано {len(_func_defs)} имён функций)")
         section_results["4. duplicate defs"] = (1, 0)
 else:
-    fail("vless_installer/ не найден — невозможно проверить дубликаты")
+    fail("chimera/ не найден — невозможно проверить дубликаты")
     section_results["4. duplicate defs"] = (0, 1)
 
 
@@ -402,7 +402,7 @@ _chmod_tested = 0
 
 # Тест 1: proto_common.proto_save_state — основная функция
 try:
-    from vless_installer.modules.proto_common import proto_save_state
+    from chimera.modules.proto_common import proto_save_state
     _tmp = Path(_tempfile.mkdtemp())
     _test_file = _tmp / "test_proto.json"
     proto_save_state(_test_file, {"test": True})
@@ -425,7 +425,7 @@ except Exception as e:
 _PROTO_MODS = ["wdtt", "turnable", "mieru", "fptn", "naiveproxy", "turntunnel", "mtproto", "webdav_tunnel"]
 for _mod_name in _PROTO_MODS:
     try:
-        _mod = __import__(f"vless_installer.modules.{_mod_name}", fromlist=[_mod_name])
+        _mod = __import__(f"chimera.modules.{_mod_name}", fromlist=[_mod_name])
         _test_file = _tmp / f"test_{_mod_name}.json"
         # Все 8 модулей делегируют в proto_save_state
         proto_save_state(_test_file, {"test": True, "proto": _mod_name})
@@ -501,7 +501,7 @@ else:
 # ══════════════════════════════════════════════════════════════
 section("8. Web panel security invariants (rest_api.py)")
 
-_rest_api_path = _PROJECT_ROOT / "vless_installer" / "modules" / "rest_api.py"
+_rest_api_path = _PROJECT_ROOT / "chimera" / "modules" / "rest_api.py"
 _sec8_pass = 0
 _sec8_fail = 0
 
@@ -650,7 +650,7 @@ else:
 
 # 9.4 Архитектурный инвариант: nginx слушает unix: сокет (nginx_setup.py),
 # а xray service НЕ делает ExecStartPre: rm -f сокета (это ломало бы nginx).
-_nginx_setup_src = (_PROJECT_ROOT / "vless_installer" / "modules" /
+_nginx_setup_src = (_PROJECT_ROOT / "chimera" / "modules" /
                     "nginx_setup.py").read_text(encoding="utf-8")
 if "listen unix:" in _nginx_setup_src and "PARAM_SOCKET_PATH" in _nginx_setup_src:
     ok("nginx_setup.py: nginx слушает unix: сокет (подтверждено — "
@@ -661,7 +661,7 @@ else:
          "REALITY+Unix-сокет нарушена")
     _sec9_fail += 1
 
-_xray_install_src = (_PROJECT_ROOT / "vless_installer" / "modules" /
+_xray_install_src = (_PROJECT_ROOT / "chimera" / "modules" /
                      "xray_install.py").read_text(encoding="utf-8")
 # Xray НЕ должен делать rm -f PARAM_SOCKET_PATH (это удаляло бы сокет nginx).
 # Должен быть только mkdir -p в ExecStartPre.
@@ -749,7 +749,7 @@ else:
 # перепишут на чтение из global — порядок сохранения state станет неважен, и
 # эта проверка потеряет смысл. Но пока health.py читает state.json — порядок
 # критичен.
-_health_path = _PROJECT_ROOT / "vless_installer" / "modules" / "health.py"
+_health_path = _PROJECT_ROOT / "chimera" / "modules" / "health.py"
 if not _health_path.exists():
     fail(f"health.py не найден: {_health_path}")
     _sec10_fail += 1

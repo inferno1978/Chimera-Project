@@ -2,7 +2,7 @@
 """
 tests/test_proto_common.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/proto_common.py — общие хелперы
+Unit-тесты для chimera/modules/proto_common.py — общие хелперы
 для 8 протокольных модулей (wdtt, turnable, mieru, fptn, naiveproxy,
 turntunnel, mtproto, webdav_tunnel).
 
@@ -29,7 +29,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -39,9 +39,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestProtoLoadState(unittest.TestCase):
@@ -51,7 +51,7 @@ class TestProtoLoadState(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_loads_valid_json(self):
-        from vless_installer.modules.proto_common import proto_load_state
+        from chimera.modules.proto_common import proto_load_state
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump({"installed": True, "port": 56000}, f)
             f.flush()
@@ -61,19 +61,19 @@ class TestProtoLoadState(unittest.TestCase):
         self.assertEqual(state["port"], 56000)
 
     def test_returns_empty_dict_when_file_missing(self):
-        from vless_installer.modules.proto_common import proto_load_state
+        from chimera.modules.proto_common import proto_load_state
         state = proto_load_state(Path("/tmp/nonexistent_proto_state.json"))
         self.assertEqual(state, {})
 
     def test_returns_defaults_when_file_missing(self):
-        from vless_installer.modules.proto_common import proto_load_state
+        from chimera.modules.proto_common import proto_load_state
         defaults = {"installed": False, "port": 443}
         state = proto_load_state(Path("/tmp/nonexistent_proto_state.json"), defaults)
         self.assertEqual(state["installed"], False)
         self.assertEqual(state["port"], 443)
 
     def test_returns_empty_dict_when_corrupt_json(self):
-        from vless_installer.modules.proto_common import proto_load_state
+        from chimera.modules.proto_common import proto_load_state
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             f.write("{invalid json!!!")
             f.flush()
@@ -83,7 +83,7 @@ class TestProtoLoadState(unittest.TestCase):
 
     def test_merges_defaults_with_existing_state(self):
         """При наличии defaults — missing keys заполняются из defaults."""
-        from vless_installer.modules.proto_common import proto_load_state
+        from chimera.modules.proto_common import proto_load_state
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump({"installed": True}, f)
             f.flush()
@@ -103,7 +103,7 @@ class TestProtoSaveState(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_writes_valid_json(self):
-        from vless_installer.modules.proto_common import proto_save_state
+        from chimera.modules.proto_common import proto_save_state
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "test_state.json"
             proto_save_state(path, {"installed": True, "port": 56000})
@@ -113,7 +113,7 @@ class TestProtoSaveState(unittest.TestCase):
 
     def test_sets_chmod_600(self):
         """proto_save_state должен устанавливать права 0o600."""
-        from vless_installer.modules.proto_common import proto_save_state
+        from chimera.modules.proto_common import proto_save_state
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "test_state.json"
             proto_save_state(path, {"test": True})
@@ -123,7 +123,7 @@ class TestProtoSaveState(unittest.TestCase):
 
     def test_creates_parent_dir(self):
         """Создаёт родительскую директорию если не существует."""
-        from vless_installer.modules.proto_common import proto_save_state
+        from chimera.modules.proto_common import proto_save_state
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "subdir" / "test_state.json"
             proto_save_state(path, {"test": True})
@@ -131,7 +131,7 @@ class TestProtoSaveState(unittest.TestCase):
 
     def test_overwrites_existing(self):
         """Перезаписывает существующий файл."""
-        from vless_installer.modules.proto_common import proto_save_state
+        from chimera.modules.proto_common import proto_save_state
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "test_state.json"
             proto_save_state(path, {"version": 1})
@@ -147,27 +147,27 @@ class TestProtoAsk(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_input_value(self):
-        from vless_installer.modules.proto_common import proto_ask
+        from chimera.modules.proto_common import proto_ask
         with patch("builtins.input", return_value="hello"):
             result = proto_ask("Enter something: ")
         self.assertEqual(result, "hello")
 
     def test_returns_default_on_empty(self):
-        from vless_installer.modules.proto_common import proto_ask
+        from chimera.modules.proto_common import proto_ask
         with patch("builtins.input", return_value=""):
             result = proto_ask("Enter: ", default="fallback")
         self.assertEqual(result, "fallback")
 
     def test_raises_on_ctrl_c(self):
         """Ctrl+C → ProtoCancelled exception."""
-        from vless_installer.modules.proto_common import proto_ask, ProtoCancelled
+        from chimera.modules.proto_common import proto_ask, ProtoCancelled
         with patch("builtins.input", side_effect=KeyboardInterrupt):
             with self.assertRaises(ProtoCancelled):
                 proto_ask("Enter: ", c=True)
 
     def test_returns_default_on_ctrl_c_without_c_flag(self):
         """Без c=True — Ctrl+C возвращает default, не exception."""
-        from vless_installer.modules.proto_common import proto_ask
+        from chimera.modules.proto_common import proto_ask
         with patch("builtins.input", side_effect=KeyboardInterrupt):
             result = proto_ask("Enter: ", default="safe")
         self.assertEqual(result, "safe")
@@ -180,24 +180,24 @@ class TestProtoGenPassword(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_generates_correct_length(self):
-        from vless_installer.modules.proto_common import proto_gen_password
+        from chimera.modules.proto_common import proto_gen_password
         pw = proto_gen_password(16)
         self.assertEqual(len(pw), 16)
 
     def test_generates_different_passwords(self):
-        from vless_installer.modules.proto_common import proto_gen_password
+        from chimera.modules.proto_common import proto_gen_password
         pw1 = proto_gen_password(20)
         pw2 = proto_gen_password(20)
         self.assertNotEqual(pw1, pw2)
 
     def test_default_length(self):
-        from vless_installer.modules.proto_common import proto_gen_password
+        from chimera.modules.proto_common import proto_gen_password
         pw = proto_gen_password()
         self.assertTrue(len(pw) >= 12)  # default should be reasonable
 
     def test_contains_only_safe_chars(self):
         """Пароль содержит только печатные ASCII без неоднозначных символов."""
-        from vless_installer.modules.proto_common import proto_gen_password
+        from chimera.modules.proto_common import proto_gen_password
         pw = proto_gen_password(50)
         # Не должно содержать пробелы, кавычки, обратный слеш
         for ch in pw:
@@ -211,11 +211,11 @@ class TestProtoCancelled(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_is_exception(self):
-        from vless_installer.modules.proto_common import ProtoCancelled
+        from chimera.modules.proto_common import ProtoCancelled
         self.assertTrue(issubclass(ProtoCancelled, Exception))
 
     def test_can_be_raised_and_caught(self):
-        from vless_installer.modules.proto_common import ProtoCancelled
+        from chimera.modules.proto_common import ProtoCancelled
         with self.assertRaises(ProtoCancelled):
             raise ProtoCancelled()
 

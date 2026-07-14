@@ -2,7 +2,7 @@
 """
 tests/test_awg_rest_api.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/awg_rest_api.py и интеграции с rest_api.
+Unit-тесты для chimera/modules/awg_rest_api.py и интеграции с rest_api.
 
 Покрывает:
   1. /api/awg/* отдают 404 если AWG не установлен (не 500).
@@ -38,10 +38,10 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 def _setup_core_in_sysmodules():
     """
     Загружает _core.py через exec (как full_test.py) и регистрирует в
-    sys.modules['vless_installer._core'], чтобы lazy-импорты в awg-модулях
+    sys.modules['chimera._core'], чтобы lazy-импорты в awg-модулях
     работали. Возвращает module object.
     """
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -51,9 +51,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core, g
 
 
@@ -129,44 +129,44 @@ class TestAWGRestAPIAwgNotInstalled(unittest.TestCase):
     def setUp(self):
         _setup_core_in_sysmodules()
         # Патчим awgs_state_is_installed → False
-        self._patch1 = patch("vless_installer.modules.awg_rest_api._is_awg_installed", return_value=False)
+        self._patch1 = patch("chimera.modules.awg_rest_api._is_awg_installed", return_value=False)
         self._patch1.start()
 
     def tearDown(self):
         self._patch1.stop()
 
     def test_get_status_404_when_not_installed(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=True)
         awg_rest_api.awg_handle_get(h, "/api/awg/status", {})
         self.assertEqual(h.status, 404)
 
     def test_get_peers_404_when_not_installed(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=True)
         awg_rest_api.awg_handle_get(h, "/api/awg/peers", {})
         self.assertEqual(h.status, 404)
 
     def test_post_peer_404_when_not_installed(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=True)
         awg_rest_api.awg_handle_post(h, "/api/awg/peers", {"name": "test"})
         self.assertEqual(h.status, 404)
 
     def test_delete_peer_404_when_not_installed(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=True)
         awg_rest_api.awg_handle_delete(h, "/api/awg/peers/test")
         self.assertEqual(h.status, 404)
 
     def test_patch_peer_404_when_not_installed(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=True)
         awg_rest_api.awg_handle_patch(h, "/api/awg/peers/test", {"param": "dns1", "value": "1.1.1.1"})
         self.assertEqual(h.status, 404)
 
     def test_my_peer_404_when_not_installed(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(user={"email": "alice@example.com"})
         awg_rest_api.awg_handle_get(h, "/api/awg/my-peer", {})
         self.assertEqual(h.status, 404)
@@ -177,13 +177,13 @@ class TestAWGRestAPIAdminAuth(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        self._patch1 = patch("vless_installer.modules.awg_rest_api._is_awg_installed", return_value=True)
+        self._patch1 = patch("chimera.modules.awg_rest_api._is_awg_installed", return_value=True)
         self._patch1.start()
         # Мокаем awgs_state_load / awgs_service_status чтобы не падало
-        self._patch2 = patch("vless_installer.modules.awg_state.awgs_state_load",
+        self._patch2 = patch("chimera.modules.awg_state.awgs_state_load",
                              return_value={"installed": True, "peers": [], "interface": "awg0"})
         self._patch2.start()
-        self._patch3 = patch("vless_installer.modules.awg_state.awgs_state_is_installed", return_value=True)
+        self._patch3 = patch("chimera.modules.awg_state.awgs_state_is_installed", return_value=True)
         self._patch3.start()
 
     def tearDown(self):
@@ -192,31 +192,31 @@ class TestAWGRestAPIAdminAuth(unittest.TestCase):
         self._patch3.stop()
 
     def test_status_401_without_admin_auth(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=False)
         awg_rest_api.awg_handle_get(h, "/api/awg/status", {})
         self.assertEqual(h.status, 401)
 
     def test_peers_401_without_admin_auth(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=False)
         awg_rest_api.awg_handle_get(h, "/api/awg/peers", {})
         self.assertEqual(h.status, 401)
 
     def test_post_peer_401_without_admin_auth(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=False)
         awg_rest_api.awg_handle_post(h, "/api/awg/peers", {"name": "test"})
         self.assertEqual(h.status, 401)
 
     def test_delete_peer_401_without_admin_auth(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=False)
         awg_rest_api.awg_handle_delete(h, "/api/awg/peers/test")
         self.assertEqual(h.status, 401)
 
     def test_patch_peer_401_without_admin_auth(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=False)
         awg_rest_api.awg_handle_patch(h, "/api/awg/peers/test", {"param": "dns1", "value": "1.1.1.1"})
         self.assertEqual(h.status, 401)
@@ -227,19 +227,19 @@ class TestAWGRestAPIAdminAuth(unittest.TestCase):
         Это admin-only endpoint. Без admin auth → 401 (не 200, не 403).
         Это и есть негативный кейс: user пытается достучаться до admin endpoint.
         """
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=False)
         awg_rest_api.awg_handle_get(h, "/api/awg/peers/alice/config", {})
         self.assertEqual(h.status, 401)
 
     def test_peer_qr_401_without_admin_auth(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=False)
         awg_rest_api.awg_handle_get(h, "/api/awg/peers/alice/qr", {})
         self.assertEqual(h.status, 401)
 
     def test_stats_401_without_admin_auth(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=False)
         awg_rest_api.awg_handle_get(h, "/api/awg/stats", {})
         self.assertEqual(h.status, 401)
@@ -267,7 +267,7 @@ class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        self._patch1 = patch("vless_installer.modules.awg_rest_api._is_awg_installed",
+        self._patch1 = patch("chimera.modules.awg_rest_api._is_awg_installed",
                              return_value=True)
         self._patch1.start()
 
@@ -294,7 +294,7 @@ class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
 
     def test_stats_response_does_not_contain_server_privkey(self):
         """JSON-ответ /api/awg/stats не содержит server_privkey."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         fake_dump = self._build_fake_dump_with_secrets()
         # peers из state — нужны для матчинга по pubkey в _parse_peer_stats
         fake_peers = [{
@@ -303,9 +303,9 @@ class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
             "client_privkey": "irrelevant",
             "client_ip": "10.66.66.2",
         }]
-        with patch("vless_installer.modules.awg_apply.awgs_show_dump",
+        with patch("chimera.modules.awg_apply.awgs_show_dump",
                    return_value=fake_dump), \
-             patch("vless_installer.modules.awg_state.awgs_state_peers_get",
+             patch("chimera.modules.awg_state.awgs_state_peers_get",
                    return_value=fake_peers):
             h = _MockHandler(admin_authed=True)
             awg_rest_api.awg_handle_get(h, "/api/awg/stats", {})
@@ -318,7 +318,7 @@ class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
 
     def test_stats_response_does_not_contain_psk(self):
         """JSON-ответ /api/awg/stats не содержит PSK пира."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         fake_dump = self._build_fake_dump_with_secrets()
         fake_peers = [{
             "name": "alice",
@@ -326,9 +326,9 @@ class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
             "client_privkey": "irrelevant",
             "client_ip": "10.66.66.2",
         }]
-        with patch("vless_installer.modules.awg_apply.awgs_show_dump",
+        with patch("chimera.modules.awg_apply.awgs_show_dump",
                    return_value=fake_dump), \
-             patch("vless_installer.modules.awg_state.awgs_state_peers_get",
+             patch("chimera.modules.awg_state.awgs_state_peers_get",
                    return_value=fake_peers):
             h = _MockHandler(admin_authed=True)
             awg_rest_api.awg_handle_get(h, "/api/awg/stats", {})
@@ -340,7 +340,7 @@ class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
 
     def test_stats_response_does_not_contain_raw_dump_key(self):
         """В JSON-ответе нет ключа 'raw_dump' вообще."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         fake_dump = self._build_fake_dump_with_secrets()
         fake_peers = [{
             "name": "alice",
@@ -348,9 +348,9 @@ class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
             "client_privkey": "irrelevant",
             "client_ip": "10.66.66.2",
         }]
-        with patch("vless_installer.modules.awg_apply.awgs_show_dump",
+        with patch("chimera.modules.awg_apply.awgs_show_dump",
                    return_value=fake_dump), \
-             patch("vless_installer.modules.awg_state.awgs_state_peers_get",
+             patch("chimera.modules.awg_state.awgs_state_peers_get",
                    return_value=fake_peers):
             h = _MockHandler(admin_authed=True)
             awg_rest_api.awg_handle_get(h, "/api/awg/stats", {})
@@ -367,7 +367,7 @@ class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
         Проверка что после фикса endpoint всё ещё отдаёт полезную статистику
         (rx_bytes, tx_bytes, handshake, endpoint) — просто без raw_dump.
         """
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         fake_dump = self._build_fake_dump_with_secrets()
         fake_peers = [{
             "name": "alice",
@@ -375,9 +375,9 @@ class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
             "client_privkey": "irrelevant",
             "client_ip": "10.66.66.2",
         }]
-        with patch("vless_installer.modules.awg_apply.awgs_show_dump",
+        with patch("chimera.modules.awg_apply.awgs_show_dump",
                    return_value=fake_dump), \
-             patch("vless_installer.modules.awg_state.awgs_state_peers_get",
+             patch("chimera.modules.awg_state.awgs_state_peers_get",
                    return_value=fake_peers):
             h = _MockHandler(admin_authed=True)
             awg_rest_api.awg_handle_get(h, "/api/awg/stats", {})
@@ -402,7 +402,7 @@ class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
         только rx/tx/handshake/endpoint), но проверим что raw dump не попадает
         в ответ случайно (например через debug-поле).
         """
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         fake_dump = self._build_fake_dump_with_secrets()
         fake_peers = [{
             "name": "alice",
@@ -412,11 +412,11 @@ class TestAWGRestAPIStatsNoSecretLeak(unittest.TestCase):
             "owner_email": "",
             "expires_at": "",
         }]
-        with patch("vless_installer.modules.awg_apply.awgs_show_dump",
+        with patch("chimera.modules.awg_apply.awgs_show_dump",
                    return_value=fake_dump), \
-             patch("vless_installer.modules.awg_state.awgs_state_peers_get",
+             patch("chimera.modules.awg_state.awgs_state_peers_get",
                    return_value=fake_peers), \
-             patch("vless_installer.modules.awg_state.awgs_state_ensure_peer_owner_field"):
+             patch("chimera.modules.awg_state.awgs_state_ensure_peer_owner_field"):
             h = _MockHandler(admin_authed=True)
             awg_rest_api.awg_handle_get(h, "/api/awg/peers", {})
             self.assertEqual(h.status, 200)
@@ -432,7 +432,7 @@ class TestAWGRestAPIPeerNameValidation(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        self._patch1 = patch("vless_installer.modules.awg_rest_api._is_awg_installed", return_value=True)
+        self._patch1 = patch("chimera.modules.awg_rest_api._is_awg_installed", return_value=True)
         self._patch1.start()
 
     def tearDown(self):
@@ -440,7 +440,7 @@ class TestAWGRestAPIPeerNameValidation(unittest.TestCase):
 
     def test_path_traversal_in_config_blocked(self):
         """Имя пира с ../ не проходит валидацию → 400, не 500/200."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=True)
         # path уже спарсен rest_api; хендлер получает имя из regex
         # Симулируем что regex в awg_rest_api matched "etc/passwd" (без ..)
@@ -454,7 +454,7 @@ class TestAWGRestAPIPeerNameValidation(unittest.TestCase):
 
     def test_invalid_peer_name_rejected(self):
         """Имя начинающееся с цифры отклоняется."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         # Проверяем напрямую _validate_peer_name
         self.assertFalse(awg_rest_api._validate_peer_name("123abc"))
         self.assertFalse(awg_rest_api._validate_peer_name(""))
@@ -468,7 +468,7 @@ class TestAWGRestAPIPeerNameValidation(unittest.TestCase):
 
     def test_path_traversal_name_rejected_by_validator(self):
         """Имена с / .. и т.п. не проходят _validate_peer_name."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         self.assertFalse(awg_rest_api._validate_peer_name("../etc/passwd"))
         self.assertFalse(awg_rest_api._validate_peer_name("a/b"))
         self.assertFalse(awg_rest_api._validate_peer_name(".."))
@@ -480,22 +480,22 @@ class TestAWGRestAPIUserEndpoints(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        self._patch1 = patch("vless_installer.modules.awg_rest_api._is_awg_installed", return_value=True)
+        self._patch1 = patch("chimera.modules.awg_rest_api._is_awg_installed", return_value=True)
         self._patch1.start()
 
     def tearDown(self):
         self._patch1.stop()
 
     def test_my_peer_401_without_user_auth(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(user=None)
         awg_rest_api.awg_handle_get(h, "/api/awg/my-peer", {})
         self.assertEqual(h.status, 401)
 
     def test_my_peer_returns_null_when_no_peer(self):
         """Если у юзера нет привязанного пира — {"peer": null}, 200."""
-        from vless_installer.modules import awg_rest_api
-        with patch("vless_installer.modules.awg_state.awgs_state_find_peer_by_owner",
+        from chimera.modules import awg_rest_api
+        with patch("chimera.modules.awg_state.awgs_state_find_peer_by_owner",
                    return_value=None):
             h = _MockHandler(user={"email": "alice@example.com"})
             awg_rest_api.awg_handle_get(h, "/api/awg/my-peer", {})
@@ -504,16 +504,16 @@ class TestAWGRestAPIUserEndpoints(unittest.TestCase):
             self.assertIsNone(data.get("peer"))
 
     def test_my_peer_config_404_when_no_peer(self):
-        from vless_installer.modules import awg_rest_api
-        with patch("vless_installer.modules.awg_state.awgs_state_find_peer_by_owner",
+        from chimera.modules import awg_rest_api
+        with patch("chimera.modules.awg_state.awgs_state_find_peer_by_owner",
                    return_value=None):
             h = _MockHandler(user={"email": "alice@example.com"})
             awg_rest_api.awg_handle_get(h, "/api/awg/my-peer/config", {})
             self.assertEqual(h.status, 404)
 
     def test_my_peer_regen_404_when_no_peer(self):
-        from vless_installer.modules import awg_rest_api
-        with patch("vless_installer.modules.awg_state.awgs_state_find_peer_by_owner",
+        from chimera.modules import awg_rest_api
+        with patch("chimera.modules.awg_state.awgs_state_find_peer_by_owner",
                    return_value=None):
             h = _MockHandler(user={"email": "alice@example.com"})
             awg_rest_api.awg_handle_post(h, "/api/awg/my-peer/regen", {})
@@ -521,7 +521,7 @@ class TestAWGRestAPIUserEndpoints(unittest.TestCase):
 
     def test_my_peer_returns_safe_peer_without_privkey(self):
         """my-peer отдаёт пира БЕЗ client_privkey И preshared_key (секреты не утекают)."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         fake_peer = {
             "name": "alice",
             "client_privkey": "SECRET_PRIVATE_KEY_MUST_NOT_LEAK",
@@ -531,9 +531,9 @@ class TestAWGRestAPIUserEndpoints(unittest.TestCase):
             "owner_email": "alice@example.com",
             "expires_at": "",
         }
-        with patch("vless_installer.modules.awg_state.awgs_state_find_peer_by_owner",
+        with patch("chimera.modules.awg_state.awgs_state_find_peer_by_owner",
                    return_value=fake_peer), \
-             patch("vless_installer.modules.awg_apply.awgs_show_dump", return_value=[]):
+             patch("chimera.modules.awg_apply.awgs_show_dump", return_value=[]):
             h = _MockHandler(user={"email": "alice@example.com"})
             awg_rest_api.awg_handle_get(h, "/api/awg/my-peer", {})
             self.assertEqual(h.status, 200)
@@ -551,7 +551,7 @@ class TestAWGRestAPISafePeerForJson(unittest.TestCase):
     """_safe_peer_for_json убирает приватные ключи и PSK."""
 
     def test_safe_peer_strips_client_privkey(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         peer = {
             "name": "alice",
             "client_privkey": "SECRET",
@@ -572,7 +572,7 @@ class TestAWGRestAPISafePeerForJson(unittest.TestCase):
         /api/awg/my-peer. PSK — боевой секрет (дополнительный симметричный
         ключ для post-quantum resistance), утечка ослабляет туннель.
         """
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         peer = {
             "name": "alice",
             "client_privkey": "SECRET_PRIV",
@@ -593,7 +593,7 @@ class TestAWGRestAPISafePeerForJson(unittest.TestCase):
 
     def test_safe_peer_strips_server_privkey_if_present(self):
         """server_privkey (если бы оказался в peer) тоже фильтруется."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         peer = {
             "name": "alice",
             "server_privkey": "SERVER_SECRET",
@@ -603,7 +603,7 @@ class TestAWGRestAPISafePeerForJson(unittest.TestCase):
         self.assertNotIn("server_privkey", safe)
 
     def test_safe_peer_handles_empty(self):
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         self.assertEqual(awg_rest_api._safe_peer_for_json({}), {})
         self.assertEqual(awg_rest_api._safe_peer_for_json(None), {})
 
@@ -615,13 +615,13 @@ class TestAWGStateOwnerEmailMigration(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_ensure_owner_field_adds_missing(self):
-        from vless_installer.modules import awg_state
-        with patch("vless_installer.modules.awg_state.awgs_state_load",
+        from chimera.modules import awg_state
+        with patch("chimera.modules.awg_state.awgs_state_load",
                    return_value={"peers": [
                        {"name": "alice", "client_privkey": "x"},  # без owner_email
                        {"name": "bob", "owner_email": "bob@ex.com"},  # уже есть
                    ]}), \
-             patch("vless_installer.modules.awg_state.awgs_state_save") as mock_save:
+             patch("chimera.modules.awg_state.awgs_state_save") as mock_save:
             awg_state.awgs_state_ensure_peer_owner_field()
             mock_save.assert_called_once()
             saved_state = mock_save.call_args.args[0]
@@ -630,23 +630,23 @@ class TestAWGStateOwnerEmailMigration(unittest.TestCase):
             self.assertEqual(peers[1].get("owner_email"), "bob@ex.com")
 
     def test_ensure_owner_field_idempotent_when_all_have_it(self):
-        from vless_installer.modules import awg_state
-        with patch("vless_installer.modules.awg_state.awgs_state_load",
+        from chimera.modules import awg_state
+        with patch("chimera.modules.awg_state.awgs_state_load",
                    return_value={"peers": [
                        {"name": "alice", "owner_email": "a@ex.com"},
                    ]}), \
-             patch("vless_installer.modules.awg_state.awgs_state_save") as mock_save:
+             patch("chimera.modules.awg_state.awgs_state_save") as mock_save:
             awg_state.awgs_state_ensure_peer_owner_field()
             mock_save.assert_not_called()  # ничего не меняли — не сохраняем
 
     def test_find_peer_by_owner_returns_correct_peer(self):
-        from vless_installer.modules import awg_state
+        from chimera.modules import awg_state
         peers = [
             {"name": "alice", "owner_email": "alice@ex.com"},
             {"name": "bob", "owner_email": "bob@ex.com"},
             {"name": "tech", "owner_email": ""},  # технический
         ]
-        with patch("vless_installer.modules.awg_state.awgs_state_peers_get",
+        with patch("chimera.modules.awg_state.awgs_state_peers_get",
                    return_value=peers):
             self.assertEqual(awg_state.awgs_state_find_peer_by_owner("alice@ex.com")["name"], "alice")
             self.assertEqual(awg_state.awgs_state_find_peer_by_owner("bob@ex.com")["name"], "bob")
@@ -661,16 +661,16 @@ class TestAWGPeerAddOwnerEmail(unittest.TestCase):
         _setup_core_in_sysmodules()
         # Мокаем все внешние вызовы awg_peer_add
         self._patches = [
-            patch("vless_installer.modules.awg_peers.awgs_state_peer_find", return_value=None),
-            patch("vless_installer.modules.awg_peers.awgs_generate_keys",
+            patch("chimera.modules.awg_peers.awgs_state_peer_find", return_value=None),
+            patch("chimera.modules.awg_peers.awgs_generate_keys",
                   return_value=("priv", "pub")),
-            patch("vless_installer.modules.awg_peers.awgs_state_next_ip",
+            patch("chimera.modules.awg_peers.awgs_state_next_ip",
                   return_value="10.66.66.5"),
-            patch("vless_installer.modules.awg_peers.awgs_state_load",
+            patch("chimera.modules.awg_peers.awgs_state_load",
                   return_value={"allow_ipv6_tunnel": False}),
-            patch("vless_installer.modules.awg_peers.awgs_state_peer_add", return_value=True),
-            patch("vless_installer.modules.awg_peers.awg_peer_rebuild_conf", return_value=True),
-            patch("vless_installer.modules.awg_peers.awgs_qr_export_peer",
+            patch("chimera.modules.awg_peers.awgs_state_peer_add", return_value=True),
+            patch("chimera.modules.awg_peers.awg_peer_rebuild_conf", return_value=True),
+            patch("chimera.modules.awg_peers.awgs_qr_export_peer",
                   return_value={"conf_path": "/tmp/x.conf"}),
         ]
         for p in self._patches:
@@ -681,7 +681,7 @@ class TestAWGPeerAddOwnerEmail(unittest.TestCase):
             p.stop()
 
     def test_add_with_owner_email_saves_it(self):
-        from vless_installer.modules import awg_peers
+        from chimera.modules import awg_peers
         ok = awg_peers.awg_peer_add(
             name="alice",
             expires="",
@@ -693,12 +693,12 @@ class TestAWGPeerAddOwnerEmail(unittest.TestCase):
         )
         self.assertTrue(ok)
         # Проверяем что awgs_state_peer_add получил пира с owner_email
-        from vless_installer.modules import awg_peers
+        from chimera.modules import awg_peers
         peer_arg = awg_peers.awgs_state_peer_add.call_args.args[0]
         self.assertEqual(peer_arg.get("owner_email"), "alice@example.com")
 
     def test_add_without_owner_email_defaults_empty(self):
-        from vless_installer.modules import awg_peers
+        from chimera.modules import awg_peers
         ok = awg_peers.awg_peer_add(
             name="tech",
             expires="",
@@ -713,7 +713,7 @@ class TestAWGPeerAddOwnerEmail(unittest.TestCase):
         self.assertEqual(peer_arg.get("owner_email"), "")
 
     def test_add_with_invalid_email_fails(self):
-        from vless_installer.modules import awg_peers
+        from chimera.modules import awg_peers
         ok = awg_peers.awg_peer_add(
             name="bad",
             expires="",
@@ -733,30 +733,30 @@ class TestAWGPeerModifyOwnerEmail(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_modify_owner_email_valid(self):
-        from vless_installer.modules import awg_peers
-        with patch("vless_installer.modules.awg_peers.awgs_state_peer_find",
+        from chimera.modules import awg_peers
+        with patch("chimera.modules.awg_peers.awgs_state_peer_find",
                    return_value={"name": "alice", "owner_email": ""}), \
-             patch("vless_installer.modules.awg_peers.awgs_state_peer_update", return_value=True) as mock_up, \
-             patch("vless_installer.modules.awg_peers.awgs_qr_export_peer"):
+             patch("chimera.modules.awg_peers.awgs_state_peer_update", return_value=True) as mock_up, \
+             patch("chimera.modules.awg_peers.awgs_qr_export_peer"):
             ok = awg_peers.awg_peer_modify("alice", "owner_email", "alice@new.com")
             self.assertTrue(ok)
             mock_up.assert_called_once_with("alice", owner_email="alice@new.com")
 
     def test_modify_owner_email_empty_unbinds(self):
-        from vless_installer.modules import awg_peers
-        with patch("vless_installer.modules.awg_peers.awgs_state_peer_find",
+        from chimera.modules import awg_peers
+        with patch("chimera.modules.awg_peers.awgs_state_peer_find",
                    return_value={"name": "alice", "owner_email": "old@ex.com"}), \
-             patch("vless_installer.modules.awg_peers.awgs_state_peer_update", return_value=True) as mock_up, \
-             patch("vless_installer.modules.awg_peers.awgs_qr_export_peer"):
+             patch("chimera.modules.awg_peers.awgs_state_peer_update", return_value=True) as mock_up, \
+             patch("chimera.modules.awg_peers.awgs_qr_export_peer"):
             ok = awg_peers.awg_peer_modify("alice", "owner_email", "")
             self.assertTrue(ok)
             mock_up.assert_called_once_with("alice", owner_email="")
 
     def test_modify_owner_email_invalid_fails(self):
-        from vless_installer.modules import awg_peers
-        with patch("vless_installer.modules.awg_peers.awgs_state_peer_find",
+        from chimera.modules import awg_peers
+        with patch("chimera.modules.awg_peers.awgs_state_peer_find",
                    return_value={"name": "alice", "owner_email": ""}), \
-             patch("vless_installer.modules.awg_peers.awgs_state_peer_update") as mock_up:
+             patch("chimera.modules.awg_peers.awgs_state_peer_update") as mock_up:
             ok = awg_peers.awg_peer_modify("alice", "owner_email", "not-an-email")
             self.assertFalse(ok)
             mock_up.assert_not_called()
@@ -769,17 +769,17 @@ class TestValidateEmail(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_empty_email_valid(self):
-        from vless_installer.modules import awg_peers
+        from chimera.modules import awg_peers
         self.assertTrue(awg_peers._validate_email(""))
 
     def test_valid_emails(self):
-        from vless_installer.modules import awg_peers
+        from chimera.modules import awg_peers
         self.assertTrue(awg_peers._validate_email("alice@example.com"))
         self.assertTrue(awg_peers._validate_email("bob.user@sub.domain.org"))
         self.assertTrue(awg_peers._validate_email("user+tag@ex.com"))
 
     def test_invalid_emails(self):
-        from vless_installer.modules import awg_peers
+        from chimera.modules import awg_peers
         self.assertFalse(awg_peers._validate_email("not-an-email"))
         self.assertFalse(awg_peers._validate_email("@example.com"))
         self.assertFalse(awg_peers._validate_email("user@"))
@@ -792,7 +792,7 @@ class TestUserCannotRegenOthersPeer(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        self._patch1 = patch("vless_installer.modules.awg_rest_api._is_awg_installed", return_value=True)
+        self._patch1 = patch("chimera.modules.awg_rest_api._is_awg_installed", return_value=True)
         self._patch1.start()
 
     def tearDown(self):
@@ -801,9 +801,9 @@ class TestUserCannotRegenOthersPeer(unittest.TestCase):
     def test_user_regen_others_peer_returns_404(self):
         """User Alice пытается regen пира Bob (owner_email=bob@ex.com).
         Должно быть 404 (не раскрываем существование чужого пира), не 200."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         bob_peer = {"name": "bob", "owner_email": "bob@example.com"}
-        with patch("vless_installer.modules.awg_state.awgs_state_peer_find",
+        with patch("chimera.modules.awg_state.awgs_state_peer_find",
                    return_value=bob_peer):
             # Alice authed as user, not admin
             h = _MockHandler(admin_authed=False, user={"email": "alice@example.com"})
@@ -813,11 +813,11 @@ class TestUserCannotRegenOthersPeer(unittest.TestCase):
 
     def test_admin_regen_any_peer_ok(self):
         """Админ может regen любой пир."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         bob_peer = {"name": "bob", "owner_email": "bob@example.com"}
-        with patch("vless_installer.modules.awg_state.awgs_state_peer_find",
+        with patch("chimera.modules.awg_state.awgs_state_peer_find",
                    return_value=bob_peer), \
-             patch("vless_installer.modules.awg_peers.awg_peer_regen", return_value=True):
+             patch("chimera.modules.awg_peers.awg_peer_regen", return_value=True):
             h = _MockHandler(admin_authed=True)
             awg_rest_api.awg_handle_post(h, "/api/awg/peers/bob/regen", {})
             self.assertEqual(h.status, 200)
@@ -826,11 +826,11 @@ class TestUserCannotRegenOthersPeer(unittest.TestCase):
 
     def test_user_regen_own_peer_ok(self):
         """User Alice может regen свой пир."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         alice_peer = {"name": "alice", "owner_email": "alice@example.com"}
-        with patch("vless_installer.modules.awg_state.awgs_state_peer_find",
+        with patch("chimera.modules.awg_state.awgs_state_peer_find",
                    return_value=alice_peer), \
-             patch("vless_installer.modules.awg_peers.awg_peer_regen", return_value=True):
+             patch("chimera.modules.awg_peers.awg_peer_regen", return_value=True):
             h = _MockHandler(admin_authed=False, user={"email": "alice@example.com"})
             awg_rest_api.awg_handle_post(h, "/api/awg/peers/alice/regen", {})
             self.assertEqual(h.status, 200)
@@ -841,7 +841,7 @@ class TestUserCannotAccessAdminEndpoints(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        self._patch1 = patch("vless_installer.modules.awg_rest_api._is_awg_installed", return_value=True)
+        self._patch1 = patch("chimera.modules.awg_rest_api._is_awg_installed", return_value=True)
         self._patch1.start()
 
     def tearDown(self):
@@ -849,7 +849,7 @@ class TestUserCannotAccessAdminEndpoints(unittest.TestCase):
 
     def test_user_delete_peer_401(self):
         """DELETE /api/awg/peers/{name} — admin-only. User → 401."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         # _MockHandler с admin_authed=False но user=set — _require_admin вернёт 401
         h = _MockHandler(admin_authed=False, user={"email": "alice@example.com"})
         awg_rest_api.awg_handle_delete(h, "/api/awg/peers/alice")
@@ -857,7 +857,7 @@ class TestUserCannotAccessAdminEndpoints(unittest.TestCase):
 
     def test_user_patch_peer_401(self):
         """PATCH /api/awg/peers/{name} — admin-only. User → 401."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         h = _MockHandler(admin_authed=False, user={"email": "alice@example.com"})
         awg_rest_api.awg_handle_patch(h, "/api/awg/peers/alice",
                                        {"param": "owner_email", "value": "hacker@ex.com"})
@@ -880,7 +880,7 @@ class TestAWGQRPngChmod(unittest.TestCase):
     def test_save_png_calls_chmod_600(self):
         """awgs_qr_save_png вызывает path.chmod(0o600) после успешной генерации."""
         import tempfile
-        from vless_installer.modules import awg_qr
+        from chimera.modules import awg_qr
         from pathlib import Path
         with tempfile.TemporaryDirectory() as td:
             png_path = Path(td) / "test_qr.png"
@@ -902,7 +902,7 @@ class TestAWGQRPngChmod(unittest.TestCase):
 
     def test_save_png_no_chmod_on_failure(self):
         """При неудаче qrencode chmod не вызывается (файла нет)."""
-        from vless_installer.modules import awg_qr
+        from chimera.modules import awg_qr
         from pathlib import Path
         mock_core = MagicMock()
         mock_core._run = MagicMock(
@@ -915,7 +915,7 @@ class TestAWGQRPngChmod(unittest.TestCase):
     def test_save_client_conf_sets_dir_chmod_700(self):
         """awgs_qr_save_client_conf устанавливает AWGS_KEYS_DIR chmod 0o700."""
         import tempfile
-        from vless_installer.modules import awg_qr
+        from chimera.modules import awg_qr
         from pathlib import Path
         with tempfile.TemporaryDirectory() as td:
             keys_dir = Path(td) / "keys"
@@ -953,7 +953,7 @@ class TestAWGQRExportNoPrintInApiMode(unittest.TestCase):
 
     def test_export_with_show_terminal_false_does_not_print(self):
         """show_terminal=False → awgs_qr_show_terminal НЕ вызывается."""
-        from vless_installer.modules import awg_qr
+        from chimera.modules import awg_qr
         peer = {
             "name": "alice",
             "client_privkey": "SECRET",
@@ -971,7 +971,7 @@ class TestAWGQRExportNoPrintInApiMode(unittest.TestCase):
         }
         with patch.object(awg_qr, "_core_module",
                           return_value=MagicMock(log_to_file=MagicMock())), \
-             patch("vless_installer.modules.awg_state.awgs_state_load",
+             patch("chimera.modules.awg_state.awgs_state_load",
                    return_value=server_state), \
              patch.object(awg_qr, "AWGS_KEYS_DIR",
                           Path("/tmp/test_awg_qr_keys")), \
@@ -985,7 +985,7 @@ class TestAWGQRExportNoPrintInApiMode(unittest.TestCase):
 
     def test_export_with_show_terminal_true_calls_show_terminal(self):
         """show_terminal=True (TUI-режим, default) → awgs_qr_show_terminal вызывается."""
-        from vless_installer.modules import awg_qr
+        from chimera.modules import awg_qr
         peer = {
             "name": "alice",
             "client_privkey": "SECRET",
@@ -1002,7 +1002,7 @@ class TestAWGQRExportNoPrintInApiMode(unittest.TestCase):
         }
         with patch.object(awg_qr, "_core_module",
                           return_value=MagicMock(log_to_file=MagicMock())), \
-             patch("vless_installer.modules.awg_state.awgs_state_load",
+             patch("chimera.modules.awg_state.awgs_state_load",
                    return_value=server_state), \
              patch.object(awg_qr, "AWGS_KEYS_DIR",
                           Path("/tmp/test_awg_qr_keys")), \
@@ -1017,7 +1017,7 @@ class TestAWGQRExportNoPrintInApiMode(unittest.TestCase):
     def test_export_default_is_show_terminal_true(self):
         """Default (без аргумента) = TUI-режим (show_terminal=True) — обратная совместимость."""
         import inspect
-        from vless_installer.modules import awg_qr
+        from chimera.modules import awg_qr
         sig = inspect.signature(awg_qr.awgs_qr_export_peer)
         self.assertIn("show_terminal", sig.parameters)
         self.assertEqual(sig.parameters["show_terminal"].default, True,
@@ -1029,15 +1029,15 @@ class TestAWGQRExportNoPrintInApiMode(unittest.TestCase):
         Интеграционный тест: хендлер REST API не должен дёргать
         awgs_qr_show_terminal (иначе приватный ключ в journal).
         """
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         peer = {"name": "alice", "owner_email": "", "client_privkey": "k",
                 "client_pubkey": "pub", "client_ip": "10.66.66.2"}
-        with patch("vless_installer.modules.awg_rest_api._is_awg_installed",
+        with patch("chimera.modules.awg_rest_api._is_awg_installed",
                    return_value=True), \
-             patch("vless_installer.modules.awg_state.awgs_state_peer_find",
+             patch("chimera.modules.awg_state.awgs_state_peer_find",
                    return_value=peer), \
-             patch("vless_installer.modules.awg_qr.awgs_qr_export_peer") as mock_export, \
-             patch("vless_installer.modules.awg_constants.AWGS_KEYS_DIR",
+             patch("chimera.modules.awg_qr.awgs_qr_export_peer") as mock_export, \
+             patch("chimera.modules.awg_constants.AWGS_KEYS_DIR",
                    Path("/tmp/test_awg_keys")), \
              patch("pathlib.Path.exists", return_value=True), \
              patch("pathlib.Path.read_bytes", return_value=b"fake-png"):
@@ -1060,16 +1060,16 @@ class TestAWGQRExportNoPrintInApiMode(unittest.TestCase):
 
     def test_rest_api_my_peer_qr_uses_show_terminal_false(self):
         """REST API /api/awg/my-peer/qr передаёт show_terminal=False."""
-        from vless_installer.modules import awg_rest_api
+        from chimera.modules import awg_rest_api
         peer = {"name": "alice", "owner_email": "alice@ex.com",
                 "client_privkey": "k", "client_pubkey": "pub",
                 "client_ip": "10.66.66.2"}
-        with patch("vless_installer.modules.awg_rest_api._is_awg_installed",
+        with patch("chimera.modules.awg_rest_api._is_awg_installed",
                    return_value=True), \
-             patch("vless_installer.modules.awg_state.awgs_state_find_peer_by_owner",
+             patch("chimera.modules.awg_state.awgs_state_find_peer_by_owner",
                    return_value=peer), \
-             patch("vless_installer.modules.awg_qr.awgs_qr_export_peer") as mock_export, \
-             patch("vless_installer.modules.awg_constants.AWGS_KEYS_DIR",
+             patch("chimera.modules.awg_qr.awgs_qr_export_peer") as mock_export, \
+             patch("chimera.modules.awg_constants.AWGS_KEYS_DIR",
                    Path("/tmp/test_awg_keys")), \
              patch("pathlib.Path.exists", return_value=True), \
              patch("pathlib.Path.read_bytes", return_value=b"fake-png"):
@@ -1171,7 +1171,7 @@ class TestAWGQREndToEndChmod(unittest.TestCase):
             → png_path.read_bytes() → HTTP 200
         """
         import os, stat
-        from vless_installer.modules import awg_rest_api, awg_qr, awg_constants
+        from chimera.modules import awg_rest_api, awg_qr, awg_constants
 
         peer = {
             "name": "alice",
@@ -1197,11 +1197,11 @@ class TestAWGQREndToEndChmod(unittest.TestCase):
         }
         mock_core = self._make_mock_core_with_qrencode()
 
-        with patch("vless_installer.modules.awg_rest_api._is_awg_installed",
+        with patch("chimera.modules.awg_rest_api._is_awg_installed",
                    return_value=True), \
-             patch("vless_installer.modules.awg_state.awgs_state_peer_find",
+             patch("chimera.modules.awg_state.awgs_state_peer_find",
                    return_value=peer), \
-             patch("vless_installer.modules.awg_state.awgs_state_load",
+             patch("chimera.modules.awg_state.awgs_state_load",
                    return_value=server_state), \
              patch.object(awg_qr, "_core_module", return_value=mock_core), \
              patch.object(awg_qr, "AWGS_KEYS_DIR", self._keys_dir), \

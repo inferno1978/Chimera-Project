@@ -125,9 +125,9 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
             && info "Обновлён: ${rel_path}" \
             || warn "Не удалось обновить: ${rel_path}"
     }
-    _update_module "vless_installer/modules/tg_nets.py"
-    _update_module "vless_installer/modules/user_fp_manager.py"
-    _update_module "vless_installer/_core.py"
+    _update_module "chimera/modules/tg_nets.py"
+    _update_module "chimera/modules/user_fp_manager.py"
+    _update_module "chimera/_core.py"
     _update_module "main.py"
 else
     if [[ -d "$INSTALL_DIR" ]] && [[ -f "${INSTALL_DIR}/main.py" ]]; then
@@ -150,12 +150,12 @@ else
                 && info "Принудительно обновлён: ${rel_path}" \
                 || warn "Не удалось обновить: ${rel_path}"
         }
-        _update_module "vless_installer/_core.py"
+        _update_module "chimera/_core.py"
         _update_module "main.py"
-        _update_module "vless_installer/modules/tg_bot.py"
-        _update_module "vless_installer/modules/port_hopping.py"
-        _update_module "vless_installer/modules/tg_nets.py"
-        _update_module "vless_installer/modules/user_fp_manager.py"
+        _update_module "chimera/modules/tg_bot.py"
+        _update_module "chimera/modules/port_hopping.py"
+        _update_module "chimera/modules/tg_nets.py"
+        _update_module "chimera/modules/user_fp_manager.py"
     else
         info "Клонирование репозитория..."
         if ! git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then

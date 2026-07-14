@@ -2,7 +2,7 @@
 """
 tests/test_fragment_watchdog.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/fragment_watchdog.py.
+Unit-тесты для chimera/modules/fragment_watchdog.py.
 
 Покрывает:
   1. _ESCALATION — структура пресетов
@@ -21,7 +21,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -31,9 +31,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestEscalation(unittest.TestCase):
@@ -43,11 +43,11 @@ class TestEscalation(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_has_at_least_3_presets(self):
-        from vless_installer.modules.fragment_watchdog import _ESCALATION
+        from chimera.modules.fragment_watchdog import _ESCALATION
         self.assertGreaterEqual(len(_ESCALATION), 3)
 
     def test_each_preset_has_required_keys(self):
-        from vless_installer.modules.fragment_watchdog import _ESCALATION
+        from chimera.modules.fragment_watchdog import _ESCALATION
         for preset in _ESCALATION:
             with self.subTest(preset=preset.get("name")):
                 self.assertIn("name", preset)
@@ -69,11 +69,11 @@ class TestShowWatchdogLog(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.fragment_watchdog._WATCHDOG_LOG", self._log)
+        return patch("chimera.modules.fragment_watchdog._WATCHDOG_LOG", self._log)
 
     def test_shows_empty_message_when_no_file(self):
         import io
-        from vless_installer.modules.fragment_watchdog import _show_watchdog_log
+        from chimera.modules.fragment_watchdog import _show_watchdog_log
         buf = io.StringIO()
         with self._patch(), patch("sys.stdout", buf):
             _show_watchdog_log()
@@ -82,7 +82,7 @@ class TestShowWatchdogLog(unittest.TestCase):
 
     def test_shows_log_lines(self):
         import io
-        from vless_installer.modules.fragment_watchdog import _show_watchdog_log
+        from chimera.modules.fragment_watchdog import _show_watchdog_log
         self._log.write_text(
             "[START] Watchdog started\n"
             "[SWITCH] Switched to aggressive\n"

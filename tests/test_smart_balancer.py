@@ -2,7 +2,7 @@
 """
 tests/test_smart_balancer.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/smart_balancer.py.
+Unit-тесты для chimera/modules/smart_balancer.py.
 
 Покрывает:
   1. _compute_score — расчёт score (pure math)
@@ -29,7 +29,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -39,9 +39,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestComputeScore(unittest.TestCase):
@@ -57,7 +57,7 @@ class TestComputeScore(unittest.TestCase):
         """lat=0, bw=0, load=0 → все нормированные значения = 0 → score = 0.
         После фикса: lat=0 трактуется как идеальный пинг (0 falsy больше не
         подменяется на NORM_LAT_MS_WORST)."""
-        from vless_installer.modules.smart_balancer import _compute_score
+        from chimera.modules.smart_balancer import _compute_score
         score = _compute_score(0, 0, 0, self._weights())
         # w_lat*0 + w_bw*0 + w_ld*0 = 0.0
         self.assertEqual(score, 0.0)
@@ -66,7 +66,7 @@ class TestComputeScore(unittest.TestCase):
         """Regression: lat=0 (идеальный пинг) НЕ должен трактоваться как worst.
         Раньше `0 or NORM` = NORM из-за falsy-семантики 0.0 в Python.
         После фикса: `0 if 0 is not None else NORM` = 0 → lat_norm = 0."""
-        from vless_installer.modules.smart_balancer import _compute_score
+        from chimera.modules.smart_balancer import _compute_score
         perfect = _compute_score(0, 100, 100, self._weights())
         worst = _compute_score(2000, 100, 100, self._weights())  # lat=NORM_WORST
         self.assertLess(perfect, worst,
@@ -75,7 +75,7 @@ class TestComputeScore(unittest.TestCase):
     def test_none_metrics_returns_one(self):
         """lat=None, bw=None, load=None → все берут NORM_*_WORST → score = 1.0.
         После фикса: load=None поддерживается (раньше падал с TypeError)."""
-        from vless_installer.modules.smart_balancer import _compute_score
+        from chimera.modules.smart_balancer import _compute_score
         score = _compute_score(None, None, None, self._weights())
         # w_lat*1 + w_bw*1 + w_ld*1 = 1.0
         self.assertAlmostEqual(score, 1.0, places=4)
@@ -84,7 +84,7 @@ class TestComputeScore(unittest.TestCase):
         """Regression: load=None → берётся NORM_LOAD_WORST (200) → load_norm=1.0.
         Раньше load=None падал с TypeError (не было `or NORM` fallback).
         После фикса: `load if load is not None else NORM_LOAD_WORST`."""
-        from vless_installer.modules.smart_balancer import _compute_score
+        from chimera.modules.smart_balancer import _compute_score
         score = _compute_score(None, None, None, self._weights())
         # load_norm = 1.0 → w_ld*1 = 0.2
         # но проще проверить через изолированный load=None vs load=200
@@ -96,19 +96,19 @@ class TestComputeScore(unittest.TestCase):
         self.assertGreater(score_none, score_zero)
 
     def test_high_latency_higher_score(self):
-        from vless_installer.modules.smart_balancer import _compute_score
+        from chimera.modules.smart_balancer import _compute_score
         low = _compute_score(10, 10, 10, self._weights())
         high = _compute_score(1000, 10, 10, self._weights())
         self.assertGreater(high, low)
 
     def test_clamps_to_one(self):
         """Метрики выше NORM → clamp на 1.0."""
-        from vless_installer.modules.smart_balancer import _compute_score
+        from chimera.modules.smart_balancer import _compute_score
         score = _compute_score(999999, 999999, 999999, self._weights())
         self.assertLessEqual(score, 1.0)
 
     def test_rounded_to_4_decimal_places(self):
-        from vless_installer.modules.smart_balancer import _compute_score
+        from chimera.modules.smart_balancer import _compute_score
         score = _compute_score(100, 200, 50, self._weights())
         # проверяем что не больше 4 знаков после запятой
         decimal_part = str(score).split(".")[1] if "." in str(score) else ""
@@ -122,16 +122,16 @@ class TestIsQuarantined(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_false_when_no_quarantine(self):
-        from vless_installer.modules.smart_balancer import _is_quarantined
+        from chimera.modules.smart_balancer import _is_quarantined
         self.assertFalse(_is_quarantined({}))
 
     def test_returns_false_when_quarantine_in_past(self):
-        from vless_installer.modules.smart_balancer import _is_quarantined
+        from chimera.modules.smart_balancer import _is_quarantined
         meta = {"quarantine_until": time.time() - 100}
         self.assertFalse(_is_quarantined(meta))
 
     def test_returns_true_when_quarantine_in_future(self):
-        from vless_installer.modules.smart_balancer import _is_quarantined
+        from chimera.modules.smart_balancer import _is_quarantined
         meta = {"quarantine_until": time.time() + 3600}
         self.assertTrue(_is_quarantined(meta))
 
@@ -143,7 +143,7 @@ class TestQuarantineNode(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_sets_quarantine_until(self):
-        from vless_installer.modules.smart_balancer import _quarantine_node
+        from chimera.modules.smart_balancer import _quarantine_node
         meta = {}
         now = time.time()
         with patch("time.time", return_value=now):
@@ -151,7 +151,7 @@ class TestQuarantineNode(unittest.TestCase):
         self.assertAlmostEqual(meta["quarantine_until"], now + 30 * 60, places=1)
 
     def test_sets_quarantine_until_str(self):
-        from vless_installer.modules.smart_balancer import _quarantine_node
+        from chimera.modules.smart_balancer import _quarantine_node
         meta = {}
         _quarantine_node(meta, minutes=30)
         self.assertIn("quarantine_until_str", meta)
@@ -164,14 +164,14 @@ class TestReleaseFromQuarantine(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_resets_quarantine_until(self):
-        from vless_installer.modules.smart_balancer import _release_from_quarantine
+        from chimera.modules.smart_balancer import _release_from_quarantine
         meta = {"quarantine_until": time.time() + 3600, "fails": 5}
         _release_from_quarantine(meta)
         self.assertEqual(meta["quarantine_until"], 0)
         self.assertEqual(meta["fails"], 0)
 
     def test_removes_quarantine_until_str(self):
-        from vless_installer.modules.smart_balancer import _release_from_quarantine
+        from chimera.modules.smart_balancer import _release_from_quarantine
         meta = {"quarantine_until_str": "2026-07-10 12:00", "fails": 3}
         _release_from_quarantine(meta)
         self.assertNotIn("quarantine_until_str", meta)
@@ -190,11 +190,11 @@ class TestSbLoadSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.smart_balancer._SB_STATE_FILE",
+        return patch("chimera.modules.smart_balancer._SB_STATE_FILE",
                      self._state)
 
     def test_load_returns_default_when_no_file(self):
-        from vless_installer.modules.smart_balancer import _sb_load
+        from chimera.modules.smart_balancer import _sb_load
         with self._patch():
             state = _sb_load()
         self.assertFalse(state["enabled"])
@@ -202,14 +202,14 @@ class TestSbLoadSave(unittest.TestCase):
         self.assertEqual(state["active_node_idx"], -1)
 
     def test_load_returns_default_on_corrupt(self):
-        from vless_installer.modules.smart_balancer import _sb_load
+        from chimera.modules.smart_balancer import _sb_load
         self._state.write_text("{invalid")
         with self._patch():
             state = _sb_load()
         self.assertFalse(state["enabled"])
 
     def test_save_then_load(self):
-        from vless_installer.modules.smart_balancer import _sb_load, _sb_save
+        from chimera.modules.smart_balancer import _sb_load, _sb_save
         with self._patch():
             _sb_save({"enabled": True, "strategy": "leastping", "active_node_idx": 0})
             loaded = _sb_load()
@@ -218,7 +218,7 @@ class TestSbLoadSave(unittest.TestCase):
 
     def test_save_sets_chmod_600(self):
         import stat
-        from vless_installer.modules.smart_balancer import _sb_save
+        from chimera.modules.smart_balancer import _sb_save
         with self._patch():
             _sb_save({"enabled": False})
         mode = stat.S_IMODE(os.stat(self._state).st_mode)
@@ -238,16 +238,16 @@ class TestAwgGuardCron(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.smart_balancer._STATE_FILE",
+        return patch("chimera.modules.smart_balancer._STATE_FILE",
                      self._state)
 
     def test_returns_false_when_no_state(self):
-        from vless_installer.modules.smart_balancer import _awg_guard_cron
+        from chimera.modules.smart_balancer import _awg_guard_cron
         with self._patch():
             self.assertFalse(_awg_guard_cron("test"))
 
     def test_returns_true_for_awg_mode_b(self):
-        from vless_installer.modules.smart_balancer import _awg_guard_cron
+        from chimera.modules.smart_balancer import _awg_guard_cron
         self._state.write_text(json.dumps({
             "awg_exit_enabled": True, "install_mode": "B",
         }))
@@ -255,7 +255,7 @@ class TestAwgGuardCron(unittest.TestCase):
             self.assertTrue(_awg_guard_cron("test"))
 
     def test_returns_false_for_non_awg(self):
-        from vless_installer.modules.smart_balancer import _awg_guard_cron
+        from chimera.modules.smart_balancer import _awg_guard_cron
         self._state.write_text(json.dumps({
             "awg_exit_enabled": False, "install_mode": "A",
         }))
@@ -263,7 +263,7 @@ class TestAwgGuardCron(unittest.TestCase):
             self.assertFalse(_awg_guard_cron("test"))
 
     def test_returns_false_for_awg_mode_not_b(self):
-        from vless_installer.modules.smart_balancer import _awg_guard_cron
+        from chimera.modules.smart_balancer import _awg_guard_cron
         self._state.write_text(json.dumps({
             "awg_exit_enabled": True, "install_mode": "A",
         }))
@@ -278,7 +278,7 @@ class TestProbeTcpLatency(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_positive_on_success(self):
-        from vless_installer.modules.smart_balancer import _probe_tcp_latency
+        from chimera.modules.smart_balancer import _probe_tcp_latency
         with patch("socket.create_connection") as mock_conn:
             mock_conn.return_value = MagicMock()
             result = _probe_tcp_latency("1.2.3.4", 443)
@@ -286,7 +286,7 @@ class TestProbeTcpLatency(unittest.TestCase):
         self.assertLess(result, float("inf"))
 
     def test_returns_inf_on_failure(self):
-        from vless_installer.modules.smart_balancer import _probe_tcp_latency
+        from chimera.modules.smart_balancer import _probe_tcp_latency
         with patch("socket.create_connection", side_effect=OSError("conn refused")):
             result = _probe_tcp_latency("1.2.3.4", 443)
         self.assertEqual(result, float("inf"))

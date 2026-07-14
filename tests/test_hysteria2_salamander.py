@@ -2,7 +2,7 @@
 """
 tests/test_hysteria2_salamander.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/hysteria2_salamander.py.
+Unit-тесты для chimera/modules/hysteria2_salamander.py.
 
 Покрывает:
   1. _generate_salamander_password — формат/длина/энтропия
@@ -32,7 +32,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core():
     """Загружает _core.py в sys.modules, чтобы импорты hysteria2_* сработали."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -42,9 +42,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -58,7 +58,7 @@ class TestGeneratePassword(unittest.TestCase):
         _setup_core()
 
     def test_returns_string(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _generate_salamander_password,
         )
         pw = _generate_salamander_password()
@@ -66,14 +66,14 @@ class TestGeneratePassword(unittest.TestCase):
 
     def test_length_is_64_chars(self):
         """32 байта в hex = 64 символа — криптостойкость."""
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _generate_salamander_password,
         )
         pw = _generate_salamander_password()
         self.assertEqual(len(pw), 64)
 
     def test_is_hex(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _generate_salamander_password,
         )
         pw = _generate_salamander_password()
@@ -81,7 +81,7 @@ class TestGeneratePassword(unittest.TestCase):
 
     def test_two_calls_differ(self):
         """Два вызова должны давать разные пароли (энтропия)."""
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _generate_salamander_password,
         )
         a = _generate_salamander_password()
@@ -141,23 +141,23 @@ class TestHasObfsBlock(unittest.TestCase):
         _setup_core()
 
     def test_returns_false_for_plain_yaml(self):
-        from vless_installer.modules.hysteria2_salamander import _has_obfs_block
+        from chimera.modules.hysteria2_salamander import _has_obfs_block
         self.assertFalse(_has_obfs_block(_SAMPLE_CLIENT_YAML))
 
     def test_returns_true_after_inject(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _has_obfs_block, _inject_obfs,
         )
         injected = _inject_obfs(_SAMPLE_CLIENT_YAML, "mypassword")
         self.assertTrue(_has_obfs_block(injected))
 
     def test_returns_false_for_empty(self):
-        from vless_installer.modules.hysteria2_salamander import _has_obfs_block
+        from chimera.modules.hysteria2_salamander import _has_obfs_block
         self.assertFalse(_has_obfs_block(""))
 
     def test_does_not_match_substring(self):
         """Строка `obfs:` в комментарии не должна считаться секцией."""
-        from vless_installer.modules.hysteria2_salamander import _has_obfs_block
+        from chimera.modules.hysteria2_salamander import _has_obfs_block
         # Строка с `obfs:` но не в начале — не валидная YAML-секция
         bad = "# comment about obfs: not a real section\nserver: 1.2.3.4\n"
         self.assertFalse(_has_obfs_block(bad))
@@ -170,7 +170,7 @@ class TestInjectObfs(unittest.TestCase):
         _setup_core()
 
     def test_adds_obfs_block_at_end(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _inject_obfs, _has_obfs_block,
         )
         out = _inject_obfs(_SAMPLE_CLIENT_YAML, "secret123")
@@ -182,7 +182,7 @@ class TestInjectObfs(unittest.TestCase):
         self.assertIn("password: secret123", out)
 
     def test_preserves_original_content(self):
-        from vless_installer.modules.hysteria2_salamander import _inject_obfs
+        from chimera.modules.hysteria2_salamander import _inject_obfs
         out = _inject_obfs(_SAMPLE_CLIENT_YAML, "pw")
         # Все исходные строки сохранены
         self.assertIn("server: 1.2.3.4:443", out)
@@ -191,7 +191,7 @@ class TestInjectObfs(unittest.TestCase):
         self.assertIn("initStreamReceiveWindow: 8388608", out)
 
     def test_works_for_server_yaml_too(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _inject_obfs, _has_obfs_block,
         )
         out = _inject_obfs(_SAMPLE_SERVER_YAML, "serverpw")
@@ -200,12 +200,12 @@ class TestInjectObfs(unittest.TestCase):
         self.assertIn("rewriteHost: true", out)
 
     def test_ends_with_newline(self):
-        from vless_installer.modules.hysteria2_salamander import _inject_obfs
+        from chimera.modules.hysteria2_salamander import _inject_obfs
         out = _inject_obfs(_SAMPLE_CLIENT_YAML, "pw")
         self.assertTrue(out.endswith("\n"))
 
     def test_handles_no_trailing_newline(self):
-        from vless_installer.modules.hysteria2_salamander import _inject_obfs
+        from chimera.modules.hysteria2_salamander import _inject_obfs
         no_nl = _SAMPLE_CLIENT_YAML.rstrip()
         out = _inject_obfs(no_nl, "pw")
         # Должен добавить \n перед obfs-блоком
@@ -219,7 +219,7 @@ class TestStripObfs(unittest.TestCase):
         _setup_core()
 
     def test_removes_obfs_block(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _inject_obfs, _strip_obfs, _has_obfs_block,
         )
         injected = _inject_obfs(_SAMPLE_CLIENT_YAML, "pw")
@@ -227,7 +227,7 @@ class TestStripObfs(unittest.TestCase):
         self.assertFalse(_has_obfs_block(stripped))
 
     def test_preserves_other_sections(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _inject_obfs, _strip_obfs,
         )
         injected = _inject_obfs(_SAMPLE_CLIENT_YAML, "pw")
@@ -237,7 +237,7 @@ class TestStripObfs(unittest.TestCase):
         self.assertIn("pinSHA256: abc123def456", stripped)
 
     def test_idempotent_when_no_obfs(self):
-        from vless_installer.modules.hysteria2_salamander import _strip_obfs
+        from chimera.modules.hysteria2_salamander import _strip_obfs
         out = _strip_obfs(_SAMPLE_CLIENT_YAML)
         self.assertEqual(out, _SAMPLE_CLIENT_YAML)
 
@@ -249,7 +249,7 @@ class TestInjectIdempotency(unittest.TestCase):
         _setup_core()
 
     def test_double_inject_single_block(self):
-        from vless_installer.modules.hysteria2_salamander import _inject_obfs
+        from chimera.modules.hysteria2_salamander import _inject_obfs
         once = _inject_obfs(_SAMPLE_CLIENT_YAML, "pw1")
         twice = _inject_obfs(once, "pw2")
         self.assertEqual(twice.count("obfs:"), 1)
@@ -257,7 +257,7 @@ class TestInjectIdempotency(unittest.TestCase):
         self.assertEqual(twice.count("salamander:"), 1)
 
     def test_double_inject_replaces_password(self):
-        from vless_installer.modules.hysteria2_salamander import _inject_obfs
+        from chimera.modules.hysteria2_salamander import _inject_obfs
         once = _inject_obfs(_SAMPLE_CLIENT_YAML, "oldpass")
         twice = _inject_obfs(once, "newpass")
         self.assertNotIn("password: oldpass", twice)
@@ -271,7 +271,7 @@ class TestBuildObfsBlock(unittest.TestCase):
         _setup_core()
 
     def test_contains_all_required_keys(self):
-        from vless_installer.modules.hysteria2_salamander import _build_obfs_block
+        from chimera.modules.hysteria2_salamander import _build_obfs_block
         block = _build_obfs_block("mypw")
         self.assertIn("obfs:", block)
         self.assertIn("type: salamander", block)
@@ -279,12 +279,12 @@ class TestBuildObfsBlock(unittest.TestCase):
         self.assertIn("password: mypw", block)
 
     def test_ends_with_newline(self):
-        from vless_installer.modules.hysteria2_salamander import _build_obfs_block
+        from chimera.modules.hysteria2_salamander import _build_obfs_block
         block = _build_obfs_block("mypw")
         self.assertTrue(block.endswith("\n"))
 
     def test_supports_indent(self):
-        from vless_installer.modules.hysteria2_salamander import _build_obfs_block
+        from chimera.modules.hysteria2_salamander import _build_obfs_block
         block = _build_obfs_block("mypw", indent="  ")
         self.assertIn("  obfs:", block)
         self.assertIn("    type: salamander", block)
@@ -309,7 +309,7 @@ class TestYamlSemantics(unittest.TestCase):
         if not self._has_yaml:
             self.skipTest("PyYAML not installed")
         import yaml
-        from vless_installer.modules.hysteria2_salamander import _inject_obfs
+        from chimera.modules.hysteria2_salamander import _inject_obfs
         out = _inject_obfs(_SAMPLE_CLIENT_YAML, "secretpw")
         parsed = yaml.safe_load(out)
         self.assertEqual(parsed["obfs"]["type"], "salamander")
@@ -323,7 +323,7 @@ class TestYamlSemantics(unittest.TestCase):
         if not self._has_yaml:
             self.skipTest("PyYAML not installed")
         import yaml
-        from vless_installer.modules.hysteria2_salamander import _inject_obfs
+        from chimera.modules.hysteria2_salamander import _inject_obfs
         out = _inject_obfs(_SAMPLE_SERVER_YAML, "secretpw")
         parsed = yaml.safe_load(out)
         self.assertEqual(parsed["obfs"]["type"], "salamander")
@@ -334,7 +334,7 @@ class TestYamlSemantics(unittest.TestCase):
         if not self._has_yaml:
             self.skipTest("PyYAML not installed")
         import yaml
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _inject_obfs, _strip_obfs,
         )
         out = _strip_obfs(_inject_obfs(_SAMPLE_CLIENT_YAML, "pw"))
@@ -360,18 +360,18 @@ class TestSalamanderState(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch_state(self):
-        return patch("vless_installer.modules.hysteria2_common.STATE_FILE",
+        return patch("chimera.modules.hysteria2_common.STATE_FILE",
                      self._state)
 
     def test_load_returns_empty_when_no_section(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _load_salamander_state,
         )
         with self._patch_state():
             self.assertEqual(_load_salamander_state(), {})
 
     def test_load_returns_section(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _load_salamander_state,
         )
         self._state.write_text(json.dumps({
@@ -383,10 +383,10 @@ class TestSalamanderState(unittest.TestCase):
         self.assertEqual(sal["password"], "abc")
 
     def test_save_preserves_other_hysteria2_keys(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _save_salamander_state, _load_salamander_state,
         )
-        from vless_installer.modules.hysteria2_common import _load_h2_state
+        from chimera.modules.hysteria2_common import _load_h2_state
         self._state.write_text(json.dumps({
             "hysteria2": {"enabled": True, "exit_nodes": [{"ip": "1.2.3.4"}]}
         }))
@@ -401,7 +401,7 @@ class TestSalamanderState(unittest.TestCase):
         self.assertEqual(h2["salamander"]["password"], "pw")
 
     def test_ensure_creates_default_when_missing(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _ensure_salamander_state,
         )
         with self._patch_state():
@@ -414,7 +414,7 @@ class TestSalamanderState(unittest.TestCase):
         self.assertTrue(self._state.exists())
 
     def test_ensure_returns_existing_when_present(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _ensure_salamander_state,
         )
         self._state.write_text(json.dumps({
@@ -445,14 +445,14 @@ class TestSalamanderStatus(unittest.TestCase):
 
     def _patches(self):
         return (
-            patch("vless_installer.modules.hysteria2_common.STATE_FILE",
+            patch("chimera.modules.hysteria2_common.STATE_FILE",
                   self._state),
-            patch("vless_installer.modules.hysteria2_salamander._H2_CLIENT_CONFIG",
+            patch("chimera.modules.hysteria2_salamander._H2_CLIENT_CONFIG",
                   self._client_yaml),
         )
 
     def test_status_returns_dict_with_required_keys(self):
-        from vless_installer.modules.hysteria2_salamander import h2_salamander_status
+        from chimera.modules.hysteria2_salamander import h2_salamander_status
         with self._patches()[0], self._patches()[1]:
             st = h2_salamander_status()
         self.assertIsInstance(st, dict)
@@ -461,14 +461,14 @@ class TestSalamanderStatus(unittest.TestCase):
             self.assertIn(key, st, f"missing key: {key}")
 
     def test_status_disabled_by_default(self):
-        from vless_installer.modules.hysteria2_salamander import h2_salamander_status
+        from chimera.modules.hysteria2_salamander import h2_salamander_status
         with self._patches()[0], self._patches()[1]:
             st = h2_salamander_status()
         self.assertFalse(st["enabled"])
         self.assertFalse(st["has_password"])
 
     def test_status_detects_obfs_in_client_yaml(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             h2_salamander_status, _inject_obfs,
         )
         # Записываем client.yaml с obfs
@@ -478,14 +478,14 @@ class TestSalamanderStatus(unittest.TestCase):
         self.assertTrue(st["applied_to_client"])
 
     def test_status_detects_absence_of_obfs(self):
-        from vless_installer.modules.hysteria2_salamander import h2_salamander_status
+        from chimera.modules.hysteria2_salamander import h2_salamander_status
         self._client_yaml.write_text(_SAMPLE_CLIENT_YAML)
         with self._patches()[0], self._patches()[1]:
             st = h2_salamander_status()
         self.assertFalse(st["applied_to_client"])
 
     def test_status_handles_missing_client_yaml(self):
-        from vless_installer.modules.hysteria2_salamander import h2_salamander_status
+        from chimera.modules.hysteria2_salamander import h2_salamander_status
         # _client_yaml не существует
         with self._patches()[0], self._patches()[1]:
             st = h2_salamander_status()
@@ -509,16 +509,16 @@ class TestApplyObfsToClient(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.hysteria2_salamander._H2_CLIENT_CONFIG",
+        return patch("chimera.modules.hysteria2_salamander._H2_CLIENT_CONFIG",
                      self._client_yaml)
 
     def test_returns_false_when_no_file(self):
-        from vless_installer.modules.hysteria2_salamander import _apply_obfs_to_client
+        from chimera.modules.hysteria2_salamander import _apply_obfs_to_client
         with self._patch():
             self.assertFalse(_apply_obfs_to_client("pw"))
 
     def test_writes_obfs_to_existing_file(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _apply_obfs_to_client, _has_obfs_block,
         )
         self._client_yaml.write_text(_SAMPLE_CLIENT_YAML)
@@ -530,7 +530,7 @@ class TestApplyObfsToClient(unittest.TestCase):
         self.assertIn("password: mypw", out)
 
     def test_preserves_original_content(self):
-        from vless_installer.modules.hysteria2_salamander import _apply_obfs_to_client
+        from chimera.modules.hysteria2_salamander import _apply_obfs_to_client
         self._client_yaml.write_text(_SAMPLE_CLIENT_YAML)
         with self._patch():
             _apply_obfs_to_client("mypw")
@@ -540,7 +540,7 @@ class TestApplyObfsToClient(unittest.TestCase):
 
     def test_chmod_0600_after_write(self):
         """Пароль секретный — права доступа 0o600."""
-        from vless_installer.modules.hysteria2_salamander import _apply_obfs_to_client
+        from chimera.modules.hysteria2_salamander import _apply_obfs_to_client
         self._client_yaml.write_text(_SAMPLE_CLIENT_YAML)
         with self._patch():
             _apply_obfs_to_client("mypw")
@@ -561,16 +561,16 @@ class TestStripObfsFromClient(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.hysteria2_salamander._H2_CLIENT_CONFIG",
+        return patch("chimera.modules.hysteria2_salamander._H2_CLIENT_CONFIG",
                      self._client_yaml)
 
     def test_returns_true_when_no_file(self):
-        from vless_installer.modules.hysteria2_salamander import _strip_obfs_from_client
+        from chimera.modules.hysteria2_salamander import _strip_obfs_from_client
         with self._patch():
             self.assertTrue(_strip_obfs_from_client())
 
     def test_removes_obfs_from_existing_file(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             _strip_obfs_from_client, _inject_obfs, _has_obfs_block,
         )
         self._client_yaml.write_text(_inject_obfs(_SAMPLE_CLIENT_YAML, "pw"))
@@ -581,7 +581,7 @@ class TestStripObfsFromClient(unittest.TestCase):
         self.assertFalse(_has_obfs_block(out))
 
     def test_no_op_when_no_obfs(self):
-        from vless_installer.modules.hysteria2_salamander import _strip_obfs_from_client
+        from chimera.modules.hysteria2_salamander import _strip_obfs_from_client
         self._client_yaml.write_text(_SAMPLE_CLIENT_YAML)
         with self._patch():
             ok = _strip_obfs_from_client()
@@ -609,16 +609,16 @@ class TestEnsureStateHook(unittest.TestCase):
 
     def _patches(self):
         return (
-            patch("vless_installer.modules.hysteria2_common.STATE_FILE",
+            patch("chimera.modules.hysteria2_common.STATE_FILE",
                   self._state),
-            patch("vless_installer.modules.hysteria2_salamander._H2_CLIENT_CONFIG",
+            patch("chimera.modules.hysteria2_salamander._H2_CLIENT_CONFIG",
                   self._client_yaml),
-            patch("vless_installer.modules.hysteria2_salamander._restart_hysteria_client",
+            patch("chimera.modules.hysteria2_salamander._restart_hysteria_client",
                   return_value=True),
         )
 
     def test_noop_when_disabled(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             h2_salamander_ensure_state,
         )
         # State пустой — salamander не включён
@@ -628,7 +628,7 @@ class TestEnsureStateHook(unittest.TestCase):
         self.assertFalse(self._client_yaml.exists())
 
     def test_noop_when_no_password(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             h2_salamander_ensure_state, _save_salamander_state,
         )
         with self._patches()[0]:
@@ -637,7 +637,7 @@ class TestEnsureStateHook(unittest.TestCase):
         self.assertFalse(self._client_yaml.exists())
 
     def test_reapplies_obfs_when_enabled(self):
-        from vless_installer.modules.hysteria2_salamander import (
+        from chimera.modules.hysteria2_salamander import (
             h2_salamander_ensure_state, _save_salamander_state,
             _has_obfs_block,
         )

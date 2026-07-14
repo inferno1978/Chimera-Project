@@ -2,7 +2,7 @@
 """
 tests/test_github_mirrors.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/github_mirrors.py.
+Unit-тесты для chimera/modules/github_mirrors.py.
 
 КЛЮЧЕВЫЕ ПРОВЕРКИ:
   1. build_mirror_urls() даёт БИТ-В-БИТ те же URL, что geo_mirrors.get_geosite_urls()
@@ -24,7 +24,7 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from vless_installer.modules.github_mirrors import (
+from chimera.modules.github_mirrors import (
     jsdelivr_url,
     raw_github_url,
     release_github_url,
@@ -133,7 +133,7 @@ class TestBuildMirrorUrlsGeoBitForBit(unittest.TestCase):
 
     def test_geosite_dat_bit_for_bit(self):
         """geosite.dat — построчное сравнение списков URL."""
-        from vless_installer.modules.geo_mirrors import get_geosite_urls
+        from chimera.modules.geo_mirrors import get_geosite_urls
 
         old_urls = get_geosite_urls()
         new_urls = build_mirror_urls(
@@ -153,7 +153,7 @@ class TestBuildMirrorUrlsGeoBitForBit(unittest.TestCase):
 
     def test_geoip_dat_bit_for_bit(self):
         """geoip.dat — построчное сравнение списков URL."""
-        from vless_installer.modules.geo_mirrors import get_geoip_urls
+        from chimera.modules.geo_mirrors import get_geoip_urls
 
         old_urls = get_geoip_urls()
         new_urls = build_mirror_urls(
@@ -216,7 +216,7 @@ class TestBuildMirrorUrlsMieruSetMatch(unittest.TestCase):
     def test_mita_mirrors_set_match(self):
         """После миграции mieru_mirrors на build_mirror_urls: SET должен
         совпадать с полным build_mirror_urls (14 зеркал, без ограничений)."""
-        from vless_installer.modules.mieru_mirrors import get_mita_mirrors
+        from chimera.modules.mieru_mirrors import get_mita_mirrors
 
         old_urls = get_mita_mirrors("3.33.0")
         new_urls = build_mirror_urls(
@@ -248,7 +248,7 @@ class TestBuildMirrorUrlsTelemtSetMatch(unittest.TestCase):
     """
 
     def test_telemt_mirrors_exact_match(self):
-        from vless_installer.modules.telemt_mirrors import get_telemt_mirrors, detect_arch_libc
+        from chimera.modules.telemt_mirrors import get_telemt_mirrors, detect_arch_libc
 
         arch, libc = detect_arch_libc()
         filename = f"telemt-{arch}-linux-{libc}.tar.gz"

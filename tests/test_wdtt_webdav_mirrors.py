@@ -3,13 +3,13 @@
 tests/test_wdtt_webdav_mirrors.py
 ───────────────────────────────────────────────────────────────────────────────
 Unit-тесты для mirror-реестров и PackageSpecs Волны 2:
-  • vless_installer/modules/github_mirrors.py::build_source_archive_mirror_urls
-  • vless_installer/modules/go_toolchain_mirrors.py
-  • vless_installer/modules/go_toolchain_packages.py::GO_TOOLCHAIN_SPEC
-  • vless_installer/modules/wdtt_mirrors.py
-  • vless_installer/modules/wdtt_packages.py::WDTT_SOURCE_SPEC
-  • vless_installer/modules/webdav_mirrors.py
-  • vless_installer/modules/webdav_packages.py::WEBDAV_SOURCE_SPEC
+  • chimera/modules/github_mirrors.py::build_source_archive_mirror_urls
+  • chimera/modules/go_toolchain_mirrors.py
+  • chimera/modules/go_toolchain_packages.py::GO_TOOLCHAIN_SPEC
+  • chimera/modules/wdtt_mirrors.py
+  • chimera/modules/wdtt_packages.py::WDTT_SOURCE_SPEC
+  • chimera/modules/webdav_mirrors.py
+  • chimera/modules/webdav_packages.py::WEBDAV_SOURCE_SPEC
 
 Покрывает:
   • Корректность URL-шаблонов (прямой GitHub + codeload + 7 gh-proxy для
@@ -34,7 +34,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -44,9 +44,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 # ============================================================================
@@ -60,7 +60,7 @@ class TestBuildSourceArchiveMirrorUrls(unittest.TestCase):
 
     def test_returns_9_urls_for_default_config(self):
         """1 прямой + 1 codeload + 7 прокси = 9 URL."""
-        from vless_installer.modules.github_mirrors import (
+        from chimera.modules.github_mirrors import (
             build_source_archive_mirror_urls, GITHUB_PROXY_HOSTS,
         )
         urls = build_source_archive_mirror_urls(
@@ -69,12 +69,12 @@ class TestBuildSourceArchiveMirrorUrls(unittest.TestCase):
         self.assertEqual(len(urls), 2 + len(GITHUB_PROXY_HOSTS))
 
     def test_all_urls_are_https(self):
-        from vless_installer.modules.github_mirrors import build_source_archive_mirror_urls
+        from chimera.modules.github_mirrors import build_source_archive_mirror_urls
         for url in build_source_archive_mirror_urls("a", "b", "main"):
             self.assertEqual(urlparse(url).scheme, "https")
 
     def test_first_url_is_direct_github(self):
-        from vless_installer.modules.github_mirrors import build_source_archive_mirror_urls
+        from chimera.modules.github_mirrors import build_source_archive_mirror_urls
         urls = build_source_archive_mirror_urls("a", "b", "main")
         self.assertEqual(
             urls[0],
@@ -82,7 +82,7 @@ class TestBuildSourceArchiveMirrorUrls(unittest.TestCase):
         )
 
     def test_second_url_is_codeload(self):
-        from vless_installer.modules.github_mirrors import build_source_archive_mirror_urls
+        from chimera.modules.github_mirrors import build_source_archive_mirror_urls
         urls = build_source_archive_mirror_urls("a", "b", "main")
         self.assertEqual(
             urls[1],
@@ -90,14 +90,14 @@ class TestBuildSourceArchiveMirrorUrls(unittest.TestCase):
         )
 
     def test_proxy_urls_come_after_direct_and_codeload(self):
-        from vless_installer.modules.github_mirrors import build_source_archive_mirror_urls
+        from chimera.modules.github_mirrors import build_source_archive_mirror_urls
         urls = build_source_archive_mirror_urls("a", "b", "main")
         # URLs 2..8 — прокси (начиная с ghproxy.net)
         self.assertIn("ghproxy.net", urls[2])
         self.assertIn("/a/b/archive/refs/heads/main.tar.gz", urls[2])
 
     def test_can_disable_codeload(self):
-        from vless_installer.modules.github_mirrors import build_source_archive_mirror_urls
+        from chimera.modules.github_mirrors import build_source_archive_mirror_urls
         urls = build_source_archive_mirror_urls(
             "a", "b", "main", include_codeload=False,
         )
@@ -106,13 +106,13 @@ class TestBuildSourceArchiveMirrorUrls(unittest.TestCase):
         self.assertNotIn("codeload.github.com", "".join(urls))
 
     def test_returns_empty_on_missing_args(self):
-        from vless_installer.modules.github_mirrors import build_source_archive_mirror_urls
+        from chimera.modules.github_mirrors import build_source_archive_mirror_urls
         self.assertEqual(build_source_archive_mirror_urls("", "b", "main"), [])
         self.assertEqual(build_source_archive_mirror_urls("a", "", "main"), [])
         self.assertEqual(build_source_archive_mirror_urls("a", "b", ""), [])
 
     def test_custom_proxy_hosts(self):
-        from vless_installer.modules.github_mirrors import build_source_archive_mirror_urls
+        from chimera.modules.github_mirrors import build_source_archive_mirror_urls
         urls = build_source_archive_mirror_urls(
             "a", "b", "main", proxy_hosts=["custom.proxy.com"],
         )
@@ -131,7 +131,7 @@ class TestGoToolchainMirrors(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_4_urls(self):
-        from vless_installer.modules.go_toolchain_mirrors import (
+        from chimera.modules.go_toolchain_mirrors import (
             get_go_toolchain_mirrors, GO_TOOLCHAIN_MIRRORS_COUNT,
         )
         urls = get_go_toolchain_mirrors("go1.23.4", "amd64")
@@ -139,12 +139,12 @@ class TestGoToolchainMirrors(unittest.TestCase):
         self.assertEqual(GO_TOOLCHAIN_MIRRORS_COUNT, 4)
 
     def test_all_urls_are_https(self):
-        from vless_installer.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
+        from chimera.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
         for url in get_go_toolchain_mirrors("go1.23.4", "amd64"):
             self.assertEqual(urlparse(url).scheme, "https")
 
     def test_first_url_is_go_dev(self):
-        from vless_installer.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
+        from chimera.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
         urls = get_go_toolchain_mirrors("go1.23.4", "amd64")
         self.assertEqual(
             urls[0],
@@ -152,7 +152,7 @@ class TestGoToolchainMirrors(unittest.TestCase):
         )
 
     def test_contains_regional_mirrors(self):
-        from vless_installer.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
+        from chimera.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
         urls = get_go_toolchain_mirrors("go1.23.4", "amd64")
         all_urls = " ".join(urls)
         self.assertIn("golang.google.cn", all_urls)
@@ -160,24 +160,24 @@ class TestGoToolchainMirrors(unittest.TestCase):
         self.assertIn("mirrors.tencent.com", all_urls)
 
     def test_arm64_arch(self):
-        from vless_installer.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
+        from chimera.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
         urls = get_go_toolchain_mirrors("go1.23.4", "arm64")
         for url in urls:
             self.assertIn("linux-arm64.tar.gz", url)
 
     def test_normalizes_version_without_go_prefix(self):
         """Если version передан как '1.23.4' (без 'go'), добавляется префикс."""
-        from vless_installer.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
+        from chimera.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
         urls = get_go_toolchain_mirrors("1.23.4", "amd64")
         for url in urls:
             self.assertIn("go1.23.4.linux-amd64.tar.gz", url)
 
     def test_empty_version_returns_empty_list(self):
-        from vless_installer.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
+        from chimera.modules.go_toolchain_mirrors import get_go_toolchain_mirrors
         self.assertEqual(get_go_toolchain_mirrors("", "amd64"), [])
 
     def test_recommended_manual_path_is_root(self):
-        from vless_installer.modules.go_toolchain_mirrors import recommended_manual_path
+        from chimera.modules.go_toolchain_mirrors import recommended_manual_path
         self.assertEqual(recommended_manual_path(), Path("/root"))
 
 
@@ -191,11 +191,11 @@ class TestGoToolchainSpecSanity(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_name_is_go_toolchain(self):
-        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        from chimera.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
         self.assertEqual(GO_TOOLCHAIN_SPEC.name, "Go toolchain")
 
     def test_filename_builder_with_version_and_arch(self):
-        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        from chimera.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
         self.assertEqual(
             GO_TOOLCHAIN_SPEC.filename_builder(version="go1.23.4", arch="amd64"),
             "go1.23.4.linux-amd64.tar.gz",
@@ -206,29 +206,29 @@ class TestGoToolchainSpecSanity(unittest.TestCase):
         )
 
     def test_install_dests_is_usr_local(self):
-        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        from chimera.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
         self.assertEqual(GO_TOOLCHAIN_SPEC.install_dests, [Path("/usr/local")])
 
     def test_manual_dir_is_root(self):
-        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        from chimera.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
         self.assertEqual(GO_TOOLCHAIN_SPEC.manual_incoming_dir, Path("/root"))
 
     def test_manual_dir_not_in_install_dests(self):
         """КРИТИЧЕСКИЙ ИНВАРИАНТ (баг 21d7baf)."""
-        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        from chimera.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
         for dest in GO_TOOLCHAIN_SPEC.install_dests:
             self.assertNotEqual(GO_TOOLCHAIN_SPEC.manual_incoming_dir, dest)
 
     def test_min_size_is_10mb(self):
-        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        from chimera.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
         self.assertEqual(GO_TOOLCHAIN_SPEC.min_size, 10_000_000)
 
     def test_post_install_is_set(self):
-        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        from chimera.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
         self.assertIsNotNone(GO_TOOLCHAIN_SPEC.post_install)
 
     def test_mirror_urls_builder_uses_version_and_arch(self):
-        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        from chimera.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
         urls = GO_TOOLCHAIN_SPEC.mirror_urls_builder(
             filename="ignored.tar.gz",
             version="go1.23.4", arch="amd64",
@@ -249,7 +249,7 @@ class TestWdttMirrors(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_9_urls(self):
-        from vless_installer.modules.wdtt_mirrors import (
+        from chimera.modules.wdtt_mirrors import (
             get_wdtt_source_mirrors, WDTT_SOURCE_MIRRORS_COUNT,
         )
         urls = get_wdtt_source_mirrors()
@@ -257,19 +257,19 @@ class TestWdttMirrors(unittest.TestCase):
         self.assertEqual(WDTT_SOURCE_MIRRORS_COUNT, 9)
 
     def test_all_urls_are_https(self):
-        from vless_installer.modules.wdtt_mirrors import get_wdtt_source_mirrors
+        from chimera.modules.wdtt_mirrors import get_wdtt_source_mirrors
         for url in get_wdtt_source_mirrors():
             self.assertEqual(urlparse(url).scheme, "https")
 
     def test_all_urls_contain_repo_and_branch(self):
-        from vless_installer.modules.wdtt_mirrors import get_wdtt_source_mirrors
+        from chimera.modules.wdtt_mirrors import get_wdtt_source_mirrors
         for url in get_wdtt_source_mirrors():
             self.assertIn("SpaceNeuroX", url)
             self.assertIn("proxy-turn-vk-android", url)
             self.assertIn("master", url)
 
     def test_has_direct_github_url(self):
-        from vless_installer.modules.wdtt_mirrors import get_wdtt_source_mirrors
+        from chimera.modules.wdtt_mirrors import get_wdtt_source_mirrors
         urls = get_wdtt_source_mirrors()
         self.assertTrue(
             any("github.com/SpaceNeuroX/proxy-turn-vk-android/archive/refs/heads/master.tar.gz" in u
@@ -277,14 +277,14 @@ class TestWdttMirrors(unittest.TestCase):
         )
 
     def test_has_codeload_url(self):
-        from vless_installer.modules.wdtt_mirrors import get_wdtt_source_mirrors
+        from chimera.modules.wdtt_mirrors import get_wdtt_source_mirrors
         urls = get_wdtt_source_mirrors()
         self.assertTrue(
             any("codeload.github.com" in u for u in urls)
         )
 
     def test_recommended_manual_path_is_root(self):
-        from vless_installer.modules.wdtt_mirrors import recommended_manual_path
+        from chimera.modules.wdtt_mirrors import recommended_manual_path
         self.assertEqual(recommended_manual_path(), Path("/root"))
 
 
@@ -298,36 +298,36 @@ class TestWdttSourceSpecSanity(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_name_is_qwdtt_source(self):
-        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        from chimera.modules.wdtt_packages import WDTT_SOURCE_SPEC
         self.assertEqual(WDTT_SOURCE_SPEC.name, "qWDTT source")
 
     def test_filename_is_master_tarball(self):
-        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        from chimera.modules.wdtt_packages import WDTT_SOURCE_SPEC
         self.assertEqual(
             WDTT_SOURCE_SPEC.filename_builder(),
             "proxy-turn-vk-android-master.tar.gz",
         )
 
     def test_manual_dir_is_root(self):
-        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        from chimera.modules.wdtt_packages import WDTT_SOURCE_SPEC
         self.assertEqual(WDTT_SOURCE_SPEC.manual_incoming_dir, Path("/root"))
 
     def test_manual_dir_not_in_install_dests(self):
         """КРИТИЧЕСКИЙ ИНВАРИАНТ (баг 21d7baf)."""
-        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        from chimera.modules.wdtt_packages import WDTT_SOURCE_SPEC
         for dest in WDTT_SOURCE_SPEC.install_dests:
             self.assertNotEqual(WDTT_SOURCE_SPEC.manual_incoming_dir, dest)
 
     def test_min_size_is_1kb(self):
-        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        from chimera.modules.wdtt_packages import WDTT_SOURCE_SPEC
         self.assertEqual(WDTT_SOURCE_SPEC.min_size, 1000)
 
     def test_post_install_is_set(self):
-        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        from chimera.modules.wdtt_packages import WDTT_SOURCE_SPEC
         self.assertIsNotNone(WDTT_SOURCE_SPEC.post_install)
 
     def test_mirror_urls_has_9_entries(self):
-        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        from chimera.modules.wdtt_packages import WDTT_SOURCE_SPEC
         urls = WDTT_SOURCE_SPEC.mirror_urls_builder(
             filename="proxy-turn-vk-android-master.tar.gz",
         )
@@ -344,7 +344,7 @@ class TestWebdavMirrors(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_9_urls(self):
-        from vless_installer.modules.webdav_mirrors import (
+        from chimera.modules.webdav_mirrors import (
             get_webdav_source_mirrors, WEBDAV_SOURCE_MIRRORS_COUNT,
         )
         urls = get_webdav_source_mirrors()
@@ -352,19 +352,19 @@ class TestWebdavMirrors(unittest.TestCase):
         self.assertEqual(WEBDAV_SOURCE_MIRRORS_COUNT, 9)
 
     def test_all_urls_are_https(self):
-        from vless_installer.modules.webdav_mirrors import get_webdav_source_mirrors
+        from chimera.modules.webdav_mirrors import get_webdav_source_mirrors
         for url in get_webdav_source_mirrors():
             self.assertEqual(urlparse(url).scheme, "https")
 
     def test_all_urls_contain_repo_and_branch(self):
-        from vless_installer.modules.webdav_mirrors import get_webdav_source_mirrors
+        from chimera.modules.webdav_mirrors import get_webdav_source_mirrors
         for url in get_webdav_source_mirrors():
             self.assertIn("spkprsnts", url)
             self.assertIn("webdav-tunnel", url)
             self.assertIn("main", url)
 
     def test_has_direct_github_url(self):
-        from vless_installer.modules.webdav_mirrors import get_webdav_source_mirrors
+        from chimera.modules.webdav_mirrors import get_webdav_source_mirrors
         urls = get_webdav_source_mirrors()
         self.assertTrue(
             any("github.com/spkprsnts/webdav-tunnel/archive/refs/heads/main.tar.gz" in u
@@ -372,7 +372,7 @@ class TestWebdavMirrors(unittest.TestCase):
         )
 
     def test_recommended_manual_path_is_root(self):
-        from vless_installer.modules.webdav_mirrors import recommended_manual_path
+        from chimera.modules.webdav_mirrors import recommended_manual_path
         self.assertEqual(recommended_manual_path(), Path("/root"))
 
 
@@ -386,36 +386,36 @@ class TestWebdavSourceSpecSanity(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_name_is_webdav_tunnel_source(self):
-        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        from chimera.modules.webdav_packages import WEBDAV_SOURCE_SPEC
         self.assertEqual(WEBDAV_SOURCE_SPEC.name, "webdav-tunnel source")
 
     def test_filename_is_main_tarball(self):
-        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        from chimera.modules.webdav_packages import WEBDAV_SOURCE_SPEC
         self.assertEqual(
             WEBDAV_SOURCE_SPEC.filename_builder(),
             "webdav-tunnel-main.tar.gz",
         )
 
     def test_manual_dir_is_root(self):
-        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        from chimera.modules.webdav_packages import WEBDAV_SOURCE_SPEC
         self.assertEqual(WEBDAV_SOURCE_SPEC.manual_incoming_dir, Path("/root"))
 
     def test_manual_dir_not_in_install_dests(self):
         """КРИТИЧЕСКИЙ ИНВАРИАНТ (баг 21d7baf)."""
-        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        from chimera.modules.webdav_packages import WEBDAV_SOURCE_SPEC
         for dest in WEBDAV_SOURCE_SPEC.install_dests:
             self.assertNotEqual(WEBDAV_SOURCE_SPEC.manual_incoming_dir, dest)
 
     def test_min_size_is_1kb(self):
-        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        from chimera.modules.webdav_packages import WEBDAV_SOURCE_SPEC
         self.assertEqual(WEBDAV_SOURCE_SPEC.min_size, 1000)
 
     def test_post_install_is_set(self):
-        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        from chimera.modules.webdav_packages import WEBDAV_SOURCE_SPEC
         self.assertIsNotNone(WEBDAV_SOURCE_SPEC.post_install)
 
     def test_mirror_urls_has_9_entries(self):
-        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        from chimera.modules.webdav_packages import WEBDAV_SOURCE_SPEC
         urls = WEBDAV_SOURCE_SPEC.mirror_urls_builder(
             filename="webdav-tunnel-main.tar.gz",
         )
@@ -444,7 +444,7 @@ class TestPostInstallArchiveHandling(unittest.TestCase):
 
     def test_wdtt_post_install_returns_false_on_non_tarball(self):
         """post_install WDTT возвращает False на не-tar.gz файле."""
-        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        from chimera.modules.wdtt_packages import WDTT_SOURCE_SPEC
 
         # Создаём файл который не tar.gz
         src = self._tmpdir / "fake.tar.gz"
@@ -456,7 +456,7 @@ class TestPostInstallArchiveHandling(unittest.TestCase):
 
     def test_webdav_post_install_returns_false_on_non_tarball(self):
         """post_install WEBDAV возвращает False на не-tar.gz файле."""
-        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        from chimera.modules.webdav_packages import WEBDAV_SOURCE_SPEC
 
         src = self._tmpdir / "fake.tar.gz"
         src.write_bytes(b"not a tarball" * 100)
@@ -467,7 +467,7 @@ class TestPostInstallArchiveHandling(unittest.TestCase):
 
     def test_wdtt_post_install_returns_false_on_empty_file(self):
         """post_install WDTT возвращает False на пустом файле."""
-        from vless_installer.modules.wdtt_packages import WDTT_SOURCE_SPEC
+        from chimera.modules.wdtt_packages import WDTT_SOURCE_SPEC
 
         src = self._tmpdir / "empty.tar.gz"
         src.write_bytes(b"")
@@ -477,7 +477,7 @@ class TestPostInstallArchiveHandling(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_webdav_post_install_returns_false_on_empty_file(self):
-        from vless_installer.modules.webdav_packages import WEBDAV_SOURCE_SPEC
+        from chimera.modules.webdav_packages import WEBDAV_SOURCE_SPEC
 
         src = self._tmpdir / "empty.tar.gz"
         src.write_bytes(b"")
@@ -508,7 +508,7 @@ class TestPostInstallGoToolchain(unittest.TestCase):
 
     def test_post_install_returns_false_on_non_tarball(self):
         """post_install GO_TOOLCHAIN возвращает False на не-tar.gz файле."""
-        from vless_installer.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+        from chimera.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
 
         src = self._tmpdir / "fake-go.tar.gz"
         src.write_bytes(b"not a go tarball" * 100)

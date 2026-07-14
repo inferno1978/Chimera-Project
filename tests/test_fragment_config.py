@@ -2,7 +2,7 @@
 """
 tests/test_fragment_config.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/fragment_config.py.
+Unit-тесты для chimera/modules/fragment_config.py.
 
 Покрывает:
   1. build_fragment_sockopt — генерация sockopt dict
@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -34,9 +34,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestBuildFragmentSockopt(unittest.TestCase):
@@ -46,14 +46,14 @@ class TestBuildFragmentSockopt(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_dict_with_required_keys(self):
-        from vless_installer.modules.fragment_config import build_fragment_sockopt
+        from chimera.modules.fragment_config import build_fragment_sockopt
         s = build_fragment_sockopt()
         for key in ("tcpFastOpen", "tcpKeepAliveInterval", "tcpKeepAliveIdle",
                      "tcpUserTimeout", "tcpCongestion", "fragment"):
             self.assertIn(key, s)
 
     def test_default_values(self):
-        from vless_installer.modules.fragment_config import build_fragment_sockopt
+        from chimera.modules.fragment_config import build_fragment_sockopt
         s = build_fragment_sockopt()
         self.assertTrue(s["tcpFastOpen"])
         self.assertEqual(s["tcpCongestion"], "bbr")
@@ -62,7 +62,7 @@ class TestBuildFragmentSockopt(unittest.TestCase):
         self.assertEqual(s["fragment"]["interval"], "10-20")
 
     def test_custom_values(self):
-        from vless_installer.modules.fragment_config import build_fragment_sockopt
+        from chimera.modules.fragment_config import build_fragment_sockopt
         s = build_fragment_sockopt(packets="5-10", length="100-200", interval="50-100")
         self.assertEqual(s["fragment"]["packets"], "5-10")
         self.assertEqual(s["fragment"]["length"], "100-200")
@@ -76,35 +76,35 @@ class TestValidateRangeStr(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_single_number_valid(self):
-        from vless_installer.modules.fragment_config import _validate_range_str
+        from chimera.modules.fragment_config import _validate_range_str
         self.assertTrue(_validate_range_str("3", "test"))
         self.assertTrue(_validate_range_str("10", "test"))
 
     def test_range_valid(self):
-        from vless_installer.modules.fragment_config import _validate_range_str
+        from chimera.modules.fragment_config import _validate_range_str
         self.assertTrue(_validate_range_str("3-7", "test"))
         self.assertTrue(_validate_range_str("1-100", "test"))
 
     def test_zero_invalid(self):
-        from vless_installer.modules.fragment_config import _validate_range_str
+        from chimera.modules.fragment_config import _validate_range_str
         self.assertFalse(_validate_range_str("0", "test"))
         self.assertFalse(_validate_range_str("0-5", "test"))
 
     def test_reversed_range_invalid(self):
-        from vless_installer.modules.fragment_config import _validate_range_str
+        from chimera.modules.fragment_config import _validate_range_str
         self.assertFalse(_validate_range_str("7-3", "test"))
 
     def test_non_numeric_invalid(self):
-        from vless_installer.modules.fragment_config import _validate_range_str
+        from chimera.modules.fragment_config import _validate_range_str
         self.assertFalse(_validate_range_str("abc", "test"))
         self.assertFalse(_validate_range_str("a-b", "test"))
 
     def test_three_parts_invalid(self):
-        from vless_installer.modules.fragment_config import _validate_range_str
+        from chimera.modules.fragment_config import _validate_range_str
         self.assertFalse(_validate_range_str("3-7-9", "test"))
 
     def test_strips_whitespace(self):
-        from vless_installer.modules.fragment_config import _validate_range_str
+        from chimera.modules.fragment_config import _validate_range_str
         self.assertTrue(_validate_range_str("  3-7  ", "test"))
 
 
@@ -115,12 +115,12 @@ class TestFragmentPresets(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_has_aggressive_balanced_light_custom(self):
-        from vless_installer.modules.fragment_config import _FRAGMENT_PRESETS
+        from chimera.modules.fragment_config import _FRAGMENT_PRESETS
         for name in ("aggressive", "balanced", "light", "custom"):
             self.assertIn(name, _FRAGMENT_PRESETS)
 
     def test_each_preset_has_required_keys(self):
-        from vless_installer.modules.fragment_config import _FRAGMENT_PRESETS
+        from chimera.modules.fragment_config import _FRAGMENT_PRESETS
         for name, preset in _FRAGMENT_PRESETS.items():
             with self.subTest(preset=name):
                 for key in ("packets", "length", "interval", "desc"):
@@ -143,32 +143,32 @@ class TestGenerateFragmentClientConfig(unittest.TestCase):
 
     def _patch(self):
         return (
-            patch("vless_installer.modules.fragment_config._STATE_FILE", self._state),
-            patch("vless_installer.modules.fragment_config._FRAGMENT_DIR", self._frag_dir),
+            patch("chimera.modules.fragment_config._STATE_FILE", self._state),
+            patch("chimera.modules.fragment_config._FRAGMENT_DIR", self._frag_dir),
         )
 
     def test_returns_none_when_no_state(self):
-        from vless_installer.modules.fragment_config import generate_fragment_client_config
+        from chimera.modules.fragment_config import generate_fragment_client_config
         with self._patch()[0], self._patch()[1]:
             result = generate_fragment_client_config("1-3", "3-7", "10-20")
         self.assertIsNone(result)
 
     def test_returns_none_when_no_domain(self):
-        from vless_installer.modules.fragment_config import generate_fragment_client_config
+        from chimera.modules.fragment_config import generate_fragment_client_config
         self._state.write_text(json.dumps({"uuid": "abc"}))
         with self._patch()[0], self._patch()[1]:
             result = generate_fragment_client_config("1-3", "3-7", "10-20")
         self.assertIsNone(result)
 
     def test_returns_none_when_no_uuid(self):
-        from vless_installer.modules.fragment_config import generate_fragment_client_config
+        from chimera.modules.fragment_config import generate_fragment_client_config
         self._state.write_text(json.dumps({"domain": "x.com"}))
         with self._patch()[0], self._patch()[1]:
             result = generate_fragment_client_config("1-3", "3-7", "10-20")
         self.assertIsNone(result)
 
     def test_generates_reality_config(self):
-        from vless_installer.modules.fragment_config import generate_fragment_client_config
+        from chimera.modules.fragment_config import generate_fragment_client_config
         self._state.write_text(json.dumps({
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -188,7 +188,7 @@ class TestGenerateFragmentClientConfig(unittest.TestCase):
 
     def test_sanitizes_label(self):
         """label с пробелами и спецсимволами — санитизируется."""
-        from vless_installer.modules.fragment_config import generate_fragment_client_config
+        from chimera.modules.fragment_config import generate_fragment_client_config
         self._state.write_text(json.dumps({
             "domain": "x.com", "uuid": "u",
             "protocol_mode": "reality",

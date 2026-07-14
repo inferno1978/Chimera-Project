@@ -2,7 +2,7 @@
 """
 tests/test_nginx_watchdog.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/nginx_watchdog.py.
+Unit-тесты для chimera/modules/nginx_watchdog.py.
 
 Покрывает:
   1. _protocol_mode — чтение из state.json
@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -34,15 +34,15 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestNginxWatchdog(unittest.TestCase):
     def setUp(self): _setup_core()
     def test_protocol_mode_reality(self):
-        from vless_installer.modules import nginx_watchdog
+        from chimera.modules import nginx_watchdog
         import tempfile as tf
         tmpdir = Path(tf.mkdtemp())
         try:
@@ -53,7 +53,7 @@ class TestNginxWatchdog(unittest.TestCase):
         finally:
             import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
     def test_protocol_mode_default(self):
-        from vless_installer.modules import nginx_watchdog
+        from chimera.modules import nginx_watchdog
         import tempfile as tf
         tmpdir = Path(tf.mkdtemp())
         try:

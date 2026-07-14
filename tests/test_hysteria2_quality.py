@@ -2,7 +2,7 @@
 """
 tests/test_hysteria2_quality.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/hysteria2_quality.py.
+Unit-тесты для chimera/modules/hysteria2_quality.py.
 
 Покрывает:
   1. _load_history / _save_history — JSON I/O
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -35,9 +35,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestH2QualityHistory(unittest.TestCase):
@@ -47,16 +47,16 @@ class TestH2QualityHistory(unittest.TestCase):
     def tearDown(self):
         import shutil; shutil.rmtree(self._tmp, ignore_errors=True)
     def _patch(self):
-        return patch("vless_installer.modules.hysteria2_quality._HISTORY_FILE", self._f)
+        return patch("chimera.modules.hysteria2_quality._HISTORY_FILE", self._f)
     def test_load_empty(self):
-        from vless_installer.modules.hysteria2_quality import _load_history
+        from chimera.modules.hysteria2_quality import _load_history
         with self._patch(): self.assertEqual(_load_history(), {})
     def test_save_load(self):
-        from vless_installer.modules.hysteria2_quality import _load_history, _save_history
+        from chimera.modules.hysteria2_quality import _load_history, _save_history
         with self._patch():
             _save_history({"1.2.3.4": [{"ts":"x"}]}); self.assertTrue(_load_history()["1.2.3.4"])
     def test_append_trims(self):
-        from vless_installer.modules.hysteria2_quality import _append_history, _load_history, _MAX_HISTORY
+        from chimera.modules.hysteria2_quality import _append_history, _load_history, _MAX_HISTORY
         with self._patch():
             for i in range(_MAX_HISTORY + 20):
                 _append_history("1.2.3.4", {"ts": str(i)})

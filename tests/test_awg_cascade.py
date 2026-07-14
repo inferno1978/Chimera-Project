@@ -2,7 +2,7 @@
 """
 tests/test_awg_cascade.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/awg_cascade.py.
+Unit-тесты для chimera/modules/awg_cascade.py.
 
 Покрывает:
   1. _awgs_cascade_build_awg1_conf — генерация awg1.conf
@@ -28,7 +28,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -38,9 +38,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestAwgsCascadeBuildAwg1Conf(unittest.TestCase):
@@ -56,11 +56,11 @@ class TestAwgsCascadeBuildAwg1Conf(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.awg_state.AWGS_STATE_FILE",
+        return patch("chimera.modules.awg_state.AWGS_STATE_FILE",
                      self._state)
 
     def test_generates_interface_and_peer_sections(self):
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
         # state с дефолтными params
         self._state.write_text(json.dumps({
             "installed": True,
@@ -84,7 +84,7 @@ class TestAwgsCascadeBuildAwg1Conf(unittest.TestCase):
 
     def test_client_ip_from_exit_subnet(self):
         """client_ip = base.2/32 где base = exit_subnet без последнего октета."""
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
         self._state.write_text(json.dumps({
             "installed": True, "params": {},
         }))
@@ -98,7 +98,7 @@ class TestAwgsCascadeBuildAwg1Conf(unittest.TestCase):
         self.assertIn("172.16.61.2/32", conf)
 
     def test_omits_preshared_key_when_empty(self):
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
         self._state.write_text(json.dumps({
             "installed": True, "params": {},
         }))
@@ -120,7 +120,7 @@ class TestAwgsCascadeBuildAwg1Conf(unittest.TestCase):
         0.0.0.0/0 dev awg1, перехватывая весь трафик сервера (включая
         SSH-ответы) — сессия обрывается. Фикс: коммит 33970c2.
         """
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
         self._state.write_text(json.dumps({
             "installed": True,
             "params": {"jc": 4, "jmin": 40, "jmax": 70,
@@ -141,7 +141,7 @@ class TestAwgsCascadeBuildAwg1Conf(unittest.TestCase):
 
     def test_table_off_present_regardless_of_mtu_or_params(self):
         """Table = off присутствует независимо от params/mtu — безусловная строка."""
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
         # Тест с пустыми params и кастомным mtu
         self._state.write_text(json.dumps({
             "installed": True, "params": {}, "mtu": 1400,
@@ -208,7 +208,7 @@ class TestAwgsCascadeApplyIptablesRules(unittest.TestCase):
         До фикса (коммит 33970c2) правило было '-A OUTPUT', что маркировало
         весь исходящий трафик сервера (включая SSH-ответы) → SSH lockout.
         """
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
 
         mock_core = self._mock_core()
         with patch.object(awg_cascade, "_core_module", return_value=mock_core):
@@ -242,7 +242,7 @@ class TestAwgsCascadeApplyIptablesRules(unittest.TestCase):
         Это была компенсация для OUTPUT MARK-бага. После перехода на FORWARD
         это правило больше не нужно.
         """
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
 
         mock_core = self._mock_core()
         with patch.object(awg_cascade, "_core_module", return_value=mock_core):
@@ -261,7 +261,7 @@ class TestAwgsCascadeApplyIptablesRules(unittest.TestCase):
 
     def test_forward_mark_rule_not_for_ru_networks(self):
         """Дополнительно: FORWARD MARK правило исключает RU-сети через ipset."""
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
 
         mock_core = self._mock_core()
         with patch.object(awg_cascade, "_core_module", return_value=mock_core):
@@ -294,15 +294,15 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
     def _patch(self):
         # Патчим и AWGS_CASCADE_DIR (для mkdir) и AWGS_ROUTING_SCRIPT (для write)
         return (
-            patch("vless_installer.modules.awg_cascade.AWGS_CASCADE_DIR", self._tmpdir),
-            patch("vless_installer.modules.awg_cascade.AWGS_ROUTING_SCRIPT", self._script),
+            patch("chimera.modules.awg_cascade.AWGS_CASCADE_DIR", self._tmpdir),
+            patch("chimera.modules.awg_cascade.AWGS_ROUTING_SCRIPT", self._script),
         )
 
     def test_writes_script_with_ipset_references(self):
         """Скрипт содержит ссылки на ipset и exit_gw (base.1 из exit_subnet).
         Ранее f-string конфликтовал с bash ${line:0:1} → NameError при вызове
         (фикс: экранирование через ${{line:0:1}})."""
-        from vless_installer.modules.awg_cascade import (
+        from chimera.modules.awg_cascade import (
             _awgs_cascade_create_routing_script, AWGS_IPSET_NAME,
         )
         with self._patch()[0], self._patch()[1]:
@@ -318,7 +318,7 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
     def test_script_is_executable(self):
         """Скрипт создаётся с executable bit (0o755)."""
         import stat
-        from vless_installer.modules.awg_cascade import (
+        from chimera.modules.awg_cascade import (
             _awgs_cascade_create_routing_script,
         )
         with self._patch()[0], self._patch()[1]:
@@ -340,11 +340,11 @@ class TestAwgsCascadeCreateSystemdUnit(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.awg_cascade.AWGS_SYSTEMD_CASCADE",
+        return patch("chimera.modules.awg_cascade.AWGS_SYSTEMD_CASCADE",
                      self._unit)
 
     def test_writes_unit_with_exec_start(self):
-        from vless_installer.modules.awg_cascade import (
+        from chimera.modules.awg_cascade import (
             _awgs_cascade_create_systemd_unit, AWGS_ROUTING_SCRIPT,
         )
         with self._patch():
@@ -369,11 +369,11 @@ class TestAwgsCascadeSetupCron(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.awg_cascade.AWGS_CRON_RU_UPDATE",
+        return patch("chimera.modules.awg_cascade.AWGS_CRON_RU_UPDATE",
                      self._cron)
 
     def test_writes_cron_file(self):
-        from vless_installer.modules.awg_cascade import _awgs_cascade_setup_cron
+        from chimera.modules.awg_cascade import _awgs_cascade_setup_cron
         with self._patch():
             _awgs_cascade_setup_cron()
         self.assertTrue(self._cron.exists())
@@ -382,7 +382,7 @@ class TestAwgsCascadeSetupCron(unittest.TestCase):
 
     def test_cron_chmod_644(self):
         import stat
-        from vless_installer.modules.awg_cascade import _awgs_cascade_setup_cron
+        from chimera.modules.awg_cascade import _awgs_cascade_setup_cron
         with self._patch():
             _awgs_cascade_setup_cron()
         mode = stat.S_IMODE(os.stat(self._cron).st_mode)
@@ -434,7 +434,7 @@ class TestAwgsCascadeSetupAwg1(unittest.TestCase):
         awgs_state_load (returns state), awgs_state_peer_find (returns peer),
         core._box_* (no-op), core.info/success (no-op).
         """
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
 
         mock_core = _mock_core_for_cascade()
 
@@ -452,8 +452,8 @@ class TestAwgsCascadeSetupAwg1(unittest.TestCase):
              patch.object(awg_cascade, "awg_peer_add", return_value=True), \
              patch.object(awg_cascade, "awgs_state_set_cascade_role"), \
              patch.object(awg_cascade, "awgs_state_load", return_value=state), \
-             patch("vless_installer.modules.awg_state.awgs_state_peer_find", return_value=peer), \
-             patch("vless_installer.modules.awg_state.awgs_state_peer_remove"), \
+             patch("chimera.modules.awg_state.awgs_state_peer_find", return_value=peer), \
+             patch("chimera.modules.awg_state.awgs_state_peer_remove"), \
              patch("builtins.print"):
             # Не должно поднять NameError или любое другое исключение
             result = awg_cascade.awgs_cascade_setup_awg1()
@@ -467,7 +467,7 @@ class TestAwgsCascadeSetupAwg1(unittest.TestCase):
         поднимет NameError ДО вызова _box_row. Тест проверяет что
         _box_row действительно вызывается (значит f-string отработал).
         """
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
 
         mock_core = _mock_core_for_cascade()
 
@@ -485,8 +485,8 @@ class TestAwgsCascadeSetupAwg1(unittest.TestCase):
              patch.object(awg_cascade, "awg_peer_add", return_value=True), \
              patch.object(awg_cascade, "awgs_state_set_cascade_role"), \
              patch.object(awg_cascade, "awgs_state_load", return_value=state), \
-             patch("vless_installer.modules.awg_state.awgs_state_peer_find", return_value=peer), \
-             patch("vless_installer.modules.awg_state.awgs_state_peer_remove"), \
+             patch("chimera.modules.awg_state.awgs_state_peer_find", return_value=peer), \
+             patch("chimera.modules.awg_state.awgs_state_peer_remove"), \
              patch("builtins.print"):
             awg_cascade.awgs_cascade_setup_awg1()
 
@@ -495,7 +495,7 @@ class TestAwgsCascadeSetupAwg1(unittest.TestCase):
 
     def test_box_row_contains_endpoint_value(self):
         """В выводе _box_row присутствует значение endpoint из state."""
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
 
         mock_core = _mock_core_for_cascade()
 
@@ -513,8 +513,8 @@ class TestAwgsCascadeSetupAwg1(unittest.TestCase):
              patch.object(awg_cascade, "awg_peer_add", return_value=True), \
              patch.object(awg_cascade, "awgs_state_set_cascade_role"), \
              patch.object(awg_cascade, "awgs_state_load", return_value=state), \
-             patch("vless_installer.modules.awg_state.awgs_state_peer_find", return_value=peer), \
-             patch("vless_installer.modules.awg_state.awgs_state_peer_remove"), \
+             patch("chimera.modules.awg_state.awgs_state_peer_find", return_value=peer), \
+             patch("chimera.modules.awg_state.awgs_state_peer_remove"), \
              patch("builtins.print"):
             awg_cascade.awgs_cascade_setup_awg1()
 
@@ -527,15 +527,15 @@ class TestAwgsCascadeSetupAwg1(unittest.TestCase):
 
     def test_returns_false_when_peer_add_fails(self):
         """Если awg_peer_add возвращает False — функция возвращает False."""
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
 
         mock_core = _mock_core_for_cascade()
 
         with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
              patch.object(awg_cascade, "awgs_state_is_installed", return_value=True), \
              patch.object(awg_cascade, "awg_peer_add", return_value=False), \
-             patch("vless_installer.modules.awg_state.awgs_state_peer_find", return_value=None), \
-             patch("vless_installer.modules.awg_state.awgs_state_peer_remove"), \
+             patch("chimera.modules.awg_state.awgs_state_peer_find", return_value=None), \
+             patch("chimera.modules.awg_state.awgs_state_peer_remove"), \
              patch("builtins.print"):
             result = awg_cascade.awgs_cascade_setup_awg1()
 
@@ -555,7 +555,7 @@ class TestAwgsCascadeStatus(unittest.TestCase):
 
     def test_runs_without_nameerror_no_role(self):
         """Нет cascade_role → выводит 'Каскад не настроен' без NameError."""
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
 
         mock_core = _mock_core_for_cascade()
 
@@ -570,7 +570,7 @@ class TestAwgsCascadeStatus(unittest.TestCase):
 
     def test_runs_without_nameerror_entry_role(self):
         """role='entry' → проверка systemctl/ipset без NameError."""
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
 
         mock_core = _mock_core_for_cascade()
 
@@ -590,7 +590,7 @@ class TestAwgsCascadeStatus(unittest.TestCase):
 
     def test_runs_without_nameerror_exit_role(self):
         """role='exit' → проверка standalone AWG без NameError."""
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
 
         mock_core = _mock_core_for_cascade()
 
@@ -600,7 +600,7 @@ class TestAwgsCascadeStatus(unittest.TestCase):
              patch.object(awg_cascade, "awgs_state_load", return_value=state), \
              patch.object(awg_cascade, "awgs_service_status",
                           return_value={"active": True, "enabled": True}), \
-             patch("vless_installer.modules.awg_state.awgs_state_peer_find",
+             patch("chimera.modules.awg_state.awgs_state_peer_find",
                           return_value={"client_ip": "10.66.66.2/32"}), \
              patch("builtins.print"):
             awg_cascade._awgs_cascade_status()
@@ -621,7 +621,7 @@ class TestDoManageAwgCascade(unittest.TestCase):
 
     def test_menu_renders_without_nameerror(self):
         """Меню рендерится и выходит по 'q' без NameError."""
-        from vless_installer.modules import awg_cascade
+        from chimera.modules import awg_cascade
 
         mock_core = _mock_core_for_cascade()
 

@@ -2,7 +2,7 @@
 """
 tests/test_awg_transport.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/awg_transport.py.
+Unit-тесты для chimera/modules/awg_transport.py.
 
 Модуль использует _core_module() для доступа к globals — патчим через mock core.
 Тестируем:
@@ -28,7 +28,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -38,9 +38,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 def _mock_core(**overrides):
@@ -91,13 +91,13 @@ class TestAwgCheckTool(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_true_when_binary_in_path(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch("shutil.which", return_value="/usr/bin/awg"), \
              patch.object(awg_transport, "_core_module", return_value=MagicMock()):
             self.assertTrue(awg_transport.awg_check_tool("awg"))
 
     def test_returns_false_when_binary_not_found(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch("shutil.which", return_value=None), \
              patch.object(awg_transport, "_core_module", return_value=MagicMock()):
             self.assertFalse(awg_transport.awg_check_tool("nonexistent"))
@@ -110,7 +110,7 @@ class TestAwgNodeSubnets(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_node_0(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module",
                           return_value=_mock_core()):
             subnets = awg_transport._awg_node_subnets(0)
@@ -123,7 +123,7 @@ class TestAwgNodeSubnets(unittest.TestCase):
         self.assertEqual(subnets["route_table"], 1000)
 
     def test_node_5(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module",
                           return_value=_mock_core()):
             subnets = awg_transport._awg_node_subnets(5)
@@ -134,7 +134,7 @@ class TestAwgNodeSubnets(unittest.TestCase):
         self.assertEqual(subnets["route_table"], 1005)
 
     def test_has_all_required_keys(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module",
                           return_value=_mock_core()):
             subnets = awg_transport._awg_node_subnets(1)
@@ -153,7 +153,7 @@ class TestAwgNodeFromGlobals(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_uses_globals_for_host_port(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module",
                           return_value=_mock_core(AWG_EXIT_HOST="5.6.7.8")):
             node = awg_transport._awg_node_from_globals(2)
@@ -165,7 +165,7 @@ class TestAwgNodeFromGlobals(unittest.TestCase):
         self.assertEqual(node["status"], "unknown")
 
     def test_default_ssh_auth_method_is_key(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module",
                           return_value=_mock_core()):
             node = awg_transport._awg_node_from_globals(0)
@@ -185,7 +185,7 @@ class TestAwgLoadNodesFromState(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_returns_empty_when_no_file(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         core = _mock_core()
         core.STATE_FILE = Path("/tmp/nonexistent_xyz_state.json")
         with patch.object(awg_transport, "_core_module", return_value=core):
@@ -193,7 +193,7 @@ class TestAwgLoadNodesFromState(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_returns_nodes_from_state(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         self._state.write_text(json.dumps({
             "awg_nodes": [{"host": "1.1.1.1"}, {"host": "2.2.2.2"}],
         }))
@@ -205,7 +205,7 @@ class TestAwgLoadNodesFromState(unittest.TestCase):
         self.assertEqual(result[0]["host"], "1.1.1.1")
 
     def test_returns_empty_when_corrupt(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         self._state.write_text("{invalid")
         core = _mock_core()
         core.STATE_FILE = self._state
@@ -214,7 +214,7 @@ class TestAwgLoadNodesFromState(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_returns_empty_when_no_awg_nodes_key(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         self._state.write_text(json.dumps({"other_key": "value"}))
         core = _mock_core()
         core.STATE_FILE = self._state
@@ -237,7 +237,7 @@ class TestAwgSaveNodesToState(unittest.TestCase):
 
     def test_filters_ssh_password_from_nodes(self):
         """ssh_password не должен попадать в state.json."""
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         self._state.write_text(json.dumps({"uuid": "abc"}))
         core = _mock_core()
         core.STATE_FILE = self._state
@@ -255,7 +255,7 @@ class TestAwgSaveNodesToState(unittest.TestCase):
         self.assertEqual(saved["uuid"], "abc")
 
     def test_does_nothing_when_no_state_file(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         core = _mock_core()
         core.STATE_FILE = Path("/tmp/nonexistent_xyz_state.json")
         with patch.object(awg_transport, "_core_module", return_value=core):
@@ -263,7 +263,7 @@ class TestAwgSaveNodesToState(unittest.TestCase):
             awg_transport._awg_save_nodes_to_state([{"host": "1.1.1.1"}])
 
     def test_writes_active_node_index(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         self._state.write_text(json.dumps({}))
         core = _mock_core(AWG_ACTIVE_NODE_INDEX=3)
         core.STATE_FILE = self._state
@@ -290,13 +290,13 @@ class TestAwgClientConfForNode(unittest.TestCase):
         }
 
     def test_includes_node_endpoint(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_for_node(self._node())
         self.assertIn("Endpoint = 5.6.7.8:51820", conf)
 
     def test_uses_node_keys_when_provided(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_for_node(self._node())
         self.assertIn("PrivateKey = NODE_PRIVKEY", conf)
@@ -304,7 +304,7 @@ class TestAwgClientConfForNode(unittest.TestCase):
         self.assertIn("PresharedKey = NODE_PSK", conf)
 
     def test_falls_back_to_globals_when_node_keys_missing(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         node = {
             "host": "5.6.7.8", "port": 51820,
             "client_ip": "10.66.5.2/32",
@@ -318,14 +318,14 @@ class TestAwgClientConfForNode(unittest.TestCase):
         self.assertIn("PresharedKey = PSK_KEY", conf)
 
     def test_includes_node_addresses(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_for_node(self._node())
         self.assertIn("10.66.5.2/32", conf)
         self.assertIn("fd66:5::2/128", conf)
 
     def test_includes_awg_params(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_for_node(self._node())
         self.assertIn("Jc = 4", conf)
@@ -335,20 +335,20 @@ class TestAwgClientConfForNode(unittest.TestCase):
         self.assertIn("H4 = 4", conf)
 
     def test_includes_dns_and_table_off(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_for_node(self._node())
         self.assertIn("DNS = 1.1.1.1, 8.8.8.8, 2606:4700:4700::1111", conf)
         self.assertIn("Table = off", conf)
 
     def test_allowed_ips_all(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_for_node(self._node())
         self.assertIn("AllowedIPs = 0.0.0.0/0, ::/0", conf)
 
     def test_persistent_keepalive(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_for_node(self._node())
         self.assertIn("PersistentKeepalive = 25", conf)
@@ -372,32 +372,32 @@ class TestAwgServerConfForNode(unittest.TestCase):
         }
 
     def test_includes_interface_section(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_server_conf_for_node(self._node())
         self.assertIn("[Interface]", conf)
         self.assertIn("[Peer]", conf)
 
     def test_uses_node_server_privkey(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_server_conf_for_node(self._node())
         self.assertIn("PrivateKey = NODE_S_PRIV", conf)
 
     def test_uses_node_client_pubkey(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_server_conf_for_node(self._node())
         self.assertIn("PublicKey = NODE_C_PUB", conf)
 
     def test_includes_listen_port(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_server_conf_for_node(self._node())
         self.assertIn("ListenPort = 51820", conf)
 
     def test_includes_addresses(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_server_conf_for_node(self._node())
         self.assertIn("10.66.5.1/32", conf)
@@ -406,7 +406,7 @@ class TestAwgServerConfForNode(unittest.TestCase):
         self.assertIn("fd66:5::2/128", conf)
 
     def test_includes_awg_params(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_server_conf_for_node(self._node())
         self.assertIn("Jc = 4", conf)
@@ -421,20 +421,20 @@ class TestAwgClientConfText(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_includes_interface_and_peer_sections(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_text()
         self.assertIn("[Interface]", conf)
         self.assertIn("[Peer]", conf)
 
     def test_includes_endpoint_from_globals(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_text()
         self.assertIn("Endpoint = 1.2.3.4:51820", conf)
 
     def test_includes_keys(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_text()
         self.assertIn("PrivateKey = CLIENT_PRIV", conf)
@@ -442,7 +442,7 @@ class TestAwgClientConfText(unittest.TestCase):
         self.assertIn("PresharedKey = PSK_KEY", conf)
 
     def test_includes_awg_params(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_text()
         self.assertIn("Jc = 4", conf)
@@ -452,20 +452,20 @@ class TestAwgClientConfText(unittest.TestCase):
         self.assertIn("H4 = 4", conf)
 
     def test_includes_dns_and_table_off(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_text()
         self.assertIn("DNS = 1.1.1.1, 8.8.8.8, 2606:4700:4700::1111", conf)
         self.assertIn("Table = off", conf)
 
     def test_allowed_ips_all(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_text()
         self.assertIn("AllowedIPs = 0.0.0.0/0, ::/0", conf)
 
     def test_persistent_keepalive(self):
-        from vless_installer.modules import awg_transport
+        from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_text()
         self.assertIn("PersistentKeepalive = 25", conf)

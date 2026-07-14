@@ -2,7 +2,7 @@
 """
 tests/test_system_deps.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/system_deps.py.
+Unit-тесты для chimera/modules/system_deps.py.
 
 Покрывает:
   1. _CMD_TO_PKG — структура таблицы команд
@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -34,19 +34,19 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestSystemDeps(unittest.TestCase):
     def setUp(self): _setup_core()
     def test_cmd_to_pkg_has_common_commands(self):
-        from vless_installer.modules.system_deps import _CMD_TO_PKG
+        from chimera.modules.system_deps import _CMD_TO_PKG
         for cmd in ("curl", "wget", "tar"):
             self.assertIn(cmd, _CMD_TO_PKG)
     def test_cmd_to_pkg_values_are_tuples(self):
-        from vless_installer.modules.system_deps import _CMD_TO_PKG
+        from chimera.modules.system_deps import _CMD_TO_PKG
         for cmd, pkg in _CMD_TO_PKG.items():
             with self.subTest(cmd=cmd):
                 self.assertIsInstance(pkg, (tuple, list))

@@ -2,7 +2,7 @@
 """
 tests/test_awg_hw_tuning.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/awg_hw_tuning.py.
+Unit-тесты для chimera/modules/awg_hw_tuning.py.
 
 Покрывает:
   1. awgs_detect_ram_mb — чтение /proc/meminfo
@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -34,22 +34,22 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestAwgHwTuning(unittest.TestCase):
     def setUp(self): _setup_core()
     def test_detect_ram_mb(self):
-        from vless_installer.modules import awg_hw_tuning
+        from chimera.modules import awg_hw_tuning
         content = "MemTotal:       16384000 kB\n"
         with patch("pathlib.Path.read_text", return_value=content):
             with patch("pathlib.Path.exists", return_value=True):
                 ram = awg_hw_tuning.awgs_detect_ram_mb()
         self.assertEqual(ram, 16000)
     def test_detect_ram_no_file(self):
-        from vless_installer.modules import awg_hw_tuning
+        from chimera.modules import awg_hw_tuning
         orig_read = Path.read_text
         def _fake_read(self):
             raise OSError("no file")

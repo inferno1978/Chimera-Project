@@ -2,7 +2,7 @@
 """
 tests/test_mieru.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/mieru.py.
+Unit-тесты для chimera/modules/mieru.py.
 
 Покрывает:
   1. _get_download_urls — вычисление URL для amd64/arm64
@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -35,9 +35,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestGetDownloadUrls(unittest.TestCase):
@@ -47,7 +47,7 @@ class TestGetDownloadUrls(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_amd64_urls(self):
-        from vless_installer.modules import mieru
+        from chimera.modules import mieru
         with patch.object(mieru, "_is_amd64", return_value=True):
             mita_url, mieru_url = mieru._get_download_urls("1.0.0")
         self.assertIn("amd64", mita_url)
@@ -56,7 +56,7 @@ class TestGetDownloadUrls(unittest.TestCase):
         self.assertIn("1.0.0", mieru_url)
 
     def test_arm64_urls(self):
-        from vless_installer.modules import mieru
+        from chimera.modules import mieru
         with patch.object(mieru, "_is_amd64", return_value=False):
             mita_url, mieru_url = mieru._get_download_urls("2.0.0")
         self.assertIn("arm64", mita_url)
@@ -70,7 +70,7 @@ class TestBuildServerConfig(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_single_port(self):
-        from vless_installer.modules.mieru import _build_server_config
+        from chimera.modules.mieru import _build_server_config
         users = [{"username": "alice", "password": "pass1"}]
         cfg = _build_server_config(users, 2012, 2012, "TCP")
         self.assertEqual(len(cfg["portBindings"]), 1)
@@ -78,7 +78,7 @@ class TestBuildServerConfig(unittest.TestCase):
         self.assertEqual(cfg["portBindings"][0]["protocol"], "TCP")
 
     def test_port_range(self):
-        from vless_installer.modules.mieru import _build_server_config
+        from chimera.modules.mieru import _build_server_config
         users = [{"username": "alice", "password": "pass1"}]
         cfg = _build_server_config(users, 2012, 2022, "UDP")
         self.assertEqual(len(cfg["portBindings"]), 1)
@@ -87,13 +87,13 @@ class TestBuildServerConfig(unittest.TestCase):
         self.assertEqual(cfg["portBindings"][0]["protocol"], "UDP")
 
     def test_users_included(self):
-        from vless_installer.modules.mieru import _build_server_config
+        from chimera.modules.mieru import _build_server_config
         users = [{"username": "alice", "password": "p1"}, {"username": "bob", "password": "p2"}]
         cfg = _build_server_config(users, 2012, 2022, "TCP")
         self.assertEqual(len(cfg["users"]), 2)
 
     def test_logging_level_and_mtu(self):
-        from vless_installer.modules.mieru import _build_server_config
+        from chimera.modules.mieru import _build_server_config
         cfg = _build_server_config([], 2012, 2022, "TCP")
         self.assertEqual(cfg["loggingLevel"], "INFO")
         self.assertEqual(cfg["mtu"], 1400)
@@ -102,7 +102,7 @@ class TestBuildServerConfig(unittest.TestCase):
 
     def test_traffic_pattern_added_when_provided(self):
         """_build_server_config с traffic_pattern → cfg["trafficPattern"] present."""
-        from vless_installer.modules.mieru import _build_server_config
+        from chimera.modules.mieru import _build_server_config
         tp = {"nonce": {"type": "NONCE_TYPE_PRINTABLE"}}
         cfg = _build_server_config([], 2012, 2022, "TCP", traffic_pattern=tp)
         self.assertIn("trafficPattern", cfg)
@@ -110,13 +110,13 @@ class TestBuildServerConfig(unittest.TestCase):
 
     def test_traffic_pattern_omitted_when_none(self):
         """_build_server_config без traffic_pattern → нет поля trafficPattern."""
-        from vless_installer.modules.mieru import _build_server_config
+        from chimera.modules.mieru import _build_server_config
         cfg = _build_server_config([], 2012, 2022, "TCP")
         self.assertNotIn("trafficPattern", cfg)
 
     def test_traffic_pattern_omitted_when_none_explicit(self):
         """_build_server_config с traffic_pattern=None → нет поля."""
-        from vless_installer.modules.mieru import _build_server_config
+        from chimera.modules.mieru import _build_server_config
         cfg = _build_server_config([], 2012, 2022, "TCP", traffic_pattern=None)
         self.assertNotIn("trafficPattern", cfg)
 
@@ -128,12 +128,12 @@ class TestMieruTrafficPresets(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_has_4_presets(self):
-        from vless_installer.modules.mieru import _MIERU_TRAFFIC_PRESETS
+        from chimera.modules.mieru import _MIERU_TRAFFIC_PRESETS
         for name in ("disabled", "basic", "medium", "aggressive"):
             self.assertIn(name, _MIERU_TRAFFIC_PRESETS)
 
     def test_each_preset_has_label_description_config(self):
-        from vless_installer.modules.mieru import _MIERU_TRAFFIC_PRESETS
+        from chimera.modules.mieru import _MIERU_TRAFFIC_PRESETS
         for name, preset in _MIERU_TRAFFIC_PRESETS.items():
             with self.subTest(preset=name):
                 self.assertIn("label", preset)
@@ -141,16 +141,16 @@ class TestMieruTrafficPresets(unittest.TestCase):
                 self.assertIn("config", preset)
 
     def test_disabled_has_none_config(self):
-        from vless_installer.modules.mieru import _MIERU_TRAFFIC_PRESETS
+        from chimera.modules.mieru import _MIERU_TRAFFIC_PRESETS
         self.assertIsNone(_MIERU_TRAFFIC_PRESETS["disabled"]["config"])
 
     def test_basic_has_nonce(self):
-        from vless_installer.modules.mieru import _MIERU_TRAFFIC_PRESETS
+        from chimera.modules.mieru import _MIERU_TRAFFIC_PRESETS
         cfg = _MIERU_TRAFFIC_PRESETS["basic"]["config"]
         self.assertIn("nonce", cfg)
 
     def test_aggressive_has_all_fields(self):
-        from vless_installer.modules.mieru import _MIERU_TRAFFIC_PRESETS
+        from chimera.modules.mieru import _MIERU_TRAFFIC_PRESETS
         cfg = _MIERU_TRAFFIC_PRESETS["aggressive"]["config"]
         self.assertIn("nonce", cfg)
         self.assertIn("tcpFragment", cfg)
@@ -164,7 +164,7 @@ class TestGenSingboxOutbound(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_dict_with_required_keys(self):
-        from vless_installer.modules.mieru import _gen_singbox_outbound
+        from chimera.modules.mieru import _gen_singbox_outbound
         ob = _gen_singbox_outbound("1.2.3.4", 2012, 2022, "TCP", "alice", "pass")
         self.assertEqual(ob["type"], "mieru")
         self.assertEqual(ob["tag"], "mieru-alice")
@@ -174,12 +174,12 @@ class TestGenSingboxOutbound(unittest.TestCase):
         self.assertEqual(ob["password"], "pass")
 
     def test_transport_uppercase(self):
-        from vless_installer.modules.mieru import _gen_singbox_outbound
+        from chimera.modules.mieru import _gen_singbox_outbound
         ob = _gen_singbox_outbound("1.2.3.4", 2012, 2022, "tcp", "u", "p")
         self.assertEqual(ob["transport"], "TCP")
 
     def test_multiplexing_high(self):
-        from vless_installer.modules.mieru import _gen_singbox_outbound
+        from chimera.modules.mieru import _gen_singbox_outbound
         ob = _gen_singbox_outbound("1.2.3.4", 2012, 2022, "TCP", "u", "p")
         self.assertEqual(ob["multiplexing"], "MULTIPLEXING_HIGH")
 
@@ -191,23 +191,23 @@ class TestGenClientShareLink(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_mierus_url(self):
-        from vless_installer.modules.mieru import _gen_client_share_link
+        from chimera.modules.mieru import _gen_client_share_link
         link = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "alice", "pass")
         self.assertTrue(link.startswith("mierus://"))
 
     def test_contains_credentials(self):
-        from vless_installer.modules.mieru import _gen_client_share_link
+        from chimera.modules.mieru import _gen_client_share_link
         link = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "alice", "pass")
         self.assertIn("alice:pass", link)
 
     def test_contains_port_and_protocol(self):
-        from vless_installer.modules.mieru import _gen_client_share_link
+        from chimera.modules.mieru import _gen_client_share_link
         link = _gen_client_share_link("1.2.3.4", 2012, 2022, "tcp", "u", "p")
         self.assertIn("port=2012", link)
         self.assertIn("protocol=TCP", link)
 
     def test_contains_mtu_and_multiplexing(self):
-        from vless_installer.modules.mieru import _gen_client_share_link
+        from chimera.modules.mieru import _gen_client_share_link
         link = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p")
         self.assertIn("mtu=1400", link)
         self.assertIn("multiplexing=MULTIPLEXING_HIGH", link)
@@ -216,14 +216,14 @@ class TestGenClientShareLink(unittest.TestCase):
 
     def test_contains_traffic_pattern(self):
         """Ссылка содержит traffic-pattern= параметр (base64-protobuf)."""
-        from vless_installer.modules.mieru import _gen_client_share_link
+        from chimera.modules.mieru import _gen_client_share_link
         link = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p")
         self.assertIn("traffic-pattern=", link)
 
     def test_traffic_pattern_is_url_encoded(self):
         """base64 padding '=' → '%3D' (URL-safe)."""
-        from vless_installer.modules.mieru import _gen_client_share_link
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru import _gen_client_share_link
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         import urllib.parse
         link = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p",
                                       traffic_preset="medium")
@@ -238,8 +238,8 @@ class TestGenClientShareLink(unittest.TestCase):
 
     def test_default_preset_is_basic(self):
         """Дефолтный traffic_preset='basic' → base64 = GgQIARAK."""
-        from vless_installer.modules.mieru import _gen_client_share_link
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru import _gen_client_share_link
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         import urllib.parse
         link = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p")
         tp_part = [p for p in link.split("&") if p.startswith("traffic-pattern=")][0]
@@ -249,7 +249,7 @@ class TestGenClientShareLink(unittest.TestCase):
 
     def test_different_presets_produce_different_patterns(self):
         """Разные пресеты → разные traffic-pattern значения."""
-        from vless_installer.modules.mieru import _gen_client_share_link
+        from chimera.modules.mieru import _gen_client_share_link
         import urllib.parse
         link_basic = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p",
                                             traffic_preset="basic")
@@ -261,7 +261,7 @@ class TestGenClientShareLink(unittest.TestCase):
 
     def test_nekobox_link_does_not_have_traffic_pattern(self):
         """Nekobox-ссылка не должна содержать traffic-pattern (не поддерживается)."""
-        from vless_installer.modules.mieru import _gen_client_share_link_nekobox
+        from chimera.modules.mieru import _gen_client_share_link_nekobox
         link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "TCP", "u", "p")
         self.assertNotIn("traffic-pattern", link)
 
@@ -273,8 +273,8 @@ class TestGenClientShareLink(unittest.TestCase):
         передачи traffic_preset — всегда дефолт 'basic', даже если админ
         выбрал 'aggressive' на сервере. Клиент и сервер расходились.
         """
-        from vless_installer.modules.mieru import _gen_client_share_link
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru import _gen_client_share_link
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         import urllib.parse
 
         # Генерируем ссылку с aggressive
@@ -292,8 +292,8 @@ class TestGenClientShareLink(unittest.TestCase):
 
     def test_default_uses_basic_when_no_preset_in_state(self):
         """При отсутствии traffic_preset в state — дефолт 'basic'."""
-        from vless_installer.modules.mieru import _gen_client_share_link
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru import _gen_client_share_link
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         import urllib.parse
 
         link = _gen_client_share_link("1.2.3.4", 2012, 2022, "TCP", "u", "p")
@@ -309,18 +309,18 @@ class TestGenClientShareLinkNekobox(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_mierus_url(self):
-        from vless_installer.modules.mieru import _gen_client_share_link_nekobox
+        from chimera.modules.mieru import _gen_client_share_link_nekobox
         link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "TCP", "alice", "pass")
         self.assertTrue(link.startswith("mierus://"))
 
     def test_contains_port_in_host_part(self):
         """Nekobox формат: host:PORT? а не ?port=PORT"""
-        from vless_installer.modules.mieru import _gen_client_share_link_nekobox
+        from chimera.modules.mieru import _gen_client_share_link_nekobox
         link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "tcp", "u", "p")
         self.assertIn("1.2.3.4:2012", link)
 
     def test_contains_transport(self):
-        from vless_installer.modules.mieru import _gen_client_share_link_nekobox
+        from chimera.modules.mieru import _gen_client_share_link_nekobox
         link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "tcp", "u", "p")
         self.assertIn("transport=TCP", link)
 
@@ -332,17 +332,17 @@ class TestIsAmd64(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_x86_64(self):
-        from vless_installer.modules.mieru import _is_amd64
+        from chimera.modules.mieru import _is_amd64
         with patch("platform.machine", return_value="x86_64"):
             self.assertTrue(_is_amd64())
 
     def test_amd64(self):
-        from vless_installer.modules.mieru import _is_amd64
+        from chimera.modules.mieru import _is_amd64
         with patch("platform.machine", return_value="amd64"):
             self.assertTrue(_is_amd64())
 
     def test_aarch64(self):
-        from vless_installer.modules.mieru import _is_amd64
+        from chimera.modules.mieru import _is_amd64
         with patch("platform.machine", return_value="aarch64"):
             self.assertFalse(_is_amd64())
 
@@ -354,13 +354,13 @@ class TestReUsername(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_valid_names(self):
-        from vless_installer.modules.mieru import _RE_USERNAME
+        from chimera.modules.mieru import _RE_USERNAME
         for name in ("alice", "bob123", "user-name", "user_name", "ABC"):
             with self.subTest(name=name):
                 self.assertTrue(_RE_USERNAME.match(name))
 
     def test_invalid_names(self):
-        from vless_installer.modules.mieru import _RE_USERNAME
+        from chimera.modules.mieru import _RE_USERNAME
         for name in ("", "user@name", "user.name", "user name", "пользователь"):
             with self.subTest(name=name):
                 self.assertFalse(_RE_USERNAME.match(name))

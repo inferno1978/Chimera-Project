@@ -2,7 +2,7 @@
 """
 tests/test_ru_subnets.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/ru_subnets.py.
+Unit-тесты для chimera/modules/ru_subnets.py.
 
 Покрывает:
   1. _ru_subnets_save — запись файла подсетей
@@ -26,7 +26,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -36,9 +36,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestRuSubnetsSave(unittest.TestCase):
@@ -54,11 +54,11 @@ class TestRuSubnetsSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.ru_subnets.RU_SUBNETS_FILE",
+        return patch("chimera.modules.ru_subnets.RU_SUBNETS_FILE",
                      self._file)
 
     def test_writes_file_with_header(self):
-        from vless_installer.modules.ru_subnets import _ru_subnets_save
+        from chimera.modules.ru_subnets import _ru_subnets_save
         with self._patch():
             _ru_subnets_save(["10.0.0.0/8", "192.168.0.0/16"])
         content = self._file.read_text()
@@ -66,7 +66,7 @@ class TestRuSubnetsSave(unittest.TestCase):
         self.assertIn("192.168.0.0/16", content)
 
     def test_sorts_cidrs(self):
-        from vless_installer.modules.ru_subnets import _ru_subnets_save
+        from chimera.modules.ru_subnets import _ru_subnets_save
         with self._patch():
             _ru_subnets_save(["192.168.0.0/16", "10.0.0.0/8"])
         content = self._file.read_text()
@@ -87,16 +87,16 @@ class TestRuSubnetsLoadFromFile(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.ru_subnets.RU_SUBNETS_FILE",
+        return patch("chimera.modules.ru_subnets.RU_SUBNETS_FILE",
                      self._file)
 
     def test_returns_empty_when_no_file(self):
-        from vless_installer.modules.ru_subnets import _ru_subnets_load_from_file
+        from chimera.modules.ru_subnets import _ru_subnets_load_from_file
         with self._patch():
             self.assertEqual(_ru_subnets_load_from_file(), [])
 
     def test_loads_cidrs(self):
-        from vless_installer.modules.ru_subnets import _ru_subnets_load_from_file
+        from chimera.modules.ru_subnets import _ru_subnets_load_from_file
         self._file.write_text(
             "# header comment\n"
             "10.0.0.0/8\n"
@@ -108,7 +108,7 @@ class TestRuSubnetsLoadFromFile(unittest.TestCase):
         self.assertIn("10.0.0.0/8", result)
 
     def test_filters_comments(self):
-        from vless_installer.modules.ru_subnets import _ru_subnets_load_from_file
+        from chimera.modules.ru_subnets import _ru_subnets_load_from_file
         self._file.write_text("# only comments\n# another\n")
         with self._patch():
             self.assertEqual(_ru_subnets_load_from_file(), [])
@@ -141,7 +141,7 @@ class TestFetchRuSubnetsFromRipe(unittest.TestCase):
     def test_parses_ipv4_delegated_line(self):
         """RIPE delegated формат: registry|CC|type|start|value|date|status.
         value=256 → prefix = 32 - log2(256) = 32 - 8 = 24 → /24."""
-        from vless_installer.modules import ru_subnets
+        from chimera.modules import ru_subnets
         content = (
             "2.0|ripencc|20260701|KV\n"
             "ripencc|RU|ipv4|10.0.0.0|256|20260101|allocated\n"
@@ -153,7 +153,7 @@ class TestFetchRuSubnetsFromRipe(unittest.TestCase):
 
     def test_parses_ipv6_delegated_line(self):
         """IPv6: value = prefixlen напрямую."""
-        from vless_installer.modules import ru_subnets
+        from chimera.modules import ru_subnets
         content = (
             "2.0|ripencc|20260701|KV\n"
             "ripencc|RU|ipv6|2001:db8::|48|20260101|allocated\n"
@@ -164,7 +164,7 @@ class TestFetchRuSubnetsFromRipe(unittest.TestCase):
         self.assertIn("2001:db8::/48", result)
 
     def test_skips_non_ru(self):
-        from vless_installer.modules import ru_subnets
+        from chimera.modules import ru_subnets
         content = (
             "2.0|ripencc|20260701|KV\n"
             "ripencc|US|ipv4|1.0.0.0|256|20260101|allocated\n"
@@ -177,7 +177,7 @@ class TestFetchRuSubnetsFromRipe(unittest.TestCase):
         self.assertIn("10.0.0.0/24", result)
 
     def test_returns_empty_on_network_error(self):
-        from vless_installer.modules import ru_subnets
+        from chimera.modules import ru_subnets
         with patch.object(ru_subnets, "_core_module", return_value=self._mock_core()), \
              patch("urllib.request.urlopen", side_effect=Exception("network error")):
             result = ru_subnets._fetch_ru_subnets_from_ripe()

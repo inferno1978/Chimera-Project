@@ -1,0 +1,1113 @@
+"""
+chimera/modules/mieru_stats.py
+───────────────────────────────────────────────────────────────────────────────
+Статистика трафика Mieru (mita-сервер).
+
+Mieru не пишет access.log с байтами — поэтому используем несколько
+источников, комбинируя их в единую картину:
+
+Источники данных (без новых демонов, без сторонних зависимостей):
+  • iptables -L INPUT -n -v -x  — байты/пакеты на TCP/UDP-порту mita
+      Это основной и наиболее достоверный источник объёма трафика.
+  • journalctl -u mita           — события соединений, ошибки, warn
+      Парсим строки accepted / closed / error / warning за период.
+  • ss -tnp / ss -unp            — активные соединения (TCP/UDP) на порт
+  • /proc/net/sockstat            — глобальная статистика TCP/UDP сокетов
+  • timedatectl                  — синхронизация NTP (Mieru критично зависит)
+
+Метрики:
+  • Суммарный трафик (байты, пакеты) — iptables INPUT
+  • Скорость (байт/с) между двумя замерами через кэш
+  • Кол-во соединений accepted / closed — из journalctl
+  • Кол-во ошибок / предупреждений — из journalctl
+  • Активных соединений сейчас — ss
+  • Гистограмма активности по 10-мин интервалам (из журнала)
+  • Тренд: рост / спад / стабильно
+  • NTP-статус (отклонение > 30 сек = Mieru не будет принимать клиентов)
+  • Живое обновление каждые 30 сек
+
+Не трогает:
+  • Xray config.json / state.json
+  • iptables-правила других модулей
+  • Конфиги mieru.py
+
+Точка входа из mieru.py:
+    from chimera.modules.mieru_stats import do_mieru_stats_menu
+    do_mieru_stats_menu()
+───────────────────────────────────────────────────────────────────────────────
+"""
+from __future__ import annotations
+
+from chimera.modules.text_width import wlen as _wlen, plain as _plain
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ЦВЕТА — независимые от родительского модуля
+# ══════════════════════════════════════════════════════════════════════════════
+def _detect_colors() -> dict:
+    _light = os.environ.get("VLESS_THEME", "").lower() == "light"
+    if sys.stdout.isatty():
+        if _light:
+            return dict(
+                RED='\033[0;31m', GREEN='\033[0;32m', YELLOW='\033[0;33m',
+                CYAN='\033[0;34m', BLUE='\033[0;35m', BOLD='\033[1m',
+                DIM='\033[2m', WHITE='\033[0;30m', NC='\033[0m',
+            )
+        return dict(
+            RED='\033[0;31m', GREEN='\033[0;32m', YELLOW='\033[1;33m',
+            CYAN='\033[0;36m', BLUE='\033[0;34m', BOLD='\033[1m',
+            DIM='\033[2m', WHITE='\033[1;37m', NC='\033[0m',
+        )
+    return {k: '' for k in ('RED', 'GREEN', 'YELLOW', 'CYAN', 'BLUE', 'BOLD', 'DIM', 'WHITE', 'NC')}
+
+_C = _detect_colors()
+RED    = _C['RED'];   GREEN  = _C['GREEN'];  YELLOW = _C['YELLOW']
+CYAN   = _C['CYAN'];  BLUE   = _C['BLUE'];   BOLD   = _C['BOLD']
+DIM    = _C['DIM'];   WHITE  = _C['WHITE'];  NC     = _C['NC']
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ПУТИ
+# ══════════════════════════════════════════════════════════════════════════════
+_SERVICE_NAME = "mita"
+_MODULE_STATE = Path("/var/lib/xray-installer/mieru.json")
+_STATS_CACHE  = Path("/var/lib/xray-installer/mieru_stats_cache.json")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  BOX-РЕНДЕРИНГ (собственный — в стиле mieru.py)
+# ══════════════════════════════════════════════════════════════════════════════
+import re as _re
+import unicodedata as _ud
+
+
+
+_BOX_W = 66
+
+def _box_top(title: str = "") -> None:
+    print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
+    if title:
+        pad = _BOX_W - _wlen(title); lpad = pad // 2; rpad = pad - lpad
+        print(f"{CYAN}║{NC}{' ' * lpad}{BOLD}{WHITE}{title}{NC}{' ' * rpad}{CYAN}║{NC}")
+        print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
+
+def _box_sep() -> None: print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
+def _box_bot() -> None: print(f"{CYAN}╚{'═' * _BOX_W}╝{NC}")
+
+def _box_row(text: str = "") -> None:
+    w = _wlen(text)
+    if w > _BOX_W:
+        acc, out = 0, ""
+        for ch in _plain(text):
+            cw = 2 if _ud.east_asian_width(ch) in ('W', 'F') else 1
+            if acc + cw > _BOX_W - 1: break
+            out += ch; acc += cw
+        text = out + "…"; w = _wlen(text)
+    pad = max(0, _BOX_W - w)
+    print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
+
+def _box_item(key: str, label: str) -> None:
+    col = RED + BOLD if key.strip().upper() in ("Q", "0") else WHITE + BOLD
+    _box_row(f"  {DIM}[{NC}{col}{key}{NC}{DIM}]{NC}  {label}")
+
+def _box_ok(msg: str)   -> None: _box_row(f"  {GREEN}✓{NC}  {msg}")
+def _box_warn(msg: str) -> None: _box_row(f"  {YELLOW}⚠{NC}  {msg}")
+def _box_info(msg: str) -> None: _box_row(f"  {CYAN}→{NC}  {msg}")
+def _box_err(msg: str)  -> None: _box_row(f"  {RED}✗{NC}  {msg}")
+
+def _box_kv(key: str, val: str, kw: int = 24) -> None:
+    key_col = f"{CYAN}{key}{NC}"
+    pad = kw - _wlen(key_col)
+    _box_row(f"  {key_col}{' ' * max(0, pad)}  {val}")
+
+def _box_log_line(line: str, indent: str = "  ") -> None:
+    """
+    Выводит одну строку лога/дампа (journalctl, iptables, ss, timedatectl),
+    разбивая её максимум на 2 строки бокса, если не помещается целиком —
+    вместо обрезки посередине, которая делала длинные строки нечитаемыми.
+    Вторая строка (продолжение) помечается "↳ " для визуальной связи.
+    """
+    avail_1 = _BOX_W - _wlen(indent)
+    cont_indent = indent + "↳ "
+    avail_2 = _BOX_W - _wlen(cont_indent)
+
+    if _wlen(line) <= avail_1:
+        _box_row(f"{indent}{DIM}{line}{NC}")
+        return
+
+    first_part = line[:avail_1]
+    rest       = line[avail_1:]
+    if _wlen(rest) > avail_2:
+        rest = rest[:max(0, avail_2 - 1)] + "…"
+
+    _box_row(f"{indent}{DIM}{first_part}{NC}")
+    _box_row(f"{cont_indent}{DIM}{rest}{NC}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ВСПОМОГАТЕЛЬНЫЕ
+# ══════════════════════════════════════════════════════════════════════════════
+class _Cancelled(Exception):
+    pass
+
+def _pause() -> None:
+    try:
+        print(f"\n  {DIM}Нажмите Enter...{NC}", end="", flush=True); input()
+    except (KeyboardInterrupt, EOFError):
+        print()
+
+def _ask(prompt: str, default: str = "", c: bool = False) -> str:
+    try:
+        print(prompt, end="", flush=True)
+        val = input().strip()
+        return val if val else default
+    except (EOFError, UnicodeDecodeError):
+        print(); return default
+    except KeyboardInterrupt:
+        print()
+        if c: raise _Cancelled()
+        return default
+
+def _run(cmd: list, capture: bool = False,
+         timeout: int = 10) -> subprocess.CompletedProcess:
+    kw: dict = {}
+    if capture:
+        kw.update(capture_output=True, text=True, encoding="utf-8",
+                  errors="replace", timeout=timeout)
+    else:
+        kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                  timeout=timeout)
+    try:
+        return subprocess.run(cmd, **kw)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="timeout")
+    except Exception:
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="error")
+
+def _bytes_human(b: int) -> str:
+    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+        if b < 1024:
+            return f"{b:.1f} {unit}"
+        b /= 1024
+    return f"{b:.1f} ПБ"
+
+def _load_mieru_state() -> dict:
+    if not _MODULE_STATE.exists(): return {}
+    try: return json.loads(_MODULE_STATE.read_text())
+    except Exception: return {}
+
+def _load_cache() -> dict:
+    try:
+        if _STATS_CACHE.exists():
+            return json.loads(_STATS_CACHE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_cache(data: dict) -> None:
+    try:
+        _STATS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        _STATS_CACHE.write_text(json.dumps(data, ensure_ascii=False))
+    except Exception:
+        pass
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ПОРТЫ: читаем portRange прямо из /etc/mita/server.json
+# ══════════════════════════════════════════════════════════════════════════════
+def _get_mita_ports() -> tuple[int, int]:
+    """
+    Читает portRange из /etc/mita/server.json.
+    Возвращает (port_start, port_end).
+    Поддерживает форматы: "2012", "2012-2022", "2012:2022".
+    """
+    cfg_path = Path("/etc/mita/server.json")
+    try:
+        if cfg_path.exists():
+            data = json.loads(cfg_path.read_text())
+            # portRange может быть в portBindings[0].portRange или верхнем уровне
+            pr = None
+            if "portBindings" in data and data["portBindings"]:
+                pr = data["portBindings"][0].get("portRange", "")
+            if not pr:
+                pr = data.get("portRange", "")
+            if pr:
+                pr = str(pr).strip()
+                for sep in ("-", ":"):
+                    if sep in pr:
+                        parts = pr.split(sep, 1)
+                        return int(parts[0]), int(parts[1])
+                return int(pr), int(pr)
+    except Exception:
+        pass
+    return 2012, 2022
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  IPTABLES: создаём счётчик на диапазон портов mita если его нет
+# ══════════════════════════════════════════════════════════════════════════════
+def _ensure_iptables_rule(port_start: int, port_end: int, proto: str) -> bool:
+    """
+    Гарантирует ровно одно iptables-правило-счётчик для mita.
+    Использует iptables -C (check) для проверки и -D в цикле для удаления дублей.
+    Правило с mita-stats уже существует и накопило трафик — НЕ пересоздаём.
+    """
+    import subprocess as _sp
+
+    p = proto.lower()
+    dport_arg = str(port_start) if port_start == port_end else f"{port_start}:{port_end}"
+
+    # Базовые аргументы правила (без -I/-D/-C)
+    rule_args = [
+        "-p", p,
+        "--dport", dport_arg,
+        "-j", "ACCEPT",
+        "-m", "comment", "--comment", "mita-stats"
+    ]
+
+    try:
+        # iptables -C INPUT: returncode=0 если правило существует
+        chk = _sp.run(
+            ["iptables", "-C", "INPUT"] + rule_args,
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
+        )
+        if chk.returncode == 0:
+            # Правило есть. Проверяем нет ли дублей — считаем через -L
+            r_list = _sp.run(
+                ["iptables", "-L", "INPUT", "-n", "-v", "-x"],
+                capture_output=True, text=True
+            )
+            check_str = (f"dpts:{port_start}:{port_end}"
+                         if port_start != port_end else f"dpt:{port_start}")
+            count = sum(
+                1 for line in r_list.stdout.splitlines()
+                if p in line.lower() and check_str in line
+            )
+            if count <= 1:
+                return True  # ровно одно правило — всё хорошо, не трогаем счётчик
+            # Дубли: удаляем все, потом создадим одно
+        # Удаляем ВСЕ вхождения через -D в цикле (каждый -D удаляет одно)
+        for _ in range(30):
+            d = _sp.run(
+                ["iptables", "-D", "INPUT"] + rule_args,
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
+            )
+            if d.returncode != 0:
+                break  # больше нет
+
+        # Добавляем одно чистое правило
+        add = _sp.run(
+            ["iptables", "-I", "INPUT", "1"] + rule_args,
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
+        )
+        return add.returncode == 0
+    except Exception:
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ИСТОЧНИК 1: iptables — байты/пакеты
+# ══════════════════════════════════════════════════════════════════════════════
+def _iptables_stats(port_start: int, port_end: int, proto: str) -> dict:
+    """
+    Читает счётчики байт и пакетов из iptables INPUT для правила mita.
+    Возвращает {bytes, packets}.
+    proto: TCP или UDP.
+    """
+    result = {"bytes": 0, "packets": 0}
+    try:
+        r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x"], capture=True)
+        # Суммируем все строки с нашим портом (на случай временных дублей)
+        for line in r.stdout.splitlines():
+            lp = line.lower()
+            # Ищем строку с нашим протоколом и портом
+            if proto.lower() not in lp:
+                continue
+            # Диапазон портов: iptables пишет dpts:start:end (с 's')
+            # Одиночный порт: dpt:XXXX (без 's')
+            if port_start != port_end:
+                if f"dpts:{port_start}:{port_end}" not in line and \
+                   f"dpt:{port_start}:{port_end}" not in line and \
+                   f"dport {port_start}:{port_end}" not in line:
+                    continue
+            else:
+                if f"dpt:{port_start}" not in line and \
+                   f"dport {port_start}" not in line:
+                    continue
+            parts = line.split()
+            # Формат iptables -vnxL: pkts bytes target prot ...
+            if len(parts) >= 2:
+                try:
+                    result["packets"] += int(parts[0])
+                    result["bytes"]   += int(parts[1])
+                except (ValueError, IndexError):
+                    pass
+    except Exception:
+        pass
+    return result
+
+def _iptables_speed(port_start: int, port_end: int, proto: str) -> dict:
+    """
+    Возвращает {bytes, packets, speed_bps, speed_pps} используя кэш.
+    """
+    now_ts = time.time()
+    cache  = _load_cache()
+    prev_ts    = cache.get("mita_ipt_ts", now_ts)
+    prev_bytes = cache.get("mita_ipt_bytes", 0)
+
+    stats   = _iptables_stats(port_start, port_end, proto)
+    elapsed = max(now_ts - prev_ts, 1.0)
+    delta_b = max(stats["bytes"] - prev_bytes, 0)
+    speed_b = delta_b / elapsed
+
+    cache.update(
+        mita_ipt_ts=now_ts,
+        mita_ipt_bytes=stats["bytes"],
+    )
+    _save_cache(cache)
+
+    return {
+        "bytes":     stats["bytes"],
+        "packets":   stats["packets"],
+        "speed_bps": speed_b,
+    }
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ИСТОЧНИК 2: journalctl — metrics mita
+# ══════════════════════════════════════════════════════════════════════════════
+# mita пишет метрики каждые 10 минут в формате:
+#   INFO [metrics - connections] ActiveOpens=N CurrEstablished=N PassiveOpens=N
+#   INFO [metrics - traffic] DownloadBytes=N OutputPaddingBytes=N UploadBytes=N
+#   INFO [metrics - underlay] ActiveOpens=N CurrEstablished=N MaxConn=N PassiveOpens=N
+#   INFO [metrics - user - USERNAME] DownloadBytes=N UploadBytes=N
+#   INFO [metrics - cipher - server] DirectDecrypt=N FailedDirectDecrypt=N ...
+#   INFO [metrics - replay] KnownSession=N NewSession=N NewSessionDecrypted=N
+#   ERROR / WARNING — отдельные строки
+
+_RE_METRICS_CONN    = re.compile(r"\[metrics\s*-\s*connections\].*?ActiveOpens=(\d+).*?CurrEstablished=(\d+).*?PassiveOpens=(\d+)", re.I)
+_RE_METRICS_TRAFFIC = re.compile(r"\[metrics\s*-\s*traffic\].*?DownloadBytes=(\d+).*?UploadBytes=(\d+)", re.I)
+_RE_METRICS_UNDERLAY= re.compile(r"\[metrics\s*-\s*underlay\].*?CurrEstablished=(\d+).*?MaxConn=(\d+).*?PassiveOpens=(\d+)", re.I)
+_RE_METRICS_USER    = re.compile(r"\[metrics\s*-\s*user\s*-\s*([^\]]+)\].*?DownloadBytes=(\d+).*?UploadBytes=(\d+)", re.I)
+_RE_METRICS_REPLAY  = re.compile(r"\[metrics\s*-\s*replay\].*?KnownSession=(\d+).*?NewSession=(\d+)", re.I)
+_RE_AUTH_FAIL       = re.compile(r"FailedDirectDecrypt=(\d+)|FailedHintMatchDecrypt=(\d+)|timestamp.*mismatch|replay", re.I)
+_RE_ERROR           = re.compile(r"\berror\b|\bfatal\b|\bpanic\b", re.I)
+_RE_WARN            = re.compile(r"\bwarn(ing)?\b", re.I)
+
+
+def _parse_kv(line: str) -> dict:
+    """Парсит строку вида Key1=Val1 Key2=Val2 в словарь."""
+    return {m.group(1): m.group(2) for m in re.finditer(r"(\w+)=(\d+)", line)}
+
+
+def _parse_journal(window_minutes: int = 60) -> dict:
+    """
+    Парсит journalctl -u mita за последние window_minutes минут.
+    mita пишет агрегированные метрики каждые 10 мин — берём последний снимок.
+    """
+    result = {
+        # connections (из последнего [metrics - connections])
+        "active_opens":       0,   # новых TCP-соединений за период
+        "curr_established":   0,   # сейчас активных
+        "passive_opens":      0,   # входящих соединений всего
+        # traffic (из последнего [metrics - traffic], байты)
+        "download_bytes":     0,
+        "upload_bytes":       0,
+        "padding_bytes":      0,
+        # underlay
+        "underlay_curr":      0,
+        "underlay_max":       0,
+        # per-user: {username: {dl, ul}}
+        "users":              {},
+        # replay / auth
+        "known_sessions":     0,
+        "new_sessions":       0,
+        "auth_fail":          0,   # FailedDirectDecrypt суммарно
+        # errors/warnings из нон-metrics строк
+        "errors":             0,
+        "warnings":           0,
+        "recent_errors":      [],
+        # гистограмма по слотам (активность = PassiveOpens delta между снимками)
+        "slots":              {},
+        "raw_lines":          0,
+        # обратная совместимость с UI-кодом
+        "accepted":           0,   # = passive_opens (псевдоним)
+        "closed":             0,
+    }
+    slots: dict = defaultdict(lambda: {"accepted": 0, "errors": 0, "warnings": 0})
+
+    since = (datetime.now() - timedelta(minutes=window_minutes)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    try:
+        r = _run(
+            ["journalctl", "-u", _SERVICE_NAME,
+             "--since", since,
+             "--no-pager", "--output=short-iso",
+             "-n", "5000"],
+            capture=True, timeout=15,
+        )
+        lines = r.stdout.splitlines()
+        result["raw_lines"] = len(lines)
+
+        prev_passive = None   # для дельты PassiveOpens между снимками
+
+        for line in lines:
+            # Временной слот для гистограммы — храним полный sortable key
+            # (дата+час+10-мин интервал), а не голое HH:MM, чтобы сортировка
+            # не ломалась на переходе через полночь (23:50 после 00:30)
+            slot = None
+            m_ts = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})", line)
+            if m_ts:
+                try:
+                    dt = datetime.fromisoformat(m_ts.group(1))
+                    rounded_min = (dt.minute // 10) * 10
+                    slot = dt.replace(minute=rounded_min, second=0,
+                                      microsecond=0).strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    pass
+
+            # ── [metrics - connections] ───────────────────────────────────────
+            m = _RE_METRICS_CONN.search(line)
+            if m:
+                active  = int(m.group(1))
+                curr    = int(m.group(2))
+                passive = int(m.group(3))
+                result["active_opens"]     = active
+                result["curr_established"] = curr
+                result["passive_opens"]    = passive
+                result["accepted"]         = passive  # псевдоним для UI
+                # Дельта PassiveOpens → активность в слоте
+                if slot and prev_passive is not None and passive > prev_passive:
+                    slots[slot]["accepted"] += passive - prev_passive
+                prev_passive = passive
+                continue
+
+            # ── [metrics - traffic] ───────────────────────────────────────────
+            m = _RE_METRICS_TRAFFIC.search(line)
+            if m:
+                result["download_bytes"] = int(m.group(1))
+                result["upload_bytes"]   = int(m.group(2))
+                kv = _parse_kv(line)
+                result["padding_bytes"]  = int(kv.get("OutputPaddingBytes", 0))
+                continue
+
+            # ── [metrics - underlay] ──────────────────────────────────────────
+            m = _RE_METRICS_UNDERLAY.search(line)
+            if m:
+                result["underlay_curr"] = int(m.group(1))
+                result["underlay_max"]  = int(m.group(2))
+                continue
+
+            # ── [metrics - user - NAME] ───────────────────────────────────────
+            m = _RE_METRICS_USER.search(line)
+            if m:
+                uname = m.group(1).strip()
+                dl    = int(m.group(2))
+                ul    = int(m.group(3))
+                result["users"][uname] = {"download": dl, "upload": ul}
+                continue
+
+            # ── [metrics - replay] ────────────────────────────────────────────
+            m = _RE_METRICS_REPLAY.search(line)
+            if m:
+                result["known_sessions"] = int(m.group(1))
+                result["new_sessions"]   = int(m.group(2))
+                continue
+
+            # ── FailedDirectDecrypt (из cipher-строки) ────────────────────────
+            if "[metrics - cipher" in line:
+                kv = _parse_kv(line)
+                failed = int(kv.get("FailedDirectDecrypt", 0)) + \
+                         int(kv.get("FailedHintMatchDecrypt", 0))
+                if failed:
+                    result["auth_fail"] += failed
+                continue
+
+            # ── Обычные ERROR / WARNING (не metrics) ──────────────────────────
+            if _RE_ERROR.search(line):
+                result["errors"] += 1
+                if slot:
+                    slots[slot]["errors"] += 1
+                if len(result["recent_errors"]) < 5:
+                    msg = re.sub(r"^\S+\s+\S+\s+\S+:\s*", "", line)
+                    result["recent_errors"].append(msg[:80])
+            elif _RE_WARN.search(line):
+                result["warnings"] += 1
+                if slot:
+                    slots[slot]["warnings"] += 1
+
+    except Exception:
+        pass
+
+    result["slots"] = dict(slots)
+    return result
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ИСТОЧНИК 3: ss — активные соединения
+# ══════════════════════════════════════════════════════════════════════════════
+def _active_connections(port_start: int, port_end: int, proto: str) -> int:
+    """Считает активные TCP/UDP соединения на диапазон портов."""
+    total = 0
+    try:
+        flag = "-tn" if proto.upper() == "TCP" else "-un"
+        r = _run(["ss", flag, "state", "established"], capture=True)
+        for line in r.stdout.splitlines():
+            if "Recv-Q" in line or "State" in line:
+                continue
+            # Ищем порт в Local Address или Peer Address
+            m = re.search(r':(\d+)\s', line)
+            if m:
+                p = int(m.group(1))
+                if port_start <= p <= port_end:
+                    total += 1
+    except Exception:
+        pass
+    return total
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ИСТОЧНИК 4: NTP статус
+# ══════════════════════════════════════════════════════════════════════════════
+def _ntp_status() -> tuple[bool, str, float]:
+    """
+    Возвращает (is_synced, description, offset_ms).
+    offset_ms — отклонение в миллисекундах (если доступно).
+    """
+    # timedatectl
+    try:
+        r = _run(["timedatectl", "status"], capture=True)
+        out = r.stdout or ""
+        synced = "synchronized: yes" in out or "NTP synchronized: yes" in out
+        # Попытка извлечь offset из chronyc
+        offset_ms = 0.0
+        r2 = _run(["chronyc", "tracking"], capture=True)
+        if r2.returncode == 0:
+            m = re.search(r"System time\s*:\s*([\d.]+)\s*seconds\s*(slow|fast)", r2.stdout)
+            if m:
+                offset_ms = float(m.group(1)) * 1000
+                direction = m.group(2)
+                if direction == "fast":
+                    offset_ms = -offset_ms
+        if synced:
+            if offset_ms:
+                return True, f"синхронизирован ({offset_ms:+.0f} мс)", offset_ms
+            return True, "синхронизирован (NTP)", 0.0
+        return False, "НЕ синхронизирован!", 0.0
+    except Exception:
+        pass
+    return True, "статус неизвестен", 0.0
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ГИСТОГРАММА (из journal-слотов)
+# ══════════════════════════════════════════════════════════════════════════════
+def _render_histogram(slots: dict) -> None:
+    if not slots:
+        _box_row(f"  {DIM}Нет данных для гистограммы{NC}")
+        return
+
+    # Ключи теперь "YYYY-MM-DD HH:MM" — сортировка строкой = сортировка по времени
+    keys    = sorted(slots.keys())
+    max_acc = max((slots[k]["accepted"] for k in keys), default=1) or 1
+    bar_w   = 24
+
+    _box_row(f"  {BOLD}{CYAN}{'Время':<7}  {'Принято':>7}  {'Ошибок':>6}  {'Предупр':>7}  График{NC}")
+    _box_sep()
+    for slot in keys:
+        acc  = slots[slot]["accepted"]
+        err  = slots[slot]["errors"]
+        wrn  = slots[slot].get("warnings", 0)
+        ok_w = int(acc / max_acc * bar_w) if max_acc else 0
+        er_w = min(int(err / max(max_acc, 1) * bar_w), bar_w - ok_w)
+        bar  = f"{GREEN}{'█' * ok_w}{NC}{RED}{'▓' * er_w}{NC}"
+        err_s = f"{RED}{err:>6}{NC}" if err else f"{DIM}{err:>6}{NC}"
+        wrn_s = f"{YELLOW}{wrn:>7}{NC}" if wrn else f"{DIM}{wrn:>7}{NC}"
+        # Отображаем только время (HH:MM) — дата отбрасывается визуально
+        time_label = slot.split(" ")[-1] if " " in slot else slot
+        _box_row(f"  {DIM}{time_label:<7}{NC}  {GREEN}{acc:>7}{NC}  {err_s}  {wrn_s}  {bar}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТРЕНД соединений
+# ══════════════════════════════════════════════════════════════════════════════
+def _calc_trend(slots: dict) -> str:
+    keys = sorted(slots.keys())
+    if len(keys) < 3:
+        return f"{DIM}недостаточно данных{NC}"
+    recent = keys[-2:]
+    older  = keys[-4:-2] if len(keys) >= 4 else keys[:2]
+
+    def avg_acc(ks: list) -> float:
+        vals = [slots[k]["accepted"] for k in ks if k in slots]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    r = avg_acc(recent)
+    o = avg_acc(older)
+    if o == 0 and r == 0:
+        return f"{DIM}нет активности{NC}"
+    if o == 0:
+        return f"{GREEN}↑ растёт{NC}"
+    ratio = r / o
+    if ratio >= 1.3:
+        return f"{GREEN}↑ рост активности{NC}"
+    elif ratio <= 0.7:
+        return f"{YELLOW}↓ спад активности{NC}"
+    return f"{CYAN}→ стабильно{NC}"
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ОТОБРАЖЕНИЕ ПОЛНОЙ СТАТИСТИКИ
+# ══════════════════════════════════════════════════════════════════════════════
+def _show_stats(window_minutes: int = 60) -> None:
+    os.system("clear")
+    state      = _load_mieru_state()
+    # Читаем порты прямо из /etc/mita/server.json (приоритет над state)
+    port_start, port_end = _get_mita_ports()
+    # Фоллбэк на state только если конфиг не читается
+    if port_start == 2012 and port_end == 2022 and             "port_start" in state:
+        port_start = state.get("port_start", 2012)
+        port_end   = state.get("port_end",   2022)
+    proto      = state.get("protocol",   "TCP")
+    users      = state.get("users", [])
+    version    = state.get("version", "—")
+    # Гарантируем наличие iptables-счётчика для диапазона портов mita
+    _ensure_iptables_rule(port_start, port_end, proto)
+
+    port_str = str(port_start) if port_start == port_end else f"{port_start}-{port_end}"
+
+    _box_top(f"📊  MIERU — СТАТИСТИКА  ({window_minutes} мин)")
+    _box_row()
+
+    # ── Сервис ────────────────────────────────────────────────────────────────
+    r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
+    svc_ok = r.stdout.strip() == "active"
+    _box_kv("Сервис:",
+            f"{GREEN}● активен{NC}" if svc_ok else f"{RED}● остановлен{NC}")
+    _box_kv("Версия:", version)
+    _box_kv("Порт(ы):", f"{YELLOW}{port_str}/{proto}{NC}")
+    _box_kv("Пользователей:", str(len(users)))
+
+    # ── NTP ───────────────────────────────────────────────────────────────────
+    ntp_ok, ntp_desc, ntp_off = _ntp_status()
+    ntp_col = GREEN if ntp_ok else RED
+    _box_kv("NTP:",
+            f"{ntp_col}{ntp_desc}{NC}")
+    if not ntp_ok:
+        _box_warn("Mieru НЕ будет принимать клиентов без синхронизации времени!")
+    elif abs(ntp_off) > 15000:
+        _box_warn(f"Отклонение NTP {ntp_off:+.0f} мс — близко к лимиту ±30 сек!")
+
+    _box_sep()
+
+    # ── iptables (байты + скорость) ───────────────────────────────────────────
+    _box_row(f"  {BOLD}{WHITE}Трафик (iptables):{NC}")
+    _box_row()
+    ipt = _iptables_speed(port_start, port_end, proto)
+    _box_kv("  Всего байт:",   f"{YELLOW}{_bytes_human(ipt['bytes'])}{NC}")
+    _box_kv("  Всего пакетов:", f"{DIM}{ipt['packets']:,}{NC}")
+    speed_kbps = ipt["speed_bps"] * 8 / 1000
+    speed_col  = GREEN if speed_kbps >= 1 else DIM
+    _box_kv("  Скорость:",
+            f"{speed_col}{speed_kbps:.1f} кбит/с{NC}")
+
+    if ipt["bytes"] == 0:
+        _box_warn("iptables-счётчик ещё не накопил трафик — правило создано автоматически.")
+        grep_arg = str(port_start) if port_start == port_end else f"{port_start}:{port_end}"
+        _box_info(f"Для проверки: iptables -L INPUT -n -v -x | grep {grep_arg}")
+
+    # ── Активные соединения ───────────────────────────────────────────────────
+    active = _active_connections(port_start, port_end, proto)
+    _box_kv("  Активных соед.:", f"{CYAN}{active}{NC}")
+
+    _box_sep()
+
+    # ── journalctl metrics ────────────────────────────────────────────────────
+    jnl = _parse_journal(window_minutes)
+
+    # ── Connections (из metrics) ──────────────────────────────────────────────
+    _box_row(f"  {BOLD}{WHITE}Соединения (metrics, последний снимок):{NC}")
+    _box_row()
+    _box_kv("  Активных открыто:",   f"{GREEN}{jnl['active_opens']}{NC}")
+    _box_kv("  Установлено сейчас:", f"{CYAN}{jnl['curr_established']}{NC}")
+    _box_kv("  Входящих всего:",     f"{DIM}{jnl['passive_opens']}{NC}")
+    _box_kv("  Underlay-соед.:",
+            f"{DIM}{jnl['underlay_curr']} / max {jnl['underlay_max']}{NC}")
+    if jnl["known_sessions"] or jnl["new_sessions"]:
+        _box_kv("  Сессий (replay):",
+                f"{DIM}known={jnl['known_sessions']} new={jnl['new_sessions']}{NC}")
+
+    # ── Traffic from metrics ──────────────────────────────────────────────────
+    if jnl["download_bytes"] or jnl["upload_bytes"]:
+        _box_sep()
+        _box_row(f"  {BOLD}{WHITE}Трафик mita (metrics, нарастающий итог):{NC}")
+        _box_row()
+        _box_kv("  Получено (↓):", f"{GREEN}{_bytes_human(jnl['download_bytes'])}{NC}")
+        _box_kv("  Отправлено (↑):", f"{YELLOW}{_bytes_human(jnl['upload_bytes'])}{NC}")
+        if jnl["padding_bytes"]:
+            _box_kv("  Padding:", f"{DIM}{_bytes_human(jnl['padding_bytes'])}{NC}")
+
+    # ── Per-user traffic ──────────────────────────────────────────────────────
+    if jnl["users"]:
+        _box_sep()
+        _box_row(f"  {BOLD}{WHITE}Трафик по пользователям:{NC}")
+        _box_row()
+        _box_row(f"  {BOLD}{CYAN}{'Пользователь':<20}  {'Получено':>10}  {'Отправлено':>10}{NC}")
+        _box_sep()
+        for uname, udata in sorted(jnl["users"].items(),
+                                   key=lambda x: x[1]["download"], reverse=True):
+            _box_row(f"  {CYAN}{uname:<20}{NC}  "
+                     f"{GREEN}{_bytes_human(udata['download']):>10}{NC}  "
+                     f"{YELLOW}{_bytes_human(udata['upload']):>10}{NC}")
+
+    # ── Auth / errors ─────────────────────────────────────────────────────────
+    _box_sep()
+    _box_row(f"  {BOLD}{WHITE}Ошибки и авторизация:{NC}")
+    _box_row()
+    _box_kv("  Ошибок:",
+            f"{RED}{jnl['errors']}{NC}" if jnl['errors'] else f"{DIM}0{NC}")
+    _box_kv("  Предупреждений:",
+            f"{YELLOW}{jnl['warnings']}{NC}" if jnl['warnings'] else f"{DIM}0{NC}")
+    if jnl['auth_fail']:
+        _box_kv("  Сбоев расшифровки:",
+                f"{RED}{jnl['auth_fail']}{NC}  {DIM}(FailedDecrypt/replay){NC}")
+    _box_kv("  Строк в журнале:", f"{DIM}{jnl['raw_lines']}{NC}")
+
+    # ── Гистограмма ───────────────────────────────────────────────────────────
+    if jnl["slots"]:
+        _box_sep()
+        _box_row(f"  {BOLD}{WHITE}Активность (дельта PassiveOpens по 10-мин):{NC}")
+        _box_row()
+        _render_histogram(jnl["slots"])
+        _box_row()
+
+    # ── Последние ошибки ──────────────────────────────────────────────────────
+    if jnl["recent_errors"]:
+        _box_sep()
+        _box_row(f"  {BOLD}{WHITE}Последние ошибки:{NC}")
+        _box_row()
+        for msg in jnl["recent_errors"]:
+            _box_row(f"  {RED}✗{NC}  {DIM}{msg}{NC}")
+
+    # ── Рекомендация ──────────────────────────────────────────────────────────
+    _box_sep()
+    if not svc_ok:
+        _box_err("Сервис mita не запущен — статистика неактуальна.")
+        _box_info("Запустите: systemctl start mita")
+    elif jnl["auth_fail"] > 5:
+        _box_warn(f"Обнаружено {jnl['auth_fail']} сбоев расшифровки.")
+        _box_info("Причина: расхождение времени клиент/сервер > 30 сек (replay).")
+        _box_info("Проверьте NTP на клиенте и сервере.")
+    elif jnl["errors"] > 0 and jnl["curr_established"] == 0:
+        _box_warn("Есть ошибки, соединений нет.")
+    elif ipt["bytes"] == 0 and jnl["curr_established"] == 0:
+        _box_info("Активности нет — сервис готов к подключениям.")
+    else:
+        _box_ok("Сервис работает штатно.")
+
+    _box_bot()
+    _pause()
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ЖИВОЕ ОБНОВЛЕНИЕ
+# ══════════════════════════════════════════════════════════════════════════════
+def _show_live(interval: int = 30) -> None:
+    """Выводит краткую сводку каждые interval секунд. Ctrl+C — выход."""
+    state      = _load_mieru_state()
+    port_start, port_end = _get_mita_ports()
+    if port_start == 2012 and port_end == 2022 and "port_start" in state:
+        port_start = state.get("port_start", 2012)
+        port_end   = state.get("port_end",   2022)
+    proto      = state.get("protocol",   "TCP")
+    _ensure_iptables_rule(port_start, port_end, proto)
+
+    print(f"\n  {CYAN}Живое обновление — Ctrl+C для выхода{NC}\n")
+    try:
+        while True:
+            os.system("clear")
+            now_str = datetime.now().strftime("%H:%M:%S")
+
+            _box_top(f"📡  MIERU — LIVE  [{now_str}]")
+            _box_row()
+
+            r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
+            svc_ok = r.stdout.strip() == "active"
+            _box_kv("Сервис:",
+                    f"{GREEN}● активен{NC}" if svc_ok else f"{RED}● остановлен{NC}")
+
+            # NTP (быстрая проверка)
+            ntp_ok, ntp_desc, _ = _ntp_status()
+            _box_kv("NTP:", f"{'✓' if ntp_ok else '✗'}  {DIM}{ntp_desc}{NC}")
+
+            ipt = _iptables_speed(port_start, port_end, proto)
+            _box_kv("Трафик (iptables):", f"{YELLOW}{_bytes_human(ipt['bytes'])}{NC}")
+            speed_kbps = ipt["speed_bps"] * 8 / 1000
+            _box_kv("Скорость:", f"{GREEN}{speed_kbps:.1f} кбит/с{NC}")
+
+            active = _active_connections(port_start, port_end, proto)
+            _box_kv("Активных соед.:", f"{CYAN}{active}{NC}")
+
+            _box_sep()
+
+            # Метрики mita: окно шире 5 мин, т.к. снимки пишутся раз в 10 мин
+            jnl5 = _parse_journal(15)
+            _box_row(f"  {BOLD}{WHITE}Последний снимок metrics:{NC}")
+            _box_row()
+            _box_kv("  Установлено сейчас:", f"{CYAN}{jnl5['curr_established']}{NC}")
+            _box_kv("  Входящих всего:",     f"{DIM}{jnl5['passive_opens']}{NC}")
+            if jnl5["download_bytes"] or jnl5["upload_bytes"]:
+                _box_kv("  ↓ / ↑ (итого):",
+                        f"{GREEN}{_bytes_human(jnl5['download_bytes'])}{NC} / "
+                        f"{YELLOW}{_bytes_human(jnl5['upload_bytes'])}{NC}")
+            _box_kv("  Ошибок:",
+                    f"{RED}{jnl5['errors']}{NC}" if jnl5['errors'] else f"{DIM}0{NC}")
+            _box_kv("  Предупреждений:",
+                    f"{YELLOW}{jnl5['warnings']}{NC}" if jnl5['warnings'] else f"{DIM}0{NC}")
+
+            if jnl5["recent_errors"]:
+                _box_sep()
+                _box_row(f"  {RED}Последняя ошибка:{NC}")
+                _box_row(f"  {DIM}{jnl5['recent_errors'][-1]}{NC}")
+
+            _box_sep()
+            _box_row(f"  {DIM}Обновление через {interval} сек...  Ctrl+C — выход{NC}")
+            _box_bot()
+
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  СБРОС КЭША
+# ══════════════════════════════════════════════════════════════════════════════
+def _reset_cache() -> None:
+    try:
+        if _STATS_CACHE.exists():
+            _STATS_CACHE.unlink()
+        print(f"\n  {GREEN}✓{NC}  Кэш сброшен.")
+    except Exception as e:
+        print(f"\n  {RED}✗{NC}  Ошибка: {e}")
+    _pause()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ИНТЕГРАЦИЯ С traffic_accounting (baseline-offset для переживания рестарта)
+# ══════════════════════════════════════════════════════════════════════════════
+def mieru_collect_traffic() -> dict:
+    """
+    Собирает raw bytes из journalctl [metrics - user - NAME] и feed'ит
+    в traffic_accounting.record_traffic_sample() с baseline-offset.
+
+    Защищает от сброса счётчика при `systemctl restart mita` или reboot —
+    накопленный трафик сохраняется в state.json.
+
+    ИСТОЧНИК ДАННЫХ:
+      journalctl -u mita → [metrics - user - NAME] DownloadBytes=N UploadBytes=N
+      Это монотонно растущие cumulative counters с момента старта процесса mita
+      (стандартное поведение Go-метрик в mita). Сбрасываются ТОЛЬКО при
+      `systemctl restart mita` — именно этот случай обрабатывает baseline-offset.
+
+    Returns:
+      dict — {username: accumulated_bytes} для всех пользователей mieru.
+      username берётся из journalctl [metrics - user - NAME] если доступен,
+      иначе используется "_global_" (суммарный трафик mita из iptables).
+    """
+    try:
+        from chimera.modules.traffic_accounting import record_traffic_sample
+    except Exception:
+        return {}
+
+    # Пытаемся получить per-user из journalctl
+    per_user = {}
+    try:
+        journal = _parse_journal(window_minutes=60)
+        users = journal.get("users", {})
+        # _parse_journal кладёт {"download": dl, "upload": ul} per-user
+        # (см. mieru_stats.py:513). НЕ "rx"/"tx" — это была ошибка.
+        for username, ustats in users.items():
+            user_bytes = ustats.get("download", 0) + ustats.get("upload", 0)
+            per_user[username] = user_bytes
+    except Exception:
+        pass
+
+    result = {}
+    if per_user:
+        # Per-user из journal — feed каждого
+        for username, raw in per_user.items():
+            accumulated = record_traffic_sample(username, "mieru", raw)
+            result[username] = accumulated
+    else:
+        # Fallback на global счётчик из iptables (TCP+UDP порты mita)
+        try:
+            port_start, port_end = _get_mita_ports()
+            raw_total = 0
+            for proto in ("tcp", "udp"):
+                try:
+                    stats = _iptables_stats(port_start, port_end, proto.upper())
+                    raw_total += stats.get("bytes", 0)
+                except Exception:
+                    pass
+            accumulated = record_traffic_sample("_global_", "mieru", raw_total)
+            result["_global_"] = accumulated
+        except Exception:
+            pass
+
+    return result
+
+
+def mieru_get_traffic_accumulated(username: str) -> int:
+    """
+    Возвращает накопленный трафик mieru для пользователя.
+    Не делает новый снимок — читает из state.
+
+    Args:
+      username: имя пользователя mieru (или "_global_")
+
+    Returns:
+      int — accumulated bytes (или 0)
+    """
+    try:
+        from chimera.modules.traffic_accounting import get_accumulated_bytes
+        return get_accumulated_bytes(username, "mieru")
+    except Exception:
+        return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ДИАГНОСТИКА (отдельная страница)
+# ══════════════════════════════════════════════════════════════════════════════
+def _show_diagnostics() -> None:
+    """Детальная диагностика: iptables, ss, NTP, последние 50 строк журнала."""
+    os.system("clear")
+    state      = _load_mieru_state()
+    port_start, port_end = _get_mita_ports()
+    if port_start == 2012 and port_end == 2022 and "port_start" in state:
+        port_start = state.get("port_start", 2012)
+        port_end   = state.get("port_end",   2022)
+    proto      = state.get("protocol",   "TCP")
+    port_str   = str(port_start) if port_start == port_end else f"{port_start}-{port_end}"
+
+    _box_top("🔍  MIERU — ДИАГНОСТИКА")
+    _box_row()
+    _box_kv("Порт(ы):", f"{YELLOW}{port_str}/{proto}{NC}")
+    _box_sep()
+
+    # ── iptables dump ─────────────────────────────────────────────────────────
+    _box_row(f"  {BOLD}{WHITE}iptables INPUT (все правила на порт {port_start}):{NC}")
+    _box_row()
+    try:
+        r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x", "--line-numbers"],
+                 capture=True)
+        found = False
+        for line in r.stdout.splitlines():
+            if str(port_start) in line or "Chain" in line or "pkts" in line:
+                _box_log_line(line)
+                found = True
+        if not found:
+            _box_warn("Правило для порта не найдено в iptables INPUT.")
+    except Exception as e:
+        _box_err(f"iptables ошибка: {e}")
+
+    # ── ss dump ───────────────────────────────────────────────────────────────
+    _box_sep()
+    _box_row(f"  {BOLD}{WHITE}ss — соединения на порт {port_str}:{NC}")
+    _box_row()
+    try:
+        flag = "-tnp" if proto.upper() == "TCP" else "-unp"
+        r = _run(["ss", flag], capture=True)
+        found = False
+        for line in r.stdout.splitlines():
+            if str(port_start) in line or "Recv-Q" in line:
+                _box_log_line(line)
+                found = True
+        if not found:
+            _box_info("Активных соединений нет.")
+    except Exception as e:
+        _box_err(f"ss ошибка: {e}")
+
+    # ── NTP подробно ──────────────────────────────────────────────────────────
+    _box_sep()
+    _box_row(f"  {BOLD}{WHITE}timedatectl status:{NC}")
+    _box_row()
+    try:
+        r = _run(["timedatectl", "status"], capture=True)
+        for line in r.stdout.splitlines():
+            _box_log_line(line)
+    except Exception:
+        _box_err("timedatectl недоступен")
+
+    # ── Последние 50 строк журнала ────────────────────────────────────────────
+    _box_sep()
+    _box_row(f"  {BOLD}{WHITE}journalctl -u mita (последние 50 строк):{NC}")
+    _box_row()
+    try:
+        r = subprocess.run(
+            ["journalctl", "-u", _SERVICE_NAME, "-n", "50",
+             "--no-pager", "--output=short-monotonic"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env={**os.environ, "LANG": "C.UTF-8"},
+        )
+        for line in (r.stdout or "Нет записей").splitlines():
+            _box_log_line(line)
+    except Exception as e:
+        _box_err(f"journalctl ошибка: {e}")
+
+    _box_bot()
+    _pause()
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ГЛАВНОЕ МЕНЮ
+# ══════════════════════════════════════════════════════════════════════════════
+def do_mieru_stats_menu() -> None:
+    """
+    Точка входа — вызывается из do_mieru_menu() в mieru.py.
+    """
+    while True:
+        os.system("clear")
+        _box_top("📊  MIERU — СТАТИСТИКА ТРАФИКА")
+        _box_row()
+        _box_info("Источники: iptables-счётчики, journalctl, ss, timedatectl")
+        _box_row()
+        _box_sep()
+        _box_item("1", f"📊  Последний час         {DIM}(60 мин){NC}")
+        _box_item("2", f"📊  Последние 3 часа      {DIM}(180 мин){NC}")
+        _box_item("3", f"📊  Последние 24 часа     {DIM}(1440 мин){NC}")
+        _box_item("4", f"📡  Живое обновление      {DIM}(каждые 30 сек, Ctrl+C — выход){NC}")
+        _box_sep()
+        _box_item("5", f"🔍  Диагностика           {DIM}(iptables, ss, NTP, журнал){NC}")
+        _box_item("R", f"{DIM}Сбросить кэш счётчиков{NC}")
+        _box_sep()
+        _box_item("Q", "← Назад в меню Mieru")
+        _box_bot()
+        print()
+
+        try:
+            ch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+        except _Cancelled:
+            break
+
+        windows = {"1": 60, "2": 180, "3": 1440}
+        if ch in windows:
+            _show_stats(windows[ch])
+        elif ch == "4":
+            _show_live(30)
+        elif ch == "5":
+            _show_diagnostics()
+        elif ch == "r":
+            _reset_cache()
+        elif ch in ("q", ""):
+            break
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  АВТОНОМНЫЙ ЗАПУСК
+# ══════════════════════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    if os.geteuid() != 0:
+        print(f"{RED}Запустите от root.{NC}")
+        import sys; sys.exit(1)
+    try:
+        do_mieru_stats_menu()
+    except KeyboardInterrupt:
+        print(f"\n{GREEN}До свидания!{NC}")

@@ -2,7 +2,7 @@
 """
 tests/test_fingerprint_manager.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/fingerprint_manager.py.
+Unit-тесты для chimera/modules/fingerprint_manager.py.
 
 Покрывает:
   1. XRAY_FP_LIST — список fingerprint'ов
@@ -26,7 +26,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -36,24 +36,24 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestFingerprintManager(unittest.TestCase):
     def setUp(self): _setup_core()
     def test_xray_fp_list_has_11_entries(self):
-        from vless_installer.modules.fingerprint_manager import XRAY_FP_LIST
+        from chimera.modules.fingerprint_manager import XRAY_FP_LIST
         self.assertGreaterEqual(len(XRAY_FP_LIST), 11)
         self.assertIn("chrome", XRAY_FP_LIST)
         self.assertIn("firefox", XRAY_FP_LIST)
         self.assertIn("safari", XRAY_FP_LIST)
     def test_default_fp_is_chrome(self):
-        from vless_installer.modules.fingerprint_manager import DEFAULT_FP
+        from chimera.modules.fingerprint_manager import DEFAULT_FP
         self.assertEqual(DEFAULT_FP, "chrome")
     def test_fp_menu_keys_are_numeric(self):
-        from vless_installer.modules.fingerprint_manager import _FP_MENU
+        from chimera.modules.fingerprint_manager import _FP_MENU
         for key in _FP_MENU:
             self.assertTrue(key.isdigit())
 

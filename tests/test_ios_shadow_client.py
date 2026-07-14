@@ -51,7 +51,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core_in_sysmodules():
     """Эталонный паттерн из tests/test_users_manager.py."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -60,9 +60,9 @@ def _setup_core_in_sysmodules():
          patch('os.chown', lambda *a, **kw: None), \
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -177,7 +177,7 @@ class TestNoRegressionAddDelete(unittest.TestCase):
         """Симулируем: добавили юзера, потом удалили. Финальный config.json
         должен быть побайтово идентичен исходному (ни новых клиентов, ни
         новых ключей)."""
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         original = self._cfg_path.read_text()
 
@@ -247,7 +247,7 @@ class TestShadowClientNoFlowKey(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_shadow_client_has_no_flow_key(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         with patch.object(users_manager, "_core_module", return_value=self._fake_core), \
              patch.object(users_manager, "_users_apply_config", lambda cfg: None):
@@ -293,7 +293,7 @@ class TestShadowClientIsIdempotent(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_repeat_call_returns_same_uuid_no_duplicate(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         with patch.object(users_manager, "_core_module", return_value=self._fake_core), \
              patch.object(users_manager, "_users_apply_config", lambda cfg: None):
@@ -333,7 +333,7 @@ class TestShadowClientXhttpNoop(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_xhttp_returns_none_no_mutation(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         original_clients = _read_clients(self._cfg_path)
         original_json = self._cfg_path.read_text()
@@ -382,7 +382,7 @@ class TestShowLinkIosUsesShadowUuid(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_link_uses_shadow_uuid_no_flow(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         # Сначала узнаём UUID оригинала.
         orig_clients = _read_clients(self._cfg_path)
@@ -461,7 +461,7 @@ class TestDeleteWithAndWithoutShadow(unittest.TestCase):
         return _make_reality_config(clients)
 
     def test_delete_with_shadow_removes_both(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         tmpdir, cfg_path = self._make_cfg(with_shadow=True)
         try:
@@ -488,7 +488,7 @@ class TestDeleteWithAndWithoutShadow(unittest.TestCase):
     def test_delete_without_shadow_only_removes_main(self):
         """Поведение идентично допатчевому: shadow нет → удаляется только
         основной. Никаких лишних изменений."""
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         tmpdir, cfg_path = self._make_cfg(with_shadow=False)
         original_json = cfg_path.read_text()
@@ -544,7 +544,7 @@ class TestConfigValidityAfterIosShadow(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_config_valid_after_shadow_creation(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         with patch.object(users_manager, "_users_get_config", return_value=self._cfg_path), \
              patch.object(users_manager, "_core_module", return_value=self._fake_core), \
@@ -616,7 +616,7 @@ class TestGoldenGenLinkUnchanged(unittest.TestCase):
     def test_reality_golden_unchanged(self):
         """REALITY-ссылка содержит flow=xtls-rprx-vision — патч №2 НЕ должен
         был тронуть исходный генератор."""
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         link = _gen_vless_link(
             host="1.2.3.4", uuid_str="11111111-2222-3333-4444-555555555555",
             pbk="PUBKEY", sid="deadbeef", domain="example.com",
@@ -631,7 +631,7 @@ class TestGoldenGenLinkUnchanged(unittest.TestCase):
         self.assertEqual(link, expected)
 
     def test_xhttp_golden_unchanged(self):
-        from vless_installer.modules.users_manager import _gen_vless_link
+        from chimera.modules.users_manager import _gen_vless_link
         import urllib.parse
         link = _gen_vless_link(
             host="1.2.3.4", uuid_str="22222222-3333-4444-5555-666666666666",
@@ -670,7 +670,7 @@ class TestStep0Closure(unittest.TestCase):
         (которое ведёт к generate_client_links_ios — закрытой поверхности
         из патча №2, всё ещё рвёт REALITY-юзеров)."""
         import re
-        src = (_PROJECT_ROOT / "vless_installer" / "_core.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "_core.py").read_text()
 
         # Извлекаем блок main_menu — от `def main_menu` до конца функции.
         # main_menu — последняя функция в _core.py, поэтому после неё может
@@ -698,7 +698,7 @@ class TestStep0Closure(unittest.TestCase):
         из тела подписки (отдельная логика в build_subscription_body_ios),
         но сам маршрут отдаёт iOS-совместимый base64. Это защищает от
         случайного отката к закомментированному состоянию (патч №2)."""
-        src = (_PROJECT_ROOT / "vless_installer" / "modules" / "subscription.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "subscription.py").read_text()
         lines = src.split("\n")
         in_do_get = False
         found_active = False
@@ -722,7 +722,7 @@ class TestStep0Closure(unittest.TestCase):
 
         Этот тест защищает от случайного возврата к закомментированному
         состоянию (которое было нужно в патче №2, но снято патчем №4)."""
-        src = (_PROJECT_ROOT / "vless_installer" / "modules" / "client_config_export.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "client_config_export.py").read_text()
         # Должна быть АКТИВНАЯ (не закомментированная) строка с
         # _users_get_or_create_ios_shadow — это и есть shadow-паттерн.
         found_shadow_call = False
@@ -749,7 +749,7 @@ class TestStep0Closure(unittest.TestCase):
         """Патч №5: do_subscription_menu показывает url_ios рядом с url
         для каждого пользователя. Это защищает от случайного отката к
         состоянию, когда iOS-маршрут был закомментирован (патч №2)."""
-        src = (_PROJECT_ROOT / "vless_installer" / "modules" / "subscription.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "subscription.py").read_text()
         # Активная (не закомментированная) строка с url_ios = f"https://
         found = False
         for line in src.split("\n"):
@@ -764,7 +764,7 @@ class TestStep0Closure(unittest.TestCase):
     def test_do_user_show_link_ios_still_callable(self):
         """do_user_show_link_ios должна остаться в коде (не удалена) —
         патч №2 чинит именно её."""
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
         self.assertTrue(hasattr(users_manager, "do_user_show_link_ios"))
         self.assertTrue(callable(users_manager.do_user_show_link_ios))
 

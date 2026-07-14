@@ -2,7 +2,7 @@
 """
 tests/test_ingress_geoip.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/ingress_geoip.py.
+Unit-тесты для chimera/modules/ingress_geoip.py.
 
 Покрывает:
   1. _ingress_state_load / _ingress_state_save — JSON I/O
@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -34,9 +34,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestIngressStateLoadSave(unittest.TestCase):
@@ -52,25 +52,25 @@ class TestIngressStateLoadSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.ingress_geoip.INGRESS_GEOIP_FILE",
+        return patch("chimera.modules.ingress_geoip.INGRESS_GEOIP_FILE",
                      self._state)
 
     def test_load_returns_default_when_no_file(self):
-        from vless_installer.modules.ingress_geoip import _ingress_state_load
+        from chimera.modules.ingress_geoip import _ingress_state_load
         with self._patch():
             result = _ingress_state_load()
         self.assertFalse(result["enabled"])
         self.assertEqual(result["port"], 0)
 
     def test_load_returns_default_on_corrupt(self):
-        from vless_installer.modules.ingress_geoip import _ingress_state_load
+        from chimera.modules.ingress_geoip import _ingress_state_load
         self._state.write_text("{invalid")
         with self._patch():
             result = _ingress_state_load()
         self.assertFalse(result["enabled"])
 
     def test_save_then_load(self):
-        from vless_installer.modules.ingress_geoip import (
+        from chimera.modules.ingress_geoip import (
             _ingress_state_load, _ingress_state_save,
         )
         data = {"enabled": True, "port": 443, "cidrs_v4": 100}
@@ -82,7 +82,7 @@ class TestIngressStateLoadSave(unittest.TestCase):
 
     def test_save_sets_chmod_600(self):
         import stat
-        from vless_installer.modules.ingress_geoip import _ingress_state_save
+        from chimera.modules.ingress_geoip import _ingress_state_save
         with self._patch():
             _ingress_state_save({"enabled": False})
         mode = stat.S_IMODE(os.stat(self._state).st_mode)
@@ -96,17 +96,17 @@ class TestIngressIpsetAvailable(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_true_when_ipset_found(self):
-        from vless_installer.modules.ingress_geoip import _ingress_ipset_available
+        from chimera.modules.ingress_geoip import _ingress_ipset_available
         with patch("shutil.which", return_value="/usr/sbin/ipset"):
             self.assertTrue(_ingress_ipset_available())
 
     def test_returns_false_when_not_found(self):
-        from vless_installer.modules.ingress_geoip import _ingress_ipset_available
+        from chimera.modules.ingress_geoip import _ingress_ipset_available
         with patch("shutil.which", return_value=None):
             self.assertFalse(_ingress_ipset_available())
 
     def test_iptables_available(self):
-        from vless_installer.modules.ingress_geoip import _ingress_iptables_available
+        from chimera.modules.ingress_geoip import _ingress_iptables_available
         with patch("shutil.which", return_value="/usr/sbin/iptables"):
             self.assertTrue(_ingress_iptables_available())
 
@@ -130,7 +130,7 @@ class TestIngressGetCidrs(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_reads_cidrs_from_file(self):
-        from vless_installer.modules import ingress_geoip
+        from chimera.modules import ingress_geoip
 
         # Патчим модуль так, чтобы чтение файла работало
         original_path = Path
@@ -140,7 +140,7 @@ class TestIngressGetCidrs(unittest.TestCase):
                 return True
             return original_path(self).exists()
 
-        with patch("vless_installer.modules.ingress_geoip._fetch_ru_subnets_ripe",
+        with patch("chimera.modules.ingress_geoip._fetch_ru_subnets_ripe",
                    return_value=[]) as mock_fetch:
             # _ingress_get_cidrs читает /etc/xray/ru_subnets_ripe.txt
             # Патчим Path чтобы указывал на наш файл
@@ -150,7 +150,7 @@ class TestIngressGetCidrs(unittest.TestCase):
             mock_path.stat.return_value = MagicMock(st_size=2000)
             mock_path.read_text.return_value = self._ru_file.read_text()
 
-            with patch("vless_installer.modules.ingress_geoip.Path",
+            with patch("chimera.modules.ingress_geoip.Path",
                        return_value=mock_path):
                 v4, v6 = ingress_geoip._ingress_get_cidrs()
 
