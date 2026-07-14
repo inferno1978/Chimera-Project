@@ -203,23 +203,26 @@ def uninstall_cold_boot_restore() -> tuple[bool, str]:
 
 
 def _find_installer_path() -> str:
-    """Находит корневой путь установки vless-installer."""
+    """Находит корневой путь установки Chimera Project."""
     import importlib.util
     spec = importlib.util.find_spec("chimera")
     if spec and spec.submodule_search_locations:
         p = Path(list(spec.submodule_search_locations)[0]).parent
         return str(p)
-    # Fallback — ищем по типичным путям
+    # Fallback — ищем по типичным системным путям.
+    # ВАЖНО: домашние директории разработчиков НЕ проверяем.
+    # Поддерживаемые пути (новый → старые):
+    #   /opt/chimera                   — новый стандарт (Chimera Project v5.0+)
+    #   /opt/vless-ultimate            — старый путь (VLESS Ultimate Installer v4.x)
+    #   /opt/VLESS-Ultimate-Installer  — ранние версии bootstrap
     for candidate in [
-        Path("/root/VLESS-Ultimate-Installer"),
-        Path("/home/*/VLESS-Ultimate-Installer"),
+        Path("/opt/chimera"),
+        Path("/opt/vless-ultimate"),
         Path("/opt/VLESS-Ultimate-Installer"),
     ]:
-        matches = list(Path("/").glob(str(candidate).lstrip("/")))
-        for m in matches:
-            if (m / "chimera").exists():
-                return str(m)
-    return "/root/VLESS-Ultimate-Installer"
+        if candidate.exists() and (candidate / "chimera").exists():
+            return str(candidate)
+    return "/opt/chimera"
 
 
 def run_cold_boot_restore() -> None:

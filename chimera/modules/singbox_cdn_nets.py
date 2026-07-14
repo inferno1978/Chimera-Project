@@ -67,7 +67,7 @@ from chimera.modules.singbox_common import (
 _IPSET_PREFIX = "singbox_cdn_allowlist"
 _IPTABLES_COMMENT_PREFIX = "singbox-cdn-allowlist"
 _HTTP_TIMEOUT = 15
-_UA = "VLESS-Ultimate-Installer"
+_UA = "Chimera-Project"
 
 # Persistence paths (по образцу ipset_persist.py)
 _IPSET_CONF = Path("/etc/ipset-singbox-cdn.conf")

@@ -355,7 +355,7 @@ def _detect_arch() -> Optional[str]:
 def _get_latest_release() -> Optional[dict]:
     try:
         req = urllib.request.Request(
-            _GITHUB_API, headers={"User-Agent": "VLESS-Ultimate-Installer"})
+            _GITHUB_API, headers={"User-Agent": "Chimera-Project"})
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read())
     except Exception:
@@ -576,7 +576,7 @@ def _write_fw_reconcile_hook(port: int, tun_iface: str, out_iface: str,
     )
     _FW_RECONCILE.write_text(
         "#!/bin/bash\n"
-        "# Автосоздано VLESS-Ultimate-Installer — модуль fptn.py\n"
+        "# Автосоздано Chimera Project — модуль fptn.py\n"
         "# fptn-server при каждом старте безусловно выставляет\n"
         "# iptables/ip6tables -P INPUT/FORWARD/OUTPUT ACCEPT и не откатывает\n"
         "# это при остановке. Этот хук (ExecStartPost) запускается systemd\n"

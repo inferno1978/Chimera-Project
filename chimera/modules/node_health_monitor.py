@@ -252,7 +252,7 @@ def install_health_monitor(interval: int = DEFAULT_INTERVAL) -> tuple[bool, str]
         if spec and spec.submodule_search_locations:
             installer_path = str(Path(list(spec.submodule_search_locations)[0]).parent)
         else:
-            installer_path = "/root/VLESS-Ultimate-Installer"
+            installer_path = "/opt/chimera"
 
         python = _find_python()
 

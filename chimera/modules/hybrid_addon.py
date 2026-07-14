@@ -1106,7 +1106,7 @@ def print_summary(creds: dict) -> None:
 
 # ───────────────────────── main ─────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Mieru hybrid addon для VLESS-Ultimate-Installer")
+    parser = argparse.ArgumentParser(description="Mieru hybrid addon для Chimera Project")
     parser.add_argument("--port", type=int, default=443,
                          help="Текущий внешний порт VLESS-инбаунда, который нужно "
                               "освободить (по умолчанию 443)")

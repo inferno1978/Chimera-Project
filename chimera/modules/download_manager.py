@@ -186,7 +186,7 @@ def fetch_package(
         try:
             req = urllib.request.Request(
                 url,
-                headers={"User-Agent": "VLESS-Ultimate-Installer"},
+                headers={"User-Agent": "Chimera-Project"},
             )
             with urllib.request.urlopen(req, timeout=15) as r:
                 with open(tmp_path, 'wb') as f:
