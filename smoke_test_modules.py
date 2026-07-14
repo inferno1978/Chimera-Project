@@ -46,7 +46,8 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 # Список (модуль, функция, описание) — только функции-меню и публичные API
 TEST_CASES = [
     # Меню-функции (вызываем с 'q' для немедленного выхода)
-    ("users_manager", "do_user_menu", "меню пользователей"),
+    # do_user_menu удалён в патче №5 — мёртвый код, дублировал
+    # do_unified_user_manager из _core.py.
     ("users_manager", "do_user_list", "список пользователей"),
     ("users_manager", "generate_client_links", "генерация ссылок"),
     ("ttl_users", "do_manage_ttl_users", "меню TTL-пользователей"),

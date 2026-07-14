@@ -559,14 +559,23 @@ def build_subscription_body(user: dict) -> bytes:
 def build_subscription_body_ios(user: dict) -> bytes:
     """iOS/Karing-совместимый вариант тела подписки.
 
-    Копия структуры build_subscription_body(), но vless-запись
-    (_build_vless_uri) и каждая ссылка из get_mirror_uris(...) прогоняются
-    через to_ios_karing_link() перед добавлением в links[].
-
-    Сателлитные протоколы (mieru/naive/fptn/telemt) НЕ трогаются —
-    в их ссылках нет ни `&flow=xtls-rprx-vision`, ни эмодзи-флага в
-    начале fragment. Это фиксируется тестом, а не полагается на «и так
-    должно быть».
+    Копия структуры build_subscription_body(), но:
+      • vless:// строится на shadow-UUID (через
+        _users_get_or_create_ios_shadow), НЕ на user["uuid"]. Это та же
+        защита от рассинхрона, что в do_user_show_link_ios_by_uuid
+        (патч №3): email берётся напрямую из clients[] по user["uuid"],
+        и если он не совпадает с тем, что в users.json — shadow всё
+        равно создаётся/переиспользуется правильно.
+      • Mirror-URI (entry_mirrors) ИСКЛЮЧАЮТСЯ из iOS-подписки ЦЕЛИКОМ.
+        Mirror-серверы — это отдельные инстансы того же инсталлятора на
+        других VPS, чьи clients[] этот модуль не редактирует. Заводить
+        там shadow программно нельзя — только руками на каждом mirror.
+        Постпроцессор на клиентской строке mirror-ссылки без shadow на
+        СЕРВЕРЕ mirror'а даст тот же разрыв хендшейка, который мы чиним
+        весь этот раунд.
+      • Сателлитные протоколы (mieru/naive/fptn/telemt) НЕ трогаются —
+        в их ссылках нет ни `&flow=xtls-rprx-vision`, ни эмодзи-флага в
+        начале fragment.
 
     Существующая build_subscription_body() НЕ трогается — старый
     маршрут /sub/{token} возвращает побайтово тот же base64, что и до
@@ -579,9 +588,21 @@ def build_subscription_body_ios(user: dict) -> bytes:
 
     links: list[str] = []
 
-    # vless:// — только если hybrid_addon не увёл внешний inbound на Mieru
+    # ── vless:// на shadow-UUID ───────────────────────────────────────────
+    # _build_vless_uri(user, state) берёт user["uuid"] напрямую — это
+    # оригинальный UUID, для которого серверная clients[] хранит
+    # "flow": "xtls-rprx-vision". Создаём shadow (без flow) и подменяем
+    # user dict перед вызовом, чтобы ссылка строилась на shadow UUID.
+    # Та же логика, что в do_user_show_link_ios_by_uuid (патч №3).
     if not is_hybrid_mieru_active():
-        vless = _build_vless_uri(user, state)
+        proto = state.get("protocol_mode", "reality")
+        if proto == "reality":
+            # Резолвим shadow — email из живого clients[], не из user dict.
+            shadow_user = _resolve_ios_shadow_user(user)
+            vless = _build_vless_uri(shadow_user, state)
+        else:
+            # xHTTP — flow не используется, shadow не нужен.
+            vless = _build_vless_uri(user, state)
         if vless:
             links.append(to_ios_karing_link(vless))
     else:
@@ -596,20 +617,74 @@ def build_subscription_body_ios(user: dict) -> bytes:
     if telemt:
         links.append(telemt)
 
-    # Резервные entry-ноды — это тоже vless:// REALITY-ссылки, в них
-    # есть и flow, и (опционально) эмодзи-флаг в fragment. Прогоняем
-    # через to_ios_karing_link каждую.
+    # ── Mirror-URI ИСКЛЮЧАЮТСЯ из iOS-подписки ────────────────────────────
+    # Mirror-серверы — отдельные инстансы, их clients[] мы не контролируем.
+    # На каждом mirror админ должен отдельно выполнить
+    # do_unified_user_manager → 1 → K для нужных пользователей, иначе
+    # постпроцессор отрежет flow, а сервер mirror'а его ждёт — разрыв.
+    # Логируем количество исключённых, чтобы админ видел, сколько mirror
+    # требует ручной настройки.
     uuid_str = user.get("uuid", "")
+    excluded_mirrors = 0
     if uuid_str:
         try:
             from vless_installer.modules.entry_mirrors import get_mirror_uris
-            for uri in get_mirror_uris(uuid_str, only_healthy=True):
-                links.append(to_ios_karing_link(uri))
+            mirror_uris = get_mirror_uris(uuid_str, only_healthy=True)
+            excluded_mirrors = len(mirror_uris)
+            if excluded_mirrors > 0:
+                _log("WARN",
+                     f"iOS-подписка: {excluded_mirrors} mirror-ссылок исключены — "
+                     "требуют ручной настройки shadow-клиента на каждом mirror "
+                     "(do_unified_user_manager → 1 → K)")
         except Exception as e:
             _log("WARN", f"entry_mirrors недоступен: {e}")
 
     payload = "\n".join(links)
     return base64.b64encode(payload.encode())
+
+
+def _resolve_ios_shadow_user(user: dict) -> dict:
+    """Возвращает копию user dict с подменённым uuid/email на shadow-значения.
+
+    Логика та же, что в do_user_show_link_ios_by_uuid (патч №3):
+      1. Найти client в config.json по user["uuid"].
+      2. Взять email напрямую из clients[] (защита от рассинхрона
+         с users.json — там может быть устаревший email).
+      3. Вызвать _users_get_or_create_ios_shadow(cfg, email).
+      4. Если shadow создан — вернуть {**user, "uuid": shadow_uuid,
+         "email": shadow_email}.
+      5. Если что-то пошло не так — вернуть user без изменений (fallback).
+         Ссылка будет с оригинальным UUID и flow — постпроцессор отрежет
+         flow, но это всё ещё может работать на iOS, если баг Karing#1158
+         не воспроизводится. Лучше так, чем уронить подписку.
+
+    Не использует _core_module() напрямую — импортирует users_manager
+    по требованию (как и остальной код subscription.py).
+    """
+    try:
+        from vless_installer.modules.users_manager import (
+            _users_get_config, _users_get_or_create_ios_shadow,
+        )
+        cfg_path = _users_get_config()
+        with cfg_path.open() as f:
+            c = json.load(f)
+        clients = (c.get("inbounds", [{}])[0]
+                   .get("settings", {}).get("clients", []))
+        orig_uuid = user.get("uuid", "")
+        base = next((cl for cl in clients if cl.get("id", "") == orig_uuid), None)
+        if not base or not base.get("email"):
+            _log("WARN", f"iOS-подписка: UUID '{orig_uuid[:8]}…' не найден в "
+                 "clients[] или нет email — используется оригинальный UUID")
+            return user
+        shadow = _users_get_or_create_ios_shadow(cfg_path, base["email"])
+        if shadow is None:
+            return user
+        shadow_uuid, shadow_email = shadow
+        return {**user, "uuid": shadow_uuid, "email": shadow_email}
+    except Exception as e:
+        _log("WARN", f"iOS-подписка: не удалось создать shadow для "
+             f"{user.get('email', '?')}: {e} — используется оригинальный UUID")
+        return user
 
 # ══════════════════════════════════════════════════════════════════════════
 # HTTP(S)-ХЕНДЛЕР
@@ -624,37 +699,38 @@ class _SubHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
 
-        # TODO: broken until shadow-client fix — не показывать пользователю.
-        # Маршрут /sub/{token}/ios на REALITY давал бы нерабочую подписку:
-        # серверный clients[] содержит flow=xtls-rprx-vision, а постпроцессор
-        # его режет — разрыв хендшейка. Чинится отдельным заходом через
-        # _users_get_or_create_ios_shadow() (как в do_user_show_link_ios).
-        # m_ios = re.match(r"^/sub/([0-9a-f]{24})/ios/?$", path)
-        # if m_ios:
-        #     cfg = _load_sub_conf()
-        #     pepper = cfg.get("pepper", "")
-        #     if not pepper:
-        #         self.send_response(503)
-        #         self.end_headers()
-        #         return
-        #     token = m_ios.group(1)
-        #     user = _find_user_by_token(token, pepper)
-        #     if not user:
-        #         self.send_response(404)
-        #         self.end_headers()
-        #         return
-        #     body = build_subscription_body_ios(user)
-        #     self.send_response(200)
-        #     self.send_header("Content-Type", "text/plain; charset=utf-8")
-        #     self.send_header("Content-Length", str(len(body)))
-        #     self.send_header("Profile-Update-Interval", "6")
-        #     self.send_header("Profile-Title", "Chimera-iOS")
-        #     userinfo = _build_userinfo_header(user)
-        #     if userinfo:
-        #         self.send_header("Subscription-Userinfo", userinfo)
-        #     self.end_headers()
-        #     self.wfile.write(body)
-        #     return
+        # iOS/Karing-маршрут — проверяем ПЕРВЫМ. Существующий regex
+        # ^/sub/([0-9a-f]{24})/?$ физически не матчит `/sub/{token}/ios`
+        # (там после 24 hex идёт `/ios`, а `$` требует конца), так что
+        # даже если бы мы поставили старую проверку первой, конфликтов
+        # не было бы — но логичнее держать более специфичный маршрут
+        # выше. Существующая ветка ниже — не тронута.
+        m_ios = re.match(r"^/sub/([0-9a-f]{24})/ios/?$", path)
+        if m_ios:
+            cfg = _load_sub_conf()
+            pepper = cfg.get("pepper", "")
+            if not pepper:
+                self.send_response(503)
+                self.end_headers()
+                return
+            token = m_ios.group(1)
+            user = _find_user_by_token(token, pepper)
+            if not user:
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = build_subscription_body_ios(user)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Profile-Update-Interval", "6")
+            self.send_header("Profile-Title", "Chimera-iOS")
+            userinfo = _build_userinfo_header(user)
+            if userinfo:
+                self.send_header("Subscription-Userinfo", userinfo)
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         # Существующая ветка — без изменений.
         m = re.match(r"^/sub/([0-9a-f]{24})/?$", path)
@@ -946,25 +1022,28 @@ def do_subscription_menu() -> None:
                     continue
                 token = _token_for(u["uuid"], pepper)
                 url = f"https://{domain}:{port}/sub/{token}"
+                url_ios = f"https://{domain}:{port}/sub/{token}/ios"
                 label = u.get("email", u.get("name", "?"))
-                rows.append((label, url))
+                rows.append((label, url, url_ios))
 
             _box_top("🔗  ССЫЛКИ ПОДПИСКИ")
             _box_row()
             if not rows:
                 _box_warn_line("Нет активных пользователей.")
-            for label, url in rows:
+            for label, url, url_ios in rows:
                 _box_row(f"  {WHITE}{label}{NC}")
                 _box_row(f"  {GREEN}{url}{NC}")
+                _box_row(f"  {DIM}iOS/Karing:{NC} {CYAN}{url_ios}{NC}")
                 _box_row()
             _box_back()
             _box_bottom()
 
             # QR — вне рамки, qrencode рисует свою фиксированную ASCII-сетку,
             # внутри box она ломает выравнивание.
-            for label, url in rows:
+            for label, url, url_ios in rows:
                 print()
-                _print_qr(url, label)
+                _print_qr(url, f"{label} (основной)")
+                _print_qr(url_ios, f"{label} (iOS/Karing)")
 
             input(f"\n{BOLD}Enter…{NC}")
 

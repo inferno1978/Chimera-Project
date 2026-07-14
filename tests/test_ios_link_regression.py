@@ -230,13 +230,20 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
         }
         user = {"uuid": "u-1", "email": "alice@example.com"}
 
+        # Патч №5 добавил _resolve_ios_shadow_user в build_subscription_body_ios
+        # — она идёт в _users_get_config() и падает без config.json. В этом
+        # тесте мы проверяем постпроцессорную логику (flow убран), а не
+        # shadow-создание (для этого есть test_ios_patch5). Патчим
+        # _resolve_ios_shadow_user чтобы вернуть user без изменений —
+        # постпроцессор всё равно отрежет flow из оригинальной ссылки.
         with patch.object(subscription, "_load_state", return_value=fake_state), \
              patch.object(subscription, "_get_server_ip", return_value="1.2.3.4"), \
              patch.object(subscription, "is_hybrid_mieru_active", return_value=False), \
              patch.object(subscription, "_build_mieru_uris", return_value=["mierus://m1"]), \
              patch.object(subscription, "_build_naive_uris", return_value=[]), \
              patch.object(subscription, "_build_fptn_uris", return_value=[]), \
-             patch.object(subscription, "_build_telemt_uri", return_value=None):
+             patch.object(subscription, "_build_telemt_uri", return_value=None), \
+             patch.object(subscription, "_resolve_ios_shadow_user", side_effect=lambda u: u):
             with patch.dict(sys.modules, {"vless_installer.modules.entry_mirrors": MagicMock(
                     get_mirror_uris=MagicMock(return_value=[]))}):
                 body = subscription.build_subscription_body_ios(user)
@@ -285,6 +292,9 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
             patch.object(subscription, "_build_naive_uris", return_value=naive_uris),
             patch.object(subscription, "_build_fptn_uris", return_value=fptn_uris),
             patch.object(subscription, "_build_telemt_uri", return_value=telemt_uri),
+            # Патч №5 добавил _resolve_ios_shadow_user — патчим вернуть user
+            # без изменений, чтобы тест проверял постпроцессор а не shadow.
+            patch.object(subscription, "_resolve_ios_shadow_user", side_effect=lambda u: u),
         ]
         for p in common_patches:
             p.start()
@@ -520,6 +530,7 @@ class TestSanityAllFourPoints(unittest.TestCase):
              patch.object(subscription, "_build_naive_uris", return_value=[]), \
              patch.object(subscription, "_build_fptn_uris", return_value=[]), \
              patch.object(subscription, "_build_telemt_uri", return_value=None), \
+             patch.object(subscription, "_resolve_ios_shadow_user", side_effect=lambda u: u), \
              patch.dict(sys.modules, {"vless_installer.modules.entry_mirrors": MagicMock(
                  get_mirror_uris=MagicMock(return_value=[]))}):
             body = subscription.build_subscription_body_ios(user)

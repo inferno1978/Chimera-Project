@@ -692,11 +692,16 @@ class TestStep0Closure(unittest.TestCase):
                     f"REALITY-юзеров без shadow). Got: {line!r}"
                 )
 
-    def test_subscription_route_ios_commented(self):
-        """В subscription.py do_GET блок m_ios должен быть закомментирован."""
+    def test_subscription_route_ios_active(self):
+        """Патч №5: /sub/{token}/ios маршрут в subscription.py do_GET
+        должен быть АКТИВЕН (раскомментирован). Mirror-URI исключаются
+        из тела подписки (отдельная логика в build_subscription_body_ios),
+        но сам маршрут отдаёт iOS-совместимый base64. Это защищает от
+        случайного отката к закомментированному состоянию (патч №2)."""
         src = (_PROJECT_ROOT / "vless_installer" / "modules" / "subscription.py").read_text()
         lines = src.split("\n")
         in_do_get = False
+        found_active = False
         for i, line in enumerate(lines):
             if "def do_GET" in line:
                 in_do_get = True
@@ -704,10 +709,11 @@ class TestStep0Closure(unittest.TestCase):
                 stripped = line.strip()
                 # Активная (не закомментированная) строка с m_ios = re.match
                 if "m_ios = re.match" in stripped and not stripped.startswith("#"):
-                    self.fail(
-                        f"Строка {i+1} в subscription.py: m_ios должен быть "
-                        f"закомментирован, got: {line!r}"
-                    )
+                    found_active = True
+                    break
+        self.assertTrue(found_active,
+                        "Патч №5: /sub/{token}/ios маршрут должен быть активен "
+                        "в do_GET (не закомментирован)")
 
     def test_client_config_export_ios_link_active_with_shadow(self):
         """Патч №4 раскомментировал генерацию vless-link-ios.txt в
@@ -739,18 +745,21 @@ class TestStep0Closure(unittest.TestCase):
                         "Патч №4: ios_link_file.write_text должен быть активен "
                         "(не закомментирован) — патч №2 закомментировал, №4 снял")
 
-    def test_subscription_menu_no_ios_url(self):
-        """В do_subscription_menu не должно быть показа url_ios."""
+    def test_subscription_menu_ios_url_active(self):
+        """Патч №5: do_subscription_menu показывает url_ios рядом с url
+        для каждого пользователя. Это защищает от случайного отката к
+        состоянию, когда iOS-маршрут был закомментирован (патч №2)."""
         src = (_PROJECT_ROOT / "vless_installer" / "modules" / "subscription.py").read_text()
-        # Активная строка с url_ios = f"https://
-        lines = src.split("\n")
-        for i, line in enumerate(lines):
+        # Активная (не закомментированная) строка с url_ios = f"https://
+        found = False
+        for line in src.split("\n"):
             stripped = line.strip()
             if 'url_ios = f"https://' in stripped and not stripped.startswith("#"):
-                self.fail(
-                    f"Строка {i+1}: url_ios должен быть убран из меню подписки, "
-                    f"got: {line!r}"
-                )
+                found = True
+                break
+        self.assertTrue(found,
+                        "Патч №5: do_subscription_menu должен показывать url_ios "
+                        "рядом с url для каждого пользователя")
 
     def test_do_user_show_link_ios_still_callable(self):
         """do_user_show_link_ios должна остаться в коде (не удалена) —
@@ -759,20 +768,12 @@ class TestStep0Closure(unittest.TestCase):
         self.assertTrue(hasattr(users_manager, "do_user_show_link_ios"))
         self.assertTrue(callable(users_manager.do_user_show_link_ios))
 
-    def test_do_user_menu_k_item_still_present(self):
-        """Пункт K в do_user_menu (внутреннем менеджере) должен остаться
-        активным — это единственная iOS-поверхность, которую чинит патч №2."""
-        src = (_PROJECT_ROOT / "vless_installer" / "modules" / "users_manager.py").read_text()
-        lines = src.split("\n")
-        found_active = False
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.startswith('_box_item("K"'):
-                found_active = True
-                break
-        self.assertTrue(found_active,
-                        "Пункт K в do_user_menu должен быть активным — "
-                        "do_user_show_link_ios чинится патчем №2")
+    # test_do_user_menu_k_item_still_present удалён в патче №5:
+    # do_user_menu() целиком удалён как мёртвый код (строго подмножество
+    # do_unified_user_manager). Активные пункты K теперь живут в _core.py:
+    # do_unified_user_manager (патч №3) и _menu_users (патч №4) — их
+    # корректность проверяется в test_ios_unified_menu.py и
+    # test_ios_patch4_open_surfaces.py.
 
 
 if __name__ == "__main__":
