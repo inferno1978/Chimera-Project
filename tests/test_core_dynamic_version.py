@@ -95,12 +95,18 @@ class TestCoreDynamicVersion(unittest.TestCase):
         """Баннер (print_banner) подхватывает monkey-patched версию.
 
         print_banner() использует _get_version() в f-string для ASCII-баннера.
-        Проверяем что "9.9.9" появляется в выводе.
+        Проверяем что "9.9.9" появляется в выводе, а оригинальная версия
+        (прочитанная динамически из vless_installer.__version__ ДО monkey-patch)
+        — НЕ появляется. Это защищает от регрессии: если баннер перестанет
+        использовать _get_version() и вернётся к хардкоду, оригинальная
+        версия останется в выводе даже после monkey-patch.
         """
         # Сбрасываем кэш в globals dict
         self._core_globals["_CACHED_VERSION"] = ""
 
-        # Monkey-patch __version__
+        # Читаем оригинальную версию ДО monkey-patch — это значение НЕ должно
+        # появиться в выводе после подмены на "9.9.9". Динамическое чтение,
+        # не хардкод — при следующем бампе версии тест сам подтянется.
         import vless_installer
         original_version = vless_installer.__version__
         try:
@@ -115,10 +121,56 @@ class TestCoreDynamicVersion(unittest.TestCase):
         output = captured.getvalue()
         self.assertIn("9.9.9", output,
                       f"Expected '9.9.9' in banner output, got:\n{output}")
-        # Убеждаемся что старая версия НЕ появилась
-        self.assertNotIn("4.25.0", output,
-                         f"Old hardcoded version 4.25.0 should NOT appear in banner, "
-                         f"got:\n{output}")
+        # Убеждаемся что оригинальная версия НЕ появилась — если бы баннер
+        # использовал хардкод вместо _get_version(), оригинал остался бы.
+        self.assertNotIn(original_version, output,
+                         f"Original version {original_version!r} should NOT appear "
+                         f"in banner after monkey-patch to '9.9.9' — this would "
+                         f"mean banner uses hardcoded version instead of "
+                         f"_get_version(). Got:\n{output}")
+
+    def test_main_menu_shows_current_version(self):
+        """Регрессионный тест Т4 (патч версии 4.25.1): главное меню
+        показывает ТЕКУЩУЮ версию проекта в строке баннера.
+
+        main_menu() использует _get_version() в f-string для строки
+        "VLESS Ultimate Installer v{version}". После бампа версии
+        баннер должен показывать новое значение, а не старое и не "unknown".
+
+        ВАЖНО: тест НЕ хардкодит "4.25.1" — читает текущую версию из
+        vless_installer.__version__ и проверяет, что она появилась в выводе.
+        При следующем бампе тест сам подтянется.
+        """
+        # Сбрасываем кэш — _core.py уже вызвал _get_version() при exec.
+        self._core_globals["_CACHED_VERSION"] = ""
+
+        from vless_installer import __version__ as current_version
+        # main_menu() — бесконечный цикл с input(). Мокаем чтобы выйти.
+        call_count = [0]
+        def mock_input(prompt):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "q"
+            raise KeyboardInterrupt
+
+        with patch("builtins.input", side_effect=mock_input), \
+             patch("os.system"), \
+             patch("time.sleep"):
+            captured = io.StringIO()
+            try:
+                with redirect_stdout(captured):
+                    self._fake_core.main_menu()
+            except (KeyboardInterrupt, SystemExit):
+                pass
+
+        output = captured.getvalue()
+        self.assertIn(current_version, output,
+                      f"Main menu banner should contain current version "
+                      f"{current_version!r}, got:\n{output[:500]}")
+        self.assertNotIn("unknown", output.lower(),
+                         f"Banner should NOT show 'unknown' — means "
+                         f"_get_version() failed to import __version__. "
+                         f"Got:\n{output[:500]}")
 
     def test_monkeypatch_version_propagates_to_main_menu(self):
         """Статус-бар главного меню подхватывает monkey-patched версию.
@@ -163,26 +215,50 @@ class TestCoreDynamicVersion(unittest.TestCase):
         self.assertIn("9.9.9", output,
                       f"Expected '9.9.9' in main_menu output, got:\n{output[:500]}")
 
-    def test_no_hardcoded_version_in_core_py(self):
-        """В _core.py не должно остаться хардкода '4.25.0' (кроме исторических
-        комментариев про старые версии).
+    def test_no_hardcoded_current_version_in_core_py(self):
+        """В _core.py не должно остаться хардкода ТЕКУЩЕЙ версии проекта
+        (кроме исторических комментариев про старые версии).
 
-        Этот тест — regression guard: если кто-то снова впишет хардкод,
-        тест поймает.
+        Этот тест — regression guard: если кто-то снова впишет хардкод
+        текущей версии вместо _get_version(), тест поймает.
+
+        ВАЖНО: тест НЕ хардкодит конкретную версию (типа "X.Y.Z" —
+        текущее значение). Он читает текущую версию из vless_installer.__version__
+        в момент запуска и ищет её как литерал в _core.py. При следующем
+        бампе версии тест сам подтянется — не нужно править тест руками.
+
+        Допускаются исторические упоминания СТАРЫХ версий (v4.20.x, v4.23.x
+        и т.д. в комментариях типа "# v4.23.8: ..." — это история, не хардкод
+        текущей версии). Текущая версия в виде литерала запрещена — её
+        единственное законное место в _core.py — это результат вызова
+        _get_version(), который возвращает её из vless_installer.__version__.
         """
+        import re
         core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
         content = core_path.read_text()
-        # Ищем "v4.25.0" или "4.25.0" в контексте версии проекта.
-        # Допускаются исторические упоминания старых версий (v4.20.x, v4.23.x).
-        # Но текущая версия (4.25.0) НЕ должна быть захардкожена.
-        lines_with_current_version = [
-            line.strip()
-            for i, line in enumerate(content.splitlines(), 1)
-            if "4.25.0" in line
-        ]
+
+        # Динамически читаем текущую версию — НЕ хардкодим "4.25.x".
+        from vless_installer import __version__ as current_version
+        # Экранируем для regex (точки — это метасимволы).
+        version_pattern = re.escape(current_version)
+
+        lines_with_current_version = []
+        for i, line in enumerate(content.splitlines(), 1):
+            stripped = line.strip()
+            # Пропускаем комментарии и докстринги — там могут быть исторические
+            # упоминания. Но в _core.py НЕТ активного кода с текущей версией
+            # как литералом (всё через _get_version()).
+            # Исторические упоминания старых версий (v4.20.x, v4.23.x) нас не
+            # интересуют — мы ищем только CURRENT version.
+            if re.search(version_pattern, line):
+                lines_with_current_version.append((i, line.rstrip()))
+
         self.assertEqual(lines_with_current_version, [],
-                         f"_core.py contains hardcoded '4.25.0' on lines: "
-                         f"{lines_with_current_version}. Use _get_version() instead.")
+                         f"_core.py contains hardcoded current version "
+                         f"{current_version!r} on lines: "
+                         f"{lines_with_current_version}. "
+                         f"Use _get_version() instead — version must come from "
+                         f"vless_installer.__version__, not from a string literal.")
 
 
 if __name__ == "__main__":
