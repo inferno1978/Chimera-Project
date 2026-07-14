@@ -14,12 +14,16 @@ Region A — базовый CRUD пользователей (clients в xray con
   • ``do_user_list()``                               — список пользователей.
   • ``do_user_add()``                                — добавить пользователя.
   • ``do_user_delete()``                             — удалить пользователя.
-  • ``do_user_show_link()``                          — показать ссылку/QR.
-  • ``do_user_menu()``                               — меню управления.
   • ``_show_qr(link, label, png_path)``              — QR-код в боксе.
   • ``_gen_vless_link(host, uuid_str, pbk, sid, ...)``— сборщик VLESS-ссылки.
   • ``generate_client_links()``                      — генерация всех ссылок
     (IPv4/IPv6/Domain) для основного пользователя. Мутирует ``_BOX_W``.
+
+  Удалены в патче №5 (мёртвый код, строго подмножество do_unified_user_manager
+  из _core.py, доступного из главного меню 2 → 1):
+  • ``do_user_show_link()`` — вызывалась только из do_user_menu().
+  • ``do_user_menu()``      — не вызывалась из _core.py, дублировала
+    do_unified_user_manager() с меньшим набором пунктов.
 
 Region B — единый менеджер (users.json + xray config.json одновременно):
   • ``_users_load()``                                — чтение users.json.
@@ -44,7 +48,7 @@ Region C — v2 с сортировкой и экспортом CSV:
     from vless_installer.modules.users_manager import (
         _users_load, _users_save, _users_get_config, _users_apply_config,
         _users_apply_to_config, _users_patch_config_no_restart, _users_gen_link,
-        do_user_list, do_user_add, do_user_delete, do_user_show_link, do_user_menu,
+        do_user_list, do_user_add, do_user_delete,
         _show_qr, _gen_vless_link, generate_client_links,
         _unified_load_users, _unified_save_users, _unified_show_links,
         _do_user_stats_screen, _do_user_stats_screen_v2,
@@ -391,42 +395,27 @@ def do_user_delete() -> None:
         warn(f"Ошибка при удалении: {e}")
 
 
-def do_user_show_link() -> None:
-    core = _core_module()
-    _box_link = core._box_link
-    CYAN      = core.CYAN
-    BOLD      = core.BOLD
-    NC        = core.NC
-    warn      = core.warn
-    cfg = _users_get_config()
-    do_user_list()
-    target = input(f"{CYAN}Email или UUID:{NC} ").strip()
-    if not target:
-        warn("Отмена")
-        return
-
-    try:
-        with cfg.open() as f:
-            c = json.load(f)
-        clients = (c.get("inbounds", [{}])[0]
-                   .get("settings", {}).get("clients", []))
-        found = next((cl for cl in clients
-                      if cl.get("email", "") == target or cl.get("id", "") == target), None)
-    except Exception:
-        found = None
-
-    if not found:
-        warn(f"Пользователь '{target}' не найден")
-        return
-
-    u_email = found.get("email", "")
-    u_uuid  = found.get("id", "")
-    link = _users_gen_link(cfg, u_uuid, u_email)
-    if link:
-        print(f"{BOLD}VLESS ссылка для '{u_email}':{NC}")
-        _box_link(link)
-        _show_qr(link, u_email, f"/root/vless_qr_{u_email}.png")
-
+# do_user_show_link() и do_user_menu() удалены в патче №5.
+#
+# Аудит показал, что do_user_menu() — строго подмножество
+# do_unified_user_manager() из _core.py: те же L/A/D/S/K/I пункты,
+# но без 4-8/E (статистика/применить/метка/отключить/редактировать/экспорт).
+# do_unified_user_manager() доступен из главного меню (2 → 1) и использует
+# _unified_load_users/_unified_save_users, которые синхронизируют users.json
+# и config.json одновременно — do_user_menu() работал только с config.json.
+#
+# do_user_show_link() вызывалась ТОЛЬКО из do_user_menu() (стр. 693 в старом
+# коде). do_user_add() использует _users_gen_link() напрямую (не эту функцию).
+# Аналогичная функциональность есть в do_unified_user_manager() пункт 3
+# (вызывает _unified_show_links).
+#
+# Пункт K (iOS-ссылка) из do_user_menu() был уже мёртвым кодом — do_user_menu
+# импортировалась в _core.py, но нигде не вызывалась. Патч №3 добавил рабочий
+# пункт K в do_unified_user_manager (do_user_show_link_ios_by_uuid),
+# патч №4 — в _menu_users (generate_client_links_ios).
+#
+# do_user_show_link_ios() (с input-ом email/uuid) оставлена — используется
+# тестами и может быть полезна как CLI-точка входа.
 
 def _users_gen_link_ios(cfg: Path, uuid_str: str, email: str) -> str:
     """iOS/Karing-совместимый вариант ссылки для конкретного пользователя.
@@ -659,44 +648,7 @@ def do_user_show_link_ios_by_uuid(uuid_str: str) -> None:
         _show_qr(link, f"{u_email} (iOS)", f"/root/vless_qr_ios_{u_email}.png")
 
 
-def do_user_menu() -> None:
-    core = _core_module()
-    _box_top    = core._box_top
-    _box_item   = core._box_item
-    _box_bottom = core._box_bottom
-    _box_row    = core._box_row
-    _box_sep    = core._box_sep
-    _box_info   = core._box_info
-    CYAN        = core.CYAN
-    NC          = core.NC
-    DIM         = core.DIM
-    YELLOW      = core.YELLOW
-    die         = core.die
-    warn        = core.warn
-    if not (Path("/etc/xray/config.json").exists()
-            or Path("/usr/local/etc/xray/config.json").exists()):
-        die("Xray не установлен.")
-    while True:
-        _box_top("УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ")
-        _box_item("L", f"Список пользователей")
-        _box_item("A", f"Добавить пользователя")
-        _box_item("D", f"Удалить пользователя")
-        _box_item("S", f"Показать ссылку / QR-код")
-        _box_item("K", f"Показать iOS/Karing-ссылку  {DIM}(без Vision flow и эмодзи){NC}")
-        _box_item("I", f"Информация: ограничение доступа по устройствам")
-        _box_item("Q", f"Назад")
-        _box_bottom()
-        choice = input(f"{CYAN}Выбор:{NC} ").strip().lower()
-        if   choice == 'l': do_user_list()
-        elif choice == 'a': do_user_add()
-        elif choice == 'd': do_user_delete()
-        elif choice == 's': do_user_show_link()
-        elif choice == 'k': do_user_show_link_ios()
-        elif choice == 'i': _show_device_limit_info()
-        elif choice in ('q', ''):
-            return
-        else:
-            warn("Введите L, A, D, S, K, I или Q")
+# do_user_menu() удалён в патче №5 — см. комментарий выше.
 
 
 def _show_device_limit_info() -> None:

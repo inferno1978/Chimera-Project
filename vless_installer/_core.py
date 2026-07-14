@@ -369,7 +369,7 @@ from vless_installer.modules.install_prompts import (
 from vless_installer.modules.users_manager import (
     _users_load, _users_save, _users_get_config, _users_apply_config,
     _users_apply_to_config, _users_patch_config_no_restart, _users_gen_link,
-    do_user_list, do_user_add, do_user_delete, do_user_show_link, do_user_menu,
+    do_user_list, do_user_add, do_user_delete,
     do_user_show_link_ios_by_uuid,
     _show_qr, _gen_vless_link, generate_client_links, generate_client_links_ios,
     _unified_load_users, _unified_save_users, _unified_show_links,
@@ -2787,9 +2787,11 @@ def _fp_from_state() -> str:
 
 
 # (_users_get_config, _users_apply_config, _users_gen_link, do_user_list,
-#  do_user_add, do_user_delete, do_user_show_link, do_user_menu, _show_qr,
-#  _gen_vless_link, generate_client_links — вынесены в
-#  vless_installer.modules.users_manager; импорт — в верхней секции этого файла.)
+#  do_user_add, do_user_delete, _show_qr, _gen_vless_link,
+#  generate_client_links — вынесены в
+#  vless_installer.modules.users_manager; импорт — в верхней секции этого файла.
+#  do_user_show_link и do_user_menu удалены в патче №5 — мёртвый код,
+#  строго подмножество do_unified_user_manager.)
 
 
 # =============================================================================

@@ -432,6 +432,22 @@ def do_entry_mirrors_menu() -> None:
         _box_row()
         _list_mirrors()
         _box_row()
+        # Подсказка про iOS/Karing — mirror-серверы требуют ручной настройки
+        # shadow-клиента на каждом отдельно. Это НЕ автоматизируется из этого
+        # меню, потому что clients[] на mirror-серверах этот модуль не
+        # редактирует (mirror-серверы — отдельные инстансы инсталлятора на
+        # других VPS, доступны только по SSH). Без shadow на mirror'е
+        # iOS-подписка исключает mirror-ссылки целиком (см. subscription.py
+        # ::build_subscription_body_ios). Чтобы mirror работал и в iOS-подписке,
+        # админ должен зайти на каждый mirror-сервер отдельно и выполнить
+        # в инсталляторе: главное меню → 2 (Управление пользователями) →
+        # 1 (Менеджер пользователей) → K (iOS/Karing-ссылка) для нужных юзеров.
+        if n_total > 0:
+            _box_row(f"  {YELLOW}📱 iOS/Karing:{NC} {DIM}для каждого mirror:{NC}")
+            _box_row(f"     {DIM}зайдите на него по SSH и выполните в инсталляторе{NC}")
+            _box_row(f"     {DIM}«2 → 1 → K» для каждого юзера с iOS-подпиской.{NC}")
+            _box_row(f"     {DIM}Иначе iOS-подписка исключит этот mirror.{NC}")
+            _box_row()
         _box_sep()
         _box_item("1", "➕  Добавить mirror")
         _box_item("2", "🗑️   Удалить mirror")
