@@ -23,15 +23,21 @@
 bootstrap.sh           — точка входа (curl | bash), проверка зависимостей
 main.py                — тонкая обёртка: exec(_core.py)
 chimera/
-  _core.py             — ВСЯ логика (≈37k строк), единый файл намеренно
-  __init__.py          — пустой, для импорта
+  _core.py             — ядро: orchestrator + globals (~8 093 строк)
+  __init__.py          — версия проекта (__version__ = "5.0.0")
   __all_exports.py     — реэкспорт публичных символов
-verify.py              — pre-publish sanity check
+  modules/             — 143 модуля по 25 категориям (см. PROJECT_MAP.md)
+verify.py              — pre-publish sanity check (313 проверок, 10/10)
+full_test.py           — полный автотест (74 проверки, 10/10)
+smoke_test_modules.py  — 42 smoke-теста в стен-режиме
 ```
 
 `_core.py` намеренно монолитный — это упрощает `exec`-загрузку и
 `curl | bash`-дистрибуцию без `pip install`. Не пытайтесь разбить его
-на пакеты без предварительного обсуждения в Issue.
+на пакеты без предварительного обсуждения в Issue. Модули в `chimera/modules/`
+обращаются к ядру через `_core_module()` lazy binding — это позволяет
+избежать циклических импортов и работать как из интерактивного режима,
+так и из cron.
 
 ## Правила кода
 
