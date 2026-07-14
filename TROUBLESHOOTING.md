@@ -613,3 +613,47 @@ remove_dns_redirect()
 - **DNS Leak Test**: Меню → Диагностика → `N` — проверка утечки DNS-запросов
 - **DNSCrypt-proxy управление**: Меню → Настройки сети → `3` (оптимизация) / `R` (выбор резолверов)
 - **Кастомные DNS правила**: Меню → Настройки сети → `D` (hosts / routing override в Xray)
+
+---
+
+## TrustTunnel — известные архитектурные ограничения
+
+**Меню:** главное → `18` · **Upstream:** https://github.com/TrustTunnel/TrustTunnel
+
+TrustTunnel интегрирован как 9-й протокол в `user_lifecycle.PROTOCOL_ADAPTERS`, использует официальный upstream prebuilt-бинарник `trusttunnel_endpoint` (Rust, Apache 2.0, GPG-подписан ключом AdGuard). Два ограничения зафиксированы осознанно — они не баги, а следствия дизайна upstream, которые пришлось принять при интеграции.
+
+### 1. Только агрегированный трафик, не per-user
+
+Апстримовский `/metrics` endpoint (Prometheus, `http://127.0.0.1:1987/metrics`) отдаёт счётчики трафика только с лейблом `protocol_type` (`http1`/`http2`/`http3`) — **без `username`**. Подтверждено в `lib/src/metrics.rs` и в `METRICS.md` upstream'а.
+
+```prometheus
+# HELP inbound_traffic_bytes Total number of bytes uploaded by clients
+# TYPE inbound_traffic_bytes counter
+inbound_traffic_bytes{protocol_type="http2"} 1234567
+```
+
+Per-user биллинг для TrustTunnel в текущей реализации **не поддерживается**. Трафик записывается в `traffic_accounting.record_traffic_sample` под синтетическим user_id `_aggregate` — это даёт мониторинг "есть ли вообще активность на TrustTunnel", но не позволяет атрибутировать байты конкретному пользователю. Это тот же уровень, что у FPTN и Hysteria2 в проекте (у них тоже нет per-user byte counter).
+
+**Если per-user биллинг становится hard-требованием**, варианты:
+- (a) Запускать отдельный процесс `trusttunnel_endpoint` на каждого пользователя (тяжело: 17 МБ бинарник × N пользователей, N портов).
+- (b) Патчить `lib/src/metrics.rs` в upstream'е, добавляя `username` лейбл, и собирать из исходников (Rust 1.95 + CMake + libclang, ~10 мин компиляции). **Побочный эффект:** теряется GPG-верификация официальных релизов — придётся поддерживать собственный форк.
+
+Вариант (b) в текущей реализации **не сделан осознанно** — GPG-верификация официальных бинарников считается более важной, чем per-user биллинг для протокола, который в проекте дополняющий (не основной).
+
+### 2. Смена пользователей вызывает рестарт сервиса
+
+Upstream TrustTunnel **не поддерживает hot-reload `credentials.toml`**. SIGHUP перезагружает только `hosts.toml` (TLS-хосты/сертификаты), но не credentials и не rules. Подтверждено в `endpoint/src/main.rs:521-542` — обработчик SIGHUP вызывает только `Core::reload_tls_hosts_settings`, который свопает `self.context.tls_demux` и больше ничего.
+
+Любой `add`/`remove`/`block`/`unblock` для TrustTunnel → правка `credentials.toml` + `systemctl restart trusttunnel`. Рестарт длится ~1 секунду и **рвёт ВСЕ активные соединения TrustTunnel** на сервере, не только у изменяемого пользователя.
+
+**Митигация для массовых операций:** cron-проходы (`check_ttl_expired`, `check_traffic_limits`, `run_cleanup`) обёрнуты в `user_lifecycle.batch_context()` — все правки файлов накапливаются, рестарт происходит **ровно один раз** в конце прохода, а не N раз. Контекстный менеджер поддерживает вложенность (счётчик глубины). Rollback-до-flush: при сбое любого протокола в транзакции `snap.restore()` + `_cancel_pending_restarts(protocols_list)` — демон никогда не рестартует с откаченным конфигом.
+
+**Не митигируется:** ручное добавление/удаление пользователя через TUI-меню (пункт 18) или через клиентского Telegram-бота. Эти одиночные операции рестартуют сервис сразу. Это задокументированное поведение — если на сервере активно пользуются TrustTunnel, планировать массовые пользовательские операции на cron-окно (например, ночью) или через `batch_context()` в кастомном скрипте.
+
+### См. также
+
+- **Установка/удаление:** Меню → `18` (TrustTunnel) → `1` (Установить) / `8` (Удалить)
+- **Cron-задачи:** `/etc/cron.d/trusttunnel` (health + stats, каждые 5 мин) — устанавливается автоматически при install, убирается при uninstall
+- **Логи:** `/var/log/xray-trusttunnel.log` (lifecycle), `/var/log/trusttunnel-endpoint.log` (binary stdout/stderr)
+- **VPS-чеклист для реального тестирования:** [`docs/trusttunnel-vps-checklist.md`](docs/trusttunnel-vps-checklist.md)
+
