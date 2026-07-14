@@ -338,6 +338,40 @@ def do_user_delete() -> None:
                   f"/root/vless_qr_{del_email}.png"):
             Path(p).unlink(missing_ok=True)
         _users_apply_config(cfg)
+
+        # ── Аддитивный блок: удаление теневого iOS-клиента ────────────────
+        # Если у удаляемого юзера был создан теневой клиент (через
+        # _users_get_or_create_ios_shadow для iOS-ссылки), его тоже надо
+        # убрать — иначе в clients[] остаётся висеть запись `__ios` без
+        # своего основного юзера, которая никому не нужна и засоряет
+        # список. Идемпотентно: если shadow нет — блок no-op, поведение
+        # для юзеров без iOS-варианта идентично допатчевому.
+        #
+        # ВАЖНО: отдельный _users_apply_config — намеренный, а не «забыли
+        # объединить с вызовом выше». Удаление основного и удаление
+        # shadow разделены, чтобы при сбое中途 (например JSON-ошибка при
+        # повторном чтении) основной юзер уже был удалён и применён, а
+        # shadow остался бы — это лучше, чем частично удалённый основной.
+        try:
+            shadow_email = _shadow_ios_email(del_email)
+            with cfg.open() as f:
+                c2 = json.load(f)
+            shadow_clients = c2["inbounds"][0]["settings"]["clients"]
+            if any(cl.get("email", "") == shadow_email for cl in shadow_clients):
+                c2["inbounds"][0]["settings"]["clients"] = [
+                    cl for cl in shadow_clients if cl.get("email", "") != shadow_email
+                ]
+                with cfg.open('w') as f:
+                    json.dump(c2, f, indent=2, ensure_ascii=False)
+                _users_apply_config(cfg)
+                Path(f"/root/vless_qr_ios_{del_email}.png").unlink(missing_ok=True)
+        except Exception as _shadow_e:
+            # Не роняем весь do_user_delete из-за сбоя cleanup-шага —
+            # основной юзер уже удалён. Логируем через warn (если доступен).
+            try:
+                warn(f"Предупреждение: не удалось удалить iOS-shadow для '{del_email}': {_shadow_e}")
+            except Exception:
+                pass
     except Exception as e:
         warn(f"Ошибка при удалении: {e}")
 
@@ -379,6 +413,162 @@ def do_user_show_link() -> None:
         _show_qr(link, u_email, f"/root/vless_qr_{u_email}.png")
 
 
+def _users_gen_link_ios(cfg: Path, uuid_str: str, email: str) -> str:
+    """iOS/Karing-совместимый вариант ссылки для конкретного пользователя.
+
+    Обёртка над существующим _users_gen_link() + постпроцессор
+    to_ios_karing_link() из ios_link_variant. НЕ дублирует логику сборки
+    host/port/pbk/sid/domain — только вызывает готовую ссылку и убирает
+    из неё `&flow=xtls-rprx-vision` и сырой эмодзи-флаг в начале fragment.
+
+    Возвращает пустую строку, если базовая _users_gen_link() вернула
+    пустую (т.е. ошибку чтения config.json) — поведение идентично
+    оригиналу, никаких новых точек отказа.
+    """
+    from vless_installer.modules.ios_link_variant import to_ios_karing_link
+    base = _users_gen_link(cfg, uuid_str, email)
+    if not base:
+        return ""
+    return to_ios_karing_link(base)
+
+
+# =============================================================================
+#  Теневой iOS-клиент (без XTLS Vision flow)
+# =============================================================================
+# Корень проблемы, которую чинит этот блок:
+#   Патч №1 (постпроцессор to_ios_karing_link) показывал пользователю REALITY-
+#   ссылку БЕЗ `&flow=xtls-rprx-vision`, но серверная clients[] в config.json
+#   продолжала хранить `"flow": "xtls-rprx-vision"` для этого UUID. Xray при
+#   хендшейке ожидает Vision-extended ClientHello, а клиент без flow в ссылке
+#   его не отправляет → гарантированный разрыв соединения.
+#
+#   Решение: для каждого REALITY-пользователя, которому нужна iOS-ссылка,
+#   создаётся ОТДЕЛЬНЫЙ shadow-клиент в той же clients[] — БЕЗ ключа `flow`
+#   в словаре. Этот shadow-клиент использует свой UUID (его видит iOS-юзер),
+#   а оригинальный клиент остаётся нетронутым для Android/ПК.
+#
+#   На xHTTP-инбаунде flow не используется в принципе → shadow не нужен,
+#   функция возвращает None, вызывающий код использует обычную ссылку.
+
+def _shadow_ios_email(base_email: str) -> str:
+    """Детерминированное имя теневого клиента. НЕ содержит пробелов.
+
+    Суффикс `__ios` выбран так, чтобы:
+      • Не конфликтовать с обычными email-адресами (никто не использует
+        двойное подчёркивание в реальных ящиках).
+      • Быть визуально различимым в do_user_list() — администратор видит,
+        что это служебная запись для iOS-варианта конкретного юзера.
+      • Детерминированно восстанавливаться по base_email —
+        _shadow_ios_email("alice") == "alice__ios" всегда.
+    """
+    return f"{base_email}__ios"
+
+
+def _users_get_or_create_ios_shadow(cfg: Path, base_email: str) -> tuple[str, str] | None:
+    """
+    Возвращает (shadow_uuid, shadow_email) для REALITY-юзера base_email.
+    Если теневой клиент уже существует в clients[] — переиспользует его
+    (идемпотентно, повторный вызов НЕ плодит дубликаты).
+    Если сеть — xhttp, теневой клиент не нужен: возвращает None
+    (вызывающий код должен в этом случае просто использовать обычную
+    _users_gen_link на ОРИГИНАЛЬНОМ uuid юзера).
+    Если base_email не найден среди clients[] — возвращает None.
+    """
+    core = _core_module()
+    gen_uuid = core.gen_uuid
+    with cfg.open() as f:
+        c = json.load(f)
+    inbound = c.get("inbounds", [{}])[0]
+    net = inbound.get("streamSettings", {}).get("network", "tcp")
+    if net == "xhttp":
+        return None
+    clients = inbound.get("settings", {}).get("clients", [])
+    base_client = next((cl for cl in clients if cl.get("email", "") == base_email), None)
+    if not base_client:
+        return None
+    shadow_email = _shadow_ios_email(base_email)
+    existing = next((cl for cl in clients if cl.get("email", "") == shadow_email), None)
+    if existing:
+        return existing.get("id", ""), shadow_email
+    shadow_uuid = gen_uuid()
+    # ВАЖНО: ключ "flow" здесь НЕ прописывается вообще (ни пустой строкой,
+    # ни отсутствующим ключом с явным None) — просто нет такого ключа в
+    # словаре, ровно как Xray ожидает клиента без Vision.
+    new_client = {"id": shadow_uuid, "email": shadow_email}
+    clients.append(new_client)
+    inbound["settings"]["clients"] = clients
+    c["inbounds"][0] = inbound
+    with cfg.open('w') as f:
+        json.dump(c, f, indent=2, ensure_ascii=False)
+    _users_apply_config(cfg)   # тот же безопасный путь, что и do_user_add()
+    return shadow_uuid, shadow_email
+
+
+def do_user_show_link_ios() -> None:
+    """iOS/Karing-совместимая ссылка для конкретного пользователя.
+
+    Для REALITY-режима:
+      Создаёт (или переиспользует) теневой клиент в clients[] БЕЗ ключа
+      `flow`, и генерирует ссылку на его UUID. Серверная clients[]
+      оригинального юзера НЕ трогается — Android/ПК продолжают
+      работать как раньше со своим flow=xtls-rprx-vision.
+
+    Для xHTTP-режима:
+      Shadow не нужен (flow там не используется в принципе) — ссылка
+      строится на UUID оригинального юзера, to_ios_karing_link всё
+      равно отрабатывает как no-op (в xHTTP нет flow ни в ссылке, ни
+      в server-side client).
+
+    QR пишется в отдельный файл /root/vless_qr_ios_{email}.png, НЕ
+    перезаписывая существующий /root/vless_qr_{email}.png.
+    """
+    core = _core_module()
+    _box_link = core._box_link
+    CYAN      = core.CYAN
+    BOLD      = core.BOLD
+    NC        = core.NC
+    DIM       = core.DIM
+    warn      = core.warn
+    cfg = _users_get_config()
+    do_user_list()
+    target = input(f"{CYAN}Email или UUID:{NC} ").strip()
+    if not target:
+        warn("Отмена")
+        return
+
+    try:
+        with cfg.open() as f:
+            c = json.load(f)
+        clients = (c.get("inbounds", [{}])[0]
+                   .get("settings", {}).get("clients", []))
+        found = next((cl for cl in clients
+                      if cl.get("email", "") == target or cl.get("id", "") == target), None)
+    except Exception:
+        found = None
+
+    if not found:
+        warn(f"Пользователь '{target}' не найден")
+        return
+
+    u_email = found.get("email", "")
+    shadow = _users_get_or_create_ios_shadow(cfg, u_email)
+    if shadow is None:
+        # xHTTP-режим ИЛИ юзер не найден в clients[] (не должно случиться,
+        # т.к. found уже найден выше, но на всякий случай) — используем
+        # обычную ссылку без изменений, она и так iOS-совместима.
+        u_uuid = found.get("id", "")
+        link = _users_gen_link_ios(cfg, u_uuid, u_email)
+    else:
+        shadow_uuid, shadow_email = shadow
+        link = _users_gen_link_ios(cfg, shadow_uuid, shadow_email)
+    if link:
+        print(f"{BOLD}📱 iOS/Karing-совместимая VLESS-ссылка для '{u_email}':{NC}")
+        print(f"{DIM}  (без &flow=xtls-rprx-vision и без эмодзи-флага){NC}")
+        _box_link(link)
+        # Отдельное имя файла — не перезаписывать существующий QR.
+        _show_qr(link, f"{u_email} (iOS)", f"/root/vless_qr_ios_{u_email}.png")
+
+
 def do_user_menu() -> None:
     core = _core_module()
     _box_top    = core._box_top
@@ -402,6 +592,7 @@ def do_user_menu() -> None:
         _box_item("A", f"Добавить пользователя")
         _box_item("D", f"Удалить пользователя")
         _box_item("S", f"Показать ссылку / QR-код")
+        _box_item("K", f"Показать iOS/Karing-ссылку  {DIM}(без Vision flow и эмодзи){NC}")
         _box_item("I", f"Информация: ограничение доступа по устройствам")
         _box_item("Q", f"Назад")
         _box_bottom()
@@ -410,11 +601,12 @@ def do_user_menu() -> None:
         elif choice == 'a': do_user_add()
         elif choice == 'd': do_user_delete()
         elif choice == 's': do_user_show_link()
+        elif choice == 'k': do_user_show_link_ios()
         elif choice == 'i': _show_device_limit_info()
         elif choice in ('q', ''):
             return
         else:
-            warn("Введите L, A, D, S, I или Q")
+            warn("Введите L, A, D, S, K, I или Q")
 
 
 def _show_device_limit_info() -> None:
@@ -688,6 +880,118 @@ def generate_client_links() -> None:
     _box_row(f"{BLUE}💡 Протокол: {proto_label}{NC}")
     _box_row(f"{BLUE}💡 Совет:{NC} Отсканируйте QR в v2rayNG, Hiddify, FoXray, Nekobox")
     _box_wrap_msg(f"   {DIM}Файлы QR:{NC} ", 12, "/root/vless_qr.png  /root/vless_qr_ipv4.png  /root/vless_qr_ipv6.png")
+    _box_row()
+    _box_bottom()
+
+
+def generate_client_links_ios() -> None:
+    """iOS/Karing-совместимые сводные ссылки (IPv4/IPv6/Domain).
+
+    Копия структуры generate_client_links(), но каждая ссылка
+    прогоняется через to_ios_karing_link() перед выводом, а файлы
+    и QR-картинки пишутся в ОТДЕЛЬНЫЕ имена (суффикс _ios), чтобы
+    НЕ перезаписывать существующие /root/vless_link*.txt и
+    /root/vless_qr_*.png от generate_client_links().
+
+    Существующая generate_client_links() НЕ трогается.
+
+    Мутирует _BOX_W по той же схеме — dual-form паттерн проекта.
+    """
+    core = _core_module()
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_bottom = core._box_bottom
+    _box_link   = core._box_link
+    _box_wrap_msg = core._box_wrap_msg
+    _get_box_width = core._get_box_width
+    get_server_ip  = core.get_server_ip
+    PARAM_FINGERPRINT = core.PARAM_FINGERPRINT
+    PROTOCOL_MODE     = core.PROTOCOL_MODE
+    PARAM_REALITY_DEST = core.PARAM_REALITY_DEST
+    AWG_EXIT_ENABLED  = core.AWG_EXIT_ENABLED
+    PARAM_DOMAIN      = core.PARAM_DOMAIN
+    PARAM_UUID        = core.PARAM_UUID
+    PARAM_PUBLIC_KEY  = core.PARAM_PUBLIC_KEY
+    PARAM_SHORTID     = core.PARAM_SHORTID
+    XHTTP_PATH        = core.XHTTP_PATH
+    XHTTP_MODE        = core.XHTTP_MODE
+    SERVER_PORT       = core.SERVER_PORT
+    IS_IPV6_AVAILABLE = core.IS_IPV6_AVAILABLE
+    GREEN   = core.GREEN
+    CYAN    = core.CYAN
+    MAGENTA = core.MAGENTA
+    BLUE    = core.BLUE
+    DIM     = core.DIM
+    NC      = core.NC
+
+    from vless_installer.modules.ios_link_variant import to_ios_karing_link
+
+    _BOX_W = _get_box_width()
+    setattr(core, "_BOX_W", _BOX_W)
+    print()
+    print()
+    _box_top(f"📱 iOS/Karing-совместимые ссылки")
+    _box_row()
+    _box_row(f"  {DIM}flow=xtls-rprx-vision и эмодзи-флаг убраны{NC}")
+    _box_row()
+    fp = PARAM_FINGERPRINT or "chrome"
+    proto = PROTOCOL_MODE  # "reality" или "xhttp"
+    _sni = PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) else PARAM_DOMAIN
+
+    ipv4 = get_server_ip("4")
+    if ipv4:
+        link4 = _gen_vless_link(
+            ipv4, PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
+            proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
+            port=SERVER_PORT,
+        )
+        link4 = to_ios_karing_link(link4)
+        print()
+        print(f"{GREEN}📡 IPv4 ссылка (iOS):{NC}")
+        _box_link(link4)
+        link_file = Path("/root/vless_link_ios.txt")
+        link_file.write_text(link4)
+        link_file.chmod(0o600)
+        print()
+        _show_qr(link4, "IPv4 (iOS)", "/root/vless_qr_ipv4_ios.png")
+
+    ipv6_ext = get_server_ip("6") if IS_IPV6_AVAILABLE else ""
+    if ipv6_ext:
+        link6 = _gen_vless_link(
+            f"[{ipv6_ext}]", PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
+            proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
+            port=SERVER_PORT,
+        )
+        link6 = to_ios_karing_link(link6)
+        print()
+        print(f"{CYAN}🌐 IPv6 ссылка (iOS):{NC}")
+        _box_link(link6)
+        link6_file = Path("/root/vless_link_ipv6_ios.txt")
+        link6_file.write_text(link6)
+        link6_file.chmod(0o600)
+        print()
+        _show_qr(link6, "IPv6 (iOS)", "/root/vless_qr_ipv6_ios.png")
+
+    if PARAM_DOMAIN:
+        link_ds = _gen_vless_link(
+            PARAM_DOMAIN, PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
+            proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
+            port=SERVER_PORT,
+        )
+        link_ds = to_ios_karing_link(link_ds)
+        print()
+        print(f"{MAGENTA}🔄 Domain (DualStack) ссылка (iOS):{NC}")
+        _box_link(link_ds)
+        print()
+        _show_qr(link_ds, "Domain/DualStack (iOS)", "/root/vless_qr_ios.png")
+        print()
+
+    _box_row()
+    proto_label = f"xHTTP TLS ({XHTTP_MODE})" if proto == "xhttp" else "VLESS+REALITY"
+    _box_row(f"{BLUE}💡 Протокол: {proto_label} | Порт: {SERVER_PORT}{NC}")
+    _box_row(f"{BLUE}💡 Совет:{NC} Импортируйте в Karing (iOS) или Hiddify (iOS)")
+    _box_wrap_msg(f"   {DIM}Файлы QR:{NC} ", 12,
+                  "/root/vless_qr_ios.png  /root/vless_qr_ipv4_ios.png  /root/vless_qr_ipv6_ios.png")
     _box_row()
     _box_bottom()
 

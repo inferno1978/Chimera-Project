@@ -551,6 +551,62 @@ def build_subscription_body(user: dict) -> bytes:
     payload = "\n".join(links)
     return base64.b64encode(payload.encode())
 
+
+def build_subscription_body_ios(user: dict) -> bytes:
+    """iOS/Karing-совместимый вариант тела подписки.
+
+    Копия структуры build_subscription_body(), но vless-запись
+    (_build_vless_uri) и каждая ссылка из get_mirror_uris(...) прогоняются
+    через to_ios_karing_link() перед добавлением в links[].
+
+    Сателлитные протоколы (mieru/naive/fptn/telemt) НЕ трогаются —
+    в их ссылках нет ни `&flow=xtls-rprx-vision`, ни эмодзи-флага в
+    начале fragment. Это фиксируется тестом, а не полагается на «и так
+    должно быть».
+
+    Существующая build_subscription_body() НЕ трогается — старый
+    маршрут /sub/{token} возвращает побайтово тот же base64, что и до
+    патча (защищено отдельным регрессионным тестом).
+    """
+    from vless_installer.modules.ios_link_variant import to_ios_karing_link
+
+    state = _load_state() or {}
+    ipv4  = _get_server_ip("4")
+
+    links: list[str] = []
+
+    # vless:// — только если hybrid_addon не увёл внешний inbound на Mieru
+    if not is_hybrid_mieru_active():
+        vless = _build_vless_uri(user, state)
+        if vless:
+            links.append(to_ios_karing_link(vless))
+    else:
+        _log("INFO", "hybrid_mieru активен — vless:// исключён из iOS-подписки")
+
+    # Сателлитные протоколы — БЕЗ трансформации (фиксируется тестом).
+    links += _build_mieru_uris(user, ipv4 or state.get("domain", ""))
+    links += _build_naive_uris(user)
+    links += _build_fptn_uris(user, ipv4 or state.get("domain", ""))
+
+    telemt = _build_telemt_uri(user, ipv4 or state.get("domain", ""))
+    if telemt:
+        links.append(telemt)
+
+    # Резервные entry-ноды — это тоже vless:// REALITY-ссылки, в них
+    # есть и flow, и (опционально) эмодзи-флаг в fragment. Прогоняем
+    # через to_ios_karing_link каждую.
+    uuid_str = user.get("uuid", "")
+    if uuid_str:
+        try:
+            from vless_installer.modules.entry_mirrors import get_mirror_uris
+            for uri in get_mirror_uris(uuid_str, only_healthy=True):
+                links.append(to_ios_karing_link(uri))
+        except Exception as e:
+            _log("WARN", f"entry_mirrors недоступен: {e}")
+
+    payload = "\n".join(links)
+    return base64.b64encode(payload.encode())
+
 # ══════════════════════════════════════════════════════════════════════════
 # HTTP(S)-ХЕНДЛЕР
 # ══════════════════════════════════════════════════════════════════════════
@@ -563,6 +619,40 @@ class _SubHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+
+        # TODO: broken until shadow-client fix — не показывать пользователю.
+        # Маршрут /sub/{token}/ios на REALITY давал бы нерабочую подписку:
+        # серверный clients[] содержит flow=xtls-rprx-vision, а постпроцессор
+        # его режет — разрыв хендшейка. Чинится отдельным заходом через
+        # _users_get_or_create_ios_shadow() (как в do_user_show_link_ios).
+        # m_ios = re.match(r"^/sub/([0-9a-f]{24})/ios/?$", path)
+        # if m_ios:
+        #     cfg = _load_sub_conf()
+        #     pepper = cfg.get("pepper", "")
+        #     if not pepper:
+        #         self.send_response(503)
+        #         self.end_headers()
+        #         return
+        #     token = m_ios.group(1)
+        #     user = _find_user_by_token(token, pepper)
+        #     if not user:
+        #         self.send_response(404)
+        #         self.end_headers()
+        #         return
+        #     body = build_subscription_body_ios(user)
+        #     self.send_response(200)
+        #     self.send_header("Content-Type", "text/plain; charset=utf-8")
+        #     self.send_header("Content-Length", str(len(body)))
+        #     self.send_header("Profile-Update-Interval", "6")
+        #     self.send_header("Profile-Title", "Chimera-iOS")
+        #     userinfo = _build_userinfo_header(user)
+        #     if userinfo:
+        #         self.send_header("Subscription-Userinfo", userinfo)
+        #     self.end_headers()
+        #     self.wfile.write(body)
+        #     return
+
+        # Существующая ветка — без изменений.
         m = re.match(r"^/sub/([0-9a-f]{24})/?$", path)
         if not m:
             self.send_response(404)

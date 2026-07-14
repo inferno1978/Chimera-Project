@@ -202,7 +202,7 @@ def do_generate_client_config() -> None:
                 "server": domain,
                 "server_port": port,
                 "uuid": vuuid,
-                "transport": {"type": "http", "path": xhttp_path},
+                "transport": {"type": "xhttp", "path": xhttp_path},
                 "tls": {
                     "enabled": True,
                     "server_name": domain,
@@ -241,8 +241,16 @@ def do_generate_client_config() -> None:
         xhttp_path_enc = _url_quote(xhttp_path, safe="")
         vless_link = (f"vless://{vuuid}@{domain}:{port}"
                       f"?encryption=none&security=tls&sni={domain}"
-                      f"&fp={fp}&type=http&path={xhttp_path_enc}#VLESS-xHTTP")
+                      f"&fp={fp}&type=xhttp&path={xhttp_path_enc}#VLESS-xHTTP")
     vless_link_file.write_text(vless_link + "\n")
+
+    # TODO: broken until shadow-client fix — не показывать пользователю.
+    # vless-link-ios.txt на REALITY давал бы нерабочую ссылку: серверный
+    # clients[] содержит flow=xtls-rprx-vision, а постпроцессор его режет.
+    # Чинится через _users_get_or_create_ios_shadow() отдельным заходом.
+    # from vless_installer.modules.ios_link_variant import to_ios_karing_link
+    # ios_link_file = out_dir / "vless-link-ios.txt"
+    # ios_link_file.write_text(to_ios_karing_link(vless_link) + "\n")
 
     _box_ok(f"Clash Meta   → {clash_file}")
     _box_ok(f"Sing-box     → {singbox_file}")
@@ -483,7 +491,7 @@ def do_share_config_server() -> None:
                 xhttp_path = urllib.parse.quote(state.get("xhttp_path", "/"), safe="")
                 link = (f"vless://{vuuid}@{domain}:{port}"
                         f"?encryption=none&security=tls&sni={domain}"
-                        f"&fp={fp}&type=http&path={xhttp_path}#VLESS-xHTTP")
+                        f"&fp={fp}&type=xhttp&path={xhttp_path}#VLESS-xHTTP")
             links.append({"name": "default", "links": [link]})
     except Exception as e:
         _box_warn(f"Ошибка сборки ссылок: {e}")
