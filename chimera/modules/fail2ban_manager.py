@@ -73,7 +73,7 @@ WHITE  = _C['WHITE']
 NC     = _C['NC']
 
 # ── Логирование ────────────────────────────────────────────────────────────────
-_LOG_FILE = Path("/var/log/vless-install.log")
+_LOG_FILE = Path("/var/log/chimera.log")
 
 def _log(level: str, msg: str) -> None:
     try:

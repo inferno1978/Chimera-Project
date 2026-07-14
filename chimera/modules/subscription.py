@@ -84,7 +84,7 @@ from chimera.modules.box_renderer import (
 )
 
 # ── Логирование (единый формат с остальными модулями) ──────────────────────
-_LOG_FILE = Path("/var/log/vless-install.log")
+_LOG_FILE = Path("/var/log/chimera.log")
 
 def _log(level: str, msg: str) -> None:
     try:

@@ -101,7 +101,7 @@ CRON_FILE    = Path("/etc/cron.d/telemt-warp-watchdog")
 WATCHDOG_LOG = Path("/var/log/telemt-warp-watchdog.log")
 MODULE_PATH  = Path(__file__).resolve()
 
-_LOG_FILE = Path("/var/log/vless-install.log")
+_LOG_FILE = Path("/var/log/chimera.log")
 
 
 # ── Логирование ──────────────────────────────────────────────────────────

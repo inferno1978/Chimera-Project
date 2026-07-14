@@ -76,7 +76,7 @@ _USERS_FILE       = Path("/etc/xray/users.json")
 _TTL_FILE         = Path("/var/lib/xray-installer/ttl_users.json")
 _LIMITS_FILE      = Path("/var/lib/xray-installer/traffic_limits.json")
 _BLOCKED_FILE     = Path("/var/lib/xray-installer/blocked_users.json")
-_LOG_FILE         = Path("/var/log/vless-install.log")
+_LOG_FILE         = Path("/var/log/chimera.log")
 _CLIENT_BOT_SVC   = Path("/etc/systemd/system/xray-tg-client.service")
 _CLIENT_BOT_SCRIPT = Path("/usr/local/bin/xray-tg-client-bot.py")
 _QR_TMP_DIR       = Path("/tmp/tg-client-bot-qr")
@@ -654,7 +654,7 @@ RATE_LIMIT_S = {rate_limit_s}
 # каталог, содержащий chimera/modules/linkqr_lib.py — нужен для
 # subprocess-вызовов linkqr_lib из inner-скрипта (см. _call_linkqr_helper).
 # Если проект перемещён после установки — fallback в _call_linkqr_helper
-# попробует канонические пути (/opt/vless-ultimate и legacy-варианты).
+# попробует канонические пути (/opt/chimera и legacy-варианты).
 PROJECT_ROOT = {project_root_literal}
 BOT_FILE     = Path("{bot_file}")
 MAP_FILE     = Path("{map_file}")
@@ -664,7 +664,7 @@ TTL_FILE     = Path("{ttl_file}")
 LIMITS_FILE  = Path("{limits_file}")
 BLOCKED_FILE = Path("{blocked_file}")
 QR_DIR       = Path("{qr_dir}")
-LOG_FILE     = Path("/var/log/vless-install.log")
+LOG_FILE     = Path("/var/log/chimera.log")
 OFFSET       = 0
 
 # ── Rate-limiting ────────────────────────────────────────────────────────────
@@ -960,10 +960,10 @@ def _call_linkqr_helper(action, **kwargs):
       1. PROJECT_ROOT — зашитый в момент генерации путь (главный, надёжный).
          Вычислен через Path(__file__).resolve().parents[2] от расположения
          chimera/modules/tg_client_bot.py — это канонический путь
-         установки (например /opt/vless-ultimate по bootstrap.sh).
+         установки (например /opt/chimera по bootstrap.sh).
       2. Fallback на случай нестандартной установки/переустановки:
          проверяем канонические пути из bootstrap.sh, ВКЛЮЧАЯ правильный
-         /opt/vless-ultimate (legacy /opt/VLESS-Ultimate-Installer оставлен
+         /opt/chimera (legacy /opt/VLESS-Ultimate-Installer оставлен
          только для обратной совместимости со старыми установками).
       3. Если ничего не найдено — возвращаем None, вызывающий код должен
          ЯВНО сообщить пользователю о невозможности построить ссылку.
@@ -985,7 +985,7 @@ def _call_linkqr_helper(action, **kwargs):
     # 2) Fallback: канонические пути в порядке приоритета
     if not project_root:
         for p in (
-            "/opt/vless-ultimate",                          # канонический (bootstrap.sh:INSTALL_DIR)
+            "/opt/chimera",                          # канонический (bootstrap.sh:INSTALL_DIR)
             "/opt/VLESS-Ultimate-Installer",                # legacy регистр (старые установки)
             "/root/VLESS-Ultimate-Installer",
             "/root/vless-ultimate",

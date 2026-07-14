@@ -68,7 +68,7 @@ CYAN   = _C['CYAN'];  BLUE   = _C['BLUE'];   BOLD   = _C['BOLD']
 DIM    = _C['DIM'];   WHITE  = _C['WHITE'];  NC     = _C['NC']
 
 # ── Логирование ────────────────────────────────────────────────────────────
-_LOG_FILE   = Path("/var/log/vless-install.log")
+_LOG_FILE   = Path("/var/log/chimera.log")
 _FUZZ_LOG   = Path("/var/log/xray-fragment-fuzzer.log")
 _STATE_FILE = Path("/var/lib/xray-installer/state.json")
 

@@ -270,7 +270,7 @@ def main():
 
     # Проверка: не боевой ли сервер?
     _prod_markers = [
-        Path("/opt/vless-ultimate"),
+        Path("/opt/chimera"),
         Path("/var/lib/xray-installer/state.json"),
         Path("/etc/xray/config.json"),
         Path("/etc/systemd/system/xray.service"),

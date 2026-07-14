@@ -47,7 +47,7 @@ RED=_C['RED']; GREEN=_C['GREEN']; YELLOW=_C['YELLOW']; CYAN=_C['CYAN']
 BLUE=_C['BLUE']; BOLD=_C['BOLD']; DIM=_C['DIM']; WHITE=_C['WHITE']; NC=_C['NC']
 
 # ── Логирование ────────────────────────────────────────────────────────────
-_LOG_FILE      = Path("/var/log/vless-install.log")
+_LOG_FILE      = Path("/var/log/chimera.log")
 _WATCHDOG_LOG  = Path("/var/log/vless-fragment-watchdog.log")
 _STATE_FILE    = Path("/var/lib/xray-installer/state.json")
 _XRAY_LOG      = Path("/var/log/xray/error.log")
@@ -160,7 +160,7 @@ def apply_preset(idx: int) -> bool:
     preset = ESCALATION[idx]
     try:
         sys.path.insert(0, "/home/inferno1978/VLESS-Ultimate-Installer")
-        sys.path.insert(0, "/opt/vless-ultimate")
+        sys.path.insert(0, "/opt/chimera")
         from chimera.modules.fragment_config import generate_fragment_client_config
         path = generate_fragment_client_config(
             packets=preset["packets"],

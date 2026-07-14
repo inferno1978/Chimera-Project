@@ -41,7 +41,7 @@ DIM    = _C['DIM'];   WHITE  = _C['WHITE'];  NC     = _C['NC']
 
 # ── Файлы и пути ──────────────────────────────────────────────────────────────
 STATE_FILE      = Path("/var/lib/xray-installer/state.json")
-LOG_FILE        = Path("/var/log/vless-install.log")
+LOG_FILE        = Path("/var/log/chimera.log")
 H2_CONFIG_DIR   = Path("/etc/hysteria")
 H2_CONFIG_FILE  = H2_CONFIG_DIR / "config.yaml"
 H2_BINARY       = Path("/usr/local/bin/hysteria")

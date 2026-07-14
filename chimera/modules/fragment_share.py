@@ -55,7 +55,7 @@ RED=_C['RED']; GREEN=_C['GREEN']; YELLOW=_C['YELLOW']; CYAN=_C['CYAN']
 BLUE=_C['BLUE']; BOLD=_C['BOLD']; DIM=_C['DIM']; WHITE=_C['WHITE']; NC=_C['NC']
 
 # ── Логирование ────────────────────────────────────────────────────────────
-_LOG_FILE = Path("/var/log/vless-install.log")
+_LOG_FILE = Path("/var/log/chimera.log")
 
 def _log(level: str, msg: str) -> None:
     try:

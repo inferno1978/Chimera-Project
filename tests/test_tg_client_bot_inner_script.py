@@ -10,14 +10,14 @@ End-to-end тесты для сгенерированного inner-скрипт
 
   1. Записывает сгенерированный inner-скрипт во временный файл.
   2. Подкладывает fake project_root с минимальным linkqr_lib-заглушкой
-     (по структуре /opt/vless-ultimate/chimera/modules/linkqr_lib.py).
+     (по структуре /opt/chimera/chimera/modules/linkqr_lib.py).
   3. Реально ИСПОЛНЯЕТ inner-скрипт через subprocess, импортируя его как модуль.
   4. Вызывает _call_linkqr_helper для каждого из 5 actions и проверяет,
      что subprocess-вызов РЕАЛЬНО находит linkqr_lib и возвращает не-None.
 
 Это ловит регрессии, которые ast.parse не видит:
   • неправильный путь к linkqr_lib (баг с /opt/VLESS-Ultimate-Installer)
-  • отсутствие канонического /opt/vless-ultimate в fallback-списке
+  • отсутствие канонического /opt/chimera в fallback-списке
   • сломанная сериализация аргументов через stdin/JSON
   • неверный PYTHONPATH в subprocess env
 
@@ -107,7 +107,7 @@ class TestInnerScriptExecutesLinkqrHelper(unittest.TestCase):
     def setUp(self):
         _setup_core_in_sysmodules()
         self._tmpdir = Path(tempfile.mkdtemp())
-        # 1) Fake project_root, имитирующий структуру /opt/vless-ultimate/
+        # 1) Fake project_root, имитирующий структуру /opt/chimera/
         #    с рабочим linkqr_lib.py
         self._fake_project = self._tmpdir / "fake-vless-ultimate"
         self._linkqr_lib_path = (
@@ -316,14 +316,14 @@ class TestInnerScriptProjectRootResolvesAtGenerationTime(unittest.TestCase):
         self.assertIn("if PROJECT_ROOT and", helper_body)
         # Fallback-список должен идти ПОСЛЕ проверки PROJECT_ROOT
         project_root_check_pos = helper_body.find("if PROJECT_ROOT and")
-        fallback_pos = helper_body.find('"/opt/vless-ultimate"')
+        fallback_pos = helper_body.find('"/opt/chimera"')
         self.assertGreater(fallback_pos, project_root_check_pos,
                            "Fallback list must come AFTER PROJECT_ROOT check")
 
 
 class TestInnerScriptFallbackListOrder(unittest.TestCase):
     """
-    Проверяет, что в fallback-списке канонический /opt/vless-ultimate идёт
+    Проверяет, что в fallback-списке канонический /opt/chimera идёт
     ПЕРВЫМ (а не legacy /opt/VLESS-Ultimate-Installer).
     """
 
@@ -336,22 +336,22 @@ class TestInnerScriptFallbackListOrder(unittest.TestCase):
         script = tg_client_bot._generate_client_bot_script(cfg)
         helper_start = script.find("def _call_linkqr_helper")
         helper_body = script[helper_start:]
-        # /opt/vless-ultimate должен встретиться раньше /opt/VLESS-Ultimate-Installer
-        canonical_pos = helper_body.find('"/opt/vless-ultimate"')
+        # /opt/chimera должен встретиться раньше /opt/VLESS-Ultimate-Installer
+        canonical_pos = helper_body.find('"/opt/chimera"')
         legacy_pos = helper_body.find('"/opt/VLESS-Ultimate-Installer"')
-        self.assertGreater(canonical_pos, 0, "/opt/vless-ultimate missing in fallback")
+        self.assertGreater(canonical_pos, 0, "/opt/chimera missing in fallback")
         self.assertGreater(legacy_pos, 0, "legacy path missing in fallback")
         self.assertLess(canonical_pos, legacy_pos,
-                        "Canonical /opt/vless-ultimate must come BEFORE legacy path")
+                        "Canonical /opt/chimera must come BEFORE legacy path")
 
     def test_no_legacy_only_list(self):
-        """Старый баг: только legacy-пути без /opt/vless-ultimate."""
+        """Старый баг: только legacy-пути без /opt/chimera."""
         from chimera.modules import tg_client_bot
         cfg = {"token": "T", "admin_id": "A"}
         script = tg_client_bot._generate_client_bot_script(cfg)
         # Не должно быть секции где ТОЛЬКО legacy-пути
         # (старый код начинался с ('/opt/VLESS-Ultimate-Installer', ...))
-        # Проверим что любая тройка начинается с /opt/vless-ultimate
+        # Проверим что любая тройка начинается с /opt/chimera
         helper_start = script.find("def _call_linkqr_helper")
         helper_body = script[helper_start:helper_start + 3000]
         # Находим первый for p in (
@@ -360,8 +360,8 @@ class TestInnerScriptFallbackListOrder(unittest.TestCase):
         # Сразу после 'for p in (' должен идти canonical path
         after_for = helper_body[for_match + len("for p in ("):].lstrip()
         self.assertTrue(
-            after_for.startswith('"/opt/vless-ultimate"'),
-            f"First path in fallback list must be /opt/vless-ultimate, got: {after_for[:50]!r}"
+            after_for.startswith('"/opt/chimera"'),
+            f"First path in fallback list must be /opt/chimera, got: {after_for[:50]!r}"
         )
 
 
@@ -399,7 +399,7 @@ class TestInnerScriptNegativeScenarioErrorMessage(unittest.TestCase):
         inner_script = self._tmpdir / "inner_bot.py"
         inner_script.write_text(script)
 
-        # Запускаем в чистом окружении — без /opt/vless-ultimate на диске.
+        # Запускаем в чистом окружении — без /opt/chimera на диске.
         # Используем tmpdir как cwd, чтобы sys.path[0]='' указывал туда
         # (где нет chimera/).
         env = dict(os.environ)
