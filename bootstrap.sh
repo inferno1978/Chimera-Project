@@ -115,153 +115,186 @@ if [[ -n "$_found" && "$_found" != "$INSTALL_DIR" ]]; then
 fi
 
 # =============================================================================
-#  Пост-апгрейд проверка: импорт chimera + авто-очистка старой vless_installer/
+#  Atomic archive-based update with staging, verification, and rollback
 # =============================================================================
-# Вызывается после успешного archive-fallback (когда cp -rf отработал, но
-# старая директория vless_installer/ могла остаться, т.к. cp не удаляет файлы,
-# отсутствующие в архиве).
+# Безопасный паттерн обновления через archive-tarball:
+#   1. Download → tmp file (curl -f, проверка exit code)
+#   2. Extract → distinct staging dir (tar, проверка exit code)
+#   3. Verify key files exist in staging (main.py, chimera/__init__.py, chimera/_core.py)
+#   4. Backup current installation → ${install_dir}.pre-chimera-backup
+#   5. Copy staging → install_dir
+#   6. Verify import chimera
+#   7. If ANY step fails after backup → ROLLBACK from backup
+#   8. If all OK → cleanup backup + staging + auto-cleanup vless_installer/
 #
-# Логика:
-#   1. Проверяем, что chimera пакет действительно импортируется из INSTALL_DIR
-#      (это подтверждает, что обновление полное и рабочее).
-#   2. Если импорт прошёл — удаляем старую vless_installer/ если она существует
-#      (auto-cleanup, чтобы не путать пользователя неактивными старыми файлами).
-#   3. Если импорт НЕ прошёл — НЕ трогаем vless_installer/, чтобы оставить
-#      пользователю хоть что-то рабочее для восстановления.
-#   4. Дополнительно: удаляем stale __pycache__ из vless_installer/, если
-#      vless_installer/ решено оставить (defensive — должно быть пусто, но
-#      на всякий случай).
-_verify_and_cleanup_old_package() {
+# ГАРАНТИЯ: если curl/tar/verify упали ДО backup — install_dir НЕ ТРОНУТ.
+#           если cp/import упали ПОСЛЕ backup — install_dir ВОССТАНОВЛЕН из backup.
+_archive_update() {
     local install_dir="$1"
+    local archive_url="$2"
+    local _pid="$$"
+    local _archive_tmp="/tmp/chimera_update_${_pid}.tar.gz"
+    local _staging="/tmp/chimera_staging_${_pid}"
 
-    # Шаг 1: проверка импорта chimera
-    # Используем PYTHONPATH вместо sys.path.insert, чтобы команда была максимально простой
-    if PYTHONPATH="${install_dir}" python3 -c "import chimera; print('chimera version:', chimera.__version__)" >/dev/null 2>&1; then
-        ok "Импорт chimera проверен — обновление успешно"
+    # Очистка от предыдущих прогонов
+    rm -rf "$_staging" "$_archive_tmp"
 
-        # Шаг 2: авто-очистка старой vless_installer/ (если есть)
-        if [[ -d "${install_dir}/vless_installer" ]]; then
-            rm -rf "${install_dir}/vless_installer"
-            ok "Старая директория vless_installer/ удалена (auto-cleanup после успешного апгрейда)"
-        fi
-
-        # Шаг 3: defensive — удаляем stale __pycache__ от старого пакета, если остались
-        # (rm -rf vless_installer выше уже должен был их убрать, но если vless_installer/
-        # уже была удалена ранее, проверяем корень)
-        find "${install_dir}" -maxdepth 3 -type d -name "__pycache__" -path "*/vless_installer/*" -exec rm -rf {} + 2>/dev/null || true
-    else
-        # Импорт не прошёл — обновление неполное. НЕ трогаем старую vless_installer/.
-        warn "Импорт chimera не прошёл — обновление может быть неполным"
-        warn "Старая директория vless_installer/ оставлена (для возможного восстановления)"
-        warn "Проверьте ${install_dir}/chimera/ вручную или выполните:"
+    # --- Stage 1: Download ---
+    if ! curl -fsSL --connect-timeout 30 --retry 3 -o "$_archive_tmp" "$archive_url" 2>/dev/null; then
+        warn "Не удалось скачать архив. Проверьте соединение с GitHub."
+        warn "Установка НЕ изменена. Попробуйте вручную:"
         warn "  cd ${install_dir} && git reset --hard origin/${BRANCH}"
+        rm -f "$_archive_tmp"
+        return 1
     fi
+    local _size
+    _size=$(stat -c%s "$_archive_tmp" 2>/dev/null || echo "?")
+    ok "Архив скачан (${_size} байт)"
+
+    # --- Stage 2: Extract to staging (NOT to install_dir!) ---
+    mkdir -p "$_staging"
+    if ! tar -xzf "$_archive_tmp" -C "$_staging" 2>/dev/null; then
+        warn "Не удалось распаковать архив (возможно повреждён при передаче)."
+        warn "Установка НЕ изменена. Попробуйте вручную:"
+        warn "  cd ${install_dir} && git reset --hard origin/${BRANCH}"
+        rm -rf "$_staging" "$_archive_tmp"
+        return 1
+    fi
+    ok "Архив распакован в staging: ${_staging}"
+
+    # --- Stage 3: Find extracted dir + verify key files ---
+    local _extracted=""
+    for _d in "${_staging}/Chimera-Project-${BRANCH}" "${_staging}/VLESS-Ultimate-Installer-${BRANCH}"; do
+        if [[ -d "$_d" ]]; then _extracted="$_d"; break; fi
+    done
+    if [[ -z "$_extracted" ]]; then
+        warn "Архив распакован, но ожидаемая директория не найдена."
+        warn "Установка НЕ изменена. Содержимое staging: $(ls "$_staging" 2>/dev/null)"
+        rm -rf "$_staging" "$_archive_tmp"
+        return 1
+    fi
+    # Verify critical files exist in staging
+    if [[ ! -f "${_extracted}/main.py" ]] || \
+       [[ ! -f "${_extracted}/chimera/__init__.py" ]] || \
+       [[ ! -f "${_extracted}/chimera/_core.py" ]]; then
+        warn "Архив неполон — отсутствуют ключевые файлы (main.py, chimera/__init__.py, chimera/_core.py)."
+        warn "Установка НЕ изменена. Попробуйте вручную:"
+        warn "  cd ${install_dir} && git reset --hard origin/${BRANCH}"
+        rm -rf "$_staging" "$_archive_tmp"
+        return 1
+    fi
+    ok "Staging проверен: main.py, chimera/__init__.py, chimera/_core.py — на месте"
+
+    # --- Stage 4: Backup current installation ---
+    local _backup="${install_dir}.pre-chimera-backup"
+    rm -rf "$_backup"
+    if ! cp -rf "$install_dir" "$_backup" 2>/dev/null; then
+        warn "Не удалось создать backup текущей установки (диск заполнен?)."
+        warn "Установка НЕ изменена (безопасность важнее обновления)."
+        rm -rf "$_backup" "$_staging" "$_archive_tmp"
+        return 1
+    fi
+    ok "Backup создан: ${_backup}"
+
+    # --- Stage 5: Copy staging → install_dir ---
+    if ! cp -rf "${_extracted}/." "${install_dir}/" 2>/dev/null; then
+        warn "Копирование файлов прервано (диск заполнен?). ОТКАТ из backup."
+        rm -rf "${install_dir}"
+        mv "$_backup" "$install_dir"
+        ok "Откат выполнен — установка восстановлена из backup"
+        rm -rf "$_staging" "$_archive_tmp"
+        return 1
+    fi
+    ok "Файлы скопированы из staging в ${install_dir}"
+
+    # --- Stage 6: Verify import chimera ---
+    if ! PYTHONPATH="${install_dir}" python3 -c "import chimera" >/dev/null 2>&1; then
+        warn "Импорт chimera не прошёл после обновления. ОТКАТ из backup."
+        rm -rf "${install_dir}"
+        mv "$_backup" "$install_dir"
+        ok "Откат выполнен — установка восстановлена из backup"
+        rm -rf "$_staging" "$_archive_tmp"
+        warn "Попробуйте вручную: cd ${install_dir} && git reset --hard origin/${BRANCH}"
+        return 1
+    fi
+    ok "Импорт chimera проверен — обновление успешно"
+
+    # --- Stage 7: Cleanup ---
+    rm -rf "$_backup" "$_staging" "$_archive_tmp"
+
+    # --- Stage 8: Auto-cleanup old vless_installer/ ---
+    if [[ -d "${install_dir}/vless_installer" ]]; then
+        rm -rf "${install_dir}/vless_installer"
+        ok "Старая директория vless_installer/ удалена (auto-cleanup)"
+    fi
+    find "${install_dir}" -maxdepth 3 -type d -name "__pycache__" \
+        -path "*/vless_installer/*" -exec rm -rf {} + 2>/dev/null || true
+
+    return 0
 }
 
+# =============================================================================
+#  Основная логика обновления / установки
+# =============================================================================
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
     info "Обновление существующей git-установки..."
     cd "$INSTALL_DIR"
 
     # Пробуем обычный git pull. Если упал (divergent branches, нет сети и т.п.) —
-    # fallback на полный archive-tarball. _update_module через curl НЕ используем:
-    # он обновляет только 4 файла и не создаёт директории (curl -o не делает mkdir),
-    # что приводило к багу: main.py обновлялся до v5.0.0, но chimera/ не создавалась
-    # → ModuleNotFoundError при запуске.
-    # Archive fallback обновляет ВСЕ файлы сразу через tar -xzf + cp -rf.
+    # fallback на полный archive-tarball через _archive_update (atomic, с rollback).
     if git pull --quiet origin "$BRANCH" 2>/dev/null; then
         ok "Обновлено до последней версии (fast-forward)"
     else
         warn "git pull не удался (возможно divergent branches) — полное обновление через archive..."
-        ARCHIVE="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
-        ARCHIVE_TMP="/tmp/chimera_update.tar.gz"
-        # Имя директории внутри архива = <RepoName>-<branch>
-        # GitHub отдаёт архив с именем по текущему названию репо (Chimera-Project-main)
-        ARCHIVE_DIR="Chimera-Project-${BRANCH}"
-        if curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" 2>/dev/null; then
-            tar -xzf "$ARCHIVE_TMP" -C /tmp/ 2>/dev/null
-            if [[ -d "/tmp/${ARCHIVE_DIR}" ]]; then
-                cp -rf "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
-                rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
-                ok "Файлы обновлены до последней версии через archive"
-                _verify_and_cleanup_old_package "$INSTALL_DIR"
-            else
-                # Архив мог скачаться, но директория имеет другое имя
-                # (например, если GitHub ещё не переименован — будет VLESS-Ultimate-Installer-main)
-                _alt_dir="VLESS-Ultimate-Installer-${BRANCH}"
-                if [[ -d "/tmp/${_alt_dir}" ]]; then
-                    cp -rf "/tmp/${_alt_dir}/." "$INSTALL_DIR/"
-                    rm -rf "/tmp/${_alt_dir}" "$ARCHIVE_TMP"
-                    ok "Файлы обновлены через archive (legacy dir name)"
-                    _verify_and_cleanup_old_package "$INSTALL_DIR"
-                else
-                    warn "Архив скачан, но директория не найдена. Проверьте /tmp/${ARCHIVE_DIR}"
-                    warn "Возможно, репозиторий ещё не переименован на GitHub."
-                    warn "Попробуйте вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
-                fi
-            fi
-        else
-            warn "Не удалось скачать архив. Проверьте соединение с GitHub."
-            warn "Попробуйте вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
-        fi
+        _archive_update "$INSTALL_DIR" "${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
     fi
 else
     if [[ -d "$INSTALL_DIR" ]] && [[ -f "${INSTALL_DIR}/main.py" ]]; then
-        # Установка без .git — принудительно обновляем все файлы через archive
+        # Установка без .git — обновляем через _archive_update (atomic, с rollback)
         info "Установка без git обнаружена — полное обновление через archive..."
-        ARCHIVE="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
-        ARCHIVE_TMP="/tmp/chimera_update.tar.gz"
-        ARCHIVE_DIR="Chimera-Project-${BRANCH}"
-        if curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" 2>/dev/null; then
-            tar -xzf "$ARCHIVE_TMP" -C /tmp/ 2>/dev/null
-            if [[ -d "/tmp/${ARCHIVE_DIR}" ]]; then
-                cp -rf "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
-                rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
-                ok "Файлы обновлены до последней версии через archive"
-                _verify_and_cleanup_old_package "$INSTALL_DIR"
-            else
-                _alt_dir="VLESS-Ultimate-Installer-${BRANCH}"
-                if [[ -d "/tmp/${_alt_dir}" ]]; then
-                    cp -rf "/tmp/${_alt_dir}/." "$INSTALL_DIR/"
-                    rm -rf "/tmp/${_alt_dir}" "$ARCHIVE_TMP"
-                    ok "Файлы обновлены через archive (legacy dir name)"
-                    _verify_and_cleanup_old_package "$INSTALL_DIR"
-                else
-                    warn "Архив скачан, но директория не найдена. Проверьте /tmp/${ARCHIVE_DIR}"
-                fi
-            fi
-        else
-            warn "Не удалось обновить — используем текущую версию"
-        fi
+        _archive_update "$INSTALL_DIR" "${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
     else
         info "Клонирование репозитория..."
         if ! git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
             warn "git clone не удался — загружаю архив..."
             mkdir -p "$INSTALL_DIR"
-            ARCHIVE="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
-            ARCHIVE_TMP="/tmp/chimera_install.tar.gz"
-            ARCHIVE_DIR="Chimera-Project-${BRANCH}"
-            curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" 2>/dev/null || {
-                # Пробуем legacy-имя архива (если GitHub ещё не переименован)
-                _alt_archive_url="https://github.com/inferno1978/VLESS-Ultimate-Installer/archive/refs/heads/${BRANCH}.tar.gz"
-                curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$_alt_archive_url" 2>/dev/null || {
-                    err "Не удалось загрузить архив. Проверьте соединение."
+            _ARCHIVE_URL="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
+            # Для свежей установки используем упрощённый путь (backup не нужен —
+            # INSTALL_DIR пустой, откатываться некуда). Но staging + verify — обязательно.
+            _CLONE_TMP="/tmp/chimera_install_$$.tar.gz"
+            _CLONE_STAGING="/tmp/chimera_clone_staging_$$"
+            rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
+            if curl -fsSL --connect-timeout 30 --retry 3 -o "$_CLONE_TMP" "$_ARCHIVE_URL" 2>/dev/null || \
+               curl -fsSL --connect-timeout 30 --retry 3 -o "$_CLONE_TMP" \
+                 "https://github.com/inferno1978/VLESS-Ultimate-Installer/archive/refs/heads/${BRANCH}.tar.gz" 2>/dev/null; then
+                mkdir -p "$_CLONE_STAGING"
+                if tar -xzf "$_CLONE_TMP" -C "$_CLONE_STAGING" 2>/dev/null; then
+                    _extracted=""
+                    for _d in "${_CLONE_STAGING}/Chimera-Project-${BRANCH}" "${_CLONE_STAGING}/VLESS-Ultimate-Installer-${BRANCH}"; do
+                        if [[ -d "$_d" ]]; then _extracted="$_d"; break; fi
+                    done
+                    if [[ -n "$_extracted" ]] && [[ -f "${_extracted}/main.py" ]]; then
+                        cp -r "${_extracted}/." "$INSTALL_DIR/"
+                        ok "Загружено в ${INSTALL_DIR}"
+                    else
+                        err "Архив скачан, но директория или main.py не найдены."
+                        rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
+                        exit 1
+                    fi
+                else
+                    err "Не удалось распаковать архив."
+                    rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
                     exit 1
-                }
-            }
-            tar -xzf "$ARCHIVE_TMP" -C /tmp/
-            # Пробуем оба имени директории
-            if [[ -d "/tmp/${ARCHIVE_DIR}" ]]; then
-                cp -r "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
-                rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
+                fi
+                rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
             else
-                _alt_dir="VLESS-Ultimate-Installer-${BRANCH}"
-                cp -r "/tmp/${_alt_dir}/." "$INSTALL_DIR/" 2>/dev/null && rm -rf "/tmp/${_alt_dir}" "$ARCHIVE_TMP" || {
-                    err "Архив скачан, но директория не найдена."
-                    exit 1
-                }
+                err "Не удалось загрузить архив. Проверьте соединение."
+                rm -f "$_CLONE_TMP"
+                exit 1
             fi
+        else
+            ok "Загружено в ${INSTALL_DIR}"
         fi
-        ok "Загружено в ${INSTALL_DIR}"
     fi
 fi
 
