@@ -117,63 +117,101 @@ fi
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
     info "Обновление существующей git-установки..."
     cd "$INSTALL_DIR"
-    git pull --quiet origin "$BRANCH" 2>/dev/null \
-        && ok "Обновлено до последней версии" \
-        || warn "Не удалось обновить через git — принудительно обновляю файлы..."
-    # Принудительно обновляем ключевые модули напрямую с GitHub
-    _update_module() {
-        local rel_path="$1"
-        local url="https://raw.githubusercontent.com/inferno1978/Chimera-Project/${BRANCH}/${rel_path}"
-        curl -fsSL --connect-timeout 15 -H "Cache-Control: no-cache" -H "Pragma: no-cache" -o "${INSTALL_DIR}/${rel_path}" "$url" 2>/dev/null \
-            && info "Обновлён: ${rel_path}" \
-            || warn "Не удалось обновить: ${rel_path}"
-    }
-    _update_module "chimera/modules/tg_nets.py"
-    _update_module "chimera/modules/user_fp_manager.py"
-    _update_module "chimera/_core.py"
-    _update_module "main.py"
+
+    # Пробуем обычный git pull. Если упал (divergent branches, нет сети и т.п.) —
+    # fallback на полный archive-tarball. _update_module через curl НЕ используем:
+    # он обновляет только 4 файла и не создаёт директории (curl -o не делает mkdir),
+    # что приводило к багу: main.py обновлялся до v5.0.0, но chimera/ не создавалась
+    # → ModuleNotFoundError при запуске.
+    # Archive fallback обновляет ВСЕ файлы сразу через tar -xzf + cp -rf.
+    if git pull --quiet origin "$BRANCH" 2>/dev/null; then
+        ok "Обновлено до последней версии (fast-forward)"
+    else
+        warn "git pull не удался (возможно divergent branches) — полное обновление через archive..."
+        ARCHIVE="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
+        ARCHIVE_TMP="/tmp/chimera_update.tar.gz"
+        # Имя директории внутри архива = <RepoName>-<branch>
+        # GitHub отдаёт архив с именем по текущему названию репо (Chimera-Project-main)
+        ARCHIVE_DIR="Chimera-Project-${BRANCH}"
+        if curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" 2>/dev/null; then
+            tar -xzf "$ARCHIVE_TMP" -C /tmp/ 2>/dev/null
+            if [[ -d "/tmp/${ARCHIVE_DIR}" ]]; then
+                cp -rf "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
+                rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
+                ok "Файлы обновлены до последней версии через archive"
+            else
+                # Архив мог скачаться, но директория имеет другое имя
+                # (например, если GitHub ещё не переименован — будет VLESS-Ultimate-Installer-main)
+                _alt_dir="VLESS-Ultimate-Installer-${BRANCH}"
+                if [[ -d "/tmp/${_alt_dir}" ]]; then
+                    cp -rf "/tmp/${_alt_dir}/." "$INSTALL_DIR/"
+                    rm -rf "/tmp/${_alt_dir}" "$ARCHIVE_TMP"
+                    ok "Файлы обновлены через archive (legacy dir name)"
+                else
+                    warn "Архив скачан, но директория не найдена. Проверьте /tmp/${ARCHIVE_DIR}"
+                    warn "Возможно, репозиторий ещё не переименован на GitHub."
+                    warn "Попробуйте вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
+                fi
+            fi
+        else
+            warn "Не удалось скачать архив. Проверьте соединение с GitHub."
+            warn "Попробуйте вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
+        fi
+    fi
 else
     if [[ -d "$INSTALL_DIR" ]] && [[ -f "${INSTALL_DIR}/main.py" ]]; then
-        # Установка без .git — принудительно обновляем все файлы с GitHub
-        info "Установка без git обнаружена — принудительное обновление файлов..."
+        # Установка без .git — принудительно обновляем все файлы через archive
+        info "Установка без git обнаружена — полное обновление через archive..."
         ARCHIVE="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
-        ARCHIVE_TMP="/tmp/vless_ultimate_update.tar.gz"
-        ARCHIVE_DIR="VLESS-Ultimate-Installer-${BRANCH}"
-        curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" && {
-            tar -xzf "$ARCHIVE_TMP" -C /tmp/
-            cp -rf "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
-            rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
-            ok "Файлы обновлены до последней версии"
-        } || warn "Не удалось обновить — используем текущую версию"
-        # Принудительно обновляем ключевые модули напрямую (минуя CDN-кэш архива)
-        _update_module() {
-            local rel_path="$1"
-            local url="https://raw.githubusercontent.com/inferno1978/Chimera-Project/${BRANCH}/${rel_path}"
-            curl -fsSL --connect-timeout 15 -H "Cache-Control: no-cache" -H "Pragma: no-cache" -o "${INSTALL_DIR}/${rel_path}" "$url" 2>/dev/null \
-                && info "Принудительно обновлён: ${rel_path}" \
-                || warn "Не удалось обновить: ${rel_path}"
-        }
-        _update_module "chimera/_core.py"
-        _update_module "main.py"
-        _update_module "chimera/modules/tg_bot.py"
-        _update_module "chimera/modules/port_hopping.py"
-        _update_module "chimera/modules/tg_nets.py"
-        _update_module "chimera/modules/user_fp_manager.py"
+        ARCHIVE_TMP="/tmp/chimera_update.tar.gz"
+        ARCHIVE_DIR="Chimera-Project-${BRANCH}"
+        if curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" 2>/dev/null; then
+            tar -xzf "$ARCHIVE_TMP" -C /tmp/ 2>/dev/null
+            if [[ -d "/tmp/${ARCHIVE_DIR}" ]]; then
+                cp -rf "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
+                rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
+                ok "Файлы обновлены до последней версии через archive"
+            else
+                _alt_dir="VLESS-Ultimate-Installer-${BRANCH}"
+                if [[ -d "/tmp/${_alt_dir}" ]]; then
+                    cp -rf "/tmp/${_alt_dir}/." "$INSTALL_DIR/"
+                    rm -rf "/tmp/${_alt_dir}" "$ARCHIVE_TMP"
+                    ok "Файлы обновлены через archive (legacy dir name)"
+                else
+                    warn "Архив скачан, но директория не найдена. Проверьте /tmp/${ARCHIVE_DIR}"
+                fi
+            fi
+        else
+            warn "Не удалось обновить — используем текущую версию"
+        fi
     else
         info "Клонирование репозитория..."
         if ! git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
             warn "git clone не удался — загружаю архив..."
             mkdir -p "$INSTALL_DIR"
             ARCHIVE="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
-            ARCHIVE_TMP="/tmp/vless_ultimate.tar.gz"
-            ARCHIVE_DIR="VLESS-Ultimate-Installer-${BRANCH}"
-            curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" || {
-                err "Не удалось загрузить архив. Проверьте соединение."
-                exit 1
+            ARCHIVE_TMP="/tmp/chimera_install.tar.gz"
+            ARCHIVE_DIR="Chimera-Project-${BRANCH}"
+            curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" 2>/dev/null || {
+                # Пробуем legacy-имя архива (если GitHub ещё не переименован)
+                _alt_archive_url="https://github.com/inferno1978/VLESS-Ultimate-Installer/archive/refs/heads/${BRANCH}.tar.gz"
+                curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$_alt_archive_url" 2>/dev/null || {
+                    err "Не удалось загрузить архив. Проверьте соединение."
+                    exit 1
+                }
             }
             tar -xzf "$ARCHIVE_TMP" -C /tmp/
-            cp -r "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
-            rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
+            # Пробуем оба имени директории
+            if [[ -d "/tmp/${ARCHIVE_DIR}" ]]; then
+                cp -r "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
+                rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
+            else
+                _alt_dir="VLESS-Ultimate-Installer-${BRANCH}"
+                cp -r "/tmp/${_alt_dir}/." "$INSTALL_DIR/" 2>/dev/null && rm -rf "/tmp/${_alt_dir}" "$ARCHIVE_TMP" || {
+                    err "Архив скачан, но директория не найдена."
+                    exit 1
+                }
+            fi
         fi
         ok "Загружено в ${INSTALL_DIR}"
     fi
