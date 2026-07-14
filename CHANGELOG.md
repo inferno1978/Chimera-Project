@@ -2,6 +2,129 @@
 
 ---
 
+## v5.0.0 — REBRAND: VLESS Ultimate Installer → Chimera Project — 15 июля 2026
+
+**Мажорный релиз — смена идентичности проекта.** Название «VLESS Ultimate Installer» перестало отражать суть: за 8 недель разработки (с 19 мая 2026) проект вырос с 1 протокола (VLESS) до 9+ (VLESS REALITY/xHTTP, Hysteria2, AmneziaWG standalone, MTProto/Telemt, NaiveProxy, Mieru, FPTN, TrustTunnel), с ~30 функций до ~1 500, с одного файла до 143 модулей + ядро 8 093 строки + 25 категорий. Новое имя — **Chimera Project** — метафора мифического существа, собранного из частей разных животных: каждая «голова» (протокол) нужна для своего сценария, и если цензор блокирует один, химера «выращивает новую голову».
+
+### 🎭 Почему Chimera
+
+**Химе́ра** (греч. Χίμαιρα) — чудовище с головой льва, телом козы и хвостом змеи; существо из разнородных частей. Прямые параллели с проектом:
+
+- **Голова льва** (главная, пасть) — VLESS REALITY, основной и самый «зубастый» протокол
+- **Тело козы** (неприхотливое, выносливое) — AmneziaWG, устойчивый к DPI туннель, работает даже на мобильных сетях
+- **Хвост змеи** (гибкий, ядовитый) — Hysteria2/QUIC, быстрый UDP-транспорт с обфускацией
+- **Существо из многих частей** — 9+ протоколов, 143 модуля, 25 категорий, единый организм
+- **Не сводится ни к одной части** — нельзя сказать «это VLESS-installer», это мульти-протокольный комбайн
+
+Название **Chimera** краткое (7 букв), запоминающееся, интернациональное (известно в английском, русском, немецком, французском), не привязано к протоколу — в отличие от «VLESS», «Hysteria», «AWG» в названии, не отдаёт приоритет ни одному из 9+ протоколов. AmneziaWG standalone, например, вообще не использует VLESS под капотом.
+
+### 📋 Почему переименование сейчас
+
+1. **Имя врёт пользователю.** Человек, видящий «VLESS Ultimate Installer», ожидает VLESS-сервер. Реально получает 9 протоколов, кластер, балансировку, веб-панель, REST API, Telegram-бота, DPI-детектор. Это разрыв ожиданий.
+2. **SEO и discoverability.** По слову «VLESS» проект конкурирует с десятками репозиториев. По «Chimera» в niche anti-censorship — он будет единственным заметным.
+3. **Развязка рук для роста.** Сейчас добавление новых не-VLESS протоколов ощущается как «выход за рамки». После ребрендинга это будет «новая голова химеры» — в рамках бренда.
+4. **Точка мажорного релиза.** v5.0.0 как мажорный bump — естественный момент для смены идентичности.
+
+### 🔄 Что переименовано
+
+#### 1. Python-пакет: `vless_installer/` → `chimera/`
+
+Полный rename каталога + массовый sed всех импортов `from vless_installer.modules.X import Y` → `from chimera.modules.X import Y` в 399 файлах (6 892 замены). Критичная инфраструктура:
+- `main.py`: `_core_path = Path(__file__).parent / "chimera" / "_core.py"`
+- `main.py`: `sys.modules["chimera._core"] = sys.modules["__main__"]` — критичный фикс для lazy binding через `_core_module()` в вынесенных модулях
+- `verify.py`, `full_test.py`, `smoke_test_modules.py`: обновлены пути к ядру и список проверяемых модулей
+- Вендорный код `_vendor/dpi_detector/*.py` НЕ ТРОГАЕМ — он не импортирует наш пакет, запускается через subprocess
+
+#### 2. ASCII-баннер: `VLESS` → `CHIMERA`
+
+Сгенерирован через `pyfiglet.renderText("CHIMERA", font="ansi_shadow")` — 6 строк × 54 символа, использует те же block-символы `╗╔╝╚═║` что и оригинальный VLESS баннер (визуальная преемственность). Внутренняя ширина рамки `_OW=67` посчитана программно: `max(art_w + 4, info_w + 8) = max(58, 67) = 67`. Полная проверка ширины: 24 строки (с RAM-предупреждением) + 19 строк (без) — все 69 символов, 0 mismatch.
+
+Info-строки обновлены под текущее состояние проекта:
+- `Chimera Project — Multi-Protocol Anti-DPI Installer v{version}`
+- `VLESS · Hysteria2 · AmneziaWG · TrustTunnel · MTProto`
+- `NaiveProxy · Mieru · FPTN · Slipgate · WARP · WDTT · +more`
+- `Anti-DPI: REALITY · xHTTP · Fragmentation · Port Hopping`
+- `Cluster: RoundRobin · LeastPing · LeastLoad · Failover A↔B`
+- `Dashboard · REST API · TG Bot · Admin Panel · User Portal`
+
+#### 3. URL репозитория: `VLESS-Ultimate-Installer` → `Chimera-Project`
+
+9 URL-замен в 4 файлах (README.md, INSTALL.md, SECURITY.md, bootstrap.sh). GitHub автоматически редиректит старый URL на новый (включая `raw.githubusercontent.com` и archive tarball), поэтому существующие клоны и `curl | bash` продолжают работать. В README добавлен Note про редирект.
+
+#### 4. Текстовые упоминания: `VLESS Ultimate Installer` → `Chimera Project`
+
+37 замен в 27 файлах — в docstrings модулей, комментариях в генерируемых конфигах (hysteria2, awg_transport, mtproto, fptn, singbox, trusttunnel), описаниях systemd-юнитов, HTML в admin panel, cron-комментариях. `VLESS` как название протокола (VLESS REALITY, VLESS+xHTTP) НЕ ТРОГАЕМ — это отдельное понятие.
+
+#### 5. Пути в ОС
+
+| Старый путь | Новый путь | Кол-во замен |
+|---|---|---|
+| `/opt/vless-ultimate` | `/opt/chimera` | 63 |
+| `/var/log/vless-install.log` | `/var/log/chimera.log` | 50 |
+| `/var/lib/xray-installer/` | (НЕ ТРОГАТЬ) | — |
+
+**Обратная совместимость для лога:** при старте `_core.py` создаёт symlink `/var/log/vless-install.log` → `/var/log/chimera.log`. Если старый лог существует как regular file — его содержимое копируется в новый, старый переименовывается в `.pre-chimera.bak`, затем заменяется symlink. Это позволяет существующим cron-задачам и logrotate-конфигам со старым путём продолжать работать без изменений.
+
+**`bootstrap.sh` fallback:** `INSTALL_DIR="/opt/chimera"`. Поиск существующей установки только в системных путях: `/opt/vless-ultimate`, `/opt/VLESS-Ultimate-Installer`, `/opt/chimera`. Домашние директории разработчиков НЕ проверяются (это личные пути, бесполезные для конечных пользователей и засвечивающие структуру окружения).
+
+**`/var/lib/xray-installer/` НЕ МИГРИРОВАН** — 258 вхождений в коде, baseline в `verify.py` (150), риск сломать `state.json` у текущих пользователей. Это «внутренний» путь, юзер его почти не видит.
+
+### 📊 Статистика
+
+| Метрика | Значение |
+|---|---|
+| Коммитов в ветке rebrand/chimera-project | 6 (Phases 2-6 + этот релиз) |
+| Файлов изменено | ~450 |
+| Строк изменено | ~7 100 (insertions) / ~7 000 (deletions) |
+| Замен `vless_installer` → `chimera` | 6 892 в 399 файлах |
+| Замен URL | 9 в 4 файлах |
+| Замен текстовых упоминаний | 37 в 27 файлах |
+| Замен путей в ОС | 113 в 49 файлах |
+| Замен версии `4.25.1` → `5.0.0` | 7 в 5 файлах |
+| Тестов пройдено | verify.py 313/313, full_test.py 74/74, smoke_test_modules.py 43/43 |
+
+### 🔬 Методология
+
+**Правило по ASCII-art** (установлено пользователем): никогда не писать баннеры/лого вручную символами `██╗/██║/╚═╝` — систематически путаю блоки. Вместо этого: `pyfiglet` + программный расчёт ширины через `len()` + реальный прогон функции + точный вывод в отчёт. Применено к CHIMERA-баннеру: шрифт `ansi_shadow`, все 6 строк вставлены verbatim из pyfiglet, `_OW=67` посчитана как `max(art_w + 4, info_w + 8)`, рендер проверен на 24+19 строках.
+
+**Правило по diff до коммита** (установлено пользователем): после каждой фазы — полный diff пользователю, не только результат тестов. Применено к Фазе 2 (rename пакета, 428 файлов в индексе).
+
+### ⚠️ Изменения
+
+#### 1. Версия bumped с 4.25.1 до 5.0.0
+
+`chimera/__init__.py`: `__version__ = "5.0.0"`, docstring `"""Chimera Project v5.0.0 — Multi-Protocol Anti-DPI Installer"""`. Все публикациионные файлы обновлены: `bootstrap.sh`, `README.md`, `INSTALL.md`, `PROJECT_MAP.md`, `verify.py`, `full_test.py`. `_core.py`, `main.py` подхватывают версию динамически через `_get_version()` — ручных правок не требуют.
+
+#### 2. GitHub repository rename
+
+После merge в main: GitHub Settings → Repository name → `Chimera-Project`. GitHub автоматически редиректит все URL (web, git clone, raw.githubusercontent.com, archive tarball). Локально: `git remote set-url origin https://github.com/inferno1978/Chimera-Project.git`.
+
+### 🔗 Связанные коммиты в ветке rebrand/chimera-project
+
+- `feat(rebrand): rename Python package vless_installer → chimera` (3ea56e3) — Фаза 2
+- `feat(rebrand): new CHIMERA ASCII banner (pyfiglet ansi_shadow) + visible strings` (c220f2c) — Фаза 3
+- `feat(rebrand): replace URLs and 'VLESS Ultimate Installer' text with Chimera Project` (a8a841a) — Фаза 4
+- `feat(rebrand): migrate OS paths /opt/vless-ultimate → /opt/chimera, /var/log/vless-install.log → /var/log/chimera.log` (3b15dff) — Фаза 5
+- `feat(rebrand): version bump 4.25.1 → 5.0.0 + CHANGELOG entry` (этот коммит) — Фаза 6
+
+### 📚 Persistent-артефакты
+
+Скрипты генерации/проверки сохранены в `/home/z/my-project/scripts/`:
+- `rebrand_vless_to_chimera.py` — sed-замена имени пакета
+- `rebrand_urls_and_text.py` — замена URLs и текстовых упоминаний
+- `rebrand_os_paths.py` — замена путей в ОС
+- `gen_chimera_options.py` — тест 12 шрифтов pyfiglet
+- `apply_chimera_banner.py` — финальная генерация баннера + расчёт `_OW`
+- `test_banner_render_full.py` — полный рендер баннера с проверкой ширины (оба режима)
+
+### 🚀 Совместимость
+
+- **Свежие установки** (с v5.0.0): ставятся в `/opt/chimera`, лог в `/var/log/chimera.log`, все импорты через `chimera.*`. Работают «из коробки».
+- **Существующие установки** (v4.x): при запуске `bootstrap.sh` находит старый `/opt/vless-ultimate`, обновляет его in-place. `chimera/_core.py` при старте создаёт symlink `/var/log/vless-install.log` → `/var/log/chimera.log`, перенося старое содержимое в `.pre-chimera.bak`. Cron-задачи и logrotate-конфиги со старыми путями продолжают работать через symlink. State.json в `/var/lib/xray-installer/` НЕ ТРОГАЕТСЯ — все настройки сохраняются.
+- **GitHub URLs**: старый `github.com/inferno1978/VLESS-Ultimate-Installer` редиректится на новый `Chimera-Project` (после ручного rename на GitHub). Все `curl | bash` скрипты со старым URL продолжают работать.
+
+---
+
 ## v4.25.1 — FEAT: iOS/Karing-совместимые VLESS-ссылки через shadow-client — 15 июля 2026
 
 Решение проблемы «Karing на iOS не работает, Hiddify работает, на Android/ПК всё ок». Корень — XTLS Vision flow (`&flow=xtls-rprx-vision`) рвёт хендшейк в Karing на iOS через 20-40 секунд (внешний баг KaringX/karing#1158), плюс гипотеза о капризности iOS URL-парсеров к сырым эмодзи-флагам в `#fragment`. Решение — отдельный shadow-клиент в `clients[]` без ключа `flow` + постпроцессор ссылки. Подтверждено живым тестом на реальном iOS-устройстве через Karing.
