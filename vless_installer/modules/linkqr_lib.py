@@ -48,6 +48,7 @@ _SINGBOX_STATE_FILE  = Path("/var/lib/xray-installer/singbox_state.json")
 _MIERU_STATE_FILE    = Path("/var/lib/xray-installer/mieru.json")
 _NAIVE_STATE_FILE    = Path("/var/lib/xray-installer/naiveproxy.json")
 _FPTN_STATE_FILE     = Path("/var/lib/xray-installer/fptn.json")
+_TRUSTTUNNEL_STATE_FILE = Path("/var/lib/xray-installer/trusttunnel.json")
 _SUB_CONF_FILE       = Path("/var/lib/xray-installer/subscription.json")
 _USERS_FILE          = Path("/etc/xray/users.json")
 
@@ -516,6 +517,34 @@ def build_subscription_url_for_user(user_dict: dict,
 # =============================================================================
 #  Высокоуровневый агрегатор: все ссылки пользователя одним вызовом
 # =============================================================================
+def build_trusttunnel_link_for_user(user_dict: dict,
+                                    state: Optional[dict] = None) -> str:
+    """Build a tt://?<base64url> deep-link for a TrustTunnel user.
+
+    Returns "" if TrustTunnel not installed or the user is not in
+    credentials.toml. Uses the pure-Python TLV codec from
+    trusttunnel.trusttunnel_deeplink_for_user (no subprocess spawn —
+    safe for high-frequency bot /config and /qr requests).
+
+    The URI contains the user's own username + password (deterministic
+    SHA-256 of uuid), the server's hostname + address, and the upstream
+    protocol. It does NOT contain the server's TLS private key — only
+    public parameters. For Let's Encrypt certs (system-verifiable), the
+    certificate field is omitted, keeping the URI compact.
+    """
+    if not user_dict:
+        return ""
+    email = user_dict.get("email", "")
+    uuid_str = user_dict.get("uuid", "")
+    if not email or not uuid_str:
+        return ""
+    try:
+        from vless_installer.modules.trusttunnel import trusttunnel_deeplink_for_user
+        return trusttunnel_deeplink_for_user(email, uuid_str, state=state)
+    except Exception:
+        return ""
+
+
 def build_all_links_for_user(user_dict: dict) -> Dict[str, str]:
     """
     Строит dict всех активных ссылок пользователя:
@@ -526,6 +555,7 @@ def build_all_links_for_user(user_dict: dict) -> Dict[str, str]:
        "singbox_tuic": "tuic://...",
        "mieru": "mierus://...",
        "naive": "naive+https://...",
+       "trusttunnel": "tt://?...",
        "subscription": "https://..."}
 
     Только активные протоколы (где пользователь реально присутствует).
@@ -570,6 +600,12 @@ def build_all_links_for_user(user_dict: dict) -> Dict[str, str]:
         naive = build_naive_link_for_user(email)
         if naive:
             links["naive"] = naive
+
+    # TrustTunnel (deep-link tt://?<base64url>)
+    if email and uuid_str:
+        tt = build_trusttunnel_link_for_user(user_dict)
+        if tt:
+            links["trusttunnel"] = tt
 
     # Subscription
     sub_url = build_subscription_url_for_user(user_dict)
@@ -616,6 +652,7 @@ __all__ = [
     "build_singbox_links_for_user",
     "build_hysteria2_link",
     "build_subscription_url_for_user",
+    "build_trusttunnel_link_for_user",
     "build_all_links_for_user",
     "_read_json",
     "_read_users",
