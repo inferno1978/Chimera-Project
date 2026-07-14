@@ -2,6 +2,82 @@
 
 ---
 
+## v4.25.1 — FEAT: iOS/Karing-совместимые VLESS-ссылки через shadow-client — 15 июля 2026
+
+Решение проблемы «Karing на iOS не работает, Hiddify работает, на Android/ПК всё ок». Корень — XTLS Vision flow (`&flow=xtls-rprx-vision`) рвёт хендшейк в Karing на iOS через 20-40 секунд (внешний баг KaringX/karing#1158), плюс гипотеза о капризности iOS URL-парсеров к сырым эмодзи-флагам в `#fragment`. Решение — отдельный shadow-клиент в `clients[]` без ключа `flow` + постпроцессор ссылки. Подтверждено живым тестом на реальном iOS-устройстве через Karing.
+
+### 🎯 Что добавлено
+
+#### 1. Постпроцессор `to_ios_karing_link()` — новый модуль `ios_link_variant.py`
+
+Чистая постобработка готовой строки ссылки: убирает `&flow=xtls-rprx-vision` (REALITY-only, no-op для xHTTP) и сырой эмодзи-флаг страны в начале `#fragment`. Не дублирует логику сборки host/port/pbk/sid/domain — только вызывает существующий генератор и проходит по результату. Идемпотентный, безопасный для пустых входов и ссылок без `#`.
+
+#### 2. Shadow-client паттерн — `_users_get_or_create_ios_shadow()`
+
+Корень проблемы, которую чинит этот патч: постпроцессор без shadow рвёт хендшейк (сервер в `clients[]` хранит `"flow": "xtls-rprx-vision"`, а клиент без flow в ссылке его не отправляет → Xray отклоняет). Решение: для каждого REALITY-пользователя, которому нужна iOS-ссылка, создаётся отдельный shadow-клиент в той же `clients[]` — **БЕЗ ключа `flow`** в словаре. Ссылка строится на его UUID. Оригинальный клиент не трогается — Android/ПК продолжают работать с `flow=xtls-rprx-vision`.
+
+- **Идемпотентный**: повторный вызов переиспользует существующий shadow по email-суффиксу `__ios`.
+- **xHTTP-инбаунд**: возвращает `None` (flow там не используется, shadow не нужен).
+- **`do_user_delete()`**: аддитивный cleanup-блок удаляет shadow вместе с основным юзером. No-op для юзеров без iOS-варианта — поведение идентично допатчевому.
+
+#### 3. Четыре точки интеграции iOS-ссылок
+
+Все используют один и тот же shadow-паттерн, подтверждённый живым тестом:
+
+- **`do_user_show_link_ios_by_uuid(uuid)`** — одна ссылка для конкретного юзера. Email резолвится напрямую из `clients[]` по UUID (защита от рассинхрона `users.json` ↔ `config.json`). Доступ: главное меню → 2 → 1 → K.
+- **`generate_client_links_ios()`** — сводный экран IPv4/IPv6/Domain. Доступ: главное меню → 2 → K.
+- **`client_config_export.py`** — `vless-link-ios.txt` рядом с обычным `vless-link.txt` в `/root/xray-client-configs/`. Graceful fallback если `config.json` недоступен.
+- **`/sub/{token}/ios` маршрут** в `subscription.py` — iOS-совместимая подписка. `do_subscription_menu` показывает URL + QR для каждого пользователя. `build_subscription_body_ios()` строит тело на shadow-UUID, `_resolve_ios_shadow_user()` резолвит shadow до `_build_vless_uri`.
+
+#### 4. Гигиена shadow-клиентов
+
+Поскольку shadow теперь идут в бой массово, введена пометка и фильтрация:
+
+- **`_unified_load_users()`** помечает shadow полем `is_ios_shadow=True` (НЕ исключает — админ может видеть и удалять их вручную при отладке).
+- **`do_user_list()`** рендерит shadow отдельным блоком внизу без номеров, серым цветом — реальным юзерам нумерация не сбивается.
+- **`do_unified_user_manager()`** помечает shadow-строки тегом `[ios-shadow]` в таблице.
+- **`status_panel._users_counts()`** фильтрует shadow из `total`/`active` — счётчик «число пользователей» не задваивается.
+- **`do_entry_mirrors_menu()`** показывает подсказку: для каждого mirror-сервера нужно отдельно зайти по SSH и выполнить «2 → 1 → K» для нужных юзеров (mirror-серверы — отдельные инстансы, программно недоступны).
+
+### 🔧 Что исправлено
+
+#### 1. Drive-by фикс: `type=http` → `type=xhttp` в `client_config_export.py`
+
+В 3 местах (sing-box JSON transport + 2 vless-link builder'а) использовался устаревший HTTP/2-транспорт (`type=http`) вместо актуального xHTTP Xray 1.8.16+ (`type=xhttp`). Рассинхрон с `users_manager.py`, где всегда было `type=xhttp`. Защита отката фикса — отдельный статический тест.
+
+#### 2. Баг рассинхрона в `_build_vless_uri` (subscription.py)
+
+Функция брала `user["uuid"]` напрямую — тот же баг, что починили в `do_user_show_link_ios_by_uuid` (патч №3). Если в `users.json` UUID имел один email, а в `clients[]` — другой (админ редактировал через пункт «8. Редактировать»), shadow-функция не находила клиента и молча возвращала `None`. Починено через `_resolve_ios_shadow_user(user)`: email берётся напрямую из `clients[]` по UUID, shadow создаётся/переиспользуется корректно.
+
+#### 3. Mirror-URI исключены из iOS-подписки
+
+Раньше `build_subscription_body_ios()` прогоняла mirror-ссылки через `to_ios_karing_link()`. Но mirror-серверы — отдельные инстансы инсталлятора на других VPS, чьи `clients[]` этот модуль не редактирует. Постпроцессор без shadow на СЕРВЕРЕ mirror'а даёт тот же разрыв хендшейка. Теперь mirror-URI исключаются целиком, логируется WARN с количеством исключённых.
+
+#### 4. Удалён мёртвый код: `do_user_menu()` + `do_user_show_link()`
+
+Аудит показал: `do_user_menu()` — строго подмножество `do_unified_user_manager()` (те же L/A/D/S/K/I, без 4-8/E). `do_unified_user_manager` — реальный путь из главного меню (2 → 1), использует `_unified_load_users/_unified_save_users` с синхронизацией `users.json` + `config.json`. `do_user_menu` работал только с `config.json`, импортирован в `_core.py`, но **НИГДЕ не вызывался** — чистый мёртвый код. `do_user_show_link()` вызывалась только из `do_user_menu()`. Обе функции удалены, обновлены импорты, `smoke_test_modules.py`, докстринги.
+
+### ⚠️ Изменения
+
+#### 1. `test_core_dynamic_version.py` переписан на динамический паттерн
+
+`test_no_hardcoded_version_in_core_py` хардкодил `"4.25.0"` как искомый литерал — tautological-паттерн, после следующего бампа тест протухал молча. Переписан: читает текущую версию из `vless_installer.__version__` в момент запуска и ищет её как литерал в `_core.py`. При следующем бампе тест сам подтянется. Добавлен `test_main_menu_shows_current_version` — проверяет, что баннер главного меню показывает текущую версию (не "unknown" и не устаревшую).
+
+#### 2. Version bump 4.25.0 → 4.25.1
+
+`vless_installer/__init__.py` — `__version__` + докстринг. Все публикациионные файлы обновлены вручную: `bootstrap.sh`, `README.md` (заголовок + badge + баннер + architecture-диаграмма), `INSTALL.md`, `PROJECT_MAP.md`, `full_test.py`, `verify.py`. `_core.py`, `honeypot.py`, `main.py` подхватывают версию динамически через `_get_version()` — ручных правок не требуют (проверено grep-аудитом).
+
+### 📊 Статистика
+
+- **Новых модулей:** 1 (`ios_link_variant.py`)
+- **Новых функций:** 7 (`to_ios_karing_link`, `_shadow_ios_email`, `_users_get_or_create_ios_shadow`, `do_user_show_link_ios`, `do_user_show_link_ios_by_uuid`, `_users_gen_link_ios`, `generate_client_links_ios`, `build_subscription_body_ios`, `_resolve_ios_shadow_user`)
+- **Новых тест-файлов:** 6 (`test_ios_link_variant.py`, `test_ios_link_regression.py`, `test_ios_shadow_client.py`, `test_ios_unified_menu.py`, `test_ios_patch4_open_surfaces.py`, `test_ios_patch5_subscription_cleanup.py`)
+- **Новых тестов:** ~80 (все проходят)
+- **Удалено мёртвого кода:** 2 функции (`do_user_menu`, `do_user_show_link`)
+- **Точек интеграции iOS-ссылок:** 4 (менеджер юзеров, сводный экран, экспорт конфигов, подписка)
+
+---
+
 ## v4.25.0 — FEAT: Client Telegram Bot, Unified User Lifecycle, Forced DNS Redirect, Baseline-Offset Traffic Accounting — 14 июля 2026
 
 Крупный релиз: 4 новые подсистемы, ~6000 строк нового кода, ~470 новых тестов.
