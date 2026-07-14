@@ -1,19 +1,22 @@
 """
 vless_installer/modules/trusttunnel_health.py
 ───────────────────────────────────────────────────────────────────────────────
-Health check for TrustTunnel service. Called from cron via `main.py --trusttunnel-health`.
+Health check для TrustTunnel-сервиса. Вызывается из cron через
+`main.py --trusttunnel-health` (каждые 5 минут, install_cron()).
 
-Checks:
-  1. systemctl is-active trusttunnel
-  2. /metrics endpoint responds (http://127.0.0.1:1987/health-check → 200)
-  3. Binary version matches state['version']
+Методы проверки:
+  • systemctl is-active trusttunnel
+  • /metrics endpoint (http://127.0.0.1:1987/health-check → HTTP 200)
+  • Версия бинарника совпадает с state['version']
 
-If the service is down, attempts a one-shot restart and re-checks.
-Writes status to /var/lib/xray-installer/trusttunnel-health.status.
+Если сервис упал — одна попытка рестарта + повторная проверка.
+Результат пишется в /var/lib/xray-installer/trusttunnel-health.status.
 
-Public API:
-    trusttunnel_health_check() -> dict    # one-shot check
-    trusttunnel_health_check_cron() -> None  # cron entrypoint (writes status file)
+Точка входа из main.py:
+    from vless_installer.modules.trusttunnel_health import (
+        trusttunnel_health_check, trusttunnel_health_check_cron,
+    )
+───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
 
@@ -37,27 +40,27 @@ _STATUS_FILE = Path("/var/lib/xray-installer/trusttunnel-health.status")
 
 
 def trusttunnel_health_check() -> dict:
-    """One-shot health check. Returns dict with:
+    """Одна итерация health-check. Возвращает dict:
       {"healthy": bool, "service_active": bool, "metrics_ok": bool,
        "version_match": bool, "details": str, "checked_at": ISO}
     """
     state = trusttunnel_load_state()
     result = {
-        "healthy": False,
+        "healthy":        False,
         "service_active": False,
-        "metrics_ok": False,
-        "version_match": False,
-        "details": "",
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "metrics_ok":     False,
+        "version_match":  False,
+        "details":        "",
+        "checked_at":     datetime.now(timezone.utc).isoformat(),
     }
     if not state.get("installed"):
         result["details"] = "TrustTunnel not installed"
         return result
 
-    # 1. Service active?
+    # 1. Сервис активен?
     result["service_active"] = trusttunnel_service_active()
 
-    # 2. Metrics endpoint
+    # 2. /metrics endpoint
     metrics_port = state.get("metrics_port", _METRICS_PORT)
     try:
         r = subprocess.run(
@@ -69,7 +72,7 @@ def trusttunnel_health_check() -> dict:
     except Exception:
         result["metrics_ok"] = False
 
-    # 3. Binary version
+    # 3. Версия бинарника
     expected_version = state.get("version", "")
     if _BINARY_PATH.exists() and expected_version:
         try:
@@ -77,7 +80,7 @@ def trusttunnel_health_check() -> dict:
                 [str(_BINARY_PATH), "--version"],
                 capture_output=True, text=True, timeout=5,
             )
-            actual = r.stdout.strip()
+            actual = (r.stdout or "").strip()
             result["version_match"] = (actual == expected_version)
         except Exception:
             result["version_match"] = False
@@ -93,8 +96,9 @@ def trusttunnel_health_check() -> dict:
 
 
 def trusttunnel_health_check_cron() -> None:
-    """Cron entrypoint. Checks health, attempts one restart if down,
-    writes status file."""
+    """Cron entrypoint. Проверяет health, при падении — одна попытка
+    рестарта + повторная проверка. Пишет status-файл.
+    """
     _log("INFO", "health_check_cron: starting")
     check = trusttunnel_health_check()
     if not check["healthy"]:
@@ -105,7 +109,6 @@ def trusttunnel_health_check_cron() -> None:
             _log("INFO", f"health_check_cron: after restart — healthy={check['healthy']}")
         else:
             _log("ERROR", "health_check_cron: restart failed")
-    # Write status file
     try:
         _STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
         _STATUS_FILE.write_text(json.dumps(check, indent=2))
