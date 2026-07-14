@@ -774,5 +774,217 @@ class TestDeeplinkForUser(unittest.TestCase):
             patch.stopall()
 
 
+# =============================================================================
+#  Cron install/uninstall (auto-installed on install, removed on uninstall)
+# =============================================================================
+class TestCronInstallUninstall(unittest.TestCase):
+    """Verify that cron jobs are installed during install() and removed
+    during uninstall(). Tests use tempdir paths for _CRON_FILE and _SCRIPT_FILE
+    so no real /etc/cron.d is touched."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.cron_file = self.tmpdir / "cron.d" / "trusttunnel"
+        self.script_file = self.tmpdir / "trusttunnel_cron.sh"
+        self.fake_main_py = self.tmpdir / "main.py"
+        self.fake_main_py.write_text("#!/usr/bin/env python3\nprint('mock')\n")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+
+    def _patches(self):
+        return [
+            patch("vless_installer.modules.trusttunnel._CRON_FILE", self.cron_file),
+            patch("vless_installer.modules.trusttunnel._SCRIPT_FILE", self.script_file),
+            patch("vless_installer.modules.trusttunnel._PROJECT_ROOT", self.tmpdir),
+        ]
+
+    def test_install_cron_creates_both_files(self):
+        """_install_cron() should create both the cron file and the wrapper script."""
+        from vless_installer.modules.trusttunnel import _install_cron, _CRON_INTERVAL_MIN
+        for p in self._patches():
+            p.start()
+        try:
+            self.assertFalse(self.cron_file.exists())
+            self.assertFalse(self.script_file.exists())
+            _install_cron()
+            self.assertTrue(self.cron_file.exists(), "cron file should be created")
+            self.assertTrue(self.script_file.exists(), "wrapper script should be created")
+        finally:
+            patch.stopall()
+
+    def test_cron_file_contains_expected_content(self):
+        """The cron file should contain both --trusttunnel-health and
+        --trusttunnel-stats entries with the correct interval."""
+        from vless_installer.modules.trusttunnel import (
+            _install_cron, _CRON_INTERVAL_MIN,
+        )
+        for p in self._patches():
+            p.start()
+        try:
+            _install_cron()
+            cron_text = self.cron_file.read_text()
+            # Should contain both health and stats entries
+            self.assertIn("health", cron_text)
+            self.assertIn("stats", cron_text)
+            # Should contain the interval (e.g. */5)
+            self.assertIn(f"*/{_CRON_INTERVAL_MIN}", cron_text)
+            # Should reference the wrapper script
+            self.assertIn(str(self.script_file), cron_text)
+            # Should run as root
+            self.assertIn("root", cron_text)
+        finally:
+            patch.stopall()
+
+    def test_script_file_contains_main_py_reference(self):
+        """The wrapper script should reference main.py and both CLI flags."""
+        from vless_installer.modules.trusttunnel import _install_cron
+        for p in self._patches():
+            p.start()
+        try:
+            _install_cron()
+            script_text = self.script_file.read_text()
+            self.assertIn("--trusttunnel-health", script_text)
+            self.assertIn("--trusttunnel-stats", script_text)
+            self.assertIn("main.py", script_text)
+            self.assertIn("#!/bin/bash", script_text)
+        finally:
+            patch.stopall()
+
+    def test_script_file_is_executable(self):
+        """The wrapper script should be chmod 0o755."""
+        from vless_installer.modules.trusttunnel import _install_cron
+        for p in self._patches():
+            p.start()
+        try:
+            _install_cron()
+            mode = self.script_file.stat().st_mode & 0o777
+            self.assertEqual(mode, 0o755, f"script should be 0o755, got {oct(mode)}")
+        finally:
+            patch.stopall()
+
+    def test_install_cron_is_idempotent(self):
+        """Calling _install_cron() twice should not error — overwrites."""
+        from vless_installer.modules.trusttunnel import _install_cron
+        for p in self._patches():
+            p.start()
+        try:
+            _install_cron()
+            _install_cron()  # should not raise
+            self.assertTrue(self.cron_file.exists())
+        finally:
+            patch.stopall()
+
+    def test_remove_cron_deletes_both_files(self):
+        """_remove_cron() should delete both the cron file and the wrapper script."""
+        from vless_installer.modules.trusttunnel import _install_cron, _remove_cron
+        for p in self._patches():
+            p.start()
+        try:
+            _install_cron()
+            self.assertTrue(self.cron_file.exists())
+            self.assertTrue(self.script_file.exists())
+            _remove_cron()
+            self.assertFalse(self.cron_file.exists(), "cron file should be removed")
+            self.assertFalse(self.script_file.exists(), "script should be removed")
+        finally:
+            patch.stopall()
+
+    def test_remove_cron_idempotent_when_not_installed(self):
+        """_remove_cron() should not error if files don't exist."""
+        from vless_installer.modules.trusttunnel import _remove_cron
+        for p in self._patches():
+            p.start()
+        try:
+            # Should not raise even though files don't exist
+            _remove_cron()
+            self.assertFalse(self.cron_file.exists())
+        finally:
+            patch.stopall()
+
+    def test_cron_installed_check(self):
+        """trusttunnel_cron_installed() should return True after install, False after remove."""
+        from vless_installer.modules.trusttunnel import (
+            _install_cron, _remove_cron, trusttunnel_cron_installed,
+        )
+        for p in self._patches():
+            p.start()
+        try:
+            self.assertFalse(trusttunnel_cron_installed())
+            _install_cron()
+            self.assertTrue(trusttunnel_cron_installed())
+            _remove_cron()
+            self.assertFalse(trusttunnel_cron_installed())
+        finally:
+            patch.stopall()
+
+    def test_install_then_uninstall_full_cycle_cron(self):
+        """Integration: trusttunnel_install() should call _install_cron(),
+        and trusttunnel_uninstall() should call _remove_cron(). This mocks
+        ALL the heavy install steps + the cron functions themselves, and
+        verifies the call wiring (not the file creation — that's covered by
+        the unit tests above)."""
+        from vless_installer.modules import trusttunnel
+        install_cron_called = []
+        remove_cron_called = []
+
+        def mock_install_cron():
+            install_cron_called.append(True)
+
+        def mock_remove_cron():
+            remove_cron_called.append(True)
+
+        # Patch the cron functions to track calls, and patch all heavy
+        # install/uninstall steps to no-op. We also need to make
+        # trusttunnel_install return True, which requires patching the
+        # download + cert + setup_wizard chain.
+        patches = [
+            patch.object(trusttunnel, "_install_cron", side_effect=mock_install_cron),
+            patch.object(trusttunnel, "_remove_cron", side_effect=mock_remove_cron),
+            patch.object(trusttunnel, "_download_and_install_binary",
+                         return_value=(True, "1.0.33")),
+            patch.object(trusttunnel, "_import_gpg_key"),
+            patch.object(trusttunnel, "_verify_gpg_signature", return_value=True),
+            patch("vless_installer.modules.ssl_certbot.obtain_ssl_cert"),
+            patch.object(trusttunnel, "_check_domain_available", return_value=""),
+            patch.object(trusttunnel, "_check_port_available", return_value=""),
+            patch.object(trusttunnel, "_open_port"),
+            patch.object(trusttunnel, "_close_port"),
+            patch.object(trusttunnel, "_install_systemd_unit"),
+            patch.object(trusttunnel, "_remove_systemd_unit"),
+            patch.object(trusttunnel, "_install_cert_renewal_hook"),
+            patch.object(trusttunnel, "_remove_cert_renewal_hook"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+            patch.object(trusttunnel, "_INSTALL_DIR", self.tmpdir / "tt"),
+            patch.object(trusttunnel, "_BINARY_PATH", self.tmpdir / "tt" / "endpoint"),
+            patch.object(trusttunnel, "_WIZARD_PATH", self.tmpdir / "tt" / "wizard"),
+            patch.object(trusttunnel, "_VPN_TOML", self.tmpdir / "tt" / "vpn.toml"),
+            patch.object(trusttunnel, "_HOSTS_TOML", self.tmpdir / "tt" / "hosts.toml"),
+            patch.object(trusttunnel, "_CREDS_TOML", self.tmpdir / "tt" / "creds.toml"),
+            patch.object(trusttunnel, "_RULES_TOML", self.tmpdir / "tt" / "rules.toml"),
+            patch.object(trusttunnel, "_STATE_FILE", self.tmpdir / "state.json"),
+            patch("pathlib.Path.exists", return_value=True),
+            patch.object(trusttunnel, "_STATE_FILE",
+                         self.tmpdir / "state.json"),
+            patch.object(trusttunnel, "trusttunnel_load_state",
+                         return_value={"installed": True, "listen_port": 8443}),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            # Install should call _install_cron
+            ok = trusttunnel.trusttunnel_install("test.example.com", 8443, "")
+            self.assertTrue(ok, "install should succeed")
+            self.assertEqual(len(install_cron_called), 1,
+                             "_install_cron should be called once during install")
+
+            # Uninstall should call _remove_cron
+            ok = trusttunnel.trusttunnel_uninstall()
+            self.assertTrue(ok, "uninstall should succeed")
+            self.assertEqual(len(remove_cron_called), 1,
+                             "_remove_cron should be called once during uninstall")
+        finally:
+            patch.stopall()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

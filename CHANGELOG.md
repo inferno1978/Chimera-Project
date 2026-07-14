@@ -38,6 +38,22 @@ iptables/ip6tables NAT REDIRECT для UDP/TCP порта 53 от клиентс
 
 Переживает рестарт сервиса, ротацию логов и сброс интерфейса для VLESS/Xray, AWG, Mieru и NaiveProxy. Универсальный парсер человекочитаемых размеров `parse_human_readable_bytes` (IEC KiB/MiB/GiB, SI KB/MB/GB, bare-letter K/M/G) и форматтер `format_bytes` (en/ru локали). Thread/process-safe через `fcntl.flock`. Для NaiveProxy — инкрементальное чтение access.log с отслеживанием inode для устойчивости к ротации Caddy `roll_size 10mb`. Для AWG — корректный парсер `awg show all dump` (peer vs interface по количеству полей). Для Mieru — правильные ключи `download`/`upload` из journalctl `[metrics - user - NAME]`.
 
+#### 5. TrustTunnel — интеграция официального upstream-бинарника AdGuard VPN
+
+**Модули:** `vless_installer/modules/trusttunnel.py`, `trusttunnel_packages.py`, `trusttunnel_mirrors.py`, `trusttunnel_health.py`, `trusttunnel_stats.py`
+
+Новый протокол как 9-й в реестре `user_lifecycle.PROTOCOL_ADAPTERS`. Использует **официальный upstream prebuilt-бинарник** `trusttunnel_endpoint` + `setup_wizard` (Rust, Apache 2.0, https://github.com/TrustTunnel/TrustTunnel), GPG-подписан ключом AdGuard `28645AC9776EC4C00BCE2AFC0FE641E7235E2EC6`. НЕ форк и НЕ реимплементация (в отличие от подхода в HYDRA-ULTIMATE, где TrustTunnel — кастомный sing-box inbound с несовместимым `tt://user:pass@host` URI). Транспорт: HTTP/2-over-TLS (TCP) + HTTP/3-over-QUIC (UDP) с мультиплексированием TCP/UDP/ICMP. Клиентская выдача — deep-link `tt://?<base64url-TLV>` (upstream-формат), встроен в `linkqr_lib.build_all_links_for_user` и существующий self-service Telegram-бот (команды `/config` и `/qr` работают без изменений UX).
+
+**Порт по умолчанию `8443` (TCP+UDP)** — отдельный порт, не 443 (443 занят VLESS TCP + Hysteria2 UDP; TrustTunnel не имеет SNI-dispatch и не умеет fallback). Конфликт портов проверяется через существующий `core.check_port_used_by_other_protocol`, зарегистрирован в `PROTOCOL_PORT_REGISTRY`. Сертификаты — через существующий `ssl_certbot.obtain_ssl_cert()` + feed в `setup_wizard --cert-type provided`; авто-renewal — certbot cron + deploy-hook `systemctl reload trusttunnel` (SIGHUP перезагружает `hosts.toml` без рестарта, без разрыва активных сессий). systemd-юнит дополнен `ExecReload=/bin/kill -HUP $MAINPID` (апстримовский template этот параметр не содержит — фикс задокументированного бага, при котором `systemctl reload trusttunnel` падал с "Unit is not reloadable"). Cron-задачи `--trusttunnel-health` (каждые 5 мин) и `--trusttunnel-stats` (каждые 5 мин) устанавливаются автоматически при install, убираются при uninstall.
+
+**Батчинг рестартов для restart-based протоколов.** Апстрим TrustTunnel не поддерживает hot-reload `credentials.toml` (SIGHUP перезагружает только `hosts.toml`). Смена пользователей требует `systemctl restart trusttunnel`, что рвёт ВСЕ активные соединения. Для предотвращения N рестартов при массовых cron-операциях (TTL-expiry, traffic-limits) введён контекстный менеджер `user_lifecycle.batch_context()` + модуль-level `_PENDING_RESTARTS: set` + счётчик глубины для вложенности. Адаптеры правят файл и вызывают `_request_restart(protocol)`, реальный рестарт происходит один раз в конце транзакции (одиночная операция — сразу после `snap.commit()`; cron-проход — на выходе из `batch_context()`). Rollback-до-flush: при сбое любого протокола `snap.restore()` + `_cancel_pending_restarts(protocols_list)` — демон никогда не рестартует с откаченным конфигом. Cron-функции `check_ttl_expired`, `check_traffic_limits`, `run_cleanup` обёрнуты в `batch_context()`. Влияние на остальные 8 протоколов — нулевое (их адаптеры не вызывают `_request_restart`, `_PENDING_RESTARTS` остаётся пустым, `_flush_pending_restarts` — no-op).
+
+**Pure-Python TLV-кодек** `tt://?<base64url>` ( TrustTunnel-формат: varint-кодированные TLV-записи с RFC 9000 §16 QUIC varints) — reimplemented в `trusttunnel.py` (~200 строк), чтобы `linkqr_lib` мог генерировать URI без спавна 17-МБ бинарника на каждый `/config`/`/qr` запрос бота. Roundtrip-проверено против реального deep-link'а, сгенерированного `trusttunnel_endpoint v1.0.33`. Детерминированные per-user пароли: `SHA-256("trusttunnel-pass|" + uuid)` — стабильны при переустановках, не требуют хранения в `state.json`.
+
+**Известные архитектурные ограничения** (зафиксированы в `TROUBLESHOOTING.md`):
+1. **Только агрегированный трафик, не per-user.** Апстримовский `/metrics` (Prometheus, порт 1987) отдаёт счётчики `inbound_traffic_bytes`/`outbound_traffic_bytes` только с лейблом `protocol_type` (`http1`/`http2`/`http3`), без `username`. Per-user биллинг потребует патчить `lib/src/metrics.rs` и собирать из исходников, теряя GPG-верификацию. В текущей реализации трафик записывается под синтетическим user_id `_aggregate` через `traffic_accounting.record_traffic_sample` (аналогично FPTN/Hysteria2, у которых тоже нет per-user byte counter). Статус `trusttunnel` явно отмечен в `traffic_accounting.SUPPORTED_PROTOCOLS`.
+2. **Смена пользователей рестартует сервис.** Любой `add`/`remove`/`block`/`unblock` для TrustTunnel вызывает `systemctl restart trusttunnel` (~1 с разрыв ВСЕХ активных соединений, не только у изменяемого юзера). Массовые cron-операции батчатся в один рестарт за проход через `batch_context()`, но ручное добавление/удаление через TUI/бота рестартует сразу.
+
 ### 📦 Изменения по файлам
 
 **Новые модули:**
@@ -46,6 +62,11 @@ iptables/ip6tables NAT REDIRECT для UDP/TCP порта 53 от клиентс
 - `vless_installer/modules/user_lifecycle.py` (+1643 строки) — unified lifecycle
 - `vless_installer/modules/dns_redirect.py` (+917 строк) — DNS REDIRECT
 - `vless_installer/modules/traffic_accounting.py` (+559 строк) — baseline-offset
+- `vless_installer/modules/trusttunnel.py` (~700 строк) — TrustTunnel: install/menu/user CRUD/deep-link codec/systemd/service control
+- `vless_installer/modules/trusttunnel_packages.py` — PackageSpec для prebuilt binaries
+- `vless_installer/modules/trusttunnel_mirrors.py` — URL builder для GitHub Releases
+- `vless_installer/modules/trusttunnel_health.py` — cron health-check (service + /metrics + version)
+- `vless_installer/modules/trusttunnel_stats.py` — aggregate traffic collector (Prometheus /metrics → traffic_accounting)
 
 **Новые тесты:**
 - `tests/test_tg_client_bot.py` (+738 строк, 56 тестов)
@@ -56,6 +77,8 @@ iptables/ip6tables NAT REDIRECT для UDP/TCP порта 53 от клиентс
 - `tests/test_core_dns_redirect_integration.py` (+170 строк, 3 теста)
 - `tests/test_traffic_accounting.py` (+833 строки, 61 тест)
 - `tests/test_traffic_collectors.py` (+470 строк, 10 тестов)
+- `tests/test_trusttunnel.py` (~470 строк, 53 теста) — credentials CRUD, deep-link codec, password derivation, PackageSpec, systemd template, port/domain checks, service control
+- `tests/test_trusttunnel_user_lifecycle.py` (~440 строк, 27 тестов) — батчинг рестартов, rollback при частичном сбое, non-existent user protection, идемпотентность, регрессия существующих протоколов
 
 **Интеграция в `_core.py`:**
 - Импорт + пункт меню `TC` (главное → 5 → TC) для клиентского бота
