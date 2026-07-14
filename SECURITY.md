@@ -58,7 +58,7 @@ TLS-сертификат GitHub.
 
 - UUID клиентов и ключи AmneziaWG хранятся в `/etc/xray/state.json` (chmod 600)
 - Telegram-токен бота хранится там же, не попадает в логи
-- Логи (`/var/log/vless-install.log`) не содержат приватных ключей
+- Логи (`/var/log/chimera.log`) не содержат приватных ключей
 
 ### iptables / ipset
 

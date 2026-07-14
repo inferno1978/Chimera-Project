@@ -61,7 +61,7 @@ from chimera.modules.box_renderer import (
 # =============================================================================
 #  ЛОКАЛЬНЫЕ ХЕЛПЕРЫ — без зависимости от _core.py (см. шапку файла)
 # =============================================================================
-LOG_FILE = Path("/var/log/vless-install.log")
+LOG_FILE = Path("/var/log/chimera.log")
 
 
 def _log(line: str) -> None:

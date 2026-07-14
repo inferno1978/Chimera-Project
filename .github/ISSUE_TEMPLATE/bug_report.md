@@ -23,7 +23,7 @@ labels: bug
 
 **Лог установки**
 ```
-Последние 30 строк из /var/log/vless-install.log
+Последние 30 строк из /var/log/chimera.log
 ```
 
 **Окружение**

@@ -351,7 +351,7 @@ def confirm(prompt: str) -> bool:
 
 
 # ───────────────────────── Логирование в общий лог проекта ─────────────────────────
-INSTALL_LOG = "/var/log/vless-install.log"
+INSTALL_LOG = "/var/log/chimera.log"
 
 
 def _log(level: str, msg: str) -> None:

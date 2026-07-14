@@ -71,7 +71,7 @@ BLUE=_C['BLUE']; BOLD=_C['BOLD']; DIM=_C['DIM']; WHITE=_C['WHITE']; NC=_C['NC']
 # ── Константы ─────────────────────────────────────────────────────────────────
 _STATE_FILE  = Path("/var/lib/xray-installer/state.json")
 _PH_FILE     = Path("/var/lib/xray-installer/port_hopping.json")
-_LOG_FILE    = Path("/var/log/vless-install.log")
+_LOG_FILE    = Path("/var/log/chimera.log")
 _COMMENT     = "xray-port-hopping"  # метка для правил iptables
 _PERSIST_DIR = Path("/etc/iptables")
 
