@@ -95,12 +95,14 @@ _NAIVE_STATE_FILE   = Path("/var/lib/xray-installer/naiveproxy.json")
 _FPTN_STATE_FILE    = Path("/var/lib/xray-installer/fptn.json")
 _TELEMT_TOML_FILE   = Path("/etc/telemt/telemt.toml")
 _FPTN_USERS_LIST    = Path("/etc/fptn/users.list")
+_TRUSTTUNNEL_STATE_FILE  = Path("/var/lib/xray-installer/trusttunnel.json")
+_TRUSTTUNNEL_CREDS_FILE  = Path("/opt/trusttunnel/credentials.toml")
 
 # Лог
 _LOG_FILE = Path("/var/log/xray-user-lifecycle.log")
 
 # Список всех протоколов, поддерживаемых lifecycle
-ALL_PROTOCOLS = ["vless", "awg", "singbox", "mieru", "mtproto", "naiveproxy", "fptn", "hysteria2"]
+ALL_PROTOCOLS = ["vless", "awg", "singbox", "mieru", "mtproto", "naiveproxy", "fptn", "hysteria2", "trusttunnel"]
 
 
 # =============================================================================
@@ -297,6 +299,174 @@ class StateSnapshot:
         """Помечает snapshot как больше не нужный (операция успешна)."""
         self._captured = False
         self._snapshots.clear()
+
+
+# =============================================================================
+#  BATCHED RESTART MECHANISM (for restart-based protocols like TrustTunnel)
+# =============================================================================
+# Problem: TrustTunnel (and any future protocol that requires a daemon restart
+# to pick up credential changes) would cause N consecutive restarts if N users
+# are processed in a single cron pass (check_ttl_expired / check_traffic_limits).
+# Each restart briefly disconnects ALL active clients, not just the one being
+# modified — so N restarts = N disruptions.
+#
+# Solution: a module-level "pending restarts" set + a context manager that
+# defers the actual `systemctl restart` calls until the end of the batch.
+#
+# Design (chosen over alternatives — see Phase 1 design notes):
+#   • Context manager `batch_context()` — explicit at the call site, naturally
+#     scopes the batch, supports nesting via a depth counter.
+#   • Module-level `_PENDING_RESTARTS: set[str]` — protocols that have pending
+#     file edits and need a restart. A set (not a list) so multiple user
+#     operations on the same protocol collapse to ONE restart.
+#   • `_request_restart(protocol)` — called by adapters AFTER successful file
+#     edits. No-op semantics if the protocol doesn't actually need a restart
+#     (future-proof: other restart-based protocols can opt in).
+#   • `_flush_pending_restarts()` — performs the actual restarts. Called:
+#       (a) after `snap.commit()` in single (non-batched) operations, and
+#       (b) on `batch_context()` exit (only when depth returns to 0).
+#   • `_cancel_pending_restarts(protocols)` — called on transaction rollback
+#     (snap.restore()) so that a failed operation does NOT trigger a restart
+#     of the rolled-back protocol. Restarting with the old (restored) file is
+#     harmless but wasteful and briefly disconnects clients for nothing.
+#
+# Why context manager (not a `result["deferred_restarts"]` field):
+#   • The result dict is returned to the caller (TUI, bot, cron). Plumbing a
+#     "please restart now" side-channel through every caller is fragile —
+#     someone will forget. The context manager makes batching automatic for
+#     ALL callers that wrap their loop in `with batch_context():`.
+#   • The context manager also correctly handles the "rollback before flush"
+#     requirement (D3/option a): within each add_user/remove_user/etc., the
+#     snapshot is captured before any file edits, and restored on failure
+#     BEFORE any restart would happen. The restart is only flushed after
+#     commit — so a failed transaction never restarts anything.
+#   • For single manual operations (no batch_context), the flush happens
+#     immediately after commit, preserving the existing UX ("add user →
+#     service restarts within ~1 second").
+#
+# Impact on existing 8 protocols: ZERO. Their adapters never call
+# `_request_restart()`, so `_PENDING_RESTARTS` stays empty for them.
+# `_flush_pending_restarts()` is a no-op when the set is empty. No behavior
+# change, no extra restarts, no performance impact.
+
+_BATCH_DEPTH: int = 0
+_PENDING_RESTARTS: set = set()
+
+
+def _request_restart(protocol: str) -> None:
+    """Called by adapters that need a daemon restart after their file edits.
+
+    The actual restart is deferred:
+      - If inside a `batch_context()`: added to _PENDING_RESTARTS, flushed on
+        context exit.
+      - If outside: added to _PENDING_RESTARTS, flushed immediately by the
+        coordinator after `snap.commit()`.
+    """
+    if not protocol:
+        return
+    _PENDING_RESTARTS.add(protocol)
+    _log("INFO", f"_request_restart: {protocol!r} queued (depth={_BATCH_DEPTH})")
+
+
+def _cancel_pending_restarts(protocols) -> None:
+    """Called on transaction rollback to cancel restarts for the rolled-back
+    protocols. Prevents restarting a daemon whose config file was just
+    restored to its pre-transaction state.
+    """
+    global _PENDING_RESTARTS
+    if not protocols:
+        return
+    cancelled = set(protocols) & _PENDING_RESTARTS
+    if cancelled:
+        _PENDING_RESTARTS -= cancelled
+        _log("INFO", f"_cancel_pending_restarts: cancelled {sorted(cancelled)} (rollback)")
+
+
+def _flush_pending_restarts() -> None:
+    """Perform the actual `systemctl restart` for each pending protocol.
+    Called after `snap.commit()` (single op) or on `batch_context()` exit.
+    Idempotent: if _PENDING_RESTARTS is empty, does nothing.
+    """
+    global _PENDING_RESTARTS
+    if not _PENDING_RESTARTS:
+        return
+    # Snapshot the set and clear it BEFORE invoking restarts, so that if a
+    # restart triggers any code that calls _request_restart again, the new
+    # request is recorded for the next flush rather than lost.
+    to_flush = sorted(_PENDING_RESTARTS)  # deterministic order
+    _PENDING_RESTARTS = set()
+    for proto in to_flush:
+        try:
+            if proto == "trusttunnel":
+                from vless_installer.modules.trusttunnel import trusttunnel_restart_service
+                ok = trusttunnel_restart_service()
+                if ok:
+                    _log("INFO", f"_flush_pending_restarts: trusttunnel restarted")
+                else:
+                    _log("ERROR", f"_flush_pending_restarts: trusttunnel restart FAILED")
+            else:
+                # Future: other restart-based protocols plug in here.
+                _log("WARN", f"_flush_pending_restarts: no restart handler for {proto!r}")
+        except Exception as e:
+            _log("ERROR", f"_flush_pending_restarts: {proto} restart raised: {e}")
+
+
+def _flush_if_not_batched() -> None:
+    """Flush pending restarts ONLY if we're not inside a batch_context.
+    Called by the coordinator after `snap.commit()`.
+    """
+    if _BATCH_DEPTH == 0:
+        _flush_pending_restarts()
+
+
+import contextlib
+
+
+@contextlib.contextmanager
+def batch_context():
+    """Context manager that defers daemon restarts until the block exits.
+
+    Use this around cron batch operations (check_ttl_expired,
+    check_traffic_limits, run_cleanup) to avoid N consecutive restarts when
+    N users are processed — each restart briefly disconnects ALL active
+    clients of the restart-based protocol (e.g. TrustTunnel).
+
+    Nested calls are supported: the actual flush happens only when the
+    outermost context exits (depth counter returns to 0).
+
+    On exception: pending restarts are NOT flushed (the transaction is
+    rolled back by StateSnapshot.restore() in the coordinator, so restarting
+    would be pointless). The exception propagates.
+
+    Example:
+        with user_lifecycle.batch_context():
+            for email in expired_users:
+                user_lifecycle.block_user(email, reason="ttl_expired")
+        # ^ trusttunnel restarted ONCE here, not N times
+    """
+    global _BATCH_DEPTH
+    _BATCH_DEPTH += 1
+    try:
+        yield
+    finally:
+        _BATCH_DEPTH -= 1
+        if _BATCH_DEPTH == 0:
+            # Only flush if no exception is in flight. If an exception is
+            # propagating, the coordinator's `except` block will call
+            # snap.restore() + _cancel_pending_restarts(), and we should
+            # NOT flush here. We detect this by checking sys.exc_info().
+            import sys as _sys
+            if _sys.exc_info()[0] is None:
+                _flush_pending_restarts()
+            else:
+                # Exception propagating — discard pending restarts (they
+                # were for operations that are being rolled back).
+                global _PENDING_RESTARTS
+                if _PENDING_RESTARTS:
+                    _log("INFO",
+                        f"batch_context: discarding {len(_PENDING_RESTARTS)} pending "
+                        f"restarts due to exception: {sorted(_PENDING_RESTARTS)}")
+                    _PENDING_RESTARTS = set()
 
 
 # =============================================================================
@@ -1007,16 +1177,131 @@ class Hysteria2Adapter:
         return True  # no-op
 
 
+class TrustTunnelAdapter:
+    """Adapter для TrustTunnel (upstream Rust endpoint binary).
+
+    Особенности (из Phase 0):
+      • Credentials в /opt/trusttunnel/credentials.toml (TOML, массив [[client]]).
+      • NO hot-reload — изменение credentials.toml требует `systemctl restart
+        trusttunnel`. SIGHUP перезагружает только hosts.toml (TLS certs).
+      • Рестарт рвёт ВСЕ активные соединения TrustTunnel (~1 c), не только
+        изменяемого юзера. Поэтому адаптер НЕ рестартует сервис сам — он
+        правит файл и вызывает `_request_restart("trusttunnel")`. Реальный
+        рестарт происходит в конце транзакции (single op) или в конце батча
+        (cron pass) через `_flush_pending_restarts()`.
+
+    Identity model:
+      • username = email (verbatim — TrustTunnel позволяет произвольные строки,
+        email является каноническим ID в проекте).
+      • password = SHA-256("trusttunnel-pass|" + uuid) — детерминированный,
+        стабильный при переустановках (D8).
+    """
+
+    PROTOCOL_NAME = "trusttunnel"
+
+    @staticmethod
+    def _is_installed() -> bool:
+        """Check if TrustTunnel is installed (state + binary)."""
+        try:
+            from vless_installer.modules.trusttunnel import trusttunnel_is_installed
+            return trusttunnel_is_installed()
+        except Exception:
+            return False
+
+    @staticmethod
+    def add(email: str, uuid: str = "", name: str = "", **kwargs) -> bool:
+        """Add or update a user in credentials.toml. Idempotent (D5).
+
+        File edit only — does NOT restart the service. Calls
+        `_request_restart("trusttunnel")` so the coordinator flushes the
+        restart at the right time (after commit, batched if in batch_context).
+        """
+        try:
+            if not TrustTunnelAdapter._is_installed():
+                _log("INFO", "trusttunnel.add: TrustTunnel not installed, skipping")
+                return True
+            if not email:
+                _log("ERROR", "trusttunnel.add: email is required")
+                return False
+            # UUID is required to derive the deterministic password (D8).
+            # If not provided, try to look it up in users.json.
+            if not uuid:
+                user = find_user_by_email(email)
+                if user:
+                    uuid = user.get("uuid", "")
+            if not uuid:
+                _log("ERROR", f"trusttunnel.add: cannot derive password for {email!r} — uuid required")
+                return False
+            from vless_installer.modules.trusttunnel import (
+                trusttunnel_add_user as _tt_add,
+                trusttunnel_derive_password as _tt_pass,
+            )
+            password = _tt_pass(uuid)
+            ok = _tt_add(email, password)
+            if not ok:
+                _log("ERROR", f"trusttunnel.add: trusttunnel_add_user failed for {email!r}")
+                return False
+            # Queue restart — coordinator flushes after commit (or on batch exit).
+            _request_restart("trusttunnel")
+            return True
+        except Exception as e:
+            _log("ERROR", f"trusttunnel.add: exception for {email!r}: {e}")
+            return False
+
+    @staticmethod
+    def remove(email: str, **kwargs) -> bool:
+        """Remove a [[client]] block by email/username. Idempotent.
+
+        File edit only — restart is queued via _request_restart.
+        """
+        try:
+            if not TrustTunnelAdapter._is_installed():
+                return True
+            if not email:
+                return False
+            from vless_installer.modules.trusttunnel import trusttunnel_remove_user as _tt_remove
+            ok = _tt_remove(email)
+            if not ok:
+                _log("ERROR", f"trusttunnel.remove: trusttunnel_remove_user failed for {email!r}")
+                return False
+            _request_restart("trusttunnel")
+            return True
+        except Exception as e:
+            _log("ERROR", f"trusttunnel.remove: exception for {email!r}: {e}")
+            return False
+
+    @staticmethod
+    def block(email: str, reason: str = "manual", **kwargs) -> bool:
+        """Block = remove from credentials.toml (same as remove).
+        The user's deep-link becomes invalid immediately after restart.
+        """
+        _log("INFO", f"trusttunnel.block: removing user for {email!r} (reason={reason})")
+        return TrustTunnelAdapter.remove(email)
+
+    @staticmethod
+    def unblock(email: str, uuid: str = "", **kwargs) -> bool:
+        """Unblock = re-add the user (password is deterministic from uuid,
+        so the user gets the SAME credentials back — no new password to
+        distribute)."""
+        if not uuid:
+            user = find_user_by_email(email)
+            if user:
+                uuid = user.get("uuid", "")
+        _log("INFO", f"trusttunnel.unblock: re-adding user for {email!r} (same password — deterministic)")
+        return TrustTunnelAdapter.add(email, uuid=uuid)
+
+
 # Реестр adapter'ов
 PROTOCOL_ADAPTERS: Dict[str, type] = {
-    "vless":      VlessAdapter,
-    "awg":        AwgAdapter,
-    "singbox":    SingboxAdapter,
-    "mieru":      MieruAdapter,
-    "mtproto":    MtprotoAdapter,
-    "naiveproxy": NaiveProxyAdapter,
-    "fptn":       FptnAdapter,
-    "hysteria2":  Hysteria2Adapter,
+    "vless":        VlessAdapter,
+    "awg":          AwgAdapter,
+    "singbox":      SingboxAdapter,
+    "mieru":        MieruAdapter,
+    "mtproto":      MtprotoAdapter,
+    "naiveproxy":   NaiveProxyAdapter,
+    "fptn":         FptnAdapter,
+    "hysteria2":    Hysteria2Adapter,
+    "trusttunnel":  TrustTunnelAdapter,
 }
 
 
@@ -1041,6 +1326,11 @@ def _state_files_for_protocols(protocols: List[str]) -> List[Path]:
         files.append(_FPTN_USERS_LIST)
     if "mtproto" in protocols:
         files.append(_TELEMT_TOML_FILE)
+    if "trusttunnel" in protocols:
+        # credentials.toml is the file that TrustTunnelAdapter edits.
+        # Include the state file too so install metadata is rolled back.
+        files.append(_TRUSTTUNNEL_CREDS_FILE)
+        files.append(_TRUSTTUNNEL_STATE_FILE)
     if "vless" in protocols:
         files.extend([_TTL_FILE, _LIMITS_FILE, _BLOCKED_FILE])
     # Дедупликация
@@ -1170,6 +1460,9 @@ def add_user(email: str,
                 result["applied"].append("traffic_limit")
 
         snap.commit()
+        # Flush pending daemon restarts (e.g. TrustTunnel) — only if not
+        # inside a batch_context (otherwise the batch exit will flush).
+        _flush_if_not_batched()
         result["success"] = True
         _log_op("add", email, result["applied"], True,
                 f"uuid={uuid_str}, ttl={ttl}, limit={traffic_limit}")
@@ -1177,6 +1470,9 @@ def add_user(email: str,
 
     except Exception as e:
         snap.restore()
+        # Cancel pending restarts for protocols in this transaction — the
+        # files were just rolled back, so restarting would be pointless.
+        _cancel_pending_restarts(protocols_list)
         result["success"] = False
         _log_op("add", email, result["applied"] + result["failed"], False, str(e))
         return result
@@ -1233,12 +1529,14 @@ def remove_user(email: str,
             _remove_traffic_limit(email)
 
         snap.commit()
+        _flush_if_not_batched()
         result["success"] = True
         _log_op("remove", email, result["applied"], True)
         return result
 
     except Exception as e:
         snap.restore()
+        _cancel_pending_restarts(protocols_list)
         result["success"] = False
         _log_op("remove", email, result["applied"] + result["failed"], False, str(e))
         return result
@@ -1291,12 +1589,14 @@ def block_user(email: str,
                 raise RuntimeError(err)
 
         snap.commit()
+        _flush_if_not_batched()
         result["success"] = True
         _log_op("block", email, result["applied"], True, f"reason={reason}")
         return result
 
     except Exception as e:
         snap.restore()
+        _cancel_pending_restarts(protocols_list)
         result["success"] = False
         _log_op("block", email, result["applied"] + result["failed"], False, str(e))
         return result
@@ -1347,12 +1647,14 @@ def unblock_user(email: str,
                 raise RuntimeError(err)
 
         snap.commit()
+        _flush_if_not_batched()
         result["success"] = True
         _log_op("unblock", email, result["applied"], True)
         return result
 
     except Exception as e:
         snap.restore()
+        _cancel_pending_restarts(protocols_list)
         result["success"] = False
         _log_op("unblock", email, result["applied"] + result["failed"], False, str(e))
         return result
@@ -1466,43 +1768,47 @@ def check_ttl_expired() -> int:
             _ttl_load, _ttl_is_expired, _ttl_expires_within_hours,
         )
         ttl_db = _ttl_load()
-        for email, info in ttl_db.items():
-            if not isinstance(info, dict):
-                continue
-            expires_at = info.get("expires_at", "")
-            if not expires_at:
-                continue
-            # 24h-предупреждение
-            if not info.get("notified_24h") and _ttl_expires_within_hours(expires_at, 24):
-                try:
-                    core = _core_module()
-                    if hasattr(core, "_tg_notify_event"):
-                        core._tg_notify_event("ttl_expiring",
-                            f"Пользователь <b>{email}</b> истекает через 24ч")
-                    info["notified_24h"] = True
-                except Exception:
-                    pass
-            # Истёк — блокируем across все протоколы
-            if _ttl_is_expired(expires_at):
-                _log("INFO", f"check_ttl_expired: blocking {email!r} (TTL expired)")
-                result = block_user(email, reason="ttl_expired")
-                if result["success"]:
-                    blocked_count += 1
+        # Batching: wrap the entire loop in batch_context() so that
+        # restart-based protocols (TrustTunnel) are restarted ONCE at the
+        # end, not once per blocked user.
+        with batch_context():
+            for email, info in ttl_db.items():
+                if not isinstance(info, dict):
+                    continue
+                expires_at = info.get("expires_at", "")
+                if not expires_at:
+                    continue
+                # 24h-предупреждение
+                if not info.get("notified_24h") and _ttl_expires_within_hours(expires_at, 24):
                     try:
                         core = _core_module()
                         if hasattr(core, "_tg_notify_event"):
-                            core._tg_notify_event("ttl_expired",
-                                f"Пользователь <b>{email}</b> заблокирован (TTL истёк)")
+                            core._tg_notify_event("ttl_expiring",
+                                f"Пользователь <b>{email}</b> истекает через 24ч")
+                        info["notified_24h"] = True
                     except Exception:
                         pass
-                else:
-                    _log("ERROR", f"check_ttl_expired: failed to block {email!r}: {result['errors']}")
-        # Сохраняем обновлённые notified_24h флаги
-        try:
-            from vless_installer.modules.ttl_users import _ttl_save
-            _ttl_save(ttl_db)
-        except Exception:
-            pass
+                # Истёк — блокируем across все протоколы
+                if _ttl_is_expired(expires_at):
+                    _log("INFO", f"check_ttl_expired: blocking {email!r} (TTL expired)")
+                    result = block_user(email, reason="ttl_expired")
+                    if result["success"]:
+                        blocked_count += 1
+                        try:
+                            core = _core_module()
+                            if hasattr(core, "_tg_notify_event"):
+                                core._tg_notify_event("ttl_expired",
+                                    f"Пользователь <b>{email}</b> заблокирован (TTL истёк)")
+                        except Exception:
+                            pass
+                    else:
+                        _log("ERROR", f"check_ttl_expired: failed to block {email!r}: {result['errors']}")
+            # Сохраняем обновлённые notified_24h флаги
+            try:
+                from vless_installer.modules.ttl_users import _ttl_save
+                _ttl_save(ttl_db)
+            except Exception:
+                pass
     except Exception as e:
         _log("ERROR", f"check_ttl_expired: {e}")
     _log("INFO", f"check_ttl_expired: done, blocked {blocked_count} users")
@@ -1530,34 +1836,36 @@ def check_traffic_limits() -> int:
             _log("WARN", "check_traffic_limits: Stats API not configured, skipping")
             return 0
         limits = _limits_load()
-        for email, cfg in limits.items():
-            if not isinstance(cfg, dict):
-                continue
-            limit_gb = cfg.get("limit_gb", 0)
-            if not limit_gb or cfg.get("disabled"):
-                continue
-            used_bytes = _query_user_traffic_bytes(email)
-            cfg["used_bytes"] = used_bytes
-            limit_bytes = limit_gb * 1024**3
-            if used_bytes >= limit_bytes:
-                _log("INFO", f"check_traffic_limits: blocking {email!r} "
-                    f"({used_bytes/1024**3:.2f} GiB / {limit_gb} GiB)")
-                result = block_user(email, reason="traffic_limit")
-                if result["success"]:
-                    blocked_count += 1
-                    cfg["disabled"] = True
-                    cfg["disabled_at"] = datetime.now(timezone.utc).isoformat()
-                    try:
-                        core = _core_module()
-                        if hasattr(core, "_tg_notify_event"):
-                            core._tg_notify_event("traffic_limit",
-                                f"Пользователь <b>{email}</b> заблокирован: "
-                                f"использовано {used_bytes/1024**3:.2f} GiB из {limit_gb} GiB")
-                    except Exception:
-                        pass
-                else:
-                    _log("ERROR", f"check_traffic_limits: failed to block {email!r}: {result['errors']}")
-        _limits_save(limits)
+        # Batching: wrap the loop so restart-based protocols restart ONCE.
+        with batch_context():
+            for email, cfg in limits.items():
+                if not isinstance(cfg, dict):
+                    continue
+                limit_gb = cfg.get("limit_gb", 0)
+                if not limit_gb or cfg.get("disabled"):
+                    continue
+                used_bytes = _query_user_traffic_bytes(email)
+                cfg["used_bytes"] = used_bytes
+                limit_bytes = limit_gb * 1024**3
+                if used_bytes >= limit_bytes:
+                    _log("INFO", f"check_traffic_limits: blocking {email!r} "
+                        f"({used_bytes/1024**3:.2f} GiB / {limit_gb} GiB)")
+                    result = block_user(email, reason="traffic_limit")
+                    if result["success"]:
+                        blocked_count += 1
+                        cfg["disabled"] = True
+                        cfg["disabled_at"] = datetime.now(timezone.utc).isoformat()
+                        try:
+                            core = _core_module()
+                            if hasattr(core, "_tg_notify_event"):
+                                core._tg_notify_event("traffic_limit",
+                                    f"Пользователь <b>{email}</b> заблокирован: "
+                                    f"использовано {used_bytes/1024**3:.2f} GiB из {limit_gb} GiB")
+                        except Exception:
+                            pass
+                    else:
+                        _log("ERROR", f"check_traffic_limits: failed to block {email!r}: {result['errors']}")
+            _limits_save(limits)
     except Exception as e:
         _log("ERROR", f"check_traffic_limits: {e}")
     _log("INFO", f"check_traffic_limits: done, blocked {blocked_count} users")
@@ -1578,20 +1886,26 @@ def run_cleanup() -> dict:
         "traffic_blocked":   0,
         "awg_peers_removed": 0,
     }
-    try:
-        result["ttl_blocked"] = check_ttl_expired()
-    except Exception as e:
-        _log("ERROR", f"run_cleanup: check_ttl_expired failed: {e}")
-    try:
-        result["traffic_blocked"] = check_traffic_limits()
-    except Exception as e:
-        _log("ERROR", f"run_cleanup: check_traffic_limits failed: {e}")
-    try:
-        # AWG peer expiry — делегируем в существующую функцию
-        from vless_installer.modules.awg_expires import awgs_expires_check
-        result["awg_peers_removed"] = awgs_expires_check() or 0
-    except Exception as e:
-        _log("WARN", f"run_cleanup: awgs_expires_check failed (AWG not installed?): {e}")
+    # Wrap both check_ttl_expired and check_traffic_limits in a single
+    # batch_context so restart-based protocols restart at most ONCE across
+    # the entire cron pass (TTL + traffic + AWG). Each sub-function also
+    # wraps its own loop in batch_context(), but nesting is supported —
+    # the actual flush happens only when this outermost context exits.
+    with batch_context():
+        try:
+            result["ttl_blocked"] = check_ttl_expired()
+        except Exception as e:
+            _log("ERROR", f"run_cleanup: check_ttl_expired failed: {e}")
+        try:
+            result["traffic_blocked"] = check_traffic_limits()
+        except Exception as e:
+            _log("ERROR", f"run_cleanup: check_traffic_limits failed: {e}")
+        try:
+            # AWG peer expiry — делегируем в существующую функцию
+            from vless_installer.modules.awg_expires import awgs_expires_check
+            result["awg_peers_removed"] = awgs_expires_check() or 0
+        except Exception as e:
+            _log("WARN", f"run_cleanup: awgs_expires_check failed (AWG not installed?): {e}")
     _log("INFO", f"run_cleanup: done: {result}")
     return result
 
@@ -1610,6 +1924,12 @@ __all__ = [
     "check_ttl_expired",
     "check_traffic_limits",
     "run_cleanup",
+    # Batched restart mechanism (for TrustTunnel and future restart-based protocols)
+    "batch_context",
+    "_request_restart",
+    "_flush_pending_restarts",
+    "_cancel_pending_restarts",
+    "_flush_if_not_batched",
     # Identity helpers
     "find_user_by_email",
     "find_user_by_uuid",
@@ -1623,6 +1943,7 @@ __all__ = [
     "MtprotoAdapter",
     "FptnAdapter",
     "Hysteria2Adapter",
+    "TrustTunnelAdapter",
     "PROTOCOL_ADAPTERS",
     "ALL_PROTOCOLS",
     # Snapshot/restore
@@ -1639,5 +1960,7 @@ __all__ = [
     "_FPTN_STATE_FILE",
     "_TELEMT_TOML_FILE",
     "_FPTN_USERS_LIST",
+    "_TRUSTTUNNEL_STATE_FILE",
+    "_TRUSTTUNNEL_CREDS_FILE",
     "_LOG_FILE",
 ]

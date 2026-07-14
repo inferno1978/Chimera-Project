@@ -97,6 +97,9 @@ TEST_CASES = [
     ("backup_manager", "_scheduled_backup_run", "CLI: --scheduled-backup"),
     ("ru_subnets", "_ru_subnets_cli_update", "CLI: --update-ru-subnets"),
     ("as_direct", "_as_direct_cli_update", "CLI: --update-as-direct"),
+    # TrustTunnel
+    ("trusttunnel", "do_trusttunnel_menu", "меню TrustTunnel"),
+    ("trusttunnel_health", "trusttunnel_health_check", "health-check TrustTunnel"),
     # Инсталляционные (НЕ вызываем — слишком опасно, но проверяем callable)
     # ("install_prompts", "prompt_parameters", "параметры установки"),
     # ("xray_install", "install_xray", "установка Xray"),
