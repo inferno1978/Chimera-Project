@@ -383,32 +383,30 @@ class TestUnifiedMenuKItemStatic(unittest.TestCase):
             f"пунктах 3 и K, найдено {len(prompt_matches)}."
         )
 
-    def test_t5b_main_menu_k_item_still_disabled(self):
-        """Пункт K в Главном меню (do_unified_user_manager из _core.py
-        строки ~6350, который ведёт к generate_client_links_ios) должен
-        ОСТАВАТЬСЯ закрытым — он не чинен патчем №3."""
+    def test_t5b_main_menu_k_item_never_in_top_menu(self):
+        """В top-level main_menu (главное меню 1-17) НЕТ пункта K —
+        там никогда не было iOS-точки.
+
+        Активные пункты K живут только в ПОДменю:
+          • do_unified_user_manager (патч №3) → do_user_show_link_ios_by_uuid
+          • _menu_users (патч №4)             → generate_client_links_ios
+
+        Этот тест защищает от случайной вставки K в main_menu — там
+        ему не место, поскольку главный menu — это разделы (1-Установка,
+        2-Пользователи, 3-Сеть и т.д.), а не конкретные действия."""
+        import re
         src = (_PROJECT_ROOT / "vless_installer" / "_core.py").read_text()
-        # Главный menu пункт 2 → подменю "УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ" (большое).
-        # Ищем там _box_item("K" — он должен быть в комментарии.
-        # Это блок меню вокруг строки 6350 (старого пункта K, который мы
-        # закомментировали в патче №2).
-        # Найдём все активные _box_item("K" в файле.
-        active_k_lines = []
-        for i, line in enumerate(src.split("\n"), 1):
+        # Извлекаем main_menu (top-level).
+        m = re.search(r'def main_menu\(\).*', src, re.DOTALL)
+        self.assertIsNotNone(m, "main_menu не найдена в _core.py")
+        main_menu_block = m.group(0)
+        for i, line in enumerate(main_menu_block.split("\n"), 1):
             stripped = line.strip()
             if stripped.startswith('_box_item("K"'):
-                active_k_lines.append((i, line))
-        # Должен быть ровно 1 активный — в do_unified_user_manager
-        # (T5). В главном меню (do_main_menu блок 2) он должен быть
-        # закомментирован.
-        self.assertEqual(
-            len(active_k_lines), 1,
-            f"Должен быть ровно 1 активный пункт K (в do_unified_user_manager). "
-            f"Найдено активных: {len(active_k_lines)}. Лист: {active_k_lines}. "
-            f"Если их больше — значит в главном меню кто-то раскомментировал "
-            f"точку, которая НЕ чинена (generate_client_links_ios всё ещё рвёт "
-            f"REALITY-юзеров без shadow-клиента)."
-        )
+                self.fail(
+                    f"Строка {i} в main_menu: пункт K не должен быть в "
+                    f"top-level меню. Got: {line!r}"
+                )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
