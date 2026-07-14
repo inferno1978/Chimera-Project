@@ -709,19 +709,35 @@ class TestStep0Closure(unittest.TestCase):
                         f"закомментирован, got: {line!r}"
                     )
 
-    def test_client_config_export_ios_link_commented(self):
-        """В client_config_export.py генерация vless-link-ios.txt должна
-        быть закомментирована."""
+    def test_client_config_export_ios_link_active_with_shadow(self):
+        """Патч №4 раскомментировал генерацию vless-link-ios.txt в
+        client_config_export.py, с тем же shadow-паттерном, что
+        подтверждён в do_user_show_link_ios.
+
+        Этот тест защищает от случайного возврата к закомментированному
+        состоянию (которое было нужно в патче №2, но снято патчем №4)."""
         src = (_PROJECT_ROOT / "vless_installer" / "modules" / "client_config_export.py").read_text()
-        lines = src.split("\n")
-        for i, line in enumerate(lines):
+        # Должна быть АКТИВНАЯ (не закомментированная) строка с
+        # _users_get_or_create_ios_shadow — это и есть shadow-паттерн.
+        found_shadow_call = False
+        for line in src.split("\n"):
             stripped = line.strip()
-            # Активная запись ios_link_file.write_text
+            if "_users_get_or_create_ios_shadow" in stripped and not stripped.startswith("#"):
+                found_shadow_call = True
+                break
+        self.assertTrue(found_shadow_call,
+                        "Патч №4: client_config_export.py должен использовать "
+                        "_users_get_or_create_ios_shadow для REALITY (shadow-паттерн)")
+        # Должна быть АКТИВНАЯ запись ios_link_file.write_text.
+        found_write = False
+        for line in src.split("\n"):
+            stripped = line.strip()
             if "ios_link_file.write_text" in stripped and not stripped.startswith("#"):
-                self.fail(
-                    f"Строка {i+1}: ios_link_file.write_text должна быть "
-                    f"закомментирована, got: {line!r}"
-                )
+                found_write = True
+                break
+        self.assertTrue(found_write,
+                        "Патч №4: ios_link_file.write_text должен быть активен "
+                        "(не закомментирован) — патч №2 закомментировал, №4 снял")
 
     def test_subscription_menu_no_ios_url(self):
         """В do_subscription_menu не должно быть показа url_ios."""

@@ -244,26 +244,80 @@ def do_generate_client_config() -> None:
                       f"&fp={fp}&type=xhttp&path={xhttp_path_enc}#VLESS-xHTTP")
     vless_link_file.write_text(vless_link + "\n")
 
-    # TODO: broken until shadow-client fix — не показывать пользователю.
-    # vless-link-ios.txt на REALITY давал бы нерабочую ссылку: серверный
-    # clients[] содержит flow=xtls-rprx-vision, а постпроцессор его режет.
-    # Чинится через _users_get_or_create_ios_shadow() отдельным заходом.
-    # from vless_installer.modules.ios_link_variant import to_ios_karing_link
-    # ios_link_file = out_dir / "vless-link-ios.txt"
-    # ios_link_file.write_text(to_ios_karing_link(vless_link) + "\n")
+    # ── iOS/Karing-совместимый вариант ссылки ─────────────────────────────
+    # Для REALITY: серверный clients[] хранит "flow": "xtls-rprx-vision"
+    # для этого UUID. Постпроцессор to_ios_karing_link убирает flow из
+    # ссылки, но без shadow-клиента Xray рвёт хендшейк. Поэтому создаём
+    # shadow (без flow) и собираем ссылку на его UUID.
+    # Для xHTTP: flow не используется в принципе — обычный vless_link
+    # уже iOS-safe, просто копируем.
+    # Если config.json недоступен (тестовое окружение или Xray не установлен) —
+    # graceful fallback: оставляем только постпроцессор. Это лучше, чем
+    # ронять весь do_generate_client_config, ведь остальные 4 файла
+    # (clash/singbox/hiddify/vless-link) уже сгенерированы.
+    ios_link_file = out_dir / "vless-link-ios.txt"
+    if proto == "reality":
+        try:
+            from vless_installer.modules.users_manager import (
+                _users_get_config, _users_get_or_create_ios_shadow,
+                _users_gen_link,
+            )
+            from vless_installer.modules.ios_link_variant import to_ios_karing_link
+            try:
+                cfg_path = _users_get_config()
+            except SystemExit:
+                # _users_get_config вызывает die() если config.json не найден.
+                # В тестовом окружении это норма — fallback на постпроцессор.
+                raise FileNotFoundError("config.json not found")
+            with cfg_path.open() as _f:
+                _c = json.load(_f)
+            _clients = (_c.get("inbounds", [{}])[0]
+                        .get("settings", {}).get("clients", []))
+            _base = next((cl for cl in _clients if cl.get("id", "") == vuuid), None)
+            if not _base or not _base.get("email"):
+                _box_warn("iOS-link: root-юзер не найден в clients[] или нет email — "
+                          "vless-link-ios.txt не создан. Примените список [5] в менеджере.")
+            else:
+                _shadow = _users_get_or_create_ios_shadow(cfg_path, _base["email"])
+                if _shadow is None:
+                    # Ненормально для reality — fallback на обычную ссылку.
+                    _box_warn("iOS-link: shadow не создан (нетипично для reality) — "
+                              "vless-link-ios.txt = обычная ссылка.")
+                    ios_link_file.write_text(to_ios_karing_link(vless_link) + "\n")
+                else:
+                    _shadow_uuid, _shadow_email = _shadow
+                    _ios_link = to_ios_karing_link(
+                        _users_gen_link(cfg_path, _shadow_uuid, _shadow_email)
+                    )
+                    ios_link_file.write_text(_ios_link + "\n")
+        except FileNotFoundError:
+            # Config Xray не найден — fallback на постпроцессор.
+            from vless_installer.modules.ios_link_variant import to_ios_karing_link
+            ios_link_file.write_text(to_ios_karing_link(vless_link) + "\n")
+        except Exception as _ios_e:
+            _box_warn(f"iOS-link: не удалось создать shadow-клиент: {_ios_e}")
+            # Фолбэк: хотя бы постпроцессор, лучше чем ничего.
+            from vless_installer.modules.ios_link_variant import to_ios_karing_link
+            ios_link_file.write_text(to_ios_karing_link(vless_link) + "\n")
+    else:
+        # xHTTP — shadow не нужен, flow нет.
+        from vless_installer.modules.ios_link_variant import to_ios_karing_link
+        ios_link_file.write_text(to_ios_karing_link(vless_link) + "\n")
 
     _box_ok(f"Clash Meta   → {clash_file}")
     _box_ok(f"Sing-box     → {singbox_file}")
     _box_ok(f"Hiddify      → {hiddify_file}")
     _box_ok(f"VLESS-ссылка → {vless_link_file}")
+    _box_ok(f"iOS/Karing   → {ios_link_file}")
     _box_row()
     _box_row(f"  {DIM}Скопируйте файлы на клиентское устройство:{NC}")
     _box_row(f"    {CYAN}scp root@{domain}:{clash_file} .{NC}")
     _box_row(f"    {CYAN}scp root@{domain}:{singbox_file} .{NC}")
     _box_row(f"    {CYAN}scp root@{domain}:{hiddify_file} .{NC}")
     _box_row(f"    {CYAN}scp root@{domain}:{vless_link_file} .{NC}")
+    _box_row(f"    {CYAN}scp root@{domain}:{ios_link_file} .{NC}")
     _box_bottom()
-    log_to_file("INFO", f"Client configs generated: {clash_file}, {singbox_file}, {hiddify_file}, {vless_link_file}")
+    log_to_file("INFO", f"Client configs generated: {clash_file}, {singbox_file}, {hiddify_file}, {vless_link_file}, {ios_link_file}")
 
 
 # =============================================================================
