@@ -771,7 +771,7 @@ def _unit_text(python_bin: str, module_path: str, port: int) -> str:
 
 _NGINX_SNIPPET_TEMPLATE = (
     "# vless-subscription — включить одной строкой внутри существующего\n"
-    "# `server { listen 443 ssl; ... }` для домена:\n"
+    "# `server {{ listen 443 ssl; ... }}` для домена:\n"
     "#   include /etc/nginx/snippets/vless-subscription.conf;\n"
     "location /sub/ {{\n"
     "    proxy_pass https://127.0.0.1:{port};\n"
