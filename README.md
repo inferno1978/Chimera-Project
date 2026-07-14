@@ -35,7 +35,7 @@ bash bootstrap.sh
 
 | Категория        | Функции                                                              |
 | ---------------- | -------------------------------------------------------------------- |
-| **Протоколы**    | VLESS + TCP + REALITY, VLESS + xHTTP + TLS                           |
+| **Протоколы**    | VLESS + TCP + REALITY, VLESS + xHTTP + TLS, TrustTunnel (AdGuard VPN) |
 | **Режимы**       | Одиночный (A), Каскад Россия→Зарубеж (B), Мульти-каскад (до 10 нод) |
 | **Транспорт**    | AmneziaWG (AWG 2.0) с multi-node балансировкой                       |
 | **Маскировка**   | XTLS Vision/Splice, сайты-заглушки (TechHub, Nextcloud, custom)      |
@@ -59,6 +59,18 @@ bash bootstrap.sh
 | **v4.14** 🔒 | AmneziaWG 2.0 standalone VPN: 13 новых модулей `awg_*.py` (полный порт bivlked/amneziawg-installer), 9 carrier-пресетов (Yota/Tele2/Мегафон/Билайн/T-Mobile US), каскад RU→зарубеж с split-routing, QR+`vpn://` URI, временные клиенты, backup/restore, diagnose с carrier-compare |
 | **v4.15 NEW** 🛡️ | AmneziaWG peer management в веб-панели: новый модуль `awg_rest_api.py` (15 REST endpoints), `owner_email` model (admin видит все пиры, user — только свой), Admin Panel — секция AmneziaWG с CRUD, User Portal — карточка «Мой AmneziaWG» (QR/conf/regen). Security: PSK фильтрация из JSON, QR PNG chmod 0o600, нет print ключа в journal. Bug fixes: порядок nginx→сокет, state.json ДО health check. |
 | **v4.20.1** 🎭 | Telemt nginx-fallback: режим "own-site" — свой домен + свой сайт на локальном nginx вместо чужого donor-домена. Telemt сплайсит failed handshakes на локальный nginx с реальным Let's Encrypt сертификатом (`censorship.mask_host` + `tls_emulation=true`), убирая детектируемую аномалию `fake_cert_len=2048`. Рефакторинг сигнатур `create_website()` / `setup_nginx_final()` / `obtain_ssl_cert()` — опциональные `domain`/`port`/`socket_path` перекрывают `core.PARAM_*` без мутации глобального state. Guard перед стартом Telemt: проверка готовности nginx (TCP connect) — откат к donor-режиму если nginx не слушает (защита от silent regression в духе AWG rotation no-op, telemt/telemt #330 #713). 24 новых регресс-теста. |
+
+## 🔐 TrustTunnel (AdGuard VPN protocol)
+
+**Меню:** главное → `18` · **Upstream:** https://github.com/TrustTunnel/TrustTunnel
+
+Референсная реализация протокола AdGuard VPN на Rust (Apache 2.0, open-source с января 2026). Интеграция использует **официальный upstream-бинарник** `trusttunnel_endpoint` + `setup_wizard` (prebuilt, GPG-подписан ключом AdGuard `28645AC9...`) — НЕ форк и НЕ реимплементация. Транспорт: HTTP/2-over-TLS (TCP) и HTTP/3-over-QUIC (UDP) с мультиплексированием TCP/UDP/ICMP. Выдача доступа пользователю — через deep-link `tt://?<base64url>` (upstream TLV-формат), который встраивается в существующий self-service Telegram-бот наравне с `vless://`, `vpn://`, `hysteria2://`.
+
+**Порт по умолчанию: `8443` (TCP + UDP).** Это отдельный порт, не 443 — порт 443 уже занят VLESS (TCP, REALITY или xHTTP) и Hysteria2 (UDP), а TrustTunnel слушает одновременно TCP и UDP на одном номере порта, не имеет SNI-dispatch и не умеет fallback. При установке конфликт проверяется через `core.check_port_used_by_other_protocol`.
+
+Сертификаты — через существующий конвейер `ssl_certbot.obtain_ssl_cert()`, feed в `setup_wizard --cert-type provided`. Авто-renewal — через certbot cron + deploy-hook `systemctl reload trusttunnel` (SIGHUP перезагружает `hosts.toml` без рестарта, без разрыва активных сессий).
+
+Управление пользователями — общий `user_lifecycle.TrustTunnelAdapter`, credentials в `/opt/trusttunnel/credentials.toml` (TOML, массив `[[client]]`). Известные ограничения — см. [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) (агрегированный трафик, рестарт при смене пользователей).
 
 ## 📋 Требования
 
