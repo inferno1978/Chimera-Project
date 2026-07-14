@@ -195,15 +195,30 @@ def do_user_list() -> None:
         with cfg.open() as f:
             c = json.load(f)
         clients = c.get("inbounds", [{}])[0].get("settings", {}).get("clients", [])
-        if not clients:
+        # Разделяем реальных пользователей и iOS-shadow (по email с суффиксом __ios).
+        # Shadow не нумеруются и не участвуют в выборе по номеру — они показываются
+        # отдельным блоком внизу, чтобы админ видел, что они есть, но не путал их
+        # с реальными юзерами.
+        real_clients = [cl for cl in clients if not cl.get("email", "").endswith("__ios")]
+        shadow_clients = [cl for cl in clients if cl.get("email", "").endswith("__ios")]
+        if not real_clients and not shadow_clients:
             _box_row(f"  {DIM}Пользователи не найдены.{NC}")
         else:
-            _box_row(f"  {'N':<4} {'Email/имя':<30} {'UUID':<38} {'Flow':<20}")
-            _box_bottom()
-            print("  " + "─" * 96)
-            for i, cl in enumerate(clients, 1):
-                print(f"  {i:<4} {cl.get('email','—'):<30} "
-                      f"{cl.get('id','—'):<38} {cl.get('flow','—'):<20}")
+            if real_clients:
+                _box_row(f"  {'N':<4} {'Email/имя':<30} {'UUID':<38} {'Flow':<20}")
+                _box_bottom()
+                print("  " + "─" * 96)
+                for i, cl in enumerate(real_clients, 1):
+                    print(f"  {i:<4} {cl.get('email','—'):<30} "
+                          f"{cl.get('id','—'):<38} {cl.get('flow','—'):<20}")
+            if shadow_clients:
+                if real_clients:
+                    print()
+                print(f"  {DIM}iOS-shadow (служебные, без flow — для Karing):{NC}")
+                print("  " + "─" * 96)
+                for cl in shadow_clients:
+                    print(f"  {DIM}  —   {cl.get('email','—'):<30} "
+                          f"{cl.get('id','—'):<38} {cl.get('flow','—') or '—':<20}{NC}")
     except Exception:
         warn("Не удалось прочитать конфиг")
     print()
@@ -962,11 +977,21 @@ def generate_client_links() -> None:
 def generate_client_links_ios() -> None:
     """iOS/Karing-совместимые сводные ссылки (IPv4/IPv6/Domain).
 
-    Копия структуры generate_client_links(), но каждая ссылка
-    прогоняется через to_ios_karing_link() перед выводом, а файлы
-    и QR-картинки пишутся в ОТДЕЛЬНЫЕ имена (суффикс _ios), чтобы
-    НЕ перезаписывать существующие /root/vless_link*.txt и
-    /root/vless_qr_*.png от generate_client_links().
+    Копия структуры generate_client_links(), но:
+      • Для REALITY: создаёт/переиспользует shadow-клиент без flow
+        (_users_get_or_create_ios_shadow) и строит ссылки на его UUID.
+        Email резолвится из живого clients[] по PARAM_UUID (та же защита
+        от рассинхрона, что в do_user_show_link_ios_by_uuid) — не из
+        state.json напрямую.
+      • Для xHTTP: shadow не нужен (flow не используется), ссылки
+        строятся на PARAM_UUID, to_ios_karing_link отрабатывает как
+        no-op (в xHTTP нет flow ни в ссылке, ни в server-side client).
+      • Каждая ссылка прогоняется через to_ios_karing_link() (полный
+        no-op для shadow-варианта, потому что shadow-клиент уже без flow
+        — но сохраняем для единообразия и для эмодзи-флага).
+      • Файлы и QR-картинки пишутся в ОТДЕЛЬНЫЕ имена (суффикс _ios),
+        чтобы НЕ перезаписывать существующие /root/vless_link*.txt и
+        /root/vless_qr_*.png от generate_client_links().
 
     Существующая generate_client_links() НЕ трогается.
 
@@ -978,6 +1003,7 @@ def generate_client_links_ios() -> None:
     _box_bottom = core._box_bottom
     _box_link   = core._box_link
     _box_wrap_msg = core._box_wrap_msg
+    _box_warn   = core._box_warn
     _get_box_width = core._get_box_width
     get_server_ip  = core.get_server_ip
     PARAM_FINGERPRINT = core.PARAM_FINGERPRINT
@@ -998,6 +1024,7 @@ def generate_client_links_ios() -> None:
     BLUE    = core.BLUE
     DIM     = core.DIM
     NC      = core.NC
+    warn    = core.warn
 
     from vless_installer.modules.ios_link_variant import to_ios_karing_link
 
@@ -1013,10 +1040,46 @@ def generate_client_links_ios() -> None:
     proto = PROTOCOL_MODE  # "reality" или "xhttp"
     _sni = PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) else PARAM_DOMAIN
 
+    # ── Резолвим email и UUID для генерации ссылок ────────────────────────
+    # Для REALITY: shadow-клиент (без flow), UUID берётся из него.
+    # Для xHTTP: оригинальный PARAM_UUID, shadow не нужен.
+    # Email — из живого clients[] по PARAM_UUID (защита от рассинхрона
+    # state.json ↔ clients[], та же логика, что в do_user_show_link_ios_by_uuid).
+    link_uuid = PARAM_UUID
+    link_email = ""
+    if proto == "reality":
+        cfg = _users_get_config()
+        try:
+            with cfg.open() as f:
+                c = json.load(f)
+            clients = (c.get("inbounds", [{}])[0]
+                       .get("settings", {}).get("clients", []))
+            base_client = next((cl for cl in clients if cl.get("id", "") == PARAM_UUID), None)
+            if not base_client:
+                warn(f"PARAM_UUID '{PARAM_UUID[:8]}…' не найден в clients[] config.json.")
+                _box_warn("Возможно, список пользователей не применён. "
+                          "Ссылки будут с оригинальным UUID (могут не работать на iOS без shadow).")
+            else:
+                base_email = base_client.get("email", "")
+                if not base_email:
+                    warn("У root-юзера в clients[] пустой email — "
+                         "невозможно создать iOS-shadow.")
+                    _box_warn("Ссылки будут с оригинальным UUID (могут не работать на iOS).")
+                else:
+                    shadow = _users_get_or_create_ios_shadow(cfg, base_email)
+                    if shadow is not None:
+                        link_uuid, link_email = shadow
+                    # если shadow вернул None при proto == "reality" —
+                    # это ненормально (xhttp-инбаунд не должен быть reality),
+                    # но не роняем — fallback на PARAM_UUID.
+        except Exception as e:
+            warn(f"Ошибка чтения config.json для shadow: {e}")
+            _box_warn("Ссылки будут с оригинальным UUID (могут не работать на iOS).")
+
     ipv4 = get_server_ip("4")
     if ipv4:
         link4 = _gen_vless_link(
-            ipv4, PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
+            ipv4, link_uuid, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
             proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
             port=SERVER_PORT,
         )
@@ -1033,7 +1096,7 @@ def generate_client_links_ios() -> None:
     ipv6_ext = get_server_ip("6") if IS_IPV6_AVAILABLE else ""
     if ipv6_ext:
         link6 = _gen_vless_link(
-            f"[{ipv6_ext}]", PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
+            f"[{ipv6_ext}]", link_uuid, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
             proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
             port=SERVER_PORT,
         )
@@ -1049,7 +1112,7 @@ def generate_client_links_ios() -> None:
 
     if PARAM_DOMAIN:
         link_ds = _gen_vless_link(
-            PARAM_DOMAIN, PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
+            PARAM_DOMAIN, link_uuid, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
             proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
             port=SERVER_PORT,
         )
@@ -1308,14 +1371,23 @@ def _unified_load_users() -> list[dict]:
                 if uid and uid not in seen_uuids:
                     seen_uuids.add(uid)
                     email = cl.get("email", "")
-                    merged.append({
+                    # Помечаем shadow-клиентов (созданных через
+                    # _users_get_or_create_ios_shadow) полем is_ios_shadow.
+                    # Не исключаем из списка — do_unified_user_manager
+                    # продолжит их показывать (админ может удалить вручную
+                    # при отладке). Счётчики/статус-панель фильтруют по
+                    # этому полю, чтобы не задваивать «число пользователей».
+                    entry = {
                         "uuid":    uid,
                         "email":   email,
                         "name":    email.split("@")[0] if email else uid[:8],
                         "created": "",
                         "source":  "A",
                         "flow":    cl.get("flow", ""),
-                    })
+                    }
+                    if email.endswith("__ios"):
+                        entry["is_ios_shadow"] = True
+                    merged.append(entry)
         except Exception:
             pass
         break  # только первый найденный конфиг

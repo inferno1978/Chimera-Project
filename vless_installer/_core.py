@@ -4533,6 +4533,11 @@ def do_unified_user_manager() -> None:
                 for i, u in enumerate(users, 1):
                     uuid_short   = u["uuid"][:8] + "~"
                     src_tag      = u.get("source", "?")
+                    # iOS-shadow помечаем явно — это служебная запись без flow,
+                    # созданная через _users_get_or_create_ios_shadow для
+                    # REALITY-юзера. Не реальный пользователь.
+                    if u.get("is_ios_shadow"):
+                        src_tag = f"{DIM}ios-shadow{NC}"
                     device_label = u.get("device_label", "")
                     icon         = _device_icon(device_label)
                     if device_label:
@@ -6402,12 +6407,7 @@ def _menu_users() -> None:
         _box_item("G", f"📲 Поделиться конфигом  {DIM}(QR → скачать без scp){NC}")
         _box_item("H", f"🔁 Единая подписка  {DIM}(все транспорты в одном URL){NC}")
         _box_item("M", f"🪞 Entry Mirrors  {DIM}(резервные точки входа){NC}")
-        # TODO: broken until shadow-client fix — не показывать пользователю.
-        # Сводный экран generate_client_links_ios() пока рвёт REALITY-юзеров:
-        # серверная clients[] содержит flow=xtls-rprx-vision, а ссылка
-        # уходит без flow — это разрыв хендшейка. Чинится отдельным заходом
-        # через _users_get_or_create_ios_shadow() (как в do_user_show_link_ios).
-        # _box_item("K", f"📱 iOS/Karing-ссылка  {DIM}(без Vision flow и эмодзи){NC}")
+        _box_item("K", f"📱 iOS/Karing-ссылки  {DIM}(сводный экран, без Vision flow){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -6463,15 +6463,14 @@ def _menu_users() -> None:
             except ImportError as _e:
                 warn(f"Модуль Entry Mirrors не найден: {_e}")
                 time.sleep(2)
-        # TODO: broken until shadow-client fix — не показывать пользователю.
-        # elif ch.lower() == "k":
-        #     _load_state_into_globals()
-        #     if not PARAM_DOMAIN:
-        #         warn("Параметры не найдены. Сначала установите (раздел 1).")
-        #         time.sleep(2)
-        #         continue
-        #     generate_client_links_ios()
-        #     input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch.lower() == "k":
+            _load_state_into_globals()
+            if not PARAM_DOMAIN:
+                warn("Параметры не найдены. Сначала установите (раздел 1).")
+                time.sleep(2)
+                continue
+            generate_client_links_ios()
+            input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch.lower() == "q" or ch == "":
             break
         else:

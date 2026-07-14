@@ -220,8 +220,14 @@ def _security_checks() -> list[tuple[str, bool]]:
 def _users_counts() -> tuple[int, int]:
     try:
         users = _core_module()._unified_load_users()
-        total = len(users)
-        active = sum(1 for u in users if not u.get("disabled"))
+        # Исключаем iOS-shadow-клиентов (служебные записи без flow, создаются
+        # через _users_get_or_create_ios_shadow). Они не реальные пользователи,
+        # а серверная пара для REALITY-юзера, чья iOS-ссылка идёт без Vision flow.
+        # Без фильтра счётчик задваивался бы — shadow имеют уникальный UUID и
+        # попадали бы в total как отдельный юзер.
+        real_users = [u for u in users if not u.get("is_ios_shadow")]
+        total = len(real_users)
+        active = sum(1 for u in real_users if not u.get("disabled"))
         return active, total
     except Exception:
         return 0, 0
