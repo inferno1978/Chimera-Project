@@ -159,7 +159,7 @@ def do_full_migration_export() -> None:
             return
 
         (tmp / "README.txt").write_text(textwrap.dedent(f"""\
-            VLESS Ultimate Installer — Полный архив миграции
+            Chimera Project — Полный архив миграции
             Создан: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             Домен:  {domain or '—'}
             Файлов: {len(copied)}

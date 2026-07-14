@@ -91,7 +91,7 @@ bash bootstrap.sh
 ## 🔧 Ручная установка
 
 ```bash
-git clone https://github.com/inferno1978/VLESS-Ultimate-Installer /opt/vless-ultimate
+git clone https://github.com/inferno1978/Chimera-Project /opt/vless-ultimate
 cd /opt/vless-ultimate
 sudo python3 main.py
 ```
@@ -352,7 +352,7 @@ sudo python3 /opt/vless-ultimate/main.py --scheduled-backup
 
 ## ❓ Решение проблем
 
-Смотри [TROUBLESHOOTING.md](https://github.com/inferno1978/VLESS-Ultimate-Installer/blob/main/TROUBLESHOOTING.md).
+Смотри [TROUBLESHOOTING.md](https://github.com/inferno1978/Chimera-Project/blob/main/TROUBLESHOOTING.md).
 
 ## 📌 О проекте и формате общения
 
@@ -384,7 +384,7 @@ sudo python3 /opt/vless-ultimate/main.py --scheduled-backup
 
 ## 📄 Лицензия
 
-MIT — см. [LICENSE](https://github.com/inferno1978/VLESS-Ultimate-Installer/blob/main/LICENSE)
+MIT — см. [LICENSE](https://github.com/inferno1978/Chimera-Project/blob/main/LICENSE)
 
 ## ✍️ Автор
 

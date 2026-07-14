@@ -1,4 +1,4 @@
-# Hysteria2 Transport — VLESS Ultimate Installer
+# Hysteria2 Transport — Chimera Project
 
 ## Обзор
 

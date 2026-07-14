@@ -73,7 +73,7 @@ def awgs_check_conflicts(port: int = AWGS_DEFAULT_PORT) -> list:
     core = _core_module()
     conflicts = []
 
-    # 1. Конфликт с chain Mode B (VLESS Ultimate Installer)
+    # 1. Конфликт с chain Mode B (Chimera Project)
     vless_state = Path("/var/lib/xray-installer/state.json")
     if vless_state.exists():
         try:

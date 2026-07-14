@@ -212,7 +212,7 @@ def do_manage_logrotate() -> None:
             _LOGROTATE_XRAY.parent.mkdir(parents=True, exist_ok=True)
             _LOGROTATE_XRAY.write_text(textwrap.dedent(f"""\
                 # Ротация логов Xray-core
-                # Создано VLESS Ultimate Installer v4.11.3
+                # Создано Chimera Project v4.11.3
                 /var/log/xray/access.log
                 /var/log/xray/error.log {{
                     {freq}

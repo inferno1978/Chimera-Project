@@ -44,7 +44,7 @@ from chimera.modules.download_manager import fetch_package
 # ============================================================================
 _SYSTEMD_UNIT = """\
 [Unit]
-Description=sing-box (VLESS Ultimate Installer)
+Description=sing-box (Chimera Project)
 After=network-online.target
 Wants=network-online.target
 # v4.23.10: ограничение рестартов — без этого при crash-loop (EADDRINUSE,

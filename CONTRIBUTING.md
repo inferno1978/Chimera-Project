@@ -1,4 +1,4 @@
-# Contributing to VLESS Ultimate Installer
+# Contributing to Chimera Project
 
 Спасибо за интерес к проекту! Ниже — правила участия.
 

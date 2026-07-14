@@ -204,7 +204,7 @@ def h2_cert_monitor() -> None:
 def h2_cert_install_cron() -> None:
     """Устанавливает еженедельный мониторинг сертификата."""
     cron = "0 8 * * 1 root /usr/bin/python3 /opt/vless-installer/main.py --h2-cert-monitor\n"
-    _RENEW_CRON.write_text(f"# H2 cert monitor — VLESS Ultimate Installer\n{cron}")
+    _RENEW_CRON.write_text(f"# H2 cert monitor — Chimera Project\n{cron}")
     success(f"Cron мониторинга сертификата → {_RENEW_CRON}")
 
 

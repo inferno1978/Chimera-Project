@@ -338,7 +338,7 @@ def _auto_fallback_install(nodes: list, tg_token: str = "", tg_chat: str = "") -
     script = textwrap.dedent(f"""\
         #!/bin/bash
         # Xray Auto-Fallback: Mode B → A при отказе всех exit-нод
-        # Установлен VLESS Ultimate Installer
+        # Установлен Chimera Project
         LOG="{_AUTO_FALLBACK_LOGFILE}"
         STATE_FILE="{STATE_FILE}"
         FAILOVER_STATE="{_FAILOVER_STATE}"

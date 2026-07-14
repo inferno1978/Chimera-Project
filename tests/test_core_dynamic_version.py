@@ -134,7 +134,7 @@ class TestCoreDynamicVersion(unittest.TestCase):
         показывает ТЕКУЩУЮ версию проекта в строке баннера.
 
         main_menu() использует _get_version() в f-string для строки
-        "VLESS Ultimate Installer v{version}". После бампа версии
+        "Chimera Project v{version}". После бампа версии
         баннер должен показывать новое значение, а не старое и не "unknown".
 
         ВАЖНО: тест НЕ хардкодит "4.25.1" — читает текущую версию из
@@ -176,7 +176,7 @@ class TestCoreDynamicVersion(unittest.TestCase):
         """Статус-бар главного меню подхватывает monkey-patched версию.
 
         main_menu() использует _get_version() в f-string для строки
-        "VLESS Ultimate Installer v{version}".
+        "Chimera Project v{version}".
         """
         # Сбрасываем кэш в globals dict
         self._core_globals["_CACHED_VERSION"] = ""

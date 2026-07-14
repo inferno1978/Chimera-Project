@@ -83,7 +83,7 @@ def _build_watchdog_script() -> str:
 
     return textwrap.dedent(f"""\
         #!/bin/bash
-        # nginx-watchdog.sh — VLESS Ultimate Installer
+        # nginx-watchdog.sh — Chimera Project
         # Автоматически создан. Управляется через меню установщика.
         LOG="{_LOG}"
         DATE=$(date '+%Y-%m-%d %H:%M:%S')
