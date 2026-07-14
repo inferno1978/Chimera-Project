@@ -370,7 +370,7 @@ from vless_installer.modules.users_manager import (
     _users_load, _users_save, _users_get_config, _users_apply_config,
     _users_apply_to_config, _users_patch_config_no_restart, _users_gen_link,
     do_user_list, do_user_add, do_user_delete, do_user_show_link, do_user_menu,
-    _show_qr, _gen_vless_link, generate_client_links,
+    _show_qr, _gen_vless_link, generate_client_links, generate_client_links_ios,
     _unified_load_users, _unified_save_users, _unified_show_links,
     _do_user_stats_screen, _do_user_stats_screen_v2,
 )
@@ -6347,6 +6347,12 @@ def _menu_users() -> None:
         _box_item("G", f"📲 Поделиться конфигом  {DIM}(QR → скачать без scp){NC}")
         _box_item("H", f"🔁 Единая подписка  {DIM}(все транспорты в одном URL){NC}")
         _box_item("M", f"🪞 Entry Mirrors  {DIM}(резервные точки входа){NC}")
+        # TODO: broken until shadow-client fix — не показывать пользователю.
+        # Сводный экран generate_client_links_ios() пока рвёт REALITY-юзеров:
+        # серверная clients[] содержит flow=xtls-rprx-vision, а ссылка
+        # уходит без flow — это разрыв хендшейка. Чинится отдельным заходом
+        # через _users_get_or_create_ios_shadow() (как в do_user_show_link_ios).
+        # _box_item("K", f"📱 iOS/Karing-ссылка  {DIM}(без Vision flow и эмодзи){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -6402,6 +6408,15 @@ def _menu_users() -> None:
             except ImportError as _e:
                 warn(f"Модуль Entry Mirrors не найден: {_e}")
                 time.sleep(2)
+        # TODO: broken until shadow-client fix — не показывать пользователю.
+        # elif ch.lower() == "k":
+        #     _load_state_into_globals()
+        #     if not PARAM_DOMAIN:
+        #         warn("Параметры не найдены. Сначала установите (раздел 1).")
+        #         time.sleep(2)
+        #         continue
+        #     generate_client_links_ios()
+        #     input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch.lower() == "q" or ch == "":
             break
         else:

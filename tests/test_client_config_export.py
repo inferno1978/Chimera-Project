@@ -205,7 +205,13 @@ class TestGenerateClientConfig(unittest.TestCase):
         if not vless_link:
             self.skipTest("vless-link.txt not captured")
         self.assertIn("security=tls", vless_link)
-        self.assertIn("type=http", vless_link)
+        # ФИКС: ранее тут было type=http (устаревший HTTP/2 транспорт).
+        # Актуальный xHTTP Xray 1.8.16+ использует type=xhttp — это
+        # синхронизировано с users_manager.py (где всегда type=xhttp).
+        # Защита отката фикса — см. tests/test_ios_link_regression.py
+        # ::TestClientConfigExportXhttpFix.
+        self.assertIn("type=xhttp", vless_link)
+        self.assertNotIn("type=http", vless_link)
         self.assertIn("path=", vless_link)
 
     def test_sni_correct_for_awg_mode_b(self):
