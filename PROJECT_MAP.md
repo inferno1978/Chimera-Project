@@ -353,7 +353,7 @@ Standalone AmneziaWG 2.0 — отдельный VPN-протокол (не за�
 ```
 chimera/
 ├── _core.py              (8 093 строки — ядро, главный orchestrator)
-├── __init__.py           (version = "4.25.1")
+├── __init__.py           (version = "5.0.0")
 ├── __all_exports.py      (реэкспорт API для программного доступа)
 └── modules/              (143 модуля)
     ├── __init__.py
