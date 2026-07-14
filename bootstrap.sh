@@ -246,13 +246,20 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
         ok "Обновлено до последней версии (fast-forward)"
     else
         warn "git pull не удался (возможно divergent branches) — полное обновление через archive..."
-        _archive_update "$INSTALL_DIR" "${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
+        # _archive_update может вернуть 1 (graceful failure) — не дадим set -e убить скрипт
+        if ! _archive_update "$INSTALL_DIR" "${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"; then
+            warn "Обновление через archive не удалось. Установка НЕ изменена."
+            warn "Попробуйте вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
+        fi
     fi
 else
     if [[ -d "$INSTALL_DIR" ]] && [[ -f "${INSTALL_DIR}/main.py" ]]; then
         # Установка без .git — обновляем через _archive_update (atomic, с rollback)
         info "Установка без git обнаружена — полное обновление через archive..."
-        _archive_update "$INSTALL_DIR" "${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
+        if ! _archive_update "$INSTALL_DIR" "${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"; then
+            warn "Обновление через archive не удалось. Установка НЕ изменена."
+            warn "Попробуйте вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
+        fi
     else
         info "Клонирование репозитория..."
         if ! git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
