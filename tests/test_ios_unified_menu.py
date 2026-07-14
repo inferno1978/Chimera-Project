@@ -46,7 +46,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core_in_sysmodules():
     """Эталонный паттерн из tests/test_users_manager.py."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -55,9 +55,9 @@ def _setup_core_in_sysmodules():
          patch('os.chown', lambda *a, **kw: None), \
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -134,7 +134,7 @@ class TestEmailFromClientsNotFromArg(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_email_comes_from_clients_not_from_arg(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         # Перехватываем ссылку через _box_link.
         captured = []
@@ -199,7 +199,7 @@ class TestEmailDesyncResolvedFromClients(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_uses_email_from_clients_not_users_json(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         captured = []
         self._fake_core._box_link = lambda link: captured.append(link)
@@ -244,7 +244,7 @@ class TestUuidNotFoundInClientsExplicitWarn(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_explicit_warn_when_uuid_missing_in_clients(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         captured_warns = []
         self._fake_core.warn = lambda msg: captured_warns.append(msg)
@@ -285,7 +285,7 @@ class TestEmptyEmailInClientsExplicitWarn(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_explicit_warn_when_email_empty(self):
-        from vless_installer.modules import users_manager
+        from chimera.modules import users_manager
 
         captured_warns = []
         self._fake_core.warn = lambda msg: captured_warns.append(msg)
@@ -319,7 +319,7 @@ class TestUnifiedMenuKItemStatic(unittest.TestCase):
 
     def _extract_unified_user_manager_block(self):
         """Достаёт исходник функции do_unified_user_manager из _core.py."""
-        src = (_PROJECT_ROOT / "vless_installer" / "_core.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "_core.py").read_text()
         # От `def do_unified_user_manager` до следующего `def ` на том же уровне.
         m = re.search(
             r'def do_unified_user_manager\(\).*?(?=\ndef [a-z_])',
@@ -395,7 +395,7 @@ class TestUnifiedMenuKItemStatic(unittest.TestCase):
         ему не место, поскольку главный menu — это разделы (1-Установка,
         2-Пользователи, 3-Сеть и т.д.), а не конкретные действия."""
         import re
-        src = (_PROJECT_ROOT / "vless_installer" / "_core.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "_core.py").read_text()
         # Извлекаем main_menu (top-level).
         m = re.search(r'def main_menu\(\).*', src, re.DOTALL)
         self.assertIsNotNone(m, "main_menu не найдена в _core.py")
@@ -421,11 +421,11 @@ class TestImportWorks(unittest.TestCase):
 
     def test_import_succeeds(self):
         # Компилируем _core.py (он делает import в верхней части).
-        src = (_PROJECT_ROOT / "vless_installer" / "_core.py").read_text()
+        src = (_PROJECT_ROOT / "chimera" / "_core.py").read_text()
         compile(src, "_core.py", "exec")
         # Если import сломан — exec упадёт с ImportError.
         # Делаем минимальный smoke-test: import users_manager и проверяем функцию.
-        from vless_installer.modules.users_manager import (
+        from chimera.modules.users_manager import (
             do_user_show_link_ios_by_uuid
         )
         self.assertTrue(callable(do_user_show_link_ios_by_uuid))

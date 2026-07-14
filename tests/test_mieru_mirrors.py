@@ -2,7 +2,7 @@
 """
 tests/test_mieru_mirrors.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/mieru_mirrors.py.
+Unit-тесты для chimera/modules/mieru_mirrors.py.
 
 Покрывает:
   • Структуру и инварианты списка зеркал
@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from vless_installer.modules.mieru_mirrors import (
+from chimera.modules.mieru_mirrors import (
     get_mita_mirrors,
     get_mieru_mirrors,
     get_deb_mirrors,
@@ -280,7 +280,7 @@ class TestFindManualUpload(unittest.TestCase):
             tmp_path = Path(f.name)
         try:
             filename = tmp_path.name
-            import vless_installer.modules.mieru_mirrors as mm
+            import chimera.modules.mieru_mirrors as mm
             with patch.object(mm, "MANUAL_UPLOAD_PATHS", [tmp_path.parent]):
                 result = find_manual_upload(filename)
             self.assertEqual(result, tmp_path)
@@ -290,7 +290,7 @@ class TestFindManualUpload(unittest.TestCase):
     def test_handles_permission_error_gracefully(self):
         """Если /root/ недоступен для чтения, find_manual_upload не должен
         выбрасывать PermissionError — просто пропустить путь."""
-        with patch("vless_installer.modules.mieru_mirrors.MANUAL_UPLOAD_PATHS",
+        with patch("chimera.modules.mieru_mirrors.MANUAL_UPLOAD_PATHS",
                    [Path("/root/__nonexistent__")]):
             # Path.exists() не выбрасывает PermissionError, но stat() может
             # на некоторых файловых системах. Должно вернуть None, не упасть.

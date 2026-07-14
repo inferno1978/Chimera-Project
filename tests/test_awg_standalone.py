@@ -2,7 +2,7 @@
 """
 tests/test_awg_standalone.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/awg_standalone.py.
+Unit-тесты для chimera/modules/awg_standalone.py.
 
 Покрывает:
   1. awgs_build_server_conf — генерация awg0.conf (серверная сторона)
@@ -20,7 +20,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -30,9 +30,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 def _default_params():
@@ -63,7 +63,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_minimal_config(self):
-        from vless_installer.modules.awg_standalone import awgs_build_server_conf
+        from chimera.modules.awg_standalone import awgs_build_server_conf
         conf = awgs_build_server_conf(
             server_privkey="SERVER_PRIV",
             port=51820, subnet="10.66.66.0/24",
@@ -78,7 +78,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         self.assertIn("Address = fd66:66:66::1/64", conf)
 
     def test_includes_awg_params(self):
-        from vless_installer.modules.awg_standalone import awgs_build_server_conf
+        from chimera.modules.awg_standalone import awgs_build_server_conf
         conf = awgs_build_server_conf(
             server_privkey="PRIV", port=51820,
             subnet="10.66.66.0/24", subnet_v6="", mtu=1280,
@@ -91,7 +91,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         self.assertIn("H4 = 4", conf)
 
     def test_omits_ipv6_when_empty(self):
-        from vless_installer.modules.awg_standalone import awgs_build_server_conf
+        from chimera.modules.awg_standalone import awgs_build_server_conf
         conf = awgs_build_server_conf(
             server_privkey="PRIV", port=51820,
             subnet="10.66.66.0/24", subnet_v6="", mtu=1280,
@@ -101,7 +101,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         self.assertEqual(conf.count("Address ="), 1)
 
     def test_includes_peers(self):
-        from vless_installer.modules.awg_standalone import awgs_build_server_conf
+        from chimera.modules.awg_standalone import awgs_build_server_conf
         peers = [_sample_peer("alice"), _sample_peer("bob")]
         conf = awgs_build_server_conf(
             server_privkey="PRIV", port=51820,
@@ -113,7 +113,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         self.assertIn("10.66.66.2", conf)
 
     def test_peer_with_preshared_key(self):
-        from vless_installer.modules.awg_standalone import awgs_build_server_conf
+        from chimera.modules.awg_standalone import awgs_build_server_conf
         peers = [_sample_peer(preshared_key="PSK_KEY")]
         conf = awgs_build_server_conf(
             server_privkey="PRIV", port=51820,
@@ -123,7 +123,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         self.assertIn("PresharedKey = PSK_KEY", conf)
 
     def test_peer_without_preshared_key(self):
-        from vless_installer.modules.awg_standalone import awgs_build_server_conf
+        from chimera.modules.awg_standalone import awgs_build_server_conf
         peers = [_sample_peer(preshared_key="")]
         conf = awgs_build_server_conf(
             server_privkey="PRIV", port=51820,
@@ -133,7 +133,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         self.assertNotIn("PresharedKey", conf)
 
     def test_i1_included_when_non_empty(self):
-        from vless_installer.modules.awg_standalone import awgs_build_server_conf
+        from chimera.modules.awg_standalone import awgs_build_server_conf
         params = _default_params()
         params["i1"] = "deadbeef"
         conf = awgs_build_server_conf(
@@ -144,7 +144,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         self.assertIn("I1 = deadbeef", conf)
 
     def test_i1_omitted_when_empty(self):
-        from vless_installer.modules.awg_standalone import awgs_build_server_conf
+        from chimera.modules.awg_standalone import awgs_build_server_conf
         conf = awgs_build_server_conf(
             server_privkey="PRIV", port=51820,
             subnet="10.66.66.0/24", subnet_v6="", mtu=1280,
@@ -154,7 +154,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
 
     def test_cascade_entry_role(self):
         """cascade_role='entry' + cascade_peer → [Peer] для exit-VPS."""
-        from vless_installer.modules.awg_standalone import awgs_build_server_conf
+        from chimera.modules.awg_standalone import awgs_build_server_conf
         cascade_peer = {
             "pubkey": "EXIT_PUBKEY",
             "preshared_key": "CASCADE_PSK",
@@ -235,7 +235,7 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
 
     def test_returns_false_when_not_installed(self):
         """AWG не установлен → False."""
-        from vless_installer.modules import awg_standalone
+        from chimera.modules import awg_standalone
         with patch.object(awg_standalone, "_core_module",
                           return_value=self._mock_core()), \
              patch.object(awg_standalone, "awgs_state_is_installed",
@@ -245,7 +245,7 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
         self.assertIn("не установлен", msg)
 
     def test_returns_false_for_unknown_preset(self):
-        from vless_installer.modules import awg_standalone
+        from chimera.modules import awg_standalone
         with patch.object(awg_standalone, "_core_module",
                           return_value=self._mock_core()), \
              patch.object(awg_standalone, "awgs_state_is_installed",
@@ -263,9 +263,9 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
         затем возвращал True, и только тогда new_params писались в state.
         Итог: интерфейс оставался на OLD_PARAMS, но state врал что применены NEW.
         """
-        from vless_installer.modules import awg_standalone
-        from vless_installer.modules import awg_peers
-        from vless_installer.modules import awg_presets
+        from chimera.modules import awg_standalone
+        from chimera.modules import awg_peers
+        from chimera.modules import awg_presets
 
         mock_core = self._mock_core()
         state = self._make_state()  # state со OLD_PARAMS
@@ -276,7 +276,7 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
                           return_value=True), \
              patch.object(awg_standalone, "awgs_state_load",
                           return_value=state), \
-             patch("vless_installer.modules.awg_state.awgs_state_update") as mock_update, \
+             patch("chimera.modules.awg_state.awgs_state_update") as mock_update, \
              patch.object(awg_presets, "awgs_presets_generate",
                           return_value=dict(self.NEW_PARAMS)) as mock_gen, \
              patch.object(awg_peers, "awgs_state_load",
@@ -336,9 +336,9 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
           (b) awgs_state_update НЕ вызвана (state не закоммичен)
           (c) сообщение честно говорит о неудаче
         """
-        from vless_installer.modules import awg_standalone
-        from vless_installer.modules import awg_peers
-        from vless_installer.modules import awg_presets
+        from chimera.modules import awg_standalone
+        from chimera.modules import awg_peers
+        from chimera.modules import awg_presets
 
         mock_core = self._mock_core()
         state = self._make_state()  # state со OLD_PARAMS
@@ -349,7 +349,7 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
                           return_value=True), \
              patch.object(awg_standalone, "awgs_state_load",
                           return_value=state), \
-             patch("vless_installer.modules.awg_state.awgs_state_update") as mock_update, \
+             patch("chimera.modules.awg_state.awgs_state_update") as mock_update, \
              patch.object(awg_presets, "awgs_presets_generate",
                           return_value=dict(self.NEW_PARAMS)), \
              patch.object(awg_peers, "awgs_state_load",
@@ -382,9 +382,9 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
 
     def test_uses_current_preset_when_not_specified(self):
         """Пустой preset_name → используется carrier_preset из state."""
-        from vless_installer.modules import awg_standalone
-        from vless_installer.modules import awg_peers
-        from vless_installer.modules import awg_presets
+        from chimera.modules import awg_standalone
+        from chimera.modules import awg_peers
+        from chimera.modules import awg_presets
 
         mock_core = self._mock_core()
         state = self._make_state()
@@ -396,7 +396,7 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
                           return_value=True), \
              patch.object(awg_standalone, "awgs_state_load",
                           return_value=state), \
-             patch("vless_installer.modules.awg_state.awgs_state_update"), \
+             patch("chimera.modules.awg_state.awgs_state_update"), \
              patch.object(awg_presets, "awgs_presets_generate",
                           return_value=dict(self.NEW_PARAMS)), \
              patch.object(awg_peers, "awgs_state_load",

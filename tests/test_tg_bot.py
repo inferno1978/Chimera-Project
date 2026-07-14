@@ -2,7 +2,7 @@
 """
 tests/test_tg_bot.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/tg_bot.py.
+Unit-тесты для chimera/modules/tg_bot.py.
 
 Покрывает:
   1. _get_vless_link — генерация VLESS-ссылки (reality + xhttp, Mode B/AWG)
@@ -26,7 +26,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -36,9 +36,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestGetVlessLink(unittest.TestCase):
@@ -55,10 +55,10 @@ class TestGetVlessLink(unittest.TestCase):
 
     def _patch_state(self, state_dict):
         self._state.write_text(json.dumps(state_dict))
-        return patch("vless_installer.modules.tg_bot._STATE_FILE", self._state)
+        return patch("chimera.modules.tg_bot._STATE_FILE", self._state)
 
     def test_reality_mode(self):
-        from vless_installer.modules.tg_bot import _get_vless_link
+        from chimera.modules.tg_bot import _get_vless_link
         state = {
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -79,7 +79,7 @@ class TestGetVlessLink(unittest.TestCase):
 
     def test_reality_mode_b_awg_uses_reality_dest_sni(self):
         """Mode B + AWG: SNI берётся из reality_dest, а не domain."""
-        from vless_installer.modules.tg_bot import _get_vless_link
+        from chimera.modules.tg_bot import _get_vless_link
         state = {
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -95,7 +95,7 @@ class TestGetVlessLink(unittest.TestCase):
 
     def test_reality_mode_a_uses_domain_sni(self):
         """Mode A: SNI берётся из domain."""
-        from vless_installer.modules.tg_bot import _get_vless_link
+        from chimera.modules.tg_bot import _get_vless_link
         state = {
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -109,7 +109,7 @@ class TestGetVlessLink(unittest.TestCase):
         self.assertIn("sni=vpn.example.com", link)
 
     def test_xhttp_mode(self):
-        from vless_installer.modules.tg_bot import _get_vless_link
+        from chimera.modules.tg_bot import _get_vless_link
         state = {
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -126,20 +126,20 @@ class TestGetVlessLink(unittest.TestCase):
         self.assertIn("path=/xhttp", link)
 
     def test_returns_empty_when_no_domain(self):
-        from vless_installer.modules.tg_bot import _get_vless_link
+        from chimera.modules.tg_bot import _get_vless_link
         state = {"uuid": "test-uuid"}
         with self._patch_state(state):
             self.assertEqual(_get_vless_link(), "")
 
     def test_returns_empty_when_no_uuid(self):
-        from vless_installer.modules.tg_bot import _get_vless_link
+        from chimera.modules.tg_bot import _get_vless_link
         state = {"domain": "vpn.example.com"}
         with self._patch_state(state):
             self.assertEqual(_get_vless_link(), "")
 
     def test_reality_without_flow(self):
         """Без xtls_flow — параметр flow не добавляется."""
-        from vless_installer.modules.tg_bot import _get_vless_link
+        from chimera.modules.tg_bot import _get_vless_link
         state = {
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -153,7 +153,7 @@ class TestGetVlessLink(unittest.TestCase):
         self.assertNotIn("flow=", link)
 
     def test_default_fingerprint_is_chrome(self):
-        from vless_installer.modules.tg_bot import _get_vless_link
+        from chimera.modules.tg_bot import _get_vless_link
         state = {
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -179,15 +179,15 @@ class TestTgLoadSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.tg_bot._NOTIF_FILE", self._notif)
+        return patch("chimera.modules.tg_bot._NOTIF_FILE", self._notif)
 
     def test_load_returns_empty_when_no_file(self):
-        from vless_installer.modules.tg_bot import tg_load
+        from chimera.modules.tg_bot import tg_load
         with self._patch():
             self.assertEqual(tg_load(), {})
 
     def test_save_then_load(self):
-        from vless_installer.modules.tg_bot import tg_load, tg_save
+        from chimera.modules.tg_bot import tg_load, tg_save
         with self._patch():
             tg_save({"bot_token": "abc", "admin_id": "123"})
             loaded = tg_load()
@@ -196,7 +196,7 @@ class TestTgLoadSave(unittest.TestCase):
 
     def test_save_sets_chmod_600(self):
         import stat
-        from vless_installer.modules.tg_bot import tg_save
+        from chimera.modules.tg_bot import tg_save
         with self._patch():
             tg_save({"x": 1})
         mode = stat.S_IMODE(os.stat(self._notif).st_mode)
@@ -216,15 +216,15 @@ class TestBotLoadSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.tg_bot._BOT_FILE", self._bot)
+        return patch("chimera.modules.tg_bot._BOT_FILE", self._bot)
 
     def test_load_returns_empty_when_no_file(self):
-        from vless_installer.modules.tg_bot import _bot_load
+        from chimera.modules.tg_bot import _bot_load
         with self._patch():
             self.assertEqual(_bot_load(), {})
 
     def test_save_then_load(self):
-        from vless_installer.modules.tg_bot import _bot_load, _bot_save
+        from chimera.modules.tg_bot import _bot_load, _bot_save
         with self._patch():
             _bot_save({"users": {"alice": "uuid1"}})
             loaded = _bot_load()
@@ -244,15 +244,15 @@ class TestLoadState(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.tg_bot._STATE_FILE", self._state)
+        return patch("chimera.modules.tg_bot._STATE_FILE", self._state)
 
     def test_returns_empty_when_no_file(self):
-        from vless_installer.modules.tg_bot import _load_state
+        from chimera.modules.tg_bot import _load_state
         with self._patch():
             self.assertEqual(_load_state(), {})
 
     def test_returns_state(self):
-        from vless_installer.modules.tg_bot import _load_state
+        from chimera.modules.tg_bot import _load_state
         self._state.write_text(json.dumps({"domain": "x.com"}))
         with self._patch():
             st = _load_state()
@@ -289,7 +289,7 @@ class TestGenerateBotScriptSyntax(unittest.TestCase):
     def test_normal_values_produce_valid_syntax(self):
         """Обычные значения — ast.parse не должен поднимать SyntaxError."""
         import ast
-        from vless_installer.modules.tg_bot import _generate_bot_script
+        from chimera.modules.tg_bot import _generate_bot_script
         script = _generate_bot_script(self._bot_cfg(), self._notif_cfg())
         # Если экранирование сломано — ast.parse поднимает SyntaxError
         ast.parse(script)
@@ -297,7 +297,7 @@ class TestGenerateBotScriptSyntax(unittest.TestCase):
     def test_empty_values_produce_valid_syntax(self):
         """Пустые/дефолтные значения — ast.parse не должен падать."""
         import ast
-        from vless_installer.modules.tg_bot import _generate_bot_script
+        from chimera.modules.tg_bot import _generate_bot_script
         cfg = self._bot_cfg(token="", admin_id="", allowed_users=[], invite_tokens={})
         script = _generate_bot_script(cfg, self._notif_cfg())
         ast.parse(script)
@@ -311,7 +311,7 @@ class TestGenerateBotScriptSyntax(unittest.TestCase):
         должно совпадать с исходным token (кавычка сохранена как часть строки).
         """
         import ast
-        from vless_installer.modules.tg_bot import _generate_bot_script
+        from chimera.modules.tg_bot import _generate_bot_script
         cfg = self._bot_cfg(token='abc"def')
         script = _generate_bot_script(cfg, self._notif_cfg())
         # ast.parse должен пройти без SyntaxError
@@ -332,7 +332,7 @@ class TestGenerateBotScriptSyntax(unittest.TestCase):
         token с обратным слэшем как есть (без интерпретации как escape-последовательности).
         """
         import ast
-        from vless_installer.modules.tg_bot import _generate_bot_script
+        from chimera.modules.tg_bot import _generate_bot_script
         cfg = self._bot_cfg(token=r"abc\def")
         script = _generate_bot_script(cfg, self._notif_cfg())
         # ast.parse должен пройти без SyntaxError
@@ -353,7 +353,7 @@ class TestGenerateBotScriptSyntax(unittest.TestCase):
         исходному token с переносом строки и эмодзи как есть.
         """
         import ast
-        from vless_installer.modules.tg_bot import _generate_bot_script
+        from chimera.modules.tg_bot import _generate_bot_script
         cfg = self._bot_cfg(token="abc\ndef🚀")
         script = _generate_bot_script(cfg, self._notif_cfg())
         # ast.parse должен пройти без SyntaxError
@@ -383,7 +383,7 @@ class TestGenerateBotScriptSyntax(unittest.TestCase):
         Тест фиксирует что генерация не падает и синтаксис результата валиден.
         """
         import ast
-        from vless_installer.modules.tg_bot import _generate_bot_script
+        from chimera.modules.tg_bot import _generate_bot_script
         cfg = self._bot_cfg(token="abc{def}ghi")
         script = _generate_bot_script(cfg, self._notif_cfg())
         # Проверяем что ast.parse проходит (синтаксис валиден)
@@ -405,7 +405,7 @@ class TestGenerateBotScriptSyntax(unittest.TestCase):
         саму подстановку значения.
         """
         import ast
-        from vless_installer.modules.tg_bot import _generate_bot_script
+        from chimera.modules.tg_bot import _generate_bot_script
         cfg = self._bot_cfg(token="test_token", admin_id="12345")
         script = _generate_bot_script(cfg, self._notif_cfg())
         tree = ast.parse(script)
@@ -452,7 +452,7 @@ class TestGenerateBotScriptSyntax(unittest.TestCase):
     def test_generated_script_contains_handlers(self):
         """Сгенерированный скрипт содержит все handler-функции."""
         import ast
-        from vless_installer.modules.tg_bot import _generate_bot_script
+        from chimera.modules.tg_bot import _generate_bot_script
         script = _generate_bot_script(self._bot_cfg(), self._notif_cfg())
         tree = ast.parse(script)
 
@@ -473,7 +473,7 @@ class TestGenerateBotScriptSyntax(unittest.TestCase):
     def test_generated_script_has_main_guard(self):
         """Сгенерированный скрипт имеет if __name__ == '__main__' guard."""
         import ast
-        from vless_installer.modules.tg_bot import _generate_bot_script
+        from chimera.modules.tg_bot import _generate_bot_script
         script = _generate_bot_script(self._bot_cfg(), self._notif_cfg())
         tree = ast.parse(script)
 

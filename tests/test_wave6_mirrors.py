@@ -25,7 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -35,9 +35,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 # ============================================================================
@@ -50,7 +50,7 @@ class TestAwgTransportMirrors(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_awg_tools_mirrors_count(self):
-        from vless_installer.modules.awg_transport_mirrors import (
+        from chimera.modules.awg_transport_mirrors import (
             get_amneziawg_tools_mirrors, AWG_TOOLS_MIRRORS_COUNT,
         )
         urls = get_amneziawg_tools_mirrors(tag="v1.0.0", arch="amd64")
@@ -58,7 +58,7 @@ class TestAwgTransportMirrors(unittest.TestCase):
         self.assertEqual(AWG_TOOLS_MIRRORS_COUNT, 14)
 
     def test_awg_go_source_mirrors_count(self):
-        from vless_installer.modules.awg_transport_mirrors import (
+        from chimera.modules.awg_transport_mirrors import (
             get_amneziawg_go_source_mirrors, AWG_GO_SOURCE_MIRRORS_COUNT,
         )
         urls = get_amneziawg_go_source_mirrors()
@@ -66,7 +66,7 @@ class TestAwgTransportMirrors(unittest.TestCase):
         self.assertEqual(AWG_GO_SOURCE_MIRRORS_COUNT, 9)
 
     def test_awg_kmod_source_mirrors_count(self):
-        from vless_installer.modules.awg_transport_mirrors import (
+        from chimera.modules.awg_transport_mirrors import (
             get_amneziawg_kmod_source_mirrors, AWG_KMOD_SOURCE_MIRRORS_COUNT,
         )
         urls = get_amneziawg_kmod_source_mirrors()
@@ -74,7 +74,7 @@ class TestAwgTransportMirrors(unittest.TestCase):
         self.assertEqual(AWG_KMOD_SOURCE_MIRRORS_COUNT, 9)
 
     def test_all_urls_are_https(self):
-        from vless_installer.modules.awg_transport_mirrors import (
+        from chimera.modules.awg_transport_mirrors import (
             get_amneziawg_tools_mirrors, get_amneziawg_go_source_mirrors,
             get_amneziawg_kmod_source_mirrors,
         )
@@ -86,7 +86,7 @@ class TestAwgTransportMirrors(unittest.TestCase):
             self.assertEqual(urlparse(url).scheme, "https")
 
     def test_awg_tools_urls_contain_repo_tag_filename(self):
-        from vless_installer.modules.awg_transport_mirrors import get_amneziawg_tools_mirrors
+        from chimera.modules.awg_transport_mirrors import get_amneziawg_tools_mirrors
         for url in get_amneziawg_tools_mirrors(tag="v1.0.0", arch="amd64"):
             self.assertIn("amnezia-vpn", url)
             self.assertIn("amneziawg-tools", url)
@@ -94,30 +94,30 @@ class TestAwgTransportMirrors(unittest.TestCase):
             self.assertIn("ubuntu-22.04-amneziawg-tools.zip", url)
 
     def test_awg_go_source_urls_contain_repo_and_branch(self):
-        from vless_installer.modules.awg_transport_mirrors import get_amneziawg_go_source_mirrors
+        from chimera.modules.awg_transport_mirrors import get_amneziawg_go_source_mirrors
         for url in get_amneziawg_go_source_mirrors():
             self.assertIn("amnezia-vpn", url)
             self.assertIn("amneziawg-go", url)
             self.assertIn("master", url)
 
     def test_awg_kmod_source_urls_contain_repo_and_branch(self):
-        from vless_installer.modules.awg_transport_mirrors import get_amneziawg_kmod_source_mirrors
+        from chimera.modules.awg_transport_mirrors import get_amneziawg_kmod_source_mirrors
         for url in get_amneziawg_kmod_source_mirrors():
             self.assertIn("amnezia-vpn", url)
             self.assertIn("amneziawg-linux-kernel-module", url)
             self.assertIn("master", url)
 
     def test_awg_tools_arm64_filename(self):
-        from vless_installer.modules.awg_transport_mirrors import get_amneziawg_tools_mirrors
+        from chimera.modules.awg_transport_mirrors import get_amneziawg_tools_mirrors
         for url in get_amneziawg_tools_mirrors(tag="v1.0.0", arch="arm64"):
             self.assertIn("ubuntu-22.04-arm64-amneziawg-tools.zip", url)
 
     def test_empty_tag_returns_empty(self):
-        from vless_installer.modules.awg_transport_mirrors import get_amneziawg_tools_mirrors
+        from chimera.modules.awg_transport_mirrors import get_amneziawg_tools_mirrors
         self.assertEqual(get_amneziawg_tools_mirrors(tag="", arch="amd64"), [])
 
     def test_recommended_manual_path_is_root(self):
-        from vless_installer.modules.awg_transport_mirrors import recommended_manual_path
+        from chimera.modules.awg_transport_mirrors import recommended_manual_path
         self.assertEqual(recommended_manual_path(), Path("/root"))
 
 
@@ -131,19 +131,19 @@ class TestAwgSpecsSanity(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_awg_tools_spec_name(self):
-        from vless_installer.modules.awg_transport_packages import AWG_TOOLS_SPEC
+        from chimera.modules.awg_transport_packages import AWG_TOOLS_SPEC
         self.assertEqual(AWG_TOOLS_SPEC.name, "amneziawg-tools")
 
     def test_awg_go_source_spec_name(self):
-        from vless_installer.modules.awg_transport_packages import AWG_GO_SOURCE_SPEC
+        from chimera.modules.awg_transport_packages import AWG_GO_SOURCE_SPEC
         self.assertEqual(AWG_GO_SOURCE_SPEC.name, "amneziawg-go source")
 
     def test_awg_kmod_source_spec_name(self):
-        from vless_installer.modules.awg_transport_packages import AWG_KMOD_SOURCE_SPEC
+        from chimera.modules.awg_transport_packages import AWG_KMOD_SOURCE_SPEC
         self.assertEqual(AWG_KMOD_SOURCE_SPEC.name, "amneziawg-kernel-module source")
 
     def test_all_specs_manual_dir_is_root(self):
-        from vless_installer.modules.awg_transport_packages import (
+        from chimera.modules.awg_transport_packages import (
             AWG_TOOLS_SPEC, AWG_GO_SOURCE_SPEC, AWG_KMOD_SOURCE_SPEC,
         )
         for spec in (AWG_TOOLS_SPEC, AWG_GO_SOURCE_SPEC, AWG_KMOD_SOURCE_SPEC):
@@ -151,7 +151,7 @@ class TestAwgSpecsSanity(unittest.TestCase):
 
     def test_all_specs_manual_dir_not_in_install_dests(self):
         """КРИТИЧЕСКИЙ ИНВАРИАНТ (баг 21d7baf)."""
-        from vless_installer.modules.awg_transport_packages import (
+        from chimera.modules.awg_transport_packages import (
             AWG_TOOLS_SPEC, AWG_GO_SOURCE_SPEC, AWG_KMOD_SOURCE_SPEC,
         )
         for spec in (AWG_TOOLS_SPEC, AWG_GO_SOURCE_SPEC, AWG_KMOD_SOURCE_SPEC):
@@ -159,14 +159,14 @@ class TestAwgSpecsSanity(unittest.TestCase):
                 self.assertNotEqual(spec.manual_incoming_dir, dest)
 
     def test_all_specs_post_install_set(self):
-        from vless_installer.modules.awg_transport_packages import (
+        from chimera.modules.awg_transport_packages import (
             AWG_TOOLS_SPEC, AWG_GO_SOURCE_SPEC, AWG_KMOD_SOURCE_SPEC,
         )
         for spec in (AWG_TOOLS_SPEC, AWG_GO_SOURCE_SPEC, AWG_KMOD_SOURCE_SPEC):
             self.assertIsNotNone(spec.post_install)
 
     def test_awg_tools_filename_builder(self):
-        from vless_installer.modules.awg_transport_packages import AWG_TOOLS_SPEC
+        from chimera.modules.awg_transport_packages import AWG_TOOLS_SPEC
         self.assertEqual(
             AWG_TOOLS_SPEC.filename_builder(tag="v1.0.0", arch="amd64"),
             "ubuntu-22.04-amneziawg-tools.zip",
@@ -177,14 +177,14 @@ class TestAwgSpecsSanity(unittest.TestCase):
         )
 
     def test_awg_go_source_filename(self):
-        from vless_installer.modules.awg_transport_packages import AWG_GO_SOURCE_SPEC
+        from chimera.modules.awg_transport_packages import AWG_GO_SOURCE_SPEC
         self.assertEqual(
             AWG_GO_SOURCE_SPEC.filename_builder(),
             "amneziawg-go-master.tar.gz",
         )
 
     def test_awg_kmod_source_filename(self):
-        from vless_installer.modules.awg_transport_packages import AWG_KMOD_SOURCE_SPEC
+        from chimera.modules.awg_transport_packages import AWG_KMOD_SOURCE_SPEC
         self.assertEqual(
             AWG_KMOD_SOURCE_SPEC.filename_builder(),
             "amneziawg-linux-kernel-module-master.tar.gz",
@@ -206,21 +206,21 @@ class TestAwgPostInstallNegative(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_awg_tools_post_install_returns_false_on_non_zip(self):
-        from vless_installer.modules.awg_transport_packages import AWG_TOOLS_SPEC
+        from chimera.modules.awg_transport_packages import AWG_TOOLS_SPEC
         src = self._tmpdir / "fake.zip"
         src.write_bytes(b"not a zip" * 100)
         ok = AWG_TOOLS_SPEC.post_install(src, [self._tmpdir / "install"])
         self.assertFalse(ok)
 
     def test_awg_go_source_post_install_returns_false_on_non_tarball(self):
-        from vless_installer.modules.awg_transport_packages import AWG_GO_SOURCE_SPEC
+        from chimera.modules.awg_transport_packages import AWG_GO_SOURCE_SPEC
         src = self._tmpdir / "fake.tar.gz"
         src.write_bytes(b"not a tarball" * 100)
         ok = AWG_GO_SOURCE_SPEC.post_install(src, [self._tmpdir / "install"])
         self.assertFalse(ok)
 
     def test_awg_kmod_source_post_install_returns_false_on_non_tarball(self):
-        from vless_installer.modules.awg_transport_packages import AWG_KMOD_SOURCE_SPEC
+        from chimera.modules.awg_transport_packages import AWG_KMOD_SOURCE_SPEC
         src = self._tmpdir / "fake.tar.gz"
         src.write_bytes(b"not a tarball" * 100)
         ok = AWG_KMOD_SOURCE_SPEC.post_install(src, [self._tmpdir / "install"])
@@ -237,7 +237,7 @@ class TestOlcrtcMirrors(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_9_urls(self):
-        from vless_installer.modules.olcrtc_mirrors import (
+        from chimera.modules.olcrtc_mirrors import (
             get_olcrtc_source_mirrors, OLCRTC_SOURCE_MIRRORS_COUNT,
         )
         urls = get_olcrtc_source_mirrors()
@@ -245,25 +245,25 @@ class TestOlcrtcMirrors(unittest.TestCase):
         self.assertEqual(OLCRTC_SOURCE_MIRRORS_COUNT, 9)
 
     def test_all_urls_are_https(self):
-        from vless_installer.modules.olcrtc_mirrors import get_olcrtc_source_mirrors
+        from chimera.modules.olcrtc_mirrors import get_olcrtc_source_mirrors
         for url in get_olcrtc_source_mirrors():
             self.assertEqual(urlparse(url).scheme, "https")
 
     def test_all_urls_contain_repo_and_branch(self):
-        from vless_installer.modules.olcrtc_mirrors import get_olcrtc_source_mirrors
+        from chimera.modules.olcrtc_mirrors import get_olcrtc_source_mirrors
         for url in get_olcrtc_source_mirrors():
             self.assertIn("openlibrecommunity", url)
             self.assertIn("olcrtc", url)
             self.assertIn("master", url)
 
     def test_has_codeload_url(self):
-        from vless_installer.modules.olcrtc_mirrors import get_olcrtc_source_mirrors
+        from chimera.modules.olcrtc_mirrors import get_olcrtc_source_mirrors
         urls = get_olcrtc_source_mirrors()
         self.assertTrue(any("codeload.github.com" in u for u in urls))
 
     def test_commits_api_url(self):
         """get_olcrtc_commits_api_url возвращает GitHub API URL для /commits/master."""
-        from vless_installer.modules.olcrtc_mirrors import get_olcrtc_commits_api_url
+        from chimera.modules.olcrtc_mirrors import get_olcrtc_commits_api_url
         api_url = get_olcrtc_commits_api_url()
         self.assertIn("api.github.com", api_url)
         self.assertIn("openlibrecommunity", api_url)
@@ -271,7 +271,7 @@ class TestOlcrtcMirrors(unittest.TestCase):
         self.assertIn("commits/master", api_url)
 
     def test_recommended_manual_path_is_root(self):
-        from vless_installer.modules.olcrtc_mirrors import recommended_manual_path
+        from chimera.modules.olcrtc_mirrors import recommended_manual_path
         self.assertEqual(recommended_manual_path(), Path("/root"))
 
 
@@ -282,36 +282,36 @@ class TestOlcrtcSpecSanity(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_name_is_olcrtc_source(self):
-        from vless_installer.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
+        from chimera.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
         self.assertEqual(OLCRTC_SOURCE_SPEC.name, "olcrtc source")
 
     def test_filename_is_olcrtc_master_tarball(self):
-        from vless_installer.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
+        from chimera.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
         self.assertEqual(
             OLCRTC_SOURCE_SPEC.filename_builder(),
             "olcrtc-master.tar.gz",
         )
 
     def test_install_dests_is_usr_local_bin(self):
-        from vless_installer.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
+        from chimera.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
         self.assertEqual(OLCRTC_SOURCE_SPEC.install_dests, [Path("/usr/local/bin")])
 
     def test_manual_dir_is_root(self):
-        from vless_installer.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
+        from chimera.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
         self.assertEqual(OLCRTC_SOURCE_SPEC.manual_incoming_dir, Path("/root"))
 
     def test_manual_dir_not_in_install_dests(self):
-        from vless_installer.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
+        from chimera.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
         for dest in OLCRTC_SOURCE_SPEC.install_dests:
             self.assertNotEqual(OLCRTC_SOURCE_SPEC.manual_incoming_dir, dest)
 
     def test_post_install_is_set(self):
-        from vless_installer.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
+        from chimera.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
         self.assertIsNotNone(OLCRTC_SOURCE_SPEC.post_install)
 
     def test_post_install_returns_false_on_non_tarball(self):
         import tempfile
-        from vless_installer.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
+        from chimera.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
         tmpdir = Path(tempfile.mkdtemp())
         try:
             src = tmpdir / "fake.tar.gz"
@@ -335,7 +335,7 @@ class TestOlcrtcCommitShaMigrated(unittest.TestCase):
     def test_returns_sha_from_api(self):
         """SHA получается из GitHub API ответа."""
         import json
-        from vless_installer.modules import olcrtc
+        from chimera.modules import olcrtc
 
         # Мокаем _http_get_text чтобы вернуть JSON с SHA
         api_response = json.dumps({"sha": "ad5758513335cda54362a64621c29e9d9fe759b4"})
@@ -345,20 +345,20 @@ class TestOlcrtcCommitShaMigrated(unittest.TestCase):
 
     def test_returns_question_on_api_failure(self):
         """При ошибке API — fallback на '?'."""
-        from vless_installer.modules import olcrtc
+        from chimera.modules import olcrtc
         with patch.object(olcrtc, "_http_get_text", return_value=None):
             sha = olcrtc._olcrtc_fetch_commit_sha()
         self.assertEqual(sha, "?")
 
     def test_returns_question_on_invalid_json(self):
-        from vless_installer.modules import olcrtc
+        from chimera.modules import olcrtc
         with patch.object(olcrtc, "_http_get_text", return_value="not json"):
             sha = olcrtc._olcrtc_fetch_commit_sha()
         self.assertEqual(sha, "?")
 
     def test_returns_question_on_missing_sha_field(self):
         import json
-        from vless_installer.modules import olcrtc
+        from chimera.modules import olcrtc
         api_response = json.dumps({"message": "Not Found"})
         with patch.object(olcrtc, "_http_get_text", return_value=api_response):
             sha = olcrtc._olcrtc_fetch_commit_sha()
@@ -366,7 +366,7 @@ class TestOlcrtcCommitShaMigrated(unittest.TestCase):
 
     def test_olcrtc_commit_delegates_to_fetch_sha(self):
         """_olcrtc_commit() вызывает _olcrtc_fetch_commit_sha (после миграции)."""
-        from vless_installer.modules import olcrtc
+        from chimera.modules import olcrtc
         with patch.object(olcrtc, "_olcrtc_fetch_commit_sha", return_value="abc1234") as mock_sha:
             result = olcrtc._olcrtc_commit()
         self.assertEqual(result, "abc1234")

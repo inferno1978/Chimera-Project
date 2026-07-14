@@ -2,7 +2,7 @@
 """
 tests/test_turn_mirrors.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/turn_mirrors.py и turn_packages.py.
+Unit-тесты для chimera/modules/turn_mirrors.py и turn_packages.py.
 
 Покрывает:
   • Структуру и инварианты списка зеркал для vk-turn-proxy и turnable
@@ -31,7 +31,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core_in_sysmodules():
     """Подстановка фейкового _core в sys.modules — как в остальных тестах."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -41,12 +41,12 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
-from vless_installer.modules.turn_mirrors import (
+from chimera.modules.turn_mirrors import (
     get_turntunnel_mirrors,
     get_turnable_mirrors,
     MANUAL_UPLOAD_PATHS_TURNTUNNEL,
@@ -55,7 +55,7 @@ from vless_installer.modules.turn_mirrors import (
     TURNABLE_MIRRORS_COUNT,
     recommended_manual_path,
 )
-from vless_installer.modules.turn_packages import (
+from chimera.modules.turn_packages import (
     TURNTUNNEL_SPEC,
     TURNABLE_SPEC,
 )

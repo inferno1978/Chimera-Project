@@ -2,7 +2,7 @@
 """
 tests/test_awg_diagnose.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/awg_diagnose.py.
+Unit-тесты для chimera/modules/awg_diagnose.py.
 
 Покрывает:
   1. _diag_kernel_module — lsmod + awg --version (mocked)
@@ -28,7 +28,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -38,9 +38,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestDiagKernelModule(unittest.TestCase):
@@ -50,8 +50,8 @@ class TestDiagKernelModule(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_ok_when_module_loaded(self):
-        from vless_installer.modules import awg_diagnose
-        with patch("vless_installer._core._run") as mock_run:
+        from chimera.modules import awg_diagnose
+        with patch("chimera._core._run") as mock_run:
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="amnezia 1234567\n", stderr=""),
                 MagicMock(returncode=0, stdout="amnezia-wg-tools v1.0\n", stderr=""),
@@ -63,8 +63,8 @@ class TestDiagKernelModule(unittest.TestCase):
             self.assertIn("v1.0", r["version"])
 
     def test_fail_when_module_not_loaded(self):
-        from vless_installer.modules import awg_diagnose
-        with patch("vless_installer._core._run") as mock_run:
+        from chimera.modules import awg_diagnose
+        with patch("chimera._core._run") as mock_run:
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="", stderr=""),
                 MagicMock(returncode=1, stdout="", stderr="not found"),
@@ -81,10 +81,10 @@ class TestDiagSysctl(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_all_ok_when_values_match(self):
-        from vless_installer.modules import awg_diagnose
-        from vless_installer.modules.awg_constants import AWGS_SYSCTL_TARGETS
+        from chimera.modules import awg_diagnose
+        from chimera.modules.awg_constants import AWGS_SYSCTL_TARGETS
         with patch.object(awg_diagnose, "awgs_sysctl_get") as mock_get, \
-             patch("vless_installer._core._run") as mock_run:
+             patch("chimera._core._run") as mock_run:
             # IPv6 disable check → return "0" (IPv6 enabled)
             mock_run.return_value = MagicMock(returncode=0, stdout="0\n", stderr="")
             # все sysctl-параметры возвращают target-значение
@@ -95,9 +95,9 @@ class TestDiagSysctl(unittest.TestCase):
                 self.assertIn(r["status"], ("OK", "SKIP"))
 
     def test_warn_when_value_mismatch(self):
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         with patch.object(awg_diagnose, "awgs_sysctl_get") as mock_get, \
-             patch("vless_installer._core._run") as mock_run:
+             patch("chimera._core._run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="0\n", stderr="")
             mock_get.return_value = "wrong_value"
             results = awg_diagnose._diag_sysctl()
@@ -106,9 +106,9 @@ class TestDiagSysctl(unittest.TestCase):
 
     def test_skip_ipv6_forwarding_when_ipv6_disabled(self):
         """IPv6 forwarding — SKIP если disable_ipv6=1."""
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         with patch.object(awg_diagnose, "awgs_sysctl_get") as mock_get, \
-             patch("vless_installer._core._run") as mock_run:
+             patch("chimera._core._run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="1\n", stderr="")
             mock_get.return_value = "1"  # для остальных
             results = awg_diagnose._diag_sysctl()
@@ -123,8 +123,8 @@ class TestDiagUfw(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_skip_when_ufw_inactive(self):
-        from vless_installer.modules import awg_diagnose
-        with patch("vless_installer._core._run") as mock_run:
+        from chimera.modules import awg_diagnose
+        with patch("chimera._core._run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="Status: inactive\n", stderr=""
             )
@@ -133,8 +133,8 @@ class TestDiagUfw(unittest.TestCase):
             self.assertTrue(r["ok"])
 
     def test_ok_when_rule_present(self):
-        from vless_installer.modules import awg_diagnose
-        with patch("vless_installer._core._run") as mock_run:
+        from chimera.modules import awg_diagnose
+        with patch("chimera._core._run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout="51820/udp ALLOW Anywhere\n",
@@ -145,8 +145,8 @@ class TestDiagUfw(unittest.TestCase):
             self.assertEqual(r["status"], "OK")
 
     def test_warn_when_rule_missing(self):
-        from vless_installer.modules import awg_diagnose
-        with patch("vless_installer._core._run") as mock_run:
+        from chimera.modules import awg_diagnose
+        with patch("chimera._core._run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="22/tcp ALLOW Anywhere\n", stderr=""
             )
@@ -162,7 +162,7 @@ class TestDiagService(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_ok_when_active(self):
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         with patch.object(awg_diagnose, "awgs_service_status") as mock_status:
             mock_status.return_value = {"active": True, "enabled": True}
             r = awg_diagnose._diag_service()
@@ -170,7 +170,7 @@ class TestDiagService(unittest.TestCase):
             self.assertEqual(r["status"], "OK")
 
     def test_fail_when_inactive(self):
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         with patch.object(awg_diagnose, "awgs_service_status") as mock_status:
             mock_status.return_value = {"active": False, "enabled": False}
             r = awg_diagnose._diag_service()
@@ -185,14 +185,14 @@ class TestDiagTunnel(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_warn_when_awg_show_empty(self):
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         with patch.object(awg_diagnose, "awgs_show_handshakes", return_value=""):
             r = awg_diagnose._diag_tunnel()
             self.assertFalse(r["ok"])
             self.assertEqual(r["status"], "WARN")
 
     def test_ok_with_peers(self):
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         output = "peer: abc123\nlatest handshake: 1s ago\npeer: def456\n"
         with patch.object(awg_diagnose, "awgs_show_handshakes", return_value=output):
             r = awg_diagnose._diag_tunnel()
@@ -217,13 +217,13 @@ class TestDiagNatRouting(unittest.TestCase):
         self._state_file.write_text(json.dumps({
             "installed": True, "subnet": subnet,
         }))
-        return patch("vless_installer.modules.awg_state.AWGS_STATE_FILE",
+        return patch("chimera.modules.awg_state.AWGS_STATE_FILE",
                      self._state_file)
 
     def test_all_ok(self):
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         with self._patch_state(), \
-             patch("vless_installer._core._run") as mock_run:
+             patch("chimera._core._run") as mock_run:
             # ip_forward=1, MASQUERADE+subnet, FORWARD+awg0, route, rp_filter=0
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="1\n", stderr=""),
@@ -237,9 +237,9 @@ class TestDiagNatRouting(unittest.TestCase):
             self.assertEqual(r["status"], "OK")
 
     def test_fail_when_ip_forward_off(self):
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         with self._patch_state(), \
-             patch("vless_installer._core._run") as mock_run:
+             patch("chimera._core._run") as mock_run:
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="0\n", stderr=""),
                 MagicMock(returncode=0, stdout="MASQUERADE 10.66.66.0/24\n", stderr=""),
@@ -252,9 +252,9 @@ class TestDiagNatRouting(unittest.TestCase):
             self.assertEqual(r["status"], "FAIL")
 
     def test_fail_when_masquerade_missing(self):
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         with self._patch_state(), \
-             patch("vless_installer._core._run") as mock_run:
+             patch("chimera._core._run") as mock_run:
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="1\n", stderr=""),
                 MagicMock(returncode=0, stdout="", stderr=""),  # нет MASQUERADE
@@ -281,11 +281,11 @@ class TestDiagCarrierCompare(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_returns_compare_result(self):
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         self._state_file.write_text(json.dumps({
             "installed": True, "params": {"jc": 3, "jmin": 40, "jmax": 80, "i1": "dead"},
         }))
-        with patch("vless_installer.modules.awg_state.AWGS_STATE_FILE", self._state_file):
+        with patch("chimera.modules.awg_state.AWGS_STATE_FILE", self._state_file):
             r = awg_diagnose._diag_carrier_compare("mobile")
             self.assertIn("status", r)
             self.assertIn("checks", r)
@@ -304,9 +304,9 @@ class TestDiagnoseFull(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_report_has_all_sections(self):
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         self._state_file.write_text(json.dumps({"installed": True, "port": 51820}))
-        with patch("vless_installer.modules.awg_state.AWGS_STATE_FILE", self._state_file), \
+        with patch("chimera.modules.awg_state.AWGS_STATE_FILE", self._state_file), \
              patch.object(awg_diagnose, "_diag_kernel_module") as mock_k, \
              patch.object(awg_diagnose, "_diag_sysctl") as mock_s, \
              patch.object(awg_diagnose, "_diag_ufw") as mock_u, \
@@ -326,9 +326,9 @@ class TestDiagnoseFull(unittest.TestCase):
             self.assertNotIn("carrier_compare", report)
 
     def test_report_includes_carrier_when_provided(self):
-        from vless_installer.modules import awg_diagnose
+        from chimera.modules import awg_diagnose
         self._state_file.write_text(json.dumps({"installed": True, "port": 51820}))
-        with patch("vless_installer.modules.awg_state.AWGS_STATE_FILE", self._state_file), \
+        with patch("chimera.modules.awg_state.AWGS_STATE_FILE", self._state_file), \
              patch.object(awg_diagnose, "_diag_kernel_module"), \
              patch.object(awg_diagnose, "_diag_sysctl", return_value=[]), \
              patch.object(awg_diagnose, "_diag_ufw"), \

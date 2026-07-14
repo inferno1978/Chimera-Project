@@ -2,7 +2,7 @@
 """
 tests/test_dpi_censor_check.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/dpi_censor_check.py.
+Unit-тесты для chimera/modules/dpi_censor_check.py.
 
 Покрывает:
   1. _deps_missing — проверка отсутствующих Python-модулей
@@ -22,7 +22,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -32,9 +32,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestRequiredModules(unittest.TestCase):
@@ -44,7 +44,7 @@ class TestRequiredModules(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_has_httpx_rich_yaml(self):
-        from vless_installer.modules.dpi_censor_check import _REQUIRED_MODULES
+        from chimera.modules.dpi_censor_check import _REQUIRED_MODULES
         for mod in ("httpx", "rich", "yaml"):
             self.assertIn(mod, _REQUIRED_MODULES)
 
@@ -56,12 +56,12 @@ class TestDepsMissing(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_empty_when_all_present(self):
-        from vless_installer.modules.dpi_censor_check import _deps_missing
+        from chimera.modules.dpi_censor_check import _deps_missing
         with patch("importlib.util.find_spec", return_value=MagicMock()):
             self.assertEqual(_deps_missing(), [])
 
     def test_returns_missing_modules(self):
-        from vless_installer.modules.dpi_censor_check import (
+        from chimera.modules.dpi_censor_check import (
             _deps_missing, _REQUIRED_MODULES,
         )
         # find_spec возвращает None для всех → все missing
@@ -71,7 +71,7 @@ class TestDepsMissing(unittest.TestCase):
             self.assertIn(mod, result)
 
     def test_partial_missing(self):
-        from vless_installer.modules.dpi_censor_check import _deps_missing
+        from chimera.modules.dpi_censor_check import _deps_missing
         # httpx есть, остальные нет
         def _fake_find(mod):
             return MagicMock() if mod == "httpx" else None
@@ -89,26 +89,26 @@ class TestBuildArgs(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_all_none_returns_empty(self):
-        from vless_installer.modules.dpi_censor_check import _build_args
+        from chimera.modules.dpi_censor_check import _build_args
         self.assertEqual(_build_args(None, None, None), [])
 
     def test_domains_only(self):
-        from vless_installer.modules.dpi_censor_check import _build_args
+        from chimera.modules.dpi_censor_check import _build_args
         result = _build_args(["a.com", "b.com"], None, None)
         self.assertEqual(result, ["-d", "a.com", "-d", "b.com"])
 
     def test_proxy_only(self):
-        from vless_installer.modules.dpi_censor_check import _build_args
+        from chimera.modules.dpi_censor_check import _build_args
         result = _build_args(None, "socks5://127.0.0.1:1080", None)
         self.assertEqual(result, ["-p", "socks5://127.0.0.1:1080"])
 
     def test_output_only(self):
-        from vless_installer.modules.dpi_censor_check import _build_args
+        from chimera.modules.dpi_censor_check import _build_args
         result = _build_args(None, None, "/tmp/report.json")
         self.assertEqual(result, ["-o", "/tmp/report.json"])
 
     def test_all_combined(self):
-        from vless_installer.modules.dpi_censor_check import _build_args
+        from chimera.modules.dpi_censor_check import _build_args
         result = _build_args(["x.com"], "proxy", "out.json")
         self.assertIn("-d", result)
         self.assertIn("x.com", result)
@@ -118,7 +118,7 @@ class TestBuildArgs(unittest.TestCase):
         self.assertIn("out.json", result)
 
     def test_empty_domains_list(self):
-        from vless_installer.modules.dpi_censor_check import _build_args
+        from chimera.modules.dpi_censor_check import _build_args
         result = _build_args([], None, None)
         self.assertEqual(result, [])
 

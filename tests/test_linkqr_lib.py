@@ -2,7 +2,7 @@
 """
 tests/test_linkqr_lib.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/linkqr_lib.py.
+Unit-тесты для chimera/modules/linkqr_lib.py.
 
 Покрывает:
   1. generate_qr_png — генерация QR-кода в PNG
@@ -27,8 +27,8 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Создаёт фейковый vless_installer._core в sys.modules (как в test_tg_bot)."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    """Создаёт фейковый chimera._core в sys.modules (как в test_tg_bot)."""
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -38,9 +38,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestGenerateQrPng(unittest.TestCase):
@@ -55,7 +55,7 @@ class TestGenerateQrPng(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_generates_png_for_simple_text(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         out = self._tmpdir / "qr1.png"
         ok = linkqr_lib.generate_qr_png("vless://test-uuid@example.com:443", out)
         # qrencode может быть не установлен в CI — принимаем оба исхода,
@@ -65,14 +65,14 @@ class TestGenerateQrPng(unittest.TestCase):
             self.assertGreater(out.stat().st_size, 100)
 
     def test_empty_text_returns_false(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         out = self._tmpdir / "qr2.png"
         self.assertFalse(linkqr_lib.generate_qr_png("", out))
         self.assertFalse(out.exists())
 
     def test_long_text_uses_low_error_correction(self):
         """Длинный vpn:// URI (>800 символов) не должен падать."""
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         out = self._tmpdir / "qr3.png"
         long_text = "vpn://free/" + "A" * 1500
         # Функция должна ПОПЫТАТЬСЯ сгенерировать (с -l L).
@@ -98,10 +98,10 @@ class TestBuildVlessLinkForUser(unittest.TestCase):
 
     def _patch_state(self, state_dict):
         self._state.write_text(json.dumps(state_dict))
-        return patch("vless_installer.modules.linkqr_lib._MAIN_STATE_FILE", self._state)
+        return patch("chimera.modules.linkqr_lib._MAIN_STATE_FILE", self._state)
 
     def test_reality_mode_with_user_uuid(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         state = {
             "domain": "vpn.example.com",
             "uuid": "primary-uuid",
@@ -123,7 +123,7 @@ class TestBuildVlessLinkForUser(unittest.TestCase):
         self.assertNotIn("primary-uuid", link)
 
     def test_reality_mode_no_user_uuid_uses_primary(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         state = {
             "domain": "vpn.example.com",
             "uuid": "primary-uuid",
@@ -135,7 +135,7 @@ class TestBuildVlessLinkForUser(unittest.TestCase):
         self.assertIn("vless://primary-uuid@", link)
 
     def test_xhttp_mode(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         state = {
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -152,7 +152,7 @@ class TestBuildVlessLinkForUser(unittest.TestCase):
         self.assertIn("path=/xhttp", link)
 
     def test_mode_b_awg_uses_reality_dest_sni(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         state = {
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -167,18 +167,18 @@ class TestBuildVlessLinkForUser(unittest.TestCase):
         self.assertIn("sni=dest.example.com", link)
 
     def test_empty_when_no_domain(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch_state({"uuid": "test-uuid"}):
             self.assertEqual(linkqr_lib.build_vless_link_for_user("test-uuid"), "")
 
     def test_empty_when_no_uuid(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch_state({"domain": "vpn.example.com"}):
             self.assertEqual(linkqr_lib.build_vless_link_for_user(None), "")
 
     def test_no_private_key_in_link(self):
         """Приватный ключ сервера НЕ должен попадать в ссылку."""
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         state = {
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -206,15 +206,15 @@ class TestBuildAwgLinkForUser(unittest.TestCase):
 
     def _patch_awg(self, state_dict):
         self._awg_state.write_text(json.dumps(state_dict))
-        return patch("vless_installer.modules.linkqr_lib._AWG_STATE_FILE", self._awg_state)
+        return patch("chimera.modules.linkqr_lib._AWG_STATE_FILE", self._awg_state)
 
     def test_returns_empty_when_awg_not_installed(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch_awg({"installed": False}):
             self.assertEqual(linkqr_lib.build_awg_link_for_user("alice@xray"), "")
 
     def test_returns_empty_when_no_peer_for_email(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch_awg({
             "installed": True,
             "server_pubkey": "PUB",
@@ -240,15 +240,15 @@ class TestBuildSingboxLinksForUser(unittest.TestCase):
 
     def _patch_sb(self, state_dict):
         self._sb_state.write_text(json.dumps(state_dict))
-        return patch("vless_installer.modules.linkqr_lib._SINGBOX_STATE_FILE", self._sb_state)
+        return patch("chimera.modules.linkqr_lib._SINGBOX_STATE_FILE", self._sb_state)
 
     def test_returns_empty_when_not_installed(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch_sb({"installed": False}):
             self.assertEqual(linkqr_lib.build_singbox_links_for_user("uuid-1"), [])
 
     def test_returns_empty_when_no_inbounds(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch_sb({"installed": True, "inbounds": {}}):
             self.assertEqual(linkqr_lib.build_singbox_links_for_user("uuid-1"), [])
 
@@ -267,15 +267,15 @@ class TestBuildHysteria2Link(unittest.TestCase):
 
     def _patch(self, state_dict):
         self._state.write_text(json.dumps(state_dict))
-        return patch("vless_installer.modules.linkqr_lib._MAIN_STATE_FILE", self._state)
+        return patch("chimera.modules.linkqr_lib._MAIN_STATE_FILE", self._state)
 
     def test_returns_none_when_not_enabled(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch({"hysteria2": {"enabled": False}}):
             self.assertIsNone(linkqr_lib.build_hysteria2_link())
 
     def test_returns_none_when_no_active_node(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch({
             "hysteria2": {
                 "enabled": True,
@@ -285,7 +285,7 @@ class TestBuildHysteria2Link(unittest.TestCase):
             self.assertIsNone(linkqr_lib.build_hysteria2_link())
 
     def test_returns_none_when_no_password(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch({
             "hysteria2": {
                 "enabled": True,
@@ -310,18 +310,18 @@ class TestBuildAllLinksForUser(unittest.TestCase):
 
     def _patch_state(self, state_dict):
         self._state.write_text(json.dumps(state_dict))
-        return patch("vless_installer.modules.linkqr_lib._MAIN_STATE_FILE", self._state)
+        return patch("chimera.modules.linkqr_lib._MAIN_STATE_FILE", self._state)
 
     def _patch_sub(self, sub_dict):
         self._sub_conf.write_text(json.dumps(sub_dict))
-        return patch("vless_installer.modules.linkqr_lib._SUB_CONF_FILE", self._sub_conf)
+        return patch("chimera.modules.linkqr_lib._SUB_CONF_FILE", self._sub_conf)
 
     def test_empty_user_returns_empty(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         self.assertEqual(linkqr_lib.build_all_links_for_user({}), {})
 
     def test_returns_vless_when_state_configured(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         state = {
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -334,7 +334,7 @@ class TestBuildAllLinksForUser(unittest.TestCase):
         self.assertIn("vless://", links["vless"])
 
     def test_subscription_url_included_when_pepper_set(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         state = {
             "domain": "vpn.example.com",
             "uuid": "test-uuid",
@@ -363,29 +363,29 @@ class TestSubscriptionUrlForUser(unittest.TestCase):
 
     def _patch_state(self, state_dict):
         self._state.write_text(json.dumps(state_dict))
-        return patch("vless_installer.modules.linkqr_lib._MAIN_STATE_FILE", self._state)
+        return patch("chimera.modules.linkqr_lib._MAIN_STATE_FILE", self._state)
 
     def _patch_sub(self, sub_dict):
         self._sub_conf.write_text(json.dumps(sub_dict))
-        return patch("vless_installer.modules.linkqr_lib._SUB_CONF_FILE", self._sub_conf)
+        return patch("chimera.modules.linkqr_lib._SUB_CONF_FILE", self._sub_conf)
 
     def test_returns_none_when_no_pepper(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch_sub({}):
             self.assertIsNone(linkqr_lib.build_subscription_url_for_user({"uuid": "abc"}))
 
     def test_returns_none_when_no_uuid(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch_sub({"pepper": "p"}):
             self.assertIsNone(linkqr_lib.build_subscription_url_for_user({}))
 
     def test_returns_none_when_no_domain(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch_state({}), self._patch_sub({"pepper": "p"}):
             self.assertIsNone(linkqr_lib.build_subscription_url_for_user({"uuid": "abc"}))
 
     def test_returns_url_when_all_set(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch_state({"domain": "vpn.example.com"}), \
              self._patch_sub({"pepper": "pepper", "port": 8443}):
             url = linkqr_lib.build_subscription_url_for_user({"uuid": "abc-uuid"})
@@ -398,7 +398,7 @@ class TestSubscriptionUrlForUser(unittest.TestCase):
 
     def test_token_is_deterministic(self):
         """Один и тот же (uuid, pepper) → один и тот же токен."""
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch_state({"domain": "x"}), \
              self._patch_sub({"pepper": "p", "port": 1}):
             url1 = linkqr_lib.build_subscription_url_for_user({"uuid": "abc"})
@@ -419,15 +419,15 @@ class TestReadUsersAndFinders(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.linkqr_lib._USERS_FILE", self._users)
+        return patch("chimera.modules.linkqr_lib._USERS_FILE", self._users)
 
     def test_read_users_empty_when_no_file(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         with self._patch():
             self.assertEqual(linkqr_lib._read_users(), [])
 
     def test_find_by_uuid(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         users = [
             {"uuid": "u1", "email": "alice@xray"},
             {"uuid": "u2", "email": "bob@xray"},
@@ -439,7 +439,7 @@ class TestReadUsersAndFinders(unittest.TestCase):
         self.assertEqual(u["email"], "bob@xray")
 
     def test_find_by_email_returns_none_when_missing(self):
-        from vless_installer.modules import linkqr_lib
+        from chimera.modules import linkqr_lib
         self._users.write_text(json.dumps([{"uuid": "u1", "email": "alice@xray"}]))
         with self._patch():
             self.assertIsNone(linkqr_lib._find_user_by_email("nobody@xray"))

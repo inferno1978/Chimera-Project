@@ -2,7 +2,7 @@
 """
 tests/test_hysteria2_cert_mgr.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/hysteria2_cert_mgr.py.
+Unit-тесты для chimera/modules/hysteria2_cert_mgr.py.
 
 Покрывает:
   1. h2_cert_check — проверка сертификата (mocked openssl _run)
@@ -26,7 +26,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -36,9 +36,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestH2CertCheck(unittest.TestCase):
@@ -49,7 +49,7 @@ class TestH2CertCheck(unittest.TestCase):
 
     def test_returns_not_exists_when_no_file(self):
         """Сертификат не существует → exists=False."""
-        from vless_installer.modules.hysteria2_cert_mgr import h2_cert_check
+        from chimera.modules.hysteria2_cert_mgr import h2_cert_check
         with patch("pathlib.Path.exists", return_value=False):
             result = h2_cert_check("/tmp/nonexistent_cert.pem")
         self.assertFalse(result["exists"])
@@ -58,7 +58,7 @@ class TestH2CertCheck(unittest.TestCase):
 
     def test_parses_single_space_date_format(self):
         """openssl возвращает 'Sep 28 12:00:00 2025 GMT' (одинарный пробел)."""
-        from vless_installer.modules.hysteria2_cert_mgr import h2_cert_check
+        from chimera.modules.hysteria2_cert_mgr import h2_cert_check
         future = (datetime.now(timezone.utc) + timedelta(days=90))
         date_str = future.strftime("%b %d %H:%M:%S %Y GMT")
         mock_result = MagicMock()
@@ -66,7 +66,7 @@ class TestH2CertCheck(unittest.TestCase):
         mock_result.stdout = f"notBefore=Jan  1 00:00:00 2025 GMT\nnotAfter={date_str}\n"
         mock_result.stderr = ""
         with patch("pathlib.Path.exists", return_value=True), \
-             patch("vless_installer.modules.hysteria2_cert_mgr._run",
+             patch("chimera.modules.hysteria2_cert_mgr._run",
                    return_value=mock_result):
             result = h2_cert_check("/fake/cert.pem")
         self.assertTrue(result["exists"])
@@ -75,7 +75,7 @@ class TestH2CertCheck(unittest.TestCase):
 
     def test_parses_double_space_date_format(self):
         """openssl возвращает 'Sep  8 12:00:00 2025 GMT' (двойной пробел для однозначных дней)."""
-        from vless_installer.modules.hysteria2_cert_mgr import h2_cert_check
+        from chimera.modules.hysteria2_cert_mgr import h2_cert_check
         future = (datetime.now(timezone.utc) + timedelta(days=60))
         day = future.day
         if day < 10:
@@ -87,7 +87,7 @@ class TestH2CertCheck(unittest.TestCase):
         mock_result.stdout = f"notAfter={date_str}\n"
         mock_result.stderr = ""
         with patch("pathlib.Path.exists", return_value=True), \
-             patch("vless_installer.modules.hysteria2_cert_mgr._run",
+             patch("chimera.modules.hysteria2_cert_mgr._run",
                    return_value=mock_result):
             result = h2_cert_check("/fake/cert.pem")
         self.assertTrue(result["exists"])
@@ -95,7 +95,7 @@ class TestH2CertCheck(unittest.TestCase):
 
     def test_expired_cert_returns_valid_false(self):
         """Сертификат с датой в прошлом → valid=False, days_left < 0."""
-        from vless_installer.modules.hysteria2_cert_mgr import h2_cert_check
+        from chimera.modules.hysteria2_cert_mgr import h2_cert_check
         past = (datetime.now(timezone.utc) - timedelta(days=30))
         date_str = past.strftime("%b %d %H:%M:%S %Y GMT")
         mock_result = MagicMock()
@@ -103,7 +103,7 @@ class TestH2CertCheck(unittest.TestCase):
         mock_result.stdout = f"notAfter={date_str}\n"
         mock_result.stderr = ""
         with patch("pathlib.Path.exists", return_value=True), \
-             patch("vless_installer.modules.hysteria2_cert_mgr._run",
+             patch("chimera.modules.hysteria2_cert_mgr._run",
                    return_value=mock_result):
             result = h2_cert_check("/fake/cert.pem")
         self.assertTrue(result["exists"])
@@ -112,13 +112,13 @@ class TestH2CertCheck(unittest.TestCase):
 
     def test_returns_invalid_when_no_notafter(self):
         """openssl не вернул notAfter → valid=False."""
-        from vless_installer.modules.hysteria2_cert_mgr import h2_cert_check
+        from chimera.modules.hysteria2_cert_mgr import h2_cert_check
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "some other line\n"
         mock_result.stderr = ""
         with patch("pathlib.Path.exists", return_value=True), \
-             patch("vless_installer.modules.hysteria2_cert_mgr._run",
+             patch("chimera.modules.hysteria2_cert_mgr._run",
                    return_value=mock_result):
             result = h2_cert_check("/fake/cert.pem")
         self.assertTrue(result["exists"])
@@ -126,9 +126,9 @@ class TestH2CertCheck(unittest.TestCase):
 
     def test_returns_error_dict_on_exception(self):
         """При исключении в openssl → error в результате."""
-        from vless_installer.modules.hysteria2_cert_mgr import h2_cert_check
+        from chimera.modules.hysteria2_cert_mgr import h2_cert_check
         with patch("pathlib.Path.exists", return_value=True), \
-             patch("vless_installer.modules.hysteria2_cert_mgr._run",
+             patch("chimera.modules.hysteria2_cert_mgr._run",
                    side_effect=Exception("openssl crash")):
             result = h2_cert_check("/fake/cert.pem")
         self.assertTrue(result["exists"])

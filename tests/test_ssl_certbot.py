@@ -2,7 +2,7 @@
 """
 tests/test_ssl_certbot.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/ssl_certbot.py.
+Unit-тесты для chimera/modules/ssl_certbot.py.
 
 Покрывает:
   1. ensure_cert_fix_script — генерация bash-скрипта
@@ -22,7 +22,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -32,9 +32,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestEnsureCertFixScript(unittest.TestCase):
@@ -51,7 +51,7 @@ class TestEnsureCertFixScript(unittest.TestCase):
 
     def test_creates_script_with_domain(self):
         """Тестируем через перехват Path — write_text/chmod на mock."""
-        from vless_installer.modules import ssl_certbot
+        from chimera.modules import ssl_certbot
         # Функция: script_path = Path("/usr/local/bin/fix-xray-certs.sh")
         # затем script_path.write_text(content) + script_path.chmod(0o750)
         # Патчим Path чтобы вернуть mock_path для нужного аргумента
@@ -77,7 +77,7 @@ class TestEnsureCertFixScript(unittest.TestCase):
 
     def test_script_has_chmod_750(self):
         """Проверяем что chmod вызывается с 0o750."""
-        from vless_installer.modules import ssl_certbot
+        from chimera.modules import ssl_certbot
         chmod_calls = []
 
         def _fake_path(*args, **kwargs):

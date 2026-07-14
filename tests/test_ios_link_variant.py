@@ -2,7 +2,7 @@
 """
 tests/test_ios_link_variant.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/ios_link_variant.py —
+Unit-тесты для chimera/modules/ios_link_variant.py —
 постпроцессор vless-ссылки в iOS/Karing-совместимый вариант.
 
 Покрывает (нумерация соответствует спецификации задачи — ШАГ 0, тесты a-d):
@@ -38,7 +38,7 @@ class TestToIosKaringLink(unittest.TestCase):
     """to_ios_karing_link — pure postprocessor."""
 
     def _import(self):
-        from vless_installer.modules.ios_link_variant import to_ios_karing_link
+        from chimera.modules.ios_link_variant import to_ios_karing_link
         return to_ios_karing_link
 
     # ── 0a: REALITY + flow + эмодзи-флаг ─────────────────────────────────────

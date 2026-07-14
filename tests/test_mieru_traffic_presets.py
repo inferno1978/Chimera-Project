@@ -2,7 +2,7 @@
 """
 tests/test_mieru_traffic_presets.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/mieru_traffic_presets.py.
+Unit-тесты для chimera/modules/mieru_traffic_presets.py.
 
 Покрывает:
   1. Эталонные base64-векторы из реального mieru proto (не self-reference)
@@ -22,7 +22,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda s, *a, **k: None), \
@@ -32,9 +32,9 @@ def _setup_core():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    m = types.ModuleType("vless_installer._core")
+    m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
-    sys.modules["vless_installer._core"] = m
+    sys.modules["chimera._core"] = m
 
 
 class TestPresetStructure(unittest.TestCase):
@@ -44,12 +44,12 @@ class TestPresetStructure(unittest.TestCase):
         _setup_core()
 
     def test_has_4_presets(self):
-        from vless_installer.modules.mieru_traffic_presets import PRESETS
+        from chimera.modules.mieru_traffic_presets import PRESETS
         for name in ("disabled", "basic", "medium", "aggressive"):
             self.assertIn(name, PRESETS)
 
     def test_each_preset_has_required_fields(self):
-        from vless_installer.modules.mieru_traffic_presets import PRESETS
+        from chimera.modules.mieru_traffic_presets import PRESETS
         for name, preset in PRESETS.items():
             with self.subTest(preset=name):
                 self.assertIn("name", preset)
@@ -65,16 +65,16 @@ class TestEncodeVarint(unittest.TestCase):
         _setup_core()
 
     def test_zero(self):
-        from vless_installer.modules.mieru_traffic_presets import encode_varint
+        from chimera.modules.mieru_traffic_presets import encode_varint
         self.assertEqual(encode_varint(0), b"\x00")
 
     def test_one(self):
-        from vless_installer.modules.mieru_traffic_presets import encode_varint
+        from chimera.modules.mieru_traffic_presets import encode_varint
         self.assertEqual(encode_varint(1), b"\x01")
 
     def test_128(self):
         """128 → multi-byte varint."""
-        from vless_installer.modules.mieru_traffic_presets import encode_varint
+        from chimera.modules.mieru_traffic_presets import encode_varint
         self.assertEqual(encode_varint(128), b"\x80\x01")
 
 
@@ -103,7 +103,7 @@ class TestRealProtoVectors(unittest.TestCase):
         - 10 00 → field 2 (unlockAll) = false (varint 0)
         - 1a 04 08 01 10 0a → field 3 (tcpFragment) = {enable=true, maxSleepMs=10}
         """
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         result = get_preset_base64("basic")
         # Декодируем для проверки структуры
         raw = base64.b64decode(result)
@@ -120,7 +120,7 @@ class TestRealProtoVectors(unittest.TestCase):
         До фикса unlockAll=False отбрасывался (if cfg.get("unlockAll") else None).
         После фикса — кодируется явно (proto3 optional = явное presence).
         """
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         # disabled пресет: unlockAll=False (явно в config)
         result = get_preset_base64("disabled")
         raw = base64.b64decode(result)
@@ -130,7 +130,7 @@ class TestRealProtoVectors(unittest.TestCase):
 
     def test_unlock_all_true_is_serialized(self):
         """unlockAll=True должен сериализоваться как 1001."""
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         result = get_preset_base64("aggressive")
         raw = base64.b64decode(result)
         # 1001 = field 2 (unlockAll), varint 1 (true)
@@ -140,7 +140,7 @@ class TestRealProtoVectors(unittest.TestCase):
     def test_empty_traffic_pattern_is_valid_base64(self):
         """disabled пресет (config=None → нет trafficPattern) — get_preset_base64
         возвращает base64 пустого TrafficPattern (только unlockAll=False)."""
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         result = get_preset_base64("disabled")
         raw = base64.b64decode(result)
         # Минимум: unlockAll=false (1000)
@@ -148,7 +148,7 @@ class TestRealProtoVectors(unittest.TestCase):
 
     def test_all_presets_produce_valid_base64(self):
         """Все 4 пресета дают валидный base64 (декодируется без исключения)."""
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         for name in ("disabled", "basic", "medium", "aggressive"):
             with self.subTest(preset=name):
                 result = get_preset_base64(name)
@@ -163,7 +163,7 @@ class TestRealProtoVectors(unittest.TestCase):
         nonce{PRINTABLE(1), applyAll=true, min=6, max=8} →
         22 08 08 01 10 01 18 06 20 08
         """
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         result = get_preset_base64("medium")
         raw = base64.b64decode(result)
         # field 4 (nonce) = tag 22 (0x22 = field 4, wire type 2)
@@ -177,7 +177,7 @@ class TestRealProtoVectors(unittest.TestCase):
 
         padding field 5 = tag 2a (0x2a = field 5, wire type 2)
         """
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         result = get_preset_base64("aggressive")
         raw = base64.b64decode(result)
         # field 5 (padding) = tag 2a
@@ -186,7 +186,7 @@ class TestRealProtoVectors(unittest.TestCase):
 
     def test_different_presets_produce_different_bytes(self):
         """Разные пресеты → разный raw bytes (не только разный base64)."""
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         results = {}
         for name in ("disabled", "basic", "medium", "aggressive"):
             results[name] = base64.b64decode(get_preset_base64(name))
@@ -201,22 +201,22 @@ class TestListAndGetPresets(unittest.TestCase):
         _setup_core()
 
     def test_list_presets_returns_list(self):
-        from vless_installer.modules.mieru_traffic_presets import list_presets
+        from chimera.modules.mieru_traffic_presets import list_presets
         result = list_presets()
         self.assertGreaterEqual(len(result), 4)
 
     def test_get_preset_known(self):
-        from vless_installer.modules.mieru_traffic_presets import get_preset
+        from chimera.modules.mieru_traffic_presets import get_preset
         p = get_preset("basic")
         self.assertEqual(p["name"], "basic")
 
     def test_get_preset_unknown_falls_back_to_basic(self):
-        from vless_installer.modules.mieru_traffic_presets import get_preset
+        from chimera.modules.mieru_traffic_presets import get_preset
         p = get_preset("nonexistent")
         self.assertEqual(p["name"], "basic")
 
     def test_get_preset_base64_unknown_falls_back_to_basic(self):
-        from vless_installer.modules.mieru_traffic_presets import get_preset_base64
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
         result = get_preset_base64("nonexistent")
         basic = get_preset_base64("basic")
         self.assertEqual(result, basic)

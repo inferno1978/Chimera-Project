@@ -2,7 +2,7 @@
 """
 tests/test_geo_files.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/geo_files.py.
+Unit-тесты для chimera/modules/geo_files.py.
 
 Покрывает:
   1. _core_module() — importlib dispatcher
@@ -34,7 +34,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -45,9 +45,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestCoreModule(unittest.TestCase):
@@ -57,7 +57,7 @@ class TestCoreModule(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_module(self):
-        from vless_installer.modules.geo_files import _core_module
+        from chimera.modules.geo_files import _core_module
         result = _core_module()
         self.assertIsNotNone(result)
 
@@ -183,7 +183,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         находила файл в dest_dirs → urlopen НЕ вызывался → функция ложно
         репортила успех.
         """
-        from vless_installer.modules import geo_files
+        from chimera.modules import geo_files
 
         mock_core = self._make_mock_core()
 
@@ -199,7 +199,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
              p_exists, p_stat, \
              patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
              patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
-             patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+             patch("chimera.modules.download_manager.urllib.request.urlopen",
                    urlopen_mock) as mock_urlopen, \
              patch("shutil.copy2", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, *a, **kw: None), \
@@ -222,7 +222,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
 
         Проверка: urllib.request.urlopen НЕ вызывается.
         """
-        from vless_installer.modules import geo_files
+        from chimera.modules import geo_files
 
         mock_core = self._make_mock_core()
 
@@ -238,7 +238,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
              p_exists, p_stat, \
              patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
              patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
-             patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+             patch("chimera.modules.download_manager.urllib.request.urlopen",
                    urlopen_mock) as mock_urlopen, \
              patch("shutil.copy2", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, *a, **kw: None), \
@@ -262,7 +262,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         Здесь urlopen возвращает НЕУДАЧУ (URLError) — функция должна провалиться,
         а НЕ тихо взять файл из dest_dirs.
         """
-        from vless_installer.modules import geo_files
+        from chimera.modules import geo_files
 
         mock_core = self._make_mock_core()
 
@@ -278,7 +278,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
              p_exists, p_stat, \
              patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
              patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
-             patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+             patch("chimera.modules.download_manager.urllib.request.urlopen",
                    urlopen_mock) as mock_urlopen, \
              patch.object(Path, "unlink", lambda self, *a, **kw: None), \
              patch("builtins.input", return_value="n"):
@@ -336,7 +336,7 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
 
         urlopen ДОЛЖЕН быть вызван — сеть затронута, не пропущена.
         """
-        from vless_installer.modules import geo_files
+        from chimera.modules import geo_files
 
         mock_core = self._make_mock_core()
 
@@ -385,7 +385,7 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
              patch.object(Path, 'stat', mock_stat), \
              patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
              patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
-             patch("vless_installer.modules.download_manager.urllib.request.urlopen",
+             patch("chimera.modules.download_manager.urllib.request.urlopen",
                    urlopen_mock) as mock_urlopen, \
              patch("shutil.copy2", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, *a, **kw: None), \
@@ -408,7 +408,7 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
     def test_package_spec_assert_prevents_bug_by_construction(self):
         """Дополнительная проверка: PackageSpec для geo файлов действительно
         имеет manual_incoming_dir != install_dests. Это структурная защита."""
-        from vless_installer.modules.geo_packages import GEOSITE_SPEC, GEOIP_SPEC
+        from chimera.modules.geo_packages import GEOSITE_SPEC, GEOIP_SPEC
 
         for spec in (GEOSITE_SPEC, GEOIP_SPEC):
             with self.subTest(spec=spec.name):

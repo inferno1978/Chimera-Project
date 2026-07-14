@@ -2,7 +2,7 @@
 """
 tests/test_text_width.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/text_width.py.
+Unit-тесты для chimera/modules/text_width.py.
 
 Покрывает:
   • wlen() — визуальная ширина строки
@@ -27,7 +27,7 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from vless_installer.modules.text_width import wlen, plain, _plain, _wlen
+from chimera.modules.text_width import wlen, plain, _plain, _wlen
 
 
 class TestPlain(unittest.TestCase):
@@ -271,30 +271,30 @@ class TestModulesImportWlen(unittest.TestCase):
     """Все 19 модулей должны импортировать _wlen из text_width."""
 
     MODULES = [
-        "vless_installer.modules.wdtt",
-        "vless_installer.modules.mtproto",
-        "vless_installer.modules.vkturn_menu",
-        "vless_installer.modules.webdav_tunnel",
-        "vless_installer.modules.telemt_panel",
-        "vless_installer.modules.fptn",
-        "vless_installer.modules.mtproto_stats",
-        "vless_installer.modules.turnable",
-        "vless_installer.modules.mieru_stats",
-        "vless_installer.modules.mieru",
-        "vless_installer.modules.telemt_syn_limiter",
-        "vless_installer.modules.telemt_fallback",
-        "vless_installer.modules.turntunnel_links",
-        "vless_installer.modules.naiveproxy",
-        "vless_installer.modules.naiveproxy_stats",
-        "vless_installer.modules.turntunnel",
-        "vless_installer.modules.telemt_mss_selector",
-        "vless_installer.modules.telemt_ios_fix",
-        "vless_installer.modules.slipgate",
+        "chimera.modules.wdtt",
+        "chimera.modules.mtproto",
+        "chimera.modules.vkturn_menu",
+        "chimera.modules.webdav_tunnel",
+        "chimera.modules.telemt_panel",
+        "chimera.modules.fptn",
+        "chimera.modules.mtproto_stats",
+        "chimera.modules.turnable",
+        "chimera.modules.mieru_stats",
+        "chimera.modules.mieru",
+        "chimera.modules.telemt_syn_limiter",
+        "chimera.modules.telemt_fallback",
+        "chimera.modules.turntunnel_links",
+        "chimera.modules.naiveproxy",
+        "chimera.modules.naiveproxy_stats",
+        "chimera.modules.turntunnel",
+        "chimera.modules.telemt_mss_selector",
+        "chimera.modules.telemt_ios_fix",
+        "chimera.modules.slipgate",
     ]
 
     def setUp(self):
         """Загружаем _core.py в sys.modules как fake module."""
-        core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+        core_path = _PROJECT_ROOT / "chimera" / "_core.py"
         src = core_path.read_text()
         g = {}
         from unittest.mock import patch
@@ -305,9 +305,9 @@ class TestModulesImportWlen(unittest.TestCase):
              patch('os.geteuid', return_value=0):
             exec(compile(src, str(core_path), "exec"), g)
         import types
-        fake_core = types.ModuleType("vless_installer._core")
+        fake_core = types.ModuleType("chimera._core")
         fake_core.__dict__.update(g)
-        sys.modules["vless_installer._core"] = fake_core
+        sys.modules["chimera._core"] = fake_core
 
     def test_all_modules_have_wlen(self):
         """Каждый из 19 модулей должен иметь _wlen (через импорт из text_width)."""

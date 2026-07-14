@@ -2,7 +2,7 @@
 """
 tests/test_fragment_log_viewer.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/fragment_log_viewer.py.
+Unit-тесты для chimera/modules/fragment_log_viewer.py.
 
 Покрывает:
   1. _parse_log_line — парсинг строки лога
@@ -23,7 +23,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -33,9 +33,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestParseLogLine(unittest.TestCase):
@@ -45,15 +45,15 @@ class TestParseLogLine(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_none_for_empty_string(self):
-        from vless_installer.modules.fragment_log_viewer import _parse_log_line
+        from chimera.modules.fragment_log_viewer import _parse_log_line
         self.assertIsNone(_parse_log_line(""))
 
     def test_returns_none_for_comment(self):
-        from vless_installer.modules.fragment_log_viewer import _parse_log_line
+        from chimera.modules.fragment_log_viewer import _parse_log_line
         self.assertIsNone(_parse_log_line("# comment"))
 
     def test_parses_timestamp_slash_format(self):
-        from vless_installer.modules.fragment_log_viewer import _parse_log_line
+        from chimera.modules.fragment_log_viewer import _parse_log_line
         line = "2026/07/10 12:00:00 some event happened"
         result = _parse_log_line(line)
         self.assertIsNotNone(result)
@@ -61,34 +61,34 @@ class TestParseLogLine(unittest.TestCase):
         self.assertIn("12:00:00", result["ts"])
 
     def test_parses_timestamp_iso_format(self):
-        from vless_installer.modules.fragment_log_viewer import _parse_log_line
+        from chimera.modules.fragment_log_viewer import _parse_log_line
         line = "2026-07-10T12:00:00 some event happened"
         result = _parse_log_line(line)
         self.assertIsNotNone(result)
         self.assertIn("ts", result)
 
     def test_detects_connection_reset(self):
-        from vless_installer.modules.fragment_log_viewer import _parse_log_line
+        from chimera.modules.fragment_log_viewer import _parse_log_line
         line = "2026/07/10 12:00:00 connection reset by peer"
         result = _parse_log_line(line)
         self.assertIsNotNone(result)
         self.assertIn("event", result)
 
     def test_detects_fragment_event(self):
-        from vless_installer.modules.fragment_log_viewer import _parse_log_line
+        from chimera.modules.fragment_log_viewer import _parse_log_line
         line = "2026/07/10 12:00:00 fragment applied to request"
         result = _parse_log_line(line)
         self.assertIsNotNone(result)
 
     def test_returns_info_for_unknown_event(self):
-        from vless_installer.modules.fragment_log_viewer import _parse_log_line
+        from chimera.modules.fragment_log_viewer import _parse_log_line
         line = "2026/07/10 12:00:00 unknown event type"
         result = _parse_log_line(line)
         self.assertIsNotNone(result)
         self.assertIn("raw", result)
 
     def test_includes_raw_line(self):
-        from vless_installer.modules.fragment_log_viewer import _parse_log_line
+        from chimera.modules.fragment_log_viewer import _parse_log_line
         line = "2026/07/10 12:00:00 some event"
         result = _parse_log_line(line)
         self.assertIsNotNone(result)
@@ -109,7 +109,7 @@ class TestFindXrayLog(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_returns_none_when_no_log(self):
-        from vless_installer.modules.fragment_log_viewer import _find_xray_log
+        from chimera.modules.fragment_log_viewer import _find_xray_log
         # На продакшен-сервере /var/log/xray.log, /tmp/xray-error.log или
         # /etc/xray/config.json (с log.error путём) могут существовать —
         # патчим ВСЕ кандидаты + config.json чтобы гарантировать None.
@@ -123,25 +123,25 @@ class TestFindXrayLog(unittest.TestCase):
             if str(self) in _no_log_paths:
                 return False
             return _orig_exists(self)
-        with patch("vless_installer.modules.fragment_log_viewer._XRAY_LOG",
+        with patch("chimera.modules.fragment_log_viewer._XRAY_LOG",
                    Path("/tmp/nonexistent_log1")), \
-             patch("vless_installer.modules.fragment_log_viewer._ALT_LOG",
+             patch("chimera.modules.fragment_log_viewer._ALT_LOG",
                    Path("/tmp/nonexistent_log2")), \
              patch.object(Path, "exists", _exists):
             result = _find_xray_log()
         self.assertIsNone(result)
 
     def test_returns_first_existing_log(self):
-        from vless_installer.modules.fragment_log_viewer import _find_xray_log
+        from chimera.modules.fragment_log_viewer import _find_xray_log
         self._log.write_text("log content\n")
-        with patch("vless_installer.modules.fragment_log_viewer._XRAY_LOG", self._log), \
-             patch("vless_installer.modules.fragment_log_viewer._ALT_LOG",
+        with patch("chimera.modules.fragment_log_viewer._XRAY_LOG", self._log), \
+             patch("chimera.modules.fragment_log_viewer._ALT_LOG",
                    Path("/tmp/nonexistent_alt")):
             result = _find_xray_log()
         self.assertEqual(result, self._log)
 
     def test_skips_empty_file(self):
-        from vless_installer.modules.fragment_log_viewer import _find_xray_log
+        from chimera.modules.fragment_log_viewer import _find_xray_log
         self._log.write_text("")  # пустой
         # На проде /var/log/xray.log, /tmp/xray-error.log или config.json
         # могут существовать — патчим их exists() → False.
@@ -154,8 +154,8 @@ class TestFindXrayLog(unittest.TestCase):
             if str(self) in _no_log_paths:
                 return False
             return _orig_exists(self)
-        with patch("vless_installer.modules.fragment_log_viewer._XRAY_LOG", self._log), \
-             patch("vless_installer.modules.fragment_log_viewer._ALT_LOG",
+        with patch("chimera.modules.fragment_log_viewer._XRAY_LOG", self._log), \
+             patch("chimera.modules.fragment_log_viewer._ALT_LOG",
                    Path("/tmp/nonexistent_alt")), \
              patch.object(Path, "exists", _exists):
             result = _find_xray_log()
@@ -169,11 +169,11 @@ class TestPatterns(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_has_at_least_5_patterns(self):
-        from vless_installer.modules.fragment_log_viewer import _PATTERNS
+        from chimera.modules.fragment_log_viewer import _PATTERNS
         self.assertGreaterEqual(len(_PATTERNS), 5)
 
     def test_each_pattern_has_required_fields(self):
-        from vless_installer.modules.fragment_log_viewer import _PATTERNS
+        from chimera.modules.fragment_log_viewer import _PATTERNS
         for pat in _PATTERNS:
             with self.subTest(pattern=pat):
                 # каждый паттерн — tuple (regex, icon, color, event_label)

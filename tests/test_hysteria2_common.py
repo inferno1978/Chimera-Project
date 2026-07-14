@@ -2,7 +2,7 @@
 """
 tests/test_hysteria2_common.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для vless_installer/modules/hysteria2_common.py.
+Unit-тесты для chimera/modules/hysteria2_common.py.
 
 Покрывает:
   1. _h2_default_state — структура дефолтного state
@@ -28,7 +28,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -38,9 +38,9 @@ def _setup_core_in_sysmodules():
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
     import types
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
 
 
 class TestH2DefaultState(unittest.TestCase):
@@ -50,19 +50,19 @@ class TestH2DefaultState(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_dict(self):
-        from vless_installer.modules.hysteria2_common import _h2_default_state
+        from chimera.modules.hysteria2_common import _h2_default_state
         st = _h2_default_state()
         self.assertIsInstance(st, dict)
 
     def test_has_required_top_level_keys(self):
-        from vless_installer.modules.hysteria2_common import _h2_default_state
+        from chimera.modules.hysteria2_common import _h2_default_state
         st = _h2_default_state()
         for key in ("enabled", "transport_only", "exit_nodes", "cert",
                      "health_check", "firewall", "balancer", "auto_update"):
             self.assertIn(key, st, f"missing key: {key}")
 
     def test_enabled_is_false_by_default(self):
-        from vless_installer.modules.hysteria2_common import _h2_default_state
+        from chimera.modules.hysteria2_common import _h2_default_state
         self.assertFalse(_h2_default_state()["enabled"])
 
 
@@ -73,18 +73,18 @@ class TestIsIpv6(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_ipv4_returns_false(self):
-        from vless_installer.modules.hysteria2_common import _is_ipv6
+        from chimera.modules.hysteria2_common import _is_ipv6
         self.assertFalse(_is_ipv6("1.2.3.4"))
         self.assertFalse(_is_ipv6("192.168.1.1"))
 
     def test_ipv6_returns_true(self):
-        from vless_installer.modules.hysteria2_common import _is_ipv6
+        from chimera.modules.hysteria2_common import _is_ipv6
         self.assertTrue(_is_ipv6("::1"))
         self.assertTrue(_is_ipv6("2001:db8::1"))
         self.assertTrue(_is_ipv6("fd66:66:66::1"))
 
     def test_empty_returns_false(self):
-        from vless_installer.modules.hysteria2_common import _is_ipv6
+        from chimera.modules.hysteria2_common import _is_ipv6
         self.assertFalse(_is_ipv6(""))
 
 
@@ -95,16 +95,16 @@ class TestBracket(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_ipv4_unchanged(self):
-        from vless_installer.modules.hysteria2_common import _bracket
+        from chimera.modules.hysteria2_common import _bracket
         self.assertEqual(_bracket("1.2.3.4"), "1.2.3.4")
 
     def test_ipv6_wrapped(self):
-        from vless_installer.modules.hysteria2_common import _bracket
+        from chimera.modules.hysteria2_common import _bracket
         self.assertEqual(_bracket("2001:db8::1"), "[2001:db8::1]")
         self.assertEqual(_bracket("::1"), "[::1]")
 
     def test_already_bracketed_unchanged(self):
-        from vless_installer.modules.hysteria2_common import _bracket
+        from chimera.modules.hysteria2_common import _bracket
         self.assertEqual(_bracket("[2001:db8::1]"), "[2001:db8::1]")
 
 
@@ -121,28 +121,28 @@ class TestLoadSaveState(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.hysteria2_common.STATE_FILE", self._state)
+        return patch("chimera.modules.hysteria2_common.STATE_FILE", self._state)
 
     def test_load_returns_empty_when_no_file(self):
-        from vless_installer.modules.hysteria2_common import _load_state
+        from chimera.modules.hysteria2_common import _load_state
         with self._patch():
             self.assertEqual(_load_state(), {})
 
     def test_load_returns_empty_on_corrupt(self):
-        from vless_installer.modules.hysteria2_common import _load_state
+        from chimera.modules.hysteria2_common import _load_state
         self._state.write_text("{invalid")
         with self._patch():
             self.assertEqual(_load_state(), {})
 
     def test_load_returns_state(self):
-        from vless_installer.modules.hysteria2_common import _load_state
+        from chimera.modules.hysteria2_common import _load_state
         self._state.write_text(json.dumps({"hysteria2": {"enabled": True}}))
         with self._patch():
             st = _load_state()
         self.assertTrue(st["hysteria2"]["enabled"])
 
     def test_save_writes_json(self):
-        from vless_installer.modules.hysteria2_common import _save_state, _load_state
+        from chimera.modules.hysteria2_common import _save_state, _load_state
         with self._patch():
             _save_state({"hysteria2": {"enabled": True}})
             loaded = _load_state()
@@ -162,15 +162,15 @@ class TestLoadSaveH2State(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.hysteria2_common.STATE_FILE", self._state)
+        return patch("chimera.modules.hysteria2_common.STATE_FILE", self._state)
 
     def test_load_h2_returns_empty_when_no_section(self):
-        from vless_installer.modules.hysteria2_common import _load_h2_state
+        from chimera.modules.hysteria2_common import _load_h2_state
         with self._patch():
             self.assertEqual(_load_h2_state(), {})
 
     def test_load_h2_returns_section(self):
-        from vless_installer.modules.hysteria2_common import _load_h2_state
+        from chimera.modules.hysteria2_common import _load_h2_state
         self._state.write_text(json.dumps({"hysteria2": {"enabled": True, "port": 8443}}))
         with self._patch():
             h2 = _load_h2_state()
@@ -178,7 +178,7 @@ class TestLoadSaveH2State(unittest.TestCase):
         self.assertEqual(h2["port"], 8443)
 
     def test_save_h2_preserves_other_keys(self):
-        from vless_installer.modules.hysteria2_common import (
+        from chimera.modules.hysteria2_common import (
             _save_h2_state, _load_h2_state, _load_state,
         )
         self._state.write_text(json.dumps({"uuid": "abc", "domain": "x.com"}))
@@ -203,10 +203,10 @@ class TestEnsureH2State(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("vless_installer.modules.hysteria2_common.STATE_FILE", self._state)
+        return patch("chimera.modules.hysteria2_common.STATE_FILE", self._state)
 
     def test_creates_default_when_missing(self):
-        from vless_installer.modules.hysteria2_common import _ensure_h2_state
+        from chimera.modules.hysteria2_common import _ensure_h2_state
         with self._patch():
             h2 = _ensure_h2_state()
         self.assertIn("enabled", h2)
@@ -214,7 +214,7 @@ class TestEnsureH2State(unittest.TestCase):
         self.assertTrue(self._state.exists())
 
     def test_returns_existing_when_present(self):
-        from vless_installer.modules.hysteria2_common import _ensure_h2_state
+        from chimera.modules.hysteria2_common import _ensure_h2_state
         self._state.write_text(json.dumps({"hysteria2": {"enabled": True, "custom": "x"}}))
         with self._patch():
             h2 = _ensure_h2_state()
@@ -229,8 +229,8 @@ class TestH2BinaryExists(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_returns_false_when_no_binary(self):
-        from vless_installer.modules.hysteria2_common import _h2_binary_exists
-        with patch("vless_installer.modules.hysteria2_common.H2_BINARY",
+        from chimera.modules.hysteria2_common import _h2_binary_exists
+        with patch("chimera.modules.hysteria2_common.H2_BINARY",
                    Path("/tmp/nonexistent_h2_binary")):
             self.assertFalse(_h2_binary_exists())
 

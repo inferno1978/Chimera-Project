@@ -2,7 +2,7 @@
 """
 tests/test_rest_api_auth.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для auth-функций из vless_installer/modules/rest_api.py
+Unit-тесты для auth-функций из chimera/modules/rest_api.py
 (класс _VLESSHandler).
 
 Покрывает (только auth — НЕ пересекается с test_rest_api.py, который тестирует
@@ -35,7 +35,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _setup_core_in_sysmodules():
     """Эталонный паттерн из tests/test_health.py."""
-    core_path = _PROJECT_ROOT / "vless_installer" / "_core.py"
+    core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -44,9 +44,9 @@ def _setup_core_in_sysmodules():
          patch('os.chown', lambda *a, **kw: None), \
          patch('os.geteuid', return_value=0):
         exec(compile(src, str(core_path), "exec"), g)
-    fake_core = types.ModuleType("vless_installer._core")
+    fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
-    sys.modules["vless_installer._core"] = fake_core
+    sys.modules["chimera._core"] = fake_core
     return fake_core
 
 
@@ -64,7 +64,7 @@ def _make_handler(headers: dict = None, client_ip: str = "1.2.3.4"):
     BaseHTTPRequestHandler), чтобы методы _check_admin_auth/_is_rate_limited/
     _require_admin и т.д. работали как настоящие bound methods.
     """
-    from vless_installer.modules.rest_api import _VLESSHandler
+    from chimera.modules.rest_api import _VLESSHandler
 
     class _StubHandler(_VLESSHandler):
         # Не вызываем BaseHTTPRequestHandler.__init__ — он требует сокет и
@@ -89,11 +89,11 @@ class TestCheckAdminAuth(unittest.TestCase):
     def setUp(self):
         _setup_core_in_sysmodules()
         # Очищаем rate-limit лог между тестами
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         rest_api._AUTH_FAIL_LOG.clear()
 
     def test_returns_true_with_correct_credentials(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({
             "Authorization": _basic_auth_header("admin", "s3cret"),
         })
@@ -104,7 +104,7 @@ class TestCheckAdminAuth(unittest.TestCase):
         self.assertTrue(result)
 
     def test_returns_false_with_wrong_password(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({
             "Authorization": _basic_auth_header("admin", "wrong"),
         })
@@ -115,7 +115,7 @@ class TestCheckAdminAuth(unittest.TestCase):
         self.assertFalse(result)
 
     def test_returns_false_with_wrong_username(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({
             "Authorization": _basic_auth_header("root", "s3cret"),
         })
@@ -126,7 +126,7 @@ class TestCheckAdminAuth(unittest.TestCase):
         self.assertFalse(result)
 
     def test_returns_false_when_no_auth_header(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({})
         with patch.object(rest_api, "_web_config_load",
                           return_value={"admin_user": "admin",
@@ -136,7 +136,7 @@ class TestCheckAdminAuth(unittest.TestCase):
 
     def test_returns_false_when_not_basic_auth(self):
         """Bearer-токен не принимается."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({"Authorization": "Bearer xyz123"})
         with patch.object(rest_api, "_web_config_load",
                           return_value={"admin_user": "admin",
@@ -145,7 +145,7 @@ class TestCheckAdminAuth(unittest.TestCase):
         self.assertFalse(result)
 
     def test_returns_false_when_invalid_base64(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({"Authorization": "Basic !!!invalid_base64!!!"})
         with patch.object(rest_api, "_web_config_load",
                           return_value={"admin_user": "admin",
@@ -155,7 +155,7 @@ class TestCheckAdminAuth(unittest.TestCase):
 
     def test_returns_false_when_admin_pass_empty(self):
         """Если admin_pass в конфиге пустой — отказ (даже при верных остальных полях)."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({
             "Authorization": _basic_auth_header("admin", ""),
         })
@@ -167,7 +167,7 @@ class TestCheckAdminAuth(unittest.TestCase):
 
     def test_returns_false_when_web_config_empty(self):
         """Пустой web_config → defaults: admin_user='admin', admin_pass='' → False."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({
             "Authorization": _basic_auth_header("admin", ""),
         })
@@ -177,7 +177,7 @@ class TestCheckAdminAuth(unittest.TestCase):
 
     def test_password_with_colon_partition_works(self):
         """Пароль с двоеточием — partition берёт только первое ':'."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         # user='admin', password='pass:with:colons'
         h = _make_handler({
             "Authorization": _basic_auth_header("admin", "pass:with:colons"),
@@ -190,7 +190,7 @@ class TestCheckAdminAuth(unittest.TestCase):
 
     def test_default_admin_user_is_admin(self):
         """Если в конфиге нет admin_user — default 'admin'."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({
             "Authorization": _basic_auth_header("admin", "pass"),
         })
@@ -209,11 +209,11 @@ class TestCheckUserAuth(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         rest_api._AUTH_FAIL_LOG.clear()
 
     def test_returns_user_dict_when_matching_name(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         user = {"name": "alice", "email": "alice@example.com",
                 "portal_password": "alice_pw", "uuid": "u1"}
         h = _make_handler({
@@ -224,7 +224,7 @@ class TestCheckUserAuth(unittest.TestCase):
         self.assertEqual(result, user)
 
     def test_returns_user_dict_when_matching_email(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         user = {"name": "alice", "email": "alice@example.com",
                 "portal_password": "alice_pw", "uuid": "u1"}
         h = _make_handler({
@@ -235,7 +235,7 @@ class TestCheckUserAuth(unittest.TestCase):
         self.assertEqual(result, user)
 
     def test_returns_none_when_wrong_password(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         user = {"name": "alice", "email": "alice@example.com",
                 "portal_password": "alice_pw", "uuid": "u1"}
         h = _make_handler({
@@ -246,7 +246,7 @@ class TestCheckUserAuth(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_returns_none_when_user_not_found(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({
             "Authorization": _basic_auth_header("nobody", "pw"),
         })
@@ -257,14 +257,14 @@ class TestCheckUserAuth(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_returns_none_when_no_basic_header(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({})
         with patch.object(rest_api, "_get_users", return_value=[]):
             result = rest_api._VLESSHandler._check_user_auth(h)
         self.assertIsNone(result)
 
     def test_returns_none_when_invalid_base64(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({"Authorization": "Basic !!!invalid!!!"})
         with patch.object(rest_api, "_get_users", return_value=[]):
             result = rest_api._VLESSHandler._check_user_auth(h)
@@ -273,7 +273,7 @@ class TestCheckUserAuth(unittest.TestCase):
     def test_returns_none_when_portal_password_empty(self):
         """Регрессия: пользователь найден, но portal_password пустой → None
         (раньше был fallback на uuid — убран намеренно)."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         user = {"name": "alice", "email": "alice@example.com",
                 "portal_password": "",  # пустой!
                 "uuid": "u1"}
@@ -286,7 +286,7 @@ class TestCheckUserAuth(unittest.TestCase):
 
     def test_first_match_wins_when_duplicate_names(self):
         """Несколько пользователей с одним name — выигрывает первый."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         u1 = {"name": "alice", "email": "alice1@x",
               "portal_password": "pw1", "uuid": "u1"}
         u2 = {"name": "alice", "email": "alice2@x",
@@ -300,7 +300,7 @@ class TestCheckUserAuth(unittest.TestCase):
 
     def test_password_with_colon_partition_works(self):
         """Пароль с двоеточием — partition берёт только первое ':'."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         user = {"name": "alice", "email": "a@x",
                 "portal_password": "pw:with:colons", "uuid": "u1"}
         h = _make_handler({
@@ -319,24 +319,24 @@ class TestIsRateLimited(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         rest_api._AUTH_FAIL_LOG.clear()
 
     def test_returns_false_when_log_empty(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler(client_ip="1.1.1.1")
         self.assertFalse(rest_api._VLESSHandler._is_rate_limited(h))
 
     def test_returns_false_below_threshold(self):
         """9 попыток за 60с — НЕ rate-limited."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         rest_api._AUTH_FAIL_LOG["1.1.1.1"] = [time.time() - i for i in range(9)]
         h = _make_handler(client_ip="1.1.1.1")
         self.assertFalse(rest_api._VLESSHandler._is_rate_limited(h))
 
     def test_returns_true_at_threshold(self):
         """10 попыток за 60с, последняя <30с назад → rate-limited."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         now = time.time()
         rest_api._AUTH_FAIL_LOG["1.1.1.1"] = [now - i for i in range(10)]
         h = _make_handler(client_ip="1.1.1.1")
@@ -344,7 +344,7 @@ class TestIsRateLimited(unittest.TestCase):
 
     def test_returns_false_when_reject_window_expired(self):
         """10 попыток, но последняя >30с назад → НЕ rate-limited (отклон истёк)."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         now = time.time()
         # 10 попыток в течение 60с, но последняя была 35с назад
         rest_api._AUTH_FAIL_LOG["1.1.1.1"] = [now - 35 - i for i in range(10)]
@@ -353,7 +353,7 @@ class TestIsRateLimited(unittest.TestCase):
 
     def test_returns_false_when_attempts_outside_window(self):
         """Попытки старше 60с — выкидываются."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         now = time.time()
         # 5 свежих + 5 старых (>60с) — должно остаться 5, не rate-limited
         rest_api._AUTH_FAIL_LOG["1.1.1.1"] = (
@@ -365,7 +365,7 @@ class TestIsRateLimited(unittest.TestCase):
 
     def test_rate_limit_isolated_by_ip(self):
         """10 попыток от IP '1.1.1.1' не блокируют IP '2.2.2.2'."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         now = time.time()
         rest_api._AUTH_FAIL_LOG["1.1.1.1"] = [now - i for i in range(10)]
         h2 = _make_handler(client_ip="2.2.2.2")
@@ -373,7 +373,7 @@ class TestIsRateLimited(unittest.TestCase):
 
     def test_unknown_ip_returns_question_mark(self):
         """client_address=None → IP становится '?' — отдельный bucket."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler(client_ip=None)
         # 10 попыток от '?'
         rest_api._AUTH_FAIL_LOG["?"] = [time.time() - i for i in range(10)]
@@ -388,11 +388,11 @@ class TestRecordAuthFailure(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         rest_api._AUTH_FAIL_LOG.clear()
 
     def test_appends_timestamp_to_log(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler(client_ip="1.1.1.1")
         before = time.time()
         rest_api._VLESSHandler._record_auth_failure(h)
@@ -404,7 +404,7 @@ class TestRecordAuthFailure(unittest.TestCase):
         self.assertLessEqual(ts, after)
 
     def test_multiple_appends_accumulate(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler(client_ip="1.1.1.1")
         for _ in range(5):
             rest_api._VLESSHandler._record_auth_failure(h)
@@ -412,7 +412,7 @@ class TestRecordAuthFailure(unittest.TestCase):
 
     def test_cleans_up_old_entries(self):
         """Записи старше AUTH_FAIL_WINDOW выкидываются при следующей записи."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         rest_api._AUTH_FAIL_LOG["1.1.1.1"] = [time.time() - 100]  # 100с назад
         h = _make_handler(client_ip="1.1.1.1")
         rest_api._VLESSHandler._record_auth_failure(h)
@@ -420,7 +420,7 @@ class TestRecordAuthFailure(unittest.TestCase):
         self.assertEqual(len(rest_api._AUTH_FAIL_LOG["1.1.1.1"]), 1)
 
     def test_isolates_ips(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h1 = _make_handler(client_ip="1.1.1.1")
         h2 = _make_handler(client_ip="2.2.2.2")
         rest_api._VLESSHandler._record_auth_failure(h1)
@@ -439,11 +439,11 @@ class TestRequireAdmin(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         rest_api._AUTH_FAIL_LOG.clear()
 
     def test_returns_true_when_auth_succeeds(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({
             "Authorization": _basic_auth_header("admin", "s3cret"),
         })
@@ -457,7 +457,7 @@ class TestRequireAdmin(unittest.TestCase):
         h.wfile.write.assert_not_called()
 
     def test_returns_false_and_sends_401_when_auth_fails(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({
             "Authorization": _basic_auth_header("admin", "wrong"),
         })
@@ -477,7 +477,7 @@ class TestRequireAdmin(unittest.TestCase):
 
     def test_returns_false_and_sends_429_when_rate_limited(self):
         """10 неудач → следующий запрос получает 429, _record_auth_failure НЕ вызывается."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         rest_api._AUTH_FAIL_LOG["1.2.3.4"] = [time.time() - i for i in range(10)]
         h = _make_handler({
             "Authorization": _basic_auth_header("admin", "s3cret"),
@@ -497,7 +497,7 @@ class TestRequireAdmin(unittest.TestCase):
         self.assertEqual(len(rest_api._AUTH_FAIL_LOG["1.2.3.4"]), 10)
 
     def test_default_realm_is_admin(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({})  # нет auth
         with patch.object(rest_api, "_web_config_load",
                           return_value={"admin_user": "admin",
@@ -517,11 +517,11 @@ class TestRequireUser(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         rest_api._AUTH_FAIL_LOG.clear()
 
     def test_returns_user_dict_when_auth_succeeds(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         user = {"name": "alice", "email": "a@x",
                 "portal_password": "pw", "uuid": "u1"}
         h = _make_handler({
@@ -533,7 +533,7 @@ class TestRequireUser(unittest.TestCase):
         h.send_response.assert_not_called()
 
     def test_returns_none_and_sends_401_when_user_not_found(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler({
             "Authorization": _basic_auth_header("nobody", "pw"),
         })
@@ -548,7 +548,7 @@ class TestRequireUser(unittest.TestCase):
         self.assertIn("1.2.3.4", rest_api._AUTH_FAIL_LOG)
 
     def test_returns_none_and_sends_429_when_rate_limited(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         rest_api._AUTH_FAIL_LOG["1.2.3.4"] = [time.time() - i for i in range(10)]
         user = {"name": "alice", "email": "a@x",
                 "portal_password": "pw", "uuid": "u1"}
@@ -564,7 +564,7 @@ class TestRequireUser(unittest.TestCase):
 
     def test_returns_none_when_portal_password_empty(self):
         """Регрессия: пользователь найден, но portal_password='' → 401."""
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         user = {"name": "alice", "email": "a@x",
                 "portal_password": "", "uuid": "u1"}
         h = _make_handler({
@@ -586,7 +586,7 @@ class TestSendErrorResponses(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_send_401_includes_www_authenticate_header(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler()
         rest_api._VLESSHandler._send_401(h, realm="Test Realm")
         h.send_response.assert_called_with(401)
@@ -600,7 +600,7 @@ class TestSendErrorResponses(unittest.TestCase):
         self.assertIn(b"Unauthorized", body)
 
     def test_send_429_includes_retry_after_header(self):
-        from vless_installer.modules import rest_api
+        from chimera.modules import rest_api
         h = _make_handler()
         rest_api._VLESSHandler._send_429(h)
         h.send_response.assert_called_with(429)
