@@ -2,7 +2,7 @@
 # ============================================================
 #  Chimera Project v5.0.0 — Bootstrap
 #  Multi-Protocol Anti-DPI Installer
-#  bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
+#  bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
 # ============================================================
 set -euo pipefail
 
@@ -34,7 +34,7 @@ echo -e "${NC}"
 echo -e "${BOLD}[1/5] Проверка прав${NC}"
 if [[ $EUID -ne 0 ]]; then
     err "Требуются права root"
-    echo -e "     ${YELLOW}sudo bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)${NC}"
+    echo -e "     ${YELLOW}sudo bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)${NC}"
     exit 1
 fi
 ok "root: OK"
@@ -85,8 +85,8 @@ fi
 # [4] Загрузка / обновление
 echo -e "\n${BOLD}[4/5] Загрузка Chimera Project${NC}"
 INSTALL_DIR="/opt/chimera"
-REPO_URL="https://github.com/inferno1978/Chimera-Project"
-BRANCH="main"
+REPO_URL="https://gitlab.com/netwalker071778/chimera-project"
+BRANCH="chimera-v5"
 
 # Ищем существующую установку в стандартных системных путях.
 # ВАЖНО: домашние директории разработчиков НЕ проверяем — это личные пути,
@@ -164,7 +164,7 @@ _archive_update() {
 
     # --- Stage 3: Find extracted dir + verify key files ---
     local _extracted=""
-    for _d in "${_staging}/Chimera-Project-${BRANCH}" "${_staging}/VLESS-Ultimate-Installer-${BRANCH}"; do
+    for _d in "${_staging}/chimera-project-${BRANCH}" "${_staging}/Chimera-Project-${BRANCH}" "${_staging}/VLESS-Ultimate-Installer-${BRANCH}"; do
         if [[ -d "$_d" ]]; then _extracted="$_d"; break; fi
     done
     if [[ -z "$_extracted" ]]; then
@@ -273,11 +273,11 @@ else
             rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
             if curl -fsSL --connect-timeout 30 --retry 3 -o "$_CLONE_TMP" "$_ARCHIVE_URL" 2>/dev/null || \
                curl -fsSL --connect-timeout 30 --retry 3 -o "$_CLONE_TMP" \
-                 "https://github.com/inferno1978/VLESS-Ultimate-Installer/archive/refs/heads/${BRANCH}.tar.gz" 2>/dev/null; then
+                 "https://gitlab.com/netwalker071778/chimera-project/-/archive/chimera-v5/chimera-project-chimera-v5.tar.gz" 2>/dev/null; then
                 mkdir -p "$_CLONE_STAGING"
                 if tar -xzf "$_CLONE_TMP" -C "$_CLONE_STAGING" 2>/dev/null; then
                     _extracted=""
-                    for _d in "${_CLONE_STAGING}/Chimera-Project-${BRANCH}" "${_CLONE_STAGING}/VLESS-Ultimate-Installer-${BRANCH}"; do
+                    for _d in "${_CLONE_STAGING}/chimera-project-${BRANCH}" "${_CLONE_STAGING}/Chimera-Project-${BRANCH}" "${_CLONE_STAGING}/VLESS-Ultimate-Installer-${BRANCH}"; do
                         if [[ -d "$_d" ]]; then _extracted="$_d"; break; fi
                     done
                     if [[ -n "$_extracted" ]] && [[ -f "${_extracted}/main.py" ]]; then
