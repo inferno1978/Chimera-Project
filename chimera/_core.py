@@ -8000,6 +8000,13 @@ def _load_state_into_globals() -> None:
     global H2_EXIT_ENABLED
     global XTLS_FLOW
     global PARAM_FINGERPRINT
+    # FIX: PARAM_SOCKET_PATH и PARAM_SPIDERX раньше не загружались из state,
+    # хотя сохраняются туда (см. _save_state: "socket" / "spiderx"). Это
+    # приводило к пустому dest/spiderX в generate_xray_config() при вызове
+    # rebuild через меню (пункт 5b) — Xray падал с 'please fill in a valid
+    # value for "target"'. При do_full_install() эти поля устанавливались в
+    # процессе установки, поэтому баг не проявлялся.
+    global PARAM_SOCKET_PATH, PARAM_SPIDERX
     # === FIX 1: объявление глобалей для multi-node полей ===
     global AWG_NODES, AWG_ACTIVE_NODE_INDEX, _AWG_SSH_CLIENT_IP
     # === END FIX 1 ===
@@ -8069,6 +8076,11 @@ def _load_state_into_globals() -> None:
         AWG_EXIT_PORT    = state.get("awg_exit_port",     AWG_EXIT_PORT)
         AWG_CLIENT_LISTEN_PORT = state.get("awg_client_listen_port", AWG_CLIENT_LISTEN_PORT)
         PARAM_REALITY_DEST = state.get("reality_dest",   PARAM_REALITY_DEST)
+        # FIX: загружаем socket_path и spiderx из state — раньше не делалось,
+        # что ломало generate_xray_config() при rebuild через пункт меню 5b
+        # (получали dest="", spiderX="" → Xray валидация падала).
+        PARAM_SOCKET_PATH = state.get("socket",  PARAM_SOCKET_PATH)
+        PARAM_SPIDERX     = state.get("spiderx", PARAM_SPIDERX)
         # Hysteria2 транспорт
         H2_EXIT_ENABLED  = state.get("h2_exit_enabled",  False)
         # === FIX 1: загрузка multi-node полей ===
