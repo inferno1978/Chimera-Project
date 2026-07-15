@@ -9,14 +9,12 @@
 # SHA256 этого файла публикуется в bootstrap.sh.sha256 (рядом).
 # Проверить целостность перед запуском:
 #
-#   curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh -o /tmp/bs.sh
-#   curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh.sha256 -o /tmp/bs.sha256
-#   cd /tmp && sha256sum -c bs.sha256
+#   curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh -o /tmp/bootstrap.sh
+#   curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh.sha256 -o /tmp/bootstrap.sh.sha256
+#   cd /tmp && sha256sum -c bootstrap.sh.sha256
 #
-# Или одной командой:
-#   curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh -o /tmp/bs.sh && \
-#     sha256sum /tmp/bs.sh | diff - <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh.sha256) && \
-#     echo "✓ Integrity OK" || echo "✗ MISMATCH — не запускать!"
+# Или одной командой (без зависимости от имени файла):
+#   [ "$(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh | sha256sum | awk '{print $1}')" = "$(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh.sha256 | awk '{print $1}')" ] && echo "OK" || echo "MISMATCH"
 #
 # SHA256 генерируется автоматически при каждом коммите (pre-commit hook).
 # ────────────────────────────────────────────────────────────────
