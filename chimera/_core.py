@@ -2833,6 +2833,85 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
             info("nginx перезапущен, Unix-сокет готов")
 
 
+def do_rebuild_xray_config() -> None:
+    """Перегенерировать /etc/xray/config.json из state.json без переустановки.
+
+    Полезно когда:
+      • Обновился Xray-core до новой мажорной версии и в код инсталлятора добавили
+        новые обязательные поля (например minClientVer для Xray 26.7.11+).
+        В уже существующем config.json этих полей нет, а полная переустановка
+        не нужна — нужен только rebuild конфига.
+      • Конфиг был повреждён / частично изменён вручную и нужно вернуть его
+        к каноническому виду с сохранением всех параметров из state.json.
+
+    Делает:
+      1. Бэкап текущего /etc/xray/config.json (через backup_xray_config()).
+      2. Загружает state.json в глобали (PARAM_DOMAIN, PARAM_PRIVATE_KEY и т.д.).
+      3. Вызывает _rebuild_and_restart_xray() — та сама пересоздаёт конфиг
+         (через generate_xray_config / generate_xray_config_xhttp /
+         generate_xray_config_chain_entry_multi в зависимости от режима),
+         восстанавливает пользователей / RIPE-правила / Telemt / PQ-VLESS /
+         server-fragment / SNI-dispatch и перезапускает Xray + Nginx.
+
+    Точки входа:
+        Вызывается из _menu_install_system() — пункт "5b".
+    """
+    print()
+    _box_top("🔧  Перегенерация конфига Xray")
+    _box_row()
+    _box_row(f"  Пересоздаёт {CYAN}/etc/xray/config.json{NC} из {CYAN}state.json{NC}")
+    _box_row(f"  с текущими параметрами (домен, ключи REALITY, UUID).")
+    _box_row()
+    _box_row(f"  Применение — добавить поля, которых нет в старом конфиге,")
+    _box_row(f"  но которые теперь обязательны (напр. {BOLD}minClientVer{NC} для Xray 26.7.11+).")
+    _box_row()
+    _box_row(f"  {YELLOW}⚠  Текущий config.json будет забэкаплен и заменён.{NC}")
+    _box_row(f"  {DIM}Пользователи, RIPE-правила, Telemt tproxy, PQ-VLESS, fragment{NC}")
+    _box_row(f"  {DIM}будут восстановлены автоматически.{NC}")
+    _box_row()
+    _box_bottom()
+    try:
+        ans = input(f"{CYAN}Перегенерировать конфиг? [y/N]:{NC} ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        ans = ""
+    if ans != "y":
+        info("Отменено.")
+        return
+
+    if not STATE_FILE.exists():
+        warn(f"state.json не найден ({STATE_FILE}) — сначала выполните установку (пункт 1).")
+        return
+
+    _load_state_into_globals()
+    info("Параметры загружены из state.json.")
+    info(f"  Режим: {INSTALL_MODE}, протокол: {PROTOCOL_MODE}, домен: {PARAM_DOMAIN}")
+
+    # _rebuild_and_restart_xray() внутри делает бэкап, регенерацию, восстановление
+    # пользователей/RIPE/Telemt/PQ-VLESS/fragment/SNI-dispatch и рестарт Xray+Nginx.
+    try:
+        _rebuild_and_restart_xray("Xray перезапущен — конфиг перегенерирован")
+    except Exception as e:
+        warn(f"Ошибка перегенерации: {e}")
+        warn(f"Восстановите из бэкапа: ls /var/backups/xray/configs/")
+        return
+
+    # Показать что minClientVer действительно появился (если REALITY-режим)
+    if PROTOCOL_MODE == "reality" and PROTOCOL_MODE != "xhttp":
+        try:
+            cfg = json.loads((CONFIG_DIR / "config.json").read_text())
+            for ib in cfg.get("inbounds", []):
+                rs = ib.get("streamSettings", {}).get("realitySettings", {})
+                if rs:
+                    mcv = rs.get("minClientVer", "")
+                    if mcv:
+                        success(f"minClientVer = {mcv}  ✓  (совместимость с Xray 26.7.11+)")
+                    else:
+                        warn("minClientVer отсутствует — проверьте generate_xray_config()")
+                    break
+        except Exception:
+            pass
+
+
 # (Chain/Nodes — do_manage_nodes — вынесены в
 #  chimera.modules.chain_nodes; импорт — в верхней секции этого файла.)
 
@@ -6405,6 +6484,7 @@ def _menu_install_system() -> None:
         _box_item("3", f"📦 Миграция  {DIM}(Экспорт / Импорт конфигурации){NC}")
         _box_item("4", f"⚡ Оптимизация системы  {DIM}(Sysctl / Limits){NC}")
         _box_item("5", "🔧 Обновить Xray-core")
+        _box_item("5b", f"♻️  Перегенерировать конфиг Xray  {DIM}(из state.json, с minClientVer для 26.7.11+){NC}")
         _box_item("6", f"🛠️  Аварийное восстановление  {DIM}(из state.json, без переустановки){NC}")
         _box_item("7", "🗑️  Удалить установку")
         _box_item("8", "🧪 Запустить unit-тесты")
@@ -6433,6 +6513,9 @@ def _menu_install_system() -> None:
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "5":
             do_xray_update_interactive()
+            input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "5b":
+            do_rebuild_xray_config()
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "6":
             do_emergency_repair()
