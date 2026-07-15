@@ -4,6 +4,22 @@
 #  Multi-Protocol Anti-DPI Installer
 #  bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
 # ============================================================
+#
+# ─── INTEGRITY VERIFICATION ─────────────────────────────────────
+# SHA256 этого файла публикуется в bootstrap.sh.sha256 (рядом).
+# Проверить целостность перед запуском:
+#
+#   curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh -o /tmp/bs.sh
+#   curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh.sha256 -o /tmp/bs.sha256
+#   cd /tmp && sha256sum -c bs.sha256
+#
+# Или одной командой:
+#   curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh -o /tmp/bs.sh && \
+#     sha256sum /tmp/bs.sh | diff - <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh.sha256) && \
+#     echo "✓ Integrity OK" || echo "✗ MISMATCH — не запускать!"
+#
+# SHA256 генерируется автоматически при каждом коммите (pre-commit hook).
+# ────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 # Сброс системного прокси перед загрузкой — защита от сломанных окружений,
