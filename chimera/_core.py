@@ -574,6 +574,81 @@ log_to_file("INFO", f"Время начала: {datetime.now()}")
 # =============================================================================
 #  БАННЕР
 # =============================================================================
+
+# ── Поддержка цвета в терминале ──────────────────────────────────────────────
+# Уважаем стандарт de-facto для современных CLI:
+#   - NO_COLOR (https://no-color.org/) — явный запрет цвета
+#   - TERM=dumb — терминал без ANSI
+#   - не TTY (перенаправление в файл/пайп) — цвет только засоряет вывод
+# На Windows 10 1607+ / Windows Terminal / PowerShell 7+ ANSI поддерживается
+# из коробки без всякой инициализации, поэтому отдельный код не нужен.
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+
+def _ansi_supported() -> bool:
+    """Возвращает True, если текущий stdout способен отображать ANSI-цвета."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("TERM", "") == "dumb":
+        return False
+    if not sys.stdout.isatty():
+        return False
+    return True
+
+
+def _gradient_rgb(t: float) -> tuple:
+    """Возвращает RGB-цвет (R,G,B) для параметра t ∈ [0.0, 1.0].
+    Палитра: фиолетовый → голубой → зелёный → жёлтый → оранжевый → красный.
+    Truecolor (24-bit) — поддерживается в Windows Terminal, PowerShell 7+,
+    cmd.exe на Win10 1607+, iTerm2, GNOME Terminal, kitty и др.
+    """
+    # Контрольные точки палитры (R, G, B)
+    stops = [
+        (138,  43, 226),  # фиолетовый  (BlueViolet)
+        ( 30, 144, 255),  # голубой     (DodgerBlue)
+        (  0, 200, 120),  # зелёный
+        (255, 215,   0),  # жёлтый      (Gold)
+        (255, 140,   0),  # оранжевый   (DarkOrange)
+        (220,  40,  60),  # красный     (Crimson)
+    ]
+    if t <= 0.0:
+        return stops[0]
+    if t >= 1.0:
+        return stops[-1]
+    seg = t * (len(stops) - 1)
+    i = int(seg)
+    frac = seg - i
+    r1, g1, b1 = stops[i]
+    r2, g2, b2 = stops[i + 1]
+    return (
+        int(r1 + (r2 - r1) * frac),
+        int(g1 + (g2 - g1) * frac),
+        int(b1 + (b2 - b1) * frac),
+    )
+
+
+def _colorize_gradient(text: str) -> str:
+    """Применяет горизонтальный truecolor-градиент к строке.
+    Каждый символ получает свой цвет по позиции. Если цвет не поддерживается —
+    возвращает строку как есть.
+    """
+    if not _ansi_supported() or not text:
+        return text
+    out = []
+    n = len(text) - 1
+    for i, ch in enumerate(text):
+        t = i / n if n > 0 else 0.0
+        r, g, b = _gradient_rgb(t)
+        out.append(f"\033[38;2;{r};{g};{b}m{ch}")
+    out.append("\033[0m")
+    return "".join(out)
+
+
+def _visible_len(s: str) -> int:
+    """Длина строки без учёта ANSI escape-последовательностей."""
+    return len(_ANSI_RE.sub('', s))
+
+
 def _make_banner(show_ram_warning: bool = True) -> str:
     _OW = 67   # внутренняя ширина внешней рамки (CHIMERA ansi_shadow art=54, info=59 → max+pad)
     _IW = _OW - 6  # внутренняя ширина вложенной рамки (61)
@@ -582,8 +657,14 @@ def _make_banner(show_ram_warning: bool = True) -> str:
     _bot    = "╚" + "═" * _OW + "╝"
     _itop   = "║  ╔" + "═" * _IW + "╗  ║"
     _ibot   = "║  ╚" + "═" * _IW + "╝  ║"
+
     def _art(a):
-        return "║  " + a + " " * (_OW - 2 - len(a)) + "║"
+        # Применяем градиент к ASCII-арту CHIMERA. После этого строка
+        # содержит ANSI-коды, поэтому длину считаем по видимым символам.
+        colored = _colorize_gradient(a)
+        pad = _OW - 2 - _visible_len(colored)
+        return "║  " + colored + " " * max(pad, 0) + "║"
+
     def _irow(t):
         return "║  ║ " + t + " " * (_OW - 8 - len(t)) + " ║  ║"
     _art_lines = [
