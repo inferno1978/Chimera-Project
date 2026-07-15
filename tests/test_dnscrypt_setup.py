@@ -131,7 +131,7 @@ class TestDnscryptSpecSanity(unittest.TestCase):
         self.assertIsNotNone(DNSCRYPT_SPEC.post_install)
 
     def test_mirror_urls_has_14_entries(self):
-        """Сценарий 2: 14 зеркал для fallback."""
+        """Сценарий 2: 14 зеркал для fallback (4 jsDelivr + raw + release + 7 proxy + Statically)."""
         from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
         urls = DNSCRYPT_SPEC.mirror_urls_builder(
             filename="dnscrypt-proxy-linux_x86_64-2.1.5.tar.gz",
