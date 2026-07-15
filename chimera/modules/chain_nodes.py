@@ -594,6 +594,10 @@ def generate_xray_config_chain_entry() -> None:
                     "privateKey":  PARAM_PRIVATE_KEY,
                     "publicKey":   PARAM_PUBLIC_KEY,
                     "shortIds":    [PARAM_SHORTID],
+                    # Xray-core 26.7.11+ ужесточил проверку REALITY-клиента.
+                    # Mihomo / sing-box / старые Xray-клиенты НЕ проходят авторизацию
+                    # без этого поля. См. https://github.com/XTLS/REALITY/blob/main/README.md
+                    "minClientVer": "1.0.0",
                 },
             },
         }
@@ -831,6 +835,10 @@ def _make_exit_node_config(nd: dict) -> dict:
                     "privateKey":  "<ВСТАВЬТЕ_PRIVATE_KEY_EXIT_NODE>",
                     "publicKey":   nd["pubkey"],
                     "shortIds":    [nd["shortid"]],
+                    # Xray-core 26.7.11+ ужесточил проверку REALITY-клиента.
+                    # Mihomo / sing-box / старые Xray-клиенты НЕ проходят авторизацию
+                    # без этого поля. См. https://github.com/XTLS/REALITY/blob/main/README.md
+                    "minClientVer": "1.0.0",
                 },
             },
         }
@@ -1956,6 +1964,10 @@ def generate_xray_config_chain_entry_multi() -> None:
                     "privateKey":  PARAM_PRIVATE_KEY,
                     "publicKey":   PARAM_PUBLIC_KEY,
                     "shortIds":    [PARAM_SHORTID],
+                    # Xray-core 26.7.11+ ужесточил проверку REALITY-клиента.
+                    # Mihomo / sing-box / старые Xray-клиенты НЕ проходят авторизацию
+                    # без этого поля. См. https://github.com/XTLS/REALITY/blob/main/README.md
+                    "minClientVer": "1.0.0",
                 },
             },
         }

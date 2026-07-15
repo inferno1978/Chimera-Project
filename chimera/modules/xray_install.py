@@ -875,6 +875,12 @@ def generate_xray_config() -> None:
                     "privateKey":  PARAM_PRIVATE_KEY,
                     "publicKey":   PARAM_PUBLIC_KEY,
                     "shortIds":    [PARAM_SHORTID],
+                    # Xray-core 26.7.11+ ужесточил проверку REALITY-клиента.
+                    # Mihomo / sing-box / старые Xray-клиенты НЕ проходят авторизацию
+                    # без этого поля. Формат — "x.y.z" (semver). "1.0.0" пропускает
+                    # всех клиентов версии >= 1.0.0 (т.е. практически всех).
+                    # См. https://github.com/XTLS/REALITY/blob/main/README.md
+                    "minClientVer": "1.0.0",
                 },
             },
         }],
