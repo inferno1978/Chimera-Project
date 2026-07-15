@@ -2885,6 +2885,11 @@ def do_rebuild_xray_config() -> None:
     _load_state_into_globals()
     info("Параметры загружены из state.json.")
     info(f"  Режим: {INSTALL_MODE}, протокол: {PROTOCOL_MODE}, домен: {PARAM_DOMAIN}")
+    # Если PARAM_SOCKET_PATH пустой — что-то не так с state.json.
+    if PROTOCOL_MODE == "reality" and not AWG_EXIT_ENABLED and not PARAM_SOCKET_PATH:
+        warn("PARAM_SOCKET_PATH пуст — в state.json нет ключа 'socket'.")
+        warn("Проверьте: jq '.socket' /var/lib/xray-installer/state.json")
+        return
 
     # _rebuild_and_restart_xray() внутри делает бэкап, регенерацию, восстановление
     # пользователей/RIPE/Telemt/PQ-VLESS/fragment/SNI-dispatch и рестарт Xray+Nginx.
@@ -7997,6 +8002,15 @@ def _load_state_into_globals() -> None:
     global IS_IPV6_AVAILABLE, IPV6_PREFLIGHT, PARAM_USE_DNSCRYPT
     global INSTALL_MODE, PROTOCOL_MODE, XHTTP_MODE, XHTTP_PATH, XHTTP_PERF_PRESET
     global AWG_EXIT_ENABLED, AWG_INSTALLED, AWG_EXIT_HOST, AWG_EXIT_PORT, PARAM_REALITY_DEST
+    # FIX: AWG_CLIENT_LISTEN_PORT присваивается ниже (state.get("awg_client_listen_port",
+    # AWG_CLIENT_LISTEN_PORT)) но НЕ был объявлен как global. Python считал его
+    # local переменной, и при чтении как default для state.get выбрасывал
+    # UnboundLocalError. try/except: pass внизу функции проглатывал ошибку,
+    # и ВСЕ строки после AWG_CLIENT_LISTEN_PORT (PARAM_REALITY_DEST, PARAM_SOCKET_PATH,
+    # PARAM_SPIDERX) НЕ выполнялись. Это был давний баг проекта — проявился только
+    # при вызове _load_state_into_globals() через новый пункт меню 5b, потому что
+    # при do_full_install() эти поля устанавливались в процессе установки.
+    global AWG_CLIENT_LISTEN_PORT
     global H2_EXIT_ENABLED
     global XTLS_FLOW
     global PARAM_FINGERPRINT
