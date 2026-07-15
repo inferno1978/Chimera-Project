@@ -106,24 +106,31 @@ def get_xray_zip_mirrors(tag: str, arch: str = "64") -> list[str]:
 
 
 # ============================================================================
-#  СБОРЩИК URL — checksums.txt
+#  СБОРЩИК URL — .dgst файл (SHA256/512 манифест XTLS/Xray-core)
 # ============================================================================
-def get_xray_checksums_mirrors(tag: str) -> list[str]:
-    """Упорядоченный список URL для скачивания checksums.txt.
+def get_xray_checksums_mirrors(tag: str, arch: str = "64") -> list[str]:
+    """Упорядоченный список URL для скачивания Xray-linux-{arch}.zip.dgst.
+
+    XTLS/Xray-core НЕ публикует единый checksums.txt. Вместо этого рядом с
+    каждым .zip ассетом лежит .dgst файл (299 bytes) с MD5/SHA1/SHA256/SHA512
+    хешами. Старый код искал несуществующий checksums.txt и получал 404 на
+    всех зеркалах → SHA256 верификация всегда была "skipped".
 
     Параметры:
-      tag: Release tag (например "v25.4.30").
+      tag:  Release tag (например "v25.4.30").
+      arch: Архитектура в схеме Xray ("64", "arm64-v8a", "arm32-v7a", "32").
 
     Возвращает:
       Упорядоченный список URL (через build_mirror_urls с filename=
-      "checksums.txt"). Та же структура что и для zip, но другой filename.
+      "Xray-linux-{arch}.zip.dgst").
     """
     if not tag:
         return []
+    filename = f"Xray-linux-{arch}.zip.dgst"
     return build_mirror_urls(
         owner=_XRAY_CORE_OWNER,
         repo=_XRAY_CORE_REPO,
-        filename="checksums.txt",
+        filename=filename,
         tag=tag,
     )
 
@@ -156,10 +163,10 @@ def get_xray_installer_mirrors() -> list[str]:
 
 # Количество зеркал — вычисляется для отображения в TUI.
 # XRAY_ZIP: 14 (4 jsDelivr + raw + release + 7 proxy + Statically).
-# XRAY_CHK (checksums.txt): 14 (та же структура что и zip, другой filename).
+# XRAY_CHK (.dgst): 14 (та же структура что и zip, другой filename).
 # XRAY_INSTALLER: 13 (4 jsDelivr + raw + 7 proxy + Statically, без release).
-XRAY_ZIP_MIRRORS_COUNT: int = 14
-XRAY_CHK_MIRRORS_COUNT: int = 14
+XRAY_ZIP_MIRRORS_COUNT: int = len(get_xray_zip_mirrors(tag="v25.4.30", arch="64"))
+XRAY_CHK_MIRRORS_COUNT: int = len(get_xray_checksums_mirrors(tag="v25.4.30", arch="64"))
 XRAY_INSTALLER_MIRRORS_COUNT: int = len(get_xray_installer_mirrors())
 
 

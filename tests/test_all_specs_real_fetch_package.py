@@ -142,9 +142,10 @@ class TestAllSpecsRealFetchPackageCall(unittest.TestCase):
         self.assertFalse(result)
 
     def test_xray_checksums_spec_real_call(self):
-        """XRAY_CHECKSUMS_SPEC — может вызываться с tag=."""
+        """XRAY_CHECKSUMS_SPEC — может вызываться с tag= и arch=."""
         from chimera.modules.xray_packages import XRAY_CHECKSUMS_SPEC
-        result = fetch_package(XRAY_CHECKSUMS_SPEC, dry_run=True, tag="v25.4.30")
+        result = fetch_package(XRAY_CHECKSUMS_SPEC, dry_run=True,
+                              tag="v25.4.30", arch="64")
         self.assertFalse(result)
 
     def test_xray_installer_spec_real_call(self):
@@ -154,14 +155,14 @@ class TestAllSpecsRealFetchPackageCall(unittest.TestCase):
         self.assertFalse(result)
 
     def test_xray_chk_spec_internal_real_call(self):
-        """Внутренний chk_spec в _fetch_checksums_content — вызывается с tag=.
+        """Внутренний chk_spec в _fetch_dgst_content — вызывается с tag= и arch=.
 
         БАГ №1 (исправлен): filename_builder был lambda: без параметров,
         call site передавал tag= → TypeError → SHA256 верификация
         молча отключена на 100% установок Xray.
         """
-        from chimera.modules.xray_packages import _fetch_checksums_content
-        # dry_run не подходит для _fetch_checksums_content (она сама зовёт
+        from chimera.modules.xray_packages import _fetch_dgst_content
+        # dry_run не подходит для _fetch_dgst_content (она сама зовёт
         # fetch_package без dry_run). Мокаем urlopen чтобы не лезть в сеть.
         from unittest.mock import MagicMock
         mock_resp = MagicMock()
@@ -171,7 +172,7 @@ class TestAllSpecsRealFetchPackageCall(unittest.TestCase):
         with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    return_value=mock_resp):
             # Это НЕ должно крашить с TypeError. Вернёт None (сеть "недоступна").
-            result = _fetch_checksums_content("v25.4.30")
+            result = _fetch_dgst_content("v25.4.30", "64")
         # None — OK (сеть мокнута на пустой ответ). TypeError — FAIL.
         self.assertIsNone(result)
 

@@ -47,6 +47,10 @@ from typing import Optional
 
 #: Список GitHub-прокси-хостов (китайские + комьюнити CDN).
 #: Порядок важен — соответствует порядку в существующих *_mirrors.py модулях.
+#: NOTE 2026-07: некоторые хосты могут быть временно недоступны (mirror.ghproxy.com,
+#: hub.gitmirror.com, github.moeyy.xyz, ghps.cc). fetch_package перебирает их
+#: по очереди и 404/NXDOMAIN пропускает. Не удаляйте хосты без необходимости —
+#: это сломает тесты, проверяющие точное количество зеркал.
 GITHUB_PROXY_HOSTS: list[str] = [
     "ghproxy.net",
     "ghproxy.com",

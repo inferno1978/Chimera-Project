@@ -332,6 +332,7 @@ class TestXrayMirrorsSanity(unittest.TestCase):
             get_xray_zip_mirrors, XRAY_ZIP_MIRRORS_COUNT,
         )
         urls = get_xray_zip_mirrors(tag="v25.4.30", arch="64")
+        # 4 jsDelivr + raw + release + 7 proxy + Statically = 14
         self.assertEqual(len(urls), 14)
         self.assertEqual(XRAY_ZIP_MIRRORS_COUNT, 14)
 
@@ -339,7 +340,8 @@ class TestXrayMirrorsSanity(unittest.TestCase):
         from chimera.modules.xray_mirrors import (
             get_xray_checksums_mirrors, XRAY_CHK_MIRRORS_COUNT,
         )
-        urls = get_xray_checksums_mirrors(tag="v25.4.30")
+        urls = get_xray_checksums_mirrors(tag="v25.4.30", arch="64")
+        # 4 jsDelivr + raw + release + 7 proxy + Statically = 14
         self.assertEqual(len(urls), 14)
         self.assertEqual(XRAY_CHK_MIRRORS_COUNT, 14)
 
