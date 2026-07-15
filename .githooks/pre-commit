@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# ============================================================
+# Git pre-commit hook
+# Автоматически генерирует bootstrap.sh.sha256, если bootstrap.sh
+# был изменен и staged в текущем коммите.
+# ============================================================
+# Установка:
+#   git config core.hooksPath .githooks
+# ============================================================
+set -euo pipefail
+
+# Проверяем, есть ли bootstrap.sh в staged changes
+if git diff --cached --name-only | grep -q '^bootstrap\.sh$'; then
+    echo "[pre-commit] bootstrap.sh изменён — авто-генерация SHA256..."
+    GIT_HOOK_MODE=1 bash "$(git rev-parse --show-toplevel)/scripts/generate_checksum.sh"
+    echo "[pre-commit] ✓ bootstrap.sh.sha256 обновлён и staged"
+fi
+
+exit 0
