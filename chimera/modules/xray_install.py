@@ -165,7 +165,7 @@ def _xray_print_manual_download_hint(zip_name: str, tag: str, xray_arch: str) ->
 
     # Зеркала из единого реестра (14 URL через build_mirror_urls)
     XRAY_MANUAL_MIRRORS = get_xray_zip_mirrors(tag=tag, arch=xray_arch)
-    XRAY_CHECKSUMS_MIRRORS = get_xray_checksums_mirrors(tag=tag)
+    XRAY_CHECKSUMS_MIRRORS = get_xray_checksums_mirrors(tag=tag, arch=xray_arch)
     sep = f"{YELLOW}{'─'*64}{NC}"
     print()
     print(sep)
@@ -452,11 +452,11 @@ def install_xray() -> None:
         # теперь — 14 URL через get_xray_zip_mirrors() (jsDelivr CDN × 4 +
         # raw GitHub + release GitHub + 7 gh-proxy + Statically).
         _ZIP_MIRRORS = get_xray_zip_mirrors(tag=latest_tag, arch=xray_arch)
-        # checksums URL — для _xray_try_local_zip (manual retry).
-        # post_install XRAY_ZIP_SPEC сам скачивает checksums.txt через
-        # fetch_package(XRAY_CHECKSUMS_SPEC, tag=...) — здесь URL нужен
+        # .dgst URL — для _xray_try_local_zip (manual retry).
+        # post_install XRAY_ZIP_SPEC сам скачивает .dgst через
+        # fetch_package(XRAY_CHECKSUMS_SPEC, tag=..., arch=...) — здесь URL нужен
         # только для _verify_sha256 в _xray_try_local_zip.
-        _CHK_URLS = get_xray_checksums_mirrors(tag=latest_tag)
+        _CHK_URLS = get_xray_checksums_mirrors(tag=latest_tag, arch=xray_arch)
         chk_url = _CHK_URLS[0] if _CHK_URLS else ""
 
         # Выводим все ссылки в терминал чтобы пользователь мог скачать вручную
