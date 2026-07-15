@@ -117,6 +117,7 @@ def fetch_package(
     *,
     dry_run: bool = False,
     print_hint_on_failure: bool = True,
+    progress_label: str = "",
     **filename_kwargs,
 ) -> bool:
     """Скачивает пакет по spec.
@@ -142,6 +143,12 @@ def fetch_package(
                              подсказку (например geo_files использует
                              _geo_print_manual_download_hint с полным
                              списком путей).
+      progress_label:        Если непустая строка — печатать прогресс
+                             скачивания (какое зеркало пробуется, размер
+                             скачанного). Полезно для больших файлов
+                             (geo .dat ~30MB) чтобы пользователь видел
+                             что процесс не завис. По умолчанию "" —
+                             молча (для внутренних вызовов вроде .dgst).
       **filename_kwargs:     Дополнительные аргументы для filename_builder и
                              mirror_urls_builder.
 
@@ -182,21 +189,42 @@ def fetch_package(
     tmp_path = Path("/tmp") / f"_download_mgr_{filename}"
     tmp_path.unlink(missing_ok=True)
 
-    for url in urls:
+    for url_idx, url in enumerate(urls, 1):
+        # Прогресс-индикатор: показываем какое зеркало пробуется.
+        # Важно для больших файлов (geo .dat ~30MB) — без этого пользователь
+        # видит "Загрузка geosite.dat..." и ждёт 30-60с без обратной связи.
+        if progress_label:
+            host = url.split("/")[2] if "://" in url else url[:40]
+            print(f"  {progress_label} → зеркало {url_idx}/{len(urls)}: {host}...", flush=True)
         try:
             req = urllib.request.Request(
                 url,
                 headers={"User-Agent": "Chimera-Project"},
             )
             with urllib.request.urlopen(req, timeout=15) as r:
+                # Content-Length для прогресс-бара (не все серверы отдают)
+                total = r.headers.get("Content-Length")
+                total_int = int(total) if total else 0
+                downloaded = 0
                 with open(tmp_path, 'wb') as f:
                     while True:
                         chunk = r.read(65536)
                         if not chunk:
                             break
                         f.write(chunk)
+                        downloaded += len(chunk)
+                        # Прогресс каждые ~1MB (16 chunks × 64KB ≈ 1MB)
+                        if progress_label and downloaded % (65536 * 16) == 0:
+                            if total_int:
+                                pct = downloaded * 100 // total_int
+                                print(f"    {downloaded // 1024} КБ / {total_int // 1024} КБ ({pct}%)", flush=True)
+                            else:
+                                print(f"    {downloaded // 1024} КБ", flush=True)
 
             if tmp_path.exists() and tmp_path.stat().st_size >= spec.min_size:
+                if progress_label:
+                    sz = tmp_path.stat().st_size
+                    print(f"  {progress_label} ✓ скачано ({sz // 1024} КБ)", flush=True)
                 # Скачано успешно — копируем во все install_dests
                 if spec.post_install is not None:
                     ok = spec.post_install(tmp_path, spec.install_dests)
