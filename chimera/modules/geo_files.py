@@ -124,7 +124,8 @@ def download_geo_files() -> bool:
     ):
         info(f"  Загрузка {fname}...")
         try:
-            ok = fetch_package(spec, print_hint_on_failure=False)
+            ok = fetch_package(spec, print_hint_on_failure=False,
+                               progress_label=fname)
             if ok:
                 success_count += 1
             else:

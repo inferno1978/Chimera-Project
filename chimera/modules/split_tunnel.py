@@ -74,6 +74,72 @@ def _core_module():
 
 
 # =============================================================================
+#  ВСПОМОГАТЕЛЬНАЯ: проверка geo-файлов во всех директориях Xray
+# =============================================================================
+def _geo_files_available(auto_copy: bool = True) -> bool:
+    """Проверяет наличие geosite.dat и geoip.dat в директориях где Xray
+    их ищет. Возвращает True если оба файла найдены.
+
+    BUGFIX: ранее проверялся ТОЛЬКО /etc/xray/ (CONFIG_DIR). Но Xray
+    ищет .dat-файлы в трёх директориях:
+      /usr/local/share/xray/  — куда ставит официальный XTLS installer
+      /etc/xray/              — куда ставит chimera-project
+      /usr/local/etc/xray/    — альтернативный путь
+
+    Если пользователь сначала установил Xray через XTLS installer (файлы
+    в /usr/local/share/xray/), а потом включил split tunneling в chimera —
+    проверка /etc/xray/ возвращала False → warning "Geo файлы не найдены"
+    → geosite:category-ru правила не добавлялись → split tunneling работал
+    только с пользовательскими правилами.
+
+    Если auto_copy=True (по умолчанию) и файлы найдены в /usr/local/share/xray/
+    но НЕ в /etc/xray/ — автоматически копирует их в /etc/xray/, потому что
+    config.json Xray содержит geoDataBasePath=/etc/xray/.
+    """
+    import shutil
+    core = _core_module()
+    GEOSITE_DAT = core.GEOSITE_DAT  # /etc/xray/geosite.dat
+    GEOIP_DAT   = core.GEOIP_DAT    # /etc/xray/geoip.dat
+
+    lookup_dirs = [
+        Path("/usr/local/share/xray"),
+        Path("/etc/xray"),
+        Path("/usr/local/etc/xray"),
+    ]
+
+    def _find(name: str) -> Path | None:
+        """Ищет файл по всем lookup_dirs, возвращает первый найденный путь."""
+        for d in lookup_dirs:
+            p = d / name
+            if p.exists() and p.stat().st_size > 0:
+                return p
+        return None
+
+    geosite_src = _find("geosite.dat")
+    geoip_src   = _find("geoip.dat")
+
+    if not geosite_src or not geoip_src:
+        return False
+
+    # Если файлы найдены но НЕ в /etc/xray/ — копируем туда (Xray ищет
+    # через geoDataBasePath=/etc/xray/ в config.json).
+    if auto_copy and geosite_src != GEOSITE_DAT:
+        try:
+            GEOSITE_DAT.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(geosite_src), str(GEOSITE_DAT))
+        except Exception:
+            pass
+    if auto_copy and geoip_src != GEOIP_DAT:
+        try:
+            GEOIP_DAT.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(geoip_src), str(GEOIP_DAT))
+        except Exception:
+            pass
+
+    return True
+
+
+# =============================================================================
 #  ИНТЕРАКТИВНЫЙ ОПРОС ПРИ УСТАНОВКЕ
 # =============================================================================
 def prompt_split_tunnel() -> None:
@@ -279,7 +345,7 @@ def build_split_tunnel_routing_rules(
     if not SPLIT_TUNNEL_ENABLED:
         return []
 
-    geo_files_ok = GEOSITE_DAT.exists() and GEOIP_DAT.exists()
+    geo_files_ok = _geo_files_available(auto_copy=True)
     rules: list[dict] = []
 
     # --- Пользовательские домены (наивысший приоритет) ---
@@ -565,7 +631,7 @@ def do_manage_split_tunnel() -> None:
         SPLIT_TUNNEL_EXTRA_DOMAINS = getattr(core, "SPLIT_TUNNEL_EXTRA_DOMAINS", [])
         SPLIT_TUNNEL_EXTRA_IPS     = getattr(core, "SPLIT_TUNNEL_EXTRA_IPS",     [])
         st_status = f"{GREEN}ВКЛЮЧЕНО{NC}" if SPLIT_TUNNEL_ENABLED else f"{YELLOW}ОТКЛЮЧЕНО{NC}"
-        geo_ok = GEOSITE_DAT.exists() and GEOIP_DAT.exists()
+        geo_ok = _geo_files_available(auto_copy=False)
         geo_str = f"{GREEN}OK{NC}" if geo_ok else f"{RED}НЕТ{NC}"
         dom_count = len(SPLIT_TUNNEL_EXTRA_DOMAINS)
         ip_count  = len(SPLIT_TUNNEL_EXTRA_IPS)
@@ -609,7 +675,7 @@ def do_manage_split_tunnel() -> None:
             _save_split_tunnel_custom()
             status = "включено" if SPLIT_TUNNEL_ENABLED else "отключено"
             success(f"Раздельное туннелирование {status}")
-            if SPLIT_TUNNEL_ENABLED and not (GEOSITE_DAT.exists() and GEOIP_DAT.exists()):
+            if SPLIT_TUNNEL_ENABLED and not _geo_files_available(auto_copy=False):
                 warn("Geo-файлы не скачаны!")
                 warn("Без них geosite:category-ru / geoip:ru не будут работать и Xray упадёт.")
                 warn("Выберите [6] для загрузки geo-файлов перед применением [7].")
@@ -791,12 +857,15 @@ def _apply_split_tunnel_config_from_state() -> None:
     # Если split tunneling включён, но geo-файлы отсутствуют/повреждены,
     # конфиг будет содержать geosite:category-ru — и Xray упадёт при старте.
     if SPLIT_TUNNEL_ENABLED:
-        geo_missing = not (GEOSITE_DAT.exists() and GEOIP_DAT.exists())
+        # auto_copy=True: если файлы в /usr/local/share/xray/ но не в /etc/xray/ —
+        # копируем автоматически, чтобы Xray (geoDataBasePath=/etc/xray/) их нашёл.
+        geo_missing = not _geo_files_available(auto_copy=True)
         geo_too_small = False
         if not geo_missing:
             # Стандартный geosite.dat от v2fly/xray ~1-2 МБ — не содержит
             # категорию BLOCKED. Нужный файл от runetfreedom весит ~4-6 МБ.
             # Порог 3 МБ отсекает неправильные файлы.
+            # После auto_copy выше — файлы точно в /etc/xray/, проверяем размер.
             geo_too_small = (
                 GEOSITE_DAT.stat().st_size < 3_000_000
                 or GEOIP_DAT.stat().st_size < 10_000
