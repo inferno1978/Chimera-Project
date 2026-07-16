@@ -1,9 +1,22 @@
+# ============================================================
+# Mirror to GitLab — one-way GitHub → GitLab
+# ============================================================
+# GitLab branch chimera-v5 is a MIRROR ONLY.
+# Never commit directly to chimera-v5 on GitLab — changes will be
+# force-overwritten on next push to main on GitHub.
+#
+# Flow: push to GitHub main → Actions triggers → force-push to
+# GitLab chimera-v5 + tags.
+#
+# Required secrets:
+#   GITLAB_TOKEN — GitLab PAT with write_repository scope
+# ============================================================
 name: Mirror to GitLab
 
 on:
   push:
     branches: [main]
-  tags: ['v*']
+    tags: ['v*']
 
 jobs:
   mirror:
@@ -13,11 +26,24 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Push to GitLab
+      - name: Push main → chimera-v5 to GitLab
         run: |
           git remote add gitlab "https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/netwalker071778/chimera-project.git"
           git push --force gitlab refs/heads/main:refs/heads/chimera-v5
-          git push --force gitlab refs/tags/*:refs/tags/* || true
         env:
           GIT_TERMINAL_PROMPT: 0
+
+      - name: Push tags to GitLab
+        id: push_tags
+        continue-on-error: true
+        run: |
+          git push --force gitlab refs/tags/*:refs/tags/*
+        env:
+          GIT_TERMINAL_PROMPT: 0
+
+      - name: Warn if tag push failed
+        if: steps.push_tags.outcome == 'failure'
+        run: |
+          echo "::warning::Pushing tags to GitLab failed. Check logs above. Branch mirror succeeded."
