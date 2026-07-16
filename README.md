@@ -34,6 +34,8 @@ bash bootstrap.sh
 ```
 
 > **Note:** Репозиторий также доступен на GitHub: `github.com/inferno1978/Chimera-Project` (ветка `main`, временно недоступен из-за spam-flag). GitLab (ветка `chimera-v5`) — основной источник.
+>
+> **⚠️ GitLab branch `chimera-v5` is a mirror only — never commit directly to it, changes will be force-overwritten on next push to `main` on GitHub.**
 
 ## 🎯 Возможности
 
