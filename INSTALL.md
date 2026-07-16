@@ -3,7 +3,7 @@
 ## Быстрый старт (рекомендуется)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
+bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
 ```
 
 Bootstrap скрипт автоматически:
@@ -18,7 +18,7 @@ Bootstrap скрипт автоматически:
 
 ```bash
 # 1. Клонировать репозиторий
-git clone https://github.com/inferno1978/Chimera-Project /opt/chimera
+git clone -b chimera-v5 https://gitlab.com/netwalker071778/chimera-project.git /opt/chimera
 cd /opt/chimera
 
 # 2. Проверить целостность

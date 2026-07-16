@@ -1,8 +1,8 @@
 # Chimera Project v5.0.0
 
-[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](https://github.com/inferno1978/Chimera-Project)
+[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](https://gitlab.com/netwalker071778/chimera-project)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://github.com/inferno1978/Chimera-Project/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://gitlab.com/netwalker071778/chimera-project/-/blob/chimera-v5/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
 
 **Multi-Protocol Anti-DPI Installer** — мульти-протокольный установщик для обхода цензуры: VLESS REALITY/xHTTP, Hysteria2, AmneziaWG, TrustTunnel, MTProto, NaiveProxy, Mieru, FPTN, Slipgate и др. Полная автоматизация: от установки до мониторинга, с кластеризацией, балансировкой, веб-панелью и REST API.
@@ -33,7 +33,7 @@ chmod +x bootstrap.sh
 bash bootstrap.sh
 ```
 
-> **Note:** Репозиторий также доступен на GitHub: `github.com/inferno1978/Chimera-Project` (ветка `main`). GitLab-зеркало (ветка `chimera-v5`) — основной источник для `curl | bash`.
+> **Note:** Репозиторий также доступен на GitHub: `github.com/inferno1978/Chimera-Project` (ветка `main`, временно недоступен из-за spam-flag). GitLab (ветка `chimera-v5`) — основной источник.
 
 ## 🎯 Возможности
 
@@ -91,7 +91,7 @@ bash bootstrap.sh
 ## 🔧 Ручная установка
 
 ```bash
-git clone https://github.com/inferno1978/Chimera-Project /opt/chimera
+git clone -b chimera-v5 https://gitlab.com/netwalker071778/chimera-project.git /opt/chimera
 cd /opt/chimera
 sudo python3 main.py
 ```
@@ -352,7 +352,7 @@ sudo python3 /opt/chimera/main.py --scheduled-backup
 
 ## ❓ Решение проблем
 
-Смотри [TROUBLESHOOTING.md](https://github.com/inferno1978/Chimera-Project/blob/main/TROUBLESHOOTING.md).
+Смотри [TROUBLESHOOTING.md](https://gitlab.com/netwalker071778/chimera-project/-/blob/chimera-v5/TROUBLESHOOTING.md).
 
 ## 📌 О проекте и формате общения
 
@@ -384,8 +384,8 @@ sudo python3 /opt/chimera/main.py --scheduled-backup
 
 ## 📄 Лицензия
 
-MIT — см. [LICENSE](https://github.com/inferno1978/Chimera-Project/blob/main/LICENSE)
+MIT — см. [LICENSE](https://gitlab.com/netwalker071778/chimera-project/-/blob/chimera-v5/LICENSE)
 
 ## ✍️ Автор
 
-inferno1978 · [GitHub](https://github.com/inferno1978)
+inferno1978 · [GitLab](https://gitlab.com/netwalker071778/chimera-project) · [GitHub](https://github.com/inferno1978)
