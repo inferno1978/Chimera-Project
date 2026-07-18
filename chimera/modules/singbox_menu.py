@@ -44,6 +44,7 @@ from chimera.modules.singbox_common import (
     DEFAULT_PORT_VLESS_WS_CDN,
     CDN_PROVIDERS,
     LE_LIVE_DIR,
+    SHADOWTLS_SNI_PRESETS,
 )
 from chimera.modules.singbox_state import (
     singbox_state_load, singbox_state_save,
@@ -522,10 +523,45 @@ def _enable_shadowtls_custom() -> None:
     """
     if not _ensure_binary_installed():
         return
+
+    # SNI-пресеты для handshake-домена (адаптировано из HYDRA-ULTIMATE)
+    print()
+    _box_top("🌐  SNI ДЛЯ SHADOWTLS")
+    _box_row(f"  {DIM}Выберите маскировочный домен (TLS 1.3):{NC}")
+    _box_sep()
+    for idx, (domain, label) in enumerate(SHADOWTLS_SNI_PRESETS, start=1):
+        _box_item(str(idx), f"{label}", f"{CYAN}{domain}{NC}")
+    _box_sep()
+    custom_key = str(len(SHADOWTLS_SNI_PRESETS) + 1)
+    _box_item(custom_key, "Свой домен", f"{DIM}ввести вручную{NC}")
+    _box_row()
+    _box_item_exit("0", "← Отмена")
+    _box_bottom()
+
     try:
-        hs_server = input(
-            f"{CYAN}Handshake домен {DIM}(Enter={DEFAULT_SHADOWTLS_HANDSHAKE_HOST}):{NC} "
-        ).strip() or DEFAULT_SHADOWTLS_HANDSHAKE_HOST
+        ch = input(f"{CYAN}Выбор:{NC} ").strip()
+    except KeyboardInterrupt:
+        return
+
+    if ch == "0" or not ch:
+        return
+
+    if ch == custom_key:
+        try:
+            hs_server = input(
+                f"{CYAN}Введите TLS 1.3 домен:{NC} "
+            ).strip().lower() or DEFAULT_SHADOWTLS_HANDSHAKE_HOST
+        except KeyboardInterrupt:
+            return
+    else:
+        try:
+            hs_server = SHADOWTLS_SNI_PRESETS[int(ch) - 1][0]
+        except (ValueError, IndexError):
+            error("Неверный выбор")
+            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            return
+
+    try:
         hs_port_str = input(
             f"{CYAN}Handshake порт {DIM}(Enter=443):{NC} "
         ).strip()
@@ -617,24 +653,85 @@ def _regen_password_shadowtls() -> None:
 
 
 def _change_handshake_domain() -> None:
+    """Смена handshake-домена для ShadowTLS с SNI-пресетами.
+
+    Адаптировано из HYDRA-ULTIMATE (gr33nimax): курируемый список
+    международных и российских TLS 1.3 доменов + custom-домен.
+    Транзакционная смена: если sing-box не запускается — откат.
+    """
+    import copy
+
+    # Показываем меню пресетов
+    os.system("clear")
+    print()
+    _box_top("🌐  SNI ДЛЯ SHADOWTLS")
+    _box_row(f"  {DIM}Выберите маскировочный домен (TLS 1.3):{NC}")
+    _box_sep()
+    for idx, (domain, label) in enumerate(SHADOWTLS_SNI_PRESETS, start=1):
+        _box_item(str(idx), f"{label}", f"{CYAN}{domain}{NC}")
+    _box_sep()
+    custom_key = str(len(SHADOWTLS_SNI_PRESETS) + 1)
+    _box_item(custom_key, "Свой домен", f"{DIM}ввести вручную{NC}")
+    _box_row()
+    _box_item_exit("0", "← Отмена")
+    _box_bottom()
+
     try:
-        new_host = input(
-            f"{CYAN}Новый handshake домен{NC} "
-            f"{DIM}(Enter={DEFAULT_SHADOWTLS_HANDSHAKE_HOST}):{NC} "
-        ).strip() or DEFAULT_SHADOWTLS_HANDSHAKE_HOST
+        ch = input(f"{CYAN}Выбор:{NC} ").strip()
+    except KeyboardInterrupt:
+        return
+
+    if ch == "0" or not ch:
+        return
+
+    if ch == custom_key:
+        try:
+            new_host = input(
+                f"{CYAN}Введите TLS 1.3 домен:{NC} "
+            ).strip().lower()
+        except KeyboardInterrupt:
+            return
+        if not new_host:
+            info("Отменено")
+            return
+    else:
+        try:
+            idx = int(ch) - 1
+            new_host = SHADOWTLS_SNI_PRESETS[idx][0]
+        except (ValueError, IndexError):
+            error("Неверный выбор")
+            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            return
+
+    try:
         new_port_str = input(f"{CYAN}Порт {DIM}(Enter=443):{NC} ").strip()
         new_port = int(new_port_str) if new_port_str else 443
     except KeyboardInterrupt:
         return
+    except ValueError:
+        error("Некорректный порт")
+        return
+
+    # Транзакционная смена: сохраняем старый state, пробуем применить
     state = singbox_state_load()
     ib = state.get("inbounds", {}).get("shadowtls", {})
+    old_handshake = copy.deepcopy(ib.get("handshake", {}))
+
     ib.setdefault("handshake", {})
     ib["handshake"] = {"server": new_host, "server_port": new_port}
     singbox_state_update_inbound("shadowtls", **ib)
     singbox_generate_config()
-    if not _apply_and_check("Handshake изменён, но sing-box не запустился"):
-        return
-    success(f"Handshake: {new_host}:{new_port}")
+
+    if _apply_and_check("Handshake изменён, но sing-box не запустился"):
+        success(f"Handshake: {new_host}:{new_port}")
+    else:
+        # Откат
+        warn("Откат: восстанавливаем прежний handshake...")
+        ib["handshake"] = old_handshake
+        singbox_state_update_inbound("shadowtls", **ib)
+        singbox_generate_config()
+        _apply_and_check("Откат: sing-box не запустился с прежним handshake")
+        error("Не удалось применить новый SNI — конфиг восстановлен")
 
 
 def _configure_tuic_initial_packet_size() -> None:
