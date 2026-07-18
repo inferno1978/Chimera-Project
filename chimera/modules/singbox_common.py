@@ -60,6 +60,25 @@ DEFAULT_PORT_TUIC_ALTERNATIVE = 443  # UDP/443 — параллельно с TCP
 DEFAULT_SHADOWTLS_HANDSHAKE_HOST = "www.cloudflare.com"
 DEFAULT_SHADOWTLS_HANDSHAKE_PORT = 443
 
+# SNI-пресеты для ShadowTLS (адаптировано из HYDRA-ULTIMATE, gr33nimax)
+# Курируемый список TLS 1.3 доменов для маскировки.
+# Разделены на международные (Microsoft/Apple/Cloudflare/etc.) и
+# российские (Яндекс/ВК/MAX/Дзен/Rutube/Ozon).
+SHADOWTLS_SNI_PRESETS = (
+    ("www.microsoft.com", "Международный · Microsoft"),
+    ("www.apple.com", "Международный · Apple"),
+    ("www.cloudflare.com", "Международный · Cloudflare"),
+    ("www.amazon.com", "Международный · Amazon"),
+    ("www.samsung.com", "Международный · Samsung"),
+    ("www.adobe.com", "Международный · Adobe"),
+    ("ya.ru", "Россия · Яндекс"),
+    ("vk.com", "Россия · ВКонтакте"),
+    ("max.ru", "Россия · MAX"),
+    ("dzen.ru", "Россия · Дзен"),
+    ("rutube.ru", "Россия · Rutube"),
+    ("www.ozon.ru", "Россия · Ozon"),
+)
+
 # Path к существующему LE-сертификату (если есть PARAM_DOMAIN).
 # Используется ssl_certbot.py. ShadowTLS может использовать этот же сертификат.
 LE_LIVE_DIR = Path("/etc/letsencrypt/live")
