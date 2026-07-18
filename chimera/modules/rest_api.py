@@ -448,15 +448,75 @@ def _generate_vless_links(user: dict) -> list[dict]:
             h2_link = f"hysteria2://{h2_pass}@{h2_host}:{h2_port}?insecure=1&sni={domain}#Hysteria2"
             links.append({"label": "Hysteria2", "link": h2_link, "protocol": "hysteria2"})
 
-    # MTProto (если установлен — проверяем что state-файл существует и имеет port+secret)
+    # MTProto (Telemt) — персональная ссылка для юзера портала.
+    #
+    # Корневая причина прошлой реализации: код обращался к _load_state и файлу
+    # /var/lib/xray-installer/mtproto_state.json, которых не существует в
+    # chimera/modules/mtproto.py (модуль Telemt хранит конфиг иначе — см. ниже).
+    # Из-за `except Exception: pass` импорт падал молча, и ссылка просто не
+    # появлялась в /api/portal/links без ошибок в логах.
+    #
+    # Реальная структура конфига Telemt (см. chimera/modules/mtproto.py):
+    #   • CONFIG_FILE = /etc/telemt/telemt.toml
+    #   • [server].port                 → _get_port()
+    #   • [censorship].tls_domain       → _get_domain()
+    #     (если непустой — TLS-режим; секрет обёрнут через _make_tls_secret)
+    #   • [access.users]: name = "hex32" → _load_users() dict {имя: secret}
+    #
+    # Логика:
+    #   1. Сервис telemt должен быть активен (systemctl is-active telemt) —
+    #      по аналогии с проверкой hysteria-server выше. Иначе не отдаём
+    #      ссылку на неработающий сервис.
+    #   2. Ссылка персональная: сопоставляем user["name"] / user["email"] /
+    #      локальную часть email с ключом в _load_users(). Если совпадения
+    #      нет — не показываем ссылку (не отдаём чужой/первый-попавшийся секрет).
+    #   3. TLS-режим (tls_domain непустой) → секрет через _make_tls_secret
+    #      (формат "ee<secret_hex><tls_domain_hex>"). Иначе — голый секрет.
     try:
-        from chimera.modules.mtproto import _load_state as _mtproto_load
-        mt_state = _mtproto_load(Path("/var/lib/xray-installer/mtproto_state.json"))
-        if mt_state.get("port") and mt_state.get("secret"):
-            mt_port = mt_state["port"]
-            mt_secret = mt_state.get("secret", "")
-            mt_link = f"https://t.me/proxy?server={domain}&port={mt_port}&secret={mt_secret}"
-            links.append({"label": "MTProto", "link": mt_link, "protocol": "mtproto"})
+        from chimera.modules.mtproto import (
+            _load_users as _telemt_load_users,
+            _get_port as _telemt_get_port,
+            _get_domain as _telemt_get_domain,
+            _make_tls_secret as _telemt_make_tls_secret,
+            SERVICE_NAME as _TELEMT_SERVICE_NAME,
+        )
+        # 1) Проверяем что служба telemt активна.
+        _telemt_active = False
+        try:
+            core = _core_module()
+            r = core._run(["systemctl", "is-active", _TELEMT_SERVICE_NAME],
+                          capture=True, check=False)
+            _telemt_active = (r.returncode == 0 and r.stdout.strip() == "active")
+        except Exception:
+            pass
+        # 2) Только если сервис активен — ищем персональный секрет юзера.
+        if _telemt_active:
+            telemt_users = _telemt_load_users() or {}
+            user_name = user.get("name", "") or ""
+            user_email = user.get("email", "") or ""
+            # email часто имеет вид "user@domain" — пробуем и локальную часть
+            # как fallback, потому что в Telemt имена пользователей это обычно
+            # короткие логины без @ (см. _validate_username в mtproto.py).
+            user_email_local = user_email.split("@", 1)[0] if user_email else ""
+            mt_secret_raw = ""
+            if user_name and user_name in telemt_users:
+                mt_secret_raw = telemt_users[user_name]
+            elif user_email and user_email in telemt_users:
+                mt_secret_raw = telemt_users[user_email]
+            elif user_email_local and user_email_local in telemt_users:
+                mt_secret_raw = telemt_users[user_email_local]
+            # 3) Секрет найден — собираем ссылку (с учётом TLS-режима).
+            if mt_secret_raw:
+                mt_port = _telemt_get_port()
+                mt_tls_domain = _telemt_get_domain()
+                if mt_tls_domain:
+                    mt_secret = _telemt_make_tls_secret(mt_secret_raw, mt_tls_domain)
+                else:
+                    mt_secret = mt_secret_raw
+                mt_link = (f"https://t.me/proxy?server={domain}"
+                           f"&port={mt_port}&secret={mt_secret}")
+                links.append({"label": "MTProto", "link": mt_link,
+                              "protocol": "mtproto"})
     except Exception:
         pass
 
