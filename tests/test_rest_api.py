@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -187,6 +188,182 @@ class TestGenerateVlessLinks(unittest.TestCase):
         with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY):
             links = rest_api._generate_vless_links(_FAKE_USER)
         self.assertEqual(len(links), 1)
+
+
+def _make_completed_process(stdout: str, returncode: int = 0):
+    """Helper: имитирует subprocess.CompletedProcess для core._run()."""
+    return subprocess.CompletedProcess(args=[], returncode=returncode,
+                                       stdout=stdout, stderr="")
+
+
+class TestGenerateVlessLinksMTProto(unittest.TestCase):
+    """_generate_vless_links — MTProto (Telemt) блок.
+
+    Покрывает регрессию: ранее код обращался к несуществующей функции
+    _load_state и файлу /var/lib/xray-installer/mtproto_state.json, из-за
+    чего ссылка молча не появлялась (except Exception: pass). Новая
+    реализация использует реальные геттеры mtproto.py: _load_users,
+    _get_port, _get_domain, _make_tls_secret.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    # ── helpers ───────────────────────────────────────────────────────────
+    def _patch_telemt(self, users=None, port=8443, tls_domain="mask.example.com",
+                     active=True):
+        """Возвращает list-of-patches для Telemt-окружения.
+
+        users: dict {name: hex32_secret} (None → пустой конфиг)
+        port: значение _get_port()
+        tls_domain: значение _get_domain() (пустая строка = обычный режим,
+                   без TLS-обёртки секрета)
+        active:True → systemctl is-active telemt возвращает "active"
+        """
+        from chimera.modules import mtproto as _mtproto_mod
+        if users is None:
+            users = {}
+        cp = _make_completed_process(
+            "active\n" if active else "inactive\n",
+            returncode=0 if active else 3,
+        )
+        core = sys.modules.get("chimera._core")
+        # _make_tls_secret воспроизводит реальную формулу из mtproto.py,
+        # чтобы тест был независим от реализации (только контракт).
+        def _fake_make_tls_secret(base_secret, domain):
+            return f"ee{base_secret}{domain.encode().hex()}"
+        patches = [
+            patch.object(_mtproto_mod, "_load_users", return_value=dict(users)),
+            patch.object(_mtproto_mod, "_get_port", return_value=port),
+            patch.object(_mtproto_mod, "_get_domain", return_value=tls_domain),
+            patch.object(_mtproto_mod, "_make_tls_secret",
+                         side_effect=_fake_make_tls_secret),
+            patch.object(_mtproto_mod, "SERVICE_NAME", "telemt"),
+        ]
+        if core is not None:
+            patches.append(patch.object(core, "_run", return_value=cp))
+        return patches
+
+    def _run(self, patches, user=None):
+        """Запускает _generate_vless_links с пропатченным окружением."""
+        from chimera.modules import rest_api
+        if user is None:
+            user = _FAKE_USER
+        # Стартуем все патчи; .stop() вызываем на самих patch-объектах,
+        # а не на том, что вернул .start() (mock/etc.).
+        for p in patches:
+            p.start()
+        try:
+            with patch.object(rest_api, "_get_state",
+                              return_value=_FAKE_STATE_REALITY):
+                return rest_api._generate_vless_links(user)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def _mtproto_link(self, links):
+        """Возвращает элемент link с protocol == 'mtproto' или None."""
+        for item in links:
+            if item.get("protocol") == "mtproto":
+                return item
+        return None
+
+    # ── тесты ─────────────────────────────────────────────────────────────
+    def test_mtproto_link_present_when_user_matches_tls_mode(self):
+        """Юзер с совпадающим name в [access.users] → ссылка MTProto
+        с TLS-обёрнутым секретом (формат ee<secret><domain_hex>)."""
+        secret = "deadbeefdeadbeefdeadbeefdeadbeef"
+        tls_domain = "mask.example.com"
+        patches = self._patch_telemt(
+            users={"user": secret}, port=8443, tls_domain=tls_domain, active=True,
+        )
+        links = self._run(patches, user=_FAKE_USER)
+        mt = self._mtproto_link(links)
+        self.assertIsNotNone(mt, "MTProto-ссылка должна присутствовать")
+        expected_secret = f"ee{secret}{tls_domain.encode().hex()}"
+        self.assertIn(f"secret={expected_secret}", mt["link"])
+        self.assertIn("port=8443", mt["link"])
+        self.assertIn("server=total-shadows.online", mt["link"])
+        self.assertTrue(mt["link"].startswith("https://t.me/proxy?"))
+
+    def test_mtproto_link_uses_email_local_part_when_name_not_in_telemt(self):
+        """Если user['name'] не найден, но локальная часть email совпадает —
+        ссылка генерируется (типичный кейс: portal email 'alice@x.com',
+        Telemt-имя 'alice')."""
+        secret = "aabbccddaabbccddaabbccddaabbccdd"
+        user = {"uuid": "u1", "name": "alice_portal", "email": "alice@x.com"}
+        patches = self._patch_telemt(users={"alice": secret})
+        links = self._run(patches, user=user)
+        mt = self._mtproto_link(links)
+        self.assertIsNotNone(mt, "Должен сработать fallback по локальной части email")
+        self.assertIn(f"secret=ee{secret}", mt["link"])
+
+    def test_mtproto_link_absent_when_no_matching_user(self):
+        """У юзера портала нет соответствующего аккаунта Telemt → ссылка
+        не показывается, остальные ссылки не ломаются."""
+        patches = self._patch_telemt(
+            users={"someone_else": "0123456789abcdef0123456789abcdef"},
+            active=True,
+        )
+        links = self._run(patches, user=_FAKE_USER)
+        mt = self._mtproto_link(links)
+        self.assertIsNone(mt, "MTProto-ссылка НЕ должна появляться без совпадения")
+        # VLESS-ссылка должна остаться.
+        self.assertGreaterEqual(len(links), 1)
+        self.assertEqual(links[0]["protocol"], "reality")
+
+    def test_mtproto_link_absent_when_service_inactive(self):
+        """systemctl is-active telemt → inactive: ссылка не отдаётся,
+        даже если у юзера есть секрет в Telemt-конфиге."""
+        secret = "deadbeefdeadbeefdeadbeefdeadbeef"
+        patches = self._patch_telemt(
+            users={"user": secret}, active=False,
+        )
+        links = self._run(patches, user=_FAKE_USER)
+        mt = self._mtproto_link(links)
+        self.assertIsNone(mt, "MTProto-ссылка не отдаётся при неактивном telemt")
+        self.assertGreaterEqual(len(links), 1)
+
+    def test_mtproto_link_uses_raw_secret_when_no_tls_domain(self):
+        """tls_domain пустой (нет [censorship] секции) → секрет не
+        оборачивается, отдаётся как есть."""
+        secret = "cafebabecafebabecafebabecafebabe"
+        patches = self._patch_telemt(
+            users={"user": secret}, tls_domain="", active=True,
+        )
+        links = self._run(patches, user=_FAKE_USER)
+        mt = self._mtproto_link(links)
+        self.assertIsNotNone(mt)
+        # Секрет без 'ee'-префикса и без hex-домена.
+        self.assertIn(f"secret={secret}", mt["link"])
+        self.assertNotIn("secret=ee", mt["link"])
+
+    def test_mtproto_link_absent_when_telemt_users_empty(self):
+        """Пустой [access.users] → нет секретов → нет ссылки."""
+        patches = self._patch_telemt(users={}, active=True)
+        links = self._run(patches, user=_FAKE_USER)
+        self.assertIsNone(self._mtproto_link(links))
+
+    def test_mtproto_link_absent_when_mtproto_module_import_fails(self):
+        """Если импорт mtproto падает (модуль не установлен) — regress к
+        silent-pass, остальные ссылки не ломаются (старый контракт)."""
+        import importlib
+        from chimera.modules import rest_api
+        # Прячем настоящий mtproto, подменяем на модуль без нужных атрибутов.
+        real_mtproto = sys.modules.get("chimera.modules.mtproto")
+        broken = type(sys)("chimera.modules.mtproto")
+        sys.modules["chimera.modules.mtproto"] = broken
+        try:
+            with patch.object(rest_api, "_get_state",
+                              return_value=_FAKE_STATE_REALITY):
+                links = rest_api._generate_vless_links(_FAKE_USER)
+        finally:
+            if real_mtproto is not None:
+                sys.modules["chimera.modules.mtproto"] = real_mtproto
+            else:
+                sys.modules.pop("chimera.modules.mtproto", None)
+        self.assertIsNone(self._mtproto_link(links))
+        self.assertGreaterEqual(len(links), 1)
 
 
 class TestGenerateClashConfig(unittest.TestCase):
