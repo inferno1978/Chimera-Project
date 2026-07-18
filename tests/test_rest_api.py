@@ -601,5 +601,308 @@ class TestSyncUsersFromConfig(unittest.TestCase):
         self.assertEqual(saved_users[0]["uuid"], "real-uuid")
 
 
+class TestTelemtSyncHelpers(unittest.TestCase):
+    """Автосинхронизация VLESS → Telemt (MTProto).
+
+    Тестирует мост между users.json (VLESS) и /etc/telemt/telemt.toml
+    [access.users] (Telemt). Логика: при создании/удалении/переименовании
+    VLESS-юзера в админ-панели соответствующий Telemt-аккаунт создаётся /
+    удаляется / переименовывается автоматически, чтобы MTProto-ссылка
+    появлялась в User Portal без ручного шага в TUI Chimera → Telemt →
+    Управление пользователями.
+    """
+
+    # Telemt-имя должно быть валидно по спеке mtproto._validate_username:
+    # ^[a-zA-Z][a-zA-Z0-9_\-]{2,15}$ — 3-16 символов, начинающихся с буквы.
+    VALID_NAME = "alice"
+    VALID_NAME_2 = "bob"
+    INVALID_NAME = "a@b.c"   # содержит @ и точки — не подходит для Telemt
+    NEW_SECRET = "deadbeefdeadbeefdeadbeefdeadbeef"
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        # Подменяем ядро для systemctl calls.
+        self._core = sys.modules.get("chimera._core")
+        self._cp_active = _make_completed_process("active\n", returncode=0)
+        self._cp_inactive = _make_completed_process("inactive\n", returncode=3)
+
+    def _patch_telemt(self, users=None, active=True, secret=None):
+        """Возвращает list-of-patches для Telemt-окружения.
+
+        users: dict {name: hex32_secret} (None → пустой конфиг)
+        active: True → systemctl is-active telemt → "active"
+        secret: значение, которое возвращает _generate_secret (для детерминизма)
+        """
+        from chimera.modules import mtproto as _mtproto_mod
+        if users is None:
+            users = {}
+        if secret is None:
+            secret = self.NEW_SECRET
+        cp = self._cp_active if active else self._cp_inactive
+        patches = [
+            patch.object(_mtproto_mod, "_load_users", return_value=dict(users)),
+            patch.object(_mtproto_mod, "_save_users"),
+            patch.object(_mtproto_mod, "_generate_secret", return_value=secret),
+            patch.object(_mtproto_mod, "_validate_username",
+                         side_effect=lambda n: bool(n) and
+                         bool(__import__("re").match(r'^[a-zA-Z][a-zA-Z0-9_\-]{2,15}$', n))),
+            patch.object(_mtproto_mod, "SERVICE_NAME", "telemt"),
+        ]
+        if self._core is not None:
+            patches.append(patch.object(self._core, "_run", return_value=cp))
+        return patches
+
+    def _apply(self, patches):
+        for p in patches:
+            p.start()
+
+    def _revert(self, patches):
+        for p in patches:
+            p.stop()
+
+    # ── _telemt_is_active ─────────────────────────────────────────────────
+    def test_telemt_is_active_true(self):
+        from chimera.modules import rest_api
+        patches = self._patch_telemt(active=True)
+        self._apply(patches)
+        try:
+            self.assertTrue(rest_api._telemt_is_active())
+        finally:
+            self._revert(patches)
+
+    def test_telemt_is_active_false_when_inactive(self):
+        from chimera.modules import rest_api
+        patches = self._patch_telemt(active=False)
+        self._apply(patches)
+        try:
+            self.assertFalse(rest_api._telemt_is_active())
+        finally:
+            self._revert(patches)
+
+    # ── _telemt_ensure_user ───────────────────────────────────────────────
+    def test_ensure_user_creates_when_missing(self):
+        """Создаёт Telemt-аккаунт для валидного VLESS-имени."""
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        patches = self._patch_telemt(users={})  # пустой Telemt
+        self._apply(patches)
+        try:
+            ok = rest_api._telemt_ensure_user(self.VALID_NAME)
+            self.assertTrue(ok)
+            # Проверяем что _save_users вызван с alice и сгенерированным секретом.
+            _mt._save_users.assert_called_once()
+            saved = _mt._save_users.call_args.args[0]
+            self.assertIn(self.VALID_NAME, saved)
+            self.assertEqual(saved[self.VALID_NAME], self.NEW_SECRET)
+        finally:
+            self._revert(patches)
+
+    def test_ensure_user_noop_when_already_exists(self):
+        """Если аккаунт уже есть — не перезаписываем секрет."""
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        existing = {self.VALID_NAME: "aabbccddeeff00112233445566778899"}
+        patches = self._patch_telemt(users=existing)
+        self._apply(patches)
+        try:
+            ok = rest_api._telemt_ensure_user(self.VALID_NAME)
+            self.assertTrue(ok)
+            # _save_users не должен вызываться — аккаунт уже существует.
+            _mt._save_users.assert_not_called()
+        finally:
+            self._revert(patches)
+
+    def test_ensure_user_rejects_invalid_name(self):
+        """Имя не подходит под Telemt-спеку → no-op, без исключения."""
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        patches = self._patch_telemt(users={})
+        self._apply(patches)
+        try:
+            ok = rest_api._telemt_ensure_user(self.INVALID_NAME)
+            self.assertFalse(ok)
+            _mt._save_users.assert_not_called()
+        finally:
+            self._revert(patches)
+
+    def test_ensure_user_empty_name_returns_false(self):
+        from chimera.modules import rest_api
+        ok = rest_api._telemt_ensure_user("")
+        self.assertFalse(ok)
+
+    # ── _telemt_remove_user ───────────────────────────────────────────────
+    def test_remove_user_deletes_existing(self):
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        existing = {self.VALID_NAME: "x" * 32, self.VALID_NAME_2: "y" * 32}
+        patches = self._patch_telemt(users=existing)
+        self._apply(patches)
+        try:
+            ok = rest_api._telemt_remove_user(self.VALID_NAME)
+            self.assertTrue(ok)
+            _mt._save_users.assert_called_once()
+            saved = _mt._save_users.call_args.args[0]
+            self.assertNotIn(self.VALID_NAME, saved)
+            self.assertIn(self.VALID_NAME_2, saved)
+        finally:
+            self._revert(patches)
+
+    def test_remove_user_noop_when_missing(self):
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        patches = self._patch_telemt(users={self.VALID_NAME_2: "y" * 32})
+        self._apply(patches)
+        try:
+            ok = rest_api._telemt_remove_user(self.VALID_NAME)
+            self.assertTrue(ok)  # "уже удалён" — True
+            _mt._save_users.assert_not_called()
+        finally:
+            self._revert(patches)
+
+    def test_remove_user_refuses_to_delete_last(self):
+        """Не даём удалить последнего пользователя (Telemt требует минимум одного)."""
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        existing = {self.VALID_NAME: "x" * 32}  # один юзер
+        patches = self._patch_telemt(users=existing)
+        self._apply(patches)
+        try:
+            ok = rest_api._telemt_remove_user(self.VALID_NAME)
+            self.assertFalse(ok)
+            _mt._save_users.assert_not_called()
+        finally:
+            self._revert(patches)
+
+    # ── _telemt_rename_user ───────────────────────────────────────────────
+    def test_rename_user_preserves_secret(self):
+        """При переименовании секрет должен переноситься, а не генерироваться заново."""
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        old_secret = "11111111111111111111111111111111"
+        existing = {self.VALID_NAME: old_secret}
+        patches = self._patch_telemt(users=existing)
+        self._apply(patches)
+        try:
+            ok = rest_api._telemt_rename_user(self.VALID_NAME, self.VALID_NAME_2)
+            self.assertTrue(ok)
+            saved = _mt._save_users.call_args.args[0]
+            self.assertNotIn(self.VALID_NAME, saved)
+            self.assertIn(self.VALID_NAME_2, saved)
+            self.assertEqual(saved[self.VALID_NAME_2], old_secret)
+        finally:
+            self._revert(patches)
+
+    def test_rename_user_refuses_if_target_taken(self):
+        """Если новое имя уже занято — не трогаем чужой секрет."""
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        existing = {
+            self.VALID_NAME: "11111111111111111111111111111111",
+            self.VALID_NAME_2: "22222222222222222222222222222222",
+        }
+        patches = self._patch_telemt(users=existing)
+        self._apply(patches)
+        try:
+            ok = rest_api._telemt_rename_user(self.VALID_NAME, self.VALID_NAME_2)
+            self.assertFalse(ok)
+            _mt._save_users.assert_not_called()
+        finally:
+            self._revert(patches)
+
+    def test_rename_user_creates_new_if_old_missing(self):
+        """Если старого имени нет в Telemt — создаём новое (fallback)."""
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        patches = self._patch_telemt(users={})
+        self._apply(patches)
+        try:
+            ok = rest_api._telemt_rename_user("nonexistent", self.VALID_NAME)
+            self.assertTrue(ok)
+            saved = _mt._save_users.call_args.args[0]
+            self.assertIn(self.VALID_NAME, saved)
+        finally:
+            self._revert(patches)
+
+    # ── _telemt_sync_all_from_vless ───────────────────────────────────────
+    def test_sync_all_creates_missing_for_valid_vless_names(self):
+        """Полная синхронизация: создаёт недостающих Telemt-юзеров."""
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        vless_users = [
+            {"name": "alice", "email": "alice@x.com", "disabled": False},
+            {"name": "bob",   "email": "bob@x.com",   "disabled": False},
+            {"name": "a@b.c", "email": "weird@x.com", "disabled": False},  # invalid
+        ]
+        # alice уже есть в Telemt, bob — нет.
+        existing_telemt = {"alice": "x" * 32}
+        patches = self._patch_telemt(users=existing_telemt)
+        self._apply(patches)
+        try:
+            stats = rest_api._telemt_sync_all_from_vless(vless_users)
+            self.assertEqual(stats["created"], 1)  # bob
+            self.assertEqual(stats["skipped_invalid"], 1)  # a@b.c
+            saved = _mt._save_users.call_args.args[0]
+            self.assertIn("alice", saved)
+            self.assertIn("bob", saved)
+            self.assertNotIn("a@b.c", saved)
+        finally:
+            self._revert(patches)
+
+    def test_sync_all_skips_disabled_vless_users(self):
+        """disabled=True VLESS-юзеры не получают Telemt-аккаунт."""
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        vless_users = [
+            {"name": "alice", "email": "alice@x.com", "disabled": False},
+            {"name": "bob",   "email": "bob@x.com",   "disabled": True},
+        ]
+        patches = self._patch_telemt(users={"alice": "x" * 32})
+        self._apply(patches)
+        try:
+            stats = rest_api._telemt_sync_all_from_vless(vless_users)
+            self.assertEqual(stats["created"], 0)  # bob disabled → не создан
+            _mt._save_users.assert_not_called()
+        finally:
+            self._revert(patches)
+
+    def test_sync_all_noop_when_telemt_inactive(self):
+        """Telemt не активен → no-op (никаких изменений)."""
+        from chimera.modules import rest_api
+        from chimera.modules import mtproto as _mt
+        vless_users = [{"name": "alice", "email": "alice@x.com", "disabled": False}]
+        patches = self._patch_telemt(users={}, active=False)
+        self._apply(patches)
+        try:
+            stats = rest_api._telemt_sync_all_from_vless(vless_users)
+            self.assertEqual(stats["created"], 0)
+            _mt._save_users.assert_not_called()
+        finally:
+            self._revert(patches)
+
+    # ── Интеграционный тест: импорт обёрнут в try/except ImportError ──────
+    def test_helpers_survive_when_mtproto_module_unavailable(self):
+        """Если mtproto модуль недоступен — функции возвращают False/пусто,
+        не выбрасывая исключений (контракт no-op на любой сбой)."""
+        from chimera.modules import rest_api
+        # Прячем настоящий mtproto из sys.modules.
+        real = sys.modules.get("chimera.modules.mtproto")
+        sys.modules.pop("chimera.modules.mtproto", None)
+        # Подменяем на модуль без нужных атрибутов → ImportError при `from ... import ...`.
+        broken = type(sys)("chimera.modules.mtproto")
+        # Намеренно НЕ добавляем атрибуты → `from ... import _load_users` упадёт.
+        sys.modules["chimera.modules.mtproto"] = broken
+        try:
+            self.assertFalse(rest_api._telemt_ensure_user("alice"))
+            self.assertFalse(rest_api._telemt_remove_user("alice"))
+            self.assertFalse(rest_api._telemt_rename_user("a", "b"))
+            stats = rest_api._telemt_sync_all_from_vless([{"name": "alice"}])
+            self.assertEqual(stats["created"], 0)
+        finally:
+            if real is not None:
+                sys.modules["chimera.modules.mtproto"] = real
+            else:
+                sys.modules.pop("chimera.modules.mtproto", None)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -239,6 +239,208 @@ def _sync_users_from_config() -> int:
     return added
 
 
+# ── Telemt (MTProto) ↔ users.json автосинхронизация ──────────────────────────
+#
+# Telemt хранит свой список пользователей отдельно от VLESS (users.json) —
+# в /etc/telemt/telemt.toml, секция [access.users]. Каждый Telemt-юзер имеет
+# уникальный secret (hex32), который используется в персональной MTProto-ссылке.
+#
+# Без автосинхронизации админ должен вручную создавать каждого юзера через
+# TUI Chimera → Telemt → Управление пользователями → Добавить. Это не работает
+# на практике: юзер VLESS создан в админ-панели, а Telemt-аккаунта нет →
+# MTProto-ссылка не появляется в User Portal (см. _generate_vless_links).
+#
+# Эти функции — мост: при создании/удалении/переименовании VLESS-юзера в
+# админ-панели автоматически создаём/удаляем/переименовываем соответствующего
+# Telemt-юзера с тем же name. Секрет генерируется случайно (hex32) через
+# Telemt'овский _generate_secret(). Если Telemt не установлен — функции
+# молча возвращаются (no-op), не ломая остальные операции.
+#
+# ВАЖНО: все функции оставляют Telemt-аккаунты, созданные вручную через TUI,
+# нетронутыми — синхронизация работает только в одну сторону (VLESS → Telemt),
+# и только для имён, которые валидны по Telemt-спеке (^[a-zA-Z][a-zA-Z0-9_\-]{2,15}$).
+
+def _telemt_is_active() -> bool:
+    """Возвращает True если служба telemt активна (systemctl is-active)."""
+    try:
+        core = _core_module()
+        from chimera.modules.mtproto import SERVICE_NAME as _TELEMT_SVC
+        r = core._run(["systemctl", "is-active", _TELEMT_SVC],
+                      capture=True, check=False)
+        return r.returncode == 0 and r.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def _telemt_ensure_user(name: str) -> bool:
+    """Создаёт Telemt-пользователя с именем `name`, если его ещё нет.
+
+    Возвращает True если пользователь создан или уже существует.
+    Возвращает False если:
+      • Telemt не активен (не установлен) → no-op
+      • Имя невалидно по Telemt-спеке → no-op (VLESS-юзер остаётся без MTProto)
+      • Ошибка при сохранении/рестарте → no-op
+    """
+    if not name:
+        return False
+    try:
+        from chimera.modules.mtproto import (
+            _load_users as _telemt_load_users,
+            _save_users as _telemt_save_users,
+            _generate_secret as _telemt_generate_secret,
+            _validate_username as _telemt_validate_username,
+            SERVICE_NAME as _TELEMT_SVC,
+        )
+    except ImportError:
+        # mtproto модуль недоступен (старая инсталляция без Telemt)
+        return False
+    # Имя должно соответствовать Telemt-спеке: ^[a-zA-Z][a-zA-Z0-9_\-]{2,15}$
+    # VLESS-юзеры могут иметь имена с точками, @, и т.д. — для них MTProto
+    # будет недоступен (требование Telemt-бинарника, не наше ограничение).
+    if not _telemt_validate_username(name):
+        return False
+    try:
+        users = _telemt_load_users() or {}
+        if name in users:
+            return True  # уже есть — ничего делать не надо
+        users[name] = _telemt_generate_secret()
+        _telemt_save_users(users)
+        # Рестарт telemt чтобы подхватил нового юзера (аналогично TUI-меню).
+        core = _core_module()
+        core._run(["systemctl", "restart", _TELEMT_SVC], check=False, quiet=True)
+        return True
+    except Exception:
+        return False
+
+
+def _telemt_remove_user(name: str) -> bool:
+    """Удаляет Telemt-пользователя с именем `name`, если он существует.
+
+    Возвращает True если удалён или его не было. False — при ошибке.
+    Никогда не падает с исключением — no-op на любой сбой.
+    """
+    if not name:
+        return False
+    try:
+        from chimera.modules.mtproto import (
+            _load_users as _telemt_load_users,
+            _save_users as _telemt_save_users,
+            SERVICE_NAME as _TELEMT_SVC,
+        )
+    except ImportError:
+        return False
+    try:
+        users = _telemt_load_users() or {}
+        if name not in users:
+            return True  # нет такого — уже "удалён"
+        # Не удаляем последнего пользователя (Telemt требует минимум одного).
+        if len(users) <= 1:
+            return False
+        del users[name]
+        _telemt_save_users(users)
+        core = _core_module()
+        core._run(["systemctl", "restart", _TELEMT_SVC], check=False, quiet=True)
+        return True
+    except Exception:
+        return False
+
+
+def _telemt_rename_user(old_name: str, new_name: str) -> bool:
+    """Переименовывает Telemt-пользователя old_name → new_name.
+
+    Сохраняет секрет (MTProto-ссылка остаётся рабочей, меняется только имя).
+    Если new_name уже занят — no-op (не перезаписываем чужой секрет).
+    Если old_name не существует — пробуем создать new_name с новым секретом
+    (fallback, чтобы не ломать сценарий "переименовали в VLESS, но в Telemt
+    такого не было" — тогда просто создаём нового).
+    """
+    if not old_name or not new_name:
+        return False
+    if old_name == new_name:
+        return True
+    try:
+        from chimera.modules.mtproto import (
+            _load_users as _telemt_load_users,
+            _save_users as _telemt_save_users,
+            _generate_secret as _telemt_generate_secret,
+            _validate_username as _telemt_validate_username,
+            SERVICE_NAME as _TELEMT_SVC,
+        )
+    except ImportError:
+        return False
+    if not _telemt_validate_username(new_name):
+        return False
+    try:
+        users = _telemt_load_users() or {}
+        if new_name in users:
+            # Имя занято — не трогаем чужой секрет.
+            return False
+        if old_name in users:
+            users[new_name] = users.pop(old_name)
+        else:
+            # Старого нет — создаём нового (fallback).
+            users[new_name] = _telemt_generate_secret()
+        _telemt_save_users(users)
+        core = _core_module()
+        core._run(["systemctl", "restart", _TELEMT_SVC], check=False, quiet=True)
+        return True
+    except Exception:
+        return False
+
+
+def _telemt_sync_all_from_vless(users: list[dict]) -> dict:
+    """Полная синхронизация VLESS → Telemt.
+
+    Создаёт недостающих Telemt-аккаунтов для всех валидных VLESS-юзеров.
+    Удаляет "лишние" Telemt-аккаунты только если они НЕ валидны как
+    Telemt-имена (чтобы не удалить аккаунты, созданные вручную через TUI
+    с именами, не совпадающими с VLESS-юзерами).
+
+    Возвращает dict со статистикой для отчёта в админ-панели:
+      {"created": N, "removed": N, "skipped_invalid": N}
+    """
+    stats = {"created": 0, "removed": 0, "skipped_invalid": 0}
+    try:
+        from chimera.modules.mtproto import (
+            _load_users as _telemt_load_users,
+            _save_users as _telemt_save_users,
+            _generate_secret as _telemt_generate_secret,
+            _validate_username as _telemt_validate_username,
+            SERVICE_NAME as _TELEMT_SVC,
+        )
+    except ImportError:
+        return stats
+    if not _telemt_is_active():
+        return stats
+    try:
+        telemt_users = _telemt_load_users() or {}
+        # Собираем валидные VLESS-имена (могут дублироваться между email/name —
+        # берём уникальные).
+        vless_names: set[str] = set()
+        for u in users:
+            name = u.get("name", "") or ""
+            if not u.get("disabled", False) and name:
+                vless_names.add(name)
+        # Создаём недостающих.
+        new_users = dict(telemt_users)
+        for name in vless_names:
+            if name not in new_users:
+                if _telemt_validate_username(name):
+                    new_users[name] = _telemt_generate_secret()
+                    stats["created"] += 1
+                else:
+                    stats["skipped_invalid"] += 1
+        # Сохраняем если были изменения.
+        if new_users != telemt_users:
+            _telemt_save_users(new_users)
+            core = _core_module()
+            core._run(["systemctl", "restart", _TELEMT_SVC],
+                      check=False, quiet=True)
+    except Exception:
+        pass
+    return stats
+
+
 def _get_user_traffic(email: str) -> dict:
     """Возвращает трафик пользователя (uplink + downlink)."""
     core = _core_module()
@@ -1151,12 +1353,18 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+            # Автосинхронизация с Telemt: создаём соответствующего
+            # Telemt-пользователя с тем же name, чтобы MTProto-ссылка
+            # появилась в User Portal без ручного шага в TUI.
+            telemt_created = _telemt_ensure_user(name)
+
             self._send_json({
                 "status": "created",
                 "uuid": new_uuid,
                 "email": email,
                 "portal_login": name or email,
                 "portal_password": portal_password,
+                "telemt_synced": telemt_created,
             }, 201)
             return
 
@@ -1288,11 +1496,27 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 return
             try:
                 added = _sync_users_from_config()
+                # Полная синхронизация VLESS → Telemt: создаём недостающие
+                # Telemt-аккаунты для всех валидных VLESS-юзеров, чтобы
+                # MTProto-ссылки появились в User Portal для всех сразу.
+                telemt_stats = _telemt_sync_all_from_vless(_get_users())
+                msg_parts = []
+                if added:
+                    msg_parts.append(f"Синхронизировано {added} новых юзеров из config.json")
+                else:
+                    msg_parts.append("Новых юзеров в config.json не найдено — users.json уже актуален")
+                tc = telemt_stats.get("created", 0)
+                ts = telemt_stats.get("skipped_invalid", 0)
+                if tc:
+                    msg_parts.append(f"создано {tc} Telemt-аккаунтов")
+                if ts:
+                    msg_parts.append(f"{ts} имён не подходят для Telemt (нужен формат [a-zA-Z][a-zA-Z0-9_-]{{2,15}})")
                 self._send_json({
                     "status": "synced",
                     "added": added,
-                    "message": (f"Синхронизировано {added} новых юзеров из config.json"
-                                if added else "Новых юзеров в config.json не найдено — users.json уже актуален"),
+                    "telemt_created": tc,
+                    "telemt_skipped_invalid": ts,
+                    "message": "; ".join(msg_parts),
                 })
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
@@ -1355,6 +1579,13 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             # не находится в users.json → 404 → "Ошибка удаления" в admin panel.
             email = unquote(m.group(1))
             users = _get_users()
+            # Ищем удаляемого юзера ДО того как отфильтруем список —
+            # нужно знать его name для синхронизации с Telemt.
+            deleted_user = None
+            for u in users:
+                if u.get("email") == email:
+                    deleted_user = u
+                    break
             new_users = [u for u in users if u.get("email") != email]
             if len(new_users) == len(users):
                 self._send_json({"error": "user not found"}, 404)
@@ -1365,7 +1596,19 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 core._users_apply_to_config(new_users)
             except Exception:
                 pass
-            self._send_json({"status": "deleted", "email": email})
+            # Автосинхронизация с Telemt: удаляем соответствующего
+            # Telemt-пользователя (если он был), чтобы не оставлять
+            # "висящий" MTProto-аккаунт для удалённого VLESS-юзера.
+            telemt_removed = False
+            if deleted_user is not None:
+                telemt_removed = _telemt_remove_user(
+                    deleted_user.get("name", "") or
+                    deleted_user.get("email", "").split("@")[0]
+                )
+            self._send_json({
+                "status": "deleted", "email": email,
+                "telemt_synced": telemt_removed,
+            })
             return
 
         # DELETE /api/geoip/rules
