@@ -290,16 +290,34 @@ def _ufw_open_tcp(port: int, comment: str = "snell") -> None:
         return
     _run(["ufw", "allow", f"{port}/tcp", "comment", comment], capture=True)
 
+def _ufw_open_udp(port: int, comment: str = "snell") -> None:
+    if not _ufw_is_active():
+        return
+    _run(["ufw", "allow", f"{port}/udp", "comment", comment], capture=True)
+
 def _ufw_close_tcp(port: int) -> None:
     if not _ufw_is_active():
         return
     _run(["ufw", "delete", "allow", f"{port}/tcp"], capture=True)
 
+def _ufw_close_udp(port: int) -> None:
+    if not _ufw_is_active():
+        return
+    _run(["ufw", "delete", "allow", f"{port}/udp"], capture=True)
+
 def _ipt_tcp_rule_exists(port: int) -> bool:
     r = _run(
         ["iptables", "-t", "filter", "-C", "INPUT",
          "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
-        capture=True,
+        capture=True, check=False,
+    )
+    return r.returncode == 0
+
+def _ipt_udp_rule_exists(port: int) -> bool:
+    r = _run(
+        ["iptables", "-t", "filter", "-C", "INPUT",
+         "-p", "udp", "--dport", str(port), "-j", "ACCEPT"],
+        capture=True, check=False,
     )
     return r.returncode == 0
 
@@ -307,6 +325,12 @@ def _ipt_open_tcp(port: int) -> None:
     if not _ipt_tcp_rule_exists(port):
         _run(["iptables", "-t", "filter", "-I", "INPUT", "1",
               "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"])
+        proto_ipt_persist()
+
+def _ipt_open_udp(port: int) -> None:
+    if not _ipt_udp_rule_exists(port):
+        _run(["iptables", "-t", "filter", "-I", "INPUT", "1",
+              "-p", "udp", "--dport", str(port), "-j", "ACCEPT"])
         proto_ipt_persist()
 
 def _ipt_close_tcp(port: int) -> None:
@@ -317,19 +341,37 @@ def _ipt_close_tcp(port: int) -> None:
               "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"])
     proto_ipt_persist()
 
+def _ipt_close_udp(port: int) -> None:
+    for _ in range(5):
+        if not _ipt_udp_rule_exists(port):
+            break
+        _run(["iptables", "-t", "filter", "-D", "INPUT",
+              "-p", "udp", "--dport", str(port), "-j", "ACCEPT"])
+    proto_ipt_persist()
+
 def _open_port(port: int, username: str) -> str:
-    """Открывает TCP-порт для конкретного юзера. Возвращает описание действия."""
+    """Открывает TCP+UDP порт для конкретного юзера.
+
+    Snell v5 использует QUIC (UDP) транспорт В ДОПОЛНЕНИЕ к TCP.
+    Лог snell-server: "Please confirm that both TCP and UDP inbound
+    to port 30000 has been enabled." Если открыть только TCP —
+    QUIC-handshake по UDP не проходит, клиент получает Timeout.
+    """
     comment = f"snell-{username}"
     if _ufw_is_active():
         _ufw_open_tcp(port, comment)
-        return f"UFW: TCP {port} открыт для {username}"
+        _ufw_open_udp(port, comment)
+        return f"UFW: TCP+UDP {port} открыт для {username}"
     _ipt_open_tcp(port)
-    return f"iptables: TCP {port} открыт для {username}"
+    _ipt_open_udp(port)
+    return f"iptables: TCP+UDP {port} открыт для {username}"
 
 def _close_port(port: int) -> None:
-    """Закрывает TCP-порт и в UFW, и в iptables (на всякий случай)."""
+    """Закрывает TCP+UDP порт и в UFW, и в iptables."""
     _ufw_close_tcp(port)
+    _ufw_close_udp(port)
     _ipt_close_tcp(port)
+    _ipt_close_udp(port)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PSK GENERATION
@@ -448,7 +490,7 @@ def _start_user_instance(username: str) -> bool:
     """Запускает systemd-инстанс snell-server@<username>.
 
     Возвращает True если инстанс успешно стартовал (или уже был активен)
-    И порт действительно слушается.
+    И порт действительно слушается (TCP — для v4 compat, UDP — для QUIC в v5).
     """
     instance = f"{SERVICE_NAME}{username}"
     _run(["systemctl", "enable", instance])
@@ -458,20 +500,20 @@ def _start_user_instance(username: str) -> bool:
     if r.returncode != 0 or r.stdout.strip() != "active":
         return False
     # Дополнительная проверка: порт действительно слушается.
-    # systemd может показать "active" даже если binary упал после старта
-    # (Type=simple, Restart=on-failure с RestartSec=5 — между падением и
-    # рестартом есть окно где is-active может показать "active").
-    # Проверяем через ss -tlnp что порт реально слушается.
+    # snell-server v5 пишет в лог: "Please confirm that both TCP and UDP
+    # inbound to port 30000 has been enabled." — он слушает ОБА протокола.
+    # Проверяем через ss что хотя бы TCP слушается (UDP тоже должен, но
+    # ss -tlnp показывает только TCP; UDP проверяем через ss -ulnp).
     state = _load_state()
     user = _find_user(state, username)
     if user:
         port = user.get("port", 0)
         if port:
-            r = _run(["ss", "-tlnp"], capture=True, check=False)
+            r = _run(["ss", "-tulnp"], capture=True, check=False)
             if r.returncode == 0 and r.stdout:
-                # Ищем строку с нашим портом — формат ":30000 " или "[::]:30000 "
-                if f":{port} " not in r.stdout and f":{port}\n" not in r.stdout:
-                    return False  # порт не слушается
+                # Ищем порт в выводе ss — и TCP и UDP.
+                if f":{port}" not in r.stdout:
+                    return False  # порт не слушается ни по TCP ни по UDP
     return True
 
 def _stop_user_instance(username: str) -> None:
@@ -1371,29 +1413,26 @@ def _fmt_bytes(n: int) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _ensure_port_open(port: int, username: str) -> bool:
-    """Проверяет что порт открыт в UFW/iptables. Если закрыт — открывает.
+    """Проверяет что порт открыт в UFW/iptables (TCP+UDP). Если закрыт — открывает.
 
-    Defensive функция — вызывается при генерации клиентских конфигов
-    (Clash/Singbox) чтобы гарантировать что порт доступен. Если порт
-    был закрыт (например, UFW был включён после создания юзера и
-    flush-нул iptables правила) — открывает его автоматически.
-
-    Возвращает True если порт открыт (был или стал).
+    Snell v5 использует QUIC (UDP) В ДОПОЛНЕНИЕ к TCP. Лог:
+    "Please confirm that both TCP and UDP inbound to port 30000 has been enabled."
+    Если открыт только TCP — QUIC-handshake по UDP не проходит, клиент
+    получает Timeout. Поэтому проверяем и открываем ОБА протокола.
     """
-    # Сначала проверяем — может порт уже открыт.
     if _ufw_is_active():
         r = _run(["ufw", "status"], capture=True, check=False)
         if r.returncode == 0 and r.stdout:
-            # Ищем порт в выводе ufw status.
-            if f"{port}/tcp" in r.stdout:
-                return True  # уже открыт
-        # Порт не найден в UFW — открываем.
-        _ufw_open_tcp(port, f"snell-{username}")
+            if f"{port}/tcp" not in r.stdout:
+                _ufw_open_tcp(port, f"snell-{username}")
+            if f"{port}/udp" not in r.stdout:
+                _ufw_open_udp(port, f"snell-{username}")
         return True
-    # UFW не активен — проверяем iptables.
-    if _ipt_tcp_rule_exists(port):
-        return True  # уже открыт
-    _ipt_open_tcp(port)
+    # UFW не активен — iptables.
+    if not _ipt_tcp_rule_exists(port):
+        _ipt_open_tcp(port)
+    if not _ipt_udp_rule_exists(port):
+        _ipt_open_udp(port)
     return True
 
 

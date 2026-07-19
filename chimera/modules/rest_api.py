@@ -752,20 +752,17 @@ def _generate_clash_config(user: dict) -> str:
                         obfs_mode = obfs.get("mode", "off")
                         obfs_host = obfs.get("host", "")
                         # Ручная YAML-сериализация (без привлечения yaml-модуля).
-                        # PSK закавычен двойными кавычками — base64 содержит
-                        # символы / + = которые некоторые YAML-парсеры (включая
-                        # Clash Meta) могут интерпретировать неправильно без
-                        # кавычек. Пример: PSK "/x4PFN...+...fNs=" без кавычек
-                        # мог быть распарсен как-то specially, приводя к
-                        # неверному PSK на клиенте → connection timeout.
-                        # obfs-host тоже закавычен — домен может содержать
-                        # специальные символы в будущем (wildcard, и т.п.).
+                        # PSK НЕ кавычим — base64 символы / + = валидны в YAML
+                        # plain scalars, все Clash-совместимые парсеры (включая
+                        # Clash Meta, Mihomo) корректно их читают без кавычек.
+                        # Hydra-ULTIMATE генерирует Snell-конфиги без кавычек
+                        # вокруг PSK — следуем тому же паттерну.
                         snell_proxy_yaml = (
-                            f"  - name: \"{snell_name}\"\n"
+                            f"  - name: {snell_name}\n"
                             f"    type: snell\n"
                             f"    server: {px['server']}\n"
                             f"    port: {px['port']}\n"
-                            f"    psk: \"{px['psk']}\"\n"
+                            f"    psk: {px['psk']}\n"
                             f"    obfs-opts:\n"
                             f"      mode: {obfs_mode}\n"
                         )
