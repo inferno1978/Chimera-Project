@@ -524,6 +524,35 @@ def _generate_vless_links(user: dict) -> list[dict]:
     else:
         sni = domain
 
+    # ── Tag (после # в URL) ──────────────────────────────────────────────
+    # В TUI (_unified_show_links в users_manager.py) тэг формируется как
+    # "<флаг страны> <имя юзера>". Web-панель раньше хардкодила "VLESS-Reality"
+    # / "VLESS-xHTTP" — без флага и без имени юзера. Это было неудобно: в
+    # клиенте (v2rayN, NekoBox, и т.п.) несколько узлов отображались как
+    # одинаковые "VLESS Reality", без возможности отличить.
+    #
+    # Теперь web-панель использует тот же формат что и TUI:
+    #   "<флаг> <имя_юзера>"  (если флаг есть и не "🌐")
+    #   "<имя_юзера>"         (если флаг недоступен)
+    # Имя юзера берётся из user["name"], fallback на email, потом на "user".
+    # Это совпадает с TUI-логикой в _unified_show_links().
+    #
+    # Флаг страны кешируется через get_server_country_cached() — один curl
+    # к ip-api.com за всё время работы процесса. Если ip-api недоступен —
+    # возвращается "🌐", тогда prefix пустой (без флага).
+    from urllib.parse import quote as _url_quote
+    try:
+        _, _, _flag = core.get_server_country_cached()
+    except Exception:
+        _flag = "🌐"
+    _flag_prefix = f"{_flag} " if _flag and _flag != "🌐" else ""
+    # label = user name (или email, или "user") — как в TUI.
+    _user_label = (user.get("name", "") or user.get("email", "")
+                   or "user").replace(" ", "_").replace("/", "_")
+    _tag_user = _flag_prefix + _url_quote(_user_label)
+    # Для IPv6 добавляем суффикс "IPv6" чтобы отличить от IPv4 в клиенте.
+    _tag_user_v6 = _flag_prefix + _url_quote(_user_label + "-IPv6")
+
     links = []
 
     # IPv4 / Domain link
@@ -532,13 +561,12 @@ def _generate_vless_links(user: dict) -> list[dict]:
                 f"?encryption=none&flow={xtls_flow}"
                 f"&security=reality&sni={sni}"
                 f"&fp={fp}&pbk={pub_key}&sid={short_id}"
-                f"&type=tcp#VLESS-Reality")
+                f"&type=tcp#{_tag_user}")
     else:
-        from urllib.parse import quote
-        xhttp_path_enc = quote(xhttp_path, safe="")
+        xhttp_path_enc = _url_quote(xhttp_path, safe="")
         link = (f"vless://{uuid_val}@{domain}:{port}"
                 f"?encryption=none&security=tls&sni={domain}"
-                f"&fp={fp}&type=http&path={xhttp_path_enc}#VLESS-xHTTP")
+                f"&fp={fp}&type=http&path={xhttp_path_enc}#{_tag_user}")
     links.append({"label": "IPv4 / Domain", "link": link, "protocol": proto})
 
     # IPv6 link (если доступен)
@@ -549,13 +577,12 @@ def _generate_vless_links(user: dict) -> list[dict]:
                      f"?encryption=none&flow={xtls_flow}"
                      f"&security=reality&sni={sni}"
                      f"&fp={fp}&pbk={pub_key}&sid={short_id}"
-                     f"&type=tcp#VLESS-Reality-IPv6")
+                     f"&type=tcp#{_tag_user_v6}")
         else:
-            from urllib.parse import quote
-            xhttp_path_enc = quote(xhttp_path, safe="")
+            xhttp_path_enc = _url_quote(xhttp_path, safe="")
             link6 = (f"vless://{uuid_val}@[{ipv6}]:{port}"
                      f"?encryption=none&security=tls&sni={domain}"
-                     f"&fp={fp}&type=http&path={xhttp_path_enc}#VLESS-xHTTP-IPv6")
+                     f"&fp={fp}&type=http&path={xhttp_path_enc}#{_tag_user_v6}")
         links.append({"label": "IPv6", "link": link6, "protocol": proto})
 
     # Hysteria2 (если включён И реально настроен И сервис активен)
