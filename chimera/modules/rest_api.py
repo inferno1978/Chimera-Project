@@ -725,6 +725,33 @@ def _generate_vless_links(user: dict) -> list[dict]:
     except Exception:
         pass
 
+    # Snell v4 (если установлен и есть активный инстанс для этого юзера).
+    # Per-user модель: каждый юзер имеет свой порт+PSK, ссылка генерируется
+    # только если snell-server@<user> активен. Сопоставление по user["name"]
+    # / email / email-local-part (как в MTProto-блоке выше).
+    try:
+        from chimera.modules.snell import (
+            get_user_link as _snell_get_user_link,
+            is_any_active as _snell_is_any_active,
+        )
+        if _snell_is_any_active():
+            # Сопоставление: пробуем user["name"], user["email"], локальную
+            # часть email — Snell-юзеры имеют имена в формате [a-zA-Z][a-zA-Z0-9_-]{2,15}.
+            user_name = user.get("name", "") or ""
+            user_email = user.get("email", "") or ""
+            user_email_local = user_email.split("@", 1)[0] if user_email else ""
+            snell_link = None
+            for candidate in (user_name, user_email, user_email_local):
+                if candidate:
+                    snell_link = _snell_get_user_link(candidate, server_ip=domain)
+                    if snell_link:
+                        break
+            if snell_link:
+                links.append({"label": "Snell v4", "link": snell_link,
+                              "protocol": "snell"})
+    except Exception:
+        pass
+
     return links
 
 
@@ -747,6 +774,48 @@ def _generate_clash_config(user: dict) -> str:
     xhttp_path = state.get("xhttp_path", "/")
     xtls_flow = state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision"
 
+    # Snell v4 — добавляем как альтернативный proxy если установлен и
+    # есть активный инстанс для этого юзера. Per-user matching по name/email.
+    snell_proxy_yaml = ""
+    snell_name = ""
+    try:
+        from chimera.modules.snell import (
+            get_user_clash_proxy as _snell_get_clash_proxy,
+            is_any_active as _snell_is_any_active,
+        )
+        if _snell_is_any_active():
+            user_name = user.get("name", "") or ""
+            user_email = user.get("email", "") or ""
+            user_email_local = user_email.split("@", 1)[0] if user_email else ""
+            for candidate in (user_name, user_email, user_email_local):
+                if candidate:
+                    px = _snell_get_clash_proxy(candidate, server_ip=domain)
+                    if px:
+                        snell_name = px.get("name", "Snell")
+                        obfs = px.get("obfs-opts", {})
+                        obfs_mode = obfs.get("mode", "off")
+                        obfs_host = obfs.get("host", "")
+                        # Ручная YAML-сериализация (без привлечения yaml-модуля).
+                        snell_proxy_yaml = (
+                            f"  - name: {snell_name}\n"
+                            f"    type: snell\n"
+                            f"    server: {px['server']}\n"
+                            f"    port: {px['port']}\n"
+                            f"    psk: {px['psk']}\n"
+                            f"    obfs-opts:\n"
+                            f"      mode: {obfs_mode}\n"
+                        )
+                        if obfs_host:
+                            snell_proxy_yaml += f"      host: {obfs_host}\n"
+                        break
+    except Exception:
+        pass
+
+    # Имена proxy-узлов в группе — VLESS первым, Snell вторым (если есть).
+    group_proxies = ["VLESS-Reality" if proto == "reality" else "VLESS-xHTTP"]
+    if snell_proxy_yaml:
+        group_proxies.append(snell_name)
+
     if proto == "reality":
         clash = f"""proxies:
   - name: VLESS-Reality
@@ -763,13 +832,15 @@ def _generate_clash_config(user: dict) -> str:
       short-id: {short_id}
     client-fingerprint: {fp}
     servername: {sni}
-
+{snell_proxy_yaml}
 proxy-groups:
   - name: Proxy
     type: select
     proxies:
-      - VLESS-Reality
-
+"""
+        for p in group_proxies:
+            clash += f"      - {p}\n"
+        clash += """
 rules:
   - MATCH,Proxy
 """
@@ -787,13 +858,15 @@ rules:
       path: [{xhttp_path}]
     client-fingerprint: {fp}
     servername: {domain}
-
+{snell_proxy_yaml}
 proxy-groups:
   - name: Proxy
     type: select
     proxies:
-      - VLESS-xHTTP
-
+"""
+        for p in group_proxies:
+            clash += f"      - {p}\n"
+        clash += """
 rules:
   - MATCH,Proxy
 """
@@ -851,6 +924,30 @@ def _generate_singbox_config(user: dict) -> str:
                 }
             }]
         }
+
+    # Snell v4 — добавляем как второй outbound если установлен и есть
+    # активный инстанс. ВАЖНО: официальный sing-box НЕ поддерживает Snell —
+    # outbound работает только в сторонних форках (Dress, sss-box-shadow).
+    # Если у юзера официальный sing-box, он увидит в логах unknown outbound
+    # type — это нормально, просто игнорируется.
+    try:
+        from chimera.modules.snell import (
+            get_user_singbox_outbound as _snell_get_singbox_outbound,
+            is_any_active as _snell_is_any_active,
+        )
+        if _snell_is_any_active():
+            user_name = user.get("name", "") or ""
+            user_email = user.get("email", "") or ""
+            user_email_local = user_email.split("@", 1)[0] if user_email else ""
+            for candidate in (user_name, user_email, user_email_local):
+                if candidate:
+                    ob = _snell_get_singbox_outbound(candidate, server_ip=domain)
+                    if ob:
+                        config["outbounds"].append(ob)
+                        break
+    except Exception:
+        pass
+
     return json.dumps(config, indent=2, ensure_ascii=False)
 
 

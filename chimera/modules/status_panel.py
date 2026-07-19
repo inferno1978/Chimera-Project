@@ -121,6 +121,14 @@ def _check_mieru() -> bool:
     from chimera.modules.mieru import _is_installed
     return _is_installed()
 
+def _check_snell() -> bool:
+    """Snell v4 — установлен если есть бинарник + template unit + CONFIG_DIR."""
+    try:
+        from chimera.modules.snell import _is_installed
+        return _is_installed()
+    except Exception:
+        return False
+
 def _check_olcrtc() -> bool:
     from chimera.modules.olcrtc import _olcrtc_installed
     return _olcrtc_installed()
@@ -142,6 +150,7 @@ def _protocol_checks(state: dict) -> list[tuple[str, bool]]:
         ("qWDTT",             _check_wdtt),
         ("NaiveProxy",        _check_naiveproxy),
         ("Mieru",             _check_mieru),
+        ("Snell v4",          _check_snell),
         ("olcRTC",            _check_olcrtc),
         ("WebDAV Tunnel",     _check_webdav),
     ]
