@@ -930,6 +930,12 @@ def _generate_singbox_config(user: dict) -> str:
     # outbound работает только в сторонних форках (Dress, sss-box-shadow).
     # Если у юзера официальный sing-box, он увидит в логах unknown outbound
     # type — это нормально, просто игнорируется.
+    #
+    # Если Snell-outbound реально добавлен — добавляем информационное поле
+    # верхнего уровня "_snell_compat_note" с пояснением на русском, чтобы
+    # админ/юзер открыв конфиг видел причину "unknown outbound type".
+    # Ведущее подчёркивание — чтобы не путать с реальными полями sing-box.
+    snell_added = False
     try:
         from chimera.modules.snell import (
             get_user_singbox_outbound as _snell_get_singbox_outbound,
@@ -944,9 +950,29 @@ def _generate_singbox_config(user: dict) -> str:
                     ob = _snell_get_singbox_outbound(candidate, server_ip=domain)
                     if ob:
                         config["outbounds"].append(ob)
+                        snell_added = True
                         break
     except Exception:
         pass
+
+    # Информационное поле о совместимости Snell — только если Snell-outbound
+    # реально попал в конфиг. На официальном sing-box этот outbound будет
+    # молча проигнорирован ("unknown outbound type" в логах), но остальные
+    # outbounds/конфиг работать продолжат. Пользователям официального
+    # sing-box следует использовать Clash Meta или snell:// ссылку напрямую.
+    if snell_added:
+        config["_snell_compat_note"] = (
+            "Внимание: outbound с type=snell в этом конфиге совместим только "
+            "со сторонними форками sing-box (Dress, sss-box-shadow и подобные), "
+            "имеющими патч поддержки протокола Snell v4. Официальная сборка "
+            "sing-box не поддерживает Snell как нативный outbound и молча "
+            "проигнорирует его (в логах — 'unknown outbound type'), при этом "
+            "остальные outbounds (VLESS/Reality/xHTTP) продолжат работать "
+            "без изменений. Если вы используете официальный sing-box — "
+            "импортируйте Snell через snell:// ссылку (раздел «Подключение» "
+            "на главной странице портала) или используйте Clash Meta конфиг "
+            "из этого же раздела «Скачать конфиги»."
+        )
 
     return json.dumps(config, indent=2, ensure_ascii=False)
 
