@@ -360,6 +360,26 @@ tr:hover { background: rgba(56,189,248,0.05); }
   </div>
 </div>
 
+<!-- Rename User Modal -->
+<div class="modal-overlay" id="rename-user-modal">
+  <div class="modal">
+    <h2>✏️ Переименовать пользователя</h2>
+    <input type="text" id="rename-user-email" readonly style="opacity:0.6">
+    <input type="text" id="rename-user-current" readonly style="opacity:0.6" placeholder="Текущее имя">
+    <input type="text" id="rename-user-new" placeholder="Новое имя (login для портала)">
+    <div style="font-size:0.78rem;color:var(--text-dim);margin-top:-6px;margin-bottom:8px">
+      ⚠️ Если включён Telemt (MTProto), соответствующий аккаунт будет переименован
+      автоматически с сохранением секрета — MTProto-ссылка останется рабочей.
+      Для валидации имени в Telemt формат: латиница, 3-16 символов
+      ([a-zA-Z][a-zA-Z0-9_-]).
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-danger" onclick="closeModal('rename-user-modal')">Отмена</button>
+      <button class="btn btn-primary" onclick="renameUser()">Переименовать</button>
+    </div>
+  </div>
+</div>
+
 <!-- Add AWG Peer Modal -->
 <div class="modal-overlay" id="add-awg-peer-modal">
   <div class="modal">
@@ -532,6 +552,7 @@ async function loadUsers() {
       <td id="ttl-${esc(u.email)}">—</td>
       <td>
         ${toggleBtn}
+        <button class="btn btn-sm btn-warn" onclick="showRenameUserModal('${esc(u.email)}', '${esc(u.name || '')}')">✏️ Переименовать</button>
         <button class="btn btn-sm btn-warn" onclick="showSetPassModal('${esc(u.email)}')">🔑 Пароль</button>
         <button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.email)}')">🗑 Удалить</button>
       </td>
@@ -634,6 +655,42 @@ async function deleteUser(email) {
     loadUsers();
   } else {
     showToast('Ошибка удаления', 'error');
+  }
+}
+
+// ── Rename user (admin) ────────────────────────────────────────────────────
+// Переименование меняет только name (login для портала). Email остаётся
+// прежним — он используется как ключ в users.json и как email в config.json
+// Xray (clients[].email). Backend дополнительно синхронизирует Telemt:
+// соответствующий MTProto-аккаунт переименовывается с сохранением секрета.
+function showRenameUserModal(email, currentName) {
+  document.getElementById('rename-user-email').value = email;
+  document.getElementById('rename-user-current').value = currentName || '';
+  document.getElementById('rename-user-new').value = '';
+  showModal('rename-user-modal');
+  setTimeout(() => document.getElementById('rename-user-new').focus(), 100);
+}
+
+async function renameUser() {
+  const email = document.getElementById('rename-user-email').value;
+  const newName = document.getElementById('rename-user-new').value.trim();
+  if (!newName) { showToast('Новое имя обязательно', 'error'); return; }
+  if (newName.length < 3 || newName.length > 32) {
+    showToast('Имя: 3-32 символа', 'error'); return;
+  }
+  const data = await api(`/api/users/${encodeURIComponent(email)}/rename`, 'POST', { new_name: newName });
+  if (data && data.status === 'renamed') {
+    let msg = 'Переименован: ' + email + ' → ' + newName;
+    if (data.telemt_synced === true) {
+      msg += ' (Telemt-аккаунт также переименован, секрет сохранён)';
+    } else if (data.telemt_synced === false && data.telemt_reason) {
+      msg += ' (Telemt: ' + data.telemt_reason + ')';
+    }
+    showToast(msg);
+    closeModal('rename-user-modal');
+    loadUsers();
+  } else {
+    showToast(data && data.error ? data.error : 'Ошибка переименования', 'error');
   }
 }
 

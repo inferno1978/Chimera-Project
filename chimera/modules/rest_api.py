@@ -14,6 +14,9 @@ Endpoints:
     GET    /api/users               — список пользователей
     POST   /api/users               — создать пользователя
     DELETE /api/users/{email}       — удалить пользователя
+    POST   /api/users/{email}/password — задать пароль портала
+    POST   /api/users/{email}/toggle   — заблокировать/разблокировать
+    POST   /api/users/{email}/rename   — переименовать (login портала)
     GET    /api/users/{email}/traffic — трафик пользователя
     POST   /api/rotate/uuid         — ротация UUID
     POST   /api/rotate/reality       — ротация REALITY-ключей
@@ -1421,6 +1424,73 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                     self._send_json({"status": _new_state, "email": email})
                     return
             self._send_json({"error": "user not found"}, 404)
+            return
+
+        # POST /api/users/{email}/rename — переименовать юзера (изменить name,
+        # login для портала). Email остаётся прежним — он используется как
+        # ключ в users.json и как clients[].email в config.json Xray.
+        # Backend дополнительно синхронизирует Telemt: соответствующий
+        # MTProto-аккаунт переименовывается с сохранением секрета через
+        # _telemt_rename_user() — MTProto-ссылка остаётся рабочей.
+        m = re.match(r"^/api/users/(.+)/rename$", path)
+        if m:
+            if not self._require_admin():
+                return
+            email = unquote(m.group(1))
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            new_name = (body.get("new_name", "") or "").strip()
+            if not new_name:
+                self._send_json({"error": "new_name required"}, 400)
+                return
+            if len(new_name) < 3 or len(new_name) > 32:
+                self._send_json({"error": "Имя должно быть 3-32 символа"}, 400)
+                return
+            users = _get_users()
+            target = None
+            for u in users:
+                if u.get("email") == email:
+                    target = u
+                    break
+            if target is None:
+                self._send_json({"error": "user not found"}, 404)
+                return
+            old_name = target.get("name", "") or target.get("email", "").split("@")[0]
+            target["name"] = new_name
+            _save_users(users)
+            # config.json Xray не нужно трогать — там используется email,
+            # а не name. _users_apply_to_config не требуется.
+            # Автосинхронизация с Telemt: переименовываем соответствующий
+            # MTProto-аккаунт с сохранением секрета. Если Telemt не активен
+            # или имя не подходит под Telemt-спеку — это не ошибка, VLESS
+            # всё равно переименован. Возвращаем telemt_synced + reason для
+            # информативного toast в админ-панели.
+            telemt_synced = False
+            telemt_reason = ""
+            try:
+                from chimera.modules.mtproto import _validate_username as _telemt_valid
+                if not _telemt_valid(new_name):
+                    telemt_reason = ("имя не подходит под Telemt-спеку "
+                                     "(нужен [a-zA-Z][a-zA-Z0-9_-]{2,15})")
+                elif not _telemt_is_active():
+                    telemt_reason = "сервис не активен"
+                else:
+                    telemt_synced = _telemt_rename_user(old_name, new_name)
+                    if not telemt_synced:
+                        telemt_reason = ("возможно, новое имя уже занято в Telemt "
+                                         "или Telemt не установлен")
+            except Exception as _e:
+                telemt_reason = f"ошибка синхронизации: {_e}"
+            self._send_json({
+                "status": "renamed",
+                "email": email,
+                "old_name": old_name,
+                "new_name": new_name,
+                "telemt_synced": telemt_synced,
+                "telemt_reason": telemt_reason,
+            })
             return
 
         if path == "/api/rotate/uuid":
