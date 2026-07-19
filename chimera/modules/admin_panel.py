@@ -369,8 +369,11 @@ tr:hover { background: rgba(56,189,248,0.05); }
     <input type="text" id="rename-user-new" placeholder="Новое имя (login для портала)">
     <div style="font-size:0.78rem;color:var(--text-dim);margin-top:-6px;margin-bottom:8px">
       ⚠️ Если включён Telemt (MTProto), соответствующий аккаунт будет переименован
-      автоматически с сохранением секрета — MTProto-ссылка останется рабочей.
-      Для валидации имени в Telemt формат: латиница, 3-16 символов
+      автоматически с сохранением секрета — MTProto-ссылка останется рабочей.<br>
+      ⚠️ Если включён Snell v4, соответствующий аккаунт (systemd-инстанс
+      snell-server@&lt;user&gt;) будет переименован с сохранением PSK и порта —
+      snell:// ссылка останется рабочей.<br>
+      Для валидации имени в Telemt/Snell формат: латиница, 3-16 символов
       ([a-zA-Z][a-zA-Z0-9_-]).
     </div>
     <div class="modal-actions">
@@ -685,6 +688,11 @@ async function renameUser() {
       msg += ' (Telemt-аккаунт также переименован, секрет сохранён)';
     } else if (data.telemt_synced === false && data.telemt_reason) {
       msg += ' (Telemt: ' + data.telemt_reason + ')';
+    }
+    if (data.snell_synced === true) {
+      msg += ' (Snell-аккаунт также переименован, PSK и порт сохранены)';
+    } else if (data.snell_synced === false && data.snell_reason) {
+      msg += ' (Snell: ' + data.snell_reason + ')';
     }
     showToast(msg);
     closeModal('rename-user-modal');
