@@ -262,14 +262,12 @@ def _sync_users_from_config() -> int:
 #
 # Протоколы в списке:
 #   • mtproto (Telemt) — MTProto-прокси, общий [access.users] в /etc/telemt/telemt.toml
-#   • snell (Snell v4) — per-user systemd template, /etc/snell/<user>.conf
 #
 # Внутренняя политика каждого протокола (валидация имён, лимиты портов,
 # "нельзя удалить последнего" и т.п.) — полностью инкапсулирована в модуле.
 # Реестр про это ничего не знает, он просто вызывает 4 функции контракта.
 _SYNCABLE_PROTOCOLS = [
     "chimera.modules.mtproto",
-    "chimera.modules.snell",
 ]
 
 
@@ -283,13 +281,13 @@ def _sync_dispatch(method: str, *args) -> dict:
         вернул False), либо method бросил исключение
 
     None означает "протокол пропущен, не считается ошибкой" — например,
-    если Snell не установлен, синхронизация для него просто не делается,
+    если протокол не установлен, синхронизация для него просто не делается,
     но Telemt при этом нормально синхронизируется.
     """
     import importlib
     results: dict = {}
     for modpath in _SYNCABLE_PROTOCOLS:
-        # proto — короткое имя для ключа в ответе (mtproto, snell).
+        # proto — короткое имя для ключа в ответе (mtproto).
         proto = modpath.rsplit(".", 1)[-1]
         try:
             mod = importlib.import_module(modpath)
@@ -681,33 +679,6 @@ def _generate_vless_links(user: dict) -> list[dict]:
     except Exception:
         pass
 
-    # Snell v4 (если установлен и есть активный инстанс для этого юзера).
-    # Per-user модель: каждый юзер имеет свой порт+PSK, ссылка генерируется
-    # только если snell-server@<user> активен. Сопоставление по user["name"]
-    # / email / email-local-part (как в MTProto-блоке выше).
-    try:
-        from chimera.modules.snell import (
-            get_user_link as _snell_get_user_link,
-            is_any_active as _snell_is_any_active,
-        )
-        if _snell_is_any_active():
-            # Сопоставление: пробуем user["name"], user["email"], локальную
-            # часть email — Snell-юзеры имеют имена в формате [a-zA-Z][a-zA-Z0-9_-]{2,15}.
-            user_name = user.get("name", "") or ""
-            user_email = user.get("email", "") or ""
-            user_email_local = user_email.split("@", 1)[0] if user_email else ""
-            snell_link = None
-            for candidate in (user_name, user_email, user_email_local):
-                if candidate:
-                    snell_link = _snell_get_user_link(candidate, server_ip=domain)
-                    if snell_link:
-                        break
-            if snell_link:
-                links.append({"label": "Snell v4", "link": snell_link,
-                              "protocol": "snell"})
-    except Exception:
-        pass
-
     return links
 
 
@@ -717,7 +688,6 @@ def _generate_clash_config(user: dict) -> str:
     if not links:
         return ""
 
-    first = links[0]
     state = _get_state()
     domain = state.get("domain", "")
     port = state.get("server_port", 443)
@@ -730,56 +700,7 @@ def _generate_clash_config(user: dict) -> str:
     xhttp_path = state.get("xhttp_path", "/")
     xtls_flow = state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision"
 
-    # Snell v4 — добавляем как альтернативный proxy если установлен и
-    # есть активный инстанс для этого юзера. Per-user matching по name/email.
-    snell_proxy_yaml = ""
-    snell_name = ""
-    try:
-        from chimera.modules.snell import (
-            get_user_clash_proxy as _snell_get_clash_proxy,
-            is_any_active as _snell_is_any_active,
-        )
-        if _snell_is_any_active():
-            user_name = user.get("name", "") or ""
-            user_email = user.get("email", "") or ""
-            user_email_local = user_email.split("@", 1)[0] if user_email else ""
-            for candidate in (user_name, user_email, user_email_local):
-                if candidate:
-                    px = _snell_get_clash_proxy(candidate, server_ip=domain)
-                    if px:
-                        snell_name = px.get("name", "Snell")
-                        obfs = px.get("obfs-opts", {})
-                        obfs_mode = obfs.get("mode", "off")
-                        obfs_host = obfs.get("host", "")
-                        # Ручная YAML-сериализация (без привлечения yaml-модуля).
-                        # version=4 — обязательно (без него Mihomo дефолтит на v1).
-                        # udp: true — включает UDP-over-TCP для v4.
-                        # obfs-opts — только если obfs = tls или http.
-                        # obfs=off → obfs-opts ОПУСКАЕТСЯ (Mihomo не принимает mode=off).
-                        snell_proxy_yaml = (
-                            f"  - name: {snell_name}\n"
-                            f"    type: snell\n"
-                            f"    server: {px['server']}\n"
-                            f"    port: {px['port']}\n"
-                            f"    psk: {px['psk']}\n"
-                            f"    version: 4\n"
-                            f"    udp: true\n"
-                        )
-                        if obfs_mode in ("tls", "http"):
-                            snell_proxy_yaml += (
-                                f"    obfs-opts:\n"
-                                f"      mode: {obfs_mode}\n"
-                            )
-                            if obfs_host:
-                                snell_proxy_yaml += f"      host: {obfs_host}\n"
-                        break
-    except Exception:
-        pass
-
-    # Имена proxy-узлов в группе — VLESS первым, Snell вторым (если есть).
     group_proxies = ["VLESS-Reality" if proto == "reality" else "VLESS-xHTTP"]
-    if snell_proxy_yaml:
-        group_proxies.append(snell_name)
 
     if proto == "reality":
         clash = f"""proxies:
@@ -797,7 +718,7 @@ def _generate_clash_config(user: dict) -> str:
       short-id: {short_id}
     client-fingerprint: {fp}
     servername: {sni}
-{snell_proxy_yaml}
+
 proxy-groups:
   - name: Proxy
     type: select
@@ -823,7 +744,7 @@ rules:
       path: [{xhttp_path}]
     client-fingerprint: {fp}
     servername: {domain}
-{snell_proxy_yaml}
+
 proxy-groups:
   - name: Proxy
     type: select
@@ -889,55 +810,6 @@ def _generate_singbox_config(user: dict) -> str:
                 }
             }]
         }
-
-    # Snell v4 — добавляем как второй outbound если установлен и есть
-    # активный инстанс. ВАЖНО: официальный sing-box НЕ поддерживает Snell —
-    # outbound работает только в сторонних форках (Dress, sss-box-shadow).
-    # Если у юзера официальный sing-box, он увидит в логах unknown outbound
-    # type — это нормально, просто игнорируется.
-    #
-    # Если Snell-outbound реально добавлен — добавляем информационное поле
-    # верхнего уровня "_snell_compat_note" с пояснением на русском, чтобы
-    # админ/юзер открыв конфиг видел причину "unknown outbound type".
-    # Ведущее подчёркивание — чтобы не путать с реальными полями sing-box.
-    snell_added = False
-    try:
-        from chimera.modules.snell import (
-            get_user_singbox_outbound as _snell_get_singbox_outbound,
-            is_any_active as _snell_is_any_active,
-        )
-        if _snell_is_any_active():
-            user_name = user.get("name", "") or ""
-            user_email = user.get("email", "") or ""
-            user_email_local = user_email.split("@", 1)[0] if user_email else ""
-            for candidate in (user_name, user_email, user_email_local):
-                if candidate:
-                    ob = _snell_get_singbox_outbound(candidate, server_ip=domain)
-                    if ob:
-                        config["outbounds"].append(ob)
-                        snell_added = True
-                        break
-    except Exception:
-        pass
-
-    # Информационное поле о совместимости Snell — только если Snell-outbound
-    # реально попал в конфиг. На официальном sing-box этот outbound будет
-    # молча проигнорирован ("unknown outbound type" в логах), но остальные
-    # outbounds/конфиг работать продолжат. Пользователям официального
-    # sing-box следует использовать Clash Meta или snell:// ссылку напрямую.
-    if snell_added:
-        config["_snell_compat_note"] = (
-            "Внимание: outbound с type=snell в этом конфиге совместим только "
-            "со сторонними форками sing-box (Dress, sss-box-shadow и подобные), "
-            "имеющими патч поддержки протокола Snell v4. Официальная сборка "
-            "sing-box не поддерживает Snell как нативный outbound и молча "
-            "проигнорирует его (в логах — 'unknown outbound type'), при этом "
-            "остальные outbounds (VLESS/Reality/xHTTP) продолжат работать "
-            "без изменений. Если вы используете официальный sing-box — "
-            "импортируйте Snell через snell:// ссылку (раздел «Подключение» "
-            "на главной странице портала) или используйте Clash Meta конфиг "
-            "из этого же раздела «Скачать конфиги»."
-        )
 
     return json.dumps(config, indent=2, ensure_ascii=False)
 
@@ -1445,7 +1317,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 pass
 
             # Автосинхронизация со всеми syncable-протоколами (Telemt,
-            # Snell, и любые будущие через реестр _SYNCABLE_PROTOCOLS).
+            # и любые будущие через реестр _SYNCABLE_PROTOCOLS).
             # Создаёт аккаунт с тем же name в каждом активном протоколе,
             # чтобы соответствующая ссылка появилась в User Portal без
             # ручного шага в TUI. Возвращает {proto: bool|None}.
@@ -1521,7 +1393,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         # ключ в users.json и как clients[].email в config.json Xray.
         # Backend дополнительно синхронизирует все syncable-протоколы через
         # _sync_rename_user() — каждый протокол переименовывает аккаунт с
-        # сохранением своих данных (Telemt — секрет, Snell — PSK+порт).
+        # сохранением своих данных (Telemt — секрет).
         m = re.match(r"^/api/users/(.+)/rename$", path)
         if m:
             if not self._require_admin():
@@ -1552,10 +1424,10 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             _save_users(users)
             # config.json Xray не нужно трогать — там используется email,
             # а не name. _users_apply_to_config не требуется.
-            # Автосинхронизация со всеми syncable-протоколами (Telemt, Snell,
+            # Автосинхронизация со всеми syncable-протоколами (Telemt,
             # и любые будущие через реестр _SYNCABLE_PROTOCOLS). Каждый
             # протокол переименовывает аккаунт с сохранением своих данных
-            # (Telemt — секрет, Snell — PSK+порт). Если протокол не активен
+            # (Telemt — секрет). Если протокол не активен
             # или имя не подходит под его спеку — это не ошибка, VLESS всё
             # равно переименован. Возвращаем protocol_sync = {proto: bool|None}
             # для информативного toast в админ-панели.
@@ -1643,7 +1515,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             try:
                 added = _sync_users_from_config()
                 # Полная синхронизация VLESS → все syncable-протоколы
-                # (Telemt, Snell, и любые будущие через реестр
+                # (Telemt, и любые будущие через реестр
                 # _SYNCABLE_PROTOCOLS). Создаёт недостающие аккаунты для
                 # всех валидных VLESS-имён, чтобы соответствующие ссылки
                 # появились в User Portal для всех сразу.
@@ -1748,7 +1620,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             # Автосинхронизация со всеми syncable-протоколами (Telemt,
-            # Snell, и любые будущие через реестр _SYNCABLE_PROTOCOLS).
+            # и любые будущие через реестр _SYNCABLE_PROTOCOLS).
             # Удаляет аккаунт в каждом активном протоколе, чтобы не
             # оставлять "висящие" аккаунты для удалённого VLESS-юзера.
             # Возвращает {proto: bool|None}.

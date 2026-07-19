@@ -775,7 +775,7 @@ class TestSyncUsersFromConfig(unittest.TestCase):
 class TestSyncRegistryDispatch(unittest.TestCase):
     """Тесты для обобщённого реестра _SYNCABLE_PROTOCOLS и _sync_dispatch.
 
-    Использует ФЕЙКОВЫЙ протокол-модуль (не mtproto/snell) чтобы тесты
+    Использует ФЕЙКОВЫЙ протокол-модуль (не привязан к mtproto) чтобы тесты
     реестра не ломались при добавлении/удалении реальных протоколов из
     списка. Мок-модуль регистрируется в sys.modules, добавляется в
     _SYNCABLE_PROTOCOLS, проверяется что dispatch корректно вызывает
@@ -1023,7 +1023,7 @@ class TestSyncEndpointResponseFormat(unittest.TestCase):
     """Тесты для структуры ответов endpoints с protocol_sync.
 
     Проверяем что endpoints возвращают protocol_sync = {proto: bool|None}
-    вместо старых плоских полей telemt_synced/snell_synced.
+    вместо старых плоских полей telemt_synced.
     """
 
     def setUp(self):
