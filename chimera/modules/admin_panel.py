@@ -368,9 +368,9 @@ tr:hover { background: rgba(56,189,248,0.05); }
     <input type="text" id="rename-user-current" readonly style="opacity:0.6" placeholder="Текущее имя">
     <input type="text" id="rename-user-new" placeholder="Новое имя (login для портала)">
     <div style="font-size:0.78rem;color:var(--text-dim);margin-top:-6px;margin-bottom:8px">
-      ⚠️ Включённые протоколы синхронизации (Telemt/MTProto, Snell v4 и
+      ⚠️ Включённые протоколы синхронизации (Telemt/MTProto и
       любые другие из реестра) автоматически переименуют соответствующие
-      аккаунты с сохранением их данных (секрет/PSK/порт) — клиентские
+      аккаунты с сохранением их данных (секрет/порт) — клиентские
       ссылки остаются рабочими.<br>
       Для валидации имени формат: латиница, 3-16 символов
       ([a-zA-Z][a-zA-Z0-9_-]).

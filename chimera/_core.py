@@ -76,7 +76,6 @@ from chimera.modules.slipgate import do_slipgate_menu
 from chimera.modules.wdtt import do_wdtt_menu
 from chimera.modules.naiveproxy import do_naiveproxy_menu
 from chimera.modules.mieru import do_mieru_menu
-from chimera.modules.snell import do_snell_menu
 from chimera.modules.webdav_tunnel import do_webdav_tunnel_menu
 from chimera.modules.hybrid_addon import do_hybrid_addon_menu
 from chimera.modules.ripe_file_age   import (
@@ -8238,16 +8237,11 @@ def main_menu() -> None:
             _box_row(f"     {DIM}AdGuard VPN protocol (HTTP/2+HTTP/3 over TLS) — tt:// deep-link{NC}")
             _box_row()
             _box_sep()
-            _box_row()
-            _box_row(f"  {CYAN}19{NC} 🛡️ {TITLE}Snell v4{NC}  {DIM}(NEW){NC}")
-            _box_row(f"     {DIM}Surge MTProto-подобный протокол — per-user systemd template{NC}")
-            _box_row()
-            _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–19 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–18 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -8365,13 +8359,6 @@ def main_menu() -> None:
                 do_trusttunnel_menu()
             except ImportError as _e:
                 warn(f"Модуль TrustTunnel не найден: {_e}")
-                time.sleep(2)
-
-        elif choice == "19":
-            try:
-                do_snell_menu()
-            except ImportError as _e:
-                warn(f"Модуль Snell v4 не найден: {_e}")
                 time.sleep(2)
 
         elif choice == "0":
