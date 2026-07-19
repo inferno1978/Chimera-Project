@@ -444,6 +444,230 @@ def _telemt_sync_all_from_vless(users: list[dict]) -> dict:
     return stats
 
 
+# ── Snell v4 ↔ users.json автосинхронизация ─────────────────────────────────
+#
+# Snell хранит свой список пользователей отдельно от VLESS (users.json) —
+# в /var/lib/xray-installer/snell.json, поле state["users"] (массив dict'ов
+# с username/port/psk/obfs). Каждый Snell-юзер — независимый systemd
+# template-инстанс snell-server@<username>.service, со своим портом
+# из диапазона 30000-30999 и своим PSK.
+#
+# Без автосинхронизации админ должен вручную создавать каждого юзера через
+# TUI Chimera → Snell → Управление пользователями → Добавить. Это не работает
+# на практике: юзер VLESS создан в админ-панели, а Snell-аккаунта нет →
+# snell:// ссылка не появляется в User Portal (matching в _generate_vless_links
+# идёт по совпадению user.name/email с Snell-username, молча через except: pass).
+#
+# Архитектурное отличие от Telemt: у Telemt общий [access.users] в одном
+# конфиге, нельзя удалить последнего юзера (Telemt падает). У Snell каждый
+# юзер — независимый инстанс, удалять последнего МОЖНО (это просто остановит
+# последний snell-server@<user>.service, никаких ограничений).
+#
+# Эти функции — мост: при создании/удалении/переименовании VLESS-юзера в
+# админ-панели автоматически создаём/удаляем/переименовываем соответствующего
+# Snell-юзера с тем же name. PSK генерируется случайно (32 байта, base64)
+# через snell._generate_psk(). Если Snell не установлен — функции молча
+# возвращаются (no-op), не ломая остальные операции.
+
+def _snell_is_active() -> bool:
+    """Возвращает True если Snell установлен И есть хотя бы один активный
+    systemd-инстанс snell-server@<user>.
+
+    Использует snell.is_any_active() — он уже проверяет _is_installed()
+    и перебирает все инстансы в state["users"].
+    """
+    try:
+        from chimera.modules.snell import is_any_active as _snell_is_any
+        return _snell_is_any()
+    except Exception:
+        return False
+
+
+def _snell_ensure_user(name: str) -> bool:
+    """Создаёт Snell-пользователя с именем `name`, если его ещё нет.
+
+    Возвращает True если пользователь создан или уже существует.
+    Возвращает False если:
+      • Snell не установлен (is_any_active возвращает False) → no-op
+      • Имя невалидно по Snell-спеке → no-op (VLESS-юзер остаётся без snell://)
+      • Ошибка при создании/запуске инстанса → no-op
+      • Нет свободных портов в диапазоне 30000-30999 → no-op
+        (sync_all отдельно считает такие случаи как skipped_no_ports)
+    """
+    if not name:
+        return False
+    try:
+        from chimera.modules.snell import (
+            _load_state as _snell_load_state,
+            _find_user as _snell_find_user,
+            _add_user as _snell_add_user,
+            _validate_username as _snell_validate_username,
+            is_any_active as _snell_is_any,
+        )
+    except ImportError:
+        # snell модуль недоступен (старая инсталляция без Snell)
+        return False
+    # Если Snell вообще не установлен — no-op (не создаём аккаунты
+    # под неработающий сервис).
+    try:
+        if not _snell_is_any():
+            return False
+    except Exception:
+        return False
+    # Имя должно соответствовать Snell-спеке: ^[a-zA-Z][a-zA-Z0-9_\-]{2,15}$
+    # (та же что и у Telemt — но это совпадение, Snell-бинарник сам валидирует).
+    if not _snell_validate_username(name):
+        return False
+    try:
+        # Если юзер уже есть — ничего делать не надо.
+        state = _snell_load_state()
+        if _snell_find_user(state, name) is not None:
+            return True
+        # Создаём — _add_user сам выделяет порт, пишет конфиг,
+        # запускает systemd-инстанс, сохраняет state.
+        _snell_add_user(name)
+        return True
+    except ValueError:
+        # Имя невалидно или юзер уже существует (последнее маловероятно,
+        # мы только что проверили — но race condition возможен).
+        return False
+    except RuntimeError:
+        # Нет свободных портов или инстанс не стартовал.
+        return False
+    except Exception:
+        return False
+
+
+def _snell_remove_user(name: str) -> bool:
+    """Удаляет Snell-пользователя с именем `name`, если он существует.
+
+    Возвращает True если удалён или его не было. False — при ошибке.
+    Никогда не падает с исключением — no-op на любой сбой.
+
+    В отличие от Telemt, у Snell можно удалять последнего юзера —
+    каждый инстанс независим, никаких ограничений на пустой state.
+    """
+    if not name:
+        return False
+    try:
+        from chimera.modules.snell import (
+            _remove_user as _snell_remove_user_impl,
+            is_any_active as _snell_is_any,
+        )
+    except ImportError:
+        return False
+    # Если Snell не установлен — нет смысла что-то удалять.
+    # Но если он БЫЛ установлен и потом удалён — могли остаться
+    # висящие аккаунты в state. Поэтому проверяем только наличие
+    # snell-модуля, is_any_active не требуем (иначе при удалённом
+    # бинарнике аккаунты не почистятся).
+    try:
+        return _snell_remove_user_impl(name)
+    except Exception:
+        return False
+
+
+def _snell_rename_user(old_name: str, new_name: str) -> bool:
+    """Переименовывает Snell-пользователя old_name → new_name.
+
+    Сохраняет PSK, порт, obfs — старые клиентские snell:// ссылки
+    продолжают работать (меняется только имя инстанса, а не psk/port).
+
+    Делегирует в snell.rename_user() — он делает полную транзакцию
+    с откатом если snell-server@<new> не стартовал.
+    """
+    if not old_name or not new_name:
+        return False
+    if old_name == new_name:
+        return True
+    try:
+        from chimera.modules.snell import (
+            rename_user as _snell_rename_impl,
+            _validate_username as _snell_validate_username,
+        )
+    except ImportError:
+        return False
+    if not _snell_validate_username(new_name):
+        return False
+    try:
+        return _snell_rename_impl(old_name, new_name)
+    except Exception:
+        return False
+
+
+def _snell_sync_all_from_vless(users: list[dict]) -> dict:
+    """Полная синхронизация VLESS → Snell.
+
+    Создаёт недостающие Snell-аккаунты для всех валидных VLESS-юзеров.
+    Не удаляет существующие Snell-аккаунты (даже если VLESS-юзер удалён)
+    — удаление происходит через явный DELETE /api/users/{email} hook,
+    а не через массовую sync (это безопаснее: ручные Snell-аккаунты
+    через TUI не будут стёрты при sync).
+
+    Возвращает dict со статистикой для отчёта в админ-панели:
+      {"created": N, "skipped_invalid": N, "skipped_no_ports": N}
+
+    skipped_invalid — VLESS-имена не подходят под Snell-спеку
+                     ([a-zA-Z][a-zA-Z0-9_-]{2,15}).
+    skipped_no_ports — Snell установлен, имя валидно, но _add_user
+                      бросил RuntimeError о нехватке портов
+                      (диапазон 30000-30999 = 1000 слотов кончился).
+    """
+    stats = {"created": 0, "skipped_invalid": 0, "skipped_no_ports": 0}
+    try:
+        from chimera.modules.snell import (
+            _load_state as _snell_load_state,
+            _find_user as _snell_find_user,
+            _add_user as _snell_add_user,
+            _validate_username as _snell_validate_username,
+            is_any_active as _snell_is_any,
+        )
+    except ImportError:
+        return stats
+    # Если Snell не установлен — no-op.
+    try:
+        if not _snell_is_any():
+            return stats
+    except Exception:
+        return stats
+    try:
+        state = _snell_load_state()
+        # Собираем валидные VLESS-имена (уникальные, не disabled).
+        vless_names: set[str] = set()
+        for u in users:
+            name = u.get("name", "") or ""
+            if not u.get("disabled", False) and name:
+                vless_names.add(name)
+        # Создаём недостающих — по одному, чтобы изолировать ошибки
+        # (RuntimeError на нехватке портов не должен валить всю sync).
+        for name in vless_names:
+            if _snell_find_user(state, name) is not None:
+                continue  # уже есть
+            if not _snell_validate_username(name):
+                stats["skipped_invalid"] += 1
+                continue
+            try:
+                _snell_add_user(name)
+                stats["created"] += 1
+                # Перезагружаем state чтобы следующий _find_user увидел
+                # только что созданного юзера (на случай дубликатов имён
+                # в vless_names — set их убирает, но мало ли).
+                state = _snell_load_state()
+            except ValueError:
+                # Невалидное имя или уже существует — оба случая маловероятны
+                # после проверок выше, но обрабатываем.
+                stats["skipped_invalid"] += 1
+            except RuntimeError:
+                # Нет свободных портов или инстанс не стартовал.
+                stats["skipped_no_ports"] += 1
+            except Exception:
+                # Любая другая ошибка — пропускаем, не валить sync.
+                stats["skipped_invalid"] += 1
+    except Exception:
+        pass
+    return stats
+
+
 def _get_user_traffic(email: str) -> dict:
     """Возвращает трафик пользователя (uplink + downlink)."""
     core = _core_module()
@@ -1484,6 +1708,13 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             # появилась в User Portal без ручного шага в TUI.
             telemt_created = _telemt_ensure_user(name)
 
+            # Автосинхронизация со Snell v4: создаём соответствующий
+            # Snell-аккаунт (per-user systemd-инстанс) с тем же name,
+            # чтобы snell:// ссылка появилась в User Portal. PSK и порт
+            # генерируются автоматически. Если Snell не установлен или
+            # имя невалидно — no-op, не ломаем создание VLESS-юзера.
+            snell_created = _snell_ensure_user(name)
+
             self._send_json({
                 "status": "created",
                 "uuid": new_uuid,
@@ -1491,6 +1722,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 "portal_login": name or email,
                 "portal_password": portal_password,
                 "telemt_synced": telemt_created,
+                "snell_synced": snell_created,
             }, 201)
             return
 
@@ -1606,6 +1838,26 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                                          "или Telemt не установлен")
             except Exception as _e:
                 telemt_reason = f"ошибка синхронизации: {_e}"
+            # Автосинхронизация со Snell v4: переименовываем соответствующий
+            # Snell-аккаунт с сохранением PSK и порта. Если Snell не активен
+            # или имя не подходит под Snell-спеку — VLESS всё равно переименован,
+            # это не ошибка. Возвращаем snell_synced + snell_reason для toast.
+            snell_synced = False
+            snell_reason = ""
+            try:
+                from chimera.modules.snell import _validate_username as _snell_valid
+                if not _snell_valid(new_name):
+                    snell_reason = ("имя не подходит под Snell-спеку "
+                                    "(нужен [a-zA-Z][a-zA-Z0-9_-]{2,15})")
+                elif not _snell_is_active():
+                    snell_reason = "сервис не активен"
+                else:
+                    snell_synced = _snell_rename_user(old_name, new_name)
+                    if not snell_synced:
+                        snell_reason = ("возможно, новое имя уже занято в Snell "
+                                        "или Snell-инстанс не стартовал")
+            except Exception as _e:
+                snell_reason = f"ошибка синхронизации: {_e}"
             self._send_json({
                 "status": "renamed",
                 "email": email,
@@ -1613,6 +1865,8 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 "new_name": new_name,
                 "telemt_synced": telemt_synced,
                 "telemt_reason": telemt_reason,
+                "snell_synced": snell_synced,
+                "snell_reason": snell_reason,
             })
             return
 
@@ -1693,6 +1947,12 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 # Telemt-аккаунты для всех валидных VLESS-юзеров, чтобы
                 # MTProto-ссылки появились в User Portal для всех сразу.
                 telemt_stats = _telemt_sync_all_from_vless(_get_users())
+                # Полная синхронизация VLESS → Snell: создаём недостающие
+                # Snell-аккаунты (per-user systemd-инстансы) для всех валидных
+                # VLESS-имён, чтобы snell:// ссылки появились в User Portal.
+                # Считает отдельно skipped_no_ports — если диапазон 30000-30999
+                # кончился, остальные имена пропускаются без ошибки.
+                snell_stats = _snell_sync_all_from_vless(_get_users())
                 msg_parts = []
                 if added:
                     msg_parts.append(f"Синхронизировано {added} новых юзеров из config.json")
@@ -1704,11 +1964,23 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                     msg_parts.append(f"создано {tc} Telemt-аккаунтов")
                 if ts:
                     msg_parts.append(f"{ts} имён не подходят для Telemt (нужен формат [a-zA-Z][a-zA-Z0-9_-]{{2,15}})")
+                sc = snell_stats.get("created", 0)
+                si = snell_stats.get("skipped_invalid", 0)
+                sn = snell_stats.get("skipped_no_ports", 0)
+                if sc:
+                    msg_parts.append(f"создано {sc} Snell-аккаунтов")
+                if si:
+                    msg_parts.append(f"{si} имён не подходят для Snell (нужен формат [a-zA-Z][a-zA-Z0-9_-]{{2,15}})")
+                if sn:
+                    msg_parts.append(f"{sn} Snell-аккаунтов не создано — диапазон портов 30000-30999 исчерпан")
                 self._send_json({
                     "status": "synced",
                     "added": added,
                     "telemt_created": tc,
                     "telemt_skipped_invalid": ts,
+                    "snell_created": sc,
+                    "snell_skipped_invalid": si,
+                    "snell_skipped_no_ports": sn,
                     "message": "; ".join(msg_parts),
                 })
             except Exception as e:
@@ -1798,9 +2070,20 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                     deleted_user.get("name", "") or
                     deleted_user.get("email", "").split("@")[0]
                 )
+            # Автосинхронизация со Snell v4: удаляем соответствующий
+            # Snell-аккаунт (systemd-инстанс snell-server@<user>) и закрываем
+            # его порт. В отличие от Telemt, у Snell можно удалять последнего
+            # юзера — каждый инстанс независим, никаких ограничений.
+            snell_removed = False
+            if deleted_user is not None:
+                snell_removed = _snell_remove_user(
+                    deleted_user.get("name", "") or
+                    deleted_user.get("email", "").split("@")[0]
+                )
             self._send_json({
                 "status": "deleted", "email": email,
                 "telemt_synced": telemt_removed,
+                "snell_synced": snell_removed,
             })
             return
 

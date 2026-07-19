@@ -697,6 +697,92 @@ def _remove_user(username: str) -> bool:
     _save_state(state)
     return True
 
+
+def rename_user(old_username: str, new_username: str) -> bool:
+    """Переименовывает Snell-пользователя old_username → new_username.
+
+    Сохраняет PSK, порт, obfs и obfs_host — старые клиентские ссылки
+    продолжают работать (меняется только тэг имени, который юзер видит
+    в клиенте, но psk+server+port+obfs не меняются, так что фактическое
+    подключение работает без перенастройки).
+
+    Шаги:
+      1. Валидация new_username (формат [a-zA-Z][a-zA-Z0-9_-]{2,15}).
+      2. Проверка что old_username существует в state.
+      3. Проверка что new_username НЕ занят другим юзером
+         (не перезаписываем чужой psk).
+      4. Останавливаем systemd-инстанс snell-server@<old>.
+      5. Перегенерируем конфиг под новым именем с тем же psk/port/obfs.
+         (Простое переименование файла недостаточно — внутри конфига
+         нет имени, но systemd %i берётся из имени unit'а, поэтому
+         конфиг должен лежать по пути /etc/snell/<new>.conf.)
+      6. Удаляем старый /etc/snell/<old>.conf.
+      7. Запускаем snell-server@<new>.
+         Если не стартует — откат: восстанавливаем старый конфиг,
+         запускаем snell-server@<old>, возвращаем False.
+      8. Обновляем username в state["users"], сохраняем state.
+
+    Возвращает True если переименование успешно.
+    Возвращает False БЕЗ изменений если:
+      • old_username не найден в state
+      • new_username уже занят другим юзером
+      • new_username невалиден по спеке
+      • snell-server@<new> не стартовал (с откатом к old)
+      • old == new (no-op, возвращаем True — это не ошибка)
+    """
+    if not old_username or not new_username:
+        return False
+    if old_username == new_username:
+        return True  # no-op, не ошибка
+    if not _validate_username(new_username):
+        return False
+    state = _load_state()
+    old_user = _find_user(state, old_username)
+    if old_user is None:
+        return False  # нечего переименовывать
+    if _find_user(state, new_username) is not None:
+        return False  # не перезаписываем чужой psk
+    # Сохраняем старые данные для отката.
+    port = old_user.get("port", 0)
+    psk = old_user.get("psk", "")
+    obfs = old_user.get("obfs", state.get("obfs", DEFAULT_OBFS))
+    obfs_host = old_user.get("obfs_host", state.get("obfs_host", ""))
+    old_cfg_path = CONFIG_DIR / f"{old_username}.conf"
+    new_cfg_path = CONFIG_DIR / f"{new_username}.conf"
+    # 1. Останавливаем старый инстанс.
+    _stop_user_instance(old_username)
+    # 2. Создаём новый конфиг с тем же psk/port/obfs.
+    try:
+        _write_user_config(new_username, port, psk, obfs, obfs_host)
+    except Exception:
+        # Откат: перезапускаем старый инстанс.
+        _start_user_instance(old_username)
+        return False
+    # 3. Запускаем новый инстанс.
+    if not _start_user_instance(new_username):
+        # Откат: удаляем новый конфиг, запускаем старый.
+        new_cfg_path.unlink(missing_ok=True)
+        _start_user_instance(old_username)
+        return False
+    # 4. Удаляем старый конфиг.
+    old_cfg_path.unlink(missing_ok=True)
+    # 5. Обновляем username в state (psk/port/obfs/obfs_host не трогаем).
+    old_user["username"] = new_username
+    _save_state(state)
+    # 6. Переносим iptables accounting со старого имени на новое
+    # (порт остаётся тем же, но comment-тег меняется).
+    if port:
+        try:
+            from chimera.modules.snell_stats import (
+                teardown_user_accounting, setup_user_accounting,
+            )
+            teardown_user_accounting(old_username, port)
+            setup_user_accounting(new_username, port)
+        except Exception:
+            pass  # не критично — учёт трафика опционален
+    return True
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  INSTALL / UNINSTALL
 # ══════════════════════════════════════════════════════════════════════════════

@@ -41,6 +41,15 @@ def _make_completed(stdout: str = "", returncode: int = 0):
     )
 
 
+def snell_module():
+    """Возвращает модуль chimera.modules.snell (для patch.object).
+    Импортирует его лениво, чтобы _setup_core_in_sysmodules() в setUp
+    уже отработал к моменту импорта.
+    """
+    from chimera.modules import snell
+    return snell
+
+
 def _setup_core_in_sysmodules():
     """Загружает chimera._core через exec и регистрирует в sys.modules."""
     core_path = _PROJECT_ROOT / "chimera" / "_core.py"
@@ -934,6 +943,275 @@ class TestVersionCheckPermissive(unittest.TestCase):
         self.assertTrue(cfg_dir.exists(),
                         "Установка должна продолжиться даже если version "
                         "check не сработал — CONFIG_DIR создан")
+
+
+class TestSnellRenameUser(unittest.TestCase):
+    """Тесты для snell.rename_user(old, new) — переименование с сохранением
+    PSK/порта/obfs. Регрессионный тест для новой функции (раньше переименование
+    было возможно только delete+recreate, что теряло PSK и рвало старые
+    клиентские snell:// ссылки).
+
+    Контракт (см. docstring rename_user в snell.py):
+      • PSK и порт СОХРАНЯЮТСЯ — старые клиентские ссылки продолжают работать.
+      • Конфиг /etc/snell/<new>.conf создаётся, /etc/snell/<old>.conf удаляется.
+      • systemd-инстанс snell-server@<old> останавливается, snell-server@<new>
+        запускается. Если новый не стартует — откат к старому.
+      • Возвращает False без изменений если:
+        - old_username не найден
+        - new_username уже занят другим юзером (не перезаписываем чужой PSK)
+        - new_username невалиден по спеке
+      • Возвращает True (no-op) если old == new.
+    """
+
+    VALID_OLD = "alice"
+    VALID_NEW = "bob"
+    INVALID_NEW = "a@b.c"  # содержит @ и точки — не подходит
+    OLD_PSK = "cHBza2V5MTIzNDU2Nzg5MDEyMzQ1Njc4OTA="  # base64, 32 байта
+    OLD_PORT = 30005
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        # Подменяем CONFIG_DIR, MODULE_STATE на временные.
+        self._cfg_dir = self._tmpdir / "snell"
+        self._state_file = self._tmpdir / "snell.json"
+        self._cfg_dir.mkdir()
+        self._patches = [
+            patch.object(snell_module(), "CONFIG_DIR", self._cfg_dir),
+            patch.object(snell_module(), "MODULE_STATE", self._state_file),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        import shutil
+        for p in self._patches:
+            p.stop()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _make_state_with_old_user(self):
+        """Создаёт snell.json с одним юзером alice (старые PSK+порт)."""
+        state = {
+            "installed": True,
+            "obfs": "tls",
+            "obfs_host": "vpn.example.com",
+            "domain": "vpn.example.com",
+            "server_ip": "1.2.3.4",
+            "version": "4.1.1",
+            "users": [{
+                "username": self.VALID_OLD,
+                "psk": self.OLD_PSK,
+                "port": self.OLD_PORT,
+                "obfs": "tls",
+                "obfs_host": "vpn.example.com",
+                "created": "2026-07-19T00:00:00",
+            }],
+        }
+        self._state_file.write_text(json.dumps(state))
+        # Создаём конфиг для alice.
+        (self._cfg_dir / f"{self.VALID_OLD}.conf").write_text(
+            "[snell-server]\nlisten = 0.0.0.0:%d\npsk = %s\n"
+            "ipv6 = false\nobfs = tls\nobfs-host = vpn.example.com\n"
+            % (self.OLD_PORT, self.OLD_PSK)
+        )
+
+    def _patch_systemd_calls(self):
+        """Мокает _stop_user_instance, _start_user_instance, _write_user_config,
+        _open_port, _close_port, snell_stats — чтобы тест не трогал systemd."""
+        snell = snell_module()
+        return [
+            patch.object(snell, "_stop_user_instance"),
+            patch.object(snell, "_start_user_instance", return_value=True),
+            patch.object(snell, "_open_port"),
+            patch.object(snell, "_close_port"),
+        ]
+
+    def test_rename_returns_true_when_successful(self):
+        """Успешное переименование возвращает True."""
+        from chimera.modules import snell
+        self._make_state_with_old_user()
+        patches = self._patch_systemd_calls()
+        # _write_user_config должен реально писать (для проверки что файл создан).
+        for p in patches:
+            p.start()
+        try:
+            ok = snell.rename_user(self.VALID_OLD, self.VALID_NEW)
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertTrue(ok)
+
+    def test_rename_preserves_psk_and_port(self):
+        """PSK и порт должны сохраниться — старые клиентские ссылки
+        продолжают работать (psk+server+port+obfs не меняются)."""
+        from chimera.modules import snell
+        self._make_state_with_old_user()
+        patches = self._patch_systemd_calls()
+        for p in patches:
+            p.start()
+        try:
+            snell.rename_user(self.VALID_OLD, self.VALID_NEW)
+        finally:
+            for p in patches:
+                p.stop()
+        # Проверяем state.
+        state = json.loads(self._state_file.read_text())
+        # alice должен быть переименован в bob.
+        usernames = [u["username"] for u in state["users"]]
+        self.assertIn(self.VALID_NEW, usernames)
+        self.assertNotIn(self.VALID_OLD, usernames)
+        # PSK и порт должны совпасть со старыми.
+        new_user = next(u for u in state["users"] if u["username"] == self.VALID_NEW)
+        self.assertEqual(new_user["psk"], self.OLD_PSK,
+                         "PSK должен сохраниться при переименовании")
+        self.assertEqual(new_user["port"], self.OLD_PORT,
+                         "Порт должен сохраниться при переименовании")
+        # obfs и obfs_host тоже не должны измениться.
+        self.assertEqual(new_user["obfs"], "tls")
+        self.assertEqual(new_user["obfs_host"], "vpn.example.com")
+
+    def test_rename_creates_new_config_and_removes_old(self):
+        """Конфиг /etc/snell/<new>.conf создаётся, <old>.conf удаляется."""
+        from chimera.modules import snell
+        self._make_state_with_old_user()
+        patches = self._patch_systemd_calls()
+        for p in patches:
+            p.start()
+        try:
+            snell.rename_user(self.VALID_OLD, self.VALID_NEW)
+        finally:
+            for p in patches:
+                p.stop()
+        new_cfg = self._cfg_dir / f"{self.VALID_NEW}.conf"
+        old_cfg = self._cfg_dir / f"{self.VALID_OLD}.conf"
+        self.assertTrue(new_cfg.exists(),
+                        "Новый конфиг должен быть создан")
+        self.assertFalse(old_cfg.exists(),
+                         "Старый конфиг должен быть удалён")
+
+    def test_rename_stops_old_instance_starts_new(self):
+        """snell-server@<old> останавливается, snell-server@<new> запускается."""
+        from chimera.modules import snell
+        self._make_state_with_old_user()
+        with patch.object(snell, "_stop_user_instance") as mock_stop, \
+             patch.object(snell, "_start_user_instance", return_value=True) as mock_start, \
+             patch.object(snell, "_open_port"), \
+             patch.object(snell, "_close_port"):
+            snell.rename_user(self.VALID_OLD, self.VALID_NEW)
+        mock_stop.assert_called_once_with(self.VALID_OLD)
+        mock_start.assert_called_once_with(self.VALID_NEW)
+
+    def test_rename_returns_false_when_old_not_found(self):
+        """Если old_username не существует — False без изменений."""
+        from chimera.modules import snell
+        self._make_state_with_old_user()
+        patches = self._patch_systemd_calls()
+        for p in patches:
+            p.start()
+        try:
+            ok = snell.rename_user("nonexistent_user", self.VALID_NEW)
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertFalse(ok)
+        # alice должен остаться на месте.
+        state = json.loads(self._state_file.read_text())
+        usernames = [u["username"] for u in state["users"]]
+        self.assertIn(self.VALID_OLD, usernames)
+
+    def test_rename_returns_false_when_new_already_taken(self):
+        """Если new_username уже занят — False, не перезаписываем чужой PSK."""
+        from chimera.modules import snell
+        self._make_state_with_old_user()
+        # Добавляем второго юзера bob.
+        state = json.loads(self._state_file.read_text())
+        state["users"].append({
+            "username": self.VALID_NEW,  # bob уже существует
+            "psk": "other_psk_12345",
+            "port": 30006,
+            "obfs": "tls", "obfs_host": "vpn.example.com",
+            "created": "2026-07-19T00:00:00",
+        })
+        self._state_file.write_text(json.dumps(state))
+        patches = self._patch_systemd_calls()
+        for p in patches:
+            p.start()
+        try:
+            ok = snell.rename_user(self.VALID_OLD, self.VALID_NEW)
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertFalse(ok)
+        # alice должен остаться alice, bob — bob (его PSK не тронут).
+        state = json.loads(self._state_file.read_text())
+        usernames = [u["username"] for u in state["users"]]
+        self.assertIn(self.VALID_OLD, usernames)
+        self.assertIn(self.VALID_NEW, usernames)
+        bob = next(u for u in state["users"] if u["username"] == self.VALID_NEW)
+        self.assertEqual(bob["psk"], "other_psk_12345",
+                         "Чужой PSK не должен быть перезаписан")
+
+    def test_rename_returns_false_for_invalid_new_name(self):
+        """Если new_username невалиден — False без изменений."""
+        from chimera.modules import snell
+        self._make_state_with_old_user()
+        patches = self._patch_systemd_calls()
+        for p in patches:
+            p.start()
+        try:
+            ok = snell.rename_user(self.VALID_OLD, self.INVALID_NEW)
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertFalse(ok)
+
+    def test_rename_returns_true_when_old_equals_new(self):
+        """old == new — no-op, возвращаем True (не ошибка)."""
+        from chimera.modules import snell
+        self._make_state_with_old_user()
+        # Без патчей systemd — no-op не должен вызывать ничего.
+        ok = snell.rename_user(self.VALID_OLD, self.VALID_OLD)
+        self.assertTrue(ok)
+        # state не должен измениться.
+        state = json.loads(self._state_file.read_text())
+        usernames = [u["username"] for u in state["users"]]
+        self.assertIn(self.VALID_OLD, usernames)
+
+    def test_rename_returns_false_for_empty_args(self):
+        """Пустые аргументы — False."""
+        from chimera.modules import snell
+        self._make_state_with_old_user()
+        self.assertFalse(snell.rename_user("", self.VALID_NEW))
+        self.assertFalse(snell.rename_user(self.VALID_OLD, ""))
+
+    def test_rename_rolls_back_if_new_instance_fails_to_start(self):
+        """Если snell-server@<new> не стартует — откат: удаляем новый конфиг,
+        перезапускаем старый инстанс, возвращаем False."""
+        from chimera.modules import snell
+        self._make_state_with_old_user()
+        # _start_user_instance возвращает False для нового имени,
+        # True для старого (откат должен перезапустить old).
+        def fake_start(username):
+            return username == self.VALID_OLD  # только old стартует
+        with patch.object(snell, "_stop_user_instance"), \
+             patch.object(snell, "_start_user_instance",
+                          side_effect=fake_start), \
+             patch.object(snell, "_open_port"), \
+             patch.object(snell, "_close_port"):
+            ok = snell.rename_user(self.VALID_OLD, self.VALID_NEW)
+        self.assertFalse(ok, "Должен вернуть False если новый инстанс не стартовал")
+        # При откате старый конфиг должен остаться, новый — удалён.
+        old_cfg = self._cfg_dir / f"{self.VALID_OLD}.conf"
+        new_cfg = self._cfg_dir / f"{self.VALID_NEW}.conf"
+        self.assertTrue(old_cfg.exists(),
+                        "При откате старый конфиг должен остаться")
+        self.assertFalse(new_cfg.exists(),
+                         "При откате новый конфиг должен быть удалён")
+        # State не должен измениться — alice остаётся alice.
+        state = json.loads(self._state_file.read_text())
+        usernames = [u["username"] for u in state["users"]]
+        self.assertIn(self.VALID_OLD, usernames)
+        self.assertNotIn(self.VALID_NEW, usernames)
 
 
 if __name__ == "__main__":
