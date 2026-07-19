@@ -763,6 +763,7 @@ def _generate_clash_config(user: dict) -> str:
                             f"    server: {px['server']}\n"
                             f"    port: {px['port']}\n"
                             f"    psk: {px['psk']}\n"
+                            f"    version: 4\n"
                             f"    obfs-opts:\n"
                             f"      mode: {obfs_mode}\n"
                         )

@@ -105,15 +105,18 @@ class TestBuildSnellLink(unittest.TestCase):
         self.assertNotIn("+" + psk[0], link.replace("%2B", ""))
 
     def test_obfs_off_omits_obfs_host(self):
-        """obfs=off → параметр obfs-host не должен быть в URL."""
+        """obfs=off → параметр obfs-host не должен быть в URL.
+        Также параметр obfs=off не добавляется (off = нет обфускации = дефолт).
+        Но version=4 должен быть всегда."""
         from chimera.modules.snell import _build_snell_link
         link = _build_snell_link(
             server="1.2.3.4", port=30001, psk="psk",
             obfs="off", obfs_host="should-not-appear",
             tag="t",
         )
-        self.assertIn("obfs=off", link)
         self.assertNotIn("obfs-host", link)
+        self.assertNotIn("obfs=off", link)  # off = дефолт, не пишем
+        self.assertIn("version=4", link)    # version всегда есть
 
     def test_obfs_http_includes_host(self):
         """obfs=http → параметр obfs-host должен быть."""

@@ -589,15 +589,29 @@ def _build_snell_link(server: str, port: int, psk: str,
                       tag: str = "") -> str:
     """Генерирует клиентскую ссылку snell:// для Clash Meta и совместимых.
 
-    Формат: snell://<urlencoded_psk>@<server>:<port>?obfs=<tls|http|off>&obfs-host=<host>#<tag>
+    Формат: snell://<urlencoded_psk>@<server>:<port>?version=4&obfs=<tls|http|off>&obfs-host=<host>#<tag>
+
+    КРИТИЧНО: параметр version=4 ОБЯЗАТЕЛЕН. Без него Clash Meta по умолчанию
+    использует Snell v3, а snell-server v5.0.1 говорит только на v4/v5.
+    Результат: TCP-соединение устанавливается (исходящий трафик идёт),
+    но протокольный handshake не совпадает — сервер не может ответить
+    (входящий = 0, Timeout в клиенте).
+
+    HYDRA-ULTIMATE (gr33nimax) тоже явно указывает version=4 в snell:// URL,
+    с комментарием: "sing-box-extended accepts v5 on the inbound, but its
+    outbound maps v5 to v4. Keeping both ends on v4 avoids an incompatible
+    handshake."
 
     PSK URL-кодируется чтобы корректно обработать base64-символы '+', '/',
     '=', которые могут быть в нём. tag (после #) — имя узла в клиенте.
     """
     psk_q = urllib.parse.quote(psk, safe="")
-    params = {"obfs": obfs}
-    if obfs in ("tls", "http") and obfs_host:
-        params["obfs-host"] = obfs_host
+    # version=4 — обязательно, иначе Clash Meta дефолтит на v3.
+    params = {"version": "4"}
+    if obfs and obfs != "off":
+        params["obfs"] = obfs
+        if obfs_host:
+            params["obfs-host"] = obfs_host
     query = urllib.parse.urlencode(params, safe="")
     link = f"snell://{psk_q}@{server}:{port}?{query}"
     if tag:
@@ -612,6 +626,9 @@ def _gen_singbox_outbound(server: str, port: int, psk: str,
     Этот JSON формат работает только в сторонних форках sing-box с патчем
     Snell (например, Dress / sss-box-shadow). Если у пользователя официальный
     sing-box — outbound будет проигнорирован.
+
+    version=4 включён явно — без него sing-box-extended может использовать
+    v3, несовместимое с snell-server v5.
     """
     outbound = {
         "type": "snell",
@@ -619,6 +636,7 @@ def _gen_singbox_outbound(server: str, port: int, psk: str,
         "server": server,
         "server_port": port,
         "password": psk,
+        "version": 4,
     }
     if obfs in ("tls", "http"):
         outbound["obfs"] = {
@@ -634,6 +652,10 @@ def _gen_clash_proxy(server: str, port: int, psk: str,
 
     Возвращает dict в формате, который clash-meta понимает как элемент
     массива proxies:.
+
+    КРИТИЧНО: version=4 ОБЯЗАТЕЛЕН. Без него Clash Meta дефолтит на v3,
+    а snell-server v5.0.1 говорит только на v4/v5 — handshake не совпадает,
+    результат: исходящий трафик идёт, входящий = 0, Timeout.
     """
     proxy = {
         "name": name,
@@ -641,6 +663,7 @@ def _gen_clash_proxy(server: str, port: int, psk: str,
         "server": server,
         "port": port,
         "psk": psk,
+        "version": 4,
         "obfs-opts": {"mode": obfs},
     }
     if obfs in ("tls", "http") and obfs_host:
