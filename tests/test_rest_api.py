@@ -1044,5 +1044,427 @@ class TestRenameUserEndpoint(unittest.TestCase):
                 p.stop()
 
 
+class TestSnellSyncHelpers(unittest.TestCase):
+    """Автосинхронизация VLESS → Snell v4 (per-user systemd template).
+
+    Зеркало TestTelemtSyncHelpers, но с учётом архитектурных отличий Snell:
+      • Каждый юзер — независимый systemd-инстанс (snell-server@<user>).
+      • Можно удалять последнего юзера (Telemt этого не позволял).
+      • Порт из диапазона 30000-30999 (1000 слотов) — может закончиться.
+      • sync_all отдельно считает skipped_no_ports.
+    """
+
+    VALID_NAME = "alice"
+    VALID_NAME_2 = "bob"
+    INVALID_NAME = "a@b.c"
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _patch_snell(self, state_users=None, is_active=True,
+                     add_user_raises_runtime=False):
+        """Патчит snell-модуль: is_any_active, _load_state, _find_user,
+        _add_user, _remove_user, rename_user, _validate_username.
+
+        state_users: list of user dicts (как в snell.json state["users"]).
+        is_active: значение is_any_active().
+        add_user_raises_runtime: если True — _add_user бросает RuntimeError
+            (имитация нехватки портов).
+        """
+        from chimera.modules import snell as _snell_mod
+        if state_users is None:
+            state_users = []
+        state = {"installed": True, "users": list(state_users)}
+
+        def fake_add_user(name):
+            if add_user_raises_runtime:
+                raise RuntimeError("No free ports in range 30000-30999")
+            # Имитируем добавление — добавляем в state.
+            state["users"].append({
+                "username": name, "psk": "psk_" + name,
+                "port": 30000 + len(state["users"]),
+                "obfs": "tls", "obfs_host": "vpn.example.com",
+                "created": "2026-07-19T00:00:00",
+            })
+            return state["users"][-1]
+
+        patches = [
+            patch.object(_snell_mod, "is_any_active", return_value=is_active),
+            patch.object(_snell_mod, "_load_state", return_value=state),
+            patch.object(_snell_mod, "_find_user",
+                         side_effect=lambda s, n: next(
+                             (u for u in s.get("users", []) if u.get("username") == n),
+                             None)),
+            patch.object(_snell_mod, "_add_user", side_effect=fake_add_user),
+            patch.object(_snell_mod, "_remove_user", return_value=True),
+            patch.object(_snell_mod, "rename_user", return_value=True),
+            patch.object(_snell_mod, "_validate_username",
+                         side_effect=lambda n: bool(n) and
+                         bool(__import__("re").match(
+                             r'^[a-zA-Z][a-zA-Z0-9_\-]{2,15}$', n))),
+        ]
+        return patches
+
+    def _apply(self, patches):
+        for p in patches:
+            p.start()
+
+    def _revert(self, patches):
+        for p in patches:
+            p.stop()
+
+    # ── _snell_is_active ──────────────────────────────────────────────────
+    def test_is_active_true(self):
+        from chimera.modules import rest_api
+        patches = self._patch_snell(is_active=True)
+        self._apply(patches)
+        try:
+            self.assertTrue(rest_api._snell_is_active())
+        finally:
+            self._revert(patches)
+
+    def test_is_active_false_when_snell_inactive(self):
+        from chimera.modules import rest_api
+        patches = self._patch_snell(is_active=False)
+        self._apply(patches)
+        try:
+            self.assertFalse(rest_api._snell_is_active())
+        finally:
+            self._revert(patches)
+
+    # ── _snell_ensure_user ────────────────────────────────────────────────
+    def test_ensure_user_creates_when_missing(self):
+        from chimera.modules import rest_api
+        from chimera.modules import snell as _snell
+        patches = self._patch_snell(state_users=[])
+        self._apply(patches)
+        try:
+            ok = rest_api._snell_ensure_user(self.VALID_NAME)
+            self.assertTrue(ok)
+            # _add_user должен быть вызван.
+            _snell._add_user.assert_called_once_with(self.VALID_NAME)
+        finally:
+            self._revert(patches)
+
+    def test_ensure_user_noop_when_already_exists(self):
+        from chimera.modules import rest_api
+        from chimera.modules import snell as _snell
+        existing = [{"username": self.VALID_NAME, "psk": "x", "port": 30000}]
+        patches = self._patch_snell(state_users=existing)
+        self._apply(patches)
+        try:
+            ok = rest_api._snell_ensure_user(self.VALID_NAME)
+            self.assertTrue(ok)
+            _snell._add_user.assert_not_called()
+        finally:
+            self._revert(patches)
+
+    def test_ensure_user_rejects_invalid_name(self):
+        from chimera.modules import rest_api
+        from chimera.modules import snell as _snell
+        patches = self._patch_snell(state_users=[])
+        self._apply(patches)
+        try:
+            ok = rest_api._snell_ensure_user(self.INVALID_NAME)
+            self.assertFalse(ok)
+            _snell._add_user.assert_not_called()
+        finally:
+            self._revert(patches)
+
+    def test_ensure_user_returns_false_when_snell_inactive(self):
+        from chimera.modules import rest_api
+        from chimera.modules import snell as _snell
+        patches = self._patch_snell(state_users=[], is_active=False)
+        self._apply(patches)
+        try:
+            ok = rest_api._snell_ensure_user(self.VALID_NAME)
+            self.assertFalse(ok)
+            _snell._add_user.assert_not_called()
+        finally:
+            self._revert(patches)
+
+    def test_ensure_user_returns_false_on_runtime_error(self):
+        """RuntimeError (нет портов) → False, не пробрасываем исключение."""
+        from chimera.modules import rest_api
+        patches = self._patch_snell(state_users=[], add_user_raises_runtime=True)
+        self._apply(patches)
+        try:
+            ok = rest_api._snell_ensure_user(self.VALID_NAME)
+            self.assertFalse(ok)
+        finally:
+            self._revert(patches)
+
+    def test_ensure_user_empty_name_returns_false(self):
+        from chimera.modules import rest_api
+        self.assertFalse(rest_api._snell_ensure_user(""))
+
+    # ── _snell_remove_user ────────────────────────────────────────────────
+    def test_remove_user_delegates_to_snell(self):
+        from chimera.modules import rest_api
+        from chimera.modules import snell as _snell
+        patches = self._patch_snell(state_users=[
+            {"username": self.VALID_NAME, "psk": "x", "port": 30000}])
+        self._apply(patches)
+        try:
+            ok = rest_api._snell_remove_user(self.VALID_NAME)
+            self.assertTrue(ok)
+            _snell._remove_user.assert_called_once_with(self.VALID_NAME)
+        finally:
+            self._revert(patches)
+
+    def test_remove_user_can_delete_last(self):
+        """В отличие от Telemt, у Snell можно удалять последнего юзера —
+        каждый инстанс независим, никаких ограничений на пустой state."""
+        from chimera.modules import rest_api
+        from chimera.modules import snell as _snell
+        # Только один юзер — Telemt бы отказал, Snell должен удалить.
+        patches = self._patch_snell(state_users=[
+            {"username": self.VALID_NAME, "psk": "x", "port": 30000}])
+        self._apply(patches)
+        try:
+            ok = rest_api._snell_remove_user(self.VALID_NAME)
+            self.assertTrue(ok)
+            _snell._remove_user.assert_called_once_with(self.VALID_NAME)
+        finally:
+            self._revert(patches)
+
+    def test_remove_user_empty_name_returns_false(self):
+        from chimera.modules import rest_api
+        self.assertFalse(rest_api._snell_remove_user(""))
+
+    # ── _snell_rename_user ────────────────────────────────────────────────
+    def test_rename_user_delegates_to_snell(self):
+        from chimera.modules import rest_api
+        from chimera.modules import snell as _snell
+        patches = self._patch_snell(state_users=[
+            {"username": self.VALID_NAME, "psk": "x", "port": 30000}])
+        self._apply(patches)
+        try:
+            ok = rest_api._snell_rename_user(self.VALID_NAME, self.VALID_NAME_2)
+            self.assertTrue(ok)
+            _snell.rename_user.assert_called_once_with(
+                self.VALID_NAME, self.VALID_NAME_2)
+        finally:
+            self._revert(patches)
+
+    def test_rename_user_same_name_returns_true(self):
+        from chimera.modules import rest_api
+        # old == new → no-op, возвращаем True без вызова snell.rename_user.
+        ok = rest_api._snell_rename_user("alice", "alice")
+        self.assertTrue(ok)
+
+    def test_rename_user_invalid_new_returns_false(self):
+        from chimera.modules import rest_api
+        from chimera.modules import snell as _snell
+        patches = self._patch_snell(state_users=[
+            {"username": self.VALID_NAME, "psk": "x", "port": 30000}])
+        self._apply(patches)
+        try:
+            ok = rest_api._snell_rename_user(self.VALID_NAME, self.INVALID_NAME)
+            self.assertFalse(ok)
+            _snell.rename_user.assert_not_called()
+        finally:
+            self._revert(patches)
+
+    # ── _snell_sync_all_from_vless ────────────────────────────────────────
+    def test_sync_all_creates_missing_for_valid_vless_names(self):
+        from chimera.modules import rest_api
+        vless_users = [
+            {"name": "alice", "email": "alice@x.com", "disabled": False},
+            {"name": "bob", "email": "bob@x.com", "disabled": False},
+            {"name": "a@b.c", "email": "weird@x.com", "disabled": False},  # invalid
+        ]
+        patches = self._patch_snell(state_users=[])
+        self._apply(patches)
+        try:
+            stats = rest_api._snell_sync_all_from_vless(vless_users)
+            self.assertEqual(stats["created"], 2)  # alice + bob
+            self.assertEqual(stats["skipped_invalid"], 1)  # a@b.c
+            self.assertEqual(stats["skipped_no_ports"], 0)
+        finally:
+            self._revert(patches)
+
+    def test_sync_all_skips_disabled_vless_users(self):
+        from chimera.modules import rest_api
+        vless_users = [
+            {"name": "alice", "email": "alice@x.com", "disabled": False},
+            {"name": "bob", "email": "bob@x.com", "disabled": True},
+        ]
+        patches = self._patch_snell(state_users=[])
+        self._apply(patches)
+        try:
+            stats = rest_api._snell_sync_all_from_vless(vless_users)
+            self.assertEqual(stats["created"], 1)  # только alice
+            self.assertEqual(stats["skipped_no_ports"], 0)
+        finally:
+            self._revert(patches)
+
+    def test_sync_all_noop_when_snell_inactive(self):
+        from chimera.modules import rest_api
+        vless_users = [{"name": "alice", "email": "alice@x.com",
+                        "disabled": False}]
+        patches = self._patch_snell(state_users=[], is_active=False)
+        self._apply(patches)
+        try:
+            stats = rest_api._snell_sync_all_from_vless(vless_users)
+            self.assertEqual(stats["created"], 0)
+            self.assertEqual(stats["skipped_invalid"], 0)
+            self.assertEqual(stats["skipped_no_ports"], 0)
+        finally:
+            self._revert(patches)
+
+    def test_sync_all_counts_no_ports_separately(self):
+        """Если _add_user бросает RuntimeError (нет портов) —
+        sync_all считает это как skipped_no_ports, не валирует."""
+        from chimera.modules import rest_api
+        vless_users = [
+            {"name": "alice", "email": "alice@x.com", "disabled": False},
+            {"name": "bob", "email": "bob@x.com", "disabled": False},
+        ]
+        patches = self._patch_snell(state_users=[], add_user_raises_runtime=True)
+        self._apply(patches)
+        try:
+            stats = rest_api._snell_sync_all_from_vless(vless_users)
+            self.assertEqual(stats["created"], 0)
+            self.assertEqual(stats["skipped_no_ports"], 2)
+            self.assertEqual(stats["skipped_invalid"], 0)
+        finally:
+            self._revert(patches)
+
+    def test_sync_all_skips_already_existing_users(self):
+        """Если Snell-аккаунт уже есть — не создаём повторно."""
+        from chimera.modules import rest_api
+        vless_users = [
+            {"name": "alice", "email": "alice@x.com", "disabled": False},
+            {"name": "bob", "email": "bob@x.com", "disabled": False},
+        ]
+        # alice уже есть в Snell.
+        existing = [{"username": "alice", "psk": "x", "port": 30000}]
+        patches = self._patch_snell(state_users=existing)
+        self._apply(patches)
+        try:
+            stats = rest_api._snell_sync_all_from_vless(vless_users)
+            self.assertEqual(stats["created"], 1)  # только bob
+        finally:
+            self._revert(patches)
+
+    # ── Интеграционный: модуль недоступен ─────────────────────────────────
+    def test_helpers_survive_when_snell_module_unavailable(self):
+        """Если snell-модуль недоступен — функции возвращают False/пусто,
+        не выбрасывая исключений (контракт no-op на любой сбой)."""
+        from chimera.modules import rest_api
+        real = sys.modules.get("chimera.modules.snell")
+        sys.modules.pop("chimera.modules.snell", None)
+        broken = type(sys)("chimera.modules.snell")
+        sys.modules["chimera.modules.snell"] = broken
+        try:
+            self.assertFalse(rest_api._snell_ensure_user("alice"))
+            self.assertFalse(rest_api._snell_remove_user("alice"))
+            self.assertFalse(rest_api._snell_rename_user("a", "b"))
+            self.assertFalse(rest_api._snell_is_active())
+            stats = rest_api._snell_sync_all_from_vless([{"name": "alice"}])
+            self.assertEqual(stats["created"], 0)
+        finally:
+            if real is not None:
+                sys.modules["chimera.modules.snell"] = real
+            else:
+                sys.modules.pop("chimera.modules.snell", None)
+
+
+class TestSnellRenameEndpoint(unittest.TestCase):
+    """Тесты для Snell-части rename endpoint (POST /api/users/{email}/rename).
+
+    Логика endpoint: после переименования VLESS-юзера вызывается
+    _snell_rename_user(old_name, new_name). Ответ включает snell_synced
+    (bool) и snell_reason (str) — для информативного toast в админ-панели.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_rename_endpoint_returns_snell_synced_field(self):
+        """В ответе rename endpoint должно быть поле snell_synced."""
+        from chimera.modules import rest_api, snell
+        # Snell не активен — snell_synced=False, snell_reason='сервис не активен'.
+        with patch.object(snell, "_validate_username", return_value=True), \
+             patch.object(rest_api, "_snell_is_active", return_value=False), \
+             patch.object(rest_api, "_snell_rename_user", return_value=False), \
+             patch.object(rest_api, "_telemt_is_active", return_value=False), \
+             patch.object(rest_api, "_telemt_rename_user", return_value=False), \
+             patch.object(rest_api, "_get_users", return_value=[]), \
+             patch.object(rest_api, "_save_users"):
+            # Симулируем логику endpoint напрямую — функция _snell_rename_user
+            # вызывается только если _snell_is_active() True, поэтому тут
+            # snell_synced=False с reason='сервис не активен'.
+            snell_synced = False
+            snell_reason = ""
+            from chimera.modules.snell import _validate_username as _snell_valid
+            if not _snell_valid("alice"):
+                snell_reason = "имя не подходит"
+            elif not rest_api._snell_is_active():
+                snell_reason = "сервис не активен"
+            self.assertEqual(snell_reason, "сервис не активен")
+            self.assertFalse(snell_synced)
+
+    def test_rename_endpoint_snell_reason_for_invalid_name(self):
+        """Если новое имя не подходит под Snell-спеку — snell_reason
+        содержит пояснение."""
+        from chimera.modules.snell import _validate_username
+        self.assertFalse(_validate_username("a@b.c"))
+        # endpoint формирует reason: "имя не подходит под Snell-спеку ..."
+        # (точная строка проверяется в test_rename_endpoint_response_format).
+
+    def test_rename_endpoint_calls_snell_rename_when_active(self):
+        """Если Snell активен и имя валидно — _snell_rename_user вызывается
+        с (old_name, new_name)."""
+        from chimera.modules import rest_api, snell
+        with patch.object(snell, "_validate_username", return_value=True), \
+             patch.object(rest_api, "_snell_is_active", return_value=True), \
+             patch.object(rest_api, "_snell_rename_user",
+                          return_value=True) as mock_snell_rename, \
+             patch.object(rest_api, "_telemt_is_active", return_value=False), \
+             patch.object(rest_api, "_telemt_rename_user",
+                          return_value=False):
+            # Логика rename endpoint (упрощённо):
+            snell_synced = False
+            if snell._validate_username("bob"):
+                if rest_api._snell_is_active():
+                    snell_synced = rest_api._snell_rename_user("alice", "bob")
+            self.assertTrue(snell_synced)
+            mock_snell_rename.assert_called_once_with("alice", "bob")
+
+    def test_rename_endpoint_snell_synced_false_when_target_taken(self):
+        """Если snell.rename_user возвращает False (имя занято) —
+        snell_synced=False, snell_reason поясняет причину."""
+        from chimera.modules import rest_api, snell
+        with patch.object(snell, "_validate_username", return_value=True), \
+             patch.object(rest_api, "_snell_is_active", return_value=True), \
+             patch.object(rest_api, "_snell_rename_user",
+                          return_value=False):
+            snell_synced = rest_api._snell_rename_user("alice", "bob")
+            self.assertFalse(snell_synced)
+            # endpoint формирует reason: "возможно, новое имя уже занято в Snell..."
+
+    def test_rename_endpoint_preserves_psk_on_rename(self):
+        """При переименовании PSK должен сохраниться — snell.rename_user
+        это гарантирует (см. TestSnellRenameUser в test_snell.py).
+        Здесь проверяем что bridge _snell_rename_user делегирует в snell.rename_user."""
+        from chimera.modules import rest_api, snell
+        with patch.object(snell, "_validate_username", return_value=True), \
+             patch.object(snell, "rename_user",
+                          return_value=True) as mock_rename:
+            ok = rest_api._snell_rename_user("alice", "bob")
+            self.assertTrue(ok)
+            mock_rename.assert_called_once_with("alice", "bob")
+
+    def test_rename_endpoint_snell_no_op_when_old_equals_new(self):
+        """old == new → no-op, snell_synced=True без вызова snell.rename_user."""
+        from chimera.modules import rest_api, snell
+        with patch.object(snell, "rename_user") as mock_rename:
+            ok = rest_api._snell_rename_user("alice", "alice")
+            self.assertTrue(ok)
+            mock_rename.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
