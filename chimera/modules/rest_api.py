@@ -757,13 +757,19 @@ def _generate_clash_config(user: dict) -> str:
                         # Clash Meta, Mihomo) корректно их читают без кавычек.
                         # Hydra-ULTIMATE генерирует Snell-конфиги без кавычек
                         # вокруг PSK — следуем тому же паттерну.
+                        # version НЕ указываем — Clash Meta/Mihomo выдаёт
+                        # "snell version error: 4" при явном указании v4.
+                        # Без version Mihomo дефолтит на v3. snell-server v5
+                        # должен поддерживать v3 для обратной совместимости.
+                        # Если нет — Snell несовместим с этой версией Mihomo,
+                        # нужен клиент поновее (sing-box, Surge) или обновление
+                        # Clash Verge Rev до версии с поддержкой Snell v4.
                         snell_proxy_yaml = (
                             f"  - name: {snell_name}\n"
                             f"    type: snell\n"
                             f"    server: {px['server']}\n"
                             f"    port: {px['port']}\n"
                             f"    psk: {px['psk']}\n"
-                            f"    version: 4\n"
                             f"    obfs-opts:\n"
                             f"      mode: {obfs_mode}\n"
                         )
