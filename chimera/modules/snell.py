@@ -447,14 +447,32 @@ def _install_service_template() -> None:
 def _start_user_instance(username: str) -> bool:
     """Запускает systemd-инстанс snell-server@<username>.
 
-    Возвращает True если инстанс успешно стартовал (или уже был активен).
+    Возвращает True если инстанс успешно стартовал (или уже был активен)
+    И порт действительно слушается.
     """
     instance = f"{SERVICE_NAME}{username}"
     _run(["systemctl", "enable", instance])
     _run(["systemctl", "start", instance])
     time.sleep(1)
     r = _run(["systemctl", "is-active", instance], capture=True)
-    return r.returncode == 0 and r.stdout.strip() == "active"
+    if r.returncode != 0 or r.stdout.strip() != "active":
+        return False
+    # Дополнительная проверка: порт действительно слушается.
+    # systemd может показать "active" даже если binary упал после старта
+    # (Type=simple, Restart=on-failure с RestartSec=5 — между падением и
+    # рестартом есть окно где is-active может показать "active").
+    # Проверяем через ss -tlnp что порт реально слушается.
+    state = _load_state()
+    user = _find_user(state, username)
+    if user:
+        port = user.get("port", 0)
+        if port:
+            r = _run(["ss", "-tlnp"], capture=True, check=False)
+            if r.returncode == 0 and r.stdout:
+                # Ищем строку с нашим портом — формат ":30000 " или "[::]:30000 "
+                if f":{port} " not in r.stdout and f":{port}\n" not in r.stdout:
+                    return False  # порт не слушается
+    return True
 
 def _stop_user_instance(username: str) -> None:
     """Останавливает и disable-ит инстанс snell-server@<username>."""
@@ -1352,6 +1370,33 @@ def _fmt_bytes(n: int) -> str:
 #  PUBLIC API — для интеграции с rest_api.py / subscription.py / status_panel.py
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _ensure_port_open(port: int, username: str) -> bool:
+    """Проверяет что порт открыт в UFW/iptables. Если закрыт — открывает.
+
+    Defensive функция — вызывается при генерации клиентских конфигов
+    (Clash/Singbox) чтобы гарантировать что порт доступен. Если порт
+    был закрыт (например, UFW был включён после создания юзера и
+    flush-нул iptables правила) — открывает его автоматически.
+
+    Возвращает True если порт открыт (был или стал).
+    """
+    # Сначала проверяем — может порт уже открыт.
+    if _ufw_is_active():
+        r = _run(["ufw", "status"], capture=True, check=False)
+        if r.returncode == 0 and r.stdout:
+            # Ищем порт в выводе ufw status.
+            if f"{port}/tcp" in r.stdout:
+                return True  # уже открыт
+        # Порт не найден в UFW — открываем.
+        _ufw_open_tcp(port, f"snell-{username}")
+        return True
+    # UFW не активен — проверяем iptables.
+    if _ipt_tcp_rule_exists(port):
+        return True  # уже открыт
+    _ipt_open_tcp(port)
+    return True
+
+
 def get_user_link(username: str, server_ip: str = "") -> Optional[str]:
     """Возвращает snell:// ссылку для конкретного юзера (или None если не найден).
 
@@ -1361,6 +1406,10 @@ def get_user_link(username: str, server_ip: str = "") -> Optional[str]:
     user = _find_user(state, username)
     if user is None:
         return None
+    # Defensive: убедимся что порт открыт в файрволе. Если UFW был
+    # включён после создания юзера и flush-нул iptables правила —
+    # порт мог быть закрыт. Открываем при генерации ссылки.
+    _ensure_port_open(user.get("port", 0), username)
     server = server_ip or state.get("server_ip", "") or _get_server_ip()
     obfs = user.get("obfs", state.get("obfs", DEFAULT_OBFS))
     obfs_host = user.get("obfs_host", state.get("obfs_host", ""))
@@ -1376,6 +1425,7 @@ def get_user_singbox_outbound(username: str, server_ip: str = "") -> Optional[di
     user = _find_user(state, username)
     if user is None:
         return None
+    _ensure_port_open(user.get("port", 0), username)
     server = server_ip or state.get("server_ip", "") or _get_server_ip()
     obfs = user.get("obfs", state.get("obfs", DEFAULT_OBFS))
     obfs_host = user.get("obfs_host", state.get("obfs_host", ""))
@@ -1390,6 +1440,7 @@ def get_user_clash_proxy(username: str, server_ip: str = "") -> Optional[dict]:
     user = _find_user(state, username)
     if user is None:
         return None
+    _ensure_port_open(user.get("port", 0), username)
     server = server_ip or state.get("server_ip", "") or _get_server_ip()
     obfs = user.get("obfs", state.get("obfs", DEFAULT_OBFS))
     obfs_host = user.get("obfs_host", state.get("obfs_host", ""))
