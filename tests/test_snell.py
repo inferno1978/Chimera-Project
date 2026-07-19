@@ -338,15 +338,16 @@ class TestSingboxOutbound(unittest.TestCase):
         from chimera.modules.snell import _gen_singbox_outbound
         ob = _gen_singbox_outbound(
             server="1.2.3.4", port=30001, psk="psk",
-            obfs="tls", obfs_host="vpn.example.com",
+            obfs="http", obfs_host="vpn.example.com",
         )
         self.assertEqual(ob["type"], "snell")
         self.assertEqual(ob["tag"], "snell-out")
         self.assertEqual(ob["server"], "1.2.3.4")
         self.assertEqual(ob["server_port"], 30001)
-        self.assertEqual(ob["password"], "psk")
-        self.assertEqual(ob["obfs"]["type"], "tls")
-        self.assertEqual(ob["obfs"]["host"], "vpn.example.com")
+        self.assertEqual(ob["psk"], "psk")  # sing-box uses 'psk', not 'password'
+        self.assertEqual(ob["version"], 4)
+        self.assertEqual(ob["obfs_mode"], "http")  # flat field, not nested
+        self.assertEqual(ob["obfs_host"], "vpn.example.com")
 
     def test_obfs_off_omits_obfs_section(self):
         from chimera.modules.snell import _gen_singbox_outbound
@@ -354,6 +355,8 @@ class TestSingboxOutbound(unittest.TestCase):
             server="1.2.3.4", port=30001, psk="psk",
             obfs="off", obfs_host="",
         )
+        self.assertNotIn("obfs_mode", ob)
+        self.assertNotIn("obfs_host", ob)
         self.assertNotIn("obfs", ob)
 
 
@@ -385,8 +388,8 @@ class TestClashProxy(unittest.TestCase):
             obfs="off", obfs_host="",
             name="Snell",
         )
-        self.assertEqual(px["obfs-opts"]["mode"], "off")
-        self.assertNotIn("host", px["obfs-opts"])
+        # obfs-opts должен ОТСУТСТВОВАТЬ целиком — Mihomo не принимает mode=off
+        self.assertNotIn("obfs-opts", px)
 
 
 class TestPublicApiNoInstall(unittest.TestCase):

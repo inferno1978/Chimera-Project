@@ -125,8 +125,10 @@ MODULE_STATE      = Path("/var/lib/xray-installer/snell.json")
 PORT_RANGE_START  = 30000
 PORT_RANGE_END    = 30999
 
-# obfs по умолчанию — tls (маскировка под HTTPS, требует LE-сертификат).
-DEFAULT_OBFS      = "tls"
+# obfs по умолчанию — http. Surge KB: "http is the only option supported
+# by Snell V4". tls может не поддерживаться официальным бинарником —
+# используем http как самый безопасный выбор для совместимости.
+DEFAULT_OBFS      = "http"
 
 # Размер PSK в байтах (32 = 256 бит). Surge поддерживает произвольную длину,
 # но 32 байта — стандарт для большинства клиентов.
@@ -585,77 +587,83 @@ def _ensure_le_cert(domain: str) -> bool:
 #  CLIENT LINK GENERATION
 # ══════════════════════════════════════════════════════════════════════════════
 def _build_snell_link(server: str, port: int, psk: str,
-                      obfs: str = "tls", obfs_host: str = "",
+                      obfs: str = "http", obfs_host: str = "",
                       tag: str = "") -> str:
     """Генерирует клиентскую ссылку snell:// для Clash Meta и совместимых.
 
-    Формат: snell://<urlencoded_psk>@<server>:<port>?version=4&obfs=<tls|http|off>&obfs-host=<host>#<tag>
+    Формат: snell://<urlencoded_psk>@<server>:<port>?version=4&obfs=<http|tls>&obfs-host=<host>&udp-relay=true#<tag>
 
-    КРИТИЧНО: параметр version=4 ОБЯЗАТЕЛЕН. Без него Clash Meta по умолчанию
-    использует Snell v3, а snell-server v5.0.1 говорит только на v4/v5.
-    Результат: TCP-соединение устанавливается (исходящий трафик идёт),
-    но протокольный handshake не совпадает — сервер не может ответить
-    (входящий = 0, Timeout в клиенте).
+    КРИТИЧНО: параметр version=4 ОБЯЗАТЕЛЕН. Без него Clash Meta (Mihomo)
+    по умолчанию использует Snell v1 (DefaultSnellVersion = Version1 в
+    исходниках Mihomo), а snell-server v5.0.1 говорит только на v4/v5.
 
-    HYDRA-ULTIMATE (gr33nimax) тоже явно указывает version=4 в snell:// URL,
-    с комментарием: "sing-box-extended accepts v5 on the inbound, but its
-    outbound maps v5 to v4. Keeping both ends on v4 avoids an incompatible
-    handshake."
+    udp-relay=true — включает UDP-over-TCP для Snell v4 (поддерживается
+    Surge, Surfboard, Mihomo). Без него некоторые клиенты не relay-ят UDP.
 
     PSK URL-кодируется чтобы корректно обработать base64-символы '+', '/',
     '=', которые могут быть в нём. tag (после #) — имя узла в клиенте.
     """
     psk_q = urllib.parse.quote(psk, safe="")
-    # version=4 — обязательно, иначе Clash Meta дефолтит на v3.
-    params = {"version": "4"}
+    # version=4 — обязательно, иначе Clash Meta дефолтит на v1.
+    # udp-relay=true — включаем UDP-over-TCP для v4.
+    params = {"version": "4", "udp-relay": "true"}
     if obfs and obfs != "off":
         params["obfs"] = obfs
         if obfs_host:
             params["obfs-host"] = obfs_host
     query = urllib.parse.urlencode(params, safe="")
+    # IPv6 server addresses must be bracketed: [2001:db8::1]:port
+    if ":" in server and not server.startswith("["):
+        server = f"[{server}]"
     link = f"snell://{psk_q}@{server}:{port}?{query}"
     if tag:
         link += f"#{urllib.parse.quote(tag, safe='')}"
     return link
 
 def _gen_singbox_outbound(server: str, port: int, psk: str,
-                          obfs: str = "tls", obfs_host: str = "") -> dict:
+                          obfs: str = "http", obfs_host: str = "") -> dict:
     """Генерирует sing-box outbound JSON для Snell.
 
-    ВАЖНО: sing-box upstream НЕ поддерживает Snell в официальном релизе.
-    Этот JSON формат работает только в сторонних форках sing-box с патчем
-    Snell (например, Dress / sss-box-shadow). Если у пользователя официальный
-    sing-box — outbound будет проигнорирован.
+    Начиная с sing-box 1.14.0 Snell поддерживается официально.
+    Формат соответствует документации sing-box 1.14.0+:
+      https://sing-box.sagernet.org/configuration/outbound/snell/
 
-    version=4 включён явно — без него sing-box-extended может использовать
-    v3, несовместимое с snell-server v5.
+    КРИТИЧНО: sing-box использует поле "psk" (НЕ "password"),
+    и flat-поля obfs_mode/obfs_host (НЕ вложенный obfs объект).
+    Также sing-box поддерживает только obfs_mode: "http" или "none" —
+    "tls" НЕ поддерживается официальным sing-box.
     """
     outbound = {
         "type": "snell",
         "tag": "snell-out",
         "server": server,
         "server_port": port,
-        "password": psk,
+        "psk": psk,
         "version": 4,
     }
-    if obfs in ("tls", "http"):
-        outbound["obfs"] = {
-            "type": obfs,
-            "host": obfs_host or server,
-        }
+    # sing-box 1.14.0+ поддерживает только obfs_mode: "http" или "none".
+    # "tls" НЕ поддерживается — если сервер с tls, sing-box клиент не сможет
+    # подключиться. В этом случае просто не добавляем obfs (none).
+    if obfs == "http":
+        outbound["obfs_mode"] = "http"
+        outbound["obfs_host"] = obfs_host or "bing.com"
+    # obfs=tls или obfs=off → не добавляем obfs поля (none = дефолт)
     return outbound
 
 def _gen_clash_proxy(server: str, port: int, psk: str,
-                     obfs: str = "tls", obfs_host: str = "",
+                     obfs: str = "http", obfs_host: str = "",
                      name: str = "Snell") -> dict:
     """Генерирует Clash Meta proxy-узел (dict, потом конвертируется в YAML).
 
-    Возвращает dict в формате, который clash-meta понимает как элемент
-    массива proxies:.
+    Возвращает dict в формате, который clash-meta (Mihomo) понимает как
+    элемент массива proxies:.
 
-    КРИТИЧНО: version=4 ОБЯЗАТЕЛЕН. Без него Clash Meta дефолтит на v3,
-    а snell-server v5.0.1 говорит только на v4/v5 — handshake не совпадает,
-    результат: исходящий трафик идёт, входящий = 0, Timeout.
+    КРИТИЧНО:
+    - version=4 ОБЯЗАТЕЛЕН. Без него Mihomo дефолтит на v1.
+    - udp=true включает UDP-over-TCP (поддерживается v3+).
+    - obfs-opts ОПУСКАЕТСЯ целиком когда obfs=off. Mihomo НЕ принимает
+      mode=off — возвращает "snell obfs mode error: off" и роняет весь
+      конфиг. Допустимые значения mode: tls, http, пустая строка.
     """
     proxy = {
         "name": name,
@@ -664,10 +672,15 @@ def _gen_clash_proxy(server: str, port: int, psk: str,
         "port": port,
         "psk": psk,
         "version": 4,
-        "obfs-opts": {"mode": obfs},
+        "udp": True,
     }
-    if obfs in ("tls", "http") and obfs_host:
-        proxy["obfs-opts"]["host"] = obfs_host
+    # obfs-opts добавляем ТОЛЬКО когда obfs = tls или http.
+    # Когда obfs=off — НЕ добавляем obfs-opts вообще (Mihomo не принимает
+    # mode=off, только tls/http/пустая строка).
+    if obfs in ("tls", "http"):
+        proxy["obfs-opts"] = {"mode": obfs}
+        if obfs_host:
+            proxy["obfs-opts"]["host"] = obfs_host
     return proxy
 
 # ══════════════════════════════════════════════════════════════════════════════

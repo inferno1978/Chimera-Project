@@ -752,11 +752,10 @@ def _generate_clash_config(user: dict) -> str:
                         obfs_mode = obfs.get("mode", "off")
                         obfs_host = obfs.get("host", "")
                         # Ручная YAML-сериализация (без привлечения yaml-модуля).
-                        # PSK НЕ кавычим — base64 символы / + = валидны в YAML
-                        # plain scalars, все Clash-совместимые парсеры (включая
-                        # Clash Meta, Mihomo) корректно их читают без кавычек.
-                        # Hydra-ULTIMATE генерирует Snell-конфиги без кавычек
-                        # вокруг PSK — следуем тому же паттерну.
+                        # version=4 — обязательно (без него Mihomo дефолтит на v1).
+                        # udp: true — включает UDP-over-TCP для v4.
+                        # obfs-opts — только если obfs = tls или http.
+                        # obfs=off → obfs-opts ОПУСКАЕТСЯ (Mihomo не принимает mode=off).
                         snell_proxy_yaml = (
                             f"  - name: {snell_name}\n"
                             f"    type: snell\n"
@@ -764,11 +763,15 @@ def _generate_clash_config(user: dict) -> str:
                             f"    port: {px['port']}\n"
                             f"    psk: {px['psk']}\n"
                             f"    version: 4\n"
-                            f"    obfs-opts:\n"
-                            f"      mode: {obfs_mode}\n"
+                            f"    udp: true\n"
                         )
-                        if obfs_host:
-                            snell_proxy_yaml += f"      host: {obfs_host}\n"
+                        if obfs_mode in ("tls", "http"):
+                            snell_proxy_yaml += (
+                                f"    obfs-opts:\n"
+                                f"      mode: {obfs_mode}\n"
+                            )
+                            if obfs_host:
+                                snell_proxy_yaml += f"      host: {obfs_host}\n"
                         break
     except Exception:
         pass
