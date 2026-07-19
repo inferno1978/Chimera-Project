@@ -1178,15 +1178,26 @@ def _xray_write_and_test(cfg_path: Path, cfg: dict) -> Optional[str]:
 # Выбор iptables vs ip6tables (по ":" в net) остаётся здесь — proto_common
 # работает только с iptables. Для IPv6 вызываем _run напрямую.
 def _ipt_rule_exists(net: str, port: int) -> bool:
-    """Проверяет наличие REDIRECT-правила через iptables -C (не дублирует)."""
+    """Проверяет наличие REDIRECT-правила через iptables -C (не дублирует).
+
+    КРИТИЧНО: iptables -C / ip6tables -C возвращают exit status 1 когда правило
+    НЕ существует — это норма (man iptables: "If the rule does not exist, the
+    exit code is 1"). _run с check=True (по умолчанию) бросает CalledProcessError
+    на rc=1, что валило весь TUI-меню Telemt при открытии если хоть одна TG-подсеть
+    не имела правила. Поэтому для IPv6 пути явно передаём check=False.
+    IPv4 путь идёт через proto_ipt_rule_exists (там фикс отдельный).
+    """
     v6  = ":" in net
     if v6:
         # IPv6 — ip6tables, не покрывается proto_ipt_rule_exists
-        r = _run(["ip6tables", "-t", "nat", "-C", "OUTPUT",
-                  "-d", net, "-p", "tcp",
-                  "-j", "REDIRECT", "--to-port", str(port)],
-                 capture=True)
-        return r.returncode == 0
+        try:
+            r = _run(["ip6tables", "-t", "nat", "-C", "OUTPUT",
+                      "-d", net, "-p", "tcp",
+                      "-j", "REDIRECT", "--to-port", str(port)],
+                     capture=True, check=False)
+            return r.returncode == 0
+        except Exception:
+            return False
     return proto_ipt_rule_exists("nat", "OUTPUT",
                                 ["-d", net, "-p", "tcp",
                                  "-j", "REDIRECT", "--to-port", str(port)])
@@ -1469,7 +1480,20 @@ def _xray_tproxy_status() -> dict:
     pt, is_bal   = _xray_get_proxy_tag(cfg)
     proxy_tag    = pt + (" [balancer]" if is_bal else "")
     tg_nets      = _TG_NETS_current()
-    ipt_active   = sum(1 for n in tg_nets if _ipt_rule_exists(n, port))
+    # Per-net resilience: если даже после фиксов proto_ipt_rule_exists /
+    # _ipt_rule_exists какой-то отдельный net упадёт (например, iptables
+    # временно недоступен), не роняем весь TUI-меню Telemt. Считаем что
+    # для упавшего net правила нет (False), остальные подсети проверяются
+    # нормально. ipt_ok = False если хоть одна не проверена/отсутствует.
+    ipt_active = 0
+    for n in tg_nets:
+        try:
+            if _ipt_rule_exists(n, port):
+                ipt_active += 1
+        except Exception:
+            # Defensive: _ipt_rule_exists сам ловит исключения, но на всякий
+            # случай — если что-то пробилось, считаем что правила нет.
+            pass
 
     return {
         "enabled":   True,
