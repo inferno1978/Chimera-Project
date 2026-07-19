@@ -63,5 +63,23 @@ class TestGetAdminHtml(unittest.TestCase):
             html = get_admin_html()
             self.assertGreater(len(html), 0)
 
+    def test_rename_user_ui_present(self):
+        """В HTML присутствуют элементы UI для переименования юзера:
+        кнопка в строке таблицы, модальное окно и JS-функции."""
+        from chimera.modules.admin_panel import get_admin_html
+        html = get_admin_html()
+        # Модальное окно
+        self.assertIn('id="rename-user-modal"', html)
+        # Кнопка в строке
+        self.assertIn('showRenameUserModal(', html)
+        # JS-функции
+        self.assertIn('function showRenameUserModal(', html)
+        self.assertIn('async function renameUser(', html)
+        # Поле ввода нового имени
+        self.assertIn('id="rename-user-new"', html)
+        # Подсказка про Telemt в модалке
+        self.assertIn('Telemt', html)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
