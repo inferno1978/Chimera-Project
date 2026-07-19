@@ -220,5 +220,151 @@ class TestProtoCancelled(unittest.TestCase):
             raise ProtoCancelled()
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  proto_ipt_rule_exists — проверка наличия iptables-правила через -C
+# ══════════════════════════════════════════════════════════════════════════════
+class TestProtoIptRuleExists(unittest.TestCase):
+    """proto_ipt_rule_exists — проверка наличия iptables-правила.
+
+    РЕГРЕССИЯ: iptables -C возвращает exit status 1 когда правило НЕ существует
+    — это норма (man iptables: "If the rule does not exist, the exit code is 1").
+    _core._run по умолчанию имеет check=True и бросает CalledProcessError на
+    rc=1. Без явного check=False функция падала при открытии TUI-меню Telemt
+    если хоть одна TG-подсеть не имела правила (что нормально когда Telemt
+    остановлен).
+
+    Тесты проверяют:
+      • rc=0 → True (правило существует)
+      • rc=1 → False (правило не существует, НЕ бросает исключение)
+      • _run бросает исключение → False (defensive, не роняет вызывателя)
+      • импорт core падает → False (defensive)
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _make_completed(self, returncode: int):
+        """Создаёт mock CompletedProcess."""
+        import subprocess
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout="", stderr="",
+        )
+
+    def test_returns_true_when_rule_exists(self):
+        """rc=0 → True (правило существует)."""
+        from chimera.modules import proto_common
+        fake_run = MagicMock(return_value=self._make_completed(0))
+        fake_core = MagicMock()
+        fake_core._run = fake_run
+        with patch.object(proto_common, "_core_module", return_value=fake_core):
+            result = proto_common.proto_ipt_rule_exists(
+                "nat", "OUTPUT",
+                ["-d", "91.105.192.0/23", "-p", "tcp", "-j", "REDIRECT",
+                 "--to-port", "10811"],
+            )
+        self.assertTrue(result)
+        # Проверяем что check=False был передан (это ключевая часть фикса).
+        fake_run.assert_called_once()
+        kwargs = fake_run.call_args.kwargs
+        self.assertFalse(kwargs.get("check", True),
+                         "check=False ДОЛЖЕН быть передан — иначе rc=1 бросает")
+
+    def test_returns_false_when_rule_not_exists(self):
+        """РЕГРЕССИЯ: rc=1 → False (правило не существует), НЕ бросает исключение.
+
+        До фикса _run с check=True бросал CalledProcessError на rc=1.
+        """
+        from chimera.modules import proto_common
+        fake_run = MagicMock(return_value=self._make_completed(1))
+        fake_core = MagicMock()
+        fake_core._run = fake_run
+        with patch.object(proto_common, "_core_module", return_value=fake_core):
+            # Не должно бросать — должно вернуть False.
+            result = proto_common.proto_ipt_rule_exists(
+                "nat", "OUTPUT",
+                ["-d", "91.105.192.0/23", "-p", "tcp", "-j", "REDIRECT",
+                 "--to-port", "10811"],
+            )
+        self.assertFalse(result)
+
+    def test_returns_false_on_other_nonzero_rc(self):
+        """rc=2 (iptables error) → False, не бросает."""
+        from chimera.modules import proto_common
+        fake_run = MagicMock(return_value=self._make_completed(2))
+        fake_core = MagicMock()
+        fake_core._run = fake_run
+        with patch.object(proto_common, "_core_module", return_value=fake_core):
+            result = proto_common.proto_ipt_rule_exists(
+                "filter", "INPUT", ["-p", "udp", "--dport", "56000", "-j", "ACCEPT"],
+            )
+        self.assertFalse(result)
+
+    def test_returns_false_on_run_exception(self):
+        """Если _run бросает исключение (например, iptables не установлен) —
+        возвращаем False, не пробрасываем исключение."""
+        from chimera.modules import proto_common
+        fake_run = MagicMock(side_effect=Exception("iptables not found"))
+        fake_core = MagicMock()
+        fake_core._run = fake_run
+        with patch.object(proto_common, "_core_module", return_value=fake_core):
+            # Не должно бросать — defensive try/except.
+            result = proto_common.proto_ipt_rule_exists(
+                "filter", "INPUT", ["-p", "udp", "--dport", "56000"],
+            )
+        self.assertFalse(result)
+
+    def test_returns_false_on_core_import_failure(self):
+        """Если _core_module() бросает исключение — возвращаем False."""
+        from chimera.modules import proto_common
+        with patch.object(proto_common, "_core_module",
+                          side_effect=Exception("core unavailable")):
+            result = proto_common.proto_ipt_rule_exists(
+                "filter", "INPUT", ["-p", "udp"],
+            )
+        self.assertFalse(result)
+
+    def test_passes_correct_args_to_run(self):
+        """Проверяем что аргументы передаются корректно: iptables -t <table>
+        -C <chain> + args."""
+        from chimera.modules import proto_common
+        fake_run = MagicMock(return_value=self._make_completed(0))
+        fake_core = MagicMock()
+        fake_core._run = fake_run
+        with patch.object(proto_common, "_core_module", return_value=fake_core):
+            proto_common.proto_ipt_rule_exists(
+                "nat", "OUTPUT",
+                ["-d", "10.0.0.0/8", "-p", "tcp", "-j", "ACCEPT"],
+            )
+        args = fake_run.call_args.args[0]
+        self.assertEqual(args[0], "iptables")
+        self.assertEqual(args[1], "-t")
+        self.assertEqual(args[2], "nat")
+        self.assertEqual(args[3], "-C")
+        self.assertEqual(args[4], "OUTPUT")
+        self.assertIn("-d", args)
+        self.assertIn("10.0.0.0/8", args)
+
+    def test_does_not_crash_telemt_menu_scenario(self):
+        """Интеграционный тест: имитируем сценарий из баг-репорта —
+        _xray_tproxy_status вызывает _ipt_rule_exists для 19 TG-подсетей,
+        ни одна не имеет правила (Telemt остановлен). Раньше первый же
+        rc=1 валил весь TUI-меню. Теперь — должно работать."""
+        from chimera.modules import proto_common
+        # 19 TG-подсетей, ни одной нет правила.
+        fake_run = MagicMock(return_value=self._make_completed(1))
+        fake_core = MagicMock()
+        fake_core._run = fake_run
+        with patch.object(proto_common, "_core_module", return_value=fake_core):
+            for i in range(19):
+                result = proto_common.proto_ipt_rule_exists(
+                    "nat", "OUTPUT",
+                    ["-d", f"91.105.{i}.0/23", "-p", "tcp",
+                     "-j", "REDIRECT", "--to-port", "10811"],
+                )
+                self.assertFalse(result,
+                                 f"Подсеть {i}: должно быть False (правила нет)")
+        # 19 вызовов, ни один не бросил — тест прошёл.
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
