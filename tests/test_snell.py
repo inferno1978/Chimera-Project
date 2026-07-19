@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,14 @@ from unittest.mock import patch, MagicMock
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
+
+
+def _make_completed(stdout: str = "", returncode: int = 0):
+    """Создаёт mock CompletedProcess для имитации subprocess.run."""
+    return subprocess.CompletedProcess(
+        args=[], returncode=returncode,
+        stdout=stdout, stderr="",
+    )
 
 
 def _setup_core_in_sysmodules():
@@ -711,6 +720,220 @@ class TestStatusPanelIntegration(unittest.TestCase):
         checks = _protocol_checks({})
         names = [name for name, _ in checks]
         self.assertIn("Snell v4", names)
+
+
+class TestIsInstalledLogic(unittest.TestCase):
+    """Регрессионные тесты для _is_installed() и install flow.
+
+    Баг: после _run_install() юзер видел "не установлен" в меню, потому что
+    CONFIG_DIR (/etc/snell/) не создавался во время установки. _is_installed()
+    проверяет BIN_PATH + SERVICE_TEMPLATE + CONFIG_DIR — без CONFIG_DIR
+    возвращал False → пункт меню '2. Управление пользователями' не появлялся.
+
+    Эти тесты проверяют контракт _is_installed() напрямую: True только когда
+    все три компонента существуют.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_paths(self):
+        """Патчит BIN_PATH, SERVICE_TEMPLATE, CONFIG_DIR на временные."""
+        from chimera.modules import snell
+        bin_path = self._tmpdir / "snell-server"
+        svc_template = self._tmpdir / "snell-server@.service"
+        cfg_dir = self._tmpdir / "snell"
+        return [
+            patch.object(snell, "BIN_PATH", bin_path),
+            patch.object(snell, "SERVICE_TEMPLATE", svc_template),
+            patch.object(snell, "CONFIG_DIR", cfg_dir),
+        ], bin_path, svc_template, cfg_dir
+
+    def test_is_installed_false_when_nothing_exists(self):
+        """В чистой среде _is_installed() должен вернуть False."""
+        from chimera.modules.snell import _is_installed
+        patches, _, _, _ = self._patch_paths()
+        for p in patches:
+            p.start()
+        try:
+            self.assertFalse(_is_installed())
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_is_installed_false_when_binary_missing(self):
+        """Если бинарника нет — False, даже если template и CONFIG_DIR есть."""
+        from chimera.modules.snell import _is_installed
+        patches, bin_path, svc_template, cfg_dir = self._patch_paths()
+        for p in patches:
+            p.start()
+        try:
+            # Создаём template и CONFIG_DIR, но НЕ бинарник.
+            svc_template.write_text("[Unit]\n...")
+            cfg_dir.mkdir()
+            self.assertFalse(_is_installed())
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_is_installed_false_when_config_dir_missing(self):
+        """РЕГРЕССИЯ: если CONFIG_DIR не создан — _is_installed() False,
+        даже если бинарник и template на месте. Это была причина бага
+        'не установлено' после _run_install()."""
+        from chimera.modules.snell import _is_installed
+        patches, bin_path, svc_template, cfg_dir = self._patch_paths()
+        for p in patches:
+            p.start()
+        try:
+            # Создаём бинарник и template, но НЕ CONFIG_DIR.
+            bin_path.write_bytes(b'\x7fELF')
+            bin_path.chmod(0o755)
+            svc_template.write_text("[Unit]\n...")
+            # cfg_dir НЕ создаём — это и есть баг.
+            self.assertFalse(_is_installed(),
+                             "_is_installed() должен вернуть False без CONFIG_DIR")
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_is_installed_true_when_all_three_exist(self):
+        """Все три компонента (binary + template + CONFIG_DIR) существуют → True."""
+        from chimera.modules.snell import _is_installed
+        patches, bin_path, svc_template, cfg_dir = self._patch_paths()
+        for p in patches:
+            p.start()
+        try:
+            bin_path.write_bytes(b'\x7fELF')
+            bin_path.chmod(0o755)
+            svc_template.write_text("[Unit]\n...")
+            cfg_dir.mkdir()  # КРИТИЧНО — без этого _is_installed() False
+            self.assertTrue(_is_installed())
+        finally:
+            for p in patches:
+                p.stop()
+
+
+class TestRunInstallCreatesConfigDir(unittest.TestCase):
+    """Регрессионный тест: _run_install() ДОЛЖЕН создавать CONFIG_DIR.
+
+    Баг: ранее _run_install() скачивал бинарник, писал template unit,
+    но НЕ создавал CONFIG_DIR. Из-за этого после установки:
+      - _is_installed() возвращал False (нет CONFIG_DIR)
+      - меню показывало '● не установлен'
+      - пункт '2. Управление пользователями' не появлялся
+      - юзер не мог добавить ни одного пользователя (chicken-and-egg)
+
+    Фикс: _run_install() явно вызывает CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    сразу после _install_service_template().
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_install_creates_config_dir(self):
+        """После успешного _run_install() CONFIG_DIR должен существовать.
+
+        Тестируем только шаг создания CONFIG_DIR — остальные шаги
+        (download binary, ask obfs) требуют интерактивного ввода и
+        сетевых вызовов, поэтому мокаются.
+        """
+        from chimera.modules import snell
+        cfg_dir = self._tmpdir / "snell"
+        bin_path = self._tmpdir / "snell-server"
+        svc_template = self._tmpdir / "snell-server@.service"
+        # Мокаем все пути.
+        with patch.object(snell, "CONFIG_DIR", cfg_dir), \
+             patch.object(snell, "BIN_PATH", bin_path), \
+             patch.object(snell, "SERVICE_TEMPLATE", svc_template), \
+             patch.object(snell, "MODULE_STATE",
+                          self._tmpdir / "snell.json"), \
+             patch.object(snell, "_download_binary", return_value=True), \
+             patch.object(snell, "_install_service_template"), \
+             patch.object(snell, "_ask_obfs", return_value="off"), \
+             patch.object(snell, "_ensure_le_cert", return_value=True), \
+             patch.object(snell, "_get_server_ip", return_value="1.2.3.4"), \
+             patch.object(snell, "_get_latest_version",
+                          return_value="4.1.1"), \
+             patch.object(snell, "_run",
+                          return_value=_make_completed("snell v4.1.1", 0)), \
+             patch.object(snell, "_pause"), \
+             patch("os.system"):
+            snell._run_install()
+        # CONFIG_DIR должен быть создан.
+        self.assertTrue(cfg_dir.exists(),
+                        "CONFIG_DIR должен существовать после _run_install()")
+        # После установки _is_installed() должен вернуть True.
+        with patch.object(snell, "BIN_PATH", bin_path), \
+             patch.object(snell, "SERVICE_TEMPLATE", svc_template), \
+             patch.object(snell, "CONFIG_DIR", cfg_dir):
+            # Создаём бинарник и template (их _run_install не сделал
+            # потому что мы замокали _download_binary и _install_service_template).
+            bin_path.write_bytes(b'\x7fELF')
+            bin_path.chmod(0o755)
+            svc_template.write_text("[Unit]\n...")
+            self.assertTrue(snell._is_installed(),
+                            "_is_installed() должен вернуть True после install")
+
+
+class TestVersionCheckPermissive(unittest.TestCase):
+    """Регрессионный тест: проверка версии бинарника должна быть пермиссивной.
+
+    Баг: ранее _run_install() вызывал `snell-server --version` и если
+    returncode != 0 — прерывал установку. Но snell-server может:
+      • использовать -v вместо --version
+      • писать версию в stderr, не stdout
+      • вообще не поддерживать флаг версии
+    Фикс: пробуем --version, потом -v, если оба не сработали — продолжаем
+    с предупреждением, не блокируем установку.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_install_continues_when_version_check_fails(self):
+        """Если --version и -v оба возвращают non-zero — установка
+        продолжается (с предупреждением), не прерывается."""
+        from chimera.modules import snell
+        cfg_dir = self._tmpdir / "snell"
+        # _run всегда возвращает rc=1 (как будто флаг не поддерживается).
+        failed_completed = _make_completed("", returncode=1)
+        with patch.object(snell, "CONFIG_DIR", cfg_dir), \
+             patch.object(snell, "BIN_PATH", self._tmpdir / "snell-server"), \
+             patch.object(snell, "SERVICE_TEMPLATE",
+                          self._tmpdir / "snell-server@.service"), \
+             patch.object(snell, "MODULE_STATE",
+                          self._tmpdir / "snell.json"), \
+             patch.object(snell, "_download_binary", return_value=True), \
+             patch.object(snell, "_install_service_template"), \
+             patch.object(snell, "_ask_obfs", return_value="off"), \
+             patch.object(snell, "_ensure_le_cert", return_value=True), \
+             patch.object(snell, "_get_server_ip", return_value="1.2.3.4"), \
+             patch.object(snell, "_get_latest_version",
+                          return_value="4.1.1"), \
+             patch.object(snell, "_run", return_value=failed_completed), \
+             patch.object(snell, "_pause"), \
+             patch("os.system"):
+            # Не должно падать — установка продолжается.
+            snell._run_install()
+        # CONFIG_DIR всё равно должен быть создан (install не прервался).
+        self.assertTrue(cfg_dir.exists(),
+                        "Установка должна продолжиться даже если version "
+                        "check не сработал — CONFIG_DIR создан")
 
 
 if __name__ == "__main__":

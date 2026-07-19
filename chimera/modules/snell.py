@@ -715,19 +715,44 @@ def _run_install() -> None:
         _pause()
         return
 
-    # Проверяем что бинарник реально работает.
+    # Проверяем что бинарник реально работает. Snell-server может
+    # использовать --version или -v (зависит от сборки). Если ни один
+    # флаг не сработал — не блокируем установку, просто предупреждаем
+    # (бинарник может писать версию только в stderr или при запуске
+    # с конфигом). Главный критерий — что он запускается без segfault.
     _info("Проверяю бинарник...")
     r = _run([str(BIN_PATH), "--version"], capture=True)
     if r.returncode != 0:
-        _err(f"Бинарник не запускается: {r.stderr}")
-        _pause()
-        return
-    _ok(f"Версия: {r.stdout.strip()}")
+        # Пробуем короткий флаг -v.
+        r = _run([str(BIN_PATH), "-v"], capture=True)
+    if r.returncode != 0:
+        _warn(f"Не удалось получить версию через --version/-v "
+              f"(rc={r.returncode}). Продолжаю установку — бинарник "
+              f"может использовать другой флаг. Проверьте вручную: "
+              f"{BIN_PATH} --version")
+    else:
+        version_output = (r.stdout or r.stderr or "").strip()
+        if version_output:
+            _ok(f"Версия: {version_output}")
 
     # Устанавливаем template unit.
     _info("Создаю systemd template unit...")
     _install_service_template()
     _ok(f"Template unit: {SERVICE_TEMPLATE}")
+
+    # Создаём CONFIG_DIR для per-user конфигов.
+    # КРИТИЧНО: _is_installed() проверяет существование CONFIG_DIR —
+    # без этого пункт меню '2. Управление пользователями' не появится
+    # и юзер не сможет добавить ни одного пользователя (chicken-and-egg).
+    _info("Создаю директорию для конфигов...")
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_DIR.chmod(0o755)
+        _ok(f"Директория конфигов: {CONFIG_DIR}")
+    except (OSError, PermissionError) as e:
+        _err(f"Не удалось создать {CONFIG_DIR}: {e}")
+        _pause()
+        return
 
     # Спрашиваем obfs.
     obfs = _ask_obfs()
