@@ -155,6 +155,7 @@ _FPTN_USERS_FILE = Path("/etc/fptn/users.list")
 _FPTN_CERT_FILE  = Path("/etc/fptn/server.crt")
 _HYBRID_STATE = Path("/var/lib/xray-installer/hybrid_mieru_state.json")
 _MITA_HYBRID_CFG = Path("/etc/mita/hybrid_server_config.json")
+_SNELL_STATE  = Path("/var/lib/xray-installer/snell.json")
 _SUB_CONF    = Path("/var/lib/xray-installer/subscription.json")
 _TRAFFIC_LIMITS_FILE = Path("/var/lib/xray-installer/traffic_limits.json")
 _UNIT_PATH   = Path("/etc/systemd/system/vless-subscription.service")
@@ -408,6 +409,44 @@ def _build_naive_uris(user: dict) -> list[str]:
         return []
 
 # ══════════════════════════════════════════════════════════════════════════
+# SNELL v4 (Surge — per-user systemd template, свой psk+port на каждого)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _build_snell_uris(user: dict, server_ip: str) -> list[str]:
+    """Генерирует snell:// URI для юзера если Snell установлен и инстанс активен.
+
+    Per-user модель: у каждого юзера свой port+PSK. Сопоставление по
+    user["name"] / email / email-local-part (аналогично Telemt/NaiveProxy).
+    Возвращает список (обычно 0 или 1 элемент) — пустой если Snell не
+    установлен или у юзера нет соответствующего аккаунта.
+    """
+    if not _SNELL_STATE.exists():
+        return []
+    try:
+        # Делегируем в snell-модуль — там уже есть get_user_link() с
+        # проверкой is_any_active() и сопоставлением по name/email/local.
+        from chimera.modules.snell import (
+            get_user_link as _snell_get_link,
+            is_any_active as _snell_is_any_active,
+        )
+        if not _snell_is_any_active():
+            return []
+        # Пробуем по name, полному email, локальной части email.
+        user_name = user.get("name", "") or ""
+        user_email = user.get("email", "") or ""
+        user_email_local = user_email.split("@", 1)[0] if user_email else ""
+        for candidate in (user_name, user_email, user_email_local):
+            if not candidate:
+                continue
+            link = _snell_get_link(candidate, server_ip=server_ip)
+            if link:
+                return [link]
+        return []
+    except Exception as e:
+        _warn(f"Не удалось построить Snell URI: {e}")
+        return []
+
+# ══════════════════════════════════════════════════════════════════════════
 # FPTN (самостоятельный L3 VPN, свой users.list — не Xray-inbound)
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -537,6 +576,7 @@ def build_subscription_body(user: dict) -> bytes:
     links += _build_mieru_uris(user, ipv4 or state.get("domain", ""))
     links += _build_naive_uris(user)
     links += _build_fptn_uris(user, ipv4 or state.get("domain", ""))
+    links += _build_snell_uris(user, ipv4 or state.get("domain", ""))
 
     telemt = _build_telemt_uri(user, ipv4 or state.get("domain", ""))
     if telemt:
@@ -612,6 +652,7 @@ def build_subscription_body_ios(user: dict) -> bytes:
     links += _build_mieru_uris(user, ipv4 or state.get("domain", ""))
     links += _build_naive_uris(user)
     links += _build_fptn_uris(user, ipv4 or state.get("domain", ""))
+    links += _build_snell_uris(user, ipv4 or state.get("domain", ""))
 
     telemt = _build_telemt_uri(user, ipv4 or state.get("domain", ""))
     if telemt:
