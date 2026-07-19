@@ -242,429 +242,134 @@ def _sync_users_from_config() -> int:
     return added
 
 
-# ── Telemt (MTProto) ↔ users.json автосинхронизация ──────────────────────────
+# ── Обобщённая автосинхронизация VLESS → независимые протоколы ──────────────
 #
-# Telemt хранит свой список пользователей отдельно от VLESS (users.json) —
-# в /etc/telemt/telemt.toml, секция [access.users]. Каждый Telemt-юзер имеет
-# уникальный secret (hex32), который используется в персональной MTProto-ссылке.
+# Реестр протоколов, которые участвуют в автосинхронизации. Каждый протокол
+# в списке — это полный modulepath к Python-модулю, который экспортирует
+# 4 функции контракта:
+#   • is_active() -> bool — протокол установлен и активен
+#   • ensure_user(name) -> bool — создать аккаунт если нет
+#   • remove_user(name) -> bool — удалить аккаунт
+#   • rename_user(old, new) -> bool — переименовать с сохранением секрета/порта
 #
-# Без автосинхронизации админ должен вручную создавать каждого юзера через
-# TUI Chimera → Telemt → Управление пользователями → Добавить. Это не работает
-# на практике: юзер VLESS создан в админ-панели, а Telemt-аккаунта нет →
-# MTProto-ссылка не появляется в User Portal (см. _generate_vless_links).
+# Все 4 функции НИКОГДА не бросают исключение наружу — ловят всё внутри
+# и возвращают bool. Это позволяет реестру диспетчеризовать вызовы безопасно,
+# не падая при сбое одного из протоколов.
 #
-# Эти функции — мост: при создании/удалении/переименовании VLESS-юзера в
-# админ-панели автоматически создаём/удаляем/переименовываем соответствующего
-# Telemt-юзера с тем же name. Секрет генерируется случайно (hex32) через
-# Telemt'овский _generate_secret(). Если Telemt не установлен — функции
-# молча возвращаются (no-op), не ломая остальные операции.
+# Добавление нового протокола в синхронизацию = ОДНА строка в этом списке.
+# Не нужно писать новые _<proto>_ensure_user функции в rest_api.py —
+# логика инкапсулирована в самом протокол-модуле.
 #
-# ВАЖНО: все функции оставляют Telemt-аккаунты, созданные вручную через TUI,
-# нетронутыми — синхронизация работает только в одну сторону (VLESS → Telemt),
-# и только для имён, которые валидны по Telemt-спеке (^[a-zA-Z][a-zA-Z0-9_\-]{2,15}$).
-
-def _telemt_is_active() -> bool:
-    """Возвращает True если служба telemt активна (systemctl is-active)."""
-    try:
-        core = _core_module()
-        from chimera.modules.mtproto import SERVICE_NAME as _TELEMT_SVC
-        r = core._run(["systemctl", "is-active", _TELEMT_SVC],
-                      capture=True, check=False)
-        return r.returncode == 0 and r.stdout.strip() == "active"
-    except Exception:
-        return False
-
-
-def _telemt_ensure_user(name: str) -> bool:
-    """Создаёт Telemt-пользователя с именем `name`, если его ещё нет.
-
-    Возвращает True если пользователь создан или уже существует.
-    Возвращает False если:
-      • Telemt не активен (не установлен) → no-op
-      • Имя невалидно по Telemt-спеке → no-op (VLESS-юзер остаётся без MTProto)
-      • Ошибка при сохранении/рестарте → no-op
-    """
-    if not name:
-        return False
-    try:
-        from chimera.modules.mtproto import (
-            _load_users as _telemt_load_users,
-            _save_users as _telemt_save_users,
-            _generate_secret as _telemt_generate_secret,
-            _validate_username as _telemt_validate_username,
-            SERVICE_NAME as _TELEMT_SVC,
-        )
-    except ImportError:
-        # mtproto модуль недоступен (старая инсталляция без Telemt)
-        return False
-    # Имя должно соответствовать Telemt-спеке: ^[a-zA-Z][a-zA-Z0-9_\-]{2,15}$
-    # VLESS-юзеры могут иметь имена с точками, @, и т.д. — для них MTProto
-    # будет недоступен (требование Telemt-бинарника, не наше ограничение).
-    if not _telemt_validate_username(name):
-        return False
-    try:
-        users = _telemt_load_users() or {}
-        if name in users:
-            return True  # уже есть — ничего делать не надо
-        users[name] = _telemt_generate_secret()
-        _telemt_save_users(users)
-        # Рестарт telemt чтобы подхватил нового юзера (аналогично TUI-меню).
-        core = _core_module()
-        core._run(["systemctl", "restart", _TELEMT_SVC], check=False, quiet=True)
-        return True
-    except Exception:
-        return False
-
-
-def _telemt_remove_user(name: str) -> bool:
-    """Удаляет Telemt-пользователя с именем `name`, если он существует.
-
-    Возвращает True если удалён или его не было. False — при ошибке.
-    Никогда не падает с исключением — no-op на любой сбой.
-    """
-    if not name:
-        return False
-    try:
-        from chimera.modules.mtproto import (
-            _load_users as _telemt_load_users,
-            _save_users as _telemt_save_users,
-            SERVICE_NAME as _TELEMT_SVC,
-        )
-    except ImportError:
-        return False
-    try:
-        users = _telemt_load_users() or {}
-        if name not in users:
-            return True  # нет такого — уже "удалён"
-        # Не удаляем последнего пользователя (Telemt требует минимум одного).
-        if len(users) <= 1:
-            return False
-        del users[name]
-        _telemt_save_users(users)
-        core = _core_module()
-        core._run(["systemctl", "restart", _TELEMT_SVC], check=False, quiet=True)
-        return True
-    except Exception:
-        return False
-
-
-def _telemt_rename_user(old_name: str, new_name: str) -> bool:
-    """Переименовывает Telemt-пользователя old_name → new_name.
-
-    Сохраняет секрет (MTProto-ссылка остаётся рабочей, меняется только имя).
-    Если new_name уже занят — no-op (не перезаписываем чужой секрет).
-    Если old_name не существует — пробуем создать new_name с новым секретом
-    (fallback, чтобы не ломать сценарий "переименовали в VLESS, но в Telemt
-    такого не было" — тогда просто создаём нового).
-    """
-    if not old_name or not new_name:
-        return False
-    if old_name == new_name:
-        return True
-    try:
-        from chimera.modules.mtproto import (
-            _load_users as _telemt_load_users,
-            _save_users as _telemt_save_users,
-            _generate_secret as _telemt_generate_secret,
-            _validate_username as _telemt_validate_username,
-            SERVICE_NAME as _TELEMT_SVC,
-        )
-    except ImportError:
-        return False
-    if not _telemt_validate_username(new_name):
-        return False
-    try:
-        users = _telemt_load_users() or {}
-        if new_name in users:
-            # Имя занято — не трогаем чужой секрет.
-            return False
-        if old_name in users:
-            users[new_name] = users.pop(old_name)
-        else:
-            # Старого нет — создаём нового (fallback).
-            users[new_name] = _telemt_generate_secret()
-        _telemt_save_users(users)
-        core = _core_module()
-        core._run(["systemctl", "restart", _TELEMT_SVC], check=False, quiet=True)
-        return True
-    except Exception:
-        return False
-
-
-def _telemt_sync_all_from_vless(users: list[dict]) -> dict:
-    """Полная синхронизация VLESS → Telemt.
-
-    Создаёт недостающих Telemt-аккаунтов для всех валидных VLESS-юзеров.
-    Удаляет "лишние" Telemt-аккаунты только если они НЕ валидны как
-    Telemt-имена (чтобы не удалить аккаунты, созданные вручную через TUI
-    с именами, не совпадающими с VLESS-юзерами).
-
-    Возвращает dict со статистикой для отчёта в админ-панели:
-      {"created": N, "removed": N, "skipped_invalid": N}
-    """
-    stats = {"created": 0, "removed": 0, "skipped_invalid": 0}
-    try:
-        from chimera.modules.mtproto import (
-            _load_users as _telemt_load_users,
-            _save_users as _telemt_save_users,
-            _generate_secret as _telemt_generate_secret,
-            _validate_username as _telemt_validate_username,
-            SERVICE_NAME as _TELEMT_SVC,
-        )
-    except ImportError:
-        return stats
-    if not _telemt_is_active():
-        return stats
-    try:
-        telemt_users = _telemt_load_users() or {}
-        # Собираем валидные VLESS-имена (могут дублироваться между email/name —
-        # берём уникальные).
-        vless_names: set[str] = set()
-        for u in users:
-            name = u.get("name", "") or ""
-            if not u.get("disabled", False) and name:
-                vless_names.add(name)
-        # Создаём недостающих.
-        new_users = dict(telemt_users)
-        for name in vless_names:
-            if name not in new_users:
-                if _telemt_validate_username(name):
-                    new_users[name] = _telemt_generate_secret()
-                    stats["created"] += 1
-                else:
-                    stats["skipped_invalid"] += 1
-        # Сохраняем если были изменения.
-        if new_users != telemt_users:
-            _telemt_save_users(new_users)
-            core = _core_module()
-            core._run(["systemctl", "restart", _TELEMT_SVC],
-                      check=False, quiet=True)
-    except Exception:
-        pass
-    return stats
-
-
-# ── Snell v4 ↔ users.json автосинхронизация ─────────────────────────────────
+# Протоколы в списке:
+#   • mtproto (Telemt) — MTProto-прокси, общий [access.users] в /etc/telemt/telemt.toml
+#   • snell (Snell v4) — per-user systemd template, /etc/snell/<user>.conf
 #
-# Snell хранит свой список пользователей отдельно от VLESS (users.json) —
-# в /var/lib/xray-installer/snell.json, поле state["users"] (массив dict'ов
-# с username/port/psk/obfs). Каждый Snell-юзер — независимый systemd
-# template-инстанс snell-server@<username>.service, со своим портом
-# из диапазона 30000-30999 и своим PSK.
-#
-# Без автосинхронизации админ должен вручную создавать каждого юзера через
-# TUI Chimera → Snell → Управление пользователями → Добавить. Это не работает
-# на практике: юзер VLESS создан в админ-панели, а Snell-аккаунта нет →
-# snell:// ссылка не появляется в User Portal (matching в _generate_vless_links
-# идёт по совпадению user.name/email с Snell-username, молча через except: pass).
-#
-# Архитектурное отличие от Telemt: у Telemt общий [access.users] в одном
-# конфиге, нельзя удалить последнего юзера (Telemt падает). У Snell каждый
-# юзер — независимый инстанс, удалять последнего МОЖНО (это просто остановит
-# последний snell-server@<user>.service, никаких ограничений).
-#
-# Эти функции — мост: при создании/удалении/переименовании VLESS-юзера в
-# админ-панели автоматически создаём/удаляем/переименовываем соответствующего
-# Snell-юзера с тем же name. PSK генерируется случайно (32 байта, base64)
-# через snell._generate_psk(). Если Snell не установлен — функции молча
-# возвращаются (no-op), не ломая остальные операции.
+# Внутренняя политика каждого протокола (валидация имён, лимиты портов,
+# "нельзя удалить последнего" и т.п.) — полностью инкапсулирована в модуле.
+# Реестр про это ничего не знает, он просто вызывает 4 функции контракта.
+_SYNCABLE_PROTOCOLS = [
+    "chimera.modules.mtproto",
+    "chimera.modules.snell",
+]
 
-def _snell_is_active() -> bool:
-    """Возвращает True если Snell установлен И есть хотя бы один активный
-    systemd-инстанс snell-server@<user>.
 
-    Использует snell.is_any_active() — он уже проверяет _is_installed()
-    и перебирает все инстансы в state["users"].
+def _sync_dispatch(method: str, *args) -> dict:
+    """Вызывает method (ensure_user/remove_user/rename_user) на каждом
+    активном syncable-протоколе.
+
+    Возвращает {proto_short_name: bool|None}:
+      • True/False — результат вызова method на протоколе
+      • None — протокол недоступен (ImportError) или не активен (is_active()
+        вернул False), либо method бросил исключение
+
+    None означает "протокол пропущен, не считается ошибкой" — например,
+    если Snell не установлен, синхронизация для него просто не делается,
+    но Telemt при этом нормально синхронизируется.
     """
-    try:
-        from chimera.modules.snell import is_any_active as _snell_is_any
-        return _snell_is_any()
-    except Exception:
-        return False
-
-
-def _snell_ensure_user(name: str) -> bool:
-    """Создаёт Snell-пользователя с именем `name`, если его ещё нет.
-
-    Возвращает True если пользователь создан или уже существует.
-    Возвращает False если:
-      • Snell не установлен (is_any_active возвращает False) → no-op
-      • Имя невалидно по Snell-спеке → no-op (VLESS-юзер остаётся без snell://)
-      • Ошибка при создании/запуске инстанса → no-op
-      • Нет свободных портов в диапазоне 30000-30999 → no-op
-        (sync_all отдельно считает такие случаи как skipped_no_ports)
-    """
-    if not name:
-        return False
-    try:
-        from chimera.modules.snell import (
-            _load_state as _snell_load_state,
-            _find_user as _snell_find_user,
-            _add_user as _snell_add_user,
-            _validate_username as _snell_validate_username,
-            is_any_active as _snell_is_any,
-        )
-    except ImportError:
-        # snell модуль недоступен (старая инсталляция без Snell)
-        return False
-    # Если Snell вообще не установлен — no-op (не создаём аккаунты
-    # под неработающий сервис).
-    try:
-        if not _snell_is_any():
-            return False
-    except Exception:
-        return False
-    # Имя должно соответствовать Snell-спеке: ^[a-zA-Z][a-zA-Z0-9_\-]{2,15}$
-    # (та же что и у Telemt — но это совпадение, Snell-бинарник сам валидирует).
-    if not _snell_validate_username(name):
-        return False
-    try:
-        # Если юзер уже есть — ничего делать не надо.
-        state = _snell_load_state()
-        if _snell_find_user(state, name) is not None:
-            return True
-        # Создаём — _add_user сам выделяет порт, пишет конфиг,
-        # запускает systemd-инстанс, сохраняет state.
-        _snell_add_user(name)
-        return True
-    except ValueError:
-        # Имя невалидно или юзер уже существует (последнее маловероятно,
-        # мы только что проверили — но race condition возможен).
-        return False
-    except RuntimeError:
-        # Нет свободных портов или инстанс не стартовал.
-        return False
-    except Exception:
-        return False
-
-
-def _snell_remove_user(name: str) -> bool:
-    """Удаляет Snell-пользователя с именем `name`, если он существует.
-
-    Возвращает True если удалён или его не было. False — при ошибке.
-    Никогда не падает с исключением — no-op на любой сбой.
-
-    В отличие от Telemt, у Snell можно удалять последнего юзера —
-    каждый инстанс независим, никаких ограничений на пустой state.
-    """
-    if not name:
-        return False
-    try:
-        from chimera.modules.snell import (
-            _remove_user as _snell_remove_user_impl,
-            is_any_active as _snell_is_any,
-        )
-    except ImportError:
-        return False
-    # Если Snell не установлен — нет смысла что-то удалять.
-    # Но если он БЫЛ установлен и потом удалён — могли остаться
-    # висящие аккаунты в state. Поэтому проверяем только наличие
-    # snell-модуля, is_any_active не требуем (иначе при удалённом
-    # бинарнике аккаунты не почистятся).
-    try:
-        return _snell_remove_user_impl(name)
-    except Exception:
-        return False
-
-
-def _snell_rename_user(old_name: str, new_name: str) -> bool:
-    """Переименовывает Snell-пользователя old_name → new_name.
-
-    Сохраняет PSK, порт, obfs — старые клиентские snell:// ссылки
-    продолжают работать (меняется только имя инстанса, а не psk/port).
-
-    Делегирует в snell.rename_user() — он делает полную транзакцию
-    с откатом если snell-server@<new> не стартовал.
-    """
-    if not old_name or not new_name:
-        return False
-    if old_name == new_name:
-        return True
-    try:
-        from chimera.modules.snell import (
-            rename_user as _snell_rename_impl,
-            _validate_username as _snell_validate_username,
-        )
-    except ImportError:
-        return False
-    if not _snell_validate_username(new_name):
-        return False
-    try:
-        return _snell_rename_impl(old_name, new_name)
-    except Exception:
-        return False
-
-
-def _snell_sync_all_from_vless(users: list[dict]) -> dict:
-    """Полная синхронизация VLESS → Snell.
-
-    Создаёт недостающие Snell-аккаунты для всех валидных VLESS-юзеров.
-    Не удаляет существующие Snell-аккаунты (даже если VLESS-юзер удалён)
-    — удаление происходит через явный DELETE /api/users/{email} hook,
-    а не через массовую sync (это безопаснее: ручные Snell-аккаунты
-    через TUI не будут стёрты при sync).
-
-    Возвращает dict со статистикой для отчёта в админ-панели:
-      {"created": N, "skipped_invalid": N, "skipped_no_ports": N}
-
-    skipped_invalid — VLESS-имена не подходят под Snell-спеку
-                     ([a-zA-Z][a-zA-Z0-9_-]{2,15}).
-    skipped_no_ports — Snell установлен, имя валидно, но _add_user
-                      бросил RuntimeError о нехватке портов
-                      (диапазон 30000-30999 = 1000 слотов кончился).
-    """
-    stats = {"created": 0, "skipped_invalid": 0, "skipped_no_ports": 0}
-    try:
-        from chimera.modules.snell import (
-            _load_state as _snell_load_state,
-            _find_user as _snell_find_user,
-            _add_user as _snell_add_user,
-            _validate_username as _snell_validate_username,
-            is_any_active as _snell_is_any,
-        )
-    except ImportError:
-        return stats
-    # Если Snell не установлен — no-op.
-    try:
-        if not _snell_is_any():
-            return stats
-    except Exception:
-        return stats
-    try:
-        state = _snell_load_state()
-        # Собираем валидные VLESS-имена (уникальные, не disabled).
-        vless_names: set[str] = set()
-        for u in users:
-            name = u.get("name", "") or ""
-            if not u.get("disabled", False) and name:
-                vless_names.add(name)
-        # Создаём недостающих — по одному, чтобы изолировать ошибки
-        # (RuntimeError на нехватке портов не должен валить всю sync).
-        for name in vless_names:
-            if _snell_find_user(state, name) is not None:
-                continue  # уже есть
-            if not _snell_validate_username(name):
-                stats["skipped_invalid"] += 1
+    import importlib
+    results: dict = {}
+    for modpath in _SYNCABLE_PROTOCOLS:
+        # proto — короткое имя для ключа в ответе (mtproto, snell).
+        proto = modpath.rsplit(".", 1)[-1]
+        try:
+            mod = importlib.import_module(modpath)
+        except Exception:
+            # Модуль не импортируется (старая инсталляция без этого протокола,
+            # или синтаксическая ошибка после кривого update) — пропускаем.
+            results[proto] = None
+            continue
+        try:
+            # is_active() — тоже часть контракта, не бросает исключение.
+            if not mod.is_active():
+                results[proto] = None
                 continue
-            try:
-                _snell_add_user(name)
-                stats["created"] += 1
-                # Перезагружаем state чтобы следующий _find_user увидел
-                # только что созданного юзера (на случай дубликатов имён
-                # в vless_names — set их убирает, но мало ли).
-                state = _snell_load_state()
-            except ValueError:
-                # Невалидное имя или уже существует — оба случая маловероятны
-                # после проверок выше, но обрабатываем.
-                stats["skipped_invalid"] += 1
-            except RuntimeError:
-                # Нет свободных портов или инстанс не стартовал.
-                stats["skipped_no_ports"] += 1
-            except Exception:
-                # Любая другая ошибка — пропускаем, не валить sync.
-                stats["skipped_invalid"] += 1
-    except Exception:
-        pass
+            fn = getattr(mod, method)
+            results[proto] = fn(*args)
+        except Exception:
+            # Любой сбой внутри method — протокол пропускаем, не роняем
+            # всю синхронизацию. Остальные протоколы в реестре продолжают.
+            results[proto] = None
+    return results
+
+
+def _sync_ensure_user(name: str) -> dict:
+    """Создаёт аккаунт `name` во всех активных syncable-протоколах.
+
+    Возвращает {proto: bool|None}. См. _sync_dispatch для значений.
+    """
+    return _sync_dispatch("ensure_user", name)
+
+
+def _sync_remove_user(name: str) -> dict:
+    """Удаляет аккаунт `name` во всех активных syncable-протоколах."""
+    return _sync_dispatch("remove_user", name)
+
+
+def _sync_rename_user(old: str, new: str) -> dict:
+    """Переименовывает old → new во всех активных syncable-протоколах."""
+    return _sync_dispatch("rename_user", old, new)
+
+
+def _sync_all_from_vless(users: list[dict]) -> dict:
+    """Массовая синхронизация: для каждого syncable-протокола вызывает
+    ensure_user на всех валидных VLESS-именах.
+
+    Возвращает {proto: {"created": N, "skipped": N}} — статистика по
+    каждому протоколу. skipped = сумма всех причин пропуска (невалидное
+    имя, нет ресурсов и т.п.) — детализация причин внутри протокола,
+    реестр не различает.
+
+    Протоколы, у которых is_active() вернул False — в ответе со значением
+    {"created": 0, "skipped": 0} (no-op, не считается ошибкой).
+    """
+    import importlib
+    # Собираем уникальные VLESS-имена (не disabled). Этот шаг общий для
+    # всех протоколов — нет смысла дублировать в каждом модуле.
+    vless_names: set[str] = set()
+    for u in users:
+        name = u.get("name", "") or ""
+        if not u.get("disabled", False) and name:
+            vless_names.add(name)
+    stats: dict = {}
+    for modpath in _SYNCABLE_PROTOCOLS:
+        proto = modpath.rsplit(".", 1)[-1]
+        stats[proto] = {"created": 0, "skipped": 0}
+        try:
+            mod = importlib.import_module(modpath)
+        except Exception:
+            continue  # протокол недоступен — stats остаётся {0, 0}
+        try:
+            if not mod.is_active():
+                continue  # не активен — no-op
+            for name in vless_names:
+                ok = mod.ensure_user(name)
+                if ok:
+                    stats[proto]["created"] += 1
+                else:
+                    stats[proto]["skipped"] += 1
+        except Exception:
+            # Любой сбой — протокол пропускаем, не роняем sync.
+            continue
     return stats
 
 
@@ -1703,17 +1408,12 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-            # Автосинхронизация с Telemt: создаём соответствующего
-            # Telemt-пользователя с тем же name, чтобы MTProto-ссылка
-            # появилась в User Portal без ручного шага в TUI.
-            telemt_created = _telemt_ensure_user(name)
-
-            # Автосинхронизация со Snell v4: создаём соответствующий
-            # Snell-аккаунт (per-user systemd-инстанс) с тем же name,
-            # чтобы snell:// ссылка появилась в User Portal. PSK и порт
-            # генерируются автоматически. Если Snell не установлен или
-            # имя невалидно — no-op, не ломаем создание VLESS-юзера.
-            snell_created = _snell_ensure_user(name)
+            # Автосинхронизация со всеми syncable-протоколами (Telemt,
+            # Snell, и любые будущие через реестр _SYNCABLE_PROTOCOLS).
+            # Создаёт аккаунт с тем же name в каждом активном протоколе,
+            # чтобы соответствующая ссылка появилась в User Portal без
+            # ручного шага в TUI. Возвращает {proto: bool|None}.
+            protocol_sync = _sync_ensure_user(name)
 
             self._send_json({
                 "status": "created",
@@ -1721,8 +1421,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 "email": email,
                 "portal_login": name or email,
                 "portal_password": portal_password,
-                "telemt_synced": telemt_created,
-                "snell_synced": snell_created,
+                "protocol_sync": protocol_sync,
             }, 201)
             return
 
@@ -1784,9 +1483,9 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         # POST /api/users/{email}/rename — переименовать юзера (изменить name,
         # login для портала). Email остаётся прежним — он используется как
         # ключ в users.json и как clients[].email в config.json Xray.
-        # Backend дополнительно синхронизирует Telemt: соответствующий
-        # MTProto-аккаунт переименовывается с сохранением секрета через
-        # _telemt_rename_user() — MTProto-ссылка остаётся рабочей.
+        # Backend дополнительно синхронизирует все syncable-протоколы через
+        # _sync_rename_user() — каждый протокол переименовывает аккаунт с
+        # сохранением своих данных (Telemt — секрет, Snell — PSK+порт).
         m = re.match(r"^/api/users/(.+)/rename$", path)
         if m:
             if not self._require_admin():
@@ -1817,56 +1516,20 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             _save_users(users)
             # config.json Xray не нужно трогать — там используется email,
             # а не name. _users_apply_to_config не требуется.
-            # Автосинхронизация с Telemt: переименовываем соответствующий
-            # MTProto-аккаунт с сохранением секрета. Если Telemt не активен
-            # или имя не подходит под Telemt-спеку — это не ошибка, VLESS
-            # всё равно переименован. Возвращаем telemt_synced + reason для
-            # информативного toast в админ-панели.
-            telemt_synced = False
-            telemt_reason = ""
-            try:
-                from chimera.modules.mtproto import _validate_username as _telemt_valid
-                if not _telemt_valid(new_name):
-                    telemt_reason = ("имя не подходит под Telemt-спеку "
-                                     "(нужен [a-zA-Z][a-zA-Z0-9_-]{2,15})")
-                elif not _telemt_is_active():
-                    telemt_reason = "сервис не активен"
-                else:
-                    telemt_synced = _telemt_rename_user(old_name, new_name)
-                    if not telemt_synced:
-                        telemt_reason = ("возможно, новое имя уже занято в Telemt "
-                                         "или Telemt не установлен")
-            except Exception as _e:
-                telemt_reason = f"ошибка синхронизации: {_e}"
-            # Автосинхронизация со Snell v4: переименовываем соответствующий
-            # Snell-аккаунт с сохранением PSK и порта. Если Snell не активен
-            # или имя не подходит под Snell-спеку — VLESS всё равно переименован,
-            # это не ошибка. Возвращаем snell_synced + snell_reason для toast.
-            snell_synced = False
-            snell_reason = ""
-            try:
-                from chimera.modules.snell import _validate_username as _snell_valid
-                if not _snell_valid(new_name):
-                    snell_reason = ("имя не подходит под Snell-спеку "
-                                    "(нужен [a-zA-Z][a-zA-Z0-9_-]{2,15})")
-                elif not _snell_is_active():
-                    snell_reason = "сервис не активен"
-                else:
-                    snell_synced = _snell_rename_user(old_name, new_name)
-                    if not snell_synced:
-                        snell_reason = ("возможно, новое имя уже занято в Snell "
-                                        "или Snell-инстанс не стартовал")
-            except Exception as _e:
-                snell_reason = f"ошибка синхронизации: {_e}"
+            # Автосинхронизация со всеми syncable-протоколами (Telemt, Snell,
+            # и любые будущие через реестр _SYNCABLE_PROTOCOLS). Каждый
+            # протокол переименовывает аккаунт с сохранением своих данных
+            # (Telemt — секрет, Snell — PSK+порт). Если протокол не активен
+            # или имя не подходит под его спеку — это не ошибка, VLESS всё
+            # равно переименован. Возвращаем protocol_sync = {proto: bool|None}
+            # для информативного toast в админ-панели.
+            protocol_sync = _sync_rename_user(old_name, new_name)
             self._send_json({
                 "status": "renamed",
                 "email": email,
                 "old_name": old_name,
                 "new_name": new_name,
-                "telemt_synced": telemt_synced,
-                "telemt_reason": telemt_reason,
-                "snell_synced": snell_synced,
-                "snell_reason": snell_reason,
+                "protocol_sync": protocol_sync,
             })
             return
 
@@ -1943,44 +1606,31 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 return
             try:
                 added = _sync_users_from_config()
-                # Полная синхронизация VLESS → Telemt: создаём недостающие
-                # Telemt-аккаунты для всех валидных VLESS-юзеров, чтобы
-                # MTProto-ссылки появились в User Portal для всех сразу.
-                telemt_stats = _telemt_sync_all_from_vless(_get_users())
-                # Полная синхронизация VLESS → Snell: создаём недостающие
-                # Snell-аккаунты (per-user systemd-инстансы) для всех валидных
-                # VLESS-имён, чтобы snell:// ссылки появились в User Portal.
-                # Считает отдельно skipped_no_ports — если диапазон 30000-30999
-                # кончился, остальные имена пропускаются без ошибки.
-                snell_stats = _snell_sync_all_from_vless(_get_users())
+                # Полная синхронизация VLESS → все syncable-протоколы
+                # (Telemt, Snell, и любые будущие через реестр
+                # _SYNCABLE_PROTOCOLS). Создаёт недостающие аккаунты для
+                # всех валидных VLESS-имён, чтобы соответствующие ссылки
+                # появились в User Portal для всех сразу.
+                # Возвращает {proto: {"created": N, "skipped": N}}.
+                protocol_stats = _sync_all_from_vless(_get_users())
                 msg_parts = []
                 if added:
                     msg_parts.append(f"Синхронизировано {added} новых юзеров из config.json")
                 else:
                     msg_parts.append("Новых юзеров в config.json не найдено — users.json уже актуален")
-                tc = telemt_stats.get("created", 0)
-                ts = telemt_stats.get("skipped_invalid", 0)
-                if tc:
-                    msg_parts.append(f"создано {tc} Telemt-аккаунтов")
-                if ts:
-                    msg_parts.append(f"{ts} имён не подходят для Telemt (нужен формат [a-zA-Z][a-zA-Z0-9_-]{{2,15}})")
-                sc = snell_stats.get("created", 0)
-                si = snell_stats.get("skipped_invalid", 0)
-                sn = snell_stats.get("skipped_no_ports", 0)
-                if sc:
-                    msg_parts.append(f"создано {sc} Snell-аккаунтов")
-                if si:
-                    msg_parts.append(f"{si} имён не подходят для Snell (нужен формат [a-zA-Z][a-zA-Z0-9_-]{{2,15}})")
-                if sn:
-                    msg_parts.append(f"{sn} Snell-аккаунтов не создано — диапазон портов 30000-30999 исчерпан")
+                # Перебираем все протоколы из реестра — фронт не хардкодит
+                # конкретные имена, формирует текст toast универсально.
+                for proto, st in protocol_stats.items():
+                    created = st.get("created", 0)
+                    skipped = st.get("skipped", 0)
+                    if created:
+                        msg_parts.append(f"создано {created} {proto}-аккаунтов")
+                    if skipped:
+                        msg_parts.append(f"{skipped} имён не подходят для {proto} (нужен формат [a-zA-Z][a-zA-Z0-9_-]{{2,15}} или нет ресурсов)")
                 self._send_json({
                     "status": "synced",
                     "added": added,
-                    "telemt_created": tc,
-                    "telemt_skipped_invalid": ts,
-                    "snell_created": sc,
-                    "snell_skipped_invalid": si,
-                    "snell_skipped_no_ports": sn,
+                    "protocol_stats": protocol_stats,
                     "message": "; ".join(msg_parts),
                 })
             except Exception as e:
@@ -2061,29 +1711,20 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 core._users_apply_to_config(new_users)
             except Exception:
                 pass
-            # Автосинхронизация с Telemt: удаляем соответствующего
-            # Telemt-пользователя (если он был), чтобы не оставлять
-            # "висящий" MTProto-аккаунт для удалённого VLESS-юзера.
-            telemt_removed = False
+            # Автосинхронизация со всеми syncable-протоколами (Telemt,
+            # Snell, и любые будущие через реестр _SYNCABLE_PROTOCOLS).
+            # Удаляет аккаунт в каждом активном протоколе, чтобы не
+            # оставлять "висящие" аккаунты для удалённого VLESS-юзера.
+            # Возвращает {proto: bool|None}.
+            protocol_sync = {}
             if deleted_user is not None:
-                telemt_removed = _telemt_remove_user(
-                    deleted_user.get("name", "") or
-                    deleted_user.get("email", "").split("@")[0]
-                )
-            # Автосинхронизация со Snell v4: удаляем соответствующий
-            # Snell-аккаунт (systemd-инстанс snell-server@<user>) и закрываем
-            # его порт. В отличие от Telemt, у Snell можно удалять последнего
-            # юзера — каждый инстанс независим, никаких ограничений.
-            snell_removed = False
-            if deleted_user is not None:
-                snell_removed = _snell_remove_user(
+                protocol_sync = _sync_remove_user(
                     deleted_user.get("name", "") or
                     deleted_user.get("email", "").split("@")[0]
                 )
             self._send_json({
                 "status": "deleted", "email": email,
-                "telemt_synced": telemt_removed,
-                "snell_synced": snell_removed,
+                "protocol_sync": protocol_sync,
             })
             return
 

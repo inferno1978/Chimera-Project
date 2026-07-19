@@ -682,6 +682,124 @@ def _save_users(users: dict) -> None:
                      CONFIG_FILE.read_text(), flags=re.MULTILINE)
     CONFIG_FILE.write_text(content)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PUBLIC SYNC CONTRACT — is_active / ensure_user / remove_user / rename_user
+# ══════════════════════════════════════════════════════════════════════════════
+# Эти 4 функции — единый контракт автосинхронизации VLESS → Telemt,
+# вызываются из rest_api.py через обобщённый реестр _SYNCABLE_PROTOCOLS.
+# Все 4 НИКОГДА не бросают исключение наружу — ловят всё внутри и
+# возвращают bool (кроме is_active, который тоже возвращает bool).
+# Это позволяет реестру диспетчеризовать вызовы безопасно, не падая
+# при сбое одного из протоколов.
+#
+# Внутренняя логика (валидация имён, "нельзя удалить последнего",
+# генерация секрета, рестарт сервиса) — полностью инкапсулирована
+# здесь, реестр про это ничего не знает.
+
+def is_active() -> bool:
+    """Возвращает True если служба telemt активна (systemctl is-active).
+
+    Используется обобщённым реестром синхронизации чтобы решить,
+    вызывать ли ensure_user/remove_user/rename_user для этого протокола.
+    Если False — синхронизация пропускается (results[proto] = None).
+    """
+    try:
+        r = _run(["systemctl", "is-active", SERVICE_NAME],
+                 capture=True, check=False)
+        return r.returncode == 0 and r.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def ensure_user(name: str) -> bool:
+    """Создаёт Telemt-пользователя с именем `name`, если его ещё нет.
+
+    Возвращает True если пользователь создан или уже существует.
+    Возвращает False если:
+      • Имя невалидно по Telemt-спеке (^[a-zA-Z][a-zA-Z0-9_\\-]{2,15}$)
+      • Ошибка при сохранении/рестарте сервиса
+    Никогда не бросает исключение наружу.
+    """
+    if not name:
+        return False
+    try:
+        if not _validate_username(name):
+            return False
+        users = _load_users() or {}
+        if name in users:
+            return True  # уже есть — ничего делать не надо
+        users[name] = _generate_secret()
+        _save_users(users)
+        # Рестарт telemt чтобы подхватил нового юзера (аналогично TUI-меню).
+        _run(["systemctl", "restart", SERVICE_NAME], check=False)
+        return True
+    except Exception:
+        return False
+
+
+def remove_user(name: str) -> bool:
+    """Удаляет Telemt-пользователя с именем `name`, если он существует.
+
+    Возвращает True если удалён или его не было. False — при ошибке или
+    если это последний пользователь (Telemt требует минимум одного —
+    бинарник падает при пустом [access.users]).
+
+    Это внутренняя политика протокола — реестр синхронизации про это
+    ничего не знает, он просто получает bool и идёт дальше.
+    """
+    if not name:
+        return False
+    try:
+        users = _load_users() or {}
+        if name not in users:
+            return True  # нет такого — уже "удалён"
+        # Не удаляем последнего пользователя (Telemt требует минимум одного).
+        # Это специфичная для Telemt политика, не часть общего контракта.
+        if len(users) <= 1:
+            return False
+        del users[name]
+        _save_users(users)
+        _run(["systemctl", "restart", SERVICE_NAME], check=False)
+        return True
+    except Exception:
+        return False
+
+
+def rename_user(old_name: str, new_name: str) -> bool:
+    """Переименовывает Telemt-пользователя old_name → new_name.
+
+    Сохраняет секрет (MTProto-ссылка остаётся рабочей, меняется только имя).
+    Возвращает False без изменений если:
+      • new_name уже занят (не перезаписываем чужой секрет)
+      • old_name не найден (но в этом случае fallback — создаём new_name
+        с новым секретом, чтобы не ломать сценарий "переименовали в VLESS,
+        но в Telemt такого не было")
+      • new_name невалиден по спеке
+    """
+    if not old_name or not new_name:
+        return False
+    if old_name == new_name:
+        return True
+    try:
+        if not _validate_username(new_name):
+            return False
+        users = _load_users() or {}
+        if new_name in users:
+            # Имя занято — не трогаем чужой секрет.
+            return False
+        if old_name in users:
+            users[new_name] = users.pop(old_name)
+        else:
+            # Старого нет — создаём нового (fallback).
+            users[new_name] = _generate_secret()
+        _save_users(users)
+        _run(["systemctl", "restart", SERVICE_NAME], check=False)
+        return True
+    except Exception:
+        return False
+
+
 def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
                   socks5_port: int = 0, fallback_cfg=None,
                   client_mss: str = "",

@@ -368,12 +368,11 @@ tr:hover { background: rgba(56,189,248,0.05); }
     <input type="text" id="rename-user-current" readonly style="opacity:0.6" placeholder="Текущее имя">
     <input type="text" id="rename-user-new" placeholder="Новое имя (login для портала)">
     <div style="font-size:0.78rem;color:var(--text-dim);margin-top:-6px;margin-bottom:8px">
-      ⚠️ Если включён Telemt (MTProto), соответствующий аккаунт будет переименован
-      автоматически с сохранением секрета — MTProto-ссылка останется рабочей.<br>
-      ⚠️ Если включён Snell v4, соответствующий аккаунт (systemd-инстанс
-      snell-server@&lt;user&gt;) будет переименован с сохранением PSK и порта —
-      snell:// ссылка останется рабочей.<br>
-      Для валидации имени в Telemt/Snell формат: латиница, 3-16 символов
+      ⚠️ Включённые протоколы синхронизации (Telemt/MTProto, Snell v4 и
+      любые другие из реестра) автоматически переименуют соответствующие
+      аккаунты с сохранением их данных (секрет/PSK/порт) — клиентские
+      ссылки остаются рабочими.<br>
+      Для валидации имени формат: латиница, 3-16 символов
       ([a-zA-Z][a-zA-Z0-9_-]).
     </div>
     <div class="modal-actions">
@@ -684,15 +683,18 @@ async function renameUser() {
   const data = await api(`/api/users/${encodeURIComponent(email)}/rename`, 'POST', { new_name: newName });
   if (data && data.status === 'renamed') {
     let msg = 'Переименован: ' + email + ' → ' + newName;
-    if (data.telemt_synced === true) {
-      msg += ' (Telemt-аккаунт также переименован, секрет сохранён)';
-    } else if (data.telemt_synced === false && data.telemt_reason) {
-      msg += ' (Telemt: ' + data.telemt_reason + ')';
-    }
-    if (data.snell_synced === true) {
-      msg += ' (Snell-аккаунт также переименован, PSK и порт сохранены)';
-    } else if (data.snell_synced === false && data.snell_reason) {
-      msg += ' (Snell: ' + data.snell_reason + ')';
+    // Обобщённый toast: перебираем protocol_sync = {proto: bool|None}.
+    // Не хардкодим конкретные имена протоколов — если в реестр добавится
+    // новый протокол, фронт автоматически его покажет.
+    if (data.protocol_sync && typeof data.protocol_sync === 'object') {
+      for (const [proto, synced] of Object.entries(data.protocol_sync)) {
+        if (synced === true) {
+          msg += ` (${proto}: аккаунт переименован, данные сохранены)`;
+        } else if (synced === false) {
+          msg += ` (${proto}: не синхронизирован — возможно имя занято или не подходит)`;
+        }
+        // synced === null — протокол не активен/не установлен, не показываем
+      }
     }
     showToast(msg);
     closeModal('rename-user-modal');
