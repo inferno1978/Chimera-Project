@@ -2,6 +2,194 @@
 
 ---
 
+## v5.1.0 — FEAT: ShadowTLS SNI-пресеты + MTProto-ссылка в User Portal + автосинхронизация Telemt + переименование юзеров — 19 июля 2026
+
+**Релиз закрывает три давних UX-проблемы и добавляет одну долгожданную функцию.** Все правки нацелены на то, чтобы User Portal и Admin Panel работали «из коробки» без ручных шагов в TUI — Telemt-аккаунт создаётся автоматически при создании VLESS-юзера, MTProto-ссылка появляется в портале без переименования пользователя вручную, а ShadowTLS теперь предлагает курируемый список SNI вместо ввода домена вслепую.
+
+### ✨ Новые функции
+
+#### 1. ShadowTLS: SNI-пресеты для handshake-домена (`feat(shadowtls)`)
+
+Раньше при включении ShadowTLS или смене handshake-домена админ должен был вручную вводить TLS 1.3 домен для маскировки — без подсказок, без примеров. Теперь в TUI-меню (пункты «Включить ShadowTLS (custom)» и «Сменить handshake домен») показывается курируемый список из 12 пресетов, разделённый на международные и российские домены.
+
+**Кураторский список `SHADOWTLS_SNI_PRESETS` в `singbox_common.py`:**
+
+| # | Домен | Категория |
+|---|---|---|
+| 1 | `www.microsoft.com` | Международный · Microsoft |
+| 2 | `www.apple.com` | Международный · Apple |
+| 3 | `www.cloudflare.com` | Международный · Cloudflare |
+| 4 | `www.amazon.com` | Международный · Amazon |
+| 5 | `www.samsung.com` | Международный · Samsung |
+| 6 | `www.adobe.com` | Международный · Adobe |
+| 7 | `ya.ru` | Россия · Яндекс |
+| 8 | `vk.com` | Россия · ВКонтакте |
+| 9 | `max.ru` | Россия · MAX |
+| 10 | `dzen.ru` | Россия · Дзен |
+| 11 | `rutube.ru` | Россия · Rutube |
+| 12 | `www.ozon.ru` | Россия · Ozon |
+| 13 | (custom) | Свой домен |
+
+**UX-изменения в `singbox_menu.py`:**
+
+- Меню через `_box_top` / `_box_row` / `_box_item` / `_box_bottom` (тот же visual-language, что и остальные TUI-меню Chimera)
+- Выбор по номеру (1-12) — домен подставляется автоматически
+- Пункт 13 — «Свой домен» с ручным вводом (fallback для опытных админов)
+- Пункт 0 — «Отмена» (через `_box_item_exit`)
+- `KeyboardInterrupt` (Ctrl+C) в любой момент → тихий возврат в меню без exception
+
+**Транзакционная смена handshake-домена** (только в `_change_handshake_domain`): перед применением нового SNI сохраняется `copy.deepcopy()` старого `handshake`-блока state-файла. Если sing-box не запускается с новым доменом (`_apply_and_check` возвращает False) — автоматически восстанавливается прежний handshake и снова применяется. Админ видит `warn("Откат: восстанавливаем прежний handshake...")` и `error("Не удалось применить новый SNI — конфиг восстановлен")`. Это защищает от сценария «выбрал домен, который оказался недоступен из РФ → sing-box упал → пользователи без VPN».
+
+Список адаптирован из HYDRA-ULTIMATE (`gr33nimax/d9968e37`) — кураторская подборка TLS 1.3 доменов, проверенных на совместимость с ShadowTLS.
+
+#### 2. MTProto (Telemt) ссылка в User Portal (`fix(rest_api)`)
+
+**Баг:** в `_generate_vless_links()` (rest_api.py) блок MTProto обращался к функции `_load_state` из `chimera.modules.mtproto` и файлу `/var/lib/xray-installer/mtproto_state.json` — **ни того, ни другого не существует**. Реальный модуль (Telemt) хранит конфиг в `/etc/telemt/telemt.toml` и экспортирует `_load_users()`, `_get_port()`, `_get_domain()`, `_make_tls_secret()`. Из-за `except Exception: pass` импорт падал молча — ссылка просто не появлялась в `/api/portal/links` без ошибок в логах.
+
+**Фикс:** блок MTProto переписан на реальные геттеры Telemt:
+
+```python
+from chimera.modules.mtproto import (
+    _load_users as _telemt_load_users,
+    _get_port as _telemt_get_port,
+    _get_domain as _telemt_get_domain,
+    _make_tls_secret as _telemt_make_tls_secret,
+    SERVICE_NAME as _TELEMT_SERVICE_NAME,
+)
+```
+
+Логика генерации ссылки:
+
+1. **Проверка активности сервиса** — `systemctl is-active telemt` через `core._run()`. Если сервис не активен — ссылка не отдаётся (по аналогии с Hysteria2-проверкой выше в том же файле). Это защищает от показа битой ссылки на неработающий сервис.
+2. **Персональный секрет юзера** — `user["name"]`, `user["email"]` и локальная часть email (`email.split("@")[0]`) по очереди проверяются против ключей в `_load_users()`. Это решает типичный кейс: portal user с email `alice@node-b.example`, Telemt-имя `alice` — fallback по локальной части находит совпадение. Если совпадения нет — ссылка **не показывается** (раньше бы отдалась чужая/первая попавшаяся). Чужой секрет никогда не утекает.
+3. **TLS-режим vs plain-режим** — если `_get_domain()` возвращает непустой `tls_domain` (секция `[censorship]` активна), секрет оборачивается через `_make_tls_secret(secret, tls_domain)` → `f"ee{secret}{tls_domain.encode().hex()}"`. Иначе отдаётся голый `secret` из `_load_users()`. Оба режима покрыты тестами.
+
+Фронтенд (`user_portal.py`, JS-функция `loadLinks()`) не менялся — карточка со ссылкой, QR-кодом и кнопкой «Копировать ссылку» уже универсальна и рендерится для любого элемента массива `links`, включая произвольные `label` / `protocol` / `link`. Как только бэкенд начал корректно отдавать MTProto-ссылку в `/api/portal/links` — UI подхватил её автоматически.
+
+**Тесты:** 7 новых кейсов в `TestGenerateVlessLinksMTProto` покрывают все ветки: счастливый путь (TLS-режим с проверкой формата `ee<secret><domain_hex>`), plain-режим (голый секрет без `ee`-префикса), fallback по локальной части email, отсутствие совпадения (ссылка не показывается, остальные ссылки не ломаются), неактивный сервис, пустой `[access.users]`, broken import (модуль недоступен → silent-pass по контракту `except Exception: pass`).
+
+#### 3. Автосинхронизация VLESS → Telemt (`feat(rest_api)`)
+
+**Проблема:** после создания VLESS-юзера в админ-панели MTProto-ссылка не появлялась в User Portal, пока админ вручную не зайдёт в TUI Chimera → Telemt → Управление пользователями → Добавить. Секция `[access.users]` в `/etc/telemt/telemt.toml` независима от `users.json` — между ними не было моста.
+
+**Фикс:** добавлен слой автосинхронизации VLESS → Telemt в `rest_api.py` — 5 функций-мостов:
+
+| Функция | Действие |
+|---|---|
+| `_telemt_is_active()` | `systemctl is-active telemt` через `core._run()` |
+| `_telemt_ensure_user(name)` | Создаёт Telemt-аккаунт с тем же `name`, если его ещё нет. Секрет генерируется через `_generate_secret()` (os.urandom(16).hex()) |
+| `_telemt_remove_user(name)` | Удаляет Telemt-аккаунт. **Отказывается удалять последнего** пользователя (Telemt падает при пустом `[access.users]`) |
+| `_telemt_rename_user(old, new)` | Переименовывает, **сохраняя секрет** (MTProto-ссылка остаётся рабочей, меняется только имя). Если `new` уже занят — no-op (не перезаписывает чужой секрет) |
+| `_telemt_sync_all_from_vless(users)` | Массовая синхронизация: создаёт недостающие Telemt-аккаунты для всех валидных VLESS-имён. Возвращает `{"created": N, "removed": 0, "skipped_invalid": N}` |
+
+**Хуки в существующие endpoints:**
+
+- `POST /api/users` → `_telemt_ensure_user(name)` — новый VLESS-юзер сразу получает Telemt-аккаунт
+- `DELETE /api/users/{email}` → `_telemt_remove_user(name)` — при удалении VLESS-юзера удаляется и Telemt-аккаунт (чтобы не оставался «висящий» MTProto-доступ для удалённого юзера)
+- `POST /api/users/sync` → `_telemt_sync_all_from_vless(users)` — кнопка «Синхронизация пользователей» в админ-панели теперь создаёт недостающие Telemt-аккаунты оптом. В ответе добавлены поля `telemt_created` и `telemt_skipped_invalid` для информативного toast
+
+**Безопасность:**
+
+- Все функции — **no-op** если Telemt не активен или модуль недоступен (`ImportError`). Никогда не ломают VLESS.
+- Telemt-спека на имена `^[a-zA-Z][a-zA-Z0-9_\-]{2,15}$` проверяется через `_validate_username()` из mtproto.py. VLESS-юзеры с `@`, точками или дефисами в неподходящих позициях пропускаются и попадают в `skipped_invalid` (видно в toast).
+- При переименовании секрет **переносится**, не генерируется заново — MTProto-ссылка остаётся рабочей, юзеру не нужно заново сканировать QR.
+- Нельзя удалить последнего Telemt-юзера — функция возвращает False, VLESS-юзер всё равно удаляется, но Telemt сохраняет последнего аккаунт (иначе Telemt падает в restart-loop).
+- Нельзя перезаписать чужой секрет при коллизии имён — если новое имя уже занято в Telemt, `_telemt_rename_user` возвращает False без записи.
+
+**Тесты:** 16 новых кейсов в `TestTelemtSyncHelpers` покрывают все ветки: ensure/remove/rename/sync_all, валидные и невалидные имена, активный и неактивный сервис, ImportError fallback, отказ удалять последнего, отказ перезаписывать чужой секрет, skip disabled VLESS-юзеров в массовой синхронизации.
+
+#### 4. Кнопка «Переименовать» в Admin Panel (`feat(admin_panel)`)
+
+Раньше изменить `name` (login для портала) можно было только удалением юзера и пересозданием — с потерей `portal_password`, `created`, `disabled`-флагов и (косвенно) Telemt-секрета. Теперь в каждой строке таблицы пользователей есть кнопка `✏️ Переименовать`.
+
+**UI (admin_panel.py):**
+
+- Новое модальное окно `#rename-user-modal` с тремя полями:
+  - email (readonly, для контекста)
+  - текущее имя (readonly, для сравнения)
+  - новое имя (input, autofocus)
+- Подсказка в модалке объясняет поведение Telemt: «Если включён Telemt (MTProto), соответствующий аккаунт будет переименован автоматически с сохранением секрета — MTProto-ссылка останется рабочей. Для валидации имени в Telemt формат: латиница, 3-16 символов ([a-zA-Z][a-zA-Z0-9_-]).»
+- Кнопка `✏️ Переименовать` в строке таблицы между `🔒 Заблокировать` и `🔑 Пароль`
+- JS-функции `showRenameUserModal(email, currentName)` и `renameUser()` с клиентской валидацией (3-32 символа) и информативным toast с результатом Telemt-синхронизации
+
+**Бэкенд (rest_api.py):**
+
+Новый endpoint `POST /api/users/{email}/rename` с телом `{"new_name": "..."}`:
+
+- Admin-only (через `_require_admin()`)
+- Валидация: `new_name` 3-32 символа, непустой
+- Меняет только поле `name` в `users.json` — **email не трогается** (он ключ в `users.json` и `clients[].email` в `config.json` Xray, его изменение сломало бы статистику трафика и TTL)
+- `config.json` Xray не нужно перезаписывать — там используется `email`, а не `name`. `_users_apply_to_config` не вызывается.
+- Вызывает `_telemt_rename_user(old_name, new_name)` для синхронизации Telemt. Если Telemt не активен или новое имя не подходит под Telemt-спеку — VLESS всё равно переименовывается, Telemt-синхронизация best-effort.
+- В ответе: `{"status": "renamed", "email": "...", "old_name": "...", "new_name": "...", "telemt_synced": bool, "telemt_reason": "..."}` — `telemt_reason` показывает почему sync не сработал (например, «имя не подходит под Telemt-спеку (нужен [a-zA-Z][a-zA-Z0-9_-]{2,15})» или «сервис не активен»)
+
+**Тесты:** 6 новых кейсов в `TestRenameUserEndpoint` покрывают обновление `name` в users.json, вызов `_telemt_rename_user` с сохранением секрета, обработку невалидного Telemt-имени (с reason), отказ на коротких/длинных именах, no-op при `old == new`. Smoke-тест `test_rename_user_ui_present` в `test_admin_panel.py` проверяет наличие модального окна, кнопки, JS-функций и input-поля в HTML.
+
+### 📊 Статистика
+
+| Метрика | Значение |
+|---|---|
+| Коммитов в релизе | 4 (`6ed3b51`, `16a8979`, `28fc0b9`, плюс 2 ShadowTLS `29c19db` + `6374a00` из прошлой ветки) |
+| Файлов изменено | 4 (rest_api.py, admin_panel.py, mtproto.py не тронут, singbox_common.py + singbox_menu.py для ShadowTLS) |
+| Строк добавлено | ~840 (включая тесты и комментарии) |
+| Новых функций-мостов в rest_api.py | 5 (`_telemt_is_active`, `_telemt_ensure_user`, `_telemt_remove_user`, `_telemt_rename_user`, `_telemt_sync_all_from_vless`) |
+| Новых endpoints | 1 (`POST /api/users/{email}/rename`) |
+| Новых UI-элементов | 1 модальное окно + 1 кнопка в строке таблицы + 2 JS-функции |
+| SNI-пресетов для ShadowTLS | 12 (6 международных + 6 российских) |
+| Новых тестов | 30 (7 MTProto-ссылка + 16 Telemt-синхронизация + 6 rename endpoint + 1 UI smoke) |
+| Тестов пройдено | 179 (test_rest_api 47 + test_admin_panel 6 + test_user_portal + test_mtproto + test_telemt_panel = 126) |
+
+### ⚠️ Изменения
+
+#### 1. `chimera/modules/singbox_common.py`
+
+Добавлена константа `SHADOWTLS_SNI_PRESETS` — кортеж из 12 `(domain, label)` пар. Без логики, чисто данные. Импортируется в `singbox_menu.py`.
+
+#### 2. `chimera/modules/singbox_menu.py`
+
+- `_enable_shadowtls_custom()`: перед запросом handshake-домена показывается меню SNI-пресетов. Выбор по номеру → домен подставляется. Пункт «Свой домен» → ручной ввод (старое поведение).
+- `_change_handshake_domain()`: та же SNI-менюшка + **транзакционная смена** с откатом при неудаче. Сохраняется `copy.deepcopy()` старого `handshake`-блока, при падении `_apply_and_check` восстанавливается и снова применяется.
+
+#### 3. `chimera/modules/rest_api.py`
+
+- Переписан блок MTProto в `_generate_vless_links()` (строки ~451-521): реальные геттеры Telemt вместо `_load_state`, проверка `systemctl is-active telemt`, персональный секрет по `user.name/email/email-local-part`, поддержка TLS и plain режимов.
+- Добавлены 5 функций-мостов для синхронизации VLESS → Telemt (см. раздел «Автосинхронизация» выше).
+- Добавлен endpoint `POST /api/users/{email}/rename`.
+- Хуки автосинхронизации в `POST /api/users`, `DELETE /api/users/{email}`, `POST /api/users/sync`.
+- В docstring модуля добавлен новый endpoint в список.
+
+#### 4. `chimera/modules/admin_panel.py`
+
+- Новое модальное окно `#rename-user-modal` с тремя input-полями и подсказкой про Telemt.
+- Кнопка `✏️ Переименовать` в каждой строке таблицы пользователей.
+- JS-функции `showRenameUserModal(email, currentName)` и `renameUser()` с валидацией и toast-уведомлением.
+
+### 🔄 Миграция
+
+**Для существующих инсталляций:**
+
+1. `cd /root/chimera-project && git pull`
+2. `systemctl restart vless-web` — подхватит новые endpoints и UI
+3. (опционально) В админ-панели нажать «Синхронизация пользователей» — создаст недостающие Telemt-аккаунты для всех существующих VLESS-юзеров с валидными именами. В toast будет видно сколько создано и сколько пропущено (невалидные имена).
+4. (опционально) В TUI Chimera → Sing-box → ShadowTLS → «Сменить handshake домен» — увидеть новое SNI-меню.
+
+**Для новых инсталляций:** ничего специального — все функции работают из коробки.
+
+### 🔬 Методология
+
+- **Правило «no-op на любой сбой»** для Telemt-синхронизации: все 5 функций-мостов возвращают False/пустой dict при любой ошибке (ImportError, OSError, исключения из mtproto.py) и никогда не пробрасывают исключение наверх. VLESS-операция (создание/удаление/переименование юзера) выполняется в первую очередь; Telemt-синхронизация — best-effort во вторую. Это гарантирует, что сбой Telemt никогда не сломает VLESS.
+- **Правило «чужой секрет не отдаём»** для MTProto-ссылки: если у портального юзера нет соответствующего Telemt-аккаунта (имя не найдено по `name`/`email`/`email-local-part`), ссылка **не показывается**. Раньше код отдал бы секрет первого попавшегося Telemt-юзера — это утечка.
+- **Правило «сохраняем секрет при переименовании»**: `_telemt_rename_user` делает `users[new] = users.pop(old)` — секрет переносится, а не генерируется заново. Это критично: MTProto-ссылка, которую юзер уже добавил в Telegram-клиент, продолжает работать после переименования.
+- **Транзакционная смена SNI для ShadowTLS**: `copy.deepcopy()` старого state → применение нового → проверка запуска sing-box → откат при неудаче. Админ всегда видит либо «Handshake: domain:port» (успех), либо «Откат: восстанавливаем прежний handshake...» + «Не удалось применить новый SNI — конфиг восстановлен» (неудача).
+
+### 📝 Замечания
+
+- **Имена VLESS-юзеров с `@` или точками** не получат MTProto-ссылку — это ограничение Telemt-бинарника, не наше. Спека: `^[a-zA-Z][a-zA-Z0-9_\-]{2,15}$`. Если у вас есть такие юзеры, переименуйте их через новую кнопку «Переименовать» в админ-панели (например, `alice.portal@x.com` → `alice`).
+- **Telemt должен быть активен** для генерации MTProto-ссылки. Проверка `systemctl is-active telemt` — то же самое условие, что и для Hysteria2 (там `systemctl is-active hysteria-server`). Если сервис упал — ссылка не отдаётся, чтобы не показывать битый URL.
+- **При удалении последнего VLESS-юзера** Telemt-аккаунт не удаляется (функция `_telemt_remove_user` отказывается это делать). Это предотвращает падение Telemt в restart-loop при пустом `[access.users]`. При следующем создании VLESS-юзера Telemt-аккаунт создастся заново через `_telemt_ensure_user`.
+
+---
+
 ## v5.0.0 — REBRAND: VLESS Ultimate Installer → Chimera Project — 15 июля 2026
 
 **Мажорный релиз — смена идентичности проекта.** Название «VLESS Ultimate Installer» перестало отражать суть: за 8 недель разработки (с 19 мая 2026) проект вырос с 1 протокола (VLESS) до 9+ (VLESS REALITY/xHTTP, Hysteria2, AmneziaWG standalone, MTProto/Telemt, NaiveProxy, Mieru, FPTN, TrustTunnel), с ~30 функций до ~1 500, с одного файла до 143 модулей + ядро 8 093 строки + 25 категорий. Новое имя — **Chimera Project** — метафора мифического существа, собранного из частей разных животных: каждая «голова» (протокол) нужна для своего сценария, и если цензор блокирует один, химера «выращивает новую голову».
