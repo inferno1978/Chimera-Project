@@ -387,6 +387,13 @@ body {{
       <a class="btn btn-ghost" href="/api/portal/hiddify" download>Hiddify</a>
       <a class="btn btn-ghost" href="/api/portal/vless-link" download>VLESS-ссылка</a>
     </div>
+    <div id="snell-compat-warning" style="display:none; margin-top:12px; padding:10px 14px; background:rgba(251,191,36,0.12); border-left:3px solid #fbbf24; border-radius:6px; font-size:0.82rem; color:var(--text-dim); line-height:1.5">
+      <strong style="color:#fbbf24">⚠️ Snell v4 в Sing-box конфиге:</strong>
+      Файл Sing-box содержит Snell-outbound, который поддерживается только
+      сторонними форками sing-box (Dress, sss-box-shadow). На официальном
+      sing-box он будет молча проигнорирован — используйте Clash Meta или
+      snell:// ссылку из раздела «Подключение».
+    </div>
     <div style="margin-top:16px; padding:12px; background:rgba(15,23,42,0.5); border-radius:10px; font-size:0.85rem; color:var(--text-dim); line-height:1.6">
       <strong style="color:var(--accent-light)">📱 Подсказка по клиентам:</strong><br>
       • <strong>Clash Meta</strong> / <strong>Mihomo</strong> — скачайте файл Clash Meta выше, импортируйте в приложение<br>
@@ -461,6 +468,18 @@ async function loadLinks() {{
       </div>
     `;
   }}).join('');
+
+  // Snell v4 compat warning: показываем жёлтое предупреждение рядом с
+  // кнопкой "Sing-box" если у юзера есть Snell-ссылка. Это сигналит что
+  // sing-box JSON будет содержать snell-outbound, который работает только
+  // в сторонних форках (Dress, sss-box-shadow), а на официальном sing-box
+  // молча игнорируется. Подробности — в поле _snell_compat_note в самом
+  // JSON-файле (видно открыв его).
+  const hasSnell = data.links.some(l => l.protocol === 'snell');
+  const warnEl = document.getElementById('snell-compat-warning');
+  if (warnEl) {{
+    warnEl.style.display = hasSnell ? 'block' : 'none';
+  }}
 }}
 
 function copyLink(i) {{
