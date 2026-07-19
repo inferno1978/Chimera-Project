@@ -1330,5 +1330,195 @@ class TestSyncContractRenameUser(unittest.TestCase):
         self.assertEqual(saved_users["bob"], old_secret)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  _ipt_rule_exists / _xray_tproxy_status — REGRESSION: rc=1 от iptables -C
+#  больше не роняет TUI-меню Telemt
+# ══════════════════════════════════════════════════════════════════════════════
+class TestIptRuleExistsNoCrashOnRc1(unittest.TestCase):
+    """РЕГРЕССИЯ: _ipt_rule_exists(net, port) не должен бросать исключение
+    когда iptables -C возвращает rc=1 (правило не существует — норма).
+
+    До фикса _run с check=True бросал CalledProcessError, что валило весь
+    TUI-меню Telemt при открытии если хоть одна TG-подсеть не имела правила
+    (что нормально когда Telemt остановлен).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_returns_false_when_rule_not_exists(self):
+        """rc=1 от iptables -C → False, не бросает."""
+        from chimera.modules import mtproto
+        import subprocess
+        cp = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="",
+        )
+        with patch.object(mtproto, "_run", return_value=cp):
+            ok = mtproto._ipt_rule_exists("91.105.192.0/23", 10811)
+        self.assertFalse(ok)
+
+    def test_returns_true_when_rule_exists(self):
+        from chimera.modules import mtproto
+        import subprocess
+        cp = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
+        )
+        # IPv4 путь идёт через proto_ipt_rule_exists → core._run, не mtproto._run.
+        # Патчим proto_ipt_rule_exists напрямую.
+        with patch.object(mtproto, "proto_ipt_rule_exists", return_value=True):
+            ok = mtproto._ipt_rule_exists("91.105.192.0/23", 10811)
+        self.assertTrue(ok)
+
+    def test_returns_false_on_exception(self):
+        """Если _run бросает исключение — возвращаем False, не пробрасываем.
+
+        Для IPv4 (proto_ipt_rule_exists) уже есть отдельный тест в
+        test_proto_common.py. Здесь проверяем IPv6 путь (напрямую через
+        mtproto._run)."""
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_run", side_effect=Exception("test")):
+            ok = mtproto._ipt_rule_exists("2001:db8::/32", 10811)
+        self.assertFalse(ok)
+
+    def test_ipv6_path_returns_false_on_rc1(self):
+        """IPv6 путь (ip6tables) тоже должен возвращать False на rc=1,
+        не бросать."""
+        from chimera.modules import mtproto
+        import subprocess
+        cp = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="",
+        )
+        with patch.object(mtproto, "_run", return_value=cp):
+            ok = mtproto._ipt_rule_exists("2001:db8::/32", 10811)
+        self.assertFalse(ok)
+
+    def test_ipv6_path_returns_false_on_exception(self):
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_run", side_effect=Exception("test")):
+            ok = mtproto._ipt_rule_exists("2001:db8::/32", 10811)
+        self.assertFalse(ok)
+
+
+class TestXrayTproxyStatusResilience(unittest.TestCase):
+    """РЕГРЕССИЯ: _xray_tproxy_status не должен ронять TUI-меню если
+    один из _ipt_rule_exists вызовов бросает исключение.
+
+    До фикса: sum(1 for n in tg_nets if _ipt_rule_exists(n, port))
+    бросал на первом же исключении, вали весь TUI-меню Telemt.
+    После фикса: per-net try/except, исключение считается как "правила нет".
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_does_not_crash_when_ipt_rule_exists_raises(self):
+        """Если _ipt_rule_exists бросает для одной подсети — _xray_tproxy_status
+        не падает, возвращает dict с ipt_count < ipt_total."""
+        from chimera.modules import mtproto
+
+        # Мокаем все зависимости _xray_tproxy_status.
+        fake_cfg = {"inbounds": [
+            {"tag": "tproxy-telemt", "listen": "127.0.0.1",
+             "port": 10811, "settings": {}}
+        ]}
+        cfg_path = MagicMock()
+        cfg_path.exists.return_value = True
+        cfg_path.read_text.return_value = json.dumps(fake_cfg)
+
+        # _ipt_rule_exists бросает для всех — имитируем сломанный iptables.
+        with patch.object(mtproto, "_xray_config_path", return_value=cfg_path), \
+             patch.object(mtproto, "_xray_cascade_mode", return_value="vless"), \
+             patch.object(mtproto, "_xray_dokodemo_port", return_value=10811), \
+             patch.object(mtproto, "_xray_get_proxy_tag",
+                          return_value=("vless-out", False)), \
+             patch.object(mtproto, "_TG_NETS_current",
+                          return_value=["91.105.192.0/23", "91.105.200.0/23"]), \
+             patch.object(mtproto, "_ipt_rule_exists",
+                          side_effect=Exception("iptables broken")):
+            # Не должно бросать — должно вернуть dict.
+            result = mtproto._xray_tproxy_status()
+        self.assertIsInstance(result, dict)
+        self.assertFalse(result["ipt_ok"])
+        self.assertEqual(result["ipt_count"], 0)
+        self.assertEqual(result["ipt_total"], 2)
+
+    def test_returns_correct_count_when_some_rules_exist(self):
+        """3 подсети: 2 с правилом, 1 без → ipt_count=2, ipt_ok=False."""
+        from chimera.modules import mtproto
+
+        fake_cfg = {"inbounds": [
+            {"tag": "tproxy-telemt", "listen": "127.0.0.1",
+             "port": 10811, "settings": {}}
+        ]}
+        cfg_path = MagicMock()
+        cfg_path.exists.return_value = True
+        cfg_path.read_text.return_value = json.dumps(fake_cfg)
+
+        # _ipt_rule_exists возвращает True для первых двух, False для третьей.
+        def fake_ipt_rule_exists(net, port):
+            return "rule_exists" in net  # True для "rule_exists_1", False для "no_rule"
+        nets = ["rule_exists_1", "rule_exists_2", "no_rule"]
+
+        with patch.object(mtproto, "_xray_config_path", return_value=cfg_path), \
+             patch.object(mtproto, "_xray_cascade_mode", return_value="vless"), \
+             patch.object(mtproto, "_xray_dokodemo_port", return_value=10811), \
+             patch.object(mtproto, "_xray_get_proxy_tag",
+                          return_value=("vless-out", False)), \
+             patch.object(mtproto, "_TG_NETS_current", return_value=nets), \
+             patch.object(mtproto, "_ipt_rule_exists",
+                          side_effect=fake_ipt_rule_exists):
+            result = mtproto._xray_tproxy_status()
+        self.assertEqual(result["ipt_count"], 2)
+        self.assertEqual(result["ipt_total"], 3)
+        self.assertFalse(result["ipt_ok"])  # не все 3 — False
+
+    def test_returns_ipt_ok_true_when_all_rules_exist(self):
+        from chimera.modules import mtproto
+
+        fake_cfg = {"inbounds": [
+            {"tag": "tproxy-telemt", "listen": "127.0.0.1",
+             "port": 10811, "settings": {}}
+        ]}
+        cfg_path = MagicMock()
+        cfg_path.exists.return_value = True
+        cfg_path.read_text.return_value = json.dumps(fake_cfg)
+
+        with patch.object(mtproto, "_xray_config_path", return_value=cfg_path), \
+             patch.object(mtproto, "_xray_cascade_mode", return_value="vless"), \
+             patch.object(mtproto, "_xray_dokodemo_port", return_value=10811), \
+             patch.object(mtproto, "_xray_get_proxy_tag",
+                          return_value=("vless-out", False)), \
+             patch.object(mtproto, "_TG_NETS_current",
+                          return_value=["net1", "net2"]), \
+             patch.object(mtproto, "_ipt_rule_exists", return_value=True):
+            result = mtproto._xray_tproxy_status()
+        self.assertTrue(result["ipt_ok"])
+        self.assertEqual(result["ipt_count"], 2)
+        self.assertEqual(result["ipt_total"], 2)
+
+    def test_returns_base_when_no_cfg_path(self):
+        """Если config.json Xray не найден — возвращаем base (всё False)."""
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_xray_config_path", return_value=None), \
+             patch.object(mtproto, "_xray_cascade_mode", return_value="none"):
+            result = mtproto._xray_tproxy_status()
+        self.assertFalse(result["enabled"])
+        self.assertEqual(result["port"], 0)
+        self.assertFalse(result["ipt_ok"])
+
+    def test_returns_base_when_no_dokodemo_port(self):
+        """Если в config.json нет dokodemo-door inbound — возвращаем base."""
+        from chimera.modules import mtproto
+        cfg_path = MagicMock()
+        cfg_path.exists.return_value = True
+        cfg_path.read_text.return_value = json.dumps({"inbounds": []})
+        with patch.object(mtproto, "_xray_config_path", return_value=cfg_path), \
+             patch.object(mtproto, "_xray_cascade_mode", return_value="none"), \
+             patch.object(mtproto, "_xray_dokodemo_port", return_value=0):
+            result = mtproto._xray_tproxy_status()
+        self.assertFalse(result["enabled"])
+        self.assertEqual(result["port"], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

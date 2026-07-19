@@ -290,8 +290,28 @@ def proto_ipt_rule_exists(table: str, chain: str, args: list) -> bool:
     Возвращает True если правило существует, False — если нет.
     Все 5 протокольных модулей (wdtt, mieru, turnable, turntunnel, mtproto)
     делегируют сюда свои _ipt_rule_exists, собирая table/chain/args под свой кейс.
+
+    КРИТИЧНО: ``iptables -C`` возвращает exit status 1 когда правило НЕ существует
+    — это нормальное поведение для "check if rule exists" (man iptables: "If the
+    rule does not exist, the exit code is 1"). ``_core._run`` по умолчанию имеет
+    ``check=True`` и бросает ``CalledProcessError`` на любом non-zero rc —
+    поэтому МЫ ДОЛЖНЫ явно передавать ``check=False``. Иначе TUI-меню Telemt
+    (и любых других протоколов) падает при открытии если хоть одно iptables-правило
+    отсутствует (что нормально когда протокол остановлен/не установлен).
+
+    Дополнительно: оборачиваем в try/except на случай если ``iptables`` вообще
+    не установлен в системе (FileNotFoundError маскируется _run под rc=127).
     """
-    core = _core_module()
-    _run = core._run
-    r = _run(["iptables", "-t", table, "-C", chain] + args, capture=True)
-    return r.returncode == 0
+    try:
+        core = _core_module()
+        _run = core._run
+        # check=False — rc=1 (правило не существует) это норма, не ошибка.
+        r = _run(["iptables", "-t", table, "-C", chain] + args,
+                 capture=True, check=False)
+        return r.returncode == 0
+    except Exception:
+        # Любой сбой (iptables не установлен, нет прав, и т.п.) — считаем что
+        # правила нет. Это безопасно для всех вызывающих функций: они используют
+        # _ipt_rule_exists только для решения "добавлять ли правило" —
+        # если не можем проверить, лучше добавить (дубликат отловит сам iptables).
+        return False
