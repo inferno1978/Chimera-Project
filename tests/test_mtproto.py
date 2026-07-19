@@ -1131,5 +1131,204 @@ class TestXrayConfigManipulation(unittest.TestCase):
         self.assertTrue(_xray_inject_dokodemo(cfg, 10811))
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  PUBLIC SYNC CONTRACT — is_active / ensure_user / remove_user / rename_user
+#  (обобщённый реестр автосинхронизации VLESS → Telemt в rest_api.py)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestSyncContractIsActive(unittest.TestCase):
+    """mtproto.is_active() — обёртка над systemctl is-active telemt."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_returns_bool(self):
+        """is_active всегда возвращает bool, не бросает исключение."""
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_run",
+                          return_value=MagicMock(returncode=0, stdout="active\n")):
+            result = mtproto.is_active()
+        self.assertIsInstance(result, bool)
+
+    def test_returns_true_when_active(self):
+        from chimera.modules import mtproto
+        cp = MagicMock(returncode=0, stdout="active\n")
+        with patch.object(mtproto, "_run", return_value=cp):
+            self.assertTrue(mtproto.is_active())
+
+    def test_returns_false_when_inactive(self):
+        from chimera.modules import mtproto
+        cp = MagicMock(returncode=3, stdout="inactive\n")
+        with patch.object(mtproto, "_run", return_value=cp):
+            self.assertFalse(mtproto.is_active())
+
+    def test_returns_false_on_exception(self):
+        """Если _run бросает исключение — is_active возвращает False."""
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_run", side_effect=Exception("test")):
+            self.assertFalse(mtproto.is_active())
+
+
+class TestSyncContractEnsureUser(unittest.TestCase):
+    """mtproto.ensure_user(name) — создаёт Telemt-аккаунт если нет."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_returns_true_when_created(self):
+        from chimera.modules import mtproto
+        # _load_users возвращает пустой dict, _save_users мок.
+        with patch.object(mtproto, "_load_users", return_value={}), \
+             patch.object(mtproto, "_save_users"), \
+             patch.object(mtproto, "_validate_username", return_value=True), \
+             patch.object(mtproto, "_generate_secret", return_value="abc123"), \
+             patch.object(mtproto, "_run"):
+            ok = mtproto.ensure_user("alice")
+        self.assertTrue(ok)
+
+    def test_returns_true_when_already_exists(self):
+        """Если юзер уже есть — True без вызова _save_users."""
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_load_users", return_value={"alice": "secret"}), \
+             patch.object(mtproto, "_save_users") as mock_save, \
+             patch.object(mtproto, "_validate_username", return_value=True), \
+             patch.object(mtproto, "_run"):
+            ok = mtproto.ensure_user("alice")
+        self.assertTrue(ok)
+        mock_save.assert_not_called()
+
+    def test_returns_false_for_invalid_name(self):
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_validate_username", return_value=False), \
+             patch.object(mtproto, "_save_users") as mock_save:
+            ok = mtproto.ensure_user("a@b.c")
+        self.assertFalse(ok)
+        mock_save.assert_not_called()
+
+    def test_returns_false_for_empty_name(self):
+        from chimera.modules import mtproto
+        self.assertFalse(mtproto.ensure_user(""))
+
+    def test_returns_false_on_exception(self):
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_validate_username", return_value=True), \
+             patch.object(mtproto, "_load_users", side_effect=Exception("test")):
+            ok = mtproto.ensure_user("alice")
+        self.assertFalse(ok)
+
+
+class TestSyncContractRemoveUser(unittest.TestCase):
+    """mtproto.remove_user(name) — удаляет Telemt-аккаунт."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_returns_true_when_removed(self):
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_load_users",
+                          return_value={"alice": "x", "bob": "y"}), \
+             patch.object(mtproto, "_save_users"), \
+             patch.object(mtproto, "_run"):
+            ok = mtproto.remove_user("alice")
+        self.assertTrue(ok)
+
+    def test_returns_true_when_not_found(self):
+        """Нет такого юзера — True (уже удалён)."""
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_load_users", return_value={"bob": "y"}), \
+             patch.object(mtproto, "_save_users") as mock_save:
+            ok = mtproto.remove_user("alice")
+        self.assertTrue(ok)
+        mock_save.assert_not_called()
+
+    def test_returns_false_when_last_user(self):
+        """Не удаляем последнего — Telemt требует минимум одного."""
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_load_users",
+                          return_value={"alice": "x"}), \
+             patch.object(mtproto, "_save_users") as mock_save:
+            ok = mtproto.remove_user("alice")
+        self.assertFalse(ok)
+        mock_save.assert_not_called()
+
+    def test_returns_false_for_empty_name(self):
+        from chimera.modules import mtproto
+        self.assertFalse(mtproto.remove_user(""))
+
+    def test_returns_false_on_exception(self):
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_load_users", side_effect=Exception("test")):
+            ok = mtproto.remove_user("alice")
+        self.assertFalse(ok)
+
+
+class TestSyncContractRenameUser(unittest.TestCase):
+    """mtproto.rename_user(old, new) — переименование с сохранением секрета."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_returns_true_when_renamed(self):
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_load_users",
+                          return_value={"alice": "secret123"}), \
+             patch.object(mtproto, "_save_users"), \
+             patch.object(mtproto, "_validate_username", return_value=True), \
+             patch.object(mtproto, "_run"):
+            ok = mtproto.rename_user("alice", "bob")
+        self.assertTrue(ok)
+
+    def test_returns_true_when_old_equals_new(self):
+        """old == new — no-op, True."""
+        from chimera.modules import mtproto
+        ok = mtproto.rename_user("alice", "alice")
+        self.assertTrue(ok)
+
+    def test_returns_false_when_target_taken(self):
+        """new уже занят — False, не перезаписываем чужой секрет."""
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_load_users",
+                          return_value={"alice": "x", "bob": "y"}), \
+             patch.object(mtproto, "_save_users") as mock_save, \
+             patch.object(mtproto, "_validate_username", return_value=True):
+            ok = mtproto.rename_user("alice", "bob")
+        self.assertFalse(ok)
+        mock_save.assert_not_called()
+
+    def test_returns_false_for_invalid_new_name(self):
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_validate_username", return_value=False):
+            ok = mtproto.rename_user("alice", "a@b.c")
+        self.assertFalse(ok)
+
+    def test_returns_false_for_empty_args(self):
+        from chimera.modules import mtproto
+        self.assertFalse(mtproto.rename_user("", "bob"))
+        self.assertFalse(mtproto.rename_user("alice", ""))
+
+    def test_returns_false_on_exception(self):
+        from chimera.modules import mtproto
+        with patch.object(mtproto, "_validate_username", return_value=True), \
+             patch.object(mtproto, "_load_users", side_effect=Exception("test")):
+            ok = mtproto.rename_user("alice", "bob")
+        self.assertFalse(ok)
+
+    def test_preserves_secret_on_rename(self):
+        """Секрет должен перенестись с old на new."""
+        from chimera.modules import mtproto
+        old_secret = "preserved_secret_12345"
+        saved_users = {}
+        def fake_save(users):
+            saved_users.update(users)
+        with patch.object(mtproto, "_load_users",
+                          return_value={"alice": old_secret}), \
+             patch.object(mtproto, "_save_users", side_effect=fake_save), \
+             patch.object(mtproto, "_validate_username", return_value=True), \
+             patch.object(mtproto, "_run"):
+            mtproto.rename_user("alice", "bob")
+        self.assertNotIn("alice", saved_users)
+        self.assertIn("bob", saved_users)
+        self.assertEqual(saved_users["bob"], old_secret)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
