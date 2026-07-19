@@ -2,6 +2,56 @@
 
 ---
 
+## REVERT: Протокол Snell v4 полностью удалён — 19 июля 2026
+
+**Протокол Snell v4 (Surge) признан нестабильным в продакшене и полностью удалён из Chimera Project.**
+
+### Причина удаления
+
+В ходе тестирования выявлены непреодолимые проблемы совместимости:
+
+1. **Версия протокола** — snell-server v5.0.1 (последняя доступная сборка) поддерживает только wire protocol v4/v5. Mihomo (Clash Verge Rev) при `version: 4` выдаёт `snell version error: 4` (устаревшее ядро), а без `version` дефолтит на v1 (несовместимо). Нет версии, которая работает везде.
+
+2. **UDP для QUIC** — snell-server v5 требует открытых TCP+UDP портов. Открытие UDP решило часть проблем, но протокольный handshake всё равно не проходил.
+
+3. **Обфускация** — Surge KB: "http is the only option supported by Snell V4". `obfs=tls` может не поддерживаться официальным бинарником. `obfs=off` работает на сервере, но без обфускации протокол легко детектируется DPI.
+
+4. **Клиентская совместимость** — ни один из протестированных Windows-клиентов (Clash Verge Rev, Clash Nyanpasu, FlClash, Karing) не смог корректно установить соединение. VLESS Reality на том же сервере работает без проблем (53мс задержка).
+
+5. **sing-box** — официальный sing-box 1.14.0+ поддерживает Snell, но с другим форматом конфига (`psk` вместо `password`, flat `obfs_mode` вместо nested `obfs`). HYDRA-ULTIMATE использует sing-box-extended (форк), что не применимо к нашей архитектуре.
+
+### Что удалено
+
+**Файлы (8 шт, полностью удалены):**
+- `chimera/modules/snell.py`
+- `chimera/modules/snell_mirrors.py`
+- `chimera/modules/snell_packages.py`
+- `chimera/modules/snell_stats.py`
+- `tests/test_snell.py`
+- `tests/test_snell_mirrors.py`
+- `tests/test_snell_packages.py`
+- `tests/test_snell_stats.py`
+
+**Точки интеграции (очищены):**
+- `_core.py` — удалён import `do_snell_menu`, пункт меню `19`, dispatch
+- `rest_api.py` — удалён `"chimera.modules.snell"` из `_SYNCABLE_PROTOCOLS`, Snell-блоки из `_generate_vless_links`/`_generate_clash_config`/`_generate_singbox_config`, `_snell_compat_note`
+- `subscription.py` — удалён `_SNELL_STATE`, `_build_snell_uris()`, оба вызова
+- `status_panel.py` — удалён `_check_snell()`, `"Snell v4"` из `_protocol_checks`
+- `admin_panel.py` — удалено упоминание Snell в подсказке модалки rename
+- `user_portal.py` — удалён `#snell-compat-warning` div, JS `hasSnell` проверка
+- `tests/test_rest_api.py` — очищены комментарии с упоминанием snell
+- `tests/test_user_portal.py` — удалены 3 тест-кейса про snell-compat-warning
+
+### Что НЕ тронуто
+
+- `proto_common.py` — НЕ Snell-специфичный файл, используется 9 другими протоколами
+- `mtproto.py` — логика Telemt не изменена, контракт синхронизации (`is_active`/`ensure_user`/`remove_user`/`rename_user`) сохранён
+- Реестр `_SYNCABLE_PROTOCOLS` — теперь содержит только `"chimera.modules.mtproto"`, но архитектура реестра и `_sync_dispatch` сохранены для будущих протоколов
+- Старые записи в CHANGELOG.md про Snell — не удалены и не отредактированы задним числом (история есть история)
+- Тесты реестра синхронизации (`TestSyncRegistryDispatch`, `TestSyncAllFromVless`) с фейковым протоколом — сохранены, не привязаны к реальному Snell
+
+---
+
 ## REFACTOR: Обобщённая автосинхронизация VLESS → протоколы через реестр + VLESS tag в web-панели с флагом и именем юзера — 19 июля 2026
 
 **Два крупных улучшения в одном релизе.** Первое — инфраструктурный рефакторинг автосинхронизации: раньше для каждого нового протокола нужно было писать 5 новых функций-мостов в `rest_api.py`, теперь — ОДНА строка в реестре. Второе — UX-фикс: ссылки из web-панели теперь выглядят так же как из TUI (с флагом страны и именем юзера), а не как безликие "VLESS Reality".

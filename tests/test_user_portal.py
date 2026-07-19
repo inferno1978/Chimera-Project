@@ -81,48 +81,6 @@ class TestGetPortalHtml(unittest.TestCase):
             html = get_portal_html(user)
             self.assertGreater(len(html), 0)
 
-    def test_snell_compat_warning_div_present(self):
-        """В HTML должно быть скрытое предупреждение #snell-compat-warning
-        о совместимости Snell v4 в sing-box конфиге.
-
-        div по умолчанию display:none — JS loadLinks() показывает его
-        только если у юзера есть snell-ссылка (protocol === 'snell').
-        """
-        from chimera.modules.user_portal import get_portal_html
-        html = get_portal_html({"email": "a@b.c", "name": "alice"})
-        self.assertIn('id="snell-compat-warning"', html,
-                      "Должно быть div#snell-compat-warning")
-        self.assertIn("Snell v4", html,
-                      "В предупреждении должно упоминаться Snell v4")
-
-    def test_snell_compat_warning_hidden_by_default(self):
-        """Предупреждение должно быть скрыто по умолчанию (display:none)."""
-        from chimera.modules.user_portal import get_portal_html
-        html = get_portal_html({"email": "a@b.c", "name": "alice"})
-        # Находим div и проверяем что в его style есть display:none.
-        idx = html.find('id="snell-compat-warning"')
-        self.assertGreater(idx, 0, "div#snell-compat-warning должен быть")
-        # style может быть до или после id — смотрим 300 символов в обе стороны.
-        around = html[max(0, idx-300):idx+300]
-        self.assertIn("display:none", around,
-                      "По умолчанию предупреждение должно быть скрыто "
-                      "(style.display:none в атрибутах div)")
-
-    def test_load_links_js_checks_snell_protocol(self):
-        """JS loadLinks() должен проверять protocol === 'snell' в массиве
-        ссылок и показывать/скрывать предупреждение через style.display."""
-        from chimera.modules.user_portal import get_portal_html
-        html = get_portal_html({"email": "a@b.c", "name": "alice"})
-        # JS должен содержать проверку hasSnell.
-        self.assertIn("hasSnell", html,
-                      "JS должен иметь переменную hasSnell")
-        self.assertIn("'snell'", html,
-                      "JS должен проверять protocol === 'snell'")
-        # И устанавливать style.display блока предупреждения.
-        self.assertIn("snell-compat-warning", html)
-        self.assertIn("style.display", html,
-                      "JS должен менять style.display предупреждения")
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
