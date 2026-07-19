@@ -190,6 +190,177 @@ class TestGenerateVlessLinks(unittest.TestCase):
         self.assertEqual(len(links), 1)
 
 
+class TestGenerateVlessLinksTag(unittest.TestCase):
+    """_generate_vless_links — tag (часть после # в URL).
+
+    РАНЬШЕ: web-панель хардкодила "#VLESS-Reality" / "#VLESS-xHTTP" —
+    без флага страны и без имени юзера. В клиенте (v2rayN, NekoBox, и т.п.)
+    несколько узлов отображались как одинаковые "VLESS Reality", без
+    возможности отличить.
+
+    ТЕПЕРЬ: web-панель использует тот же формат что и TUI (_unified_show_links
+    в users_manager.py): "<флаг> <имя_юзера>". Флаг берётся через
+    get_server_country_cached() (один curl к ip-api.com, кешируется).
+    Если флаг недоступен (ip-api.com не отвечает) — tag без флага, но
+    с именем юзера.
+
+    Эти тесты проверяют новый формат tag.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_tag_contains_user_name(self):
+        """Tag должен содержать имя юзера (user["name"])."""
+        from chimera.modules import rest_api
+        with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY):
+            links = rest_api._generate_vless_links(_FAKE_USER)
+        link = links[0]["link"]
+        # После # должен быть tag с именем юзера "user".
+        tag_part = link.split("#", 1)[1]
+        self.assertIn("user", tag_part,
+                      "Tag должен содержать имя юзера")
+
+    def test_tag_does_not_contain_vless_reality(self):
+        """РЕГРЕССИЯ: tag НЕ должен быть "VLESS-Reality" — это был старый
+        хардкоженный формат без флага и имени юзера."""
+        from chimera.modules import rest_api
+        with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY):
+            links = rest_api._generate_vless_links(_FAKE_USER)
+        link = links[0]["link"]
+        tag_part = link.split("#", 1)[1]
+        self.assertNotEqual(tag_part, "VLESS-Reality",
+                            "Tag не должен быть хардкоженным 'VLESS-Reality'")
+        self.assertNotEqual(tag_part, "VLESS-xHTTP",
+                            "Tag не должен быть хардкоженным 'VLESS-xHTTP'")
+
+    def test_tag_contains_flag_when_country_available(self):
+        """Если get_server_country_cached возвращает флаг — он должен быть в tag."""
+        from chimera.modules import rest_api
+        # Мокаем core.get_server_country_cached чтобы вернуть флаг Германии.
+        fake_core = sys.modules.get("chimera._core")
+        with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY), \
+             patch.object(fake_core, "get_server_country_cached",
+                          return_value=("DE", "Germany", "🇩🇪")):
+            links = rest_api._generate_vless_links(_FAKE_USER)
+        link = links[0]["link"]
+        tag_part = link.split("#", 1)[1]
+        self.assertIn("🇩🇪", tag_part,
+                      "Tag должен содержать флаг страны (🇩🇪)")
+
+    def test_tag_without_flag_when_country_unavailable(self):
+        """Если get_server_country_cached возвращает "🌐" (страна неизвестна) —
+        tag должен быть без флага, но с именем юзера."""
+        from chimera.modules import rest_api
+        fake_core = sys.modules.get("chimera._core")
+        with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY), \
+             patch.object(fake_core, "get_server_country_cached",
+                          return_value=("??", "Unknown", "🌐")):
+            links = rest_api._generate_vless_links(_FAKE_USER)
+        link = links[0]["link"]
+        tag_part = link.split("#", 1)[1]
+        self.assertNotIn("🌐", tag_part,
+                         "Tag не должен содержать 🌐 (это не флаг страны)")
+        self.assertIn("user", tag_part,
+                      "Tag должен содержать имя юзера даже без флага")
+
+    def test_tag_uses_email_when_no_name(self):
+        """Если у юзера нет name — fallback на email (локальная часть)."""
+        from chimera.modules import rest_api
+        user_no_name = {"uuid": "test-uuid", "email": "alice@example.com"}
+        fake_core = sys.modules.get("chimera._core")
+        with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY), \
+             patch.object(fake_core, "get_server_country_cached",
+                          return_value=("??", "Unknown", "🌐")):
+            links = rest_api._generate_vless_links(user_no_name)
+        link = links[0]["link"]
+        tag_part = link.split("#", 1)[1]
+        self.assertIn("alice", tag_part,
+                      "Tag должен использовать email как fallback")
+
+    def test_tag_uses_user_when_no_name_no_email(self):
+        """Если у юзера нет ни name, ни email — fallback на "user"."""
+        from chimera.modules import rest_api
+        user_bare = {"uuid": "test-uuid"}
+        fake_core = sys.modules.get("chimera._core")
+        with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY), \
+             patch.object(fake_core, "get_server_country_cached",
+                          return_value=("??", "Unknown", "🌐")):
+            links = rest_api._generate_vless_links(user_bare)
+        link = links[0]["link"]
+        tag_part = link.split("#", 1)[1]
+        self.assertIn("user", tag_part,
+                      "Tag должен использовать 'user' как последний fallback")
+
+    def test_ipv6_tag_has_ipv6_suffix(self):
+        """IPv6-ссылка должна иметь суффикс 'IPv6' в tag чтобы отличить
+        от IPv4 в клиенте."""
+        from chimera.modules import rest_api
+        state = {**_FAKE_STATE_REALITY, "ipv6": "2001:db8::1"}
+        fake_core = sys.modules.get("chimera._core")
+        with patch.object(rest_api, "_get_state", return_value=state), \
+             patch.object(fake_core, "get_server_country_cached",
+                          return_value=("??", "Unknown", "🌐")):
+            links = rest_api._generate_vless_links(_FAKE_USER)
+        # links[0] — IPv4, links[1] — IPv6.
+        ipv4_tag = links[0]["link"].split("#", 1)[1]
+        ipv6_tag = links[1]["link"].split("#", 1)[1]
+        self.assertNotIn("IPv6", ipv4_tag,
+                         "IPv4 tag не должен содержать 'IPv6'")
+        self.assertIn("IPv6", ipv6_tag,
+                      "IPv6 tag должен содержать 'IPv6' для отличия от IPv4")
+
+    def test_tag_url_encoded_for_special_chars(self):
+        """Если в имени юзера есть пробел или / — они должны быть
+        URL-закодированы (пробел → %20, / → %2F)."""
+        from chimera.modules import rest_api
+        user_special = {"uuid": "u1", "name": "alice / bob"}
+        fake_core = sys.modules.get("chimera._core")
+        with patch.object(rest_api, "_get_state", return_value=_FAKE_STATE_REALITY), \
+             patch.object(fake_core, "get_server_country_cached",
+                          return_value=("??", "Unknown", "🌐")):
+            links = rest_api._generate_vless_links(user_special)
+        link = links[0]["link"]
+        tag_part = link.split("#", 1)[1]
+        # Пробелы и / не должны быть в чистом виде (URL-encoded).
+        self.assertNotIn(" / ", tag_part,
+                         "Пробелы и / должны быть URL-закодированы")
+
+    def test_tag_consistent_between_reality_and_xhttp(self):
+        """Tag должен быть одинаковым для REALITY и xHTTP (один и тот же юзер)."""
+        from chimera.modules import rest_api
+        fake_core = sys.modules.get("chimera._core")
+        with patch.object(fake_core, "get_server_country_cached",
+                          return_value=("DE", "Germany", "🇩🇪")):
+            with patch.object(rest_api, "_get_state",
+                              return_value=_FAKE_STATE_REALITY):
+                reality_links = rest_api._generate_vless_links(_FAKE_USER)
+            with patch.object(rest_api, "_get_state",
+                              return_value=_FAKE_STATE_XHTTP):
+                xhttp_links = rest_api._generate_vless_links(_FAKE_USER)
+        reality_tag = reality_links[0]["link"].split("#", 1)[1]
+        xhttp_tag = xhttp_links[0]["link"].split("#", 1)[1]
+        self.assertEqual(reality_tag, xhttp_tag,
+                         "Tag должен быть одинаковым для REALITY и xHTTP "
+                         "(один и тот же юзер → один и тот же tag)")
+
+    def test_country_cached_not_called_multiple_times(self):
+        """get_server_country_cached должен вызываться один раз за генерацию
+        ссылок (кеширование). Если у юзера 2 ссылки (IPv4+IPv6), функция
+        должна вызваться только 1 раз — иначе лишние curl-запросы к ip-api.com."""
+        from chimera.modules import rest_api
+        state = {**_FAKE_STATE_REALITY, "ipv6": "2001:db8::1"}
+        fake_core = sys.modules.get("chimera._core")
+        with patch.object(rest_api, "_get_state", return_value=state), \
+             patch.object(fake_core, "get_server_country_cached",
+                          return_value=("DE", "Germany", "🇩🇪")) as mock_cc:
+            rest_api._generate_vless_links(_FAKE_USER)
+        # Должна быть вызвана ровно 1 раз (кеширование на уровне _generate_vless_links).
+        self.assertEqual(mock_cc.call_count, 1,
+                         "get_server_country_cached должен вызваться 1 раз "
+                         "(не 2 для IPv4+IPv6)")
+
+
 def _make_completed_process(stdout: str, returncode: int = 0):
     """Helper: имитирует subprocess.CompletedProcess для core._run()."""
     return subprocess.CompletedProcess(args=[], returncode=returncode,
