@@ -1065,6 +1065,7 @@ def _diag_check_state(counters: list) -> None:
     core = _core_module()
     _box_warn = core._box_warn
     _box_info = core._box_info
+    _box_dim  = core._box_dim
     STATE_FILE               = core.STATE_FILE
     SPLIT_TUNNEL_CUSTOM_FILE = core.SPLIT_TUNNEL_CUSTOM_FILE
     BOLD = core.BOLD
