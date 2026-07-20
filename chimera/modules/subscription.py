@@ -554,6 +554,153 @@ def _collect_registry_uris(user: dict) -> list[str]:
     return links
 
 
+# ── Content negotiation: ?format= / User-Agent → формат подписки ────────────
+#
+# Поддерживаемые форматы:
+#   "base64" (default) — текущее поведение: Base64-список share-links.
+#   "singbox"           — полный sing-box JSON config с outbounds.
+#   "base64_safe"       — Base64-список БЕЗ naive+https:// и mierus://
+#                         (для клиентов, которые не умеют их парсить).
+#
+# Определение формата:
+#   1. Явный ?format=singbox в URL — высший приоритет.
+#   2. Эвристика по User-Agent (словарь, легко расширяется).
+#   3. Дефолт: "base64" (100% обратная совместимость).
+#
+# User-Agent сигнатуры (подстрока в lowercased UA → формат):
+_UA_FORMAT_MAP = {
+    "nekobox": "singbox",
+    "nyamebox": "singbox",
+    "sing-box": "singbox",
+    "karing": "base64_safe",
+}
+
+
+def _resolve_format(requested: str, user_agent: str) -> str:
+    """Определяет формат подписки: ?format= > User-Agent > 'base64'.
+
+    Parameters:
+      requested — значение query-параметра ?format= (может быть пустым).
+      user_agent — заголовок User-Agent (может быть пустым).
+
+    Returns: 'base64' | 'singbox' | 'base64_safe'
+    """
+    # 1. Явный параметр — высший приоритет.
+    if requested:
+        fmt = requested.lower().strip()
+        if fmt in ("singbox", "sing-box", "json"):
+            return "singbox"
+        if fmt in ("safe", "base64_safe", "base64safe"):
+            return "base64_safe"
+        if fmt in ("auto", "default", "base64"):
+            return "base64"
+    # 2. Эвристика по User-Agent.
+    ua = (user_agent or "").lower()
+    for ua_substring, fmt in _UA_FORMAT_MAP.items():
+        if ua_substring in ua:
+            return fmt
+    # 3. Дефолт.
+    return "base64"
+
+
+def _collect_registry_json_outbounds(user: dict) -> list[dict]:
+    """Вызывает get_subscription_json_outbound(user) на каждом модуле из реестра.
+
+    Каждый модуль может (опционально) экспортировать функцию
+    get_subscription_json_outbound(user: dict) -> Optional[dict | list[dict]]
+    — возвращает sing-box outbound JSON (dict) или список outbound'ов.
+    Если функция отсутствует или возвращает None — протокол пропускается.
+
+    Возвращает плоский список outbound-объектов.
+    """
+    import importlib
+    outbounds: list[dict] = []
+    for modpath in _SUBSCRIBABLE_PROTOCOLS:
+        try:
+            mod = importlib.import_module(modpath)
+            fn = getattr(mod, "get_subscription_json_outbound", None)
+            if fn is None:
+                continue
+            result = fn(user)
+            if result is None:
+                continue
+            if isinstance(result, list):
+                outbounds.extend(result)
+            elif isinstance(result, dict):
+                outbounds.append(result)
+        except ImportError:
+            pass
+        except Exception as e:
+            _log("WARN", f"{modpath}.get_subscription_json_outbound: {e}")
+    return outbounds
+
+
+def build_subscription_singbox_config(user: dict) -> str:
+    """Собирает полный sing-box JSON config для пользователя.
+
+    Включает:
+      - VLESS outbound (Reality/xHTTP) — из rest_api._generate_singbox_config
+      - Все sing-box протоколы (ShadowTLS/AnyTLS/TUIC/VLESS-WS-CDN) —
+        через _collect_registry_json_outbounds
+      - TrustTunnel outbound — через реестр
+      - direct + block outbounds
+      - Базовый route с final на первый outbound
+
+    Возвращает JSON-строку (indent=2, ensure_ascii=False).
+    """
+    import json as _json
+
+    outbounds: list[dict] = []
+
+    # 1. VLESS outbound — переиспользуем логику из rest_api.
+    try:
+        from chimera.modules.rest_api import _generate_singbox_config
+        vless_json = _generate_singbox_config(user)
+        if vless_json:
+            vless_cfg = _json.loads(vless_json)
+            for ob in vless_cfg.get("outbounds", []):
+                outbounds.append(ob)
+    except Exception as e:
+        _log("WARN", f"VLESS singbox outbound: {e}")
+
+    # 2. Сателлитные протоколы через реестр.
+    outbounds.extend(_collect_registry_json_outbounds(user))
+
+    # 3. Direct + block (базовые outbounds).
+    if outbounds:
+        outbounds.append({"type": "direct", "tag": "direct"})
+        outbounds.append({"type": "block", "tag": "block"})
+    else:
+        # Нет ни одного outbound — возвращаем минимальный direct-only.
+        outbounds.append({"type": "direct", "tag": "direct"})
+
+    config = {
+        "log": {"level": "warn"},
+        "outbounds": outbounds,
+        "route": {
+            "final": outbounds[0].get("tag", "direct"),
+        },
+    }
+    return _json.dumps(config, indent=2, ensure_ascii=False)
+
+
+def _filter_safe_links(links: list[str]) -> list[str]:
+    """Убирает из списка ссылок те, что не распознаются большинством клиентов.
+
+    naive+https:// и mierus:// — нестандартные share-link форматы,
+    которые Karing и некоторые другие клиенты не умеют парсить.
+    При format=base64_safe они исключаются.
+    """
+    filtered = []
+    for link in links:
+        if link.startswith("naive+https://"):
+            continue
+        if link.startswith("mierus://"):
+            continue
+        filtered.append(link)
+    return filtered
+
+
 def build_subscription_body(user: dict) -> bytes:
     state = _load_state() or {}
     ipv4  = _get_server_ip("4")
@@ -739,7 +886,10 @@ class _SubHandler(BaseHTTPRequestHandler):
         _log("ACCESS", f"{self.client_address[0]} {fmt % args}")
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+        user_agent = self.headers.get("User-Agent", "")
 
         # iOS/Karing-маршрут — проверяем ПЕРВЫМ. Существующий regex
         # ^/sub/([0-9a-f]{24})/?$ физически не матчит `/sub/{token}/ios`
@@ -774,7 +924,7 @@ class _SubHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # Существующая ветка — без изменений.
+        # Существующая ветка — с content negotiation.
         m = re.match(r"^/sub/([0-9a-f]{24})/?$", path)
         if not m:
             self.send_response(404)
@@ -795,7 +945,34 @@ class _SubHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        # Content negotiation: ?format= > User-Agent > base64 (default).
+        fmt_param = (query.get("format", [""])[0] or "").strip()
+        fmt = _resolve_format(fmt_param, user_agent)
+
+        if fmt == "singbox":
+            # Полный sing-box JSON config.
+            body = build_subscription_singbox_config(user).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Profile-Update-Interval", "6")
+            self.send_header("Profile-Title", "Chimera-singbox")
+            userinfo = _build_userinfo_header(user)
+            if userinfo:
+                self.send_header("Subscription-Userinfo", userinfo)
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        # base64 или base64_safe — текущее поведение (возможно с фильтром).
         body = build_subscription_body(user)
+        if fmt == "base64_safe":
+            # Декодируем, фильтруем, кодируем обратно.
+            import base64 as _b64
+            decoded = body.decode("utf-8")
+            links = decoded.split("\n")
+            links = _filter_safe_links(links)
+            body = _b64.b64encode("\n".join(links).encode()).copy()
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -1065,24 +1242,26 @@ def do_subscription_menu() -> None:
                 token = _token_for(u["uuid"], pepper)
                 url = f"https://{domain}:{port}/sub/{token}"
                 url_ios = f"https://{domain}:{port}/sub/{token}/ios"
+                url_sb = f"https://{domain}:{port}/sub/{token}?format=singbox"
                 label = u.get("email", u.get("name", "?"))
-                rows.append((label, url, url_ios))
+                rows.append((label, url, url_ios, url_sb))
 
             _box_top("🔗  ССЫЛКИ ПОДПИСКИ")
             _box_row()
             if not rows:
                 _box_warn_line("Нет активных пользователей.")
-            for label, url, url_ios in rows:
+            for label, url, url_ios, url_sb in rows:
                 _box_row(f"  {WHITE}{label}{NC}")
                 _box_row(f"  {GREEN}{url}{NC}")
                 _box_row(f"  {DIM}iOS/Karing:{NC} {CYAN}{url_ios}{NC}")
+                _box_row(f"  {DIM}sing-box JSON:{NC} {CYAN}{url_sb}{NC}")
                 _box_row()
             _box_back()
             _box_bottom()
 
             # QR — вне рамки, qrencode рисует свою фиксированную ASCII-сетку,
             # внутри box она ломает выравнивание.
-            for label, url, url_ios in rows:
+            for label, url, url_ios, url_sb in rows:
                 print()
                 _print_qr(url, f"{label} (основной)")
                 _print_qr(url_ios, f"{label} (iOS/Karing)")
