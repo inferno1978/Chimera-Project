@@ -1736,14 +1736,56 @@ def _run_in_thread(port: int = None) -> threading.Thread:
 #  SYSTEMD SERVICE
 # ============================================================================
 
+def _ufw_web_panel_close(port: int) -> None:
+    """Закрывает ufw-правило для веб-панели по комментарию и порту.
+
+    Ищет в `ufw status numbered` строки с комментарием
+    "VLESS Web Panel (exposed, no TLS)" и портом == port.
+    Удаляет по номеру с конца (чтобы номера не съезжали).
+    Не удаляет чужие правила. Не падает, если ufw не установлен/неактивен.
+    """
+    if not shutil.which("ufw"):
+        return
+    core = _core_module()
+    _run = core._run
+    r = _run(["ufw", "status", "numbered"], capture=True, check=False, quiet=True)
+    if r.returncode != 0 or not r.stdout:
+        return
+    # Парсим строки вида:
+    # [ 3] 8443/tcp                   ALLOW IN    Anywhere                   # VLESS Web Panel (exposed, no TLS)
+    lines_to_delete: list[int] = []
+    for line in r.stdout.splitlines():
+        # Ищем номер правила в квадратных скобках.
+        m = re.match(r'^\s*\[\s*(\d+)\s*\]\s*(.+)', line)
+        if not m:
+            continue
+        rule_num = int(m.group(1))
+        rest = m.group(2)
+        # Проверяем: содержит ли правило наш порт и наш комментарий.
+        if str(port) in rest and "VLESS Web Panel" in rest:
+            lines_to_delete.append(rule_num)
+    # Удаляем с конца (старшие номера первыми) — чтобы не сбить нумерацию.
+    for num in sorted(lines_to_delete, reverse=True):
+        _run(["ufw", "delete", str(num)],
+             check=False, quiet=True,
+             input_text="y\n")
+
+
 def install_web_service(port: int = None, admin_user: str = None,
                         admin_pass: str = None,
                         expose: Optional[bool] = None) -> dict:
     """Устанавливает systemd-сервис для веб-панели.
     По умолчанию bind 127.0.0.1 — ufw НЕ открывается (доступ через SSH-туннель).
     expose=True  — bind 0.0.0.0 + открытие порта в ufw + предупреждение о HTTP.
-    expose=False — принудительно 127.0.0.1 (даже если в конфиге было 0.0.0.0).
+    expose=False — принудительно 127.0.0.1 (даже если в конфиге было 0.0.0.0)
+                  + закрытие старого ufw-правила если было открыто.
     expose=None  — оставить текущий host в конфиге как есть."""
+    # Читаем СТАРЫЙ конфиг ДО перезаписи — нужно знать старый host/port
+    # для закрытия ufw-правила при переключении с 0.0.0.0 на 127.0.0.1.
+    old_cfg = _web_config_load()
+    old_host = old_cfg.get("host", DEFAULT_WEB_HOST)
+    old_port = old_cfg.get("port", DEFAULT_WEB_PORT)
+
     host_arg = None
     if expose is True:
         host_arg = "0.0.0.0"
@@ -1756,6 +1798,14 @@ def install_web_service(port: int = None, admin_user: str = None,
 
     core = _core_module()
     _run = core._run
+
+    # Если переключаемся С 0.0.0.0 на что-то другое (127.0.0.1 или смена порта) —
+    # закрыть СТАРЫЙ ufw-порт.
+    if old_host == "0.0.0.0" and current_host != "0.0.0.0":
+        _ufw_web_panel_close(old_port)
+    # Если меняем порт при сохранении 0.0.0.0 — закрыть старый, открыть новый.
+    if old_host == "0.0.0.0" and current_host == "0.0.0.0" and old_port != port:
+        _ufw_web_panel_close(old_port)
 
     # Открываем порт в ufw ТОЛЬКО при явном внешнем доступе (host=0.0.0.0).
     # По умолчанию (127.0.0.1) — не открываем, доступ через SSH-туннель.
@@ -1801,13 +1851,19 @@ WantedBy=multi-user.target
 
 
 def uninstall_web_service() -> None:
-    """Останавливает и удаляет systemd-сервис."""
+    """Останавливает и удаляет systemd-сервис + закрывает ufw-порт."""
     core = _core_module()
     _run = core._run
+    # Читаем конфиг ДО остановки — нужно знать host/port для ufw.
+    cfg = _web_config_load()
+    old_host = cfg.get("host", DEFAULT_WEB_HOST)
+    old_port = cfg.get("port", DEFAULT_WEB_PORT)
+    # Если панель была открыта наружу — закрыть ufw-порт.
+    if old_host == "0.0.0.0":
+        _ufw_web_panel_close(old_port)
     _run(["systemctl", "disable", "--now", "vless-web"], check=False, quiet=True)
     WEB_SERVICE_FILE.unlink(missing_ok=True)
     _run(["systemctl", "daemon-reload"], check=False, quiet=True)
-    cfg = _web_config_load()
     cfg["enabled"] = False
     _web_config_save(cfg)
 
@@ -1892,6 +1948,7 @@ def do_manage_web_panel() -> None:
         _box_item("3", "Изменить admin-пароль")
         _box_item("4", "Переустановить (сброс конфига)")
         _box_item("5", f"{'Закрыть доступ снаружи' if exposed else 'Открыть доступ снаружи (ВНИМАНИЕ: без TLS!)'}")
+        _box_item("6", f"{RED}🗑️  Удалить полностью{NC}")
         _box_item("Q", "Назад")
         _box_bottom()
 
@@ -1911,10 +1968,20 @@ def do_manage_web_panel() -> None:
                 warn("  ⚠️  Сохраните пароль — он показан только один раз!")
                 _box_row(f"  {DIM}Доступ через SSH-туннель: ssh -L {cfg['port']}:127.0.0.1:{cfg['port']} user@<server>{NC}")
             elif running:
+                # Останавливаем сервис. Если панель была открыта наружу (0.0.0.0) —
+                # закрываем ufw-порт, чтобы не оставлять дыру при остановленном сервисе.
+                if exposed:
+                    _ufw_web_panel_close(port)
                 core._run(["systemctl", "stop", "vless-web"], check=False, quiet=True)
                 success("Сервис остановлен")
             else:
-                core._run(["systemctl", "start", "vless-web"], check=False, quiet=True)
+                # Запускаем сервис. Если панель была открыта наружу (0.0.0.0) —
+                # переоткрываем ufw-порт через install_web_service (а не голый
+                # systemctl start, который порт не откроет).
+                if exposed:
+                    install_web_service(port=port, expose=True)
+                else:
+                    core._run(["systemctl", "start", "vless-web"], check=False, quiet=True)
                 success("Сервис запущен")
             _input(f"{BLUE}Нажмите Enter...{NC}")
 
@@ -1962,6 +2029,8 @@ def do_manage_web_panel() -> None:
                     f"  Закрыть доступ снаружи (только 127.0.0.1)? [y/N]: "
                 ).strip().lower()
                 if confirm == "y":
+                    # install_web_service(expose=False) уже закроет старый ufw-порт
+                    # через логику old_host=="0.0.0.0" → _ufw_web_panel_close.
                     install_web_service(port=cfg["port"], expose=False)
                     success("Доступ закрыт. Только 127.0.0.1 (SSH-туннель).")
             else:
@@ -1975,6 +2044,28 @@ def do_manage_web_panel() -> None:
                     install_web_service(port=cfg["port"], expose=True)
                     success(f"Открыто на 0.0.0.0:{port} (без TLS!)")
             _input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "6":
+            # Полное удаление веб-панели (systemd unit + web_config.json + ufw).
+            if not _installed:
+                warn("Веб-панель не установлена — нечего удалять.")
+                _input(f"{BLUE}Нажмите Enter...{NC}")
+            else:
+                _box_row(f"  {RED}Будет удалено:{NC}")
+                _box_row(f"  {DIM}  • systemd-unit vless-web.service{NC}")
+                _box_row(f"  {DIM}  • web_config.json (admin/portal конфиг){NC}")
+                _box_row(f"  {DIM}  • ufw-правило (если было открыто){NC}")
+                _box_row(f"  {DIM}  state.json и пользователи VLESS НЕ затрагиваются.{NC}")
+                _box_row()
+                confirm = _input(
+                    f"  {RED}Полностью удалить веб-панель? [y/N]:{NC} "
+                ).strip().lower()
+                if confirm == "y":
+                    uninstall_web_service()
+                    success("Веб-панель полностью удалена.")
+                else:
+                    info("Отменено.")
+                _input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch in ("q", ""):
             break
