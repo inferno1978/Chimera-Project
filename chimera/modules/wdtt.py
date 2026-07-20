@@ -525,6 +525,58 @@ def rename_user(old_name: str, new_name: str) -> bool:
         {"email": new_name, "name": new_name},
     )
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SUBSCRIPTION CONTRACT (v4.25) — для реестра _SUBSCRIBABLE_PROTOCOLS
+#
+#  Возвращает qwdtt:// ссылку для VLESS-юзера (по owner_email).
+#  Используется subscription.py для включения qWDTT в единую подписку.
+# ══════════════════════════════════════════════════════════════════════════════
+def get_subscription_uris(user: dict) -> list:
+    """Возвращает qwdtt:// ссылку для юзера (по owner_email).
+
+    Формат ссылки:
+      qwdtt://config?name=qWDTT-<ip>&peer=<ip>:<dtls_port>&hashes=<vk_hash>
+        &workers=16&port=<tun_port>&pass=<password>
+
+    Если у юзера нет пароля (не синхронизирован) — пустой список.
+    VK-хеш берётся из password entry (если задан) или placeholder ВК_ХЕШ.
+    """
+    try:
+        if not _is_installed():
+            return []
+        email = user.get("email", "") or ""
+        if not email:
+            return []
+        pwd = _find_password_by_owner(email)
+        if not pwd:
+            return []
+        # Проверяем что пароль не истёк и не деактивирован.
+        data = _load_passwords()
+        entry = data.get("passwords", {}).get(pwd, {})
+        if not entry:
+            return []
+        if entry.get("is_deactivated", False):
+            return []
+        expires = entry.get("expires_at", 0)
+        if expires > 0 and time.time() > expires:
+            return []  # истёк
+        # Собираем ссылку.
+        state = proto_load_state(_MODULE_STATE)
+        server_ip = _get_server_ip()
+        dtls_port = state.get("dtls_port", _DEFAULT_DTLS_PORT)
+        vk_hash = entry.get("vk_hash", "") or "ВК_ХЕШ"
+        link = (
+            f"qwdtt://config?name=qWDTT-{server_ip}"
+            f"&peer={server_ip}:{dtls_port}"
+            f"&hashes={vk_hash}"
+            f"&workers=16&port={_DEFAULT_TUN_PORT}"
+            f"&pass={pwd}"
+        )
+        return [link]
+    except Exception:
+        return []
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  СБОРКА / УСТАНОВКА БИНАРНИКА
 # ══════════════════════════════════════════════════════════════════════════════

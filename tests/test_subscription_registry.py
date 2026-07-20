@@ -45,6 +45,20 @@ class TestSubscribableRegistry(unittest.TestCase):
         self.assertIn("chimera.modules.trusttunnel", subscription._SUBSCRIBABLE_PROTOCOLS)
         self.assertIn("chimera.modules.singbox_menu", subscription._SUBSCRIBABLE_PROTOCOLS)
 
+    def test_registry_contains_v425_protocols(self):
+        """v4.25: реестр расширен — qWDTT, AWG, Hysteria2 тоже в подписке."""
+        from chimera.modules import subscription
+        # Оригинальные 2 протокола.
+        self.assertIn("chimera.modules.trusttunnel", subscription._SUBSCRIBABLE_PROTOCOLS)
+        self.assertIn("chimera.modules.singbox_menu", subscription._SUBSCRIBABLE_PROTOCOLS)
+        # v4.25: 3 новых протокола.
+        self.assertIn("chimera.modules.wdtt", subscription._SUBSCRIBABLE_PROTOCOLS,
+                      "qWDTT должен быть в реестре подписки")
+        self.assertIn("chimera.modules.awg_peers", subscription._SUBSCRIBABLE_PROTOCOLS,
+                      "AWG должен быть в реестре подписки")
+        self.assertIn("chimera.modules.hysteria2_sync", subscription._SUBSCRIBABLE_PROTOCOLS,
+                      "Hysteria2 должен быть в реестре подписки")
+
     def test_collect_registry_uris_returns_list(self):
         """_collect_registry_uris возвращает list (может быть пустым)."""
         from chimera.modules import subscription
@@ -284,6 +298,186 @@ class TestFindSingboxUserCredential(unittest.TestCase):
         result = singbox_menu._find_singbox_user_credential(
             {"users": users}, {"alice"})
         self.assertEqual(result["name"], "Alice")
+
+
+class TestWDTTSubscriptionUris(unittest.TestCase):
+    """qWDTT (wdtt.py) get_subscription_uris — qwdtt:// ссылка."""
+
+    def setUp(self):
+        _setup_core()
+
+    def test_returns_empty_when_not_installed(self):
+        from chimera.modules import wdtt
+        with patch.object(wdtt, "_is_installed", return_value=False):
+            result = wdtt.get_subscription_uris({"email": "alice@x.com"})
+        self.assertEqual(result, [])
+
+    def test_returns_empty_when_no_password_for_user(self):
+        """Если у юзера нет пароля (owner_email не совпадает) — пусто."""
+        from chimera.modules import wdtt
+        import json, tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        passwords_file = tmpdir / "passwords.json"
+        # Пароль есть, но для другого email.
+        passwords_file.write_text(json.dumps({
+            "passwords": {"pwd123": {"owner_email": "other@x.com"}}
+        }))
+        with patch.object(wdtt, "_is_installed", return_value=True), \
+             patch.object(wdtt, "_PASSWORDS_FILE", passwords_file):
+            result = wdtt.get_subscription_uris({"email": "alice@x.com"})
+        self.assertEqual(result, [])
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_returns_qwdtt_link_for_user_with_password(self):
+        """Если у юзера есть пароль — возвращает qwdtt:// ссылку."""
+        from chimera.modules import wdtt
+        import json, tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        passwords_file = tmpdir / "passwords.json"
+        passwords_file.write_text(json.dumps({
+            "passwords": {"secret_pwd": {
+                "owner_email": "alice@x.com",
+                "expires_at": 0,  # бессрочный
+                "is_deactivated": False,
+                "vk_hash": "ABC123",
+            }}
+        }))
+        state_file = tmpdir / "wdtt.json"
+        state_file.write_text(json.dumps({"dtls_port": 56000}))
+        with patch.object(wdtt, "_is_installed", return_value=True), \
+             patch.object(wdtt, "_PASSWORDS_FILE", passwords_file), \
+             patch.object(wdtt, "_MODULE_STATE", state_file), \
+             patch.object(wdtt, "_get_server_ip", return_value="1.2.3.4"):
+            result = wdtt.get_subscription_uris({"email": "alice@x.com"})
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0].startswith("qwdtt://config?"))
+        self.assertIn("pass=secret_pwd", result[0])
+        self.assertIn("peer=1.2.3.4:56000", result[0])
+        self.assertIn("hashes=ABC123", result[0])
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestAWGSubscriptionUris(unittest.TestCase):
+    """AWG (awg_peers.py) get_subscription_uris — vpn:// ссылка."""
+
+    def setUp(self):
+        _setup_core()
+
+    def test_returns_empty_when_not_installed(self):
+        from chimera.modules import awg_peers
+        with patch("chimera.modules.awg_state.awgs_state_is_installed",
+                   return_value=False):
+            result = awg_peers.get_subscription_uris({"email": "alice@x.com"})
+        self.assertEqual(result, [])
+
+    def test_returns_empty_when_no_peer_for_user(self):
+        from chimera.modules import awg_peers
+        with patch("chimera.modules.awg_state.awgs_state_is_installed",
+                   return_value=True), \
+             patch("chimera.modules.awg_state.awgs_state_find_peer_by_owner",
+                   return_value=None):
+            result = awg_peers.get_subscription_uris({"email": "alice@x.com"})
+        self.assertEqual(result, [])
+
+    def test_returns_vpn_link_for_user_with_peer(self):
+        """Если у юзера есть peer — возвращает vpn:// URI."""
+        from chimera.modules import awg_peers
+        peer = {
+            "name": "alice",
+            "client_privkey": "priv",
+            "client_pubkey": "pub",
+            "client_ip": "10.66.66.2",
+            "owner_email": "alice@x.com",
+            "expires_at": "",
+        }
+        server_state = {
+            "server_pubkey": "srv_pub",
+            "port": 51820,
+            "endpoint_host": "1.2.3.4",
+            "mtu": 1280,
+            "params": {},
+        }
+        with patch("chimera.modules.awg_state.awgs_state_is_installed",
+                   return_value=True), \
+             patch("chimera.modules.awg_state.awgs_state_find_peer_by_owner",
+                   return_value=peer), \
+             patch("chimera.modules.awg_state.awgs_state_load",
+                   return_value=server_state), \
+             patch("chimera.modules.awg_qr.awgs_qr_build_vpn_uri",
+                   return_value="vpn://test_uri"):
+            result = awg_peers.get_subscription_uris({"email": "alice@x.com"})
+        self.assertEqual(result, ["vpn://test_uri"])
+
+
+class TestHysteria2SubscriptionUris(unittest.TestCase):
+    """Hysteria2 (hysteria2_sync.py) get_subscription_uris — hysteria2:// ссылка."""
+
+    def setUp(self):
+        _setup_core()
+
+    def test_returns_empty_when_h2_disabled(self):
+        from chimera.modules import hysteria2_sync
+        with patch("chimera.modules.linkqr_lib.build_hysteria2_link",
+                   return_value=None):
+            result = hysteria2_sync.get_subscription_uris({"email": "alice@x.com"})
+        self.assertEqual(result, [])
+
+    def test_returns_hysteria2_link_when_enabled(self):
+        from chimera.modules import hysteria2_sync
+        link = "hysteria2://password@1.2.3.4:443?insecure=1&sni=x.com#Hysteria2"
+        with patch("chimera.modules.linkqr_lib.build_hysteria2_link",
+                   return_value=link):
+            result = hysteria2_sync.get_subscription_uris({"email": "alice@x.com"})
+        self.assertEqual(result, [link])
+
+
+class TestSafeLinkFilterV425(unittest.TestCase):
+    """_filter_safe_links — v4.25 фильтрует qwdtt:// и vpn://."""
+
+    def setUp(self):
+        _setup_core()
+
+    def test_filters_qwdtt(self):
+        from chimera.modules import subscription
+        links = [
+            "vless://abc@1.2.3.4:443",
+            "qwdtt://config?pass=secret",
+            "trojan://pwd@1.2.3.4:443",
+        ]
+        result = subscription._filter_safe_links(links)
+        self.assertIn("vless://abc@1.2.3.4:443", result)
+        self.assertIn("trojan://pwd@1.2.3.4:443", result)
+        self.assertNotIn("qwdtt://config?pass=secret", result,
+                         "qwdtt:// должен быть отфильтрован в safe mode")
+
+    def test_filters_vpn_uri(self):
+        from chimera.modules import subscription
+        links = [
+            "vless://abc@1.2.3.4:443",
+            "vpn://amnezia_config_data",
+            "hysteria2://pwd@1.2.3.4:443",
+        ]
+        result = subscription._filter_safe_links(links)
+        self.assertIn("vless://abc@1.2.3.4:443", result)
+        self.assertIn("hysteria2://pwd@1.2.3.4:443", result)
+        self.assertNotIn("vpn://amnezia_config_data", result,
+                         "vpn:// должен быть отфильтрован в safe mode")
+
+    def test_keeps_standard_protocols(self):
+        """vless://, trojan://, anytls://, tuic://, tt://, hysteria2:// — НЕ фильтруются."""
+        from chimera.modules import subscription
+        links = [
+            "vless://abc@1.2.3.4:443",
+            "trojan://pwd@1.2.3.4:443",
+            "anytls://pwd@1.2.3.4:443",
+            "tuic://pwd@1.2.3.4:443",
+            "tt://pwd@1.2.3.4:443",
+            "hysteria2://pwd@1.2.3.4:443",
+        ]
+        result = subscription._filter_safe_links(links)
+        self.assertEqual(len(result), 6, "Все стандартные протоколы должны остаться")
 
 
 if __name__ == "__main__":

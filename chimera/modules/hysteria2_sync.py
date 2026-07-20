@@ -77,3 +77,26 @@ def rename_user_full(old_user: dict, new_user: dict) -> bool:
 def rename_user(old_name: str, new_name: str) -> bool:
     """Legacy contract — NO-OP."""
     return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SUBSCRIPTION CONTRACT (v4.25) — для реестра _SUBSCRIBABLE_PROTOCOLS
+#
+#  Возвращает hysteria2:// ссылку (shared, одинакова для всех юзеров).
+#  Используется subscription.py для включения Hysteria2 в единую подписку.
+# ══════════════════════════════════════════════════════════════════════════════
+def get_subscription_uris(user: dict) -> list:
+    """Возвращает hysteria2:// ссылку для юзера.
+
+    Hysteria2 — shared-password модель. Ссылка одинакова для всех юзеров
+    (один auth password на exit-ноду). Генерируется через
+    linkqr_lib.build_hysteria2_link.
+
+    Если Hysteria2 не включена или нет активной exit-ноды — пустой список.
+    """
+    try:
+        from chimera.modules.linkqr_lib import build_hysteria2_link
+        link = build_hysteria2_link()
+        return [link] if link else []
+    except Exception:
+        return []
