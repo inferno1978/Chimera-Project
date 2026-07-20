@@ -7494,6 +7494,7 @@ def _menu_diagnostics() -> None:
         _box_item("8", "🩺 Полная диагностика одной кнопкой")
         _box_item("9", f"💻 Системный дашборд  {DIM}(CPU / RAM / Disk){NC}")
         _box_item("NB", f"🚀 Бенчмарк сервера  {DIM}(CPU/RAM/Disk + iperf3 RU/EU/NA/APAC){NC}")
+        _box_item("YB", f"🚀 YABS Benchmark  {DIM}(fio + iperf3 + Geekbench 6){NC}")
         _box_sep()
         _box_item("M", f"🗺️   Матрица exit-нод / туннель{_matrix_note}")
         _box_item("B", f"🔌 Проверка порта снаружи  {DIM}(заблокирован ли провайдером){NC}")
@@ -7549,6 +7550,13 @@ def _menu_diagnostics() -> None:
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch.lower() == "nb":
             do_network_bench_menu()
+        elif ch.lower() == "yb":
+            try:
+                from chimera.modules.yabs import do_yabs_menu
+                do_yabs_menu()
+            except ImportError as _e:
+                warn(f"Модуль YABS не найден: {_e}")
+                time.sleep(2)
         elif ch.lower() == "s":
             print()
             print(f"{BOLD}Статус сервисов:{NC}")
