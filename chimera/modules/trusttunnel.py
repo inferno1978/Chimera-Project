@@ -1183,6 +1183,32 @@ def _run_install_inner() -> None:
                 _box_warn(f"Порт {port} занят: {err}"); continue
             break
 
+        # v4.24: спрашиваем email первого пользователя (был хардкод 'admin').
+        # Email — это Имя пользователя в TrustTunnel (username == email).
+        # Пароль детерминированно выводится из UUID (через
+        # trusttunnel_derive_password). Если у юзера нет UUID — генерируем
+        # случайный (только для первого admin, потом можно привязать через
+        # identity_map в подписке).
+        while True:
+            admin_email = proto_ask(
+                f"  {CYAN}Email первого пользователя [admin@example.com]: {NC}",
+                default="admin@example.com", c=True,
+            ).strip()
+            if not admin_email:
+                admin_email = "admin@example.com"
+            if "@" not in admin_email:
+                _box_warn("Email должен содержать @ — это username для TrustTunnel.")
+                continue
+            break
+        # UUID для derive пароля. Если Enter — генерируем случайный.
+        _admin_uuid = proto_ask(
+            f"  {CYAN}UUID для derive пароля {DIM}(Enter=авто):{NC} ",
+            default="", c=True,
+        ).strip()
+        if not _admin_uuid:
+            import uuid as _uuid_mod
+            _admin_uuid = str(_uuid_mod.uuid4())
+
         acme_email = proto_ask(
             f"  {CYAN}Email для Let's Encrypt (Enter=пропустить): {NC}",
             default="", c=True,
@@ -1211,24 +1237,53 @@ def _run_install_inner() -> None:
         _box_warn("GPG-верификация не прошла — бинарник уже скачан, продолжаю")
 
     _box_info(f"Получаю Let's Encrypt сертификат для {domain}...")
+    # v4.24: graceful fallback вместо sys.exit(1).
+    # Раньше: obtain_ssl_cert() вызывала core.die() при DNS failure →
+    # die() = sys.exit(1) → ВЕСЬ установщик падал. Теперь: перехватываем
+    # SystemExit, генерируем self-signed cert, продолжаем установку.
+    # TrustTunnel может работать с self-signed — клиенты принимают любой
+    # сертификат TLS (pin через SNI, не через CA).
+    _le_failed = False
     try:
         from chimera.modules.ssl_certbot import obtain_ssl_cert
         obtain_ssl_cert(domain=domain)
+    except SystemExit as _se:
+        # core.die() внутри obtain_ssl_cert → sys.exit(1). Перехватываем.
+        _le_failed = True
+        _box_warn(f"Let's Encrypt не получен: {_se}")
+        _box_warn("Генерирую self-signed сертификат — продолжаю установку.")
     except Exception as e:
-        os.system("clear"); _box_top("🔐  УСТАНОВКА  •  TRUSTTUNNEL")
-        _box_err(f"obtain_ssl_cert failed: {e}"); _box_bot(); _pause(); return
+        _le_failed = True
+        _box_warn(f"obtain_ssl_cert exception: {e}")
+        _box_warn("Генерирую self-signed сертификат — продолжаю установку.")
+
+    if _le_failed:
+        # Генерируем self-signed cert в /etc/letsencrypt/live/<domain>/
+        # (тот же путь что и LE, чтобы код ниже нашёл его без изменений).
+        try:
+            from chimera.modules.resources import generate_self_signed_cert
+            generate_self_signed_cert(domain)
+        except Exception as e:
+            _box_err(f"Не удалось создать self-signed сертификат: {e}")
+            _box_bot(); _pause(); return
+
     cert_chain = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem")
     cert_key = Path(f"/etc/letsencrypt/live/{domain}/privkey.pem")
     if not cert_chain.exists() or not cert_key.exists():
-        _box_err(f"Сертификат не найден в {cert_chain}"); _box_bot(); _pause(); return
-    print(f"  {GREEN}✓{NC}  Сертификат получен")
+        _box_err(f"Сертификат не найден в {cert_chain}")
+        _box_warn("Установка прервана — без TLS-сертификата TrustTunnel не стартует.")
+        _box_bot(); _pause(); return
+    print(f"  {GREEN}✓{NC}  Сертификат получен{' (self-signed)' if _le_failed else ''}")
 
     _box_info("Запускаю setup_wizard (non-interactive, --cert-type provided)...")
     listen_addr = f"0.0.0.0:{port}"
-    admin_pass = trusttunnel_derive_password("00000000-0000-0000-0000-000000000000")
+    # v4.24: используем email+UUID пользователя вместо хардкода
+    # 'admin' + dummy UUID 00000000-... Пароль детерминированно выводится
+    # из UUID (trusttunnel_derive_password).
+    admin_pass = trusttunnel_derive_password(_admin_uuid)
     wizard_cmd = [
         str(_WIZARD_PATH), "-m", "non-interactive",
-        "-a", listen_addr, "-c", f"admin:{admin_pass}", "-n", domain,
+        "-a", listen_addr, "-c", f"{admin_email}:{admin_pass}", "-n", domain,
         "--cert-type", "provided",
         "--cert-chain-path", str(cert_chain),
         "--cert-key-path", str(cert_key),
@@ -1240,6 +1295,8 @@ def _run_install_inner() -> None:
         _box_err(f"setup_wizard exited {r.returncode}: {r.stderr[:300]}")
         _box_bot(); _pause(); return
     print(f"  {GREEN}✓{NC}  vpn.toml + hosts.toml + credentials.toml сгенерированы")
+    print(f"  {GREEN}✓{NC}  Первый пользователь: {YELLOW}{admin_email}{NC}")
+    print(f"  {DIM}    Пароль (derived from UUID): {admin_pass[:8]}...{NC}")
 
     # Включаем [metrics] блок для scrape через trusttunnel_stats
     try:

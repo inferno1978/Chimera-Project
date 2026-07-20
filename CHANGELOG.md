@@ -2,6 +2,77 @@
 
 ---
 
+## FEAT: Выбор порта + имя первого пользователя во всех протоколах — 21 июля 2026
+
+**По запросу Andrew B.: во всех протоколах (NaiveProxy, Trojan/sing-box, TrustTunnel, Mieru) добавлен интерактивный выбор порта и имени первого пользователя. TrustTunnel больше не падает при ошибке LE-сертификата.**
+
+### Проблемы (из переписки с Andrew B.)
+
+| Протокол | Жалоба | Корневая причина |
+|---|---|---|
+| **NaiveProxy** | «просит остановить nginx, как где это сделать? сам он почему не может его стопнуть?» | Warning «остановите nginx сами» — но auto-stop был только для port 80 (ACME), НЕ для выбранного порта Caddy (443). | Порт конфликта не проверялся до install; auto-stop nginx покрывал только port 80, не выбранный порт |
+| **NaiveProxy** | «Другой порт назначить не дает» | Был `input(f"Порт [{old_port}]")` БЕЗ проверки конфликта — если порт занят, Caddy падал при запуске | Нет pre-flight port conflict check |
+| **Trojan (sing-box)** | «садится автоматом на порт 8443 и негде его переназначить» | TUIC default и VLESS-WS-CDN default использовали `_prompt_alt_port` только в ShadowTLS/AnyTLS, НЕ в TUIC/VLESS-WS-CDN | Hardcoded `DEFAULT_PORT_TUIC_ALTERNATIVE=443` / `DEFAULT_PORT_VLESS_WS_CDN=8080` без запроса |
+| **TrustTunnel** | «не может получить LE сертификат и падает установщик» | `obtain_ssl_cert()` вызывает `core.die()` при DNS failure → `die() = sys.exit(1)` → ВЕСЬ установщик падает | `sys.exit(1)` не перехватывался |
+| **Mieru** | «тоже добавить возможность выбора имени пользователя/порт» | Порт уже запрашивался, но первый username был хардкод `admin` | `first_user = "admin"` без `proto_ask` |
+| **NaiveProxy / TrustTunnel** | (общее) первый username хардкод `admin` / `admin:dummy-uuid` | Нет `proto_ask` для первого пользователя | Hardcoded `admin` |
+
+### Фиксы
+
+#### 1. NaiveProxy (`chimera/modules/naiveproxy.py`)
+
+- **Pre-flight port conflict check** — `socket.bind(("0.0.0.0", port))` до install. Если занят — показываем кто держит (через `ss -ltnp`) и предлагаем ввести альтернативу. Цикл повторяется пока не введут свободный порт или отменят.
+- **Auto-stop nginx расширено** — раньше только для port 80 (ACME). Теперь также для выбранного порта Caddy (если nginx на нём). Логика: `if _nginx_active and (port_80_taken or chosen_port_taken): stop nginx; restore after install`.
+- **Запрос первого username** — `proto_ask("Логин первого пользователя [admin]: ", default="admin")` с валидацией `^[A-Za-z0-9_\-]+$` (для Caddyfile `basic_auth`).
+- **Убран misleading warning** — «Если на порту 443 уже работает nginx — остановите его сначала» заменён на «Если выбранный порт занят — установщик предложит альтернативу. Если порт 80 занят — nginx будет автоматически остановлен и возвращён.»
+
+#### 2. sing-box TUIC default (`chimera/modules/singbox_menu.py`)
+
+- **Добавлен `_prompt_alt_port(DEFAULT_PORT_TUIC_ALTERNATIVE, "::", "udp")`** — mirror ShadowTLS/AnyTLS pattern. Если 443/UDP занят — предлагаем альтернативу.
+- `singbox_enable_tuic(listen_port=listen_port, ...)` — передаём выбранный порт.
+- `singbox_ufw_ensure_open(listen_port, "udp", "tuic", listen="::")` — UFW для выбранного порта.
+
+#### 3. sing-box VLESS-WS-CDN default (`chimera/modules/singbox_menu.py`)
+
+- **Добавлен `_prompt_alt_port(DEFAULT_PORT_VLESS_WS_CDN, "0.0.0.0", "tcp")`** — если 8080 занят, предлагаем альтернативу.
+- `singbox_enable_vless_ws_cdn(cdn_provider="cloudflare", host=host, listen_port=listen_port)` — передаём выбранный порт.
+- `singbox_ufw_ensure_open(listen_port, "tcp", "vless_ws_cdn", listen="0.0.0.0")` — UFW для выбранного порта.
+
+#### 4. TrustTunnel (`chimera/modules/trusttunnel.py`)
+
+- **LE cert failure graceful fallback** — перехватываем `SystemExit` (от `core.die()` внутри `obtain_ssl_cert`) и `Exception`. При ошибке — генерируем self-signed cert через `generate_self_signed_cert(domain)` в тот же путь (`/etc/letsencrypt/live/<domain>/`). Установка продолжается. TrustTunnel работает с self-signed — клиенты принимают любой TLS-сертификат (pin через SNI, не через CA).
+- **Запрос первого username (email)** — `proto_ask("Email первого пользователя [admin@example.com]: ", default="admin@example.com")` с валидацией наличия `@`. Email = username в TrustTunnel.
+- **Запрос UUID для derive пароля** — `proto_ask("UUID для derive пароля (Enter=авто): ")` — если Enter, генерируем случайный UUID. Пароль детерминированно выводится через `trusttunnel_derive_password(uuid)`.
+- **wizard_cmd использует admin_email** вместо хардкода `admin`: `-c "{admin_email}:{admin_pass}"`.
+
+#### 5. Mieru (`chimera/modules/mieru.py`)
+
+- **Запрос первого username** — `proto_ask("Логин первого пользователя [admin]: ", default="admin")` с валидацией через `_RE_USERNAME` (только латиница/цифры/_-). При недопустимых символах — fallback на `admin`.
+- Порт уже запрашивался ранее (`_DEFAULT_PORT_START=2012`, `_DEFAULT_PORT_END=2022`) — без изменений.
+
+### Тесты — `tests/test_proto_port_username_v424.py` (10 новых)
+
+- `TestNaiveproxyFirstUsernamePrompt` (2) — proto_ask для логина, проверка конфликта порта через `socket.bind()`
+- `TestSingboxTuicPortPrompt` (2) — `_prompt_alt_port` для TUIC default и VLESS-WS-CDN default
+- `TestTrustTunnelLECertFallback` (2) — перехват `SystemExit`, fallback на `generate_self_signed_cert`; запрос `admin_email`
+- `TestMieruFirstUsernamePrompt` (2) — proto_ask для логина, нет прямого хардкода `admin` в main path
+- `TestNaiveproxyNginxAutoStop` (2) — auto-stop nginx для port 80 (ACME) и для выбранного порта Caddy
+
+Все 533 теста (naiveproxy + mieru + trusttunnel + singbox + новые) проходят.
+
+### Изменения в коде
+
+| Файл | Что изменилось |
+|---|---|
+| `chimera/modules/naiveproxy.py` | Pre-flight port conflict check, auto-stop nginx для выбранного порта, запрос первого username, убран misleading warning |
+| `chimera/modules/singbox_menu.py` | TUIC default: `_prompt_alt_port` для UDP/::; VLESS-WS-CDN default: `_prompt_alt_port` для TCP/0.0.0.0 |
+| `chimera/modules/trusttunnel.py` | LE cert graceful fallback (перехват SystemExit → self-signed), запрос admin_email + UUID |
+| `chimera/modules/mieru.py` | Запрос первого username через `proto_ask` |
+| `tests/test_proto_port_username_v424.py` | **НОВЫЙ** — 10 regression-тестов |
+| `CHANGELOG.md` | Эта запись |
+
+---
+
 ## FEAT: Переключатель YouTube → RU / exit-ноды — 21 июля 2026
 
 **В TUI «Настройки сети» добавлен пункт `Y` — переключатель маршрутизации YouTube между RU entry-нодой и exit-нодами каскада.**

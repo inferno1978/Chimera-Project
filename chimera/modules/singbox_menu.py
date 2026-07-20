@@ -1117,8 +1117,15 @@ def _tuic_menu() -> None:
             if ch == "1":
                 if not _ensure_binary_installed():
                     continue
+                # v4.24: pre-flight port-check — если дефолтный 443/UDP занят,
+                # предлагаем альтернативу вместо crash-loop. Mirror ShadowTLS.
+                listen_port = _prompt_alt_port(DEFAULT_PORT_TUIC_ALTERNATIVE, "::", "udp")
+                if listen_port is None:
+                    input(f"\n{BLUE}Нажмите Enter...{NC}")
+                    continue
                 cert_path, key_path, _ = _ensure_self_signed_cert("tuic")
                 ok = singbox_enable_tuic(
+                    listen_port=listen_port,
                     cert_path=str(cert_path),
                     key_path=str(key_path),
                     cert_source="self-signed",
@@ -1132,7 +1139,7 @@ def _tuic_menu() -> None:
                         else:
                             # v4.23.14: UFW для TUIC (UDP, listen=::)
                             singbox_ufw_ensure_open(
-                                DEFAULT_PORT_TUIC_ALTERNATIVE, "udp", "tuic",
+                                listen_port, "udp", "tuic",
                                 listen="::")
                             success("TUIC v5 включён")
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
@@ -1250,9 +1257,16 @@ def _enable_vless_ws_cdn_default() -> None:
         time.sleep(1.5)
         return
 
+    # v4.24: pre-flight port-check — если дефолтный 8080 занят, предлагаем
+    # альтернативу вместо crash-loop. Mirror ShadowTLS/AnyTLS/TUIC.
+    listen_port = _prompt_alt_port(DEFAULT_PORT_VLESS_WS_CDN, "0.0.0.0", "tcp")
+    if listen_port is None:
+        return
+
     ok = singbox_enable_vless_ws_cdn(
         cdn_provider="cloudflare",
         host=host,
+        listen_port=listen_port,
     )
     if not ok:
         return
@@ -1265,7 +1279,7 @@ def _enable_vless_ws_cdn_default() -> None:
         return
     # v4.23.14: UFW для VLESS-WS-CDN (listen=0.0.0.0 по умолчанию)
     singbox_ufw_ensure_open(
-        DEFAULT_PORT_VLESS_WS_CDN, "tcp", "vless_ws_cdn", listen="0.0.0.0")
+        listen_port, "tcp", "vless_ws_cdn", listen="0.0.0.0")
     success("VLESS-WS-CDN включён (Cloudflare)")
     _show_cdn_instructions("cloudflare")
 
