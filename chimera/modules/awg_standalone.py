@@ -1177,6 +1177,25 @@ def awgs_install(
         allow_ipv6_tunnel=allow_ipv6_tunnel,
     )
 
+    # v4.25: bulk-provisioning всех существующих VLESS-пользователей в AWG.
+    # Каждый VLESS-юзер получает peer (привязка через owner_email).
+    # Лимит 253 пира (по числу IP в /24 подсети).
+    try:
+        from chimera.modules.rest_api import _sync_all_from_vless
+        from chimera.modules.users_manager import _unified_load_users
+        _vless_users = _unified_load_users()
+        if _vless_users:
+            info(f"Синхронизирую {len(_vless_users)} VLESS-юзеров в AWG...")
+            _stats = _sync_all_from_vless(_vless_users)
+            _awg_stats = _stats.get("awg_peers", {})
+            if _awg_stats.get("created", 0) > 0:
+                success(f"Добавлено AWG peers: {_awg_stats['created']}")
+    except Exception as _e:
+        try:
+            warn(f"Sync VLESS-юзеров не удался: {_e}")
+        except Exception:
+            print(f"Sync VLESS-юзеров не удался: {_e}")
+
     # 13. Создание cron для --expires (если ещё нет)
     awgs_setup_expires_cron()
 

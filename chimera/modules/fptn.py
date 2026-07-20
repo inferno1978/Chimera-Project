@@ -757,6 +757,136 @@ def _passwd_list_usernames() -> list:
             names.append(parts[0])
     return names
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SYNC CONTRACT (v4.25) — для реестра _SYNCABLE_PROTOCOLS в rest_api.py
+#
+#  FPTN — username/password модель (как NaiveProxy/Mieru):
+#    • Username = email.split('@')[0], валидируется [A-Za-z0-9] (без _-)
+#    • Пароль = случайная строка (proto_gen_password)
+#    • Хранится в /etc/fptn/users.list + дублируется в fptn.json state
+#
+#  Bridge к VLESS users.json — по username (email.split('@')[0]).
+#  При rename — remove + add (пароль меняется).
+# ══════════════════════════════════════════════════════════════════════════════
+def _username_from_email(email: str) -> str:
+    """Convention: username = email.split('@')[0].strip()."""
+    return (email or "").split("@")[0].strip()
+
+
+def is_active() -> bool:
+    """True если FPTN установлен И сервис запущен."""
+    try:
+        if not _is_installed():
+            return False
+        r = _run(["systemctl", "is-active", _SERVICE_NAME],
+                 capture=True, check=False)
+        return r.returncode == 0 and r.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def ensure_user_full(user: dict) -> bool:
+    """Создаёт FPTN-аккаунт из full user dict.
+
+    Username = email.split('@')[0]. Валидируется [A-Za-z0-9] (только буквы/цифры,
+    без _-). Пароль генерируется. /etc/fptn/users.list обновляется через
+    fptn-passwd --add-user, сервис рестартуется.
+    """
+    try:
+        if not _is_installed():
+            return True  # не установлено — пропускаем
+        email = user.get("email", "") or ""
+        if not email:
+            return False
+        username = _username_from_email(email)
+        if not username or not _valid_username(username):
+            return False
+        # Если уже есть — no-op.
+        existing = _passwd_list_usernames()
+        if username in existing:
+            return True
+        # Генерируем пароль.
+        try:
+            from chimera.modules.proto_common import proto_gen_password
+            password = proto_gen_password()
+        except Exception:
+            import secrets as _s
+            password = _s.token_urlsafe(16)
+        ok, _msg = _passwd_add_user(username, password, _DEFAULT_BANDWIDTH_MB)
+        if not ok:
+            return False
+        _save_user_to_state(username, password, _DEFAULT_BANDWIDTH_MB)
+        # Рестарт сервиса чтобы подхватил нового юзера.
+        _run(["systemctl", "restart", _SERVICE_NAME], check=False)
+        return True
+    except Exception as e:
+        try:
+            print(f"  {RED}✗{NC}  fptn.ensure_user_full: {e}")
+        except Exception:
+            pass
+        return False
+
+
+def ensure_user(name: str) -> bool:
+    """Legacy contract — name трактуется как email."""
+    return ensure_user_full({"email": name, "name": name})
+
+
+def remove_user_full(user: dict) -> bool:
+    """Удаляет FPTN-аккаунт по full user dict (по username = email.split('@')[0])."""
+    try:
+        if not _is_installed():
+            return True
+        email = user.get("email", "") or ""
+        username = _username_from_email(email)
+        if not username:
+            return False
+        existing = _passwd_list_usernames()
+        if username not in existing:
+            return True  # не было — идемпотентность
+        if not _passwd_del_user(username):
+            return False
+        # Удаляем из state.json тоже.
+        try:
+            state = proto_load_state(_MODULE_STATE)
+            users = state.get("users", [])
+            state["users"] = [u for u in users if u.get("username") != username]
+            proto_save_state(_MODULE_STATE, state)
+        except Exception:
+            pass
+        _run(["systemctl", "restart", _SERVICE_NAME], check=False)
+        return True
+    except Exception as e:
+        try:
+            print(f"  {RED}✗{NC}  fptn.remove_user_full: {e}")
+        except Exception:
+            pass
+        return False
+
+
+def remove_user(name: str) -> bool:
+    """Legacy contract — name трактуется как email."""
+    return remove_user_full({"email": name, "name": name})
+
+
+def rename_user_full(old_user: dict, new_user: dict) -> bool:
+    """Rename = remove + add (fptn-passwd не поддерживает rename in-place)."""
+    try:
+        ok1 = remove_user_full(old_user)
+        ok2 = ensure_user_full(new_user)
+        return ok1 and ok2
+    except Exception:
+        return False
+
+
+def rename_user(old_name: str, new_name: str) -> bool:
+    """Legacy contract — имена тракуются как emails."""
+    return rename_user_full(
+        {"email": old_name, "name": old_name},
+        {"email": new_name, "name": new_name},
+    )
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ПРИМЕНЕНИЕ КОНФИГА / ПЕРЕЗАПУСК
 # ══════════════════════════════════════════════════════════════════════════════
@@ -942,6 +1072,21 @@ def _run_install_inner() -> None:
         "out_iface": out_iface, "server_ip": server_ip,
         "max_sessions": cfg["max_sessions"], "prometheus_key": cfg["prometheus_key"],
     })
+
+    # v4.25: bulk-provisioning всех существующих VLESS-пользователей в FPTN.
+    # Username = email.split('@')[0], пароль генерируется автоматически.
+    try:
+        from chimera.modules.rest_api import _sync_all_from_vless
+        from chimera.modules.users_manager import _unified_load_users
+        _vless_users = _unified_load_users()
+        if _vless_users:
+            print(f"  {CYAN}→{NC}  Синхронизирую {len(_vless_users)} VLESS-юзеров в FPTN...")
+            _stats = _sync_all_from_vless(_vless_users)
+            _fptn_stats = _stats.get("fptn", {})
+            if _fptn_stats.get("created", 0) > 0:
+                print(f"  {GREEN}✓{NC}  Добавлено в FPTN: {_fptn_stats['created']} юзеров")
+    except Exception as _e:
+        print(f"  {YELLOW}⚠{NC}  Sync VLESS-юзеров не удался: {_e}")
 
     os.system("clear")
     _box_top("✅  УСТАНОВКА ЗАВЕРШЕНА  •  FPTN")

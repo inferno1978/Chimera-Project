@@ -2,6 +2,128 @@
 
 ---
 
+## FEAT(2): Sync для qWDTT, FPTN, AWG, Hysteria2 — 21 июля 2026
+
+**Расширил реестр `_SYNCABLE_PROTOCOLS` с 5 до 9 протоколов. Теперь двусторонняя синхронизация VLESS-юзеров работает со ВСЕМИ спутниковыми протоколами проекта.**
+
+### Полный список синхронизируемых протоколов (9 шт)
+
+| # | Протокол | Identity | Storage | Sync contract |
+|---|---|---|---|---|
+| 1 | **mtproto** (Telemt) | name = `email.split('@')[0]` | `/etc/telemt/telemt.toml` | per-user (secret preserved on rename) |
+| 2 | **naiveproxy** | username = `email.split('@')[0]` | `/var/lib/xray-installer/naiveproxy.json` | per-user (password changes on rename) |
+| 3 | **mieru** | username = `email.split('@')[0]` | `/var/lib/xray-installer/mieru.json` | per-user |
+| 4 | **trusttunnel** | username = `email` (verbatim) | `/opt/trusttunnel/credentials.toml` | per-user (password deterministic from UUID) |
+| 5 | **singbox** (ShadowTLS/AnyTLS/TUIC/Trojan) | UUID | `singbox_state.json` | per-user (UUID-keyed, password changes on add) |
+| 6 | **wdtt** (qWDTT) | `owner_email` field in password entry | `/etc/wdtt/passwords.json` | per-user (TTL=365д, 1 устройство, **лимит 10 паролей**) |
+| 7 | **fptn** | username = `email.split('@')[0]` | `/etc/fptn/users.list` | per-user (через `fptn-passwd --add-user`) |
+| 8 | **awg_peers** (AmneziaWG) | `owner_email` field in peer | `/var/lib/xray-installer/awg_standalone_state.json` | per-peer (ключи генерируются, **лимит 253 пира**) |
+| 9 | **hysteria2_sync** (Hysteria2) | N/A (shared password) | `state["hysteria2"]` | **NO-OP** (shared password, no per-user) |
+
+### Что нового (4 протокола)
+
+#### qWDTT (`chimera/modules/wdtt.py`)
+
+qWDTT — WireGuard-over-TURN (через TURN-серверы ВКонтакте). Парольная модель доступа:
+- Главный пароль (бессрочный) — для админа
+- До 10 временных паролей с TTL и лимитом устройств — для юзеров
+
+**Bridge к VLESS**: каждый VLESS-юзер получает ОДИН временный пароль WDTT с `owner_email` полем. TTL=365 дней, max_devices=1. **Лимит 10 паролей** — если у тебя >10 VLESS-юзеров, WDTT не для всех (11-й юзер получит warning и skip).
+
+При add/remove/rename — `owner_email` поле используется для поиска. Hot reload через SIGHUP — новые пароли применяются без перезапуска сервера.
+
+#### FPTN (`chimera/modules/fptn.py`)
+
+FPTN — прокси-протокол (SNI-based). Username/password модель:
+- Username = `email.split('@')[0]`, валидируется `[A-Za-z0-9]` (только буквы/цифры, без `_-`)
+- Пароль = случайная строка (proto_gen_password)
+- Хранится в `/etc/fptn/users.list` через `fptn-passwd --add-user`
+
+При rename — remove + add (пароль меняется). Сервис `fptn-server` рестартуется.
+
+#### AWG / AmneziaWG (`chimera/modules/awg_peers.py`)
+
+AWG standalone — peer-based модель:
+- Каждый peer = пара ключей (private+public) + IP в подсети AWG
+- Identity: `peer.name` (уникальное, `[a-zA-Z0-9_-]`, не с цифры)
+- Bridge к VLESS: через `peer.owner_email` (email VLESS-юзера)
+- **Лимит 253 пира** (по числу IP в /24 подсети)
+
+Имя пира генерируется из email: `alice@x.com → alice`. Если занято — `alice_2`, `alice_3` и т.д. Если имя начинается с цифры — добавляется `u_` prefix.
+
+При rename — remove + add (ключи пересоздаются, клиент получает новый `.conf`).
+
+#### Hysteria2 (`chimera/modules/hysteria2_sync.py`) — NO-OP
+
+Hysteria2 — shared-password модель (один auth password на всех клиентов). Per-user концепции НЕТ.
+
+Контракт NO-OP:
+- `is_active()` — True если Hysteria2 включена в `state["hysteria2"]["enabled"]` или `transport_only`
+- `ensure_user_full` / `remove_user_full` / `rename_user_full` — возвращают True (no-op)
+
+Зачем тогда в реестре? Чтобы подписка/web-панель/user portal знали, что Hysteria2 активна. Dispatcher не делает per-user операций, просто подтверждает что протокол "синхронизирован" (= активна для всех).
+
+### Bulk-provisioning при install
+
+После успешной установки протокола вызывается `_sync_all_from_vless` — все существующие VLESS-юзеры автоматически получают аккаунты/peers/пароли:
+
+```python
+# Пример из wdtt.py _run_install_inner (после proto_save_state):
+from chimera.modules.rest_api import _sync_all_from_vless
+from chimera.modules.users_manager import _unified_load_users
+_vless_users = _unified_load_users()
+if _vless_users:
+    print(f"Синхронизирую {len(_vless_users)} VLESS-юзеров в qWDTT...")
+    _stats = _sync_all_from_vless(_vless_users)
+```
+
+Пользователь видит: `✓ Добавлено паролей qWDTT: 5` (например).
+
+### Identity model — сводная таблица
+
+| Протокол | Identity | Пароль | Rename |
+|---|---|---|---|
+| mtproto | `email.split('@')[0]` | случайный hex32 | секрет сохраняется |
+| naiveproxy | `email.split('@')[0]` | случайный | меняется (remove+add) |
+| mieru | `email.split('@')[0]` | случайный | меняется |
+| trusttunnel | `email` (verbatim) | `SHA-256(uuid)` | ТОТ ЖЕ (derive из UUID) |
+| singbox | UUID | случайный per inbound | name field updated, пароль НЕ меняется |
+| **wdtt** | `owner_email` (link) | случайный, TTL=365д | меняется (remove+add) |
+| **fptn** | `email.split('@')[0]` | случайный | меняется |
+| **awg_peers** | `owner_email` (link) | пара ключей (private+public) | ключи пересоздаются |
+| **hysteria2_sync** | N/A | shared | N/A (NO-OP) |
+
+### Изменения в коде
+
+| Файл | Что изменилось |
+|---|---|
+| `chimera/modules/rest_api.py` | `_SYNCABLE_PROTOCOLS` расширен с 5 до 9: +wdtt, +fptn, +awg_peers, +hysteria2_sync. Sing-box переименован в `singbox_users` (где реально живёт контракт). |
+| `chimera/modules/wdtt.py` | Добавлены 7 contract функций + bulk-provisioning после install. `_find_password_by_owner` helper. `owner_email` поле в password entry. |
+| `chimera/modules/fptn.py` | Добавлены 7 contract функций + bulk-provisioning. Использует существующие `_passwd_add_user`/`_passwd_del_user`. |
+| `chimera/modules/awg_peers.py` | Добавлены 7 contract функций + `_peer_name_from_email` helper. Использует существующие `awg_peer_add`/`awg_peer_remove` с `owner_email` параметром. |
+| `chimera/modules/awg_standalone.py` | Bulk-provisioning после install — все VLESS-юзеры получают AWG peers. |
+| `chimera/modules/hysteria2_sync.py` | **НОВЫЙ** модуль — NO-OP контракт для Hysteria2 (shared password). |
+| `tests/test_user_sync_v425.py` | Расширен с 16 до 30 тестов: +4 contract exports tests, +5 Hysteria2 NO-OP tests, +2 WDTT limit tests, +3 AWG peer name generation tests. |
+
+### Тесты — 14 новых (всего 30 в test_user_sync_v425.py)
+
+- `TestProtocolContractFunctions` (4 новых) — wdtt, fptn, awg_peers, hysteria2_sync экспортируют контракт
+- `TestHysteria2NoOpContract` (5) — ensure/remove/rename всегда True, is_active реагирует на state
+- `TestWDTTPasswordLimit` (2) — лимит 10 паролей, идемпотентность для существующего
+- `TestAwgPeerNameGeneration` (3) — генерация из email, суффикс при коллизии, u_ prefix для цифры
+
+Все 611 тестов проходят (naiveproxy + mieru + trusttunnel + singbox + rest_api + subscription + user_sync + mtproto + awg).
+
+### Что проверить на сервере
+
+1. Установить qWDTT через TUI — в конце `✓ Добавлено паролей qWDTT: N`
+2. Установить FPTN — `✓ Добавлено в FPTN: N юзеров`
+3. Установить AWG standalone — `✓ Добавлено AWG peers: N`
+4. Добавить VLESS-юзера через TUI [1] — `Синхронизирован со спутниковыми протоколами: naiveproxy, mieru, singbox, wdtt, fptn, awg_peers` (если установлены)
+5. Hysteria2 — при включении `Синхронизирован со спутниковыми протоколами: hysteria2_sync` (NO-OP, но подписка увидит hysteria2:// ссылку)
+
+---
+
 ## FEAT: Двусторонняя синхронизация пользователей VLESS ↔ спутниковые протоколы — 21 июля 2026
 
 **По запросу Andrew B.: «если имя пользователя будет совпадать при установке этих протоколов, они добавятся в единую подписку/web панель/user portal автоматически?» — ответ теперь ДА.**

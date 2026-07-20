@@ -380,6 +380,151 @@ def _hot_reload() -> bool:
     _run(["kill", "-HUP", pid])
     return True
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SYNC CONTRACT (v4.25) — для реестра _SYNCABLE_PROTOCOLS в rest_api.py
+#
+#  WDTT — парольная модель доступа (НЕ per-user UUID как sing-box):
+#    • Главный пароль (бессрочный) — для админа
+#    • До 10 временных паролей с TTL и лимитом устройств — для юзеров
+#
+#  Bridge к VLESS users.json:
+#    • Каждый VLESS-юзер получает ОДИН временный пароль WDTT.
+#    • Связь через поле `owner_email` в password entry (аналогично AWG peers).
+#    • При добавлении VLESS-юзера → создаётся WDTT-пароль (TTL=365д, 1 устройство).
+#    • При удалении VLESS-юзера → WDTT-пароль удаляется.
+#    • При rename → старый пароль удаляется, новый создаётся (пароль меняется).
+#
+#  Лимит 10 паролей — если у тебя >10 VLESS-юзеров, WDTT не для всех.
+#  ensure_user_full вернёт False для 11-го юзера (с предупреждением в лог).
+# ══════════════════════════════════════════════════════════════════════════════
+def is_active() -> bool:
+    """True если WDTT установлен И сервис запущен."""
+    try:
+        if not _is_installed():
+            return False
+        r = _run(["systemctl", "is-active", _SERVICE_NAME],
+                 capture=True, check=False)
+        return r.returncode == 0 and r.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def _find_password_by_owner(email: str) -> Optional[str]:
+    """Находит WDTT-пароль по owner_email. Возвращает сам пароль или None."""
+    if not email:
+        return None
+    data = _load_passwords()
+    for pwd, info in data.get("passwords", {}).items():
+        if info.get("owner_email") == email:
+            return pwd
+    return None
+
+
+def ensure_user_full(user: dict) -> bool:
+    """Создаёт WDTT-пароль для VLESS-юзера.
+
+    Если пароль с этим owner_email уже есть — no-op (возвращает True).
+    TTL=365 дней, max_devices=1. Пароль = случайная строка (proto_gen_password).
+
+    Возвращает True если создан или уже существует. False — лимит 10 превышён
+    или ошибка.
+    """
+    try:
+        if not _is_installed():
+            return True  # WDTT не установлен — пропускаем
+        email = user.get("email", "") or ""
+        if not email:
+            return False
+        # Если уже есть пароль для этого email — no-op.
+        existing = _find_password_by_owner(email)
+        if existing:
+            return True
+        data = _load_passwords()
+        passwords = data.get("passwords", {})
+        if len(passwords) >= 10:
+            print(f"  {YELLOW}⚠{NC}  WDTT: лимит 10 паролей превышён — пропускаю {email}")
+            return False
+        # Генерируем новый пароль (TTL=365д, 1 устройство).
+        new_pass = proto_gen_password()
+        expires_at = int((datetime.now() + timedelta(days=365)).timestamp())
+        passwords[new_pass] = {
+            "device_ids":    [],
+            "max_devices":   1,
+            "expires_at":    expires_at,
+            "down_bytes":    0,
+            "up_bytes":      0,
+            "vk_hash":       "",
+            "ports":         "",
+            "is_deactivated": False,
+            "owner_email":   email,  # ← bridge к VLESS users.json
+        }
+        data["passwords"] = passwords
+        _save_passwords(data)
+        _hot_reload()
+        return True
+    except Exception as e:
+        try:
+            print(f"  {RED}✗{NC}  wdtt.ensure_user_full: {e}")
+        except Exception:
+            pass
+        return False
+
+
+def ensure_user(name: str) -> bool:
+    """Legacy contract — name трактуется как email."""
+    return ensure_user_full({"email": name, "name": name})
+
+
+def remove_user_full(user: dict) -> bool:
+    """Удаляет WDTT-пароль по owner_email (email юзера)."""
+    try:
+        if not _is_installed():
+            return True
+        email = user.get("email", "") or ""
+        if not email:
+            return False
+        pwd = _find_password_by_owner(email)
+        if not pwd:
+            return True  # не было — идемпотентность
+        data = _load_passwords()
+        passwords = data.get("passwords", {})
+        if pwd in passwords:
+            del passwords[pwd]
+            data["passwords"] = passwords
+            _save_passwords(data)
+            _hot_reload()
+        return True
+    except Exception as e:
+        try:
+            print(f"  {RED}✗{NC}  wdtt.remove_user_full: {e}")
+        except Exception:
+            pass
+        return False
+
+
+def remove_user(name: str) -> bool:
+    """Legacy contract — name трактуется как email."""
+    return remove_user_full({"email": name, "name": name})
+
+
+def rename_user_full(old_user: dict, new_user: dict) -> bool:
+    """Rename = remove + add (пароль меняется, TTL сбрасывается)."""
+    try:
+        ok1 = remove_user_full(old_user)
+        ok2 = ensure_user_full(new_user)
+        return ok1 and ok2
+    except Exception:
+        return False
+
+
+def rename_user(old_name: str, new_name: str) -> bool:
+    """Legacy contract — имена тракуются как emails."""
+    return rename_user_full(
+        {"email": old_name, "name": old_name},
+        {"email": new_name, "name": new_name},
+    )
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  СБОРКА / УСТАНОВКА БИНАРНИКА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -771,6 +916,22 @@ def _run_install_inner() -> None:
         "admin_id":      admin_id,
         "bot_token":     bot_token,
     })
+
+    # v4.25: bulk-provisioning всех существующих VLESS-пользователей в WDTT.
+    # Каждый VLESS-юзер получает временный пароль (TTL=365д, 1 устройство).
+    # Лимит 10 паролей — если юзеров больше, лишние пропускаются с warning.
+    try:
+        from chimera.modules.rest_api import _sync_all_from_vless
+        from chimera.modules.users_manager import _unified_load_users
+        _vless_users = _unified_load_users()
+        if _vless_users:
+            print(f"  {CYAN}→{NC}  Синхронизирую {len(_vless_users)} VLESS-юзеров в qWDTT...")
+            _stats = _sync_all_from_vless(_vless_users)
+            _wdtt_stats = _stats.get("wdtt", {})
+            if _wdtt_stats.get("created", 0) > 0:
+                print(f"  {GREEN}✓{NC}  Добавлено паролей qWDTT: {_wdtt_stats['created']}")
+    except Exception as _e:
+        print(f"  {YELLOW}⚠{NC}  Sync VLESS-юзеров не удался: {_e}")
 
     # ── Итог ──────────────────────────────────────────────────────────────────
     server_ip = _get_server_ip()

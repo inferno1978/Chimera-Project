@@ -290,15 +290,30 @@ def _sync_users_from_config() -> int:
 # уже в нужном состоянии). Это позволяет вызывать sync при каждом install/
 # add/remove без побочных эффектов.
 #
-# Текущий реестр (v4.25): все 5 спутниковых протоколов — mtproto, naiveproxy,
-# mieru, trusttunnel, singbox. VLESS НЕ в реестре (это canonical source, не
-# satellite — синхронизация идёт ОТ него, не К нему).
+# Текущий реестр (v4.25): все 9 спутниковых протоколов —
+#   • mtproto (Telemt) — MTProto-прокси, [access.users] в /etc/telemt/telemt.toml
+#   • naiveproxy       — Caddy + forwardproxy-naive, /var/lib/xray-installer/naiveproxy.json
+#   • mieru            — mita server, /var/lib/xray-installer/mieru.json
+#   • trusttunnel      — AdGuard VPN ref impl, /opt/trusttunnel/credentials.toml
+#   • singbox          — sing-box inbounds (ShadowTLS/AnyTLS/TUIC/Trojan), singbox_state.json
+#   • wdtt             — qWDTT WireGuard-over-TURN, /etc/wdtt/passwords.json (парольная модель)
+#   • fptn             — FPTN server, /etc/fptn/users.list
+#   • awg_peers        — AmneziaWG standalone, /var/lib/xray-installer/awg_standalone_state.json
+#   • hysteria2_sync   — Hysteria2 transport (shared password, NO per-user)
+#
+# VLESS НЕ в реестре (это canonical source, не satellite — синхронизация
+# идёт ОТ него, не К нему). Hysteria2 — shared-password модель, контракт
+# NO-OP (см. chimera/modules/hysteria2_sync.py).
 _SYNCABLE_PROTOCOLS = [
     "chimera.modules.mtproto",
     "chimera.modules.naiveproxy",
     "chimera.modules.mieru",
     "chimera.modules.trusttunnel",
-    "chimera.modules.singbox",
+    "chimera.modules.singbox_users",
+    "chimera.modules.wdtt",
+    "chimera.modules.fptn",
+    "chimera.modules.awg_peers",
+    "chimera.modules.hysteria2_sync",
 ]
 
 

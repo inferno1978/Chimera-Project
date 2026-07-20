@@ -52,7 +52,8 @@ class TestSyncableRegistryContents(unittest.TestCase):
         _setup_core_in_sysmodules()
 
     def test_registry_contains_all_satellite_protocols(self):
-        """В реестре должны быть: mtproto, naiveproxy, mieru, trusttunnel, singbox."""
+        """В реестре должны быть: mtproto, naiveproxy, mieru, trusttunnel, singbox_users,
+        wdtt, fptn, awg_peers, hysteria2_sync (всего 9 протоколов)."""
         from chimera.modules import rest_api
         # Извлекаем короткие имена.
         proto_names = {p.rsplit(".", 1)[-1] for p in rest_api._SYNCABLE_PROTOCOLS}
@@ -60,7 +61,12 @@ class TestSyncableRegistryContents(unittest.TestCase):
         self.assertIn("naiveproxy", proto_names, "naiveproxy должен быть в реестре")
         self.assertIn("mieru", proto_names, "mieru должен быть в реестре")
         self.assertIn("trusttunnel", proto_names, "trusttunnel должен быть в реестре")
-        self.assertIn("singbox", proto_names, "singbox должен быть в реестре")
+        self.assertIn("singbox_users", proto_names, "singbox_users должен быть в реестре")
+        # v4.25: 4 новых протокола
+        self.assertIn("wdtt", proto_names, "wdtt (qWDTT) должен быть в реестре")
+        self.assertIn("fptn", proto_names, "fptn должен быть в реестре")
+        self.assertIn("awg_peers", proto_names, "awg_peers должен быть в реестре")
+        self.assertIn("hysteria2_sync", proto_names, "hysteria2_sync должен быть в реестре")
 
     def test_registry_does_not_contain_vless(self):
         """VLESS НЕ в реестре — это canonical source, синхронизация идёт ОТ него."""
@@ -110,6 +116,42 @@ class TestProtocolContractFunctions(unittest.TestCase):
                          "rename_user"):
             self.assertTrue(hasattr(singbox_users, fn_name),
                             f"singbox_users должен экспортировать {fn_name}")
+
+    def test_wdtt_exports_contract(self):
+        """qWDTT (wdtt.py) экспортирует sync contract."""
+        from chimera.modules import wdtt
+        for fn_name in ("is_active", "ensure_user_full", "remove_user_full",
+                         "rename_user_full", "ensure_user", "remove_user",
+                         "rename_user"):
+            self.assertTrue(hasattr(wdtt, fn_name),
+                            f"wdtt должен экспортировать {fn_name}")
+
+    def test_fptn_exports_contract(self):
+        """FPTN (fptn.py) экспортирует sync contract."""
+        from chimera.modules import fptn
+        for fn_name in ("is_active", "ensure_user_full", "remove_user_full",
+                         "rename_user_full", "ensure_user", "remove_user",
+                         "rename_user"):
+            self.assertTrue(hasattr(fptn, fn_name),
+                            f"fptn должен экспортировать {fn_name}")
+
+    def test_awg_peers_exports_contract(self):
+        """AWG (awg_peers.py) экспортирует sync contract."""
+        from chimera.modules import awg_peers
+        for fn_name in ("is_active", "ensure_user_full", "remove_user_full",
+                         "rename_user_full", "ensure_user", "remove_user",
+                         "rename_user"):
+            self.assertTrue(hasattr(awg_peers, fn_name),
+                            f"awg_peers должен экспортировать {fn_name}")
+
+    def test_hysteria2_sync_exports_contract(self):
+        """Hysteria2 (hysteria2_sync.py) экспортирует NO-OP contract."""
+        from chimera.modules import hysteria2_sync
+        for fn_name in ("is_active", "ensure_user_full", "remove_user_full",
+                         "rename_user_full", "ensure_user", "remove_user",
+                         "rename_user"):
+            self.assertTrue(hasattr(hysteria2_sync, fn_name),
+                            f"hysteria2_sync должен экспортировать {fn_name}")
 
 
 class TestSyncDispatchPrefersFullContract(unittest.TestCase):
@@ -312,6 +354,121 @@ class TestTrustTunnelContractRequiresUuid(unittest.TestCase):
                 "email": "alice@x.com", "uuid": "abc-123",
             })
         self.assertTrue(result, "Должен вернуть True с UUID")
+
+
+class TestHysteria2NoOpContract(unittest.TestCase):
+    """Hysteria2 — shared-password модель, контракт NO-OP."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_ensure_user_full_always_returns_true(self):
+        """NO-OP: всегда True, не зависит от user dict."""
+        from chimera.modules import hysteria2_sync
+        self.assertTrue(hysteria2_sync.ensure_user_full({"email": "alice@x.com"}))
+        self.assertTrue(hysteria2_sync.ensure_user_full({}))
+        self.assertTrue(hysteria2_sync.ensure_user_full({"name": ""}))
+
+    def test_remove_user_full_always_returns_true(self):
+        from chimera.modules import hysteria2_sync
+        self.assertTrue(hysteria2_sync.remove_user_full({"email": "alice@x.com"}))
+        self.assertTrue(hysteria2_sync.remove_user_full({}))
+
+    def test_rename_user_full_always_returns_true(self):
+        from chimera.modules import hysteria2_sync
+        self.assertTrue(hysteria2_sync.rename_user_full(
+            {"email": "old@x.com"}, {"email": "new@x.com"}
+        ))
+
+    def test_is_active_returns_false_when_h2_disabled(self):
+        """is_active = False когда Hysteria2 не включена в state."""
+        from chimera.modules import hysteria2_sync
+        with patch("chimera.modules.hysteria2_common._load_h2_state",
+                   return_value={}):
+            self.assertFalse(hysteria2_sync.is_active())
+
+    def test_is_active_returns_true_when_h2_enabled(self):
+        from chimera.modules import hysteria2_sync
+        with patch("chimera.modules.hysteria2_common._load_h2_state",
+                   return_value={"enabled": True}):
+            self.assertTrue(hysteria2_sync.is_active())
+
+
+class TestWDTTPasswordLimit(unittest.TestCase):
+    """WDTT — лимит 10 паролей."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_returns_false_when_limit_exceeded(self):
+        """Если уже 10 паролей — новый не создаётся, return False."""
+        from chimera.modules import wdtt
+        import tempfile, json
+        tmpdir = Path(tempfile.mkdtemp())
+        passwords_file = tmpdir / "passwords.json"
+        # Pre-populate с 10 паролями.
+        passwords = {f"pwd{i}": {"owner_email": f"u{i}@x.com"} for i in range(10)}
+        passwords_file.write_text(json.dumps({"passwords": passwords}))
+        with patch.object(wdtt, "_is_installed", return_value=True), \
+             patch.object(wdtt, "_PASSWORDS_FILE", passwords_file), \
+             patch.object(wdtt, "_hot_reload", return_value=True):
+            # Новый email — должен FAIL из-за лимита.
+            result = wdtt.ensure_user_full({"email": "new@x.com"})
+        self.assertFalse(result, "Должен вернуть False при превышении лимита 10")
+        try:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+
+    def test_returns_true_for_existing_user(self):
+        """Если у email уже есть пароль — no-op, return True."""
+        from chimera.modules import wdtt
+        import tempfile, json
+        tmpdir = Path(tempfile.mkdtemp())
+        passwords_file = tmpdir / "passwords.json"
+        passwords = {"existing_pwd": {"owner_email": "alice@x.com"}}
+        passwords_file.write_text(json.dumps({"passwords": passwords}))
+        with patch.object(wdtt, "_is_installed", return_value=True), \
+             patch.object(wdtt, "_PASSWORDS_FILE", passwords_file), \
+             patch.object(wdtt, "_hot_reload", return_value=True):
+            result = wdtt.ensure_user_full({"email": "alice@x.com"})
+        self.assertTrue(result, "Должен вернуть True для существующего юзера")
+        try:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+class TestAwgPeerNameGeneration(unittest.TestCase):
+    """AWG: _peer_name_from_email генерирует валидные имена."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_generates_name_from_email(self):
+        from chimera.modules import awg_peers
+        with patch.object(awg_peers, "awgs_state_peer_find", return_value=None):
+            name = awg_peers._peer_name_from_email("alice@x.com")
+        self.assertEqual(name, "alice")
+
+    def test_handles_collision_with_suffix(self):
+        from chimera.modules import awg_peers
+        # Имитируем что "alice" уже занят.
+        existing = {"alice": True}
+        def fake_find(name):
+            return existing.get(name)
+        with patch.object(awg_peers, "awgs_state_peer_find", side_effect=fake_find):
+            name = awg_peers._peer_name_from_email("alice@x.com")
+        self.assertEqual(name, "alice_2")
+
+    def test_handles_digit_start(self):
+        """Имя не должно начинаться с цифры — добавляем 'u_' prefix."""
+        from chimera.modules import awg_peers
+        with patch.object(awg_peers, "awgs_state_peer_find", return_value=None):
+            name = awg_peers._peer_name_from_email("123alice@x.com")
+        self.assertTrue(name.startswith("u_"), "Имя с цифры должно получить u_ prefix")
 
 
 if __name__ == "__main__":
