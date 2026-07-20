@@ -151,9 +151,10 @@ class TestStopServiceReliable(unittest.TestCase):
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_mask_called_before_stop(self):
-        """mask должен быть вызван ДО stop — иначе Restart=always успеет
-        перезапустить процесс между stop и mask."""
+    def test_stop_called_and_no_mask(self):
+        """Для временной остановки [4] mask НЕ нужен — systemctl stop сам
+        игнорирует Restart= (per systemd.service(5)). Проверяем что stop
+        вызван, а mask — нет (не падает с 'File already exists')."""
         from chimera.modules import subscription
         cfg_file = tempfile.mkdtemp()
         cfg_path = Path(cfg_file) / "subscription.json"
@@ -162,22 +163,15 @@ class TestStopServiceReliable(unittest.TestCase):
         with patch.object(subscription, "_SUB_CONF", cfg_path), \
              patch("subprocess.run", side_effect=recorder):
             subscription._stop_service_reliable()
-        # Находим индексы mask и stop в списке вызовов.
-        mask_idx = None
-        stop_idx = None
-        for i, c in enumerate(recorder.calls):
-            if c[:3] == ["systemctl", "mask", subscription.SERVICE_NAME]:
-                mask_idx = i
-            elif c[:3] == ["systemctl", "stop", subscription.SERVICE_NAME]:
-                stop_idx = i
-        self.assertIsNotNone(mask_idx, "mask должен быть вызван")
-        self.assertIsNotNone(stop_idx, "stop должен быть вызван")
-        self.assertLess(mask_idx, stop_idx,
-                        "mask должен быть ВЫЗВАН ДО stop (иначе Restart=always перезапустит)")
+        actions = [c[1] for c in recorder.calls
+                   if c[:1] == ["systemctl"] and len(c) > 1]
+        self.assertIn("stop", actions, "stop должен быть вызван")
+        self.assertNotIn("mask", actions,
+                         "mask не нужен для [4] — stop игнорирует Restart=")
 
     def test_kill_port_holder_called_after_stop(self):
         """После stop вызывается _kill_port_holder — fallback на случай
-        если mask не сработал (старый systemd)."""
+        если stop не успел за TimeoutStopSec (процесс игнорит SIGTERM)."""
         from chimera.modules import subscription
         cfg_file = tempfile.mkdtemp()
         cfg_path = Path(cfg_file) / "subscription.json"
@@ -217,8 +211,18 @@ class TestUninstallSubscriptionService(unittest.TestCase):
         unit_path.write_text("[Unit]\nDescription=test\n")
         return cfg_path, unit_path, tmpdir
 
-    def test_full_pipeline_mask_stop_disable_unlink(self):
-        """Все шаги pipeline вызваны в правильном порядке."""
+    def test_full_pipeline_disable_unlink_mask_stop(self):
+        """Все шаги pipeline вызваны в правильном порядке.
+
+        Новый порядок (фикс 'Failed to mask unit: File already exists'):
+          1. disable — убрать Wants symlink
+          2. unlink unit-файла — чтобы mask смог создать symlink → /dev/null
+          3. mask — symlink → /dev/null (теперь succeeds)
+          4. stop — процесс уходит, не перезапускается (masked)
+          5. unmask — убрать symlink → /dev/null (cleanup)
+          6. daemon-reload
+          7. reset-failed
+        """
         from chimera.modules import subscription
         cfg_path, unit_path, tmpdir = self._setup_paths(8443)
         recorder = _CallRecorder(ss_stdout=_SS_OUTPUT_EMPTY)
@@ -229,22 +233,25 @@ class TestUninstallSubscriptionService(unittest.TestCase):
                  patch("subprocess.run", side_effect=recorder):
                 subscription.uninstall_subscription_service()
             cmds = [c for c in recorder.calls if c[:1] == ["systemctl"]]
-            # Должны быть: mask, stop, disable, daemon-reload, reset-failed.
             actions = [c[1] for c in cmds if len(c) > 1]
+            # Все ключевые действия должны быть вызваны.
+            self.assertIn("disable", actions, "disable должен быть вызван")
             self.assertIn("mask", actions, "mask должен быть вызван")
             self.assertIn("stop", actions, "stop должен быть вызван")
-            self.assertIn("disable", actions, "disable должен быть вызван")
+            self.assertIn("unmask", actions, "unmask должен быть вызван (cleanup)")
             self.assertIn("daemon-reload", actions, "daemon-reload должен быть вызван")
             self.assertIn("reset-failed", actions, "reset-failed должен быть вызван")
-            # Порядок: mask → stop → disable → daemon-reload → reset-failed.
+            # Порядок: disable → mask → stop → unmask → daemon-reload → reset-failed.
+            disable_idx = actions.index("disable")
             mask_idx = actions.index("mask")
             stop_idx = actions.index("stop")
-            disable_idx = actions.index("disable")
+            unmask_idx = actions.index("unmask")
             daemon_idx = actions.index("daemon-reload")
             reset_idx = actions.index("reset-failed")
+            self.assertLess(disable_idx, mask_idx, "disable до mask")
             self.assertLess(mask_idx, stop_idx, "mask до stop")
-            self.assertLess(stop_idx, disable_idx, "stop до disable")
-            self.assertLess(disable_idx, daemon_idx, "disable до daemon-reload")
+            self.assertLess(stop_idx, unmask_idx, "stop до unmask")
+            self.assertLess(unmask_idx, daemon_idx, "unmask до daemon-reload")
             self.assertLess(daemon_idx, reset_idx, "daemon-reload до reset-failed")
         finally:
             import shutil
@@ -348,9 +355,9 @@ class TestUninstallSubscriptionService(unittest.TestCase):
 class TestInstallServiceUnmask(unittest.TestCase):
     """_install_service — unmask перед enable.
 
-    Без unmask: после stop через _stop_service_reliable (которая маскирует
-    юнит), повторный install через [1] молча не запустит сервис — unit
-    symlink на /dev/null, systemctl enable молча игнорирует.
+    Без unmask: после uninstall через uninstall_subscription_service (которая
+    маскирует юнит), повторный install через [1] молча не запустит сервис —
+    unit symlink на /dev/null, systemctl enable молча игнорирует.
     """
 
     def setUp(self):
@@ -375,6 +382,103 @@ class TestInstallServiceUnmask(unittest.TestCase):
                                 "unmask должен быть ДО enable")
             else:
                 self.fail("unmask или enable не вызваны")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestMaskFileAlreadyExistsRegression(unittest.TestCase):
+    """Регрессия: 'Failed to mask unit: File ... already exists.' на systemd ≥252.
+
+    Проблема: `systemctl mask` отказывается перезаписывать существующий
+    unit-файл (нужен --force, которого нет на старом systemd). Решение:
+    удалить unit-файл ДО mask — тогда mask создаёт symlink → /dev/null.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_unit_file_unlinked_before_mask(self):
+        """Удаление unit-файла должно произойти ДО mask.
+
+        Проверяем: путь unit_path.exists() должен быть False в момент
+        вызова `systemctl mask`. Симулируем: записываем вызовы и для
+        каждого mask-вызова проверяем что файла уже нет на диске.
+        """
+        from chimera.modules import subscription
+        tmpdir = Path(tempfile.mkdtemp())
+        cfg_path = tmpdir / "subscription.json"
+        cfg_path.write_text(json.dumps({
+            "listen_port": 8443, "enabled": True, "pepper": "abc",
+        }))
+        unit_path = tmpdir / "vless-subscription.service"
+        unit_path.write_text("[Unit]\nDescription=test\n")
+        mask_calls_with_file_state = []
+
+        def mock_run(cmd, **kw):
+            if cmd[:3] == ["systemctl", "mask", subscription.SERVICE_NAME]:
+                # Записываем — существует ли файл в момент вызова mask.
+                mask_calls_with_file_state.append(unit_path.exists())
+            # Возвращаем пустой результат для всех команд.
+            if cmd[:1] == ["ss"]:
+                return _make_completed(_SS_OUTPUT_EMPTY)
+            return _make_completed("")
+
+        try:
+            with patch.object(subscription, "_SUB_CONF", cfg_path), \
+                 patch.object(subscription, "_UNIT_PATH", unit_path), \
+                 patch("shutil.which", return_value=None), \
+                 patch("subprocess.run", side_effect=mock_run):
+                subscription.uninstall_subscription_service()
+            self.assertEqual(len(mask_calls_with_file_state), 1,
+                             "mask должен быть вызван ровно один раз")
+            self.assertFalse(mask_calls_with_file_state[0],
+                             "В момент вызова mask unit-файла уже не должно "
+                             "быть на диске — иначе 'File already exists'")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_install_does_not_emit_reset_failed_not_loaded(self):
+        """Проверка что reset-failed в _install_service глушит stderr —
+        иначе пользователь видит 'Failed to reset failed state of unit
+        vless-subscription.service: Unit ... not loaded.' при первом
+        install (когда unit никогда не был загружен).
+        """
+        from chimera.modules import subscription
+        tmpdir = Path(tempfile.mkdtemp())
+        unit_path = tmpdir / "vless-subscription.service"
+        nginx_snip = tmpdir / "vless-subscription.conf"
+        reset_failed_calls = []
+
+        def mock_run(cmd, **kw):
+            # Ловим reset-failed и записываем kwargs.
+            if cmd[:3] == ["systemctl", "reset-failed", subscription.SERVICE_NAME]:
+                reset_failed_calls.append(kw)
+            # Все вызовы возвращают success — daemon-reload, enable, restart
+            # в тест-среде без systemd всё равно упадут, нам нужен только
+            # факт вызова reset-failed с правильным stderr=DEVNULL.
+            return _make_completed("")
+
+        try:
+            with patch.object(subscription, "_UNIT_PATH", unit_path), \
+                 patch.object(subscription, "_NGINX_SNIP", nginx_snip), \
+                 patch("subprocess.run", side_effect=mock_run):
+                subscription._install_service(8443)
+            # Проверяем что reset-failed вызван с подавленным stderr.
+            self.assertGreater(len(reset_failed_calls), 0,
+                               "reset-failed должен быть вызван в _install_service")
+            for kw in reset_failed_calls:
+                self.assertEqual(
+                    kw.get("stderr"), subprocess.DEVNULL,
+                    "stderr должен быть DEVNULL — иначе 'Unit ... not loaded.' "
+                    "печатается и пугает пользователя"
+                )
+                self.assertEqual(
+                    kw.get("stdout"), subprocess.DEVNULL,
+                    "stdout тоже должен быть DEVNULL — иначе системный вывод "
+                    "может загрязнять TUI"
+                )
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

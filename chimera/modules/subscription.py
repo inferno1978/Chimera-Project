@@ -1108,10 +1108,24 @@ def _fw_open_tcp(port: int) -> str:
 
 
 def _fw_close_tcp(port: int) -> None:
-    """Закрывает TCP-порт, ранее открытый _fw_open_tcp (при смене порта
-    подписки старое правило иначе остаётся висеть в файрволе)."""
+    """Закрывает TCP-порт, ранее открытый _fw_open_tcp.
+
+    Идемпотентно: если правило уже удалено (или никогда не существовало),
+    ufw пишет в stderr 'Could not delete non-existent rule' — мы глушим
+    stderr/stdout чтобы не пугать пользователя. Это нормально для сценариев
+    вроде stop[4] → uninstall[6]: stop уже закрыл порт, uninstall пытается
+    закрыть его снова.
+    """
     if shutil.which("ufw"):
-        subprocess.run(["ufw", "delete", "allow", f"{port}/tcp"], check=False)
+        # ufw delete allow <port>/tcp — неинтерактивный (правило задано явно).
+        # stderr подавляем: 'Could not delete non-existent rule' — это шум,
+        # не ошибка. stdout тоже — 'Rule deleted' уже после stop неинформативно.
+        subprocess.run(
+            ["ufw", "delete", "allow", f"{port}/tcp"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     if shutil.which("iptables"):
         for _ in range(5):
             chk = subprocess.run(
@@ -1140,12 +1154,23 @@ def _install_service(port: int) -> bool:
         # alone couldn't recover from a port-bind crash (e.g. TrustTunnel on
         # the same port). The user had to run [4] (stop/disable) first to
         # clear the failed state, then [1]. Now [1] is self-healing.
-        subprocess.run(["systemctl", "reset-failed", SERVICE_NAME], check=False)
-        # Unmask before enable — item [4] (Выключить сервис) masks the unit
-        # to prevent Restart=always from respawning the process after stop.
-        # If the user later runs [1] without unmask, `systemctl enable` will
-        # silently refuse to start the service (unit is symlink to /dev/null).
-        # Same fix as in rest_api.do_manage_web_panel() item "1" run branch.
+        #
+        # stderr подавляем: на свеже-установленной системе (unit никогда не
+        # был загружен) `reset-failed` падает с 'Unit ... not loaded.' — это
+        # шум, не ошибка. После `daemon-reload` выше unit загружается в
+        # память systemd, но если он никогда не был в failed-состоянии,
+        # `reset-failed` всё равно пишет это сообщение. Глушим.
+        subprocess.run(
+            ["systemctl", "reset-failed", SERVICE_NAME],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Unmask before enable — item [4] (Выключить сервис) может
+        # замаскировать unit (если mask succeed). Если юзер потом запускает
+        # [1] без unmask, `systemctl enable` молча игнорирует (unit symlink
+        # to /dev/null). Та же логика что в rest_api.do_manage_web_panel()
+        # item '1' run branch.
         subprocess.run(["systemctl", "unmask", SERVICE_NAME], check=False)
         subprocess.run(["systemctl", "enable", SERVICE_NAME], check=True)
         # `restart` (not `start`) so a unit-file change (new port, new cert)
@@ -1206,27 +1231,39 @@ def _kill_port_holder(port: int) -> bool:
 def _stop_service_reliable() -> None:
     """Останавливает сервис vless-subscription НАДЁЖНО — без перезапуска.
 
-    Проблема: в unit-файле стоит Restart=always. Обычный `systemctl stop`
-    убивает процесс, но systemd сразу его перезапускает (т.к. юнит-файл
-    ещё на диске и Restart=always срабатывает на любой exit code).
+    ВАЖНО о mask: первоначальный фикс (mirror rest_api commit e830f28)
+    использовал `systemctl mask` перед stop, но mask ПАДАЕТ с 'Failed to
+    mask unit: File ... already exists.' на новом systemd (≥252), если
+    unit-файл — обычный файл, а не symlink. Mask задуман как создание
+    symlink → /dev/null, но не перезаписывает существующий файл без --force.
 
-    Решение — та же последовательность что и в
-    rest_api.uninstall_web_service() / do_manage_web_panel() item '1' stop:
-      1. systemctl mask — заменяет юнит на symlink → /dev/null,
-         systemd перестаёт его читать, Restart= больше не срабатывает.
-      2. systemctl stop — процесс уходит и НЕ перезапускается.
-      3. Fallback: _kill_port_holder(port) — если mask не помог (старый
-         systemd, процесс запущен вручную), найти PID через ss и kill -9.
+    Оказалось, что mask вообще НЕ НУЖЕН для временной остановки (item [4]):
+    согласно systemd.service(5), `systemctl stop` ЯВНО игнорирует Restart=:
+      > If a service is stopped via systemctl stop, the Restart= setting
+      > is ignored and the service is not restarted.
+    Restart= срабатывает только когда процесс падает САМ (crash, OOM, signal
+    от ядрa) — но НЕ когда systemd его останавливает по явной команде stop.
 
-    ВАЖНО: после этой функции сервис остаётся замаскированным. Перед
-    следующим запуском (через _install_service) нужно unmask — это
-    сделано в _install_service().
+    Поэтому правильная последовательность для [4]:
+      1. systemctl stop — процесс уходит, Restart= НЕ триггерится.
+      2. _kill_port_holder(port) — fallback: если stop не успел за
+         TimeoutStopSec (процесс игнорит SIGTERM), добить по PID.
+
+    Для uninstall[6] — другая ситуация (см. uninstall_subscription_service):
+    там мы удаляем unit-файл ДО mask, чтобы mask succeeded (создал symlink
+    → /dev/null какbelt-and-suspenders — на случай если stop по какой-то
+    причине не отработает и Restart= всё-таки триггернётся).
     """
-    # 1. Mask — предотвращает перезапуск после stop.
-    subprocess.run(["systemctl", "mask", SERVICE_NAME], check=False)
-    # 2. Stop — теперь процесс не перезапустится.
-    subprocess.run(["systemctl", "stop", SERVICE_NAME], check=False)
-    # 3. Fallback: убить процесс по порту если systemd не справился.
+    # 1. Stop — process exits, Restart= is ignored per systemd docs.
+    #    stderr глушим: если сервис уже остановлен, systemctl stop пишет
+    #    ничего страшного, но иногда там мусор.
+    subprocess.run(
+        ["systemctl", "stop", SERVICE_NAME],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # 2. Fallback: kill by port if systemd didn't release it in time.
     cfg = _load_sub_conf()
     port = cfg.get("listen_port", DEFAULT_PORT)
     _kill_port_holder(port)
@@ -1234,26 +1271,38 @@ def _stop_service_reliable() -> None:
 
 def uninstall_subscription_service() -> None:
     """Полное удаление сервиса vless-subscription: systemd-unit + ufw-порт +
-    процесс. mirror rest_api.uninstall_web_service() (commit e830f28).
+    процесс. mirror rest_api.uninstall_web_service() (commit e830f28),
+    но с правильным порядком mask/delete (см. ниже).
 
-    Проблема с Restart=always (было в проде):
-      1. systemctl disable --now → SIGTERM → процесс вышел
-      2. systemd видит Restart=always → перезапускает через 3с
-      3. unit-файл удалён + daemon-reload → НО процесс уже запущен заново
-         и держит порт, и больше не управляется systemd (unit-файла нет).
-      4. 'uninstall' формально успешен, но порт занят python3 —
-         следующий install падает с 'Address already in use'.
+    КРИТИЧНЫЙ баг в первоначальном фиксе: `systemctl mask` ПАДАЕТ с
+    'Failed to mask unit: File ... already exists.' на новом systemd (≥252),
+    если unit-файл — обычный файл. Mask создаёт symlink → /dev/null, но
+    отказывается перезаписывать существующий файл (нужен --force, которого
+    нет на старом systemd). Результат: mask не сработал, stop вызвался
+    следом, но Restart=always мог перезапустить процесс.
 
-    Правильная последовательность (та же что для vless-web):
-      1. _fw_close_tcp(port) — закрыть ufw-порт (если был открыт).
-      2. systemctl mask  — блокирует Restart=
-      3. systemctl stop   — процесс уходит без перезапуска
-      4. systemctl disable — убрать из автозагрузки
-      5. Удалить unit-файл + убрать symlink от mask (если остался)
-      6. systemctl daemon-reload — systemd забывает юнит
-      7. systemctl reset-failed  — очистить failed-состояние
-      8. Fallback: _kill_port_holder(port) — добить процесс если mask
-         не сработал или процесс был запущен вручную.
+    Правильный порядок: сначала удалить unit-файл (чтобы mask succeeded и
+    создал symlink → /dev/null), потом mask, потом stop. Тогда даже если
+    stop почему-то триггернет Restart= (чего по docs быть не должно, но
+    belt-and-suspenders), masked unit не даст процессу воскреснуть.
+
+    Полная последовательность:
+      1. _fw_close_tcp(port) — закрыть ufw-порт (идемпотентно, stderr
+         глушится — правило могло быть уже удалено через stop[4]).
+      2. systemctl disable — убрать из автозагрузки (Wants symlink).
+      3. Удалить unit-файл — теперь `systemctl mask` сможет создать
+         symlink → /dev/null.
+      4. systemctl mask — symlink → /dev/null, Restart= заблокирован.
+      5. systemctl stop — процесс уходит, не перезапускается (masked +
+         systemd docs: stop игнорирует Restart=).
+      6. systemctl unmask — убрать symlink → /dev/null (cleanup).
+      7. systemctl daemon-reload — systemd забывает юнит.
+      8. systemctl reset-failed — очистить failed-состояние.
+         stderr глушим: после удаления unit-файла systemd пишет
+         'Unit ... not loaded.' — это шум, не ошибка.
+      9. Fallback: _kill_port_holder(port) — добить процесс если что-то
+         пошло не так (старый systemd, процесс запущен вручную через
+         `python3 -m chimera.modules.subscription serve`).
 
     Конфиг subscription.json (pepper, identity_map) НЕ трогается —
     это намеренно: при повторной установке старые ссылки должны
@@ -1262,34 +1311,67 @@ def uninstall_subscription_service() -> None:
     """
     cfg = _load_sub_conf()
     port = cfg.get("listen_port", DEFAULT_PORT)
-    # 1. Закрыть ufw-порт.
+    # 1. Закрыть ufw-порт (идемпотентно — stderr глушится).
     _fw_close_tcp(port)
-    # 2. Mask — предотвращает перезапуск после stop (symlink → /dev/null).
-    subprocess.run(["systemctl", "mask", SERVICE_NAME], check=False)
-    # 3. Stop — процесс уходит и не перезапускается.
-    subprocess.run(["systemctl", "stop", SERVICE_NAME], check=False)
-    # 4. Disable — убрать из автозагрузки.
-    subprocess.run(["systemctl", "disable", SERVICE_NAME], check=False)
-    # 5. Удалить unit-файл.
+    # 2. Disable — убрать из автозагрузки (Wants symlink).
+    #    stderr глушим: 'Removed .../multi-user.target.wants/...' — это
+    #    info, не error, но пугает пользователя в контексте полного удаления.
+    subprocess.run(
+        ["systemctl", "disable", SERVICE_NAME],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # 3. Удалить unit-файл ДО mask — иначе mask падает с
+    #    'Failed to mask unit: File ... already exists.' (systemd ≥252).
     try:
         _UNIT_PATH.unlink(missing_ok=True)
     except Exception:
         pass
-    # mask создаёт symlink /etc/systemd/system/vless-subscription.service
-    # → /dev/null. unlink(missing_ok=True) выше его уже убрал (это symlink),
-    # но на всякий случай проверяем — если это не symlink, а реальный файл
-    # (маловероятно но возможно после ручного редактирования), повторяем.
-    if _UNIT_PATH.is_symlink():
+    # 4. Mask — теперь создаёт symlink → /dev/null (файла нет).
+    #    stderr глушим: на старом systemd mask может выдать предупреждение,
+    #    не влияющее на работу.
+    subprocess.run(
+        ["systemctl", "mask", SERVICE_NAME],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # 5. Stop — процесс уходит, не перезапускается (masked + systemd stop
+    #    semantics игнорируют Restart=).
+    subprocess.run(
+        ["systemctl", "stop", SERVICE_NAME],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # 6. Unmask — убрать symlink → /dev/null (cleanup, мы хотим полностью
+    #    удалить unit, не оставить замаскированный symlink).
+    subprocess.run(
+        ["systemctl", "unmask", SERVICE_NAME],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # 7. На всякий случай убираем symlink/file если unmask не справился.
+    if _UNIT_PATH.is_symlink() or _UNIT_PATH.exists():
         try:
             _UNIT_PATH.unlink()
         except Exception:
             pass
-    # 6. Daemon-reload — systemd забывает юнит.
+    # 8. Daemon-reload — systemd забывает юнит.
     subprocess.run(["systemctl", "daemon-reload"], check=False)
-    # 7. Reset-failed — очищает failed-состояние (иначе при следующей
+    # 9. Reset-failed — очищает failed-состояние (иначе при следующей
     #    установке systemd может ругаться на 'start-limit-hit').
-    subprocess.run(["systemctl", "reset-failed", SERVICE_NAME], check=False)
-    # 8. Fallback: убить процесс по порту если systemd не справился.
+    #    stderr глушим: после удаления unit-файла systemd пишет
+    #    'Unit ... not loaded.' — это шум (нечего очищать), не ошибка.
+    subprocess.run(
+        ["systemctl", "reset-failed", SERVICE_NAME],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # 10. Fallback: убить процесс по порту если systemd не справился.
     _kill_port_holder(port)
     # Помечаем как выключенный в конфиге — но НЕ удаляем pepper/port,
     # чтобы при повторной установке старые ссылки продолжили работать.
