@@ -2,6 +2,115 @@
 
 ---
 
+## FEAT: Content negotiation в подписке + управление файрволлом веб-панели — 20 июля 2026
+
+**Два крупных улучшения: единая подписка теперь отдаёт правильный формат каждому клиенту автоматически, а веб-панель (admin + user portal) больше не оставляет открытых ufw-портов при остановке или удалении.**
+
+### 🔔 Расширение единой подписки (subscription.py)
+
+#### Content negotiation — ?format= / User-Agent
+
+Подписка теперь определяет, какой формат отдать клиенту, по трём уровням приоритета:
+
+1. **`?format=singbox`** — явный параметр в URL (высший приоритет)
+2. **User-Agent эвристика** — словарь `_UA_FORMAT_MAP` (расширяемый): nekobox/sing-box → `singbox`, karing → `base64_safe`
+3. **`base64`** — дефолт (100% обратная совместимость, существующие клиенты не сломаются)
+
+Три формата:
+
+| Формат | Content-Type | Что отдаётся | Для кого |
+|---|---|---|---|
+| `base64` (дефолт) | `text/plain` | Base64-список всех share-links | Все клиенты (по умолчанию) |
+| `singbox` | `application/json` | Полный sing-box JSON config с outbounds | NekoBox, sing-box, клиенты на ядре sing-box |
+| `base64_safe` | `text/plain` | Base64-список БЕЗ `naive+https://` и `mierus://` | Karing и клиенты, не умеющие парсить нестандартные схемы |
+
+#### Реестр сателлитных протоколов `_SUBSCRIBABLE_PROTOCOLS`
+
+Добавление нового протокола в подписку = **одна строка** в реестре. Модуль должен экспортировать `get_subscription_uris(user: dict) -> list[str]` (для share-links) и/или `get_subscription_json_outbound(user: dict) -> Optional[dict]` (для sing-box JSON).
+
+Текущий реестр:
+- `chimera.modules.trusttunnel` — tt:// deep-link
+- `chimera.modules.singbox_menu` — trojan:// (ShadowTLS), anytls://, tuic://, vless:// (WS-CDN)
+
+#### Per-user credential matching в sing-box протоколах
+
+**Баг исправлен:** все gen-функции (`_gen_shadowtls_client_uri`, `_gen_anytls_client_uri`, `_gen_tuic_client_uri`) брали пароль из `state_ib["users"][0]` — первого юзера в списке. В подписке каждый юзер получал **чужой пароль**.
+
+Новая функция `_find_singbox_user_credential(state_ib, candidates)` — ищет запись юзера по UUID (точное совпадение), затем по name (без учёта регистра). Если `candidates` пустой (TUI-режим) — возвращает `users[0]` (обратная совместимость).
+
+#### Новые протоколы в подписке
+
+TrustTunnel (`tt://`), ShadowTLS (`trojan://`), AnyTLS (`anytls://`), TUIC (`tuic://`), VLESS-WS-CDN (`vless://`) — теперь включены в `build_subscription_body()` и `build_subscription_body_ios()`. Каждый юзер получает **свой** пароль (по совпадению UUID/name), а не пароль первого юзера. VLESS-WS-CDN — общий (без per-user).
+
+#### `build_subscription_singbox_config(user)` — полный JSON
+
+Собирает sing-box JSON config из:
+- VLESS outbound (Reality/xHTTP) — переиспользует `rest_api._generate_singbox_config`
+- ShadowTLS/AnyTLS/TUIC/VLESS-WS-CDN/TrustTunnel — через `_collect_registry_json_outbounds`
+- Direct + block outbounds + базовый route
+
+#### TUI меню
+
+Теперь показывает три ссылки на каждого юзера:
+```
+alice@node-b.example
+  https://node-b.example:8443/sub/aBcDeFgHiJkLmNoPqRsTuVw
+  iOS/Karing: https://node-b.example:8443/sub/aBcDeFgHiJkLmNoPqRsTuVw/ios
+  sing-box JSON: https://node-b.example:8443/sub/aBcDeFgHiJkLmNoPqRsTuVw?format=singbox
+```
+
+#### Identity map — новые теги
+
+Меню ручной привязки (`_do_identity_map_menu`) расширено — добавлены TrustTunnel и sing-box (shadowtls/anytls/tuic) теги для ручного override если автоматический матчинг по name/email не сработал.
+
+### 🔒 Управление файрволлом веб-панели (rest_api.py)
+
+#### Проблема
+
+При остановке, переустановке или удалении сервиса веб-панели ufw-порт оставался открытым — файрволл продолжал пропускать трафик на мёртвый сервис. При переключении с `0.0.0.0` на `127.0.0.1` старое ufw-правило не удалялось. При смене порта — старый порт оставался открыт.
+
+#### Новая функция `_ufw_web_panel_close(port)`
+
+- Парсит `ufw status numbered` — находит правила с комментарием "VLESS Web Panel (exposed, no TLS)" и нужным портом
+- Удаляет по номеру с конца (чтобы номера не съезжали)
+- Подтверждает `y\n` для `ufw delete`
+- Не трогает чужие правила
+- Тихо return если ufw не установлен/неактивен/пустой вывод
+
+#### Изменения в `install_web_service()`
+
+- Читает **старый** конфиг до перезаписи (old_host, old_port)
+- При переключении с `0.0.0.0` на `127.0.0.1` → закрывает старый ufw-порт
+- При смене порта на `0.0.0.0` → закрывает старый, открывает новый
+
+#### Изменения в `uninstall_web_service()`
+
+- Читает конфиг до остановки сервиса
+- Если `host == "0.0.0.0"` → вызывает `_ufw_web_panel_close(port)`
+- Затем останавливает/удаляет systemd unit как раньше
+
+#### Изменения в `do_manage_web_panel()`
+
+| Пункт | Что изменилось |
+|---|---|
+| **1 (Остановить)** | Если exposed (`0.0.0.0`) — закрывает ufw-порт перед `systemctl stop` |
+| **1 (Запустить)** | Если exposed — вызывает `install_web_service(expose=True)` вместо голого `systemctl start` (чтобы переоткрыть ufw) |
+| **5 (Закрыть доступ)** | `install_web_service(expose=False)` автоматически закрывает старый ufw-порт |
+| **6 (НОВЫЙ — Удалить полностью)** | Подтверждение y/N → `uninstall_web_service()` (закрывает ufw + удаляет systemd unit + web_config.json). state.json и VLESS-юзеры НЕ трогаются. |
+
+### 📊 Статистика
+
+| Метрика | Значение |
+|---|---|
+| Коммитов | 4 (`0601e70` реестр, `a3b14bd` content negotiation, `afce8d4` e2e тесты, `31fe941` ufw) |
+| Файлов изменено | 4 (subscription.py, rest_api.py, singbox_menu.py, trusttunnel.py) + 3 тест-файла |
+| Новых функций | 8 (_resolve_format, build_subscription_singbox_config, _collect_registry_json_outbounds, _filter_safe_links, _ufw_web_panel_close, get_subscription_uris × 2, _find_singbox_user_credential) |
+| Новых пунктов меню | 1 (Удалить полностью) |
+| Новых тестов | 40 (23 registry + 26 content negotiation + 6 e2e + 11 firewall) |
+| Тестов пройдено | 258 |
+
+---
+
 ## REVERT: Протокол Snell v4 полностью удалён — 19 июля 2026
 
 **Протокол Snell v4 (Surge) признан нестабильным в продакшене и полностью удалён из Chimera Project.**
