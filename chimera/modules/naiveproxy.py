@@ -818,6 +818,23 @@ def _run_install_inner() -> None:
         "users":        users,
     })
 
+    # v4.25: bulk-provisioning всех существующих VLESS-пользователей в NaiveProxy.
+    # После успешной установки NaiveProxy активируется is_active()=True, и все
+    # VLESS-юзеры (которых уже создали через главное меню) автоматически
+    # получают аккаунты в NaiveProxy. Username = email.split('@')[0].
+    try:
+        from chimera.modules.rest_api import _sync_all_from_vless
+        from chimera.modules.users_manager import _unified_load_users
+        _vless_users = _unified_load_users()
+        if _vless_users:
+            print(f"  {CYAN}→{NC}  Синхронизирую {len(_vless_users)} VLESS-юзеров в NaiveProxy...")
+            _stats = _sync_all_from_vless(_vless_users)
+            _naive_stats = _stats.get("naiveproxy", {})
+            if _naive_stats.get("created", 0) > 0:
+                print(f"  {GREEN}✓{NC}  Добавлено в NaiveProxy: {_naive_stats['created']} юзеров")
+    except Exception as _e:
+        print(f"  {YELLOW}⚠{NC}  Sync VLESS-юзеров не удался: {_e}")
+
     # ── Итог ──────────────────────────────────────────────────────────────────
     time.sleep(2)
     r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
@@ -1067,6 +1084,152 @@ def _delete_user(users: list, state: dict) -> None:
     )
     print(f"  {GREEN}✓{NC}  Пользователь удалён, конфиг применён.")
     _pause()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SYNC CONTRACT (v4.25) — для реестра _SYNCABLE_PROTOCOLS в rest_api.py
+#
+#  Эти функции вызываются диспетчером синхронизации:
+#    • TUI do_unified_user_manager (добавление/удаление/переименование VLESS-юзера)
+#    • REST API /api/users (POST/DELETE/rename)
+#    • _sync_all_from_vless после install протокола (bulk provisioning)
+#
+#  Контракт:
+#    is_active()           — True если NaiveProxy установлен И запущен
+#    ensure_user_full(u)   — создать аккаунт из full user dict
+#    remove_user_full(u)   — удалить аккаунт по full user dict
+#    rename_user_full(o,n) — переименовать (remove+add, т.к. Caddy basic_auth
+#                            не поддерживает rename in-place)
+#    ensure_user(name) / remove_user(name) / rename_user(old,new) — legacy,
+#                            извлекают username из email.split('@')[0]
+# ══════════════════════════════════════════════════════════════════════════════
+def _username_from_email(email: str) -> str:
+    """Convention: username = email.split('@')[0].strip()."""
+    return (email or "").split("@")[0].strip()
+
+def is_active() -> bool:
+    """True если NaiveProxy установлен (binary + service file + Caddyfile)
+    И сервис запущен (systemctl is-active). Используется реестром
+    синхронизации чтобы решить, вызывать ли ensure_user/remove_user."""
+    try:
+        if not _is_installed():
+            return False
+        r = _run(["systemctl", "is-active", _SERVICE_NAME],
+                 capture=True, check=False)
+        return r.returncode == 0 and r.stdout.strip() == "active"
+    except Exception:
+        return False
+
+def ensure_user_full(user: dict) -> bool:
+    """Создаёт NaiveProxy-аккаунт из full user dict.
+
+    Username = email.split('@')[0]. Если уже существует — no-op (returns True).
+    Пароль генерируется автоматически. Caddyfile перезаписывается, сервис reload.
+
+    Возвращает True если создан или уже существует. Никогда не бросает исключение.
+    """
+    try:
+        if not _is_installed():
+            return True  # не установлено — не ошибка, просто пропускаем
+        email = user.get("email", "") or ""
+        if not email:
+            return False
+        username = _username_from_email(email)
+        if not username:
+            return False
+        # Валидация username — только латиница/цифры/_- для Caddyfile basic_auth.
+        if not re.match(r'^[A-Za-z0-9_\-]+$', username):
+            return False
+        state = proto_load_state(_MODULE_STATE)
+        users = state.get("users", [])
+        if any(u.get("username") == username for u in users):
+            return True  # уже есть — идемпотентность
+        # Генерируем пароль и хэш.
+        password = proto_gen_password()
+        try:
+            password_hash = _hash_password(password)
+        except Exception:
+            password_hash = ""
+        users.append({
+            "username": username,
+            "password": password,
+            "password_hash": password_hash,
+        })
+        state["users"] = users
+        proto_save_state(_MODULE_STATE, state)
+        # Применяем конфиг (перезапишет Caddyfile + reload caddy-naive).
+        _apply_config(
+            state.get("domain", ""),
+            state.get("port", _DEFAULT_PORT),
+            users,
+            state.get("fake_url", _DEFAULT_FAKE),
+            state.get("probe_secret", ""),
+            state.get("upstream", ""),
+        )
+        return True
+    except Exception as e:
+        try:
+            print(f"  {RED}✗{NC}  naiveproxy.ensure_user_full: {e}")
+        except Exception:
+            pass
+        return False
+
+def ensure_user(name: str) -> bool:
+    """Legacy contract — принимает email или name как строку."""
+    return ensure_user_full({"email": name, "name": name})
+
+def remove_user_full(user: dict) -> bool:
+    """Удаляет NaiveProxy-аккаунт по full user dict."""
+    try:
+        if not _is_installed():
+            return True
+        email = user.get("email", "") or ""
+        username = _username_from_email(email)
+        if not username:
+            return False
+        state = proto_load_state(_MODULE_STATE)
+        users = state.get("users", [])
+        new_users = [u for u in users if u.get("username") != username]
+        if len(new_users) == len(users):
+            return True  # не было такого — идемпотентность
+        state["users"] = new_users
+        proto_save_state(_MODULE_STATE, state)
+        _apply_config(
+            state.get("domain", ""),
+            state.get("port", _DEFAULT_PORT),
+            new_users,
+            state.get("fake_url", _DEFAULT_FAKE),
+            state.get("probe_secret", ""),
+            state.get("upstream", ""),
+        )
+        return True
+    except Exception as e:
+        try:
+            print(f"  {RED}✗{NC}  naiveproxy.remove_user_full: {e}")
+        except Exception:
+            pass
+        return False
+
+def remove_user(name: str) -> bool:
+    """Legacy contract — принимает email или name как строку."""
+    return remove_user_full({"email": name, "name": name})
+
+def rename_user_full(old_user: dict, new_user: dict) -> bool:
+    """Переименование = remove + add (Caddy basic_auth не поддерживает rename
+    in-place — пароль генерируется заново при add)."""
+    try:
+        ok1 = remove_user_full(old_user)
+        ok2 = ensure_user_full(new_user)
+        return ok1 and ok2
+    except Exception:
+        return False
+
+def rename_user(old_name: str, new_name: str) -> bool:
+    """Legacy contract — принимает email или name."""
+    return rename_user_full(
+        {"email": old_name, "name": old_name},
+        {"email": new_name, "name": new_name},
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  КАСКАД (Entry → Exit)

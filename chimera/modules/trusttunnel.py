@@ -525,6 +525,112 @@ def trusttunnel_derive_password(uuid_str: str) -> str:
         raise ValueError("uuid is required to derive TrustTunnel password")
     return hashlib.sha256(b"trusttunnel-pass|" + uuid_str.encode("utf-8")).hexdigest()
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SYNC CONTRACT (v4.25) — для реестра _SYNCABLE_PROTOCOLS в rest_api.py
+#
+#  TrustTunnel особенный:
+#    • Username = email (verbatim) — НЕ email.split('@')[0], как у других.
+#    • Password детерминированно выводится из UUID (trusttunnel_derive_password).
+#      Поэтому ensure_user_full требует uuid в user dict — иначе fail.
+#    • NO hot-reload — изменение credentials.toml требует systemctl restart
+#      trusttunnel. Рестарт рвёт ВСЕ активные соединения (~1 c). Адаптер
+#      делает рестарт сразу (не батчит) — это OK для интерактивных операций
+#      TUI/REST. Cron-батч идёт через user_lifecycle.batch_context().
+# ══════════════════════════════════════════════════════════════════════════════
+def is_active() -> bool:
+    """True если TrustTunnel установлен И сервис запущен."""
+    try:
+        if not _is_installed():
+            return False
+        r = _run(["systemctl", "is-active", _SERVICE_NAME],
+                 capture=True, check=False)
+        return r.returncode == 0 and r.stdout.strip() == "active"
+    except Exception:
+        return False
+
+def ensure_user_full(user: dict) -> bool:
+    """Создаёт TrustTunnel-аккаунт из full user dict.
+
+    Username = email (verbatim). Password = SHA-256("trusttunnel-pass|" + uuid).
+    Требует uuid в user dict (для derive пароля). Если uuid нет — fail.
+    Если аккаунт уже существует — обновляем пароль (idempotent upsert).
+
+    credentials.toml перезаписывается, сервис рестартуется.
+    """
+    try:
+        if not _is_installed():
+            return True  # не установлено — пропускаем
+        email = user.get("email", "") or ""
+        if not email:
+            _log("ERROR", "trusttunnel.ensure_user_full: email required")
+            return False
+        uuid_str = user.get("uuid", "") or ""
+        if not uuid_str:
+            _log("ERROR", f"trusttunnel.ensure_user_full: uuid required for {email!r}")
+            return False
+        password = trusttunnel_derive_password(uuid_str)
+        if not trusttunnel_add_user(email, password):
+            _log("ERROR", f"trusttunnel.ensure_user_full: add_user failed for {email!r}")
+            return False
+        # Рестарт сервиса (рвёт активные соединения — для интерактивных ops OK).
+        trusttunnel_restart_service()
+        return True
+    except Exception as e:
+        _log("ERROR", f"trusttunnel.ensure_user_full: {e}")
+        return False
+
+def ensure_user(name: str) -> bool:
+    """Legacy contract — НЕ работает для TrustTunnel без UUID (пароль
+    derive-ится из UUID). Возвращает False если name не содержит uuid.
+
+    Используется только для совместимости с диспетчером. TUI/REST API
+    должны передавать full user dict через ensure_user_full.
+    """
+    # Legacy без UUID — невозможно. Возвращаем True (no-op) чтобы не ломать
+    # диспетчер, но логируем предупреждение.
+    _log("WARN", f"trusttunnel.ensure_user legacy called for {name!r} — "
+                 "uuid required, use ensure_user_full instead")
+    return True
+
+def remove_user_full(user: dict) -> bool:
+    """Удаляет TrustTunnel-аккаунт по full user dict (по email)."""
+    try:
+        if not _is_installed():
+            return True
+        email = user.get("email", "") or ""
+        if not email:
+            return False
+        if not trusttunnel_remove_user(email):
+            return False
+        trusttunnel_restart_service()
+        return True
+    except Exception as e:
+        _log("ERROR", f"trusttunnel.remove_user_full: {e}")
+        return False
+
+def remove_user(name: str) -> bool:
+    """Legacy contract — name трактуется как email (TrustTunnel username = email)."""
+    return remove_user_full({"email": name, "name": name})
+
+def rename_user_full(old_user: dict, new_user: dict) -> bool:
+    """Переименование = remove + add (username = email, при смене email
+    старый аккаунт удаляется, новый создаётся с тем же UUID → пароль
+    детерминированно тот же)."""
+    try:
+        ok1 = remove_user_full(old_user)
+        ok2 = ensure_user_full(new_user)
+        return ok1 and ok2
+    except Exception:
+        return False
+
+def rename_user(old_name: str, new_name: str) -> bool:
+    """Legacy contract — имена тракуются как emails."""
+    return rename_user_full(
+        {"email": old_name, "name": old_name},
+        {"email": new_name, "name": new_name},
+    )
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  DEEP-LINK КОДЕК (чистый Python, upstream tt://?<base64url> TLV-формат)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1350,6 +1456,23 @@ def _run_install_inner() -> None:
         "installed_at":    datetime.now(timezone.utc).isoformat(),
     }
     proto_save_state(_STATE_FILE, new_state)
+
+    # v4.25: bulk-provisioning всех существующих VLESS-пользователей в TrustTunnel.
+    # После успешной установки TrustTunnel активируется is_active()=True, и все
+    # VLESS-юзеры автоматически получают аккаунты в TrustTunnel.
+    # Username = email (verbatim), password = SHA-256("trusttunnel-pass|" + uuid).
+    try:
+        from chimera.modules.rest_api import _sync_all_from_vless
+        from chimera.modules.users_manager import _unified_load_users
+        _vless_users = _unified_load_users()
+        if _vless_users:
+            print(f"  {CYAN}→{NC}  Синхронизирую {len(_vless_users)} VLESS-юзеров в TrustTunnel...")
+            _stats = _sync_all_from_vless(_vless_users)
+            _tt_stats = _stats.get("trusttunnel", {})
+            if _tt_stats.get("created", 0) > 0:
+                print(f"  {GREEN}✓{NC}  Добавлено в TrustTunnel: {_tt_stats['created']} юзеров")
+    except Exception as _e:
+        print(f"  {YELLOW}⚠{NC}  Sync VLESS-юзеров не удался: {_e}")
 
     _box_row(); _box_sep()
     _box_ok(f"TrustTunnel v{version} установлен.")

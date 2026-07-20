@@ -4822,6 +4822,17 @@ def do_unified_user_manager() -> None:
                 success(f"Пользователь '{name}' добавлен (UUID: {new_uuid[:16]}...)")
                 if device_label:
                     success(f"Метка устройства: {device_label}")
+                # v4.25: синхронизируем нового юзера во все активные спутниковые
+                # протоколы (NaiveProxy, Mieru, TrustTunnel, sing-box, Telemt).
+                # Если протокол не установлен — is_active() вернёт False, skip.
+                _new_user_dict = {
+                    "uuid": new_uuid, "email": email, "name": name,
+                    "device_label": device_label,
+                }
+                _sync_result = _sync_user_to_protocols("add", _new_user_dict)
+                _active_protos = [k for k, v in _sync_result.items() if v is not None]
+                if _active_protos:
+                    info(f"Синхронизирован со спутниковыми протоколами: {', '.join(_active_protos)}")
                 # Показываем все ссылки сразу (IPv4 / IPv6 / Domain)
                 _unified_show_links({"uuid": new_uuid, "email": email, "name": name},
                                      print_output=True)
@@ -4839,6 +4850,11 @@ def do_unified_user_manager() -> None:
                     _unified_save_users(users)
                     _log_change("user_del", f"Удалён: {removed.get('name','?')} ({removed.get('email','')})")
                     success(f"Удалён: {removed.get('name')} ({removed['uuid'][:16]}...)")
+                    # v4.25: удаляем юзера из всех спутниковых протоколов.
+                    _sync_result = _sync_user_to_protocols("remove", removed)
+                    _active_protos = [k for k, v in _sync_result.items() if v is not None]
+                    if _active_protos:
+                        info(f"Удалён из спутниковых протоколов: {', '.join(_active_protos)}")
                     # Чистим файлы ссылок
                     for p in (f"/root/vless_link_{removed.get('name','')}.txt",
                                f"/root/vless_qr_{removed.get('name','')}.png"):
@@ -4967,8 +4983,18 @@ def do_unified_user_manager() -> None:
                 label   = u.get("device_label") or u.get("name", u.get("email",""))
                 if now_dis:
                     warn(f"Пользователь '{label}' ОТКЛЮЧЁН (UUID сохранён)")
+                    # v4.25: блокируем во всех спутниковых протоколах.
+                    _sync_result = _sync_user_to_protocols("toggle_off", u)
+                    _active_protos = [k for k, v in _sync_result.items() if v is not None]
+                    if _active_protos:
+                        info(f"Отключён в спутниковых протоколах: {', '.join(_active_protos)}")
                 else:
                     success(f"Пользователь '{label}' ВОССТАНОВЛЕН")
+                    # v4.25: восстанавливаем во всех спутниковых протоколах.
+                    _sync_result = _sync_user_to_protocols("toggle_on", u)
+                    _active_protos = [k for k, v in _sync_result.items() if v is not None]
+                    if _active_protos:
+                        info(f"Восстановлен в спутниковых протоколах: {', '.join(_active_protos)}")
                 input(f"{BLUE}Нажмите Enter...{NC}")
 
             elif ch == "8":
@@ -5012,6 +5038,9 @@ def do_unified_user_manager() -> None:
                         continue
 
                 old_email = u.get("email", "")
+                old_name  = u.get("name", "")
+                # Сохраняем old_user dict для rename sync.
+                _old_user_dict = dict(u)
                 if new_name:
                     users[idx]["name"]  = new_name
                 if new_email:
@@ -5025,6 +5054,17 @@ def do_unified_user_manager() -> None:
                 success("Данные пользователя обновлены")
                 if new_email:
                     info(f"Email изменён: {old_email} → {new_email} (обновлено в xray config + users.json)")
+                # v4.25: переименовываем во всех спутниковых протоколах.
+                # rename sync передаёт old_user + new_user — каждый протокол
+                # сам решает как обработать (sing-box: update name field in
+                # place, TrustTunnel/NaiveProxy/Mieru: remove+add с тем же UUID).
+                _new_user_dict = dict(users[idx])
+                _sync_result = _sync_user_to_protocols(
+                    "rename", _new_user_dict, old_user=_old_user_dict,
+                )
+                _active_protos = [k for k, v in _sync_result.items() if v is not None]
+                if _active_protos:
+                    info(f"Переименован в спутниковых протоколах: {', '.join(_active_protos)}")
                 warn("Не забудьте применить список [5] чтобы Xray подхватил изменение email")
                 input(f"{BLUE}Нажмите Enter...{NC}")
 
@@ -6274,6 +6314,60 @@ def _user_toggle_disabled(users: list, idx: int) -> bool:
 # =============================================================================
 CHANGES_LOG_FILE = Path("/var/log/xray-changes.log")
 CHANGES_DB_FILE  = Path("/var/lib/xray-installer/changes.json")
+
+
+def _sync_user_to_protocols(action: str, user: dict,
+                            old_user: dict = None) -> dict:
+    """Синхронизирует действие над VLESS-пользователем со всеми спутниковыми
+    протоколами (NaiveProxy, Mieru, TrustTunnel, sing-box, MTProto/Telemt).
+
+    v4.25: раньше TUI do_unified_user_manager только писал в users.json + xray
+    config.json. Satellite-протоколы НЕ обновлялись → юзер получал VLESS-ссылку,
+    но не получал naive+https://, mierus://, tt://, trojan://, tg://proxy.
+
+    Теперь: после _unified_save_users(users) вызываем эту функцию. Она через
+    rest_api._SYNCABLE_PROTOCOLS реестр диспатчит action на все активные
+    протоколы. Каждый протокол сам решает как обработать action (см. контракты
+    в chimera/modules/<proto>.py: is_active / ensure_user_full / remove_user_full
+    / rename_user_full).
+
+    Args:
+      action: "add" | "remove" | "rename" | "toggle_off" | "toggle_on"
+      user: full user dict (uuid, email, name, device_label)
+      old_user: для rename — старый dict (с old email)
+
+    Returns:
+      {proto_name: bool|None} — результат на каждом протоколе.
+      None = протокол не активен (is_active=False), пропущен.
+    """
+    try:
+        from chimera.modules.rest_api import (
+            _sync_ensure_user, _sync_remove_user, _sync_rename_user,
+        )
+        if action == "add":
+            return _sync_ensure_user(user.get("name", ""), user=user)
+        elif action == "remove":
+            return _sync_remove_user(user.get("name", ""), user=user)
+        elif action == "rename" and old_user:
+            return _sync_rename_user(
+                old_user.get("name", ""), user.get("name", ""),
+                old_user=old_user, new_user=user,
+            )
+        elif action in ("toggle_off", "toggle_on"):
+            # Toggle: на off — remove (аккаунт инвалидируется), на on — add.
+            # VLESS-блокировка идёт через _user_toggle_disabled + apply [5],
+            # satellite-протоколы блокируем здесь.
+            if action == "toggle_off":
+                return _sync_remove_user(user.get("name", ""), user=user)
+            else:
+                return _sync_ensure_user(user.get("name", ""), user=user)
+        return {}
+    except Exception as e:
+        try:
+            warn(f"Синхронизация спутниковых протоколов не удалась: {e}")
+        except Exception:
+            print(f"Синхронизация не удалась: {e}")
+        return {}
 
 
 def _log_change(action: str, detail: str, user: str = "root") -> None:
