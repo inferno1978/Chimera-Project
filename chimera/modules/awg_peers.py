@@ -290,6 +290,159 @@ def awg_peer_remove(
     return True
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SYNC CONTRACT (v4.25) — для реестра _SYNCABLE_PROTOCOLS в rest_api.py
+#
+#  AWG (AmneziaWG) — peer-based модель:
+#    • Каждый peer = пара ключей (private+public) + IP в подсети AWG.
+#    • Identity: peer.name (уникальное, [a-zA-Z0-9_-], не с цифры).
+#    • Bridge к VLESS: через peer.owner_email (email VLESS-юзера).
+#    • Лимит: 253 пира (по числу IP в /24 подсети).
+#
+#  Контракт:
+#    ensure_user_full(user): если у юзера уже есть peer (по owner_email) —
+#      no-op. Иначе генерируем имя пира из email (sanitized), создаём peer
+#      с owner_email = user.email.
+#    remove_user_full(user): находим peer по owner_email, удаляем.
+#    rename_user_full: remove + add (ключи меняются — AWG не поддерживает
+#      rename in-place).
+# ══════════════════════════════════════════════════════════════════════════════
+def _peer_name_from_email(email: str) -> str:
+    """Генерирует имя пира из email: alice@x.com → alice.
+    Если имя занято — добавляет суффикс _2, _3, ...
+    Валидируется через _validate_peer_name."""
+    import re as _re
+    base = (email or "").split("@")[0].strip().lower()
+    # Заменяем недопустимые символы на _
+    base = _re.sub(r'[^a-zA-Z0-9_-]', '_', base)
+    # Не должно начинаться с цифры
+    if base and base[0].isdigit():
+        base = "u_" + base
+    if not base:
+        base = "user"
+    # Уникальность
+    name = base
+    suffix = 2
+    while awgs_state_peer_find(name):
+        name = f"{base}_{suffix}"
+        suffix += 1
+        if suffix > 100:
+            return ""  # слишком много коллизий
+    return name
+
+
+def is_active() -> bool:
+    """True если AWG standalone установлен И сервис запущен."""
+    try:
+        from chimera.modules.awg_state import awgs_state_is_installed
+        if not awgs_state_is_installed():
+            return False
+        # Проверяем что сервис amneziawg или awg запущен.
+        for svc in ("amneziawg", "awg"):
+            r = _run(["systemctl", "is-active", svc],
+                     capture=True, check=False, quiet=True)
+            if r.returncode == 0 and r.stdout.strip() == "active":
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def ensure_user_full(user: dict) -> bool:
+    """Создаёт AWG peer для VLESS-юзера (привязка через owner_email).
+
+    Если у юзера уже есть peer (по owner_email) — no-op.
+    Иначе генерируем имя из email, создаём peer с owner_email = user.email.
+    """
+    try:
+        from chimera.modules.awg_state import (
+            awgs_state_is_installed, awgs_state_find_peer_by_owner,
+        )
+        if not awgs_state_is_installed():
+            return True  # AWG не установлен — пропускаем
+        email = user.get("email", "") or ""
+        if not email:
+            return False
+        # Если уже есть peer для этого email — no-op.
+        existing = awgs_state_find_peer_by_owner(email)
+        if existing:
+            return True
+        # Генерируем уникальное имя пира.
+        name = _peer_name_from_email(email)
+        if not name:
+            return False
+        # Создаём peer с owner_email.
+        return awg_peer_add(
+            name=name,
+            expires="",  # бессрочный
+            psk=False,
+            apply=True,
+            save_state=True,
+            show_qr=False,
+            owner_email=email,
+        )
+    except Exception as e:
+        try:
+            core = _core_module()
+            core.warn(f"awg.ensure_user_full: {e}")
+        except Exception:
+            print(f"awg.ensure_user_full: {e}")
+        return False
+
+
+def ensure_user(name: str) -> bool:
+    """Legacy contract — name трактуется как email."""
+    return ensure_user_full({"email": name, "name": name})
+
+
+def remove_user_full(user: dict) -> bool:
+    """Удаляет AWG peer по owner_email (email юзера)."""
+    try:
+        from chimera.modules.awg_state import (
+            awgs_state_is_installed, awgs_state_find_peer_by_owner,
+        )
+        if not awgs_state_is_installed():
+            return True
+        email = user.get("email", "") or ""
+        if not email:
+            return False
+        peer = awgs_state_find_peer_by_owner(email)
+        if not peer:
+            return True  # не было — идемпотентность
+        return awg_peer_remove(peer.get("name", ""), apply=True, save_state=True)
+    except Exception as e:
+        try:
+            core = _core_module()
+            core.warn(f"awg.remove_user_full: {e}")
+        except Exception:
+            print(f"awg.remove_user_full: {e}")
+        return False
+
+
+def remove_user(name: str) -> bool:
+    """Legacy contract — name трактуется как email."""
+    return remove_user_full({"email": name, "name": name})
+
+
+def rename_user_full(old_user: dict, new_user: dict) -> bool:
+    """Rename = remove + add (AWG не поддерживает rename in-place —
+    ключи пересоздаются, клиент получает новый .conf)."""
+    try:
+        ok1 = remove_user_full(old_user)
+        ok2 = ensure_user_full(new_user)
+        return ok1 and ok2
+    except Exception:
+        return False
+
+
+def rename_user(old_name: str, new_name: str) -> bool:
+    """Legacy contract — имена тракуются как emails."""
+    return rename_user_full(
+        {"email": old_name, "name": old_name},
+        {"email": new_name, "name": new_name},
+    )
+
+
 # ── LIST ────────────────────────────────────────────────────────────────────
 
 def awg_peer_list(verbose: bool = False, json_output: bool = False) -> None:
