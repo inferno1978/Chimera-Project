@@ -1987,18 +1987,11 @@ def _list_users_for_protocol(protocol: str) -> None:
 #  Генерация клиентских ссылок (v4.23.12)
 # ============================================================================
 def _get_public_endpoint(state_ib: dict, default_listen: str = "127.0.0.1") -> tuple:
-    """Возвращает (host, port) для подключения клиента извне.
-
-    Логика:
-      • Если listen == 0.0.0.0 или :: — клиент подключается к публичному IP сервера.
-      • Если listen == 127.0.0.1 (loopback) — клиент НЕ может подключиться напрямую;
-        нужно либо SNI-dispatch (TCP:443 → nginx stream → backend), либо сменить listen.
-        Возвращаем публичный IP с пометкой 'loopback_warning'.
-    """
+    """Возвращает (host, port, is_loopback_warning) — клиент подключается
+    к публичному IP сервера; если listen=127.0.0.1 — loopback_warning=True."""
     listen = state_ib.get("listen", default_listen)
     port = state_ib.get("listen_port", 0)
     is_loopback = listen in ("127.0.0.1", "::1", "localhost")
-    # Публичный IP сервера
     public_ip = ""
     try:
         from chimera.modules.resources import get_server_ip
@@ -2010,22 +2003,66 @@ def _get_public_endpoint(state_ib: dict, default_listen: str = "127.0.0.1") -> t
     return public_ip or listen, port, False
 
 
+# ── Per-user credential matching ────────────────────────────────────────────
+#
+# Раньше все gen-функции брали password из state_ib["users"][0] — первого
+# юзера в списке. Это работало для TUI (_show_client_links), но НЕ работало
+# для единой подписки (subscription.py) — там каждый VLESS-юзер должен
+# получить ссылку со СВОИМ паролем, а не с паролем первого попавшегося.
+#
+# _find_singbox_user_credential() ищет в state_ib["users"] запись,
+# соответствующую конкретному VLESS-юзеру — по UUID (точное совпадение),
+# затем по name/email-local-part (без учёта регистра).
+
+def _find_singbox_user_credential(state_ib: dict,
+                                  candidates: set[str] = None) -> Optional[dict]:
+    """Ищет в state_ib['users'] запись, соответствующую VLESS-юзеру.
+
+    Parameters:
+      state_ib — inbound state dict (singbox_state_get_inbound(protocol))
+      candidates — множество lower-cased имён юзера (name, email-local, device_label).
+                   Если None или пустое — возвращает users[0] (обратная совместимость
+                   для TUI-режима, где нет конкретного юзера).
+
+    Возвращает dict записи юзера ({"uuid", "password", "name"}) или None.
+    """
+    users = state_ib.get("users", [])
+    if not users:
+        return None
+    # TUI-режим (нет candidates) — обратная совместимость: первый юзер.
+    if not candidates:
+        return users[0]
+    # Per-user: сначала точное совпадение по UUID.
+    for u in users:
+        uuid_val = (u.get("uuid") or "").strip().lower()
+        if uuid_val and uuid_val in candidates:
+            return u
+    # Затем по name (без учёта регистра).
+    for u in users:
+        name_val = (u.get("name") or "").strip().lower()
+        if name_val and name_val in candidates:
+            return u
+    return None
+
+
 def _gen_shadowtls_client_uri(state_ib: dict, public_ip: str, port: int,
-                              password: str) -> str:
+                              password: str, user_record: Optional[dict] = None) -> str:
     """Генерирует trojan:// URI для ShadowTLS v3 + Trojan.
 
     Формат (понимается Hiddify/Nekobox/Karing/sing-box):
       trojan://<password>@<host>:<port>?security=tls&sni=<handshake_domain>
         &shadowtls=3&shadowtls_password=<password>#<name>
 
-    Важно: в sing-box клиентский outbound для ShadowTLS v3 использует
-    type=trojan + transport=shadowtls. URI выше — устоявшийся де-факто
-    стандарт, понимаемый GUI-клиентами.
+    v4.23.20: пароль берётся через _get_effective_password() — из users[].password.
+    Если передан user_record — использует его name для тэга (#name) вместо users[0].
     """
     handshake = state_ib.get("handshake", {})
     sni = handshake.get("server", "www.cloudflare.com")
-    name = state_ib.get("users", [{}])[0].get("name", "shadowtls-user") \
-        if state_ib.get("users") else "shadowtls-user"
+    if user_record:
+        name = user_record.get("name", "shadowtls-user")
+    else:
+        name = state_ib.get("users", [{}])[0].get("name", "shadowtls-user") \
+            if state_ib.get("users") else "shadowtls-user"
     from urllib.parse import quote, urlencode
     params = urlencode({
         "security": "tls",
@@ -2038,10 +2075,13 @@ def _gen_shadowtls_client_uri(state_ib: dict, public_ip: str, port: int,
 
 
 def _gen_anytls_client_uri(state_ib: dict, public_ip: str, port: int,
-                           password: str) -> str:
+                           password: str, user_record: Optional[dict] = None) -> str:
     """Генерирует anytls:// URI (sing-box >= 1.10)."""
-    name = state_ib.get("users", [{}])[0].get("name", "anytls-user") \
-        if state_ib.get("users") else "anytls-user"
+    if user_record:
+        name = user_record.get("name", "anytls-user")
+    else:
+        name = state_ib.get("users", [{}])[0].get("name", "anytls-user") \
+            if state_ib.get("users") else "anytls-user"
     from urllib.parse import quote, urlencode
     # SNI для AnyTLS: общий домен (если есть), иначе публичный IP
     sni = state_ib.get("common_name") or public_ip
@@ -2052,12 +2092,17 @@ def _gen_anytls_client_uri(state_ib: dict, public_ip: str, port: int,
     return f"anytls://{quote(password, safe='')}@{public_ip}:{port}?{params}#{quote(name)}"
 
 
-def _gen_tuic_client_uri(state_ib: dict, public_ip: str, port: int) -> str:
-    """Генерирует tuic:// URI для TUIC v5."""
+def _gen_tuic_client_uri(state_ib: dict, public_ip: str, port: int,
+                         user_record: Optional[dict] = None) -> str:
+    """Генерирует tuic:// URI для TUIC v5.
+
+    Если передан user_record — использует его uuid/password/name.
+    Иначе — первый юзер из state_ib["users"] (обратная совместимость).
+    """
     users = state_ib.get("users", [])
-    if not users:
+    if not users and not user_record:
         return ""
-    u = users[0]
+    u = user_record or users[0]
     uuid = u.get("uuid", "")
     password = u.get("password", "")
     name = u.get("name", "tuic-user")
@@ -2397,3 +2442,80 @@ def _list_users_for_protocol(protocol: str) -> None:
                 _box_row(f"  {GREEN}•{NC} {name:<24}  "
                          f"{CYAN}password={pw}{NC}")
     _box_bottom()
+
+
+# ============================================================================
+#  PUBLIC API — для интеграции с subscription.py (единая подписка)
+# ============================================================================
+
+def get_subscription_uris(user: dict) -> list[str]:
+    """Генерирует клиентские URI для всех активных sing-box протоколов,
+    отфильтрованных по конкретному VLESS-юзеру.
+
+    Мультиплексирует: shadowtls, anytls, tuic, vless_ws_cdn — для каждого
+    активного инбаунда пытается найти credential через
+    _find_singbox_user_credential(), собирает все найденные URI.
+
+    Никогда не бросает исключение — try/except внутри, возвращает [].
+    """
+    uris: list[str] = []
+    try:
+        state = singbox_state_load()
+        inbounds = state.get("inbounds", {})
+        if not inbounds:
+            return uris
+
+        # Кандидаты для матчинга — lower-cased name/email-local/device_label/uuid.
+        candidates: set[str] = set()
+        for val in (user.get("name", ""), user.get("email", ""),
+                    user.get("device_label", ""), user.get("uuid", "")):
+            v = val.strip().lower()
+            if v:
+                candidates.add(v)
+        # Также локальная часть email.
+        email = user.get("email", "")
+        if "@" in email:
+            local = email.split("@")[0].strip().lower()
+            if local:
+                candidates.add(local)
+
+        for protocol in ("shadowtls", "anytls", "tuic", "vless_ws_cdn"):
+            state_ib = inbounds.get(protocol, {})
+            if not state_ib.get("enabled", False):
+                continue
+            if protocol == "vless_ws_cdn":
+                # VLESS-WS-CDN не имеет per-user — общий UUID для всех.
+                # CDN endpoint: host:443 из state_ib (не использует listen_port).
+                uri = _gen_vless_ws_cdn_client_uri(state_ib)
+                if uri:
+                    uris.append(uri)
+                continue
+
+            # Per-user протоколы: shadowtls, anytls, tuic — требуют public_ip+port.
+            default_listen = "127.0.0.1" if protocol in ("shadowtls", "anytls") else "::"
+            public_ip, port, _ = _get_public_endpoint(state_ib, default_listen)
+            if not public_ip or not port:
+                continue
+
+            # Per-user протоколы: shadowtls, anytls, tuic.
+            user_record = _find_singbox_user_credential(state_ib, candidates)
+            if not user_record:
+                continue  # нет совпадения — не отдаём чужой пароль
+
+            password = user_record.get("password", "") or _get_effective_password(state_ib)
+            if not password:
+                continue
+
+            if protocol == "shadowtls":
+                uri = _gen_shadowtls_client_uri(state_ib, public_ip, port, password, user_record)
+            elif protocol == "anytls":
+                uri = _gen_anytls_client_uri(state_ib, public_ip, port, password, user_record)
+            elif protocol == "tuic":
+                uri = _gen_tuic_client_uri(state_ib, public_ip, port, user_record)
+            else:
+                continue
+            if uri:
+                uris.append(uri)
+    except Exception:
+        pass
+    return uris

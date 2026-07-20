@@ -1811,3 +1811,29 @@ if __name__ == "__main__":
         do_trusttunnel_menu()
     except KeyboardInterrupt:
         print(f"\n{GREEN}До свидания!{NC}"); sys.exit(0)
+
+
+# ============================================================================
+#  PUBLIC API — для интеграции с subscription.py (единая подписка)
+# ============================================================================
+
+def get_subscription_uris(user: dict) -> list[str]:
+    """Генерирует tt:// deep-link для VLESS-юзера, если TrustTunnel установлен.
+
+    Матчинг по email (TrustTunnel username == email) + uuid (для derive password).
+    Использует trusttunnel_deeplink_for_user() — детерминированный пароль
+    из SHA-256("trusttunnel-pass|" + uuid).
+
+    Никогда не бросает исключение — try/except внутри, возвращает [].
+    """
+    try:
+        email = user.get("email", "")
+        uuid_str = user.get("uuid", "")
+        if not email or not uuid_str:
+            return []
+        uri = trusttunnel_deeplink_for_user(email, uuid_str)
+        if uri:
+            return [uri]
+    except Exception:
+        pass
+    return []
