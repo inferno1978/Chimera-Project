@@ -2,6 +2,103 @@
 
 ---
 
+## FEAT: Переключатель YouTube → RU / exit-ноды — 21 июля 2026
+
+**В TUI «Настройки сети» добавлен пункт `Y` — переключатель маршрутизации YouTube между RU entry-нодой и exit-нодами каскада.**
+
+### Контекст задачи
+
+Архитектура проекта: клиент → RU entry-нода → (geosite/geoip правила) → exit-ноды (1–10 нод, балансировщик). Уже применяются:
+- `geosite:category-ru`, `geosite:ru-available-only-inside`, `geoip:ru` → `direct` (split tunneling)
+- RIPE NCC CIDR → `direct` (ru_subnets_ripe, 13000+ правил)
+- Catch-all `tcp,udp` → `chain-exit` / `chain-balancer`
+
+Нужно: точечно переключать **только YouTube** между RU и exit, не трогая остальной трафик. Кнопкой в TUI, без редактирования `config.json` вручную.
+
+### Решение — новый модуль `chimera/modules/youtube_route.py`
+
+Архитектурно повторяет `ru_subnets.py` (Pattern C: правило с `comment="youtube_via_ru"`, идемпотентное добавление/удаление, AWG-aware).
+
+#### Правило маршрутизации
+
+```json
+{
+  "type": "field",
+  "domain": [
+    "geosite:youtube",
+    "geosite:google",
+    "domain:googlevideo.com",
+    "domain:ytimg.com",
+    "domain:ggpht.com",
+    "domain:youtubei.googleapis.com",
+    "domain:manifest.googlevideo.com",
+    "domain:youtu.be",
+    "domain:youtube-nocookie.com",
+    "domain:youtubeeducation.com"
+  ],
+  "outboundTag": "direct",   ← или "direct-local" в AWG-режиме
+  "comment": "youtube_via_ru"
+}
+```
+
+Полный список доменов покрывает все CDN YouTube (видео-стрим, thumbnails, avatars, internal API, DASH/HLS manifests) — чтобы не было асимметричной маршрутизации (стрим через RU, thumbnails через exit — сессия ломается).
+
+#### AWG-aware
+
+При `AWG_EXIT_ENABLED=True` используется `outboundTag="direct-local"` (freedom без fwmark) — YouTube выходит через дефолтный маршрут RU-сервера, а не через AWG-туннель к exit. Та же логика что в `ru_subnets._ru_subnets_apply_to_xray` (lines 267, 290–296).
+
+#### TUI-меню `do_manage_youtube_via_ru()`
+
+```
+📺  YouTube через RU  (entry-нода)
+
+  Текущий маршрут: YouTube → RU entry
+  geosite:youtube → outbound:direct
+
+  Переключатель добавляет/убирает правило routing в config.json:
+    domain:[geosite:youtube, googlevideo.com, ytimg.com, ...] → direct
+  AWG-aware: outbound=direct-local когда AWG exit активен.
+
+  [1]  ● YouTube через RU entry
+  [2]  ● YouTube через exit-ноды (default)
+
+  [Q] Назад
+```
+
+Показывает актуальное состояние (читает `state.json` + проверяет `config.json` — если state говорит True, но правила нет после regenerate, показывает «несогласованно» и предлагает пере-применить).
+
+#### Restore после regenerate xray-config
+
+`generate_xray_config*` полностью перезаписывает `config.json`, стирая все runtime-правила. Поэтому в `_core.py:2759` (после `_ru_subnets_restore_if_needed` и `_as_direct_restore_if_needed`) добавлен вызов `restore_youtube_rule_if_needed(silent=False)` — если `state["youtube_via_ru"]=True`, правило пере-добавляется автоматически.
+
+#### Состояние
+
+- `state["youtube_via_ru"]: bool` (default `False`)
+- Загружается в `_core.YOUTUBE_VIA_RU` через `_load_state_into_globals()` (новый global рядом с `XTLS_FLOW`)
+- Записывается через `_save_youtube_state(enabled)` — НЕ трогает остальные поля state.json
+
+### Изменения в коде
+
+| Файл | Что изменилось |
+|---|---|
+| `chimera/modules/youtube_route.py` | **НОВЫЙ** — модуль с apply/remove/restore/TUI |
+| `chimera/_core.py` | Глобаль `YOUTUBE_VIA_RU`, загрузка в `_load_state_into_globals()`, restore-вызов после regenerate, пункт меню `Y` + dispatch |
+| `tests/test_youtube_route.py` | **НОВЫЙ** — 19 тестов |
+| `CHANGELOG.md` | Эта запись |
+
+### Тесты — 19 новых
+
+- `TestYoutubeApplyToXray` (6) — добавление правила, geosite:youtube в domain[], outbound=direct без AWG, outbound=direct-local с AWG, идемпотентность, порядок правил (prepended before catch-all), False при падении Xray
+- `TestYoutubeRemoveFromXray` (2) — удаляет только YouTube правило, не трогает RIPE/catch-all; no-op если правила нет
+- `TestYoutubeRuleInConfig` (3) — детектор: True/False/нет файла
+- `TestSaveYoutubeState` (3) — запись True/False, создание файла, сохранение существующих полей
+- `TestRestoreYoutubeRuleIfNeeded` (4) — False при disabled/missing/already-present, True при state=True+rule_missing
+- `TestYoutubeDomainsList` (1) — список покрывает ключевые домены
+
+Все 51 routing-тест (ru_subnets + as_direct + geoip_block + youtube_route) проходят.
+
+---
+
 ## FIX(2): 'Failed to mask unit: File already exists' + шум stderr в subscription uninstall — 21 июля 2026
 
 **После предыдущего фикса (`4b0f5e7`) пользователь сообщил о трёх шумных ошибках в реальном выводе systemd. Все три исправлены.**
