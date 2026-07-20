@@ -633,7 +633,9 @@ def _run_install_inner() -> None:
     _box_info("NaiveProxy требует домен с A-записью на IP этого VPS.")
     _box_info("Caddy автоматически получит TLS сертификат (порт 443).")
     _box_row()
-    _box_warn("Если на порту 443 уже работает nginx — остановите его сначала.")
+    _box_info("Если выбранный порт занят — установщик предложит альтернативу.")
+    _box_info("Если порт 80 занят (нужен для ACME) — nginx будет")
+    _box_info("автоматически остановлен и возвращён после получения сертификата.")
     _box_bot(); print()
 
     try:
@@ -644,11 +646,47 @@ def _run_install_inner() -> None:
         if not domain:
             print(f"  {RED}✗{NC}  Домен обязателен."); _pause(); return
 
-        raw = proto_ask(
-            f"  {CYAN}Порт [{old_port}]: {NC}",
-            default=str(old_port), c=True,
-        )
-        port = int(raw) if raw.isdigit() else old_port
+        # v4.24: интерактивный выбор порта с проверкой конфликта.
+        # Раньше: просто `int(input(...))` без проверки — если 443 занят
+        # nginx (REALITY), Caddy падал при запуске. Теперь: если порт
+        # занят — показываем кто его держит и предлагаем ввести другой.
+        while True:
+            raw = proto_ask(
+                f"  {CYAN}Порт [{old_port}]: {NC}",
+                default=str(old_port), c=True,
+            )
+            port = int(raw) if raw.isdigit() else old_port
+            # Проверка конфликта: пробуем bind() на 0.0.0.0:port.
+            import socket as _socket
+            try:
+                _s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                _s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                try:
+                    _s.bind(("0.0.0.0", port))
+                finally:
+                    _s.close()
+                break  # порт свободен
+            except OSError:
+                # Узнаём кто держит порт через ss.
+                _r = _run(["ss", "-ltnp"], capture=True, quiet=True)
+                _who = ""
+                for _line in (_r.stdout or "").splitlines():
+                    if f":{port} " in _line and "users:" in _line:
+                        _m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', _line)
+                        if _m:
+                            _who = f" (pid={_m.group(2)} {_m.group(1)})"
+                            break
+                print(f"  {YELLOW}⚠{NC}  Порт {port} уже занят{_who}.")
+                _alt = proto_ask(
+                    f"  {CYAN}Введите другой порт {DIM}(Enter — отмена):{NC} ",
+                    default="", c=True,
+                ).strip()
+                if not _alt or not _alt.isdigit():
+                    print(f"  {YELLOW}Установка отменена.{NC}")
+                    _pause(); return
+                port = int(_alt)
+                # цикл продолжится — перепроверим новый порт
+                old_port = port  # для следующей итерации default
 
         fake_url = proto_ask(
             f"  {CYAN}URL фейкового сайта [{old_fake}]: {NC}",
@@ -678,10 +716,25 @@ def _run_install_inner() -> None:
     # 2. Probe secret
     probe_secret = state.get("probe_secret") or _gen_probe_secret()
 
-    # 3. Пользователи — создаём первого если нет
+    # 3. Пользователи — спрашиваем имя первого пользователя (был хардкод 'admin')
     users = state.get("users") or []
     if not users:
-        first_user = "admin"
+        # v4.24: запрос имени первого пользователя вместо хардкода 'admin'.
+        # Запрос идёт ВНУТРИ блока параметров (выше), но мы повторяем здесь
+        # на случай если state был пустой. По умолчанию предлагаем 'admin'
+        # (обратная совместимость), но даём юзеру возможность ввести своё.
+        try:
+            first_user = proto_ask(
+                f"  {CYAN}Логин первого пользователя [admin]: {NC}",
+                default="admin", c=True,
+            ).strip() or "admin"
+        except _Cancelled:
+            first_user = "admin"
+        # Простая валидация логина — только латиница/цифры/_-,
+        # чтобы не сломать Caddyfile basic_auth.
+        if not re.match(r'^[A-Za-z0-9_\-]+$', first_user):
+            print(f"  {YELLOW}⚠{NC}  Логин содержит недопустимые символы — используем 'admin'.")
+            first_user = "admin"
         first_pass = proto_gen_password()
         first_hash = _hash_password(first_pass)
         users = [{"username": first_user, "password": first_pass,
@@ -704,15 +757,40 @@ def _run_install_inner() -> None:
         print(f"  {GREEN}✓{NC}  Найден существующий сертификат Let's Encrypt для {domain}.")
 
     # Caddy нужен порт 80 для ACME HTTP-01 challenge — останавливаем конкурентов
-    # (только если нет готового сертификата)
+    # (только если нет готового сертификата). Также: если выбранный port (443
+    # или другой) занят nginx — останавливаем nginx чтобы Caddy мог bind-иться.
+    # v4.24: раньше warn говорил "остановите nginx сами" — теперь делаем это
+    # автоматически (с восстановлением после install).
     _nginx_was_running = False
+    _nginx_stop_reason = ""
     r80 = _run(["ss", "-tlpn"], capture=True)
-    if not existing_cert and (":80 " in r80.stdout or ":80      " in r80.stdout or " :80" in r80.stdout):
-        r_nginx = _run(["systemctl", "is-active", "nginx"], capture=True)
-        if r_nginx.stdout.strip() == "active":
-            _run(["systemctl", "stop", "nginx"])
-            _nginx_was_running = True
-            print(f"  {YELLOW}⚠{NC}  nginx остановлен (нужен порт 80 для TLS сертификата).")
+    _port_80_taken = (":80 " in r80.stdout or ":80      " in r80.stdout or " :80" in r80.stdout)
+    # Также проверяем занят ли выбранный порт (Caddy будет bind-ить :port)
+    _port_chosen_taken = False
+    if not existing_cert:
+        _r_port = _run(["ss", "-ltnp"], capture=True, quiet=True)
+        for _line in (_r_port.stdout or "").splitlines():
+            if f":{port} " in _line and "users:" in _line:
+                _port_chosen_taken = True
+                break
+
+    r_nginx = _run(["systemctl", "is-active", "nginx"], capture=True)
+    _nginx_active = (r_nginx.stdout.strip() == "active")
+
+    if _nginx_active and (not existing_cert and _port_80_taken):
+        # Нужен порт 80 для ACME — stop nginx temporarily.
+        _run(["systemctl", "stop", "nginx"])
+        _nginx_was_running = True
+        _nginx_stop_reason = "порт 80 для ACME"
+        print(f"  {YELLOW}⚠{NC}  nginx остановлен (нужен {_nginx_stop_reason}).")
+    elif _nginx_active and _port_chosen_taken:
+        # Выбранный порт занят nginx (вероятно 443 для REALITY) — stop nginx.
+        _run(["systemctl", "stop", "nginx"])
+        _nginx_was_running = True
+        _nginx_stop_reason = f"порт {port} для Caddy"
+        print(f"  {YELLOW}⚠{NC}  nginx остановлен (нужен {_nginx_stop_reason}).")
+        print(f"  {DIM}nginx будет возвращён после применения конфига Caddy.{NC}")
+        print(f"  {DIM}Если nginx нужен для REALITY на 443 — выберите другой порт для NaiveProxy.{NC}")
     _install_service()
     err = _apply_config(domain, port, users, fake_url, probe_secret, upstream,
                        cert_file=existing_cert, key_file=existing_key)

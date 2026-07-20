@@ -784,7 +784,20 @@ def _run_install_inner() -> None:
     # 4. Пользователи
     users = state.get("users") or []
     if not users:
-        first_user = "admin"
+        # v4.24: спрашиваем имя первого пользователя (был хардкод 'admin').
+        # Запрос идём здесь, после ввода портов, т.к. только тут есть
+        # полный контекст (state loaded, ports validated).
+        try:
+            first_user = proto_ask(
+                f"  {CYAN}Логин первого пользователя [admin]: {NC}",
+                default="admin", c=True,
+            ).strip() or "admin"
+        except _Cancelled:
+            first_user = "admin"
+        # Валидация логина — только латиница/цифры/_- (Mieru строгий).
+        if not _RE_USERNAME.match(first_user):
+            print(f"  {YELLOW}⚠{NC}  Логин содержит недопустимые символы — используем 'admin'.")
+            first_user = "admin"
         first_pass = proto_gen_password()
         users = [{"username": first_user, "password": first_pass}]
         print(f"  {GREEN}✓{NC}  Создан первый пользователь: "
