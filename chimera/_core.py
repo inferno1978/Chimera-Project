@@ -1065,6 +1065,14 @@ PROTOCOL_MODE: str = "reality"   # "reality" | "xhttp"
 # ""                  — без flow (fallback для старых клиентов / отладки)
 XTLS_FLOW: str = "xtls-rprx-vision"
 
+# YouTube routing toggle (youtube_route.py).
+# True = весь YouTube-трафик выходит через RU entry-ноду (outbound: direct
+#       или direct-local в AWG-режиме). Правило geosite:youtube → direct
+#       prepended в routing.rules.
+# False = (default) YouTube идёт через каскад exit-нод (catch-all routing).
+# Загружается из state["youtube_via_ru"] в _load_state_into_globals().
+YOUTUBE_VIA_RU: bool = False
+
 # Режим работы xHTTP (только для PROTOCOL_MODE == "xhttp")
 # "streamup" | "streamone" | "packetup"
 XHTTP_MODE: str = "streamup"
@@ -2743,6 +2751,18 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
 
     # Восстанавливаем AS-direct правила (if any)
     _as_direct_restore_if_needed(silent=False)
+
+    # Восстанавливаем YouTube→RU правило если оно было включено
+    # (state["youtube_via_ru"] = True). generate_* перезаписывает routing
+    # целиком — без restore пользователь потерял бы переключатель после
+    # любого rebuild xray-config (пункт 5b, смена домена/порта и т.д.).
+    try:
+        from chimera.modules.youtube_route import restore_youtube_rule_if_needed
+        restore_youtube_rule_if_needed(silent=False)
+    except ImportError:
+        pass
+    except Exception:
+        pass  # не критично — это best-effort restore
 
     # Восстанавливаем Telemt tproxy-интеграцию (если установлен).
     # generate_* перезаписывает config.json целиком — dokodemo inbound и
@@ -6915,6 +6935,8 @@ def _menu_network() -> None:
         _box_item("X", f"⚡ XTLS-flow режим  {DIM}(Vision / Splice / none — только REALITY){NC}")
         _box_item("P", f"🧪 Постквантовый VLESS  {DIM}(экспериментально, отдельный порт){NC}")
         _box_sep()
+        _box_item("Y", f"📺 YouTube через RU  {DIM}(geosite:youtube → direct/exit toggle){NC}")
+        _box_sep()
         _box_item("H", f"🚀 Hysteria2 транспорт  {DIM}(Режим B, Exit-нода, Балансировщик, DPI){NC}")
         _box_row()
         _box_back()
@@ -7023,6 +7045,16 @@ def _menu_network() -> None:
                     time.sleep(2)
         elif ch.lower() == "h":
             do_hysteria2_menu()
+        elif ch.lower() == "y":
+            # YouTube routing toggle: geosite:youtube → direct (RU entry) or
+            # default (exit nodes via catch-all). Independent of split tunnel.
+            _load_state_into_globals()
+            try:
+                from chimera.modules.youtube_route import do_manage_youtube_via_ru
+                do_manage_youtube_via_ru()
+            except ImportError as e:
+                warn(f"Модуль youtube_route не найден: {e}")
+                time.sleep(2)
         elif ch.lower() == "q" or ch == "":
             break
         else:
@@ -8014,6 +8046,8 @@ def _load_state_into_globals() -> None:
     global H2_EXIT_ENABLED
     global XTLS_FLOW
     global PARAM_FINGERPRINT
+    # YouTube routing toggle (youtube_route.py).
+    global YOUTUBE_VIA_RU
     # FIX: PARAM_SOCKET_PATH и PARAM_SPIDERX раньше не загружались из state,
     # хотя сохраняются туда (см. _save_state: "socket" / "spiderx"). Это
     # приводило к пустому dest/spiderX в generate_xray_config() при вызове
@@ -8052,6 +8086,9 @@ def _load_state_into_globals() -> None:
         PARAM_USE_DNSCRYPT = state.get("use_dnscrypt", False)
         PROTOCOL_MODE = state.get("protocol_mode", "reality")
         XTLS_FLOW     = state.get("xtls_flow",      "xtls-rprx-vision")
+        # YouTube routing toggle (youtube_route.py). Default False — YouTube
+        # идёт через exit-ноды (как было до этого фикса).
+        YOUTUBE_VIA_RU = state.get("youtube_via_ru", False)
         XHTTP_MODE    = state.get("xhttp_mode",    "streamup")
         XHTTP_PATH    = state.get("xhttp_path",    "/")
         XHTTP_PERF_PRESET = state.get("xhttp_perf_preset", "auto")
