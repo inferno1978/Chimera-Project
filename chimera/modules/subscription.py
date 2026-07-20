@@ -1141,6 +1141,12 @@ def _install_service(port: int) -> bool:
         # the same port). The user had to run [4] (stop/disable) first to
         # clear the failed state, then [1]. Now [1] is self-healing.
         subprocess.run(["systemctl", "reset-failed", SERVICE_NAME], check=False)
+        # Unmask before enable — item [4] (Выключить сервис) masks the unit
+        # to prevent Restart=always from respawning the process after stop.
+        # If the user later runs [1] without unmask, `systemctl enable` will
+        # silently refuse to start the service (unit is symlink to /dev/null).
+        # Same fix as in rest_api.do_manage_web_panel() item "1" run branch.
+        subprocess.run(["systemctl", "unmask", SERVICE_NAME], check=False)
         subprocess.run(["systemctl", "enable", SERVICE_NAME], check=True)
         # `restart` (not `start`) so a unit-file change (new port, new cert)
         # takes effect even if the service is already running on the old port.
@@ -1149,6 +1155,146 @@ def _install_service(port: int) -> bool:
     except Exception as e:
         _err(f"Не удалось установить сервис: {e}")
         return False
+
+
+def _kill_port_holder(port: int) -> bool:
+    """Fallback: если systemd-управление не убило процесс (старый systemd,
+    процесс запущен вручную через `python3 -m chimera.modules.subscription
+    serve`, mask не сработал и т.п.) — найти PID через `ss -tlnp` и убить
+    через `kill -9`.
+
+    Возвращает True если процесс был найден и убит, иначе False.
+    Та же логика что и в rest_api.uninstall_web_service() — см. commit
+    e830f28 'fix(rest_api): mask+stop+kill for reliable web panel uninstall'.
+
+    ВАЖНО: парсим ТОЛЬКО строку с `:port` — `re.finditer(r'pid=(\\d+)',
+    весь_вывод)` матчит ВСЕ pid= в выводе ss (включая sshd, xray и т.д.),
+    что убило бы посторонние процессы. Ищем строку вида
+    `0.0.0.0:8443 ... users:((\"python3\",pid=4966,fd=3))` и достаём PID
+    только из неё.
+    """
+    try:
+        r = subprocess.run(
+            ["ss", "-tlnp"],
+            capture_output=True, text=True, check=False,
+        )
+        if r.returncode != 0 or not r.stdout:
+            return False
+        # Ищем СТРОКУ с нашим портом. На одной строке — Local Address:Port
+        # и (опционально) users:((...pid=N...)). Бывает несколько строк с
+        # одним портом (IPv4 + IPv6) — обрабатываем все.
+        port_str = f":{port}"
+        killed = False
+        for line in r.stdout.splitlines():
+            if port_str not in line:
+                continue
+            # В этой строке ищем pid=N. Может быть несколько processes
+            # (multi-process bind — редко, но возможно).
+            for m in re.finditer(r'pid=(\d+)', line):
+                pid = int(m.group(1))
+                if pid <= 1:
+                    continue  # не убиваем init
+                subprocess.run(["kill", "-9", str(pid)], check=False)
+                _info(f"Убит процесс PID={pid} (держал порт :{port})")
+                killed = True
+        return killed
+    except Exception as e:
+        _warn(f"Не удалось убить процесс на порту {port}: {e}")
+        return False
+
+
+def _stop_service_reliable() -> None:
+    """Останавливает сервис vless-subscription НАДЁЖНО — без перезапуска.
+
+    Проблема: в unit-файле стоит Restart=always. Обычный `systemctl stop`
+    убивает процесс, но systemd сразу его перезапускает (т.к. юнит-файл
+    ещё на диске и Restart=always срабатывает на любой exit code).
+
+    Решение — та же последовательность что и в
+    rest_api.uninstall_web_service() / do_manage_web_panel() item '1' stop:
+      1. systemctl mask — заменяет юнит на symlink → /dev/null,
+         systemd перестаёт его читать, Restart= больше не срабатывает.
+      2. systemctl stop — процесс уходит и НЕ перезапускается.
+      3. Fallback: _kill_port_holder(port) — если mask не помог (старый
+         systemd, процесс запущен вручную), найти PID через ss и kill -9.
+
+    ВАЖНО: после этой функции сервис остаётся замаскированным. Перед
+    следующим запуском (через _install_service) нужно unmask — это
+    сделано в _install_service().
+    """
+    # 1. Mask — предотвращает перезапуск после stop.
+    subprocess.run(["systemctl", "mask", SERVICE_NAME], check=False)
+    # 2. Stop — теперь процесс не перезапустится.
+    subprocess.run(["systemctl", "stop", SERVICE_NAME], check=False)
+    # 3. Fallback: убить процесс по порту если systemd не справился.
+    cfg = _load_sub_conf()
+    port = cfg.get("listen_port", DEFAULT_PORT)
+    _kill_port_holder(port)
+
+
+def uninstall_subscription_service() -> None:
+    """Полное удаление сервиса vless-subscription: systemd-unit + ufw-порт +
+    процесс. mirror rest_api.uninstall_web_service() (commit e830f28).
+
+    Проблема с Restart=always (было в проде):
+      1. systemctl disable --now → SIGTERM → процесс вышел
+      2. systemd видит Restart=always → перезапускает через 3с
+      3. unit-файл удалён + daemon-reload → НО процесс уже запущен заново
+         и держит порт, и больше не управляется systemd (unit-файла нет).
+      4. 'uninstall' формально успешен, но порт занят python3 —
+         следующий install падает с 'Address already in use'.
+
+    Правильная последовательность (та же что для vless-web):
+      1. _fw_close_tcp(port) — закрыть ufw-порт (если был открыт).
+      2. systemctl mask  — блокирует Restart=
+      3. systemctl stop   — процесс уходит без перезапуска
+      4. systemctl disable — убрать из автозагрузки
+      5. Удалить unit-файл + убрать symlink от mask (если остался)
+      6. systemctl daemon-reload — systemd забывает юнит
+      7. systemctl reset-failed  — очистить failed-состояние
+      8. Fallback: _kill_port_holder(port) — добить процесс если mask
+         не сработал или процесс был запущен вручную.
+
+    Конфиг subscription.json (pepper, identity_map) НЕ трогается —
+    это намеренно: при повторной установке старые ссылки должны
+    продолжить работать (pepper не инвалидируется). Если нужно
+    полный сброс — пункт меню 'Сгенерировать pepper заново'.
+    """
+    cfg = _load_sub_conf()
+    port = cfg.get("listen_port", DEFAULT_PORT)
+    # 1. Закрыть ufw-порт.
+    _fw_close_tcp(port)
+    # 2. Mask — предотвращает перезапуск после stop (symlink → /dev/null).
+    subprocess.run(["systemctl", "mask", SERVICE_NAME], check=False)
+    # 3. Stop — процесс уходит и не перезапускается.
+    subprocess.run(["systemctl", "stop", SERVICE_NAME], check=False)
+    # 4. Disable — убрать из автозагрузки.
+    subprocess.run(["systemctl", "disable", SERVICE_NAME], check=False)
+    # 5. Удалить unit-файл.
+    try:
+        _UNIT_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+    # mask создаёт symlink /etc/systemd/system/vless-subscription.service
+    # → /dev/null. unlink(missing_ok=True) выше его уже убрал (это symlink),
+    # но на всякий случай проверяем — если это не symlink, а реальный файл
+    # (маловероятно но возможно после ручного редактирования), повторяем.
+    if _UNIT_PATH.is_symlink():
+        try:
+            _UNIT_PATH.unlink()
+        except Exception:
+            pass
+    # 6. Daemon-reload — systemd забывает юнит.
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+    # 7. Reset-failed — очищает failed-состояние (иначе при следующей
+    #    установке systemd может ругаться на 'start-limit-hit').
+    subprocess.run(["systemctl", "reset-failed", SERVICE_NAME], check=False)
+    # 8. Fallback: убить процесс по порту если systemd не справился.
+    _kill_port_holder(port)
+    # Помечаем как выключенный в конфиге — но НЕ удаляем pepper/port,
+    # чтобы при повторной установке старые ссылки продолжили работать.
+    cfg["enabled"] = False
+    _save_sub_conf(cfg)
 
 # ══════════════════════════════════════════════════════════════════════════
 # CLI / МЕНЮ (вызывается отдельно, НЕ вшито в _core.py)
@@ -1177,6 +1323,7 @@ def do_subscription_menu() -> None:
         _box_item("3", f"🔄 Сгенерировать pepper заново  {DIM}(инвалидирует все ссылки){NC}")
         _box_item("4", "🛑 Выключить сервис")
         _box_item("5", f"🧩 Привязать сателлитные логины к UUID  {DIM}(Mieru/Naive/Telemt/TrustTunnel/sing-box){NC}")
+        _box_item("6", f"{RED}🗑️  Удалить полностью{NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -1277,15 +1424,49 @@ def do_subscription_menu() -> None:
             input(f"\n{BOLD}Enter…{NC}")
 
         elif ch == "4":
+            # Надёжная остановка: mask → stop → kill-by-port fallback.
+            # Обычный `systemctl disable --now` НЕ работает — в unit-файле
+            # стоит Restart=always, и systemd сразу перезапускает процесс
+            # после stop (юнит-файл ещё на диске). Результат: порт остаётся
+            # занятым, пользователь думает что сервис остановлен.
+            # Та же проблема/фикс как в rest_api.do_manage_web_panel() item '1'
+            # stop branch — см. commit e830f28.
             cfg["enabled"] = False
             _save_sub_conf(cfg)
-            subprocess.run(["systemctl", "disable", "--now", SERVICE_NAME], check=False)
-            _fw_close_tcp(cfg.get("listen_port", DEFAULT_PORT))
-            _ok("Сервис остановлен, порт закрыт.")
+            old_port = cfg.get("listen_port", DEFAULT_PORT)
+            _fw_close_tcp(old_port)
+            _stop_service_reliable()
+            _ok("Сервис остановлен, порт освобождён.")
             input(f"\n{BOLD}Enter…{NC}")
 
         elif ch == "5":
             _do_identity_map_menu(cfg)
+
+        elif ch == "6":
+            # Полное удаление (mirror rest_api.uninstall_web_service):
+            # systemd-unit + ufw-порт + процесс. pepper/port в конфиге
+            # НЕ удаляем — при повторной установке [1] старые ссылки
+            # продолжат работать. Для инвалидации ссылок есть пункт [3].
+            if not _UNIT_PATH.exists():
+                _warn("Сервис не установлен — нечего удалять.")
+                input(f"\n{BOLD}Enter…{NC}")
+            else:
+                _box_row(f"  {RED}Будет удалено:{NC}")
+                _box_row(f"  {DIM}  • systemd-unit {SERVICE_NAME}.service{NC}")
+                _box_row(f"  {DIM}  • ufw-правило (если было открыто){NC}")
+                _box_row(f"  {DIM}  • процесс python3 на порту подписки{NC}")
+                _box_row(f"  {DIM}  subscription.json (pepper, identity_map) НЕ затрагивается —{NC}")
+                _box_row(f"  {DIM}  при повторной установке [1] старые ссылки продолжат работать.{NC}")
+                _box_row()
+                confirm = input(
+                    f"  {RED}Полностью удалить сервис подписки? [y/N]:{NC} "
+                ).strip().lower()
+                if confirm == "y":
+                    uninstall_subscription_service()
+                    _ok("Сервис подписки полностью удалён, порт свободен.")
+                else:
+                    _info("Отменено.")
+                input(f"\n{BOLD}Enter…{NC}")
 
         elif ch == "" or ch.lower() == "q" or ch == "0":
             return

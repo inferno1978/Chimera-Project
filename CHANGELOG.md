@@ -2,6 +2,69 @@
 
 ---
 
+## FIX: Надёжный uninstall/stop сервиса единой подписки — 21 июля 2026
+
+**`vless-subscription.service` (порт 8443) теперь корректно освобождает порт при остановке/удалении — тот же mask+stop+kill fix, что ранее починил `vless-web` (commit `e830f28`).**
+
+### Проблема
+
+Пункт меню **«4. Выключить сервис»** в `do_subscription_menu()` использовал `systemctl disable --now vless-subscription`. Это **не работало**: в unit-файле стоит `Restart=always` (агрессивнее, чем `Restart=on-failure` у веб-панели). Последовательность:
+
+1. `systemctl disable --now` → SIGTERM → процесс выходит
+2. systemd видит `Restart=always` → перезапускает через 3с
+3. unit-файл удалён + `daemon-reload` → но процесс **уже запущен заново** и больше не управляется systemd (unit-файла нет)
+4. Результат: порт занят python3 (видно в `ss -tlnp`), формально «uninstall успешен», но при следующей установке [1] — `OSError: Address already in use` → `systemd start-limit-hit` → сервис молча умирает
+
+Кроме того, **не было пункта «Удалить полностью»** — только «Выключить» (с вышеописанным багом).
+
+### Фикс — mirror `rest_api.uninstall_web_service()` (commit `e830f28`)
+
+Та же последовательность, что починила `vless-web`, применена к `vless-subscription`:
+
+#### Новая функция `uninstall_subscription_service()`
+
+1. `_fw_close_tcp(port)` — закрыть ufw-порт (если был открыт)
+2. `systemctl mask vless-subscription` — заменяет unit-файл на symlink → `/dev/null`, systemd перестаёт его читать, `Restart=` больше не срабатывает
+3. `systemctl stop vless-subscription` — процесс уходит и **не перезапускается**
+4. `systemctl disable vless-subscription` — убрать из автозагрузки
+5. Удалить unit-файл + проверить symlink от mask (если остался)
+6. `systemctl daemon-reload` — systemd забывает юнит
+7. `systemctl reset-failed vless-subscription` — очистить failed-состояние (иначе при следующей установке `start-limit-hit`)
+8. **Fallback:** `_kill_port_holder(port)` — найти PID через `ss -tlnp` и `kill -9` (catches cases: старый systemd, процесс запущен вручную через `python3 -m chimera.modules.subscription serve`, mask не сработал)
+
+Конфиг `subscription.json` (pepper, identity_map) **НЕ удаляется** — при повторной установке [1] старые ссылки продолжат работать. Для инвалидации ссылок есть отдельный пункт [3] «Сгенерировать pepper заново».
+
+#### Новая функция `_stop_service_reliable()`
+
+Используется в пункте [4] «Выключить сервис»: mask → stop → `_kill_port_holder`. После остановки юнит остаётся замаскированным — это **намеренно**, чтобы `Restart=always` не воскресил процесс.
+
+#### Новая функция `_kill_port_holder(port)`
+
+Парсит `ss -tlnp`, находит **только строку** с нужным портом (не весь вывод — иначе убил бы sshd/xray/etc.), извлекает PID и `kill -9`. Не убивает PID=1 (init). Тихо возвращает False если ss недоступен/вернул ошибку.
+
+#### Изменения в `_install_service()`
+
+Добавлен `systemctl unmask` перед `enable` — без этого повторная установка [1] после остановки [4] молча не запускает сервис (unit symlink на `/dev/null`, `systemctl enable` это игнорирует). Та же логика что в `do_manage_web_panel()` item '1' run branch.
+
+### Изменения в меню `do_subscription_menu()`
+
+| Пункт | Что изменилось |
+|---|---|
+| **1 (Включить / переустановить)** | `_install_service` делает `unmask` перед `enable` — корректный старт после [4] |
+| **4 (Выключить сервис)** | Использует `_stop_service_reliable()` вместо `systemctl disable --now`. Порт **реально** освобождается. |
+| **6 (НОВЫЙ — Удалить полностью)** | Подтверждение y/N → `uninstall_subscription_service()` (systemd unit + ufw-порт + процесс). `subscription.json` (pepper, identity_map) НЕ трогается — старые ссылки переживут reinstall. |
+
+### Тесты — `tests/test_subscription_uninstall.py` (13 шт)
+
+- `TestKillPortHolder` (4) — kill по PID из ss, не убивает PID=1, не падает при ошибке ss
+- `TestStopServiceReliable` (2) — mask ДО stop, kill fallback ПОСЛЕ stop
+- `TestUninstallSubscriptionService` (6) — полный pipeline, порядок mask→stop→disable→daemon-reload→reset-failed, unit-файл удалён, kill fallback вызван, pepper сохранён, ufw-порт закрыт, не падает если unit уже удалён
+- `TestInstallServiceUnmask` (1) — unmask перед enable
+
+Все 112 тестов (subscription + web panel firewall) проходят.
+
+---
+
 ## FEAT: Content negotiation в подписке + управление файрволлом веб-панели — 20 июля 2026
 
 **Два крупных улучшения: единая подписка теперь отдаёт правильный формат каждому клиенту автоматически, а веб-панель (admin + user portal) больше не оставляет открытых ufw-портов при остановке или удалении.**
