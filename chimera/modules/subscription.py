@@ -526,9 +526,31 @@ def _build_userinfo_header(user: dict) -> Optional[str]:
 # Добавление нового протокола в подписку = ОДНА строка в этом списке.
 # Модуль должен импортироваться без side effects и иметь функцию
 # get_subscription_uris, которая никогда не бросает исключение.
+#
+# v4.25: реестр расширен с 2 до 5 протоколов. Теперь подписка включает
+# ВСЕ синхронизируемые спутниковые протоколы (кроме тех что уже hardcoded
+# ниже: Telemt/Mieru/NaiveProxy/FPTN — они в build_subscription_body
+# напрямую через _build_*_uris функции).
+#
+# Hardcoded в build_subscription_body (НЕ в этом реестре):
+#   • VLESS (всегда, через _build_vless_uri)
+#   • Telemt/MTProto (через _build_telemt_uri)
+#   • Mieru (через _build_mieru_uris)
+#   • NaiveProxy (через _build_naive_uris)
+#   • FPTN (через _build_fptn_uris)
+#
+# В реестре (v4.25):
+#   • trusttunnel      — tt:// deep-link
+#   • singbox_menu     — trojan://, anytls://, tuic://, vless:// (WS-CDN)
+#   • wdtt             — qwdtt:// (WireGuard-over-TURN, по owner_email)
+#   • awg_peers        — vpn:// (Amnezia VPN deep-link, по owner_email)
+#   • hysteria2_sync   — hysteria2:// (shared password, одинакова для всех)
 _SUBSCRIBABLE_PROTOCOLS = [
     "chimera.modules.trusttunnel",
     "chimera.modules.singbox_menu",
+    "chimera.modules.wdtt",
+    "chimera.modules.awg_peers",
+    "chimera.modules.hysteria2_sync",
 ]
 
 
@@ -687,9 +709,12 @@ def build_subscription_singbox_config(user: dict) -> str:
 def _filter_safe_links(links: list[str]) -> list[str]:
     """Убирает из списка ссылок те, что не распознаются большинством клиентов.
 
-    naive+https:// и mierus:// — нестандартные share-link форматы,
-    которые Karing и некоторые другие клиенты не умеют парсить.
+    naive+https://, mierus://, qwdtt://, vpn:// — нестандартные share-link
+    форматы, которые Karing и некоторые другие клиенты не умеют парсить.
     При format=base64_safe они исключаются.
+
+    vless://, trojan://, anytls://, tuic://, tt://, hysteria2:// —
+    поддерживаются (стандартные или широко имплементированные).
     """
     filtered = []
     for link in links:
@@ -697,6 +722,10 @@ def _filter_safe_links(links: list[str]) -> list[str]:
             continue
         if link.startswith("mierus://"):
             continue
+        if link.startswith("qwdtt://"):
+            continue  # qWDTT — только Android APK, не стандартный share-link
+        if link.startswith("vpn://"):
+            continue  # Amnezia VPN deep-link — только Amnezia Client
         filtered.append(link)
     return filtered
 

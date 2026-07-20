@@ -443,6 +443,53 @@ def rename_user(old_name: str, new_name: str) -> bool:
     )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SUBSCRIPTION CONTRACT (v4.25) — для реестра _SUBSCRIBABLE_PROTOCOLS
+#
+#  Возвращает vpn:// URI (Amnezia VPN deep-link) для AWG peer юзера
+#  (по owner_email). Используется subscription.py для включения AWG
+#  в единую подписку.
+# ══════════════════════════════════════════════════════════════════════════════
+def get_subscription_uris(user: dict) -> list:
+    """Возвращает vpn:// URI для AWG peer юзера (по owner_email).
+
+    Формат — Amnezia VPN deep-link (vpn:// + base64 JSON с конфигом).
+    Генерируется через awgs_qr_build_vpn_uri из awg_qr.py.
+
+    Если у юзера нет peer (не синхронизирован) — пустой список.
+    """
+    try:
+        from chimera.modules.awg_state import (
+            awgs_state_is_installed, awgs_state_find_peer_by_owner,
+            awgs_state_load,
+        )
+        if not awgs_state_is_installed():
+            return []
+        email = user.get("email", "") or ""
+        if not email:
+            return []
+        peer = awgs_state_find_peer_by_owner(email)
+        if not peer:
+            return []
+        # Проверяем что peer не истёк.
+        expires = peer.get("expires_at", "")
+        if expires:
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                exp_dt = _dt.fromisoformat(expires.replace("Z", "+00:00"))
+                if _dt.now(_tz.utc) > exp_dt:
+                    return []  # истёк
+            except Exception:
+                pass  # не парсится — считаем валидным
+        # Генерируем vpn:// URI.
+        from chimera.modules.awg_qr import awgs_qr_build_vpn_uri
+        server_state = awgs_state_load()
+        uri = awgs_qr_build_vpn_uri(peer, server_state)
+        return [uri] if uri else []
+    except Exception:
+        return []
+
+
 # ── LIST ────────────────────────────────────────────────────────────────────
 
 def awg_peer_list(verbose: bool = False, json_output: bool = False) -> None:

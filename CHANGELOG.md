@@ -2,6 +2,112 @@
 
 ---
 
+## FEAT(3): Все 9 протоколов в единой подписке — 21 июля 2026
+
+**Реестр `_SUBSCRIBABLE_PROTOCOLS` расширен с 2 до 5. Теперь единая подписка включает ВСЕ 9 синхронизируемых протоколов. qWDTT, AWG и Hysteria2 автоматически появляются в `/sub/{token}` если установлены.**
+
+### Полный список протоколов в подписке (9 шт)
+
+| # | Протокол | Способ включения | Формат ссылки |
+|---|---|---|---|
+| 1 | **VLESS** (REALITY/xHTTP) | hardcoded в `build_subscription_body` | `vless://uuid@host:443?...` |
+| 2 | **Telemt/MTProto** | hardcoded `_build_telemt_uri` | `tg://proxy?server=...` |
+| 3 | **Mieru** | hardcoded `_build_mieru_uris` | `mierus://user:pass@ip:port` |
+| 4 | **NaiveProxy** | hardcoded `_build_naive_uris` | `naive+https://user:pass@host:port/` |
+| 5 | **FPTN** | hardcoded `_build_fptn_uris` | `fptn://...` |
+| 6 | **TrustTunnel** | `_SUBSCRIBABLE_PROTOCOLS` registry | `tt://...` (deep-link) |
+| 7 | **sing-box** (ShadowTLS/AnyTLS/TUIC/Trojan/VLESS-WS-CDN) | registry | `trojan://`, `anytls://`, `tuic://`, `vless://` |
+| 8 | **qWDTT** | **НОВЫЙ** registry | `qwdtt://config?...&pass=<password>` |
+| 9 | **AWG** (AmneziaWG) | **НОВЫЙ** registry | `vpn://...` (Amnezia VPN deep-link) |
+| 10 | **Hysteria2** | **НОВЫЙ** registry | `hysteria2://password@host:port?...` |
+
+### Что нового (3 протокола в подписке)
+
+#### qWDTT (`chimera/modules/wdtt.py` → `get_subscription_uris`)
+
+Возвращает `qwdtt://config?` ссылку для юзера (по `owner_email`):
+```
+qwdtt://config?name=qWDTT-1.2.3.4&peer=1.2.3.4:56000&hashes=ABC123&workers=16&port=9000&pass=secret_pwd
+```
+
+Логика:
+- Если WDTT не установлен → `[]`
+- Если у юзера нет пароля (не синхронизирован) → `[]`
+- Если пароль истёк или деактивирован → `[]`
+- Иначе → возвращает ссылку с VK-хешем из password entry (или placeholder `ВК_ХЕШ`)
+
+#### AWG (`chimera/modules/awg_peers.py` → `get_subscription_uris`)
+
+Возвращает `vpn://` URI (Amnezia VPN deep-link) для юзера (по `owner_email`):
+```
+vpn://<base64-encoded JSON config>
+```
+
+Логика:
+- Если AWG не установлен → `[]`
+- Если у юзера нет peer → `[]`
+- Если peer истёк → `[]`
+- Иначе → генерирует URI через `awgs_qr_build_vpn_uri` (внутри base64 JSON с ключами, IP, параметрами Amnezia)
+
+#### Hysteria2 (`chimera/modules/hysteria2_sync.py` → `get_subscription_uris`)
+
+Возвращает `hysteria2://` ссылку (shared, одинакова для всех юзеров):
+```
+hysteria2://password@1.2.3.4:443?insecure=1&sni=example.com#Hysteria2
+```
+
+Логика:
+- Если Hysteria2 не включена → `[]`
+- Если нет активной exit-ноды → `[]`
+- Иначе → `linkqr_lib.build_hysteria2_link()` (shared password)
+
+### Content negotiation — `?format=base64_safe`
+
+Расширен фильтр `_filter_safe_links` — теперь исключает также `qwdtt://` и `vpn://` (нестандартные форматы, которые Karing и большинство универсальных клиентов не умеют парсить):
+
+| Формат | В base64 | В base64_safe |
+|---|---|---|
+| `vless://` | ✅ | ✅ |
+| `trojan://`, `anytls://`, `tuic://` | ✅ | ✅ |
+| `tt://` (TrustTunnel) | ✅ | ✅ |
+| `hysteria2://` | ✅ | ✅ |
+| `tg://proxy` (Telemt) | ✅ | ✅ |
+| `naive+https://` | ✅ | ❌ filtered |
+| `mierus://` | ✅ | ❌ filtered |
+| `qwdtt://` | ✅ | ❌ filtered (NEW) |
+| `vpn://` (AWG) | ✅ | ❌ filtered (NEW) |
+
+### Изменения в коде
+
+| Файл | Что изменилось |
+|---|---|
+| `chimera/modules/subscription.py` | `_SUBSCRIBABLE_PROTOCOLS` расширен с 2 до 5: +wdtt, +awg_peers, +hysteria2_sync. `_filter_safe_links` фильтрует `qwdtt://` и `vpn://` в safe mode. |
+| `chimera/modules/wdtt.py` | Добавлен `get_subscription_uris(user)` — возвращает `qwdtt://` ссылку по owner_email. Проверяет TTL, deactivation, existence. |
+| `chimera/modules/awg_peers.py` | Добавлен `get_subscription_uris(user)` — возвращает `vpn://` URI (Amnezia VPN deep-link) по owner_email. Через `awgs_qr_build_vpn_uri`. |
+| `chimera/modules/hysteria2_sync.py` | Добавлен `get_subscription_uris(user)` — возвращает `hysteria2://` ссылку (shared). Через `linkqr_lib.build_hysteria2_link`. |
+| `tests/test_subscription_registry.py` | Добавлены 4 новых testclass: `TestWDTTSubscriptionUris` (3 теста), `TestAWGSubscriptionUris` (3), `TestHysteria2SubscriptionUris` (2), `TestSafeLinkFilterV425` (3). +1 test в `TestSubscribableRegistry` для проверки реестра. |
+
+### Тесты — 12 новых
+
+- `TestSubscribableRegistry.test_registry_contains_v425_protocols` (1) — реестр содержит wdtt, awg_peers, hysteria2_sync
+- `TestWDTTSubscriptionUris` (3) — empty when not installed, empty when no password, qwdtt:// link generation
+- `TestAWGSubscriptionUris` (3) — empty when not installed, empty when no peer, vpn:// URI generation
+- `TestHysteria2SubscriptionUris` (2) — empty when disabled, hysteria2:// link when enabled
+- `TestSafeLinkFilterV425` (3) — filters qwdtt://, filters vpn://, keeps standard protocols
+
+Все 308 тестов (subscription + sync + naiveproxy + mieru + trusttunnel + rest_api + proto_port) проходят.
+
+### Что проверить на сервере
+
+1. Установить qWDTT → после bulk-provisioning у каждого юзера появится `qwdtt://` в подписке
+2. Установить AWG standalone → у каждого юзера `vpn://` (Amnezia deep-link) в подписке
+3. Включить Hysteria2 → `hysteria2://` (shared) в подписке у всех юзеров
+4. Открыть подписку в NekoBox (`?format=singbox`) → видны outbounds для trojan/anytls/tuic
+5. Открыть подписку в Karing (`?format=base64_safe` или UA-based) → qwdtt:// и vpn:// отфильтрованы, остальные видны
+6. Открыть подписку в v2rayN (default base64) → все 9 протоколов видны
+
+---
+
 ## FEAT(2): Sync для qWDTT, FPTN, AWG, Hysteria2 — 21 июля 2026
 
 **Расширил реестр `_SYNCABLE_PROTOCOLS` с 5 до 9 протоколов. Теперь двусторонняя синхронизация VLESS-юзеров работает со ВСЕМИ спутниковыми протоколами проекта.**
