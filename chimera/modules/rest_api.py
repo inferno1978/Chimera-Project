@@ -1851,19 +1851,59 @@ WantedBy=multi-user.target
 
 
 def uninstall_web_service() -> None:
-    """Останавливает и удаляет systemd-сервис + закрывает ufw-порт."""
+    """Останавливает и удаляет systemd-сервис + закрывает ufw-порт.
+
+    Проблема с Restart=on-failure: при systemctl stop процесс убивается,
+    но systemd перезапускает его (т.к. юнит-файл ещё на диске).
+    Решение: mask → stop → удалить юнит → daemon-reload → reset-failed →
+    kill по порту если процесс всё ещё жив (fallback).
+    """
     core = _core_module()
     _run = core._run
-    # Читаем конфиг ДО остановки — нужно знать host/port для ufw.
+    # Читаем конфиг ДО остановки — нужно знать host/port для ufw и kill.
     cfg = _web_config_load()
     old_host = cfg.get("host", DEFAULT_WEB_HOST)
     old_port = cfg.get("port", DEFAULT_WEB_PORT)
     # Если панель была открыта наружу — закрыть ufw-порт.
     if old_host == "0.0.0.0":
         _ufw_web_panel_close(old_port)
-    _run(["systemctl", "disable", "--now", "vless-web"], check=False, quiet=True)
+    # 1. Mask — предотвращает перезапуск после stop (systemd больше не
+    #    читает юнит-файл для этого сервиса, /etc/systemd/system/vless-web.service
+    #    заменяется symlink на /dev/null).
+    _run(["systemctl", "mask", "vless-web"], check=False, quiet=True)
+    # 2. Stop — теперь процесс не перезапустится (mask блокирует Restart=).
+    _run(["systemctl", "stop", "vless-web"], check=False, quiet=True)
+    # 3. Disable — убирает из автозагрузки.
+    _run(["systemctl", "disable", "vless-web"], check=False, quiet=True)
+    # 4. Удаляем юнит-файл (и symlink от mask, если остался).
     WEB_SERVICE_FILE.unlink(missing_ok=True)
+    # mask создаёт symlink /etc/systemd/system/vless-web.service → /dev/null
+    # — его тоже нужно убрать, иначе при следующей установке сервис не стартует.
+    mask_link = Path("/etc/systemd/system/vless-web.service")
+    if mask_link.is_symlink():
+        try:
+            mask_link.unlink()
+        except Exception:
+            pass
+    # 5. Daemon-reload — systemd забывает про сервис.
     _run(["systemctl", "daemon-reload"], check=False, quiet=True)
+    # 6. Reset-failed — очищает состояние "failed" (иначе при следующей
+    #    установке systemd может ругаться на "start-limit-hit").
+    _run(["systemctl", "reset-failed", "vless-web"], check=False, quiet=True)
+    # 7. Fallback: если процесс всё ещё слушает порт (mask не сработал
+    #    на старых systemd, или процесс был запущен вручную а не через
+    #    systemd) — найти PID через ss и убить через kill -9.
+    try:
+        r = _run(["ss", "-tlnp"], capture=True, check=False, quiet=True)
+        if r.stdout and f":{old_port}" in r.stdout:
+            # Парсим PID из вывода ss: users:(("python3",pid=4966,fd=3))
+            import re as _re
+            m = _re.search(r'pid=(\d+)', r.stdout)
+            if m:
+                pid = int(m.group(1))
+                _run(["kill", "-9", str(pid)], check=False, quiet=True)
+    except Exception:
+        pass
     cfg["enabled"] = False
     _web_config_save(cfg)
 
@@ -1972,12 +2012,16 @@ def do_manage_web_panel() -> None:
                 # закрываем ufw-порт, чтобы не оставлять дыру при остановленном сервисе.
                 if exposed:
                     _ufw_web_panel_close(port)
+                # Mask перед stop — предотвращает перезапуск из-за Restart=on-failure.
+                core._run(["systemctl", "mask", "vless-web"], check=False, quiet=True)
                 core._run(["systemctl", "stop", "vless-web"], check=False, quiet=True)
                 success("Сервис остановлен")
             else:
-                # Запускаем сервис. Если панель была открыта наружу (0.0.0.0) —
+                # Запускаем сервис. Сначала unmask (если был замаскирован при остановке).
+                # Если панель была открыта наружу (0.0.0.0) —
                 # переоткрываем ufw-порт через install_web_service (а не голый
                 # systemctl start, который порт не откроет).
+                core._run(["systemctl", "unmask", "vless-web"], check=False, quiet=True)
                 if exposed:
                     install_web_service(port=port, expose=True)
                 else:
