@@ -973,26 +973,29 @@ class TestSyncAllFromVless(unittest.TestCase):
         self._fake_proto.ensure_user.assert_not_called()
 
     def test_deduplicates_names(self):
-        """Если несколько VLESS-юзеров с одним name — синхронизируется один раз."""
+        """v4.25: НЕ дедуплицирует по name — каждый VLESS-юзер синхронизируется
+        отдельно (у каждого свой UUID, sing-box/trusttunnel используют UUID как
+        ключ). Раньше (v4.24) дедуплицировало по name — это ломало сценарий
+        когда два юзера с одним name (например Ivan и Ivan) оба хотят аккаунт."""
         from chimera.modules import rest_api
         vless_users = [
-            {"name": "alice", "email": "a1@x.com", "disabled": False},
-            {"name": "alice", "email": "a2@x.com", "disabled": False},
+            {"name": "alice", "email": "a1@x.com", "disabled": False, "uuid": "u1"},
+            {"name": "alice", "email": "a2@x.com", "disabled": False, "uuid": "u2"},
         ]
         stats = rest_api._sync_all_from_vless(vless_users)
-        self.assertEqual(stats["_test_fake_proto"]["created"], 1)  # только один alice
-        self._fake_proto.ensure_user.assert_called_once_with("alice")
+        # Оба alice синхронизируются (у них разные UUID).
+        self.assertEqual(stats["_test_fake_proto"]["created"], 2)
 
     def test_skips_empty_names(self):
-        """Пустые имена не передаются протоколу."""
+        """Пустые имена И email не передаются протоколу. v4.25: если есть
+        email но нет name — юзер всё равно синхронизируется (name = email)."""
         from chimera.modules import rest_api
         vless_users = [
-            {"name": "", "disabled": False},
-            {"name": "alice", "disabled": False},
+            {"name": "", "email": "", "disabled": False},
+            {"name": "alice", "email": "a@x.com", "disabled": False},
         ]
         stats = rest_api._sync_all_from_vless(vless_users)
         self.assertEqual(stats["_test_fake_proto"]["created"], 1)
-        self._fake_proto.ensure_user.assert_called_once_with("alice")
 
     def test_protocol_stats_includes_all_protocols(self):
         """Статистика включает все протоколы из реестра, даже неактивные."""

@@ -250,3 +250,153 @@ def singbox_state_list_users(protocol: str = "") -> list[dict]:
                 result.append(u_copy)
 
     return result
+
+
+# ============================================================================
+#  SYNC CONTRACT (v4.25) — для реестра _SYNCABLE_PROTOCOLS в rest_api.py
+#
+#  sing-box особенный:
+#    • Identity = UUID (canonical VLESS UUID). НЕ email/name — у sing-box
+#      внутренний users[] массив с {uuid, password, name} для каждого
+#      включённого inbound'а (shadowtls/anytls/trojan/tuic).
+#    • Пароль генерируется случайно (singbox_gen_password) — НЕ детерминирован.
+#      При remove+add пароль меняется → клиентам нужно перевыдать ссылки.
+#    • NO сервис-рестарт при add/remove — только state.json обновляется.
+#      sing-box подхватывает изменения при следующем reload/restart через
+#      singbox_generate_config + singbox_validate_config + systemctl reload.
+#      Для интерактивных ops (TUI/REST) мы делаем это здесь. Cron-батч
+#      идёт через user_lifecycle.batch_context().
+#
+#  Реестр вызывает:
+#    is_active()           — sing-box сервис запущен
+#    ensure_user_full(u)   — добавить UUID во все включённые inbounds
+#    remove_user_full(u)   — удалить UUID из всех inbounds
+#    rename_user_full(o,n) — update name field (UUID не меняется)
+# ============================================================================
+def is_active() -> bool:
+    """True если sing-box установлен И сервис запущен."""
+    try:
+        from chimera.modules.singbox_common import _service_active
+        # Проверяем что хотя бы один inbound включён.
+        state = singbox_state_load()
+        if not state.get("installed"):
+            return False
+        any_enabled = any(
+            ib.get("enabled") for ib in state.get("inbounds", {}).values()
+        )
+        if not any_enabled:
+            return False
+        return _service_active()
+    except Exception:
+        return False
+
+
+def ensure_user_full(user: dict) -> bool:
+    """Добавляет UUID пользователя во все включённые sing-box inbounds.
+
+    Требует uuid в user dict. Если уже есть во всех inbound'ах — no-op.
+    Пароль генерируется случайно для каждого inbound'а. State обновляется,
+    конфиг регенерируется, sing-box reload.
+    """
+    try:
+        uuid_str = user.get("uuid", "") or ""
+        if not uuid_str:
+            return False
+        # name = display name (для логов sing-box, не влияет на auth).
+        name = user.get("name") or user.get("email") or user.get("device_label") or uuid_str[:8]
+        # singbox_state_add_user_to_all_protocols идемпотентна (проверяет дубликат).
+        ok = singbox_state_add_user_to_all_protocols(uuid_str, name)
+        if not ok:
+            return False
+        # Регенерируем конфиг и reload.
+        try:
+            from chimera.modules.singbox_config import singbox_generate_config
+            from chimera.modules.singbox_common import _systemctl
+            singbox_generate_config()
+            _systemctl("reload")
+        except Exception:
+            pass  # не критично — state сохранён, при следующем reload подхватит
+        return True
+    except Exception:
+        return False
+
+
+def ensure_user(name: str) -> bool:
+    """Legacy contract — НЕ работает для sing-box без UUID.
+    sing-box идентифицирует пользователей по UUID, не по name.
+
+    Возвращает True (no-op) чтобы не ломать диспетчер. TUI/REST API
+    должны передавать full user dict через ensure_user_full.
+    """
+    return True
+
+
+def remove_user_full(user: dict) -> bool:
+    """Удаляет UUID из всех sing-box inbounds."""
+    try:
+        uuid_str = user.get("uuid", "") or ""
+        if not uuid_str:
+            return False
+        ok = singbox_state_remove_user_from_all_protocols(uuid_str)
+        if not ok:
+            return False
+        try:
+            from chimera.modules.singbox_config import singbox_generate_config
+            from chimera.modules.singbox_common import _systemctl
+            singbox_generate_config()
+            _systemctl("reload")
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def remove_user(name: str) -> bool:
+    """Legacy contract — не работает без UUID. No-op."""
+    return True
+
+
+def rename_user_full(old_user: dict, new_user: dict) -> bool:
+    """Rename = обновить name field во всех inbounds (UUID не меняется).
+
+    sing-box users идентифицируются по UUID, поэтому rename не требует
+    remove+add — просто обновляем поле name в существующих записях.
+    Пароль НЕ меняется (в отличие от remove+add).
+    """
+    try:
+        uuid_str = new_user.get("uuid") or old_user.get("uuid", "") or ""
+        if not uuid_str:
+            return False
+        new_name = (new_user.get("name") or new_user.get("email")
+                    or new_user.get("device_label") or uuid_str[:8])
+        state = singbox_state_load()
+        inbounds = state.get("inbounds", {})
+        changed = False
+        for proto_name, proto_config in inbounds.items():
+            if not proto_config.get("enabled"):
+                continue
+            if proto_name not in ("shadowtls", "anytls", "trojan", "tuic"):
+                continue
+            users = proto_config.get("users", [])
+            for u in users:
+                if u.get("uuid") == uuid_str:
+                    u["name"] = new_name
+                    changed = True
+        if changed:
+            singbox_state_save(state)
+            try:
+                from chimera.modules.singbox_config import singbox_generate_config
+                from chimera.modules.singbox_common import _systemctl
+                singbox_generate_config()
+                _systemctl("reload")
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def rename_user(old_name: str, new_name: str) -> bool:
+    """Legacy contract — не работает без UUID. No-op."""
+    return True

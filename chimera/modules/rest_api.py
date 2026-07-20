@@ -266,14 +266,50 @@ def _sync_users_from_config() -> int:
 # Внутренняя политика каждого протокола (валидация имён, лимиты портов,
 # "нельзя удалить последнего" и т.п.) — полностью инкапсулирована в модуле.
 # Реестр про это ничего не знает, он просто вызывает 4 функции контракта.
+#
+# КОНТРАКТ модуля (каждый syncable-протокол экспортирует):
+#   is_active() -> bool
+#       True если сервис установлен И запущен (systemctl is-active == active).
+#       Синхронизация пропускается если False.
+#
+#   ensure_user(name: str) -> bool           # legacy contract — только name
+#   ensure_user_full(user: dict) -> bool     # extended contract — full user dict
+#       Создаёт аккаунт. Если есть ensure_user_full — dispatcher предпочитает её
+#       (даёт доступ к email, uuid, device_label — нужно для trusttunnel/singbox).
+#       Возвращает True если создан или уже существует. Никогда не бросает исключение.
+#
+#   remove_user(name: str) -> bool
+#   remove_user_full(user: dict) -> bool     # extended
+#       Аналогично — удаляет аккаунт.
+#
+#   rename_user(old: str, new: str) -> bool
+#   rename_user_full(old_user: dict, new_user: dict) -> bool   # extended
+#       Переименовывает. Legacy: только имена. Extended: full dicts.
+#
+# Идемпотентность: все функции безопасны при повторном вызове (no-op если
+# уже в нужном состоянии). Это позволяет вызывать sync при каждом install/
+# add/remove без побочных эффектов.
+#
+# Текущий реестр (v4.25): все 5 спутниковых протоколов — mtproto, naiveproxy,
+# mieru, trusttunnel, singbox. VLESS НЕ в реестре (это canonical source, не
+# satellite — синхронизация идёт ОТ него, не К нему).
 _SYNCABLE_PROTOCOLS = [
     "chimera.modules.mtproto",
+    "chimera.modules.naiveproxy",
+    "chimera.modules.mieru",
+    "chimera.modules.trusttunnel",
+    "chimera.modules.singbox",
 ]
 
 
-def _sync_dispatch(method: str, *args) -> dict:
+def _sync_dispatch(method: str, *args, user: dict = None) -> dict:
     """Вызывает method (ensure_user/remove_user/rename_user) на каждом
     активном syncable-протоколе.
+
+    Если передан `user` (dict с email, uuid, name, device_label) —
+    dispatcher предпочитает `{method}_full(user)` если модуль её экспортирует
+    (extended contract — нужен для trusttunnel/singbox которые требуют UUID).
+    Иначе fallback на legacy `{method}(*args)` (только name).
 
     Возвращает {proto_short_name: bool|None}:
       • True/False — результат вызова method на протоколе
@@ -287,7 +323,7 @@ def _sync_dispatch(method: str, *args) -> dict:
     import importlib
     results: dict = {}
     for modpath in _SYNCABLE_PROTOCOLS:
-        # proto — короткое имя для ключа в ответе (mtproto).
+        # proto — короткое имя для ключа в ответе (mtproto, naiveproxy, etc).
         proto = modpath.rsplit(".", 1)[-1]
         try:
             mod = importlib.import_module(modpath)
@@ -301,6 +337,15 @@ def _sync_dispatch(method: str, *args) -> dict:
             if not mod.is_active():
                 results[proto] = None
                 continue
+            # Если передан full user dict и модуль поддерживает extended contract —
+            # предпочитаем _full вариант (доступ к email/uuid/device_label).
+            if user is not None:
+                full_method = f"{method}_full"
+                fn = getattr(mod, full_method, None)
+                if fn is not None:
+                    results[proto] = fn(user)
+                    continue
+            # Fallback: legacy contract — method(*args) только с name.
             fn = getattr(mod, method)
             results[proto] = fn(*args)
         except Exception:
@@ -310,27 +355,40 @@ def _sync_dispatch(method: str, *args) -> dict:
     return results
 
 
-def _sync_ensure_user(name: str) -> dict:
+def _sync_ensure_user(name: str, user: dict = None) -> dict:
     """Создаёт аккаунт `name` во всех активных syncable-протоколах.
+
+    Если передан `user` (dict с email/uuid/name/device_label) — используется
+    extended contract (ensure_user_full) для протоколов которым нужен UUID
+    (singbox, trusttunnel). Иначе fallback на legacy ensure_user(name).
 
     Возвращает {proto: bool|None}. См. _sync_dispatch для значений.
     """
-    return _sync_dispatch("ensure_user", name)
+    return _sync_dispatch("ensure_user", name, user=user)
 
 
-def _sync_remove_user(name: str) -> dict:
+def _sync_remove_user(name: str, user: dict = None) -> dict:
     """Удаляет аккаунт `name` во всех активных syncable-протоколах."""
-    return _sync_dispatch("remove_user", name)
+    return _sync_dispatch("remove_user", name, user=user)
 
 
-def _sync_rename_user(old: str, new: str) -> dict:
-    """Переименовывает old → new во всех активных syncable-протоколах."""
+def _sync_rename_user(old: str, new: str,
+                      old_user: dict = None, new_user: dict = None) -> dict:
+    """Переименовывает old → new во всех активных syncable-протоколах.
+
+    Если переданы old_user/new_user dicts — используется extended contract
+    (rename_user_full) для протоколов с UUID-зависимостью.
+    """
+    # Для rename_full передаём пару (old_user, new_user) как один tuple-arg.
+    if old_user is not None and new_user is not None:
+        return _sync_dispatch("rename_user", old, new,
+                              user={"old": old_user, "new": new_user})
     return _sync_dispatch("rename_user", old, new)
 
 
 def _sync_all_from_vless(users: list[dict]) -> dict:
     """Массовая синхронизация: для каждого syncable-протокола вызывает
-    ensure_user на всех валидных VLESS-именах.
+    ensure_user_full(user) на всех активных VLESS-пользователях.
 
     Возвращает {proto: {"created": N, "skipped": N}} — статистика по
     каждому протоколу. skipped = сумма всех причин пропуска (невалидное
@@ -339,15 +397,18 @@ def _sync_all_from_vless(users: list[dict]) -> dict:
 
     Протоколы, у которых is_active() вернул False — в ответе со значением
     {"created": 0, "skipped": 0} (no-op, не считается ошибкой).
+
+    v4.25: передаёт ПОЛНЫЙ user dict (с email, uuid, name, device_label)
+    вместо просто name. Это позволяет singbox использовать UUID, trusttunnel
+    — email+UUID для derive пароля. Legacy fallback на ensure_user(name)
+    сохранён для протоколов без _full варианта.
     """
     import importlib
-    # Собираем уникальные VLESS-имена (не disabled). Этот шаг общий для
-    # всех протоколов — нет смысла дублировать в каждом модуле.
-    vless_names: set[str] = set()
+    # Собираем активных VLESS-пользователей (не disabled). Передаём full dict.
+    active_users: list[dict] = []
     for u in users:
-        name = u.get("name", "") or ""
-        if not u.get("disabled", False) and name:
-            vless_names.add(name)
+        if not u.get("disabled", False) and (u.get("name") or u.get("email")):
+            active_users.append(u)
     stats: dict = {}
     for modpath in _SYNCABLE_PROTOCOLS:
         proto = modpath.rsplit(".", 1)[-1]
@@ -359,8 +420,20 @@ def _sync_all_from_vless(users: list[dict]) -> dict:
         try:
             if not mod.is_active():
                 continue  # не активен — no-op
-            for name in vless_names:
-                ok = mod.ensure_user(name)
+            # Предпочитаем ensure_user_full если есть, иначе legacy ensure_user(name).
+            full_fn = getattr(mod, "ensure_user_full", None)
+            legacy_fn = getattr(mod, "ensure_user", None)
+            for u in active_users:
+                ok = False
+                try:
+                    if full_fn is not None:
+                        ok = bool(full_fn(u))
+                    elif legacy_fn is not None:
+                        # Legacy: передаём name (или email если name пусто).
+                        name = u.get("name") or u.get("email", "")
+                        ok = bool(legacy_fn(name))
+                except Exception:
+                    ok = False
                 if ok:
                     stats[proto]["created"] += 1
                 else:
@@ -1316,12 +1389,16 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-            # Автосинхронизация со всеми syncable-протоколами (Telemt,
-            # и любые будущие через реестр _SYNCABLE_PROTOCOLS).
-            # Создаёт аккаунт с тем же name в каждом активном протоколе,
-            # чтобы соответствующая ссылка появилась в User Portal без
-            # ручного шага в TUI. Возвращает {proto: bool|None}.
-            protocol_sync = _sync_ensure_user(name)
+            # v4.25: Автосинхронизация со всеми syncable-протоколами (NaiveProxy,
+            # Mieru, TrustTunnel, sing-box, Telemt). Создаёт аккаунт с тем же
+            # email/UUID в каждом активном протоколе, чтобы соответствующая
+            # ссылка появилась в User Portal без ручного шага в TUI.
+            # Передаём full user dict чтобы singbox/trusttunnel могли использовать
+            # UUID для derive пароля. Возвращает {proto: bool|None}.
+            _new_user_dict = {
+                "uuid": new_uuid, "email": email, "name": name,
+            }
+            protocol_sync = _sync_ensure_user(name, user=_new_user_dict)
 
             self._send_json({
                 "status": "created",
@@ -1361,6 +1438,9 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         # POST /api/users/{email}/toggle — заблокировать/разблокировать юзера.
         # Блокировка = disabled=True → юзер убирается из config.json (не может
         # подключиться). Разблокировка = disabled=False → юзер возвращается.
+        # v4.25: toggle теперь синхронизируется со всеми спутниковыми протоколами
+        # (NaiveProxy, Mieru, TrustTunnel, sing-box, Telemt) через
+        # _sync_remove_user (на disable) / _sync_ensure_user (на enable).
         m = re.match(r"^/api/users/(.+)/toggle$", path)
         if m:
             if not self._require_admin():
@@ -1382,6 +1462,11 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                         core._users_apply_to_config(users)
                     except Exception:
                         pass
+                    # v4.25: синхронизируем toggle со спутниковыми протоколами.
+                    if u["disabled"]:
+                        _sync_remove_user(u.get("name", ""), user=u)
+                    else:
+                        _sync_ensure_user(u.get("name", ""), user=u)
                     _new_state = "disabled" if u["disabled"] else "enabled"
                     self._send_json({"status": _new_state, "email": email})
                     return
@@ -1420,18 +1505,25 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "user not found"}, 404)
                 return
             old_name = target.get("name", "") or target.get("email", "").split("@")[0]
+            # Сохраняем old_user dict для full rename sync (нужно для sing-box
+            # и trusttunnel которые используют UUID, не name).
+            _old_user_dict = dict(target)
             target["name"] = new_name
             _save_users(users)
             # config.json Xray не нужно трогать — там используется email,
             # а не name. _users_apply_to_config не требуется.
-            # Автосинхронизация со всеми syncable-протоколами (Telemt,
-            # и любые будущие через реестр _SYNCABLE_PROTOCOLS). Каждый
-            # протокол переименовывает аккаунт с сохранением своих данных
-            # (Telemt — секрет). Если протокол не активен
-            # или имя не подходит под его спеку — это не ошибка, VLESS всё
-            # равно переименован. Возвращаем protocol_sync = {proto: bool|None}
+            # v4.25: Автосинхронизация со всеми syncable-протоколами (NaiveProxy,
+            # Mieru, TrustTunnel, sing-box, Telemt). Каждый протокол переименовывает
+            # аккаунт с сохранением своих данных (Telemt — секрет, sing-box —
+            # UUID+password, TrustTunnel — derived password). Если протокол не
+            # активен или имя не подходит под его спеку — это не ошибка, VLESS
+            # всё равно переименован. Возвращаем protocol_sync = {proto: bool|None}
             # для информативного toast в админ-панели.
-            protocol_sync = _sync_rename_user(old_name, new_name)
+            _new_user_dict = dict(target)
+            protocol_sync = _sync_rename_user(
+                old_name, new_name,
+                old_user=_old_user_dict, new_user=_new_user_dict,
+            )
             self._send_json({
                 "status": "renamed",
                 "email": email,
@@ -1619,16 +1711,18 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 core._users_apply_to_config(new_users)
             except Exception:
                 pass
-            # Автосинхронизация со всеми syncable-протоколами (Telemt,
-            # и любые будущие через реестр _SYNCABLE_PROTOCOLS).
-            # Удаляет аккаунт в каждом активном протоколе, чтобы не
-            # оставлять "висящие" аккаунты для удалённого VLESS-юзера.
+            # v4.25: Автосинхронизация со всеми syncable-протоколами (NaiveProxy,
+            # Mieru, TrustTunnel, sing-box, Telemt). Удаляет аккаунт в каждом
+            # активном протоколе, чтобы не оставлять "висящие" аккаунты для
+            # удалённого VLESS-юзера. Передаём full user dict чтобы singbox/
+            # trusttunnel могли найти аккаунт по UUID (не только по name/email).
             # Возвращает {proto: bool|None}.
             protocol_sync = {}
             if deleted_user is not None:
                 protocol_sync = _sync_remove_user(
                     deleted_user.get("name", "") or
-                    deleted_user.get("email", "").split("@")[0]
+                    deleted_user.get("email", "").split("@")[0],
+                    user=deleted_user,
                 )
             self._send_json({
                 "status": "deleted", "email": email,

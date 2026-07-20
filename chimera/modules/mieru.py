@@ -871,6 +871,22 @@ def _run_install_inner() -> None:
     # Обновляем локальную переменную для использования ниже
     state = new_state
 
+    # v4.25: bulk-provisioning всех существующих VLESS-пользователей в Mieru.
+    # После успешной установки Mieru активируется is_active()=True, и все
+    # VLESS-юзеры автоматически получают аккаунты в Mieru.
+    try:
+        from chimera.modules.rest_api import _sync_all_from_vless
+        from chimera.modules.users_manager import _unified_load_users
+        _vless_users = _unified_load_users()
+        if _vless_users:
+            print(f"  {CYAN}→{NC}  Синхронизирую {len(_vless_users)} VLESS-юзеров в Mieru...")
+            _stats = _sync_all_from_vless(_vless_users)
+            _mieru_stats = _stats.get("mieru", {})
+            if _mieru_stats.get("created", 0) > 0:
+                print(f"  {GREEN}✓{NC}  Добавлено в Mieru: {_mieru_stats['created']} юзеров")
+    except Exception as _e:
+        print(f"  {YELLOW}⚠{NC}  Sync VLESS-юзеров не удался: {_e}")
+
     # ── Итог ──────────────────────────────────────────────────────────────────
     server_ip      = _get_server_ip()
     uname          = users[0]["username"]
@@ -1195,6 +1211,131 @@ def _delete_user(users: list, state: dict) -> None:
         _run(["systemctl", "reload-or-restart", _SERVICE_NAME])
     print(f"  {GREEN}✓{NC}  Пользователь удалён.")
     _pause()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SYNC CONTRACT (v4.25) — для реестра _SYNCABLE_PROTOCOLS в rest_api.py
+#  См. naiveproxy.py для документации контракта.
+# ══════════════════════════════════════════════════════════════════════════════
+def _username_from_email(email: str) -> str:
+    """Convention: username = email.split('@')[0].strip()."""
+    return (email or "").split("@")[0].strip()
+
+def is_active() -> bool:
+    """True если Mieru установлен И сервис mita запущен."""
+    try:
+        if not _is_installed():
+            return False
+        r = _run(["systemctl", "is-active", _SERVICE_NAME],
+                 capture=True, check=False)
+        return r.returncode == 0 and r.stdout.strip() == "active"
+    except Exception:
+        return False
+
+def ensure_user_full(user: dict) -> bool:
+    """Создаёт Mieru-аккаунт из full user dict.
+
+    Username = email.split('@')[0]. Валидируется через _RE_USERNAME.
+    Пароль генерируется автоматически. /etc/mita/server.json
+    перегенерируется, mita перезапускается.
+    """
+    try:
+        if not _is_installed():
+            return True  # не установлено — пропускаем
+        email = user.get("email", "") or ""
+        if not email:
+            return False
+        username = _username_from_email(email)
+        if not username or not _RE_USERNAME.match(username):
+            return False
+        state = proto_load_state(_MODULE_STATE)
+        users = state.get("users", [])
+        if any(u.get("username") == username for u in users):
+            return True  # уже есть — идемпотентность
+        password = proto_gen_password()
+        users.append({"username": username, "password": password})
+        state["users"] = users
+        proto_save_state(_MODULE_STATE, state)
+        # Регенерируем server.json и перезапускаем mita.
+        _tp_name = state.get("traffic_preset", "basic")
+        _tp_config = _MIERU_TRAFFIC_PRESETS.get(_tp_name, {}).get("config")
+        cfg = _build_server_config(
+            users,
+            state.get("port_start", _DEFAULT_PORT_START),
+            state.get("port_end",   _DEFAULT_PORT_END),
+            state.get("protocol",   _DEFAULT_PROTOCOL),
+            traffic_pattern=_tp_config,
+        )
+        err = _apply_server_config(cfg)
+        if not err:
+            _run(["systemctl", "reload-or-restart", _SERVICE_NAME])
+        return True
+    except Exception as e:
+        try:
+            print(f"  {RED}✗{NC}  mieru.ensure_user_full: {e}")
+        except Exception:
+            pass
+        return False
+
+def ensure_user(name: str) -> bool:
+    """Legacy contract — принимает email или name."""
+    return ensure_user_full({"email": name, "name": name})
+
+def remove_user_full(user: dict) -> bool:
+    """Удаляет Mieru-аккаунт по full user dict."""
+    try:
+        if not _is_installed():
+            return True
+        email = user.get("email", "") or ""
+        username = _username_from_email(email)
+        if not username:
+            return False
+        state = proto_load_state(_MODULE_STATE)
+        users = state.get("users", [])
+        new_users = [u for u in users if u.get("username") != username]
+        if len(new_users) == len(users):
+            return True  # не было такого — идемпотентность
+        state["users"] = new_users
+        proto_save_state(_MODULE_STATE, state)
+        _tp_name = state.get("traffic_preset", "basic")
+        _tp_config = _MIERU_TRAFFIC_PRESETS.get(_tp_name, {}).get("config")
+        cfg = _build_server_config(
+            new_users,
+            state.get("port_start", _DEFAULT_PORT_START),
+            state.get("port_end",   _DEFAULT_PORT_END),
+            state.get("protocol",   _DEFAULT_PROTOCOL),
+            traffic_pattern=_tp_config,
+        )
+        err = _apply_server_config(cfg)
+        if not err:
+            _run(["systemctl", "reload-or-restart", _SERVICE_NAME])
+        return True
+    except Exception as e:
+        try:
+            print(f"  {RED}✗{NC}  mieru.remove_user_full: {e}")
+        except Exception:
+            pass
+        return False
+
+def remove_user(name: str) -> bool:
+    """Legacy contract — принимает email или name."""
+    return remove_user_full({"email": name, "name": name})
+
+def rename_user_full(old_user: dict, new_user: dict) -> bool:
+    """Переименование = remove + add (mita не поддерживает rename in-place)."""
+    try:
+        ok1 = remove_user_full(old_user)
+        ok2 = ensure_user_full(new_user)
+        return ok1 and ok2
+    except Exception:
+        return False
+
+def rename_user(old_name: str, new_name: str) -> bool:
+    """Legacy contract — принимает email или name."""
+    return rename_user_full(
+        {"email": old_name, "name": old_name},
+        {"email": new_name, "name": new_name},
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  СТАТУС
