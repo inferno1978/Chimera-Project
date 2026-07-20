@@ -520,6 +520,40 @@ def _build_userinfo_header(user: dict) -> Optional[str]:
     total_bytes = int(lim.get("limit_gb", 0)) * 1024 ** 3
     return f"upload=0; download={used_bytes}; total={total_bytes}"
 
+# ── Реестр сателлитных протоколов для единой подписки ──────────────────────
+#
+# Протоколы, которые экспортируют get_subscription_uris(user: dict) -> list[str].
+# Добавление нового протокола в подписку = ОДНА строка в этом списке.
+# Модуль должен импортироваться без side effects и иметь функцию
+# get_subscription_uris, которая никогда не бросает исключение.
+_SUBSCRIBABLE_PROTOCOLS = [
+    "chimera.modules.trusttunnel",
+    "chimera.modules.singbox_menu",
+]
+
+
+def _collect_registry_uris(user: dict) -> list[str]:
+    """Вызывает get_subscription_uris(user) на каждом модуле из реестра.
+
+    Возвращает плоский список URI. Если модуль недоступен (ImportError)
+    или его функция бросает исключение — логирует и продолжает, не роняя
+    остальные протоколы.
+    """
+    import importlib
+    links: list[str] = []
+    for modpath in _SUBSCRIBABLE_PROTOCOLS:
+        try:
+            mod = importlib.import_module(modpath)
+            uris = mod.get_subscription_uris(user)
+            if uris:
+                links.extend(uris)
+        except ImportError:
+            pass  # модуль не установлен — нормально
+        except Exception as e:
+            _log("WARN", f"{modpath} недоступен для подписки: {e}")
+    return links
+
+
 def build_subscription_body(user: dict) -> bytes:
     state = _load_state() or {}
     ipv4  = _get_server_ip("4")
@@ -541,6 +575,11 @@ def build_subscription_body(user: dict) -> bytes:
     telemt = _build_telemt_uri(user, ipv4 or state.get("domain", ""))
     if telemt:
         links.append(telemt)
+
+    # Реестр сателлитных протоколов: TrustTunnel, sing-box (ShadowTLS,
+    # AnyTLS, TUIC, VLESS-WS-CDN) и любые будущие через единый интерфейс
+    # get_subscription_uris(user) -> list[str].
+    links += _collect_registry_uris(user)
 
     # Резервные entry-ноды (см. entry_mirrors.py) — опционально, для
     # клиент-сайд auto-failover если основной entry заблокируют/забанят.
@@ -616,6 +655,9 @@ def build_subscription_body_ios(user: dict) -> bytes:
     telemt = _build_telemt_uri(user, ipv4 or state.get("domain", ""))
     if telemt:
         links.append(telemt)
+
+    # Реестр сателлитных протоколов (TrustTunnel, sing-box протоколы).
+    links += _collect_registry_uris(user)
 
     # ── Mirror-URI ИСКЛЮЧАЮТСЯ из iOS-подписки ────────────────────────────
     # Mirror-серверы — отдельные инстансы, их clients[] мы не контролируем.
@@ -957,7 +999,7 @@ def do_subscription_menu() -> None:
         _box_item("2", "🔗 Показать ссылки подписки для всех пользователей")
         _box_item("3", f"🔄 Сгенерировать pepper заново  {DIM}(инвалидирует все ссылки){NC}")
         _box_item("4", "🛑 Выключить сервис")
-        _box_item("5", f"🧩 Привязать Mieru/NaiveProxy/Telemt к UUID  {DIM}(вручную){NC}")
+        _box_item("5", f"🧩 Привязать сателлитные логины к UUID  {DIM}(Mieru/Naive/Telemt/TrustTunnel/sing-box){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -1128,6 +1170,13 @@ def _do_identity_map_menu(cfg: dict) -> None:
     if m: entry["mieru"] = m
     if n: entry["naive"] = n
     if t: entry["telemt"] = t
+    # Новые сателлиты: TrustTunnel и sing-box протоколы (shadowtls/anytls/tuic).
+    # Для TrustTunnel matching идёт по email (не по name), но identity_map
+    # можно использовать для ручного override если email не совпадает.
+    tt = input("TrustTunnel логин/email (Enter — пропустить): ").strip()
+    sb = input("sing-box (shadowtls/anytls/tuic) имя (Enter — пропустить): ").strip()
+    if tt: entry["trusttunnel"] = tt
+    if sb: entry["singbox"] = sb
     _save_sub_conf(cfg)
     _ok("Привязка сохранена.")
     input(f"\n{BOLD}Enter…{NC}")
