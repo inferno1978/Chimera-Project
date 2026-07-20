@@ -2,6 +2,77 @@
 
 ---
 
+## FIX(2): 'Failed to mask unit: File already exists' + шум stderr в subscription uninstall — 21 июля 2026
+
+**После предыдущего фикса (`4b0f5e7`) пользователь сообщил о трёх шумных ошибках в реальном выводе systemd. Все три исправлены.**
+
+### Проблема 1 — `Failed to mask unit: File ... already exists.`
+
+**Симптом** (item [4] «Выключить сервис» и item [6] «Удалить полностью»):
+```
+Failed to mask unit: File /etc/systemd/system/vless-subscription.service already exists.
+[OK]    Сервис остановлен, порт освобождён.
+```
+
+**Причина:** `systemctl mask` создаёт symlink `/etc/systemd/system/<name>.service → /dev/null`. На systemd ≥252 mask **отказывается перезаписывать** существующий обычный файл (нужен `--force`, которого нет на старом systemd). Mask молча не срабатывал, и далее полагались только на `systemctl stop` + `_kill_port_holder` fallback.
+
+**Фикс — два разных решения для [4] и [6]:**
+
+| Сценарий | Решение |
+|---|---|
+| **[4] Выключить сервис** (временная остановка, unit-файл нужно сохранить) | **mask вообще НЕ нужен.** Согласно systemd.service(5): «If a service is stopped via systemctl stop, the Restart= setting is ignored and the service is not restarted.» Restart= срабатывает только при самостоятельном падении процесса (crash, OOM, signal от ядра) — но НЕ при явной команде stop. Поэтому `_stop_service_reliable()` теперь просто `systemctl stop` + `_kill_port_holder` fallback. |
+| **[6] Удалить полностью** (unit-файл удаляем) | Удалить unit-файл **ДО** mask — тогда mask succeeds (создаёт symlink → /dev/null как belt-and-suspenders, на случай если stop по какой-то причине всё-таки триггернет Restart=). После stop — `unmask` (убрать symlink, cleanup). |
+
+Новый порядок `uninstall_subscription_service()`:
+```
+1. _fw_close_tcp(port)         — закрыть ufw-порт
+2. systemctl disable           — убрать Wants symlink
+3. unlink unit-файла           — чтобы mask смог создать symlink → /dev/null
+4. systemctl mask              — symlink → /dev/null (теперь succeeds)
+5. systemctl stop              — процесс уходит, не перезапускается (masked)
+6. systemctl unmask            — убрать symlink (cleanup)
+7. unlink если что-то осталось — паранойя
+8. systemctl daemon-reload
+9. systemctl reset-failed
+10. _kill_port_holder(port)    — fallback
+```
+
+### Проблема 2 — `Failed to reset failed state ... Unit ... not loaded.`
+
+**Симптом** (item [1] «Включить» и item [6] «Удалить»):
+```
+Failed to reset failed state of unit vless-subscription.service: Unit vless-subscription.service not loaded.
+```
+
+**Причина:** `systemctl reset-failed` пишет это в stderr, когда unit не загружен в память systemd:
+- В `_install_service` — вызывается после `daemon-reload`, но если unit никогда не был в failed-состоянии, всё равно пишет.
+- В `uninstall_subscription_service` — вызывается после удаления unit-файла + daemon-reload, так что systemd уже выгрузил unit.
+
+**Фикс:** Добавлен `stderr=subprocess.DEVNULL` (и `stdout=subprocess.DEVNULL` заодно) к этим вызовам. Сообщение безобидное (нечего очищать), но пугает пользователя.
+
+### Проблема 3 — `Could not delete non-existent rule` (×2, v4 и v6)
+
+**Симптом** (item [6] после item [4]):
+```
+Could not delete non-existent rule
+Could not delete non-existent rule (v6)
+```
+
+**Причина:** `_fw_close_tcp(port)` вызывает `ufw delete allow <port>/tcp`. Если правило уже удалено (через stop[4] или потому что порт никогда не открывался), ufw пишет это в stderr для обоих стеков (IPv4 + IPv6).
+
+**Фикс:** `_fw_close_tcp` теперь идемпотентна — `stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL` для ufw-вызова. Сценарий stop[4] → uninstall[6] теперь чистый.
+
+### Тесты — 2 новых (всего 15 в `test_subscription_uninstall.py`)
+
+- `test_unit_file_unlinked_before_mask` — регрессия: в момент вызова `systemctl mask` unit-файла уже не должно быть на диске (иначе `File already exists`).
+- `test_install_does_not_emit_reset_failed_not_loaded` — регрессия: `reset-failed` в `_install_service` должен вызываться с `stderr=DEVNULL` (иначе `Unit ... not loaded` печатается).
+- `test_stop_called_and_no_mask` — обновлён: для [4] mask НЕ вызывается (раньше проверялось что mask ДО stop).
+- `test_full_pipeline_disable_unlink_mask_stop` — обновлён: новый порядок disable → unlink → mask → stop → unmask → daemon-reload → reset-failed.
+
+Все 142 теста (subscription + web panel firewall) проходят.
+
+---
+
 ## FIX: Надёжный uninstall/stop сервиса единой подписки — 21 июля 2026
 
 **`vless-subscription.service` (порт 8443) теперь корректно освобождает порт при остановке/удалении — тот же mask+stop+kill fix, что ранее починил `vless-web` (commit `e830f28`).**
