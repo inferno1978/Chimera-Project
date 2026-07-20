@@ -2,6 +2,130 @@
 
 ---
 
+## FEAT: Двусторонняя синхронизация пользователей VLESS ↔ спутниковые протоколы — 21 июля 2026
+
+**По запросу Andrew B.: «если имя пользователя будет совпадать при установке этих протоколов, они добавятся в единую подписку/web панель/user portal автоматически?» — ответ теперь ДА.**
+
+### Что работает сейчас (v4.25)
+
+| Сценарий | Автоматически? |
+|---|---|
+| **Добавил протокол** → все существующие VLESS-юзеры автоматически получают аккаунты в новом протоколе | ✅ **ДА** — `_sync_all_from_vless` вызывается в конце `_run_install_inner` каждого протокола |
+| **Добавил VLESS-юзера** (через TUI [1] или REST API) → аккаунты создаются во всех активных протоколах | ✅ **ДА** — `_sync_user_to_protocols("add", user)` / `_sync_ensure_user(user)` |
+| **Удалил VLESS-юзера** → аккаунты удаляются во всех протоколах | ✅ **ДА** |
+| **Переименовал VLESS-юзера** → аккаунты переименовываются (с сохранением UUID/секрета где возможно) | ✅ **ДА** |
+| **Toggle disable/enable VLESS-юзера** → аккаунты удаляются/восстанавливаются во всех протоколах | ✅ **ДА** (раньше toggle не имел sync вообще) |
+| **Подписка находит юзера** | ✅ **ДА** — теперь уже с реальными аккаунтами, не только name-matching |
+
+### Архитектура
+
+```
+                    ┌──────────────────────────────────────┐
+                    │  VLESS users.json (canonical source) │
+                    └────────────┬─────────────────────────┘
+                                 │
+                  _sync_user_to_protocols(action, user)
+                                 │
+                  ┌──────────────┴───────────────┐
+                  ▼                              ▼
+       _SYNCABLE_PROTOCOLS (реестр)     user_lifecycle.PROTOCOL_ADAPTERS
+       ────────────────────────────     ─────────────────────────────────
+       • mtproto                        • vless
+       • naiveproxy                     • awg
+       • mieru                          • singbox
+       • trusttunnel                    • mieru
+       • singbox                        • mtproto
+                                       • naiveproxy
+                                       • fptn
+                                       • hysteria2
+                                       • trusttunnel
+                  │
+                  ▼
+       Каждый модуль экспортирует КОНТРАКТ:
+         is_active() → bool
+         ensure_user_full(user: dict) → bool      # extended
+         remove_user_full(user: dict) → bool      # extended
+         rename_user_full(old, new) → bool        # extended
+         ensure_user(name) → bool                 # legacy fallback
+         remove_user(name) → bool
+         rename_user(old, new) → bool
+```
+
+### Контракт syncable-протокола
+
+Каждый спутниковый протокол экспортирует 7 функций:
+
+| Функция | Описание |
+|---|---|
+| `is_active()` | True если протокол установлен И сервис запущен. Dispatcher пропускает протокол если False. |
+| `ensure_user_full(user)` | Создаёт аккаунт из full user dict (uuid, email, name, device_label). Идемпотентна. |
+| `remove_user_full(user)` | Удаляет аккаунт. Идемпотентна. |
+| `rename_user_full(old, new)` | Переименование. Каждый протокол сам решает как — sing-box обновляет name field in-place, TrustTunnel/NaiveProxy/Mieru делают remove+add (пароль не меняется у TrustTunnel т.к. derive из UUID). |
+| `ensure_user(name)` / `remove_user(name)` / `rename_user(old, new)` | Legacy contract — только name. Fallback если модуль не экспортирует `_full` вариант. |
+
+### Identity model каждого протокола
+
+| Протокол | Identity | Пароль | Rename semantics |
+|---|---|---|---|
+| **mtproto** (Telemt) | name = `email.split('@')[0]` | Случайный hex32 secret | Секрет сохраняется при rename |
+| **naiveproxy** | username = `email.split('@')[0]` | Случайный (proto_gen_password) | remove+add, пароль меняется |
+| **mieru** | username = `email.split('@')[0]` | Случайный | remove+add, пароль меняется |
+| **trusttunnel** | username = `email` (verbatim) | `SHA-256("trusttunnel-pass|" + uuid)` — детерминированный | remove+add, пароль ТОТ ЖЕ (derive из UUID) |
+| **singbox** (ShadowTLS/AnyTLS/TUIC/Trojan) | UUID (canonical VLESS UUID) | Случайный (singbox_gen_password) | update name field in-place, пароль НЕ меняется |
+
+### Изменения в коде
+
+| Файл | Что изменилось |
+|---|---|
+| `chimera/modules/rest_api.py` | `_SYNCABLE_PROTOCOLS` расширен с 1 (mtproto) до 5 (mtproto + naiveproxy + mieru + trusttunnel + singbox). `_sync_dispatch` поддерживает `_full` варианты. `_sync_all_from_vless` передаёт full user dicts. Toggle/rename в REST API теперь вызывает sync. |
+| `chimera/modules/naiveproxy.py` | Добавлены: `is_active`, `ensure_user_full`, `remove_user_full`, `rename_user_full`, legacy `ensure_user`/`remove_user`/`rename_user`. Bulk-provisioning в конце `_run_install_inner`. |
+| `chimera/modules/mieru.py` | Те же 7 функций контракта + bulk-provisioning после install. |
+| `chimera/modules/trusttunnel.py` | Те же 7 функций контракта + bulk-provisioning. TrustTunnel особенный: username=email, password=derive(uuid). |
+| `chimera/modules/singbox_users.py` | Контракт добавлен здесь (не в singbox_menu). `is_active` проверяет что sing-box запущен И хотя бы один inbound включён. `ensure_user_full` вызывает `singbox_state_add_user_to_all_protocols`. |
+| `chimera/_core.py` | Новая функция `_sync_user_to_protocols(action, user, old_user=None)` — диспетчер для TUI. Вызывается из `do_unified_user_manager` items 1 (add), 2 (remove), 7 (toggle), 8 (rename). |
+| `tests/test_user_sync_v425.py` | **НОВЫЙ** — 16 тестов: реестр, контрактные функции, dispatcher `_full` preference, `_sync_all_from_vless` full dicts, `_sync_user_to_protocols` диспетчер, идемпотентность naiveproxy, TrustTunnel UUID requirement. |
+
+### Bulk-provisioning при install протокола
+
+После успешной установки протокола вызывается:
+
+```python
+from chimera.modules.rest_api import _sync_all_from_vless
+from chimera.modules.users_manager import _unified_load_users
+_vless_users = _unified_load_users()
+if _vless_users:
+    print(f"Синхронизирую {len(_vless_users)} VLESS-юзеров в {ProtoName}...")
+    _stats = _sync_all_from_vless(_vless_users)
+```
+
+Пользователь видит в выводе: `✓ Добавлено в NaiveProxy: 5 юзеров` (например).
+
+### Тесты — 16 новых + 2 обновлённых
+
+- `TestSyncableRegistryContents` (2) — реестр содержит 5 протоколов, НЕ содержит vless
+- `TestProtocolContractFunctions` (4) — все 4 протокола экспортируют контракт
+- `TestSyncDispatchPrefersFullContract` (2) — dispatcher предпочитает `_full` при user dict, fallback на legacy
+- `TestSyncAllFromVlessPassesFullDicts` (1) — full user dicts передаются в `ensure_user_full`
+- `TestCoreSyncHelper` (4) — `_sync_user_to_protocols` для add/remove/toggle_off/toggle_on
+- `TestNaiveproxyContractIdempotency` (1) — существующий юзер → True (no-op)
+- `TestTrustTunnelContractRequiresUuid` (2) — без UUID возвращает False, с UUID — True
+
+Обновлённые тесты в `test_rest_api.py`:
+- `test_deduplicates_names` — v4.25 НЕ дедуплицирует по name (у каждого свой UUID)
+- `test_skips_empty_names` — юзер с email но без name теперь синхронизируется
+
+Все 563 теста (naiveproxy + mieru + trusttunnel + singbox + rest_api + subscription + user_sync + mtproto) проходят.
+
+### Что проверить на сервере
+
+1. Установить NaiveProxy (через TUI) — в конце вывода должно быть `✓ Добавлено в NaiveProxy: N юзеров` (где N = число VLESS-юзеров).
+2. Зайти в `Подписка → Показать ссылки` — у каждого юзера должна появиться `naive+https://` ссылка.
+3. Добавить нового VLESS-юзера через TUI [1] — в выводе `Синхронизирован со спутниковыми протоколами: naiveproxy, mieru, singbox` (если они установлены).
+4. Toggle disable VLESS-юзера [7] — `Отключён в спутниковых протоколах: ...`.
+5. Переименовать VLESS-юзера [8] — `Переименован в спутниковых протоколах: ...`.
+
+---
+
 ## FEAT: Выбор порта + имя первого пользователя во всех протоколах — 21 июля 2026
 
 **По запросу Andrew B.: во всех протоколах (NaiveProxy, Trojan/sing-box, TrustTunnel, Mieru) добавлен интерактивный выбор порта и имени первого пользователя. TrustTunnel больше не падает при ошибке LE-сертификата.**
