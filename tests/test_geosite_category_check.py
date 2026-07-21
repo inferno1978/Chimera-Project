@@ -181,7 +181,7 @@ class TestBuildSplitTunnelRulesCategoryCheck(unittest.TestCase):
                          "ru-available-only-inside НЕ должен быть в правилах если категории нет")
 
     def test_includes_both_when_both_exist(self):
-        """Если обе категории есть — обе добавляются."""
+        """Если category-ru есть — добавляется. ru-available-only-inside убран (v4.25.2)."""
         from chimera.modules import split_tunnel
         core = sys.modules["chimera._core"]
         core.SPLIT_TUNNEL_ENABLED = True
@@ -201,7 +201,8 @@ class TestBuildSplitTunnelRulesCategoryCheck(unittest.TestCase):
         self.assertIsNotNone(geosite_rule)
         all_domains = geosite_rule["domain"]
         self.assertIn("geosite:category-ru", all_domains)
-        self.assertIn("geosite:ru-available-only-inside", all_domains)
+        # v4.25.2: ru-available-only-inside убран — категории нет в geosite.dat
+        self.assertNotIn("geosite:ru-available-only-inside", all_domains)
 
     def test_skips_both_when_both_missing(self):
         """Если обе категории отсутствуют — geosite-правило всё равно создаётся,

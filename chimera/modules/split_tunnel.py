@@ -414,20 +414,17 @@ def build_split_tunnel_routing_rules(
         # ВАЖНО: российские домены/IP идут первыми — первое совпадение побеждает.
         # Xray применяет правила в порядке списка.
         #
-        # v4.25 FIX: проверяем наличие каждой geosite-категории перед добавлением.
-        # Раньше geosite:ru-available-only-inside добавлялся без проверки —
-        # если geosite.dat старый или от другого источника (не runetfreedom),
-        # Xray падал при старте с "code not found in geosite.dat".
+        # v4.25.2 FIX: geosite:ru-available-only-inside ПОЛНОСТЬЮ УБРАН — этой
+        # категории НЕ существует в geosite.dat от runetfreedom (проверено:
+        # strings geosite.dat | grep -i AVAILABLE — нет RU-AVAILABLE-ONLY-INSIDE).
+        # Она была добавлена ошибочно и вызывала бесконечный warning при каждой
+        # перегенерации конфига. Оставляем только geosite:category-ru
+        # (проверено: CATEGORY-RU есть в файле).
         geosite_domains = list(IP_CHECK_DOMAINS)
         if _geosite_has_category("category-ru"):
             geosite_domains.append("geosite:category-ru")
         else:
             warn("geosite:category-ru не найден в geosite.dat — правило пропущено")
-        if _geosite_has_category("ru-available-only-inside"):
-            geosite_domains.append("geosite:ru-available-only-inside")
-        else:
-            warn("geosite:ru-available-only-inside не найден в geosite.dat — правило пропущено. "
-                 "Обновите geo-файлы: Настройки сети → 1 (Split Tunneling) → 6 (Обновить).")
 
         rules.append({
             "type":        "field",
