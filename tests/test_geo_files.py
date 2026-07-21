@@ -128,7 +128,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         original_stat = Path.stat
 
         class MockStat:
-            st_size = 10_000_000  # 10 МБ > MIN_SIZES для обоих файлов
+            st_size = 30_000_000  # 30 МБ > MIN_SIZES для обоих файлов (v4.25.1: geosite=20MB, geoip=1MB)
             st_mtime = 0
 
         def mock_exists(self, *a, **kw):
@@ -164,7 +164,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
             return MagicMock(side_effect=URLError("blocked"))
 
         mock_resp = MagicMock()
-        mock_resp.read.side_effect = [b"x" * 10_000_000, b""]
+        mock_resp.read.side_effect = [b"x" * 30_000_000, b""]  # 30 МБ > MIN_SIZES (v4.25.1)
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = lambda self, *a: None
         return MagicMock(return_value=mock_resp)
@@ -354,7 +354,7 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
         original_stat = Path.stat
 
         class MockStat:
-            st_size = 10_000_000
+            st_size = 30_000_000  # 30 МБ > MIN_SIZES (v4.25.1)
             st_mtime = 0
 
         def mock_exists(self, *a, **kw):
@@ -375,7 +375,7 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
 
         # urlopen mock — "успешное скачивание"
         mock_resp = MagicMock()
-        mock_resp.read.side_effect = [b"y" * 10_000_000, b""]
+        mock_resp.read.side_effect = [b"y" * 30_000_000, b""]  # 30 МБ > MIN_SIZES (v4.25.1)
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = lambda self, *a: None
         urlopen_mock = MagicMock(return_value=mock_resp)

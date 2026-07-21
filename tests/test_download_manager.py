@@ -555,11 +555,186 @@ class TestPostInstallCallback(unittest.TestCase):
 
 
 # ============================================================================
+#  ТЕСТЫ MIN_SIZES — отбраковка слишком маленьких файлов (v4.25.1)
+# ============================================================================
+
+class TestFetchPackageMinSizeRejection(unittest.TestCase):
+    """fetch_package() — отбраковка файлов меньше min_size и retry на следующее зеркало.
+
+    v4.25.1: на проде был инцидент — CDN отдал устаревший geosite.dat (10 МБ
+    вместо 73 МБ). Старый порог 3 МБ пропустил его как валидный. Тест проверяет:
+      1. Файл < min_size отбраковывается.
+      2. Код переходит к следующему зеркалу (НЕ считает загрузку успешной).
+      3. В логе виден реальный размер vs порог (для диагностики).
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.manual_dir = Path(self.tmpdir) / "manual"
+        self.manual_dir.mkdir()
+        self.install_dir = Path(self.tmpdir) / "install"
+        self.install_dir.mkdir()
+        self.tmp_path = Path("/tmp") / "_download_mgr_test_minsize.dat"
+        self.tmp_path.unlink(missing_ok=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        self.tmp_path.unlink(missing_ok=True)
+
+    def test_small_file_rejected_retries_next_mirror(self):
+        """Файл < min_size отбраковывается → retry на следующее зеркало.
+
+        Симулируем: первое зеркало отдаёт 50 байт (меньше порога 100),
+        второе зеркало отдаёт 200 байт (больше порога) → успех.
+        """
+        spec = PackageSpec(
+            name="test",
+            filename_builder=lambda: "test.dat",
+            mirror_urls_builder=lambda filename: [
+                "https://mirror1.example.com/test.dat",
+                "https://mirror2.example.com/test.dat",
+            ],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=100,  # порог 100 байт
+        )
+
+        call_count = [0]
+        def make_mock_resp(size: int):
+            mock_resp = MagicMock()
+            mock_resp.read.side_effect = [b"x" * size, b""]
+            mock_resp.headers = {"Content-Length": str(size)}
+            mock_resp.__enter__ = lambda self: self
+            mock_resp.__exit__ = lambda self, *a: None
+            return mock_resp
+
+        def fake_urlopen(req, timeout):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return make_mock_resp(50)   # 50 байт — ОТБРАКОВЫВАЕТСЯ (< 100)
+            return make_mock_resp(200)      # 200 байт — ОК
+
+        # Реально пишем в tmp_path чтобы stat() прошёл. Используем real open
+        # (НЕ мокаем builtins.open — иначе Path.write_bytes не запишет).
+        def fake_urlopen_and_write():
+            # Записываем разный размер в зависимости от того, какое зеркало
+            size = 50 if call_count[0] == 1 else 200
+            self.tmp_path.write_bytes(b"x" * size)
+
+        # Оборачиваем fake_urlopen чтобы сразу писать файл после получения ответа.
+        original_fake_urlopen = fake_urlopen
+        def wrapped_urlopen(req, timeout):
+            resp = original_fake_urlopen(req, timeout)
+            # Записываем файл сразу (имитируем что urlopen + read уже отработал).
+            size = 50 if call_count[0] == 1 else 200
+            self.tmp_path.write_bytes(b"x" * size)
+            return resp
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=wrapped_urlopen), \
+             patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
+             patch("chimera.modules.download_manager.Path.unlink"):
+            result = fetch_package(spec, progress_label="test")
+
+        self.assertTrue(result, "Должен вернуть True — второе зеркало отдало валидный файл")
+        self.assertEqual(call_count[0], 2, "Должен быть вызван 2 раза (retry после отбраковки)")
+        mock_copy.assert_called_once(), "Файл должен быть скопирован в install_dests"
+
+    def test_small_file_from_all_mirrors_returns_false(self):
+        """Все зеркала отдали маленькие файлы → False (отбраковка сработала)."""
+        spec = PackageSpec(
+            name="test",
+            filename_builder=lambda: "test.dat",
+            mirror_urls_builder=lambda filename: [
+                "https://mirror1.example.com/test.dat",
+                "https://mirror2.example.com/test.dat",
+            ],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=1000,  # порог 1000 байт
+        )
+
+        def make_mock_resp(size: int):
+            mock_resp = MagicMock()
+            mock_resp.read.side_effect = [b"x" * size, b""]
+            mock_resp.headers = {"Content-Length": str(size)}
+            mock_resp.__enter__ = lambda self: self
+            mock_resp.__exit__ = lambda self, *a: None
+            return mock_resp
+
+        call_count = [0]
+        def wrapped_urlopen(req, timeout):
+            call_count[0] += 1
+            self.tmp_path.write_bytes(b"x" * 50)  # все зеркала отдают 50 байт (< 1000)
+            return make_mock_resp(50)
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=wrapped_urlopen), \
+             patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
+             patch("chimera.modules.download_manager.Path.unlink"), \
+             patch("chimera.modules.download_manager.print_manual_hint"):
+            result = fetch_package(spec, progress_label="test")
+
+        self.assertFalse(result, "Должен вернуть False — все файлы слишком маленькие")
+        mock_copy.assert_not_called(), "Ничего не должно быть скопировано"
+        self.assertEqual(call_count[0], 2, "Оба зеркала должны быть попытаны")
+
+    def test_logs_actual_size_vs_threshold_on_rejection(self):
+        """При отбраковке логируется реальный размер vs порог (для диагностики)."""
+        import io
+        from contextlib import redirect_stdout
+
+        spec = PackageSpec(
+            name="test",
+            filename_builder=lambda: "test.dat",
+            mirror_urls_builder=lambda filename: [
+                "https://mirror1.example.com/test.dat",
+                "https://mirror2.example.com/test.dat",
+            ],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=1000,  # порог 1000 байт
+        )
+
+        def make_mock_resp(size: int):
+            mock_resp = MagicMock()
+            mock_resp.read.side_effect = [b"x" * size, b""]
+            mock_resp.headers = {"Content-Length": str(size)}
+            mock_resp.__enter__ = lambda self: self
+            mock_resp.__exit__ = lambda self, *a: None
+            return mock_resp
+
+        call_count = [0]
+        def wrapped_urlopen(req, timeout):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                self.tmp_path.write_bytes(b"x" * 50)    # 50 байт — отбраковка
+            else:
+                self.tmp_path.write_bytes(b"x" * 2000)  # 2000 байт — ОК
+            return make_mock_resp(50 if call_count[0] == 1 else 2000)
+
+        captured = io.StringIO()
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=wrapped_urlopen), \
+             patch("chimera.modules.download_manager._default_copy_to_dests"), \
+             patch("chimera.modules.download_manager.Path.unlink"), \
+             redirect_stdout(captured):
+            fetch_package(spec, progress_label="test")
+
+        output = captured.getvalue()
+        # В выводе должно быть сообщение об отбраковке с реальным размером и порогом.
+        self.assertIn("50", output, "Должен логировать реальный размер (50 байт)")
+        self.assertIn("1000", output, "Должен логировать порог (1000 байт)")
+        self.assertIn("минимум", output.lower(),
+                      "Должно быть слово 'минимум' для понятности")
+
+
+# ============================================================================
 #  ТЕСТЫ dry_run
 # ============================================================================
 
 class TestFetchPackageDryRun(unittest.TestCase):
-    """dry_run=True — не делает реальных вызовов."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()

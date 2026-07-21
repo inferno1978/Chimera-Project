@@ -1376,6 +1376,12 @@ def _xray_geo_is_runetfreedom() -> bool:
     Проверяет что geosite.dat содержит категорию ru-available-only-inside.
     Делает это через быстрый grep по бинарному содержимому файла.
     Это единственный надёжный способ — размер файла ненадёжен.
+
+    v4.25.1 FIX: добавлен флаг -i (case-insensitive). Теги в geosite.dat
+    хранятся в ВЕРХНЕМ регистре (RU-AVAILABLE-ONLY-INSIDE), а мы ищем
+    строчное 'ru-available-only-inside'. Без -i grep не находил тег →
+    функция возвращала False даже для валидного runetfreedom geosite.dat →
+    при каждом запуске установщика гео-файлы перескачивались (~73 МБ).
     """
     # Xray ищет geo-файлы в нескольких местах в таком порядке:
     # 1. $XRAY_LOCATION_ASSET  2. /etc/xray/  3. /usr/local/share/xray/
@@ -1394,8 +1400,12 @@ def _xray_geo_is_runetfreedom() -> bool:
             continue
         try:
             import subprocess as _sp
+            # -i = case-insensitive (теги в geosite.dat в ВЕРХНЕМ регистре).
+            # -a = treat binary as text (geosite.dat — protobuf binary).
+            # -F = fixed string (не regex).
+            # -q = quiet (только exit code).
             r = _sp.run(
-                ["grep", "-qaF", "ru-available-only-inside", str(p)],
+                ["grep", "-qaFi", "ru-available-only-inside", str(p)],
                 capture_output=True,
             )
             if r.returncode == 0:

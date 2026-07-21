@@ -1075,5 +1075,62 @@ class TestXrayUpdateGeoRunetfreedomMigration(unittest.TestCase):
         self.assertFalse(result)
 
 
+class TestXrayGeoIsRunetfreedomCaseInsensitive(unittest.TestCase):
+    """v4.25.1 REGRESSION: _xray_geo_is_runetfreedom должен использовать
+    case-insensitive grep (-i флаг).
+
+    Теги в geosite.dat хранятся в ВЕРХНЕМ регистре (RU-AVAILABLE-ONLY-INSIDE),
+    а функция ищет строчное 'ru-available-only-inside'. Без -i grep не находил
+    тег → функция возвращала False даже для валидного runetfreedom geosite.dat →
+    при каждом запуске установщика гео-файлы перескачивались (~73 МБ).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_uses_case_insensitive_grep_flag(self):
+        """grep должен вызываться с -i флагом (в составе объединённой строки -qaFi)."""
+        from chimera.modules import xray_install
+        import subprocess as _sp
+        # Мокаем Path.exists чтобы кандидат-путь "существовал".
+        with patch("pathlib.Path.exists", return_value=True), \
+             patch("subprocess.run",
+                   return_value=_sp.CompletedProcess(
+                       args=[], returncode=0, stdout="", stderr="")) as mock_run:
+            xray_install._xray_geo_is_runetfreedom()
+            # subprocess.run вызывается как subprocess.run(["grep", "-qaFi", ...])
+            # Ищем grep-вызовы и проверяем что в строке флагов есть 'i'.
+            grep_calls = [c for c in mock_run.call_args_list
+                          if c[0] and c[0][0] and isinstance(c[0][0], list)
+                          and c[0][0][:1] == ["grep"]]
+            self.assertTrue(grep_calls, "Должен быть хотя бы один grep вызов")
+            for c in grep_calls:
+                cmd_args = c[0][0]
+                # cmd_args = ["grep", "-qaFi", "ru-available-only-inside", "/path"]
+                self.assertGreaterEqual(len(cmd_args), 2,
+                                        f"grep команда должна иметь флаги: {cmd_args}")
+                flags = cmd_args[1]
+                self.assertIn("i", flags,
+                              f"grep flags '{flags}' должны содержать 'i' (case-insensitive). "
+                              f"Полная команда: {cmd_args}")
+
+    def test_finds_uppercase_tag_in_real_geosite(self):
+        """Если geosite.dat содержит RU-AVAILABLE-ONLY-INSIDE (uppercase),
+        функция должна вернуть True через case-insensitive grep."""
+        from chimera.modules import xray_install
+        import subprocess as _sp
+        # Имитируем: grep с -i находит (rc=0), без -i не находит (rc=1).
+        def fake_grep(cmd, **kw):
+            if isinstance(cmd, list) and len(cmd) > 1 and "i" in cmd[1]:
+                return _sp.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            return _sp.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+
+        with patch("pathlib.Path.exists", return_value=True), \
+             patch("subprocess.run", side_effect=fake_grep):
+            result = xray_install._xray_geo_is_runetfreedom()
+        self.assertTrue(result,
+                        "Должна вернуть True для geosite.dat с uppercase тегом")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

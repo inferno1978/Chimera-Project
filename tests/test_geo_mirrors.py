@@ -193,12 +193,22 @@ class TestMinSizes(unittest.TestCase):
     """Минимальные размеры для защиты от усечённых загрузок."""
 
     def test_geosite_min_size(self):
-        """geosite.dat — ~3 МБ минимум (реальный файл ~10 МБ)."""
-        self.assertGreaterEqual(MIN_SIZES["geosite.dat"], 3_000_000)
+        """geosite.dat — v4.25.1: 20 МБ минимум (реальный файл ~73 МБ).
+
+        Старый порог 3 МБ пропускал устаревшие копии (10 МБ от кэширующего CDN).
+        Новый порог 20 МБ отсекает их, но даёт запас ниже актуальных 73 МБ.
+        """
+        self.assertGreaterEqual(MIN_SIZES["geosite.dat"], 20_000_000,
+                                "geosite.dat min_size должен быть >= 20 МБ (v4.25.1)")
 
     def test_geoip_min_size(self):
-        """geoip.dat — ~10 КБ минимум (реальный файл ~100 КБ)."""
-        self.assertGreaterEqual(MIN_SIZES["geoip.dat"], 10_000)
+        """geoip.dat — v4.25.1: 1 МБ минимум (реальный файл ~18 МБ).
+
+        Старый порог 10 КБ был безнадёжно занижен. Новый 1 МБ отсекает
+        пустые/обрезанные загрузки.
+        """
+        self.assertGreaterEqual(MIN_SIZES["geoip.dat"], 1_000_000,
+                                "geoip.dat min_size должен быть >= 1 МБ (v4.25.1)")
 
     def test_min_sizes_keys(self):
         self.assertEqual(set(MIN_SIZES.keys()), {"geosite.dat", "geoip.dat"})
