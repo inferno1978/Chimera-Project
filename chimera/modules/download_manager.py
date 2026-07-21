@@ -31,7 +31,7 @@ spec, ДО любого сетевого вызова.
         ),
         install_dests=[Path("/usr/local/share/xray"), Path("/etc/xray")],
         manual_incoming_dir=Path("/root"),
-        min_size=3_000_000,
+        min_size=20_000_000,  # v4.25.1: example only — use MIN_SIZES from geo_mirrors.py
         post_install=lambda tmp, dests: _copy_to_dests(tmp, dests),
     )
     ok = fetch_package(spec)
