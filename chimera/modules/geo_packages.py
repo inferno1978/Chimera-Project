@@ -101,7 +101,7 @@ GEOSITE_SPEC = PackageSpec(
     ),
     install_dests=_GEO_INSTALL_DESTS,     # [/etc/xray, /usr/local/share/xray, /usr/local/etc/xray]
     manual_incoming_dir=_GEO_MANUAL_DIR,   # /root/ — WinSCP-friendly
-    min_size=MIN_SIZES["geosite.dat"],     # 3_000_000
+    min_size=MIN_SIZES["geosite.dat"],     # 20_000_000 (v4.25.1)
     post_install=_post_install_geo,        # chmod 644 + chown root:xray
 )
 
@@ -121,6 +121,6 @@ GEOIP_SPEC = PackageSpec(
     ),
     install_dests=_GEO_INSTALL_DESTS,
     manual_incoming_dir=_GEO_MANUAL_DIR,
-    min_size=MIN_SIZES["geoip.dat"],       # 10_000
+    min_size=MIN_SIZES["geoip.dat"],       # 1_000_000 (v4.25.1)
     post_install=_post_install_geo,
 )

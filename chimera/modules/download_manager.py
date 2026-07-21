@@ -165,15 +165,27 @@ def fetch_package(
     # install_dests, но мы его НЕ трогаем — идём в сеть.
     if not dry_run:
         try:
-            if manual_path.exists() and manual_path.stat().st_size >= spec.min_size:
-                # Файл найден локально — используем без сети
-                if spec.post_install is not None:
-                    ok = spec.post_install(manual_path, spec.install_dests)
-                    if not ok:
-                        return False
+            if manual_path.exists():
+                _manual_size = manual_path.stat().st_size
+                if _manual_size >= spec.min_size:
+                    # Файл найден локально — используем без сети
+                    if spec.post_install is not None:
+                        ok = spec.post_install(manual_path, spec.install_dests)
+                        if not ok:
+                            return False
+                    else:
+                        _default_copy_to_dests(manual_path, spec.install_dests)
+                    return True
                 else:
-                    _default_copy_to_dests(manual_path, spec.install_dests)
-                return True
+                    # v4.25.1: логируем если ручной файл слишком маленький —
+                    # пользователь мог положить устаревшую/обрезанную копию.
+                    if progress_label:
+                        print(
+                            f"  {progress_label} ⚠ ручной файл {manual_path} "
+                            f"({_manual_size} байт < {spec.min_size} минимум) — "
+                            f"игнорируем, идём в сеть",
+                            flush=True,
+                        )
         except (PermissionError, OSError):
             # manual_incoming_dir может быть недоступен (например /root/
             # при запуске не от root) — просто пропускаем, идём в сеть
@@ -237,7 +249,20 @@ def fetch_package(
                 tmp_path.unlink(missing_ok=True)
                 return True
 
-            # Файл слишком маленький — пробуем следующее зеркало
+            # Файл слишком маленький — пробуем следующее зеркало.
+            # v4.25.1: логируем реальный размер vs порог, чтобы при отладке
+            # было видно что именно произошло (а не только "не удалось").
+            # Это критично для диагностики случаев когда CDN отдаёт устаревшую
+            # копию файла (был инцидент с geosite.dat: 10 МБ вместо 73 МБ,
+            # прошёл старый порог 3 МБ — см. geo_mirrors.MIN_SIZES).
+            _actual_size = tmp_path.stat().st_size if tmp_path.exists() else 0
+            if progress_label:
+                print(
+                    f"  {progress_label} ⚠ зеркало {url_idx}/{len(urls)} отдало "
+                    f"{_actual_size} байт (< {spec.min_size} минимум) — "
+                    f"пробуем следующее зеркало",
+                    flush=True,
+                )
             tmp_path.unlink(missing_ok=True)
 
         except Exception:

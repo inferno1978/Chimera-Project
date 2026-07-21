@@ -147,6 +147,11 @@ def _geosite_has_category(category: str) -> bool:
     старте если правило ссылается на несуществующую категорию.
 
     Ищет во всех директориях где Xray может искать geo-файлы.
+
+    v4.25.1 FIX: добавлен флаг -i (case-insensitive). Теги в geosite.dat
+    хранятся в ВЕРХНЕМ регистре (CATEGORY-RU), а мы передаём строчные
+    (category-ru). Без -i grep не находил существующие категории →
+    правила geosite:category-ru терялись даже с валидным geosite.dat.
     """
     if not category:
         return False
@@ -165,8 +170,12 @@ def _geosite_has_category(category: str) -> bool:
         if not p.exists():
             continue
         try:
+            # -i = case-insensitive (теги в geosite.dat в ВЕРХНЕМ регистре).
+            # -a = treat binary file as text (geosite.dat — protobuf binary).
+            # -F = fixed string (не regex).
+            # -q = quiet (только exit code).
             r = _sp.run(
-                ["grep", "-qaF", cat, str(p)],
+                ["grep", "-qaFi", cat, str(p)],
                 capture_output=True,
             )
             if r.returncode == 0:
