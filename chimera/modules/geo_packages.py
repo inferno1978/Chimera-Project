@@ -56,33 +56,69 @@ def _post_install_geo(src: Path, install_dests: list[Path]) -> bool:
       • chown root:xray (best-effort через core._run)
 
     Возвращает True при успехе. False только если ВСЕ копирования упали.
+
+    v4.25.1: добавлено логирование каждой копии (size, dest, error) —
+    для диагностики случаев когда файл скачался но не скопировался.
+    Был инцидент: geosite.dat (71 МБ) скачался в /tmp, но не появился
+    в /etc/xray/ — без логирования было невозможно понять почему.
     """
-    # Ленивый доступ к core._run для chown
+    import shutil as _shutil
+
+    # Ленивый доступ к core._run для chown + warn для логирования
     _run = None
+    _warn = None
+    _info = None
     try:
         import importlib
         core = importlib.import_module("chimera._core")
         _run = core._run
+        _warn = core.warn
+        _info = core.info
     except Exception:
         pass
+
+    def _log(msg: str):
+        if _info:
+            _info(msg)
+        else:
+            print(msg)
+
+    def _log_warn(msg: str):
+        if _warn:
+            _warn(msg)
+        else:
+            print(f"[WARN] {msg}")
+
+    src_size = src.stat().st_size if src.exists() else 0
+    _log(f"Копирование {src.name} ({src_size // 1024} КБ) в {len(install_dests)} директорий...")
 
     any_ok = False
     for dest_dir in install_dests:
         dest = dest_dir / src.name
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(dest))
+            _shutil.copy2(str(src), str(dest))
             dest.chmod(0o644)
+            # Проверяем что копия реально записалась (size match).
+            dest_size = dest.stat().st_size
+            if dest_size != src_size:
+                _log_warn(f"  {dest}: размер {dest_size} ≠ {src_size} (источник) — копия неполная!")
+                # Удаляем неполную копию.
+                dest.unlink(missing_ok=True)
+                continue
             # chown root:xray — best-effort, как в старом коде
             if _run is not None:
                 try:
                     _run(["chown", "root:xray", str(dest)], check=False, quiet=True)
                 except Exception:
                     pass
+            _log(f"  {dest}: OK ({dest_size // 1024} КБ)")
             any_ok = True
-        except Exception:
-            pass
+        except Exception as e:
+            _log_warn(f"  {dest}: {e}")
 
+    if not any_ok:
+        _log_warn(f"  ВСЕ копирования {src.name} провалились!")
     return any_ok
 
 

@@ -80,26 +80,14 @@ def _geo_files_available(auto_copy: bool = True) -> bool:
     """Проверяет наличие geosite.dat и geoip.dat в директориях где Xray
     их ищет. Возвращает True если оба файла найдены.
 
-    BUGFIX: ранее проверялся ТОЛЬКО /etc/xray/ (CONFIG_DIR). Но Xray
-    ищет .dat-файлы в трёх директориях:
-      /usr/local/share/xray/  — куда ставит официальный XTLS installer
-      /etc/xray/              — куда ставит chimera-project
-      /usr/local/etc/xray/    — альтернативный путь
-
-    Если пользователь сначала установил Xray через XTLS installer (файлы
-    в /usr/local/share/xray/), а потом включил split tunneling в chimera —
-    проверка /etc/xray/ возвращала False → warning "Geo файлы не найдены"
-    → geosite:category-ru правила не добавлялись → split tunneling работал
-    только с пользовательскими правилами.
-
-    Если auto_copy=True (по умолчанию) и файлы найдены в /usr/local/share/xray/
-    но НЕ в /etc/xray/ — автоматически копирует их в /etc/xray/, потому что
-    config.json Xray содержит geoDataBasePath=/etc/xray/.
+    v4.25.1: добавлено логирование для диагностики — если функция возвращает
+    False, выводит какой именно файл не найден и в каких директориях искали.
     """
     import shutil
     core = _core_module()
     GEOSITE_DAT = core.GEOSITE_DAT  # /etc/xray/geosite.dat
     GEOIP_DAT   = core.GEOIP_DAT    # /etc/xray/geoip.dat
+    warn        = core.warn
 
     lookup_dirs = [
         Path("/usr/local/share/xray"),
@@ -119,6 +107,15 @@ def _geo_files_available(auto_copy: bool = True) -> bool:
     geoip_src   = _find("geoip.dat")
 
     if not geosite_src or not geoip_src:
+        # v4.25.1: диагностическое сообщение — какой файл отсутствует.
+        missing = []
+        if not geosite_src:
+            missing.append("geosite.dat")
+        if not geoip_src:
+            missing.append("geoip.dat")
+        warn(f"Geo-файлы не найдены: {', '.join(missing)}. "
+             f"Искали в: {', '.join(str(d) for d in lookup_dirs)}. "
+             f"Обновите: Настройки сети → 1 (Split Tunneling) → 6 (Обновить).")
         return False
 
     # Если файлы найдены но НЕ в /etc/xray/ — копируем туда (Xray ищет
