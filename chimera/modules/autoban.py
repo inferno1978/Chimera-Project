@@ -458,7 +458,16 @@ try:
 except: pass
 threshold = cfg.get('threshold', {threshold})
 window    = cfg.get('window_min', {window})
-whitelist = set(cfg.get('whitelist', ['127.0.0.1','::1']))
+# v4.25.2 FIX: persist whitelist back to cfg, otherwise cron-скрипт
+# перезаписывал autoban.json без 'whitelist' (если поле отсутствовало
+# в файле) — и пользовательские IP терялись при следующем запуске.
+# Раньше: whitelist = set(cfg.get('whitelist', ['127.0.0.1','::1']))
+# → локальная переменная, в cfg не записывалась → json.dumps(cfg)
+# → файл без 'whitelist' → _autoban_load() возвращает дефолт.
+# Теперь: инициализируем cfg['whitelist'] явно, а whitelist берём из него.
+if 'whitelist' not in cfg or not isinstance(cfg.get('whitelist'), list):
+    cfg['whitelist'] = ['127.0.0.1', '::1']
+whitelist = set(cfg['whitelist'])
 try:
     import socket as _sock
     _state_f = Path('/var/lib/xray-installer/state.json')
@@ -512,8 +521,17 @@ for ip, cnt in ip_errors.items():
             tg(f'AutoBan: {{ip}} banned ({{cnt}} TLS errors in {{window}}min)')
 
 cfg['banned'] = banned
+# v4.25.2 FIX: persist whitelist (включая добавленные chain IPs) и
+# гарантировать наличие 'ban_history' — иначе cron-скрипт затирал
+# эти поля, и пункт меню [6] История банов оставался пустым.
+cfg['whitelist'] = sorted(whitelist)
+if 'ban_history' not in cfg:
+    cfg['ban_history'] = []
+if 'enabled' not in cfg:
+    cfg['enabled'] = True
 BAN_STATE.parent.mkdir(parents=True,exist_ok=True)
-BAN_STATE.write_text(json.dumps(cfg,indent=2))
+BAN_STATE.write_text(json.dumps(cfg,indent=2,ensure_ascii=False))
+BAN_STATE.chmod(0o600)
 """
     lines = ["#!/bin/bash", "python3 - <<'PYEOF'"] + py_body.splitlines() + ["PYEOF"]
     sh.write_text("\n".join(lines) + "\n")
