@@ -58,6 +58,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from chimera.modules.geo_mirrors import MIN_SIZES
+
 
 # =============================================================================
 #  ОТЛОЖЕННАЯ ПРИВЯЗКА К ЯДРУ (_core.py)
@@ -916,12 +918,15 @@ def _apply_split_tunnel_config_from_state() -> None:
         geo_too_small = False
         if not geo_missing:
             # Стандартный geosite.dat от v2fly/xray ~1-2 МБ — не содержит
-            # категорию BLOCKED. Нужный файл от runetfreedom весит ~4-6 МБ.
-            # Порог 3 МБ отсекает неправильные файлы.
+            # категорию BLOCKED. Нужный файл от runetfreedom весит ~73 МБ.
+            # v4.25.1 FIX: пороги берутся из MIN_SIZES (geo_mirrors.py),
+            # а не хардкод 3 МБ / 10 КБ — иначе усечённая 10-МБ кэшированная
+            # копия с jsDelivr проходит проверку как валидная. См. комментарий
+            # в geo_mirrors.py:191-217 с описанием инцидента на проде.
             # После auto_copy выше — файлы точно в /etc/xray/, проверяем размер.
             geo_too_small = (
-                GEOSITE_DAT.stat().st_size < 3_000_000
-                or GEOIP_DAT.stat().st_size < 10_000
+                GEOSITE_DAT.stat().st_size < MIN_SIZES["geosite.dat"]
+                or GEOIP_DAT.stat().st_size < MIN_SIZES["geoip.dat"]
             )
         if geo_missing or geo_too_small:
             reason = "отсутствуют" if geo_missing else "повреждены (слишком малый размер)"

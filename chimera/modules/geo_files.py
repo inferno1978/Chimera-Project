@@ -226,9 +226,15 @@ def setup_geo_autoupdate() -> None:
         # FIX: гарантируем наличие обеих директорий
         mkdir -p /etc/xray /usr/local/share/xray /usr/local/etc/xray
 
-        # Минимальные размеры (защита от усечённых загрузок)
-        GEOSITE_MIN=3000000
-        GEOIP_MIN=10000
+        # Минимальные размеры (защита от усечённых загрузок).
+        # v4.25.1 FIX: берётся из MIN_SIZES (geo_mirrors.py), а не хардкод.
+        # Ранее здесь стояли 3 МБ / 10 КБ — устаревшие значения из-за которых
+        # cron "обновлял" geosite.dat на 10-МБ усечённую кэшированную копию
+        # с jsDelivr (которая проходила старый порог), а реальное обновление
+        # с GitHub Release (~73 МБ) не происходило. См. комментарий в
+        # geo_mirrors.py:191-217 с описанием инцидента на проде.
+        GEOSITE_MIN={MIN_SIZES["geosite.dat"]}
+        GEOIP_MIN={MIN_SIZES["geoip.dat"]}
 
         # Bash-массивы зеркал (генерируются из chimera.modules.geo_mirrors)
         GEOSITE_URLS=(
