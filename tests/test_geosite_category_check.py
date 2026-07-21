@@ -93,6 +93,52 @@ class TestGeositeHasCategory(unittest.TestCase):
             self.assertIn("category-ru", args)
             self.assertNotIn("geosite:category-ru", args)
 
+    def test_uses_case_insensitive_grep_flag(self):
+        """v4.25.1 REGRESSION: grep должен использовать -i (case-insensitive).
+
+        Теги в geosite.dat хранятся в ВЕРХНЕМ регистре (CATEGORY-RU), а мы
+        передаём строчные (category-ru). Без -i grep не находит существующие
+        категории → правила geosite:category-ru терялись даже с валидным
+        geosite.dat. Это воспроизводит баг с проде.
+
+        Флаги объединены в одну строку: '-qaFi' (q=aquiet, a=binary-as-text,
+        F=fixed-string, i=case-insensitive). Проверяем что 'i' присутствует
+        в строке флагов.
+        """
+        from chimera.modules import split_tunnel
+        with patch.object(Path, "exists", return_value=True), \
+             patch("subprocess.run", return_value=_make_completed(returncode=0)) as mock_run:
+            split_tunnel._geosite_has_category("category-ru")
+            args = mock_run.call_args[0][0]
+            # grep вызывается как ["grep", "-qaFi", "category-ru", "/path"]
+            # Проверяем что в строке флагов есть 'i' (case-insensitive).
+            self.assertEqual(args[0], "grep", "Должен вызываться grep")
+            flags = args[1]
+            self.assertIn("i", flags,
+                          f"grep flags '{flags}' должны содержать 'i' (case-insensitive). "
+                          f"Полная команда: {args}")
+
+    def test_finds_uppercase_tag_in_geosite(self):
+        """v4.25.1 REGRESSION: _geosite_has_category находит тег в ВЕРХНЕМ регистре.
+
+        Реальный geosite.dat хранит теги как CATEGORY-RU (проверено через
+        `strings geosite.dat | grep CATEGORY-RU`). До фикса grep -qaF (без -i)
+        не находил 'category-ru' в файле с 'CATEGORY-RU' → возвращала False.
+        """
+        from chimera.modules import split_tunnel
+        # Имитируем что grep с -i находит (rc=0), без -i не находит (rc=1).
+        # Проверяем что функция использует -i и поэтому получает rc=0.
+        def fake_grep(cmd, **kw):
+            if isinstance(cmd, list) and len(cmd) > 1 and "i" in cmd[1]:
+                return _make_completed(returncode=0)  # found (case-insensitive)
+            return _make_completed(returncode=1)  # not found (case-sensitive)
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch("subprocess.run", side_effect=fake_grep):
+            result = split_tunnel._geosite_has_category("category-ru")
+        self.assertTrue(result,
+                        "Должна найти CATEGORY-RU в geosite.dat через case-insensitive grep")
+
     def test_empty_category_returns_false(self):
         """Пустая категория → False."""
         from chimera.modules import split_tunnel
