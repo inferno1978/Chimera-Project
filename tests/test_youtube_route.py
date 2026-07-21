@@ -99,8 +99,12 @@ class TestYoutubeApplyToXray(unittest.TestCase):
             patch.object(core, "CONFIG_DIR", self._tmpdir),
         )
 
-    def test_adds_youtube_rule_with_geosite_domain(self):
-        """Правило должно содержать geosite:youtube в domain[]."""
+    def test_adds_youtube_rule_with_domain_entries(self):
+        """Правило должно содержать domain:youtube.com в domain[].
+
+        v4.25.1: geosite:youtube убран — его нет в runetfreedom geosite.dat.
+        Теперь используем только domain: записи.
+        """
         from chimera.modules import youtube_route
         self._cfg_path.write_text(json.dumps(_make_xray_config()))
         # Mocks: _set_config_owner, _run, _nginx_restart_if_reality, info/success/warn.
@@ -117,8 +121,11 @@ class TestYoutubeApplyToXray(unittest.TestCase):
         rules = cfg["routing"]["rules"]
         yt_rules = [r for r in rules if r.get("comment") == "youtube_via_ru"]
         self.assertEqual(len(yt_rules), 1, "Должно быть ровно одно YouTube правило")
-        self.assertIn("geosite:youtube", yt_rules[0]["domain"])
+        self.assertIn("domain:youtube.com", yt_rules[0]["domain"])
         self.assertIn("domain:googlevideo.com", yt_rules[0]["domain"])
+        # geosite:youtube НЕ должно быть — его нет в runetfreedom geosite.dat.
+        self.assertNotIn("geosite:youtube", yt_rules[0]["domain"])
+        self.assertNotIn("geosite:google", yt_rules[0]["domain"])
 
     def test_uses_direct_outbound_in_non_awg_mode(self):
         """Без AWG: outboundTag='direct'."""
@@ -235,7 +242,7 @@ class TestYoutubeRemoveFromXray(unittest.TestCase):
         """Удаляет только YouTube правило, оставляя остальные."""
         from chimera.modules import youtube_route
         cfg = _make_xray_config(routing_rules=[
-            {"type": "field", "domain": ["geosite:youtube"],
+            {"type": "field", "domain": ["domain:youtube.com"],
              "outboundTag": "direct", "comment": "youtube_via_ru"},
             {"type": "field", "ip": ["10.0.0.0/8"],
              "outboundTag": "direct", "comment": "ru_subnets_ripe"},
@@ -294,7 +301,7 @@ class TestYoutubeRuleInConfig(unittest.TestCase):
     def test_returns_true_when_rule_exists(self):
         from chimera.modules import youtube_route
         cfg = _make_xray_config(routing_rules=[
-            {"type": "field", "domain": ["geosite:youtube"],
+            {"type": "field", "domain": ["domain:youtube.com"],
              "outboundTag": "direct", "comment": "youtube_via_ru"},
         ])
         self._cfg_path.write_text(json.dumps(cfg))
@@ -402,7 +409,7 @@ class TestRestoreYoutubeRuleIfNeeded(unittest.TestCase):
         from chimera.modules import youtube_route
         self._state_path.write_text(json.dumps({"youtube_via_ru": True}))
         cfg = _make_xray_config(routing_rules=[
-            {"type": "field", "domain": ["geosite:youtube"],
+            {"type": "field", "domain": ["domain:youtube.com"],
              "outboundTag": "direct", "comment": "youtube_via_ru"},
         ])
         self._cfg_path.write_text(json.dumps(cfg))
@@ -446,8 +453,11 @@ class TestYoutubeDomainsList(unittest.TestCase):
     def test_domains_list_includes_key_youtube_domains(self):
         """Список _YOUTUBE_DOMAINS должен покрывать ключевые домены."""
         from chimera.modules.youtube_route import _YOUTUBE_DOMAINS
-        # geosite:youtube — основной список.
-        self.assertIn("geosite:youtube", _YOUTUBE_DOMAINS)
+        # domain:youtube.com — основной домен.
+        self.assertIn("domain:youtube.com", _YOUTUBE_DOMAINS)
+        # geosite:youtube НЕ должно быть — его нет в runetfreedom geosite.dat.
+        self.assertNotIn("geosite:youtube", _YOUTUBE_DOMAINS)
+        self.assertNotIn("geosite:google", _YOUTUBE_DOMAINS)
         # googlevideo.com — CDN видео-стримов.
         self.assertIn("domain:googlevideo.com", _YOUTUBE_DOMAINS)
         # ytimg.com — thumbnails.

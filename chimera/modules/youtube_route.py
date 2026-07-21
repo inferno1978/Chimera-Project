@@ -60,29 +60,44 @@ def _core_module():
 # ── Константы ───────────────────────────────────────────────────────────────
 _YOUTUBE_RULE_COMMENT = "youtube_via_ru"
 
-# Список доменов YouTube и связанных сервисов. geosite:youtube покрывает
-# основные домены (youtube.com, *.youtube.com, youtu.be, googlevideo.com),
-# но дополнительно добавляем:
-#   - geosite:google — googlevideo.com иногда归类 under google
-#   - geosite:youtube-googletag — ad-tracking домены YouTube
-#   - domain:ytimg.com — thumbnails/images (часто на отдельном CDN)
-#   - domain:ggpht.com — user avatars
-#   - domain:youtubei.googleapis.com — внутренний API YouTube
-#   - domain:manifest.googlevideo.com — DASH/HLS манифесты
+# Список доменов YouTube и связанных сервисов.
+#
+# v4.25.1 FIX: Раньше использовались geosite:youtube и geosite:google, но
+# geosite.dat от runetfreedom (который ставит Chimera) НЕ содержит этих
+# категорий — только российские (category-ru, ru-available-only-inside).
+# Xray падал при старте с "code not found in geosite.dat: YOUTUBE".
+#
+# Теперь используем ТОЛЬКО domain: записи — они работают с любым geosite.dat
+# (или даже без него). Список расширен чтобы покрыть то, что обычно входит
+# в geosite:youtube:
+#   - Основные домены: youtube.com, youtu.be, *.youtube-nocookie.com и т.д.
+#   - CDN видео-стримов: googlevideo.com, manifest.googlevideo.com
+#   - Thumbnails/images: ytimg.com, ggpht.com
+#   - Внутренний API: youtubei.googleapis.com
+#   - Ad-tracking: youtube-googletag (через domain: записи)
+#
+# Xray matching: domain:example.com матчит поддомены тоже (foo.example.com).
 # Полный список — чтобы не было ситуации когда видео-стрим через RU,
 # а thumbnails через exit (или наоборот) — асимметричная маршрутизация
 # ломает сессию YouTube.
 _YOUTUBE_DOMAINS = [
-    "geosite:youtube",
-    "geosite:google",
-    "domain:googlevideo.com",
-    "domain:ytimg.com",
-    "domain:ggpht.com",
-    "domain:youtubei.googleapis.com",
-    "domain:manifest.googlevideo.com",
+    # Основные домены YouTube
+    "domain:youtube.com",
     "domain:youtu.be",
     "domain:youtube-nocookie.com",
     "domain:youtubeeducation.com",
+    "domain:youtubei.googleapis.com",
+    "domain:ytimg.com",
+    # CDN видео-стримов (DASH/HLS манифесты + сегменты)
+    "domain:googlevideo.com",
+    "domain:manifest.googlevideo.com",
+    # Avatars / user images
+    "domain:ggpht.com",
+    # Ad-tracking (YouTube-specific)
+    "domain:youtube-googletag.com",
+    # Google services used by YouTube internally
+    "domain:accounts.google.com",
+    "domain:apis.google.com",
 ]
 
 
