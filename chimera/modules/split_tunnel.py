@@ -139,6 +139,43 @@ def _geo_files_available(auto_copy: bool = True) -> bool:
     return True
 
 
+def _geosite_has_category(category: str) -> bool:
+    """Проверяет что geosite.dat содержит указанную категорию.
+
+    Использует grep по бинарному содержимому файла (как _xray_geo_is_runetfreedom
+    в xray_install.py). Это единственный надёжный способ — Xray падает при
+    старте если правило ссылается на несуществующую категорию.
+
+    Ищет во всех директориях где Xray может искать geo-файлы.
+    """
+    if not category:
+        return False
+    # Нормализуем: geosite:category-ru → category-ru
+    cat = category.replace("geosite:", "").strip()
+    if not cat:
+        return False
+    import subprocess as _sp
+    # Xray ищет geo-файлы в нескольких местах.
+    candidates = [
+        Path("/etc/xray/geosite.dat"),
+        Path("/usr/local/share/xray/geosite.dat"),
+        Path("/usr/local/etc/xray/geosite.dat"),
+    ]
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            r = _sp.run(
+                ["grep", "-qaF", cat, str(p)],
+                capture_output=True,
+            )
+            if r.returncode == 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 # =============================================================================
 #  ИНТЕРАКТИВНЫЙ ОПРОС ПРИ УСТАНОВКЕ
 # =============================================================================
@@ -370,12 +407,25 @@ def build_split_tunnel_routing_rules(
         # --- Явные домены IP-проверок и РФ — ВСЕГДА через direct (наивысший приоритет) ---
         # ВАЖНО: российские домены/IP идут первыми — первое совпадение побеждает.
         # Xray применяет правила в порядке списка.
+        #
+        # v4.25 FIX: проверяем наличие каждой geosite-категории перед добавлением.
+        # Раньше geosite:ru-available-only-inside добавлялся без проверки —
+        # если geosite.dat старый или от другого источника (не runetfreedom),
+        # Xray падал при старте с "code not found in geosite.dat".
+        geosite_domains = list(IP_CHECK_DOMAINS)
+        if _geosite_has_category("category-ru"):
+            geosite_domains.append("geosite:category-ru")
+        else:
+            warn("geosite:category-ru не найден в geosite.dat — правило пропущено")
+        if _geosite_has_category("ru-available-only-inside"):
+            geosite_domains.append("geosite:ru-available-only-inside")
+        else:
+            warn("geosite:ru-available-only-inside не найден в geosite.dat — правило пропущено. "
+                 "Обновите geo-файлы: Настройки сети → 1 (Split Tunneling) → 6 (Обновить).")
+
         rules.append({
             "type":        "field",
-            "domain":      IP_CHECK_DOMAINS + [
-                "geosite:category-ru",
-                "geosite:ru-available-only-inside",
-            ],
+            "domain":      geosite_domains,
             "outboundTag": direct_tag,
             "comment":     "split_tunnel: российские домены напрямую",
         })
