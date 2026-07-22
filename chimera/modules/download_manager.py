@@ -278,6 +278,35 @@ def fetch_package(
                     # внутри _verify_checksum). Принимаем файл.
                     # verify_result is True — хэш совпал, принимаем.
 
+                # ── Переименование tmp_path в каноническое имя ────────────
+                # v4.25.4 FIX (критический баг с 10.07.2026, коммит fbb2285):
+                # tmp_path строится как /tmp/_download_mgr_{filename} —
+                # post_install callback'и (_post_install_geo, _default_copy_to_dests,
+                # и любые другие, использующие src.name) копировали файл под
+                # именем '_download_mgr_{filename}' вместо канонического
+                # {filename}. Это означало что geosite.dat, geoip.dat и др.
+                # NEVER не попадали в /etc/xray/ под правильным именем —
+                # вместо этого создавался _download_mgr_geosite.dat РЯДОМ со
+                # старым нетронутым geosite.dat. Все обновления с 10.07.2026
+                # были no-op по факту.
+                #
+                # Решение: переименовать tmp_path в /tmp/{filename} ПЕРЕД
+                # вызовом post_install/_default_copy_to_dests. Тогда src.name
+                # будет каноническим именем, и все post_install callback'и
+                # (~15 штук в проекте) автоматически заработают правильно
+                # без изменения их сигнатуры или кода.
+                canonical_tmp = Path("/tmp") / filename
+                if canonical_tmp != tmp_path:
+                    canonical_tmp.unlink(missing_ok=True)
+                    try:
+                        tmp_path.rename(canonical_tmp)
+                    except OSError:
+                        # На некоторых FS rename через /tmp может упасть
+                        # (например, cross-device). Fallback: copy2 + unlink.
+                        shutil.copy2(str(tmp_path), str(canonical_tmp))
+                        tmp_path.unlink(missing_ok=True)
+                    tmp_path = canonical_tmp
+
                 # Скачано успешно — копируем во все install_dests
                 if spec.post_install is not None:
                     ok = spec.post_install(tmp_path, spec.install_dests)
@@ -322,7 +351,14 @@ def fetch_package(
 # ============================================================================
 
 def _default_copy_to_dests(src: Path, dests: list[Path]) -> None:
-    """Копирует src во все dests с chmod 0o644."""
+    """Копирует src во все dests с chmod 0o644.
+
+    v4.25.4: src.name теперь гарантированно каноническое (без префикса
+    _download_mgr_), потому что fetch_package() переименовывает tmp_path
+    в /tmp/{filename} перед вызовом этой функции (см. строку ~281 в
+    fetch_package). Раньше src.name был '_download_mgr_{filename}' и
+    файлы копировались под неправильным именем — критический баг с 10.07.2026.
+    """
     for dest_dir in dests:
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / src.name

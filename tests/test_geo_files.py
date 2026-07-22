@@ -156,6 +156,19 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
             return any(s.startswith(d) for d in _GEO_DIRS) and \
                    any(s.endswith(fn) for fn in _GEO_FILENAMES)
 
+        def _is_tmp_geo(s: str) -> bool:
+            """True если s — tmp-путь к geo-файлу (любой вариант имени).
+
+            v4.25.4: после фикса tmp_path переименования, файл в /tmp/
+            называется канонически (/tmp/geosite.dat), а не
+            /tmp/_download_mgr_geosite.dat. Покрываем оба варианта,
+            чтобы тест работал и со старым (до фикса) и с новым кодом.
+            """
+            return (s.startswith("/tmp/_download_mgr_") and
+                    any(s.endswith(fn) for fn in _GEO_FILENAMES)) or \
+                   (s.startswith("/tmp/") and
+                    any(s == f"/tmp/{fn}" for fn in _GEO_FILENAMES))
+
         def mock_exists(self, *a, **kw):
             s = str(self)
             if s in existing_files:
@@ -167,6 +180,9 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
             # /tmp/_download_mgr_* — "скачанный" файл существует
             if s.startswith("/tmp/_download_mgr_"):
                 return True
+            # v4.25.4: canonical tmp path после rename — /tmp/{filename}
+            if _is_tmp_geo(s):
+                return True
             # v4.25.2: geo-файлы в dest-директориях "создаются" copy2 в
             # _post_install_geo — даже если их не было в existing_files,
             # dest.stat() должен их видеть.
@@ -177,6 +193,9 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         def mock_stat(self, *a, **kw):
             s = str(self)
             if s in existing_files or s.startswith("/tmp/_download_mgr_"):
+                return MockStat()
+            # v4.25.4: canonical tmp path после rename
+            if _is_tmp_geo(s):
                 return MockStat()
             # v4.25.2: geo-файлы в dest-директориях — copy2 "создал" их,
             # dest.stat() должен вернуть MockStat чтобы size-check
@@ -251,6 +270,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
                    urlopen_mock) as mock_urlopen, \
              patch("shutil.copy2", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, *a, **kw: None), \
+             patch.object(Path, "rename", lambda self, *a, **kw: None), \
              patch("builtins.open", mock_open_inst), \
              patch("builtins.input", return_value="n"):
             result = geo_files.download_geo_files()
@@ -300,6 +320,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
                    urlopen_mock) as mock_urlopen, \
              patch("shutil.copy2", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, *a, **kw: None), \
+             patch.object(Path, "rename", lambda self, *a, **kw: None), \
              patch("builtins.open", mock_open_inst), \
              patch("builtins.input", return_value="n"):
             result = geo_files.download_geo_files()
@@ -429,6 +450,14 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
             return any(s.startswith(d) for d in _GEO_DIRS) and \
                    any(s.endswith(fn) for fn in _GEO_FILENAMES)
 
+        def _is_tmp_geo(s: str) -> bool:
+            """v4.25.4: canonical tmp path /tmp/{filename} (после rename)
+            + старый /tmp/_download_mgr_{filename} (до фикса)."""
+            return (s.startswith("/tmp/_download_mgr_") and
+                    any(s.endswith(fn) for fn in _GEO_FILENAMES)) or \
+                   (s.startswith("/tmp/") and
+                    any(s == f"/tmp/{fn}" for fn in _GEO_FILENAMES))
+
         def mock_exists(self, *a, **kw):
             s = str(self)
             if s in existing_files:
@@ -437,6 +466,9 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
                 return False  # /root/ пуст
             if s.startswith("/tmp/_download_mgr_"):
                 return True  # "скачанный" файл
+            # v4.25.4: canonical tmp path после rename
+            if _is_tmp_geo(s):
+                return True
             # v4.25.2: copy2 в _post_install_geo "создаёт" dest-файлы
             if _is_geo_dest(s):
                 return True
@@ -445,6 +477,9 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
         def mock_stat(self, *a, **kw):
             s = str(self)
             if s in existing_files or s.startswith("/tmp/_download_mgr_"):
+                return MockStat()
+            # v4.25.4: canonical tmp path после rename
+            if _is_tmp_geo(s):
                 return MockStat()
             # v4.25.2: dest-файлы после copy2 — size-check должен пройти
             if _is_geo_dest(s):
@@ -469,6 +504,7 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
                    urlopen_mock) as mock_urlopen, \
              patch("shutil.copy2", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, *a, **kw: None), \
+             patch.object(Path, "rename", lambda self, *a, **kw: None), \
              patch("builtins.open", mock_open_inst), \
              patch("builtins.input", return_value="n"):
             result = geo_files.download_geo_files()
