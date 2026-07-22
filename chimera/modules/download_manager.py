@@ -44,6 +44,8 @@ spec, ДО любого сетевого вызова.
 """
 from __future__ import annotations
 
+import hashlib
+import re
 import shutil
 import subprocess
 import urllib.request
@@ -83,6 +85,21 @@ class PackageSpec:
                              (tmp_path, install_dests). Возвращает True при
                              успехе. Если None — просто copy2+chmod во все
                              install_dests.
+      checksum_urls:         Optional[list[str]] — список URL .sha256sum
+                             файлов для верификации контента после размерной
+                             проверки. Если задан — после успешной загрузки
+                             (размер >= min_size) fetch_package скачивает
+                             .sha256sum, парсит hex-хэш, считает sha256
+                             скачанного файла и сравнивает. Несовпадение →
+                             отбраковка и переход к следующему зеркалу, как
+                             при провале по размеру. Если НИ ОДИН checksum_url
+                             не ответил (404 везде) — деградация до одобрения
+                             по размеру с warn. По умолчанию None — обратная
+                             совместимость, верификация не делается.
+      checksum_algo:         Алгоритм хэширования для checksum_urls.
+                             По умолчанию "sha256". Используется как
+                             hashlib.new(checksum_algo) и как суффикс
+                             в ожидаемом имени файла (.sha256sum).
     """
 
     name: str
@@ -92,6 +109,8 @@ class PackageSpec:
     manual_incoming_dir: Path = Path("/root")
     min_size: int = 0
     post_install: Optional[Callable[[Path, list[Path]], bool]] = None
+    checksum_urls: Optional[list[str]] = None
+    checksum_algo: str = "sha256"
 
     def __post_init__(self):
         # КРИТИЧЕСКИЙ ИНВАРИАНТ: ручная директория НЕ должна совпадать
@@ -237,6 +256,28 @@ def fetch_package(
                 if progress_label:
                     sz = tmp_path.stat().st_size
                     print(f"  {progress_label} ✓ скачано ({sz // 1024} КБ)", flush=True)
+
+                # ── sha256-верификация (если spec.checksum_urls задан) ──────
+                # v4.25.2: размерная проверка не ловит случаи, когда CDN
+                # закэшировал устаревший, но достаточно большой файл. Контроль
+                # суммы однозначно отбраковывает такой файл. Если НИ ОДИН
+                # checksum_url не отвечает (404 везде — апстрим перестал
+                # публиковать) — деградация до одобрения по размеру с warn.
+                if spec.checksum_urls:
+                    verify_result = _verify_checksum(
+                        tmp_path, spec.checksum_urls, spec.checksum_algo,
+                        progress_label=progress_label,
+                    )
+                    if verify_result is False:
+                        # Явная отбраковка — хэш не совпал. Лог уже внутри
+                        # _verify_checksum. Переходим к следующему зеркалу.
+                        tmp_path.unlink(missing_ok=True)
+                        continue
+                    # verify_result is None — checksum недоступен со всех
+                    # зеркал, деградация до размерной проверки (warn уже
+                    # внутри _verify_checksum). Принимаем файл.
+                    # verify_result is True — хэш совпал, принимаем.
+
                 # Скачано успешно — копируем во все install_dests
                 if spec.post_install is not None:
                     ok = spec.post_install(tmp_path, spec.install_dests)
@@ -290,6 +331,186 @@ def _default_copy_to_dests(src: Path, dests: list[Path]) -> None:
             dest.chmod(0o644)
         except Exception:
             pass
+
+
+# ============================================================================
+#  sha256-верификация (v4.25.2)
+# ============================================================================
+# Реализована как отдельный helper, а не инлайн в fetch_package, чтобы:
+#   1. Была тестируемой (mock urlopen с разными ответами checksum).
+#   2. Не раздувала основной цикл fetch_package.
+#   3. Логика парсинга .sha256sum (терпимость к разным форматам) жила
+#      отдельно от цикла скачивания.
+#
+# Возвращает Optional[bool]:
+#   True  — хэш совпал, файл валиден
+#   False — хэш НЕ совпал, файл отбракован (вызывающий код идёт к след. зеркалу)
+#   None  — ни один checksum_url не ответил (404 везде) — деградация,
+#           вызывающий код принимает файл по размерной проверке
+
+# Regex для извлечения hex-хэша из .sha256sum.
+# Терпим к разным форматам:
+#   "<hex>  <filename>"   (стандартный sha256sum вывод)
+#   "<hex> <filename>"    (один пробел)
+#   "<hex>"               (только хэш, без имени)
+#   "<hex>\n"             (только хэш с переводом строки)
+# Допускает как нижний, так и верхний регистр hex.
+_HEX_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")
+
+
+def _parse_checksum_content(content: str) -> Optional[str]:
+    """Парсит содержимое .sha256sum файла.
+
+    Возвращает hex-хэш в нижнем регистре (без имени файла, без пробелов).
+    Возвращает None если в содержимом нет 64-символьной hex-строки.
+
+    Поддерживаемые форматы (все встречавшиеся у разных генераторов sha256sum):
+      "abc123...  geosite.dat\\n"        — стандартный sha256sum
+      "abc123... geosite.dat\\n"         — один пробел
+      "abc123...\\n"                     — только хэш
+      "  abc123...  \\n"                 — с пробелами по краям
+      "# comment\\nabc123...\\n"         — с комментариями
+    """
+    match = _HEX_RE.search(content)
+    if match:
+        return match.group(1).lower()
+    return None
+
+
+def _compute_hash(file_path: Path, algo: str = "sha256") -> str:
+    """Считает хэш файла чанками по 64 КБ (не загружая весь файл в память).
+
+    Возвращает hex-строку в нижнем регистре.
+    """
+    h = hashlib.new(algo)
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest().lower()
+
+
+def _verify_checksum(
+    file_path: Path,
+    checksum_urls: list[str],
+    algo: str = "sha256",
+    *,
+    progress_label: str = "",
+) -> Optional[bool]:
+    """Верифицирует file_path по .sha256sum, скачанному с checksum_urls.
+
+    Алгоритм:
+      1. Считает хэш file_path (algo, по умолчанию sha256) чанками.
+      2. Перебирает checksum_urls по порядку, скачивает .sha256sum.
+         ВАЖНО: перебор идёт НЕЗАВИСИМО от того, какое зеркало дало сам файл.
+         Это гарантирует, что мы верифицируем то что РЕАЛЬНО пришло, а не
+         то что зеркало "должно" было отдать.
+      3. При успехе скачивания .sha256sum — парсит hex-хэш, сравнивает.
+         • Совпал → return True
+         • Не совпал → return False (отбраковка, log warn)
+      4. Если НИ ОДИН checksum_url не ответил (404 везде — апстрим перестал
+         публиковать) → return None (деградация, warn "не удалось проверить").
+
+    Аргументы:
+      file_path:       Путь к скачанному файлу для верификации.
+      checksum_urls:   Список URL .sha256sum файлов (в порядке приоритета).
+      algo:            Алгоритм хэширования ("sha256" по умолчанию).
+      progress_label:  Если непусто — печатать прогресс верификации.
+
+    Возвращает:
+      True  — хэш совпал, файл валиден
+      False — хэш НЕ совпал, файл отбракован
+      None  — checksum недоступен со всех зеркал (деградация)
+    """
+    # 1) Считаем хэш скачанного файла
+    try:
+        actual_hash = _compute_hash(file_path, algo)
+    except Exception as e:
+        if progress_label:
+            print(
+                f"  {progress_label} ⚠ не удалось вычислить {algo} "
+                f"({e}) — пропуск верификации",
+                flush=True,
+            )
+        return None  # деградация, не отбраковка
+
+    if progress_label:
+        print(
+            f"  {progress_label} → верификация {algo}: "
+            f"{actual_hash[:16]}… перебор {len(checksum_urls)} checksum-зеркал",
+            flush=True,
+        )
+
+    # 2) Перебираем checksum_urls по порядку
+    checksum_obtained = False
+    for idx, checksum_url in enumerate(checksum_urls, 1):
+        try:
+            req = urllib.request.Request(
+                checksum_url,
+                headers={"User-Agent": "Chimera-Project"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                # .sha256sum файлы маленькие (~100 байт), читаем целиком.
+                # decode utf-8 с errors='replace' — терпимость к BOM/мусору.
+                content = r.read().decode("utf-8", errors="replace")
+            checksum_obtained = True
+
+            expected_hash = _parse_checksum_content(content)
+            if expected_hash is None:
+                # Скачали, но не смогли распарсить — пробуем следующий URL.
+                if progress_label:
+                    host = checksum_url.split("/")[2] if "://" in checksum_url else checksum_url[:40]
+                    print(
+                        f"  {progress_label} ⚠ checksum с {host}: "
+                        f"не удалось распарсить hex — пробуем следующее",
+                        flush=True,
+                    )
+                continue
+
+            if actual_hash == expected_hash:
+                if progress_label:
+                    host = checksum_url.split("/")[2] if "://" in checksum_url else checksum_url[:40]
+                    print(
+                        f"  {progress_label} ✓ {algo} совпал (зеркало {idx}/{len(checksum_urls)}: {host})",
+                        flush=True,
+                    )
+                return True
+            else:
+                # Хэш НЕ совпал — ОТБРАКОВКА.
+                host = checksum_url.split("/")[2] if "://" in checksum_url else checksum_url[:40]
+                if progress_label:
+                    print(
+                        f"  {progress_label} ⚠ {host}: {algo} НЕ совпал — "
+                        f"ожидался {expected_hash[:16]}…, получен {actual_hash[:16]}… "
+                        f"— файл отбракован, пробуем следующее зеркало",
+                        flush=True,
+                    )
+                return False
+
+        except Exception:
+            # 404 / network error / timeout — пробуем следующий URL
+            continue
+
+    # 3) Ни один checksum_url не ответил
+    if not checksum_obtained:
+        if progress_label:
+            print(
+                f"  {progress_label} ⚠ не удалось получить {algo} ни с одного "
+                f"зеркала ({len(checksum_urls)} попыток) — принято по размеру",
+                flush=True,
+            )
+        return None  # деградация, не отбраковка
+
+    # 4) checksum_obtained=True, но ни один не распарсился — деградация
+    if progress_label:
+        print(
+            f"  {progress_label} ⚠ checksum скачан, но hex не распарсен ни "
+            f"из одного — принято по размеру",
+            flush=True,
+        )
+    return None
 
 
 def print_manual_hint(spec: PackageSpec, *, filename: str, **filename_kwargs) -> None:

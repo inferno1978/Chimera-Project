@@ -154,6 +154,54 @@ def get_all_mirrors() -> dict[str, list[str]]:
     }
 
 
+# ============================================================================
+#  CHECKSUM URLS — для sha256-верификации скачанных geo-файлов
+# ============================================================================
+# Апстрим-проект runetfreedom/russia-v2ray-rules-dat публикует рядом с самими
+# файлами их официальные sha256-суммы:
+#   geosite.dat.sha256sum
+#   geoip.dat.sha256sum
+# (видно в листинге файлов ветки release)
+#
+# URL чек-суммы строится теми же фабриками, что URL самого файла — просто
+# передаём "geosite.dat.sha256sum" вместо "geosite.dat". Это гарантирует:
+#   • Тот же порядок хостов (зеркало N файла ↔ зеркало N чек-суммы)
+#   • Та же CDN-инфраструктура (jsDelivr/raw/release/прокси/Statically)
+#   • Совместимость с любым новым зеркалом, добавленным в _MIRROR_FACTORIES
+#
+# Назначение: sha256-верификация независимо от того, какое зеркало ответило.
+# Размер-проверка (MIN_SIZES) не ловит случаи, когда CDN закэшировал
+# устаревший, но достаточно большой файл (был инцидент: jsDelivr отдал
+# geosite.dat 10 МБ вместо 73 МБ, прошёл порог 3 МБ). Контрольная сумма
+# однозначно отбраковывает такой файл.
+
+def get_geosite_checksum_urls() -> list[str]:
+    """Упорядоченный список URL для скачивания geosite.dat.sha256sum.
+
+    Тот же порядок зеркал, что get_geosite_urls(), но с .sha256sum
+    в конце пути. Переиспользует _MIRROR_FACTORIES — не дублирует
+    список зеркал.
+    """
+    return [f("geosite.dat.sha256sum") for f in _MIRROR_FACTORIES]
+
+
+def get_geoip_checksum_urls() -> list[str]:
+    """Упорядоченный список URL для скачивания geoip.dat.sha256sum.
+
+    Аналогично get_geosite_checksum_urls() — тот же порядок зеркал,
+    что get_geoip_urls(), но с .sha256sum в конце пути.
+    """
+    return [f("geoip.dat.sha256sum") for f in _MIRROR_FACTORIES]
+
+
+def get_all_checksum_mirrors() -> dict[str, list[str]]:
+    """Словарь {filename: [checksum_urls]} — симметрично get_all_mirrors()."""
+    return {
+        "geosite.dat": get_geosite_checksum_urls(),
+        "geoip.dat":   get_geoip_checksum_urls(),
+    }
+
+
 GEO_MIRRORS_COUNT: int = len(_MIRROR_FACTORIES)
 """Количество зеркал на каждый файл (для отображения в TUI)."""
 

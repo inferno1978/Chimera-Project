@@ -29,7 +29,10 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from chimera.modules.geo_mirrors import (
     get_geosite_urls,
     get_geoip_urls,
+    get_geosite_checksum_urls,
+    get_geoip_checksum_urls,
     get_all_mirrors,
+    get_all_checksum_mirrors,
     MANUAL_UPLOAD_PATHS,
     XRAY_LOOKUP_DIRS,
     MIN_SIZES,
@@ -259,6 +262,143 @@ class TestBackwardCompatibility(unittest.TestCase):
 
     def test_old_ghproxy_url_still_present(self):
         self.assertIn(self.OLD_GHP, get_geosite_urls())
+
+
+# ============================================================================
+#  CHECKSUM URLS — v4.25.2: sha256-верификация скачанных geo-файлов
+# ============================================================================
+# Апстрим-проект публикует рядом с geosite.dat/geoip.dat их sha256-суммы
+# в файлах geosite.dat.sha256sum/geoip.dat.sha256sum. URL чек-суммы строится
+# теми же фабриками, что URL файла — порядок хостов должен совпадать.
+
+class TestChecksumUrls(unittest.TestCase):
+    """get_geosite_checksum_urls()/get_geoip_checksum_urls() — v4.25.2.
+
+    Проверки:
+      • Списки непустые и той же длины, что список URL самих файлов
+      • Тот же порядок хостов (зеркало N файла ↔ зеркало N чек-суммы)
+      • URL заканчивается на .sha256sum
+      • Все URL — HTTPS
+      • Все URL ведут на runetfreedom/russia-v2ray-rules-dat
+    """
+
+    def test_geosite_checksum_urls_non_empty(self):
+        urls = get_geosite_checksum_urls()
+        self.assertGreater(len(urls), 0)
+
+    def test_geoip_checksum_urls_non_empty(self):
+        urls = get_geoip_checksum_urls()
+        self.assertGreater(len(urls), 0)
+
+    def test_checksum_urls_same_count_as_file_urls(self):
+        """Должно быть столько же checksum-URL, сколько file-URL —
+        каждое зеркало должно отдавать и файл, и чек-сумму."""
+        self.assertEqual(
+            len(get_geosite_checksum_urls()), len(get_geosite_urls()),
+            "geosite: количество checksum-URL должно совпадать с количеством URL файлов"
+        )
+        self.assertEqual(
+            len(get_geoip_checksum_urls()), len(get_geoip_urls()),
+            "geoip: количество checksum-URL должно совпадать с количеством URL файлов"
+        )
+
+    def test_checksum_urls_same_count_as_geo_mirrors_count(self):
+        """GEO_MIRRORS_COUNT используется в TUI для отображения числа зеркал."""
+        self.assertEqual(GEO_MIRRORS_COUNT, len(get_geosite_checksum_urls()))
+        self.assertEqual(GEO_MIRRORS_COUNT, len(get_geoip_checksum_urls()))
+
+    def test_geosite_checksum_urls_end_with_sha256sum(self):
+        for url in get_geosite_checksum_urls():
+            with self.subTest(url=url):
+                self.assertTrue(
+                    url.endswith("/geosite.dat.sha256sum"),
+                    f"URL не заканчивается на /geosite.dat.sha256sum: {url}",
+                )
+
+    def test_geoip_checksum_urls_end_with_sha256sum(self):
+        for url in get_geoip_checksum_urls():
+            with self.subTest(url=url):
+                self.assertTrue(
+                    url.endswith("/geoip.dat.sha256sum"),
+                    f"URL не заканчивается на /geoip.dat.sha256sum: {url}",
+                )
+
+    def test_all_checksum_urls_are_https(self):
+        for url in get_geosite_checksum_urls() + get_geoip_checksum_urls():
+            with self.subTest(url=url):
+                self.assertTrue(url.startswith("https://"),
+                                f"Не-HTTPS checksum URL: {url}")
+
+    def test_all_checksum_urls_target_runetfreedom_repo(self):
+        for url in get_geosite_checksum_urls() + get_geoip_checksum_urls():
+            with self.subTest(url=url):
+                self.assertIn("runetfreedom/russia-v2ray-rules-dat", url,
+                              f"checksum URL ведёт не на runetfreedom: {url}")
+
+    def test_geosite_checksum_urls_same_hosts_as_file_urls(self):
+        """КРИТИЧЕСКИЙ инвариант: зеркало N для файла ↔ зеркало N для checksum.
+
+        Если URL файла — https://cdn.jsdelivr.net/.../geosite.dat, то URL
+        checksum с тем же индексом должен быть
+        https://cdn.jsdelivr.net/.../geosite.dat.sha256sum — тот же хост,
+        тот же путь, отличается только суффикс имени файла.
+
+        Это гарантирует, что верификация работает с тем же CDN-бэкендом,
+        который отдал файл, а не "наугад" с любым зеркалом.
+        """
+        file_urls = get_geosite_urls()
+        checksum_urls = get_geosite_checksum_urls()
+        self.assertEqual(len(file_urls), len(checksum_urls))
+        for file_url, checksum_url in zip(file_urls, checksum_urls):
+            with self.subTest():
+                # checksum_url = file_url + ".sha256sum"
+                expected = file_url + ".sha256sum"
+                self.assertEqual(
+                    checksum_url, expected,
+                    f"Зеркало не совпадает: file={file_url} vs checksum={checksum_url}",
+                )
+
+    def test_geoip_checksum_urls_same_hosts_as_file_urls(self):
+        """Аналогично test_geosite_checksum_urls_same_hosts_as_file_urls
+        для geoip.dat."""
+        file_urls = get_geoip_urls()
+        checksum_urls = get_geoip_checksum_urls()
+        self.assertEqual(len(file_urls), len(checksum_urls))
+        for file_url, checksum_url in zip(file_urls, checksum_urls):
+            with self.subTest():
+                expected = file_url + ".sha256sum"
+                self.assertEqual(
+                    checksum_url, expected,
+                    f"Зеркало не совпадает: file={file_url} vs checksum={checksum_url}",
+                )
+
+    def test_no_duplicate_checksum_urls(self):
+        for urls in (get_geosite_checksum_urls(), get_geoip_checksum_urls()):
+            with self.subTest():
+                self.assertEqual(
+                    len(urls), len(set(urls)),
+                    f"Дубликаты в checksum-списке: {[u for u in urls if urls.count(u) > 1]}",
+                )
+
+
+class TestGetAllChecksumMirrors(unittest.TestCase):
+    """get_all_checksum_mirrors — словарь {filename: [checksum_urls]}."""
+
+    def test_returns_dict_with_both_files(self):
+        d = get_all_checksum_mirrors()
+        self.assertEqual(set(d.keys()), {"geosite.dat", "geoip.dat"})
+
+    def test_dict_values_match_get_geosite_checksum_urls(self):
+        self.assertEqual(
+            get_all_checksum_mirrors()["geosite.dat"],
+            get_geosite_checksum_urls(),
+        )
+
+    def test_dict_values_match_get_geoip_checksum_urls(self):
+        self.assertEqual(
+            get_all_checksum_mirrors()["geoip.dat"],
+            get_geoip_checksum_urls(),
+        )
 
 
 if __name__ == "__main__":

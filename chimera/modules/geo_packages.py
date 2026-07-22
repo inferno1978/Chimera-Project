@@ -25,7 +25,11 @@ from pathlib import Path
 
 from chimera.modules.download_manager import PackageSpec
 from chimera.modules.github_mirrors import build_mirror_urls
-from chimera.modules.geo_mirrors import MIN_SIZES
+from chimera.modules.geo_mirrors import (
+    MIN_SIZES,
+    get_geosite_checksum_urls,
+    get_geoip_checksum_urls,
+)
 
 
 # ============================================================================
@@ -139,6 +143,8 @@ GEOSITE_SPEC = PackageSpec(
     manual_incoming_dir=_GEO_MANUAL_DIR,   # /root/ — WinSCP-friendly
     min_size=MIN_SIZES["geosite.dat"],     # 20_000_000 (v4.25.1)
     post_install=_post_install_geo,        # chmod 644 + chown root:xray
+    checksum_urls=get_geosite_checksum_urls(),  # v4.25.2: sha256-верификация
+    checksum_algo="sha256",
 )
 
 
@@ -159,4 +165,6 @@ GEOIP_SPEC = PackageSpec(
     manual_incoming_dir=_GEO_MANUAL_DIR,
     min_size=MIN_SIZES["geoip.dat"],       # 1_000_000 (v4.25.1)
     post_install=_post_install_geo,
+    checksum_urls=get_geoip_checksum_urls(),  # v4.25.2: sha256-верификация
+    checksum_algo="sha256",
 )
