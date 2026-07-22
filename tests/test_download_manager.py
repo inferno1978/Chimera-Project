@@ -1401,5 +1401,150 @@ class TestChecksumNotCalledInManualBranch(unittest.TestCase):
         mock_verify.assert_not_called()
 
 
+# ============================================================================
+#  v4.25.4 REGRESSION TEST: файл в install_dests должен иметь каноническое имя
+# ============================================================================
+# КРИТИЧЕСКИЙ regression-тест на баг, обнаруженный 22.07.2026 на проде:
+# geosite.dat/geoip.dat копировались под именем '_download_mgr_geosite.dat'
+# вместо 'geosite.dat' — из-за того что _post_install_geo и
+# _default_copy_to_dests использовали src.name, а src был tmp_path =
+# /tmp/_download_mgr_{filename}. Баг введён в fbb2285 (10.07.2026), жил 12
+# дней, все geo-обновления за это время были no-op по факту.
+
+class TestCanonicalFileNameInInstallDests(unittest.TestCase):
+    """v4.25.4 regression: файл в install_dests должен называться
+    'geosite.dat', а НЕ '_download_mgr_geosite.dat'.
+
+    Баг введён в fbb2285 (10.07.2026), обнаружен 22.07.2026 на проде —
+    все geo-обновления с 10 июля по 22 июля были no-op: скачивание и
+    sha256-верификация проходили успешно, но результат не попадал в
+    реальный /etc/xray/geosite.dat (создавался файл с префиксом
+    _download_mgr_ рядом со старым нетронутым geosite.dat).
+
+    Этот тест проверяет ИМЕННО ИТОГОВОЕ ИМЯ ФАЙЛА в install_dests,
+    а не только факт копирования — это слепое пятно существующих тестов,
+    которое и позволило багу жить 12 дней незамеченным.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.manual_dir = Path(self.tmpdir) / "manual"
+        self.manual_dir.mkdir()
+        self.install_dir = Path(self.tmpdir) / "install"
+        self.install_dir.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_installed_file_has_canonical_name_not_tmp_prefix(self):
+        """Регрессия: после fetch_package() файл в install_dests должен
+        называться 'geosite.dat', а НЕ '_download_mgr_geosite.dat'.
+
+        Баг введён в fbb2285 (10.07.2026), обнаружен на проде 22.07.2026 —
+        все geo-обновления с 10 июля были no-op из-за этого имени.
+        """
+        # Реальный контент файла
+        file_content = b"valid geosite content" * 100  # > min_size
+        filename = "geosite.dat"
+
+        # Используем РЕАЛЬНЫЙ post_install (не mock) — _default_copy_to_dests,
+        # чтобы проверить именно тот путь, который использует fetch_package
+        # по умолчанию. Запись в /tmp будет реальной (через builtins.open).
+        spec = PackageSpec(
+            name="geosite-test",
+            filename_builder=lambda **kw: filename,
+            mirror_urls_builder=lambda filename, **kw: [f"https://mirror.example.com/{filename}"],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=50,
+            # post_install=None → используется _default_copy_to_dests,
+            # который копирует src → dest_dir/src.name
+        )
+
+        # Мокаем urlopen — отдаём file_content
+        mock_resp = MagicMock()
+        mock_resp.read.side_effect = [file_content, b""]
+        mock_resp.headers = {"Content-Length": str(len(file_content))}
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   return_value=mock_resp):
+            result = fetch_package(spec)
+
+        # fetch_package должен завершиться успешно
+        self.assertTrue(result,
+                        "fetch_package должен вернуть True — файл скачан и скопирован")
+
+        # КЛЮЧЕВАЯ ПРОВЕРКА: в install_dir должен лежать 'geosite.dat',
+        # а НЕ '_download_mgr_geosite.dat'
+        installed_files = list(self.install_dir.iterdir())
+        names = {f.name for f in installed_files}
+        self.assertIn("geosite.dat", names,
+                      f"В install_dests должен быть 'geosite.dat', "
+                      f"фактически: {names}")
+        self.assertNotIn("_download_mgr_geosite.dat", names,
+                         f"В install_dests НЕ должно быть "
+                         f"'_download_mgr_geosite.dat' (регрессия fbb2285), "
+                         f"фактически: {names}")
+
+    def test_installed_file_has_canonical_name_with_post_install(self):
+        """Та же регрессия, но с явным post_install callback.
+
+        Проверяет что post_install получает src с каноническим именем
+        (через src.name) — это та точка, где _post_install_geo использует
+        src.name для построения dest пути.
+        """
+        filename = "geosite.dat"
+        file_content = b"valid content" * 100
+
+        # post_install callback, который использует src.name (как _post_install_geo)
+        captured_src_name = []
+        def fake_post_install(src, dests):
+            captured_src_name.append(src.name)
+            for dest_dir in dests:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / src.name
+                import shutil as _shutil
+                _shutil.copy2(str(src), str(dest))
+            return True
+
+        spec = PackageSpec(
+            name="geosite-test",
+            filename_builder=lambda **kw: filename,
+            mirror_urls_builder=lambda filename, **kw: [f"https://mirror.example.com/{filename}"],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=50,
+            post_install=fake_post_install,
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.read.side_effect = [file_content, b""]
+        mock_resp.headers = {"Content-Length": str(len(file_content))}
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   return_value=mock_resp):
+            result = fetch_package(spec)
+
+        self.assertTrue(result)
+        # post_install получил src с каноническим именем
+        self.assertEqual(len(captured_src_name), 1,
+                         "post_install должен быть вызван ровно 1 раз")
+        self.assertEqual(captured_src_name[0], "geosite.dat",
+                         f"post_install должен получить src.name='geosite.dat', "
+                         f"фактически: {captured_src_name[0]!r} "
+                         f"(регрессия fbb2285 — было '_download_mgr_geosite.dat')")
+
+        # И файл в install_dir имеет каноническое имя
+        installed_files = list(self.install_dir.iterdir())
+        names = {f.name for f in installed_files}
+        self.assertIn("geosite.dat", names)
+        self.assertNotIn("_download_mgr_geosite.dat", names)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
