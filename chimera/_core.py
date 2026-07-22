@@ -7536,21 +7536,37 @@ def do_dns_leak_test() -> None:
         _box_top("Сверка конфигурации")
         is_loopback = any(ip.startswith("127.") or ip == "::1"
                           for ip in configured_resolvers)
-        if is_loopback:
-            ns_str = ", ".join(configured_resolvers)
-            line1 = f"  {GREEN}✓ /etc/resolv.conf → localhost — DNS проксируется локально{NC}"
-            line2 = f"    {DIM}({ns_str}){NC}"
-            _box_row(line1)
-            _box_row(line2)
-        else:
-            _box_row(f"  {YELLOW}⚠ /etc/resolv.conf → внешний DNS "
-                     f"({', '.join(configured_resolvers)}){NC}")
-            _box_row(f"  {YELLOW}  DNS-запросы уходят напрямую, минуя Xray tunnel{NC}")
-        # DNSCrypt
+        # v4.25.5 FIX: проверяем DNSCrypt-proxy ДО decision'а про цвет
+        # предупреждения. Раньше код рисовал жёлтое "DNS уходит напрямую,
+        # минуя Xray tunnel" даже когда DNSCrypt-proxy был активен — это
+        # false positive, потому что при активном DNSCrypt запросы НЕ
+        # уходят напрямую, они перехватываются DNSCrypt-proxy (обычно
+        # через iptables redirect 53 → 5300). Жёлтое предупреждение
+        # сбивало пользователя с толку: выше зелёное "DNS-утечки не
+        # обнаружено", ниже жёлтое "всё плохо". Теперь логика:
+        #   - loopback в resolv.conf → зелёное "проксируется локально"
+        #   - non-loopback + DNSCrypt активен → зелёное "перехватывается DNSCrypt-proxy"
+        #   - non-loopback + DNSCrypt не активен → жёлтое (реальный риск)
         dnscrypt_active = _run(
             ["systemctl", "is-active", "dnscrypt-proxy"],
             capture=True, check=False
         ).stdout.strip() == "active"
+        ns_str = ", ".join(configured_resolvers)
+        if is_loopback:
+            line1 = f"  {GREEN}✓ /etc/resolv.conf → localhost — DNS проксируется локально{NC}"
+            line2 = f"    {DIM}({ns_str}){NC}"
+            _box_row(line1)
+            _box_row(line2)
+        elif dnscrypt_active:
+            # DNSCrypt активен — даже с внешними DNS в resolv.conf запросы
+            # перехватываются (обычно iptables redirect 53 → dnscrypt порт).
+            # Жёлтое предупреждение здесь было false positive.
+            _box_row(f"  {GREEN}✓ /etc/resolv.conf → внешний DNS ({ns_str}){NC}")
+            _box_row(f"  {GREEN}  Перехватывается DNSCrypt-proxy — напрямую не уходит{NC}")
+        else:
+            _box_row(f"  {YELLOW}⚠ /etc/resolv.conf → внешний DNS "
+                     f"({ns_str}){NC}")
+            _box_row(f"  {YELLOW}  DNS-запросы уходят напрямую, минуя Xray tunnel{NC}")
         dc_str = f"{GREEN}активен{NC}" if dnscrypt_active else f"{DIM}не запущен{NC}"
         _box_row(f"  DNSCrypt-proxy: {dc_str}")
         _box_row()
