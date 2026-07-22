@@ -7159,6 +7159,81 @@ def _menu_network() -> None:
 # =============================================================================
 #  DNS LEAK TEST
 # =============================================================================
+def _render_dns_reconciliation_box(configured_resolvers: list) -> None:
+    """Рендерит блок «Сверка конфигурации» в конце DNS Leak Test.
+
+    Выделен в отдельную функцию (v4.25.6) для тестопригодности —
+    do_dns_leak_test() делает реальные сетевые запросы (dig, API),
+    что делает её неподъёмной для unit-тестов. Эта функция работает
+    только с переданным списком configured_resolvers и health_check,
+    поэтому покрывает все 5 кейсов из tests/test_core_dns_redirect_integration.py.
+
+    Логика (v4.25.6 — исправлен false negative из v4.25.5/038540f):
+      - loopback → зелёное "проксируется локально"
+      - non-loopback + redirect_active (enabled AND rules_applied) →
+        зелёное "редирект активен — трафик заворачивается на dnscrypt-proxy"
+      - non-loopback + redirect НЕ активен (включая dnscrypt active но
+        rules_applied=False) → жёлтое "DNS уходит напрямую, минуя Xray"
+    """
+    if not configured_resolvers:
+        return
+    print()
+    _box_top("Сверка конфигурации")
+    is_loopback = any(ip.startswith("127.") or ip == "::1"
+                      for ip in configured_resolvers)
+    # v4.25.6 FIX: правильное условие для зелёного цвета.
+    #
+    # v4.25.5 (коммит 038540f) исправил визуальный баг — жёлтое
+    # "DNS уходит напрямую" рисовалось даже при активном DNSCrypt.
+    # НО он сделал это проверкой dnscrypt_active (процесс запущен),
+    # что является false negative: dnscrypt-proxy может быть active
+    # без того, чтобы системный DNS-трафик реально шёл через него —
+    # для этого нужны применённые iptables-правила редиректа 53 порта.
+    # Это прямо описано в dns_redirect.py:291-292: "редирект включён
+    # в state, но правила в iptables отсутствуют".
+    #
+    # v4.25.6: вместо dnscrypt_active проверяем redirect_active =
+    # health_check_dns_redirect()["enabled"] AND ["rules_applied"].
+    # Это значит, что зелёный цвет показывается ТОЛЬКО когда трафик
+    # реально перехватывается, не просто когда сервис запущен.
+    dnscrypt_active = _run(
+        ["systemctl", "is-active", "dnscrypt-proxy"],
+        capture=True, check=False
+    ).stdout.strip() == "active"
+    try:
+        _hc = health_check_dns_redirect()
+        redirect_active = bool(_hc.get("enabled")) and bool(_hc.get("rules_applied"))
+    except Exception:
+        # fallback: если health_check_dns_redirect() упал (например,
+        # state.json повреждён), не маскируем потенциальную утечку
+        # зелёным — показываем жёлтое как реальный риск.
+        redirect_active = False
+    ns_str = ", ".join(configured_resolvers)
+    if is_loopback:
+        line1 = f"  {GREEN}✓ /etc/resolv.conf → localhost — DNS проксируется локально{NC}"
+        line2 = f"    {DIM}({ns_str}){NC}"
+        _box_row(line1)
+        _box_row(line2)
+    elif redirect_active:
+        # DNS-редирект реально активен: правила в iptables применены,
+        # трафик 53 порта принудительно заворачивается на dnscrypt-proxy.
+        # Зелёное обоснованно — даже при внешних DNS в resolv.conf.
+        _box_row(f"  {GREEN}✓ /etc/resolv.conf → внешний DNS ({ns_str}){NC}")
+        _box_row(f"  {GREEN}  DNS-редирект активен — трафик принудительно "
+                 f"заворачивается на dnscrypt-proxy{NC}")
+    else:
+        # Жёлтое: либо dnscrypt не запущен, либо запущен но правила
+        # не применены (enabled=True, rules_applied=False) — оба случая
+        # реально означают, что DNS уходит напрямую на 8.8.8.8/1.1.1.1.
+        _box_row(f"  {YELLOW}⚠ /etc/resolv.conf → внешний DNS "
+                 f"({ns_str}){NC}")
+        _box_row(f"  {YELLOW}  DNS-запросы уходят напрямую, минуя Xray tunnel{NC}")
+    dc_str = f"{GREEN}активен{NC}" if dnscrypt_active else f"{DIM}не запущен{NC}"
+    _box_row(f"  DNSCrypt-proxy: {dc_str}")
+    _box_row()
+    _box_bottom()
+
+
 def do_dns_leak_test() -> None:
     """
     DNS Leak Test — проверяет, через какие DNS-серверы уходят запросы.
@@ -7531,46 +7606,9 @@ def do_dns_leak_test() -> None:
     _box_bottom()
 
     # ── Сверка с настроенным DNS — отдельный бокс ───────────────────────────
-    if configured_resolvers:
-        print()
-        _box_top("Сверка конфигурации")
-        is_loopback = any(ip.startswith("127.") or ip == "::1"
-                          for ip in configured_resolvers)
-        # v4.25.5 FIX: проверяем DNSCrypt-proxy ДО decision'а про цвет
-        # предупреждения. Раньше код рисовал жёлтое "DNS уходит напрямую,
-        # минуя Xray tunnel" даже когда DNSCrypt-proxy был активен — это
-        # false positive, потому что при активном DNSCrypt запросы НЕ
-        # уходят напрямую, они перехватываются DNSCrypt-proxy (обычно
-        # через iptables redirect 53 → 5300). Жёлтое предупреждение
-        # сбивало пользователя с толку: выше зелёное "DNS-утечки не
-        # обнаружено", ниже жёлтое "всё плохо". Теперь логика:
-        #   - loopback в resolv.conf → зелёное "проксируется локально"
-        #   - non-loopback + DNSCrypt активен → зелёное "перехватывается DNSCrypt-proxy"
-        #   - non-loopback + DNSCrypt не активен → жёлтое (реальный риск)
-        dnscrypt_active = _run(
-            ["systemctl", "is-active", "dnscrypt-proxy"],
-            capture=True, check=False
-        ).stdout.strip() == "active"
-        ns_str = ", ".join(configured_resolvers)
-        if is_loopback:
-            line1 = f"  {GREEN}✓ /etc/resolv.conf → localhost — DNS проксируется локально{NC}"
-            line2 = f"    {DIM}({ns_str}){NC}"
-            _box_row(line1)
-            _box_row(line2)
-        elif dnscrypt_active:
-            # DNSCrypt активен — даже с внешними DNS в resolv.conf запросы
-            # перехватываются (обычно iptables redirect 53 → dnscrypt порт).
-            # Жёлтое предупреждение здесь было false positive.
-            _box_row(f"  {GREEN}✓ /etc/resolv.conf → внешний DNS ({ns_str}){NC}")
-            _box_row(f"  {GREEN}  Перехватывается DNSCrypt-proxy — напрямую не уходит{NC}")
-        else:
-            _box_row(f"  {YELLOW}⚠ /etc/resolv.conf → внешний DNS "
-                     f"({ns_str}){NC}")
-            _box_row(f"  {YELLOW}  DNS-запросы уходят напрямую, минуя Xray tunnel{NC}")
-        dc_str = f"{GREEN}активен{NC}" if dnscrypt_active else f"{DIM}не запущен{NC}"
-        _box_row(f"  DNSCrypt-proxy: {dc_str}")
-        _box_row()
-        _box_bottom()
+    # v4.25.6: блок выделен в _render_dns_reconciliation_box() для
+    # тестопригодности. Логика описана в docstring функции.
+    _render_dns_reconciliation_box(configured_resolvers)
 
     print()
     input(f"{BLUE}Нажмите Enter...{NC}")
