@@ -2,6 +2,61 @@
 
 ---
 
+## FIX(geo): критический баг — geo-файлы копировались под именем временного файла (10.07–22.07.2026 все обновления были no-op) — 22 июля 2026
+
+**КРИТИЧЕСКИЙ баг, обнаруженный на реальном сервере 22.07.2026: `geosite.dat`/`geoip.dat` копировались в `/etc/xray/` под именем `_download_mgr_geosite.dat` вместо канонического `geosite.dat`. Это означало, что ВСЕ обновления geo-файлов с 10.07.2026 (коммит `fbb2285`, миграция `download_geo_files()` на `fetch_package()`) по 22.07.2026 (день обнаружения) были no-op по факту: скачивание и sha256-верификация проходили успешно, но результат никогда не попадал в реальный `/etc/xray/geosite.dat` (и параллельные копии в `/usr/local/share/xray/`, `/usr/local/etc/xray/`) — вместо этого создавался файл `_download_mgr_geosite.dat` РЯДОМ со старым нетронутым `geosite.dat`.**
+
+Это объясняет вообще весь цикл проблем с «geosite.dat возраст 202 дня», которые диагностировались и чинились последние два дня:
+- `a20c0f1` — фикс хардкоженных порогов в cron-скрипте (3 МБ → 20 МБ из `MIN_SIZES`) — был правильным, но не мог проявиться, потому что реальный целевой файл никогда физически не подменялся.
+- `e90f255` — sha256-верификация — была правильной, но отбраковывала файлы, которые потом копировались под неправильным именем.
+- `1f3dd04` — revert категории `ru-available-only-inside` — был правильным, но категория никогда не проверялась на актуальном файле в `/etc/xray/` (там лежал 200-дневной давности протухший файл).
+
+### Локация бага
+
+- `chimera/modules/geo_packages.py:_post_install_geo()` строка ~101: `dest = dest_dir / src.name`, где `src` = `tmp_path` = `Path("/tmp") / f"_download_mgr_{filename}"` — `src.name` буквально равен `"_download_mgr_geosite.dat"`, а не `"geosite.dat"`.
+- `chimera/modules/download_manager.py:_default_copy_to_dests()` строка ~328 — та же ошибка (`dest = dest_dir / src.name`), но эта функция используется только при `post_install=None` (например `XRAY_CHECKSUMS_SPEC` — `.dgst` файлы копируются в `/tmp/`). workaround в `xray_packages._fetch_dgst_content` уже учитывал оба варианта имени файла, так что Xray не пострадал.
+
+### Фикс (вариант (б) — минимальный blast radius)
+
+`chimera/modules/download_manager.py:fetch_package()` — после успешной sha256-верификации, **перед** вызовом `post_install`/`_default_copy_to_dests`, `tmp_path` переименовывается из `/tmp/_download_mgr_{filename}` в `/tmp/{filename}` (каноническое имя). Тогда `src.name` автоматически становится каноническим, и все ~15 существующих `post_install` callback'ов в проекте (`_post_install_geo`, `_post_install_mieru_targz`, `_post_install_fptn`, `_post_install_trusttunnel`, `_post_install_hysteria2`, `_post_install_naiveproxy`, `_post_install_singbox`, `_post_install_xray_zip` и т.д.) продолжают работать без изменения сигнатуры или кода.
+
+Переименование идёт через `Path.rename` с fallback на `shutil.copy2` + `unlink` для cross-device случаев. Перед rename удаляется потенциальный старый файл по новому пути (от прошлого неудачного запуска).
+
+### Регрессионный тест
+
+`tests/test_download_manager.py` — новый класс `TestCanonicalFileNameInInstallDests` с двумя тестами:
+1. `test_installed_file_has_canonical_name_not_tmp_prefix` — проверяет что после `fetch_package()` (с `post_install=None`, через `_default_copy_to_dests`) в `install_dests` лежит `geosite.dat`, а НЕ `_download_mgr_geosite.dat`.
+2. `test_installed_file_has_canonical_name_with_post_install` — то же, но с явным `post_install` callback, который использует `src.name` (как `_post_install_geo`). Проверяет что callback получает `src.name='geosite.dat'`, а не `'_download_mgr_geosite.dat'`.
+
+Оба теста проверены на воспроизведение бага: при закомментированном фиксе оба теста падают с `AssertionError: '_download_mgr_geosite.dat' != 'geosite.dat'` — ровно та ошибка, что была на проде.
+
+Тесты проверяют ИМЕННО ИТОГОВОЕ ИМЯ ФАЙЛА в `install_dests`, а не только факт копирования — это слепое пятно существующих тестов, которое и позволило багу жить 12 дней незамеченным.
+
+### Blast radius проверка
+
+`grep -rn "src.name" chimera/modules/*_packages.py` — нашёл только `_post_install_geo` (geo_packages.py:97,101,125) и `_default_copy_to_dests` (download_manager.py:328, уже covered). Остальные ~13 `post_install` callback'ов используют свои целевые имена явно (не через `src.name`) — не затронуты багом. Тесты других протоколов (mieru, fptn, trusttunnel, wdtt, singbox, xray, naiveproxy, hysteria2, awg, slipgate, turn, olcrtc, dnscrypt, go_toolchain, telemt) — 326 тестов прошли без регрессий.
+
+### После деплоя фикса
+
+На реальном сервере: запустить обновление geo-файлов → `ls -la /etc/xray/geosite.dat` должен показать СЕГОДНЯШНЮЮ дату и размер ~70+ МБ, файлов `_download_mgr_*` в `/etc/xray/` быть не должно. Старые `_download_mgr_*` файлы от прошлых 12 дней (если остались) можно удалить вручную: `rm -f /etc/xray/_download_mgr_* /usr/local/share/xray/_download_mgr_* /usr/local/etc/xray/_download_mgr_*`.
+
+### Тесты
+
+- `tests/test_download_manager.py` — 43/43 passed (+2 новых regression)
+- `tests/test_geo_files.py` — 6/6 passed
+- `tests/test_geo_mirrors.py` — 47/47 passed
+- `tests/test_geo_cron_script.py` — 17/17 passed
+- `tests/test_geosite_category_check.py` — 10/10 passed
+- `tests/test_autoban.py` — 5/5 passed
+- naiveproxy + mieru + fptn + trusttunnel + wdtt + singbox_packages + xray_install + singbox_install — 326 passed
+- hysteria2 (12 файлов) — 90 passed
+- awg + slipgate + turn + olcrtc + singbox_config — 384 passed
+- subscription + user_portal + admin_panel + rest_api + ssl_certbot — 150 passed
+
+Итого: 1078 тестов прошли, 0 регрессий.
+
+---
+
 ## FEAT(3): Все 9 протоколов в единой подписке — 21 июля 2026
 
 **Реестр `_SUBSCRIBABLE_PROTOCOLS` расширен с 2 до 5. Теперь единая подписка включает ВСЕ 9 синхронизируемых протоколов. qWDTT, AWG и Hysteria2 автоматически появляются в `/sub/{token}` если установлены.**
