@@ -815,5 +815,534 @@ class TestPrintManualHint(unittest.TestCase):
         self.assertGreater(len(buf.getvalue()), 0)
 
 
+# ============================================================================
+#  ТЕСТЫ sha256-верификации (v4.25.2)
+# ============================================================================
+# Тесты покрывают 3 ключевых сценария:
+#   1. Hash НЕ совпал → файл отбракован, переход к следующему зеркалу
+#   2. Hash совпал → файл принят с первой попытки
+#   3. Все checksum_url 404 → деградация до одобрения по размеру с warn
+#
+# Также отдельный класс TestParseChecksumContent покрывает парсер
+# .sha256sum на разных форматах (стандартный, только-хэш, с пробелами,
+# с комментариями, upper-case).
+
+import hashlib as _hashlib_for_tests
+
+
+class TestParseChecksumContent(unittest.TestCase):
+    """Парсер .sha256sum контента — терпимость к разным форматам."""
+
+    def test_standard_sha256sum_format(self):
+        """Стандартный вывод sha256sum: '<hex>  <filename>\\n'."""
+        from chimera.modules.download_manager import _parse_checksum_content
+        h = "a" * 64
+        content = f"{h}  geosite.dat\n"
+        self.assertEqual(_parse_checksum_content(content), h)
+
+    def test_single_space_format(self):
+        """Один пробел между хэшем и именем файла."""
+        from chimera.modules.download_manager import _parse_checksum_content
+        h = "b" * 64
+        content = f"{h} geosite.dat\n"
+        self.assertEqual(_parse_checksum_content(content), h)
+
+    def test_hash_only(self):
+        """Только hex-хэш, без имени файла."""
+        from chimera.modules.download_manager import _parse_checksum_content
+        h = "c" * 64
+        content = f"{h}\n"
+        self.assertEqual(_parse_checksum_content(content), h)
+
+    def test_hash_with_surrounding_whitespace(self):
+        """Хэш с пробелами по краям."""
+        from chimera.modules.download_manager import _parse_checksum_content
+        h = "d" * 64
+        content = f"  {h}  \n"
+        self.assertEqual(_parse_checksum_content(content), h)
+
+    def test_hash_with_comment(self):
+        """Хэш после строки комментария."""
+        from chimera.modules.download_manager import _parse_checksum_content
+        h = "e" * 64
+        content = f"# Generated 2026-07-21\n{h}  geosite.dat\n"
+        self.assertEqual(_parse_checksum_content(content), h)
+
+    def test_uppercase_hash_normalized_to_lower(self):
+        """Upper-case hex должен нормализоваться в lower-case."""
+        from chimera.modules.download_manager import _parse_checksum_content
+        h_upper = "F" * 64
+        h_lower = "f" * 64
+        content = f"{h_upper}  geosite.dat\n"
+        self.assertEqual(_parse_checksum_content(content), h_lower)
+
+    def test_garbage_returns_none(self):
+        """Нет 64-символьной hex-строки → None."""
+        from chimera.modules.download_manager import _parse_checksum_content
+        self.assertIsNone(_parse_checksum_content("garbage without hex"))
+        self.assertIsNone(_parse_checksum_content(""))
+        self.assertIsNone(_parse_checksum_content("abc123"))
+
+    def test_partial_hex_returns_none(self):
+        """63-символьный hex (неполный) → None."""
+        from chimera.modules.download_manager import _parse_checksum_content
+        # 63 символа вместо 64
+        h63 = "a" * 63
+        self.assertIsNone(_parse_checksum_content(h63))
+
+    def test_real_sha256_format(self):
+        """Реальный пример .sha256sum файла от runetfreedom."""
+        from chimera.modules.download_manager import _parse_checksum_content
+        # Реальный 64-символьный hex (это sha256 пустой строки для теста)
+        h = _hashlib_for_tests.sha256(b"").hexdigest()
+        content = f"{h}  geosite.dat\n"
+        self.assertEqual(_parse_checksum_content(content), h)
+
+
+class TestFetchPackageChecksumVerification(unittest.TestCase):
+    """fetch_package() с checksum_urls — три ключевых сценария.
+
+    v4.25.2: после успешной загрузки файла (размер >= min_size) дополнительно
+    проверяется sha256 через скачивание .sha256sum с checksum_urls.
+
+    Сценарии:
+      1. Hash НЕ совпал → файл отбракован, retry на следующее зеркало
+      2. Hash совпал → файл принят с первой попытки
+      3. Все checksum_url 404 → деградация до одобрения по размеру с warn
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.manual_dir = Path(self.tmpdir) / "manual"
+        self.manual_dir.mkdir()
+        self.install_dir = Path(self.tmpdir) / "install"
+        self.install_dir.mkdir()
+        # Уникальное имя tmp-файла для каждого теста, чтобы не было конфликтов
+        self.tmp_filename = f"_test_checksum_{id(self)}.dat"
+        self.tmp_path = Path("/tmp") / f"_download_mgr_{self.tmp_filename}"
+        self.tmp_path.unlink(missing_ok=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        self.tmp_path.unlink(missing_ok=True)
+
+    def _make_file_response(self, content: bytes):
+        """Создаёт mock-ответ для запроса К ФАЙЛУ (test.dat).
+
+        read() возвращает content, затем пустой chunk (EOF).
+        """
+        mock_resp = MagicMock()
+        mock_resp.read.side_effect = [content, b""]
+        mock_resp.headers = {"Content-Length": str(len(content))}
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+        return mock_resp
+
+    def _make_checksum_response(self, content: str):
+        """Создаёт mock-ответ для запроса К .sha256sum.
+
+        read() возвращает content.encode(), затем пустой chunk.
+        """
+        mock_resp = MagicMock()
+        mock_resp.read.side_effect = [content.encode("utf-8"), b""]
+        mock_resp.headers = {"Content-Length": str(len(content))}
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+        return mock_resp
+
+    def test_hash_mismatch_retries_next_mirror(self):
+        """Сценарий 1: hash НЕ совпал → файл отбракован → retry.
+
+        Реалистичный сценарий: CDN с кэшем по branch-ref отдаёт устаревший
+        файл (mirror1) — большой, но не текущий. .sha256sum на mirror1
+        тоже закэширован и соответствует НОВОЙ версии файла, поэтому
+        hash не совпадает со старым файлом → отбраковка. Mirror2 отдаёт
+        актуальный файл, .sha256sum совпадает → успех.
+
+        Симметрично: checksum_urls перебираются по порядку, независимо
+        от того, какое зеркало дало сам файл (см. спеку v4.25.2). Это
+        гарантирует верификацию того, что РЕАЛЬНО пришло, а не того,
+        что зеркало "должно" было отдать.
+
+        КЛЮЧЕВЫЕ проверки:
+          - Первое зеркало отбраковано (hash mismatch)
+          - Второе зеркало принято (hash match)
+          - _default_copy_to_dests вызван ровно 1 раз
+          - fetch_package вернул True
+        """
+        # Файл от mirror1 — устаревший (CDN кэш)
+        stale_content = b"stale content from cache" * 10   # 250 байт
+        # Файл от mirror2 — актуальный
+        fresh_content = b"fresh content from upstream" * 10  # 270 байт
+
+        # Единый "правильный" hash для актуального файла — оба checksum-зеркала
+        # отдают одно и то же (апстрим публикует один .sha256sum, CDN кэшируют).
+        fresh_hash = _hashlib_for_tests.sha256(fresh_content).hexdigest()
+
+        spec = PackageSpec(
+            name="test",
+            filename_builder=lambda: self.tmp_filename,
+            mirror_urls_builder=lambda filename: [
+                f"https://mirror1.example.com/{filename}",
+                f"https://mirror2.example.com/{filename}",
+            ],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=50,
+            checksum_urls=[
+                f"https://mirror1.example.com/{self.tmp_filename}.sha256sum",
+                f"https://mirror2.example.com/{self.tmp_filename}.sha256sum",
+            ],
+            checksum_algo="sha256",
+        )
+
+        call_log = []  # лог URL-ов в порядке вызова
+
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            call_log.append(url)
+
+            # Запрос файла
+            if url.endswith(self.tmp_filename) and not url.endswith(".sha256sum"):
+                if "mirror1" in url:
+                    # mirror1 отдаёт устаревший кэш
+                    self.tmp_path.write_bytes(stale_content)
+                    return self._make_file_response(stale_content)
+                else:
+                    # mirror2 отдаёт актуальный файл
+                    self.tmp_path.write_bytes(fresh_content)
+                    return self._make_file_response(fresh_content)
+
+            # Запрос checksum — оба checksum-зеркала отдают актуальный hash
+            # (апстрим обновил .sha256sum, CDN кэширует его быстрее, чем сам
+            # большой .dat файл — реалистичный сценарий с jsDelivr)
+            if url.endswith(".sha256sum"):
+                return self._make_checksum_response(f"{fresh_hash}  {self.tmp_filename}\n")
+
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen), \
+             patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
+             patch("chimera.modules.download_manager.Path.unlink"):
+            result = fetch_package(spec, progress_label="test")
+
+        self.assertTrue(result, "Должен вернуть True — второе зеркало прошло верификацию")
+
+        # mirror1: file1 → checksum1 (mismatch, fresh_hash vs stale_content hash)
+        # mirror2: file2 → checksum1 (match, fresh_hash vs fresh_content hash)
+        # Итого: 4 вызова (2 файла + 2 checksum — на mirror2 первый же checksum_url совпал)
+        self.assertGreaterEqual(len(call_log), 3,
+                               f"Должно быть минимум 3 вызова (file1 + checksum1 + file2 + checksum1), фактически: {call_log}")
+        self.assertLessEqual(len(call_log), 4,
+                             f"Не более 4 вызовов, фактически: {call_log}")
+
+        # Проверяем что первый запрос был к mirror1 (файл)
+        self.assertIn(f"mirror1.example.com/{self.tmp_filename}", call_log[0])
+        # Второй — к .sha256sum (mirror1)
+        self.assertIn(".sha256sum", call_log[1])
+
+        # Только второе зеркало прошло верификацию → copy вызван 1 раз
+        mock_copy.assert_called_once()
+
+    def test_hash_match_accepts_first_mirror(self):
+        """Сценарий 2: hash совпал → файл принят с первой попытки.
+
+        Симулируем: единственное зеркало, файл валидного размера,
+        .sha256sum совпадает → успех с первого раза.
+
+        КЛЮЧЕВЫЕ проверки:
+          - urlopen вызван 2 раза (1 файл + 1 checksum)
+          - _default_copy_to_dests вызван 1 раз
+          - fetch_package вернул True
+        """
+        file_content = b"valid content" * 10   # 130 байт
+        right_hash = _hashlib_for_tests.sha256(file_content).hexdigest()
+
+        spec = PackageSpec(
+            name="test",
+            filename_builder=lambda: self.tmp_filename,
+            mirror_urls_builder=lambda filename: [
+                f"https://mirror1.example.com/{filename}",
+            ],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=50,
+            checksum_urls=[
+                f"https://mirror1.example.com/{self.tmp_filename}.sha256sum",
+            ],
+            checksum_algo="sha256",
+        )
+
+        call_log = []
+
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            call_log.append(url)
+
+            if url.endswith(".sha256sum"):
+                return self._make_checksum_response(f"{right_hash}  {self.tmp_filename}\n")
+            # Файл
+            self.tmp_path.write_bytes(file_content)
+            return self._make_file_response(file_content)
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen), \
+             patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
+             patch("chimera.modules.download_manager.Path.unlink"):
+            result = fetch_package(spec, progress_label="test")
+
+        self.assertTrue(result, "Должен вернуть True — hash совпал")
+        self.assertEqual(len(call_log), 2,
+                         f"Должно быть 2 вызова (1 файл + 1 checksum), фактически: {call_log}")
+        mock_copy.assert_called_once()
+
+    def test_all_checksum_urls_404_degrades_to_size_check(self):
+        """Сценарий 3: все checksum_url 404 → деградация до размерной проверки.
+
+        Симулируем: единственное зеркало, файл валидного размера,
+        но .sha256sum возвращает 404 на ВСЕХ checksum-зеркалах →
+        fetch_package принимает файл по размерной проверке с warn.
+
+        КЛЮЧЕВЫЕ проверки:
+          - urlopen вызван 1 + N раз (1 файл + N попыток checksum)
+          - _default_copy_to_dests вызван 1 раз (файл принят по размеру)
+          - fetch_package вернул True (не упал)
+          - В логе виден warn "не удалось проверить ... принято по размеру"
+        """
+        import io
+        from contextlib import redirect_stdout
+        from urllib.error import HTTPError, URLError
+
+        file_content = b"valid content" * 10   # 130 байт
+
+        spec = PackageSpec(
+            name="test",
+            filename_builder=lambda: self.tmp_filename,
+            mirror_urls_builder=lambda filename: [
+                f"https://mirror1.example.com/{filename}",
+            ],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=50,
+            checksum_urls=[
+                f"https://mirror1.example.com/{self.tmp_filename}.sha256sum",
+                f"https://mirror2.example.com/{self.tmp_filename}.sha256sum",
+                f"https://mirror3.example.com/{self.tmp_filename}.sha256sum",
+            ],
+            checksum_algo="sha256",
+        )
+
+        call_log = []
+
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            call_log.append(url)
+
+            if url.endswith(".sha256sum"):
+                # Все checksum-зеркала возвращают 404 / network error
+                raise URLError("404 Not Found")
+            # Файл
+            self.tmp_path.write_bytes(file_content)
+            return self._make_file_response(file_content)
+
+        captured = io.StringIO()
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen), \
+             patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
+             patch("chimera.modules.download_manager.Path.unlink"), \
+             redirect_stdout(captured):
+            result = fetch_package(spec, progress_label="test")
+
+        # Файл принят по размерной проверке (деградация)
+        self.assertTrue(result, "Должен вернуть True — деградация до размерной проверки")
+        # 1 вызов файла + 3 попытки checksum (все упали)
+        self.assertEqual(len(call_log), 4,
+                         f"Должно быть 4 вызова (1 файл + 3 checksum), фактически: {call_log}")
+        mock_copy.assert_called_once()
+
+        # В логе должен быть warn о деградации
+        output = captured.getvalue()
+        self.assertIn("принято по размеру", output.lower(),
+                      f"Должен быть warn 'принято по размеру' при деградации, вывод: {output}")
+
+    def test_checksum_urls_none_no_verification(self):
+        """Обратная совместимость: checksum_urls=None → верификация не делается.
+
+        PackageSpec без checksum_urls должен работать байт-в-байт как раньше:
+          - urlopen вызван 1 раз (только файл, без checksum)
+          - _default_copy_to_dests вызван 1 раз
+          - fetch_package вернул True
+        """
+        file_content = b"valid content" * 10   # 130 байт
+
+        spec = PackageSpec(
+            name="test",
+            filename_builder=lambda: self.tmp_filename,
+            mirror_urls_builder=lambda filename: [
+                f"https://mirror1.example.com/{filename}",
+            ],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=50,
+            # checksum_urls не задан — обратная совместимость
+        )
+
+        call_log = []
+
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            call_log.append(url)
+            self.tmp_path.write_bytes(file_content)
+            return self._make_file_response(file_content)
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen), \
+             patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
+             patch("chimera.modules.download_manager.Path.unlink"):
+            result = fetch_package(spec, progress_label="test")
+
+        self.assertTrue(result)
+        # ТОЛЬКО 1 вызов — файла, без checksum
+        self.assertEqual(len(call_log), 1,
+                         f"Без checksum_urls не должно быть запросов .sha256sum, фактически: {call_log}")
+        mock_copy.assert_called_once()
+
+    def test_checksum_unparseable_degrades_to_size_check(self):
+        """Сценарий 4: .sha256sum скачан, но hex не парсится → деградация.
+
+        Симулируем: зеркало отдаёт .sha256sum с мусором (нет 64-символьного hex)
+        на ВСЕХ checksum-зеркалах → деградация до размерной проверки.
+
+        Это отличается от сценария 3 (404) — здесь checksum_obtained=True,
+        но парсинг не удался. Должна быть другая ветка warn.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        file_content = b"valid content" * 10   # 130 байт
+
+        spec = PackageSpec(
+            name="test",
+            filename_builder=lambda: self.tmp_filename,
+            mirror_urls_builder=lambda filename: [
+                f"https://mirror1.example.com/{filename}",
+            ],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=50,
+            checksum_urls=[
+                f"https://mirror1.example.com/{self.tmp_filename}.sha256sum",
+            ],
+            checksum_algo="sha256",
+        )
+
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            if url.endswith(".sha256sum"):
+                # Мусор — нет 64-символьного hex
+                return self._make_checksum_response("garbage content without hex\n")
+            # Файл
+            self.tmp_path.write_bytes(file_content)
+            return self._make_file_response(file_content)
+
+        captured = io.StringIO()
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen), \
+             patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
+             patch("chimera.modules.download_manager.Path.unlink"), \
+             redirect_stdout(captured):
+            result = fetch_package(spec, progress_label="test")
+
+        # Деградация — файл принят по размеру
+        self.assertTrue(result)
+        mock_copy.assert_called_once()
+        # В логе должен быть warn о невозможности распарсить
+        output = captured.getvalue()
+        # Либо "не удалось распарсить" (из цикла), либо "hex не распарсен" (финал)
+        self.assertTrue(
+            "распарсить" in output.lower() or "распарсен" in output.lower(),
+            f"Должен быть warn о проблеме парсинга, вывод: {output}",
+        )
+
+
+class TestVerifyChecksumHelper(unittest.TestCase):
+    """Прямые тесты _verify_checksum() — без overhead полного fetch_package.
+
+    Покрывает edge cases:
+      - Пустой список checksum_urls → None (деградация)
+      - Несколько checksum_urls, первый отвечает с совпадением → True
+      - Несколько checksum_urls, первый 404, второй отвечает с несовпадением → False
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.test_file = Path(self.tmpdir) / "test.dat"
+        self.test_file.write_bytes(b"test content" * 10)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_empty_checksum_urls_returns_none(self):
+        """Пустой список checksum_urls → None (деградация, не отбраковка)."""
+        from chimera.modules.download_manager import _verify_checksum
+        result = _verify_checksum(self.test_file, [], "sha256")
+        self.assertIsNone(result)
+
+    def test_first_url_matches_returns_true(self):
+        """Первый checksum_url отвечает с совпадающим hash → True."""
+        from chimera.modules.download_manager import _verify_checksum
+        right_hash = _hashlib_for_tests.sha256(b"test content" * 10).hexdigest()
+
+        def fake_urlopen(req, timeout):
+            mock_resp = MagicMock()
+            mock_resp.read.side_effect = [f"{right_hash}  test.dat\n".encode(), b""]
+            mock_resp.__enter__ = lambda self: self
+            mock_resp.__exit__ = lambda self, *a: None
+            return mock_resp
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen):
+            result = _verify_checksum(
+                self.test_file,
+                ["https://example.com/test.dat.sha256sum"],
+                "sha256",
+            )
+        self.assertTrue(result)
+
+    def test_first_404_second_mismatch_returns_false(self):
+        """Первый checksum_url 404, второй отвечает с НЕсовпадающим hash → False."""
+        from chimera.modules.download_manager import _verify_checksum
+        wrong_hash = _hashlib_for_tests.sha256(b"different content").hexdigest()
+
+        from urllib.error import URLError
+        call_count = [0]
+
+        def fake_urlopen(req, timeout):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise URLError("404")
+            mock_resp = MagicMock()
+            mock_resp.read.side_effect = [f"{wrong_hash}  test.dat\n".encode(), b""]
+            mock_resp.__enter__ = lambda self: self
+            mock_resp.__exit__ = lambda self, *a: None
+            return mock_resp
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen):
+            result = _verify_checksum(
+                self.test_file,
+                [
+                    "https://mirror1.example.com/test.dat.sha256sum",
+                    "https://mirror2.example.com/test.dat.sha256sum",
+                ],
+                "sha256",
+            )
+        self.assertFalse(result, "Hash не совпал → False (отбраковка)")
+        self.assertEqual(call_count[0], 2, "Должны быть попытаны оба URL")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
