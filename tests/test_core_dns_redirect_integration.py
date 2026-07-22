@@ -171,5 +171,224 @@ class TestBug4HealthScreenShowsActualPort(unittest.TestCase):
                          f"Expected port=6000 from state, got: {hc['port']}")
 
 
+# ============================================================================
+#  v4.25.6 REGRESSION TEST: правильное условие зелёного/жёлтого в блоке
+#  «Сверка конфигурации» DNS Leak Test
+# ============================================================================
+# Коммит 038540f (v4.25.5) исправил визуальный баг — жёлтое "DNS уходит
+# напрямую" рисовалось при активном DNSCrypt. НО он сделал это проверкой
+# dnscrypt_active (процесс запущен), что является false negative:
+# dnscrypt-proxy может быть active без применённых iptables-правил
+# редиректа 53 порта — то есть без реального перехвата трафика.
+#
+# v4.25.6 исправляет условие: redirect_active = enabled AND rules_applied.
+# Зелёный цвет показывается ТОЛЬКО когда трафик реально перехватывается.
+#
+# Тесты вызывают _render_dns_reconciliation_box() напрямую (мокая
+# health_check_dns_redirect и _run для systemctl), не трогая сетевые
+# методы 1-4 do_dns_leak_test.
+
+class TestDnsReconciliationBoxV4256(unittest.TestCase):
+    """5 кейсов для блока «Сверка конфигурации» (v4.25.6).
+
+    Логика (см. _render_dns_reconciliation_box docstring):
+      - loopback → зелёное "проксируется локально"
+      - non-loopback + redirect_active (enabled=True, rules_applied=True)
+        → зелёное "редирект активен"
+      - non-loopback + redirect НЕ активен → жёлтое "уходит напрямую"
+        (включая dnscrypt active но rules_applied=False — ключевой кейс бага)
+      - non-loopback + health_check бросает исключение → жёлтое (fallback)
+      - loopback=True → redirect-логика не влияет (зелёное "localhost")
+    """
+
+    def setUp(self):
+        self._fake_core, self._core_globals = _setup_core_in_sysmodules()
+        self._render = self._fake_core._render_dns_reconciliation_box
+
+    def _make_completed_process(self, stdout="inactive", returncode=0):
+        """Создаёт mock CompletedProcess для _run(['systemctl', 'is-active', ...])."""
+        cp = MagicMock()
+        cp.stdout = stdout
+        cp.returncode = returncode
+        cp.stderr = ""
+        return cp
+
+    def _run_box(self, configured_resolvers, fake_hc=None, hc_raises=False,
+                 dnscrypt_stdout="inactive"):
+        """Вызывает _render_dns_reconciliation_box с моками.
+
+        Аргументы:
+          configured_resolvers: список IP для resolv.conf
+          fake_hc: dict который вернёт health_check_dns_redirect()
+                   (None = функция не вызывается, но это не должно случаться)
+          hc_raises: True = health_check_dns_redirect() бросает RuntimeError
+          dnscrypt_stdout: stdout от `systemctl is-active dnscrypt-proxy`
+                           ("active" или "inactive")
+
+        Возвращает захваченный stdout.
+        """
+        captured = io.StringIO()
+
+        # Мокаем _run в globals — он используется для systemctl is-active
+        def fake_run(cmd, **kw):
+            if cmd == ["systemctl", "is-active", "dnscrypt-proxy"]:
+                return self._make_completed_process(stdout=dnscrypt_stdout)
+            # На любой другой вызов — пустой результат
+            return self._make_completed_process(stdout="", returncode=1)
+
+        # Мокаем health_check_dns_redirect в globals
+        if hc_raises:
+            hc_value = MagicMock(side_effect=RuntimeError("state.json corrupted"))
+        else:
+            hc_value = lambda: fake_hc
+
+        with patch("builtins.input", return_value=""), \
+             redirect_stdout(captured), \
+             patch.dict(self._core_globals, {
+                 "_run": fake_run,
+                 "health_check_dns_redirect": hc_value,
+             }):
+            self._render(configured_resolvers)
+
+        return captured.getvalue()
+
+    # ── Кейс 1: redirect активен → ЗЕЛЁНОЕ ─────────────────────────────────
+    def test_non_loopback_redirect_active_shows_green(self):
+        """Кейс 1: is_loopback=False, enabled=True, rules_applied=True
+        → зелёное 'редирект активен', НЕ жёлтое."""
+        fake_hc = {
+            "enabled":       True,
+            "rules_applied": True,
+            "port":          5300,
+            "dnscrypt_active": True,
+            "issues":        [],
+        }
+        output = self._run_box(
+            configured_resolvers=["8.8.8.8", "1.1.1.1"],
+            fake_hc=fake_hc,
+            dnscrypt_stdout="active",
+        )
+        # Зелёное сообщение про редирект присутствует
+        self.assertIn("DNS-редирект активен", output,
+                      f"Должно быть зелёное 'DNS-редирект активен', вывод:\n{output}")
+        # Жёлтое предупреждение отсутствует
+        self.assertNotIn("DNS-запросы уходят напрямую", output,
+                         f"Не должно быть жёлтого предупреждения когда redirect активен, "
+                         f"вывод:\n{output}")
+        self.assertNotIn("минуя Xray", output)
+
+    # ── Кейс 2: КЛЮЧЕВОЙ — dnscrypt active, но rules_applied=False ─────────
+    def test_non_loopback_dnscrypt_active_no_rules_shows_yellow(self):
+        """Кейс 2 (КЛЮЧЕВОЙ): is_loopback=False, enabled=True,
+        rules_applied=False (но dnscrypt-proxy active) → ЖЁЛТОЕ, не зелёное.
+
+        Это именно тот баг, который был в v4.25.5/038540f — код проверял
+        dnscrypt_active и показывал зелёное, хотя реальной перехватки нет
+        (правила iptables не применены). v4.25.6 исправляет это.
+        """
+        fake_hc = {
+            "enabled":       True,
+            "rules_applied": False,   # ← КЛЮЧЕВОЙ момент: правила НЕ применены
+            "port":          5300,
+            "dnscrypt_active": True,  # ← сервис активен, но трафик не перехватывается
+            "issues":        ["редирект включён в state, но правила в iptables отсутствуют"],
+        }
+        output = self._run_box(
+            configured_resolvers=["8.8.8.8", "1.1.1.1"],
+            fake_hc=fake_hc,
+            dnscrypt_stdout="active",  # systemctl is-active dnscrypt-proxy → active
+        )
+        # Жёлтое предупреждение должно присутствовать — реальный риск
+        self.assertIn("DNS-запросы уходят напрямую", output,
+                      f"Должно быть жёлтое предупреждение когда rules_applied=False, "
+                      f"вывод:\n{output}")
+        self.assertIn("минуя Xray", output)
+        # Зелёное "редирект активен" НЕ должно появляться
+        self.assertNotIn("DNS-редирект активен", output,
+                         f"Не должно быть зелёного 'редирект активен' когда rules_applied=False "
+                         f"(баг v4.25.5/038540f), вывод:\n{output}")
+        # Но "DNSCrypt-proxy: активен" должен быть (потому что dnscrypt_stdout=active)
+        # — это корректно, сервис действительно запущен, просто редиректа нет
+        self.assertIn("активен", output)
+
+    # ── Кейс 3: redirect выключен → ЖЁЛТОЕ ─────────────────────────────────
+    def test_non_loopback_redirect_disabled_shows_yellow(self):
+        """Кейс 3: is_loopback=False, enabled=False → жёлтое как раньше."""
+        fake_hc = {
+            "enabled":       False,
+            "rules_applied": False,
+            "port":          5300,
+            "dnscrypt_active": False,
+            "issues":        [],
+        }
+        output = self._run_box(
+            configured_resolvers=["8.8.8.8"],
+            fake_hc=fake_hc,
+            dnscrypt_stdout="inactive",
+        )
+        self.assertIn("DNS-запросы уходят напрямую", output,
+                      f"Должно быть жёлтое когда redirect выключен, вывод:\n{output}")
+        self.assertNotIn("DNS-редирект активен", output)
+
+    # ── Кейс 4: health_check_dns_redirect() бросает исключение ─────────────
+    def test_non_loopback_health_check_raises_shows_yellow(self):
+        """Кейс 4: is_loopback=False, health_check_dns_redirect() бросает
+        исключение → жёлтое (fallback), экран не падает."""
+        output = self._run_box(
+            configured_resolvers=["8.8.8.8"],
+            fake_hc=None,
+            hc_raises=True,
+            dnscrypt_stdout="inactive",
+        )
+        # Не должно быть зелёного (мы не знаем состояние редиректа —
+        # не маскируем потенциальную утечку)
+        self.assertNotIn("DNS-редирект активен", output,
+                         f"Не должно быть зелёного когда health_check упал, вывод:\n{output}")
+        # Жёлтое должно быть (fallback = безопасный default)
+        self.assertIn("DNS-запросы уходят напрямую", output,
+                      f"Должно быть жёлтое (fallback) когда health_check упал, "
+                      f"вывод:\n{output}")
+        # Блока вообще не должно упасть — функция должна отработать
+        # и напечатать заголовок "Сверка конфигурации"
+        self.assertIn("Сверка конфигурации", output)
+
+    # ── Кейс 5: loopback → ЗЕЛЁНОЕ "localhost", redirect не влияет ─────────
+    def test_loopback_shows_localhost_green_regardless_of_redirect(self):
+        """Кейс 5: is_loopback=True → зелёное 'localhost — проксируется
+        локально', redirect-логика не вызывается вообще (или вызывается,
+        но не влияет на результат).
+
+        Проверяем что зелёная "localhost" ветка не полагается на
+        redirect_active — даже если redirect_active=False, loopback
+        всё равно показывает зелёное.
+        """
+        # Передаём redirect_active=False (enabled=False, rules_applied=False)
+        # — но loopback должен всё равно дать зелёное
+        fake_hc = {
+            "enabled":       False,
+            "rules_applied": False,
+            "port":          5300,
+            "dnscrypt_active": False,
+            "issues":        [],
+        }
+        output = self._run_box(
+            configured_resolvers=["127.0.0.1"],
+            fake_hc=fake_hc,
+            dnscrypt_stdout="inactive",
+        )
+        # Зелёное "localhost" присутствует
+        self.assertIn("localhost", output)
+        self.assertIn("проксируется локально", output,
+                      f"Должно быть 'проксируется локально' для loopback, "
+                      f"вывод:\n{output}")
+        # Жёлтое "уходит напрямую" отсутствует
+        self.assertNotIn("DNS-запросы уходят напрямую", output,
+                         f"Loopback не должен давать жёлтое, вывод:\n{output}")
+        # "редирект активен" тоже отсутствует — это другая зелёная ветка
+        self.assertNotIn("DNS-редирект активен", output,
+                         f"Loopback использует 'localhost' ветку, не 'редирект активен', "
+                         f"вывод:\n{output}")
+
+
 if __name__ == "__main__":
     unittest.main()
