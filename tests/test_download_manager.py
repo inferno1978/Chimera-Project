@@ -1344,5 +1344,62 @@ class TestVerifyChecksumHelper(unittest.TestCase):
         self.assertEqual(call_count[0], 2, "Должны быть попытаны оба URL")
 
 
+class TestChecksumNotCalledInManualBranch(unittest.TestCase):
+    """v4.25.2 regression-тест: _verify_checksum НЕ вызывается в manual-ветке.
+
+    Когда файл найден в manual_incoming_dir (/root/ — ручное размещение
+    через WinSCP), fetch_package использует его без сети и БЕЗ sha256-
+    верификации. Это самый быстрый путь получения файла (пользователь
+    сам туда кладёт то, что скачал вручную через curl), верификация по
+    хэшу там избыточна.
+
+    Если бы _verify_checksum вызывался в manual-ветке, глобальные моки
+    builtins.open в других тестах (например в test_geo_files.py) ломали
+    бы _compute_hash → fetch_package возвращал бы False → regression.
+
+    Тест гарантирует, что sha256-верификация живёт СТРОГО внутри сетевого
+    цикла fetch_package (после успешной загрузки), а не в ветке /root/.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.manual_dir = Path(self.tmpdir) / "manual"
+        self.manual_dir.mkdir()
+        self.install_dir = Path(self.tmpdir) / "install"
+        self.install_dir.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_manual_file_does_not_trigger_verify_checksum(self):
+        """Файл в manual_dir → _verify_checksum НЕ вызывается."""
+        # Создаём валидный файл в manual_dir
+        manual_file = self.manual_dir / "test.dat"
+        manual_file.write_bytes(b"x" * 100)
+
+        # Spec с checksum_urls — если бы они использовались в manual-ветке,
+        # тест упал бы на mock_verify.assert_not_called()
+        spec = PackageSpec(
+            name="test",
+            filename_builder=lambda: "test.dat",
+            mirror_urls_builder=lambda filename: ["https://example.com/test.dat"],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=50,
+            checksum_urls=["https://example.com/test.dat.sha256sum"],
+            checksum_algo="sha256",
+        )
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen") as mock_urlopen, \
+             patch("chimera.modules.download_manager._verify_checksum") as mock_verify, \
+             patch("chimera.modules.download_manager._default_copy_to_dests"):
+            result = fetch_package(spec)
+
+        self.assertTrue(result, "fetch_package должен вернуть True (manual-файл валидный)")
+        mock_urlopen.assert_not_called()
+        mock_verify.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
