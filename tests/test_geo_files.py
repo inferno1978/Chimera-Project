@@ -27,7 +27,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, mock_open
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
@@ -117,12 +117,22 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
     def _patch_path_exists_stat(self, existing_files: set):
         """Патчит Path.exists и Path.stat чтобы симулировать существование файлов.
 
-        Файлы в existing_files — существуют с размером 10 МБ (> min_size).
+        Файлы в existing_files — существуют с размером 30 МБ (> min_size).
         /root/ пути — всегда возвращают False (нет ручного размещения),
         БЕЗ обращения к реальному Path.exists (PermissionError на /root/
         в тест-окружении без root-прав).
-        /tmp/_download_mgr_* пути — всегда возвращают True + 10 МБ (файл
+        /tmp/_download_mgr_* пути — всегда возвращают True + 30 МБ (файл
         "скачан" urlopen mock'ом).
+
+        v4.25.2 FIX: расширено для поддержки _post_install_geo, который
+        после shutil.copy2(src, dest) вызывает dest.stat().st_size для
+        проверки что копия записалась. dest-пути (в /etc/xray/,
+        /usr/local/share/xray/, /usr/local/etc/xray/) с суффиксом
+        geosite.dat/geoip.dat теперь тоже возвращают True + MockStat,
+        даже если их не было в existing_files — потому что copy2 их
+        "создаёт". Раньше dest.stat() падал с FileNotFoundError →
+        _post_install_geo возвращал False → fetch_package возвращал
+        False → тест падал на assertTrue(result).
         """
         original_exists = Path.exists
         original_stat = Path.stat
@@ -130,6 +140,21 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         class MockStat:
             st_size = 30_000_000  # 30 МБ > MIN_SIZES для обоих файлов (v4.25.1: geosite=20MB, geoip=1MB)
             st_mtime = 0
+
+        # Имена файлов, для которых dest.stat() должен вернуть MockStat
+        # даже после copy2 — это geo-файлы в трёх директориях Xray.
+        _GEO_FILENAMES = ("geosite.dat", "geoip.dat")
+        _GEO_DIRS = ("/etc/xray/", "/usr/local/share/xray/", "/usr/local/etc/xray/")
+
+        def _is_geo_dest(s: str) -> bool:
+            """True если s — путь к geo-файлу в одной из dest-директорий Xray.
+
+            Например: '/etc/xray/geosite.dat' → True
+                      '/usr/local/share/xray/geoip.dat' → True
+                      '/etc/xray/config.json' → False (не geo-файл)
+            """
+            return any(s.startswith(d) for d in _GEO_DIRS) and \
+                   any(s.endswith(fn) for fn in _GEO_FILENAMES)
 
         def mock_exists(self, *a, **kw):
             s = str(self)
@@ -142,11 +167,21 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
             # /tmp/_download_mgr_* — "скачанный" файл существует
             if s.startswith("/tmp/_download_mgr_"):
                 return True
+            # v4.25.2: geo-файлы в dest-директориях "создаются" copy2 в
+            # _post_install_geo — даже если их не было в existing_files,
+            # dest.stat() должен их видеть.
+            if _is_geo_dest(s):
+                return True
             return original_exists(self, *a, **kw)
 
         def mock_stat(self, *a, **kw):
             s = str(self)
             if s in existing_files or s.startswith("/tmp/_download_mgr_"):
+                return MockStat()
+            # v4.25.2: geo-файлы в dest-директориях — copy2 "создал" их,
+            # dest.stat() должен вернуть MockStat чтобы size-check
+            # (dest_size == src_size) прошёл.
+            if _is_geo_dest(s):
                 return MockStat()
             return original_stat(self, *a, **kw)
 
@@ -182,6 +217,13 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         До фикса (баг 21d7baf): безусловная проверка по MANUAL_UPLOAD_PATHS
         находила файл в dest_dirs → urlopen НЕ вызывался → функция ложно
         репортила успех.
+
+        v4.25.2: мок builtins.open заменён с голого MagicMock на mock_open
+        с реальным бинарным содержимым. Раньше глобальный MagicMock ломал
+        _compute_hash (f.read() возвращал MagicMock, не bytes, hashlib.update
+        падал с TypeError). Теперь _compute_hash корректно читает bytes и
+        либо верифицирует файл (если checksum_urls доступны), либо деградирует
+        с warn, но не падает с TypeError.
         """
         from chimera.modules import geo_files
 
@@ -195,6 +237,12 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         p_exists, p_stat = self._patch_path_exists_stat(existing_files)
         urlopen_mock = self._make_urlopen_mock(success=True)
 
+        # mock_open с read_data возвращает bytes для f.read(N) — нужно для
+        # _compute_hash, который вызывается в sha256-верификации.
+        # Без read_data _compute_hash.get('rb').read() вернул бы MagicMock,
+        # что ломает hashlib.update.
+        mock_open_inst = mock_open(read_data=b"x" * 65536)
+
         with patch.object(geo_files, "_core_module", return_value=mock_core), \
              p_exists, p_stat, \
              patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -203,7 +251,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
                    urlopen_mock) as mock_urlopen, \
              patch("shutil.copy2", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, *a, **kw: None), \
-             patch("builtins.open", new_callable=MagicMock), \
+             patch("builtins.open", mock_open_inst), \
              patch("builtins.input", return_value="n"):
             result = geo_files.download_geo_files()
 
@@ -221,6 +269,14 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         используется БЕЗ похода в сеть. Это желаемое поведение, не трогать.
 
         Проверка: urllib.request.urlopen НЕ вызывается.
+
+        v4.25.2: тест использует _patch_path_exists_stat (расширенный mock
+        Path.exists/stat для dest-путей) и mock_open вместо голого MagicMock.
+        Без этого _post_install_geo падал на dest.stat().st_size (реальный
+        Path.stat на несуществующем /etc/xray/geosite.dat → FileNotFoundError),
+        и fetch_package возвращал False хотя manual-файл был найден в /root/.
+        Сетевая ветка (где _compute_hash) тут не должна вызываться — но mock_open
+        оставлен для консистентности и на случай будущих изменений.
         """
         from chimera.modules import geo_files
 
@@ -234,6 +290,8 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         p_exists, p_stat = self._patch_path_exists_stat(existing_files)
         urlopen_mock = self._make_urlopen_mock(success=True)
 
+        mock_open_inst = mock_open(read_data=b"x" * 65536)
+
         with patch.object(geo_files, "_core_module", return_value=mock_core), \
              p_exists, p_stat, \
              patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
@@ -242,7 +300,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
                    urlopen_mock) as mock_urlopen, \
              patch("shutil.copy2", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, *a, **kw: None), \
-             patch("builtins.open", new_callable=MagicMock), \
+             patch("builtins.open", mock_open_inst), \
              patch("builtins.input", return_value="n"):
             result = geo_files.download_geo_files()
 
@@ -335,6 +393,12 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
         успешного запуска. /root/ пуст.
 
         urlopen ДОЛЖЕН быть вызван — сеть затронута, не пропущена.
+
+        v4.25.2: как и в TestDownloadGeoFilesRegression, mock Path.exists/stat
+        расширен чтобы покрывать geo-файлы в dest-директориях (нужны для
+        _post_install_geo который вызывает dest.stat().st_size после copy2).
+        mock builtins.open заменён с голого MagicMock на mock_open с реальным
+        бинарным содержимым — нужно для _compute_hash в sha256-верификации.
         """
         from chimera.modules import geo_files
 
@@ -357,6 +421,14 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
             st_size = 30_000_000  # 30 МБ > MIN_SIZES (v4.25.1)
             st_mtime = 0
 
+        # Geo-файлы в dest-директориях — нужны для _post_install_geo size-check
+        _GEO_FILENAMES = ("geosite.dat", "geoip.dat")
+        _GEO_DIRS = ("/etc/xray/", "/usr/local/share/xray/", "/usr/local/etc/xray/")
+
+        def _is_geo_dest(s: str) -> bool:
+            return any(s.startswith(d) for d in _GEO_DIRS) and \
+                   any(s.endswith(fn) for fn in _GEO_FILENAMES)
+
         def mock_exists(self, *a, **kw):
             s = str(self)
             if s in existing_files:
@@ -365,11 +437,17 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
                 return False  # /root/ пуст
             if s.startswith("/tmp/_download_mgr_"):
                 return True  # "скачанный" файл
+            # v4.25.2: copy2 в _post_install_geo "создаёт" dest-файлы
+            if _is_geo_dest(s):
+                return True
             return original_exists(self, *a, **kw)
 
         def mock_stat(self, *a, **kw):
             s = str(self)
             if s in existing_files or s.startswith("/tmp/_download_mgr_"):
+                return MockStat()
+            # v4.25.2: dest-файлы после copy2 — size-check должен пройти
+            if _is_geo_dest(s):
                 return MockStat()
             return original_stat(self, *a, **kw)
 
@@ -380,6 +458,8 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
         mock_resp.__exit__ = lambda self, *a: None
         urlopen_mock = MagicMock(return_value=mock_resp)
 
+        mock_open_inst = mock_open(read_data=b"y" * 65536)
+
         with patch.object(geo_files, "_core_module", return_value=mock_core), \
              patch.object(Path, 'exists', mock_exists), \
              patch.object(Path, 'stat', mock_stat), \
@@ -389,7 +469,7 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
                    urlopen_mock) as mock_urlopen, \
              patch("shutil.copy2", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, *a, **kw: None), \
-             patch("builtins.open", new_callable=MagicMock), \
+             patch("builtins.open", mock_open_inst), \
              patch("builtins.input", return_value="n"):
             result = geo_files.download_geo_files()
 
