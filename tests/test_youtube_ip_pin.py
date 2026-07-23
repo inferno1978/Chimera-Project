@@ -124,6 +124,21 @@ class TestPackageSpecsValid(unittest.TestCase):
         for dest in CIDR6_SPEC.install_dests:
             self.assertNotEqual(CIDR6_SPEC.manual_incoming_dir, dest)
 
+    def test_mirror_order_raw_github_first(self):
+        """raw.githubusercontent.com первым, jsDelivr — fallback вторым.
+
+        Без checksum_urls нельзя полагаться на кэширующий CDN как основной
+        источник (см. e90f255 — staleness от jsDelivr нечем ловить).
+        Regression-тест чтобы порядок не откатили молча в будущем.
+        """
+        from chimera.modules.youtube_ip_pin import _mirror_urls
+        urls = _mirror_urls("cidr4.txt")
+        self.assertEqual(len(urls), 2)
+        self.assertIn("raw.githubusercontent.com", urls[0],
+                      f"raw.githubusercontent.com должен быть ПЕРВЫМ, фактически: {urls}")
+        self.assertIn("jsdelivr", urls[1],
+                      f"jsDelivr должен быть ВТОРЫМ (fallback), фактически: {urls}")
+
 
 class TestPostInstallValidator(unittest.TestCase):
     """Кейсы 2-3: post_install валидатор — принимает/отбраковывает."""
