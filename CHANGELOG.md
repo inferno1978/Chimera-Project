@@ -2,6 +2,54 @@
 
 ---
 
+## FEAT(youtube-route): выбор конкретной exit-ноды для YouTube в multi-node режиме — 23 июля 2026
+
+**Переключатель «YouTube через RU» расширен до выбора конкретной exit-ноды в multi-node режиме. Раньше был только бинарный выбор: RU entry (direct/direct-local) или exit-каскад (default catch-all через балансировщик). Теперь при наличии >1 exit-ноды меню показывает по пункту на каждую ноду + RU + default — можно направить YouTube-трафик через конкретную ноду, а не через балансировщик.**
+
+### Что сделано
+
+1. **`_youtube_apply_to_xray(target_tag)`** — новый параметр `target_tag: str | None`:
+   - `None` — RU entry (direct/direct-local, AWG-aware) — обратная совместимость
+   - `"chain-exit-N"` — конкретная exit-нода N. Проверяет что outbound существует — если нода удалена, возвращает `False` + warn, НЕ пишет правило с несуществующим тегом (Xray падает с "unknown outbound tag")
+
+2. **`_save_youtube_state(target: str)`** — замена `bool` на `str`:
+   - Новый ключ `youtube_route_target`: `"ru"` | `"off"` | `"chain-exit-N"`
+   - Legacy `youtube_via_ru`: `(target == "ru")` — для обратной совместимости
+
+3. **`do_manage_youtube_via_ru()`** — переписано меню:
+   - `len(CHAIN_NODES) <= 1`: старое двухпунктовое меню `[1/2/Q]` (обратная совместимость)
+   - `len(CHAIN_NODES) > 1`: меню `[1..N+2/Q]` — RU + N нод (показывает хост каждой) + default (балансировщик)
+   - Миграция со старого `youtube_via_ru` bool — без отдельного скрипта
+   - Статус отличает «правило пропало после regenerate» от «нода была удалена»
+
+4. **`restore_youtube_rule_if_needed()`** — обновлён под новый ключ `youtube_route_target`:
+   - `target="ru"` → `_youtube_apply_to_xray(target_tag=None)`
+   - `target="chain-exit-N"` → `_youtube_apply_to_xray(target_tag=target)`
+   - Если нода не существует → `False`, не падает
+
+### Не тронуто
+
+- `chain_nodes.py` — генераторы конфигов, balancer, теги `chain-exit-N` (уже корректны)
+- `_YOUTUBE_DOMAINS` список
+- `generate_xray_config_chain_entry()` (single-node)
+- AWG_EXIT_ENABLED-ветка (`direct-local`)
+
+### Тесты
+
+`tests/test_youtube_route.py` — **29 passed** (19 существующих обновлены + 10 новых):
+1. `target_tag=None` → `direct` (regression)
+2. `target_tag="chain-exit-2"` с outbound → правило пишется
+3. `target_tag="chain-exit-5"` без outbound → `False`, config не тронут
+4. `_save_youtube_state("chain-exit-2")` — новый ключ + legacy `False`
+5. `_save_youtube_state("ru")` — legacy `True`, обратная совместимость
+6. Миграция — старый `youtube_via_ru=True` без `youtube_route_target` → RU
+7. `len(CHAIN_NODES)<=1` → старое `[1/2/Q]` меню
+8. `len(CHAIN_NODES)==3` → `[1-5/Q]` меню с хостами нод
+9. restore с `chain-exit-2`, нода существует → пере-применяет
+10. restore с `chain-exit-9`, ноды нет → `False`, не падает
+
+---
+
 ## FIX(awg): проверка коллизий H1-H4 в ручном вводе обфускации — 23 июля 2026
 
 **Доработка AWG 2.0 (v5.0.0): в ручном вводе параметров обфускации (пункт меню "3" в `prompt_awg_exit_mode()`) добавлена проверка на коллизии H1-H4. Раньше каждое H вводилось через независимый `_ask_int()` вызов — дубликат между ними никак не ловился, хотя весь смысл фичи — уникальность H1-H4 (DPI-отпечаток). Теперь при обнаружении дубликата пользователю показывается предупреждение и предлагается ввести значения заново. После 5 неудачных попыток — fallback на рекомендованные уникальные значения из `awgs_generate_full_manual_params()`.**
