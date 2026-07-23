@@ -68,6 +68,15 @@ def _mock_core(**overrides):
     core.AWG_JMAX = 70
     core.AWG_S1 = 0
     core.AWG_S2 = 0
+    # v4.25.7: S3/S4/I1-I5 — добавлены в mock для полного набора AWG 2.0
+    core.AWG_S3 = 0
+    core.AWG_S4 = 0
+    core.AWG_I1 = ""
+    core.AWG_I2 = ""
+    core.AWG_I3 = ""
+    core.AWG_I4 = ""
+    core.AWG_I5 = ""
+    core.AWG_OBFUSCATION_SOURCE = "default"
     core.AWG_MTU = 1280
     core.AWG_FWMARK = 1000
     core.AWG_INTERFACE = "awg0"
@@ -469,6 +478,204 @@ class TestAwgClientConfText(unittest.TestCase):
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_text()
         self.assertIn("PersistentKeepalive = 25", conf)
+
+
+# ============================================================================
+#  v4.25.7 — Тесты на полный набор параметров AWG 2.0 (S3/S4/I1-I5)
+# ============================================================================
+# Жалоба пользователя (Keenetic не может импортировать AWG-конфиг) —
+# Cascade-режим генерил только 9 параметров (Jc/Jmin/Jmax/S1/S2/H1-H4),
+# без S3/S4/I1-I5. Keenetic, видимо, парсер-строгий и падал на отсутствии I1.
+#
+# Тесты проверяют что все 4 Cascade-функции теперь пишут полный набор:
+#   - _awg_server_conf_text()
+#   - _awg_client_conf_text()
+#   - _awg_client_conf_for_node(node)
+#   - _awg_server_conf_for_node(node)
+
+class TestCascadeFullParamsV4257(unittest.TestCase):
+    """v4.25.7: все 4 Cascade-функции должны писать полный набор параметров
+    AWG 2.0 — Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5 (16 штук).
+
+    Раньше писались только 9 (Jc/Jmin/Jmax/S1/S2/H1-H4) — без S3/S4/I1-I5.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _mock_node(self):
+        """Минимальная нода для _awg_*_conf_for_node()."""
+        return {
+            "interface":      "awg0",
+            "server_ip":      "10.66.66.1/32",
+            "server_ip_v6":   "fd66:66:66::1/128",
+            "client_ip":      "10.66.66.2/32",
+            "client_ip_v6":   "fd66:66:66::2/128",
+            "port":           51820,
+            "host":           "1.2.3.4",
+            "pubkey":         "SERVER_PUB",
+            "preshared_key":  "PSK_KEY",
+            "client_privkey": "CLIENT_PRIV",
+            "server_privkey": "SERVER_PRIV",
+            "client_pubkey":  "CLIENT_PUB",
+            "fwmark":         1000,
+            "route_table":    1000,
+        }
+
+    # ── _awg_server_conf_text ─────────────────────────────────────────────
+    def test_server_conf_has_s3_s4(self):
+        """_awg_server_conf_text пишет S3 и S4 (раньше не писались)."""
+        from chimera.modules import awg_transport
+        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+            conf = awg_transport._awg_server_conf_text()
+        self.assertIn("S3 = 0", conf, f"S3 отсутствует в server conf:\n{conf}")
+        self.assertIn("S4 = 0", conf, f"S4 отсутствует в server conf:\n{conf}")
+
+    def test_server_conf_writes_i1_when_set(self):
+        """_awg_server_conf_text пишет I1 если он задан (непустой)."""
+        from chimera.modules import awg_transport
+        _i1_val = "aabbccdd" * 6  # 48 hex chars
+        with patch.object(awg_transport, "_core_module",
+                          return_value=_mock_core(AWG_I1=_i1_val)):
+            conf = awg_transport._awg_server_conf_text()
+        self.assertIn(f"I1 = {_i1_val}", conf,
+                      f"I1 должен быть в conf когда задан, фактически:\n{conf}")
+
+    def test_server_conf_omits_i1_when_empty(self):
+        """_awg_server_conf_text НЕ пишет I1 если он пустой (default)."""
+        from chimera.modules import awg_transport
+        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+            conf = awg_transport._awg_server_conf_text()
+        # I1 не должен появляться в conf когда AWG_I1 пустой
+        self.assertNotIn("I1 = ", conf,
+                         f"I1 не должен быть в conf когда пустой, фактически:\n{conf}")
+
+    def test_server_conf_writes_all_i_when_set(self):
+        """_awg_server_conf_text пишет I1-I5 если все заданы."""
+        from chimera.modules import awg_transport
+        _vals = {"AWG_I1": "aa", "AWG_I2": "bb", "AWG_I3": "cc",
+                 "AWG_I4": "dd", "AWG_I5": "ee"}
+        with patch.object(awg_transport, "_core_module",
+                          return_value=_mock_core(**_vals)):
+            conf = awg_transport._awg_server_conf_text()
+        for _k, _v in _vals.items():
+            self.assertIn(f"{_k.replace('AWG_', '')} = {_v}", conf,
+                          f"{_k} должен быть в conf, фактически:\n{conf}")
+
+    # ── _awg_client_conf_text ─────────────────────────────────────────────
+    def test_client_conf_has_s3_s4(self):
+        """_awg_client_conf_text пишет S3 и S4."""
+        from chimera.modules import awg_transport
+        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+            conf = awg_transport._awg_client_conf_text()
+        self.assertIn("S3 = 0", conf)
+        self.assertIn("S4 = 0", conf)
+
+    def test_client_conf_writes_i1_when_set(self):
+        """_awg_client_conf_text пишет I1 если задан."""
+        from chimera.modules import awg_transport
+        _i1_val = "deadbeef" * 6
+        with patch.object(awg_transport, "_core_module",
+                          return_value=_mock_core(AWG_I1=_i1_val)):
+            conf = awg_transport._awg_client_conf_text()
+        self.assertIn(f"I1 = {_i1_val}", conf)
+
+    def test_client_conf_omits_i1_when_empty(self):
+        """_awg_client_conf_text НЕ пишет I1 если пустой."""
+        from chimera.modules import awg_transport
+        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+            conf = awg_transport._awg_client_conf_text()
+        self.assertNotIn("I1 = ", conf)
+
+    # ── _awg_client_conf_for_node ─────────────────────────────────────────
+    def test_client_conf_for_node_has_s3_s4(self):
+        """_awg_client_conf_for_node пишет S3 и S4."""
+        from chimera.modules import awg_transport
+        node = self._mock_node()
+        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+            conf = awg_transport._awg_client_conf_for_node(node)
+        self.assertIn("S3 = 0", conf)
+        self.assertIn("S4 = 0", conf)
+
+    def test_client_conf_for_node_writes_i1_when_set(self):
+        """_awg_client_conf_for_node пишет I1 если задан."""
+        from chimera.modules import awg_transport
+        node = self._mock_node()
+        _i1_val = "cafebabe" * 6
+        with patch.object(awg_transport, "_core_module",
+                          return_value=_mock_core(AWG_I1=_i1_val)):
+            conf = awg_transport._awg_client_conf_for_node(node)
+        self.assertIn(f"I1 = {_i1_val}", conf)
+
+    def test_client_conf_for_node_omits_i1_when_empty(self):
+        """_awg_client_conf_for_node НЕ пишет I1 если пустой."""
+        from chimera.modules import awg_transport
+        node = self._mock_node()
+        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+            conf = awg_transport._awg_client_conf_for_node(node)
+        self.assertNotIn("I1 = ", conf)
+
+    # ── _awg_server_conf_for_node ─────────────────────────────────────────
+    def test_server_conf_for_node_has_s3_s4(self):
+        """_awg_server_conf_for_node пишет S3 и S4."""
+        from chimera.modules import awg_transport
+        node = self._mock_node()
+        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+            conf = awg_transport._awg_server_conf_for_node(node)
+        self.assertIn("S3 = 0", conf)
+        self.assertIn("S4 = 0", conf)
+
+    def test_server_conf_for_node_writes_i1_when_set(self):
+        """_awg_server_conf_for_node пишет I1 если задан."""
+        from chimera.modules import awg_transport
+        node = self._mock_node()
+        _i1_val = "1234abcd" * 6
+        with patch.object(awg_transport, "_core_module",
+                          return_value=_mock_core(AWG_I1=_i1_val)):
+            conf = awg_transport._awg_server_conf_for_node(node)
+        self.assertIn(f"I1 = {_i1_val}", conf)
+
+    def test_server_conf_for_node_omits_i1_when_empty(self):
+        """_awg_server_conf_for_node НЕ пишет I1 если пустой."""
+        from chimera.modules import awg_transport
+        node = self._mock_node()
+        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+            conf = awg_transport._awg_server_conf_for_node(node)
+        self.assertNotIn("I1 = ", conf)
+
+    # ── Полный набор — regression на жалобу zvshka ────────────────────────
+    def test_all_4_functions_have_full_param_set(self):
+        """Все 4 Cascade-функции пишут ПОЛНЫЙ набор: Jc/Jmin/Jmax/S1-S4/H1-H4.
+
+        I1-I5 пишутся условно (только если непустые), поэтому проверяем
+        что S3 и S4 присутствуют ВСЕГДА — это были отсутствующие параметры
+        из-за которых Keenetic не мог импортировать конфиг (жалоба zvshka).
+        """
+        from chimera.modules import awg_transport
+        node = self._mock_node()
+        # Все 4 функции
+        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+            confs = [
+                ("_awg_server_conf_text", awg_transport._awg_server_conf_text()),
+                ("_awg_client_conf_text", awg_transport._awg_client_conf_text()),
+                ("_awg_client_conf_for_node",
+                 awg_transport._awg_client_conf_for_node(node)),
+                ("_awg_server_conf_for_node",
+                 awg_transport._awg_server_conf_for_node(node)),
+            ]
+        # Каждая функция должна содержать все 11 обязательных параметров
+        # (Jc/Jmin/Jmax/S1-S4/H1-H4 — всего 11). I1-I5 опциональны.
+        required_params = [
+            "Jc = ", "Jmin = ", "Jmax = ",
+            "S1 = ", "S2 = ", "S3 = ", "S4 = ",
+            "H1 = ", "H2 = ", "H3 = ", "H4 = ",
+        ]
+        for fname, conf in confs:
+            with self.subTest(func=fname):
+                for param in required_params:
+                    self.assertIn(param, conf,
+                                  f"{fname}: отсутствует '{param}' — "
+                                  f"неполный набор AWG 2.0 (баг zvshka):\n{conf}")
 
 
 if __name__ == "__main__":

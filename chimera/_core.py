@@ -1034,10 +1034,31 @@ AWG_JMIN: int = 40      # Junk packet min size
 AWG_JMAX: int = 70      # Junk packet max size
 AWG_S1:   int = 0       # Init packet junk size
 AWG_S2:   int = 0       # Response packet junk size
+# v4.25.7: S3/S4 добавлены — нужны для полного набора AWG 2.0
+# (Keenetic и др. строгие парсеры падают на отсутствии этих полей).
+# По умолчанию 0 (как в bivlked), но теперь persist'ятся в state.
+AWG_S3:   int = 0       # Under-load packet junk size (0-64)
+AWG_S4:   int = 0       # Transport packet junk size (0-32)
 AWG_H1:   int = 1       # Init packet magic header
 AWG_H2:   int = 2       # Response packet magic header
 AWG_H3:   int = 3       # Under load packet magic header
 AWG_H4:   int = 4       # Transport packet magic header
+# v4.25.7: I1-I5 добавлены — опциональные decoy CPS-пакеты.
+# I1 — hex-строка (48-64 hex символов при i1_mode=random), I2-I5 обычно пустые.
+# По умолчанию пустые строки — не пишутся в конфиг если непустые (см. _awg_*_conf_text).
+AWG_I1:   str = ""      # Init packet junk allowed IP (hex)
+AWG_I2:   str = ""      # Response packet junk allowed IP (hex)
+AWG_I3:   str = ""      # Under-load packet junk allowed IP (hex)
+AWG_I4:   str = ""      # Transport packet junk allowed IP (hex)
+AWG_I5:   str = ""      # Transport packet junk IPv6 allowed IP (hex)
+# v4.25.7: источник параметров обфускации — для диагностики при жалобах
+# вроде "Keenetic не импортирует" (zvshka-кейс). Возможные значения:
+#   "preset:tele2_krasnoyarsk" | "preset:default" | ... (готовый пресет)
+#   "manual"  (пользователь ввёл параметры вручную через _awgs_menu_custom_params)
+#   "auto_full"  (авто-генерация через awgs_generate_full_manual_params)
+#   "default"  (старый хардкод 4/40/70/0/0/1/2/3/4 — для обратной совместимости
+#               с установками до v4.25.7)
+AWG_OBFUSCATION_SOURCE: str = "default"
 # Routing mark для policy routing
 AWG_FWMARK:      int = 1000
 AWG_ROUTE_TABLE: int = 1000
@@ -3533,6 +3554,27 @@ def do_full_install() -> None:
             "awg_server_pubkey": AWG_SERVER_PUBKEY,
             "awg_fwmark":        AWG_FWMARK,
             "awg_route_table":   AWG_ROUTE_TABLE,
+            # v4.25.7: параметры обфускации — все 16 (Jc/Jmin/Jmax/S1-S4/
+            # H1-H4/I1-I5) + источник. Раньше persist'ились только connection
+            # параметры (exit_host, port, keys), а obfuscation всегда
+            # сбрасывалась в дефолты при рестарте Chimera — скрытый баг.
+            "awg_jc":              AWG_JC,
+            "awg_jmin":            AWG_JMIN,
+            "awg_jmax":            AWG_JMAX,
+            "awg_s1":              AWG_S1,
+            "awg_s2":              AWG_S2,
+            "awg_s3":              AWG_S3,
+            "awg_s4":              AWG_S4,
+            "awg_h1":              AWG_H1,
+            "awg_h2":              AWG_H2,
+            "awg_h3":              AWG_H3,
+            "awg_h4":              AWG_H4,
+            "awg_i1":              AWG_I1,
+            "awg_i2":              AWG_I2,
+            "awg_i3":              AWG_I3,
+            "awg_i4":              AWG_I4,
+            "awg_i5":              AWG_I5,
+            "awg_obfuscation_source": AWG_OBFUSCATION_SOURCE,
             # === PATCH v2: multi-node state fields ===
             "awg_nodes":             [{k: v for k, v in n.items() if k != "ssh_password"}
                                       for n in AWG_NODES] if AWG_NODES else [],
@@ -8206,6 +8248,16 @@ def _load_state_into_globals() -> None:
     # === FIX 1: объявление глобалей для multi-node полей ===
     global AWG_NODES, AWG_ACTIVE_NODE_INDEX, _AWG_SSH_CLIENT_IP
     # === END FIX 1 ===
+    # v4.25.7: объявление глобалей для параметров обфускации AWG 2.0.
+    # Раньше они не объявлялись как global — Python считал их local, и
+    # try/except: pass проглатывал UnboundLocalError. Это значило что
+    # obfuscation параметры всегда оставались дефолтами 4/40/70/0/0/1/2/3/4
+    # после рестарта Chimera, даже если в state.json сохранены другие.
+    global AWG_JC, AWG_JMIN, AWG_JMAX
+    global AWG_S1, AWG_S2, AWG_S3, AWG_S4
+    global AWG_H1, AWG_H2, AWG_H3, AWG_H4
+    global AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5
+    global AWG_OBFUSCATION_SOURCE
     global XHTTP_PADDING_BYTES, XHTTP_NO_SSE_HEADER, XHTTP_NO_GRPC_HEADER, XHTTP_HOST
     global XHTTP_SC_STREAM_UP_SERVER_SECS, XHTTP_SC_MAX_EACH_POST_BYTES
     global XHTTP_SC_MIN_POSTS_INTERVAL_MS, XHTTP_SC_MAX_BUFFERED_POSTS
@@ -8274,6 +8326,27 @@ def _load_state_into_globals() -> None:
         AWG_EXIT_HOST    = state.get("awg_exit_host",     AWG_EXIT_HOST)
         AWG_EXIT_PORT    = state.get("awg_exit_port",     AWG_EXIT_PORT)
         AWG_CLIENT_LISTEN_PORT = state.get("awg_client_listen_port", AWG_CLIENT_LISTEN_PORT)
+        # v4.25.7: загружаем параметры обфускации из state — раньше они
+        # всегда сбрасывались в дефолты 4/40/70/0/0/1/2/3/4 при рестарте
+        # Chimera, что приводило к рассинхрону сервера (со старыми значениями)
+        # и конфигов, генерируемых Chimera (с дефолтами).
+        AWG_JC = state.get("awg_jc",  AWG_JC)
+        AWG_JMIN = state.get("awg_jmin",  AWG_JMIN)
+        AWG_JMAX = state.get("awg_jmax",  AWG_JMAX)
+        AWG_S1 = state.get("awg_s1",  AWG_S1)
+        AWG_S2 = state.get("awg_s2",  AWG_S2)
+        AWG_S3 = state.get("awg_s3",  AWG_S3)
+        AWG_S4 = state.get("awg_s4",  AWG_S4)
+        AWG_H1 = state.get("awg_h1",  AWG_H1)
+        AWG_H2 = state.get("awg_h2",  AWG_H2)
+        AWG_H3 = state.get("awg_h3",  AWG_H3)
+        AWG_H4 = state.get("awg_h4",  AWG_H4)
+        AWG_I1 = state.get("awg_i1",  AWG_I1)
+        AWG_I2 = state.get("awg_i2",  AWG_I2)
+        AWG_I3 = state.get("awg_i3",  AWG_I3)
+        AWG_I4 = state.get("awg_i4",  AWG_I4)
+        AWG_I5 = state.get("awg_i5",  AWG_I5)
+        AWG_OBFUSCATION_SOURCE = state.get("awg_obfuscation_source", AWG_OBFUSCATION_SOURCE)
         PARAM_REALITY_DEST = state.get("reality_dest",   PARAM_REALITY_DEST)
         # FIX: загружаем socket_path и spiderx из state — раньше не делалось,
         # что ломало generate_xray_config() при rebuild через пункт меню 5b

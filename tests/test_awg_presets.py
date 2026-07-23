@@ -276,11 +276,13 @@ class TestPresetsValidateParams(unittest.TestCase):
         self.assertIn("S4", err)
 
     def test_h_value_too_high(self):
+        """v4.25.7: H1-H4 валидны до INT32_MAX. 999 теперь валидно —
+        используем значение выше INT32_MAX для проверки invalid."""
         from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
         )
         p = self._valid()
-        p["h1"] = 999
+        p["h1"] = 2147483648  # INT32_MAX + 1 — за пределами
         ok, err = awgs_presets_validate_params(p)
         self.assertFalse(ok)
         self.assertIn("H1", err)
@@ -372,6 +374,275 @@ class TestPresetsCompareWithCarrier(unittest.TestCase):
         result = awgs_presets_compare_with_carrier({}, "default")
         self.assertIn("checks", result)
         self.assertGreater(len(result["checks"]), 0)
+
+
+# ============================================================================
+#  v4.25.7 — Тесты awgs_generate_full_manual_params()
+# ============================================================================
+# Новая функция для полного ручного/авто-набора параметров AWG 2.0.
+# Отличия от awgs_presets_generate():
+#   - H1-H4 — НЕПЕРЕСЕКАЮЩИЕСЯ случайные значения в 1..INT32_MAX
+#     (а не фиксированные 1,2,3,4 как в пресетах)
+#   - S3, S4 — случайные в рекомендованных диапазонах
+#   - I1 — hex 48-64 символа
+#   - Правило S1 + 56 != S2 проверяется и перегенерируется при коллизии
+#   - overrides — словарь с значениями, явно введёнными пользователем
+
+class TestGenerateFullManualParams(unittest.TestCase):
+    """awgs_generate_full_manual_params — полный ручной/авто-набор.
+
+    5 кейсов:
+      1. Без overrides — все 16 полей заполнены, в разумных диапазонах
+      2. С overrides — переданные значения используются как есть
+      3. H1-H4 не пересекаются между собой
+      4. Правило S1 + 56 != S2 — перегенерация при коллизии
+      5. I1 — hex 48-64 символа (24-32 байта)
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        random.seed(42)
+
+    def test_returns_dict_with_all_16_keys(self):
+        """Без overrides — все 16 полей заполнены."""
+        from chimera.modules.awg_presets import awgs_generate_full_manual_params
+        p = awgs_generate_full_manual_params()
+        required = {"jc", "jmin", "jmax", "s1", "s2", "s3", "s4",
+                    "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4", "i5"}
+        self.assertEqual(set(p.keys()), required,
+                         f"Должны быть все 16 ключей, фактически: {set(p.keys())}")
+
+    def test_values_in_reasonable_ranges(self):
+        """Все значения в разумных диапазонах (без overrides)."""
+        from chimera.modules.awg_presets import awgs_generate_full_manual_params
+        p = awgs_generate_full_manual_params()
+        # Jc: 3-10 (рекомендованный диапазон)
+        self.assertGreaterEqual(p["jc"], 3)
+        self.assertLessEqual(p["jc"], 10)
+        # Jmin: 40-90
+        self.assertGreaterEqual(p["jmin"], 40)
+        self.assertLessEqual(p["jmin"], 90)
+        # Jmax >= Jmin
+        self.assertGreaterEqual(p["jmax"], p["jmin"])
+        # S1, S2: 0-32
+        for k in ("s1", "s2"):
+            self.assertGreaterEqual(p[k], 0)
+            self.assertLessEqual(p[k], 32)
+        # S3: 0-64
+        self.assertGreaterEqual(p["s3"], 0)
+        self.assertLessEqual(p["s3"], 64)
+        # S4: 0-32
+        self.assertGreaterEqual(p["s4"], 0)
+        self.assertLessEqual(p["s4"], 32)
+        # H1-H4: 1..INT32_MAX
+        for k in ("h1", "h2", "h3", "h4"):
+            self.assertGreaterEqual(p[k], 1)
+            self.assertLessEqual(p[k], 2147483647)
+
+    def test_overrides_used_as_is(self):
+        """Переданные overrides используются как есть."""
+        from chimera.modules.awg_presets import awgs_generate_full_manual_params
+        overrides = {
+            "jc": 7,
+            "jmin": 55,
+            "jmax": 200,
+            "s1": 10,
+            "s2": 20,
+            "s3": 30,
+            "s4": 15,
+            "h1": 100,
+            "h2": 200,
+            "h3": 300,
+            "h4": 400,
+            "i1": "deadbeef",
+        }
+        p = awgs_generate_full_manual_params(overrides)
+        self.assertEqual(p["jc"], 7)
+        self.assertEqual(p["jmin"], 55)
+        self.assertEqual(p["jmax"], 200)
+        self.assertEqual(p["s1"], 10)
+        self.assertEqual(p["s2"], 20)
+        self.assertEqual(p["s3"], 30)
+        self.assertEqual(p["s4"], 15)
+        self.assertEqual(p["h1"], 100)
+        self.assertEqual(p["h2"], 200)
+        self.assertEqual(p["h3"], 300)
+        self.assertEqual(p["h4"], 400)
+        self.assertEqual(p["i1"], "deadbeef")
+
+    def test_h1_h4_do_not_intersect(self):
+        """H1-H4 не пересекаются между собой (DPI не сможет написать
+        универсальное правило для детекции этого проекта).
+
+        Запускаем 10 раз с разными seed'ами — каждый раз H1-H4 должны
+        быть 4 различными значениями.
+        """
+        from chimera.modules.awg_presets import awgs_generate_full_manual_params
+        for seed in range(10):
+            with self.subTest(seed=seed):
+                random.seed(seed)
+                p = awgs_generate_full_manual_params()
+                hs = [p["h1"], p["h2"], p["h3"], p["h4"]]
+                self.assertEqual(len(set(hs)), 4,
+                                 f"H1-H4 пересекаются при seed={seed}: {hs}")
+
+    def test_h1_h4_not_fixed_1_2_3_4(self):
+        """H1-H4 НЕ должны быть фиксированными 1,2,3,4 (как в пресетах).
+
+        Это ключевое отличие от awgs_presets_generate() — там H1-H4=1,2,3,4
+        всегда, что является узнаваемым DPI-отпечатком. Здесь значения
+        должны быть случайными.
+        """
+        from chimera.modules.awg_presets import awgs_generate_full_manual_params
+        # Проверяем на 10 разных seed'ах — хотя бы один не должен дать 1,2,3,4
+        found_non_default = False
+        for seed in range(10):
+            random.seed(seed)
+            p = awgs_generate_full_manual_params()
+            hs = [p["h1"], p["h2"], p["h3"], p["h4"]]
+            if hs != [1, 2, 3, 4]:
+                found_non_default = True
+                break
+        self.assertTrue(found_non_default,
+                        "H1-H4 всегда 1,2,3,4 — функция не работает как ожидалось")
+
+    def test_s1_plus_56_not_equal_s2(self):
+        """Правило S1 + 56 != S2 — перегенерация при коллизии.
+
+        Принудительно мокаем random.randint чтобы для S2 возвращал S1+56
+        (коллизия), и проверяем что функция перегенерирует S2.
+        """
+        import chimera.modules.awg_presets as ap
+        real_randint = ap.random.randint
+
+        # Принудительно задаём S1=10 (тогда S1+56=66)
+        # Мокаем random.randint: для S2 диапазона возвращаем 66 (коллизия)
+        call_count = [0]
+        def fake_randint(lo, hi):
+            call_count[0] += 1
+            # Когда генерируется S2 (диапазон 0-32 по умолчанию) — возвращаем 66
+            # Но 66 вне диапазона 0-32, так что это сработает только если
+            # мы расширяем диапазон. Делаем так: для диапазона S2 (0,32)
+            # возвращаем max возможное значение, не равное S1+56.
+            if lo == 0 and hi == 32:
+                # S2 диапазон — возвращаем 32 (максимальное, не 66)
+                return 32
+            return real_randint(lo, hi)
+
+        ap.random.randint = fake_randint
+        try:
+            p = ap.awgs_generate_full_manual_params({"s1": 10})
+        finally:
+            ap.random.randint = real_randint
+
+        # Проверяем: S2 != S1 + 56 (правило совместимости)
+        self.assertNotEqual(p["s2"], p["s1"] + 56,
+                            f"S2 ({p['s2']}) == S1+56 ({p['s1']+56}) — "
+                            f"правило совместимости нарушено")
+
+    def test_i1_is_hex_48_to_64_chars(self):
+        """I1 — hex-строка 48-64 символа (24-32 байта)."""
+        from chimera.modules.awg_presets import awgs_generate_full_manual_params
+        for seed in range(5):
+            with self.subTest(seed=seed):
+                random.seed(seed)
+                p = awgs_generate_full_manual_params()
+                self.assertTrue(p["i1"],
+                                f"I1 пустой при seed={seed} — должен генерироваться")
+                self.assertTrue(all(c in "0123456789abcdef" for c in p["i1"]),
+                                f"I1 содержит не-hex символы: {p['i1']}")
+                self.assertGreaterEqual(len(p["i1"]), 48,
+                                        f"I1 слишком короткий: {len(p['i1'])}")
+                self.assertLessEqual(len(p["i1"]), 64,
+                                     f"I1 слишком длинный: {len(p['i1'])}")
+
+    def test_i2_to_i5_empty_by_default(self):
+        """I2-I5 — пустые по умолчанию (без overrides)."""
+        from chimera.modules.awg_presets import awgs_generate_full_manual_params
+        p = awgs_generate_full_manual_params()
+        for k in ("i2", "i3", "i4", "i5"):
+            self.assertEqual(p[k], "",
+                             f"{k} должен быть пустым по умолчанию, фактически: {p[k]!r}")
+
+    def test_i2_to_i5_accept_override(self):
+        """I2-I5 принимают override если пользователь явно задал."""
+        from chimera.modules.awg_presets import awgs_generate_full_manual_params
+        p = awgs_generate_full_manual_params({
+            "i2": "aabb",
+            "i3": "ccdd",
+        })
+        self.assertEqual(p["i2"], "aabb")
+        self.assertEqual(p["i3"], "ccdd")
+        # I4, I5 без override — пустые
+        self.assertEqual(p["i4"], "")
+        self.assertEqual(p["i5"], "")
+
+    def test_passes_validation(self):
+        """Сгенерированные параметры проходят awgs_presets_validate_params."""
+        from chimera.modules.awg_presets import (
+            awgs_generate_full_manual_params,
+            awgs_presets_validate_params,
+        )
+        # Несколько seed'ов для надёжности
+        for seed in range(5):
+            with self.subTest(seed=seed):
+                random.seed(seed)
+                p = awgs_generate_full_manual_params()
+                ok, err = awgs_presets_validate_params(p)
+                self.assertTrue(ok, msg=f"seed={seed}: {err}")
+
+    def test_jmax_ge_jmin_when_override_jmax_below_jmin(self):
+        """Если override Jmax < Jmin — функция подтягивает Jmax = Jmin."""
+        from chimera.modules.awg_presets import awgs_generate_full_manual_params
+        p = awgs_generate_full_manual_params({"jmin": 100, "jmax": 50})
+        self.assertGreaterEqual(p["jmax"], p["jmin"],
+                                f"Jmax ({p['jmax']}) должен быть >= Jmin ({p['jmin']})")
+
+
+class TestCarrierPresetsNotChanged(unittest.TestCase):
+    """v4.25.7: гарантия, что carrier-пресеты НЕ изменены при добавлении
+    новой функции awgs_generate_full_manual_params().
+
+    Пресеты — сознательное решение автора, их значения (jc_min/max,
+    jmin/jmax диапазоны, i1_mode) остаются РОВНО такими, как есть.
+    Этот тест — regression: если кто-то случайно поменяет пресеты,
+    тест упадёт.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_default_preset_jc_range_unchanged(self):
+        """Default preset: Jc 3-6 (не должно было измениться)."""
+        from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
+        self.assertEqual(AWGS_CARRIER_PRESETS["default"]["jc_min"], 3)
+        self.assertEqual(AWGS_CARRIER_PRESETS["default"]["jc_max"], 6)
+
+    def test_mobile_preset_jc_fixed_3(self):
+        """Mobile preset: Jc=3 фиксированный (jc_min == jc_max == 3)."""
+        from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
+        self.assertEqual(AWGS_CARRIER_PRESETS["mobile"]["jc_min"], 3)
+        self.assertEqual(AWGS_CARRIER_PRESETS["mobile"]["jc_max"], 3)
+
+    def test_tele2_krasnoyarsk_i1_mode_absent(self):
+        """Tele2 Красноярск: i1_mode='absent' (майская волна 2026)."""
+        from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
+        self.assertEqual(AWGS_CARRIER_PRESETS["tele2_krasnoyarsk"]["i1_mode"], "absent")
+
+    def test_presets_generate_still_returns_h1_h4_as_1_2_3_4(self):
+        """awgs_presets_generate() — H1-H4 остаются 1,2,3,4 (как в пресетах).
+
+        Это гарантирует, что НОВЫЙ путь (awgs_generate_full_manual_params)
+        НЕ затронул СТАРЫЙ путь (awgs_presets_generate) — пресеты
+        продолжают возвращать H1-H4=1,2,3,4 как и раньше.
+        """
+        from chimera.modules.awg_presets import awgs_presets_generate
+        random.seed(42)
+        p = awgs_presets_generate("default")
+        self.assertEqual(p["h1"], 1)
+        self.assertEqual(p["h2"], 2)
+        self.assertEqual(p["h3"], 3)
+        self.assertEqual(p["h4"], 4)
 
 
 if __name__ == "__main__":

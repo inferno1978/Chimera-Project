@@ -847,14 +847,76 @@ def prompt_awg_exit_mode() -> None:
     _box_wrap_msg(f"  {DIM}", 2,
         f"Значения по умолчанию оптимальны для большинства случаев.{NC}")
     _box_row()
+    # v4.25.7: 3 варианта настройки обфускации — пресет / ручной ввод /
+    # авто-полный набор. Раньше был только y/N на изменение дефолтов
+    # (4/40/70/0/0/1/2/3/4) — без S3/S4/I1-I5, что ломало импорт в Keenetic.
+    _box_item("1", f"{DIM}Использовать значения по умолчанию "
+                    f"(Jc=4, Jmin=40, Jmax=70, S1-S4=0, H1-H4=1-4, без I1-I5){NC}")
+    _box_desc("Старый режим — для обратной совместимости. НЕ рекомендуется "
+              "для новых установок (нет I1, H1-H4 одинаковые у всех).")
+    _box_item("2", f"{GREEN}Авто-генерация полного набора{NC} "
+                    f"{DIM}(Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5 — случайно в "
+                    f"рекомендованных диапазонах, H1-H4 уникальны){NC}")
+    _box_desc("Рекомендуется. Уникальные H1-H4 — DPI не сможет написать "
+              "универсальное правило. I1 генерируется для совместимости "
+              "с Keenetic и другими строгими парсерами.")
+    _box_item("3", f"{CYAN}Ввести параметры вручную{NC} "
+                    f"{DIM}(с рекомендованными значениями){NC}")
+    _box_desc("Полный контроль — каждый параметр вручную. Экспертный режим.")
+    _box_item("4", f"{YELLOW}Готовый пресет под оператора{NC} "
+                    f"{DIM}(Tele2, Yota, Мегафон, Билайн, T-Mobile US и др.){NC}")
+    _box_desc("Carrier-специфичные значения, заточенные под конкретного "
+              "оператора РФ/мира. 9 пресетов из bivlked/amneziawg-installer.")
+    _box_row()
 
     try:
-        adv = input(f"  {CYAN}Изменить параметры обфускации? [y/N]:{NC} ").strip().lower()
+        _obf_ch = input(f"  {CYAN}Способ настройки [2 — рекомендуется]:{NC} ").strip()
     except KeyboardInterrupt:
         print()
-        adv = ""
+        _obf_ch = "2"
+    if _obf_ch not in ("1", "2", "3", "4"):
+        _obf_ch = "2"  # default = авто-генерация
 
-    if adv == "y":
+    if _obf_ch == "1":
+        # Значения по умолчанию — ничего не меняем, AWG_OBFUSCATION_SOURCE = "default"
+        setattr(core, "AWG_OBFUSCATION_SOURCE", "default")
+        success("   Обфускация: значения по умолчанию (старый режим)")
+
+    elif _obf_ch == "2":
+        # Авто-генерация полного набора через awgs_generate_full_manual_params()
+        from chimera.modules.awg_presets import awgs_generate_full_manual_params
+        _p = awgs_generate_full_manual_params()  # без overrides = полный авто-рандом
+        AWG_JC, AWG_JMIN, AWG_JMAX = _p["jc"], _p["jmin"], _p["jmax"]
+        AWG_S1, AWG_S2, AWG_S3, AWG_S4 = _p["s1"], _p["s2"], _p["s3"], _p["s4"]
+        AWG_H1, AWG_H2, AWG_H3, AWG_H4 = _p["h1"], _p["h2"], _p["h3"], _p["h4"]
+        AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5 = (
+            _p["i1"], _p["i2"], _p["i3"], _p["i4"], _p["i5"]
+        )
+        for _k, _v in (
+            ("AWG_JC", AWG_JC), ("AWG_JMIN", AWG_JMIN), ("AWG_JMAX", AWG_JMAX),
+            ("AWG_S1", AWG_S1), ("AWG_S2", AWG_S2),
+            ("AWG_S3", AWG_S3), ("AWG_S4", AWG_S4),
+            ("AWG_H1", AWG_H1), ("AWG_H2", AWG_H2),
+            ("AWG_H3", AWG_H3), ("AWG_H4", AWG_H4),
+            ("AWG_I1", AWG_I1), ("AWG_I2", AWG_I2),
+            ("AWG_I3", AWG_I3), ("AWG_I4", AWG_I4), ("AWG_I5", AWG_I5),
+        ):
+            setattr(core, _k, _v)
+        setattr(core, "AWG_OBFUSCATION_SOURCE", "auto_full")
+        success(f"   Обфускация: авто-генерация (полный набор, H1-H4 уникальны)")
+        info(f"     Jc={AWG_JC} Jmin={AWG_JMIN} Jmax={AWG_JMAX}")
+        info(f"     S1-S4={AWG_S1}/{AWG_S2}/{AWG_S3}/{AWG_S4}")
+        info(f"     H1-H4={AWG_H1}/{AWG_H2}/{AWG_H3}/{AWG_H4}")
+        if AWG_I1:
+            info(f"     I1={AWG_I1[:32]}... (len={len(AWG_I1)})")
+
+    elif _obf_ch == "3":
+        # Ручной ввод полного набора — с рекомендованными значениями
+        # Сначала генерируем рекомендации через awgs_generate_full_manual_params(),
+        # затем предлагаем пользователю подтвердить или изменить каждый параметр.
+        from chimera.modules.awg_presets import awgs_generate_full_manual_params
+        _rec = awgs_generate_full_manual_params()
+
         def _ask_int(prompt: str, default: int, lo: int, hi: int) -> int:
             try:
                 raw2 = input(f"  {prompt} [{default}]: ").strip()
@@ -865,26 +927,104 @@ def prompt_awg_exit_mode() -> None:
                 pass
             return default
 
-        AWG_JC   = _ask_int("Junk packet count (Jc, 1-128)",   AWG_JC,   1,   128)
+        def _ask_hex(prompt: str, default: str) -> str:
+            try:
+                raw2 = input(f"  {prompt} [{default[:32]}{'...' if len(default) > 32 else ''}]: ").strip()
+                if not raw2:
+                    return default
+                if raw2.lower() == "none":
+                    return ""
+                if all(c in "0123456789abcdefABCDEF" for c in raw2):
+                    return raw2
+                warn(f"  '{raw2}' не hex — игнорирую, использую default")
+            except (ValueError, KeyboardInterrupt):
+                pass
+            return default
+
+        AWG_JC   = _ask_int("Junk packet count (Jc, 1-128)",   _rec["jc"],   1,   128)
         setattr(core, "AWG_JC",   AWG_JC)
-        AWG_JMIN = _ask_int("Junk min size (Jmin, 10-1000)",   AWG_JMIN, 10,  1000)
+        AWG_JMIN = _ask_int("Junk min size (Jmin, 0-1280)",    _rec["jmin"], 0,  1280)
         setattr(core, "AWG_JMIN", AWG_JMIN)
-        AWG_JMAX = _ask_int("Junk max size (Jmax, 10-1000)",   AWG_JMAX, AWG_JMIN, 1000)
+        AWG_JMAX = _ask_int("Junk max size (Jmax, 0-1280)",    _rec["jmax"], AWG_JMIN, 1280)
         setattr(core, "AWG_JMAX", AWG_JMAX)
-        AWG_S1   = _ask_int("Init junk size S1 (0-1000)",      AWG_S1,   0,   1000)
+        AWG_S1   = _ask_int("Init junk size S1 (0-1280)",      _rec["s1"],   0,  1280)
         setattr(core, "AWG_S1",   AWG_S1)
-        AWG_S2   = _ask_int("Response junk size S2 (0-1000)",  AWG_S2,   0,   1000)
+        AWG_S2   = _ask_int("Response junk size S2 (0-1280)",  _rec["s2"],   0,  1280)
         setattr(core, "AWG_S2",   AWG_S2)
-        AWG_H1   = _ask_int("Magic header H1 (1-2147483647)",  AWG_H1,   1,   2147483647)
+        AWG_S3   = _ask_int("Under-load junk size S3 (0-64)",  _rec["s3"],   0,  64)
+        setattr(core, "AWG_S3",   AWG_S3)
+        AWG_S4   = _ask_int("Transport junk size S4 (0-32)",   _rec["s4"],   0,  32)
+        setattr(core, "AWG_S4",   AWG_S4)
+        AWG_H1   = _ask_int("Magic header H1 (1-2147483647)",  _rec["h1"],   1,   2147483647)
         setattr(core, "AWG_H1",   AWG_H1)
-        AWG_H2   = _ask_int("Magic header H2 (1-2147483647)",  AWG_H2,   1,   2147483647)
+        AWG_H2   = _ask_int("Magic header H2 (1-2147483647)",  _rec["h2"],   1,   2147483647)
         setattr(core, "AWG_H2",   AWG_H2)
-        AWG_H3   = _ask_int("Magic header H3 (1-2147483647)",  AWG_H3,   1,   2147483647)
+        AWG_H3   = _ask_int("Magic header H3 (1-2147483647)",  _rec["h3"],   1,   2147483647)
         setattr(core, "AWG_H3",   AWG_H3)
-        AWG_H4   = _ask_int("Magic header H4 (1-2147483647)",  AWG_H4,   1,   2147483647)
+        AWG_H4   = _ask_int("Magic header H4 (1-2147483647)",  _rec["h4"],   1,   2147483647)
         setattr(core, "AWG_H4",   AWG_H4)
+        # I1 — рекомендованный hex, можно 'none' чтобы пропустить
+        AWG_I1   = _ask_hex("Init packet I1 (hex, или 'none')", _rec["i1"])
+        setattr(core, "AWG_I1",   AWG_I1)
+        # I2-I5 — по умолчанию пустые
+        AWG_I2   = _ask_hex("Response packet I2 (hex, или 'none')", _rec["i2"])
+        setattr(core, "AWG_I2",   AWG_I2)
+        AWG_I3   = _ask_hex("Under-load packet I3 (hex, или 'none')", _rec["i3"])
+        setattr(core, "AWG_I3",   AWG_I3)
+        AWG_I4   = _ask_hex("Transport packet I4 (hex, или 'none')", _rec["i4"])
+        setattr(core, "AWG_I4",   AWG_I4)
+        AWG_I5   = _ask_hex("Transport IPv6 I5 (hex, или 'none')", _rec["i5"])
+        setattr(core, "AWG_I5",   AWG_I5)
         AWG_MTU  = _ask_int("MTU интерфейса (1200-1420)",      AWG_MTU,  1200, 1420)
         setattr(core, "AWG_MTU",  AWG_MTU)
+        setattr(core, "AWG_OBFUSCATION_SOURCE", "manual")
+        success("   Обфускация: ручной ввод (полный набор)")
+
+    elif _obf_ch == "4":
+        # Готовый пресет оператора
+        from chimera.modules.awg_presets import (
+            awgs_presets_list, awgs_presets_get, awgs_presets_generate,
+        )
+        _presets = awgs_presets_list()
+        _box_row()
+        for i, _pname in enumerate(_presets, 1):
+            _pinfo = awgs_presets_get(_pname)
+            _box_row(f"  {CYAN}{i}{NC}) {_pname} — {_pinfo.get('label', '')}")
+        _box_row()
+        try:
+            _pchoice = input(f"  {CYAN}Выберите пресет [1]:{NC} ").strip()
+        except KeyboardInterrupt:
+            _pchoice = "1"
+        try:
+            _pidx = int(_pchoice) - 1 if _pchoice else 0
+        except ValueError:
+            _pidx = 0
+        if not (0 <= _pidx < len(_presets)):
+            _pidx = 0
+        _preset_name = _presets[_pidx]
+        _p = awgs_presets_generate(_preset_name)
+        AWG_JC, AWG_JMIN, AWG_JMAX = _p["jc"], _p["jmin"], _p["jmax"]
+        AWG_S1, AWG_S2, AWG_S3, AWG_S4 = _p["s1"], _p["s2"], _p["s3"], _p["s4"]
+        AWG_H1, AWG_H2, AWG_H3, AWG_H4 = _p["h1"], _p["h2"], _p["h3"], _p["h4"]
+        AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5 = (
+            _p["i1"], _p["i2"], _p["i3"], _p["i4"], _p["i5"]
+        )
+        for _k, _v in (
+            ("AWG_JC", AWG_JC), ("AWG_JMIN", AWG_JMIN), ("AWG_JMAX", AWG_JMAX),
+            ("AWG_S1", AWG_S1), ("AWG_S2", AWG_S2),
+            ("AWG_S3", AWG_S3), ("AWG_S4", AWG_S4),
+            ("AWG_H1", AWG_H1), ("AWG_H2", AWG_H2),
+            ("AWG_H3", AWG_H3), ("AWG_H4", AWG_H4),
+            ("AWG_I1", AWG_I1), ("AWG_I2", AWG_I2),
+            ("AWG_I3", AWG_I3), ("AWG_I4", AWG_I4), ("AWG_I5", AWG_I5),
+        ):
+            setattr(core, _k, _v)
+        setattr(core, "AWG_OBFUSCATION_SOURCE", f"preset:{_preset_name}")
+        success(f"   Обфускация: пресет '{_preset_name}'")
+        info(f"     Jc={AWG_JC} Jmin={AWG_JMIN} Jmax={AWG_JMAX}")
+        info(f"     H1-H4={AWG_H1}/{AWG_H2}/{AWG_H3}/{AWG_H4}")
+        if AWG_I1:
+            info(f"     I1={AWG_I1[:32]}... (len={len(AWG_I1)})")
 
     # --- Метод SSH-аутентификации для удалённой настройки exit-VPS ---
     _box_top("SSH-доступ к exit-VPS")
