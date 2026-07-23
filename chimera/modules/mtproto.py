@@ -3318,6 +3318,7 @@ def mtproto_menu() -> None:
         _box_item("6", "📊  Статистика трафика")
         _box_item("7", "📋  Статус / логи")
         _box_item("L", "⏱️   Лимиты пользователей (квота + срок)")
+        _box_item("G", "🌍  Гео-блокировка по странам")
         _box_item("X", "🔗  Xray-интеграция (SOCKS5 ↔ каскад)")
         _box_item("F", "🔀  Hybrid Fallback (Middle Proxy → Direct)")
         _box_item("S", "🛡️   SYN-limiter (стабилизация подключения)")
@@ -3414,6 +3415,16 @@ def mtproto_menu() -> None:
             if not server_ip:
                 server_ip, _ = _get_public_ip()
             _menu_limits(server_ip)
+
+        elif ch == "g":
+            if not CONFIG_FILE.exists():
+                _warn("Telemt не установлен."); _pause(); continue
+            from chimera.modules.geoblock import geoblock_menu_telemt
+            _telemt_port = _get_port()
+            if _telemt_port:
+                geoblock_menu_telemt(_telemt_port)
+            else:
+                _warn("Не удалось определить порт Telemt.")
 
         elif ch == "8":
             if not (BIN_PATH.exists() or CONFIG_FILE.exists() or SERVICE_FILE.exists()):
