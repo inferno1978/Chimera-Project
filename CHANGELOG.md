@@ -2,6 +2,57 @@
 
 ---
 
+## FEAT(youtube-ip-pin): экспериментальная опция закрепления YouTube-CDN по IP — 23 июля 2026
+
+**Новая экспериментальная опция: закрепление YouTube-CDN по IP поверх уже выбранной exit-ноды. Добавляет ДОПОЛНИТЕЛЬНОЕ routing-правило в Xray config (матчащее по IP-адресам из внешнего списка, а не по доменам) рядом с доменным правилом YouTube. Оба правила включаются/выключаются независимо.**
+
+⚠️ **Дисклеймер (показывается в UI при включении):** YouTube отдаёт видео с подписанных URL конкретного cache-узла, который сервер YouTube выбирает в момент запроса manifest'а. Пиннинг по IP из внешнего списка НЕ гарантирует, что видео будет доступно — это best-effort, может давать 403/таймауты. Не использовать как основной механизм выбора региона (для этого есть выбор exit-ноды).
+
+### Источник данных
+
+`github.com/touhidurrr/iplist-youtube` — `lists/cidr4.txt` (~557 CIDR IPv4) и `lists/cidr6.txt` (~710 CIDR IPv6). Обновляется автором каждые 5 минут, нам достаточно рефетча раз в сутки.
+
+### Что сделано
+
+**Новый файл: `chimera/modules/youtube_ip_pin.py`**
+
+1. **PackageSpec x2** (cidr4.txt, cidr6.txt) — через `download_manager.fetch_package()`, полностью переиспользована существующая логика скачивания/ретраев. `post_install` — content-level валидация через `ipaddress.ip_network()` построчно (минимум 300/400 валидных CIDR, отбраковка мусора/404-страниц). `checksum_urls=None` — апстрим не публикует чек-суммы.
+
+2. **`download_youtube_iplist()`** — скачивает оба списка, записывает timestamp в state.json.
+
+3. **`setup_youtube_iplist_autoupdate()`** — cron ежедневно в 04:00, отдельный файл `/etc/cron.d/youtube-iplist-update` (НЕ трогает существующий `/etc/cron.d/xray-geo-update`).
+
+4. **`apply_youtube_ip_pin(target_tag)` / `remove_youtube_ip_pin()`** — IP-правило с `comment="youtube_ip_pin"`, отдельное от доменного (`comment="youtube_via_ru"`). При `target="off"` — не применяется. Проверяет существование outbound (если нода удалена — `False` + warn).
+
+5. **UI** — подменю в `do_manage_youtube_via_ru()` (youtube_route.py), показывается ТОЛЬКО когда `current_target != "off"`. Пункты: включить/выключить IP-pin (с дисклеймером), обновить списки, вкл/выкл cron. Статус: дата обновления, кол-во CIDR, вкл/выкл.
+
+6. **`restore_ip_pin_if_needed()`** — вызывается из `restore_youtube_rule_if_needed()` после regenerate xray-config. При рассинхроне (`ip_pin_enabled=True`, `route_target="off"`) — не применяется, логирует warn, не падает.
+
+### State
+
+Новые ключи в state.json: `youtube_ip_pin_enabled` (bool), `youtube_iplist_updated_at` (ISO-timestamp).
+
+### Не тронуто
+
+- Доменная логика `youtube_route.py` (`_youtube_apply_to_xray`, `_YOUTUBE_DOMAINS`)
+- `geo_packages.py`/`geo_mirrors.py`/`geo_files.py` — только переиспользование
+- Существующий `/etc/cron.d/xray-geo-update`
+- Логика выбора exit-ноды
+
+### Тесты
+
+`tests/test_youtube_ip_pin.py` — **9 passed** (8 кейсов + 1 regression на порядок зеркал):
+1. PackageSpec x2 валидны (assert `manual_incoming_dir != install_dests`)
+2. post_install: 600 валидных CIDR → принимается
+3. post_install: мусор (HTML 404) → отбраковывается
+4. `apply("off")` → `False`
+5. `apply("chain-exit-2")` → IP-правило добавлено, доменное не тронуто
+6. `remove()` → убирает только IP-правило, доменное остаётся
+7. restore: `ip_pin=True`, `target="off"` → `False`, не падает
+8. `_mirror_urls` порядок: raw.githubusercontent.com первым, jsDelivr — fallback
+
+---
+
 ## FEAT(youtube-route): выбор конкретной exit-ноды для YouTube в multi-node режиме — 23 июля 2026
 
 **Переключатель «YouTube через RU» расширен до выбора конкретной exit-ноды в multi-node режиме. Раньше был только бинарный выбор: RU entry (direct/direct-local) или exit-каскад (default catch-all через балансировщик). Теперь при наличии >1 exit-ноды меню показывает по пункту на каждую ноду + RU + default — можно направить YouTube-трафик через конкретную ноду, а не через балансировщик.**
