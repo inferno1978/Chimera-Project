@@ -1034,7 +1034,7 @@ AWG_JMIN: int = 40      # Junk packet min size
 AWG_JMAX: int = 70      # Junk packet max size
 AWG_S1:   int = 0       # Init packet junk size
 AWG_S2:   int = 0       # Response packet junk size
-# v5.0.7: S3/S4 добавлены — нужны для полного набора AWG 2.0
+# v5.0.0: S3/S4 добавлены — нужны для полного набора AWG 2.0
 # (Keenetic и др. строгие парсеры падают на отсутствии этих полей).
 # По умолчанию 0 (как в bivlked), но теперь persist'ятся в state.
 AWG_S3:   int = 0       # Under-load packet junk size (0-64)
@@ -1043,7 +1043,7 @@ AWG_H1:   int = 1       # Init packet magic header
 AWG_H2:   int = 2       # Response packet magic header
 AWG_H3:   int = 3       # Under load packet magic header
 AWG_H4:   int = 4       # Transport packet magic header
-# v5.0.7: I1-I5 добавлены — опциональные decoy CPS-пакеты.
+# v5.0.0: I1-I5 добавлены — опциональные decoy CPS-пакеты.
 # I1 — hex-строка (48-64 hex символов при i1_mode=random), I2-I5 обычно пустые.
 # По умолчанию пустые строки — не пишутся в конфиг если непустые (см. _awg_*_conf_text).
 AWG_I1:   str = ""      # Init packet junk allowed IP (hex)
@@ -1051,13 +1051,13 @@ AWG_I2:   str = ""      # Response packet junk allowed IP (hex)
 AWG_I3:   str = ""      # Under-load packet junk allowed IP (hex)
 AWG_I4:   str = ""      # Transport packet junk allowed IP (hex)
 AWG_I5:   str = ""      # Transport packet junk IPv6 allowed IP (hex)
-# v5.0.7: источник параметров обфускации — для диагностики при жалобах
+# v5.0.0: источник параметров обфускации — для диагностики при жалобах
 # вроде "Keenetic не импортирует" (zvshka-кейс). Возможные значения:
 #   "preset:tele2_krasnoyarsk" | "preset:default" | ... (готовый пресет)
 #   "manual"  (пользователь ввёл параметры вручную через _awgs_menu_custom_params)
 #   "auto_full"  (авто-генерация через awgs_generate_full_manual_params)
 #   "default"  (старый хардкод 4/40/70/0/0/1/2/3/4 — для обратной совместимости
-#               с установками до v5.0.7)
+#               с установками до v5.0.0)
 AWG_OBFUSCATION_SOURCE: str = "default"
 # Routing mark для policy routing
 AWG_FWMARK:      int = 1000
@@ -3554,7 +3554,7 @@ def do_full_install() -> None:
             "awg_server_pubkey": AWG_SERVER_PUBKEY,
             "awg_fwmark":        AWG_FWMARK,
             "awg_route_table":   AWG_ROUTE_TABLE,
-            # v5.0.7: параметры обфускации — все 16 (Jc/Jmin/Jmax/S1-S4/
+            # v5.0.0: параметры обфускации — все 16 (Jc/Jmin/Jmax/S1-S4/
             # H1-H4/I1-I5) + источник. Раньше persist'ились только connection
             # параметры (exit_host, port, keys), а obfuscation всегда
             # сбрасывалась в дефолты при рестарте Chimera — скрытый баг.
@@ -7204,13 +7204,13 @@ def _menu_network() -> None:
 def _render_dns_reconciliation_box(configured_resolvers: list) -> None:
     """Рендерит блок «Сверка конфигурации» в конце DNS Leak Test.
 
-    Выделен в отдельную функцию (v5.0.6) для тестопригодности —
+    Выделен в отдельную функцию (v5.0.0) для тестопригодности —
     do_dns_leak_test() делает реальные сетевые запросы (dig, API),
     что делает её неподъёмной для unit-тестов. Эта функция работает
     только с переданным списком configured_resolvers и health_check,
     поэтому покрывает все 5 кейсов из tests/test_core_dns_redirect_integration.py.
 
-    Логика (v5.0.6 — исправлен false negative из v5.0.5/038540f):
+    Логика (v5.0.0 — исправлен false negative из v5.0.0/038540f):
       - loopback → зелёное "проксируется локально"
       - non-loopback + redirect_active (enabled AND rules_applied) →
         зелёное "редирект активен — трафик заворачивается на dnscrypt-proxy"
@@ -7223,9 +7223,9 @@ def _render_dns_reconciliation_box(configured_resolvers: list) -> None:
     _box_top("Сверка конфигурации")
     is_loopback = any(ip.startswith("127.") or ip == "::1"
                       for ip in configured_resolvers)
-    # v5.0.6 FIX: правильное условие для зелёного цвета.
+    # v5.0.0 FIX: правильное условие для зелёного цвета.
     #
-    # v5.0.5 (коммит 038540f) исправил визуальный баг — жёлтое
+    # v5.0.0 (коммит 038540f) исправил визуальный баг — жёлтое
     # "DNS уходит напрямую" рисовалось даже при активном DNSCrypt.
     # НО он сделал это проверкой dnscrypt_active (процесс запущен),
     # что является false negative: dnscrypt-proxy может быть active
@@ -7234,7 +7234,7 @@ def _render_dns_reconciliation_box(configured_resolvers: list) -> None:
     # Это прямо описано в dns_redirect.py:291-292: "редирект включён
     # в state, но правила в iptables отсутствуют".
     #
-    # v5.0.6: вместо dnscrypt_active проверяем redirect_active =
+    # v5.0.0: вместо dnscrypt_active проверяем redirect_active =
     # health_check_dns_redirect()["enabled"] AND ["rules_applied"].
     # Это значит, что зелёный цвет показывается ТОЛЬКО когда трафик
     # реально перехватывается, не просто когда сервис запущен.
@@ -7648,7 +7648,7 @@ def do_dns_leak_test() -> None:
     _box_bottom()
 
     # ── Сверка с настроенным DNS — отдельный бокс ───────────────────────────
-    # v5.0.6: блок выделен в _render_dns_reconciliation_box() для
+    # v5.0.0: блок выделен в _render_dns_reconciliation_box() для
     # тестопригодности. Логика описана в docstring функции.
     _render_dns_reconciliation_box(configured_resolvers)
 
@@ -8248,7 +8248,7 @@ def _load_state_into_globals() -> None:
     # === FIX 1: объявление глобалей для multi-node полей ===
     global AWG_NODES, AWG_ACTIVE_NODE_INDEX, _AWG_SSH_CLIENT_IP
     # === END FIX 1 ===
-    # v5.0.7: объявление глобалей для параметров обфускации AWG 2.0.
+    # v5.0.0: объявление глобалей для параметров обфускации AWG 2.0.
     # Раньше они не объявлялись как global — Python считал их local, и
     # try/except: pass проглатывал UnboundLocalError. Это значило что
     # obfuscation параметры всегда оставались дефолтами 4/40/70/0/0/1/2/3/4
@@ -8326,7 +8326,7 @@ def _load_state_into_globals() -> None:
         AWG_EXIT_HOST    = state.get("awg_exit_host",     AWG_EXIT_HOST)
         AWG_EXIT_PORT    = state.get("awg_exit_port",     AWG_EXIT_PORT)
         AWG_CLIENT_LISTEN_PORT = state.get("awg_client_listen_port", AWG_CLIENT_LISTEN_PORT)
-        # v5.0.7: загружаем параметры обфускации из state — раньше они
+        # v5.0.0: загружаем параметры обфускации из state — раньше они
         # всегда сбрасывались в дефолты 4/40/70/0/0/1/2/3/4 при рестарте
         # Chimera, что приводило к рассинхрону сервера (со старыми значениями)
         # и конфигов, генерируемых Chimera (с дефолтами).
