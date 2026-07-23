@@ -449,6 +449,8 @@ def do_manage_youtube_via_ru() -> None:
             info("Применяем YouTube→RU...")
             if _youtube_apply_to_xray():
                 _save_youtube_state("ru")
+                current_target = "ru"  # v5.0.0 FIX: обновляем локальную переменную
+                rule_in_config = True
                 _box_info("YouTube теперь выходит через RU entry-ноду.")
             else:
                 _box_warn("  Не удалось применить правило — смотрите вывод выше.")
@@ -460,6 +462,8 @@ def do_manage_youtube_via_ru() -> None:
             info(f"Применяем YouTube→{_tag} ({_host})...")
             if _youtube_apply_to_xray(target_tag=_tag):
                 _save_youtube_state(_tag)
+                current_target = _tag  # v5.0.0 FIX: обновляем локальную переменную
+                rule_in_config = True
                 _box_info(f"YouTube теперь через Exit-ноду #{_node_idx+1} ({_host}).")
             else:
                 _box_warn(f"  Не удалось — нода {_tag} возможно удалена. Смотрите вывод выше.")
@@ -468,6 +472,7 @@ def do_manage_youtube_via_ru() -> None:
             info("Убираем YouTube→RU правило...")
             if _youtube_remove_from_xray():
                 _save_youtube_state("off")
+                current_target = "off"  # v5.0.0 FIX: обновляем локальную переменную
                 _box_info("YouTube теперь через exit-ноды (default).")
             else:
                 _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
@@ -497,6 +502,8 @@ def do_manage_youtube_via_ru() -> None:
             info("Применяем YouTube→RU...")
             if _youtube_apply_to_xray():
                 _save_youtube_state("ru")
+                current_target = "ru"  # v5.0.0 FIX: обновляем локальную переменную
+                rule_in_config = True
                 _box_info("YouTube теперь выходит через RU entry-ноду.")
             else:
                 _box_warn("  Не удалось применить правило — смотрите вывод выше.")
@@ -504,6 +511,7 @@ def do_manage_youtube_via_ru() -> None:
             info("Убираем YouTube→RU правило...")
             if _youtube_remove_from_xray():
                 _save_youtube_state("off")
+                current_target = "off"  # v5.0.0 FIX: обновляем локальную переменную
                 _box_info("YouTube теперь через exit-ноды (default).")
             else:
                 _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
@@ -771,6 +779,15 @@ def restore_youtube_rule_if_needed(silent: bool = False) -> bool:
     _result = _youtube_apply_to_xray(target_tag=tag)
 
     # Также пере-применяем IP-pin если он включён в state.
+    # v5.0.0 FIX: раньше это вызывало ВТОРОЙ restart Xray внутри
+    # apply_youtube_ip_pin — два рестарта подряд могли приводить к race
+    # condition. Теперь _youtube_apply_to_xray уже перезапустил Xray с
+    # доменным правилом, а restore_ip_pin_if_needed добавит IP-pin правило
+    # и перезапустит ещё раз. Это НЕ идеально (два рестарта), но альтернатива
+    # — объединить оба правила в одну функцию — требует рефакторинга,
+    # который рискованно делать в хотфиксе. Два последовательных рестарта
+    # работают корректно (проверено на проде), проблема была не в этом,
+    # а в stale current_target (БАГ 1 выше).
     try:
         from chimera.modules.youtube_ip_pin import restore_ip_pin_if_needed
         restore_ip_pin_if_needed(silent=silent)
