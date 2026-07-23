@@ -413,16 +413,34 @@ def do_manage_youtube_via_ru() -> None:
 
     if multi_node:
         # Multi-node меню: RU + N нод + default.
+        # Вычисляем ширину колонки имени ноды для выравнивания IP.
+        _name_width = max(len(f"Exit-нода #{i+1}") for i in range(len(nodes)))
+        _name_width = max(_name_width, len("RU entry"))
+
         _is_current = (current_target == "ru" and rule_in_config)
-        _box_item("1", f"{'● ' if _is_current else '  '}YouTube через RU entry")
+        _marker = "● " if _is_current else "  "
+        _box_item("1", f"{_marker}YouTube через {'RU entry':<{_name_width}}")
+
         for i, nd in enumerate(nodes):
             _tag = f"chain-exit-{i+1}"
             _is_cur = (current_target == _tag and rule_in_config)
+            _marker = "● " if _is_cur else "  "
             _host = nd.get("host", "?")
-            _box_item(str(i+2), f"{'● ' if _is_cur else '  '}YouTube через Exit-нода #{i+1} ({_host})")
+            # Резолвим IP для отображения (best-effort, без блокировки)
+            _ip_str = ""
+            try:
+                import socket as _sock
+                _resolved = _sock.gethostbyname(_host)
+                _ip_str = f"  {DIM}{_resolved}{NC}"
+            except Exception:
+                _ip_str = f"  {DIM}(IP недоступен){NC}"
+            _node_name = f"Exit-нода #{i+1}"
+            _box_item(str(i+2), f"{_marker}YouTube через {_node_name:<{_name_width}}{_ip_str}")
+
         _default_idx = len(nodes) + 2
         _is_cur = (current_target == "off")
-        _box_item(str(_default_idx), f"{'● ' if _is_cur else '  '}YouTube через exit-ноды (default, балансировщик)")
+        _marker = "● " if _is_cur else "  "
+        _box_item(str(_default_idx), f"{_marker}YouTube через exit-ноды (default, балансировщик)")
         _box_row()
         _box_item("Q", f"{DIM}Назад{NC}")
         _box_bottom()
