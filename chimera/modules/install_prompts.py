@@ -658,6 +658,59 @@ def prompt_protocol_mode() -> None:
 # =============================================================================
 #  ВЫБОР ТРАНСПОРТА EXIT-НОДЫ (VLESS / AWG / Hysteria2)
 # =============================================================================
+
+def _prompt_h1_h4_unique(
+    _rec: dict,
+    _ask_int_fn,
+    warn_fn,
+    info_fn,
+) -> tuple:
+    """Ввод H1-H4 с проверкой коллизий (v4.25.8).
+
+    Выделено в отдельную функцию для тестопригодности. Внутри
+    prompt_awg_exit_mode() (ветка _obf_ch == "3") H1-H4 вводились через
+    4 независимых _ask_int() вызова — дубликаты между ними никак не
+    ловились, хотя весь смысл фичи — уникальность H1-H4 (DPI-отпечаток).
+
+    Эта функция принимает:
+      _rec:        dict с рекомендованными значениями (h1-h4 уникальны)
+      _ask_int_fn: callback(prompt, default, lo, hi) -> int
+      warn_fn:     callback(msg) для предупреждений
+      info_fn:     callback(msg) для информационных сообщений
+
+    Возвращает (h1, h2, h3, h4) — гарантированно уникальные значения.
+    Если пользователь 5 раз подряд вводит дубликаты — fallback на _rec.
+    """
+    h1 = _ask_int_fn("Magic header H1 (1-2147483647)", _rec["h1"], 1, 2147483647)
+    h2 = _ask_int_fn("Magic header H2 (1-2147483647)", _rec["h2"], 1, 2147483647)
+    h3 = _ask_int_fn("Magic header H3 (1-2147483647)", _rec["h3"], 1, 2147483647)
+    h4 = _ask_int_fn("Magic header H4 (1-2147483647)", _rec["h4"], 1, 2147483647)
+
+    _h_vals = {"H1": h1, "H2": h2, "H3": h3, "H4": h4}
+    _dupes = [k for k, v in _h_vals.items()
+              if list(_h_vals.values()).count(v) > 1]
+    _attempts = 0
+    while _dupes:
+        _attempts += 1
+        if _attempts > 5:
+            warn_fn("  5 попыток ввода H1-H4 с дубликатами — "
+                    "использую рекомендованные уникальные значения")
+            h1, h2, h3, h4 = _rec["h1"], _rec["h2"], _rec["h3"], _rec["h4"]
+            break
+        warn_fn(f"  H1-H4 не должны совпадать — обнаружен дубликат: "
+                f"{', '.join(sorted(set(_dupes)))} = {_h_vals[_dupes[0]]}")
+        info_fn("  Уникальность H1-H4 — то, что не даёт DPI написать "
+                "универсальное правило для детекции. Введите ещё раз:")
+        h1 = _ask_int_fn("Magic header H1 (1-2147483647)", _rec["h1"], 1, 2147483647)
+        h2 = _ask_int_fn("Magic header H2 (1-2147483647)", _rec["h2"], 1, 2147483647)
+        h3 = _ask_int_fn("Magic header H3 (1-2147483647)", _rec["h3"], 1, 2147483647)
+        h4 = _ask_int_fn("Magic header H4 (1-2147483647)", _rec["h4"], 1, 2147483647)
+        _h_vals = {"H1": h1, "H2": h2, "H3": h3, "H4": h4}
+        _dupes = [k for k, v in _h_vals.items()
+                  if list(_h_vals.values()).count(v) > 1]
+    return h1, h2, h3, h4
+
+
 def prompt_awg_exit_mode() -> None:
     """
     Спрашивает пользователя: использовать ли AWG как транспорт exit-ноды.
@@ -955,13 +1008,12 @@ def prompt_awg_exit_mode() -> None:
         setattr(core, "AWG_S3",   AWG_S3)
         AWG_S4   = _ask_int("Transport junk size S4 (0-32)",   _rec["s4"],   0,  32)
         setattr(core, "AWG_S4",   AWG_S4)
-        AWG_H1   = _ask_int("Magic header H1 (1-2147483647)",  _rec["h1"],   1,   2147483647)
+        AWG_H1, AWG_H2, AWG_H3, AWG_H4 = _prompt_h1_h4_unique(
+            _rec, _ask_int, warn, info
+        )
         setattr(core, "AWG_H1",   AWG_H1)
-        AWG_H2   = _ask_int("Magic header H2 (1-2147483647)",  _rec["h2"],   1,   2147483647)
         setattr(core, "AWG_H2",   AWG_H2)
-        AWG_H3   = _ask_int("Magic header H3 (1-2147483647)",  _rec["h3"],   1,   2147483647)
         setattr(core, "AWG_H3",   AWG_H3)
-        AWG_H4   = _ask_int("Magic header H4 (1-2147483647)",  _rec["h4"],   1,   2147483647)
         setattr(core, "AWG_H4",   AWG_H4)
         # I1 — рекомендованный hex, можно 'none' чтобы пропустить
         AWG_I1   = _ask_hex("Init packet I1 (hex, или 'none')", _rec["i1"])
