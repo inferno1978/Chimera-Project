@@ -345,9 +345,10 @@ class TestSaveYoutubeState(unittest.TestCase):
         core = sys.modules["chimera._core"]
         core.STATE_FILE = self._state_path
         with patch.object(youtube_route, "_core_module", lambda: core):
-            youtube_route._save_youtube_state(True)
+            youtube_route._save_youtube_state("ru")
         state = json.loads(self._state_path.read_text())
         self.assertTrue(state.get("youtube_via_ru"))
+        self.assertEqual(state.get("youtube_route_target"), "ru")
         self.assertEqual(state.get("domain"), "x.com",
                          "Существующие поля не должны быть потеряны")
 
@@ -357,9 +358,10 @@ class TestSaveYoutubeState(unittest.TestCase):
         core = sys.modules["chimera._core"]
         core.STATE_FILE = self._state_path
         with patch.object(youtube_route, "_core_module", lambda: core):
-            youtube_route._save_youtube_state(False)
+            youtube_route._save_youtube_state("off")
         state = json.loads(self._state_path.read_text())
         self.assertFalse(state.get("youtube_via_ru"))
+        self.assertEqual(state.get("youtube_route_target"), "off")
 
     def test_creates_state_file_if_missing(self):
         """Если state.json не существует — создаёт."""
@@ -367,9 +369,10 @@ class TestSaveYoutubeState(unittest.TestCase):
         core = sys.modules["chimera._core"]
         core.STATE_FILE = self._state_path  # не существует
         with patch.object(youtube_route, "_core_module", lambda: core):
-            youtube_route._save_youtube_state(True)
+            youtube_route._save_youtube_state("ru")
         state = json.loads(self._state_path.read_text())
         self.assertTrue(state.get("youtube_via_ru"))
+        self.assertEqual(state.get("youtube_route_target"), "ru")
 
 
 class TestRestoreYoutubeRuleIfNeeded(unittest.TestCase):
@@ -464,6 +467,333 @@ class TestYoutubeDomainsList(unittest.TestCase):
         self.assertIn("domain:ytimg.com", _YOUTUBE_DOMAINS)
         # youtu.be — короткие ссылки.
         self.assertIn("domain:youtu.be", _YOUTUBE_DOMAINS)
+
+
+# ============================================================================
+#  v5.0.0 — Multi-node YouTube routing: target_tag = "chain-exit-N"
+# ============================================================================
+
+class TestYoutubeApplyToXrayTargetTag(unittest.TestCase):
+    """_youtube_apply_to_xray(target_tag) — multi-node routing."""
+
+    def setUp(self):
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg_path = self._tmpdir / "config.json"
+        _setup_core_in_sysmodules(awg_enabled=False)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_and_mock(self):
+        from chimera.modules import youtube_route
+        core = sys.modules["chimera._core"]
+        core.CONFIG_DIR = self._tmpdir
+        core._set_config_owner = lambda p: None
+        core._run = MagicMock(return_value=_make_completed("active"))
+        core._nginx_restart_if_reality = MagicMock()
+        core.info = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        return patch.object(youtube_route, "_core_module", lambda: core)
+
+    # ── Кейс 1: target_tag=None — regression, поведение не изменилось ──────
+    def test_target_none_uses_direct(self):
+        """target_tag=None → outboundTag='direct' (как раньше)."""
+        from chimera.modules import youtube_route
+        self._cfg_path.write_text(json.dumps(_make_xray_config()))
+        with self._patch_and_mock():
+            youtube_route._youtube_apply_to_xray()
+        cfg = json.loads(self._cfg_path.read_text())
+        yt_rules = [r for r in cfg["routing"]["rules"]
+                    if r.get("comment") == "youtube_via_ru"]
+        self.assertEqual(yt_rules[0]["outboundTag"], "direct")
+
+    # ── Кейс 2: target_tag="chain-exit-2", outbound существует ────────────
+    def test_target_chain_exit_2_writes_rule(self):
+        """target_tag='chain-exit-2' с существующим outbound → правило пишется."""
+        from chimera.modules import youtube_route
+        outbounds = [
+            {"protocol": "freedom", "tag": "direct"},
+            {"protocol": "vless", "tag": "chain-exit-1"},
+            {"protocol": "vless", "tag": "chain-exit-2"},
+            {"protocol": "vless", "tag": "chain-exit-3"},
+        ]
+        self._cfg_path.write_text(json.dumps(_make_xray_config(outbounds=outbounds)))
+        with self._patch_and_mock():
+            result = youtube_route._youtube_apply_to_xray(target_tag="chain-exit-2")
+        self.assertTrue(result)
+        cfg = json.loads(self._cfg_path.read_text())
+        yt_rules = [r for r in cfg["routing"]["rules"]
+                    if r.get("comment") == "youtube_via_ru"]
+        self.assertEqual(len(yt_rules), 1)
+        self.assertEqual(yt_rules[0]["outboundTag"], "chain-exit-2")
+
+    # ── Кейс 3: target_tag="chain-exit-5", outbound НЕ существует ─────────
+    def test_target_nonexistent_outbound_returns_false(self):
+        """target_tag='chain-exit-5' без такого outbound → False, config не тронут."""
+        from chimera.modules import youtube_route
+        outbounds = [
+            {"protocol": "freedom", "tag": "direct"},
+            {"protocol": "vless", "tag": "chain-exit-1"},
+        ]
+        original_config = json.dumps(_make_xray_config(outbounds=outbounds))
+        self._cfg_path.write_text(original_config)
+        core_warn = MagicMock()
+        with self._patch_and_mock():
+            # Подменяем warn чтобы проверить вызов.
+            sys.modules["chimera._core"].warn = core_warn
+            result = youtube_route._youtube_apply_to_xray(target_tag="chain-exit-5")
+        self.assertFalse(result, "Должен вернуть False — outbound не существует")
+        core_warn.assert_called()
+        # Config не должен быть изменён.
+        self.assertEqual(self._cfg_path.read_text(), original_config,
+                         "Config.json не должен быть тронут при несуществующей ноде")
+
+
+class TestSaveYoutubeStateTarget(unittest.TestCase):
+    """_save_youtube_state(target) — новый ключ + legacy."""
+
+    def setUp(self):
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state_path = self._tmpdir / "state.json"
+        _setup_core_in_sysmodules()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    # ── Кейс 4: _save_youtube_state("chain-exit-2") ───────────────────────
+    def test_save_chain_exit_2(self):
+        """_save_youtube_state('chain-exit-2') — youtube_route_target записан,
+        youtube_via_ru==False (не 'ru')."""
+        from chimera.modules import youtube_route
+        self._state_path.write_text(json.dumps({}))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        with patch.object(youtube_route, "_core_module", lambda: core):
+            youtube_route._save_youtube_state("chain-exit-2")
+        state = json.loads(self._state_path.read_text())
+        self.assertEqual(state.get("youtube_route_target"), "chain-exit-2")
+        self.assertFalse(state.get("youtube_via_ru"),
+                         "youtube_via_ru должен быть False для chain-exit-2")
+
+    # ── Кейс 5: _save_youtube_state("ru") — legacy ────────────────────────
+    def test_save_ru_legacy_compat(self):
+        """_save_youtube_state('ru') — youtube_via_ru==True, обратная совместимость."""
+        from chimera.modules import youtube_route
+        self._state_path.write_text(json.dumps({}))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        with patch.object(youtube_route, "_core_module", lambda: core):
+            youtube_route._save_youtube_state("ru")
+        state = json.loads(self._state_path.read_text())
+        self.assertTrue(state.get("youtube_via_ru"))
+        self.assertEqual(state.get("youtube_route_target"), "ru")
+
+
+class TestRestoreYoutubeTargetTag(unittest.TestCase):
+    """restore_youtube_rule_if_needed — multi-node target."""
+
+    def setUp(self):
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg_path = self._tmpdir / "config.json"
+        self._state_path = self._tmpdir / "state.json"
+        _setup_core_in_sysmodules()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    # ── Кейс 9: target="chain-exit-2", нода существует, правила нет ───────
+    def test_reapplies_chain_exit_2(self):
+        """target='chain-exit-2', нода существует, правила нет → пере-применяет."""
+        from chimera.modules import youtube_route
+        self._state_path.write_text(json.dumps({
+            "youtube_route_target": "chain-exit-2",
+        }))
+        outbounds = [
+            {"protocol": "freedom", "tag": "direct"},
+            {"protocol": "vless", "tag": "chain-exit-1"},
+            {"protocol": "vless", "tag": "chain-exit-2"},
+        ]
+        self._cfg_path.write_text(json.dumps(_make_xray_config(outbounds=outbounds)))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        core.CONFIG_DIR = self._tmpdir
+        core._set_config_owner = lambda p: None
+        core._run = MagicMock(return_value=_make_completed("active"))
+        core._nginx_restart_if_reality = MagicMock()
+        core.info = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        with patch.object(youtube_route, "_core_module", lambda: core):
+            result = youtube_route.restore_youtube_rule_if_needed(silent=True)
+        self.assertTrue(result, "Должен вернуть True — правило пере-применено")
+        cfg2 = json.loads(self._cfg_path.read_text())
+        yt_rules = [r for r in cfg2["routing"]["rules"]
+                    if r.get("comment") == "youtube_via_ru"]
+        self.assertEqual(len(yt_rules), 1)
+        self.assertEqual(yt_rules[0]["outboundTag"], "chain-exit-2")
+
+    # ── Кейс 10: target="chain-exit-9", ноды не существует ────────────────
+    def test_returns_false_when_node_deleted(self):
+        """target='chain-exit-9', ноды не существует → False, не падает."""
+        from chimera.modules import youtube_route
+        self._state_path.write_text(json.dumps({
+            "youtube_route_target": "chain-exit-9",
+        }))
+        outbounds = [
+            {"protocol": "freedom", "tag": "direct"},
+            {"protocol": "vless", "tag": "chain-exit-1"},
+        ]
+        self._cfg_path.write_text(json.dumps(_make_xray_config(outbounds=outbounds)))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        core.CONFIG_DIR = self._tmpdir
+        core._set_config_owner = lambda p: None
+        core._run = MagicMock(return_value=_make_completed("active"))
+        core._nginx_restart_if_reality = MagicMock()
+        core.info = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        with patch.object(youtube_route, "_core_module", lambda: core):
+            result = youtube_route.restore_youtube_rule_if_needed(silent=True)
+        self.assertFalse(result, "Должен вернуть False — нода не существует")
+        # Config не должен быть тронут.
+        cfg2 = json.loads(self._cfg_path.read_text())
+        yt_rules = [r for r in cfg2["routing"]["rules"]
+                    if r.get("comment") == "youtube_via_ru"]
+        self.assertEqual(len(yt_rules), 0, "Правило не должно быть добавлено")
+
+
+class TestDoManageYoutubeMigration(unittest.TestCase):
+    """do_manage_youtube_via_ru() — миграция и multi-node меню.
+
+    Эти тесты мокают input() и вызывают do_manage_youtube_via_ru() напрямую,
+    перехватывая stdout. Проверяют что меню отображает правильные пункты.
+    """
+
+    def setUp(self):
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state_path = self._tmpdir / "state.json"
+        _setup_core_in_sysmodules()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    # ── Кейс 6: миграция — старый youtube_via_ru=True без youtube_route_target
+    def test_migration_old_bool_shows_ru(self):
+        """state.json со старым youtube_via_ru=True и БЕЗ youtube_route_target
+        → меню показывает текущий маршрут как RU."""
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import youtube_route
+        self._state_path.write_text(json.dumps({"youtube_via_ru": True}))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        core.CHAIN_NODES = []  # single-node
+        core.AWG_EXIT_ENABLED = False
+        core.CONFIG_DIR = self._tmpdir  # нет config.json
+        # Mocks
+        core.info = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.CYAN = core.NC = core.GREEN = core.YELLOW = ""
+        core.RED = core.BOLD = core.DIM = core.BLUE = ""
+
+        # input должна печатать prompt перед возвратом — иначе prompt не
+        # попадает в captured stdout.
+        def _input_with_print(prompt="", *a, **kw):
+            print(prompt, end="", flush=True)
+            return "q"
+
+        captured = io.StringIO()
+        with patch.object(youtube_route, "_core_module", lambda: core), \
+             patch("builtins.input", side_effect=_input_with_print), \
+             redirect_stdout(captured):
+            youtube_route.do_manage_youtube_via_ru()
+
+        output = captured.getvalue()
+        self.assertIn("RU", output,
+                      f"Должен показать RU как текущий маршрут, вывод:\n{output}")
+
+    # ── Кейс 7: len(CHAIN_NODES)<=1 → старое двухпунктовое меню ───────────
+    def test_single_node_shows_two_item_menu(self):
+        """len(CHAIN_NODES)<=1 → старое двухпунктовое меню."""
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import youtube_route
+        self._state_path.write_text(json.dumps({"youtube_route_target": "off"}))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        core.CHAIN_NODES = []  # 0 nodes → single-node mode
+        core.AWG_EXIT_ENABLED = False
+        core.CONFIG_DIR = self._tmpdir
+        core.info = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.CYAN = core.NC = core.GREEN = core.YELLOW = ""
+        core.RED = core.BOLD = core.DIM = core.BLUE = ""
+
+        def _input_with_print(prompt="", *a, **kw):
+            print(prompt, end="", flush=True)
+            return "q"
+
+        captured = io.StringIO()
+        with patch.object(youtube_route, "_core_module", lambda: core), \
+             patch("builtins.input", side_effect=_input_with_print), \
+             redirect_stdout(captured):
+            youtube_route.do_manage_youtube_via_ru()
+
+        output = captured.getvalue()
+        self.assertIn("[1/2/Q]", output,
+                      f"Single-node должен показать [1/2/Q], вывод:\n{output}")
+        # НЕ должно быть multi-node prompt типа [1-5/Q]
+        self.assertNotIn("[1-5/Q]", output)
+
+    # ── Кейс 8: len(CHAIN_NODES)==3 → меню показывает 5 пунктов ───────────
+    def test_three_nodes_shows_five_items(self):
+        """len(CHAIN_NODES)==3 → меню показывает 5 пунктов (RU + 3 ноды + default)."""
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import youtube_route
+        self._state_path.write_text(json.dumps({"youtube_route_target": "off"}))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        core.CHAIN_NODES = [
+            {"host": "1.1.1.1", "port": 443},
+            {"host": "2.2.2.2", "port": 443},
+            {"host": "3.3.3.3", "port": 443},
+        ]
+        core.AWG_EXIT_ENABLED = False
+        core.CONFIG_DIR = self._tmpdir
+        core.info = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.CYAN = core.NC = core.GREEN = core.YELLOW = ""
+        core.RED = core.BOLD = core.DIM = core.BLUE = ""
+
+        def _input_with_print(prompt="", *a, **kw):
+            print(prompt, end="", flush=True)
+            return "q"
+
+        captured = io.StringIO()
+        with patch.object(youtube_route, "_core_module", lambda: core), \
+             patch("builtins.input", side_effect=_input_with_print), \
+             redirect_stdout(captured):
+            youtube_route.do_manage_youtube_via_ru()
+
+        output = captured.getvalue()
+        self.assertIn("[1-5/Q]", output,
+                      f"Multi-node (3 nodes) должен показать [1-5/Q], вывод:\n{output}")
+        # Не должно быть single-node prompt
+        self.assertNotIn("[1/2/Q]", output)
+        # Должны быть хосты нод
+        self.assertIn("1.1.1.1", output)
+        self.assertIn("2.2.2.2", output)
+        self.assertIn("3.3.3.3", output)
 
 
 if __name__ == "__main__":
