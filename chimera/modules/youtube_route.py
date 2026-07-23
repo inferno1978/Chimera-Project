@@ -387,7 +387,7 @@ def do_manage_youtube_via_ru() -> None:
             current_display = f"{GREEN}YouTube → Exit-нода #{_m.group(1) if _m else '?'} ({_host}){NC}"
             current_detail = f"{DIM}outbound:{current_target}{NC}"
         else:
-            # Правила нет —可能是 нода удалена или regenerate.
+            # Правила нет — нода удалена или после regenerate xray-config.
             _m = re.match(r'chain-exit-(\d+)', current_target)
             _node_num = _m.group(1) if _m else "?"
             _node_idx = int(_node_num) - 1 if _node_num != "?" else -1
