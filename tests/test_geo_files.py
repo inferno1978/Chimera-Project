@@ -124,7 +124,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         /tmp/_download_mgr_* пути — всегда возвращают True + 30 МБ (файл
         "скачан" urlopen mock'ом).
 
-        v4.25.2 FIX: расширено для поддержки _post_install_geo, который
+        v5.0.2 FIX: расширено для поддержки _post_install_geo, который
         после shutil.copy2(src, dest) вызывает dest.stat().st_size для
         проверки что копия записалась. dest-пути (в /etc/xray/,
         /usr/local/share/xray/, /usr/local/etc/xray/) с суффиксом
@@ -138,7 +138,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         original_stat = Path.stat
 
         class MockStat:
-            st_size = 30_000_000  # 30 МБ > MIN_SIZES для обоих файлов (v4.25.1: geosite=20MB, geoip=1MB)
+            st_size = 30_000_000  # 30 МБ > MIN_SIZES для обоих файлов (v5.0.1: geosite=20MB, geoip=1MB)
             st_mtime = 0
 
         # Имена файлов, для которых dest.stat() должен вернуть MockStat
@@ -159,7 +159,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         def _is_tmp_geo(s: str) -> bool:
             """True если s — tmp-путь к geo-файлу (любой вариант имени).
 
-            v4.25.4: после фикса tmp_path переименования, файл в /tmp/
+            v5.0.4: после фикса tmp_path переименования, файл в /tmp/
             называется канонически (/tmp/geosite.dat), а не
             /tmp/_download_mgr_geosite.dat. Покрываем оба варианта,
             чтобы тест работал и со старым (до фикса) и с новым кодом.
@@ -180,10 +180,10 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
             # /tmp/_download_mgr_* — "скачанный" файл существует
             if s.startswith("/tmp/_download_mgr_"):
                 return True
-            # v4.25.4: canonical tmp path после rename — /tmp/{filename}
+            # v5.0.4: canonical tmp path после rename — /tmp/{filename}
             if _is_tmp_geo(s):
                 return True
-            # v4.25.2: geo-файлы в dest-директориях "создаются" copy2 в
+            # v5.0.2: geo-файлы в dest-директориях "создаются" copy2 в
             # _post_install_geo — даже если их не было в existing_files,
             # dest.stat() должен их видеть.
             if _is_geo_dest(s):
@@ -194,10 +194,10 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
             s = str(self)
             if s in existing_files or s.startswith("/tmp/_download_mgr_"):
                 return MockStat()
-            # v4.25.4: canonical tmp path после rename
+            # v5.0.4: canonical tmp path после rename
             if _is_tmp_geo(s):
                 return MockStat()
-            # v4.25.2: geo-файлы в dest-директориях — copy2 "создал" их,
+            # v5.0.2: geo-файлы в dest-директориях — copy2 "создал" их,
             # dest.stat() должен вернуть MockStat чтобы size-check
             # (dest_size == src_size) прошёл.
             if _is_geo_dest(s):
@@ -218,7 +218,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
             return MagicMock(side_effect=URLError("blocked"))
 
         mock_resp = MagicMock()
-        mock_resp.read.side_effect = [b"x" * 30_000_000, b""]  # 30 МБ > MIN_SIZES (v4.25.1)
+        mock_resp.read.side_effect = [b"x" * 30_000_000, b""]  # 30 МБ > MIN_SIZES (v5.0.1)
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = lambda self, *a: None
         return MagicMock(return_value=mock_resp)
@@ -237,7 +237,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
         находила файл в dest_dirs → urlopen НЕ вызывался → функция ложно
         репортила успех.
 
-        v4.25.2: мок builtins.open заменён с голого MagicMock на mock_open
+        v5.0.2: мок builtins.open заменён с голого MagicMock на mock_open
         с реальным бинарным содержимым. Раньше глобальный MagicMock ломал
         _compute_hash (f.read() возвращал MagicMock, не bytes, hashlib.update
         падал с TypeError). Теперь _compute_hash корректно читает bytes и
@@ -290,7 +290,7 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
 
         Проверка: urllib.request.urlopen НЕ вызывается.
 
-        v4.25.2: тест использует _patch_path_exists_stat (расширенный mock
+        v5.0.2: тест использует _patch_path_exists_stat (расширенный mock
         Path.exists/stat для dest-путей) и mock_open вместо голого MagicMock.
         Без этого _post_install_geo падал на dest.stat().st_size (реальный
         Path.stat на несуществующем /etc/xray/geosite.dat → FileNotFoundError),
@@ -415,7 +415,7 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
 
         urlopen ДОЛЖЕН быть вызван — сеть затронута, не пропущена.
 
-        v4.25.2: как и в TestDownloadGeoFilesRegression, mock Path.exists/stat
+        v5.0.2: как и в TestDownloadGeoFilesRegression, mock Path.exists/stat
         расширен чтобы покрывать geo-файлы в dest-директориях (нужны для
         _post_install_geo который вызывает dest.stat().st_size после copy2).
         mock builtins.open заменён с голого MagicMock на mock_open с реальным
@@ -439,7 +439,7 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
         original_stat = Path.stat
 
         class MockStat:
-            st_size = 30_000_000  # 30 МБ > MIN_SIZES (v4.25.1)
+            st_size = 30_000_000  # 30 МБ > MIN_SIZES (v5.0.1)
             st_mtime = 0
 
         # Geo-файлы в dest-директориях — нужны для _post_install_geo size-check
@@ -451,7 +451,7 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
                    any(s.endswith(fn) for fn in _GEO_FILENAMES)
 
         def _is_tmp_geo(s: str) -> bool:
-            """v4.25.4: canonical tmp path /tmp/{filename} (после rename)
+            """v5.0.4: canonical tmp path /tmp/{filename} (после rename)
             + старый /tmp/_download_mgr_{filename} (до фикса)."""
             return (s.startswith("/tmp/_download_mgr_") and
                     any(s.endswith(fn) for fn in _GEO_FILENAMES)) or \
@@ -466,10 +466,10 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
                 return False  # /root/ пуст
             if s.startswith("/tmp/_download_mgr_"):
                 return True  # "скачанный" файл
-            # v4.25.4: canonical tmp path после rename
+            # v5.0.4: canonical tmp path после rename
             if _is_tmp_geo(s):
                 return True
-            # v4.25.2: copy2 в _post_install_geo "создаёт" dest-файлы
+            # v5.0.2: copy2 в _post_install_geo "создаёт" dest-файлы
             if _is_geo_dest(s):
                 return True
             return original_exists(self, *a, **kw)
@@ -478,17 +478,17 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
             s = str(self)
             if s in existing_files or s.startswith("/tmp/_download_mgr_"):
                 return MockStat()
-            # v4.25.4: canonical tmp path после rename
+            # v5.0.4: canonical tmp path после rename
             if _is_tmp_geo(s):
                 return MockStat()
-            # v4.25.2: dest-файлы после copy2 — size-check должен пройти
+            # v5.0.2: dest-файлы после copy2 — size-check должен пройти
             if _is_geo_dest(s):
                 return MockStat()
             return original_stat(self, *a, **kw)
 
         # urlopen mock — "успешное скачивание"
         mock_resp = MagicMock()
-        mock_resp.read.side_effect = [b"y" * 30_000_000, b""]  # 30 МБ > MIN_SIZES (v4.25.1)
+        mock_resp.read.side_effect = [b"y" * 30_000_000, b""]  # 30 МБ > MIN_SIZES (v5.0.1)
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = lambda self, *a: None
         urlopen_mock = MagicMock(return_value=mock_resp)

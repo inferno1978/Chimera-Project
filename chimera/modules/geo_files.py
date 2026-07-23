@@ -227,7 +227,7 @@ def setup_geo_autoupdate() -> None:
         mkdir -p /etc/xray /usr/local/share/xray /usr/local/etc/xray
 
         # Минимальные размеры (защита от усечённых загрузок).
-        # v4.25.1 FIX: берётся из MIN_SIZES (geo_mirrors.py), а не хардкод.
+        # v5.0.1 FIX: берётся из MIN_SIZES (geo_mirrors.py), а не хардкод.
         # Ранее здесь стояли 3 МБ / 10 КБ — устаревшие значения из-за которых
         # cron "обновлял" geosite.dat на 10-МБ усечённую кэшированную копию
         # с jsDelivr (которая проходила старый порог), а реальное обновление

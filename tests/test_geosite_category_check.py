@@ -94,7 +94,7 @@ class TestGeositeHasCategory(unittest.TestCase):
             self.assertNotIn("geosite:category-ru", args)
 
     def test_uses_case_insensitive_grep_flag(self):
-        """v4.25.1 REGRESSION: grep должен использовать -i (case-insensitive).
+        """v5.0.1 REGRESSION: grep должен использовать -i (case-insensitive).
 
         Теги в geosite.dat хранятся в ВЕРХНЕМ регистре (CATEGORY-RU), а мы
         передаём строчные (category-ru). Без -i grep не находит существующие
@@ -119,7 +119,7 @@ class TestGeositeHasCategory(unittest.TestCase):
                           f"Полная команда: {args}")
 
     def test_finds_uppercase_tag_in_geosite(self):
-        """v4.25.1 REGRESSION: _geosite_has_category находит тег в ВЕРХНЕМ регистре.
+        """v5.0.1 REGRESSION: _geosite_has_category находит тег в ВЕРХНЕМ регистре.
 
         Реальный geosite.dat хранит теги как CATEGORY-RU (проверено через
         `strings geosite.dat | grep CATEGORY-RU`). До фикса grep -qaF (без -i)
@@ -201,7 +201,7 @@ class TestBuildSplitTunnelRulesCategoryCheck(unittest.TestCase):
         self.assertIsNotNone(geosite_rule)
         all_domains = geosite_rule["domain"]
         self.assertIn("geosite:category-ru", all_domains)
-        # v4.25.3 REVERT: категория ru-available-only-inside ВОЗВРАЩЕНА —
+        # v5.0.3 REVERT: категория ru-available-only-inside ВОЗВРАЩЕНА —
         # она существует в актуальном geosite.dat от runetfreedom (проверено
         # 2026-07-22 на свежескачанном файле 70 МБ, sha256 совпал).
         self.assertIn("geosite:ru-available-only-inside", all_domains)
