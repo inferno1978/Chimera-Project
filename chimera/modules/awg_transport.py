@@ -427,6 +427,15 @@ def _awg_server_conf_text() -> str:
     AWG_PRESHARED_KEY = getattr(core, "AWG_PRESHARED_KEY", "")
     AWG_S1 = getattr(core, "AWG_S1", 0)
     AWG_S2 = getattr(core, "AWG_S2", 0)
+    # v4.25.7: S3/S4 — добавлены для полного набора AWG 2.0
+    AWG_S3 = getattr(core, "AWG_S3", 0)
+    AWG_S4 = getattr(core, "AWG_S4", 0)
+    # v4.25.7: I1-I5 — опциональные decoy CPS-пакеты
+    AWG_I1 = getattr(core, "AWG_I1", "")
+    AWG_I2 = getattr(core, "AWG_I2", "")
+    AWG_I3 = getattr(core, "AWG_I3", "")
+    AWG_I4 = getattr(core, "AWG_I4", "")
+    AWG_I5 = getattr(core, "AWG_I5", "")
     AWG_SERVER_IP = getattr(core, "AWG_SERVER_IP", "10.66.66.1/32")
     AWG_SERVER_IPv6 = getattr(core, "AWG_SERVER_IPv6", "fd66:66:66::1/128")
     AWG_SERVER_PRIVKEY = getattr(core, "AWG_SERVER_PRIVKEY", "")
@@ -476,6 +485,14 @@ def _awg_server_conf_text() -> str:
         + _build_nat6_down(_awg_subnet_v6, "awg0", "$WAN6", scope_source=False)
         + " || true"
     )
+    # v4.25.7: I1-I5 — условная запись (только если непустые), как в
+    # awg_standalone.awgs_build_server_conf. Keenetic и др. строгие
+    # парсеры падают если I1 отсутствует при наличии S3/S4.
+    _i_lines = ""
+    for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
+                   ("I4", AWG_I4), ("I5", AWG_I5)):
+        if _v:
+            _i_lines += f"{_k} = {_v}\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {AWG_SERVER_PRIVKEY}\n"
@@ -487,10 +504,13 @@ def _awg_server_conf_text() -> str:
         f"Jmax = {AWG_JMAX}\n"
         f"S1 = {AWG_S1}\n"
         f"S2 = {AWG_S2}\n"
+        f"S3 = {AWG_S3}\n"
+        f"S4 = {AWG_S4}\n"
         f"H1 = {AWG_H1}\n"
         f"H2 = {AWG_H2}\n"
         f"H3 = {AWG_H3}\n"
         f"H4 = {AWG_H4}\n"
+        f"{_i_lines}"
         # PostUp: только IPv4 + IPv6 блоки через awg_net_common — без ручных
         # дублирующих iptables FORWARD строк (они целиком генерируются билдерами).
         f"PostUp = {_postup_v4}; "
@@ -527,7 +547,22 @@ def _awg_client_conf_text() -> str:
     AWG_PRESHARED_KEY = getattr(core, "AWG_PRESHARED_KEY", "")
     AWG_S1 = getattr(core, "AWG_S1", 0)
     AWG_S2 = getattr(core, "AWG_S2", 0)
+    # v4.25.7: S3/S4 — добавлены для полного набора AWG 2.0
+    AWG_S3 = getattr(core, "AWG_S3", 0)
+    AWG_S4 = getattr(core, "AWG_S4", 0)
+    # v4.25.7: I1-I5 — опциональные decoy CPS-пакеты
+    AWG_I1 = getattr(core, "AWG_I1", "")
+    AWG_I2 = getattr(core, "AWG_I2", "")
+    AWG_I3 = getattr(core, "AWG_I3", "")
+    AWG_I4 = getattr(core, "AWG_I4", "")
+    AWG_I5 = getattr(core, "AWG_I5", "")
     AWG_SERVER_PUBKEY = getattr(core, "AWG_SERVER_PUBKEY", "")
+    # v4.25.7: I1-I5 — условная запись (только если непустые)
+    _i_lines = ""
+    for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
+                   ("I4", AWG_I4), ("I5", AWG_I5)):
+        if _v:
+            _i_lines += f"{_k} = {_v}\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {AWG_CLIENT_PRIVKEY}\n"
@@ -539,10 +574,13 @@ def _awg_client_conf_text() -> str:
         f"Jmax = {AWG_JMAX}\n"
         f"S1 = {AWG_S1}\n"
         f"S2 = {AWG_S2}\n"
+        f"S3 = {AWG_S3}\n"
+        f"S4 = {AWG_S4}\n"
         f"H1 = {AWG_H1}\n"
         f"H2 = {AWG_H2}\n"
         f"H3 = {AWG_H3}\n"
         f"H4 = {AWG_H4}\n"
+        f"{_i_lines}"
         f"DNS = 1.1.1.1, 8.8.8.8, 2606:4700:4700::1111\n"
         f"Table = off\n"
         f"\n"
@@ -2932,7 +2970,11 @@ def _awg_save_nodes_to_state(nodes: list) -> None:
 
 
 def _awg_client_conf_for_node(node: dict) -> str:
-    """Генерирует текст клиентского конфига AWG для конкретной ноды."""
+    """Генерирует текст клиентского конфига AWG для конкретной ноды.
+
+    v4.25.7: добавлены S3, S4, I1-I5 — полный набор параметров AWG 2.0,
+    как в _awg_client_conf_text() и awg_standalone.awgs_build_server_conf().
+    """
     core = _core_module()
     AWG_CLIENT_PRIVKEY = getattr(core, "AWG_CLIENT_PRIVKEY", "")
     AWG_H1 = getattr(core, "AWG_H1", 1)
@@ -2946,6 +2988,15 @@ def _awg_client_conf_for_node(node: dict) -> str:
     AWG_PRESHARED_KEY = getattr(core, "AWG_PRESHARED_KEY", "")
     AWG_S1 = getattr(core, "AWG_S1", 0)
     AWG_S2 = getattr(core, "AWG_S2", 0)
+    # v4.25.7: S3/S4
+    AWG_S3 = getattr(core, "AWG_S3", 0)
+    AWG_S4 = getattr(core, "AWG_S4", 0)
+    # v4.25.7: I1-I5
+    AWG_I1 = getattr(core, "AWG_I1", "")
+    AWG_I2 = getattr(core, "AWG_I2", "")
+    AWG_I3 = getattr(core, "AWG_I3", "")
+    AWG_I4 = getattr(core, "AWG_I4", "")
+    AWG_I5 = getattr(core, "AWG_I5", "")
     AWG_SERVER_PUBKEY = getattr(core, "AWG_SERVER_PUBKEY", "")
     cli_ip   = node["client_ip"]
     cli_ip6  = node["client_ip_v6"]
@@ -2953,6 +3004,12 @@ def _awg_client_conf_for_node(node: dict) -> str:
     psk      = node.get("preshared_key", AWG_PRESHARED_KEY)
     cli_priv = node.get("client_privkey", AWG_CLIENT_PRIVKEY)
     endpoint = f"{node['host']}:{node['port']}"
+    # v4.25.7: I1-I5 — условная запись (только если непустые)
+    _i_lines = ""
+    for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
+                   ("I4", AWG_I4), ("I5", AWG_I5)):
+        if _v:
+            _i_lines += f"{_k} = {_v}\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {cli_priv}\n"
@@ -2963,10 +3020,13 @@ def _awg_client_conf_for_node(node: dict) -> str:
         f"Jmax = {AWG_JMAX}\n"
         f"S1 = {AWG_S1}\n"
         f"S2 = {AWG_S2}\n"
+        f"S3 = {AWG_S3}\n"
+        f"S4 = {AWG_S4}\n"
         f"H1 = {AWG_H1}\n"
         f"H2 = {AWG_H2}\n"
         f"H3 = {AWG_H3}\n"
         f"H4 = {AWG_H4}\n"
+        f"{_i_lines}"
         f"DNS = 1.1.1.1, 8.8.8.8, 2606:4700:4700::1111\n"
         f"Table = off\n\n"
         f"[Peer]\n"
@@ -2980,7 +3040,10 @@ def _awg_client_conf_for_node(node: dict) -> str:
 
 
 def _awg_server_conf_for_node(node: dict) -> str:
-    """Генерирует текст серверного конфига AWG (для exit-VPS)."""
+    """Генерирует текст серверного конфига AWG (для exit-VPS).
+
+    v4.25.7: добавлены S3, S4, I1-I5 — полный набор параметров AWG 2.0.
+    """
     core = _core_module()
     AWG_CLIENT_PUBKEY = getattr(core, "AWG_CLIENT_PUBKEY", "")
     AWG_H1 = getattr(core, "AWG_H1", 1)
@@ -2994,6 +3057,15 @@ def _awg_server_conf_for_node(node: dict) -> str:
     AWG_PRESHARED_KEY = getattr(core, "AWG_PRESHARED_KEY", "")
     AWG_S1 = getattr(core, "AWG_S1", 0)
     AWG_S2 = getattr(core, "AWG_S2", 0)
+    # v4.25.7: S3/S4
+    AWG_S3 = getattr(core, "AWG_S3", 0)
+    AWG_S4 = getattr(core, "AWG_S4", 0)
+    # v4.25.7: I1-I5
+    AWG_I1 = getattr(core, "AWG_I1", "")
+    AWG_I2 = getattr(core, "AWG_I2", "")
+    AWG_I3 = getattr(core, "AWG_I3", "")
+    AWG_I4 = getattr(core, "AWG_I4", "")
+    AWG_I5 = getattr(core, "AWG_I5", "")
     AWG_SERVER_PRIVKEY = getattr(core, "AWG_SERVER_PRIVKEY", "")
     iface    = node["interface"]
     srv_ip   = node["server_ip"]
@@ -3005,6 +3077,12 @@ def _awg_server_conf_for_node(node: dict) -> str:
     cli_ip6  = node["client_ip_v6"]
     lport    = node["port"]
     dif = "$(ip route | awk '/default/ {print $5; exit}')"
+    # v4.25.7: I1-I5 — условная запись (только если непустые)
+    _i_lines = ""
+    for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
+                   ("I4", AWG_I4), ("I5", AWG_I5)):
+        if _v:
+            _i_lines += f"{_k} = {_v}\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {srv_priv}\n"
@@ -3013,7 +3091,9 @@ def _awg_server_conf_for_node(node: dict) -> str:
         f"MTU = {AWG_MTU}\n"
         f"Jc = {AWG_JC}\nJmin = {AWG_JMIN}\nJmax = {AWG_JMAX}\n"
         f"S1 = {AWG_S1}\nS2 = {AWG_S2}\n"
+        f"S3 = {AWG_S3}\nS4 = {AWG_S4}\n"
         f"H1 = {AWG_H1}\nH2 = {AWG_H2}\nH3 = {AWG_H3}\nH4 = {AWG_H4}\n"
+        f"{_i_lines}"
         f"PostUp = iptables -A FORWARD -i {iface} -j ACCEPT; "
         f"iptables -A FORWARD -o {iface} -j ACCEPT; "
         f"iptables -t nat -A POSTROUTING -o {dif} -j MASQUERADE; "
