@@ -2,6 +2,107 @@
 
 ---
 
+## FEAT(geoblock): гео-блокировка по странам для Telemt — 23 июля 2026
+
+**Гео-блокировка по странам для Telemt (MTProto): можно запретить подключение к MTProto-порту с IP-адресов указанных стран. Блокировка работает на уровне iptables (ДО бинарника Telemt), а не на уровне Xray routing — DROP срабатывает раньше, чем соединение дойдёт до обработки. Переиспользован паттерн из `ingress_geoip.py` (ipset `hash:net` + iptables DROP), но в режиме block-list (DROP конкретных стран), а не allowlist.**
+
+### Источник данных
+
+ipdeny.com — aggregated country zone files:
+- IPv4: `ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone`
+- IPv6: `ipdeny.com/ipblocks/data/aggregated/ip6t/{cc}-aggregated.zone`
+
+### Что сделано
+
+Новый модуль `chimera/modules/geoblock.py` (419 строк) + интеграция в `chimera/modules/mtproto.py` (+11 строк):
+
+1. **Функции API**:
+   - `geoblock_add_country(port, country_code)` — блокирует страну на порту
+   - `geoblock_remove_country(port, country_code)` — разблокирует
+   - `geoblock_list(port)` — список заблокированных стран
+   - `geoblock_restore_all()` — восстановление после ребута (из state)
+   - `geoblock_menu_telemt(port)` — TUI-меню
+
+2. **Персистентность**:
+   - `ipset save` через `ipset_persist.ipset_save()` (как в `ingress_geoip`)
+   - State в `/var/lib/xray-installer/geoblock_telemt.json`
+   - ipset-сеты с уникальными именами `telemt_geoblock_v4_{cc}` / `telemt_geoblock_v6_{cc}` — не конфликтуют с `xray_ru_block`
+
+3. **TUI** — главное меню Telemt: новый пункт `G` — Гео-блокировка по странам. Подменю: заблокировать страну, разблокировать, список заблокированных.
+
+### Не тронуто
+
+- `ingress_geoip.py` (RU-allowlist) — только переиспользование паттерна
+- `awg_expires.py` — не связан
+- `geoip_block.py` (Xray routing level) — отдельный механизм, не тронут
+
+### Тесты
+
+`tests/test_geoblock.py` — **6 passed** (новый файл):
+1. `test_add_country_calls_ipset_and_iptables` — ipset create + iptables DROP вызываются, state сохранён
+2. `test_invalid_country_code_returns_false` — неверный код страны → `False`
+3. `test_remove_country_calls_ipset_destroy` — ipset destroy + iptables `-D`, state обновлён
+4. `test_list_returns_countries_from_state` — возвращает страны из state
+5. `test_list_empty_state_returns_empty` — пустой state → пустой список
+6. `test_list_different_port_returns_empty` — другой порт → пустой список
+
+Регрессии: `tests/test_mtproto_limits.py` (15) + `tests/test_mtproto.py` (140) — 0 регрессий. Итого: 161 passed.
+
+---
+
+## FEAT(mtproto): per-user лимиты (квота трафика + срок действия) для Telemt — 23 июля 2026
+
+**Per-user лимиты для Telemt (MTProto): можно назначить каждому пользователю квоту трафика (например `10G`) и/или срок действия (например `30d`), при достижении/истечении которых пользователь автоматически удаляется (с restart'ом бинарника). Лимиты хранятся в отдельном JSON-файле — формат `telemt.toml` не трогается (бинарник читает только `[access.users]` секцию, менять формат нельзя), обратная совместимость со старыми конфигами полная.**
+
+### Что сделано
+
+Новый функционал в `chimera/modules/mtproto.py` (+340 строк), обёртка над существующим `mtproto_stats._load_stats()` для учёта трафика и `awgs_expires_*` для парсинга duration:
+
+1. **Хранение** — отдельный JSON-файл `/var/lib/xray-installer/telemt_limits.json`. Старые конфиги без лимитов работают без изменений — лимиты просто отсутствуют, пользователь считается безлимитным.
+
+2. **Установка лимитов** — `mtproto_set_limits(username, quota, expires_in, max_connections)`:
+   - `quota`: `'10G'` через `traffic_accounting.parse_human_readable_bytes`
+   - `expires_in`: `'30d'` через `awgs_expires_parse + awgs_expires_compute_iso`
+   - `max_connections`: НЕ ПОДДЕРЖИВАЕТСЯ бинарником telemt — записывается в JSON для будущего использования, но не применяется. Документировано в TUI как ограничение.
+
+3. **Проверка лимитов** — `mtproto_check_limits()` (cron каждые 5 мин):
+   - Истёк срок → удаляет пользователя (`remove_user` + restart)
+   - Превышена квота → удаляет пользователя
+   - Возвращает `{'expired': N, 'quota_exceeded': N}`
+
+4. **TUI** — главное меню Telemt: новый пункт `L` — Лимиты пользователей. Меню управления пользователями: новый пункт `5` — Лимиты. Список пользователей показывает колонки Квота и Срок. Таблица: имя, квота (used/total), срок, трафик.
+
+5. **Cron** — `mtproto_stats.setup_accounting()` дополнен второй строкой (`*/5 * * * * root python3 -c "...mtproto_check_limits()"`). НЕ отдельный cron-файл — дополнение к существующему `/etc/cron.d/telemt-stats`.
+
+### Переиспользовано (не дублировано)
+
+- `awgs_expires_parse/compute_iso/is_expired/humanize` — парсинг duration, вычисление ISO-даты, проверка истечения, человекочитаемый вывод
+- `traffic_accounting.parse_human_readable_bytes` — парсинг `'10G'`/`'500MB'`
+- `mtproto_stats._load_stats()` — per-user трафик (rx+tx)
+- `_load_users()/_save_users()` — без изменений, обратная совместимость
+
+### Тесты
+
+`tests/test_mtproto_limits.py` — **15 passed** (новый файл):
+1. set_quota_and_expiry — квота + срок → `True`
+2a. set_quota_only — только квота
+2b. set_expiry_only — только срок
+2c. set_both_none — оба `None` (безлимит)
+3. nonexistent_user — `False`
+4a. invalid_quota — `False`
+4b. invalid_expiry — `False`
+5. get_limits — все поля + `used_bytes`
+6. remove_limits — удаление
+7. check_limits: expired → удалён
+8. check_limits: quota_exceeded → удалён
+9. check_limits: unlimited → не тронут
+10a. old_format_plain_strings — обратная совместимость
+10b. old_format_with_limits — старый формат + новые лимиты
+
+Регрессии: `tests/test_mtproto.py` (195 passed), `tests/test_awg_expires.py` — 0 регрессий.
+
+---
+
 ## FEAT(youtube-ip-pin): экспериментальная опция закрепления YouTube-CDN по IP — 23 июля 2026
 
 **Новая экспериментальная опция: закрепление YouTube-CDN по IP поверх уже выбранной exit-ноды. Добавляет ДОПОЛНИТЕЛЬНОЕ routing-правило в Xray config (матчащее по IP-адресам из внешнего списка, а не по доменам) рядом с доменным правилом YouTube. Оба правила включаются/выключаются независимо.**
