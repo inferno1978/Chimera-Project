@@ -1377,7 +1377,7 @@ def _xray_geo_is_runetfreedom() -> bool:
     Делает это через быстрый grep по бинарному содержимому файла.
     Это единственный надёжный способ — размер файла ненадёжен.
 
-    v4.25.1 FIX: добавлен флаг -i (case-insensitive). Теги в geosite.dat
+    v5.0.1 FIX: добавлен флаг -i (case-insensitive). Теги в geosite.dat
     хранятся в ВЕРХНЕМ регистре (RU-AVAILABLE-ONLY-INSIDE), а мы ищем
     строчное 'ru-available-only-inside'. Без -i grep не находил тег →
     функция возвращала False даже для валидного runetfreedom geosite.dat →

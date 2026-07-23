@@ -135,12 +135,12 @@ class TestGeoCronScript(unittest.TestCase):
 
     # ── Min sizes ─────────────────────────────────────────────────────────
     def test_script_has_geosite_min_size(self):
-        """v4.25.1: порог берётся из MIN_SIZES (20 МБ), а не хардкод 3 МБ."""
+        """v5.0.1: порог берётся из MIN_SIZES (20 МБ), а не хардкод 3 МБ."""
         from chimera.modules.geo_mirrors import MIN_SIZES
         self.assertIn(f"GEOSITE_MIN={MIN_SIZES['geosite.dat']}", self.script)
 
     def test_script_has_geoip_min_size(self):
-        """v4.25.1: порог берётся из MIN_SIZES (1 МБ), а не хардкод 10 КБ."""
+        """v5.0.1: порог берётся из MIN_SIZES (1 МБ), а не хардкод 10 КБ."""
         from chimera.modules.geo_mirrors import MIN_SIZES
         self.assertIn(f"GEOIP_MIN={MIN_SIZES['geoip.dat']}", self.script)
 

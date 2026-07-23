@@ -61,7 +61,7 @@ def _post_install_geo(src: Path, install_dests: list[Path]) -> bool:
 
     Возвращает True при успехе. False только если ВСЕ копирования упали.
 
-    v4.25.1: добавлено логирование каждой копии (size, dest, error) —
+    v5.0.1: добавлено логирование каждой копии (size, dest, error) —
     для диагностики случаев когда файл скачался но не скопировался.
     Был инцидент: geosite.dat (71 МБ) скачался в /tmp, но не появился
     в /etc/xray/ — без логирования было невозможно понять почему.
@@ -141,9 +141,9 @@ GEOSITE_SPEC = PackageSpec(
     ),
     install_dests=_GEO_INSTALL_DESTS,     # [/etc/xray, /usr/local/share/xray, /usr/local/etc/xray]
     manual_incoming_dir=_GEO_MANUAL_DIR,   # /root/ — WinSCP-friendly
-    min_size=MIN_SIZES["geosite.dat"],     # 20_000_000 (v4.25.1)
+    min_size=MIN_SIZES["geosite.dat"],     # 20_000_000 (v5.0.1)
     post_install=_post_install_geo,        # chmod 644 + chown root:xray
-    checksum_urls=get_geosite_checksum_urls(),  # v4.25.2: sha256-верификация
+    checksum_urls=get_geosite_checksum_urls(),  # v5.0.2: sha256-верификация
     checksum_algo="sha256",
 )
 
@@ -163,8 +163,8 @@ GEOIP_SPEC = PackageSpec(
     ),
     install_dests=_GEO_INSTALL_DESTS,
     manual_incoming_dir=_GEO_MANUAL_DIR,
-    min_size=MIN_SIZES["geoip.dat"],       # 1_000_000 (v4.25.1)
+    min_size=MIN_SIZES["geoip.dat"],       # 1_000_000 (v5.0.1)
     post_install=_post_install_geo,
-    checksum_urls=get_geoip_checksum_urls(),  # v4.25.2: sha256-верификация
+    checksum_urls=get_geoip_checksum_urls(),  # v5.0.2: sha256-верификация
     checksum_algo="sha256",
 )
