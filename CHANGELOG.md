@@ -2,7 +2,53 @@
 
 ---
 
-## FIX(geo): критический баг — geo-файлы копировались под именем временного файла (10.07–22.07.2026 все обновления были no-op) — 22 июля 2026
+## FIX(awg): проверка коллизий H1-H4 в ручном вводе обфускации — 23 июля 2026
+
+**Доработка AWG 2.0 (v4.25.8): в ручном вводе параметров обфускации (пункт меню "3" в `prompt_awg_exit_mode()`) добавлена проверка на коллизии H1-H4. Раньше каждое H вводилось через независимый `_ask_int()` вызов — дубликат между ними никак не ловился, хотя весь смысл фичи — уникальность H1-H4 (DPI-отпечаток). Теперь при обнаружении дубликата пользователю показывается предупреждение и предлагается ввести значения заново. После 5 неудачных попыток — fallback на рекомендованные уникальные значения из `awgs_generate_full_manual_params()`.**
+
+### Локация
+
+`chimera/modules/install_prompts.py`, ветка `elif _obf_ch == "3"` (ручной ввод полного набора), поля H1-H4.
+
+### Изменение
+
+Логика проверки коллизий выделена в отдельную функцию `_prompt_h1_h4_unique(_rec, _ask_int_fn, warn_fn, info_fn)` для тестопригодности. Внутри `prompt_awg_exit_mode()` вызов заменён на:
+```python
+AWG_H1, AWG_H2, AWG_H3, AWG_H4 = _prompt_h1_h4_unique(_rec, _ask_int, warn, info)
+```
+
+Алгоритм:
+1. Ввод H1-H4 через 4 вызова `_ask_int_fn` (как раньше)
+2. Проверка: если есть дубликаты — `warn` + `info` + перезапрос всех 4 полей
+3. Цикл до 5 попыток; после 5 — fallback на `_rec["h1".."h4"]` (гарантированно уникальные рекомендованные значения), `warn` об fallback, `break`
+4. `setattr(core, ...)` для H1-H4 одним блоком после успешной проверки (раньше был разбросан — перенесён)
+
+### Тесты
+
+`tests/test_install_prompts.py` — новый файл, 4 кейса:
+1. `test_duplicate_first_attempt_unique_second` — H1=H2=100 первой попыткой, второй — уникальные → успех
+2. `test_five_attempts_with_duplicates_fallback_to_rec` — 5 попыток с dup → fallback на _rec, без зависания
+3. `test_first_attempt_unique_no_retry` — сразу уникальны → input вызван ровно 4 раза (не 8+), warn не вызван
+4. `test_three_duplicates_fourth_unique` — 3 dup, 4-я уникальна → успех (доп. кейс на множественные retry)
+
+Мок `builtins.input` через `side_effect` с итератором (как в `test_xray_install.py`, `test_ios_shadow_client.py`).
+
+### Не тронуто
+
+- `awgs_generate_full_manual_params()` в `awg_presets.py` — там уникальность уже гарантирована
+- Ветки `_obf_ch == "1"`, `"2"`, `"4"` — там H1-H4 либо не спрашиваются, либо уже уникальны (auto_full), либо намеренно одинаковы (preset)
+
+### Прогон
+
+- `tests/test_install_prompts.py` — **4/4 passed** (новый файл)
+- `tests/test_awg_presets.py` — 51/51 passed
+- `tests/test_awg_transport.py` — 49/49 passed
+- `tests/test_awg_standalone.py` + `test_awg_apply.py` + `test_awg_cascade.py` — 51/51 passed
+- Итого: **155 passed**, 0 регрессий
+
+---
+
+## FEAT(awg): полный набор параметров обфускации AWG 2.0 (16 шт) во всех режимах — 22 июля 2026
 
 **КРИТИЧЕСКИЙ баг, обнаруженный на реальном сервере 22.07.2026: `geosite.dat`/`geoip.dat` копировались в `/etc/xray/` под именем `_download_mgr_geosite.dat` вместо канонического `geosite.dat`. Это означало, что ВСЕ обновления geo-файлов с 10.07.2026 (коммит `fbb2285`, миграция `download_geo_files()` на `fetch_package()`) по 22.07.2026 (день обнаружения) были no-op по факту: скачивание и sha256-верификация проходили успешно, но результат никогда не попадал в реальный `/etc/xray/geosite.dat` (и параллельные копии в `/usr/local/share/xray/`, `/usr/local/etc/xray/`) — вместо этого создавался файл `_download_mgr_geosite.dat` РЯДОМ со старым нетронутым `geosite.dat`.**
 
