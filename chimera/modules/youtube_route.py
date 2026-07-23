@@ -105,12 +105,20 @@ _YOUTUBE_DOMAINS = [
 #  ПРИМЕНЕНИЕ / УДАЛЕНИЕ ПРАВИЛА В XRAY CONFIG
 # =============================================================================
 
-def _youtube_apply_to_xray() -> bool:
-    """Добавляет YouTube→direct правило в Xray config.
+def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
+    """Добавляет YouTube→{target} правило в Xray config.
 
     Идемпотентно: сначала убирает старое правило с comment="youtube_via_ru",
-    затем добавляет новое. AWG-aware: outboundTag="direct-local" если
-    AWG_EXIT_ENABLED, иначе "direct".
+    затем добавляет новое.
+
+    Args:
+      target_tag: None — RU entry-нода (direct/direct-local, AWG-aware,
+                  автосоздание outbound если отсутствует).
+                  "chain-exit-N" — конкретная exit-нода N (1-indexed).
+                  Outbound должен уже существовать в cfg["outbounds"] —
+                  если нет (нода удалена после реконфигурации), возвращаем
+                  False с warn, НЕ пишем правило с несуществующим тегом
+                  (Xray падает с "unknown outbound tag").
 
     Возвращает True если хотя бы один config.json пропатчен успешно.
     """
@@ -124,9 +132,15 @@ def _youtube_apply_to_xray() -> bool:
     success                  = core.success
     warn                     = core.warn
 
-    # Если outbound direct-local ещё не существует (AWG mode), добавляем.
-    # В обычном режиме "direct" уже есть во всех конфигах.
-    _outbound_tag = "direct-local" if AWG_EXIT_ENABLED else "direct"
+    # Определяем outboundTag для правила.
+    if target_tag is not None:
+        # Конкретная exit-нода — outbound уже должен существовать.
+        _outbound_tag = target_tag
+        _is_exit_node = True
+    else:
+        # RU entry-нода — direct/direct-local, AWG-aware.
+        _outbound_tag = "direct-local" if AWG_EXIT_ENABLED else "direct"
+        _is_exit_node = False
 
     written: set = set()
     ok = False
@@ -148,19 +162,34 @@ def _youtube_apply_to_xray() -> bool:
             rules    = [r for r in routing.setdefault("rules", [])
                         if r.get("comment") != _YOUTUBE_RULE_COMMENT]
             outbounds = cfg.setdefault("outbounds", [])
-            # В AWG-режиме нужен "direct-local" (без fwmark) — чтобы YouTube
-            # вышел через RU-сервер, а не через AWG-туннель к exit.
-            if AWG_EXIT_ENABLED:
-                if not any(ob.get("tag") == "direct-local" for ob in outbounds):
-                    outbounds.append({
-                        "protocol": "freedom",
-                        "tag":      "direct-local",
-                        "settings": {"domainStrategy": "UseIPv4"},
-                    })
-                    info("AWG: добавлен outbound direct-local для YouTube→RU")
+
+            if _is_exit_node:
+                # Проверяем что outbound с этим тегом существует.
+                # Если нет — нода была удалена после реконфигурации.
+                # НЕ пишем правило с несуществующим тегом (Xray падает).
+                if not any(ob.get("tag") == _outbound_tag for ob in outbounds):
+                    # Извлекаем номер ноды из тега для понятного сообщения.
+                    _node_num = "?"
+                    _m = re.match(r'chain-exit-(\d+)', _outbound_tag)
+                    if _m:
+                        _node_num = _m.group(1)
+                    warn(f"Exit-нода #{_node_num} ({_outbound_tag}) "
+                         f"была удалена из конфигурации — выберите другую")
+                    # НЕ пишем конфиг, НЕ считаем успехом.
+                    continue
             else:
-                if not any(ob.get("tag") == "direct" for ob in outbounds):
-                    outbounds.append({"protocol": "freedom", "tag": "direct"})
+                # RU-путь: автосоздание outbound если отсутствует.
+                if AWG_EXIT_ENABLED:
+                    if not any(ob.get("tag") == "direct-local" for ob in outbounds):
+                        outbounds.append({
+                            "protocol": "freedom",
+                            "tag":      "direct-local",
+                            "settings": {"domainStrategy": "UseIPv4"},
+                        })
+                        info("AWG: добавлен outbound direct-local для YouTube→RU")
+                else:
+                    if not any(ob.get("tag") == "direct" for ob in outbounds):
+                        outbounds.append({"protocol": "freedom", "tag": "direct"})
 
             # Новое правило. Prepended ПЕРЕД существующими — Xray eval
             # top-to-bottom, первое совпадение выигрывает. catch-all
@@ -180,6 +209,9 @@ def _youtube_apply_to_xray() -> bool:
             warn(f"Ошибка патча {cfg_path}: {e}")
 
     if not ok:
+        if _is_exit_node:
+            # warn уже вызван выше с конкретным сообщением про ноду.
+            return False
         warn("Конфиг Xray не найден — не удалось применить YouTube→RU")
         return False
 
@@ -195,7 +227,10 @@ def _youtube_apply_to_xray() -> bool:
         warn("Xray не запустился — проверьте: journalctl -u xray -n 30")
         _nginx_restart_if_reality()
         return False
-    success(f"YouTube → {_outbound_tag} (RU entry-нода)")
+    if _is_exit_node:
+        success(f"YouTube → {_outbound_tag} (exit-нода)")
+    else:
+        success(f"YouTube → {_outbound_tag} (RU entry-нода)")
     _nginx_restart_if_reality()
     return True
 
@@ -287,12 +322,13 @@ def _geosite_available() -> bool:
 # =============================================================================
 
 def do_manage_youtube_via_ru() -> None:
-    """TUI-меню переключателя YouTube→RU.
+    """TUI-меню переключателя YouTube→RU / конкретная exit-нода.
 
-    Показывает текущее состояние (state["youtube_via_ru"]) и предлагает:
-      [1] YouTube через RU (entry-нода)  — добавляет правило
-      [2] YouTube через exit-ноды        — убирает правило (default)
-      [Q] Назад
+    v5.0.0: расширено для multi-node режима — если CHAIN_NODES содержит
+    >1 ноду, показывает по пункту на каждую ноду + RU + default.
+
+    В single-node режиме (0-1 нода) — старое двухпунктовое меню без
+    изменений (обратная совместимость).
     """
     core = _core_module()
     _box_top    = core._box_top
@@ -314,83 +350,165 @@ def do_manage_youtube_via_ru() -> None:
     warn    = core.warn
     success = core.success
 
-    # Текущее состояние из state.json (свежее, не из глобали —
-    # на случай если пользователь редактировал state.json вручную).
+    # Текущее состояние из state.json — с миграцией со старого bool-ключа.
     try:
         state = json.loads(core.STATE_FILE.read_text()) if core.STATE_FILE.exists() else {}
     except Exception:
         state = {}
-    current = state.get("youtube_via_ru", False)
+    current_target = state.get("youtube_route_target")
+    if current_target is None:
+        # Миграция со старого формата.
+        current_target = "ru" if state.get("youtube_via_ru", False) else "off"
 
     # Дополнительная проверка: что в конфиге реально есть правило.
-    # Если state говорит True, но правила нет (например, после regenerate
-    # xray-config через пункт 5b — он перезаписывает routing полностью)
-    # — показываем что правило отсутствует.
     rule_in_config = _youtube_rule_in_xray_config()
 
-    print()
-    _box_top("📺  YouTube через RU  (entry-нода)")
-    _box_row()
-    if current and rule_in_config:
-        _box_row(f"  Текущий маршрут: {GREEN}YouTube → RU entry{NC}")
-        _box_row(f"  {DIM}geosite:youtube → outbound:{'direct-local' if core.AWG_EXIT_ENABLED else 'direct'}{NC}")
-    elif current and not rule_in_config:
-        _box_row(f"  Текущий маршрут: {YELLOW}несогласованно{NC}")
-        _box_row(f"  {DIM}state.json: youtube_via_ru=True, но правило в config.json отсутствует.{NC}")
-        _box_row(f"  {DIM}Это бывает после regenerate xray-config (пункт 5b).{NC}")
-        _box_row(f"  {DIM}Нажмите [1] чтобы пере-применить.{NC}")
+    # Multi-node: проверяем количество exit-нод.
+    nodes = getattr(core, "CHAIN_NODES", [])
+    multi_node = len(nodes) > 1
+
+    # Определяем отображаемое имя текущего маршрута.
+    if current_target == "off":
+        current_display = f"{CYAN}YouTube → exit-ноды (default){NC}"
+        current_detail = f"{DIM}Весь YouTube-трафик идёт через каскад exit-нод.{NC}"
+    elif current_target == "ru":
+        if rule_in_config:
+            current_display = f"{GREEN}YouTube → RU entry{NC}"
+            current_detail = f"{DIM}outbound:{'direct-local' if core.AWG_EXIT_ENABLED else 'direct'}{NC}"
+        else:
+            current_display = f"{YELLOW}несогласованно{NC}"
+            current_detail = f"{DIM}state: youtube_route_target=ru, но правило в config.json отсутствует.{NC}"
+    elif current_target.startswith("chain-exit-"):
+        if rule_in_config:
+            # Извлекаем номер ноды и ищем её хост.
+            _m = re.match(r'chain-exit-(\d+)', current_target)
+            _node_idx = int(_m.group(1)) - 1 if _m else -1
+            _host = nodes[_node_idx].get("host", "?") if 0 <= _node_idx < len(nodes) else "?"
+            current_display = f"{GREEN}YouTube → Exit-нода #{_m.group(1) if _m else '?'} ({_host}){NC}"
+            current_detail = f"{DIM}outbound:{current_target}{NC}"
+        else:
+            # Правила нет —可能是 нода удалена или regenerate.
+            _m = re.match(r'chain-exit-(\d+)', current_target)
+            _node_num = _m.group(1) if _m else "?"
+            _node_idx = int(_node_num) - 1 if _node_num != "?" else -1
+            if 0 <= _node_idx < len(nodes):
+                current_display = f"{YELLOW}несогласованно{NC}"
+                current_detail = f"{DIM}state: youtube_route_target={current_target}, но правило отсутствует (regenerate?).{NC}"
+            else:
+                current_display = f"{YELLOW}несогласованно{NC}"
+                current_detail = f"{DIM}Exit-нода #{_node_num} была удалена из конфигурации — выберите другую.{NC}"
     else:
-        _box_row(f"  Текущий маршрут: {CYAN}YouTube → exit-ноды (default){NC}")
-        _box_row(f"  {DIM}Весь YouTube-трафик идёт через каскад exit-нод.{NC}")
+        current_display = f"{CYAN}YouTube → exit-ноды (default){NC}"
+        current_detail = f"{DIM}Весь YouTube-трафик идёт через каскад exit-нод.{NC}"
+
+    print()
+    _box_top("📺  YouTube маршрутизация")
+    _box_row()
+    _box_row(f"  Текущий маршрут: {current_display}")
+    _box_row(f"  {current_detail}")
     _box_row()
     _box_row(f"  {DIM}Переключатель добавляет/убирает правило routing в config.json:{NC}")
-    _box_row(f"  {DIM}  domain:[geosite:youtube, googlevideo.com, ytimg.com, ...] → direct{NC}")
-    _box_row(f"  {DIM}AWG-aware: outbound=direct-local когда AWG exit активен.{NC}")
+    _box_row(f"  {DIM}  domain:[youtube.com, googlevideo.com, ytimg.com, ...] → {current_target}{NC}")
     _box_sep()
-    _box_item("1", f"{'● ' if current and rule_in_config else '  '}YouTube через RU entry")
-    _box_item("2", f"{'● ' if not current else '  '}YouTube через exit-ноды (default)")
-    _box_row()
-    _box_item("Q", f"{DIM}Назад{NC}")
-    _box_bottom()
 
-    try:
-        ch = input(f"{CYAN}  Выбор [1/2/Q]:{NC} ").strip().lower()
-    except KeyboardInterrupt:
-        print()
-        return
+    if multi_node:
+        # Multi-node меню: RU + N нод + default.
+        _is_current = (current_target == "ru" and rule_in_config)
+        _box_item("1", f"{'● ' if _is_current else '  '}YouTube через RU entry")
+        for i, nd in enumerate(nodes):
+            _tag = f"chain-exit-{i+1}"
+            _is_cur = (current_target == _tag and rule_in_config)
+            _host = nd.get("host", "?")
+            _box_item(str(i+2), f"{'● ' if _is_cur else '  '}YouTube через Exit-нода #{i+1} ({_host})")
+        _default_idx = len(nodes) + 2
+        _is_cur = (current_target == "off")
+        _box_item(str(_default_idx), f"{'● ' if _is_cur else '  '}YouTube через exit-ноды (default, балансировщик)")
+        _box_row()
+        _box_item("Q", f"{DIM}Назад{NC}")
+        _box_bottom()
 
-    if ch == "1":
-        # Проверка geosite.dat
-        if not _geosite_available():
-            warn("geosite.dat не найден — правило geosite:youtube не сработает.")
-            warn("Установите geo-файлы: Настройки сети → 1 (Split Tunneling) → 1 (Включить).")
-            _box_warn("  Geo-файлы необходимы для geosite:youtube категории.")
-            input(f"\n{BLUE}  Нажмите Enter...{NC}")
+        try:
+            ch = input(f"{CYAN}  Выбор [1-{_default_idx}/Q]:{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            print()
             return
 
-        info("Применяем YouTube→RU...")
-        if _youtube_apply_to_xray():
-            _save_youtube_state(True)
-            _box_info("YouTube теперь выходит через RU entry-ноду.")
-            try:
-                core._log_change("youtube_route", "exit -> RU entry (direct)")
-            except Exception:
-                pass
+        if ch == "q" or ch == "":
+            return
+        try:
+            _choice = int(ch)
+        except ValueError:
+            return
+
+        if _choice == 1:
+            # RU entry
+            if not _geosite_available():
+                warn("geosite.dat не найден — правило geosite:youtube не сработает.")
+                input(f"\n{BLUE}  Нажмите Enter...{NC}")
+                return
+            info("Применяем YouTube→RU...")
+            if _youtube_apply_to_xray():
+                _save_youtube_state("ru")
+                _box_info("YouTube теперь выходит через RU entry-ноду.")
+            else:
+                _box_warn("  Не удалось применить правило — смотрите вывод выше.")
+        elif 2 <= _choice <= len(nodes) + 1:
+            # Конкретная exit-нода
+            _node_idx = _choice - 2  # 0-indexed
+            _tag = f"chain-exit-{_node_idx+1}"
+            _host = nodes[_node_idx].get("host", "?")
+            info(f"Применяем YouTube→{_tag} ({_host})...")
+            if _youtube_apply_to_xray(target_tag=_tag):
+                _save_youtube_state(_tag)
+                _box_info(f"YouTube теперь через Exit-ноду #{_node_idx+1} ({_host}).")
+            else:
+                _box_warn(f"  Не удалось — нода {_tag} возможно удалена. Смотрите вывод выше.")
+        elif _choice == _default_idx:
+            # Default (балансировщик)
+            info("Убираем YouTube→RU правило...")
+            if _youtube_remove_from_xray():
+                _save_youtube_state("off")
+                _box_info("YouTube теперь через exit-ноды (default).")
+            else:
+                _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
         else:
-            _box_warn("  Не удалось применить правило — смотрите вывод выше.")
-    elif ch == "2":
-        info("Убираем YouTube→RU правило...")
-        if _youtube_remove_from_xray():
-            _save_youtube_state(False)
-            _box_info("YouTube теперь через exit-ноды (default).")
-            try:
-                core._log_change("youtube_route", "RU entry -> exit (default)")
-            except Exception:
-                pass
-        else:
-            _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
+            return
     else:
-        return
+        # Single-node / no-chain: старое двухпунктовое меню (обратная совместимость).
+        _is_cur = (current_target == "ru" and rule_in_config)
+        _box_item("1", f"{'● ' if _is_cur else '  '}YouTube через RU entry")
+        _is_cur_off = (current_target == "off")
+        _box_item("2", f"{'● ' if _is_cur_off else '  '}YouTube через exit-ноды (default)")
+        _box_row()
+        _box_item("Q", f"{DIM}Назад{NC}")
+        _box_bottom()
+
+        try:
+            ch = input(f"{CYAN}  Выбор [1/2/Q]:{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            print()
+            return
+
+        if ch == "1":
+            if not _geosite_available():
+                warn("geosite.dat не найден — правило geosite:youtube не сработает.")
+                input(f"\n{BLUE}  Нажмите Enter...{NC}")
+                return
+            info("Применяем YouTube→RU...")
+            if _youtube_apply_to_xray():
+                _save_youtube_state("ru")
+                _box_info("YouTube теперь выходит через RU entry-ноду.")
+            else:
+                _box_warn("  Не удалось применить правило — смотрите вывод выше.")
+        elif ch == "2":
+            info("Убираем YouTube→RU правило...")
+            if _youtube_remove_from_xray():
+                _save_youtube_state("off")
+                _box_info("YouTube теперь через exit-ноды (default).")
+            else:
+                _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
+        else:
+            return
 
     input(f"\n{BLUE}  Нажмите Enter...{NC}")
 
@@ -419,11 +537,15 @@ def _youtube_rule_in_xray_config() -> bool:
     return False
 
 
-def _save_youtube_state(enabled: bool) -> None:
-    """Сохраняет youtube_via_ru в state.json.
+def _save_youtube_state(target: str) -> None:
+    """Сохраняет youtube_route_target в state.json.
 
-    НЕ использует _core.YOUTUBE_VIA_RU глобаль (она обновится при
-    следующем _load_state_into_globals()) — пишем прямо в state.json.
+    Args:
+      target: "ru" | "off" | "chain-exit-{N}"
+
+    Также пишет legacy "youtube_via_ru": (target == "ru") для обратной
+    совместимости с _core.YOUTUBE_VIA_RU и любыми внешними скриптами/
+    бэкапами, которые могут читать этот ключ.
     """
     core = _core_module()
     try:
@@ -431,7 +553,9 @@ def _save_youtube_state(enabled: bool) -> None:
             state = json.loads(core.STATE_FILE.read_text())
         else:
             state = {}
-        state["youtube_via_ru"] = bool(enabled)
+        state["youtube_route_target"] = target
+        # Legacy: youtube_via_ru = True только когда target == "ru".
+        state["youtube_via_ru"] = (target == "ru")
         core.STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
     except Exception as e:
         try:
@@ -441,17 +565,16 @@ def _save_youtube_state(enabled: bool) -> None:
 
 
 def restore_youtube_rule_if_needed(silent: bool = False) -> bool:
-    """Пере-применяет YouTube→RU правило если state.json говорит что оно
+    """Пере-применяет YouTube правило если state.json говорит что оно
     должно быть включено, но в config.json его нет.
 
     ВЫЗЫВАЕТСЯ ИЗ:
       - ru_subnets._ru_subnets_restore_if_needed (после regenerate xray-config)
       - Любого места которое перезаписывает routing полностью.
 
-    Это нужно потому что generate_xray_config* полностью перезаписывает
-    config.json, стирая все runtime-правила (youtube_via_ru, ru_subnets_ripe,
-    geoip_block). После regenerate — restore_*_if_needed пере-добавляет
-    их из state.
+    v5.0.0: поддерживает не только RU (direct/direct-local), но и
+    конкретную exit-ноду (chain-exit-N). Читает новый ключ
+    "youtube_route_target" (с миграцией со старого "youtube_via_ru").
 
     Возвращает True если правило было пере-применено.
     """
@@ -463,17 +586,31 @@ def restore_youtube_rule_if_needed(silent: bool = False) -> bool:
         if not core.STATE_FILE.exists():
             return False
         state = json.loads(core.STATE_FILE.read_text())
-        if not state.get("youtube_via_ru", False):
-            return False
     except Exception:
+        return False
+
+    # Миграция: новый ключ youtube_route_target, fallback на старый bool.
+    target = state.get("youtube_route_target")
+    if target is None:
+        # Миграция со старого формата.
+        target = "ru" if state.get("youtube_via_ru", False) else "off"
+
+    if target == "off":
         return False
 
     if _youtube_rule_in_xray_config():
         return False  # Уже на месте
 
+    # Определяем outboundTag для пере-применения.
+    if target == "ru":
+        tag = None  # direct/direct-local, AWG-aware
+    else:
+        tag = target  # chain-exit-N
+
     if not silent:
         try:
-            core.info("Пере-применяем YouTube→RU правило после regenerate xray-config...")
+            core.info(f"Пере-применяем YouTube→{target} правило "
+                      f"после regenerate xray-config...")
         except Exception:
             pass
-    return _youtube_apply_to_xray()
+    return _youtube_apply_to_xray(target_tag=tag)

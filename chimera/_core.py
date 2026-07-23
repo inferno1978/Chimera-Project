@@ -1091,7 +1091,9 @@ XTLS_FLOW: str = "xtls-rprx-vision"
 #       или direct-local в AWG-режиме). Правило geosite:youtube → direct
 #       prepended в routing.rules.
 # False = (default) YouTube идёт через каскад exit-нод (catch-all routing).
-# Загружается из state["youtube_via_ru"] в _load_state_into_globals().
+# Derived/legacy: True когда youtube_route_target=="ru" (state["youtube_via_ru"]).
+# Основной ключ — state["youtube_route_target"] (str: "ru"|"off"|"chain-exit-N"),
+# управляется через youtube_route.py. Этот bool — для обратной совместимости.
 YOUTUBE_VIA_RU: bool = False
 
 # Режим работы xHTTP (только для PROTOCOL_MODE == "xhttp")
