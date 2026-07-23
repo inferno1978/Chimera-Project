@@ -62,7 +62,7 @@ _YOUTUBE_RULE_COMMENT = "youtube_via_ru"
 
 # Список доменов YouTube и связанных сервисов.
 #
-# v5.0.1 FIX: Раньше использовались geosite:youtube и geosite:google, но
+# v5.0.0 FIX: Раньше использовались geosite:youtube и geosite:google, но
 # geosite.dat от runetfreedom (который ставит Chimera) НЕ содержит этих
 # категорий — только российские (category-ru, ru-available-only-inside).
 # Xray падал при старте с "code not found in geosite.dat: YOUTUBE".
