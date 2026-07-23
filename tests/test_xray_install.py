@@ -1076,7 +1076,7 @@ class TestXrayUpdateGeoRunetfreedomMigration(unittest.TestCase):
 
 
 class TestXrayGeoIsRunetfreedomCaseInsensitive(unittest.TestCase):
-    """v5.0.1 REGRESSION: _xray_geo_is_runetfreedom должен использовать
+    """v5.0.0 REGRESSION: _xray_geo_is_runetfreedom должен использовать
     case-insensitive grep (-i флаг).
 
     Теги в geosite.dat хранятся в ВЕРХНЕМ регистре (RU-AVAILABLE-ONLY-INSIDE),

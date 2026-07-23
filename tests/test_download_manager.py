@@ -555,13 +555,13 @@ class TestPostInstallCallback(unittest.TestCase):
 
 
 # ============================================================================
-#  ТЕСТЫ MIN_SIZES — отбраковка слишком маленьких файлов (v5.0.1)
+#  ТЕСТЫ MIN_SIZES — отбраковка слишком маленьких файлов (v5.0.0)
 # ============================================================================
 
 class TestFetchPackageMinSizeRejection(unittest.TestCase):
     """fetch_package() — отбраковка файлов меньше min_size и retry на следующее зеркало.
 
-    v5.0.1: на проде был инцидент — CDN отдал устаревший geosite.dat (10 МБ
+    v5.0.0: на проде был инцидент — CDN отдал устаревший geosite.dat (10 МБ
     вместо 73 МБ). Старый порог 3 МБ пропустил его как валидный. Тест проверяет:
       1. Файл < min_size отбраковывается.
       2. Код переходит к следующему зеркалу (НЕ считает загрузку успешной).
@@ -816,7 +816,7 @@ class TestPrintManualHint(unittest.TestCase):
 
 
 # ============================================================================
-#  ТЕСТЫ sha256-верификации (v5.0.2)
+#  ТЕСТЫ sha256-верификации (v5.0.0)
 # ============================================================================
 # Тесты покрывают 3 ключевых сценария:
 #   1. Hash НЕ совпал → файл отбракован, переход к следующему зеркалу
@@ -902,7 +902,7 @@ class TestParseChecksumContent(unittest.TestCase):
 class TestFetchPackageChecksumVerification(unittest.TestCase):
     """fetch_package() с checksum_urls — три ключевых сценария.
 
-    v5.0.2: после успешной загрузки файла (размер >= min_size) дополнительно
+    v5.0.0: после успешной загрузки файла (размер >= min_size) дополнительно
     проверяется sha256 через скачивание .sha256sum с checksum_urls.
 
     Сценарии:
@@ -961,7 +961,7 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
         актуальный файл, .sha256sum совпадает → успех.
 
         Симметрично: checksum_urls перебираются по порядку, независимо
-        от того, какое зеркало дало сам файл (см. спеку v5.0.2). Это
+        от того, какое зеркало дало сам файл (см. спеку v5.0.0). Это
         гарантирует верификацию того, что РЕАЛЬНО пришло, а не того,
         что зеркало "должно" было отдать.
 
@@ -1345,7 +1345,7 @@ class TestVerifyChecksumHelper(unittest.TestCase):
 
 
 class TestChecksumNotCalledInManualBranch(unittest.TestCase):
-    """v5.0.2 regression-тест: _verify_checksum НЕ вызывается в manual-ветке.
+    """v5.0.0 regression-тест: _verify_checksum НЕ вызывается в manual-ветке.
 
     Когда файл найден в manual_incoming_dir (/root/ — ручное размещение
     через WinSCP), fetch_package использует его без сети и БЕЗ sha256-
@@ -1402,7 +1402,7 @@ class TestChecksumNotCalledInManualBranch(unittest.TestCase):
 
 
 # ============================================================================
-#  v5.0.4 REGRESSION TEST: файл в install_dests должен иметь каноническое имя
+#  v5.0.0 REGRESSION TEST: файл в install_dests должен иметь каноническое имя
 # ============================================================================
 # КРИТИЧЕСКИЙ regression-тест на баг, обнаруженный 22.07.2026 на проде:
 # geosite.dat/geoip.dat копировались под именем '_download_mgr_geosite.dat'
@@ -1412,7 +1412,7 @@ class TestChecksumNotCalledInManualBranch(unittest.TestCase):
 # дней, все geo-обновления за это время были no-op по факту.
 
 class TestCanonicalFileNameInInstallDests(unittest.TestCase):
-    """v5.0.4 regression: файл в install_dests должен называться
+    """v5.0.0 regression: файл в install_dests должен называться
     'geosite.dat', а НЕ '_download_mgr_geosite.dat'.
 
     Баг введён в fbb2285 (10.07.2026), обнаружен 22.07.2026 на проде —

@@ -31,7 +31,7 @@ spec, ДО любого сетевого вызова.
         ),
         install_dests=[Path("/usr/local/share/xray"), Path("/etc/xray")],
         manual_incoming_dir=Path("/root"),
-        min_size=20_000_000,  # v5.0.1: example only — use MIN_SIZES from geo_mirrors.py
+        min_size=20_000_000,  # v5.0.0: example only — use MIN_SIZES from geo_mirrors.py
         post_install=lambda tmp, dests: _copy_to_dests(tmp, dests),
     )
     ok = fetch_package(spec)
@@ -196,7 +196,7 @@ def fetch_package(
                         _default_copy_to_dests(manual_path, spec.install_dests)
                     return True
                 else:
-                    # v5.0.1: логируем если ручной файл слишком маленький —
+                    # v5.0.0: логируем если ручной файл слишком маленький —
                     # пользователь мог положить устаревшую/обрезанную копию.
                     if progress_label:
                         print(
@@ -258,7 +258,7 @@ def fetch_package(
                     print(f"  {progress_label} ✓ скачано ({sz // 1024} КБ)", flush=True)
 
                 # ── sha256-верификация (если spec.checksum_urls задан) ──────
-                # v5.0.2: размерная проверка не ловит случаи, когда CDN
+                # v5.0.0: размерная проверка не ловит случаи, когда CDN
                 # закэшировал устаревший, но достаточно большой файл. Контроль
                 # суммы однозначно отбраковывает такой файл. Если НИ ОДИН
                 # checksum_url не отвечает (404 везде — апстрим перестал
@@ -279,7 +279,7 @@ def fetch_package(
                     # verify_result is True — хэш совпал, принимаем.
 
                 # ── Переименование tmp_path в каноническое имя ────────────
-                # v5.0.4 FIX (критический баг с 10.07.2026, коммит fbb2285):
+                # v5.0.0 FIX (критический баг с 10.07.2026, коммит fbb2285):
                 # tmp_path строится как /tmp/_download_mgr_{filename} —
                 # post_install callback'и (_post_install_geo, _default_copy_to_dests,
                 # и любые другие, использующие src.name) копировали файл под
@@ -320,7 +320,7 @@ def fetch_package(
                 return True
 
             # Файл слишком маленький — пробуем следующее зеркало.
-            # v5.0.1: логируем реальный размер vs порог, чтобы при отладке
+            # v5.0.0: логируем реальный размер vs порог, чтобы при отладке
             # было видно что именно произошло (а не только "не удалось").
             # Это критично для диагностики случаев когда CDN отдаёт устаревшую
             # копию файла (был инцидент с geosite.dat: 10 МБ вместо 73 МБ,
@@ -353,7 +353,7 @@ def fetch_package(
 def _default_copy_to_dests(src: Path, dests: list[Path]) -> None:
     """Копирует src во все dests с chmod 0o644.
 
-    v5.0.4: src.name теперь гарантированно каноническое (без префикса
+    v5.0.0: src.name теперь гарантированно каноническое (без префикса
     _download_mgr_), потому что fetch_package() переименовывает tmp_path
     в /tmp/{filename} перед вызовом этой функции (см. строку ~281 в
     fetch_package). Раньше src.name был '_download_mgr_{filename}' и
@@ -370,7 +370,7 @@ def _default_copy_to_dests(src: Path, dests: list[Path]) -> None:
 
 
 # ============================================================================
-#  sha256-верификация (v5.0.2)
+#  sha256-верификация (v5.0.0)
 # ============================================================================
 # Реализована как отдельный helper, а не инлайн в fetch_package, чтобы:
 #   1. Была тестируемой (mock urlopen с разными ответами checksum).

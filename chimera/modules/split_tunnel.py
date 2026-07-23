@@ -82,7 +82,7 @@ def _geo_files_available(auto_copy: bool = True) -> bool:
     """Проверяет наличие geosite.dat и geoip.dat в директориях где Xray
     их ищет. Возвращает True если оба файла найдены.
 
-    v5.0.1: добавлено логирование для диагностики — если функция возвращает
+    v5.0.0: добавлено логирование для диагностики — если функция возвращает
     False, выводит какой именно файл не найден и в каких директориях искали.
     """
     import shutil
@@ -109,7 +109,7 @@ def _geo_files_available(auto_copy: bool = True) -> bool:
     geoip_src   = _find("geoip.dat")
 
     if not geosite_src or not geoip_src:
-        # v5.0.1: диагностическое сообщение — какой файл отсутствует.
+        # v5.0.0: диагностическое сообщение — какой файл отсутствует.
         missing = []
         if not geosite_src:
             missing.append("geosite.dat")
@@ -147,7 +147,7 @@ def _geosite_has_category(category: str) -> bool:
 
     Ищет во всех директориях где Xray может искать geo-файлы.
 
-    v5.0.1 FIX: добавлен флаг -i (case-insensitive). Теги в geosite.dat
+    v5.0.0 FIX: добавлен флаг -i (case-insensitive). Теги в geosite.dat
     хранятся в ВЕРХНЕМ регистре (CATEGORY-RU), а мы передаём строчные
     (category-ru). Без -i grep не находил существующие категории →
     правила geosite:category-ru терялись даже с валидным geosite.dat.
@@ -421,7 +421,7 @@ def build_split_tunnel_routing_rules(
         # если geosite.dat старый или от другого источника (не runetfreedom),
         # Xray падал при старте с "code not found in geosite.dat".
         #
-        # v5.0.3 REVERT (2026-07-22): категория ru-available-only-inside
+        # v5.0.0 REVERT (2026-07-22): категория ru-available-only-inside
         # ВОЗВРАЩЕНА. Коммит a9c7377 удалил её на основе проверки протухшего
         # geosite.dat (10 МБ, ~200 дней) — файл был с того времени, когда
         # категория ещё не появилась в апстриме. После фиксов хардкоженных
@@ -936,7 +936,7 @@ def _apply_split_tunnel_config_from_state() -> None:
         if not geo_missing:
             # Стандартный geosite.dat от v2fly/xray ~1-2 МБ — не содержит
             # категорию BLOCKED. Нужный файл от runetfreedom весит ~73 МБ.
-            # v5.0.1 FIX: пороги берутся из MIN_SIZES (geo_mirrors.py),
+            # v5.0.0 FIX: пороги берутся из MIN_SIZES (geo_mirrors.py),
             # а не хардкод 3 МБ / 10 КБ — иначе усечённая 10-МБ кэшированная
             # копия с jsDelivr проходит проверку как валидная. См. комментарий
             # в geo_mirrors.py:191-217 с описанием инцидента на проде.
