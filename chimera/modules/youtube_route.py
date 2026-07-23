@@ -510,7 +510,162 @@ def do_manage_youtube_via_ru() -> None:
         else:
             return
 
+    # ── IP-pin submenu (только когда current_target != "off") ─────────────
+    if current_target != "off":
+        _handle_ip_pin_submenu(core, current_target, rule_in_config,
+                                _box_top, _box_row, _box_sep, _box_bottom,
+                                _box_item, _box_info, _box_warn,
+                                CYAN, NC, GREEN, YELLOW, RED, DIM, BLUE,
+                                info, warn, success)
+
     input(f"\n{BLUE}  Нажмите Enter...{NC}")
+
+
+def _handle_ip_pin_submenu(core, current_target, rule_in_config,
+                            _box_top, _box_row, _box_sep, _box_bottom,
+                            _box_item, _box_info, _box_warn,
+                            CYAN, NC, GREEN, YELLOW, RED, DIM, BLUE,
+                            info, warn, success):
+    """Подменю IP-pin — показывается только когда выбрана нода (не 'off')."""
+    from chimera.modules.youtube_ip_pin import (
+        get_ip_pin_status, apply_youtube_ip_pin, remove_youtube_ip_pin,
+        download_youtube_iplist, save_ip_pin_state,
+        setup_youtube_iplist_autoupdate, remove_youtube_iplist_autoupdate,
+    )
+
+    ip_status = get_ip_pin_status()
+
+    print()
+    _box_top("📌  YouTube IP-pin (ЭКСПЕРИМЕНТАЛЬНО)")
+    _box_row()
+    if ip_status["enabled"] and ip_status["rule_in_config"]:
+        _box_row(f"  Статус: {GREEN}включён{NC}")
+    elif ip_status["enabled"] and not ip_status["rule_in_config"]:
+        _box_row(f"  Статус: {YELLOW}несогласованно{NC}")
+        _box_row(f"  {DIM}state: enabled, но правило отсутствует (regenerate?).{NC}")
+    else:
+        _box_row(f"  Статус: {DIM}выключен{NC}")
+    _box_row(f"  CIDR записей: {ip_status['cidr_count']}")
+    if ip_status["updated_at"]:
+        _box_row(f"  Обновлён: {DIM}{ip_status['updated_at'][:19]}{NC}")
+    else:
+        _box_row(f"  Обновлён: {DIM}— (скачайте список){NC}")
+    _box_row()
+    _box_row(f"  {YELLOW}⚠ ЭКСПЕРИМЕНТ:{NC} YouTube отдаёт видео с подписанных URL")
+    _box_row(f"  {DIM}конкретного cache-узла, выбирhttp://мого сервером YouTube{NC}")
+    _box_row(f"  {DIM}в момент запроса manifest'а. Пиннинг по IP из внешнего{NC}")
+    _box_row(f"  {DIM}списка НЕ гарантирует доступность видео — может давать{NC}")
+    _box_row(f"  {DIM}403/таймауты. Это best-effort, не основной механизм.{NC}")
+    _box_sep()
+
+    _menu_items = []
+    _idx = 1
+    if not ip_status["enabled"]:
+        _box_item(str(_idx), "Включить IP-pin (с дисклеймером)")
+        _menu_items.append(("enable", _idx))
+        _idx += 1
+    else:
+        _box_item(str(_idx), "Выключить IP-pin")
+        _menu_items.append(("disable", _idx))
+        _idx += 1
+
+    _box_item(str(_idx), "Обновить IP-списки (скачать с GitHub)")
+    _menu_items.append(("download", _idx))
+    _idx += 1
+
+    _box_item(str(_idx), "Включить автообновление IP-списков (cron, ежедневно)")
+    _menu_items.append(("cron_on", _idx))
+    _idx += 1
+
+    _box_item(str(_idx), "Выключить автообновление")
+    _menu_items.append(("cron_off", _idx))
+    _idx += 1
+
+    _box_row()
+    _box_item("Q", f"{DIM}Назад{NC}")
+    _box_bottom()
+
+    try:
+        ch = input(f"{CYAN}  Выбор [1-{_idx-1}/Q]:{NC} ").strip().lower()
+    except KeyboardInterrupt:
+        print()
+        return
+
+    if ch == "q" or ch == "":
+        return
+
+    try:
+        _choice = int(ch)
+    except ValueError:
+        return
+
+    _action = None
+    for act, idx in _menu_items:
+        if idx == _choice:
+            _action = act
+            break
+
+    if _action is None:
+        return
+
+    if _action == "enable":
+        # Показываем дисклеймер перед подтверждением.
+        print()
+        warn("⚠ ВНИМАНИЕ: Это экспериментальная опция.")
+        warn("  YouTube отдаёт видео с подписанных URL конкретного cache-узла,")
+        warn("  который сервер YouTube выбирает в момент запроса manifest'а.")
+        warn("  Пиннинг по IP из внешнего списка НЕ гарантирует, что видео")
+        warn("  будет доступно — это best-effort, может давать 403/таймауты.")
+        warn("  Не использовать как основной механизм выбора региона.")
+        print()
+        try:
+            _confirm = input(f"{CYAN}  Продолжить? [y/N]:{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            return
+        if _confirm != "y":
+            return
+
+        # Определяем outboundTag для IP-pin.
+        if current_target == "ru":
+            _tag = "direct-local" if core.AWG_EXIT_ENABLED else "direct"
+        else:
+            _tag = current_target  # chain-exit-N
+
+        # Если IP-списков нет — сначала скачиваем.
+        if ip_status["cidr_count"] == 0:
+            info("IP-списки не найдены — скачиваем...")
+            if not download_youtube_iplist():
+                _box_warn("  Не удалось скачать IP-списки — IP-pin не включён.")
+                return
+
+        if apply_youtube_ip_pin(_tag):
+            save_ip_pin_state(True)
+            _box_info("YouTube IP-pin включён (экспериментально).")
+        else:
+            _box_warn("  Не удалось применить IP-pin — смотрите вывод выше.")
+
+    elif _action == "disable":
+        info("Убираем IP-pin правило...")
+        if remove_youtube_ip_pin():
+            save_ip_pin_state(False)
+            _box_info("YouTube IP-pin выключен.")
+        else:
+            _box_warn("  Не удалось убрать IP-pin — смотрите вывод выше.")
+
+    elif _action == "download":
+        info("Скачиваем YouTube IP-списки...")
+        if download_youtube_iplist():
+            _box_info("IP-списки обновлены.")
+        else:
+            _box_warn("  Не удалось скачать IP-списки.")
+
+    elif _action == "cron_on":
+        setup_youtube_iplist_autoupdate()
+        _box_info("Автообновление IP-списков включено (ежедневно в 04:00).")
+
+    elif _action == "cron_off":
+        remove_youtube_iplist_autoupdate()
+        _box_info("Автообновление IP-списков выключено.")
 
 
 # =============================================================================
@@ -613,4 +768,13 @@ def restore_youtube_rule_if_needed(silent: bool = False) -> bool:
                       f"после regenerate xray-config...")
         except Exception:
             pass
-    return _youtube_apply_to_xray(target_tag=tag)
+    _result = _youtube_apply_to_xray(target_tag=tag)
+
+    # Также пере-применяем IP-pin если он включён в state.
+    try:
+        from chimera.modules.youtube_ip_pin import restore_ip_pin_if_needed
+        restore_ip_pin_if_needed(silent=silent)
+    except Exception:
+        pass  # модуль недоступен — не критично
+
+    return _result
