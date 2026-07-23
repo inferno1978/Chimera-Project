@@ -276,7 +276,7 @@ class TestPresetsValidateParams(unittest.TestCase):
         self.assertIn("S4", err)
 
     def test_h_value_too_high(self):
-        """v4.25.7: H1-H4 валидны до INT32_MAX. 999 теперь валидно —
+        """v5.0.7: H1-H4 валидны до INT32_MAX. 999 теперь валидно —
         используем значение выше INT32_MAX для проверки invalid."""
         from chimera.modules.awg_presets import (
             awgs_presets_validate_params,
@@ -377,7 +377,7 @@ class TestPresetsCompareWithCarrier(unittest.TestCase):
 
 
 # ============================================================================
-#  v4.25.7 — Тесты awgs_generate_full_manual_params()
+#  v5.0.7 — Тесты awgs_generate_full_manual_params()
 # ============================================================================
 # Новая функция для полного ручного/авто-набора параметров AWG 2.0.
 # Отличия от awgs_presets_generate():
@@ -600,7 +600,7 @@ class TestGenerateFullManualParams(unittest.TestCase):
 
 
 class TestCarrierPresetsNotChanged(unittest.TestCase):
-    """v4.25.7: гарантия, что carrier-пресеты НЕ изменены при добавлении
+    """v5.0.7: гарантия, что carrier-пресеты НЕ изменены при добавлении
     новой функции awgs_generate_full_manual_params().
 
     Пресеты — сознательное решение автора, их значения (jc_min/max,

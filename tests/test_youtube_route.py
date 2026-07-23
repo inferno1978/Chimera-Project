@@ -102,7 +102,7 @@ class TestYoutubeApplyToXray(unittest.TestCase):
     def test_adds_youtube_rule_with_domain_entries(self):
         """Правило должно содержать domain:youtube.com в domain[].
 
-        v4.25.1: geosite:youtube убран — его нет в runetfreedom geosite.dat.
+        v5.0.1: geosite:youtube убран — его нет в runetfreedom geosite.dat.
         Теперь используем только domain: записи.
         """
         from chimera.modules import youtube_route
