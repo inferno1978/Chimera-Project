@@ -82,6 +82,7 @@ LOG_FILE        = Path("/var/log/telemt_install.log")
 OPTIMIZER_CONF  = Path("/etc/sysctl.d/99-telemt-performance.conf")
 LIMITS_CONF     = Path("/etc/security/limits.d/99-telemt-limits.conf")
 CRON_FILE       = Path("/etc/cron.d/telemt-stats")
+LIMITS_FILE     = Path("/var/lib/xray-installer/telemt_limits.json")
 
 SERVICE_NAME    = "telemt"
 GITHUB_API      = "https://api.github.com/repos/telemt/telemt/releases/latest"
@@ -2188,15 +2189,27 @@ def _menu_users(server_ip: str) -> None:
 
         _box_top("УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ")
         _box_row()
-        _box_row(f"  {DIM}{'№':<4} {'Имя':<18} Секрет{NC}")
+        limits = _load_limits()
+        from chimera.modules.awg_expires import awgs_expires_humanize
+        _box_row(f"  {DIM}{'№':<4} {'Имя':<18} {'Секрет':<20} {'Квота':<14} {'Срок':<14}{NC}")
         _box_sep()
         for i, (n, s) in enumerate(users.items(), 1):
-            _box_row(f"  {DIM}{i:<4}{NC} {n:<18} {DIM}{s[:16]}…{NC}")
+            entry = limits.get(n, {})
+            quota = entry.get("quota_bytes")
+            expires = entry.get("expires_at")
+            if quota:
+                used = _get_user_traffic_bytes(n)
+                q_str = f"{_fmt_bytes_limits(used)}/{_fmt_bytes_limits(quota)}"
+            else:
+                q_str = f"{DIM}безлимит{NC}"
+            e_str = awgs_expires_humanize(expires) if expires else f"{DIM}бессрочно{NC}"
+            _box_row(f"  {DIM}{i:<4}{NC} {n:<18} {DIM}{s[:16]}…{NC} {q_str:<20} {e_str:<14}")
         _box_row(); _box_sep()
         _box_item("1", "➕  Добавить")
         _box_item("2", "➖  Удалить")
         _box_item("3", "✏️   Переименовать")
         _box_item("4", "🔗  Показать ссылки")
+        _box_item("5", "⏱️   Лимиты (квота + срок)")
         _box_sep(); _box_item("Q", "← Назад"); _box_bot(); print()
 
         try:
@@ -2282,11 +2295,324 @@ def _menu_users(server_ip: str) -> None:
                     print()
             _pause()
 
+        elif ch == "5":
+            _menu_limits(server_ip)
+
         elif ch in ("q", ""):
             break
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  АВТООБНОВЛЕНИЕ
+#  PER-USER ЛИМИТЫ (квота трафика + срок действия)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _load_limits() -> dict:
+    """Загружает per-user лимиты из JSON.
+    
+    Формат: {username: {"quota_bytes": int|None, "expires_at": str|None,
+                        "max_connections": int|None}}
+    """
+    if not LIMITS_FILE.exists():
+        return {}
+    try:
+        return json.loads(LIMITS_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_limits(limits: dict) -> None:
+    """Сохраняет per-user лимиты в JSON."""
+    LIMITS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LIMITS_FILE.write_text(json.dumps(limits, ensure_ascii=False, indent=2))
+    LIMITS_FILE.chmod(0o640)
+
+
+def _get_user_traffic_bytes(username: str) -> int:
+    """Возвращает накопленный трафик пользователя (rx+tx) из mtproto_stats.
+    
+    Переиспользует mtproto_stats._load_stats() — там per-user данные
+    распределяются пропорционально от агрегатных iptables-счётчиков.
+    """
+    try:
+        from chimera.modules.mtproto_stats import _load_stats
+        stats = _load_stats()
+        u = stats.get("users", {}).get(username, {})
+        return int(u.get("rx", 0)) + int(u.get("tx", 0))
+    except Exception:
+        return 0
+
+
+def mtproto_set_limits(username: str,
+                       quota: Optional[str] = None,
+                       expires_in: Optional[str] = None,
+                       max_connections: Optional[int] = None
+                       ) -> bool:
+    """Устанавливает per-user лимиты для существующего Telemt-пользователя.
+    
+    Args:
+      username: имя пользователя (должно существовать в telemt.toml)
+      quota: строка вида "10G" / "500MB" / "1.5GiB" — парсится через
+             traffic_accounting.parse_human_readable_bytes.
+             None или пустая строка = безлимит.
+      expires_in: строка вида "30d" / "6m" / "12h" — парсится через
+                  awgs_expires_parse + awgs_expires_compute_iso.
+                  None или пустая строка = бессрочно.
+      max_connections: НЕ ПОДДЕРЖИВАЕТСЯ бинарником telemt — принимается
+                       для API-совместимости, записывается в JSON, но
+                       НЕ применяется к бинарнику. Документировано в TUI.
+    
+    Возвращает True если лимиты установлены.
+    """
+    # Проверяем что пользователь существует.
+    users = _load_users()
+    if username not in users:
+        return False
+    
+    limits = _load_limits()
+    entry = limits.get(username, {})
+    
+    # Квота трафика.
+    if quota and quota.strip():
+        try:
+            from chimera.modules.traffic_accounting import parse_human_readable_bytes
+            entry["quota_bytes"] = parse_human_readable_bytes(quota)
+        except Exception:
+            return False
+    else:
+        entry["quota_bytes"] = None
+    
+    # Срок действия.
+    if expires_in and expires_in.strip():
+        from chimera.modules.awg_expires import (
+            awgs_expires_parse, awgs_expires_compute_iso,
+        )
+        delta = awgs_expires_parse(expires_in)
+        if delta is None:
+            return False
+        entry["expires_at"] = awgs_expires_compute_iso(delta)
+    else:
+        entry["expires_at"] = None
+    
+    # max_connections — записываем, но не применяем (telemt не поддерживает).
+    entry["max_connections"] = max_connections
+    
+    limits[username] = entry
+    _save_limits(limits)
+    return True
+
+
+def mtproto_get_limits(username: str) -> dict:
+    """Возвращает лимиты пользователя.
+    
+    Формат: {"quota_bytes": int|None, "expires_at": str|None,
+             "max_connections": int|None, "used_bytes": int}
+    """
+    limits = _load_limits()
+    entry = limits.get(username, {})
+    return {
+        "quota_bytes": entry.get("quota_bytes"),
+        "expires_at": entry.get("expires_at"),
+        "max_connections": entry.get("max_connections"),
+        "used_bytes": _get_user_traffic_bytes(username),
+    }
+
+
+def mtproto_remove_limits(username: str) -> bool:
+    """Удаляет лимиты пользователя (делает безлимитным)."""
+    limits = _load_limits()
+    if username in limits:
+        del limits[username]
+        _save_limits(limits)
+        return True
+    return False
+
+
+def mtproto_check_limits() -> dict:
+    """Периодическая проверка лимитов всех пользователей.
+    
+    Удаляет пользователей, у которых:
+      - истёк срок действия (expires_at)
+      - превышена квота трафика (used_bytes >= quota_bytes)
+    
+    Возвращает {"expired": N, "quota_exceeded": N} для вывода в TUI.
+    """
+    from chimera.modules.awg_expires import awgs_expires_is_expired, awgs_expires_humanize
+    
+    limits = _load_limits()
+    if not limits:
+        return {"expired": 0, "quota_exceeded": 0}
+    
+    users = _load_users()
+    expired_count = 0
+    quota_exceeded_count = 0
+    to_remove = []
+    
+    for username, entry in limits.items():
+        if username not in users:
+            # Пользователь уже удалён — чистим лимит.
+            to_remove.append(username)
+            continue
+        
+        # Проверка срока действия.
+        expires_at = entry.get("expires_at")
+        if expires_at and awgs_expires_is_expired(expires_at):
+            to_remove.append(username)
+            expired_count += 1
+            try:
+                _log_telemt(f"LIMIT: пользователь '{username}' истёк "
+                            f"({awgs_expires_humanize(expires_at)}) — удаляю")
+            except Exception:
+                pass
+            continue
+        
+        # Проверка квоты трафика.
+        quota_bytes = entry.get("quota_bytes")
+        if quota_bytes and quota_bytes > 0:
+            used = _get_user_traffic_bytes(username)
+            if used >= quota_bytes:
+                to_remove.append(username)
+                quota_exceeded_count += 1
+                try:
+                    _log_telemt(f"LIMIT: пользователь '{username}' превысил квоту "
+                                f"({used} >= {quota_bytes}) — удаляю")
+                except Exception:
+                    pass
+                continue
+    
+    # Удаляем пользователей.
+    for username in to_remove:
+        # Чистим лимит.
+        if username in limits:
+            del limits[username]
+        # Удаляем пользователя из telemt.toml (если ещё там).
+        users = _load_users()
+        if username in users:
+            if len(users) > 1:
+                del users[username]
+                _save_users(users)
+            else:
+                # Нельзя удалить последнего — только чистим лимит.
+                try:
+                    _log_telemt(f"LIMIT: не могу удалить последнего "
+                                f"пользователя '{username}'")
+                except Exception:
+                    pass
+    
+    _save_limits(limits)
+    
+    # Рестарт сервиса если были изменения.
+    if to_remove:
+        _run(["systemctl", "restart", SERVICE_NAME], check=False, quiet=True)
+    
+    return {"expired": expired_count, "quota_exceeded": quota_exceeded_count}
+
+
+def _log_telemt(msg: str) -> None:
+    """Записывает сообщение в лог Telemt."""
+    try:
+        from chimera._core import log_to_file
+        log_to_file("INFO", f"telemt: {msg}")
+    except Exception:
+        pass
+
+
+def _menu_limits(server_ip: str) -> None:
+    """TUI-меню управления per-user лимитами."""
+    while True:
+        _banner()
+        users = _load_users()
+        limits = _load_limits()
+        
+        _box_top("⏱️   ЛИМИТЫ ПОЛЬЗОВАТЕЛЕЙ  •  TELETMT")
+        _box_row()
+        if not users:
+            _box_row(f"  {DIM}Нет пользователей{NC}")
+        else:
+            _box_row(f"  {DIM}{'Имя':<18} {'Квота':<14} {'Срок':<16} {'Трафик':<14}{NC}")
+            _box_sep()
+            from chimera.modules.awg_expires import awgs_expires_humanize
+            for n in users:
+                entry = limits.get(n, {})
+                quota = entry.get("quota_bytes")
+                expires = entry.get("expires_at")
+                used = _get_user_traffic_bytes(n)
+                
+                if quota:
+                    q_str = f"{used / quota * 100:.0f}% ({_fmt_bytes_limits(used)}/{_fmt_bytes_limits(quota)})"
+                    if used >= quota:
+                        q_str = f"{RED}{q_str}{NC}"
+                else:
+                    q_str = f"{DIM}безлимит{NC}"
+                
+                e_str = awgs_expires_humanize(expires) if expires else f"{DIM}бессрочно{NC}"
+                u_str = _fmt_bytes_limits(used)
+                
+                _box_row(f"  {n:<18} {q_str:<30} {e_str:<16} {u_str:<14}")
+        _box_row(); _box_sep()
+        _box_item("1", "⏱️   Задать лимиты пользователю")
+        _box_item("2", "🗑️   Снять лимиты (безлимит)")
+        _box_item("Q", "← Назад")
+        _box_bot(); print()
+        
+        try:
+            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+        except _Cancelled:
+            break
+        
+        if ch == "1":
+            try:
+                print(f"  {CYAN}Имя пользователя: {NC}", end="", flush=True)
+                uname = input().strip()
+            except KeyboardInterrupt:
+                print(); continue
+            if uname not in users:
+                _warn(f"'{uname}' не найден."); _pause(); continue
+            
+            # Квота
+            try:
+                print(f"  {CYAN}Квота трафика (10G, 500MB, пусто=безлимит): {NC}", end="", flush=True)
+                quota_str = input().strip()
+            except KeyboardInterrupt:
+                print(); continue
+            
+            # Срок
+            try:
+                print(f"  {CYAN}Срок действия (30d, 6m, 12h, пусто=бессрочно): {NC}", end="", flush=True)
+                expires_str = input().strip()
+            except KeyboardInterrupt:
+                print(); continue
+            
+            # max_connections — информируем что не поддерживается
+            _info("max_connections: бинарник telemt не поддерживает — пропуск.")
+            
+            if mtproto_set_limits(uname, quota_str or None, expires_str or None):
+                _ok(f"Лимиты установлены для '{uname}'.")
+            else:
+                _warn("Не удалось установить лимиты — проверьте формат.")
+            _pause()
+        
+        elif ch == "2":
+            try:
+                print(f"  {CYAN}Имя пользователя: {NC}", end="", flush=True)
+                uname = input().strip()
+            except KeyboardInterrupt:
+                print(); continue
+            if mtproto_remove_limits(uname):
+                _ok(f"Лимиты сняты для '{uname}' (безлимит).")
+            else:
+                _warn(f"Лимиты не были установлены для '{uname}'.")
+            _pause()
+        
+        elif ch in ("q", ""):
+            break
+
+
+def _fmt_bytes_limits(b: int) -> str:
+    """Форматирует байты для отображения в меню лимитов.
+    
+    Переиспользует существующую _fmt_bytes (строка 504) если доступна.
+    """
+    # _fmt_bytes определена выше в этом же модуле — Python найдёт её.
+    return _fmt_bytes(b)
 # ══════════════════════════════════════════════════════════════════════════════
 def _menu_update() -> None:
     _info("Проверяю обновления...")
@@ -2991,6 +3317,7 @@ def mtproto_menu() -> None:
         _box_item("5", "⬆️   Проверить и обновить")
         _box_item("6", "📊  Статистика трафика")
         _box_item("7", "📋  Статус / логи")
+        _box_item("L", "⏱️   Лимиты пользователей (квота + срок)")
         _box_item("X", "🔗  Xray-интеграция (SOCKS5 ↔ каскад)")
         _box_item("F", "🔀  Hybrid Fallback (Middle Proxy → Direct)")
         _box_item("S", "🛡️   SYN-limiter (стабилизация подключения)")
@@ -3080,6 +3407,13 @@ def mtproto_menu() -> None:
             for line in (r2.stdout or r2.stderr or "Нет записей").splitlines():
                 _box_row(f"  {DIM}{line[:_BOX_W - 4]}{NC}")
             _box_row(); _box_bot(); _pause()
+
+        elif ch == "l":
+            if not CONFIG_FILE.exists():
+                _warn("Telemt не установлен."); _pause(); continue
+            if not server_ip:
+                server_ip, _ = _get_public_ip()
+            _menu_limits(server_ip)
 
         elif ch == "8":
             if not (BIN_PATH.exists() or CONFIG_FILE.exists() or SERVICE_FILE.exists()):

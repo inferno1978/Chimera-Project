@@ -174,11 +174,14 @@ def setup_iptables_accounting(port: int) -> None:
     _run(["iptables", "-A", CHAIN_OUT, "-p", "tcp", "--sport", str(port),
           "-m", "comment", "--comment", "telemt-tx", "-j", "RETURN"])
 
-    # Cron: сброс счётчиков в 00:00
+    # Cron: сброс счётчиков в 00:00 + проверка лимитов каждые 5 мин
     try:
         CRON_FILE.write_text(
             f"0 0 * * * root iptables -Z {CHAIN_IN} && iptables -Z {CHAIN_OUT}"
             f"  # telemt-stats\n"
+            f"*/5 * * * * root /usr/bin/python3 -c \""
+            f"from chimera.modules.mtproto import mtproto_check_limits; "
+            f"mtproto_check_limits()\" # telemt-limits-check\n"
         )
         CRON_FILE.chmod(0o644)
     except Exception:
