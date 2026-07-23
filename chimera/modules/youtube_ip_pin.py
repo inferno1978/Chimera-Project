@@ -453,9 +453,13 @@ def apply_youtube_ip_pin(target_tag: str) -> bool:
         return False
 
     # Restart xray.
+    # v5.0.0 FIX: если _youtube_apply_to_xray только что перезапустил Xray,
+    # второй restart подряд может упасть (systemd не успел обработать первый).
+    # Добавляем sleep 2с перед restart и увеличиваем таймаут ожидания.
+    time.sleep(2)
     _run(["systemctl", "restart", "xray"], check=False, quiet=True)
     r = None
-    for _ in range(30):
+    for _ in range(45):  # увеличено с 30 до 45
         r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
         if r.stdout.strip() == "active":
             break
