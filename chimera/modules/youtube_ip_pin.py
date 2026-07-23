@@ -73,22 +73,39 @@ _GH_LISTS_DIR = "lists"
 
 # ── URL-билдеры ──────────────────────────────────────────────────────────────
 def _raw_github_url(filename: str) -> str:
-    """Прямой raw.githubusercontent.com URL."""
+    """Прямой raw.githubusercontent.com URL — основной источник.
+
+    Используется ПЕРВЫМ в _mirror_urls(), потому что raw.githubusercontent.com
+    не кэширует так агрессивно как jsDelivr (TTL по branch-ref). Для этого
+    источника (touhidurrr/iplist-youtube) нет публикуемых sha256-чек-сумм
+    (checksum_urls=None), соответственно staleness от кэширующего CDN
+    нечем ловить — post_install проверяет только валидность CIDR, а
+    устаревший-но-валидный список пройдёт проверку. См. аналогичный баг
+    с geosite.dat/geoip.dat (коммит e90f255) — там спасла sha256-сверка,
+    здесь её нет.
+    """
     return (f"https://raw.githubusercontent.com/"
             f"{_GH_OWNER}/{_GH_REPO}/{_GH_BRANCH}/{_GH_LISTS_DIR}/{filename}")
 
 
 def _jsdelivr_url(filename: str) -> str:
-    """jsDelivr CDN fallback URL."""
+    """jsDelivr CDN URL — fallback на случай недоступности GitHub из РФ.
+
+    Используется ВТОРЫМ в _mirror_urls(). jsDelivr кэширует по branch-ref
+    с TTL, может отдавать устаревший контент — без checksum-верификации
+    это не детектируется. Только fallback, не основной источник.
+    """
     return (f"https://cdn.jsdelivr.net/gh/"
             f"{_GH_OWNER}/{_GH_REPO}@{_GH_BRANCH}/{_GH_LISTS_DIR}/{filename}")
 
 
 def _mirror_urls(filename: str) -> list[str]:
-    """Список зеркал для скачивания (прямой GitHub + jsDelivr)."""
+    """Список зеркал для скачивания (прямой GitHub первым — без
+    checksum-верификации нельзя полагаться на кэширующий CDN как
+    основной источник, см. e90f255; jsDelivr — fallback)."""
     return [
-        _jsdelivr_url(filename),   # jsDelivr первым — обычно быстрее из РФ
-        _raw_github_url(filename), # прямой GitHub как fallback
+        _raw_github_url(filename),  # прямой GitHub первым — не кэширует
+        _jsdelivr_url(filename),    # jsDelivr — fallback, может отдавать stale
     ]
 
 
