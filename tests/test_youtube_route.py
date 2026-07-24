@@ -796,5 +796,222 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
         self.assertIn("3.3.3.3", output)
 
 
+class TestResolveNodeIpAndFlag(unittest.TestCase):
+    """Тесты для _resolve_node_ip_and_flag — хелпер резолва IP + emoji-флага.
+
+    v5.0.2: флаги стран (🇩🇪, 🇳🇱, ...) рядом с IP exit-нод в YouTube меню.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        # Очищаем кеш перед каждым тестом
+        from chimera.modules import youtube_route
+        youtube_route._NODE_IP_FLAG_CACHE.clear()
+
+    def test_nonexistent_host_returns_unavailable_ip(self):
+        """Host не резолвится → ('(IP недоступен)', '')."""
+        from chimera.modules import youtube_route
+        with patch("socket.gethostbyname", side_effect=OSError("no such host")):
+            ip, flag = youtube_route._resolve_node_ip_and_flag("nonexistent.invalid")
+        self.assertEqual(ip, "(IP недоступен)")
+        self.assertEqual(flag, "")
+
+    def test_successful_resolve_with_country(self):
+        """Host резолвится, ip-api.com отдаёт DE → (IP, '🇩🇪')."""
+        from chimera.modules import youtube_route
+        core = sys.modules["chimera._core"]
+        core._run = lambda args, **kw: _make_completed(
+            '{"status":"success","countryCode":"DE"}'
+        )
+        with patch("socket.gethostbyname", return_value="203.0.113.132"):
+            ip, flag = youtube_route._resolve_node_ip_and_flag("node1.example.com")
+        self.assertEqual(ip, "203.0.113.132")
+        self.assertEqual(flag, "🇩🇪")
+
+    def test_russian_flag(self):
+        """countryCode=RU → 🇷🇺."""
+        from chimera.modules import youtube_route
+        core = sys.modules["chimera._core"]
+        core._run = lambda args, **kw: _make_completed(
+            '{"status":"success","countryCode":"RU"}'
+        )
+        with patch("socket.gethostbyname", return_value="203.0.113.135"):
+            ip, flag = youtube_route._resolve_node_ip_and_flag("ru-node.example.com")
+        self.assertEqual(ip, "203.0.113.135")
+        self.assertEqual(flag, "🇷🇺")
+
+    def test_cache_avoids_repeat_network_calls(self):
+        """Повторный вызов с тем же host берёт результат из кеша —
+        socket.gethostbyname вызывается только один раз."""
+        from chimera.modules import youtube_route
+        core = sys.modules["chimera._core"]
+        core._run = lambda args, **kw: _make_completed(
+            '{"status":"success","countryCode":"NL"}'
+        )
+        call_count = [0]
+        def counting_gethostbyname(host):
+            call_count[0] += 1
+            return "203.0.113.133"
+        with patch("socket.gethostbyname", side_effect=counting_gethostbyname):
+            r1 = youtube_route._resolve_node_ip_and_flag("cached.example.com")
+            r2 = youtube_route._resolve_node_ip_and_flag("cached.example.com")
+        self.assertEqual(r1, r2)
+        self.assertEqual(call_count[0], 1,
+                         "gethostbyname должен вызываться 1 раз (кеш), "
+                         f"фактически {call_count[0]}")
+
+    def test_ip_api_failure_returns_empty_flag(self):
+        """ip-api.com вернул ошибку → flag пустой, IP всё равно отдаём."""
+        from chimera.modules import youtube_route
+        core = sys.modules["chimera._core"]
+        core._run = lambda args, **kw: _make_completed(
+            '{"status":"fail"}', returncode=0
+        )
+        with patch("socket.gethostbyname", return_value="1.2.3.4"):
+            ip, flag = youtube_route._resolve_node_ip_and_flag("fail.example.com")
+        self.assertEqual(ip, "1.2.3.4")
+        self.assertEqual(flag, "",
+                         "При ошибке ip-api.com flag должен быть пустым, "
+                         "не 🌐 (это зарезервировано для балансировщика)")
+
+
+class TestYoutubeMenuFlagRendering(unittest.TestCase):
+    """Регрессионные тесты рендера multi-node меню с флагами.
+
+    v5.0.2: флаги 🇷🇺 (RU), 🇩🇪/🇳🇱/... (exit-ноды), 🌍 (балансировщик).
+    Границы бокса не должны сломаться — _wcslen корректно считает emoji.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state_path = self._tmpdir / "state.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _render_menu(self, chain_nodes: list, state_target: str = "off") -> str:
+        """Рендерит multi-node YouTube меню, возвращает вывод."""
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import youtube_route
+        # Очищаем кеш флагов перед каждым рендером
+        youtube_route._NODE_IP_FLAG_CACHE.clear()
+
+        self._state_path.write_text(json.dumps({"youtube_route_target": state_target}))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        core.CHAIN_NODES = chain_nodes
+        core.AWG_EXIT_ENABLED = False
+        core.CONFIG_DIR = self._tmpdir
+        # Stub info/warn/success чтобы не засорять вывод
+        core.info = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+
+        def _input_with_print(prompt="", *a, **kw):
+            print(prompt, end="", flush=True)
+            return "q"
+
+        captured = io.StringIO()
+        with patch.object(youtube_route, "_core_module", lambda: core), \
+             patch("builtins.input", side_effect=_input_with_print), \
+             patch("socket.gethostbyname",
+                   side_effect=lambda h: f"1.2.3.{len(h) % 200 + 1}"), \
+             redirect_stdout(captured):
+            youtube_route.do_manage_youtube_via_ru()
+        return captured.getvalue()
+
+    def test_ru_entry_has_russian_flag(self):
+        """Пункт 'RU entry' должен содержать 🇷🇺."""
+        output = self._render_menu([
+            {"host": "node1.example.com", "port": 443},
+        ])
+        # Ищем строку с RU entry
+        ru_line = [l for l in output.splitlines() if "RU entry" in l]
+        self.assertEqual(len(ru_line), 1, f"Должна быть 1 строка RU entry, вывод:\n{output}")
+        self.assertIn("🇷🇺", ru_line[0],
+                      f"RU entry должен содержать 🇷🇺, строка: {ru_line[0]}")
+
+    def test_balancer_has_globe_emoji(self):
+        """Пункт 'балансировщик' должен содержать 🌍."""
+        output = self._render_menu([
+            {"host": "node1.example.com", "port": 443},
+            {"host": "node2.example.com", "port": 443},
+        ])
+        balancer_lines = [l for l in output.splitlines() if "балансировщик" in l]
+        self.assertEqual(len(balancer_lines), 1)
+        self.assertIn("🌍", balancer_lines[0],
+                      f"Балансировщик должен содержать 🌍, строка: {balancer_lines[0]}")
+
+    def test_box_right_border_aligned_with_emoji(self):
+        """Правая граница бокса (║) должна быть выровнена на всех строках,
+        несмотря на emoji-флаги (2 колонки) и 🌍.
+
+        Это regression-тест на багу: если _wcslen не учитывал emoji как
+        2 колонки, правая граница съезжала.
+        """
+        # 3 ноды с разными hostnames → разная длина IP, но флаги добавляют
+        # 2 колонки каждый. Граница должна остаться ровной.
+        output = self._render_menu([
+            {"host": "a.example.com",   "port": 443},
+            {"host": "bb.example.com",  "port": 443},
+            {"host": "ccc.example.com", "port": 443},
+        ])
+        lines = output.splitlines()
+        # Находим строки с exit-нодами (содержат 'Exit-нода #')
+        exit_lines = [l for l in lines if "Exit-нода #" in l]
+        self.assertGreaterEqual(len(exit_lines), 3,
+                                f"Должно быть 3 exit-ноды, вывод:\n{output}")
+        # Все строки должны заканчиваться на '║' (правая граница бокса)
+        for line in exit_lines:
+            # Убираем trailing whitespace и проверяем последний символ
+            stripped = line.rstrip()
+            self.assertTrue(stripped.endswith("║"),
+                            f"Строка должна заканчиваться на '║' (правая граница "
+                            f"бокса), но заканчивается на {stripped[-5:]!r}:\n{line}")
+        # Проверим также RU entry и балансировщик
+        ru_lines = [l for l in lines if "RU entry" in l]
+        balancer_lines = [l for l in lines if "балансировщик" in l]
+        for line in ru_lines + balancer_lines:
+            stripped = line.rstrip()
+            self.assertTrue(stripped.endswith("║"),
+                            f"Строка должна заканчиваться на '║':\n{line}")
+
+    def test_flag_appears_after_ip_for_exit_nodes(self):
+        """Флаг emoji должен идти после IP-адреса exit-ноды, не до него."""
+        # Mock: ip-api.com отдаёт DE для всех IP.
+        # ВАЖНО: _render_menu использует lambda h: f"1.2.3.{len(h) % 200 + 1}"
+        # для socket.gethostbyname — поэтому IP будут вида 1.2.3.X.
+        # Нужно передать ≥2 ноды чтобы сработал multi-node режим (иначе
+        # рендерится single-node меню без 'Exit-нода #1').
+        core = sys.modules["chimera._core"]
+        original_run = core._run
+        core._run = lambda args, **kw: _make_completed(
+            '{"status":"success","countryCode":"DE"}'
+        )
+        try:
+            output = self._render_menu([
+                {"host": "node1.example.com", "port": 443},
+                {"host": "node2.example.com", "port": 443},
+            ])
+        finally:
+            core._run = original_run
+
+        exit_lines = [l for l in output.splitlines() if "Exit-нода #1" in l]
+        self.assertEqual(len(exit_lines), 1,
+                         f"Должна быть 1 строка с Exit-нода #1, вывод:\n{output}")
+        line = exit_lines[0]
+        # IP должен быть раньше флага в строке.
+        # _render_menu генерирует IP вида 1.2.3.X (mock gethostbyname).
+        ip_pos = line.find("1.2.3.")
+        flag_pos = line.find("🇩🇪")
+        self.assertGreater(ip_pos, 0, f"IP должен быть в строке: {line}")
+        self.assertGreater(flag_pos, 0, f"Флаг 🇩🇪 должен быть в строке: {line}")
+        self.assertLess(ip_pos, flag_pos,
+                        f"IP должен быть раньше флага в строке:\n{line}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
