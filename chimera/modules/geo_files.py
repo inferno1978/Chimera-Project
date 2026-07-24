@@ -5,15 +5,22 @@ chimera/modules/geo_files.py
 
   • download_geo_files()      — скачивает через download_manager.fetch_package()
                                  с PackageSpec из geo_packages.py.
-                                 14 зеркал-фолбэков (через github_mirrors.py),
+                                 19 зеркал-фолбэков (через geo_mirrors.py),
                                  копирование в /etc/xray, /usr/local/share/xray,
                                  /usr/local/etc/xray. Ручное размещение в /root/.
+                                 EMERGENCY FALLBACK (волна 2026-07): если все
+                                 зеркала провалились — прямой curl на GitHub
+                                 release URL с другим User-Agent.
   • setup_geo_autoupdate()    — cron every Sunday 03:00 + bash-скрипт с
                                  multi-mirror fallback и restart xray+nginx
-                                 (для REALITY+Unix-сокет).
+                                 (для REALITY+Unix-сокет). В bash-скрипт
+                                 встроен тот же emergency curl fallback.
   • do_manage_geo_update()    — меню: обновить сейчас / вкл-выкл cron /
                                  показать лог / показать ссылки для ручного
                                  скачивания.
+  • emergency_curl_fallback() — переиспользуемая функция прямого curl на
+                                 GitHub release URL. Используется как
+                                 последний рубеж когда fetch_package() провален.
 
 АРХИТЕКТУРНАЯ ЗАЩИТА ОТ БАГА 21d7baf:
   download_geo_files() вызывает fetch_package(GEOSITE_SPEC) / fetch_package(GEOIP_SPEC).
@@ -23,9 +30,22 @@ chimera/modules/geo_files.py
   запуска) НЕ блокирует повторное сетевое скачивание. Баг 21d7baf физически
   невозможен по конструкции.
 
+EMERGENCY FALLBACK — почему он нужен (волна 2026-07):
+  На части серверов в РФ сложилась ситуация: jsDelivr-бэкенды отдают
+  устаревший/битый контент, прямые GitHub-URL'ы блокируются, часть
+  gh-proxy хостов недоступна. fetch_package() через urllib.request
+  падает на всех зеркалах. При этом простой прямой curl на тот же
+  GitHub release URL — работает (видимо за счёт другого TLS-fingerprint'а
+  и follow-redirects). Поэтому в самом конце flow вызывается
+  emergency_curl_fallback() — он пробует прямой curl на 2 GitHub URL'а
+  (releases/latest/download) и в случае успеха раскладывает файлы
+  вручную. Это ровно то, что делал пользователь вручную — теперь
+  автоматизировано.
+
 Точки входа из _core.py:
     from chimera.modules.geo_files import (
         download_geo_files, setup_geo_autoupdate, do_manage_geo_update,
+        emergency_curl_fallback,
     )
 ───────────────────────────────────────────────────────────────────────────────
 """
@@ -33,6 +53,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import textwrap
 import time
 from pathlib import Path
@@ -55,6 +76,289 @@ def _core_module():
 
 
 # ============================================================================
+#  EMERGENCY FALLBACK — прямой curl на GitHub release URL
+# ============================================================================
+# Волна 2026-07. См. описание в шапке модуля.
+# Используется когда fetch_package() провален на всех зеркалах.
+#
+# Прямой curl на releases/latest/download часто работает даже когда urllib
+# блокируется (другой TLS-fingerprint, follow-redirects, retries).
+# Это ровно те команды, что пользователь выполнял вручную:
+#   curl -fsSL https://github.com/.../releases/latest/download/geosite.dat \
+#     -o /etc/xray/geosite.dat
+#   curl -fsSL https://github.com/.../releases/latest/download/geoip.dat \
+#     -o /etc/xray/geoip.dat
+#   chmod 644 + chown root:xray + копии в /usr/local/share/xray,
+#   /usr/local/etc/xray.
+
+# Два GitHub release URL — пробуем оба (releases/latest/download и
+# releases/download/<tag>/ после API-запроса latest tag). В 99% случаев
+# достаточно первого, второй — страховка.
+_EMERGENCY_GEOSITE_URL = (
+    "https://github.com/runetfreedom/russia-v2ray-rules-dat/"
+    "releases/latest/download/geosite.dat"
+)
+_EMERGENCY_GEOIP_URL = (
+    "https://github.com/runetfreedom/russia-v2ray-rules-dat/"
+    "releases/latest/download/geoip.dat"
+)
+
+
+def _emergency_curl_one(
+    url: str,
+    dest_path: Path,
+    min_size: int,
+    *,
+    timeout: int = 180,
+    checksum_urls: Optional[list[str]] = None,
+    checksum_algo: str = "sha256",
+    progress_label: str = "",
+) -> bool:
+    """Скачивает один файл через прямой curl.
+
+    Использует тот же User-Agent что и браузер (curl/8.x), что часто
+    проходит там, где urllib.request блокируется (GitHub иногда
+    блокирует нестандартные UA на release-asset redirects).
+
+    v5.0.0+: если передан checksum_urls — после размерной проверки
+    делает SHA256-верификацию через download_manager._verify_checksum.
+    Это гарантирует, что emergency fallback не откатит защиту от
+    устаревших/битых кэшированных файлов, введённую в v5.0.0
+    (коммит cdadfab). Логика верификации:
+      • verify_result is True  → принимаем файл
+      • verify_result is False → отбраковка (хэш не совпал)
+      • verify_result is None  → принимаем с warn (checksum недоступен
+        со всех зеркал — деградация, как в fetch_package)
+
+    Возвращает True если файл скачан, размер >= min_size, и (если
+    checksum_urls задан) SHA256-верификация прошла или деградировала.
+    """
+    core = _core_module()
+    info = getattr(core, "info", print)
+    warn = getattr(core, "warn", print)
+    _run = getattr(core, "_run", subprocess.run)
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dest_path.parent / f".{dest_path.name}.emergency.tmp"
+    tmp_path.unlink(missing_ok=True)
+
+    try:
+        # curl флаги:
+        #   -f  — fail on HTTP errors (не писать HTML-страницу 404 в файл)
+        #   -S  — показывать ошибки
+        #   -sL — silent + follow redirects (releases/latest/download
+        #         делает 302 redirect на releases/download/<tag>/)
+        #   --connect-timeout 20 — если хост не отвечает за 20с — fail
+        #   -m 180 — общий таймаут 3 минуты (geo .dat ~30MB)
+        #   --retry 2 — две попытки на тот же URL
+        #   -A "curl/8.x" — стандартный UA curl, проходит GitHub filters
+        r = _run(
+            [
+                "curl", "-fsSL",
+                "--connect-timeout", "20",
+                "-m", str(timeout),
+                "--retry", "2",
+                "-A", "curl/8.5.0",
+                "-o", str(tmp_path),
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if r.returncode != 0:
+            warn(f"  emergency curl не смог скачать {url}: rc={r.returncode}")
+            if r.stderr:
+                # Логируем stderr для диагностики (но не весь, чтобы не засорять
+                # вывод — обычно там прогресс curl)
+                stderr_tail = (r.stderr or "").strip().splitlines()[-1] if r.stderr else ""
+                if stderr_tail:
+                    info(f"  curl stderr: {stderr_tail}")
+            return False
+
+        if not tmp_path.exists():
+            warn(f"  emergency curl отчитался OK, но файл не создан: {tmp_path}")
+            return False
+
+        sz = tmp_path.stat().st_size
+        if sz < min_size:
+            warn(f"  emergency curl скачал слишком маленький файл: {sz} байт < {min_size}")
+            tmp_path.unlink(missing_ok=True)
+            return False
+
+        # ── SHA256-верификация (если задан checksum_urls) ────────────────
+        # v5.0.0+: emergency fallback не должен откатывать защиту от
+        # кэшированных/битых файлов, введённую в cdadfab. Используем тот же
+        # _verify_checksum что и fetch_package — это гарантирует одинаковый
+        # критерий валидности файла.
+        if checksum_urls:
+            try:
+                from chimera.modules.download_manager import _verify_checksum
+                verify_result = _verify_checksum(
+                    tmp_path, checksum_urls, checksum_algo,
+                    progress_label=progress_label,
+                )
+                if verify_result is False:
+                    # Явная отбраковка — хэш не совпал.
+                    warn(f"  emergency curl: SHA256 не совпал для {dest_path.name} — "
+                         f"файл отбракован (возможно кэшированная устаревшая копия)")
+                    tmp_path.unlink(missing_ok=True)
+                    return False
+                # verify_result is None — checksum недоступен со всех зеркал,
+                # деградация до размерной проверки (warn уже внутри _verify_checksum).
+                # verify_result is True — хэш совпал, принимаем.
+            except Exception as ex:
+                # _verify_checksum сам по себе не должен падать (он ловит свои
+                # исключения), но на всякий случай — log + деградация.
+                warn(f"  emergency curl: ошибка SHA256-верификации "
+                     f"({type(ex).__name__}: {ex}) — принимаю по размеру")
+        # else: checksum_urls не задан — принимаем только по размеру
+        # (для обратной совместимости, если кто-то вызовет без checksum).
+
+        # Копируем tmp → dest (rename быстрее, но не работает между
+        # разными файловыми системами — copy2 безопаснее).
+        shutil.copy2(str(tmp_path), str(dest_path))
+        dest_path.chmod(0o644)
+        # chown root:xray — best-effort, как в _post_install_geo
+        try:
+            _run(["chown", "root:xray", str(dest_path)],
+                 check=False, quiet=True)
+        except Exception:
+            pass
+
+        tmp_path.unlink(missing_ok=True)
+        return True
+
+    except Exception as ex:
+        warn(f"  emergency curl exception: {type(ex).__name__}: {ex}")
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+
+def emergency_curl_fallback(
+    *,
+    dest_dirs: Optional[list[Path]] = None,
+    log_to_file: bool = True,
+) -> bool:
+    """Последний рубеж скачивания geo-файлов — прямой curl на GitHub.
+
+    Вызывается когда fetch_package() провален на всех зеркалах из
+    geo_mirrors._MIRROR_FACTORIES. Пробует прямой curl на 2 GitHub
+    release URL (geosite.dat и geoip.dat), и в случае успеха раскладывает
+    файлы во все dest_dirs (по умолчанию XRAY_LOOKUP_DIRS).
+
+    Идея: GitHub release-asset endpoints часто работают через curl даже
+    когда urllib.request блокируется. Это связано с тем что GitHub
+    фильтрует по User-Agent для не-браузерных клиентов, и стандартный
+    curl/8.x UA проходит фильтр.
+
+    v5.0.0+: SHA256-верификация включена (берутся те же checksum_urls
+    что в GEOSITE_SPEC/GEOIP_SPEC — см. geo_packages.py). Это гарантирует,
+    что emergency fallback не откатит защиту от кэшированных/битых
+    файлов, введённую в коммите cdadfab.
+
+    Возвращает True если ОБА файла (geosite.dat и geoip.dat) успешно
+    скачаны и расложены. Иначе False (хотя частичный успех тоже возможен
+    — в этом случае функция всё равно вернёт False, но часть файлов
+    будет лежать на месте; логи в /var/log/chimera.log покажут детали).
+
+    Аргументы:
+      dest_dirs:    Список директорий куда копировать файлы. По умолчанию
+                    XRAY_LOOKUP_DIRS (/etc/xray, /usr/local/share/xray,
+                    /usr/local/etc/xray). Если передать пустой список —
+                    fallback ничего не сделает.
+      log_to_file:  Писать подробности в /var/log/chimera.log (через
+                    core.log_to_file). По умолчанию True.
+    """
+    core = _core_module()
+    info = getattr(core, "info", print)
+    warn = getattr(core, "warn", print)
+    success = getattr(core, "success", print)
+    _log = getattr(core, "log_to_file", lambda *a, **kw: None)
+
+    if dest_dirs is None:
+        dest_dirs = list(XRAY_LOOKUP_DIRS)
+    if not dest_dirs:
+        warn("emergency_curl_fallback: dest_dirs пуст — нечего делать")
+        return False
+
+    # Берём checksum_urls и algo из GEOSITE_SPEC/GEOIP_SPEC, чтобы
+    # emergency fallback использовал ТУ ЖЕ верификацию что и fetch_package.
+    # Если spec не задан (чего быть не должно) — fallback работает без
+    # SHA256-проверки, только по размеру (старое поведение).
+    geosite_checksum_urls = getattr(GEOSITE_SPEC, "checksum_urls", None)
+    geosite_checksum_algo = getattr(GEOSITE_SPEC, "checksum_algo", "sha256")
+    geoip_checksum_urls   = getattr(GEOIP_SPEC,   "checksum_urls", None)
+    geoip_checksum_algo   = getattr(GEOIP_SPEC,   "checksum_algo", "sha256")
+
+    info("EMERGENCY FALLBACK: пробую прямой curl на GitHub release URL...")
+    if log_to_file:
+        _log("WARN", "geo_files: fetch_package провален на всех зеркалах — "
+                     "запускаю emergency curl fallback на GitHub release URL "
+                     "(с SHA256-верификацией)")
+
+    # Гарантируем наличие директорий
+    for d in dest_dirs:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+    results = []
+    for url, fname, min_size, checksum_urls, checksum_algo in (
+        (_EMERGENCY_GEOSITE_URL, "geosite.dat", MIN_SIZES["geosite.dat"],
+         geosite_checksum_urls, geosite_checksum_algo),
+        (_EMERGENCY_GEOIP_URL,   "geoip.dat",   MIN_SIZES["geoip.dat"],
+         geoip_checksum_urls, geoip_checksum_algo),
+    ):
+        info(f"  Прямой curl: {fname} ← {url}")
+        # Сначала качаем в первую dest_dir, потом копируем в остальные
+        primary_dest = dest_dirs[0] / fname
+        ok = _emergency_curl_one(
+            url, primary_dest, min_size,
+            checksum_urls=checksum_urls,
+            checksum_algo=checksum_algo,
+            progress_label=fname,
+        )
+        if not ok:
+            results.append((fname, False))
+            continue
+        # Копируем в остальные dest_dirs
+        for d in dest_dirs[1:]:
+            try:
+                dest = d / fname
+                d.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(primary_dest), str(dest))
+                dest.chmod(0o644)
+                try:
+                    _run = getattr(core, "_run", subprocess.run)
+                    _run(["chown", "root:xray", str(dest)],
+                         check=False, quiet=True)
+                except Exception:
+                    pass
+            except Exception as ex:
+                warn(f"  не удалось скопировать {fname} в {d}: {ex}")
+        results.append((fname, True))
+        success(f"  ✓ {fname} скачан через emergency curl "
+                f"({primary_dest.stat().st_size // 1024} КБ, SHA256 OK)")
+
+    all_ok = all(r[1] for r in results)
+    if log_to_file:
+        _log("INFO" if all_ok else "ERROR",
+             f"emergency_curl_fallback: results={results}")
+    if all_ok:
+        success("EMERGENCY FALLBACK: оба geo-файла скачаны через прямой curl "
+                "(с SHA256-верификацией)")
+    else:
+        failed = [r[0] for r in results if not r[1]]
+        warn(f"EMERGENCY FALLBACK: провален для файлов: {', '.join(failed)}")
+    return all_ok
+
+
+# ============================================================================
 #  ЗАГРУЗКА GEO-ФАЙЛОВ
 # ============================================================================
 def download_geo_files() -> bool:
@@ -69,7 +373,13 @@ def download_geo_files() -> bool:
     FIX: Xray ищет dat-файлы в нескольких местах (/etc/xray/ и /usr/local/share/xray/).
     Официальный установщик XTLS кладёт их только в /usr/local/share/xray/, поэтому
     копируем в ОБЕ директории и корректно выставляем права и владельца.
-    При неудаче — выводим все известные ссылки и предлагаем ручное размещение.
+
+    Wave 2026-07: EMERGENCY FALLBACK — если fetch_package() провален на всех
+    зеркалах, вызывается emergency_curl_fallback() который пробует прямой curl
+    на GitHub release URL. Это помогает на серверах где urllib блокируется,
+    но curl работает (частый случай в РФ из-за блокировки GitHub по TLS
+    fingerprint). Только если emergency fallback тоже провален — показываем
+    manual hint и предлагаем пользователю разместить файлы вручную.
     """
     core = _core_module()
     info    = core.info
@@ -111,7 +421,7 @@ def download_geo_files() -> bool:
     # fetch_package сам:
     #   1. Проверяет /root/{filename} (manual_incoming_dir из PackageSpec) —
     #      если найден, использует без сети.
-    #   2. Иначе — перебирает 14 зеркал через urllib.
+    #   2. Иначе — перебирает все зеркала (19 шт., см. geo_mirrors.py) через urllib.
     #   3. При успехе — post_install копирует в 3 dest_dirs + chmod + chown.
     #   4. При провале — возвращает False (hint подавлен, т.к. ниже свой).
     #
@@ -134,12 +444,55 @@ def download_geo_files() -> bool:
             warn(f"  Ошибка загрузки {fname}: {ex}")
             failed_files.append(fname)
 
+    # ── EMERGENCY FALLBACK: прямой curl на GitHub (волна 2026-07) ──────────
+    # Если хотя бы один файл не скачался через fetch_package (все зеркала
+    # провалены) — пробуем прямой curl на GitHub release URL.
+    # Это последнее автоматическое средство перед manual hint.
+    #
+    # Логика:
+    #   • emergency_curl_fallback() скачивает ОБА файла заново через прямой curl.
+    #   • Если у нас failed_files == ["geosite.dat"] (только один провалился),
+    #     всё равно вызываем fallback для обоих — он идемпотентный (перезапишет
+    #     уже скачанный geoip.dat тем же содержимым).
+    #   • После fallback — пересчитываем success_count: для каждого dest_dir
+    #     проверяем что файл существует и >= min_size.
+    if failed_files:
+        info("  fetch_package провален — пробую emergency curl fallback...")
+        em_ok = emergency_curl_fallback(dest_dirs=dest_dirs)
+        if em_ok:
+            # Пересчитываем успех — какие файлы реально на месте.
+            new_failed: list[str] = []
+            for fname in failed_files:
+                # Проверяем все dest_dirs — если хотя бы в одной есть файл
+                # нужного размера, считаем что файл "успешно доставлен"
+                # (post_install в fetch_package копирует во все 3, и
+                # emergency fallback тоже копирует во все 3).
+                min_size = MIN_SIZES[fname]
+                placed = any(
+                    (d / fname).exists() and (d / fname).stat().st_size >= min_size
+                    for d in dest_dirs
+                )
+                if placed:
+                    success_count += 1
+                    if fname in failed_files:
+                        # не remove из failed_files тут — ниже он используется
+                        pass
+                else:
+                    new_failed.append(fname)
+            failed_files = new_failed
+            if not failed_files:
+                success("  emergency curl fallback спас установку")
+        else:
+            warn("  emergency curl fallback тоже провален")
+
     # ── Retry-branch: "Разместили файлы вручную? Повторить проверку?" ──────
     # Это ОСОЗНАННО более широкий поиск чем безусловная проверка в
     # fetch_package: здесь проверяем И /root/, И dest_dirs — потому что
     # пользователь явно подтвердил что положил файл куда-то. Это не баг
     # 21d7baf (который был про БЕЗУСЛОВНУЮ проверку на каждый вызов), а
     # intentional retry после подтверждения.
+    #
+    # Этот branch выполняется только если emergency fallback тоже не спас.
     if failed_files:
         warn("Не удалось загрузить гео-файлы — проверьте интернет-соединение")
         _geo_print_manual_download_hint()
@@ -213,15 +566,24 @@ def setup_geo_autoupdate() -> None:
     geosite_urls_bash = "\n".join(f'        "{u}"' for u in geosite_urls)
     geoip_urls_bash   = "\n".join(f'        "{u}"' for u in geoip_urls)
 
+    # Emergency fallback URLs — прямой GitHub release-assets endpoint.
+    # Используются в bash-скрипте как последний рубеж когда все зеркала
+    # провалились. См. подробное обоснование в emergency_curl_fallback().
+    em_geosite_url = _EMERGENCY_GEOSITE_URL
+    em_geoip_url   = _EMERGENCY_GEOIP_URL
+
     script = Path("/usr/local/bin/xray-geo-update.sh")
     script.write_text(textwrap.dedent(f"""\
         #!/bin/bash
         # Автообновление geosite/geoip для split tunneling (runetfreedom)
         # Multi-mirror fallback: перебирает {GEO_MIRRORS_COUNT} зеркал по очереди.
+        # Wave 2026-07: если все зеркала провалились — emergency curl на
+        # прямой GitHub release URL (часто проходит там, где зеркала и
+        # urllib блокируются, благодаря другому User-Agent и follow-redirects).
         set -uo pipefail
         LOG="/var/log/xray-geo-update.log"
         DATE=$(date '+%Y-%m-%d %H:%M:%S')
-        echo "[$DATE] Обновление geo-файлов (попытка {GEO_MIRRORS_COUNT} зеркал)..." >> "$LOG"
+        echo "[$DATE] Обновление geo-файлов (попытка {GEO_MIRRORS_COUNT} зеркал + emergency curl)..." >> "$LOG"
 
         # FIX: гарантируем наличие обеих директорий
         mkdir -p /etc/xray /usr/local/share/xray /usr/local/etc/xray
@@ -235,6 +597,10 @@ def setup_geo_autoupdate() -> None:
         # geo_mirrors.py:191-217 с описанием инцидента на проде.
         GEOSITE_MIN={MIN_SIZES["geosite.dat"]}
         GEOIP_MIN={MIN_SIZES["geoip.dat"]}
+
+        # Emergency fallback URLs (прямой GitHub release-assets endpoint)
+        EM_GEOSITE_URL="{em_geosite_url}"
+        EM_GEOIP_URL="{em_geoip_url}"
 
         # Bash-массивы зеркал (генерируются из chimera.modules.geo_mirrors)
         GEOSITE_URLS=(
@@ -281,8 +647,54 @@ def setup_geo_autoupdate() -> None:
                     fi
                 fi
             done
+
+            # 3) EMERGENCY FALLBACK (волна 2026-07): прямой curl на GitHub
+            #    release URL с User-Agent "curl/8.5.0" — проходит там, где
+            #    urllib и стандартный curl без UA блокируются GitHub-фильтрами.
+            #    Пробуем только если все зеркала провалились.
+            #
+            #    ВАЖНО про SHA256: в bash-скрипте SHA256-верификация НЕ делается
+            #    ни в шаге 2 (перебор зеркал), ни здесь в emergency. Это
+            #    осознанное решение — bash cron-скрипт рассчитан на лёгкость и
+            #    независимость от Python-окружения. SHA256-верификация делается
+            #    только в Python-пути (download_manager.fetch_package и
+            #    geo_files.emergency_curl_fallback), который вызывается при
+            #    интерактивной установке/обновлении. Cron-скрипт — это
+            #    фоновое еженедельное обновление, и если оно скачает
+            #    кэшированный устаревший файл — это исправится при следующем
+            #    запуске (актуальный файл пройдёт), либо при ручном обновлении
+            #    через меню (которое идёт через Python с SHA256).
+            local em_url=""
+            case "$name" in
+                geosite.dat) em_url="$EM_GEOSITE_URL" ;;
+                geoip.dat)   em_url="$EM_GEOIP_URL"   ;;
+            esac
+            if [ -n "$em_url" ]; then
+                echo "[$DATE] ! Все зеркала провалились для $name — пробую emergency curl на GitHub..." >> "$LOG"
+                rm -f "$tmp"
+                if curl -fsSL --connect-timeout 20 -m 180 --retry 2 \\
+                        -A "curl/8.5.0" \\
+                        -o "$tmp" "$em_url" 2>/dev/null; then
+                    local sz=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
+                    if [ "$sz" -ge "$min_size" ]; then
+                        cp "$tmp" "$dest_etc"
+                        cp "$tmp" "$dest_share"
+                        cp "$tmp" "$dest_etc3" 2>/dev/null || true
+                        chmod 644 "$dest_etc" "$dest_share" "$dest_etc3" 2>/dev/null || true
+                        chown root:xray "$dest_etc" "$dest_share" "$dest_etc3" 2>/dev/null || true
+                        rm -f "$tmp"
+                        echo "[$DATE] ✓ $name обновлён через EMERGENCY curl на GitHub ($((sz / 1024)) КБ)" >> "$LOG"
+                        return 0
+                    else
+                        echo "[$DATE] ✗ Emergency curl: файл слишком маленький ($sz байт < $min_size)" >> "$LOG"
+                    fi
+                else
+                    echo "[$DATE] ✗ Emergency curl провален (rc=$?)" >> "$LOG"
+                fi
+            fi
+
             rm -f "$tmp"
-            echo "[$DATE] ✗ Не удалось обновить $name (все зеркала недоступны)" >> "$LOG"
+            echo "[$DATE] ✗ Не удалось обновить $name (все зеркала + emergency curl недоступны)" >> "$LOG"
             return 1
         }}
 

@@ -62,7 +62,10 @@ class TestMirrorListStructure(unittest.TestCase):
 
     def test_at_least_14_mirrors(self):
         """Regression: старый список содержал 9 зеркал.
-        После рефакторинга должно быть ≥14 (4 jsDelivr + 2 GitHub + 7 прокси + 1 Statically)."""
+        После рефакторинга должно быть ≥14 (4 jsDelivr + 2 GitHub + 7 прокси + 1 Statically).
+        Wave 2026-07: добавлены РФ-специфичные fallback'и (4 новых gh-proxy + 1 РФ-зеркало
+        jsDelivr) — теперь 19 зеркал. Нижняя граница остаётся 14, чтобы не ломать
+        будущие rollback'и."""
         self.assertGreaterEqual(GEO_MIRRORS_COUNT, 14)
 
     def test_no_duplicate_urls(self):
@@ -157,9 +160,17 @@ class TestUrlOrdering(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertIn("jsdelivr.net", url)
 
-    def test_statically_goes_last(self):
+    def test_statically_present_near_end(self):
+        """Statically CDN присутствует в списке — раньше был последним,
+        теперь после него идут РФ-специфичные fallback'ы (jsd.cooluc.ru).
+        Гарантируем что Statically НЕ раньше середины списка (т.е. это fallback)."""
         urls = get_geosite_urls()
-        self.assertIn("cdn.statically.io", urls[-1])
+        statically_idx = next(
+            (i for i, u in enumerate(urls) if "cdn.statically.io" in u), -1
+        )
+        self.assertGreater(statically_idx, len(urls) // 2,
+                           f"Statically должен быть в fallback-части списка, "
+                           f"а не в начале. Позиция: {statically_idx}/{len(urls)}")
 
 
 class TestManualUploadPaths(unittest.TestCase):

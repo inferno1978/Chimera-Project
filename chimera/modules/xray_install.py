@@ -1563,7 +1563,50 @@ def _xray_update_geo_runetfreedom() -> bool:
             warn(f"  Не удалось скачать {fname} из всех источников — split tunneling будет частично отключён")
             failed_files.append(fname)
 
-    # Если что-то не скачалось — предлагаем ручное размещение
+    # ── EMERGENCY FALLBACK: прямой curl на GitHub (волна 2026-07) ──────────
+    # Если fetch_package провален на всех зеркалах — пробуем прямой curl
+    # на GitHub release URL. См. подробное обоснование в
+    # geo_files.emergency_curl_fallback().
+    #
+    # ВАЖНО: НЕ импортируем XRAY_LOOKUP_DIRS здесь повторно — он уже
+    # импортирован вверху модуля. Повторный `from ... import` внутри
+    # функции сделал бы переменную локальной для всей функции и сломал
+    # строку `dest_dirs_raw = list(XRAY_LOOKUP_DIRS) + ...` выше
+    # (UnboundLocalError).
+    if failed_files:
+        info("  fetch_package провален — пробую emergency curl fallback...")
+        try:
+            from chimera.modules.geo_files import emergency_curl_fallback
+            # geo_dirs здесь может содержать /usr/local/bin/xray (родная
+            # директория бинарника) — для fallback не нужно, копируем только
+            # в стандартные XRAY_LOOKUP_DIRS (уже импортированы вверху модуля).
+            em_ok = emergency_curl_fallback(dest_dirs=list(XRAY_LOOKUP_DIRS))
+        except Exception as ex:
+            warn(f"  emergency curl fallback упал с исключением: {ex}")
+            em_ok = False
+        if em_ok:
+            # Пересчитываем успех — какие файлы реально на месте.
+            new_failed: list[str] = []
+            for fname in failed_files:
+                min_size = MIN_SIZES[fname]
+                placed = any(
+                    (d / fname).exists() and (d / fname).stat().st_size >= min_size
+                    for d in XRAY_LOOKUP_DIRS
+                )
+                if placed:
+                    if fname == "geosite.dat":
+                        geosite_ok = True
+                        info(f"  geosite.dat → {', '.join(str(d) for d in geo_dirs)} "
+                             f"(через emergency curl)")
+                else:
+                    new_failed.append(fname)
+            failed_files = new_failed
+            if not failed_files:
+                success("  emergency curl fallback спас обновление гео-файлов")
+        else:
+            warn("  emergency curl fallback тоже провален")
+
+    # Если что-то не скачалось даже после emergency fallback — предлагаем ручное размещение
     if failed_files:
         warn(f"  Не удалось загрузить гео-файлы — проверьте интернет-соединение")
         _geo_print_manual_download_hint()

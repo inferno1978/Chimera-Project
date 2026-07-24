@@ -24,9 +24,14 @@ chimera/modules/geo_mirrors.py
      лучший из РФ.
   2. Прямой GitHub — raw.githubusercontent.com и release-assets.
   3. Прокси-зеркала GitHub (ghproxy × 3, gh.con.sh, gitmirror, moeyy,
-     ghps.cc) — китайские/комьюнити-прокси,medленно но работают когда
-     прямой GitHub заблокирован.
+     ghps.cc, gh-proxy.com, gh.llkk.cc, gh.api.99988866.xyz,
+     mirror.ghproxy.com.tr) — китайские/комьюнити-прокси. Расширено
+     в волне 2026-07 после жалоб на блокировки ghproxy.com /
+     hub.gitmirror.com / github.moeyy.xyz / ghps.cc в РФ.
   4. Statically CDN — альтернативный CDN с другим URL-шаблоном.
+  5. jsd.cooluc.ru — зеркало jsDelivr в РФ (хостится в РФ, не блокируется
+     РКН). Используется как крайний fallback когда jsDelivr и Statically
+     недоступны.
 
 Пути ручного размещения (для WinSCP/scp):
   /root/                     ← РЕКОМЕНДУЕТСЯ (подсветка зелёным в TUI)
@@ -69,6 +74,13 @@ def _jsdelivr(host: str) -> Callable[[str], str]:
     return lambda fn: f"https://{host}/gh/{_JSDR_REPO}/{fn}"
 
 
+# --- jsd.cooluc.ru — зеркало jsDelivr в РФ ----------------------------------
+# Хостится в РФ, не блокируется РКН. Использует тот же URL-шаблон что
+# основной jsDelivr (просто подставляет другой хост).
+def _jsdelivr_cooluc(fn: str) -> str:
+    return f"https://jsd.cooluc.ru/gh/{_JSDR_REPO}/{fn}"
+
+
 # --- Прямой GitHub ----------------------------------------------------------
 def _raw_github(fn: str) -> str:
     return (
@@ -108,6 +120,15 @@ def _statically(fn: str) -> str:
 # ============================================================================
 # Порядок = порядок попыток скачивания. Первые — самые быстрые/доступные,
 # последние — fallback'и на случай полной блокировки.
+#
+# Расширено в волне 2026-07 после жалоб на блокировки в РФ:
+#   • ghproxy.com — периодически отдаёт 403 с РФ
+#   • hub.gitmirror.com — частый NXDOMAIN
+#   • github.moeyy.xyz — периодически недоступен
+#   • ghps.cc — медленный
+# Добавлены новые прокси: gh-proxy.com, gh.llkk.cc, gh.api.99988866.xyz,
+# mirror.ghproxy.com.tr. Плюс jsd.cooluc.ru (РФ-зеркало jsDelivr) как
+# последний fallback.
 _MIRROR_FACTORIES: list[Callable[[str], str]] = [
     # 1) jsDelivr CDN family — 4 бэкенда
     _jsdelivr("cdn.jsdelivr.net"),        # основной jsDelivr
@@ -127,9 +148,21 @@ _MIRROR_FACTORIES: list[Callable[[str], str]] = [
     _gh_proxy("hub.gitmirror.com"),
     _gh_proxy("github.moeyy.xyz"),
     _gh_proxy("ghps.cc"),
+    # Новые прокси (волна 2026-07) — добавлены после жалоб на блокировки
+    # ghproxy.com / hub.gitmirror.com / github.moeyy.xyz / ghps.cc в РФ.
+    # Проверены на доступность из РФ-IP в июле 2026.
+    _gh_proxy("gh-proxy.com"),
+    _gh_proxy("gh.llkk.cc"),
+    _gh_proxy("gh.api.99988866.xyz"),
+    _gh_proxy("mirror.ghproxy.com.tr"),
 
     # 4) Statically CDN — другой URL-шаблон, независимый CDN
     _statically,
+
+    # 5) jsd.cooluc.ru — РФ-зеркало jsDelivr (хостится в РФ, не блокируется
+    #    РКН). Используется как крайний fallback когда jsDelivr и Statically
+    #    недоступны, а GitHub-прокси отдают мусор.
+    _jsdelivr_cooluc,
 ]
 
 
