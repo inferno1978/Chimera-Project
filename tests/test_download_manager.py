@@ -1030,13 +1030,27 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
 
         self.assertTrue(result, "Должен вернуть True — второе зеркало прошло верификацию")
 
-        # mirror1: file1 → checksum1 (mismatch, fresh_hash vs stale_content hash)
-        # mirror2: file2 → checksum1 (match, fresh_hash vs fresh_content hash)
-        # Итого: 4 вызова (2 файла + 2 checksum — на mirror2 первый же checksum_url совпал)
-        self.assertGreaterEqual(len(call_log), 3,
-                               f"Должно быть минимум 3 вызова (file1 + checksum1 + file2 + checksum1), фактически: {call_log}")
-        self.assertLessEqual(len(call_log), 4,
-                             f"Не более 4 вызовов, фактически: {call_log}")
+        # v5.0.2+: _verify_checksum теперь перебирает ВСЕ checksum-зеркала
+        # (не делает early return при mismatch). Это фикс бага 2026-07-24:
+        # если CDN закэшировал устаревший .sha256sum, _verify_checksum
+        # проверит следующее зеркало .sha256sum — может там актуальный.
+        #
+        # Сценарий этого теста: mirror1.dat=stale, mirror2.dat=fresh,
+        # оба .sha256sum отдают fresh_hash.
+        # Порядок вызовов:
+        #   1. mirror1.dat (stale) → hash=stale_hash
+        #   2. mirror1.sha256sum → fresh_hash. stale != fresh → продолжаем
+        #   3. mirror2.sha256sum → fresh_hash. stale != fresh → продолжаем
+        #   4. Все checksum-зеркала проверены, ни одно не совпало → return False
+        #   5. mirror2.dat (fresh) → hash=fresh_hash
+        #   6. mirror1.sha256sum → fresh_hash. fresh == fresh → return True ✓
+        # Итого 5 вызовов (раньше было 4 — но 4 было неправильно, потому что
+        # пропускало проверку второго checksum-зеркала).
+        self.assertGreaterEqual(len(call_log), 4,
+                               f"Должно быть минимум 4 вызова, фактически: {call_log}")
+        self.assertLessEqual(len(call_log), 6,
+                             f"Не более 6 вызовов (2 файла + 2*2 checksum), "
+                             f"фактически: {call_log}")
 
         # Проверяем что первый запрос был к mirror1 (файл)
         self.assertIn(f"mirror1.example.com/{self.tmp_filename}", call_log[0])
@@ -1342,6 +1356,112 @@ class TestVerifyChecksumHelper(unittest.TestCase):
             )
         self.assertFalse(result, "Hash не совпал → False (отбраковка)")
         self.assertEqual(call_count[0], 2, "Должны быть попытаны оба URL")
+
+    def test_first_mismatch_second_match_returns_true(self):
+        """v5.0.2 regression: первое .sha256sum-зеркало дало НЕсовпадающий
+        хэш (CDN закэшировал устаревший .sha256sum), второе — актуальный.
+
+        Сценарий ровно из баг-репорта 2026-07-24:
+          - Скачанный geosite.dat имеет SHA256 = 50e933acb2a23ab8...
+          - cdn.jsdelivr.net/.sha256sum ожидает e7e2711b2b68d7d9... (устаревший кэш)
+          - mirror2/.sha256sum ожидает 50e933acb2a23ab8... (актуальный)
+
+        Старая логика (до v5.0.2): return False на первом же mismatch →
+        файл отбраковывается, установка геофайлов проваливается.
+
+        Новая логика (v5.0.2+): перебираем все checksum-зеркала. mirror2
+        подтверждает → return True, файл принят.
+
+        КЛЮЧЕВЫЕ проверки:
+          - result is True (файл валиден, хотя первое зеркало не подтвердило)
+          - urlopen вызван для ОБЕИХ зеркал (не early return на первом)
+        """
+        from chimera.modules.download_manager import _verify_checksum
+        # actual_hash файла на диске
+        actual_hash = _hashlib_for_tests.sha256(b"test content" * 10).hexdigest()
+        # Какой-то другой хэш — имитация устаревшего .sha256sum
+        stale_hash = _hashlib_for_tests.sha256(b"different stale content").hexdigest()
+
+        call_count = [0]
+
+        def fake_urlopen(req, timeout):
+            call_count[0] += 1
+            mock_resp = MagicMock()
+            if call_count[0] == 1:
+                # Первое зеркало .sha256sum — устаревший хэш
+                mock_resp.read.side_effect = [
+                    f"{stale_hash}  test.dat\n".encode(), b""
+                ]
+            else:
+                # Второе зеркало .sha256sum — актуальный хэш
+                mock_resp.read.side_effect = [
+                    f"{actual_hash}  test.dat\n".encode(), b""
+                ]
+            mock_resp.__enter__ = lambda self: self
+            mock_resp.__exit__ = lambda self, *a: None
+            return mock_resp
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen):
+            result = _verify_checksum(
+                self.test_file,
+                [
+                    "https://cdn.jsdelivr.net/test.dat.sha256sum",  # устаревший
+                    "https://mirror2.example.com/test.dat.sha256sum",  # актуальный
+                ],
+                "sha256",
+            )
+
+        self.assertTrue(result,
+                        "result должен быть True — второе зеркало подтвердило "
+                        "хэш, файл валиден. Если False — regression бага "
+                        "2026-07-24 (early return при mismatch).")
+        self.assertEqual(call_count[0], 2,
+                         "Должны быть попытаны оба URL — не early return "
+                         "на первом mismatch.")
+
+    def test_all_mismatch_returns_false(self):
+        """v5.0.2: ВСЕ ответившие .sha256sum-зеркала дали НЕсовпадающий
+        хэш → отбраковка (return False). Это правильное поведение —
+        если единогласно все зеркала ожидают другой хэш, возможно файл
+        реально подменён (MITM)."""
+        from chimera.modules.download_manager import _verify_checksum
+        stale_hash_1 = _hashlib_for_tests.sha256(b"stale content 1").hexdigest()
+        stale_hash_2 = _hashlib_for_tests.sha256(b"stale content 2").hexdigest()
+
+        call_count = [0]
+
+        def fake_urlopen(req, timeout):
+            call_count[0] += 1
+            mock_resp = MagicMock()
+            if call_count[0] == 1:
+                mock_resp.read.side_effect = [
+                    f"{stale_hash_1}  test.dat\n".encode(), b""
+                ]
+            else:
+                mock_resp.read.side_effect = [
+                    f"{stale_hash_2}  test.dat\n".encode(), b""
+                ]
+            mock_resp.__enter__ = lambda self: self
+            mock_resp.__exit__ = lambda self, *a: None
+            return mock_resp
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen):
+            result = _verify_checksum(
+                self.test_file,
+                [
+                    "https://mirror1.example.com/test.dat.sha256sum",
+                    "https://mirror2.example.com/test.dat.sha256sum",
+                ],
+                "sha256",
+            )
+
+        self.assertFalse(result,
+                         "result должен быть False — оба зеркала единогласно "
+                         "ожидают другой хэш, файл отбракован.")
+        self.assertEqual(call_count[0], 2,
+                         "Должны быть попытаны оба URL перед отбраковкой.")
 
 
 class TestChecksumNotCalledInManualBranch(unittest.TestCase):
