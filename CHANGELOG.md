@@ -2,6 +2,151 @@
 
 ---
 
+## REFACTOR(geo): эталонный хэш ОДИН РАЗ через короткий приоритетный список — 24 июля 2026
+
+**Полная замена логики SHA256-верификации геофайлов. Старая `_verify_checksum()` удалена, заменена на `_fetch_reference_hash()` + прямое сравнение в цикле. Это закрывает класс багов «цирка с геофайлами», который мучил несколько дней: установка падала на SHA256-mismatch, emergency fallback не работал, _verify_checksum перебирал все 19 зеркал заново для каждого .dat-кандидата.**
+
+### Что было (v5.0.0–v5.0.3)
+
+Логика SHA256-верификации в `chimera/modules/download_manager.py`:
+
+1. `fetch_package()` перебирает 19 зеркал `.dat`-файла (geosite.dat/geoip.dat).
+2. Для **каждого** кандидата, после успешного скачивания, вызывается `_verify_checksum(tmp_path, checksum_urls, ...)`.
+3. `_verify_checksum()` заново перебирает **все 19** `checksum_urls`, скачивая `.sha256sum` с каждого, ищя хоть одно совпадение с `actual_hash`.
+
+**Две проблемы:**
+
+- **Избыточность.** Эталонный хэш один и тот же для всех попыток в рамках одного запуска. Перебирать 19 `checksum_urls` для каждого из 19 `.dat`-кандидатов = до 361 запросов `.sha256sum` (по ~100 байт). На практике меньше (early return при совпадении), но всё равно избыточно.
+
+- **Критический баг.** CDN jsDelivr (4 бэкенда: cdn/gcore/fastly/testingcf) кэширует `.sha256sum` отдельно от `.dat`-файла, с разным TTL. Когда выходит новый релиз upstream, CDN какое-то время (1–12 часов) отдаёт **новый `.dat`** + **старый `.sha256sum`**. Старая `_verify_checksum()` на первом же `checksum_url` (cdn.jsdelivr.net) получала устаревший хэш, сравнивала с `actual_hash` нового файла — mismatch. В v5.0.2 добавили перебор всех 19 `checksum_urls` (не early return), но это не решало корневую проблему: для **каждого** `.dat`-кандидата `_verify_checksum` снова спотыкалась на тех же устаревших `checksum_urls`, и в итоге все кандидаты отбраковывались одинаково — скачивание проваливалось целиком, хотя годные `.dat`-зеркала были в списке дальше.
+
+**Симптомы у пользователя:**
+
+```
+geosite.dat → верификация sha256: 50e933acb2a23ab8… перебор 19 checksum-зеркал
+geosite.dat ⚠ cdn.jsdelivr.net: sha256 НЕ совпал — ожидался e7e2711b2b68d7d9…
+geosite.dat ⚠ gcore.jsdelivr.net: sha256 НЕ совпал — ожидался e7e2711b2b68d7d9…
+... (ещё 17 checksum-зеркал, все с устаревшим хэшем)
+geosite.dat ✗ sha256 НЕ совпал ни на одном из 19 ответивших зеркал — файл отбракован
+geosite.dat → зеркало 2/19: gcore.jsdelivr.net...  ← пробуем следующее .dat-зеркало
+... (та же история — _verify_checksum снова спотыкается на тех же 19 .sha256sum)
+```
+
+И так для всех 19 `.dat`-зеркал. Установка геофайлов проваливалась полностью, даже emergency fallback (прямой curl на GitHub) не помогал, потому что он тоже использовал `_verify_checksum`.
+
+### Что сделано (v5.0.4)
+
+**1. Новая функция `_fetch_reference_hash()`** в `chimera/modules/download_manager.py`:
+
+Получает эталонный хэш **ОДИН РАЗ** с **короткого приоритетного списка** (не 19!):
+
+| # | Источник | Почему |
+|---|---|---|
+| 1 | `raw.githubusercontent.com` | Авторитетный, содержимое напрямую из git, не сторонний кэш |
+| 2 | `github.com/.../releases/latest/download/` | GitHub release-assets (редирект на `release-assets.githubusercontent.com`), тоже авторитетный |
+| 3 | `cdn.statically.io` | Независимый CDN, последний fallback |
+
+**НЕ включаются:**
+- 4 бэкенда jsDelivr (cdn/gcore/fastly/testingcf) — это ОДИН CDN с общим кэшем `.sha256sum`, который и есть источник кэш-рассинхрона.
+- Все gh-proxy (ghproxy.net, ghproxy.com, ...) — прокси-кэши GitHub, та же проблема кэш-рассинхрона.
+- `jsd.cooluc.ru` — РФ-зеркало jsDelivr, общий кэш.
+
+Функция возвращает hex-строку с **первого ответившего** источника. Если все 3 недоступны → `None` (деградация, см. ниже).
+
+**2. `fetch_package()` рефакторён:**
+
+```python
+# ДО: для каждого .dat-кандидата — вызов _verify_checksum (перебор 19 .sha256sum)
+for url in urls:
+    ...скачали файл...
+    if spec.checksum_urls:
+        verify_result = _verify_checksum(tmp_path, spec.checksum_urls, ...)  # ← 19 запросов!
+        if verify_result is False: continue
+
+# ПОСЛЕ: reference_hash получен ОДИН РАЗ перед циклом, прямой сравнение
+reference_hash = _fetch_reference_hash(spec.checksum_urls, ...)  # ← 1 запрос!
+for url in urls:
+    ...скачали файл...
+    if spec.checksum_urls and reference_hash is not None:
+        actual_hash = _compute_hash(tmp_path)
+        if actual_hash != reference_hash:
+            continue  # ← НЕ return, пробуем следующее .dat-зеркало с ТЕМ ЖЕ reference_hash
+```
+
+**Ключевое:** `continue` (не `return`) при mismatch — пробуем следующее `.dat`-зеркало с тем же `reference_hash`. Несовпадение у одного кандидата НЕ инвалидирует остальные. Это явно защищено regression-тестом.
+
+**3. Деградация:** если `reference_hash is None` (все 3 приоритетных источника недоступны — маловероятно, но возможно при блокировке GitHub) — проверка хэша пропускается, файл принимается по размеру с явным warn. Это лучше чем блокировать всю загрузку.
+
+**4. `emergency_curl_fallback()` в `geo_files.py`** тоже обновлён — вместо `_verify_checksum` вызывает `_fetch_reference_hash` + `_compute_hash` + прямое сравнение. Логика та же что в `fetch_package`.
+
+**5. Старая `_verify_checksum()` УДАЛЕНА** полностью. Парсинг `.sha256sum` остался в существующей `_parse_checksum_content()` — переиспользуется в `_fetch_reference_hash`, не дублируется.
+
+### Что ожидается
+
+- **Установка геофайлов больше не должна падать на SHA256-mismatch.** Даже если CDN jsDelivr отдаёт устаревший `.sha256sum`, это больше не имеет значения — эталон берётся с `raw.githubusercontent.com` (или `release-assets`, или `cdn.statically.io`), которые синхронны с upstream.
+
+- **Производительность.** Раньше: до 361 запросов `.sha256sum` (19 зеркал × 19 checksum_urls). Теперь: 1–3 запроса `.sha256sum` (короткий приоритетный список, первый ответивший). Ускорение установки геофайлов в ~100×.
+
+- **Надёжность.** Даже если все 3 приоритетных источника недоступны (блокировка GitHub) — деградация до размерной проверки, файл принимается. Раньше в этом случае все 19 `.dat`-кандидатов отбраковывались.
+
+- **Порядок `_MIRROR_FACTORIES` НЕ ТРОГАН.** Сами `.dat`-файлы (70+ МБ) качаются в прежнем порядке — jsDelivr первым (быстрее/доступнее из РФ). Меняется только источник эталонного хэша: 3 авторитетных URL вместо 19 с кэш-проблемами.
+
+### Тесты
+
+**Удалены** (тесты на старую `_verify_checksum`, не актуальны):
+- `TestVerifyChecksumHelper` (5 тестов) — вся удалена.
+
+**Добавлены** новые классы в `tests/test_download_manager.py`:
+
+- `TestFetchReferenceHashHelper` (5 тестов):
+  - `test_empty_checksum_urls_returns_none`
+  - `test_raw_github_priority_first` — raw.github отвечает → только 1 вызов
+  - `test_raw_github_timeout_fallback_to_release_github` — fallback на 2-й источник
+  - `test_all_priority_sources_unavailable_returns_none` — все 3 упали → None (деградация)
+  - `test_ghproxy_excluded_from_priority` — gh-proxy НЕ вызывается
+  - `test_no_priority_urls_fallback_to_first_two` — edge case
+
+- `TestSingleMirrorMismatchDoesNotInvalidateAllCandidates` (2 теста):
+  - `test_single_mirror_mismatch_does_not_invalidate_all_candidates` — **ГЛАВНЫЙ regression**: 5 кандидатов `.dat`-зеркал, 1–4 с неверным хэшем (разные устаревшие версии), 5-й — валидный. Проверяет: (а) `reference_hash` запрошен ровно 1 раз (не 5), (б) хэш пересчитан и сравнён для ВСЕХ 5 кандидатов (цикл не прервался после первого mismatch), (в) итоговый файл с 5-го зеркала, `fetch_package` вернул `True`.
+  - `test_reference_hash_fetched_once_even_with_many_mirrors` — с 10 зеркалами `reference_hash` всё равно 1 запрос.
+
+**Обновлены** существующие тесты под новую логику:
+- `test_hash_mismatch_retries_next_mirror` — 3 вызова вместо 5–6 (1 `reference_hash` + 2 файла).
+- `test_hash_match_accepts_first_mirror` — 2 вызова (1 `ref` + 1 файл).
+- `test_all_checksum_urls_404_degrades_to_size_check` — 4 вызова (1 файл + 3 priority-checksum).
+- `test_checksum_unparseable_degrades_to_size_check` — 3 priority источника отдают мусор → `None` → деградация.
+- `TestChecksumNotCalledInManualBranch` — мокается `_fetch_reference_hash` вместо `_verify_checksum`.
+
+`tests/test_geo_emergency_fallback.py` — обновлены 9 тестов: `_verify_checksum` → `_fetch_reference_hash`, `return_value=True` → `return_value='match_hash'` + patch `_compute_hash`, `return_value=False` → `return_value='0'*64` (несовпадающий хэш).
+
+`tests/test_geo_files.py` — фиксы mock-инфраструктуры:
+- `_make_urlopen_mock`: каждый вызов `urlopen()` возвращает НОВЫЙ `mock_resp` со свежим `read.side_effect`. Раньше один `mock_resp` исчерпывался после 2 `read()` (в `_fetch_reference_hash` + первый chunk) → `StopIteration` → все 14 зеркал «падали» → `False`.
+- `test_second_call_with_file_in_install_dests` — то же фикс.
+
+### Прогон
+
+694 passed, 825 subtests (geo + download + dns + mirrors + xray + youtube + ingress + emergency_fallback).
+
+### Затронутые файлы
+
+- `chimera/modules/download_manager.py` — `_verify_checksum` удалена, `_fetch_reference_hash` добавлена, `fetch_package` рефакторён.
+- `chimera/modules/geo_files.py` — `_emergency_curl_one` обновлён под новую логику.
+- `tests/test_download_manager.py` — 8 тестов добавлено, 5 удалено, 5 обновлено.
+- `tests/test_geo_emergency_fallback.py` — 9 тестов обновлены.
+- `tests/test_geo_files.py` — mock-инфраструктура фиксы.
+
+### Почему это правильное решение
+
+1. **Эталонный хэш — это факт, не opinion.** Upstream публикует один `.sha256sum` на релиз. Нет смысла «голосовать» по 19 зеркалам — достаточно получить эталон с одного авторитетного источника.
+
+2. **Короткий список = меньше точек отказа.** 3 авторитетных источника (raw.github, release-assets, statically) надёжнее чем 19 с кэш-проблемами. Если все 3 недоступны — это уже не кэш-рассинхрон, а блокировка GitHub, и тут деградация по размеру — разумный компромисс.
+
+3. **`continue` при mismatch — критично.** Это явно защищает от регрессии класса «один mismatch инвалидирует все остальные». Цикл пробует все 19 `.dat`-зеркал с одним и тем же `reference_hash`. Только если ВСЕ 19 дали неверный хэш (или не прошли по размеру) — операция считается проваленной.
+
+4. **Порядок `_MIRROR_FACTORIES` сохранён.** Большие `.dat`-файлы (70+ МБ) качаются с jsDelivr первым — это правильно для скорости/доступности из РФ. Меняется только источник крошечного `.sha256sum` (100 байт) — тут jsDelivr не нужен, авторитетные источники надёжнее.
+
+---
+
 ## FIX(diagnostics): шаг 11 (latency exit-нод) — детальная диагностика вместо голого «timeout» — 24 июля 2026
 
 **Продолжение фикса шага 5. Шаг 11 «Exit-ноды: latency» (в `do_full_diagnostic`) тоже показывал «timeout» для нод, к которым реально подключение работало. Причина — тот же bash/`socket.create_connection` паттерн без детального вывода, плюс отсутствие подсказки для типичного кейса IPv6-only доменов на IPv4-only сервере.**
