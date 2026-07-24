@@ -1574,13 +1574,19 @@ def _xray_update_geo_runetfreedom() -> bool:
     # строку `dest_dirs_raw = list(XRAY_LOOKUP_DIRS) + ...` выше
     # (UnboundLocalError).
     if failed_files:
-        info("  fetch_package провален — пробую emergency curl fallback...")
+        info(f"  fetch_package провален для {len(failed_files)} файл(а/ов) — "
+             f"пробую emergency curl fallback...")
         try:
             from chimera.modules.geo_files import emergency_curl_fallback
             # geo_dirs здесь может содержать /usr/local/bin/xray (родная
             # директория бинарника) — для fallback не нужно, копируем только
             # в стандартные XRAY_LOOKUP_DIRS (уже импортированы вверху модуля).
-            em_ok = emergency_curl_fallback(dest_dirs=list(XRAY_LOOKUP_DIRS))
+            # only_files=failed_files — качаем только недостающие, не трогая
+            # уже успешно скачанные (v5.0.1+).
+            em_ok = emergency_curl_fallback(
+                dest_dirs=list(XRAY_LOOKUP_DIRS),
+                only_files=list(failed_files),
+            )
         except Exception as ex:
             warn(f"  emergency curl fallback упал с исключением: {ex}")
             em_ok = False

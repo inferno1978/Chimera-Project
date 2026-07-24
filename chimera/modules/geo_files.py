@@ -132,15 +132,48 @@ def _emergency_curl_one(
 
     Возвращает True если файл скачан, размер >= min_size, и (если
     checksum_urls задан) SHA256-верификация прошла или деградировала.
+
+    ВАЖНО ПРО core._run vs subprocess.run:
+      core._run() имеет сигнатуру (args, check, quiet, capture, input_text,
+      env, cwd) — НЕ принимает capture_output/text (это аргументы
+      subprocess.run). Раньше тут было capture_output=True, что падало
+      с TypeError на реальном сервере (см. лог пользователя от 2026-07-24).
+      Теперь используем capture=True (правильный аргумент core._run).
+      Если core._run недоступен (importlib упал) — fallback на
+      subprocess.run с правильными аргументами.
     """
     core = _core_module()
     info = getattr(core, "info", print)
     warn = getattr(core, "warn", print)
-    _run = getattr(core, "_run", subprocess.run)
+    core_run = getattr(core, "_run", None)
 
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = dest_path.parent / f".{dest_path.name}.emergency.tmp"
     tmp_path.unlink(missing_ok=True)
+
+    def _do_run(args: list[str]) -> subprocess.CompletedProcess:
+        """Запуск команды через core._run (если доступен) или subprocess.run.
+
+        core._run возвращает CompletedProcess с .stdout/.stderr/.returncode,
+        как и subprocess.run. Разница в аргументах:
+          • core._run:     capture=True (не capture_output)
+          • subprocess.run: capture_output=True
+
+        ВАЖНО: core._run с check=True (по умолчанию) поднимает
+        CalledProcessError при ненулевом returncode. Нам нужно получить
+        returncode без исключения — поэтому всегда передаём check=False.
+        """
+        if core_run is not None:
+            # core._run(args, check=False, capture=True) — возвращает
+            # CompletedProcess с заполненными stdout/stderr.
+            return core_run(args, check=False, capture=True)
+        # Fallback: subprocess.run напрямую
+        return subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
     try:
         # curl флаги:
@@ -152,20 +185,15 @@ def _emergency_curl_one(
         #   -m 180 — общий таймаут 3 минуты (geo .dat ~30MB)
         #   --retry 2 — две попытки на тот же URL
         #   -A "curl/8.x" — стандартный UA curl, проходит GitHub filters
-        r = _run(
-            [
-                "curl", "-fsSL",
-                "--connect-timeout", "20",
-                "-m", str(timeout),
-                "--retry", "2",
-                "-A", "curl/8.5.0",
-                "-o", str(tmp_path),
-                url,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        r = _do_run([
+            "curl", "-fsSL",
+            "--connect-timeout", "20",
+            "-m", str(timeout),
+            "--retry", "2",
+            "-A", "curl/8.5.0",
+            "-o", str(tmp_path),
+            url,
+        ])
         if r.returncode != 0:
             warn(f"  emergency curl не смог скачать {url}: rc={r.returncode}")
             if r.stderr:
@@ -219,10 +247,10 @@ def _emergency_curl_one(
         # разными файловыми системами — copy2 безопаснее).
         shutil.copy2(str(tmp_path), str(dest_path))
         dest_path.chmod(0o644)
-        # chown root:xray — best-effort, как в _post_install_geo
+        # chown root:xray — best-effort, как в _post_install_geo.
+        # Используем тот же _do_run для консистентности.
         try:
-            _run(["chown", "root:xray", str(dest_path)],
-                 check=False, quiet=True)
+            _do_run(["chown", "root:xray", str(dest_path)])
         except Exception:
             pass
 
@@ -242,12 +270,13 @@ def emergency_curl_fallback(
     *,
     dest_dirs: Optional[list[Path]] = None,
     log_to_file: bool = True,
+    only_files: Optional[list[str]] = None,
 ) -> bool:
     """Последний рубеж скачивания geo-файлов — прямой curl на GitHub.
 
     Вызывается когда fetch_package() провален на всех зеркалах из
-    geo_mirrors._MIRROR_FACTORIES. Пробует прямой curl на 2 GitHub
-    release URL (geosite.dat и geoip.dat), и в случае успеха раскладывает
+    geo_mirrors._MIRROR_FACTORIES. Пробует прямой curl на GitHub release
+    URL (geosite.dat и/или geoip.dat), и в случае успеха раскладывает
     файлы во все dest_dirs (по умолчанию XRAY_LOOKUP_DIRS).
 
     Идея: GitHub release-asset endpoints часто работают через curl даже
@@ -260,10 +289,14 @@ def emergency_curl_fallback(
     что emergency fallback не откатит защиту от кэшированных/битых
     файлов, введённую в коммите cdadfab.
 
-    Возвращает True если ОБА файла (geosite.dat и geoip.dat) успешно
-    скачаны и расложены. Иначе False (хотя частичный успех тоже возможен
-    — в этом случае функция всё равно вернёт False, но часть файлов
-    будет лежать на месте; логи в /var/log/chimera.log покажут детали).
+    v5.0.1+: аргумент only_files позволяет скачать только указанные файлы
+    (например ['geosite.dat'] если geoip.dat уже успешно скачан через
+    fetch_package). Раньше fallback качал оба файла всегда, что
+    приводило к пустой трате времени и возможным сбоям при повторной
+    перезаписи успешно скачанного файла.
+
+    Возвращает True если ВСЕ запрошенные файлы (only_files или оба)
+    успешно скачаны и расложены. Иначе False.
 
     Аргументы:
       dest_dirs:    Список директорий куда копировать файлы. По умолчанию
@@ -272,6 +305,9 @@ def emergency_curl_fallback(
                     fallback ничего не сделает.
       log_to_file:  Писать подробности в /var/log/chimera.log (через
                     core.log_to_file). По умолчанию True.
+      only_files:   Список файлов для скачивания (['geosite.dat'],
+                    ['geoip.dat'] или оба). По умолчанию None = оба.
+                    Если файл не в этом списке — он пропускается.
     """
     core = _core_module()
     info = getattr(core, "info", print)
@@ -294,11 +330,32 @@ def emergency_curl_fallback(
     geoip_checksum_urls   = getattr(GEOIP_SPEC,   "checksum_urls", None)
     geoip_checksum_algo   = getattr(GEOIP_SPEC,   "checksum_algo", "sha256")
 
-    info("EMERGENCY FALLBACK: пробую прямой curl на GitHub release URL...")
+    # Фильтруем список файлов для скачивания. По умолчанию — оба.
+    # only_files позволяет скачивать только geosite.dat или только geoip.dat,
+    # если другой уже успешно скачан через fetch_package.
+    all_targets = [
+        (_EMERGENCY_GEOSITE_URL, "geosite.dat", MIN_SIZES["geosite.dat"],
+         geosite_checksum_urls, geosite_checksum_algo),
+        (_EMERGENCY_GEOIP_URL,   "geoip.dat",   MIN_SIZES["geoip.dat"],
+         geoip_checksum_urls, geoip_checksum_algo),
+    ]
+    if only_files is not None:
+        only_set = set(only_files)
+        targets = [t for t in all_targets if t[1] in only_set]
+        if not targets:
+            warn(f"emergency_curl_fallback: only_files={only_files} "
+                 f"не соответствует ни одному известному файлу — нечего делать")
+            return False
+    else:
+        targets = all_targets
+
+    info(f"EMERGENCY FALLBACK: пробую прямой curl на GitHub release URL "
+         f"для {len(targets)} файл(а/ов)...")
     if log_to_file:
-        _log("WARN", "geo_files: fetch_package провален на всех зеркалах — "
-                     "запускаю emergency curl fallback на GitHub release URL "
-                     "(с SHA256-верификацией)")
+        files_str = ", ".join(t[1] for t in targets)
+        _log("WARN", f"geo_files: fetch_package провален для [{files_str}] — "
+                     f"запускаю emergency curl fallback на GitHub release URL "
+                     f"(с SHA256-верификацией)")
 
     # Гарантируем наличие директорий
     for d in dest_dirs:
@@ -308,12 +365,7 @@ def emergency_curl_fallback(
             pass
 
     results = []
-    for url, fname, min_size, checksum_urls, checksum_algo in (
-        (_EMERGENCY_GEOSITE_URL, "geosite.dat", MIN_SIZES["geosite.dat"],
-         geosite_checksum_urls, geosite_checksum_algo),
-        (_EMERGENCY_GEOIP_URL,   "geoip.dat",   MIN_SIZES["geoip.dat"],
-         geoip_checksum_urls, geoip_checksum_algo),
-    ):
+    for url, fname, min_size, checksum_urls, checksum_algo in targets:
         info(f"  Прямой curl: {fname} ← {url}")
         # Сначала качаем в первую dest_dir, потом копируем в остальные
         primary_dest = dest_dirs[0] / fname
@@ -327,6 +379,7 @@ def emergency_curl_fallback(
             results.append((fname, False))
             continue
         # Копируем в остальные dest_dirs
+        core_run = getattr(core, "_run", None)
         for d in dest_dirs[1:]:
             try:
                 dest = d / fname
@@ -334,9 +387,12 @@ def emergency_curl_fallback(
                 shutil.copy2(str(primary_dest), str(dest))
                 dest.chmod(0o644)
                 try:
-                    _run = getattr(core, "_run", subprocess.run)
-                    _run(["chown", "root:xray", str(dest)],
-                         check=False, quiet=True)
+                    if core_run is not None:
+                        core_run(["chown", "root:xray", str(dest)],
+                                 check=False, quiet=True)
+                    else:
+                        subprocess.run(["chown", "root:xray", str(dest)],
+                                       check=False, capture_output=True)
                 except Exception:
                     pass
             except Exception as ex:
@@ -350,8 +406,8 @@ def emergency_curl_fallback(
         _log("INFO" if all_ok else "ERROR",
              f"emergency_curl_fallback: results={results}")
     if all_ok:
-        success("EMERGENCY FALLBACK: оба geo-файла скачаны через прямой curl "
-                "(с SHA256-верификацией)")
+        success("EMERGENCY FALLBACK: все запрошенные файлы скачаны через "
+                "прямой curl (с SHA256-верификацией)")
     else:
         failed = [r[0] for r in results if not r[1]]
         warn(f"EMERGENCY FALLBACK: провален для файлов: {', '.join(failed)}")
@@ -450,15 +506,18 @@ def download_geo_files() -> bool:
     # Это последнее автоматическое средство перед manual hint.
     #
     # Логика:
-    #   • emergency_curl_fallback() скачивает ОБА файла заново через прямой curl.
-    #   • Если у нас failed_files == ["geosite.dat"] (только один провалился),
-    #     всё равно вызываем fallback для обоих — он идемпотентный (перезапишет
-    #     уже скачанный geoip.dat тем же содержимым).
+    #   • emergency_curl_fallback() скачивает ТОЛЬКО failed_files (v5.0.1+).
+    #     Раньше качал оба — это работало, но повторно перезаписывало
+    #     успешно скачанный файл и тратило время.
     #   • После fallback — пересчитываем success_count: для каждого dest_dir
     #     проверяем что файл существует и >= min_size.
     if failed_files:
-        info("  fetch_package провален — пробую emergency curl fallback...")
-        em_ok = emergency_curl_fallback(dest_dirs=dest_dirs)
+        info(f"  fetch_package провален для {len(failed_files)} файл(а/ов) — "
+             f"пробую emergency curl fallback...")
+        em_ok = emergency_curl_fallback(
+            dest_dirs=dest_dirs,
+            only_files=list(failed_files),  # качаем только недостающие
+        )
         if em_ok:
             # Пересчитываем успех — какие файлы реально на месте.
             new_failed: list[str] = []
