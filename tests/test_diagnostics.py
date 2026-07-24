@@ -202,16 +202,18 @@ class TestDiagTcpProbe(unittest.TestCase):
         from chimera.modules import diagnostics
         with patch.object(diagnostics.socket, "getaddrinfo",
                           side_effect=socket.gaierror("Name or service not known")):
-            alive, detail = diagnostics._diag_tcp_probe("nonexistent.invalid", 443)
+            alive, detail, lat = diagnostics._diag_tcp_probe("nonexistent.invalid", 443)
         self.assertFalse(alive)
         self.assertIn("DNS fail", detail)
+        self.assertEqual(lat, -1)
 
     def test_dns_empty_returns_false(self):
         from chimera.modules import diagnostics
         with patch.object(diagnostics.socket, "getaddrinfo", return_value=[]):
-            alive, detail = diagnostics._diag_tcp_probe("example.com", 443)
+            alive, detail, lat = diagnostics._diag_tcp_probe("example.com", 443)
         self.assertFalse(alive)
         self.assertEqual(detail, "DNS empty")
+        self.assertEqual(lat, -1)
 
     def test_ipv4_only_success(self):
         """Классический кейс: домен резолвится в IPv4, коннект успешен."""
@@ -220,10 +222,11 @@ class TestDiagTcpProbe(unittest.TestCase):
         mock_sock = MagicMock()
         with patch.object(diagnostics.socket, "getaddrinfo", return_value=addrinfos), \
              patch.object(diagnostics.socket, "socket", return_value=mock_sock):
-            alive, detail = diagnostics._diag_tcp_probe("example.com", 443)
+            alive, detail, lat = diagnostics._diag_tcp_probe("example.com", 443)
         self.assertTrue(alive)
         self.assertIn("IPv4", detail)
         self.assertIn("1.2.3.4", detail)
+        self.assertGreaterEqual(lat, 0)  # latency должна быть неотрицательной
         mock_sock.connect.assert_called_once()
         mock_sock.close.assert_called_once()
 
@@ -235,12 +238,13 @@ class TestDiagTcpProbe(unittest.TestCase):
         mock_sock.connect.side_effect = OSError("Network is unreachable")
         with patch.object(diagnostics.socket, "getaddrinfo", return_value=addrinfos), \
              patch.object(diagnostics.socket, "socket", return_value=mock_sock):
-            alive, detail = diagnostics._diag_tcp_probe("totalshadows.online", 443)
+            alive, detail, lat = diagnostics._diag_tcp_probe("totalshadows.online", 443)
         self.assertFalse(alive)
         self.assertIn("IPv6", detail)
         self.assertIn("unreachable", detail.lower())
         # Подсказка для diag-вывода: detail не должен содержать IPv4-успеха
         self.assertNotIn("IPv4", detail)
+        self.assertEqual(lat, -1)
 
     def test_dualstack_ipv6_fails_ipv4_succeeds(self):
         """Dual-stack домен, IPv6 недоступен, IPv4 отвечает → нода жива."""
@@ -255,10 +259,11 @@ class TestDiagTcpProbe(unittest.TestCase):
         sock_v4 = MagicMock()
         with patch.object(diagnostics.socket, "getaddrinfo", return_value=addrinfos), \
              patch.object(diagnostics.socket, "socket", side_effect=[sock_v6, sock_v4]):
-            alive, detail = diagnostics._diag_tcp_probe("dualstack.example.com", 443)
+            alive, detail, lat = diagnostics._diag_tcp_probe("dualstack.example.com", 443)
         self.assertTrue(alive)
         self.assertIn("IPv4", detail)
         self.assertIn("1.2.3.4", detail)
+        self.assertGreaterEqual(lat, 0)
 
     def test_dualstack_both_fail(self):
         """Dual-stack домен, обе семьи упали → False, detail содержит обе ошибки."""
@@ -273,12 +278,13 @@ class TestDiagTcpProbe(unittest.TestCase):
         sock_v4.connect.side_effect = socket.timeout("timed out")
         with patch.object(diagnostics.socket, "getaddrinfo", return_value=addrinfos), \
              patch.object(diagnostics.socket, "socket", side_effect=[sock_v6, sock_v4]):
-            alive, detail = diagnostics._diag_tcp_probe("dualstack.example.com", 443)
+            alive, detail, lat = diagnostics._diag_tcp_probe("dualstack.example.com", 443)
         self.assertFalse(alive)
         self.assertIn("IPv6", detail)
         self.assertIn("IPv4", detail)
         self.assertIn("unreachable", detail.lower())
         self.assertIn("timeout", detail.lower())
+        self.assertEqual(lat, -1)
 
     def test_timeout_10_seconds_passed_to_socket(self):
         """Проверка что timeout=10 доходит до socket.settimeout()."""
