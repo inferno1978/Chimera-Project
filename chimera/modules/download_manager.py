@@ -437,17 +437,46 @@ def _verify_checksum(
 ) -> Optional[bool]:
     """Верифицирует file_path по .sha256sum, скачанному с checksum_urls.
 
-    Алгоритм:
+    Алгоритм (v5.0.2+ — перебор ВСЕХ зеркал):
       1. Считает хэш file_path (algo, по умолчанию sha256) чанками.
-      2. Перебирает checksum_urls по порядку, скачивает .sha256sum.
+      2. Перебирает ВСЕ checksum_urls по порядку, скачивает .sha256sum.
          ВАЖНО: перебор идёт НЕЗАВИСИМО от того, какое зеркало дало сам файл.
          Это гарантирует, что мы верифицируем то что РЕАЛЬНО пришло, а не
          то что зеркало "должно" было отдать.
-      3. При успехе скачивания .sha256sum — парсит hex-хэш, сравнивает.
-         • Совпал → return True
-         • Не совпал → return False (отбраковка, log warn)
-      4. Если НИ ОДИН checksum_url не ответил (404 везде — апстрим перестал
-         публиковать) → return None (деградация, warn "не удалось проверить").
+      3. Для каждого .sha256sum:
+         • Совпал с actual_hash → return True НЕМЕДЛЕННО (файл валиден,
+           по крайней мере одно зеркало подтверждает)
+         • НЕ совпал → продолжаем перебор (может это зеркало закэшировало
+           устаревший .sha256sum)
+         • Не смогли распарсить → продолжаем перебор
+      4. После перебора всех:
+         • Был хоть один ответивший .sha256sum, но ни один не совпал →
+           return False (отбраковка — все зеркала ожидают другой хэш,
+           возможно файл реально подменён)
+         • Ни один .sha256sum не ответил (404 везде — апстрим перестал
+           публиковать) → return None (деградация, warn "не удалось проверить")
+         • Ответили, но ни один hex не распарсился → return None (деградация)
+
+    ПОЧЕМУ ПЕРЕБОР ВСЕХ ЗЕРКАЛ (фикс 2026-07-24):
+      Старая логика делала return False на первом же несовпадении. Это
+      ломало установку когда CDN jsDelivr закэшировал устаревший .sha256sum
+      (upstream обновил geosite.dat, но .sha256sum на jsDelivr ещё старый).
+      _verify_checksum проверял только первое зеркало (cdn.jsdelivr.net),
+      видел несовпадение и отбраковывал файл — хотя на других зеркалах
+      .sha256sum был актуальный. Лог пользователя:
+        geosite.dat → верификация sha256: 50e933acb2a23ab8… перебор 19 checksum-зеркал
+        geosite.dat ⚠ cdn.jsdelivr.net: sha256 НЕ совпал — ожидался e7e2711b2b68d7d9…
+        — файл отбракован, пробуем следующее зеркало
+      Фраза "пробуем следующее зеркало" относилась к ЗЕРКАЛАМ .DAT файла,
+      а не .sha256sum — но в коде это было неочевидно из-за early return.
+
+      Новая логика: перебираем все .sha256sum зеркала. Если хотя бы одно
+      подтверждает actual_hash — файл валиден. Это правильно потому что:
+        • Скачанный файл — факт, его хэш не меняется.
+        • Если 18 зеркал .sha256sum ожидают старый хэш, а 1 — актуальный,
+          значит 18 просто устарели (кэш CDN), а 1 подтверждает реальность.
+        • Отбраковывать надо только если ВСЕ зеркала .sha256sum единогласно
+          ожидают другой хэш — это уже подозрение на MITM.
 
     Аргументы:
       file_path:       Путь к скачанному файлу для верификации.
@@ -456,9 +485,9 @@ def _verify_checksum(
       progress_label:  Если непусто — печатать прогресс верификации.
 
     Возвращает:
-      True  — хэш совпал, файл валиден
-      False — хэш НЕ совпал, файл отбракован
-      None  — checksum недоступен со всех зеркал (деградация)
+      True  — хэш совпал хотя бы на одном зеркале, файл валиден
+      False — хэш НЕ совпал ни на одном ответившем зеркале (отбраковка)
+      None  — ни одно зеркало не ответило (деградация, принято по размеру)
     """
     # 1) Считаем хэш скачанного файла
     try:
@@ -479,8 +508,15 @@ def _verify_checksum(
             flush=True,
         )
 
-    # 2) Перебираем checksum_urls по порядку
-    checksum_obtained = False
+    # 2) Перебираем ВСЕ checksum_urls по порядку.
+    #    v5.0.2+: не делаем early return при несовпадении — может это
+    #    зеркало закэшировало устаревший .sha256sum, а следующее актуальное.
+    checksum_obtained = False       # хоть один .sha256sum ответил
+    checksum_parsed = False          # хоть один .sha256sum распарсен
+    mismatch_count = 0               # сколько зеркал дали несовпадающий хэш
+    last_mismatch_expected = ""      # для диагностического сообщения
+    last_mismatch_host = ""
+
     for idx, checksum_url in enumerate(checksum_urls, 1):
         try:
             req = urllib.request.Request(
@@ -504,8 +540,11 @@ def _verify_checksum(
                         flush=True,
                     )
                 continue
+            checksum_parsed = True
 
             if actual_hash == expected_hash:
+                # Хэш совпал — файл валиден, по крайней мере это зеркало
+                # подтверждает. Немедленно возвращаем True.
                 if progress_label:
                     host = checksum_url.split("/")[2] if "://" in checksum_url else checksum_url[:40]
                     print(
@@ -514,23 +553,31 @@ def _verify_checksum(
                     )
                 return True
             else:
-                # Хэш НЕ совпал — ОТБРАКОВКА.
+                # Хэш НЕ совпал на этом зеркале. НЕ делаем early return —
+                # продолжаем перебор. Может это зеркало закэшировало
+                # устаревший .sha256sum, а следующее актуальное.
+                # (фикс 2026-07-24 — раньше тут был return False)
+                mismatch_count += 1
                 host = checksum_url.split("/")[2] if "://" in checksum_url else checksum_url[:40]
+                last_mismatch_expected = expected_hash
+                last_mismatch_host = host
                 if progress_label:
                     print(
                         f"  {progress_label} ⚠ {host}: {algo} НЕ совпал — "
                         f"ожидался {expected_hash[:16]}…, получен {actual_hash[:16]}… "
-                        f"— файл отбракован, пробуем следующее зеркало",
+                        f"— перебираем остальные checksum-зеркала "
+                        f"({idx}/{len(checksum_urls)})",
                         flush=True,
                     )
-                return False
+                # НЕ return — продолжаем for loop
 
         except Exception:
             # 404 / network error / timeout — пробуем следующий URL
             continue
 
-    # 3) Ни один checksum_url не ответил
+    # 3) Перебор завершён. Анализируем результат.
     if not checksum_obtained:
+        # Ни один .sha256sum не ответил — деградация.
         if progress_label:
             print(
                 f"  {progress_label} ⚠ не удалось получить {algo} ни с одного "
@@ -539,14 +586,27 @@ def _verify_checksum(
             )
         return None  # деградация, не отбраковка
 
-    # 4) checksum_obtained=True, но ни один не распарсился — деградация
-    if progress_label:
+    if not checksum_parsed:
+        # Ответили, но ни один hex не распарсился — деградация.
+        if progress_label:
+            print(
+                f"  {progress_label} ⚠ checksum скачан, но hex не распарсен ни "
+                f"из одного — принято по размеру",
+                flush=True,
+            )
+        return None
+
+    # checksum_parsed=True, но ни один не совпал → ОТБРАКОВКА.
+    # Все ответившие зеркала .sha256sum единогласно ожидают другой хэш —
+    # это подозрение на MITM или реально устаревший файл.
+    if progress_label and mismatch_count > 0:
         print(
-            f"  {progress_label} ⚠ checksum скачан, но hex не распарсен ни "
-            f"из одного — принято по размеру",
+            f"  {progress_label} ✗ {algo} НЕ совпал ни на одном из "
+            f"{mismatch_count} ответивших зеркал (последнее: {last_mismatch_host} "
+            f"ожидал {last_mismatch_expected[:16]}…) — файл отбракован",
             flush=True,
         )
-    return None
+    return False
 
 
 def print_manual_hint(spec: PackageSpec, *, filename: str, **filename_kwargs) -> None:
