@@ -119,10 +119,41 @@ _YOUTUBE_DOMAINS = [
 #                неизвестна или запрос упал. НЕ возвращаем 🌐 для fallback
 #                (это зарезервировано для балансировщика) — лучше пусто.
 #
+# v5.0.3 FIX: U+FE0F (VARIATION SELECTOR-16) после regional indicator pair.
+#   Без VS16 некоторые терминалы (особенно с нестандартными шрифтами) рендерят
+#   regional indicator pair как ОДНУ букву вместо emoji-флага. Был зафиксирован
+#   случай: 🇳🇱 рендерилась как "N" (одна буква), 🇩🇪 как "D", 🇮🇹 как "I",
+#   но при этом 🇧🇾 (Беларусь) рендерилась корректно как флаг. Добавление
+#   U+FE0F принудительно заставляет терминал рендерить пару как emoji.
+#   _wcslen в box_renderer корректно считает VS16 как 0 колонок — выравнивание
+#   бокса не ломается (проверено тестом test_box_right_border_aligned_with_emoji).
+#
 # Кеширование: модуль-level dict _NODE_IP_FLAG_CACHE[host] = (ip_str, flag).
 # Это критично — меню может перерисовываться, и без кеша каждый раз был бы
 # новый сетевой запрос (4 секунды на ноду × N нод = неприемлемо).
 _NODE_IP_FLAG_CACHE: dict[str, tuple[str, str]] = {}
+
+
+def _with_emoji_vs16(flag: str) -> str:
+    """Добавляет U+FE0F (VARIATION SELECTOR-16) к emoji-флагу.
+
+    VS16 — это Unicode variation selector, который говорит терминалу
+    "рендери предшествующий символ как emoji, не как текст". Для regional
+    indicator pair (🇷🇺 = U+1F1F7 + U+1F1FA) без VS16 некоторые терминалы
+    рендерят только первую букву вместо флага.
+
+    Также добавляет VS16 к 🌍 (U+1F30D) — на всякий случай, для терминалов
+    которые рендерят 🌍 как 🌐 (Globe with meridians) без VS16.
+
+    _wcslen корректно считает VS16 как 0 колонок — выравнивание бокса
+    не ломается.
+    """
+    if not flag:
+        return flag
+    # Если уже есть VS16 в конце — не дублируем
+    if flag.endswith("\ufe0f"):
+        return flag
+    return flag + "\ufe0f"
 
 
 def _resolve_node_ip_and_flag(host: str) -> tuple[str, str]:
@@ -130,7 +161,7 @@ def _resolve_node_ip_and_flag(host: str) -> tuple[str, str]:
 
     Возвращает (ip_str, flag_emoji):
       ip_str:     "203.0.113.132" или "(IP недоступен)".
-      flag_emoji: "🇩🇪" или "" (пусто если не удалось определить страну).
+      flag_emoji: "🇩🇪️" (с VS16) или "" (пусто если не удалось определить страну).
 
     Кеширует результат в _NODE_IP_FLAG_CACHE чтобы при перерисовке меню
     не делать повторных сетевых запросов (4с на каждый ip-api.com запрос).
@@ -171,6 +202,9 @@ def _resolve_node_ip_and_flag(host: str) -> tuple[str, str]:
                     try:
                         from chimera.modules.resources import country_flag_emoji
                         flag = country_flag_emoji(cc)
+                        # v5.0.3: добавляем U+FE0F чтобы терминал рендерил
+                        # regional indicator pair как emoji-флаг, не как буквы.
+                        flag = _with_emoji_vs16(flag)
                     except Exception:
                         flag = ""
     except Exception:
@@ -512,7 +546,7 @@ def do_manage_youtube_via_ru() -> None:
         _is_current = (current_target == "ru" and rule_in_config)
         _marker = "● " if _is_current else "  "
         # RU entry — флаг 🇷🇺 в начале (статичный, без сетевого запроса).
-        _box_item("1", f"{_marker}YouTube через 🇷🇺 {'RU entry':<{_name_width}}")
+        _box_item("1", f"{_marker}YouTube через 🇷🇺\ufe0f {'RU entry':<{_name_width}}")
 
         for i, nd in enumerate(nodes):
             _tag = f"chain-exit-{i+1}"
@@ -540,7 +574,7 @@ def do_manage_youtube_via_ru() -> None:
         # (без привязки к конкретной стране). Emoji занимает 2 колонки,
         # _wcslen в box_renderer корректно его посчитает — правая граница
         # бокса останется ровной.
-        _box_item(str(_default_idx), f"{_marker}YouTube через 🌍 exit-ноды (default, балансировщик)")
+        _box_item(str(_default_idx), f"{_marker}YouTube через 🌍\ufe0f exit-ноды (default, балансировщик)")
         _box_row()
         _box_item("Q", f"{DIM}Назад{NC}")
         _box_bottom()
@@ -601,9 +635,9 @@ def do_manage_youtube_via_ru() -> None:
         # v5.0.2: добавлены emoji для консистентности с multi-node меню —
         # 🇷🇺 для RU entry, 🌍 для default (балансировщик).
         _is_cur = (current_target == "ru" and rule_in_config)
-        _box_item("1", f"{'● ' if _is_cur else '  '}YouTube через 🇷🇺 RU entry")
+        _box_item("1", f"{'● ' if _is_cur else '  '}YouTube через 🇷🇺\ufe0f RU entry")
         _is_cur_off = (current_target == "off")
-        _box_item("2", f"{'● ' if _is_cur_off else '  '}YouTube через 🌍 exit-ноды (default)")
+        _box_item("2", f"{'● ' if _is_cur_off else '  '}YouTube через 🌍\ufe0f exit-ноды (default)")
         _box_row()
         _box_item("Q", f"{DIM}Назад{NC}")
         _box_bottom()
