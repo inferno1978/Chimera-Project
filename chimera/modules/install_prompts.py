@@ -725,10 +725,13 @@ def prompt_awg_exit_mode() -> None:
     """
     core = _core_module()
     # ── Bind helpers ──────────────────────────────────────────────────────────
+    # v5.0.3 FIX: добавлен _box_desc (забыли забиндить — NameError при показе
+    # описаний вариантов обфускации AWG, строка 908+).
     _box_top    = core._box_top
     _box_row    = core._box_row
     _box_item   = core._box_item
     _box_bottom = core._box_bottom
+    _box_desc   = core._box_desc
     _box_wrap_msg = core._box_wrap_msg
     success = core.success
     warn    = core.warn
