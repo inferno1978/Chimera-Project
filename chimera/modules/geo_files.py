@@ -121,14 +121,16 @@ def _emergency_curl_one(
     блокирует нестандартные UA на release-asset redirects).
 
     v5.0.0+: если передан checksum_urls — после размерной проверки
-    делает SHA256-верификацию через download_manager._verify_checksum.
-    Это гарантирует, что emergency fallback не откатит защиту от
-    устаревших/битых кэшированных файлов, введённую в v5.0.0
+    делает SHA256-верификацию через download_manager._fetch_reference_hash
+    (короткий приоритетный список: raw.githubusercontent.com →
+    release-assets → cdn.statically.io) + прямое сравнение actual_hash
+    с reference_hash. Это гарантирует, что emergency fallback не откатит
+    защиту от устаревших/битых кэшированных файлов, введённую в v5.0.0
     (коммит cdadfab). Логика верификации:
-      • verify_result is True  → принимаем файл
-      • verify_result is False → отбраковка (хэш не совпал)
-      • verify_result is None  → принимаем с warn (checksum недоступен
-        со всех зеркал — деградация, как в fetch_package)
+      • reference_hash is None → принимаем с warn (все 3 приоритетных
+        источника недоступны — деградация, как в fetch_package)
+      • actual_hash == reference_hash → принимаем файл
+      • actual_hash != reference_hash → отбраковка (файл подменён/устаревший)
 
     Возвращает True если файл скачан, размер >= min_size, и (если
     checksum_urls задан) SHA256-верификация прошла или деградировала.
@@ -215,29 +217,43 @@ def _emergency_curl_one(
             return False
 
         # ── SHA256-верификация (если задан checksum_urls) ────────────────
-        # v5.0.0+: emergency fallback не должен откатывать защиту от
-        # кэшированных/битых файлов, введённую в cdadfab. Используем тот же
-        # _verify_checksum что и fetch_package — это гарантирует одинаковый
-        # критерий валидности файла.
+        # v5.0.4+: emergency fallback использует тот же подход что и
+        # fetch_package — получает эталонный хэш ОДИН РАЗ через
+        # _fetch_reference_hash() (короткий приоритетный список авторитетных
+        # источников), затем прямо сравнивает actual_hash с reference_hash.
+        # Раньше вызывал _verify_checksum() — но она удалена в v5.0.4
+        # (заменена на _fetch_reference_hash + прямое сравнение).
         if checksum_urls:
             try:
-                from chimera.modules.download_manager import _verify_checksum
-                verify_result = _verify_checksum(
-                    tmp_path, checksum_urls, checksum_algo,
+                from chimera.modules.download_manager import (
+                    _fetch_reference_hash, _compute_hash,
+                )
+                # reference_hash получен ОДИН РАЗ с короткого приоритетного
+                # списка (raw.githubusercontent.com → release-assets →
+                # cdn.statically.io). None = все 3 недоступны (деградация).
+                reference_hash = _fetch_reference_hash(
+                    checksum_urls, checksum_algo,
                     progress_label=progress_label,
                 )
-                if verify_result is False:
-                    # Явная отбраковка — хэш не совпал.
-                    warn(f"  emergency curl: SHA256 не совпал для {dest_path.name} — "
-                         f"файл отбракован (возможно кэшированная устаревшая копия)")
-                    tmp_path.unlink(missing_ok=True)
-                    return False
-                # verify_result is None — checksum недоступен со всех зеркал,
-                # деградация до размерной проверки (warn уже внутри _verify_checksum).
-                # verify_result is True — хэш совпал, принимаем.
+                if reference_hash is None:
+                    # Деградация — принимаем по размеру (warn уже внутри
+                    # _fetch_reference_hash).
+                    pass
+                else:
+                    actual_hash = _compute_hash(tmp_path, checksum_algo)
+                    if actual_hash != reference_hash:
+                        # Явная отбраковка — хэш не совпал.
+                        warn(f"  emergency curl: SHA256 не совпал для "
+                             f"{dest_path.name} — ожидался "
+                             f"{reference_hash[:16]}…, получен "
+                             f"{actual_hash[:16]}… — файл отбракован "
+                             f"(возможно кэшированная устаревшая копия)")
+                        tmp_path.unlink(missing_ok=True)
+                        return False
+                    # Хэш совпал — принимаем файл.
             except Exception as ex:
-                # _verify_checksum сам по себе не должен падать (он ловит свои
-                # исключения), но на всякий случай — log + деградация.
+                # _fetch_reference_hash / _compute_hash не должны падать,
+                # но на всякий случай — log + деградация.
                 warn(f"  emergency curl: ошибка SHA256-верификации "
                      f"({type(ex).__name__}: {ex}) — принимаю по размеру")
         # else: checksum_urls не задан — принимаем только по размеру
