@@ -726,15 +726,76 @@ def _diag_check_outbounds(cfg: dict, counters: list) -> None:
         _box_info("Outbound 'direct' отсутствует (нормально для Режима B без split tunneling)")
 
 
+def _diag_tcp_probe(host: str, port: int, timeout: int = 10) -> tuple[bool, str]:
+    """TCP-ping до host:port с перебором всех адресов из getaddrinfo() (IPv4 + IPv6).
+
+    Возвращает (alive, detail). detail — короткая строка для diag-вывода:
+      'IPv4 1.2.3.4'
+      'IPv6 2a12::2'
+      'DNS empty'
+      'DNS fail: ...'
+      'IPv4 timeout; IPv6 unreachable'
+    """
+    # 1) DNS-резолв через системный резолвер (getaddrinfo). Если он отдал
+    #    IPv6-only, а на сервере нет IPv6-маршрута — попробуем это понять.
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        return False, f"DNS fail: {e}"
+    if not infos:
+        return False, "DNS empty"
+
+    # Дедуп по (family, addr), сохраняя порядок IPv4/IPv6 как отдал резолвер.
+    seen: list[tuple[int, tuple]] = []
+    for family, _, _, _, sockaddr in infos:
+        key = (family, sockaddr)
+        if key not in seen:
+            seen.append((family, sockaddr))
+
+    results: list[tuple[bool, str]] = []  # (alive, family_label)
+    for family, sockaddr in seen:
+        fam_label = "IPv6" if family == socket.AF_INET6 else "IPv4"
+        ip_str = sockaddr[0]
+        try:
+            s = socket.socket(family, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            try:
+                s.connect(sockaddr)
+                s.close()
+                results.append((True, f"{fam_label} {ip_str}"))
+            except (socket.timeout, OSError) as e:
+                # Закрываем сокет в любой ошибке
+                try:
+                    s.close()
+                except OSError:
+                    pass
+                err_short = "timeout" if isinstance(e, socket.timeout) else str(e)
+                results.append((False, f"{fam_label} {ip_str}: {err_short}"))
+        except OSError as e:
+            results.append((False, f"{fam_label} {ip_str}: {e}"))
+
+    # Если хотя бы одна address family ответила — считаем ноду живой.
+    alive = any(ok for ok, _ in results)
+    if alive:
+        # Берём первую успешную.
+        for ok, label in results:
+            if ok:
+                return True, label
+    # Все упали — покажем что именно не вышло.
+    failed_summary = "; ".join(label for _, label in results)
+    return False, failed_summary
+
+
 def _diag_check_routing_live(cfg: dict, counters: list) -> None:
     core = _core_module()
     _box_warn = core._box_warn
     _box_info = core._box_info
+    _box_dim  = core._box_dim
     _diag_head("5. Тест маршрутизации (TCP ping exit-нод)")
     if not cfg:
         _box_warn("Конфиг не загружен, пропуск")
         return
-    _box_info("Проверяем доступность exit-нод напрямую (TCP ping)...")
+    _box_info("Проверяем доступность exit-нод напрямую (TCP ping, 10 сек/нода)...")
     outbounds = cfg.get("outbounds", [])
     for ob in outbounds:
         tag = ob.get("tag", "")
@@ -745,15 +806,21 @@ def _diag_check_routing_live(cfg: dict, counters: list) -> None:
             port = vn.get("port", 443)
             if not host:
                 continue
-            r = subprocess.run(
-                ["bash", "-c",
-                 f"timeout 5 bash -c 'echo > /dev/tcp/{host}/{port}' 2>/dev/null && echo ok || echo fail"],
-                capture_output=True, text=True
-            )
-            alive = r.stdout.strip() == "ok"
-            _diag_chk(counters, alive,
-                      f"Exit-нода [{tag}] {host}:{port} — TCP достижима",
-                      f"Exit-нода [{tag}] {host}:{port} — НЕДОСТУПНА (timeout или rejected)")
+            alive, detail = _diag_tcp_probe(host, port, timeout=10)
+            if alive:
+                _diag_chk(counters, True,
+                          f"Exit-нода [{tag}] {host}:{port} — TCP достижима ({detail})",
+                          "")
+            else:
+                _diag_chk(counters, False,
+                          "",
+                          f"Exit-нода [{tag}] {host}:{port} — НЕДОСТУПНА ({detail})")
+                # Дополнительная подсказка: если все упали по IPv6 — это типичный
+                # кейс "на сервере нет IPv6, но домен резолвится только в AAAA".
+                if "IPv6" in detail and "IPv4" not in detail:
+                    _box_dim("  ↳ На этом сервере нет публичного IPv6, а домен ноды "
+                             "резолвится только в AAAA. Клиент может подключаться, "
+                             "если у него есть IPv6 или используется другой резолвер.")
 
 
 def _diag_check_access_log(counters: list) -> dict:
