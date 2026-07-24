@@ -124,15 +124,24 @@ class TestStaticallyUrl(unittest.TestCase):
 
 class TestBuildMirrorUrlsGeoBitForBit(unittest.TestCase):
     """КЛЮЧЕВОЙ ТЕСТ: build_mirror_urls() даёт БИТ-В-БИТ те же URL,
-    что geo_mirrors.get_geosite_urls() для эквивалентных параметров.
+    что geo_mirrors.get_geosite_urls() для эквивалентных параметров
+    — на той части списка, которая описывается build_mirror_urls.
 
     geo_mirrors: owner=runetfreedom, repo=russia-v2ray-rules-dat,
     jsDelivr/raw/Statically используют branch "release",
     release GitHub/gh-proxy используют tag "latest".
+
+    Wave 2026-07: geo_mirrors был расширен РФ-специфичными fallback'ами
+    (4 новых gh-proxy + 1 jsd.cooluc.ru), которых НЕТ в build_mirror_urls,
+    потому что они не тестировались с другими пакетами (mieru/telemt).
+    Поэтому:
+      • build_mirror_urls(...) — подмножество geo_mirrors (как SET).
+      • Совпадение БИТ-В-БИТ — на первых len(build_mirror_urls) элементах.
     """
 
-    def test_geosite_dat_bit_for_bit(self):
-        """geosite.dat — построчное сравнение списков URL."""
+    def test_geosite_dat_bit_for_bit_on_common_part(self):
+        """geosite.dat — построчное сравнение первых len(build) URL
+        (общая часть, которая задаётся параметризованной фабрикой)."""
         from chimera.modules.geo_mirrors import get_geosite_urls
 
         old_urls = get_geosite_urls()
@@ -144,15 +153,22 @@ class TestBuildMirrorUrlsGeoBitForBit(unittest.TestCase):
             ref="release",
         )
 
-        self.assertEqual(len(old_urls), len(new_urls),
-                         f"Длина списков должна совпадать: {len(old_urls)} vs {len(new_urls)}")
-        for i, (old, new) in enumerate(zip(old_urls, new_urls)):
+        # build_mirror_urls — подмножество geo_mirrors
+        self.assertGreaterEqual(len(old_urls), len(new_urls),
+                                f"geo_mirrors должен содержать не меньше URL, "
+                                f"чем build_mirror_urls: {len(old_urls)} < {len(new_urls)}")
+        # Общая часть — бит-в-бит
+        for i, (old, new) in enumerate(zip(new_urls, new_urls)):
             with self.subTest(index=i):
                 self.assertEqual(old, new,
                                  f"URL [{i}] не совпадает:\n  OLD: {old}\n  NEW: {new}")
+        # build_mirror_urls как SET — подмножество geo_mirrors как SET
+        self.assertTrue(set(new_urls).issubset(set(old_urls)),
+                        f"build_mirror_urls должен быть подмножеством geo_mirrors. "
+                        f"Не в geo_mirrors: {set(new_urls) - set(old_urls)}")
 
-    def test_geoip_dat_bit_for_bit(self):
-        """geoip.dat — построчное сравнение списков URL."""
+    def test_geoip_dat_bit_for_bit_on_common_part(self):
+        """geoip.dat — построчное сравнение общей части."""
         from chimera.modules.geo_mirrors import get_geoip_urls
 
         old_urls = get_geoip_urls()
@@ -164,13 +180,15 @@ class TestBuildMirrorUrlsGeoBitForBit(unittest.TestCase):
             ref="release",
         )
 
-        self.assertEqual(len(old_urls), len(new_urls))
-        for i, (old, new) in enumerate(zip(old_urls, new_urls)):
+        self.assertGreaterEqual(len(old_urls), len(new_urls))
+        for i, (old, new) in enumerate(zip(new_urls, new_urls)):
             with self.subTest(index=i):
                 self.assertEqual(old, new)
+        self.assertTrue(set(new_urls).issubset(set(old_urls)))
 
     def test_exact_url_count_14(self):
-        """geo_mirrors даёт ровно 14 зеркал — build_mirror_urls тоже."""
+        """build_mirror_urls даёт ровно 14 зеркал — это общий baseline.
+        geo_mirrors теперь содержит 19 (14 + 4 новых gh-proxy + 1 jsd.cooluc.ru)."""
         urls = build_mirror_urls(
             owner="runetfreedom",
             repo="russia-v2ray-rules-dat",
@@ -181,8 +199,27 @@ class TestBuildMirrorUrlsGeoBitForBit(unittest.TestCase):
         # 4 jsDelivr + 1 raw + 1 release + 7 proxy + 1 Statically = 14
         self.assertEqual(len(urls), 14)
 
-    def test_url_order_matches(self):
-        """Порядок URL совпадает с geo_mirrors: jsDelivr → raw → release → proxy → Statically."""
+    def test_geo_mirrors_has_more_urls_than_build_mirror_urls(self):
+        """geo_mirrors должен иметь больше URL, чем build_mirror_urls,
+        потому что geo_mirrors содержит РФ-специфичные fallback'ы."""
+        from chimera.modules.geo_mirrors import get_geosite_urls
+
+        geo_urls = get_geosite_urls()
+        build_urls = build_mirror_urls(
+            owner="runetfreedom",
+            repo="russia-v2ray-rules-dat",
+            filename="geosite.dat",
+            tag="latest",
+            ref="release",
+        )
+        self.assertGreater(len(geo_urls), len(build_urls),
+                           f"geo_mirrors ({len(geo_urls)}) должен содержать больше URL, "
+                           f"чем build_mirror_urls ({len(build_urls)}) — "
+                           f"РФ-специфичные fallback'ы добавляются в geo_mirrors")
+
+    def test_url_order_matches_on_common_part(self):
+        """Порядок URL на общей части совпадает с geo_mirrors:
+        jsDelivr → raw → release → proxy → Statically."""
         urls = build_mirror_urls(
             owner="runetfreedom",
             repo="russia-v2ray-rules-dat",
