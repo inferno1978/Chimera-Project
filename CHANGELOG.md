@@ -2,6 +2,67 @@
 
 ---
 
+## FIX(diagnostics): ложное «НЕДОСТУПНА» для IPv6-only exit-нод в тесте маршрутизации — 24 июля 2026
+
+**В отчёте «Диагностика одной кнопкой» шаг 5 (TCP ping exit-нод) показывал некоторые ноды как «НЕДОСТУПНА (timeout или rejected)», хотя подключение по vless-ссылке к тем же нодам работало нормально. Корень проблемы: для TCP-ping'а использовался bash `/dev/tcp/{host}/{port}`, который под капотом вызывает `getaddrinfo()` и пытается установить соединение. Если домен ноды резолвился только в AAAA (IPv6), а на сервере диагностики нет публичного IPv6-маршрута — bash получал «Network is unreachable» и диагностика помечала ноду как недоступную. Но реальный клиент (vless-ссылка) мог подключаться через свой IPv6, либо через другой резолвер, который отдавал IPv4 — и соединение работало.**
+
+### Локация бага
+
+`chimera/modules/diagnostics.py:_diag_check_routing_live()` (строки ~729-757 до фикса):
+
+```python
+r = subprocess.run(
+    ["bash", "-c",
+     f"timeout 5 bash -c 'echo > /dev/tcp/{host}/{port}' 2>/dev/null && echo ok || echo fail"],
+    ...
+)
+alive = r.stdout.strip() == "ok"
+```
+
+Проблемы этого подхода:
+1. **IPv4-only fallback отсутствует** — bash `/dev/tcp` перебирает адреса из `getaddrinfo()`, но если первый (IPv6) падает с «Network is unreachable», не пытается IPv4
+2. **Timeout 5 сек** — для некоторых мобильных/спутниковых exit-нод маловато
+3. **Неинформативное сообщение** — «НЕДОСТУПНА (timeout или rejected)» не даёт понять, какая именно address family упала и почему
+
+### Что сделано
+
+Новая функция `_diag_tcp_probe(host, port, timeout=10)` в `diagnostics.py`:
+
+1. **`socket.getaddrinfo()` с явным перебором всех адресов** — берёт все записи (IPv4 + IPv6), дедуплицирует по `(family, sockaddr)`, перебирает по очереди. Если хотя бы одна семья отвечает — нода считается живой.
+
+2. **Явный timeout 10 секунд** на каждую попытку `socket.connect()` через `s.settimeout(10)`.
+
+3. **Детальный вывод** — вместо «НЕДОСТУПНА (timeout или rejected)» теперь показывает, что именно упало:
+   - `Exit-нода [chain-exit-2] total-shadows.online:443 — TCP достижима (IPv4 132.243.212.119)` — успешный кейс
+   - `Exit-нода [chain-exit-2] totalshadows.online:443 — НЕДОСТУПНА (IPv6 2a12:bec4:1460:443::2: Network is unreachable)` — IPv6-only домен на IPv4-only сервере
+   - `Exit-нода [...] dualstack.com:443 — НЕДОСТУПНА (IPv6 2a12::1: Network is unreachable; IPv4 1.2.3.4: timed out)` — обе семьи упали, видно обе ошибки
+
+4. **Подсказка для типичного кейса** — если в detail есть IPv6, но нет IPv4 (т.е. домен только AAAA, а на сервере нет IPv6), выводится дополнительная строка:
+   > `↳ На этом сервере нет публичного IPv6, а домен ноды резолвится только в AAAA. Клиент может подключаться, если у него есть IPv6 или используется другой резолвер.`
+
+### Не тронуто
+
+- Остальные шаги диагностики (1-4, 6+) — не связаны, работают через `subprocess.run` для других команд
+- `_diag_check_routing_live()` — вызывается из `run_full_diagnostics()`, сигнатура не изменилась
+- `chain_nodes.py` — отдельная функция TCP-ping для live-статуса нод в основном меню, не тронута (там свой код)
+
+### Тесты
+
+`tests/test_diagnostics.py` — **20 passed** (12 существующих + 8 новых, класс `TestDiagTcpProbe`):
+
+1. `test_dns_fail_returns_false_with_detail` — DNS не резолвит → `False`, detail содержит «DNS fail»
+2. `test_dns_empty_returns_false` — `getaddrinfo` вернул пустой список → `False`, detail = «DNS empty»
+3. `test_ipv4_only_success` — IPv4-only домен, коннект успешен → `True`, detail содержит «IPv4» и адрес
+4. `test_ipv6_only_unreachable_on_ipv4_only_server` — кейс `totalshadows.online`: только AAAA, `OSError("Network is unreachable")` → `False`, detail содержит «IPv6» и «unreachable»
+5. `test_dualstack_ipv6_fails_ipv4_succeeds` — dual-stack домен, IPv6 падает, IPv4 отвечает → `True`, detail содержит «IPv4» (ключевой кейс — раньше bash давал `False`, теперь `True`)
+6. `test_dualstack_both_fail` — обе семьи упали → `False`, detail содержит обе ошибки (IPv6 + IPv4 + «unreachable» + «timeout»)
+7. `test_timeout_10_seconds_passed_to_socket` — проверка что `timeout=10` доходит до `s.settimeout(10)`
+8. `test_dedup_duplicate_addrinfo_entries` — `getaddrinfo` часто возвращает дубликаты — должны быть дедуплицированы, только ОДИН сокет создаётся
+
+Регрессии: `tests/test_diagnostics.py` (старые 12 тестов) — 0 регрессий. Итого: 20 passed.
+
+---
+
 ## FEAT(geoblock): гео-блокировка по странам для Telemt — 23 июля 2026
 
 **Гео-блокировка по странам для Telemt (MTProto): можно запретить подключение к MTProto-порту с IP-адресов указанных стран. Блокировка работает на уровне iptables (ДО бинарника Telemt), а не на уровне Xray routing — DROP срабатывает раньше, чем соединение дойдёт до обработки. Переиспользован паттерн из `ingress_geoip.py` (ipset `hash:net` + iptables DROP), но в режиме block-list (DROP конкретных стран), а не allowlist.**

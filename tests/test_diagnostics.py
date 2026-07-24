@@ -13,6 +13,7 @@ Unit-тесты для chimera/modules/diagnostics.py.
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import tempfile
 import unittest
@@ -181,6 +182,129 @@ class TestDiagResolveConfig(unittest.TestCase):
             path, cfg = diagnostics._diag_resolve_config()
         self.assertIsNotNone(path)
         self.assertEqual(cfg, {})
+
+
+class TestDiagTcpProbe(unittest.TestCase):
+    """_diag_tcp_probe — TCP-ping с перебором IPv4/IPv6 из getaddrinfo()."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _make_addrinfo(self, family, ip, port=443):
+        """Хелпер: строит кортеж формата getaddrinfo."""
+        if family == socket.AF_INET:
+            sockaddr = (ip, port, 0, 0)
+        else:
+            sockaddr = (ip, port, 0, 0)
+        return (family, socket.SOCK_STREAM, 6, "", sockaddr)
+
+    def test_dns_fail_returns_false_with_detail(self):
+        from chimera.modules import diagnostics
+        with patch.object(diagnostics.socket, "getaddrinfo",
+                          side_effect=socket.gaierror("Name or service not known")):
+            alive, detail = diagnostics._diag_tcp_probe("nonexistent.invalid", 443)
+        self.assertFalse(alive)
+        self.assertIn("DNS fail", detail)
+
+    def test_dns_empty_returns_false(self):
+        from chimera.modules import diagnostics
+        with patch.object(diagnostics.socket, "getaddrinfo", return_value=[]):
+            alive, detail = diagnostics._diag_tcp_probe("example.com", 443)
+        self.assertFalse(alive)
+        self.assertEqual(detail, "DNS empty")
+
+    def test_ipv4_only_success(self):
+        """Классический кейс: домен резолвится в IPv4, коннект успешен."""
+        from chimera.modules import diagnostics
+        addrinfos = [self._make_addrinfo(socket.AF_INET, "1.2.3.4")]
+        mock_sock = MagicMock()
+        with patch.object(diagnostics.socket, "getaddrinfo", return_value=addrinfos), \
+             patch.object(diagnostics.socket, "socket", return_value=mock_sock):
+            alive, detail = diagnostics._diag_tcp_probe("example.com", 443)
+        self.assertTrue(alive)
+        self.assertIn("IPv4", detail)
+        self.assertIn("1.2.3.4", detail)
+        mock_sock.connect.assert_called_once()
+        mock_sock.close.assert_called_once()
+
+    def test_ipv6_only_unreachable_on_ipv4_only_server(self):
+        """Кейс totalshadows.online: только AAAA, на сервере нет IPv6 → 'Network is unreachable'."""
+        from chimera.modules import diagnostics
+        addrinfos = [self._make_addrinfo(socket.AF_INET6, "2a12:bec4:1460:443::2")]
+        mock_sock = MagicMock()
+        mock_sock.connect.side_effect = OSError("Network is unreachable")
+        with patch.object(diagnostics.socket, "getaddrinfo", return_value=addrinfos), \
+             patch.object(diagnostics.socket, "socket", return_value=mock_sock):
+            alive, detail = diagnostics._diag_tcp_probe("totalshadows.online", 443)
+        self.assertFalse(alive)
+        self.assertIn("IPv6", detail)
+        self.assertIn("unreachable", detail.lower())
+        # Подсказка для diag-вывода: detail не должен содержать IPv4-успеха
+        self.assertNotIn("IPv4", detail)
+
+    def test_dualstack_ipv6_fails_ipv4_succeeds(self):
+        """Dual-stack домен, IPv6 недоступен, IPv4 отвечает → нода жива."""
+        from chimera.modules import diagnostics
+        addrinfos = [
+            self._make_addrinfo(socket.AF_INET6, "2a12::1"),
+            self._make_addrinfo(socket.AF_INET, "1.2.3.4"),
+        ]
+        # Каждый вызов socket() возвращает новый mock — один для IPv6 (fail), один для IPv4 (ok)
+        sock_v6 = MagicMock()
+        sock_v6.connect.side_effect = OSError("Network is unreachable")
+        sock_v4 = MagicMock()
+        with patch.object(diagnostics.socket, "getaddrinfo", return_value=addrinfos), \
+             patch.object(diagnostics.socket, "socket", side_effect=[sock_v6, sock_v4]):
+            alive, detail = diagnostics._diag_tcp_probe("dualstack.example.com", 443)
+        self.assertTrue(alive)
+        self.assertIn("IPv4", detail)
+        self.assertIn("1.2.3.4", detail)
+
+    def test_dualstack_both_fail(self):
+        """Dual-stack домен, обе семьи упали → False, detail содержит обе ошибки."""
+        from chimera.modules import diagnostics
+        addrinfos = [
+            self._make_addrinfo(socket.AF_INET6, "2a12::1"),
+            self._make_addrinfo(socket.AF_INET, "1.2.3.4"),
+        ]
+        sock_v6 = MagicMock()
+        sock_v6.connect.side_effect = OSError("Network is unreachable")
+        sock_v4 = MagicMock()
+        sock_v4.connect.side_effect = socket.timeout("timed out")
+        with patch.object(diagnostics.socket, "getaddrinfo", return_value=addrinfos), \
+             patch.object(diagnostics.socket, "socket", side_effect=[sock_v6, sock_v4]):
+            alive, detail = diagnostics._diag_tcp_probe("dualstack.example.com", 443)
+        self.assertFalse(alive)
+        self.assertIn("IPv6", detail)
+        self.assertIn("IPv4", detail)
+        self.assertIn("unreachable", detail.lower())
+        self.assertIn("timeout", detail.lower())
+
+    def test_timeout_10_seconds_passed_to_socket(self):
+        """Проверка что timeout=10 доходит до socket.settimeout()."""
+        from chimera.modules import diagnostics
+        addrinfos = [self._make_addrinfo(socket.AF_INET, "1.2.3.4")]
+        mock_sock = MagicMock()
+        with patch.object(diagnostics.socket, "getaddrinfo", return_value=addrinfos), \
+             patch.object(diagnostics.socket, "socket", return_value=mock_sock):
+            diagnostics._diag_tcp_probe("example.com", 443, timeout=10)
+        mock_sock.settimeout.assert_called_once_with(10)
+
+    def test_dedup_duplicate_addrinfo_entries(self):
+        """getaddrinfo часто возвращает дубликаты — должны быть дедуплицированы."""
+        from chimera.modules import diagnostics
+        # Тот же адрес дважды
+        addrinfos = [
+            self._make_addrinfo(socket.AF_INET, "1.2.3.4"),
+            self._make_addrinfo(socket.AF_INET, "1.2.3.4"),
+        ]
+        mock_sock = MagicMock()
+        with patch.object(diagnostics.socket, "getaddrinfo", return_value=addrinfos) as mock_gai, \
+             patch.object(diagnostics.socket, "socket", return_value=mock_sock) as mock_socket_factory:
+            diagnostics._diag_tcp_probe("example.com", 443)
+        # Только ОДИН сокет создан — дубликат не вызывал второй коннект
+        mock_socket_factory.assert_called_once()
+        mock_sock.connect.assert_called_once()
 
 
 if __name__ == "__main__":
