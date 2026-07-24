@@ -102,6 +102,86 @@ _YOUTUBE_DOMAINS = [
 
 
 # =============================================================================
+#  ХЕЛПЕР: IP + ФЛАГ СТРАНЫ для exit-ноды
+# =============================================================================
+# v5.0.2: отображение флага страны рядом с IP exit-ноды в TUI-меню.
+# Используется в do_manage_youtube_via_ru() для multi-node режима.
+#
+# Алгоритм:
+#   1. Резолвим hostname → IPv4 через socket.gethostbyname().
+#   2. Запрашиваем страну через http://ip-api.com/json/{ip}?fields=countryCode
+#      (тот же endpoint что в chain_nodes.py:2421, 4 сек таймаут).
+#   3. Преобразуем countryCode в emoji-флаг через country_flag_emoji().
+#
+# Возвращает (ip_str, flag_emoji):
+#   ip_str     — IP-адрес или "(IP недоступен)" если резолв упал.
+#   flag_emoji — emoji-флаг (🇩🇪, 🇷🇺, ...) или пустая строка если страна
+#                неизвестна или запрос упал. НЕ возвращаем 🌐 для fallback
+#                (это зарезервировано для балансировщика) — лучше пусто.
+#
+# Кеширование: модуль-level dict _NODE_IP_FLAG_CACHE[host] = (ip_str, flag).
+# Это критично — меню может перерисовываться, и без кеша каждый раз был бы
+# новый сетевой запрос (4 секунды на ноду × N нод = неприемлемо).
+_NODE_IP_FLAG_CACHE: dict[str, tuple[str, str]] = {}
+
+
+def _resolve_node_ip_and_flag(host: str) -> tuple[str, str]:
+    """Резолвит host → (IP, flag_emoji) с кешированием.
+
+    Возвращает (ip_str, flag_emoji):
+      ip_str:     "203.0.113.132" или "(IP недоступен)".
+      flag_emoji: "🇩🇪" или "" (пусто если не удалось определить страну).
+
+    Кеширует результат в _NODE_IP_FLAG_CACHE чтобы при перерисовке меню
+    не делать повторных сетевых запросов (4с на каждый ip-api.com запрос).
+    """
+    # Кеш: host → (ip_str, flag_emoji)
+    if host in _NODE_IP_FLAG_CACHE:
+        return _NODE_IP_FLAG_CACHE[host]
+
+    # Резолв IP
+    ip = ""
+    try:
+        import socket as _sock
+        ip = _sock.gethostbyname(host)
+    except Exception:
+        ip = ""
+
+    if not ip:
+        result = ("(IP недоступен)", "")
+        _NODE_IP_FLAG_CACHE[host] = result
+        return result
+
+    # Получаем страну через ip-api.com (best-effort, не блокируем надолго)
+    flag = ""
+    try:
+        core = _core_module()
+        _run = core._run
+        r = _run(
+            ["curl", "-s", "--max-time", "4",
+             f"http://ip-api.com/json/{ip}?fields=countryCode"],
+            capture=True, check=False,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            data = json.loads(r.stdout.strip())
+            if data.get("status") == "success" or "countryCode" in data:
+                cc = data.get("countryCode", "")
+                if cc and len(cc) == 2:
+                    # country_flag_emoji из resources.py
+                    try:
+                        from chimera.modules.resources import country_flag_emoji
+                        flag = country_flag_emoji(cc)
+                    except Exception:
+                        flag = ""
+    except Exception:
+        flag = ""
+
+    result = (ip, flag)
+    _NODE_IP_FLAG_CACHE[host] = result
+    return result
+
+
+# =============================================================================
 #  ПРИМЕНЕНИЕ / УДАЛЕНИЕ ПРАВИЛА В XRAY CONFIG
 # =============================================================================
 
@@ -413,34 +493,54 @@ def do_manage_youtube_via_ru() -> None:
 
     if multi_node:
         # Multi-node меню: RU + N нод + default.
+        #
+        # v5.0.2: рядом с IP каждой exit-ноды показываем emoji-флаг страны
+        # (🇩🇪, 🇳🇱, 🇷🇺, ...). Для пункта "балансировщик" — 🌍 в начале.
+        #
+        # ВАЖНО про выравнивание и границы бокса:
+        #   • _box_row (через _wcslen) корректно считает emoji-флаги как
+        #     2 колонки — правая граница бокса не съедет.
+        #   • _name_width выравнивает только имя ноды ("Exit-нода #1"),
+        #     emoji-флаг ставится ПОСЛЕ IP, не участвует в выравнивании.
+        #   • 🌍 для балансировщика ставится в начале названия (до текста),
+        #     это не влияет на выравнивание других строк.
+
         # Вычисляем ширину колонки имени ноды для выравнивания IP.
         _name_width = max(len(f"Exit-нода #{i+1}") for i in range(len(nodes)))
         _name_width = max(_name_width, len("RU entry"))
 
         _is_current = (current_target == "ru" and rule_in_config)
         _marker = "● " if _is_current else "  "
-        _box_item("1", f"{_marker}YouTube через {'RU entry':<{_name_width}}")
+        # RU entry — флаг 🇷🇺 в начале (статичный, без сетевого запроса).
+        _box_item("1", f"{_marker}YouTube через 🇷🇺 {'RU entry':<{_name_width}}")
 
         for i, nd in enumerate(nodes):
             _tag = f"chain-exit-{i+1}"
             _is_cur = (current_target == _tag and rule_in_config)
             _marker = "● " if _is_cur else "  "
             _host = nd.get("host", "?")
-            # Резолвим IP для отображения (best-effort, без блокировки)
-            _ip_str = ""
-            try:
-                import socket as _sock
-                _resolved = _sock.gethostbyname(_host)
-                _ip_str = f"  {DIM}{_resolved}{NC}"
-            except Exception:
-                _ip_str = f"  {DIM}(IP недоступен){NC}"
+            # v5.0.2: резолвим IP + страну через кешированный хелпер.
+            # Хелпер делает socket.gethostbyname + curl ip-api.com (4с таймаут)
+            # с кешированием по host — повторные перерисовки меню не делают
+            # повторных сетевых запросов.
+            _ip, _flag = _resolve_node_ip_and_flag(_host)
+            # Флаг ставим после IP, через пробел. Если флаг пустой — не
+            # добавляем лишний пробел (не "132.x.x.x  ", а "132.x.x.x").
+            if _flag:
+                _ip_str = f"  {DIM}{_ip}{NC}  {_flag}"
+            else:
+                _ip_str = f"  {DIM}{_ip}{NC}"
             _node_name = f"Exit-нода #{i+1}"
             _box_item(str(i+2), f"{_marker}YouTube через {_node_name:<{_name_width}}{_ip_str}")
 
         _default_idx = len(nodes) + 2
         _is_cur = (current_target == "off")
         _marker = "● " if _is_cur else "  "
-        _box_item(str(_default_idx), f"{_marker}YouTube через exit-ноды (default, балансировщик)")
+        # v5.0.2: 🌍 в начале — символизирует балансировщик по всем exit-нодам
+        # (без привязки к конкретной стране). Emoji занимает 2 колонки,
+        # _wcslen в box_renderer корректно его посчитает — правая граница
+        # бокса останется ровной.
+        _box_item(str(_default_idx), f"{_marker}YouTube через 🌍 exit-ноды (default, балансировщик)")
         _box_row()
         _box_item("Q", f"{DIM}Назад{NC}")
         _box_bottom()
@@ -498,10 +598,12 @@ def do_manage_youtube_via_ru() -> None:
             return
     else:
         # Single-node / no-chain: старое двухпунктовое меню (обратная совместимость).
+        # v5.0.2: добавлены emoji для консистентности с multi-node меню —
+        # 🇷🇺 для RU entry, 🌍 для default (балансировщик).
         _is_cur = (current_target == "ru" and rule_in_config)
-        _box_item("1", f"{'● ' if _is_cur else '  '}YouTube через RU entry")
+        _box_item("1", f"{'● ' if _is_cur else '  '}YouTube через 🇷🇺 RU entry")
         _is_cur_off = (current_target == "off")
-        _box_item("2", f"{'● ' if _is_cur_off else '  '}YouTube через exit-ноды (default)")
+        _box_item("2", f"{'● ' if _is_cur_off else '  '}YouTube через 🌍 exit-ноды (default)")
         _box_row()
         _box_item("Q", f"{DIM}Назад{NC}")
         _box_bottom()
