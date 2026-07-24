@@ -817,7 +817,11 @@ class TestResolveNodeIpAndFlag(unittest.TestCase):
         self.assertEqual(flag, "")
 
     def test_successful_resolve_with_country(self):
-        """Host резолвится, ip-api.com отдаёт DE → (IP, '🇩🇪')."""
+        """Host резолвится, ip-api.com отдаёт DE → (IP, '🇩🇪️').
+        
+        v5.0.3: флаг включает U+FE0F (VS16) чтобы терминал рендерил
+        regional indicator pair как emoji-флаг, не как буквы.
+        """
         from chimera.modules import youtube_route
         core = sys.modules["chimera._core"]
         core._run = lambda args, **kw: _make_completed(
@@ -826,10 +830,13 @@ class TestResolveNodeIpAndFlag(unittest.TestCase):
         with patch("socket.gethostbyname", return_value="132.243.221.181"):
             ip, flag = youtube_route._resolve_node_ip_and_flag("node1.example.com")
         self.assertEqual(ip, "132.243.221.181")
-        self.assertEqual(flag, "🇩🇪")
+        # v5.0.3: флаг теперь содержит U+FE0F (VS16) в конце
+        self.assertEqual(flag, "🇩🇪\ufe0f",
+                         f"Флаг должен быть 🇩🇪+VS16, получили {flag!r} "
+                         f"(codepoints: {[hex(ord(c)) for c in flag]})")
 
     def test_russian_flag(self):
-        """countryCode=RU → 🇷🇺."""
+        """countryCode=RU → 🇷🇺️ (с VS16)."""
         from chimera.modules import youtube_route
         core = sys.modules["chimera._core"]
         core._run = lambda args, **kw: _make_completed(
@@ -838,7 +845,9 @@ class TestResolveNodeIpAndFlag(unittest.TestCase):
         with patch("socket.gethostbyname", return_value="80.66.65.15"):
             ip, flag = youtube_route._resolve_node_ip_and_flag("ru-node.example.com")
         self.assertEqual(ip, "80.66.65.15")
-        self.assertEqual(flag, "🇷🇺")
+        # v5.0.3: флаг теперь содержит U+FE0F (VS16) в конце
+        self.assertEqual(flag, "🇷🇺\ufe0f",
+                         f"Флаг должен быть 🇷🇺+VS16, получили {flag!r}")
 
     def test_cache_avoids_repeat_network_calls(self):
         """Повторный вызов с тем же host берёт результат из кеша —
@@ -873,6 +882,46 @@ class TestResolveNodeIpAndFlag(unittest.TestCase):
         self.assertEqual(flag, "",
                          "При ошибке ip-api.com flag должен быть пустым, "
                          "не 🌐 (это зарезервировано для балансировщика)")
+
+    def test_flag_has_vs16_variation_selector(self):
+        """v5.0.3 regression: emoji-флаг должен заканчиваться U+FE0F (VS16).
+
+        Без VS16 некоторые терминалы рендерят regional indicator pair как
+        ОДНУ букву вместо emoji-флага. Был зафиксирован случай (скриншот
+        пользователя 2026-07-24): 🇳🇱 рендерилась как "N", 🇩🇪 как "D",
+        🇮🇹 как "I", но 🇧🇾 рендерилась корректно. Добавление U+FE0F
+        принудительно заставляет терминал рендерить пару как emoji.
+        """
+        from chimera.modules import youtube_route
+        core = sys.modules["chimera._core"]
+        core._run = lambda args, **kw: _make_completed(
+            '{"status":"success","countryCode":"DE"}'
+        )
+        with patch("socket.gethostbyname", return_value="1.2.3.4"):
+            ip, flag = youtube_route._resolve_node_ip_and_flag("vs16-test.example.com")
+        self.assertTrue(flag.endswith("\ufe0f"),
+                        f"Флаг должен заканчиваться U+FE0F (VS16), "
+                        f"получили {flag!r} (codepoints: {[hex(ord(c)) for c in flag]}). "
+                        f"Без VS16 терминалы могут рендерить regional indicator "
+                        f"pair как одну букву вместо emoji-флага.")
+
+    def test_with_emoji_vs16_helper(self):
+        """_with_emoji_vs16 helper корректно добавляет VS16."""
+        from chimera.modules import youtube_route
+        # Пустая строка — возвращаем как есть
+        self.assertEqual(youtube_route._with_emoji_vs16(""), "")
+        # Флаг без VS16 — добавляем
+        result = youtube_route._with_emoji_vs16("🇷🇺")
+        self.assertEqual(result, "🇷🇺\ufe0f")
+        self.assertTrue(result.endswith("\ufe0f"))
+        # Флаг уже с VS16 — не дублируем
+        result2 = youtube_route._with_emoji_vs16("🇷🇺\ufe0f")
+        self.assertEqual(result2, "🇷🇺\ufe0f")
+        self.assertEqual(len(result2), len("🇷🇺\ufe0f"),
+                         "VS16 не должен дублироваться")
+        # 🌍 тоже получает VS16
+        result3 = youtube_route._with_emoji_vs16("🌍")
+        self.assertEqual(result3, "🌍\ufe0f")
 
 
 class TestYoutubeMenuFlagRendering(unittest.TestCase):
