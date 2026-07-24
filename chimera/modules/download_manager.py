@@ -220,6 +220,28 @@ def fetch_package(
     tmp_path = Path("/tmp") / f"_download_mgr_{filename}"
     tmp_path.unlink(missing_ok=True)
 
+    # ── v5.0.4: Эталонный хэш получаем ОДИН РАЗ перед циклом ──────────────
+    # Раньше (v5.0.0-v5.0.3): для КАЖДОГО кандидата .dat/.geoip-файла вызывалась
+    # _verify_checksum(), которая заново перебирала ВСЕ 19 checksum_urls.
+    # Это было избыточно (эталон один и тот же для всех попыток) и небезопасно
+    # (CDN мог отдать устаревший .sha256sum, и все кандидаты отбраковывались).
+    #
+    # Теперь: _fetch_reference_hash() берёт КОРОТКИЙ приоритетный список
+    # (raw.githubusercontent.com → release-assets → cdn.statically.io),
+    # скачивает .sha256sum с первого ответившего, парсит hex-хэш.
+    # Возвращает None если все 3 источника недоступны (деградация — см. ниже).
+    #
+    # Внутри цикла for url_idx, url ... — простое сравнение actual_hash
+    # с reference_hash (одной строкой). НЕ повторный запрос .sha256sum.
+    reference_hash: Optional[str] = None
+    if spec.checksum_urls:
+        reference_hash = _fetch_reference_hash(
+            spec.checksum_urls, spec.checksum_algo,
+            progress_label=progress_label,
+        )
+        # reference_hash is None → деградация (см. ниже в цикле: проверка
+        # хэша пропускается, файл принимается по размеру с warn).
+
     for url_idx, url in enumerate(urls, 1):
         # Прогресс-индикатор: показываем какое зеркало пробуется.
         # Важно для больших файлов (geo .dat ~30MB) — без этого пользователь
@@ -257,26 +279,53 @@ def fetch_package(
                     sz = tmp_path.stat().st_size
                     print(f"  {progress_label} ✓ скачано ({sz // 1024} КБ)", flush=True)
 
-                # ── sha256-верификация (если spec.checksum_urls задан) ──────
-                # v5.0.0: размерная проверка не ловит случаи, когда CDN
-                # закэшировал устаревший, но достаточно большой файл. Контроль
-                # суммы однозначно отбраковывает такой файл. Если НИ ОДИН
-                # checksum_url не отвечает (404 везде — апстрим перестал
-                # публиковать) — деградация до одобрения по размеру с warn.
-                if spec.checksum_urls:
-                    verify_result = _verify_checksum(
-                        tmp_path, spec.checksum_urls, spec.checksum_algo,
-                        progress_label=progress_label,
-                    )
-                    if verify_result is False:
-                        # Явная отбраковка — хэш не совпал. Лог уже внутри
-                        # _verify_checksum. Переходим к следующему зеркалу.
+                # ── v5.0.4: сравнение с эталонным хэшем (прямое, не _verify_checksum)
+                # reference_hash получен ОДИН РАЗ перед циклом (см. выше).
+                # Здесь — просто считаем actual_hash скачанного кандидата
+                # и сравниваем строкой. НЕ повторный запрос .sha256sum.
+                #
+                # Если reference_hash is None (деградация — все 3 приоритетных
+                # источника недоступны) — пропускаем проверку хэша, принимаем
+                # файл по размеру. Это лучше чем блокировать всю загрузку.
+                #
+                # КРИТИЧНО: несовпадение хэша у ОДНОГО кандидата НЕ должно
+                # прекращать проверку остальных. Здесь continue (а не return)
+                # — пробуем следующее зеркало с ТЕМ ЖЕ reference_hash.
+                if spec.checksum_urls and reference_hash is not None:
+                    try:
+                        actual_hash = _compute_hash(tmp_path, spec.checksum_algo)
+                    except Exception as e:
+                        if progress_label:
+                            print(
+                                f"  {progress_label} ⚠ не удалось вычислить "
+                                f"{spec.checksum_algo} ({e}) — пробуем следующее зеркало",
+                                flush=True,
+                            )
                         tmp_path.unlink(missing_ok=True)
                         continue
-                    # verify_result is None — checksum недоступен со всех
-                    # зеркал, деградация до размерной проверки (warn уже
-                    # внутри _verify_checksum). Принимаем файл.
-                    # verify_result is True — хэш совпал, принимаем.
+
+                    if actual_hash != reference_hash:
+                        # Хэш НЕ совпал — отбраковываем ЭТОГО кандидата.
+                        # НЕ прекращаем цикл — переходим к следующему зеркалу.
+                        # reference_hash уже получен, повторный запрос не нужен.
+                        if progress_label:
+                            print(
+                                f"  {progress_label} ⚠ {spec.checksum_algo} НЕ совпал — "
+                                f"ожидался {reference_hash[:16]}…, "
+                                f"получен {actual_hash[:16]}… — "
+                                f"пробуем следующее зеркало {url_idx + 1}/{len(urls)}",
+                                flush=True,
+                            )
+                        tmp_path.unlink(missing_ok=True)
+                        continue
+                    # Хэш совпал — принимаем файл, идём дальше к copy_to_dests.
+                    if progress_label:
+                        print(
+                            f"  {progress_label} ✓ {spec.checksum_algo} совпал",
+                            flush=True,
+                        )
+                # else: spec.checksum_urls is None ИЛИ reference_hash is None
+                # → проверка хэша пропущена (деградация), файл принят по размеру.
 
                 # ── Переименование tmp_path в каноническое имя ────────────
                 # v5.0.0 FIX (критический баг с 10.07.2026, коммит fbb2285):
@@ -428,185 +477,168 @@ def _compute_hash(file_path: Path, algo: str = "sha256") -> str:
     return h.hexdigest().lower()
 
 
-def _verify_checksum(
-    file_path: Path,
+def _fetch_reference_hash(
     checksum_urls: list[str],
     algo: str = "sha256",
     *,
     progress_label: str = "",
-) -> Optional[bool]:
-    """Верифицирует file_path по .sha256sum, скачанному с checksum_urls.
+) -> Optional[str]:
+    """Получает ЭТАЛОННЫЙ хэш ОДИН РАЗ с КОРОТКОГО приоритетного списка
+    источников (не всех 19!).
 
-    Алгоритм (v5.0.2+ — перебор ВСЕХ зеркал):
-      1. Считает хэш file_path (algo, по умолчанию sha256) чанками.
-      2. Перебирает ВСЕ checksum_urls по порядку, скачивает .sha256sum.
-         ВАЖНО: перебор идёт НЕЗАВИСИМО от того, какое зеркало дало сам файл.
-         Это гарантирует, что мы верифицируем то что РЕАЛЬНО пришло, а не
-         то что зеркало "должно" было отдать.
-      3. Для каждого .sha256sum:
-         • Совпал с actual_hash → return True НЕМЕДЛЕННО (файл валиден,
-           по крайней мере одно зеркало подтверждает)
-         • НЕ совпал → продолжаем перебор (может это зеркало закэшировало
-           устаревший .sha256sum)
-         • Не смогли распарсить → продолжаем перебор
-      4. После перебора всех:
-         • Был хоть один ответивший .sha256sum, но ни один не совпал →
-           return False (отбраковка — все зеркала ожидают другой хэш,
-           возможно файл реально подменён)
-         • Ни один .sha256sum не ответил (404 везде — апстрим перестал
-           публиковать) → return None (деградация, warn "не удалось проверить")
-         • Ответили, но ни один hex не распарсился → return None (деградация)
+    v5.0.4: заменяет старую _verify_checksum() которая для КАЖДОГО кандидата
+    .dat-файла заново перебирала ВСЕ 19 checksum_urls. Это было избыточно
+    (эталонный хэш один и тот же для всех попыток) и небезопасно (CDN
+    мог отдать устаревший .sha256sum, и все кандидаты отбраковывались
+    одинаково — см. инцидент 2026-07-24).
 
-    ПОЧЕМУ ПЕРЕБОР ВСЕХ ЗЕРКАЛ (фикс 2026-07-24):
-      Старая логика делала return False на первом же несовпадении. Это
-      ломало установку когда CDN jsDelivr закэшировал устаревший .sha256sum
-      (upstream обновил geosite.dat, но .sha256sum на jsDelivr ещё старый).
-      _verify_checksum проверял только первое зеркало (cdn.jsdelivr.net),
-      видел несовпадение и отбраковывал файл — хотя на других зеркалах
-      .sha256sum был актуальный. Лог пользователя:
-        geosite.dat → верификация sha256: 50e933acb2a23ab8… перебор 19 checksum-зеркал
-        geosite.dat ⚠ cdn.jsdelivr.net: sha256 НЕ совпал — ожидался e7e2711b2b68d7d9…
-        — файл отбракован, пробуем следующее зеркало
-      Фраза "пробуем следующее зеркало" относилась к ЗЕРКАЛАМ .DAT файла,
-      а не .sha256sum — но в коде это было неочевидно из-за early return.
+    ПРИОРИТЕТНЫЙ КОРОТКИЙ СПИСОК (выбирается из полного checksum_urls):
 
-      Новая логика: перебираем все .sha256sum зеркала. Если хотя бы одно
-      подтверждает actual_hash — файл валиден. Это правильно потому что:
-        • Скачанный файл — факт, его хэш не меняется.
-        • Если 18 зеркал .sha256sum ожидают старый хэш, а 1 — актуальный,
-          значит 18 просто устарели (кэш CDN), а 1 подтверждает реальность.
-        • Отбраковывать надо только если ВСЕ зеркала .sha256sum единогласно
-          ожидают другой хэш — это уже подозрение на MITM.
+      1. raw.githubusercontent.com — самый авторитетный, содержимое
+         напрямую из git (не кэш стороннего CDN).
+      2. github.com/.../releases/latest/download/... — GitHub release
+         assets (тоже авторитетный, не сторонний кэш). URL редиректит
+         на release-assets.githubusercontent.com.
+      3. cdn.statically.io — последний fallback, независимый от jsDelivr
+         CDN. Берётся из существующего списка checksum_urls.
+
+    НЕ включаются в короткий список:
+      • Все 4 бэкенда jsDelivr (cdn/gcore/fastly/testingcf) — это ОДИН
+        CDN с общим кэшем .sha256sum, который как раз и рассинхронизируется
+        с .dat-файлом (см. инцидент 2026-07-24).
+      • Все gh-proxy (ghproxy.net, ghproxy.com, ...) — это прокси-кэши
+        GitHub, та же проблема кэш-рассинхрона.
+      • jsd.cooluc.ru — РФ-зеркало jsDelivr, общий кэш.
+
+    АЛГОРИТМ:
+      1. Из полного checksum_urls извлекаем URLs по hostname:
+         raw.githubusercontent.com → приоритет 1
+         github.com (без ghproxy/jsdelivr в URL) с releases/latest/download
+           → приоритет 2
+         cdn.statically.io → приоритет 3
+      2. Перебираем приоритетный список по очереди:
+         • Скачиваем .sha256sum (~100 байт).
+         • Парсим hex-хэш через _parse_checksum_content().
+         • При успехе — возвращаем хэш (НЕ продолжаем перебор).
+      3. Если все 3 источника из короткого списка не ответили или парсинг
+         не удался — возвращаем None (деградация, см. fetch_package).
+
+    ВАЖНО: функция НЕ перебирает все 19 checksum_urls. Короткий список
+    максимум 3 URL. Это критично для производительности (3 запроса вместо
+    19*N, где N — число кандидатов .dat-файла) и для надёжности (если
+    все 3 авторитетных источника недоступны — это деградация, а не отказ).
 
     Аргументы:
-      file_path:       Путь к скачанному файлу для верификации.
-      checksum_urls:   Список URL .sha256sum файлов (в порядке приоритета).
+      checksum_urls:   Полный список URL .sha256sum (как в PackageSpec).
+                       Функция извлечёт из него короткий приоритетный список.
       algo:            Алгоритм хэширования ("sha256" по умолчанию).
-      progress_label:  Если непусто — печатать прогресс верификации.
+      progress_label:  Если непусто — печатать прогресс.
 
     Возвращает:
-      True  — хэш совпал хотя бы на одном зеркале, файл валиден
-      False — хэш НЕ совпал ни на одном ответившем зеркале (отбраковка)
-      None  — ни одно зеркало не ответило (деградация, принято по размеру)
+      hex-строку хэша в нижнем регистре — если получен с любого источника.
+      None — если все источники из короткого списка недоступны
+            (деградация до проверки по размеру в вызывающем коде).
     """
-    # 1) Считаем хэш скачанного файла
-    try:
-        actual_hash = _compute_hash(file_path, algo)
-    except Exception as e:
-        if progress_label:
-            print(
-                f"  {progress_label} ⚠ не удалось вычислить {algo} "
-                f"({e}) — пропуск верификации",
-                flush=True,
-            )
-        return None  # деградация, не отбраковка
+    if not checksum_urls:
+        return None
+
+    # ── 1) Извлекаем короткий приоритетный список из полного checksum_urls
+    raw_github_url: Optional[str] = None
+    release_github_url: Optional[str] = None
+    statically_url: Optional[str] = None
+
+    for url in checksum_urls:
+        # Приоритет 1: raw.githubusercontent.com (прямой доступ к git)
+        if "raw.githubusercontent.com" in url and raw_github_url is None:
+            raw_github_url = url
+            continue
+        # Приоритет 2: github.com/.../releases/latest/download/... (release assets)
+        # НО исключаем gh-proxy и jsDelivr-обёртки — они не авторитетны.
+        # Идентифицируем по hostname github.com И пути releases/latest/download.
+        if (release_github_url is None
+                and "github.com" in url
+                and "releases/latest/download" in url
+                and "ghproxy" not in url
+                and "jsdelivr" not in url
+                and "/https://github.com/" not in url):  # gh-proxy pattern
+            release_github_url = url
+            continue
+        # Приоритет 3: cdn.statically.io (независимый CDN)
+        if "cdn.statically.io" in url and statically_url is None:
+            statically_url = url
+            continue
+
+    # Собираем приоритетный список в нужном порядке
+    priority_urls: list[str] = []
+    if raw_github_url:
+        priority_urls.append(raw_github_url)
+    if release_github_url:
+        priority_urls.append(release_github_url)
+    if statically_url:
+        priority_urls.append(statically_url)
+
+    # Edge case: в checksum_urls нет ни одного URL из приоритетных хостов
+    # (например, тестовый spec с зеркалами example.com). В этом случае
+    # fallback: используем первые 2 URL из полного списка (best-effort).
+    if not priority_urls:
+        priority_urls = checksum_urls[:2]
 
     if progress_label:
         print(
-            f"  {progress_label} → верификация {algo}: "
-            f"{actual_hash[:16]}… перебор {len(checksum_urls)} checksum-зеркал",
+            f"  {progress_label} → запрос эталонного {algo} "
+            f"({len(priority_urls)} приоритетных источника)",
             flush=True,
         )
 
-    # 2) Перебираем ВСЕ checksum_urls по порядку.
-    #    v5.0.2+: не делаем early return при несовпадении — может это
-    #    зеркало закэшировало устаревший .sha256sum, а следующее актуальное.
-    checksum_obtained = False       # хоть один .sha256sum ответил
-    checksum_parsed = False          # хоть один .sha256sum распарсен
-    mismatch_count = 0               # сколько зеркал дали несовпадающий хэш
-    last_mismatch_expected = ""      # для диагностического сообщения
-    last_mismatch_host = ""
-
-    for idx, checksum_url in enumerate(checksum_urls, 1):
+    # ── 2) Перебираем приоритетный список — возвращаем хэш с первого ответившего
+    for url in priority_urls:
         try:
             req = urllib.request.Request(
-                checksum_url,
+                url,
                 headers={"User-Agent": "Chimera-Project"},
             )
             with urllib.request.urlopen(req, timeout=15) as r:
                 # .sha256sum файлы маленькие (~100 байт), читаем целиком.
                 # decode utf-8 с errors='replace' — терпимость к BOM/мусору.
                 content = r.read().decode("utf-8", errors="replace")
-            checksum_obtained = True
 
             expected_hash = _parse_checksum_content(content)
             if expected_hash is None:
-                # Скачали, но не смогли распарсить — пробуем следующий URL.
+                # Скачали, но не смогли распарсить — пробуем следующий источник.
                 if progress_label:
-                    host = checksum_url.split("/")[2] if "://" in checksum_url else checksum_url[:40]
+                    host = url.split("/")[2] if "://" in url else url[:40]
                     print(
-                        f"  {progress_label} ⚠ checksum с {host}: "
-                        f"не удалось распарсить hex — пробуем следующее",
+                        f"  {progress_label} ⚠ {host}: checksum скачан, "
+                        f"но hex не распарсен — пробуем следующий источник",
                         flush=True,
                     )
                 continue
-            checksum_parsed = True
 
-            if actual_hash == expected_hash:
-                # Хэш совпал — файл валиден, по крайней мере это зеркало
-                # подтверждает. Немедленно возвращаем True.
-                if progress_label:
-                    host = checksum_url.split("/")[2] if "://" in checksum_url else checksum_url[:40]
-                    print(
-                        f"  {progress_label} ✓ {algo} совпал (зеркало {idx}/{len(checksum_urls)}: {host})",
-                        flush=True,
-                    )
-                return True
-            else:
-                # Хэш НЕ совпал на этом зеркале. НЕ делаем early return —
-                # продолжаем перебор. Может это зеркало закэшировало
-                # устаревший .sha256sum, а следующее актуальное.
-                # (фикс 2026-07-24 — раньше тут был return False)
-                mismatch_count += 1
-                host = checksum_url.split("/")[2] if "://" in checksum_url else checksum_url[:40]
-                last_mismatch_expected = expected_hash
-                last_mismatch_host = host
-                if progress_label:
-                    print(
-                        f"  {progress_label} ⚠ {host}: {algo} НЕ совпал — "
-                        f"ожидался {expected_hash[:16]}…, получен {actual_hash[:16]}… "
-                        f"— перебираем остальные checksum-зеркала "
-                        f"({idx}/{len(checksum_urls)})",
-                        flush=True,
-                    )
-                # НЕ return — продолжаем for loop
+            # Успех — возвращаем хэш с первого ответившего источника
+            if progress_label:
+                host = url.split("/")[2] if "://" in url else url[:40]
+                print(
+                    f"  {progress_label} → эталонный {algo}: "
+                    f"{expected_hash[:16]}… (с {host})",
+                    flush=True,
+                )
+            return expected_hash
 
         except Exception:
-            # 404 / network error / timeout — пробуем следующий URL
+            # 404 / network error / timeout — пробуем следующий источник
             continue
 
-    # 3) Перебор завершён. Анализируем результат.
-    if not checksum_obtained:
-        # Ни один .sha256sum не ответил — деградация.
-        if progress_label:
-            print(
-                f"  {progress_label} ⚠ не удалось получить {algo} ни с одного "
-                f"зеркала ({len(checksum_urls)} попыток) — принято по размеру",
-                flush=True,
-            )
-        return None  # деградация, не отбраковка
-
-    if not checksum_parsed:
-        # Ответили, но ни один hex не распарсился — деградация.
-        if progress_label:
-            print(
-                f"  {progress_label} ⚠ checksum скачан, но hex не распарсен ни "
-                f"из одного — принято по размеру",
-                flush=True,
-            )
-        return None
-
-    # checksum_parsed=True, но ни один не совпал → ОТБРАКОВКА.
-    # Все ответившие зеркала .sha256sum единогласно ожидают другой хэш —
-    # это подозрение на MITM или реально устаревший файл.
-    if progress_label and mismatch_count > 0:
+    # ── 3) Все источники из короткого списка недоступны → None (деградация)
+    if progress_label:
         print(
-            f"  {progress_label} ✗ {algo} НЕ совпал ни на одном из "
-            f"{mismatch_count} ответивших зеркал (последнее: {last_mismatch_host} "
-            f"ожидал {last_mismatch_expected[:16]}…) — файл отбракован",
+            f"  {progress_label} ⚠ не удалось получить эталонный {algo} "
+            f"ни с одного из {len(priority_urls)} приоритетных источников "
+            f"— принято по размеру",
             flush=True,
         )
-    return False
+    return None
+
+
 
 
 def print_manual_hint(spec: PackageSpec, *, filename: str, **filename_kwargs) -> None:

@@ -212,16 +212,30 @@ class TestDownloadGeoFilesRegression(unittest.TestCase):
 
         success=True — возвращает "скачанный" файл (10 МБ данных).
         success=False — выбрасывает URLError (сеть заблокирована).
+
+        v5.0.4: КАЖДЫЙ вызов urlopen() возвращает НОВЫЙ mock_resp со
+        свежим read.side_effect. Раньше mock_resp был один на все вызовы,
+        и после 2 вызовов read() (в _fetch_reference_hash + первый chunk
+        в основном цикле) side_effect исчерпывался → StopIteration →
+        все 14 зеркал "падали" → fetch_package возвращал False.
         """
         if not success:
             from urllib.error import URLError
             return MagicMock(side_effect=URLError("blocked"))
 
-        mock_resp = MagicMock()
-        mock_resp.read.side_effect = [b"x" * 30_000_000, b""]  # 30 МБ > MIN_SIZES (v5.0.0)
-        mock_resp.__enter__ = lambda self: self
-        mock_resp.__exit__ = lambda self, *a: None
-        return MagicMock(return_value=mock_resp)
+        def make_fresh_resp():
+            """Создаёт свежий mock_resp с полным side_effect."""
+            r = MagicMock()
+            r.read.side_effect = [b"x" * 30_000_000, b""]
+            r.headers = {"Content-Length": "30000000"}
+            r.__enter__ = lambda self: self
+            r.__exit__ = lambda self, *a: None
+            return r
+
+        # return_value — это factory, который для каждого urlopen() вызова
+        # создаёт НОВЫЙ mock_resp. MagicMock(return_value=X) возвращает X
+        # каждый раз, нам нужно side_effect который возвращает новый объект.
+        return MagicMock(side_effect=lambda *a, **kw: make_fresh_resp())
 
     def test_files_in_dest_dirs_still_triggers_network_download(self):
         """КЛЮЧЕВОЙ РЕГРЕССИОННЫЙ ТЕСТ:
@@ -487,11 +501,18 @@ class TestDownloadGeoFilesSecondCallRegression(unittest.TestCase):
             return original_stat(self, *a, **kw)
 
         # urlopen mock — "успешное скачивание"
-        mock_resp = MagicMock()
-        mock_resp.read.side_effect = [b"y" * 30_000_000, b""]  # 30 МБ > MIN_SIZES (v5.0.0)
-        mock_resp.__enter__ = lambda self: self
-        mock_resp.__exit__ = lambda self, *a: None
-        urlopen_mock = MagicMock(return_value=mock_resp)
+        # v5.0.4: КАЖДЫЙ вызов urlopen() возвращает НОВЫЙ mock_resp со
+        # свежим read.side_effect. Раньше один mock_resp на все вызовы,
+        # и после 2 read() (в _fetch_reference_hash + первый chunk) side_effect
+        # исчерпывался → StopIteration → все 14 зеркал "падали" → False.
+        def make_fresh_resp():
+            r = MagicMock()
+            r.read.side_effect = [b"y" * 30_000_000, b""]
+            r.headers = {"Content-Length": "30000000"}
+            r.__enter__ = lambda self: self
+            r.__exit__ = lambda self, *a: None
+            return r
+        urlopen_mock = MagicMock(side_effect=lambda *a, **kw: make_fresh_resp())
 
         mock_open_inst = mock_open(read_data=b"y" * 65536)
 

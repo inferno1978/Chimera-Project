@@ -955,15 +955,15 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
         """Сценарий 1: hash НЕ совпал → файл отбракован → retry.
 
         Реалистичный сценарий: CDN с кэшем по branch-ref отдаёт устаревший
-        файл (mirror1) — большой, но не текущий. .sha256sum на mirror1
-        тоже закэширован и соответствует НОВОЙ версии файла, поэтому
-        hash не совпадает со старым файлом → отбраковка. Mirror2 отдаёт
-        актуальный файл, .sha256sum совпадает → успех.
+        файл (mirror1) — большой, но не текущий. .sha256sum с приоритетного
+        источника (raw.githubusercontent.com) соответствует НОВОЙ версии
+        файла, поэтому hash не совпадает со старым файлом → отбраковка.
+        Mirror2 отдаёт актуальный файл, hash совпадает → успех.
 
-        Симметрично: checksum_urls перебираются по порядку, независимо
-        от того, какое зеркало дало сам файл (см. спеку v5.0.0). Это
-        гарантирует верификацию того, что РЕАЛЬНО пришло, а не того,
-        что зеркало "должно" было отдать.
+        v5.0.4+: эталонный хэш получается ОДИН РАЗ через _fetch_reference_hash
+        (короткий приоритетный список) ПЕРЕД циклом скачивания. Внутри цикла
+        — простое сравнение actual_hash с reference_hash, без повторных
+        запросов .sha256sum.
 
         КЛЮЧЕВЫЕ проверки:
           - Первое зеркало отбраковано (hash mismatch)
@@ -976,8 +976,7 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
         # Файл от mirror2 — актуальный
         fresh_content = b"fresh content from upstream" * 10  # 270 байт
 
-        # Единый "правильный" hash для актуального файла — оба checksum-зеркала
-        # отдают одно и то же (апстрим публикует один .sha256sum, CDN кэшируют).
+        # Единый "правильный" hash для актуального файла
         fresh_hash = _hashlib_for_tests.sha256(fresh_content).hexdigest()
 
         spec = PackageSpec(
@@ -990,9 +989,11 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
             install_dests=[self.install_dir],
             manual_incoming_dir=self.manual_dir,
             min_size=50,
+            # checksum_urls содержит ОДИН URL — он же приоритетный
+            # (edge case: _fetch_reference_hash fallback на первые 2 URL
+            # если нет raw.githubusercontent.com/github.com/statically.io).
             checksum_urls=[
-                f"https://mirror1.example.com/{self.tmp_filename}.sha256sum",
-                f"https://mirror2.example.com/{self.tmp_filename}.sha256sum",
+                f"https://raw.githubusercontent.com/test/repo/main/{self.tmp_filename}.sha256sum",
             ],
             checksum_algo="sha256",
         )
@@ -1014,9 +1015,7 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
                     self.tmp_path.write_bytes(fresh_content)
                     return self._make_file_response(fresh_content)
 
-            # Запрос checksum — оба checksum-зеркала отдают актуальный hash
-            # (апстрим обновил .sha256sum, CDN кэширует его быстрее, чем сам
-            # большой .dat файл — реалистичный сценарий с jsDelivr)
+            # Запрос checksum (приоритетный источник raw.githubusercontent.com)
             if url.endswith(".sha256sum"):
                 return self._make_checksum_response(f"{fresh_hash}  {self.tmp_filename}\n")
 
@@ -1030,32 +1029,24 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
 
         self.assertTrue(result, "Должен вернуть True — второе зеркало прошло верификацию")
 
-        # v5.0.2+: _verify_checksum теперь перебирает ВСЕ checksum-зеркала
-        # (не делает early return при mismatch). Это фикс бага 2026-07-24:
-        # если CDN закэшировал устаревший .sha256sum, _verify_checksum
-        # проверит следующее зеркало .sha256sum — может там актуальный.
-        #
-        # Сценарий этого теста: mirror1.dat=stale, mirror2.dat=fresh,
-        # оба .sha256sum отдают fresh_hash.
-        # Порядок вызовов:
-        #   1. mirror1.dat (stale) → hash=stale_hash
-        #   2. mirror1.sha256sum → fresh_hash. stale != fresh → продолжаем
-        #   3. mirror2.sha256sum → fresh_hash. stale != fresh → продолжаем
-        #   4. Все checksum-зеркала проверены, ни одно не совпало → return False
-        #   5. mirror2.dat (fresh) → hash=fresh_hash
-        #   6. mirror1.sha256sum → fresh_hash. fresh == fresh → return True ✓
-        # Итого 5 вызовов (раньше было 4 — но 4 было неправильно, потому что
-        # пропускало проверку второго checksum-зеркала).
-        self.assertGreaterEqual(len(call_log), 4,
-                               f"Должно быть минимум 4 вызова, фактически: {call_log}")
-        self.assertLessEqual(len(call_log), 6,
-                             f"Не более 6 вызовов (2 файла + 2*2 checksum), "
-                             f"фактически: {call_log}")
+        # v5.0.4+: эталонный хэш получен ОДИН РАЗ перед циклом, а НЕ для
+        # каждого кандидата. Порядок вызовов:
+        #   1. raw.githubusercontent.com/.sha256sum → fresh_hash (reference_hash)
+        #   2. mirror1.example.com/.dat (stale) → hash=stale_hash, mismatch
+        #   3. mirror2.example.com/.dat (fresh) → hash=fresh_hash, match ✓
+        # Итого 3 вызова (1 checksum + 2 файла). Раньше было 5-6 вызовов
+        # потому что _verify_checksum перебирал checksum_urls для каждого
+        # кандидата — это и было проблемой.
+        self.assertEqual(len(call_log), 3,
+                         f"Должно быть 3 вызова (1 reference_hash + 2 файла), "
+                         f"фактически: {call_log}")
 
-        # Проверяем что первый запрос был к mirror1 (файл)
-        self.assertIn(f"mirror1.example.com/{self.tmp_filename}", call_log[0])
-        # Второй — к .sha256sum (mirror1)
-        self.assertIn(".sha256sum", call_log[1])
+        # Проверяем что первый запрос был к .sha256sum (reference hash)
+        self.assertIn(".sha256sum", call_log[0])
+        # Второй — к mirror1.dat
+        self.assertIn(f"mirror1.example.com/{self.tmp_filename}", call_log[1])
+        # Третий — к mirror2.dat
+        self.assertIn(f"mirror2.example.com/{self.tmp_filename}", call_log[2])
 
         # Только второе зеркало прошло верификацию → copy вызван 1 раз
         mock_copy.assert_called_once()
@@ -1066,8 +1057,11 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
         Симулируем: единственное зеркало, файл валидного размера,
         .sha256sum совпадает → успех с первого раза.
 
+        v5.0.4+: reference_hash получен ОДИН РАЗ перед циклом, затем
+        actual_hash скачанного файла сравнивается напрямую.
+
         КЛЮЧЕВЫЕ проверки:
-          - urlopen вызван 2 раза (1 файл + 1 checksum)
+          - urlopen вызван 2 раза (1 reference_hash + 1 файл)
           - _default_copy_to_dests вызван 1 раз
           - fetch_package вернул True
         """
@@ -1084,7 +1078,7 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
             manual_incoming_dir=self.manual_dir,
             min_size=50,
             checksum_urls=[
-                f"https://mirror1.example.com/{self.tmp_filename}.sha256sum",
+                f"https://raw.githubusercontent.com/test/repo/main/{self.tmp_filename}.sha256sum",
             ],
             checksum_algo="sha256",
         )
@@ -1109,21 +1103,31 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
 
         self.assertTrue(result, "Должен вернуть True — hash совпал")
         self.assertEqual(len(call_log), 2,
-                         f"Должно быть 2 вызова (1 файл + 1 checksum), фактически: {call_log}")
+                         f"Должно быть 2 вызова (1 reference_hash + 1 файл), "
+                         f"фактически: {call_log}")
+        # Первый — .sha256sum (reference hash)
+        self.assertIn(".sha256sum", call_log[0])
+        # Второй — сам файл
+        self.assertIn(f"mirror1.example.com/{self.tmp_filename}", call_log[1])
         mock_copy.assert_called_once()
 
     def test_all_checksum_urls_404_degrades_to_size_check(self):
-        """Сценарий 3: все checksum_url 404 → деградация до размерной проверки.
+        """Сценарий 3: все priority-источники недоступны → деградация.
 
         Симулируем: единственное зеркало, файл валидного размера,
-        но .sha256sum возвращает 404 на ВСЕХ checksum-зеркалах →
-        fetch_package принимает файл по размерной проверке с warn.
+        но .sha256sum на ВСЕХ приоритетных источниках (raw.githubusercontent,
+        github.com, cdn.statically.io) возвращает 404 → fetch_package
+        принимает файл по размерной проверке с warn.
+
+        v5.0.4+: _fetch_reference_hash возвращает None (деградация) если
+        все 3 приоритетных источника недоступны. Полный список checksum_urls
+        (19 зеркал) НЕ перебирается — только короткий приоритетный список.
 
         КЛЮЧЕВЫЕ проверки:
-          - urlopen вызван 1 + N раз (1 файл + N попыток checksum)
+          - urlopen вызван 1 (файл) + 3 (priority-источники) раз = 4
           - _default_copy_to_dests вызван 1 раз (файл принят по размеру)
           - fetch_package вернул True (не упал)
-          - В логе виден warn "не удалось проверить ... принято по размеру"
+          - В логе виден warn "принято по размеру"
         """
         import io
         from contextlib import redirect_stdout
@@ -1140,10 +1144,11 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
             install_dests=[self.install_dir],
             manual_incoming_dir=self.manual_dir,
             min_size=50,
+            # 3 приоритетных источника — все упадут
             checksum_urls=[
-                f"https://mirror1.example.com/{self.tmp_filename}.sha256sum",
-                f"https://mirror2.example.com/{self.tmp_filename}.sha256sum",
-                f"https://mirror3.example.com/{self.tmp_filename}.sha256sum",
+                f"https://raw.githubusercontent.com/test/repo/main/{self.tmp_filename}.sha256sum",
+                f"https://github.com/test/repo/releases/latest/download/{self.tmp_filename}.sha256sum",
+                f"https://cdn.statically.io/gh/test/repo/main/{self.tmp_filename}.sha256sum",
             ],
             checksum_algo="sha256",
         )
@@ -1155,7 +1160,7 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
             call_log.append(url)
 
             if url.endswith(".sha256sum"):
-                # Все checksum-зеркала возвращают 404 / network error
+                # Все приоритетные источники возвращают 404 / network error
                 raise URLError("404 Not Found")
             # Файл
             self.tmp_path.write_bytes(file_content)
@@ -1171,9 +1176,10 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
 
         # Файл принят по размерной проверке (деградация)
         self.assertTrue(result, "Должен вернуть True — деградация до размерной проверки")
-        # 1 вызов файла + 3 попытки checksum (все упали)
+        # 1 вызов файла + 3 попытки priority-checksum (все упали)
         self.assertEqual(len(call_log), 4,
-                         f"Должно быть 4 вызова (1 файл + 3 checksum), фактически: {call_log}")
+                         f"Должно быть 4 вызова (1 файл + 3 priority-checksum), "
+                         f"фактически: {call_log}")
         mock_copy.assert_called_once()
 
         # В логе должен быть warn о деградации
@@ -1226,11 +1232,12 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
     def test_checksum_unparseable_degrades_to_size_check(self):
         """Сценарий 4: .sha256sum скачан, но hex не парсится → деградация.
 
-        Симулируем: зеркало отдаёт .sha256sum с мусором (нет 64-символьного hex)
-        на ВСЕХ checksum-зеркалах → деградация до размерной проверки.
+        Симулируем: приоритетный источник отдаёт .sha256sum с мусором
+        (нет 64-символьного hex) → _fetch_reference_hash пробует следующий
+        приоритетный источник, если все 3 отдают мусор → None → деградация.
 
-        Это отличается от сценария 3 (404) — здесь checksum_obtained=True,
-        но парсинг не удался. Должна быть другая ветка warn.
+        v5.0.4+: _fetch_reference_hash перебирает 3 приоритетных источника.
+        Если все 3 ответили мусором (или упали) → None → деградация.
         """
         import io
         from contextlib import redirect_stdout
@@ -1246,8 +1253,11 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
             install_dests=[self.install_dir],
             manual_incoming_dir=self.manual_dir,
             min_size=50,
+            # Все 3 приоритетных источника отдают мусор
             checksum_urls=[
-                f"https://mirror1.example.com/{self.tmp_filename}.sha256sum",
+                f"https://raw.githubusercontent.com/test/repo/main/{self.tmp_filename}.sha256sum",
+                f"https://github.com/test/repo/releases/latest/download/{self.tmp_filename}.sha256sum",
+                f"https://cdn.statically.io/gh/test/repo/main/{self.tmp_filename}.sha256sum",
             ],
             checksum_algo="sha256",
         )
@@ -1272,200 +1282,19 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
         # Деградация — файл принят по размеру
         self.assertTrue(result)
         mock_copy.assert_called_once()
-        # В логе должен быть warn о невозможности распарсить
+        # В логе должен быть warn о невозможности распарсить или о деградации
         output = captured.getvalue()
-        # Либо "не удалось распарсить" (из цикла), либо "hex не распарсен" (финал)
+        # Либо "не удалось распарсить" (из цикла), либо "принято по размеру" (финал)
         self.assertTrue(
-            "распарсить" in output.lower() or "распарсен" in output.lower(),
-            f"Должен быть warn о проблеме парсинга, вывод: {output}",
+            "распарсить" in output.lower() or "распарсен" in output.lower()
+            or "принято по размеру" in output.lower(),
+            f"Должен быть warn о проблеме парсинга или деградации, вывод: {output}",
         )
 
 
-class TestVerifyChecksumHelper(unittest.TestCase):
-    """Прямые тесты _verify_checksum() — без overhead полного fetch_package.
-
-    Покрывает edge cases:
-      - Пустой список checksum_urls → None (деградация)
-      - Несколько checksum_urls, первый отвечает с совпадением → True
-      - Несколько checksum_urls, первый 404, второй отвечает с несовпадением → False
-    """
-
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.test_file = Path(self.tmpdir) / "test.dat"
-        self.test_file.write_bytes(b"test content" * 10)
-
-    def tearDown(self):
-        import shutil
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_empty_checksum_urls_returns_none(self):
-        """Пустой список checksum_urls → None (деградация, не отбраковка)."""
-        from chimera.modules.download_manager import _verify_checksum
-        result = _verify_checksum(self.test_file, [], "sha256")
-        self.assertIsNone(result)
-
-    def test_first_url_matches_returns_true(self):
-        """Первый checksum_url отвечает с совпадающим hash → True."""
-        from chimera.modules.download_manager import _verify_checksum
-        right_hash = _hashlib_for_tests.sha256(b"test content" * 10).hexdigest()
-
-        def fake_urlopen(req, timeout):
-            mock_resp = MagicMock()
-            mock_resp.read.side_effect = [f"{right_hash}  test.dat\n".encode(), b""]
-            mock_resp.__enter__ = lambda self: self
-            mock_resp.__exit__ = lambda self, *a: None
-            return mock_resp
-
-        with patch("chimera.modules.download_manager.urllib.request.urlopen",
-                   side_effect=fake_urlopen):
-            result = _verify_checksum(
-                self.test_file,
-                ["https://example.com/test.dat.sha256sum"],
-                "sha256",
-            )
-        self.assertTrue(result)
-
-    def test_first_404_second_mismatch_returns_false(self):
-        """Первый checksum_url 404, второй отвечает с НЕсовпадающим hash → False."""
-        from chimera.modules.download_manager import _verify_checksum
-        wrong_hash = _hashlib_for_tests.sha256(b"different content").hexdigest()
-
-        from urllib.error import URLError
-        call_count = [0]
-
-        def fake_urlopen(req, timeout):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise URLError("404")
-            mock_resp = MagicMock()
-            mock_resp.read.side_effect = [f"{wrong_hash}  test.dat\n".encode(), b""]
-            mock_resp.__enter__ = lambda self: self
-            mock_resp.__exit__ = lambda self, *a: None
-            return mock_resp
-
-        with patch("chimera.modules.download_manager.urllib.request.urlopen",
-                   side_effect=fake_urlopen):
-            result = _verify_checksum(
-                self.test_file,
-                [
-                    "https://mirror1.example.com/test.dat.sha256sum",
-                    "https://mirror2.example.com/test.dat.sha256sum",
-                ],
-                "sha256",
-            )
-        self.assertFalse(result, "Hash не совпал → False (отбраковка)")
-        self.assertEqual(call_count[0], 2, "Должны быть попытаны оба URL")
-
-    def test_first_mismatch_second_match_returns_true(self):
-        """v5.0.2 regression: первое .sha256sum-зеркало дало НЕсовпадающий
-        хэш (CDN закэшировал устаревший .sha256sum), второе — актуальный.
-
-        Сценарий ровно из баг-репорта 2026-07-24:
-          - Скачанный geosite.dat имеет SHA256 = 50e933acb2a23ab8...
-          - cdn.jsdelivr.net/.sha256sum ожидает e7e2711b2b68d7d9... (устаревший кэш)
-          - mirror2/.sha256sum ожидает 50e933acb2a23ab8... (актуальный)
-
-        Старая логика (до v5.0.2): return False на первом же mismatch →
-        файл отбраковывается, установка геофайлов проваливается.
-
-        Новая логика (v5.0.2+): перебираем все checksum-зеркала. mirror2
-        подтверждает → return True, файл принят.
-
-        КЛЮЧЕВЫЕ проверки:
-          - result is True (файл валиден, хотя первое зеркало не подтвердило)
-          - urlopen вызван для ОБЕИХ зеркал (не early return на первом)
-        """
-        from chimera.modules.download_manager import _verify_checksum
-        # actual_hash файла на диске
-        actual_hash = _hashlib_for_tests.sha256(b"test content" * 10).hexdigest()
-        # Какой-то другой хэш — имитация устаревшего .sha256sum
-        stale_hash = _hashlib_for_tests.sha256(b"different stale content").hexdigest()
-
-        call_count = [0]
-
-        def fake_urlopen(req, timeout):
-            call_count[0] += 1
-            mock_resp = MagicMock()
-            if call_count[0] == 1:
-                # Первое зеркало .sha256sum — устаревший хэш
-                mock_resp.read.side_effect = [
-                    f"{stale_hash}  test.dat\n".encode(), b""
-                ]
-            else:
-                # Второе зеркало .sha256sum — актуальный хэш
-                mock_resp.read.side_effect = [
-                    f"{actual_hash}  test.dat\n".encode(), b""
-                ]
-            mock_resp.__enter__ = lambda self: self
-            mock_resp.__exit__ = lambda self, *a: None
-            return mock_resp
-
-        with patch("chimera.modules.download_manager.urllib.request.urlopen",
-                   side_effect=fake_urlopen):
-            result = _verify_checksum(
-                self.test_file,
-                [
-                    "https://cdn.jsdelivr.net/test.dat.sha256sum",  # устаревший
-                    "https://mirror2.example.com/test.dat.sha256sum",  # актуальный
-                ],
-                "sha256",
-            )
-
-        self.assertTrue(result,
-                        "result должен быть True — второе зеркало подтвердило "
-                        "хэш, файл валиден. Если False — regression бага "
-                        "2026-07-24 (early return при mismatch).")
-        self.assertEqual(call_count[0], 2,
-                         "Должны быть попытаны оба URL — не early return "
-                         "на первом mismatch.")
-
-    def test_all_mismatch_returns_false(self):
-        """v5.0.2: ВСЕ ответившие .sha256sum-зеркала дали НЕсовпадающий
-        хэш → отбраковка (return False). Это правильное поведение —
-        если единогласно все зеркала ожидают другой хэш, возможно файл
-        реально подменён (MITM)."""
-        from chimera.modules.download_manager import _verify_checksum
-        stale_hash_1 = _hashlib_for_tests.sha256(b"stale content 1").hexdigest()
-        stale_hash_2 = _hashlib_for_tests.sha256(b"stale content 2").hexdigest()
-
-        call_count = [0]
-
-        def fake_urlopen(req, timeout):
-            call_count[0] += 1
-            mock_resp = MagicMock()
-            if call_count[0] == 1:
-                mock_resp.read.side_effect = [
-                    f"{stale_hash_1}  test.dat\n".encode(), b""
-                ]
-            else:
-                mock_resp.read.side_effect = [
-                    f"{stale_hash_2}  test.dat\n".encode(), b""
-                ]
-            mock_resp.__enter__ = lambda self: self
-            mock_resp.__exit__ = lambda self, *a: None
-            return mock_resp
-
-        with patch("chimera.modules.download_manager.urllib.request.urlopen",
-                   side_effect=fake_urlopen):
-            result = _verify_checksum(
-                self.test_file,
-                [
-                    "https://mirror1.example.com/test.dat.sha256sum",
-                    "https://mirror2.example.com/test.dat.sha256sum",
-                ],
-                "sha256",
-            )
-
-        self.assertFalse(result,
-                         "result должен быть False — оба зеркала единогласно "
-                         "ожидают другой хэш, файл отбракован.")
-        self.assertEqual(call_count[0], 2,
-                         "Должны быть попытаны оба URL перед отбраковкой.")
-
 
 class TestChecksumNotCalledInManualBranch(unittest.TestCase):
-    """v5.0.0 regression-тест: _verify_checksum НЕ вызывается в manual-ветке.
+    """v5.0.0 regression-тест: sha256-верификация НЕ вызывается в manual-ветке.
 
     Когда файл найден в manual_incoming_dir (/root/ — ручное размещение
     через WinSCP), fetch_package использует его без сети и БЕЗ sha256-
@@ -1473,9 +1302,10 @@ class TestChecksumNotCalledInManualBranch(unittest.TestCase):
     сам туда кладёт то, что скачал вручную через curl), верификация по
     хэшу там избыточна.
 
-    Если бы _verify_checksum вызывался в manual-ветке, глобальные моки
-    builtins.open в других тестах (например в test_geo_files.py) ломали
-    бы _compute_hash → fetch_package возвращал бы False → regression.
+    v5.0.4+: вместо _verify_checksum теперь мокаем _fetch_reference_hash
+    (она заменила _verify_checksum). Логика та же: в manual-ветке
+    fetch_package должен вернуть True ДО сетевого цикла, не вызывая
+    ни _fetch_reference_hash, ни _compute_hash.
 
     Тест гарантирует, что sha256-верификация живёт СТРОГО внутри сетевого
     цикла fetch_package (после успешной загрузки), а не в ветке /root/.
@@ -1493,13 +1323,13 @@ class TestChecksumNotCalledInManualBranch(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_manual_file_does_not_trigger_verify_checksum(self):
-        """Файл в manual_dir → _verify_checksum НЕ вызывается."""
+        """Файл в manual_dir → _fetch_reference_hash НЕ вызывается."""
         # Создаём валидный файл в manual_dir
         manual_file = self.manual_dir / "test.dat"
         manual_file.write_bytes(b"x" * 100)
 
         # Spec с checksum_urls — если бы они использовались в manual-ветке,
-        # тест упал бы на mock_verify.assert_not_called()
+        # тест упал бы на mock_fetch.assert_not_called()
         spec = PackageSpec(
             name="test",
             filename_builder=lambda: "test.dat",
@@ -1512,13 +1342,13 @@ class TestChecksumNotCalledInManualBranch(unittest.TestCase):
         )
 
         with patch("chimera.modules.download_manager.urllib.request.urlopen") as mock_urlopen, \
-             patch("chimera.modules.download_manager._verify_checksum") as mock_verify, \
+             patch("chimera.modules.download_manager._fetch_reference_hash") as mock_fetch, \
              patch("chimera.modules.download_manager._default_copy_to_dests"):
             result = fetch_package(spec)
 
         self.assertTrue(result, "fetch_package должен вернуть True (manual-файл валидный)")
         mock_urlopen.assert_not_called()
-        mock_verify.assert_not_called()
+        mock_fetch.assert_not_called()
 
 
 # ============================================================================
@@ -1664,6 +1494,479 @@ class TestCanonicalFileNameInInstallDests(unittest.TestCase):
         names = {f.name for f in installed_files}
         self.assertIn("geosite.dat", names)
         self.assertNotIn("_download_mgr_geosite.dat", names)
+
+
+# ============================================================================
+#  v5.0.4 REGRESSION TESTS: эталонный хэш ОДИН РАЗ, continue-при-mismatch
+# ============================================================================
+# Эти тесты защищают от регрессии класса багов, который был в v5.0.0-v5.0.3:
+#
+# 1. _verify_checksum() перебирала ВСЕ 19 checksum_urls для КАЖДОГО кандидата
+#    .dat-файла — избыточно (эталон один и тот же для всех попыток).
+#
+# 2. Если CDN закэшировал устаревший .sha256sum, _verify_checksum спотыкалась
+#    на одном и том же (протухшем) первом checksum-зеркале для всех кандидатов,
+#    и ВСЕ .dat-кандидаты помечались невалидными одинаково — скачивание
+#    проваливалось целиком, хотя годные зеркала .dat были дальше в списке.
+#
+# v5.0.4 фикс: _fetch_reference_hash() получает эталонный хэш ОДИН РАЗ с
+# короткого приоритетного списка (raw.githubusercontent.com → release-assets →
+# cdn.statically.io), затем fetch_package просто сравнивает actual_hash
+# с reference_hash для каждого кандидата. continue (НЕ return) при mismatch.
+
+class TestFetchReferenceHashHelper(unittest.TestCase):
+    """Прямые тесты _fetch_reference_hash() — без overhead полного fetch_package.
+
+    v5.0.4: новая функция заменяет старую _verify_checksum.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_checksum_response(self, content: str):
+        mock_resp = MagicMock()
+        mock_resp.read.side_effect = [content.encode("utf-8"), b""]
+        mock_resp.headers = {"Content-Length": str(len(content))}
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+        return mock_resp
+
+    def test_empty_checksum_urls_returns_none(self):
+        """Пустой список checksum_urls → None (деградация)."""
+        from chimera.modules.download_manager import _fetch_reference_hash
+        result = _fetch_reference_hash([], "sha256")
+        self.assertIsNone(result)
+
+    def test_raw_github_priority_first(self):
+        """raw.githubusercontent.com — первый приоритет.
+        Если отвечает — возвращаем хэш с него, НЕ трогая остальные источники.
+        """
+        from chimera.modules.download_manager import _fetch_reference_hash
+        right_hash = _hashlib_for_tests.sha256(b"fresh content").hexdigest()
+
+        call_log = []
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            call_log.append(url)
+            return self._make_checksum_response(f"{right_hash}  geosite.dat\n")
+
+        checksum_urls = [
+            "https://cdn.jsdelivr.net/gh/test/repo@main/geosite.dat.sha256sum",
+            "https://raw.githubusercontent.com/test/repo/main/geosite.dat.sha256sum",
+            "https://github.com/test/repo/releases/latest/download/geosite.dat.sha256sum",
+            "https://cdn.statically.io/gh/test/repo/main/geosite.dat.sha256sum",
+        ]
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen):
+            result = _fetch_reference_hash(checksum_urls, "sha256")
+
+        self.assertEqual(result, right_hash)
+        # Должен быть ТОЛЬКО 1 вызов — raw.githubusercontent.com (приоритет 1)
+        self.assertEqual(len(call_log), 1,
+                         f"Должен быть 1 вызов (raw.github приоритет), "
+                         f"фактически: {call_log}")
+        self.assertIn("raw.githubusercontent.com", call_log[0])
+
+    def test_raw_github_timeout_fallback_to_release_github(self):
+        """raw.githubusercontent.com недоступен → fallback на release GitHub.
+
+        Проверяем что приоритетный список работает: первый источник упал,
+        второй ответил — хэш получен со второго, НЕ со всех 19.
+        """
+        from chimera.modules.download_manager import _fetch_reference_hash
+        from urllib.error import URLError
+        right_hash = _hashlib_for_tests.sha256(b"fresh content").hexdigest()
+
+        call_log = []
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            call_log.append(url)
+            if "raw.githubusercontent.com" in url:
+                raise URLError("timeout")
+            return self._make_checksum_response(f"{right_hash}  geosite.dat\n")
+
+        checksum_urls = [
+            "https://cdn.jsdelivr.net/gh/test/repo@main/geosite.dat.sha256sum",
+            "https://raw.githubusercontent.com/test/repo/main/geosite.dat.sha256sum",
+            "https://github.com/test/repo/releases/latest/download/geosite.dat.sha256sum",
+            "https://cdn.statically.io/gh/test/repo/main/geosite.dat.sha256sum",
+        ]
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen):
+            result = _fetch_reference_hash(checksum_urls, "sha256")
+
+        self.assertEqual(result, right_hash)
+        # Должно быть 2 вызова: raw.github (упал) + github.com/releases (ответил)
+        self.assertEqual(len(call_log), 2,
+                         f"Должно быть 2 вызова (raw упал + release ответил), "
+                         f"фактически: {call_log}")
+        self.assertIn("raw.githubusercontent.com", call_log[0])
+        self.assertIn("github.com", call_log[1])
+        self.assertIn("releases/latest/download", call_log[1])
+
+    def test_all_priority_sources_unavailable_returns_none(self):
+        """Все 3 приоритетных источника недоступны → None (деградация)."""
+        from chimera.modules.download_manager import _fetch_reference_hash
+        from urllib.error import URLError
+
+        call_log = []
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            call_log.append(url)
+            raise URLError("timeout")
+
+        checksum_urls = [
+            "https://raw.githubusercontent.com/test/repo/main/geosite.dat.sha256sum",
+            "https://github.com/test/repo/releases/latest/download/geosite.dat.sha256sum",
+            "https://cdn.statically.io/gh/test/repo/main/geosite.dat.sha256sum",
+            # Также добавим jsDelivr и gh-proxy — они НЕ должны вызываться
+            "https://cdn.jsdelivr.net/gh/test/repo@main/geosite.dat.sha256sum",
+            "https://ghproxy.net/https://github.com/test/repo/releases/latest/download/geosite.dat.sha256sum",
+        ]
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen):
+            result = _fetch_reference_hash(checksum_urls, "sha256")
+
+        self.assertIsNone(result, "Все приоритетные упали → None (деградация)")
+        # Должно быть РОВНО 3 вызова — только приоритетные источники.
+        # jsDelivr и gh-proxy НЕ должны вызываться.
+        self.assertEqual(len(call_log), 3,
+                         f"Должно быть 3 вызова (только приоритетные), "
+                         f"фактически: {call_log}")
+        # Проверяем что каждый вызов — к одному из приоритетных источников
+        for url in call_log:
+            is_priority = (
+                "raw.githubusercontent.com" in url or
+                ("github.com" in url and "releases/latest/download" in url
+                 and "ghproxy" not in url) or
+                "cdn.statically.io" in url
+            )
+            self.assertTrue(is_priority,
+                            f"URL не является приоритетным источником: {url}. "
+                            f"jsDelivr и gh-proxy НЕ должны вызываться.")
+        # Дополнительно: проверяем что jsDelivr и gh-proxy НЕ были вызваны
+        for url in call_log:
+            self.assertNotIn("jsdelivr", url,
+                             f"jsDelivr не должен вызываться, но был: {url}")
+            self.assertNotIn("ghproxy", url,
+                             f"gh-proxy не должен вызываться, но был: {url}")
+
+    def test_ghproxy_excluded_from_priority(self):
+        """gh-proxy URL'ы НЕ включаются в приоритетный список.
+
+        gh-proxy (ghproxy.net, ghproxy.com, ...) — это прокси-кэши GitHub,
+        та же проблема кэш-рассинхрона что у jsDelivr. Должны быть исключены.
+        """
+        from chimera.modules.download_manager import _fetch_reference_hash
+        from urllib.error import URLError
+        right_hash = _hashlib_for_tests.sha256(b"fresh").hexdigest()
+
+        call_log = []
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            call_log.append(url)
+            # raw и cdn.statically — упадут, должен сработать github.com/releases
+            if "raw.githubusercontent.com" in url:
+                raise URLError("timeout")
+            if "cdn.statically.io" in url:
+                raise URLError("timeout")
+            return self._make_checksum_response(f"{right_hash}  geosite.dat\n")
+
+        # gh-proxy выглядит как github.com но содержит /https://github.com/
+        checksum_urls = [
+            "https://ghproxy.net/https://github.com/test/repo/releases/latest/download/geosite.dat.sha256sum",
+            "https://raw.githubusercontent.com/test/repo/main/geosite.dat.sha256sum",
+            "https://github.com/test/repo/releases/latest/download/geosite.dat.sha256sum",
+            "https://cdn.statically.io/gh/test/repo/main/geosite.dat.sha256sum",
+        ]
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen):
+            result = _fetch_reference_hash(checksum_urls, "sha256")
+
+        self.assertEqual(result, right_hash)
+        # ghproxy.net НЕ должен быть в call_log — только raw, statically,
+        # и реальный github.com/releases.
+        for url in call_log:
+            self.assertNotIn("ghproxy", url,
+                             f"gh-proxy не должен вызываться, но был: {url}")
+        # Должен быть вызван реальный github.com/releases (не ghproxy)
+        self.assertTrue(
+            any("github.com" in u and "releases/latest/download" in u
+                and "ghproxy" not in u for u in call_log),
+            f"Должен быть вызван реальный github.com/releases, "
+            f"call_log: {call_log}",
+        )
+
+    def test_no_priority_urls_fallback_to_first_two(self):
+        """Edge case: в checksum_urls нет приоритетных хостов →
+        fallback на первые 2 URL из полного списка."""
+        from chimera.modules.download_manager import _fetch_reference_hash
+        right_hash = _hashlib_for_tests.sha256(b"fresh").hexdigest()
+
+        call_log = []
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            call_log.append(url)
+            return self._make_checksum_response(f"{right_hash}  geosite.dat\n")
+
+        # Только example.com — нет raw.github/github.com/statically
+        checksum_urls = [
+            "https://mirror1.example.com/geosite.dat.sha256sum",
+            "https://mirror2.example.com/geosite.dat.sha256sum",
+            "https://mirror3.example.com/geosite.dat.sha256sum",
+        ]
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen):
+            result = _fetch_reference_hash(checksum_urls, "sha256")
+
+        self.assertEqual(result, right_hash)
+        # Только 1 вызов — первый ответивший из первых 2 URL
+        self.assertEqual(len(call_log), 1,
+                         f"Должен быть 1 вызов (fallback на первые 2, "
+                         f"первый ответил), фактически: {call_log}")
+
+
+class TestSingleMirrorMismatchDoesNotInvalidateAllCandidates(unittest.TestCase):
+    """ГЛАВНЫЙ regression-тест v5.0.4: несовпадение хэша у ОДНОГО кандидата
+    НЕ должно прекращать проверку остальных .dat-зеркал.
+
+    Это защита от класса регрессии, который был в v5.0.0-v5.0.3: если CDN
+    закэшировал устаревший .sha256sum, _verify_checksum спотыкалась на
+    одном и том же протухшем зеркале для ВСЕХ .dat-кандидатов — и все
+    кандидаты помечались невалидными одинаково, скачивание проваливалось
+    целиком, хотя годные зеркала .dat были дальше в списке.
+
+    v5.0.4 фикс:
+      - reference_hash получается ОДИН РАЗ (через короткий приоритетный список)
+      - цикл по .dat-зеркалам ПРОДОЛЖАЕТСЯ (continue) при несовпадении хэша
+      - пробуется СЛЕДУЮЩЕЕ зеркало .dat с ТЕМ ЖЕ reference_hash
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.manual_dir = Path(self.tmpdir) / "manual"
+        self.manual_dir.mkdir()
+        self.install_dir = Path(self.tmpdir) / "install"
+        self.install_dir.mkdir()
+        self.tmp_filename = f"_test_mismatch_{id(self)}.dat"
+        self.tmp_path = Path("/tmp") / f"_download_mgr_{self.tmp_filename}"
+        self.tmp_path.unlink(missing_ok=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        self.tmp_path.unlink(missing_ok=True)
+
+    def _make_file_response(self, content: bytes):
+        mock_resp = MagicMock()
+        mock_resp.read.side_effect = [content, b""]
+        mock_resp.headers = {"Content-Length": str(len(content))}
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+        return mock_resp
+
+    def _make_checksum_response(self, content: str):
+        mock_resp = MagicMock()
+        mock_resp.read.side_effect = [content.encode("utf-8"), b""]
+        mock_resp.headers = {"Content-Length": str(len(content))}
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+        return mock_resp
+
+    def test_single_mirror_mismatch_does_not_invalidate_all_candidates(self):
+        """5 кандидатов .dat-зеркал: 1-4 с неверным хэшем, 5-й — верный.
+
+        Сценарий: CDN кэширует устаревшие .dat-файлы на зеркалах 1-4
+        (разные устаревшие версии, не одна и та же ошибка). Зеркало 5
+        отдаёт актуальный файл. reference_hash получен ОДИН РАЗ с
+        raw.githubusercontent.com — соответствует актуальному файлу.
+
+        КЛЮЧЕВЫЕ проверки:
+          а) _fetch_reference_hash вызван РОВНО ОДИН РАЗ за весь fetch_package
+             (не 5 раз, не 0 раз после первого mismatch);
+          б) хэш реально пересчитывается и сравнивается для КАЖДОГО из 5
+             кандидатов по очереди (не прерывается после первого/второго
+             несовпадения);
+          в) итоговый результат — файл с кандидата 5, fetch_package вернул
+             True, а не False/провал из-за предыдущих 4 несовпадений.
+        """
+        # 5 разных "устаревших" контентов (каждый со своим хэшем)
+        stale_contents = [
+            b"stale content v1 from mirror 1" * 10,
+            b"stale content v2 from mirror 2" * 10,
+            b"stale content v3 from mirror 3" * 10,
+            b"stale content v4 from mirror 4" * 10,
+        ]
+        # Актуальный контент с зеркала 5
+        fresh_content = b"fresh content from mirror 5 - the right one" * 10
+
+        # reference_hash соответствует fresh_content
+        reference_hash = _hashlib_for_tests.sha256(fresh_content).hexdigest()
+
+        spec = PackageSpec(
+            name="test",
+            filename_builder=lambda: self.tmp_filename,
+            mirror_urls_builder=lambda filename: [
+                f"https://mirror1.example.com/{filename}",
+                f"https://mirror2.example.com/{filename}",
+                f"https://mirror3.example.com/{filename}",
+                f"https://mirror4.example.com/{filename}",
+                f"https://mirror5.example.com/{filename}",
+            ],
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=50,
+            checksum_urls=[
+                f"https://raw.githubusercontent.com/test/repo/main/{self.tmp_filename}.sha256sum",
+            ],
+            checksum_algo="sha256",
+        )
+
+        call_log = []  # лог URL-ов в порядке вызова
+
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            call_log.append(url)
+
+            # Запрос reference_hash (только raw.githubusercontent.com)
+            if url.endswith(".sha256sum"):
+                return self._make_checksum_response(
+                    f"{reference_hash}  {self.tmp_filename}\n"
+                )
+
+            # Запрос .dat-файла с одного из 5 зеркал
+            if url.endswith(self.tmp_filename):
+                # Определяем номер зеркала
+                for i in range(1, 5):
+                    if f"mirror{i}.example.com" in url:
+                        content = stale_contents[i - 1]
+                        self.tmp_path.write_bytes(content)
+                        return self._make_file_response(content)
+                # mirror5 — актуальный
+                if "mirror5.example.com" in url:
+                    self.tmp_path.write_bytes(fresh_content)
+                    return self._make_file_response(fresh_content)
+
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        # Мокаем _fetch_reference_hash чтобы подсчитать его вызовы
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen), \
+             patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
+             patch("chimera.modules.download_manager.Path.unlink"):
+            result = fetch_package(spec, progress_label="test")
+
+        # (в) Файл с зеркала 5 принят, fetch_package вернул True
+        self.assertTrue(result,
+                        "fetch_package должен вернуть True — зеркало 5 валидное, "
+                        "несмотря на 4 предыдущих mismatch. Если False — regression "
+                        "бага когда mismatch на одном зеркале инвалидирует все остальные.")
+
+        # (а) reference_hash запрошен ровно 1 раз
+        checksum_calls = [u for u in call_log if u.endswith(".sha256sum")]
+        self.assertEqual(len(checksum_calls), 1,
+                         f"reference_hash должен быть запрошен РОВНО 1 раз, "
+                         f"фактически {len(checksum_calls)}: {checksum_calls}. "
+                         f"Если >1 — regression: _fetch_reference_hash вызывается "
+                         f"повторно для каждого .dat-кандидата. "
+                         f"Если 0 — regression: reference_hash вообще не получен.")
+
+        # (б) Все 5 .dat-зеркал были опробованы (хэш пересчитан и сравнён
+        # для каждого). Не прервались после первого/второго mismatch.
+        dat_calls = [u for u in call_log if u.endswith(self.tmp_filename)
+                     and not u.endswith(".sha256sum")]
+        self.assertEqual(len(dat_calls), 5,
+                         f"Должны быть опробованы ВСЕ 5 .dat-зеркал, "
+                         f"фактически {len(dat_calls)}: {dat_calls}. "
+                         f"Если <5 — regression: цикл прервался после mismatch "
+                         f"вместо continue к следующему зеркалу.")
+
+        # Проверяем порядок: сначала reference_hash, потом mirror1, 2, 3, 4, 5
+        self.assertIn(".sha256sum", call_log[0],
+                      f"Первый вызов должен быть reference_hash, "
+                      f"фактически: {call_log[0]}")
+        for i, expected_mirror in enumerate(["mirror1", "mirror2", "mirror3",
+                                              "mirror4", "mirror5"], start=1):
+            self.assertIn(f"{expected_mirror}.example.com", call_log[i],
+                          f"Вызов {i} должен быть к {expected_mirror}, "
+                          f"фактически: {call_log[i]}")
+
+        # Только зеркало 5 прошло верификацию → copy вызван 1 раз
+        mock_copy.assert_called_once()
+
+    def test_reference_hash_fetched_once_even_with_many_mirrors(self):
+        """Дополнительная проверка: с 10 .dat-зеркалами reference_hash
+        всё равно запрашивается ОДИН раз, не 10.
+
+        Это явная защита от regression: если кто-то случайно вернёт вызов
+        _fetch_reference_hash (или её аналога) ВНУТРЬ цикла for url in urls,
+        этот тест упадёт.
+        """
+        # Все 10 зеркал отдают один и тот же валидный контент
+        fresh_content = b"fresh content from any mirror" * 10
+        reference_hash = _hashlib_for_tests.sha256(fresh_content).hexdigest()
+
+        mirror_urls = [f"https://mirror{i}.example.com/{self.tmp_filename}"
+                       for i in range(1, 11)]
+
+        spec = PackageSpec(
+            name="test",
+            filename_builder=lambda: self.tmp_filename,
+            mirror_urls_builder=lambda filename: mirror_urls,
+            install_dests=[self.install_dir],
+            manual_incoming_dir=self.manual_dir,
+            min_size=50,
+            checksum_urls=[
+                f"https://raw.githubusercontent.com/test/repo/main/{self.tmp_filename}.sha256sum",
+            ],
+            checksum_algo="sha256",
+        )
+
+        call_log = []
+        def fake_urlopen(req, timeout):
+            url = req.full_url
+            call_log.append(url)
+            if url.endswith(".sha256sum"):
+                return self._make_checksum_response(
+                    f"{reference_hash}  {self.tmp_filename}\n"
+                )
+            # Все зеркала отдают fresh_content (валидный)
+            self.tmp_path.write_bytes(fresh_content)
+            return self._make_file_response(fresh_content)
+
+        with patch("chimera.modules.download_manager.urllib.request.urlopen",
+                   side_effect=fake_urlopen), \
+             patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
+             patch("chimera.modules.download_manager.Path.unlink"):
+            result = fetch_package(spec, progress_label="test")
+
+        self.assertTrue(result)
+
+        # reference_hash запрошен РОВНО 1 раз (НЕ 10!)
+        checksum_calls = [u for u in call_log if u.endswith(".sha256sum")]
+        self.assertEqual(len(checksum_calls), 1,
+                         f"reference_hash должен быть запрошен 1 раз даже с "
+                         f"10 зеркалами, фактически {len(checksum_calls)}. "
+                         f"Если >1 — regression: верификация вызывается "
+                         f"повторно для каждого .dat-кандидата.")
+
+        # Только первое зеркало прошло (hash совпал) → copy 1 раз,
+        # остальные 9 зеркал НЕ опробовались.
+        dat_calls = [u for u in call_log if u.endswith(self.tmp_filename)
+                     and not u.endswith(".sha256sum")]
+        self.assertEqual(len(dat_calls), 1,
+                         f"Должно быть опробовано только 1 зеркало (первое "
+                         f"с валидным hash), фактически {len(dat_calls)}: {dat_calls}")
+        mock_copy.assert_called_once()
 
 
 if __name__ == "__main__":

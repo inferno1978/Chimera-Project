@@ -28,7 +28,7 @@ Regression-тесты для chimera/modules/geo_files.py::emergency_curl_fallba
 
 6. Возврат False когда SHA256 не совпал.
 
-ВСЕ тесты мокают core._run и download_manager._verify_checksum — реальная
+ВСЕ тесты мокают core._run и download_manager._fetch_reference_hash — реальная
 сеть и реальный curl НЕ вызываются.
 ───────────────────────────────────────────────────────────────────────────────
 """
@@ -163,8 +163,10 @@ class TestEmergencyCurlOneNoTypeError(unittest.TestCase):
         fake_file = self._make_fake_file()
         self.fake_core._run = self._make_mock_run(fake_file)
 
-        with patch("chimera.modules.download_manager._verify_checksum",
-                   return_value=True):
+        with patch("chimera.modules.download_manager._fetch_reference_hash",
+                   return_value="match_hash"), \
+             patch("chimera.modules.download_manager._compute_hash",
+                   return_value="match_hash"):
             result = _emergency_curl_one(
                 url="https://github.com/test/repo/releases/latest/download/geosite.dat",
                 dest_path=self.tmpdir / "dest_geosite.dat",
@@ -186,8 +188,10 @@ class TestEmergencyCurlOneNoTypeError(unittest.TestCase):
         fake_file = self._make_fake_file()
         self.fake_core._run = self._make_mock_run(fake_file, returncode=22)
 
-        with patch("chimera.modules.download_manager._verify_checksum",
-                   return_value=True):
+        with patch("chimera.modules.download_manager._fetch_reference_hash",
+                   return_value="match_hash"), \
+             patch("chimera.modules.download_manager._compute_hash",
+                   return_value="match_hash"):
             result = _emergency_curl_one(
                 url="https://github.com/test/repo/releases/latest/download/geosite.dat",
                 dest_path=self.tmpdir / "dest_geosite.dat",
@@ -207,8 +211,10 @@ class TestEmergencyCurlOneNoTypeError(unittest.TestCase):
         fake_file = self._make_fake_file(size=5_000_000)
         self.fake_core._run = self._make_mock_run(fake_file)
 
-        with patch("chimera.modules.download_manager._verify_checksum",
-                   return_value=True):
+        with patch("chimera.modules.download_manager._fetch_reference_hash",
+                   return_value="match_hash"), \
+             patch("chimera.modules.download_manager._compute_hash",
+                   return_value="match_hash"):
             result = _emergency_curl_one(
                 url="https://github.com/test/repo/releases/latest/download/geosite.dat",
                 dest_path=self.tmpdir / "dest_geosite.dat",
@@ -220,15 +226,15 @@ class TestEmergencyCurlOneNoTypeError(unittest.TestCase):
         self.assertFalse(result, "Файл 5МБ < min_size 20МБ → False")
 
     def test_returns_false_when_sha256_mismatch(self):
-        """Если SHA256 не совпал (verify_result=False) — файл отбраковывается,
+        """Если SHA256 не совпал (reference_hash != actual_hash) — файл отбраковывается,
         возвращается False."""
         from chimera.modules.geo_files import _emergency_curl_one
 
         fake_file = self._make_fake_file()
         self.fake_core._run = self._make_mock_run(fake_file)
 
-        with patch("chimera.modules.download_manager._verify_checksum",
-                   return_value=False):  # SHA256 НЕ совпал
+        with patch("chimera.modules.download_manager._fetch_reference_hash",
+                   return_value="0" * 64):  # SHA256 НЕ совпал
             result = _emergency_curl_one(
                 url="https://github.com/test/repo/releases/latest/download/geosite.dat",
                 dest_path=self.tmpdir / "dest_geosite.dat",
@@ -242,14 +248,14 @@ class TestEmergencyCurlOneNoTypeError(unittest.TestCase):
                          "от кэшированных устаревших файлов (см. cdadfab).")
 
     def test_accepts_when_sha256_unavailable(self):
-        """Если SHA256 checksum недоступен со всех зеркал (verify_result=None)
+        """Если SHA256 checksum недоступен со всех зеркал (reference_hash is None)
         — деградация до размерной проверки, файл принимается."""
         from chimera.modules.geo_files import _emergency_curl_one
 
         fake_file = self._make_fake_file()
         self.fake_core._run = self._make_mock_run(fake_file)
 
-        with patch("chimera.modules.download_manager._verify_checksum",
+        with patch("chimera.modules.download_manager._fetch_reference_hash",
                    return_value=None):  # checksum недоступен
             result = _emergency_curl_one(
                 url="https://github.com/test/repo/releases/latest/download/geosite.dat",
@@ -345,8 +351,10 @@ class TestEmergencyCurlFallbackOnlyFiles(unittest.TestCase):
         dest_dir = self.tmpdir / "xray"
         dest_dir.mkdir(exist_ok=True)
 
-        with patch("chimera.modules.download_manager._verify_checksum",
-                   return_value=True):
+        with patch("chimera.modules.download_manager._fetch_reference_hash",
+                   return_value="match_hash"), \
+             patch("chimera.modules.download_manager._compute_hash",
+                   return_value="match_hash"):
             result = emergency_curl_fallback(
                 dest_dirs=[dest_dir],
                 only_files=["geosite.dat"],
@@ -383,8 +391,10 @@ class TestEmergencyCurlFallbackOnlyFiles(unittest.TestCase):
         dest_dir = self.tmpdir / "xray"
         dest_dir.mkdir(exist_ok=True)
 
-        with patch("chimera.modules.download_manager._verify_checksum",
-                   return_value=True):
+        with patch("chimera.modules.download_manager._fetch_reference_hash",
+                   return_value="match_hash"), \
+             patch("chimera.modules.download_manager._compute_hash",
+                   return_value="match_hash"):
             result = emergency_curl_fallback(
                 dest_dirs=[dest_dir],
                 only_files=["geoip.dat"],
@@ -418,8 +428,10 @@ class TestEmergencyCurlFallbackOnlyFiles(unittest.TestCase):
         dest_dir = self.tmpdir / "xray"
         dest_dir.mkdir(exist_ok=True)
 
-        with patch("chimera.modules.download_manager._verify_checksum",
-                   return_value=True):
+        with patch("chimera.modules.download_manager._fetch_reference_hash",
+                   return_value="match_hash"), \
+             patch("chimera.modules.download_manager._compute_hash",
+                   return_value="match_hash"):
             result = emergency_curl_fallback(
                 dest_dirs=[dest_dir],
                 only_files=None,  # оба
@@ -492,8 +504,10 @@ class TestEmergencyCurlFallbackDestDirs(unittest.TestCase):
         for d in (dest1, dest2, dest3):
             d.mkdir(exist_ok=True)
 
-        with patch("chimera.modules.download_manager._verify_checksum",
-                   return_value=True):
+        with patch("chimera.modules.download_manager._fetch_reference_hash",
+                   return_value="match_hash"), \
+             patch("chimera.modules.download_manager._compute_hash",
+                   return_value="match_hash"):
             result = emergency_curl_fallback(
                 dest_dirs=[dest1, dest2, dest3],
                 only_files=["geosite.dat"],
