@@ -726,24 +726,34 @@ def _diag_check_outbounds(cfg: dict, counters: list) -> None:
         _box_info("Outbound 'direct' отсутствует (нормально для Режима B без split tunneling)")
 
 
-def _diag_tcp_probe(host: str, port: int, timeout: int = 10) -> tuple[bool, str]:
+def _diag_tcp_probe(host: str, port: int, timeout: int = 10
+                    ) -> tuple[bool, str, int]:
     """TCP-ping до host:port с перебором всех адресов из getaddrinfo() (IPv4 + IPv6).
 
-    Возвращает (alive, detail). detail — короткая строка для diag-вывода:
-      'IPv4 1.2.3.4'
-      'IPv6 2a12::2'
-      'DNS empty'
-      'DNS fail: ...'
-      'IPv4 timeout; IPv6 unreachable'
+    Возвращает (alive, detail, latency_ms):
+      - alive: True если хотя бы одна address family ответила
+      - detail: короткая строка для diag-вывода:
+          'IPv4 1.2.3.4'
+          'IPv6 2a12::2'
+          'DNS empty'
+          'DNS fail: ...'
+          'IPv4 timeout; IPv6 unreachable'
+      - latency_ms: latency до УСПЕШНОГО адреса в мс (или -1 если все упали)
+
+    Алгоритм:
+      1. getaddrinfo() — получаем все записи (IPv4 + IPv6)
+      2. Дедуп по (family, sockaddr)
+      3. Перебираем по очереди, для каждой пробуем socket.connect() с timeout
+      4. Если хоть одна семья ответила — нода жива (как Happy Eyeballs у клиента)
     """
     # 1) DNS-резолв через системный резолвер (getaddrinfo). Если он отдал
     #    IPv6-only, а на сервере нет IPv6-маршрута — попробуем это понять.
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
-        return False, f"DNS fail: {e}"
+        return False, f"DNS fail: {e}", -1
     if not infos:
-        return False, "DNS empty"
+        return False, "DNS empty", -1
 
     # Дедуп по (family, addr), сохраняя порядок IPv4/IPv6 как отдал резолвер.
     seen: list[tuple[int, tuple]] = []
@@ -752,7 +762,7 @@ def _diag_tcp_probe(host: str, port: int, timeout: int = 10) -> tuple[bool, str]
         if key not in seen:
             seen.append((family, sockaddr))
 
-    results: list[tuple[bool, str]] = []  # (alive, family_label)
+    results: list[tuple[bool, str, int]] = []  # (alive, family_label, latency_ms)
     for family, sockaddr in seen:
         fam_label = "IPv6" if family == socket.AF_INET6 else "IPv4"
         ip_str = sockaddr[0]
@@ -760,9 +770,12 @@ def _diag_tcp_probe(host: str, port: int, timeout: int = 10) -> tuple[bool, str]
             s = socket.socket(family, socket.SOCK_STREAM)
             s.settimeout(timeout)
             try:
+                import time as _time_mod
+                _t0 = _time_mod.time()
                 s.connect(sockaddr)
+                _lat = int((_time_mod.time() - _t0) * 1000)
                 s.close()
-                results.append((True, f"{fam_label} {ip_str}"))
+                results.append((True, f"{fam_label} {ip_str}", _lat))
             except (socket.timeout, OSError) as e:
                 # Закрываем сокет в любой ошибке
                 try:
@@ -770,20 +783,20 @@ def _diag_tcp_probe(host: str, port: int, timeout: int = 10) -> tuple[bool, str]
                 except OSError:
                     pass
                 err_short = "timeout" if isinstance(e, socket.timeout) else str(e)
-                results.append((False, f"{fam_label} {ip_str}: {err_short}"))
+                results.append((False, f"{fam_label} {ip_str}: {err_short}", -1))
         except OSError as e:
-            results.append((False, f"{fam_label} {ip_str}: {e}"))
+            results.append((False, f"{fam_label} {ip_str}: {e}", -1))
 
     # Если хотя бы одна address family ответила — считаем ноду живой.
-    alive = any(ok for ok, _ in results)
+    alive = any(ok for ok, _, _ in results)
     if alive:
         # Берём первую успешную.
-        for ok, label in results:
+        for ok, label, lat in results:
             if ok:
-                return True, label
+                return True, label, lat
     # Все упали — покажем что именно не вышло.
-    failed_summary = "; ".join(label for _, label in results)
-    return False, failed_summary
+    failed_summary = "; ".join(label for _, label, _ in results)
+    return False, failed_summary, -1
 
 
 def _diag_check_routing_live(cfg: dict, counters: list) -> None:
@@ -806,7 +819,7 @@ def _diag_check_routing_live(cfg: dict, counters: list) -> None:
             port = vn.get("port", 443)
             if not host:
                 continue
-            alive, detail = _diag_tcp_probe(host, port, timeout=10)
+            alive, detail, _lat = _diag_tcp_probe(host, port, timeout=10)
             if alive:
                 _diag_chk(counters, True,
                           f"Exit-нода [{tag}] {host}:{port} — TCP достижима ({detail})",
@@ -2040,23 +2053,27 @@ def do_full_diagnostic() -> None:
                 _HP_W = 32
                 _hp   = f"{_nh}:{_np}"[:_HP_W]   # host:port, обрезанный
                 _idx  = f"[{_ni}/{len(_nodes)}] → "
-                try:
-                    _t0 = time.time()
-                    _ns = _socket.create_connection((_nh, _np), timeout=8)
-                    _ns.close()
-                    _lat_ms = int((time.time() - _t0) * 1000)
+                # Используем _diag_tcp_probe — перебор всех address family (IPv4 + IPv6),
+                # как в шаге 5. Раньше тут был socket.create_connection(timeout=8),
+                # который для dual-stack доменов на IPv4-only сервере мог отдавать
+                # timeout по IPv6 и не показывать причину.
+                _alive, _detail, _lat_ms = _diag_tcp_probe(_nh, _np, timeout=8)
+                if _alive:
                     _max_lat = max(_max_lat, _lat_ms)
                     _lc = GREEN if _lat_ms < 150 else YELLOW if _lat_ms < 300 else RED
                     _lat_str = f"{_lc}{_lat_ms:>4}ms{NC}"
-                    _box_info(f"  {_idx}{_hp:<{_HP_W}}  {_lat_str}")
+                    _box_info(f"  {_idx}{_hp:<{_HP_W}}  {_lat_str}  {DIM}({_detail}){NC}")
                     if _lat_ms >= 300:
                         _wiz_hint(f"Высокая latency к {_nh} — попробуй: mtr {_nh}")
-                except _socket.timeout:
-                    _box_info(f"  {_idx}{_hp:<{_HP_W}}  {RED}timeout{NC}")
-                    _wiz_hint(f"Firewall exit-сервера {_nh}: порт {_np} открыт?")
-                    _node_fails.append(f"{_nh}:{_np}")
-                except Exception as _ne:
-                    _box_info(f"  {_idx}{_hp:<{_HP_W}}  {RED}{str(_ne)[:12]}{NC}")
+                else:
+                    # Подробно показываем что именно упало.
+                    _box_info(f"  {_idx}{_hp:<{_HP_W}}  {RED}timeout{NC}  {DIM}({_detail}){NC}")
+                    # Подсказка для типичного кейса IPv6-only на IPv4-only сервере.
+                    if "IPv6" in _detail and "IPv4" not in _detail:
+                        _wiz_hint(f"На сервере нет IPv6, а {_nh} резолвится только в AAAA — "
+                                  f"клиент может подключаться через свой IPv6/другой резолвер")
+                    else:
+                        _wiz_hint(f"Firewall exit-сервера {_nh}: порт {_np} открыт?")
                     _node_fails.append(f"{_nh}:{_np}")
             if _node_fails:
                 _box_warn(f"Недоступны: {', '.join(_node_fails)}")
