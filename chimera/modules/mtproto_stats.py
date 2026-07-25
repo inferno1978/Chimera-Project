@@ -146,6 +146,22 @@ except ImportError:
 # ══════════════════════════════════════════════════════════════════════════════
 #  IPTABLES ACCOUNTING
 # ══════════════════════════════════════════════════════════════════════════════
+# УРОК НА БУДУЩЕЕ: при парсинге вывода iptables/ip/nft с флагом -n значения
+# полей могут быть числовыми вместо текстовых. Для iptables -L -n это в
+# первую очередь ПОЛЕ ПРОТОКОЛА: вместо текстового "tcp" стоит "6"
+# (IPPROTO_TCP). IP-адреса также становятся числовыми, но они нас тут не
+# касаются (мы не сравниваем их со строкой).
+#
+# Любой будущий парсинг вывода iptables/ip/nft с флагом -n должен либо не
+# использовать -n для полей, которые сравниваются со строкой, либо явно
+# принимать оба представления (текстовое и числовое). См. _TCP_PROTO_TOKENS
+# ниже — этот набор был введён после ложноположительного отказа на реальном
+# сервере (commit после 0b412e3): jump-правило реально стояло и работало
+# (счётчики 119 пакетов / 15936 байт), но старый код ждал буквально "tcp" и
+# всегда возвращал False из-за "6" в выводе -n.
+_TCP_PROTO_TOKENS = frozenset({"tcp", "6"})
+
+
 def _ipt_chain_exists(chain: str) -> bool:
     return _run(["iptables", "-L", chain, "-n"], capture=True).returncode == 0
 
@@ -162,6 +178,13 @@ def _ipt_jump_exists(parent: str, chain: str, port: int, direction: str) -> bool
     если iptables не имеет CAP_NET_ADMIN в контейнере, или ядро без
     netfilter-модуля). Реально проверяем `iptables -L parent -v -n` и ищем
     цепочку по имени в колонке target.
+
+    ВАЖНО про флаг -n: он делает числовым не только IP-адреса, но и ПОЛЕ
+    ПРОТОКОЛА — вместо текстового "tcp" в этой колонке стоит "6"
+    (IPPROTO_TCP). Реальный вывод с сервера:
+        119 15936 TELEMT_STATS_IN  6  --  *  *  0.0.0.0/0  0.0.0.0/0  tcp dpt:5000
+    Поэтому принимаем оба варианта через _TCP_PROTO_TOKENS = {"tcp", "6"}.
+    См. УРОК НА БУДУЩЕЕ выше.
     """
     r = _run(["iptables", "-L", parent, "-v", "-n"], capture=True)
     if r.returncode != 0:
@@ -169,14 +192,15 @@ def _ipt_jump_exists(parent: str, chain: str, port: int, direction: str) -> bool
     for line in r.stdout.splitlines():
         parts = line.split()
         # Формат: pkts bytes target prot opt in out source destination ...
-        # Нужно: target == chain, протокол tcp, и в строке есть порт.
+        # Нужно: target == chain, протокол tcp (или "6" при -n), и в строке
+        # есть порт.
         if len(parts) < 10:
             continue
         target = parts[2]
         if target != chain:
             continue
         prot = parts[3]
-        if prot != "tcp":
+        if prot not in _TCP_PROTO_TOKENS:
             continue
         # Ищем опцию dport/sport в строке (могут быть на разных позициях
         # в зависимости от версии iptables).
@@ -187,6 +211,45 @@ def _ipt_jump_exists(parent: str, chain: str, port: int, direction: str) -> bool
             continue
         return True
     return False
+
+
+def _ipt_remove_all_jumps(parent: str, chain: str, port: int,
+                          direction: str) -> int:
+    """Удаляет ВСЕ jump-правила parent → chain для порта, независимо
+    от того, сколько их накопилось. Возвращает количество удалённых
+    правил (для лога). Использует `_ipt_jump_exists()` для проверки
+    after each removal, а не полагается на returncode -D.
+
+    Зачем это нужно: пункт [3] «Включить / переинициализировать учёт
+    iptables» может нажиматься многократно (при диагностике). Текущий
+    код делал ОДИН вызов `-D ... -j CHAIN` перед ОДНИМ `-I ... -j CHAIN`
+    — это снижало риск дублирования, но не гарантировало его отсутствие:
+    `-D` удаляет только ОДНО совпадающее правило за вызов, не проверяет
+    результат, и если по какой-то причине правило встретилось дважды
+    (например, из-за более ранней версии кода без `-D` вообще, или
+    ручного вмешательства) — одно из дублей останется висеть, а после
+    `-I` добавится ещё одна свежая копия — правила будут накапливаться
+    с каждым нажатием [3].
+
+    Цикл удаления до исчерпания (с защитным лимитом 50 итераций на случай
+    непредвиденного поведения iptables — штатно никогда не достигается)
+    гарантирует, что после `_ipt_remove_all_jumps` останется РОВНО 0
+    jump-правил, и последующий единственный `-I` приведёт к РОВНО 1
+    правилу в финальном состоянии, сколько бы раз [3] ни нажимали.
+    """
+    removed = 0
+    opt = "--dport" if direction == "dport" else "--sport"
+    # Защита от бесконечного цикла — 50 итераций хватит на любой реальный
+    # сценарий (даже если в INPUT скопилось 50 дублей из-за ручной правки).
+    for _ in range(50):
+        if not _ipt_jump_exists(parent, chain, port, direction):
+            break
+        r = _run(["iptables", "-D", parent, "-p", "tcp", opt, str(port),
+                  "-j", chain])
+        if r.returncode != 0:
+            break
+        removed += 1
+    return removed
 
 
 def setup_iptables_accounting(port: int) -> bool:
@@ -209,6 +272,14 @@ def setup_iptables_accounting(port: int) -> bool:
     срабатывал, и установщик рапортовал «Учёт трафика активирован» даже
     когда цепочки физически не создались (контейнер без CAP_NET_ADMIN,
     ядро без netfilter, и т.п.).
+
+    Идемпотентность: при повторных вызовах (пункт [3] меню статистики
+    может нажиматься многократно при диагностике) — ГАРАНТИРОВАННО
+    удаляются ВСЕ ранее установленные jump-правила в INPUT/OUTPUT через
+    _ipt_remove_all_jumps() (цикл до исчерпания), и только потом
+    создаётся ровно одно новое. Не полагаемся на единственный -D.
+    Если удалено >1 правила — логируем как сигнал, что раньше копилось
+    дублирование (полезно для диагностики).
     """
     _fail_reasons: list[str] = []
 
@@ -223,19 +294,45 @@ def setup_iptables_accounting(port: int) -> bool:
         except Exception:
             pass
 
+    def _info_local(msg: str) -> None:
+        # Информационные сообщения (не повод возвращать False) — только в лог
+        try:
+            import importlib
+            core = importlib.import_module("chimera._core")
+            if hasattr(core, "log_to_file"):
+                core.log_to_file("INFO", f"mtproto_stats.setup_iptables_accounting: {msg}")
+        except Exception:
+            pass
+
     for chain in (CHAIN_IN, CHAIN_OUT):
         if not _ipt_chain_exists(chain):
             _run(["iptables", "-N", chain])
 
-    # INPUT → CHAIN_IN
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port), "-j", CHAIN_IN])
+    # ── ИДЕМПОТЕНТНАЯ ОЧИСТКА старых jump-правил ─────────────────────────────
+    # Удаляем ВСЕ ранее установленные jump-правила (сколько бы их ни было —
+    # 0, 1 или больше) перед созданием нового. Цикл до исчерпания через
+    # _ipt_jump_exists(), а не один -D. Если >1 — логируем как сигнал
+    # копившегося дублирования (полезно для диагностики).
+    removed_in = _ipt_remove_all_jumps("INPUT", CHAIN_IN, port, "dport")
+    removed_out = _ipt_remove_all_jumps("OUTPUT", CHAIN_OUT, port, "sport")
+    if removed_in > 1:
+        _info_local(
+            f"removed {removed_in} duplicate INPUT jump-rules to "
+            f"{CHAIN_IN} (dport={port}) — pre-existing duplication detected"
+        )
+    if removed_out > 1:
+        _info_local(
+            f"removed {removed_out} duplicate OUTPUT jump-rules to "
+            f"{CHAIN_OUT} (sport={port}) — pre-existing duplication detected"
+        )
+
+    # INPUT → CHAIN_IN (ровно одно новое правило)
     _run(["iptables", "-I", "INPUT", "1", "-p", "tcp", "--dport", str(port), "-j", CHAIN_IN])
     _run(["iptables", "-F", CHAIN_IN])
     _run(["iptables", "-A", CHAIN_IN, "-p", "tcp", "--dport", str(port),
           "-m", "comment", "--comment", "telemt-rx", "-j", "RETURN"])
 
-    # OUTPUT → CHAIN_OUT
-    _run(["iptables", "-D", "OUTPUT", "-p", "tcp", "--sport", str(port), "-j", CHAIN_OUT])
+    # OUTPUT → CHAIN_OUT (ровно одно новое правило)
     _run(["iptables", "-I", "OUTPUT", "1", "-p", "tcp", "--sport", str(port), "-j", CHAIN_OUT])
     _run(["iptables", "-F", CHAIN_OUT])
     _run(["iptables", "-A", CHAIN_OUT, "-p", "tcp", "--sport", str(port),

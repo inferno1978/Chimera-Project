@@ -462,7 +462,7 @@ class TestCollect(unittest.TestCase):
 
 
 # =============================================================================
-#  setup_iptables_accounting: постфактум-верификация (Test 1, 2 из задачи)
+#  setup_iptables_accounting: постфактум-верификация + парсинг -n + идемпотентность
 # =============================================================================
 class TestSetupIptablesAccountingVerification(unittest.TestCase):
     """Проверка что setup_iptables_accounting() реально верифицирует факт
@@ -474,6 +474,14 @@ class TestSetupIptablesAccountingVerification(unittest.TestCase):
     через try/except, и установщик рапортовал «Учёт трафика активирован»
     даже когда цепочки физически не создались (контейнер без CAP_NET_ADMIN,
     ядро без netfilter, iptables-nft vs iptables-legacy конфликт, и т.п.).
+
+    Также покрыты:
+      • парсинг числового протокола "6" (IPPROTO_TCP) в выводе iptables -n
+        (старый код ждал буквально "tcp" и всегда возвращал False на реальном
+        выводе с сервера, хотя jump-правило реально стояло и работало).
+      • идемпотентность при повторных вызовах (пункт [3] может нажиматься
+        многократно) — через _ipt_remove_all_jumps() с циклом до исчерпания,
+        гарантирующим ровно 0 jump-правил перед созданием ровно 1 нового.
     """
 
     def setUp(self):
@@ -489,23 +497,40 @@ class TestSetupIptablesAccountingVerification(unittest.TestCase):
     def _patch_cron(self):
         return patch("chimera.modules.mtproto_stats.CRON_FILE", self._cron)
 
-    def _make_run_mock(self, *, chain_exists_results: dict = None,
-                       jump_exists_results: dict = None):
-        """Создаёт mock для _run.
+    def _make_run_mock(self, *, chains_exist: set = None,
+                       initial_jumps: dict = None,
+                       proto_token: str = "tcp"):
+        """Создаёт STATEFUL mock для _run — отслеживает «реально
+        установленные» цепочки и jump-правила в mock-state.
 
-        chain_exists_results: {chain_name: bool} — что вернёт
-            iptables -L chain -n (returncode 0 = exists).
-        jump_exists_results: {parent_chain: bool} — что вернёт
-            iptables -L INPUT/OUTPUT -v -n (returncode 0 = OK, stdout
-            парсится _ipt_jump_exists).
+        Args:
+          chains_exist: set chain-имён, которые «существуют» изначально.
+            Команда `-N chain` добавляет chain в этот set.
+          initial_jumps: dict {(parent, chain, port, direction): count} —
+            сколько jump-правил изначально установлено (может быть >1 для
+            эмуляции копившегося дублирования). Команда `-D` декрементирует,
+            `-I` инкрементирует (но только если count=0 — `-I` добавляет
+            ровно одно). Словарь мутируется в реальном времени, что
+            позволяет _ipt_jump_exists() и _ipt_remove_all_jumps()
+            корректно взаимодействовать.
+          proto_token: "tcp" (текстовый) или "6" (числовой, как при -n) —
+            какой токен протокола возвращать в stdout iptables -L -v -n.
 
-        Для команд -N/-I/-D/-F/-A/-Z просто возвращаем success.
+        Возвращаемый fake_run умеет:
+          • iptables -L CHAIN -n → проверка существования цепочки
+          • iptables -L INPUT/OUTPUT -v -n → возвращаем stdout со всеми
+            «установленными» jump-правилами (с proto_token в колонке prot)
+          • iptables -D parent ... -j chain → декремент jump-count
+          • iptables -I parent 1 ... -j chain → инкремент jump-count (до 1)
+          • iptables -N chain → добавить chain в chains_exist
+          • iptables -F/-A/-Z, netfilter-persistent, iptables-save → no-op success
         """
         from unittest.mock import MagicMock
         from chimera.modules.mtproto_stats import CHAIN_IN, CHAIN_OUT
 
-        chain_exists_results = chain_exists_results or {}
-        jump_exists_results = jump_exists_results or {}
+        chains_exist = set(chains_exist or [])
+        # jumps: {(parent, chain, port, direction): count}
+        jumps = dict(initial_jumps or {})
 
         # Карта: parent → (target_chain, port_label)
         # INPUT → CHAIN_IN, dport (входящий — destination port)
@@ -514,55 +539,130 @@ class TestSetupIptablesAccountingVerification(unittest.TestCase):
             "INPUT":  (CHAIN_IN,  "dpt"),
             "OUTPUT": (CHAIN_OUT, "spt"),
         }
+        direction_to_label = {"dport": "dpt", "sport": "spt"}
 
         def fake_run(cmd, capture=False, check=False):
-            # Определяем тип команды по первым аргументам
+            cmd = list(cmd)
+
+            # ── iptables -L ... ──────────────────────────────────────────────
             if len(cmd) >= 3 and cmd[0] == "iptables" and cmd[1] == "-L":
                 chain_or_parent = cmd[2]
-                # Команда вида: iptables -L CHAIN -n  (проверка существования)
+                # iptables -L CHAIN -n  (проверка существования цепочки)
                 if "-n" in cmd and "-v" not in cmd:
-                    exists = chain_exists_results.get(chain_or_parent, False)
+                    exists = chain_or_parent in chains_exist
                     return MagicMock(returncode=0 if exists else 1,
                                      stdout="chain" if exists else "",
                                      stderr="")
-                # Команда вида: iptables -L INPUT -v -n  (для jump-проверки)
+                # iptables -L INPUT/OUTPUT -v -n  (для jump-проверки)
                 if "-v" in cmd and "-n" in cmd:
-                    ok = jump_exists_results.get(chain_or_parent, False)
-                    if not ok:
-                        return MagicMock(returncode=1, stdout="", stderr="")
-                    # Возвращаем stdout с jump-правилом, чтобы _ipt_jump_exists
-                    # его распарсил. Формат: pkts bytes target prot opt in out
-                    # source destination ... dpt:PORT / spt:PORT
-                    port = 8443
-                    target, port_label = parent_map.get(
-                        chain_or_parent, (chain_or_parent, "dpt"))
-                    line = (f"  0  0  {target}  "
-                            f"tcp  --  *  *  0.0.0.0/0  0.0.0.0/0  "
-                            f"tcp {port_label}:{port}")
+                    # Собираем stdout со всеми установленными jump-правилами
+                    # для этого parent.
+                    lines = [f"Chain {chain_or_parent} (policy ACCEPT)"]
+                    for (parent, chain, port, direction), count in jumps.items():
+                        if parent != chain_or_parent or count <= 0:
+                            continue
+                        target, _ = parent_map.get(
+                            parent, (chain, "dpt"))
+                        port_label = direction_to_label.get(direction, "dpt")
+                        # Генерируем `count` строк — по одной на каждое
+                        # «установленное» jump-правило (эмуляция дублей).
+                        for _i in range(count):
+                            line = (f"  0  0  {target}  "
+                                    f"{proto_token}  --  *  *  0.0.0.0/0  0.0.0.0/0  "
+                                    f"tcp {port_label}:{port}")
+                            lines.append(line)
                     return MagicMock(returncode=0,
-                                     stdout=f"Chain {chain_or_parent}\n{line}\n",
+                                     stdout="\n".join(lines) + "\n",
                                      stderr="")
-            # Все остальные команды (-N/-I/-D/-F/-A/-Z, netfilter-persistent,
-            # iptables-save) — возвращаем успех, не делаем ничего реально.
+
+            # ── iptables -N chain  (создание цепочки) ────────────────────────
+            if len(cmd) >= 3 and cmd[0] == "iptables" and cmd[1] == "-N":
+                chains_exist.add(cmd[2])
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            # ── iptables -D parent -p tcp --dport/--sport PORT -j chain ──────
+            # Декремент jump-count на 1. returncode 1 если count=0 (ничего
+            # нечего удалять).
+            if len(cmd) >= 3 and cmd[0] == "iptables" and cmd[1] == "-D":
+                parent = cmd[2]
+                # Парсим -p tcp --dport PORT -j CHAIN из остальных аргументов
+                port = None
+                chain = None
+                direction = None
+                i = 3
+                while i < len(cmd):
+                    if cmd[i] == "--dport" and i + 1 < len(cmd):
+                        port = int(cmd[i + 1]); direction = "dport"; i += 2; continue
+                    if cmd[i] == "--sport" and i + 1 < len(cmd):
+                        port = int(cmd[i + 1]); direction = "sport"; i += 2; continue
+                    if cmd[i] == "-j" and i + 1 < len(cmd):
+                        chain = cmd[i + 1]; i += 2; continue
+                    i += 1
+                if port is not None and chain is not None and direction is not None:
+                    key = (parent, chain, port, direction)
+                    if jumps.get(key, 0) > 0:
+                        jumps[key] = jumps.get(key, 0) - 1
+                        return MagicMock(returncode=0, stdout="", stderr="")
+                    return MagicMock(returncode=1, stdout="", stderr="not found")
+
+            # ── iptables -I parent 1 -p tcp --dport/--sport PORT -j chain ────
+            # Инкремент jump-count (добавляет ровно одно правило).
+            if len(cmd) >= 3 and cmd[0] == "iptables" and cmd[1] == "-I":
+                parent = cmd[2]
+                port = None
+                chain = None
+                direction = None
+                i = 3
+                while i < len(cmd):
+                    if cmd[i] == "--dport" and i + 1 < len(cmd):
+                        port = int(cmd[i + 1]); direction = "dport"; i += 2; continue
+                    if cmd[i] == "--sport" and i + 1 < len(cmd):
+                        port = int(cmd[i + 1]); direction = "sport"; i += 2; continue
+                    if cmd[i] == "-j" and i + 1 < len(cmd):
+                        chain = cmd[i + 1]; i += 2; continue
+                    i += 1
+                if port is not None and chain is not None and direction is not None:
+                    key = (parent, chain, port, direction)
+                    jumps[key] = jumps.get(key, 0) + 1
+                    return MagicMock(returncode=0, stdout="", stderr="")
+
+            # ── Все остальные команды (-F/-A/-Z, netfilter-persistent,
+            #    iptables-save) — no-op success.
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        return fake_run
+        return fake_run, chains_exist, jumps
 
     # ── Тест 1: chains+jumps "успешно" создались, но _ipt_chain_exists
     #    возвращает False → функция должна вернуть False ─────────────────────
     def test_returns_false_when_chains_did_not_actually_appear(self):
         """Сценарий: iptables -N/-I отработали с returncode 0, но цепочки
         реально не появились (например, контейнер без CAP_NET_ADMIN
-        молча игнорирует команды). Постфактум-верификация должна это
-        поймать и вернуть False, а не True.
+        молча игнорирует команды — мокируем через пустой chains_exist,
+        -N добавляет в set, но мы проверяем БЕЗ -N в начальном состоянии).
+
+        Конкретнее: мокируем так, что -N НЕ добавляет цепочку (симуляция
+        того, что iptables молча проигнорировал команду). Тогда
+        _ipt_chain_exists() после -N всё равно вернёт False, и вся
+        функция должна вернуть False.
         """
         from chimera.modules import mtproto_stats
-        # Все проверки post-factum → False
-        fake_run = self._make_run_mock(
-            chain_exists_results={},  # цепочки не появились
-            jump_exists_results={},   # jump-правила не появились
-        )
-        with patch.object(mtproto_stats, "_run", fake_run), \
+        # Используем специальный mock где -N не работает (цепочки не
+        # добавляются в chains_exist).
+        from unittest.mock import MagicMock
+
+        def fake_run_no_create(cmd, capture=False, check=False):
+            cmd = list(cmd)
+            # iptables -L CHAIN -n → всегда returncode 1 (цепочки нет)
+            if len(cmd) >= 3 and cmd[0] == "iptables" and cmd[1] == "-L":
+                if "-n" in cmd and "-v" not in cmd:
+                    return MagicMock(returncode=1, stdout="", stderr="")
+                if "-v" in cmd and "-n" in cmd:
+                    return MagicMock(returncode=0, stdout=f"Chain {cmd[2]}\n",
+                                     stderr="")
+            # -N и все остальные → returncode 0, но состояние НЕ меняем
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch.object(mtproto_stats, "_run", fake_run_no_create), \
              self._patch_cron(), \
              patch.object(mtproto_stats, "_persist_accounting_rules",
                           return_value=None):
@@ -574,17 +674,16 @@ class TestSetupIptablesAccountingVerification(unittest.TestCase):
     def test_returns_true_when_all_chains_and_jumps_confirmed(self):
         """Сценарий: iptables-команды отработали И постфактум-верификация
         подтверждает существование цепочек и jump-правил → True.
+
+        Использует stateful mock: -N добавляет цепочку, -I добавляет
+        jump-правило, после чего _ipt_chain_exists/_ipt_jump_exists
+        подтверждают их наличие.
         """
         from chimera.modules import mtproto_stats
-        fake_run = self._make_run_mock(
-            chain_exists_results={
-                mtproto_stats.CHAIN_IN: True,
-                mtproto_stats.CHAIN_OUT: True,
-            },
-            jump_exists_results={
-                "INPUT": True,
-                "OUTPUT": True,
-            },
+        fake_run, _chains, _jumps = self._make_run_mock(
+            chains_exist=set(),  # начально пусто — -N создаст
+            initial_jumps={},     # начально пусто — -I создаст
+            proto_token="tcp",   # текстовый "tcp"
         )
         with patch.object(mtproto_stats, "_run", fake_run), \
              self._patch_cron(), \
@@ -593,6 +692,190 @@ class TestSetupIptablesAccountingVerification(unittest.TestCase):
             result = mtproto_stats.setup_iptables_accounting(8443)
         self.assertTrue(result,
                         "expected True when all chains and jumps confirmed")
+
+    # ── Тест 2b: полный успех с числовым "6" вместо "tcp" (как при -n) ──────
+    def test_returns_true_with_numeric_proto_token_from_dash_n(self):
+        """Тот же сценарий что тест 2, но с proto_token="6" — как реально
+        выводит `iptables -L -n` (IPPROTO_TCP = 6). Старый код ждал
+        буквально "tcp" и всегда возвращал False на этом выводе.
+        """
+        from chimera.modules import mtproto_stats
+        fake_run, _chains, _jumps = self._make_run_mock(
+            chains_exist=set(),
+            initial_jumps={},
+            proto_token="6",  # числовой IPPROTO_TCP
+        )
+        with patch.object(mtproto_stats, "_run", fake_run), \
+             self._patch_cron(), \
+             patch.object(mtproto_stats, "_persist_accounting_rules",
+                          return_value=None):
+            result = mtproto_stats.setup_iptables_accounting(8443)
+        self.assertTrue(result,
+                        "expected True with numeric proto token '6' from -n")
+
+    # ── Тест 3: регрессия — РЕАЛЬНЫЙ вывод с сервера (telemt dpt:5000) ──────
+    def test_recognizes_numeric_tcp_protocol_from_dash_n_output(self):
+        """Регрессия: -n делает протокол числовым (6 вместо tcp) — реальный
+        вывод с сервера fast-cheetah подтвердил, что jump-правило реально
+        стоит и работает (счётчики 119 пакетов / 15936 байт), но старый
+        код всегда возвращал False из-за строгого сравнения с "tcp".
+
+        Тест берёт реальную строку вывода один в один из диагностики
+        на сервере (не абстрактный пример), и убеждается что
+        _ipt_jump_exists распознаёт jump-правило.
+        """
+        from chimera.modules import mtproto_stats
+        from unittest.mock import MagicMock
+
+        # Реальный вывод с сервера (один в один из диагностики)
+        mock_output = (
+            "Chain INPUT (policy DROP 0 packets, 0 bytes)\n"
+            " pkts bytes target     prot opt in     out     source               destination\n"
+            "  119 15936 TELEMT_STATS_IN  6    --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:5000\n"
+        )
+
+        def fake_run(cmd, capture=False, check=False):
+            if len(cmd) >= 3 and cmd[0] == "iptables" and cmd[1] == "-L":
+                if "-v" in cmd and "-n" in cmd and cmd[2] == "INPUT":
+                    return MagicMock(returncode=0, stdout=mock_output, stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch.object(mtproto_stats, "_run", fake_run):
+            result = mtproto_stats._ipt_jump_exists(
+                "INPUT", mtproto_stats.CHAIN_IN, 5000, "dport")
+        self.assertTrue(result,
+                        "expected True for real server output with proto=6 "
+                        "and dpt:5000 — regression check for the -n numeric "
+                        "protocol bug")
+
+    # ── Тест 4: _ipt_remove_all_jumps с 3 дублями → 3 -D вызова ─────────────
+    def test_remove_all_jumps_with_three_duplicates_calls_D_three_times(self):
+        """Сценарий: в INPUT скопилось 3 дубля jump-правила на CHAIN_IN
+        (из-за ранней версии кода без -D, или ручного вмешательства).
+        _ipt_remove_all_jumps должен вызвать -D ровно 3 раза (не 1, не
+        бесконечно) и вернуть removed=3.
+        """
+        from chimera.modules import mtproto_stats
+
+        fake_run, _chains, jumps = self._make_run_mock(
+            chains_exist={mtproto_stats.CHAIN_IN, mtproto_stats.CHAIN_OUT},
+            initial_jumps={
+                ("INPUT", mtproto_stats.CHAIN_IN, 8443, "dport"): 3,
+            },
+            proto_token="tcp",
+        )
+        with patch.object(mtproto_stats, "_run", fake_run):
+            removed = mtproto_stats._ipt_remove_all_jumps(
+                "INPUT", mtproto_stats.CHAIN_IN, 8443, "dport")
+        self.assertEqual(removed, 3,
+                         f"expected removed=3 for 3 duplicates, got {removed}")
+        # Все 3 дубля удалены
+        self.assertEqual(jumps.get(("INPUT", mtproto_stats.CHAIN_IN, 8443, "dport"), 0), 0,
+                         "expected 0 jump-rules remaining after _ipt_remove_all_jumps")
+
+    # ── Тест 4b: _ipt_remove_all_jumps с 0 правил → 0 -D вызовов ────────────
+    def test_remove_all_jumps_with_zero_rules_calls_D_zero_times(self):
+        """Сценарий: jump-правил нет изначально. _ipt_remove_all_jumps
+        должен сразу выйти с removed=0, не делая ни одного -D.
+        """
+        from chimera.modules import mtproto_stats
+
+        fake_run, _chains, _jumps = self._make_run_mock(
+            chains_exist={mtproto_stats.CHAIN_IN, mtproto_stats.CHAIN_OUT},
+            initial_jumps={},  # ничего не установлено
+            proto_token="tcp",
+        )
+        with patch.object(mtproto_stats, "_run", fake_run):
+            removed = mtproto_stats._ipt_remove_all_jumps(
+                "INPUT", mtproto_stats.CHAIN_IN, 8443, "dport")
+        self.assertEqual(removed, 0,
+                         f"expected removed=0 for no rules, got {removed}")
+
+    # ── Тест 5: идемпотентность — два вызова → ровно одно jump-правило ──────
+    def test_setup_called_twleve_leaves_exactly_one_jump_rule(self):
+        """Интеграционный тест: setup_iptables_accounting() вызван ДВАЖДЫ
+        подряд (эмулируя два нажатия [3] в меню статистики). После
+        второго вызова в финальном состоянии (mock iptables -L -v -n)
+        присутствует РОВНО ОДНО jump-правило на CHAIN_IN, не два.
+
+        До фикса (одиночный -D перед -I) — если по какой-то причине
+        правило встретилось дважды, одно из дублей осталось, а после
+        -I добавилось ещё одно → копление с каждым нажатием [3].
+        После фикса (_ipt_remove_all_jumps с циклом до исчерпания) —
+        гарантированно 0 перед -I, ровно 1 после.
+        """
+        from chimera.modules import mtproto_stats
+
+        # Используем SHARED state между двумя вызовами — мок и jumps-словарь
+        # должны пережить первый вызов и передать состояние во второй.
+        fake_run, _chains, jumps = self._make_run_mock(
+            chains_exist=set(),
+            initial_jumps={},
+            proto_token="tcp",
+        )
+        with patch.object(mtproto_stats, "_run", fake_run), \
+             self._patch_cron(), \
+             patch.object(mtproto_stats, "_persist_accounting_rules",
+                          return_value=None):
+            # Первый вызов
+            result1 = mtproto_stats.setup_iptables_accounting(8443)
+            self.assertTrue(result1, "first call should succeed")
+            # Проверяем: ровно 1 jump-правило на CHAIN_IN после первого вызова
+            self.assertEqual(
+                jumps.get(("INPUT", mtproto_stats.CHAIN_IN, 8443, "dport"), 0),
+                1,
+                "after first call: exactly 1 INPUT jump-rule expected"
+            )
+            # Второй вызов (эмуляция повторного нажатия [3])
+            result2 = mtproto_stats.setup_iptables_accounting(8443)
+            self.assertTrue(result2, "second call should also succeed")
+            # Проверяем: ВСЁ ЕЩЁ ровно 1 jump-правило (не 2!)
+            self.assertEqual(
+                jumps.get(("INPUT", mtproto_stats.CHAIN_IN, 8443, "dport"), 0),
+                1,
+                "after second call: still exactly 1 INPUT jump-rule expected "
+                "(no duplication from repeated [3] presses)"
+            )
+            # То же для OUTPUT
+            self.assertEqual(
+                jumps.get(("OUTPUT", mtproto_stats.CHAIN_OUT, 8443, "sport"), 0),
+                1,
+                "after second call: still exactly 1 OUTPUT jump-rule expected"
+            )
+
+    # ── Тест 5b: идемпотентность с предсуществующими дублями ────────────────
+    def test_setup_cleans_up_preexisting_duplicates(self):
+        """Сценарий: до вызова в INPUT уже скопилось 3 jump-правила (из-за
+        ранней версии кода). setup_iptables_accounting должен все их
+        удалить через _ipt_remove_all_jumps и оставить ровно 1 после.
+        """
+        from chimera.modules import mtproto_stats
+
+        fake_run, _chains, jumps = self._make_run_mock(
+            chains_exist={mtproto_stats.CHAIN_IN, mtproto_stats.CHAIN_OUT},
+            initial_jumps={
+                ("INPUT", mtproto_stats.CHAIN_IN, 8443, "dport"): 3,
+                ("OUTPUT", mtproto_stats.CHAIN_OUT, 8443, "sport"): 2,
+            },
+            proto_token="tcp",
+        )
+        with patch.object(mtproto_stats, "_run", fake_run), \
+             self._patch_cron(), \
+             patch.object(mtproto_stats, "_persist_accounting_rules",
+                          return_value=None):
+            result = mtproto_stats.setup_iptables_accounting(8443)
+        self.assertTrue(result, "should succeed despite pre-existing duplicates")
+        # После вызова: ровно 1 (3 удалено, 1 добавлено)
+        self.assertEqual(
+            jumps.get(("INPUT", mtproto_stats.CHAIN_IN, 8443, "dport"), 0),
+            1,
+            "after setup with 3 preexisting duplicates: exactly 1 expected"
+        )
+        self.assertEqual(
+            jumps.get(("OUTPUT", mtproto_stats.CHAIN_OUT, 8443, "sport"), 0),
+            1,
+            "after setup with 2 preexisting duplicates: exactly 1 expected"
+        )
 
 
 if __name__ == "__main__":
