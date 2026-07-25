@@ -652,6 +652,152 @@ class TestImportOnlyUsersReachable(unittest.TestCase):
 
 
 # =============================================================================
+#  Regression tests: warn about server secrets in non-encrypted archive
+# =============================================================================
+class TestExportConfigWarnsAboutServerSecrets(unittest.TestCase):
+    """Регрессионные тесты на предупреждение о серверных секретах в
+    do_export_config() при encrypt=False И непустом результате
+    автообнаружения.
+
+    Покрывает 3 случая:
+      1. encrypt=False, _discovered непустой → warn ВЫЗВАН
+      2. encrypt=False, _discovered пустой   → warn НЕ вызван
+      3. encrypt=True,  _discovered непустой → warn НЕ вызван
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _run_do_export_config_with_spy(self, *, encrypt, discovered_paths,
+                                       allow_real_packaging=False):
+        """Запускает do_export_config(encrypt=encrypt) с замоканным
+        discover_backup_paths (возвращает discovered_paths) и spy на warn().
+
+        Возвращает список сообщений, переданных в warn() ДО того, как
+        функция дошла до реальной упаковки архива (которую мы обрываем
+        через StopIteration или SystemExit, чтобы не трогать /root/ и
+        tempfile).
+
+        Если allow_real_packaging=True — не обрываем, даём дойти до конца
+        (используется для проверки что warn вызывается в нужном порядке).
+        """
+        import chimera._core as core
+        import chimera.modules.backup_registry as br
+
+        # Spy на warn — собирает все вызовы
+        warn_calls: list[str] = []
+        original_warn = core.warn
+        def spy_warn(msg):
+            warn_calls.append(msg)
+            original_warn(msg)
+
+        # Мокаем discover_backup_paths в модуле backup_registry
+        # (do_export_config делает `from ... import discover_backup_paths`
+        # внутри функции, поэтому патчим сам атрибут модуля)
+        original_discover = br.discover_backup_paths
+        def fake_discover(*args, **kwargs):
+            return list(discovered_paths)
+        br.discover_backup_paths = fake_discover
+
+        # Чтобы не выполнять реальную упаковку (tempfile/tar/shutil.copy2
+        # в /root/xray-backup-*.tar.gz) — патчим TemporaryDirectory так,
+        # чтобы сразу бросить StopIteration (сигнал "достаточно, мы уже
+        # видели warn"). Это сработает ПОСЛЕ блока автообнаружения и
+        # ПОСЛЕ блока warn-о-секретах, но ДО реальной упаковки.
+        import tempfile as _tempfile_mod
+        original_TemporaryDirectory = _tempfile_mod.TemporaryDirectory
+        class _EarlyExitTemporaryDirectory:
+            def __init__(self, *a, **kw):
+                raise StopIteration("_early_exit_")
+            def __enter__(self, *a, **kw):
+                pass
+            def __exit__(self, *a, **kw):
+                pass
+
+        g = core.do_export_config.__globals__
+        g["warn"] = spy_warn
+        # _discovered инициализируется в самой функции — патчить не нужно
+
+        try:
+            with patch("chimera.modules.backup_registry.discover_backup_paths",
+                       fake_discover):
+                with patch("tempfile.TemporaryDirectory",
+                           _EarlyExitTemporaryDirectory):
+                    try:
+                        core.do_export_config(encrypt=encrypt)
+                    except StopIteration as _e:
+                        if str(_e) != "_early_exit_":
+                            raise
+                        # Нормальный early-exit — мы перехватили до tar.gz
+                    except Exception:
+                        # Любые другие ошибки от патчей / не-наших путей
+                        # — не интересны, нас волнует только warn_calls
+                        pass
+        finally:
+            g["warn"] = original_warn
+            br.discover_backup_paths = original_discover
+
+        return warn_calls
+
+    # ── 1. encrypt=False, _discovered непустой → warn ВЫЗВАН ─────────────────
+    def test_warn_called_when_encrypt_false_and_discovery_nonempty(self):
+        from pathlib import Path
+        # Создаём фейковые пути, которые "вернуло" автообнаружение
+        # (сами файлы могут не существовать — это ОК, мы обрываем до .exists())
+        fake_paths = [
+            (Path("/etc/telemt/telemt.toml"), "telemt/telemt.toml"),
+            (Path("/etc/caddy-naive/probe_secret"), "caddy-naive/probe_secret"),
+            (Path("/etc/xray/hysteria.key"), "hysteria/hysteria.key"),
+        ]
+        warn_calls = self._run_do_export_config_with_spy(
+            encrypt=False, discovered_paths=fake_paths,
+        )
+        # Среди warn-вызовов должен быть тот, что про серверные секреты
+        secrets_warns = [w for w in warn_calls
+                         if "серверные секреты" in w and "НЕ зашифрован" in w]
+        self.assertEqual(len(secrets_warns), 1,
+                         f"expected exactly 1 server-secrets warn, got "
+                         f"{len(secrets_warns)}: {secrets_warns}")
+        # Проверяем ключевые элементы текста
+        w = secrets_warns[0]
+        self.assertIn("MTProto/NaiveProxy/Hysteria2", w)
+        self.assertIn("TLS-ключи", w)
+        self.assertIn("приватный ключ", w)
+        # Упоминается количество путей (3 в нашем фейке)
+        self.assertIn("3", w)
+
+    # ── 2. encrypt=False, _discovered пустой → warn НЕ вызван ────────────────
+    def test_warn_NOT_called_when_encrypt_false_and_discovery_empty(self):
+        warn_calls = self._run_do_export_config_with_spy(
+            encrypt=False, discovered_paths=[],
+        )
+        # Не должно быть warn про серверные секреты
+        secrets_warns = [w for w in warn_calls
+                         if "серверные секреты" in w and "НЕ зашифрован" in w]
+        self.assertEqual(len(secrets_warns), 0,
+                         f"expected NO server-secrets warn when discovery is "
+                         f"empty, but got: {secrets_warns}")
+
+    # ── 3. encrypt=True, _discovered непустой → warn НЕ вызван ───────────────
+    def test_warn_NOT_called_when_encrypt_true_even_if_discovery_nonempty(self):
+        from pathlib import Path
+        fake_paths = [
+            (Path("/etc/telemt/telemt.toml"), "telemt/telemt.toml"),
+            (Path("/etc/xray/hysteria.key"), "hysteria/hysteria.key"),
+        ]
+        warn_calls = self._run_do_export_config_with_spy(
+            encrypt=True, discovered_paths=fake_paths,
+        )
+        # При encrypt=True предупреждения о секретах быть не должно —
+        # архив закрыт AES-256-CBC, не о чем волноваться.
+        secrets_warns = [w for w in warn_calls
+                         if "серверные секреты" in w and "НЕ зашифрован" in w]
+        self.assertEqual(len(secrets_warns), 0,
+                         f"expected NO server-secrets warn when encrypt=True, "
+                         f"but got: {secrets_warns}")
+
+
+# =============================================================================
 #  Integration test: end-to-end auto-discovery with real chimera.modules
 # =============================================================================
 class TestIntegrationWithRealModules(unittest.TestCase):
