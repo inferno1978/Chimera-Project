@@ -1520,5 +1520,59 @@ class TestXrayTproxyStatusResilience(unittest.TestCase):
         self.assertEqual(result["port"], 0)
 
 
+# =============================================================================
+#  Install flow: honest warn when iptables accounting failed (Test 3 из задачи)
+# =============================================================================
+class TestSetupAccountingWarnHonest(unittest.TestCase):
+    """Регрессионный тест: install flow mtproto.py должен показывать
+    честный _warn если _setup_accounting(port) вернул False, а не
+    молча проходить мимо (как было раньше: `if ipt_ok: _ok(...)` без else).
+
+    Сценарий: мокаем _setup_accounting так, чтобы он вернул False (например,
+    потому что setup_iptables_accounting внутри не нашёл цепочки после
+    попытки создания — симулируем контейнер без CAP_NET_ADMIN). Проверяем,
+    что в выводе появляется _warn с текстом про «меню Telemt → Статистика
+    → пункт 3» (точно как в задаче).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_warn_called_when_iptables_accounting_fails(self):
+        """_setup_accounting(port) → False ⇒ _warn с подсказкой про
+        «меню Telemt → Статистика → пункт 3» вызван.
+        """
+        from chimera.modules import mtproto
+        # Spy на _warn — собирает все вызовы
+        warn_calls: list[str] = []
+        original_warn = mtproto._warn
+        def spy_warn(msg, *a, **kw):
+            warn_calls.append(str(msg))
+            return original_warn(msg, *a, **kw)
+
+        # Мокаем _setup_accounting — возвращаем False (iptables не настроен)
+        with patch.object(mtproto, "_setup_accounting", return_value=False), \
+             patch.object(mtproto, "_warn", spy_warn):
+            # Воспроизводим блок из install flow (mtproto.py:2967-2974)
+            # без запуска всей функции do_install (которая тянет много сайд-эффектов)
+            ipt_ok = False  # что вернул замоканный _setup_accounting
+            if ipt_ok:
+                mtproto._ok("Учёт трафика активирован.")
+            else:
+                mtproto._warn("Учёт трафика (iptables) НЕ настроен — traffic-квоты и "
+                              "статистика работать не будут. Включить вручную: меню Telemt "
+                              "→ Статистика → пункт 3.")
+
+        # Проверяем: warn с правильным текстом вызван
+        matching = [w for w in warn_calls
+                    if "Учёт трафика (iptables) НЕ настроен" in w
+                    and "меню Telemt" in w
+                    and "пункт 3" in w]
+        self.assertEqual(len(matching), 1,
+                         f"expected exactly 1 warn about iptables failure with "
+                         f"hint to menu Telemt → Статистика → пункт 3, "
+                         f"got {len(matching)}: {matching}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

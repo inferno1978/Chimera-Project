@@ -1627,12 +1627,26 @@ root hard nofile 1048576
 #  IPTABLES ACCOUNTING (делегируем в mtproto_stats.py)
 # ══════════════════════════════════════════════════════════════════════════════
 def _setup_accounting(port: int) -> bool:
-    """Настраивает iptables-цепочки учёта. Возвращает True при успехе."""
+    """Настраивает iptables-цепочки учёта. Возвращает True при успехе.
+
+    Делегирует в mtproto_stats.setup_iptables_accounting(), которая теперь
+    САМА постфактум-верифицирует факт создания цепочек и jump-правил через
+    `iptables -L INPUT -v -n` / `iptables -L OUTPUT -v -n` (а не полагается
+    на успешный returncode `iptables -I` — он с check=False не бросает
+    исключений при провале, но и не гарантирует появления правила).
+
+    try/except оставлен только для реального импорт-сбоя (модуль
+    mtproto_stats недоступен) — это единственный случай, когда здесь может
+    возникнуть Python-уровневое исключение.
+    """
     try:
         from chimera.modules.mtproto_stats import setup_iptables_accounting
-        setup_iptables_accounting(port)
-        return True
-    except Exception:
+        return bool(setup_iptables_accounting(port))
+    except Exception as _e:
+        try:
+            _warn(f"_setup_accounting: import mtproto_stats failed: {_e}")
+        except Exception:
+            pass
         return False
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2952,7 +2966,12 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
 
     _info("Настройка учёта трафика (iptables)...")
     ipt_ok = _setup_accounting(port)
-    if ipt_ok: _ok("Учёт трафика активирован.")
+    if ipt_ok:
+        _ok("Учёт трафика активирован.")
+    else:
+        _warn("Учёт трафика (iptables) НЕ настроен — traffic-квоты и "
+              "статистика работать не будут. Включить вручную: меню Telemt "
+              "→ Статистика → пункт 3.")
 
     # ── КРИТИЧНЫЙ GUARD: nginx готов ДО старта Telemt? ──────────────────────
     # Если включён own-site режим (tls_emulation=true), Telemt при старте
