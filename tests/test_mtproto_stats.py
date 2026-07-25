@@ -461,5 +461,139 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(result["total"]["tx"], 12000)
 
 
+# =============================================================================
+#  setup_iptables_accounting: постфактум-верификация (Test 1, 2 из задачи)
+# =============================================================================
+class TestSetupIptablesAccountingVerification(unittest.TestCase):
+    """Проверка что setup_iptables_accounting() реально верифицирует факт
+    создания цепочек и jump-правил, а не возвращает всегда True.
+
+    До фикса функция возвращала None (implicit) и не проверяла результат —
+    все iptables-команды идут с check=False и не бросают исключений при
+    провале. Поэтому mtproto._setup_accounting() почти никогда не падал
+    через try/except, и установщик рапортовал «Учёт трафика активирован»
+    даже когда цепочки физически не создались (контейнер без CAP_NET_ADMIN,
+    ядро без netfilter, iptables-nft vs iptables-legacy конфликт, и т.п.).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        # Патчим CRON_FILE чтобы не трогать реальный /etc/cron.d/
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cron = self._tmpdir / "telemt-stats"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_cron(self):
+        return patch("chimera.modules.mtproto_stats.CRON_FILE", self._cron)
+
+    def _make_run_mock(self, *, chain_exists_results: dict = None,
+                       jump_exists_results: dict = None):
+        """Создаёт mock для _run.
+
+        chain_exists_results: {chain_name: bool} — что вернёт
+            iptables -L chain -n (returncode 0 = exists).
+        jump_exists_results: {parent_chain: bool} — что вернёт
+            iptables -L INPUT/OUTPUT -v -n (returncode 0 = OK, stdout
+            парсится _ipt_jump_exists).
+
+        Для команд -N/-I/-D/-F/-A/-Z просто возвращаем success.
+        """
+        from unittest.mock import MagicMock
+        from chimera.modules.mtproto_stats import CHAIN_IN, CHAIN_OUT
+
+        chain_exists_results = chain_exists_results or {}
+        jump_exists_results = jump_exists_results or {}
+
+        # Карта: parent → (target_chain, port_label)
+        # INPUT → CHAIN_IN, dport (входящий — destination port)
+        # OUTPUT → CHAIN_OUT, sport (исходящий — source port)
+        parent_map = {
+            "INPUT":  (CHAIN_IN,  "dpt"),
+            "OUTPUT": (CHAIN_OUT, "spt"),
+        }
+
+        def fake_run(cmd, capture=False, check=False):
+            # Определяем тип команды по первым аргументам
+            if len(cmd) >= 3 and cmd[0] == "iptables" and cmd[1] == "-L":
+                chain_or_parent = cmd[2]
+                # Команда вида: iptables -L CHAIN -n  (проверка существования)
+                if "-n" in cmd and "-v" not in cmd:
+                    exists = chain_exists_results.get(chain_or_parent, False)
+                    return MagicMock(returncode=0 if exists else 1,
+                                     stdout="chain" if exists else "",
+                                     stderr="")
+                # Команда вида: iptables -L INPUT -v -n  (для jump-проверки)
+                if "-v" in cmd and "-n" in cmd:
+                    ok = jump_exists_results.get(chain_or_parent, False)
+                    if not ok:
+                        return MagicMock(returncode=1, stdout="", stderr="")
+                    # Возвращаем stdout с jump-правилом, чтобы _ipt_jump_exists
+                    # его распарсил. Формат: pkts bytes target prot opt in out
+                    # source destination ... dpt:PORT / spt:PORT
+                    port = 8443
+                    target, port_label = parent_map.get(
+                        chain_or_parent, (chain_or_parent, "dpt"))
+                    line = (f"  0  0  {target}  "
+                            f"tcp  --  *  *  0.0.0.0/0  0.0.0.0/0  "
+                            f"tcp {port_label}:{port}")
+                    return MagicMock(returncode=0,
+                                     stdout=f"Chain {chain_or_parent}\n{line}\n",
+                                     stderr="")
+            # Все остальные команды (-N/-I/-D/-F/-A/-Z, netfilter-persistent,
+            # iptables-save) — возвращаем успех, не делаем ничего реально.
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return fake_run
+
+    # ── Тест 1: chains+jumps "успешно" создались, но _ipt_chain_exists
+    #    возвращает False → функция должна вернуть False ─────────────────────
+    def test_returns_false_when_chains_did_not_actually_appear(self):
+        """Сценарий: iptables -N/-I отработали с returncode 0, но цепочки
+        реально не появились (например, контейнер без CAP_NET_ADMIN
+        молча игнорирует команды). Постфактум-верификация должна это
+        поймать и вернуть False, а не True.
+        """
+        from chimera.modules import mtproto_stats
+        # Все проверки post-factum → False
+        fake_run = self._make_run_mock(
+            chain_exists_results={},  # цепочки не появились
+            jump_exists_results={},   # jump-правила не появились
+        )
+        with patch.object(mtproto_stats, "_run", fake_run), \
+             self._patch_cron(), \
+             patch.object(mtproto_stats, "_persist_accounting_rules",
+                          return_value=None):
+            result = mtproto_stats.setup_iptables_accounting(8443)
+        self.assertFalse(result,
+                         "expected False when chains did not actually appear")
+
+    # ── Тест 2: полный успех — chains+jumps подтверждаются → True ───────────
+    def test_returns_true_when_all_chains_and_jumps_confirmed(self):
+        """Сценарий: iptables-команды отработали И постфактум-верификация
+        подтверждает существование цепочек и jump-правил → True.
+        """
+        from chimera.modules import mtproto_stats
+        fake_run = self._make_run_mock(
+            chain_exists_results={
+                mtproto_stats.CHAIN_IN: True,
+                mtproto_stats.CHAIN_OUT: True,
+            },
+            jump_exists_results={
+                "INPUT": True,
+                "OUTPUT": True,
+            },
+        )
+        with patch.object(mtproto_stats, "_run", fake_run), \
+             self._patch_cron(), \
+             patch.object(mtproto_stats, "_persist_accounting_rules",
+                          return_value=None):
+            result = mtproto_stats.setup_iptables_accounting(8443)
+        self.assertTrue(result,
+                        "expected True when all chains and jumps confirmed")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

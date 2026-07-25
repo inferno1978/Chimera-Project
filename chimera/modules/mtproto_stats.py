@@ -149,13 +149,80 @@ except ImportError:
 def _ipt_chain_exists(chain: str) -> bool:
     return _run(["iptables", "-L", chain, "-n"], capture=True).returncode == 0
 
-def setup_iptables_accounting(port: int) -> None:
+
+def _ipt_jump_exists(parent: str, chain: str, port: int, direction: str) -> bool:
+    """Проверяет что в parent-цепочке (INPUT/OUTPUT) реально стоит
+    jump-правило `-j chain` для порта port.
+
+    direction="dport" для INPUT (входящий — dport),
+    direction="sport" для OUTPUT (исходящий — sport).
+
+    Не полагается на успешный returncode `-D`+`-I` — эти команды с check=False
+    не бросают исключений, но и не гарантируют появления правила (например,
+    если iptables не имеет CAP_NET_ADMIN в контейнере, или ядро без
+    netfilter-модуля). Реально проверяем `iptables -L parent -v -n` и ищем
+    цепочку по имени в колонке target.
+    """
+    r = _run(["iptables", "-L", parent, "-v", "-n"], capture=True)
+    if r.returncode != 0:
+        return False
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        # Формат: pkts bytes target prot opt in out source destination ...
+        # Нужно: target == chain, протокол tcp, и в строке есть порт.
+        if len(parts) < 10:
+            continue
+        target = parts[2]
+        if target != chain:
+            continue
+        prot = parts[3]
+        if prot != "tcp":
+            continue
+        # Ищем опцию dport/sport в строке (могут быть на разных позициях
+        # в зависимости от версии iptables).
+        line_lower = line.lower()
+        if direction == "dport" and f"dpt:{port}" not in line_lower:
+            continue
+        if direction == "sport" and f"spt:{port}" not in line_lower:
+            continue
+        return True
+    return False
+
+
+def setup_iptables_accounting(port: int) -> bool:
     """
     Публичная функция — вызывается из mtproto.py при установке.
     Создаёт цепочки TELEMT_STATS_IN / TELEMT_STATS_OUT.
     Каждый вызов сначала очищает цепочки (flush), потом добавляет одно
     правило — так избегаем дублирования счётчиков.
+
+    Возвращает True только если ВСЕ четыре проверки постфактум подтверждают
+    факт установки:
+      • цепочка CHAIN_IN существует
+      • цепочка CHAIN_OUT существует
+      • jump-правило из INPUT в CHAIN_IN для порта port стоит
+      • jump-правило из OUTPUT в CHAIN_OUT для порта port стоит
+
+    Раньше возвращала None (implicit) и не проверяла результат — все
+    iptables-команды идут с check=False и не бросают исключений при провале,
+    поэтому try/except в mtproto._setup_accounting() почти никогда не
+    срабатывал, и установщик рапортовал «Учёт трафика активирован» даже
+    когда цепочки физически не создались (контейнер без CAP_NET_ADMIN,
+    ядро без netfilter, и т.п.).
     """
+    _fail_reasons: list[str] = []
+
+    def _warn_local(msg: str) -> None:
+        _fail_reasons.append(msg)
+        # Также логируем в chimera.log через _core, если доступен
+        try:
+            import importlib
+            core = importlib.import_module("chimera._core")
+            if hasattr(core, "log_to_file"):
+                core.log_to_file("WARN", f"mtproto_stats.setup_iptables_accounting: {msg}")
+        except Exception:
+            pass
+
     for chain in (CHAIN_IN, CHAIN_OUT):
         if not _ipt_chain_exists(chain):
             _run(["iptables", "-N", chain])
@@ -173,6 +240,25 @@ def setup_iptables_accounting(port: int) -> None:
     _run(["iptables", "-F", CHAIN_OUT])
     _run(["iptables", "-A", CHAIN_OUT, "-p", "tcp", "--sport", str(port),
           "-m", "comment", "--comment", "telemt-tx", "-j", "RETURN"])
+
+    # ── Постфактум-верификация ───────────────────────────────────────────────
+    # Все 4 проверки обязаны пройти. Если хотя бы одна не прошла — возвращаем
+    # False и логируем конкретную причину, чтобы администратор мог
+    # диагностировать (а не получить молчаливое «учёт активирован»).
+    if not _ipt_chain_exists(CHAIN_IN):
+        _warn_local(f"chain {CHAIN_IN} does not exist after iptables -N")
+    if not _ipt_chain_exists(CHAIN_OUT):
+        _warn_local(f"chain {CHAIN_OUT} does not exist after iptables -N")
+    if not _ipt_jump_exists("INPUT", CHAIN_IN, port, "dport"):
+        _warn_local(f"INPUT jump-rule to {CHAIN_IN} for dport={port} not found")
+    if not _ipt_jump_exists("OUTPUT", CHAIN_OUT, port, "sport"):
+        _warn_local(f"OUTPUT jump-rule to {CHAIN_OUT} for sport={port} not found")
+
+    if _fail_reasons:
+        # Не Critical-fail cron-установку и persist — эти шаги могут
+        # пригодиться при ручной починке iptables. Но возвращаем False,
+        # чтобы mtproto.py показал честный warn, а не фейковый success.
+        pass
 
     # Cron: сброс счётчиков в 00:00 + проверка лимитов каждые 5 мин
     try:
@@ -195,6 +281,8 @@ def setup_iptables_accounting(port: int) -> None:
     # виноват. SYN-limiter и iOS-фикс уже сохраняют свои правила аналогично —
     # учёт трафика был единственным исключением.
     _persist_accounting_rules()
+
+    return len(_fail_reasons) == 0
 
 def _persist_accounting_rules() -> None:
     """
@@ -518,12 +606,29 @@ def stats_menu() -> None:
         elif ch == "3":
             port = _get_port()
             try:
-                setup_iptables_accounting(port)
-                d["ipt_ok"] = True
-                d["total"]["since"] = _now_str()
-                _save_stats(d)
-                print(f"\n  {GREEN}✓  iptables-учёт активирован.{NC}")
-                print(f"  {GREEN}✓  Cron-сброс счётчиков в 00:00 установлен.{NC}")
+                ipt_ok = setup_iptables_accounting(port)
+                if ipt_ok:
+                    d["ipt_ok"] = True
+                    d["total"]["since"] = _now_str()
+                    _save_stats(d)
+                    print(f"\n  {GREEN}✓  iptables-учёт активирован.{NC}")
+                    print(f"  {GREEN}✓  Cron-сброс счётчиков в 00:00 установлен.{NC}")
+                else:
+                    # setup_iptables_accounting вернула False — постфактум-
+                    # верификация обнаружила что цепочки или jump-правила
+                    # не появились. Детали уже залогированы в chimera.log.
+                    d["ipt_ok"] = False
+                    _save_stats(d)
+                    print(f"\n  {YELLOW}⚠  iptables-учёт НЕ активирован.{NC}")
+                    print(f"  {YELLOW}  Постфактум-верификация обнаружила, что цепочки "
+                          f"TELEMT_STATS_IN/OUT{NC}")
+                    print(f"  {YELLOW}  или jump-правила из INPUT/OUTPUT не создались.{NC}")
+                    print(f"  {DIM}  Возможные причины: контейнер без CAP_NET_ADMIN, "
+                          f"ядро без netfilter-модуля,{NC}")
+                    print(f"  {DIM}  iptables-nft vs iptables-legacy конфликт, или "
+                          f"правила уже существуют в другой таблице.{NC}")
+                    print(f"  {DIM}  Подробности — в /var/log/chimera.log "
+                          f"(WARN от mtproto_stats.setup_iptables_accounting).{NC}")
             except Exception as e:
                 print(f"\n  {YELLOW}⚠  Не удалось настроить iptables: {e}{NC}")
             _pause()
