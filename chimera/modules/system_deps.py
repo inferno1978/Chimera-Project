@@ -224,6 +224,47 @@ def _smart_recover(exc: FileNotFoundError) -> bool:
 
     tb_str = _tb.format_exc()
 
+    # ── СУЖЕНИЕ ОБЛАСТИ СРАБАТЫВАНИЯ APT-GET ВЕТКИ ────────────────────────────
+    # FileNotFoundError кидается не только при отсутствии системной команды,
+    # но и при попытке прочитать/записать несуществующий файл (например,
+    # shutil.copy2 в несуществующую поддиректорию). В этом случае missing_cmd
+    # — это имя ФАЙЛА (telemt.toml, server.json, ...), а не команда.
+    # Предлагать "apt-get install telemt.toml" — бессмысленно и сбивает с толку.
+    #
+    # Эвристика: если missing_cmd не входит в _CMD_TO_PKG (справочник известных
+    # системных команд) И имеет расширение, не характерное для исполняемых
+    # файлов — считаем это файловой ошибкой, а не отсутствием пакета.
+    _FILE_EXT_HINTS = (
+        ".toml", ".json", ".txt", ".service", ".crt", ".key",
+        ".yaml", ".yml", ".pem", ".conf", ".cfg", ".ini", ".env",
+        ".sock", ".socket", ".log", ".db", ".sqlite",
+    )
+    _looks_like_file = (
+        missing_cmd
+        and missing_cmd not in _CMD_TO_PKG
+        and any(missing_cmd.lower().endswith(ext) for ext in _FILE_EXT_HINTS)
+    )
+    if _looks_like_file:
+        # Это FileNotFoundError по ФАЙЛУ, а не по команде. Не предлагаем
+        # apt-get install — это не поможет и только запутает пользователя.
+        print()
+        print(f"{RED}{'═'*64}{NC}")
+        print(f"{RED}  💥 ОШИБКА ФАЙЛОВОЙ СИСТЕМЫ: {BOLD}{missing_cmd}{NC}")
+        print(f"{RED}{'═'*64}{NC}")
+        print(f"{DIM}  Файл или директория не найдены — это не связано с "
+              f"отсутствующим системным пакетом.{NC}")
+        print()
+        print(f"{DIM}  Трассировка:{NC}")
+        for line in tb_str.strip().splitlines()[-6:]:
+            print(f"  {DIM}{line}{NC}")
+        print()
+        log_to_file("ERROR",
+                    f"FileNotFoundError (file-system): '{missing_cmd}' "
+                    f"(not a known system command, no apt-get recovery)")
+        log_to_file("ERROR", tb_str)
+        return False
+
+    # ── СТАНДАРТНАЯ ВЕТКА: похоже на отсутствующую системную команду ──────────
     print()
     print(f"{RED}{'═'*64}{NC}")
     print(f"{RED}  💥 КОМАНДА НЕ НАЙДЕНА: {BOLD}{missing_cmd or '?'}{NC}")
