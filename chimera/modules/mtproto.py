@@ -1343,12 +1343,24 @@ def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
           "-m", "owner", "--uid-owner", "999", "-j", "RETURN"], capture=True)
     _run(["iptables", "-t", "nat", "-I", "OUTPUT", "1",
           "-m", "owner", "--uid-owner", "999", "-j", "RETURN"])
-    # Исключение 2: ME-серверы Telegram на порту 8888 не должны попадать под REDIRECT
-    # (нужно для работы use_middle_proxy=true в каскадной схеме)
-    _run(["iptables", "-t", "nat", "-D", "OUTPUT",
-          "-p", "tcp", "--dport", "8888", "-j", "RETURN"], capture=True)
-    _run(["iptables", "-t", "nat", "-I", "OUTPUT", "2",
-          "-p", "tcp", "--dport", "8888", "-j", "RETURN"])
+    # Исключение 2: ME-серверы Telegram на портах 8888 и 80 не должны
+    # попадать под REDIRECT (нужно для работы use_middle_proxy=true в
+    # каскадной схеме). Telemt сам делает RPC handshake к ME-серверам
+    # на :8888 (основной ME-порт) и :80 (health-check / fallback).
+    # Без этого исключения REDIRECT перехватывает трафик к ME → xray
+    # отдаёт plain TCP вместо MTProto-handshake → ME-pool не поднимается
+    # → "me runtime ready: OFF" → fallback в Direct Mode.
+    #
+    # Применяем к ОБЕИМ таблицам: iptables (IPv4) и ip6tables (IPv6),
+    # т.к. ME-серверы доступны и по IPv4 (91.108.x.x, 149.154.x.x),
+    # и по IPv6 (2001:67c:4e8::, 2001:b28:f23d::, и т.д.).
+    for _ipt in ("iptables", "ip6tables"):
+        for _me_port in ("8888", "80"):
+            _run([_ipt, "-t", "nat", "-D", "OUTPUT",
+                  "-p", "tcp", "--dport", _me_port, "-j", "RETURN"],
+                 capture=True)
+            _run([_ipt, "-t", "nat", "-I", "OUTPUT",
+                  "-p", "tcp", "--dport", _me_port, "-j", "RETURN"])
     tg_nets = _TG_NETS_current()
     failed = [net for net in tg_nets if not _ipt_add_redirect(net, port)]
     _iptables_persist()
@@ -1389,6 +1401,17 @@ def xray_disable_tproxy_for_telemt() -> tuple:
 
     for net in _TG_NETS_current():
         _ipt_del_redirect(net, port or XRAY_TPROXY_PORT)
+
+    # Удаляем исключения для ME-портов (:8888, :80) — больше не нужны
+    # без REDIRECT. Обе таблицы (iptables + ip6tables).
+    for _ipt in ("iptables", "ip6tables"):
+        for _me_port in ("8888", "80"):
+            _run([_ipt, "-t", "nat", "-D", "OUTPUT",
+                  "-p", "tcp", "--dport", _me_port, "-j", "RETURN"],
+                 capture=True)
+    # Удаляем исключение для UID 999 (xray)
+    _run(["iptables", "-t", "nat", "-D", "OUTPUT",
+          "-m", "owner", "--uid-owner", "999", "-j", "RETURN"], capture=True)
 
     _iptables_persist()
 
