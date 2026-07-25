@@ -933,32 +933,56 @@ class TestExportConfigHandlesNestedDestNames(unittest.TestCase):
                 return
             return original_path_chmod(self_p, *a, **kw)
 
+        # Патчим stat архива. do_export_config после создания архива
+        # вызывает archive_path.stat().st_size для вывода размера —
+        # archive_path это Path("/root/xray-backup-<ts>.tar.gz"), который
+        # физически никогда не существует (запись перенаправлена в tmpdir
+        # через fake_tarfile_open). Без этого мока Path.stat() падает с
+        # FileNotFoundError (если /root/ недоступен) или PermissionError
+        # (если /root/ существует но не читаем), и тест фейлится с
+        # вводящим в заблуждение сообщением про nested dest_name, хотя
+        # production-код уже корректен.
+        original_path_stat = Path.stat
+        def fake_path_stat(self_p, *a, **kw):
+            s = str(self_p)
+            if s.startswith("/root/") and s.endswith(".tar.gz"):
+                # Возвращаем stat перенаправленного архива в tmpdir —
+                # он действительно существует (его создал fake_tarfile_open)
+                redirected = self._tmpdir / "test-export.tar.gz"
+                if redirected.exists():
+                    return original_path_stat(redirected, *a, **kw)
+                # fallback: возвращаем пустой stat_result (размер 0)
+                import os as _os
+                return _os.stat_result((0o600, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            return original_path_stat(self_p, *a, **kw)
+
         # Патчим getpass (encrypt=False — не нужен, но на всякий случай)
         # и input (чтобы тест не зависал)
         try:
             with patch.object(core.shutil, "copy2", spy_copy2):
                 with patch.object(_tarfile_mod, "open", fake_tarfile_open):
                     with patch.object(Path, "chmod", fake_path_chmod):
-                        with patch("builtins.input", return_value=""):
-                            try:
-                                core.do_export_config(encrypt=False)
-                            except SystemExit:
-                                pass
-                            except FileNotFoundError as e:
-                                # Если упало — это и есть bug, тест должен фейлиться
-                                self.fail(
-                                    f"do_export_config raised FileNotFoundError "
-                                    f"with nested dest_name — bug not fixed: {e}"
-                                )
-                            except Exception as e:
-                                # Прочие исключения (например, info-вывод
-                                # и логирование) — не интересны, главный
-                                # критерий: НЕ FileNotFoundError на copy2
-                                if "copy2" in str(e).lower() or "telemt" in str(e).lower():
+                        with patch.object(Path, "stat", fake_path_stat):
+                            with patch("builtins.input", return_value=""):
+                                try:
+                                    core.do_export_config(encrypt=False)
+                                except SystemExit:
+                                    pass
+                                except FileNotFoundError as e:
+                                    # Если упало — это и есть bug, тест должен фейлиться
                                     self.fail(
-                                        f"Unexpected error related to copy2/nested "
-                                        f"dest_name: {type(e).__name__}: {e}"
+                                        f"do_export_config raised FileNotFoundError "
+                                        f"with nested dest_name — bug not fixed: {e}"
                                     )
+                                except Exception as e:
+                                    # Прочие исключения (например, info-вывод
+                                    # и логирование) — не интересны, главный
+                                    # критерий: НЕ FileNotFoundError на copy2
+                                    if "copy2" in str(e).lower() or "telemt" in str(e).lower():
+                                        self.fail(
+                                            f"Unexpected error related to copy2/nested "
+                                            f"dest_name: {type(e).__name__}: {e}"
+                                        )
         finally:
             g["EXPORT_INCLUDE"] = original_export_include
             br.discover_backup_paths = original_discover
