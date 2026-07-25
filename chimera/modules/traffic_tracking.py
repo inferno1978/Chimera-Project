@@ -105,6 +105,113 @@ def _query_user_traffic_bytes(email: str) -> int:
     return total
 
 
+# =============================================================================
+#  МУЛЬТИ-ПРОТОКОЛЬНЫЙ ДИСПЕТЧЕР ТРАФИКА
+# =============================================================================
+#: Поддерживаемые протоколы для диспетчеризации. Каждый протокол должен иметь
+#: свой собственный механизм чтения per-user трафика (см. query_user_traffic_bytes).
+SUPPORTED_PROTOCOLS_FOR_QUERY = frozenset({
+    "xray", "vless",       # VLESS/Reality через Xray Stats API (синонимы)
+    "mtproto", "telemt",   # Telemt через mtproto_stats._load_stats (собственный baseline)
+    "mieru",               # mieru_stats.mieru_get_traffic_accumulated
+    "naiveproxy",          # naiveproxy_stats.naiveproxy_get_traffic_accumulated
+    "awg",                 # awg_peers.awg_get_peer_traffic_accumulated
+    # "trusttunnel" — aggregate-only (нет per-user breakdown), не включаем
+})
+
+
+def query_user_traffic_bytes(identifier: str, protocol: str) -> int:
+    """Единый диспетчер: возвращает накопленный трафик пользователя по
+    идентификатору в зависимости от протокола.
+
+    ДО этой функции traffic_tracking._query_user_traffic_bytes() жёстко
+    ходил в Xray Stats API по паттерну user>>>{email}>>>traffic — у
+    пользователей telemt / mieru / naiveproxy / awg нет такого объекта в
+    Xray (они не заведены как xray "user", даже если их трафик физически
+    идёт через dokodemo-door tproxy для telemt). В результате TUI
+    дневного трафика (traffic_history.py) показывал 0 для всех
+    не-VLESS протоколов.
+
+    Диспетчер НЕ дублирует логику, которая уже есть в каждом протокольном
+    модуле — только диспетчеризация:
+
+      • protocol == "xray"/"vless" → текущий путь (Xray Stats API),
+        ВНИМАНИЕ: возвращает RAW-счётчик (сбрасывается при restart xray).
+        Для accumulated-значения используйте query_user_traffic_bytes_accumulated().
+      • protocol == "mtproto"/"telemt" → mtproto._get_user_traffic_bytes(username),
+        собственный baseline в mtproto_stats._load_stats().
+      • protocol == "mieru" → mieru_stats.mieru_get_traffic_accumulated(username)
+      • protocol == "naiveproxy" → naiveproxy_stats.naiveproxy_get_traffic_accumulated(username)
+      • protocol == "awg" → awg_peers.awg_get_peer_traffic_accumulated(owner_email)
+
+    Args:
+      identifier: идентификатор пользователя в пространстве протокола:
+        email для VLESS/AWG, username для mtproto/mieru/naiveproxy.
+      protocol: один из SUPPORTED_PROTOCOLS_FOR_QUERY.
+
+    Returns:
+      int — accumulated bytes (или 0 если протокол не установлен,
+      данные недоступны, или произошла ошибка — НЕ бросает исключение).
+    """
+    p = (protocol or "").lower().strip()
+
+    if p in ("xray", "vless"):
+        return _query_user_traffic_bytes(identifier)
+
+    if p in ("mtproto", "telemt"):
+        try:
+            from chimera.modules.mtproto import _get_user_traffic_bytes
+            return int(_get_user_traffic_bytes(identifier))
+        except Exception:
+            return 0
+
+    if p == "mieru":
+        try:
+            from chimera.modules.mieru_stats import mieru_get_traffic_accumulated
+            return int(mieru_get_traffic_accumulated(identifier))
+        except Exception:
+            return 0
+
+    if p == "naiveproxy":
+        try:
+            from chimera.modules.naiveproxy_stats import naiveproxy_get_traffic_accumulated
+            return int(naiveproxy_get_traffic_accumulated(identifier))
+        except Exception:
+            return 0
+
+    if p == "awg":
+        try:
+            from chimera.modules.awg_peers import awg_get_peer_traffic_accumulated
+            return int(awg_get_peer_traffic_accumulated(identifier))
+        except Exception:
+            return 0
+
+    # Неизвестный протокол — возвращаем 0, не бросаем исключение.
+    # Вызывающий код (snapshot/TUI) не должен ронять из-за одного протокола.
+    return 0
+
+
+def query_user_traffic_bytes_accumulated(identifier: str, protocol: str) -> int:
+    """Накопленная версия диспетчера — переживает рестарт сервиса.
+
+    Для VLESS использует traffic_accounting.record_traffic_sample() с
+    baseline-offset (тот же механизм что и
+    _query_user_traffic_bytes_accumulated(email)).
+
+    Для остальных протоколов — у них собственный baseline уже встроен
+    (mtproto через _load_stats, mieru/naiveproxy/awg через
+    traffic_accounting с своим protocol-namespace). Просто возвращаем
+    то, что отдаёт query_user_traffic_bytes().
+    """
+    p = (protocol or "").lower().strip()
+
+    if p in ("xray", "vless"):
+        return _query_user_traffic_bytes_accumulated(identifier)
+
+    # Для остальных протоколов — их собственный accumulated уже встроен.
+    return query_user_traffic_bytes(identifier, protocol)
+
+
 def _query_user_traffic_bytes_accumulated(email: str) -> int:
     """
     Возвращает накопленный трафик пользователя с защитой от сброса счётчика

@@ -2,6 +2,104 @@
 
 ---
 
+## FIX(traffic+mtproto): Telemt не считал трафик в TUI + latent-баг iptables-accounting + multi-protocol диспетчер трафика — 26 июля 2026
+
+**На реальной entry-ноде в РФ (маршрутизация через xray tproxy) обнаружено: Telemt не считает трафик ни в реальном времени, ни по дням, ни после принудительного обновления. Корневых причин две, обе латентные — чиним одной задачей, без бампа версии.**
+
+### Подпроблема 1: iptables-цепочки учёта никогда реально не создавались, но установщик рапортовал успех
+
+`mtproto_stats.setup_iptables_accounting(port)` делала ~8 вызовов `_run(["iptables", ...])` все с `check=False` — ни одна команда не бросает исключение при провале. Функция ничего не возвращала (implicit `None`) и не проверяла результат постфактум. `mtproto._setup_accounting()` оборачивал её в `try/except Exception: return False` — но раз iptables-команды не бросают исключений, этот `except` почти никогда не срабатывал по реальной причине (например, цепочки не появились). Отсюда «✓ Учёт трафика активирован» при установке, даже когда цепочки физически не создались (контейнер без CAP_NET_ADMIN, ядро без netfilter-модуля, iptables-nft vs iptables-legacy конфликт, и т.п.).
+
+**Фикс:** `setup_iptables_accounting(port) -> bool` теперь после всех iptables-команд делает **постфактум-верификацию** 4-мя проверками:
+1. `_ipt_chain_exists(CHAIN_IN)` — цепочка существует.
+2. `_ipt_chain_exists(CHAIN_OUT)` — цепочка существует.
+3. `_ipt_jump_exists("INPUT", CHAIN_IN, port, "dport")` — jump-правило из INPUT в CHAIN_IN для dport=port реально стоит (парсится `iptables -L INPUT -v -n`, ищется target=chain + tcp + dpt:port).
+4. `_ipt_jump_exists("OUTPUT", CHAIN_OUT, port, "sport")` — то же для OUTPUT.
+
+Возвращает `True` только если все 4 проверки прошли. Иначе — `False` + конкретная причина в `chimera.log` (WARN от `mtproto_stats.setup_iptables_accounting`).
+
+`mtproto._setup_accounting(port) -> bool` — упрощён, `try/except` оставлен только для реального импорт-сбоя (модуль `mtproto_stats` недоступен), возвращает то, что реально вернула `setup_iptables_accounting(port)`.
+
+Install flow (`mtproto.py:2967-2974`) — добавлена `else`-ветка: при `ipt_ok=False` выводится `_warn` с текстом «Учёт трафика (iptables) НЕ настроен — traffic-квоты и статистика работать не будут. Включить вручную: меню Telemt → Статистика → пункт 3.».
+
+`stats_menu()` пункт `[3]` (строка 606-634) — тоже теперь показывает честный результат: при `ipt_ok=False` печатает «⚠ iptables-учёт НЕ активирован. Постфактум-верификация обнаружила, что цепочки TELEMT_STATS_IN/OUT или jump-правила из INPUT/OUTPUT не создались.» + возможные причины + ссылку на `chimera.log`.
+
+### Подпроблема 2: Telemt (и mieru/naiveproxy/awg) отсутствовали в дневном TUI трафика
+
+`traffic_tracking._query_user_traffic_bytes(email)` жёстко ходил в Xray Stats API по паттерну `user>>>{email}>>>traffic` — у telemt-пользователей нет такого объекта в Xray (они не заведены как xray "user", даже несмотря на то что их трафик физически идёт через dokodemo-door tproxy). `traffic_history._traffic_snapshot_save()` перебирал только `core._users_load()` = `users.json` (VLESS-only) — про telemt/mieru/naiveproxy/awg пользователей не знал вообще.
+
+**Проверка гипотезы** (см. `SUPPORTED_PROTOCOLS` в `traffic_accounting.py`): разрыв подтвердился для всех 4 не-VLESS протоколов с per-user трафиком (trusttunnel — aggregate-only, без per-user breakdown, осознанно не включён). Чиним одним заходом.
+
+**Фикс — единый диспетчер** `traffic_tracking.query_user_traffic_bytes(identifier, protocol) -> int`:
+- `protocol="xray"/"vless"` → `_query_user_traffic_bytes(email)` (Xray Stats API, как раньше).
+- `protocol="mtproto"/"telemt"` → `mtproto._get_user_traffic_bytes(username)` (собственный baseline в `mtproto_stats._load_stats`).
+- `protocol="mieru"` → `mieru_stats.mieru_get_traffic_accumulated(username)`.
+- `protocol="naiveproxy"` → `naiveproxy_stats.naiveproxy_get_traffic_accumulated(username)`.
+- `protocol="awg"` → `awg_peers.awg_get_peer_traffic_accumulated(owner_email)`.
+
+Диспетчер НЕ дублирует логику per-protocol модулей — только диспетчеризация. Никогда не бросает исключение (ошибка → 0), чтобы snapshot/TUI не ронять из-за одного протокола. Также добавлена accumulated-версия `query_user_traffic_bytes_accumulated(identifier, protocol)` — для VLESS использует `traffic_accounting.record_traffic_sample()` с baseline-offset, для остальных протоколов просто возвращает то, что отдаёт их собственный механизм (у них baseline уже встроен).
+
+**`_traffic_snapshot_save()` расширена** — теперь помимо VLESS перебирает:
+- Telemt — `mtproto._load_users()` → ключ `mtproto::{username}_max`
+- Mieru — `mieru._MODULE_STATE.users` → ключ `mieru::{username}_max`
+- NaiveProxy — `naiveproxy._load_users()` → ключ `naiveproxy::{username}_max`
+- AWG Standalone — `awgs_state.peers` → ключ `awg::{owner_email}_max`
+
+Ключи с `proto::` prefix — чтобы избежать коллизий со старыми VLESS-ключами `{email}_max` (обратно совместимо). TrustTunnel намеренно НЕ включён — aggregate-only. Каждый протокол обёрнут в `try/except` с DEBUG-логом, чтобы один недоступный протокол не ронял весь снимок.
+
+**`do_traffic_history()` TUI** — обновлён, чтобы показывать не только VLESS-emails из `_users_load()`, но и все ключи `<proto>::<id>_max` из `history.json`. Берёт топ-5 пользователей по суммарному трафику за период (раньше — первые 5 emails), чтобы график не перегружался (>5 цветов нет).
+
+**Cron-скрипт** `/usr/local/bin/xray-traffic-snapshot.sh` — раньше содержал инлайн-реализацию опроса Xray Stats API (VLESS-only). Теперь делегирует в проектную функцию `_traffic_snapshot_save()`, что убирает дублирование и автоматически подключает все протоколы. PYTHONPATH=`/opt/chimera` (canonical install path, см. `trusttunnel.py:149`).
+
+### Регрессионные тесты
+
+`tests/test_mtproto_stats.py` — новый класс `TestSetupIptablesAccountingVerification` (2 теста):
+1. `test_returns_false_when_chains_did_not_actually_appear` — iptables -N/-I «успешно» (returncode 0), но `_ipt_chain_exists()` после этого возвращает False → функция возвращает False, не True.
+2. `test_returns_true_when_all_chains_and_jumps_confirmed` — полный успех (chains+jumps подтверждаются) → True.
+
+`tests/test_mtproto.py` — новый класс `TestSetupAccountingWarnHonest` (1 тест):
+3. `test_warn_called_when_iptables_accounting_fails` — `ipt_ok=False` → `_warn` с текстом про «меню Telemt → Статистика → пункт 3» вызван (spy на `_warn`).
+
+`tests/test_traffic_dispatcher.py` — **новый файл** (14 тестов):
+4. `test_mtproto_protocol_uses_mtproto_get_user_traffic_bytes` — `query_user_traffic_bytes("alice", "mtproto")` → вызывает `mtproto._get_user_traffic_bytes`, НЕ Xray Stats API.
+5. `test_telemt_user_appears_in_snapshot` — telemt-пользователь появляется в `history.json` с ключом `mtproto::{username}_max`.
+6. `test_mieru_user_appears_in_snapshot`, `test_naiveproxy_user_appears_in_snapshot`, `test_awg_peer_appears_in_snapshot` — аналогично для mieru/naiveproxy/awg (разрыв подтверждён — чиним для всех 4).
+- Плюс синонимы (`vless`→`xray`, `telemt`→`mtproto`), failure-кейсы (mtproto бросает → 0), unknown-protocol → 0, VLESS регрессия (старый ключ `{email}_max` сохранён).
+
+### DO NOT TOUCH (по требованию задачи)
+
+- `mtproto_stats._collect()` / `_read_chain_bytes()` — внутренняя механика чтения iptables-счётчиков уже верна, не трогаем.
+- `traffic_accounting.py` — ядро уже работает правильно для awg/mieru/naiveproxy/trusttunnel, не переделываем.
+- `mtproto_stats._accounting_active()` — readonly-проверка существования цепочек, оставлена как есть.
+
+### Изменённые файлы
+
+- `chimera/modules/mtproto_stats.py` — `setup_iptables_accounting() -> bool` с постфактум-верификацией; новый `_ipt_jump_exists()`; `stats_menu()` пункт `[3]` показывает честный результат.
+- `chimera/modules/mtproto.py` — `_setup_accounting()` упрощён; install flow — `else`-ветка с `_warn`.
+- `chimera/modules/traffic_tracking.py` — новые `query_user_traffic_bytes(identifier, protocol)` + `query_user_traffic_bytes_accumulated(identifier, protocol)` + `SUPPORTED_PROTOCOLS_FOR_QUERY`.
+- `chimera/modules/traffic_history.py` — `_traffic_snapshot_save()` мультипротокольная; `do_traffic_history()` показывает всех пользователей из `history.json`; `_install_traffic_snapshot_cron()` делегирует в проектную функцию.
+- `tests/test_mtproto_stats.py` — +2 теста (iptables verification).
+- `tests/test_mtproto.py` — +1 тест (install warn).
+- `tests/test_traffic_dispatcher.py` — **новый**, 14 тестов (dispatcher + snapshot).
+
+### Тесты
+
+- `tests/test_mtproto_stats.py` — все PASS (включая +2 новых)
+- `tests/test_mtproto.py` — все PASS (включая +1 новый)
+- `tests/test_traffic_dispatcher.py` — 14/14 PASS (новый файл)
+- Регрессия: `tests/test_mtproto*.py` + `test_traffic_*.py` — **271/271 PASS**
+- `full_test.py` — **10/10 PASS**, проект готов к релизу
+
+### Совместимость
+
+Полностью обратно совместимо:
+1. Старые ключи `{email}_max` в `history.json` продолжают работать (VLESS-пользователи не теряют историю).
+2. `_query_user_traffic_bytes(email)` (без protocol-аргумента) сохранена — cron-скрипты и старый код работают как раньше.
+3. `setup_iptables_accounting(port)` теперь возвращает `bool`, но старый вызов `setup_iptables_accounting(port)` без проверки возвращаемого значения всё ещё работает (как раньше — просто игнорирует результат).
+4. Cron-скрипт `/usr/local/bin/xray-traffic-snapshot.sh` будет переписан при следующем вызове `_install_traffic_snapshot_cron()` (через меню "История трафика → [1] Включить сбор снимков"). До этого старая VLESS-only версия продолжает работать.
+
+---
+
 ## FEAT(backup): единая АВТОМАТИЧЕСКИ РАСШИРЯЕМАЯ система бэкапа/восстановления всех протоколов + починка недостижимого «импорта только пользователей» — 25 июля 2026
 
 ### Постановка проблемы
