@@ -5437,7 +5437,14 @@ def do_export_config(encrypt: bool = False) -> None:
 
         for src, dest_name in _export_list:
             if src.exists():
-                shutil.copy2(src, tmp / dest_name)
+                dest_path = tmp / dest_name
+                # dest_name теперь может быть вложенным ("telemt/telemt.toml",
+                # "etc/systemd/system/mita.service", и т.д. — arcname из
+                # discover_backup_paths). Создаём parent-директорию,
+                # иначе shutil.copy2 упадёт с FileNotFoundError.
+                # (migration.py::do_full_migration_export делает так же.)
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest_path)
                 copied.append(dest_name)
                 dim(f"  + {dest_name}")
             else:
