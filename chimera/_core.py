@@ -5398,10 +5398,11 @@ def do_export_config(encrypt: bool = False) -> None:
         pass
 
     # ── АВТООБНАРУЖЕНИЕ протоколов через backup_registry ──────────────────────
-    # Все卫星-протоколы (Telemt, Mieru, NaiveProxy, FPTN, TrustTunnel,
+    # Все спутниковые протоколы (Telemt, Mieru, NaiveProxy, FPTN, TrustTunnel,
     # sing-box семейство, AWG Standalone, Hysteria2, и любые будущие)
     # добавляют свой get_backup_paths() — здесь НИКАКИХ изменений не нужно
     # при появлении нового протокола. Это и есть APPEND-FREE дизайн.
+    _discovered: list = []
     try:
         from chimera.modules.backup_registry import discover_backup_paths
         _discovered = discover_backup_paths()
@@ -5411,6 +5412,24 @@ def do_export_config(encrypt: bool = False) -> None:
     except Exception as _e:
         warn(f"  Автообнаружение протоколов не удалось: {_e}")
         warn(f"  (статический список EXPORT_INCLUDE остаётся в силе)")
+
+    # ── ПРЕДУПРЕЖДЕНИЕ О СЕРВЕРНЫХ СЕКРЕТАХ В НЕЗАШИФРОВАННОМ АРХИВЕ ───────────
+    # Если архив НЕ шифруется (encrypt=False) И автообнаружение реально что-то
+    # нашло — предупреждаем пользователя, что теперь в архиве лежат не только
+    # VLESS/Reality/geo/AWG-Cascade, но и серверные секреты спутниковых
+    # протоколов (MTProto-secret, NaiveProxy probe-secret, Hysteria2 TLS-key
+    # и т.д. — задокументировано в get_backup_paths() каждого модуля).
+    # При encrypt=True архив закрыт AES-256-CBC — предупреждать не о чем.
+    # При пустом _discovered ничего сверх старого списка нет — предупреждать
+    # тоже не о чем (архив как раньше, до ввода автообнаружения).
+    if not encrypt and _discovered:
+        warn(f"  ⚠ Архив НЕ зашифрован, но содержит серверные секреты "
+             f"{len(_discovered)} доп. протоколов (MTProto/NaiveProxy/"
+             f"Hysteria2 и др., если установлены) — TLS-ключи и "
+             f"pre-shared секреты, без которых протокол не поднять "
+             f"заново. Храните архив как приватный ключ. Для передачи "
+             f"куда-либо — используйте шифрованный экспорт (пункт "
+             f"«Экспорт с шифрованием»).")
 
     with tempfile.TemporaryDirectory(prefix="xray_export_") as tmpdir:
         tmp = Path(tmpdir)
