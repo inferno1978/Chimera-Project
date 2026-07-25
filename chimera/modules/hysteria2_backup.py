@@ -146,16 +146,56 @@ def h2_backup_cleanup(keep: int = 5) -> int:
 
 def h2_backup_include_in_main() -> list[str]:
     """
-    Возвращает список путей для включения в основной бэкап проекта.
-    Вызывается из _core.py в do_backup() без изменения существующей логики.
+    DEPRECATED — мёртвый код (нет ни одного вызова из _core.py или других
+    модулей, найдено только self-reference в этом же файле). Сохранён как
+    заглушку-делегат к новому get_backup_paths() для обратной совместимости
+    на случай, если сторонний код/патчи всё ещё импортируют эту функцию.
+
+    ВАЖНО: используйте get_backup_paths() — он возвращает кортежи
+    (Path, arcname) вместо голых строк, что соответствует конвенции
+    chimera.modules.backup_registry.
     """
-    paths = []
-    for f in _H2_FILES:
-        if f.exists():
-            paths.append(str(f))
-    if H2_CONFIG_DIR.exists():
-        paths.append(str(H2_CONFIG_DIR))
-    return paths
+    return [str(p) for p, _ in get_backup_paths()]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  УЧАСТИЕ В ОБЩЕМ БЭКАПЕ (единая автообнаружаемая система chimera.modules.backup_registry)
+# ══════════════════════════════════════════════════════════════════════════════
+# У Hysteria2 уже есть собственный полнофункциональный бэкап-модуль
+# (h2_backup_create / h2_backup_restore / do_h2_backup_menu в этом же файле),
+# который вызывается из меню Hysteria2. Здесь — ТОЛЬКО список путей для
+# ЕДИНОГО бэкапа всего проекта, чтобы пользователь по привычке нажавший
+# "Экспорт всего" в главном меню получил H2-конфиги в общем архиве тоже.
+# Дублирования логики нет — только пути.
+def get_backup_paths() -> list[tuple[Path, str]]:
+    """Возвращает [(реальный_путь, имя_в_архиве), ...] — всё необходимое для
+    восстановления Hysteria2 БЕЗ переиздания пользовательских секретов.
+
+    Файлы:
+      • /etc/hysteria/config.yaml — основной конфиг Hysteria2 (порт, obfs,
+        masquerade-настройки). Серверный password хранится в нём, но это
+        серверный секрет — без него протокол не запустится; не путать с
+        клиентскими паролями, которых у Hysteria2 нет в смысле отдельных
+        кред (используется общий серверный password).
+      • /etc/xray/hysteria.crt и /etc/xray/hysteria.key — серверный TLS-cert.
+      • /etc/systemd/system/hysteria-server.service — systemd unit.
+
+    State (секция hysteria2 в /var/lib/xray-installer/state.json) не
+    дублируем — он включается в общий бэкап отдельной записью state.json
+    на уровне EXPORT_INCLUDE в _core.py.
+
+    Пустой список если Hysteria2 не установлен. Никогда не бросает исключение.
+    """
+    try:
+        candidates = [
+            (H2_CONFIG_FILE,                                                       "hysteria/config.yaml"),
+            (H2_CERT_FILE,                                                        "hysteria/hysteria.crt"),
+            (H2_KEY_FILE,                                                         "hysteria/hysteria.key"),
+            (Path("/etc/systemd/system/hysteria-server.service"),                 "etc/systemd/system/hysteria-server.service"),
+        ]
+        return [(p, arcname) for p, arcname in candidates if p.exists()]
+    except Exception:
+        return []
 
 
 # ── Миграционный скрипт AWG → H2 ─────────────────────────────────────────────

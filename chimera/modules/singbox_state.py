@@ -358,3 +358,51 @@ def singbox_state_get_binary_path() -> str:
 
 def singbox_state_get_config_path() -> str:
     return singbox_state_load().get("config_path", str(SINGBOX_CONFIG_FILE))
+
+
+# ── Участие в общем бэкапе ────────────────────────────────────────────────────
+def get_backup_paths() -> list[tuple[Path, str]]:
+    """Возвращает [(реальный_путь, имя_в_архиве), ...] — всё необходимое для
+    восстановления sing-box backend (ShadowTLS / AnyTLS / TUIC / Trojan /
+    VLESS-WS-CDN) БЕЗ переиздания пользовательских паролей/UUID.
+
+    Файлы:
+      • /var/lib/xray-installer/singbox_state.json — state со всеми
+        параметрами inbound'ов (порты, handshake-серверы, cert_path/key_path
+        для anytls/tuic). Без него восстановление невозможно.
+      • /etc/sing-box/config.json — сгенерированный конфиг (можно
+        пересоздать из state, но для надёжности сохраняем).
+      • /etc/sing-box/certs/*.crt и *.key — self-signed сертификаты для
+        anytls/tuic (сохранив их, экономим регенерацию и сохраняем
+        fingerprint'ы клиентов; cert_sha256 в state останется валидным).
+
+    Не включаем сами пользовательские пароли/UUID — они уже В state.json
+    в виде открытого текста, но это конфигурация сервера, без которой
+    протокол не запустится. Пользовательские креды в смысле "клиентских
+    секретов" — это ссылки/QR, которые генерируются из state отдельно.
+
+    Пустой список если sing-box не установлен (state-файл отсутствует).
+    Никогда не бросает исключение.
+    """
+    try:
+        candidates = [
+            (SINGBOX_STATE_FILE,  "singbox/singbox_state.json"),
+            (SINGBOX_CONFIG_FILE, "singbox/config.json"),
+        ]
+        result = [(p, arcname) for p, arcname in candidates if p.exists()]
+
+        # Сертификаты — отдельным циклом, потому что их может быть несколько
+        # и они опциональны (для shadowtls/vless_ws_cdn их нет по дизайну).
+        cert_dir = SINGBOX_CONFIG_FILE.parent / "certs"
+        if cert_dir.is_dir():
+            for cert_file in cert_dir.iterdir():
+                if not cert_file.is_file():
+                    continue
+                if cert_file.suffix in (".crt", ".key", ".pem"):
+                    result.append(
+                        (cert_file, f"singbox/certs/{cert_file.name}")
+                    )
+
+        return result
+    except Exception:
+        return []
