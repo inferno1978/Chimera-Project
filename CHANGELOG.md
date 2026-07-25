@@ -230,6 +230,70 @@ restore из общего архива.
 
 ---
 
+## FIX(backup+deps): стабилизация после FEAT(backup) — mkdir parent-директории перед copy2 + сужение _smart_recover + warn о серверных секретах в нешифрованном архиве — 25 июля 2026
+
+**После внедрения единой автообнаружаемой системы бэкапа (FEAT(backup) выше) вскрылись три проблемы, ни одна из которых не была выявлена в первоначальном анализе. Все три исправлены в этот же день отдельными коммитами `f9738b1`, `fad93cb`, `bbf7831` — без бампа версии, как добавочная стабилизация к существующей фиче.**
+
+### Коммит `f9738b1` — убираем иероглиф из комментария + добавляем warn о серверных секретах
+
+**Подпроблема 1: артефакт LLM-генерации.** В `chimera/_core.py` в комментарии к блоку автообнаружения в `do_export_config()` затесался китайский иероглиф: «Все**卫星**-протоколы» вместо «Все **спутниковые** протоколы» (как корректно написано в `migration.py` с того же коммита). grep по всем 13 правленным файлам на диапазон CJK `\u4e00-\u9fff` (а также по более широким CJK Extension A/B, корейскому, японскому, FFxx) — других артефактов не найдено, ликвидирован только один.
+
+**Подпроблема 2: пользователь не предупреждён о попадании серверных секретов в нешифрованный архив.** `get_backup_paths()` у `mtproto.py` / `naiveproxy.py` / `hysteria2_backup.py` осознанно включает файлы с серверными секретами (`telemt.toml` — MTProto secret, `probe_secret` — naiveproxy anti-probing secret, `hysteria.key` — приватный TLS-ключ) — без них протокол не восстановить, это задокументировано в докстрингах. Но после ввода автообнаружения эти файлы стали автоматически попадать и в `encrypt=False` архив (пункт `[3] Стандартный экспорт` в `_menu_migration()`) — раньше туда входили только VLESS/Reality/geo/AWG-Cascade.
+
+**Фикс:** после блока автообнаружения в `do_export_config()` добавлен условный `warn()`, который срабатывает ТОЛЬКО когда `encrypt=False` И `_discovered` непустой. Текст предупреждает: «Архив НЕ зашифрован, но содержит серверные секреты N доп. протоколов (MTProto/NaiveProxy/Hysteria2 и др.) — TLS-ключи и pre-shared секреты, без которых протокол не поднять заново. Храните архив как приватный ключ. Для передачи куда-либо — используйте шифрованный экспорт». Переменная `_discovered` инициализируется `[]` перед `try` — поэтому warn-блок корректно работает даже если импорт `backup_registry` упал с исключением.
+
+Не выводится, если `_discovered` пустой (архив как раньше, не о чем предупредить) или `encrypt=True` (архив закрыт AES-256-CBC).
+
+Логика `get_backup_paths()` в протокол-модулях НЕ пересматривается — решение включать туда серверные секреты осознанное и задокументированное. Меняется только то, что пользователь ТЕПЕРЬ явно предупреждён при экспорте без шифрования.
+
+### Коммит `fad93cb` — латентный баг `shutil.copy2` на вложенных arcname + сужение `_smart_recover()`
+
+**Подпроблема 3: latent-баг, вскрытый коммитом `8a4e93c`.** `get_backup_paths()` впервые в этом коде возвращает arcname с вложенностью — `"telemt/telemt.toml"`, `"mita/server.json"`, `"etc/systemd/system/mita.service"`, и т.д. Старый статический `EXPORT_INCLUDE` состоял только из плоских имён, поэтому цикл `shutil.copy2(src, tmp / dest_name)` работал — директория `tmp` уже существовала как сама временная папка. С появлением вложенных arcname `shutil.copy2` стал падать с `FileNotFoundError`, потому что поддиректория `tmp/telemt/` не существовала. Баг был латентным в `EXPORT_INCLUDE` и проявился только после ввода автообнаружения.
+
+**Фикс в `chimera/_core.py::do_export_config()`:** перед `shutil.copy2` добавлен `dest_path.parent.mkdir(parents=True, exist_ok=True)`. Аналогичный цикл в `migration.py::do_full_migration_export()` проверен — там `mkdir(parents=True, exist_ok=True)` уже присутствовал с самого начала (строка 167), фикс не нужен.
+
+**Подпроблема 4: `_smart_recover()` давал неверную диагностику на FileNotFoundError от файлов.** Механизм `_smart_recover` в `chimera/modules/system_deps.py` ловит `FileNotFoundError` вокруг `main_menu()` в `main.py` и предлагает установку недостающих пакетов. Но `FileNotFoundError` кидается не только при отсутствии системной команды — но и при попытке прочитать/записать несуществующий файл. До этого фикса случай из подпроблемы 3 (где `shutil.copy2` упал на `mita/server.json`) получал совершенно неверную диагностику: `_smart_recover` доставал `basename` «server.json», не находил его в `_CMD_TO_PKG`, но всё равно показывал «КОМАНДА НЕ НАЙДЕНА / apt-get install server.json» — что бессмысленно и сбивало с толку.
+
+**Фикс в `chimera/modules/system_deps.py::_smart_recover()`:** после извлечения `missing_cmd` добавлена предварительная проверка. Если `missing_cmd` НЕ входит в `_CMD_TO_PKG` (справочник известных системных команд) И имеет расширение из `_FILE_EXT_HINTS` (`.toml` / `.json` / `.txt` / `.service` / `.crt` / `.key` / `.yaml` / `.yml` / `.pem` / `.conf` / `.cfg` / `.ini` / `.env` / `.sock` / `.socket` / `.log` / `.db` / `.sqlite`) — печатаем «ОШИБКА ФАЙЛОВОЙ СИСТЕМЫ: <name>» + «Файл или директория не найдены — это не связано с отсутствующим системным пакетом» + traceback, возвращаем `False` (НЕ пытаемся `apt-get install`).
+
+Реальные отсутствующие команды (`curl`, `xray`, ...) — старая ветка `apt-get install` работает как раньше, поведение НЕ изменилось. Сам механизм `_smart_recover` как «поймать `FileNotFoundError` вокруг `main_menu()`» в `main.py` не переделывается, только сужается область срабатывания apt-get-ветки.
+
+### Коммит `bbf7831` — починка собственного регрессионного теста на вложенный arcname
+
+Тест `test_nested_dest_name_does_not_raise` (созданный в `fad93cb`) падал в средах где `/root/` недоступен (`FileNotFoundError` на `archive_path.stat()`), хотя production-код уже корректен. Причина: `do_export_config()` после `tarfile.open` вызывает `archive_path.stat().st_size` для вывода размера — `archive_path` это `Path("/root/xray-backup-<ts>.tar.gz")`, который физически не существует (запись перенаправлена в `tmpdir` через `fake_tarfile_open`, `chmod` пропущен через `fake_path_chmod`, но `.stat()` не был замокан).
+
+Фикс: добавлен `fake_path_stat` по образцу `fake_path_chmod` — для путей `/root/xray-backup-*.tar.gz` возвращает `os.stat_result` перенаправленного файла в `tmpdir`. `with patch.object(Path, "stat", fake_path_stat)` добавлен на том же уровне вложенности, что и `patch.object(Path, "chmod", ...)`, не отдельным блоком.
+
+**Regression-catch верификация** (доказывает, что тест ловит реальный баг, а не проходит «случайно»):
+1. С фиксом: тест проходит (42/42 PASS в `test_backup_registry.py`).
+2. Временное удаление `dest_path.parent.mkdir(...)` в `_core.py`: тест **детерминированно падает** с корректным сообщением «parent dir `/tmp/xray_export_xxx/mita` does not exist when `copy2` is called with nested dest_name — bug not fixed» — spy на `shutil.copy2` ловит отсутствие parent-директории.
+3. После возврата `mkdir`: тест снова проходит.
+
+### Изменённые файлы
+
+- `chimera/_core.py` — убран иероглиф; добавлен `warn()` о серверных секретах; добавлен `dest_path.parent.mkdir(parents=True, exist_ok=True)` перед `shutil.copy2` в `do_export_config()`
+- `chimera/modules/system_deps.py` — `_smart_recover()` сужен: для `FileNotFoundError` с filename-расширением из `_FILE_EXT_HINTS` печатает «ОШИБКА ФАЙЛОВОЙ СИСТЕМЫ» и возвращает `False` без `apt-get install`
+- `tests/test_backup_registry.py` — новый класс `TestExportConfigWarnsAboutServerSecrets` (3 теста на warn о секретах); новый класс `TestExportConfigHandlesNestedDestNames` (1 тест на вложенный arcname, с правильно замоканными `Path.stat()` и `Path.chmod()`)
+- `tests/test_system_deps.py` — новый класс `TestSmartRecoverFilesystemError` (7 тестов: 5 на файловые расширения + 2 на реальные команды)
+
+### Тесты
+
+- `tests/test_backup_registry.py` — **33/33 PASS** (29 из `8a4e93c` + 3 warn-теста из `f9738b1` + 1 nested-dest-name из `fad93cb`/`bbf7831`)
+- `tests/test_system_deps.py` — **9/9 PASS** (2 старых + 7 новых)
+- Регрессия на 13 затронутых модулях (`migration`/`awg_backup`/`config_backup`/`awg_standalone`/`hysteria2_backup`/`singbox_state`/`fptn`/`trusttunnel`/`naiveproxy`/`mieru`/`mtproto` + `system_deps`) — **402/402 PASS**
+- `full_test.py` — **10/10 PASS**, проект готов к релизу
+
+### Совместимость
+
+Полностью обратно совместимо. Изменения затрагивают только:
+1. Пользовательский вывод при `do_export_config(encrypt=False)` с непустым автообнаружением — появляется дополнительное `warn()` (раньше его не было).
+2. Поведение `_smart_recover()` на `FileNotFoundError` с файловыми расширениями — теперь печатает «ОШИБКА ФАЙЛОВОЙ СИСТЕМЫ» вместо «КОМАНДА НЕ НАЙДЕНА / apt-get install» (раньше вводящее в заблуждение поведение).
+3. Внутреннюю логику `do_export_config()` — добавлен `mkdir(parents=True, exist_ok=True)`, ранее падавший с `FileNotFoundError` на вложенных arcname.
+
+Старые архивы (`xray-backup-*.tar.gz`, `xray-migration-*.tar.gz.enc`) продолжают восстанавливаться без изменений. Новые архивы корректно собираются со всеми спутниковыми протоколами и вложенной структурой путей внутри tar'а.
+
+---
+
 ## REFACTOR(geo): эталонный хэш ОДИН РАЗ через короткий приоритетный список — 24 июля 2026
 
 **Полная замена логики SHA256-верификации геофайлов. Старая `_verify_checksum()` удалена, заменена на `_fetch_reference_hash()` + прямое сравнение в цикле. Это закрывает класс багов «цирка с геофайлами», который мучил несколько дней: установка падала на SHA256-mismatch, emergency fallback не работал, _verify_checksum перебирал все 19 зеркал заново для каждого .dat-кандидата.**
