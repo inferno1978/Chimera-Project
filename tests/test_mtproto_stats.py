@@ -1062,5 +1062,184 @@ class TestSetupIptablesAccountingVerification(unittest.TestCase):
         )
 
 
+# =============================================================================
+#  Диагностика Telemt API (для панели telemt_panel)
+# =============================================================================
+class TestDiagnoseTelemtApiForPanel(unittest.TestCase):
+    """Тесты на diagnose_telemt_api_for_panel() — диагностика почему Telemt
+    Panel может показывать 0 traffic / 0 connections, хотя TUI Chimera
+    видит трафик через iptables-цепочки.
+
+    Покрывает:
+      1. _telemt_api_section_configured — распознаёт [server.api] секцию
+         в telemt.toml (или её отсутствие / enabled=false).
+      2. diagnose_telemt_api_for_panel — собирает рекомендации когда
+         что-то не настроено.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg = self._tmpdir / "telemt.toml"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_cfg(self):
+        return patch("chimera.modules.mtproto_stats.CONFIG_FILE", self._cfg)
+
+    # ── _telemt_api_section_configured ──────────────────────────────────────
+    def test_section_configured_returns_true_when_enabled(self):
+        from chimera.modules import mtproto_stats
+        self._cfg.write_text(
+            "[server]\nport = 5000\n\n"
+            "[server.api]\n"
+            "enabled = true\n"
+            'listen = "127.0.0.1:9091"\n'
+            'auth_header = "abc123"\n'
+        )
+        with self._patch_cfg():
+            ok, detail = mtproto_stats._telemt_api_section_configured()
+        self.assertTrue(ok)
+        self.assertIn("включена", detail)
+
+    def test_section_configured_returns_false_when_section_absent(self):
+        from chimera.modules import mtproto_stats
+        self._cfg.write_text("[server]\nport = 5000\n")
+        with self._patch_cfg():
+            ok, detail = mtproto_stats._telemt_api_section_configured()
+        self.assertFalse(ok)
+        self.assertIn("отсутствует", detail)
+
+    def test_section_configured_returns_false_when_enabled_is_false(self):
+        from chimera.modules import mtproto_stats
+        self._cfg.write_text(
+            "[server.api]\n"
+            "enabled = false\n"
+            'listen = "127.0.0.1:9091"\n'
+        )
+        with self._patch_cfg():
+            ok, detail = mtproto_stats._telemt_api_section_configured()
+        self.assertFalse(ok)
+        self.assertIn("enabled=false", detail)
+
+    def test_section_configured_returns_false_when_no_config_file(self):
+        from chimera.modules import mtproto_stats
+        # _cfg не существует (не создаём)
+        with self._patch_cfg():
+            ok, detail = mtproto_stats._telemt_api_section_configured()
+        self.assertFalse(ok)
+        self.assertIn("не найден", detail)
+
+    # ── diagnose_telemt_api_for_panel ────────────────────────────────────────
+    def test_diagnose_returns_recommendations_when_section_missing(self):
+        """Если [server.api] нет в telemt.toml — diagnose возвращает
+        рекомендацию включить секцию.
+        """
+        from chimera.modules import mtproto_stats
+        self._cfg.write_text("[server]\nport = 5000\n")
+        # Мокаем что telemt не запущен, чтобы не делать реальный HTTP-запрос
+        mock_run = MagicMock()
+        mock_run.return_value = MagicMock(returncode=3, stdout="inactive", stderr="")
+        with self._patch_cfg(), \
+             patch.object(mtproto_stats, "_run", mock_run):
+            diag = mtproto_stats.diagnose_telemt_api_for_panel()
+        self.assertFalse(diag["api_section_configured"])
+        self.assertTrue(len(diag["recommendations"]) > 0)
+        # Должна быть рекомендация про [server.api]
+        api_recs = [r for r in diag["recommendations"] if "[server.api]" in r]
+        self.assertTrue(len(api_recs) > 0,
+                        f"expected recommendation about [server.api], got: {diag['recommendations']}")
+
+    def test_diagnose_includes_uptime_when_telemt_recently_restarted(self):
+        """Если telemt перезапущен недавно (< 10 мин) — diagnose включает
+        рекомендацию про обнуление счётчиков.
+
+        Использует реальный /proc/uptime (он есть на любой Linux-системе).
+        systemctl show возвращает ActiveEnterTimestampMonotonic = 60s назад
+        в микросекундах, а /proc/uptime > 60 — поэтому telemt_uptime будет
+        > 0 и < 600 → рекомендация появится.
+        """
+        from chimera.modules import mtproto_stats
+        import os
+        # Пропускаем если /proc/uptime недоступен (не Linux)
+        if not os.path.exists("/proc/uptime"):
+            self.skipTest("/proc/uptime not available (non-Linux)")
+
+        self._cfg.write_text(
+            "[server.api]\nenabled = true\nlisten = \"127.0.0.1:9091\"\n"
+        )
+        # systemctl show → telemt запущен 60s назад
+        def fake_run(cmd, capture=False, check=False):
+            cmd = list(cmd)
+            if "is-active" in cmd:
+                return MagicMock(returncode=0, stdout="active\n", stderr="")
+            # 'show' в cmd + 'ActiveEnterTimestampMonotonic' как substring
+            # в любом элементе (--property=ActiveEnterTimestampMonotonic)
+            if "show" in cmd and any("ActiveEnterTimestampMonotonic" in x for x in cmd):
+                # Текущий uptime системы из /proc/uptime минус 60 секунд,
+                # чтобы симулировать что telemt запущен 60s назад.
+                with open("/proc/uptime") as f:
+                    sys_uptime = float(f.read().split()[0])
+                enter_mono_us = int((sys_uptime - 60) * 1_000_000)
+                return MagicMock(returncode=0,
+                                 stdout=f"ActiveEnterTimestampMonotonic={enter_mono_us}\n",
+                                 stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with self._patch_cfg(), \
+             patch.object(mtproto_stats, "_run", fake_run), \
+             patch.object(mtproto_stats, "_telemt_api_probe",
+                          return_value=(True, "API отвечает", {})):
+            diag = mtproto_stats.diagnose_telemt_api_for_panel()
+        self.assertGreater(diag["telemt_uptime_sec"], 0)
+        self.assertLess(diag["telemt_uptime_sec"], 600)
+        # Должна быть рекомендация про обнуление счётчиков
+        uptime_recs = [r for r in diag["recommendations"] if "обнуляются при рестарте" in r]
+        self.assertTrue(len(uptime_recs) > 0,
+                        f"expected uptime recommendation, got: {diag['recommendations']}")
+
+    def test_diagnose_adds_build_profile_recommendation_when_all_ok(self):
+        """Когда всё настроено (секция есть, API отвечает, uptime большой),
+        diagnose добавляет рекомендацию про build profile и upstream telemt.
+        """
+        from chimera.modules import mtproto_stats
+        import os
+        if not os.path.exists("/proc/uptime"):
+            self.skipTest("/proc/uptime not available (non-Linux)")
+
+        self._cfg.write_text(
+            "[server.api]\nenabled = true\nlisten = \"127.0.0.1:9091\"\n"
+        )
+        def fake_run(cmd, capture=False, check=False):
+            cmd = list(cmd)
+            if "is-active" in cmd:
+                return MagicMock(returncode=0, stdout="active\n", stderr="")
+            if "show" in cmd and any("ActiveEnterTimestampMonotonic" in x for x in cmd):
+                # telemt запущен 2 часа назад = 7200s
+                with open("/proc/uptime") as f:
+                    sys_uptime = float(f.read().split()[0])
+                enter_mono_us = int((sys_uptime - 7200) * 1_000_000)
+                return MagicMock(returncode=0,
+                                 stdout=f"ActiveEnterTimestampMonotonic={enter_mono_us}\n",
+                                 stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with self._patch_cfg(), \
+             patch.object(mtproto_stats, "_run", fake_run), \
+             patch.object(mtproto_stats, "_telemt_api_probe",
+                          return_value=(True, "API отвечает", {})):
+            diag = mtproto_stats.diagnose_telemt_api_for_panel()
+        self.assertTrue(diag["api_section_configured"])
+        self.assertTrue(diag["api_reachable"])
+        self.assertGreaterEqual(diag["telemt_uptime_sec"], 600)
+        # Должна быть рекомендация про build profile / upstream telemt
+        upstream_recs = [r for r in diag["recommendations"]
+                         if "build profile" in r or "upstream telemt" in r]
+        self.assertTrue(len(upstream_recs) > 0,
+                        f"expected upstream recommendation, got: {diag['recommendations']}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
