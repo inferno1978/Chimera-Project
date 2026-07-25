@@ -5371,7 +5371,8 @@ def do_export_config(encrypt: bool = False) -> None:
 
     info(f"Экспорт конфигурации → {archive_path}")
 
-    # Базовый список + AWG-конфиги при AWG-режиме
+    # Базовый список (VLESS/Reality/state/users/geo/AS-direct) — остаётся
+    # статическим, это ядро проекта, гарантированно стабильные пути.
     _export_list = list(EXPORT_INCLUDE)
     try:
         if STATE_FILE.exists():
@@ -5395,6 +5396,21 @@ def do_export_config(encrypt: bool = False) -> None:
                 _export_list.append((_as_cache_f, f"as_prefix_{_as_entry['asn']}.txt"))
     except Exception:
         pass
+
+    # ── АВТООБНАРУЖЕНИЕ протоколов через backup_registry ──────────────────────
+    # Все卫星-протоколы (Telemt, Mieru, NaiveProxy, FPTN, TrustTunnel,
+    # sing-box семейство, AWG Standalone, Hysteria2, и любые будущие)
+    # добавляют свой get_backup_paths() — здесь НИКАКИХ изменений не нужно
+    # при появлении нового протокола. Это и есть APPEND-FREE дизайн.
+    try:
+        from chimera.modules.backup_registry import discover_backup_paths
+        _discovered = discover_backup_paths()
+        if _discovered:
+            _export_list.extend(_discovered)
+            dim(f"  + автообнаружено протоколов: {len(_discovered)} путей")
+    except Exception as _e:
+        warn(f"  Автообнаружение протоколов не удалось: {_e}")
+        warn(f"  (статический список EXPORT_INCLUDE остаётся в силе)")
 
     with tempfile.TemporaryDirectory(prefix="xray_export_") as tmpdir:
         tmp = Path(tmpdir)
@@ -6707,15 +6723,35 @@ def _menu_install_system() -> None:
 
 
 def _menu_migration() -> None:
-    """Подменю миграции (экспорт/импорт)."""
+    """Подменю миграции (экспорт/импорт).
+
+    Решение по dual-system (см. CHANGELOG.md / git history commit 7acdbfb):
+    migration.py был извлечён из _core.py как рефакторинг-перенос (Tier-3
+    group 5), НЕ как замена. Оба инструмента остаются:
+      • [1]/[2] do_full_migration_export/import — полная миграция на другой
+        сервер: config + state + users + traffic_limits + telegram +
+        SSL-сертификаты + systemd unit, обязательно зашифровано AES-256-CBC.
+      • [3] do_export_config — стандартный нешифрованный бэкап ядра проекта
+        (VLESS/Reality/state/users/geo/AS-direct).
+      • [4] _import_users_only — ИМПОРТ ТОЛЬКО ПОЛЬЗОВАТЕЛЕЙ из любого
+        tar.gz-архива. Безопасно после переустановки сервера: не трогает
+        config.json/state.json, не требует совпадения socket-пути.
+        РАНЬШЕ был мёртвым кодом (do_manage_backup() с пунктом 4 нигде не
+        вызывался) — теперь вернули в живое меню.
+    Оба инструмента [1]/[3] теперь ТАКЖЕ получают пути через автообнаружение
+    chimera.modules.backup_registry — то есть Telemt/Mieru/NaiveProxy/FPTN/
+    TrustTunnel/sing-box/AWG-Standalone/Hysteria2 едут в архивы автоматически,
+    без правок этих функций при добавлении новых протоколов.
+    """
     while True:
         os.system("clear")
         print()
         _box_top("📦  МИГРАЦИЯ КОНФИГУРАЦИИ")
         _box_row()
-        _box_item("1", f"📤 Экспорт  {DIM}(зашифрованный архив){NC}")
+        _box_item("1", f"📤 Экспорт  {DIM}(зашифрованный архив, для миграции){NC}")
         _box_item("2", f"📥 Импорт  {DIM}(восстановить из .tar.gz или .tar.gz.enc){NC}")
         _box_item("3", f"📄 Стандартный экспорт  {DIM}(без шифрования){NC}")
+        _box_item("4", f"👥 Импорт только пользователей  {DIM}(безопасно после переустановки){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -6731,6 +6767,16 @@ def _menu_migration() -> None:
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "3":
             do_export_config()
+            input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "4":
+            print()
+            archive_raw = input(f"  Путь к архиву (.tar.gz): ").strip()
+            ap = Path(archive_raw)
+            if not ap.exists():
+                warn(f"Файл не найден: {ap}")
+            else:
+                info("Импорт только пользователей из архива...")
+                _import_users_only(ap)
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch.lower() == "q" or ch == "":
             break
