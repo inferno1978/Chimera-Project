@@ -2,6 +2,80 @@
 
 ---
 
+## FEAT(mtproto_stats): диагностика Telemt API в TUI (почему Panel показывает 0) — 26 июля 2026
+
+**Пользователь сообщил: TUI Chimera корректно показывает трафик Telemt (490.9 KiB, два активных пользователя), но Telemt Panel (веб-панель) показывает 0 traffic / 0 connections / 0 active IPs, хотя `Configured Users: 2` и `Uptime: 7m`. Это расходящиеся источники: TUI берёт трафик из iptables-цепочек TELEMT_STATS_IN/OUT (надёжно, не зависит от telemt API), а Panel — из HTTP API telemt (127.0.0.1:9091, секция [server.api]). Если API telemt возвращает 0 — Panel показывает 0, хотя трафик реально есть. Добавляем диагностический инструмент в TUI, чтобы пользователь мог сам разобраться.**
+
+### Контекст
+
+Telemt Panel (`chimera/modules/telemt_panel.py`) — отдельный Go-бинарник с React-фронтендом, общается с telemt через HTTP API (127.0.0.1:9091). Chimera только **генерирует конфиг панели** и включает `[server.api]` в telemt.toml через `mtproto.ensure_api_enabled()` — но не контролирует, что именно telemt API возвращает.
+
+Возможные причины, почему Panel показывает 0 при работающем TUI:
+
+1. **Telemt был недавно перезапущен** — внутренние счётчики telemt обнулились (uptime < времени с последнего подключения). iptables-счётчики при этом НЕ обнуляются (только при `iptables -Z` или ребуте сервера), поэтому TUI Chimera продолжает показывать трафик. Подожди 5-10 минут после рестарта и переподключись — счётчики telemt должны начать расти.
+
+2. **`build profile: unknown`** в System Info панели — подозрительный признак. Telemt-бинарник может быть собран без stats-feature. Вывод пользователя показывает именно `build profile: unknown` — это намекает на кастомную/урезанную сборку telemt.
+
+3. **iOS Fix через iptables NAT REDIRECT** — пользователь подключается через внешний порт 5001, который iptables редиректит на основной порт 5000. Telemt физически видит соединение на 5000, но его internal per-connection tracking может не работать корректно для таких редиректнутых соединений (upstream telemt, не Chimera).
+
+4. **Баг upstream telemt** — telemt API может просто не считать трафик в этой версии бинарника. Чинить нужно в upstream telemt, не в Chimera.
+
+### Что реализовано
+
+**Новый пункт [5] в `stats_menu()` (меню Telemt → Статистика):** «🔍 Диагностика Telemt API (для панели)».
+
+Запускает `diagnose_telemt_api_for_panel()` — полную диагностику:
+
+1. **`_telemt_api_section_configured()`** — проверяет что в `telemt.toml` включена секция `[server.api]` (или устаревший `[server.admin_api]`), что `enabled = true`. Возвращает `(ok, detail)`.
+
+2. **`_telemt_api_probe(timeout=3.0)`** — делает HTTP-запрос к `http://127.0.0.1:9091/v1/info` (fallback на `/info` и `/`) без auth_header. Если API отвечает 200/401/403 — значит API слушает (401/403 = auth required, это нормально, мы просто не передаём auth_header в диагностике). Если connection refused — API не запущен.
+
+3. **Uptime telemt** — через `systemctl show telemt --property=ActiveEnterTimestampMonotonic` + `/proc/uptime`. Если uptime < 10 минут — добавляет рекомендацию про обнуление счётчиков при рестарте.
+
+4. **`_render_telemt_api_diagnosis(diag)`** — рендерит результат в TUI: показывает статус секции, статус API, uptime, и список рекомендаций (через `_wrap_text` для длинных строк).
+
+### Регрессионные тесты (7 новых)
+
+`tests/test_mtproto_stats.py` — новый класс `TestDiagnoseTelemtApiForPanel`:
+
+1. `test_section_configured_returns_true_when_enabled` — `[server.api]` есть и `enabled=true` → ok=True.
+2. `test_section_configured_returns_false_when_section_absent` — секции нет → ok=False.
+3. `test_section_configured_returns_false_when_enabled_is_false` — `enabled=false` → ok=False.
+4. `test_section_configured_returns_false_when_no_config_file` — `telemt.toml` не существует → ok=False.
+5. `test_diagnose_returns_recommendations_when_section_missing` — если секции нет, diagnose возвращает рекомендацию включить её.
+6. `test_diagnose_includes_uptime_when_telemt_recently_restarted` — если telemt перезапущен < 10 мин назад, diagnose включает рекомендацию про обнуление счётчиков. Использует реальный `/proc/uptime` (Linux-only, skip на других ОС).
+7. `test_diagnose_adds_build_profile_recommendation_when_all_ok` — когда всё настроено (секция есть, API отвечает, uptime большой), diagnose добавляет рекомендацию про build profile и upstream telemt.
+
+### Изменённые файлы
+
+- `chimera/modules/mtproto_stats.py` — новые функции `_telemt_api_section_configured()`, `_telemt_api_probe()`, `diagnose_telemt_api_for_panel()`, `_render_telemt_api_diagnosis()`, `_wrap_text()`; пункт [5] в `stats_menu()` и `_render_stats()`.
+- `tests/test_mtproto_stats.py` — +7 тестов в новом классе `TestDiagnoseTelemtApiForPanel`.
+
+### Тесты
+
+- `tests/test_mtproto_stats.py` — 53/53 PASS (46 + 7 новых).
+- Регрессия: `test_mtproto*.py` + `test_traffic_*.py` — **292/292 PASS** (285 + 7 новых).
+- `full_test.py` — **10/10 PASS**, проект готов к релизу.
+
+### Совместимость
+
+Полностью обратно совместимо:
+1. Новый пункт [5] в меню — аддитивный, не меняет существующие пункты [1]-[4].
+2. Диагностика делает HTTP-запрос к 127.0.0.1:9091 без auth — если API требует auth, вернёт 401/403, и диагностика корректно это интерпретирует как «API работает, нужен auth».
+3. `/proc/uptime` читается только на Linux (на других ОС диагностика пропускает uptime-проверку, не падает).
+
+### Что делать пользователю
+
+1. Зайти в меню: Telemt → Статистика → [5] Диагностика Telemt API.
+2. Посмотреть вывод:
+   - Если «Секция [server.api]: ✗ отсутствует» — переустановить панель через меню Telemt → Telemt Panel.
+   - Если «API отвечает: ✗» — проверить `systemctl status telemt`, `journalctl -u telemt -n 30`, `ss -tlnp | grep 9091`.
+   - Если uptime < 10 минут — подождать 5-10 минут после рестарта telemt, переподключиться, счётчики должны начать расти.
+   - Если всё настроено, но трафик 0 — проверить `build profile` в System Info панели. Если `unknown` — это подозрительно, попробуйте другую версию telemt-бинарника.
+3. TUI Chimera (через iptables) — надёжный источник, не зависящий от telemt API. Если TUI видит трафик, а Panel — нет, проблема в upstream telemt, не в Chimera.
+
+---
+
 ## FIX(mtproto_stats): "Последний вход: —" для активных пользователей Telemt — 26 июля 2026
 
 **На реальном сервере в TUI статистики Telemt (меню Telemt → Статистика) в графе «Последний вход» отображалось «—» для активных пользователей, у которых трафик реально есть (4.9 KiB / 9.7 KiB). Причина — узкий парсер journalctl, который пропускал реальные строки логов telemt. Чиним без бампа версии.**

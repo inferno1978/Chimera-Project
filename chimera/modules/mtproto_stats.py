@@ -419,6 +419,250 @@ def _reset_accounting() -> None:
 def _accounting_active() -> bool:
     return _ipt_chain_exists(CHAIN_IN) and _ipt_chain_exists(CHAIN_OUT)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ДИАГНОСТИКА TELEMT API (для панели telemt_panel)
+# ══════════════════════════════════════════════════════════════════════════════
+# Telemt Panel (отдельный Go-бинарник) берёт статистику из HTTP API telemt
+# (127.0.0.1:9091, секция [server.api] в telemt.toml). Если панель показывает
+# 0 traffic / 0 connections, хотя TUI Chimera (через iptables-цепочки
+# TELEMT_STATS_IN/OUT) видит трафик — это значит, что API telemt возвращает 0.
+#
+# Возможные причины:
+#   1. Telemt был недавно перезапущен — внутренние счётчики обнулились
+#      (uptime < времени с последнего подключения). iptables-счётчики при
+#      этом НЕ обнуляются, поэтому TUI Chimera продолжает показывать трафик.
+#   2. telemt-бинарник собран без stats-feature (build profile = "unknown"
+#      в System Info панели — подозрительный признак).
+#   3. telemt считает только соединения на основном порту, а iOS Fix
+#      (iptables NAT REDIRECT с внешнего порта на основной) может
+#      приводить к тому, что telemt теряет per-connection tracking.
+#   4. Баг upstream telemt (не в Chimera).
+#
+# Эта функция проверяет первые 3 пункта и возвращает диагностику для TUI.
+
+def _telemt_api_section_configured() -> tuple[bool, str]:
+    """Проверяет что в telemt.toml включена секция [server.api].
+
+    Returns:
+      (ok, detail): ok=True если секция присутствует и enabled=true.
+                    detail — человекочитаемое описание для TUI.
+    """
+    if not CONFIG_FILE.exists():
+        return False, "telemt.toml не найден — Telemt не установлен"
+    try:
+        text = CONFIG_FILE.read_text()
+    except Exception as e:
+        return False, f"не удалось прочитать telemt.toml: {e}"
+
+    # Ищем секцию [server.api] (или устаревший [server.admin_api])
+    m = re.search(
+        r'\[server\.(?:api|admin_api)\]\s*\n(.*?)(?=\n\[|\Z)',
+        text, re.DOTALL
+    )
+    if not m:
+        return False, "секция [server.api] отсутствует в telemt.toml"
+    section = m.group(1)
+    if not re.search(r'^\s*enabled\s*=\s*true\s*$', section, re.MULTILINE):
+        return False, "секция [server.api] есть, но enabled=false (или отсутствует)"
+    return True, "секция [server.api] включена"
+
+
+def _telemt_api_probe(timeout: float = 3.0) -> tuple[bool, str, dict]:
+    """Делает запрос к telemt API (без auth_header) чтобы проверить что API
+    отвечает.
+
+    Возвращает (reachable, detail, response_dict):
+      reachable: True если HTTP-запрос вернул любой ответ (даже 401/403 —
+                 это значит API слушает, просто нужен auth).
+      detail: человекочитаемое описание.
+      response_dict: JSON-ответ если удалось распарсить, иначе {}.
+
+    Не использует auth_header (мы его не знаем — он в конфиге панели).
+    Это нормально для диагностики — нам важно понять, слушает ли API вообще.
+    """
+    import urllib.request
+    import urllib.error
+
+    # Сначала проверяем что telemt вообще запущен
+    r = _run(["systemctl", "is-active", SERVICE_NAME], capture=True)
+    if r.returncode != 0 or r.stdout.strip() != "active":
+        return False, f"сервис {SERVICE_NAME} не активен", {}
+
+    # Пытаемся достучаться до API. Telemt API обычно отдаёт info на
+    # корневом endpoint или на /v1/info. Используем /v1/info как
+    # наиболее вероятный (стандартный для Rust-приложений с axum/actix).
+    # Если API требует auth — вернёт 401/403, и это OK для нашей проверки
+    # (значит API работает, просто нужен auth_header).
+    urls_to_try = [
+        "http://127.0.0.1:9091/v1/info",
+        "http://127.0.0.1:9091/info",
+        "http://127.0.0.1:9091/",
+    ]
+    for url in urls_to_try:
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                try:
+                    data = json.loads(body) if body else {}
+                except Exception:
+                    data = {}
+                return True, f"API отвечает на {url} (HTTP {resp.status})", data
+        except urllib.error.HTTPError as e:
+            # 401/403 — API работает, но нужен auth. Это GOOD для нашей
+            # проверки — значит API слушает.
+            if e.code in (401, 403):
+                return True, f"API отвечает на {url} (HTTP {e.code} — auth required, это нормально)", {}
+            # Другие HTTP-ошибки — продолжаем пробовать
+            continue
+        except urllib.error.URLError as e:
+            # Connection refused и т.п. — пробуем следующий URL
+            continue
+        except Exception:
+            continue
+
+    return False, "API не отвечает ни на одном из проверенных URL", {}
+
+
+def diagnose_telemt_api_for_panel() -> dict:
+    """Полная диагностика: почему Telemt Panel может показывать 0 traffic.
+
+    Возвращает dict с ключами:
+      api_section_configured: bool — [server.api] есть в telemt.toml
+      api_section_detail: str
+      api_reachable: bool — API отвечает на HTTP-запрос
+      api_reachable_detail: str
+      api_response: dict — JSON-ответ если есть
+      telemt_uptime_sec: int — uptime процесса telemt (если получилось узнать)
+      recommendations: list[str] — список рекомендаций для пользователя
+    """
+    result = {
+        "api_section_configured": False,
+        "api_section_detail": "",
+        "api_reachable": False,
+        "api_reachable_detail": "",
+        "api_response": {},
+        "telemt_uptime_sec": 0,
+        "telemt_uptime_detail": "",
+        "recommendations": [],
+    }
+
+    # 1. Проверяем секцию [server.api] в telemt.toml
+    ok, detail = _telemt_api_section_configured()
+    result["api_section_configured"] = ok
+    result["api_section_detail"] = detail
+    if not ok:
+        result["recommendations"].append(
+            "Включите [server.api] в telemt.toml (через меню Telemt → "
+            "Telemt Panel → установка панели, или вручную mtproto."
+            "ensure_api_enabled())."
+        )
+
+    # 2. Пробуем достучаться до API
+    reachable, reach_detail, api_data = _telemt_api_probe()
+    result["api_reachable"] = reachable
+    result["api_reachable_detail"] = reach_detail
+    result["api_response"] = api_data
+    if not reachable:
+        result["recommendations"].append(
+            "API telemt не отвечает на 127.0.0.1:9091. Проверьте: "
+            "systemctl status telemt, journalctl -u telemt -n 30, "
+            "ss -tlnp | grep 9091."
+        )
+
+    # 3. Uptime telemt — если telemt недавно перезапущен, его внутренние
+    # счётчики обнулились. iptables-счётчики при этом НЕ обнуляются,
+    # поэтому TUI Chimera может показывать трафик, а Panel — нет.
+    r = _run(["systemctl", "show", SERVICE_NAME,
+              "--property=ActiveEnterTimestampMonotonic"], capture=True)
+    if r.returncode == 0 and r.stdout:
+        m = re.search(r'=(\d+)', r.stdout)
+        if m:
+            enter_mono_us = int(m.group(1))  # микросекунды monotonic
+            # Получаем текущий monotonic timestamp
+            try:
+                import time as _time
+                # clock_gettime CLOCK_MONOTONIC = время с boot
+                # monotonic в systemctl — это микросекунды с boot
+                # Нельзя напрямую сравнить с time.time() (wall clock),
+                # но можно через /proc/uptime
+                with open("/proc/uptime") as f:
+                    uptime_sec = float(f.read().split()[0])
+                enter_sec = enter_mono_us / 1_000_000
+                telemt_uptime = max(0, int(uptime_sec - enter_sec))
+                result["telemt_uptime_sec"] = telemt_uptime
+                if telemt_uptime < 600:  # < 10 минут
+                    result["telemt_uptime_detail"] = (
+                        f"{telemt_uptime}s (< 10 минут — счётчики telemt "
+                        f"могли обнулиться при недавнем рестарте)"
+                    )
+                    result["recommendations"].append(
+                        f"Telemt перезапущен {telemt_uptime}s назад. Внутренние "
+                        f"счётчики telemt обнуляются при рестарте, поэтому Panel "
+                        f"может показывать 0 даже если трафик был. iptables-"
+                        f"счётчики (TUI Chimera) НЕ обнуляются при рестарте "
+                        f"telemt — поэтому TUI и Panel могут расходиться. "
+                        f"Подождите 5-10 минут после рестарта и попробуйте "
+                        f"подключиться снова — счётчики telemt должны начать "
+                        f"расти."
+                    )
+                else:
+                    result["telemt_uptime_detail"] = f"{telemt_uptime}s"
+            except Exception:
+                pass
+
+    # 4. Дополнительная рекомендация если всё настроено но трафика нет
+    if (result["api_section_configured"] and result["api_reachable"]
+            and not result["recommendations"]):
+        result["recommendations"].append(
+            "API telemt настроен и отвечает, но Panel показывает 0. "
+            "Возможные причины: (а) telemt-бинарник собран без stats-"
+            "feature (проверьте 'build profile' в System Info панели — "
+            "если 'unknown', это подозрительно); (б) telemt считает только "
+            "соединения на основном порту, а iOS Fix через iptables NAT "
+            "REDIRECT может приводить к потере per-connection tracking; "
+            "(в) баг upstream telemt (не в Chimera). TUI Chimera считает "
+            "трафик через iptables-цепочки TELEMT_STATS_IN/OUT — это "
+            "надёжный источник, не зависящий от telemt API."
+        )
+
+    return result
+
+
+def _render_telemt_api_diagnosis(diag: dict) -> None:
+    """Рендерит диагностику Telemt API для TUI (вызывается из stats_menu)."""
+    _box_row(f"  {BOLD}{CYAN}🔍 Диагностика Telemt API (для панели){NC}")
+    _box_row()
+    _box_kv("Секция [server.api]:",
+            f"{GREEN}✓{NC} {diag['api_section_detail']}"
+            if diag["api_section_configured"]
+            else f"{RED}✗{NC} {diag['api_section_detail']}")
+    _box_kv("API отвечает:",
+            f"{GREEN}✓{NC} {diag['api_reachable_detail']}"
+            if diag["api_reachable"]
+            else f"{RED}✗{NC} {diag['api_reachable_detail']}")
+    if diag["telemt_uptime_sec"] > 0:
+        _box_kv("Uptime telemt:", diag["telemt_uptime_detail"])
+    _box_row()
+    if diag["recommendations"]:
+        _box_row(f"  {YELLOW}⚠ Рекомендации:{NC}")
+        for rec in diag["recommendations"]:
+            # Wrap long lines
+            for line in _wrap_text(rec, _BOX_W - 4):
+                _box_row(f"  {DIM}{line}{NC}")
+        _box_row()
+    _box_sep()
+
+
+def _wrap_text(text: str, width: int) -> list:
+    """Простой word-wrap для длинных строк в TUI."""
+    import textwrap
+    return textwrap.wrap(text, width=width,
+                         break_long_words=False,
+                         break_on_hyphens=False)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ПАРСИНГ JOURNALCTL — per-user сессии
 # ══════════════════════════════════════════════════════════════════════════════
@@ -738,6 +982,7 @@ def _render_stats(d: dict, realtime: bool = False) -> None:
         _box_item("2", "📡  Режим реального времени (5с)")
         _box_item("3", "⚡  Включить / переинициализировать учёт iptables")
         _box_item("4", "🗑️   Сбросить статистику")
+        _box_item("5", "🔍  Диагностика Telemt API (для панели)")
         _box_sep()
         _box_item("Q", "← Назад")
         _box_bot()
@@ -826,6 +1071,31 @@ def stats_menu() -> None:
                 }
                 _save_stats(d)
                 print(f"\n  {GREEN}✓  Статистика сброшена.{NC}")
+            _pause()
+
+        elif ch == "5":
+            # Диагностика Telemt API — почему Telemt Panel может показывать
+            # 0 traffic / 0 connections, хотя TUI Chimera видит трафик.
+            # Panel берёт статистику из HTTP API telemt (127.0.0.1:9091),
+            # а TUI Chimera — из iptables-цепочек TELEMT_STATS_IN/OUT. Это
+            # независимые источники: TUI работает даже если API telemt не
+            # считает трафик.
+            os.system("clear")
+            print()
+            _box_top("🔍  ДИАГНОСТИКА TELEMT API (ДЛЯ ПАНЕЛИ)")
+            _box_row()
+            _box_row(f"  {DIM}Panel (веб-панель) берёт статистику из HTTP API telemt{NC}")
+            _box_row(f"  {DIM}(127.0.0.1:9091). TUI Chimera — из iptables-цепочек{NC}")
+            _box_row(f"  {DIM}TELEMT_STATS_IN/OUT. Это независимые источники.{NC}")
+            _box_row(f"  {DIM}Если TUI видит трафик, а Panel — нет, проблема в API telemt.{NC}")
+            _box_row()
+            try:
+                diag = diagnose_telemt_api_for_panel()
+                _render_telemt_api_diagnosis(diag)
+            except Exception as e:
+                _box_row(f"  {RED}✗ Ошибка диагностики: {e}{NC}")
+                _box_sep()
+            _box_bot()
             _pause()
 
         elif ch in ("q", ""):
