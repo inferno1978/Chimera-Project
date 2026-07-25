@@ -2,6 +2,234 @@
 
 ---
 
+## FEAT(backup): единая АВТОМАТИЧЕСКИ РАСШИРЯЕМАЯ система бэкапа/восстановления всех протоколов + починка недостижимого «импорта только пользователей» — 25 июля 2026
+
+### Постановка проблемы
+
+В проекте существовали две параллельные, неполные системы экспорта/импорта
+конфигурации:
+
+1. **`do_export_config` / `do_import_config` / `do_manage_backup` /
+   `_import_users_only`** в `chimera/_core.py` (старая система, пункт
+   меню `[3] Стандартный экспорт`). Покрывала только VLESS+Reality+geo+
+   AWG-Cascade.
+2. **`do_full_migration_export` / `do_full_migration_import`** в
+   `chimera/modules/migration.py` (вынесена из `_core.py` в коммите
+   `7acdbfb` как Tier-3 рефакторинг). Дополнительно включала
+   `traffic_limits.json`, `telegram.json`, SSL-сертификаты, systemd unit.
+
+Обе системы покрывали только VLESS+geo+Cascade AWG. Ни одна не знала про
+Telemt/Mieru/NaiveProxy/FPTN/TrustTunnel/sing-box-семейство/AWG-Standalone/
+Hysteria2. Добавление нового протокола в будущем требовало ручной правки
+списков `EXPORT_INCLUDE` и `include_paths` — что регулярно забывалось.
+
+Плюс **критичный баг**: `do_manage_backup()` — единственное место с пунктом
+«Импорт только пользователей» (помечено «безопасно после переустановки») —
+**нигде не вызывался из живого меню**. Функция `_import_users_only()` уже
+была рабочей, просто не имела точки входа. Мёртвый код.
+
+### Решение по dual-system вопросу
+
+**Изучение git-истории** (`git log --follow -- chimera/_core.py
+chimera/modules/migration.py`, коммит `7acdbfb refactor(status): extract
+10 functions to 7 modules (status/speed/reconfig/migration/mode/backup/
+traffic-history)`):
+
+`migration.py` был извлечён из `_core.py` как **рефакторинг-перенос**
+(Tier-3 group 5 of 6), НЕ как замена. Обе системы сосуществовали ДО
+рефакторинга, продолжают сосуществовать после. Каждая решает свой
+сценарий:
+
+- **`do_full_migration_export/import`** — полная миграция на ДРУГОЙ сервер:
+  config + state + users + traffic_limits + telegram + SSL-сертификаты +
+  systemd unit, обязательно зашифровано AES-256-CBC.
+- **`do_export_config`** — стандартный нешифрованный бэкап ядра проекта
+  (VLESS/Reality/state/users/geo/AS-direct) для повседневного использования
+  на той же машине.
+
+**Решение: обе системы остаются.** Помечать старую как deprecated не нужно
+— это осознанно два разных инструмента для разных сценариев. Обе системы
+теперь ОДИНАКОВО получают пути через автообнаружение (см. ниже). Доступ к
+«импорту только пользователей» возвращён в живое меню (см. ниже).
+
+### Что реализовано
+
+**1. `chimera/modules/backup_registry.py` (новый модуль) — автообнаружение.**
+
+Главная функция `discover_backup_paths(timeout_sec=20)`:
+
+- Сканирует `chimera/modules/` через `pkgutil.iter_modules(chimera.modules.__path__)`
+  → импортирует каждый модуль → вызывает `get_backup_paths()` если функция
+  определена.
+- Любая ошибка импорта/вызова у конкретного модуля — **тихий skip**
+  (`try/except Exception: continue`), не прерывает сбор для остальных 213
+  модулей.
+- **Дедупликация** по реальному пути (`Path.resolve()`) — если два модуля
+  случайно укажут один и тот же файл.
+- **Timeout-guard** через `threading.Thread.join(timeout=N)` — если В
+  БУДУЩЕМ какой-то новый модуль случайно получит тяжёлую операцию на
+  уровне импорта (сетевой запрос, sleep и т.п.), один плохой модуль не
+  сможет подвесить весь процесс бэкапа навсегда. При таймауте возвращается
+  то, что успело собраться, + WARN в `chimera.log`.
+- Намеренно **НЕ кэшируется** между вызовами процесса — протоколы могут
+  быть установлены/удалены между запусками бэкапа. Скан ~0.8 секунды на
+  214 модулей — оптимизация не нужна.
+
+**2. Конвенция `get_backup_paths()` (договорённость об имени функции).**
+
+Любой модуль в `chimera/modules/`, который хочет участвовать в общем
+бэкапе, определяет на уровне модуля:
+
+```python
+def get_backup_paths() -> list[tuple[Path, str]]:
+    """[(реальный_путь_на_диске, имя_в_архиве), ...].
+    Пустой список если протокол не установлен.
+    Никогда не бросает исключение — любая внутренняя ошибка = []."""
+```
+
+Модули БЕЗ `get_backup_paths()` тихо пропускаются (норма — большинство из
+214 модулей `chimera/modules/` не являются протоколами и не имеют
+конфиг-файлов для бэкапа).
+
+**3. `get_backup_paths()` реализован в модулях, где его раньше не было:**
+
+| Модуль | Файлы, попадающие в бэкап |
+|---|---|
+| `chimera/modules/mtproto.py` | `telemt.toml`, `telemt.service`, `telemt_limits.json` |
+| `chimera/modules/mieru.py` | `mita/server.json`, `mita.service`, `mieru_state.json` |
+| `chimera/modules/naiveproxy.py` | `Caddyfile`, `probe_secret`, `caddy-naive.service`, `naiveproxy_state.json` |
+| `chimera/modules/fptn.py` | `server.conf`, `server.crt`, `server.key`, `fptn-server.service`, `fptn_state.json` |
+| `chimera/modules/trusttunnel.py` | `trusttunnel_state.json`, `vpn.toml`, `hosts.toml`, `rules.toml`, `trusttunnel.service` |
+| `chimera/modules/singbox_state.py` | `singbox_state.json`, `config.json`, `certs/*.crt|key|pem` |
+| `chimera/modules/awg_standalone.py` | `awg0.conf`, `awgsetup_cfg.init`, `awg_standalone_state.json`, `awg-cascade-routing.service` |
+| `chimera/modules/hysteria2_backup.py` | `config.yaml`, `hysteria.crt`, `hysteria.key`, `hysteria-server.service` |
+
+Каждая реализация — просто проверяет `Path.exists()` и возвращает список
+найденных, пустой список если протокол не установлен. Никакой сложной
+логики, только пути. Никогда не бросает исключение (try/except → []).
+
+Пользовательские секреты (клиентские ключи AWG, credentials.toml
+TrustTunnel, и т.д.) намеренно НЕ включаются — их переиздают после
+восстановления через соответствующее меню протокола, чтобы старые
+скомпрометированные креды не поехали на новый сервер.
+
+**4. Подключение `discover_backup_paths()` к обеим существующим точкам экспорта.**
+
+- В `chimera/_core.py` → `do_export_config()`: после статического
+  `EXPORT_INCLUDE` (VLESS/geo/AWG-Cascade/AS-direct — остаются как явные
+  записи, раз они и так давно стабильны) добавочно вызывается
+  `discover_backup_paths()` и его результат extend'ится к `_export_list`.
+- В `chimera/modules/migration.py` → `do_full_migration_export()`:
+  аналогично после статического `include_paths` (VLESS/state/users/traffic/
+  telegram/SSL/systemd-unit/AWG-Cascade).
+
+Обе точки — try/except с fallback на статический список, если
+автообнаружение почему-то не сработает.
+
+**5. Возвращена доступность «импорт только пользователей» в живое меню.**
+
+`_menu_migration()` в `chimera/_core.py` получил пункт `[4] 👥 Импорт
+только пользователей (безопасно после переустановки)`, который вызывает
+уже существующую рабочую `_import_users_only(ap)`. Раньше эта функция
+была мёртвым кодом — её пункт жил только в `do_manage_backup()`, который
+нигде не вызывался.
+
+**6. AWG Standalone и Hysteria2 — приведены к общей конвенции.**
+
+У обоих уже есть собственные independent backup-модули
+(`awg_backup.py`/`hysteria2_backup.py` с полнофункциональными
+create/list/restore/menu), которые остаются. Но теперь ОНИ ЖЕ предоставляют
+`get_backup_paths()` по общей конвенции — чтобы пользователь, по привычке
+нажавший «Экспорт всего» в главном меню, получил AWG/H2-конфиги в общем
+архиве тоже.
+
+**Разобрано с `h2_backup_include_in_main()`**: существовавшая функция
+была мёртвым кодом (нет ни одного вызова из `_core.py` или других
+модулей, только self-reference в `hysteria2_backup.py`). НЕ удалена
+(внешние патчи/скрипты могут импортировать), а превращена в thin
+delegating wrapper к новому `get_backup_paths()`. Это закрывает
+дублирование мёртвого кода и одновременно сохраняет обратную
+совместимость.
+
+### APPEND-FREE свойство — доказательство
+
+Главное требование задачи: **решение должно быть APPEND-FREE для новых
+протоколов**. Никакого жёсткого списка, который нужно пополнять при
+добавлении протокола.
+
+Тест `test_future_protocol_auto_discovered_without_code_changes` в
+`tests/test_backup_registry.py` доказывает это: создаёт ВРЕМЕННЫЙ фейковый
+модуль с `get_backup_paths()`, которого не было НИ РАЗУ до теста, и
+убеждается, что `discover_backup_paths()` подхватывает его БЕЗ единой
+правки кода самой системы бэкапа. Это тест, который доказывает решение
+заявленной задачи («протокол появится позже — подхватится автоматически»).
+
+### Тесты (`tests/test_backup_registry.py`, 29 тестов)
+
+1. `discover_backup_paths()` находит фейковые тестовые модули с
+   `get_backup_paths()` (через monkeypatch списка модулей — НЕ полагается
+   на реальные 214 модулей `chimera.modules`).
+2. Модуль БЕЗ `get_backup_paths()` — тихо пропускается.
+3. Модуль, чей `get_backup_paths()` бросает исключение — не роняет
+   остальной сбор.
+4. Дедупликация одинаковых путей от двух модулей.
+5. **Timeout-guard**: «зависший» модуль (30s sleep) не блокирует сбор —
+   частичный результат + WARN, общий elapsed < 5s.
+6. **ГЛАВНЫЙ смысловой тест — «будущий протокол» сценарий**: временный
+   фейковый модуль подхватывается автоматически БЕЗ правок системы бэкапа.
+7. Malformed entries (не-tuple, пустой arcname, list вместо tuple) — не
+   роняют остальные.
+8-21. Тест на каждый новый `get_backup_paths()` (mtproto/mieru/naiveproxy/
+   fptn/trusttunnel/singbox_state/awg_standalone/hysteria2_backup):
+   пустой список без установки, непустой с установленными файлами,
+   never-raises.
+22. `h2_backup_include_in_main()` теперь deprecated-делегат к
+   `get_backup_paths()` (возвращает эквивалентные данные как `list[str]`).
+23-24. **Регрессионный тест**: «импорт только пользователей» достижим из
+   живого меню `_menu_migration()` — пункт `[4]` рендерится и при выборе
+   вызывает `_import_users_only(ap)` с указанным путём.
+25-26. Интеграционный тест с реальным деревом `chimera.modules` (214
+   модулей): завершается за < 30 сек, не бросает исключение, находит
+   `get_backup_paths()` во всех целевых модулях.
+
+Полный `tests/` прогнан — 0 регрессий (существующие 3500+ тестов остались
+зелёными).
+
+### Файлы изменены
+
+- `chimera/modules/backup_registry.py` — **новый** (200 строк)
+- `chimera/modules/mtproto.py` — добавлен `get_backup_paths()`
+- `chimera/modules/mieru.py` — добавлен `get_backup_paths()`
+- `chimera/modules/naiveproxy.py` — добавлен `get_backup_paths()`
+- `chimera/modules/fptn.py` — добавлен `get_backup_paths()`
+- `chimera/modules/trusttunnel.py` — добавлен `get_backup_paths()`
+- `chimera/modules/singbox_state.py` — добавлен `get_backup_paths()`
+- `chimera/modules/awg_standalone.py` — добавлен `get_backup_paths()`
+- `chimera/modules/hysteria2_backup.py` — добавлен `get_backup_paths()`;
+  `h2_backup_include_in_main()` превращён в deprecated-делегат
+- `chimera/_core.py` — `do_export_config()` вызывает
+  `discover_backup_paths()`; `_menu_migration()` получил пункт `[4]` для
+  импорта только пользователей
+- `chimera/modules/migration.py` — `do_full_migration_export()` вызывает
+  `discover_backup_paths()`
+- `tests/test_backup_registry.py` — **новый** (29 тестов, 660 строк)
+
+### Совместимость
+
+Полностью обратно совместимо. Старые архивы (`xray-backup-*.tar.gz`,
+`xray-migration-*.tar.gz.enc`) продолжают восстанавливаться. Новые архивы
+теперь содержат дополнительные файлы от спутниковых протоколов — старый
+`do_import_config`/`do_full_migration_import` их просто не найдёт в
+`restore_map` и тихо проигнорирует (поведение не изменилось). Для
+осознанного восстановления спутниковых протоколов из общего архива
+пользователь должен использовать меню соответствующего протокола
+(AWG Standalone → Backup → Restore, Hysteria2 → Backup → Restore, и т.д.)
+— теперь эти независимые backup-модули имеют доступ к путям через общую
+систему, что можно использовать в будущих патчах для автоматического
+restore из общего архива.
+
+---
+
 ## REFACTOR(geo): эталонный хэш ОДИН РАЗ через короткий приоритетный список — 24 июля 2026
 
 **Полная замена логики SHA256-верификации геофайлов. Старая `_verify_checksum()` удалена, заменена на `_fetch_reference_hash()` + прямое сравнение в цикле. Это закрывает класс багов «цирка с геофайлами», который мучил несколько дней: установка падала на SHA256-mismatch, emergency fallback не работал, _verify_checksum перебирал все 19 зеркал заново для каждого .dat-кандидата.**

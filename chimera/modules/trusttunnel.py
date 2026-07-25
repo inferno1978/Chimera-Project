@@ -1982,6 +1982,41 @@ def do_trusttunnel_menu() -> None:
             break
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  УЧАСТИЕ В ОБЩЕМ БЭКАПЕ (единая автообнаружаемая система chimera.modules.backup_registry)
+# ══════════════════════════════════════════════════════════════════════════════
+def get_backup_paths() -> list[tuple[Path, str]]:
+    """Возвращает [(реальный_путь, имя_в_архиве), ...] — всё необходимое для
+    восстановления TrustTunnel БЕЗ переиздания пользовательских секретов.
+
+    Файлы:
+      • /var/lib/xray-installer/trusttunnel.json — module state (порт, версия,
+        список хостов, статус инсталляции).
+      • /opt/trusttunnel/vpn.toml — конфиг VPN-туннеля.
+      • /opt/trusttunnel/hosts.toml — конфиг хостов.
+      • /opt/trusttunnel/rules.toml — конфиг rules.
+      • /etc/systemd/system/trusttunnel.service — systemd unit.
+
+    Не включаем credentials.toml — там пользовательские секреты, их
+    переиздают после восстановления через меню TrustTunnel (это явное
+    намерение, не баг — иначе старые скомпрометированные креды поехали
+    бы на новый сервер).
+
+    Пустой список если протокол не установлен. Никогда не бросает исключение.
+    """
+    try:
+        candidates = [
+            (_STATE_FILE,   "trusttunnel/trusttunnel_state.json"),
+            (_VPN_TOML,     "trusttunnel/vpn.toml"),
+            (_HOSTS_TOML,   "trusttunnel/hosts.toml"),
+            (_RULES_TOML,   "trusttunnel/rules.toml"),
+            (_SERVICE_FILE, "etc/systemd/system/trusttunnel.service"),
+        ]
+        return [(p, arcname) for p, arcname in candidates if p.exists()]
+    except Exception:
+        return []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  АВТОНОМНЫЙ ЗАПУСК
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":

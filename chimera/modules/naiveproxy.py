@@ -1639,6 +1639,33 @@ def do_naiveproxy_menu() -> None:
             break
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  УЧАСТИЕ В ОБЩЕМ БЭКАПЕ (единая автообнаружаемая система chimera.modules.backup_registry)
+# ══════════════════════════════════════════════════════════════════════════════
+def get_backup_paths() -> list[tuple[Path, str]]:
+    """Возвращает [(реальный_путь, имя_в_архиве), ...] — всё необходимое для
+    восстановления NaiveProxy БЕЗ переиздания пользовательских секретов.
+
+    Файлы:
+      • /etc/caddy-naive/Caddyfile — конфиг Caddy+naive (порт, sni, пути).
+      • /etc/caddy-naive/probe_secret — секрет для пробо-ендпоинта.
+      • /etc/systemd/system/caddy-naive.service — systemd unit.
+      • /var/lib/xray-installer/naiveproxy.json — module state.
+
+    Пустой список если протокол не установлен. Никогда не бросает исключение.
+    """
+    try:
+        candidates = [
+            (_CADDYFILE,    "caddy-naive/Caddyfile"),
+            (_PROBE_SECRET, "caddy-naive/probe_secret"),
+            (_SERVICE_FILE, "etc/systemd/system/caddy-naive.service"),
+            (_MODULE_STATE, "naiveproxy/naiveproxy_state.json"),
+        ]
+        return [(p, arcname) for p, arcname in candidates if p.exists()]
+    except Exception:
+        return []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  АВТОНОМНЫЙ ЗАПУСК
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":

@@ -1618,6 +1618,36 @@ def do_fptn_menu() -> None:
             break
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  УЧАСТИЕ В ОБЩЕМ БЭКАПЕ (единая автообнаружаемая система chimera.modules.backup_registry)
+# ══════════════════════════════════════════════════════════════════════════════
+def get_backup_paths() -> list[tuple[Path, str]]:
+    """Возвращает [(реальный_путь, имя_в_архиве), ...] — всё необходимое для
+    восстановления FPTN БЕЗ переиздания пользовательских секретов.
+
+    Файлы:
+      • /etc/fptn/server.conf — конфиг сервера (порт, cert/key пути).
+      • /etc/fptn/server.crt и /etc/fptn/server.key — серверный TLS-cert
+        (НЕ пользовательские ключи — пользователи живут в users.list,
+        который восстанавливается отдельно при необходимости).
+      • /etc/systemd/system/fptn-server.service — systemd unit.
+      • /var/lib/xray-installer/fptn.json — module state (порт, версия, и т.д.).
+
+    Пустой список если протокол не установлен. Никогда не бросает исключение.
+    """
+    try:
+        candidates = [
+            (_CFG_FILE,     "fptn/server.conf"),
+            (_CERT_FILE,    "fptn/server.crt"),
+            (_KEY_FILE,     "fptn/server.key"),
+            (_SERVICE_FILE, "etc/systemd/system/fptn-server.service"),
+            (_MODULE_STATE, "fptn/fptn_state.json"),
+        ]
+        return [(p, arcname) for p, arcname in candidates if p.exists()]
+    except Exception:
+        return []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  АВТОНОМНЫЙ ЗАПУСК
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":

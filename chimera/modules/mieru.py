@@ -1841,6 +1841,31 @@ def _obfuscation_menu() -> None:
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  УЧАСТИЕ В ОБЩЕМ БЭКАПЕ (единая автообнаружаемая система chimera.modules.backup_registry)
+# ══════════════════════════════════════════════════════════════════════════════
+def get_backup_paths() -> list[tuple[Path, str]]:
+    """Возвращает [(реальный_путь, имя_в_архиве), ...] — всё необходимое для
+    восстановления Mieru (mita) БЕЗ переиздания пользовательских секретов.
+
+    Файлы:
+      • /etc/mita/server.json — основной конфиг mita-сервера.
+      • /etc/systemd/system/mita.service — systemd unit.
+      • /var/lib/xray-installer/mieru.json — module state (порт, версия и т.д.).
+
+    Пустой список если протокол не установлен. Никогда не бросает исключение.
+    """
+    try:
+        candidates = [
+            (_SERVER_CFG,   "mita/server.json"),
+            (_SERVICE_FILE, "etc/systemd/system/mita.service"),
+            (_MODULE_STATE, "mieru/mieru_state.json"),
+        ]
+        return [(p, arcname) for p, arcname in candidates if p.exists()]
+    except Exception:
+        return []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  АВТОНОМНЫЙ ЗАПУСК
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":

@@ -130,6 +130,21 @@ def do_full_migration_export() -> None:
                 if f.is_file():
                     include_paths.append((f, f"letsencrypt/archive/{domain}/{f.name}"))
 
+    # ── АВТООБНАРУЖЕНИЕ протоколов через backup_registry ──────────────────────
+    # Все спутниковые протоколы (Telemt, Mieru, NaiveProxy, FPTN, TrustTunnel,
+    # sing-box семейство, AWG Standalone, Hysteria2, и любые будущие)
+    # добавляют свой get_backup_paths() — здесь НИКАКИХ изменений не нужно
+    # при появлении нового протокола. Это и есть APPEND-FREE дизайн.
+    try:
+        from chimera.modules.backup_registry import discover_backup_paths
+        _discovered = discover_backup_paths()
+        if _discovered:
+            include_paths.extend(_discovered)
+            dim(f"  + автообнаружено протоколов: {len(_discovered)} путей")
+    except Exception as _e:
+        warn(f"  Автообнаружение протоколов не удалось: {_e}")
+        warn(f"  (статический include_paths остаётся в силе)")
+
     _box_row(f"  {YELLOW}Архив будет зашифрован паролем (AES-256-CBC){NC}")
     _box_bottom()
     while True:

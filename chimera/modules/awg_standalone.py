@@ -1653,3 +1653,48 @@ def do_awgs_rotate_menu() -> None:
         except ValueError:
             warn("Неверный ввод")
         input(f"\n{CYAN}Нажмите Enter...{NC}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  УЧАСТИЕ В ОБЩЕМ БЭКАПЕ (единая автообнаружаемая система chimera.modules.backup_registry)
+# ══════════════════════════════════════════════════════════════════════════════
+# У AWG Standalone уже есть собственный полнофункциональный бэкап-модуль
+# (awg_backup.py с awgs_backup_create/awgs_backup_restore), который вызывается
+# из отдельного меню AWG. Здесь — ТОЛЬКО список путей для ЕДИНОГО бэкапа всего
+# проекта, чтобы пользователь по привычке нажавший "Экспорт всего" в главном
+# меню получил AWG-конфиги в общем архиве тоже. Дублирования логики нет —
+# только пути.
+def get_backup_paths() -> list[tuple[Path, str]]:
+    """Возвращает [(реальный_путь, имя_в_архиве), ...] — всё необходимое для
+    восстановления AWG Standalone БЕЗ переиздания клиентских ключей.
+
+    Файлы:
+      • /etc/amnezia/amneziawg/awg0.conf — серверный конфиг (PrivateKey
+        сервера + параметры обфускации — без них клиенты не смогут
+        подключиться; клиентские ключи НЕ входят в серверный конфиг,
+        они лежат в /root/awg/keys/ и не бэкапятся здесь намеренно).
+      • /root/awg/awgsetup_cfg.init — init-файл (параметры установки).
+      • /var/lib/xray-installer/awg_standalone_state.json — module state.
+      • /etc/systemd/system/awg-cascade-routing.service — systemd-unit
+        каскада (опционально, только если установлен каскад).
+
+    Клиентские конфиги (/root/awg/keys/*) НЕ включаем — это пользовательские
+    секреты, их переиздают после восстановления через меню AWG Standalone.
+
+    Пустой список если AWG Standalone не установлен. Никогда не бросает
+    исключение.
+    """
+    try:
+        from .awg_constants import (
+            AWGS_SERVER_CONF, AWGS_INIT_FILE, AWGS_STATE_FILE,
+            AWGS_SYSTEMD_CASCADE,
+        )
+        candidates = [
+            (AWGS_SERVER_CONF,        "amnezia/amneziawg/awg0.conf"),
+            (AWGS_INIT_FILE,          "awg/awgsetup_cfg.init"),
+            (AWGS_STATE_FILE,         "awg/awg_standalone_state.json"),
+            (AWGS_SYSTEMD_CASCADE,    "etc/systemd/system/awg-cascade-routing.service"),
+        ]
+        return [(p, arcname) for p, arcname in candidates if p.exists()]
+    except Exception:
+        return []
