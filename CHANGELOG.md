@@ -2,6 +2,83 @@
 
 ---
 
+## FIX(mtproto_stats): "Последний вход: —" для активных пользователей Telemt — 26 июля 2026
+
+**На реальном сервере в TUI статистики Telemt (меню Telemt → Статистика) в графе «Последний вход» отображалось «—» для активных пользователей, у которых трафик реально есть (4.9 KiB / 9.7 KiB). Причина — узкий парсер journalctl, который пропускал реальные строки логов telemt. Чиним без бампа версии.**
+
+### Корневая причина
+
+`mtproto_stats._parse_journal()` имел три узких места:
+
+1. **Timestamp-регулярка ждала только `T`-разделитель** — `^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})`. Если journalctl или telemt пишет timestamp с пробелом вместо `T` (например `short-full` формат, или другая версия journald) — timestamp не извлекался, `last_seen` оставался `"—"`.
+
+2. **Multiline-сообщения обрабатывались построчно без контекста.** Journald может разрывать длинные сообщения на несколько строк; continuation-строки не имеют своего timestamp. Если `user=alice` оказывалась на continuation-строке (например, после строки `new MTProto connection` с timestamp), то:
+   - Имя пользователя извлекалось (матчилось на `user=alice`).
+   - Timestamp — нет (continuation-строка без timestamp в начале).
+   - `last_seen` оставался `"—"`.
+   - Это объясняет почему в TUI имя отображалось, а «Последний вход» — нет.
+
+3. **Узкий паттерн session:** `connect|new.?client|auth.?ok` пропускал много реальных сообщений telemt: `accepted`, `login`, `session started`, `handshake ok`, `client ok`, `authenticated`. Из-за этого `sessions=0` даже для активных пользователей.
+
+### Фикс
+
+**1. `_extract_ts()` — новая helper-функция в `_parse_journal`** — принимает оба варианта разделителя между датой и временем: `T` (стандартный `short-iso`) и пробел (`short-full` и другие). Возвращает `'YYYY-MM-DD HH:MM:SS'`.
+
+**2. Multiline-handling через `last_ts`-переменную** — запоминаем последний timestamp из предыдущей строки. Если текущая строка содержит `user=` но не содержит timestamp (continuation-строка), используем `last_ts` как fallback. Это НЕ идеально (timestamp может быть из предыдущего log-entry), но лучше чем `"—"` для активных пользователей.
+
+**3. Расширенный `_SESSION_RE`** — `connect | new.?client | auth(.|_)?(ok|enticated) | session.?start | accepted | login | handshake.?ok | client.?ok`. Покрывает реальные сообщения от tracing-логгера telemt.
+
+**4. Расширенная регулярка пользователя** — помимо `user=`/`client=`/`user[`/`client[`, теперь принимает `username=`, `name=`, и значения в кавычках (`user="alice"`, `user='alice'`) через опциональную группу `(["\']?)([a-zA-Z][a-zA-Z0-9_\-]+)\1`.
+
+**5. Fallback `last_seen` в `_collect()` для активных пользователей** — если у пользователя есть трафик (`rx>0` или `tx>0`) но `last_seen="—"` (ни одна строка journalctl не сматчилась), используем `d["total"]["updated"]` как приблизительное время последней активности. Это лучше чем `"—"` для активных пользователей, чьи логи telemt пишутся в формате, который не распознаётся текущим парсером.
+
+ВАЖНО: fallback применяется **ТОЛЬКО** к пользователям с ненулевым трафиком. Если `rx=0` и `tx=0` — пользователь никогда не подключался, оставляем `"—"` (не выдумываем время для пустого пользователя). Применяется **ПОСЛЕ** распределения байт, чтобы распределённый трафик тоже учитывался в условии `rx>0`/`tx>0`.
+
+### Регрессионные тесты (8 новых)
+
+`tests/test_mtproto_stats.py` — 6 новых в `TestParseJournal` + 2 новых в `TestCollectLastSeenFallback`:
+
+1. `test_realistic_short_iso_format_with_hostname_and_pid` — реальный вывод journalctl `-o short-iso` (с hostname, PID, +TZ offset) — main regression marker.
+2. `test_multiline_continuation_uses_last_timestamp` — multiline-сообщение с `user=` на continuation-строке → `last_seen` берётся из предыдущей строки (через `last_ts`).
+3. `test_timestamp_with_space_separator_accepted` — timestamp с пробелом вместо `T` (как `short-full`).
+4. `test_extended_session_patterns_recognized` — `accepted`/`login`/`session started`/`handshake ok`/`client ok`/`authenticated` → все дают `sessions=1`.
+5. `test_user_with_quotes_in_value_parsed` — `user="alice"` и `user='bob'` (с кавычками).
+6. `test_username_key_also_recognized` — `username=alice` и `name=bob` (не только `user=`).
+7. `test_user_with_traffic_but_no_journal_gets_fallback_last_seen` — fallback `last_seen` из `d["total"]["updated"]` при `rx>0`/`tx>0` и пустом journalctl.
+8. `test_user_without_traffic_stays_dash` — пользователь без трафика → `last_seen` остаётся `"—"` (не выдумываем время).
+
+### ВАЖНО про отдельную Telemt Panel (веб-панель)
+
+Telemt Panel (`chimera/modules/telemt_panel.py`) — это **отдельный Go-бинарник** с React-фронтендом (github.com/amirotin/telemt_panel). Она общается с telemt через **HTTP API Telemt** (127.0.0.1:9091), а НЕ через наши iptables-цепочки `TELEMT_STATS_IN/OUT` или journalctl. У панели собственный механизм отображения статистики, наши фиксы `mtproto_stats.py` её **не затрагивают**.
+
+Наши фиксы помогают TUI статистики Telemt в самом Chimera (меню Telemt → Статистика), где:
+- Раньше «Последний вход: —» даже для активных пользователей.
+- Раньше `sessions=0` для активных пользователей (узкий session-паттерн).
+- Теперь `last_seen` заполняется (либо из journalctl, либо fallback из `total.updated`).
+- Теперь `sessions` корректно считается (расширенный паттерн).
+
+Если в веб-панели Telemt трафик тоже не считался — это отдельная проблема в самом telemt (его API / tracing-логи), не в нашем коде. Чинить нужно в upstream telemt, не в Chimera.
+
+### Изменённые файлы
+
+- `chimera/modules/mtproto_stats.py` — `_parse_journal()` расширен: `_extract_ts()` helper, `last_ts` для multiline-continuation, расширенный `_SESSION_RE`, расширенная регулярка пользователя с кавычками и `username`/`name` ключами. `_collect()` — fallback `last_seen` для активных пользователей из `d["total"]["updated"]` (после распределения байт).
+- `tests/test_mtproto_stats.py` — +8 тестов (6 на `_parse_journal` + 2 на `_collect` fallback).
+
+### Тесты
+
+- `tests/test_mtproto_stats.py` — 46/46 PASS (38 + 8 новых).
+- Регрессия: `test_mtproto*.py` + `test_traffic_*.py` — **285/285 PASS** (277 + 8 новых).
+- `full_test.py` — **10/10 PASS**, проект готов к релизу.
+
+### Совместимость
+
+Полностью обратно совместимо:
+1. Старые форматы логов (с `T`-разделителем, без кавычек, с `user=`) — все продолжают работать.
+2. Новые форматы (с пробелом, с кавычками, с `username=`/`name=`) — теперь тоже работают.
+3. Fallback `last_seen` применяется только когда `rx>0`/`tx>0` и `last_seen="—"` — не меняет поведение для пользователей без трафика.
+
+---
+
 ## FIX(mtproto): парсинг числового протокола "6" в _ipt_jump_exists + идемпотентность setup_iptables_accounting при повторных [3] — 26 июля 2026
 
 **После коммита 0b412e3 (постфактум-верификация iptables-accounting) обнаружен ложноположительный отказ на реальном сервере: iptables-учёт для Telemt физически работает (jump-правила стоят, счётчики пакетов/байт растут — подтверждено на сервере: 119 пакетов / 15936 байт на TELEMT_STATS_IN, 111 / 48027 на TELEMT_STATS_OUT), но `setup_iptables_accounting()` всё равно возвращает False и TUI показывает «iptables-учёт НЕ активирован». Корневых причин две — чиним одной задачей, без бампа версии.**

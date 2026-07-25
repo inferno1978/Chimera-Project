@@ -431,6 +431,28 @@ def _parse_journal(since: Optional[str] = None) -> dict:
     """
     Парсит journalctl telemt.
     Возвращает: {username: {sessions, last_seen}}
+
+    Формат вывода journalctl -o short-iso:
+        2026-07-26T12:34:56+0300 host telemt[1234]: <message>
+    Telemt (Rust, tracing crate) пишет в message свои строки, например:
+        user=alice connected from 1.2.3.4
+        new client user=bob
+        client alice authenticated
+        session started for user=carol
+
+    Поддержка нескольких сценариев:
+      1. Стандартный short-iso: timestamp в начале строки, дальше message.
+      2. Multiline-сообщения: journald может разрывать длинные сообщения
+         на несколько строк; continuation-строки не имеют timestamp.
+         Запоминаем последний timestamp и применяем его к continuation-строкам
+         с user= (это фикс «Последний вход: —» для пользователей, чьё имя
+         оказалось на continuation-строке).
+      3. timestamp с пробелом вместо T (если кто-то изменил формат
+         journalctl или используется short-full): принимаем оба варианта.
+      4. session-паттерн расширен: connect | new.?client | auth.?ok |
+         session.?start | accepted | login | handshake.?ok | client.?ok.
+         Раньше узкий паттерн пропускал много реальных сообщений telemt,
+         из-за чего sessions=0 даже для активных пользователей.
     """
     cmd = ["journalctl", "-u", SERVICE_NAME, "--no-pager", "-o", "short-iso"]
     if since:
@@ -438,28 +460,69 @@ def _parse_journal(since: Optional[str] = None) -> dict:
     r = _run(cmd, capture=True)
 
     result: dict = {}
+    # Запоминаем последний timestamp из предыдущей строки — для
+    # continuation-строк без timestamp в начале (multiline-сообщения).
+    last_ts: Optional[str] = None
 
     def _ensure(name):
         if name not in result:
             result[name] = {"sessions": 0, "last_seen": "—"}
 
+    def _extract_ts(line: str) -> Optional[str]:
+        """Извлекает timestamp из начала строки.
+
+        Принимает оба варианта разделителя между датой и временем:
+          • T (стандартный short-iso): 2026-07-26T12:34:56+0300
+          • пробел (short-full / другие): 2026-07-26 12:34:56
+        Возвращает 'YYYY-MM-DD HH:MM:SS' или None.
+        """
+        m = re.match(r'^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})', line)
+        if m:
+            return f"{m.group(1)} {m.group(2)}"
+        return None
+
+    # Расширенный паттерн «соединение установлено» — покрывает реальные
+    # сообщения от tracing-логгера telemt. Буквы после `auth`/`connect`
+    # могут быть: `auth.ok`, `auth_ok`, `authenticated`, `connect from`,
+    # `new client`, `client connected`, `session started`, `accepted`,
+    # `handshake ok`, `client ok`, `login`, и т.п.
+    _SESSION_RE = re.compile(
+        r'connect|new.?client|auth(?:\.|_)?(?:ok|enticated)|'
+        r'session.?start|accepted|login|handshake.?ok|client.?ok',
+        re.IGNORECASE
+    )
+
     for line in r.stdout.splitlines():
+        # Сначала пытаемся извлечь timestamp из текущей строки
+        ts = _extract_ts(line)
+        if ts:
+            last_ts = ts
+
         m_user = re.search(
-            r'(?:user[=:\[]\s*|client[=:\[]\s*)([a-zA-Z][a-zA-Z0-9_\-]+)',
+            r'(?:user[=:\[]\s*|client[=:\[]\s*|username[=:]\s*|name[=:]\s*)'
+            r'(["\']?)([a-zA-Z][a-zA-Z0-9_\-]+)\1',
             line, re.IGNORECASE
         )
         if not m_user:
             continue
-        uname = m_user.group(1)
-        if uname.lower() in ("root", "telemt", "system", "service"):
+        uname = m_user.group(2)
+        if uname.lower() in ("root", "telemt", "system", "service", "client"):
             continue
         _ensure(uname)
 
-        ts_m = re.match(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})', line)
-        if ts_m:
-            result[uname]["last_seen"] = ts_m.group(1).replace("T", " ")
+        # last_seen обновляем: либо из текущей строки, либо из last_ts
+        # (для continuation-строк multiline-сообщений).
+        if ts:
+            result[uname]["last_seen"] = ts
+        elif last_ts:
+            # continuation-строка без своего timestamp — используем
+            # последний известный. Это НЕ идеально (timestamp может быть
+            # из предыдущего log-entry), но лучше чем "—" для активных
+            # пользователей. Только обновляем если текущий last_seen = "—".
+            if result[uname]["last_seen"] == "—":
+                result[uname]["last_seen"] = last_ts
 
-        if re.search(r'connect|new.?client|auth.?ok', line, re.IGNORECASE):
+        if _SESSION_RE.search(line):
             result[uname]["sessions"] += 1
 
     return result
@@ -553,6 +616,27 @@ def _collect(d: dict) -> dict:
             for i, uname in enumerate(active):
                 d["users"][uname]["rx"] = (total_rx - (total_rx // n) * (n-1)) if i == n-1 else total_rx // n
                 d["users"][uname]["tx"] = (total_tx - (total_tx // n) * (n-1)) if i == n-1 else total_tx // n
+
+    # ── Fallback для last_seen: если у пользователя есть трафик (rx>0 или
+    # tx>0) но last_seen="—" (ни одна строка journalctl не сматчилась на
+    # user=<name> с timestamp) — используем d["total"]["updated"] как
+    # приблизительное время последней активности. Это лучше чем "—" для
+    # активных пользователей, чьи логи telemt пишутся в формате, который
+    # не распознаётся текущим парсером (например, multiline-сообщения,
+    # или format без явного user= в строке с timestamp).
+    #
+    # ВАЖНО: fallback применяется ТОЛЬКО к пользователям с ненулевым
+    # трафиком. Если rx=0 и tx=0 — пользователь никогда не подключался,
+    # оставляем "—" (не выдумываем время для пустого пользователя).
+    #
+    # Применяется ПОСЛЕ распределения байт, чтобы распределённый трафик
+    # тоже учитывался в условии rx>0/tx>0 (для пользователей, у которых
+    # трафик не был явно установлен ранее).
+    _total_updated = d["total"].get("updated", "") or _now_str()
+    for uname, udata in d["users"].items():
+        if (udata.get("last_seen", "—") == "—"
+                and (udata.get("rx", 0) > 0 or udata.get("tx", 0) > 0)):
+            udata["last_seen"] = _total_updated
 
     d["total"]["updated"] = _now_str()
     return d
