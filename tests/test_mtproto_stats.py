@@ -338,6 +338,190 @@ class TestParseJournal(unittest.TestCase):
         self.assertIn("--since", cmd)
         self.assertIn("2026-07-09", cmd)
 
+    # ── Регрессионные тесты на реалистичные форматы journalctl + telemt ──────
+    def test_realistic_short_iso_format_with_hostname_and_pid(self):
+        r"""Реальный вывод journalctl -o short-iso:
+            2026-07-26T12:34:56+0300 host telemt[1234]: <message>
+        Старая регулярка ^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}) работает,
+        но новая _extract_ts также принимает пробел вместо T.
+        """
+        from chimera.modules import mtproto_stats
+        lines = "\n".join([
+            "2026-07-26T12:34:56+0300 fast-cheetah telemt[1234]: user=alice connected from 1.2.3.4",
+            "2026-07-26T12:35:00+0300 fast-cheetah telemt[1234]: user=bob authenticated",
+        ])
+        with patch.object(mtproto_stats, "_run",
+                          return_value=self._mock_run(lines)):
+            result = mtproto_stats._parse_journal()
+        self.assertIn("alice", result)
+        self.assertIn("bob", result)
+        self.assertEqual(result["alice"]["last_seen"], "2026-07-26 12:34:56")
+        self.assertEqual(result["bob"]["last_seen"], "2026-07-26 12:35:00")
+        # alice — 1 сессия (connect), bob — 1 (authenticated)
+        self.assertEqual(result["alice"]["sessions"], 1)
+        self.assertEqual(result["bob"]["sessions"], 1)
+
+    def test_multiline_continuation_uses_last_timestamp(self):
+        """Если telemt пишет multiline-сообщение, continuation-строка
+        не имеет своего timestamp. user=alice на continuation-строке
+        должна получить timestamp из предыдущей строки.
+        """
+        from chimera.modules import mtproto_stats
+        lines = "\n".join([
+            # Первая строка с timestamp + общая информация (без user=)
+            "2026-07-26T12:34:56+0300 host telemt[1234]: new MTProto connection",
+            # Continuation-строка БЕЗ timestamp, но с user=
+            "                    user=alice, secret=abc123, ip=1.2.3.4",
+        ])
+        with patch.object(mtproto_stats, "_run",
+                          return_value=self._mock_run(lines)):
+            result = mtproto_stats._parse_journal()
+        self.assertIn("alice", result)
+        # last_seen должен быть из предыдущей строки (fallback на last_ts)
+        self.assertNotEqual(result["alice"]["last_seen"], "—",
+                            "multiline continuation should use last_ts, not stay '—'")
+        self.assertEqual(result["alice"]["last_seen"], "2026-07-26 12:34:56")
+
+    def test_timestamp_with_space_separator_accepted(self):
+        """Если journalctl использует пробел вместо T (например short-full),
+        _extract_ts всё равно должен распознать timestamp.
+        """
+        from chimera.modules import mtproto_stats
+        lines = "2026-07-26 12:34:56 host telemt[1234]: user=alice connect from 1.2.3.4"
+        with patch.object(mtproto_stats, "_run",
+                          return_value=self._mock_run(lines)):
+            result = mtproto_stats._parse_journal()
+        self.assertIn("alice", result)
+        self.assertEqual(result["alice"]["last_seen"], "2026-07-26 12:34:56")
+
+    def test_extended_session_patterns_recognized(self):
+        """Расширенный паттерн _SESSION_RE должен ловить не только
+        connect/auth.ok, но и: accepted, login, session start,
+        handshake ok, client ok, authenticated.
+        """
+        from chimera.modules import mtproto_stats
+        lines = "\n".join([
+            "2026-07-26T12:00:01 host telemt[1234]: user=alice accepted",
+            "2026-07-26T12:00:02 host telemt[1234]: user=bob login",
+            "2026-07-26T12:00:03 host telemt[1234]: user=carol session started",
+            "2026-07-26T12:00:04 host telemt[1234]: user=dave handshake ok",
+            "2026-07-26T12:00:05 host telemt[1234]: user=eve client ok",
+            "2026-07-26T12:00:06 host telemt[1234]: user=frank authenticated",
+        ])
+        with patch.object(mtproto_stats, "_run",
+                          return_value=self._mock_run(lines)):
+            result = mtproto_stats._parse_journal()
+        # Все 6 пользователей должны быть с sessions=1
+        for name in ("alice", "bob", "carol", "dave", "eve", "frank"):
+            self.assertIn(name, result)
+            self.assertEqual(result[name]["sessions"], 1,
+                             f"{name} should have sessions=1 with extended pattern")
+
+    def test_user_with_quotes_in_value_parsed(self):
+        """user="alice" или user='alice' (с кавычками) — новая регулярка
+        принимает оба варианта через опциональную группу (["\\']?).
+        """
+        from chimera.modules import mtproto_stats
+        lines = "\n".join([
+            '2026-07-26T12:00:01 host telemt[1234]: user="alice" connect from 1.2.3.4',
+            "2026-07-26T12:00:02 host telemt[1234]: user='bob' connect from 5.6.7.8",
+        ])
+        with patch.object(mtproto_stats, "_run",
+                          return_value=self._mock_run(lines)):
+            result = mtproto_stats._parse_journal()
+        self.assertIn("alice", result)
+        self.assertIn("bob", result)
+        self.assertEqual(result["alice"]["sessions"], 1)
+        self.assertEqual(result["bob"]["sessions"], 1)
+
+    def test_username_key_also_recognized(self):
+        """username=alice (а не только user=) — новая регулярка принимает
+        и username, и name как ключи.
+        """
+        from chimera.modules import mtproto_stats
+        lines = "\n".join([
+            "2026-07-26T12:00:01 host telemt[1234]: username=alice connect",
+            "2026-07-26T12:00:02 host telemt[1234]: name=bob accepted",
+        ])
+        with patch.object(mtproto_stats, "_run",
+                          return_value=self._mock_run(lines)):
+            result = mtproto_stats._parse_journal()
+        self.assertIn("alice", result)
+        self.assertIn("bob", result)
+
+
+class TestCollectLastSeenFallback(unittest.TestCase):
+    """_collect — fallback last_seen при трафике >0 но пустом journalctl.
+
+    Если у пользователя есть трафик (rx>0 или tx>0), но journalctl не
+    вернул для него timestamp (например, telemt пишет в формате, который
+    не распознаётся парсером) — _collect использует d["total"]["updated"]
+    как приблизительное время последней активности. Это лучше чем "—"
+    для активных пользователей.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg = self._tmpdir / "telemt.toml"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_cfg(self):
+        return patch("chimera.modules.mtproto_stats.CONFIG_FILE",
+                     self._cfg)
+
+    def test_user_with_traffic_but_no_journal_gets_fallback_last_seen(self):
+        """Пользователь с rx>0, но journalctl пуст → last_seen берётся
+        из d["total"]["updated"], а не остаётся '—'.
+        """
+        from chimera.modules import mtproto_stats
+        d = {
+            "total": {"rx": 1000, "tx": 2000, "updated": "2026-07-26 12:00:00",
+                      "since": "2026-07-20 00:00:00"},
+            "daily": {"2026-07-26": {"rx": 1000, "tx": 2000}},
+            "users": {"alice": {"sessions": 0, "rx": 0, "tx": 0, "last_seen": "—"}},
+            "ipt_ok": True,
+        }
+        with self._patch_cfg(), \
+             patch.object(mtproto_stats, "_read_chain_bytes",
+                          side_effect=[1000, 2000]), \
+             patch.object(mtproto_stats, "_parse_journal", return_value={}), \
+             patch.object(mtproto_stats, "_load_users", return_value={"alice": "secret"}):
+            result = mtproto_stats._collect(d)
+        # alice получила трафик через распределение (1 активный пользователь)
+        self.assertGreater(result["users"]["alice"]["rx"], 0)
+        # last_seen НЕ должен остаться '—' — fallback на total.updated
+        self.assertNotEqual(result["users"]["alice"]["last_seen"], "—",
+                            "user with traffic should get fallback last_seen")
+        self.assertEqual(result["users"]["alice"]["last_seen"],
+                         "2026-07-26 12:00:00")
+
+    def test_user_without_traffic_stays_dash(self):
+        """Пользователь без трафика (rx=0, tx=0) и без journalctl →
+        last_seen остаётся '—' (не выдумываем время для пустого польз.).
+        """
+        from chimera.modules import mtproto_stats
+        d = {
+            "total": {"rx": 0, "tx": 0, "updated": "2026-07-26 12:00:00",
+                      "since": "2026-07-20 00:00:00"},
+            "daily": {},
+            "users": {"alice": {"sessions": 0, "rx": 0, "tx": 0, "last_seen": "—"}},
+            "ipt_ok": True,
+        }
+        with self._patch_cfg(), \
+             patch.object(mtproto_stats, "_read_chain_bytes",
+                          side_effect=[0, 0]), \
+             patch.object(mtproto_stats, "_parse_journal", return_value={}), \
+             patch.object(mtproto_stats, "_load_users", return_value={"alice": "secret", "bob": "secret2"}):
+            result = mtproto_stats._collect(d)
+        # alice без трафика — last_seen остаётся '—'
+        self.assertEqual(result["users"]["alice"]["last_seen"], "—")
+        # bob — новый пользователь без трафика, тоже '—'
+        self.assertEqual(result["users"]["bob"]["last_seen"], "—")
+
 
 class TestCollect(unittest.TestCase):
     """_collect — обновление статистики (mocked iptables + journalctl)."""
