@@ -37,6 +37,13 @@ from typing import Optional
 STATS_FILE   = Path("/var/lib/telemt/stats.json")
 CONFIG_FILE  = Path("/etc/telemt/telemt.toml")
 CRON_FILE    = Path("/etc/cron.d/telemt-stats")
+# v5.1: wrapper bash-скрипт для cron-проверки лимитов (PYTHONPATH-safe).
+# Bare `python3 -c "from chimera..."` в cron НЕ работает — cron
+# запускается с произвольной cwd и без PYTHONPATH, поэтому
+# `from chimera...` падает с ModuleNotFoundError. Wrapper-скрипт
+# экспорит PYTHONPATH перед вызовом python3 (тот же паттерн, что в
+# node_health_monitor.py::install_health_monitor и geo_files.py).
+LIMITS_CHECK_SCRIPT = Path("/usr/local/sbin/telemt-limits-check.sh")
 CHAIN_IN     = "TELEMT_STATS_IN"
 CHAIN_OUT    = "TELEMT_STATS_OUT"
 SERVICE_NAME = "telemt"
@@ -357,14 +364,62 @@ def setup_iptables_accounting(port: int) -> bool:
         # чтобы mtproto.py показал честный warn, а не фейковый success.
         pass
 
-    # Cron: сброс счётчиков в 00:00 + проверка лимитов каждые 5 мин
+    # Cron: сброс счётчиков в 00:00 + проверка лимитов каждые 5 мин.
+    #
+    # v5.1: проверка лимитов раньше шла через bare `python3 -c "from
+    # chimera.modules.mtproto import mtproto_check_limits; ..."` — это
+    # НЕ работало, потому что cron запускается с произвольной cwd и без
+    # PYTHONPATH, и `from chimera...` падал с ModuleNotFoundError
+    # (подтверждено трейсбеком с реального сервера пользователя zvshka).
+    # Квоты/expiry Telemt НИКОГДА реально не проверялись через cron.
+    #
+    # Паттерн исправления — wrapper bash-скрипт (как в
+    # node_health_monitor.py::install_health_monitor и
+    # geo_files.py::setup_geo_autoupdate): находим путь установки
+    # chimera, экспорим PYTHONPATH, вызываем python -c с
+    # sys.path.insert(0, ...). Cron-файл просто вызывает wrapper.
+
+    # Находим путь установки chimera (тот же способ, что в
+    # node_health_monitor.py::install_health_monitor).
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("chimera")
+        if spec and spec.submodule_search_locations:
+            installer_path = str(
+                Path(list(spec.submodule_search_locations)[0]).parent
+            )
+        else:
+            installer_path = "/opt/chimera"
+    except Exception:
+        installer_path = "/opt/chimera"
+
+    # Wrapper bash-скрипт: export PYTHONPATH + sys.path.insert + python -c.
+    # Ошибки записи wrapper-скрипта НЕ должны блокировать запись cron-файла
+    # (могут быть разные причины: read-only fs, отсутствие /usr/local/sbin и пр.)
+    try:
+        script_content = (
+            "#!/bin/bash\n"
+            f"# Telemt limits check (wrapper для cron; v5.1: PYTHONPATH-safe).\n"
+            f"export PYTHONPATH=\"{installer_path}:$PYTHONPATH\"\n"
+            f"/usr/bin/python3 -c \"\n"
+            f"import sys\n"
+            f"sys.path.insert(0, '{installer_path}')\n"
+            f"from chimera.modules.mtproto import mtproto_check_limits\n"
+            f"mtproto_check_limits()\n"
+            f"\" # telemt-limits-check\n"
+        )
+        LIMITS_CHECK_SCRIPT.write_text(script_content)
+        LIMITS_CHECK_SCRIPT.chmod(0o755)
+    except Exception:
+        pass
+
+    # Cron-файл: сброс iptables-счётчиков в 00:00 (pure shell, без python)
+    # + проверка лимитов каждые 5 мин (через wrapper-скрипт).
     try:
         CRON_FILE.write_text(
             f"0 0 * * * root iptables -Z {CHAIN_IN} && iptables -Z {CHAIN_OUT}"
             f"  # telemt-stats\n"
-            f"*/5 * * * * root /usr/bin/python3 -c \""
-            f"from chimera.modules.mtproto import mtproto_check_limits; "
-            f"mtproto_check_limits()\" # telemt-limits-check\n"
+            f"*/5 * * * * root {LIMITS_CHECK_SCRIPT} # telemt-limits-check\n"
         )
         CRON_FILE.chmod(0o644)
     except Exception:

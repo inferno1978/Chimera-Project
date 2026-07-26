@@ -149,29 +149,58 @@ def awgs_presets_generate(name: str = "default") -> dict:
     """
     Генерирует конкретные значения параметров обфускации по пресету.
     Возвращает dict с ключами: jc, jmin, jmax, s1, s2, s3, s4, h1, h2, h3, h4, i1..i5
+
+    Jc/Jmin/Jmax — случайные в per-preset диапазонах (DPI-тюнинг под
+    конкретного оператора, см. AWGS_CARRIER_PRESETS). I1 — per-preset
+    режим (random/absent/binary). S1, S2 остаются 0 (как в bivlked).
+
+    S3, S4 — случайные в общих диапазонах 0..AWGS_S3_MAX / 0..AWGS_S4_MAX
+    (это общегигиенические параметры, не связанные с тюнингом под
+    конкретного оператора). Диапазоны переиспользуются из
+    _FULL_MANUAL_RANGES чтобы не дублировать константы.
+
+    H1-H4 — генерируются как НЕПЕРЕСЕКАЮЩИЕСЯ случайные значения в
+    1.._H_UPPER_LIMIT (та же логика, что в
+    awgs_generate_full_manual_params(), см. _generate_non_overlapping_h_values).
+    Раньше H1-H4 были захардкожены как 1,2,3,4 во всех пресетах — это
+    давало одинаковый DPI-отпечаток всем установкам проекта на одном
+    пресете (подтверждено пользователем zvshka: byte-identical S1-S4/H1-H4
+    на разных серверах с Default preset).
+
+    I2-I5 — пустые по умолчанию для пресетного пути (опциональные
+    decoy-пакеты; полный контроль даёт пункт «5. Ручная настройка»).
+
+    Каждый вызов (install/rotation) генерирует НОВЫЕ уникальные
+    S3/S4/H1-H4 — это явно требуется для «Обновить параметры обфускации»
+    в меню (awgs_rotate_obfuscation).
     """
     preset = AWGS_CARRIER_PRESETS.get(name)
     if not preset:
         raise ValueError(f"Неизвестный пресет: '{name}'. "
                          f"Допустимые: {', '.join(AWGS_CARRIER_PRESETS.keys())}")
 
-    # Jc — случайное целое в диапазоне
+    # Jc — случайное целое в per-preset диапазоне
     jc = random.randint(preset["jc_min"], preset["jc_max"])
 
-    # Jmin — случайное целое в диапазоне
+    # Jmin — случайное целое в per-preset диапазоне
     jmin = random.randint(preset["jmin_min"], preset["jmin_max"])
 
-    # Jmax = Jmin + delta (delta в диапазоне)
+    # Jmax = Jmin + delta (delta в per-preset диапазоне)
     jmax_delta = random.randint(preset["jmax_delta_min"], preset["jmax_delta_max"])
     jmax = jmin + jmax_delta
 
-    # S1-S4 — по умолчанию 0 (как в bivlked)
-    s1, s2, s3, s4 = 0, 0, 0, 0
+    # S1, S2 — по умолчанию 0 (как в bivlked)
+    s1, s2 = 0, 0
 
-    # H1-H4 — magic headers (как в bivlked default)
-    h1, h2, h3, h4 = 1, 2, 3, 4
+    # S3, S4 — случайные в общих диапазонах (общегигиенические, не per-preset).
+    # Переиспользуем диапазоны из _FULL_MANUAL_RANGES чтобы не дублировать.
+    s3 = random.randint(_FULL_MANUAL_RANGES["s3"][0], _FULL_MANUAL_RANGES["s3"][1])
+    s4 = random.randint(_FULL_MANUAL_RANGES["s4"][0], _FULL_MANUAL_RANGES["s4"][1])
 
-    # I1 — зависит от i1_mode
+    # H1-H4 — непересекающиеся случайные значения (см. комментарий выше).
+    h1, h2, h3, h4 = _generate_non_overlapping_h_values()
+
+    # I1 — зависит от per-preset i1_mode
     i1_mode = preset["i1_mode"]
     if i1_mode == "random":
         # Случайный I1 (24-32 байта, hex)
@@ -183,7 +212,7 @@ def awgs_presets_generate(name: str = "default") -> dict:
     else:  # absent
         i1 = ""
 
-    # I2-I5 — пустые (опциональные)
+    # I2-I5 — пустые (опциональные decoy-пакеты)
     i2 = i3 = i4 = i5 = ""
 
     return {
@@ -395,6 +424,49 @@ def awgs_presets_compare_with_carrier(
 # выше INT32_MAX как invalid.
 _H_UPPER_LIMIT: int = 2147483647  # INT32_MAX
 
+
+def _generate_non_overlapping_h_value(used_h: set[int]) -> int:
+    """Генерирует одно случайное значение H в диапазоне 1.._H_UPPER_LIMIT,
+    гарантированно не входящее в ``used_h``.
+
+    Используется как awgs_presets_generate() (для всех carrier-пресетов),
+    так и awgs_generate_full_manual_params() — общая логика анти-фингерпринта
+    (H1-H4 должны быть непересекающимися между собой, иначе DPI может
+    написать универсальное правило для детекции именно этого проекта).
+
+    Делает до 50 случайных попыток; если все 50 совпали с used_h (почти
+    невозможно для INT32_MAX), падает на детерминистический инкремент от 1.
+    """
+    for _attempt in range(50):
+        hv = random.randint(1, _H_UPPER_LIMIT)
+        if hv not in used_h:
+            return hv
+    # 50 попыток не хватило (невероятно для INT32_MAX) — берём
+    # любое непересекающееся через инкремент
+    hv = 1
+    while hv in used_h:
+        hv += 1
+        if hv > _H_UPPER_LIMIT:
+            hv = 1
+    return hv
+
+
+def _generate_non_overlapping_h_values() -> tuple[int, int, int, int]:
+    """Генерирует 4 непересекающихся случайных значения H1-H4 в
+    диапазоне 1.._H_UPPER_LIMIT. Возвращает кортеж (h1, h2, h3, h4).
+
+    Используется awgs_presets_generate() для всех carrier-пресетов —
+    раньше там было захардкожено 1,2,3,4 (узнаваемый DPI-отпечаток).
+    """
+    used_h: set[int] = set()
+    result = []
+    for _ in range(4):
+        hv = _generate_non_overlapping_h_value(used_h)
+        used_h.add(hv)
+        result.append(hv)
+    return tuple(result)  # type: ignore[return-value]
+
+
 # Рекомендованные диапазоны для авто-генерации (взяты из спеки AWG 2.0
 # и bivlked/amneziawg-installer/ADVANCED.md). Эти диапазоны НЕ используют
 # carrier-специфичные значения из AWGS_CARRIER_PRESETS — это нейтральные
@@ -503,10 +575,10 @@ def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
     # Каждое значение выбирается случайно из всего диапазона 1..2^31-1,
     # с гарантией что все 4 значения различны (DPI не сможет написать
     # универсальное правило для детекции этого проекта).
+    # Переиспользуем общий хелпер (см. _generate_non_overlapping_h_values).
     used_h = set()
-    h_values = []
-    # Учёт overrides для H1-H4
     h_overrides = []
+    # Учёт overrides для H1-H4
     for key in ("h1", "h2", "h3", "h4"):
         if key in overrides:
             hv = int(overrides[key])
@@ -516,19 +588,7 @@ def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
     for key in ("h1", "h2", "h3", "h4"):
         if key in overrides:
             continue
-        # Подбираем случайное значение, не пересекающееся с уже использованными
-        for _attempt in range(50):
-            hv = random.randint(1, _H_UPPER_LIMIT)
-            if hv not in used_h:
-                break
-        else:
-            # 50 попыток не хватило (невероятно для INT32_MAX) — берём
-            # любое непересекающееся через инкремент
-            hv = 1
-            while hv in used_h:
-                hv += 1
-                if hv > _H_UPPER_LIMIT:
-                    hv = 1
+        hv = _generate_non_overlapping_h_value(used_h)
         used_h.add(hv)
         h_overrides.append((key, hv))
     # Сортируем по ключу, чтобы порядок был h1, h2, h3, h4
