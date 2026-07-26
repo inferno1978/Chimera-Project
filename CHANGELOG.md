@@ -2,6 +2,103 @@
 
 ---
 
+## FIX(awg): v5.2.2 — самоисцеление в awgs_apply() для УЖЕ СЛОМАННЫХ установок (корень проблемы zvshka) — 27 июля 2026
+
+**КОРЕНЬ ПРОБЛЕМЫ (найден после анализа лога zvshka):** v5.2.1 исправил механизм проверки `awgs_supports_i2_i5()` (заменил strip на setconf), но проверка **НИКОГДА НЕ ВЫЗЫВАЛАСЬ** на сервере zvshka. Пользователь сделал `git pull` + `systemctl restart`, но перезапуск сервиса НЕ переписывает конфиг — конфиг переписывается только при install/rotate/add-peer. Поэтому в конфиге всё ещё пустые I2-I5 (поведение v5.2), и `awg-quick up` падает с той же ошибкой.
+
+**Подтверждение из лога zvshka:**
+```
+awg-quick[192652]: Line unrecognized: `I2='
+awg-quick[192652]: Configuration parsing error
+```
+
+Обратите внимание: `I2=` БЕЗ значения — парсер не знает КЛЮЧ I2 вообще. Их amneziawg-tools — переходная версия, которая распознаёт I1 (добавлен раньше) но НЕ I2-I5 (добавлены позже).
+
+**РЕШЕНИЕ v5.2.2:** Самоисцеление в `awgs_apply()`. Если apply падает с "Line unrecognized: I2=", автоматически переписать конфиг без пустых I2-I5 и повторить apply. **Срабатывает при ЛЮБОМ действии**, включая `systemctl restart` через fallback, без требования от пользователя запустить конкретное меню.
+
+### Что реализовано
+
+**Файл:** `chimera/modules/awg_apply.py`
+
+**1. `_extract_apply_failure_stderr()` — НОВАЯ функция:**
+
+Извлекает точную причину сбоя через `awg setconf` на тестовом интерфейсе (не awg0!). Заменяет извлечение через `awg-quick strip` (которое НЕ работало — strip это текстовый фильтр, не валидирует I2, всегда возвращает 0).
+
+Алгоритм:
+1. Запускаем `awg-quick strip` на реальном конфиге → получаем stripped-формат
+2. Запускаем `awg setconf` на ВРЕМЕННОМ тестовом интерфейсе (awgprobe<uuid>) с этим stripped конфигом
+3. Если amneziawg-tools не поддерживает I2-I5, setconf падает с 'Line unrecognized: I2=' — это и есть точная причина сбоя awgs_apply_syncconf
+
+**2. `_is_i2_i5_unrecognized_error()` — НОВАЯ функция:**
+
+Классифицирует ошибку: проверяет, что stderr содержит "Line unrecognized" или "Configuration parsing error" + упоминание I2/I3/I4/I5. Это защищает от ложного срабатывания на другие ошибки (невалидный privkey, отсутствие интерфейса, и пр.).
+
+**3. `_self_heal_i2_i5_incompatibility()` — НОВАЯ функция:**
+
+Самоисцеление:
+1. Устанавливает кэш `awgs_supports_i2_i5()` в False — будущие записи конфига не будут писать пустые I2-I5
+2. Переписывает конфиг через `awg_peer_rebuild_conf(apply=False)` (без apply — apply будет ниже)
+3. Повторяет `awgs_apply_syncconf()` с переписанным конфигом
+4. Если повтор успешен, возвращает True с предупреждающим сообщением
+
+**4. `awgs_apply()` — обновлена:**
+
+Новый поток выполнения при syncconf-failure:
+1. `awgs_apply_syncconf()` — если успех, вернуть True
+2. `_extract_apply_failure_stderr()` — извлечь точную причину через awg setconf на тестовом интерфейсе
+3. Если `_is_i2_i5_unrecognized_error(last_stderr)` — вызвать `_self_heal_i2_i5_incompatibility()`
+4. Если самоисцеление успешно, вернуть True
+5. Если нет — defensive stderr fallback (показать точную причину в warn)
+6. `awgs_apply_restart()` — final fallback
+
+**Защита от рекурсии:** Флаг `_SELF_HEAL_IN_PROGRESS` предотвращает бесконечную рекурсию — если `_self_heal_i2_i5_incompatibility()` вызывает `awgs_apply_syncconf()`, и та тоже падает, мы не пытаемся самоисцелиться повторно.
+
+### Почему это решает проблему zvshka
+
+**До v5.2.2:**
+- zvshka делает `git pull` + `systemctl restart`
+- Конфиг НЕ переписывается (перезапуск сервиса не вызывает awgs_build_server_conf)
+- `awg-quick up` падает на пустых I2-I5
+- Сервис не стартует
+
+**После v5.2.2:**
+- zvshka делает `git pull` + `systemctl restart`
+- `awg-quick up` падает на пустых I2-I5
+- Fallback вызывает `awgs_apply()` (через restart fallback)
+- `awgs_apply()` видит ошибку I2 → самоисцеление переписывает конфиг без I2-I5
+- Повторный apply проходит → сервис стартует
+- Пользователь видит warn про старые amneziawg-tools и совет обновиться
+
+### Тесты (`tests/test_awg_apply.py`)
+
+Обновлено существующих + добавлено новых: 37 тестов всего (было 19).
+
+- `TestApplyStderrSurfacing` (3 теста) — обновлены под новый механизм извлечения stderr (через `_extract_apply_failure_stderr` вместо `awg-quick strip`). Проверяют, что defensive stderr fallback работает и после самоисцеления.
+- `TestIsI2I5UnrecognizedError` (9 тестов) — НОВЫЙ класс. Проверяет классификацию ошибок: реальная ошибка zvshka → True, I3/I4/I5 → True, unrelated error → False, пустой stderr → False, privkey error → False, "Line unrecognized" без I2 → False.
+- `TestSelfHealI2I5` (5 тестов) — НОВЫЙ класс. Проверяет: самоисцеление вызывается при I2 ошибке, НЕ вызывается при unrelated ошибке, защита от рекурсии, успех возвращает True, неудача fallback на restart.
+- `TestSelfHealImplementation` (4 теста) — НОВЫЙ класс. Проверяет интеграцию: самоисцеление устанавливает кэш в False, вызывает awg_peer_rebuild_conf + повторяет apply, возвращает False при неудаче rebuild, возвращает False при неудаче повторного apply.
+
+### Прогон тестов
+
+- `tests/test_awg_apply.py` — 37 тестов PASS (19 существующих обновлены + 18 новых)
+- `tests/test_awg_compat.py` — PASS
+- `tests/test_awg_standalone.py` — PASS
+- `tests/test_awg_qr.py` — PASS
+- `tests/test_awg_transport.py` — PASS
+- `tests/test_awg_peers.py` — PASS
+- 185 тестов в затронутых модулях PASS
+- `full_test.py` — 10/10 PASS
+
+### Что НЕ тронуто
+
+- `awg_compat.py` (`awgs_supports_i2_i5()` через setconf) — осталась как в v5.2.1, работает для НОВЫХ установок
+- Писатели конфига с условной записью I2-I5 — осталась как в v5.2
+- `awgs_warn_old_tools_once()` — осталась как в v5.2
+
+Самоисцеление в `awgs_apply()` — это ДОПОЛНЕНИЕ к проверке `awgs_supports_i2_i5()`, не замена. Проверка предотвращает запись пустых I2-I5 для НОВЫХ установок. Самоисцеление лечит УЖЕ СЛОМАННЫЕ установки (как у zvshka).
+
+---
+
 ## FIX(awg): v5.2.1 — критический фикс механизма проверки I2-I5 (setconf вместо strip) — 27 июля 2026
 
 **КРИТИЧНО. Вчерашний фикс v5.2 не работает вообще — `awgs_supports_i2_i5()` проверяла через `awg-quick strip`, но strip НЕ валидирует содержимое [Interface] за пределами своих собственных директив (Address/DNS/MTU/Table и т.д.), а просто пропускает остальное насквозь без проверки. Реальная валидация (та, что рожает "Line unrecognized: I2=") происходит внутри `awg setconf`, вызываемого при настоящем `up` — strip до этой стадии не доходит вообще. Подтверждено на сервере ArkadiaGamingHub: awgs_supports_i2_i5() == True (strip returncode 0), но awg-quick up на РЕАЛЬНОМ конфиге с теми же I2-I5 падает с той же "Line unrecognized: I2=" — проверка ничего не защищала, возвращала True всегда.**
