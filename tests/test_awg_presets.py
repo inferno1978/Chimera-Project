@@ -198,9 +198,9 @@ class TestPresetsGenerate(unittest.TestCase):
         узнаваемый DPI-отпечаток (одинаковый у всех установок проекта
         на одном пресете, подтверждено пользователем zvshka).
 
-        Теперь H1-H4 — непересекающиеся случайные значения в
-        1..INT32_MAX. Проверяем на 10 разных seed'ах: хотя бы один
-        не должен дать 1,2,3,4.
+        v5.3: H1-H4 теперь генерируются как диапазоны 'N-M' (как в
+        эталонном конфиге Amnezia), не одиночные числа. Проверяем что
+        хотя бы один seed даёт НЕ 1,2,3,4.
         """
         from chimera.modules.awg_presets import awgs_presets_generate
         found_non_default = False
@@ -208,7 +208,8 @@ class TestPresetsGenerate(unittest.TestCase):
             random.seed(seed)
             p = awgs_presets_generate("default")
             hs = [p["h1"], p["h2"], p["h3"], p["h4"]]
-            if hs != [1, 2, 3, 4]:
+            # v5.3: hs теперь строки 'N-M', не int. Проверяем что не 1,2,3,4.
+            if hs != ["1", "2", "3", "4"] and hs != [1, 2, 3, 4]:
                 found_non_default = True
                 break
         self.assertTrue(found_non_default,
@@ -218,29 +219,57 @@ class TestPresetsGenerate(unittest.TestCase):
         """v5.1: H1-H4 не пересекаются между собой (DPI не сможет
         написать универсальное правило для детекции этого проекта).
 
-        Проверяем на 10 разных seed'ах — каждый раз H1-H4 должны
-        быть 4 различными значениями.
+        v5.3: H1-H4 теперь диапазоны 'N-M'. Проверяем что диапазоны
+        не пересекаются.
         """
         from chimera.modules.awg_presets import awgs_presets_generate
         for seed in range(10):
             with self.subTest(seed=seed):
                 random.seed(seed)
                 p = awgs_presets_generate("default")
-                hs = [p["h1"], p["h2"], p["h3"], p["h4"]]
-                self.assertEqual(len(set(hs)), 4,
-                                 f"H1-H4 пересекаются при seed={seed}: {hs}")
+                # Парсим диапазоны
+                ranges = []
+                for k in ("h1", "h2", "h3", "h4"):
+                    parts = p[k].split("-")
+                    self.assertEqual(len(parts), 2,
+                                     f"{k} should be 'N-M' format: {p[k]}")
+                    lo, hi = int(parts[0]), int(parts[1])
+                    ranges.append((lo, hi))
+                # Проверяем непересечение
+                for i in range(4):
+                    for j in range(i + 1, 4):
+                        lo_i, hi_i = ranges[i]
+                        lo_j, hi_j = ranges[j]
+                        # Не должны пересекаться
+                        self.assertTrue(
+                            hi_i < lo_j or hi_j < lo_i,
+                            f"H{i+1}={ranges[i]} и H{j+1}={ranges[j]} пересекаются"
+                        )
 
     def test_h_values_in_int32_range(self):
         """v5.1: H1-H4 в диапазоне 1..INT32_MAX (как валидатор
-        принимает)."""
+        принимает).
+
+        v5.3: H1-H4 теперь диапазоны 'N-M'. Проверяем что обе границы
+        в 1..INT32_MAX.
+        """
         from chimera.modules.awg_presets import awgs_presets_generate
         for seed in range(5):
             with self.subTest(seed=seed):
                 random.seed(seed)
                 p = awgs_presets_generate("default")
                 for k in ("h1", "h2", "h3", "h4"):
-                    self.assertGreaterEqual(p[k], 1)
-                    self.assertLessEqual(p[k], 2147483647)
+                    # v5.3: p[k] — строка 'N-M'
+                    parts = p[k].split("-")
+                    lo, hi = int(parts[0]), int(parts[1])
+                    self.assertGreaterEqual(lo, 1,
+                                            f"{k} lo={lo} < 1")
+                    self.assertLessEqual(lo, 2147483647,
+                                         f"{k} lo={lo} > INT32_MAX")
+                    self.assertGreaterEqual(hi, 1,
+                                            f"{k} hi={hi} < 1")
+                    self.assertLessEqual(hi, 2147483647,
+                                         f"{k} hi={hi} > INT32_MAX")
 
     def test_two_consecutive_calls_give_different_h_and_s(self):
         """v5.1: два вызова awgs_presets_generate("default") подряд
@@ -559,13 +588,23 @@ class TestGenerateFullManualParams(unittest.TestCase):
         # S4: 0-32
         self.assertGreaterEqual(p["s4"], 0)
         self.assertLessEqual(p["s4"], 32)
-        # H1-H4: 1..INT32_MAX
+        # H1-H4: 1..INT32_MAX (v5.3: теперь диапазоны 'N-M')
         for k in ("h1", "h2", "h3", "h4"):
-            self.assertGreaterEqual(p[k], 1)
-            self.assertLessEqual(p[k], 2147483647)
+            # v5.3: p[k] — строка 'N-M'
+            parts = p[k].split("-")
+            lo, hi = int(parts[0]), int(parts[1])
+            self.assertGreaterEqual(lo, 1)
+            self.assertLessEqual(lo, 2147483647)
+            self.assertGreaterEqual(hi, 1)
+            self.assertLessEqual(hi, 2147483647)
 
     def test_overrides_used_as_is(self):
-        """Переданные overrides используются как есть."""
+        """Переданные overrides используются как есть.
+
+        v5.3: H1-H4 overrides теперь принимают int или строку (число или
+        диапазон 'N-M'). Возвращает как строку (для единообразия с
+        генератором диапазонов).
+        """
         from chimera.modules.awg_presets import awgs_generate_full_manual_params
         overrides = {
             "jc": 7,
@@ -575,10 +614,10 @@ class TestGenerateFullManualParams(unittest.TestCase):
             "s2": 20,
             "s3": 30,
             "s4": 15,
-            "h1": 100,
-            "h2": 200,
-            "h3": 300,
-            "h4": 400,
+            "h1": 100,    # int override
+            "h2": 200,    # int override
+            "h3": 300,    # int override
+            "h4": 400,    # int override
             "i1": "deadbeef",
         }
         p = awgs_generate_full_manual_params(overrides)
@@ -589,34 +628,47 @@ class TestGenerateFullManualParams(unittest.TestCase):
         self.assertEqual(p["s2"], 20)
         self.assertEqual(p["s3"], 30)
         self.assertEqual(p["s4"], 15)
-        self.assertEqual(p["h1"], 100)
-        self.assertEqual(p["h2"], 200)
-        self.assertEqual(p["h3"], 300)
-        self.assertEqual(p["h4"], 400)
+        # v5.3: H1-H4 возвращаются как строки (приводятся к str для
+        # единообразия с генератором диапазонов)
+        self.assertEqual(p["h1"], "100")
+        self.assertEqual(p["h2"], "200")
+        self.assertEqual(p["h3"], "300")
+        self.assertEqual(p["h4"], "400")
         self.assertEqual(p["i1"], "deadbeef")
 
     def test_h1_h4_do_not_intersect(self):
         """H1-H4 не пересекаются между собой (DPI не сможет написать
         универсальное правило для детекции этого проекта).
 
-        Запускаем 10 раз с разными seed'ами — каждый раз H1-H4 должны
-        быть 4 различными значениями.
+        v5.3: H1-H4 теперь диапазоны 'N-M'. Проверяем что диапазоны
+        не пересекаются. Запускаем 10 раз с разными seed'ами.
         """
         from chimera.modules.awg_presets import awgs_generate_full_manual_params
         for seed in range(10):
             with self.subTest(seed=seed):
                 random.seed(seed)
                 p = awgs_generate_full_manual_params()
-                hs = [p["h1"], p["h2"], p["h3"], p["h4"]]
-                self.assertEqual(len(set(hs)), 4,
-                                 f"H1-H4 пересекаются при seed={seed}: {hs}")
+                # Парсим диапазоны
+                ranges = []
+                for k in ("h1", "h2", "h3", "h4"):
+                    parts = p[k].split("-")
+                    lo, hi = int(parts[0]), int(parts[1])
+                    ranges.append((lo, hi))
+                # Проверяем непересечение
+                for i in range(4):
+                    for j in range(i + 1, 4):
+                        lo_i, hi_i = ranges[i]
+                        lo_j, hi_j = ranges[j]
+                        self.assertTrue(
+                            hi_i < lo_j or hi_j < lo_i,
+                            f"H{i+1}={ranges[i]} и H{j+1}={ranges[j]} пересекаются"
+                        )
 
     def test_h1_h4_not_fixed_1_2_3_4(self):
         """H1-H4 НЕ должны быть фиксированными 1,2,3,4 (как в пресетах).
 
-        Это ключевое отличие от awgs_presets_generate() — там H1-H4=1,2,3,4
-        всегда, что является узнаваемым DPI-отпечатком. Здесь значения
-        должны быть случайными.
+        v5.3: H1-H4 теперь диапазоны 'N-M' (как в эталонном конфиге
+        Amnezia). Проверяем что хотя бы один seed даёт НЕ 1,2,3,4.
         """
         from chimera.modules.awg_presets import awgs_generate_full_manual_params
         # Проверяем на 10 разных seed'ах — хотя бы один не должен дать 1,2,3,4
@@ -625,7 +677,8 @@ class TestGenerateFullManualParams(unittest.TestCase):
             random.seed(seed)
             p = awgs_generate_full_manual_params()
             hs = [p["h1"], p["h2"], p["h3"], p["h4"]]
-            if hs != [1, 2, 3, 4]:
+            # v5.3: hs теперь строки 'N-M'. Проверяем что не 1,2,3,4 (в любом формате).
+            if hs != ["1", "2", "3", "4"] and hs != [1, 2, 3, 4]:
                 found_non_default = True
                 break
         self.assertTrue(found_non_default,
