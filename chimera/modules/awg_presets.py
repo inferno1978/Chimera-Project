@@ -306,16 +306,47 @@ def awgs_presets_validate_params(params: dict) -> tuple[bool, str]:
     # H1-H4: magic headers. По официальной документации AmneziaWG
     # (docs.amnezia.org) безопасный верхний предел — INT32_MAX (2147483647).
     # amneziawg-windows-client может подсвечивать значения выше как invalid.
-    # Можно как одиночное число, так и диапазон "N-M" (но в проекте сейчас
-    # всегда int — диапазоны не поддерживаются).
-    # v5.0.0: расширено с 0-255 до 0-INT32_MAX — раньше было слишком узко,
-    # не позволяло awgs_generate_full_manual_params() генерировать
-    # уникальные H1-H4 в полном диапазоне (что нужно для устойчивости к DPI).
+    # v5.3: поддерживаем ДВА формата (как в эталонном конфиге Amnezia):
+    #   1. Одиночное число: H1 = 12345
+    #   2. Диапазон N-M: H1 = 2135087609-2145903954 (как в официальном Amnezia)
+    # Диапазонный формат скрывает magic header — DPI не может написать
+    # универсальное правило для детекции. Подтверждено эталонным конфигом
+    # из Docker-контейнера Amnezia (zvshka).
+    # v5.0.0: расширено с 0-255 до 0-INT32_MAX.
     _H_MAX = 2147483647  # INT32_MAX
+    _H_RANGE_RE = re.compile(r"^(\d+)-(\d+)$")
     for key in ("h1", "h2", "h3", "h4"):
         v = params.get(key, 0)
-        if not isinstance(v, int) or v < 0 or v > _H_MAX:
-            return False, f"{key.upper()}={v} вне диапазона (0-{_H_MAX})"
+        # Принимаем int (одиночное число)
+        if isinstance(v, int):
+            if v < 0 or v > _H_MAX:
+                return False, f"{key.upper()}={v} вне диапазона (0-{_H_MAX})"
+            continue
+        # Принимаем строку — одиночное число или диапазон N-M
+        if isinstance(v, str):
+            v_str = v.strip()
+            # Проверяем диапазон N-M
+            m = _H_RANGE_RE.match(v_str)
+            if m:
+                lo = int(m.group(1))
+                hi = int(m.group(2))
+                if lo < 0 or lo > _H_MAX:
+                    return False, f"{key.upper()}={v} начало диапазона вне (0-{_H_MAX})"
+                if hi < 0 or hi > _H_MAX:
+                    return False, f"{key.upper()}={v} конец диапазона вне (0-{_H_MAX})"
+                if lo > hi:
+                    return False, f"{key.upper()}={v} начало диапазона > конца"
+                continue
+            # Проверяем одиночное число как строку
+            try:
+                v_int = int(v_str)
+                if v_int < 0 or v_int > _H_MAX:
+                    return False, f"{key.upper()}={v} вне диапазона (0-{_H_MAX})"
+                continue
+            except ValueError:
+                return False, f"{key.upper()}={v} не число и не диапазон N-M"
+        # Любой другой тип
+        return False, f"{key.upper()}={v} должен быть int или строкой 'N' или 'N-M'"
 
     # I1-I5: опциональные CPS tag-строки (AWG 2.0) или голый hex (AWG 1.5,
     # для обратной совместимости со старыми state.json).
@@ -494,9 +525,77 @@ def _generate_non_overlapping_h_value(used_h: set[int]) -> int:
     return hv
 
 
-def _generate_non_overlapping_h_values() -> tuple[int, int, int, int]:
-    """Генерирует 4 непересекающихся случайных значения H1-H4 в
-    диапазоне 1.._H_UPPER_LIMIT. Возвращает кортеж (h1, h2, h3, h4).
+def _generate_non_overlapping_h_ranges(used_ranges: list[tuple[int, int]],
+                                       range_size: int = 1000) -> tuple[int, int]:
+    """Генерирует один непересекающийся диапазон [start, end] для H1-H4.
+
+    v5.3: официальный Amnezia использует формат H1 = N-M (диапазон, не
+    одиночное число) — это скрывает magic header в диапазоне, DPI не может
+    написать универсальное правило для детекции. Подтверждено эталонным
+    конфигом из Docker-контейнера Amnezia (zvshka):
+      H1 = 2135087609-2145903954
+      H2 = 2147225277-2147461177
+      H3 = 2147472979-2147474536
+      H4 = 2147478893-2147482205
+
+    Генерирует диапазон [start, start+range_size-1], где start случайно.
+    Проверяет что диапазон не пересекается ни с одним из used_ranges.
+    Возвращает кортеж (start, end) где end = start + range_size - 1.
+
+    Диапазоны располагаются в верхней части INT32_MAX (как в эталонном
+    конфиге Amnezia) — значения близкие к INT32_MAX, но не превышающие.
+    range_size=1000 — компромисс между анти-DPI эффективностью (большой
+    диапазон сложнее fingerprint'ить) и совместимостью (не все клиенты
+    принимают очень большие диапазоны).
+    """
+    # Делаем до 50 попыток найти непересекающийся диапазон
+    for _attempt in range(50):
+        # start в верхней трети INT32_MAX (как в эталонном Amnezia конфиге)
+        # Оставляем запас для range_size чтобы не превысить INT32_MAX
+        lo = _H_UPPER_LIMIT - _H_UPPER_LIMIT // 3
+        hi = _H_UPPER_LIMIT - range_size
+        start = random.randint(lo, hi)
+        end = start + range_size - 1
+        # Проверяем непересечение с существующими диапазонами
+        overlaps = False
+        for (u_start, u_end) in used_ranges:
+            if not (end < u_start or start > u_end):
+                overlaps = True
+                break
+        if not overlaps:
+            return (start, end)
+    # 50 попыток не хватило — берём инкрементальный подход
+    # Ищем первый свободный слот начиная с lo
+    start = lo
+    while True:
+        end = start + range_size - 1
+        if end > _H_UPPER_LIMIT:
+            start = lo
+            end = start + range_size - 1
+        overlaps = False
+        for (u_start, u_end) in used_ranges:
+            if not (end < u_start or start > u_end):
+                overlaps = True
+                break
+        if not overlaps:
+            return (start, end)
+        start += range_size + 1
+
+
+def _generate_non_overlapping_h_values() -> tuple[str, str, str, str]:
+    """Генерирует 4 непересекающихся диапазона H1-H4 в формате 'N-M'.
+
+    v5.3: Возвращает КОРТЕЖ СТРОК формата 'N-M' (диапазон), а не int.
+    Это соответствует эталонному формату официального Amnezia
+    (подтверждено конфигом из Docker-контейнера):
+      H1 = 2135087609-2145903954
+      H2 = 2147225277-2147461177
+      H3 = 2147472979-2147474536
+      H4 = 2147478893-2147482205
+
+    Диапазонный формат скрывает magic header — DPI не может написать
+    универсальное правило для детекции именно этого проекта (раньше
+    одиночные числа были узнаваемым отпечатком).
 
     Используется awgs_presets_generate() для всех carrier-пресетов —
     раньше там было захардкожено 1,2,3,4 (узнаваемый DPI-отпечаток).
@@ -520,12 +619,12 @@ def _generate_non_overlapping_h_values() -> tuple[int, int, int, int]:
     Альтернативное решение для старых роутеров — использовать
     amneziawg-go upstream-бинарник (не native AWG-клиент роутера).
     """
-    used_h: set[int] = set()
+    used_ranges: list[tuple[int, int]] = []
     result = []
     for _ in range(4):
-        hv = _generate_non_overlapping_h_value(used_h)
-        used_h.add(hv)
-        result.append(hv)
+        start, end = _generate_non_overlapping_h_ranges(used_ranges)
+        used_ranges.append((start, end))
+        result.append(f"{start}-{end}")
     return tuple(result)  # type: ignore[return-value]
 
 
@@ -720,26 +819,36 @@ def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
     else:
         s4 = random.randint(r["s4"][0], r["s4"][1])
 
-    # ── H1-H4 — непересекающиеся случайные значения в 1..INT32_MAX ────────
-    # Каждое значение выбирается случайно из всего диапазона 1..2^31-1,
-    # с гарантией что все 4 значения различны (DPI не сможет написать
-    # универсальное правило для детекции этого проекта).
-    # Переиспользуем общий хелпер (см. _generate_non_overlapping_h_values).
-    used_h = set()
+    # ── H1-H4 — непересекающиеся диапазоны в формате 'N-M' (AWG 2.0) ─────
+    # v5.3: официальный Amnezia использует формат H1 = N-M (диапазон), не
+    # одиночное число. Это скрывает magic header в диапазоне, DPI не может
+    # написать универсальное правило для детекции. Подтверждено эталонным
+    # конфигом из Docker-контейнера Amnezia (zvshka).
+    # Переиспользуем общий хелпер _generate_non_overlapping_h_values()
+    # (возвращает кортеж строк 'N-M').
+    # Overrides: если пользователь явно ввёл H1-H4 (например, "100" или
+    # "100-200"), используем как есть. Иначе — генерируем диапазон.
+    used_ranges: list[tuple[int, int]] = []
     h_overrides = []
     # Учёт overrides для H1-H4
     for key in ("h1", "h2", "h3", "h4"):
         if key in overrides:
-            hv = int(overrides[key])
+            hv = str(overrides[key])
             h_overrides.append((key, hv))
-            used_h.add(hv)
-    # Заполняем остальные (без override) — случайно, без пересечений
+            # Парсим override в диапазон для проверки пересечений
+            if "-" in hv:
+                parts = hv.split("-")
+                used_ranges.append((int(parts[0]), int(parts[1])))
+            else:
+                v = int(hv)
+                used_ranges.append((v, v))
+    # Заполняем остальные (без override) — диапазонами, без пересечений
     for key in ("h1", "h2", "h3", "h4"):
         if key in overrides:
             continue
-        hv = _generate_non_overlapping_h_value(used_h)
-        used_h.add(hv)
-        h_overrides.append((key, hv))
+        start, end = _generate_non_overlapping_h_ranges(used_ranges)
+        used_ranges.append((start, end))
+        h_overrides.append((key, f"{start}-{end}"))
     # Сортируем по ключу, чтобы порядок был h1, h2, h3, h4
     h_overrides.sort(key=lambda x: ("h1", "h2", "h3", "h4").index(x[0]))
     h1, h2, h3, h4 = (v for _, v in h_overrides)
