@@ -162,18 +162,20 @@ class TestPresetsGenerate(unittest.TestCase):
                 p = awgs_presets_generate(name)
                 self.assertGreaterEqual(p["jmax"], p["jmin"])
 
-    def test_s1_s2_are_zero(self):
-        """S1, S2 всегда 0 (как в bivlked default).
+    def test_s1_s2_non_zero_v542(self):
+        """v5.4.2: S1, S2 — случайные ненулевые (как в эталонном конфиге Amnezia).
 
-        v5.1: S3, S4 больше НЕ 0 — теперь это случайные значения
-        в общих диапазонах (см. test_s3_s4_in_range). S1/S2 остаются 0
-        потому что их смысл — per-packet junk size, и в bivlked default
-        они нулевые.
+        Раньше (v5.0-v5.4.1) были 0 (как в bivlked). Но рабочий конфиг от
+        приложения Amnezia использует S1=125, S2=47 — ненулевые. Подтверждено
+        zvshka: с S1=0, S2=0 handshake не завершается. С ненулевыми — работает.
         """
         from chimera.modules.awg_presets import awgs_presets_generate
+        random.seed(42)
         p = awgs_presets_generate("default")
-        self.assertEqual(p["s1"], 0)
-        self.assertEqual(p["s2"], 0)
+        self.assertGreaterEqual(p["s1"], 0)
+        self.assertLessEqual(p["s1"], 32)
+        self.assertGreaterEqual(p["s2"], 0)
+        self.assertLessEqual(p["s2"], 32)
 
     def test_s3_s4_in_range(self):
         """v5.1: S3, S4 — случайные в общих диапазонах 0..64 / 0..32.

@@ -80,16 +80,15 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     lines.append(f"H2 = {params.get('h2', 2)}")
     lines.append(f"H3 = {params.get('h3', 3)}")
     lines.append(f"H4 = {params.get('h4', 4)}")
-    # v5.4: I1-I5 — КОММЕНТИРУЕМ пустые (как в эталонном конфиге Amnezia).
-    # См. awg_standalone.awgs_build_server_conf() для подробного обоснования.
-    # Коротко: старые amneziawg-tools падают на 'I2 = ' (пустая строка),
-    # но игнорируют '# I2 = '. Закомментированные строки работают везде.
+    # v5.4.2: I1-I5 для КЛИЕНТСКОГО конфига — пишем ВСЕГДА без комментария
+    # (даже пустые). Подтверждено zvshka: рабочая конфигурация Amnezia
+    # имеет I1-I5 без '#' на клиенте, и '# I1-I5' на сервере. Это работает
+    # потому что клиентские AWG-приложения (включая Keenetic, amneziawg-go)
+    # принимают пустые I2-I5 без ошибки. Только серверные awg-quick (старые
+    # сборки) падают на пустых I2-I5 — поэтому для сервера комментируем.
     for key in ("i1", "i2", "i3", "i4", "i5"):
         val = params.get(key, "")
-        if val:
-            lines.append(f"{key.upper()} = {val}")
-        else:
-            lines.append(f"# {key.upper()} = ")
+        lines.append(f"{key.upper()} = {val}")
 
     return "\n".join(lines) + "\n"
 
