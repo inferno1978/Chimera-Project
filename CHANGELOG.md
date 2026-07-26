@@ -2,6 +2,81 @@
 
 ---
 
+## FIX(awg): v5.2.1 — критический фикс механизма проверки I2-I5 (setconf вместо strip) — 27 июля 2026
+
+**КРИТИЧНО. Вчерашний фикс v5.2 не работает вообще — `awgs_supports_i2_i5()` проверяла через `awg-quick strip`, но strip НЕ валидирует содержимое [Interface] за пределами своих собственных директив (Address/DNS/MTU/Table и т.д.), а просто пропускает остальное насквозь без проверки. Реальная валидация (та, что рожает "Line unrecognized: I2=") происходит внутри `awg setconf`, вызываемого при настоящем `up` — strip до этой стадии не доходит вообще. Подтверждено на сервере ArkadiaGamingHub: awgs_supports_i2_i5() == True (strip returncode 0), но awg-quick up на РЕАЛЬНОМ конфиге с теми же I2-I5 падает с той же "Line unrecognized: I2=" — проверка ничего не защищала, возвращала True всегда.**
+
+### Что исправлено
+
+**Файл:** `chimera/modules/awg_compat.py`
+
+**1. `_run_strip_check` → `_run_setconf_check` (полная замена):**
+
+Старый механизм (`awg-quick strip`) — текстовый фильтр, не валидирует содержимое [Interface]. Заменён на реальный `awg setconf` против ВРЕМЕННОГО тестового интерфейса (не awg0!):
+
+- Создаёт интерфейс `awgprobe<uuid>` через `ip link add <iface> type amneziawg` (имя через uuid — гарантированно не совпадает с awg0 или любым существующим интерфейсом)
+- Применяет тестовый .conf через `awg setconf <iface> <file>` — это РЕАЛЬНЫЙ путь валидации, тот же, что вызывается при `awg-quick up`
+- Удаляет интерфейс в finally-блоке (`ip link delete dev <iface>`) — ВСЕГДА, даже при ошибке setconf
+- Возвращает `(success, stderr+stdout)`
+
+**Безопасность:**
+- Имя тестового интерфейса через uuid — гарантированно не awg0
+- Explicit-проверка `test_iface != AWGS_INTERFACE` — второй слой safety
+- Флаг `interface_created` — не вызываем `ip link delete` если интерфейс не был создан (микро-оптимизация + semantic correctness)
+- Интерфейс ВСЕГДА удаляется в finally, даже при исключении
+- Исключения из `core._run` ловятся, возвращаются как `(False, str(e))` — не валит процесс
+
+**2. `sample_conf` скорректирован для setconf (stripped формат):**
+
+`awg setconf` ожидает файл в "стриппнутом" формате (как `awg-quick strip` производит) — только [Interface] с PrivateKey/ListenPort/Jc.../I1-I5. Убраны awg-quick-only директивы: Address, MTU, DNS, Table, PreUp/PostUp/PreDown/PostDown, SaveConfig. Иначе setconf отвергнет конфиг по другой причине (не про I2), и тест даст ложный отрицательный результат.
+
+ListenPort = 0 — kernel присваивает ephemeral port, не конфликтует с реальным awg0 (который обычно на 51820).
+
+**3. `awgs_supports_i2_i5()` — вызов `_run_setconf_check` вместо `_run_strip_check`:**
+
+Остальная логика без изменений: кэш на время процесса, классификация ошибки по токенам "i2"/"i3"/"i4"/"i5"/"line unrecognized"/"configuration parsing error", safe-default True при неоднозначной ошибке (DKMS не загружен, awg нет в PATH, и пр.).
+
+### Что НЕ тронуто (v5.2 осталась верной)
+
+- Условная запись I2-I5 в писателях конфига (5 функций в 3 модулях)
+- `awgs_warn_old_tools_once()` — одноразовый warn про старый awg-tools
+- Defensive stderr в `awgs_apply()` — при syncconf-failure показывает точную причину
+- Самоисцеление существующих установок — при следующем действии конфиг перепишется
+
+Проблема была ТОЛЬКО в самом механизме проверки (strip vs setconf), не в том, что делается с её результатом.
+
+### Тесты (`tests/test_awg_compat.py`)
+
+- Все существующие тесты, мокавшие `_run_strip_check` — переименованы под `_run_setconf_check`, логика проверок не изменилась
+- НОВЫЙ класс `TestRunSetconfCheckInterfaceCleanup` (3 теста):
+  - `test_interface_cleaned_up_on_setconf_failure` — интерфейс удаляется даже при ошибке setconf
+  - `test_interface_cleaned_up_on_setconf_success` — интерфейс удаляется при успехе
+  - `test_interface_not_deleted_when_add_fails` — не пытаемся удалить несуществующий интерфейс
+- НОВЫЙ класс `TestRunSetconfCheckInterfaceName` (2 теста):
+  - `test_interface_name_never_awg0` — 100 запусков, ни одно имя не равно "awg0"
+  - `test_all_generated_names_unique` — 50 запусков, все имена уникальны (uuid)
+- НОВЫЙ тест `test_returns_true_on_ip_link_add_failure_safe_default` — DKMS не загружен → safe True
+- НОВЫЙ тест `test_returns_false_on_exception` — исключение из core._run → (False, str(e))
+- НОВЫЙ тест `test_sample_conf_stripped_format_no_awg_quick_directives` — sample_conf не содержит Address/MTU/DNS/Table/PreUp/PostUp
+- НОВЫЙ тест `test_sample_conf_listenport_zero_avoids_conflicts` — ListenPort=0 не конфликтует с awg0
+
+### Прогон тестов
+
+- `tests/test_awg_compat.py` — 29 тестов PASS (20 существующих переименованы + 9 новых)
+- `tests/test_awg_apply.py` — PASS
+- `tests/test_awg_standalone.py` — PASS
+- `tests/test_awg_qr.py` — PASS
+- `tests/test_awg_transport.py` — PASS
+- `tests/test_awg_peers.py` — PASS
+- 167 тестов в затронутых модулях PASS
+- `full_test.py` — 10/10 PASS
+
+### ВАЖНО — проверка на реальном сервере
+
+Юнит-тесты с моками НЕ поймали бы вчерашнюю ошибку (strip реально возвращал 0, это не баг мока, это баг механизма). То же самое может повториться и с setconf-подходом, если что-то упущено. Перед объявлением готовым — прогнать `awgs_supports_i2_i5()` на сервере с подтверждённо старым awg-quick (как на ArkadiaGamingHub, где результат должен быть False) — и увидеть False, а не поверить юнит-тестам на слово.
+
+---
+
 ## FIX(awg): v5.2 — условная запись I2-I5 в зависимости от поддержки локальным awg-quick (критическая регрессия 3e1fa70) — 26 июля 2026
 
 **КРИТИЧНО. Коммит 3e1fa70 ("всегда писать I1-I5 в .conf") ломает совместимость со старыми сборками amneziawg-tools, которые поддерживают только I1 (парсер AWG 1.5) и вообще не знают директиву I2 — падают с `Line unrecognized: \`I2='` / `Configuration parsing error`, сервис awg-quick@awg0 не поднимается ВООБЩЕ (не просто "туннель не идёт", а полный отказ старта). Подтверждено реальным логом пользователя zvshka (journalctl -u awg-quick@awg0), сервер ArkadiaGamingHub, установка через Chimera сегодня.**

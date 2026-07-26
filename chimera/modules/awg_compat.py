@@ -20,19 +20,30 @@ awg-quick@awg0 не поднимается ВООБЩЕ (не просто "ту
     директивы — видят такую строку и ПАДАЮТ с ошибкой парсинга.
 
 Решение: определять возможности локального awg-quick ПЕРЕД записью .conf,
-а не жёстко "всегда" или "никогда". Проверка через `awg-quick strip`
-(парсит конфиг БЕЗ поднятия интерфейса — безопаснее чем реальный up/down).
-Результат кэшируется на время процесса.
+а не жёстко "всегда" или "никогда".
+
+v5.2.1 (критический фикс): проверка через `awg-quick strip` НЕ РАБОТАЛА
+— strip это текстовый фильтр, не валидирует содержимое [Interface] за
+пределами своих собственных директив (Address/DNS/MTU/Table и т.д.),
+а просто пропускает остальное насквозь без проверки. Реальная валидация
+(та, что рожает 'Line unrecognized: I2=') происходит внутри `awg setconf`,
+вызываемого при настоящем `up` — strip до этой стадии не доходит вообще.
+Подтверждено на сервере ArkadiaGamingHub: strip давал False Positive
+100% времени. Заменен на реальный `awg setconf` против временного
+тестового интерфейса (не awg0! — не трогая реальный работающий интерфейс
+пользователя). Результат кэшируется на время процесса.
 """
 from __future__ import annotations
 
 import tempfile
+import uuid
 from pathlib import Path
 
 
 # ── Кэш результата проверки (на время процесса) ─────────────────────────────
-# Не гоняем проверку на каждый apply — она делает subprocess-вызов и
-# tempfile I/O. Кэшируем в module-level dict после первого вызова.
+# Не гоняем проверку на каждый apply — она делает subprocess-вызовы
+# (ip link add + awg setconf + ip link delete) и tempfile I/O.
+# Кэшируем в module-level dict после первого вызова.
 _SUPPORTS_I2_I5_CACHE: dict[str, bool] = {}
 
 
@@ -41,33 +52,124 @@ def _core_module():
     return importlib.import_module("chimera._core")
 
 
-def _run_strip_check(quick_bin: str, sample_conf: str) -> tuple[bool, str]:
-    """Запускает `awg-quick strip` на sample_conf и возвращает
-    (success, stderr).
+def _run_setconf_check(sample_conf: str) -> tuple[bool, str]:
+    """Создаёт ВРЕМЕННЫЙ интерфейс с уникальным именем (НЕ awg0!),
+    пытается `awg setconf` на нём с тестовым конфигом, удаляет интерфейс.
+    Возвращает (success, stderr+stdout).
 
-    strip — это режим парсинга конфига без поднятия интерфейса:
-    awg-quick strip <conf> читает конфиг, парсит его, и печатает
-    нормализованный wireguard-конфиг в stdout. Если конфиг невалиден
-    (например содержит неизвестную директиву I2 в старом amneziawg-tools),
-    strip падает с "Line unrecognized" в stderr и ненулевым returncode.
+    В отличие от `awg-quick strip` (текстовый фильтр, не валидирует
+    содержимое [Interface] за пределами своих собственных директив —
+    Address/DNS/MTU/Table и т.д., а просто пропускает остальное насквозь
+    без проверки), `awg setconf` — это РЕАЛЬНЫЙ путь валидации, тот же
+    самый, что вызывается при `up`. Это единственный надёжный способ
+    проверить, распознаёт ли локальный amneziawg-tools директивы I2-I5 —
+    без этого весь механизм детекции бесполезен (подтверждено на реальном
+    сервере ArkadiaGamingHub: strip давал False Positive 100% времени).
 
-    Это безопасный способ проверить, понимает ли локальный awg-quick
-    директивы I2-I5 — без реального up/down интерфейса.
+    Безопасность:
+      - Имя тестового интерфейса генерируется через uuid — гарантированно
+        не совпадает с AWGS_INTERFACE ("awg0") или любым другим
+        существующим интерфейсом.
+      - Дополнительная explicit-проверка test_iface != AWGS_INTERFACE —
+        защита от случайного повреждения реального интерфейса
+        пользователя (вернуть True, не трогать awg0).
+      - Интерфейс ВСЕГДА удаляется в finally-блоке, даже при ошибке
+        setconf — не оставляем мусор в системе.
+      - setconf запускается с tempfile (atomic), tempfile тоже удаляется
+        в finally.
+      - Исключения из core._run (FileNotFoundError и пр.) ловятся и
+        возвращаются как (False, str(e)) — не валит весь процесс.
+
+    sample_conf должен быть в "стриппнутом" формате (как awg-quick strip
+    производит): только [Interface] с PrivateKey/ListenPort/Jc.../I1-I5.
+    НЕ содержит Address/MTU/DNS/Table/PreUp/PostUp — иначе setconf
+    отвергнет его по другой причине (не про I2), и тест даст ложный
+    отрицательный результат.
     """
+    # Уникальное имя интерфейса — гарантированно не совпадает с awg0
+    # (AWGS_INTERFACE). Префикс "awgprobe" для удобства диагностики
+    # (если в системе останется мусорный интерфейс, по имени видно
+    # откуда он).
+    test_iface = f"awgprobe{uuid.uuid4().hex[:8]}"
+
     core = _core_module()
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".conf", delete=False
-    ) as tmp:
-        tmp.write(sample_conf)
-        tmp_path = tmp.name
+    from .awg_constants import AWGS_BIN, AWGS_INTERFACE
+
+    # Защита от случайного повреждения реального интерфейса пользователя.
+    # uuid гарантирует уникальность, но эта explicit-проверка добавляет
+    # второй слой safety — если вдруг AWGS_INTERFACE изменится в будущем
+    # на что-то начинающееся с "awgprobe", мы всё равно откажемся.
+    if test_iface == AWGS_INTERFACE:
+        return (True, "test interface name collision with awg0 — refusing to test")
+
+    # Флаг: был ли интерфейс реально создан (чтобы в finally знать,
+    # нужно ли его удалять). Если `ip link add` упал — интерфейса нет,
+    # и `ip link delete` вызывать не нужно.
+    interface_created = False
     try:
-        r = core._run([quick_bin, "strip", tmp_path],
-                      capture=True, check=False)
-        return (r.returncode == 0, (r.stderr or "") + (r.stdout or ""))
-    except Exception as e:
-        return (False, str(e))
+        try:
+            # Создаём тестовый интерфейс (без адресов/поднятия — только
+            # чтобы было куда применить setconf).
+            r_add = core._run(
+                ["ip", "link", "add", test_iface, "type", "amneziawg"],
+                capture=True, check=False,
+            )
+            if r_add.returncode != 0:
+                # Не удалось создать тестовый интерфейс — DKMS-модуль не
+                # загружен, нет CAP_NET_ADMIN, или другая причина. Это НЕ
+                # про I2-I5, поэтому safe default True (см. существующую
+                # edge case логику в awgs_supports_i2_i5 — лучше написать
+                # все 5 ключей и пусть пользователь обновит amneziawg-tools,
+                # чем молча выкинуть I2-I5 и потерять decoy-пакеты на
+                # совместимой системе).
+                return (True, r_add.stderr or "interface creation failed")
+            interface_created = True
+
+            # Пишем sample_conf во tempfile (setconf принимает путь к файлу).
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".conf", delete=False
+            ) as tmp:
+                tmp.write(sample_conf)
+                tmp_path = tmp.name
+            try:
+                # awg setconf <iface> <file> — РЕАЛЬНЫЙ путь валидации
+                # (тот же, что вызывается при `awg-quick up`).
+                r = core._run(
+                    [AWGS_BIN, "setconf", test_iface, tmp_path],
+                    capture=True, check=False,
+                )
+                return (r.returncode == 0, (r.stderr or "") + (r.stdout or ""))
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+        except Exception as e:
+            # Исключение из core._run (FileNotFoundError если ip/awg нет
+            # в PATH, и пр.) — возвращаем как (False, str(e)). Не валит
+            # весь процесс, позволяет awgs_supports_i2_i5 применить
+            # safe-default логику.
+            return (False, str(e))
     finally:
-        Path(tmp_path).unlink(missing_ok=True)
+        # Обязательно удаляем тестовый интерфейс, даже при ошибке.
+        # Не вызываем delete если интерфейс не был создан — это
+        # микро-оптимизация, но и semantic-correctness (не пытаемся
+        # удалить то, чего нет).
+        # Заворачиваем в try/except чтобы не маскировать оригинальную
+        # ошибку — если delete тоже упадёт, логируем но не пробрасываем.
+        if interface_created:
+            try:
+                core._run(["ip", "link", "delete", "dev", test_iface],
+                          capture=True, check=False)
+            except Exception:
+                # Не маскируем оригинальную ошибку. Интерфейс может
+                # остаться в системе, но это лучше чем уронить процесс.
+                # Логируем для диагностики.
+                try:
+                    core.log_to_file(
+                        "WARN",
+                        f"_run_setconf_check: failed to delete test "
+                        f"interface {test_iface} — may need manual cleanup"
+                    )
+                except Exception:
+                    pass
 
 
 def awgs_supports_i2_i5(force_refresh: bool = False) -> bool:
@@ -78,46 +180,59 @@ def awgs_supports_i2_i5(force_refresh: bool = False) -> bool:
     это старая сборка (AWG 1.5-эра), которая падает с
     'Line unrecognized: I2=' при виде этих директив.
 
-    Способ проверки — САМЫЙ надёжный, не гадать по номеру версии в
-    строке (версии в разных дистрибутивах/форках именуются по-разному):
-    собираем МИНИМАЛЬНЫЙ тестовый .conf с непустым I1 и пустым I2,
-    прогоняем через `awg-quick strip` (парсит конфиг БЕЗ поднятия
-    интерфейса — безопаснее чем реальный up/down). Если strip падает
-    с ошибкой про I2/I3/I4/I5 — поддержка отсутствует.
+    Способ проверки (v5.2.1 — КРИТИЧЕСКИ ИЗМЕНЁН):
+      Создаём ВРЕМЕННЫЙ интерфейс с уникальным именем (НЕ awg0!),
+      применяем к нему тестовый .conf через `awg setconf`, удаляем
+      интерфейс. setconf — это РЕАЛЬНЫЙ путь валидации, тот же, что
+      вызывается при `awg-quick up`. Если setconf падает с ошибкой про
+      I2/I3/I4/I5 — поддержка отсутствует.
+
+      v5.2 использовал `awg-quick strip` — но strip это текстовый
+      фильтр, не валидирует содержимое [Interface] за пределами своих
+      собственных директив. Подтверждено на сервере ArkadiaGamingHub:
+      strip давал False Positive 100% времени (возвращал True даже для
+      старых amneziawg-tools, которые реально не поддерживают I2-I5).
+      v5.2.1 — заменён на setconf, единственный надёжный способ.
 
     Результат кэшируется на время процесса (не гоняем проверку на
     каждый apply). Используйте force_refresh=True для принудительной
     перепроверки (нужно в тестах).
 
     Edge cases:
-      - awg-quick не установлен в системе (тестовое окружение,
+      - awg-quick / awg не установлен в системе (тестовое окружение,
         свежий сервер до установки DKMS) — возвращаем True
         (безопасный default: лучше написать все 5 ключей и пусть
         пользователь обновит amneziawg-tools, чем молча выкинуть
         I2-I5 и потерять decoy-пакеты на совместимой системе).
-      - awg-quick strip вообще не работает (повреждённая установка) —
+      - `ip link add` падает (DKMS-модуль не загружен, нет прав) —
         тоже возвращаем True по той же причине.
+      - setconf падает по НЕ I2-I5 причине (например, privkey
+        невалидный, или awg нет в PATH) — возвращаем True (safe
+        default), чтобы не выкинуть I2-I5 из-за ложного срабатывания.
       - На тестах mock'ается через _SUPPORTS_I2_I5_CACHE directly
-        или через patch _run_strip_check.
+        или через patch _run_setconf_check.
     """
     if not force_refresh and "result" in _SUPPORTS_I2_I5_CACHE:
         return _SUPPORTS_I2_I5_CACHE["result"]
 
-    from .awg_constants import AWGS_QUICK_BIN
-
-    # Минимальный тестовый конфиг. I1 — CPS tag (валидный для AWG 2.0),
-    # I2 — пустая строка. Старый amneziawg-tools упадёт уже на парсинге
-    # строки "I2 = " с 'Line unrecognized: I2='. Современный —
-    # примет и вернёт strip'нутый конфиг.
+    # Минимальный тестовый конфиг в "стриппнутом" формате (как awg-quick
+    # strip производит): только [Interface] с PrivateKey/ListenPort/
+    # Jc.../I1-I5. НЕ содержит Address/MTU/DNS/Table/PreUp/PostUp —
+    # иначе setconf отвергнет его по другой причине (не про I2), и тест
+    # даст ложный отрицательный результат.
     #
-    # Приватный ключ — заглушка (wg-quick strip его парсит, но не
-    # использует для реальных crypto-операций в strip-режиме).
-    # 32 байта base64 = 44 символа.
+    # Приватный ключ — заглушка (32 байта base64, all-zeros валиден как
+    # Curve25519 identity element — amneziawg-tools принимает любой
+    # 32-байтный base64).
+    # ListenPort = 0 — kernel присваивает ephemeral port, не конфликтует
+    # с реальным awg0 (который обычно на 51820).
+    # I1 — CPS tag (валидный для AWG 2.0), I2-I5 — пустые. Старый
+    # amneziawg-tools упадёт в setconf уже на парсинге "I2 = " с
+    # 'Line unrecognized: I2='. Современный — примет.
     sample_conf = (
         "[Interface]\n"
         "PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n"
-        "Address = 10.66.66.1/24\n"
-        "ListenPort = 51820\n"
+        "ListenPort = 0\n"
         "Jc = 3\n"
         "Jmin = 40\n"
         "Jmax = 70\n"
@@ -136,11 +251,12 @@ def awgs_supports_i2_i5(force_refresh: bool = False) -> bool:
         "I5 = \n"
     )
 
-    ok, output = _run_strip_check(AWGS_QUICK_BIN, sample_conf)
+    ok, output = _run_setconf_check(sample_conf)
 
     if not ok:
         # Проверяем, что ошибка действительно про I2-I5, а не про что-то
-        # другое (например, privkey невалидный, или awg-quick нет в PATH).
+        # другое (например, privkey невалидный, или awg нет в PATH, или
+        # `ip link add` упал).
         # Если ошибка НЕ про I2-I5 — лучше вернуть True (default safe),
         # чтобы не выкинуть I2-I5 из-за ложного срабатывания.
         output_lower = output.lower()
@@ -158,7 +274,7 @@ def awgs_supports_i2_i5(force_refresh: bool = False) -> bool:
             core = _core_module()
             core.log_to_file(
                 "WARN",
-                f"awgs_supports_i2_i5: awg-quick strip failed for "
+                f"awgs_supports_i2_i5: awg setconf failed for "
                 f"non-I2 reason, defaulting to True. stderr: {output[:300]}"
             )
         except Exception:
@@ -166,7 +282,7 @@ def awgs_supports_i2_i5(force_refresh: bool = False) -> bool:
         _SUPPORTS_I2_I5_CACHE["result"] = True
         return True
 
-    # strip прошёл — значит I2-I5 поддерживаются
+    # setconf прошёл — значит I2-I5 поддерживаются
     _SUPPORTS_I2_I5_CACHE["result"] = True
     return True
 
