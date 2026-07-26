@@ -1230,6 +1230,104 @@ def _ipt_del_redirect(net: str, port: int) -> None:
              capture=True)
 
 
+# ── RETURN-правила для ME-портов (исключения из REDIRECT) ────────────────────
+# ME-серверы Telegram используют порты :8888 (основной) и :80 (health-check).
+# Эти порты НЕ должны попадать под REDIRECT в xray-tproxy-интеграции, иначе
+# telemt не может поднять Middle Proxy pool (RPC handshake проваливается,
+# т.к. xray отдаёт plain TCP вместо MTProto-handshake).
+#
+# ВАЖНО: эти helper-функции работают с ОБЕИМ таблицами — iptables (IPv4)
+# и ip6tables (IPv6) — т.к. ME-серверы доступны и по IPv4, и по IPv6.
+
+#: ME-порты, которые исключаются из REDIRECT.
+_ME_RETURN_PORTS: tuple = ("8888", "80")
+
+
+def _ipt_return_rule_exists(ipt: str, dport: str) -> bool:
+    """Проверяет наличие RETURN-правила для dport в таблице ipt
+    (iptables или ip6tables). Через iptables -C (check).
+    """
+    r = _run([ipt, "-t", "nat", "-C", "OUTPUT",
+              "-p", "tcp", "--dport", dport, "-j", "RETURN"],
+             capture=True, check=False)
+    return r.returncode == 0
+
+
+def _ipt_remove_all_return_rules(ipt: str, dport: str) -> int:
+    """Удаляет ВСЕ RETURN-правила для dport в таблице ipt, сколько бы
+    их ни было. Возвращает количество удалённых правил.
+
+    Аналог _ipt_remove_all_jumps() для RETURN-правил ME-портов.
+    Использует _ipt_return_rule_exists() для проверки after each removal,
+    а не полагается на returncode -D (который удаляет только одно правило
+    за вызов).
+
+    Защита от бесконечного цикла — 20 итераций (больше дублей в
+    реальной системе не бывает, обычно 1-2).
+    """
+    removed = 0
+    for _ in range(20):
+        if not _ipt_return_rule_exists(ipt, dport):
+            break
+        r = _run([ipt, "-t", "nat", "-D", "OUTPUT",
+                  "-p", "tcp", "--dport", dport, "-j", "RETURN"],
+                 capture=True, check=False)
+        if r.returncode != 0:
+            break
+        removed += 1
+    return removed
+
+
+def _ipt_ensure_single_return_rule(ipt: str, dport: str) -> int:
+    """Гарантирует, что в таблице ipt есть РОВНО ОДНО RETURN-правило
+    для dport. Сначала удаляет все существующие (через
+    _ipt_remove_all_return_rules), потом добавляет ровно одно через -I.
+
+    Возвращает количество удалённых дублей (для логирования).
+    """
+    removed = _ipt_remove_all_return_rules(ipt, dport)
+    _run([ipt, "-t", "nat", "-I", "OUTPUT",
+          "-p", "tcp", "--dport", dport, "-j", "RETURN"],
+         capture=True, check=False)
+    return removed
+
+
+def _ipt_owner_return_rule_exists(ipt: str, uid: int) -> bool:
+    """Проверяет RETURN-правило по UID (для исключения xray UID 999
+    из REDIRECT-петли).
+    """
+    r = _run([ipt, "-t", "nat", "-C", "OUTPUT",
+              "-m", "owner", "--uid-owner", str(uid), "-j", "RETURN"],
+             capture=True, check=False)
+    return r.returncode == 0
+
+
+def _ipt_remove_all_owner_return_rules(ipt: str, uid: int) -> int:
+    """Удаляет ВСЕ RETURN-правила по UID в таблице ipt. Аналог
+    _ipt_remove_all_return_rules, но для owner-match правил.
+    """
+    removed = 0
+    for _ in range(20):
+        if not _ipt_owner_return_rule_exists(ipt, uid):
+            break
+        r = _run([ipt, "-t", "nat", "-D", "OUTPUT",
+                  "-m", "owner", "--uid-owner", str(uid), "-j", "RETURN"],
+                 capture=True, check=False)
+        if r.returncode != 0:
+            break
+        removed += 1
+    return removed
+
+
+def _ipt_ensure_single_owner_return(ipt: str, uid: int) -> int:
+    """Гарантирует ровно одно RETURN-правило по UID в таблице ipt."""
+    removed = _ipt_remove_all_owner_return_rules(ipt, uid)
+    _run([ipt, "-t", "nat", "-I", "OUTPUT",
+          "-m", "owner", "--uid-owner", str(uid), "-j", "RETURN"],
+         capture=True, check=False)
+    return removed
+
+
 def _iptables_persist() -> None:
     """
     Сохраняет iptables-правила для выживания после ребута.
@@ -1338,11 +1436,10 @@ def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
         _run(["systemctl", "restart", XRAY_SERVICE_NAME])
 
     # ── iptables REDIRECT ─────────────────────────────────────────────────────
-    # Исключение 1: xray (UID 999) не должен попадать в REDIRECT-петлю
-    _run(["iptables", "-t", "nat", "-D", "OUTPUT",
-          "-m", "owner", "--uid-owner", "999", "-j", "RETURN"], capture=True)
-    _run(["iptables", "-t", "nat", "-I", "OUTPUT", "1",
-          "-m", "owner", "--uid-owner", "999", "-j", "RETURN"])
+    # Исключение 1: xray (UID 999) не должен попадать в REDIRECT-петлю.
+    # Гарантируем РОВНО ОДНО правило через _ipt_ensure_single_owner_return
+    # (сначала удаляем все дубли, потом добавляем одно).
+    _ipt_ensure_single_owner_return("iptables", 999)
     # Исключение 2: ME-серверы Telegram на портах 8888 и 80 не должны
     # попадать под REDIRECT (нужно для работы use_middle_proxy=true в
     # каскадной схеме). Telemt сам делает RPC handshake к ME-серверам
@@ -1354,13 +1451,16 @@ def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
     # Применяем к ОБЕИМ таблицам: iptables (IPv4) и ip6tables (IPv6),
     # т.к. ME-серверы доступны и по IPv4 (91.108.x.x, 149.154.x.x),
     # и по IPv6 (2001:67c:4e8::, 2001:b28:f23d::, и т.д.).
+    #
+    # Гарантируем РОВНО ОДНО RETURN-правило на порт через
+    # _ipt_ensure_single_return_rule — цикл удаления всех дублей
+    # перед добавлением одного. Без этого при повторных вызовах
+    # (через меню или при emergency_restore) правила накапливались
+    # дубли, а при ручной чистке пользователь мог удалить все — и
+    # ME-pool снова падал.
     for _ipt in ("iptables", "ip6tables"):
-        for _me_port in ("8888", "80"):
-            _run([_ipt, "-t", "nat", "-D", "OUTPUT",
-                  "-p", "tcp", "--dport", _me_port, "-j", "RETURN"],
-                 capture=True)
-            _run([_ipt, "-t", "nat", "-I", "OUTPUT",
-                  "-p", "tcp", "--dport", _me_port, "-j", "RETURN"])
+        for _me_port in _ME_RETURN_PORTS:
+            _ipt_ensure_single_return_rule(_ipt, _me_port)
     tg_nets = _TG_NETS_current()
     failed = [net for net in tg_nets if not _ipt_add_redirect(net, port)]
     _iptables_persist()
@@ -1402,16 +1502,15 @@ def xray_disable_tproxy_for_telemt() -> tuple:
     for net in _TG_NETS_current():
         _ipt_del_redirect(net, port or XRAY_TPROXY_PORT)
 
-    # Удаляем исключения для ME-портов (:8888, :80) — больше не нужны
-    # без REDIRECT. Обе таблицы (iptables + ip6tables).
+    # Удаляем ВСЕ исключения для ME-портов (:8888, :80) — больше не нужны
+    # без REDIRECT. Обе таблицы (iptables + ip6tables). Через цикл
+    # _ipt_remove_all_return_rules — удаляет ВСЕ дубли (а не одно правило
+    # как одиночный -D).
     for _ipt in ("iptables", "ip6tables"):
-        for _me_port in ("8888", "80"):
-            _run([_ipt, "-t", "nat", "-D", "OUTPUT",
-                  "-p", "tcp", "--dport", _me_port, "-j", "RETURN"],
-                 capture=True)
-    # Удаляем исключение для UID 999 (xray)
-    _run(["iptables", "-t", "nat", "-D", "OUTPUT",
-          "-m", "owner", "--uid-owner", "999", "-j", "RETURN"], capture=True)
+        for _me_port in _ME_RETURN_PORTS:
+            _ipt_remove_all_return_rules(_ipt, _me_port)
+    # Удаляем ВСЕ исключения для UID 999 (xray) — аналогично через цикл
+    _ipt_remove_all_owner_return_rules("iptables", 999)
 
     _iptables_persist()
 
