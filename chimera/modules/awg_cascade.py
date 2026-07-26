@@ -26,7 +26,7 @@ from pathlib import Path
 from .awg_constants import (
     AWGS_CASCADE_DIR, AWGS_RU_ZONE_FILE, AWGS_ROUTING_SCRIPT,
     AWGS_IPSET_NAME, AWGS_CASCADE_FWMARK,
-    AWGS_CRON_RU_UPDATE, AWGS_SYSTEMD_CASCADE,
+    AWGS_CRON_RU_UPDATE, AWGS_CRON_RU_UPDATE_SCRIPT, AWGS_SYSTEMD_CASCADE,
     AWGS_RU_ZONE_URL, AWGS_RU_ZONE_FALLBACK_GH,
     AWGS_CASCADE_ENTRY_PEER, AWGS_DEFAULT_SUBNET,
 )
@@ -403,13 +403,55 @@ WantedBy=multi-user.target
 
 
 def _awgs_cascade_setup_cron() -> None:
-    """Создаёт cron для еженедельного обновления ru.zone."""
+    """Создаёт cron для еженедельного обновления ru.zone.
+
+    v5.1: bare ``python3 -c "from chimera.modules.awg_cascade import
+    awgs_cascade_update_ru_zone; ..."`` в cron НЕ работает — cron
+    запускается с произвольной cwd и без PYTHONPATH, поэтому
+    ``from chimera...`` падает с ``ModuleNotFoundError: No module named
+    'chimera'``. Тот же класс бага, что и в awgs_setup_expires_cron()
+    и mtproto_stats.setup_iptables_accounting().
+
+    Паттерн исправления — wrapper bash-скрипт (как в
+    ``node_health_monitor.py::install_health_monitor`` и
+    ``geo_files.py::setup_geo_autoupdate``): находим путь установки
+    chimera, экспорим PYTHONPATH, вызываем python -c с
+    ``sys.path.insert(0, ...)``. Cron-файл просто вызывает wrapper.
+    """
+    # Находим путь установки chimera (тот же способ, что в
+    # node_health_monitor.py::install_health_monitor).
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("chimera")
+        if spec and spec.submodule_search_locations:
+            installer_path = str(
+                Path(list(spec.submodule_search_locations)[0]).parent
+            )
+        else:
+            installer_path = "/opt/chimera"
+    except Exception:
+        installer_path = "/opt/chimera"
+
+    # Wrapper bash-скрипт: export PYTHONPATH + sys.path.insert + python -c
+    script_content = (
+        "#!/bin/bash\n"
+        "# AWG cascade: еженедельное обновление ru.zone "
+        "(wrapper для cron; v5.1: PYTHONPATH-safe).\n"
+        f"export PYTHONPATH=\"{installer_path}:$PYTHONPATH\"\n"
+        f"/usr/bin/python3 -c \"\n"
+        f"import sys\n"
+        f"sys.path.insert(0, '{installer_path}')\n"
+        f"from chimera.modules.awg_cascade import awgs_cascade_update_ru_zone\n"
+        f"awgs_cascade_update_ru_zone()\n"
+        f"\" >> /root/awg/awg_standalone.log 2>&1\n"
+    )
+    AWGS_CRON_RU_UPDATE_SCRIPT.write_text(script_content)
+    AWGS_CRON_RU_UPDATE_SCRIPT.chmod(0o755)
+
+    # Cron-файл — вызывает wrapper-скрипт.
     cron = (
         "# AWG cascade: еженедельное обновление ru.zone\n"
-        "0 3 * * 0 root /usr/bin/python3 -c "
-        "\"from chimera.modules.awg_cascade import awgs_cascade_update_ru_zone; "
-        "awgs_cascade_update_ru_zone()\" "
-        f">> /root/awg/awg_standalone.log 2>&1\n"
+        f"0 3 * * 0 root {AWGS_CRON_RU_UPDATE_SCRIPT}\n"
     )
     AWGS_CRON_RU_UPDATE.write_text(cron)
     AWGS_CRON_RU_UPDATE.chmod(0o644)
