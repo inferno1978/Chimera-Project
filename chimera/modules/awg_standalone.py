@@ -742,16 +742,17 @@ def awgs_build_server_conf(
     lines.append(f"H2 = {params.get('h2', 2)}")
     lines.append(f"H3 = {params.get('h3', 3)}")
     lines.append(f"H4 = {params.get('h4', 4)}")
-    if params.get("i1"):
-        lines.append(f"I1 = {params['i1']}")
-    if params.get("i2"):
-        lines.append(f"I2 = {params['i2']}")
-    if params.get("i3"):
-        lines.append(f"I3 = {params['i3']}")
-    if params.get("i4"):
-        lines.append(f"I4 = {params['i4']}")
-    if params.get("i5"):
-        lines.append(f"I5 = {params['i5']}")
+    # v5.1: I1-I5 ВСЕГДА пишутся в конфиг, даже когда пустые — как в
+    # официальном формате AWG 2.0. Раньше писались только непустые, но
+    # некоторые строгие парсеры (Keenetic native AWG 2.0) падают на
+    # отсутствии ключа I2/I3/I4/I5 при наличии I1 (или наоборот).
+    # См. docs.amnezia.org — официальный конфиг от amnezia-клиента всегда
+    # содержит все пять ключей.
+    lines.append(f"I1 = {params.get('i1', '')}")
+    lines.append(f"I2 = {params.get('i2', '')}")
+    lines.append(f"I3 = {params.get('i3', '')}")
+    lines.append(f"I4 = {params.get('i4', '')}")
+    lines.append(f"I5 = {params.get('i5', '')}")
 
     # Cascade: если это AWG0 (entry), добавляем peer к AWG1
     if cascade_role == "entry" and cascade_peer:
@@ -1594,7 +1595,15 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
     if awg_peer_rebuild_conf(apply=True, params_override=new_params):
         # Apply успешен — теперь безопасно коммитить state
         awgs_state_update(params=new_params)
-        i1_display = new_params.get("i1", "")[:16] + "..." if new_params.get("i1") else "отсутствует"
+        # v5.1: I1 теперь CPS tag (например "<r 24>") — обычно короткий,
+        # не нужно обрезать. Для legacy hex (длинный) оставляем обрезку.
+        _i1_val = new_params.get("i1", "")
+        if not _i1_val:
+            i1_display = "отсутствует"
+        elif len(_i1_val) > 16:
+            i1_display = _i1_val[:16] + "..."
+        else:
+            i1_display = _i1_val
         msg = (f"Параметры обновлены: Jc={new_params['jc']} "
                f"Jmin={new_params['jmin']} Jmax={new_params['jmax']} "
                f"I1={i1_display}")
@@ -1649,7 +1658,13 @@ def do_awgs_rotate_menu() -> None:
                  f"Jmin={current_params.get('jmin', '?')} "
                  f"Jmax={current_params.get('jmax', '?')}")
         i1 = current_params.get("i1", "")
-        i1_display = i1[:16] + "..." if i1 else "отсутствует"
+        # v5.1: I1 теперь CPS tag — обычно короткий, не нужно обрезать.
+        if not i1:
+            i1_display = "отсутствует"
+        elif len(i1) > 16:
+            i1_display = i1[:16] + "..."
+        else:
+            i1_display = i1
         _box_row(f"    I1={i1_display}")
     _box_row()
     _box_sep()

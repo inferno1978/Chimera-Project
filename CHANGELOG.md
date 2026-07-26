@@ -2,6 +2,77 @@
 
 ---
 
+## FIX(awg): CPS tag-формат для I1-I5 вместо голой hex-строки (AWG 2.0 совместимость) + всегда писать I1-I5 в .conf — 26 июля 2026
+
+**Контекст: сравнение с конфигом официального приложения Amnezia показало, что I1-I5 в AWG 2.0 — это НЕ голая hex-строка, а мини-язык тегов (CPS — Custom Protocol Signature), задокументированный в docs.amnezia.org и в спецификации amneziawg-go. Голый hex — это старый формат AWG 1.5. Стороннее сообщество (bivlked/amneziawg-installer, ADVANCED.md) прямо указывает: "если туннель подключается, но трафик не идёт — проблема в формате I1" на некоторых клиентах (Keenetic native AWG 2.0, amneziawg-go).**
+
+### Что изменилось
+
+**1. awgs_presets_generate() — генерация I1 в CPS tag-формате:**
+
+- `i1_mode == "random"`: было `"".join(random.choices("0123456789abcdef", k=i1_len * 2))` → стало `f"<r {i1_size}>"` (24-32 случайных байт через CPS tag, простейший валидный формат AWG 2.0).
+- `i1_mode == "binary"` (T-Mobile US): было голый hex 16 символов → стало `f"<b 0x{i1_hex}>"` (32 hex символа = 16 байт, статичные байты через CPS tag).
+- `i1_mode == "absent"`: без изменений (пустая строка).
+- **Новый режим `i1_mode == "quic_mimicry"`** — опциональный sneaky-режим через `_generate_quic_mimicry_i1()`: `<b 0xc30000000108><r 8><b 0x08><r 8><b 0x0045dc><t><r 16>` (маскировка под QUIC v1 long-header, RFC 9000). Доступен для использования в "5. Ручная настройка" через `awgs_generate_full_manual_params()`.
+
+**2. awgs_generate_full_manual_params() — та же правка: I1 теперь `<r N>` вместо голого hex.**
+
+**3. awgs_presets_validate_params() — принимает CPS tag-формат И голый hex:**
+
+Новый хелпер `_is_valid_cps_or_legacy_hex()` принимает:
+- CPS tag-формат AWG 2.0: `<b 0x[hex]>`, `<r [size]>`, `<rd [size]>`, `<rc [size]>`, `<t>` (комбинируются через конкатенацию, optional whitespace между тегами).
+- Голый hex без тегов (AWG 1.5) — для обратной совместимости с уже установленными state.json у пользователей, которые обновились с v5.0.x.
+
+Старый hex-формат остаётся валидным, чтобы не сломать уже установленные конфиги (правка только для НОВОЙ генерации, не автомиграция).
+
+**4. Писатели конфига ВСЕГДА пишут I1-I5 (раньше только непустые):**
+
+- `awg_standalone.awgs_build_server_conf()` — серверный awg0.conf
+- `awg_qr.awgs_qr_build_client_conf()` — клиентский .conf для QR
+- `awg_transport._awg_server_conf_text()` — Cascade сервер
+- `awg_transport._awg_client_conf_text()` — Cascade клиент
+- `awg_transport._awg_client_conf_for_node()` — Cascade клиент для конкретной ноды
+- `awg_transport._awg_server_conf_for_node()` — Cascade сервер для конкретной ноды
+
+Было:
+```python
+if params.get("i1"):
+    lines.append(f"I1 = {params['i1']}")
+```
+
+Стало:
+```python
+lines.append(f"I1 = {params.get('i1', '')}")
+# ... то же для I2-I5
+```
+
+Это соответствует официальному формату AWG 2.0 (amnezia-клиент всегда пишет все 5 ключей). Строгие парсеры (Keenetic native AWG 2.0) падают на отсутствии ключа I2/I3/I4/I5 при наличии I1.
+
+**5. install_prompts._ask_hex() — принимает CPS tag-формат в ручном вводе.**
+
+Пользователь в пункте "5. Ручная настройка" теперь может вводить как голый hex (старый формат), так и CPS tag-строки (`<r 24>`, `<b 0x...>`, `<t>` и т.д.).
+
+**6. ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ H1-H4 для старых прошивок Keenetic (зафиксировано в коде):**
+
+Добавлен подробный комментарий в `_generate_non_overlapping_h_values()` (awg_presets.py): некоторые старые прошивки роутеров (Keenetic Speedster firmware 5.0.6, OpenWrt 21.x и старше) не парсят H1-H4 как одиночное число выше 255 — они требуют значения в диапазоне 0-255 (один байт). По спецификации AWG 2.0 (docs.amnezia.org) значения валидны до INT32_MAX, и amneziawg-windows-client их принимает. Если пользователь жалуется на "не подключается с Keenetic" — нужно проверить версию прошивки и при необходимости вручную снизить H1-H4 до 0-255 через "5. Ручная настройка". Альтернатива — использовать upstream amneziawg-go бинарник вместо native AWG-клиента роутера.
+
+### Тесты
+
+- `tests/test_awg_presets.py` — обновлены существующие тесты (старые `test_i1_random_mode_generates_hex`, `test_i1_binary_mode_generates_short_hex`, `test_i1_is_hex_48_to_64_chars` заменены на CPS-варианты) + 2 новых тестовых класса:
+  - `TestCpsTagFormat` (15 тестов) — проверка `_is_valid_cps_or_legacy_hex` (CPS tags, legacy hex, garbage rejection, non-string rejection), `_generate_quic_mimicry_i1` (static pattern, validator pass, QUIC flag 0xc3, timestamp tag, random tags), и интеграция с `awgs_presets_validate_params`.
+  - `TestPresetsGenerateCpsI1` (4 теста) — все пресеты с i1_mode='random' генерируют `<r N>`, 'binary' — `<b 0x...>`, 'absent' — пустой, и все проходят валидатор.
+- `tests/test_awg_qr.py` — `test_omits_i1_when_empty` заменён на `test_i1_always_written_v51` (все 5 I1-I5 ключей всегда в conf).
+- `tests/test_awg_standalone.py` — `test_i1_omitted_when_empty` заменён на `test_i1_to_i5_always_written_v51`.
+- `tests/test_awg_transport.py` — 4 теста `*_omits_i1_when_empty` заменены на `*_always_writes_i1_to_i5_v51` (4 функции: `_awg_server_conf_text`, `_awg_client_conf_text`, `_awg_client_conf_for_node`, `_awg_server_conf_for_node`). `test_all_4_functions_have_full_param_set` расширен: теперь проверяет все 16 параметров (раньше 11 + опциональные I1-I5).
+
+### Обратная совместимость
+
+- НЕ трогаются уже установленные/существующие конфиги на серверах пользователей. Правка только для НОВОЙ генерации при установке/ротации параметров.
+- Если пользователь ротирует параметры после обновления кода, он естественно получит новый корректный формат.
+- Валидатор принимает оба формата (CPS + legacy hex), чтобы уже установленные state.json продолжали работать.
+
+---
+
 ## FEAT(mtproto_stats): диагностика Telemt API в TUI (почему Panel показывает 0) — 26 июля 2026
 
 **Пользователь сообщил: TUI Chimera корректно показывает трафик Telemt (490.9 KiB, два активных пользователя), но Telemt Panel (веб-панель) показывает 0 traffic / 0 connections / 0 active IPs, хотя `Configured Users: 2` и `Uptime: 7m`. Это расходящиеся источники: TUI берёт трафик из iptables-цепочек TELEMT_STATS_IN/OUT (надёжно, не зависит от telemt API), а Panel — из HTTP API telemt (127.0.0.1:9091, секция [server.api]). Если API telemt возвращает 0 — Panel показывает 0, хотя трафик реально есть. Добавляем диагностический инструмент в TUI, чтобы пользователь мог сам разобраться.**

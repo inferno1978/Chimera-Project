@@ -69,7 +69,10 @@ class TestCarrierPresetsStructure(unittest.TestCase):
         from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
         for name, preset in AWGS_CARRIER_PRESETS.items():
             with self.subTest(preset=name):
-                self.assertIn(preset["i1_mode"], ("random", "absent", "binary"))
+                # v5.1: добавлен 4-й режим 'quic_mimicry' (опциональный,
+                # для sneaky-режима в ручной настройке)
+                self.assertIn(preset["i1_mode"],
+                              ("random", "absent", "binary", "quic_mimicry"))
 
     def test_jc_min_le_jc_max(self):
         from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
@@ -263,12 +266,29 @@ class TestPresetsGenerate(unittest.TestCase):
                         f"S3/S4 одинаковые у двух вызовов: "
                         f"p1=({p1['s3']},{p1['s4']}), p2=({p2['s3']},{p2['s4']})")
 
-    def test_i1_random_mode_generates_hex(self):
+    def test_i1_random_mode_generates_cps_tag(self):
+        """v5.1: i1_mode='random' генерирует CPS tag-формат <r N>.
+
+        Раньше (v5.0) генерировался голый hex — это формат AWG 1.5,
+        который ломает некоторых клиентов AWG 2.0 (Keenetic native,
+        amneziawg-go). Теперь это CPS tag <r N> — простейший валидный
+        формат AWG 2.0, функционально эквивалентный старому по энтропии.
+        """
+        import re
         from chimera.modules.awg_presets import awgs_presets_generate
         random.seed(42)
         p = awgs_presets_generate("default")  # i1_mode=random
-        self.assertTrue(p["i1"])
-        self.assertTrue(all(c in "0123456789abcdef" for c in p["i1"]))
+        self.assertTrue(p["i1"], "I1 не должен быть пустым для random mode")
+        # CPS tag-формат: <r N> где N — число 24..32
+        self.assertRegex(
+            p["i1"], r"^<r \d+>$",
+            f"I1 должен быть в формате '<r N>', фактически: {p['i1']!r}"
+        )
+        # Проверяем что N в разумном диапазоне (24..32 байта)
+        m = re.match(r"^<r (\d+)>$", p["i1"])
+        n = int(m.group(1))
+        self.assertGreaterEqual(n, 24)
+        self.assertLessEqual(n, 32)
 
     def test_i1_absent_mode_returns_empty(self):
         """Пресет tele2_krasnoyarsk использует i1_mode='absent'."""
@@ -277,12 +297,29 @@ class TestPresetsGenerate(unittest.TestCase):
         p = awgs_presets_generate("tele2_krasnoyarsk")
         self.assertEqual(p["i1"], "")
 
-    def test_i1_binary_mode_generates_short_hex(self):
-        """T-Mobile US использует i1_mode='binary' — 16 hex символов."""
+    def test_i1_binary_mode_generates_cps_static_bytes(self):
+        """v5.1: i1_mode='binary' генерирует CPS tag-формат <b 0x...>.
+
+        Раньше (v5.0) генерировался голый hex 16 символов. Теперь это
+        CPS tag <b 0x...> — статичные байты, валидный формат AWG 2.0.
+        Для T-Mobile US используется 32 hex символа (16 байт) внутри тега.
+        """
+        import re
         from chimera.modules.awg_presets import awgs_presets_generate
         random.seed(42)
         p = awgs_presets_generate("tmobile_us")
-        self.assertEqual(len(p["i1"]), 16)
+        # CPS tag-формат: <b 0x[hex]> (чётное число hex-символов после 0x)
+        self.assertRegex(
+            p["i1"], r"^<b 0x[0-9a-fA-F]+>$",
+            f"I1 должен быть в формате '<b 0x[hex]>', фактически: {p['i1']!r}"
+        )
+        # Проверяем что hex-часть имеет чётное число символов (байты)
+        m = re.match(r"^<b 0x([0-9a-fA-F]+)>$", p["i1"])
+        hex_part = m.group(1)
+        self.assertEqual(
+            len(hex_part) % 2, 0,
+            f"hex-часть должна иметь чётное число символов: {hex_part!r}"
+        )
 
     def test_i2_to_i5_are_empty(self):
         from chimera.modules.awg_presets import awgs_presets_generate
@@ -628,8 +665,15 @@ class TestGenerateFullManualParams(unittest.TestCase):
                             f"S2 ({p['s2']}) == S1+56 ({p['s1']+56}) — "
                             f"правило совместимости нарушено")
 
-    def test_i1_is_hex_48_to_64_chars(self):
-        """I1 — hex-строка 48-64 символа (24-32 байта)."""
+    def test_i1_is_cps_tag_r_n(self):
+        """v5.1: I1 — CPS tag-формат <r N> (24-32 случайных байт).
+
+        Раньше (v5.0) генерировался голый hex 48-64 символа (AWG 1.5).
+        Теперь это CPS tag <r N> — валидный формат AWG 2.0, который
+        принимают все современные клиенты (включая Keenetic native
+        AWG 2.0 и amneziawg-go). Голый hex ломал этих клиентов.
+        """
+        import re
         from chimera.modules.awg_presets import awgs_generate_full_manual_params
         for seed in range(5):
             with self.subTest(seed=seed):
@@ -637,12 +681,17 @@ class TestGenerateFullManualParams(unittest.TestCase):
                 p = awgs_generate_full_manual_params()
                 self.assertTrue(p["i1"],
                                 f"I1 пустой при seed={seed} — должен генерироваться")
-                self.assertTrue(all(c in "0123456789abcdef" for c in p["i1"]),
-                                f"I1 содержит не-hex символы: {p['i1']}")
-                self.assertGreaterEqual(len(p["i1"]), 48,
-                                        f"I1 слишком короткий: {len(p['i1'])}")
-                self.assertLessEqual(len(p["i1"]), 64,
-                                     f"I1 слишком длинный: {len(p['i1'])}")
+                # CPS tag-формат: <r N> где N — число 24..32
+                self.assertRegex(
+                    p["i1"], r"^<r \d+>$",
+                    f"I1 должен быть в формате '<r N>', фактически: {p['i1']!r}"
+                )
+                m = re.match(r"^<r (\d+)>$", p["i1"])
+                n = int(m.group(1))
+                self.assertGreaterEqual(n, 24,
+                                        f"размер <r N> слишком маленький: {n}")
+                self.assertLessEqual(n, 32,
+                                     f"размер <r N> слишком большой: {n}")
 
     def test_i2_to_i5_empty_by_default(self):
         """I2-I5 — пустые по умолчанию (без overrides)."""
@@ -740,6 +789,294 @@ class TestCarrierPresetsNotChanged(unittest.TestCase):
         # H1-H4 должны быть непересекающимися
         self.assertEqual(len(set(hs)), 4,
                          f"H1-H4 пересекаются: {hs}")
+
+
+# ============================================================================
+#  v5.1 — CPS tag-формат для I1-I5 (AWG 2.0)
+# ============================================================================
+# Раньше I1-I5 генерировались как голая hex-строка (формат AWG 1.5). Это
+# ломало некоторых клиентов AWG 2.0 (Keenetic native AWG 2.0, amneziawg-go)
+# — туннель подключается, но трафик не идёт.
+#
+# v5.1: I1-I5 теперь генерируются в CPS tag-формате (Custom Protocol
+# Signature), как требует спецификация AWG 2.0 (docs.amnezia.org):
+#   <b 0x[hex]>  — статичные байты (hex-encoded)
+#   <r [size]>   — [size] случайных байт
+#   <rd [size]>  — [size] случайных байт из [0-9]
+#   <rc [size]>  — [size] случайных байт из [a-zA-Z]
+#   <t>          — 4-байтный текущий unix-timestamp
+#
+# Старый голый hex остаётся валидным в валидаторе для обратной
+# совместимости (уже установленные state.json у пользователей).
+
+class TestCpsTagFormat(unittest.TestCase):
+    """Тесты на CPS tag-формат I1-I5 и валидатор."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    # ── _is_valid_cps_or_legacy_hex ──────────────────────────────────────
+    def test_validator_accepts_empty_string(self):
+        """Пустая строка валидна (I1-I5 опциональны)."""
+        from chimera.modules.awg_presets import _is_valid_cps_or_legacy_hex
+        self.assertTrue(_is_valid_cps_or_legacy_hex(""))
+
+    def test_validator_accepts_cps_random_tag(self):
+        """CPS tag <r N> валиден."""
+        from chimera.modules.awg_presets import _is_valid_cps_or_legacy_hex
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<r 24>"))
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<r 32>"))
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<r 1>"))
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<r 100>"))
+
+    def test_validator_accepts_cps_static_bytes_tag(self):
+        """CPS tag <b 0x...> валиден (статичные байты, hex)."""
+        from chimera.modules.awg_presets import _is_valid_cps_or_legacy_hex
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<b 0xdeadbeef>"))
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<b 0xab>"))
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<b 0xc30000000108>"))
+
+    def test_validator_accepts_cps_random_digit_tag(self):
+        """CPS tag <rd N> валиден (случайные байты из 0-9)."""
+        from chimera.modules.awg_presets import _is_valid_cps_or_legacy_hex
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<rd 16>"))
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<rd 4>"))
+
+    def test_validator_accepts_cps_random_chars_tag(self):
+        """CPS tag <rc N> валиден (случайные байты из a-zA-Z)."""
+        from chimera.modules.awg_presets import _is_valid_cps_or_legacy_hex
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<rc 16>"))
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<rc 4>"))
+
+    def test_validator_accepts_cps_timestamp_tag(self):
+        """CPS tag <t> валиден (текущий unix-timestamp)."""
+        from chimera.modules.awg_presets import _is_valid_cps_or_legacy_hex
+        self.assertTrue(_is_valid_cps_or_legacy_hex("<t>"))
+
+    def test_validator_accepts_cps_combined_tags(self):
+        """CPS-строка из нескольких тегов валидна (как в quic_mimicry)."""
+        from chimera.modules.awg_presets import _is_valid_cps_or_legacy_hex
+        # Комбинированный паттерн QUIC-маскировки
+        quic = "<b 0xc30000000108><r 8><b 0x08><r 8><b 0x0045dc><t><r 16>"
+        self.assertTrue(_is_valid_cps_or_legacy_hex(quic))
+        # С пробелами между тегами (как в официальном примере Amnezia)
+        spaced = "<r 2> <b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000105a00044d583737>"
+        self.assertTrue(_is_valid_cps_or_legacy_hex(spaced))
+
+    def test_validator_accepts_legacy_hex(self):
+        """Голый hex (без тегов) валиден для обратной совместимости.
+
+        v5.0 генерировал I1 как голый hex. В state.json у существующих
+        пользователей может остаться такой формат — валидатор не должен
+        его отбрасывать, иначе уже установленные конфиги перестанут
+        проходить валидацию при ротации параметров.
+        """
+        from chimera.modules.awg_presets import _is_valid_cps_or_legacy_hex
+        self.assertTrue(_is_valid_cps_or_legacy_hex("deadbeef"))
+        self.assertTrue(_is_valid_cps_or_legacy_hex("aabbccdd" * 12))  # 96 chars
+
+    def test_validator_rejects_garbage(self):
+        """Мусор (не CPS, не hex) отбрасывается."""
+        from chimera.modules.awg_presets import _is_valid_cps_or_legacy_hex
+        self.assertFalse(_is_valid_cps_or_legacy_hex("xyz123"))
+        self.assertFalse(_is_valid_cps_or_legacy_hex("hello world"))
+        self.assertFalse(_is_valid_cps_or_legacy_hex("<r abc>"))  # не число
+        self.assertFalse(_is_valid_cps_or_legacy_hex("<b 0xxyz>"))  # не hex
+        self.assertFalse(_is_valid_cps_or_legacy_hex("<unknown_tag>"))
+        self.assertFalse(_is_valid_cps_or_legacy_hex("[r 24]"))  # не угловые скобки
+
+    def test_validator_rejects_non_string(self):
+        """Non-string значения отбрасываются."""
+        from chimera.modules.awg_presets import _is_valid_cps_or_legacy_hex
+        self.assertFalse(_is_valid_cps_or_legacy_hex(None))
+        self.assertFalse(_is_valid_cps_or_legacy_hex(123))
+        self.assertFalse(_is_valid_cps_or_legacy_hex([]))
+
+    # ── _generate_quic_mimicry_i1 ────────────────────────────────────────
+    def test_quic_mimicry_returns_static_pattern(self):
+        """_generate_quic_mimicry_i1 возвращает статичный QUIC-паттерн."""
+        from chimera.modules.awg_presets import _generate_quic_mimicry_i1
+        result = _generate_quic_mimicry_i1()
+        # Паттерн из bivlked/amneziawg-installer (ADVANCED.md)
+        expected = "<b 0xc30000000108><r 8><b 0x08><r 8><b 0x0045dc><t><r 16>"
+        self.assertEqual(result, expected)
+
+    def test_quic_mimicry_passes_validator(self):
+        """QUIC-mimicry I1 проходит валидатор (CPS tag-формат)."""
+        from chimera.modules.awg_presets import (
+            _generate_quic_mimicry_i1,
+            _is_valid_cps_or_legacy_hex,
+        )
+        i1 = _generate_quic_mimicry_i1()
+        self.assertTrue(_is_valid_cps_or_legacy_hex(i1),
+                        f"QUIC-mimicry I1 не проходит валидатор: {i1!r}")
+
+    def test_quic_mimicry_contains_quic_long_header_flag(self):
+        """QUIC-mimicry I1 содержит 0xc3 (QUIC v1 long-header flag)."""
+        from chimera.modules.awg_presets import _generate_quic_mimicry_i1
+        result = _generate_quic_mimicry_i1()
+        # 0xc3 = Long header flag (1100 0011): long header + fixed bit +
+        # QUIC version 1. См. RFC 9000.
+        self.assertIn("0xc3", result,
+                      f"QUIC-mimicry I1 должен содержать 0xc3 flag: {result!r}")
+
+    def test_quic_mimicry_contains_timestamp_tag(self):
+        """QUIC-mimicry I1 содержит <t> (timestamp) — даёт уникальность
+        при каждом handshake (4-байтный unix-timestamp).
+        """
+        from chimera.modules.awg_presets import _generate_quic_mimicry_i1
+        result = _generate_quic_mimicry_i1()
+        self.assertIn("<t>", result,
+                      f"QUIC-mimicry I1 должен содержать <t>: {result!r}")
+
+    def test_quic_mimicry_contains_random_tags(self):
+        """QUIC-mimicry I1 содержит <r N> теги (случайные байты)."""
+        from chimera.modules.awg_presets import _generate_quic_mimicry_i1
+        result = _generate_quic_mimicry_i1()
+        # Должно быть минимум 2 <r N> тега (connection-ID + trailing bytes)
+        self.assertGreaterEqual(result.count("<r "), 2,
+                                f"QUIC-mimicry I1 должен содержать минимум 2 "
+                                f"<r N> тега: {result!r}")
+
+    # ── Валидатор awgs_presets_validate_params ──────────────────────────
+    def test_validate_accepts_cps_random_i1(self):
+        """Валидатор принимает CPS tag <r N> для I1."""
+        from chimera.modules.awg_presets import awgs_presets_validate_params
+        p = {
+            "jc": 4, "jmin": 40, "jmax": 70,
+            "s1": 0, "s2": 0, "s3": 0, "s4": 0,
+            "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+            "i1": "<r 24>", "i2": "", "i3": "", "i4": "", "i5": "",
+        }
+        ok, err = awgs_presets_validate_params(p)
+        self.assertTrue(ok, msg=f"CPS <r N> должен валидироваться: {err}")
+
+    def test_validate_accepts_cps_static_bytes_i1(self):
+        """Валидатор принимает CPS tag <b 0x...> для I1."""
+        from chimera.modules.awg_presets import awgs_presets_validate_params
+        p = {
+            "jc": 4, "jmin": 40, "jmax": 70,
+            "s1": 0, "s2": 0, "s3": 0, "s4": 0,
+            "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+            "i1": "<b 0xdeadbeef>", "i2": "", "i3": "", "i4": "", "i5": "",
+        }
+        ok, err = awgs_presets_validate_params(p)
+        self.assertTrue(ok, msg=f"CPS <b 0x...> должен валидироваться: {err}")
+
+    def test_validate_accepts_quic_mimicry_i1(self):
+        """Валидатор принимает QUIC-mimicry I1 (комбинированный CPS)."""
+        from chimera.modules.awg_presets import (
+            awgs_presets_validate_params,
+            _generate_quic_mimicry_i1,
+        )
+        p = {
+            "jc": 4, "jmin": 40, "jmax": 70,
+            "s1": 0, "s2": 0, "s3": 0, "s4": 0,
+            "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+            "i1": _generate_quic_mimicry_i1(),
+            "i2": "", "i3": "", "i4": "", "i5": "",
+        }
+        ok, err = awgs_presets_validate_params(p)
+        self.assertTrue(ok, msg=f"QUIC-mimicry I1 должен валидироваться: {err}")
+
+    def test_validate_accepts_legacy_hex_i1(self):
+        """Валидатор принимает голый hex для I1 (обратная совместимость)."""
+        from chimera.modules.awg_presets import awgs_presets_validate_params
+        p = {
+            "jc": 4, "jmin": 40, "jmax": 70,
+            "s1": 0, "s2": 0, "s3": 0, "s4": 0,
+            "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+            "i1": "deadbeef", "i2": "", "i3": "", "i4": "", "i5": "",
+        }
+        ok, err = awgs_presets_validate_params(p)
+        self.assertTrue(ok, msg=f"Legacy hex I1 должен валидироваться: {err}")
+
+    def test_validate_rejects_garbage_i1(self):
+        """Валидатор отбрасывает мусор в I1."""
+        from chimera.modules.awg_presets import awgs_presets_validate_params
+        p = {
+            "jc": 4, "jmin": 40, "jmax": 70,
+            "s1": 0, "s2": 0, "s3": 0, "s4": 0,
+            "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+            "i1": "xyz123 garbage", "i2": "", "i3": "", "i4": "", "i5": "",
+        }
+        ok, err = awgs_presets_validate_params(p)
+        self.assertFalse(ok)
+        self.assertIn("I1", err)
+
+
+class TestPresetsGenerateCpsI1(unittest.TestCase):
+    """Тесты что awgs_presets_generate генерирует CPS tag I1 для всех
+    пресетов с i1_mode != 'absent'."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_random_presets_generate_cps_r_tag(self):
+        """Все пресеты с i1_mode='random' генерируют <r N> для I1.
+
+        v5.1: раньше был голый hex, теперь CPS tag.
+        """
+        import re
+        from chimera.modules.awg_presets import (
+            awgs_presets_generate, AWGS_CARRIER_PRESETS,
+        )
+        random.seed(42)
+        for name, preset in AWGS_CARRIER_PRESETS.items():
+            if preset["i1_mode"] != "random":
+                continue
+            with self.subTest(preset=name):
+                p = awgs_presets_generate(name)
+                self.assertRegex(
+                    p["i1"], r"^<r \d+>$",
+                    f"preset {name}: I1 должен быть '<r N>', "
+                    f"фактически: {p['i1']!r}"
+                )
+
+    def test_binary_presets_generate_cps_b_tag(self):
+        """Все пресеты с i1_mode='binary' генерируют <b 0x...> для I1."""
+        import re
+        from chimera.modules.awg_presets import (
+            awgs_presets_generate, AWGS_CARRIER_PRESETS,
+        )
+        random.seed(42)
+        for name, preset in AWGS_CARRIER_PRESETS.items():
+            if preset["i1_mode"] != "binary":
+                continue
+            with self.subTest(preset=name):
+                p = awgs_presets_generate(name)
+                self.assertRegex(
+                    p["i1"], r"^<b 0x[0-9a-fA-F]+>$",
+                    f"preset {name}: I1 должен быть '<b 0x[hex]>', "
+                    f"фактически: {p['i1']!r}"
+                )
+
+    def test_absent_presets_generate_empty_i1(self):
+        """Все пресеты с i1_mode='absent' генерируют пустой I1."""
+        from chimera.modules.awg_presets import (
+            awgs_presets_generate, AWGS_CARRIER_PRESETS,
+        )
+        for name, preset in AWGS_CARRIER_PRESETS.items():
+            if preset["i1_mode"] != "absent":
+                continue
+            with self.subTest(preset=name):
+                random.seed(42)
+                p = awgs_presets_generate(name)
+                self.assertEqual(p["i1"], "",
+                                 f"preset {name}: I1 должен быть пустым для absent mode")
+
+    def test_generated_i1_passes_validator(self):
+        """Сгенерированный I1 проходит валидатор для всех пресетов."""
+        from chimera.modules.awg_presets import (
+            awgs_presets_generate, awgs_presets_validate_params,
+            AWGS_CARRIER_PRESETS,
+        )
+        for name in AWGS_CARRIER_PRESETS:
+            with self.subTest(preset=name):
+                random.seed(42)
+                p = awgs_presets_generate(name)
+                ok, err = awgs_presets_validate_params(p)
+                self.assertTrue(ok, msg=f"preset {name}: {err}")
 
 
 if __name__ == "__main__":
