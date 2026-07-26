@@ -2,6 +2,91 @@
 
 ---
 
+## FIX(awg): v5.2 — условная запись I2-I5 в зависимости от поддержки локальным awg-quick (критическая регрессия 3e1fa70) — 26 июля 2026
+
+**КРИТИЧНО. Коммит 3e1fa70 ("всегда писать I1-I5 в .conf") ломает совместимость со старыми сборками amneziawg-tools, которые поддерживают только I1 (парсер AWG 1.5) и вообще не знают директиву I2 — падают с `Line unrecognized: \`I2='` / `Configuration parsing error`, сервис awg-quick@awg0 не поднимается ВООБЩЕ (не просто "туннель не идёт", а полный отказ старта). Подтверждено реальным логом пользователя zvshka (journalctl -u awg-quick@awg0), сервер ArkadiaGamingHub, установка через Chimera сегодня.**
+
+### Конфликт требований
+
+- **Строгие парсеры** (Keenetic native AWG 2.0) требуют ВСЕ 5 ключей I1-I5 присутствующими, даже пустыми — иначе не считают конфиг валидным (это и было причиной коммита 3e1fa70).
+- **Старые сборки amneziawg-tools** (AWG 1.5-эра) вообще не знают про I2-I5 как директивы — видят такую строку и ПАДАЮТ с ошибкой парсинга, весь сервис не стартует.
+
+Это не "одна сторона права, другая нет" — единственный правильный фикс здесь — определять возможности установленного локально awg-quick/amneziawg-tools ПЕРЕД записью, а не жёстко "всегда" или "никогда".
+
+### Что реализовано
+
+**1. Новый модуль `chimera/modules/awg_compat.py`:**
+
+- `awgs_supports_i2_i5()` — проверяет, поддерживает ли локальный awg-quick директивы I2-I5. Способ проверки — САМЫЙ надёжный, не гадать по номеру версии в строке (версии в разных дистрибутивах/форках именуются по-разному): собираем МИНИМАЛЬНЫЙ тестовый .conf с непустым I1 и пустым I2, прогоняем через `awg-quick strip` (парсит конфиг БЕЗ поднятия интерфейса — безопаснее чем реальный up/down). Если strip падает с ошибкой про I2/I3/I4/I5 — поддержка отсутствует.
+- Кэширование результата на время процесса (не гонять проверку на каждый apply).
+- `awgs_warn_old_tools_once()` — одноразовый warn пользователю про старую версию amneziawg-tools и совет обновиться.
+- Edge cases: awg-quick не установлен → safe default True (лучше написать все 5 ключей, чем потерять decoy-пакеты); ошибка по НЕ I2-I5 причине → safe default True (не выкидывать I2-I5 из-за ложного срабатывания).
+
+**2. Писатели конфига — условная запись I2-I5 (5 функций в 3 модулях):**
+
+- `awg_standalone.awgs_build_server_conf()` — серверный awg0.conf
+- `awg_qr.awgs_qr_build_client_conf()` — клиентский .conf для QR
+- `awg_transport._awg_server_conf_text/_client_conf_text/_client_conf_for_node/_server_conf_for_node` (4 функции) — Cascade
+- Общий хелпер `_awg_build_i_lines()` в awg_transport.py для 4 cascade-функций
+
+Логика:
+- **I1 пишется ВСЕГДА** (поддерживается везде, включая старые сборки — подтверждено логом zvshka, ошибка именно на I2, не на I1).
+- **I2-I5 при `awgs_supports_i2_i5()==True`**: ВСЕ 5 ключей пишутся (поведение 3e1fa70, для Keenetic native AWG 2.0).
+- **I2-I5 при `awgs_supports_i2_i5()==False`**: пишутся ТОЛЬКО непустые (старое поведение до 3e1fa70, для старых amneziawg-tools). Один раз за процесс показывается warn про обновление.
+
+**3. `awgs_apply()` — defensive fallback с stderr (awg_apply.py):**
+
+При syncconf-failure запускает `awg-quick strip` ещё раз для извлечения stderr. Если stderr содержит фрагмент про I2-I5 / "Line unrecognized" — показывается детальный warn с точной причиной + совет обновить amneziawg-tools + упоминание что конфиг автоматически перепишется в совместимом виде при следующем действии.
+
+Раньше при откате пользователь видел только общее "syncconf не удался" — реальная причина падения терялась, её можно было найти только через ручной journalctl (пользователь zvshka сам не смог бы понять, в чём дело).
+
+`awg_peer_rebuild_conf()` делегирует в `awgs_apply()`, поэтому defensive stderr автоматически работает и при rebuild (например, при добавлении клиента, ротации параметров).
+
+**4. Самоисцеление существующих установок:**
+
+При следующем действии пользователя (добавление клиента, ротация параметров, и т.п.) после установки этого фикса — конфиг автоматически перепишется в совместимом виде (без I2-I5, если локальный awg-quick их не поддерживает). Не требуется ручная правка .conf. Сервис awg-quick@awg0 снова стартует.
+
+### Тесты
+
+- **`tests/test_awg_compat.py`** — НОВЫЙ файл, 20 тестов в 5 классах:
+  - `TestSupportsI2I5` (8 тестов) — `awgs_supports_i2_i5()` для случаев: strip OK, strip fails on I2/I3/I4/I5, strip fails on "Configuration parsing error", strip fails on unrelated reason (safe True), strip fails with empty stderr (safe True).
+  - `TestSupportsCache` (4 теста) — кэширование на время процесса, `force_refresh`, `_set_supports_cache`/`_reset_supports_cache` для тестов.
+  - `TestWarnOldToolsOnce` (3 теста) — одноразовый warn за процесс, содержимое сообщения, `_reset_old_tools_warn_flag` для тестов.
+  - `TestRunStripCheck` (3 теста) — `_run_strip_check` для success/failure/exception.
+  - `TestSampleConfContent` (2 теста) — sample conf содержит I1-I5 + базовые AWG-параметры.
+
+- **`tests/test_awg_apply.py`** — НОВЫЙ класс `TestApplyStderrSurfacing` (3 теста):
+  - `test_stderr_shown_in_warn_on_i2_unrecognized` — 'Line unrecognized: I2=' в warn().
+  - `test_stderr_shown_on_any_strip_error` — любая ошибка strip в warn().
+  - `test_generic_warn_when_no_stderr_available` — общее сообщение при отсутствии stderr.
+
+- **`tests/test_awg_standalone.py`** — `test_i1_to_i5_always_written_v51` параметризован в 3 теста:
+  - `test_i1_to_i5_written_when_supports_i2_i5_v52` — supports=True → все 5 ключей.
+  - `test_i1_only_when_no_i2_i5_support_v52` — supports=False → только I1 (zvshka regression).
+  - `test_non_empty_i2_to_i5_written_even_without_support_v52` — supports=False + непустые I2-I5 → пишутся.
+
+- **`tests/test_awg_qr.py`** — `test_i1_always_written_v51` → `test_i1_always_written_v52` (параметризован: supports=True → 5 ключей, supports=False → только I1).
+
+- **`tests/test_awg_transport.py`** — 4 теста `*_always_writes_i1_to_i5_v51` → `*_writes_i_lines_based_on_support_v52` (параметризованы). `test_all_4_functions_have_full_param_set` — мокает supports=True для проверки полного набора 16 параметров.
+
+### Прогон тестов
+
+- `tests/test_awg_compat.py` — 20 тестов PASS
+- `tests/test_awg_apply.py` — 14 тестов PASS (3 новых + 11 существующих)
+- `tests/test_awg_standalone.py` — PASS
+- `tests/test_awg_qr.py` — PASS
+- `tests/test_awg_transport.py` — PASS
+- `tests/test_awg_peers.py` — PASS
+- `full_test.py` — 10/10 PASS
+
+### Обратная совместимость
+
+- Пользователи с современными amneziawg-tools (AWG 2.0): поведение не изменилось — все 5 I-ключей пишутся как в 3e1fa70.
+- Пользователи со старыми amneziawg-tools (AWG 1.5): conf автоматически переписывается без I2-I5 при следующем действии → сервис снова стартует.
+- существующие state.json остаются валидными (валидатор принимает CPS tag-формат и legacy hex).
+
+---
+
 ## FIX(awg): CPS tag-формат для I1-I5 вместо голой hex-строки (AWG 2.0 совместимость) + всегда писать I1-I5 в .conf — 26 июля 2026
 
 **Контекст: сравнение с конфигом официального приложения Amnezia показало, что I1-I5 в AWG 2.0 — это НЕ голая hex-строка, а мини-язык тегов (CPS — Custom Protocol Signature), задокументированный в docs.amnezia.org и в спецификации amneziawg-go. Голый hex — это старый формат AWG 1.5. Стороннее сообщество (bivlked/amneziawg-installer, ADVANCED.md) прямо указывает: "если туннель подключается, но трафик не идёт — проблема в формате I1" на некоторых клиентах (Keenetic native AWG 2.0, amneziawg-go).**

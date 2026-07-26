@@ -82,6 +82,49 @@ def _core_module():
     return importlib.import_module("chimera._core")
 
 
+def _awg_build_i_lines(i1: str, i2: str, i3: str, i4: str, i5: str) -> str:
+    """Строит строки I1-I5 для .conf в зависимости от поддержки локальным
+    awg-quick.
+
+    v5.2: коммит 3e1fa70 ("всегда писать I1-I5") ломает старые сборки
+    amneziawg-tools (AWG 1.5-эра), которые падают с
+    'Line unrecognized: I2=' и сервис не стартует ВООБЩЕ. Решение —
+    определять возможности локального awg-quick ПЕРЕД записью конфига
+    (через awg-quick strip без поднятия интерфейса).
+
+    Логика:
+      - I1 пишется ВСЕГДА (поддерживается везде, включая старые сборки).
+      - I2-I5: если awgs_supports_i2_i5() — пишем все 5 ключей (как в
+        3e1fa70, для Keenetic native AWG 2.0). Если False — пишем только
+        непустые (старое поведение до 3e1fa70, для старых amneziawg-tools).
+
+    См. chimera/modules/awg_compat.py::awgs_supports_i2_i5().
+    """
+    # I1 — всегда безусловно
+    lines = f"I1 = {i1}\n"
+    try:
+        from .awg_compat import awgs_supports_i2_i5, awgs_warn_old_tools_once
+        if awgs_supports_i2_i5():
+            # Современный awg-quick — пишем все 4 оставшихся ключа
+            lines += f"I2 = {i2}\n"
+            lines += f"I3 = {i3}\n"
+            lines += f"I4 = {i4}\n"
+            lines += f"I5 = {i5}\n"
+        else:
+            # Старый awg-quick — пишем только непустые
+            awgs_warn_old_tools_once()
+            for key, val in (("I2", i2), ("I3", i3), ("I4", i4), ("I5", i5)):
+                if val:
+                    lines += f"{key} = {val}\n"
+    except Exception:
+        # Fallback: пишем все 5 ключей (поведение 3e1fa70)
+        lines += f"I2 = {i2}\n"
+        lines += f"I3 = {i3}\n"
+        lines += f"I4 = {i4}\n"
+        lines += f"I5 = {i5}\n"
+    return lines
+
+
 
 
 def awg_check_tool(binary: str) -> bool:
@@ -485,17 +528,10 @@ def _awg_server_conf_text() -> str:
         + _build_nat6_down(_awg_subnet_v6, "awg0", "$WAN6", scope_source=False)
         + " || true"
     )
-    # v5.1: I1-I5 ВСЕГДА пишутся в конфиг, даже когда пустые — как в
-    # официальном формате AWG 2.0. Раньше писались только непустые, но
-    # некоторые строгие парсеры (Keenetic native AWG 2.0) падают на
-    # отсутствии ключа I2/I3/I4/I5 при наличии I1 (или наоборот).
-    # См. docs.amnezia.org — официальный конфиг от amnezia-клиента всегда
-    # содержит все пять ключей. Тот же паттерн что в
-    # awg_standalone.awgs_build_server_conf().
-    _i_lines = ""
-    for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
-                   ("I4", AWG_I4), ("I5", AWG_I5)):
-        _i_lines += f"{_k} = {_v}\n"
+    # v5.2: I1-I5 пишутся через _awg_build_i_lines() — условная запись
+    # в зависимости от поддержки локальным awg-quick (см. awg_compat.py).
+    # Раньше (3e1fa70) писались ВСЕГДА — это ломало старые amneziawg-tools.
+    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5)
     return (
         f"[Interface]\n"
         f"PrivateKey = {AWG_SERVER_PRIVKEY}\n"
@@ -560,13 +596,8 @@ def _awg_client_conf_text() -> str:
     AWG_I4 = getattr(core, "AWG_I4", "")
     AWG_I5 = getattr(core, "AWG_I5", "")
     AWG_SERVER_PUBKEY = getattr(core, "AWG_SERVER_PUBKEY", "")
-    # v5.1: I1-I5 ВСЕГДА пишутся в конфиг (см. комментарий выше в
-    # _awg_server_conf_text). Была условная запись, теперь безусловная —
-    # как в официальном формате AWG 2.0.
-    _i_lines = ""
-    for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
-                   ("I4", AWG_I4), ("I5", AWG_I5)):
-        _i_lines += f"{_k} = {_v}\n"
+    # v5.2: I1-I5 через _awg_build_i_lines() (см. выше в _awg_server_conf_text)
+    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5)
     return (
         f"[Interface]\n"
         f"PrivateKey = {AWG_CLIENT_PRIVKEY}\n"
@@ -3008,13 +3039,8 @@ def _awg_client_conf_for_node(node: dict) -> str:
     psk      = node.get("preshared_key", AWG_PRESHARED_KEY)
     cli_priv = node.get("client_privkey", AWG_CLIENT_PRIVKEY)
     endpoint = f"{node['host']}:{node['port']}"
-    # v5.1: I1-I5 ВСЕГДА пишутся в конфиг (см. комментарий выше в
-    # _awg_server_conf_text). Была условная запись, теперь безусловная —
-    # как в официальном формате AWG 2.0.
-    _i_lines = ""
-    for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
-                   ("I4", AWG_I4), ("I5", AWG_I5)):
-        _i_lines += f"{_k} = {_v}\n"
+    # v5.2: I1-I5 через _awg_build_i_lines() (см. _awg_server_conf_text)
+    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5)
     return (
         f"[Interface]\n"
         f"PrivateKey = {cli_priv}\n"
@@ -3082,13 +3108,8 @@ def _awg_server_conf_for_node(node: dict) -> str:
     cli_ip6  = node["client_ip_v6"]
     lport    = node["port"]
     dif = "$(ip route | awk '/default/ {print $5; exit}')"
-    # v5.1: I1-I5 ВСЕГДА пишутся в конфиг (см. комментарий выше в
-    # _awg_server_conf_text). Была условная запись, теперь безусловная —
-    # как в официальном формате AWG 2.0.
-    _i_lines = ""
-    for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
-                   ("I4", AWG_I4), ("I5", AWG_I5)):
-        _i_lines += f"{_k} = {_v}\n"
+    # v5.2: I1-I5 через _awg_build_i_lines() (см. _awg_server_conf_text)
+    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5)
     return (
         f"[Interface]\n"
         f"PrivateKey = {srv_priv}\n"
