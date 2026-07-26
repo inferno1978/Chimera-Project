@@ -83,45 +83,33 @@ def _core_module():
 
 
 def _awg_build_i_lines(i1: str, i2: str, i3: str, i4: str, i5: str) -> str:
-    """Строит строки I1-I5 для .conf в зависимости от поддержки локальным
-    awg-quick.
+    """Строит строки I1-I5 для .conf — комментирует пустые (как в эталонном Amnezia).
 
-    v5.2: коммит 3e1fa70 ("всегда писать I1-I5") ломает старые сборки
-    amneziawg-tools (AWG 1.5-эра), которые падают с
-    'Line unrecognized: I2=' и сервис не стартует ВООБЩЕ. Решение —
-    определять возможности локального awg-quick ПЕРЕД записью конфига
-    (через awg-quick strip без поднятия интерфейса).
+    v5.4: КОРЕНЬ ПРОБЛЕМЫ (подтверждено zvshka): старые amneziawg-tools
+    (переходная версия с I1 но без I2-I5) падают с 'Line unrecognized: I2='
+    при виде пустой строки 'I2 = '. Сервис не стартует ВООБЩЕ. zvshka
+    подтвердил: комментирование строк '# I2 = ' решает проблему.
 
-    Логика:
-      - I1 пишется ВСЕГДА (поддерживается везде, включая старые сборки).
-      - I2-I5: если awgs_supports_i2_i5() — пишем все 5 ключей (как в
-        3e1fa70, для Keenetic native AWG 2.0). Если False — пишем только
-        непустые (старое поведение до 3e1fa70, для старых amneziawg-tools).
+    Самоисцеление в awgs_apply() (v5.2.2) НЕ помогает при systemctl restart
+    — systemd вызывает awg-quick up напрямую, не через наш код. Поэтому
+    нужно писать конфиг ПРАВИЛЬНО с самого начала.
 
-    См. chimera/modules/awg_compat.py::awgs_supports_i2_i5().
+    РЕШЕНИЕ v5.4: комментируем пустые I1-I5 (как в эталонном конфиге
+    Amnezia из Docker-контейнера). Закомментированные строки игнорируются
+    ВСЕМИ версиями amneziawg-tools (парсер пропускает '#'). Непустые
+    I1-I5 пишутся без комментария (как раньше).
+
+    Больше НЕ нужна проверка awgs_supports_i2_i5() — закомментированный
+    формат работает везде, не требует определения возможностей.
     """
-    # I1 — всегда безусловно
-    lines = f"I1 = {i1}\n"
-    try:
-        from .awg_compat import awgs_supports_i2_i5, awgs_warn_old_tools_once
-        if awgs_supports_i2_i5():
-            # Современный awg-quick — пишем все 4 оставшихся ключа
-            lines += f"I2 = {i2}\n"
-            lines += f"I3 = {i3}\n"
-            lines += f"I4 = {i4}\n"
-            lines += f"I5 = {i5}\n"
+    lines = ""
+    for key, val in (("I1", i1), ("I2", i2), ("I3", i3),
+                     ("I4", i4), ("I5", i5)):
+        if val:
+            lines += f"{key} = {val}\n"
         else:
-            # Старый awg-quick — пишем только непустые
-            awgs_warn_old_tools_once()
-            for key, val in (("I2", i2), ("I3", i3), ("I4", i4), ("I5", i5)):
-                if val:
-                    lines += f"{key} = {val}\n"
-    except Exception:
-        # Fallback: пишем все 5 ключей (поведение 3e1fa70)
-        lines += f"I2 = {i2}\n"
-        lines += f"I3 = {i3}\n"
-        lines += f"I4 = {i4}\n"
-        lines += f"I5 = {i5}\n"
+            # Пустое значение — комментируем (как в эталонном Amnezia)
+            lines += f"# {key} = \n"
     return lines
 
 
