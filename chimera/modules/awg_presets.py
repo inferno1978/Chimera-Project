@@ -10,14 +10,29 @@ Carrier-пресеты для AmneziaWG 2.0.
   jc_min, jc_max   — диапазон Jc (junk packet count)
   jmin_min, jmin_max — диапазон Jmin
   jmax_delta_min, jmax_delta_max — приращение к Jmin для получения Jmax
-  i1_mode           — "random" | "absent" | "binary" (см. bivlked)
-                     random: случайный I1
+  i1_mode           — "random" | "absent" | "binary" | "quic_mimicry"
+                     (см. bivlked и docs.amnezia.org/CPS-формат)
+                     random: случайный I1 в CPS-формате <r N>
                      absent: не указывать I1
-                     binary: использовать I1 как binary blob
+                     binary: I1 как статичные байты в CPS-формате <b 0x...>
+                     quic_mimicry: I1 как QUIC Initial packet (<b 0x...><r N><t>)
+
+I1-I5 в AWG 2.0 — это НЕ голая hex-строка, а мини-язык тегов (CPS — Custom
+Protocol Signature), задокументированный в docs.amnezia.org и в спецификации
+amneziawg-go:
+  <b 0x[hex]>  — статичные байты как есть (hex-encoded, всегда чётное число символов)
+  <r [size]>   — [size] случайных байт
+  <rd [size]>  — [size] случайных байт из [0-9]
+  <rc [size]>  — [size] случайных байт из [a-zA-Z]
+  <t>          — 4-байтный текущий unix-timestamp
+
+Пакеты отправляются в порядке I1→I2→I3→I4→I5 перед каждым хендшейком; если I1
+не задан — I2-I5 пропускаются тоже (I1 — обязательный якорь для остальных).
 """
 from __future__ import annotations
 
 import random
+import re
 from typing import Optional
 
 
@@ -201,14 +216,31 @@ def awgs_presets_generate(name: str = "default") -> dict:
     h1, h2, h3, h4 = _generate_non_overlapping_h_values()
 
     # I1 — зависит от per-preset i1_mode
+    #
+    # v5.1: I1 теперь генерируется в CPS tag-формате (AWG 2.0), а НЕ как
+    # голая hex-строка. Сравнение с конфигом официального приложения
+    # Amnezia показало, что голый hex — это старый формат AWG 1.5, а
+    # AWG 2.0 требует теговый мини-язык: <b 0x...>, <r N>, <t> и т.д.
+    # (см. docs.amnezia.org и bivlked/amneziawg-installer/ADVANCED.md).
+    # Некоторые клиенты (Keenetic native AWG 2.0, amneziawg-go) падают
+    # на голом hex-формате с невнятной ошибкой "туннель подключается,
+    # но трафик не идёт".
     i1_mode = preset["i1_mode"]
     if i1_mode == "random":
-        # Случайный I1 (24-32 байта, hex)
-        i1_len = random.randint(24, 32)
-        i1 = "".join(random.choices("0123456789abcdef", k=i1_len * 2))
+        # Случайные N байт — простейший валидный CPS-формат, функционально
+        # эквивалентен старому голому hex-снапшоту (та же энтропия), но
+        # синтаксически корректный для AWG 2.0.
+        i1_size = random.randint(24, 32)
+        i1 = f"<r {i1_size}>"
     elif i1_mode == "binary":
-        # Binary blob (для T-Mobile US — короткий фиксированный)
-        i1 = "".join(random.choices("0123456789abcdef", k=16))
+        # Статичные байты в CPS-формате <b 0x...> — для T-Mobile US
+        # (короткий фиксированный blob, как в upstream preset).
+        i1_hex = "".join(random.choices("0123456789abcdef", k=32))
+        i1 = f"<b 0x{i1_hex}>"
+    elif i1_mode == "quic_mimicry":
+        # QUIC Initial packet mimicry — маскировка под QUIC v1 long-header.
+        # Используется опционально для sneaky-режима (см. bivlked-гайд).
+        i1 = _generate_quic_mimicry_i1()
     else:  # absent
         i1 = ""
 
@@ -285,13 +317,24 @@ def awgs_presets_validate_params(params: dict) -> tuple[bool, str]:
         if not isinstance(v, int) or v < 0 or v > _H_MAX:
             return False, f"{key.upper()}={v} вне диапазона (0-{_H_MAX})"
 
-    # I1-I5: опциональные hex-строки (если не пустые — проверяем что hex)
+    # I1-I5: опциональные CPS tag-строки (AWG 2.0) или голый hex (AWG 1.5,
+    # для обратной совместимости со старыми state.json).
+    #
+    # v5.1: раньше валидатор принимал только голый hex. Теперь I1-I5
+    # генерируются в CPS tag-формате (<r N>, <b 0x...>, <t> и т.д.) —
+    # это спецификация AWG 2.0 (docs.amnezia.org). Старый hex-формат
+    # оставляем валидным для обратной совместимости, чтобы не сломать
+    # уже установленные конфиги пользователей.
+    # См. _is_valid_cps_or_legacy_hex() для деталей формата.
     for key in ("i1", "i2", "i3", "i4", "i5"):
         v = params.get(key, "")
         if v and not isinstance(v, str):
             return False, f"{key.upper()} должен быть строкой"
-        if v and not all(c in "0123456789abcdefABCDEF" for c in v):
-            return False, f"{key.upper()} содержит не-hex символы"
+        if v and not _is_valid_cps_or_legacy_hex(v):
+            return False, (f"{key.upper()} содержит невалидные символы. "
+                          f"Ожидается CPS tag-формат AWG 2.0 "
+                          f"(<b 0x...>, <r N>, <t>) или голый hex (AWG 1.5). "
+                          f"Фактически: {v[:64]}{'...' if len(v) > 64 else ''}")
 
     return True, ""
 
@@ -457,6 +500,25 @@ def _generate_non_overlapping_h_values() -> tuple[int, int, int, int]:
 
     Используется awgs_presets_generate() для всех carrier-пресетов —
     раньше там было захардкожено 1,2,3,4 (узнаваемый DPI-отпечаток).
+
+    ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ (фиксируем, чтобы не разбирать заново при
+    будущих жалобах): некоторые старые прошивки роутеров (например,
+    Keenetic Speedster с firmware 5.0.6, а также некоторые сборки
+    OpenWrt 21.x и старше) не парсят H1-H4 как одиночное число выше 255
+    и требуют значения в диапазоне 0-255 (один байт). По официальной
+    спецификации AWG 2.0 (docs.amnezia.org) и amneziawg-go значения
+    H1-H4 валидны до INT32_MAX (2147483647), и amneziawg-windows-client
+    их принимает — но старые клиенты могут не справиться.
+
+    Если пользователь жалуется на "не подключается с Keenetic", проверьте
+    версию прошивки: на старых (KeeneticOS ≤ 5.0.x) значения H1-H4 нужно
+    вручную снизить до диапазона 0-255 через пункт меню «5. Ручная
+    настройка». Эта функция НЕ должна урезать диапазон автоматически —
+    современные клиенты (включая официальный amneziawg-go) работают с
+    полным диапазоном, и урезание снизило бы анти-DPI эффективность.
+
+    Альтернативное решение для старых роутеров — использовать
+    amneziawg-go upstream-бинарник (не native AWG-клиент роутера).
     """
     used_h: set[int] = set()
     result = []
@@ -465,6 +527,90 @@ def _generate_non_overlapping_h_values() -> tuple[int, int, int, int]:
         used_h.add(hv)
         result.append(hv)
     return tuple(result)  # type: ignore[return-value]
+
+
+# ── CPS tag-формат для I1-I5 (AWG 2.0) ──────────────────────────────────────
+# I1-I5 — это мини-язык тегов (Custom Protocol Signature), задокументированный
+# в docs.amnezia.org и спецификации amneziawg-go. Каждый I-параметр — это
+# последовательность тегов, которые в рантайме разворачиваются в байты.
+# v5.1: раньше генерировался голый hex (старый формат AWG 1.5) — некоторые
+# клиенты (Keenetic native AWG 2.0, amneziawg-go) на это падают.
+
+# Regex для проверки CPS-тегов в валидаторе. Допускаем:
+#   <b 0x[hex]>           — статичные байты (hex, обязательно чётное число символов)
+#   <r [size]>            — [size] случайных байт
+#   <rd [size]>           — [size] случайных байт из [0-9]
+#   <rc [size]>           — [size] случайных байт из [a-zA-Z]
+#   <t>                   — 4-байтный текущий unix-timestamp
+# Также допускаем whitespace между тегами (как в официальном примере Amnezia).
+# Голый hex без тегов НЕ валиден для AWG 2.0, но оставляем толерантность
+# для обратной совместимости — если у пользователя в state.json остался
+# старый hex-I1 (до v5.1), валидатор не должен его отбрасывать, чтобы
+# не сломать уже установленные конфиги (правка только для НОВОЙ генерации).
+_CPS_TAG_RE = re.compile(
+    r"^(\s*"
+    r"<b\s+0x[0-9a-fA-F]+>"
+    r"|<r[d c]?\s+\d+>"
+    r"|<t>"
+    r")+\s*$"
+)
+
+# Альтернативный «legacy hex» паттерн — голый hex без тегов. Допускаем
+# в валидаторе для обратной совместимости с уже установленными конфигами
+# (v5.0 и ранее), но новая генерация его больше не использует.
+_LEGACY_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+
+
+def _is_valid_cps_or_legacy_hex(value: str) -> bool:
+    """Проверяет, является ли value корректным I1-I5 значением.
+
+    Принимает два формата:
+      1. CPS tag-формат AWG 2.0 (``<b 0x...>``, ``<r N>``, ``<t>`` и т.д.) —
+         НОВЫЙ формат, генерируется начиная с v5.1.
+      2. Голый hex без тегов — СТАРЫЙ формат AWG 1.5, остаётся в валидаторе
+         для обратной совместимости с уже установленными конфигами
+         (state.json у пользователей, которые обновились с v5.0.x).
+         Новая генерация этот формат больше НЕ использует.
+
+    Пустая строка считается валидной (I1-I5 опциональны).
+    None и non-string значения НЕ валидны (в отличие от пустой строки,
+    которая semantically означает "не задано").
+    """
+    if not isinstance(value, str):
+        return False
+    if value == "":
+        return True
+    if _CPS_TAG_RE.match(value):
+        return True
+    if _LEGACY_HEX_RE.match(value):
+        return True
+    return False
+
+
+def _generate_quic_mimicry_i1() -> str:
+    """Генерирует I1 в формате QUIC Initial packet mimicry.
+
+    Паттерн из bivlked/amneziawg-installer (ADVANCED.md) и комьюнити-гайдов:
+      <b 0xc30000000108><r 8><b 0x08><r 8><b 0x0045dc><t><r 16>
+
+    Байты ``0xc3+версия`` имитируют QUIC v1 long-header (RFC 9000):
+      0xc3 = Long header flag (1100 0011):
+        - 1 = long header (1 bit)
+        - 1 = fixed bit (must be 1 for valid QUIC packets)
+        - 0 = unused
+        - 0011 = QUIC version 1
+      00000001 = connection ID length
+      08 = packet number length
+      0045dc = reserved version-specific bytes
+
+    Дальше идут случайные байты (через ``<r N>``) и текущий timestamp
+    (через ``<t>``), чтобы каждый handshake выглядел как реальный QUIC
+    packet с уникальными connection-ID и packet-number.
+
+    НЕ меняется между вызовами — паттерн статичный (только рантайм-теги
+    ``<r N>`` и ``<t>`` дают уникальность при каждом handshake).
+    """
+    return "<b 0xc30000000108><r 8><b 0x08><r 8><b 0x0045dc><t><r 16>"
 
 
 # Рекомендованные диапазоны для авто-генерации (взяты из спеки AWG 2.0
@@ -501,9 +647,12 @@ def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
     уникальные значения, что не даёт DPI написать универсальное правило
     для детекции именно этого проекта.
 
-    I1 — hex-строка 48-64 символа (как i1_mode=random в awgs_presets_
-    generate). I2-I5 — по умолчанию пустые, но принимают override,
-    если пользователь явно захочет задать.
+    I1 — CPS tag-строка формата AWG 2.0 (``<r N>`` по умолчанию,
+    24-32 случайных байт). v5.1: раньше генерировался голый hex (AWG 1.5),
+    но он ломает некоторых клиентов (Keenetic native AWG 2.0, amneziawg-go).
+    Override принимается as-is — если пользователь явно ввёл ``<b 0x...>``
+    или голый hex, валидатор оба примет (см. _is_valid_cps_or_legacy_hex).
+    I2-I5 — по умолчанию пустые, но принимают override.
 
     Правило совместимости S1 + 56 != S2 проверяется при генерации —
     если случайно совпало (padded init и padded response совпадут по
@@ -595,12 +744,17 @@ def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
     h_overrides.sort(key=lambda x: ("h1", "h2", "h3", "h4").index(x[0]))
     h1, h2, h3, h4 = (v for _, v in h_overrides)
 
-    # ── I1 — hex 48-64 символа (24-32 байта) ──────────────────────────────
+    # ── I1 — CPS tag-формат <r N> (24-32 случайных байт, AWG 2.0) ─────────
+    # v5.1: раньше генерировался голый hex (AWG 1.5). Теперь — CPS tag-формат
+    # <r N>, как в awgs_presets_generate() для i1_mode='random'. Голый hex
+    # ломает некоторых клиентов AWG 2.0 (Keenetic, amneziawg-go).
+    # Override принимается as-is (через _is_valid_cps_or_legacy_hex проходит
+    # и CPS, и legacy hex).
     if "i1" in overrides and overrides["i1"]:
         i1 = str(overrides["i1"])
     else:
-        i1_len = random.randint(24, 32)
-        i1 = "".join(random.choices("0123456789abcdef", k=i1_len * 2))
+        i1_size = random.randint(24, 32)
+        i1 = f"<r {i1_size}>"
 
     # ── I2-I5 — по умолчанию пустые, но принимают override ────────────────
     i2 = str(overrides["i2"]) if "i2" in overrides and overrides["i2"] else ""

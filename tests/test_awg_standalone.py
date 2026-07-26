@@ -143,14 +143,24 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         )
         self.assertIn("I1 = deadbeef", conf)
 
-    def test_i1_omitted_when_empty(self):
+    def test_i1_to_i5_always_written_v51(self):
+        """v5.1: I1-I5 ВСЕГДА пишутся в серверный conf, даже когда пустые.
+
+        Раньше писались только непустые — это ломало некоторых строгих
+        парсеров (Keenetic native AWG 2.0). Теперь все 5 ключей
+        присутствуют в conf всегда, как в официальном формате AWG 2.0
+        (см. docs.amnezia.org — amnezia-клиент всегда пишет все 5).
+        """
         from chimera.modules.awg_standalone import awgs_build_server_conf
         conf = awgs_build_server_conf(
             server_privkey="PRIV", port=51820,
             subnet="10.66.66.0/24", subnet_v6="", mtu=1280,
             params=_default_params(),
         )
-        self.assertNotIn("I1 =", conf)
+        # Все 5 ключей I1-I5 должны присутствовать, даже когда пустые
+        for key in ("I1", "I2", "I3", "I4", "I5"):
+            self.assertIn(f"{key} = ", conf,
+                          f"{key} = должен всегда присутствовать в conf (v5.1)")
 
     def test_cascade_entry_role(self):
         """cascade_role='entry' + cascade_peer → [Peer] для exit-VPS."""

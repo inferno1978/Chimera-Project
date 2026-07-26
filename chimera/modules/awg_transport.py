@@ -485,14 +485,17 @@ def _awg_server_conf_text() -> str:
         + _build_nat6_down(_awg_subnet_v6, "awg0", "$WAN6", scope_source=False)
         + " || true"
     )
-    # v5.0.0: I1-I5 — условная запись (только если непустые), как в
-    # awg_standalone.awgs_build_server_conf. Keenetic и др. строгие
-    # парсеры падают если I1 отсутствует при наличии S3/S4.
+    # v5.1: I1-I5 ВСЕГДА пишутся в конфиг, даже когда пустые — как в
+    # официальном формате AWG 2.0. Раньше писались только непустые, но
+    # некоторые строгие парсеры (Keenetic native AWG 2.0) падают на
+    # отсутствии ключа I2/I3/I4/I5 при наличии I1 (или наоборот).
+    # См. docs.amnezia.org — официальный конфиг от amnezia-клиента всегда
+    # содержит все пять ключей. Тот же паттерн что в
+    # awg_standalone.awgs_build_server_conf().
     _i_lines = ""
     for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
                    ("I4", AWG_I4), ("I5", AWG_I5)):
-        if _v:
-            _i_lines += f"{_k} = {_v}\n"
+        _i_lines += f"{_k} = {_v}\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {AWG_SERVER_PRIVKEY}\n"
@@ -557,12 +560,13 @@ def _awg_client_conf_text() -> str:
     AWG_I4 = getattr(core, "AWG_I4", "")
     AWG_I5 = getattr(core, "AWG_I5", "")
     AWG_SERVER_PUBKEY = getattr(core, "AWG_SERVER_PUBKEY", "")
-    # v5.0.0: I1-I5 — условная запись (только если непустые)
+    # v5.1: I1-I5 ВСЕГДА пишутся в конфиг (см. комментарий выше в
+    # _awg_server_conf_text). Была условная запись, теперь безусловная —
+    # как в официальном формате AWG 2.0.
     _i_lines = ""
     for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
                    ("I4", AWG_I4), ("I5", AWG_I5)):
-        if _v:
-            _i_lines += f"{_k} = {_v}\n"
+        _i_lines += f"{_k} = {_v}\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {AWG_CLIENT_PRIVKEY}\n"
@@ -3004,12 +3008,13 @@ def _awg_client_conf_for_node(node: dict) -> str:
     psk      = node.get("preshared_key", AWG_PRESHARED_KEY)
     cli_priv = node.get("client_privkey", AWG_CLIENT_PRIVKEY)
     endpoint = f"{node['host']}:{node['port']}"
-    # v5.0.0: I1-I5 — условная запись (только если непустые)
+    # v5.1: I1-I5 ВСЕГДА пишутся в конфиг (см. комментарий выше в
+    # _awg_server_conf_text). Была условная запись, теперь безусловная —
+    # как в официальном формате AWG 2.0.
     _i_lines = ""
     for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
                    ("I4", AWG_I4), ("I5", AWG_I5)):
-        if _v:
-            _i_lines += f"{_k} = {_v}\n"
+        _i_lines += f"{_k} = {_v}\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {cli_priv}\n"
@@ -3077,12 +3082,13 @@ def _awg_server_conf_for_node(node: dict) -> str:
     cli_ip6  = node["client_ip_v6"]
     lport    = node["port"]
     dif = "$(ip route | awk '/default/ {print $5; exit}')"
-    # v5.0.0: I1-I5 — условная запись (только если непустые)
+    # v5.1: I1-I5 ВСЕГДА пишутся в конфиг (см. комментарий выше в
+    # _awg_server_conf_text). Была условная запись, теперь безусловная —
+    # как в официальном формате AWG 2.0.
     _i_lines = ""
     for _k, _v in (("I1", AWG_I1), ("I2", AWG_I2), ("I3", AWG_I3),
                    ("I4", AWG_I4), ("I5", AWG_I5)):
-        if _v:
-            _i_lines += f"{_k} = {_v}\n"
+        _i_lines += f"{_k} = {_v}\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {srv_priv}\n"

@@ -541,14 +541,20 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
         self.assertIn(f"I1 = {_i1_val}", conf,
                       f"I1 должен быть в conf когда задан, фактически:\n{conf}")
 
-    def test_server_conf_omits_i1_when_empty(self):
-        """_awg_server_conf_text НЕ пишет I1 если он пустой (default)."""
+    def test_server_conf_always_writes_i1_to_i5_v51(self):
+        """v5.1: _awg_server_conf_text ВСЕГДА пишет I1-I5, даже когда пустые.
+
+        Раньше писались только непустые — ломало строгих парсеров
+        (Keenetic native AWG 2.0). Теперь все 5 ключей присутствуют
+        всегда, как в официальном формате AWG 2.0.
+        """
         from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_server_conf_text()
-        # I1 не должен появляться в conf когда AWG_I1 пустой
-        self.assertNotIn("I1 = ", conf,
-                         f"I1 не должен быть в conf когда пустой, фактически:\n{conf}")
+        # Все 5 ключей I1-I5 должны присутствовать, даже когда пустые
+        for key in ("I1", "I2", "I3", "I4", "I5"):
+            self.assertIn(f"{key} = ", conf,
+                          f"{key} = должен всегда присутствовать в conf (v5.1):\n{conf}")
 
     def test_server_conf_writes_all_i_when_set(self):
         """_awg_server_conf_text пишет I1-I5 если все заданы."""
@@ -580,12 +586,14 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
             conf = awg_transport._awg_client_conf_text()
         self.assertIn(f"I1 = {_i1_val}", conf)
 
-    def test_client_conf_omits_i1_when_empty(self):
-        """_awg_client_conf_text НЕ пишет I1 если пустой."""
+    def test_client_conf_always_writes_i1_to_i5_v51(self):
+        """v5.1: _awg_client_conf_text ВСЕГДА пишет I1-I5, даже когда пустые."""
         from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_text()
-        self.assertNotIn("I1 = ", conf)
+        for key in ("I1", "I2", "I3", "I4", "I5"):
+            self.assertIn(f"{key} = ", conf,
+                          f"{key} = должен всегда присутствовать (v5.1)")
 
     # ── _awg_client_conf_for_node ─────────────────────────────────────────
     def test_client_conf_for_node_has_s3_s4(self):
@@ -607,13 +615,15 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
             conf = awg_transport._awg_client_conf_for_node(node)
         self.assertIn(f"I1 = {_i1_val}", conf)
 
-    def test_client_conf_for_node_omits_i1_when_empty(self):
-        """_awg_client_conf_for_node НЕ пишет I1 если пустой."""
+    def test_client_conf_for_node_always_writes_i1_to_i5_v51(self):
+        """v5.1: _awg_client_conf_for_node ВСЕГДА пишет I1-I5, даже когда пустые."""
         from chimera.modules import awg_transport
         node = self._mock_node()
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_for_node(node)
-        self.assertNotIn("I1 = ", conf)
+        for key in ("I1", "I2", "I3", "I4", "I5"):
+            self.assertIn(f"{key} = ", conf,
+                          f"{key} = должен всегда присутствовать (v5.1)")
 
     # ── _awg_server_conf_for_node ─────────────────────────────────────────
     def test_server_conf_for_node_has_s3_s4(self):
@@ -635,21 +645,23 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
             conf = awg_transport._awg_server_conf_for_node(node)
         self.assertIn(f"I1 = {_i1_val}", conf)
 
-    def test_server_conf_for_node_omits_i1_when_empty(self):
-        """_awg_server_conf_for_node НЕ пишет I1 если пустой."""
+    def test_server_conf_for_node_always_writes_i1_to_i5_v51(self):
+        """v5.1: _awg_server_conf_for_node ВСЕГДА пишет I1-I5, даже когда пустые."""
         from chimera.modules import awg_transport
         node = self._mock_node()
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_server_conf_for_node(node)
-        self.assertNotIn("I1 = ", conf)
+        for key in ("I1", "I2", "I3", "I4", "I5"):
+            self.assertIn(f"{key} = ", conf,
+                          f"{key} = должен всегда присутствовать (v5.1)")
 
     # ── Полный набор — regression на жалобу zvshka ────────────────────────
     def test_all_4_functions_have_full_param_set(self):
-        """Все 4 Cascade-функции пишут ПОЛНЫЙ набор: Jc/Jmin/Jmax/S1-S4/H1-H4.
+        """Все 4 Cascade-функции пишут ПОЛНЫЙ набор: Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5.
 
-        I1-I5 пишутся условно (только если непустые), поэтому проверяем
-        что S3 и S4 присутствуют ВСЕГДА — это были отсутствующие параметры
-        из-за которых Keenetic не мог импортировать конфиг (жалоба zvshka).
+        v5.1: I1-I5 теперь тоже пишутся ВСЕГДА (раньше были условными).
+        Это regression-тест на жалобу zvshka — Keenetic не мог импортировать
+        конфиг из-за отсутствия S3/S4 (v5.0 fix) и отсутствия I1-I5 (v5.1 fix).
         """
         from chimera.modules import awg_transport
         node = self._mock_node()
@@ -663,12 +675,13 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
                 ("_awg_server_conf_for_node",
                  awg_transport._awg_server_conf_for_node(node)),
             ]
-        # Каждая функция должна содержать все 11 обязательных параметров
-        # (Jc/Jmin/Jmax/S1-S4/H1-H4 — всего 11). I1-I5 опциональны.
+        # v5.1: ВСЕ 16 параметров теперь обязательны (Jc/Jmin/Jmax/S1-S4/
+        # H1-H4/I1-I5). Раньше I1-I5 были опциональны — теперь всегда пишутся.
         required_params = [
             "Jc = ", "Jmin = ", "Jmax = ",
             "S1 = ", "S2 = ", "S3 = ", "S4 = ",
             "H1 = ", "H2 = ", "H3 = ", "H4 = ",
+            "I1 = ", "I2 = ", "I3 = ", "I4 = ", "I5 = ",
         ]
         for fname, conf in confs:
             with self.subTest(func=fname):

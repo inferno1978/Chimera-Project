@@ -137,10 +137,27 @@ class TestBuildClientConf(unittest.TestCase):
         conf = awgs_qr_build_client_conf(_peer(), state)
         self.assertIn("I1 = deadbeef", conf)
 
-    def test_omits_i1_when_empty(self):
+    def test_i1_always_written_v51(self):
+        """v5.1: I1-I5 ВСЕГДА пишутся в клиентский .conf, даже когда пустые.
+
+        Раньше писались только непустые — это ломало некоторых строгих
+        парсеров (Keenetic native AWG 2.0). Теперь все 5 ключей
+        присутствуют в конфиге всегда, как в официальном формате AWG 2.0.
+        См. awg_standalone.awgs_build_server_conf() для обоснования.
+        """
         from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
-        self.assertNotIn("I1 =", conf)
+        # Все 5 ключей I1-I5 должны присутствовать, даже когда пустые
+        self.assertIn("I1 = ", conf,
+                      "I1 = должен всегда присутствовать в conf (v5.1)")
+        self.assertIn("I2 = ", conf,
+                      "I2 = должен всегда присутствовать в conf (v5.1)")
+        self.assertIn("I3 = ", conf,
+                      "I3 = должен всегда присутствовать в conf (v5.1)")
+        self.assertIn("I4 = ", conf,
+                      "I4 = должен всегда присутствовать в conf (v5.1)")
+        self.assertIn("I5 = ", conf,
+                      "I5 = должен всегда присутствовать в conf (v5.1)")
 
     def test_includes_ipv6_address_when_enabled(self):
         from chimera.modules.awg_qr import awgs_qr_build_client_conf
