@@ -115,7 +115,7 @@ def prompt_parameters() -> None:
 
     # --- 1. UUID ---
     _box_sep()
-    _box_row(f" {BLUE}[1/9] UUID клиента:{NC}")
+    _box_row(f" {BLUE}[1/11] UUID клиента:{NC}")
     auto_uuid = gen_uuid()
     _box_item("1", f"Сгенерировать автоматически: {DIM}{auto_uuid}{NC}")
     _box_item("2", f"Ввести вручную")
@@ -150,7 +150,7 @@ def prompt_parameters() -> None:
             warn("   Введите 1 или 2")
 
     # --- 2. ShortID ---
-    _box_top(f" {BLUE}[2/9] ShortID (REALITY):{NC}")
+    _box_top(f" {BLUE}[2/11] ShortID (REALITY):{NC}")
     auto_sid = gen_hex(8)
     _box_item("1", f"Сгенерировать автоматически: {DIM}{auto_sid}{NC}")
     _box_item("2", f"Ввести вручную (hex, чётная длина 2-16)")
@@ -187,7 +187,7 @@ def prompt_parameters() -> None:
     # --- 3. Ключи REALITY (только для REALITY) ---
     key_mode = "auto"
     if PROTOCOL_MODE == "reality":
-        _box_top(f" {BLUE}[3/9] Ключи REALITY (x25519) — будут сгенерированы после установки Xray:{NC}")
+        _box_top(f" {BLUE}[3/11] Ключи REALITY (x25519) — будут сгенерированы после установки Xray:{NC}")
         _box_item("1", f"Сгенерировать автоматически (рекомендуется)")
         _box_item("2", f"Ввести вручную (если уже есть пара ключей)")
         _box_bottom()
@@ -230,11 +230,11 @@ def prompt_parameters() -> None:
             else:
                 warn("   Введите 1 или 2")
     else:
-        info("[3/9] Ключи REALITY: пропущено (xHTTP TLS использует TLS-сертификат Let's Encrypt)")
+        info("[3/11] Ключи REALITY: пропущено (xHTTP TLS использует TLS-сертификат Let's Encrypt)")
 
     # --- 4. SpiderX (только для REALITY) ---
     if PROTOCOL_MODE == "reality":
-        _box_top(f" {BLUE}[4/9] SpiderX (путь краулера REALITY):{NC}")
+        _box_top(f" {BLUE}[4/11] SpiderX (путь краулера REALITY):{NC}")
         auto_spx = gen_spiderx()
         _box_item("1", f"Сгенерировать автоматически: {DIM}{auto_spx}{NC}")
         _box_item("2", f"Ввести вручную")
@@ -270,7 +270,7 @@ def prompt_parameters() -> None:
     else:
         PARAM_SPIDERX = gen_spiderx()   # значение не используется, но задаём
         setattr(core, "PARAM_SPIDERX", PARAM_SPIDERX)
-        info(f"[4/9] SpiderX: пропущено (xHTTP TLS)")
+        info(f"[4/11] SpiderX: пропущено (xHTTP TLS)")
 
     # --- 5. Unix Socket (только для REALITY) ---
     if PROTOCOL_MODE == "reality":
@@ -292,7 +292,7 @@ def prompt_parameters() -> None:
             except Exception:
                 pass
         auto_sock = _existing_sock if _existing_sock else f"/dev/shm/{gen_hex(4)}.socket"
-        _box_top(f" {BLUE}[5/9] Unix socket path:{NC}")
+        _box_top(f" {BLUE}[5/11] Unix socket path:{NC}")
         _box_item("1", f"Использовать: {DIM}{auto_sock}{NC}")
         _box_item("2", f"Ввести вручную")
         _box_bottom()
@@ -327,10 +327,10 @@ def prompt_parameters() -> None:
     else:
         PARAM_SOCKET_PATH = f"/dev/shm/{gen_hex(4)}.socket"  # заглушка
         setattr(core, "PARAM_SOCKET_PATH", PARAM_SOCKET_PATH)
-        info(f"[5/9] Unix socket: пропущено (xHTTP TLS не использует сокет)")
+        info(f"[5/11] Unix socket: пропущено (xHTTP TLS не использует сокет)")
 
     # --- 6. Домен ---
-    _box_top(f" {BLUE}[6/9] Домен (SNI):{NC}")
+    _box_top(f" {BLUE}[6/11] Домен (SNI):{NC}")
     _box_bottom()
     while True:
         try:
@@ -349,7 +349,7 @@ def prompt_parameters() -> None:
         warn("   Некорректный домен. Введите FQDN вида my.example.com")
 
     # --- 7. Email ---
-    _box_top(f" {BLUE}[7/9] Email для Let's Encrypt:{NC}")
+    _box_top(f" {BLUE}[7/11] Email для Let's Encrypt:{NC}")
     _box_bottom()
     while True:
         try:
@@ -365,7 +365,7 @@ def prompt_parameters() -> None:
         warn("   Некорректный email")
 
     # --- 8. domainStrategy ---
-    _box_top(f" {BLUE}[8/9] Стратегия исходящих соединений:{NC}")
+    _box_top(f" {BLUE}[8/11] Стратегия исходящих соединений:{NC}")
     if IS_IPV6_AVAILABLE:
         _box_row(f"   {GREEN}ℹ IPv6 обнаружен на сервере{NC}")
     _box_item("1", f"UseIPv6v4 — сначала IPv6, fallback IPv4 {GREEN}(рекомендуется){NC}")
@@ -388,7 +388,7 @@ def prompt_parameters() -> None:
     success(f"   domainStrategy: {PARAM_DOMAIN_STRATEGY}")
 
     # --- 9. Шаблон сайта ---
-    _box_top(f" {BLUE}[9/9] Шаблон сайта-заглушки:{NC}")
+    _box_top(f" {BLUE}[9/11] Шаблон сайта-заглушки:{NC}")
     _box_item("1",  f"TechHub             — IT-портал (RU) · fade-up reveal")
     _box_item("2",  f"NexCloud            — serverless SaaS · gradient mesh")
     _box_item("3",  f"Holm & Oak          — homeware store · parallax")

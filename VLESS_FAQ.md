@@ -196,7 +196,7 @@ sudo python3 main.py # запустить
 
 ```
 Клиент ──TCP──► Nginx (unix socket) ──► Xray (REALITY)
-                 TLS-handshake с伪装サイト
+                 TLS-handshake с маскировочным сайтом
 ```
 
 - **Максимальная производительность** — аппаратное ускорение TLS.
