@@ -58,17 +58,10 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
         lines.append(f"Address = {client_ipv6}/128")
     lines.append(f"DNS = {dns1}, {dns2}")
     lines.append(f"MTU = {mtu}")
-    lines.append("")
-    lines.append("[Peer]")
-    lines.append(f"PublicKey = {server_pubkey}")
-    if endpoint:
-        lines.append(f"Endpoint = {endpoint}:{port}")
-    lines.append(f"AllowedIPs = {allowed_ips}")
-    if psk:
-        lines.append(f"PresharedKey = {psk}")
-    lines.append("PersistentKeepalive = 25")
-    lines.append("")
-    # Параметры AWG 2.0
+    # v5.4.3: Параметры AWG 2.0 внутри [Interface] (как в эталонном конфиге Amnezia).
+    # Раньше были после [Peer] — некоторые парсеры не принимают AWG-параметры
+    # вне [Interface]. Подтверждено zvshka: рабочая конфигурация Amnezia
+    # имеет Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5 внутри [Interface].
     lines.append(f"Jc = {params.get('jc', 4)}")
     lines.append(f"Jmin = {params.get('jmin', 40)}")
     lines.append(f"Jmax = {params.get('jmax', 70)}")
@@ -82,13 +75,19 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     lines.append(f"H4 = {params.get('h4', 4)}")
     # v5.4.2: I1-I5 для КЛИЕНТСКОГО конфига — пишем ВСЕГДА без комментария
     # (даже пустые). Подтверждено zvshka: рабочая конфигурация Amnezia
-    # имеет I1-I5 без '#' на клиенте, и '# I1-I5' на сервере. Это работает
-    # потому что клиентские AWG-приложения (включая Keenetic, amneziawg-go)
-    # принимают пустые I2-I5 без ошибки. Только серверные awg-quick (старые
-    # сборки) падают на пустых I2-I5 — поэтому для сервера комментируем.
+    # имеет I1-I5 без '#' на клиенте, и '# I1-I5' на сервере.
     for key in ("i1", "i2", "i3", "i4", "i5"):
         val = params.get(key, "")
         lines.append(f"{key.upper()} = {val}")
+    lines.append("")
+    lines.append("[Peer]")
+    lines.append(f"PublicKey = {server_pubkey}")
+    if endpoint:
+        lines.append(f"Endpoint = {endpoint}:{port}")
+    lines.append(f"AllowedIPs = {allowed_ips}")
+    if psk:
+        lines.append(f"PresharedKey = {psk}")
+    lines.append("PersistentKeepalive = 25")
 
     return "\n".join(lines) + "\n"
 
