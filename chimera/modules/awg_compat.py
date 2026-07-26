@@ -288,14 +288,82 @@ def awgs_supports_i2_i5(force_refresh: bool = False) -> bool:
 
 
 def _reset_supports_cache() -> None:
-    """Сбрасывает кэш awgs_supports_i2_i5(). Для тестов."""
+    """Сбрасывает кэш awgs_supports_i2_i5() и awgs_supports_h_ranges().
+    Для тестов."""
     _SUPPORTS_I2_I5_CACHE.clear()
+    _SUPPORTS_H_RANGES_CACHE.clear()
 
 
 def _set_supports_cache(value: bool) -> None:
     """Принудительно устанавливает кэш awgs_supports_i2_i5() в value.
     Для тестов — позволяет mock'ать результат без реального subprocess."""
     _SUPPORTS_I2_I5_CACHE["result"] = value
+
+
+# ── Проверка поддержки диапазонов H1-H4 ─────────────────────────────────────
+
+_SUPPORTS_H_RANGES_CACHE: dict[str, bool] = {}
+
+
+def awgs_supports_h_ranges(force_refresh: bool = False) -> bool:
+    """Проверяет, поддерживает ли локальный awg-quick диапазоны H1-H4
+    (формат 'N-M', как в эталонном конфиге Amnezia).
+
+    v5.3: официальный Amnezia использует формат H1 = N-M (диапазон).
+    Но старые amneziawg-tools (как у zvshka) могут не понимать диапазоны
+    и падать с ошибкой парсинга. Эта функция определяет поддержку через
+    awg setconf на тестовом интерфейсе (тот же механизм что
+    awgs_supports_i2_i5, но с другим sample_conf — H1 = 100-200 вместо
+    H1 = 1).
+
+    Возвращает True если диапазоны поддерживаются, False если нет.
+    Safe default: True (лучше попробовать диапазоны и fallback при ошибке,
+    чем молча использовать одиночные числа).
+    """
+    if not force_refresh and "result" in _SUPPORTS_H_RANGES_CACHE:
+        return _SUPPORTS_H_RANGES_CACHE["result"]
+
+    # Sample conf с диапазоном H1 = 100-200
+    sample_conf = (
+        "[Interface]\n"
+        "PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n"
+        "ListenPort = 0\n"
+        "Jc = 3\n"
+        "Jmin = 40\n"
+        "Jmax = 70\n"
+        "S1 = 0\n"
+        "S2 = 0\n"
+        "S3 = 0\n"
+        "S4 = 0\n"
+        "H1 = 100-200\n"
+        "H2 = 300-400\n"
+        "H3 = 500-600\n"
+        "H4 = 700-800\n"
+        "I1 = <r 24>\n"
+    )
+
+    ok, output = _run_setconf_check(sample_conf)
+
+    if not ok:
+        output_lower = output.lower()
+        # Если ошибка про H1-H4 / "Line unrecognized" — диапазоны не поддерживаются
+        if any(token in output_lower for token in (
+            "h1", "h2", "h3", "h4",
+            "line unrecognized", "configuration parsing error",
+        )):
+            _SUPPORTS_H_RANGES_CACHE["result"] = False
+            return False
+        # Ошибка по другой причине — safe default True
+        _SUPPORTS_H_RANGES_CACHE["result"] = True
+        return True
+
+    _SUPPORTS_H_RANGES_CACHE["result"] = True
+    return True
+
+
+def _set_h_ranges_cache(value: bool) -> None:
+    """Принудительно устанавливает кэш awgs_supports_h_ranges(). Для тестов."""
+    _SUPPORTS_H_RANGES_CACHE["result"] = value
 
 
 # ── Сообщения для пользователя ───────────────────────────────────────────────
