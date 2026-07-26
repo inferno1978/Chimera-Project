@@ -742,40 +742,32 @@ def awgs_build_server_conf(
     lines.append(f"H2 = {params.get('h2', 2)}")
     lines.append(f"H3 = {params.get('h3', 3)}")
     lines.append(f"H4 = {params.get('h4', 4)}")
-    # v5.2: I1 пишется ВСЕГДА (поддерживается везде, включая старые сборки
-    # amneziawg-tools AWG 1.5-эры — подтверждено реальным логом пользователя
-    # zvshka, ошибка парсинга была именно на I2, не на I1).
-    # I2-I5 пишутся условно: только если локальный awg-quick их поддерживает
-    # (определяется через awg-quick strip без поднятия интерфейса).
-    # Конфликт требований:
-    #   - Keenetic native AWG 2.0 требует ВСЕ 5 ключей I1-I5 (даже пустых)
-    #   - Старые amneziawg-tools (AWG 1.5-эра) падают с
-    #     "Line unrecognized: \`I2='" и сервис не стартует ВООБЩЕ.
-    # Решение — определение возможностей локального awg-quick ПЕРЕД записью.
-    # См. chimera/modules/awg_compat.py::awgs_supports_i2_i5().
-    lines.append(f"I1 = {params.get('i1', '')}")
-    try:
-        from .awg_compat import awgs_supports_i2_i5, awgs_warn_old_tools_once
-        if awgs_supports_i2_i5():
-            # Современный awg-quick — пишем все 5 ключей (как в 3e1fa70)
-            lines.append(f"I2 = {params.get('i2', '')}")
-            lines.append(f"I3 = {params.get('i3', '')}")
-            lines.append(f"I4 = {params.get('i4', '')}")
-            lines.append(f"I5 = {params.get('i5', '')}")
+    # v5.4: I1-I5 — КОММЕНТИРУЕМ пустые (как в эталонном конфиге Amnezia).
+    #
+    # КОРЕНЬ ПРОБЛЕМЫ (подтверждено zvshka): старые amneziawg-tools
+    # (переходная версия с I1 но без I2-I5) падают с
+    # 'Line unrecognized: I2=' при виде пустой строки 'I2 = '. Сервис
+    # awg-quick@awg0 не стартует ВООБЩЕ. zvshka подтвердил: комментирование
+    # строк '# I2 = ' решает проблему — старые tools игнорируют '#'.
+    #
+    # Самоисцеление в awgs_apply() (v5.2.2) НЕ помогает при systemctl
+    # restart — systemd вызывает awg-quick up напрямую, не через наш код.
+    # Поэтому нужно писать конфиг ПРАВИЛЬНО с самого начала.
+    #
+    # РЕШЕНИЕ v5.4: комментируем пустые I1-I5 (как в эталонном конфиге
+    # Amnezia из Docker-контейнера). Закомментированные строки:
+    #   - Игнорируются старыми amneziawg-tools (парсер пропускает '#')
+    #   - Игнорируются современными amneziawg-tools (тоже пропускают '#')
+    #   - Не нужны для Keenetic — эталонный Amnezia конфиг имеет все
+    #     I1-I5 закомментированными, и Keenetic его принимает
+    # Непустые I1-I5 пишутся без комментария (как раньше).
+    for key in ("i1", "i2", "i3", "i4", "i5"):
+        val = params.get(key, "")
+        if val:
+            lines.append(f"{key.upper()} = {val}")
         else:
-            # Старый awg-quick — пишем только непустые (старое поведение
-            # до 3e1fa70), и warn один раз за процесс
-            awgs_warn_old_tools_once()
-            for key in ("i2", "i3", "i4", "i5"):
-                if params.get(key):
-                    lines.append(f"{key.upper()} = {params[key]}")
-    except Exception:
-        # Fallback: если awg_compat недоступен (не должно случаться),
-        # пишем все 5 ключей — это поведение 3e1fa70, лучше для Keenetic.
-        lines.append(f"I2 = {params.get('i2', '')}")
-        lines.append(f"I3 = {params.get('i3', '')}")
-        lines.append(f"I4 = {params.get('i4', '')}")
-        lines.append(f"I5 = {params.get('i5', '')}")
+            # Пустое значение — комментируем (как в эталонном Amnezia)
+            lines.append(f"# {key.upper()} = ")
 
     # Cascade: если это AWG0 (entry), добавляем peer к AWG1
     if cascade_role == "entry" and cascade_peer:
