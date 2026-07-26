@@ -80,10 +80,14 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     lines.append(f"H2 = {params.get('h2', 2)}")
     lines.append(f"H3 = {params.get('h3', 3)}")
     lines.append(f"H4 = {params.get('h4', 4)}")
-    if params.get("i1"):
-        lines.append(f"I1 = {params['i1']}")
-    if params.get("i2"):
-        lines.append(f"I2 = {params['i2']}")
+    # v5.1: I1-I5 ВСЕГДА пишутся в клиентский .conf, даже когда пустые —
+    # как в официальном формате AWG 2.0. См. awgs_build_server_conf()
+    # в awg_standalone.py для обоснования.
+    lines.append(f"I1 = {params.get('i1', '')}")
+    lines.append(f"I2 = {params.get('i2', '')}")
+    lines.append(f"I3 = {params.get('i3', '')}")
+    lines.append(f"I4 = {params.get('i4', '')}")
+    lines.append(f"I5 = {params.get('i5', '')}")
 
     return "\n".join(lines) + "\n"
 

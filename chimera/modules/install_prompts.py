@@ -990,9 +990,13 @@ def prompt_awg_exit_mode() -> None:
                     return default
                 if raw2.lower() == "none":
                     return ""
-                if all(c in "0123456789abcdefABCDEF" for c in raw2):
+                # v5.1: принимаем CPS tag-формат AWG 2.0 (<b 0x...>, <r N>,
+                # <t>) и голый hex (AWG 1.5, для обратной совместимости).
+                # См. awg_presets._is_valid_cps_or_legacy_hex для деталей.
+                from chimera.modules.awg_presets import _is_valid_cps_or_legacy_hex
+                if _is_valid_cps_or_legacy_hex(raw2):
                     return raw2
-                warn(f"  '{raw2}' не hex — игнорирую, использую default")
+                warn(f"  '{raw2[:32]}' не CPS tag и не hex — игнорирую, использую default")
             except (ValueError, KeyboardInterrupt):
                 pass
             return default
