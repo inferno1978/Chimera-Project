@@ -742,17 +742,40 @@ def awgs_build_server_conf(
     lines.append(f"H2 = {params.get('h2', 2)}")
     lines.append(f"H3 = {params.get('h3', 3)}")
     lines.append(f"H4 = {params.get('h4', 4)}")
-    # v5.1: I1-I5 ВСЕГДА пишутся в конфиг, даже когда пустые — как в
-    # официальном формате AWG 2.0. Раньше писались только непустые, но
-    # некоторые строгие парсеры (Keenetic native AWG 2.0) падают на
-    # отсутствии ключа I2/I3/I4/I5 при наличии I1 (или наоборот).
-    # См. docs.amnezia.org — официальный конфиг от amnezia-клиента всегда
-    # содержит все пять ключей.
+    # v5.2: I1 пишется ВСЕГДА (поддерживается везде, включая старые сборки
+    # amneziawg-tools AWG 1.5-эры — подтверждено реальным логом пользователя
+    # zvshka, ошибка парсинга была именно на I2, не на I1).
+    # I2-I5 пишутся условно: только если локальный awg-quick их поддерживает
+    # (определяется через awg-quick strip без поднятия интерфейса).
+    # Конфликт требований:
+    #   - Keenetic native AWG 2.0 требует ВСЕ 5 ключей I1-I5 (даже пустых)
+    #   - Старые amneziawg-tools (AWG 1.5-эра) падают с
+    #     "Line unrecognized: \`I2='" и сервис не стартует ВООБЩЕ.
+    # Решение — определение возможностей локального awg-quick ПЕРЕД записью.
+    # См. chimera/modules/awg_compat.py::awgs_supports_i2_i5().
     lines.append(f"I1 = {params.get('i1', '')}")
-    lines.append(f"I2 = {params.get('i2', '')}")
-    lines.append(f"I3 = {params.get('i3', '')}")
-    lines.append(f"I4 = {params.get('i4', '')}")
-    lines.append(f"I5 = {params.get('i5', '')}")
+    try:
+        from .awg_compat import awgs_supports_i2_i5, awgs_warn_old_tools_once
+        if awgs_supports_i2_i5():
+            # Современный awg-quick — пишем все 5 ключей (как в 3e1fa70)
+            lines.append(f"I2 = {params.get('i2', '')}")
+            lines.append(f"I3 = {params.get('i3', '')}")
+            lines.append(f"I4 = {params.get('i4', '')}")
+            lines.append(f"I5 = {params.get('i5', '')}")
+        else:
+            # Старый awg-quick — пишем только непустые (старое поведение
+            # до 3e1fa70), и warn один раз за процесс
+            awgs_warn_old_tools_once()
+            for key in ("i2", "i3", "i4", "i5"):
+                if params.get(key):
+                    lines.append(f"{key.upper()} = {params[key]}")
+    except Exception:
+        # Fallback: если awg_compat недоступен (не должно случаться),
+        # пишем все 5 ключей — это поведение 3e1fa70, лучше для Keenetic.
+        lines.append(f"I2 = {params.get('i2', '')}")
+        lines.append(f"I3 = {params.get('i3', '')}")
+        lines.append(f"I4 = {params.get('i4', '')}")
+        lines.append(f"I5 = {params.get('i5', '')}")
 
     # Cascade: если это AWG0 (entry), добавляем peer к AWG1
     if cascade_role == "entry" and cascade_peer:

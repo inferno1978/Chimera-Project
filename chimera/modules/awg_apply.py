@@ -88,6 +88,13 @@ def awgs_apply(mode: str = AWGS_APPLY_MODE_SYNCCONF) -> bool:
     """
     Применяет конфиг в указанном режиме.
     При syncconf-failure автоматически fallback на restart.
+
+    v5.2: defensive fallback — если awg-quick падает с "Line unrecognized"
+    в stderr (как в случае со старыми amneziawg-tools и директивами I2-I5),
+    показываем пользователю ТОЧНУЮ причину из stderr в warn(), а не просто
+    общий "syncconf не удался". Реальная причина раньше терялась — её
+    можно было найти только через ручной journalctl, пользователь сам не
+    мог понять, в чём дело.
     """
     core = _core_module()
     if mode == AWGS_APPLY_MODE_RESTART:
@@ -96,8 +103,44 @@ def awgs_apply(mode: str = AWGS_APPLY_MODE_SYNCCONF) -> bool:
     # syncconf (по умолчанию)
     if awgs_apply_syncconf():
         return True
-    # Fallback
-    core.warn("syncconf не удался — fallback на restart (кратковременный разрыв)")
+
+    # Fallback: пытаемся извлечь stderr из последней неудачной команды
+    # syncconf, чтобы показать пользователю точную причину.
+    # awgs_apply_syncconf() уже залогировал stderr в log_to_file, но
+    # warn() с конкретной причиной важнее для пользователя.
+    #
+    # Идея: запускаем strip ещё раз (это быстро) и сохраняем stderr
+    # для диагностического сообщения. Если strip падает с ошибкой про
+    # I2-I5 / "Line unrecognized" — это и есть причина syncconf-failure.
+    last_stderr = ""
+    try:
+        if AWGS_SERVER_CONF.exists():
+            r = core._run([AWGS_QUICK_BIN, "strip", str(AWGS_SERVER_CONF)],
+                          capture=True, check=False)
+            if r.returncode != 0 and r.stderr:
+                last_stderr = r.stderr.strip()
+    except Exception:
+        pass
+
+    if last_stderr:
+        # Показываем первые 300 символов stderr — обычно этого достаточно
+        # для понимания причины (например,
+        # "Line unrecognized: `I2='" / "Configuration parsing error")
+        snippet = last_stderr[:300]
+        if len(last_stderr) > 300:
+            snippet += "..."
+        core.warn(
+            f"Применение конфига (awg-quick strip) НЕ удалось — "
+            f"точная причина из stderr:\n  {snippet}\n"
+            f"---\n"
+            f"Если ошибка про I2/I3/I4/I5 ('Line unrecognized') — установлена "
+            f"старая версия amneziawg-tools без поддержки AWG 2.0. "
+            f"Обновите: apt update && apt install --only-upgrade amneziawg-tools. "
+            f"Конфиг автоматически перепишется в совместимом виде при следующем "
+            f"действии (добавление клиента / ротация параметров)."
+        )
+    else:
+        core.warn("syncconf не удался — fallback на restart (кратковременный разрыв)")
     return awgs_apply_restart()
 
 

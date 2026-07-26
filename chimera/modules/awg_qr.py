@@ -80,14 +80,31 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     lines.append(f"H2 = {params.get('h2', 2)}")
     lines.append(f"H3 = {params.get('h3', 3)}")
     lines.append(f"H4 = {params.get('h4', 4)}")
-    # v5.1: I1-I5 ВСЕГДА пишутся в клиентский .conf, даже когда пустые —
-    # как в официальном формате AWG 2.0. См. awgs_build_server_conf()
-    # в awg_standalone.py для обоснования.
+    # v5.2: I1 пишется ВСЕГДА (поддерживается везде, включая старые сборки
+    # amneziawg-tools AWG 1.5-эры). I2-I5 — условно, в зависимости от
+    # поддержки локальным awg-quick (см. awg_standalone.awgs_build_server_conf
+    # для подробного обоснования).
     lines.append(f"I1 = {params.get('i1', '')}")
-    lines.append(f"I2 = {params.get('i2', '')}")
-    lines.append(f"I3 = {params.get('i3', '')}")
-    lines.append(f"I4 = {params.get('i4', '')}")
-    lines.append(f"I5 = {params.get('i5', '')}")
+    try:
+        from .awg_compat import awgs_supports_i2_i5, awgs_warn_old_tools_once
+        if awgs_supports_i2_i5():
+            # Современный awg-quick — пишем все 5 ключей (как в 3e1fa70)
+            lines.append(f"I2 = {params.get('i2', '')}")
+            lines.append(f"I3 = {params.get('i3', '')}")
+            lines.append(f"I4 = {params.get('i4', '')}")
+            lines.append(f"I5 = {params.get('i5', '')}")
+        else:
+            # Старый awg-quick — пишем только непустые
+            awgs_warn_old_tools_once()
+            for key in ("i2", "i3", "i4", "i5"):
+                if params.get(key):
+                    lines.append(f"{key.upper()} = {params[key]}")
+    except Exception:
+        # Fallback: пишем все 5 ключей (поведение 3e1fa70)
+        lines.append(f"I2 = {params.get('i2', '')}")
+        lines.append(f"I3 = {params.get('i3', '')}")
+        lines.append(f"I4 = {params.get('i4', '')}")
+        lines.append(f"I5 = {params.get('i5', '')}")
 
     return "\n".join(lines) + "\n"
 
