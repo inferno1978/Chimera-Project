@@ -1574,5 +1574,151 @@ class TestSetupAccountingWarnHonest(unittest.TestCase):
                          f"got {len(matching)}: {matching}")
 
 
+# =============================================================================
+#  _ipt_ensure_single_return_rule / _ipt_remove_all_return_rules — идемпотентность
+# =============================================================================
+class TestReturnRuleIdempotency(unittest.TestCase):
+    """Тесты на идемпотентность RETURN-правил для ME-портов (:8888, :80).
+
+    Проблема: при повторных вызовах xray_enable_tproxy_for_telemt() (через
+    меню или emergency_restore) RETURN-правила накапливались дубли, а при
+    ручной чистке пользователь мог удалить все — и ME-pool снова падал.
+
+    Фикс: _ipt_ensure_single_return_rule() гарантирует РОВНО ОДНО правило
+    через цикл удаления всех дублей перед добавлением одного.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _make_stateful_run_mock(self):
+        """Создаёт stateful mock для _run, отслеживающий RETURN-правила.
+
+        Мокирует iptables -C / -D / -I для RETURN-правил ME-портов.
+        Возвращает (fake_run, return_rules_dict) где return_rules_dict
+        мутируется при -D / -I.
+        """
+        from unittest.mock import MagicMock
+        # return_rules: {(ipt, dport): count} — сколько RETURN-правил
+        # установлено для данного (ipt, dport).
+        return_rules: dict = {}
+
+        def fake_run(cmd, capture=False, check=False):
+            cmd = list(cmd)
+            # iptables -t nat -C OUTPUT -p tcp --dport PORT -j RETURN
+            # → check if rule exists
+            if len(cmd) >= 3 and cmd[0] in ("iptables", "ip6tables") and cmd[1] == "-t" and cmd[2] == "nat":
+                ipt = cmd[0]
+                # -C (check)
+                if "-C" in cmd and "--dport" in cmd and "RETURN" in cmd:
+                    dport_idx = cmd.index("--dport") + 1
+                    dport = cmd[dport_idx]
+                    exists = return_rules.get((ipt, dport), 0) > 0
+                    return MagicMock(returncode=0 if exists else 1,
+                                     stdout="", stderr="")
+                # -D (delete) — декремент count
+                if "-D" in cmd and "--dport" in cmd and "RETURN" in cmd:
+                    dport_idx = cmd.index("--dport") + 1
+                    dport = cmd[dport_idx]
+                    if return_rules.get((ipt, dport), 0) > 0:
+                        return_rules[(ipt, dport)] = return_rules.get((ipt, dport), 0) - 1
+                        return MagicMock(returncode=0, stdout="", stderr="")
+                    return MagicMock(returncode=1, stdout="", stderr="not found")
+                # -I (insert) — инкремент count
+                if "-I" in cmd and "--dport" in cmd and "RETURN" in cmd:
+                    dport_idx = cmd.index("--dport") + 1
+                    dport = cmd[dport_idx]
+                    return_rules[(ipt, dport)] = return_rules.get((ipt, dport), 0) + 1
+                    return MagicMock(returncode=0, stdout="", stderr="")
+                # -C / -D / -I для owner UID (xray)
+                if "-C" in cmd and "--uid-owner" in cmd and "RETURN" in cmd:
+                    uid_idx = cmd.index("--uid-owner") + 1
+                    uid = cmd[uid_idx]
+                    exists = return_rules.get((ipt, f"uid:{uid}"), 0) > 0
+                    return MagicMock(returncode=0 if exists else 1,
+                                     stdout="", stderr="")
+                if "-D" in cmd and "--uid-owner" in cmd and "RETURN" in cmd:
+                    uid_idx = cmd.index("--uid-owner") + 1
+                    uid = cmd[uid_idx]
+                    key = (ipt, f"uid:{uid}")
+                    if return_rules.get(key, 0) > 0:
+                        return_rules[key] = return_rules.get(key, 0) - 1
+                        return MagicMock(returncode=0, stdout="", stderr="")
+                    return MagicMock(returncode=1, stdout="", stderr="not found")
+                if "-I" in cmd and "--uid-owner" in cmd and "RETURN" in cmd:
+                    uid_idx = cmd.index("--uid-owner") + 1
+                    uid = cmd[uid_idx]
+                    key = (ipt, f"uid:{uid}")
+                    return_rules[key] = return_rules.get(key, 0) + 1
+                    return MagicMock(returncode=0, stdout="", stderr="")
+            # Все остальные команды — no-op success
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return fake_run, return_rules
+
+    def test_ensure_single_return_rule_with_no_existing_rules(self):
+        """Если правил нет — _ipt_ensure_single_return_rule добавляет одно."""
+        from chimera.modules import mtproto
+        fake_run, rules = self._make_stateful_run_mock()
+        with patch.object(mtproto, "_run", fake_run):
+            removed = mtproto._ipt_ensure_single_return_rule("iptables", "8888")
+        self.assertEqual(removed, 0, "no rules to remove")
+        self.assertEqual(rules.get(("iptables", "8888"), 0), 1,
+                         "exactly 1 RETURN rule should be added")
+
+    def test_ensure_single_return_rule_with_one_existing_rule(self):
+        """Если уже есть одно — _ipt_ensure_single_return_rule оставляет одно."""
+        from chimera.modules import mtproto
+        fake_run, rules = self._make_stateful_run_mock()
+        rules[("iptables", "8888")] = 1  # уже есть одно
+        with patch.object(mtproto, "_run", fake_run):
+            removed = mtproto._ipt_ensure_single_return_rule("iptables", "8888")
+        self.assertEqual(removed, 1, "removed 1 existing rule")
+        self.assertEqual(rules.get(("iptables", "8888"), 0), 1,
+                         "exactly 1 RETURN rule should remain")
+
+    def test_ensure_single_return_rule_with_three_duplicates(self):
+        """Если есть 3 дубля — _ipt_ensure_single_return_rule удаляет все 3,
+        добавляет одно, остаётся ровно 1.
+        """
+        from chimera.modules import mtproto
+        fake_run, rules = self._make_stateful_run_mock()
+        rules[("ip6tables", "80")] = 3  # 3 дубля
+        with patch.object(mtproto, "_run", fake_run):
+            removed = mtproto._ipt_ensure_single_return_rule("ip6tables", "80")
+        self.assertEqual(removed, 3, "removed 3 duplicates")
+        self.assertEqual(rules.get(("ip6tables", "80"), 0), 1,
+                         "exactly 1 RETURN rule should remain after cleanup")
+
+    def test_remove_all_return_rules_with_three_duplicates(self):
+        """_ipt_remove_all_return_rules удаляет ВСЕ правила (не одно)."""
+        from chimera.modules import mtproto
+        fake_run, rules = self._make_stateful_run_mock()
+        rules[("iptables", "8888")] = 3
+        with patch.object(mtproto, "_run", fake_run):
+            removed = mtproto._ipt_remove_all_return_rules("iptables", "8888")
+        self.assertEqual(removed, 3)
+        self.assertEqual(rules.get(("iptables", "8888"), 0), 0,
+                         "all RETURN rules should be removed")
+
+    def test_remove_all_return_rules_with_zero_rules(self):
+        """_ipt_remove_all_return_rules с 0 правил → removed=0, не падает."""
+        from chimera.modules import mtproto
+        fake_run, rules = self._make_stateful_run_mock()
+        with patch.object(mtproto, "_run", fake_run):
+            removed = mtproto._ipt_remove_all_return_rules("iptables", "8888")
+        self.assertEqual(removed, 0)
+
+    def test_ensure_single_owner_return_with_duplicates(self):
+        """_ipt_ensure_single_owner_return с 2 дублями → 1 после."""
+        from chimera.modules import mtproto
+        fake_run, rules = self._make_stateful_run_mock()
+        rules[("iptables", "uid:999")] = 2
+        with patch.object(mtproto, "_run", fake_run):
+            removed = mtproto._ipt_ensure_single_owner_return("iptables", 999)
+        self.assertEqual(removed, 2)
+        self.assertEqual(rules.get(("iptables", "uid:999"), 0), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
