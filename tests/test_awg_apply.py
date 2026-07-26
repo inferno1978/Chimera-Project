@@ -145,6 +145,86 @@ class TestApplyDispatcher(unittest.TestCase):
             mock_r.assert_called_once()
 
 
+class TestApplyStderrSurfacing(unittest.TestCase):
+    """v5.2: awgs_apply при syncconf-failure показывает пользователю
+    фрагмент stderr от awg-quick strip — это defensive fallback на случай
+    если проверка awgs_supports_i2_i5() в будущем окажется неточной на
+    каком-то дистрибутиве. Реальная причина раньше терялась — её можно
+    было найти только через ручной journalctl.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._conf = self._tmpdir / "awg0.conf"
+        self._conf.write_text("[Interface]\nPrivateKey = x\n")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_stderr_shown_in_warn_on_i2_unrecognized(self):
+        """При 'Line unrecognized: I2=' в stderr — warn() содержит этот
+        фрагмент и подсказку про обновление amneziawg-tools."""
+        from chimera.modules import awg_apply
+        with patch.object(awg_apply, "AWGS_SERVER_CONF", self._conf), \
+             patch.object(awg_apply, "awgs_apply_syncconf", return_value=False), \
+             patch.object(awg_apply, "awgs_apply_restart", return_value=True), \
+             patch("chimera._core._run") as mock_run, \
+             patch("chimera._core.warn") as mock_warn:
+            # strip возвращает ошибку про I2 (старые amneziawg-tools)
+            mock_run.return_value = MagicMock(
+                returncode=1, stdout="",
+                stderr="Line unrecognized: `I2='\nConfiguration parsing error"
+            )
+            awg_apply.awgs_apply(mode="syncconf")
+            # warn() должен был вызываться с фрагментом stderr
+            self.assertTrue(mock_warn.called,
+                            "warn() должен вызываться при syncconf-failure")
+            warn_msg = mock_warn.call_args[0][0]
+            self.assertIn("Line unrecognized", warn_msg,
+                           f"warn() должен содержать фрагмент stderr: {warn_msg}")
+            self.assertIn("I2", warn_msg,
+                           f"warn() должен упоминать I2: {warn_msg}")
+            self.assertIn("amneziawg-tools", warn_msg,
+                           f"warn() должен советовать обновление: {warn_msg}")
+
+    def test_stderr_shown_on_any_strip_error(self):
+        """Любая ошибка strip (не только I2) должна попадать в warn()."""
+        from chimera.modules import awg_apply
+        with patch.object(awg_apply, "AWGS_SERVER_CONF", self._conf), \
+             patch.object(awg_apply, "awgs_apply_syncconf", return_value=False), \
+             patch.object(awg_apply, "awgs_apply_restart", return_value=True), \
+             patch("chimera._core._run") as mock_run, \
+             patch("chimera._core.warn") as mock_warn:
+            mock_run.return_value = MagicMock(
+                returncode=1, stdout="",
+                stderr="Some other awg-quick error"
+            )
+            awg_apply.awgs_apply(mode="syncconf")
+            self.assertTrue(mock_warn.called)
+            warn_msg = mock_warn.call_args[0][0]
+            self.assertIn("Some other awg-quick error", warn_msg,
+                          f"warn() должен содержать фрагмент stderr: {warn_msg}")
+
+    def test_generic_warn_when_no_stderr_available(self):
+        """Если stderr недоступен (например, conf не существует) —
+        warn() показывает общее сообщение про syncconf-failure."""
+        from chimera.modules import awg_apply
+        # AWGS_SERVER_CONF не существует → strip не запускается,
+        # last_stderr остаётся пустым
+        with patch.object(awg_apply, "AWGS_SERVER_CONF",
+                          Path("/tmp/nonexistent_xyz.conf")), \
+             patch.object(awg_apply, "awgs_apply_syncconf", return_value=False), \
+             patch.object(awg_apply, "awgs_apply_restart", return_value=True), \
+             patch("chimera._core.warn") as mock_warn:
+            awg_apply.awgs_apply(mode="syncconf")
+            self.assertTrue(mock_warn.called)
+            warn_msg = mock_warn.call_args[0][0]
+            self.assertIn("syncconf не удался", warn_msg,
+                          f"Должно быть общее сообщение: {warn_msg}")
+
+
 class TestServiceStatus(unittest.TestCase):
     """awgs_service_status."""
 

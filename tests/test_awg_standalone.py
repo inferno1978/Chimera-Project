@@ -143,24 +143,92 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         )
         self.assertIn("I1 = deadbeef", conf)
 
-    def test_i1_to_i5_always_written_v51(self):
-        """v5.1: I1-I5 ВСЕГДА пишутся в серверный conf, даже когда пустые.
+    def test_i1_to_i5_written_when_supports_i2_i5_v52(self):
+        """v5.2: I1-I5 ВСЕГДА пишутся в conf, если локальный awg-quick
+        поддерживает I2-I5 (современные сборки AWG 2.0).
 
-        Раньше писались только непустые — это ломало некоторых строгих
-        парсеров (Keenetic native AWG 2.0). Теперь все 5 ключей
-        присутствуют в conf всегда, как в официальном формате AWG 2.0
-        (см. docs.amnezia.org — amnezia-клиент всегда пишет все 5).
+        Это поведение было введено в 3e1fa70 для Keenetic native AWG 2.0,
+        требующего всех 5 ключей (даже пустых). v5.2 сохранил его для
+        случая awgs_supports_i2_i5() == True.
         """
         from chimera.modules.awg_standalone import awgs_build_server_conf
-        conf = awgs_build_server_conf(
-            server_privkey="PRIV", port=51820,
-            subnet="10.66.66.0/24", subnet_v6="", mtu=1280,
-            params=_default_params(),
-        )
-        # Все 5 ключей I1-I5 должны присутствовать, даже когда пустые
-        for key in ("I1", "I2", "I3", "I4", "I5"):
-            self.assertIn(f"{key} = ", conf,
-                          f"{key} = должен всегда присутствовать в conf (v5.1)")
+        from chimera.modules import awg_compat
+        # Мокаем поддержку — современные amneziawg-tools
+        awg_compat._set_supports_cache(True)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            conf = awgs_build_server_conf(
+                server_privkey="PRIV", port=51820,
+                subnet="10.66.66.0/24", subnet_v6="", mtu=1280,
+                params=_default_params(),
+            )
+            # Все 5 ключей I1-I5 должны присутствовать, даже когда пустые
+            for key in ("I1", "I2", "I3", "I4", "I5"):
+                self.assertIn(f"{key} = ", conf,
+                              f"{key} = должен присутствовать в conf когда "
+                              f"awgs_supports_i2_i5()==True (v5.2)")
+        finally:
+            awg_compat._reset_supports_cache()
+
+    def test_i1_only_when_no_i2_i5_support_v52(self):
+        """v5.2: при отсутствии поддержки I2-I5 (старые amneziawg-tools
+        AWG 1.5-эры) пишется ТОЛЬКО I1, I2-I5 опускаются если пустые.
+
+        Регрессионный тест на жалобу zvshka (сервер ArkadiaGamingHub):
+        коммит 3e1fa70 ломал сервис awg-quick@awg0 — старые сборки
+        падали с 'Line unrecognized: I2=' и весь сервис не стартовал.
+        v5.2: проверка awgs_supports_i2_i5() перед записью конфига.
+        """
+        from chimera.modules.awg_standalone import awgs_build_server_conf
+        from chimera.modules import awg_compat
+        # Мокаем отсутствие поддержки — старые amneziawg-tools
+        awg_compat._set_supports_cache(False)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            conf = awgs_build_server_conf(
+                server_privkey="PRIV", port=51820,
+                subnet="10.66.66.0/24", subnet_v6="", mtu=1280,
+                params=_default_params(),
+            )
+            # I1 пишется ВСЕГДА (поддерживается везде)
+            self.assertIn("I1 = ", conf,
+                          "I1 должен писаться всегда (даже старые "
+                          "amneziawg-tools поддерживают I1)")
+            # I2-I5 НЕ пишутся когда пустые + нет поддержки
+            for key in ("I2", "I3", "I4", "I5"):
+                self.assertNotIn(f"{key} = ", conf,
+                                 f"{key} = НЕ должен писаться когда пустой + "
+                                 f"awgs_supports_i2_i5()==False (v5.2 fix "
+                                 f"для старых amneziawg-tools)")
+        finally:
+            awg_compat._reset_supports_cache()
+
+    def test_non_empty_i2_to_i5_written_even_without_support_v52(self):
+        """v5.2: даже при отсутствии поддержки I2-I5, НЕПУСТЫЕ значения
+        I2-I5 пишутся (это явная пользовательская инициатива через пункт
+        '5. Ручная настройка' — пользователь знает что делает)."""
+        from chimera.modules.awg_standalone import awgs_build_server_conf
+        from chimera.modules import awg_compat
+        awg_compat._set_supports_cache(False)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            params = _default_params()
+            params["i1"] = "<r 24>"
+            params["i3"] = "<r 16>"  # непустое — должно писаться
+            conf = awgs_build_server_conf(
+                server_privkey="PRIV", port=51820,
+                subnet="10.66.66.0/24", subnet_v6="", mtu=1280,
+                params=params,
+            )
+            # I1 и I3 (непустой) — присутствуют
+            self.assertIn("I1 = <r 24>", conf)
+            self.assertIn("I3 = <r 16>", conf)
+            # I2, I4, I5 (пустые) — НЕ присутствуют
+            self.assertNotIn("I2 = ", conf)
+            self.assertNotIn("I4 = ", conf)
+            self.assertNotIn("I5 = ", conf)
+        finally:
+            awg_compat._reset_supports_cache()
 
     def test_cascade_entry_role(self):
         """cascade_role='entry' + cascade_peer → [Peer] для exit-VPS."""

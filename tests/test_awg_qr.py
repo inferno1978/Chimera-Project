@@ -137,27 +137,46 @@ class TestBuildClientConf(unittest.TestCase):
         conf = awgs_qr_build_client_conf(_peer(), state)
         self.assertIn("I1 = deadbeef", conf)
 
-    def test_i1_always_written_v51(self):
-        """v5.1: I1-I5 ВСЕГДА пишутся в клиентский .conf, даже когда пустые.
+    def test_i1_always_written_v52(self):
+        """v5.2: I1-I5 пишутся в клиентский .conf в зависимости от
+        поддержки локальным awg-quick.
 
-        Раньше писались только непустые — это ломало некоторых строгих
-        парсеров (Keenetic native AWG 2.0). Теперь все 5 ключей
-        присутствуют в конфиге всегда, как в официальном формате AWG 2.0.
-        См. awg_standalone.awgs_build_server_conf() для обоснования.
+        - awgs_supports_i2_i5()==True: ВСЕ 5 ключей (как в 3e1fa70, для
+          Keenetic native AWG 2.0 — требует всех 5 даже пустых).
+        - awgs_supports_i2_i5()==False: только I1 (поддерживается везде,
+          включая старые amneziawg-tools AWG 1.5-эры). I2-I5 опускаются
+          если пустые — иначе сервис awg-quick падает с
+          'Line unrecognized: I2=' и весь сервис не стартует (регрессия
+          3e1fa70, зафиксированная жалобой zvshka на сервере
+          ArkadiaGamingHub).
         """
         from chimera.modules.awg_qr import awgs_qr_build_client_conf
-        conf = awgs_qr_build_client_conf(_peer(), _server_state())
-        # Все 5 ключей I1-I5 должны присутствовать, даже когда пустые
-        self.assertIn("I1 = ", conf,
-                      "I1 = должен всегда присутствовать в conf (v5.1)")
-        self.assertIn("I2 = ", conf,
-                      "I2 = должен всегда присутствовать в conf (v5.1)")
-        self.assertIn("I3 = ", conf,
-                      "I3 = должен всегда присутствовать в conf (v5.1)")
-        self.assertIn("I4 = ", conf,
-                      "I4 = должен всегда присутствовать в conf (v5.1)")
-        self.assertIn("I5 = ", conf,
-                      "I5 = должен всегда присутствовать в conf (v5.1)")
+        from chimera.modules import awg_compat
+        # Случай 1: поддержка есть — все 5 ключей
+        awg_compat._set_supports_cache(True)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            conf = awgs_qr_build_client_conf(_peer(), _server_state())
+            for key in ("I1", "I2", "I3", "I4", "I5"):
+                self.assertIn(f"{key} = ", conf,
+                              f"{key} = должен присутствовать когда "
+                              f"awgs_supports_i2_i5()==True (v5.2)")
+        finally:
+            awg_compat._reset_supports_cache()
+
+        # Случай 2: поддержки нет — только I1
+        awg_compat._set_supports_cache(False)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            conf = awgs_qr_build_client_conf(_peer(), _server_state())
+            self.assertIn("I1 = ", conf,
+                          "I1 должен писаться всегда (поддерживается везде)")
+            for key in ("I2", "I3", "I4", "I5"):
+                self.assertNotIn(f"{key} = ", conf,
+                                 f"{key} = НЕ должен писаться когда пустой + "
+                                 f"awgs_supports_i2_i5()==False (v5.2)")
+        finally:
+            awg_compat._reset_supports_cache()
 
     def test_includes_ipv6_address_when_enabled(self):
         from chimera.modules.awg_qr import awgs_qr_build_client_conf

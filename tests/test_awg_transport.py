@@ -541,20 +541,40 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
         self.assertIn(f"I1 = {_i1_val}", conf,
                       f"I1 должен быть в conf когда задан, фактически:\n{conf}")
 
-    def test_server_conf_always_writes_i1_to_i5_v51(self):
-        """v5.1: _awg_server_conf_text ВСЕГДА пишет I1-I5, даже когда пустые.
+    def test_server_conf_writes_i_lines_based_on_support_v52(self):
+        """v5.2: _awg_server_conf_text пишет I1-I5 в зависимости от
+        awgs_supports_i2_i5().
 
-        Раньше писались только непустые — ломало строгих парсеров
-        (Keenetic native AWG 2.0). Теперь все 5 ключей присутствуют
-        всегда, как в официальном формате AWG 2.0.
+        - supports=True: ВСЕ 5 ключей (для Keenetic native AWG 2.0).
+        - supports=False: только I1 + непустые (для старых amneziawg-tools
+          AWG 1.5-эры — регрессия 3e1fa70, зафиксированная жалобой zvshka).
         """
-        from chimera.modules import awg_transport
-        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
-            conf = awg_transport._awg_server_conf_text()
-        # Все 5 ключей I1-I5 должны присутствовать, даже когда пустые
-        for key in ("I1", "I2", "I3", "I4", "I5"):
-            self.assertIn(f"{key} = ", conf,
-                          f"{key} = должен всегда присутствовать в conf (v5.1):\n{conf}")
+        from chimera.modules import awg_transport, awg_compat
+        # Случай 1: поддержка есть — все 5 ключей
+        awg_compat._set_supports_cache(True)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+                conf = awg_transport._awg_server_conf_text()
+            for key in ("I1", "I2", "I3", "I4", "I5"):
+                self.assertIn(f"{key} = ", conf,
+                              f"{key} = должен присутствовать когда supports=True")
+        finally:
+            awg_compat._reset_supports_cache()
+
+        # Случай 2: поддержки нет — только I1 (I2-I5 опускаются если пустые)
+        awg_compat._set_supports_cache(False)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+                conf = awg_transport._awg_server_conf_text()
+            self.assertIn("I1 = ", conf)
+            for key in ("I2", "I3", "I4", "I5"):
+                self.assertNotIn(f"{key} = ", conf,
+                                 f"{key} = НЕ должен писаться когда пустой + "
+                                 f"supports=False (v5.2 fix для старых awg-tools)")
+        finally:
+            awg_compat._reset_supports_cache()
 
     def test_server_conf_writes_all_i_when_set(self):
         """_awg_server_conf_text пишет I1-I5 если все заданы."""
@@ -586,14 +606,34 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
             conf = awg_transport._awg_client_conf_text()
         self.assertIn(f"I1 = {_i1_val}", conf)
 
-    def test_client_conf_always_writes_i1_to_i5_v51(self):
-        """v5.1: _awg_client_conf_text ВСЕГДА пишет I1-I5, даже когда пустые."""
-        from chimera.modules import awg_transport
-        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
-            conf = awg_transport._awg_client_conf_text()
-        for key in ("I1", "I2", "I3", "I4", "I5"):
-            self.assertIn(f"{key} = ", conf,
-                          f"{key} = должен всегда присутствовать (v5.1)")
+    def test_client_conf_writes_i_lines_based_on_support_v52(self):
+        """v5.2: _awg_client_conf_text пишет I1-I5 в зависимости от
+        awgs_supports_i2_i5() (аналогично _awg_server_conf_text)."""
+        from chimera.modules import awg_transport, awg_compat
+        # supports=True — все 5 ключей
+        awg_compat._set_supports_cache(True)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+                conf = awg_transport._awg_client_conf_text()
+            for key in ("I1", "I2", "I3", "I4", "I5"):
+                self.assertIn(f"{key} = ", conf,
+                              f"{key} = должен присутствовать когда supports=True")
+        finally:
+            awg_compat._reset_supports_cache()
+
+        # supports=False — только I1
+        awg_compat._set_supports_cache(False)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+                conf = awg_transport._awg_client_conf_text()
+            self.assertIn("I1 = ", conf)
+            for key in ("I2", "I3", "I4", "I5"):
+                self.assertNotIn(f"{key} = ", conf,
+                                 f"{key} = НЕ должен писаться когда пустой + supports=False")
+        finally:
+            awg_compat._reset_supports_cache()
 
     # ── _awg_client_conf_for_node ─────────────────────────────────────────
     def test_client_conf_for_node_has_s3_s4(self):
@@ -615,15 +655,35 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
             conf = awg_transport._awg_client_conf_for_node(node)
         self.assertIn(f"I1 = {_i1_val}", conf)
 
-    def test_client_conf_for_node_always_writes_i1_to_i5_v51(self):
-        """v5.1: _awg_client_conf_for_node ВСЕГДА пишет I1-I5, даже когда пустые."""
-        from chimera.modules import awg_transport
+    def test_client_conf_for_node_writes_i_lines_based_on_support_v52(self):
+        """v5.2: _awg_client_conf_for_node пишет I1-I5 в зависимости от
+        awgs_supports_i2_i5() (аналогично _awg_server_conf_text)."""
+        from chimera.modules import awg_transport, awg_compat
         node = self._mock_node()
-        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
-            conf = awg_transport._awg_client_conf_for_node(node)
-        for key in ("I1", "I2", "I3", "I4", "I5"):
-            self.assertIn(f"{key} = ", conf,
-                          f"{key} = должен всегда присутствовать (v5.1)")
+        # supports=True — все 5 ключей
+        awg_compat._set_supports_cache(True)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+                conf = awg_transport._awg_client_conf_for_node(node)
+            for key in ("I1", "I2", "I3", "I4", "I5"):
+                self.assertIn(f"{key} = ", conf,
+                              f"{key} = должен присутствовать когда supports=True")
+        finally:
+            awg_compat._reset_supports_cache()
+
+        # supports=False — только I1
+        awg_compat._set_supports_cache(False)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+                conf = awg_transport._awg_client_conf_for_node(node)
+            self.assertIn("I1 = ", conf)
+            for key in ("I2", "I3", "I4", "I5"):
+                self.assertNotIn(f"{key} = ", conf,
+                                 f"{key} = НЕ должен писаться когда пустой + supports=False")
+        finally:
+            awg_compat._reset_supports_cache()
 
     # ── _awg_server_conf_for_node ─────────────────────────────────────────
     def test_server_conf_for_node_has_s3_s4(self):
@@ -645,50 +705,77 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
             conf = awg_transport._awg_server_conf_for_node(node)
         self.assertIn(f"I1 = {_i1_val}", conf)
 
-    def test_server_conf_for_node_always_writes_i1_to_i5_v51(self):
-        """v5.1: _awg_server_conf_for_node ВСЕГДА пишет I1-I5, даже когда пустые."""
-        from chimera.modules import awg_transport
+    def test_server_conf_for_node_writes_i_lines_based_on_support_v52(self):
+        """v5.2: _awg_server_conf_for_node пишет I1-I5 в зависимости от
+        awgs_supports_i2_i5() (аналогично _awg_server_conf_text)."""
+        from chimera.modules import awg_transport, awg_compat
         node = self._mock_node()
-        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
-            conf = awg_transport._awg_server_conf_for_node(node)
-        for key in ("I1", "I2", "I3", "I4", "I5"):
-            self.assertIn(f"{key} = ", conf,
-                          f"{key} = должен всегда присутствовать (v5.1)")
+        # supports=True — все 5 ключей
+        awg_compat._set_supports_cache(True)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+                conf = awg_transport._awg_server_conf_for_node(node)
+            for key in ("I1", "I2", "I3", "I4", "I5"):
+                self.assertIn(f"{key} = ", conf,
+                              f"{key} = должен присутствовать когда supports=True")
+        finally:
+            awg_compat._reset_supports_cache()
+
+        # supports=False — только I1
+        awg_compat._set_supports_cache(False)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+                conf = awg_transport._awg_server_conf_for_node(node)
+            self.assertIn("I1 = ", conf)
+            for key in ("I2", "I3", "I4", "I5"):
+                self.assertNotIn(f"{key} = ", conf,
+                                 f"{key} = НЕ должен писаться когда пустой + supports=False")
+        finally:
+            awg_compat._reset_supports_cache()
 
     # ── Полный набор — regression на жалобу zvshka ────────────────────────
     def test_all_4_functions_have_full_param_set(self):
         """Все 4 Cascade-функции пишут ПОЛНЫЙ набор: Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5.
 
-        v5.1: I1-I5 теперь тоже пишутся ВСЕГДА (раньше были условными).
-        Это regression-тест на жалобу zvshka — Keenetic не мог импортировать
+        v5.2: I1-I5 пишутся условно (в зависимости от awgs_supports_i2_i5()).
+        В этом тесте мокаем supports=True — все 5 I-ключей должны
+        присутствовать (поведение 3e1fa70 для Keenetic native AWG 2.0).
+        Regression-тест на жалобу zvshka — Keenetic не мог импортировать
         конфиг из-за отсутствия S3/S4 (v5.0 fix) и отсутствия I1-I5 (v5.1 fix).
         """
-        from chimera.modules import awg_transport
+        from chimera.modules import awg_transport, awg_compat
         node = self._mock_node()
-        # Все 4 функции
-        with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
-            confs = [
-                ("_awg_server_conf_text", awg_transport._awg_server_conf_text()),
-                ("_awg_client_conf_text", awg_transport._awg_client_conf_text()),
-                ("_awg_client_conf_for_node",
-                 awg_transport._awg_client_conf_for_node(node)),
-                ("_awg_server_conf_for_node",
-                 awg_transport._awg_server_conf_for_node(node)),
+        # v5.2: мокаем supports=True — все 5 I-ключей должны присутствовать
+        awg_compat._set_supports_cache(True)
+        awg_compat._reset_old_tools_warn_flag()
+        try:
+            # Все 4 функции
+            with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
+                confs = [
+                    ("_awg_server_conf_text", awg_transport._awg_server_conf_text()),
+                    ("_awg_client_conf_text", awg_transport._awg_client_conf_text()),
+                    ("_awg_client_conf_for_node",
+                     awg_transport._awg_client_conf_for_node(node)),
+                    ("_awg_server_conf_for_node",
+                     awg_transport._awg_server_conf_for_node(node)),
+                ]
+            # v5.2: ВСЕ 16 параметров (Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5) при supports=True.
+            required_params = [
+                "Jc = ", "Jmin = ", "Jmax = ",
+                "S1 = ", "S2 = ", "S3 = ", "S4 = ",
+                "H1 = ", "H2 = ", "H3 = ", "H4 = ",
+                "I1 = ", "I2 = ", "I3 = ", "I4 = ", "I5 = ",
             ]
-        # v5.1: ВСЕ 16 параметров теперь обязательны (Jc/Jmin/Jmax/S1-S4/
-        # H1-H4/I1-I5). Раньше I1-I5 были опциональны — теперь всегда пишутся.
-        required_params = [
-            "Jc = ", "Jmin = ", "Jmax = ",
-            "S1 = ", "S2 = ", "S3 = ", "S4 = ",
-            "H1 = ", "H2 = ", "H3 = ", "H4 = ",
-            "I1 = ", "I2 = ", "I3 = ", "I4 = ", "I5 = ",
-        ]
-        for fname, conf in confs:
-            with self.subTest(func=fname):
-                for param in required_params:
-                    self.assertIn(param, conf,
-                                  f"{fname}: отсутствует '{param}' — "
-                                  f"неполный набор AWG 2.0 (баг zvshka):\n{conf}")
+            for fname, conf in confs:
+                with self.subTest(func=fname):
+                    for param in required_params:
+                        self.assertIn(param, conf,
+                                      f"{fname}: отсутствует '{param}' — "
+                                      f"неполный набор AWG 2.0 (баг zvshka):\n{conf}")
+        finally:
+            awg_compat._reset_supports_cache()
 
 
 if __name__ == "__main__":
