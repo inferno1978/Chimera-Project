@@ -357,36 +357,94 @@ class TestAwgsCascadeCreateSystemdUnit(unittest.TestCase):
 
 
 class TestAwgsCascadeSetupCron(unittest.TestCase):
-    """_awgs_cascade_setup_cron — генерация cron-файла."""
+    """_awgs_cascade_setup_cron — генерация cron-файла.
+
+    v5.1: теперь функция пишет ДВА файла — wrapper bash-скрипт
+    (AWGS_CRON_RU_UPDATE_SCRIPT) и cron-файл (AWGS_CRON_RU_UPDATE),
+    который вызывает wrapper. Bare ``python3 -c "from chimera..."`` в
+    cron НЕ работает (ModuleNotFoundError без PYTHONPATH), поэтому
+    wrapper-скрипт экспорит PYTHONPATH перед вызовом python (тот же
+    паттерн, что в node_health_monitor.py и geo_files.py).
+    """
 
     def setUp(self):
         _setup_core_in_sysmodules()
         self._tmpdir = Path(tempfile.mkdtemp())
         self._cron = self._tmpdir / "awg-cascade-ru-update"
+        self._script = self._tmpdir / "awg-cascade-ru-update.sh"
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
-        return patch("chimera.modules.awg_cascade.AWGS_CRON_RU_UPDATE",
-                     self._cron)
+        return (
+            patch("chimera.modules.awg_cascade.AWGS_CRON_RU_UPDATE",
+                  self._cron),
+            patch("chimera.modules.awg_cascade.AWGS_CRON_RU_UPDATE_SCRIPT",
+                  self._script),
+        )
 
     def test_writes_cron_file(self):
         from chimera.modules.awg_cascade import _awgs_cascade_setup_cron
-        with self._patch():
+        with self._patch()[0], self._patch()[1]:
             _awgs_cascade_setup_cron()
         self.assertTrue(self._cron.exists())
+        # v5.1: cron-файл теперь ссылается на wrapper-скрипт, а не содержит
+        # `python3 -c "from chimera..."` напрямую. Проверяем, что wrapper
+        # указан и что в нём (через чтение wrapper-файла) есть вызов
+        # целевой функции.
         content = self._cron.read_text()
-        self.assertIn("awgs_cascade_update_ru_zone", content)
+        self.assertIn(str(self._script), content,
+                      "cron-файл должен ссылаться на wrapper-скрипт")
+        # Wrapper-скрипт тоже должен существовать и содержать вызов функции.
+        self.assertTrue(self._script.exists(),
+                       "wrapper-скрипт должен быть создан")
+        script_content = self._script.read_text()
+        self.assertIn("awgs_cascade_update_ru_zone", script_content,
+                      "wrapper-скрипт должен вызывать awgs_cascade_update_ru_zone")
 
     def test_cron_chmod_644(self):
         import stat
         from chimera.modules.awg_cascade import _awgs_cascade_setup_cron
-        with self._patch():
+        with self._patch()[0], self._patch()[1]:
             _awgs_cascade_setup_cron()
         mode = stat.S_IMODE(os.stat(self._cron).st_mode)
         self.assertEqual(mode, 0o644)
+
+    def test_wrapper_script_chmod_755(self):
+        """v5.1: wrapper-скрипт должен быть исполняемым (0o755)."""
+        import stat
+        from chimera.modules.awg_cascade import _awgs_cascade_setup_cron
+        with self._patch()[0], self._patch()[1]:
+            _awgs_cascade_setup_cron()
+        mode = stat.S_IMODE(os.stat(self._script).st_mode)
+        self.assertEqual(mode, 0o755)
+
+    def test_wrapper_script_has_pythonpath_export(self):
+        """v5.1: wrapper-скрипт должен экспортить PYTHONPATH (иначе
+        cron-вызов упадёт с ModuleNotFoundError, как и раньше)."""
+        from chimera.modules.awg_cascade import _awgs_cascade_setup_cron
+        with self._patch()[0], self._patch()[1]:
+            _awgs_cascade_setup_cron()
+        content = self._script.read_text()
+        self.assertIn("export PYTHONPATH", content,
+                      "wrapper-скрипт должен содержать export PYTHONPATH")
+        self.assertIn("sys.path.insert", content,
+                      "wrapper-скрипт должен содержать sys.path.insert")
+
+    def test_cron_does_not_use_bare_python_c_from_chimera(self):
+        """v5.1: regression — в cron-файле НЕ должно быть
+        ``python3 -c "from chimera...`` (старый ломанный паттерн)."""
+        from chimera.modules.awg_cascade import _awgs_cascade_setup_cron
+        with self._patch()[0], self._patch()[1]:
+            _awgs_cascade_setup_cron()
+        content = self._cron.read_text()
+        # Старый паттерн: `python3 -c "from chimera...` в самом cron-файле
+        self.assertNotIn('python3 -c "from chimera', content,
+                         "cron-файл НЕ должен содержать bare python3 -c "
+                         "\"from chimera...\" — это ломает cron из-за "
+                         "отсутствия PYTHONPATH")
 
 
 # ────────────────────────────────────────────────────────────────────────────

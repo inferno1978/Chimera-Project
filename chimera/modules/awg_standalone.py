@@ -1220,15 +1220,62 @@ def awgs_install(
 
 
 def awgs_setup_expires_cron() -> bool:
-    """Создаёт cron-задачу для автоудаления истёкших клиентов."""
-    from .awg_constants import AWGS_CRON_EXPIRES
-    cron_content = (
-        "# AWG standalone: автоудаление истёкших клиентов\n"
-        "*/5 * * * * root /usr/bin/python3 -c "
-        "\"from chimera.modules.awg_expires import awgs_expires_check; awgs_expires_check()\" "
-        f">> {AWGS_LOG_FILE} 2>&1\n"
-    )
+    """Создаёт cron-задачу для автоудаления истёкших клиентов.
+
+    v5.1: bare ``python3 -c "from chimera.modules.awg_expires import ..."`` в
+    cron НЕ работает — cron запускается с произвольной cwd и без PYTHONPATH,
+    поэтому ``from chimera...`` падает с ``ModuleNotFoundError: No module
+    named 'chimera'``. Реальный трейсбек с сервера пользователя zvshka
+    подтвердил, что фича автоудаления истёкших AWG-клиентов НИКОГДА не
+    срабатывала с момента появления.
+
+    Паттерн исправления — wrapper bash-скрипт (как в
+    ``node_health_monitor.py::install_health_monitor`` и
+    ``geo_files.py::setup_geo_autoupdate``):
+      1. Находим путь установки chimera через ``importlib.util.find_spec``
+         (fallback ``/opt/chimera``).
+      2. Пишем ``/usr/local/sbin/awg-expires-check.sh`` с ``export PYTHONPATH``
+         и ``sys.path.insert(0, ...)`` внутри python -c.
+      3. Cron-файл просто вызывает wrapper-скрипт.
+    """
+    from .awg_constants import AWGS_CRON_EXPIRES, AWGS_CRON_EXPIRES_SCRIPT
+
+    # Находим путь установки chimera (тот же способ, что в
+    # node_health_monitor.py::install_health_monitor).
     try:
+        import importlib.util
+        spec = importlib.util.find_spec("chimera")
+        if spec and spec.submodule_search_locations:
+            installer_path = str(
+                Path(list(spec.submodule_search_locations)[0]).parent
+            )
+        else:
+            installer_path = "/opt/chimera"
+    except Exception:
+        installer_path = "/opt/chimera"
+
+    try:
+        # Wrapper bash-скрипт: export PYTHONPATH + sys.path.insert + python -c
+        script_content = (
+            "#!/bin/bash\n"
+            f"# AWG standalone: автоудаление истёкших клиентов "
+            f"(wrapper для cron; v5.1: PYTHONPATH-safe).\n"
+            f"export PYTHONPATH=\"{installer_path}:$PYTHONPATH\"\n"
+            f"/usr/bin/python3 -c \"\n"
+            f"import sys\n"
+            f"sys.path.insert(0, '{installer_path}')\n"
+            f"from chimera.modules.awg_expires import awgs_expires_check\n"
+            f"awgs_expires_check()\n"
+            f"\" >> {AWGS_LOG_FILE} 2>&1\n"
+        )
+        AWGS_CRON_EXPIRES_SCRIPT.write_text(script_content)
+        AWGS_CRON_EXPIRES_SCRIPT.chmod(0o755)
+
+        # Cron-файл — вызывает wrapper-скрипт.
+        cron_content = (
+            "# AWG standalone: автоудаление истёкших клиентов\n"
+            f"*/5 * * * * root {AWGS_CRON_EXPIRES_SCRIPT}\n"
+        )
         AWGS_CRON_EXPIRES.write_text(cron_content)
         AWGS_CRON_EXPIRES.chmod(0o644)
         return True

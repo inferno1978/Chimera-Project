@@ -159,21 +159,109 @@ class TestPresetsGenerate(unittest.TestCase):
                 p = awgs_presets_generate(name)
                 self.assertGreaterEqual(p["jmax"], p["jmin"])
 
-    def test_s_values_are_zero(self):
-        """S1-S4 всегда 0 (как в bivlked default)."""
-        from chimera.modules.awg_presets import awgs_presets_generate
-        p = awgs_presets_generate("default")
-        for k in ("s1", "s2", "s3", "s4"):
-            self.assertEqual(p[k], 0)
+    def test_s1_s2_are_zero(self):
+        """S1, S2 всегда 0 (как в bivlked default).
 
-    def test_h_values_are_1_2_3_4(self):
-        """H1-H4 — magic headers 1,2,3,4."""
+        v5.1: S3, S4 больше НЕ 0 — теперь это случайные значения
+        в общих диапазонах (см. test_s3_s4_in_range). S1/S2 остаются 0
+        потому что их смысл — per-packet junk size, и в bivlked default
+        они нулевые.
+        """
         from chimera.modules.awg_presets import awgs_presets_generate
         p = awgs_presets_generate("default")
-        self.assertEqual(p["h1"], 1)
-        self.assertEqual(p["h2"], 2)
-        self.assertEqual(p["h3"], 3)
-        self.assertEqual(p["h4"], 4)
+        self.assertEqual(p["s1"], 0)
+        self.assertEqual(p["s2"], 0)
+
+    def test_s3_s4_in_range(self):
+        """v5.1: S3, S4 — случайные в общих диапазонах 0..64 / 0..32.
+
+        Раньше были захардкожены 0 у всех пресетов — это давало
+        одинаковый DPI-отпечаток всем установкам. Теперь переиспользуются
+        диапазоны из _FULL_MANUAL_RANGES (те же, что в полном ручном
+        режиме — чтобы не дублировать константы).
+        """
+        from chimera.modules.awg_presets import awgs_presets_generate
+        for name in ("default", "mobile", "beeline_msk", "tmobile_us"):
+            with self.subTest(preset=name):
+                random.seed(42)
+                p = awgs_presets_generate(name)
+                self.assertGreaterEqual(p["s3"], 0)
+                self.assertLessEqual(p["s3"], 64)
+                self.assertGreaterEqual(p["s4"], 0)
+                self.assertLessEqual(p["s4"], 32)
+
+    def test_h_values_not_fixed_1_2_3_4(self):
+        """v5.1: H1-H4 НЕ должны быть фиксированными 1,2,3,4 — это
+        узнаваемый DPI-отпечаток (одинаковый у всех установок проекта
+        на одном пресете, подтверждено пользователем zvshka).
+
+        Теперь H1-H4 — непересекающиеся случайные значения в
+        1..INT32_MAX. Проверяем на 10 разных seed'ах: хотя бы один
+        не должен дать 1,2,3,4.
+        """
+        from chimera.modules.awg_presets import awgs_presets_generate
+        found_non_default = False
+        for seed in range(10):
+            random.seed(seed)
+            p = awgs_presets_generate("default")
+            hs = [p["h1"], p["h2"], p["h3"], p["h4"]]
+            if hs != [1, 2, 3, 4]:
+                found_non_default = True
+                break
+        self.assertTrue(found_non_default,
+                        "H1-H4 всегда 1,2,3,4 — функция не работает как ожидалось")
+
+    def test_h_values_are_non_overlapping(self):
+        """v5.1: H1-H4 не пересекаются между собой (DPI не сможет
+        написать универсальное правило для детекции этого проекта).
+
+        Проверяем на 10 разных seed'ах — каждый раз H1-H4 должны
+        быть 4 различными значениями.
+        """
+        from chimera.modules.awg_presets import awgs_presets_generate
+        for seed in range(10):
+            with self.subTest(seed=seed):
+                random.seed(seed)
+                p = awgs_presets_generate("default")
+                hs = [p["h1"], p["h2"], p["h3"], p["h4"]]
+                self.assertEqual(len(set(hs)), 4,
+                                 f"H1-H4 пересекаются при seed={seed}: {hs}")
+
+    def test_h_values_in_int32_range(self):
+        """v5.1: H1-H4 в диапазоне 1..INT32_MAX (как валидатор
+        принимает)."""
+        from chimera.modules.awg_presets import awgs_presets_generate
+        for seed in range(5):
+            with self.subTest(seed=seed):
+                random.seed(seed)
+                p = awgs_presets_generate("default")
+                for k in ("h1", "h2", "h3", "h4"):
+                    self.assertGreaterEqual(p[k], 1)
+                    self.assertLessEqual(p[k], 2147483647)
+
+    def test_two_consecutive_calls_give_different_h_and_s(self):
+        """v5.1: два вызова awgs_presets_generate("default") подряд
+        дают РАЗНЫЕ H1-H4 и разные S3/S4.
+
+        Это критично для ротации параметров (awgs_rotate_obfuscation):
+        при каждом вызове должны генерироваться новые значения, а не
+        повторяться одни и те же.
+        """
+        from chimera.modules.awg_presets import awgs_presets_generate
+        # Не фиксируем seed — два вызова должны дать разные значения
+        # просто за счёт прогресса RNG.
+        random.seed(42)
+        p1 = awgs_presets_generate("default")
+        p2 = awgs_presets_generate("default")
+        hs1 = [p1["h1"], p1["h2"], p1["h3"], p1["h4"]]
+        hs2 = [p2["h1"], p2["h2"], p2["h3"], p2["h4"]]
+        self.assertNotEqual(hs1, hs2,
+                            f"H1-H4 одинаковые у двух вызовов: {hs1}")
+        # S3/S4 тоже должны различаться (с высокой вероятностью)
+        s_diff = (p1["s3"], p1["s4"]) != (p2["s3"], p2["s4"])
+        self.assertTrue(s_diff,
+                        f"S3/S4 одинаковые у двух вызовов: "
+                        f"p1=({p1['s3']},{p1['s4']}), p2=({p2['s3']},{p2['s4']})")
 
     def test_i1_random_mode_generates_hex(self):
         from chimera.modules.awg_presets import awgs_presets_generate
@@ -629,20 +717,29 @@ class TestCarrierPresetsNotChanged(unittest.TestCase):
         from chimera.modules.awg_presets import AWGS_CARRIER_PRESETS
         self.assertEqual(AWGS_CARRIER_PRESETS["tele2_krasnoyarsk"]["i1_mode"], "absent")
 
-    def test_presets_generate_still_returns_h1_h4_as_1_2_3_4(self):
-        """awgs_presets_generate() — H1-H4 остаются 1,2,3,4 (как в пресетах).
+    def test_presets_generate_now_returns_random_h1_h4(self):
+        """awgs_presets_generate() — H1-H4 больше НЕ 1,2,3,4 (v5.1).
 
-        Это гарантирует, что НОВЫЙ путь (awgs_generate_full_manual_params)
-        НЕ затронул СТАРЫЙ путь (awgs_presets_generate) — пресеты
-        продолжают возвращать H1-H4=1,2,3,4 как и раньше.
+        Раньше пресеты возвращали H1-H4=1,2,3,4 фиксированно — это
+        узнаваемый DPI-отпечаток проекта (одинаковый у всех установок
+        на одном пресете). v5.1: пресеты используют общую функцию
+        _generate_non_overlapping_h_values(), которая выдаёт случайные
+        непересекающиеся значения в 1..INT32_MAX.
+
+        Этот тест — regression: гарантирует что НОВЫЙ путь
+        (awgs_generate_full_manual_params) и ОБНОВЛЁННЫЙ старый путь
+        (awgs_presets_generate) оба выдают случайные H1-H4.
         """
         from chimera.modules.awg_presets import awgs_presets_generate
         random.seed(42)
         p = awgs_presets_generate("default")
-        self.assertEqual(p["h1"], 1)
-        self.assertEqual(p["h2"], 2)
-        self.assertEqual(p["h3"], 3)
-        self.assertEqual(p["h4"], 4)
+        # H1-H4 НЕ должны быть 1,2,3,4
+        hs = [p["h1"], p["h2"], p["h3"], p["h4"]]
+        self.assertNotEqual(hs, [1, 2, 3, 4],
+                            f"H1-H4 всё ещё 1,2,3,4: {hs}")
+        # H1-H4 должны быть непересекающимися
+        self.assertEqual(len(set(hs)), 4,
+                         f"H1-H4 пересекаются: {hs}")
 
 
 if __name__ == "__main__":

@@ -52,6 +52,15 @@ AWGS_IPSET_NAME:      str  = "awg_ru_networks"
 AWGS_CRON_EXPIRES:    Path = Path("/etc/cron.d/awg-standalone-expires")
 AWGS_CRON_RU_UPDATE:  Path = Path("/etc/cron.d/awg-cascade-ru-update")
 
+# Wrapper-скрипты для cron (bash with PYTHONPATH export).
+# v5.1: bare `python3 -c "from chimera.modules..."` в cron НЕ работает —
+# cron запускается с произвольной cwd и без PYTHONPATH, поэтому
+# `from chimera...` падает с ModuleNotFoundError. Wrapper-скрипт
+# экспорит PYTHONPATH перед вызовом python3 (тот же паттерн, что в
+# node_health_monitor.py::install_health_monitor и geo_files.py).
+AWGS_CRON_EXPIRES_SCRIPT:    Path = Path("/usr/local/sbin/awg-expires-check.sh")
+AWGS_CRON_RU_UPDATE_SCRIPT:  Path = Path("/usr/local/sbin/awg-cascade-ru-update.sh")
+
 # Systemd-юниты
 AWGS_SYSTEMD_AWG_QUICK: str = "awg-quick@awg0.service"
 AWGS_SYSTEMD_CASCADE:   Path = Path("/etc/systemd/system/awg-cascade-routing.service")
