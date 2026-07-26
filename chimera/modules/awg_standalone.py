@@ -1610,6 +1610,31 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
     if awg_peer_rebuild_conf(apply=True, params_override=new_params):
         # Apply успешен — теперь безопасно коммитить state
         awgs_state_update(params=new_params)
+
+        # v5.4.1: Перегенерируем клиентские .conf файлы для всех пиров —
+        # после ротации параметры обфускации изменились, и клиенты должны
+        # получить новые параметры, иначе handshake не завершится
+        # (подтверждено жалобой zvshka: "handshake did not complete after
+        # 2842297815 seconds" — сервер и клиент с разными параметрами).
+        try:
+            from .awg_qr import awgs_qr_export_peer
+            updated_state = awgs_state_load()
+            for peer in updated_state.get("peers", []):
+                try:
+                    awgs_qr_export_peer(peer)
+                except Exception as e:
+                    core.log_to_file("WARN",
+                        f"awgs_rotate_obfuscation: не удалось обновить "
+                        f"клиентский конфиг для пира '{peer.get('name', '?')}': {e}")
+            if updated_state.get("peers"):
+                info(f"Клиентские конфиги обновлены для "
+                     f"{len(updated_state['peers'])} пира(ов) — "
+                     f"передайте новые .conf файлы клиентам")
+        except Exception as e:
+            core.log_to_file("WARN",
+                f"awgs_rotate_obfuscation: ошибка обновления клиентских "
+                f"конфигов: {e}")
+
         # v5.1: I1 теперь CPS tag (например "<r 24>") — обычно короткий,
         # не нужно обрезать. Для legacy hex (длинный) оставляем обрезку.
         _i1_val = new_params.get("i1", "")
