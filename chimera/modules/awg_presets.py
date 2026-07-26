@@ -204,8 +204,19 @@ def awgs_presets_generate(name: str = "default") -> dict:
     jmax_delta = random.randint(preset["jmax_delta_min"], preset["jmax_delta_max"])
     jmax = jmin + jmax_delta
 
-    # S1, S2 — по умолчанию 0 (как в bivlked)
-    s1, s2 = 0, 0
+    # S1, S2 — случайные ненулевые (как в эталонном конфиге Amnezia).
+    # v5.4.2: РАНЬШЕ были 0 (как в bivlked). Но рабочий конфиг от приложения
+    # Amnezia использует S1=125, S2=47 — ненулевые. Подтверждено zvshka:
+    # с S1=0, S2=0 handshake не завершается. С ненулевыми S1/S2 — работает.
+    # S1/S2 — это junk packet size для init/response фазы handshake.
+    # Нулевое значение может вызывать сбой на некоторых реализациях AWG.
+    s1 = random.randint(_FULL_MANUAL_RANGES["s1"][0], _FULL_MANUAL_RANGES["s1"][1])
+    s2 = random.randint(_FULL_MANUAL_RANGES["s2"][0], _FULL_MANUAL_RANGES["s2"][1])
+    # Правило S1 + 56 != S2 (паттерн, выдающий VPN) — перегенерация при коллизии
+    for _attempt in range(10):
+        if s1 + 56 != s2:
+            break
+        s2 = random.randint(_FULL_MANUAL_RANGES["s2"][0], _FULL_MANUAL_RANGES["s2"][1])
 
     # S3, S4 — случайные в общих диапазонах (общегигиенические, не per-preset).
     # Переиспользуем диапазоны из _FULL_MANUAL_RANGES чтобы не дублировать.
@@ -583,48 +594,24 @@ def _generate_non_overlapping_h_ranges(used_ranges: list[tuple[int, int]],
 
 
 def _generate_non_overlapping_h_values() -> tuple:
-    """Генерирует 4 непересекающихся значения H1-H4.
+    """Генерирует 4 непересекающихся диапазона H1-H4 в формате 'N-M'.
 
-    v5.4.1: Проверяет поддержку диапазонов через awgs_supports_h_ranges().
-    Если поддерживаются — возвращает диапазоны 'N-M' (как в эталонном
-    конфиге Amnezia). Если нет — возвращает одиночные числа (int),
-    как в v5.1-v5.2. Это решает проблему zvshka: его старые
-    amneziawg-tools не понимают диапазоны H1-H4, и awg setconf падает.
+    v5.4.2: Диапазоны H1-H4 ПОДДЕРЖИВАЮТСЯ всеми версиями amneziawg-tools
+    (подтверждено zvshka: рабочая конфигурация Amnezia с диапазонами
+    работает на его сервере со старыми amneziawg-tools). Убираем
+    условную проверку awgs_supports_h_ranges() — всегда генерируем
+    диапазоны.
 
     Диапазонный формат скрывает magic header — DPI не может написать
     универсальное правило для детекции именно этого проекта (раньше
     одиночные числа были узнаваемым отпечатком).
-
-    ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ (фиксируем, чтобы не разбирать заново при
-    будущих жалобах): некоторые старые прошивки роутеров (например,
-    Keenetic Speedster с firmware 5.0.6, а также некоторые сборки
-    OpenWrt 21.x и старше) не парсят H1-H4 как одиночное число выше 255
-    и требуют значения в диапазоне 0-255 (один байт). По официальной
-    спецификации AWG 2.0 (docs.amnezia.org) и amneziawg-go значения
-    H1-H4 валидны до INT32_MAX (2147483647), и amneziawg-windows-client
-    их принимает — но старые клиенты могут не справиться.
     """
-    try:
-        from .awg_compat import awgs_supports_h_ranges
-        if awgs_supports_h_ranges():
-            # Диапазоны поддерживаются — генерируем 'N-M' (как в эталоне Amnezia)
-            used_ranges: list[tuple[int, int]] = []
-            result = []
-            for _ in range(4):
-                start, end = _generate_non_overlapping_h_ranges(used_ranges)
-                used_ranges.append((start, end))
-                result.append(f"{start}-{end}")
-            return tuple(result)
-    except Exception:
-        pass
-
-    # Диапазоны НЕ поддерживаются (или ошибка проверки) — одиночные числа
-    used_h: set = set()
+    used_ranges: list[tuple[int, int]] = []
     result = []
     for _ in range(4):
-        hv = _generate_non_overlapping_h_value(used_h)
-        used_h.add(hv)
-        result.append(hv)
+        start, end = _generate_non_overlapping_h_ranges(used_ranges)
+        used_ranges.append((start, end))
+        result.append(f"{start}-{end}")
     return tuple(result)
 
 
@@ -819,61 +806,31 @@ def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
     else:
         s4 = random.randint(r["s4"][0], r["s4"][1])
 
-    # ── H1-H4 — непересекающиеся значения (диапазоны или одиночные) ─────
-    # v5.4.1: проверяем поддержку диапазонов через awgs_supports_h_ranges().
-    # Если поддерживаются — генерируем 'N-M' (как в эталонном Amnezia).
-    # Если нет — одиночные числа (int), как в v5.1-v5.2.
+    # ── H1-H4 — непересекающиеся диапазоны в формате 'N-M' (AWG 2.0) ─────
+    # v5.4.2: Всегда генерируем диапазоны (подтверждено zvshka — работает).
     # Overrides: если пользователь явно ввёл H1-H4, используем как есть.
-    try:
-        from .awg_compat import awgs_supports_h_ranges
-        use_ranges = awgs_supports_h_ranges()
-    except Exception:
-        use_ranges = False  # safe default — одиночные числа
-
     h_overrides = []
-    # Учёт overrides для H1-H4
     for key in ("h1", "h2", "h3", "h4"):
         if key in overrides:
             hv = str(overrides[key])
             h_overrides.append((key, hv))
 
-    if use_ranges:
-        # Диапазоны поддерживаются — генерируем 'N-M'
-        used_ranges: list[tuple[int, int]] = []
-        # Парсим overrides в диапазоны для проверки пересечений
-        for key, hv in h_overrides:
-            if "-" in hv:
-                parts = hv.split("-")
-                used_ranges.append((int(parts[0]), int(parts[1])))
-            else:
-                v = int(hv)
-                used_ranges.append((v, v))
-        # Заполняем остальные (без override)
-        for key in ("h1", "h2", "h3", "h4"):
-            if key in overrides:
-                continue
-            start, end = _generate_non_overlapping_h_ranges(used_ranges)
-            used_ranges.append((start, end))
-            h_overrides.append((key, f"{start}-{end}"))
-    else:
-        # Диапазоны НЕ поддерживаются — одиночные числа
-        used_h: set = set()
-        # Парсим overrides
-        for key, hv in h_overrides:
-            if "-" in hv:
-                # Override задан как диапазон, но ranges не поддерживаются —
-                # берём первое число
-                v = int(hv.split("-")[0])
-            else:
-                v = int(hv)
-            used_h.add(v)
-        # Заполняем остальные
-        for key in ("h1", "h2", "h3", "h4"):
-            if key in overrides:
-                continue
-            hv = _generate_non_overlapping_h_value(used_h)
-            used_h.add(hv)
-            h_overrides.append((key, hv))
+    used_ranges: list[tuple[int, int]] = []
+    # Парсим overrides в диапазоны для проверки пересечений
+    for key, hv in h_overrides:
+        if "-" in hv:
+            parts = hv.split("-")
+            used_ranges.append((int(parts[0]), int(parts[1])))
+        else:
+            v = int(hv)
+            used_ranges.append((v, v))
+    # Заполняем остальные (без override)
+    for key in ("h1", "h2", "h3", "h4"):
+        if key in overrides:
+            continue
+        start, end = _generate_non_overlapping_h_ranges(used_ranges)
+        used_ranges.append((start, end))
+        h_overrides.append((key, f"{start}-{end}"))
 
     # Сортируем по ключу, чтобы порядок был h1, h2, h3, h4
     h_overrides.sort(key=lambda x: ("h1", "h2", "h3", "h4").index(x[0]))

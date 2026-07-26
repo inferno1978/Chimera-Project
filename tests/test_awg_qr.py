@@ -137,20 +137,23 @@ class TestBuildClientConf(unittest.TestCase):
         conf = awgs_qr_build_client_conf(_peer(), state)
         self.assertIn("I1 = deadbeef", conf)
 
-    def test_empty_i1_to_i5_commented_v54(self):
-        """v5.4: Пустые I1-I5 КОММЕНТИРУЮТСЯ в клиентском .conf (как в эталоне Amnezia).
+    def test_client_i1_to_i5_uncommented_v542(self):
+        """v5.4.2: I1-I5 в клиентском .conf пишутся БЕЗ комментария (даже пустые).
 
-        См. test_empty_i1_to_i5_commented_v54 в test_awg_standalone.py
-        для подробного обоснования. Коротко: старые amneziawg-tools падают
-        на 'I2 = ' (пустая строка), но игнорируют '# I2 = '.
+        Подтверждено zvshka: рабочая конфигурация Amnezia имеет I1-I5
+        без '#' на клиенте, и '# I1-I5' на сервере. Клиентские приложения
+        (Keenetic, amneziawg-go) принимают пустые I2-I5 без ошибки.
+        Только серверные awg-quick (старые сборки) падают на пустых I2-I5.
         """
         from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
-        # Все 5 ключей I1-I5 должны быть ЗАКОММЕНТИРОВАНЫ (пустые)
+        # Все 5 I-ключей должны быть БЕЗ комментария (даже пустые)
         for key in ("I1", "I2", "I3", "I4", "I5"):
-            self.assertIn(f"# {key} = ", conf,
-                          f"# {key} = должен присутствовать (закомментирован) "
-                          f"в клиентском conf когда значение пустое (v5.4)")
+            self.assertIn(f"{key} = ", conf,
+                          f"{key} = должен присутствовать (без комментария) "
+                          f"в клиентском conf (v5.4.2)")
+            self.assertNotIn(f"# {key} = ", conf,
+                             f"# {key} = НЕ должен быть в клиентском conf (v5.4.2)")
 
     def test_includes_ipv6_address_when_enabled(self):
         from chimera.modules.awg_qr import awgs_qr_build_client_conf
