@@ -244,11 +244,13 @@ def _pause() -> None:
         print()
 
 def _run(cmd: list, capture: bool = False, check: bool = False,
-         cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+         cwd: Optional[str] = None, quiet: bool = False) -> subprocess.CompletedProcess:
     kw: dict = {"check": check}
     if cwd: kw["cwd"] = cwd
     if capture:
         kw.update(capture_output=True, text=True, encoding="utf-8", errors="replace")
+    elif quiet:
+        kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
         kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return subprocess.run(cmd, **kw)
