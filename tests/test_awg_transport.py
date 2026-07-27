@@ -587,15 +587,17 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
             conf = awg_transport._awg_client_conf_text()
         self.assertIn(f"I1 = {_i1_val}", conf)
 
-    def test_client_conf_writes_i_lines_commented_v54(self):
-        """v5.4: _awg_client_conf_text пишет пустые I1-I5 ЗАКОММЕНТИРОВАННЫМИ."""
+    def test_client_conf_writes_i_lines_uncommented_v544(self):
+        """v5.4.4: _awg_client_conf_text пишет пустые I1-I5 БЕЗ комментария (role=client)."""
         from chimera.modules import awg_transport
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_text()
         for key in ("I1", "I2", "I3", "I4", "I5"):
-            self.assertIn(f"# {key} = ", conf,
-                          f"# {key} = должен присутствовать (закомментирован) "
-                          f"в client conf (v5.4)")
+            self.assertIn(f"{key} = ", conf,
+                          f"{key} = должен присутствовать (без комментария) "
+                          f"в client conf (v5.4.4)")
+            self.assertNotIn(f"# {key} = ", conf,
+                             f"# {key} = НЕ должен быть в client conf (v5.4.4)")
 
     # ── _awg_client_conf_for_node ─────────────────────────────────────────
     def test_client_conf_for_node_has_s3_s4(self):
@@ -617,16 +619,18 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
             conf = awg_transport._awg_client_conf_for_node(node)
         self.assertIn(f"I1 = {_i1_val}", conf)
 
-    def test_client_conf_for_node_writes_i_lines_commented_v54(self):
-        """v5.4: _awg_client_conf_for_node пишет пустые I1-I5 ЗАКОММЕНТИРОВАННЫМИ."""
+    def test_client_conf_for_node_writes_i_lines_uncommented_v544(self):
+        """v5.4.4: _awg_client_conf_for_node пишет пустые I1-I5 БЕЗ комментария (role=client)."""
         from chimera.modules import awg_transport
         node = self._mock_node()
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
             conf = awg_transport._awg_client_conf_for_node(node)
         for key in ("I1", "I2", "I3", "I4", "I5"):
-            self.assertIn(f"# {key} = ", conf,
-                          f"# {key} = должен присутствовать (закомментирован) "
-                          f"в client_conf_for_node (v5.4)")
+            self.assertIn(f"{key} = ", conf,
+                          f"{key} = должен присутствовать (без комментария) "
+                          f"в client_conf_for_node (v5.4.4)")
+            self.assertNotIn(f"# {key} = ", conf,
+                             f"# {key} = НЕ должен быть в client_conf_for_node (v5.4.4)")
 
     # ── _awg_server_conf_for_node ─────────────────────────────────────────
     def test_server_conf_for_node_has_s3_s4(self):
@@ -663,11 +667,9 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
     def test_all_4_functions_have_full_param_set(self):
         """Все 4 Cascade-функции пишут ПОЛНЫЙ набор: Jc/Jmin/Jmax/S1-S4/H1-H4 + I1-I5.
 
-        v5.4: I1-I5 теперь ЗАКОММЕНТИРОВАНЫ когда пустые (как в эталоне
-        Amnezia). Проверяем что все 16 параметров присутствуют — I1-I5
-        как '# I1 = ' (закомментировано), остальные как обычно.
-        Regression-тест на жалобу zvshka — Keenetic не мог импортировать
-        конфиг из-за отсутствия S3/S4 (v5.0 fix).
+        v5.4.4: Серверные функции комментируют пустые I1-I5 (# I2 = ),
+        клиентские пишут без комментария (I2 = ). Проверяем что все 16
+        параметров присутствуют в каждой функции.
         """
         from chimera.modules import awg_transport
         node = self._mock_node()
@@ -687,18 +689,29 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
             "S1 = ", "S2 = ", "S3 = ", "S4 = ",
             "H1 = ", "H2 = ", "H3 = ", "H4 = ",
         ]
-        # I1-I5 — закомментированы (v5.4: пустые → '# I1 = ')
-        required_commented = ["# I1 = ", "# I2 = ", "# I3 = ", "# I4 = ", "# I5 = "]
+        # Серверные функции: I1-I5 закомментированы (# I1 = )
+        server_funcs = ("_awg_server_conf_text", "_awg_server_conf_for_node")
+        # Клиентские функции: I1-I5 без комментария (I1 = )
+        client_funcs = ("_awg_client_conf_text", "_awg_client_conf_for_node")
+
         for fname, conf in confs:
             with self.subTest(func=fname):
                 for param in required_uncommented:
                     self.assertIn(param, conf,
                                   f"{fname}: отсутствует '{param}' — "
                                   f"неполный набор AWG 2.0 (баг zvshka):\n{conf}")
-                for param in required_commented:
-                    self.assertIn(param, conf,
-                                  f"{fname}: отсутствует '{param}' — "
-                                  f"I-ключи должны быть закомментированы (v5.4):\n{conf}")
+                if fname in server_funcs:
+                    # Сервер: I1-I5 закомментированы
+                    for key in ("I1", "I2", "I3", "I4", "I5"):
+                        self.assertIn(f"# {key} = ", conf,
+                                      f"{fname}: # {key} = должен быть (сервер, v5.4.4)")
+                else:
+                    # Клиент: I1-I5 без комментария
+                    for key in ("I1", "I2", "I3", "I4", "I5"):
+                        self.assertIn(f"{key} = ", conf,
+                                      f"{fname}: {key} = должен быть (клиент, v5.4.4)")
+                        self.assertNotIn(f"# {key} = ", conf,
+                                         f"{fname}: # {key} = НЕ должен быть (клиент, v5.4.4)")
 
 
 if __name__ == "__main__":
