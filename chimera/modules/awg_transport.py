@@ -82,25 +82,22 @@ def _core_module():
     return importlib.import_module("chimera._core")
 
 
-def _awg_build_i_lines(i1: str, i2: str, i3: str, i4: str, i5: str) -> str:
-    """Строит строки I1-I5 для .conf — комментирует пустые (как в эталонном Amnezia).
+def _awg_build_i_lines(i1: str, i2: str, i3: str, i4: str, i5: str,
+                       role: str = "server") -> str:
+    """Строит строки I1-I5 для .conf — раздельно для сервера и клиента.
 
-    v5.4: КОРЕНЬ ПРОБЛЕМЫ (подтверждено zvshka): старые amneziawg-tools
-    (переходная версия с I1 но без I2-I5) падают с 'Line unrecognized: I2='
-    при виде пустой строки 'I2 = '. Сервис не стартует ВООБЩЕ. zvshka
-    подтвердил: комментирование строк '# I2 = ' решает проблему.
+    v5.4.4: Подтверждено zvshka на реальном сервере — правильно так:
+      - сервер: комментировать пустые I1-I5 (# I2 = ) — старые amneziawg-tools
+        на сервере падают на пустых I2-I5, но игнорируют '#'.
+      - клиент: писать без комментария (I2 = ) — клиентские приложения
+        (Keenetic, amneziawg-go) принимают пустые I2-I5 без ошибки.
 
-    Самоисцеление в awgs_apply() (v5.2.2) НЕ помогает при systemctl restart
-    — systemd вызывает awg-quick up напрямую, не через наш код. Поэтому
-    нужно писать конфиг ПРАВИЛЬНО с самого начала.
+    Это уже применено в Standalone-режиме (awg_standalone.py + awg_qr.py).
+    Теперь применяется и в Cascade-режиме (awg_transport.py).
 
-    РЕШЕНИЕ v5.4: комментируем пустые I1-I5 (как в эталонном конфиге
-    Amnezia из Docker-контейнера). Закомментированные строки игнорируются
-    ВСЕМИ версиями amneziawg-tools (парсер пропускает '#'). Непустые
-    I1-I5 пишутся без комментария (как раньше).
-
-    Больше НЕ нужна проверка awgs_supports_i2_i5() — закомментированный
-    формат работает везде, не требует определения возможностей.
+    Args:
+      role: "server" — комментировать пустые (# I2 = ),
+            "client" — писать без комментария (I2 = ).
     """
     lines = ""
     for key, val in (("I1", i1), ("I2", i2), ("I3", i3),
@@ -108,8 +105,12 @@ def _awg_build_i_lines(i1: str, i2: str, i3: str, i4: str, i5: str) -> str:
         if val:
             lines += f"{key} = {val}\n"
         else:
-            # Пустое значение — комментируем (как в эталонном Amnezia)
-            lines += f"# {key} = \n"
+            if role == "client":
+                # Клиент — пишем без комментария (как в эталонном Amnezia)
+                lines += f"{key} = \n"
+            else:
+                # Сервер — комментируем пустые (старые amneziawg-tools падают)
+                lines += f"# {key} = \n"
     return lines
 
 
@@ -516,10 +517,9 @@ def _awg_server_conf_text() -> str:
         + _build_nat6_down(_awg_subnet_v6, "awg0", "$WAN6", scope_source=False)
         + " || true"
     )
-    # v5.2: I1-I5 пишутся через _awg_build_i_lines() — условная запись
-    # в зависимости от поддержки локальным awg-quick (см. awg_compat.py).
-    # Раньше (3e1fa70) писались ВСЕГДА — это ломало старые amneziawg-tools.
-    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5)
+    # v5.4.4: I1-I5 через _awg_build_i_lines(role="server")
+    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
+                                  role="server")
     return (
         f"[Interface]\n"
         f"PrivateKey = {AWG_SERVER_PRIVKEY}\n"
@@ -584,8 +584,9 @@ def _awg_client_conf_text() -> str:
     AWG_I4 = getattr(core, "AWG_I4", "")
     AWG_I5 = getattr(core, "AWG_I5", "")
     AWG_SERVER_PUBKEY = getattr(core, "AWG_SERVER_PUBKEY", "")
-    # v5.2: I1-I5 через _awg_build_i_lines() (см. выше в _awg_server_conf_text)
-    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5)
+    # v5.4.4: I1-I5 через _awg_build_i_lines(role="client")
+    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
+                                  role="client")
     return (
         f"[Interface]\n"
         f"PrivateKey = {AWG_CLIENT_PRIVKEY}\n"
@@ -3027,8 +3028,9 @@ def _awg_client_conf_for_node(node: dict) -> str:
     psk      = node.get("preshared_key", AWG_PRESHARED_KEY)
     cli_priv = node.get("client_privkey", AWG_CLIENT_PRIVKEY)
     endpoint = f"{node['host']}:{node['port']}"
-    # v5.2: I1-I5 через _awg_build_i_lines() (см. _awg_server_conf_text)
-    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5)
+    # v5.4.4: I1-I5 через _awg_build_i_lines(role="client") — клиент
+    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
+                                  role="client")
     return (
         f"[Interface]\n"
         f"PrivateKey = {cli_priv}\n"
@@ -3096,8 +3098,9 @@ def _awg_server_conf_for_node(node: dict) -> str:
     cli_ip6  = node["client_ip_v6"]
     lport    = node["port"]
     dif = "$(ip route | awk '/default/ {print $5; exit}')"
-    # v5.2: I1-I5 через _awg_build_i_lines() (см. _awg_server_conf_text)
-    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5)
+    # v5.4.4: I1-I5 через _awg_build_i_lines(role="server") — сервер
+    _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
+                                  role="server")
     return (
         f"[Interface]\n"
         f"PrivateKey = {srv_priv}\n"
