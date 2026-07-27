@@ -1156,30 +1156,34 @@ class TestDiagnoseTelemtApiForPanel(unittest.TestCase):
         """Если telemt перезапущен недавно (< 10 мин) — diagnose включает
         рекомендацию про обнуление счётчиков.
 
-        Использует реальный /proc/uptime (он есть на любой Linux-системе).
-        systemctl show возвращает ActiveEnterTimestampMonotonic = 60s назад
-        в микросекундах, а /proc/uptime > 60 — поэтому telemt_uptime будет
-        > 0 и < 600 → рекомендация появится.
+        Мокаем /proc/uptime на 3600s (1 час) — безопасное значение, далеко
+        выше 60-секундного оффсета. Раньше тест полагался на реальный
+        /proc/uptime, но в контейнерах с коротким uptime (< 60s)
+        enter_mono_us получался отрицательным, regex не матчит, и
+        telemt_uptime оставался 0.
         """
         from chimera.modules import mtproto_stats
+        from unittest.mock import mock_open
         import os
-        # Пропускаем если /proc/uptime недоступен (не Linux)
         if not os.path.exists("/proc/uptime"):
             self.skipTest("/proc/uptime not available (non-Linux)")
 
         self._cfg.write_text(
             "[server.api]\nenabled = true\nlisten = \"127.0.0.1:9091\"\n"
         )
+        # Мокаем /proc/uptime на 3600s (1 час) — см. комментарий в
+        # test_diagnose_adds_build_profile_recommendation_when_all_ok
+        # для подробного обоснования.
+        fake_uptime_content = "3600.00 12345.00\n"
+
         # systemctl show → telemt запущен 60s назад
         def fake_run(cmd, capture=False, check=False):
             cmd = list(cmd)
             if "is-active" in cmd:
                 return MagicMock(returncode=0, stdout="active\n", stderr="")
-            # 'show' в cmd + 'ActiveEnterTimestampMonotonic' как substring
-            # в любом элементе (--property=ActiveEnterTimestampMonotonic)
             if "show" in cmd and any("ActiveEnterTimestampMonotonic" in x for x in cmd):
-                # Текущий uptime системы из /proc/uptime минус 60 секунд,
-                # чтобы симулировать что telemt запущен 60s назад.
+                # telemt запущен 60s назад.
+                # /proc/uptime уже замокан на 3600s через outer patch
                 with open("/proc/uptime") as f:
                     sys_uptime = float(f.read().split()[0])
                 enter_mono_us = int((sys_uptime - 60) * 1_000_000)
@@ -1191,7 +1195,8 @@ class TestDiagnoseTelemtApiForPanel(unittest.TestCase):
         with self._patch_cfg(), \
              patch.object(mtproto_stats, "_run", fake_run), \
              patch.object(mtproto_stats, "_telemt_api_probe",
-                          return_value=(True, "API отвечает", {})):
+                          return_value=(True, "API отвечает", {})), \
+             patch("builtins.open", mock_open(read_data=fake_uptime_content)):
             diag = mtproto_stats.diagnose_telemt_api_for_panel()
         self.assertGreater(diag["telemt_uptime_sec"], 0)
         self.assertLess(diag["telemt_uptime_sec"], 600)
@@ -1205,6 +1210,7 @@ class TestDiagnoseTelemtApiForPanel(unittest.TestCase):
         diagnose добавляет рекомендацию про build profile и upstream telemt.
         """
         from chimera.modules import mtproto_stats
+        from unittest.mock import mock_open
         import os
         if not os.path.exists("/proc/uptime"):
             self.skipTest("/proc/uptime not available (non-Linux)")
@@ -1212,12 +1218,26 @@ class TestDiagnoseTelemtApiForPanel(unittest.TestCase):
         self._cfg.write_text(
             "[server.api]\nenabled = true\nlisten = \"127.0.0.1:9091\"\n"
         )
+        # Мокаем /proc/uptime на 1 сутки (86400s). Это нужно потому что:
+        # 1. fake_run читает /proc/uptime для вычисления enter_mono_us
+        #    (эмулирует "telemt запущен 7200s назад")
+        # 2. Код diagnose_telemt_api_for_panel тоже читает /proc/uptime
+        #    для вычисления telemt_uptime = uptime_sec - enter_sec
+        # Оба чтения должны получить одинаковое значение > 7200, иначе
+        # enter_mono_us получается отрицательным, regex r'=(\d+)' не матчит
+        # отрицательные числа, и telemt_uptime остаётся 0.
+        # В реальной жизни /proc/uptime всегда > enter_mono_us (процесс
+        # не может стартовать до загрузки системы), но в тестовом
+        # контейнере/VM с коротким uptime это не так.
+        fake_uptime_content = "86400.00 123456.00\n"
+
         def fake_run(cmd, capture=False, check=False):
             cmd = list(cmd)
             if "is-active" in cmd:
                 return MagicMock(returncode=0, stdout="active\n", stderr="")
             if "show" in cmd and any("ActiveEnterTimestampMonotonic" in x for x in cmd):
                 # telemt запущен 2 часа назад = 7200s
+                # /proc/uptime уже замокан на 86400s через outer patch
                 with open("/proc/uptime") as f:
                     sys_uptime = float(f.read().split()[0])
                 enter_mono_us = int((sys_uptime - 7200) * 1_000_000)
@@ -1229,7 +1249,8 @@ class TestDiagnoseTelemtApiForPanel(unittest.TestCase):
         with self._patch_cfg(), \
              patch.object(mtproto_stats, "_run", fake_run), \
              patch.object(mtproto_stats, "_telemt_api_probe",
-                          return_value=(True, "API отвечает", {})):
+                          return_value=(True, "API отвечает", {})), \
+             patch("builtins.open", mock_open(read_data=fake_uptime_content)):
             diag = mtproto_stats.diagnose_telemt_api_for_panel()
         self.assertTrue(diag["api_section_configured"])
         self.assertTrue(diag["api_reachable"])
