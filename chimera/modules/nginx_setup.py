@@ -270,7 +270,7 @@ def setup_nginx_temp(domain: Optional[str] = None) -> None:
     cfg.write_text(textwrap.dedent(f"""\
         server {{
             listen 80;
-            listen [::]:80;
+            {f"listen [::]:80;" if core.IS_IPV6_AVAILABLE else ""}
             server_name {PARAM_DOMAIN};
             root {web_root};
             index index.html;
@@ -450,7 +450,7 @@ def setup_nginx_final(domain: Optional[str] = None,
             # (Telemt), а не на mask_port.
             server {{
                 listen 80;
-                listen [::]:80;
+                {f"listen [::]:80;" if core.IS_IPV6_AVAILABLE else ""}
                 server_name {PARAM_DOMAIN};
                 location /.well-known/acme-challenge/ {{ root {web_root}; }}
                 location / {{ return 404; }}
@@ -585,7 +585,7 @@ def setup_nginx_final(domain: Optional[str] = None,
             # HTTP → HTTPS redirect
             server {{
                 listen 80;
-                listen [::]:80;
+                {f"listen [::]:80;" if core.IS_IPV6_AVAILABLE else ""}
                 server_name {PARAM_DOMAIN};
                 location /.well-known/acme-challenge/ {{ root {web_root}; }}
                 location / {{ return 301 https://$host$request_uri; }}
@@ -676,7 +676,7 @@ def setup_nginx_final(domain: Optional[str] = None,
             # HTTP → HTTPS redirect (AWG 2.0 — Xray слушает :{SERVER_PORT} напрямую)
             server {{
                 listen 80;
-                listen [::]:80;
+                {f"listen [::]:80;" if core.IS_IPV6_AVAILABLE else ""}
                 server_name {PARAM_DOMAIN};
                 root {web_root};
                 index index.html;
@@ -759,7 +759,7 @@ def setup_nginx_final(domain: Optional[str] = None,
         # HTTP → HTTPS redirect
         server {{
             listen 80;
-            listen [::]:80;
+            {f"listen [::]:80;" if core.IS_IPV6_AVAILABLE else ""}
             server_name {PARAM_DOMAIN};
             return 301 https://$host$request_uri;
         }}

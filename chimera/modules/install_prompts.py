@@ -734,9 +734,9 @@ def prompt_awg_exit_mode() -> None:
     _box_desc   = core._box_desc
     _box_wrap_msg = core._box_wrap_msg
     success = core.success
+    info    = core.info
     warn    = core.warn
     _prompt_awg_additional_nodes = core._prompt_awg_additional_nodes
-    # ── Bind globals (for reads) ───────────────────────────────────────────────
     AWG_EXIT_PORT = core.AWG_EXIT_PORT
     AWG_JC        = core.AWG_JC
     AWG_JMIN      = core.AWG_JMIN
