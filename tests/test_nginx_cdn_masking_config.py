@@ -2,22 +2,27 @@
 """
 tests/test_nginx_cdn_masking_config.py
 ───────────────────────────────────────────────────────────────────────────────
-Регрессионный тест на багу «large_client_header_buffers directive is not
-allowed here» в CDN masking профиле.
+Регрессионные тесты на баги в CDN masking профиле nginx-конфига:
 
-Бага: директива large_client_header_buffers была вставлена в location {}
-блок, но согласно документации nginx она допустима только в http {} контексте.
-Nginx падал с emerg при запуске:
-    "large_client_header_buffers" directive is not allowed here in
-    /etc/nginx/sites-enabled/<domain>:63
+1. «large_client_header_buffers directive is not allowed here» —
+   директива была в location {} блоке, но согласно документации nginx
+   она допустима только в http {} контексте.
+
+2. «unknown directive underscore_in_headers» — на некоторых кастомных
+   сборках nginx (отдельные VPS-провайдеры) этой директивы нет вообще.
+   Решение: убрать underscore_in_headers — X-Api-Key не содержит
+   подчёркивания в начале, поэтому дефолтное поведение nginx на него
+   не влияет.
 
 Тестируется статическим анализом исходника setup_nginx_final() —
 проверяем, что:
-  1. _cdn_server_extras содержит large_client_header_buffers + underscore_in_headers
-  2. _cdn_location_extras НЕ содержит эти директивы (они не для location)
-  3. {_cdn_server_extras} подставляется в server-блок (после add_header)
-  4. {_cdn_location_extras} подставляется в location-блок
-  5. старая переменная _cdn_extras удалена
+  1. _cdn_server_extras содержит large_client_header_buffers (server context)
+  2. _cdn_server_extras НЕ содержит underscore_in_headers (убрано)
+  3. _cdn_location_extras НЕ содержит large_client_header_buffers
+  4. _cdn_location_extras НЕ содержит underscore_in_headers
+  5. {_cdn_server_extras} подставляется в server-блок (после add_header)
+  6. {_cdn_location_extras} подставляется в location-блок
+  7. старая переменная _cdn_extras удалена
 """
 from __future__ import annotations
 
@@ -34,7 +39,11 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 class TestNginxCdnMaskingConfigContext(unittest.TestCase):
     """CDN masking: nginx-директивы в правильных контекстах (server vs location).
 
-    Регрессия на багу «large_client_header_buffers directive is not allowed here».
+    Регрессия на баги:
+      1. «large_client_header_buffers directive is not allowed here»
+         (была в location — emerg при запуске nginx).
+      2. «unknown directive underscore_in_headers»
+         (на кастомных сборках nginx этой директивы нет — emerg).
     """
 
     def setUp(self):
@@ -73,19 +82,23 @@ class TestNginxCdnMaskingConfigContext(unittest.TestCase):
         self.assertIn("large_client_header_buffers", server_block,
             "large_client_header_buffers must be in _cdn_server_extras (server context)")
 
-    def test_underscore_in_headers_in_server_block(self):
-        """underscore_in_headers в _cdn_server_extras (server context).
+    def test_underscore_in_headers_removed_everywhere(self):
+        """underscore_in_headers полностью убран из CDN masking конфига.
 
-        Согласно документации nginx:
-            Context: http, server
-        Location не подходит.
+        Регрессия: на кастомных сборках nginx (отдельные VPS-провайдеры)
+        этой директивы нет — nginx падает с 'unknown directive
+        "underscore_in_headers"'. X-Api-Key не содержит подчёркивания
+        в начале, поэтому дефолтное поведение nginx на него не влияет.
         """
-        m = re.search(r'_cdn_server_extras\s*=\s*textwrap\.dedent\(f?"""(.*?)"""',
-                       self._src, re.DOTALL)
-        self.assertIsNotNone(m)
-        server_block = m.group(1)
-        self.assertIn("underscore_in_headers", server_block,
-            "underscore_in_headers must be in _cdn_server_extras (server context)")
+        # Проверяем, что underscore_in_headers нет ни в server, ни в location extras.
+        for var_name in ("_cdn_server_extras", "_cdn_location_extras"):
+            m = re.search(rf'{var_name}\s*=\s*textwrap\.dedent\(f?"""(.*?)"""',
+                           self._src, re.DOTALL)
+            self.assertIsNotNone(m, f"Could not find {var_name} assignment")
+            block = m.group(1)
+            self.assertNotIn("underscore_in_headers", block,
+                f"underscore_in_headers must NOT be in {var_name} — "
+                f"it causes 'unknown directive' on custom nginx builds")
 
     def test_large_client_header_buffers_NOT_in_location_block(self):
         """large_client_header_buffers ОТСУТСТВУЕТ в _cdn_location_extras.
@@ -99,15 +112,6 @@ class TestNginxCdnMaskingConfigContext(unittest.TestCase):
         self.assertNotIn("large_client_header_buffers", location_block,
             "large_client_header_buffers MUST NOT be in _cdn_location_extras "
             "(nginx: 'directive is not allowed here' in location context)")
-
-    def test_underscore_in_headers_NOT_in_location_block(self):
-        """underscore_in_headers ОТСУТСТВУЕТ в _cdn_location_extras."""
-        m = re.search(r'_cdn_location_extras\s*=\s*textwrap\.dedent\(f?"""(.*?)"""',
-                       self._src, re.DOTALL)
-        self.assertIsNotNone(m)
-        location_block = m.group(1)
-        self.assertNotIn("underscore_in_headers", location_block,
-            "underscore_in_headers MUST NOT be in _cdn_location_extras")
 
     def test_location_safe_directives_in_location_block(self):
         """proxy_* директивы в _cdn_location_extras (они допустимы в location).
