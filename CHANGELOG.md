@@ -2,6 +2,142 @@
 
 ---
 
+## FEAT(xhttp): CDN masking profile — обход белых списков через Beeline CDN — 28 июля 2026
+
+**Новый опциональный профиль XHTTP для маскировки трафика под реальный
+HTTPS через CDN Beeline (и аналоги). Не затрагивает текущий простой
+XHTTP-режим (path+mode) — это отдельный профиль, активируемый через
+скрытое меню.**
+
+**Состав:**
+
+1. **`chimera/modules/xhttp_path_gen.py`** (новый файл) — генератор
+   случайного path-обманки. Порт `gen_path()` из `install-caddy-node.sh`
+   на Python (через `secrets` module, crypto-strength RNG). Списки
+   WORDS/VERSIONS/EXTS идентичны bash-оригиналу (54/12/2 элемента).
+   Формат пути — `^/[\w-]+(/[\w-]+){0,2}\.(php|ts)$` (1-3 сегмента +
+   расширение php/ts).
+
+2. **`chimera/modules/xhttp_cdn_masking.py`** (новый файл) — ядро профиля:
+   - `build_xhttp_cdn_masking_inbound(domain, path, port=7443) -> dict`
+     — возвращает полный `xhttpSettings` (mode/path/host/extra) для
+     серверного инбаунда со всеми экспертными полями (xPaddingBytes 50-150,
+     xPaddingHeader "X-Api-Key", xPaddingMethod "tokenish",
+     xPaddingObfsMode true, xPaddingPlacement "header",
+     seqKey "chunk_id", seqPlacement "query",
+     sessionKey/sessionIDKey "auth", sessionIDTable "Base62",
+     sessionIDLength "16-32", sessionPlacement+sessionIDPlacement "query",
+     noSSEHeader/noGRPCHeader true,
+     scMaxBufferedPosts 100, scMaxEachPostBytes 3000000,
+     scMinPostsIntervalMs "5-10", scMaxConcurrentPosts 10,
+     serverMaxHeaderBytes 32768,
+     uplinkHTTPMethod "POST", downloadHTTPMethod "GET",
+     uplinkDataPlacement "body",
+     xmux.maxConcurrency "1").
+   - `build_xhttp_cdn_masking_client_extra()` — клиентская копия extra
+     (симметрична серверу).
+   - `CDN_MASKING_INBOUND_PORT = 7443` — отдельный backend-порт от 8443
+     (simple XHTTP), чтобы профили не конфликтовали.
+   - `_unlock_cdn_masking_menu()` / `run_cdn_masking_install()` —
+     скрытое меню с парольной защитой. Пароль в коде НЕ хранится —
+     только его SHA-256 hash (проверка через `hmac.compare_digest`,
+     constant-time). Требования к паролю: ≥20 символов, заглавные +
+     прописные + спец. символы.
+
+3. **`chimera/modules/cdn_masking_guide.py`** (новый файл) —
+   `print_cdn_setup_instructions(domain, path)` печатает пошаговую
+   инструкцию для ручной настройки ресурса в Beeline CDN (9 шагов:
+   вход в ЛК → создание ресурса → HTTPS → кэширование → таймауты →
+   Rewrite → WebSocket → CNAME → проверка). Статический текст с
+   f-string подстановкой сгенерированных domain/path, без интерактивности.
+
+4. **`chimera/modules/nginx_setup_templates.py`** — добавлен шаблон #16
+   `create_fake_login(web_root)`: одностраничная заглушка «Доступ к
+   серверу» с JS-капчей. HTML перенесён 1:1 из base64-декодированного
+   decoy #1 файла `install-caddy-node.sh` (DECOYS[0]). Не входит в
+   стандартный выбор шаблонов 1..15 — активируется только через
+   `cdn_masking_mode=True` в `setup_nginx_final()`.
+
+5. **`chimera/modules/nginx_setup.py`** — `setup_nginx_final()` получил
+   новый опциональный параметр `cdn_masking_mode: bool = False`. При
+   `True`:
+   - `XHTTP_BACKEND_PORT` переключается на 7443 (CDN_MASKING_INBOUND_PORT);
+   - вместо `create_website()` вызывается `create_fake_login()`;
+   - в location-блок добавляются CDN-специфичные директивы
+     (`large_client_header_buffers 8 32k`, `underscore_in_headers on`,
+     `proxy_send_timeout 86400s`, `proxy_read_timeout 86400s`,
+     `proxy_next_upstream off`).
+   Дефолтное поведение (без параметра) полностью сохранено — ни одного
+   байта вывода не меняется в простом XHTTP-режиме.
+
+6. **`chimera/modules/xray_install.py`** — `generate_xray_config_xhttp()`
+   проверяет флаг `core.XHTTP_CDN_MASKING`. При `True` вызывает
+   `build_xhttp_cdn_masking_inbound()` вместо `_build_xhttp_settings()`,
+   обновляет `XHTTP_BACKEND_PORT` до 7443. Падение на простой профиль
+   при `ImportError` (graceful fallback).
+
+7. **`chimera/modules/users_manager.py`** — `_gen_vless_link()` при
+   активном профиле добавляет `&host=<host>` в URL (значение из
+   `CDN_MASKING_HOST` или domain).
+
+8. **`chimera/modules/client_config_export.py`** — `do_generate_client_config()`
+   при активном профиле:
+   - sing-box JSON: `transport` получает `host` + `extra` (симметрично серверу);
+   - VLESS-ссылка: добавляется `&host=` (пост-обработка через `.replace()`,
+     исходная подстрока `&type=xhttp&path={xhttp_path_enc}#VLESS-xHTTP`
+     сохранена для обратной совместимости с regression-тестами);
+   - label становится `VLESS-xHTTP-CDN` (визуальное отличие в клиенте).
+
+9. **`chimera/_core.py`** —
+   - новая глобальная `XHTTP_CDN_MASKING: bool = False`;
+   - `do_full_install()` передаёт `cdn_masking_mode=bool(globals().get("XHTTP_CDN_MASKING", False))`
+     в `setup_nginx_final()`;
+   - `main_menu()` добавляет скрытый пункт: ввод строки `"cdn"` (без
+     кавычек) в главном меню вызывает `run_cdn_masking_install()`. При
+     ошибке — тихий fallback на "Неверный выбор" (не выдаёт существование
+     скрытого меню);
+   - `_load_state_into_globals()` и блок сохранения state.json обновлены
+     для персистентности `xhttp_cdn_masking` флага.
+
+10. **`chimera/scripts/generate_cdn_masking_password_hash.py`** (новый
+    файл) — утилита для админа: генерирует SHA-256 hash пароля для
+    скрытого меню, проверяет требования (≥20 символов, заглавные +
+    прописные + спец.), печатает инструкцию по замене хеша в коде.
+    Plaintext-пароль в коде НЕ хранится — только хеш.
+
+**Тесты:**
+- `tests/test_xhttp_path_gen.py` — 14 тестов (формат пути, regex,
+  списки WORDS/VERSIONS/EXTS идентичность bash-оригиналу).
+- `tests/test_xhttp_cdn_masking.py` — 48 тестов (все обязательные
+  extra-ключи, значения по референсу, симметрия клиент/сервер,
+  проверка пароля через SHA-256, требования к паролю, отсутствие
+  plaintext в коде).
+- `tests/test_fake_login_template.py` — 17 тестов (создание файлов,
+  наличие ключевых HTML-элементов, регистрация шаблона #16 в dispatcher).
+- `tests/test_cdn_masking_guide.py` — 22 теста (подстановка domain/path,
+  все 9 шагов присутствуют, origin/tunnel URLs, обработка пустых
+  domain/path).
+
+**Регрессии:** 0. Полный suite `tests/test_xray_install.py` (58),
+`tests/test_subscription*.py` (96+), `tests/test_client_config_export.py` (7),
+`tests/test_ios_link_regression.py` (14), `tests/test_users_manager.py`,
+`tests/test_tui.py` (8), `tests/test_nginx_watchdog.py` (2),
+`tests/test_ssl_certbot.py` (2) — все PASS. `full_test.py` — 10/10
+проверок, 74/74 подтестов.
+
+**Совместимость:**
+- Текущий простой XHTTP-режим (path+mode) — НЕ затронут. Дефолтное
+  поведение `setup_nginx_final()`, `generate_xray_config_xhttp()`,
+  `_gen_vless_link()`, `do_generate_client_config()` идентично
+  предыдущей версии.
+- Профиль CDN masking — опциональный, активируется только через
+  скрытое меню (ввод `"cdn"` + код доступа).
+- Пароль доступа меняется через `chimera/scripts/generate_cdn_masking_password_hash.py`
+  (админ генерирует новый hash, заменяет константу в коде, сообщает
+  пароль платным клиентам через защищённый канал).
+
+---
+
 ## FIX(awg): v5.4 — комментировать пустые I1-I5 (как в эталоне Amnezia) — РЕАЛЬНЫЙ КОРЕНЬ проблемы zvshka — 27 июля 2026
 
 **КОРЕНЬ ПРОБЛЕМЫ НАЙДЕН (подтверждено zvshka):**

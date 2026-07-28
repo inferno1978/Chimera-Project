@@ -173,6 +173,20 @@ def do_generate_client_config() -> None:
         """)
 
     # --- Sing-box JSON ---
+    # CDN masking: при активном профиле добавляем экспертные extra-поля
+    # в transport и host в URL. Симметрично серверному inbound.
+    _cdn_masking_active = bool(state.get("xhttp_cdn_masking", False))
+    if _cdn_masking_active:
+        try:
+            from chimera.modules.xhttp_cdn_masking import (
+                build_xhttp_cdn_masking_client_xhttp_settings,
+                CDN_MASKING_HOST,
+            )
+            _client_xhttp = build_xhttp_cdn_masking_client_xhttp_settings(domain, xhttp_path)
+            _cdn_host_param = CDN_MASKING_HOST or domain
+        except ImportError:
+            _cdn_masking_active = False  # fallback на обычный xhttp
+            _cdn_host_param = domain
     if proto == "reality":
         singbox = {
             "outbounds": [{
@@ -191,6 +205,29 @@ def do_generate_client_config() -> None:
                         "public_key": pub_key,
                         "short_id": short_id,
                     }
+                }
+            }]
+        }
+    elif _cdn_masking_active:
+        # CDN masking: sing-box outbound с расширенным transport (extra + host).
+        # Структура: transport.type=xhttp + path + host + extra (симметрично серверу).
+        singbox = {
+            "outbounds": [{
+                "type": "vless",
+                "tag": "vless-out",
+                "server": domain,
+                "server_port": port,
+                "uuid": vuuid,
+                "transport": {
+                    "type": "xhttp",
+                    "path": xhttp_path,
+                    "host": _cdn_host_param,
+                    "extra": _client_xhttp.get("extra", {}),
+                },
+                "tls": {
+                    "enabled": True,
+                    "server_name": domain,
+                    "utls": {"enabled": True, "fingerprint": fp},
                 }
             }]
         }
@@ -239,9 +276,22 @@ def do_generate_client_config() -> None:
     else:
         from urllib.parse import quote as _url_quote
         xhttp_path_enc = _url_quote(xhttp_path, safe="")
+        # Базовая VLESS-ссылка для xHTTP (исходная подстрока сохранена 1:1
+        # для обратной совместимости с regression-тестами test_ios_link_regression).
         vless_link = (f"vless://{vuuid}@{domain}:{port}"
                       f"?encryption=none&security=tls&sni={domain}"
                       f"&fp={fp}&type=xhttp&path={xhttp_path_enc}#VLESS-xHTTP")
+        # CDN masking: добавляем host= параметр (перед #fragment) и суффикс
+        # -CDN к label, чтобы визуально отличить ссылку в клиенте.
+        # Пост-обработка строки — не трогаем исходный f-string выше.
+        if _cdn_masking_active:
+            _host_query = f"&host={_url_quote(_cdn_host_param, safe='')}"
+            # Вставляем host= перед #VLESS-xHTTP, добавляем -CDN к label.
+            vless_link = vless_link.replace(
+                "#VLESS-xHTTP",
+                f"{_host_query}#VLESS-xHTTP-CDN",
+                1,
+            )
     vless_link_file.write_text(vless_link + "\n")
 
     # ── iOS/Karing-совместимый вариант ссылки ─────────────────────────────

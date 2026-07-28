@@ -807,7 +807,12 @@ def _gen_vless_link(host: str, uuid_str: str, pbk: str,
                     proto: str = "reality",
                     xhttp_path: str = "/", xhttp_mode: str = "streamup",
                     port: int = 443) -> str:
-    """Генерирует VLESS-ссылку для REALITY или xHTTP TLS."""
+    """Генерирует VLESS-ссылку для REALITY или xHTTP TLS.
+
+    При активном профиле CDN masking (core.XHTTP_CDN_MASKING=True) добавляет
+    параметр `host=` в URL — он соответствует xhttpSettings.host, нужен для
+    маскировки под реальный HTTPS-запрос через CDN.
+    """
     core = _core_module()
     get_server_country_cached = core.get_server_country_cached
     import urllib.parse
@@ -816,10 +821,20 @@ def _gen_vless_link(host: str, uuid_str: str, pbk: str,
     label = _flag_prefix + urllib.parse.quote(domain)
     if proto == "xhttp":
         path_enc = urllib.parse.quote(xhttp_path, safe="/")
+        _extra_query = ""
+        # CDN masking: добавляем host= параметр для XHTTP-маскировки.
+        # Значение берётся из CDN_MASKING_HOST (или domain если пусто).
+        if getattr(core, "XHTTP_CDN_MASKING", False):
+            try:
+                from chimera.modules.xhttp_cdn_masking import CDN_MASKING_HOST
+                _host_param = CDN_MASKING_HOST or domain
+                _extra_query = f"&host={urllib.parse.quote(_host_param, safe='')}"
+            except ImportError:
+                pass  # fallback: обычная ссылка без host=
         return (f"vless://{uuid_str}@{host}:{port}"
                 f"?type=xhttp&security=tls&sni={domain}"
                 f"&path={path_enc}&mode={xhttp_mode}"
-                f"&fp={fp}#{label}")
+                f"&fp={fp}{_extra_query}#{label}")
     else:
         return (f"vless://{uuid_str}@{host}:{port}"
                 f"?type=tcp&security=reality&pbk={pbk}"
