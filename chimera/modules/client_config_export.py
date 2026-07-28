@@ -111,7 +111,7 @@ def do_generate_client_config() -> None:
         sni = domain          # xHTTP TLS: SNI = собственный домен
     # === END FIX 2 ===
     xhttp_path = state.get("xhttp_path", "/")
-    mode      = state.get("install_mode", "A")
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     xtls_flow_val = state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision"
 
     if not domain or not vuuid:
@@ -242,7 +242,11 @@ def do_generate_client_config() -> None:
                 "server": domain,
                 "server_port": port,
                 "uuid": vuuid,
-                "transport": {"type": "xhttp", "path": xhttp_path},
+                "transport": {
+                    "type": "xhttp",
+                    "mode": xhttp_mode,
+                    "path": xhttp_path,
+                },
                 "tls": {
                     "enabled": True,
                     "server_name": domain,
@@ -279,11 +283,14 @@ def do_generate_client_config() -> None:
     else:
         from urllib.parse import quote as _url_quote
         xhttp_path_enc = _url_quote(xhttp_path, safe="")
-        # Базовая VLESS-ссылка для xHTTP (исходная подстрока сохранена 1:1
-        # для обратной совместимости с regression-тестами test_ios_link_regression).
+        # Базовая VLESS-ссылка для xHTTP с mode= из state.json.
+        # ВАЖНО: mode берётся из state["xhttp_mode"], который синхронизирован
+        # с серверным config.json через _build_xhttp_settings(mode=XHTTP_MODE).
+        # Для CDN masking mode="auto" (через _CDN_MASKING_XHTTP_MODE).
         vless_link = (f"vless://{vuuid}@{domain}:{port}"
                       f"?encryption=none&security=tls&sni={domain}"
-                      f"&fp={fp}&type=xhttp&path={xhttp_path_enc}#VLESS-xHTTP")
+                      f"&fp={fp}&type=xhttp&path={xhttp_path_enc}"
+                      f"&mode={xhttp_mode}#VLESS-xHTTP")
         # CDN masking: добавляем host= параметр (перед #fragment) и суффикс
         # -CDN к label, чтобы визуально отличить ссылку в клиенте.
         # Пост-обработка строки — не трогаем исходный f-string выше.
@@ -596,9 +603,11 @@ def do_share_config_server() -> None:
                         f"&type=tcp#VLESS-Reality")
             else:
                 xhttp_path = urllib.parse.quote(state.get("xhttp_path", "/"), safe="")
+                xhttp_mode = state.get("xhttp_mode", "stream-up")
                 link = (f"vless://{vuuid}@{domain}:{port}"
                         f"?encryption=none&security=tls&sni={domain}"
-                        f"&fp={fp}&type=xhttp&path={xhttp_path}#VLESS-xHTTP")
+                        f"&fp={fp}&type=xhttp&path={xhttp_path}"
+                        f"&mode={xhttp_mode}#VLESS-xHTTP")
             links.append({"name": "default", "links": [link]})
     except Exception as e:
         _box_warn(f"Ошибка сборки ссылок: {e}")
