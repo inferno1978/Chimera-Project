@@ -1891,21 +1891,43 @@ def _prompt_xhttp_options() -> None:
     _box_desc(f"Каждый фрагмент данных — отдельный HTTP-запрос.")
     _box_desc(f"{YELLOW}⚠ Может не поддерживаться вашей версией Xray-core.{NC}")
     _box_row()
+    _box_item("4", f"auto        — автоматический выбор (Xray сам решает)")
+    _box_desc(f"Xray выбирает stream-up или packet-up по HTTP-методу запроса.")
+    _box_desc(f"Удобно для CDN: один инбаунд обслуживает uplink (POST) + download (GET).")
+    _box_row()
     _box_bottom()
-    while True:
-        choice = input(f"  {CYAN}Выбор [1]: {NC}").strip() or "1"
-        if choice == "1":
-            XHTTP_MODE = "stream-up"
-            break
-        elif choice == "2":
-            XHTTP_MODE = "stream-one"
-            break
-        elif choice == "3":
-            XHTTP_MODE = "packet-up"
-            warn("packet-up выбран — убедитесь что ваша версия Xray-core его поддерживает")
-            break
-        else:
-            warn("Введите 1, 2 или 3")
+
+    # CDN masking: mode уже выставлен в "auto" скрытым меню через
+    # setattr(core, "XHTTP_MODE", _CDN_MASKING_XHTTP_MODE) в
+    # run_cdn_masking_install(). НЕ переспрашиваем — это критично:
+    # server config использует _CDN_MASKING_XHTTP_MODE ("auto") из
+    # build_xhttp_cdn_masking_inbound(), и client link должен получить
+    # то же значение. Если пользователь выберет "stream-up" здесь,
+    # client link получит mode=stream-up, а server config останется
+    # mode=auto → рассинхрон → клиент не подключится.
+    if globals().get("XHTTP_CDN_MASKING", False):
+        if not XHTTP_MODE:
+            XHTTP_MODE = "auto"
+        info(f"CDN masking: использую mode из скрытого меню: {GREEN}{XHTTP_MODE}{NC}")
+        info(f"           (не переспрашиваю — mode должен совпадать на сервере и клиенте)")
+    else:
+        while True:
+            choice = input(f"  {CYAN}Выбор [1]: {NC}").strip() or "1"
+            if choice == "1":
+                XHTTP_MODE = "stream-up"
+                break
+            elif choice == "2":
+                XHTTP_MODE = "stream-one"
+                break
+            elif choice == "3":
+                XHTTP_MODE = "packet-up"
+                warn("packet-up выбран — убедитесь что ваша версия Xray-core его поддерживает")
+                break
+            elif choice == "4":
+                XHTTP_MODE = "auto"
+                break
+            else:
+                warn("Введите 1, 2, 3 или 4")
     success(f"xHTTP режим: {XHTTP_MODE}")
 
     # Путь endpoint

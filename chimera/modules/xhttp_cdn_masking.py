@@ -569,18 +569,16 @@ def run_cdn_masking_install() -> None:
 
     # ── Синхронизация XHTTP_MODE между сервером и клиентской ссылкой ──────
     # build_xhttp_cdn_masking_inbound() жёстко ставит mode=_CDN_MASKING_XHTTP_MODE
-    # ("auto") в server config.json. Но клиентская ссылка (vless://...&mode=...)
+    # ("auto") в server config.json. Клиентская ссылка (vless://...&mode=...)
     # берёт значение из core.XHTTP_MODE → state["xhttp_mode"]. Если НЕ
-    # выставить XHTTP_MODE здесь, останется дефолт "stream-up" (опечатка,
-    # невалидное значение) → клиент получит mode=stream-up → не подключится.
+    # выставить XHTTP_MODE здесь, останется дефолт "stream-up" → клиент
+    # получит mode=stream-up → РАССИНХРОН с сервером (auto) → не подключится.
     #
-    # ВАЖНО: _prompt_xhttp_options() в _core.py переспрашивает mode у юзера
-    # (stream-up/stream-one/packet-up — тоже опечатки, но сейчас не трогаем).
-    # Для CDN masking этот вопрос не критичен — server config использует
-    # _CDN_MASKING_XHTTP_MODE из build_xhttp_cdn_masking_inbound(), а не
-    # из XHTTP_MODE. Но client link использует XHTTP_MODE. Поэтому выставляем
-    # здесь, ДО do_full_install(), чтобы даже если юзер выберет "stream-up"
-    # в _prompt_xhttp_options(), мы потом перезапишем обратно на "auto".
+    # _prompt_xhttp_options() в _core.py при XHTTP_CDN_MASKING=True НЕ
+    # переспрашивает mode (аналогично path) — использует это значение.
+    # Если бы переспрашивал, и пользователь выбрал бы "stream-up", то
+    # client link получил бы mode=stream-up, а server config остался
+    # mode=auto → рассинхрон → клиент не подключится.
     setattr(core, "XHTTP_MODE", _CDN_MASKING_XHTTP_MODE)
 
     success(f"Сгенерирован path: {GREEN}{_path}{NC}")
