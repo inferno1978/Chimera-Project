@@ -1196,6 +1196,14 @@ XHTTP_ENABLE_SESSION_RESUMPTION: bool = False
 #   В пресете speed/balance уже включён, здесь — явное управление.
 XHTTP_TCP_NO_DELAY: bool = False
 
+# ── CDN masking (профиль для обхода белых списков через Beeline CDN) ─────────
+# Если True — активируется экспертный профиль XHTTP с расширенными extra-полями
+# (xPaddingHeaders, session/seq keys, xmux.maxConcurrency=1 и т.д.) и
+# одностраничная fake-login заглушка. Активируется только через скрытое меню
+# (ввод кода доступа). Не затрагивает простой XHTTP-режим — это отдельный
+# профиль, параллельный дефолтному.
+XHTTP_CDN_MASKING: bool = False
+
 # INSTALL_COMPLETED — сигнализирует EXIT TRAP что работа завершена нормально
 INSTALL_COMPLETED: bool = False
 
@@ -3355,7 +3363,11 @@ def do_full_install() -> None:
         generate_xray_config_chain_entry_multi()
 
     setup_nginx_rate_limit();       PROGRESS.update(2,  "Rate limit")
-    setup_nginx_final();            PROGRESS.update(5,  "Nginx final")
+    # CDN masking: передаём cdn_masking_mode=True если профиль активен.
+    # В simple-XHTTP-режиме (по умолчанию) flag=False → поведение идентично
+    # предыдущей версии (без параметра), ни одного байта вывода не меняется.
+    setup_nginx_final(cdn_masking_mode=bool(globals().get("XHTTP_CDN_MASKING", False)))
+    PROGRESS.update(5,  "Nginx final")
     setup_nginx_systemd_override(); PROGRESS.update(2,  "Nginx override")
     setup_cert_renewal();           PROGRESS.update(2,  "Cert renewal")
     setup_logrotate();              PROGRESS.update(2,  "Logrotate")
@@ -3511,6 +3523,8 @@ def do_full_install() -> None:
         "xhttp_xmux_h_keep_alive_period": XHTTP_XMUX_H_KEEP_ALIVE_PERIOD,
         "xhttp_tcp_no_delay":            XHTTP_TCP_NO_DELAY,
         "xhttp_enable_session_resumption": XHTTP_ENABLE_SESSION_RESUMPTION,
+        # CDN masking profile flag (опциональный, дефолт False — простой XHTTP).
+        "xhttp_cdn_masking":             globals().get("XHTTP_CDN_MASKING", False),
         "server_port":    SERVER_PORT,
         "domain":         PARAM_DOMAIN,
         "uuid":           PARAM_UUID,
@@ -8339,6 +8353,8 @@ def _load_state_into_globals() -> None:
     global XHTTP_XMUX_C_MAX_REUSE_TIMES, XHTTP_XMUX_H_MAX_REQUEST_TIMES
     global XHTTP_XMUX_H_MAX_REUSABLE_SECS, XHTTP_XMUX_H_KEEP_ALIVE_PERIOD
     global XHTTP_TCP_NO_DELAY, XHTTP_ENABLE_SESSION_RESUMPTION
+    # CDN masking profile flag (опциональный, дефолт False — простой XHTTP).
+    global XHTTP_CDN_MASKING
     global SERVER_PORT, XHTTP_PORT, CHAIN_BALANCER_STRATEGY
     global CHAIN_EXIT_HOST, CHAIN_EXIT_PORT, CHAIN_EXIT_UUID
     global CHAIN_EXIT_PUBKEY, CHAIN_EXIT_SHORTID, CHAIN_EXIT_SNI, CHAIN_EXIT_FP
@@ -8383,6 +8399,8 @@ def _load_state_into_globals() -> None:
         XHTTP_XMUX_H_KEEP_ALIVE_PERIOD  = state.get("xhttp_xmux_h_keep_alive_period", 0)
         XHTTP_TCP_NO_DELAY              = state.get("xhttp_tcp_no_delay",             False)
         XHTTP_ENABLE_SESSION_RESUMPTION = state.get("xhttp_enable_session_resumption", False)
+        # CDN masking profile flag — опциональный, по умолч. False (простой XHTTP).
+        XHTTP_CDN_MASKING               = state.get("xhttp_cdn_masking",              False)
         SERVER_PORT   = state.get("server_port",   443)
         XHTTP_PORT    = SERVER_PORT
         CHAIN_EXIT_HOST    = state.get("chain_exit_host",    CHAIN_EXIT_HOST)
@@ -8453,6 +8471,8 @@ def main_menu() -> None:
     global XHTTP_XMUX_C_MAX_REUSE_TIMES, XHTTP_XMUX_H_MAX_REQUEST_TIMES
     global XHTTP_XMUX_H_MAX_REUSABLE_SECS, XHTTP_XMUX_H_KEEP_ALIVE_PERIOD
     global XHTTP_TCP_NO_DELAY, XHTTP_ENABLE_SESSION_RESUMPTION
+    # CDN masking profile flag — для скрытого меню (unlock через код доступа).
+    global XHTTP_CDN_MASKING
     global XHTTP_SC_STREAM_UP_SERVER_SECS, XHTTP_SC_MAX_EACH_POST_BYTES
     global XHTTP_SC_MAX_BUFFERED_POSTS
     global CHAIN_EXIT_HOST, CHAIN_EXIT_PORT, CHAIN_EXIT_UUID
@@ -8692,6 +8712,26 @@ def main_menu() -> None:
             except ImportError as _e:
                 warn(f"Модуль TrustTunnel не найден: {_e}")
                 time.sleep(2)
+
+        # ── Скрытое меню: CDN masking (обход белых списков через Beeline CDN) ─
+        # Активируется вводом строки "cdn" (без кавычек) в главном меню.
+        # Не отображается в списке пунктов — пользователь должен знать
+        # о существовании этого раздела. После ввода "cdn" запрашивается
+        # код доступа (getpass, без эха), проверяется через SHA-256 hash
+        # (plaintext НЕ хранится в коде). Только после успешной авторизации
+        # открывается интерфейс профиля CDN masking.
+        elif choice.lower() == "cdn":
+            try:
+                from chimera.modules.xhttp_cdn_masking import run_cdn_masking_install
+                run_cdn_masking_install()
+            except ImportError as _e:
+                # Тихая ошибка — не выдаём существование скрытого меню.
+                warn(f"Неверный выбор: {choice}")
+                time.sleep(1)
+            except Exception as _e:
+                # Любая ошибка — тихая, чтобы не выдать существование раздела.
+                warn(f"Неверный выбор: {choice}")
+                time.sleep(1)
 
         elif choice == "0":
             print(f"{GREEN}До свидания! 👋{NC}")

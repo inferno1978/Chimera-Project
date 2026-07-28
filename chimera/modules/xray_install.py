@@ -1069,7 +1069,41 @@ def generate_xray_config_xhttp() -> None:
 
     cert_path = f"/etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem"
     key_path  = f"/etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem"
-    _xhttp_s3, _sockopt_s3 = _build_xhttp_settings(XHTTP_MODE, XHTTP_PATH)
+    # ── CDN masking: если профиль активен, используем экспертный inbound ───
+    # вместо базового _build_xhttp_settings(). Профиль даёт расширенные
+    # extra-поля (xPadding/session/seq/xmux.maxConcurrency=1), специализированные
+    # для маскировки под реальный HTTPS через CDN Beeline.
+    #
+    # Не затрагивает простой XHTTP-режим — только ветка XHTTP_CDN_MASKING=True.
+    if getattr(core, "XHTTP_CDN_MASKING", False):
+        try:
+            from chimera.modules.xhttp_cdn_masking import (
+                build_xhttp_cdn_masking_inbound,
+                CDN_MASKING_INBOUND_PORT,
+            )
+            # Используем отдельный backend-порт (7443), чтобы CDN-masking
+            # профиль не конфликтовал с простым XHTTP (8443).
+            _xhttp_s3_dict = build_xhttp_cdn_masking_inbound(
+                PARAM_DOMAIN, XHTTP_PATH, port=CDN_MASKING_INBOUND_PORT)
+            _xhttp_backend_port = _xhttp_s3_dict.pop("__backend_port",
+                                                      CDN_MASKING_INBOUND_PORT)
+            # Обновляем глобал, чтобы setup_nginx_final() проксировал на
+            # правильный порт. В simple-XHTTP этого не делаем — там работает
+            # дефолтный XHTTP_BACKEND_PORT (8443).
+            XHTTP_BACKEND_PORT = _xhttp_backend_port
+            setattr(core, "XHTTP_BACKEND_PORT", _xhttp_backend_port)
+            # Серверный sockopt для CDN masking — без marks/firewall,
+            # tcpNoDelay=True для низкой латентности на loopback.
+            _sockopt_s3 = {"tcpNoDelay": True}
+            info("CDN masking: используется экспертный профиль XHTTP "
+                 f"(backend=127.0.0.1:{_xhttp_backend_port}, extra=24+ полей)")
+        except ImportError as _e:
+            # Если модуль недоступен (edge-case) — fallback на простой профиль.
+            warn = core.warn
+            warn(f"CDN masking: модуль недоступен ({_e}), fallback на простой XHTTP")
+            _xhttp_s3, _sockopt_s3 = _build_xhttp_settings(XHTTP_MODE, XHTTP_PATH)
+    else:
+        _xhttp_s3, _sockopt_s3 = _build_xhttp_settings(XHTTP_MODE, XHTTP_PATH)
 
     # Сертификат здесь НЕ используется самим Xray — TLS терминирует Nginx на :SERVER_PORT.
     # cert_path / key_path оставлены для обратной совместимости с возможными хуками,

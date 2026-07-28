@@ -320,7 +320,8 @@ def setup_nginx_final(domain: Optional[str] = None,
                       socket_path=_UNSET,
                       protocol_mode: Optional[str] = None,
                       awg_exit_enabled: Optional[bool] = None,
-                      site_template: Optional[str] = None) -> None:
+                      site_template: Optional[str] = None,
+                      cdn_masking_mode: bool = False) -> None:
     """Финальная настройка Nginx: HTTPS-сайт + reverse-proxy на Xray backend.
 
     Параметры domain/port/socket_path/protocol_mode/awg_exit_enabled/site_template,
@@ -337,6 +338,20 @@ def setup_nginx_final(domain: Optional[str] = None,
 
     Sentinel _UNSET для port/socket_path позволяет различить "не передан"
     (→ inherit из core) от "передан None" (→ own-site TCP режим).
+
+    cdn_masking_mode=True (новый параметр, по умолч. False) — активирует
+    профиль «CDN masking» для XHTTP. В этом режиме:
+      • path берётся из xhttp_path_gen.generate_decoy_path() (через
+        core.XHTTP_PATH, который выставляет скрытое меню);
+      • вместо create_website() вызывается create_fake_login() —
+        одностраничная заглушка «Доступ к серверу» с капчей (шаблон #16);
+      • reverse-proxy направляется на 127.0.0.1:CDN_MASKING_INBOUND_PORT
+        (7443, отдельный от стандартного 8443);
+      • Nginx-конфиг содержит доп. настройки для безбуферного стриминга
+        и долгих таймаутов, критичные для CDN edge.
+    Профиль НЕ затрагивает текущий простой XHTTP-режим — только ветка
+    `if cdn_masking_mode and PROTOCOL_MODE == "xhttp"`. Дефолтное поведение
+    (без параметра) полностью сохранено.
     """
     core = _core_module()
     info = core.info
@@ -368,6 +383,16 @@ def setup_nginx_final(domain: Optional[str] = None,
     XHTTP_PATH = core.XHTTP_PATH
     XHTTP_BACKEND_PORT = core.XHTTP_BACKEND_PORT
 
+    # ── CDN masking: если профиль активен, берём port из CDN_MASKING_INBOUND_PORT
+    #    и используем create_fake_login вместо create_website. Не затрагивает
+    #    простой XHTTP-режим — только ветка cdn_masking_mode=True.
+    if cdn_masking_mode:
+        try:
+            from chimera.modules.xhttp_cdn_masking import CDN_MASKING_INBOUND_PORT
+            XHTTP_BACKEND_PORT = CDN_MASKING_INBOUND_PORT   # 7443
+        except ImportError:
+            pass  # fallback на стандартный 8443 если модуль недоступен
+
     # ── Detect own-site TCP mode ────────────────────────────────────────────
     # Telemt own-site: socket_path явно None + port явно задан → TCP listen на
     # 127.0.0.1:{port}, без proxy_protocol, без real_ip_header, без Xray proxy.
@@ -390,7 +415,21 @@ def setup_nginx_final(domain: Optional[str] = None,
     info("Настройка финального конфига Nginx...")
     web_root = Path(f"/var/www/{PARAM_DOMAIN}")
 
-    create_website(domain=PARAM_DOMAIN, site_template=site_template)
+    # ── CDN masking: используем fake-login заглушку вместо обычного сайта ──
+    # Профиль CDN masking требует одностраничную заглушку «Доступ к серверу»
+    # с капчей (create_fake_login, шаблон #16). Не затрагивает стандартный
+    # выбор шаблонов 1..15 — только ветка cdn_masking_mode=True.
+    if cdn_masking_mode:
+        try:
+            from chimera.modules.nginx_setup_templates import create_fake_login
+            web_root.mkdir(parents=True, exist_ok=True)
+            create_fake_login(web_root)
+            info(f"CDN masking: установлена fake-login заглушка → {web_root}/index.html")
+        except ImportError as _e:
+            warn(f"CDN masking: не удалось импортировать create_fake_login: {_e}")
+            create_website(domain=PARAM_DOMAIN, site_template=site_template)
+    else:
+        create_website(domain=PARAM_DOMAIN, site_template=site_template)
     NGINX_CONF_DIR.mkdir(parents=True, exist_ok=True)
     NGINX_ENABLED_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -567,8 +606,29 @@ def setup_nginx_final(domain: Optional[str] = None,
         # proxy_pass без URI → Nginx передаёт запрос как есть (нужно для xHTTP).
         _backend = f"127.0.0.1:{XHTTP_BACKEND_PORT}"
 
+        # ── CDN masking: доп. настройки для корректной работы через CDN edge ─
+        # large_client_header_buffers — для больших padding-заголовков XHTTP.
+        # proxy_request_buffering off + proxy_buffering off — обязательно для
+        #   stream-up (CF/Beeline CDN иначе рвут stream-up соединение через 100с).
+        # proxy_read_timeout 86400s — 24 часа, т.к. CDN edge может держать
+        #   long-polling соединение очень долго.
+        # underscore_in_headers on — XHTTP использует кастомные заголовки вида
+        #   X-Api-Key, и без этой директивы nginx их молча dropped бы.
+        _cdn_extras = ""
+        if cdn_masking_mode:
+            _cdn_extras = textwrap.dedent(f"""\
+                    # ── CDN masking: настройки для Beeline/CF CDN edge ──────────────
+                    large_client_header_buffers 8 32k;
+                    underscore_in_headers on;
+                    proxy_send_timeout 86400s;
+                    proxy_read_timeout 86400s;
+                    proxy_next_upstream off;
+                    proxy_next_upstream_tries 1;
+            """)
+
         info(f"xHTTP TLS: Nginx терминирует TLS на :{SERVER_PORT}, "
-             f"заглушка для /, проксирование {_xhttp_path} → http://{_backend}")
+             f"заглушка для /, проксирование {_xhttp_path} → http://{_backend}"
+             + (f" (CDN masking)" if cdn_masking_mode else ""))
 
         cfg = NGINX_CONF_DIR / PARAM_DOMAIN
         cfg.write_text(textwrap.dedent(f"""\
@@ -633,7 +693,7 @@ def setup_nginx_final(domain: Optional[str] = None,
                     proxy_read_timeout 3600s;
                     proxy_send_timeout 3600s;
                     proxy_connect_timeout 60s;
-                }}
+{_cdn_extras}                }}
 
                 # ── Заглушка: сайт отдаётся для всех прочих путей ─────────────────
                 location / {{
