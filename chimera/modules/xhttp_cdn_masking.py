@@ -519,6 +519,7 @@ def run_cdn_masking_install() -> None:
     CYAN = core.CYAN
     NC = core.NC
     GREEN = core.GREEN
+    BOLD = core.BOLD
     warn = core.warn
     success = core.success
     info = core.info
