@@ -7,11 +7,15 @@ tests/test_nginx_cdn_masking_config.py
 1. «large_client_header_buffers directive is not allowed here» (коммит 1b434e3)
    — директива была в location {} блоке.
 
-2. «unknown directive underscore_in_headers» (коммит fcb0cab)
-   — изначально объяснялось "кастомной сборкой nginx без core-модуля",
-     но реальная причина: textwrap.dedent() ломал отступы при вставке
-     в f-string, и nginx указывал на underscore_in_headers, хотя проблема
-     была в сломанной indentation строкой выше.
+2. «unknown directive underscores_in_headers» (коммиты fcb0cab, 648aebc)
+   — изначально объяснялось "кастомной сборкой nginx без core-модуля"
+     (fcb0cab), потом "сломанными отступами от textwrap.dedent" (648aebc).
+     Оба объяснения были НЕВЕРНЫМИ. Реальная причина: ОПЕЧАТКА в имени
+     директивы — правильно "underscores_in_headers" (с "s", множественное
+     число), а в коде было "underscores_in_headers" (без "s"). nginx не
+     знает директивы "underscores_in_headers" вообще ни в каком контексте.
+     Эти тесты тоже содержали опечатку и не могли её поймать — пока
+     пользователь не проверил на реальном nginx/1.24.0.
 
 3. Дублирование proxy_send_timeout/proxy_read_timeout в location-блоке
    — безусловная часть location содержала proxy_*_timeout 3600s,
@@ -224,7 +228,7 @@ class TestNginxCdnMaskingConfigContext(unittest.TestCase):
 
     Регрессия на три бага:
       1. «large_client_header_buffers directive is not allowed here» (1b434e3)
-      2. «unknown directive underscore_in_headers» (fcb0cab — неверное объяснение)
+      2. «unknown directive underscores_in_headers» (fcb0cab — неверное объяснение)
       3. Дублирование proxy_*_timeout в location-блоке
     """
 
@@ -232,21 +236,21 @@ class TestNginxCdnMaskingConfigContext(unittest.TestCase):
         from chimera.modules import nginx_setup
         self._src = inspect.getsource(nginx_setup.setup_nginx_final)
 
-    # ── ЧАСТЬ 1: underscore_in_headers возвращён ──────────────────────────
+    # ── ЧАСТЬ 1: underscores_in_headers возвращён ──────────────────────────
 
-    def test_underscore_in_headers_present_in_source(self):
-        """underscore_in_headers присутствует в _cdn_server_extras (возвращена).
+    def test_underscores_in_headers_present_in_source(self):
+        """underscores_in_headers присутствует в _cdn_server_extras (возвращена).
 
         Регрессия на fcb0cab: директива была убрана с неверным объяснением
         "кастомная сборка nginx без core-модуля". Реальная причина была в
         сломанных отступах от textwrap.dedent(). Директива возвращена.
         """
-        self.assertIn("underscore_in_headers", self._src,
-            "underscore_in_headers must be present in setup_nginx_final — "
+        self.assertIn("underscores_in_headers", self._src,
+            "underscores_in_headers must be present in setup_nginx_final — "
             "it was incorrectly removed in fcb0cab due to misdiagnosed cause")
 
-    def test_underscore_in_headers_in_server_extras(self):
-        """underscore_in_headers в _cdn_server_extras (server context).
+    def test_underscores_in_headers_in_server_extras(self):
+        """underscores_in_headers в _cdn_server_extras (server context).
 
         Согласно документации nginx: Context: http, server (НЕ location).
         """
@@ -255,17 +259,17 @@ class TestNginxCdnMaskingConfigContext(unittest.TestCase):
                        self._src, re.DOTALL)
         self.assertIsNotNone(m, "Could not find _cdn_server_extras assignment")
         server_block = m.group(1)
-        self.assertIn("underscore_in_headers", server_block,
-            "underscore_in_headers must be in _cdn_server_extras (server context)")
+        self.assertIn("underscores_in_headers", server_block,
+            "underscores_in_headers must be in _cdn_server_extras (server context)")
 
-    def test_underscore_in_headers_NOT_in_location_extras(self):
-        """underscore_in_headers ОТСУТСТВУЕТ в _cdn_location_extras."""
+    def test_underscores_in_headers_NOT_in_location_extras(self):
+        """underscores_in_headers ОТСУТСТВУЕТ в _cdn_location_extras."""
         m = re.search(r'_cdn_location_extras\s*=\s*\((.*?)\)',
                        self._src, re.DOTALL)
         self.assertIsNotNone(m)
         location_block = m.group(1)
-        self.assertNotIn("underscore_in_headers", location_block,
-            "underscore_in_headers MUST NOT be in _cdn_location_extras")
+        self.assertNotIn("underscores_in_headers", location_block,
+            "underscores_in_headers MUST NOT be in _cdn_location_extras")
 
     def test_large_client_header_buffers_in_server_extras(self):
         """large_client_header_buffers в _cdn_server_extras (server context)."""
@@ -381,8 +385,8 @@ class TestNginxCdnMaskingConfigContext(unittest.TestCase):
         self.assertEqual(count_send, 1,
             f"Simple XHTTP: proxy_send_timeout must be 1, got {count_send}")
 
-    def test_cdn_vhost_has_underscore_in_headers_with_proper_indent(self):
-        """CDN vhost: underscore_in_headers есть и с правильным отступом.
+    def test_cdn_vhost_has_underscores_in_headers_with_proper_indent(self):
+        """CDN vhost: underscores_in_headers есть и с правильным отступом.
 
         Регрессия на fcb0cab: директива была убрана. Также проверяем,
         что отступ правильный (4+ пробела = server-уровень), а не column 0.
@@ -391,14 +395,14 @@ class TestNginxCdnMaskingConfigContext(unittest.TestCase):
         lines = content.split('\n')
         found = False
         for i, line in enumerate(lines, 1):
-            if 'underscore_in_headers' in line and not line.strip().startswith('#'):
+            if 'underscores_in_headers' in line and not line.strip().startswith('#'):
                 found = True
                 # Должна иметь отступ (не в column 0)
                 self.assertTrue(line.startswith('    ') or line.startswith('\t'),
-                    f"L{i}: underscore_in_headers must have indent (server-level), "
+                    f"L{i}: underscores_in_headers must have indent (server-level), "
                     f"got: {line!r}")
         self.assertTrue(found,
-            "underscore_in_headers must be present in CDN masking vhost")
+            "underscores_in_headers must be present in CDN masking vhost")
 
     def test_cdn_vhost_has_large_client_header_buffers_with_proper_indent(self):
         """CDN vhost: large_client_header_buffers с правильным отступом."""
@@ -448,8 +452,8 @@ class TestNginxCdnMaskingConfigContext(unittest.TestCase):
         content = _generate_vhost(cdn_masking_mode=False)
         self.assertNotIn("large_client_header_buffers", content,
             "Simple XHTTP vhost must NOT have large_client_header_buffers")
-        self.assertNotIn("underscore_in_headers", content,
-            "Simple XHTTP vhost must NOT have underscore_in_headers")
+        self.assertNotIn("underscores_in_headers", content,
+            "Simple XHTTP vhost must NOT have underscores_in_headers")
         self.assertNotIn("proxy_next_upstream off", content,
             "Simple XHTTP vhost must NOT have proxy_next_upstream off")
 

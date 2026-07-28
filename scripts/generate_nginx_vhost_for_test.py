@@ -192,7 +192,7 @@ def main():
     print()
     print("=== Содержимое CDN masking vhost (server-блок с директивами) ===")
     for i, line in enumerate(cdn_content.split('\n'), 1):
-        if any(k in line for k in ['large_client_header', 'underscore_in_headers',
+        if any(k in line for k in ['large_client_header', 'underscores_in_headers',
                                      'proxy_send_timeout', 'proxy_read_timeout',
                                      'proxy_next_upstream', 'location ', 'server ',
                                      'server_name', 'add_header', 'root ']):
@@ -200,7 +200,7 @@ def main():
     print()
     print("=== Содержимое simple XHTTP vhost (для сравнения) ===")
     for i, line in enumerate(simple_content.split('\n'), 1):
-        if any(k in line for k in ['large_client_header', 'underscore_in_headers',
+        if any(k in line for k in ['large_client_header', 'underscores_in_headers',
                                      'proxy_send_timeout', 'proxy_read_timeout',
                                      'proxy_next_upstream', 'location ', 'server ',
                                      'server_name', 'add_header', 'root ']):
@@ -230,7 +230,7 @@ def main():
                 loc_directives.append(s)
     for d in ['proxy_read_timeout', 'proxy_send_timeout', 'proxy_next_upstream',
               'proxy_next_upstream_tries', 'large_client_header_buffers',
-              'underscore_in_headers']:
+              'underscores_in_headers']:
         count = sum(1 for x in loc_directives if x.startswith(d))
         print(f"  {d}: {count} вхождений в location")
 
