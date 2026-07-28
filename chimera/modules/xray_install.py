@@ -1083,9 +1083,11 @@ def generate_xray_config_xhttp() -> None:
             )
             # Используем отдельный backend-порт (7443), чтобы CDN-masking
             # профиль не конфликтовал с простым XHTTP (8443).
-            _xhttp_s3_dict = build_xhttp_cdn_masking_inbound(
+            # ВАЖНО: переменная называется _xhttp_s3 (как в простой ветке ниже),
+            # чтобы строка "xhttpSettings": _xhttp_s3 работала в обоих случаях.
+            _xhttp_s3 = build_xhttp_cdn_masking_inbound(
                 PARAM_DOMAIN, XHTTP_PATH, port=CDN_MASKING_INBOUND_PORT)
-            _xhttp_backend_port = _xhttp_s3_dict.pop("__backend_port",
+            _xhttp_backend_port = _xhttp_s3.pop("__backend_port",
                                                       CDN_MASKING_INBOUND_PORT)
             # Обновляем глобал, чтобы setup_nginx_final() проксировал на
             # правильный порт. В simple-XHTTP этого не делаем — там работает
