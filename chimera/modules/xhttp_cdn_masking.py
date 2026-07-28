@@ -53,6 +53,25 @@ from typing import Any
 # конфликтовали при одновременном (гипотетическом) включении.
 CDN_MASKING_INBOUND_PORT: int = 7443
 
+# ── XHTTP mode для CDN masking профиля ─────────────────────────────────────
+# Валидные значения xhttpSettings.mode по документации Xray-core:
+#   "auto", "packet-up", "stream-up", "stream-one"
+# (все, кроме auto, через дефис). Значения "stream-up"/"stream-one"/"packet-up"
+# (слитно) — ОПЕЧАТКИ, которых Xray не знает.
+#
+# CDN masking использует "auto" — Xray сам выбирает stream-up/packet-up по
+# HTTP-методу запроса (POST → packet-up uplink, GET → stream-up download).
+# Это позволяет одному инбаунду обслуживать оба режима, что соответствует
+# референс-конфигу «Beeline CDN XHTTP node».
+#
+# Эта константа используется в ДВУХ местах:
+#   1. build_xhttp_cdn_masking_inbound() — пишет в server config.json
+#   2. run_cdn_masking_install() — setattr(core, "XHTTP_MODE", ...) чтобы
+#      клиентская ссылка (vless://...&mode=...) получила то же значение.
+# Если когда-либо измените mode — измените ОДНУ константу, оба места
+# синхронизируются автоматически.
+_CDN_MASKING_XHTTP_MODE: str = "auto"
+
 # host-заголовок для CDN masking. При пустой строке Xray использует SNI.
 # Для Beeline CDN: SNI = внешний домен CDN, host = origin-домен (тот же
 # домен, что и в PARAM_DOMAIN) — обычно совпадают, оставляем пустым.
@@ -189,7 +208,10 @@ def build_xhttp_cdn_masking_inbound(domain: str, path: str,
         # mode="auto" — Xray сам выбирает stream-up/packet-up по запросу.
         # Это позволяет одному инбаунду обслуживать оба режима (uplink POST +
         # download GET), что соответствует референс-конфигу.
-        "mode": "auto",
+        # Используем _CDN_MASKING_XHTTP_MODE (константа) — то же значение
+        # используется в run_cdn_masking_install() для синхронизации с
+        # клиентской ссылкой. Если изменить здесь — изменится и там.
+        "mode": _CDN_MASKING_XHTTP_MODE,
         "path": _path,
         "host": CDN_MASKING_HOST or domain,
         "extra": _copy_extra_for_server(),
@@ -545,6 +567,22 @@ def run_cdn_masking_install() -> None:
     setattr(core, "XHTTP_PATH", _path)
     setattr(core, "XHTTP_BACKEND_PORT", CDN_MASKING_INBOUND_PORT)
 
+    # ── Синхронизация XHTTP_MODE между сервером и клиентской ссылкой ──────
+    # build_xhttp_cdn_masking_inbound() жёстко ставит mode=_CDN_MASKING_XHTTP_MODE
+    # ("auto") в server config.json. Но клиентская ссылка (vless://...&mode=...)
+    # берёт значение из core.XHTTP_MODE → state["xhttp_mode"]. Если НЕ
+    # выставить XHTTP_MODE здесь, останется дефолт "stream-up" (опечатка,
+    # невалидное значение) → клиент получит mode=stream-up → не подключится.
+    #
+    # ВАЖНО: _prompt_xhttp_options() в _core.py переспрашивает mode у юзера
+    # (stream-up/stream-one/packet-up — тоже опечатки, но сейчас не трогаем).
+    # Для CDN masking этот вопрос не критичен — server config использует
+    # _CDN_MASKING_XHTTP_MODE из build_xhttp_cdn_masking_inbound(), а не
+    # из XHTTP_MODE. Но client link использует XHTTP_MODE. Поэтому выставляем
+    # здесь, ДО do_full_install(), чтобы даже если юзер выберет "stream-up"
+    # в _prompt_xhttp_options(), мы потом перезапишем обратно на "auto".
+    setattr(core, "XHTTP_MODE", _CDN_MASKING_XHTTP_MODE)
+
     success(f"Сгенерирован path: {GREEN}{_path}{NC}")
     info("Запуск полной установки профиля CDN masking...")
 
@@ -574,6 +612,39 @@ def run_cdn_masking_install() -> None:
     print()
     try:
         input(f"  {CYAN}Нажмите Enter чтобы увидеть инструкцию по Beeline CDN...{NC}")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+    # ── Предупреждение: vless:// НЕДОСТАТОЧНО для CDN masking ────────────
+    # Экспертные extra-параметры (xPaddingBytes, seqKey, sessionIDKey и т.д.)
+    # физически не кодируются в vless://-URI — формат share-ссылки не
+    # поддерживает вложенные extra-объекты. Они доступны только через
+    # sing-box JSON конфиг (через client_config_export.py).
+    # Реальный пользователь (zvshka) взял vless://-ссылку — стандартный,
+    # первый попавшийся способ подключиться — и не смог, потому что для
+    # CDN masking этого недостаточно.
+    print()
+    _box_top("⚠️  ВАЖНО: КАКОЙ КОНФИГ ИСПОЛЬЗОВАТЬ КЛИЕНТУ")
+    _box_row()
+    _box_warn("Для профиля CDN masking НЕДОСТАТОЧНО обычной vless://-ссылки!")
+    _box_row()
+    _box_desc("Экспертные параметры (xPaddingBytes, seqKey, sessionIDKey,")
+    _box_desc("xPaddingHeader, noSSEHeader, noGRPCHeader, xmux и т.д.)")
+    _box_desc("физически не кодируются в vless://-URI — формат share-ссылки")
+    _box_desc("не поддерживает вложенные extra-объекты.")
+    _box_row()
+    _box_desc("Эти параметры доступны ТОЛЬКО через sing-box JSON конфиг.")
+    _box_row()
+    _box_row(f"  {BOLD}Используйте:{NC} меню 2 → Управление пользователями →")
+    _box_row(f"           {CYAN}«Экспорт для sing-box»{NC} (не «Скопировать vless-ссылку»)")
+    _box_row(f"           Файл: /root/xray-client-configs/sing-box.json")
+    _box_row()
+    _box_warn("Без sing-box JSON конфига клиент подключится, но маскировка")
+    _box_warn("не сработает — DPI увидит обычный XHTTP без padding/session.")
+    _box_bottom()
+    print()
+    try:
+        input(f"  {CYAN}Нажмите Enter для продолжения...{NC}")
     except (EOFError, KeyboardInterrupt):
         pass
 

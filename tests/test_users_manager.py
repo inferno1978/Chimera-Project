@@ -82,7 +82,7 @@ class TestGenVlessLink(unittest.TestCase):
             host="1.2.3.4", uuid_str="uuid-1234", pbk="",
             sid="", domain="example.com",
             fp="firefox", proto="xhttp",
-            xhttp_path="/xhttp", xhttp_mode="streamup",
+            xhttp_path="/xhttp", xhttp_mode="stream-up",
             port=8443,
         )
         self.assertIn("vless://uuid-1234@1.2.3.4:8443", link)
@@ -91,7 +91,7 @@ class TestGenVlessLink(unittest.TestCase):
         self.assertIn("sni=example.com", link)
         # Path URL-encoded
         self.assertIn(f"path={urllib.parse.quote('/xhttp', safe='/')}", link)
-        self.assertIn("mode=streamup", link)
+        self.assertIn("mode=stream-up", link)
         self.assertIn("fp=firefox", link)
         # flow не должно быть в xhttp-ссылке
         self.assertNotIn("flow=", link)

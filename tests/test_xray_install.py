@@ -1155,7 +1155,7 @@ class TestGenerateXhttpConfigCdnMasking(unittest.TestCase):
         c = self._fake_core
         # Минимальные атрибуты для generate_xray_config_xhttp.
         c.PROTOCOL_MODE = "xhttp"
-        c.XHTTP_MODE = "streamup"
+        c.XHTTP_MODE = "stream-up"
         c.XHTTP_PATH = "/test-cdn.ts"
         c.PARAM_DOMAIN = "test.example.com"
         c.PARAM_UUID = "test-uuid-1234"
