@@ -210,7 +210,9 @@ def do_generate_client_config() -> None:
         }
     elif _cdn_masking_active:
         # CDN masking: sing-box outbound с расширенным transport (extra + host).
-        # Структура: transport.type=xhttp + path + host + extra (симметрично серверу).
+        # Структура: transport.type=xhttp + mode + path + host + extra (симметрично серверу).
+        # ВАЖНО: mode берём из _client_xhttp (всегда "auto" = _CDN_MASKING_XHTTP_MODE),
+        # не из state["xhttp_mode"] — чтобы гарантировать синхрон с сервером.
         singbox = {
             "outbounds": [{
                 "type": "vless",
@@ -220,6 +222,7 @@ def do_generate_client_config() -> None:
                 "uuid": vuuid,
                 "transport": {
                     "type": "xhttp",
+                    "mode": _client_xhttp.get("mode", "auto"),
                     "path": xhttp_path,
                     "host": _cdn_host_param,
                     "extra": _client_xhttp.get("extra", {}),
