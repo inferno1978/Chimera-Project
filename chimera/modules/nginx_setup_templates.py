@@ -2393,8 +2393,169 @@ footer a:hover{color:var(--accent)}
 
 
 # =============================================================================
-#  Диспетчер: возвращает функцию-генератор по индексу 1..15
+#  ШАБЛОН 16: Fake Login — страница «Доступ к серверу» с капчей
 # =============================================================================
+# Используется ТОЛЬКО в профиле «CDN masking» (скрытое меню). Не входит в
+# стандартный выбор шаблонов 1..15 (create_website() в nginx_setup.py
+# ограничивает индекс 1..15). Активируется через cdn_masking_mode=True
+# в setup_nginx_final(), который явно вызывает create_fake_login().
+#
+# HTML перенесён 1:1 из base64-декодированного decoy #1 файла
+# install-caddy-node.sh (DECOYS[0]). Оригинал — одностраничная fake-login
+# форма с JS-капчей («Сколько будет X+Y?») и toast-уведомлением
+# «Неверный логин или пароль». Любая опечатка при переносе = баг.
+def create_fake_login(web_root: Path) -> None:
+    """Создаёт одностраничную заглушку «Доступ к серверу» с капчей.
+
+    Используется только в профиле CDN masking. В отличие от шаблонов 1..15,
+    здесь ОДНА страница (index.html) без подстраниц и без style.css —
+    стили инлайнены в <head>, т.к. заглушка должна быть самодостаточной
+    (CDN может не отдавать /style.css при некоторых конфигурациях).
+    """
+    web_root.mkdir(parents=True, exist_ok=True)
+    # Контент перенесён 1:1 из decoy #1 install-caddy-node.sh.
+    # Не меняем ни одного байта — это рабочий HTML, откалиброванный
+    # против DPI-сканеров.
+    html = _FAKE_LOGIN_HTML
+    (web_root / "index.html").write_text(html, encoding="utf-8")
+    # robots.txt — на случай если краулеры CDN/поисковики зайдут.
+    (web_root / "robots.txt").write_text("User-agent: *\nDisallow: /\n",
+                                          encoding="utf-8")
+
+
+_FAKE_LOGIN_HTML: str = """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Доступ к серверу</title>
+<style>
+
+*{ box-sizing:border-box; }
+html,body{ height:100%; }
+body{ margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;
+  font-family:ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif; color:#f2f2ff; background:#07060d;  }
+.stage{ position:relative; z-index:1; display:flex;  width:min(460px,94vw);  }
+.aside{ display:none; }
+.card{ position:relative; flex:1; min-width:0; background:#0d0b18; border:1px solid #ff2e8855; border-radius:16px; overflow:hidden; box-shadow:0 0 40px -8px rgba(255,46,136,.5), 0 30px 60px -25px #000;  }
+.card-head{ display:flex; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid #ff2e8833; background:rgba(255,255,255,.02); }
+.dot{ width:11px; height:11px; border-radius:50%; flex:0 0 auto; display:inline-block; }
+.dot.r{ background:#ff5f57; } .dot.y{ background:#febc2e; } .dot.g{ background:#28c840; }
+.path{ margin-left:8px; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:12px; color:#6b7099; letter-spacing:.3px; }
+.status-pill{ margin-left:auto; display:inline-flex; align-items:center; gap:6px; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:11px; color:#ff2e88; background:#ff2e881a; border:1px solid #ff2e8866; padding:3px 9px; border-radius:999px; }
+.status-pill .led{ width:6px; height:6px; border-radius:50%; background:#ff2e88; box-shadow:0 0 10px #ff2e88; }
+.card-body{ padding:26px 26px 22px; }
+.eyebrow{ display:block; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:11px; text-transform:uppercase; letter-spacing:2px; color:#ff2e88; margin:0 0 10px; }
+h1{ margin:0 0 8px; font-size:26px; font-weight:650; font-family:ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif; color:#fff; letter-spacing:.2px; }
+.subtitle{ margin:0 0 24px; color:#9aa0c0; line-height:1.45; font-size:14px; }
+.field{ margin:16px 0; }
+label{ display:block; font-size:12px; font-weight:600; color:#9aa0c0; margin:0 0 8px; }
+.input{ display:flex; align-items:center; gap:11px; padding:12px 14px; background:#0a0814; border:1px solid #ff2e8840; border-radius:10px; transition:border-color .15s ease, box-shadow .15s ease, background .15s ease; }
+.input:focus-within{ border-color:#ff2e88; box-shadow:0 0 0 3px #ff2e8833, 0 0 14px rgba(255,46,136,.5); }
+.icon{ width:18px; height:18px; flex:0 0 auto; color:#6b7099; }
+.input:focus-within .icon{ color:#ff2e88; }
+input{ width:100%; border:0; background:transparent; color:#f2f2ff; font-size:14px; font-family:ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif; outline:none; }
+input::placeholder{ color:#5a5f85; }
+.btn{ margin-top:22px; width:100%; border:0; padding:13px 14px; border-radius:10px; color:#07060d; font-weight:700; font-size:14px; letter-spacing:.3px; cursor:pointer; font-family:ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif; background:#ff2e88; box-shadow:0 0 22px -2px rgba(255,46,136,.5); transition:transform .06s ease, filter .15s ease, box-shadow .15s ease; }
+.btn:hover{ filter:brightness(1.05);  }
+.btn:active{ transform:translateY(1px); }
+.hint{ margin:16px 0 0; font-size:12px; color:#6b7099; text-align:center; }
+.captcha-box{ padding:15px; border-radius:10px; background:#0a0814; border:1px dashed #ff2e8855; }
+.captcha-top{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.captcha-label{ font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#9aa0c0; margin-bottom:6px; }
+.captcha-q{ font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:16px; font-weight:700; color:#f2f2ff; }
+.btn-ghost{ border:1px solid #ff2e8855; background:transparent; color:#9aa0c0; padding:9px 12px; border-radius:10px; font-weight:600; font-size:13px; cursor:pointer; font-family:ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif; transition:.15s ease; }
+.btn-ghost:hover{ border-color:#ff2e88; color:#ff2e88; }
+.toast{ position:fixed; left:50%; bottom:24px; transform:translateX(-50%) translateY(8px); display:flex; align-items:center; gap:9px; background:#0d0b18; border:1px solid #ff2e8855; border-left:3px solid #ff5577; color:#f2f2ff; padding:11px 15px; border-radius:10px; box-shadow:0 18px 40px -12px rgba(0,0,0,.45); font-size:13px; opacity:0; pointer-events:none; transition:opacity .2s ease, transform .2s ease; }
+.toast::before{ content:""; width:7px; height:7px; border-radius:50%; background:#ff5577; flex:0 0 auto; }
+.toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="aside" aria-hidden="true"></div>
+    <main class="card" role="main" aria-label="Форма доступа">
+      <div class="card-head">
+        <span class="dot r"></span>
+        <span class="dot y"></span>
+        <span class="dot g"></span>
+        <span class="path">ssh://secure-gateway</span>
+        <span class="status-pill"><span class="led"></span>online</span>
+      </div>
+      <div class="card-body">
+        <span class="eyebrow">Secure Access</span>
+        <h1>Доступ к серверу</h1>
+        <p class="subtitle">Авторизация требуется для продолжения. Используйте корпоративные учётные данные.</p>
+        <form id="loginForm" autocomplete="off" novalidate>
+          <div class="field">
+            <label for="user">Логин</label>
+            <div class="input">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              <input id="user" name="user" type="text" placeholder="ivan.petrov" autocomplete="username" required/>
+            </div>
+          </div>
+          <div class="field">
+            <label for="pass">Пароль</label>
+            <div class="input">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              <input id="pass" name="pass" type="password" placeholder="••••••••" autocomplete="current-password" required/>
+            </div>
+          </div>
+          <div class="field" id="captchaWrap" style="display:none">
+            <label>Проверка</label>
+            <div class="captcha-box">
+              <div class="captcha-label">Подтвердите, что вы человек</div>
+              <div class="captcha-top">
+                <div class="captcha-q" id="captchaQuestion">—</div>
+                <button type="button" class="btn-ghost" id="captchaRefresh" aria-label="Обновить">↻</button>
+              </div>
+              <div class="input" style="margin-top:12px">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                <input id="captchaAnswer" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="Ответ" autocomplete="off"/>
+              </div>
+            </div>
+          </div>
+          <button type="submit" class="btn">Войти</button>
+          <p class="hint">Забыли пароль? Обратитесь к администратору системы.</p>
+        </form>
+      </div>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script>
+  const form = document.getElementById('loginForm');
+  const captchaWrap = document.getElementById('captchaWrap');
+  const captchaQuestion = document.getElementById('captchaQuestion');
+  const captchaAnswer = document.getElementById('captchaAnswer');
+  const captchaRefresh = document.getElementById('captchaRefresh');
+  const toast = document.getElementById('toast');
+  let captchaAnswerValue = 0;
+  let attempts = 0;
+  let toastTimer = null;
+  function showToast(msg){ toast.textContent = msg; toast.classList.add('show'); if(toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(()=>{ toast.classList.remove('show'); }, 2600); }
+  function newCaptcha(){ const a = Math.floor(Math.random()*9)+1; const b = Math.floor(Math.random()*9)+1; captchaAnswerValue = a + b; captchaQuestion.textContent = a + ' + ' + b + ' = ?'; captchaAnswer.value = ''; }
+  function captchaIsRequired(){ return attempts >= 1; }
+  function captchaIsSolved(){ if(!captchaIsRequired()) return true; const v = parseInt(captchaAnswer.value, 10); return v === captchaAnswer.result; }
+  function showCaptchaIfNeeded(){ if(captchaIsRequired()){ captchaWrap.style.display='block'; if(!captchaQuestion.textContent || captchaQuestion.textContent==='—'){ newCaptcha(); } } }
+  captchaRefresh.addEventListener('click', ()=>{ newCaptcha(); showToast('Капча обновлена.'); });
+  form.addEventListener('submit', (e)=>{
+    e.preventDefault();
+    if(captchaIsRequired()){ showCaptchaIfNeeded(); if(!captchaIsSolved()){ showToast('Неверная капча. Попробуйте ещё раз.'); return; } }
+    attempts += 1; showCaptchaIfNeeded(); showToast('Неверный логин или пароль.');
+  });
+</script>
+</body>
+</html>
+"""
+
+
+# =============================================================================
+#  Диспетчер: возвращает функцию-генератор по индексу 1..16
+# =============================================================================
+# Шаблон 16 (Fake Login) добавлен для профиля CDN masking. В стандартный
+# выбор через create_website() (nginx_setup.py) он НЕ входит — там
+# индекс ограничен 1..15. Активируется только через cdn_masking_mode=True
+# в setup_nginx_final(), который явно вызывает create_fake_login().
 TEMPLATES = {
     1:  ("TechHub",            create_techhub),
     2:  ("NexCloud",           create_nexcloud),
@@ -2411,18 +2572,27 @@ TEMPLATES = {
     13: ("Quietude Library",   create_quietude),
     14: ("Mensara Consulting", create_mensara),
     15: ("Cascade Analytics",  create_cascade),
+    16: ("Fake Login",         create_fake_login),  # CDN masking only
 }
 
 
 def get_template_names() -> list:
-    """Возвращает список имён шаблонов, индексированный 1..15.
+    """Возвращает список имён шаблонов, индексированный 1..16.
+
     Индекс 0 — пустой (для совместимости со старым кодом, ожидавшим 'random').
+    Индекс 16 — «Fake Login», используется только в профиле CDN masking
+    (через cdn_masking_mode=True в setup_nginx_final); в стандартном
+    выборе шаблонов 1..15 не участвует.
     """
     return [""] + [name for name, _fn in TEMPLATES.values()]
 
 
 def build_template(index: int, web_root: Path) -> None:
-    """Вызывает функцию-генератор для шаблона с заданным индексом (1..15)."""
+    """Вызывает функцию-генератор для шаблона с заданным индексом (1..16).
+
+    Индексы 1..15 — стандартные шаблоны сайта (выбор через create_website()).
+    Индекс 16 — Fake Login, используется только в профиле CDN masking.
+    """
     if index not in TEMPLATES:
         # Fallback на NexCloud для неизвестных индексов (старое поведение).
         index = 2
