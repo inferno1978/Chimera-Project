@@ -610,26 +610,29 @@ def setup_nginx_final(domain: Optional[str] = None,
         # ВАЖНО: nginx-директивы имеют разные допустимые контексты.
         # Согласно документации nginx:
         #   • large_client_header_buffers — context: http (НЕ location!)
-        #   • underscore_in_headers       — context: http, server (НЕ location!)
         #   • proxy_send_timeout          — context: http, server, location
         #   • proxy_read_timeout          — context: http, server, location
         #   • proxy_next_upstream          — context: http, server, location
         #   • proxy_next_upstream_tries    — context: http, server, location
-        # Поэтому large_client_header_buffers и underscore_in_headers кладём
-        # в server {} блок, остальное — в location {} блок.
+        # Поэтому large_client_header_buffers кладём в server {} блок,
+        # остальное — в location {} блок.
         #
         # large_client_header_buffers — для больших padding-заголовков XHTTP.
-        # underscore_in_headers on — XHTTP использует кастомные заголовки вида
-        #   X-Api-Key, и без этой директивы nginx их молча dropped бы.
         # proxy_read_timeout 86400s — 24 часа, т.к. CDN edge может держать
         #   long-polling соединение очень долго.
+        #
+        # underscore_in_headers — УБРАНО. На некоторых кастомных сборках nginx
+        # (например, на отдельных VPS-провайдерах) этой директивы нет, и nginx
+        # падает с 'unknown directive "underscore_in_headers"'. XHTTP-заголовок
+        # X-Api-Key не содержит подчёркивания в начале, поэтому дефолтное
+        # поведение nginx (игнорировать заголовки с подчёркиваниями) на него
+        # не влияет. Проброс X-Api-Key работает и без underscore_in_headers.
         _cdn_server_extras = ""   # для server {} блока
         _cdn_location_extras = ""  # для location {} блока
         if cdn_masking_mode:
             _cdn_server_extras = textwrap.dedent(f"""\
                 # ── CDN masking: server-level настройки для Beeline/CF CDN edge ──
                 large_client_header_buffers 8 32k;
-                underscore_in_headers on;
             """)
             _cdn_location_extras = textwrap.dedent(f"""\
                     # ── CDN masking: location-level настройки ───────────────────
