@@ -20,6 +20,7 @@ Xray-core, парсинг x25519-ключей, нормализация верс
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import textwrap
@@ -1130,6 +1131,142 @@ class TestXrayGeoIsRunetfreedomCaseInsensitive(unittest.TestCase):
             result = xray_install._xray_geo_is_runetfreedom()
         self.assertTrue(result,
                         "Должна вернуть True для geosite.dat с uppercase тегом")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  generate_xray_config_xhttp — генерация config.json для XHTTP TLS.
+#  Регрессионный тест на багу «_xhttp_s3 not associated with a value»
+#  при активном профиле CDN masking.
+# ══════════════════════════════════════════════════════════════════════════════
+class TestGenerateXhttpConfigCdnMasking(unittest.TestCase):
+    """generate_xray_config_xhttp: корректная работа при XHTTP_CDN_MASKING=True.
+
+    Регрессионный тест: при активном CDN masking profile переменная
+    _xhttp_s3 должна определяться в if-ветке (а не _xhttp_s3_dict),
+    иначе 'xhttpSettings': _xhttp_s3 падает с UnboundLocalError.
+
+    Баг проявлялся только в runtime (при установке), т.к. в тестах
+    generate_xray_config_xhttp не вызывалась — она пишет config.json
+    и запускает xray -test.
+    """
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+        c = self._fake_core
+        # Минимальные атрибуты для generate_xray_config_xhttp.
+        c.PROTOCOL_MODE = "xhttp"
+        c.XHTTP_MODE = "streamup"
+        c.XHTTP_PATH = "/test-cdn.ts"
+        c.PARAM_DOMAIN = "test.example.com"
+        c.PARAM_UUID = "test-uuid-1234"
+        c.XHTTP_BACKEND_PORT = 8443  # будет переопределён на 7443
+        c.IS_IPV6_AVAILABLE = False
+        c.PARAM_DOMAIN_STRATEGY = "UseIPv4"
+        c.DNSCRYPT_LISTEN_PORT = 5353
+        c.DNSCRYPT_INSTALLED = False
+        c.DNSCRYPT_LISTEN_ADDR = "127.0.0.1"
+        c.AWG_FWMARK = 0
+        c.AWG_EXIT_ENABLED = False
+        c.SPLIT_TUNNEL_ENABLED = False
+        c.SERVER_PORT = 443
+        c.XRAY_BIN = "/usr/local/bin/xray"
+        c.INSTALL_COMPLETED = False
+        c.command_exists = lambda x: True
+        # Мокаем _run чтобы xray -test возвращал успех.
+        c._run = MagicMock(return_value=MagicMock(returncode=0, stdout="active",
+                                                   stderr=""))
+        c._set_config_owner = MagicMock()
+        c._apply_stats_to_config = lambda cfg: None
+        c._xray_log_block = lambda: {"loglevel": "warning"}
+        c.XHTTP_MODE_SUPPORTED = True
+        # Colors
+        for attr in ("YELLOW", "NC", "BOLD", "WHITE", "CYAN", "GREEN",
+                     "DIM", "RED", "BLUE"):
+            setattr(c, attr, "")
+        # Реальный temp-каталог для CONFIG_DIR (write_text нужен)
+        self._tmp = tempfile.mkdtemp()
+        c.CONFIG_DIR = Path(self._tmp)
+        # Patch Path.mkdir/chmod (как в других тестах).
+        self._path_mkdir_patcher = patch.object(Path, "mkdir",
+                                                lambda self, *a, **kw: None)
+        self._path_mkdir_patcher.start()
+        self._path_chmod_patcher = patch.object(Path, "chmod",
+                                                lambda self, *a, **kw: None)
+        self._path_chmod_patcher.start()
+        self._os_chown_patcher = patch("os.chown", lambda *a, **kw: None)
+        self._os_chown_patcher.start()
+        self._os_geteuid_patcher = patch("os.geteuid", return_value=0)
+        self._os_geteuid_patcher.start()
+
+    def tearDown(self):
+        self._path_mkdir_patcher.stop()
+        self._path_chmod_patcher.stop()
+        self._os_chown_patcher.stop()
+        self._os_geteuid_patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_cdn_masking_active_no_unbound_local_error(self):
+        """XHTTP_CDN_MASKING=True: generate_xray_config_xhttp не падает.
+
+        Регрессия: раньше в if-ветке переменная называлась _xhttp_s3_dict,
+        а в streamSettings ссылалась на _xhttp_s3 → UnboundLocalError.
+        """
+        self._fake_core.XHTTP_CDN_MASKING = True
+        from chimera.modules import xray_install
+        # Не должно бросить UnboundLocalError.
+        xray_install.generate_xray_config_xhttp()
+        # config.json должен быть создан.
+        cfg_file = Path(self._tmp) / "config.json"
+        self.assertTrue(cfg_file.exists(),
+            "config.json must be created")
+        cfg = json.loads(cfg_file.read_text())
+        # Проверка: используется CDN-masking профиль (port 7443).
+        self.assertEqual(cfg["inbounds"][0]["port"], 7443,
+            f"Port must be 7443 (CDN_MASKING_INBOUND_PORT), "
+            f"got {cfg['inbounds'][0]['port']}")
+        # Проверка: xhttpSettings.extra присутствует (CDN-masking профиль).
+        xhttp_settings = cfg["inbounds"][0]["streamSettings"]["xhttpSettings"]
+        self.assertIn("extra", xhttp_settings,
+            "xhttpSettings.extra must be present for CDN masking profile")
+        self.assertGreater(len(xhttp_settings["extra"]), 20,
+            f"CDN masking extra should have 24+ fields, "
+            f"got {len(xhttp_settings['extra'])}")
+        # Проверка: __backend_port НЕ должен попасть в финальный конфиг
+        # (он извлекается через .pop()).
+        self.assertNotIn("__backend_port", xhttp_settings,
+            "__backend_port must be popped from xhttpSettings before "
+            "writing to config.json")
+        # Проверка: XHTTP_BACKEND_PORT в core обновлён до 7443.
+        self.assertEqual(self._fake_core.XHTTP_BACKEND_PORT, 7443,
+            f"core.XHTTP_BACKEND_PORT must be updated to 7443, "
+            f"got {self._fake_core.XHTTP_BACKEND_PORT}")
+
+    def test_cdn_masking_inactive_uses_simple_xhttp(self):
+        """XHTTP_CDN_MASKING=False: используется простой _build_xhttp_settings.
+
+        Регрессия: при CDN masking выключеном, должен работать старый
+        путь через _build_xhttp_settings() — port остаётся 8443,
+        extra — базовый (xPaddingBytes, noGRPCHeader, noSSEHeader, ...).
+        """
+        self._fake_core.XHTTP_CDN_MASKING = False
+        from chimera.modules import xray_install
+        xray_install.generate_xray_config_xhttp()
+        cfg_file = Path(self._tmp) / "config.json"
+        self.assertTrue(cfg_file.exists())
+        cfg = json.loads(cfg_file.read_text())
+        # При CDN masking выключенном — стандартный port 8443.
+        self.assertEqual(cfg["inbounds"][0]["port"], 8443,
+            f"Port must be 8443 (standard XHTTP_BACKEND_PORT) when "
+            f"CDN masking off, got {cfg['inbounds'][0]['port']}")
+        # xhttpSettings присутствует, но без расширенных CDN-masking полей.
+        xhttp_settings = cfg["inbounds"][0]["streamSettings"]["xhttpSettings"]
+        self.assertIn("extra", xhttp_settings)
+        # В простом режиме extra содержит xPaddingBytes (базовый padding).
+        self.assertIn("xPaddingBytes", xhttp_settings["extra"])
+        # Но не содержит sessionKey (это CDN-masking специфичное поле).
+        self.assertNotIn("sessionKey", xhttp_settings["extra"],
+            "sessionKey must NOT be present in simple XHTTP mode "
+            "(only in CDN masking profile)")
 
 
 if __name__ == "__main__":
