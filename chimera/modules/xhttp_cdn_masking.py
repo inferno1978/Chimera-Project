@@ -17,10 +17,14 @@ chimera/modules/xhttp_cdn_masking.py
      — клиентская копия extra-блока (для client_config_export /
        users_manager._gen_vless_link).
   6. _unlock_cdn_masking_menu() / run_cdn_masking_install()
-     — скрытое меню, защищённое паролем (SHA-256 hash + hmac.compare_digest).
-       Plaintext-пароль в коде НЕ хранится — только hash. Админ меняет hash
-       через chimera/scripts/generate_cdn_masking_password_hash.py и сообщает
-       пароль платным клиентам отдельно.
+     — скрытое меню, защищённое паролем. Хеш пароля хранится ТОЛЬКО
+       в state-файле на сервере (/var/lib/xray-installer/cdn_premium.hash),
+       НИКОГДА не в исходниках и не в git. Используется PBKDF2-HMAC-SHA256
+       со случайной солью и 600000 итераций (OWASP 2025-2026), проверка
+       через hmac.compare_digest (constant-time). Plaintext-пароля нет
+       нигде в репозитории. Админ устанавливает/меняет пароль через
+       chimera/scripts/generate_cdn_masking_password_hash.py, который
+       пишет хеш прямо в state-файл (chmod 0600, root).
 
 СПРАВКА: профиль «CDN masking» — опциональный. Текущий простой XHTTP-режим
 (path+mode) остаётся дефолтным и не затрагивается. Профиль активируется
@@ -33,6 +37,9 @@ import hashlib
 import hmac
 import getpass
 import importlib
+import json
+import os
+from pathlib import Path
 from typing import Any
 
 
@@ -255,26 +262,48 @@ def build_xhttp_cdn_masking_client_xhttp_settings(domain: str, path: str) -> dic
 
 
 # =============================================================================
-#  СКРЫТОЕ МЕНЮ — защита паролем
+#  СКРЫТОЕ МЕНЮ — защита паролем (PBKDF2, state-file на сервере)
 # =============================================================================
-# В коде хранится ТОЛЬКО SHA-256 hash пароля. Plaintext НИГДЕ не появляется:
-#   • не в исходниках
-#   • не в комментариях
-#   • не в git-истории (мы передаём пароль юзеру в отдельном сообщении)
+# Хеш пароля хранится ТОЛЬКО в state-файле на диске сервера:
+#   /var/lib/xray-installer/cdn_premium.hash  (chmod 0600, root)
 #
-# Требования к паролю (ТЗ): ≥20 символов, заглавные + прописные + спец.символы.
+# Паттерн аналогичен другим state-файлам Chimera:
+#   HEALTH_CHECK_FILE = Path("/var/lib/xray-installer/health.status")
+#   STATE_FILE        = Path("/var/lib/xray-installer/state.json")
+#   — тот же каталог /var/lib/xray-installer/, те же права 0600.
 #
-# Админ меняет пароль так:
-#   1. Запускает chimera/scripts/generate_cdn_masking_password_hash.py
-#   2. Вводит новый пароль (скрипт проверяет длину/сложность)
-#   3. Получает SHA-256 hash
-#   4. Заменяет значение константы ниже
-#   5. Коммуницирует пароль платным клиентам отдельно (не через git)
+# В файле — JSON: {"salt": "<hex>", "hash": "<hex>",
+#                  "iterations": N, "algo": "pbkdf2_sha256"}.
+# Все параметры (включая iterations и algo) хранятся В ФАЙЛЕ, не в коде —
+# это позволяет в будущем поднять iterations без поломки старых хешей
+# (старые файлы просто остаются с меньшим N и работают до пересоздания).
 #
-# Текущий hash соответствует тестовому паролю (сообщается юзеру вне кода).
-_CDN_MASKING_PASSWORD_HASH: str = (
-    "e84455a260273ca94b7abf6fe34540666be3cdd431910bdbc72a5b5c6a4df4d9"
-)
+# КЛЮЧЕВЫЕ ГАРАНТИИ (vs. предыдущей версии с SHA-256-в-коде):
+#   • Хеш НИКОГДА не попадает в git (публичный репозиторий GitHub+GitLab).
+#   • Хеш НИКОГДА не попадает в git-историю (смена пароля = перезапись
+#     файла на сервере, без коммита).
+#   • Атакующий, получивший копию репозитория, не имеет ничего для
+#     офлайн-перебора — файла с хешем у него нет.
+#   • PBKDF2-HMAC-SHA256 с 600000 итераций + случайная соль 16 байт —
+#     медленный хеш, GPU-брутфорс дороже на ~5 порядков чем SHA-256.
+#   • При отсутствии файла (новая установка, профиль не активирован)
+#     верификация всегда возвращает False — раздел скрытого меню
+#     остаётся закрытым. Это соответствует исходному ТЗ: "функция
+#     не активирована".
+#
+# 600000 итераций — актуальная рекомендация OWASP для PBKDF2-HMAC-SHA256
+# на 2025-2026. Можно поднять до 1200000 при апгрейде железа; нельзя
+# опускать ниже 100000.
+CDN_MASKING_HASH_FILE: Path = Path("/var/lib/xray-installer/cdn_premium.hash")
+
+# Дефолтное число итераций для НОВЫХ хешей. Старые файлы читают своё
+# значение из JSON (см. _verify_cdn_masking_password — если ключ
+# "iterations" отсутствует, это старый формат, см. ниже).
+_CDN_MASKING_DEFAULT_ITERATIONS: int = 600_000
+
+# Алгоритм хеширования. Хранится также в файле — при будущем переходе
+# на argon2/scrypt старые файлы можно отличить по полю "algo".
+_CDN_MASKING_ALGO: str = "pbkdf2_sha256"
 
 
 def _core_module():
@@ -285,13 +314,93 @@ def _core_module():
 def _verify_cdn_masking_password(password: str) -> bool:
     """Проверяет пароль доступа к скрытому меню «CDN masking».
 
-    Использует hmac.compare_digest() для constant-time сравнения —
-    защита от timing-атак. Пароль НЕ хранится в коде, только его SHA-256 hash.
+    Схема (state-file на сервере, PBKDF2-HMAC-SHA256):
+      1. Если CDN_MASKING_HASH_FILE не существует → return False
+         (профиль не активирован, раздел остаётся скрытым).
+      2. Читает JSON, берёт salt/hash/iterations.
+      3. computed = pbkdf2_hmac("sha256", password, salt, iterations).hex()
+      4. hmac.compare_digest(computed, stored_hash) — constant-time.
+
+    ОБРАБОТКА СТАРОГО ФОРМАТА (миграция с несолёного SHA-256):
+      Если в JSON отсутствует ключ "iterations" или "algo" — это старый
+      формат от ДО PBKDF2-фикса. Верификация НЕ пытается сравнить как
+      SHA-256 (это ослабило бы гарантию и пропустило уязвимые хеши).
+      Вместо этого возвращается False, а в лог пишется предупреждение
+      (админ должен пересоздать пароль через generate_..._hash.py).
+      Автоматическая миграция SHA-256→PBKDF2 без участия админа запрещена
+      ТЗ — это ослабило бы гарантию.
+
+    Любая ошибка (битый JSON, отсутствующие ключи, permission denied)
+    → return False. Не бросает исключение наружу, не выдаёт существование
+    или состояние раздела через traceback.
     """
     if not password:
         return False
-    pwd_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
-    return hmac.compare_digest(pwd_hash, _CDN_MASKING_PASSWORD_HASH)
+
+    # Шаг 1: файл должен существовать.
+    try:
+        if not CDN_MASKING_HASH_FILE.exists():
+            return False
+    except Exception:
+        # Любая ошибка при проверке существования файла (permission, OSError)
+        # — тихо возвращаем False, не выдаём состояние раздела.
+        return False
+
+    # Шаг 2: читать и парсить JSON.
+    try:
+        raw_text = CDN_MASKING_HASH_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw_text)
+    except Exception:
+        # Битый JSON, файл недоступен для чтения, и т.п. — тихо False.
+        return False
+
+    # Шаг 3: проверить, что это новый формат (PBKDF2), а не старый (SHA-256).
+    # Если "iterations" или "algo" отсутствуют — это старый формат.
+    # Возвращаем False + лог предупреждения. НЕ пытаемся сравнить как SHA-256.
+    if "iterations" not in data or "algo" not in data:
+        try:
+            core = _core_module()
+            log_to_file = getattr(core, "log_to_file", None)
+            if log_to_file is not None:
+                log_to_file(
+                    "WARN",
+                    "CDN masking: обнаружен устаревший формат hash-файла "
+                    "(отсутствует 'iterations'/'algo'). Пересоздайте пароль "
+                    "через chimera/scripts/generate_cdn_masking_password_hash.py"
+                )
+        except Exception:
+            pass  # лог недоступен — тихо возвращаем False
+        return False
+
+    # Шаг 4: проверить, что algo — это pbkdf2_sha256. Если в будущем появится
+    # другой algo (argon2 и т.п.) — тут будет ветвление. Сейчас поддерживаем
+    # только pbkdf2_sha256; неизвестный algo → False (не падать).
+    algo = data.get("algo")
+    if algo != _CDN_MASKING_ALGO:
+        return False
+
+    # Шаг 5: извлечь salt, hash, iterations. Любая ошибка → False.
+    try:
+        salt_hex = data["salt"]
+        stored_hash = data["hash"]
+        iterations = int(data["iterations"])
+        salt = bytes.fromhex(salt_hex)
+    except Exception:
+        return False
+
+    # Шаг 6: вычислить PBKDF2-HMAC-SHA256 от введённого пароля.
+    try:
+        computed = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            iterations,
+        ).hex()
+    except Exception:
+        return False
+
+    # Шаг 7: constant-time сравнение.
+    return hmac.compare_digest(computed, stored_hash)
 
 
 def _unlock_cdn_masking_menu() -> bool:
