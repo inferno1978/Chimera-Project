@@ -2,6 +2,128 @@
 
 ---
 
+## SECURITY(cdn-masking): PBKDF2 + state-file вместо SHA-256-в-коде — 28 июля 2026
+
+**Критический security-фикс модели «платного скрытого доступа». Предыдущая
+реализация хранила несолёный SHA-256 hash пароля захардкоженным в исходнике,
+который инструкция велела коммитить в публичный репозиторий. Это полностью
+обнуляло security-модель: любой, кто клонирует репозиторий (публичный GitHub
++ GitLab), получал hash и мог перебирать его офлайн на GPU без следов на
+сервере. Каждая смена пароля добавляла ещё один hash в git-историю навсегда.**
+
+**Что было неправильно (для понимания, не для повторения):**
+- `_CDN_MASKING_PASSWORD_HASH` — константа в .py-файле, менялась через правку
+  кода + git commit + git push. Hash физически виден в публичном репозитории
+  и во всей git-истории.
+- `hashlib.sha256(password).hexdigest()` — без соли, без растяжения ключа
+  (PBKDF2/bcrypt/scrypt/argon2). Быстрый hash = дешёвый брутфорс.
+
+**Изменение:**
+
+1. **Хранение — ТОЛЬКО в state-файле на диске сервера, НИКОГДА не в коде
+   и не в git.** Аналогично существующим state-файлам в _core.py
+   (HEALTH_CHECK_FILE / STATE_FILE и десятки протокольных state_file):
+   ```
+   CDN_MASKING_HASH_FILE = Path("/var/lib/xray-installer/cdn_premium.hash")
+   ```
+   Формат файла — JSON: `{"salt": "<hex>", "hash": "<hex>",
+   "iterations": N, "algo": "pbkdf2_sha256"}`. Параметры iterations и algo
+   хранятся явно в файле (не константой в коде), чтобы в будущем можно было
+   поднять число итераций без поломки старых хешей. Права на файл — 0600,
+   владелец root (chmod сразу после записи).
+
+2. **`_verify_cdn_masking_password(password)`** (xhttp_cdn_masking.py) —
+   переписана:
+   - Если `CDN_MASKING_HASH_FILE` не существует → `return False` (как и
+     требуется по исходной задаче — «функция не активирована»).
+   - Читает JSON, `salt = bytes.fromhex(data["salt"])`, `stored_hash =
+     data["hash"]`, `iterations = data["iterations"]`.
+   - `computed = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+     salt, iterations).hex()`.
+   - `hmac.compare_digest(computed, stored_hash)` — constant-time сравнение
+     сохранено.
+   - Обёрнуто в `try/except` — любая ошибка (битый JSON, отсутствующие
+     ключи, permission denied) → `return False`, не бросает исключение
+     наружу (не выдаёт существование/состояние раздела через traceback).
+   - **Старый формат (без «iterations»/«algo»)** — НЕ мигрируется
+     автоматически. Возвращает False + WARN в лог. Админ должен пересоздать
+     пароль через `generate_cdn_masking_password_hash.py`. Авто-миграция
+     SHA-256→PBKDF2 без участия админа запрещена ТЗ — это ослабило бы
+     гарантию.
+
+3. **`chimera/scripts/generate_cdn_masking_password_hash.py`** — переписан:
+   - `check_password_strength` — БЕЗ ИЗМЕНЕНИЙ (эта часть была верной).
+   - `salt = os.urandom(16)`, `hash = pbkdf2_hmac(...)` с новым salt.
+   - Записывает JSON напрямую в `CDN_MASKING_HASH_FILE` (chmod 0600, root).
+     Атомарная запись через `tmp.replace(dest)`.
+   - Убраны все инструкции про «закоммитьте и запушьте в репозиторий» —
+     этой фразы нет нигде в выводе скрипта.
+   - Финальный вывод: «Пароль установлен. Файл
+     /var/lib/xray-installer/cdn_premium.hash обновлён (права 0600, root).
+     Пароль сообщите платным клиентам через защищённый канал».
+   - Новая функция `write_hash_file(password, dest, iterations)` —
+     тестируемая, пишет JSON в любой путь (для unit-тестов).
+
+4. **Дефолтное `iterations` для НОВЫХ хешей — 600000** (актуальная
+   рекомендация OWASP для PBKDF2-HMAC-SHA256 на 2025-2026). Не меньше
+   100000 — это нижняя граница, проверяется в тестах.
+
+5. **Докстринги** в `xhttp_cdn_masking.py` (верхний блок СОСТАВ пункт 6
+   и блок «СКРЫТОЕ МЕНЮ — защита паролем») — приведены в соответствие
+   новой схеме. Удалены упоминания «SHA-256 hash + hmac.compare_digest»
+   и «админ меняет hash через chimera/scripts/... и коммитит в репозиторий».
+
+**DO NOT TOUCH (по ТЗ):** `_unlock_cdn_masking_menu()` (getpass-ввод,
+UI-обёртка, сообщения об ошибке) — не менялся по существу. Скрытость пункта
+меню в `_core.py` (`choice.lower() == "cdn"`, тихий fallback) — корректна,
+не трогалась.
+
+**Тесты (tests/test_xhttp_cdn_masking.py):**
+- `TestPasswordVerification` — 19 тестов, покрывает все 7 пунктов ТЗ:
+  1. Файла нет → verify() всегда False для любого пароля.
+  2. Установленный пароль → verify(correct)==True, verify(wrong)==False.
+  3. (в TestPasswordHashScript) Два прогона одного пароля → разные salt
+     и hash.
+  4. Битый JSON / отсутствующие ключи (salt/hash/iterations/algo) → False
+     без исключения.
+  5. (в TestPasswordHashScript) Файл записывается с правами 0600.
+  6. Старый формат (без iterations/algo) → False с WARN в лог, не падает,
+     не пытается сравнить как PBKDF2.
+  7. (в TestPasswordHashScript) grep по скрипту — нет «закоммитьте»/
+     «запушьте»/«git commit»/«git push»/«замените значение константы»/
+     `_CDN_MASKING_PASSWORD_HASH` (case-sensitive для идентификатора,
+     case-insensitive для русских фраз).
+- `TestPasswordHashScript` — 20 тестов: check_password_strength (5),
+  write_hash_file (создание, JSON, 0600, salt 16 байт, hash 64 hex,
+  перезапись, parent dir creation, roundtrip с verify), случайность
+  salt между прогонами, отсутствие forbidden фраз в source и в main()
+  output.
+- Остальные классы (`TestBuildCdnMaskingInbound`, `TestBuildClientExtra`,
+  `TestBuildClientXhttpSettings`, `TestCdnMaskingConstants`) — НЕ
+  тронуты, все 36 тестов проходят.
+
+**Регрессии:** 0. `tests/test_xhttp_cdn_masking.py` — 75/75. Смежные
+тесты: `test_xray_install` (58), `test_subscription` (33),
+`test_client_config_export` (7), `test_users_manager` (12),
+`test_tui` (8), `test_ios_link_regression` (14), `test_ios_link_variant`
+(5), `test_nginx_watchdog` (2), `test_ssl_certbot` (2),
+`test_xhttp_path_gen` (14), `test_fake_login_template` (17),
+`test_cdn_masking_guide` (22) — все PASS. `full_test.py` — 10/10
+проверок, 74/74 подтестов.
+
+**Совместимость:**
+- Старый hash-файл (если был создан предыдущей версией с SHA-256-в-коде)
+  — на диске его не было (он был в коде), так что после обновления профиль
+  просто остаётся закрытым до тех пор, пока админ не запустит
+  `generate_cdn_masking_password_hash.py` для создания PBKDF2 hash-файла.
+- Если админ ранее «установил» пароль правкой константы в коде — этот
+  пароль больше НЕ работает (константа удалена). Нужно пересоздать через
+  скрипт.
+- Все остальные функции (`build_xhttp_cdn_masking_inbound`, fake-login
+  шаблон, CDN guide, nginx_setup cdn_masking_mode, и т.д.) — не менялись.
+
+---
+
 ## FEAT(xhttp): CDN masking profile — обход белых списков через Beeline CDN — 28 июля 2026
 
 **Новый опциональный профиль XHTTP для маскировки трафика под реальный
