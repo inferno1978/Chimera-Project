@@ -394,16 +394,20 @@ class TestClientConfigExportXhttpFix(unittest.TestCase):
 
         # Контрольные точки — фиксированные подстроки в коде.
         # 1. sing-box JSON xHTTP-ветка (transport.type).
-        self.assertIn('"transport": {"type": "xhttp", "path": xhttp_path}', src)
-        self.assertNotIn('"transport": {"type": "http", "path": xhttp_path}', src)
+        # Теперь transport содержит mode + path (не только path).
+        self.assertIn('"type": "xhttp"', src)
+        self.assertIn('"path": xhttp_path', src)
+        self.assertNotIn('"type": "http"', src)
 
-        # 2. vless_link для xHTTP в do_generate_client_config (строка ~244).
-        self.assertIn("&type=xhttp&path={xhttp_path_enc}#VLESS-xHTTP", src)
-        self.assertNotIn("&type=http&path={xhttp_path_enc}#VLESS-xHTTP", src)
+        # 2. vless_link для xHTTP в do_generate_client_config.
+        # Теперь содержит &mode={xhttp_mode} перед #VLESS-xHTTP.
+        self.assertIn("&type=xhttp&path={xhttp_path_enc}", src)
+        self.assertIn("&mode={xhttp_mode}#VLESS-xHTTP", src)
+        self.assertNotIn("&type=http&", src)
 
-        # 3. vless_link для xHTTP в do_share_config_server (строка ~486).
-        self.assertIn("&type=xhttp&path={xhttp_path}#VLESS-xHTTP", src)
-        self.assertNotIn("&type=http&path={xhttp_path}#VLESS-xHTTP", src)
+        # 3. vless_link для xHTTP в do_share_config_server.
+        self.assertIn("&type=xhttp&path={xhttp_path}", src)
+        self.assertIn("&mode={xhttp_mode}#VLESS-xHTTP", src)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
