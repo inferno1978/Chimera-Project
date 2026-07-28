@@ -57,7 +57,9 @@ class TestCdnMaskingPathSkip(unittest.TestCase):
         # (как делает run_cdn_masking_install() в xhttp_cdn_masking.py).
         self._fake_core.XHTTP_CDN_MASKING = True
         self._fake_core.XHTTP_PATH = "/test-cdn-path.ts"
-        self._fake_core.XHTTP_MODE = "stream-up"
+        # run_cdn_masking_install() выставляет XHTTP_MODE = "auto"
+        # (через _CDN_MASKING_XHTTP_MODE) —模拟 это поведение в тесте.
+        self._fake_core.XHTTP_MODE = "auto"
 
     def test_path_preserved_when_cdn_masking_active(self):
         """При XHTTP_CDN_MASKING=True path НЕ перезаписывается вопросом."""
@@ -121,22 +123,80 @@ class TestCdnMaskingPathSkip(unittest.TestCase):
             "_prompt_xhttp_options must call input() for path choice "
             "in else-branch")
 
-    def test_path_preserved_with_different_mode_choice(self):
-        """Path сохраняется при CDN masking, mode выбирается отдельно.
+    def test_mode_skipped_when_cdn_masking_active(self):
+        """При XHTTP_CDN_MASKING=True вопрос о mode ТОЖЕ пропускается.
 
-        Проверяем через инспекцию: mode-вопрос идёт ДО path-skip-логики,
-        значит mode можно выбрать любой, а path останется.
+        Регрессия: раньше _prompt_xhttp_options() переспрашивал mode даже
+        при CDN masking. Если пользователь выбирал "stream-up", а server
+        config жёстко "auto" → рассинхрон → клиент не подключался.
+        Теперь mode пропускается (как path) при CDN masking.
         """
         import inspect
         src = inspect.getsource(self._fake_core._prompt_xhttp_options)
-        # mode-вопрос должен быть ДО path-skip-блока
-        mode_pos = src.find('stream-up   — однонаправленный')
-        path_skip_pos = src.find('globals().get("XHTTP_CDN_MASKING", False)')
-        self.assertGreater(mode_pos, 0, "Mode question not found in source")
-        self.assertGreater(path_skip_pos, 0, "Path skip block not found")
-        self.assertLess(mode_pos, path_skip_pos,
-            "Mode question must come BEFORE path-skip block "
-            "(so mode is choosable independently of path)")
+        # Должно быть два if-блока: один для mode, один для path
+        # Оба проверяют XHTTP_CDN_MASKING
+        cdn_masking_checks = src.count('globals().get("XHTTP_CDN_MASKING", False)')
+        self.assertGreaterEqual(cdn_masking_checks, 2,
+            f"_prompt_xhttp_options must check XHTTP_CDN_MASKING at least 2 times "
+            f"(once for mode, once for path), found {cdn_masking_checks}")
+        # Должно быть info-сообщение про mode skip
+        self.assertIn('CDN masking: использую mode из скрытого меню', src,
+            "_prompt_xhttp_options must print info about mode skip for CDN masking")
+
+    def test_mode_preserved_when_cdn_masking_active(self):
+        """При CDN masking mode сохраняется как "auto" (не перезаписывается)."""
+        # XHTTP_MODE уже выставлен в "auto" в setUp через setattr
+        original_mode = self._fake_core.XHTTP_MODE
+        self.assertEqual(original_mode, "/test-cdn-path.ts" and "auto",
+            "Test setup error: XHTTP_MODE should be set to 'auto' or similar")
+        import builtins
+        orig_input = builtins.input
+        builtins.input = lambda prompt='': '1'  # default for all questions
+        try:
+            self._fake_core._prompt_xhttp_options()
+        finally:
+            builtins.input = orig_input
+        # Mode должен остаться "auto" (или тем, что было выставлено)
+        # При CDN masking _prompt_xhttp_options НЕ должен менять XHTTP_MODE
+        # (он использует уже выставленное значение, не переспрашивает)
+        # Проверяем что mode не стал "stream-up" (вариант 1)
+        self.assertNotEqual(self._fake_core.XHTTP_MODE, "stream-up",
+            "XHTTP_MODE must NOT be overwritten to 'stream-up' when "
+            "XHTTP_CDN_MASKING=True (mode is skipped, uses pre-set value)")
+
+    def test_auto_option_available_in_menu(self):
+        """В TUI меню есть пункт 'auto' (вариант 4).
+
+        Регрессия: раньше "auto" не было в меню — только stream-up,
+        stream-one, packet-up. Пользователь не мог выбрать auto для
+        обычного XHTTP.
+        """
+        import inspect
+        src = inspect.getsource(self._fake_core._prompt_xhttp_options)
+        self.assertIn('auto        — автоматический выбор', src,
+            "TUI menu must have 'auto' option (variant 4)")
+        self.assertIn('XHTTP_MODE = "auto"', src,
+            "_prompt_xhttp_options must set XHTTP_MODE='auto' when "
+            "user selects variant 4")
+
+    def test_path_preserved_with_different_mode_choice(self):
+        """Path сохраняется при CDN masking, mode тоже сохраняется.
+
+        Проверяем через инспекцию: при CDN masking оба вопроса (mode + path)
+        пропускаются — используются значения из скрытого меню.
+        """
+        import inspect
+        src = inspect.getsource(self._fake_core._prompt_xhttp_options)
+        # mode-skip-блок должен быть ДО path-skip-блока
+        # (оба проверяют XHTTP_CDN_MASKING)
+        first_cdn_check = src.find('globals().get("XHTTP_CDN_MASKING", False)')
+        second_cdn_check = src.find('globals().get("XHTTP_CDN_MASKING", False)', first_cdn_check + 1)
+        self.assertGreater(first_cdn_check, 0, "First CDN masking check not found")
+        self.assertGreater(second_cdn_check, 0, "Second CDN masking check not found")
+        # Первый check — для mode, второй — для path
+        # mode-skip идёт ДО path-skip
+        self.assertLess(first_cdn_check, second_cdn_check,
+            "Mode skip must come BEFORE path skip")
 
 
 if __name__ == "__main__":
