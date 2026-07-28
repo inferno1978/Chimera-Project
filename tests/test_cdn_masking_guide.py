@@ -7,10 +7,11 @@ Unit-тесты для chimera/modules/cdn_masking_guide.py — печать и�
 
 Покрывает:
   1. print_cdn_setup_instructions(domain, path) — домен/путь подставлены в вывод.
-  2. Вывод содержит все ключевые шаги (1-9) для Beeline CDN.
-  3. Вывод содержит origin URL и tunnel URL.
+  2. Вывод содержит все ключевые шаги (1-8) для Beeline CDN.
+  3. Вывод содержит tunnel URL.
   4. Вывод содержит правильный формат path.
   5. Пустой domain / path вызывает ValueError.
+  6. Шаг 5 (Rewrite) содержит явные ОТКУДА/КУДА с подставленным path.
 """
 from __future__ import annotations
 
@@ -55,11 +56,6 @@ class TestPrintCdnSetupInstructions(unittest.TestCase):
         out = self._capture("example.com", "/cdn/v3/signal.php")
         self.assertIn("/cdn/v3/signal.php", out)
 
-    def test_origin_url_in_output(self):
-        """Вывод содержит origin URL: https://<domain>:443."""
-        out = self._capture("example.com", "/api/v2/static.ts")
-        self.assertIn("https://example.com:443", out)
-
     def test_tunnel_url_in_output(self):
         """Вывод содержит tunnel URL: https://<domain><path>."""
         out = self._capture("example.com", "/api/v2/static.ts")
@@ -79,63 +75,97 @@ class TestPrintCdnSetupInstructions(unittest.TestCase):
         self.assertIn("Добавить ресурс", out)
         self.assertIn("Статика", out)
 
-    def test_contains_step_3_https(self):
-        """Шаг 3: Настройка HTTPS."""
+    def test_contains_step_3_resource_config(self):
+        """Шаг 3: Конфигурация ресурса (HTTPS/SNI/Host/Cache)."""
         out = self._capture("example.com", "/api/v2/static.ts")
         self.assertIn("ШАГ 3", out)
-        self.assertIn("Let's Encrypt", out)
+        self.assertIn("HTTPS", out)
+        self.assertIn("SNI", out)
 
-    def test_contains_step_4_caching(self):
-        """Шаг 4: Настройка кэширования."""
+    def test_contains_step_4_expert_settings(self):
+        """Шаг 4: Экспертные настройки (HTTP/2, TLS, таймауты, методы)."""
         out = self._capture("example.com", "/api/v2/static.ts")
         self.assertIn("ШАГ 4", out)
-        self.assertIn("Кэшировани", out)
+        self.assertIn("HTTP/2", out)
+        self.assertIn("Таймауты", out)
+        # Мануал Beeline: 5 / 300 / 300 (Connect/Read/Send)
+        self.assertIn("5 / 300 / 300", out)
+        self.assertIn("POST", out)
 
-    def test_contains_step_5_timeouts(self):
-        """Шаг 5: Настройка таймаутов."""
+    def test_contains_step_5_rewrite_with_from_to(self):
+        """Шаг 5: Rewrite с явными полями ОТКУДА/КУДА + path подставлен."""
         out = self._capture("example.com", "/api/v2/static.ts")
         self.assertIn("ШАГ 5", out)
-        # Заголовок шага содержит "таймаут" (case-insensitive)
-        self.assertTrue(
-            "таймаут" in out.lower() or "Timeout" in out,
-            "Step 5 should mention timeouts"
-        )
-        self.assertIn("3600", out)  # 1 hour timeout mentioned
+        self.assertIn("Rewrite", out)
+        self.assertIn("ОТКУДА", out)
+        self.assertIn("КУДА", out)
+        # Path подставлен в поля ОТКУДА/КУДА (без ведущего /, с trailing / в ОТКУДА)
+        self.assertIn("api/v2/static.ts/", out)   # ОТКУДА
+        self.assertIn("api/v2/static.ts\n", out + "\n")  # КУДА (без trailing /)
+        # «На конечных узлах» — это правильный выбор по мануалу Beeline
+        self.assertIn("На конечных узлах", out)
 
-    def test_contains_step_6_rewrite(self):
-        """Шаг 6: Rewrite правила."""
+    def test_contains_step_6_cname(self):
+        """Шаг 6: Привязка домена (CNAME)."""
         out = self._capture("example.com", "/api/v2/static.ts")
         self.assertIn("ШАГ 6", out)
-        self.assertIn("Rewrite", out)
-
-    def test_contains_step_7_websocket(self):
-        """Шаг 7: WebSocket / Streaming."""
-        out = self._capture("example.com", "/api/v2/static.ts")
-        self.assertIn("ШАГ 7", out)
-        # Проверяем что-то про streaming/websocket
-        self.assertTrue(
-            "WebSocket" in out or "Streaming" in out or "stream" in out.lower(),
-            "Step 7 should mention WebSocket/Streaming"
-        )
-
-    def test_contains_step_8_cname(self):
-        """Шаг 8: Привязка домена (CNAME)."""
-        out = self._capture("example.com", "/api/v2/static.ts")
-        self.assertIn("ШАГ 8", out)
         self.assertIn("CNAME", out)
 
-    def test_contains_step_9_verification(self):
-        """Шаг 9: Проверка."""
+    def test_contains_step_7_verification(self):
+        """Шаг 7: Проверка."""
         out = self._capture("example.com", "/api/v2/static.ts")
-        self.assertIn("ШАГ 9", out)
+        self.assertIn("ШАГ 7", out)
         self.assertIn("Проверк", out)
 
-    def test_contains_all_9_steps(self):
-        """Все 9 шагов присутствуют в выводе."""
+    def test_contains_step_8_final_cache_clear(self):
+        """Шаг 8: Финал — очистка кэша CDN-ресурса."""
         out = self._capture("example.com", "/api/v2/static.ts")
-        for i in range(1, 10):
+        self.assertIn("ШАГ 8", out)
+        self.assertIn("очистк", out.lower())  # «очистку кэша»
+
+    def test_contains_all_8_steps(self):
+        """Все 8 шагов присутствуют в выводе."""
+        out = self._capture("example.com", "/api/v2/static.ts")
+        for i in range(1, 9):
             self.assertIn(f"ШАГ {i}", out,
                 f"Step {i} missing in output")
+
+    def test_rewrite_from_to_substituted_correctly(self):
+        """ОТКУДА/КУДА вычисляются правильно для разных path."""
+        # Single-segment path
+        out = self._capture("example.com", "/assets.ts")
+        self.assertIn("ОТКУДА:  assets.ts/", out)
+        self.assertIn("КУДА:    assets.ts", out)
+        # Multi-segment path
+        out = self._capture("example.com", "/api/v3/segment.ts")
+        self.assertIn("ОТКУДА:  api/v3/segment.ts/", out)
+        self.assertIn("КУДА:    api/v3/segment.ts", out)
+
+    def test_rewrite_from_to_no_leading_slash(self):
+        """В полях ОТКУДА/КУДА нет ведущего '/' (требование панели Beeline)."""
+        out = self._capture("example.com", "/api/v2/static.ts")
+        # Не должно быть '/api/v2/static.ts/' (с ведущим /) в ОТКУДА
+        self.assertNotIn("ОТКУДА:  /api/v2/static.ts/", out)
+        # Должно быть без ведущего /
+        self.assertIn("ОТКУДА:  api/v2/static.ts/", out)
+
+    def test_rewrite_trailing_slash_only_in_from(self):
+        """Trailing '/' есть только в ОТКУДА, в КУДА его нет."""
+        out = self._capture("example.com", "/api/v2/static.ts")
+        self.assertIn("ОТКУДА:  api/v2/static.ts/", out)  # trailing /
+        # КУДА — без trailing /
+        # Ищем строку "КУДА:    api/v2/static.ts" (не "api/v2/static.ts/")
+        # ВАЖНО: 'ОТКУДА' содержит подстроку 'КУДА', поэтому ищем строки
+        # которые НЕ содержат 'ОТ' перед 'КУДА'.
+        lines = out.split('\n')
+        kuda_lines = [l for l in lines if 'КУДА:' in l and 'ОТКУДА' not in l]
+        self.assertTrue(len(kuda_lines) > 0, "No КУДА line in output (without ОТКУДА)")
+        for kuda_line in kuda_lines:
+            # Должно содержать path без trailing /
+            self.assertIn("api/v2/static.ts", kuda_line)
+            # Но не должно заканчиваться на "static.ts/"
+            self.assertFalse(re.search(r'static\.ts/\s*$', kuda_line),
+                f"КУДА line must not have trailing slash: {kuda_line!r}")
 
     def test_path_normalized_leading_slash(self):
         """Path без ведущего / нормализуется при подстановке."""
@@ -167,11 +197,14 @@ class TestPrintCdnSetupInstructions(unittest.TestCase):
         self.assertNotIn("domain1.com", out2)
 
     def test_different_paths_produce_different_output(self):
-        """Разные path → разный вывод."""
+        """Разные path → разный вывод (в т.ч. в ОТКУДА/КУДА)."""
         out1 = self._capture("example.com", "/api/v2/static.ts")
         out2 = self._capture("example.com", "/cdn/v3/signal.php")
         self.assertNotIn("/cdn/v3/signal.php", out1)
         self.assertNotIn("/api/v2/static.ts", out2)
+        # ОТКУДА/КУДА тоже должны отличаться
+        self.assertIn("api/v2/static.ts/", out1)
+        self.assertIn("cdn/v3/signal.php/", out2)
 
     def test_output_size_reasonable(self):
         """Вывод имеет разумный размер (не пустой, не огромный)."""

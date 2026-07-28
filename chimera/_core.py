@@ -1873,6 +1873,9 @@ def _build_tls_settings_xhttp(domain: str, cert_file: str, key_file: str,
 def _prompt_xhttp_options() -> None:
     """Дополнительные параметры xHTTP TLS."""
     global XHTTP_MODE, XHTTP_PATH, XHTTP_PORT
+    # CDN masking — читаем флаг, чтобы пропустить вопрос о path
+    # (path уже сгенерирован скрытым меню и выставлен в XHTTP_PATH).
+    global XHTTP_CDN_MASKING
 
     _box_top(f"Режим xHTTP")
     _box_row()
@@ -1906,28 +1909,47 @@ def _prompt_xhttp_options() -> None:
     success(f"xHTTP режим: {XHTTP_MODE}")
 
     # Путь endpoint
-    auto_path = "/" + gen_hex(4)
-    _box_top(f"xHTTP path (путь endpoint)")
-    _box_row()
-    _box_item("1", f"Авто: {DIM}{auto_path}{NC}")
-    _box_item("2", f"Ввести вручную")
-    _box_row()
-    _box_bottom()
-    while True:
-        ch = input("  Выбор [1/2]: ").strip() or "1"
-        if ch == "1":
-            XHTTP_PATH = auto_path
-            break
-        elif ch == "2":
-            while True:
-                v = input("  Path (начинается с /): ").strip()
-                if v.startswith("/"):
-                    XHTTP_PATH = v
-                    break
-                warn("  Путь должен начинаться с /")
-            break
-        else:
-            warn("Введите 1 или 2")
+    # CDN masking: path уже сгенерирован скрытым меню через
+    # xhttp_path_gen.generate_decoy_path() и выставлен в core.XHTTP_PATH.
+    # НЕ переспрашиваем — это критично: path уже должен быть вбит в
+    # Rewrite панели Beeline CDN, и любое изменение сломает связку.
+    # См. chimera/modules/xhttp_cdn_masking.py:run_cdn_masking_install()
+    # которая делает setattr(core, "XHTTP_PATH", _path) ДО вызова do_full_install().
+    if globals().get("XHTTP_CDN_MASKING", False):
+        if not XHTTP_PATH:
+            # Edge-case: флаг выставлен, но path пуст (создание из
+            # командной строки без скрытого меню). Генерируем через
+            # тот же генератор, что и скрытое меню — формат /api/v2/static.ts.
+            try:
+                from chimera.modules.xhttp_path_gen import generate_decoy_path
+                XHTTP_PATH = generate_decoy_path()
+            except ImportError:
+                XHTTP_PATH = "/" + gen_hex(4)  # fallback на старый формат
+        info(f"CDN masking: использую path из скрытого меню: {GREEN}{XHTTP_PATH}{NC}")
+        info(f"           (не переспрашиваю — path уже должен быть в Rewrite Beeline CDN)")
+    else:
+        auto_path = "/" + gen_hex(4)
+        _box_top(f"xHTTP path (путь endpoint)")
+        _box_row()
+        _box_item("1", f"Авто: {DIM}{auto_path}{NC}")
+        _box_item("2", f"Ввести вручную")
+        _box_row()
+        _box_bottom()
+        while True:
+            ch = input("  Выбор [1/2]: ").strip() or "1"
+            if ch == "1":
+                XHTTP_PATH = auto_path
+                break
+            elif ch == "2":
+                while True:
+                    v = input("  Path (начинается с /): ").strip()
+                    if v.startswith("/"):
+                        XHTTP_PATH = v
+                        break
+                    warn("  Путь должен начинаться с /")
+                break
+            else:
+                warn("Введите 1 или 2")
     success(f"xHTTP path: {XHTTP_PATH}")
 
     # Пресет производительности (smux / sockopt / TLS)
