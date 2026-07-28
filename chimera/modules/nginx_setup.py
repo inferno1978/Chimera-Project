@@ -610,37 +610,57 @@ def setup_nginx_final(domain: Optional[str] = None,
         # ВАЖНО: nginx-директивы имеют разные допустимые контексты.
         # Согласно документации nginx:
         #   • large_client_header_buffers — context: http (НЕ location!)
+        #   • underscore_in_headers       — context: http, server (НЕ location!)
         #   • proxy_send_timeout          — context: http, server, location
         #   • proxy_read_timeout          — context: http, server, location
         #   • proxy_next_upstream          — context: http, server, location
         #   • proxy_next_upstream_tries    — context: http, server, location
-        # Поэтому large_client_header_buffers кладём в server {} блок,
-        # остальное — в location {} блок.
+        # Поэтому large_client_header_buffers и underscore_in_headers кладём
+        # в server {} блок, остальное — в location {} блок.
         #
         # large_client_header_buffers — для больших padding-заголовков XHTTP.
-        # proxy_read_timeout 86400s — 24 часа, т.к. CDN edge может держать
-        #   long-polling соединение очень долго.
+        # underscore_in_headers on — XHTTP использует кастомные заголовки вида
+        #   X-Api-Key, и без этой директивы nginx их молча dropped бы.
         #
-        # underscore_in_headers — УБРАНО. На некоторых кастомных сборках nginx
-        # (например, на отдельных VPS-провайдерах) этой директивы нет, и nginx
-        # падает с 'unknown directive "underscore_in_headers"'. XHTTP-заголовок
-        # X-Api-Key не содержит подчёркивания в начале, поэтому дефолтное
-        # поведение nginx (игнорировать заголовки с подчёркиваниями) на него
-        # не влияет. Проброс X-Api-Key работает и без underscore_in_headers.
+        # ИСТОРИЯ ФИКСОВ (честная, не переписываем):
+        # • Коммит 1b434e3 перенёс large_client_header_buffers из location в
+        #   server, но использовал textwrap.dedent() который при вставке в
+        #   f-string с отступами ломал indentation — директива оказывалась
+        #   в column 0, и nginx терял контекст server{}.
+        # • Коммит fcb0cab объяснил падение "unknown directive underscore_in_headers"
+        #   тем, что "этой директивы нет на кастомных сборках". Это объяснение
+        #   было НЕВЕРНЫМ — underscore_in_headers часть ngx_http_core_module,
+        #   всегда есть в stock nginx. Реальная причина: textwrap.dedent()
+        #   ломал отступы, и nginx указывал на underscore_in_headers, хотя
+        #   проблема была в сломанной indentation строкой выше.
+        # • Этот коммит возвращает underscore_in_headers и ИСПРАВЛЯЕТ отступы
+        #   — используем явные строки с правильными отступами вместо
+        #   textwrap.dedent(), который не годится для встраивания в f-string.
+        #
+        # proxy_*_timeout — для CDN masking ставим 86400s (24 часа), т.к.
+        #   CDN edge может держать long-polling соединение очень долго.
+        #   Для обычного XHTTP — 3600s (1 час, как было раньше).
+        #   Раньше proxy_*_timeout дублировался: один раз в безусловной части
+        #   location-блока (3600s), второй раз в _cdn_location_extras (86400s).
+        #   Теперь — единая _proxy_timeout переменная, дублирования нет.
+        _proxy_timeout = "86400s" if cdn_masking_mode else "3600s"
         _cdn_server_extras = ""   # для server {} блока
         _cdn_location_extras = ""  # для location {} блока
         if cdn_masking_mode:
-            _cdn_server_extras = textwrap.dedent(f"""\
-                # ── CDN masking: server-level настройки для Beeline/CF CDN edge ──
-                large_client_header_buffers 8 32k;
-            """)
-            _cdn_location_extras = textwrap.dedent(f"""\
-                    # ── CDN masking: location-level настройки ───────────────────
-                    proxy_send_timeout 86400s;
-                    proxy_read_timeout 86400s;
-                    proxy_next_upstream off;
-                    proxy_next_upstream_tries 1;
-            """)
+            # Явные строки с правильными отступами (16 пробелов = уровень server).
+            # НЕ используем textwrap.dedent() — он ломает отступы при вставке
+            # в f-string. Каждая строка явно имеет 16-пробельный отступ.
+            _cdn_server_extras = (
+                "                # ── CDN masking: server-level настройки для Beeline/CF CDN edge ──\n"
+                "                large_client_header_buffers 8 32k;\n"
+                "                underscore_in_headers on;\n"
+            )
+            # 20 пробелов = уровень location (location на 16, содержимое на 20).
+            _cdn_location_extras = (
+                "                    # ── CDN masking: location-level настройки ───────────────────\n"
+                "                    proxy_next_upstream off;\n"
+                    "                    proxy_next_upstream_tries 1;\n"
+            )
 
         info(f"xHTTP TLS: Nginx терминирует TLS на :{SERVER_PORT}, "
              f"заглушка для /, проксирование {_xhttp_path} → http://{_backend}"
@@ -706,8 +726,8 @@ def setup_nginx_final(domain: Optional[str] = None,
                     proxy_request_buffering off;
                     proxy_buffering off;
                     proxy_max_temp_file_size 0;
-                    proxy_read_timeout 3600s;
-                    proxy_send_timeout 3600s;
+                    proxy_read_timeout {_proxy_timeout};
+                    proxy_send_timeout {_proxy_timeout};
                     proxy_connect_timeout 60s;
 {_cdn_location_extras}                }}
 

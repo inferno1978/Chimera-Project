@@ -100,8 +100,21 @@ class TestPrintCdnSetupInstructions(unittest.TestCase):
         self.assertIn("ОТКУДА", out)
         self.assertIn("КУДА", out)
         # Path подставлен в поля ОТКУДА/КУДА (без ведущего /, с trailing / в ОТКУДА)
-        self.assertIn("api/v2/static.ts/", out)   # ОТКУДА
-        self.assertIn("api/v2/static.ts\n", out + "\n")  # КУДА (без trailing /)
+        self.assertIn("api/v2/static.ts/", out)   # ОТКУДА (с trailing /)
+        # КУДА — без trailing /. Ищем "КУДА:    api/v2/static.ts" (без trailing /).
+        # ВАЖНО: 'ОТКУДА' содержит подстроку 'КУДА', поэтому фильтруем строки.
+        lines = out.split('\n')
+        kuda_lines = [l for l in lines if 'КУДА:' in l and 'ОТКУДА' not in l]
+        self.assertTrue(len(kuda_lines) > 0, "No КУДА line in output (without ОТКУДА)")
+        found_kuda = False
+        for kuda_line in kuda_lines:
+            # Должно содержать "api/v2/static.ts" БЕЗ trailing /
+            if "api/v2/static.ts" in kuda_line and "api/v2/static.ts/" not in kuda_line:
+                found_kuda = True
+                break
+        self.assertTrue(found_kuda,
+            f"КУДА line must contain 'api/v2/static.ts' WITHOUT trailing '/'. "
+            f"Lines: {kuda_lines!r}")
         # «На конечных узлах» — это правильный выбор по мануалу Beeline
         self.assertIn("На конечных узлах", out)
 
