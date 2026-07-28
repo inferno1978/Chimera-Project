@@ -466,7 +466,7 @@ def generate_xray_config_chain_entry() -> None:
     PARAM_DOMAIN = getattr(core, "PARAM_DOMAIN", "")
     PARAM_UUID = getattr(core, "PARAM_UUID", "")
     XTLS_FLOW = getattr(core, "XTLS_FLOW", "")
-    XHTTP_MODE = getattr(core, "XHTTP_MODE", "streamup")
+    XHTTP_MODE = getattr(core, "XHTTP_MODE", "stream-up")
     XHTTP_PATH = getattr(core, "XHTTP_PATH", "/")
     AWG_EXIT_ENABLED = getattr(core, "AWG_EXIT_ENABLED", False)
     PARAM_REALITY_DEST = getattr(core, "PARAM_REALITY_DEST", "")
@@ -1333,7 +1333,7 @@ def _prompt_one_node_from_link(index: int) -> dict | None:
             "flow":       parsed.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision",
             "proto":      parsed["proto"],
             "path":       parsed.get("path", "/"),
-            "xhttp_mode": parsed.get("xhttp_mode", "streamup"),
+            "xhttp_mode": parsed.get("xhttp_mode", "stream-up"),
         }
         return node
 
@@ -1407,7 +1407,7 @@ def _fix_node_fields(index: int, parsed: dict) -> dict | None:
         "flow":       parsed.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision",
         "proto":      parsed["proto"],
         "path":       parsed.get("path", "/"),
-        "xhttp_mode": parsed.get("xhttp_mode", "streamup"),
+        "xhttp_mode": parsed.get("xhttp_mode", "stream-up"),
     }
 
 
@@ -1504,7 +1504,7 @@ def _prompt_one_node_manual(index: int) -> dict | None:
 
     pubkey = ""
     shortid = ""
-    xhttp_mode_val = "streamup"
+    xhttp_mode_val = "stream-up"
     path_val = "/"
     flow_val = XTLS_FLOW
 
@@ -1543,7 +1543,7 @@ def _prompt_one_node_manual(index: int) -> dict | None:
     else:
         # xHTTP параметры
         _box_row(f"{BLUE}[E5] xHTTP режим:{NC}")
-        _box_row(f"   {CYAN}[1]{NC} streamup {GREEN}(рек.){NC}  {CYAN}[2]{NC} streamone  {CYAN}[3]{NC} packetup {YELLOW}(⚠ проверьте версию Xray){NC}")
+        _box_row(f"   {CYAN}[1]{NC} stream-up {GREEN}(рек.){NC}  {CYAN}[2]{NC} stream-one  {CYAN}[3]{NC} packet-up {YELLOW}(⚠ проверьте версию Xray){NC}")
         _box_bottom()
         while True:
             try:
@@ -1554,14 +1554,14 @@ def _prompt_one_node_manual(index: int) -> dict | None:
             if v == "0":
                 return None
             if v == "1":
-                xhttp_mode_val = "streamup"
+                xhttp_mode_val = "stream-up"
                 break
             elif v == "2":
-                xhttp_mode_val = "streamone"
+                xhttp_mode_val = "stream-one"
                 break
             elif v == "3":
-                xhttp_mode_val = "packetup"
-                warn("packetup выбран — убедитесь что ваша версия Xray-core его поддерживает")
+                xhttp_mode_val = "packet-up"
+                warn("packet-up выбран — убедитесь что ваша версия Xray-core его поддерживает")
                 break
             warn("   Введите 1, 2 или 3")
 
@@ -1703,7 +1703,7 @@ def generate_xray_config_chain_entry_multi() -> None:
     PARAM_DOMAIN = getattr(core, "PARAM_DOMAIN", "")
     PARAM_UUID = getattr(core, "PARAM_UUID", "")
     XTLS_FLOW = getattr(core, "XTLS_FLOW", "")
-    XHTTP_MODE = getattr(core, "XHTTP_MODE", "streamup")
+    XHTTP_MODE = getattr(core, "XHTTP_MODE", "stream-up")
     XHTTP_PATH = getattr(core, "XHTTP_PATH", "/")
     XHTTP_BACKEND_PORT = getattr(core, "XHTTP_BACKEND_PORT", 8443)
     XHTTP_TCP_NO_DELAY = getattr(core, "XHTTP_TCP_NO_DELAY", False)
@@ -2162,7 +2162,7 @@ def do_manage_nodes() -> None:
     PROTOCOL_MODE = getattr(core, "PROTOCOL_MODE", "reality")
     SERVER_PORT = getattr(core, "SERVER_PORT", 443)
     XHTTP_PORT = getattr(core, "XHTTP_PORT", 443)
-    XHTTP_MODE = getattr(core, "XHTTP_MODE", "streamup")
+    XHTTP_MODE = getattr(core, "XHTTP_MODE", "stream-up")
     XHTTP_PATH = getattr(core, "XHTTP_PATH", "/")
     XHTTP_PERF_PRESET = getattr(core, "XHTTP_PERF_PRESET", "")
     PARAM_DOMAIN = getattr(core, "PARAM_DOMAIN", "")
@@ -2244,7 +2244,7 @@ def do_manage_nodes() -> None:
 
     # BUGFIX: определяем поддержку "mode" для установленной версии Xray.
     # Без этого вызова XHTTP_MODE_SUPPORTED остаётся False (дефолт),
-    # и "mode": "streamup" не пишется в конфиг — или пишется неверно.
+    # и "mode": "stream-up" не пишется в конфиг — или пишется неверно.
     _detect_xhttp_mode_support()
 
     if INSTALL_MODE != "B":
@@ -2635,7 +2635,7 @@ def generate_chain_summary() -> None:
     CHAIN_EXIT_FP = getattr(core, "CHAIN_EXIT_FP", "chrome")
     CHAIN_BALANCER_STRATEGY = getattr(core, "CHAIN_BALANCER_STRATEGY", "roundRobin")
     PROTOCOL_MODE = getattr(core, "PROTOCOL_MODE", "reality")
-    XHTTP_MODE = getattr(core, "XHTTP_MODE", "streamup")
+    XHTTP_MODE = getattr(core, "XHTTP_MODE", "stream-up")
     XHTTP_PATH = getattr(core, "XHTTP_PATH", "/")
     PARAM_UUID = getattr(core, "PARAM_UUID", "")
     PARAM_PUBLIC_KEY = getattr(core, "PARAM_PUBLIC_KEY", "")
@@ -2732,7 +2732,7 @@ def generate_chain_summary() -> None:
 Адрес:      {nd['host']}
 Порт:       {nd['port']}
 UUID:       {nd['uuid']}
-xHTTP mode: {nd.get('xhttp_mode', 'streamup')}
+xHTTP mode: {nd.get('xhttp_mode', 'stream-up')}
 xHTTP path: {nd.get('path', '/')}
 SNI:        {nd.get('sni', '')}
 FP:         {nd.get('fp', 'chrome')}

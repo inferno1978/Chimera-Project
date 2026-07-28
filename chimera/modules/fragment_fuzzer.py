@@ -236,7 +236,7 @@ def _build_test_client_config(
                 "tlsSettings": {"serverName": server_host, "allowInsecure": False},
                 "xhttpSettings": {
                     "path": state.get("xhttp_path", "/"),
-                    "mode": state.get("xhttp_mode", "streamup"),
+                    "mode": state.get("xhttp_mode", "stream-up"),
                 },
             },
         }

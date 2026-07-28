@@ -107,7 +107,7 @@ def _show_qr(link: str, label: str, png_path: str) -> None:
     _core_call("_show_qr", link, label, png_path)
 
 def _gen_vless_link(host, uuid_str, pbk, sid, domain, fp="chrome",
-                    proto="reality", xhttp_path="/", xhttp_mode="streamup",
+                    proto="reality", xhttp_path="/", xhttp_mode="stream-up",
                     port=443) -> str:
     """Стандартная ссылка без fragment — делегируем в _core.py без изменений."""
     return _core_call(
@@ -173,7 +173,7 @@ def _gen_happ_link(
     host: str, uuid_str: str, pbk: str, sid: str, sni: str,
     packets: str, length: str, interval: str,
     fp: str = "chrome", proto: str = "reality",
-    xhttp_path: str = "/", xhttp_mode: str = "streamup", port: int = 443,
+    xhttp_path: str = "/", xhttp_mode: str = "stream-up", port: int = 443,
 ) -> str:
     """
     Happ (iOS/Android/Desktop, Xray-core).
@@ -192,7 +192,7 @@ def _gen_incy_link(
     host: str, uuid_str: str, pbk: str, sid: str, sni: str,
     packets: str, length: str, interval: str,
     fp: str = "chrome", proto: str = "reality",
-    xhttp_path: str = "/", xhttp_mode: str = "streamup", port: int = 443,
+    xhttp_path: str = "/", xhttp_mode: str = "stream-up", port: int = 443,
 ) -> str:
     """
     Incy (iOS/Android/Desktop/TV, Xray-core).
@@ -212,7 +212,7 @@ def _gen_nekoray_link(
     host: str, uuid_str: str, pbk: str, sid: str, sni: str,
     packets: str, length: str, interval: str,
     fp: str = "chrome", proto: str = "reality",
-    xhttp_path: str = "/", xhttp_mode: str = "streamup", port: int = 443,
+    xhttp_path: str = "/", xhttp_mode: str = "stream-up", port: int = 443,
 ) -> str:
     """
     Nekoray / Nekobox (Desktop, sing-box core).
@@ -242,7 +242,7 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
     short_id   = state.get("short_id", "")
     xtls_flow  = state.get("xtls_flow", "xtls-rprx-vision")
     xhttp_path = state.get("xhttp_path", "/")
-    xhttp_mode = state.get("xhttp_mode", "streamup")
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 
@@ -449,7 +449,7 @@ def _show_links_and_qr(state: dict, packets: str, length: str,
     short_id   = state.get("short_id", "")
     fp         = state.get("fingerprint", "chrome") or "chrome"
     xhttp_path = state.get("xhttp_path", "/")
-    xhttp_mode = state.get("xhttp_mode", "streamup")
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     sni        = _resolve_sni(state)
     ipv4       = _get_server_ip("4")
 

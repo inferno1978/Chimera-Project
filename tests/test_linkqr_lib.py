@@ -141,7 +141,7 @@ class TestBuildVlessLinkForUser(unittest.TestCase):
             "uuid": "test-uuid",
             "protocol_mode": "xhttp",
             "xhttp_path": "/xhttp",
-            "xhttp_mode": "streamup",
+            "xhttp_mode": "stream-up",
             "fingerprint": "chrome",
             "server_port": 443,
         }

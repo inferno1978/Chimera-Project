@@ -82,7 +82,7 @@ class TestBuildSubscriptionBodyUnchanged(unittest.TestCase):
             "awg_exit_enabled": False,
             "reality_dest": "",
             "xhttp_path": "/",
-            "xhttp_mode": "streamup",
+            "xhttp_mode": "stream-up",
         }
         user = {"uuid": "u-1", "email": "alice@example.com"}
 
@@ -173,7 +173,7 @@ class TestBuildSubscriptionBodyIosNoMirrorShadowUuid(unittest.TestCase):
             "awg_exit_enabled": False,
             "reality_dest": "",
             "xhttp_path": "/",
-            "xhttp_mode": "streamup",
+            "xhttp_mode": "stream-up",
         }
         user = {"uuid": self._orig_uuid, "email": "alice@example.com"}
 

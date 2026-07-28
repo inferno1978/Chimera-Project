@@ -474,9 +474,9 @@ def prompt_parameters() -> None:
         _box_row(f"  {CYAN}noGRPCHeader:{NC}    {XHTTP_NO_GRPC_HEADER}")
         if XHTTP_HOST:
             _box_row(f"  {CYAN}host:{NC}            {XHTTP_HOST}")
-        if XHTTP_MODE in ("streamup", "streamone", "auto"):
+        if XHTTP_MODE in ("stream-up", "stream-one", "auto"):
             _box_row(f"  {CYAN}StreamUpSrvSecs:{NC} {XHTTP_SC_STREAM_UP_SERVER_SECS}")
-        if XHTTP_MODE in ("packetup", "auto"):
+        if XHTTP_MODE in ("packet-up", "auto"):
             _box_row(f"  {CYAN}MaxEachPostBytes:{NC}{XHTTP_SC_MAX_EACH_POST_BYTES}")
             _box_row(f"  {CYAN}MinPostsIntervalMs:{NC}{XHTTP_SC_MIN_POSTS_INTERVAL_MS}")
             _box_row(f"  {CYAN}MaxBufferedPosts:{NC}{XHTTP_SC_MAX_BUFFERED_POSTS}")
