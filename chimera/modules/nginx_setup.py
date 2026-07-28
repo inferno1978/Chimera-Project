@@ -610,16 +610,16 @@ def setup_nginx_final(domain: Optional[str] = None,
         # ВАЖНО: nginx-директивы имеют разные допустимые контексты.
         # Согласно документации nginx:
         #   • large_client_header_buffers — context: http (НЕ location!)
-        #   • underscore_in_headers       — context: http, server (НЕ location!)
+        #   • underscores_in_headers       — context: http, server (НЕ location!)
         #   • proxy_send_timeout          — context: http, server, location
         #   • proxy_read_timeout          — context: http, server, location
         #   • proxy_next_upstream          — context: http, server, location
         #   • proxy_next_upstream_tries    — context: http, server, location
-        # Поэтому large_client_header_buffers и underscore_in_headers кладём
+        # Поэтому large_client_header_buffers и underscores_in_headers кладём
         # в server {} блок, остальное — в location {} блок.
         #
         # large_client_header_buffers — для больших padding-заголовков XHTTP.
-        # underscore_in_headers on — XHTTP использует кастомные заголовки вида
+        # underscores_in_headers on — XHTTP использует кастомные заголовки вида
         #   X-Api-Key, и без этой директивы nginx их молча dropped бы.
         #
         # ИСТОРИЯ ФИКСОВ (честная, не переписываем):
@@ -627,15 +627,25 @@ def setup_nginx_final(domain: Optional[str] = None,
         #   server, но использовал textwrap.dedent() который при вставке в
         #   f-string с отступами ломал indentation — директива оказывалась
         #   в column 0, и nginx терял контекст server{}.
-        # • Коммит fcb0cab объяснил падение "unknown directive underscore_in_headers"
+        # • Коммит fcb0cab объяснил падение "unknown directive underscores_in_headers"
         #   тем, что "этой директивы нет на кастомных сборках". Это объяснение
-        #   было НЕВЕРНЫМ — underscore_in_headers часть ngx_http_core_module,
-        #   всегда есть в stock nginx. Реальная причина: textwrap.dedent()
-        #   ломал отступы, и nginx указывал на underscore_in_headers, хотя
-        #   проблема была в сломанной indentation строкой выше.
-        # • Этот коммит возвращает underscore_in_headers и ИСПРАВЛЯЕТ отступы
-        #   — используем явные строки с правильными отступами вместо
-        #   textwrap.dedent(), который не годится для встраивания в f-string.
+        #   было НЕВЕРНЫМ — underscores_in_headers часть ngx_http_core_module,
+        #   всегда есть в stock nginx.
+        # • Коммит 648aebc вернул underscores_in_headers и исправил отступы
+        #   (убрал textwrap.dedent, использовал явные строки). Но ВЫЯСНИЛОСЬ,
+        #   что настоящая причина "unknown directive" была не в отступах —
+        #   а в ОПЕЧАТКЕ: директива называется underscores_in_headers (с "s"
+        #   после "underscore", множественное число), а в коде была опечатка
+        #   "underscores_in_headers" (без "s"). nginx не знает директивы
+        #   "underscores_in_headers" вообще ни в каком контексте — отсюда
+        #   "unknown directive", а не "not allowed here".
+        # • Этот коммит исправляет опечатку: underscores_in_headers →
+        #   underscores_in_headers во всём коде, тестах, скриптах.
+        #   Проверено на реальном nginx/1.24.0: underscores_in_headers on;
+        #   → syntax is ok. underscores_in_headers on; → unknown directive.
+        #   Урок: 20 "зелёных" тестов не поймали опечатку, потому что ни
+        #   один не сверялся с реальным поведением nginx — тесты искали ту
+        #   же опечатку, что и код.
         #
         # proxy_*_timeout — для CDN masking ставим 86400s (24 часа), т.к.
         #   CDN edge может держать long-polling соединение очень долго.
@@ -653,7 +663,7 @@ def setup_nginx_final(domain: Optional[str] = None,
             _cdn_server_extras = (
                 "                # ── CDN masking: server-level настройки для Beeline/CF CDN edge ──\n"
                 "                large_client_header_buffers 8 32k;\n"
-                "                underscore_in_headers on;\n"
+                "                underscores_in_headers on;\n"
             )
             # 20 пробелов = уровень location (location на 16, содержимое на 20).
             _cdn_location_extras = (
