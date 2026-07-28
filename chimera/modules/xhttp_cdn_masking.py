@@ -493,6 +493,7 @@ def run_cdn_masking_install() -> None:
     _box_desc = core._box_desc
     _box_ok = core._box_ok
     _box_warn = core._box_warn
+    _box_info = core._box_info
     CYAN = core.CYAN
     NC = core.NC
     GREEN = core.GREEN
@@ -547,47 +548,117 @@ def run_cdn_masking_install() -> None:
     success(f"Сгенерирован path: {GREEN}{_path}{NC}")
     info("Запуск полной установки профиля CDN masking...")
 
+    # ── Вызов do_full_install ─────────────────────────────────────────────
+    # ВАЖНО: do_full_install в конце печатает блок «УСТАНОВКА ЗАВЕРШЕНА»
+    # и сразу возвращается в main_menu(), который делает os.system("clear").
+    # Если тут возникнет исключение — мы его ловим, печатаем traceback для
+    # отладки, но НЕ return-им сразу: инструкция Beeline CDN всё равно
+    # печатается (origin-side конфиг может быть частично готов, и инструкция
+    # нужна для ручной настройки CDN-панели).
+    install_exception: Exception | None = None
     try:
-        # do_full_install — основная функция установки из _core.py.
-        # Она вызовет prompt_protocol_mode() → пользователь выберет xhttp →
-        # _prompt_xhttp_options() → do_full_install увидит XHTTP_CDN_MASKING=True
-        # и использует build_xhttp_cdn_masking_inbound вместо _build_xhttp_settings.
         do_full_install = core.do_full_install
         do_full_install()
     except Exception as e:
+        install_exception = e
+        # Печатаем traceback полностью — пользователь должен видеть ЧТО упало.
+        import traceback
         warn(f"Ошибка установки: {e}")
-        return
+        warn("Полный traceback (для отладки):")
+        for line in traceback.format_exc().splitlines()[-15:]:
+            warn(f"  {line}")
+
+    # ── Пауза после установки — пользователь видит финальный статус ───────
+    # Без этой паузы main_menu() сразу сделал бы os.system("clear") и затёр
+    # блок «УСТАНОВКА ЗАВЕРШЕНА». Даём пользователю время прочитать.
+    print()
+    try:
+        input(f"  {CYAN}Нажмите Enter чтобы увидеть инструкцию по Beeline CDN...{NC}")
+    except (EOFError, KeyboardInterrupt):
+        pass
 
     # ── Печать инструкции для Beeline CDN ─────────────────────────────────
+    # Печатается ВСЕГДА — даже если do_full_install упал. Если домен не
+    # определён (упали на самом первом шаге), используем заглушку.
     PARAM_DOMAIN = getattr(core, "PARAM_DOMAIN", "") or ""
-    if not PARAM_DOMAIN:
-        warn("Не удалось определить домен — инструкция не напечатана.")
-        return
 
     print()
     _box_top("📖  ИНСТРУКЦИЯ: НАСТРОЙКА BEELINE CDN")
     _box_row()
     _box_desc("Эти шаги нужно выполнить ВРУЧНУЮ в панели Beeline CDN.")
     _box_desc("Установщик только генерирует origin-side конфигурацию.")
+    if install_exception is not None:
+        _box_row()
+        _box_warn("⚠️  Установка завершилась с ошибкой (см. выше). Инструкция")
+        _box_warn("    всё равно показана — origin-side конфиг может быть частично готов.")
+        _box_warn("    После исправления ошибки — настройте Beeline CDN по шагам ниже.")
+    if not PARAM_DOMAIN:
+        _box_row()
+        _box_warn("⚠️  Домен не определён (установка прервалась рано). В шагах")
+        _box_warn("    ниже замените '<domain>' на ваш реальный домен.")
+        PARAM_DOMAIN = "<domain>"
     _box_sep()
     _box_bottom()
     print()
 
+    # Печатаем инструкцию и ОДНОВРЕМЕННО сохраняем в файл — чтобы
+    # пользователь мог прочитать её позже (после того как main_menu
+    # сделает clear и затрёт вывод).
+    import io
+    import contextlib
+    _guide_buf = io.StringIO()
     try:
-        print_cdn_setup_instructions(PARAM_DOMAIN, _path)
+        # Дублируем вывод: и в stdout (для интерактива), и в буфер (для файла)
+        with contextlib.redirect_stdout(_guide_buf):
+            print_cdn_setup_instructions(PARAM_DOMAIN, _path)
+        # Печатаем содержимое буфера в stdout
+        guide_text = _guide_buf.getvalue()
+        print(guide_text, end="")
     except Exception as e:
         warn(f"Ошибка печати инструкции: {e}")
+        guide_text = f"Ошибка генерации инструкции: {e}\n"
+
+    # ── Сохраняем инструкцию в файл на диске ──────────────────────────────
+    # Файл переживает os.system("clear") — пользователь всегда может
+    # прочитать его через cat /root/cdn_masking_instructions.txt
+    try:
+        guide_file = Path("/root/cdn_masking_instructions.txt")
+        guide_file.write_text(
+            f"=== CDN MASKING — ИНСТРУКЦИЯ ПО НАСТРОЙКЕ BEELINE CDN ===\n"
+            f"Path: {_path}\n"
+            f"Domain: {PARAM_DOMAIN}\n"
+            f"Backend: 127.0.0.1:{CDN_MASKING_INBOUND_PORT}\n"
+            f"Дата: {__import__('datetime').datetime.now().isoformat()}\n"
+            f"{'=' * 60}\n\n"
+            f"{guide_text}\n",
+            encoding="utf-8",
+        )
+        try:
+            os.chmod(guide_file, 0o600)
+        except Exception:
+            pass
+        info(f"Инструкция сохранена в файл: {guide_file}")
+        info(f"  cat {guide_file}  — прочитать позже")
+    except Exception as e:
+        warn(f"Не удалось сохранить инструкцию в файл: {e}")
 
     print()
-    _box_top("✅  CDN MASKING УСТАНОВЛЕН")
+    _box_top("✅  CDN MASKING — ИТОГ")
     _box_row()
     _box_ok(f"Path:        {_path}")
     _box_ok(f"Домен:       {PARAM_DOMAIN}")
     _box_ok(f"Backend:     127.0.0.1:{CDN_MASKING_INBOUND_PORT}")
+    if install_exception is not None:
+        _box_row()
+        _box_warn("⚠️  Установка завершилась с ошибкой — см. traceback выше.")
+        _box_warn("    Сервисы могут быть не запущены. Проверьте:")
+        _box_warn("      journalctl -u xray -n 50 --no-pager")
+        _box_warn("      journalctl -u nginx -n 50 --no-pager")
     _box_row()
     _box_sep()
     _box_row()
-    _box_warn("Не забудьте настроить Beeline CDN по инструкции выше.")
+    _box_info(f"Инструкция по Beeline CDN — выше и в файле /root/cdn_masking_instructions.txt")
+    _box_warn("Не забудьте настроить Beeline CDN по инструкции.")
     _box_bottom()
     print()
     try:
