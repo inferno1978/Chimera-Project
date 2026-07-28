@@ -607,19 +607,32 @@ def setup_nginx_final(domain: Optional[str] = None,
         _backend = f"127.0.0.1:{XHTTP_BACKEND_PORT}"
 
         # ── CDN masking: доп. настройки для корректной работы через CDN edge ─
+        # ВАЖНО: nginx-директивы имеют разные допустимые контексты.
+        # Согласно документации nginx:
+        #   • large_client_header_buffers — context: http (НЕ location!)
+        #   • underscore_in_headers       — context: http, server (НЕ location!)
+        #   • proxy_send_timeout          — context: http, server, location
+        #   • proxy_read_timeout          — context: http, server, location
+        #   • proxy_next_upstream          — context: http, server, location
+        #   • proxy_next_upstream_tries    — context: http, server, location
+        # Поэтому large_client_header_buffers и underscore_in_headers кладём
+        # в server {} блок, остальное — в location {} блок.
+        #
         # large_client_header_buffers — для больших padding-заголовков XHTTP.
-        # proxy_request_buffering off + proxy_buffering off — обязательно для
-        #   stream-up (CF/Beeline CDN иначе рвут stream-up соединение через 100с).
-        # proxy_read_timeout 86400s — 24 часа, т.к. CDN edge может держать
-        #   long-polling соединение очень долго.
         # underscore_in_headers on — XHTTP использует кастомные заголовки вида
         #   X-Api-Key, и без этой директивы nginx их молча dropped бы.
-        _cdn_extras = ""
+        # proxy_read_timeout 86400s — 24 часа, т.к. CDN edge может держать
+        #   long-polling соединение очень долго.
+        _cdn_server_extras = ""   # для server {} блока
+        _cdn_location_extras = ""  # для location {} блока
         if cdn_masking_mode:
-            _cdn_extras = textwrap.dedent(f"""\
-                    # ── CDN masking: настройки для Beeline/CF CDN edge ──────────────
-                    large_client_header_buffers 8 32k;
-                    underscore_in_headers on;
+            _cdn_server_extras = textwrap.dedent(f"""\
+                # ── CDN masking: server-level настройки для Beeline/CF CDN edge ──
+                large_client_header_buffers 8 32k;
+                underscore_in_headers on;
+            """)
+            _cdn_location_extras = textwrap.dedent(f"""\
+                    # ── CDN masking: location-level настройки ───────────────────
                     proxy_send_timeout 86400s;
                     proxy_read_timeout 86400s;
                     proxy_next_upstream off;
@@ -670,7 +683,7 @@ def setup_nginx_final(domain: Optional[str] = None,
                 index index.html;
 
                 add_header X-Robots-Tag "noindex, nofollow" always;
-
+{_cdn_server_extras}
                 # ── xHTTP path → Xray backend (loopback) ─────────────────────────
                 # ВАЖНО для stream-up / packet-up режимов xHTTP:
                 #   • proxy_http_version 1.1 + Connection "" — keep-alive к upstream
@@ -693,7 +706,7 @@ def setup_nginx_final(domain: Optional[str] = None,
                     proxy_read_timeout 3600s;
                     proxy_send_timeout 3600s;
                     proxy_connect_timeout 60s;
-{_cdn_extras}                }}
+{_cdn_location_extras}                }}
 
                 # ── Заглушка: сайт отдаётся для всех прочих путей ─────────────────
                 location / {{
