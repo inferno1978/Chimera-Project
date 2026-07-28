@@ -1097,8 +1097,8 @@ XTLS_FLOW: str = "xtls-rprx-vision"
 YOUTUBE_VIA_RU: bool = False
 
 # Режим работы xHTTP (только для PROTOCOL_MODE == "xhttp")
-# "streamup" | "streamone" | "packetup"
-XHTTP_MODE: str = "streamup"
+# "stream-up" | "stream-one" | "packet-up"
+XHTTP_MODE: str = "stream-up"
 
 # Порт прослушивания Xray (общий для REALITY и xHTTP, по умолчанию 443)
 # Пользователь может выбрать любой порт 1–65535 при установке.
@@ -1179,7 +1179,7 @@ XHTTP_SC_MIN_POSTS_INTERVAL_MS: str = "30"
 
 # xmux — мультиплексирование proxy-потоков внутри одного HTTP/2 соединения (клиент).
 #   Существенно повышает пропускную способность при H2, особенно на высоком RTT.
-#   Применяется в основном для streamup / streamone / auto.
+#   Применяется в основном для stream-up / stream-one / auto.
 XHTTP_XMUX_ENABLED: bool = False
 XHTTP_XMUX_MAX_CONCURRENCY:   str = "16-32"   # параллельных proxy-потоков на соединение
 XHTTP_XMUX_MAX_CONNECTIONS:   int = 0          # 0 = без лимита
@@ -1805,11 +1805,11 @@ def _build_xhttp_settings(mode: str, path: str, preset: str | None = None) -> tu
         extra["noSSEHeader"] = False
 
     # Параметры stream-up (только сервер): keepalive против разрыва CDN/CF через 100 с.
-    if mode in ("streamup", "streamone", "auto"):
+    if mode in ("stream-up", "stream-one", "auto"):
         extra["scStreamUpServerSecs"] = XHTTP_SC_STREAM_UP_SERVER_SECS
 
     # Параметры packet-up (клиент + сервер).
-    if mode in ("packetup", "auto"):
+    if mode in ("packet-up", "auto"):
         # scMaxEachPostBytes: макс. данных в одном POST (клиент + сервер).
         extra["scMaxEachPostBytes"] = XHTTP_SC_MAX_EACH_POST_BYTES
         # scMinPostsIntervalMs: мин. интервал между POST-запросами клиента (мс).
@@ -1880,14 +1880,14 @@ def _prompt_xhttp_options() -> None:
     _box_top(f"Режим xHTTP")
     _box_row()
     _box_row()
-    _box_item("1", f"streamup   — однонаправленный стриминг (Upload-stream) {GREEN}(рекомендуется){NC}")
+    _box_item("1", f"stream-up   — однонаправленный стриминг (Upload-stream) {GREEN}(рекомендуется){NC}")
     _box_desc(f"Клиент стримит данные серверу как один длинный POST.")
     _box_desc(f"Хорошо обходит глубокую инспекцию, поддерживает большинство CDN.")
     _box_row()
-    _box_item("2", f"streamone  — один двунаправленный поток")
+    _box_item("2", f"stream-one  — один двунаправленный поток")
     _box_desc(f"Полный HTTP/2 stream multiplex. Для CDN и продвинутого камуфляжа.")
     _box_row()
-    _box_item("3", f"packetup   — пакетный режим (Upload-packet)")
+    _box_item("3", f"packet-up   — пакетный режим (Upload-packet)")
     _box_desc(f"Каждый фрагмент данных — отдельный HTTP-запрос.")
     _box_desc(f"{YELLOW}⚠ Может не поддерживаться вашей версией Xray-core.{NC}")
     _box_row()
@@ -1895,14 +1895,14 @@ def _prompt_xhttp_options() -> None:
     while True:
         choice = input(f"  {CYAN}Выбор [1]: {NC}").strip() or "1"
         if choice == "1":
-            XHTTP_MODE = "streamup"
+            XHTTP_MODE = "stream-up"
             break
         elif choice == "2":
-            XHTTP_MODE = "streamone"
+            XHTTP_MODE = "stream-one"
             break
         elif choice == "3":
-            XHTTP_MODE = "packetup"
-            warn("packetup выбран — убедитесь что ваша версия Xray-core его поддерживает")
+            XHTTP_MODE = "packet-up"
+            warn("packet-up выбран — убедитесь что ваша версия Xray-core его поддерживает")
             break
         else:
             warn("Введите 1, 2 или 3")
@@ -2004,7 +2004,7 @@ def _prompt_xhttp_options() -> None:
     _box_row(f"  {DIM}Что делает:{NC} Добавляет случайное количество байт в заголовки каждого")
     _box_row(f"  HTTP-запроса (Referer) и ответа (X-Padding). Это устраняет fingerprint")
     _box_row(f"  по фиксированной длине заголовка — одну из главных примет прокси-трафика.")
-    _box_row(f"  {DIM}Применяется:{NC} во всех режимах (streamup, streamone, packetup).")
+    _box_row(f"  {DIM}Применяется:{NC} во всех режимах (stream-up, stream-one, packet-up).")
     _box_row(f"  {DIM}Формат:{NC} \"MIN-MAX\" — случайное значение в диапазоне, либо фиксированное число.")
     _box_row()
     _box_item("1", f'{GREEN}"100-1000"{NC} — рекомендуется: padding 100–1000 байт')
@@ -2049,7 +2049,7 @@ def _prompt_xhttp_options() -> None:
     _box_row(f"  Content-Type: text/event-stream в ответы, маскируясь под Server-Sent Events.")
     _box_row(f"  Это улучшает совместимость с CDN и middlebox-ами, которые пропускают SSE.")
     _box_row(f"  Включите (true), если ваш CDN или обратный прокси блокирует SSE-соединения.")
-    _box_row(f"  {DIM}Применяется:{NC} только сервер, режимы streamup и streamone.")
+    _box_row(f"  {DIM}Применяется:{NC} только сервер, режимы stream-up и stream-one.")
     _box_sep()
     _box_item("1", f"false — SSE-заголовок включён {GREEN}(рекомендуется){NC}")
     _box_desc(f"Маскировка под Server-Sent Events, лучшая совместимость с CDN")
@@ -2074,14 +2074,14 @@ def _prompt_xhttp_options() -> None:
     # Сервер каждые N секунд отправляет xPaddingBytes байт для поддержания соединения.
     # Предотвращает разрыв CF/CDN при отсутствии данных > 100 с.
     # Значение -1 отключает механизм (поведение старых версий Xray).
-    if XHTTP_MODE in ("streamup", "streamone") or XHTTP_MODE == "auto":
+    if XHTTP_MODE in ("stream-up", "stream-one") or XHTTP_MODE == "auto":
         _box_row(f"{BOLD}{BLUE}[C] scStreamUpServerSecs{NC} — интервал keepalive для stream-up (только сервер)")
         _box_row(f"  {DIM}Что делает:{NC} Cloudflare и многие CDN разрывают HTTP-соединение,")
         _box_row(f"  если в течение 100 секунд не было реальных данных. Этот параметр")
         _box_row(f"  заставляет сервер каждые N секунд отправлять клиенту несколько байт")
         _box_row(f"  padding-а (xPaddingBytes), чтобы CDN «видел» активное соединение.")
         _box_row(f"  Значение -1 отключает механизм (поведение Xray до введения этого параметра).")
-        _box_row(f"  {DIM}Применяется:{NC} только сервер, режим streamup (и auto при TLS H2).")
+        _box_row(f"  {DIM}Применяется:{NC} только сервер, режим stream-up (и auto при TLS H2).")
         _box_row(f"  {DIM}Формат:{NC} \"MIN-MAX\" сек — случайный интервал, либо фиксированное число.")
         _box_sep()
         _box_item("1", f'{GREEN}"20-80"{NC}  — рекомендуется: интервал 20–80 с')
@@ -2124,7 +2124,7 @@ def _prompt_xhttp_options() -> None:
     #     Должно быть меньше лимита CDN. Поддерживает диапазон "500000-1000000".
     #   scMaxBufferedPosts: макс. кол-во буферизованных POST на сервере (на сессию).
     #     По умолч. 30. При превышении сервер разрывает соединение.
-    if XHTTP_MODE in ("packetup",) or XHTTP_MODE == "auto":
+    if XHTTP_MODE in ("packet-up",) or XHTTP_MODE == "auto":
         _box_row(f"{BOLD}{BLUE}[D] scMaxEachPostBytes{NC} — максимальный объём данных в одном POST-запросе (packet-up)")
         _box_row(f"  {DIM}Что делает:{NC} В режиме packet-up каждый фрагмент исходящего трафика")
         _box_row(f"  отправляется отдельным HTTP POST-запросом. Этот параметр ограничивает")
@@ -2132,7 +2132,7 @@ def _prompt_xhttp_options() -> None:
         _box_row(f"  который допускает ваш CDN или промежуточный прокси (обычно 1–10 МБ).")
         _box_row(f"  Сервер также отклоняет POST, превышающий этот лимит.")
         _box_row(f"  Диапазон \"MIN-MAX\" снижает fingerprint: размер каждого POST случаен.")
-        _box_row(f"  {DIM}Применяется:{NC} клиент и сервер, только режим packetup (и auto).")
+        _box_row(f"  {DIM}Применяется:{NC} клиент и сервер, только режим packet-up (и auto).")
         _box_sep()
         _box_item("1", f"{GREEN}1000000{NC}         — 1 МБ, стандарт {GREEN}(рекомендуется){NC}")
         _box_item("2", '"500000-1000000" — 0.5–1 МБ случайный диапазон')
@@ -2170,7 +2170,7 @@ def _prompt_xhttp_options() -> None:
         _box_row(f"  максимум одновременно буферизованных POST на одну сессию. При превышении")
         _box_row(f"  лимита сервер разрывает соединение, защищаясь от атаки на память.")
         _box_row(f"  Счётчик независим для каждой сессии (sub-connection).")
-        _box_row(f"  {DIM}Применяется:{NC} только сервер, только режим packetup (и auto).")
+        _box_row(f"  {DIM}Применяется:{NC} только сервер, только режим packet-up (и auto).")
         _box_row(f"  {DIM}Рекомендуемый диапазон по документации:{NC} 10–100.")
         _box_sep()
         _box_item("1", f"30 — стандарт {GREEN}(рекомендуется){NC}")
@@ -2206,7 +2206,7 @@ def _prompt_xhttp_options() -> None:
     # --- scMinPostsIntervalMs (только для packet-up, только клиент) ---
     # Документация: мин. интервал в мс между POST-запросами клиента в одном
     # прокси-соединении. По умолч. 30 мс. Диапазон "10-50" снижает fingerprint.
-    if XHTTP_MODE in ("packetup",) or XHTTP_MODE == "auto":
+    if XHTTP_MODE in ("packet-up",) or XHTTP_MODE == "auto":
         _box_row(f"{BOLD}{BLUE}[F] scMinPostsIntervalMs{NC} — мин. интервал между POST-запросами клиента (packet-up)")
         _box_row(f"  {DIM}Что делает:{NC} Задаёт минимальный промежуток в миллисекундах между")
         _box_row(f"  последовательными POST-запросами, которые клиент отправляет серверу")
@@ -2214,7 +2214,7 @@ def _prompt_xhttp_options() -> None:
         _box_row(f"  интервал перегружает серверный буфер (scMaxBufferedPosts) и разрывает")
         _box_row(f"  соединение. Слишком большой — снижает скорость upload. Диапазон")
         _box_row(f"  \"MIN-MAX\" снижает fingerprint по фиксированному интервалу.")
-        _box_row(f"  {DIM}Применяется:{NC} только клиент, только режим packetup (и auto).")
+        _box_row(f"  {DIM}Применяется:{NC} только клиент, только режим packet-up (и auto).")
         _box_sep()
         _box_item("1", f"{GREEN}30{NC}      — стандарт: 30 мс {GREEN}(рекомендуется){NC}")
         _box_item("2", '"10-50" — случайный диапазон (меньше fingerprint)')
@@ -2252,13 +2252,13 @@ def _prompt_xhttp_options() -> None:
     # --- noGRPCHeader (stream-up / stream-one, только клиент) ---
     # Документация: по умолчанию false — каждый upload-запрос несёт заголовок
     # Content-Type: application/grpc для маскировки под gRPC. true — отключить.
-    if XHTTP_MODE in ("streamup", "streamone") or XHTTP_MODE == "auto":
+    if XHTTP_MODE in ("stream-up", "stream-one") or XHTTP_MODE == "auto":
         _box_row(f"{BOLD}{BLUE}[G] noGRPCHeader{NC} — управление gRPC-маскировкой upload-запросов (клиент)")
         _box_row(f"  {DIM}Что делает:{NC} По умолчанию каждый upload-запрос клиента несёт заголовок")
         _box_row(f"  Content-Type: application/grpc — маскировка под gRPC-трафик. Это помогает")
         _box_row(f"  проходить через провайдеров, которые пропускают gRPC. Включите 'true',")
         _box_row(f"  если ваш CDN или провайдер блокирует gRPC или он создаёт проблемы.")
-        _box_row(f"  {DIM}Применяется:{NC} только клиент, режимы streamup и streamone.")
+        _box_row(f"  {DIM}Применяется:{NC} только клиент, режимы stream-up и stream-one.")
         _box_sep()
         _box_item("1", f"false — gRPC-маскировка включена {GREEN}(рекомендуется){NC}")
         _box_desc(f"Upload-запросы выглядят как gRPC — лучше проходит у большинства провайдеров")
@@ -2314,7 +2314,7 @@ def _prompt_xhttp_options() -> None:
     _box_row(f"  HTTP/2 TCP-соединение вместо создания отдельного на каждый поток.")
     _box_row(f"  Это существенно увеличивает пропускную способность при высоком RTT,")
     _box_row(f"  снижает overhead на TLS-хендшейки и количество соединений к серверу.")
-    _box_row(f"  Рекомендуется при режимах streamup / streamone / auto и H2.")
+    _box_row(f"  Рекомендуется при режимах stream-up / stream-one / auto и H2.")
     _box_row(f"  {DIM}Применяется:{NC} только клиент.")
     _box_sep()
     _box_item("1", f"Отключить xmux {GREEN}(умолчание, совместимо со всеми клиентами){NC}")
@@ -2480,7 +2480,7 @@ def parse_vless_link(link: str) -> dict | None:
         fp         = params.get("fp", "chrome")
         flow       = params.get("flow", "")
         path       = params.get("path", "/")
-        xhttp_mode = params.get("mode", "streamup")
+        xhttp_mode = params.get("mode", "stream-up")
 
         # Валидация UUID
         if not re.match(
@@ -2575,7 +2575,7 @@ def _build_exit_xhttp_settings(nd: dict) -> dict:
     структурой extra согласно документации XHTTP: Beyond REALITY.
     Используется в конфиге exit-VPS (серверная сторона).
     """
-    mode = nd.get("xhttp_mode", "streamup")
+    mode = nd.get("xhttp_mode", "stream-up")
     xhttp: dict = {}
     if XHTTP_MODE_SUPPORTED:
         xhttp["mode"] = mode
@@ -2588,9 +2588,9 @@ def _build_exit_xhttp_settings(nd: dict) -> dict:
         "noGRPCHeader":  XHTTP_NO_GRPC_HEADER,
         "noSSEHeader":   XHTTP_NO_SSE_HEADER,
     }
-    if mode in ("streamup", "streamone", "auto"):
+    if mode in ("stream-up", "stream-one", "auto"):
         extra["scStreamUpServerSecs"] = XHTTP_SC_STREAM_UP_SERVER_SECS
-    if mode in ("packetup", "auto"):
+    if mode in ("packet-up", "auto"):
         extra["scMaxEachPostBytes"]    = XHTTP_SC_MAX_EACH_POST_BYTES
         extra["scMinPostsIntervalMs"]  = XHTTP_SC_MIN_POSTS_INTERVAL_MS
         extra["scMaxBufferedPosts"]    = XHTTP_SC_MAX_BUFFERED_POSTS
@@ -2612,7 +2612,7 @@ def _build_exit_xhttp_outbound_settings(nd: dict) -> dict:
     Строит xhttpSettings (outbound, клиент) для исходящего соединения
     entry-ноды к exit-ноде. Используется в конфиге entry-VPS (клиентская сторона).
     """
-    mode = nd.get("xhttp_mode", "streamup")
+    mode = nd.get("xhttp_mode", "stream-up")
     xhttp: dict = {}
     if XHTTP_MODE_SUPPORTED:
         xhttp["mode"] = mode
@@ -2624,7 +2624,7 @@ def _build_exit_xhttp_outbound_settings(nd: dict) -> dict:
         "xPaddingBytes": XHTTP_PADDING_BYTES,
         "noGRPCHeader":  XHTTP_NO_GRPC_HEADER,
     }
-    if mode in ("packetup", "auto"):
+    if mode in ("packet-up", "auto"):
         extra["scMaxEachPostBytes"]   = XHTTP_SC_MAX_EACH_POST_BYTES
         extra["scMinPostsIntervalMs"] = XHTTP_SC_MIN_POSTS_INTERVAL_MS
     if XHTTP_XMUX_ENABLED:
@@ -4718,7 +4718,7 @@ def _do_export_users_zip(users: list, install_mode: str) -> None:
                         domain    = _state.get("domain", ""),
                         proto     = _state.get("protocol_mode", "reality"),
                         xhttp_path= _state.get("xhttp_path", "/"),
-                        xhttp_mode= _state.get("xhttp_mode", "streamup"),
+                        xhttp_mode= _state.get("xhttp_mode", "stream-up"),
                         port      = _state.get("server_port", 443),
                     )
                 except Exception as ex:
@@ -8401,7 +8401,7 @@ def _load_state_into_globals() -> None:
         # YouTube routing toggle (youtube_route.py). Default False — YouTube
         # идёт через exit-ноды (как было до этого фикса).
         YOUTUBE_VIA_RU = state.get("youtube_via_ru", False)
-        XHTTP_MODE    = state.get("xhttp_mode",    "streamup")
+        XHTTP_MODE    = state.get("xhttp_mode",    "stream-up")
         XHTTP_PATH    = state.get("xhttp_path",    "/")
         XHTTP_PERF_PRESET = state.get("xhttp_perf_preset", "auto")
         XHTTP_PADDING_BYTES             = state.get("xhttp_padding_bytes",            "100-1000")

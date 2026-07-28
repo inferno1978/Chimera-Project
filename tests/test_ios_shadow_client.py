@@ -120,7 +120,7 @@ def _make_xhttp_config(initial_clients=None):
             "streamSettings": {
                 "network": "xhttp",
                 "security": "tls",
-                "xhttpSettings": {"path": "/xhttp", "mode": "streamup"},
+                "xhttpSettings": {"path": "/xhttp", "mode": "stream-up"},
             },
         }],
         "outbounds": [{"protocol": "freedom", "tag": "direct"}],
@@ -637,14 +637,14 @@ class TestGoldenGenLinkUnchanged(unittest.TestCase):
             host="1.2.3.4", uuid_str="22222222-3333-4444-5555-666666666666",
             pbk="", sid="", domain="example.com",
             fp="chrome", proto="xhttp",
-            xhttp_path="/xhttp", xhttp_mode="streamup",
+            xhttp_path="/xhttp", xhttp_mode="stream-up",
             port=8443,
         )
         path_enc = urllib.parse.quote("/xhttp", safe="/")
         expected = (
             "vless://22222222-3333-4444-5555-666666666666@1.2.3.4:8443"
             "?type=xhttp&security=tls&sni=example.com"
-            f"&path={path_enc}&mode=streamup"
+            f"&path={path_enc}&mode=stream-up"
             "&fp=chrome#example.com"
         )
         self.assertEqual(link, expected)

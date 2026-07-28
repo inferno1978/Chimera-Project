@@ -124,7 +124,7 @@ def _core_call(func_name: str, *args, **kwargs):
     return getattr(core, func_name)(*args, **kwargs)
 
 def _gen_vless_link(host, uuid_str, pbk, sid, domain, fp="chrome",
-                     proto="reality", xhttp_path="/", xhttp_mode="streamup",
+                     proto="reality", xhttp_path="/", xhttp_mode="stream-up",
                      port=443) -> str:
     return _core_call(
         "_gen_vless_link",
@@ -225,7 +225,7 @@ def _build_vless_uri(user: dict, state: dict) -> Optional[str]:
     short_id   = state.get("short_id", "")
     fp         = state.get("fingerprint", "chrome") or "chrome"
     xhttp_path = state.get("xhttp_path", "/")
-    xhttp_mode = state.get("xhttp_mode", "streamup")
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     sni        = _resolve_sni(state)
     host       = domain  # у клиента подписки должен быть стабильный host, IP — по желанию юзера отдельно
 

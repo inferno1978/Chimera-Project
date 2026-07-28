@@ -57,7 +57,7 @@ class TestCdnMaskingPathSkip(unittest.TestCase):
         # (как делает run_cdn_masking_install() в xhttp_cdn_masking.py).
         self._fake_core.XHTTP_CDN_MASKING = True
         self._fake_core.XHTTP_PATH = "/test-cdn-path.ts"
-        self._fake_core.XHTTP_MODE = "streamup"
+        self._fake_core.XHTTP_MODE = "stream-up"
 
     def test_path_preserved_when_cdn_masking_active(self):
         """При XHTTP_CDN_MASKING=True path НЕ перезаписывается вопросом."""
@@ -130,7 +130,7 @@ class TestCdnMaskingPathSkip(unittest.TestCase):
         import inspect
         src = inspect.getsource(self._fake_core._prompt_xhttp_options)
         # mode-вопрос должен быть ДО path-skip-блока
-        mode_pos = src.find('streamup   — однонаправленный')
+        mode_pos = src.find('stream-up   — однонаправленный')
         path_skip_pos = src.find('globals().get("XHTTP_CDN_MASKING", False)')
         self.assertGreater(mode_pos, 0, "Mode question not found in source")
         self.assertGreater(path_skip_pos, 0, "Path skip block not found")

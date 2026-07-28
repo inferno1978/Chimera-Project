@@ -126,7 +126,7 @@ def _mock_core_for_users_manager(fake_core, cfg_path=None, state_dict=None):
     fake_core.PARAM_PUBLIC_KEY = "TEST_PUB_KEY"
     fake_core.PARAM_SHORTID = "abcd1234"
     fake_core.XHTTP_PATH = "/"
-    fake_core.XHTTP_MODE = "streamup"
+    fake_core.XHTTP_MODE = "stream-up"
     fake_core.SERVER_PORT = 443
     fake_core.IS_IPV6_AVAILABLE = False
     return fake_core
@@ -304,7 +304,7 @@ class TestClientConfigExportIosLink(unittest.TestCase):
                 "streamSettings": {
                     "network": "xhttp",
                     "security": "tls",
-                    "xhttpSettings": {"path": "/xhttp", "mode": "streamup"},
+                    "xhttpSettings": {"path": "/xhttp", "mode": "stream-up"},
                 },
             }],
         }))
@@ -317,7 +317,7 @@ class TestClientConfigExportIosLink(unittest.TestCase):
             "uuid": "22222222-0000-0000-0000-000000000002",
             "fingerprint": "chrome",
             "xhttp_path": "/xhttp",
-            "xhttp_mode": "streamup",
+            "xhttp_mode": "stream-up",
             "reality_dest": "",
             "awg_exit_enabled": False,
         }

@@ -162,7 +162,7 @@ class TestMakeExitNodeConfig(unittest.TestCase):
         from chimera.modules import chain_nodes
         # Патчим только две helpers из core — остальное берётся из fake_core.
         with patch.object(self._fake_core, "_build_exit_xhttp_settings",
-                          return_value={"path": "/x", "mode": "streamup"}), \
+                          return_value={"path": "/x", "mode": "stream-up"}), \
              patch.object(self._fake_core, "_build_sockopt",
                           return_value={"tcpFastOpen": True}):
             nd = {
@@ -531,7 +531,7 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
         c._assert_reality_dest_sane = lambda *a, **kw: None
         c._run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
         c._build_xhttp_settings = MagicMock(return_value=(
-            {"path": "/xh", "mode": "streamup"},   # xhttp_settings
+            {"path": "/xh", "mode": "stream-up"},   # xhttp_settings
             {"tcpFastOpen": True},                  # sockopt
         ))
         c._build_tls_settings_xhttp = MagicMock(return_value={
@@ -540,7 +540,7 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
         })
         c._build_sockopt = MagicMock(return_value={"tcpFastOpen": True})
         c._build_exit_xhttp_outbound_settings = MagicMock(return_value={
-            "path": "/x", "mode": "streamup"
+            "path": "/x", "mode": "stream-up"
         })
         c._xray_log_block = MagicMock(return_value={"loglevel": "info"})
         c._apply_stats_to_config = MagicMock()
@@ -558,7 +558,7 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
         c.PARAM_DOMAIN = "test.example.com"
         c.PARAM_UUID = "11111111-2222-3333-4444-555555555555"
         c.XTLS_FLOW = ""
-        c.XHTTP_MODE = "streamup"
+        c.XHTTP_MODE = "stream-up"
         c.XHTTP_PATH = "/xh"
         c.XHTTP_BACKEND_PORT = 8443
         c.XHTTP_TCP_NO_DELAY = False
@@ -594,7 +594,7 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
             "fp":      "chrome",
             "proto":   "xhttp",
             "path":    "/x",
-            "xhttp_mode": "streamup",
+            "xhttp_mode": "stream-up",
         }]
         c.CHAIN_EXIT_HOST = ""
         c.CHAIN_EXIT_PORT = 443

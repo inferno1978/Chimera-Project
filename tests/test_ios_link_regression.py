@@ -107,7 +107,7 @@ class TestGoldenOriginals(unittest.TestCase):
             host="1.2.3.4", uuid_str="22222222-3333-4444-5555-666666666666",
             pbk="", sid="", domain="example.com",
             fp="chrome", proto="xhttp",
-            xhttp_path="/xhttp", xhttp_mode="streamup",
+            xhttp_path="/xhttp", xhttp_mode="stream-up",
             port=8443,
         )
         # path кодируется с safe="/" — слэш остаётся.
@@ -115,7 +115,7 @@ class TestGoldenOriginals(unittest.TestCase):
         expected = (
             "vless://22222222-3333-4444-5555-666666666666@1.2.3.4:8443"
             "?type=xhttp&security=tls&sni=example.com"
-            f"&path={path_enc}&mode=streamup"
+            f"&path={path_enc}&mode=stream-up"
             "&fp=chrome#example.com"
         )
         self.assertEqual(link, expected)
@@ -174,7 +174,7 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
             "awg_exit_enabled": False,
             "reality_dest": "",
             "xhttp_path": "/",
-            "xhttp_mode": "streamup",
+            "xhttp_mode": "stream-up",
         }
         user = {"uuid": "u-1", "email": "alice@example.com"}
 
@@ -226,7 +226,7 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
             "awg_exit_enabled": False,
             "reality_dest": "",
             "xhttp_path": "/",
-            "xhttp_mode": "streamup",
+            "xhttp_mode": "stream-up",
         }
         user = {"uuid": "u-1", "email": "alice@example.com"}
 
@@ -275,7 +275,7 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
             "protocol_mode": "reality", "public_key": "P", "short_id": "S",
             "fingerprint": "chrome", "install_mode": "A",
             "awg_exit_enabled": False, "reality_dest": "",
-            "xhttp_path": "/", "xhttp_mode": "streamup",
+            "xhttp_path": "/", "xhttp_mode": "stream-up",
         }
         user = {"uuid": "u-1", "email": "alice@example.com"}
 
@@ -513,7 +513,7 @@ class TestSanityAllFourPoints(unittest.TestCase):
             "protocol_mode": "reality", "public_key": "PUB", "short_id": "AB",
             "fingerprint": "chrome", "install_mode": "A",
             "awg_exit_enabled": False, "reality_dest": "",
-            "xhttp_path": "/", "xhttp_mode": "streamup",
+            "xhttp_path": "/", "xhttp_mode": "stream-up",
         }
         user = {"uuid": "u-1", "email": "alice@example.com"}
 

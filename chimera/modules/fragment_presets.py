@@ -242,7 +242,7 @@ def _generate_one(preset: dict) -> Optional[Path]:
 
         if protocol_mode == "xhttp":
             xhttp_path = state.get("xhttp_path", "/")
-            xhttp_mode = state.get("xhttp_mode", "streamup")
+            xhttp_mode = state.get("xhttp_mode", "stream-up")
             outbound = {
                 "tag": "proxy", "protocol": "vless",
                 "settings": {"vnext": [{"address": server_host, "port": server_port,

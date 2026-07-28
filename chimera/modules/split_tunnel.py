@@ -882,7 +882,7 @@ def _apply_split_tunnel_config_from_state() -> None:
         setattr(core, "IPV6_PREFLIGHT",        state.get("ipv6",           ""))
         setattr(core, "SERVER_PORT",           state.get("server_port",    443))
         setattr(core, "XHTTP_PORT",            state.get("server_port",    443))
-        setattr(core, "XHTTP_MODE",            state.get("xhttp_mode",     "streamup"))
+        setattr(core, "XHTTP_MODE",            state.get("xhttp_mode",     "stream-up"))
         setattr(core, "XHTTP_PATH",            state.get("xhttp_path",     "/"))
         setattr(core, "CHAIN_BALANCER_STRATEGY", state.get("chain_balancer_strategy", "roundRobin"))
         setattr(core, "CHAIN_NODES",           state.get("chain_nodes",    []))

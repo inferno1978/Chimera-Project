@@ -186,7 +186,7 @@ def _build_xray_noise_json(
     short_id   = state.get("short_id", "")
     xtls_flow  = state.get("xtls_flow", "xtls-rprx-vision")
     xhttp_path = state.get("xhttp_path", "/")
-    xhttp_mode = state.get("xhttp_mode", "streamup")
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 

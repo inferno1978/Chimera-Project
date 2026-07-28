@@ -173,7 +173,7 @@ def _build_xray_mux_json(state: dict, frag_packets: str, frag_length: str,
     short_id   = state.get("short_id", "")
     xtls_flow  = state.get("xtls_flow", "xtls-rprx-vision")
     xhttp_path = state.get("xhttp_path", "/")
-    xhttp_mode = state.get("xhttp_mode", "streamup")
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 

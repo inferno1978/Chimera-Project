@@ -104,7 +104,7 @@ _XHTTP_CONFIG = {
                 },
                 "xhttpSettings": {
                     "path": "/xhttp",
-                    "mode": "streamup",
+                    "mode": "stream-up",
                 },
             },
         },

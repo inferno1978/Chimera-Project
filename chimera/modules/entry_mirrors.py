@@ -146,7 +146,7 @@ def _gen_vless_link(host: str, uuid_str: str, pbk: str, sid: str,
     try:
         return _core_call(
             "_gen_vless_link", host, uuid_str, pbk, sid, sni, fp,
-            "reality", "/", "streamup", port,
+            "reality", "/", "stream-up", port,
         )
     except Exception as e:
         _warn(f"Не удалось собрать vless-ссылку: {e}")

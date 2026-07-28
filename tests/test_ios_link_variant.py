@@ -113,7 +113,7 @@ class TestToIosKaringLink(unittest.TestCase):
         link = (
             "vless://33333333-4444-5555-6666-777777777777@vpn.example.com:443"
             "?type=xhttp&security=tls&sni=vpn.example.com"
-            "&path=%2Fxhttp&mode=streamup&fp=chrome#user%40example.com"
+            "&path=%2Fxhttp&mode=stream-up&fp=chrome#user%40example.com"
         )
 
         result = to_ios(link)

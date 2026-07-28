@@ -135,7 +135,7 @@ def _users_gen_link(cfg: Path, uuid_str: str, email: str) -> str:
         if net == "xhttp":
             xhttp_s = ss.get("xhttpSettings", {})
             path = xhttp_s.get("path", "/")
-            mode = xhttp_s.get("mode", "streamup")
+            mode = xhttp_s.get("mode", "stream-up")
             path_enc = urllib.parse.quote(path, safe="/")
             _fp = _fp_from_state()
             # ВАЖНО: после перехода на схему Nginx→Xray (loopback backend) Xray-inbound
@@ -805,7 +805,7 @@ def _show_qr(link: str, label: str, png_path: str) -> None:
 def _gen_vless_link(host: str, uuid_str: str, pbk: str,
                     sid: str, domain: str, fp: str = "chrome",
                     proto: str = "reality",
-                    xhttp_path: str = "/", xhttp_mode: str = "streamup",
+                    xhttp_path: str = "/", xhttp_mode: str = "stream-up",
                     port: int = 443) -> str:
     """Генерирует VLESS-ссылку для REALITY или xHTTP TLS.
 
@@ -1479,7 +1479,7 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
     short_id   = st.get("short_id", "")
     spiderx    = st.get("spiderx", "/")
     xhttp_path = st.get("xhttp_path", "/")
-    xhttp_mode = st.get("xhttp_mode", "streamup")
+    xhttp_mode = st.get("xhttp_mode", "stream-up")
     ipv6       = st.get("ipv6", "")          # сохранённый IPv6 из state.json
     install_mode = st.get("install_mode", "A")
     # SNI: при Mode B + AWG используем reality_dest (домен маскировки),
@@ -1565,6 +1565,35 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
             _box_row(f"   {DIM}IPv6 не обнаружен — ссылка IPv6 недоступна{NC}")
         _box_row()
         _box_bottom()
+
+        # ── CDN masking: предупреждение рядом с vless://-ссылкой ──────────
+        # Пользователь может зайти за ссылкой отдельно, много позже установки
+        # — и не увидеть однократное предупреждение из run_cdn_masking_install().
+        # Поэтому дублируем здесь, рядом с самой ссылкой.
+        if st.get("xhttp_cdn_masking", False):
+            _box_warn_y = getattr(core, "_box_warn", None) or (lambda *a, **kw: None)
+            _box_top_y  = getattr(core, "_box_top", None) or (lambda *a, **kw: None)
+            _box_row_y  = getattr(core, "_box_row", None) or (lambda *a, **kw: None)
+            _box_sep_y  = getattr(core, "_box_sep", None) or (lambda *a, **kw: None)
+            _box_bot_y  = getattr(core, "_box_bottom", None) or (lambda *a, **kw: None)
+            YELLOW_Y = getattr(core, "YELLOW", "")
+            BOLD_Y   = getattr(core, "BOLD", "")
+            CYAN_Y   = getattr(core, "CYAN", "")
+            NC_Y     = getattr(core, "NC", "")
+            print()
+            _box_top_y("⚠️  CDN MASKING: vless:// НЕДОСТАТОЧНО!")
+            _box_row_y()
+            _box_warn_y(f"{YELLOW_Y}Для профиля CDN masking обычная vless://-ссылка НЕДОСТАТОЧНА!{NC_Y}")
+            _box_row_y()
+            _box_row_y(f"  Экспертные параметры (xPaddingBytes, seqKey,")
+            _box_row_y(f"  sessionIDKey, xmux и т.д.) не кодируются в URI —")
+            _box_row_y(f"  они доступны только через sing-box JSON конфиг.")
+            _box_row_y()
+            _box_row_y(f"  {BOLD_Y}Используйте:{NC_Y} меню 2 → {CYAN_Y}«Экспорт для sing-box»{NC_Y}")
+            _box_row_y(f"  Файл: /root/xray-client-configs/sing-box.json")
+            _box_row_y()
+            _box_warn_y(f"{YELLOW_Y}Без sing-box JSON маскировка не сработает.{NC_Y}")
+            _box_bot_y()
 
     return links
 
