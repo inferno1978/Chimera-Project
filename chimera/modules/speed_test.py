@@ -144,13 +144,18 @@ def do_speed_test(auto_mode: bool = False) -> None:
         # Download через awg0
         _box_row()
         _box_info("  Тест загрузки 10 МБ через туннель...")
-        _r_dl = _run(
-            ["curl", "-s", "-o", "/dev/null", "--max-time", "30",
-             "-w", "%{speed_download} %{time_total}",
-             "--interface", "awg0",
-             "https://speed.cloudflare.com/__down?bytes=10485760"],
-            capture=True, check=False
-        )
+        # DoH-резолв speed.cloudflare.com — обходит серверный DNS (после
+        # фикса DNS-leak серверный DNS идёт через DNSCrypt на 127.0.0.1:5300).
+        _cf_ip = core._cf_resolve_ip()
+        _dl_cmd = [
+            "curl", "-s", "-o", "/dev/null", "--max-time", "30",
+            "-w", "%{speed_download} %{time_total}",
+            "--interface", "awg0",
+        ]
+        if _cf_ip:
+            _dl_cmd += ["--resolve", f"speed.cloudflare.com:443:{_cf_ip}"]
+        _dl_cmd.append("https://speed.cloudflare.com/__down?bytes=10485760")
+        _r_dl = _run(_dl_cmd, capture=True, check=False)
         if _r_dl.returncode == 0 and _r_dl.stdout.strip():
             try:
                 _parts = _r_dl.stdout.strip().split()
@@ -175,13 +180,10 @@ def do_speed_test(auto_mode: bool = False) -> None:
 
     # --- Проверка доступности Cloudflare и выбор размера ---
     _box_info("  Проверка доступности Cloudflare...")
-    _probe = _run(
-        ["curl", "-s", "-o", "/dev/null", "--max-time", "15",
-         "-w", "%{size_download}",
-         "https://speed.cloudflare.com/__down?bytes=1048576"],
-        capture=True, check=False
-    )
-    _probe_ok = _probe.returncode == 0 and int(_probe.stdout.strip() or 0) > 500_000
+    # DoH-резолв + --resolve в curl — обходит серверный DNS (после фикса
+    # DNS-leak серверный DNS идёт через DNSCrypt на 127.0.0.1:5300).
+    _cf_probe_available = core._cf_probe_available
+    _probe_ok = _cf_probe_available()
 
     if _probe_ok:
         if auto_mode:
