@@ -147,6 +147,13 @@ from chimera.modules.port_hopping        import do_port_hopping_menu, ph_status
 from chimera.modules.tg_bot              import do_tg_bot_menu, do_manage_telegram, _tg_notify_event, _tg_load, tg_send
 from chimera.modules.tg_client_bot       import do_tg_client_bot_menu
 from chimera.modules.dns_redirect        import do_manage_dns_redirect, health_check_dns_redirect
+# ── DNS-leak fix (/etc/resolv.conf auto-repair) ─────────────────────────────
+from chimera.modules.resolv_conf_fix     import (
+    do_fix_resolv_conf_interactive,
+    fix_resolv_conf_to_localhost,
+    rollback_resolv_conf,
+    diagnose_resolv_conf,
+)
 # ── Hysteria2 transport (аддитивно, v4.12.9+) ────────────────────────────────
 from chimera.modules.hysteria2_menu      import do_hysteria2_menu
 # ── Новые модули (бэкап, cold boot, health monitor) ──────────────────────────
@@ -7772,6 +7779,10 @@ def do_dns_leak_test() -> None:
             _box_row(f"  {CYAN}  1. DNSCrypt активен — проверьте listen-address в конфиге{NC}")
         _box_row(f"  {CYAN}  2. Убедитесь что Xray routing не отправляет DNS напрямую{NC}")
         _box_row(f"  {CYAN}  3. Проверьте /etc/resolv.conf — должен указывать на 127.0.0.1{NC}")
+        _box_row()
+        _box_row(f"  {GREEN}  🔄  Авто-фикс: направить /etc/resolv.conf → 127.0.0.1{NC}")
+        _box_row(f"  {DIM}     (через resolv_conf_fix.py — systemd-resolved drop-in или{NC}")
+        _box_row(f"  {DIM}      static rewrite, с бэкапом и возможностью отката){NC}")
         log_to_file("WARN", f"DNS leak test: LEAK detected, RU resolvers: "
                     f"{[r['ip'] for r in ru_resolvers]}")
     elif not foreign_resolvers and resolvers_found:
@@ -7793,7 +7804,27 @@ def do_dns_leak_test() -> None:
     _render_dns_reconciliation_box(configured_resolvers)
 
     print()
-    input(f"{BLUE}Нажмите Enter...{NC}")
+    # ── Авто-фикс при обнаружении leak ──────────────────────────────────────
+    # Если найдены RU-резолверы — предлагаем сразу открыть экран авто-фикса
+    # /etc/resolv.conf (resolv_conf_fix.py). Не заставляем пользователя лезть
+    # в файл руками — особенно на Ubuntu 24.04, где resolv.conf — симлинк на
+    # systemd-resolved stub и прямая правка бесполезна.
+    if leak_detected:
+        try:
+            _fix_input = input(
+                f"{BLUE}Открыть экран авто-фикса /etc/resolv.conf? [Y/n]: {NC}"
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            _fix_input = "n"
+        if _fix_input in ("", "y", "yes", "д", "да"):
+            print()
+            try:
+                do_fix_resolv_conf_interactive()
+            except Exception as _e:
+                print(f"  {RED}Ошибка экрана авто-фикса: {_e}{NC}")
+                input(f"{BLUE}Нажмите Enter...{NC}")
+    else:
+        input(f"{BLUE}Нажмите Enter...{NC}")
 
 
 # =============================================================================

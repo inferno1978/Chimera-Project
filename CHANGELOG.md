@@ -2,6 +2,110 @@
 
 ---
 
+## FEAT(dns): авто-фикс /etc/resolv.conf при DNS-leak (resolv_conf_fix.py) — 1 августа 2026
+
+**DNS Leak Test показывал утечку к провайдерским DNS (Yandex LLC:
+5.45.240.203, 37.140.169.116), но рекомендации в боксе были статичным
+текстом — "Проверьте /etc/resolv.conf — должен указывать на 127.0.0.1".
+Пользователь должен был лезть в файл руками. На Ubuntu 24.04 это
+особенно проблемно: `/etc/resolv.conf` — симлинк на
+`/run/systemd/resolve/stub-resolv.conf`, который управляется
+`systemd-resolved`, и прямая правка бесполезна (переписывается при
+ребуте / per-link change). На одних серверах проблема есть, на других
+нет — зависит от того, активен ли systemd-resolved и какой upstream DNS
+провайдер отдаёт через DHCP.**
+
+### Решение
+
+Новый модуль `chimera/modules/resolv_conf_fix.py` — автоматическое
+исправление `/etc/resolv.conf` одной кнопкой, с диагностикой, бэкапом
+и возможностью отката.
+
+### Что делает модуль
+
+**`diagnose_resolv_conf()`** — полная диагностика:
+- Читает `/etc/resolv.conf` (статичный или симлинк на systemd-resolved).
+- Проверяет активность `systemd-resolved` через `systemctl is-active`.
+- Через `resolvectl dns` получает Global DNS и per-link DNS (от DHCP).
+- Читает `listen_addresses` из `/etc/dnscrypt-proxy/dnscrypt-proxy.toml`.
+- Через `ss -tlnu` проверяет, что DNSCrypt реально слушает порт.
+- Определяет `fix_needed` + `fix_method`:
+  - `systemd_resolved` — если systemd-resolved активен.
+  - `static_resolv_conf` — если нет (Debian, минимальные cloud-образы).
+
+**`fix_resolv_conf_to_localhost()`** — программный fix:
+- **Pre-flight**: убеждается, что DNSCrypt активен И слушает порт —
+  иначе фикс отменяется (black-hole risk).
+- **systemd_resolved метод** (Ubuntu 24.04):
+  - Создаёт drop-in `/etc/systemd/resolved.conf.d/chimera-dns.conf` с
+    `DNS=127.0.0.1`, `FallbackDNS=` (пустой), `Domains=~.`,
+    `DNSOverTLS=opportunistic`, `DNSSEC=allow-downgrade`,
+    `MulticastDNS=no`, `LLMNR=no`.
+  - `resolvectl dns-global set 127.0.0.1` — глобальный upstream.
+  - `resolvectl dns-default-route set false` — отключает per-link DNS
+    (чтобы DHCP провайдера не подсовывал свой).
+  - `systemctl restart systemd-resolved` — применяет drop-in.
+  - `resolvectl flush-caches` — сброс кэша.
+- **static_resolv_conf метод** (Debian, cloud-образы без systemd-resolved):
+  - Бэкап `/etc/resolv.conf` → `/etc/resolv.conf.chimera.bak` (если нет).
+  - Удаляет симлинк если есть.
+  - Пишет `nameserver 127.0.0.1` + `options timeout:1 attempts:1`.
+- State сохраняется в `/var/lib/xray-installer/resolv_conf_fix.json`.
+
+**`rollback_resolv_conf()`** — откат к прежнему состоянию:
+- Удаляет drop-in, перезапускает systemd-resolved.
+- `resolvectl dns-default-route set true` — возвращает per-link DNS.
+- Восстанавливает `/etc/resolv.conf` из бэкапа.
+
+**`do_fix_resolv_conf_interactive()`** — TUI-экран: диагностика +
+кнопки "Исправить" / "Откатить" / "Повторить диагностику".
+
+### Интеграция в DNS Leak Test
+
+В `do_dns_leak_test()` (`_core.py`) после обнаружения leak показывается
+prompt: "Открыть экран авто-фикса /etc/resolv.conf? [Y/n]". При `Y`
+запускается `do_fix_resolv_conf_interactive()`. После применения фикса
+пользователь может повторить DNS Leak Test — резолверов в РФ быть
+не должно.
+
+### Безопасность
+
+- **Pre-flight checks**: фикс не применяется, если DNSCrypt не активен
+  или не слушает порт — иначе сервер остался бы без DNS (black-hole).
+- **Бэкап**: оригинальный `/etc/resolv.conf` сохраняется в
+  `/etc/resolv.conf.chimera.bak` (не перезаписывается при повторном
+  фиксе — idempotency).
+- **Rollback**: кнопка "Откатить" в TUI + программная `rollback_resolv_conf()`.
+- **State**: все действия логируются в `/var/log/chimera.log` и
+  `/var/lib/xray-installer/resolv_conf_fix.json`.
+- **Drop-in persist**: drop-in в `/etc/systemd/resolved.conf.d/` переживает
+  ребут — systemd-resolved автоматически его применяет при старте.
+
+### Тесты
+
+`tests/test_resolv_conf_fix.py` — 19 новых unit-тестов:
+- `TestDiagnoseResolvConf` (6) — диагностика: нет файла / localhost /
+  внешний DNS / systemd-resolved с per-link DHCP / DNSCrypt не активен /
+  DNSCrypt не слушает.
+- `TestFixResolvConfToLocahost` (5) — программный fix: static rewrite /
+  systemd drop-in / not-needed / dry-run / idempotency.
+- `TestRollbackResolvConf` (3) — откат: static restore / systemd dropin
+  removal / no-state.
+- `TestParseDnscryptListenAddr` (5) — парсинг TOML: IPv4 / IPv6 /
+  multiple / no-TOML / no-listen_addresses.
+
+Все 73 теста в DNS-свите проходят (test_resolv_conf_fix +
+test_core_dns_redirect_integration + test_diagnostics +
+test_dnscrypt_setup + test_dnscrypt_selector).
+
+### Файлы
+
+- `chimera/modules/resolv_conf_fix.py` — новый модуль (580+ строк).
+- `chimera/_core.py` — импорт модуля + интеграция в `do_dns_leak_test()`.
+- `tests/test_resolv_conf_fix.py` — новые тесты (19 кейсов).
+
+---
+
 ## FEAT(telemt): client_mss_bulk — двухуровневый MSS (handshake / relay) — 1 августа 2026
 
 **Telemt ≥ 3.5.x поддерживает параметр `client_mss_bulk` — опциональный MSS
