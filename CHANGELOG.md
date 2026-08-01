@@ -2,6 +2,80 @@
 
 ---
 
+## UX(dns): кнопка [U] Re-apply в TUI — переприменить фикс v4 поверх v3 — 1 августа 2026
+
+**После v4 фикса (отключение DHCP DNS) у пользователя мог быть уже применён
+старый фикс v3 (per-link override + drop-in, но без disable_dhcp_dns). В
+меню показывалось только [R] (Rollback) — не было способа переприменить
+новый фикс без полного отката. Пользователь в тупике: R откатывает всё,
+а F не показывается (fix_needed=False, потому что per-link уже OK).**
+
+### Что добавлено
+
+1. **Параметр `force=True` в `fix_resolv_conf_to_localhost()`** — позволяет
+   переприменить фикс даже если `diagnose_resolv_conf()` вернул
+   `fix_needed=False`. Это нужно для случая когда per-link уже OK (старый
+   фикс), но Global DNS от DHCP нужно убрать (новый фикс v4 с
+   `disable_dhcp_dns_on_all_links`).
+
+   Логика при `force=True`:
+   - Если `fix_method` из diagnose = None — fallback на `systemd_resolved`
+     если systemd-resolved активен, иначе `static_resolv_conf`.
+   - Все шаги применяются заново: drop-in, per-link override, persist,
+     **disable_dhcp_dns_on_all_links** (КРИТИЧЕСКИЙ шаг v4).
+
+2. **Новый пункт меню `[U]` (Re-apply / Update)** в TUI — показывается
+   когда:
+   - `state.fixed=True` (старый фикс применён)
+   - Global DNS содержит внешние IP от DHCP
+   - DNSCrypt активен и слушает
+
+   `_screen_fix_reapply(diag)` — отдельный экран с подтверждением, показывает
+   что будет переприменено (включая КРИТИЧЕСКИЙ шаг отключения DHCP DNS),
+   вызывает `fix_resolv_conf_to_localhost(force=True)`.
+
+3. **Логика меню** теперь:
+   - `[F]` Fix — только если `fix_needed=True` (утечка, фикс не применён)
+   - `[U]` Re-apply — если фикс применён, но Global DNS от DHCP есть
+   - `[R]` Rollback — если фикс применён
+   - `[D]` Diagnose — всегда
+   - `[Q]` Exit — всегда
+
+### Сценарий пользователя
+
+1. Пользователь применил v3 фикс → per-link OK, но Global DNS 77.88.8.8.
+2. DNS Leak Test показывает Yandex LLC.
+3. Открывает TUI-экран → видит:
+   ```
+   ~ PER-LINK OK, НО Global DNS содержит внешние IP
+     от DHCP: 77.88.8.8, 77.88.8.1
+   ...
+   ✓ Фикс применён: systemd-resolved drop-in (2026-08-01 17:39:00)
+   ```
+4. В меню видит `[U] Переприменить фикс (re-apply v4) ← отключить DHCP DNS`.
+5. Нажимает `U` → подтверждает → фикс переприменяется с disable_dhcp_dns.
+6. Global DNS теперь содержит только 127.0.0.1 → DNS Leak Test чистый.
+
+### Тесты
+
+- `test_force_reapplies_even_when_fix_not_needed` — НОВЫЙ регрессионный
+  тест: simулирует состояние после v3 фикса (per-link OK, Global 77.88.8.8),
+  проверяет что без `force` фикс отказывает, а с `force=True` — переприменяется
+  с `disable_dhcp_dns_on_all_links`.
+
+29/29 тестов в `tests/test_resolv_conf_fix.py` проходят. 88/88 в DNS-свите.
+
+### Файлы
+
+- `chimera/modules/resolv_conf_fix.py`:
+  - `fix_resolv_conf_to_localhost()` — параметр `force=False` (default).
+  - Новая функция `_screen_fix_reapply(diag)`.
+  - `do_fix_resolv_conf_interactive()` — добавлен пункт `[U]`, логика
+    `needs_reapply` (already_fixed + ext_global + dnscrypt_ready).
+- `tests/test_resolv_conf_fix.py` — +1 тест (`test_force_reapplies_even_when_fix_not_needed`).
+
+---
+
 ## FIX(dns): отключение DHCP DNS на уровне network manager — финальный фикс утечки — 1 августа 2026
 
 **После v3 фикса (per-link override + drop-in) DNS Leak Test всё ещё
