@@ -2,6 +2,109 @@
 
 ---
 
+## FEAT(telemt): client_mss_bulk — двухуровневый MSS (handshake / relay) — 1 августа 2026
+
+**Telemt ≥ 3.5.x поддерживает параметр `client_mss_bulk` — опциональный MSS
+для bulk-фазы (передачи данных после TLS-handshake). Если задан, низкий
+`client_mss` применяется только на время TLS-handshake (включая
+инспектируемый DPI ServerHello), а как только соединение переходит в фазу
+relay, MSS клиентского сокета поднимается до `client_mss_bulk`. Это
+сохраняет anti-DPI фрагментацию handshake, но для данных возвращает пакеты
+нормального размера — снижает исходящий packets-per-second в ~N раз
+(N = segment multiplier handshake-MSS, для `"tspu"` это ~16x).**
+
+### Зачем это нужно
+
+Без `client_mss_bulk` низкий `client_mss` (например `"tspu"`, MSS=92)
+дробит **все** пакеты — не только ClientHello, но и весь последующий
+трафик. Это создаёт ~16-кратный overhead по packets-per-second относительно
+нормы. На многих VPS-хостингах (особенно RU/Asian) **abuse-детекция
+автоматически банит серверы за аномальный PPS**, считая их source of
+DDoS/scan. Это конкретная боль пользователей Telemt.
+
+С `client_mss_bulk = "1400"` (Near-MTU) фрагментируется только handshake —
+дальше трафик идёт нормальными пакетами, PPS падает в 16x, и abuse-детекция
+не срабатывает.
+
+### Что добавлено
+
+1. **`chimera/modules/telemt_mss_selector.py`**:
+   - Новая функция `mss_bulk_select_interactive(client_mss)` — интерактивный
+     экран выбора bulk-MSS. Показывается только если выбран ненулевой
+     handshake-MSS (иначе нет смысла — bulk без handshake не имеет эффекта).
+   - Новая функция `mss_bulk_status_line(client_mss_bulk, client_mss)` —
+     читаемая строка для итогового бокса установки.
+   - Новая функция `get_current_mss_bulk(config_file)` — чтение
+     `client_mss_bulk` из `telemt.toml`.
+   - Новая константа `_BULK_PRESETS` — список bulk-пресетов:
+     `1400` (Near-MTU, recommended), `1360` (VPN-Safe), `1280` (IPv6-Min),
+     `1200` (Conservative), `tspu` (Mirror Handshake), `""` (без bulk).
+   - **REGRESSION FIX**: `get_current_mss` теперь использует regex с
+     негативной заглядкой `(?!\w)`, чтобы не сматчить `client_mss_bulk`
+     (который тоже начинается на `client_mss`). До фикса при наличии в
+     конфиге `client_mss_bulk` функция могла вернуть значение bulk-MSS
+     вместо handshake-MSS.
+
+2. **`chimera/modules/mtproto.py`**:
+   - `_write_config()` принимает новый параметр `client_mss_bulk: str = ""`.
+     Если задан и задан `client_mss` — в TOML пишется строка
+     `client_mss_bulk = "..."` сразу после `client_mss`, в секции `[server]`.
+     Если `client_mss` пустой — bulk не пишется (нет смысла).
+   - `_run_install_inner()` после выбора handshake-MSS спрашивает bulk-MSS
+     (через `mss_bulk_select_interactive`), если handshake-MSS не пустой.
+   - Оба вызова `_write_config()` (own-site и donor-режим) обновлены.
+   - Финальный summary-бокс показывает обе строки: `MSS:` (handshake) и
+     `Bulk:` (bulk), если bulk задан.
+
+### UX
+
+- После выбора handshake-MSS пользователь видит отдельный экран "BULK MSS
+  • ДВУХУРОВНЕВЫЙ РЕЖИМ (HANDSHAKE / RELAY)" с объяснением: что делает
+  bulk-MSS, почему это полезно (PPS-reduction), требование telemt ≥ 3.5.x.
+- Recommended bulk = `1400` (Near-MTU) — самое близкое к MTU 1500.
+- "0" = без bulk (прежнее поведение: низкий MSS на всё соединение).
+- "C" = ручной ввод числа 88–4096.
+- Enter = recommended bulk (как и в `mss_select_interactive`, где Enter = tspu).
+
+### Backward compatibility
+
+- Пустой `client_mss_bulk` = прежнее поведение (handshake-MSS на всё
+  соединение). Никаких изменений в существующих конфигах не происходит.
+- На старых версиях Telemt (< 3.5.x) параметр игнорируется без ошибки
+  (как и `client_mss`).
+- Грамматика значения идентична `client_mss` (пресеты `"extreme-low"` /
+  `"tspu"` / `"2in8"` или число 88–4096 в строке).
+
+### Тесты
+
+- `tests/test_telemt_mss_selector.py` — добавлено 5 новых классов с 20
+  тестами:
+  - `TestBulkPresets` (5) — структура `_BULK_PRESETS`.
+  - `TestMssBulkStatusLine` (5) — форматирование status-line.
+  - `TestGetCurrentMssBulk` (6) — чтение из TOML.
+  - `TestGetCurrentMssNoFalseMatchBulk` (2) — регрессия: `get_current_mss`
+    не должен сматчить `client_mss_bulk`.
+  - `TestMssBulkSelectInteractive` (6) — логика выбора (empty handshake,
+    preset keys, custom, retry on out-of-range).
+- `tests/test_mtproto.py` — добавлено 6 новых тестов в `TestWriteConfig`:
+  - `test_client_mss_bulk_inserted_when_both_set`
+  - `test_client_mss_bulk_skipped_when_no_handshake_mss`
+  - `test_client_mss_bulk_skipped_when_empty`
+  - `test_client_mss_bulk_uses_string_quotes`
+  - `test_client_mss_bulk_accepts_named_preset`
+  - `test_both_mss_in_server_section_after_port`
+
+Все 317 тестов в telemt-свите проходят (test_telemt_mss_selector +
+test_mtproto + test_telemt_ios_fix + test_telemt_syn_limiter +
+test_telemt_panel + test_telemt_nginx_fallback + test_telemt_fallback +
+test_telemt_download).
+
+### Источник
+
+Документация Telemt: https://github.com/telemt/telemt/blob/main/docs/Config_params/CONFIG_PARAMS.ru.md#client_mss_bulk
+
+---
+
 ## FIX(diagnostics): DoH-резолв во всех модулях — массовый фикс «старого IP» — 1 августа 2026
 
 **Продолжение фикса от 1 августа (DoH-резолв exit-нод — обход локального

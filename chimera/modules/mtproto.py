@@ -804,6 +804,7 @@ def rename_user(old_name: str, new_name: str) -> bool:
 def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
                   socks5_port: int = 0, fallback_cfg=None,
                   client_mss: str = "",
+                  client_mss_bulk: str = "",
                   mask_host: str = "",
                   mask_port: int = 0,
                   tls_emulation: bool = False) -> None:
@@ -811,6 +812,13 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
     socks5_port > 0  →  upstream через локальный SOCKS5 (xray), иначе direct.
     fallback_cfg     →  FallbackConfig (из telemt_fallback); None = не писать секцию.
     client_mss       →  пресет MSS для TSPU anti-JA4 ("tspu", "2in8", числовой или "").
+    client_mss_bulk  →  опциональный MSS для bulk-фазы (после TLS-handshake).
+                        Если задан — низкий client_mss применяется только на
+                        handshake, а для данных MSS поднимается до client_mss_bulk.
+                        Снижает packets-per-second в N раз (N = segment multiplier
+                        handshake-MSS). Полезно на хостингах с PPS-based abuse.
+                        Если пусто — прежнее поведение (handshake-MSS на всё
+                        соединение). Требует telemt ≥ 3.5.x (на старых игнорируется).
     mask_host        →  censorship.mask_host: Telemt сплайсит failed handshakes на
                         локальный nginx с реальным Let's Encrypt сертификатом
                         (свой домен + свой сайт). Пустая строка = donor-режим
@@ -889,9 +897,16 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
         censorship_lines.append("mask_port = 443")
         censorship_lines.append("fake_cert_len = 2048")
     if client_mss:
-        # client_mss принадлежит секции [server] (ServerConfig struct).
+        # client_mss и client_mss_bulk принадлежат секции [server] (ServerConfig struct).
         # Тип всегда String — числа тоже в кавычках ("256", "tspu", "2in8" и т.д.)
-        lines.insert(lines.index(f'port = {port}') + 1, f'client_mss = "{client_mss}"')
+        # Вставляем сразу после `port = N` — оба параметра рядом, для читаемости.
+        _port_idx = lines.index(f'port = {port}')
+        lines.insert(_port_idx + 1, f'client_mss = "{client_mss}"')
+        if client_mss_bulk:
+            # Bulk-MSS имеет смысл только при handshake-MSS (Telemt-спецификация).
+            # mtproto.py это не валидирует — телемт сам проигнорирует bulk без handshake.
+            # Но мы пишем его только если оба заданы, чтобы не плодить мусор в конфиге.
+            lines.insert(_port_idx + 2, f'client_mss_bulk = "{client_mss_bulk}"')
     lines += censorship_lines
     lines += [
         "", "[access]", "replay_check_len = 65536", "ignore_time_skew = false",
@@ -2911,6 +2926,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     # Шаг обязателен при сервере в РФ; safe skip для прочих регионов.
     # Модуль telemt_mss_selector изолирован — ошибка импорта не ломает установку.
     _client_mss = ""
+    _client_mss_bulk = ""
     _mss_mod = _get_mss_module()
     if _mss_mod is not None:
         try:
@@ -2918,6 +2934,15 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
         except Exception as _me:
             _warn(f"Шаг MSS пропущен: {_me}")
             _client_mss = ""
+        # ── Bulk-MSS (двухуровневый режим) ───────────────────────────────────
+        # Показываем только если выбран ненулевой handshake-MSS. Иначе нет
+        # смысла — bulk без handshake-MSS не имеет эффекта (Telemt-спецификация).
+        if _client_mss and _mss_mod is not None:
+            try:
+                _client_mss_bulk = _mss_mod.mss_bulk_select_interactive(_client_mss)
+            except Exception as _me:
+                _warn(f"Шаг bulk-MSS пропущен: {_me}")
+                _client_mss_bulk = ""
     # ── Регион сервера: РФ / страна с блокировкой Telegram ─────────────────
     # _is_direct_ip() возвращает True если IP напрямую на интерфейсе (не NAT).
     # Это не означает доступность ME-серверов: в РФ они заблокированы.
@@ -3049,6 +3074,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     # идентично предыдущему), заполненные для own-site режима (см. _select_domain).
     _write_config(port, ipv4, ipv6, tls_domain, users, False, socks5_port=0,
                   fallback_cfg=_fb_cfg, client_mss=_client_mss,
+                  client_mss_bulk=_client_mss_bulk,
                   mask_host=_mask_host, mask_port=_mask_port,
                   tls_emulation=_tls_emulation)
     _ok(f"Конфиг: {CONFIG_FILE}")
@@ -3142,6 +3168,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
             _tls_emulation = False
             _write_config(port, ipv4, ipv6, tls_domain, users, False, socks5_port=0,
                           fallback_cfg=_fb_cfg, client_mss=_client_mss,
+                          client_mss_bulk=_client_mss_bulk,
                           mask_host="", mask_port=0, tls_emulation=False)
             _warn(f"Конфиг переписан в donor-режим: {CONFIG_FILE}")
         else:
@@ -3212,8 +3239,12 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     _mss_mod_summary = _get_mss_module()
     if _mss_mod_summary is not None:
         _box_ok(f"MSS:     {_mss_mod_summary.mss_status_line(_client_mss)}")
+        if _client_mss_bulk:
+            _box_ok(f"Bulk:    {_mss_mod_summary.mss_bulk_status_line(_client_mss_bulk, _client_mss)}")
     elif _client_mss:
         _box_ok(f"MSS:     {_client_mss}")
+        if _client_mss_bulk:
+            _box_ok(f"Bulk:    {_client_mss_bulk}")
     _box_row(); _box_sep()
     _box_row(f"  {DIM}journalctl -u telemt -f   # логи{NC}")
     _box_bot()

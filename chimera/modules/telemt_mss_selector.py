@@ -13,8 +13,25 @@ signature_algorithms (ключевые поля для JA4) попадают в�
 одно-пакетный экстрактор TSPU видит неверный хэш и пропускает соединение.
 
 Параметр `client_mss` появился в telemt ≥ 3.4.15.
-При установке на более ранней версии поле будет проигнорировано telemt'ом
+Параметр `client_mss_bulk` появился позже (по состоянию на Telemt 3.5.x).
+При установке на более ранней версии поля будут проигнорированы telemt'ом
 без ошибки, поэтому добавление в конфиг безопасно при любой версии.
+
+Два режима MSS
+--------------
+1. **Handshake-only fragmentation** (поведение по умолчанию, прежнее):
+   `client_mss` задаёт низкий MSS, который остаётся на всё соединение.
+   Дробится и ClientHello, и весь последующий трафик.
+
+2. **Two-tier MSS** (`client_mss_bulk` задан):
+   `client_mss` применяется только на время TLS-handshake (включая
+   инспектируемый DPI ServerHello); как только соединение переходит в
+   фазу relay, MSS клиентского сокета поднимается до `client_mss_bulk`.
+   Сохраняется anti-DPI фрагментация handshake, но для данных возвращаются
+   пакеты нормального размера. Снижает исходящий packets-per-second
+   примерно во столько раз, каков segment multiplier у `client_mss`
+   (например, ~10x для `"tspu"`). Полезно на хостингах, где abuse-детекция
+   считает packets-per-second, а не полосу.
 
 Пресеты
 ───────
@@ -27,10 +44,13 @@ signature_algorithms (ключевые поля для JA4) попадают в�
   Вызывается из _run_install_inner() через:
       from chimera.modules.telemt_mss_selector import (
           mss_select_interactive,
+          mss_bulk_select_interactive,
           mss_status_line,
+          mss_bulk_status_line,
           MSS_PRESET_NONE,
       )
-  Возвращаемое значение передаётся в _write_config(client_mss=...).
+  Возвращаемые значения передаются в _write_config(client_mss=...,
+  client_mss_bulk=...).
 ───────────────────────────────────────────────────────────────────────────────
 """
 
@@ -308,9 +328,180 @@ def mss_status_line(client_mss: str) -> str:
     return f"{BOLD}{client_mss}{NC} (MSS {client_mss}, custom)"
 
 
-def get_current_mss(config_file: Optional[Path] = None) -> str:
+# ══════════════════════════════════════════════════════════════════════════════
+#  BULK MSS — двухуровневый режим (handshake-only fragmentation)
+# ══════════════════════════════════════════════════════════════════════════════
+# Bulk-пресеты — это высокие MSS (близкие к MTU 1500 − 40 = 1460),
+# которые применяются ВРЕМЕННО — после завершения TLS-handshake.
+# Цель: вернуть нормальный размер пакетов для данных, сохранив
+# фрагментацию ClientHello для обхода DPI.
+
+# Структура bulk-пресета та же: (key, value, mss_int, label, detail, recommended)
+_BULK_PRESETS: list[tuple] = [
+    # key   value   mss_int  label            detail                                                        recommended
+    ("1",  "1400",  1400,    "Near-MTU",
+     "MSS 1400 — близко к MTU 1500. Минимальный overhead, максимальная пропускная способность.",
+     True),
+
+    ("2",  "1360",  1360,    "VPN-Safe",
+     "MSS 1360 — стандарт для VPN-туннелей (учитывает overhead GRE/Wireguard).",
+     False),
+
+    ("3",  "1280",  1280,    "IPv6-Min",
+     "MSS 1280 — минимальный MTU для IPv6 (RFC 8200). Безопасный выбор для dual-stack.",
+     False),
+
+    ("4",  "1200",  1200,    "Conservative",
+     "MSS 1200 — консервативно. Подходит для мобильных клиентов с потерей пакетов.",
+     False),
+
+    ("5",  "tspu",   92,     "Mirror Handshake",
+     "MSS 92 = handshake — bulk-фаза остаётся фрагментированной. Эквивалент отсутствию bulk.",
+     False),
+
+    ("0",  MSS_PRESET_NONE, None, "Без bulk (прежнее поведение)",
+     "client_mss_bulk не пишется в конфиг. Низкий MSS остаётся на всё соединение.",
+     False),
+]
+
+
+def mss_bulk_select_interactive(client_mss: str) -> str:
     """
+    Интерактивный экран выбора bulk-MSS (для двухуровневого режима).
+
+    Показывается ТОЛЬКО если выбран ненулевой client_mss — иначе нет смысла
+    (bulk без handshake-MSS не имеет эффекта).
+
+    Аргумент:
+      client_mss — уже выбранное значение handshake-MSS (для отображения
+                   в шапке экрана и для логики валидации).
+
+    Возвращает строку-значение для client_mss_bulk в telemt.toml,
+    либо пустую строку MSS_PRESET_NONE — параметр не добавляется в конфиг
+    (прежнее поведение: низкий MSS на всё соединение).
+
+    Бросает _Cancelled при Ctrl+C — вызывающий код должен перехватить.
+    """
+    # Если handshake-MSS не задан — bulk не имеет смысла.
+    if not client_mss:
+        return MSS_PRESET_NONE
+
+    import os
+    os.system("clear")
+
+    _box_top("BULK MSS  •  ДВУХУРОВНЕВЫЙ РЕЖИМ (HANDSHAKE / RELAY)")
+    _box_row()
+    _box_info("Handshake-MSS уже выбран: " + mss_status_line(client_mss))
+    _box_row()
+    _box_info("Bulk-MSS применяется ПОСЛЕ TLS-handshake — в фазе relay.")
+    _box_info("Сохраняется anti-DPI фрагментация ClientHello, но для данных")
+    _box_info("возвращаются пакеты нормального размера. Это снижает исходящий")
+    _box_info("packets-per-second в ~N раз, где N = segment multiplier")
+    _box_info("handshake-MSS (для tspu это ~16x). Полезно на хостингах, где")
+    _box_info("abuse-детекция считает PPS, а не полосу.")
+    _box_row()
+    _box_warn("Требует telemt ≥ 3.5.x (на старых версиях игнорируется без ошибки)")
+    _box_row()
+    _box_sep()
+
+    # ── Таблица bulk-пресетов ─────────────────────────────────────────────────
+    for (key, value, mss_int, label, detail, recommended) in _BULK_PRESETS:
+        star = f" {GREEN}★ рекомендуется{NC}" if recommended else ""
+        mss_str = f"MSS {mss_int}" if mss_int is not None else "без изменений"
+        key_col = RED + BOLD if key == "0" else WHITE + BOLD
+        header = (
+            f"  {DIM}[{NC}{key_col}{key}{NC}{DIM}]{NC}  "
+            f"{BOLD}{label}{NC}{star}"
+        )
+        _box_row(header)
+        _box_row(f"       {DIM}{mss_str}{NC}")
+        _box_wrap(detail, indent="       ")
+        _box_row()
+
+    _box_sep()
+    _box_row(f"  {DIM}[{NC}{WHITE}{BOLD}C{NC}{DIM}]{NC}  ✏️   Ввести своё значение MSS (88–4096)")
+    _box_bot()
+    print()
+
+    valid_keys = {p[0] for p in _BULK_PRESETS} | {"c", "C"}
+
+    while True:
+        raw = _ask(
+            f"{CYAN}Выбор bulk-MSS [0-5/C] (Enter=1, 0=без bulk): {NC}",
+            default="1",
+            c=True,
+        ).strip()
+
+        if raw.lower() == "c":
+            # ── Ручной ввод ───────────────────────────────────────────────────
+            try:
+                print(f"  {CYAN}Значение bulk-MSS (88–4096): {NC}", end="", flush=True)
+                custom = input().strip()
+            except KeyboardInterrupt:
+                print(); continue
+            try:
+                v = int(custom)
+                if 88 <= v <= 4096:
+                    return str(v)
+                _box_warn("Значение вне диапазона 88–4096. Попробуйте ещё раз.")
+            except ValueError:
+                _box_warn("Нужно целое число. Попробуйте ещё раз.")
+            continue
+
+        for (key, value, mss_int, label, detail, recommended) in _BULK_PRESETS:
+            if raw == key:
+                return value
+
+        _box_warn(f"Неверный выбор: '{raw}'. Введите цифру 0–5 или C.")
+
+
+def mss_bulk_status_line(client_mss_bulk: str, client_mss: str = "") -> str:
+    """
+    Возвращает читаемую строку bulk-MSS для итогового бокса установки.
+
+    Например: "1400 (MSS 1400) — Near-MTU ★"
+    Или:      "не задан (MSS handshake на всё соединение)"
+    """
+    if not client_mss_bulk:
+        if client_mss:
+            return f"{DIM}не задан (handshake-MSS на всё соединение){NC}"
+        return f"{DIM}не задан{NC}"
+
+    for (key, value, mss_int, label, detail, recommended) in _BULK_PRESETS:
+        if value == client_mss_bulk:
+            star = f"  {GREEN}★{NC}" if recommended else ""
+            mss_s = f"MSS {mss_int}" if mss_int else ""
+            return f"{BOLD}{client_mss_bulk}{NC} ({mss_s})  {DIM}{label}{NC}{star}"
+
+    # Числовое кастомное значение
+    return f"{BOLD}{client_mss_bulk}{NC} (MSS {client_mss_bulk}, custom)"
+
+
+def get_current_mss(config_file: Optional[Path] = None) -> str:
+    r"""
     Читает текущее значение client_mss из telemt.toml.
+    Возвращает строку или MSS_PRESET_NONE если параметр отсутствует.
+
+    Regex использует негативную заглядку (?!\w) — чтобы не сматчить
+    `client_mss_bulk` (который тоже начинается на `client_mss`).
+    """
+    path = config_file or _CONFIG_FILE
+    if not path.exists():
+        return MSS_PRESET_NONE
+    try:
+        m = re.search(
+            r'^client_mss\s*=\s*"?([^"\s]+)"?(?!\w)',
+            path.read_text(),
+            re.MULTILINE,
+        )
+        return m.group(1) if m else MSS_PRESET_NONE
+    except Exception:
+        return MSS_PRESET_NONE
+
+
+def get_current_mss_bulk(config_file: Optional[Path] = None) -> str:
+    """
+    Читает текущее значение client_mss_bulk из telemt.toml.
     Возвращает строку или MSS_PRESET_NONE если параметр отсутствует.
     """
     path = config_file or _CONFIG_FILE
@@ -318,7 +509,7 @@ def get_current_mss(config_file: Optional[Path] = None) -> str:
         return MSS_PRESET_NONE
     try:
         m = re.search(
-            r'^client_mss\s*=\s*"?([^"\s]+)"?',
+            r'^client_mss_bulk\s*=\s*"?([^"\s]+)"?',
             path.read_text(),
             re.MULTILINE,
         )
