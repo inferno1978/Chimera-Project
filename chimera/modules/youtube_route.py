@@ -108,7 +108,7 @@ _YOUTUBE_DOMAINS = [
 # Используется в do_manage_youtube_via_ru() для multi-node режима.
 #
 # Алгоритм:
-#   1. Резолвим hostname → IPv4 через socket.gethostbyname().
+#   1. Резолвим hostname → IPv4 через _resolve_host_fresh (DoH + fallback).
 #   2. Запрашиваем страну через http://ip-api.com/json/{ip}?fields=countryCode
 #      (тот же endpoint что в chain_nodes.py:2421, 4 сек таймаут).
 #   3. Преобразуем countryCode в emoji-флаг через country_flag_emoji().
@@ -170,13 +170,20 @@ def _resolve_node_ip_and_flag(host: str) -> tuple[str, str]:
     if host in _NODE_IP_FLAG_CACHE:
         return _NODE_IP_FLAG_CACHE[host]
 
-    # Резолв IP
+    # Резолв IP через DoH (минуя локальный DNS-кэш) + fallback на системный
+    # резолвер. См. chimera.modules.chain_nodes._resolve_host_fresh —
+    # это нужно, чтобы флаг страны определялся по АКТУАЛЬНОМУ IP ноды,
+    # а не по устаревшей кэш-записи (баг с node-b.example и т.п.).
     ip = ""
     try:
-        import socket as _sock
-        ip = _sock.gethostbyname(host)
+        from chimera.modules.chain_nodes import _resolve_host_fresh
+        ip = _resolve_host_fresh(host) or ""
     except Exception:
-        ip = ""
+        try:
+            import socket as _sock
+            ip = _sock.gethostbyname(host)
+        except Exception:
+            ip = ""
 
     if not ip:
         result = ("(IP недоступен)", "")
@@ -554,7 +561,7 @@ def do_manage_youtube_via_ru() -> None:
             _marker = "● " if _is_cur else "  "
             _host = nd.get("host", "?")
             # v5.0.2: резолвим IP + страну через кешированный хелпер.
-            # Хелпер делает socket.gethostbyname + curl ip-api.com (4с таймаут)
+            # Хелпер делает _resolve_host_fresh (DoH) + curl ip-api.com (4с таймаут)
             # с кешированием по host — повторные перерисовки меню не делают
             # повторных сетевых запросов.
             _ip, _flag = _resolve_node_ip_and_flag(_host)

@@ -226,6 +226,25 @@ def _autoban_get_chain_ips() -> list[str]:
         if not STATE_FILE.exists():
             return ips
         state = json.loads(STATE_FILE.read_text())
+
+        # Хелпер: резолв домена → IPv4 через DoH + fallback.
+        # КРИТИЧНО для autoban: если в whitelist окажется устаревший IP
+        # exit-ноды (из локального DNS-кэша), то нода на НОВОМ IP рискует
+        # попасть в автобан при TLS-handshake ошибках — и трафик встанет.
+        def _resolve(host: str) -> str:
+            try:
+                from chimera.modules.chain_nodes import _resolve_host_fresh
+                ip = _resolve_host_fresh(host)
+                if ip:
+                    return ip
+            except Exception:
+                pass
+            try:
+                import socket as _sock
+                return _sock.gethostbyname(host)
+            except Exception:
+                return ""
+
         # Exit-ноды каскада (Режим B, VLESS)
         for node in state.get("chain_nodes", []):
             host = node.get("host", "")
@@ -235,14 +254,10 @@ def _autoban_get_chain_ips() -> list[str]:
                 if _re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', host):
                     ips.append(host)
                 else:
-                    # Резолвим домен
-                    try:
-                        import socket as _sock
-                        resolved = _sock.gethostbyname(host)
-                        if resolved:
-                            ips.append(resolved)
-                    except Exception:
-                        pass
+                    # Резолвим домен через DoH + fallback
+                    resolved = _resolve(host)
+                    if resolved:
+                        ips.append(resolved)
         # Legacy одиночная нода
         legacy_host = state.get("chain_exit_host", "")
         if legacy_host:
@@ -251,28 +266,21 @@ def _autoban_get_chain_ips() -> list[str]:
                 if legacy_host not in ips:
                     ips.append(legacy_host)
             else:
-                try:
-                    import socket as _sock
-                    resolved = _sock.gethostbyname(legacy_host)
-                    if resolved and resolved not in ips:
-                        ips.append(resolved)
-                except Exception:
-                    pass
+                resolved = _resolve(legacy_host)
+                if resolved and resolved not in ips:
+                    ips.append(resolved)
         # AWG 2.0: добавляем IP exit-VPS в whitelist чтобы он не получил автобан
         if state.get("awg_exit_enabled") and state.get("install_mode") == "B":
             awg_host = state.get("awg_exit_host", "")
             if awg_host:
-                import re as _re, socket as _sock
+                import re as _re
                 if _re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', awg_host):
                     if awg_host not in ips:
                         ips.append(awg_host)
                 else:
-                    try:
-                        resolved = _sock.gethostbyname(awg_host)
-                        if resolved and resolved not in ips:
-                            ips.append(resolved)
-                    except Exception:
-                        pass
+                    resolved = _resolve(awg_host)
+                    if resolved and resolved not in ips:
+                        ips.append(resolved)
     except Exception:
         pass
     return ips
@@ -452,6 +460,47 @@ def fw_ban(ip):
         '-m','comment','--comment','xray-autoban'],
         capture_output=True).returncode == 0
 
+# v5.0.3 DoH-resolver: резолв домена exit-ноды → IPv4 через публичные
+# DoH-резолверы (Cloudflare 1.1.1.1 + Google 8.8.8.8 JSON API), минуя
+# локальный DNS-кэш (/etc/hosts, systemd-resolved, nscd, dnsmasq).
+# КРИТИЧНО для autoban: если в whitelist окажется устаревший IP exit-ноды,
+# то нода на НОВОМ IP рискует попасть в автобан при TLS-handshake ошибках.
+def _resolve_fresh(host):
+    import socket as _s
+    try:
+        _s.inet_aton(host)
+        return host
+    except OSError:
+        pass
+    for url, hdr in [
+        (f'https://1.1.1.1/dns-query?name={{host}}&type=A', 'Accept: application/dns-json'),
+        (f'https://8.8.8.8/resolve?name={{host}}&type=A', None),
+    ]:
+        try:
+            cmd = ['curl','-s','--max-time','3']
+            if hdr: cmd += ['-H', hdr]
+            cmd.append(url)
+            r = subprocess.run(cmd, capture_output=True)
+            if r.returncode != 0 or not r.stdout.strip():
+                continue
+            data = json.loads(r.stdout.decode())
+            if data.get('Status', 0) != 0:
+                continue
+            for ans in data.get('Answer', []):
+                if ans.get('type') == 1:
+                    ip = ans.get('data','')
+                    try:
+                        _s.inet_aton(ip)
+                        return ip
+                    except OSError:
+                        continue
+        except Exception:
+            continue
+    try:
+        return _s.gethostbyname(host)
+    except Exception:
+        return ''
+
 cfg = {{}}
 try:
     if BAN_STATE.exists(): cfg = json.loads(BAN_STATE.read_text())
@@ -480,15 +529,15 @@ try:
             if _re.match(r'^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$', _h):
                 whitelist.add(_h)
             else:
-                try: whitelist.add(_sock.gethostbyname(_h))
-                except: pass
+                _r = _resolve_fresh(_h)
+                if _r: whitelist.add(_r)
         _lh = _st.get('chain_exit_host','')
         if _lh:
             if _re.match(r'^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$', _lh):
                 whitelist.add(_lh)
             else:
-                try: whitelist.add(_sock.gethostbyname(_lh))
-                except: pass
+                _r = _resolve_fresh(_lh)
+                if _r: whitelist.add(_r)
 except: pass
 banned = cfg.get('banned', {{}})
 

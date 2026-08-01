@@ -52,6 +52,28 @@ def _core_module():
 # ============================================================================
 #  PROBE / IFACE / APPLY / REMOVE
 # ============================================================================
+def _mtu_resolve_host(host: str) -> str:
+    """Резолв hostname → IPv4 через DoH + fallback на системный резолвер.
+
+    DoH идёт напрямую к Cloudflare/Google, минуя локальный DNS-кэш
+    (/etc/hosts, systemd-resolved, nscd, dnsmasq) — это важно, чтобы
+    MTU-пинг и iptables-правила сработали для АКТУАЛЬНОГО IP exit-ноды,
+    а не для устаревшей кэш-записи (баг с node-b.example).
+    Возвращает IP-строку или '' при ошибке.
+    """
+    try:
+        from chimera.modules.chain_nodes import _resolve_host_fresh
+        ip = _resolve_host_fresh(host)
+        if ip:
+            return ip
+    except Exception:
+        pass
+    try:
+        return socket.gethostbyname(host)
+    except Exception:
+        return ""
+
+
 def _mtu_probe(host: str, max_mtu: int = 1500, min_mtu: int = 576) -> int:
     """
     Бинарный поиск максимального MTU до хоста через ICMP ping с DF-битом.
@@ -59,9 +81,8 @@ def _mtu_probe(host: str, max_mtu: int = 1500, min_mtu: int = 576) -> int:
     """
     core = _core_module()
     _run = core._run
-    try:
-        ip = socket.gethostbyname(host)
-    except Exception:
+    ip = _mtu_resolve_host(host)
+    if not ip:
         return 0
 
     lo, hi = min_mtu, max_mtu
@@ -120,9 +141,8 @@ def _mtu_apply(iface: str, mtu: int, nodes: list) -> None:
         port = str(nd.get("port", 443))
         if not host:
             continue
-        try:
-            ip = socket.gethostbyname(host)
-        except Exception:
+        ip = _mtu_resolve_host(host)
+        if not ip:
             continue
         # Удалим старое правило если есть, потом добавим новое
         _run([
@@ -152,9 +172,8 @@ def _mtu_remove_rules(nodes: list) -> None:
         host = nd.get("host", "")
         if not host:
             continue
-        try:
-            ip = socket.gethostbyname(host)
-        except Exception:
+        ip = _mtu_resolve_host(host)
+        if not ip:
             continue
         _run([
             "iptables", "-t", "mangle", "-D", "FORWARD",
@@ -681,9 +700,8 @@ def _mtu_tracepath_one(host: str, label: str) -> None:
         payload = mtu_val - 28
         if payload < 1:
             continue
-        try:
-            ip = socket.gethostbyname(host)
-        except Exception:
+        ip = _mtu_resolve_host(host)
+        if not ip:
             _box_warn(f"  Не удалось разрешить {host}")
             break
         r = _run(

@@ -97,9 +97,18 @@ def _log(msg: str) -> None:
 def _tcp_ping(host: str, port: int, timeout: int = TCP_TIMEOUT) -> tuple[bool, float]:
     """
     TCP-пинг к хосту. Возвращает (доступен, время_мс).
+    Резолв домена — через _resolve_host_fresh (DoH + fallback), чтобы
+    не ловить устаревший IP из локального DNS-кэша (баг с node-b.example).
     """
     try:
-        ip = socket.gethostbyname(host)
+        # DoH-резолв минует локальный кэш (/etc/hosts, systemd-resolved, nscd).
+        try:
+            from chimera.modules.chain_nodes import _resolve_host_fresh
+            ip = _resolve_host_fresh(host)
+        except Exception:
+            ip = None
+        if not ip:
+            ip = socket.gethostbyname(host)
         start = time.time()
         s = socket.create_connection((ip, port), timeout=timeout)
         s.close()
