@@ -208,6 +208,20 @@ def _get_resolv_conf_nameservers() -> List[str]:
         return []
 
 
+def _is_stub_resolver(ip: str) -> bool:
+    """Проверяет, является ли IP адресом systemd-resolved stub.
+
+    systemd-resolved слушает на 127.0.0.53 (IPv4) и ::53 (IPv6).
+    Запросы к stub-резолверу форвардятся на upstream DNS — который
+    может включать DHCP DNS от провайдера (77.88.8.8 → Yandex).
+    Это УТЕЧКА, даже хотя IP начинается с 127.
+
+    127.0.0.1 — это DNSCrypt-proxy (НЕ stub) — утечки нет.
+    127.0.0.53 — это systemd-resolved stub — УТЕЧКА.
+    """
+    return ip == "127.0.0.53" or ip == "::53"
+
+
 def _nsswitch_has_resolve() -> bool:
     """Проверяет, есть ли `resolve` в строке hosts: файла /etc/nsswitch.conf."""
     if not _NSSWITCH_CONF.exists():
@@ -238,6 +252,7 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
         "resolv_conf_is_symlink": _RESOLV_CONF.is_symlink(),
         "resolv_conf_nameservers": [],
         "resolv_conf_on_localhost": False,
+        "resolv_conf_on_stub": False,
         "nsswitch_has_resolve": _nsswitch_has_resolve(),
         "dnscrypt_service_active": _is_dnscrypt_service_active(),
         "dnscrypt_listen": _get_dnscrypt_listen_addr_port(),
@@ -249,9 +264,15 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
 
     result["resolv_conf_nameservers"] = _get_resolv_conf_nameservers()
     nss = result["resolv_conf_nameservers"]
+    # resolv_conf_on_localhost = True только если ALL nameservers = 127.0.0.1
+    # (DNSCrypt-proxy). 127.0.0.53 (systemd-resolved stub) — НЕ localhost OK,
+    # это stub-резолвер, который форвардит на upstream DNS (включая DHCP DNS
+    # от провайдера → утечка).
     result["resolv_conf_on_localhost"] = bool(nss) and all(
-        ip.startswith("127.") or ip == "::1" for ip in nss
+        ip == _LOCAL_DNS for ip in nss
     )
+    # resolv_conf_on_stub = True если есть 127.0.0.53 (systemd-resolved stub).
+    result["resolv_conf_on_stub"] = any(_is_stub_resolver(ip) for ip in nss)
 
     if result["dnscrypt_listen"]:
         addr, port = result["dnscrypt_listen"]
@@ -266,8 +287,16 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
     # ── Решение: нужен ли фикс? ────────────────────────────────────────────
     reasons: List[str] = []
 
-    # resolv.conf указывает на внешние DNS
-    if nss and not result["resolv_conf_on_localhost"]:
+    # resolv.conf указывает на systemd-resolved stub (127.0.0.53) — УТЕЧКА.
+    # stub форвардит на upstream DNS, включая DHCP DNS от провайдера.
+    if result["resolv_conf_on_stub"]:
+        reasons.append(
+            f"/etc/resolv.conf → systemd-resolved stub ({', '.join(nss)}) — "
+            f"запросы уходят на upstream DNS (включая DHCP DNS от провайдера)"
+        )
+
+    # resolv.conf указывает на внешние DNS (не 127.0.0.1 и не stub)
+    if nss and not result["resolv_conf_on_localhost"] and not result["resolv_conf_on_stub"]:
         reasons.append(f"/etc/resolv.conf → внешние NS: {', '.join(nss)}")
 
     # nsswitch.conf использует resolve (systemd-resolved) — потенциальная утечка
@@ -811,12 +840,18 @@ def _print_diagnosis(diag: Dict[str, Any]) -> None:
         nss = diag["resolv_conf_nameservers"]
         if nss:
             for ip in nss:
-                col = GREEN if (ip.startswith("127.") or ip == "::1") else RED
-                _box_row(f"    nameserver {col}{ip}{NC}")
+                if _is_stub_resolver(ip):
+                    _box_row(f"    nameserver {RED}{ip}{NC} {RED}← systemd-resolved stub (УТЕЧКА){NC}")
+                elif ip == _LOCAL_DNS:
+                    _box_row(f"    nameserver {GREEN}{ip}{NC} {GREEN}← DNSCrypt ✓{NC}")
+                else:
+                    _box_row(f"    nameserver {RED}{ip}{NC} {RED}← внешний DNS{NC}")
         else:
             _box_row(f"    {DIM}nameserver — не задан{NC}")
         if diag["resolv_conf_on_localhost"]:
-            _box_row(f"    {GREEN}✓ уже на localhost{NC}")
+            _box_row(f"    {GREEN}✓ указывает на DNSCrypt (127.0.0.1){NC}")
+        elif diag["resolv_conf_on_stub"]:
+            _box_row(f"    {RED}✗ указывает на systemd-resolved stub — утечка!{NC}")
     _box_row()
 
     # /etc/nsswitch.conf
