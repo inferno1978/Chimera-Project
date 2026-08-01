@@ -2,6 +2,93 @@
 
 ---
 
+## FIX(speedtest): DoH-резолв speed.cloudflare.com — обход серверного DNS после DNS-leak fix — 1 августа 2026
+
+**После применения фикса DNS-leak (resolv_conf_fix v3) сломался Speed Test
+через Cloudflare — "Cloudflare недоступен с сервера — тестируйте на клиенте
+(fast.com)" на всех exit-нодах. Причина: серверный DNS теперь направлен на
+127.0.0.1 (DNSCrypt-proxy), и curl использует его через /etc/resolv.conf →
+systemd-resolved → 127.0.0.1:5300. Если DNSCrypt не может резолвить
+`speed.cloudflare.com` (или работает медленно) — curl падает.**
+
+### Корень проблемы
+
+`_speed_test_download()` и `_cf_probe_available()` (inline в
+`_speed_test_mode_a` и `speed_test.py`) использовали `curl` без `--resolve`.
+curl резолвит `speed.cloudflare.com` через системный DNS. После фикса
+DNS-leak системный DNS → 127.0.0.1:5300 (DNSCrypt). Если DNSCrypt:
+- не настроен (нет server_names в TOML)
+- использует блокирующие upstream
+- завис или перегружен
+
+→ `speed.cloudflare.com` не резолвится → curl rc!=0 → "Cloudflare недоступен".
+
+### Решение
+
+Применён тот же DoH-подход, что уже используется для exit-нод
+(`_resolve_host_fresh` в `chain_nodes.py`):
+
+1. **Новая функция `_cf_resolve_ip()`** в `_core.py` — резолвит
+   `speed.cloudflare.com` через DoH (Cloudflare 1.1.1.1 + Google 8.8.8.8
+   JSON API), минуя серверный DNS. Возвращает IP или None (fallback).
+
+2. **Новая функция `_cf_probe_available()`** — probe Cloudflare endpoint
+   с `--resolve speed.cloudflare.com:443:<IP>` в curl, минуя системный DNS.
+
+3. **`_speed_test_download()`** — добавлен DoH-резолв + `--resolve` в curl.
+   Если DoH не сработал — fallback на обычный curl (через системный DNS).
+
+4. **`_speed_test_mode_a()`** (Режим A, прямой) — inline probe заменён на
+   `_cf_probe_available()`.
+
+5. **`speed_test.py` (Режим B, через exit-ноды)** — inline probe заменён на
+   `_cf_probe_available()`; AWG-download тоже использует DoH + `--resolve`.
+
+### Как это работает
+
+```
+curl --resolve speed.cloudflare.com:443:104.16.0.1 \
+     https://speed.cloudflare.com/__down?bytes=10485760
+```
+
+`--resolve` заставляет curl использовать конкретный IP для указанного
+домена, обходя системный резолвер. IP получен через DoH напрямую к
+Cloudflare/Google — это работает даже если серверный DNS полностью сломан.
+
+### Тесты
+
+`tests/test_speed_test_cf_doh.py` — 11 новых unit-тестов:
+- `TestCfResolveIp` (2) — DoH success / failure → IP / None.
+- `TestCfProbeAvailable` (4) — probe с DoH + --resolve / без DoH (fallback) /
+  curl failure / size too small.
+- `TestSpeedTestDownload` (5) — --resolve передаётся / fallback без DoH /
+  curl error / size too small / успешный результат со скоростью.
+
+Все 80 тестов в speed-test + DNS-свите проходят.
+
+### Файлы
+
+- `chimera/_core.py`:
+  - `_speed_test_download()` — добавлен DoH-резолв + `--resolve`.
+  - Новая функция `_cf_resolve_ip()`.
+  - Новая функция `_cf_probe_available()`.
+  - `_speed_test_mode_a()` — inline probe заменён на `_cf_probe_available()`.
+  - `Optional` добавлен в `from typing import`.
+- `chimera/modules/speed_test.py`:
+  - Inline probe заменён на `_cf_probe_available()`.
+  - AWG-download использует DoH + `--resolve`.
+- `tests/test_speed_test_cf_doh.py` — новый файл (11 тестов).
+
+### Совместимость
+
+- Если серверный DNS работает (DNSCrypt OK или не применён фикс) — DoH
+  даёт тот же IP, что и системный резолвер. Поведение не меняется.
+- Если серверный DNS сломан (DNSCrypt не работает) — DoH спасает speed test.
+- Fallback: если DoH тоже не сработал (нет интернета до 1.1.1.1/8.8.8.8) —
+  curl идёт через системный DNS (как раньше).
+
+---
+
 ## FIX(dns): resolv_conf_fix v3 — убрать global resolvectl + per-link как главный критерий — 1 августа 2026
 
 **После v2 фикса пользователь применил фикс, но diagnose всё равно показывал
