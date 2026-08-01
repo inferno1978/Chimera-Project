@@ -741,26 +741,48 @@ def _diag_tcp_probe(host: str, port: int, timeout: int = 10
       - latency_ms: latency до УСПЕШНОГО адреса в мс (или -1 если все упали)
 
     Алгоритм:
-      1. getaddrinfo() — получаем все записи (IPv4 + IPv6)
-      2. Дедуп по (family, sockaddr)
-      3. Перебираем по очереди, для каждой пробуем socket.connect() с timeout
-      4. Если хоть одна семья ответила — нода жива (как Happy Eyeballs у клиента)
+      1. Сначала пробуем DoH-резолв через _resolve_host_fresh (Cloudflare/Google
+         JSON API) — это обходит любой локальный DNS-кэш (systemd-resolved /
+         dnsmasq / nscd / /etc/hosts) и возвращает АКТУАЛЬНЫЙ IP-адрес ноды.
+      2. Если DoH отдал IPv4 — используем его и TCP-ping напрямую.
+      3. Если DoH не сработал (нет интернета до 1.1.1.1/8.8.8.8, NXDOMAIN) —
+         fallback на системный getaddrinfo(), который дополнительно отдаёт
+         IPv6-адреса (для dual-stack доменов на IPv6-only серверах).
+      4. Перебираем по очереди, для каждой пробуем socket.connect() с timeout.
+      5. Если хоть одна семья ответила — нода жива (как Happy Eyeballs у клиента).
     """
-    # 1) DNS-резолв через системный резолвер (getaddrinfo). Если он отдал
-    #    IPv6-only, а на сервере нет IPv6-маршрута — попробуем это понять.
+    # 1) DoH-резолв — обходит локальный кэш, возвращает АКТУАЛЬНЫЙ IPv4.
+    #    Lazy import чтобы избежать циклической зависимости при загрузке модуля.
+    doh_ip: Optional[str] = None
     try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as e:
-        return False, f"DNS fail: {e}", -1
-    if not infos:
-        return False, "DNS empty", -1
+        from chimera.modules.chain_nodes import _resolve_host_fresh
+        doh_ip = _resolve_host_fresh(host)
+    except Exception:
+        doh_ip = None
 
-    # Дедуп по (family, addr), сохраняя порядок IPv4/IPv6 как отдал резолвер.
-    seen: list[tuple[int, tuple]] = []
-    for family, _, _, _, sockaddr in infos:
-        key = (family, sockaddr)
-        if key not in seen:
-            seen.append((family, sockaddr))
+    # 2) Если DoH отдал IPv4 — формируем addrinfo-подобный список вручную,
+    #    чтобы сохранить перебор address family для latency-замера.
+    if doh_ip:
+        try:
+            socket.inet_aton(doh_ip)  # валидация IPv4
+            seen = [(socket.AF_INET, (doh_ip, port))]
+        except OSError:
+            seen = []
+    else:
+        # 3) Fallback: системный резолвер (getaddrinfo). Отдаёт IPv4 + IPv6.
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            return False, f"DNS fail: {e}", -1
+        if not infos:
+            return False, "DNS empty", -1
+
+        # Дедуп по (family, addr), сохраняя порядок IPv4/IPv6 как отдал резолвер.
+        seen = []
+        for family, _, _, _, sockaddr in infos:
+            key = (family, sockaddr)
+            if key not in seen:
+                seen.append((family, sockaddr))
 
     results: list[tuple[bool, str, int]] = []  # (alive, family_label, latency_ms)
     for family, sockaddr in seen:
