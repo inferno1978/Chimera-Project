@@ -656,10 +656,11 @@ class TestDisableDhcpDns(_BaseTest):
         self.assertEqual(result["manager"], "systemd-networkd")
         # dropin_paths сохранён
         self.assertEqual(len(result["dropin_paths"]), 1)
-        # networkctl reload и reconfigure вызваны
+        # networkctl reload вызван (БЕЗ reconfigure — reconfigure убивает SSH)
         cmd_str = " ".join(" ".join(c) for c in called_cmds)
         self.assertIn("networkctl reload", cmd_str)
-        self.assertIn("networkctl reconfigure ens3", cmd_str)
+        self.assertNotIn("networkctl reconfigure", cmd_str,
+                         "networkctl reconfigure НЕ должен вызываться — убивает SSH")
 
     def test_networkmanager_sets_ignore_auto_dns(self):
         """NetworkManager: nmcli ... ignore-auto-dns yes."""
