@@ -6181,10 +6181,18 @@ def _port_block_fallback(domain: str, port: int,
     _box_row(f"  {YELLOW}Резервный метод: TCP-пробы с этого сервера (не снаружи){NC}")
     _box_row()
 
+    # Резолв домена через DoH + fallback (минуя локальный DNS-кэш),
+    # чтобы TCP-пробы шли на АКТУАЛЬНЫЙ IP сервера.
     try:
-        ip = socket.gethostbyname(domain)
+        from chimera.modules.chain_nodes import _resolve_host_fresh
+        ip = _resolve_host_fresh(domain)
     except Exception:
-        ip = domain
+        ip = None
+    if not ip:
+        try:
+            ip = socket.gethostbyname(domain)
+        except Exception:
+            ip = domain
 
     for attempt in range(3):
         try:

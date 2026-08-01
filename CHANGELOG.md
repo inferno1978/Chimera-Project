@@ -2,6 +2,80 @@
 
 ---
 
+## FIX(diagnostics): DoH-резолв во всех модулях — массовый фикс «старого IP» — 1 августа 2026
+
+**Продолжение фикса от 1 августа (DoH-резолв exit-нод — обход локального
+DNS-кэша). После первого фикса оставалось ещё 8 модулей, где домен
+exit-ноды резолвился через `socket.gethostbyname()` — системный резолвер,
+отдающий устаревший IP из `/etc/hosts`, `systemd-resolved`, `nscd` или
+`dnsmasq`. Это создавало риски в нескольких критичных местах:
+
+- `autoban.py` — whitelist IP exit-нод для автобана. Если в whitelist
+  окажется СТАРЫЙ IP, а нода уже переехала на НОВЫЙ — autoban может
+  забанить ноду на НОВОМ IP при TLS-handshake ошибках, и трафик встанет.
+  Затронуто: `_autoban_get_chain_ips()` (3 вызова) + inline cron-скрипт
+  `/usr/local/bin/xray-autoban.sh` (2 вызова, запускается каждые 5 мин).
+- `mtu_tuning.py` — iptables MSS-clamping правила. Если правило добавлено
+  со старым IP, трафик к ноде на НОВОМ IP не получит корректный MSS —
+  будут проблемы с PMTU. Затронуто: `_mtu_probe`, `_mtu_apply_rules`,
+  `_mtu_remove_rules`, sweep-зонд (4 вызова).
+- `node_health_monitor.py` — фоновый TCP-ping exit-нод (крон). Если пинг
+  идёт на старый IP — мониторинг покажет ноду как «down», хотя она жива.
+- `youtube_route.py` — флаг страны рядом с IP ноды в TUI-меню. По старому
+  IP флаг мог не соответствовать реальной стране ноды.
+- `as_direct.py` — определение ASN/IP для домена. По старому IP —
+  некорректный ASN.
+- `_core.py` → `_port_block_fallback` — TCP-пробы до домена сервера
+  при недоступности check-host.net.
+
+### Изменение
+
+Во всех перечисленных модулях `socket.gethostbyname()` заменён на
+`_resolve_host_fresh()` (DoH через Cloudflare 1.1.1.1 + Google 8.8.8.8
+JSON API, fallback на `gethostbyname()`). DoH идёт напрямую к публичным
+рекурсивам, минуя любой локальный кэш.
+
+Особый случай — **inline cron-скрипт** в `autoban.py` (`_autoban_install_cron`):
+это отдельный Python-процесс без доступа к `chimera.modules`, поэтому
+функция `_resolve_fresh()` встроена прямо в текст cron-скрипта
+(вместе с `import socket`, DoH-циклом и fallback). Скрипт самодостаточен.
+
+### Тесты
+
+- Все существующие unit-тесты проходят (158/158 в `test_chain_nodes`,
+  `test_diagnostics`, `test_autoban`, `test_mtu_tuning`, `test_as_direct`,
+  `test_youtube_route`, `test_node_health_monitor`, `test_youtube_ip_pin`).
+- Inline cron-скрипт валидируется отдельной проверкой
+  (`scripts/check_autoban_cron.py`) — после подстановки f-string
+  переменных тело скрипта парсится как валидный Python.
+
+### Файлы
+
+- `chimera/modules/autoban.py` — `_autoban_get_chain_ips()` (хелпер `_resolve`)
+  + inline cron-скрипт (функция `_resolve_fresh` + 2 замены).
+- `chimera/modules/mtu_tuning.py` — новая функция `_mtu_resolve_host()`,
+  используется в 4 местах.
+- `chimera/modules/node_health_monitor.py` — `_tcp_ping()`.
+- `chimera/modules/youtube_route.py` — `_resolve_node_ip_and_flag()`.
+- `chimera/modules/as_direct.py` — `_lookup_asn_for_target()`.
+- `chimera/_core.py` — `_port_block_fallback()`.
+- `scripts/check_autoban_cron.py` — новый скрипт-валидатор.
+
+### Не изменено (намеренно)
+
+- `_core.py:3340` — `socket.gethostbyname(socket.gethostname())` — резолв
+  собственного hostname сервера (localhost), DoH тут не нужен.
+- `fragment_fuzzer.py:175` — резолв собственного `domain` сервера из
+  state.json. Если domain сервера сменил IP, это уже не наш сервер;
+  кэш не создаёт проблемы.
+- `warp.py:516, 632` — резолв стационарных endpoint'ов Cloudflare WARP
+  (`engage.cloudflareclient.com` и curated-списков). Кэш не проблема,
+  Cloudflare A-записи меняются редко и предсказуемо.
+- `chimera/modules/_vendor/dpi_detector/` — vendored код DPI-детектора,
+  не наш.
+
+---
+
 ## FIX(diagnostics): DoH-резолв exit-нод — обход локального DNS-кэша — 1 августа 2026
 
 **При диагностике «одной кнопкой» (а также в SpeedTest и матрице состояния

@@ -81,12 +81,22 @@ def _resolve_asn_from_input(raw: str) -> tuple:
     import socket as _socket
 
     target = raw.strip()
-    # Если это домен — резолвим в IP
+    # Если это домен — резолвим в IP через DoH + fallback (минуя локальный кэш).
+    # Это нужно, чтобы ASN определялся по АКТУАЛЬНОМУ IP ноды, а не по
+    # устаревшей кэш-записи (баг с node-b.example и т.п.).
     if not _re.match(r'^\d{1,3}(\.\d{1,3}){3}$', target):
         try:
-            target = _socket.gethostbyname(target)
+            from chimera.modules.chain_nodes import _resolve_host_fresh
+            ip = _resolve_host_fresh(target)
         except Exception:
-            return ("", "")
+            ip = None
+        if ip:
+            target = ip
+        else:
+            try:
+                target = _socket.gethostbyname(target)
+            except Exception:
+                return ("", "")
     # Запрашиваем ASN через ip-api.com
     try:
         import urllib.request as _ur
