@@ -2415,16 +2415,19 @@ def do_manage_nodes() -> None:
                 lat = _speed_test_node_latency(host, port)
                 flag_str = ""
                 try:
-                    import socket as _s
-                    ip = _s.gethostbyname(host)
-                    r = _run(["curl", "-s", "--max-time", "4",
-                              f"http://ip-api.com/json/{ip}?fields=countryCode"],
-                             capture=True, check=False)
-                    if r.returncode == 0:
-                        import json as _j
-                        cc = _j.loads(r.stdout.strip()).get("countryCode", "")
-                        if cc:
-                            flag_str = f"  {country_flag_emoji(cc)}"
+                    # Используем _resolve_host_fresh (DoH + fallback) вместо
+                    # socket.gethostbyname — чтобы флаг страны определялся по
+                    # АКТУАЛЬНОМУ IP ноды, а не по устаревшей кэш-записи.
+                    ip = _resolve_host_fresh(host)
+                    if ip:
+                        r = _run(["curl", "-s", "--max-time", "4",
+                                  f"http://ip-api.com/json/{ip}?fields=countryCode"],
+                                 capture=True, check=False)
+                        if r.returncode == 0:
+                            import json as _j
+                            cc = _j.loads(r.stdout.strip()).get("countryCode", "")
+                            if cc:
+                                flag_str = f"  {country_flag_emoji(cc)}"
                 except Exception:
                     pass
                 # Перерисовываем строку с результатом
@@ -2864,9 +2867,89 @@ SNI:        {PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) els
 # =============================================================================
 #  СКОРОСТНЫЕ ТЕСТЫ — latency/geo для exit-нод
 # =============================================================================
+def _resolve_host_fresh(host: str, timeout: int = 3) -> Optional[str]:
+    """
+    Резолв hostname → IPv4 через публичные DoH-резолверы (Cloudflare 1.1.1.1
+    и Google 8.8.8.8), минуя локальный DNS-кэш сервера
+    (systemd-resolved / dnsmasq / nscd / /etc/hosts).
+
+    Зачем это нужно:
+      При диагностике exit-нод (SpeedTest, «полная диагностика одной кнопкой»)
+      системный резолвер socket.gethostbyname() может отдать УСТАРЕВШИЙ IP-адрес
+      домена — например, если:
+        • на сервере ранее был прописан /etc/hosts или dnsmasq entry со старым IP;
+        • systemd-resolved/nscd кэшировал A-record с большим TTL и не успел
+          его сбросить после смены A-записи в DNS-провайдере;
+        • используется локальный forwarder, который отдаёт устаревший кэш.
+
+      В результате диагностика стучится на СТАРЫЙ IP-адрес ноды, хотя реальный
+      клиент (xray/sing-box) может использовать свой resolver и идти на НОВЫЙ IP.
+      DoH-запрос идёт напрямую к авторитетному рекурсиву (Cloudflare/Google),
+      минуя любой локальный кэш.
+
+    Порядок:
+      1. Если host — уже валидный IPv4, вернуть как есть.
+      2. DoH через Cloudflare (1.1.1.1) — JSON API /dns-query.
+      3. DoH через Google (8.8.8.8) — JSON API /resolve.
+      4. Fallback: socket.gethostbyname() (системный резолвер).
+      5. Если всё упало — None.
+    """
+    # 1) Уже IPv4-адрес — отдаём как есть.
+    try:
+        socket.inet_aton(host)
+        return host
+    except OSError:
+        pass
+
+    core = _core_module()
+    _run = core._run
+
+    # 2)–3) DoH-провайдеры (Cloudflare + Google JSON API).
+    #    Cloudflare/Quad9: /dns-query + заголовок Accept: application/dns-json
+    #    Google: /resolve без Accept-заголовка
+    doh_endpoints = [
+        (f"https://1.1.1.1/dns-query?name={host}&type=A",
+         "Accept: application/dns-json"),
+        (f"https://8.8.8.8/resolve?name={host}&type=A",
+         None),
+    ]
+
+    for url, header in doh_endpoints:
+        try:
+            cmd = ["curl", "-s", "--max-time", str(timeout)]
+            if header:
+                cmd += ["-H", header]
+            cmd.append(url)
+            r = _run(cmd, capture=True, check=False)
+            if r.returncode != 0 or not r.stdout.strip():
+                continue
+            data = json.loads(r.stdout.strip())
+            # Status==0 → NOERROR (и у Cloudflare, и у Google).
+            if data.get("Status", 0) != 0:
+                continue
+            for ans in data.get("Answer", []):
+                if ans.get("type") == 1:  # A record
+                    ip = ans.get("data", "")
+                    try:
+                        socket.inet_aton(ip)
+                        return ip
+                    except OSError:
+                        continue
+        except Exception:
+            continue
+
+    # 4) Fallback: системный резолвер (лучше старый IP, чем никакой).
+    try:
+        return socket.gethostbyname(host)
+    except Exception:
+        return None
+
+
 def _speed_test_node_latency(host: str, port: int) -> str:
     """
     Измеряет TCP-латентность до хоста через прямое подключение (socket).
+    Резолв домена выполняется через _resolve_host_fresh (DoH + fallback),
+    чтобы не ловить устаревший IP из локального DNS-кэша.
     Возвращает строку с результатом.
     """
     core = _core_module()
@@ -2875,7 +2958,9 @@ def _speed_test_node_latency(host: str, port: int) -> str:
     NC = core.NC
     try:
         start = time.time()
-        ip = socket.gethostbyname(host)
+        ip = _resolve_host_fresh(host)
+        if not ip:
+            return f"{RED}ошибка (DNS: не удалось резолвить {host}){NC}"
         s = socket.create_connection((ip, port), timeout=5)
         s.close()
         ms = (time.time() - start) * 1000
@@ -2889,11 +2974,15 @@ def _speed_test_node_latency(host: str, port: int) -> str:
 def _speed_test_node_geo(host: str) -> tuple[str, str, str, str, str]:
     """
     Возвращает (ip, country_cc, country, city, isp) для хоста через ip-api.com.
+    Резолв домена выполняется через _resolve_host_fresh (DoH + fallback),
+    чтобы GeoIP определялся по АКТУАЛЬНОМУ IP, а не по устаревшей кэш-записи.
     """
     core = _core_module()
     _run = core._run
     try:
-        ip = socket.gethostbyname(host)
+        ip = _resolve_host_fresh(host)
+        if not ip:
+            return host, "??", "неизвестно", "?", "?"
         r = _run(
             ["curl", "-s", "--max-time", "8",
              f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,city,isp,query"],
@@ -3111,7 +3200,11 @@ def do_node_health_matrix() -> None:
         """Возвращает (ms_int, formatted_str). ms=-1 при недоступности."""
         try:
             t0 = time.time()
-            ip = socket.gethostbyname(host)
+            # DoH + fallback — чтобы пинговать АКТУАЛЬНЫЙ IP ноды, а не старый
+            # кэшированный адрес. См. _resolve_host_fresh().
+            ip = _resolve_host_fresh(host)
+            if not ip:
+                return -1, f"{RED}▼ DNS fail{NC}"
             s  = socket.create_connection((ip, port), timeout=5)
             s.close()
             ms = int((time.time() - t0) * 1000)
