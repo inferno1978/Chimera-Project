@@ -700,6 +700,95 @@ class TestWriteConfig(unittest.TestCase):
         content = self._cfg.read_text()
         self.assertIn('client_mss = "tspu"', content)
 
+    def test_client_mss_bulk_inserted_when_both_set(self):
+        """client_mss_bulk — добавляется в [server] если задан и client_mss."""
+        from chimera.modules import mtproto
+        mtproto._write_config(
+            port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
+            users={}, use_middle_proxy=False,
+            client_mss="tspu",
+            client_mss_bulk="1400",
+        )
+        content = self._cfg.read_text()
+        self.assertIn('client_mss = "tspu"', content)
+        self.assertIn('client_mss_bulk = "1400"', content)
+
+    def test_client_mss_bulk_skipped_when_no_handshake_mss(self):
+        """client_mss_bulk НЕ пишется если нет client_mss (нет смысла).
+
+        Telemt-спецификация: bulk-MSS применяется только после handshake-MSS.
+        Без handshake фрагментация не активна — bulk не имеет эффекта.
+        mtproto.py валидирует это на стороне записи конфига.
+        """
+        from chimera.modules import mtproto
+        mtproto._write_config(
+            port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
+            users={}, use_middle_proxy=False,
+            client_mss="",
+            client_mss_bulk="1400",
+        )
+        content = self._cfg.read_text()
+        self.assertNotIn("client_mss_bulk", content)
+        self.assertNotIn('client_mss = ""', content)
+
+    def test_client_mss_bulk_skipped_when_empty(self):
+        """Пустой client_mss_bulk — не пишется в конфиг (прежнее поведение)."""
+        from chimera.modules import mtproto
+        mtproto._write_config(
+            port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
+            users={}, use_middle_proxy=False,
+            client_mss="tspu",
+            client_mss_bulk="",
+        )
+        content = self._cfg.read_text()
+        self.assertIn('client_mss = "tspu"', content)
+        self.assertNotIn("client_mss_bulk", content)
+
+    def test_client_mss_bulk_uses_string_quotes(self):
+        """client_mss_bulk — тип String, числа тоже в кавычках (как client_mss)."""
+        from chimera.modules import mtproto
+        mtproto._write_config(
+            port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
+            users={}, use_middle_proxy=False,
+            client_mss="2in8",
+            client_mss_bulk="1280",
+        )
+        content = self._cfg.read_text()
+        # Числовое значение 1280 — в кавычках, как строка
+        self.assertIn('client_mss_bulk = "1280"', content)
+        # Не должно быть без кавычек
+        self.assertNotIn('client_mss_bulk = 1280\n', content)
+
+    def test_client_mss_bulk_accepts_named_preset(self):
+        """client_mss_bulk принимает и именованные пресеты ('tspu', '2in8')."""
+        from chimera.modules import mtproto
+        mtproto._write_config(
+            port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
+            users={}, use_middle_proxy=False,
+            client_mss="tspu",
+            client_mss_bulk="2in8",
+        )
+        content = self._cfg.read_text()
+        self.assertIn('client_mss_bulk = "2in8"', content)
+
+    def test_both_mss_in_server_section_after_port(self):
+        """Оба параметра (client_mss, client_mss_bulk) идут в секции [server],
+        сразу после `port = N`."""
+        from chimera.modules import mtproto
+        mtproto._write_config(
+            port=8443, ipv4="1.2.3.4", ipv6="", tls_domain="x",
+            users={}, use_middle_proxy=False,
+            client_mss="tspu",
+            client_mss_bulk="1400",
+        )
+        content = self._cfg.read_text()
+        # Порядок: port → client_mss → client_mss_bulk
+        idx_port = content.index("port = 8443")
+        idx_mss = content.index('client_mss = "tspu"')
+        idx_bulk = content.index('client_mss_bulk = "1400"')
+        self.assertLess(idx_port, idx_mss, "port должен идти раньше client_mss")
+        self.assertLess(idx_mss, idx_bulk, "client_mss должен идти раньше client_mss_bulk")
+
     def test_ipv4_only_listener(self):
         """Только IPv4 → listener 0.0.0.0, no IPv6 listener.
 
