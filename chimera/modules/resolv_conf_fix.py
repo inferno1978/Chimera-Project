@@ -77,6 +77,8 @@ _LOG_FILE             = Path("/var/log/chimera.log")
 _DNSCRYPT_TOML        = Path("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
 _DNSCRYPT_SERVICE     = "dnscrypt-proxy.service"
 _LOCAL_DNS            = "127.0.0.1"
+_DNS_PORT             = 53       # стандартный DNS порт (glibc отправляет сюда)
+_IPTABLES_COMMENT     = "chimera-dns-fix"  # для идентификации правил при -D
 
 # Persist-сервис — Python-скрипт (не bash), перезаписывает resolv.conf +
 # nsswitch.conf после ребута если cloud-init их регенерировал.
@@ -196,6 +198,68 @@ def _is_dnscrypt_listening(addr: str, port: int) -> bool:
             if pat in line:
                 return True
     return False
+
+
+def _is_dns_redirect_active(dnscrypt_port: int) -> bool:
+    """Проверяет, активен ли iptables redirect 53→dnscrypt_port для локальных запросов."""
+    if dnscrypt_port == _DNS_PORT:
+        return True  # redirect не нужен — DNSCrypt уже на 53
+    r = _run(["iptables", "-t", "nat", "-L", "OUTPUT", "-n"],
+             capture=True, check=False)
+    if r.returncode != 0:
+        return False
+    # Ищем правило REDIRECT dpt:53 to:5300
+    return f"to:{dnscrypt_port}" in r.stdout and "dpt:53" in r.stdout
+
+
+def _apply_dns_redirect(dnscrypt_port: int) -> tuple:
+    """Создаёт iptables NAT OUTPUT redirect 53→dnscrypt_port.
+
+    glibc (curl, dig, apt, python, ssh) отправляет DNS-запросы на
+    nameserver:53. DNSCrypt слушает на 5300. Без redirect — DNS мёртв.
+    Redirect перехватывает ТОЛЬКО локальные запросы к 127.0.0.1:53 и
+    перенаправляет на 5300. НЕ трогает интерфейсы, НЕ убивает SSH.
+
+    Возвращает (ok, error).
+    """
+    if dnscrypt_port == _DNS_PORT:
+        return True, None  # redirect не нужен
+
+    # Удаляем старые правила если есть (idempotent).
+    for proto in ("udp", "tcp"):
+        _run(["iptables", "-t", "nat", "-D", "OUTPUT",
+              "-p", proto, "-d", _LOCAL_DNS, "--dport", str(_DNS_PORT),
+              "-j", "REDIRECT", "--to-ports", str(dnscrypt_port),
+              "-m", "comment", "--comment", _IPTABLES_COMMENT],
+             capture=True, check=False)
+
+    # Добавляем новые.
+    for proto in ("udp", "tcp"):
+        r = _run(["iptables", "-t", "nat", "-A", "OUTPUT",
+                  "-p", proto, "-d", _LOCAL_DNS, "--dport", str(_DNS_PORT),
+                  "-j", "REDIRECT", "--to-ports", str(dnscrypt_port),
+                  "-m", "comment", "--comment", _IPTABLES_COMMENT],
+                 capture=True, check=False)
+        if r.returncode != 0:
+            return False, f"iptables -A OUTPUT {proto}: rc={r.returncode}, stderr={r.stderr.strip()[:120]}"
+
+    return True, None
+
+
+def _remove_dns_redirect(dnscrypt_port: int) -> tuple:
+    """Удаляет iptables NAT OUTPUT redirect 53→dnscrypt_port.
+
+    Возвращает (ok, error).
+    """
+    if dnscrypt_port == _DNS_PORT:
+        return True, None
+    for proto in ("udp", "tcp"):
+        _run(["iptables", "-t", "nat", "-D", "OUTPUT",
+              "-p", proto, "-d", _LOCAL_DNS, "--dport", str(_DNS_PORT),
+              "-j", "REDIRECT", "--to-ports", str(dnscrypt_port),
+              "-m", "comment", "--comment", _IPTABLES_COMMENT],
+             capture=True, check=False)
+    return True, None
 
 
 def _get_resolv_conf_nameservers() -> List[str]:
@@ -439,6 +503,40 @@ try:
 except Exception:
     pass
 
+# 5. iptables redirect 53→5300 (БЕЗОПАСНО — не трогает интерфейсы)
+# glibc отправляет DNS на nameserver:53. DNSCrypt слушает на 5300.
+# Без redirect — DNS мёртв после применения фикса.
+DNS_PORT = 53
+DNSCRYPT_PORT = 5300  # default; можно переопределить из TOML
+try:
+    # Читаем порт DNSCrypt из TOML.
+    toml = Path("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
+    if toml.exists():
+        m = re.search(r"listen_addresses\\s*=\\s*\\[\\s*['\\\"]([^'\\\"]+)['\\\"]",
+                      toml.read_text(errors="replace"), re.IGNORECASE)
+        if m:
+            addr_port = m.group(1)
+            parts = addr_port.rsplit(":", 1)
+            if len(parts) == 2:
+                DNSCRYPT_PORT = int(parts[1])
+    if DNSCRYPT_PORT != DNS_PORT:
+        for proto in ("udp", "tcp"):
+            # Удаляем старое правило если есть.
+            subprocess.run(["iptables", "-t", "nat", "-D", "OUTPUT",
+                          "-p", proto, "-d", LOCAL_DNS, "--dport", str(DNS_PORT),
+                          "-j", "REDIRECT", "--to-ports", str(DNSCRYPT_PORT),
+                          "-m", "comment", "--comment", "chimera-dns-fix"],
+                         capture_output=True, timeout=5)
+            # Добавляем новое.
+            subprocess.run(["iptables", "-t", "nat", "-A", "OUTPUT",
+                          "-p", proto, "-d", LOCAL_DNS, "--dport", str(DNS_PORT),
+                          "-j", "REDIRECT", "--to-ports", str(DNSCRYPT_PORT),
+                          "-m", "comment", "--comment", "chimera-dns-fix"],
+                         capture_output=True, timeout=5)
+        log(f"iptables redirect {DNS_PORT}→{DNSCRYPT_PORT}")
+except Exception as e:
+    log(f"iptables redirect ERROR: {e}")
+
 log("done")
 '''
     try:
@@ -626,6 +724,24 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False,
     except Exception as e:
         warnings.append(f"не удалось изменить nsswitch.conf: {e}")
 
+    # ── 4.5. iptables redirect 53→dnscrypt_port ─────────────────────────────
+    # КРИТИЧЕСКИЙ шаг: glibc отправляет DNS на nameserver:53. DNSCrypt слушает
+    # на 5300. Без redirect — DNS мёртв (Could not resolve host).
+    # iptables NAT OUTPUT redirect перехватывает ТОЛЬКО локальные запросы к
+    # 127.0.0.1:53 → перенаправляет на 5300. НЕ трогает интерфейсы.
+    dnscrypt_port = 5300  # default
+    if diag["dnscrypt_listen"]:
+        dnscrypt_port = diag["dnscrypt_listen"][1]
+    if dnscrypt_port != _DNS_PORT:
+        ok_r, err_r = _apply_dns_redirect(dnscrypt_port)
+        if ok_r:
+            actions.append(f"iptables redirect 53→{dnscrypt_port} (локальные DNS → DNSCrypt)")
+        else:
+            warnings.append(f"iptables redirect: {err_r}")
+            warnings.append("ВНИМАНИЕ: DNS может не работать без redirect! "
+                           "Проверьте что DNSCrypt слушает на порту 53, либо "
+                           "настройте iptables вручную.")
+
     # ── 5. Drop-in для systemd-resolved (defense-in-depth) ──────────────────
     try:
         _RESOLVED_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -801,6 +917,15 @@ def rollback_resolv_conf() -> Dict[str, Any]:
         except Exception as e:
             warnings.append(f"не удалось удалить drop-in: {e}")
 
+    # 4.5. Удалить iptables redirect 53→dnscrypt_port
+    dnscrypt_port = 5300
+    diag = diagnose_resolv_conf()
+    if diag["dnscrypt_listen"]:
+        dnscrypt_port = diag["dnscrypt_listen"][1]
+    ok_r, _ = _remove_dns_redirect(dnscrypt_port)
+    if ok_r and dnscrypt_port != _DNS_PORT:
+        actions.append(f"удалён iptables redirect 53→{dnscrypt_port}")
+
     # 5. restart systemd-resolved + flush-caches
     _run(["systemctl", "restart", "systemd-resolved"], capture=True, check=False)
     actions.append("systemctl restart systemd-resolved")
@@ -873,6 +998,12 @@ def _print_diagnosis(diag: Dict[str, Any]) -> None:
         listen_str = f"{addr}:{port}"
         if diag["dnscrypt_listening"]:
             _box_row(f"    listen:  {GREEN}{listen_str} ✓ слушает{NC}")
+            if port != _DNS_PORT:
+                redirect_ok = _is_dns_redirect_active(port)
+                if redirect_ok:
+                    _box_row(f"    iptables redirect 53→{port}: {GREEN}✓ активен{NC}")
+                else:
+                    _box_row(f"    iptables redirect 53→{port}: {RED}✗ НЕ активен (DNS не будет работать!){NC}")
         else:
             _box_row(f"    listen:  {RED}{listen_str} ✗ НЕ слушает{NC}")
     else:
