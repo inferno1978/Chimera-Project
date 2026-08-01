@@ -494,47 +494,119 @@ def _networkd_find_link_files(link: str) -> List[Path]:
     """Находит .network файлы systemd-networkd для указанного link.
 
     Ищет в:
-      - /etc/systemd/network/*.network (admin config)
+      - /etc/systemd/network/*.network (admin config, высший приоритет)
       - /run/systemd/network/*.network (runtime, генерируется netplan)
       - /lib/systemd/network/*.network (distro defaults)
 
+    Match по [Match] секции: Name=ens3 / Name=ens3 e* / Name=e* /
+    MACAddress=... (если link имеет тот же MAC) / [Network] DHCP=yes
+    (без явного Name — fallback).
+
     Возвращает список путей. Обычно один файл на link.
     """
+    import fnmatch
+
     results: List[Path] = []
     search_dirs = [
         Path("/etc/systemd/network"),
         Path("/run/systemd/network"),
         Path("/lib/systemd/network"),
     ]
+    # Получаем MAC link'а для match по MACAddress=.
+    link_mac = None
+    try:
+        mac_path = Path(f"/sys/class/net/{link}/address")
+        if mac_path.exists():
+            link_mac = mac_path.read_text().strip().lower()
+    except Exception:
+        pass
+
     for d in search_dirs:
         if not d.exists():
             continue
         for f in d.glob("*.network"):
             try:
                 content = f.read_text(errors="replace")
-                # Ищем [Match] Name=ens3 (или Name=ens3 e*).
-                # Простейший match — точное имя в Name= или MAC.
-                if f"Name={link}" in content or f"Name={link}\n" in content:
-                    results.append(f)
-                    continue
-                # Также match по wildcard: Name=ens3 / Name=e*
-                # Парсим [Match] секцию.
+                # Парсим [Match] секцию — собираем все Name= и MACAddress=.
                 in_match = False
+                name_patterns: List[str] = []
+                mac_patterns: List[str] = []
                 for line in content.splitlines():
                     ls = line.strip()
                     if ls.startswith("[") and ls.endswith("]"):
                         in_match = (ls == "[Match]")
                         continue
-                    if in_match and ls.startswith("Name="):
-                        pattern = ls[5:].strip()
-                        # Простой glob: ens3, e*, en*
-                        import fnmatch
-                        if fnmatch.fnmatch(link, pattern):
-                            results.append(f)
+                    if not in_match:
+                        continue
+                    # Name= может быть "ens3" или "ens3 eth0" (через пробел).
+                    if ls.startswith("Name=") or ls.startswith("Name ="):
+                        val = ls.split("=", 1)[1].strip()
+                        name_patterns.extend(val.split())
+                    elif ls.startswith("MACAddress=") or ls.startswith("MACAddress ="):
+                        val = ls.split("=", 1)[1].strip()
+                        mac_patterns.extend(m.strip().lower() for m in val.split())
+                # Match по Name (fnmatch для wildcard).
+                matched = False
+                for pattern in name_patterns:
+                    if fnmatch.fnmatch(link, pattern):
+                        matched = True
+                        break
+                # Match по MAC.
+                if not matched and link_mac:
+                    for pattern in mac_patterns:
+                        if pattern == link_mac:
+                            matched = True
                             break
+                if matched:
+                    results.append(f)
+                    continue
+                # Fallback: если в [Network] есть DHCP=yes и нет Name=,
+                # считаем что это generic .network (редкий кейс).
+                if not name_patterns and not mac_patterns:
+                    if "DHCP=yes" in content or "DHCP=ipv4" in content:
+                        results.append(f)
             except Exception:
                 continue
     return results
+
+
+def _networkd_create_link_network_file(link: str) -> Path:
+    """Создаёт новый .network файл для link в /etc/systemd/network/.
+
+    Используется как fallback если _networkd_find_link_files ничего не нашёл
+    (например, на server-сборках без netplan, или если .network файлы в /run/
+    удалены). Файл содержит минимальный [Match] Name=<link> + [Network]
+    DHCP=yes — чтобы systemd-networkd продолжал управлять DHCP, но drop-in
+    с UseDNS=false мог примениться.
+
+    Имя файла: 10-chimera-<link>.network (в /etc/systemd/network/).
+    """
+    net_file = Path("/etc/systemd/network") / f"10-chimera-{link}.network"
+    content = (
+        f"# Chimera Project — .network файл для link {link}\n"
+        f"# Создан chimera/modules/resolv_conf_fix.py как fallback\n"
+        f"# (не найден существующий .network файл для этого link).\n"
+        f"[Match]\n"
+        f"Name={link}\n"
+        f"\n"
+        f"[Network]\n"
+        f"DHCP=yes\n"
+        f"\n"
+        f"[DHCPv4]\n"
+        f"UseDNS=false\n"
+        f"UseDomains=false\n"
+        f"\n"
+        f"[DHCPv6]\n"
+        f"UseDNS=false\n"
+        f"UseDomains=false\n"
+        f"\n"
+        f"[IPv6AcceptRA]\n"
+        f"UseDNS=false\n"
+        f"UseDomains=false\n"
+    )
+    net_file.parent.mkdir(parents=True, exist_ok=True)
+    net_file.write_text(content)
+    return net_file
 
 
 def _networkd_disable_dhcp_dns(link: str) -> tuple:
@@ -543,11 +615,23 @@ def _networkd_disable_dhcp_dns(link: str) -> tuple:
     systemd-networkd читает drop-in'ы из /etc/systemd/network/<file>.d/*.conf.
     Drop-in перебивает DHCP DNS: `[DHCPv4] UseDNS=false` + `[DHCPv6] UseDNS=false`.
 
+    Если .network файл не найден (редкий кейс на server-сборках без netplan) —
+    создаёт новый .network файл в /etc/systemd/network/ через
+    _networkd_create_link_network_file() (уже с UseDNS=false внутри).
+
     Возвращает (ok, dropin_path, error).
     """
     net_files = _networkd_find_link_files(link)
     if not net_files:
-        return False, None, f"не найден .network файл для link {link}"
+        # Fallback: создаём .network файл с [DHCPv4] UseDNS=false прямо внутри.
+        try:
+            net_file = _networkd_create_link_network_file(link)
+        except PermissionError:
+            return False, None, f"нет прав на /etc/systemd/network/ (нужен root)"
+        except Exception as e:
+            return False, None, f"не удалось создать .network файл: {e}"
+        # Возвращаем путь к самому .network файлу — UseDNS=false уже внутри.
+        return True, net_file, None
 
     # Берём первый найденный (обычно один на link).
     net_file = net_files[0]
@@ -588,6 +672,9 @@ def _networkd_disable_dhcp_dns(link: str) -> tuple:
 def _networkd_enable_dhcp_dns(link: str) -> tuple:
     """Удаляет drop-in для .network файла link'а (возвращает DHCP DNS).
 
+    Также удаляет fallback .network файлы (10-chimera-*.network) созданные
+    _networkd_create_link_network_file() если не было найдено существующих.
+
     Возвращает (ok, error).
     """
     # Удаляем все chimera-dns.conf drop-in'ы для любого .network файла.
@@ -608,6 +695,13 @@ def _networkd_enable_dhcp_dns(link: str) -> tuple:
         try:
             if d.exists() and not any(d.iterdir()):
                 d.rmdir()
+        except Exception:
+            pass
+    # Также удаляем fallback .network файлы (10-chimera-*.network).
+    for f in dropin_dir_glob.glob("10-chimera-*.network"):
+        try:
+            f.unlink()
+            removed = True
         except Exception:
             pass
     return True, None if removed else "drop-in не найден (возможно уже удалён)"

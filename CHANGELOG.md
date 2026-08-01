@@ -2,6 +2,94 @@
 
 ---
 
+## FIX(dns): resolv_conf_fix v5 — robust поиск .network файлов + fallback создание — 1 августа 2026
+
+**После v4 фикса пользователь увидел warning: "link ens3: не найден .network
+файл для link ens3". DHCP DNS не отключился, утечка осталась. Причина:
+`_networkd_find_link_files()` не нашёл .network файл — либо netplan не
+сгенерировал его в /run/systemd/network/, либо Name= записан с пробелами/
+wildcard/MAC, что старый парсер не понимал.**
+
+### Корень проблемы
+
+Старый `_networkd_find_link_files()`:
+- Искал только `Name=<link>` буквально в тексте (без парсинга [Match] секции).
+- Не понимал `Name = ens3` (с пробелами вокруг `=`).
+- Не понимал `Name=ens3 eth0` (несколько имён через пробел).
+- Не понимал wildcard `Name=e*`.
+- Не понимал match по `MACAddress=`.
+- Не имел fallback если файл не найден.
+
+### Решение
+
+**1. Полностью переписан `_networkd_find_link_files()`:**
+- Парсит `[Match]` секцию корректно — собирает все `Name=` и `MACAddress=`.
+- Поддерживает `Name = ens3` (пробелы вокруг `=`).
+- Поддерживает `Name=ens3 eth0` (несколько имён через пробел).
+- Поддерживает wildcard `Name=e*` через `fnmatch`.
+- Поддерживает match по MAC: читает `/sys/class/net/<link>/address`,
+  сравнивает с `MACAddress=` в .network файле.
+- Fallback: если в `[Network]` есть `DHCP=yes` и нет явного Name —
+  считает generic .network подходящим (редкий кейс).
+
+**2. Новый fallback `_networkd_create_link_network_file(link)`:**
+- Если .network файл не найден — создаёт новый
+  `/etc/systemd/network/10-chimera-<link>.network` с:
+  ```ini
+  [Match]
+  Name=ens3
+
+  [Network]
+  DHCP=yes
+
+  [DHCPv4]
+  UseDNS=false
+  [DHCPv6]
+  UseDNS=false
+  [IPv6AcceptRA]
+  UseDNS=false
+  ```
+- UseDNS=false уже внутри файла — drop-in не нужен.
+- systemd-networkd применит этот файл при `networkctl reload`.
+
+**3. `_networkd_disable_dhcp_dns()` — использует fallback:**
+- Если `_networkd_find_link_files()` вернул пустой список → вызывает
+  `_networkd_create_link_network_file()`.
+- Возвращает путь к созданному .network файлу (не drop-in).
+
+**4. `_networkd_enable_dhcp_dns()` — удаляет fallback .network файлы:**
+- Кроме drop-in'ов, удаляет `10-chimera-*.network` (созданные fallback'ом).
+
+### Тесты
+
+`tests/test_resolv_conf_fix.py` — 6 новых unit-тестов:
+- `TestNetworkdFindLinkFiles` (4): exact name / wildcard / multiple names /
+  no match.
+- `TestNetworkdDisableDhcpDnsFallback` (2): создаёт .network файл при
+  отсутствии (fallback) / создаёт drop-in при наличии.
+
+35/35 тестов в `tests/test_resolv_conf_fix.py` проходят. 94/94 в DNS-свите.
+
+### Файлы
+
+- `chimera/modules/resolv_conf_fix.py`:
+  - `_networkd_find_link_files()` — полностью переписан (парсинг [Match],
+    MAC, wildcard, multiple names, generic fallback).
+  - Новая функция `_networkd_create_link_network_file(link)` — fallback.
+  - `_networkd_disable_dhcp_dns()` — использует fallback если файл не найден.
+  - `_networkd_enable_dhcp_dns()` — удаляет `10-chimera-*.network` файлы.
+- `tests/test_resolv_conf_fix.py` — +6 тестов.
+
+### Совместимость
+
+- На server-сборках без netplan (нет /run/systemd/network/*.network) —
+  fallback создаёт .network файл в /etc/, systemd-networkd применит.
+- На Ubuntu 24.04 с netplan — netplan генерирует .network в /run/,
+  парсер теперь корректно их находит (wildcard, MAC, multiple names).
+- Rollback чистит оба типа: drop-in'ы + fallback .network файлы.
+
+---
+
 ## UX(dns): кнопка [U] Re-apply в TUI — переприменить фикс v4 поверх v3 — 1 августа 2026
 
 **После v4 фикса (отключение DHCP DNS) у пользователя мог быть уже применён
