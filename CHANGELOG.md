@@ -2,6 +2,71 @@
 
 ---
 
+## CRITICAL FIX(dns): resolv_conf_fix v6 — ПОЛНАЯ переработка, БЕЗ networkctl — 2 августа 2026
+
+**ПРЕДЫСТОРИЯ: v4/v5 фиксы вызывали `networkctl reconfigure <link>`, что
+ПОЛНОСТЬЮ переконфигурировало сетевой интерфейс — сбрасывало IP-адрес,
+перезапрашивало DHCP. На удалённом сервере это УБИВАЛО SSH. Пользователь
+потерял доступ к серверу и был вынужден переустанавливать ОС.**
+
+**КРОМЕ ТОГО: v5 fallback создавал .network файл с `DHCP=yes` для интерфейса,
+имя которого определялось динамически. Если интерфейс назывался `ensp0s4`
+(а не `ens3`), fallback-файл мог сконфликтовать с netplan-конфигом и
+переопределить статический IP на DHCP — тоже убивая SSH.**
+
+### Принцип безопасности v6
+
+Этот модуль **НЕ вызывает НИ ОДНОЙ команды, которая может затронуть
+сетевой интерфейс**:
+
+  ✗ НЕТ `networkctl reconfigure` (УБИВАЕТ SSH)
+  ✗ НЕТ `networkctl reload`
+  ✗ НЕТ `.network` файлов / drop-in'ов
+  ✗ НЕТ `nmcli connection up/down`
+  ✗ НЕТ `dhclient`
+  ✗ НЕТ `ifconfig` / `ip link`
+
+Только текстовые файлы + runtime `resolvectl` команды (не трогают интерфейсы):
+  ✓ `/etc/resolv.conf` → статичный `nameserver 127.0.0.1`
+  ✓ `/etc/nsswitch.conf` → убрать `resolve` (bypass systemd-resolved для glibc)
+  ✓ `/etc/systemd/resolved.conf.d/chimera-dns.conf` → drop-in (defense-in-depth)
+  ✓ `resolvectl dns LINK 127.0.0.1` + `default-route LINK false` (runtime, safe)
+  ✓ `resolvectl flush-caches`
+
+### Почему это работает
+
+Проблема: systemd-resolved получает DHCP DNS от провайдера (77.88.8.8) и
+отправляет запросы на все Global DNS параллельно — DNS Leak Test видит Yandex.
+
+Решение: **ПОЛНОСТЬЮ обойти systemd-resolved** для системного DNS:
+1. `/etc/resolv.conf` → `nameserver 127.0.0.1` — glibc (curl, dig, apt, ssh)
+   использует этот файл напрямую, НЕ через systemd-resolved.
+2. `/etc/nsswitch.conf` → убрать `resolve` из `hosts:` — nss-resolve модуль
+   отключён, glibc использует `dns` (читает /etc/resolv.conf → 127.0.0.1).
+3. Per-link `resolvectl` override — для приложений, использующих D-Bus API
+   systemd-resolved напрямую.
+
+Всё, что использует glibc `getaddrinfo()` (curl, dig, apt, python, ssh),
+идёт через /etc/resolv.conf → 127.0.0.1 → DNSCrypt. **Утечки НЕТ.**
+
+### Что удалено
+
+- `_networkd_find_link_files()` — удалён
+- `_networkd_disable_dhcp_dns()` / `_networkd_enable_dhcp_dns()` — удалены
+- `_networkd_create_link_network_file()` — удалён (ОПАСНЫЙ — создавал .network)
+- `_nm_disable_dhcp_dns()` / `_nm_enable_dhcp_dns()` — удалены
+- `disable_dhcp_dns_on_all_links()` / `enable_dhcp_dns_on_all_links()` — удалены
+- `_detect_network_manager()` — удалён
+- Все `networkctl` вызовы — удалены
+- Persist-скрипт переписан с bash на **Python** (надёжнее, БЕЗ networkctl)
+
+### Тесты
+
+16 тестов, включая `test_no_networkctl_called` — проверяет что НИ ОДНА
+команда `networkctl` не вызывается. 16/16 OK. 75/75 в DNS-свите OK.
+
+---
+
 ## FIX(dns): resolv_conf_fix v5 — robust поиск .network файлов + fallback создание — 1 августа 2026
 
 **После v4 фикса пользователь увидел warning: "link ens3: не найден .network
