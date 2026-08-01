@@ -77,14 +77,18 @@ class _BaseTest(unittest.TestCase):
     def setUp(self):
         _setup_core_in_sysmodules()
         self._tmpdir = Path(tempfile.mkdtemp())
-        # Патчим _STATE_FILE / _BACKUP / _RESOLV_CONF / _RESOLVED_DROPIN_*
-        # на пути внутри tmpdir.
+        # Патчим все файловые пути на tmpdir.
         self._state_file = self._tmpdir / "resolv_conf_fix.json"
         self._backup_file = self._tmpdir / "resolv.conf.chimera.bak"
         self._resolv_conf = self._tmpdir / "resolv.conf"
         self._dropin_dir = self._tmpdir / "resolved.conf.d"
         self._dropin_file = self._dropin_dir / "chimera-dns.conf"
         self._dnscrypt_toml = self._tmpdir / "dnscrypt-proxy.toml"
+        self._persist_svc_path = self._tmpdir / "chimera-dns-fix.service"
+        self._persist_script_path = self._tmpdir / "chimera-dns-fix-apply.sh"
+        # Создаём поддиректории для systemd-unit и /usr/local/bin
+        (self._tmpdir / "systemd-system").mkdir(parents=True, exist_ok=True)
+        (self._tmpdir / "usr-local-bin").mkdir(parents=True, exist_ok=True)
 
         patches = [
             patch("chimera.modules.resolv_conf_fix._STATE_FILE", self._state_file),
@@ -93,6 +97,8 @@ class _BaseTest(unittest.TestCase):
             patch("chimera.modules.resolv_conf_fix._RESOLVED_DROPIN_DIR", self._dropin_dir),
             patch("chimera.modules.resolv_conf_fix._RESOLVED_DROPIN_FILE", self._dropin_file),
             patch("chimera.modules.resolv_conf_fix._DNSCRYPT_TOML", self._dnscrypt_toml),
+            patch("chimera.modules.resolv_conf_fix._PERSIST_SVC_PATH", self._persist_svc_path),
+            patch("chimera.modules.resolv_conf_fix._PERSIST_SCRIPT_PATH", self._persist_script_path),
         ]
         for p in patches:
             p.start()
@@ -263,7 +269,7 @@ class TestFixResolvConfToLocahost(_BaseTest):
         self.assertEqual(state["method"], "static_resolv_conf")
 
     def test_systemd_resolved_fix_creates_dropin(self):
-        """systemd-resolved кейс: создаётся drop-in + resolvectl вызовы."""
+        """systemd-resolved кейс: создаётся drop-in + resolvectl вызовы + persist-сервис."""
         from chimera.modules import resolv_conf_fix
         self._resolv_conf.symlink_to("/run/systemd/resolve/stub-resolv.conf")
         cmd_to_result = {
@@ -273,10 +279,18 @@ class TestFixResolvConfToLocahost(_BaseTest):
                 _make_completed(stdout="active"),
             ("resolvectl", "dns"): _make_completed(
                 stdout="Global:\nLink 2 (eth0): 5.45.240.203\n"),
-            ("resolvectl", "dns-global"): _make_completed(rc=0),
-            ("resolvectl", "dns-default-route"): _make_completed(rc=0),
+            ("resolvectl", "dns", "eth0"): _make_completed(rc=0),
+            ("resolvectl", "dns", "eth0", "127.0.0.1"): _make_completed(rc=0),
+            ("resolvectl", "dns", "127.0.0.1"): _make_completed(rc=0),
+            ("resolvectl", "default-route"): _make_completed(rc=0),
+            ("resolvectl", "default-route", "eth0"): _make_completed(rc=0),
+            ("resolvectl", "default-route", "eth0", "false"): _make_completed(rc=0),
+            ("resolvectl", "default-route", "false"): _make_completed(rc=0),
             ("resolvectl", "flush-caches"): _make_completed(rc=0),
             ("systemctl", "restart", "systemd-resolved"): _make_completed(rc=0),
+            ("systemctl", "daemon-reload"): _make_completed(rc=0),
+            ("systemctl", "enable", "chimera-dns-fix.service"): _make_completed(rc=0),
+            ("systemctl", "start", "chimera-dns-fix.service"): _make_completed(rc=0),
             ("ss", "-tlnu"): _make_completed(
                 stdout="UDP  127.0.0.1:5300  0.0.0.0:*"),
         }
@@ -292,11 +306,76 @@ class TestFixResolvConfToLocahost(_BaseTest):
         dropin_content = self._dropin_file.read_text()
         self.assertIn("DNS=127.0.0.1", dropin_content)
         self.assertIn("[Resolve]", dropin_content)
-        # State сохранён
+        # Persist-сервис и скрипт созданы
+        self.assertTrue(resolv_conf_fix._PERSIST_SVC_PATH.exists())
+        self.assertTrue(resolv_conf_fix._PERSIST_SCRIPT_PATH.exists())
+        # Скрипт исполняемый
+        import os, stat
+        mode = stat.S_IMODE(os.stat(resolv_conf_fix._PERSIST_SCRIPT_PATH).st_mode)
+        self.assertTrue(mode & 0o100, "persist-скрипт должен быть исполняемым")
+        # systemd-unit содержит After=network-online.target
+        svc_content = resolv_conf_fix._PERSIST_SVC_PATH.read_text()
+        self.assertIn("network-online.target", svc_content)
+        self.assertIn("chimera-dns-fix-apply.sh", svc_content)
+        # В actions есть per-link override и persist
+        actions_str = " ".join(result["actions"])
+        self.assertIn("resolvectl dns eth0 127.0.0.1", actions_str)
+        self.assertIn("resolvectl default-route eth0 false", actions_str)
+        self.assertIn("persist-сервис", actions_str)
+        # State сохранён с persist_service=True
         state = json.loads(self._state_file.read_text())
         self.assertTrue(state["fixed"])
         self.assertEqual(state["method"], "systemd_resolved")
         self.assertIn("dropin_path", state)
+        self.assertTrue(state.get("persist_service"))
+
+    def test_systemd_resolved_uses_correct_resolvectl_syntax(self):
+        """РЕГРЕССИЯ: на Ubuntu 24.04+ синтаксис `resolvectl dns` (без -global),
+        `resolvectl default-route` (без dns- prefix). Старый синтаксис
+        `dns-global set` / `dns-default-route set false` возвращал
+        'Unknown command verb' — фикс «применялся», но утечка оставалась.
+        """
+        from chimera.modules import resolv_conf_fix
+        self._resolv_conf.symlink_to("/run/systemd/resolve/stub-resolv.conf")
+        # Записываем все вызовы _run для последующего анализа.
+        called_cmds = []
+        def tracking_run(cmd, capture=False, quiet=False, check=False, **kw):
+            called_cmds.append(tuple(cmd))
+            # Спец-выводы для ключевых команд:
+            if "is-active" in cmd:
+                return _make_completed(rc=0, stdout="active\n")
+            if cmd[:2] == ["resolvectl", "dns"] and len(cmd) == 2:
+                # `resolvectl dns` (просмотр) — без аргументов.
+                return _make_completed(stdout="Global:\nLink 2 (eth0): 5.45.240.203\n")
+            if cmd[:1] == ["ss"]:
+                # ss -tlnu — кто-то слушает на 127.0.0.1:5300.
+                return _make_completed(stdout="UDP  127.0.0.1:5300  0.0.0.0:*\n")
+            # Все остальные (resolvectl dns X, default-route, systemctl) — успех.
+            return _make_completed(rc=0)
+        with patch.object(resolv_conf_fix, "_run", side_effect=tracking_run), \
+             patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
+                          return_value=("127.0.0.1", 5300)):
+            resolv_conf_fix.fix_resolv_conf_to_localhost()
+        # Не должно быть вызовов `dns-global` или `dns-default-route`.
+        bad_cmds = [c for c in called_cmds
+                    if "dns-global" in c or "dns-default-route" in c]
+        self.assertEqual(bad_cmds, [],
+                         f"найдены устаревшие команды: {bad_cmds}")
+        # Должны быть вызовы `resolvectl dns 127.0.0.1` (global)
+        # и `resolvectl dns eth0 127.0.0.1` (per-link).
+        self.assertTrue(any(c == ("resolvectl", "dns", "127.0.0.1")
+                            for c in called_cmds),
+                        "нет вызова `resolvectl dns 127.0.0.1` (global)")
+        self.assertTrue(any(c == ("resolvectl", "dns", "eth0", "127.0.0.1")
+                            for c in called_cmds),
+                        "нет вызова `resolvectl dns eth0 127.0.0.1` (per-link)")
+        # `resolvectl default-route false` (global) и per-link.
+        self.assertTrue(any(c == ("resolvectl", "default-route", "false")
+                            for c in called_cmds),
+                        "нет вызова `resolvectl default-route false` (global)")
+        self.assertTrue(any(c == ("resolvectl", "default-route", "eth0", "false")
+                            for c in called_cmds),
+                        "нет вызова `resolvectl default-route eth0 false` (per-link)")
 
     def test_fix_returns_error_when_not_needed(self):
         """Если fix не нужен — возвращается ok=False с объяснением."""
@@ -399,21 +478,30 @@ class TestRollbackResolvConf(_BaseTest):
         state = json.loads(self._state_file.read_text())
         self.assertFalse(state["fixed"])
 
-    def test_rollback_systemd_removes_dropin(self):
-        """systemd-resolved: rollback удаляет drop-in + restart."""
+    def test_rollback_systemd_removes_dropin_and_persist_service(self):
+        """systemd-resolved: rollback удаляет drop-in + persist-сервис + restart."""
         from chimera.modules import resolv_conf_fix
-        # Подготовка: drop-in существует, state → fixed.
+        # Подготовка: drop-in + persist-service существуют, state → fixed.
         self._dropin_dir.mkdir(parents=True, exist_ok=True)
         self._dropin_file.write_text("[Resolve]\nDNS=127.0.0.1\n")
+        self._persist_svc_path.write_text("[Unit]\nDescription=test\n")
+        self._persist_script_path.write_text("#!/bin/bash\necho test\n")
         self._state_file.write_text(json.dumps({
             "fixed": True,
             "method": "systemd_resolved",
             "applied_at": "2026-08-01T10:00:00",
             "dropin_path": str(self._dropin_file),
+            "persist_service": True,
         }))
         cmd_to_result = {
+            ("systemctl", "stop", "chimera-dns-fix.service"): _make_completed(rc=0),
+            ("systemctl", "disable", "chimera-dns-fix.service"): _make_completed(rc=0),
+            ("systemctl", "daemon-reload"): _make_completed(rc=0),
             ("systemctl", "restart", "systemd-resolved"): _make_completed(rc=0),
-            ("resolvectl", "dns-default-route"): _make_completed(rc=0),
+            ("resolvectl", "dns"): _make_completed(
+                stdout="Global:\nLink 2 (eth0):\n"),
+            ("resolvectl", "default-route", "eth0", "true"): _make_completed(rc=0),
+            ("resolvectl", "default-route", "true"): _make_completed(rc=0),
             ("resolvectl", "flush-caches"): _make_completed(rc=0),
         }
         with patch.object(resolv_conf_fix, "_run",
@@ -422,6 +510,13 @@ class TestRollbackResolvConf(_BaseTest):
         self.assertTrue(result["ok"])
         # Drop-in удалён
         self.assertFalse(self._dropin_file.exists())
+        # Persist-сервис и скрипт удалены
+        self.assertFalse(self._persist_svc_path.exists())
+        self.assertFalse(self._persist_script_path.exists())
+        # State обновлён
+        state = json.loads(self._state_file.read_text())
+        self.assertFalse(state["fixed"])
+        self.assertFalse(state.get("persist_service"))
 
     def test_rollback_without_state_returns_error(self):
         """Rollback без применённого фикса → ok=False с ошибкой."""

@@ -2,6 +2,142 @@
 
 ---
 
+## FIX(dns): resolv_conf_fix — правильный синтаксис resolvectl + per-link override + persist — 1 августа 2026
+
+**После применения фикса на Ubuntu 24.04 утечка DNS оставалась: фикс
+«применялся» (создавался drop-in, restart, flush-caches), но `resolvectl`
+возвращал `Unknown command verb 'dns-global'` и `did you mean
+'default-route'?`. Плюс — drop-in перебивал только Global DNS, а per-link
+DNS от DHCP (ens3: 77.88.8.8 на Yandex VPS) имеет приоритет и не
+заменялся. После ребута настройки терялись.**
+
+### Корень проблемы
+
+**1. Устаревший синтаксис `resolvectl`.**
+В systemd 256+ (Ubuntu 24.04, Fedora 40+) команды были переименованы:
+- `resolvectl dns-global set 127.0.0.1` → `resolvectl dns 127.0.0.1`
+- `resolvectl dns-default-route set false` → `resolvectl default-route false`
+
+Старые команды возвращали `Unknown command verb`, rc=1. Фикс не применялся,
+но из-за того что restart + flush-caches шли после (с rc=0), пользователю
+казалось, что всё ок.
+
+**2. Per-link DNS имеет приоритет над Global.**
+Drop-in `/etc/systemd/resolved.conf.d/chimera-dns.conf` с `DNS=127.0.0.1`
+задаёт только Global DNS. Если у link'а (ens3) есть per-link DNS от DHCP
+(через netplan/NetworkManager) — systemd-resolved использует per-link.
+Global не применяется. Поэтому даже после фикса `resolvectl dns` показывал
+`Link ens3: 77.88.8.8 77.88.8.1`.
+
+**3. Нет persist после ребута.**
+Настройки через `resolvectl dns LINK 127.0.0.1` применяются только до
+перезапуска systemd-resolved. После ребута systemd-resolved снова
+подхватывает DHCP DNS от провайдера.
+
+### Решение
+
+**1. Правильный синтаксис `resolvectl` (Ubuntu 24.04+):**
+- `resolvectl dns 127.0.0.1` (global)
+- `resolvectl dns LINK 127.0.0.1` (per-link)
+- `resolvectl default-route false` (global)
+- `resolvectl default-route LINK false` (per-link)
+
+Реализовано через helper-функции `_resolvectl_dns_set(link, dns)` и
+`_resolvectl_default_route_set(link, value)`, которые вызываются и для
+global (link=None), и для каждого link'а.
+
+**2. Per-link override — КРИТИЧЕСКИЙ шаг:**
+- `_get_all_links()` — получает список всех сетевых link'ов из
+  `resolvectl dns` (regex `^Link \d+ \(([^)]+)\):`), фильтрует loopback.
+- Для каждого link'а: `resolvectl dns LINK 127.0.0.1` +
+  `resolvectl default-route LINK false`.
+- После `systemctl restart systemd-resolved` настройки link'ов
+  сбрасываются — делается повторный проход.
+
+**3. Persist после ребута — systemd-сервис `chimera-dns-fix.service`:**
+- Скрипт `/usr/local/bin/chimera-dns-fix-apply.sh` (chmod 0o755):
+  - Получает список всех link'ов через `resolvectl dns`.
+  - Для каждого link'а: `resolvectl dns LINK 127.0.0.1` +
+    `resolvectl default-route LINK false`.
+  - Также задаёт global DNS и flush-caches.
+- Systemd-unit `/etc/systemd/system/chimera-dns-fix.service`:
+  - `After=network-online.target systemd-resolved.service dnscrypt-proxy.service`
+  - `Requires=systemd-resolved.service`
+  - `Type=oneshot`, `RemainAfterExit=yes`
+  - `WantedBy=multi-user.target`
+- После создания: `systemctl daemon-reload + enable + start`.
+- Логи сервиса: `journalctl -u chimera-dns-fix.service`.
+
+### Rollback
+
+`rollback_resolv_conf()` теперь:
+1. Останавливает и удаляет `chimera-dns-fix.service` + скрипт.
+2. Удаляет drop-in.
+3. Для каждого link'а: `resolvectl default-route LINK true` (возвращает
+   DHCP DNS).
+4. Global `resolvectl default-route true`.
+5. `systemctl restart systemd-resolved`.
+6. Восстанавливает `/etc/resolv.conf` из бэкапа.
+7. `resolvectl flush-caches`.
+
+### Диагностика после фикса
+
+После применения фикса `diagnose_resolv_conf()` должна показать:
+- `Global: 127.0.0.1`
+- `Link ens3: 127.0.0.1` (per-link override)
+- `fix_needed=False` (утечки нет)
+
+В TUI-экране добавлена плашка в `state`:
+- `Persist: chimera-dns-fix.service активен (переживёт ребут)` — если
+  сервис создан.
+- `⚠ persist-сервис не активен — после ребута DHCP DNS может вернуться` —
+  если state.fixed=True, но сервис не создан.
+
+### Тесты
+
+- `test_systemd_resolved_fix_creates_dropin` — расширен: проверяет
+  создание drop-in + persist-сервиса + скрипта (исполняемость, наличие
+  `network-online.target` в unit, наличие `resolvectl dns` в скрипте).
+- `test_systemd_resolved_uses_correct_resolvectl_syntax` — НОВЫЙ
+  регрессионный тест: проверяет, что НЕ вызываются устаревшие `dns-global`
+  / `dns-default-route`, и что ВЫЗЫВАЮТ `resolvectl dns 127.0.0.1` /
+  `resolvectl dns eth0 127.0.0.1` / `resolvectl default-route false` /
+  `resolvectl default-route eth0 false`.
+- `test_rollback_systemd_removes_dropin_and_persist_service` —
+  переименован и расширен: проверяет удаление drop-in + persist-сервиса
+  + скрипта + восстановление per-link default-route.
+
+Все 20 тестов в `tests/test_resolv_conf_fix.py` проходят. 74/74 в DNS-свите.
+
+### Совместимость
+
+- Старый синтаксис `dns-global` / `dns-default-route set` не используется
+  вообще — он не работает на Ubuntu 24.04+ (а это и есть целевая
+  платформа с проблемой DNS-leak).
+- Если на очень старой системе (systemd < 240) команды не сработают —
+  будет warning в actions, но фикс не откатится. Это приемлемо —
+  старые системы обычно не имеют systemd-resolved в принципе.
+
+### Файлы
+
+- `chimera/modules/resolv_conf_fix.py`:
+  - Новые константы: `_PERSIST_SVC_NAME`, `_PERSIST_SVC_PATH`,
+    `_PERSIST_SCRIPT_PATH`.
+  - Новые helper-функции: `_get_all_links()`, `_resolvectl_dns_set()`,
+    `_resolvectl_default_route_set()`, `_write_persist_script_and_service()`,
+    `_enable_persist_service()`, `_disable_persist_service()`.
+  - `fix_resolv_conf_to_localhost()` — метод `systemd_resolved` полностью
+    переработан: правильный синтаксис + per-link override + persist.
+  - `rollback_resolv_conf()` — удаляет persist-сервис + восстанавливает
+    per-link default-route.
+  - State добавлено поле `persist_service: bool`.
+  - TUI: `_screen_fix_apply()` показывает полный список действий
+    включая per-link override и persist; `_screen_rollback()` показывает
+    удаление persist-сервиса; `_print_fix_state_badge()` показывает
+    статус persist-сервиса.
+
+---
+
 ## UX(dns): TUI-меню resolv_conf_fix в едином стиле проекта + Rollback — 1 августа 2026
 
 **После первого варианта `resolv_conf_fix.py` меню выбора [F/D/Q] рисовалось
