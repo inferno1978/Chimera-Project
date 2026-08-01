@@ -447,6 +447,59 @@ class TestFixResolvConfToLocahost(_BaseTest):
         self.assertFalse(result["ok"])
         self.assertIsNone(result["method"])
 
+    def test_force_reapplies_even_when_fix_not_needed(self):
+        """force=True — переприменяет фикс даже если fix_needed=False.
+
+        Сценарий: старый фикс v3 применён (per-link OK), но Global DNS
+        содержит 77.88.8.8 от DHCP. diagnose вернёт fix_needed=False
+        (per_link_overridden=True), но force=True позволяет переприменить
+        — это запустит disable_dhcp_dns_on_all_links (шаг 1i).
+        """
+        from chimera.modules import resolv_conf_fix
+        self._resolv_conf.symlink_to("/run/systemd/resolve/stub-resolv.conf")
+        cmd_to_result = {
+            ("systemctl", "is-active", "systemd-resolved"):
+                _make_completed(stdout="active"),
+            ("systemctl", "is-active", "dnscrypt-proxy.service"):
+                _make_completed(stdout="active"),
+            # resolvectl dns: Global содержит 77.88.8.8 (DHCP), per-link OK.
+            ("resolvectl", "dns"): _make_completed(
+                stdout="Global: 77.88.8.8 127.0.0.1\n"
+                       "Link 2 (ens3): 127.0.0.1\n"),
+            ("resolvectl", "default-route"): _make_completed(
+                stdout="Global: yes\nLink 2 (ens3): no\n"),
+            ("resolvectl", "dns", "ens3", "127.0.0.1"): _make_completed(rc=0),
+            ("resolvectl", "default-route", "ens3", "false"): _make_completed(rc=0),
+            ("resolvectl", "flush-caches"): _make_completed(rc=0),
+            ("systemctl", "restart", "systemd-resolved"): _make_completed(rc=0),
+            ("systemctl", "daemon-reload"): _make_completed(rc=0),
+            ("systemctl", "enable", "chimera-dns-fix.service"): _make_completed(rc=0),
+            ("systemctl", "start", "chimera-dns-fix.service"): _make_completed(rc=0),
+            ("ss", "-tlnu"): _make_completed(
+                stdout="UDP  127.0.0.1:5300  0.0.0.0:*"),
+        }
+        with patch.object(resolv_conf_fix, "_run",
+                          side_effect=_mock_run_factory(cmd_to_result)), \
+             patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
+                          return_value=("127.0.0.1", 5300)), \
+             patch.object(resolv_conf_fix, "_get_resolv_conf_nameservers",
+                          return_value=["127.0.0.53"]), \
+             patch.object(resolv_conf_fix, "disable_dhcp_dns_on_all_links",
+                          return_value={"ok": True, "manager": "systemd-networkd",
+                                        "actions": ["drop-in created"],
+                                        "warnings": [],
+                                        "dropin_paths": ["/etc/systemd/network/10-netplan-ens3.network.d/chimera-dns.conf"]}):
+            # Без force — отказ (fix_needed=False, per_link_overridden=True).
+            result_no_force = resolv_conf_fix.fix_resolv_conf_to_localhost()
+            self.assertFalse(result_no_force["ok"])
+            # С force=True — переприменяется.
+            result_force = resolv_conf_fix.fix_resolv_conf_to_localhost(force=True)
+        self.assertTrue(result_force["ok"])
+        self.assertEqual(result_force["method"], "systemd_resolved")
+        # В actions должен быть disable_dhcp_dns.
+        actions_str = " ".join(result_force["actions"])
+        self.assertIn("отключён DHCP DNS", actions_str)
+
     def test_dry_run_does_not_modify(self):
         """dry_run=True — ничего не меняет, возвращает actions для отображения."""
         from chimera.modules import resolv_conf_fix

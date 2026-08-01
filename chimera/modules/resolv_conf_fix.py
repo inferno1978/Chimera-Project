@@ -1054,7 +1054,8 @@ def _state_save(data: dict) -> None:
 # =============================================================================
 #  FIX — программные функции (без TUI)
 # =============================================================================
-def fix_resolv_conf_to_localhost(dry_run: bool = False) -> Dict[str, Any]:
+def fix_resolv_conf_to_localhost(dry_run: bool = False,
+                                 force: bool = False) -> Dict[str, Any]:
     """Программно направляет серверный DNS на 127.0.0.1 (DNSCrypt).
 
     Шаги:
@@ -1074,6 +1075,11 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False) -> Dict[str, Any]:
          - написать `nameserver 127.0.0.1\noptions timeout:1 attempts:1\n`
       5. Сохранить state.
 
+    Параметр force=True — переприменить фикс даже если diagnose говорит
+    fix_needed=False (например, per-link уже OK, но Global DNS от DHCP
+    нужно убрать). Используется кнопкой [U] в TUI для re-apply поверх
+    старого фикса.
+
     Возвращает dict:
       {"ok": bool, "method": str, "actions": [str, ...],
        "warnings": [str, ...], "error": str | None}
@@ -1083,16 +1089,27 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False) -> Dict[str, Any]:
 
     diag = diagnose_resolv_conf()
 
-    if not diag["fix_needed"]:
+    # При force=True — продолжаем даже если fix_needed=False.
+    # Это для случая когда per-link уже OK (старый фикс), но Global DNS
+    # от DHCP нужно убрать (новый фикс v4 с disable_dhcp_dns).
+    if not diag["fix_needed"] and not force:
         return {
             "ok": False,
             "method": None,
             "actions": [],
             "warnings": diag["leak_reasons"],
-            "error": "fix not needed or not possible (see warnings)",
+            "error": "fix not needed or not possible (see warnings). "
+                     "Use force=True to re-apply.",
         }
 
+    # При force=True и fix_needed=False — используем fix_method из diagnose,
+    # или fallback на systemd_resolved если systemd-resolved активен.
     method = diag["fix_method"]
+    if method is None and force:
+        if diag["systemd_resolved_active"]:
+            method = "systemd_resolved"
+        else:
+            method = "static_resolv_conf"
     if method is None:
         return {
             "ok": False,
@@ -1709,6 +1726,68 @@ def _screen_rollback() -> None:
     input(f"{BLUE}Нажмите Enter для возврата в меню...{NC}")
 
 
+def _screen_fix_reapply(diag: Dict[str, Any]) -> None:
+    """Экран переприменения фикса (re-apply) с подтверждением и результатом.
+
+    Используется когда state.fixed=True (старый фикс применён), но
+    diagnose показывает что есть внешние Global DNS от DHCP (parallel
+    queries утечка). Вызывает fix_resolv_conf_to_localhost(force=True)
+    — это применяет все шаги включая disable_dhcp_dns_on_all_links.
+    """
+    os.system("clear")
+    print()
+    _box_top("🔄  ПЕРЕПРИМЕНИТЬ ФИКС (RE-APPLY v4)")
+    _box_row()
+    _box_row(f"  {YELLOW}Фикс уже применён, но Global DNS содержит внешние IP{NC}")
+    _box_row(f"  {YELLOW}от DHCP — это вызывает утечку (parallel queries).{NC}")
+    _box_row()
+    _box_row(f"  {BOLD}Будет переприменено (force=True):{NC}")
+    _box_row(f"    {DIM}• drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf{NC}")
+    _box_row(f"    {DIM}• per-link override: resolvectl dns LINK 127.0.0.1{NC}")
+    _box_row(f"    {DIM}• per-link default-route: resolvectl default-route LINK false{NC}")
+    _box_row(f"    {DIM}• systemctl restart systemd-resolved{NC}")
+    _box_row(f"    {DIM}• persist-сервис chimera-dns-fix.service{NC}")
+    _box_row(f"    {GREEN}• ОТКЛЮЧИТЬ DHCP DNS (КРИТИЧЕСКИЙ шаг):{NC}")
+    _box_row(f"    {GREEN}  - systemd-networkd: drop-in .network.d/chimera-dns.conf{NC}")
+    _box_row(f"    {GREEN}  - NetworkManager: nmcli ignore-auto-dns yes{NC}")
+    _box_row(f"    {GREEN}  - networkctl reload + reconfigure{NC}")
+    _box_row()
+    _box_row(f"  {GREEN}После re-apply Global DNS будет содержать только 127.0.0.1.{NC}")
+    _box_row(f"  {GREEN}DNS Leak Test не должен видеть Yandex LLC.{NC}")
+    _box_bottom()
+
+    print()
+    try:
+        confirm = input(
+            f"{CYAN}Переприменить фикс? [Y/n]: {NC}"
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        confirm = "n"
+    if confirm not in ("", "y", "yes", "д", "да"):
+        return
+
+    print()
+    _info("Переприменяем фикс (force=True)...")
+    result = fix_resolv_conf_to_localhost(force=True)
+    print()
+    if result["ok"]:
+        _ok("Фикс переприменён успешно!")
+        for action in result["actions"]:
+            print(f"  {GREEN}✓{NC} {action}")
+        if result["warnings"]:
+            _warn("Предупреждения:")
+            for w in result["warnings"]:
+                print(f"  {YELLOW}•{NC} {w}")
+        print()
+        _info("Рекомендация: перезапустите DNS Leak Test для проверки.")
+    else:
+        _err(f"Re-apply не удался: {result.get('error')}")
+        for w in result.get("warnings", []):
+            print(f"  {YELLOW}•{NC} {w}")
+    print()
+    input(f"{BLUE}Нажмите Enter для возврата в меню...{NC}")
+
+
 def do_fix_resolv_conf_interactive() -> None:
     """Интерактивный TUI-экран управления /etc/resolv.conf.
 
@@ -1718,7 +1797,8 @@ def do_fix_resolv_conf_interactive() -> None:
       2. Блок диагностики (resolv.conf / systemd-resolved / DNSCrypt / итог)
       3. Плашка «фикс применён» (если есть)
       4. Меню действий в отдельной рамке:
-         [F] Исправить автоматически  (только если fix_needed)
+         [F] Исправить автоматически  (только если fix_needed и не применён)
+         [U] Переприменить фикс       (если применён, но Global DNS от DHCP)
          [R] Откатить фикс            (только если уже применён)
          [D] Повторить диагностику
          [Q] Выход
@@ -1731,6 +1811,13 @@ def do_fix_resolv_conf_interactive() -> None:
         diag = diagnose_resolv_conf()
         state = _state_load()
         already_fixed = state.get("fixed", False)
+
+        # Определяем: есть ли внешние Global DNS от DHCP (нужен re-apply).
+        ext_global = [ip for ip in diag["resolved_global_dns"]
+                      if not (ip.startswith("127.") or ip == "::1")]
+        needs_reapply = (already_fixed and bool(ext_global)
+                         and diag["dnscrypt_service_active"]
+                         and diag["dnscrypt_listening"])
 
         _box_top("🔧  ИСПРАВЛЕНИЕ /etc/resolv.conf (DNS LEAK FIX)")
         _box_desc(
@@ -1753,6 +1840,9 @@ def do_fix_resolv_conf_interactive() -> None:
         if diag["fix_needed"]:
             _box_item("F", f"{GREEN}Исправить автоматически{NC}  "
                            f"(направить DNS → 127.0.0.1 = DNSCrypt-proxy)")
+        if needs_reapply:
+            _box_item("U", f"{GREEN}Переприменить фикс (re-apply v4){NC}  "
+                           f"{YELLOW}← отключить DHCP DNS{NC}")
         if already_fixed:
             _box_item("R", f"{YELLOW}Откатить фикс{NC}  "
                            f"(вернуть /etc/resolv.conf как было)")
@@ -1769,6 +1859,8 @@ def do_fix_resolv_conf_interactive() -> None:
 
         if ch == "f" and diag["fix_needed"]:
             _screen_fix_apply(diag)
+        elif ch == "u" and needs_reapply:
+            _screen_fix_reapply(diag)
         elif ch == "r" and already_fixed:
             _screen_rollback()
         elif ch == "d":
