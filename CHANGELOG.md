@@ -2,6 +2,127 @@
 
 ---
 
+## FIX(dns): отключение DHCP DNS на уровне network manager — финальный фикс утечки — 1 августа 2026
+
+**После v3 фикса (per-link override + drop-in) DNS Leak Test всё ещё
+показывал Yandex LLC, хотя diagnose говорил "УТЕЧКИ НЕТ". Причина:
+systemd-resolved отправляет запросы на ВСЕ Global DNS параллельно
+(parallel queries), включая 77.88.8.8 от DHCP. Per-link override + drop-in
+не убирают Global DNS от DHCP — они только добавляют 127.0.0.1. Чтобы
+реально убрать 77.88.8.8, нужно отключить получение DNS от DHCP на уровне
+network manager.**
+
+### Корень проблемы
+
+Моя теория из v3 ("Global DNS не используется из-за Domains=~.") была
+неверной на практике. systemd-resolved 256+ отправляет запросы на все
+Global DNS параллельно — это особенность реализации для отказоустойчивости.
+Даже если drop-in с `Domains=~.` перехватывает запросы, 77.88.8.8 от DHCP
+всё равно получает запросы — DNS Leak Test видит Yandex LLC.
+
+### Решение
+
+Программное отключение DHCP DNS на уровне network manager — без правки
+yaml-файлов руками.
+
+**Логика:**
+1. `_detect_network_manager()` — определяет активный manager:
+   - `systemctl is-active NetworkManager` → NetworkManager
+   - `systemctl is-active systemd-networkd` → systemd-networkd
+   - Иначе 'none'.
+
+2. **systemd-networkd** (Ubuntu 24.04 cloud-образы, netplan):
+   - `_networkd_find_link_files(link)` — находит `.network` файл для link'а
+     в `/etc/systemd/network/`, `/run/systemd/network/`, `/lib/systemd/network/`.
+   - `_networkd_disable_dhcp_dns(link)` — создаёт drop-in
+     `/etc/systemd/network/<file>.network.d/chimera-dns.conf` с:
+     ```ini
+     [DHCPv4]
+     UseDNS=false
+     UseDomains=false
+
+     [DHCPv6]
+     UseDNS=false
+     UseDomains=false
+
+     [IPv6AcceptRA]
+     UseDNS=false
+     UseDomains=false
+     ```
+   - `networkctl reload` + `networkctl reconfigure <link>` — применяет.
+   - Drop-in в `/etc/` переживает ребут и `netplan apply` (netplan
+     регенерирует только `/run/`).
+
+3. **NetworkManager** (десктопы, некоторые server-сборки):
+   - `_nm_disable_dhcp_dns(link)` — `nmcli connection modify <conn>
+     ipv4.ignore-auto-dns yes` + `ipv6.ignore-auto-dns yes` +
+     `nmcli connection up <conn>`.
+
+4. Интегрировано в `fix_resolv_conf_to_localhost()` как шаг **1i** (после
+   persist-сервиса). State сохраняет `dhcp_dns_disabled` и `dhcp_dropin_paths`.
+
+5. Rollback (`rollback_resolv_conf()`) — шаг 3: `enable_dhcp_dns_on_all_links()`:
+   - systemd-networkd: удаляет drop-in'ы `chimera-dns.conf`.
+   - NetworkManager: `nmcli ... ignore-auto-dns no`.
+
+### TUI
+
+- `_print_diagnosis()` — теперь корректно показывает утечку, если per-link
+  OK, но Global DNS содержит внешние IP от DHCP:
+  ```
+  ~ PER-LINK OK, НО Global DNS содержит внешние IP
+    от DHCP: 77.88.8.8, 77.88.8.1
+    systemd-resolved отправляет запросы на все Global
+    DNS параллельно — DNS Leak Test видит Yandex.
+  ────────────────────────────────────────────────
+  ✓ Можно исправить: отключить DHCP DNS на уровне
+    network manager (systemd-networkd drop-in или
+    NetworkManager ignore-auto-dns).
+  ```
+- `_screen_fix_apply()` — добавлен блок "КРИТИЧЕСКИЙ шаг: отключение DHCP DNS"
+  с описанием что будет сделано.
+- `_screen_rollback()` — добавлено "восстановить DHCP DNS: удалить
+  .network.d/chimera-dns.conf / nmcli ignore-auto-dns no".
+
+### Тесты
+
+`tests/test_resolv_conf_fix.py` — 7 новых unit-тестов:
+- `TestDisableDhcpDns` (3): systemd-networkd creates dropin /
+  NetworkManager sets ignore-auto-dns / no network manager.
+- `TestEnableDhcpDns` (1): systemd-networkd removes dropin (rollback).
+- `TestDetectNetworkManager` (3): NetworkManager active / systemd-networkd
+  active / none.
+
+Все 28 тестов в `tests/test_resolv_conf_fix.py` проходят. 87/87 в DNS-свите.
+
+### Файлы
+
+- `chimera/modules/resolv_conf_fix.py`:
+  - Новые helper-функции: `_detect_network_manager()`,
+    `_networkd_find_link_files()`, `_networkd_disable_dhcp_dns()`,
+    `_networkd_enable_dhcp_dns()`, `_nm_disable_dhcp_dns()`,
+    `_nm_enable_dhcp_dns()`.
+  - Новые публичные функции: `disable_dhcp_dns_on_all_links()`,
+    `enable_dhcp_dns_on_all_links()`.
+  - `fix_resolv_conf_to_localhost()` — шаг 1i: disable_dhcp_dns_on_all_links.
+  - `rollback_resolv_conf()` — шаг 3: enable_dhcp_dns_on_all_links.
+  - State: поля `dhcp_dns_disabled`, `dhcp_dropin_paths`.
+  - `_print_diagnosis()` — корректное определение утечки при Global DHCP DNS.
+  - `_screen_fix_apply()` / `_screen_rollback()` — обновлены.
+- `tests/test_resolv_conf_fix.py` — 7 новых тестов.
+
+### Совместимость
+
+- systemd-networkd: drop-in в `/etc/systemd/network/<file>.network.d/`
+  переживает `netplan apply` и ребут — netplan регенерирует только `/run/`.
+- NetworkManager: `nmcli connection modify` сохраняется в
+  `/etc/NetworkManager/system-connections/*.nmconnection` — persist.
+- Если network manager не определён (static config) — warning, но фикс не
+  падает. В этом случае пользователь должен сам прописать `nameserver 127.0.0.1`
+  в `/etc/resolv.conf` (но это редкость на современных VPS).
+
+---
+
 ## FIX(speedtest): DoH-резолв speed.cloudflare.com — обход серверного DNS после DNS-leak fix — 1 августа 2026
 
 **После применения фикса DNS-leak (resolv_conf_fix v3) сломался Speed Test

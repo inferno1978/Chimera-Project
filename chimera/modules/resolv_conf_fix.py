@@ -456,6 +456,335 @@ def _disable_persist_service() -> tuple:
     return True, None
 
 
+# =============================================================================
+#  Отключение DHCP DNS от провайдера
+# =============================================================================
+# После применения per-link override + drop-in, systemd-resolved всё ещё
+# показывает Global DNS 77.88.8.8 от DHCP. systemd-resolved отправляет
+# запросы на все Global DNS параллельно (parallel queries) — поэтому
+# DNS Leak Test видит Yandex LLC, хотя per-link ens3=127.0.0.1.
+#
+# Решение: отключить получение DNS от DHCP на уровне network manager.
+# - systemd-networkd: drop-in .network.d/chimera.conf с UseDNS=false.
+# - NetworkManager: nmcli ... ipv4.ignore-auto-dns yes + ipv6.ignore-auto-dns yes.
+#
+# Это убирает провайдерский DNS из Global DNS → остаётся только 127.0.0.1
+# из drop-in → утечки точно нет.
+
+def _detect_network_manager() -> str:
+    """Определяет network manager: 'systemd-networkd' / 'NetworkManager' / 'none'.
+
+    Логика:
+      1. `systemctl is-active NetworkManager` → NetworkManager.
+      2. `systemctl is-active systemd-networkd` → systemd-networkd.
+      3. Иначе 'none' (static config без manager).
+    """
+    r_nm = _run(["systemctl", "is-active", "NetworkManager"],
+                capture=True, check=False)
+    if r_nm.returncode == 0 and r_nm.stdout.strip() == "active":
+        return "NetworkManager"
+    r_nwd = _run(["systemctl", "is-active", "systemd-networkd"],
+                 capture=True, check=False)
+    if r_nwd.returncode == 0 and r_nwd.stdout.strip() == "active":
+        return "systemd-networkd"
+    return "none"
+
+
+def _networkd_find_link_files(link: str) -> List[Path]:
+    """Находит .network файлы systemd-networkd для указанного link.
+
+    Ищет в:
+      - /etc/systemd/network/*.network (admin config)
+      - /run/systemd/network/*.network (runtime, генерируется netplan)
+      - /lib/systemd/network/*.network (distro defaults)
+
+    Возвращает список путей. Обычно один файл на link.
+    """
+    results: List[Path] = []
+    search_dirs = [
+        Path("/etc/systemd/network"),
+        Path("/run/systemd/network"),
+        Path("/lib/systemd/network"),
+    ]
+    for d in search_dirs:
+        if not d.exists():
+            continue
+        for f in d.glob("*.network"):
+            try:
+                content = f.read_text(errors="replace")
+                # Ищем [Match] Name=ens3 (или Name=ens3 e*).
+                # Простейший match — точное имя в Name= или MAC.
+                if f"Name={link}" in content or f"Name={link}\n" in content:
+                    results.append(f)
+                    continue
+                # Также match по wildcard: Name=ens3 / Name=e*
+                # Парсим [Match] секцию.
+                in_match = False
+                for line in content.splitlines():
+                    ls = line.strip()
+                    if ls.startswith("[") and ls.endswith("]"):
+                        in_match = (ls == "[Match]")
+                        continue
+                    if in_match and ls.startswith("Name="):
+                        pattern = ls[5:].strip()
+                        # Простой glob: ens3, e*, en*
+                        import fnmatch
+                        if fnmatch.fnmatch(link, pattern):
+                            results.append(f)
+                            break
+            except Exception:
+                continue
+    return results
+
+
+def _networkd_disable_dhcp_dns(link: str) -> tuple:
+    """Создаёт drop-in для .network файла link'а с UseDNS=false.
+
+    systemd-networkd читает drop-in'ы из /etc/systemd/network/<file>.d/*.conf.
+    Drop-in перебивает DHCP DNS: `[DHCPv4] UseDNS=false` + `[DHCPv6] UseDNS=false`.
+
+    Возвращает (ok, dropin_path, error).
+    """
+    net_files = _networkd_find_link_files(link)
+    if not net_files:
+        return False, None, f"не найден .network файл для link {link}"
+
+    # Берём первый найденный (обычно один на link).
+    net_file = net_files[0]
+    # Drop-in директория: /etc/systemd/network/<basename>.d/
+    # Даже если .network файл в /run/ (от netplan), drop-in в /etc/ применяется.
+    dropin_dir = Path("/etc/systemd/network") / f"{net_file.name}.d"
+    dropin_file = dropin_dir / "chimera-dns.conf"
+    dropin_content = (
+        "# Chimera Project — отключение DHCP DNS для link " + link + "\n"
+        "# Создан chimera/modules/resolv_conf_fix.py\n"
+        "# Перебивает DHCP DNS от провайдера (Yandex, Selectel, Timeweb).\n"
+        "# Без этого systemd-resolved видит Global DNS 77.88.8.8 от DHCP и\n"
+        "# отправляет запросы параллельно на все Global DNS — DNS Leak Test\n"
+        "# видит Yandex LLC.\n"
+        "[DHCPv4]\n"
+        "UseDNS=false\n"
+        "UseDomains=false\n"
+        "\n"
+        "[DHCPv6]\n"
+        "UseDNS=false\n"
+        "UseDomains=false\n"
+        "\n"
+        "[IPv6AcceptRA]\n"
+        "UseDNS=false\n"
+        "UseDomains=false\n"
+    )
+    try:
+        dropin_dir.mkdir(parents=True, exist_ok=True)
+        dropin_file.write_text(dropin_content)
+    except PermissionError:
+        return False, None, f"нет прав на {dropin_file} (нужен root)"
+    except Exception as e:
+        return False, None, f"не удалось создать {dropin_file}: {e}"
+
+    return True, dropin_file, None
+
+
+def _networkd_enable_dhcp_dns(link: str) -> tuple:
+    """Удаляет drop-in для .network файла link'а (возвращает DHCP DNS).
+
+    Возвращает (ok, error).
+    """
+    # Удаляем все chimera-dns.conf drop-in'ы для любого .network файла.
+    # Это проще чем искать конкретный — drop-in'ов у нас только один тип.
+    dropin_dir_glob = Path("/etc/systemd/network")
+    if not dropin_dir_glob.exists():
+        return True, None
+    removed = False
+    for d in dropin_dir_glob.glob("*.network.d"):
+        dropin_file = d / "chimera-dns.conf"
+        if dropin_file.exists():
+            try:
+                dropin_file.unlink()
+                removed = True
+            except Exception:
+                pass
+        # Если директория пуста — удаляем (чистота).
+        try:
+            if d.exists() and not any(d.iterdir()):
+                d.rmdir()
+        except Exception:
+            pass
+    return True, None if removed else "drop-in не найден (возможно уже удалён)"
+
+
+def _nm_disable_dhcp_dns(link: str) -> tuple:
+    """NetworkManager: ipv4.ignore-auto-dns yes + ipv6.ignore-auto-dns yes.
+
+    Возвращает (ok, conn_name, error).
+    """
+    # Найти connection name для link.
+    r = _run(["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show"],
+             capture=True, check=False)
+    if r.returncode != 0:
+        return False, None, f"nmcli connection show: rc={r.returncode}"
+    conn_name = None
+    for line in r.stdout.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 2 and parts[1] == link:
+            conn_name = parts[0]
+            break
+    if not conn_name:
+        return False, None, f"NetworkManager: нет connection для link {link}"
+
+    # Применяем ignore-auto-dns.
+    for proto in ("ipv4", "ipv6"):
+        r = _run(["nmcli", "connection", "modify", conn_name,
+                  f"{proto}.ignore-auto-dns", "yes"],
+                 capture=True, check=False)
+        if r.returncode != 0:
+            return False, conn_name, f"nmcli modify {proto}: rc={r.returncode}, stderr={r.stderr.strip()[:100]}"
+
+    # Activate чтобы применить.
+    r = _run(["nmcli", "connection", "up", conn_name],
+             capture=True, check=False)
+    if r.returncode != 0:
+        return False, conn_name, f"nmcli connection up: rc={r.returncode}, stderr={r.stderr.strip()[:100]}"
+
+    return True, conn_name, None
+
+
+def _nm_enable_dhcp_dns(link: str) -> tuple:
+    """NetworkManager: вернуть ignore-auto-dns no.
+
+    Возвращает (ok, error).
+    """
+    r = _run(["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show"],
+             capture=True, check=False)
+    if r.returncode != 0:
+        return False, f"nmcli: rc={r.returncode}"
+    conn_name = None
+    for line in r.stdout.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 2 and parts[1] == link:
+            conn_name = parts[0]
+            break
+    if not conn_name:
+        return True, "connection не найдена (возможно уже удалена)"
+
+    for proto in ("ipv4", "ipv6"):
+        _run(["nmcli", "connection", "modify", conn_name,
+              f"{proto}.ignore-auto-dns", "no"],
+             capture=True, check=False)
+    _run(["nmcli", "connection", "up", conn_name],
+         capture=True, check=False)
+    return True, None
+
+
+def disable_dhcp_dns_on_all_links() -> Dict[str, Any]:
+    """Отключает DHCP DNS для всех активных link'ов.
+
+    Определяет network manager (systemd-networkd / NetworkManager) и
+    применяет соответствующий метод:
+      - systemd-networkd: drop-in .network.d/chimera.conf с UseDNS=false.
+      - NetworkManager: nmcli ... ignore-auto-dns yes.
+
+    После применения: networkctl reload + networkctl reconfigure (для networkd),
+    или уже применено через nmcli connection up (для NM).
+
+    Возвращает dict:
+      {"ok": bool, "manager": str, "actions": [str, ...],
+       "warnings": [str, ...], "dropin_paths": [str, ...], "error": str | None}
+    """
+    actions: List[str] = []
+    warnings: List[str] = []
+    dropin_paths: List[str] = []
+
+    manager = _detect_network_manager()
+    if manager == "none":
+        return {"ok": False, "manager": "none", "actions": [],
+                "warnings": [],
+                "dropin_paths": [],
+                "error": "не удалось определить network manager (ни systemd-networkd, ни NetworkManager не активны)"}
+
+    links = _get_all_links()
+    if not links:
+        return {"ok": False, "manager": manager, "actions": [],
+                "warnings": ["нет сетевых link'ов"],
+                "dropin_paths": [],
+                "error": "нет сетевых link'ов для настройки"}
+
+    if manager == "systemd-networkd":
+        for link in links:
+            ok, dropin_path, err = _networkd_disable_dhcp_dns(link)
+            if ok:
+                actions.append(f"создан drop-in для {link}: {dropin_path}")
+                dropin_paths.append(str(dropin_path))
+            else:
+                warnings.append(f"link {link}: {err}")
+        # networkctl reload + reconfigure для каждого link.
+        r = _run(["networkctl", "reload"], capture=True, check=False)
+        if r.returncode == 0:
+            actions.append("networkctl reload")
+        else:
+            warnings.append(f"networkctl reload: rc={r.returncode}")
+        for link in links:
+            r = _run(["networkctl", "reconfigure", link],
+                     capture=True, check=False)
+            if r.returncode == 0:
+                actions.append(f"networkctl reconfigure {link}")
+            else:
+                warnings.append(f"networkctl reconfigure {link}: rc={r.returncode}")
+
+    elif manager == "NetworkManager":
+        for link in links:
+            ok, conn_name, err = _nm_disable_dhcp_dns(link)
+            if ok:
+                actions.append(f"nmcli: {conn_name} ignore-auto-dns yes (link {link})")
+            else:
+                warnings.append(f"link {link}: {err}")
+
+    return {"ok": True, "manager": manager, "actions": actions,
+            "warnings": warnings, "dropin_paths": dropin_paths,
+            "error": None}
+
+
+def enable_dhcp_dns_on_all_links() -> Dict[str, Any]:
+    """Возвращает DHCP DNS (откат disable_dhcp_dns_on_all_links).
+
+    Возвращает dict как disable_dhcp_dns_on_all_links().
+    """
+    actions: List[str] = []
+    warnings: List[str] = []
+
+    manager = _detect_network_manager()
+    if manager == "none":
+        return {"ok": False, "manager": "none", "actions": [],
+                "warnings": [],
+                "error": "не удалось определить network manager"}
+
+    links = _get_all_links()
+
+    if manager == "systemd-networkd":
+        ok, err = _networkd_enable_dhcp_dns("")  # link не важен — удаляем все
+        if ok:
+            actions.append("удалены drop-in'ы /etc/systemd/network/*.network.d/chimera-dns.conf")
+        r = _run(["networkctl", "reload"], capture=True, check=False)
+        if r.returncode == 0:
+            actions.append("networkctl reload")
+        for link in links:
+            r = _run(["networkctl", "reconfigure", link],
+                     capture=True, check=False)
+            if r.returncode == 0:
+                actions.append(f"networkctl reconfigure {link}")
+
+    elif manager == "NetworkManager":
+        for link in links:
+            ok, err = _nm_enable_dhcp_dns(link)
+            if ok:
+                actions.append(f"nmcli: {link} ignore-auto-dns no (restore)")
+            else:
+                warnings.append(f"link {link}: {err}")
+
+    return {"ok": True, "manager": manager, "actions": actions,
+            "warnings": warnings, "error": None}
+
+
 def _get_dnscrypt_listen_addr_port() -> Optional[tuple]:
     """Читает listen_addresses из dnscrypt-proxy.toml.
 
@@ -792,6 +1121,9 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False) -> Dict[str, Any]:
         return {"ok": True, "method": method, "actions": actions,
                 "warnings": [], "error": None}
 
+    # dhcp_dropin_paths — для сохранения в state (для rollback).
+    dhcp_dropin_paths: List[str] = []
+
     # ── METHOD 1: systemd-resolved ──────────────────────────────────────────
     if method == "systemd_resolved":
         # 1a. drop-in override — задаёт Global DNS = 127.0.0.1.
@@ -895,6 +1227,37 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False) -> Dict[str, Any]:
             else:
                 warnings.append(f"persist-сервис создан, но не активирован: {perr2}")
 
+        # 1i. ОТКЛЮЧЕНИЕ DHCP DNS — КРИТИЧЕСКИЙ шаг для устранения утечки.
+        #     Per-link override + drop-in НЕ убирают Global DNS 77.88.8.8 от
+        #     DHCP. systemd-resolved отправляет запросы на ВСЕ Global DNS
+        #     параллельно (parallel queries) — DNS Leak Test видит Yandex LLC.
+        #     Решение: отключить получение DNS от DHCP на уровне network manager.
+        #     - systemd-networkd: drop-in .network.d/chimera.conf с UseDNS=false.
+        #     - NetworkManager: nmcli ... ignore-auto-dns yes.
+        #     Это убирает провайдерский DNS из Global DNS → остаётся только
+        #     127.0.0.1 из drop-in → утечки точно нет.
+        dhcp_result = disable_dhcp_dns_on_all_links()
+        if dhcp_result["ok"]:
+            actions.append(f"отключён DHCP DNS ({dhcp_result['manager']})")
+            for a in dhcp_result["actions"]:
+                actions.append(a)
+            if dhcp_result["warnings"]:
+                warnings.extend(dhcp_result["warnings"])
+            # Сохраняем dropin_paths в state для rollback.
+            dhcp_dropin_paths = dhcp_result.get("dropin_paths", [])
+        else:
+            warnings.append(f"не удалось отключить DHCP DNS: {dhcp_result.get('error')}")
+            dhcp_dropin_paths = []
+
+        # 1j. restart systemd-resolved + повторный per-link override — после
+        #     networkctl reconfigure настройки link'ов могли сброситься.
+        _run(["systemctl", "restart", "systemd-resolved"],
+             capture=True, check=False)
+        for link in links:
+            _resolvectl_dns_set(link, _LOCAL_DNS)
+            _resolvectl_default_route_set(link, False)
+        _run(["resolvectl", "flush-caches"], capture=True, check=False)
+
     # ── METHOD 2: static resolv.conf ────────────────────────────────────────
     elif method == "static_resolv_conf":
         # 2a. backup
@@ -957,6 +1320,10 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False) -> Dict[str, Any]:
                        else None,
         "persist_service": method == "systemd_resolved"
                            and _PERSIST_SVC_PATH.exists(),
+        "dhcp_dns_disabled": bool(dhcp_dropin_paths) or
+                             (method == "systemd_resolved" and
+                              any("ignore-auto-dns" in a for a in actions)),
+        "dhcp_dropin_paths": dhcp_dropin_paths,
     })
 
     _ok("DNS направлен на локальный DNSCrypt-proxy (127.0.0.1)")
@@ -971,10 +1338,11 @@ def rollback_resolv_conf() -> Dict[str, Any]:
       1. Остановить и удалить persist-сервис chimera-dns-fix.service.
       2. Если есть drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf —
          удалить, перезапустить systemd-resolved.
-      3. Если есть бэкап /etc/resolv.conf.chimera.bak — восстановить.
-      4. Восстановить per-link default-route (вернуть true) для каждого link'а.
-      5. flush-caches.
-      6. Обновить state.
+      3. Восстановить per-link default-route (вернуть true) для каждого link'а.
+      4. Восстановить DHCP DNS (вернуть UseDNS=true / ignore-auto-dns no).
+      5. Если есть бэкап /etc/resolv.conf.chimera.bak — восстановить.
+      6. flush-caches.
+      7. Обновить state.
 
     Возвращает dict как fix_resolv_conf_to_localhost().
     """
@@ -1015,8 +1383,6 @@ def rollback_resolv_conf() -> Dict[str, Any]:
             )
 
         # Восстановить per-link default-route = true (вернуть DHCP DNS).
-        # Старый синтаксис `dns-default-route set true` не работает на 24.04 —
-        # используем `default-route LINK true` для каждого link'а.
         for link in _get_all_links():
             ok_l, _, err_l = _resolvectl_default_route_set(link, True)
             if ok_l:
@@ -1032,7 +1398,20 @@ def rollback_resolv_conf() -> Dict[str, Any]:
         # flush caches
         _run(["resolvectl", "flush-caches"], capture=True, check=False)
 
-    # 3. Восстановить resolv.conf из бэкапа
+    # 3. Восстановить DHCP DNS — вернуть UseDNS=true / ignore-auto-dns no.
+    #    Это откат disable_dhcp_dns_on_all_links() из fix-шага 1i.
+    if state.get("dhcp_dns_disabled"):
+        dhcp_result = enable_dhcp_dns_on_all_links()
+        if dhcp_result["ok"]:
+            actions.append(f"восстановлен DHCP DNS ({dhcp_result['manager']})")
+            for a in dhcp_result["actions"]:
+                actions.append(a)
+            if dhcp_result["warnings"]:
+                warnings.extend(dhcp_result["warnings"])
+        else:
+            warnings.append(f"не удалось восстановить DHCP DNS: {dhcp_result.get('error')}")
+
+    # 4. Восстановить resolv.conf из бэкапа
     if _BACKUP.exists():
         try:
             # Если текущий resolv.conf — наш статичный файл, удалить.
@@ -1128,18 +1507,26 @@ def _print_diagnosis(diag: Dict[str, Any]) -> None:
 
     # Итог диагностики
     if diag["per_link_overridden"]:
-        # Все link'и на 127.0.0.1 + default-route=false → утечки нет.
-        _box_row(f"  {GREEN}✓ УТЕЧКИ НЕТ — per-link override активен{NC}")
-        _box_row(f"  {GREEN}  Все link'и направлены на 127.0.0.1,{NC}")
-        _box_row(f"  {GREEN}  default-route=false для каждого.{NC}")
-        # Если в global DNS есть внешние IP — показать informational.
+        # Все link'и на 127.0.0.1 + default-route=false → per-link OK.
+        # НО! Global DNS от DHCP всё ещё может вызывать утечку (parallel queries).
         ext_global = [ip for ip in diag["resolved_global_dns"]
                       if not (ip.startswith("127.") or ip == "::1")]
-        if ext_global:
-            _box_row()
-            _box_row(f"  {DIM}Инфо: Global DNS содержит {', '.join(ext_global)}.{NC}")
-            _box_row(f"  {DIM}Это не утечка — drop-in с Domains=~. перехватывает{NC}")
-            _box_row(f"  {DIM}все запросы на 127.0.0.1. Global не используется.{NC}")
+        if not ext_global:
+            # Global DNS чист — утечки точно нет.
+            _box_row(f"  {GREEN}✓ УТЕЧКИ НЕТ — per-link override активен,{NC}")
+            _box_row(f"  {GREEN}  Global DNS чист (только 127.0.0.1).{NC}")
+        else:
+            # per-link OK, но Global DNS содержит внешние IP от DHCP.
+            # systemd-resolved отправляет запросы на ВСЕ Global DNS параллельно
+            # — DNS Leak Test видит Yandex LLC. Это утечка!
+            _box_row(f"  {YELLOW}~ PER-LINK OK, НО Global DNS содержит внешние IP{NC}")
+            _box_row(f"  {YELLOW}  от DHCP: {', '.join(ext_global)}{NC}")
+            _box_row(f"  {YELLOW}  systemd-resolved отправляет запросы на все Global{NC}")
+            _box_row(f"  {YELLOW}  DNS параллельно — DNS Leak Test видит Yandex.{NC}")
+            _box_sep()
+            _box_row(f"  {GREEN}✓ Можно исправить: отключить DHCP DNS на уровне{NC}")
+            _box_row(f"  {GREEN}  network manager (systemd-networkd drop-in или{NC}")
+            _box_row(f"  {GREEN}  NetworkManager ignore-auto-dns).{NC}")
     elif diag["fix_needed"]:
         _box_row(f"  {RED}⚠ УТЕЧКА DNS ОБНАРУЖЕНА{NC}")
         for reason in diag["leak_reasons"]:
@@ -1218,6 +1605,18 @@ def _screen_fix_apply(diag: Dict[str, Any]) -> None:
         _box_row(f"  {DIM}Global resolvectl dns/default-route НЕ вызываем — на Ubuntu 24.04{NC}")
         _box_row(f"  {DIM}парсер падает с 'Failed to resolve interface'. Global DNS{NC}")
         _box_row(f"  {DIM}задаётся через drop-in, этого достаточно.{NC}")
+        _box_sep()
+        _box_row(f"  {YELLOW}КРИТИЧЕСКИЙ шаг: отключение DHCP DNS{NC}")
+        _box_row(f"  {YELLOW}  Per-link override НЕ убирает Global DNS 77.88.8.8 от DHCP.{NC}")
+        _box_row(f"  {YELLOW}  systemd-resolved отправляет запросы на все Global DNS{NC}")
+        _box_row(f"  {YELLOW}  параллельно — DNS Leak Test видит Yandex LLC.{NC}")
+        _box_row(f"  {YELLOW}  Решение: drop-in .network.d/chimera.conf с UseDNS=false{NC}")
+        _box_row(f"  {YELLOW}  (systemd-networkd) или nmcli ignore-auto-dns (NetworkManager).{NC}")
+        _box_row(f"    {DIM}• определить network manager (systemd-networkd / NetworkManager){NC}")
+        _box_row(f"    {DIM}• создать drop-in /etc/systemd/network/<file>.network.d/chimera-dns.conf{NC}")
+        _box_row(f"    {DIM}  с [DHCPv4] UseDNS=false + [DHCPv6] UseDNS=false{NC}")
+        _box_row(f"    {DIM}• networkctl reload + reconfigure (для networkd){NC}")
+        _box_row(f"    {DIM}• или nmcli connection modify ... ignore-auto-dns yes (для NM){NC}")
     elif diag["fix_method"] == "static_resolv_conf":
         _box_row(f"  {BOLD}Будет выполнено:{NC}")
         _box_row(f"    {DIM}• бэкап /etc/resolv.conf → /etc/resolv.conf.chimera.bak{NC}")
@@ -1269,6 +1668,9 @@ def _screen_rollback() -> None:
     _box_row(f"    {DIM}• удалить drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf{NC}")
     _box_row(f"    {DIM}• для каждого link'а: resolvectl default-route LINK true{NC}")
     _box_row(f"    {DIM}  (вернуть per-link DHCP DNS){NC}")
+    _box_row(f"    {DIM}• восстановить DHCP DNS: удалить .network.d/chimera-dns.conf{NC}")
+    _box_row(f"    {DIM}  (systemd-networkd) или nmcli ignore-auto-dns no (NetworkManager){NC}")
+    _box_row(f"    {DIM}• networkctl reload + reconfigure (для systemd-networkd){NC}")
     _box_row(f"    {DIM}• systemctl restart systemd-resolved{NC}")
     _box_row(f"    {DIM}• восстановить /etc/resolv.conf из бэкапа (если есть){NC}")
     _box_row(f"    {DIM}• resolvectl flush-caches{NC}")

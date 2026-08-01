@@ -578,6 +578,153 @@ class TestRollbackResolvConf(_BaseTest):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  DHCP DNS disable/enable — отключение DHCP DNS на уровне network manager
+# ══════════════════════════════════════════════════════════════════════════════
+class TestDisableDhcpDns(_BaseTest):
+    """disable_dhcp_dns_on_all_links: отключение DHCP DNS."""
+
+    def test_systemd_networkd_creates_dropin(self):
+        """systemd-networkd: вызывается _networkd_disable_dhcp_dns + networkctl reload."""
+        from chimera.modules import resolv_conf_fix
+        called_cmds = []
+        def tracking_run(cmd, *a, **kw):
+            called_cmds.append(tuple(cmd))
+            return _make_completed(rc=0)
+        dropin_returned = (True, Path("/etc/systemd/network/10-netplan-ens3.network.d/chimera-dns.conf"), None)
+        with patch.object(resolv_conf_fix, "_detect_network_manager",
+                          return_value="systemd-networkd"), \
+             patch.object(resolv_conf_fix, "_get_all_links",
+                          return_value=["ens3"]), \
+             patch.object(resolv_conf_fix, "_networkd_disable_dhcp_dns",
+                          return_value=dropin_returned), \
+             patch.object(resolv_conf_fix, "_run", side_effect=tracking_run):
+            result = resolv_conf_fix.disable_dhcp_dns_on_all_links()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["manager"], "systemd-networkd")
+        # dropin_paths сохранён
+        self.assertEqual(len(result["dropin_paths"]), 1)
+        # networkctl reload и reconfigure вызваны
+        cmd_str = " ".join(" ".join(c) for c in called_cmds)
+        self.assertIn("networkctl reload", cmd_str)
+        self.assertIn("networkctl reconfigure ens3", cmd_str)
+
+    def test_networkmanager_sets_ignore_auto_dns(self):
+        """NetworkManager: nmcli ... ignore-auto-dns yes."""
+        from chimera.modules import resolv_conf_fix
+        called_cmds = []
+        def tracking_run(cmd, *args, **kwargs):
+            called_cmds.append(tuple(cmd))
+            if cmd[:3] == ["nmcli", "-t", "-f"] and "connection" in cmd:
+                return _make_completed(rc=0, stdout="Wired:ens3\n")
+            return _make_completed(rc=0)
+        with patch.object(resolv_conf_fix, "_detect_network_manager",
+                          return_value="NetworkManager"), \
+             patch.object(resolv_conf_fix, "_get_all_links",
+                          return_value=["ens3"]), \
+             patch.object(resolv_conf_fix, "_run", side_effect=tracking_run):
+            result = resolv_conf_fix.disable_dhcp_dns_on_all_links()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["manager"], "NetworkManager")
+        # Должны быть nmcli modify с ignore-auto-dns yes.
+        # modify_cmds — список tuple; проверяем "ignore-auto-dns" в любом элементе tuple.
+        modify_cmds = [c for c in called_cmds
+                       if "modify" in c and any("ignore-auto-dns" in x for x in c)]
+        self.assertGreaterEqual(len(modify_cmds), 2,
+                                f"ожидали 2+ nmcli modify ignore-auto-dns: {modify_cmds}")
+        # ipv4 и ipv6
+        all_args = [x for c in modify_cmds for x in c]
+        self.assertIn("ipv4.ignore-auto-dns", all_args)
+        self.assertIn("ipv6.ignore-auto-dns", all_args)
+        self.assertIn("yes", all_args)
+
+    def test_no_network_manager_returns_error(self):
+        """Ни systemd-networkd, ни NetworkManager не активны → ok=False."""
+        from chimera.modules import resolv_conf_fix
+        with patch.object(resolv_conf_fix, "_detect_network_manager",
+                          return_value="none"):
+            result = resolv_conf_fix.disable_dhcp_dns_on_all_links()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["manager"], "none")
+        self.assertIn("network manager", result["error"])
+
+
+class TestEnableDhcpDns(_BaseTest):
+    """enable_dhcp_dns_on_all_links: восстановление DHCP DNS (rollback)."""
+
+    def test_systemd_networkd_removes_dropin(self):
+        """systemd-networkd: удаляются drop-in'ы chimera-dns.conf."""
+        from chimera.modules import resolv_conf_fix
+        # Создаём drop-in (как будто после fix).
+        etc_net = self._tmpdir / "systemd-network"
+        dropin_dir = etc_net / "10-netplan-ens3.network.d"
+        dropin_dir.mkdir(parents=True, exist_ok=True)
+        dropin_file = dropin_dir / "chimera-dns.conf"
+        dropin_file.write_text("[DHCPv4]\nUseDNS=false\n")
+        # Патчим _networkd_enable_dhcp_dns чтобы искать в tmpdir.
+        def fake_enable(link):
+            removed = False
+            for d in etc_net.glob("*.network.d"):
+                f = d / "chimera-dns.conf"
+                if f.exists():
+                    f.unlink()
+                    removed = True
+                try:
+                    if d.exists() and not any(d.iterdir()):
+                        d.rmdir()
+                except Exception:
+                    pass
+            return True, None if removed else "не найден"
+        with patch.object(resolv_conf_fix, "_detect_network_manager",
+                          return_value="systemd-networkd"), \
+             patch.object(resolv_conf_fix, "_get_all_links",
+                          return_value=["ens3"]), \
+             patch.object(resolv_conf_fix, "_networkd_enable_dhcp_dns",
+                          side_effect=fake_enable), \
+             patch.object(resolv_conf_fix, "_run",
+                          side_effect=lambda cmd, *a, **kw: _make_completed(rc=0)):
+            result = resolv_conf_fix.enable_dhcp_dns_on_all_links()
+        self.assertTrue(result["ok"])
+        # drop-in удалён
+        self.assertFalse(dropin_file.exists())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  _detect_network_manager — определение network manager
+# ══════════════════════════════════════════════════════════════════════════════
+class TestDetectNetworkManager(_BaseTest):
+    """_detect_network_manager: определение network manager."""
+
+    def test_returns_networkmanager_if_active(self):
+        from chimera.modules import resolv_conf_fix
+        def fake_run(cmd, *a, **kw):
+            if "NetworkManager" in cmd:
+                return _make_completed(rc=0, stdout="active\n")
+            return _make_completed(rc=3, stdout="inactive\n")
+        with patch.object(resolv_conf_fix, "_run", side_effect=fake_run):
+            result = resolv_conf_fix._detect_network_manager()
+        self.assertEqual(result, "NetworkManager")
+
+    def test_returns_systemd_networkd_if_active(self):
+        from chimera.modules import resolv_conf_fix
+        def fake_run(cmd, *a, **kw):
+            if "NetworkManager" in cmd:
+                return _make_completed(rc=3, stdout="inactive\n")
+            if "systemd-networkd" in cmd:
+                return _make_completed(rc=0, stdout="active\n")
+            return _make_completed(rc=3, stdout="inactive\n")
+        with patch.object(resolv_conf_fix, "_run", side_effect=fake_run):
+            result = resolv_conf_fix._detect_network_manager()
+        self.assertEqual(result, "systemd-networkd")
+
+    def test_returns_none_if_neither_active(self):
+        from chimera.modules import resolv_conf_fix
+        with patch.object(resolv_conf_fix, "_run",
+                          return_value=_make_completed(rc=3, stdout="inactive\n")):
+            result = resolv_conf_fix._detect_network_manager()
+        self.assertEqual(result, "none")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  _get_dnscrypt_listen_addr_port — парсинг TOML
 # ══════════════════════════════════════════════════════════════════════════════
 class TestParseDnscryptListenAddr(_BaseTest):
