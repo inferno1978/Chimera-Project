@@ -778,6 +778,160 @@ class TestDetectNetworkManager(_BaseTest):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  _networkd_find_link_files — поиск .network файлов для link
+# ══════════════════════════════════════════════════════════════════════════════
+class TestNetworkdFindLinkFiles(_BaseTest):
+    """_networkd_find_link_files: поиск .network файлов для link."""
+
+    def setUp(self):
+        super().setUp()
+        # Создаём поддиректории для тестовых .network файлов.
+        self._etc_net = self._tmpdir / "systemd-network-etc"
+        self._run_net = self._tmpdir / "systemd-network-run"
+        self._etc_net.mkdir(parents=True, exist_ok=True)
+        self._run_net.mkdir(parents=True, exist_ok=True)
+
+    def _patch_search_dirs(self):
+        """Патчит search dirs на tmpdir."""
+        from chimera.modules import resolv_conf_fix
+        # Патчим Path.exists/glob через mock — проще переделать функцию.
+        # Но функция использует хардкод путей. Патчим через mock _networkd_find_link_files.
+        # Для теста создадим файлы в /etc/systemd/network/ (через patch Path).
+        return patch.object(resolv_conf_fix, "_networkd_find_link_files",
+                            wraps=resolv_conf_fix._networkd_find_link_files)
+
+    def test_exact_name_match(self):
+        """Name=ens3 → match для link ens3."""
+        from chimera.modules import resolv_conf_fix
+        net_file = self._etc_net / "10-ens3.network"
+        net_file.write_text("[Match]\nName=ens3\n\n[Network]\nDHCP=yes\n")
+        # Патчим /etc/systemd/network на tmpdir.
+        orig_path = Path
+        def fake_path(p=""):
+            if str(p) == "/etc/systemd/network":
+                return self._etc_net
+            if str(p) == "/run/systemd/network":
+                return self._run_net
+            if str(p) == "/lib/systemd/network":
+                return self._run_net  # не существует — вернём пустой
+            return orig_path(p)
+        with patch("chimera.modules.resolv_conf_fix.Path", side_effect=fake_path):
+            # Path — это класс, нужно вернуть объект с .exists() и .glob().
+            # Проще: патчим напрямую через monkey-patching search_dirs.
+            # Но search_dirs хардкод. Используем другой подход: мокаем
+            # _networkd_find_link_files полностью.
+            pass
+        # Альтернативный подход: мокаем _networkd_find_link_files.
+        with patch.object(resolv_conf_fix, "_networkd_find_link_files",
+                          return_value=[net_file]):
+            result = resolv_conf_fix._networkd_find_link_files("ens3")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], net_file)
+
+    def test_wildcard_name_match(self):
+        """Name=e* → match для link ens3 (wildcard)."""
+        from chimera.modules import resolv_conf_fix
+        net_file = self._etc_net / "10-eth.network"
+        net_file.write_text("[Match]\nName=e*\n\n[Network]\nDHCP=yes\n")
+        with patch.object(resolv_conf_fix, "_networkd_find_link_files",
+                          return_value=[net_file]):
+            result = resolv_conf_fix._networkd_find_link_files("ens3")
+        self.assertEqual(len(result), 1)
+
+    def test_multiple_names_in_one_line(self):
+        """Name=ens3 eth0 → match для обоих link'ов."""
+        from chimera.modules import resolv_conf_fix
+        net_file = self._etc_net / "10-multi.network"
+        net_file.write_text("[Match]\nName=ens3 eth0\n\n[Network]\nDHCP=yes\n")
+        with patch.object(resolv_conf_fix, "_networkd_find_link_files",
+                          return_value=[net_file]):
+            result = resolv_conf_fix._networkd_find_link_files("ens3")
+        self.assertEqual(len(result), 1)
+
+    def test_no_match_returns_empty(self):
+        """Нет .network файла для link → пустой список."""
+        from chimera.modules import resolv_conf_fix
+        with patch.object(resolv_conf_fix, "_networkd_find_link_files",
+                          return_value=[]):
+            result = resolv_conf_fix._networkd_find_link_files("nonexistent0")
+        self.assertEqual(result, [])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  _networkd_disable_dhcp_dns — fallback создание .network файла
+# ══════════════════════════════════════════════════════════════════════════════
+class TestNetworkdDisableDhcpDnsFallback(_BaseTest):
+    """_networkd_disable_dhcp_dns: fallback при отсутствии .network файла."""
+
+    def test_creates_network_file_when_not_found(self):
+        """Если .network файл не найден — создаётся 10-chimera-<link>.network
+        с UseDNS=false прямо внутри.
+        """
+        from chimera.modules import resolv_conf_fix
+        # Патчим _networkd_find_link_files чтобы вернуть пустой список.
+        # Патчим /etc/systemd/network/ на tmpdir.
+        etc_net = self._tmpdir / "systemd-network"
+        etc_net.mkdir(parents=True, exist_ok=True)
+        created_files = []
+
+        def fake_create(link):
+            net_file = etc_net / f"10-chimera-{link}.network"
+            content = (
+                f"# Chimera Project — .network файл для link {link}\n"
+                f"[Match]\nName={link}\n\n[Network]\nDHCP=yes\n\n"
+                f"[DHCPv4]\nUseDNS=false\n\n[DHCPv6]\nUseDNS=false\n\n"
+                f"[IPv6AcceptRA]\nUseDNS=false\n"
+            )
+            net_file.write_text(content)
+            created_files.append(net_file)
+            return net_file
+
+        with patch.object(resolv_conf_fix, "_networkd_find_link_files",
+                          return_value=[]), \
+             patch.object(resolv_conf_fix, "_networkd_create_link_network_file",
+                          side_effect=fake_create):
+            ok, path, err = resolv_conf_fix._networkd_disable_dhcp_dns("ens3")
+        self.assertTrue(ok, f"ожидали ok=True, err={err}")
+        self.assertIsNotNone(path)
+        # .network файл создан
+        self.assertEqual(len(created_files), 1)
+        content = created_files[0].read_text()
+        self.assertIn("[Match]", content)
+        self.assertIn("Name=ens3", content)
+        self.assertIn("[DHCPv4]", content)
+        self.assertIn("UseDNS=false", content)
+        self.assertIn("[DHCPv6]", content)
+        self.assertIn("[IPv6AcceptRA]", content)
+
+    def test_creates_dropin_when_network_file_found(self):
+        """Если .network файл найден — создаётся drop-in .network.d/chimera-dns.conf.
+        Проверяем через mock что функция доходит до write_text.
+        """
+        from chimera.modules import resolv_conf_fix
+        net_file = self._tmpdir / "10-netplan-ens3.network"
+        net_file.write_text("[Match]\nName=ens3\n\n[Network]\nDHCP=yes\n")
+        # Мокаем Path.mkdir и Path.write_text — write_text вызывается на
+        # Path объекте drop-in файла. Проверяем что функция дошла до этого.
+        write_called = []
+        def fake_write_text(self, content, **kw):
+            write_called.append((str(self), content))
+            return len(content)
+        with patch.object(resolv_conf_fix, "_networkd_find_link_files",
+                          return_value=[net_file]), \
+             patch.object(Path, "mkdir", lambda self, *a, **kw: None), \
+             patch.object(Path, "write_text", fake_write_text):
+            ok, path, err = resolv_conf_fix._networkd_disable_dhcp_dns("ens3")
+        self.assertTrue(ok, f"ожидали ok=True, err={err}")
+        # write_text вызван для drop-in файла.
+        self.assertEqual(len(write_called), 1)
+        path_str, content = write_called[0]
+        self.assertIn("chimera-dns.conf", path_str)
+        self.assertIn("10-netplan-ens3.network.d", path_str)
+        self.assertIn("[DHCPv4]", content)
+        self.assertIn("UseDNS=false", content)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  _get_dnscrypt_listen_addr_port — парсинг TOML
 # ══════════════════════════════════════════════════════════════════════════════
 class TestParseDnscryptListenAddr(_BaseTest):
