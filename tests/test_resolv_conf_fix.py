@@ -122,6 +122,10 @@ class TestDiagnoseResolvConf(_BaseTest):
             ("systemctl", "is-active", "dnscrypt-proxy.service"):
                 _make_completed(stdout="active"),
             ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
+            # iptables redirect активен (to:5300 + dpt:53 в выводе)
+            ("iptables",): _make_completed(
+                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 redir ports 5300\n"
+                       "REDIRECT  udp  --  127.0.0.1  anywhere  udp dpt:53 redir ports 5300\n"),
         }
         with patch.object(resolv_conf_fix, "_run",
                           side_effect=_mock_run_factory(cmd_to_result)), \
@@ -206,6 +210,8 @@ class TestFixResolvConf(_BaseTest):
             ("systemctl", "is-active", "dnscrypt-proxy.service"):
                 _make_completed(stdout="active"),
             ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
+            ("iptables",): _make_completed(
+                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 redir ports 5300\n"),
         }
         with patch.object(resolv_conf_fix, "_run",
                           side_effect=_mock_run_factory(cmd_to_result)), \
@@ -222,6 +228,8 @@ class TestFixResolvConf(_BaseTest):
             ("systemctl", "is-active", "dnscrypt-proxy.service"):
                 _make_completed(stdout="active"),
             ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
+            ("iptables",): _make_completed(
+                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 redir ports 5300\n"),
             ("resolvectl", "dns"): _make_completed(stdout=""),
             ("systemctl", "restart", "systemd-resolved"): _make_completed(rc=0),
             ("resolvectl", "flush-caches"): _make_completed(rc=0),
