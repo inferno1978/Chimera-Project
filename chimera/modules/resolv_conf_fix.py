@@ -208,8 +208,12 @@ def _is_dns_redirect_active(dnscrypt_port: int) -> bool:
              capture=True, check=False)
     if r.returncode != 0:
         return False
-    # Ищем правило REDIRECT dpt:53 to:5300
-    return f"to:{dnscrypt_port}" in r.stdout and "dpt:53" in r.stdout
+    # iptables выводит: "REDIRECT tcp ... dpt:53 redir ports 5300"
+    # или в numeric: "REDIRECT tcp ... dpt:53 to:5300"
+    out = r.stdout
+    return ("dpt:53" in out and
+            (f"to:{dnscrypt_port}" in out or f"ports {dnscrypt_port}" in out
+             or f"redir ports {dnscrypt_port}" in out))
 
 
 def _apply_dns_redirect(dnscrypt_port: int) -> tuple:
@@ -321,6 +325,7 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
         "dnscrypt_service_active": _is_dnscrypt_service_active(),
         "dnscrypt_listen": _get_dnscrypt_listen_addr_port(),
         "dnscrypt_listening": False,
+        "dns_redirect_active": True,  # default: не нужен (port == 53)
         "fix_needed": False,
         "fix_method": None,
         "leak_reasons": [],
@@ -341,6 +346,11 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
     if result["dnscrypt_listen"]:
         addr, port = result["dnscrypt_listen"]
         result["dnscrypt_listening"] = _is_dnscrypt_listening(addr, port)
+        # Проверяем iptables redirect 53→port если port != 53.
+        if result["dnscrypt_listening"] and port != _DNS_PORT:
+            result["dns_redirect_active"] = _is_dns_redirect_active(port)
+        else:
+            result["dns_redirect_active"] = True  # не нужен если port == 53
 
     dnscrypt_ready = (
         result["dnscrypt_service_active"]
@@ -371,6 +381,17 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
     # resolv.conf пуст или не существует
     if not nss and result["resolv_conf_exists"]:
         reasons.append("/etc/resolv.conf не содержит nameserver")
+
+    # iptables redirect 53→dnscrypt_port НЕ активен — DNS мёртв.
+    # resolv.conf → 127.0.0.1, но glibc идёт на порт 53, а DNSCrypt на 5300.
+    if (result["resolv_conf_on_localhost"]
+            and not result.get("dns_redirect_active", True)
+            and result["dnscrypt_listen"]
+            and result["dnscrypt_listen"][1] != _DNS_PORT):
+        reasons.append(
+            f"iptables redirect 53→{result['dnscrypt_listen'][1]} НЕ активен — "
+            f"DNS мёртв (glibc → 127.0.0.1:53, никто не слушает)"
+        )
 
     if reasons and dnscrypt_ready:
         result["fix_needed"] = True
