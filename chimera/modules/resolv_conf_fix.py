@@ -717,10 +717,7 @@ def rollback_resolv_conf() -> Dict[str, Any]:
 #  ИНТЕРАКТИВНЫЙ ЭКРАН (TUI)
 # =============================================================================
 def _print_diagnosis(diag: Dict[str, Any]) -> None:
-    """Рисует диагностический блок."""
-    _box_top("ДИАГНОСТИКА /etc/resolv.conf")
-    _box_row()
-
+    """Рисует диагностический блок (без _box_bottom — меню ниже дорисует)."""
     # /etc/resolv.conf
     _box_row(f"  {BOLD}/etc/resolv.conf:{NC}")
     if not diag["resolv_conf_exists"]:
@@ -775,14 +772,14 @@ def _print_diagnosis(diag: Dict[str, Any]) -> None:
             _box_row(f"    listen:  {RED}{listen_str} ✗ НЕ слушает{NC}")
     else:
         _box_row(f"    listen:  {DIM}не определён (TOML не найден){NC}")
-    _box_row()
+    _box_sep()
 
     # Итог диагностики
     if diag["fix_needed"]:
         _box_row(f"  {RED}⚠ УТЕЧКА DNS ОБНАРУЖЕНА{NC}")
         for reason in diag["leak_reasons"]:
             _box_row(f"    {RED}• {reason}{NC}")
-        _box_row()
+        _box_sep()
         _box_row(f"  {GREEN}✓ Можно исправить автоматически{NC}")
         method_label = {
             "systemd_resolved": "systemd-resolved drop-in + resolvectl",
@@ -796,83 +793,203 @@ def _print_diagnosis(diag: Dict[str, Any]) -> None:
     else:
         _box_row(f"  {GREEN}✓ Утечки не обнаружено — фикс не требуется{NC}")
 
+
+def _print_fix_state_badge(state: dict) -> None:
+    """Если фикс уже применён — рисует зелёную плашку об этом."""
+    if not state.get("fixed"):
+        return
+    method = state.get("method", "?")
+    applied = state.get("applied_at", "")
+    if applied:
+        applied_short = applied[:19].replace("T", " ")
+    else:
+        applied_short = "?"
+    method_label = {
+        "systemd_resolved": "systemd-resolved drop-in",
+        "static_resolv_conf": "static /etc/resolv.conf",
+    }.get(method, method)
+    _box_row(f"  {GREEN}✓ Фикс применён:{NC} {CYAN}{method_label}{NC}  "
+             f"{DIM}({applied_short}){NC}")
+    _box_row(f"  {DIM}DNS сервера направлены на 127.0.0.1 (DNSCrypt-proxy){NC}")
+
+
+def _screen_fix_apply(diag: Dict[str, Any]) -> None:
+    """Экран применения фикса с подтверждением и результатом."""
+    os.system("clear")
+    print()
+    _box_top("🔧  ПРИМЕНЕНИЕ ФИКСА /etc/resolv.conf")
+    _box_row()
+    method_label = {
+        "systemd_resolved": "systemd-resolved drop-in + resolvectl",
+        "static_resolv_conf": "static /etc/resolv.conf rewrite",
+    }.get(diag["fix_method"], diag["fix_method"])
+    _box_row(f"  Метод:  {CYAN}{method_label}{NC}")
+    _box_row(f"  Цель:   перенаправить серверный DNS на {CYAN}127.0.0.1{NC} "
+             f"(DNSCrypt-proxy)")
+    _box_row()
+    if diag["fix_method"] == "systemd_resolved":
+        _box_row(f"  {BOLD}Будет выполнено:{NC}")
+        _box_row(f"    {DIM}• создать drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf{NC}")
+        _box_row(f"    {DIM}• resolvectl dns-global set 127.0.0.1{NC}")
+        _box_row(f"    {DIM}• resolvectl dns-default-route set false{NC}")
+        _box_row(f"    {DIM}• systemctl restart systemd-resolved{NC}")
+        _box_row(f"    {DIM}• resolvectl flush-caches{NC}")
+    elif diag["fix_method"] == "static_resolv_conf":
+        _box_row(f"  {BOLD}Будет выполнено:{NC}")
+        _box_row(f"    {DIM}• бэкап /etc/resolv.conf → /etc/resolv.conf.chimera.bak{NC}")
+        _box_row(f"    {DIM}• перезапись на nameserver 127.0.0.1{NC}")
+    _box_row()
+    _box_row(f"  {GREEN}Откат доступен в любой момент — кнопка R в меню.{NC}")
     _box_bottom()
+
+    print()
+    try:
+        confirm = input(
+            f"{CYAN}Применить фикс? [Y/n]: {NC}"
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        confirm = "n"
+    if confirm not in ("", "y", "yes", "д", "да"):
+        return
+
+    print()
+    _info("Применяем фикс...")
+    result = fix_resolv_conf_to_localhost()
+    print()
+    if result["ok"]:
+        _ok("Фикс применён успешно!")
+        for action in result["actions"]:
+            print(f"  {GREEN}✓{NC} {action}")
+        if result["warnings"]:
+            _warn("Предупреждения:")
+            for w in result["warnings"]:
+                print(f"  {YELLOW}•{NC} {w}")
+        print()
+        _info("Рекомендация: перезапустите DNS Leak Test для проверки.")
+    else:
+        _err(f"Фикс не удался: {result.get('error')}")
+        for w in result.get("warnings", []):
+            print(f"  {YELLOW}•{NC} {w}")
+    print()
+    input(f"{BLUE}Нажмите Enter для возврата в меню...{NC}")
+
+
+def _screen_rollback() -> None:
+    """Экран отката с подтверждением и результатом."""
+    os.system("clear")
+    print()
+    _box_top("🔄  ОТКАТ ФИКСА /etc/resolv.conf")
+    _box_row()
+    _box_row(f"  {BOLD}Будет выполнено:{NC}")
+    _box_row(f"    {DIM}• удалить drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf{NC}")
+    _box_row(f"    {DIM}• восстановить /etc/resolv.conf из бэкапа (если есть){NC}")
+    _box_row(f"    {DIM}• resolvectl dns-default-route set true (вернуть DHCP DNS){NC}")
+    _box_row(f"    {DIM}• systemctl restart systemd-resolved{NC}")
+    _box_row()
+    _box_row(f"  {YELLOW}После отката DNS снова будет идти через провайдера —{NC}")
+    _box_row(f"  {YELLOW}возможна утечка DNS (как до фикса).{NC}")
+    _box_bottom()
+
+    print()
+    try:
+        confirm = input(
+            f"{CYAN}Откатить фикс? [y/N]: {NC}"
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        confirm = "n"
+    if confirm not in ("y", "yes", "д", "да"):
+        return
+
+    print()
+    _info("Откатываем...")
+    result = rollback_resolv_conf()
+    print()
+    if result["ok"]:
+        _ok("Откат выполнен успешно!")
+        for action in result["actions"]:
+            print(f"  {GREEN}✓{NC} {action}")
+        if result["warnings"]:
+            _warn("Предупреждения:")
+            for w in result["warnings"]:
+                print(f"  {YELLOW}•{NC} {w}")
+    else:
+        _err(f"Откат не удался: {result.get('error')}")
+        for w in result.get("warnings", []):
+            print(f"  {YELLOW}•{NC} {w}")
+    print()
+    input(f"{BLUE}Нажмите Enter для возврата в меню...{NC}")
 
 
 def do_fix_resolv_conf_interactive() -> None:
-    """Интерактивный экран: диагностика + кнопка «Исправить» / «Откатить»."""
-    os.system("clear")
-    print()
-    print(f"  {BOLD}{CYAN}🔧  ИСПРАВЛЕНИЕ /etc/resolv.conf (DNS LEAK FIX){NC}")
-    print()
+    """Интерактивный TUI-экран управления /etc/resolv.conf.
 
-    diag = diagnose_resolv_conf()
-    _print_diagnosis(diag)
+    Зацикленный: после каждого действия экран перерисовывается с новой
+    диагностикой. Структура (в едином стиле проекта):
+      1. Заголовок + описание
+      2. Блок диагностики (resolv.conf / systemd-resolved / DNSCrypt / итог)
+      3. Плашка «фикс применён» (если есть)
+      4. Меню действий в отдельной рамке:
+         [F] Исправить автоматически  (только если fix_needed)
+         [R] Откатить фикс            (только если уже применён)
+         [D] Повторить диагностику
+         [Q] Выход
+    """
+    while True:
+        os.system("clear")
+        print()
 
-    state = _state_load()
-    already_fixed = state.get("fixed", False)
+        # ── Диагностика ──────────────────────────────────────────────────────
+        diag = diagnose_resolv_conf()
+        state = _state_load()
+        already_fixed = state.get("fixed", False)
 
-    print()
-    if not diag["fix_needed"] and not already_fixed:
-        print(f"  {GREEN}Действие не требуется.{NC}")
-        input(f"  {BLUE}Нажмите Enter...{NC}")
-        return
+        _box_top("🔧  ИСПРАВЛЕНИЕ /etc/resolv.conf (DNS LEAK FIX)")
+        _box_desc(
+            "Автоматическое перенаправление серверного DNS на локальный "
+            "DNSCrypt-proxy (127.0.0.1). Решает проблему утечки DNS к "
+            "провайдерским резолверам (Yandex, Selectel, Timeweb — "
+            "отдаваемым через DHCP на Ubuntu 24.04 / Fedora)."
+        )
+        _box_sep()
+        _print_diagnosis(diag)
+        if already_fixed:
+            _box_sep()
+            _print_fix_state_badge(state)
+        _box_bottom()
 
-    if already_fixed:
-        print(f"  {GREEN}Фикс уже применён ({state.get('method')}).{NC}")
-        print(f"  {BOLD}[R]{NC}  Откатить (вернуть как было)")
-        print(f"  {BOLD}[D]{NC}  Повторить диагностику")
-        print(f"  {BOLD}[Q]{NC}  Выход")
-        choice = input(f"  {CYAN}Выбор [R/D/Q]: {NC}").strip().lower()
-        if choice == "r":
+        print()
+
+        # ── Меню действий ───────────────────────────────────────────────────
+        _box_top("ДЕЙСТВИЯ")
+        if diag["fix_needed"]:
+            _box_item("F", f"{GREEN}Исправить автоматически{NC}  "
+                           f"(направить DNS → 127.0.0.1 = DNSCrypt-proxy)")
+        if already_fixed:
+            _box_item("R", f"{YELLOW}Откатить фикс{NC}  "
+                           f"(вернуть /etc/resolv.conf как было)")
+        _box_item("D", "Повторить диагностику")
+        _box_item("Q", f"{DIM}Выход в предыдущее меню{NC}")
+        _box_bottom()
+
+        print()
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
             print()
-            result = rollback_resolv_conf()
-            print()
-            if result["ok"]:
-                _ok("Откат выполнен")
-            else:
-                _err(f"Откат не удался: {result.get('error')}")
-            input(f"  {BLUE}Нажмите Enter...{NC}")
-        elif choice == "d":
-            do_fix_resolv_conf_interactive()
-        return
+            return
 
-    # Фикс возможен — предлагаем применить
-    if diag["fix_needed"]:
-        print(f"  {BOLD}[F]{NC}  {GREEN}Исправить автоматически{NC}  "
-              f"(направить DNS → 127.0.0.1 = DNSCrypt-proxy)")
-        print(f"  {BOLD}[D]{NC}  Повторить диагностику")
-        print(f"  {BOLD}[Q]{NC}  Выход (без изменений)")
-        choice = input(f"  {CYAN}Выбор [F/D/Q]: {NC}").strip().lower()
-        if choice == "f":
-            print()
-            _info("Применяем фикс...")
-            result = fix_resolv_conf_to_localhost()
-            print()
-            if result["ok"]:
-                _ok("Фикс применён успешно!")
-                for action in result["actions"]:
-                    print(f"  {GREEN}✓{NC} {action}")
-                if result["warnings"]:
-                    _warn("Предупреждения:")
-                    for w in result["warnings"]:
-                        print(f"  {YELLOW}•{NC} {w}")
-                print()
-                _info("Рекомендация: перезапустите DNS Leak Test для проверки.")
-            else:
-                _err(f"Фикс не удался: {result.get('error')}")
-                for w in result.get("warnings", []):
-                    print(f"  {YELLOW}•{NC} {w}")
-            input(f"  {BLUE}Нажмите Enter...{NC}")
-        elif choice == "d":
-            do_fix_resolv_conf_interactive()
-        return
-
-    # Утечка есть, но фикс невозможен
-    if diag["leak_reasons"]:
-        print(f"  {YELLOW}Авто-фикс невозможен — см. предупреждения выше.{NC}")
-        print(f"  {DIM}Возможные причины: DNSCrypt не активен / не слушает.{NC}")
-        input(f"  {BLUE}Нажмите Enter...{NC}")
+        if ch == "f" and diag["fix_needed"]:
+            _screen_fix_apply(diag)
+        elif ch == "r" and already_fixed:
+            _screen_rollback()
+        elif ch == "d":
+            # Перерисуемся на следующей итерации цикла (диагностика обновится).
+            continue
+        elif ch in ("q", "0", ""):
+            return
+        else:
+            _warn("Неверный выбор")
+            time.sleep(1)
 
 
 # =============================================================================
