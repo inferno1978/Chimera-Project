@@ -57,7 +57,7 @@ import grp
 import pwd
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 import getpass
 
 # ── Модули v4.12.9 ──────────────────────────────────────────────────────────────
@@ -5790,17 +5790,34 @@ def _speed_test_download(resolve_host: str, resolve_ip: str, port: int, size_mb_
     Измеряет скорость загрузки с Cloudflare.
     size_mb_target — размер файла в МБ (10 / 100 / 500 / 1000).
     Возвращает строку с результатом.
+
+    DoH-резолв speed.cloudflare.com через _resolve_host_fresh (Cloudflare/Google
+    JSON API), минуя серверный DNS. Это КРИТИЧНО после фикса DNS-leak —
+    серверный DNS направлен на 127.0.0.1 (DNSCrypt-proxy), и если DNSCrypt
+    не может резолвить speed.cloudflare.com (или работает медленно) — curl
+    падает с "Cloudflare недоступен с сервера". DoH обходит это: IP
+    передаётся в curl через --resolve, системный резолвер не используется.
+
+    Fallback: если DoH не сработал — обычный curl (через системный DNS).
     """
     bytes_count = size_mb_target * 1024 * 1024
     timeout = max(60, size_mb_target * 8)
     url = f"https://speed.cloudflare.com/__down?bytes={bytes_count}"
+
+    cf_ip = _cf_resolve_ip()
+
     try:
-        r = _run(
-            ["curl", "-s", "-o", "/dev/null", "--max-time", str(timeout),
-             "-w", "%{size_download} %{time_total} %{speed_download}",
-             url],
-            capture=True, check=False
-        )
+        curl_cmd = [
+            "curl", "-s", "-o", "/dev/null", "--max-time", str(timeout),
+            "-w", "%{size_download} %{time_total} %{speed_download}",
+        ]
+        # Если DoH отдал IP — передаём в curl через --resolve, чтобы обойти
+        # системный DNS. Иначе curl будет резолвить через /etc/resolv.conf.
+        if cf_ip:
+            curl_cmd += ["--resolve", f"speed.cloudflare.com:443:{cf_ip}"]
+        curl_cmd.append(url)
+
+        r = _run(curl_cmd, capture=True, check=False)
         parts = r.stdout.strip().split()
         if r.returncode != 0 or len(parts) < 3:
             return f"{RED}ошибка curl (код {r.returncode}){NC}"
@@ -5815,6 +5832,42 @@ def _speed_test_download(resolve_host: str, resolve_ip: str, port: int, size_mb_
         return f"{colour}{speed_mbit:.1f} Мбит/с{NC} ({size_mb:.0f} МБ за {time_s:.1f}с)"
     except Exception as e:
         return f"{RED}ошибка: {e}{NC}"
+
+
+def _cf_resolve_ip() -> Optional[str]:
+    """Резолвит speed.cloudflare.com через DoH (Cloudflare/Google JSON API),
+    минуя серверный DNS.
+
+    Возвращает IP-строку или None при ошибке. None означает, что caller
+    должен использовать fallback (обычный curl через системный DNS).
+
+    Зачем: после фикса DNS-leak серверный DNS направлен на 127.0.0.1
+    (DNSCrypt-proxy). Если DNSCrypt не может резолвить speed.cloudflare.com
+    (или работает медленно) — curl падает. DoH обходит это.
+    """
+    try:
+        from chimera.modules.chain_nodes import _resolve_host_fresh
+        return _resolve_host_fresh("speed.cloudflare.com")
+    except Exception:
+        return None
+
+
+def _cf_probe_available(probe_bytes: int = 1048576, timeout: int = 15) -> bool:
+    """Проверяет доступность Cloudflare SpeedTest endpoint.
+
+    Использует DoH-резолв + --resolve в curl, минуя серверный DNS —
+    см. _cf_resolve_ip(). Возвращает True если Cloudflare доступен.
+    """
+    cf_ip = _cf_resolve_ip()
+    curl_cmd = [
+        "curl", "-s", "-o", "/dev/null", "--max-time", str(timeout),
+        "-w", "%{size_download}",
+    ]
+    if cf_ip:
+        curl_cmd += ["--resolve", f"speed.cloudflare.com:443:{cf_ip}"]
+    curl_cmd.append(f"https://speed.cloudflare.com/__down?bytes={probe_bytes}")
+    r = _run(curl_cmd, capture=True, check=False)
+    return r.returncode == 0 and int(r.stdout.strip() or 0) > 500_000
 
 
 def _speed_test_mode_a(auto_mode: bool = False) -> None:
@@ -5882,13 +5935,7 @@ def _speed_test_mode_a(auto_mode: bool = False) -> None:
 
     # --- Проверка доступности Cloudflare и выбор размера ---
     _box_info("  Проверка доступности Cloudflare SpeedTest...")
-    _probe = _run(
-        ["curl", "-s", "-o", "/dev/null", "--max-time", "15",
-         "-w", "%{size_download}",
-         "https://speed.cloudflare.com/__down?bytes=1048576"],
-        capture=True, check=False
-    )
-    _probe_ok = _probe.returncode == 0 and int(_probe.stdout.strip() or 0) > 500_000
+    _probe_ok = _cf_probe_available()
 
     if _probe_ok:
         if auto_mode:
