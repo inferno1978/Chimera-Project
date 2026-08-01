@@ -189,6 +189,15 @@ class TestDiagTcpProbe(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
+        # По умолчанию DoH-резолв возвращает None → _diag_tcp_probe
+        # уходит в fallback-ветку на socket.getaddrinfo() — это позволяет
+        # старым тестам проверять логику перебора address family.
+        # Тесты, проверяющие DoH-путь, переопределяют этот patch локально.
+        patcher = patch("chimera.modules.chain_nodes._resolve_host_fresh",
+                        return_value=None)
+        self._doh_patcher = patcher
+        self._doh_patcher.start()
+        self.addCleanup(self._doh_patcher.stop)
 
     def _make_addrinfo(self, family, ip, port=443):
         """Хелпер: строит кортеж формата getaddrinfo."""
@@ -311,6 +320,34 @@ class TestDiagTcpProbe(unittest.TestCase):
         # Только ОДИН сокет создан — дубликат не вызывал второй коннект
         mock_socket_factory.assert_called_once()
         mock_sock.connect.assert_called_once()
+
+    def test_doh_resolves_overrides_getaddrinfo(self):
+        """DoH-резолв отдаёт АКТУАЛЬНЫЙ IP — getaddrinfo не должен вызываться.
+
+        Симулирует кейс из баг-репорта: на сервере в /etc/hosts или в кэше
+        systemd-resolved прописан СТАРЫЙ IP домена, но реальная A-запись в
+        DNS-провайдере уже указывает на НОВЫЙ IP. DoH идёт напрямую к
+        Cloudflare/Google, минуя локальный кэш, и возвращает НОВЫЙ IP.
+        """
+        from chimera.modules import diagnostics
+        # DoH отдаёт НОВЫЙ IP
+        with patch("chimera.modules.chain_nodes._resolve_host_fresh",
+                   return_value="5.6.7.8"), \
+             patch.object(diagnostics.socket, "getaddrinfo",
+                          side_effect=AssertionError(
+                              "getaddrinfo не должен вызываться при успешном DoH")) as mock_gai, \
+             patch.object(diagnostics.socket, "socket") as mock_socket_factory:
+            mock_sock = MagicMock()
+            mock_socket_factory.return_value = mock_sock
+            alive, detail, lat = diagnostics._diag_tcp_probe("example.com", 443)
+        self.assertTrue(alive)
+        self.assertIn("5.6.7.8", detail)
+        self.assertIn("IPv4", detail)
+        mock_gai.assert_not_called()
+        mock_sock.connect.assert_called_once()
+        # connect() вызван с НОВЫМ IP
+        connected_to = mock_sock.connect.call_args[0][0]
+        self.assertEqual(connected_to[0], "5.6.7.8")
 
 
 if __name__ == "__main__":

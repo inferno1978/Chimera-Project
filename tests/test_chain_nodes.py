@@ -781,5 +781,109 @@ class TestSaveChainNodesToState(unittest.TestCase):
         self.assertIn("state.json", warn_msg)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  _resolve_host_fresh — DoH-резолв (Cloudflare/Google) + fallback
+# ══════════════════════════════════════════════════════════════════════════════
+class TestResolveHostFresh(unittest.TestCase):
+    """_resolve_host_fresh: DoH через Cloudflare/Google + fallback на gethostbyname."""
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+
+    def test_ipv4_passthrough(self):
+        """Если host уже валидный IPv4 — возвращается как есть, без DoH."""
+        from chimera.modules import chain_nodes
+        # _run НЕ должен вызываться — патчим с side_effect AssertionError.
+        with patch.object(self._fake_core, "_run",
+                          side_effect=AssertionError("_run не должен вызываться")):
+            result = chain_nodes._resolve_host_fresh("192.0.2.42")
+        self.assertEqual(result, "192.0.2.42")
+
+    def test_doh_cloudflare_success(self):
+        """DoH через Cloudflare (1.1.1.1) отдал A-record — возвращается IP."""
+        from chimera.modules import chain_nodes
+        # Cloudflare JSON DoH: {"Status":0,"Answer":[{"name":"...","type":1,"data":"5.6.7.8"}]}
+        cf_response = json.dumps({
+            "Status": 0,
+            "Answer": [{"name": "example.com", "type": 1, "TTL": 60, "data": "5.6.7.8"}],
+        })
+        mock_run = MagicMock(returncode=0, stdout=cf_response, stderr="")
+        with patch.object(self._fake_core, "_run", return_value=mock_run), \
+             patch("socket.gethostbyname",
+                   side_effect=AssertionError(
+                       "gethostbyname не должен вызываться при успешном DoH")):
+            result = chain_nodes._resolve_host_fresh("example.com")
+        self.assertEqual(result, "5.6.7.8")
+
+    def test_doh_cloudflare_fails_google_succeeds(self):
+        """Cloudflare недоступен → fallback на Google DoH (8.8.8.8)."""
+        from chimera.modules import chain_nodes
+        google_response = json.dumps({
+            "Status": 0,
+            "Answer": [{"name": "example.com", "type": 1, "TTL": 60, "data": "9.9.9.9"}],
+        })
+        # Первый вызов _run (Cloudflare) — ошибка; второй (Google) — успех.
+        responses = [
+            MagicMock(returncode=28, stdout="", stderr="timeout"),  # cf fail
+            MagicMock(returncode=0,  stdout=google_response, stderr=""),  # google ok
+        ]
+        with patch.object(self._fake_core, "_run", side_effect=responses), \
+             patch("socket.gethostbyname",
+                   side_effect=AssertionError(
+                       "gethostbyname не должен вызываться при успешном Google DoH")):
+            result = chain_nodes._resolve_host_fresh("example.com")
+        self.assertEqual(result, "9.9.9.9")
+
+    def test_doh_returns_nxdomain_falls_back_to_gethostbyname(self):
+        """DoH отдал NXDOMAIN (Status=3) → fallback на системный резолвер."""
+        from chimera.modules import chain_nodes
+        # NXDOMAIN от обоих провайдеров.
+        nxdomain = json.dumps({"Status": 3, "Answer": []})
+        mock_run = MagicMock(returncode=0, stdout=nxdomain, stderr="")
+        with patch.object(self._fake_core, "_run", return_value=mock_run), \
+             patch("socket.gethostbyname", return_value="203.0.113.7") as mock_ghbn:
+            result = chain_nodes._resolve_host_fresh("cached.example.com")
+        self.assertEqual(result, "203.0.113.7")
+        mock_ghbn.assert_called_once_with("cached.example.com")
+
+    def test_doh_returns_aaaa_ignored(self):
+        """DoH-ответ с AAAA (type=28), но без A (type=1) → fallback на gethostbyname.
+
+        _resolve_host_fresh возвращает только IPv4 (inet_aton), чтобы не ломать
+        callers, ожидающих IPv4-строку.
+        """
+        from chimera.modules import chain_nodes
+        aaaa_only = json.dumps({
+            "Status": 0,
+            "Answer": [{"name": "v6.example.com", "type": 28,
+                        "TTL": 60, "data": "2a12::1"}],
+        })
+        mock_run = MagicMock(returncode=0, stdout=aaaa_only, stderr="")
+        with patch.object(self._fake_core, "_run", return_value=mock_run), \
+             patch("socket.gethostbyname", return_value="198.51.100.42"):
+            result = chain_nodes._resolve_host_fresh("v6.example.com")
+        self.assertEqual(result, "198.51.100.42")
+
+    def test_all_doh_fail_falls_back_to_gethostbyname(self):
+        """Все DoH-провайдеры недоступны (curl fail) → fallback на gethostbyname."""
+        from chimera.modules import chain_nodes
+        mock_run = MagicMock(returncode=6, stdout="", stderr="couldn't resolve host")
+        with patch.object(self._fake_core, "_run", return_value=mock_run), \
+             patch("socket.gethostbyname", return_value="203.0.113.99") as mock_ghbn:
+            result = chain_nodes._resolve_host_fresh("example.com")
+        self.assertEqual(result, "203.0.113.99")
+        mock_ghbn.assert_called_once_with("example.com")
+
+    def test_all_fail_returns_none(self):
+        """DoH недоступен И gethostbyname падает → None."""
+        from chimera.modules import chain_nodes
+        mock_run = MagicMock(returncode=6, stdout="", stderr="")
+        with patch.object(self._fake_core, "_run", return_value=mock_run), \
+             patch("socket.gethostbyname",
+                   side_effect=socket.gaierror("DNS fail")):
+            result = chain_nodes._resolve_host_fresh("nonexistent.invalid")
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

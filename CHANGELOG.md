@@ -2,6 +2,89 @@
 
 ---
 
+## FIX(diagnostics): DoH-резолв exit-нод — обход локального DNS-кэша — 1 августа 2026
+
+**При диагностике «одной кнопкой» (а также в SpeedTest и матрице состояния
+exit-нод) определение GeoIP, TCP-latency и TCP-ping для exit-ноды стучались
+на СТАРЫЙ IP-адрес домена, хотя реальный клиент (xray/sing-box) подключался
+на НОВЫЙ IP. Симптом: пользователь сменил A-запись домена (например
+`node-b.example`) в DNS-провайдере, нода работает по vless-ссылке, но
+диагностика упорно показывает старый IP, старого ISP и т.д.**
+
+### Корень проблемы
+
+Все диагностические функции резолвили домен exit-ноды через
+`socket.gethostbyname()` — системный резолвер сервера. Этот резолвер
+возвращает адрес из локального кэша, который может быть устаревшим:
+
+- Запись в `/etc/hosts` (часто прописывается при отладке и забывается убрать).
+- `systemd-resolved` / `nscd` / `dnsmasq` кэшируют A-record с большим TTL
+  и не успевают его сбросить после смены A-записи в DNS-провайдере.
+- Локальный forwarder (например, роутер или корпоративный DNS), который
+  отдаёт устаревший кэш.
+
+Реальный xray-клиент при этом может использовать свой resolver
+(libc + свой кэш, либо DoH/DoT в случае sing-box) — и идти на НОВЫЙ IP.
+В итоге диагностический «TCP-ping» и реальный клиентский трафик расходятся.
+
+### Локация бага
+
+- `chimera/modules/chain_nodes.py` — функции `_speed_test_node_geo()`
+  и `_speed_test_node_latency()`, а также inline-резолв в меню
+  «Пинг Exit Node» (`do_manage_nodes`, `ch == "t"`) и `_tcp_ms()`
+  в `do_node_health_matrix()`.
+- `chimera/modules/diagnostics.py` — функция `_diag_tcp_probe()`,
+  используемая шагом 5 («Тест маршрутизации — TCP ping exit-нод»)
+  и шагом 11 («Exit-ноды: latency») мастера `do_full_diagnostic()`.
+
+### Изменение
+
+1. **Новая функция `_resolve_host_fresh(host, timeout=3)` в
+   `chimera/modules/chain_nodes.py`** — резолв hostname → IPv4 через
+   публичные DoH-резолверы:
+   - Если `host` уже валидный IPv4 — возвращается как есть, без DoH.
+   - Cloudflare DoH JSON API: `https://1.1.1.1/dns-query?name=…&type=A`
+     с заголовком `Accept: application/dns-json`.
+   - Если Cloudflare недоступен / NXDOMAIN — Google DoH JSON API:
+     `https://8.8.8.8/resolve?name=…&type=A`.
+   - Из ответа берётся только A-record (DNS type 1); AAAA игнорируется
+     (callers ожидают IPv4-строку).
+   - Fallback на `socket.gethostbyname()` (системный резолвер) — лучше
+     старый IP, чем никакой.
+   - Если всё упало — `None`.
+
+2. **`_speed_test_node_geo()` / `_speed_test_node_latency()`** —
+   резолв через `_resolve_host_fresh()` вместо `socket.gethostbyname()`.
+   GeoIP теперь определяется по АКТУАЛЬНОМУ IP, latency мерируется до
+   АКТУАЛЬНОГО IP.
+
+3. **Меню «Пинг Exit Node» и `_tcp_ms()` в матрице состояния** —
+   то же самое: флаг страны и TCP-ping по АКТУАЛЬНОМУ IP.
+
+4. **`_diag_tcp_probe()` в `diagnostics.py`** — теперь сначала пробует
+   DoH-резолв (через lazy import `_resolve_host_fresh` из `chain_nodes`),
+   и если DoH отдал IPv4 — формирует addrinfo-подобный список вручную
+   для `socket.connect()`. Если DoH не сработал — fallback на системный
+   `getaddrinfo()`, который дополнительно отдаёт IPv6-адреса
+   (сохраняет прежнюю логику dual-stack для IPv6-only доменов на
+   IPv4-only серверах, см. предыдущий фикс от 24 июля 2026).
+
+### Тесты
+
+- `tests/test_chain_nodes.py` — новый класс `TestResolveHostFresh`
+  с 7 тестами: IPv4 passthrough, Cloudflare DoH success, Cloudflare→Google
+  fallback, NXDOMAIN→gethostbyname, AAAA ignored, all DoH fail→fallback,
+  all fail→None.
+- `tests/test_diagnostics.py` — в `TestDiagTcpProbe.setUp` патчится
+  `_resolve_host_fresh → None` (старые тесты проверяют fallback-логику
+  перебора address family), добавлен новый
+  `test_doh_resolves_overrides_getaddrinfo` (DoH отдаёт НОВЫЙ IP →
+  `getaddrinfo` не должен вызываться).
+
+Все 61 тест в `test_chain_nodes` + `test_diagnostics` проходят.
+
+---
+
 ## SECURITY(cdn-masking): PBKDF2 + state-file вместо SHA-256-в-коде — 28 июля 2026
 
 **Критический security-фикс модели «платного скрытого доступа». Предыдущая
