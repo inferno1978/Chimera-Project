@@ -192,6 +192,49 @@ class TestDiagnoseResolvConf(_BaseTest):
         self.assertIn("5.45.240.203", reasons_str)
         self.assertIn("eth0", reasons_str)
 
+    def test_per_link_overridden_no_leak_despite_global_external_dns(self):
+        """РЕГРЕССИЯ v3: после фикса per-link DNS=127.0.0.1 + default-route=false
+        для всех link'ов → утечки НЕТ, даже если Global DNS содержит 77.88.8.8
+        (от DHCP). Drop-in с Domains=~. перехватывает все запросы на 127.0.0.1.
+
+        Это симптом из баг-репорта: фикс применился, per-link OK, но Global
+        DNS содержит 77.88.8.8 — diagnose ошибочно показывал утечку.
+        """
+        from chimera.modules import resolv_conf_fix
+        self._resolv_conf.symlink_to("/run/systemd/resolve/stub-resolv.conf")
+        # resolv.conf → 127.0.0.53 (stub)
+        cmd_to_result = {
+            ("systemctl", "is-active", "systemd-resolved"):
+                _make_completed(stdout="active"),
+            ("systemctl", "is-active", "dnscrypt-proxy.service"):
+                _make_completed(stdout="active"),
+            # resolvectl dns: Global содержит 77.88.8.8 (от DHCP), но
+            # Link ens3: 127.0.0.1 (per-link override применён).
+            ("resolvectl", "dns"): _make_completed(
+                stdout="Global: 77.88.8.8 77.88.8.1 127.0.0.1 127.0.0.1\n"
+                       "Link 2 (ens3): 127.0.0.1\n"),
+            # resolvectl default-route: Global yes, Link ens3: no (отключён).
+            ("resolvectl", "default-route"): _make_completed(
+                stdout="Global: yes\nLink 2 (ens3): no\n"),
+            ("ss", "-tlnu"): _make_completed(
+                stdout="UDP  127.0.0.1:5300  0.0.0.0:*"),
+        }
+        with patch.object(resolv_conf_fix, "_run",
+                          side_effect=_mock_run_factory(cmd_to_result)), \
+             patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
+                          return_value=("127.0.0.1", 5300)), \
+             patch.object(resolv_conf_fix, "_get_resolv_conf_nameservers",
+                          return_value=["127.0.0.53"]):
+            diag = resolv_conf_fix.diagnose_resolv_conf()
+        # per-link override активен → утечки нет.
+        self.assertTrue(diag["per_link_overridden"],
+                        "per_link_overridden должен быть True: "
+                        "ens3 → 127.0.0.1, default-route=false")
+        self.assertFalse(diag["fix_needed"],
+                         "fix_needed должен быть False — per-link override активен")
+        self.assertEqual(diag["leak_reasons"], [],
+                         "leak_reasons должен быть пустым")
+
     def test_dnscrypt_not_active_no_fix(self):
         """DNSCrypt не активен → фикс отменяется (black-hole risk)."""
         from chimera.modules import resolv_conf_fix
@@ -334,6 +377,11 @@ class TestFixResolvConfToLocahost(_BaseTest):
         `resolvectl default-route` (без dns- prefix). Старый синтаксис
         `dns-global set` / `dns-default-route set false` возвращал
         'Unknown command verb' — фикс «применялся», но утечка оставалась.
+
+        ДОПОЛНИТЕЛЬНО (v3): global `resolvectl dns 127.0.0.1` / `default-route false`
+        тоже НЕ вызываются — на Ubuntu 24.04 парсер интерпретирует `127.0.0.1`
+        и `false` как имя интерфейса и падает с 'Failed to resolve interface'.
+        Global DNS задаётся через drop-in, этого достаточно.
         """
         from chimera.modules import resolv_conf_fix
         self._resolv_conf.symlink_to("/run/systemd/resolve/stub-resolv.conf")
@@ -347,32 +395,34 @@ class TestFixResolvConfToLocahost(_BaseTest):
             if cmd[:2] == ["resolvectl", "dns"] and len(cmd) == 2:
                 # `resolvectl dns` (просмотр) — без аргументов.
                 return _make_completed(stdout="Global:\nLink 2 (eth0): 5.45.240.203\n")
+            if cmd[:2] == ["resolvectl", "default-route"] and len(cmd) == 2:
+                # `resolvectl default-route` (просмотр) — без аргументов.
+                return _make_completed(stdout="Global: yes\nLink 2 (eth0): yes\n")
             if cmd[:1] == ["ss"]:
-                # ss -tlnu — кто-то слушает на 127.0.0.1:5300.
                 return _make_completed(stdout="UDP  127.0.0.1:5300  0.0.0.0:*\n")
-            # Все остальные (resolvectl dns X, default-route, systemctl) — успех.
             return _make_completed(rc=0)
         with patch.object(resolv_conf_fix, "_run", side_effect=tracking_run), \
              patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
                           return_value=("127.0.0.1", 5300)):
             resolv_conf_fix.fix_resolv_conf_to_localhost()
-        # Не должно быть вызовов `dns-global` или `dns-default-route`.
+        # Не должно быть вызовов `dns-global` или `dns-default-route` (старый синтаксис).
         bad_cmds = [c for c in called_cmds
                     if "dns-global" in c or "dns-default-route" in c]
         self.assertEqual(bad_cmds, [],
                          f"найдены устаревшие команды: {bad_cmds}")
-        # Должны быть вызовы `resolvectl dns 127.0.0.1` (global)
-        # и `resolvectl dns eth0 127.0.0.1` (per-link).
-        self.assertTrue(any(c == ("resolvectl", "dns", "127.0.0.1")
-                            for c in called_cmds),
-                        "нет вызова `resolvectl dns 127.0.0.1` (global)")
+        # НЕ должно быть global `resolvectl dns 127.0.0.1` (парсер падает).
+        self.assertFalse(any(c == ("resolvectl", "dns", "127.0.0.1")
+                             for c in called_cmds),
+                         "global `resolvectl dns 127.0.0.1` не должен вызываться")
+        # НЕ должно быть global `resolvectl default-route false` (парсер падает).
+        self.assertFalse(any(c == ("resolvectl", "default-route", "false")
+                             for c in called_cmds),
+                         "global `resolvectl default-route false` не должен вызываться")
+        # ДОЛЖНЫ быть per-link вызовы: `resolvectl dns eth0 127.0.0.1`.
         self.assertTrue(any(c == ("resolvectl", "dns", "eth0", "127.0.0.1")
                             for c in called_cmds),
                         "нет вызова `resolvectl dns eth0 127.0.0.1` (per-link)")
-        # `resolvectl default-route false` (global) и per-link.
-        self.assertTrue(any(c == ("resolvectl", "default-route", "false")
-                            for c in called_cmds),
-                        "нет вызова `resolvectl default-route false` (global)")
+        # ДОЛЖНЫ быть per-link: `resolvectl default-route eth0 false`.
         self.assertTrue(any(c == ("resolvectl", "default-route", "eth0", "false")
                             for c in called_cmds),
                         "нет вызова `resolvectl default-route eth0 false` (per-link)")

@@ -2,6 +2,124 @@
 
 ---
 
+## FIX(dns): resolv_conf_fix v3 — убрать global resolvectl + per-link как главный критерий — 1 августа 2026
+
+**После v2 фикса пользователь применил фикс, но diagnose всё равно показывал
+утечку. Из логов:**
+
+```
+✓ resolvectl dns ens3 127.0.0.1     (per-link OK)
+✓ resolvectl default-route ens3 false (per-link OK)
+✓ systemctl restart systemd-resolved
+✓ resolvectl flush-caches
+✓ создан и активирован persist-сервис
+• resolvectl dns 127.0.0.1: rc=1, stderr=Failed to resolve interface "127.0.0.1"
+• resolvectl default-route false: rc=1, stderr=Failed to resolve interface "false"
+```
+
+И в диагностике:
+```
+Global:  77.88.8.8     ← от DHCP
+Global:  77.88.8.1     ← от DHCP
+Global:  127.0.0.1     ← из drop-in
+Global:  127.0.0.1     ← из drop-in (дважды)
+Link ens3: 127.0.0.1   ← per-link override OK
+```
+
+Diagnose показывал "УТЕЧКА" из-за 77.88.8.8 в Global DNS.
+
+### Корень проблемы (3 момента)
+
+**1. Global `resolvectl dns 127.0.0.1` падает на Ubuntu 24.04.**
+Парсер systemd 256+ пытается интерпретировать `127.0.0.1` как имя интерфейса:
+`Failed to resolve interface "127.0.0.1": No such device`. Аналогично с
+`resolvectl default-route false` — `false` интерпретируется как имя интерфейса.
+Global-команды с одним аргументом-IP-или-BOOL не работают.
+
+**2. Global DNS содержит 77.88.8.8 от DHCP — но это НЕ утечка.**
+Drop-in `/etc/systemd/resolved.conf.d/chimera-dns.conf` с `DNS=127.0.0.1`
+и `Domains=~.` перехватывает все запросы на 127.0.0.1. Global DNS
+77.88.8.8 (от DHCP через systemd-networkd/NetworkManager) присутствует в
+списке, но не используется — потому что per-link DNS ens3=127.0.0.1 с
+`default-route=false` означает, что ens3 не используется для default-route
+запросов.
+
+**3. Diagnose ошибочно считал Global DNS причиной утечки.**
+Логика была: "Global DNS содержит внешний IP → утечка". Но это false
+positive после применения фикса.
+
+### Решение
+
+**1. Убрать global `resolvectl dns/default-route`** — они не работают на
+Ubuntu 24.04 и не нужны. Drop-in уже задаёт Global DNS через `[Resolve]
+DNS=127.0.0.1` + `Domains=~.`. Этого достаточно.
+
+**2. Per-link override — ГЛАВНЫЙ критерий утечки.**
+Новая логика в `diagnose_resolv_conf()`:
+- Если все link'и имеют DNS=127.0.0.1 И default-route=false → `per_link_overridden=True`,
+  утечки НЕТ, даже если Global DNS содержит внешние IP.
+- Если есть link с внешним DNS → утечка.
+- Если resolv.conf указывает на внешний DNS (без systemd-resolved) → утечка.
+
+**3. Получать per-link default-route** через новую helper-функцию
+`_get_resolved_link_default_routes()` — парсит `resolvectl default-route`,
+возвращает `[(link, bool)]`.
+
+**4. TUI показывает per-link default-route** в диагностике:
+```
+Link ens3: 127.0.0.1
+Link ens3 default-route: false ✓
+```
+
+**5. Информационное сообщение** в TUI, если per-link OK, но Global DNS
+содержит внешние IP:
+```
+✓ УТЕЧКИ НЕТ — per-link override активен
+  Все link'и направлены на 127.0.0.1,
+  default-route=false для каждого.
+
+Инфо: Global DNS содержит 77.88.8.8, 77.88.8.1.
+Это не утечка — drop-in с Domains=~. перехватывает
+все запросы на 127.0.0.1. Global не используется.
+```
+
+### Persist-скрипт
+
+Убраны global `resolvectl dns 127.0.0.1` и `resolvectl default-route false`
+из `/usr/local/bin/chimera-dns-fix-apply.sh`. Скрипт применяет только
+per-link override для каждого link'а + flush-caches.
+
+### Тесты
+
+- `test_systemd_resolved_uses_correct_resolvectl_syntax` — расширен:
+  проверяет, что global `resolvectl dns 127.0.0.1` и `default-route false`
+  НЕ вызываются вообще (раньше проверялось обратное).
+- `test_per_link_overridden_no_leak_despite_global_external_dns` — НОВЫЙ
+  регрессионный тест: simулирует состояние после фикса (Global содержит
+  77.88.8.8, но per-link ens3=127.0.0.1 + default-route=false) →
+  `per_link_overridden=True`, `fix_needed=False`, `leak_reasons=[]`.
+
+21/21 тестов проходят. 75/75 в DNS-свите.
+
+### Файлы
+
+- `chimera/modules/resolv_conf_fix.py`:
+  - `fix_resolv_conf_to_localhost()` — убраны шаги 1b (global dns) и 1c
+    (global default-route).
+  - `_write_persist_script_and_service()` — убраны global resolvectl из
+    shell-скрипта.
+  - Новая helper-функция `_get_resolved_link_default_routes()`.
+  - `diagnose_resolv_conf()` — добавлены поля `resolved_link_default_routes`
+    и `per_link_overridden`; новая логика: per-link override = главный
+    критерий, Global DNS не считается причиной утечки.
+  - `_print_diagnosis()` — показывает per-link default-route; если
+    `per_link_overridden=True`, показывает зелёное "УТЕЧКИ НЕТ" +
+    informational про Global DNS.
+  - `_screen_fix_apply()` — убраны global resolvectl из списка действий;
+    добавлено объяснение, почему global НЕ вызываются.
+
+---
+
 ## FIX(dns): resolv_conf_fix — правильный синтаксис resolvectl + per-link override + persist — 1 августа 2026
 
 **После применения фикса на Ubuntu 24.04 утечка DNS оставалась: фикс
