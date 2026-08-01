@@ -778,7 +778,7 @@ def disable_dhcp_dns_on_all_links() -> Dict[str, Any]:
       - systemd-networkd: drop-in .network.d/chimera.conf с UseDNS=false.
       - NetworkManager: nmcli ... ignore-auto-dns yes.
 
-    После применения: networkctl reload + networkctl reconfigure (для networkd),
+    После применения: networkctl reload (для networkd) — БЕЗ reconfigure,
     или уже применено через nmcli connection up (для NM).
 
     Возвращает dict:
@@ -811,19 +811,21 @@ def disable_dhcp_dns_on_all_links() -> Dict[str, Any]:
                 dropin_paths.append(str(dropin_path))
             else:
                 warnings.append(f"link {link}: {err}")
-        # networkctl reload + reconfigure для каждого link.
+        # networkctl reload — перезагружает .network/.netdev/.link файлы.
+        # БЕЗОПАСНО: не трогает интерфейсы, не сбрасывает IP.
+        # Drop-in с UseDNS=false вступит в силу при следующем DHCP-renewal.
+        # Немедленный эффект уже обеспечен через resolvectl dns LINK 127.0.0.1
+        # + resolvectl default-route LINK false (per-link override).
+        #
+        # ВАЖНО: НЕ вызываем `networkctl reconfigure <link>` — это
+        # ПОЛНОСТЬЮ переконфигурирует интерфейс (сбрасывает IP, пере-
+        # запрашивает DHCP), что УБИВАЕТ SSH на удалённом сервере!
+        # См. CHANGELOG: "resolv_conf_fix v6 — убрать networkctl reconfigure".
         r = _run(["networkctl", "reload"], capture=True, check=False)
         if r.returncode == 0:
             actions.append("networkctl reload")
         else:
             warnings.append(f"networkctl reload: rc={r.returncode}")
-        for link in links:
-            r = _run(["networkctl", "reconfigure", link],
-                     capture=True, check=False)
-            if r.returncode == 0:
-                actions.append(f"networkctl reconfigure {link}")
-            else:
-                warnings.append(f"networkctl reconfigure {link}: rc={r.returncode}")
 
     elif manager == "NetworkManager":
         for link in links:
@@ -861,11 +863,8 @@ def enable_dhcp_dns_on_all_links() -> Dict[str, Any]:
         r = _run(["networkctl", "reload"], capture=True, check=False)
         if r.returncode == 0:
             actions.append("networkctl reload")
-        for link in links:
-            r = _run(["networkctl", "reconfigure", link],
-                     capture=True, check=False)
-            if r.returncode == 0:
-                actions.append(f"networkctl reconfigure {link}")
+        # НЕ вызываем networkctl reconfigure — см. комментарий в
+        # disable_dhcp_dns_on_all_links (убивает SSH).
 
     elif manager == "NetworkManager":
         for link in links:
@@ -1726,7 +1725,7 @@ def _screen_fix_apply(diag: Dict[str, Any]) -> None:
         _box_row(f"    {DIM}• определить network manager (systemd-networkd / NetworkManager){NC}")
         _box_row(f"    {DIM}• создать drop-in /etc/systemd/network/<file>.network.d/chimera-dns.conf{NC}")
         _box_row(f"    {DIM}  с [DHCPv4] UseDNS=false + [DHCPv6] UseDNS=false{NC}")
-        _box_row(f"    {DIM}• networkctl reload + reconfigure (для networkd){NC}")
+        _box_row(f"    {DIM}• networkctl reload (для networkd — без reconfigure, безопасно){NC}")
         _box_row(f"    {DIM}• или nmcli connection modify ... ignore-auto-dns yes (для NM){NC}")
     elif diag["fix_method"] == "static_resolv_conf":
         _box_row(f"  {BOLD}Будет выполнено:{NC}")
@@ -1781,7 +1780,7 @@ def _screen_rollback() -> None:
     _box_row(f"    {DIM}  (вернуть per-link DHCP DNS){NC}")
     _box_row(f"    {DIM}• восстановить DHCP DNS: удалить .network.d/chimera-dns.conf{NC}")
     _box_row(f"    {DIM}  (systemd-networkd) или nmcli ignore-auto-dns no (NetworkManager){NC}")
-    _box_row(f"    {DIM}• networkctl reload + reconfigure (для systemd-networkd){NC}")
+    _box_row(f"    {DIM}• networkctl reload (для systemd-networkd — без reconfigure){NC}")
     _box_row(f"    {DIM}• systemctl restart systemd-resolved{NC}")
     _box_row(f"    {DIM}• восстановить /etc/resolv.conf из бэкапа (если есть){NC}")
     _box_row(f"    {DIM}• resolvectl flush-caches{NC}")
@@ -1844,7 +1843,7 @@ def _screen_fix_reapply(diag: Dict[str, Any]) -> None:
     _box_row(f"    {GREEN}• ОТКЛЮЧИТЬ DHCP DNS (КРИТИЧЕСКИЙ шаг):{NC}")
     _box_row(f"    {GREEN}  - systemd-networkd: drop-in .network.d/chimera-dns.conf{NC}")
     _box_row(f"    {GREEN}  - NetworkManager: nmcli ignore-auto-dns yes{NC}")
-    _box_row(f"    {GREEN}  - networkctl reload + reconfigure{NC}")
+    _box_row(f"    {GREEN}  - networkctl reload (безопасно, без reconfigure){NC}")
     _box_row()
     _box_row(f"  {GREEN}После re-apply Global DNS будет содержать только 127.0.0.1.{NC}")
     _box_row(f"  {GREEN}DNS Leak Test не должен видеть Yandex LLC.{NC}")
