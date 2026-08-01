@@ -318,13 +318,23 @@ def _write_persist_script_and_service() -> tuple:
     """
     # Shell-скрипт: применяет per-link DNS override для всех link'ов.
     # Используется bash, не sh, для подстановки процессов.
+    #
+    # ВАЖНО: global `resolvectl dns 127.0.0.1` НЕ вызываем — на Ubuntu 24.04
+    # (systemd 256+) парсер интерпретирует `127.0.0.1` как имя интерфейса
+    # и падает с `Failed to resolve interface "127.0.0.1": No such device`.
+    # Global DNS задаётся через drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf
+    # с DNS=127.0.0.1 и Domains=~. — этого достаточно.
     script_content = """#!/bin/bash
 # Chimera Project — persist per-link DNS override.
 # Создан chimera/modules/resolv_conf_fix.py
 #
-# Drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf задаёт только
-# Global DNS. Per-link DNS от DHCP (ens3, eth0, ...) имеет приоритет.
-# Этот скрипт перебивает per-link DNS на 127.0.0.1 для каждого link'а.
+# Drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf задаёт Global DNS
+# (127.0.0.1) и Domains=~. (перехват всех запросов). Этого достаточно для
+# global — resolvectl dns 127.0.0.1 НЕ вызываем (на Ubuntu 24.04 парсер
+# падает с "Failed to resolve interface").
+#
+# Per-link DNS от DHCP (ens3: 77.88.8.8 на Yandex VPS) имеет приоритет над
+# Global. Этот скрипт перебивает per-link DNS на 127.0.0.1 для каждого link'а.
 #
 # Запускается:
 #   1. После применения фикса (через systemctl start).
@@ -361,10 +371,6 @@ for LINK in $LINKS; do
         echo "[chimera-dns-fix] $LINK: resolvectl default-route failed" >&2
     fi
 done
-
-# Также задаём global DNS (на случай, если link'ов нет или новые появятся).
-resolvectl dns "$LOCAL_DNS" 2>/dev/null || true
-resolvectl default-route false 2>/dev/null || true
 
 # flush caches — не должно быть stale entries с провайдерским DNS.
 resolvectl flush-caches 2>/dev/null || true
@@ -504,8 +510,40 @@ def _is_dnscrypt_listening(addr: str, port: int) -> bool:
     return False
 
 
+def _get_resolved_link_default_routes() -> List[tuple]:
+    """Per-link default-route статус из systemd-resolved.
+
+    Возвращает список (link_name, bool: default-route enabled).
+    Пример вывода resolvectl default-route:
+        Global: yes
+        Link 2 (ens3): no
+    """
+    r = _run(["resolvectl", "default-route"], capture=True, check=False)
+    if r.returncode != 0:
+        return []
+    results = []
+    for m in re.finditer(r'^Link\s+\d+\s+\(([^)]+)\):\s*(\S+)', r.stdout, re.MULTILINE):
+        link = m.group(1).strip()
+        val_str = m.group(2).strip().lower()
+        # "yes"/"no" → bool
+        if val_str in ("yes", "true", "1"):
+            results.append((link, True))
+        elif val_str in ("no", "false", "0"):
+            results.append((link, False))
+    return results
+
+
 def diagnose_resolv_conf() -> Dict[str, Any]:
     """Полная диагностика состояния DNS-резолвера.
+
+    Главный критерий утечки — **per-link DNS**. Global DNS не критичен,
+    потому что drop-in с `Domains=~.` перехватывает все запросы на 127.0.0.1,
+    даже если global DNS содержит IP от DHCP (они просто не используются).
+
+    Логика:
+      - Если все link'и имеют DNS=127.0.0.1 И default-route=false → утечки нет.
+      - Если есть link с внешним DNS (не 127.*) → утечка.
+      - Если resolv.conf указывает на внешний DNS (без systemd-resolved) → утечка.
 
     Возвращает dict:
       {
@@ -514,16 +552,18 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
         "resolv_conf_is_symlink": bool,
         "resolv_conf_symlink_target": str | None,
         "resolv_conf_nameservers": [str, ...],
-        "resolv_conf_already_localhost": bool,  # все NS — 127.*
+        "resolv_conf_already_localhost": bool,
         "systemd_resolved_active": bool,
         "resolved_global_dns": [str, ...],
         "resolved_link_dns": [(link, [ip, ...]), ...],
+        "resolved_link_default_routes": [(link, bool), ...],
+        "per_link_overridden": bool,  # все link'и на 127.0.0.1 + default-route=false
         "dnscrypt_listen": (addr, port) | None,
         "dnscrypt_listening": bool,
         "dnscrypt_service_active": bool,
-        "fix_needed": bool,            # есть ли утечка по диагностике
+        "fix_needed": bool,
         "fix_method": "systemd_resolved" | "static_resolv_conf" | None,
-        "leak_reasons": [str, ...],    # почему диагностика решила что fix_needed
+        "leak_reasons": [str, ...],
       }
     """
     result: Dict[str, Any] = {
@@ -536,6 +576,8 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
         "systemd_resolved_active": _is_systemd_resolved_active(),
         "resolved_global_dns": [],
         "resolved_link_dns": [],
+        "resolved_link_default_routes": [],
+        "per_link_overridden": False,
         "dnscrypt_listen": None,
         "dnscrypt_listening": False,
         "dnscrypt_service_active": False,
@@ -562,6 +604,7 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
     if result["systemd_resolved_active"]:
         result["resolved_global_dns"] = _get_resolved_global_dns()
         result["resolved_link_dns"] = _get_resolved_link_dns()
+        result["resolved_link_default_routes"] = _get_resolved_link_default_routes()
 
     # DNSCrypt
     result["dnscrypt_listen"] = _get_dnscrypt_listen_addr_port()
@@ -574,8 +617,23 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
         r_svc.returncode == 0 and r_svc.stdout.strip() == "active"
     )
 
-    # Решение: нужен ли фикс?
-    reasons: List[str] = []
+    # ── Главный критерий: per-link override ────────────────────────────────
+    # Если все link'и имеют DNS=127.0.0.1 И default-route=false → утечки нет.
+    # Global DNS не критичен: drop-in с Domains=~. перехватывает все запросы
+    # на 127.0.0.1, даже если global содержит 77.88.8.8 от DHCP.
+    if result["systemd_resolved_active"] and result["resolved_link_dns"]:
+        link_dns_ok = True
+        link_dr_ok = True
+        for link, dns in result["resolved_link_dns"]:
+            if not all(ip.startswith("127.") or ip == "::1" for ip in dns):
+                link_dns_ok = False
+        for link, dr in result["resolved_link_default_routes"]:
+            if dr:  # default-route=true — link может использоваться для запросов
+                link_dr_ok = False
+        result["per_link_overridden"] = link_dns_ok and link_dr_ok
+    elif result["systemd_resolved_active"] and not result["resolved_link_dns"]:
+        # Нет per-link DNS вообще — global DNS решает.
+        result["per_link_overridden"] = False
 
     # Если DNSCrypt активен и слушает — есть смысл перенаправлять на него.
     dnscrypt_ready = (
@@ -584,19 +642,31 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
         and result["dnscrypt_listening"]
     )
 
+    # ── Решение: нужен ли фикс? ────────────────────────────────────────────
+    reasons: List[str] = []
+
+    # Case 1: per-link override активен → утечки НЕТ, независимо от global DNS.
+    if result["per_link_overridden"]:
+        result["fix_needed"] = False
+        result["fix_method"] = None
+        result["leak_reasons"] = []
+        # Если в global DNS есть внешние IP — это informational, не leak.
+        # (drop-in с Domains=~. перехватывает запросы на 127.0.0.1)
+        return result
+
+    # Case 2: resolv.conf указывает на localhost и нет per-link DNS → OK.
     if result["resolv_conf_already_localhost"] and not result["resolved_link_dns"]:
-        # Уже OK — resolv.conf указывает на localhost, per-link DNS нет.
         result["fix_needed"] = False
         result["fix_method"] = None
         return result
 
-    # resolv.conf указывает на внешние DNS — нужен фикс
+    # Case 3: resolv.conf указывает на внешние DNS → нужен фикс.
     if nss and not result["resolv_conf_already_localhost"]:
         reasons.append(
             f"/etc/resolv.conf → внешние NS: {', '.join(nss)}"
         )
 
-    # systemd-resolved: per-link DNS от провайдера
+    # Case 4: systemd-resolved: per-link DNS от провайдера → нужен фикс.
     if result["systemd_resolved_active"] and result["resolved_link_dns"]:
         for link, dns in result["resolved_link_dns"]:
             if not all(ip.startswith("127.") or ip == "::1" for ip in dns):
@@ -604,26 +674,21 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
                     f"systemd-resolved: link {link} → DHCP DNS: {', '.join(dns)}"
                 )
 
-    # systemd-resolved: global DNS — внешний
-    if result["systemd_resolved_active"] and result["resolved_global_dns"]:
-        if not all(ip.startswith("127.") or ip == "::1"
-                   for ip in result["resolved_global_dns"]):
-            reasons.append(
-                f"systemd-resolved: global DNS → {', '.join(result['resolved_global_dns'])}"
-            )
+    # ВАЖНО: Global DNS больше НЕ считаем причиной утечки.
+    # Если все link'и на 127.0.0.1 (per_link_overridden=True) — мы уже вышли
+    # в Case 1. Если per-link есть внешние DNS — это причина (Case 4).
+    # Global DNS может содержать 77.88.8.8 от DHCP, но с Domains=~. в drop-in
+    # он не используется — это НЕ утечка.
 
     if reasons and dnscrypt_ready:
         result["fix_needed"] = True
         result["leak_reasons"] = reasons
-        # Метод: если systemd-resolved активен → его и настраиваем.
-        # Иначе — статичная замена resolv.conf.
         result["fix_method"] = (
             "systemd_resolved" if result["systemd_resolved_active"]
             else "static_resolv_conf"
         )
     elif reasons and not dnscrypt_ready:
-        # Утечка есть, но DNSCrypt не готов — фикс невозможен без black-hole.
-        result["fix_needed"] = False  # не можем применить фикс
+        result["fix_needed"] = False
         result["leak_reasons"] = reasons + [
             "DNSCrypt не активен или не слушает — фикс отменён (black-hole risk)"
         ]
@@ -760,25 +825,17 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False) -> Dict[str, Any]:
                     "warnings": warnings,
                     "error": f"не удалось создать drop-in: {e}"}
 
-        # 1b. Глобальный DNS через `resolvectl dns 127.0.0.1`.
-        #     Старый синтаксис `dns-global set` был удалён в systemd 256+
-        #     (Ubuntu 24.04) — это была первопричина бага, когда фикс
-        #     «применялся», но утечка оставалась.
-        ok, cmd_str, err = _resolvectl_dns_set(None, _LOCAL_DNS)
-        if ok:
-            actions.append(cmd_str)
-        else:
-            warnings.append(f"{cmd_str}: {err}")
+        # 1b. Global DNS НЕ задаём через `resolvectl dns 127.0.0.1`.
+        #     На Ubuntu 24.04 (systemd 256+) парсер resolvectl пытается
+        #     интерпретировать `127.0.0.1` как имя интерфейса и падает с
+        #     `Failed to resolve interface "127.0.0.1": No such device`.
+        #     Drop-in (шаг 1a) уже задаёт Global DNS через [Resolve] DNS=127.0.0.1
+        #     и `Domains=~.` для перехвата всех запросов. Этого достаточно.
+        # Глобальный default-route тоже НЕ трогаем — drop-in с Domains=~.
+        # перехватывает все запросы на 127.0.0.1, даже если global DNS
+        # содержит другие IP от DHCP (они просто не используются).
 
-        # 1c. Глобальный default-route off через `resolvectl default-route false`.
-        #     Старый синтаксис `dns-default-route set false` был переименован.
-        ok, cmd_str, err = _resolvectl_default_route_set(None, False)
-        if ok:
-            actions.append(cmd_str)
-        else:
-            warnings.append(f"{cmd_str}: {err}")
-
-        # 1d. PER-LINK override — КРИТИЧЕСКИЙ шаг.
+        # 1c. PER-LINK override — КРИТИЧЕСКИЙ шаг.
         #     Drop-in и Global DNS не перебивают per-link DNS, который
         #     systemd-resolved получает от DHCP (ens3: 77.88.8.8 на Yandex VPS).
         #     Per-link DNS имеет ПРИОРИТЕТ над Global. Поэтому нужно явно
@@ -1030,19 +1087,24 @@ def _print_diagnosis(diag: Dict[str, Any]) -> None:
     _box_row(f"  {BOLD}systemd-resolved:{NC}")
     if diag["systemd_resolved_active"]:
         _box_row(f"    {GREEN}активен{NC}")
-        # Global DNS
+        # Global DNS — informational, не критичен (drop-in с Domains=~. перехватывает)
         gdns = diag["resolved_global_dns"]
         if gdns:
             for ip in gdns:
-                col = GREEN if (ip.startswith("127.") or ip == "::1") else YELLOW
+                col = GREEN if (ip.startswith("127.") or ip == "::1") else DIM
                 _box_row(f"    Global:  {col}{ip}{NC}")
         else:
             _box_row(f"    Global:  {DIM}не задан{NC}")
-        # Per-link DNS
+        # Per-link DNS — ГЛАВНЫЙ критерий утечки
         for link, dns_list in diag["resolved_link_dns"]:
             for ip in dns_list:
                 col = GREEN if (ip.startswith("127.") or ip == "::1") else RED
                 _box_row(f"    Link {link}: {col}{ip}{NC}")
+        # Per-link default-route
+        for link, dr in diag.get("resolved_link_default_routes", []):
+            col = GREEN if not dr else RED
+            label = "false ✓" if not dr else "true ✗"
+            _box_row(f"    Link {link} default-route: {col}{label}{NC}")
     else:
         _box_row(f"    {DIM}не активен (static /etc/resolv.conf){NC}")
     _box_row()
@@ -1065,7 +1127,20 @@ def _print_diagnosis(diag: Dict[str, Any]) -> None:
     _box_sep()
 
     # Итог диагностики
-    if diag["fix_needed"]:
+    if diag["per_link_overridden"]:
+        # Все link'и на 127.0.0.1 + default-route=false → утечки нет.
+        _box_row(f"  {GREEN}✓ УТЕЧКИ НЕТ — per-link override активен{NC}")
+        _box_row(f"  {GREEN}  Все link'и направлены на 127.0.0.1,{NC}")
+        _box_row(f"  {GREEN}  default-route=false для каждого.{NC}")
+        # Если в global DNS есть внешние IP — показать informational.
+        ext_global = [ip for ip in diag["resolved_global_dns"]
+                      if not (ip.startswith("127.") or ip == "::1")]
+        if ext_global:
+            _box_row()
+            _box_row(f"  {DIM}Инфо: Global DNS содержит {', '.join(ext_global)}.{NC}")
+            _box_row(f"  {DIM}Это не утечка — drop-in с Domains=~. перехватывает{NC}")
+            _box_row(f"  {DIM}все запросы на 127.0.0.1. Global не используется.{NC}")
+    elif diag["fix_needed"]:
         _box_row(f"  {RED}⚠ УТЕЧКА DNS ОБНАРУЖЕНА{NC}")
         for reason in diag["leak_reasons"]:
             _box_row(f"    {RED}• {reason}{NC}")
@@ -1125,20 +1200,24 @@ def _screen_fix_apply(diag: Dict[str, Any]) -> None:
         _box_row(f"  {BOLD}Будет выполнено:{NC}")
         _box_row(f"    {DIM}• создать drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf{NC}")
         _box_row(f"    {DIM}  (DNS=127.0.0.1, Domains=~. — Global DNS на DNSCrypt){NC}")
-        _box_row(f"    {DIM}• resolvectl dns 127.0.0.1  (Global DNS){NC}")
-        _box_row(f"    {DIM}• resolvectl default-route false  (отключить DHCP DNS){NC}")
         _box_row(f"    {DIM}• для каждого сетевого link'а (ens3/eth0/...):{NC}")
         _box_row(f"    {DIM}    resolvectl dns LINK 127.0.0.1  (per-link override){NC}")
         _box_row(f"    {DIM}    resolvectl default-route LINK false{NC}")
         _box_row(f"    {DIM}• systemctl restart systemd-resolved{NC}")
+        _box_row(f"    {DIM}• повторный per-link override (после restart){NC}")
         _box_row(f"    {DIM}• resolvectl flush-caches{NC}")
         _box_row(f"    {DIM}• создать и активировать persist-сервис{NC}")
         _box_row(f"    {DIM}  chimera-dns-fix.service (переживёт ребут){NC}")
         _box_sep()
         _box_row(f"  {YELLOW}Per-link override — КРИТИЧЕСКИЙ шаг.{NC}")
         _box_row(f"  {YELLOW}DHCP-сервер провайдера отдаёт per-link DNS (Yandex),{NC}")
-        _box_row(f"  {YELLOW}который имеет приоритет над Global. Drop-in не помогает —{NC}")
-        _box_row(f"  {YELLOW}только явный per-link override решает проблему.{NC}")
+        _box_row(f"  {YELLOW}который имеет приоритет над Global. Drop-in с Domains=~.{NC}")
+        _box_row(f"  {YELLOW}перехватывает запросы, но per-link override гарантирует,{NC}")
+        _box_row(f"  {YELLOW}что link не используется для default-route запросов.{NC}")
+        _box_sep()
+        _box_row(f"  {DIM}Global resolvectl dns/default-route НЕ вызываем — на Ubuntu 24.04{NC}")
+        _box_row(f"  {DIM}парсер падает с 'Failed to resolve interface'. Global DNS{NC}")
+        _box_row(f"  {DIM}задаётся через drop-in, этого достаточно.{NC}")
     elif diag["fix_method"] == "static_resolv_conf":
         _box_row(f"  {BOLD}Будет выполнено:{NC}")
         _box_row(f"    {DIM}• бэкап /etc/resolv.conf → /etc/resolv.conf.chimera.bak{NC}")
