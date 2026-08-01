@@ -86,6 +86,16 @@ _DNSCRYPT_TOML        = Path("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
 _DNSCRYPT_SERVICE     = "dnscrypt-proxy.service"
 _LOCAL_DNS            = "127.0.0.1"
 
+# systemd-сервис для persist per-link DNS override после ребута.
+# Drop-in /etc/systemd/resolved.conf.d/ перебивает только Global DNS —
+# per-link DNS от DHCP (ens3, eth0, ...) имеет приоритет. Поэтому после
+# ребута systemd-resolved снова подхватит DHCP DNS. Сервис запускается
+# после network-online.target и применяет `resolvectl dns LINK 127.0.0.1`
+# для каждого активного link'а.
+_PERSIST_SVC_NAME     = "chimera-dns-fix.service"
+_PERSIST_SVC_PATH     = Path("/etc/systemd/system") / _PERSIST_SVC_NAME
+_PERSIST_SCRIPT_PATH  = Path("/usr/local/bin/chimera-dns-fix-apply.sh")
+
 
 # =============================================================================
 #  Цвета (как в dns_redirect.py)
@@ -218,6 +228,226 @@ def _get_resolved_link_dns() -> List[tuple]:
         if dns_str and "not set" not in dns_str.lower():
             results.append((link, dns_str.split()))
     return results
+
+
+def _get_all_links() -> List[str]:
+    """Список всех сетевых link'ов, которые systemd-resolved знает о.
+
+    Используется для per-link DNS override — нужно применить
+    `resolvectl dns LINK 127.0.0.1` для каждого активного link'а,
+    иначе DHCP-сервер провайдера продолжит подсовывать свой DNS.
+
+    Источник: `resolvectl dns` выводит строки вида:
+        Global: ...
+        Link 2 (eth0): 8.8.8.8 1.1.1.1
+        Link 3 (wg0): 10.0.0.1
+
+    Также `networkctl list` даёт более полный список, но он может
+    показать и не-DNS интерфейсы (loopback, docker0, etc.) —
+    фильтруем по тем, что в `resolvectl dns`.
+    """
+    r = _run(["resolvectl", "dns"], capture=True, check=False)
+    if r.returncode != 0:
+        return []
+    links = []
+    for m in re.finditer(r'^Link\s+\d+\s+\(([^)]+)\):', r.stdout, re.MULTILINE):
+        link = m.group(1).strip()
+        if link and link not in links:
+            # Пропускаем loopback — он не имеет DHCP DNS.
+            if link == "lo":
+                continue
+            links.append(link)
+    return links
+
+
+def _resolvectl_dns_set(link: Optional[str], dns: str) -> tuple:
+    """Выполняет `resolvectl dns [LINK] 127.0.0.1`.
+
+    Возвращает (ok: bool, cmd_str: str, error: str | None).
+
+    На Ubuntu 24.04+ (systemd 256+) синтаксис: `resolvectl dns 127.0.0.1`
+    (для global) или `resolvectl dns LINK 127.0.0.1` (для per-link).
+    Старый синтаксис `dns-global` был удалён — это была первопричина
+    бага, когда фикс «применялся», но утечка оставалась.
+    """
+    if link:
+        cmd = ["resolvectl", "dns", link, dns]
+        cmd_str = f"resolvectl dns {link} {dns}"
+    else:
+        cmd = ["resolvectl", "dns", dns]
+        cmd_str = f"resolvectl dns {dns}"
+    r = _run(cmd, capture=True, check=False)
+    if r.returncode == 0:
+        return True, cmd_str, None
+    return False, cmd_str, f"rc={r.returncode}, stderr={r.stderr.strip()[:120]}"
+
+
+def _resolvectl_default_route_set(link: Optional[str], value: bool) -> tuple:
+    """Выполняет `resolvectl default-route [LINK] false`.
+
+    Возвращает (ok: bool, cmd_str: str, error: str | None).
+
+    На Ubuntu 24.04+ синтаксис: `resolvectl default-route false` (global)
+    или `resolvectl default-route LINK false` (per-link).
+    Старый синтаксис `dns-default-route set false` был переименован —
+    это была вторая первопричина бага.
+    """
+    val_str = "true" if value else "false"
+    if link:
+        cmd = ["resolvectl", "default-route", link, val_str]
+        cmd_str = f"resolvectl default-route {link} {val_str}"
+    else:
+        cmd = ["resolvectl", "default-route", val_str]
+        cmd_str = f"resolvectl default-route {val_str}"
+    r = _run(cmd, capture=True, check=False)
+    if r.returncode == 0:
+        return True, cmd_str, None
+    return False, cmd_str, f"rc={r.returncode}, stderr={r.stderr.strip()[:120]}"
+
+
+def _write_persist_script_and_service() -> tuple:
+    """Создаёт systemd-сервис + shell-скрипт для persist per-link DNS override.
+
+    Сервис chimera-dns-fix.service запускается после network-online.target
+    и выполняет shell-скрипт, который:
+      1. Получает список всех link'ов через `resolvectl dns`.
+      2. Для каждого link'а вызывает `resolvectl dns LINK 127.0.0.1`
+         и `resolvectl default-route LINK false`.
+
+    Возвращает (script_path, service_path, error: str | None).
+    """
+    # Shell-скрипт: применяет per-link DNS override для всех link'ов.
+    # Используется bash, не sh, для подстановки процессов.
+    script_content = """#!/bin/bash
+# Chimera Project — persist per-link DNS override.
+# Создан chimera/modules/resolv_conf_fix.py
+#
+# Drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf задаёт только
+# Global DNS. Per-link DNS от DHCP (ens3, eth0, ...) имеет приоритет.
+# Этот скрипт перебивает per-link DNS на 127.0.0.1 для каждого link'а.
+#
+# Запускается:
+#   1. После применения фикса (через systemctl start).
+#   2. После ребута (через systemd-unit chimera-dns-fix.service).
+#   3. После старта сети (After=network-online.target).
+
+set -e
+
+LOCAL_DNS="${1:-127.0.0.1}"
+
+# Получаем список всех link'ов из `resolvectl dns`.
+# Вывод: "Link 2 (eth0): 8.8.8.8 1.1.1.1" — берём имя link'а.
+LINKS=$(resolvectl dns 2>/dev/null | \\
+        sed -nE 's/^Link [0-9]+ \\(([^)]+)\\):.*/\\1/p' | \\
+        grep -v '^lo$' | \\
+        sort -u)
+
+if [ -z "$LINKS" ]; then
+    echo "[chimera-dns-fix] no network links found — skip"
+    exit 0
+fi
+
+for LINK in $LINKS; do
+    # Устанавливаем per-link DNS на 127.0.0.1.
+    if resolvectl dns "$LINK" "$LOCAL_DNS" 2>/dev/null; then
+        echo "[chimera-dns-fix] $LINK → DNS $LOCAL_DNS"
+    else
+        echo "[chimera-dns-fix] $LINK: resolvectl dns failed" >&2
+    fi
+    # Отключаем default-route для link'а — чтобы не использовался DHCP DNS.
+    if resolvectl default-route "$LINK" false 2>/dev/null; then
+        echo "[chimera-dns-fix] $LINK → default-route false"
+    else
+        echo "[chimera-dns-fix] $LINK: resolvectl default-route failed" >&2
+    fi
+done
+
+# Также задаём global DNS (на случай, если link'ов нет или новые появятся).
+resolvectl dns "$LOCAL_DNS" 2>/dev/null || true
+resolvectl default-route false 2>/dev/null || true
+
+# flush caches — не должно быть stale entries с провайдерским DNS.
+resolvectl flush-caches 2>/dev/null || true
+
+exit 0
+"""
+    try:
+        _PERSIST_SCRIPT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PERSIST_SCRIPT_PATH.write_text(script_content)
+        _PERSIST_SCRIPT_PATH.chmod(0o755)
+    except PermissionError:
+        return None, None, f"нет прав на {_PERSIST_SCRIPT_PATH} (нужен root)"
+    except Exception as e:
+        return None, None, f"не удалось создать {_PERSIST_SCRIPT_PATH}: {e}"
+
+    # systemd-unit: запускается после старта сети.
+    service_content = f"""[Unit]
+Description=Chimera Project — persist per-link DNS override (DNS-leak fix)
+Documentation=https://github.com/inferno1978/Chimera-Project
+After=network-online.target systemd-resolved.service dnscrypt-proxy.service
+Wants=network-online.target
+Requires=systemd-resolved.service
+
+[Service]
+Type=oneshot
+ExecStart={_PERSIST_SCRIPT_PATH} 127.0.0.1
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+"""
+    try:
+        _PERSIST_SVC_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PERSIST_SVC_PATH.write_text(service_content)
+    except PermissionError:
+        return _PERSIST_SCRIPT_PATH, None, f"нет прав на {_PERSIST_SVC_PATH} (нужен root)"
+    except Exception as e:
+        return _PERSIST_SCRIPT_PATH, None, f"не удалось создать {_PERSIST_SVC_PATH}: {e}"
+
+    return _PERSIST_SCRIPT_PATH, _PERSIST_SVC_PATH, None
+
+
+def _enable_persist_service() -> tuple:
+    """Активирует chimera-dns-fix.service (enable + start).
+
+    Возвращает (ok: bool, error: str | None).
+    """
+    # daemon-reload чтобы подхватить новый unit
+    _run(["systemctl", "daemon-reload"], capture=True, check=False)
+    r = _run(["systemctl", "enable", _PERSIST_SVC_NAME],
+             capture=True, check=False)
+    if r.returncode != 0:
+        return False, f"systemctl enable: rc={r.returncode}, stderr={r.stderr.strip()[:120]}"
+    r = _run(["systemctl", "start", _PERSIST_SVC_NAME],
+             capture=True, check=False)
+    if r.returncode != 0:
+        return False, f"systemctl start: rc={r.returncode}, stderr={r.stderr.strip()[:120]}"
+    return True, None
+
+
+def _disable_persist_service() -> tuple:
+    """Деактивирует и удаляет chimera-dns-fix.service.
+
+    Возвращает (ok: bool, error: str | None).
+    """
+    _run(["systemctl", "stop", _PERSIST_SVC_NAME],
+         capture=True, check=False)
+    _run(["systemctl", "disable", _PERSIST_SVC_NAME],
+         capture=True, check=False)
+    if _PERSIST_SVC_PATH.exists():
+        try:
+            _PERSIST_SVC_PATH.unlink()
+        except Exception:
+            pass
+    if _PERSIST_SCRIPT_PATH.exists():
+        try:
+            _PERSIST_SCRIPT_PATH.unlink()
+        except Exception:
+            pass
+    _run(["systemctl", "daemon-reload"], capture=True, check=False)
+    return True, None
 
 
 def _get_dnscrypt_listen_addr_port() -> Optional[tuple]:
@@ -499,7 +729,9 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False) -> Dict[str, Any]:
 
     # ── METHOD 1: systemd-resolved ──────────────────────────────────────────
     if method == "systemd_resolved":
-        # 1a. drop-in override
+        # 1a. drop-in override — задаёт Global DNS = 127.0.0.1.
+        #     ВАЖНО: drop-in НЕ перебивает per-link DNS от DHCP — для этого
+        #     нужен per-link override (шаг 1c) и persist-сервис (шаг 1f).
         try:
             _RESOLVED_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
         except PermissionError:
@@ -528,30 +760,47 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False) -> Dict[str, Any]:
                     "warnings": warnings,
                     "error": f"не удалось создать drop-in: {e}"}
 
-        # 1b. resolvectl dns-global set 127.0.0.1
-        r = _run(["resolvectl", "dns-global", "set", _LOCAL_DNS],
-                 capture=True, check=False)
-        if r.returncode == 0:
-            actions.append(f"resolvectl dns-global set {_LOCAL_DNS}")
+        # 1b. Глобальный DNS через `resolvectl dns 127.0.0.1`.
+        #     Старый синтаксис `dns-global set` был удалён в systemd 256+
+        #     (Ubuntu 24.04) — это была первопричина бага, когда фикс
+        #     «применялся», но утечка оставалась.
+        ok, cmd_str, err = _resolvectl_dns_set(None, _LOCAL_DNS)
+        if ok:
+            actions.append(cmd_str)
         else:
-            warnings.append(
-                f"resolvectl dns-global set: rc={r.returncode}, "
-                f"stderr={r.stderr.strip()[:120]}"
-            )
+            warnings.append(f"{cmd_str}: {err}")
 
-        # 1c. resolvectl dns-default-route set false
-        #     отключает per-link DNS (чтобы DHCP провайдера не подсовывал свой)
-        r = _run(["resolvectl", "dns-default-route", "set", "false"],
-                 capture=True, check=False)
-        if r.returncode == 0:
-            actions.append("resolvectl dns-default-route set false")
+        # 1c. Глобальный default-route off через `resolvectl default-route false`.
+        #     Старый синтаксис `dns-default-route set false` был переименован.
+        ok, cmd_str, err = _resolvectl_default_route_set(None, False)
+        if ok:
+            actions.append(cmd_str)
         else:
-            warnings.append(
-                f"resolvectl dns-default-route set false: rc={r.returncode}, "
-                f"stderr={r.stderr.strip()[:120]}"
-            )
+            warnings.append(f"{cmd_str}: {err}")
 
-        # 1d. systemctl restart systemd-resolved (применяет drop-in)
+        # 1d. PER-LINK override — КРИТИЧЕСКИЙ шаг.
+        #     Drop-in и Global DNS не перебивают per-link DNS, который
+        #     systemd-resolved получает от DHCP (ens3: 77.88.8.8 на Yandex VPS).
+        #     Per-link DNS имеет ПРИОРИТЕТ над Global. Поэтому нужно явно
+        #     выставить per-link DNS = 127.0.0.1 для каждого активного link'а.
+        links = _get_all_links()
+        if links:
+            for link in links:
+                ok_l, cmd_str_l, err_l = _resolvectl_dns_set(link, _LOCAL_DNS)
+                if ok_l:
+                    actions.append(cmd_str_l)
+                else:
+                    warnings.append(f"{cmd_str_l}: {err_l}")
+                ok_l, cmd_str_l, err_l = _resolvectl_default_route_set(link, False)
+                if ok_l:
+                    actions.append(cmd_str_l)
+                else:
+                    warnings.append(f"{cmd_str_l}: {err_l}")
+        else:
+            warnings.append("не найдено ни одного сетевого link'а — "
+                            "per-link override пропущен")
+
+        # 1e. systemctl restart systemd-resolved (применяет drop-in)
         r = _run(["systemctl", "restart", "systemd-resolved"],
                  capture=True, check=False)
         if r.returncode == 0:
@@ -562,11 +811,32 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False) -> Dict[str, Any]:
                 f"stderr={r.stderr.strip()[:120]}"
             )
 
-        # 1e. flush caches
+        # 1f. PER-LINK override снова — после restart настройки link'ов
+        #     сбрасываются. Делаем повторный проход.
+        for link in links:
+            _resolvectl_dns_set(link, _LOCAL_DNS)
+            _resolvectl_default_route_set(link, False)
+
+        # 1g. flush caches
         r = _run(["resolvectl", "flush-caches"],
                  capture=True, check=False)
         if r.returncode == 0:
             actions.append("resolvectl flush-caches")
+
+        # 1h. PERSIST после ребута — systemd-сервис.
+        #     После ребута systemd-resolved снова подхватит DHCP DNS от
+        #     провайдера. Сервис chimera-dns-fix.service запускается после
+        #     network-online.target и применяет per-link override.
+        script_path, svc_path, perr = _write_persist_script_and_service()
+        if perr:
+            warnings.append(f"persist-сервис не создан: {perr}")
+        elif script_path and svc_path:
+            ok_p, perr2 = _enable_persist_service()
+            if ok_p:
+                actions.append(f"создан и активирован persist-сервис: "
+                               f"{_PERSIST_SVC_NAME}")
+            else:
+                warnings.append(f"persist-сервис создан, но не активирован: {perr2}")
 
     # ── METHOD 2: static resolv.conf ────────────────────────────────────────
     elif method == "static_resolv_conf":
@@ -628,6 +898,8 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False) -> Dict[str, Any]:
         "dropin_path": str(_RESOLVED_DROPIN_FILE)
                        if method == "systemd_resolved" and _RESOLVED_DROPIN_FILE.exists()
                        else None,
+        "persist_service": method == "systemd_resolved"
+                           and _PERSIST_SVC_PATH.exists(),
     })
 
     _ok("DNS направлен на локальный DNSCrypt-proxy (127.0.0.1)")
@@ -639,12 +911,13 @@ def rollback_resolv_conf() -> Dict[str, Any]:
     """Откатывает изменения fix_resolv_conf_to_localhost().
 
     Шаги:
-      1. Если есть drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf —
+      1. Остановить и удалить persist-сервис chimera-dns-fix.service.
+      2. Если есть drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf —
          удалить, перезапустить systemd-resolved.
-      2. Если есть бэкап /etc/resolv.conf.chimera.bak — восстановить.
-      3. Снять resolvectl dns-default-route (вернуть в default).
-      4. flush-caches.
-      5. Обновить state.
+      3. Если есть бэкап /etc/resolv.conf.chimera.bak — восстановить.
+      4. Восстановить per-link default-route (вернуть true) для каждого link'а.
+      5. flush-caches.
+      6. Обновить state.
 
     Возвращает dict как fix_resolv_conf_to_localhost().
     """
@@ -659,7 +932,14 @@ def rollback_resolv_conf() -> Dict[str, Any]:
 
     method = state.get("method")
 
-    # 1. Удалить drop-in если есть
+    # 1. Остановить и удалить persist-сервис
+    ok_ds, err_ds = _disable_persist_service()
+    if ok_ds:
+        actions.append(f"остановлен и удалён persist-сервис: {_PERSIST_SVC_NAME}")
+    else:
+        warnings.append(f"ошибка удаления persist-сервиса: {err_ds}")
+
+    # 2. Удалить drop-in если есть
     if _RESOLVED_DROPIN_FILE.exists():
         try:
             _RESOLVED_DROPIN_FILE.unlink()
@@ -677,16 +957,25 @@ def rollback_resolv_conf() -> Dict[str, Any]:
                 f"systemctl restart systemd-resolved: rc={r.returncode}"
             )
 
-        # Снять dns-default-route (вернуть в default true)
-        r = _run(["resolvectl", "dns-default-route", "set", "true"],
-                 capture=True, check=False)
-        if r.returncode == 0:
-            actions.append("resolvectl dns-default-route set true (restore)")
+        # Восстановить per-link default-route = true (вернуть DHCP DNS).
+        # Старый синтаксис `dns-default-route set true` не работает на 24.04 —
+        # используем `default-route LINK true` для каждого link'а.
+        for link in _get_all_links():
+            ok_l, _, err_l = _resolvectl_default_route_set(link, True)
+            if ok_l:
+                actions.append(f"resolvectl default-route {link} true (restore)")
+            else:
+                warnings.append(f"default-route {link} true: {err_l}")
+
+        # Global default-route = true
+        ok_g, _, err_g = _resolvectl_default_route_set(None, True)
+        if ok_g:
+            actions.append("resolvectl default-route true (global restore)")
 
         # flush caches
         _run(["resolvectl", "flush-caches"], capture=True, check=False)
 
-    # 2. Восстановить resolv.conf из бэкапа
+    # 3. Восстановить resolv.conf из бэкапа
     if _BACKUP.exists():
         try:
             # Если текущий resolv.conf — наш статичный файл, удалить.
@@ -698,13 +987,14 @@ def rollback_resolv_conf() -> Dict[str, Any]:
         except Exception as e:
             warnings.append(f"не удалось восстановить resolv.conf: {e}")
 
-    # 3. Обновить state
+    # 4. Обновить state
     _state_save({
         "fixed": False,
         "method": None,
         "applied_at": None,
         "backup_path": str(_BACKUP) if _BACKUP.exists() else None,
         "dropin_path": None,
+        "persist_service": False,
         "rolled_back_at": datetime.now().isoformat(),
     })
 
@@ -811,6 +1101,10 @@ def _print_fix_state_badge(state: dict) -> None:
     _box_row(f"  {GREEN}✓ Фикс применён:{NC} {CYAN}{method_label}{NC}  "
              f"{DIM}({applied_short}){NC}")
     _box_row(f"  {DIM}DNS сервера направлены на 127.0.0.1 (DNSCrypt-proxy){NC}")
+    if state.get("persist_service"):
+        _box_row(f"  {DIM}Persist: chimera-dns-fix.service активен (переживёт ребут){NC}")
+    elif method == "systemd_resolved":
+        _box_row(f"  {YELLOW}⚠ persist-сервис не активен — после ребута DHCP DNS может вернуться{NC}")
 
 
 def _screen_fix_apply(diag: Dict[str, Any]) -> None:
@@ -830,10 +1124,21 @@ def _screen_fix_apply(diag: Dict[str, Any]) -> None:
     if diag["fix_method"] == "systemd_resolved":
         _box_row(f"  {BOLD}Будет выполнено:{NC}")
         _box_row(f"    {DIM}• создать drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf{NC}")
-        _box_row(f"    {DIM}• resolvectl dns-global set 127.0.0.1{NC}")
-        _box_row(f"    {DIM}• resolvectl dns-default-route set false{NC}")
+        _box_row(f"    {DIM}  (DNS=127.0.0.1, Domains=~. — Global DNS на DNSCrypt){NC}")
+        _box_row(f"    {DIM}• resolvectl dns 127.0.0.1  (Global DNS){NC}")
+        _box_row(f"    {DIM}• resolvectl default-route false  (отключить DHCP DNS){NC}")
+        _box_row(f"    {DIM}• для каждого сетевого link'а (ens3/eth0/...):{NC}")
+        _box_row(f"    {DIM}    resolvectl dns LINK 127.0.0.1  (per-link override){NC}")
+        _box_row(f"    {DIM}    resolvectl default-route LINK false{NC}")
         _box_row(f"    {DIM}• systemctl restart systemd-resolved{NC}")
         _box_row(f"    {DIM}• resolvectl flush-caches{NC}")
+        _box_row(f"    {DIM}• создать и активировать persist-сервис{NC}")
+        _box_row(f"    {DIM}  chimera-dns-fix.service (переживёт ребут){NC}")
+        _box_sep()
+        _box_row(f"  {YELLOW}Per-link override — КРИТИЧЕСКИЙ шаг.{NC}")
+        _box_row(f"  {YELLOW}DHCP-сервер провайдера отдаёт per-link DNS (Yandex),{NC}")
+        _box_row(f"  {YELLOW}который имеет приоритет над Global. Drop-in не помогает —{NC}")
+        _box_row(f"  {YELLOW}только явный per-link override решает проблему.{NC}")
     elif diag["fix_method"] == "static_resolv_conf":
         _box_row(f"  {BOLD}Будет выполнено:{NC}")
         _box_row(f"    {DIM}• бэкап /etc/resolv.conf → /etc/resolv.conf.chimera.bak{NC}")
@@ -881,10 +1186,13 @@ def _screen_rollback() -> None:
     _box_top("🔄  ОТКАТ ФИКСА /etc/resolv.conf")
     _box_row()
     _box_row(f"  {BOLD}Будет выполнено:{NC}")
+    _box_row(f"    {DIM}• остановить и удалить persist-сервис chimera-dns-fix.service{NC}")
     _box_row(f"    {DIM}• удалить drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf{NC}")
-    _box_row(f"    {DIM}• восстановить /etc/resolv.conf из бэкапа (если есть){NC}")
-    _box_row(f"    {DIM}• resolvectl dns-default-route set true (вернуть DHCP DNS){NC}")
+    _box_row(f"    {DIM}• для каждого link'а: resolvectl default-route LINK true{NC}")
+    _box_row(f"    {DIM}  (вернуть per-link DHCP DNS){NC}")
     _box_row(f"    {DIM}• systemctl restart systemd-resolved{NC}")
+    _box_row(f"    {DIM}• восстановить /etc/resolv.conf из бэкапа (если есть){NC}")
+    _box_row(f"    {DIM}• resolvectl flush-caches{NC}")
     _box_row()
     _box_row(f"  {YELLOW}После отката DNS снова будет идти через провайдера —{NC}")
     _box_row(f"  {YELLOW}возможна утечка DNS (как до фикса).{NC}")
