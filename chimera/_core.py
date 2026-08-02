@@ -99,6 +99,7 @@ from chimera.modules.fingerprint_manager import (
     prompt_fingerprint as _fm_prompt_fingerprint,
 )
 from chimera.modules.dnscrypt_selector import do_dnscrypt_selector_menu
+from chimera.modules.dnscrypt_advanced import do_dnscrypt_advanced_menu
 from chimera.modules.honeypot      import do_manage_honeypot
 from chimera.modules.fail2ban_manager import do_manage_fail2ban
 from chimera.modules.scheduler     import render_scheduler_menu
@@ -7251,6 +7252,7 @@ def _menu_network() -> None:
         _box_item("2", "🔍 Диагностика split tunneling")
         _box_item("3", f"🔒 DNSCrypt-proxy  {DIM}(управление и оптимизация){NC}")
         _box_item("R", f"🔍 DNSCrypt: выбор резолверов  {DIM}(замер latency → server_names){NC}")
+        _box_item("RA", f"🛡️ DNSCrypt: расширенная настройка  {DIM}(198 серверов, ODoH, DNSSEC, анонимизация){NC}")
         _box_item("4", f"☁️  Cloudflare WARP  {DIM}(управление туннелем){NC}")
         _box_item("5", f"🔄 Сменить домен / порт  {DIM}(без переустановки){NC}")
         _box_item("6", f"🌍 Стратегия исходящих  {DIM}(domainStrategy){NC}")
@@ -7341,6 +7343,8 @@ def _menu_network() -> None:
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch.lower() == "r":
             do_dnscrypt_selector_menu()
+        elif ch.lower() == "ra":
+            do_dnscrypt_advanced_menu()
         elif ch.lower() == "dr":
             do_manage_dns_redirect()
         elif ch.lower() == "d":
