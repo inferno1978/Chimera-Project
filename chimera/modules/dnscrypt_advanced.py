@@ -175,6 +175,43 @@ _SERVER_NAMES: List[str] = [
     "dnscry.pt-singapore-ipv4", "dnscry.pt-singapore-ipv6",
     # ── GE (2) — Тбилиси ──────────────────────────────────────────────────
     "dnscry.pt-tbilisi-ipv4", "dnscry.pt-tbilisi-ipv6",
+    # ══ TIER 4 — ГЛОБАЛЬНОЕ ПОКРЫТИЕ (отказоустойчивость, диверсификация) ══
+    # ── US (8) — Нью-Йорк, Чикаго, Лос-Анджелес, Даллас ───────────────────
+    "dnscry.pt-newyork-ipv4", "dnscry.pt-newyork-ipv6",
+    "dnscry.pt-chicago-ipv4", "dnscry.pt-chicago-ipv6",
+    "dnscry.pt-losangeles-ipv4", "dnscry.pt-losangeles-ipv6",
+    "dnscry.pt-dallas-ipv4", "dnscry.pt-dallas-ipv6",
+    # ── CA (4) — Торонто, Монреаль ────────────────────────────────────────
+    "dnscry.pt-toronto-ipv4", "dnscry.pt-toronto-ipv6",
+    "dnscry.pt-montreal-ipv4", "dnscry.pt-montreal-ipv6",
+    # ── AU (4) — Сидней, Мельбурн ─────────────────────────────────────────
+    "dnscry.pt-sydney-ipv4", "dnscry.pt-sydney-ipv6",
+    "dnscry.pt-melbourne-ipv4", "dnscry.pt-melbourne-ipv6",
+    # ── AE (2) — Дубай ────────────────────────────────────────────────────
+    "dnscry.pt-dubai-ipv4", "dnscry.pt-dubai-ipv6",
+    # ── IL (2) — Тель-Авив ────────────────────────────────────────────────
+    "dnscry.pt-telaviv-ipv4", "dnscry.pt-telaviv-ipv6",
+    # ── IN (2) — Мумбаи ───────────────────────────────────────────────────
+    "dnscry.pt-mumbai-ipv4", "dnscry.pt-mumbai-ipv6",
+    # ── BR (2) — Сан-Паулу ────────────────────────────────────────────────
+    "dnscry.pt-saopaulo-ipv4", "dnscry.pt-saopaulo-ipv6",
+    # ── ZA (2) — Йоханнесбург ─────────────────────────────────────────────
+    "dnscry.pt-johannesburg-ipv4", "dnscry.pt-johannesburg-ipv6",
+    # ── IE (2) — Дублин ───────────────────────────────────────────────────
+    "dnscry.pt-dublin-ipv4", "dnscry.pt-dublin-ipv6",
+    # ── AR (2) — Буэнос-Айрес ─────────────────────────────────────────────
+    "dnscry.pt-buenosaires-ipv4", "dnscry.pt-buenosaires-ipv6",
+    # ── CL (2) — Сантьяго ─────────────────────────────────────────────────
+    "dnscry.pt-santiago-ipv4", "dnscry.pt-santiago-ipv6",
+    # ── KR (2) — Сеул ─────────────────────────────────────────────────────
+    "dnscry.pt-seoul-ipv4", "dnscry.pt-seoul-ipv6",
+    # ── TH (2) — Бангкок ──────────────────────────────────────────────────
+    "dnscry.pt-bangkok-ipv4", "dnscry.pt-bangkok-ipv6",
+    # ── ID (2) — Джакарта ─────────────────────────────────────────────────
+    "dnscry.pt-jakarta-ipv4", "dnscry.pt-jakarta-ipv6",
+    # ── Глобальные DoH (cloudflare + google как fallback) ─────────────────
+    "cloudflare", "cloudflare-ipv6",
+    "google", "google-ipv6",
 ]
 
 # =============================================================================
@@ -385,6 +422,64 @@ _ANON_ROUTES: List[str] = [
     "{ server_name='nwps.fi', via=['anon-cs-de','anon-cs-poland','anon-cs-swe','anon-cs-nl'] }",
     # ── UK: доп. серверы ──────────────────────────────────────────────────
     "{ server_name='dnsforge.uk', via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    # ══ TIER 4: НОВЫЕ ГЛОБАЛЬНЫЕ МАРШРУТЫ ═════════════════════════════════
+    # ── US → DE/NL/CH/SE (трансатлантический) ─────────────────────────────
+    "{ server_name='dnscry.pt-newyork-ipv4',      via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-newyork-ipv6',      via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    "{ server_name='dnscry.pt-chicago-ipv4',      via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-chicago-ipv6',      via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    "{ server_name='dnscry.pt-losangeles-ipv4',   via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-losangeles-ipv6',   via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    "{ server_name='dnscry.pt-dallas-ipv4',       via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-dallas-ipv6',       via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── CA → DE/NL/CH/SE ──────────────────────────────────────────────────
+    "{ server_name='dnscry.pt-toronto-ipv4',      via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-toronto-ipv6',      via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    "{ server_name='dnscry.pt-montreal-ipv4',     via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-montreal-ipv6',     via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── AU → DE/NL/CH/SE (транстихоокеанский) ─────────────────────────────
+    "{ server_name='dnscry.pt-sydney-ipv4',       via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-sydney-ipv6',       via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    "{ server_name='dnscry.pt-melbourne-ipv4',    via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-melbourne-ipv6',    via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── AE → DE/NL/CH/SE ──────────────────────────────────────────────────
+    "{ server_name='dnscry.pt-dubai-ipv4',        via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-dubai-ipv6',        via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── IL → DE/NL/CH/SE ──────────────────────────────────────────────────
+    "{ server_name='dnscry.pt-telaviv-ipv4',      via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-telaviv-ipv6',      via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── IN → DE/NL/CH/SE ──────────────────────────────────────────────────
+    "{ server_name='dnscry.pt-mumbai-ipv4',       via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-mumbai-ipv6',       via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── BR → DE/NL/CH/SE ──────────────────────────────────────────────────
+    "{ server_name='dnscry.pt-saopaulo-ipv4',     via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-saopaulo-ipv6',     via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── ZA → DE/NL/CH/SE ──────────────────────────────────────────────────
+    "{ server_name='dnscry.pt-johannesburg-ipv4', via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-johannesburg-ipv6', via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── IE → DE/NL/CH/SE (не UK!) ─────────────────────────────────────────
+    "{ server_name='dnscry.pt-dublin-ipv4',       via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-dublin-ipv6',       via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── AR → DE/NL/CH/SE ──────────────────────────────────────────────────
+    "{ server_name='dnscry.pt-buenosaires-ipv4',  via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-buenosaires-ipv6',  via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── CL → DE/NL/CH/SE ──────────────────────────────────────────────────
+    "{ server_name='dnscry.pt-santiago-ipv4',     via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-santiago-ipv6',     via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── KR → DE/NL/CH/SE ──────────────────────────────────────────────────
+    "{ server_name='dnscry.pt-seoul-ipv4',        via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-seoul-ipv6',        via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── TH → DE/NL/CH/SE ──────────────────────────────────────────────────
+    "{ server_name='dnscry.pt-bangkok-ipv4',      via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-bangkok-ipv6',      via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── ID → DE/NL/CH/SE ──────────────────────────────────────────────────
+    "{ server_name='dnscry.pt-jakarta-ipv4',      via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
+    "{ server_name='dnscry.pt-jakarta-ipv6',      via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
+    # ── Глобальные DoH → EU relay ─────────────────────────────────────────
+    "{ server_name='cloudflare',      via=['anon-cs-de','anon-cs-finland','anon-cs-poland','anon-cs-nl'] }",
+    "{ server_name='cloudflare-ipv6', via=['anon-cs-de6','anon-cs-finland6','anon-cs-poland6','anon-cs-nl6'] }",
+    "{ server_name='google',          via=['anon-cs-de','anon-cs-finland','anon-cs-poland','anon-cs-nl'] }",
+    "{ server_name='google-ipv6',     via=['anon-cs-de6','anon-cs-finland6','anon-cs-poland6','anon-cs-nl6'] }",
     # ── WILDCARD — все серверы без явного маршрута ────────────────────────
     "{ server_name='*', via=["
     "'anon-cs-finland','anon-cs-finland6','anon-cs-poland','anon-cs-poland6',"
