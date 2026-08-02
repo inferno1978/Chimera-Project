@@ -985,67 +985,49 @@ def _screen_rtt_select() -> None:
     input(f"{BLUE}Нажмите Enter...{NC}")
 
 
-def _screen_manual_params() -> None:
-    os.system("clear")
-    print()
-    _box_top("⚙️  РУЧНАЯ НАСТРОЙКА ПАРАМЕТРОВ")
-    _box_desc(
-        "Текущие значения параметров DNSCrypt-proxy. "
-        "Введите 'preset' для применения всех параметров из пресета, "
-        "или key=value для изменения одного параметра."
-    )
-    _box_sep()
-    content = _read_config()
-    params_to_edit = [
-        ("require_dnssec",        "DNSSEC (проверка подлинности)"),
-        ("require_nolog",         "No-log (без логирования запросов)"),
-        ("require_nofilter",      "No-filter (без блокировок)"),
-        ("dnscrypt_servers",      "DNSCrypt-протокол"),
-        ("doh_servers",           "DoH (DNS-over-HTTPS)"),
-        ("odoh_servers",          "ODoH (Oblivious DoH)"),
-        ("dnscrypt_ephemeral_keys", "Эфемерные ключи DNSCrypt"),
-        ("tls_disable_session_tickets", "Отключить TLS session tickets"),
-        ("block_unqualified",    "Блокировать unqualified запросы"),
-        ("block_undelegated",    "Блокировать undelegated зоны"),
-        ("http3",                "HTTP/3 (QUIC)"),
-        ("force_tcp",            "Принудительный TCP (false=UDP)"),
-        ("cache",                "Кеширование DNS"),
-        ("cache_size",           "Размер кеша (записей)"),
-        ("cache_min_ttl",        "Минимальный TTL (сек)"),
-        ("cache_max_ttl",        "Максимальный TTL (сек)"),
-        ("timeout",              "Таймаут запроса (мс)"),
-        ("lb_strategy",          "Стратегия балансировки"),
-        ("max_clients",          "Макс. клиентов"),
-    ]
-    for key, label in params_to_edit:
-        m = re.search(rf'^{key}\s*=\s*(.+)$', content, re.MULTILINE)
-        current_val = m.group(1).strip() if m else "?"
-        _box_row(f"  {BOLD}{label}{NC}")
-        _box_row(f"    {DIM}{key} = {current_val}{NC}")
-    _box_bottom()
-    print()
-    _info("Введите 'preset' для всех параметров пресета, или key=value, или Enter для выхода")
-    print()
-    try:
-        raw = input(f"{CYAN}Ввод:{NC} ").strip()
-    except KeyboardInterrupt:
-        return
-    if not raw:
-        return
-    if raw.lower() == "preset":
-        _safe_apply_preset(_SERVER_NAMES, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True)
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
-        return
-    m = re.match(r'^(\w+)\s*=\s*(.+)$', raw)
-    if not m:
-        _warn("Формат: key=value (например: require_dnssec=true)")
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
-        return
-    key, value = m.group(1), m.group(2).strip()
-    if key not in _SECURITY_PARAMS and key not in ("server_names", "listen_addresses"):
-        _warn(f"Неизвестный параметр: {key}")
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
-        return
+# Параметры для ручной настройки: (key, label, type, description)
+# type: "bool" — toggle true/false
+#       "int"  — ввод числа
+#       "str"  — ввод строки
+_PARAMS_TO_EDIT = [
+    ("require_dnssec",              "DNSSEC (проверка подлинности)",          "bool", "Проверка подлинности DNS-ответов через DNSSEC"),
+    ("require_nolog",               "No-log (без логирования запросов)",      "bool", "Серверы не логируют DNS-запросы"),
+    ("require_nofilter",            "No-filter (без блокировок)",             "bool", "Серверы не фильтруют контент"),
+    ("dnscrypt_servers",            "DNSCrypt-протокол",                      "bool", "Использовать DNSCrypt-протокол"),
+    ("doh_servers",                 "DoH (DNS-over-HTTPS)",                   "bool", "Использовать DNS-over-HTTPS"),
+    ("odoh_servers",                "ODoH (Oblivious DoH)",                  "bool", "Oblivious DoH — сервер не видит IP клиента"),
+    ("dnscrypt_ephemeral_keys",     "Эфемерные ключи DNSCrypt",              "bool", "Одноразовые ключи для каждого соединения"),
+    ("tls_disable_session_tickets", "Отключить TLS session tickets",          "bool", "Усиление приватности TLS"),
+    ("block_unqualified",           "Блокировать unqualified запросы",        "bool", "Блокировать запросы к односоставным именам"),
+    ("block_undelegated",           "Блокировать undelegated зоны",           "bool", "Блокировать запросы к неделегированным зонам"),
+    ("http3",                       "HTTP/3 (QUIC)",                          "bool", "Использовать HTTP/3 поверх QUIC"),
+    ("force_tcp",                   "Принудительный TCP (false=UDP)",         "bool", "false = UDP предпочтителен, true = только TCP"),
+    ("cache",                       "Кеширование DNS",                        "bool", "Кешировать DNS-ответы"),
+    ("cache_size",                  "Размер кеша (записей)",                  "int",  "Количество записей в кеше (например 16384)"),
+    ("cache_min_ttl",               "Минимальный TTL (сек)",                  "int",  "Минимальное время жизни записи"),
+    ("cache_max_ttl",               "Максимальный TTL (сек)",                 "int",  "Максимальное время жизни записи"),
+    ("timeout",                     "Таймаут запроса (мс)",                   "int",  "Таймаут ожидания ответа от сервера"),
+    ("lb_strategy",                 "Стратегия балансировки",                 "str",  "p2 / ph / random / fastest_addr"),
+    ("max_clients",                 "Макс. клиентов",                         "int",  "Максимальное количество одновременных клиентов"),
+]
+
+
+def _get_param_value(content: str, key: str) -> str:
+    """Читает текущее значение параметра из конфига."""
+    m = re.search(rf'^{key}\s*=\s*(.+)$', content, re.MULTILINE)
+    return m.group(1).strip() if m else "?"
+
+
+def _toggle_bool(val: str) -> str:
+    """Переключает true ↔ false."""
+    v = val.strip().lower()
+    if v in ("true", "1", "yes"):
+        return "false"
+    return "true"
+
+
+def _apply_single_param(key: str, value: str) -> bool:
+    """Применяет один параметр в конфиг и перезапускает dnscrypt."""
     bak = _backup_config()
     if bak:
         _ok(f"Бэкап: {bak}")
@@ -1057,11 +1039,148 @@ def _screen_manual_params() -> None:
     try:
         _DNSCRYPT_CONF.write_text(content)
         _ok(f"{key} = {value}")
-        _restart_dnscrypt()
+        return _restart_dnscrypt()
     except Exception as e:
         _err(f"Ошибка: {e}")
-    print()
-    input(f"{BLUE}Нажмите Enter...{NC}")
+        return False
+
+
+def _screen_manual_params() -> None:
+    """Зацикленный TUI-экран ручной настройки параметров.
+
+    Каждый параметр — пункт меню с номером. Bool — переключается по номеру.
+    Int/str — ввод нового значения. P — применить весь пресет. Q — выход.
+    """
+    while True:
+        os.system("clear")
+        print()
+        _box_top("⚙️  РУЧНАЯ НАСТРОЙКА ПАРАМЕТРОВ")
+        _box_desc(
+            "Переключите bool-параметры по номеру, или введите новое "
+            "значение для int/str. [P] — применить весь пресет."
+        )
+        _box_sep()
+
+        content = _read_config()
+
+        for i, (key, label, ptype, desc) in enumerate(_PARAMS_TO_EDIT, 1):
+            current_val = _get_param_value(content, key)
+
+            # Цвет для bool: зелёный = true, красный = false.
+            if ptype == "bool":
+                v_lower = current_val.lower()
+                if v_lower in ("true", "1", "yes"):
+                    val_col = f"{GREEN}{current_val}{NC}"
+                    toggle_hint = f"{DIM}→ false{NC}"
+                else:
+                    val_col = f"{RED}{current_val}{NC}"
+                    toggle_hint = f"{DIM}→ true{NC}"
+            else:
+                val_col = f"{CYAN}{current_val}{NC}"
+                toggle_hint = ""
+
+            _box_row(f"  {BOLD}[{i}]{NC}  {label}")
+            _box_row(f"       {DIM}{key} = {NC}{val_col}  {toggle_hint}")
+            _box_row(f"       {DIM}{desc}{NC}")
+
+        _box_sep()
+        _box_item("P", f"{GREEN}Применить весь пресет{NC}  (198 серверов + все параметры)")
+        _box_item("R", f"{YELLOW}Перезапустить dnscrypt-proxy{NC}  (без изменения конфига)")
+        _box_item("Q", f"{DIM}← Назад{NC}")
+        _box_bottom()
+
+        print()
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+
+        if not ch:
+            continue
+
+        rl = ch.lower()
+
+        # Q — выход.
+        if rl in ("q", "0"):
+            return
+
+        # P — применить пресет.
+        if rl == "p":
+            _safe_apply_preset(_SERVER_NAMES, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True)
+            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            continue
+
+        # R — перезапуск без изменений.
+        if rl == "r":
+            _restart_dnscrypt()
+            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            continue
+
+        # Число — выбор параметра по номеру.
+        if ch.isdigit():
+            idx = int(ch)
+            if 1 <= idx <= len(_PARAMS_TO_EDIT):
+                key, label, ptype, desc = _PARAMS_TO_EDIT[idx - 1]
+                current_val = _get_param_value(content, key)
+
+                if ptype == "bool":
+                    # Переключаем true ↔ false.
+                    new_val = _toggle_bool(current_val)
+                    _info(f"Переключаю: {key} = {current_val} → {new_val}")
+                    _apply_single_param(key, new_val)
+                    input(f"\n{BLUE}Нажмите Enter...{NC}")
+                    continue
+
+                elif ptype == "int":
+                    _info(f"Текущее: {key} = {current_val}")
+                    try:
+                        new_val = input(f"{CYAN}Новое значение (число):{NC} ").strip()
+                    except KeyboardInterrupt:
+                        continue
+                    if not new_val:
+                        continue
+                    try:
+                        int(new_val)
+                    except ValueError:
+                        _warn("Нужно целое число")
+                        input(f"\n{BLUE}Нажмите Enter...{NC}")
+                        continue
+                    _apply_single_param(key, new_val)
+                    input(f"\n{BLUE}Нажмите Enter...{NC}")
+                    continue
+
+                elif ptype == "str":
+                    _info(f"Текущее: {key} = {current_val}")
+                    try:
+                        new_val = input(f"{CYAN}Новое значение:{NC} ").strip()
+                    except KeyboardInterrupt:
+                        continue
+                    if not new_val:
+                        continue
+                    _apply_single_param(key, new_val)
+                    input(f"\n{BLUE}Нажмите Enter...{NC}")
+                    continue
+
+            else:
+                _warn(f"Нет такого номера (1-{len(_PARAMS_TO_EDIT)})")
+                time.sleep(1)
+                continue
+
+        # key=value — прямой ввод.
+        m = re.match(r'^(\w+)\s*=\s*(.+)$', ch)
+        if m:
+            key, value = m.group(1), m.group(2).strip()
+            known_keys = {p[0] for p in _PARAMS_TO_EDIT} | {"server_names", "listen_addresses"}
+            if key not in known_keys:
+                _warn(f"Неизвестный параметр: {key}")
+                input(f"\n{BLUE}Нажмите Enter...{NC}")
+                continue
+            _apply_single_param(key, value)
+            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            continue
+
+        _warn("Неверный ввод. Введите номер, P, R, Q или key=value")
+        time.sleep(1)
 
 
 def _screen_status() -> None:
