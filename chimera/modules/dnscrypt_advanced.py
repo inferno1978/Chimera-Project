@@ -673,7 +673,7 @@ def _restart_dnscrypt() -> bool:
     _info("Перезапускаю dnscrypt-proxy...")
     _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
     time.sleep(3)
-    r = _run(["systemctl", "is-active", "dnscrypt-proxy"], capture=True, check=False)
+    r = _run(["systemctl", "is-active", "dnscrypt-proxy"], capture=True)
     if r.returncode == 0 and r.stdout.strip() == "active":
         return True
     _warn("dnscrypt-proxy не запустился — проверьте journalctl -u dnscrypt-proxy")
@@ -951,7 +951,7 @@ def _screen_status() -> None:
     os.system("clear")
     print()
     _box_top("📊  СТАТУС DNSCRYPT-PROXY")
-    r = _run(["systemctl", "is-active", "dnscrypt-proxy"], capture=True, check=False)
+    r = _run(["systemctl", "is-active", "dnscrypt-proxy"], capture=True)
     svc = f"{GREEN}active{NC}" if r.returncode == 0 else f"{RED}не активен{NC}"
     _box_row(f"  Сервис:          {svc}")
     content = _read_config()
