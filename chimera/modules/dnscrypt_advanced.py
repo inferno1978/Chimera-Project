@@ -531,8 +531,6 @@ _SECURITY_PARAMS: Dict[str, str] = {
     "netprobe_address":      "'9.9.9.9:53'",
     "cert_refresh_delay":    "240",
     "cert_ignore_timestamp": "false",
-    "skip_incompatible":     "true",
-    "direct_cert_fallback":  "true",
     "max_clients":           "250",
 }
 
