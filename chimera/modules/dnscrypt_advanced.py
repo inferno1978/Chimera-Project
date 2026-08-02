@@ -680,6 +680,111 @@ def _restart_dnscrypt() -> bool:
     return False
 
 
+def _dnscrypt_resolves() -> bool:
+    """Проверяет что dnscrypt-proxy реально резолвит DNS (не просто активен)."""
+    r = _run(["dig", "+short", "+time=3", "+tries=1",
+              "@127.0.0.1", "-p", "5300", "google.com"], capture=True)
+    if r.returncode == 0 and r.stdout.strip():
+        return True
+    return False
+
+
+def _safe_apply_preset(server_names: List[str],
+                       security_params: Dict[str, str],
+                       anon_routes: List[str],
+                       extra_sources: bool = True) -> bool:
+    """Безопасное применение пресета с откатом при неудаче.
+
+    Шаги:
+      1. Бэкап конфига.
+      2. Временно записать nameserver 8.8.8.8 в /etc/resolv.conf (fallback DNS
+         на случай если dnscrypt упадёт — DNS не умрёт).
+      3. Записать новый конфиг.
+      4. Перезапустить dnscrypt-proxy.
+      5. Подождать 5 сек, проверить что сервис active.
+      6. Проверить что dnscrypt реально резолвит (dig @127.0.0.1:5300).
+      7. Если резолвит — вернуть старый resolv.conf, успех.
+      8. Если НЕ резолвит — откатить конфиг из бэкапа, перезапустить,
+         вернуть старый resolv.conf, показать ошибку.
+
+    Возвращает True при успехе, False при неудаче (с откатом).
+    """
+    resolv_path = Path("/etc/resolv.conf")
+    resolv_backup = None
+
+    # 1. Бэкап конфига.
+    bak = _backup_config()
+    if bak:
+        _ok(f"Бэкап конфига: {bak}")
+
+    # 2. Временно записать 8.8.8.8 в resolv.conf.
+    #    iptables redirect 53→5300 НЕ трогает 8.8.8.8 (только 127.0.0.1:53).
+    #    Если dnscrypt упадёт — DNS всё равно работает через 8.8.8.8.
+    try:
+        if resolv_path.exists():
+            resolv_backup = resolv_path.read_text(errors="replace")
+            resolv_path.write_text("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
+            _info("Временный fallback DNS: 8.8.8.8 (на время применения)")
+    except Exception:
+        pass  # не критично — продолжаем без fallback
+
+    # 3. Записать новый конфиг.
+    if not _apply_preset(server_names, security_params, anon_routes, extra_sources):
+        if resolv_backup is not None:
+            try: resolv_path.write_text(resolv_backup)
+            except Exception: pass
+        return False
+
+    # 4. Перезапустить dnscrypt-proxy.
+    if not _restart_dnscrypt():
+        _warn("dnscrypt-proxy не запустился — откатываю конфиг...")
+        # Откат.
+        try:
+            shutil.copy2(str(bak), str(_DNSCRYPT_CONF))
+            _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
+            time.sleep(2)
+        except Exception:
+            pass
+        if resolv_backup is not None:
+            try: resolv_path.write_text(resolv_backup)
+            except Exception: pass
+        _err("Пресет не применён — конфиг откатан. Проверьте journalctl -u dnscrypt-proxy")
+        return False
+
+    # 5. Проверить что dnscrypt реально резолвит.
+    _info("Проверяю что dnscrypt-proxy резолвит DNS...")
+    resolves = False
+    for attempt in range(4):
+        time.sleep(3)
+        if _dnscrypt_resolves():
+            resolves = True
+            break
+        _info(f"Ожидание ({attempt+1}/4) — dnscrypt-proxy ещё стартует...")
+
+    if not resolves:
+        _warn("dnscrypt-proxy активен, но не резолвит — откатываю конфиг...")
+        try:
+            shutil.copy2(str(bak), str(_DNSCRYPT_CONF))
+            _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
+            time.sleep(2)
+        except Exception:
+            pass
+        if resolv_backup is not None:
+            try: resolv_path.write_text(resolv_backup)
+            except Exception: pass
+        _err("Пресет не применён — dnscrypt не резолвит. Конфиг откатан.")
+        _warn("Возможные причины: источники dnscry.pt ещё не скачаны.")
+        _warn("Попробуйте: systemctl restart dnscrypt-proxy && journalctl -u dnscrypt-proxy -n 30")
+        return False
+
+    # 6. Успех — вернуть старый resolv.conf.
+    if resolv_backup is not None:
+        try: resolv_path.write_text(resolv_backup)
+        except Exception: pass
+    _ok("DNSCrypt-proxy резолвит DNS — пресет применён успешно!")
+    return True
+
+
 # =============================================================================
 #  RTT-замер
 # =============================================================================
@@ -751,19 +856,8 @@ def _screen_preset() -> None:
         confirm = "n"
     if confirm not in ("", "y", "yes", "д", "да"):
         return
-    bak = _backup_config()
-    if bak:
-        _ok(f"Бэкап: {bak}")
     _info(f"Записываю конфиг ({len(_SERVER_NAMES)} серверов, {len(_ANON_ROUTES)} маршрутов)...")
-    if _apply_preset(_SERVER_NAMES, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True):
-        _ok("Конфиг записан")
-        if _restart_dnscrypt():
-            _ok("DNSCrypt-proxy перезапущен с расширенным конфигом")
-            _info("Новые источники (dnscry.pt, odoh) будут скачаны при первом запуске (~30 сек)")
-        else:
-            _warn("Сервис не поднялся — проверьте journalctl -u dnscrypt-proxy")
-    else:
-        _err("Не удалось записать конфиг")
+    _safe_apply_preset(_SERVER_NAMES, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True)
     print()
     input(f"{BLUE}Нажмите Enter...{NC}")
 
@@ -852,13 +946,7 @@ def _screen_rtt_select() -> None:
         return
     if confirm not in ("", "y", "yes", "д", "да"):
         return
-    bak = _backup_config()
-    if bak:
-        _ok(f"Бэкап: {bak}")
-    if _apply_preset(chosen, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True):
-        _ok("Конфиг записан")
-        if _restart_dnscrypt():
-            _ok(f"DNSCrypt-proxy перезапущен ({len(chosen)} серверов)")
+    _safe_apply_preset(chosen, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True)
     print()
     input(f"{BLUE}Нажмите Enter...{NC}")
 
@@ -911,12 +999,7 @@ def _screen_manual_params() -> None:
     if not raw:
         return
     if raw.lower() == "preset":
-        bak = _backup_config()
-        if bak:
-            _ok(f"Бэкап: {bak}")
-        if _apply_preset(_SERVER_NAMES, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True):
-            _ok("Параметры пресета применены")
-            _restart_dnscrypt()
+        _safe_apply_preset(_SERVER_NAMES, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True)
         input(f"\n{BLUE}Нажмите Enter...{NC}")
         return
     m = re.match(r'^(\w+)\s*=\s*(.+)$', raw)
