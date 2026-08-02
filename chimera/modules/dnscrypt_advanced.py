@@ -1,7 +1,7 @@
 """
 chimera/modules/dnscrypt_advanced.py
 ───────────────────────────────────────────────────────────────────────────────
-Расширенная настройка DNSCrypt-proxy: 154 сервера в 36 странах, ODoH, DNSSEC,
+Расширенная настройка DNSCrypt-proxy: 198 серверов в 50 странах, ODoH, DNSSEC,
 131 анонимизированный маршрут, RTT-замер, ручная настройка параметров.
 
 БЕЗОПАСНОСТЬ:
@@ -58,7 +58,7 @@ def _warn(msg):  print(f"{YELLOW}[WARN]{NC}  {msg}")
 def _err(msg):   print(f"{RED}[ERR]{NC}   {msg}")
 
 # =============================================================================
-#  ПОЛНЫЙ СПИСОК СЕРВЕРОВ — 154 шт., 36 стран
+#  ПОЛНЫЙ СПИСОК СЕРВЕРОВ — 198 шт., 50 стран
 #  Yandex ИСКЛЮЧЁН (утечка DNS). RU-серверы — через EU relay.
 # =============================================================================
 _SERVER_NAMES: List[str] = [
@@ -610,7 +610,7 @@ def _apply_preset(server_names: List[str],
     config = f"""## dnscrypt-proxy.toml — Chimera Project (advanced preset)
 ## Сгенерирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ## {len(server_names)} серверов · {len(anon_routes)} маршрутов · ODoH · DNSSEC
-## 36 стран: RU, UA, EE, LV, LT, FI, PL, DE, SE, CH, NL, CZ, RS, AT, NO, IS,
+## 50 стран: RU, UA, EE, LV, LT, FI, PL, DE, SE, CH, NL, CZ, RS, AT, NO, IS,
 ## BG, DK, RO, HU, BE, LU, TR, SK, MD, FR, IT, ES, GR, SI, HR, PT, UK, JP, SG, GE
 
 {listen}
@@ -866,9 +866,9 @@ def _measure_rtt(server_names: List[str]) -> Dict[str, float]:
 def _screen_preset() -> None:
     os.system("clear")
     print()
-    _box_top("🛡️  ПРЕСЕТ: 154 СЕРВЕРА, 36 СТРАН, АНОНИМИЗАЦИЯ")
+    _box_top("🛡️  ПРЕСЕТ: 198 СЕРВЕРОВ, 50 СТРАН, АНОНИМИЗАЦИЯ")
     _box_row()
-    _box_row(f"  {BOLD}Серверы:{NC} {len(_SERVER_NAMES)} шт. (36 стран, EU+RU+Asia)")
+    _box_row(f"  {BOLD}Серверы:{NC} {len(_SERVER_NAMES)} шт. (50 стран, EU+RU+Asia+Global)")
     _box_row(f"  {BOLD}Маршруты:{NC} {len(_ANON_ROUTES)} анонимизированных")
     _box_row(f"  {BOLD}Протоколы:{NC} DNSCrypt + DoH + ODoH")
     _box_row(f"  {BOLD}Безопасность:{NC} DNSSEC + nolog + nofilter")
@@ -1135,7 +1135,7 @@ def do_dnscrypt_advanced_menu() -> None:
         print()
         _box_top("🛡️  РАСШИРЕННАЯ НАСТРОЙКА DNSCRYPT-PROXY")
         _box_desc(
-            "154 сервера в 36 странах. ODoH, DNSSEC, анонимизация. "
+            "198 серверов в 50 странах. ODoH, DNSSEC, анонимизация. "
             "RTT-замер реальной latency. Ручная настройка параметров. "
             "НЕ трогает resolv.conf / nsswitch / интерфейсы."
         )
@@ -1150,7 +1150,7 @@ def do_dnscrypt_advanced_menu() -> None:
                  f"DNSSEC: {'✓' if has_dnssec else '✗'}  "
                  f"Анонимизация: {'✓' if has_anon else '✗'}")
         _box_sep()
-        _box_item("1", f"{GREEN}Применить пресет (154 сервера, 36 стран){NC}")
+        _box_item("1", f"{GREEN}Применить пресет (198 серверов, 50 стран){NC}")
         _box_item("2", f"{CYAN}RTT-замер и выбор серверов{NC}  (реальная latency)")
         _box_item("3", f"{YELLOW}Ручная настройка параметров{NC}  (DNSSEC, ODoH, cache...)")
         _box_item("4", "📊  Статус конфигурации")
