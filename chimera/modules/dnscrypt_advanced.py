@@ -695,17 +695,14 @@ def _safe_apply_preset(server_names: List[str],
                        extra_sources: bool = True) -> bool:
     """Безопасное применение пресета с откатом при неудаче.
 
-    Шаги:
-      1. Бэкап конфига.
-      2. Временно записать nameserver 8.8.8.8 в /etc/resolv.conf (fallback DNS
-         на случай если dnscrypt упадёт — DNS не умрёт).
-      3. Записать новый конфиг.
-      4. Перезапустить dnscrypt-proxy.
-      5. Подождать 5 сек, проверить что сервис active.
-      6. Проверить что dnscrypt реально резолвит (dig @127.0.0.1:5300).
-      7. Если резолвит — вернуть старый resolv.conf, успех.
-      8. Если НЕ резолвит — откатить конфиг из бэкапа, перезапустить,
-         вернуть старый resolv.conf, показать ошибку.
+    Двухфазное применение:
+      Фаза 1: Записать конфиг с базовыми серверами (cloudflare + google) +
+               новыми источниками (dnscry.pt, odoh). Перезапустить dnscrypt.
+               dnscrypt скачает списки серверов из dnscry.pt.
+      Фаза 2: Подождать 15 сек (скачивание). Записать полный конфиг
+               (198 серверов + маршруты). Перезапустить.
+
+    Если dnscrypt падает на любой фазе — откат с возвратом resolv.conf.
 
     Возвращает True при успехе, False при неудаче (с откатом).
     """
@@ -717,28 +714,26 @@ def _safe_apply_preset(server_names: List[str],
     if bak:
         _ok(f"Бэкап конфига: {bak}")
 
-    # 2. Временно записать 8.8.8.8 в resolv.conf.
-    #    iptables redirect 53→5300 НЕ трогает 8.8.8.8 (только 127.0.0.1:53).
-    #    Если dnscrypt упадёт — DNS всё равно работает через 8.8.8.8.
+    # 2. Временно записать 8.8.8.8 в resolv.conf (fallback DNS).
     try:
         if resolv_path.exists():
             resolv_backup = resolv_path.read_text(errors="replace")
             resolv_path.write_text("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
             _info("Временный fallback DNS: 8.8.8.8 (на время применения)")
     except Exception:
-        pass  # не критично — продолжаем без fallback
+        pass
 
-    # 3. Записать новый конфиг.
-    if not _apply_preset(server_names, security_params, anon_routes, extra_sources):
+    # ── ФАЗА 1: базовые серверы + новые источники ──────────────────────────
+    _info("Фаза 1/2: запись базовых серверов + источников dnscry.pt...")
+    phase1_names = ["cloudflare", "cloudflare-ipv6", "google", "google-ipv6"]
+    if not _apply_preset(phase1_names, security_params, [], extra_sources=extra_sources):
         if resolv_backup is not None:
             try: resolv_path.write_text(resolv_backup)
             except Exception: pass
         return False
 
-    # 4. Перезапустить dnscrypt-proxy.
     if not _restart_dnscrypt():
-        _warn("dnscrypt-proxy не запустился — откатываю конфиг...")
-        # Откат.
+        _warn("dnscrypt-proxy не запустился (фаза 1) — возвращаю конфиг...")
         try:
             shutil.copy2(str(bak), str(_DNSCRYPT_CONF))
             _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
@@ -748,40 +743,81 @@ def _safe_apply_preset(server_names: List[str],
         if resolv_backup is not None:
             try: resolv_path.write_text(resolv_backup)
             except Exception: pass
-        _err("Пресет не применён — конфиг откатан. Проверьте journalctl -u dnscrypt-proxy")
+        _err("Пресет не применён — конфиг возвращён в исходное состояние. Проверьте journalctl -u dnscrypt-proxy")
         return False
 
-    # 5. Проверить что dnscrypt реально резолвит.
-    _info("Проверяю что dnscrypt-proxy резолвит DNS...")
+    # Проверить что фаза 1 резолвит.
+    _info("Проверяю что dnscrypt-proxy резолвит (фаза 1)...")
+    if not _dnscrypt_resolves():
+        _warn("dnscrypt-proxy не резолвит (фаза 1) — возвращаю конфиг...")
+        try:
+            shutil.copy2(str(bak), str(_DNSCRYPT_CONF))
+            _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
+            time.sleep(2)
+        except Exception:
+            pass
+        if resolv_backup is not None:
+            try: resolv_path.write_text(resolv_backup)
+            except Exception: pass
+        _err("Пресет не применён — dnscrypt не резолвит. Конфиг возвращён в исходное состояние.")
+        return False
+
+    _ok("Фаза 1: dnscrypt-proxy резолвит (cloudflare + google)")
+
+    # ── ФАЗА 2: полный список серверов + маршруты ──────────────────────────
+    _info(f"Фаза 2/2: запись полного списка ({len(server_names)} серверов, {len(anon_routes)} маршрутов)...")
+    _info("Ожидаю 15 сек — dnscrypt скачивает источники dnscry.pt...")
+    time.sleep(15)
+
+    if not _apply_preset(server_names, security_params, anon_routes, extra_sources=extra_sources):
+        # Если не удалось записать — фаза 1 конфиг остаётся (рабочий).
+        _warn("Не удалось записать полный конфиг — остаётся базовый (cloudflare + google)")
+        if resolv_backup is not None:
+            try: resolv_path.write_text(resolv_backup)
+            except Exception: pass
+        return False
+
+    if not _restart_dnscrypt():
+        _warn("dnscrypt-proxy не запустился (фаза 2) — возвращаю базовый конфиг...")
+        # Возвращаем фаза-1 конфиг.
+        _apply_preset(phase1_names, security_params, [], extra_sources=extra_sources)
+        _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
+        time.sleep(2)
+        if resolv_backup is not None:
+            try: resolv_path.write_text(resolv_backup)
+            except Exception: pass
+        _err("Полный пресет не применён — оставлен базовый (cloudflare + google).")
+        _warn("Источники dnscry.pt могут быть недоступны. Попробуйте позже ещё раз.")
+        return False
+
+    # Проверить что фаза 2 резолвит.
+    _info("Проверяю что dnscrypt-proxy резолвит (фаза 2)...")
     resolves = False
     for attempt in range(4):
         time.sleep(3)
         if _dnscrypt_resolves():
             resolves = True
             break
-        _info(f"Ожидание ({attempt+1}/4) — dnscrypt-proxy ещё стартует...")
+        _info(f"Ожидание ({attempt+1}/4) — dnscrypt-proxy стартует...")
 
     if not resolves:
-        _warn("dnscrypt-proxy активен, но не резолвит — откатываю конфиг...")
-        try:
-            shutil.copy2(str(bak), str(_DNSCRYPT_CONF))
-            _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
-            time.sleep(2)
-        except Exception:
-            pass
+        _warn("dnscrypt не резолвит (фаза 2) — возвращаю базовый конфиг...")
+        _apply_preset(phase1_names, security_params, [], extra_sources=extra_sources)
+        _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
+        time.sleep(2)
         if resolv_backup is not None:
             try: resolv_path.write_text(resolv_backup)
             except Exception: pass
-        _err("Пресет не применён — dnscrypt не резолвит. Конфиг откатан.")
-        _warn("Возможные причины: источники dnscry.pt ещё не скачаны.")
-        _warn("Попробуйте: systemctl restart dnscrypt-proxy && journalctl -u dnscrypt-proxy -n 30")
+        _err("Полный пресет не применён — оставлен базовый (cloudflare + google).")
+        _warn("Источники dnscry.pt могли не скачаться. Попробуйте позже ещё раз.")
+        _warn("Проверьте: ls -la /etc/dnscrypt-proxy/dnscry.pt-*.md")
         return False
 
-    # 6. Успех — вернуть старый resolv.conf.
+    # Успех!
     if resolv_backup is not None:
         try: resolv_path.write_text(resolv_backup)
         except Exception: pass
-    _ok("DNSCrypt-proxy резолвит DNS — пресет применён успешно!")
+    _ok(f"DNSCrypt-proxy резолвит DNS — пресет применён ({len(server_names)} серверов)!")
     return True
 
 
