@@ -1197,6 +1197,9 @@ def _users_apply_to_config(users: list[dict]) -> bool:
     Работает для REALITY (clients) и xHTTP (clients).
     Основной конфиг — CONFIG_DIR/config.json; /usr/local/etc/xray/config.json
     в режиме B является симлинком и пишется автоматически через него.
+
+    БЕЗОПАСНОСТЬ: конфиг перезаписывается ТОЛЬКО после успешной валидации.
+    Если валидация падает — оригинальный конфиг не трогается.
     """
     core = _core_module()
     CONFIG_DIR         = core.CONFIG_DIR
@@ -1206,19 +1209,34 @@ def _users_apply_to_config(users: list[dict]) -> bool:
     _run               = core._run
     _nginx_restart_if_reality = core._nginx_restart_if_reality
     warn               = core.warn
-    # Xray падает с "failed to build inbound" если clients пуст.
-    # Если все пользователи отключены (или список пуст) — добавляем placeholder
-    # с невалидным UUID, чтобы inbound оставался рабочим, но реально никто не
-    # мог подключиться.
     _PLACEHOLDER_UUID = "00000000-0000-0000-0000-000000000000"
-    # Фильтруем отключённых юзеров — они не должны попадать в config.json.
-    # disabled=True означает что админ временно заблокировал юзера (через
-    # admin panel кнопку 🔒). Без этой фильтрации отключённый юзер всё равно
-    # мог бы подключаться — _users_apply_to_config просто перезаписывал clients.
     active_users = [u for u in users if not u.get("disabled")]
     effective_users = active_users if active_users else [{"uuid": _PLACEHOLDER_UUID, "email": "disabled@placeholder"}]
+
+    # ── ДЕДУПЛИКАЦИЯ: убираем дубликаты по UUID и по email ──────────────
+    # Xray падает с "User X already exists" если в clients есть два
+    # пользователя с одинаковым email (даже если UUID разные).
+    seen_uuids: set = set()
+    seen_emails: set = set()
+    deduped_users: list[dict] = []
+    for u in effective_users:
+        uid = u.get("uuid", "")
+        email = u.get("email", "")
+        if uid in seen_uuids:
+            continue
+        if email and email in seen_emails:
+            continue
+        seen_uuids.add(uid)
+        seen_emails.add(email)
+        deduped_users.append(u)
+    if len(deduped_users) < len(effective_users):
+        warn(f"Удалено дубликатов: {len(effective_users) - len(deduped_users)} "
+             f"(по UUID или email)")
+    effective_users = deduped_users
+
+    # ── НАЙТИ конфиг для записи ──────────────────────────────────────────
     written: set = set()
-    # CONFIG_DIR первичен; /usr/local/etc может быть симлинком — пишем один раз
+    cfg_paths_to_write: list[Path] = []
     for cfg_path in (CONFIG_DIR / "config.json",
                      Path("/usr/local/etc/xray/config.json")):
         if not cfg_path.exists():
@@ -1230,6 +1248,16 @@ def _users_apply_to_config(users: list[dict]) -> bool:
         if real in written:
             continue
         written.add(real)
+        cfg_paths_to_write.append(cfg_path)
+
+    if not cfg_paths_to_write:
+        warn("Конфиг Xray не найден — не могу применить пользователей")
+        return False
+
+    # ── ПОДГОТОВИТЬ новый конфиг (в памяти, БЕЗ записи на диск) ──────────
+    # Строим обновлённые конфиги для каждого пути, но не записываем.
+    pending_writes: list[tuple[Path, str]] = []  # (path, new_content)
+    for cfg_path in cfg_paths_to_write:
         try:
             cfg = json.loads(cfg_path.read_text())
             changed = False
@@ -1239,7 +1267,6 @@ def _users_apply_to_config(users: list[dict]) -> bool:
                     continue
                 proto = inb.get("protocol", "")
                 st    = inb.get("streamSettings", {})
-                # flow только для REALITY inbound, не для xHTTP
                 use_flow = (proto == "vless" and "realitySettings" in st)
                 clients = []
                 for u in effective_users:
@@ -1252,28 +1279,51 @@ def _users_apply_to_config(users: list[dict]) -> bool:
                 settings["clients"] = clients
                 changed = True
             if changed:
-                cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-                _set_config_owner(cfg_path)
+                new_content = json.dumps(cfg, indent=2, ensure_ascii=False)
+                pending_writes.append((cfg_path, new_content))
         except Exception as e:
-            warn(f"Ошибка обновления {cfg_path}: {e}")
+            warn(f"Ошибка подготовки {cfg_path}: {e}")
             return False
 
-    # Валидация: ищем реально существующий конфиг, флаг "run -test"
-    cfg_to_test = next(
-        (str(p) for p in (CONFIG_DIR / "config.json",
-                           Path("/usr/local/etc/xray/config.json"))
-         if p.exists()), None
-    )
-    if cfg_to_test is None:
-        warn("Конфиг Xray не найден — не могу провалидировать")
+    if not pending_writes:
+        warn("Не найдено inbound с clients — конфиг не изменён")
         return False
 
-    val = _run([str(XRAY_BIN), "run", "-test", "-config", cfg_to_test],
-               capture=True, check=False, quiet=True)
+    # ── ВАЛИДАЦИЯ: проверить новый конфиг БЕЗ записи на диск ────────────
+    # Записываем во временный файл, валидируем, удаляем.
+    import tempfile
+    cfg_to_test = str(cfg_paths_to_write[0])
+    tmp_path = None
+    try:
+        # Записываем первый обновлённый конфиг во временный файл для валидации.
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            f.write(pending_writes[0][1])
+            tmp_path = f.name
+        val = _run([str(XRAY_BIN), "run", "-test", "-config", tmp_path],
+                   capture=True, check=False, quiet=True)
+    except Exception as e:
+        warn(f"Ошибка валидации: {e}")
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
+        return False
+    finally:
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
+
     if val.returncode != 0:
         warn("Конфиг невалиден — пользователи не применены!")
+        warn("Оригинальный конфиг НЕ изменён.")
         warn((val.stdout + val.stderr)[:300])
         return False
+
+    # ── ЗАПИСЬ: валидация прошла — записываем все конфиги ───────────────
+    for cfg_path, new_content in pending_writes:
+        try:
+            cfg_path.write_text(new_content)
+            _set_config_owner(cfg_path)
+        except Exception as e:
+            warn(f"Ошибка записи {cfg_path}: {e}")
+            return False
 
     _run(["systemctl", "restart", "xray"], check=False, quiet=True)
     _nginx_restart_if_reality()
