@@ -46,7 +46,7 @@ from chimera.modules.box_renderer import (
 _DNSCRYPT_CONF = Path("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
 _DNSCRYPT_BIN  = Path("/usr/local/bin/dnscrypt-proxy")
 
-def _run(cmd, capture=False, quiet=False):
+def _run(cmd, capture=False, quiet=False, check=False):
     kw = {}
     if capture: kw.update(capture_output=True, text=True, encoding="utf-8", errors="replace")
     elif quiet: kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
