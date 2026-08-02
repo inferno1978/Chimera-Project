@@ -1082,6 +1082,7 @@ def _screen_manual_params() -> None:
             _box_row(f"  {BOLD}[{i}]{NC}  {label}")
             _box_row(f"       {DIM}{key} = {NC}{val_col}  {toggle_hint}")
             _box_row(f"       {DIM}{desc}{NC}")
+            _box_sep()
 
         _box_sep()
         _box_item("P", f"{GREEN}Применить весь пресет{NC}  (198 серверов + все параметры)")
