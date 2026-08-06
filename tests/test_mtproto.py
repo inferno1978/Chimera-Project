@@ -341,6 +341,77 @@ class TestIsPublicIp(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  _get_public_ip — NAT detection via IP comparison (v7.23 fix)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestGetPublicIp(unittest.TestCase):
+    """_get_public_ip: always compares local_ip with external_ip from echo service."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    @patch("chimera.modules.mtproto.urllib.request.urlopen")
+    @patch("chimera.modules.mtproto._get_local_primary_ipv4", return_value="203.0.113.5")
+    @patch("chimera.modules.mtproto._is_direct_ip", return_value=True)
+    def test_public_ip_matches_external(self, mock_direct, mock_local, mock_urlopen):
+        """Case 1: local_ip is public, external_ip == local_ip → returns local_ip."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"203.0.113.5"
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+        from chimera.modules.mtproto import _get_public_ip
+        ipv4, _ = _get_public_ip()
+        self.assertEqual(ipv4, "203.0.113.5")
+
+    @patch("chimera.modules.mtproto.urllib.request.urlopen")
+    @patch("chimera.modules.mtproto._get_local_primary_ipv4", return_value="10.0.0.5")
+    @patch("chimera.modules.mtproto._is_direct_ip", return_value=True)
+    def test_standard_nat_returns_external(self, mock_direct, mock_local, mock_urlopen):
+        """Case 2: local_ip is private (10.x), external differs, _is_direct_ip=True → returns external."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"93.184.216.34"
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+        from chimera.modules.mtproto import _get_public_ip
+        ipv4, _ = _get_public_ip()
+        self.assertEqual(ipv4, "93.184.216.34")
+
+    @patch("chimera.modules.mtproto.urllib.request.urlopen")
+    @patch("chimera.modules.mtproto._get_local_primary_ipv4", return_value="195.128.1.10")
+    @patch("chimera.modules.mtproto._is_direct_ip", return_value=True)
+    def test_sdn_nat_non_rfc1918_returns_external(self, mock_direct, mock_local, mock_urlopen):
+        """Case 3 (KEY REGRESSION): local_ip NOT in standard private range (e.g. 195.x as on <hoster-2>),
+        but external_ip differs and _is_direct_ip=True → should return external_ip, NOT local_ip.
+        Before fix: _is_public_ip(local_ip) returned True → skipped external query → returned wrong local_ip."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"93.184.216.34"
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+        from chimera.modules.mtproto import _get_public_ip
+        ipv4, _ = _get_public_ip()
+        self.assertEqual(ipv4, "93.184.216.34")
+
+    @patch("chimera.modules.mtproto.urllib.request.urlopen")
+    @patch("chimera.modules.mtproto._get_local_primary_ipv4", return_value="203.0.113.5")
+    def test_external_unavailable_returns_local(self, mock_local, mock_urlopen):
+        """Case 4: external_ip unavailable (both URLs fail) → returns local_ip, does not crash."""
+        mock_urlopen.side_effect = Exception("Network unreachable")
+        from chimera.modules.mtproto import _get_public_ip
+        ipv4, _ = _get_public_ip()
+        self.assertEqual(ipv4, "203.0.113.5")
+
+    @patch("chimera.modules.mtproto.urllib.request.urlopen")
+    @patch("chimera.modules.mtproto._get_local_primary_ipv4", return_value="203.0.113.5")
+    @patch("chimera.modules.mtproto._is_direct_ip", return_value=False)
+    def test_mode_b_exit_node_returns_local(self, mock_direct, mock_local, mock_urlopen):
+        """Case 5 (regression): Mode B — external differs from local, _is_direct_ip=False
+        → returns local_ip (not external_ip). This is existing behavior, must not break."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"93.184.216.34"
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+        from chimera.modules.mtproto import _get_public_ip
+        ipv4, _ = _get_public_ip()
+        self.assertEqual(ipv4, "203.0.113.5")
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  _make_tls_secret — генерация TLS-секрета
 # ══════════════════════════════════════════════════════════════════════════════
 class TestMakeTlsSecret(unittest.TestCase):
