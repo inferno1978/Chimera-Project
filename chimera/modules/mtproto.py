@@ -555,33 +555,43 @@ def _get_public_ip() -> tuple:
       1. Читаем IP локального интерфейса (тот, на котором слушает telemt).
          Это единственно правильный адрес для tg:// ссылки — пользователь
          должен подключаться к ЭТОЙ машине, а не к exit-ноде.
-      2. Если локальный IP приватный (NAT) — запрашиваем внешний.
-         Но если внешний не совпадает с локальным (Режим B — трафик уходит
-         через exit-ноду), всё равно возвращаем локальный.
+      2. ВСЕГДА запрашиваем внешний IP через echo-сервис и сверяем с локальным.
+         Именно сравнение (совпадает/не совпадает), а не is_private-эвристика,
+         должно определять NAT — некоторые хостеры (cloud.ru, Azure и др.)
+         используют NAT с адресами, которые выглядят как публичные, но
+         публичными не являются (SDN/гипервизор 1:1 маппинг).
       3. IPv6 всегда через api6.ipify.org.
     """
     local_ip = _get_local_primary_ipv4()
     ipv4 = ""
 
-    if local_ip and _is_public_ip(local_ip):
-        # Локальный интерфейс уже имеет публичный IP — используем его
-        ipv4 = local_ip
-    else:
-        # Сервер за NAT — запрашиваем внешний IP
-        for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
-            try:
-                with urllib.request.urlopen(url, timeout=5) as r:
-                    external_ip = r.read().decode().strip()
-                if external_ip:
-                    # Если внешний IP принадлежит этой машине — используем его.
-                    # Если нет (Режим B: трафик идёт через exit-ноду) —
-                    # используем локальный: ссылка должна вести на entry-ноду.
-                    ipv4 = external_ip if _is_direct_ip(external_ip) else (local_ip or external_ip)
-                    break
-            except Exception:
-                pass
+    # Всегда запрашиваем внешний IP — is_private-эвристика ненадёжна
+    # (некоторые хостеры используют NAT с адресами, которые выглядят
+    # как публичные, но публичными не являются — см. issue с cloud.ru).
+    external_ip = ""
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                external_ip = r.read().decode().strip()
+            if external_ip:
+                break
+        except Exception:
+            pass
 
-    if not ipv4:
+    if external_ip and local_ip and external_ip == local_ip:
+        # Внешний echo-сервис видит ровно тот же адрес, что и
+        # локальный интерфейс — сервер реально имеет публичный IP,
+        # NAT нет.
+        ipv4 = local_ip
+    elif external_ip:
+        # Внешний IP отличается от локального — либо NAT (Режим A,
+        # локальный интерфейс приватный/NAT-адрес), либо Режим B
+        # (трафик уходит через exit-ноду). Используем существующую
+        # проверку _is_direct_ip, чтобы различить эти два случая:
+        ipv4 = external_ip if _is_direct_ip(external_ip) else (local_ip or external_ip)
+    else:
+        # Внешний IP получить не удалось (нет интернета/сервисы
+        # недоступны) — используем локальный как единственный вариант.
         ipv4 = local_ip
 
     ipv6 = ""
