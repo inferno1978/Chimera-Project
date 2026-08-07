@@ -358,9 +358,9 @@ def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
 
 
 def _youtube_apply_fragment_to_xray(
-    packets: str = "1-3",
-    length: str = "3-7",
-    interval: str = "10-20",
+    packets: str = "1",
+    length: str = "10-30",
+    interval: str = "3-8",
 ) -> bool:
     """Добавляет YouTube→RU правило с TCP-фрагментацией ClientHello.
 
@@ -372,13 +372,20 @@ def _youtube_apply_fragment_to_xray(
     из РФ. Раньше YouTube→RU (direct) работал. Теперь нужен fragment
     чтобы обойти DPI.
 
+    v5.0.9: дефолтные параметры изменены на более сбалансированные
+    (packets="1", length="10-30", interval="3-8") — меньше задержка,
+    достаточно для обхода ТСПУ. Пресеты доступны в меню.
+
     Требует Xray 26.x+ (XTLS форк поддерживает fragment в freedom.settings).
     Vanilla Xray-core не поддерживает — будет ошибка при старте.
 
     Args:
-      packets:  "1-3" — первые 1-3 TCP-сегмента фрагментируются
-      length:   "3-7" — размер каждого фрагмента в байтах
-      interval: "10-20" — задержка между фрагментами в мс
+      packets:  "1" — только первый TCP-сегмент (ClientHello)
+                "1-3" — первые 3 сегмента (больше покрытия, больше задержка)
+      length:   "10-30" — размер каждого фрагмента в байтах
+                Меньше = больше фрагментов = лучше обход, но медленнее
+      interval: "3-8" — задержка между фрагментами в мс
+                Меньше = быстрее, но ТСПУ может успеть собрать
 
     Возвращает True если хотя бы один config.json пропатчен успешно.
     """
@@ -580,6 +587,109 @@ def _geosite_available() -> bool:
 #  TUI-МЕНЮ
 # =============================================================================
 
+# v5.0.9: Пресеты fragment для ТСПУ-обхода.
+# Каждый пресет — (packets, length, interval, описание).
+# Дефолтный пресет — "medium" (баланс между обходом ТСПУ и скоростью).
+_FRAGMENT_PRESETS = [
+    # (key, label, packets, length, interval, description)
+    ("light",  "Light",  "1",    "50-100", "1-3",
+     "Минимальная задержка. Только 1 сегмент, крупные фрагменты 50-100 байт. "
+     "Может не обойти ТСПУ если DPI умный."),
+    ("medium", "Medium", "1",    "10-30",  "3-8",
+     "Баланс. 1 сегмент, фрагменты 10-30 байт, задержка 3-8мс. "
+     "Рекомендуется для большинства случаев."),
+    ("heavy",  "Heavy",  "1-2",  "5-15",   "5-12",
+     "Больше покрытия. 2 сегмента, фрагменты 5-15 байт. "
+     "Лучше обход, но медленнее."),
+    ("max",    "Max",    "1-3",  "3-7",    "10-20",
+     "Максимум обхода. 3 сегмента, мелкие фрагменты 3-7 байт. "
+     "Самый медленный, но пробивает строгий DPI."),
+]
+
+
+def _fragment_preset_menu(core) -> tuple | None:
+    """Подменю выбора пресета fragment для YouTube→RU+fragment.
+
+    Возвращает (packets, length, interval) или None если пользователь отменил.
+    """
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_sep    = core._box_sep
+    _box_bottom = core._box_bottom
+    _box_item   = core._box_item
+    CYAN = core.CYAN
+    NC   = core.NC
+    DIM  = core.DIM
+    GREEN = core.GREEN
+    YELLOW = core.YELLOW
+
+    print()
+    _box_top("📦  Пресеты fragment (обход ТСПУ DPI)")
+    _box_row()
+    _box_row(f"  {DIM}TCP-фрагментация ClientHello для обхода ТСПУ SNI-фильтрации.{NC}")
+    _box_row(f"  {DIM}Меньше фрагменты = лучше обход, но медленнее загрузка.{NC}")
+    _box_sep()
+
+    # Показываем пресеты
+    for i, (key, label, packets, length, interval, desc) in enumerate(_FRAGMENT_PRESETS, 1):
+        _box_row(f"  {GREEN}[{i}]{NC} {label}")
+        _box_row(f"      {DIM}packets={packets}, length={length}, interval={interval} мс{NC}")
+        _box_row(f"      {DIM}{desc}{NC}")
+        _box_row()
+
+    _box_row(f"  {GREEN}[C]{NC} Custom — ввести параметры вручную")
+    _box_row(f"  {DIM}  (для опытных пользователей, знающих формат Xray fragment){NC}")
+    _box_row()
+    _box_item("Q", f"{DIM}Отмена (использовать пресет Medium по умолчанию){NC}")
+    _box_bottom()
+
+    try:
+        ch = input(f"{CYAN}  Выбор [1-4/C/Q]:{NC} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+    if ch in ("q", ""):
+        # Дефолт — medium
+        return ("1", "10-30", "3-8")
+
+    if ch == "c":
+        # Custom input
+        print()
+        print(f"{DIM}  Формат: range 'N-M' или single 'N' (без кавычек){NC}")
+        print(f"{DIM}  packets:  какие TCP-сегменты фрагментировать (1 = первый ClientHello){NC}")
+        print(f"{DIM}  length:   размер фрагмента в байтах (1-1000){NC}")
+        print(f"{DIM}  interval: задержка между фрагментами в мс (1-1000){NC}")
+        print()
+        try:
+            packets = input(f"{CYAN}  packets [1]:{NC} ").strip() or "1"
+            length = input(f"{CYAN}  length [10-30]:{NC} ").strip() or "10-30"
+            interval = input(f"{CYAN}  interval [3-8]:{NC} ").strip() or "3-8"
+        except (EOFError, KeyboardInterrupt):
+            return None
+        # Базовая валидация
+        if not re.match(r'^\d+(-\d+)?$', packets):
+            print(f"{YELLOW}  Некорректный формат packets{NC}")
+            return None
+        if not re.match(r'^\d+(-\d+)?$', length):
+            print(f"{YELLOW}  Некорректный формат length{NC}")
+            return None
+        if not re.match(r'^\d+(-\d+)?$', interval):
+            print(f"{YELLOW}  Некорректный формат interval{NC}")
+            return None
+        return (packets, length, interval)
+
+    # Пресет 1-4
+    try:
+        idx = int(ch) - 1
+        if 0 <= idx < len(_FRAGMENT_PRESETS):
+            _, _, packets, length, interval, _ = _FRAGMENT_PRESETS[idx]
+            return (packets, length, interval)
+    except ValueError:
+        pass
+
+    return None
+
+
 def do_manage_youtube_via_ru() -> None:
     """TUI-меню переключателя YouTube→RU / конкретная exit-нода.
 
@@ -772,23 +882,25 @@ def do_manage_youtube_via_ru() -> None:
             # Переходим к IP-pin submenu (ниже), не выходим из функции.
         elif ch == "f":
             # v5.0.8: YouTube → RU с TCP-фрагментацией ClientHello (обход ТСПУ DPI)
-            if not _geosite_available():
-                warn("geosite.dat не найден — но для domain: правил он не нужен.")
+            # v5.0.9: подменю выбора пресета fragment
             print()
             print(f"{DIM}  RU+fragment: TCP-фрагментация ClientHello для обхода ТСПУ DPI.{NC}")
-            print(f"{DIM}  Параметры: packets=1-3, length=3-7, interval=10-20 мс{NC}")
             print(f"{DIM}  Требуется Xray 26.x+ (XTLS форк с поддержкой fragment в freedom).{NC}")
-            print()
-            info("Применяем YouTube→RU+fragment...")
-            if _youtube_apply_fragment_to_xray():
-                _save_youtube_state("ru-fragment")
-                current_target = "ru-fragment"
-                rule_in_config = True
-                _box_info("YouTube теперь через RU+fragment (обход ТСПУ DPI).")
-                _box_info(f"{DIM}  Если не работает — проверьте: journalctl -u xray -n 30{NC}")
-                _box_info(f"{DIM}  Xray может не поддерживать fragment в freedom.settings{NC}")
+            # Подменю выбора пресета
+            _frag_params = _fragment_preset_menu(core)
+            if _frag_params is None:
+                _box_warn("  Отменено пользователем.")
             else:
-                _box_warn("  Не удалось применить — смотрите вывод выше.")
+                _packets, _length, _interval = _frag_params
+                info(f"Применяем YouTube→RU+fragment (packets={_packets}, length={_length}, interval={_interval})...")
+                if _youtube_apply_fragment_to_xray(_packets, _length, _interval):
+                    _save_youtube_state("ru-fragment")
+                    current_target = "ru-fragment"
+                    rule_in_config = True
+                    _box_info(f"YouTube через RU+fragment (packets={_packets}, length={_length}, interval={_interval}).")
+                    _box_info(f"{DIM}  Если не работает — попробуйте другой пресет или проверьте: journalctl -u xray -n 30{NC}")
+                else:
+                    _box_warn("  Не удалось применить — смотрите вывод выше.")
         else:
             try:
                 _choice = int(ch)
@@ -878,20 +990,24 @@ def do_manage_youtube_via_ru() -> None:
                 _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
         elif ch == "f":
             # v5.0.8: YouTube → RU с TCP-фрагментацией ClientHello (обход ТСПУ DPI)
+            # v5.0.9: подменю выбора пресета fragment
             print()
             print(f"{DIM}  RU+fragment: TCP-фрагментация ClientHello для обхода ТСПУ DPI.{NC}")
-            print(f"{DIM}  Параметры: packets=1-3, length=3-7, interval=10-20 мс{NC}")
             print(f"{DIM}  Требуется Xray 26.x+ (XTLS форк с поддержкой fragment в freedom).{NC}")
-            print()
-            info("Применяем YouTube→RU+fragment...")
-            if _youtube_apply_fragment_to_xray():
-                _save_youtube_state("ru-fragment")
-                current_target = "ru-fragment"
-                rule_in_config = True
-                _box_info("YouTube теперь через RU+fragment (обход ТСПУ DPI).")
-                _box_info(f"{DIM}  Если не работает — проверьте: journalctl -u xray -n 30{NC}")
+            _frag_params = _fragment_preset_menu(core)
+            if _frag_params is None:
+                _box_warn("  Отменено пользователем.")
             else:
-                _box_warn("  Не удалось применить — смотрите вывод выше.")
+                _packets, _length, _interval = _frag_params
+                info(f"Применяем YouTube→RU+fragment (packets={_packets}, length={_length}, interval={_interval})...")
+                if _youtube_apply_fragment_to_xray(_packets, _length, _interval):
+                    _save_youtube_state("ru-fragment")
+                    current_target = "ru-fragment"
+                    rule_in_config = True
+                    _box_info(f"YouTube через RU+fragment (packets={_packets}, length={_length}, interval={_interval}).")
+                    _box_info(f"{DIM}  Если не работает — попробуйте другой пресет или проверьте: journalctl -u xray -n 30{NC}")
+                else:
+                    _box_warn("  Не удалось применить — смотрите вывод выше.")
         elif ch == "w":
             # v5.0.1: используем интерактивный flow с авто-установкой WARP.
             from chimera.modules.youtube_warp_route import do_youtube_warp_interactive
