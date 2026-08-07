@@ -59,6 +59,7 @@ def _core_module():
 
 # ── Константы ───────────────────────────────────────────────────────────────
 _YOUTUBE_RULE_COMMENT = "youtube_via_ru"
+_YOUTUBE_FRAG_RULE_COMMENT = "youtube_via_ru_fragment"
 
 # Список доменов YouTube и связанных сервисов.
 #
@@ -356,8 +357,126 @@ def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
     return True
 
 
+def _youtube_apply_fragment_to_xray(
+    packets: str = "1-3",
+    length: str = "3-7",
+    interval: str = "10-20",
+) -> bool:
+    """Добавляет YouTube→RU правило с TCP-фрагментацией ClientHello.
+
+    Создаёт отдельный outbound 'direct-fragment' (freedom protocol) с
+    settings.fragment — Xray разбивает первые N байт TLS ClientHello
+    на мелкие куски, что мешает ТСПУ DPI-анализу SNI.
+
+    v5.0.8: ТСПУ начал фильтровать YouTube SNI на прямых соединениях
+    из РФ. Раньше YouTube→RU (direct) работал. Теперь нужен fragment
+    чтобы обойти DPI.
+
+    Требует Xray 26.x+ (XTLS форк поддерживает fragment в freedom.settings).
+    Vanilla Xray-core не поддерживает — будет ошибка при старте.
+
+    Args:
+      packets:  "1-3" — первые 1-3 TCP-сегмента фрагментируются
+      length:   "3-7" — размер каждого фрагмента в байтах
+      interval: "10-20" — задержка между фрагментами в мс
+
+    Возвращает True если хотя бы один config.json пропатчен успешно.
+    """
+    core = _core_module()
+    AWG_EXIT_ENABLED         = core.AWG_EXIT_ENABLED
+    CONFIG_DIR               = core.CONFIG_DIR
+    _nginx_restart_if_reality = core._nginx_restart_if_reality
+    _run                     = core._run
+    _set_config_owner        = core._set_config_owner
+    info                     = core.info
+    success                  = core.success
+    warn                     = core.warn
+
+    # В AWG-режиме используем direct-local-fragment (без fwmark → default route),
+    # иначе — direct-fragment (с fwmark → awg0).
+    _outbound_tag = "direct-local-fragment" if AWG_EXIT_ENABLED else "direct-fragment"
+
+    written: set = set()
+    ok = False
+    for cfg_path in (CONFIG_DIR / "config.json",
+                     Path("/usr/local/etc/xray/config.json")):
+        if not cfg_path.exists():
+            continue
+        try:
+            real = str(cfg_path.resolve())
+        except Exception:
+            real = str(cfg_path)
+        if real in written:
+            continue
+        written.add(real)
+        try:
+            cfg      = json.loads(cfg_path.read_text())
+            routing  = cfg.setdefault("routing", {})
+            # Убираем старые YouTube правила (и обычное, и fragment).
+            rules    = [r for r in routing.setdefault("rules", [])
+                        if r.get("comment") not in (_YOUTUBE_RULE_COMMENT,
+                                                     _YOUTUBE_FRAG_RULE_COMMENT)]
+            outbounds = cfg.setdefault("outbounds", [])
+
+            # Создаём outbound direct-fragment если его нет.
+            # Перезаписываем если есть — чтобы обновить параметры fragment.
+            outbounds = [ob for ob in outbounds if ob.get("tag") != _outbound_tag]
+            outbounds.append({
+                "protocol": "freedom",
+                "tag":      _outbound_tag,
+                "settings": {
+                    "domainStrategy": "UseIPv4",
+                    "fragment": {
+                        "packets":  packets,
+                        "length":   length,
+                        "interval": interval,
+                    },
+                },
+            })
+            cfg["outbounds"] = outbounds
+            info(f"Outbound '{_outbound_tag}' (fragment: packets={packets}, "
+                 f"length={length}, interval={interval})")
+
+            # Новое правило. Prepended ПЕРЕД существующими.
+            new_rule = {
+                "type":        "field",
+                "domain":      list(_YOUTUBE_DOMAINS),
+                "outboundTag": _outbound_tag,
+                "comment":     _YOUTUBE_FRAG_RULE_COMMENT,
+            }
+            routing["rules"] = [new_rule] + rules
+            cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+            _set_config_owner(cfg_path)
+            info(f"Конфиг: {cfg_path} (YouTube→{_outbound_tag} с фрагментацией)")
+            ok = True
+        except Exception as e:
+            warn(f"Ошибка патча {cfg_path}: {e}")
+
+    if not ok:
+        warn("Конфиг Xray не найден — не удалось применить YouTube→RU+fragment")
+        return False
+
+    # Restart xray, wait for it to come up.
+    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+    r = None
+    for _ in range(30):
+        r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+        if r.stdout.strip() == "active":
+            break
+        time.sleep(1)
+    if not r or r.stdout.strip() != "active":
+        warn("Xray не запустился — возможно ваш Xray не поддерживает fragment в freedom.settings")
+        warn("Проверьте: journalctl -u xray -n 30")
+        warn("Откатите: меню YouTube → [6] (exit-ноды default)")
+        _nginx_restart_if_reality()
+        return False
+    success(f"YouTube → {_outbound_tag} (RU+fragment, обход ТСПУ DPI)")
+    _nginx_restart_if_reality()
+    return True
+
+
 def _youtube_remove_from_xray() -> bool:
-    """Удаляет YouTube→direct правило из Xray config.
+    """Удаляет все YouTube правила (direct, direct-fragment, warp) из Xray config.
 
     Возвращает True если хотя бы один config.json пропатчен.
     """
@@ -368,6 +487,17 @@ def _youtube_remove_from_xray() -> bool:
     _set_config_owner        = core._set_config_owner
     success                  = core.success
     warn                     = core.warn
+
+    # Все возможные comment для YouTube правил
+    _youtube_comments = {
+        _YOUTUBE_RULE_COMMENT,           # youtube_via_ru
+        _YOUTUBE_FRAG_RULE_COMMENT,      # youtube_via_ru_fragment
+        "youtube_via_warp",              # из youtube_warp_route.py
+    }
+    # Все возможные outbound tags для YouTube
+    _youtube_outbound_tags = {
+        "direct-fragment", "direct-local-fragment", "warp"
+    }
 
     written: set = set()
     ok = False
@@ -386,15 +516,23 @@ def _youtube_remove_from_xray() -> bool:
             cfg = json.loads(cfg_path.read_text())
             routing = cfg.get("routing", {})
             old_count = len(routing.get("rules", []))
+            # Удаляем все YouTube правила
             routing["rules"] = [r for r in routing.get("rules", [])
-                                if r.get("comment") != _YOUTUBE_RULE_COMMENT]
+                                if r.get("comment") not in _youtube_comments]
             new_count = len(routing["rules"])
-            if new_count == old_count:
-                # Правила не было — пропускаем.
+            # Удаляем YouTube-специфичные outbounds (direct-fragment, warp)
+            # Оставляем direct/direct-local — они могут использоваться ru_subnets
+            outbounds = cfg.get("outbounds", [])
+            new_outbounds = [ob for ob in outbounds
+                             if ob.get("tag") not in _youtube_outbound_tags]
+            if len(new_outbounds) != len(outbounds):
+                cfg["outbounds"] = new_outbounds
+            if new_count == old_count and len(new_outbounds) == len(outbounds):
+                # Ничего не изменилось — пропускаем.
                 continue
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             _set_config_owner(cfg_path)
-            info_msg = f"Конфиг: {cfg_path} (удалено правило YouTube→RU)"
+            info_msg = f"Конфиг: {cfg_path} (удалены все YouTube правила)"
             try:
                 core.info(info_msg)
             except Exception:
@@ -496,6 +634,14 @@ def do_manage_youtube_via_ru() -> None:
         else:
             current_display = f"{YELLOW}несогласованно{NC}"
             current_detail = f"{DIM}state: youtube_route_target=warp, но правило отсутствует (regenerate?).{NC}"
+    elif current_target == "ru-fragment":
+        if rule_in_config:
+            _frag_tag = "direct-local-fragment" if core.AWG_EXIT_ENABLED else "direct-fragment"
+            current_display = f"{GREEN}YouTube → RU+fragment{NC}"
+            current_detail = f"{DIM}outbound:{_frag_tag} (TCP-фрагментация, обход ТСПУ){NC}"
+        else:
+            current_display = f"{YELLOW}несогласованно{NC}"
+            current_detail = f"{DIM}state: youtube_route_target=ru-fragment, но правило отсутствует (regenerate?).{NC}"
     elif current_target == "off":
         current_display = f"{CYAN}YouTube → exit-ноды (default){NC}"
         current_detail = f"{DIM}Весь YouTube-трафик идёт через каскад exit-нод.{NC}"
@@ -562,6 +708,11 @@ def do_manage_youtube_via_ru() -> None:
         # RU entry — флаг 🇷🇺 в начале (статичный, без сетевого запроса).
         _box_item("1", f"{_marker}YouTube через 🇷🇺\ufe0f {'RU entry':<{_name_width}}")
 
+        # v5.0.8: RU+fragment — обход ТСПУ DPI через TCP-фрагментацию ClientHello.
+        _is_current_frag = (current_target == "ru-fragment" and rule_in_config)
+        _marker = "● " if _is_current_frag else "  "
+        _box_item("F", f"{_marker}YouTube через 🇷🇺\ufe0f {'RU+fragment':<{_name_width}} {DIM}(обход ТСПУ){NC}")
+
         for i, nd in enumerate(nodes):
             _tag = f"chain-exit-{i+1}"
             _is_cur = (current_target == _tag and rule_in_config)
@@ -598,14 +749,14 @@ def do_manage_youtube_via_ru() -> None:
         _box_bottom()
 
         try:
-            ch = input(f"{CYAN}  Выбор [1-{_default_idx}/W/Q]:{NC} ").strip().lower()
+            ch = input(f"{CYAN}  Выбор [1-{_default_idx}/F/W/Q]:{NC} ").strip().lower()
         except KeyboardInterrupt:
             print()
             return
 
         if ch == "q" or ch == "":
             return
-        # v5.0.1 FIX: проверяем 'w' ДО int(ch), иначе int('w') бросает
+        # v5.0.1 FIX: проверяем 'w' и 'f' ДО int(ch), иначе int('w') бросает
         # ValueError и handler ниже недостижим — кнопка [W] молча
         # возвращала пользователя в основное меню.
         if ch == "w":
@@ -619,6 +770,25 @@ def do_manage_youtube_via_ru() -> None:
             else:
                 _box_warn(f"  {_msg}")
             # Переходим к IP-pin submenu (ниже), не выходим из функции.
+        elif ch == "f":
+            # v5.0.8: YouTube → RU с TCP-фрагментацией ClientHello (обход ТСПУ DPI)
+            if not _geosite_available():
+                warn("geosite.dat не найден — но для domain: правил он не нужен.")
+            print()
+            print(f"{DIM}  RU+fragment: TCP-фрагментация ClientHello для обхода ТСПУ DPI.{NC}")
+            print(f"{DIM}  Параметры: packets=1-3, length=3-7, interval=10-20 мс{NC}")
+            print(f"{DIM}  Требуется Xray 26.x+ (XTLS форк с поддержкой fragment в freedom).{NC}")
+            print()
+            info("Применяем YouTube→RU+fragment...")
+            if _youtube_apply_fragment_to_xray():
+                _save_youtube_state("ru-fragment")
+                current_target = "ru-fragment"
+                rule_in_config = True
+                _box_info("YouTube теперь через RU+fragment (обход ТСПУ DPI).")
+                _box_info(f"{DIM}  Если не работает — проверьте: journalctl -u xray -n 30{NC}")
+                _box_info(f"{DIM}  Xray может не поддерживать fragment в freedom.settings{NC}")
+            else:
+                _box_warn("  Не удалось применить — смотрите вывод выше.")
         else:
             try:
                 _choice = int(ch)
@@ -669,6 +839,8 @@ def do_manage_youtube_via_ru() -> None:
         # 🇷🇺 для RU entry, 🌍 для default (балансировщик).
         _is_cur = (current_target == "ru" and rule_in_config)
         _box_item("1", f"{'● ' if _is_cur else '  '}YouTube через 🇷🇺\ufe0f RU entry")
+        _is_cur_frag = (current_target == "ru-fragment" and rule_in_config)
+        _box_item("F", f"{'● ' if _is_cur_frag else '  '}YouTube через 🇷🇺\ufe0f RU+fragment {DIM}(обход ТСПУ){NC}")
         _is_cur_off = (current_target == "off")
         _box_item("2", f"{'● ' if _is_cur_off else '  '}YouTube через 🌍\ufe0f exit-ноды (default)")
         _is_cur_warp = (current_target == "warp")
@@ -678,7 +850,7 @@ def do_manage_youtube_via_ru() -> None:
         _box_bottom()
 
         try:
-            ch = input(f"{CYAN}  Выбор [1/2/W/Q]:{NC} ").strip().lower()
+            ch = input(f"{CYAN}  Выбор [1/2/F/W/Q]:{NC} ").strip().lower()
         except KeyboardInterrupt:
             print()
             return
@@ -704,6 +876,22 @@ def do_manage_youtube_via_ru() -> None:
                 _box_info("YouTube теперь через exit-ноды (default).")
             else:
                 _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
+        elif ch == "f":
+            # v5.0.8: YouTube → RU с TCP-фрагментацией ClientHello (обход ТСПУ DPI)
+            print()
+            print(f"{DIM}  RU+fragment: TCP-фрагментация ClientHello для обхода ТСПУ DPI.{NC}")
+            print(f"{DIM}  Параметры: packets=1-3, length=3-7, interval=10-20 мс{NC}")
+            print(f"{DIM}  Требуется Xray 26.x+ (XTLS форк с поддержкой fragment в freedom).{NC}")
+            print()
+            info("Применяем YouTube→RU+fragment...")
+            if _youtube_apply_fragment_to_xray():
+                _save_youtube_state("ru-fragment")
+                current_target = "ru-fragment"
+                rule_in_config = True
+                _box_info("YouTube теперь через RU+fragment (обход ТСПУ DPI).")
+                _box_info(f"{DIM}  Если не работает — проверьте: journalctl -u xray -n 30{NC}")
+            else:
+                _box_warn("  Не удалось применить — смотрите вывод выше.")
         elif ch == "w":
             # v5.0.1: используем интерактивный flow с авто-установкой WARP.
             from chimera.modules.youtube_warp_route import do_youtube_warp_interactive
@@ -881,11 +1069,13 @@ def _handle_ip_pin_submenu(core, current_target, rule_in_config,
 # =============================================================================
 
 def _youtube_rule_in_xray_config() -> bool:
-    """Проверяет, есть ли правило с comment=youtube_via_ru в любом
-    из config.json. Используется TUI для отображения актуального
-    состояния (state.json может рассинхронизироваться после regenerate)."""
+    """Проверяет, есть ли любое YouTube правило в config.json.
+
+    Используется TUI для отображения актуального состояния
+    (state.json может рассинхронизироваться после regenerate)."""
     core = _core_module()
     CONFIG_DIR = core.CONFIG_DIR
+    _youtube_comments = {_YOUTUBE_RULE_COMMENT, _YOUTUBE_FRAG_RULE_COMMENT, "youtube_via_warp"}
     for cfg_path in (CONFIG_DIR / "config.json",
                      Path("/usr/local/etc/xray/config.json")):
         if not cfg_path.exists():
@@ -893,7 +1083,7 @@ def _youtube_rule_in_xray_config() -> bool:
         try:
             cfg = json.loads(cfg_path.read_text())
             for rule in cfg.get("routing", {}).get("rules", []):
-                if rule.get("comment") in (_YOUTUBE_RULE_COMMENT, "youtube_via_warp"):
+                if rule.get("comment") in _youtube_comments:
                     return True
         except Exception:
             continue
@@ -979,6 +1169,17 @@ def restore_youtube_rule_if_needed(silent: bool = False) -> bool:
                 except Exception:
                     pass
         return True
+
+    if target == "ru-fragment":
+        # YouTube -> RU+fragment (TCP-фрагментация для обхода ТСПУ)
+        if not silent:
+            try:
+                core.info("Пере-применяем YouTube→RU+fragment правило "
+                          "после regenerate xray-config...")
+            except Exception:
+                pass
+        _result = _youtube_apply_fragment_to_xray()
+        return _result
 
     if target == "ru":
         tag = None  # direct/direct-local, AWG-aware
