@@ -573,10 +573,11 @@ def _warp_ipv4_connectivity(timeout: int = 8) -> bool:
     подключения к интернету". Диагностика показывала "всё ОК", потому что
     тестировала без -4 (curl выбирал IPv6, который работал через WARP).
 
-    Использует `curl -4 --interface wg-warp` — это ЕДИНСТВЕННЫЙ надёжный
-    способ проверить именно IPv4 connectivity. Пинг не подходит (ICMP
-    может быть заблокирован Cloudflare), DNS-резолв не подходит (он идёт
-    через основной интерфейс, не через wg-warp).
+    v5.0.3 FIX: используем Cloudflare IPv4-адрес НАПРЯМУЮ (без DNS) через
+    --resolve. Это надёжнее — не зависит от системного DNS-резолвера,
+    который может быть сломан (DNSCrypt на 127.0.0.1:5300, но порт закрыт,
+    или upstream недоступен). Endpoint: 162.159.135.80 — стабильный
+    anycast Cloudflare IPv4.
 
     Endpoint проверки: cloudflare.com/cdn-cgi/trace — быстрый, всегда
     доступен, возвращает текст (легко парсить).
@@ -585,6 +586,7 @@ def _warp_ipv4_connectivity(timeout: int = 8) -> bool:
         r = _run(
             ["curl", "-4", "--interface", "wg-warp",
              "--max-time", str(timeout), "-s",
+             "--resolve", "www.cloudflare.com:443:162.159.135.80",
              "https://www.cloudflare.com/cdn-cgi/trace"],
             capture=True, check=False,
         )
@@ -603,12 +605,24 @@ def _warp_ipv4_connectivity(timeout: int = 8) -> bool:
 
 
 def _warp_ipv6_connectivity(timeout: int = 8) -> bool:
-    """Проверяет IPv6-связность через wg-warp. Используется только
-    для информативного сообщения — не блокирует применение правила."""
+    """Проверяет IPv6-связность через wg-warp.
+
+    v5.0.3 FIX: используем Cloudflare IPv6-адрес НАПРЯМУЮ (без DNS),
+    потому что сервер без публичного IPv6 может не иметь IPv6-настроенного
+    DNS-резолвера. curl -6 https://www.cloudflare.com/ пытается
+    зарезолвить AAAA-запись через системный DNS, а если DNSCrypt
+    настроен только на IPv4 upstream — резолв падает с "no IPv6 address",
+    хотя сам IPv6-туннель WARP работает.
+
+    Cloudflare имеет стабильный anycast IPv6 2606:4700::6810:85e5 —
+    тот же /cdn-cgi/trace endpoint. Используем [2606:4700::6810:85e5]
+    с --resolve чтобы обойти DNS полностью.
+    """
     try:
         r = _run(
             ["curl", "-6", "--interface", "wg-warp",
              "--max-time", str(timeout), "-s",
+             "--resolve", "www.cloudflare.com:443:[2606:4700::6810:85e5]",
              "https://www.cloudflare.com/cdn-cgi/trace"],
             capture=True, check=False,
         )
@@ -690,19 +704,19 @@ def do_youtube_warp_interactive(core) -> tuple:
             # Ни IPv4, ни IPv6 через WARP не работают.
             print()
             warn("⚠ WARP поднят, но НИ IPv4, НИ IPv6 через wg-warp не работают.")
-            print(f"{DIM}  Handshake может проходить, но данные не идут.${NC}")
+            print(f"{DIM}  Handshake может проходить, но данные не идут.{NC}")
             print()
             allowed = _warp_allowed_ips_check()
             if not allowed["ipv4"] and not allowed["ipv6"]:
-                print(f"{YELLOW}  Причина: AllowedIPs в wg-warp.conf некорректный${NC}")
-                print(f"{DIM}  Должно быть: AllowedIPs = 0.0.0.0/0, ::/0${NC}")
+                print(f"{YELLOW}  Причина: AllowedIPs в wg-warp.conf некорректный{NC}")
+                print(f"{DIM}  Должно быть: AllowedIPs = 0.0.0.0/0, ::/0{NC}")
             else:
-                print(f"{YELLOW}  Возможные причины:${NC}")
-                print(f"  {DIM}• ТСПУ блокирует WireGuard трафик (DPI)${NC}")
-                print(f"  {DIM}• Endpoint Cloudflare недоступен (попробуйте сменить)${NC}")
-                print(f"  {DIM}• Firewall блокирует исходящий трафик через wg-warp${NC}")
+                print(f"{YELLOW}  Возможные причины:{NC}")
+                print(f"  {DIM}• ТСПУ блокирует WireGuard трафик (DPI){NC}")
+                print(f"  {DIM}• Endpoint Cloudflare недоступен (попробуйте сменить){NC}")
+                print(f"  {DIM}• Firewall блокирует исходящий трафик через wg-warp{NC}")
             print()
-            print(f"{CYAN}  Откройте меню WARP → 6 (Изменить Endpoint) или 4 (диагностика)${NC}")
+            print(f"{CYAN}  Откройте меню WARP → 6 (Изменить Endpoint) или 4 (диагностика){NC}")
             try:
                 _ans = input(f"{CYAN}  Открыть полное меню WARP? [Y/n]:{NC} ").strip().lower()
             except (EOFError, KeyboardInterrupt):
@@ -725,13 +739,13 @@ def do_youtube_warp_interactive(core) -> tuple:
             # ТСПУ-блокировки IPv4 в WireGuard. Предлагаем использовать IPv6.
             print()
             success("IPv6 через WARP РАБОТАЕТ (IPv4 заблокирован ТСПУ).")
-            print(f"{DIM}  ТСПУ делает DPI на WireGuard и дропает IPv4-пакеты внутри${NC}")
-            print(f"{DIM}  туннеля, пропуская IPv6. YouTube имеет полную IPv6-поддержку.${NC}")
+            print(f"{DIM}  ТСПУ делает DPI на WireGuard и дропает IPv4-пакеты внутри{NC}")
+            print(f"{DIM}  туннеля, пропуская IPv6. YouTube имеет полную IPv6-поддержку.{NC}")
             print()
-            print(f"{CYAN}  Будем использовать IPv6 стратегию:${NC}")
-            print(f"  {DIM}• sendThrough = <WARP IPv6 адрес>${NC}")
-            print(f"  {DIM}• domainStrategy = UseIPv6${NC}")
-            print(f"  {DIM}• Все YouTube-домены имеют IPv6 (youtube.com, googlevideo.com, ...)${NC}")
+            print(f"{CYAN}  Будем использовать IPv6 стратегию:{NC}")
+            print(f"  {DIM}• sendThrough = <WARP IPv6 адрес>{NC}")
+            print(f"  {DIM}• domainStrategy = UseIPv6{NC}")
+            print(f"  {DIM}• Все YouTube-домены имеют IPv6 (youtube.com, googlevideo.com, ...){NC}")
             print()
             try:
                 _ans = input(f"{CYAN}  Применить YouTube->WARP через IPv6? [Y/n]:{NC} ").strip().lower()
