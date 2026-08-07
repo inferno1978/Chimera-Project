@@ -2,6 +2,113 @@
 
 ---
 
+## FEAT(youtube): YouTube→WARP routing + RU+fragment — обход ТСПУ DPI — 7 августа 2026
+
+**Две новые функции в модуле YouTube-маршрутизации для обхода ТСПУ SNI-фильтрации
+YouTube: маршрутизация через Cloudflare WARP и TCP-фрагментация ClientHello.**
+
+### 1. YouTube→WARP routing (Option D: sendThrough + kernel table 301)
+
+**Новый модуль `chimera/modules/youtube_warp_route.py`** — маршрутизация
+YouTube-трафика через Cloudflare WARP с использованием `freedom` outbound
+Xray с `sendThrough` (привязка source IP) + sing-box `bind_interface`.
+
+**Архитектура:**
+- WARP (wg-warp) должен быть установлен и интерфейс поднят
+- `ip rule add from <warp_ip> table 301` + `ip route add default dev wg-warp table 301`
+  → kernel маршрутизирует пакеты с source=warp_ip через wg-warp
+- Xray: `freedom` outbound с `sendThrough=<warp_ip>` + доменное правило
+  YouTube → `warp`
+- sing-box: `direct` outbound с `bind_interface=wg-warp` + `domain_suffix`
+  правило YouTube → `warp`
+- Systemd-сервис для восстановления после ребута
+
+**Интерактивный flow с авто-установкой WARP:**
+При нажатии [W] в меню YouTube-маршрутизации модуль автоматически:
+1. Проверяет статус WARP (installed/service_active/iface_up)
+2. Если WARP не установлен — предлагает запустить мастер установки
+3. Если сервис остановлен — предлагает запустить
+4. Если битая установка — предлагает полное меню WARP
+5. Проверяет IPv4 и IPv6 connectivity через wg-warp (curl через прямой
+   IP 1.1.1.1, без DNS-зависимости)
+6. Авто-определение IP-версии: если IPv4 заблокирован ТСПУ, но IPv6
+   работает — предлагает IPv6 стратегию (sendThrough=warp_ipv6,
+   domainStrategy=UseIPv6)
+7. Принудительное применение (опционально) — если авто-проверка не
+   проходит, пользователь может применить правило вручную
+
+**IPv6 поддержка:**
+Модуль корректно работает с серверами без публичного IPv6 — WARP-интерфейс
+имеет IPv6-адрес (2606:4700:...), через который Xray открывает IPv6-соединения
+к YouTube. Все YouTube-домены имеют полную IPv6-поддержку.
+
+### 2. YouTube→RU+fragment — обход ТСПУ DPI
+
+**Новая опция [F] в меню YouTube** — TCP-фрагментация ClientHello для
+обхода ТСПУ SNI-фильтрации.
+
+ТСПУ начал фильтровать YouTube SNI на прямых соединениях из РФ. Раньше
+YouTube→RU (direct) работал. Теперь нужен fragment — Xray `freedom` outbound
+с `settings.fragment` разбивает первые N байт TLS ClientHello на мелкие
+кусочки, что мешает ТСПУ DPI-анализу SNI.
+
+**Outbound `direct-fragment` (или `direct-local-fragment` в AWG-режиме):**
+```json
+{
+  "protocol": "freedom",
+  "tag": "direct-fragment",
+  "settings": {
+    "domainStrategy": "UseIPv4",
+    "fragment": {
+      "packets": "1",
+      "length": "10-30",
+      "interval": "3-8"
+    }
+  }
+}
+```
+
+Требует Xray 26.x+ (XTLS форк с поддержкой fragment в freedom.settings).
+
+**Пресеты fragment (подменю при нажатии [F]):**
+
+| Пресет | packets | length | interval | Описание |
+|--------|---------|--------|----------|----------|
+| Light  | 1 | 50-100 | 1-3 мс | Минимальная задержка. Может не обойти ТСПУ. |
+| Medium | 1 | 10-30 | 3-8 мс | Баланс (дефолт). Рекомендуется. |
+| Heavy  | 1-2 | 5-15 | 5-12 мс | Больше покрытия, но медленнее. |
+| Max    | 1-3 | 3-7 | 10-20 мс | Максимум обхода, самый медленный. |
+| Custom | ручной ввод | ручной ввод | ручной ввод | Для опытных пользователей. |
+
+**Опциональная блокировка QUIC:**
+После выбора пресета модуль спрашивает: "Блокировать QUIC для YouTube? [y/N]".
+QUIC (UDP/443) — YouTube использует его для видео. TCP fragment работает
+только с TCP. Блокировка QUIC заставляет YouTube использовать TCP, но на
+некоторых конфигурациях Xray это ломает YouTube полностью. По умолчанию ВЫКЛ.
+
+### 3. Улучшения UX меню YouTube
+
+- Кнопка [W] (WARP) перенесена вниз меню, рядом с [F] (fragment) — буквы
+  отдельно от цифр
+- Prompt обновлён: `[1/2/F/W/Q]` (single-node) и `[1-N/F/W/Q]` (multi-node)
+- `current_display` показывает выбранный маршрут (RU/WARP/RU+fragment/exit-нода)
+- Согласованность state.json с config.json (detect regenerate)
+- Restore после regenerate xray-config
+
+### Файлы
+
+- `chimera/modules/youtube_warp_route.py` — новый модуль (WARP routing)
+- `chimera/modules/youtube_route.py` — RU+fragment, пресеты, QUIC block
+- `chimera/modules/warp.py` — улучшенный verification endpoint'а (прямой
+  IP 1.1.1.1, retry loop, длиннее таймауты)
+- `tests/test_youtube_route.py` — regression тесты
+
+### Тесты
+
+42 теста проходят (включая regression тесты для [W] и [F] кнопок).
+
+---
+
 ## FEAT(dnscrypt): расширенная настройка DNSCrypt-proxy — 198 серверов, 50 стран, ODoH, DNSSEC, анонимизация — 2 августа 2026
 
 **Новый модуль `chimera/modules/dnscrypt_advanced.py` — расширенная настройка
