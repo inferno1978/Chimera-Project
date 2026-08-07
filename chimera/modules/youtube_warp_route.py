@@ -462,6 +462,95 @@ def _warp_status_check() -> dict:
     return out
 
 
+def _warp_ipv4_connectivity(timeout: int = 8) -> bool:
+    """Проверяет, что IPv4-трафик через wg-warp действительно доходит до интернета.
+
+    v5.0.2 FIX: до этого проверяли только существование интерфейса wg-warp.
+    Но интерфейс может существовать, handshake может быть свежим, а IPv4
+    через туннель всё равно не работает — например, если в wg-warp.conf
+    AllowedIPs содержит только ::/0 без 0.0.0.0/0 (WireGuard дропает IPv4
+    пакеты), или если Cloudflare endpoint принимает только IPv6.
+
+    Без этой проверки Xray с domainStrategy=UseIPv4 получает sendThrough=
+    172.16.0.2, пытается открыть TCP-соединение к YouTube через wg-warp,
+    соединение висит (пакеты дропаются) → YouTube показывает "нет
+    подключения к интернету". Диагностика показывала "всё ОК", потому что
+    тестировала без -4 (curl выбирал IPv6, который работал через WARP).
+
+    Использует `curl -4 --interface wg-warp` — это ЕДИНСТВЕННЫЙ надёжный
+    способ проверить именно IPv4 connectivity. Пинг не подходит (ICMP
+    может быть заблокирован Cloudflare), DNS-резолв не подходит (он идёт
+    через основной интерфейс, не через wg-warp).
+
+    Endpoint проверки: cloudflare.com/cdn-cgi/trace — быстрый, всегда
+    доступен, возвращает текст (легко парсить).
+    """
+    try:
+        r = _run(
+            ["curl", "-4", "--interface", "wg-warp",
+             "--max-time", str(timeout), "-s",
+             "https://www.cloudflare.com/cdn-cgi/trace"],
+            capture=True, check=False,
+        )
+        if r.returncode != 0:
+            return False
+        out = (r.stdout or "").strip()
+        if not out:
+            return False
+        # Если в ответе есть warp=on или warp=plus — WARP работает.
+        # Если есть просто ip=... — connectivity есть, но warp flag
+        # может отсутствовать (туннель работает, но Cloudflare не
+        # идентифицирует как WARP — это тоже ОК для наших целей).
+        return ("ip=" in out) or ("warp=" in out)
+    except Exception:
+        return False
+
+
+def _warp_ipv6_connectivity(timeout: int = 8) -> bool:
+    """Проверяет IPv6-связность через wg-warp. Используется только
+    для информативного сообщения — не блокирует применение правила."""
+    try:
+        r = _run(
+            ["curl", "-6", "--interface", "wg-warp",
+             "--max-time", str(timeout), "-s",
+             "https://www.cloudflare.com/cdn-cgi/trace"],
+            capture=True, check=False,
+        )
+        if r.returncode != 0:
+            return False
+        out = (r.stdout or "").strip()
+        return bool(out) and ("ip=" in out)
+    except Exception:
+        return False
+
+
+def _warp_allowed_ips_check() -> dict:
+    """Парсит wg-warp.conf и проверяет AllowedIPs.
+
+    Возвращает {ipv4: bool, ipv6: bool} — содержит ли AllowedIPs
+    соответствующие диапазоны. Если AllowedIPs только ::/0 без
+    0.0.0.0/0 — WireGuard будет дропать IPv4 пакеты, даже если
+    маршрут в table 301 добавлен. Это типичная причина "WARP
+    поднят, handshake есть, но IPv4 не работает".
+    """
+    out = {"ipv4": False, "ipv6": False, "raw": ""}
+    try:
+        conf = Path("/etc/wireguard/wg-warp.conf").read_text()
+        out["raw"] = conf
+        m = re.search(r'^AllowedIPs\s*=\s*(.+)$', conf, re.MULTILINE)
+        if m:
+            ips = m.group(1).strip()
+            # 0.0.0.0/0 покрывает весь IPv4
+            if "0.0.0.0/0" in ips:
+                out["ipv4"] = True
+            # ::/0 покрывает весь IPv6
+            if "::/0" in ips:
+                out["ipv6"] = True
+    except Exception:
+        pass
+    return out
+
+
 def do_youtube_warp_interactive(core) -> tuple:
     """Интерактивный flow включения YouTube->WARP с авто-установкой.
 
@@ -493,10 +582,83 @@ def do_youtube_warp_interactive(core) -> tuple:
 
     # ── Сценарий 1: WARP полностью готов ──────────────────────────────────
     if st["iface_up"]:
-        # Интерфейс есть — достаточно для apply (freedom.sendThrough работает
-        # даже если WARP в selective/runet режиме, т.к. мы используем отдельную
-        # таблицу 301, а не основную).
-        info("WARP готов — применяем YouTube->WARP маршрутизацию...")
+        # v5.0.2: перед применением правила проверяем, что IPv4 через
+        # wg-warp РЕАЛЬНО работает. Xray использует domainStrategy=UseIPv4,
+        # поэтому если IPv4 через WARP не работает — YouTube будет "висеть"
+        # с "нет подключения к интернету", хотя интерфейс есть и handshake
+        # свежий. Типичная причина: AllowedIPs в wg-warp.conf содержит
+        # только ::/0 без 0.0.0.0/0.
+        info("Проверка IPv4 connectivity через wg-warp...")
+        if not _warp_ipv4_connectivity():
+            # IPv4 не работает — НЕ применяем правило (оно всё равно
+            # не сработает, YouTube будет сломан).
+            print()
+            warn("⚠ WARP поднят, но IPv4 через wg-warp НЕ РАБОТАЕТ.")
+            print(f"{DIM}  Xray использует domainStrategy=UseIPv4, поэтому без IPv4${NC}")
+            print(f"{DIM}  connectivity YouTube не загрузится.{NC}")
+            print()
+            # Проверяем AllowedIPs — самая частая причина.
+            allowed = _warp_allowed_ips_check()
+            if not allowed["ipv4"]:
+                print(f"{YELLOW}  Причина: AllowedIPs в wg-warp.conf НЕ содержит 0.0.0.0/0${NC}")
+                print(f"{DIM}  WireGuard дропает все IPv4 пакеты, даже если интерфейс поднят.${NC}")
+                print()
+                print(f"{CYAN}  Исправить:${NC}")
+                print(f"  {DIM}1. Откройте /etc/wireguard/wg-warp.conf${NC}")
+                print(f"  {DIM}2. Найдите строку AllowedIPs =${NC}")
+                print(f"  {DIM}3. Добавьте 0.0.0.0/0 (должно быть: AllowedIPs = 0.0.0.0/0, ::/0)${NC}")
+                print(f"  {DIM}4. Перезапустите: systemctl restart wg-quick@wg-warp${NC}")
+                print(f"  {DIM}5. Повторите: меню YouTube → W${NC}")
+                print()
+                # Не выходим — даём пользователю возможность сразу
+                # попробовать починить через полное меню WARP.
+                try:
+                    _ans = input(f"{CYAN}  Открыть полное меню WARP для диагностики? [Y/n]:{NC} ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    _ans = "n"
+                if _ans in ("", "y", "yes", "д", "да"):
+                    try:
+                        from chimera.modules.warp import do_manage_warp
+                        do_manage_warp()
+                        # После выхода из меню перепроверяем.
+                        if _warp_ipv4_connectivity():
+                            success("IPv4 через WARP заработал!")
+                            return apply_youtube_warp_routing(True)
+                    except Exception as e:
+                        warn(f"Ошибка: {e}")
+                return (False, "IPv4 через WARP не работает — правило не применено "
+                               "(см. инструкции выше). IPv6 поддержку НЕ трогаем.")
+            else:
+                # AllowedIPs корректный, но IPv4 всё равно не работает.
+                v6_works = _warp_ipv6_connectivity()
+                print(f"{YELLOW}  AllowedIPs корректный, но IPv4 через WARP не работает.${NC}")
+                if v6_works:
+                    print(f"{DIM}  При этом IPv6 через WARP работает. Возможные причины:${NC}")
+                else:
+                    print(f"{DIM}  IPv6 через WARP тоже не работает. Возможные причины:${NC}")
+                print(f"  {DIM}• Endpoint Cloudflare недоступен по IPv4 (попробуйте сменить)${NC}")
+                print(f"  {DIM}• MTU слишком большой (попробуйте 1280 в wg-warp.conf)${NC}")
+                print(f"  {DIM}• Firewall блокирует исходящий IPv4 через wg-warp${NC}")
+                print()
+                print(f"{CYAN}  Откройте меню WARP → 6 (Изменить Endpoint) или 4 (диагностика)${NC}")
+                try:
+                    _ans = input(f"{CYAN}  Открыть полное меню WARP? [Y/n]:{NC} ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    _ans = "n"
+                if _ans in ("", "y", "yes", "д", "да"):
+                    try:
+                        from chimera.modules.warp import do_manage_warp
+                        do_manage_warp()
+                        if _warp_ipv4_connectivity():
+                            success("IPv4 через WARP заработал!")
+                            return apply_youtube_warp_routing(True)
+                    except Exception as e:
+                        warn(f"Ошибка: {e}")
+                return (False, "IPv4 через WARP не работает — нужно починить WARP.")
+
+        # IPv4 работает — можно применять правило.
+        success("IPv4 через WARP работает.")
+        info("Применяем YouTube->WARP маршрутизацию...")
         return apply_youtube_warp_routing(True)
 
     # ── Сценарий 2: установлен, но сервис остановлен ──────────────────────
