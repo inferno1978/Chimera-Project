@@ -170,34 +170,24 @@ def _kernel_routes_remove():
 
 # ── Xray Config ────────────────────────────────────────────────────────────
 
-def _detect_warp_ip_version() -> str:
-    """Определяет, какая IP-версия через WARP реально работает.
+def _detect_warp_ip_version() -> tuple:
+    """Определяет, какая IP-версия через WARP работает.
 
-    Возвращает: "ipv4", "ipv6", "both", или "none".
-
-    v5.0.3: критически важно для РФ — ТСПУ делает DPI на WireGuard-трафике
-    и может дропать IPv4-пакеты внутри туннеля, пропуская IPv6. Handshake
-    проходит (маленькие пакеты), интерфейс поднят, но IPv4 connectivity
-    отсутствует. Xray с domainStrategy=UseIPv4 в этом случае не может
-    достучаться до YouTube.
-
-    Алгоритм:
-      1. Проверяем IPv4: curl -4 --interface wg-warp
-      2. Проверяем IPv6: curl -6 --interface wg-warp
-      3. Возвращаем результат
-
-    Приоритет: "both" > "ipv4" > "ipv6" > "none"
-    (IPv4 предпочтительнее — лучше поддерживается сайтами)
+    Возвращает (version, debug_dict):
+      version: "ipv4"/"ipv6"/"both"/"none"
+      debug_dict: {"ipv4": str, "ipv6": str} — отладка для каждой проверки
     """
-    v4 = _warp_ipv4_connectivity()
-    v6 = _warp_ipv6_connectivity()
+    v4, dbg4 = _warp_ipv4_connectivity()
+    v6, dbg6 = _warp_ipv6_connectivity()
     if v4 and v6:
-        return "both"
-    if v4:
-        return "ipv4"
-    if v6:
-        return "ipv6"
-    return "none"
+        ver = "both"
+    elif v4:
+        ver = "ipv4"
+    elif v6:
+        ver = "ipv6"
+    else:
+        ver = "none"
+    return ver, {"ipv4": dbg4, "ipv6": dbg6}
 
 
 def _xray_apply_warp_outbound(ip_version: str = "auto"):
@@ -558,80 +548,42 @@ def _warp_status_check() -> dict:
     return out
 
 
-def _warp_ipv4_connectivity(timeout: int = 8) -> bool:
-    """Проверяет, что IPv4-трафик через wg-warp действительно доходит до интернета.
-
-    v5.0.2 FIX: до этого проверяли только существование интерфейса wg-warp.
-    Но интерфейс может существовать, handshake может быть свежим, а IPv4
-    через туннель всё равно не работает — например, если в wg-warp.conf
-    AllowedIPs содержит только ::/0 без 0.0.0.0/0 (WireGuard дропает IPv4
-    пакеты), или если Cloudflare endpoint принимает только IPv6.
-
-    Без этой проверки Xray с domainStrategy=UseIPv4 получает sendThrough=
-    172.16.0.2, пытается открыть TCP-соединение к YouTube через wg-warp,
-    соединение висит (пакеты дропаются) → YouTube показывает "нет
-    подключения к интернету". Диагностика показывала "всё ОК", потому что
-    тестировала без -4 (curl выбирал IPv6, который работал через WARP).
-
-    v5.0.3 FIX: используем Cloudflare IPv4-адрес НАПРЯМУЮ (без DNS) через
-    --resolve. Это надёжнее — не зависит от системного DNS-резолвера,
-    который может быть сломан (DNSCrypt на 127.0.0.1:5300, но порт закрыт,
-    или upstream недоступен). Endpoint: 162.159.135.80 — стабильный
-    anycast Cloudflare IPv4.
-
-    Endpoint проверки: cloudflare.com/cdn-cgi/trace — быстрый, всегда
-    доступен, возвращает текст (легко парсить).
-    """
+def _warp_ipv4_connectivity(timeout: int = 8) -> tuple:
+    """Проверяет IPv4-связность через wg-warp. Возвращает (ok, debug)."""
     try:
         r = _run(
             ["curl", "-4", "--interface", "wg-warp",
              "--max-time", str(timeout), "-s",
-             "--resolve", "www.cloudflare.com:443:162.159.135.80",
              "https://www.cloudflare.com/cdn-cgi/trace"],
             capture=True, check=False,
         )
-        if r.returncode != 0:
-            return False
         out = (r.stdout or "").strip()
-        if not out:
-            return False
-        # Если в ответе есть warp=on или warp=plus — WARP работает.
-        # Если есть просто ip=... — connectivity есть, но warp flag
-        # может отсутствовать (туннель работает, но Cloudflare не
-        # идентифицирует как WARP — это тоже ОК для наших целей).
-        return ("ip=" in out) or ("warp=" in out)
-    except Exception:
-        return False
+        _err = (r.stderr or "").strip()[:200]
+        debug = f"rc={r.returncode}, stdout_len={len(out)}, stderr={_err}"
+        if r.returncode != 0 or not out:
+            return False, debug
+        return (("ip=" in out) or ("warp=" in out)), debug
+    except Exception as e:
+        return False, f"exception: {e}"
 
 
-def _warp_ipv6_connectivity(timeout: int = 8) -> bool:
-    """Проверяет IPv6-связность через wg-warp.
-
-    v5.0.3 FIX: используем Cloudflare IPv6-адрес НАПРЯМУЮ (без DNS),
-    потому что сервер без публичного IPv6 может не иметь IPv6-настроенного
-    DNS-резолвера. curl -6 https://www.cloudflare.com/ пытается
-    зарезолвить AAAA-запись через системный DNS, а если DNSCrypt
-    настроен только на IPv4 upstream — резолв падает с "no IPv6 address",
-    хотя сам IPv6-туннель WARP работает.
-
-    Cloudflare имеет стабильный anycast IPv6 2606:4700::6810:85e5 —
-    тот же /cdn-cgi/trace endpoint. Используем [2606:4700::6810:85e5]
-    с --resolve чтобы обойти DNS полностью.
-    """
+def _warp_ipv6_connectivity(timeout: int = 8) -> tuple:
+    """Проверяет IPv6-связность через wg-warp. Возвращает (ok, debug)."""
     try:
         r = _run(
             ["curl", "-6", "--interface", "wg-warp",
              "--max-time", str(timeout), "-s",
-             "--resolve", "www.cloudflare.com:443:[2606:4700::6810:85e5]",
              "https://www.cloudflare.com/cdn-cgi/trace"],
             capture=True, check=False,
         )
-        if r.returncode != 0:
-            return False
         out = (r.stdout or "").strip()
-        return bool(out) and ("ip=" in out)
-    except Exception:
-        return False
+        _err = (r.stderr or "").strip()[:200]
+        debug = f"rc={r.returncode}, stdout_len={len(out)}, stderr={_err}"
+        if r.returncode != 0 or not out:
+            return False, debug
+        return ("ip=" in out), debug
+    except Exception as e:
+        return False, f"exception: {e}"
 
 
 def _warp_allowed_ips_check() -> dict:
@@ -698,13 +650,18 @@ def do_youtube_warp_interactive(core) -> tuple:
         # Handshake проходит (маленькие пакеты), IPv6 работает, IPv4 — нет.
         # Xray нужно настроить на работающую IP-версию.
         info("Проверка IP-связности через wg-warp (IPv4 + IPv6)...")
-        ip_ver = _detect_warp_ip_version()
+        ip_ver, dbg = _detect_warp_ip_version()
 
         if ip_ver == "none":
             # Ни IPv4, ни IPv6 через WARP не работают.
             print()
             warn("⚠ WARP поднят, но НИ IPv4, НИ IPv6 через wg-warp не работают.")
             print(f"{DIM}  Handshake может проходить, но данные не идут.{NC}")
+            print()
+            # v5.0.4: показываем отладку curl — чтобы понять ПОЧЕМУ падает.
+            print(f"{YELLOW}  Отладка curl:{NC}")
+            print(f"  {DIM}IPv4: {dbg.get('ipv4', '?')}{NC}")
+            print(f"  {DIM}IPv6: {dbg.get('ipv6', '?')}{NC}")
             print()
             allowed = _warp_allowed_ips_check()
             if not allowed["ipv4"] and not allowed["ipv6"]:
@@ -726,7 +683,7 @@ def do_youtube_warp_interactive(core) -> tuple:
                     from chimera.modules.warp import do_manage_warp
                     do_manage_warp()
                     # После выхода из меню перепроверяем.
-                    new_ver = _detect_warp_ip_version()
+                    new_ver, _ = _detect_warp_ip_version()
                     if new_ver != "none":
                         success(f"Через WARP заработал: {new_ver}")
                         return apply_youtube_warp_routing(True, ip_version=new_ver)
