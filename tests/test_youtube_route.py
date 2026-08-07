@@ -748,11 +748,11 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
             youtube_route.do_manage_youtube_via_ru()
 
         output = captured.getvalue()
-        # v5.0.1: prompt теперь [1/2/W/Q] — добавлена кнопка W (YouTube->WARP)
-        self.assertIn("[1/2/W/Q]", output,
-                      f"Single-node должен показать [1/2/W/Q], вывод:\n{output}")
-        # НЕ должно быть multi-node prompt типа [1-5/W/Q]
-        self.assertNotIn("[1-5/W/Q]", output)
+        # v5.0.8: prompt теперь [1/2/F/W/Q] — добавлены кнопки F (RU+fragment) и W (YouTube->WARP)
+        self.assertIn("[1/2/F/W/Q]", output,
+                      f"Single-node должен показать [1/2/F/W/Q], вывод:\n{output}")
+        # НЕ должно быть multi-node prompt типа [1-5/F/W/Q]
+        self.assertNotIn("[1-5/F/W/Q]", output)
 
     # ── Кейс 8: len(CHAIN_NODES)==3 → меню показывает 5 пунктов ───────────
     def test_three_nodes_shows_five_items(self):
@@ -787,11 +787,11 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
             youtube_route.do_manage_youtube_via_ru()
 
         output = captured.getvalue()
-        # v5.0.1: prompt теперь [1-5/W/Q] — добавлена кнопка W (YouTube->WARP)
-        self.assertIn("[1-5/W/Q]", output,
-                      f"Multi-node (3 nodes) должен показать [1-5/W/Q], вывод:\n{output}")
+        # v5.0.8: prompt теперь [1-5/F/W/Q] — добавлены кнопки F (RU+fragment) и W (YouTube->WARP)
+        self.assertIn("[1-5/F/W/Q]", output,
+                      f"Multi-node (3 nodes) должен показать [1-5/F/W/Q], вывод:\n{output}")
         # Не должно быть single-node prompt
-        self.assertNotIn("[1/2/W/Q]", output)
+        self.assertNotIn("[1/2/F/W/Q]", output)
         # Должны быть хосты нод
         self.assertIn("1.1.1.1", output)
         self.assertIn("2.2.2.2", output)
