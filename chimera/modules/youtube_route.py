@@ -65,6 +65,11 @@ _YOUTUBE_QUIC_BLOCK_COMMENT = "youtube_block_quic"
 # v5.0.13: маркер в state.json для сохранённых оригинальных значений sniffing.
 # Используется _youtube_patch_inbounds_for_fragment() / _youtube_restore_inbounds_after_fragment()
 # чтобы корректно откатывать routeOnly/destOverride после отключения fragment.
+#
+# v5.0.14: функции _youtube_patch_inbounds_for_fragment / _youtube_restore_inbounds_after_fragment
+# ОСТАВЛЕНЫ в коде, но ВЫЗОВЫ УБРАНЫ. Причина: routeOnly=True ломает UseIPv4
+# стратегию freedom outbound (фикс v4.12.6). Если кто-то захочет экспериментально
+# включить — можно раскомментировать вызовы в _youtube_apply_fragment_to_xray / _youtube_remove_from_xray.
 _YOUTUBE_SNIFFING_BACKUP_KEY = "_youtube_sniffing_backup"
 
 # v5.0.13: безопасный sockopt для freedom outbound.
@@ -74,14 +79,13 @@ _YOUTUBE_SNIFFING_BACKUP_KEY = "_youtube_sniffing_backup"
 # загруженного модуля tcp_bbr в ядре, иначе setsockopt(TCP_CONGESTION,"bbr")
 # возвращает ENOTSUP и Xray прерывает КАЖДЫЙ dial через freedom outbound.
 #
-# Безопасный набор (без tcpCongestion, без удалённого tcpNoDelay):
-#   • tcpKeepAliveIdle: 60     — keepalive через 60с idle (как Chrome default)
-#   • tcpKeepAliveInterval: 15 — повторять каждые 15с
-#   • tcpUserTimeout: 10000    — таймаут на пользовательские данные (10с)
-#   • tcpFastOpen: true        — TFO на исходящих (если поддерживается ядром)
-#
-# Подтверждено документацией Xray (v26.x): sockopt на freedom outbound
-# поддерживается официально. Источник: xtls.github.io/en/config/transports/sockopt.html
+# v5.0.14: ОПРЕДЕЛЁН, но НЕ ПРИМЕНЯЕТСЯ к freedom outbound. Пользователи
+# сообщали что возврат sockopt (даже безопасного, без bbr) в v5.0.13 снова
+# вызывал 'Нет подключения'. Причины могут быть:
+#   • tcpFastOpen требует net.ipv4.tcp_fastopen != 0; на некоторых VPS = 0
+#     и setsockopt(TCP_FASTOPEN_CONNECT) может возвращать ошибку → dial abort
+#   • tcpUserTimeout может не поддерживаться на старых ядрах
+# Оставляем константу как документацию для будущих экспериментов.
 _YOUTUBE_SAFE_SOCKOPT = {
     "tcpKeepAliveIdle":     60,
     "tcpKeepAliveInterval": 15,
@@ -266,38 +270,32 @@ def _resolve_node_ip_and_flag(host: str) -> tuple[str, str]:
 # =============================================================================
 
 # =============================================================================
-#  v5.0.13: ПАТЧ INBOUND SNIFFING ДЛЯ FRAGMENT-РЕЖИМА
+#  v5.0.13: ПАТЧ INBOUND SNIFFING ДЛЯ FRAGMENT-РЕЖИМА (ВЫКЛЮЧЕН В v5.0.14)
 # =============================================================================
-# Проблема: по умолчанию (с v4.12.6) все VLESS/REALITY inbound имеют
-#   routeOnly: False + destOverride: ["http", "tls"]
-# Это значит:
-#   1. QUIC-пакеты YouTube (UDP/443) НЕ имеют sniffed-домена в routing
-#      → правило fragment (domain:[youtube...]) НЕ матчит QUIC
-#      → QUIC видео идёт через catch-all к exit-нодам (медленно / блокируется ТСПУ)
-#   2. routeOnly: False переписывает destination на sniffed domain
-#      → freedom outbound получает домен и делает DNS-resolve через систему
-#      → при медленном DNS это добавляет задержку на каждый новый TCP-коннект
-#      → "видео buffering несколько секунд"
-#   3. При смене preset (Xray restart) — активные TCP-коннекты рвутся,
-#      browser retries, но в момент restart routing не работает →
-#      "Нет подключения к интернету" (проходит после перезагрузки сервера).
+# ВНИМАНИЕ (v5.0.14): Функции ниже ОПРЕДЕЛЕНЫ, но ИХ ВЫЗОВЫ УБРАНЫ из
+# _youtube_apply_fragment_to_xray() и _youtube_remove_from_xray().
 #
-# Решение: ТОЛЬКО когда включён RU+fragment — патчим inbound на:
-#   • routeOnly: True  (routing по SNI без переписывания destination)
-#   • destOverride: ["http", "tls", "quic"]  (QUIC SNI используется для роутинга)
+# Причина отката:
+#   • routeOnly=True ломает фикс v4.12.6 — freedom outbound получает
+#     уже резолвленный IP (а не домен) от клиента, и domainStrategy=UseIPv4
+#     игнорируется. Если клиент резолвит YouTube в IPv6 (а RU-сервер без IPv6),
+#     freedom пытается звонить на IPv6 и падает → 'Нет подключения'.
+#   • Добавление 'quic' в destOverride вызывало побочные эффекты на некоторых
+#     конфигурациях (log noise, QUIC parsing issues).
+#   • sockopt с tcpFastOpen в freedom outbound возвращал 'Нет подключения'
+#     у некоторых пользователей (возможно из-за net.ipv4.tcp_fastopen=0).
 #
-# После отключения fragment — откатываем обратно (routeOnly: False, без quic).
-# Аналогично для AWG-режима: НЕ трогаем metadataOnly=True (там sniffing доменов
-# отключён намеренно, AWG использует kernel-роутинг).
+# Код оставлен для будущих экспериментов — можно безопасно вызывать,
+# они идемпотентны и не делают ничего разрушительного. Просто ВЫЗОВЫ убраны.
 #
-# Источник: https://xtls.github.io/en/config/inbound.html#routeonly-true-false
-#   "routeOnly: true — Use the sniffed domain only for routing; the proxy
-#    destination address remains the IP. This item requires destOverride
-#    to be enabled to work."
+# Источник для будущих правок: https://xtls.github.io/en/config/inbound.html#routeonly-true-false
 
 def _youtube_patch_inbounds_for_fragment(cfg: dict) -> bool:
-    """Включает routeOnly=True + destOverride['quic'] во всех VLESS/REALITY
-    inbound с metadataOnly=False (не-AWG).
+    """[ВЫКЛЮЧЕНО В v5.0.14] Включает routeOnly=True + destOverride['quic'].
+
+    Функция оставлена для будущих экспериментов. Вызовы убраны из
+    _youtube_apply_fragment_to_xray() из-за регрессии — ломала UseIPv4
+    стратегию freedom outbound (фикс v4.12.6).
 
     Возвращает True если хотя бы один inbound был изменён.
     """
@@ -307,34 +305,28 @@ def _youtube_patch_inbounds_for_fragment(cfg: dict) -> bool:
         if proto not in ("vless", "trojan", "vmess", "dokodemo-door"):
             continue
         sniffing = ib.get("sniffing")
-        # Нет sniffing или disabled — пропускаем.
         if not sniffing or not sniffing.get("enabled"):
             continue
-        # AWG-режим: metadataOnly=True означает что sniffers TLS/HTTP/QUIC
-        # отключены, routeOnly не имеет эффекта. НЕ трогаем — оставляем как есть.
         if sniffing.get("metadataOnly") is True:
             continue
-        # routeOnly: True — routing по SNI без переписывания destination.
         if sniffing.get("routeOnly") is not True:
             sniffing["routeOnly"] = True
             changed = True
-        # Добавляем 'quic' в destOverride (если его нет).
         do = sniffing.setdefault("destOverride", ["http", "tls"])
         if not isinstance(do, list):
             do = ["http", "tls"]
             sniffing["destOverride"] = do
         if "quic" not in do:
-            # Вставляем 'quic' в конец — порядок не важен для Xray.
             do.append("quic")
             changed = True
     return changed
 
 
 def _youtube_restore_inbounds_after_fragment(cfg: dict) -> bool:
-    """Восстанавливает дефолтные routeOnly=False + destOverride без 'quic'.
+    """[ВЫКЛЮЧЕНО В v5.0.14] Восстанавливает дефолтные routeOnly=False + без 'quic'.
 
-    Вызывается из _youtube_remove_from_xray() чтобы вернуть конфиг в исходное
-    состояние (после того как fragment-правило удалено).
+    Функция оставлена для будущих экспериментов. Вызовы убраны из
+    _youtube_remove_from_xray().
 
     Возвращает True если хотя бы один inbound был изменён.
     """
@@ -346,14 +338,11 @@ def _youtube_restore_inbounds_after_fragment(cfg: dict) -> bool:
         sniffing = ib.get("sniffing")
         if not sniffing or not sniffing.get("enabled"):
             continue
-        # НЕ трогаем metadataOnly=True (AWG-режим).
         if sniffing.get("metadataOnly") is True:
             continue
-        # routeOnly: False (дефолт проекта с v4.12.6).
         if sniffing.get("routeOnly") is not False:
             sniffing["routeOnly"] = False
             changed = True
-        # Убираем 'quic' из destOverride.
         do = sniffing.get("destOverride", [])
         if isinstance(do, list) and "quic" in do:
             sniffing["destOverride"] = [x for x in do if x != "quic"]
@@ -540,6 +529,20 @@ def _youtube_apply_fragment_to_xray(
         чтобы активные соединения успели корректно завершиться.
       • Расширенный список YouTube-доменов (CDN variants).
 
+    v5.0.14: HOTFIX — откат опасных изменений v5.0.13:
+      • УБРАН sockopt из freedom outbound (вызывал 'Нет подключения'
+        у некоторых пользователей — возможно tcpFastOpen требует
+        net.ipv4.tcp_fastopen != 0, что не всегда так на VPS).
+      • УБРАНЫ вызовы _youtube_patch_inbounds_for_fragment() /
+        _youtube_restore_inbounds_after_fragment(). routeOnly=True ломал
+        фикс v4.12.6 — freedom outbound получал IP от клиента (а не домен),
+        и domainStrategy=UseIPv4 не применялся. Если клиент резолвил
+        YouTube в IPv6 (а RU-сервер без IPv6) — dial падал.
+      • ОСТАВЛЕНЫ: maxSplit, расширенный список доменов, грейсфул-рестарт.
+      • Функции _youtube_patch_inbounds_for_fragment() / 
+        _youtube_restore_inbounds_after_fragment() оставлены в коде
+        (с пометкой ВЫКЛЮЧЕНО) для будущих экспериментов.
+
     Требует Xray 26.x+ (XTLS форк поддерживает fragment в freedom.settings).
     Vanilla Xray-core не поддерживает — будет ошибка при старте.
 
@@ -593,18 +596,14 @@ def _youtube_apply_fragment_to_xray(
             # Создаём outbound direct-fragment если его нет.
             # Перезаписываем если есть — чтобы обновить параметры fragment.
             outbounds = [ob for ob in outbounds if ob.get("tag") != _outbound_tag]
-            # v5.0.13: безопасный sockopt для freedom outbound.
-            #
-            # В v5.0.10 был sockopt с tcpCongestion='bbr' → ломал YouTube полностью
-            # (bbr требует modprobe tcp_bbr; если модуль не загружен —
-            #  setsockopt(TCP_CONGESTION) возвращает ENOTSUP, Xray прерывает dial).
-            # В v5.0.12 sockopt был убран целиком. Теперь возвращаем БЕЗОПАСНЫЙ
-            # набор: tcpKeepAlive*, tcpUserTimeout, tcpFastOpen. БЕЗ bbr, БЕЗ
-            # tcpNoDelay (последний удалён в Xray — был no-op).
-            #
-            # Подтверждено докой: https://xtls.github.io/en/config/transports/sockopt.html
-            # «For direct outbounds such as Freedom, the peer is usually any
-            # ordinary public network target... only sockopt is available.»
+            # v5.0.14: ЧИСТЫЙ freedom outbound — БЕЗ sockopt.
+            # В v5.0.13 мы вернули sockopt (безопасный, без bbr) — это снова
+            # вызывало 'Нет подключения' у некоторых пользователей.
+            # Причины возможные:
+            #   • tcpFastOpen требует net.ipv4.tcp_fastopen != 0 (не всегда так)
+            #   • tcpUserTimeout/tcpKeepAlive* могут фейлить setsockopt
+            #     на старых ядрах → dial abort → 'Нет подключения'
+            # Возвращаемся к чистому fragment, как было в рабочей v5.0.9/v5.0.12.
             _fragment_settings = {
                 "domainStrategy": "UseIPv4",
                 "fragment": {
@@ -622,15 +621,16 @@ def _youtube_apply_fragment_to_xray(
                 "protocol": "freedom",
                 "tag":      _outbound_tag,
                 "settings": _fragment_settings,
-                "sockopt":  dict(_YOUTUBE_SAFE_SOCKOPT),
             })
             cfg["outbounds"] = outbounds
 
-            # v5.0.13: ПАТЧ INBOUND SNIFFING — критично для стабильности fragment.
-            # Без этого QUIC-трафик YouTube (UDP/443) не матчится по domain в
-            # routing → идёт через catch-all к exit-нодам. Также routeOnly=True
-            # убирает лишний DNS-resolve в freedom outbound.
-            _inbounds_changed = _youtube_patch_inbounds_for_fragment(cfg)
+            # v5.0.13: ПАТЧ INBOUND SNIFFING — ВЫКЛЮЧЕН В v5.0.14.
+            # Причина: routeOnly=True ломает фикс v4.12.6 (freedom outbound
+            # получает IP от клиента вместо домена → domainStrategy=UseIPv4
+            # игнорируется → если клиент резолвит в IPv6, dial падает).
+            # См. подробнее в комментарии к _youtube_patch_inbounds_for_fragment().
+            # _inbounds_changed = _youtube_patch_inbounds_for_fragment(cfg)
+            _inbounds_changed = False  # v5.0.14: явно False, не патчим
 
             # v5.0.10/v5.0.11: опциональная блокировка QUIC (UDP/443) для YouTube.
             # По умолчанию ВЫКЛЮЧЕНА (block_quic=False) — на некоторых конфигурациях
@@ -664,7 +664,7 @@ def _youtube_apply_fragment_to_xray(
             info(f"Outbound '{_outbound_tag}' (fragment: packets={packets}, "
                  f"length={length}, interval={interval}"
                  + (f", maxSplit={max_split}" if max_split else "")
-                 + ", sockopt: keepalive+TFO)")
+                 + ")")
 
             # Новое правило fragment.
             new_rule = {
@@ -769,9 +769,9 @@ def _youtube_remove_from_xray() -> bool:
                              if ob.get("tag") not in _youtube_outbound_tags]
             if len(new_outbounds) != len(outbounds):
                 cfg["outbounds"] = new_outbounds
-            # v5.0.13: восстанавливаем дефолтные значения sniffing в inbound
-            # (routeOnly=False, destOverride без 'quic') — откат патча fragment.
-            _sniff_changed = _youtube_restore_inbounds_after_fragment(cfg)
+            # v5.0.14: sniffing patch ВЫКЛЮЧЕН — не вызываем _youtube_restore_inbounds_after_fragment().
+            # См. комментарий к _youtube_restore_inbounds_after_fragment() для деталей.
+            _sniff_changed = False
             if new_count == old_count and len(new_outbounds) == len(outbounds) and not _sniff_changed:
                 # Ничего не изменилось — пропускаем.
                 continue
@@ -941,12 +941,14 @@ def _fragment_preset_menu(core) -> tuple | None:
     # v5.0.11: вопрос про QUIC block (опционально, по умолчанию ВЫКЛ)
     # v5.0.13: с патчем sniffing (routeOnly=True + destOverride[quic]) QUIC block
     # теперь действительно работает — но всё ещё может вызывать browser retry delay.
+    # v5.0.14: патч sniffing ВЫКЛЮЧЕН — routeOnly=True ломал UseIPv4 стратегию.
+    #          QUIC block снова не матчит QUIC по домену (но это не страшно —
+    #          просто остаётся как опциональный инструмент).
     print()
     print(f"{DIM}  QUIC (UDP/443) — YouTube использует его для видео.{NC}")
-    print(f"{DIM}  TCP fragment работает только с TCP. С v5.0.13 QUIC-трафик{NC}")
-    print(f"{DIM}  теперь корректно маршрутизируется по SNI (routeOnly+quic),{NC}")
-    print(f"{DIM}  но фрагментация на QUIC не действует. Блокировка QUIC{NC}")
+    print(f"{DIM}  TCP fragment работает только с TCP. Блокировка QUIC{NC}")
     print(f"{DIM}  заставляет YouTube fallback на TCP — добавляет 1-3с задержки.{NC}")
+    print(f"{DIM}  По умолчанию ВЫКЛ (безопасный вариант).{NC}")
     print()
     try:
         quic_ans = input(f"{CYAN}  Блокировать QUIC для YouTube? [y/N]:{NC} ").strip().lower()
@@ -1169,8 +1171,8 @@ def do_manage_youtube_via_ru() -> None:
                     rule_in_config = True
                     _box_info(f"YouTube через RU+fragment ({_quic_str}).")
                     _box_info(f"{DIM}  packets={_packets}, length={_length}, interval={_interval}{_ms_str}{NC}")
-                    _box_info(f"{DIM}  v5.0.13: применён patch sniffing (routeOnly+quic) и sockopt (keepalive+TFO).{NC}")
-                    _box_info(f"{DIM}  Если не работает — попробуйте другой пресет или проверьте: journalctl -u xray -n 30{NC}")
+                    _box_info(f"{DIM}  v5.0.14: чистый fragment (без sockopt/patch sniffing). Если не работает{NC}")
+                    _box_info(f"{DIM}  — попробуйте другой пресет или проверьте: journalctl -u xray -n 30{NC}")
                 else:
                     _box_warn("  Не удалось применить — смотрите вывод выше.")
         else:
@@ -1283,8 +1285,8 @@ def do_manage_youtube_via_ru() -> None:
                     rule_in_config = True
                     _box_info(f"YouTube через RU+fragment ({_quic_str}).")
                     _box_info(f"{DIM}  packets={_packets}, length={_length}, interval={_interval}{_ms_str}{NC}")
-                    _box_info(f"{DIM}  v5.0.13: применён patch sniffing (routeOnly+quic) и sockopt (keepalive+TFO).{NC}")
-                    _box_info(f"{DIM}  Если не работает — попробуйте другой пресет или проверьте: journalctl -u xray -n 30{NC}")
+                    _box_info(f"{DIM}  v5.0.14: чистый fragment (без sockopt/patch sniffing). Если не работает{NC}")
+                    _box_info(f"{DIM}  — попробуйте другой пресет или проверьте: journalctl -u xray -n 30{NC}")
                 else:
                     _box_warn("  Не удалось применить — смотрите вывод выше.")
         elif ch == "w":
