@@ -2,6 +2,94 @@
 
 ---
 
+## FIX(youtube): v5.0.14 — HOTFIX откат опасных изменений v5.0.13 — 8 августа 2026
+
+**СРОЧНЫЙ ОТКАТ. После v5.0.13 у пользователя YouTube снова выдал
+'Нет подключения к интернету'. Возврат к чистому fragment (как в рабочей v5.0.12),
+но с сохранением безопасных улучшений.**
+
+### Что сломалось в v5.0.13
+
+В v5.0.13 я добавил три изменения, которые в теории должны были улучшить
+стабильность, но на практике ломали YouTube у пользователя:
+
+1. **`routeOnly: True` + `destOverride: ["quic"]` в inbound sniffing.**
+   Это переопределило фикс **v4.12.6** от 5 июня 2026 года. Согласно CHANGELOG:
+
+   > **v4.12.6 — Фикс IPv6 через прокси (routeOnly: False)**
+   > Причина: routeOnly: True означал что xray не переписывал destination →
+   > freedom outbound получал уже резолвленный IP вместо доменного имени →
+   > domainStrategy: UseIPv4 не могла сделать свою работу.
+
+   В v5.0.13 я выставил routeOnly=True → freedom outbound стал получать IP
+   от клиента (а не домен) → domainStrategy=UseIPv4 игнорировалась. Если
+   клиент резолвит YouTube в IPv6 (например, мобильный оператор с IPv6),
+   а RU-сервер без IPv6 — freedom пытается звонить на IPv6 и падает →
+   «Нет подключения к интернету».
+
+2. **`sockopt` в freedom outbound (`tcpFastOpen`, `tcpKeepAlive*`, `tcpUserTimeout`).**
+   Хотя дока Xray подтверждает что sockopt на freedom outbound поддерживается,
+   на практике у некоторых пользователей это снова вызывало «Нет подключения».
+   Возможные причины:
+   - `tcpFastOpen` требует `net.ipv4.tcp_fastopen != 0` в sysctl; на некоторых
+     VPS значение = 0, и setsockopt(TCP_FASTOPEN_CONNECT) может возвращать
+     ошибку → dial abort → «Нет подключения».
+   - `tcpUserTimeout` может не поддерживаться на старых ядрах.
+
+3. **`"quic"` в `destOverride`.** Хотя это должно быть безопасно с routeOnly=True,
+   commit fb13e49 уже удалял "quic" из-за побочных эффектов (log noise, QUIC
+   parsing issues). Возврат мог добавить нестабильности.
+
+### Что откатываем (v5.0.14)
+
+- **УБРАН `sockopt` из freedom outbound.** Возврат к чистому fragment, как в
+  рабочей v5.0.9/v5.0.12. Константа `_YOUTUBE_SAFE_SOCKOPT` оставлена в коде
+  как документация.
+- **УБРАНЫ вызовы `_youtube_patch_inbounds_for_fragment()` и
+  `_youtube_restore_inbounds_after_fragment()`.** Сами функции оставлены
+  в коде (с пометкой ВЫКЛЮЧЕНО) для будущих экспериментов. Причина: routeOnly=True
+  ломает UseIPv4 стратегию freedom outbound (фикс v4.12.6).
+
+### Что оставляем из v5.0.13 (безопасные улучшения)
+
+- **`maxSplit`** — поле fragment, ограничивает количество фрагментов на
+  TCP-сегмент. Пресеты: light=нет, medium=3-6, heavy=5-10, max=8-15.
+- **Расширенный список YouTube-доменов** (CDN variants): wide-youtube.l.google.com,
+  youtube-ui.l.google.com, youtubeembedded-pa.googleapis.com, youtube.googleapis.com,
+  yt-video-googleusercontent.com, lh3.googleusercontent.com.
+- **Грейсфул-рестарт**: 500мс sleep перед `systemctl restart xray`.
+- **QUIC block (опциональный)** — остаётся в меню, но снова не матчит QUIC
+  по домену (т.к. "quic" не в destOverride). Это как было до v5.0.13.
+
+### Состояние после v5.0.14
+
+YouTube через RU+fragment работает так же, как в v5.0.12 (т.е. «работает, но
+нестабильно» — buffering, Shorts иногда тупят). Это базовая стабильность,
+которую мы знаем. Никаких регрессий относительно v5.0.12.
+
+Дальнейшие улучшения стабильности требуют более глубокого подхода:
+- IPv6 connectivity на RU-сервере (чтобы routeOnly=True работал)
+- ИЛИ: балансировщик между RU+fragment и exit-нодами для QUIC-видео
+- ИЛИ: переход на sing-box с его `route.platform.http_client` для более
+  гибкой маршрутизации
+
+### Тесты
+
+- 53 теста YouTube-модуля (42 старых + 11 новых v5.0.13/v5.0.14) — все проходят.
+- Всего 279 связанных тестов проходят.
+- Новые тесты v5.0.14:
+  - `test_no_sockopt_in_freedom_outbound` — проверяет что sockopt НЕ в outbound
+  - `test_inbound_sniffing_not_modified` — проверяет что routeOnly/destOverride не трогаются
+  - `TestPatchInboundsFunctionDefined` — функции определены и работают (если вызвать вручную)
+
+### Совместимость
+
+- Backward compatible с v5.0.12 (поведение идентично, плюс maxSplit/domains/sleep).
+- AWG-режим НЕ затронут.
+- Xray 26.x+ требуется (XTLS форк).
+
+---
+
 ## FIX(youtube): v5.0.13 — стабильность RU+fragment через patch sniffing + safe sockopt — 8 августа 2026
 
 **Полная переработка стабильности YouTube через RU+fragment. Решает:
