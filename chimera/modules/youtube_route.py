@@ -362,6 +362,7 @@ def _youtube_apply_fragment_to_xray(
     packets: str = "1",
     length: str = "10-30",
     interval: str = "3-8",
+    block_quic: bool = False,
 ) -> bool:
     """Добавляет YouTube→RU правило с TCP-фрагментацией ClientHello.
 
@@ -377,16 +378,22 @@ def _youtube_apply_fragment_to_xray(
     (packets="1", length="10-30", interval="3-8") — меньше задержка,
     достаточно для обхода ТСПУ. Пресеты доступны в меню.
 
+    v5.0.10: добавлена опциональная блокировка QUIC (block_quic=True).
+    По умолчанию ВЫКЛЮЧЕНА — на некоторых конфигурациях Xray QUIC block
+    ломает YouTube полностью. Включается в подменю пресета.
+
+    v5.0.11: block_quic по умолчанию False (был True в v5.0.10, вызывал
+    'Нет подключения к интернету' у некоторых пользователей).
+
     Требует Xray 26.x+ (XTLS форк поддерживает fragment в freedom.settings).
     Vanilla Xray-core не поддерживает — будет ошибка при старте.
 
     Args:
-      packets:  "1" — только первый TCP-сегмент (ClientHello)
-                "1-3" — первые 3 сегмента (больше покрытия, больше задержка)
-      length:   "10-30" — размер каждого фрагмента в байтах
-                Меньше = больше фрагментов = лучше обход, но медленнее
-      interval: "3-8" — задержка между фрагментами в мс
-                Меньше = быстрее, но ТСПУ может успеть собрать
+      packets:    "1" — только первый TCP-сегмент (ClientHello)
+      length:     "10-30" — размер каждого фрагмента в байтах
+      interval:   "3-8" — задержка между фрагментами в мс
+      block_quic: если True — блокировать QUIC (UDP/443) для YouTube.
+                  По умолчанию False — может ломать YouTube.
 
     Возвращает True если хотя бы один config.json пропатчен успешно.
     """
@@ -454,46 +461,54 @@ def _youtube_apply_fragment_to_xray(
             })
             cfg["outbounds"] = outbounds
 
-            # v5.0.10: блокировка QUIC (UDP/443) для YouTube.
-            # КРИТИЧНО для стабильности: TCP fragment фрагментирует только TCP.
-            # YouTube использует QUIC (UDP/443) для видео — QUIC обходит
-            # fragment и блокируется ТСПУ → "Нет подключения к интернету"
-            # после обновления страницы. Блокировка QUIC заставляет YouTube
-            # использовать TCP, который фрагментируется и проходит ТСПУ.
-            # Добавляем blackhole outbound если его нет.
-            if not any(ob.get("tag") == "youtube-quic-block" for ob in outbounds):
-                cfg["outbounds"].append({
-                    "protocol": "blackhole",
-                    "tag":      "youtube-quic-block",
-                })
-            # Убираем старое правило блокировки QUIC (идемпотентность).
-            rules = [r for r in rules
-                     if r.get("comment") != _YOUTUBE_QUIC_BLOCK_COMMENT]
-            # Правило блокировки QUIC — ДО правила fragment (приоритет).
-            quic_block_rule = {
-                "type":        "field",
-                "port":        "443",
-                "network":     "udp",
-                "domain":      list(_YOUTUBE_DOMAINS),
-                "outboundTag": "youtube-quic-block",
-                "comment":     _YOUTUBE_QUIC_BLOCK_COMMENT,
-            }
+            # v5.0.10/v5.0.11: опциональная блокировка QUIC (UDP/443) для YouTube.
+            # По умолчанию ВЫКЛЮЧЕНА (block_quic=False) — на некоторых конфигурациях
+            # Xray QUIC block ломает YouTube полностью ('Нет подключения').
+            # Включается в подменю пресета если пользователь хочет попробовать.
+            if block_quic:
+                if not any(ob.get("tag") == "youtube-quic-block" for ob in cfg["outbounds"]):
+                    cfg["outbounds"].append({
+                        "protocol": "blackhole",
+                        "tag":      "youtube-quic-block",
+                    })
+                # Убираем старое правило блокировки QUIC (идемпотентность).
+                rules = [r for r in rules
+                         if r.get("comment") != _YOUTUBE_QUIC_BLOCK_COMMENT]
+                quic_block_rule = {
+                    "type":        "field",
+                    "port":        "443",
+                    "network":     "udp",
+                    "domain":      list(_YOUTUBE_DOMAINS),
+                    "outboundTag": "youtube-quic-block",
+                    "comment":     _YOUTUBE_QUIC_BLOCK_COMMENT,
+                }
+                info("QUIC block: ВКЛЮЧЁН (UDP/443 для YouTube → blackhole)")
+            else:
+                # Убираем QUIC block если он был ранее включён.
+                rules = [r for r in rules
+                         if r.get("comment") != _YOUTUBE_QUIC_BLOCK_COMMENT]
+                cfg["outbounds"] = [ob for ob in cfg["outbounds"]
+                                    if ob.get("tag") != "youtube-quic-block"]
 
             info(f"Outbound '{_outbound_tag}' (fragment: packets={packets}, "
                  f"length={length}, interval={interval}, sockopt: TFO+keepalive+NoDelay)")
 
-            # Новое правило fragment. Prepended ПЕРЕД существующими.
+            # Новое правило fragment.
             new_rule = {
                 "type":        "field",
                 "domain":      list(_YOUTUBE_DOMAINS),
                 "outboundTag": _outbound_tag,
                 "comment":     _YOUTUBE_FRAG_RULE_COMMENT,
             }
-            # QUIC block первым, затем fragment rule, затем остальные.
-            routing["rules"] = [quic_block_rule, new_rule] + rules
+            # Если QUIC block включён — ставим его первым, затем fragment.
+            if block_quic:
+                routing["rules"] = [quic_block_rule, new_rule] + rules
+            else:
+                routing["rules"] = [new_rule] + rules
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             _set_config_owner(cfg_path)
-            info(f"Конфиг: {cfg_path} (YouTube→{_outbound_tag} + QUIC block)")
+            _quic_status = "+ QUIC block" if block_quic else "(без QUIC block)"
+            info(f"Конфиг: {cfg_path} (YouTube→{_outbound_tag} {_quic_status})")
             ok = True
         except Exception as e:
             warn(f"Ошибка патча {cfg_path}: {e}")
@@ -689,10 +704,9 @@ def _fragment_preset_menu(core) -> tuple | None:
         return None
 
     if ch in ("q", ""):
-        # Дефолт — medium
-        return ("1", "10-30", "3-8")
-
-    if ch == "c":
+        # Дефолт — medium, без QUIC block
+        result = ("1", "10-30", "3-8")
+    elif ch == "c":
         # Custom input
         print()
         print(f"{DIM}  Формат: range 'N-M' или single 'N' (без кавычек){NC}")
@@ -716,18 +730,33 @@ def _fragment_preset_menu(core) -> tuple | None:
         if not re.match(r'^\d+(-\d+)?$', interval):
             print(f"{YELLOW}  Некорректный формат interval{NC}")
             return None
-        return (packets, length, interval)
+        result = (packets, length, interval)
+    else:
+        # Пресет 1-4
+        try:
+            idx = int(ch) - 1
+            if 0 <= idx < len(_FRAGMENT_PRESETS):
+                _, _, packets, length, interval, _ = _FRAGMENT_PRESETS[idx]
+                result = (packets, length, interval)
+            else:
+                return None
+        except ValueError:
+            return None
 
-    # Пресет 1-4
+    # v5.0.11: вопрос про QUIC block (опционально, по умолчанию ВЫКЛ)
+    print()
+    print(f"{DIM}  QUIC (UDP/443) — YouTube использует его для видео.{NC}")
+    print(f"{DIM}  TCP fragment работает только с TCP. Блокировка QUIC{NC}")
+    print(f"{DIM}  заставляет YouTube использовать TCP, но на некоторых{NC}")
+    print(f"{DIM}  конфигурациях Xray это ломает YouTube полностью.{NC}")
+    print()
     try:
-        idx = int(ch) - 1
-        if 0 <= idx < len(_FRAGMENT_PRESETS):
-            _, _, packets, length, interval, _ = _FRAGMENT_PRESETS[idx]
-            return (packets, length, interval)
-    except ValueError:
-        pass
+        quic_ans = input(f"{CYAN}  Блокировать QUIC для YouTube? [y/N]:{NC} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        quic_ans = "n"
+    block_quic = quic_ans in ("y", "yes", "д", "да")
 
-    return None
+    return (result[0], result[1], result[2], block_quic)
 
 
 def do_manage_youtube_via_ru() -> None:
@@ -931,13 +960,15 @@ def do_manage_youtube_via_ru() -> None:
             if _frag_params is None:
                 _box_warn("  Отменено пользователем.")
             else:
-                _packets, _length, _interval = _frag_params
-                info(f"Применяем YouTube→RU+fragment (packets={_packets}, length={_length}, interval={_interval})...")
-                if _youtube_apply_fragment_to_xray(_packets, _length, _interval):
+                _packets, _length, _interval, _block_quic = _frag_params
+                _quic_str = "+ QUIC block" if _block_quic else "(без QUIC block)"
+                info(f"Применяем YouTube→RU+fragment (packets={_packets}, length={_length}, interval={_interval}, {_quic_str})...")
+                if _youtube_apply_fragment_to_xray(_packets, _length, _interval, block_quic=_block_quic):
                     _save_youtube_state("ru-fragment")
                     current_target = "ru-fragment"
                     rule_in_config = True
-                    _box_info(f"YouTube через RU+fragment (packets={_packets}, length={_length}, interval={_interval}).")
+                    _box_info(f"YouTube через RU+fragment ({_quic_str}).")
+                    _box_info(f"{DIM}  packets={_packets}, length={_length}, interval={_interval}{NC}")
                     _box_info(f"{DIM}  Если не работает — попробуйте другой пресет или проверьте: journalctl -u xray -n 30{NC}")
                 else:
                     _box_warn("  Не удалось применить — смотрите вывод выше.")
@@ -1040,13 +1071,15 @@ def do_manage_youtube_via_ru() -> None:
             if _frag_params is None:
                 _box_warn("  Отменено пользователем.")
             else:
-                _packets, _length, _interval = _frag_params
-                info(f"Применяем YouTube→RU+fragment (packets={_packets}, length={_length}, interval={_interval})...")
-                if _youtube_apply_fragment_to_xray(_packets, _length, _interval):
+                _packets, _length, _interval, _block_quic = _frag_params
+                _quic_str = "+ QUIC block" if _block_quic else "(без QUIC block)"
+                info(f"Применяем YouTube→RU+fragment (packets={_packets}, length={_length}, interval={_interval}, {_quic_str})...")
+                if _youtube_apply_fragment_to_xray(_packets, _length, _interval, block_quic=_block_quic):
                     _save_youtube_state("ru-fragment")
                     current_target = "ru-fragment"
                     rule_in_config = True
-                    _box_info(f"YouTube через RU+fragment (packets={_packets}, length={_length}, interval={_interval}).")
+                    _box_info(f"YouTube через RU+fragment ({_quic_str}).")
+                    _box_info(f"{DIM}  packets={_packets}, length={_length}, interval={_interval}{NC}")
                     _box_info(f"{DIM}  Если не работает — попробуйте другой пресет или проверьте: journalctl -u xray -n 30{NC}")
                 else:
                     _box_warn("  Не удалось применить — смотрите вывод выше.")
