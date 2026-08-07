@@ -598,58 +598,19 @@ def do_manage_youtube_via_ru() -> None:
         _box_bottom()
 
         try:
-            ch = input(f"{CYAN}  Выбор [1-{_default_idx}/Q]:{NC} ").strip().lower()
+            ch = input(f"{CYAN}  Выбор [1-{_default_idx}/W/Q]:{NC} ").strip().lower()
         except KeyboardInterrupt:
             print()
             return
 
         if ch == "q" or ch == "":
             return
-        try:
-            _choice = int(ch)
-        except ValueError:
-            return
-
-        if _choice == 1:
-            # RU entry
-            if not _geosite_available():
-                warn("geosite.dat не найден — правило geosite:youtube не сработает.")
-                input(f"\n{BLUE}  Нажмите Enter...{NC}")
-                return
-            info("Применяем YouTube→RU...")
-            if _youtube_apply_to_xray():
-                _save_youtube_state("ru")
-                current_target = "ru"  # v5.0.0 FIX: обновляем локальную переменную
-                rule_in_config = True
-                _box_info("YouTube теперь выходит через RU entry-ноду.")
-            else:
-                _box_warn("  Не удалось применить правило — смотрите вывод выше.")
-        elif 2 <= _choice <= len(nodes) + 1:
-            # Конкретная exit-нода
-            _node_idx = _choice - 2  # 0-indexed
-            _tag = f"chain-exit-{_node_idx+1}"
-            _host = nodes[_node_idx].get("host", "?")
-            info(f"Применяем YouTube→{_tag} ({_host})...")
-            if _youtube_apply_to_xray(target_tag=_tag):
-                _save_youtube_state(_tag)
-                current_target = _tag  # v5.0.0 FIX: обновляем локальную переменную
-                rule_in_config = True
-                _box_info(f"YouTube теперь через Exit-ноду #{_node_idx+1} ({_host}).")
-            else:
-                _box_warn(f"  Не удалось — нода {_tag} возможно удалена. Смотрите вывод выше.")
-        elif _choice == _default_idx:
-            # Default (балансировщик)
-            info("Убираем YouTube→RU правило...")
-            if _youtube_remove_from_xray():
-                _save_youtube_state("off")
-                current_target = "off"  # v5.0.0 FIX: обновляем локальную переменную
-                _box_info("YouTube теперь через exit-ноды (default).")
-            else:
-                _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
-        elif ch == "w":
-            # YouTube -> WARP (Cloudflare)
-            from chimera.modules.youtube_warp_route import apply_youtube_warp_routing
-            _ok, _msg = apply_youtube_warp_routing(True)
+        # v5.0.1 FIX: проверяем 'w' ДО int(ch), иначе int('w') бросает
+        # ValueError и handler ниже недостижим — кнопка [W] молча
+        # возвращала пользователя в основное меню.
+        if ch == "w":
+            from chimera.modules.youtube_warp_route import do_youtube_warp_interactive
+            _ok, _msg = do_youtube_warp_interactive(core)
             if _ok:
                 _save_youtube_state("warp")
                 current_target = "warp"
@@ -657,8 +618,51 @@ def do_manage_youtube_via_ru() -> None:
                 _box_info(f"  {_msg}")
             else:
                 _box_warn(f"  {_msg}")
+            # Переходим к IP-pin submenu (ниже), не выходим из функции.
         else:
-            return
+            try:
+                _choice = int(ch)
+            except ValueError:
+                return
+
+            if _choice == 1:
+                # RU entry
+                if not _geosite_available():
+                    warn("geosite.dat не найден — правило geosite:youtube не сработает.")
+                    input(f"\n{BLUE}  Нажмите Enter...{NC}")
+                    return
+                info("Применяем YouTube→RU...")
+                if _youtube_apply_to_xray():
+                    _save_youtube_state("ru")
+                    current_target = "ru"  # v5.0.0 FIX: обновляем локальную переменную
+                    rule_in_config = True
+                    _box_info("YouTube теперь выходит через RU entry-ноду.")
+                else:
+                    _box_warn("  Не удалось применить правило — смотрите вывод выше.")
+            elif 2 <= _choice <= len(nodes) + 1:
+                # Конкретная exit-нода
+                _node_idx = _choice - 2  # 0-indexed
+                _tag = f"chain-exit-{_node_idx+1}"
+                _host = nodes[_node_idx].get("host", "?")
+                info(f"Применяем YouTube→{_tag} ({_host})...")
+                if _youtube_apply_to_xray(target_tag=_tag):
+                    _save_youtube_state(_tag)
+                    current_target = _tag  # v5.0.0 FIX: обновляем локальную переменную
+                    rule_in_config = True
+                    _box_info(f"YouTube теперь через Exit-ноду #{_node_idx+1} ({_host}).")
+                else:
+                    _box_warn(f"  Не удалось — нода {_tag} возможно удалена. Смотрите вывод выше.")
+            elif _choice == _default_idx:
+                # Default (балансировщик)
+                info("Убираем YouTube→RU правило...")
+                if _youtube_remove_from_xray():
+                    _save_youtube_state("off")
+                    current_target = "off"  # v5.0.0 FIX: обновляем локальную переменную
+                    _box_info("YouTube теперь через exit-ноды (default).")
+                else:
+                    _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
+            else:
+                return
     else:
         # Single-node / no-chain: старое двухпунктовое меню (обратная совместимость).
         # v5.0.2: добавлены emoji для консистентности с multi-node меню —
@@ -674,7 +678,7 @@ def do_manage_youtube_via_ru() -> None:
         _box_bottom()
 
         try:
-            ch = input(f"{CYAN}  Выбор [1/2/Q]:{NC} ").strip().lower()
+            ch = input(f"{CYAN}  Выбор [1/2/W/Q]:{NC} ").strip().lower()
         except KeyboardInterrupt:
             print()
             return
@@ -701,8 +705,9 @@ def do_manage_youtube_via_ru() -> None:
             else:
                 _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
         elif ch == "w":
-            from chimera.modules.youtube_warp_route import apply_youtube_warp_routing
-            _ok, _msg = apply_youtube_warp_routing(True)
+            # v5.0.1: используем интерактивный flow с авто-установкой WARP.
+            from chimera.modules.youtube_warp_route import do_youtube_warp_interactive
+            _ok, _msg = do_youtube_warp_interactive(core)
             if _ok:
                 _save_youtube_state("warp")
                 current_target = "warp"
