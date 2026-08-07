@@ -2,6 +2,66 @@
 
 ---
 
+## FIX(youtube): v5.0.15 — ВОЗВРАТ v5.0.13 (routeOnly + sockopt) для серверов с IPv6 — 8 августа 2026
+
+**Возврат изменений v5.0.13. Пользователь переезжает на сервер с IPv6
+connectivity, где routeOnly=True безопасен.**
+
+### Контекст
+
+В v5.0.14 я откатил изменения v5.0.13 (routeOnly=True + sockopt в freedom
+outbound), потому что на сервере БЕЗ IPv6 они ломали YouTube: `routeOnly=True`
+передавал freedom outbound IP-адрес от клиента (а не домен), и если клиент
+резолвил YouTube в IPv6 (мобильные операторы, некоторые ISP), а RU-сервер
+без IPv6 — freedom пытался звонить на IPv6 и dial падал.
+
+Пользователь решил переехать на сервер с IPv6, где это ограничение отпадает.
+Возвращаю v5.0.13 as-is.
+
+### Что возвращено (v5.0.15)
+
+- **ВОЗВРАЩЁН sockopt в freedom outbound** (tcpKeepAliveIdle=60,
+  tcpKeepAliveInterval=15, tcpUserTimeout=10000, tcpFastOpen=true).
+  БЕЗ `tcpCongestion="bbr"` (требует `modprobe tcp_bbr`, ломал YouTube в v5.0.10).
+  БЕЗ `tcpNoDelay` (удалён в Xray, был no-op).
+- **ВОЗВРАЩЕНЫ вызовы `_youtube_patch_inbounds_for_fragment()` и
+  `_youtube_restore_inbounds_after_fragment()`** — точечно (только при
+  активном fragment) выставляют routeOnly=True и добавляют "quic" в destOverride.
+- **ОСТАЮТСЯ** (из v5.0.13, не убирались в v5.0.14):
+  - `maxSplit` в fragment (3-6 для medium, 5-10 для heavy, 8-15 для max)
+  - Расширенный список YouTube-доменов (CDN variants)
+  - Грейсфул-рестарт 500мс перед `systemctl restart xray`
+- **Обновлены тексты в TUI** — добавлено предупреждение про IPv6 requirement
+  и подсказка выключить QUIC block если «Нет подключения».
+
+### ВАЖНО: совместимость с IPv4-only серверами
+
+Если вы используете RU+fragment на сервере **БЕЗ IPv6**:
+- Включите **QUIC block** в подменю пресета → YouTube fallback на TCP,
+  TCP фрагментируется, dial идёт на IPv4 (через UseIPv4 strategy).
+- ИЛИ используйте **WARP routing** (опция [W] в меню YouTube) — WARP работает
+  через Cloudflare IPv4 даже если у RU-сервера нет IPv6.
+- ИЛИ вообще не используйте RU+fragment — выберите [1] (RU entry, без fragment)
+  или exit-ноды.
+
+### Тесты
+
+- 59 тестов YouTube-модуля (42 старых + 17 v5.0.13/v5.0.15) — все проходят.
+- 285 связанных тестов проходят.
+- Восстановлены тесты:
+  - `test_sockopt_present_without_bbr` — sockopt присутствует, без bbr
+  - `test_inbound_sniffing_patched` — routeOnly=True и quic в destOverride
+  - `test_remove_restores_routeonly_and_quic` — откат sniffing после remove
+
+### Совместимость
+
+- На сервере С IPv6: работает как v5.0.13 (с патчем sniffing + sockopt).
+- На сервере БЕЗ IPv6: используйте QUIC block или WARP routing.
+- AWG-режим НЕ затронут (metadataOnly=True не патчится).
+- Xray 26.x+ требуется (XTLS форк).
+
+---
+
 ## FIX(youtube): v5.0.14 — HOTFIX откат опасных изменений v5.0.13 — 8 августа 2026
 
 **СРОЧНЫЙ ОТКАТ. После v5.0.13 у пользователя YouTube снова выдал

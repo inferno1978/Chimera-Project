@@ -2,22 +2,22 @@
 """
 tests/test_youtube_route_v5013.py
 ───────────────────────────────────────────────────────────────────────────────
-Регрессионные тесты для v5.0.13/v5.0.14 — стабильность YouTube через RU+fragment.
+Регрессионные тесты для v5.0.13/v5.0.14/v5.0.15 — стабильность YouTube через RU+fragment.
 
-v5.0.14 HOTFIX: патч sniffing и sockopt ВЫКЛЮЧЕНЫ (ломали YouTube).
-  - _youtube_patch_inbounds_for_fragment / _youtube_restore_inbounds_after_fragment
-    ОПРЕДЕЛЕНЫ, но вызовы из _youtube_apply_fragment_to_xray / _youtube_remove_from_xray
-    УБРАНЫ. Тестируем что функции работают корректно (если их вызывать вручную),
-    и что _youtube_apply_fragment_to_xray НЕ применяет sockopt и НЕ патчит sniffing.
+v5.0.13: добавлены patch sniffing + safe sockopt + maxSplit + расширенные домены.
+v5.0.14: HOTFIX — откат v5.0.13 (ломал UseIPv4 на серверах без IPv6).
+v5.0.15: ВОЗВРАТ v5.0.13 — пользователь переезжает на сервер с IPv6, где
+  routeOnly=True безопасен и чинит асимметричную маршрутизацию QUIC-видео.
 
 Покрывает:
-  1. _youtube_patch_inbounds_for_fragment — функция работает корректно (в коде, не вызывается)
-  2. _youtube_restore_inbounds_after_fragment — функция работает корректно (в коде, не вызывается)
+  1. _youtube_patch_inbounds_for_fragment — routeOnly=True + destOverride["quic"]
+     для всех VLESS/REALITY inbound (кроме AWG metadataOnly=True).
+  2. _youtube_restore_inbounds_after_fragment — откат routeOnly=False, убирает "quic".
   3. _youtube_apply_fragment_to_xray с max_split — поле maxSplit в fragment settings.
-  4. v5.0.14: БЕЗ sockopt в freedom outbound (откат).
-  5. v5.0.14: БЕЗ патча sniffing (откат).
-  6. Грейсфул-рестарт — 500мс sleep перед systemctl restart xray.
-  7. Расширенный список YouTube-доменов (CDN variants).
+  4. Безопасный sockopt — нет tcpCongestion="bbr", нет tcpNoDelay (удалён в Xray).
+  5. Грейсфул-рестарт — 500мс sleep перед systemctl restart xray.
+  6. Расширенный список YouTube-доменов (CDN variants).
+  7. _youtube_remove_from_xray откатывает sniffing patch.
 """
 from __future__ import annotations
 
@@ -92,22 +92,30 @@ def _make_xray_config_with_fragment(inbounds=None,
     }
 
 
-class TestPatchInboundsFunctionDefined(unittest.TestCase):
-    """Функция _youtube_patch_inbounds_for_fragment определена и работает
-    корректно при вызове вручную. В v5.0.14 вызовы убраны из apply_fragment."""
+class TestPatchInboundsForFragment(unittest.TestCase):
+    """_youtube_patch_inbounds_for_fragment — routeOnly=True + destOverride[quic]."""
 
     def setUp(self):
+        self._tmpdir = Path(tempfile.mkdtemp())
         _setup_core_in_sysmodules(awg_enabled=False)
 
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
     def test_sets_routeonly_true_and_adds_quic(self):
-        """Функция работает корректно при прямом вызове."""
+        """Для VLESS inbound с metadataOnly=False — патч устанавливает
+        routeOnly=True и добавляет 'quic' в destOverride."""
         from chimera.modules import youtube_route
         cfg = _make_xray_config_with_fragment()
         changed = youtube_route._youtube_patch_inbounds_for_fragment(cfg)
-        self.assertTrue(changed)
+        self.assertTrue(changed, "Должно вернуть True — inbound был изменён")
         sn = cfg["inbounds"][0]["sniffing"]
-        self.assertTrue(sn["routeOnly"])
-        self.assertIn("quic", sn["destOverride"])
+        self.assertTrue(sn["routeOnly"], "routeOnly должен быть True")
+        self.assertIn("quic", sn["destOverride"], "destOverride должен содержать 'quic'")
+        # http и tls должны остаться
+        self.assertIn("http", sn["destOverride"])
+        self.assertIn("tls", sn["destOverride"])
 
     def test_skips_awg_metadataonly_true(self):
         """AWG-режим (metadataOnly=True) — НЕ трогаем."""
@@ -115,118 +123,119 @@ class TestPatchInboundsFunctionDefined(unittest.TestCase):
         cfg = _make_xray_config_with_fragment(inbounds=[{
             "protocol": "vless", "tag": "vless-in", "port": 443,
             "settings": {"clients": []},
-            "sniffing": {"enabled": True, "destOverride": ["http", "tls"],
-                         "metadataOnly": True, "routeOnly": False},
+            "sniffing": {
+                "enabled":      True,
+                "destOverride": ["http", "tls"],
+                "metadataOnly": True,
+                "routeOnly":    False,
+            },
+        }])
+        changed = youtube_route._youtube_patch_inbounds_for_fragment(cfg)
+        self.assertFalse(changed, "AWG inbound НЕ должен быть изменён")
+        sn = cfg["inbounds"][0]["sniffing"]
+        self.assertFalse(sn["routeOnly"], "routeOnly НЕ должен меняться в AWG")
+        self.assertNotIn("quic", sn["destOverride"], "quic НЕ должен добавляться в AWG")
+
+    def test_skips_disabled_sniffing(self):
+        """Если sniffing disabled — пропускаем."""
+        from chimera.modules import youtube_route
+        cfg = _make_xray_config_with_fragment(inbounds=[{
+            "protocol": "vless", "tag": "vless-in", "port": 443,
+            "settings": {"clients": []},
+            "sniffing": {"enabled": False},
         }])
         changed = youtube_route._youtube_patch_inbounds_for_fragment(cfg)
         self.assertFalse(changed)
 
-    def test_restore_function_works(self):
-        """_youtube_restore_inbounds_after_fragment работает корректно."""
+    def test_skips_non_vless_protocols(self):
+        """Только VLESS/Trojan/VMess/dokodemo-door patching."""
+        from chimera.modules import youtube_route
+        cfg = _make_xray_config_with_fragment(inbounds=[{
+            "protocol": "socks", "tag": "socks-in", "port": 1080,
+            "settings": {},
+            "sniffing": {
+                "enabled":      True,
+                "destOverride": ["http", "tls"],
+                "metadataOnly": False,
+                "routeOnly":    False,
+            },
+        }])
+        changed = youtube_route._youtube_patch_inbounds_for_fragment(cfg)
+        self.assertFalse(changed, "socks inbound НЕ должен быть patch")
+
+    def test_idempotent(self):
+        """Повторный вызов не делает изменений если уже применено."""
         from chimera.modules import youtube_route
         cfg = _make_xray_config_with_fragment()
         youtube_route._youtube_patch_inbounds_for_fragment(cfg)
+        # Второй вызов — уже применено, изменений быть не должно.
+        changed = youtube_route._youtube_patch_inbounds_for_fragment(cfg)
+        self.assertFalse(changed, "Повторный вызов не должен делать изменений")
+
+    def test_handles_multiple_inbounds(self):
+        """Все VLESS/REALITY inbound должны быть patch."""
+        from chimera.modules import youtube_route
+        cfg = _make_xray_config_with_fragment(inbounds=[
+            {"protocol": "vless", "tag": "vless-in1", "port": 443,
+             "settings": {"clients": []},
+             "sniffing": {"enabled": True, "destOverride": ["http", "tls"],
+                          "metadataOnly": False, "routeOnly": False}},
+            {"protocol": "vless", "tag": "vless-in2", "port": 8443,
+             "settings": {"clients": []},
+             "sniffing": {"enabled": True, "destOverride": ["http", "tls"],
+                          "metadataOnly": False, "routeOnly": False}},
+            {"protocol": "vless", "tag": "vless-awg", "port": 10443,
+             "settings": {"clients": []},
+             "sniffing": {"enabled": True, "destOverride": ["http", "tls"],
+                          "metadataOnly": True, "routeOnly": False}},
+        ])
+        changed = youtube_route._youtube_patch_inbounds_for_fragment(cfg)
+        self.assertTrue(changed)
+        # Первые два — patched.
+        self.assertTrue(cfg["inbounds"][0]["sniffing"]["routeOnly"])
         self.assertIn("quic", cfg["inbounds"][0]["sniffing"]["destOverride"])
+        self.assertTrue(cfg["inbounds"][1]["sniffing"]["routeOnly"])
+        self.assertIn("quic", cfg["inbounds"][1]["sniffing"]["destOverride"])
+        # Третий (AWG) — НЕ тронут.
+        self.assertFalse(cfg["inbounds"][2]["sniffing"]["routeOnly"])
+        self.assertNotIn("quic", cfg["inbounds"][2]["sniffing"]["destOverride"])
+
+
+class TestRestoreInboundsAfterFragment(unittest.TestCase):
+    """_youtube_restore_inbounds_after_fragment — откат sniffing."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules(awg_enabled=False)
+
+    def test_restores_routeonly_false_and_removes_quic(self):
+        """После fragment — корректно откатывает routeOnly и убирает quic."""
+        from chimera.modules import youtube_route
+        cfg = _make_xray_config_with_fragment()
+        # Сначала patch.
+        youtube_route._youtube_patch_inbounds_for_fragment(cfg)
+        self.assertIn("quic", cfg["inbounds"][0]["sniffing"]["destOverride"])
+        # Потом restore.
         changed = youtube_route._youtube_restore_inbounds_after_fragment(cfg)
         self.assertTrue(changed)
         sn = cfg["inbounds"][0]["sniffing"]
         self.assertFalse(sn["routeOnly"])
         self.assertNotIn("quic", sn["destOverride"])
 
-
-class TestApplyFragmentNoSockoptV5014(unittest.TestCase):
-    """v5.0.14: freedom outbound БЕЗ sockopt (откат v5.0.13 regression)."""
-
-    def setUp(self):
-        self._tmpdir = Path(tempfile.mkdtemp())
-        self._cfg_path = self._tmpdir / "config.json"
-        _setup_core_in_sysmodules(awg_enabled=False)
-
-    def tearDown(self):
-        import shutil
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def _patch_paths(self):
+    def test_restore_skips_awg(self):
+        """AWG inbound (metadataOnly=True) НЕ трогаем при restore."""
         from chimera.modules import youtube_route
-        core = sys.modules["chimera._core"]
-        return (
-            patch.object(youtube_route, "_core_module", lambda: core),
-            patch.object(core, "CONFIG_DIR", self._tmpdir),
-        )
-
-    def test_no_sockopt_in_freedom_outbound(self):
-        """v5.0.14: freedom outbound НЕ должен содержать sockopt."""
-        from chimera.modules import youtube_route
-        self._cfg_path.write_text(json.dumps(_make_xray_config_with_fragment()))
-        core = sys.modules["chimera._core"]
-        core._set_config_owner = lambda p: None
-        core._run = MagicMock(return_value=_make_completed("active"))
-        core._nginx_restart_if_reality = MagicMock()
-        core.info = lambda *a, **kw: None
-        core.success = lambda *a, **kw: None
-        core.warn = lambda *a, **kw: None
-        with self._patch_paths()[0], self._patch_paths()[1], \
-             patch.object(youtube_route, "time"):
-            youtube_route._youtube_apply_fragment_to_xray(
-                "1", "10-30", "3-8", block_quic=False,
-            )
-        cfg = json.loads(self._cfg_path.read_text())
-        frag_ob = [ob for ob in cfg["outbounds"]
-                   if ob.get("tag") == "direct-fragment"][0]
-        # КРИТИЧНО: sockopt НЕ должен присутствовать (v5.0.14 откат).
-        self.assertNotIn("sockopt", frag_ob,
-                         "sockopt НЕ должен быть в freedom outbound (v5.0.14 откат)")
-
-
-class TestApplyFragmentNoSniffingPatchV5014(unittest.TestCase):
-    """v5.0.14: _youtube_apply_fragment_to_xray НЕ патчит inbound sniffing."""
-
-    def setUp(self):
-        self._tmpdir = Path(tempfile.mkdtemp())
-        self._cfg_path = self._tmpdir / "config.json"
-        _setup_core_in_sysmodules(awg_enabled=False)
-
-    def tearDown(self):
-        import shutil
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def _patch_paths(self):
-        from chimera.modules import youtube_route
-        core = sys.modules["chimera._core"]
-        return (
-            patch.object(youtube_route, "_core_module", lambda: core),
-            patch.object(core, "CONFIG_DIR", self._tmpdir),
-        )
-
-    def test_inbound_sniffing_not_modified(self):
-        """v5.0.14: routeOnly остаётся False, destOverride без 'quic'
-        после _youtube_apply_fragment_to_xray (патч выключен)."""
-        from chimera.modules import youtube_route
-        self._cfg_path.write_text(json.dumps(_make_xray_config_with_fragment()))
-        core = sys.modules["chimera._core"]
-        core._set_config_owner = lambda p: None
-        core._run = MagicMock(return_value=_make_completed("active"))
-        core._nginx_restart_if_reality = MagicMock()
-        core.info = lambda *a, **kw: None
-        core.success = lambda *a, **kw: None
-        core.warn = lambda *a, **kw: None
-        with self._patch_paths()[0], self._patch_paths()[1], \
-             patch.object(youtube_route, "time"):
-            youtube_route._youtube_apply_fragment_to_xray(
-                "1", "10-30", "3-8", block_quic=False,
-            )
-        cfg = json.loads(self._cfg_path.read_text())
-        sn = cfg["inbounds"][0]["sniffing"]
-        # routeOnly должен остаться False (не патчим в v5.0.14).
-        self.assertFalse(sn["routeOnly"],
-                         "routeOnly НЕ должен меняться (v5.0.14 — patch выключен)")
-        # 'quic' НЕ должен быть добавлен в destOverride.
-        self.assertNotIn("quic", sn["destOverride"],
-                         "'quic' НЕ должен добавляться (v5.0.14 — patch выключен)")
+        cfg = _make_xray_config_with_fragment(inbounds=[{
+            "protocol": "vless", "tag": "vless-in", "port": 443,
+            "settings": {"clients": []},
+            "sniffing": {"enabled": True, "destOverride": ["http", "tls"],
+                         "metadataOnly": True, "routeOnly": False},
+        }])
+        changed = youtube_route._youtube_restore_inbounds_after_fragment(cfg)
+        self.assertFalse(changed)
 
 
 class TestApplyFragmentWithMaxSplit(unittest.TestCase):
-    """_youtube_apply_fragment_to_xray с параметром max_split (v5.0.13, сохранено в v5.0.14)."""
+    """_youtube_apply_fragment_to_xray с параметром max_split (v5.0.13)."""
 
     def setUp(self):
         self._tmpdir = Path(tempfile.mkdtemp())
@@ -263,6 +272,7 @@ class TestApplyFragmentWithMaxSplit(unittest.TestCase):
                 "1", "10-30", "3-8", block_quic=False, max_split="3-6",
             )
         cfg = json.loads(self._cfg_path.read_text())
+        # Находим fragment outbound.
         frag_obs = [ob for ob in cfg["outbounds"]
                     if ob.get("tag") == "direct-fragment"]
         self.assertEqual(len(frag_obs), 1)
@@ -294,8 +304,105 @@ class TestApplyFragmentWithMaxSplit(unittest.TestCase):
         self.assertNotIn("maxSplit", frag_obs["settings"]["fragment"])
 
 
+class TestSafeSockopt(unittest.TestCase):
+    """v5.0.13/v5.0.15: безопасный sockopt в freedom outbound (БЕЗ tcpCongestion='bbr')."""
+
+    def setUp(self):
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg_path = self._tmpdir / "config.json"
+        _setup_core_in_sysmodules(awg_enabled=False)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_paths(self):
+        from chimera.modules import youtube_route
+        core = sys.modules["chimera._core"]
+        return (
+            patch.object(youtube_route, "_core_module", lambda: core),
+            patch.object(core, "CONFIG_DIR", self._tmpdir),
+        )
+
+    def test_sockopt_present_without_bbr(self):
+        """freedom outbound должен иметь sockopt с tcpKeepAlive* и tcpFastOpen,
+        но БЕЗ tcpCongestion='bbr' (это была причина поломки v5.0.10)."""
+        from chimera.modules import youtube_route
+        self._cfg_path.write_text(json.dumps(_make_xray_config_with_fragment()))
+        core = sys.modules["chimera._core"]
+        core._set_config_owner = lambda p: None
+        core._run = MagicMock(return_value=_make_completed("active"))
+        core._nginx_restart_if_reality = MagicMock()
+        core.info = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        with self._patch_paths()[0], self._patch_paths()[1], \
+             patch.object(youtube_route, "time"):
+            youtube_route._youtube_apply_fragment_to_xray(
+                "1", "10-30", "3-8", block_quic=False,
+            )
+        cfg = json.loads(self._cfg_path.read_text())
+        frag_ob = [ob for ob in cfg["outbounds"]
+                   if ob.get("tag") == "direct-fragment"][0]
+        self.assertIn("sockopt", frag_ob, "sockopt должен присутствовать")
+        so = frag_ob["sockopt"]
+        # Должны быть безопасные поля.
+        self.assertIn("tcpKeepAliveIdle", so)
+        self.assertIn("tcpKeepAliveInterval", so)
+        self.assertIn("tcpUserTimeout", so)
+        self.assertIn("tcpFastOpen", so)
+        # КРИТИЧНО: не должно быть tcpCongestion='bbr' — это ломало YouTube.
+        self.assertNotIn("tcpCongestion", so,
+                         "tcpCongestion НЕ должен присутствовать (bbr ломал YouTube)")
+        # tcpNoDelay удалён в Xray — не должен быть в sockopt.
+        self.assertNotIn("tcpNoDelay", so,
+                         "tcpNoDelay удалён в Xray — не должен быть в sockopt")
+
+
+class TestSniffingPatchedOnApply(unittest.TestCase):
+    """v5.0.15: _youtube_apply_fragment_to_xray патчит inbound sniffing."""
+
+    def setUp(self):
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg_path = self._tmpdir / "config.json"
+        _setup_core_in_sysmodules(awg_enabled=False)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_paths(self):
+        from chimera.modules import youtube_route
+        core = sys.modules["chimera._core"]
+        return (
+            patch.object(youtube_route, "_core_module", lambda: core),
+            patch.object(core, "CONFIG_DIR", self._tmpdir),
+        )
+
+    def test_inbound_sniffing_patched(self):
+        """v5.0.15: routeOnly=True и 'quic' в destOverride после apply."""
+        from chimera.modules import youtube_route
+        self._cfg_path.write_text(json.dumps(_make_xray_config_with_fragment()))
+        core = sys.modules["chimera._core"]
+        core._set_config_owner = lambda p: None
+        core._run = MagicMock(return_value=_make_completed("active"))
+        core._nginx_restart_if_reality = MagicMock()
+        core.info = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        with self._patch_paths()[0], self._patch_paths()[1], \
+             patch.object(youtube_route, "time"):
+            youtube_route._youtube_apply_fragment_to_xray(
+                "1", "10-30", "3-8", block_quic=False,
+            )
+        cfg = json.loads(self._cfg_path.read_text())
+        sn = cfg["inbounds"][0]["sniffing"]
+        self.assertTrue(sn["routeOnly"], "routeOnly должен быть True")
+        self.assertIn("quic", sn["destOverride"])
+
+
 class TestGracefulRestart(unittest.TestCase):
-    """v5.0.13/v5.0.14: грейсфул-рестарт — 500мс sleep перед systemctl restart xray."""
+    """v5.0.13/v5.0.15: грейсфул-рестарт — 500мс sleep перед systemctl restart xray."""
 
     def setUp(self):
         self._tmpdir = Path(tempfile.mkdtemp())
@@ -331,6 +438,7 @@ class TestGracefulRestart(unittest.TestCase):
             youtube_route._youtube_apply_fragment_to_xray(
                 "1", "10-30", "3-8", block_quic=False,
             )
+        # sleep должен быть вызван хотя бы один раз с 0.5
         sleep_calls = [c for c in mock_time.sleep.call_args_list
                        if c == unittest.mock.call(0.5)]
         self.assertGreaterEqual(len(sleep_calls), 1,
@@ -338,7 +446,7 @@ class TestGracefulRestart(unittest.TestCase):
 
 
 class TestExpandedYoutubeDomains(unittest.TestCase):
-    """v5.0.13/v5.0.14: расширенный список YouTube-доменов (CDN variants)."""
+    """v5.0.13/v5.0.15: расширенный список YouTube-доменов (CDN variants)."""
 
     def test_cdn_domains_present(self):
         """Должны быть добавлены CDN variants для асимметричной маршрутизации."""
@@ -355,8 +463,60 @@ class TestExpandedYoutubeDomains(unittest.TestCase):
         self.assertIn("domain:lh3.googleusercontent.com", domains)
 
 
+class TestRemoveFromXrayRestoresSniffing(unittest.TestCase):
+    """_youtube_remove_from_xray должен откатывать sniffing patch (v5.0.15)."""
+
+    def setUp(self):
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg_path = self._tmpdir / "config.json"
+        _setup_core_in_sysmodules(awg_enabled=False)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_remove_restores_routeonly_and_quic(self):
+        """После remove — routeOnly=False, destOverride без 'quic'."""
+        from chimera.modules import youtube_route
+        # Конфиг с уже применённым fragment (routeOnly=True, quic в destOverride).
+        cfg = _make_xray_config_with_fragment()
+        # Patch sniffing как будто fragment был применён.
+        youtube_route._youtube_patch_inbounds_for_fragment(cfg)
+        # Добавляем YouTube правило.
+        cfg["routing"]["rules"].insert(0, {
+            "type": "field",
+            "domain": ["domain:youtube.com"],
+            "outboundTag": "direct-fragment",
+            "comment": "youtube_via_ru_fragment",
+        })
+        cfg["outbounds"].append({
+            "protocol": "freedom", "tag": "direct-fragment",
+            "settings": {"domainStrategy": "UseIPv4",
+                         "fragment": {"packets": "1", "length": "10-30",
+                                      "interval": "3-8"}},
+        })
+        self._cfg_path.write_text(json.dumps(cfg))
+        core = sys.modules["chimera._core"]
+        core._set_config_owner = lambda p: None
+        core._run = MagicMock(return_value=_make_completed("active"))
+        core._nginx_restart_if_reality = MagicMock()
+        core.info = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        with patch.object(youtube_route, "_core_module", lambda: core), \
+             patch.object(core, "CONFIG_DIR", self._tmpdir), \
+             patch.object(youtube_route, "time"):
+            youtube_route._youtube_remove_from_xray()
+        cfg2 = json.loads(self._cfg_path.read_text())
+        sn = cfg2["inbounds"][0]["sniffing"]
+        self.assertFalse(sn["routeOnly"],
+                         "routeOnly должен вернуться в False после remove")
+        self.assertNotIn("quic", sn["destOverride"],
+                         "'quic' должен быть убран из destOverride после remove")
+
+
 class TestFragmentPresetMenuV5013(unittest.TestCase):
-    """_fragment_preset_menu возвращает 5-tuple с max_split (v5.0.13, сохранено в v5.0.14)."""
+    """_fragment_preset_menu возвращает 5-tuple с max_split (v5.0.13/v5.0.15)."""
 
     def setUp(self):
         _setup_core_in_sysmodules(awg_enabled=False)
@@ -365,6 +525,7 @@ class TestFragmentPresetMenuV5013(unittest.TestCase):
         """При выборе пресета medium — должен вернуть 5-tuple с max_split='3-6'."""
         from chimera.modules import youtube_route
         core = sys.modules["chimera._core"]
+        # Минимальные mock'и для box rendering.
         core._box_top = lambda *a, **kw: None
         core._box_row = lambda *a, **kw: None
         core._box_sep = lambda *a, **kw: None
@@ -378,6 +539,7 @@ class TestFragmentPresetMenuV5013(unittest.TestCase):
         core.GREEN = ""
         core.YELLOW = ""
         core.BLUE = ""
+        # Выбираем пресет 2 (medium) и N для QUIC block.
         with patch("builtins.input", side_effect=["2", "n"]):
             result = youtube_route._fragment_preset_menu(core)
         self.assertIsNotNone(result)
