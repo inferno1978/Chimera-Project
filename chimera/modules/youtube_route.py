@@ -489,7 +489,14 @@ def do_manage_youtube_via_ru() -> None:
     multi_node = len(nodes) > 1
 
     # Определяем отображаемое имя текущего маршрута.
-    if current_target == "off":
+    if current_target == "warp":
+        if rule_in_config:
+            current_display = f"{GREEN}YouTube → WARP (Cloudflare){NC}"
+            current_detail = f"{DIM}outbound:warp (sendThrough + table 301){NC}"
+        else:
+            current_display = f"{YELLOW}несогласованно{NC}"
+            current_detail = f"{DIM}state: youtube_route_target=warp, но правило отсутствует (regenerate?).{NC}"
+    elif current_target == "off":
         current_display = f"{CYAN}YouTube → exit-ноды (default){NC}"
         current_detail = f"{DIM}Весь YouTube-трафик идёт через каскад exit-нод.{NC}"
     elif current_target == "ru":
@@ -583,6 +590,10 @@ def do_manage_youtube_via_ru() -> None:
         # бокса останется ровной.
         _box_item(str(_default_idx), f"{_marker}YouTube через 🌍\ufe0f exit-ноды (default, балансировщик)")
         _box_row()
+        _is_cur_warp = (current_target == "warp")
+        _marker = "● " if _is_cur_warp else "  "
+        _box_item("W", f"{_marker}YouTube через ☁️ WARP (Cloudflare)")
+        _box_row()
         _box_item("Q", f"{DIM}Назад{NC}")
         _box_bottom()
 
@@ -635,6 +646,17 @@ def do_manage_youtube_via_ru() -> None:
                 _box_info("YouTube теперь через exit-ноды (default).")
             else:
                 _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
+        elif ch == "w":
+            # YouTube -> WARP (Cloudflare)
+            from chimera.modules.youtube_warp_route import apply_youtube_warp_routing
+            _ok, _msg = apply_youtube_warp_routing(True)
+            if _ok:
+                _save_youtube_state("warp")
+                current_target = "warp"
+                rule_in_config = True
+                _box_info(f"  {_msg}")
+            else:
+                _box_warn(f"  {_msg}")
         else:
             return
     else:
@@ -645,6 +667,8 @@ def do_manage_youtube_via_ru() -> None:
         _box_item("1", f"{'● ' if _is_cur else '  '}YouTube через 🇷🇺\ufe0f RU entry")
         _is_cur_off = (current_target == "off")
         _box_item("2", f"{'● ' if _is_cur_off else '  '}YouTube через 🌍\ufe0f exit-ноды (default)")
+        _is_cur_warp = (current_target == "warp")
+        _box_item("W", f"{'● ' if _is_cur_warp else '  '}YouTube через ☁\ufe0f WARP (Cloudflare)")
         _box_row()
         _box_item("Q", f"{DIM}Назад{NC}")
         _box_bottom()
@@ -676,6 +700,16 @@ def do_manage_youtube_via_ru() -> None:
                 _box_info("YouTube теперь через exit-ноды (default).")
             else:
                 _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
+        elif ch == "w":
+            from chimera.modules.youtube_warp_route import apply_youtube_warp_routing
+            _ok, _msg = apply_youtube_warp_routing(True)
+            if _ok:
+                _save_youtube_state("warp")
+                current_target = "warp"
+                rule_in_config = True
+                _box_info(f"  {_msg}")
+            else:
+                _box_warn(f"  {_msg}")
         else:
             return
 
@@ -854,7 +888,7 @@ def _youtube_rule_in_xray_config() -> bool:
         try:
             cfg = json.loads(cfg_path.read_text())
             for rule in cfg.get("routing", {}).get("rules", []):
-                if rule.get("comment") == _YOUTUBE_RULE_COMMENT:
+                if rule.get("comment") in (_YOUTUBE_RULE_COMMENT, "youtube_via_warp"):
                     return True
         except Exception:
             continue
@@ -865,7 +899,7 @@ def _save_youtube_state(target: str) -> None:
     """Сохраняет youtube_route_target в state.json.
 
     Args:
-      target: "ru" | "off" | "chain-exit-{N}"
+      target: "ru" | "off" | "chain-exit-{N}" | "warp"
 
     Также пишет legacy "youtube_via_ru": (target == "ru") для обратной
     совместимости с _core.YOUTUBE_VIA_RU и любыми внешними скриптами/
@@ -880,6 +914,8 @@ def _save_youtube_state(target: str) -> None:
         state["youtube_route_target"] = target
         # Legacy: youtube_via_ru = True только когда target == "ru".
         state["youtube_via_ru"] = (target == "ru")
+        # Для warp: также устанавливаем youtube_via_warp = True
+        state["youtube_via_warp"] = (target == "warp")
         core.STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
     except Exception as e:
         try:
@@ -926,6 +962,19 @@ def restore_youtube_rule_if_needed(silent: bool = False) -> bool:
         return False  # Уже на месте
 
     # Определяем outboundTag для пере-применения.
+    if target == "warp":
+        # YouTube -> WARP (через sendThrough + kernel table 301)
+        try:
+            from chimera.modules.youtube_warp_route import restore_if_needed as _warp_restore
+            _warp_restore(silent=silent)
+        except Exception as _e:
+            if not silent:
+                try:
+                    core.warn(f"YouTube->WARP restore не удалось: {_e}")
+                except Exception:
+                    pass
+        return True
+
     if target == "ru":
         tag = None  # direct/direct-local, AWG-aware
     else:
