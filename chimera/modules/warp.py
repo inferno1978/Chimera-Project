@@ -337,9 +337,10 @@ ENDPOINT_TCP_TIMEOUT          = 1.5   # сек, уровень 1 (массовы
 ENDPOINT_ICMP_TIMEOUT         = 1.0   # сек, уровень 2 (ICMP ping, если разрешён)
 ENDPOINT_SWITCH_THRESHOLD_MS  = 30    # УТ-4: переключать, если RTT нового ≤ RTT текущего − 30мс
 ENDPOINT_HISTORY_MAX          = 10    # УТ-6: не более 10 записей
-HANDSHAKE_WAIT_ACTIVE_SEC     = 5     # УТ-2, этап 1: дождаться active
-HANDSHAKE_SETTLE_SEC          = 3     # УТ-2, этап 3: пауза перед проверкой
-HANDSHAKE_CURL_TIMEOUT        = 5     # УТ-2, этап 2: таймаут генерации трафика
+HANDSHAKE_WAIT_ACTIVE_SEC     = 15    # УТ-2, этап 1: дождаться active (v5.0.7: 5→15, для ТСПУ)
+HANDSHAKE_SETTLE_SEC          = 5     # УТ-2, этап 3: пауза перед проверкой (v5.0.7: 3→5)
+HANDSHAKE_CURL_TIMEOUT        = 12    # УТ-2, этап 2: таймаут генерации трафика (v5.0.7: 5→12, для ТСПУ)
+HANDSHAKE_VERIFY_RETRIES      = 3     # v5.0.7: кол-во попыток генерации трафика
 
 
 # =============================================================================
@@ -1440,7 +1441,23 @@ def _verify_warp_handshake() -> tuple[bool, bool]:
     трафик curl'ом через интерфейс wg-warp на cdn-cgi/trace, (3) подождать
     HANDSHAKE_SETTLE_SEC и проверить latest-handshakes>0 И warp=on.
     Возвращает (handshake_ok, warp_on) — rollback в вызывающем коде
-    выполняется только если ОБА условия не выполнены."""
+    выполняется только если ОБА условия не выполнены.
+
+    v5.0.7 FIX: критически важно для ТСПУ-блокировок.
+    ПРОБЛЕМА: раньше curl шёл на https://www.cloudflare.com (hostname) с
+    таймаутом 5 сек. Если DNS резолвил Cloudflare IP, заблокированный
+    ТСПУ — curl падал за 5 сек, НЕ генерировал трафик через туннель,
+    WireGuard handshake НЕ происходил → оба условия False → откат
+    рабочего endpoint'а.
+
+    ФИКС:
+      1. Используем https://1.1.1.1/cdn-cgi/trace (прямой IP, без DNS).
+         1.1.1.1 имеет валидный TLS-сертификат.
+      2. Таймаут 12 сек (вместо 5).
+      3. RETRY LOOP: до 3 попыток генерации трафика с паузой между ними.
+         WireGuard handshake может требовать нескольких пакетов.
+      4. Ждём active 15 сек (вместо 5).
+    """
     deadline = time.time() + HANDSHAKE_WAIT_ACTIVE_SEC
     active = False
     while time.time() < deadline:
@@ -1451,11 +1468,23 @@ def _verify_warp_handshake() -> tuple[bool, bool]:
     if not active:
         return False, False
 
-    r_trace = _run(
-        ["curl", "-s", "--interface", WG_INTERFACE, "--max-time", str(HANDSHAKE_CURL_TIMEOUT),
-         "https://www.cloudflare.com/cdn-cgi/trace"],
-        capture=True, check=False,
-    )
+    # v5.0.7: генерируем трафик через ПРЯМОЙ IP (1.1.1.1), без DNS.
+    # Retry loop — WireGuard может требовать нескольких попыток.
+    warp_on = False
+    for attempt in range(HANDSHAKE_VERIFY_RETRIES):
+        r_trace = _run(
+            ["curl", "-sS", "--interface", WG_INTERFACE,
+             "--max-time", str(HANDSHAKE_CURL_TIMEOUT),
+             "https://1.1.1.1/cdn-cgi/trace"],
+            capture=True, check=False,
+        )
+        if r_trace.returncode == 0 and "warp=" in (r_trace.stdout or ""):
+            warp_on = "warp=on" in (r_trace.stdout or "")
+            break
+        # Пауза между попытками
+        if attempt < HANDSHAKE_VERIFY_RETRIES - 1:
+            time.sleep(2)
+
     time.sleep(HANDSHAKE_SETTLE_SEC)
 
     r_hs = _run(["wg", "show", WG_INTERFACE, "latest-handshakes"], capture=True, check=False)
@@ -1466,7 +1495,6 @@ def _verify_warp_handshake() -> tuple[bool, bool]:
             handshake_ok = True
             break
 
-    warp_on = "warp=on" in (r_trace.stdout or "")
     return handshake_ok, warp_on
 
 
