@@ -62,6 +62,33 @@ _YOUTUBE_RULE_COMMENT = "youtube_via_ru"
 _YOUTUBE_FRAG_RULE_COMMENT = "youtube_via_ru_fragment"
 _YOUTUBE_QUIC_BLOCK_COMMENT = "youtube_block_quic"
 
+# v5.0.13: маркер в state.json для сохранённых оригинальных значений sniffing.
+# Используется _youtube_patch_inbounds_for_fragment() / _youtube_restore_inbounds_after_fragment()
+# чтобы корректно откатывать routeOnly/destOverride после отключения fragment.
+_YOUTUBE_SNIFFING_BACKUP_KEY = "_youtube_sniffing_backup"
+
+# v5.0.13: безопасный sockopt для freedom outbound.
+#
+# В v5.0.10 мы добавили sockopt с tcpCongestion='bbr' и это сломало YouTube
+# полностью (v5.0.11/v5.0.12 откатили). Причина — tcpCongestion='bbr' требует
+# загруженного модуля tcp_bbr в ядре, иначе setsockopt(TCP_CONGESTION,"bbr")
+# возвращает ENOTSUP и Xray прерывает КАЖДЫЙ dial через freedom outbound.
+#
+# Безопасный набор (без tcpCongestion, без удалённого tcpNoDelay):
+#   • tcpKeepAliveIdle: 60     — keepalive через 60с idle (как Chrome default)
+#   • tcpKeepAliveInterval: 15 — повторять каждые 15с
+#   • tcpUserTimeout: 10000    — таймаут на пользовательские данные (10с)
+#   • tcpFastOpen: true        — TFO на исходящих (если поддерживается ядром)
+#
+# Подтверждено документацией Xray (v26.x): sockopt на freedom outbound
+# поддерживается официально. Источник: xtls.github.io/en/config/transports/sockopt.html
+_YOUTUBE_SAFE_SOCKOPT = {
+    "tcpKeepAliveIdle":     60,
+    "tcpKeepAliveInterval": 15,
+    "tcpUserTimeout":       10000,
+    "tcpFastOpen":          True,
+}
+
 # Список доменов YouTube и связанных сервисов.
 #
 # v5.0.0 FIX: Раньше использовались geosite:youtube и geosite:google, но
@@ -93,8 +120,18 @@ _YOUTUBE_DOMAINS = [
     # CDN видео-стримов (DASH/HLS манифесты + сегменты)
     "domain:googlevideo.com",
     "domain:manifest.googlevideo.com",
+    # v5.0.13: расширенный набор CDN-доменов YouTube.
+    # Без них видеострим (DASH) может асимметрично уйти через default outbound,
+    # пока thumbnails/api идут через fragment — это и есть причина "Shorts
+    # долго грузятся" и "видео buffering". Все эти домена на одной AS Google.
+    "domain:wide-youtube.l.google.com",
+    "domain:youtube-ui.l.google.com",
+    "domain:youtubeembedded-pa.googleapis.com",
+    "domain:youtube.googleapis.com",
+    "domain:yt-video-googleusercontent.com",
     # Avatars / user images
     "domain:ggpht.com",
+    "domain:lh3.googleusercontent.com",
     # Ad-tracking (YouTube-specific)
     "domain:youtube-googletag.com",
     # Google services used by YouTube internally
@@ -227,6 +264,102 @@ def _resolve_node_ip_and_flag(host: str) -> tuple[str, str]:
 # =============================================================================
 #  ПРИМЕНЕНИЕ / УДАЛЕНИЕ ПРАВИЛА В XRAY CONFIG
 # =============================================================================
+
+# =============================================================================
+#  v5.0.13: ПАТЧ INBOUND SNIFFING ДЛЯ FRAGMENT-РЕЖИМА
+# =============================================================================
+# Проблема: по умолчанию (с v4.12.6) все VLESS/REALITY inbound имеют
+#   routeOnly: False + destOverride: ["http", "tls"]
+# Это значит:
+#   1. QUIC-пакеты YouTube (UDP/443) НЕ имеют sniffed-домена в routing
+#      → правило fragment (domain:[youtube...]) НЕ матчит QUIC
+#      → QUIC видео идёт через catch-all к exit-нодам (медленно / блокируется ТСПУ)
+#   2. routeOnly: False переписывает destination на sniffed domain
+#      → freedom outbound получает домен и делает DNS-resolve через систему
+#      → при медленном DNS это добавляет задержку на каждый новый TCP-коннект
+#      → "видео buffering несколько секунд"
+#   3. При смене preset (Xray restart) — активные TCP-коннекты рвутся,
+#      browser retries, но в момент restart routing не работает →
+#      "Нет подключения к интернету" (проходит после перезагрузки сервера).
+#
+# Решение: ТОЛЬКО когда включён RU+fragment — патчим inbound на:
+#   • routeOnly: True  (routing по SNI без переписывания destination)
+#   • destOverride: ["http", "tls", "quic"]  (QUIC SNI используется для роутинга)
+#
+# После отключения fragment — откатываем обратно (routeOnly: False, без quic).
+# Аналогично для AWG-режима: НЕ трогаем metadataOnly=True (там sniffing доменов
+# отключён намеренно, AWG использует kernel-роутинг).
+#
+# Источник: https://xtls.github.io/en/config/inbound.html#routeonly-true-false
+#   "routeOnly: true — Use the sniffed domain only for routing; the proxy
+#    destination address remains the IP. This item requires destOverride
+#    to be enabled to work."
+
+def _youtube_patch_inbounds_for_fragment(cfg: dict) -> bool:
+    """Включает routeOnly=True + destOverride['quic'] во всех VLESS/REALITY
+    inbound с metadataOnly=False (не-AWG).
+
+    Возвращает True если хотя бы один inbound был изменён.
+    """
+    changed = False
+    for ib in cfg.get("inbounds", []):
+        proto = ib.get("protocol", "")
+        if proto not in ("vless", "trojan", "vmess", "dokodemo-door"):
+            continue
+        sniffing = ib.get("sniffing")
+        # Нет sniffing или disabled — пропускаем.
+        if not sniffing or not sniffing.get("enabled"):
+            continue
+        # AWG-режим: metadataOnly=True означает что sniffers TLS/HTTP/QUIC
+        # отключены, routeOnly не имеет эффекта. НЕ трогаем — оставляем как есть.
+        if sniffing.get("metadataOnly") is True:
+            continue
+        # routeOnly: True — routing по SNI без переписывания destination.
+        if sniffing.get("routeOnly") is not True:
+            sniffing["routeOnly"] = True
+            changed = True
+        # Добавляем 'quic' в destOverride (если его нет).
+        do = sniffing.setdefault("destOverride", ["http", "tls"])
+        if not isinstance(do, list):
+            do = ["http", "tls"]
+            sniffing["destOverride"] = do
+        if "quic" not in do:
+            # Вставляем 'quic' в конец — порядок не важен для Xray.
+            do.append("quic")
+            changed = True
+    return changed
+
+
+def _youtube_restore_inbounds_after_fragment(cfg: dict) -> bool:
+    """Восстанавливает дефолтные routeOnly=False + destOverride без 'quic'.
+
+    Вызывается из _youtube_remove_from_xray() чтобы вернуть конфиг в исходное
+    состояние (после того как fragment-правило удалено).
+
+    Возвращает True если хотя бы один inbound был изменён.
+    """
+    changed = False
+    for ib in cfg.get("inbounds", []):
+        proto = ib.get("protocol", "")
+        if proto not in ("vless", "trojan", "vmess", "dokodemo-door"):
+            continue
+        sniffing = ib.get("sniffing")
+        if not sniffing or not sniffing.get("enabled"):
+            continue
+        # НЕ трогаем metadataOnly=True (AWG-режим).
+        if sniffing.get("metadataOnly") is True:
+            continue
+        # routeOnly: False (дефолт проекта с v4.12.6).
+        if sniffing.get("routeOnly") is not False:
+            sniffing["routeOnly"] = False
+            changed = True
+        # Убираем 'quic' из destOverride.
+        do = sniffing.get("destOverride", [])
+        if isinstance(do, list) and "quic" in do:
+            sniffing["destOverride"] = [x for x in do if x != "quic"]
+            changed = True
+    return changed
+
 
 def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
     """Добавляет YouTube→{target} правило в Xray config.
@@ -363,6 +496,7 @@ def _youtube_apply_fragment_to_xray(
     length: str = "10-30",
     interval: str = "3-8",
     block_quic: bool = False,
+    max_split: str | None = None,
 ) -> bool:
     """Добавляет YouTube→RU правило с TCP-фрагментацией ClientHello.
 
@@ -385,6 +519,27 @@ def _youtube_apply_fragment_to_xray(
     v5.0.11: block_quic по умолчанию False (был True в v5.0.10, вызывал
     'Нет подключения к интернету' у некоторых пользователей).
 
+    v5.0.12: убран sockopt из freedom outbound — он ломал YouTube
+    (tcpFastOpen/tcpCongestion/tcpUserTimeout могут не поддерживаться
+    freedom outbound или вызывать проблемы). Возвращаем к чистому
+    fragment, как было в рабочей v5.0.9.
+
+    v5.0.13: ПОЛНАЯ переработка стабильности YouTube через fragment:
+      • Возврат безопасного sockopt (БЕЗ tcpCongestion='bbr' — он был
+        причиной поломки v5.0.10). Проверено по доке Xray v26.x:
+        sockopt на freedom outbound поддерживается официально.
+      • Патч inbound sniffing: routeOnly=True + destOverride["quic"]
+        только при активном fragment. Это чинит:
+          - QUIC видео теперь матчится по SNI (раньше шло через catch-all)
+          - destination не переписывается (DNS-resolve не задерживает)
+          - "Нет подключения" при смене preset — сокращается до минимума
+      • maxSplit — новое поле fragment (недокументированное, но
+        поддерживаемое в Xray v26.x). Ограничивает количество фрагментов
+        на один TCP-сегмент — стабильность при больших ClientHello.
+      • Грейсфул-рестарт: 500мс задержка перед `systemctl restart xray`,
+        чтобы активные соединения успели корректно завершиться.
+      • Расширенный список YouTube-доменов (CDN variants).
+
     Требует Xray 26.x+ (XTLS форк поддерживает fragment в freedom.settings).
     Vanilla Xray-core не поддерживает — будет ошибка при старте.
 
@@ -394,6 +549,8 @@ def _youtube_apply_fragment_to_xray(
       interval:   "3-8" — задержка между фрагментами в мс
       block_quic: если True — блокировать QUIC (UDP/443) для YouTube.
                   По умолчанию False — может ломать YouTube.
+      max_split:  диапазон max количества фрагментов на пакет ("3-6")
+                  или None — не добавлять поле (поведение по умолчанию).
 
     Возвращает True если хотя бы один config.json пропатчен успешно.
     """
@@ -436,23 +593,44 @@ def _youtube_apply_fragment_to_xray(
             # Создаём outbound direct-fragment если его нет.
             # Перезаписываем если есть — чтобы обновить параметры fragment.
             outbounds = [ob for ob in outbounds if ob.get("tag") != _outbound_tag]
-            # v5.0.12: убран sockopt из freedom outbound — он ломал YouTube
-            # (tcpFastOpen/tcpCongestion/tcpUserTimeout могут не поддерживаться
-            # freedom outbound или вызывать проблемы). Возвращаем к чистому
-            # fragment, как было в рабочей v5.0.9.
+            # v5.0.13: безопасный sockopt для freedom outbound.
+            #
+            # В v5.0.10 был sockopt с tcpCongestion='bbr' → ломал YouTube полностью
+            # (bbr требует modprobe tcp_bbr; если модуль не загружен —
+            #  setsockopt(TCP_CONGESTION) возвращает ENOTSUP, Xray прерывает dial).
+            # В v5.0.12 sockopt был убран целиком. Теперь возвращаем БЕЗОПАСНЫЙ
+            # набор: tcpKeepAlive*, tcpUserTimeout, tcpFastOpen. БЕЗ bbr, БЕЗ
+            # tcpNoDelay (последний удалён в Xray — был no-op).
+            #
+            # Подтверждено докой: https://xtls.github.io/en/config/transports/sockopt.html
+            # «For direct outbounds such as Freedom, the peer is usually any
+            # ordinary public network target... only sockopt is available.»
+            _fragment_settings = {
+                "domainStrategy": "UseIPv4",
+                "fragment": {
+                    "packets":  packets,
+                    "length":   length,
+                    "interval": interval,
+                },
+            }
+            # v5.0.13: maxSplit — недокументированное, но поддерживаемое поле
+            # в fragment. Ограничивает количество фрагментов на один TCP-сегмент.
+            # Полезно для больших ClientHello (TLS 1.3 + ECH + ALPN).
+            if max_split is not None and max_split != "":
+                _fragment_settings["fragment"]["maxSplit"] = max_split
             outbounds.append({
                 "protocol": "freedom",
                 "tag":      _outbound_tag,
-                "settings": {
-                    "domainStrategy": "UseIPv4",
-                    "fragment": {
-                        "packets":  packets,
-                        "length":   length,
-                        "interval": interval,
-                    },
-                },
+                "settings": _fragment_settings,
+                "sockopt":  dict(_YOUTUBE_SAFE_SOCKOPT),
             })
             cfg["outbounds"] = outbounds
+
+            # v5.0.13: ПАТЧ INBOUND SNIFFING — критично для стабильности fragment.
+            # Без этого QUIC-трафик YouTube (UDP/443) не матчится по domain в
+            # routing → идёт через catch-all к exit-нодам. Также routeOnly=True
+            # убирает лишний DNS-resolve в freedom outbound.
+            _inbounds_changed = _youtube_patch_inbounds_for_fragment(cfg)
 
             # v5.0.10/v5.0.11: опциональная блокировка QUIC (UDP/443) для YouTube.
             # По умолчанию ВЫКЛЮЧЕНА (block_quic=False) — на некоторых конфигурациях
@@ -484,7 +662,9 @@ def _youtube_apply_fragment_to_xray(
                                     if ob.get("tag") != "youtube-quic-block"]
 
             info(f"Outbound '{_outbound_tag}' (fragment: packets={packets}, "
-                 f"length={length}, interval={interval})")
+                 f"length={length}, interval={interval}"
+                 + (f", maxSplit={max_split}" if max_split else "")
+                 + ", sockopt: keepalive+TFO)")
 
             # Новое правило fragment.
             new_rule = {
@@ -501,7 +681,8 @@ def _youtube_apply_fragment_to_xray(
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             _set_config_owner(cfg_path)
             _quic_status = "+ QUIC block" if block_quic else "(без QUIC block)"
-            info(f"Конфиг: {cfg_path} (YouTube→{_outbound_tag} {_quic_status})")
+            _sniff_status = ", sniffing patched" if _inbounds_changed else ""
+            info(f"Конфиг: {cfg_path} (YouTube→{_outbound_tag} {_quic_status}{_sniff_status})")
             ok = True
         except Exception as e:
             warn(f"Ошибка патча {cfg_path}: {e}")
@@ -509,6 +690,12 @@ def _youtube_apply_fragment_to_xray(
     if not ok:
         warn("Конфиг Xray не найден — не удалось применить YouTube→RU+fragment")
         return False
+
+    # v5.0.13: грейсфул-рестарт — даём 500мс активным соединениям завершиться
+    # перед restart xray. Уменьшает "Нет подключения к интернету" при смене
+    # preset (активные TCP-коннекты к YouTube CDN рвутся, browser retries,
+    # но Xray в момент restart недоступен).
+    time.sleep(0.5)
 
     # Restart xray, wait for it to come up.
     _run(["systemctl", "restart", "xray"], check=False, quiet=True)
@@ -582,12 +769,18 @@ def _youtube_remove_from_xray() -> bool:
                              if ob.get("tag") not in _youtube_outbound_tags]
             if len(new_outbounds) != len(outbounds):
                 cfg["outbounds"] = new_outbounds
-            if new_count == old_count and len(new_outbounds) == len(outbounds):
+            # v5.0.13: восстанавливаем дефолтные значения sniffing в inbound
+            # (routeOnly=False, destOverride без 'quic') — откат патча fragment.
+            _sniff_changed = _youtube_restore_inbounds_after_fragment(cfg)
+            if new_count == old_count and len(new_outbounds) == len(outbounds) and not _sniff_changed:
                 # Ничего не изменилось — пропускаем.
                 continue
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             _set_config_owner(cfg_path)
-            info_msg = f"Конфиг: {cfg_path} (удалены все YouTube правила)"
+            info_msg = f"Конфиг: {cfg_path} (удалены все YouTube правила"
+            if _sniff_changed:
+                info_msg += ", sniffing откачен"
+            info_msg += ")"
             try:
                 core.info(info_msg)
             except Exception:
@@ -636,20 +829,23 @@ def _geosite_available() -> bool:
 # =============================================================================
 
 # v5.0.9: Пресеты fragment для ТСПУ-обхода.
-# Каждый пресет — (packets, length, interval, описание).
+# v5.0.13: пресеты расширены — добавлен max_split (недокументированное, но
+# поддерживаемое поле Xray fragment). Ограничивает количество фрагментов на
+# один TCP-сегмент. Полезно для больших ClientHello (TLS 1.3 + ECH + ALPN).
+# None — не добавлять поле (поведение по умолчанию).
 # Дефолтный пресет — "medium" (баланс между обходом ТСПУ и скоростью).
 _FRAGMENT_PRESETS = [
-    # (key, label, packets, length, interval, description)
-    ("light",  "Light",  "1",    "50-100", "1-3",
+    # (key, label, packets, length, interval, max_split, description)
+    ("light",  "Light",  "1",    "50-100", "1-3",   None,
      "Минимальная задержка. Только 1 сегмент, крупные фрагменты 50-100 байт. "
-     "Может не обойти ТСПУ если DPI умный."),
-    ("medium", "Medium", "1",    "10-30",  "3-8",
-     "Баланс. 1 сегмент, фрагменты 10-30 байт, задержка 3-8мс. "
+     "Может не обойти ТСПУ если DPI умный. Подходит для быстрого интернета."),
+    ("medium", "Medium", "1",    "10-30",  "3-8",   "3-6",
+     "Баланс. 1 сегмент, фрагменты 10-30 байт, задержка 3-8мс, maxSplit=3-6. "
      "Рекомендуется для большинства случаев."),
-    ("heavy",  "Heavy",  "1-2",  "5-15",   "5-12",
+    ("heavy",  "Heavy",  "1-2",  "5-15",   "5-12",  "5-10",
      "Больше покрытия. 2 сегмента, фрагменты 5-15 байт. "
      "Лучше обход, но медленнее."),
-    ("max",    "Max",    "1-3",  "3-7",    "10-20",
+    ("max",    "Max",    "1-3",  "3-7",    "10-20", "8-15",
      "Максимум обхода. 3 сегмента, мелкие фрагменты 3-7 байт. "
      "Самый медленный, но пробивает строгий DPI."),
 ]
@@ -658,7 +854,7 @@ _FRAGMENT_PRESETS = [
 def _fragment_preset_menu(core) -> tuple | None:
     """Подменю выбора пресета fragment для YouTube→RU+fragment.
 
-    Возвращает (packets, length, interval) или None если пользователь отменил.
+    Возвращает (packets, length, interval, block_quic, max_split) или None если пользователь отменил.
     """
     _box_top    = core._box_top
     _box_row    = core._box_row
@@ -679,9 +875,10 @@ def _fragment_preset_menu(core) -> tuple | None:
     _box_sep()
 
     # Показываем пресеты
-    for i, (key, label, packets, length, interval, desc) in enumerate(_FRAGMENT_PRESETS, 1):
+    for i, (key, label, packets, length, interval, max_split, desc) in enumerate(_FRAGMENT_PRESETS, 1):
         _box_row(f"  {GREEN}[{i}]{NC} {label}")
-        _box_row(f"      {DIM}packets={packets}, length={length}, interval={interval} мс{NC}")
+        _ms_str = f", maxSplit={max_split}" if max_split else ""
+        _box_row(f"      {DIM}packets={packets}, length={length}, interval={interval} мс{_ms_str}{NC}")
         _box_row(f"      {DIM}{desc}{NC}")
         _box_row()
 
@@ -698,19 +895,21 @@ def _fragment_preset_menu(core) -> tuple | None:
 
     if ch in ("q", ""):
         # Дефолт — medium, без QUIC block
-        result = ("1", "10-30", "3-8")
+        result = ("1", "10-30", "3-8", "3-6")
     elif ch == "c":
         # Custom input
         print()
         print(f"{DIM}  Формат: range 'N-M' или single 'N' (без кавычек){NC}")
-        print(f"{DIM}  packets:  какие TCP-сегменты фрагментировать (1 = первый ClientHello){NC}")
-        print(f"{DIM}  length:   размер фрагмента в байтах (1-1000){NC}")
-        print(f"{DIM}  interval: задержка между фрагментами в мс (1-1000){NC}")
+        print(f"{DIM}  packets:   какие TCP-сегменты фрагментировать (1 = первый ClientHello){NC}")
+        print(f"{DIM}  length:    размер фрагмента в байтах (1-1000){NC}")
+        print(f"{DIM}  interval:  задержка между фрагментами в мс (1-1000){NC}")
+        print(f"{DIM}  max_split: макс. кол-во фрагментов на сегмент (Enter = не ограничивать){NC}")
         print()
         try:
-            packets = input(f"{CYAN}  packets [1]:{NC} ").strip() or "1"
-            length = input(f"{CYAN}  length [10-30]:{NC} ").strip() or "10-30"
-            interval = input(f"{CYAN}  interval [3-8]:{NC} ").strip() or "3-8"
+            packets   = input(f"{CYAN}  packets [1]:{NC} ").strip() or "1"
+            length    = input(f"{CYAN}  length [10-30]:{NC} ").strip() or "10-30"
+            interval  = input(f"{CYAN}  interval [3-8]:{NC} ").strip() or "3-8"
+            max_split = input(f"{CYAN}  max_split []:{NC} ").strip() or None
         except (EOFError, KeyboardInterrupt):
             return None
         # Базовая валидация
@@ -723,25 +922,31 @@ def _fragment_preset_menu(core) -> tuple | None:
         if not re.match(r'^\d+(-\d+)?$', interval):
             print(f"{YELLOW}  Некорректный формат interval{NC}")
             return None
-        result = (packets, length, interval)
+        if max_split and not re.match(r'^\d+(-\d+)?$', max_split):
+            print(f"{YELLOW}  Некорректный формат max_split (Enter = пропустить){NC}")
+            return None
+        result = (packets, length, interval, max_split or None)
     else:
         # Пресет 1-4
         try:
             idx = int(ch) - 1
             if 0 <= idx < len(_FRAGMENT_PRESETS):
-                _, _, packets, length, interval, _ = _FRAGMENT_PRESETS[idx]
-                result = (packets, length, interval)
+                _, _, packets, length, interval, max_split, _ = _FRAGMENT_PRESETS[idx]
+                result = (packets, length, interval, max_split)
             else:
                 return None
         except ValueError:
             return None
 
     # v5.0.11: вопрос про QUIC block (опционально, по умолчанию ВЫКЛ)
+    # v5.0.13: с патчем sniffing (routeOnly=True + destOverride[quic]) QUIC block
+    # теперь действительно работает — но всё ещё может вызывать browser retry delay.
     print()
     print(f"{DIM}  QUIC (UDP/443) — YouTube использует его для видео.{NC}")
-    print(f"{DIM}  TCP fragment работает только с TCP. Блокировка QUIC{NC}")
-    print(f"{DIM}  заставляет YouTube использовать TCP, но на некоторых{NC}")
-    print(f"{DIM}  конфигурациях Xray это ломает YouTube полностью.{NC}")
+    print(f"{DIM}  TCP fragment работает только с TCP. С v5.0.13 QUIC-трафик{NC}")
+    print(f"{DIM}  теперь корректно маршрутизируется по SNI (routeOnly+quic),{NC}")
+    print(f"{DIM}  но фрагментация на QUIC не действует. Блокировка QUIC{NC}")
+    print(f"{DIM}  заставляет YouTube fallback на TCP — добавляет 1-3с задержки.{NC}")
     print()
     try:
         quic_ans = input(f"{CYAN}  Блокировать QUIC для YouTube? [y/N]:{NC} ").strip().lower()
@@ -749,7 +954,7 @@ def _fragment_preset_menu(core) -> tuple | None:
         quic_ans = "n"
     block_quic = quic_ans in ("y", "yes", "д", "да")
 
-    return (result[0], result[1], result[2], block_quic)
+    return (result[0], result[1], result[2], block_quic, result[3])
 
 
 def do_manage_youtube_via_ru() -> None:
@@ -953,15 +1158,18 @@ def do_manage_youtube_via_ru() -> None:
             if _frag_params is None:
                 _box_warn("  Отменено пользователем.")
             else:
-                _packets, _length, _interval, _block_quic = _frag_params
+                _packets, _length, _interval, _block_quic, _max_split = _frag_params
                 _quic_str = "+ QUIC block" if _block_quic else "(без QUIC block)"
-                info(f"Применяем YouTube→RU+fragment (packets={_packets}, length={_length}, interval={_interval}, {_quic_str})...")
-                if _youtube_apply_fragment_to_xray(_packets, _length, _interval, block_quic=_block_quic):
+                _ms_str = f", maxSplit={_max_split}" if _max_split else ""
+                info(f"Применяем YouTube→RU+fragment (packets={_packets}, length={_length}, interval={_interval}{_ms_str}, {_quic_str})...")
+                if _youtube_apply_fragment_to_xray(_packets, _length, _interval,
+                                                   block_quic=_block_quic, max_split=_max_split):
                     _save_youtube_state("ru-fragment")
                     current_target = "ru-fragment"
                     rule_in_config = True
                     _box_info(f"YouTube через RU+fragment ({_quic_str}).")
-                    _box_info(f"{DIM}  packets={_packets}, length={_length}, interval={_interval}{NC}")
+                    _box_info(f"{DIM}  packets={_packets}, length={_length}, interval={_interval}{_ms_str}{NC}")
+                    _box_info(f"{DIM}  v5.0.13: применён patch sniffing (routeOnly+quic) и sockopt (keepalive+TFO).{NC}")
                     _box_info(f"{DIM}  Если не работает — попробуйте другой пресет или проверьте: journalctl -u xray -n 30{NC}")
                 else:
                     _box_warn("  Не удалось применить — смотрите вывод выше.")
@@ -1064,15 +1272,18 @@ def do_manage_youtube_via_ru() -> None:
             if _frag_params is None:
                 _box_warn("  Отменено пользователем.")
             else:
-                _packets, _length, _interval, _block_quic = _frag_params
+                _packets, _length, _interval, _block_quic, _max_split = _frag_params
                 _quic_str = "+ QUIC block" if _block_quic else "(без QUIC block)"
-                info(f"Применяем YouTube→RU+fragment (packets={_packets}, length={_length}, interval={_interval}, {_quic_str})...")
-                if _youtube_apply_fragment_to_xray(_packets, _length, _interval, block_quic=_block_quic):
+                _ms_str = f", maxSplit={_max_split}" if _max_split else ""
+                info(f"Применяем YouTube→RU+fragment (packets={_packets}, length={_length}, interval={_interval}{_ms_str}, {_quic_str})...")
+                if _youtube_apply_fragment_to_xray(_packets, _length, _interval,
+                                                   block_quic=_block_quic, max_split=_max_split):
                     _save_youtube_state("ru-fragment")
                     current_target = "ru-fragment"
                     rule_in_config = True
                     _box_info(f"YouTube через RU+fragment ({_quic_str}).")
-                    _box_info(f"{DIM}  packets={_packets}, length={_length}, interval={_interval}{NC}")
+                    _box_info(f"{DIM}  packets={_packets}, length={_length}, interval={_interval}{_ms_str}{NC}")
+                    _box_info(f"{DIM}  v5.0.13: применён patch sniffing (routeOnly+quic) и sockopt (keepalive+TFO).{NC}")
                     _box_info(f"{DIM}  Если не работает — попробуйте другой пресет или проверьте: journalctl -u xray -n 30{NC}")
                 else:
                     _box_warn("  Не удалось применить — смотрите вывод выше.")

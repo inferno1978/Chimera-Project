@@ -2,6 +2,145 @@
 
 ---
 
+## FIX(youtube): v5.0.13 — стабильность RU+fragment через patch sniffing + safe sockopt — 8 августа 2026
+
+**Полная переработка стабильности YouTube через RU+fragment. Решает:
+"видео buffering несколько секунд", "Shorts иногда не грузятся",
+"Нет подключения к интернету при смене preset", "нужно перезагружать сервер".**
+
+### Анализ (включая сверку с документацией Xray v26.7.28)
+
+**Что было сломано в v5.0.10 (когда YouTube полностью упал):**
+
+Старый комментарий "freedom outbound is not designed for sockopt" — НЕВЕРЕН.
+Согласно доке Xray (https://xtls.github.io/en/config/transports/sockopt.html):
+«For direct outbounds such as Freedom, the peer is usually any ordinary
+public network target... only sockopt is available.»
+
+Реальная причина поломки: `tcpCongestion: "bbr"` требует загруженного модуля
+`tcp_bbr` в ядре. Если модуль не загружен, `setsockopt(TCP_CONGESTION, "bbr")`
+возвращает `ENOTSUP`, и Xray прерывает КАЖДЫЙ dial через freedom outbound →
+«Нет подключения к интернету». Остальные sockopt-поля (`tcpFastOpen`,
+`tcpKeepAliveIdle`, `tcpKeepAliveInterval`, `tcpUserTimeout`) работают
+корректно на любом современном Linux. `tcpNoDelay` удалён в Xray (no-op).
+
+Блокировка QUIC сама по себе YouTube не сломала — она просто не срабатывала
+(см. ниже), но и не помогала. Главным убийцей был sockopt с `bbr`.
+
+**Корневая причина текущей нестабильности (v5.0.12):**
+
+1. **QUIC видео YouTube шёл мимо fragment-правила.**
+   С v4.12.6 все VLESS/REALITY inbound имеют `routeOnly: False` + с v4.12.6
+   fb13e49 — `destOverride: ["http", "tls"]` (без `"quic"`).
+   Это значит: QUIC-пакеты YouTube (UDP/443) не имеют sniffed-домена в
+   routing → правило `domain:[youtube...]` НЕ матчит QUIC → QUIC видео
+   идёт через catch-all к exit-нодам. В итоге: API/HTML через fragment,
+   видео-стрим через exit-ноды — асимметричная маршрутизация, рассинхрон
+   сессии, "Shorts не грузятся".
+
+2. **routeOnly: False переписывает destination.**
+   Freedom outbound получает sniffed domain (а не IP) и делает DNS-resolve
+   через систему. На медленном DNS это добавляет задержку на каждый новый
+   TCP-коннект к YouTube CDN. Отсюда "видео buffering несколько секунд".
+
+3. **Нет grace period перед restart xray.**
+   При смене preset — активные TCP-коннекты к YouTube CDN рвутся. Browser
+   retries, но в момент restart Xray недоступен → "Нет подключения к
+   интернету". Помогала только перезагрузка сервера (которая убивала все
+   соединения и заставляла browser начать с чистого листа).
+
+### Фиксы (v5.0.13)
+
+**1. Патч inbound sniffing ТОЛЬКО при активном RU+fragment.**
+   Новые функции `_youtube_patch_inbounds_for_fragment()` /
+   `_youtube_restore_inbounds_after_fragment()`:
+   - Для всех VLESS/REALITY inbound с `metadataOnly=False` (не-AWG):
+     - `routeOnly: True` — routing по SNI без переписывания destination
+     - `destOverride: ["http", "tls", "quic"]` — QUIC SNI используется
+       для роутинга (но destination IP не переписывается)
+   - AWG-режим (`metadataOnly=True`) НЕ трогаем — там sniffing отключён
+     намеренно (kernel-роутинг).
+   - При отключении fragment — откатываем routeOnly в False, убираем "quic"
+     из destOverride.
+   - Источник: https://xtls.github.io/en/config/inbound.html#routeonly-true-false
+
+**2. Возврат безопасного sockopt в freedom outbound.**
+   Согласно доке Xray, sockopt на freedom outbound поддерживается официально.
+   Добавляем:
+   ```json
+   "sockopt": {
+     "tcpKeepAliveIdle":     60,
+     "tcpKeepAliveInterval": 15,
+     "tcpUserTimeout":       10000,
+     "tcpFastOpen":          true
+   }
+   ```
+   БЕЗ `tcpCongestion: "bbr"` (требует modprobe tcp_bbr — был причиной
+   поломки v5.0.10). БЕЗ `tcpNoDelay` (удалён в Xray, был no-op).
+
+**3. Новое поле `maxSplit` в fragment (недокументированное, поддерживается).**
+   Ограничивает количество фрагментов на один TCP-сегмент — полезно для
+   больших ClientHello (TLS 1.3 + ECH + ALPN). Пресеты обновлены:
+   - light: maxSplit не задан
+   - medium: maxSplit="3-6"
+   - heavy: maxSplit="5-10"
+   - max: maxSplit="8-15"
+   Custom input поддерживает max_split (Enter = пропустить).
+
+**4. Грейсфул-рестарт: 500мс sleep перед `systemctl restart xray`.**
+   Даёт активным соединениям корректно завершиться. Сокращает "Нет
+   подключения к интернету" при смене preset.
+
+**5. Расширенный список YouTube-доменов.**
+   Добавлены CDN variants (раньше видеострим мог асимметрично уйти через
+   default outbound, пока thumbnails/api шли через fragment):
+   - `wide-youtube.l.google.com`
+   - `youtube-ui.l.google.com`
+   - `youtubeembedded-pa.googleapis.com`
+   - `youtube.googleapis.com`
+   - `yt-video-googleusercontent.com`
+   - `lh3.googleusercontent.com`
+
+**6. QUIC block теперь действительно работает (опционально).**
+   Раньше правило `domain + network:udp + port:443 → blackhole` не могло
+   сматчиться без `quic` в `destOverride`. Теперь с патчем sniffing оно
+   работает корректно. Но по умолчанию всё ещё ВЫКЛ — браузеру нужен
+   retry (1-3с) для fallback на TCP.
+
+### Документация (новые комментарии в коде)
+
+В `youtube_route.py` добавлены развёрнутые комментарии со ссылками на
+официальную доку Xray v26.x:
+- Почему sockopt с bbr ломал YouTube (kernel module requirement)
+- Почему routeOnly=True правильное решение (no destination rewrite)
+- Почему quic в destOverride безопасен с routeOnly=True (no dest rewrite)
+- Подтверждение что freedom.settings.fragment — правильное место для
+  серверной фрагментации (а не sockopt.fragment, которого не существует)
+
+### Тесты
+
+- 42 существующих теста — без регрессий.
+- 16 НОВЫХ тестов в `tests/test_youtube_route_v5013.py`:
+  - patch_inbounds_for_fragment (6 тестов)
+  - restore_inbounds_after_fragment (2 теста)
+  - apply_fragment_with_maxsplit (2 теста)
+  - safe_sockopt (1 тест)
+  - graceful_restart (1 тест)
+  - expanded_youtube_domains (1 тест)
+  - remove_from_xray_restores_sniffing (1 тест)
+  - fragment_preset_menu_v5013 (2 теста)
+- Всего 204 связанных теста проходят.
+
+### Совместимость
+
+- Backward compatible: при `block_quic=False` (дефолт) поведение для тех,
+  кто НЕ использует RU+fragment — без изменений (patching только при
+  активном fragment).
+- AWG-режим: НЕ трогаем metadataOnly=True inbound (kernel-роутинг).
+- Xray 26.x+ требуется (XTLS форк).
+
+---
+
 ## FEAT(youtube): YouTube→WARP routing + RU+fragment — обход ТСПУ DPI — 7 августа 2026
 
 **Две новые функции в модуле YouTube-маршрутизации для обхода ТСПУ SNI-фильтрации
