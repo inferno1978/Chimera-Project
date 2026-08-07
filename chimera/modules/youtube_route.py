@@ -436,9 +436,10 @@ def _youtube_apply_fragment_to_xray(
             # Создаём outbound direct-fragment если его нет.
             # Перезаписываем если есть — чтобы обновить параметры fragment.
             outbounds = [ob for ob in outbounds if ob.get("tag") != _outbound_tag]
-            # v5.0.10: добавлен sockopt с TCP keepalive и tcpNoDelay для
-            # стабильности соединений. tcpFastOpen ускоряет повторные
-            # подключения (важно при переключении роликов).
+            # v5.0.12: убран sockopt из freedom outbound — он ломал YouTube
+            # (tcpFastOpen/tcpCongestion/tcpUserTimeout могут не поддерживаться
+            # freedom outbound или вызывать проблемы). Возвращаем к чистому
+            # fragment, как было в рабочей v5.0.9.
             outbounds.append({
                 "protocol": "freedom",
                 "tag":      _outbound_tag,
@@ -449,14 +450,6 @@ def _youtube_apply_fragment_to_xray(
                         "length":   length,
                         "interval": interval,
                     },
-                },
-                "sockopt": {
-                    "tcpFastOpen":         True,
-                    "tcpKeepAliveInterval": 15,
-                    "tcpKeepAliveIdle":    60,
-                    "tcpUserTimeout":      10000,
-                    "tcpCongestion":       "bbr",
-                    "tcpNoDelay":          True,
                 },
             })
             cfg["outbounds"] = outbounds
@@ -491,7 +484,7 @@ def _youtube_apply_fragment_to_xray(
                                     if ob.get("tag") != "youtube-quic-block"]
 
             info(f"Outbound '{_outbound_tag}' (fragment: packets={packets}, "
-                 f"length={length}, interval={interval}, sockopt: TFO+keepalive+NoDelay)")
+                 f"length={length}, interval={interval})")
 
             # Новое правило fragment.
             new_rule = {
