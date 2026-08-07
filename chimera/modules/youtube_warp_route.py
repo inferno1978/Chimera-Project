@@ -170,8 +170,50 @@ def _kernel_routes_remove():
 
 # ── Xray Config ────────────────────────────────────────────────────────────
 
-def _xray_apply_warp_outbound():
-    """Add WARP outbound + YouTube->WARP rule to Xray config."""
+def _detect_warp_ip_version() -> str:
+    """Определяет, какая IP-версия через WARP реально работает.
+
+    Возвращает: "ipv4", "ipv6", "both", или "none".
+
+    v5.0.3: критически важно для РФ — ТСПУ делает DPI на WireGuard-трафике
+    и может дропать IPv4-пакеты внутри туннеля, пропуская IPv6. Handshake
+    проходит (маленькие пакеты), интерфейс поднят, но IPv4 connectivity
+    отсутствует. Xray с domainStrategy=UseIPv4 в этом случае не может
+    достучаться до YouTube.
+
+    Алгоритм:
+      1. Проверяем IPv4: curl -4 --interface wg-warp
+      2. Проверяем IPv6: curl -6 --interface wg-warp
+      3. Возвращаем результат
+
+    Приоритет: "both" > "ipv4" > "ipv6" > "none"
+    (IPv4 предпочтительнее — лучше поддерживается сайтами)
+    """
+    v4 = _warp_ipv4_connectivity()
+    v6 = _warp_ipv6_connectivity()
+    if v4 and v6:
+        return "both"
+    if v4:
+        return "ipv4"
+    if v6:
+        return "ipv6"
+    return "none"
+
+
+def _xray_apply_warp_outbound(ip_version: str = "auto"):
+    """Add WARP outbound + YouTube->WARP rule to Xray config.
+
+    Args:
+      ip_version: "auto" (default) — detect which IP version works through WARP
+                  "ipv4"          — force IPv4 (sendThrough=warp_ipv4, UseIPv4)
+                  "ipv6"          — force IPv6 (sendThrough=warp_ipv6, UseIPv6)
+                  "both"          — try IPv4 first, fallback to IPv6 (UseIPv4v6)
+
+    v5.0.3: при ip_version="auto" вызывает _detect_warp_ip_version() и
+    выбирает стратегию. Если IPv4 не работает но IPv6 работает —
+    использует IPv6 (sendThrough=warp_ipv6, domainStrategy=UseIPv6).
+    Это решает проблему ТСПУ-блокировки IPv4 внутри WireGuard туннеля.
+    """
     core = _core_module()
     CONFIG_DIR = core.CONFIG_DIR
     _set_config_owner = core._set_config_owner
@@ -179,7 +221,40 @@ def _xray_apply_warp_outbound():
     info = core.info
     warn = core.warn
 
-    warp_ip = _get_warp_ipv4()
+    # Определяем стратегию IP-версии
+    if ip_version == "auto":
+        ip_version = _detect_warp_ip_version()
+        info(f"Авто-определение: через WARP работает {ip_version}")
+
+    warp_ipv4 = _get_warp_ipv4()
+    warp_ipv6 = _get_warp_ipv6()
+
+    # Выбираем sendThrough и domainStrategy на основе ip_version
+    if ip_version == "ipv6":
+        if not warp_ipv6:
+            warn("IPv6 адрес WARP не найден — нельзя использовать IPv6 стратегию")
+            return False
+        send_through = warp_ipv6
+        domain_strategy = "UseIPv6"
+        strategy_desc = f"IPv6 (sendThrough={warp_ipv6}, UseIPv6)"
+    elif ip_version == "both":
+        if not warp_ipv4 and not warp_ipv6:
+            warn("Нет ни IPv4, ни IPv6 адреса WARP")
+            return False
+        # UseIPv4v6: try IPv4 first, fallback IPv6. sendThrough должен
+        # быть IPv4 (основной), IPv6 пакеты пойдут с IPv6-адреса интерфейса.
+        send_through = warp_ipv4 or warp_ipv6
+        domain_strategy = "UseIPv4v6"
+        strategy_desc = f"IPv4+IPv6 (sendThrough={send_through}, UseIPv4v6)"
+    else:
+        # "ipv4" (default)
+        if not warp_ipv4:
+            warn("IPv4 адрес WARP не найден — нельзя использовать IPv4 стратегию")
+            return False
+        send_through = warp_ipv4
+        domain_strategy = "UseIPv4"
+        strategy_desc = f"IPv4 (sendThrough={warp_ipv4}, UseIPv4)"
+
     written = set()
     ok = False
 
@@ -201,16 +276,19 @@ def _xray_apply_warp_outbound():
             rules = [r for r in routing.setdefault("rules", [])
                      if r.get("comment") not in (_YOUTUBE_WARP_RULE_COMMENT, "youtube_via_ru")]
 
-            if not any(ob.get("tag") == "warp" for ob in outbounds):
-                outbounds.append({
-                    "protocol": "freedom",
-                    "tag": "warp",
-                    "settings": {
-                        "domainStrategy": "UseIPv4",
-                        "sendThrough": warp_ip,
-                    },
-                })
-                info(f"Добавлен outbound 'warp' (sendThrough={warp_ip})")
+            # Удаляем старый outbound warp (если есть) — перезаписываем с
+            # актуальным sendThrough и domainStrategy.
+            outbounds = [ob for ob in outbounds if ob.get("tag") != "warp"]
+            outbounds.append({
+                "protocol": "freedom",
+                "tag": "warp",
+                "settings": {
+                    "domainStrategy": domain_strategy,
+                    "sendThrough": send_through,
+                },
+            })
+            cfg["outbounds"] = outbounds
+            info(f"Outbound 'warp' настроен: {strategy_desc}")
 
             new_rule = {
                 "type": "field",
@@ -221,14 +299,14 @@ def _xray_apply_warp_outbound():
             routing["rules"] = [new_rule] + rules
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             _set_config_owner(cfg_path)
-            info(f"Конфиг: {cfg_path} (YouTube->WARP sendThrough={warp_ip})")
+            info(f"Конфиг: {cfg_path} (YouTube->WARP, {strategy_desc})")
             ok = True
         except Exception as e:
             warn(f"Ошибка патча {cfg_path}: {e}")
 
     if ok:
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-        core.success("YouTube->WARP применено в Xray")
+        core.success(f"YouTube->WARP применено в Xray ({strategy_desc})")
     return ok
 
 
@@ -377,8 +455,16 @@ def restore_kernel_routes():
 
 # ── Public API ─────────────────────────────────────────────────────────────
 
-def apply_youtube_warp_routing(enable: bool) -> tuple:
-    """Enable or disable YouTube->WARP routing."""
+def apply_youtube_warp_routing(enable: bool, ip_version: str = "auto") -> tuple:
+    """Enable or disable YouTube->WARP routing.
+
+    Args:
+      enable: True — включить, False — выключить.
+      ip_version: "auto" — определить автоматически (по умолчанию)
+                  "ipv4"  — принудительно IPv4
+                  "ipv6"  — принудительно IPv6 (для ТСПУ-блокировки IPv4)
+                  "both"  — IPv4+IPv6 (UseIPv4v6)
+    """
     core = _core_module()
 
     if enable:
@@ -386,8 +472,9 @@ def apply_youtube_warp_routing(enable: bool) -> tuple:
             return False, ("WARP не установлен или интерфейс wg-warp не найден. "
                            "Сначала установите WARP: меню -> Cloudflare WARP")
 
-        warp_ip = _get_warp_ipv4()
-        core.info(f"WARP интерфейс: wg-warp, IPv4: {warp_ip}")
+        warp_ipv4 = _get_warp_ipv4()
+        warp_ipv6 = _get_warp_ipv6()
+        core.info(f"WARP интерфейс: wg-warp, IPv4: {warp_ipv4}, IPv6: {warp_ipv6}")
 
         try:
             _kernel_routes_apply()
@@ -395,7 +482,9 @@ def apply_youtube_warp_routing(enable: bool) -> tuple:
         except Exception as e:
             return False, f"Ошибка kernel маршрутизации: {e}"
 
-        _xray_apply_warp_outbound()
+        # Передаём ip_version в _xray_apply_warp_outbound — оно выберет
+        # правильный sendThrough и domainStrategy.
+        _xray_apply_warp_outbound(ip_version=ip_version)
         _singbox_apply_warp_outbound()
         _install_persistence()
 
@@ -406,7 +495,14 @@ def apply_youtube_warp_routing(enable: bool) -> tuple:
         except Exception:
             pass
 
-        return True, f"YouTube->WARP включён (sendThrough={warp_ip}, table 301)"
+        # Описываем что применили
+        if ip_version == "ipv6":
+            desc = f"sendThrough={warp_ipv6} (IPv6), table 301"
+        elif ip_version == "both":
+            desc = f"sendThrough={warp_ipv4} (IPv4+IPv6), table 301"
+        else:
+            desc = f"sendThrough={warp_ipv4} (IPv4), table 301"
+        return True, f"YouTube->WARP включён ({desc})"
     else:
         _xray_remove_warp_outbound()
         _singbox_remove_warp_outbound()
@@ -582,84 +678,80 @@ def do_youtube_warp_interactive(core) -> tuple:
 
     # ── Сценарий 1: WARP полностью готов ──────────────────────────────────
     if st["iface_up"]:
-        # v5.0.2: перед применением правила проверяем, что IPv4 через
-        # wg-warp РЕАЛЬНО работает. Xray использует domainStrategy=UseIPv4,
-        # поэтому если IPv4 через WARP не работает — YouTube будет "висеть"
-        # с "нет подключения к интернету", хотя интерфейс есть и handshake
-        # свежий. Типичная причина: AllowedIPs в wg-warp.conf содержит
-        # только ::/0 без 0.0.0.0/0.
-        info("Проверка IPv4 connectivity через wg-warp...")
-        if not _warp_ipv4_connectivity():
-            # IPv4 не работает — НЕ применяем правило (оно всё равно
-            # не сработает, YouTube будет сломан).
-            print()
-            warn("⚠ WARP поднят, но IPv4 через wg-warp НЕ РАБОТАЕТ.")
-            print(f"{DIM}  Xray использует domainStrategy=UseIPv4, поэтому без IPv4${NC}")
-            print(f"{DIM}  connectivity YouTube не загрузится.{NC}")
-            print()
-            # Проверяем AllowedIPs — самая частая причина.
-            allowed = _warp_allowed_ips_check()
-            if not allowed["ipv4"]:
-                print(f"{YELLOW}  Причина: AllowedIPs в wg-warp.conf НЕ содержит 0.0.0.0/0${NC}")
-                print(f"{DIM}  WireGuard дропает все IPv4 пакеты, даже если интерфейс поднят.${NC}")
-                print()
-                print(f"{CYAN}  Исправить:${NC}")
-                print(f"  {DIM}1. Откройте /etc/wireguard/wg-warp.conf${NC}")
-                print(f"  {DIM}2. Найдите строку AllowedIPs =${NC}")
-                print(f"  {DIM}3. Добавьте 0.0.0.0/0 (должно быть: AllowedIPs = 0.0.0.0/0, ::/0)${NC}")
-                print(f"  {DIM}4. Перезапустите: systemctl restart wg-quick@wg-warp${NC}")
-                print(f"  {DIM}5. Повторите: меню YouTube → W${NC}")
-                print()
-                # Не выходим — даём пользователю возможность сразу
-                # попробовать починить через полное меню WARP.
-                try:
-                    _ans = input(f"{CYAN}  Открыть полное меню WARP для диагностики? [Y/n]:{NC} ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    _ans = "n"
-                if _ans in ("", "y", "yes", "д", "да"):
-                    try:
-                        from chimera.modules.warp import do_manage_warp
-                        do_manage_warp()
-                        # После выхода из меню перепроверяем.
-                        if _warp_ipv4_connectivity():
-                            success("IPv4 через WARP заработал!")
-                            return apply_youtube_warp_routing(True)
-                    except Exception as e:
-                        warn(f"Ошибка: {e}")
-                return (False, "IPv4 через WARP не работает — правило не применено "
-                               "(см. инструкции выше). IPv6 поддержку НЕ трогаем.")
-            else:
-                # AllowedIPs корректный, но IPv4 всё равно не работает.
-                v6_works = _warp_ipv6_connectivity()
-                print(f"{YELLOW}  AllowedIPs корректный, но IPv4 через WARP не работает.${NC}")
-                if v6_works:
-                    print(f"{DIM}  При этом IPv6 через WARP работает. Возможные причины:${NC}")
-                else:
-                    print(f"{DIM}  IPv6 через WARP тоже не работает. Возможные причины:${NC}")
-                print(f"  {DIM}• Endpoint Cloudflare недоступен по IPv4 (попробуйте сменить)${NC}")
-                print(f"  {DIM}• MTU слишком большой (попробуйте 1280 в wg-warp.conf)${NC}")
-                print(f"  {DIM}• Firewall блокирует исходящий IPv4 через wg-warp${NC}")
-                print()
-                print(f"{CYAN}  Откройте меню WARP → 6 (Изменить Endpoint) или 4 (диагностика)${NC}")
-                try:
-                    _ans = input(f"{CYAN}  Открыть полное меню WARP? [Y/n]:{NC} ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    _ans = "n"
-                if _ans in ("", "y", "yes", "д", "да"):
-                    try:
-                        from chimera.modules.warp import do_manage_warp
-                        do_manage_warp()
-                        if _warp_ipv4_connectivity():
-                            success("IPv4 через WARP заработал!")
-                            return apply_youtube_warp_routing(True)
-                    except Exception as e:
-                        warn(f"Ошибка: {e}")
-                return (False, "IPv4 через WARP не работает — нужно починить WARP.")
+        # v5.0.3: перед применением правила проверяем, КАКАЯ IP-версия
+        # через wg-warp реально работает. ТСПУ может дропать IPv4-пакеты
+        # внутри WireGuard туннеля (DPI по заголовку), пропуская IPv6.
+        # Handshake проходит (маленькие пакеты), IPv6 работает, IPv4 — нет.
+        # Xray нужно настроить на работающую IP-версию.
+        info("Проверка IP-связности через wg-warp (IPv4 + IPv6)...")
+        ip_ver = _detect_warp_ip_version()
 
-        # IPv4 работает — можно применять правило.
-        success("IPv4 через WARP работает.")
-        info("Применяем YouTube->WARP маршрутизацию...")
-        return apply_youtube_warp_routing(True)
+        if ip_ver == "none":
+            # Ни IPv4, ни IPv6 через WARP не работают.
+            print()
+            warn("⚠ WARP поднят, но НИ IPv4, НИ IPv6 через wg-warp не работают.")
+            print(f"{DIM}  Handshake может проходить, но данные не идут.${NC}")
+            print()
+            allowed = _warp_allowed_ips_check()
+            if not allowed["ipv4"] and not allowed["ipv6"]:
+                print(f"{YELLOW}  Причина: AllowedIPs в wg-warp.conf некорректный${NC}")
+                print(f"{DIM}  Должно быть: AllowedIPs = 0.0.0.0/0, ::/0${NC}")
+            else:
+                print(f"{YELLOW}  Возможные причины:${NC}")
+                print(f"  {DIM}• ТСПУ блокирует WireGuard трафик (DPI)${NC}")
+                print(f"  {DIM}• Endpoint Cloudflare недоступен (попробуйте сменить)${NC}")
+                print(f"  {DIM}• Firewall блокирует исходящий трафик через wg-warp${NC}")
+            print()
+            print(f"{CYAN}  Откройте меню WARP → 6 (Изменить Endpoint) или 4 (диагностика)${NC}")
+            try:
+                _ans = input(f"{CYAN}  Открыть полное меню WARP? [Y/n]:{NC} ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                _ans = "n"
+            if _ans in ("", "y", "yes", "д", "да"):
+                try:
+                    from chimera.modules.warp import do_manage_warp
+                    do_manage_warp()
+                    # После выхода из меню перепроверяем.
+                    new_ver = _detect_warp_ip_version()
+                    if new_ver != "none":
+                        success(f"Через WARP заработал: {new_ver}")
+                        return apply_youtube_warp_routing(True, ip_version=new_ver)
+                except Exception as e:
+                    warn(f"Ошибка: {e}")
+            return (False, "Через WARP не работает ни IPv4, ни IPv6 — нужно починить WARP.")
+
+        elif ip_ver == "ipv6":
+            # IPv4 не работает, но IPv6 работает! Это типичная картина
+            # ТСПУ-блокировки IPv4 в WireGuard. Предлагаем использовать IPv6.
+            print()
+            success("IPv6 через WARP РАБОТАЕТ (IPv4 заблокирован ТСПУ).")
+            print(f"{DIM}  ТСПУ делает DPI на WireGuard и дропает IPv4-пакеты внутри${NC}")
+            print(f"{DIM}  туннеля, пропуская IPv6. YouTube имеет полную IPv6-поддержку.${NC}")
+            print()
+            print(f"{CYAN}  Будем использовать IPv6 стратегию:${NC}")
+            print(f"  {DIM}• sendThrough = <WARP IPv6 адрес>${NC}")
+            print(f"  {DIM}• domainStrategy = UseIPv6${NC}")
+            print(f"  {DIM}• Все YouTube-домены имеют IPv6 (youtube.com, googlevideo.com, ...)${NC}")
+            print()
+            try:
+                _ans = input(f"{CYAN}  Применить YouTube->WARP через IPv6? [Y/n]:{NC} ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                _ans = "n"
+            if _ans in ("", "y", "yes", "д", "да"):
+                return apply_youtube_warp_routing(True, ip_version="ipv6")
+            return (False, "Пользователь отменил IPv6 стратегию.")
+
+        elif ip_ver == "ipv4":
+            # Только IPv4 работает (IPv6 не работает — например, сервер без IPv6).
+            success("IPv4 через WARP работает (IPv6 недоступен на сервере).")
+            info("Применяем YouTube->WARP маршрутизацию (IPv4)...")
+            return apply_youtube_warp_routing(True, ip_version="ipv4")
+
+        else:
+            # both — IPv4 и IPv6 оба работают. Используем UseIPv4v6 (IPv4 first).
+            success("IPv4 и IPv6 через WARP оба работают.")
+            info("Применяем YouTube->WARP маршрутизацию (IPv4+IPv6)...")
+            return apply_youtube_warp_routing(True, ip_version="both")
 
     # ── Сценарий 2: установлен, но сервис остановлен ──────────────────────
     if st["installed"] and not st["service_active"]:
@@ -795,7 +887,9 @@ def restore_if_needed(silent: bool = False) -> bool:
                 core.info("Пере-применяем YouTube->WARP правило после regenerate...")
             except Exception:
                 pass
-        _xray_apply_warp_outbound()
+        # v5.0.3: используем auto-detection IP-версии — после regenerate
+        # конфиг мог потерять актуальный sendThrough.
+        _xray_apply_warp_outbound(ip_version="auto")
         _singbox_apply_warp_outbound()
         return True
     else:
@@ -804,5 +898,5 @@ def restore_if_needed(silent: bool = False) -> bool:
                 core.info("Пере-применяем YouTube->WARP маршрутизацию...")
             except Exception:
                 pass
-        apply_youtube_warp_routing(True)
+        apply_youtube_warp_routing(True, ip_version="auto")
         return True
