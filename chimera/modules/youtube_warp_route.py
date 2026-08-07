@@ -415,6 +415,201 @@ def apply_youtube_warp_routing(enable: bool) -> tuple:
         return True, "YouTube->WARP отключён"
 
 
+# ── Interactive flow (auto-install / activate WARP) ───────────────────────
+#
+# v5.0.0 FIX: раньше нажатие [W] в меню YouTube при отсутствии WARP просто
+# показывало warn и возвращало пользователя в основное меню. Это плохо для
+# UX — пользователь не понимает что делать дальше. Теперь [W] автоматически
+# предлагает установить/активировать WARP прямо здесь, не выходя из меню
+# YouTube-маршрутизации.
+#
+# Сценарии:
+#   1. WARP не установлен (нет /etc/wireguard/wg-warp.conf)
+#      → Предлагаем запустить install wizard прямо здесь.
+#      → После успешной установки автоматически применяем YouTube->WARP.
+#
+#   2. WARP установлен, но сервис остановлен (systemctl is-active != active)
+#      → Предлагаем запустить сервис.
+#      → После успешного старта применяем YouTube->WARP.
+#
+#   3. WARP установлен и активен, но интерфейс wg-warp почему-то не поднят
+#      → Сообщаем об ошибке, предлагаем открыть полное меню WARP.
+#
+#   4. WARP полностью готов
+#      → Просто применяем YouTube->WARP routing.
+#
+# Возвращает (ok: bool, message: str) — совместимо с apply_youtube_warp_routing.
+
+def _warp_status_check() -> dict:
+    """Возвращает статус WARP для интерактивного flow.
+
+    Keys:
+      installed: bool  — /etc/wireguard/wg-warp.conf существует
+      service_active: bool — systemctl is-active wg-quick@wg-warp == active
+      iface_up: bool — `ip link show wg-warp` успешен
+    """
+    out = {"installed": False, "service_active": False, "iface_up": False}
+    try:
+        out["installed"] = Path("/etc/wireguard/wg-warp.conf").exists()
+    except Exception:
+        pass
+    try:
+        r = _run(["systemctl", "is-active", "wg-quick@wg-warp"], capture=True, check=False)
+        out["service_active"] = (r.stdout or "").strip() == "active"
+    except Exception:
+        pass
+    out["iface_up"] = _warp_iface_up()
+    return out
+
+
+def do_youtube_warp_interactive(core) -> tuple:
+    """Интерактивный flow включения YouTube->WARP с авто-установкой.
+
+    Вызывается из меню YouTube-маршрутизации (youtube_route.py) при нажатии [W].
+    Не требует предварительной установки WARP — предложит установить
+    прямо здесь, без выхода в основное меню.
+
+    Args:
+      core: модуль chimera._core (передаётся извне для согласованности
+            с остальным кодом youtube_route).
+
+    Returns:
+      (ok: bool, message: str) — совместимо с apply_youtube_warp_routing.
+      ok=True только если YouTube->WARP реально применён.
+    """
+    info = core.info
+    warn = core.warn
+    success = core.success
+    CYAN = core.CYAN
+    YELLOW = core.YELLOW
+    GREEN = core.GREEN
+    RED = core.RED
+    BLUE = core.BLUE
+    NC = core.NC
+    BOLD = core.BOLD
+
+    st = _warp_status_check()
+
+    # ── Сценарий 1: WARP полностью готов ──────────────────────────────────
+    if st["iface_up"]:
+        # Интерфейс есть — достаточно для apply (freedom.sendThrough работает
+        # даже если WARP в selective/runet режиме, т.к. мы используем отдельную
+        # таблицу 301, а не основную).
+        info("WARP готов — применяем YouTube->WARP маршрутизацию...")
+        return apply_youtube_warp_routing(True)
+
+    # ── Сценарий 2: установлен, но сервис остановлен ──────────────────────
+    if st["installed"] and not st["service_active"]:
+        print()
+        warn("WARP установлен, но сервис wg-quick@wg-warp остановлен.")
+        try:
+            _ans = input(f"{CYAN}  Запустить WARP сейчас? [Y/n]:{NC} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            _ans = "n"
+        if _ans in ("", "y", "yes", "д", "да"):
+            r = _run(["systemctl", "start", "wg-quick@wg-warp"], capture=True, check=False)
+            if r.returncode != 0:
+                print(f"{RED}  Ошибка запуска:{NC} {(r.stderr or '').strip()[:200]}")
+                return (False, "Не удалось запустить wg-quick@wg-warp — "
+                               "откройте меню WARP для диагностики.")
+            # Ждём подъёма интерфейса (до 5 сек).
+            import time as _t
+            for _ in range(10):
+                if _warp_iface_up():
+                    break
+                _t.sleep(0.5)
+            if not _warp_iface_up():
+                return (False, "Сервис wg-quick@wg-warp запущен, но интерфейс "
+                               "wg-warp не появился — проверьте конфиг.")
+            success("WARP запущен.")
+            return apply_youtube_warp_routing(True)
+        else:
+            return (False, "Пользователь отменил запуск WARP.")
+
+    # ── Сценарий 3: WARP не установлен (или битая установка) ──────────────
+    if not st["installed"]:
+        print()
+        print(f"{YELLOW}  ⚠ WARP не установлен.{NC}")
+        print(f"{DIM}  YouTube->WARP требует установленный Cloudflare WARP (wg-warp).{NC}")
+        print(f"{DIM}  Можно установить прямо сейчас — откроется мастер установки.{NC}")
+        print()
+        try:
+            _ans = input(f"{CYAN}  Установить WARP сейчас? [Y/n]:{NC} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            _ans = "n"
+        if _ans not in ("", "y", "yes", "д", "да"):
+            return (False, "WARP не установлен — установка отменена пользователем.")
+
+        # Запускаем мастер установки WARP прямо здесь.
+        try:
+            from chimera.modules.warp import (
+                _menu_install_wizard as _warp_wizard,
+                _warp_service_active, _warp_is_installed,
+            )
+        except Exception as e:
+            return (False, f"Не удалось импортировать модуль WARP: {e}")
+
+        info("Запуск мастера установки WARP...")
+        try:
+            _warp_wizard()
+        except KeyboardInterrupt:
+            print()
+            return (False, "Мастер WARP прерван пользователем.")
+        except Exception as e:
+            return (False, f"Ошибка в мастере WARP: {e}")
+
+        # Проверяем результат.
+        if not _warp_is_installed() or not _warp_service_active():
+            # Мастер либо не завершился успешно, либо пользователь отменил.
+            print()
+            warn("WARP не установлен или не активен после мастера.")
+            print(f"{DIM}  Возможно, мастер был отменён или упал. Откройте полное{NC}")
+            print(f"{DIM}  меню WARP (Настройки сети → C → Cloudflare WARP) для диагностики.{NC}")
+            try:
+                _ans2 = input(f"{CYAN}  Открыть полное меню WARP? [Y/n]:{NC} ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                _ans2 = "n"
+            if _ans2 in ("", "y", "yes", "д", "да"):
+                try:
+                    from chimera.modules.warp import do_manage_warp
+                    do_manage_warp()
+                except Exception as e:
+                    warn(f"Ошибка открытия меню WARP: {e}")
+                # Перепроверяем после выхода из меню.
+                if not _warp_iface_up():
+                    return (False, "WARP всё ещё не поднят — YouTube->WARP не применён.")
+            else:
+                return (False, "WARP не готов — YouTube->WARP не применён.")
+
+        # WARP должен быть готов — применяем routing.
+        if not _warp_iface_up():
+            return (False, "WARP установлен, но интерфейс wg-warp не поднят — "
+                           "проверьте: systemctl status wg-quick@wg-warp")
+        success("WARP готов.")
+        return apply_youtube_warp_routing(True)
+
+    # ── Сценарий 4: установлен и сервис активен, но интерфейса нет ────────
+    # (битая установка или упавший wg-quick)
+    print()
+    warn(f"WARP установлен и сервис помечен active, но интерфейс wg-warp "
+         f"отсутствует. Это признак битой установки.")
+    print(f"{DIM}  Откройте меню WARP для диагностики:{NC}")
+    print(f"{DIM}  Настройки сети → C → Cloudflare WARP → 4 (Статус/диагностика){NC}")
+    try:
+        _ans = input(f"{CYAN}  Открыть полное меню WARP? [Y/n]:{NC} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        _ans = "n"
+    if _ans in ("", "y", "yes", "д", "да"):
+        try:
+            from chimera.modules.warp import do_manage_warp
+            do_manage_warp()
+        except Exception as e:
+            warn(f"Ошибка: {e}")
+        if _warp_iface_up():
+            return apply_youtube_warp_routing(True)
+    return (False, "WARP не готов — YouTube->WARP не применён.")
+
+
 def restore_if_needed(silent: bool = False) -> bool:
     """Re-apply after regenerate xray/singbox config."""
     try:

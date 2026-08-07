@@ -748,10 +748,11 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
             youtube_route.do_manage_youtube_via_ru()
 
         output = captured.getvalue()
-        self.assertIn("[1/2/Q]", output,
-                      f"Single-node должен показать [1/2/Q], вывод:\n{output}")
-        # НЕ должно быть multi-node prompt типа [1-5/Q]
-        self.assertNotIn("[1-5/Q]", output)
+        # v5.0.1: prompt теперь [1/2/W/Q] — добавлена кнопка W (YouTube->WARP)
+        self.assertIn("[1/2/W/Q]", output,
+                      f"Single-node должен показать [1/2/W/Q], вывод:\n{output}")
+        # НЕ должно быть multi-node prompt типа [1-5/W/Q]
+        self.assertNotIn("[1-5/W/Q]", output)
 
     # ── Кейс 8: len(CHAIN_NODES)==3 → меню показывает 5 пунктов ───────────
     def test_three_nodes_shows_five_items(self):
@@ -786,14 +787,126 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
             youtube_route.do_manage_youtube_via_ru()
 
         output = captured.getvalue()
-        self.assertIn("[1-5/Q]", output,
-                      f"Multi-node (3 nodes) должен показать [1-5/Q], вывод:\n{output}")
+        # v5.0.1: prompt теперь [1-5/W/Q] — добавлена кнопка W (YouTube->WARP)
+        self.assertIn("[1-5/W/Q]", output,
+                      f"Multi-node (3 nodes) должен показать [1-5/W/Q], вывод:\n{output}")
         # Не должно быть single-node prompt
-        self.assertNotIn("[1/2/Q]", output)
+        self.assertNotIn("[1/2/W/Q]", output)
         # Должны быть хосты нод
         self.assertIn("1.1.1.1", output)
         self.assertIn("2.2.2.2", output)
         self.assertIn("3.3.3.3", output)
+
+    # ── Кейс 9: REGRESSION v5.0.1 — нажатие 'w' не должно молча выходить ──
+    # БАГ (исправлен в v5.0.1): в multi-node меню `int("w")` бросал
+    # ValueError → except ValueError: return → кнопка [W] молча возвращала
+    # пользователя в основное меню без какого-либо сообщения.
+    def test_multi_node_w_key_calls_warp_interactive(self):
+        """v5.0.1 regression: 'w' в multi-node меню должен вызвать
+        do_youtube_warp_interactive, а не молча выйти из-за ValueError
+        в int('w')."""
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import youtube_route
+        self._state_path.write_text(json.dumps({"youtube_route_target": "off"}))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        core.CHAIN_NODES = [
+            {"host": "1.1.1.1", "port": 443},
+            {"host": "2.2.2.2", "port": 443},
+            {"host": "3.3.3.3", "port": 443},
+        ]
+        core.AWG_EXIT_ENABLED = False
+        core.CONFIG_DIR = self._tmpdir
+        core.info = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.CYAN = core.NC = core.GREEN = core.YELLOW = ""
+        core.RED = core.BOLD = core.DIM = core.BLUE = ""
+
+        # Флаг что do_youtube_warp_interactive был вызван.
+        warp_called = {"count": 0}
+
+        def _fake_warp_interactive(_core):
+            warp_called["count"] += 1
+            return (False, "WARP не установлен (тестовый мок)")
+
+        def _input_with_print(prompt="", *a, **kw):
+            print(prompt, end="", flush=True)
+            return "w"   # нажимаем W
+
+        # Также мокаем input для финального "Нажмите Enter..."
+        inputs = iter(["w", ""])
+
+        def _input_seq(prompt="", *a, **kw):
+            print(prompt, end="", flush=True)
+            try:
+                return next(inputs)
+            except StopIteration:
+                return ""
+
+        captured = io.StringIO()
+        with patch.object(youtube_route, "_core_module", lambda: core), \
+             patch("builtins.input", side_effect=_input_seq), \
+             patch("chimera.modules.youtube_warp_route.do_youtube_warp_interactive",
+                   side_effect=_fake_warp_interactive), \
+             redirect_stdout(captured):
+            youtube_route.do_manage_youtube_via_ru()
+
+        # КРИТИЧНО: do_youtube_warp_interactive должен быть вызван.
+        # До v5.0.1 фикса это было невозможно — int('w') бросал ValueError.
+        self.assertEqual(warp_called["count"], 1,
+                         "do_youtube_warp_interactive должен быть вызван 1 раз "
+                         f"при нажатии 'w', фактически {warp_called['count']}. "
+                         "Возможно, regression: int('w') снова бросает ValueError "
+                         "и обработчик 'w' недостижим.")
+
+    # ── Кейс 10: REGRESSION v5.0.1 — то же для single-node меню ──────────
+    def test_single_node_w_key_calls_warp_interactive(self):
+        """v5.0.1 regression: 'w' в single-node меню должен вызвать
+        do_youtube_warp_interactive."""
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import youtube_route
+        self._state_path.write_text(json.dumps({"youtube_route_target": "off"}))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        core.CHAIN_NODES = []  # single-node
+        core.AWG_EXIT_ENABLED = False
+        core.CONFIG_DIR = self._tmpdir
+        core.info = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.CYAN = core.NC = core.GREEN = core.YELLOW = ""
+        core.RED = core.BOLD = core.DIM = core.BLUE = ""
+
+        warp_called = {"count": 0}
+
+        def _fake_warp_interactive(_core):
+            warp_called["count"] += 1
+            return (False, "WARP не установлен (тестовый мок)")
+
+        inputs = iter(["w", ""])
+
+        def _input_seq(prompt="", *a, **kw):
+            print(prompt, end="", flush=True)
+            try:
+                return next(inputs)
+            except StopIteration:
+                return ""
+
+        captured = io.StringIO()
+        with patch.object(youtube_route, "_core_module", lambda: core), \
+             patch("builtins.input", side_effect=_input_seq), \
+             patch("chimera.modules.youtube_warp_route.do_youtube_warp_interactive",
+                   side_effect=_fake_warp_interactive), \
+             redirect_stdout(captured):
+            youtube_route.do_manage_youtube_via_ru()
+
+        self.assertEqual(warp_called["count"], 1,
+                         "do_youtube_warp_interactive должен быть вызван 1 раз "
+                         f"при нажатии 'w' в single-node меню, "
+                         f"фактически {warp_called['count']}.")
 
 
 class TestResolveNodeIpAndFlag(unittest.TestCase):
