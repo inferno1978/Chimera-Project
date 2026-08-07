@@ -548,12 +548,65 @@ def _warp_status_check() -> dict:
     return out
 
 
+def _warp_connectivity_test(timeout: int = 10) -> tuple:
+    """Проверяет связность через wg-warp используя plain curl (без -4/-6).
+
+    v5.0.5: КРИТИЧНО — раньше проверяли IPv4 и IPv6 отдельно через
+    curl -4 и curl -6. Но это даёт ложные негативы:
+      - curl -4: ТСПУ дропает IPv4-пакеты внутри WireGuard -> timeout (rc=28)
+      - curl -6: DNS может вернуть Cloudflare IPv6, который ТСПУ
+        блокирует -> couldn't connect (rc=7). При этом plain curl с
+        Happy Eyeballs пробует НЕСКОЛЬКО адресов и находит рабочий.
+
+    ТЕПЕРЬ: запускаем plain `curl --interface wg-warp` (без -4/-6).
+    Curl сам выберет работающий IP через Happy Eyeballs algorithm.
+    Если получил ответ с warp=on — WARP работает. IP-версию
+    определяем по формату ip= в ответе (IPv4 содержит точку, IPv6
+    содержит двоеточие).
+
+    Возвращает (ok: bool, ip_version: str, debug: str):
+      ip_version: "ipv4"/"ipv6"/"unknown"
+    """
+    try:
+        r = _run(
+            ["curl", "--interface", "wg-warp",
+             "--max-time", str(timeout), "-sS",
+             "https://www.cloudflare.com/cdn-cgi/trace"],
+            capture=True, check=False,
+        )
+        out = (r.stdout or "").strip()
+        _err = (r.stderr or "").strip()[:300]
+        debug = f"rc={r.returncode}, stdout_len={len(out)}, stderr={_err}"
+
+        if r.returncode != 0 or not out:
+            return False, "none", debug
+
+        if "warp=" not in out and "ip=" not in out:
+            return False, "none", debug + f" | unexpected output: {out[:100]}"
+
+        # Определяем IP-версию из ответа
+        ip_ver = "unknown"
+        for line in out.splitlines():
+            if line.startswith("ip="):
+                ip_addr = line.split("=", 1)[1].strip()
+                if ":" in ip_addr:
+                    ip_ver = "ipv6"
+                elif "." in ip_addr:
+                    ip_ver = "ipv4"
+                break
+
+        return True, ip_ver, debug + f" | detected: {ip_ver}"
+    except Exception as e:
+        return False, "none", f"exception: {e}"
+
+
 def _warp_ipv4_connectivity(timeout: int = 8) -> tuple:
-    """Проверяет IPv4-связность через wg-warp. Возвращает (ok, debug)."""
+    """Проверяет IPv4-связность через wg-warp. Возвращает (ok, debug).
+    Используется только для отладки — основной тест в _warp_connectivity_test."""
     try:
         r = _run(
             ["curl", "-4", "--interface", "wg-warp",
-             "--max-time", str(timeout), "-s",
+             "--max-time", str(timeout), "-sS",
              "https://www.cloudflare.com/cdn-cgi/trace"],
             capture=True, check=False,
         )
@@ -568,11 +621,12 @@ def _warp_ipv4_connectivity(timeout: int = 8) -> tuple:
 
 
 def _warp_ipv6_connectivity(timeout: int = 8) -> tuple:
-    """Проверяет IPv6-связность через wg-warp. Возвращает (ok, debug)."""
+    """Проверяет IPv6-связность через wg-warp. Возвращает (ok, debug).
+    Используется только для отладки — основной тест в _warp_connectivity_test."""
     try:
         r = _run(
             ["curl", "-6", "--interface", "wg-warp",
-             "--max-time", str(timeout), "-s",
+             "--max-time", str(timeout), "-sS",
              "https://www.cloudflare.com/cdn-cgi/trace"],
             capture=True, check=False,
         )
@@ -584,6 +638,38 @@ def _warp_ipv6_connectivity(timeout: int = 8) -> tuple:
         return ("ip=" in out), debug
     except Exception as e:
         return False, f"exception: {e}"
+
+
+def _detect_warp_ip_version() -> tuple:
+    """Определяет, какая IP-версия через WARP работает.
+
+    v5.0.5: использует plain curl (без -4/-6) как основной тест.
+    Curl с Happy Eyeballs сам выбирает работающий IP. Если plain curl
+    работает — парсим ip= из ответа для определения версии.
+
+    Возвращает (version, debug_dict):
+      version: "ipv4"/"ipv6"/"both"/"none"
+      debug_dict: {"plain": str, "ipv4": str, "ipv6": str}
+    """
+    # Основной тест: plain curl (без -4/-6)
+    ok, ver, dbg_plain = _warp_connectivity_test()
+
+    # Дополнительная отладка: -4 и -6 отдельно (для диагностики)
+    v4, dbg4 = _warp_ipv4_connectivity()
+    v6, dbg6 = _warp_ipv6_connectivity()
+
+    if not ok:
+        return "none", {"plain": dbg_plain, "ipv4": dbg4, "ipv6": dbg6}
+
+    # Plain curl работает — возвращаем определённую версию.
+    if ver == "ipv6":
+        return "ipv6", {"plain": dbg_plain, "ipv4": dbg4, "ipv6": dbg6}
+    elif ver == "ipv4":
+        if v6:
+            return "both", {"plain": dbg_plain, "ipv4": dbg4, "ipv6": dbg6}
+        return "ipv4", {"plain": dbg_plain, "ipv4": dbg4, "ipv6": dbg6}
+    else:
+        return "ipv4", {"plain": dbg_plain, "ipv4": dbg4, "ipv6": dbg6}
 
 
 def _warp_allowed_ips_check() -> dict:
@@ -660,8 +746,9 @@ def do_youtube_warp_interactive(core) -> tuple:
             print()
             # v5.0.4: показываем отладку curl — чтобы понять ПОЧЕМУ падает.
             print(f"{YELLOW}  Отладка curl:{NC}")
-            print(f"  {DIM}IPv4: {dbg.get('ipv4', '?')}{NC}")
-            print(f"  {DIM}IPv6: {dbg.get('ipv6', '?')}{NC}")
+            print(f"  {DIM}plain (auto): {dbg.get('plain', '?')}{NC}")
+            print(f"  {DIM}IPv4 (-4):    {dbg.get('ipv4', '?')}{NC}")
+            print(f"  {DIM}IPv6 (-6):    {dbg.get('ipv6', '?')}{NC}")
             print()
             allowed = _warp_allowed_ips_check()
             if not allowed["ipv4"] and not allowed["ipv6"]:
