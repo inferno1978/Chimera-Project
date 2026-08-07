@@ -549,24 +549,40 @@ def _warp_status_check() -> dict:
 
 
 def _warp_connectivity_test(timeout: int = 10) -> tuple:
-    """Проверяет связность через wg-warp используя plain curl (без -4/-6).
+    """Проверяет связность через wg-warp. Возвращает (ok, ip_version, debug).
 
-    v5.0.5: КРИТИЧНО — раньше проверяли IPv4 и IPv6 отдельно через
-    curl -4 и curl -6. Но это даёт ложные негативы:
-      - curl -4: ТСПУ дропает IPv4-пакеты внутри WireGuard -> timeout (rc=28)
-      - curl -6: DNS может вернуть Cloudflare IPv6, который ТСПУ
-        блокирует -> couldn't connect (rc=7). При этом plain curl с
-        Happy Eyeballs пробует НЕСКОЛЬКО адресов и находит рабочий.
-
-    ТЕПЕРЬ: запускаем plain `curl --interface wg-warp` (без -4/-6).
-    Curl сам выберет работающий IP через Happy Eyeballs algorithm.
-    Если получил ответ с warp=on — WARP работает. IP-версию
-    определяем по формату ip= в ответе (IPv4 содержит точку, IPv6
-    содержит двоеточие).
-
-    Возвращает (ok: bool, ip_version: str, debug: str):
-      ip_version: "ipv4"/"ipv6"/"unknown"
+    v5.0.6: ДВА теста — сначала прямой IP (1.1.1.1, без DNS), потом hostname.
+    Если DNS сломан (DNSCrypt down) — прямой IP-тест покажет что WARP работает.
+    1.1.1.1 имеет валидный TLS-сертификат и обслуживает /cdn-cgi/trace.
     """
+    # Тест 1: прямой IP 1.1.1.1 (без DNS-зависимости)
+    try:
+        r = _run(
+            ["curl", "--interface", "wg-warp",
+             "--max-time", str(timeout), "-sS",
+             "https://1.1.1.1/cdn-cgi/trace"],
+            capture=True, check=False,
+        )
+        out = (r.stdout or "").strip()
+        _err = (r.stderr or "").strip()[:300]
+        debug_ip = f"[IP] rc={r.returncode}, len={len(out)}, err={_err}"
+
+        if r.returncode == 0 and out and ("warp=" in out or "ip=" in out):
+            # Успех через прямой IP — определяем версию
+            ip_ver = "unknown"
+            for line in out.splitlines():
+                if line.startswith("ip="):
+                    ip_addr = line.split("=", 1)[1].strip()
+                    if ":" in ip_addr:
+                        ip_ver = "ipv6"
+                    elif "." in ip_addr:
+                        ip_ver = "ipv4"
+                    break
+            return True, ip_ver, debug_ip + f" | ver={ip_ver}"
+    except Exception as e:
+        debug_ip = f"[IP] exception: {e}"
+
+    # Тест 2: hostname (если прямой IP не сработал)
     try:
         r = _run(
             ["curl", "--interface", "wg-warp",
@@ -576,28 +592,24 @@ def _warp_connectivity_test(timeout: int = 10) -> tuple:
         )
         out = (r.stdout or "").strip()
         _err = (r.stderr or "").strip()[:300]
-        debug = f"rc={r.returncode}, stdout_len={len(out)}, stderr={_err}"
+        debug_host = f"[HOST] rc={r.returncode}, len={len(out)}, err={_err}"
 
-        if r.returncode != 0 or not out:
-            return False, "none", debug
-
-        if "warp=" not in out and "ip=" not in out:
-            return False, "none", debug + f" | unexpected output: {out[:100]}"
-
-        # Определяем IP-версию из ответа
-        ip_ver = "unknown"
-        for line in out.splitlines():
-            if line.startswith("ip="):
-                ip_addr = line.split("=", 1)[1].strip()
-                if ":" in ip_addr:
-                    ip_ver = "ipv6"
-                elif "." in ip_addr:
-                    ip_ver = "ipv4"
-                break
-
-        return True, ip_ver, debug + f" | detected: {ip_ver}"
+        if r.returncode == 0 and out and ("warp=" in out or "ip=" in out):
+            ip_ver = "unknown"
+            for line in out.splitlines():
+                if line.startswith("ip="):
+                    ip_addr = line.split("=", 1)[1].strip()
+                    if ":" in ip_addr:
+                        ip_ver = "ipv6"
+                    elif "." in ip_addr:
+                        ip_ver = "ipv4"
+                    break
+            return True, ip_ver, debug_ip + " | " + debug_host + f" | ver={ip_ver}"
     except Exception as e:
-        return False, "none", f"exception: {e}"
+        debug_host = f"[HOST] exception: {e}"
+
+    # Оба теста провалились
+    return False, "none", debug_ip + " | " + debug_host
 
 
 def _warp_ipv4_connectivity(timeout: int = 8) -> tuple:
@@ -739,12 +751,11 @@ def do_youtube_warp_interactive(core) -> tuple:
         ip_ver, dbg = _detect_warp_ip_version()
 
         if ip_ver == "none":
-            # Ни IPv4, ни IPv6 через WARP не работают.
+            # Связность через WARP не подтверждена.
             print()
-            warn("⚠ WARP поднят, но НИ IPv4, НИ IPv6 через wg-warp не работают.")
+            warn("⚠ WARP поднят, но связность через wg-warp НЕ подтверждена.")
             print(f"{DIM}  Handshake может проходить, но данные не идут.{NC}")
             print()
-            # v5.0.4: показываем отладку curl — чтобы понять ПОЧЕМУ падает.
             print(f"{YELLOW}  Отладка curl:{NC}")
             print(f"  {DIM}plain (auto): {dbg.get('plain', '?')}{NC}")
             print(f"  {DIM}IPv4 (-4):    {dbg.get('ipv4', '?')}{NC}")
@@ -759,24 +770,45 @@ def do_youtube_warp_interactive(core) -> tuple:
                 print(f"  {DIM}• ТСПУ блокирует WireGuard трафик (DPI){NC}")
                 print(f"  {DIM}• Endpoint Cloudflare недоступен (попробуйте сменить){NC}")
                 print(f"  {DIM}• Firewall блокирует исходящий трафик через wg-warp{NC}")
+                print(f"  {DIM}• DNS сломан (проверьте: cat /etc/resolv.conf){NC}")
             print()
-            print(f"{CYAN}  Откройте меню WARP → 6 (Изменить Endpoint) или 4 (диагностика){NC}")
+            print(f"{CYAN}  Варианты:{NC}")
+            print(f"  {DIM}[1] Открыть меню WARP (сменить endpoint / диагностика){NC}")
+            print(f"  {DIM}[2] Применить ПРИНУДИТЕЛЬНО (IPv4, если уверены что WARP работает){NC}")
+            print(f"  {DIM}[3] Применить ПРИНУДИТЕЛЬНО (IPv6 стратегия){NC}")
+            print(f"  {DIM}[Q] Отмена{NC}")
             try:
-                _ans = input(f"{CYAN}  Открыть полное меню WARP? [Y/n]:{NC} ").strip().lower()
+                _ans = input(f"{CYAN}  Выбор [1/2/3/Q]:{NC} ").strip().lower()
             except (EOFError, KeyboardInterrupt):
-                _ans = "n"
-            if _ans in ("", "y", "yes", "д", "да"):
+                _ans = "q"
+
+            if _ans == "1":
                 try:
                     from chimera.modules.warp import do_manage_warp
                     do_manage_warp()
-                    # После выхода из меню перепроверяем.
                     new_ver, _ = _detect_warp_ip_version()
                     if new_ver != "none":
                         success(f"Через WARP заработал: {new_ver}")
                         return apply_youtube_warp_routing(True, ip_version=new_ver)
                 except Exception as e:
                     warn(f"Ошибка: {e}")
-            return (False, "Через WARP не работает ни IPv4, ни IPv6 — нужно починить WARP.")
+                return (False, "Через WARP не работает — нужно починить WARP.")
+
+            elif _ans == "2":
+                warn("Принудительное применение YouTube->WARP (IPv4 стратегия).")
+                print(f"{DIM}  Если не заработает — попробуйте вариант [3] (IPv6).{NC}")
+                return apply_youtube_warp_routing(True, ip_version="ipv4")
+
+            elif _ans == "3":
+                warp_ipv6 = _get_warp_ipv6()
+                if not warp_ipv6:
+                    warn("IPv6 адрес WARP не найден — нельзя использовать IPv6 стратегию.")
+                    return (False, "Нет IPv6 адреса на wg-warp интерфейсе.")
+                warn("Принудительное применение YouTube->WARP (IPv6 стратегия).")
+                print(f"{DIM}  sendThrough={warp_ipv6}, domainStrategy=UseIPv6{NC}")
+                return apply_youtube_warp_routing(True, ip_version="ipv6")
+            else:
+                return (False, "Отменено пользователем.")
 
         elif ip_ver == "ipv6":
             # IPv4 не работает, но IPv6 работает! Это типичная картина
