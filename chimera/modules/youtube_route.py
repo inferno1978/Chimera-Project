@@ -60,6 +60,7 @@ def _core_module():
 # ── Константы ───────────────────────────────────────────────────────────────
 _YOUTUBE_RULE_COMMENT = "youtube_via_ru"
 _YOUTUBE_FRAG_RULE_COMMENT = "youtube_via_ru_fragment"
+_YOUTUBE_QUIC_BLOCK_COMMENT = "youtube_block_quic"
 
 # Список доменов YouTube и связанных сервисов.
 #
@@ -428,6 +429,9 @@ def _youtube_apply_fragment_to_xray(
             # Создаём outbound direct-fragment если его нет.
             # Перезаписываем если есть — чтобы обновить параметры fragment.
             outbounds = [ob for ob in outbounds if ob.get("tag") != _outbound_tag]
+            # v5.0.10: добавлен sockopt с TCP keepalive и tcpNoDelay для
+            # стабильности соединений. tcpFastOpen ускоряет повторные
+            # подключения (важно при переключении роликов).
             outbounds.append({
                 "protocol": "freedom",
                 "tag":      _outbound_tag,
@@ -439,22 +443,57 @@ def _youtube_apply_fragment_to_xray(
                         "interval": interval,
                     },
                 },
+                "sockopt": {
+                    "tcpFastOpen":         True,
+                    "tcpKeepAliveInterval": 15,
+                    "tcpKeepAliveIdle":    60,
+                    "tcpUserTimeout":      10000,
+                    "tcpCongestion":       "bbr",
+                    "tcpNoDelay":          True,
+                },
             })
             cfg["outbounds"] = outbounds
-            info(f"Outbound '{_outbound_tag}' (fragment: packets={packets}, "
-                 f"length={length}, interval={interval})")
 
-            # Новое правило. Prepended ПЕРЕД существующими.
+            # v5.0.10: блокировка QUIC (UDP/443) для YouTube.
+            # КРИТИЧНО для стабильности: TCP fragment фрагментирует только TCP.
+            # YouTube использует QUIC (UDP/443) для видео — QUIC обходит
+            # fragment и блокируется ТСПУ → "Нет подключения к интернету"
+            # после обновления страницы. Блокировка QUIC заставляет YouTube
+            # использовать TCP, который фрагментируется и проходит ТСПУ.
+            # Добавляем blackhole outbound если его нет.
+            if not any(ob.get("tag") == "youtube-quic-block" for ob in outbounds):
+                cfg["outbounds"].append({
+                    "protocol": "blackhole",
+                    "tag":      "youtube-quic-block",
+                })
+            # Убираем старое правило блокировки QUIC (идемпотентность).
+            rules = [r for r in rules
+                     if r.get("comment") != _YOUTUBE_QUIC_BLOCK_COMMENT]
+            # Правило блокировки QUIC — ДО правила fragment (приоритет).
+            quic_block_rule = {
+                "type":        "field",
+                "port":        "443",
+                "network":     "udp",
+                "domain":      list(_YOUTUBE_DOMAINS),
+                "outboundTag": "youtube-quic-block",
+                "comment":     _YOUTUBE_QUIC_BLOCK_COMMENT,
+            }
+
+            info(f"Outbound '{_outbound_tag}' (fragment: packets={packets}, "
+                 f"length={length}, interval={interval}, sockopt: TFO+keepalive+NoDelay)")
+
+            # Новое правило fragment. Prepended ПЕРЕД существующими.
             new_rule = {
                 "type":        "field",
                 "domain":      list(_YOUTUBE_DOMAINS),
                 "outboundTag": _outbound_tag,
                 "comment":     _YOUTUBE_FRAG_RULE_COMMENT,
             }
-            routing["rules"] = [new_rule] + rules
+            # QUIC block первым, затем fragment rule, затем остальные.
+            routing["rules"] = [quic_block_rule, new_rule] + rules
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             _set_config_owner(cfg_path)
-            info(f"Конфиг: {cfg_path} (YouTube→{_outbound_tag} с фрагментацией)")
+            info(f"Конфиг: {cfg_path} (YouTube→{_outbound_tag} + QUIC block)")
             ok = True
         except Exception as e:
             warn(f"Ошибка патча {cfg_path}: {e}")
@@ -499,11 +538,12 @@ def _youtube_remove_from_xray() -> bool:
     _youtube_comments = {
         _YOUTUBE_RULE_COMMENT,           # youtube_via_ru
         _YOUTUBE_FRAG_RULE_COMMENT,      # youtube_via_ru_fragment
+        _YOUTUBE_QUIC_BLOCK_COMMENT,     # youtube_block_quic
         "youtube_via_warp",              # из youtube_warp_route.py
     }
     # Все возможные outbound tags для YouTube
     _youtube_outbound_tags = {
-        "direct-fragment", "direct-local-fragment", "warp"
+        "direct-fragment", "direct-local-fragment", "warp", "youtube-quic-block"
     }
 
     written: set = set()
@@ -818,11 +858,6 @@ def do_manage_youtube_via_ru() -> None:
         # RU entry — флаг 🇷🇺 в начале (статичный, без сетевого запроса).
         _box_item("1", f"{_marker}YouTube через 🇷🇺\ufe0f {'RU entry':<{_name_width}}")
 
-        # v5.0.8: RU+fragment — обход ТСПУ DPI через TCP-фрагментацию ClientHello.
-        _is_current_frag = (current_target == "ru-fragment" and rule_in_config)
-        _marker = "● " if _is_current_frag else "  "
-        _box_item("F", f"{_marker}YouTube через 🇷🇺\ufe0f {'RU+fragment':<{_name_width}} {DIM}(обход ТСПУ){NC}")
-
         for i, nd in enumerate(nodes):
             _tag = f"chain-exit-{i+1}"
             _is_cur = (current_target == _tag and rule_in_config)
@@ -851,6 +886,11 @@ def do_manage_youtube_via_ru() -> None:
         # бокса останется ровной.
         _box_item(str(_default_idx), f"{_marker}YouTube через 🌍\ufe0f exit-ноды (default, балансировщик)")
         _box_row()
+        # v5.0.8: RU+fragment — обход ТСПУ DPI через TCP-фрагментацию ClientHello.
+        # v5.0.10: перенесён вниз, рядом с WARP — буквы отдельно от цифр.
+        _is_current_frag = (current_target == "ru-fragment" and rule_in_config)
+        _marker = "● " if _is_current_frag else "  "
+        _box_item("F", f"{_marker}YouTube через 🇷🇺\ufe0f RU+fragment {DIM}(обход ТСПУ DPI){NC}")
         _is_cur_warp = (current_target == "warp")
         _marker = "● " if _is_cur_warp else "  "
         _box_item("W", f"{_marker}YouTube через ☁️ WARP (Cloudflare)")
@@ -949,12 +989,14 @@ def do_manage_youtube_via_ru() -> None:
         # Single-node / no-chain: старое двухпунктовое меню (обратная совместимость).
         # v5.0.2: добавлены emoji для консистентности с multi-node меню —
         # 🇷🇺 для RU entry, 🌍 для default (балансировщик).
+        # v5.0.10: F (RU+fragment) перенесён вниз, рядом с WARP.
         _is_cur = (current_target == "ru" and rule_in_config)
         _box_item("1", f"{'● ' if _is_cur else '  '}YouTube через 🇷🇺\ufe0f RU entry")
-        _is_cur_frag = (current_target == "ru-fragment" and rule_in_config)
-        _box_item("F", f"{'● ' if _is_cur_frag else '  '}YouTube через 🇷🇺\ufe0f RU+fragment {DIM}(обход ТСПУ){NC}")
         _is_cur_off = (current_target == "off")
         _box_item("2", f"{'● ' if _is_cur_off else '  '}YouTube через 🌍\ufe0f exit-ноды (default)")
+        _box_row()
+        _is_cur_frag = (current_target == "ru-fragment" and rule_in_config)
+        _box_item("F", f"{'● ' if _is_cur_frag else '  '}YouTube через 🇷🇺\ufe0f RU+fragment {DIM}(обход ТСПУ DPI){NC}")
         _is_cur_warp = (current_target == "warp")
         _box_item("W", f"{'● ' if _is_cur_warp else '  '}YouTube через ☁\ufe0f WARP (Cloudflare)")
         _box_row()
@@ -1191,7 +1233,8 @@ def _youtube_rule_in_xray_config() -> bool:
     (state.json может рассинхронизироваться после regenerate)."""
     core = _core_module()
     CONFIG_DIR = core.CONFIG_DIR
-    _youtube_comments = {_YOUTUBE_RULE_COMMENT, _YOUTUBE_FRAG_RULE_COMMENT, "youtube_via_warp"}
+    _youtube_comments = {_YOUTUBE_RULE_COMMENT, _YOUTUBE_FRAG_RULE_COMMENT,
+                         _YOUTUBE_QUIC_BLOCK_COMMENT, "youtube_via_warp"}
     for cfg_path in (CONFIG_DIR / "config.json",
                      Path("/usr/local/etc/xray/config.json")):
         if not cfg_path.exists():
