@@ -487,6 +487,7 @@ def do_youtube_warp_interactive(core) -> tuple:
     BLUE = core.BLUE
     NC = core.NC
     BOLD = core.BOLD
+    DIM = core.DIM  # FIX: DIM использовался в print() ниже, но не был извлечён из core
 
     st = _warp_status_check()
 
