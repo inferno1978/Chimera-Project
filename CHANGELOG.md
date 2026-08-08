@@ -2,6 +2,101 @@
 
 ---
 
+## FEAT(security): v5.0.20 — IP lifecycle: pin/unpin, FIFO, age-based cleanup, replace-all — 8 августа 2026
+
+**Расширенное управление IP whitelist: предотвращение накопления старых IP
+через age-based cleanup (cron), FIFO при достижении лимита, закрепление
+(pin) для постоянных IP, и «Заменить все» для быстрой смены IP.**
+
+### Контекст
+
+Проблема: пользователи с динамическими IP (CGNAT мобильные операторы) при
+каждой смене IP добавляют новый через User Portal. Старые не удаляются →
+накапливаются. Лимит 20 IP на пользователя достигается, новые добавить нельзя,
+надо вручную удалять старые.
+
+### Решение
+
+**1. Расширенный формат хранения (detailed)**
+Старый формат: `["5.6.7.8", ...]` (просто строки)
+Новый формат: `[{"ip": "5.6.7.8", "added_at": "2026-08-08T...", "pinned": false}, ...]`
+
+Migration: lazy — при чтении старый формат конвертируется in-memory, при
+следующем save записывается в detailed формате. `_normalize_user_ips()` остаётся
+возвращающим `list[str]` для backward compat с `_collect_all_user_ips` и старым кодом.
+
+**2. FIFO при достижении лимита**
+`add_ip_to_user()` — если лимит (20) достигнут, автоматически удаляется самый
+старый **незакреплённый** IP. Закреплённые (pinned) IP не удаляются. Если все
+закреплены — отказ с сообщением «удалите вручную».
+
+**3. Age-based cleanup (cron, раз в сутки)**
+`cleanup_old_ips(retention_days=30)` — удаляет незакреплённые IP старше
+retention_days. Default 30 дней. Настраивается через state.json
+(`ip_cleanup_retention_days`). 0 = отключен.
+
+Cron: `/etc/cron.d/chimera-ip-cleanup` — запускается в 04:00 ежедневно.
+Закреплённые IP (pinned=True) НЕ удаляются.
+
+**4. Закрепление (pin/unpin)**
+`pin_ip_to_user(email, ip)` / `unpin_ip_from_user(email, ip)` — закреплённые
+IP не удаляются при age-based cleanup и FIFO. Пользователь закрепляет свой
+домашний статический IP, чтобы он не удалялся автоматически.
+
+**5. «Заменить все» (replace-all)**
+`replace_all_ips(email, new_ip, keep_pinned=True)` — удаляет все IP (кроме
+закреплённых) и добавляет один новый. Для сценария «у меня сменился IP, хочу
+только новый». Если `keep_pinned=False` — удаляет вообще все.
+
+### Новый API в user_ip_whitelist.py
+
+- `add_ip_to_user(email, ip, pinned=False)` — теперь с FIFO и detailed формат
+- `get_user_ips_detailed(email)` → `list[dict]` с `{"ip", "added_at", "pinned"}`
+- `pin_ip_to_user(email, ip)` / `unpin_ip_from_user(email, ip)`
+- `replace_all_ips(email, new_ip, keep_pinned=True)`
+- `cleanup_old_ips(retention_days=None)` → `(deleted_count, total_before)`
+- `_get_cleanup_retention_days()` / `_set_cleanup_retention_days(days)`
+- `install_cleanup_cron()` / `remove_cleanup_cron()`
+- `_normalize_user_ips_detailed(user)` → `list[dict]`
+- `_migrate_ips_to_detailed(user)` → `list[dict]` (migration helper)
+
+### Новый REST API (rest_api.py)
+
+- `GET /api/portal/ips` — теперь возвращает `ips: [{ip, added_at, pinned}, ...]`
+- `POST /api/portal/ips/replace-all` — Body: `{"ip": "auto", "keep_pinned": true}`
+- `POST /api/portal/ips/pin` — Body: `{"ip": "5.6.7.8"}`
+- `POST /api/portal/ips/unpin` — Body: `{"ip": "5.6.7.8"}`
+
+### User Portal обновления (user_portal.py)
+
+- Каждый IP показывает 📌 если закреплён
+- Кнопки «Закрепить» / «Открепить» для каждого IP
+- Кнопка «🔄 Заменить все на текущий» — удаляет все (кроме pinned), добавляет текущий
+- Информационный блок с объяснением pin и replace-all
+
+### Тесты (19 новых в test_user_ip_whitelist.py)
+
+- `TestFifoOnLimit` (3) — FIFO удаляет самый старый незакреплённый, не удаляет pinned
+- `TestPinUnpin` (3) — pin/unpin IP, pin nonexistent
+- `TestReplaceAll` (3) — replace_all с/без keep_pinned
+- `TestCleanupOldIps` (3) — cleanup удаляет старые незакреплённые, keeps pinned, disabled при 0
+- `TestMigrationOldToDetailed` (4) — backward compat: get_user_ips возвращает строки, get_user_ips_detailed конвертирует, add_ip мигрирует, _collect_all_user_ips работает
+
+3 существующих теста обновлены для detailed формата.
+684 связанных теста проходят (0 регрессий).
+
+### Совместимость
+
+- **Backward compatible**: старый формат (строки) читается и конвертируется при следующем save
+- `get_user_ips()` возвращает `list[str]` (не меняется)
+- `_collect_all_user_ips()` работает с обоими форматами
+- `_normalize_user_ips()` работает с обоими форматами
+- Cleanup cron опционален (не устанавливается автоматически — только через TUI)
+- retention_days=0 = cleanup отключен
+- FIFO срабатывает только при достижении лимита (20 IP)
+
+---
+
 ## FEAT(infra): v5.0.19 — Финальная миграция: VLESS port + singbox_ufw + web_panel — 8 августа 2026
 
 **Завершающая миграция на port_registry: VLESS port (network_setup +

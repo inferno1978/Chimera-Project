@@ -420,12 +420,21 @@ body {{
       <button class="btn btn-primary" onclick="addIP()">Добавить</button>
       <button class="btn btn-ghost" onclick="addAutoIP()" id="btn-auto-ip">Текущий IP</button>
     </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+      <button class="btn btn-ghost" onclick="replaceAllIPs()" style="font-size:0.85rem">🔄 Заменить все на текущий</button>
+    </div>
     <div style="margin-top:12px;padding:10px;background:rgba(15,23,42,0.5);border-radius:8px;font-size:0.82rem;color:var(--text-dim);line-height:1.5">
       <strong style="color:var(--accent-light)">ℹ️ Для чего это нужно:</strong><br>
       Если на сервере включена блокировка входящих из РФ — клиенты с российскими IP
       не смогут подключиться к VLESS на порту 443. Добавьте свой IP-адрес сюда,
       и вы получите доступ. IP берётся напрямую из вашего TCP-подключения —
-      его нельзя подделать. Если у вас динамический IP — добавляйте новый при смене.
+      его нельзя подделать.<br><br>
+      <strong style="color:var(--accent-light)">📌 Закрепление:</strong>
+      Закреплённые IP (📌) не удаляются автоматически при очистке старых адресов.
+      Закрепите свой домашний статический IP, если он есть.<br><br>
+      <strong style="color:var(--accent-light)">🔄 Заменить все:</strong>
+      Удаляет все ваши IP (кроме закреплённых) и добавляет текущий.
+      Полезно при смене провайдера или если накопилось много старых адресов.
     </div>
   </div>
 </div>
@@ -630,7 +639,7 @@ async function loadMyIPs() {{
     document.getElementById('btn-auto-ip').style.opacity = '0.5';
   }}
 
-  // Render IP list.
+  // Render IP list — v5.0.20: detailed format с pinned статусом.
   const container = document.getElementById('ips-list');
   const ips = data.ips || [];
   const max = data.max || 20;
@@ -639,12 +648,22 @@ async function loadMyIPs() {{
   }} else {{
     container.innerHTML = `
       <div style="font-size:0.82rem;color:var(--text-dim);margin-bottom:6px">${{ips.length}}/${{max}} IP:</div>
-      ${{ips.map((ip, i) => `
+      ${{ips.map((entry, i) => {{
+        const ip = entry.ip;
+        const pinned = entry.pinned;
+        const pinIcon = pinned ? '📌' : '';
+        const pinBtn = pinned
+          ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.75rem" onclick="unpinIP('${{ip}}')">Открепить</button>`
+          : `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.75rem" onclick="pinIP('${{ip}}')">Закрепить</button>`;
+        return `
         <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;margin:4px 0;background:rgba(15,23,42,0.5);border-radius:8px;font-family:monospace;font-size:0.9rem">
-          <span>${{ip}}</span>
-          <button class="btn btn-ghost" style="padding:4px 10px;font-size:0.8rem" onclick="deleteIP('${{ip}}')">Удалить</button>
-        </div>
-      `).join('')}}
+          <span>${{pinIcon}} ${{ip}}</span>
+          <div style="display:flex;gap:4px">
+            ${{pinBtn}}
+            <button class="btn btn-ghost" style="padding:4px 10px;font-size:0.8rem" onclick="deleteIP('${{ip}}')">Удалить</button>
+          </div>
+        </div>`;
+      }}).join('')}}
     `;
   }}
 }}
@@ -687,6 +706,57 @@ async function deleteIP(ip) {{
   const data = await res.json();
   if (data.status === 'deleted') {{
     showToast(data.message || 'IP удалён');
+    loadMyIPs();
+  }} else {{
+    showToast(data.error || 'Ошибка', 'error');
+  }}
+}}
+
+// v5.0.20: pin / unpin / replace-all
+async function pinIP(ip) {{
+  const res = await fetch('/api/portal/ips/pin', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    credentials: 'same-origin',
+    body: JSON.stringify({{ ip: ip }})
+  }});
+  const data = await res.json();
+  if (data.status === 'pinned') {{
+    showToast(data.message || 'IP закреплён');
+    loadMyIPs();
+  }} else {{
+    showToast(data.error || 'Ошибка', 'error');
+  }}
+}}
+
+async function unpinIP(ip) {{
+  const res = await fetch('/api/portal/ips/unpin', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    credentials: 'same-origin',
+    body: JSON.stringify({{ ip: ip }})
+  }});
+  const data = await res.json();
+  if (data.status === 'unpinned') {{
+    showToast(data.message || 'IP откреплён');
+    loadMyIPs();
+  }} else {{
+    showToast(data.error || 'Ошибка', 'error');
+  }}
+}}
+
+async function replaceAllIPs() {{
+  if (!_detectedIP) {{ showToast('Текущий IP не определён', 'error'); return; }}
+  if (!confirm(`Заменить ВСЕ ваши IP на ${{_detectedIP}}?\\nЗакреплённые IP (📌) будут сохранены.`)) return;
+  const res = await fetch('/api/portal/ips/replace-all', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    credentials: 'same-origin',
+    body: JSON.stringify({{ ip: 'auto', keep_pinned: true }})
+  }});
+  const data = await res.json();
+  if (data.status === 'replaced') {{
+    showToast(data.message || 'IP заменены');
     loadMyIPs();
   }} else {{
     showToast(data.error || 'Ошибка', 'error');

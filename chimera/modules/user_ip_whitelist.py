@@ -105,6 +105,14 @@ CRON_SCRIPT = Path("/usr/local/bin/chimera-clients-wl-rebuild.sh")
 # операторов (3-5 подсетей) + домашний + рабочий. Больше = злоупотребление.
 MAX_IPS_PER_USER = 20
 
+# v5.0.20: Age-based cleanup — IP старше этого количества дней удаляются
+# автоматически (cron, раз в сутки). 0 = cleanup отключен.
+DEFAULT_CLEANUP_RETENTION_DAYS = 30
+
+# Cron-файлы для age-based cleanup (запускается раз в сутки в 04:00).
+CLEANUP_CRON_FILE = Path("/etc/cron.d/chimera-ip-cleanup")
+CLEANUP_CRON_SCRIPT = Path("/usr/local/bin/chimera-ip-cleanup.sh")
+
 
 # ── Валидация IP/CIDR ────────────────────────────────────────────────────────
 
@@ -207,23 +215,80 @@ def _find_user_by_uuid(users: list[dict], uuid_val: str) -> "Optional[dict]":
 
 
 def _normalize_user_ips(user: dict) -> list[str]:
-    """Возвращает список allowed_ips для пользователя.
-    Гарантирует, что возвращает list (не None) — для обратной совместимости
-    со старыми users без поля.
+    """Возвращает список IP-строк из allowed_ips пользователя.
+
+    v5.0.20: поддерживает оба формата:
+      - Старый: ["5.6.7.8", ...] (просто строки)
+      - Новый: [{"ip": "5.6.7.8", "added_at": "...", "pinned": false}, ...]
+    Возвращает всегда list[str] (только IP-строки) для backward compat
+    с _collect_all_user_ips и старым кодом.
     """
     ips = user.get("allowed_ips", [])
     if not isinstance(ips, list):
         return []
-    return [str(ip) for ip in ips if isinstance(ip, str) and ip]
+    result: list[str] = []
+    for entry in ips:
+        if isinstance(entry, str):
+            if entry:
+                result.append(entry)
+        elif isinstance(entry, dict):
+            ip_str = entry.get("ip", "")
+            if ip_str:
+                result.append(str(ip_str))
+    return result
+
+
+def _normalize_user_ips_detailed(user: dict) -> list[dict]:
+    """Возвращает список объектов allowed_ips с метаданными.
+
+    v5.0.20: каждый элемент — {"ip": str, "added_at": str, "pinned": bool}.
+    Для старого формата (строки) — конвертирует in-memory с added_at="" и pinned=False.
+    Не пишет на диск (миграция происходит при следующем save).
+    """
+    ips = user.get("allowed_ips", [])
+    if not isinstance(ips, list):
+        return []
+    result: list[dict] = []
+    for entry in ips:
+        if isinstance(entry, str):
+            if entry:
+                result.append({"ip": entry, "added_at": "", "pinned": False})
+        elif isinstance(entry, dict):
+            ip_str = entry.get("ip", "")
+            if ip_str:
+                result.append({
+                    "ip": str(ip_str),
+                    "added_at": entry.get("added_at", ""),
+                    "pinned": bool(entry.get("pinned", False)),
+                })
+    return result
+
+
+def _migrate_ips_to_detailed(user: dict) -> list[dict]:
+    """Конвертирует allowed_ips в detailed формат (in-memory).
+    Возвращает список объектов. Если уже detailed — возвращает как есть.
+    """
+    detailed = _normalize_user_ips_detailed(user)
+    # Если есть entries без added_at — заполняем now (миграция).
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for entry in detailed:
+        if not entry.get("added_at"):
+            entry["added_at"] = now_iso
+    return detailed
 
 
 # ── API: add / remove / get ──────────────────────────────────────────────────
 
-def add_ip_to_user(email: str, ip: str) -> "tuple[bool, str]":
+def add_ip_to_user(email: str, ip: str, pinned: bool = False) -> "tuple[bool, str]":
     """Добавляет IP/CIDR в allowed_ips пользователя.
 
     Возвращает (success, message).
     Атомарно: читает users → модифицирует → сохраняет → rebuild ipset.
+
+    v5.0.20:
+      - Хранит в detailed формате: {"ip", "added_at", "pinned"}
+      - FIFO: если лимит достигнут, удаляет самый старый незакреплённый IP
+      - Migration: при добавлении конвертирует старый формат (строки) в detailed
     """
     # Валидация IP.
     ok, normalized, err = _validate_ip_or_cidr(ip)
@@ -235,18 +300,43 @@ def add_ip_to_user(email: str, ip: str) -> "tuple[bool, str]":
     if user is None:
         return False, f"Пользователь не найден: {email}"
 
-    ips = _normalize_user_ips(user)
+    # Мигрируем в detailed формат (если старый — строки).
+    detailed = _migrate_ips_to_detailed(user)
 
     # Дедупликация — не добавляем если уже есть.
-    if normalized in ips:
+    existing_ips = [e["ip"] for e in detailed]
+    if normalized in existing_ips:
+        # IP уже есть — если pinned=True, обновляем pinned статус.
+        if pinned:
+            for e in detailed:
+                if e["ip"] == normalized:
+                    e["pinned"] = True
+                    break
+            user["allowed_ips"] = detailed
+            _users_save(users)
+            rebuild_clients_ipset()
+            return True, f"IP {normalized} уже в whitelist (закреплён)"
         return True, f"IP {normalized} уже в whitelist"
 
-    # Лимит на количество IP.
-    if len(ips) >= MAX_IPS_PER_USER:
-        return False, f"Превышен лимит IP на пользователя ({MAX_IPS_PER_USER})"
+    # FIFO: если лимит достигнут — удаляем самый старый незакреплённый.
+    if len(detailed) >= MAX_IPS_PER_USER:
+        # Ищем незакреплённые, сортируем по added_at (пустая = самая старая).
+        unpinned = [e for e in detailed if not e.get("pinned", False)]
+        if not unpinned:
+            return False, (f"Превышен лимит IP ({MAX_IPS_PER_USER}), "
+                           "все закреплены — удалите вручную")
+        # Сортируем по added_at (пустая строка = старая, идёт первой).
+        unpinned.sort(key=lambda e: e.get("added_at", ""))
+        oldest = unpinned[0]
+        detailed.remove(oldest)
 
-    ips.append(normalized)
-    user["allowed_ips"] = ips
+    # Добавляем новый IP.
+    detailed.append({
+        "ip": normalized,
+        "added_at": datetime.now(timezone.utc).isoformat(),
+        "pinned": pinned,
+    })
+    user["allowed_ips"] = detailed
     _users_save(users)
 
     # Пересобираем ipset.
@@ -261,26 +351,31 @@ def remove_ip_from_user(email: str, ip: str) -> "tuple[bool, str]":
     Возвращает (success, message).
     Принимает как нормализованную форму (из get_user_ips), так и произвольную
     (пробуем валидировать и нормализовать перед поиском).
+
+    v5.0.20: работает с detailed форматом, но принимает IP-строку.
     """
     users = _users_load()
     user = _find_user_by_email(users, email)
     if user is None:
         return False, f"Пользователь не найден: {email}"
 
-    ips = _normalize_user_ips(user)
+    # Мигрируем в detailed формат.
+    detailed = _migrate_ips_to_detailed(user)
+    existing_ips = [e["ip"] for e in detailed]
 
     # Пробуем найти как есть.
     target = ip.strip()
-    if target not in ips:
+    if target not in existing_ips:
         # Пробуем нормализовать.
         ok, normalized, _ = _validate_ip_or_cidr(ip)
-        if ok and normalized in ips:
+        if ok and normalized in existing_ips:
             target = normalized
         else:
             return False, f"IP {ip} не найден в whitelist пользователя"
 
-    ips.remove(target)
-    user["allowed_ips"] = ips
+    # Удаляем объект с этим IP.
+    detailed = [e for e in detailed if e["ip"] != target]
+    user["allowed_ips"] = detailed
     _users_save(users)
 
     rebuild_clients_ipset()
@@ -289,14 +384,124 @@ def remove_ip_from_user(email: str, ip: str) -> "tuple[bool, str]":
 
 
 def get_user_ips(email: str) -> list[str]:
-    """Возвращает список allowed_ips пользователя (нормализованных).
+    """Возвращает список allowed_ips пользователя (IP-строки).
     Пустой список если пользователь не найден или нет IP.
+    Backward compat — возвращает list[str].
     """
     users = _users_load()
     user = _find_user_by_email(users, email)
     if user is None:
         return []
     return _normalize_user_ips(user)
+
+
+def get_user_ips_detailed(email: str) -> list[dict]:
+    """Возвращает список allowed_ips с метаданными.
+
+    v5.0.20: каждый элемент — {"ip": str, "added_at": str, "pinned": bool}.
+    """
+    users = _users_load()
+    user = _find_user_by_email(users, email)
+    if user is None:
+        return []
+    return _normalize_user_ips_detailed(user)
+
+
+def pin_ip_to_user(email: str, ip: str) -> "tuple[bool, str]":
+    """Закрепляет IP (не удаляется при age-based cleanup)."""
+    users = _users_load()
+    user = _find_user_by_email(users, email)
+    if user is None:
+        return False, f"Пользователь не найден: {email}"
+
+    detailed = _migrate_ips_to_detailed(user)
+    found = False
+    for e in detailed:
+        if e["ip"] == ip:
+            e["pinned"] = True
+            found = True
+            break
+    if not found:
+        return False, f"IP {ip} не найден в whitelist пользователя"
+    user["allowed_ips"] = detailed
+    _users_save(users)
+    return True, f"IP {ip} закреплён"
+
+
+def unpin_ip_from_user(email: str, ip: str) -> "tuple[bool, str]":
+    """Открепляет IP (может быть удалён при age-based cleanup)."""
+    users = _users_load()
+    user = _find_user_by_email(users, email)
+    if user is None:
+        return False, f"Пользователь не найден: {email}"
+
+    detailed = _migrate_ips_to_detailed(user)
+    found = False
+    for e in detailed:
+        if e["ip"] == ip:
+            e["pinned"] = False
+            found = True
+            break
+    if not found:
+        return False, f"IP {ip} не найден в whitelist пользователя"
+    user["allowed_ips"] = detailed
+    _users_save(users)
+    return True, f"IP {ip} откреплён"
+
+
+def replace_all_ips(email: str, new_ip: str, keep_pinned: bool = True) -> "tuple[bool, str]":
+    """Заменяет все IP на один новый. Опционально сохраняет закреплённые.
+
+    v5.0.20: для сценария «у меня сменился IP, хочу только новый».
+    Если keep_pinned=True — закреплённые IP не удаляются.
+    """
+    # Валидация нового IP.
+    ok, normalized, err = _validate_ip_or_cidr(new_ip)
+    if not ok:
+        return False, err
+
+    users = _users_load()
+    user = _find_user_by_email(users, email)
+    if user is None:
+        return False, f"Пользователь не найден: {email}"
+
+    detailed = _migrate_ips_to_detailed(user)
+
+    # Оставляем только закреплённые (если keep_pinned).
+    if keep_pinned:
+        pinned = [e for e in detailed if e.get("pinned", False)]
+    else:
+        pinned = []
+
+    # Добавляем новый IP.
+    new_entry = {
+        "ip": normalized,
+        "added_at": datetime.now(timezone.utc).isoformat(),
+        "pinned": False,
+    }
+
+    # Проверяем, нет ли уже этого IP в pinned.
+    pinned_ips = [e["ip"] for e in pinned]
+    if normalized in pinned_ips:
+        # IP уже в pinned — не дублируем.
+        user["allowed_ips"] = pinned
+        _users_save(users)
+        rebuild_clients_ipset()
+        return True, f"Все IP заменены на {normalized} (закреплённые сохранены)"
+
+    result = pinned + [new_entry]
+    # Проверяем лимит.
+    if len(result) > MAX_IPS_PER_USER:
+        return False, (f"Превышен лимит IP ({MAX_IPS_PER_USER}) — "
+                       "слишком много закреплённых")
+
+    user["allowed_ips"] = result
+    _users_save(users)
+    rebuild_clients_ipset()
+
+    if keep_pinned and pinned:
+        return True, f"Все IP заменены на {normalized} ({len(pinned)} закреплённых сохранено)"
+    return True, f"Все IP заменены на {normalized}"
 
 
 # ── ipset management ─────────────────────────────────────────────────────────
@@ -545,6 +750,152 @@ def remove_cron() -> None:
     """Удаляет cron и cron-скрипт. Не трогает ipset/iptables/users.json."""
     CRON_FILE.unlink(missing_ok=True)
     CRON_SCRIPT.unlink(missing_ok=True)
+
+
+# ── Age-based cleanup (v5.0.20) ──────────────────────────────────────────────
+
+def _get_cleanup_retention_days() -> int:
+    """Возвращает retention period из state.json (или default)."""
+    try:
+        core = _core_module()
+        if core.STATE_FILE.exists():
+            state = json.loads(core.STATE_FILE.read_text())
+            return int(state.get("ip_cleanup_retention_days",
+                                 DEFAULT_CLEANUP_RETENTION_DAYS))
+    except Exception:
+        pass
+    return DEFAULT_CLEANUP_RETENTION_DAYS
+
+
+def _set_cleanup_retention_days(days: int) -> None:
+    """Сохраняет retention period в state.json."""
+    try:
+        core = _core_module()
+        state = {}
+        if core.STATE_FILE.exists():
+            state = json.loads(core.STATE_FILE.read_text())
+        state["ip_cleanup_retention_days"] = days
+        core.STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _is_cleanup_enabled() -> bool:
+    """Возвращает True если age-based cleanup включен (retention > 0)."""
+    return _get_cleanup_retention_days() > 0
+
+
+def cleanup_old_ips(retention_days: "Optional[int]" = None) -> "tuple[int, int]":
+    """Удаляет незакреплённые IP старше retention_days.
+
+    v5.0.20: age-based cleanup для предотвращения накопления старых IP.
+    Закреплённые (pinned=True) IP НЕ удаляются.
+
+    Args:
+      retention_days: если None — берётся из state.json (или default 30).
+
+    Returns:
+      (deleted_count, total_ips_before) — количество удалённых IP и
+      общее количество до очистки.
+    """
+    if retention_days is None:
+        retention_days = _get_cleanup_retention_days()
+    if retention_days <= 0:
+        return 0, 0  # cleanup отключен
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - _td(days=retention_days)
+
+    users = _users_load()
+    total_before = 0
+    deleted_total = 0
+    changed = False
+
+    for user in users:
+        detailed = _migrate_ips_to_detailed(user)
+        total_before += len(detailed)
+
+        new_detailed = []
+        for entry in detailed:
+            # Закреплённые — не удаляем.
+            if entry.get("pinned", False):
+                new_detailed.append(entry)
+                continue
+
+            # Проверяем возраст.
+            added_at = entry.get("added_at", "")
+            if not added_at:
+                # Старый формат без timestamp — считаем старым, удаляем.
+                # (миграция заполняет added_at=now, но если файл был
+                # отредактирован вручную — может быть пусто)
+                # Не удаляем — лучше оставить, чем удалить нужный IP.
+                new_detailed.append(entry)
+                continue
+
+            try:
+                added_dt = datetime.fromisoformat(added_at)
+                if added_dt.tzinfo is None:
+                    added_dt = added_dt.replace(tzinfo=timezone.utc)
+                if added_dt < cutoff:
+                    # IP старше retention — удаляем.
+                    deleted_total += 1
+                    changed = True
+                    continue
+            except Exception:
+                # Невалидный timestamp — не удаляем (безопасный fallback).
+                pass
+
+            new_detailed.append(entry)
+
+        if len(new_detailed) != len(detailed):
+            user["allowed_ips"] = new_detailed
+
+    if changed:
+        _users_save(users)
+        rebuild_clients_ipset()
+
+    return deleted_total, total_before
+
+
+def _td(days: int):
+    """timedelta helper (избегаем import timedelta вверху)."""
+    from datetime import timedelta
+    return timedelta(days=days)
+
+
+def install_cleanup_cron() -> bool:
+    """Устанавливает cron для age-based cleanup (раз в сутки в 04:00)."""
+    try:
+        core = _core_module()
+    except Exception:
+        return False
+
+    python_bin = sys.executable or "/usr/bin/python3"
+    CLEANUP_CRON_SCRIPT.write_text(
+        f"#!/bin/bash\n"
+        f"# Chimera — age-based cleanup для IP whitelist.\n"
+        f"# Запускается cron раз в сутки в 04:00.\n"
+        f"# Удаляет незакреплённые IP старше retention_days.\n"
+        f"{python_bin} -c '"
+        f"from chimera.modules.user_ip_whitelist import cleanup_old_ips; "
+        f"cleanup_old_ips()' >/dev/null 2>&1\n"
+    )
+    CLEANUP_CRON_SCRIPT.chmod(0o755)
+
+    CLEANUP_CRON_FILE.write_text(
+        f"# Chimera — IP whitelist age-based cleanup\n"
+        f"SHELL=/bin/bash\n"
+        f"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
+        f"0 4 * * * root {CLEANUP_CRON_SCRIPT}\n"
+    )
+    CLEANUP_CRON_FILE.chmod(0o644)
+    return True
+
+
+def remove_cleanup_cron() -> None:
+    """Удаляет cleanup cron и cron-скрипт."""
+    CLEANUP_CRON_FILE.unlink(missing_ok=True)
+    CLEANUP_CRON_SCRIPT.unlink(missing_ok=True)
 
 
 # ── TUI ──────────────────────────────────────────────────────────────────────
