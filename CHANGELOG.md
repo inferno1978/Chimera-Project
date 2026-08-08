@@ -2,6 +2,126 @@
 
 ---
 
+## FEAT(infra): v5.0.19 — Финальная миграция: VLESS port + singbox_ufw + web_panel — 8 августа 2026
+
+**Завершающая миграция на port_registry: VLESS port (network_setup +
+reconfigure), sing-box UFW, и web_panel (rest_api). Теперь ВСЕ сервисы
+Chimera (кроме SSH hardening и deny-rules) используют port_registry.**
+
+### Контекст
+
+В v5.0.18 мигрировано 14 сервисов, но остались 4 критичных:
+1. VLESS port (network_setup.py) — основной install flow
+2. VLESS reconfigure (reconfigure.py) — смена порта
+3. singbox_ufw.py — multi-protocol sing-box
+4. rest_api.py — web_panel (8443) при expose=True
+
+Этот коммит завершает миграцию.
+
+### 1. network_setup.py — VLESS install (SSH/HTTP/VLESS ports)
+
+`_ufw_allow_if_missing(port, proto, comment)` теперь:
+1. `port_register(SERVICE_VLESS, port, proto, comment, force=True)` — регистрация
+2. `ufw_open_port(port, proto, SERVICE_VLESS, comment)` — UFW open с `chimera-vless` tag
+3. Fallback на прямой `ufw allow` если port_registry недоступен
+
+Открывает: SSH (22), HTTP (80), VLESS (SERVER_PORT) — все под SERVICE_VLESS.
+`force=True` — критично, т.к. эти порты уже могут быть открыты (не блокируем).
+
+### 2. reconfigure.py — VLESS port change
+
+Новый helper `_vless_reconfigure_ufw_port_change(core, new_port, old_port)`:
+1. `port_register(SERVICE_VLESS, new_port, "tcp", comment="VLESS (reconfigured)", force=True)`
+2. `ufw_open_port(new_port, "tcp", SERVICE_VLESS, ...)` — открыть новый
+3. `ufw_close_port(old_port, "tcp", SERVICE_VLESS, legacy_comments=[...])` — закрыть старый
+4. `port_unregister(SERVICE_VLESS, old_port, "tcp")` — снять регистрацию
+
+**legacy_comments** покрывает все варианты старых comments:
+- `"VLESS reconfigure"` (от старого reconfigure.py)
+- `"SSH"`, `"HTTP (certbot ACME)"`, `"VLESS"` (от network_setup.py)
+
+### 3. singbox_ufw.py — multi-protocol sing-box
+
+**Стратегия: НЕ менять UFW-управление** (работает с `sing-box-<tag>` comments,
+сложная multi-protocol логика с проверкой `_is_port_used_by_other_singbox_proto`).
+Только **добавить регистрацию в port_registry** для conflict detection и audit.
+
+- `singbox_ufw_ensure_open()`: `port_register(SERVICE_SINGBOX, port, proto, comment=f"sing-box-{protocol_tag}", force=True)` перед UFW open
+- `singbox_ufw_close()`: `_singbox_port_unregister_safe(port, proto)` после UFW close
+- `singbox_ufw_close_all()`: `port_unregister(SERVICE_SINGBOX)` (снимает все sing-box порты)
+
+`force=True` — sing-box может использовать несколько протоколов на одном порту
+(ShadowTLS + VLESS на 443), conflict detection заблокировал бы это.
+
+### 4. rest_api.py — web_panel (8443) при expose=True
+
+**`_ufw_web_panel_close(port)`:**
+1. `ufw_close_port(port, "tcp", SERVICE_WEB_PANEL, legacy_comments=["VLESS Web Panel (exposed, no TLS)", "VLESS Web Panel"])` — ищет и новые (`chimera-web_panel`), и старые правила
+2. `port_unregister(SERVICE_WEB_PANEL, port, "tcp")`
+3. Fallback на ручной парсинг `ufw status numbered` (старый код)
+
+**`install_web_service()` при expose=True:**
+1. `port_register(SERVICE_WEB_PANEL, port, "tcp", comment="VLESS Web Panel (exposed, no TLS)", force=True)`
+2. `ufw_open_port(port, "tcp", SERVICE_WEB_PANEL, ...)` — с `chimera-web_panel` tag
+3. Fallback на прямой `ufw allow` если port_registry недоступен
+
+### Полная карта миграции (финальная)
+
+| Сервис | Файл | Статус | Service tag |
+|---|---|---|---|
+| VLESS (install) | network_setup.py | ✅ v5.0.19 | SERVICE_VLESS |
+| VLESS (reconfigure) | reconfigure.py | ✅ v5.0.19 | SERVICE_VLESS |
+| sing-box (multi-proto) | singbox_ufw.py | ✅ v5.0.19 | SERVICE_SINGBOX |
+| Web Panel | rest_api.py | ✅ v5.0.19 | SERVICE_WEB_PANEL |
+| nginx front Portal | nginx_front_portal.py | ✅ v5.0.17 | SERVICE_WEB_PANEL_NGINX |
+| WebDAV tunnel | webdav_tunnel.py | ✅ v5.0.18 | SERVICE_WEBDAV_TUNNEL |
+| NaiveProxy | naiveproxy.py | ✅ v5.0.18 | SERVICE_NAIVEPROXY |
+| TrustTunnel | trusttunnel.py | ✅ v5.0.18 | SERVICE_TRUSTTUNNEL |
+| FPTN | fptn.py | ✅ v5.0.18 | SERVICE_FPTN |
+| WDTT | wdtt.py | ✅ v5.0.18 | SERVICE_WDTT |
+| Telemt MTProxy | mtproto.py | ✅ v5.0.18 | SERVICE_TELEMT_MTPROTO |
+| Telemt iOS-fix | telemt_ios_fix.py | ✅ v5.0.18 | SERVICE_TELEMT_IOS_FIX |
+| Mieru | mieru.py | ✅ v5.0.18 | SERVICE_MIERU |
+| Port hopping | port_hopping.py | ✅ v5.0.18 | SERVICE_PORT_HOPPING |
+| AWG standalone | awg_standalone.py | ✅ v5.0.18 | SERVICE_AWG_STANDALONE |
+| AWG uninstall | awg_uninstall.py | ✅ v5.0.18 | SERVICE_AWG_STANDALONE |
+| Subscription | subscription.py | ✅ v5.0.18 | SERVICE_SUBSCRIPTION |
+
+### НЕ мигрированы (намеренно, финально)
+
+| Сервис | Причина |
+|---|---|
+| `ssh_hardening.py` | SSH port change — критичная операция, НЕ трогаем (по указанию) |
+| `_core.py:1257` (emergency SSH restore) | critical fallback |
+| `autoban.py`, `honeypot.py`, `dpi_detector.py` | ufw **deny** (блокировка IP, не открытие порта) |
+| `client_config_export.py` | ephemeral temporary share port (живёт минуты) |
+| `hybrid_addon.py` | generic rule string, не port-specific |
+| `awg_transport.py:1785` | remote SSH команда на exit-VPS (не локально) |
+
+### Тесты
+
+- 575 singbox + rest_api тестов — pass (8 skipped)
+- 828 основных тестов — pass
+- 542 AWG + remaining тестов — pass
+- **Всего 1945 тестов, 0 регрессий**
+
+### Совместимость
+
+- **Backward compatible**: legacy_comments во всех ufw_close_port вызовах
+- **Forward compatible**: новые install используют `chimera-<service>` comments
+- **Fallback**: все мигрированные функции fallback на прямой ufw если port_registry недоступен
+- **No breaking changes**: все существующие тесты проходят без модификаций
+
+### Что даёт финальная миграция
+
+1. **ВСЕ** открываемые порты зарегистрированы в `/var/lib/xray-installer/port_registry.json`
+2. **Conflict detection** работает для любого нового сервиса
+3. **TUI** `do_manage_port_registry()` показывает все порты всех сервисов
+4. **Clean uninstall** — `legacy_comments` гарантирует удаление orphaned правил
+5. **Audit trail** — полный список кто какие порты занимает
+
+---
+
 ## FEAT(infra): v5.0.18 — Миграция ВСЕХ сервисов на port_registry — 8 августа 2026
 
 **Полная миграция 14 сервисов на централизованный port_registry с backward

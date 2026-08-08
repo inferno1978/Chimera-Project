@@ -195,11 +195,9 @@ def do_reconfigure() -> None:
                 warn(f"Ошибка патча nginx {conf}: {e}")
 
     # --- UFW: открыть новый порт, закрыть старый ---
+    # v5.0.19: миграция на port_registry (с backward compat для legacy comments).
     if new_port != old_port:
-        _run(["ufw", "allow", str(new_port), "comment", "VLESS reconfigure"],
-             check=False, quiet=True)
-        _run(["ufw", "delete", "allow", str(old_port)],
-             check=False, quiet=True)
+        _vless_reconfigure_ufw_port_change(core, new_port, old_port)
 
     # --- Обновить state.json ---
     try:
@@ -226,3 +224,50 @@ def do_reconfigure() -> None:
             time.sleep(2)
             success(f"Реконфигурация завершена: домен={new_domain}, порт={new_port}")
     log_to_file("INFO", f"Reconfigure: {old_domain}:{old_port} → {new_domain}:{new_port}")
+
+
+# v5.0.19: helper для смены UFW-порта при reconfigure VLESS.
+# Использует port_registry с backward compat для legacy comments:
+#   - "VLESS reconfigure" (старый comment от reconfigure.py)
+#   - "SSH" (от network_setup.py)
+#   - "HTTP (certbot ACME)" (от network_setup.py)
+#   - "VLESS REALITY :443" / "VLESS XHTTP :443" и т.п. (от network_setup.py)
+# Это гарантирует что старые UFW-правила будут найдены и закрыты при смене порта.
+def _vless_reconfigure_ufw_port_change(core, new_port: int, old_port: int) -> None:
+    """Открывает new_port, закрывает old_port в UFW через port_registry.
+
+    legacy_comments покрывает все варианты comment, которые могли быть
+    созданы network_setup.py или предыдущими версиями reconfigure.py.
+    """
+    _run = core._run
+    _LEGACY_COMMENTS = [
+        "VLESS reconfigure",
+        "SSH",
+        "HTTP (certbot ACME)",
+        "VLESS",
+    ]
+    # 1. Открываем новый порт.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register, ufw_close_port, port_unregister,
+            SERVICE_VLESS,
+        )
+        port_register(SERVICE_VLESS, new_port, "tcp",
+                      comment=f"VLESS (reconfigured to :{new_port})",
+                      force=True)
+        ok, msg = ufw_open_port(new_port, "tcp", SERVICE_VLESS,
+                                comment=f"VLESS (reconfigured to :{new_port})")
+        if not ok:
+            # Fallback на прямой ufw allow.
+            _run(["ufw", "allow", str(new_port), "comment", "VLESS reconfigure"],
+                 check=False, quiet=True)
+        # 2. Закрываем старый порт (с legacy comments для backward compat).
+        ufw_close_port(old_port, "tcp", SERVICE_VLESS,
+                       legacy_comments=_LEGACY_COMMENTS)
+        port_unregister(SERVICE_VLESS, old_port, "tcp")
+    except Exception:
+        # Fallback: старый код (прямой ufw allow/delete).
+        _run(["ufw", "allow", str(new_port), "comment", "VLESS reconfigure"],
+             check=False, quiet=True)
+        _run(["ufw", "delete", "allow", str(old_port)],
+             check=False, quiet=True)
