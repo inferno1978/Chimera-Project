@@ -150,10 +150,9 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
         # Удаляем iptables-правила (best-effort)
         _awgs_uninstall_cleanup_iptables()
 
-    # 8. UFW-правило
+    # 8. UFW-правило (v5.0.18: через port_registry с legacy comment backward compat)
     info(f"Удаление UFW-правила для UDP {port}...")
-    core._run(["ufw", "delete", "allow", f"{port}/udp"],
-              check=False, quiet=True)
+    _awg_uninstall_ufw_close(core, port)
 
     # 8.1 NAT iptables правила (если создавались при установке)
     info("Удаление iptables NAT правил...")
@@ -299,3 +298,25 @@ def do_awg_uninstall_menu() -> None:
 
     print()
     awgs_uninstall_full(keep_backups=keep_backups)
+
+
+# v5.0.18: helper для закрытия UFW-порта AWG через port_registry
+# с backward compat для legacy comment "AWG standalone".
+def _awg_uninstall_ufw_close(core, port: int) -> None:
+    """Закрывает UDP-порт AWG в UFW.
+
+    Сначала через port_registry (новый style с chimera-awg_standalone),
+    затем fallback на прямой ufw delete (для старых правил без comment).
+    """
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister, SERVICE_AWG_STANDALONE,
+        )
+        ufw_close_port(port, "udp", SERVICE_AWG_STANDALONE,
+                       legacy_comments=["AWG standalone"])
+        port_unregister(SERVICE_AWG_STANDALONE, port, "udp")
+    except Exception:
+        pass
+    # Fallback: прямой ufw delete для правил без comment.
+    core._run(["ufw", "delete", "allow", f"{port}/udp"],
+              check=False, quiet=True)

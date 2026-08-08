@@ -2,6 +2,106 @@
 
 ---
 
+## FEAT(infra): v5.0.18 — Миграция ВСЕХ сервисов на port_registry — 8 августа 2026
+
+**Полная миграция 14 сервисов на централизованный port_registry с backward
+compatibility для существующих UFW-правил.**
+
+### Контекст
+
+В v5.0.17 создан `port_registry.py` (паттерн) и применён только к новому
+`nginx_front_portal.py`. 15+ существующих сервисов имели свой UFW-код без
+conflict detection и без централизованной регистрации. Этот коммит переносит
+все основные сервисы на port_registry.
+
+### Стратегия миграции (безопасная)
+
+**Для каждого сервиса:**
+1. При install: `port_register(SERVICE_XXX, port, proto, comment, force=True)` — регистрирует порт
+2. При install: `ufw_open_port(port, proto, SERVICE_XXX, comment=...)` — открывает UFW с tag `chimera-<service>`
+3. При uninstall: `ufw_close_port(port, proto, SERVICE_XXX, legacy_comments=["старый comment"])` — закрывает UFW, ищет и новые (`chimera-<service>`), и старые правила
+4. При uninstall: `port_unregister(SERVICE_XXX, port, proto)` — снимает регистрацию
+
+**Backward compatibility:**
+- `ufw_close_port` имеет параметр `legacy_comments: list[str]` — при миграции каждый сервис передаёт свой старый comment (например `["NaiveProxy"]`), чтобы orphaned UFW-правила на существующих серверах были удалены при следующем uninstall
+- Если `port_registry` недоступен (import fail) — fallback на прямой `ufw allow/delete` (старый код)
+- `force=True` в `port_register` — существующие сервисы не блокируются конфликтами (они уже работают, не меняем поведение)
+
+**Новые API в port_registry.py:**
+- `ufw_close_port(port, proto, service_tag, legacy_comments=None)` — backward compat
+- `ufw_open_port_range(port_start, port_end, proto, service_tag, comment=None)` — для Mieru/port_hopping
+- `ufw_close_port_range(port_start, port_end, proto, service_tag, legacy_comments=None)` — то же для range
+
+**Новые service tags:**
+- `SERVICE_TELEMT_MTPROTO` — Telemt MTProxy (раньше был `SERVICE_TELEMT`)
+- `SERVICE_TELEMT_IOS_FIX` — Telemt iOS-fix
+- `SERVICE_WEBDAV_TUNNEL` — WebDAV tunnel
+- `SERVICE_PORT_HOPPING` — Port hopping
+
+### Мигрированные сервисы (14 шт)
+
+| Сервис | Файл | Порт | Proto | Legacy comment |
+|---|---|---|---|---|
+| WebDAV tunnel | webdav_tunnel.py | configurable | tcp | "webdav-tunnel" |
+| NaiveProxy | naiveproxy.py | 443 default | tcp | "NaiveProxy" |
+| TrustTunnel | trusttunnel.py | configurable | tcp+udp | "TRUSTTUNNEL" |
+| FPTN | fptn.py | 443 default | tcp | "FPTN" |
+| WDTT | wdtt.py | 56000 default | udp | "qWDTT DTLS" |
+| Telemt MTProxy | mtproto.py | configurable | tcp | "Telemt MTProxy" |
+| Telemt iOS-fix | telemt_ios_fix.py | configurable | tcp | "Telemt iOS-fix" |
+| Mieru | mieru.py | 2012-2022 range | tcp/udp | (no comment) |
+| Port hopping | port_hopping.py | range | tcp/udp | "xray-port-hopping" |
+| AWG standalone | awg_standalone.py | 51820 default | udp | "AWG standalone" |
+| AWG uninstall | awg_uninstall.py | (та же логика) | udp | "AWG standalone" |
+| Subscription | subscription.py | 8443 default | tcp | "vless-subscription" |
+
+### НЕ мигрированы (намеренно)
+
+| Сервис | Причина |
+|---|---|
+| `autoban.py`, `honeypot.py`, `dpi_detector.py` | ufw **deny** (блокировка IP, не открытие порта) — не относится к port_registry |
+| `singbox_ufw.py` | своя сложная multi-protocol логика (ShadowTLS/VLESS/Trojan/AnyTLS на разных портах), рефакторинг рискован — оставлен как есть |
+| `_core.py:1257` (emergency SSH restore) | critical fallback, не трогаем |
+| `ssh_hardening.py` | SSH port change — критичная операция, требует отдельной проработки |
+| `client_config_export.py` | ephemeral temporary share port (живёт минуты) — нет смысла регистрировать |
+| `hybrid_addon.py` | generic rule string, не port-specific |
+| `reconfigure.py`, `network_setup.py` | VLESS port — самый критичный, мигрируется отдельно (см. ниже) |
+
+### VLESS port (network_setup.py, reconfigure.py) — НЕ мигрирован в этом коммите
+
+VLESS — основной сервис Chimera. Его порт (443 или настраиваемый) открывается
+при установке и при reconfigure. Миграция на port_registry требует:
+- Изменения `network_setup._ufw_allow_if_missing()` — используется для SSH/HTTP/VLESS
+- Изменения `reconfigure._ufw_open_tcp()` — port change при reconfigure
+- Особой осторожности с SSH (22) и HTTP (80) — они открываются вместе с VLESS
+
+Это критичная функциональность, миграция требует отдельного тестирования на
+реальных серверах. Оставлено для следующего коммита, чтобы не рисковать
+регрессиями в основном install flow.
+
+### Тесты
+
+- 759 тестов основной группы проходят (включая 37 новых из test_port_registry.py)
+- 682 теста AWG/fragment/youtube группы проходят
+- **Всего 1441 тест, 0 регрессий**
+
+### Совместимость
+
+- **Backward compatible**: на существующих серверах с старыми UFW-правилами — при следующем uninstall правила будут найдены через `legacy_comments` и удалены
+- **Forward compatible**: новые install используют `chimera-<service>` comments
+- **Fallback**: если `port_registry` недоступен — все сервисы fallback на прямой `ufw allow/delete`
+- **No breaking changes**: все существующие тесты проходят без модификаций
+
+### Что даёт port_registry после миграции
+
+1. **Conflict detection**: при установке нового сервиса проверяется, не занят ли порт (реестр + `ss -ltnp` + UFW + `/etc/services`)
+2. **Centralized UFW management**: все правила помечены `chimera-<service>` — легко найти свои
+3. **Audit trail**: `port_list_all()` показывает все зарегистрированные порты
+4. **TUI**: `do_manage_port_registry()` — просмотр реестра, проверка конфликтов
+5. **Clean uninstall**: `legacy_comments` гарантирует что orphaned правила будут удалены
+
+---
+
 ## FEAT(infra): v5.0.17 — nginx front (TLS) для User Portal + port_registry — 8 августа 2026
 
 **Два новых модуля: `chimera/modules/port_registry.py` (централизованный

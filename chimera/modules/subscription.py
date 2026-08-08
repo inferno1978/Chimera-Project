@@ -1111,7 +1111,24 @@ def _nginx_snippet_text(port: int) -> str:
 def _fw_open_tcp(port: int) -> str:
     """Открывает TCP-порт подписки в файрволе. ufw, если активен (как
     делает основной инсталлятор в _core.py) — иначе raw iptables fallback.
-    Возвращает использованный инструмент ('ufw' / 'iptables' / '' при неудаче)."""
+    Возвращает использованный инструмент ('ufw' / 'iptables' / '' при неудаче).
+
+    v5.0.18: миграция на port_registry (с backward compat fallback).
+    """
+    # v5.0.18: сначала port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register, SERVICE_SUBSCRIPTION,
+        )
+        port_register(SERVICE_SUBSCRIPTION, port, "tcp",
+                      comment="vless-subscription", force=True)
+        ok, msg = ufw_open_port(port, "tcp", SERVICE_SUBSCRIPTION,
+                                comment="vless-subscription")
+        if ok:
+            return "ufw"
+        # ufw_open_port вернул False — продолжаем fallback ниже.
+    except Exception:
+        pass
     if shutil.which("ufw"):
         r = subprocess.run(["ufw", "status"], capture_output=True, text=True, check=False)
         if "Status: active" in (r.stdout or ""):
@@ -1144,7 +1161,19 @@ def _fw_close_tcp(port: int) -> None:
     stderr/stdout чтобы не пугать пользователя. Это нормально для сценариев
     вроде stop[4] → uninstall[6]: stop уже закрыл порт, uninstall пытается
     закрыть его снова.
+
+    v5.0.18: миграция на port_registry (с legacy comment backward compat).
     """
+    # v5.0.18: сначала port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister, SERVICE_SUBSCRIPTION,
+        )
+        ufw_close_port(port, "tcp", SERVICE_SUBSCRIPTION,
+                       legacy_comments=["vless-subscription"])
+        port_unregister(SERVICE_SUBSCRIPTION, port, "tcp")
+    except Exception:
+        pass
     if shutil.which("ufw"):
         # ufw delete allow <port>/tcp — неинтерактивный (правило задано явно).
         # stderr подавляем: 'Could not delete non-existent rule' — это шум,

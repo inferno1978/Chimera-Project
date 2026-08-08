@@ -218,8 +218,25 @@ def _remove_rules() -> bool:
 
 
 def _ufw_allow_range(range_start: int, range_end: int, proto: str) -> None:
-    """Добавляет правило UFW для диапазона портов."""
+    """Добавляет правило UFW для диапазона портов.
+
+    v5.0.18: миграция на port_registry (с backward compat fallback).
+    """
     protos = ["tcp", "udp"] if proto == "both" else [proto]
+    # v5.0.18: сначала port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port_range, port_register, SERVICE_PORT_HOPPING,
+        )
+        for p in protos:
+            for port in range(range_start, range_end + 1):
+                port_register(SERVICE_PORT_HOPPING, port, p,
+                              comment="port hopping range", force=True)
+            ufw_open_port_range(range_start, range_end, p, SERVICE_PORT_HOPPING,
+                                comment="port hopping range")
+        return
+    except Exception:
+        pass
     for p in protos:
         _run([
             "ufw", "allow", f"{range_start}:{range_end}/{p}",
@@ -228,8 +245,24 @@ def _ufw_allow_range(range_start: int, range_end: int, proto: str) -> None:
 
 
 def _ufw_delete_range(range_start: int, range_end: int, proto: str) -> None:
-    """Удаляет правило UFW для диапазона портов."""
+    """Удаляет правило UFW для диапазона портов.
+
+    v5.0.18: миграция на port_registry (с legacy comment для backward compat).
+    """
     protos = ["tcp", "udp"] if proto == "both" else [proto]
+    # v5.0.18: сначала port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port_range, port_unregister, SERVICE_PORT_HOPPING,
+        )
+        for p in protos:
+            ufw_close_port_range(range_start, range_end, p, SERVICE_PORT_HOPPING,
+                                 legacy_comments=[_COMMENT])
+            for port in range(range_start, range_end + 1):
+                port_unregister(SERVICE_PORT_HOPPING, port, p)
+        return
+    except Exception:
+        pass
     for p in protos:
         _run([
             "ufw", "delete", "allow", f"{range_start}:{range_end}/{p}"

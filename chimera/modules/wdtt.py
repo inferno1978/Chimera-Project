@@ -733,6 +733,17 @@ def _fw_tool() -> str:
     return "iptables"
 
 def _ipt_open_udp(port: int) -> None:
+    # v5.0.18: миграция на port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register, SERVICE_WDTT,
+        )
+        port_register(SERVICE_WDTT, port, "udp",
+                      comment="qWDTT DTLS", force=True)
+        ufw_open_port(port, "udp", SERVICE_WDTT, comment="qWDTT DTLS")
+        return
+    except Exception:
+        pass
     if _fw_tool() == "ufw":
         r = _run(["ufw", "status"], capture=True, check=False)
         if not re.search(rf'^{port}/udp\b.*ALLOW', r.stdout or "", re.MULTILINE):
@@ -744,6 +755,15 @@ def _ipt_open_udp(port: int) -> None:
         _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
 
 def _ipt_close_udp(port: int) -> None:
+    # v5.0.18: миграция на port_registry (с legacy comment).
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister, SERVICE_WDTT,
+        )
+        ufw_close_port(port, "udp", SERVICE_WDTT, legacy_comments=["qWDTT DTLS"])
+        port_unregister(SERVICE_WDTT, port, "udp")
+    except Exception:
+        pass
     if shutil.which("ufw"):
         _run(["ufw", "delete", "allow", f"{port}/udp"], check=False)
     args = ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"]

@@ -510,6 +510,17 @@ def _ufw_is_active() -> bool:
     return "status: active" in r.stdout.lower()
 
 def _open_port(port: int) -> str:
+    # v5.0.18: миграция на port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register, SERVICE_FPTN,
+        )
+        port_register(SERVICE_FPTN, port, "tcp", comment="FPTN", force=True)
+        ok, msg = ufw_open_port(port, "tcp", SERVICE_FPTN, comment="FPTN")
+        if ok:
+            return f"UFW: TCP {port} открыт ({msg})."
+    except Exception:
+        pass
     if _ufw_is_active():
         _run(["ufw", "allow", f"{port}/tcp", "comment", "FPTN"], capture=True)
         return f"UFW: TCP {port} открыт."
@@ -518,6 +529,16 @@ def _open_port(port: int) -> str:
     return f"iptables: TCP {port} открыт."
 
 def _close_port(port: int) -> None:
+    # v5.0.18: миграция на port_registry (с legacy comment).
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister, SERVICE_FPTN,
+        )
+        ufw_close_port(port, "tcp", SERVICE_FPTN, legacy_comments=["FPTN"])
+        port_unregister(SERVICE_FPTN, port, "tcp")
+        return
+    except Exception:
+        pass
     if _ufw_is_active():
         _run(["ufw", "delete", "allow", f"{port}/tcp"], capture=True)
     else:

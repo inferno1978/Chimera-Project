@@ -102,6 +102,8 @@ SERVICE_NAIVEPROXY      = "naiveproxy"
 SERVICE_MIERU           = "mieru"
 SERVICE_TRUSTTUNNEL     = "trusttunnel"
 SERVICE_TELEMT          = "telemt"
+SERVICE_TELEMT_MTPROTO  = "telemt_mtproto"
+SERVICE_TELEMT_IOS_FIX  = "telemt_ios_fix"
 SERVICE_FPTN            = "fptn"
 SERVICE_WDTT            = "wdtt"
 SERVICE_AWG_STANDALONE  = "awg_standalone"
@@ -109,6 +111,8 @@ SERVICE_AWG_EXIT        = "awg_exit"
 SERVICE_SINGBOX         = "singbox"
 SERVICE_SUBSCRIPTION    = "subscription"
 SERVICE_HYSTERIA2       = "hysteria2"
+SERVICE_WEBDAV_TUNNEL  = "webdav_tunnel"
+SERVICE_PORT_HOPPING   = "port_hopping"
 
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────
@@ -446,27 +450,148 @@ def ufw_open_port(port: int, proto: str, service_tag: str,
     return True, f"Порт {port}/{proto} открыт в UFW"
 
 
-def ufw_close_port(port: int, proto: str, service_tag: str) -> "tuple[bool, str]":
-    """Закрывает порт в UFW, удаляя только наши правила (chimera-<service_tag>).
+def ufw_close_port(port: int, proto: str, service_tag: str,
+                   legacy_comments: "Optional[list[str]]" = None) -> "tuple[bool, str]":
+    """Закрывает порт в UFW, удаляя наши правила (chimera-<service_tag>).
 
     Чужие правила НЕ трогает.
+
+    v5.0.18: legacy_comments — список старых комментариев (без 'chimera-' prefix),
+    которые тоже нужно удалить. Используется при миграции существующих сервисов
+    на port_registry: на серверах, где сервис был установлен ДО миграции, UFW
+    правила имеют старый comment (например "NaiveProxy"). После миграции
+    ufw_close_port ищет "chimera-naiveproxy" — не находит, и без legacy_comments
+    оставил бы orphaned rule. С legacy_comments=["NaiveProxy"] правило будет
+    найдено и удалено.
     """
     if not shutil.which("ufw"):
         return False, "ufw не установлен"
 
     existing = _check_ufw_rules(port, proto)
+    # Ищем правила с нашим новым comment (chimera-<service_tag>).
     ours = [r for r in existing if f"chimera-{service_tag}" in r.get("comment", "")]
+    # v5.0.18: также ищем legacy comments (старые правила до миграции).
+    if legacy_comments:
+        for lc in legacy_comments:
+            if not lc:
+                continue
+            ours.extend([r for r in existing
+                        if lc in r.get("comment", "")
+                        and f"chimera-{service_tag}" not in r.get("comment", "")])
     if not ours:
         return True, "Нет нашего правила — нечего закрывать"
 
     # Удаляем с конца (старшие номера первыми).
+    deleted = 0
     for r in sorted(ours, key=lambda x: x["num"], reverse=True):
-        subprocess.run(
+        result = subprocess.run(
             ["ufw", "delete", str(r["num"])],
             capture_output=True, text=True, check=False,
             input="y\n",
         )
-    return True, f"Удалено {len(ours)} правил для порта {port}/{proto}"
+        if result.returncode == 0:
+            deleted += 1
+    return True, f"Удалено {deleted} правил для порта {port}/{proto}"
+
+
+def ufw_open_port_range(port_start: int, port_end: int, proto: str,
+                        service_tag: str,
+                        comment: "Optional[str]" = None) -> "tuple[bool, str]":
+    """Открывает диапазон портов в UFW (для Mieru, port_hopping).
+
+    Идемпотентно. Comment: "chimera-<service_tag> [<custom>]".
+    """
+    if not shutil.which("ufw"):
+        return False, "ufw не установлен"
+    if port_start > port_end:
+        port_start, port_end = port_end, port_start
+    if comment is None:
+        comment_str = f"chimera-{service_tag}"
+    else:
+        comment_str = f"chimera-{service_tag} {comment}"
+
+    r = subprocess.run(
+        ["ufw", "allow", f"{port_start}:{port_end}/{proto}", "comment", comment_str],
+        capture_output=True, text=True, check=False,
+        input="y\n",
+    )
+    if r.returncode != 0:
+        return False, f"ufw allow range failed: {r.stderr.strip()}"
+    return True, f"Диапазон {port_start}-{port_end}/{proto} открыт в UFW"
+
+
+def ufw_close_port_range(port_start: int, port_end: int, proto: str,
+                         service_tag: str,
+                         legacy_comments: "Optional[list[str]]" = None) -> "tuple[bool, str]":
+    """Закрывает диапазон портов в UFW.
+
+    v5.0.18: legacy_comments — старые комментарии для backward compat.
+    """
+    if not shutil.which("ufw"):
+        return False, "ufw не установлен"
+    if port_start > port_end:
+        port_start, port_end = port_end, port_start
+
+    # Пробуем удалить по comment (новый style + legacy).
+    comments_to_try = [f"chimera-{service_tag}"]
+    if legacy_comments:
+        comments_to_try.extend(legacy_comments)
+
+    deleted = 0
+    for c in comments_to_try:
+        if not c:
+            continue
+        r = subprocess.run(
+            ["ufw", "delete", "allow", f"{port_start}:{port_end}/{proto}",
+             "comment", c],
+            capture_output=True, text=True, check=False,
+            input="y\n",
+        )
+        if r.returncode == 0:
+            deleted += 1
+
+    # Также ищем по номерам (для правил созданных без comment).
+    existing = _check_ufw_rules_range(port_start, port_end, proto)
+    for r in sorted(existing, key=lambda x: x["num"], reverse=True):
+        # Только наши (chimera- или legacy).
+        comment = r.get("comment", "")
+        if any(c in comment for c in comments_to_try if c):
+            result = subprocess.run(
+                ["ufw", "delete", str(r["num"])],
+                capture_output=True, text=True, check=False,
+                input="y\n",
+            )
+            if result.returncode == 0:
+                deleted += 1
+
+    return True, f"Удалено {deleted} range-правил для {port_start}-{port_end}/{proto}"
+
+
+def _check_ufw_rules_range(port_start: int, port_end: int,
+                           proto: str = "tcp") -> list[dict]:
+    """Возвращает UFW-правила для диапазона портов."""
+    if not shutil.which("ufw"):
+        return []
+    r = subprocess.run(
+        ["ufw", "status", "numbered"],
+        capture_output=True, text=True, check=False,
+    )
+    if r.returncode != 0:
+        return []
+    rules: list[dict] = []
+    range_str = f"{port_start}:{port_end}/{proto}"
+    for line in r.stdout.splitlines():
+        m = re.match(r'^\s*\[\s*(\d+)\s*\]\s*(.+)', line)
+        if not m:
+            continue
+        num = int(m.group(1))
+        rest = m.group(2)
+        if range_str in rest:
+            comment = ""
+            if "#" in rest:
+                comment = rest.split("#", 1)[1].strip()
+            rules.append({"num": num, "comment": comment, "raw": rest.strip()})
+    return rules
 
 
 # ── TUI ──────────────────────────────────────────────────────────────────────

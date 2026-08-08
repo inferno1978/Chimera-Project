@@ -1066,6 +1066,19 @@ def _ufw_is_active() -> bool:
 
 def _open_port(port: int) -> str:
     """Открыть TCP+UDP порт в ufw (или iptables fallback)."""
+    # v5.0.18: миграция на port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register, SERVICE_TRUSTTUNNEL,
+        )
+        for proto in ("tcp", "udp"):
+            port_register(SERVICE_TRUSTTUNNEL, port, proto,
+                          comment="TrustTunnel", force=True)
+        for proto in ("tcp", "udp"):
+            ufw_open_port(port, proto, SERVICE_TRUSTTUNNEL, comment="TrustTunnel")
+        return f"UFW: TCP+UDP {port} открыты."
+    except Exception:
+        pass
     if _ufw_is_active():
         for proto in ("tcp", "udp"):
             _run(["ufw", "allow", f"{port}/{proto}", "comment", "TRUSTTUNNEL"], capture=True)
@@ -1082,6 +1095,18 @@ def _open_port(port: int) -> str:
 
 def _close_port(port: int) -> None:
     """Закрыть TCP+UDP порт в ufw (или iptables fallback)."""
+    # v5.0.18: миграция на port_registry (с legacy comment).
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister, SERVICE_TRUSTTUNNEL,
+        )
+        for proto in ("tcp", "udp"):
+            ufw_close_port(port, proto, SERVICE_TRUSTTUNNEL,
+                           legacy_comments=["TRUSTTUNNEL"])
+            port_unregister(SERVICE_TRUSTTUNNEL, port, proto)
+        return
+    except Exception:
+        pass
     if _ufw_is_active():
         for proto in ("tcp", "udp"):
             _run(["ufw", "delete", "allow", f"{port}/{proto}"], capture=True)
