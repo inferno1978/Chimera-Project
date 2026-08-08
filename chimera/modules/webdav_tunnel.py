@@ -479,6 +479,20 @@ def _ufw_is_active() -> bool:
     return "status: active" in r.stdout.lower()
 
 def _open_port(port: int) -> str:
+    # v5.0.18: миграция на port_registry (с backward compat для iptables fallback).
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register, SERVICE_WEBDAV_TUNNEL,
+        )
+        port_register(SERVICE_WEBDAV_TUNNEL, port, "tcp",
+                      comment="WebDAV tunnel", force=True)
+        ok, msg = ufw_open_port(port, "tcp", SERVICE_WEBDAV_TUNNEL,
+                                comment="WebDAV tunnel")
+        if ok:
+            return f"UFW: TCP {port} открыт ({msg})."
+        # ufw_open_port вернул False — fallback на iptables.
+    except Exception:
+        pass
     if _ufw_is_active():
         _run(["ufw", "allow", f"{port}/tcp", "comment", "webdav-tunnel"], capture=True)
         return f"UFW: TCP {port} открыт."
@@ -487,6 +501,17 @@ def _open_port(port: int) -> str:
     return f"iptables: TCP {port} открыт."
 
 def _close_port(port: int) -> None:
+    # v5.0.18: миграция на port_registry (с backward compat для legacy comment).
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister, SERVICE_WEBDAV_TUNNEL,
+        )
+        ufw_close_port(port, "tcp", SERVICE_WEBDAV_TUNNEL,
+                       legacy_comments=["webdav-tunnel"])
+        port_unregister(SERVICE_WEBDAV_TUNNEL, port, "tcp")
+        return
+    except Exception:
+        pass
     if _ufw_is_active():
         _run(["ufw", "delete", "allow", f"{port}/tcp"], capture=True)
     else:

@@ -1725,10 +1725,43 @@ WantedBy=multi-user.target
     _run(["systemctl", "enable", SERVICE_NAME])
 
 def _setup_ufw(port: int) -> None:
+    # v5.0.18: миграция на port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register, SERVICE_TELEMT_MTPROTO,
+        )
+        port_register(SERVICE_TELEMT_MTPROTO, port, "tcp",
+                      comment="Telemt MTProxy", force=True)
+        ok, msg = ufw_open_port(port, "tcp", SERVICE_TELEMT_MTPROTO,
+                                comment="Telemt MTProxy")
+        if ok:
+            _ok(f"UFW: открыт порт {port}/tcp ({msg})")
+            return
+    except Exception:
+        pass
     if not shutil.which("ufw"): return
     if "active" in _run(["ufw", "status"], capture=True).stdout.lower():
         _run(["ufw", "allow", f"{port}/tcp", "comment", "Telemt MTProxy"])
         _ok(f"UFW: открыт порт {port}/tcp")
+
+
+def _mtproto_ufw_close(port: int) -> None:
+    """v5.0.18: закрывает UFW-порт для Telemt MTProxy через port_registry
+    с backward compat для legacy comment 'Telemt MTProxy'."""
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister, SERVICE_TELEMT_MTPROTO,
+        )
+        ufw_close_port(port, "tcp", SERVICE_TELEMT_MTPROTO,
+                       legacy_comments=["Telemt MTProxy"])
+        port_unregister(SERVICE_TELEMT_MTPROTO, port, "tcp")
+        _box_ok(f"UFW: правило для порта {port}/tcp удалено.")
+        return
+    except Exception:
+        pass
+    if shutil.which("ufw") and "active" in _run(["ufw", "status"], capture=True).stdout.lower():
+        _run(["ufw", "delete", "allow", f"{port}/tcp"])
+        _box_ok(f"UFW: правило для порта {port}/tcp удалено.")
 
 def _apply_optimizations() -> None:
     try:
@@ -1858,9 +1891,8 @@ def _full_uninstall(silent: bool = False) -> bool:
         _run(["iptables", "-X", chain])
     _box_ok("iptables-цепочки удалены.")
 
-    if shutil.which("ufw") and "active" in _run(["ufw", "status"], capture=True).stdout.lower():
-        _run(["ufw", "delete", "allow", f"{port}/tcp"])
-        _box_ok(f"UFW: правило для порта {port}/tcp удалено.")
+    # v5.0.18: миграция на port_registry (с legacy comment).
+    _mtproto_ufw_close(port)
 
     _box_info("Удаляю файлы...")
     for t in [BIN_PATH, SERVICE_FILE, CONFIG_DIR, WORK_DIR,
