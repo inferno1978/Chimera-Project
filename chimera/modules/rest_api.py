@@ -1346,30 +1346,25 @@ class _VLESSHandler(BaseHTTPRequestHandler):
 
         # GET /api/portal/ips — список allowed_ips текущего пользователя.
         # Возвращает:
-        #   { "ips": ["5.167.98.20", ...], "max": 20,
-        #     "detected_ip": "<текущий IP клиента из client_address>" }
-        # detected_ip — это IP, с которого клиент пришёл СЕЙЧАС. Может быть
-        # полезно для подсказки "добавить этот IP". НЕ доверяем X-Forwarded-For,
-        # т.к. rest_api по умолчанию слушает напрямую (без nginx).
-        # См. Q2 в user_ip_whitelist.py.
+        #   { "ips": [{"ip": "5.167.98.20", "added_at": "...", "pinned": false}, ...],
+        #     "max": 20, "detected_ip": "<текущий IP клиента>" }
+        # v5.0.20: detailed формат с added_at и pinned.
+        # detected_ip — IP, с которого клиент пришёл СЕЙЧАС. НЕ доверяем X-Forwarded-For.
         if path == "/api/portal/ips":
             user = self._require_user()
             if user is None:
                 return
             try:
                 from chimera.modules.user_ip_whitelist import (
-                    get_user_ips, MAX_IPS_PER_USER,
+                    get_user_ips_detailed, MAX_IPS_PER_USER,
                 )
                 email = user.get("email", "")
-                ips = get_user_ips(email)
-                # IP клиента — напрямую из client_address.
-                # Если self.client_address[0] == "127.0.0.1" — клиент локальный
-                # (например, через SSH tunnel) — detected_ip бессмысленен.
+                ips_detailed = get_user_ips_detailed(email)
                 detected = self._client_ip()
                 if detected in ("127.0.0.1", "::1", "localhost", "?"):
                     detected = ""
                 self._send_json({
-                    "ips": ips,
+                    "ips": ips_detailed,
                     "max": MAX_IPS_PER_USER,
                     "detected_ip": detected,
                 })
@@ -1748,6 +1743,93 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 ok, msg = add_ip_to_user(email, ip_input)
                 if ok:
                     self._send_json({"status": "added", "message": msg})
+                else:
+                    self._send_json({"error": msg}, 400)
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # v5.0.20: POST /api/portal/ips/replace-all — заменить все IP на один новый.
+        # Body: {"ip": "5.167.98.20"} или {"ip": "auto"} или {"ip": "auto", "keep_pinned": false}
+        if path == "/api/portal/ips/replace-all":
+            user = self._require_user()
+            if user is None:
+                return
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            ip_input = (body.get("ip") or "").strip()
+            if not ip_input:
+                self._send_json({"error": "ip required"}, 400)
+                return
+            if ip_input.lower() == "auto":
+                ip_input = self._client_ip()
+                if ip_input in ("127.0.0.1", "::1", "localhost", "?"):
+                    self._send_json({
+                        "error": "auto-detect невозможен (вы за localhost/SSH tunnel). "
+                                 "Укажите IP вручную.",
+                    }, 400)
+                    return
+            keep_pinned = body.get("keep_pinned", True)
+            email = user.get("email", "")
+            try:
+                from chimera.modules.user_ip_whitelist import replace_all_ips
+                ok, msg = replace_all_ips(email, ip_input, keep_pinned=keep_pinned)
+                if ok:
+                    self._send_json({"status": "replaced", "message": msg})
+                else:
+                    self._send_json({"error": msg}, 400)
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # v5.0.20: POST /api/portal/ips/pin — закрепить IP.
+        # Body: {"ip": "5.167.98.20"}
+        if path == "/api/portal/ips/pin":
+            user = self._require_user()
+            if user is None:
+                return
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            ip_input = (body.get("ip") or "").strip()
+            if not ip_input:
+                self._send_json({"error": "ip required"}, 400)
+                return
+            email = user.get("email", "")
+            try:
+                from chimera.modules.user_ip_whitelist import pin_ip_to_user
+                ok, msg = pin_ip_to_user(email, ip_input)
+                if ok:
+                    self._send_json({"status": "pinned", "message": msg})
+                else:
+                    self._send_json({"error": msg}, 400)
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # v5.0.20: POST /api/portal/ips/unpin — открепить IP.
+        # Body: {"ip": "5.167.98.20"}
+        if path == "/api/portal/ips/unpin":
+            user = self._require_user()
+            if user is None:
+                return
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            ip_input = (body.get("ip") or "").strip()
+            if not ip_input:
+                self._send_json({"error": "ip required"}, 400)
+                return
+            email = user.get("email", "")
+            try:
+                from chimera.modules.user_ip_whitelist import unpin_ip_from_user
+                ok, msg = unpin_ip_from_user(email, ip_input)
+                if ok:
+                    self._send_json({"status": "unpinned", "message": msg})
                 else:
                     self._send_json({"error": msg}, 400)
             except Exception as e:
