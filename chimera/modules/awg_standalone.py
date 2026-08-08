@@ -812,8 +812,25 @@ def awgs_setup_firewall(port: int) -> bool:
     """
     Открывает UDP-порт AWG в UFW.
     НЕ переделывает deny-all, НЕ трогает Fail2Ban (как договорились в Q4=b).
+
+    v5.0.18: миграция на port_registry (с backward compat fallback).
     """
     core = _core_module()
+    # v5.0.18: сначала port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register, SERVICE_AWG_STANDALONE,
+        )
+        port_register(SERVICE_AWG_STANDALONE, port, "udp",
+                      comment="AWG standalone", force=True)
+        ok, msg = ufw_open_port(port, "udp", SERVICE_AWG_STANDALONE,
+                                comment="AWG standalone")
+        if ok:
+            core.success(f"UFW: открыт UDP-порт {port} для AWG ({msg})")
+            return True
+        # ufw_open_port вернул False — fallback на прямой ufw allow ниже.
+    except Exception:
+        pass
     # Проверяем, активен ли UFW
     r = core._run(["ufw", "status"], capture=True, check=False)
     if r.returncode != 0:

@@ -507,20 +507,60 @@ def _ufw_is_active() -> bool:
     return "status: active" in r.stdout.lower()
 
 def _ufw_open_port(proto: str, port_start: int, port_end: int) -> None:
-    """Открывает порты через UFW если он активен."""
+    """Открывает порты через UFW если он активен.
+
+    v5.0.18: миграция на port_registry (с backward compat fallback).
+    """
     if not _ufw_is_active():
         return
     proto = proto.lower()
+    # v5.0.18: сначала port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, ufw_open_port_range, port_register, SERVICE_MIERU,
+        )
+        if port_start == port_end:
+            port_register(SERVICE_MIERU, port_start, proto,
+                          comment="Mieru", force=True)
+            ufw_open_port(port_start, proto, SERVICE_MIERU, comment="Mieru")
+        else:
+            # Для range регистрируем каждый порт отдельно (для conflict detection).
+            for p in range(port_start, port_end + 1):
+                port_register(SERVICE_MIERU, p, proto,
+                              comment="Mieru range", force=True)
+            ufw_open_port_range(port_start, port_end, proto, SERVICE_MIERU,
+                                comment="Mieru range")
+        return
+    except Exception:
+        pass
     if port_start == port_end:
         _run(["ufw", "allow", f"{port_start}/{proto}"], capture=True)
     else:
         _run(["ufw", "allow", f"{port_start}:{port_end}/{proto}"], capture=True)
 
 def _ufw_close_port(proto: str, port_start: int, port_end: int) -> None:
-    """Закрывает порты через UFW если он активен."""
+    """Закрывает порты через UFW если он активен.
+
+    v5.0.18: миграция на port_registry (с backward compat).
+    """
     if not _ufw_is_active():
         return
     proto = proto.lower()
+    # v5.0.18: сначала port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, ufw_close_port_range, port_unregister, SERVICE_MIERU,
+        )
+        if port_start == port_end:
+            ufw_close_port(port_start, proto, SERVICE_MIERU)
+            port_unregister(SERVICE_MIERU, port_start, proto)
+        else:
+            ufw_close_port_range(port_start, port_end, proto, SERVICE_MIERU)
+            for p in range(port_start, port_end + 1):
+                port_unregister(SERVICE_MIERU, p, proto)
+        return
+    except Exception:
+        pass
     if port_start == port_end:
         _run(["ufw", "delete", "allow", f"{port_start}/{proto}"], capture=True)
     else:
