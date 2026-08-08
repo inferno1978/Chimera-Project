@@ -2,6 +2,164 @@
 
 ---
 
+## FEAT(infra): v5.0.17 — nginx front (TLS) для User Portal + port_registry — 8 августа 2026
+
+**Два новых модуля: `chimera/modules/port_registry.py` (централизованный
+реестр портов с conflict detection) и `chimera/modules/nginx_front_portal.py`
+(nginx reverse-proxy с TLS для User Portal).**
+
+### Контекст
+
+После v5.0.16 (per-user IP whitelist) User Portal остался на 127.0.0.1:8443 —
+доступ только через SSH-туннель или expose=True без TLS (Basic Auth = base64,
+креды видны снифферу). Нужно было поставить nginx с TLS перед порталом, при
+этом не захардкодить порт и обеспечить auto UFW open/close.
+
+Параллельно — в проекте 15+ сервисов, каждый со своим UFW-управлением. Хотелось
+общий паттерн, чтобы новые сервисы его использовали.
+
+### Решение 1: `port_registry.py`
+
+Централизованный реестр портов в `/var/lib/xray-installer/port_registry.json`:
+
+```json
+[
+  {"service": "web_panel_nginx", "port": 9443, "proto": "tcp",
+   "comment": "nginx front для User Portal (TLS, →127.0.0.1:8443)"},
+  {"service": "vless", "port": 443, "proto": "tcp", "comment": "VLESS Reality"}
+]
+```
+
+API:
+- `port_register(service, port, proto, comment, force=False)` — регистрация с conflict check
+- `port_unregister(service, port=None, proto=None)` — снятие (по service+port или весь service)
+- `port_get_conflicts(port, proto, exclude_service=None)` — список конфликтов
+- `port_is_free(port, proto, exclude_service=None)` — `(bool, [descriptions])`
+- `port_list_all()` / `port_list_for_service(service)` — листинг
+- `ufw_open_port(port, proto, service_tag, comment=None)` — UFW open с tag-комментарием
+- `ufw_close_port(port, proto, service_tag)` — UFW close (только наши правила)
+
+Conflict detection проверяет 4 источника:
+1. Реестр `port_registry.json` (другие сервисы)
+2. Активные системные слушатели (`ss -ltnp`)
+3. UFW-правила (чужие `ufw status numbered`)
+4. `/etc/services` (well-known ports — info, не блокирующий)
+
+Service tags (canonical names): `SERVICE_VLESS`, `SERVICE_WEB_PANEL`,
+`SERVICE_WEB_PANEL_NGINX`, `SERVICE_NAIVEPROXY`, `SERVICE_MIERU`,
+`SERVICE_TRUSTTUNNEL`, `SERVICE_TELEMT`, `SERVICE_FPTN`, `SERVICE_WDTT`,
+`SERVICE_AWG_STANDALONE`, `SERVICE_AWG_EXIT`, `SERVICE_SINGBOX`,
+`SERVICE_SUBSCRIPTION`, `SERVICE_HYSTERIA2`.
+
+### Решение 2: `nginx_front_portal.py`
+
+nginx vhost с TLS для User Portal:
+
+```
+client → https://<domain>:<port> → nginx (TLS, cert from Let's Encrypt)
+                                  → proxy_pass http://127.0.0.1:8443 (rest_api)
+```
+
+- **Порт настраиваемый** (default 9443, чтобы не конфликтовать с 443/8443/51820).
+- **TLS-сертификат** — переиспользуется существующий Let's Encrypt для `PARAM_DOMAIN`.
+  Если нет — `ssl_certbot.obtain_ssl_cert()` получает новый.
+- **UFW** — открывается только порт nginx front. Backend (8443) остаётся на loopback.
+- **Lifecycle** — install/remove с полной очисткой (vhost, symlink, UFW, registry).
+- **Atomic rollback** — если `nginx -t` fail после установки vhost → откат.
+- **Security headers** — HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy.
+- **WebSocket support** — для будущих live-обновлений портала.
+- **ACME challenge location** — для certbot renewal через webroot.
+
+API:
+- `nginx_front_install(port=9443, domain=None, backend_port=None) → (bool, str)`
+- `nginx_front_remove() → (bool, str)`
+- `nginx_front_status() → dict`
+- `do_manage_nginx_front()` — TUI-меню
+
+### TUI-интеграция
+
+**Меню → Веб-панель управления → [7] nginx front (TLS)** — открывает меню:
+- Включить на default порту 9443
+- Включить с другим портом (проверка конфликтов)
+- Выключить
+- Проверить конфликты портов (через `do_manage_port_registry`)
+- Статус: URL, backend, сертификат, активность nginx
+
+**Меню → Веб-панель управления → [6] Удалить полностью** — теперь также
+удаляет nginx front (если был установлен), потом rest_api web_panel.
+
+### Lifecycle hooks
+
+`rest_api.uninstall_web_service()` теперь:
+1. Проверяет `nginx_front_status().enabled` — если да, вызывает `nginx_front_remove()`
+2. Mask + stop systemd-unit `vless-web`
+3. Disable + remove unit file
+4. Закрывает UFW-порт web_panel (если expose=True было)
+5. Очищает `web_config.json`
+
+Сертификат Let's Encrypt НЕ удаляется — он может использоваться VLESS/nginx.
+
+### Валидация порта в `nginx_front_portal._validate_port`
+
+Запрещает:
+- `< 1` или `> 65535`
+- Привилегированные порты `< 1024` (nginx может не иметь прав)
+- Зарезервированные: 443 (VLESS), 80 (HTTP/certbot), 22 (SSH), 8443 (rest_api backend)
+
+### vhost generation
+
+nginx config содержит:
+- `listen <port> ssl http2` — HTTPS с HTTP/2
+- `ssl_certificate` / `ssl_certificate_key` — Let's Encrypt cert
+- `ssl_protocols TLSv1.2 TLSv1.3` — современные протоколы
+- `ssl_ciphers` — Mozilla Intermediate 2024
+- `add_header Strict-Transport-Security "max-age=63072000"` — HSTS 2 года
+- `proxy_pass http://127.0.0.1:<backend_port>` — проксирование на rest_api
+- `proxy_set_header X-Real-IP $remote_addr` — передача реального IP клиента
+- `proxy_buffering off` — для streaming downloads (clash/singbox configs)
+- `location /.well-known/acme-challenge/` — для certbot renewal
+
+### НЕ рефакторю существующие сервисы
+
+15+ сервисов (VLESS, Hysteria2, AWG, NaiveProxy, Mieru, TrustTunnel, Telemt,
+FPTN, WDTT, Subscription, и т.д.) имеют свой UFW-код. Их рефакторинг — большой
+объём с риском регрессий. В этом коммите:
+
+1. Создан паттерн (`port_registry.py`)
+2. Применён к новому функционалу (nginx_front_portal)
+3. Документирован для будущих рефакторингов
+
+Существующие сервисы продолжают работать как есть — их UFW-код не тронут.
+
+### Тесты (37 новых в `tests/test_port_registry.py`)
+
+- `TestRegistryLoadSave` (3) — JSON I/O
+- `TestPortRegister` (6) — регистрация с conflict detection, force, idempotent
+- `TestPortUnregister` (3) — снятие по service+port, по service, nonexistent
+- `TestPortGetConflicts` (4) — registry/system/ufw, exclude_service
+- `TestPortIsFree` (2) — free/occupied
+- `TestPortListAll` (1) — листинг
+- `TestUfwHelpers` (4) — open/idempotent/foreign-conflict/no-ufw
+- `TestEtcServices` (3) — well-known ports (443=https, 80=http, 59999=?)
+- `TestNginxFrontValidatePort` (5) — valid/privileged/reserved 80/8443/out-of-range
+- `TestNginxFrontVhostGeneration` (2) — required directives, no listen 443
+- `TestNginxFrontStatus` (2) — disabled when no state, after install
+- `TestNginxFrontRemoveWithUninstallWebPanel` (1) — uninstall вызывает nginx_front_remove
+- `TestRestApiMenuHasNginxFrontItem` (1) — TUI пункт [7]
+
+530 связанных тестов проходят (0 регрессий).
+
+### Совместимость
+
+- Backward compatible: существующие сервисы не тронуты.
+- nginx_front опционален: web_panel продолжает работать без него (через SSH-туннель).
+- port_registry опционален: существующие сервисы не используют его, но могут начать.
+- Если `port_registry.json` повреждён/отсутствует — `_registry_load()` возвращает `[]`.
+- Если `nginx_front_portal_state.json` отсутствует — `nginx_front_status()` возвращает `enabled: False`.
+- UFW не установлен — `ufw_open_port` возвращает `(False, "ufw не установлен")`, не падает.
+
+---
+
 ## FEAT(security): v5.0.16 — Per-user IP whitelist для ingress_geoip — 8 августа 2026
 
 **Новый модуль `chimera/modules/user_ip_whitelist.py` — позволяет клиентам с
