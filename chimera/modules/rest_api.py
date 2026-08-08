@@ -1344,6 +1344,39 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             self.wfile.write(vless_link.encode("utf-8"))
             return
 
+        # GET /api/portal/ips — список allowed_ips текущего пользователя.
+        # Возвращает:
+        #   { "ips": ["5.6.7.8", ...], "max": 20,
+        #     "detected_ip": "<текущий IP клиента из client_address>" }
+        # detected_ip — это IP, с которого клиент пришёл СЕЙЧАС. Может быть
+        # полезно для подсказки "добавить этот IP". НЕ доверяем X-Forwarded-For,
+        # т.к. rest_api по умолчанию слушает напрямую (без nginx).
+        # См. Q2 в user_ip_whitelist.py.
+        if path == "/api/portal/ips":
+            user = self._require_user()
+            if user is None:
+                return
+            try:
+                from chimera.modules.user_ip_whitelist import (
+                    get_user_ips, MAX_IPS_PER_USER,
+                )
+                email = user.get("email", "")
+                ips = get_user_ips(email)
+                # IP клиента — напрямую из client_address.
+                # Если self.client_address[0] == "127.0.0.1" — клиент локальный
+                # (например, через SSH tunnel) — detected_ip бессмысленен.
+                detected = self._client_ip()
+                if detected in ("127.0.0.1", "::1", "localhost", "?"):
+                    detected = ""
+                self._send_json({
+                    "ips": ips,
+                    "max": MAX_IPS_PER_USER,
+                    "detected_ip": detected,
+                })
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
         # ── AmneziaWG standalone API (/api/awg/*) ─────────────────────────────
         # Делегирует в awg_rest_api.py. Авторизация проверяется внутри хендлеров
         # (admin endpoints → _require_admin, user endpoints → _require_user).
@@ -1680,6 +1713,47 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "user not found"}, 404)
             return
 
+        # POST /api/portal/ips — добавить IP в whitelist текущего пользователя.
+        # Body: {"ip": "5.6.7.8"} или {"ip": "5.6.7.0/24"}.
+        # Специальное значение: {"ip": "auto"} — использовать IP клиента из
+        # client_address (НЕ из X-Forwarded-For, см. Q2 в user_ip_whitelist.py).
+        # Returns: {"status": "added", "ip": "<normalized>"} или {"error": "..."}.
+        if path == "/api/portal/ips":
+            user = self._require_user()
+            if user is None:
+                return
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            ip_input = (body.get("ip") or "").strip()
+            if not ip_input:
+                self._send_json({"error": "ip required"}, 400)
+                return
+            # "auto" → берём IP из client_address напрямую.
+            # НЕ доверяем X-Forwarded-For — он может быть подделан клиентом.
+            # rest_api слушает напрямую (без nginx), значит client_address[0]
+            # — это реальный IP TCP-подключения.
+            if ip_input.lower() == "auto":
+                ip_input = self._client_ip()
+                if ip_input in ("127.0.0.1", "::1", "localhost", "?"):
+                    self._send_json({
+                        "error": "auto-detect невозможен (вы за localhost/SSH tunnel). "
+                                 "Укажите IP вручную.",
+                    }, 400)
+                    return
+            email = user.get("email", "")
+            try:
+                from chimera.modules.user_ip_whitelist import add_ip_to_user
+                ok, msg = add_ip_to_user(email, ip_input)
+                if ok:
+                    self._send_json({"status": "added", "message": msg})
+                else:
+                    self._send_json({"error": msg}, 400)
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
         # ── AmneziaWG standalone API — POST ───────────────────────────────────
         if path.startswith("/api/awg/"):
             from chimera.modules import awg_rest_api
@@ -1753,6 +1827,33 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 from chimera.modules.geoip_block import _geoip_remove_all
                 _geoip_remove_all()
                 self._send_json({"status": "all_rules_removed"})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # DELETE /api/portal/ips?ip=<ip> — удалить IP из whitelist текущего
+        # пользователя. ip передаётся в query string (URL-encoded).
+        # Пример: DELETE /api/portal/ips?ip=5.6.7.8
+        #         DELETE /api/portal/ips?ip=5.6.7.0%2F24
+        if path == "/api/portal/ips":
+            user = self._require_user()
+            if user is None:
+                return
+            parsed_query = parse_qs(parsed.query)
+            ip_to_delete = ""
+            if "ip" in parsed_query and parsed_query["ip"]:
+                ip_to_delete = unquote(parsed_query["ip"][0]).strip()
+            if not ip_to_delete:
+                self._send_json({"error": "ip query parameter required"}, 400)
+                return
+            email = user.get("email", "")
+            try:
+                from chimera.modules.user_ip_whitelist import remove_ip_from_user
+                ok, msg = remove_ip_from_user(email, ip_to_delete)
+                if ok:
+                    self._send_json({"status": "deleted", "message": msg})
+                else:
+                    self._send_json({"error": msg}, 400)
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
             return
