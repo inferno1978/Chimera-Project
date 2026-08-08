@@ -1949,11 +1949,23 @@ def _run_in_thread(port: int = None) -> threading.Thread:
 def _ufw_web_panel_close(port: int) -> None:
     """Закрывает ufw-правило для веб-панели по комментарию и порту.
 
-    Ищет в `ufw status numbered` строки с комментарием
-    "VLESS Web Panel (exposed, no TLS)" и портом == port.
-    Удаляет по номеру с конца (чтобы номера не съезжали).
-    Не удаляет чужие правила. Не падает, если ufw не установлен/неактивен.
+    v5.0.19: миграция на port_registry (с legacy comment backward compat).
+    Сначала пробует port_registry.ufw_close_port (ищет chimera-web_panel
+    и legacy "VLESS Web Panel"), затем fallback на ручной парсинг ufw status.
     """
+    # v5.0.19: сначала port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister, SERVICE_WEB_PANEL,
+        )
+        ufw_close_port(port, "tcp", SERVICE_WEB_PANEL,
+                       legacy_comments=["VLESS Web Panel (exposed, no TLS)",
+                                        "VLESS Web Panel"])
+        port_unregister(SERVICE_WEB_PANEL, port, "tcp")
+    except Exception:
+        pass
+    # Fallback: ручной парсинг ufw status (для правил без comment или
+    # если port_registry недоступен).
     if not shutil.which("ufw"):
         return
     core = _core_module()
@@ -2019,10 +2031,27 @@ def install_web_service(port: int = None, admin_user: str = None,
 
     # Открываем порт в ufw ТОЛЬКО при явном внешнем доступе (host=0.0.0.0).
     # По умолчанию (127.0.0.1) — не открываем, доступ через SSH-туннель.
+    # v5.0.19: миграция на port_registry (с backward compat fallback).
     if current_host == "0.0.0.0" and shutil.which("ufw"):
-        _run(["ufw", "allow", str(port), "tcp",
-              "comment", "VLESS Web Panel (exposed, no TLS)"],
-             check=False, quiet=True)
+        _web_panel_ufw_opened = False
+        try:
+            from chimera.modules.port_registry import (
+                ufw_open_port, port_register, SERVICE_WEB_PANEL,
+            )
+            port_register(SERVICE_WEB_PANEL, port, "tcp",
+                          comment="VLESS Web Panel (exposed, no TLS)",
+                          force=True)
+            ok, msg = ufw_open_port(port, "tcp", SERVICE_WEB_PANEL,
+                                    comment="VLESS Web Panel (exposed, no TLS)")
+            if ok:
+                _web_panel_ufw_opened = True
+        except Exception:
+            pass
+        if not _web_panel_ufw_opened:
+            # Fallback: прямой ufw allow.
+            _run(["ufw", "allow", str(port), "tcp",
+                  "comment", "VLESS Web Panel (exposed, no TLS)"],
+                 check=False, quiet=True)
         warn_msg = (
             f"ВНИМАНИЕ: веб-панель открыта наружу на 0.0.0.0:{port} без TLS! "
             "Basic Auth = base64, НЕ шифрование. "

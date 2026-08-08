@@ -86,6 +86,29 @@ def configure_firewall() -> None:
             r = _run(["ufw", "status"], capture=True, check=False)
             if re.search(rf'^{port}/{proto}.*ALLOW', r.stdout, re.MULTILINE):
                 return
+            # v5.0.19: миграция на port_registry (с backward compat fallback).
+            # SSH (22) и HTTP (80) — критичные порты, регистрируем под SERVICE_VLESS
+            # с указанием в comment. VLESS port — основной.
+            try:
+                from chimera.modules.port_registry import (
+                    ufw_open_port, port_register, SERVICE_VLESS,
+                )
+                port_register(SERVICE_VLESS, port, proto,
+                              comment=comment, force=True)
+                ok, msg = ufw_open_port(port, proto, SERVICE_VLESS,
+                                        comment=comment)
+                if ok:
+                    try:
+                        with UFW_MARK_FILE.open('a') as f:
+                            f.write(f"allow {port}/{proto}\n")
+                    except Exception:
+                        pass
+                    info(f"UFW: открыт {port}/{proto} ({comment})")
+                    return
+                # ufw_open_port вернул False (например, чужое правило) —
+                # fallback на прямой ufw allow ниже.
+            except Exception:
+                pass
             _run(["ufw", "allow", f"{port}/{proto}", "comment", comment],
                  check=False, quiet=True)
             try:
