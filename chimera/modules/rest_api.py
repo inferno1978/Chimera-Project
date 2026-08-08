@@ -2067,9 +2067,23 @@ def uninstall_web_service() -> None:
     но systemd перезапускает его (т.к. юнит-файл ещё на диске).
     Решение: mask → stop → удалить юнит → daemon-reload → reset-failed →
     kill по порту если процесс всё ещё жив (fallback).
+
+    v5.0.17: также удаляет nginx front для User Portal (если был установлен).
+    nginx_front_portal.NGINX_FRONT_STATE_FILE указывает на наличие фронта.
     """
     core = _core_module()
     _run = core._run
+    # v5.0.17: сначала удаляем nginx front (если был) — он зависит от rest_api.
+    try:
+        from chimera.modules.nginx_front_portal import nginx_front_remove, nginx_front_status
+        if nginx_front_status().get("enabled"):
+            core.info("Удаляю nginx front для User Portal...")
+            nginx_front_remove()
+    except Exception as _e:
+        try:
+            core.warn(f"nginx_front_remove: {_e}")
+        except Exception:
+            pass
     # Читаем конфиг ДО остановки — нужно знать host/port для ufw и kill.
     cfg = _web_config_load()
     old_host = cfg.get("host", DEFAULT_WEB_HOST)
@@ -2189,6 +2203,24 @@ def do_manage_web_panel() -> None:
         except Exception:
             pass
 
+        # v5.0.17: nginx front status
+        _nginx_front_enabled = False
+        _nginx_front_port = 0
+        _nginx_front_domain = ""
+        try:
+            from chimera.modules.nginx_front_portal import nginx_front_status
+            _nfp_status = nginx_front_status()
+            _nginx_front_enabled = _nfp_status.get("enabled", False)
+            _nginx_front_port = _nfp_status.get("port", 0)
+            _nginx_front_domain = _nfp_status.get("domain", "")
+        except Exception:
+            pass
+        _box_sep()
+        if _nginx_front_enabled:
+            _box_row(f"  nginx front:  {GREEN}включён{NC} — https://{_nginx_front_domain}:{_nginx_front_port}")
+        else:
+            _box_row(f"  nginx front:  {DIM}выключен (доступ через SSH-туннель или без TLS){NC}")
+
         _box_sep()
         if not _installed:
             _box_item("1", "Установить веб-панель")
@@ -2199,6 +2231,7 @@ def do_manage_web_panel() -> None:
         _box_item("4", "Переустановить (сброс конфига)")
         _box_item("5", f"{'Закрыть доступ снаружи' if exposed else 'Открыть доступ снаружи (ВНИМАНИЕ: без TLS!)'}")
         _box_item("6", f"{RED}🗑️  Удалить полностью{NC}")
+        _box_item("7", f"🌐 nginx front (TLS) — {'выключен' if not _nginx_front_enabled else 'настройки'}")
         _box_item("Q", "Назад")
         _box_bottom()
 
@@ -2309,6 +2342,8 @@ def do_manage_web_panel() -> None:
                 _box_row(f"  {DIM}  • systemd-unit vless-web.service{NC}")
                 _box_row(f"  {DIM}  • web_config.json (admin/portal конфиг){NC}")
                 _box_row(f"  {DIM}  • ufw-правило (если было открыто){NC}")
+                if _nginx_front_enabled:
+                    _box_row(f"  {DIM}  • nginx front для User Portal (если установлен){NC}")
                 _box_row(f"  {DIM}  state.json и пользователи VLESS НЕ затрагиваются.{NC}")
                 _box_row()
                 confirm = _input(
@@ -2319,6 +2354,15 @@ def do_manage_web_panel() -> None:
                     success("Веб-панель полностью удалена.")
                 else:
                     info("Отменено.")
+                _input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "7":
+            # v5.0.17: nginx front (TLS) для User Portal.
+            try:
+                from chimera.modules.nginx_front_portal import do_manage_nginx_front
+                do_manage_nginx_front()
+            except Exception as e:
+                warn(f"Не удалось открыть меню nginx front: {e}")
                 _input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch in ("q", ""):
