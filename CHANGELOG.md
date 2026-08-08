@@ -2,6 +2,157 @@
 
 ---
 
+## FEAT(security): v5.0.16 — Per-user IP whitelist для ingress_geoip — 8 августа 2026
+
+**Новый модуль `chimera/modules/user_ip_whitelist.py` — позволяет клиентам с
+российскими IP подключаться к VLESS на 443, даже когда включена блокировка
+входящих из РФ (ingress_geoip).**
+
+### Контекст проблемы
+
+`ingress_geoip` дропает ВСЕ входящие из РФ на SERVER_PORT (443). Это защищает
+от ТСПУ-сенсоров, но блокирует и реальных клиентов с российскими IP. Раньше
+whitelist был только для админских IP — не масштабировалось на много клиентов.
+
+### Решение
+
+Per-user `allowed_ips` в `users.json`:
+- Админ добавляет IP клиента через TUI (меню → Пользователи → [6] IP whitelist)
+- Клиент сам добавляет свои IP через User Portal (веб-интерфейс)
+- Cron каждые 5 минут пересобирает ipset `clients_wl_v4` / `clients_wl_v6`
+- iptables: `ACCEPT -m set --match-set clients_wl_v4 src -p tcp --dport 443`
+  ставится через `-I INPUT 1` (в начало) — приоритет над DROP для РФ-подсетей
+
+### АРХИТЕКТУРНЫЕ РЕШЕНИЯ (Q1 + Q2)
+
+**Q1 — chicken-egg с User Portal:**
+
+Выбран **вариант (a)** — User Portal доступен отдельно от ingress_geoip-гейта.
+
+Обоснование:
+- User Portal (`rest_api.py`) слушает на порту 8443 по умолчанию, отдельном
+  от SERVER_PORT (443)
+- `ingress_geoip._ingress_apply_ipset()` применяет DROP только к
+  `--dport <SERVER_PORT>`, НЕ к 8443
+- Клиент может сменить IP, выпасть из whitelist, но всё равно зайти в User
+  Portal на порт 8443 и добавить свой новый IP
+- Вариант (a) не создаёт скрытого временного окна уязвимости, в отличие от
+  (b) grace-period
+
+Реализация: `_ingress_enable()` автоматически вызывает
+`apply_iptables_rule(port)` из `user_ip_whitelist` — ставит ACCEPT для
+clients_wl перед DROP. `_ingress_remove()` — снимает правило.
+
+**Q2 — доверие к X-Forwarded-For:**
+
+`rest_api.py` слушает напрямую (без nginx по умолчанию), использует
+`self.client_address[0]` для определения IP клиента. НЕ доверяет
+`X-Forwarded-For`, т.к. его можно подделать.
+
+Реализация:
+- `GET /api/portal/ips` возвращает `detected_ip` из `_client_ip()` (это
+  `self.client_address[0]`)
+- `POST /api/portal/ips` с `{"ip": "auto"}` берёт IP из `_client_ip()`
+- Если `_client_ip()` == 127.0.0.1 / ::1 (клиент за SSH-туннелем) —
+  auto-detect возвращает ошибку, IP нужно указать вручную
+- Тест `test_spoofed_xff_does_not_affect_ip_detection` проверяет что
+  подделка X-Forwarded-For не влияет на detected_ip
+
+### Структура данных
+
+`users.json` — новое поле `allowed_ips` (список строк, IPs/CIDR):
+```json
+{
+  "users": [
+    {
+      "uuid": "abc-123",
+      "email": "alice@example.com",
+      "name": "alice",
+      "allowed_ips": ["5.167.98.20", "5.167.99.0/24", "2a03:1ac0::/64"]
+    }
+  ]
+}
+```
+
+Обратная совместимость: старые users без поля `allowed_ips` работают —
+`get_user_ips()` возвращает `[]`.
+
+### Валидация IP/CIDR
+
+`_validate_ip_or_cidr()`:
+- Разрешает: глобальные IPv4 (1.0.0.0/8 — 223.0.0.0/8), глобальные IPv6 (2000::/3)
+- Запрещает: loopback (127.x, ::1), private (10.x, 192.168.x, fc00::/7),
+  link-local (169.254.x, fe80::/10), multicast (224.x, ff00::/8),
+  unspecified (0.0.0.0, ::), reserved
+- Нормализует: `2a03:1ac0:0000:0000:0000:0000:0000:0001` → `2a03:1ac0::1`
+- Поддерживает как одиночные IP, так и CIDR (5.167.98.0/24)
+
+### Интеграция
+
+**TUI** (админ):
+- Меню → Пользователи → [6] IP whitelist
+- Подменю: выбор пользователя → список IP → add/remove
+- Управление cron (включить/выключить автообновление)
+- Очистка всех IP всех пользователей
+
+**User Portal** (клиент, веб):
+- Карточка «🛂 Мои IP-адреса»
+- Показывает текущий IP клиента (detected_ip)
+- Кнопка «Текущий IP» —一键 добавить свой текущий IP
+- Ручной ввод IP/CIDR
+- Удаление IP с подтверждением
+- Лимит: 20 IP на пользователя
+
+**REST API**:
+- `GET /api/portal/ips` — список allowed_ips + detected_ip
+- `POST /api/portal/ips` с `{"ip": "..."}` или `{"ip": "auto"}` — добавить
+- `DELETE /api/portal/ips?ip=<ip>` — удалить
+
+**ingress_geoip.py**:
+- `_ingress_enable()` автоматически применяет ACCEPT-правило для clients_wl
+- `_ingress_remove()` автоматически снимает правило (данные в users.json сохраняются)
+- При повторном включении ingress_geoip — правила восстанавливаются из users.json
+
+**ipset_persist.py**:
+- `rebuild_clients_ipset()` после пересборки вызывает `ipset_save()` для
+  boot-restore (через существующий xray-ipset-restore.service)
+
+### Atomic swap
+
+`rebuild_clients_ipset()` использует `ipset swap` для atomic обновления:
+1. Создаёт tmp-сет `clients_wl_v4_tmp` с новыми IP
+2. `ipset swap clients_wl_v4_tmp clients_wl_v4` — atomic операция
+3. Удаляет tmp-сет (теперь содержит старые IP)
+
+Без перерыва в фильтрации. Старые IP работают до swap, новые — сразу после.
+
+### Тесты (40 новых в `tests/test_user_ip_whitelist.py`)
+
+- `TestValidateIpOrCidr` (10 тестов) — валидация IP/CIDR
+- `TestAddRemoveGetUserIPs` (8 тестов) — CRUD
+- `TestMigrateOldUsers` (2 теста) — обратная совместимость
+- `TestCollectAllUserIps` (2 теста) — сбор IP из всех users
+- `TestRebuildClientsIpset` (2 теста) — atomic swap
+- `TestIptablesRule` (3 теста) — установка/снятие правил
+- `TestCron` (2 теста) — cron-файлы
+- `TestQ1UserPortalAccessibleWithoutWhitelist` (3 теста) — Q1 (архитектура)
+- `TestQ2NoXForwardedForTrust` (4 теста) — Q2 (безопасность)
+  - `test_spoofed_xff_does_not_affect_ip_detection` — подделка XFF не работает
+- `TestIngressGeoipIntegration` (2 теста) — интеграция с ingress_geoip
+- `TestTuiEntryPoint` (1 тест) — TUI пункт [6]
+
+### Совместимость
+
+- Backward compatible: старые users.json без `allowed_ips` работают.
+- ingress_geoip без user_ip_whitelist: продолжает работать (whitelist
+  просто пропускается, в логе info-сообщение).
+- ipset недоступен: `apply_iptables_rule` возвращает False, ingress_geoip
+  продолжает работать без whitelist.
+- IPv4-only: IPv6 ipset создаётся пустой, не мешает.
+- IPv6-only: аналогично.
+
+---
+
 ## FIX(youtube): v5.0.15 — ВОЗВРАТ v5.0.13 (routeOnly + sockopt) для серверов с IPv6 — 8 августа 2026
 
 **Возврат изменений v5.0.13. Пользователь переезжает на сервер с IPv6

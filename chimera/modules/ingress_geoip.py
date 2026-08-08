@@ -289,6 +289,19 @@ def _ingress_remove() -> None:
     port  = state.get("port", 0)
     meth  = state.get("method", "")
 
+    # v5.0.16: сначала убираем per-user IP whitelist правило (если было).
+    # Не трогаем ipset и users.json — данные сохраняются для повторного включения.
+    try:
+        from chimera.modules.user_ip_whitelist import (
+            remove_iptables_rule as _wl_remove,
+            remove_cron as _wl_cron_remove,
+        )
+        if port:
+            _wl_remove(port)
+        _wl_cron_remove()
+    except Exception:
+        pass  # модуль недоступен — не критично
+
     # Сначала убираем ACCEPT-правила whitelist
     for _wip in state.get("whitelist", []):
         _ingress_whitelist_remove(_wip, port)
@@ -427,6 +440,29 @@ def _ingress_enable(port: int) -> None:
         warn("Рекомендуется: apt install ipset")
         ok = _ingress_apply_iptables_plain(port, v4)
         method = "plain"
+
+    # v5.0.16: интеграция с per-user IP whitelist (user_ip_whitelist.py).
+    # Ставим ACCEPT-правило для ipset clients_wl ПЕРЕД DROP-правилом РФ,
+    # чтобы пользователи с РФ-IP могли подключаться к VLESS на 443.
+    # Это делается ПОСЛЕ _ingress_apply_ipset (который ставит DROP через -A),
+    # через -I INPUT 1 (в самое начало) — приоритет над DROP.
+    # Если user_ip_whitelist не установлен или ipset недоступен —
+    # просто пропускаем (блокировка РФ продолжит работать, но без whitelist).
+    try:
+        from chimera.modules.user_ip_whitelist import (
+            apply_iptables_rule as _wl_apply,
+            install_cron as _wl_cron,
+        )
+        if _wl_apply(port):
+            success("Per-user IP whitelist: ACCEPT правило применено "
+                    "(ipset clients_wl → ACCEPT на :%d)" % port)
+            # Устанавливаем cron для автообновления ipset.
+            _wl_cron()
+        else:
+            info("Per-user IP whitelist: ipset недоступен или нет пользователей — "
+                 "пропускаю. Клиенты с РФ-IP будут заблокированы.")
+    except Exception as e:
+        warn(f"Per-user IP whitelist: не удалось применить ({e})")
 
     if not ok:
         warn("Не удалось применить правила — проверьте лог")

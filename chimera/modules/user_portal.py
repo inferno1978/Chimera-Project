@@ -404,6 +404,30 @@ body {{
     <input type="password" class="input-field" id="new-pass" placeholder="Новый пароль (мин. 8 символов)">
     <button class="btn btn-primary btn-full" onclick="changePassword()">Сменить пароль</button>
   </div>
+
+  <!-- My IP addresses (per-user whitelist for ingress_geoip) -->
+  <div class="card fade-in" style="animation-delay: 0.7s">
+    <div class="card-title">🛂 Мои IP-адреса</div>
+    <div id="ips-detected" style="margin-bottom:12px;padding:10px;border-radius:8px;background:rgba(15,23,42,0.5);font-size:0.88rem;color:var(--text-dim);line-height:1.5">
+      <span class="spinner" style="display:inline-block;width:14px;height:14px;border:2px solid var(--accent) transparent;border-radius:50%;animation:spin 1s linear infinite;vertical-align:middle"></span>
+      Определяем ваш текущий IP...
+    </div>
+    <div id="ips-list" style="margin-bottom:12px">
+      <div class="loading"><span class="spinner"></span></div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <input type="text" class="input-field" id="new-ip" placeholder="IP или CIDR (5.167.98.20 или 5.167.98.0/24)" style="flex:1;min-width:200px">
+      <button class="btn btn-primary" onclick="addIP()">Добавить</button>
+      <button class="btn btn-ghost" onclick="addAutoIP()" id="btn-auto-ip">Текущий IP</button>
+    </div>
+    <div style="margin-top:12px;padding:10px;background:rgba(15,23,42,0.5);border-radius:8px;font-size:0.82rem;color:var(--text-dim);line-height:1.5">
+      <strong style="color:var(--accent-light)">ℹ️ Для чего это нужно:</strong><br>
+      Если на сервере включена блокировка входящих из РФ — клиенты с российскими IP
+      не смогут подключиться к VLESS на порту 443. Добавьте свой IP-адрес сюда,
+      и вы получите доступ. IP берётся напрямую из вашего TCP-подключения —
+      его нельзя подделать. Если у вас динамический IP — добавляйте новый при смене.
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -580,6 +604,95 @@ async function changePassword() {{
   }}
 }}
 
+// ── My IP addresses (per-user whitelist) ────────────────────────────────────
+let _detectedIP = '';
+
+async function loadMyIPs() {{
+  let data;
+  try {{
+    data = await api('/api/portal/ips');
+  }} catch (e) {{
+    document.getElementById('ips-list').innerHTML = '<div style="color:var(--text-dim);font-size:0.85rem">IP whitelist недоступен</div>';
+    return;
+  }}
+  if (!data) return;
+
+  // Detected IP — показываем, если есть.
+  _detectedIP = data.detected_ip || '';
+  const detectedEl = document.getElementById('ips-detected');
+  if (_detectedIP) {{
+    detectedEl.innerHTML = `Ваш текущий IP: <strong style="color:var(--accent-light);font-family:monospace">${{_detectedIP}}</strong>`;
+    document.getElementById('btn-auto-ip').disabled = false;
+    document.getElementById('btn-auto-ip').style.opacity = '1';
+  }} else {{
+    detectedEl.innerHTML = '<span style="color:var(--text-dim)">Ваш IP не определён (возможно, вы за SSH-туннелем или localhost). Укажите IP вручную.</span>';
+    document.getElementById('btn-auto-ip').disabled = true;
+    document.getElementById('btn-auto-ip').style.opacity = '0.5';
+  }}
+
+  // Render IP list.
+  const container = document.getElementById('ips-list');
+  const ips = data.ips || [];
+  const max = data.max || 20;
+  if (ips.length === 0) {{
+    container.innerHTML = `<div style="color:var(--text-dim);font-size:0.85rem">IP-адресов нет. Если на сервере включена блокировка РФ — добавьте свой IP.</div>`;
+  }} else {{
+    container.innerHTML = `
+      <div style="font-size:0.82rem;color:var(--text-dim);margin-bottom:6px">${{ips.length}}/${{max}} IP:</div>
+      ${{ips.map((ip, i) => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;margin:4px 0;background:rgba(15,23,42,0.5);border-radius:8px;font-family:monospace;font-size:0.9rem">
+          <span>${{ip}}</span>
+          <button class="btn btn-ghost" style="padding:4px 10px;font-size:0.8rem" onclick="deleteIP('${{ip}}')">Удалить</button>
+        </div>
+      `).join('')}}
+    `;
+  }}
+}}
+
+async function addIP() {{
+  const ip = document.getElementById('new-ip').value.trim();
+  if (!ip) {{ showToast('Введите IP или CIDR', 'error'); return; }}
+  await _sendIP(ip);
+}}
+
+async function addAutoIP() {{
+  if (!_detectedIP) {{ showToast('Текущий IP не определён', 'error'); return; }}
+  await _sendIP(_detectedIP);
+}}
+
+async function _sendIP(ip) {{
+  const res = await fetch('/api/portal/ips', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    credentials: 'same-origin',
+    body: JSON.stringify({{ ip: ip }})
+  }});
+  const data = await res.json();
+  if (data.status === 'added') {{
+    showToast(data.message || 'IP добавлен');
+    document.getElementById('new-ip').value = '';
+    loadMyIPs();
+  }} else {{
+    showToast(data.error || 'Ошибка', 'error');
+  }}
+}}
+
+async function deleteIP(ip) {{
+  if (!confirm(`Удалить ${{ip}} из whitelist?`)) return;
+  const url = '/api/portal/ips?ip=' + encodeURIComponent(ip);
+  const res = await fetch(url, {{
+    method: 'DELETE',
+    credentials: 'same-origin'
+  }});
+  const data = await res.json();
+  if (data.status === 'deleted') {{
+    showToast(data.message || 'IP удалён');
+    loadMyIPs();
+  }} else {{
+    showToast(data.error || 'Ошибка', 'error');
+  }}
+}}
+
 // ── My AmneziaWG ────────────────────────────────────────────────────────────
 function _fmtBytes(b) {{
   if (!b || b <= 0) return '0 B';
@@ -693,6 +806,7 @@ loadLinks();
 loadTraffic();
 loadHealth();
 loadMyAWG();
+loadMyIPs();
 setInterval(loadHealth, 30000);
 setInterval(loadTraffic, 60000);
 setInterval(loadMyAWG, 60000);
