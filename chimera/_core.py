@@ -4440,6 +4440,7 @@ def do_manage_users() -> None:
         _box_item("3", f"Показать ссылку / QR для пользователя")
         _box_item("4", f"Показать трафик пользователей (Stats API)")
         _box_item("5", f"Применить список к Xray (сохранить + перезапустить)")
+        _box_item("6", f"IP whitelist (per-user, для ingress_geoip)")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -4584,6 +4585,16 @@ def do_manage_users() -> None:
             else:
                 warn("Применение не удалось — см. лог")
             input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "6":
+            # v5.0.16: per-user IP whitelist для ingress_geoip.
+            # Делегирует в user_ip_whitelist.do_manage_user_ip_whitelist().
+            try:
+                from chimera.modules.user_ip_whitelist import do_manage_user_ip_whitelist
+                do_manage_user_ip_whitelist()
+            except Exception as e:
+                warn(f"Не удалось открыть менеджер IP whitelist: {e}")
+                time.sleep(1)
 
         elif ch in ("q", "Q", ""):
             break
