@@ -460,7 +460,7 @@ def fw_ban(ip):
         '-m','comment','--comment','xray-autoban'],
         capture_output=True).returncode == 0
 
-# v5.0.3 DoH-resolver: резолв домена exit-ноды → IPv4 через публичные
+#  DoH-resolver: резолв домена exit-ноды → IPv4 через публичные
 # DoH-резолверы (Cloudflare 1.1.1.1 + Google 8.8.8.8 JSON API), минуя
 # локальный DNS-кэш (/etc/hosts, systemd-resolved, nscd, dnsmasq).
 # КРИТИЧНО для autoban: если в whitelist окажется устаревший IP exit-ноды,
@@ -507,7 +507,7 @@ try:
 except: pass
 threshold = cfg.get('threshold', {threshold})
 window    = cfg.get('window_min', {window})
-# v5.0.0 FIX: persist whitelist back to cfg, otherwise cron-скрипт
+#  FIX: persist whitelist back to cfg, otherwise cron-скрипт
 # перезаписывал autoban.json без 'whitelist' (если поле отсутствовало
 # в файле) — и пользовательские IP терялись при следующем запуске.
 # Раньше: whitelist = set(cfg.get('whitelist', ['127.0.0.1','::1']))
@@ -570,7 +570,7 @@ for ip, cnt in ip_errors.items():
             tg(f'AutoBan: {{ip}} banned ({{cnt}} TLS errors in {{window}}min)')
 
 cfg['banned'] = banned
-# v5.0.0 FIX: persist whitelist (включая добавленные chain IPs) и
+#  FIX: persist whitelist (включая добавленные chain IPs) и
 # гарантировать наличие 'ban_history' — иначе cron-скрипт затирал
 # эти поля, и пункт меню [6] История банов оставался пустым.
 cfg['whitelist'] = sorted(whitelist)

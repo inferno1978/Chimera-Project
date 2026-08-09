@@ -98,7 +98,7 @@ def _core_module():
 # ── Константы ────────────────────────────────────────────────────────────────
 PORT_REGISTRY_FILE = Path("/var/lib/xray-installer/port_registry.json")
 
-# v5.0.22: файловая блокировка для атомарного read-modify-write.
+#  файловая блокировка для атомарного read-modify-write.
 # fcntl.flock — POSIX advisory lock, не требует доп. зависимостей.
 LOCK_FILE = PORT_REGISTRY_FILE.with_suffix(".lock")
 
@@ -133,7 +133,7 @@ SERVICE_PORT_HOPPING   = "port_hopping"
 def _registry_lock(timeout: float = _LOCK_TIMEOUT_SEC):
     """POSIX advisory lock (fcntl.flock) для защиты read-modify-write цикла.
 
-    v5.0.22: обёртывает ВЕСЬ цикл read-modify-write в port_register()/
+     обёртывает ВЕСЬ цикл read-modify-write в port_register()/
     port_unregister() одной блокировкой. Без этого два параллельных
     процесса могут прочитать одинаковый список, каждый модифицирует свой
     экземпляр, и второй перезаписывает первый → потеря данных.
@@ -192,7 +192,7 @@ def _registry_load() -> list[dict]:
 def _registry_save(entries: list[dict]) -> None:
     """Сохраняет реестр атомарно (tempfile + os.replace).
 
-    v5.0.22: не пишет напрямую в PORT_REGISTRY_FILE — сначала пишет во
+     не пишет напрямую в PORT_REGISTRY_FILE — сначала пишет во
     временный файл (.tmp), затем os.replace (атомарная операция на уровне
     ОС). Защищает от повреждения файла при обрыве процесса посреди записи:
     если процесс упал после write, но до replace — оригинальный файл
@@ -399,7 +399,7 @@ def port_register(service_tag: str, port: int, proto: str = "tcp",
     Returns:
       (success, message)
 
-    v5.0.22: весь read-modify-write цикл обёрнут в _registry_lock() —
+     весь read-modify-write цикл обёрнут в _registry_lock() —
     защищает от гонки при конкурентном доступе (install одного сервиса
     пересекается с cron-задачей другого).
     """
@@ -457,7 +457,7 @@ def port_unregister(service_tag: str, port: "Optional[int]" = None,
     Если port/proto не указаны — снимает ВСЕ записи для этого сервиса.
     Возвращает True если что-то было снято, False если записей не было.
 
-    v5.0.22: весь read-modify-write цикл обёрнут в _registry_lock().
+     весь read-modify-write цикл обёрнут в _registry_lock().
     """
     try:
         with _registry_lock():
@@ -533,7 +533,7 @@ def ufw_close_port(port: int, proto: str, service_tag: str,
 
     Чужие правила НЕ трогает.
 
-    v5.0.18: legacy_comments — список старых комментариев (без 'chimera-' prefix),
+     legacy_comments — список старых комментариев (без 'chimera-' prefix),
     которые тоже нужно удалить. Используется при миграции существующих сервисов
     на port_registry: на серверах, где сервис был установлен ДО миграции, UFW
     правила имеют старый comment (например "NaiveProxy"). После миграции
@@ -547,7 +547,7 @@ def ufw_close_port(port: int, proto: str, service_tag: str,
     existing = _check_ufw_rules(port, proto)
     # Ищем правила с нашим новым comment (chimera-<service_tag>).
     ours = [r for r in existing if f"chimera-{service_tag}" in r.get("comment", "")]
-    # v5.0.18: также ищем legacy comments (старые правила до миграции).
+    #  также ищем legacy comments (старые правила до миграции).
     if legacy_comments:
         for lc in legacy_comments:
             if not lc:
@@ -602,7 +602,7 @@ def ufw_close_port_range(port_start: int, port_end: int, proto: str,
                          legacy_comments: "Optional[list[str]]" = None) -> "tuple[bool, str]":
     """Закрывает диапазон портов в UFW.
 
-    v5.0.18: legacy_comments — старые комментарии для backward compat.
+     legacy_comments — старые комментарии для backward compat.
     """
     if not shutil.which("ufw"):
         return False, "ufw не установлен"

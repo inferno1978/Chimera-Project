@@ -813,10 +813,10 @@ def awgs_setup_firewall(port: int) -> bool:
     Открывает UDP-порт AWG в UFW.
     НЕ переделывает deny-all, НЕ трогает Fail2Ban (как договорились в Q4=b).
 
-    v5.0.18: миграция на port_registry (с backward compat fallback).
+     миграция на port_registry (с backward compat fallback).
     """
     core = _core_module()
-    # v5.0.18: сначала port_registry.
+    #  сначала port_registry.
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, port_register, SERVICE_AWG_STANDALONE,

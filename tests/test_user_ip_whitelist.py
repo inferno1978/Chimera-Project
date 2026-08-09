@@ -164,7 +164,7 @@ class TestAddRemoveGetUserIPs(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertIn("5.6.7.8", msg)
 
-        # v5.0.20: проверяем что IP в detailed формате (объект, не строка).
+        #  проверяем что IP в detailed формате (объект, не строка).
         users = json.loads(self._users_file.read_text())
         allowed = users[0]["allowed_ips"]
         self.assertEqual(len(allowed), 1)
@@ -194,7 +194,7 @@ class TestAddRemoveGetUserIPs(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("уже", msg.lower())
 
-        # v5.0.20: проверяем detailed формат — один элемент.
+        #  проверяем detailed формат — один элемент.
         users = json.loads(self._users_file.read_text())
         allowed = users[0]["allowed_ips"]
         self.assertEqual(len(allowed), 1)
@@ -208,7 +208,7 @@ class TestAddRemoveGetUserIPs(unittest.TestCase):
             ok, _ = user_ip_whitelist.add_ip_to_user("alice@example.com",
                                                        "2a03:1ac0:0000:0000:0000:0000:0000:0001")
         self.assertTrue(ok)
-        # v5.0.20: проверяем detailed формат с нормализованным IP.
+        #  проверяем detailed формат с нормализованным IP.
         users = json.loads(self._users_file.read_text())
         allowed = users[0]["allowed_ips"]
         self.assertEqual(len(allowed), 1)
@@ -540,10 +540,10 @@ class TestQ1UserPortalAccessibleWithoutWhitelist(unittest.TestCase):
 
 
 class TestQ2XForwardedForConditionalTrust(unittest.TestCase):
-    """Q2 (v5.0.21): X-Forwarded-For доверяется ТОЛЬКО с loopback (nginx-фронт).
+    """Q2 : X-Forwarded-For доверяется ТОЛЬКО с loopback (nginx-фронт).
 
-    v5.0.16: XFF не использовался вообще (rest_api без nginx).
-    v5.0.21: XFF доверяется, если direct_ip — loopback (запрос через nginx).
+     XFF не использовался вообще (rest_api без nginx).
+     XFF доверяется, если direct_ip — loopback (запрос через nginx).
     Если direct_ip — внешний IP (rest_api открыт напрямую), XFF игнорируется
     (защита от подделки).
     """
@@ -598,7 +598,7 @@ class TestQ2XForwardedForConditionalTrust(unittest.TestCase):
         self.assertNotIn("X-Forwarded-For", code_only,
                          "X-Forwarded-For не должен использоваться в коде")
 
-    # ── v5.0.21: новые тесты для условного доверия XFF ──────────────────
+    # ──  новые тесты для условного доверия XFF ──────────────────
 
     def test_xff_trusted_from_loopback(self):
         """Тест 1: client_address=127.0.0.1 + валидный XFF → возвращает IP из XFF."""
@@ -710,11 +710,11 @@ class TestTuiEntryPoint(unittest.TestCase):
 
 
 # ============================================================================
-# v5.0.20: New tests — FIFO, pin/unpin, replace_all, cleanup, migration
+#  New tests — FIFO, pin/unpin, replace_all, cleanup, migration
 # ============================================================================
 
 class TestFifoOnLimit(unittest.TestCase):
-    """v5.0.20: FIFO — при достижении лимита удаляется самый старый незакреплённый IP."""
+    """ FIFO — при достижении лимита удаляется самый старый незакреплённый IP."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -796,7 +796,7 @@ class TestFifoOnLimit(unittest.TestCase):
 
 
 class TestPinUnpin(unittest.TestCase):
-    """v5.0.20: pin/unpin IP."""
+    """ pin/unpin IP."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -851,7 +851,7 @@ class TestPinUnpin(unittest.TestCase):
 
 
 class TestReplaceAll(unittest.TestCase):
-    """v5.0.20: replace_all_ips."""
+    """ replace_all_ips."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -915,7 +915,7 @@ class TestReplaceAll(unittest.TestCase):
 
 
 class TestCleanupOldIps(unittest.TestCase):
-    """v5.0.20: age-based cleanup."""
+    """ age-based cleanup."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -994,7 +994,7 @@ class TestCleanupOldIps(unittest.TestCase):
 
 
 class TestMigrationOldToDetailed(unittest.TestCase):
-    """v5.0.20: миграция старого формата (строки) в detailed (объекты)."""
+    """ миграция старого формата (строки) в detailed (объекты)."""
 
     def setUp(self):
         _setup_core_in_sysmodules()

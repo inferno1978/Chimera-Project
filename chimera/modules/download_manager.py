@@ -31,7 +31,7 @@ spec, ДО любого сетевого вызова.
         ),
         install_dests=[Path("/usr/local/share/xray"), Path("/etc/xray")],
         manual_incoming_dir=Path("/root"),
-        min_size=20_000_000,  # v5.0.0: example only — use MIN_SIZES from geo_mirrors.py
+        min_size=20_000_000,  #  example only — use MIN_SIZES from geo_mirrors.py
         post_install=lambda tmp, dests: _copy_to_dests(tmp, dests),
     )
     ok = fetch_package(spec)
@@ -196,7 +196,7 @@ def fetch_package(
                         _default_copy_to_dests(manual_path, spec.install_dests)
                     return True
                 else:
-                    # v5.0.0: логируем если ручной файл слишком маленький —
+                    #  логируем если ручной файл слишком маленький —
                     # пользователь мог положить устаревшую/обрезанную копию.
                     if progress_label:
                         print(
@@ -220,8 +220,8 @@ def fetch_package(
     tmp_path = Path("/tmp") / f"_download_mgr_{filename}"
     tmp_path.unlink(missing_ok=True)
 
-    # ── v5.0.4: Эталонный хэш получаем ОДИН РАЗ перед циклом ──────────────
-    # Раньше (v5.0.0-v5.0.3): для КАЖДОГО кандидата .dat/.geoip-файла вызывалась
+    # ──  Эталонный хэш получаем ОДИН РАЗ перед циклом ──────────────
+    # Раньше (v5.0.0- : для КАЖДОГО кандидата .dat/.geoip-файла вызывалась
     # _verify_checksum(), которая заново перебирала ВСЕ 19 checksum_urls.
     # Это было избыточно (эталон один и тот же для всех попыток) и небезопасно
     # (CDN мог отдать устаревший .sha256sum, и все кандидаты отбраковывались).
@@ -279,7 +279,7 @@ def fetch_package(
                     sz = tmp_path.stat().st_size
                     print(f"  {progress_label} ✓ скачано ({sz // 1024} КБ)", flush=True)
 
-                # ── v5.0.4: сравнение с эталонным хэшем (прямое, не _verify_checksum)
+                # ──  сравнение с эталонным хэшем (прямое, не _verify_checksum)
                 # reference_hash получен ОДИН РАЗ перед циклом (см. выше).
                 # Здесь — просто считаем actual_hash скачанного кандидата
                 # и сравниваем строкой. НЕ повторный запрос .sha256sum.
@@ -328,7 +328,7 @@ def fetch_package(
                 # → проверка хэша пропущена (деградация), файл принят по размеру.
 
                 # ── Переименование tmp_path в каноническое имя ────────────
-                # v5.0.0 FIX (критический баг с 10.07.2026, коммит fbb2285):
+                #  FIX (критический баг с 10.07.2026, коммит fbb2285):
                 # tmp_path строится как /tmp/_download_mgr_{filename} —
                 # post_install callback'и (_post_install_geo, _default_copy_to_dests,
                 # и любые другие, использующие src.name) копировали файл под
@@ -369,7 +369,7 @@ def fetch_package(
                 return True
 
             # Файл слишком маленький — пробуем следующее зеркало.
-            # v5.0.0: логируем реальный размер vs порог, чтобы при отладке
+            #  логируем реальный размер vs порог, чтобы при отладке
             # было видно что именно произошло (а не только "не удалось").
             # Это критично для диагностики случаев когда CDN отдаёт устаревшую
             # копию файла (был инцидент с geosite.dat: 10 МБ вместо 73 МБ,
@@ -402,7 +402,7 @@ def fetch_package(
 def _default_copy_to_dests(src: Path, dests: list[Path]) -> None:
     """Копирует src во все dests с chmod 0o644.
 
-    v5.0.0: src.name теперь гарантированно каноническое (без префикса
+     src.name теперь гарантированно каноническое (без префикса
     _download_mgr_), потому что fetch_package() переименовывает tmp_path
     в /tmp/{filename} перед вызовом этой функции (см. строку ~281 в
     fetch_package). Раньше src.name был '_download_mgr_{filename}' и
@@ -419,7 +419,7 @@ def _default_copy_to_dests(src: Path, dests: list[Path]) -> None:
 
 
 # ============================================================================
-#  sha256-верификация (v5.0.0)
+#  sha256-верификация 
 # ============================================================================
 # Реализована как отдельный helper, а не инлайн в fetch_package, чтобы:
 #   1. Была тестируемой (mock urlopen с разными ответами checksum).
@@ -486,7 +486,7 @@ def _fetch_reference_hash(
     """Получает ЭТАЛОННЫЙ хэш ОДИН РАЗ с КОРОТКОГО приоритетного списка
     источников (не всех 19!).
 
-    v5.0.4: заменяет старую _verify_checksum() которая для КАЖДОГО кандидата
+     заменяет старую _verify_checksum() которая для КАЖДОГО кандидата
     .dat-файла заново перебирала ВСЕ 19 checksum_urls. Это было избыточно
     (эталонный хэш один и тот же для всех попыток) и небезопасно (CDN
     мог отдать устаревший .sha256sum, и все кандидаты отбраковывались

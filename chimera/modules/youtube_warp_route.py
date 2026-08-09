@@ -199,7 +199,7 @@ def _xray_apply_warp_outbound(ip_version: str = "auto"):
                   "ipv6"          — force IPv6 (sendThrough=warp_ipv6, UseIPv6)
                   "both"          — try IPv4 first, fallback to IPv6 (UseIPv4v6)
 
-    v5.0.3: при ip_version="auto" вызывает _detect_warp_ip_version() и
+     при ip_version="auto" вызывает _detect_warp_ip_version() и
     выбирает стратегию. Если IPv4 не работает но IPv6 работает —
     использует IPv6 (sendThrough=warp_ipv6, domainStrategy=UseIPv6).
     Это решает проблему ТСПУ-блокировки IPv4 внутри WireGuard туннеля.
@@ -503,7 +503,7 @@ def apply_youtube_warp_routing(enable: bool, ip_version: str = "auto") -> tuple:
 
 # ── Interactive flow (auto-install / activate WARP) ───────────────────────
 #
-# v5.0.0 FIX: раньше нажатие [W] в меню YouTube при отсутствии WARP просто
+#  FIX: раньше нажатие [W] в меню YouTube при отсутствии WARP просто
 # показывало warn и возвращало пользователя в основное меню. Это плохо для
 # UX — пользователь не понимает что делать дальше. Теперь [W] автоматически
 # предлагает установить/активировать WARP прямо здесь, не выходя из меню
@@ -551,7 +551,7 @@ def _warp_status_check() -> dict:
 def _warp_connectivity_test(timeout: int = 10) -> tuple:
     """Проверяет связность через wg-warp. Возвращает (ok, ip_version, debug).
 
-    v5.0.6: ДВА теста — сначала прямой IP (1.1.1.1, без DNS), потом hostname.
+     ДВА теста — сначала прямой IP (1.1.1.1, без DNS), потом hostname.
     Если DNS сломан (DNSCrypt down) — прямой IP-тест покажет что WARP работает.
     1.1.1.1 имеет валидный TLS-сертификат и обслуживает /cdn-cgi/trace.
     """
@@ -655,7 +655,7 @@ def _warp_ipv6_connectivity(timeout: int = 8) -> tuple:
 def _detect_warp_ip_version() -> tuple:
     """Определяет, какая IP-версия через WARP работает.
 
-    v5.0.5: использует plain curl (без -4/-6) как основной тест.
+     использует plain curl (без -4/-6) как основной тест.
     Curl с Happy Eyeballs сам выбирает работающий IP. Если plain curl
     работает — парсим ip= из ответа для определения версии.
 
@@ -742,7 +742,7 @@ def do_youtube_warp_interactive(core) -> tuple:
 
     # ── Сценарий 1: WARP полностью готов ──────────────────────────────────
     if st["iface_up"]:
-        # v5.0.3: перед применением правила проверяем, КАКАЯ IP-версия
+        #  перед применением правила проверяем, КАКАЯ IP-версия
         # через wg-warp реально работает. ТСПУ может дропать IPv4-пакеты
         # внутри WireGuard туннеля (DPI по заголовку), пропуская IPv6.
         # Handshake проходит (маленькие пакеты), IPv6 работает, IPv4 — нет.
@@ -977,7 +977,7 @@ def restore_if_needed(silent: bool = False) -> bool:
                 core.info("Пере-применяем YouTube->WARP правило после regenerate...")
             except Exception:
                 pass
-        # v5.0.3: используем auto-detection IP-версии — после regenerate
+        #  используем auto-detection IP-версии — после regenerate
         # конфиг мог потерять актуальный sendThrough.
         _xray_apply_warp_outbound(ip_version="auto")
         _singbox_apply_warp_outbound()

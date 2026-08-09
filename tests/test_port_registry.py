@@ -578,11 +578,11 @@ class TestRestApiMenuHasNginxFrontItem(unittest.TestCase):
 
 
 # ============================================================================
-# v5.0.22: Atomic write + file lock tests
+#  Atomic write + file lock tests
 # ============================================================================
 
 class TestAtomicWrite(unittest.TestCase):
-    """v5.0.22: атомарная запись через tempfile + os.replace."""
+    """ атомарная запись через tempfile + os.replace."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -642,7 +642,7 @@ class TestAtomicWrite(unittest.TestCase):
 
 
 class TestFileLock(unittest.TestCase):
-    """v5.0.22: файловая блокировка через fcntl.flock."""
+    """ файловая блокировка через fcntl.flock."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
