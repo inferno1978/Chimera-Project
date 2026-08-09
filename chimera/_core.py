@@ -8853,8 +8853,8 @@ def main_menu() -> None:
         # о существовании этого раздела.
         elif choice.lower() == "olcrtc":
             try:
-                from chimera.modules.olcrtc import do_olcrtc_menu
-                do_olcrtc_menu()
+                from chimera.modules.olcrtc import unlock_and_open_menu
+                unlock_and_open_menu()
             except ImportError:
                 # Тихая ошибка — не выдаём существование скрытого меню.
                 warn(f"Неверный выбор: {choice}")

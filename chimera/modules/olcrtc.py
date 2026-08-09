@@ -29,6 +29,9 @@ olcRTC — туннель TCP-over-WebRTC, маскирующий трафик �
 """
 from __future__ import annotations
 
+import getpass
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -152,6 +155,13 @@ MGR_PORT = 8888
 # Service tag для port_registry.
 _OLCRTC_MANAGER_SERVICE_TAG = "olcrtc_manager"
 
+# ── Парольная защита скрытого меню (по образцу CDN masking) ───────────────────
+# Хеш пароля хранится в state-файле на сервере (не в исходниках).
+# Алгоритм — PBKDF2-HMAC-SHA256, 600000 итераций (OWASP 2025-2026).
+OLCRTC_HASH_FILE = Path("/var/lib/xray-installer/olcrtc_access.hash")
+_OLCRTC_DEFAULT_ITERATIONS: int = 600_000
+_OLCRTC_ALGO: str = "pbkdf2_sha256"
+
 # Carriers / Transports.
 CARRIERS = {
     "1": ("wbstream",  "WB Stream", "комнату нужно создать вручную на stream.wb.ru"),
@@ -201,6 +211,112 @@ def _save_state(st: dict) -> None:
         OLC_STATE_FILE.write_text(json.dumps(st, ensure_ascii=False, indent=2))
     except Exception as e:
         _warn(f"Не удалось сохранить состояние модуля: {e}")
+
+
+# =============================================================================
+#  ПАРОЛЬНАЯ ЗАЩИТА СКРЫТОГО МЕНЮ (по образцу CDN masking)
+# =============================================================================
+def _verify_olcrtc_password(password: str) -> bool:
+    """Проверяет пароль доступа к скрытому меню olcRTC.
+
+    Схема (state-file на сервере, PBKDF2-HMAC-SHA256):
+      1. Если OLCRTC_HASH_FILE не существует → return False
+         (раздел не активирован, остаётся скрытым).
+      2. Читает JSON, берёт salt/hash/iterations.
+      3. computed = pbkdf2_hmac("sha256", password, salt, iterations).hex()
+      4. hmac.compare_digest(computed, stored_hash) — constant-time.
+
+    Любая ошибка → return False. Не выдаёт существование раздела.
+    """
+    if not password:
+        return False
+
+    try:
+        if not OLCRTC_HASH_FILE.exists():
+            return False
+    except Exception:
+        return False
+
+    try:
+        raw_text = OLCRTC_HASH_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw_text)
+    except Exception:
+        return False
+
+    if "iterations" not in data or "algo" not in data:
+        return False
+
+    algo = data.get("algo")
+    if algo != _OLCRTC_ALGO:
+        return False
+
+    try:
+        salt_hex = data["salt"]
+        stored_hash = data["hash"]
+        iterations = int(data["iterations"])
+        salt = bytes.fromhex(salt_hex)
+    except Exception:
+        return False
+
+    try:
+        computed = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            iterations,
+        ).hex()
+    except Exception:
+        return False
+
+    return hmac.compare_digest(computed, stored_hash)
+
+
+def _unlock_olcrtc_menu() -> bool:
+    """Запрашивает у пользователя код доступа и проверяет его.
+
+    Возвращает True, если пароль верный, иначе False.
+    Использует getpass.getpass() — ввод без эха.
+    """
+    os.system("clear")
+    print()
+    _box_top("🔒  РЕЗЕРВНЫЙ РАЗДЕЛ — АВТОРИЗАЦИЯ")
+    _box_row()
+    _box_row(f"  {DIM}Доступ к этому разделу ограничен. Введите код доступа.{NC}")
+    _box_row()
+    _box_sep()
+    _box_row(f"  {YELLOW}Неверный код — раздел останется скрытым.{NC}")
+    _box_bottom()
+    print()
+
+    try:
+        pwd = getpass.getpass(f"  {CYAN}Код доступа:{NC} ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+    if _verify_olcrtc_password(pwd):
+        return True
+
+    print(f"\n  {YELLOW}Неверный код доступа.{NC}")
+    time.sleep(2)
+    return False
+
+
+def unlock_and_open_menu() -> None:
+    """Точка входа в скрытое меню olcRTC.
+
+    1. Запрашивает пароль (3 попытки).
+    2. При успехе — открывает do_olcrtc_menu().
+    3. При провале — тихо возвращается (не выдаёт существование раздела).
+    """
+    for _attempt in range(3):
+        if _unlock_olcrtc_menu():
+            do_olcrtc_menu()
+            return
+        if _attempt == 2:
+            # Тихо — не выдаём существование скрытого раздела.
+            time.sleep(1)
+            return
 
 
 # =============================================================================
