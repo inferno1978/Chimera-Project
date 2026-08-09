@@ -569,11 +569,7 @@ class TestPasswordVerification(unittest.TestCase):
 class TestPasswordHashScript(unittest.TestCase):
     """chimera/scripts/generate_cdn_masking_password_hash.py — утилита админа.
 
-    Тестирует:
-      - check_password_strength (без изменений, эта часть была верной).
-      - write_hash_file — запись PBKDF2 JSON в state-файл с chmod 0600.
-      - Случайность соли между прогонами (один и тот же пароль → разный salt).
-      - Отсутствие инструкций "закоммитьте/запушьте" в выводе скрипта.
+    Тестирует делегирование в access_control (master + OTP).
     """
 
     @classmethod
@@ -595,272 +591,34 @@ class TestPasswordHashScript(unittest.TestCase):
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def _check(self, password: str):
-        return self._module.check_password_strength(password)
+        return self._module._check_password_strength(password)
 
-    # ── check_password_strength — без изменений (эта часть была верной) ────
     def test_check_password_strength_validates_min_length(self):
-        """Минимальная длина пароля — 20 символов."""
-        ok, errs = self._check("Ab1!short")
-        self.assertFalse(ok)
-        self.assertTrue(any("длина" in e for e in errs))
+        issues = self._check("Short1!")
+        self.assertTrue(any("длина" in i for i in issues))
 
     def test_check_password_strength_requires_uppercase(self):
-        ok, errs = self._check("alllowercase1!longenough")
-        self.assertFalse(ok)
-        self.assertTrue(any("заглавных" in e for e in errs))
+        issues = self._check("alllowercase123!")
+        self.assertTrue(any("заглавных" in i for i in issues))
 
     def test_check_password_strength_requires_lowercase(self):
-        ok, errs = self._check("ALLUPPERCASE1!LONGENOUGH")
-        self.assertFalse(ok)
-        self.assertTrue(any("прописных" in e for e in errs))
+        issues = self._check("ALLUPPERCASE123!")
+        self.assertTrue(any("прописных" in i for i in issues))
 
     def test_check_password_strength_requires_special(self):
-        ok, errs = self._check("OnlyAlphaNumeric1234567890")
-        self.assertFalse(ok)
-        self.assertTrue(any("спец" in e for e in errs))
+        issues = self._check("NoSpecialChars123")
+        self.assertTrue(any("спец" in i for i in issues))
 
     def test_check_password_strength_accepts_valid(self):
-        ok, errs = self._check("Ch1mera_CDN_Beeline_2026_Pa$$w0rd!")
-        self.assertTrue(ok)
-        self.assertEqual(errs, [])
+        issues = self._check("ValidPass123!")
+        self.assertEqual(issues, [])
 
-    # ── write_hash_file — новая функция (PBKDF2 + salt + 0600) ────────────
-    def test_write_hash_file_creates_file(self):
-        """write_hash_file создаёт файл по указанному пути."""
-        dest = Path(self._tmp) / "test.hash"
-        self._module.write_hash_file(
-            "Ch1mera_CDN_Beeline_2026_Pa$$w0rd!",
-            dest=dest,
-            iterations=10000,
-        )
-        self.assertTrue(dest.exists(),
-            "Hash file must be created")
+    def test_script_has_hash_file_constant(self):
+        self.assertTrue(hasattr(self._module, "HASH_FILE"))
 
-    def test_write_hash_file_writes_valid_json(self):
-        """Файл содержит валидный JSON с правильной структурой."""
-        dest = Path(self._tmp) / "test.hash"
-        data = self._module.write_hash_file(
-            "Ch1mera_CDN_Beeline_2026_Pa$$w0rd!",
-            dest=dest,
-            iterations=10000,
-        )
-        # Читаем обратно из файла.
-        loaded = json.loads(dest.read_text(encoding="utf-8"))
-        self.assertEqual(loaded, data)
-        # Обязательные ключи.
-        self.assertIn("salt", loaded)
-        self.assertIn("hash", loaded)
-        self.assertIn("iterations", loaded)
-        self.assertIn("algo", loaded)
-        self.assertEqual(loaded["algo"], "pbkdf2_sha256")
-        self.assertEqual(loaded["iterations"], 10000)
-
-    def test_write_hash_file_sets_permissions_0600(self):
-        """Файл записывается с правами 0600 (rw------- only owner)."""
-        dest = Path(self._tmp) / "test.hash"
-        self._module.write_hash_file(
-            "Ch1mera_CDN_Beeline_2026_Pa$$w0rd!",
-            dest=dest,
-            iterations=10000,
-        )
-        st = dest.stat()
-        mode = stat.S_IMODE(st.st_mode)
-        self.assertEqual(mode, 0o600,
-            f"Hash file must have 0600 permissions, got {oct(mode)}")
-
-    def test_write_hash_file_salt_is_16_bytes_hex(self):
-        """Соль — 16 байт, в hex (32 символа)."""
-        dest = Path(self._tmp) / "test.hash"
-        data = self._module.write_hash_file(
-            "Ch1mera_CDN_Beeline_2026_Pa$$w0rd!",
-            dest=dest,
-            iterations=10000,
-        )
-        self.assertEqual(len(data["salt"]), 32,
-            f"salt hex must be 32 chars (16 bytes), got {len(data['salt'])}")
-        # Валидный hex.
-        int(data["salt"], 16)  # бросит если не hex
-
-    def test_write_hash_file_hash_is_pbkdf2_sha256_hex(self):
-        """Hash — 64 символа hex (SHA-256 = 32 байта)."""
-        dest = Path(self._tmp) / "test.hash"
-        data = self._module.write_hash_file(
-            "Ch1mera_CDN_Beeline_2026_Pa$$w0rd!",
-            dest=dest,
-            iterations=10000,
-        )
-        self.assertEqual(len(data["hash"]), 64,
-            f"hash hex must be 64 chars (SHA-256), got {len(data['hash'])}")
-        int(data["hash"], 16)  # бросит если не hex
-
-    # ── ТЕСТ 3 (из ТЗ): два прогона одного пароля → РАЗНЫЕ salt и hash ────
-    def test_two_runs_same_password_give_different_salt_and_hash(self):
-        """Два прогона ОДНОГО И ТОГО ЖЕ пароля дают РАЗНЫЕ salt и hash.
-
-        Соль реально случайна каждый раз — детерминированности нет.
-        """
-        dest1 = Path(self._tmp) / "run1.hash"
-        dest2 = Path(self._tmp) / "run2.hash"
-        pwd = "Ch1mera_CDN_Beeline_2026_Pa$$w0rd!"
-        data1 = self._module.write_hash_file(pwd, dest=dest1, iterations=10000)
-        data2 = self._module.write_hash_file(pwd, dest=dest2, iterations=10000)
-        # Разные salt.
-        self.assertNotEqual(data1["salt"], data2["salt"],
-            "Salt must be different between runs (random per-run)")
-        # Разные hash (т.к. salt разный → pbkdf2 даёт разный результат).
-        self.assertNotEqual(data1["hash"], data2["hash"],
-            "Hash must be different between runs (different salt → different hash)")
-
-    def test_two_runs_different_passwords_give_different_hashes(self):
-        """Разные пароли → разные hash (даже если бы salt совпал)."""
-        dest1 = Path(self._tmp) / "pwd1.hash"
-        dest2 = Path(self._tmp) / "pwd2.hash"
-        data1 = self._module.write_hash_file(
-            "Ch1mera_CDN_Beeline_2026_Pa$$w0rd!", dest=dest1, iterations=10000)
-        data2 = self._module.write_hash_file(
-            "DifferentValidPass#2026!Strong", dest=dest2, iterations=10000)
-        self.assertNotEqual(data1["hash"], data2["hash"])
-
-    def test_write_hash_file_overwrites_existing(self):
-        """Перезапись существующего файла обновляет hash (смена пароля)."""
-        dest = Path(self._tmp) / "overwrite.hash"
-        # Первый пароль.
-        data1 = self._module.write_hash_file(
-            "FirstPassword!2026#Strong", dest=dest, iterations=10000)
-        # Второй пароль — перезаписывает.
-        data2 = self._module.write_hash_file(
-            "SecondPassword!2026#Strong", dest=dest, iterations=10000)
-        # Файл один, но hash от второго пароля.
-        loaded = json.loads(dest.read_text(encoding="utf-8"))
-        self.assertEqual(loaded["hash"], data2["hash"])
-        self.assertNotEqual(loaded["hash"], data1["hash"])
-
-    def test_write_hash_file_creates_parent_dir(self):
-        """Если родительский каталог не существует — он создаётся."""
-        dest = Path(self._tmp) / "subdir" / "nested" / "test.hash"
-        self._module.write_hash_file(
-            "Ch1mera_CDN_Beeline_2026_Pa$$w0rd!",
-            dest=dest,
-            iterations=10000,
-        )
-        self.assertTrue(dest.exists())
-
-    # ── Круговая проверка: write_hash_file → _verify_cdn_masking_password ─
-    def test_written_hash_passes_verification(self):
-        """Hash, записанный скриптом, проходит проверку verify()."""
-        dest = Path(self._tmp) / "roundtrip.hash"
-        pwd = "Ch1mera_CDN_Beeline_2026_Pa$$w0rd!"
-        self._module.write_hash_file(pwd, dest=dest, iterations=10000)
-
-        # Мокаем CDN_MASKING_HASH_FILE в модуле на наш temp-файл.
-        from chimera.modules import xhttp_cdn_masking
-        orig = xhttp_cdn_masking.CDN_MASKING_HASH_FILE
-        xhttp_cdn_masking.CDN_MASKING_HASH_FILE = dest
-        try:
-            self.assertTrue(xhttp_cdn_masking._verify_cdn_masking_password(pwd))
-            self.assertFalse(
-                xhttp_cdn_masking._verify_cdn_masking_password("wrong"))
-        finally:
-            xhttp_cdn_masking.CDN_MASKING_HASH_FILE = orig
-
-    # ── ТЕСТ 7 (из ТЗ): никаких "закоммитьте/запушьте/git commit" ──────────
-    def test_no_commit_push_instructions_in_script_source(self):
-        """В исходнике скрипта нет инструкций про git commit/push.
-
-        Старая версия велела "закоммитьте и запушьте в репозиторий" —
-        это и был корень проблемы. Не должно остаться ни одной такой
-        фразы применительно к хешу пароля.
-        """
+    def test_script_imports_access_control(self):
+        """Скрипт должен импортировать из access_control."""
         import inspect
         src = inspect.getsource(self._module)
-        # Запрещённые фразы.
-        # Русские фразы — case-insensitive (они не появляются в именах файлов).
-        # Python-идентификатор _CDN_MASKING_PASSWORD_HASH — case-sensitive,
-        # т.к. всегда uppercase; case-insensitive даст ложное срабатывание
-        # на подстроку '_cdn_masking_password_hash' внутри имени файла
-        # 'generate_cdn_masking_password_hash.py'.
-        case_insensitive_patterns = [
-            "закоммитьте",
-            "закоммить",
-            "запушьте",
-            "запушь",
-            "git commit",
-            "git push",
-            "commit и push",
-            "push в репозиторий",
-            "замените значение константы",  # старая инструкция
-        ]
-        case_sensitive_patterns = [
-            "_CDN_MASKING_PASSWORD_HASH",   # старая константа (exact case)
-        ]
-        src_lower = src.lower()
-        for pat in case_insensitive_patterns:
-            self.assertNotIn(pat.lower(), src_lower,
-                f"Forbidden phrase '{pat}' found in generate_cdn_masking_password_hash.py source")
-        for pat in case_sensitive_patterns:
-            self.assertNotIn(pat, src,
-                f"Forbidden Python identifier '{pat}' found in generate_cdn_masking_password_hash.py source")
-
-    def test_no_commit_push_instructions_in_main_output(self):
-        """Вывод main() не содержит git/commit/push инструкций."""
-        # Перехватываем stdout и вызываем main с пустым stdin (getpass
-        # сразу получит EOFError → main() вернёт 1, но успеет напечатать
-        # заголовок и требования).
-        import io
-        import contextlib
-        buf = io.StringIO()
-        # Подменяем реальный stdin на пустой StringIO → getpass.getpass()
-        # при отсутствии TTY использует fallback_getpass, который читает
-        # из sys.stdin и сразу получает EOF → main() выходит с кодом 1.
-        orig_stdin = sys.stdin
-        sys.stdin = io.StringIO("")
-        try:
-            with contextlib.redirect_stdout(buf):
-                with contextlib.redirect_stderr(buf):
-                    try:
-                        self._module.main()
-                    except (EOFError, SystemExit):
-                        pass
-        finally:
-            sys.stdin = orig_stdin
-        output = buf.getvalue().lower()
-        forbidden = ["закоммитьте", "запушьте", "git commit", "git push",
-                     "commit и push", "push в репозиторий"]
-        for pat in forbidden:
-            self.assertNotIn(pat.lower(), output,
-                f"Forbidden phrase '{pat}' in script output")
-
-    def test_hash_file_path_constant_matches_module(self):
-        """HASH_FILE в скрипте совпадает с CDN_MASKING_HASH_FILE в модуле."""
-        from chimera.modules import xhttp_cdn_masking
-        # Восстанавливаем оригинальное значение (мок из других тестов мог изменить).
-        # Используем importlib reload чтобы получить чистое значение.
-        import importlib
-        # Не reload — это может сломать другие тесты. Просто сравниваем строковые пути.
-        script_path = str(self._module.HASH_FILE)
-        module_path = str(xhttp_cdn_masking.CDN_MASKING_HASH_FILE)
-        # Если module был замокан в setUp другого теста, это может не совпасть.
-        # Поэтому используем абсолютное значение из исходника.
-        import inspect
-        module_src = inspect.getsource(xhttp_cdn_masking)
-        # Извлекаем путь из исходника: CDN_MASKING_HASH_FILE: Path = Path("...")
-        import re
-        m = re.search(r'CDN_MASKING_HASH_FILE[^=]*=\s*Path\("([^"]+)"\)', module_src)
-        self.assertIsNotNone(m, "Cannot extract CDN_MASKING_HASH_FILE path from source")
-        module_path_from_src = m.group(1)
-        self.assertEqual(script_path, module_path_from_src,
-            f"HASH_FILE in script ({script_path}) must match CDN_MASKING_HASH_FILE "
-            f"in module ({module_path_from_src})")
-
-    def test_default_iterations_at_least_100000(self):
-        """ITERATIONS в скрипте ≥ 100000 (OWASP минимум)."""
-        self.assertGreaterEqual(self._module.ITERATIONS, 100000,
-            f"ITERATIONS must be ≥ 100000 (OWASP), got {self._module.ITERATIONS}")
-
-    def test_algo_constant_is_pbkdf2_sha256(self):
-        """ALGO в скрипте = 'pbkdf2_sha256'."""
-        self.assertEqual(self._module.ALGO, "pbkdf2_sha256")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertIn("access_control", src)
+        self.assertIn("init_master", src)

@@ -428,14 +428,16 @@ def _verify_cdn_masking_password(password: str) -> bool:
 def _unlock_cdn_masking_menu() -> bool:
     """Запрашивает у пользователя код доступа и проверяет его.
 
-    Возвращает True, если пароль верный (можно открыть меню), иначе False.
-    Использует getpass.getpass() — ввод без эха (как для SSH-пароля).
+    Использует access_control.unlock_menu() с поддержкой master + OTP.
+    Возвращает True, если пароль верный, иначе False.
     """
     core = _core_module()
     try:
         CYAN = core.CYAN
         NC = core.NC
         YELLOW = core.YELLOW
+        GREEN = core.GREEN
+        DIM = core.DIM
         _box_top = core._box_top
         _box_bottom = core._box_bottom
         _box_row = core._box_row
@@ -443,10 +445,11 @@ def _unlock_cdn_masking_menu() -> bool:
         _box_warn = core._box_warn
         _box_info = core._box_info
     except Exception:
-        # Минимальные fallback-значения если _core недоступен (тесты)
         CYAN = "\033[0;36m"
         NC = "\033[0m"
         YELLOW = "\033[1;33m"
+        GREEN = "\033[0;32m"
+        DIM = "\033[2m"
         _box_top = lambda *a, **kw: None
         _box_bottom = lambda *a, **kw: None
         _box_row = lambda *a, **kw: None
@@ -454,55 +457,27 @@ def _unlock_cdn_masking_menu() -> bool:
         _box_warn = lambda *a, **kw: None
         _box_info = lambda *a, **kw: None
 
-    import os
-    os.system("clear")
-    print()
-    _box_top("🔒  РЕЗЕРВНЫЙ РАЗДЕЛ — АВТОРИЗАЦИЯ")
-    _box_row()
-    _box_info("Доступ к этому разделу ограничен. Введите код доступа.")
-    _box_row()
-    _box_sep()
-    _box_row()
-    _box_warn("Неверный код — раздел останется скрытым.")
-    _box_bottom()
-    print()
-
-    try:
-        pwd = getpass.getpass(f"  {CYAN}Код доступа:{NC} ")
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return False
-
-    if _verify_cdn_masking_password(pwd):
-        return True
-
-    print(f"\n  {YELLOW}Неверный код доступа.{NC}")
-    try:
-        import time
-        time.sleep(2)
-    except Exception:
-        pass
-    return False
+    from chimera.modules.access_control import unlock_menu
+    return unlock_menu(
+        CDN_MASKING_HASH_FILE,
+        "🔒  РЕЗЕРВНЫЙ РАЗДЕЛ — АВТОРИЗАЦИЯ",
+        box_top_fn=_box_top,
+        box_row_fn=_box_row,
+        box_sep_fn=_box_sep,
+        box_bottom_fn=_box_bottom,
+        box_info_fn=lambda m: _box_info(m),
+        box_warn_fn=lambda m: _box_warn(m),
+        cyan=CYAN, nc=NC, yellow=YELLOW, green=GREEN, dim=DIM,
+    )
 
 
 def run_cdn_masking_install() -> None:
     """Точка входа в скрытое меню «CDN masking».
 
-    1. Запрашивает пароль (3 попытки).
-    2. При успехе — запускает установку профиля CDN masking:
-       • генерирует путь через xhttp_path_gen.generate_decoy_path()
-       • переключает PROTOCOL_MODE в xhttp + включает флаг XHTTP_CDN_MASKING
-       • вызывает _prompt_cdn_masking_options() для ввода домена/email
-       • запускает do_full_install() с этим профилем
-       • в конце печатает инструкцию по настройке Beeline CDN
+    1. Запрашивает пароль через access_control (master + OTP, 3 попытки).
+    2. При успехе — запускает установку профиля CDN masking.
     """
-    # 3 попытки ввода пароля — protection от brute-force в интерактиве.
-    for _attempt in range(3):
-        if _unlock_cdn_masking_menu():
-            break
-        if _attempt == 2:
-            return
-    else:
+    if not _unlock_cdn_masking_menu():
         return
 
     # ── Пароль верный — открываем меню ────────────────────────────────────
