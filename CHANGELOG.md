@@ -2,6 +2,88 @@
 
 ---
 
+## FIX(rest_api): v5.0.21 — определение реального IP клиента через X-Forwarded-For — 8 августа 2026
+
+**Исправление: после v5.0.17 (nginx_front_portal.py) _client_ip() видел
+только 127.0.0.1 (loopback от nginx), а не реальный IP клиента.**
+
+### Проблема
+
+v5.0.16: `_client_ip()` возвращал `self.client_address[0]` напрямую —
+обоснование: «rest_api слушает напрямую (без nginx)».
+
+v5.0.17: `nginx_front_portal.py` поставил nginx перед User Portal с
+`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`. Теперь
+`client_address[0]` — это `127.0.0.1` (loopback от nginx), а реальный IP
+клиента — в `X-Forwarded-For`. Но `_client_ip()` не обновлялся.
+
+Три места с проверкой `if IP in ("127.0.0.1", ...)` срабатывали постоянно
+для любого клиента через рекомендованный nginx+TLS путь.
+
+### Фикс
+
+`_client_ip()` доверяет `X-Forwarded-For`, ТОЛЬКО если TCP-соединение
+пришло с loopback (значит — от локального nginx-фронта). Если `direct_ip`
+НЕ loopback (запрос пришёл напрямую, rest_api на `0.0.0.0`) — XFF
+игнорируется полностью (защита от подделки).
+
+```python
+def _client_ip(self) -> str:
+    direct_ip = self.client_address[0] if self.client_address else "?"
+    if direct_ip in ("127.0.0.1", "::1", "localhost"):
+        xff = self.headers.get("X-Forwarded-For", "")
+        if xff:
+            candidate = xff.split(",")[0].strip()
+            if candidate:
+                return candidate
+    return direct_ip
+```
+
+### Оба сценария проверены
+
+1. **nginx-фронт** (host=127.0.0.1) → `client_address[0]` = 127.0.0.1 →
+   XFF доверяется → реальный IP клиента из первого элемента цепочки.
+2. **Прямой доступ** (host=0.0.0.0) → `client_address[0]` = внешний IP →
+   XFF **игнорируется** → `client_address[0]` возвращается напрямую
+   (защита от подделки заголовка).
+
+### Обновлены комментарии
+
+Во всех 3 местах проверки loopback (GET /api/portal/ips, POST /api/portal/ips
+с ip=auto, POST /api/portal/ips/replace-all с ip=auto) — теперь поясняют
+что loopback после XFF означает «nginx не проставил заголовок или клиент
+правда localhost», а не «работаем без nginx».
+
+### Не тронуто
+
+- `nginx_front_portal.py` (proxy_set_header уже корректны)
+- Логика rate-limit/timeout в `_VLESSHandler`
+
+### Тесты (10 в `TestQ2XForwardedForConditionalTrust`)
+
+| # | Тест | Сценарий | Результат |
+|---|---|---|---|
+| 1 | `test_xff_trusted_from_loopback` | loopback + валидный XFF | → IP из XFF |
+| 2 | `test_xff_absent_loopback_fallback` | loopback + нет XFF | → 127.0.0.1 (fallback) |
+| 3 | `test_xff_ignored_when_direct_non_loopback` | внешний IP + поддельный XFF | → client_address (XFF игнорируется) |
+| 4 | `test_xff_multiple_ips_takes_first` | XFF с несколькими IP | → первый (реальный клиент) |
+| 5 | `test_xff_empty_string_loopback_fallback` | пустой XFF при loopback | → fallback |
+| 6 | `test_xff_whitespace_only_loopback_fallback` | пробелы в XFF | → fallback |
+| 7 | `test_ipv6_loopback_xff_trusted` | IPv6 ::1 + XFF | → доверяем XFF |
+| 8 | `test_client_ip_uses_client_address` | проверка исходника | → client_address в основе |
+| 9 | `test_get_portal_ips_uses_client_ip_not_xff_directly` | обработчик не читает XFF напрямую | → _client_ip() |
+| 10 | `test_post_portal_ips_auto_uses_client_ip` | то же для POST | → _client_ip() |
+
+Точные количества тестов по файлам:
+- `test_user_ip_whitelist.py` — 62 passed
+- `test_rest_api.py` — 55 passed
+- `test_rest_api_auth.py` — 40 passed
+- `test_user_portal.py` — 8 passed
+- `test_rest_api_web_panel_firewall.py` — 11 passed
+- **Итого: 176 passed, 0 регрессий**
+
+---
+
 ## FEAT(security): v5.0.20 — IP lifecycle: pin/unpin, FIFO, age-based cleanup, replace-all — 8 августа 2026
 
 **Расширенное управление IP whitelist: предотвращение накопления старых IP
