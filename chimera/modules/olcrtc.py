@@ -179,7 +179,17 @@ ROOM_CREATE_URL = {
     "wbstream": "https://stream.wb.ru/",
 }
 
-# Transport payload defaults (из гайда — vp8channel с fps=30, batch=64).
+# Transport payload defaults — пресеты по умолчанию.
+# Пользователь может выбрать пресет в TUI — они отличаются fps/batch.
+TRANSPORT_PAYLOAD_PRESETS = {
+    "vp8channel": {
+        "1": ("Стандарт",     {"vp8-fps": "30", "vp8-batch": "64"},   "30 fps, batch 64 - баланс"),
+        "2": ("Быстрый",      {"vp8-fps": "60", "vp8-batch": "128"},  "60 fps, batch 128 - выше скорость, больше CPU"),
+        "3": ("Максимум",     {"vp8-fps": "60", "vp8-batch": "256"},  "60 fps, batch 256 - макс. скорость, высокий CPU"),
+        "4": ("Лёгкий",       {"vp8-fps": "15", "vp8-batch": "32"},   "15 fps, batch 32 - ниже скорость, меньше CPU"),
+    },
+}
+# Дефолтный пресет (используется если пользователь не выбирал).
 TRANSPORT_PAYLOADS = {
     "vp8channel": {"vp8-fps": "30", "vp8-batch": "64"},
 }
@@ -1276,14 +1286,19 @@ def do_olcrtc_menu() -> None:
         else:
             _box_item("1", "🔄 Обновить (пересборка)")
         _box_item("2", "📖 Гайд — как это работает")
-        if installed and not configured:
+        if installed:
             _box_item("3", "⚙️  Настроить Manager Panel (провайдер, комната)")
         if configured:
             _box_item("4", "📊 Статус (через API)")
             _box_item("5", "📋 Логи (через API)")
             _box_item("6", "📄 Показать OlcBox URI и креды")
+        if installed and configured:
+            if active:
+                _box_item("7", f"{YELLOW}⏸️  Остановить сервис{NC}")
+            else:
+                _box_item("7", f"{GREEN}▶️  Запустить сервис{NC}")
         if installed:
-            _box_item("7", f"{RED}🗑️  Удалить полностью{NC}")
+            _box_item("8", f"{RED}🗑️  Удалить полностью{NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -1334,7 +1349,49 @@ def do_olcrtc_menu() -> None:
             _box_bottom()
             input(f"{BLUE}  Нажмите Enter...{NC}")
 
-        elif ch == "7" and installed:
+        elif ch == "7" and installed and configured:
+            print()
+            if active:
+                # Остановить сервис + закрыть порт в UFW.
+                _info("Останавливаю olcrtc-manager...")
+                _run(["systemctl", "stop", "olcrtc-manager"],
+                     check=False, quiet=True, timeout=20)
+                time.sleep(1)
+                # Закрыть порт 8888 через port_registry.
+                try:
+                    from chimera.modules.port_registry import (
+                        ufw_close_port, port_unregister,
+                    )
+                    ufw_close_port(MGR_PORT, "tcp", _OLCRTC_MANAGER_SERVICE_TAG,
+                                   legacy_comments=["olcrtc-manager panel (TLS)"])
+                    port_unregister(_OLCRTC_MANAGER_SERVICE_TAG, MGR_PORT, "tcp")
+                except Exception as e:
+                    _warn(f"UFW: не удалось закрыть порт {MGR_PORT}: {e}")
+                _success("Сервис остановлен, порт 8888 закрыт в UFW")
+            else:
+                # Запустить сервис + открыть порт в UFW.
+                _info("Запускаю olcrtc-manager...")
+                _run(["systemctl", "start", "olcrtc-manager"],
+                     check=False, quiet=True, timeout=20)
+                time.sleep(3)
+                # Открыть порт 8888 через port_registry.
+                try:
+                    from chimera.modules.port_registry import (
+                        ufw_open_port, port_register,
+                    )
+                    port_register(_OLCRTC_MANAGER_SERVICE_TAG, MGR_PORT, "tcp",
+                                  comment="olcrtc-manager panel (TLS)", force=True)
+                    ufw_open_port(MGR_PORT, "tcp", _OLCRTC_MANAGER_SERVICE_TAG,
+                                  comment="olcrtc-manager panel (TLS)")
+                except Exception as e:
+                    _warn(f"UFW: не удалось открыть порт {MGR_PORT}: {e}")
+                if _manager_service_active():
+                    _success("Сервис запущен, порт 8888 открыт в UFW")
+                else:
+                    _warn("Сервис не поднялся — проверьте: journalctl -u olcrtc-manager -n 30")
+            input(f"{BLUE}  Нажмите Enter...{NC}")
+
+        elif ch == "8" and installed:
             print()
             confirm = input(f"  {RED}Полностью удалить olcRTC (бинарники, конфиги, сервис)? [y/N]:{NC} ").strip().lower()
             if confirm in ("y", "yes", "д", "да"):
