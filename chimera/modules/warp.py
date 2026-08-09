@@ -735,7 +735,37 @@ def install_warp() -> bool:
         info("Регистрация аккаунта Cloudflare WARP...")
         r2 = _run([str(tmp_bin), "register", "--accept-tos"], capture=True, check=False, cwd="/tmp")
         if r2.returncode != 0:
-            warn(f"Ошибка регистрации wgcf: {(r2.stderr or r2.stdout or '').strip()}")
+            err_text = (r2.stderr or r2.stdout or "").strip()
+            warn(f"Ошибка регистрации wgcf: {err_text}")
+            # v5.0.23: детализированное сообщение для пользователя.
+            _err_lower = err_text.lower()
+            if "tls handshake timeout" in _err_lower or "timeout" in _err_lower:
+                print()
+                _box_top("⚠️  Не удалось зарегистрировать WARP")
+                _box_row()
+                _box_row(f"  {RED}Причина: TLS handshake timeout к api.cloudflareclient.com{NC}")
+                _box_row()
+                _box_row(f"  {DIM}Возможные причины:{NC}")
+                _box_row(f"  {DIM}• IP сервера заблокирован Cloudflare (datacenter IP){NC}")
+                _box_row(f"  {DIM}• ТСПУ режет TLS к api.cloudflareclient.com{NC}")
+                _box_row(f"  {DIM}• Временный сетевой сбой{NC}")
+                _box_row()
+                _box_row(f"  {DIM}Что можно сделать:{NC}")
+                _box_row(f"  {DIM}1. Проверить: curl -v https://api.cloudflareclient.com{NC}")
+                _box_row(f"  {DIM}2. Попробовать позже (если временный сбой){NC}")
+                _box_row(f"  {DIM}3. Зарегистрировать WARP на другой машине и{NC}")
+                _box_row(f"  {DIM}   скопировать wgcf-profile.conf на этот сервер{NC}")
+                _box_bottom()
+            elif "connection refused" in _err_lower or "no such host" in _err_lower:
+                print()
+                _box_top("⚠️  Не удалось зарегистрировать WARP")
+                _box_row()
+                _box_row(f"  {RED}Причина: нет соединения с api.cloudflareclient.com{NC}")
+                _box_row()
+                _box_row(f"  {DIM}Проверьте DNS и интернет-соединение:{NC}")
+                _box_row(f"  {DIM}• dig api.cloudflareclient.com{NC}")
+                _box_row(f"  {DIM}• curl -v https://api.cloudflareclient.com{NC}")
+                _box_bottom()
             return False
 
         info("Генерация профиля WireGuard...")
@@ -1780,7 +1810,7 @@ def _menu_install_wizard() -> None:
     if ok:
         success("✓ WARP настроен успешно!")
     else:
-        warn("WARP настроен с ошибками — проверьте логи.")
+        warn("WARP настроен с ошибками — см. подробное сообщение выше.")
     input(f"{BLUE}Нажмите Enter...{NC}")
 
 
