@@ -2,6 +2,111 @@
 
 ---
 
+## FEAT(olcrtc): полная переработка на manager panel + парольная защита — 8 августа 2026
+
+**olcRTC переписан с нуля: bare-olcrtc (YAML, systemd template) →
+olcrtc-manager panel (JSON, веб-панель, API, supervisor). Скрыт из
+главного меню, доступ по паролю.**
+
+### Что было (не работало)
+
+Bare olcrtc подход: YAML конфиги, `olcrtc@.service` template per-link,
+клиентский YAML. Формат YAML не совпадал с тем, что реально ожидает olcrtc
+— ни Jitsi, ни WB Stream не заводились.
+
+### Что стало (по гайду)
+
+**Два бинарника:**
+- `olcrtc` — туннель (github.com/openlibrecommunity/olcrtc, master)
+- `olcrtc-manager` — веб-панель + API + supervisor
+  (github.com/BigDaddy3334/olcrtc-manager-panel, main)
+
+**Manager panel:**
+- Веб-панель на `https://SERVER_IP:8888/admin` (self-signed TLS, basic auth)
+- API: `/api/state`, `/api/logs` — проверка состояния без SSH
+- Supervisor: сам запускает/управляет olcrtc процессами
+- config.json — JSON формат (не YAML): `{version, clients[], locations[],
+  endpoint, carrier, transport{type, payload}, link, data, dns}`
+
+**OlcBox URI** для клиента:
+```
+olcrtc://wbstream?vp8channel<vp8-batch=64&vp8-fps=30>@ROOM_ID#KEY$wb-vps
+```
+
+**Сборка:** Go 1.26+ → git clone обоих репозиториев → go build →
+`/usr/local/bin/olcrtc` + `/usr/local/bin/olcrtc-manager`
+
+**TLS:** self-signed через `openssl req -x509` (subjectAltName=IP:public_ip)
+
+**systemd:** `olcrtc-manager.service`
+(Environment=OLCRTC_PATH=/usr/local/bin/olcrtc,
+EnvironmentFile=panel.env, ExecStart=olcrtc-manager -addr 0.0.0.0 -config config.json)
+
+**UFW:** порт 8888 через `port_registry` (SERVICE_OLCRTC_MANAGER).
+Открытие при установке, закрытие при удалении.
+
+### TUI меню
+
+```
+[1] Установить/обновить (сборка olcrtc + olcrtc-manager)
+[2] Гайд
+[3] Настроить Manager Panel (carrier, transport, room_id)
+[4] Статус (через API)
+[5] Логи (через API)
+[6] Показать OlcBox URI и креды
+[7] Удалить полностью
+```
+
+### Скрытое меню + парольная защита
+
+olcRTC **скрыт из главного меню**. Доступ — ввод строки `olcrtc` (без
+кавычек), по аналогии со скрытым меню CDN masking (`cdn`).
+
+**Парольная защита** (по образцу CDN masking):
+- `_verify_olcrtc_password()` — PBKDF2-HMAC-SHA256, 600000 итераций
+  (OWASP 2025-2026), salt 16 байт, constant-time сравнение
+- Хеш в `/var/lib/xray-installer/olcrtc_access.hash` (JSON, chmod 0600)
+- `unlock_and_open_menu()` — 3 попытки ввода через getpass (без эха)
+- Утилита: `sudo python3 chimera/scripts/generate_olcrtc_password_hash.py`
+
+Пункты 14-18 перенумерованы в 13-17 (WebDAV, FPTN, AWG, Sing-box, TrustTunnel).
+
+### Что удалено (не работало)
+
+- `_server_yaml()` / `_client_yaml()` — YAML формат неправильный
+- `_UNIT_CONTENT` / `_ensure_unit_file()` — manager сам управляет olcrtc
+- `_create_link()` / `_delete_link()` — manager делает это
+- `olcrtc@.service` template
+- `_flow_add_link()` / `_flow_list_links()` / `_flow_link_detail()` — заменены
+
+### Что сохранено (работает)
+
+- Go toolchain (`_go_ok`, `_install_go`, `_go_arch`, `_ver_tuple`)
+- `_run` / `_info` / `_warn` / `_success` / `_box_*` хелперы
+- `_load_state` / `_save_state` (расширена)
+- `CARRIERS` / `TRANSPORTS` словари
+
+### Интеграция
+
+- `port_registry`: `SERVICE_OLCRTC_MANAGER`, порт 8888
+- UFW open/close через port_registry (с legacy_comments)
+- `olcrtc_packages.py` — сохранён (сборка olcrtc из исходников)
+
+### Тесты (14 в test_olcrtc.py)
+
+- TestGenerateConfigJson (2) — JSON формат, все поля из гайда
+- TestGeneratePanelEnv (1) — basic auth env
+- TestGenerateSystemdUnit (1) — systemd unit directives
+- TestGenerateOlcBoxUri (2) — URI формат для vp8channel и datachannel
+- TestStateIO (2) — JSON I/O
+- TestGoToolchain (3) — version parsing, required version, arch
+- TestPortRegistryIntegration (2) — SERVICE_OLCRTC_MANAGER exists, port 8888
+- TestManagerInstalledCheck (1) — binary detection
+
+58 тестов (14 olcrtc + 44 port_registry), 0 регрессий.
+
+---
+
 ## FIX(rest_api):  — определение реального IP клиента через X-Forwarded-For — 8 августа 2026
 
 **Исправление: после  (nginx_front_portal.py) _client_ip() видел
