@@ -8708,29 +8708,26 @@ def main_menu() -> None:
             _box_row(f"     {DIM}mTLS + random padding — маскировка без домена{NC}")
             _box_row()
             _box_sep()
-            _box_row(f"  {CYAN}13{NC} 📹 {TITLE}olcRTC{NC}  {DIM}(Beta){NC}")
-            _box_row(f"     {DIM}TCP-over-WebRTC — туннель под видеозвонок (Jitsi/Телемост/WB Stream){NC}")
-            _box_row()
-            _box_sep()
-            _box_row(f"  {CYAN}14{NC} ☁️  {TITLE}WebDAV Tunnel{NC}")
+            # olcRTC скрыт из меню — доступ через ввод "olcrtc" (как "cdn")
+            _box_row(f"  {CYAN}13{NC} ☁️  {TITLE}WebDAV Tunnel{NC}")
             _box_row(f"     {DIM}TCP/SOCKS5 поверх WebDAV-файлов — маскировка под облако{NC}")
             _box_row()
             _box_sep()
-            _box_row(f"  {CYAN}15{NC} 🐙 {TITLE}FPTN{NC}  {DIM}(Beta){NC}")
+            _box_row(f"  {CYAN}14{NC} 🐙 {TITLE}FPTN{NC}  {DIM}(Beta){NC}")
             _box_row(f"     {DIM}Свой L3 VPN (Protobuf/TLS) — honeypot-прокси вместо отказа зондам{NC}")
             _box_sep()
             _box_row()
-            _box_row(f"  {CYAN}16{NC} 🔒 {TITLE}AmneziaWG 2.0 (standalone VPN){NC}")
+            _box_row(f"  {CYAN}15{NC} 🔒 {TITLE}AmneziaWG 2.0 (standalone VPN){NC}")
             _box_row(f"     {DIM}Standalone AWG-сервер + carrier-пресеты + каскад RU→зарубеж{NC}")
             _box_row()
             _box_sep()
             _box_row()
-            _box_row(f"  {CYAN}17{NC} 📦 {TITLE}Sing-box (ShadowTLS/AnyTLS/TUIC){NC}  {DIM}(NEW){NC}")
+            _box_row(f"  {CYAN}16{NC} 📦 {TITLE}Sing-box (ShadowTLS/AnyTLS/TUIC){NC}  {DIM}(NEW){NC}")
             _box_row(f"     {DIM}Параллельный backend: TLS-camouflage + QUIC-резерв к Hysteria2{NC}")
             _box_row()
             _box_sep()
             _box_row()
-            _box_row(f"  {CYAN}18{NC} 🔐 {TITLE}TrustTunnel{NC}  {DIM}(NEW){NC}")
+            _box_row(f"  {CYAN}17{NC} 🔐 {TITLE}TrustTunnel{NC}  {DIM}(NEW){NC}")
             _box_row(f"     {DIM}AdGuard VPN protocol (HTTP/2+HTTP/3 over TLS) — tt:// deep-link{NC}")
             _box_row()
             _box_sep()
@@ -8738,7 +8735,7 @@ def main_menu() -> None:
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–18 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–17 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -8813,20 +8810,12 @@ def main_menu() -> None:
 
         elif choice == "13":
             try:
-                from chimera.modules.olcrtc import do_olcrtc_menu
-                do_olcrtc_menu()
-            except ImportError as _e:
-                warn(f"Модуль olcRTC не найден: {_e}")
-                time.sleep(2)
-
-        elif choice == "14":
-            try:
                 do_webdav_tunnel_menu()
             except ImportError as _e:
                 warn(f"Модуль WebDAV Tunnel не найден: {_e}")
                 time.sleep(2)
 
-        elif choice == "15":
+        elif choice == "14":
             try:
                 from chimera.modules.fptn import do_fptn_menu
                 do_fptn_menu()
@@ -8834,7 +8823,7 @@ def main_menu() -> None:
                 warn(f"Модуль FPTN не найден: {_e}")
                 time.sleep(2)
 
-        elif choice == "16":
+        elif choice == "15":
             try:
                 from chimera.modules.awg_standalone import do_manage_awg_standalone
                 do_manage_awg_standalone()
@@ -8842,7 +8831,7 @@ def main_menu() -> None:
                 warn(f"Модуль AmneziaWG standalone не найден: {_e}")
                 time.sleep(2)
 
-        elif choice == "17":
+        elif choice == "16":
             try:
                 from chimera.modules.singbox_menu import do_singbox_menu
                 do_singbox_menu()
@@ -8850,12 +8839,31 @@ def main_menu() -> None:
                 warn(f"Модуль sing-box не найден: {_e}")
                 time.sleep(2)
 
-        elif choice == "18":
+        elif choice == "17":
             try:
                 from chimera.modules.trusttunnel import do_trusttunnel_menu
                 do_trusttunnel_menu()
             except ImportError as _e:
                 warn(f"Модуль TrustTunnel не найден: {_e}")
+                time.sleep(2)
+
+        # ── Скрытое меню: olcRTC (туннель под видеозвонок) ────────────────
+        # Активируется вводом строки "olcrtc" (без кавычек) в главном меню.
+        # Не отображается в списке пунктов — пользователь должен знать
+        # о существовании этого раздела.
+        elif choice.lower() == "olcrtc":
+            try:
+                from chimera.modules.olcrtc import do_olcrtc_menu
+                do_olcrtc_menu()
+            except ImportError:
+                # Тихая ошибка — не выдаём существование скрытого меню.
+                warn(f"Неверный выбор: {choice}")
+                time.sleep(1)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as _e:
+                warn(f"Ошибка в скрытом разделе: {_e}")
+                warn(f"Тип: {type(_e).__name__}")
                 time.sleep(2)
 
         # ── Скрытое меню: CDN masking (обход белых списков через Beeline CDN) ─
