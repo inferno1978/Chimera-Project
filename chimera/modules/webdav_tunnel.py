@@ -479,7 +479,7 @@ def _ufw_is_active() -> bool:
     return "status: active" in r.stdout.lower()
 
 def _open_port(port: int) -> str:
-    # v5.0.18: миграция на port_registry (с backward compat для iptables fallback).
+    #  миграция на port_registry (с backward compat для iptables fallback).
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, port_register, SERVICE_WEBDAV_TUNNEL,
@@ -501,7 +501,7 @@ def _open_port(port: int) -> str:
     return f"iptables: TCP {port} открыт."
 
 def _close_port(port: int) -> None:
-    # v5.0.18: миграция на port_registry (с backward compat для legacy comment).
+    #  миграция на port_registry (с backward compat для legacy comment).
     try:
         from chimera.modules.port_registry import (
             ufw_close_port, port_unregister, SERVICE_WEBDAV_TUNNEL,

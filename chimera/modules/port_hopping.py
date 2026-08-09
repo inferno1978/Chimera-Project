@@ -220,10 +220,10 @@ def _remove_rules() -> bool:
 def _ufw_allow_range(range_start: int, range_end: int, proto: str) -> None:
     """Добавляет правило UFW для диапазона портов.
 
-    v5.0.18: миграция на port_registry (с backward compat fallback).
+     миграция на port_registry (с backward compat fallback).
     """
     protos = ["tcp", "udp"] if proto == "both" else [proto]
-    # v5.0.18: сначала port_registry.
+    #  сначала port_registry.
     try:
         from chimera.modules.port_registry import (
             ufw_open_port_range, port_register, SERVICE_PORT_HOPPING,
@@ -247,10 +247,10 @@ def _ufw_allow_range(range_start: int, range_end: int, proto: str) -> None:
 def _ufw_delete_range(range_start: int, range_end: int, proto: str) -> None:
     """Удаляет правило UFW для диапазона портов.
 
-    v5.0.18: миграция на port_registry (с legacy comment для backward compat).
+     миграция на port_registry (с legacy comment для backward compat).
     """
     protos = ["tcp", "udp"] if proto == "both" else [proto]
-    # v5.0.18: сначала port_registry.
+    #  сначала port_registry.
     try:
         from chimera.modules.port_registry import (
             ufw_close_port_range, port_unregister, SERVICE_PORT_HOPPING,

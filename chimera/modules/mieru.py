@@ -509,12 +509,12 @@ def _ufw_is_active() -> bool:
 def _ufw_open_port(proto: str, port_start: int, port_end: int) -> None:
     """Открывает порты через UFW если он активен.
 
-    v5.0.18: миграция на port_registry (с backward compat fallback).
+     миграция на port_registry (с backward compat fallback).
     """
     if not _ufw_is_active():
         return
     proto = proto.lower()
-    # v5.0.18: сначала port_registry.
+    #  сначала port_registry.
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, ufw_open_port_range, port_register, SERVICE_MIERU,
@@ -541,12 +541,12 @@ def _ufw_open_port(proto: str, port_start: int, port_end: int) -> None:
 def _ufw_close_port(proto: str, port_start: int, port_end: int) -> None:
     """Закрывает порты через UFW если он активен.
 
-    v5.0.18: миграция на port_registry (с backward compat).
+     миграция на port_registry (с backward compat).
     """
     if not _ufw_is_active():
         return
     proto = proto.lower()
-    # v5.0.18: сначала port_registry.
+    #  сначала port_registry.
     try:
         from chimera.modules.port_registry import (
             ufw_close_port, ufw_close_port_range, port_unregister, SERVICE_MIERU,

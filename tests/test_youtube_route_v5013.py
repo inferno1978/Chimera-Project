@@ -2,11 +2,11 @@
 """
 tests/test_youtube_route_v5013.py
 ───────────────────────────────────────────────────────────────────────────────
-Регрессионные тесты для v5.0.13/v5.0.14/v5.0.15 — стабильность YouTube через RU+fragment.
+Регрессионные тесты для    — стабильность YouTube через RU+fragment.
 
-v5.0.13: добавлены patch sniffing + safe sockopt + maxSplit + расширенные домены.
-v5.0.14: HOTFIX — откат v5.0.13 (ломал UseIPv4 на серверах без IPv6).
-v5.0.15: ВОЗВРАТ v5.0.13 — пользователь переезжает на сервер с IPv6, где
+ добавлены patch sniffing + safe sockopt + maxSplit + расширенные домены.
+ HOTFIX — откат  (ломал UseIPv4 на серверах без IPv6).
+ ВОЗВРАТ  — пользователь переезжает на сервер с IPv6, где
   routeOnly=True безопасен и чинит асимметричную маршрутизацию QUIC-видео.
 
 Покрывает:
@@ -235,7 +235,7 @@ class TestRestoreInboundsAfterFragment(unittest.TestCase):
 
 
 class TestApplyFragmentWithMaxSplit(unittest.TestCase):
-    """_youtube_apply_fragment_to_xray с параметром max_split (v5.0.13)."""
+    """_youtube_apply_fragment_to_xray с параметром max_split ."""
 
     def setUp(self):
         self._tmpdir = Path(tempfile.mkdtemp())
@@ -305,7 +305,7 @@ class TestApplyFragmentWithMaxSplit(unittest.TestCase):
 
 
 class TestSafeSockopt(unittest.TestCase):
-    """v5.0.13/v5.0.15: безопасный sockopt в freedom outbound (БЕЗ tcpCongestion='bbr')."""
+    """ безопасный sockopt в freedom outbound (БЕЗ tcpCongestion='bbr')."""
 
     def setUp(self):
         self._tmpdir = Path(tempfile.mkdtemp())
@@ -326,7 +326,7 @@ class TestSafeSockopt(unittest.TestCase):
 
     def test_sockopt_present_without_bbr(self):
         """freedom outbound должен иметь sockopt с tcpKeepAlive* и tcpFastOpen,
-        но БЕЗ tcpCongestion='bbr' (это была причина поломки v5.0.10)."""
+        но БЕЗ tcpCongestion='bbr' (это была причина поломки  ."""
         from chimera.modules import youtube_route
         self._cfg_path.write_text(json.dumps(_make_xray_config_with_fragment()))
         core = sys.modules["chimera._core"]
@@ -360,7 +360,7 @@ class TestSafeSockopt(unittest.TestCase):
 
 
 class TestSniffingPatchedOnApply(unittest.TestCase):
-    """v5.0.15: _youtube_apply_fragment_to_xray патчит inbound sniffing."""
+    """ _youtube_apply_fragment_to_xray патчит inbound sniffing."""
 
     def setUp(self):
         self._tmpdir = Path(tempfile.mkdtemp())
@@ -380,7 +380,7 @@ class TestSniffingPatchedOnApply(unittest.TestCase):
         )
 
     def test_inbound_sniffing_patched(self):
-        """v5.0.15: routeOnly=True и 'quic' в destOverride после apply."""
+        """ routeOnly=True и 'quic' в destOverride после apply."""
         from chimera.modules import youtube_route
         self._cfg_path.write_text(json.dumps(_make_xray_config_with_fragment()))
         core = sys.modules["chimera._core"]
@@ -402,7 +402,7 @@ class TestSniffingPatchedOnApply(unittest.TestCase):
 
 
 class TestGracefulRestart(unittest.TestCase):
-    """v5.0.13/v5.0.15: грейсфул-рестарт — 500мс sleep перед systemctl restart xray."""
+    """ грейсфул-рестарт — 500мс sleep перед systemctl restart xray."""
 
     def setUp(self):
         self._tmpdir = Path(tempfile.mkdtemp())
@@ -446,7 +446,7 @@ class TestGracefulRestart(unittest.TestCase):
 
 
 class TestExpandedYoutubeDomains(unittest.TestCase):
-    """v5.0.13/v5.0.15: расширенный список YouTube-доменов (CDN variants)."""
+    """ расширенный список YouTube-доменов (CDN variants)."""
 
     def test_cdn_domains_present(self):
         """Должны быть добавлены CDN variants для асимметричной маршрутизации."""
@@ -455,7 +455,7 @@ class TestExpandedYoutubeDomains(unittest.TestCase):
         # Основные.
         self.assertIn("domain:youtube.com", domains)
         self.assertIn("domain:googlevideo.com", domains)
-        # v5.0.13: CDN variants.
+        #  CDN variants.
         self.assertIn("domain:wide-youtube.l.google.com", domains)
         self.assertIn("domain:youtube-ui.l.google.com", domains)
         self.assertIn("domain:youtubeembedded-pa.googleapis.com", domains)
@@ -464,7 +464,7 @@ class TestExpandedYoutubeDomains(unittest.TestCase):
 
 
 class TestRemoveFromXrayRestoresSniffing(unittest.TestCase):
-    """_youtube_remove_from_xray должен откатывать sniffing patch (v5.0.15)."""
+    """_youtube_remove_from_xray должен откатывать sniffing patch ."""
 
     def setUp(self):
         self._tmpdir = Path(tempfile.mkdtemp())
@@ -516,7 +516,7 @@ class TestRemoveFromXrayRestoresSniffing(unittest.TestCase):
 
 
 class TestFragmentPresetMenuV5013(unittest.TestCase):
-    """_fragment_preset_menu возвращает 5-tuple с max_split (v5.0.13/v5.0.15)."""
+    """_fragment_preset_menu возвращает 5-tuple с max_split (  ."""
 
     def setUp(self):
         _setup_core_in_sysmodules(awg_enabled=False)

@@ -4587,7 +4587,7 @@ def do_manage_users() -> None:
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "6":
-            # v5.0.16: per-user IP whitelist для ingress_geoip.
+            #  per-user IP whitelist для ingress_geoip.
             # Делегирует в user_ip_whitelist.do_manage_user_ip_whitelist().
             try:
                 from chimera.modules.user_ip_whitelist import do_manage_user_ip_whitelist

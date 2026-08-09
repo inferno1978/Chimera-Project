@@ -150,7 +150,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
         # Удаляем iptables-правила (best-effort)
         _awgs_uninstall_cleanup_iptables()
 
-    # 8. UFW-правило (v5.0.18: через port_registry с legacy comment backward compat)
+    # 8. UFW-правило ( через port_registry с legacy comment backward compat)
     info(f"Удаление UFW-правила для UDP {port}...")
     _awg_uninstall_ufw_close(core, port)
 
@@ -300,7 +300,7 @@ def do_awg_uninstall_menu() -> None:
     awgs_uninstall_full(keep_backups=keep_backups)
 
 
-# v5.0.18: helper для закрытия UFW-порта AWG через port_registry
+#  helper для закрытия UFW-порта AWG через port_registry
 # с backward compat для legacy comment "AWG standalone".
 def _awg_uninstall_ufw_close(core, port: int) -> None:
     """Закрывает UDP-порт AWG в UFW.

@@ -500,7 +500,7 @@ def _ufw_is_active() -> bool:
 def _ufw_open_tcp(port: int) -> None:
     if not _ufw_is_active():
         return
-    # v5.0.18: миграция на port_registry.
+    #  миграция на port_registry.
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, port_register, SERVICE_NAIVEPROXY,
@@ -516,7 +516,7 @@ def _ufw_open_tcp(port: int) -> None:
 def _ufw_close_tcp(port: int) -> None:
     if not _ufw_is_active():
         return
-    # v5.0.18: миграция на port_registry (с legacy comment для backward compat).
+    #  миграция на port_registry (с legacy comment для backward compat).
     try:
         from chimera.modules.port_registry import (
             ufw_close_port, port_unregister, SERVICE_NAIVEPROXY,

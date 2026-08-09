@@ -172,16 +172,16 @@ class TestBug4HealthScreenShowsActualPort(unittest.TestCase):
 
 
 # ============================================================================
-#  v5.0.0 REGRESSION TEST: правильное условие зелёного/жёлтого в блоке
+#   REGRESSION TEST: правильное условие зелёного/жёлтого в блоке
 #  «Сверка конфигурации» DNS Leak Test
 # ============================================================================
-# Коммит 038540f (v5.0.0) исправил визуальный баг — жёлтое "DNS уходит
+# Коммит 038540f  исправил визуальный баг — жёлтое "DNS уходит
 # напрямую" рисовалось при активном DNSCrypt. НО он сделал это проверкой
 # dnscrypt_active (процесс запущен), что является false negative:
 # dnscrypt-proxy может быть active без применённых iptables-правил
 # редиректа 53 порта — то есть без реального перехвата трафика.
 #
-# v5.0.0 исправляет условие: redirect_active = enabled AND rules_applied.
+#  исправляет условие: redirect_active = enabled AND rules_applied.
 # Зелёный цвет показывается ТОЛЬКО когда трафик реально перехватывается.
 #
 # Тесты вызывают _render_dns_reconciliation_box() напрямую (мокая
@@ -189,7 +189,7 @@ class TestBug4HealthScreenShowsActualPort(unittest.TestCase):
 # методы 1-4 do_dns_leak_test.
 
 class TestDnsReconciliationBoxV4256(unittest.TestCase):
-    """5 кейсов для блока «Сверка конфигурации» (v5.0.0).
+    """5 кейсов для блока «Сверка конфигурации» .
 
     Логика (см. _render_dns_reconciliation_box docstring):
       - loopback → зелёное "проксируется локально"
@@ -282,9 +282,9 @@ class TestDnsReconciliationBoxV4256(unittest.TestCase):
         """Кейс 2 (КЛЮЧЕВОЙ): is_loopback=False, enabled=True,
         rules_applied=False (но dnscrypt-proxy active) → ЖЁЛТОЕ, не зелёное.
 
-        Это именно тот баг, который был в v5.0.0/038540f — код проверял
+        Это именно тот баг, который был в  038540f — код проверял
         dnscrypt_active и показывал зелёное, хотя реальной перехватки нет
-        (правила iptables не применены). v5.0.0 исправляет это.
+        (правила iptables не применены).  исправляет это.
         """
         fake_hc = {
             "enabled":       True,
@@ -306,7 +306,7 @@ class TestDnsReconciliationBoxV4256(unittest.TestCase):
         # Зелёное "редирект активен" НЕ должно появляться
         self.assertNotIn("DNS-редирект активен", output,
                          f"Не должно быть зелёного 'редирект активен' когда rules_applied=False "
-                         f"(баг v5.0.0/038540f), вывод:\n{output}")
+                         f"(баг  038540f), вывод:\n{output}")
         # Но "DNSCrypt-proxy: активен" должен быть (потому что dnscrypt_stdout=active)
         # — это корректно, сервис действительно запущен, просто редиректа нет
         self.assertIn("активен", output)

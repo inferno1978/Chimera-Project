@@ -289,7 +289,7 @@ def _ingress_remove() -> None:
     port  = state.get("port", 0)
     meth  = state.get("method", "")
 
-    # v5.0.16: сначала убираем per-user IP whitelist правило (если было).
+    #  сначала убираем per-user IP whitelist правило (если было).
     # Не трогаем ipset и users.json — данные сохраняются для повторного включения.
     try:
         from chimera.modules.user_ip_whitelist import (
@@ -441,7 +441,7 @@ def _ingress_enable(port: int) -> None:
         ok = _ingress_apply_iptables_plain(port, v4)
         method = "plain"
 
-    # v5.0.16: интеграция с per-user IP whitelist (user_ip_whitelist.py).
+    #  интеграция с per-user IP whitelist (user_ip_whitelist.py).
     # Ставим ACCEPT-правило для ipset clients_wl ПЕРЕД DROP-правилом РФ,
     # чтобы пользователи с РФ-IP могли подключаться к VLESS на 443.
     # Это делается ПОСЛЕ _ingress_apply_ipset (который ставит DROP через -A),

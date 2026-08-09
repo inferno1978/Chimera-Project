@@ -195,7 +195,7 @@ def do_reconfigure() -> None:
                 warn(f"Ошибка патча nginx {conf}: {e}")
 
     # --- UFW: открыть новый порт, закрыть старый ---
-    # v5.0.19: миграция на port_registry (с backward compat для legacy comments).
+    #  миграция на port_registry (с backward compat для legacy comments).
     if new_port != old_port:
         _vless_reconfigure_ufw_port_change(core, new_port, old_port)
 
@@ -226,7 +226,7 @@ def do_reconfigure() -> None:
     log_to_file("INFO", f"Reconfigure: {old_domain}:{old_port} → {new_domain}:{new_port}")
 
 
-# v5.0.19: helper для смены UFW-порта при reconfigure VLESS.
+#  helper для смены UFW-порта при reconfigure VLESS.
 # Использует port_registry с backward compat для legacy comments:
 #   - "VLESS reconfigure" (старый comment от reconfigure.py)
 #   - "SSH" (от network_setup.py)

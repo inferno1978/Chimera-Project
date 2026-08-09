@@ -86,7 +86,7 @@ def configure_firewall() -> None:
             r = _run(["ufw", "status"], capture=True, check=False)
             if re.search(rf'^{port}/{proto}.*ALLOW', r.stdout, re.MULTILINE):
                 return
-            # v5.0.19: миграция на port_registry (с backward compat fallback).
+            #  миграция на port_registry (с backward compat fallback).
             # SSH (22) и HTTP (80) — критичные порты, регистрируем под SERVICE_VLESS
             # с указанием в comment. VLESS port — основной.
             try:

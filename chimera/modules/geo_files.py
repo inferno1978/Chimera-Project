@@ -120,12 +120,12 @@ def _emergency_curl_one(
     проходит там, где urllib.request блокируется (GitHub иногда
     блокирует нестандартные UA на release-asset redirects).
 
-    v5.0.0+: если передан checksum_urls — после размерной проверки
+     : если передан checksum_urls — после размерной проверки
     делает SHA256-верификацию через download_manager._fetch_reference_hash
     (короткий приоритетный список: raw.githubusercontent.com →
     release-assets → cdn.statically.io) + прямое сравнение actual_hash
     с reference_hash. Это гарантирует, что emergency fallback не откатит
-    защиту от устаревших/битых кэшированных файлов, введённую в v5.0.0
+    защиту от устаревших/битых кэшированных файлов, введённую в 
     (коммит cdadfab). Логика верификации:
       • reference_hash is None → принимаем с warn (все 3 приоритетных
         источника недоступны — деградация, как в fetch_package)
@@ -217,11 +217,11 @@ def _emergency_curl_one(
             return False
 
         # ── SHA256-верификация (если задан checksum_urls) ────────────────
-        # v5.0.4+: emergency fallback использует тот же подход что и
+        #  : emergency fallback использует тот же подход что и
         # fetch_package — получает эталонный хэш ОДИН РАЗ через
         # _fetch_reference_hash() (короткий приоритетный список авторитетных
         # источников), затем прямо сравнивает actual_hash с reference_hash.
-        # Раньше вызывал _verify_checksum() — но она удалена в v5.0.4
+        # Раньше вызывал _verify_checksum() — но она удалена в 
         # (заменена на _fetch_reference_hash + прямое сравнение).
         if checksum_urls:
             try:
@@ -300,12 +300,12 @@ def emergency_curl_fallback(
     фильтрует по User-Agent для не-браузерных клиентов, и стандартный
     curl/8.x UA проходит фильтр.
 
-    v5.0.0+: SHA256-верификация включена (берутся те же checksum_urls
+     : SHA256-верификация включена (берутся те же checksum_urls
     что в GEOSITE_SPEC/GEOIP_SPEC — см. geo_packages.py). Это гарантирует,
     что emergency fallback не откатит защиту от кэшированных/битых
     файлов, введённую в коммите cdadfab.
 
-    v5.0.1+: аргумент only_files позволяет скачать только указанные файлы
+     : аргумент only_files позволяет скачать только указанные файлы
     (например ['geosite.dat'] если geoip.dat уже успешно скачан через
     fetch_package). Раньше fallback качал оба файла всегда, что
     приводило к пустой трате времени и возможным сбоям при повторной
@@ -522,7 +522,7 @@ def download_geo_files() -> bool:
     # Это последнее автоматическое средство перед manual hint.
     #
     # Логика:
-    #   • emergency_curl_fallback() скачивает ТОЛЬКО failed_files (v5.0.1+).
+    #   • emergency_curl_fallback() скачивает ТОЛЬКО failed_files ( ).
     #     Раньше качал оба — это работало, но повторно перезаписывало
     #     успешно скачанный файл и тратило время.
     #   • После fallback — пересчитываем success_count: для каждого dest_dir
@@ -664,7 +664,7 @@ def setup_geo_autoupdate() -> None:
         mkdir -p /etc/xray /usr/local/share/xray /usr/local/etc/xray
 
         # Минимальные размеры (защита от усечённых загрузок).
-        # v5.0.0 FIX: берётся из MIN_SIZES (geo_mirrors.py), а не хардкод.
+        #  FIX: берётся из MIN_SIZES (geo_mirrors.py), а не хардкод.
         # Ранее здесь стояли 3 МБ / 10 КБ — устаревшие значения из-за которых
         # cron "обновлял" geosite.dat на 10-МБ усечённую кэшированную копию
         # с jsDelivr (которая проходила старый порог), а реальное обновление

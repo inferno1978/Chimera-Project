@@ -68,7 +68,7 @@ def _mock_core(**overrides):
     core.AWG_JMAX = 70
     core.AWG_S1 = 0
     core.AWG_S2 = 0
-    # v5.0.0: S3/S4/I1-I5 — добавлены в mock для полного набора AWG 2.0
+    #  S3/S4/I1-I5 — добавлены в mock для полного набора AWG 2.0
     core.AWG_S3 = 0
     core.AWG_S4 = 0
     core.AWG_I1 = ""
@@ -481,7 +481,7 @@ class TestAwgClientConfText(unittest.TestCase):
 
 
 # ============================================================================
-#  v5.0.0 — Тесты на полный набор параметров AWG 2.0 (S3/S4/I1-I5)
+#   — Тесты на полный набор параметров AWG 2.0 (S3/S4/I1-I5)
 # ============================================================================
 # Жалоба пользователя (Keenetic не может импортировать AWG-конфиг) —
 # Cascade-режим генерил только 9 параметров (Jc/Jmin/Jmax/S1/S2/H1-H4),
@@ -494,7 +494,7 @@ class TestAwgClientConfText(unittest.TestCase):
 #   - _awg_server_conf_for_node(node)
 
 class TestCascadeFullParamsV4257(unittest.TestCase):
-    """v5.0.0: все 4 Cascade-функции должны писать полный набор параметров
+    """ все 4 Cascade-функции должны писать полный набор параметров
     AWG 2.0 — Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5 (16 штук).
 
     Раньше писались только 9 (Jc/Jmin/Jmax/S1/S2/H1-H4) — без S3/S4/I1-I5.

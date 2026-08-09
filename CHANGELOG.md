@@ -2,17 +2,17 @@
 
 ---
 
-## FIX(rest_api): v5.0.21 — определение реального IP клиента через X-Forwarded-For — 8 августа 2026
+## FIX(rest_api):  — определение реального IP клиента через X-Forwarded-For — 8 августа 2026
 
-**Исправление: после v5.0.17 (nginx_front_portal.py) _client_ip() видел
+**Исправление: после  (nginx_front_portal.py) _client_ip() видел
 только 127.0.0.1 (loopback от nginx), а не реальный IP клиента.**
 
 ### Проблема
 
-v5.0.16: `_client_ip()` возвращал `self.client_address[0]` напрямую —
+ `_client_ip()` возвращал `self.client_address[0]` напрямую —
 обоснование: «rest_api слушает напрямую (без nginx)».
 
-v5.0.17: `nginx_front_portal.py` поставил nginx перед User Portal с
+ `nginx_front_portal.py` поставил nginx перед User Portal с
 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`. Теперь
 `client_address[0]` — это `127.0.0.1` (loopback от nginx), а реальный IP
 клиента — в `X-Forwarded-For`. Но `_client_ip()` не обновлялся.
@@ -84,7 +84,7 @@ def _client_ip(self) -> str:
 
 ---
 
-## FEAT(security): v5.0.20 — IP lifecycle: pin/unpin, FIFO, age-based cleanup, replace-all — 8 августа 2026
+## FEAT(security):  — IP lifecycle: pin/unpin, FIFO, age-based cleanup, replace-all — 8 августа 2026
 
 **Расширенное управление IP whitelist: предотвращение накопления старых IP
 через age-based cleanup (cron), FIFO при достижении лимита, закрепление
@@ -179,7 +179,7 @@ IP не удаляются при age-based cleanup и FIFO. Пользоват�
 
 ---
 
-## FEAT(infra): v5.0.19 — Финальная миграция: VLESS port + singbox_ufw + web_panel — 8 августа 2026
+## FEAT(infra):  — Финальная миграция: VLESS port + singbox_ufw + web_panel — 8 августа 2026
 
 **Завершающая миграция на port_registry: VLESS port (network_setup +
 reconfigure), sing-box UFW, и web_panel (rest_api). Теперь ВСЕ сервисы
@@ -187,7 +187,7 @@ Chimera (кроме SSH hardening и deny-rules) используют port_regis
 
 ### Контекст
 
-В v5.0.18 мигрировано 14 сервисов, но остались 4 критичных:
+В  мигрировано 14 сервисов, но остались 4 критичных:
 1. VLESS port (network_setup.py) — основной install flow
 2. VLESS reconfigure (reconfigure.py) — смена порта
 3. singbox_ufw.py — multi-protocol sing-box
@@ -246,23 +246,23 @@ Chimera (кроме SSH hardening и deny-rules) используют port_regis
 
 | Сервис | Файл | Статус | Service tag |
 |---|---|---|---|
-| VLESS (install) | network_setup.py | ✅ v5.0.19 | SERVICE_VLESS |
-| VLESS (reconfigure) | reconfigure.py | ✅ v5.0.19 | SERVICE_VLESS |
-| sing-box (multi-proto) | singbox_ufw.py | ✅ v5.0.19 | SERVICE_SINGBOX |
-| Web Panel | rest_api.py | ✅ v5.0.19 | SERVICE_WEB_PANEL |
-| nginx front Portal | nginx_front_portal.py | ✅ v5.0.17 | SERVICE_WEB_PANEL_NGINX |
-| WebDAV tunnel | webdav_tunnel.py | ✅ v5.0.18 | SERVICE_WEBDAV_TUNNEL |
-| NaiveProxy | naiveproxy.py | ✅ v5.0.18 | SERVICE_NAIVEPROXY |
-| TrustTunnel | trusttunnel.py | ✅ v5.0.18 | SERVICE_TRUSTTUNNEL |
-| FPTN | fptn.py | ✅ v5.0.18 | SERVICE_FPTN |
-| WDTT | wdtt.py | ✅ v5.0.18 | SERVICE_WDTT |
-| Telemt MTProxy | mtproto.py | ✅ v5.0.18 | SERVICE_TELEMT_MTPROTO |
-| Telemt iOS-fix | telemt_ios_fix.py | ✅ v5.0.18 | SERVICE_TELEMT_IOS_FIX |
-| Mieru | mieru.py | ✅ v5.0.18 | SERVICE_MIERU |
-| Port hopping | port_hopping.py | ✅ v5.0.18 | SERVICE_PORT_HOPPING |
-| AWG standalone | awg_standalone.py | ✅ v5.0.18 | SERVICE_AWG_STANDALONE |
-| AWG uninstall | awg_uninstall.py | ✅ v5.0.18 | SERVICE_AWG_STANDALONE |
-| Subscription | subscription.py | ✅ v5.0.18 | SERVICE_SUBSCRIPTION |
+| VLESS (install) | network_setup.py | ✅  | SERVICE_VLESS |
+| VLESS (reconfigure) | reconfigure.py | ✅  | SERVICE_VLESS |
+| sing-box (multi-proto) | singbox_ufw.py | ✅  | SERVICE_SINGBOX |
+| Web Panel | rest_api.py | ✅  | SERVICE_WEB_PANEL |
+| nginx front Portal | nginx_front_portal.py | ✅  | SERVICE_WEB_PANEL_NGINX |
+| WebDAV tunnel | webdav_tunnel.py | ✅  | SERVICE_WEBDAV_TUNNEL |
+| NaiveProxy | naiveproxy.py | ✅  | SERVICE_NAIVEPROXY |
+| TrustTunnel | trusttunnel.py | ✅  | SERVICE_TRUSTTUNNEL |
+| FPTN | fptn.py | ✅  | SERVICE_FPTN |
+| WDTT | wdtt.py | ✅  | SERVICE_WDTT |
+| Telemt MTProxy | mtproto.py | ✅  | SERVICE_TELEMT_MTPROTO |
+| Telemt iOS-fix | telemt_ios_fix.py | ✅  | SERVICE_TELEMT_IOS_FIX |
+| Mieru | mieru.py | ✅  | SERVICE_MIERU |
+| Port hopping | port_hopping.py | ✅  | SERVICE_PORT_HOPPING |
+| AWG standalone | awg_standalone.py | ✅  | SERVICE_AWG_STANDALONE |
+| AWG uninstall | awg_uninstall.py | ✅  | SERVICE_AWG_STANDALONE |
+| Subscription | subscription.py | ✅  | SERVICE_SUBSCRIPTION |
 
 ### НЕ мигрированы (намеренно, финально)
 
@@ -299,14 +299,14 @@ Chimera (кроме SSH hardening и deny-rules) используют port_regis
 
 ---
 
-## FEAT(infra): v5.0.18 — Миграция ВСЕХ сервисов на port_registry — 8 августа 2026
+## FEAT(infra):  — Миграция ВСЕХ сервисов на port_registry — 8 августа 2026
 
 **Полная миграция 14 сервисов на централизованный port_registry с backward
 compatibility для существующих UFW-правил.**
 
 ### Контекст
 
-В v5.0.17 создан `port_registry.py` (паттерн) и применён только к новому
+В  создан `port_registry.py` (паттерн) и применён только к новому
 `nginx_front_portal.py`. 15+ существующих сервисов имели свой UFW-код без
 conflict detection и без централизованной регистрации. Этот коммит переносит
 все основные сервисы на port_registry.
@@ -399,7 +399,7 @@ VLESS — основной сервис Chimera. Его порт (443 или н�
 
 ---
 
-## FEAT(infra): v5.0.17 — nginx front (TLS) для User Portal + port_registry — 8 августа 2026
+## FEAT(infra):  — nginx front (TLS) для User Portal + port_registry — 8 августа 2026
 
 **Два новых модуля: `chimera/modules/port_registry.py` (централизованный
 реестр портов с conflict detection) и `chimera/modules/nginx_front_portal.py`
@@ -407,7 +407,7 @@ VLESS — основной сервис Chimera. Его порт (443 или н�
 
 ### Контекст
 
-После v5.0.16 (per-user IP whitelist) User Portal остался на 127.0.0.1:8443 —
+После  (per-user IP whitelist) User Portal остался на 127.0.0.1:8443 —
 доступ только через SSH-туннель или expose=True без TLS (Basic Auth = base64,
 креды видны снифферу). Нужно было поставить nginx с TLS перед порталом, при
 этом не захардкодить порт и обеспечить auto UFW open/close.
@@ -557,7 +557,7 @@ FPTN, WDTT, Subscription, и т.д.) имеют свой UFW-код. Их реф
 
 ---
 
-## FEAT(security): v5.0.16 — Per-user IP whitelist для ingress_geoip — 8 августа 2026
+## FEAT(security):  — Per-user IP whitelist для ingress_geoip — 8 августа 2026
 
 **Новый модуль `chimera/modules/user_ip_whitelist.py` — позволяет клиентам с
 российскими IP подключаться к VLESS на 443, даже когда включена блокировка
@@ -708,32 +708,32 @@ clients_wl перед DROP. `_ingress_remove()` — снимает правил�
 
 ---
 
-## FIX(youtube): v5.0.15 — ВОЗВРАТ v5.0.13 (routeOnly + sockopt) для серверов с IPv6 — 8 августа 2026
+## FIX(youtube):  — ВОЗВРАТ  (routeOnly + sockopt) для серверов с IPv6 — 8 августа 2026
 
-**Возврат изменений v5.0.13. Пользователь переезжает на сервер с IPv6
+**Возврат изменений   Пользователь переезжает на сервер с IPv6
 connectivity, где routeOnly=True безопасен.**
 
 ### Контекст
 
-В v5.0.14 я откатил изменения v5.0.13 (routeOnly=True + sockopt в freedom
+В  я откатил изменения  (routeOnly=True + sockopt в freedom
 outbound), потому что на сервере БЕЗ IPv6 они ломали YouTube: `routeOnly=True`
 передавал freedom outbound IP-адрес от клиента (а не домен), и если клиент
 резолвил YouTube в IPv6 (мобильные операторы, некоторые ISP), а RU-сервер
 без IPv6 — freedom пытался звонить на IPv6 и dial падал.
 
 Пользователь решил переехать на сервер с IPv6, где это ограничение отпадает.
-Возвращаю v5.0.13 as-is.
+Возвращаю  as-is.
 
-### Что возвращено (v5.0.15)
+### Что возвращено 
 
 - **ВОЗВРАЩЁН sockopt в freedom outbound** (tcpKeepAliveIdle=60,
   tcpKeepAliveInterval=15, tcpUserTimeout=10000, tcpFastOpen=true).
-  БЕЗ `tcpCongestion="bbr"` (требует `modprobe tcp_bbr`, ломал YouTube в v5.0.10).
+  БЕЗ `tcpCongestion="bbr"` (требует `modprobe tcp_bbr`, ломал YouTube в  .
   БЕЗ `tcpNoDelay` (удалён в Xray, был no-op).
 - **ВОЗВРАЩЕНЫ вызовы `_youtube_patch_inbounds_for_fragment()` и
   `_youtube_restore_inbounds_after_fragment()`** — точечно (только при
   активном fragment) выставляют routeOnly=True и добавляют "quic" в destOverride.
-- **ОСТАЮТСЯ** (из v5.0.13, не убирались в v5.0.14):
+- **ОСТАЮТСЯ** (из   не убирались в  :
   - `maxSplit` в fragment (3-6 для medium, 5-10 для heavy, 8-15 для max)
   - Расширенный список YouTube-доменов (CDN variants)
   - Грейсфул-рестарт 500мс перед `systemctl restart xray`
@@ -752,7 +752,7 @@ outbound), потому что на сервере БЕЗ IPv6 они ломал
 
 ### Тесты
 
-- 59 тестов YouTube-модуля (42 старых + 17 v5.0.13/v5.0.15) — все проходят.
+- 59 тестов YouTube-модуля (42 старых + 17    — все проходят.
 - 285 связанных тестов проходят.
 - Восстановлены тесты:
   - `test_sockopt_present_without_bbr` — sockopt присутствует, без bbr
@@ -761,22 +761,22 @@ outbound), потому что на сервере БЕЗ IPv6 они ломал
 
 ### Совместимость
 
-- На сервере С IPv6: работает как v5.0.13 (с патчем sniffing + sockopt).
+- На сервере С IPv6: работает как  (с патчем sniffing + sockopt).
 - На сервере БЕЗ IPv6: используйте QUIC block или WARP routing.
 - AWG-режим НЕ затронут (metadataOnly=True не патчится).
 - Xray 26.x+ требуется (XTLS форк).
 
 ---
 
-## FIX(youtube): v5.0.14 — HOTFIX откат опасных изменений v5.0.13 — 8 августа 2026
+## FIX(youtube):  — HOTFIX откат опасных изменений  — 8 августа 2026
 
-**СРОЧНЫЙ ОТКАТ. После v5.0.13 у пользователя YouTube снова выдал
-'Нет подключения к интернету'. Возврат к чистому fragment (как в рабочей v5.0.12),
+**СРОЧНЫЙ ОТКАТ. После  у пользователя YouTube снова выдал
+'Нет подключения к интернету'. Возврат к чистому fragment (как в рабочей  ,
 но с сохранением безопасных улучшений.**
 
-### Что сломалось в v5.0.13
+### Что сломалось в 
 
-В v5.0.13 я добавил три изменения, которые в теории должны были улучшить
+В  я добавил три изменения, которые в теории должны были улучшить
 стабильность, но на практике ломали YouTube у пользователя:
 
 1. **`routeOnly: True` + `destOverride: ["quic"]` в inbound sniffing.**
@@ -787,7 +787,7 @@ outbound), потому что на сервере БЕЗ IPv6 они ломал
    > freedom outbound получал уже резолвленный IP вместо доменного имени →
    > domainStrategy: UseIPv4 не могла сделать свою работу.
 
-   В v5.0.13 я выставил routeOnly=True → freedom outbound стал получать IP
+   В  я выставил routeOnly=True → freedom outbound стал получать IP
    от клиента (а не домен) → domainStrategy=UseIPv4 игнорировалась. Если
    клиент резолвит YouTube в IPv6 (например, мобильный оператор с IPv6),
    а RU-сервер без IPv6 — freedom пытается звонить на IPv6 и падает →
@@ -806,17 +806,17 @@ outbound), потому что на сервере БЕЗ IPv6 они ломал
    commit fb13e49 уже удалял "quic" из-за побочных эффектов (log noise, QUIC
    parsing issues). Возврат мог добавить нестабильности.
 
-### Что откатываем (v5.0.14)
+### Что откатываем 
 
 - **УБРАН `sockopt` из freedom outbound.** Возврат к чистому fragment, как в
-  рабочей v5.0.9/v5.0.12. Константа `_YOUTUBE_SAFE_SOCKOPT` оставлена в коде
+  рабочей    Константа `_YOUTUBE_SAFE_SOCKOPT` оставлена в коде
   как документация.
 - **УБРАНЫ вызовы `_youtube_patch_inbounds_for_fragment()` и
   `_youtube_restore_inbounds_after_fragment()`.** Сами функции оставлены
   в коде (с пометкой ВЫКЛЮЧЕНО) для будущих экспериментов. Причина: routeOnly=True
   ломает UseIPv4 стратегию freedom outbound (фикс v4.12.6).
 
-### Что оставляем из v5.0.13 (безопасные улучшения)
+### Что оставляем из  (безопасные улучшения)
 
 - **`maxSplit`** — поле fragment, ограничивает количество фрагментов на
   TCP-сегмент. Пресеты: light=нет, medium=3-6, heavy=5-10, max=8-15.
@@ -825,13 +825,13 @@ outbound), потому что на сервере БЕЗ IPv6 они ломал
   yt-video-googleusercontent.com, lh3.googleusercontent.com.
 - **Грейсфул-рестарт**: 500мс sleep перед `systemctl restart xray`.
 - **QUIC block (опциональный)** — остаётся в меню, но снова не матчит QUIC
-  по домену (т.к. "quic" не в destOverride). Это как было до v5.0.13.
+  по домену (т.к. "quic" не в destOverride). Это как было до  
 
-### Состояние после v5.0.14
+### Состояние после 
 
-YouTube через RU+fragment работает так же, как в v5.0.12 (т.е. «работает, но
+YouTube через RU+fragment работает так же, как в  (т.е. «работает, но
 нестабильно» — buffering, Shorts иногда тупят). Это базовая стабильность,
-которую мы знаем. Никаких регрессий относительно v5.0.12.
+которую мы знаем. Никаких регрессий относительно  
 
 Дальнейшие улучшения стабильности требуют более глубокого подхода:
 - IPv6 connectivity на RU-сервере (чтобы routeOnly=True работал)
@@ -841,22 +841,22 @@ YouTube через RU+fragment работает так же, как в v5.0.12 (
 
 ### Тесты
 
-- 53 теста YouTube-модуля (42 старых + 11 новых v5.0.13/v5.0.14) — все проходят.
+- 53 теста YouTube-модуля (42 старых + 11 новых    — все проходят.
 - Всего 279 связанных тестов проходят.
-- Новые тесты v5.0.14:
+- Новые тесты  
   - `test_no_sockopt_in_freedom_outbound` — проверяет что sockopt НЕ в outbound
   - `test_inbound_sniffing_not_modified` — проверяет что routeOnly/destOverride не трогаются
   - `TestPatchInboundsFunctionDefined` — функции определены и работают (если вызвать вручную)
 
 ### Совместимость
 
-- Backward compatible с v5.0.12 (поведение идентично, плюс maxSplit/domains/sleep).
+- Backward compatible с  (поведение идентично, плюс maxSplit/domains/sleep).
 - AWG-режим НЕ затронут.
 - Xray 26.x+ требуется (XTLS форк).
 
 ---
 
-## FIX(youtube): v5.0.13 — стабильность RU+fragment через patch sniffing + safe sockopt — 8 августа 2026
+## FIX(youtube):  — стабильность RU+fragment через patch sniffing + safe sockopt — 8 августа 2026
 
 **Полная переработка стабильности YouTube через RU+fragment. Решает:
 "видео buffering несколько секунд", "Shorts иногда не грузятся",
@@ -864,7 +864,7 @@ YouTube через RU+fragment работает так же, как в v5.0.12 (
 
 ### Анализ (включая сверку с документацией Xray v26.7.28)
 
-**Что было сломано в v5.0.10 (когда YouTube полностью упал):**
+**Что было сломано в  (когда YouTube полностью упал):**
 
 Старый комментарий "freedom outbound is not designed for sockopt" — НЕВЕРЕН.
 Согласно доке Xray (https://xtls.github.io/en/config/transports/sockopt.html):
@@ -881,7 +881,7 @@ public network target... only sockopt is available.»
 Блокировка QUIC сама по себе YouTube не сломала — она просто не срабатывала
 (см. ниже), но и не помогала. Главным убийцей был sockopt с `bbr`.
 
-**Корневая причина текущей нестабильности (v5.0.12):**
+**Корневая причина текущей нестабильности :**
 
 1. **QUIC видео YouTube шёл мимо fragment-правила.**
    С v4.12.6 все VLESS/REALITY inbound имеют `routeOnly: False` + с v4.12.6
@@ -903,7 +903,7 @@ public network target... only sockopt is available.»
    интернету". Помогала только перезагрузка сервера (которая убивала все
    соединения и заставляла browser начать с чистого листа).
 
-### Фиксы (v5.0.13)
+### Фиксы 
 
 **1. Патч inbound sniffing ТОЛЬКО при активном RU+fragment.**
    Новые функции `_youtube_patch_inbounds_for_fragment()` /
@@ -930,7 +930,7 @@ public network target... only sockopt is available.»
    }
    ```
    БЕЗ `tcpCongestion: "bbr"` (требует modprobe tcp_bbr — был причиной
-   поломки v5.0.10). БЕЗ `tcpNoDelay` (удалён в Xray, был no-op).
+   поломки  . БЕЗ `tcpNoDelay` (удалён в Xray, был no-op).
 
 **3. Новое поле `maxSplit` в fragment (недокументированное, поддерживается).**
    Ограничивает количество фрагментов на один TCP-сегмент — полезно для
@@ -3014,7 +3014,7 @@ ListenPort = 0 — kernel присваивает ephemeral port, не конфл
 
 Новый хелпер `_is_valid_cps_or_legacy_hex()` принимает:
 - CPS tag-формат AWG 2.0: `<b 0x[hex]>`, `<r [size]>`, `<rd [size]>`, `<rc [size]>`, `<t>` (комбинируются через конкатенацию, optional whitespace между тегами).
-- Голый hex без тегов (AWG 1.5) — для обратной совместимости с уже установленными state.json у пользователей, которые обновились с v5.0.x.
+- Голый hex без тегов (AWG 1.5) — для обратной совместимости с уже установленными state.json у пользователей, которые обновились с  .
 
 Старый hex-формат остаётся валидным, чтобы не сломать уже установленные конфиги (правка только для НОВОЙ генерации, не автомиграция).
 
@@ -4144,7 +4144,7 @@ ipdeny.com — aggregated country zone files:
 
 ## FIX(awg): проверка коллизий H1-H4 в ручном вводе обфускации — 23 июля 2026
 
-**Доработка AWG 2.0 (v5.0.0): в ручном вводе параметров обфускации (пункт меню "3" в `prompt_awg_exit_mode()`) добавлена проверка на коллизии H1-H4. Раньше каждое H вводилось через независимый `_ask_int()` вызов — дубликат между ними никак не ловился, хотя весь смысл фичи — уникальность H1-H4 (DPI-отпечаток). Теперь при обнаружении дубликата пользователю показывается предупреждение и предлагается ввести значения заново. После 5 неудачных попыток — fallback на рекомендованные уникальные значения из `awgs_generate_full_manual_params()`.**
+**Доработка AWG 2.0 : в ручном вводе параметров обфускации (пункт меню "3" в `prompt_awg_exit_mode()`) добавлена проверка на коллизии H1-H4. Раньше каждое H вводилось через независимый `_ask_int()` вызов — дубликат между ними никак не ловился, хотя весь смысл фичи — уникальность H1-H4 (DPI-отпечаток). Теперь при обнаружении дубликата пользователю показывается предупреждение и предлагается ввести значения заново. После 5 неудачных попыток — fallback на рекомендованные уникальные значения из `awgs_generate_full_manual_params()`.**
 
 ### Локация
 
@@ -5046,7 +5046,7 @@ alice@node-b.example
 
 В ходе тестирования выявлены непреодолимые проблемы совместимости:
 
-1. **Версия протокола** — snell-server v5.0.0 (последняя доступная сборка) поддерживает только wire protocol v4/v5. Mihomo (Clash Verge Rev) при `version: 4` выдаёт `snell version error: 4` (устаревшее ядро), а без `version` дефолтит на v1 (несовместимо). Нет версии, которая работает везде.
+1. **Версия протокола** — snell-server  (последняя доступная сборка) поддерживает только wire protocol v4/v5. Mihomo (Clash Verge Rev) при `version: 4` выдаёт `snell version error: 4` (устаревшее ядро), а без `version` дефолтит на v1 (несовместимо). Нет версии, которая работает везде.
 
 2. **UDP для QUIC** — snell-server v5 требует открытых TCP+UDP портов. Открытие UDP решило часть проблем, но протокольный handshake всё равно не проходил.
 
@@ -5441,7 +5441,7 @@ from chimera.modules.mtproto import (
 
 ---
 
-## v5.0.0 — REBRAND: VLESS Ultimate Installer → Chimera Project — 15 июля 2026
+##  — REBRAND: VLESS Ultimate Installer → Chimera Project — 15 июля 2026
 
 **Мажорный релиз — смена идентичности проекта.** Название «VLESS Ultimate Installer» перестало отражать суть: за 8 недель разработки (с 19 мая 2026) проект вырос с 1 протокола (VLESS) до 9+ (VLESS REALITY/xHTTP, Hysteria2, AmneziaWG standalone, MTProto/Telemt, NaiveProxy, Mieru, FPTN, TrustTunnel), с ~30 функций до ~1 500, с одного файла до 143 модулей + ядро 8 093 строки + 25 категорий. Новое имя — **Chimera Project** — метафора мифического существа, собранного из частей разных животных: каждая «голова» (протокол) нужна для своего сценария, и если цензор блокирует один, химера «выращивает новую голову».
 
@@ -5462,7 +5462,7 @@ from chimera.modules.mtproto import (
 1. **Имя врёт пользователю.** Человек, видящий «VLESS Ultimate Installer», ожидает VLESS-сервер. Реально получает 9 протоколов, кластер, балансировку, веб-панель, REST API, Telegram-бота, DPI-детектор. Это разрыв ожиданий.
 2. **SEO и discoverability.** По слову «VLESS» проект конкурирует с десятками репозиториев. По «Chimera» в niche anti-censorship — он будет единственным заметным.
 3. **Развязка рук для роста.** Сейчас добавление новых не-VLESS протоколов ощущается как «выход за рамки». После ребрендинга это будет «новая голова химеры» — в рамках бренда.
-4. **Точка мажорного релиза.** v5.0.0 как мажорный bump — естественный момент для смены идентичности.
+4. **Точка мажорного релиза.**  как мажорный bump — естественный момент для смены идентичности.
 
 ### 🔄 Что переименовано
 
@@ -5532,7 +5532,7 @@ Info-строки обновлены под текущее состояние п
 
 #### 1. Версия bumped с 4.25.1 до 5.0.0
 
-`chimera/__init__.py`: `__version__ = "5.0.0"`, docstring `"""Chimera Project v5.0.0 — Multi-Protocol Anti-DPI Installer"""`. Все публикациионные файлы обновлены: `bootstrap.sh`, `README.md`, `INSTALL.md`, `PROJECT_MAP.md`, `verify.py`, `full_test.py`. `_core.py`, `main.py` подхватывают версию динамически через `_get_version()` — ручных правок не требуют.
+`chimera/__init__.py`: `__version__ = "5.0.0"`, docstring `"""Chimera Project  — Multi-Protocol Anti-DPI Installer"""`. Все публикациионные файлы обновлены: `bootstrap.sh`, `README.md`, `INSTALL.md`, `PROJECT_MAP.md`, `verify.py`, `full_test.py`. `_core.py`, `main.py` подхватывают версию динамически через `_get_version()` — ручных правок не требуют.
 
 #### 2. GitHub repository rename
 
@@ -5558,7 +5558,7 @@ Info-строки обновлены под текущее состояние п
 
 ### 🚀 Совместимость
 
-- **Свежие установки** (с v5.0.0): ставятся в `/opt/chimera`, лог в `/var/log/chimera.log`, все импорты через `chimera.*`. Работают «из коробки».
+- **Свежие установки** (с  : ставятся в `/opt/chimera`, лог в `/var/log/chimera.log`, все импорты через `chimera.*`. Работают «из коробки».
 - **Существующие установки** (v4.x): при запуске `bootstrap.sh` находит старый `/opt/vless-ultimate`, обновляет его in-place. `chimera/_core.py` при старте создаёт symlink `/var/log/vless-install.log` → `/var/log/chimera.log`, перенося старое содержимое в `.pre-chimera.bak`. Cron-задачи и logrotate-конфиги со старыми путями продолжают работать через symlink. State.json в `/var/lib/xray-installer/` НЕ ТРОГАЕТСЯ — все настройки сохраняются.
 - **GitHub URLs**: старый `github.com/inferno1978/VLESS-Ultimate-Installer` редиректится на новый `Chimera-Project` (после ручного rename на GitHub). Все `curl | bash` скрипты со старым URL продолжают работать.
 

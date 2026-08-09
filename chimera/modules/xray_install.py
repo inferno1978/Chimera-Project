@@ -1413,7 +1413,7 @@ def _xray_geo_is_runetfreedom() -> bool:
     Делает это через быстрый grep по бинарному содержимому файла.
     Это единственный надёжный способ — размер файла ненадёжен.
 
-    v5.0.0 FIX: добавлен флаг -i (case-insensitive). Теги в geosite.dat
+     FIX: добавлен флаг -i (case-insensitive). Теги в geosite.dat
     хранятся в ВЕРХНЕМ регистре (RU-AVAILABLE-ONLY-INSIDE), а мы ищем
     строчное 'ru-available-only-inside'. Без -i grep не находил тег →
     функция возвращала False даже для валидного runetfreedom geosite.dat →
@@ -1618,7 +1618,7 @@ def _xray_update_geo_runetfreedom() -> bool:
             # директория бинарника) — для fallback не нужно, копируем только
             # в стандартные XRAY_LOOKUP_DIRS (уже импортированы вверху модуля).
             # only_files=failed_files — качаем только недостающие, не трогая
-            # уже успешно скачанные (v5.0.1+).
+            # уже успешно скачанные ( ).
             em_ok = emergency_curl_fallback(
                 dest_dirs=list(XRAY_LOOKUP_DIRS),
                 only_files=list(failed_files),
