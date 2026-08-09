@@ -539,46 +539,47 @@ class TestQ1UserPortalAccessibleWithoutWhitelist(unittest.TestCase):
         self.assertIn("str(port)", src)
 
 
-class TestQ2NoXForwardedForTrust(unittest.TestCase):
-    """Q2: X-Forwarded-For НЕ используется для определения IP клиента.
+class TestQ2XForwardedForConditionalTrust(unittest.TestCase):
+    """Q2 (v5.0.21): X-Forwarded-For доверяется ТОЛЬКО с loopback (nginx-фронт).
 
-    rest_api.py использует self.client_address[0] напрямую.
-    /api/portal/ips возвращает detected_ip из _client_ip(), не из X-Forwarded-For.
+    v5.0.16: XFF не использовался вообще (rest_api без nginx).
+    v5.0.21: XFF доверяется, если direct_ip — loopback (запрос через nginx).
+    Если direct_ip — внешний IP (rest_api открыт напрямую), XFF игнорируется
+    (защита от подделки).
     """
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
     def test_client_ip_uses_client_address(self):
-        """_client_ip() в rest_api использует self.client_address[0]."""
+        """_client_ip() в rest_api использует self.client_address[0] как основу."""
         from chimera.modules import rest_api
         import inspect
         src = inspect.getsource(rest_api._VLESSHandler._client_ip)
         self.assertIn("client_address", src)
-        # НЕ упоминает X-Forwarded-For.
-        self.assertNotIn("X-Forwarded-For", src)
-        self.assertNotIn("x-forwarded-for", src.lower())
 
-    def test_get_portal_ips_uses_client_ip_not_xff(self):
-        """GET /api/portal/ips — detected_ip берётся из _client_ip(), не из заголовков."""
+    def test_get_portal_ips_uses_client_ip_not_xff_directly(self):
+        """GET /api/portal/ips — detected_ip берётся из _client_ip(), не из
+        прямого чтения заголовков в обработчике (XFF внутри _client_ip())."""
         from chimera.modules import rest_api
         import inspect
         src = inspect.getsource(rest_api._VLESSHandler.do_GET)
-        # Находим блок /api/portal/ips.
         ips_block_start = src.find('"/api/portal/ips"')
         if ips_block_start == -1:
             ips_block_start = src.find("'/api/portal/ips'")
         self.assertGreater(ips_block_start, 0, "Блок /api/portal/ips не найден в do_GET")
-        # Берём кусок до return.
         ips_block = src[ips_block_start:ips_block_start + 2000]
         # Должен использовать self._client_ip().
         self.assertIn("_client_ip()", ips_block)
-        # НЕ должен использовать X-Forwarded-For.
-        self.assertNotIn("X-Forwarded-For", ips_block)
-        self.assertNotIn("x-forwarded-for", ips_block.lower())
+        # В коде (не в комментариях) НЕ должен напрямую читать X-Forwarded-For.
+        code_lines = [line for line in ips_block.split('\n')
+                      if line.strip() and not line.strip().startswith('#')]
+        code_only = '\n'.join(code_lines)
+        self.assertNotIn("X-Forwarded-For", code_only,
+                         "X-Forwarded-For не должен использоваться напрямую в обработчике")
 
     def test_post_portal_ips_auto_uses_client_ip(self):
-        """POST /api/portal/ips с ip=auto использует _client_ip(), не X-Forwarded-For."""
+        """POST /api/portal/ips с ip=auto использует _client_ip(), не X-Forwarded-For напрямую."""
         from chimera.modules import rest_api
         import inspect
         src = inspect.getsource(rest_api._VLESSHandler.do_POST)
@@ -591,31 +592,81 @@ class TestQ2NoXForwardedForTrust(unittest.TestCase):
         self.assertIn("auto", ips_block.lower())
         self.assertIn("_client_ip()", ips_block)
         # X-Forwarded-For может упоминаться только в комментариях, не в коде.
-        # Удаляем комментарии (строки, начинающиеся с # после обрезки пробелов).
         code_lines = [line for line in ips_block.split('\n')
                       if line.strip() and not line.strip().startswith('#')]
         code_only = '\n'.join(code_lines)
         self.assertNotIn("X-Forwarded-For", code_only,
                          "X-Forwarded-For не должен использоваться в коде")
-        self.assertNotIn("x-forwarded-for", code_only.lower())
 
-    def test_spoofed_xff_does_not_affect_ip_detection(self):
-        """Подмена X-Forwarded-For не должна влиять на detected_ip.
+    # ── v5.0.21: новые тесты для условного доверия XFF ──────────────────
 
-        Создаём mock handler с поддельанным X-Forwarded-For и проверяем,
-        что _client_ip() возвращает client_address[0], не поддельный IP.
-        """
+    def test_xff_trusted_from_loopback(self):
+        """Тест 1: client_address=127.0.0.1 + валидный XFF → возвращает IP из XFF."""
         from chimera.modules import rest_api
-
-        # Создаём mock handler.
         handler = rest_api._VLESSHandler.__new__(rest_api._VLESSHandler)
-        handler.client_address = ("5.6.7.8", 12345)
-        # Поддельный X-Forwarded-For.
-        handler.headers = {"X-Forwarded-For": "1.2.3.4"}
-
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"X-Forwarded-For": "5.6.7.8"}
         detected = handler._client_ip()
         self.assertEqual(detected, "5.6.7.8",
-                         "Должен возвращать client_address[0], не X-Forwarded-For")
+                         "Должен возвращать IP из XFF при loopback-соединении (nginx-фронт)")
+
+    def test_xff_absent_loopback_fallback(self):
+        """Тест 2: client_address=127.0.0.1 + НЕТ XFF → возвращает 127.0.0.1 (fallback)."""
+        from chimera.modules import rest_api
+        handler = rest_api._VLESSHandler.__new__(rest_api._VLESSHandler)
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {}
+        detected = handler._client_ip()
+        self.assertEqual(detected, "127.0.0.1",
+                         "Без XFF должен возвращать client_address (loopback fallback)")
+
+    def test_xff_ignored_when_direct_non_loopback(self):
+        """Тест 3: client_address=внешний IP + поддельный XFF → возвращает
+        client_address, XFF игнорируется (защита от подделки при прямом доступе)."""
+        from chimera.modules import rest_api
+        handler = rest_api._VLESSHandler.__new__(rest_api._VLESSHandler)
+        handler.client_address = ("5.6.7.8", 12345)
+        handler.headers = {"X-Forwarded-For": "1.2.3.4"}
+        detected = handler._client_ip()
+        self.assertEqual(detected, "5.6.7.8",
+                         "При прямом доступе (не loopback) XFF должен игнорироваться")
+
+    def test_xff_multiple_ips_takes_first(self):
+        """Тест 4: XFF с несколькими IP через запятую → берётся первый (реальный клиент)."""
+        from chimera.modules import rest_api
+        handler = rest_api._VLESSHandler.__new__(rest_api._VLESSHandler)
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"X-Forwarded-For": "5.6.7.8, 10.0.0.1, 192.168.1.1"}
+        detected = handler._client_ip()
+        self.assertEqual(detected, "5.6.7.8",
+                         "Должен брать первый IP из цепочки XFF")
+
+    def test_xff_empty_string_loopback_fallback(self):
+        """Доп: XFF пустая строка при loopback → fallback на client_address."""
+        from chimera.modules import rest_api
+        handler = rest_api._VLESSHandler.__new__(rest_api._VLESSHandler)
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"X-Forwarded-For": ""}
+        detected = handler._client_ip()
+        self.assertEqual(detected, "127.0.0.1")
+
+    def test_xff_whitespace_only_loopback_fallback(self):
+        """Доп: XFF только пробелы при loopback → fallback на client_address."""
+        from chimera.modules import rest_api
+        handler = rest_api._VLESSHandler.__new__(rest_api._VLESSHandler)
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"X-Forwarded-For": "   ,  "}
+        detected = handler._client_ip()
+        self.assertEqual(detected, "127.0.0.1")
+
+    def test_ipv6_loopback_xff_trusted(self):
+        """Доп: IPv6 loopback (::1) + XFF → доверяем XFF."""
+        from chimera.modules import rest_api
+        handler = rest_api._VLESSHandler.__new__(rest_api._VLESSHandler)
+        handler.client_address = ("::1", 12345, 0, 0)
+        handler.headers = {"X-Forwarded-For": "2a03:1ac0:5a7:6214::1"}
+        detected = handler._client_ip()
+        self.assertEqual(detected, "2a03:1ac0:5a7:6214::1")
 
 
 class TestIngressGeoipIntegration(unittest.TestCase):
