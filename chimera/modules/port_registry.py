@@ -125,6 +125,7 @@ SERVICE_SUBSCRIPTION    = "subscription"
 SERVICE_HYSTERIA2       = "hysteria2"
 SERVICE_WEBDAV_TUNNEL  = "webdav_tunnel"
 SERVICE_PORT_HOPPING   = "port_hopping"
+SERVICE_OLCRTC_MANAGER = "olcrtc_manager"
 
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────
