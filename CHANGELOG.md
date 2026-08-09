@@ -2,6 +2,362 @@
 
 ---
 
+## FEAT(panels): Telemt Panel — кастомизация порта TLS-фронта через port_registry — 9 августа 2026
+
+**Telemt Panel теперь поддерживает выбор порта для self-signed TLS-фронта
+через TUI (раньше порт 8444 был захардкожен). Добавлена каноническая
+константа SERVICE_TELEMT_PANEL_DIRECT в port_registry. Все три панели
+(User Portal, Admin Panel, Telemt Panel) теперь идут через port_registry
+с полной кастомизацией портов.**
+
+### Контекст
+
+После миграции на port_registry (FEAT v5.0.17–v5.0.19) и реализации
+self-signed TLS для панелей (FEAT(panels) от 9 августа) выявился пробел:
+
+| Панель | port_registry | Кастомизация порта в TUI |
+|--------|:---:|:---:|
+| User Portal (`rest_api.py`) | ✅ | ✅ (пункт "2 — изменить порт") |
+| Admin Panel (`rest_api.py`) | ✅ | ✅ (тот же сервис) |
+| User Portal TLS-фронт (`nginx_front_portal.py`) | ✅ | ✅ (пункт "2 — другой порт") |
+| Telemt Panel direct (`telemt_panel.py`) | ⚠️ литерал `"telemt_panel_direct"` | ❌ `PANEL_TLS_PORT = 8444` захардкожен |
+
+### Что изменилось
+
+**`chimera/modules/telemt_panel.py`:**
+- `PANEL_TLS_PORT = 8444` → `DEFAULT_PANEL_TLS_PORT = 8444` (теперь это
+  *значение по умолчанию*, а не константа)
+- Добавлена функция `_validate_tls_port(port)` — проверка диапазона,
+  привилегированных портов (< 1024) и зарезервированных:
+  `{80, 443, 22, 8080, 9091, 8443, 8888, 9443}`
+- `_telemt_setup_direct_access(port=DEFAULT_PANEL_TLS_PORT)` — принимает
+  кастомный порт, валидирует, проверяет конфликты через `port_is_free()`
+- `_telemt_remove_direct_access()` — читает порт из state-файла (не из
+  глобальной константы), корректно закрывает порт
+- Новый `_ask_tls_port()` — TUI-промпт «Порт TLS-фронта [Enter=8444]»
+- `_toggle_direct_access()` — при включении спрашивает порт
+- `port_register`/`ufw_open_port`/`port_unregister` используют новую
+  константу `SERVICE_TELEMT_PANEL_DIRECT` с fallback на строковый литерал
+  для обратной совместимости со старым registry-файлом
+
+**`chimera/modules/port_registry.py`:**
+- Новая константа `SERVICE_TELEMT_PANEL_DIRECT = "telemt_panel_direct"`
+  в ряду `SERVICE_TELEMT_*`
+
+### Совместимость
+
+- Старый registry-файл с записями `"telemt_panel_direct"` (строковый
+  литерал) продолжает работать — значения константы и литерала идентичны
+- Старый state-файл `telemt_panel_direct.json` без поля `port` — fallback
+  на `DEFAULT_PANEL_TLS_PORT = 8444` (как было раньше)
+- `_validate_tls_port` — публичная, можно переиспользовать в других модулях
+
+### Тесты (24 новых в `test_telemt_panel.py`)
+
+| Класс | # | Что проверяется |
+|-------|---|---|
+| `TestValidateTlsPort` | 13 | default 8444 валиден, 0/70000 невалидны, 80/443/8443/8888/9443/8080/9091 reserved, 8445/20000 ок, не-int rejected |
+| `TestTelemtPanelDirectPortRegistry` | 2 | константа существует, round-trip register→list→unregister через `SERVICE_TELEMT_PANEL_DIRECT` |
+| `TestAskTlsPort` | 3 | empty input → default, custom port, invalid → default |
+
+Итого: 28 тестов в `test_telemt_panel.py` (было 10, +18), все pass.
+Полный набор: 316 тестов (panels + port_registry + olcrtc + access_control + rest_api + user_ip_whitelist + nginx) — 0 регрессий.
+
+---
+
+## FEAT(panels): self-signed TLS для User Portal/Admin Panel + Telemt Panel — 9 августа 2026
+
+**Все три веб-панели теперь доступны напрямую по публичному IP с
+self-signed TLS — точно так же, как уже работал olcRTC manager panel.
+Больше не обязателен ни домен, ни SSH-туннель для доступа к User Portal
+и Admin Panel.**
+
+### Контекст
+
+До этого фикса:
+- **User Portal / Admin Panel** (`rest_api.py` на 127.0.0.1:8443) —
+  только через SSH-туннель, либо через nginx front с Let's Encrypt
+  (нужен домен). На серверах без домена — только SSH.
+- **Telemt Panel** — то же самое: 127.0.0.1:8080, доступ через SSH или
+  reverse-proxy на подпуть существующего Reality-домена.
+- **olcRTC manager panel** — уже работал с self-signed TLS на 8888,
+  напрямую по IP. Этот паттерн и был расширен на остальные панели.
+
+### Что реализовано
+
+**`chimera/modules/nginx_front_portal.py`** (TLS-фронт для User Portal):
+- Новый параметр `use_self_signed: bool = False` в `nginx_front_install()`
+- Новая функция `_generate_self_signed_tls(public_ip)` — `openssl req -x509`
+  с `subjectAltName=IP:<public_ip>,DNS:localhost`, 825 дней, RSA 2048
+- Сертификат: `/etc/nginx/ssl/chimera-portal-self-signed.{crt,key}` (0600/0644)
+- TUI-меню `_ask_self_signed()` спрашивает:
+  - `[1]` Let's Encrypt (нужен домен, доверенный сертификат)
+  - `[2]` Self-signed (без домена, по IP — браузер предупредит)
+- При `use_self_signed=True` — `domain=public_ip`, cert генерируется
+  автоматически, falls back на `127.0.0.1` если curl ifconfig.me не ответил
+
+**`chimera/modules/telemt_panel.py`** (прямой доступ к Telemt Panel):
+- Новая секция «Прямой доступ (self-signed TLS через nginx)»
+- Файлы: `TELEMT_NGINX_AVAILABLE/ENABLED`, `TELEMT_NGINX_STATE`
+- `_telemt_setup_direct_access()` — генерирует self-signed TLS,
+  пишет nginx vhost `listen <port> ssl http2 → proxy_pass http://127.0.0.1:8080`,
+  UFW open через `port_registry`
+- `_telemt_remove_direct_access()` — удаляет vhost, закрывает UFW
+- `_toggle_direct_access()` — пункт `[6]` в меню Telemt Panel
+- Статус прямого доступа показывается в шапке главного меню Telemt Panel
+- При полном удалении Telemt Panel — прямой доступ тоже удаляется
+
+### nginx vhost (Telemt Panel)
+
+```nginx
+server {
+    listen 8444 ssl http2;
+    server_name _;
+    ssl_certificate     /etc/nginx/ssl/telemt-panel-self-signed.crt;
+    ssl_certificate_key /etc/nginx/ssl/telemt-panel-self-signed.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+### port_registry
+
+- User Portal: `SERVICE_WEB_PANEL_NGINX` (порт по умолчанию 9443, кастомный)
+- Telemt Panel direct: `"telemt_panel_direct"` (порт 8444)
+  → позже канонизирован в `SERVICE_TELEMT_PANEL_DIRECT` (см. запись выше)
+
+### Тесты
+
+84 теста (port_registry + olcrtc + access_control) — pass, 0 регрессий.
+
+---
+
+## FEAT(security): access_control.py — master + OTP парольная защита — 9 августа 2026
+
+**Новый общий модуль `chimera/modules/access_control.py` — двухуровневая
+парольная защита для скрытых меню (olcRTC + CDN masking). Master-пароль
+для админа + одноразовые OTP для пользователей с автоматической ротацией.**
+
+### Контекст
+
+До этого фикса у olcRTC и CDN masking были два независимых парольных
+модуля с дублированной логикой PBKDF2-HMAC-SHA256. У обоих были
+одноразовые пароли, но не было разделения «админ vs пользователь»:
+- Админ не мог войти без расхода OTP
+- После каждого успешного входа нужно было вручную создавать новый OTP
+- OTP не было, OTP приходилось пересоздавать вручную после каждого входа
+
+### Что реализовано
+
+**`chimera/modules/access_control.py`** (новый, общий для olcRTC + CDN masking):
+
+Два типа паролей:
+1. **MASTER-ПАРОЛЬ** (админ) — задаётся один раз, не протухает.
+   Проверяется через PBKDF2-HMAC-SHA256 (600000 итераций, salt 16 байт,
+   constant-time сравнение через `hmac.compare_digest`).
+2. **OTP** (одноразовый для пользователя) — 8-символьный код,
+   протухает после использования. При успешном вводе:
+   - старый OTP помечается `used=true`
+   - автоматически генерируется новый OTP
+   - админу показывается новый OTP для передачи следующему пользователю
+
+Формат hash-файла (JSON, chmod 0600):
+```json
+{
+  "master": {"salt": "...", "hash": "...", "iterations": 600000},
+  "otp":    {"code": "AB12CD34", "used": false, "created_at": "..."}
+}
+```
+
+**Backward compatibility:** старый формат (salt/hash/iterations без
+ключа `"master"`) автоматически считается master-паролем. OTP создаётся
+при первом вызове `--init-otp`.
+
+### Скрипты управления
+
+```bash
+# olcRTC
+sudo python3 chimera/scripts/generate_olcrtc_password_hash.py        # установить/сменить master
+sudo python3 chimera/scripts/generate_olcrtc_password_hash.py --init-otp
+sudo python3 chimera/scripts/generate_olcrtc_password_hash.py --show-otp
+sudo python3 chimera/scripts/generate_olcrtc_password_hash.py --rotate-otp
+
+# CDN masking — аналогично
+sudo python3 chimera/scripts/generate_cdn_masking_password_hash.py [--init-otp|--show-otp|--rotate-otp]
+```
+
+### Интеграция
+
+- `chimera/modules/olcrtc.py` — `unlock_and_open_menu()` теперь использует
+  `access_control.verify_access()` + `access_control.init_master()`
+- `chimera/modules/xhttp_cdn_masking.py` — `_unlock_cdn_masking_menu()`
+  теперь делегирует в `access_control`
+
+### Тесты
+
+| Файл | Тестов | Что покрывает |
+|------|--------|---------------|
+| `test_access_control.py` | 20 | init_master (3), init_otp (3), verify_access (6: master, OTP+rotation, wrong, used, no file, empty), backward compat (2: old format → master), get_current_otp (3), rotate_otp (2) |
+| `test_xhttp_cdn_masking.py` | 7 (обновлены) | `TestPasswordHashScript` под новый API |
+| `test_olcrtc.py` | 14 (без изменений) | integration с access_control через `unlock_and_open_menu` |
+
+41 тест, 0 регрессий.
+
+---
+
+## FIX(olcrtc): пункт [3] всегда доступен + [7] старт/стоп сервиса с UFW — 9 августа 2026
+
+**Два UX-фикса в меню olcRTC: переконфигурация Manager Panel в любой
+момент + ручной старт/стоп сервиса с правильным управлением UFW-портом.**
+
+### Что было
+
+- Пункт `[3] Настроить Manager Panel` был доступен только когда state
+  был пустой — один раз настроил, дальше нельзя изменить carrier/
+  transport/room_id без полного удаления.
+- Не было способа остановить `olcrtc-manager.service` без systemctl —
+  при остановке порт 8888 оставался открытым в UFW (дыра), при ручном
+  `systemctl start` — порт был закрыт (недоступен).
+
+### Что стало
+
+**`chimera/modules/olcrtc.py`:**
+
+1. **Пункт `[3]` всегда доступен** когда olcrtc установлен — можно
+   переконфигурировать carrier/transport/room_id в любой момент
+   (старая конфигурация перезаписывается, `olcrtc-manager` перезапускается).
+
+2. **Новый пункт `[7] Старт/Стоп сервиса`:**
+   - **Остановить:** `systemctl stop olcrtc-manager` + `ufw_close_port(8888)`
+     через `port_registry` (с legacy comment fallback)
+   - **Запустить:** `systemctl start olcrtc-manager` + `ufw_open_port(8888)`
+     через `port_registry`
+   - Состояние сервиса (active/inactive) показывается в шапке меню
+
+3. Удаление перенесено с `[7]` на `[8]`.
+
+4. **Фикс синтаксиса** в `TRANSPORT_PAYLOAD_PRESETS` — em-dash (`—`) в
+   Python-строке ломал парсинг в некоторых локалях, заменён на `-`.
+
+### Тесты
+
+21 тест в `test_olcrtc.py` — pass, 0 регрессий.
+
+---
+
+## FIX(olcrtc): WB Stream поддерживает только vp8channel — 9 августа 2026
+
+**Ошибка `unsupported carrier/transport combination wbstream + datachannel`
+при выборе WB Stream + Datachannel. WB Stream работает ТОЛЬКО с
+vp8channel — меню теперь фильтрует доступные комбинации carrier→transport.**
+
+### Проблема
+
+`olcrtc-manager` принимает JSON с `carrier` + `transport.type`, но не
+все комбинации валидны:
+
+| Carrier | Поддерживаемые транспорты |
+|---------|---------------------------|
+| `wbstream` | только `vp8channel` |
+| `jitsi` | все 4 (`vp8channel`, `datachannel`, `sctp`, `rtp`) |
+| `telemost` | все 4 |
+
+Меню предлагало все 4 транспорта для всех carriers — пользователь
+выбирал `wbstream + datachannel`, manager падал с ошибкой.
+
+### Фикс
+
+`chimera/modules/olcrtc.py`:
+- Новый словарь `CARRIER_TRANSPORTS = {wbstream: [vp8channel], jitsi: [all 4], telemost: [all 4]}`
+- При выборе carrier меню фильтрует список транспортов
+- Неподдерживаемые транспорты показываются серым с пометкой «не поддерживается»
+- Дефолтный транспорт выбирается автоматически из поддерживаемых
+
+### Тесты
+
+21 тест в `test_olcrtc.py` — pass, 0 регрессий.
+
+---
+
+## FIX(olcrtc): 5 точечных фиксов — GOPROXY, зеркала, cleanup, NAT, deps — 9 августа 2026
+
+**Пять изолированных фиксов для olcRTC, починивших сборку на серверах
+без прямого GitHub-доступа, конфликты со старым bare-olcrtc, и
+NAT-детект на IPv4-only серверах.**
+
+### ПУНКТ 1 — GOPROXY-фоллбэк при сборке
+
+`_go_mod_download()` — пробует три прокси по очереди:
+`proxy.golang.org` → `goproxy.io` → `direct` (через `GOPROXY=...,...,direct`).
+
+`_go_build()` вызывает `_go_mod_download()` первым шагом; если ни один
+прокси не сработал — не пытается собирать (быстрая ошибка вместо
+долгого зависания на `go mod download`).
+
+### ПУНКТ 2 — зеркала для git clone
+
+`_git_clone_or_pull()` — если прямой `git clone` не удался (HTTP 403,
+timeout), пробует:
+1. `codeload.github.com` tarball (`https://codeload.github.com/<owner>/<repo>/tar.gz/<ref>`)
+2. 3 GitHub-прокси (согласовано с `geo_mirrors.py`):
+   - `gh-proxy.com`
+   - `gh.llkk.cc`
+   - `ghps.cc`
+
+### ПУНКТ 3 — очистка старого bare-olcrtc.service
+
+`_install_or_update()` первым шагом (до Go toolchain):
+- `systemctl disable --now olcrtc.service`
+- удаляет `/etc/systemd/system/olcrtc.service`
+- удаляет `/etc/systemd/system/olcrtc@.service` (template из старой версии)
+- `systemctl daemon-reload`
+
+Без этого старый `bare-olcrtc` конфликтовал с новым `olcrtc-manager`
+(оба пытались слушать один порт / управлять одними файлами).
+
+### ПУНКТ 4 — NAT-детект через mtproto
+
+`_get_public_ip()` переиспользует `mtproto._get_public_ip()`, которая
+правильно обрабатывает NAT (сравнение локального IP с внешним
+echo-сервисом, а не `ipaddress.ip_address(...).is_private`-эвристика).
+
+Fallback на `curl -s ifconfig.me` если `mtproto` недоступен.
+
+### ПУНКТ 5 — runtime-зависимости
+
+`_install_or_update()` проверяет `curl`, `openssl`, `iproute2`, `tar`,
+`git` через `shutil.which()`. Если что-то отсутствует — устанавливает
+через `system_deps._pkg_install()`.
+
+### Тесты (8 новых в `test_olcrtc.py`)
+
+`TestGoModDownloadFallback` (2):
+- первый прокси падает, второй успешен → True
+- все три падают → False, `_go_build` не пытается собирать
+
+`TestGitCloneOrPull` (3):
+- прямой clone успешен → зеркала не пробуются
+- прямой clone падает, codeload tarball успешен → True
+- всё падает → False
+
+`TestCleanupOldBareOlcrtc` (1):
+- `_install_or_update` вызывает disable+unlink+daemon-reload
+
+`TestGetPublicIp` (1):
+- переиспользует `mtproto._get_public_ip()`
+
+`TestRuntimeDeps` (1):
+- `_install_or_update` проверяет `shutil.which()` для всех 5 бинарников
+
+14 тестов в `test_olcrtc.py` (было 6, +8), все pass.
+
+---
+
 ## FEAT(olcrtc): полная переработка на manager panel + парольная защита — 8 августа 2026
 
 **olcRTC переписан с нуля: bare-olcrtc (YAML, systemd template) →
