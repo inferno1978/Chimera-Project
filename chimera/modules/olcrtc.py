@@ -1047,17 +1047,35 @@ def _flow_configure() -> None:
     carrier, carrier_title, _ = CARRIERS[c_choice]
 
     print()
+    # Не все комбинации carrier+transport поддерживаются olcrtc-manager.
+    # WB Stream поддерживает ТОЛЬКО vp8channel (подтверждено ошибкой
+    # "unsupported carrier/transport combination wbstream + datachannel").
+    # Jitsi поддерживает datachannel, vp8channel, seichannel, videochannel.
+    # Телемост — аналогично Jitsi.
+    SUPPORTED_TRANSPORTS = {
+        "wbstream": {"2"},  # только vp8channel
+        "jitsi":    {"1", "2", "3", "4"},  # все
+        "telemost": {"1", "2", "3", "4"},  # все
+    }
+    allowed = SUPPORTED_TRANSPORTS.get(carrier, {"2"})
+    default_t = "2" if "2" in allowed else sorted(allowed)[0]
+
     _box_top("Транспорт (маскировка)")
     for k, (_, hint) in TRANSPORTS.items():
-        _box_item(k, hint)
+        if k in allowed:
+            marker = f" {GREEN}(по умолчанию){NC}" if k == default_t else ""
+            _box_item(k, f"{hint}{marker}")
+        else:
+            _box_row(f"  {DIM}[{k}] {hint} — не поддерживается для {carrier_title}{NC}")
     _box_bottom()
 
     try:
-        t_choice = input(f"{CYAN}  Транспорт [2 — vp8channel]:{NC} ").strip() or "2"
+        t_choice = input(f"{CYAN}  Транспорт [{default_t}]:{NC} ").strip() or default_t
     except (EOFError, KeyboardInterrupt):
         return
-    if t_choice not in TRANSPORTS:
-        _warn("Неверный выбор")
+    if t_choice not in allowed:
+        _warn(f"Транспорт {t_choice} не поддерживается для {carrier_title}")
+        _warn(f"Поддерживаемые: {', '.join(sorted(allowed))}")
         input(f"{BLUE}  Нажмите Enter...{NC}")
         return
     transport, _ = TRANSPORTS[t_choice]
