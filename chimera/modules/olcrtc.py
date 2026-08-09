@@ -1,36 +1,29 @@
 """
 chimera/modules/olcrtc.py
 ───────────────────────────────────────────────────────────────────────────────
-olcRTC — туннель TCP-over-WebRTC, маскирующий трафик под обычный видеозвонок
-в разрешённых "белым списком" сервисах (Jitsi / Яндекс.Телемост / WB Stream).
-Источник: https://github.com/openlibrecommunity/olcrtc (Beta, нет готовых
-бинарников — только сборка из исходников, Go 1.26+).
+olcRTC — туннель TCP-over-WebRTC, маскирующий трафик под видеозвонок
+в разрешённых «белым списком» сервисах (WB Stream / Jitsi / Телемост).
 
-ВАЖНО — архитектурное отличие от VLESS/Mieru/NaiveProxy в этом проекте:
-  olcRTC не умеет "один сервер — много пользователей одним портом". Каждый
-  клиент ("линк") — это отдельный процесс olcrtc в режиме srv, который
-  реально участвует в WebRTC-сессии (для vp8channel/videochannel — кодирует
-  видео) и проксирует трафик именно этого одного клиента. Поэтому 10 линков
-  — это 10 отдельных systemd-сервисов, потребляющих свой CPU/трафик.
-  Это явно показывается в статусе и расписано в гайде модуля.
-
-  Клиенту тоже нужен сам бинарник olcrtc (или альтернативный community-клиент
-  olcbox, alpha) — обычная vless://-ссылка или QR здесь не работает, в
-  актуальной версии olcrtc нет даже единого URI-формата: настройки передаются
-  одним YAML-файлом. Поэтому вместо ссылки/QR модуль отдаёт готовый YAML
-  клиента текстом для копирования + пошаговый гайд.
+Архитектура (полная переработка):
+  • olcrtc — сам туннель (github.com/openlibrecommunity/olcrtc, master)
+  • olcrtc-manager — веб-панель + API + supervisor (github.com/BigDaddy3334/olcrtc-manager-panel, main)
+  • Manager сам запускает/управляет olcrtc процессами
+  • Веб-панель на https://SERVER_IP:8888/admin (self-signed TLS)
+  • API: /api/state, /api/logs
+  • OlcBox URI для клиента
 
 Структура на диске:
-  /opt/olcrtc-src/                       — исходники (git clone, для пересборки)
-  /usr/local/bin/olcrtc                  — собранный бинарник
-  /etc/olcrtc/links/<name>.yaml          — серверный конфиг каждого линка
-  /etc/olcrtc/links/<name>.client.yaml   — клиентский конфиг (для cat/nano,
-                                            копия того, что выводится в меню)
-  /var/lib/olcrtc/<name>/data/           — runtime-данные каждого линка (поле `data`)
-  /etc/systemd/system/olcrtc@.service    — systemd template-юнит
-  /var/lib/xray-installer/olcrtc.json    — состояние модуля (линки, версия сборки)
+  /usr/local/bin/olcrtc                  — туннель (собран из исходников)
+  /usr/local/bin/olcrtc-manager          — панель (собрана из исходников)
+  /etc/olcrtc-manager/config.json        — конфиг manager (JSON, не YAML)
+  /etc/olcrtc-manager/panel.env          — basic auth для панели
+  /etc/olcrtc-manager/tls.crt            — self-signed TLS сертификат
+  /etc/olcrtc-manager/tls.key            — TLS ключ
+  /var/lib/olcrtc/data/                  — runtime данные olcrtc
+  /etc/systemd/system/olcrtc-manager.service — systemd unit
+  /var/lib/xray-installer/olcrtc.json    — состояние модуля
 
-Точка входа из _core.py (по аналогии с do_mieru_menu/do_naiveproxy_menu):
+Точка входа из _core.py:
     from chimera.modules.olcrtc import do_olcrtc_menu
 ───────────────────────────────────────────────────────────────────────────────
 """
@@ -48,7 +41,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-# ── Цвета (идентично остальным модулям проекта) ───────────────────────────────
+# ── Цвета ───────────────────────────────────────────────────────────────────────
 def _detect_colors() -> dict:
     _light = os.environ.get("VLESS_THEME", "").lower() == "light"
     if sys.stdout.isatty():
@@ -85,9 +78,11 @@ def _log(level: str, msg: str) -> None:
         with _LOG_FILE.open("a") as f:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             clean = re.sub(r'\033\[[0-9;]*m', '', msg)
-            f.write(f"[{ts}] [{level}] {clean}\n")
+            f.write(f"[{ts}] [{OLCRTC_TAG}] [{level}] {clean}\n")
     except Exception:
         pass
+
+OLCRTC_TAG = "OLCRTC"
 
 def _info(msg: str)    -> None: print(f"{CYAN}[INFO]{NC}  {msg}");  _log("INFO",    msg)
 def _success(msg: str) -> None: print(f"{GREEN}[OK]{NC}    {msg}"); _log("SUCCESS", msg)
@@ -97,7 +92,8 @@ def _error(msg: str)   -> None: print(f"{RED}[ERROR]{NC} {msg}");   _log("ERROR"
 # ── Вспомогательные ───────────────────────────────────────────────────────────
 def _run(cmd: list, capture: bool = False, check: bool = False,
          quiet: bool = False, timeout: int | None = None,
-         env: dict | None = None, cwd: str | None = None) -> subprocess.CompletedProcess:
+         env: dict | None = None, cwd: str | None = None,
+         input_text: str | None = None) -> subprocess.CompletedProcess:
     kw: dict = {"check": check}
     if capture:
         kw.update(capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -109,6 +105,8 @@ def _run(cmd: list, capture: bool = False, check: bool = False,
         kw["env"] = env
     if cwd:
         kw["cwd"] = cwd
+    if input_text is not None:
+        kw["input"] = input_text
     try:
         return subprocess.run(cmd, **kw)
     except subprocess.TimeoutExpired:
@@ -123,22 +121,42 @@ from chimera.modules.box_renderer import (
 # =============================================================================
 #  КОНСТАНТЫ
 # =============================================================================
-OLC_REPO        = "https://github.com/openlibrecommunity/olcrtc.git"
-OLC_SRC_DIR     = Path("/opt/olcrtc-src")
-OLC_BIN         = Path("/usr/local/bin/olcrtc")
-OLC_GO_DIR      = Path("/usr/local/go")
-OLC_ETC_DIR     = Path("/etc/olcrtc")
-OLC_LINKS_DIR   = OLC_ETC_DIR / "links"
-OLC_VAR_DIR     = Path("/var/lib/olcrtc")
-OLC_STATE_FILE  = Path("/var/lib/xray-installer/olcrtc.json")
-OLC_UNIT_FILE   = Path("/etc/systemd/system/olcrtc@.service")
+# Репозитории.
+OLCRTC_REPO          = "https://github.com/openlibrecommunity/olcrtc"
+OLCRTC_MANAGER_REPO  = "https://github.com/BigDaddy3334/olcrtc-manager-panel"
+OLCRTC_BRANCH        = "master"
+OLCRTC_MANAGER_BRANCH = "main"
 
-JITSI_HOSTS = ["meet.handyweb.org", "meet.small-dm.ru", "meet1.arbitr.ru"]
+# Бинарники.
+OLC_BIN       = Path("/usr/local/bin/olcrtc")
+OLC_MGR_BIN   = Path("/usr/local/bin/olcrtc-manager")
 
+# Go toolchain.
+OLC_GO_DIR    = Path("/usr/local/go")
+
+# Manager panel файлы.
+MGR_ETC_DIR   = Path("/etc/olcrtc-manager")
+MGR_CONFIG    = MGR_ETC_DIR / "config.json"
+MGR_PANEL_ENV = MGR_ETC_DIR / "panel.env"
+MGR_TLS_CRT   = MGR_ETC_DIR / "tls.crt"
+MGR_TLS_KEY   = MGR_ETC_DIR / "tls.key"
+MGR_DATA_DIR  = Path("/var/lib/olcrtc/data")
+MGR_UNIT_FILE = Path("/etc/systemd/system/olcrtc-manager.service")
+
+# Состояние модуля.
+OLC_STATE_FILE = Path("/var/lib/xray-installer/olcrtc.json")
+
+# Порт manager панели (из гайда).
+MGR_PORT = 8888
+
+# Service tag для port_registry.
+_OLCRTC_MANAGER_SERVICE_TAG = "olcrtc_manager"
+
+# Carriers / Transports.
 CARRIERS = {
-    "1": ("jitsi",     "Jitsi",     "комната придумывается на лету — полная автоматизация"),
-    "2": ("telemost",  "Телемост",  "комнату нужно создать вручную на telemost.yandex.ru"),
-    "3": ("wbstream",  "WB Stream", "комнату нужно создать вручную на stream.wb.ru"),
+    "1": ("wbstream",  "WB Stream", "комнату нужно создать вручную на stream.wb.ru"),
+    "2": ("jitsi",     "Jitsi",     "комната придумывается на лету — полная автоматизация"),
+    "3": ("telemost",  "Телемост",  "комнату нужно создать вручную на telemost.yandex.ru"),
 }
 TRANSPORTS = {
     "1": ("datachannel",  "максимум скорости, минимум маскировки под видео"),
@@ -146,30 +164,15 @@ TRANSPORTS = {
     "3": ("seichannel",   "маскировка под видео H264/SEI, ниже скорость"),
     "4": ("videochannel", "полноценные видео-кадры (QR), самый медленный, лучшая маскировка"),
 }
-
 ROOM_CREATE_URL = {
     "telemost": "https://telemost.yandex.ru/",
-    "wbstream":  "https://stream.wb.ru/",
+    "wbstream": "https://stream.wb.ru/",
 }
 
-_UNIT_CONTENT = (
-    "[Unit]\n"
-    "Description=olcrtc link %i (WebRTC-туннель)\n"
-    "After=network-online.target\n"
-    "Wants=network-online.target\n"
-    "\n"
-    "[Service]\n"
-    "Type=simple\n"
-    "ExecStart=/usr/local/bin/olcrtc /etc/olcrtc/links/%i.yaml\n"
-    "WorkingDirectory=/var/lib/olcrtc/%i\n"
-    "Restart=on-failure\n"
-    "RestartSec=5\n"
-    "User=root\n"
-    "NoNewPrivileges=true\n"
-    "\n"
-    "[Install]\n"
-    "WantedBy=multi-user.target\n"
-)
+# Transport payload defaults (из гайда — vp8channel с fps=30, batch=64).
+TRANSPORT_PAYLOADS = {
+    "vp8channel": {"vp8-fps": "30", "vp8-batch": "64"},
+}
 
 
 # =============================================================================
@@ -179,11 +182,17 @@ def _load_state() -> dict:
     if OLC_STATE_FILE.exists():
         try:
             st = json.loads(OLC_STATE_FILE.read_text())
-            st.setdefault("links", {})
+            st.setdefault("installed", False)
+            st.setdefault("manager_installed", False)
+            st.setdefault("commit", "")
+            st.setdefault("manager_commit", "")
+            st.setdefault("built_at", "")
+            st.setdefault("config", {})
             return st
         except Exception:
             pass
-    return {"installed": False, "commit": "", "built_at": "", "links": {}}
+    return {"installed": False, "manager_installed": False, "commit": "",
+            "manager_commit": "", "built_at": "", "config": {}}
 
 
 def _save_state(st: dict) -> None:
@@ -195,7 +204,7 @@ def _save_state(st: dict) -> None:
 
 
 # =============================================================================
-#  GO TOOLCHAIN
+#  GO TOOLCHAIN (переиспользуется из старого кода)
 # =============================================================================
 def _go_arch() -> str:
     r = _run(["uname", "-m"], capture=True, check=False)
@@ -221,29 +230,16 @@ def _go_installed_version() -> tuple | None:
 
 
 def _go_required_version() -> str:
-    gomod = OLC_SRC_DIR / "go.mod"
-    if gomod.exists():
-        try:
-            m = re.search(r"^go\s+(\d+\.\d+(?:\.\d+)?)", gomod.read_text(), re.M)
-            if m:
-                return m.group(1)
-        except Exception:
-            pass
+    """Минимальная версия Go — 1.26 (из гайда, golang:1.26-bookworm)."""
     return "1.26.0"
 
 
-def _go_ok(required: str) -> bool:
+def _go_ok(required: str = "1.26.0") -> bool:
     cur = _go_installed_version()
     return cur is not None and cur >= _ver_tuple(required)
 
 
 def _http_get_text(url: str, timeout: int = 15) -> str | None:
-    """HTTP GET для текстовых ответов (API metadata, version strings).
-
-    Используется для:
-      • go.dev/VERSION?m=text — последняя версия Go
-      • api.github.com/.../commits/master — SHA последнего коммита olcrtc
-    """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="replace").strip()
@@ -251,14 +247,7 @@ def _http_get_text(url: str, timeout: int = 15) -> str | None:
         return None
 
 
-def _install_go(required: str) -> bool:
-    """Скачивает официальный архив Go через download_manager.fetch_package().
-
-    МИГРАЦИЯ: раньше использовал _http_download (urlopen) с ОДНИМ прямым
-    URL (https://go.dev/dl/...), без зеркал. Теперь переиспользует
-    GO_TOOLCHAIN_SPEC из go_toolchain_packages.py (Wave 2) — 4 зеркала
-    (go.dev + golang.google.cn + mirrors.aliyun.com + mirrors.tencent.com).
-    """
+def _install_go(required: str = "1.26.0") -> bool:
     from chimera.modules.download_manager import fetch_package
     from chimera.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
 
@@ -278,270 +267,531 @@ def _install_go(required: str) -> bool:
     return _go_ok(required)
 
 
+def _find_go_binary() -> str | None:
+    """Поиск go бинарника (PATH или /usr/local/go/bin/go)."""
+    go = shutil.which("go")
+    if go:
+        return go
+    candidates = [
+        "/usr/local/go/bin/go",
+        "/usr/lib/go/bin/go",
+        "/snap/bin/go",
+    ]
+    for c in candidates:
+        if Path(c).exists() and os.access(c, os.X_OK):
+            return c
+    return None
+
+
 # =============================================================================
-#  СБОРКА olcrtc
+#  СБОРКА olcrtc и olcrtc-manager
 # =============================================================================
 def _olcrtc_installed() -> bool:
     return OLC_BIN.exists() and os.access(OLC_BIN, os.X_OK)
 
 
-def _olcrtc_clone_or_update() -> bool:
-    """Скачивает/обновляет исходники olcrtc через download_manager.fetch_package().
-
-    МИГРАЦИЯ (Wave 6, Variant A): раньше `git clone --depth 1` (или
-    `git pull --ff-only` для обновления), без зеркал. Теперь
-    fetch_package(OLCRTC_SOURCE_SPEC) — HTTP tarball через codeload.github.com.
-
-    Variant A применим согласно анализу:
-      • Build — pure `go build`, не требует .git/.
-      • Submodules отсутствуют.
-      • Commit SHA получается через отдельный GitHub API call (см.
-        _olcrtc_fetch_commit_sha), вместо `git rev-parse --short HEAD`.
-
-    post_install OLCRTC_SOURCE_SPEC делает:
-      1. extract tarball → olcrtc-master/
-      2. go build → /usr/local/bin/olcrtc (chmod 0o755)
-      3. cleanup
-
-    Go toolchain должен быть установлен ДО этого вызова.
-    """
-    from chimera.modules.download_manager import fetch_package
-    from chimera.modules.olcrtc_packages import OLCRTC_SOURCE_SPEC
-
-    ok = fetch_package(OLCRTC_SOURCE_SPEC, print_hint_on_failure=False)
-    return ok
+def _manager_installed() -> bool:
+    return OLC_MGR_BIN.exists() and os.access(OLC_MGR_BIN, os.X_OK)
 
 
-def _olcrtc_fetch_commit_sha() -> str:
-    """Получает SHA последнего коммита через GitHub API.
-
-    Заменяет `git rev-parse --short HEAD` при Variant A (HTTP tarball
-    вместо git clone — .git/ отсутствует).
-
-    Возвращает короткий SHA (7 символов) или "?" при ошибке.
-    """
-    import json
-    from chimera.modules.olcrtc_mirrors import get_olcrtc_commits_api_url
-    api_url = get_olcrtc_commits_api_url()
-    try:
-        version = _http_get_text(api_url)
-        if not version:
-            return "?"
-        data = json.loads(version)
-        sha = data.get("sha", "")
-        return sha[:7] if sha else "?"
-    except Exception:
-        return "?"
+def _git_clone_or_pull(repo: str, dest: Path, branch: str = "master") -> bool:
+    """Клонирует или обновляет репозиторий через git."""
+    if dest.exists() and (dest / ".git").exists():
+        _info(f"Обновление {dest.name}...")
+        r = _run(["git", "pull", "--ff-only", "origin", branch],
+                 capture=True, check=False, timeout=60, cwd=str(dest))
+        return r.returncode == 0
+    else:
+        _info(f"Клонирование {repo} → {dest}...")
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        r = _run(["git", "clone", "--depth", "1", "--branch", branch,
+                  repo, str(dest)],
+                 capture=True, check=False, timeout=120)
+        return r.returncode == 0
 
 
-def _olcrtc_build() -> bool:
-    """DEPRECATED: сборка теперь делается внутри post_install OLCRTC_SOURCE_SPEC.
+def _go_build(src_dir: Path, output: Path, pkg_path: str = "./cmd/olcrtc") -> bool:
+    """Собирает Go бинарник из src_dir, кладёт в output."""
+    go = _find_go_binary()
+    if not go:
+        _error("Go не найден — установите Go сначала")
+        return False
 
-    Оставлен для обратной совместимости — вызывает fetch_package, который
-    сам делает extract + go build.
-    """
-    return _olcrtc_clone_or_update()
+    env = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": _go_arch()}
+    _info(f"Сборка {output.name} (это может занять несколько минут)...")
+
+    r = subprocess.run(
+        [go, "build", "-trimpath", "-ldflags", "-s -w",
+         "-o", str(output), pkg_path],
+        cwd=str(src_dir),
+        env=env,
+        capture_output=True, text=True,
+        timeout=900,  # 15 минут
+    )
+    if r.returncode != 0 or not output.exists():
+        _error(f"Сборка не удалась: {(r.stderr or '').strip()[:500]}")
+        return False
+    output.chmod(0o755)
+    return True
 
 
-def _olcrtc_commit() -> str:
-    """Возвращает короткий SHA последнего коммита.
-
-    МИГРАЦИЯ: раньше `git rev-parse --short HEAD` (требует .git/).
-    Теперь GitHub API call к /commits/master (см. _olcrtc_fetch_commit_sha).
-    """
-    return _olcrtc_fetch_commit_sha()
-
-
-def _ensure_unit_file() -> None:
-    try:
-        if not OLC_UNIT_FILE.exists() or OLC_UNIT_FILE.read_text() != _UNIT_CONTENT:
-            OLC_UNIT_FILE.parent.mkdir(parents=True, exist_ok=True)
-            OLC_UNIT_FILE.write_text(_UNIT_CONTENT)
-            _run(["systemctl", "daemon-reload"], check=False, quiet=True, timeout=15)
-    except Exception as e:
-        _warn(f"Не удалось записать systemd unit: {e}")
+def _get_commit_sha(src_dir: Path) -> str:
+    """Возвращает короткий SHA коммита."""
+    r = _run(["git", "rev-parse", "--short", "HEAD"],
+             capture=True, check=False, timeout=10, cwd=str(src_dir))
+    return r.stdout.strip()[:7] if r.returncode == 0 else "?"
 
 
 def _install_or_update() -> bool:
-    """Полная установка/обновление: Go (если нужно) → клон/пул → сборка."""
-    OLC_LINKS_DIR.mkdir(parents=True, exist_ok=True)
-    OLC_VAR_DIR.mkdir(parents=True, exist_ok=True)
+    """Полная установка/обновление: Go → olcrtc → olcrtc-manager.
 
-    _info("Клонирую/обновляю исходники olcrtc...")
-    if not _olcrtc_clone_or_update():
-        _warn("Не удалось клонировать/обновить репозиторий — проверьте доступ к github.com")
-        return False
-
+    Шаги:
+      1. Проверка/установка Go 1.26+
+      2. Клонирование openlibrecommunity/olcrtc (master)
+      3. Сборка /usr/local/bin/olcrtc
+      4. Клонирование BigDaddy3334/olcrtc-manager-panel (main)
+      5. Сборка /usr/local/bin/olcrtc-manager
+      6. Сохранение state
+    """
+    # 1. Go toolchain
     required = _go_required_version()
     if not _go_ok(required):
-        _info(f"Нужен Go {required}+, устанавливаю...")
+        _info(f"Требуется Go {required}+, устанавливаю...")
         if not _install_go(required):
-            _warn(f"Не удалось установить Go {required}+ автоматически. "
-                  f"Установите вручную: https://go.dev/dl/")
+            _error("Не удалось установить Go")
             return False
-        _success(f"Go установлен ({required}+)")
-    else:
-        _info("Go уже подходящей версии — пропускаю установку")
+    _success(f"Go OK ({_go_installed_version()})")
 
-    _info("Собираю бинарник (go build, может занять пару минут)...")
-    if not _olcrtc_build():
-        _warn("Сборка не удалась")
+    # Временные директории для исходников.
+    tmp_base = Path("/tmp/olcrtc-build")
+    tmp_base.mkdir(parents=True, exist_ok=True)
+    olcrtc_src = tmp_base / "olcrtc-src"
+    mgr_src    = tmp_base / "panel-src"
+
+    # 2-3. Клонирование и сборка olcrtc.
+    if not _git_clone_or_pull(OLCRTC_REPO, olcrtc_src, OLCRTC_BRANCH):
+        _error("Не удалось клонировать olcrtc")
         return False
+    if not _go_build(olcrtc_src, OLC_BIN, "./cmd/olcrtc"):
+        return False
+    olc_commit = _get_commit_sha(olcrtc_src)
+    _success(f"olcrtc собран (коммит {olc_commit})")
 
-    _ensure_unit_file()
+    # 4-5. Клонирование и сборка olcrtc-manager.
+    if not _git_clone_or_pull(OLCRTC_MANAGER_REPO, mgr_src, OLCRTC_MANAGER_BRANCH):
+        _error("Не удалось клонировать olcrtc-manager-panel")
+        return False
+    if not _go_build(mgr_src, OLC_MGR_BIN, "./cmd/olcrtc-manager"):
+        return False
+    mgr_commit = _get_commit_sha(mgr_src)
+    _success(f"olcrtc-manager собран (коммит {mgr_commit})")
 
+    # 6. Сохранение state.
     st = _load_state()
     st["installed"] = True
-    st["commit"] = _olcrtc_commit()
+    st["manager_installed"] = True
+    st["commit"] = olc_commit
+    st["manager_commit"] = mgr_commit
     st["built_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _save_state(st)
+
+    # Cleanup.
+    shutil.rmtree(olcrtc_src, ignore_errors=True)
+    shutil.rmtree(mgr_src, ignore_errors=True)
+
     return True
 
 
 # =============================================================================
-#  ССЫЛКИ-КЛИЕНТЫ ("ЛИНКИ")
+#  CONFIG.JSON ГЕНЕРАЦИЯ (точно по гайду)
 # =============================================================================
-def _sanitize_name(raw: str) -> str:
-    return re.sub(r"[^a-z0-9_-]", "", raw.strip().lower())[:32]
+def _generate_config_json(carrier: str, room_id: str, key: str,
+                          transport: str, location_name: str = "wb-vps") -> str:
+    """Генерирует config.json для olcrtc-manager.
+
+    Формат — точно по гайду:
+    {
+      "version": 1,
+      "name": "WB VPS",
+      "port": 8888,
+      "refresh": "10m",
+      "clients": [
+        {
+          "client-id": "wb",
+          "refresh": "5m",
+          "locations": [
+            {
+              "name": "wb-vps",
+              "endpoint": {
+                "room_id": "<ROOM_ID>",
+                "key": "<KEY>"
+              },
+              "carrier": "wbstream",
+              "transport": {
+                "type": "vp8channel",
+                "payload": {
+                  "vp8-fps": "30",
+                  "vp8-batch": "64"
+                }
+              },
+              "link": "direct",
+              "data": "/var/lib/olcrtc/data",
+              "dns": "8.8.8.8:53"
+            }
+          ]
+        }
+      ]
+    }
+    """
+    # Transport payload (из гайда — vp8channel с fps=30, batch=64).
+    payload = TRANSPORT_PAYLOADS.get(transport, {})
+
+    config = {
+        "version": 1,
+        "name": "Chimera olcRTC",
+        "port": MGR_PORT,
+        "refresh": "10m",
+        "clients": [
+            {
+                "client-id": "wb",
+                "refresh": "5m",
+                "locations": [
+                    {
+                        "name": location_name,
+                        "endpoint": {
+                            "room_id": room_id,
+                            "key": key,
+                        },
+                        "carrier": carrier,
+                        "transport": {
+                            "type": transport,
+                            "payload": payload,
+                        },
+                        "link": "direct",
+                        "data": str(MGR_DATA_DIR),
+                        "dns": "8.8.8.8:53",
+                    }
+                ],
+            }
+        ],
+    }
+    return json.dumps(config, indent=2, ensure_ascii=False)
 
 
-def _gen_key() -> str:
-    return secrets.token_hex(32)
+def _generate_panel_env(admin_user: str, admin_pass: str) -> str:
+    """Генерирует panel.env для basic auth."""
+    return (
+        f"OLCRTC_MANAGER_USER='{admin_user}'\n"
+        f"OLCRTC_MANAGER_PASS='{admin_pass}'\n"
+        f"OLCRTC_MANAGER_ADMIN_PATH='/admin'\n"
+        f"OLCRTC_MANAGER_TLS_CERT='{MGR_TLS_CRT}'\n"
+        f"OLCRTC_MANAGER_TLS_KEY='{MGR_TLS_KEY}'\n"
+    )
 
 
-def _gen_jitsi_room_path() -> str:
-    return "olc-" + secrets.token_hex(4)
+def _generate_systemd_unit() -> str:
+    """Генерирует systemd unit для olcrtc-manager (точно по гайду)."""
+    return (
+        "[Unit]\n"
+        "Description=OlcRTC Manager Panel\n"
+        f"Documentation={OLCRTC_MANAGER_REPO}\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"Environment=OLCRTC_PATH={OLC_BIN}\n"
+        f"EnvironmentFile=-{MGR_PANEL_ENV}\n"
+        f"ExecStart={OLC_MGR_BIN} -addr 0.0.0.0 -config {MGR_CONFIG}\n"
+        "ExecReload=/bin/kill -HUP $MAINPID\n"
+        "Restart=on-failure\n"
+        "RestartSec=5s\n"
+        "KillSignal=SIGTERM\n"
+        "TimeoutStopSec=10s\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
 
 
-def _link_unit(name: str) -> str:
-    return f"olcrtc@{name}.service"
-
-
-def _systemd_is_active(unit: str) -> bool:
-    r = _run(["systemctl", "is-active", unit], capture=True, check=False, timeout=10)
-    return r.stdout.strip() == "active"
-
-
-def _server_yaml(carrier: str, room_id: str, key: str, transport: str, data_dir: str) -> str:
-    lines = [
-        "mode: srv",
-        "auth:",
-        f"  provider: {carrier}",
-        "room:",
-        f'  id: "{room_id}"',
-        "crypto:",
-        f'  key: "{key}"',
-        "net:",
-        f"  transport: {transport}",
-        '  dns: "8.8.8.8:53"',
-    ]
-    if transport == "vp8channel":
-        lines += ["vp8:", "  fps: 60", "  batch_size: 64"]
-    elif transport == "videochannel":
-        lines += ["video:", "  width: 1080", "  height: 1080", "  fps: 60",
-                   '  bitrate: "5000k"', '  hw: "none"']
-    lines += [f'data: "{data_dir}"', "debug: false"]
-    return "\n".join(lines) + "\n"
-
-
-def _client_yaml(carrier: str, room_id: str, key: str, transport: str, socks_port: int) -> str:
-    lines = [
-        "mode: cnc",
-        "auth:",
-        f"  provider: {carrier}",
-        "room:",
-        f'  id: "{room_id}"',
-        "crypto:",
-        f'  key: "{key}"',
-        "net:",
-        f"  transport: {transport}",
-        '  dns: "8.8.8.8:53"',
-    ]
-    if transport == "vp8channel":
-        lines += ["vp8:", "  fps: 60", "  batch_size: 64"]
-    elif transport == "videochannel":
-        lines += ["video:", "  width: 1080", "  height: 1080", "  fps: 60",
-                   '  bitrate: "5000k"', '  hw: "none"']
-    lines += ["socks:", '  host: "127.0.0.1"', f"  port: {socks_port}",
-              'data: "olcrtc-client-data"', "debug: false"]
-    return "\n".join(lines) + "\n"
-
-
-def _next_socks_port(st: dict) -> int:
-    used = {int(v.get("socks_port", 0)) for v in st["links"].values()}
-    port = 8808
-    while port in used:
-        port += 1
-    return port
-
-
-def _create_link(st: dict, name: str, carrier: str, transport: str, room_id: str) -> bool:
-    key = _gen_key()
-    socks_port = _next_socks_port(st)
-    data_dir = OLC_VAR_DIR / name / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    server_text = _server_yaml(carrier, room_id, key, transport, str(data_dir))
-    yaml_path = OLC_LINKS_DIR / f"{name}.yaml"
-    try:
-        OLC_LINKS_DIR.mkdir(parents=True, exist_ok=True)
-        yaml_path.write_text(server_text, encoding="utf-8")
-    except Exception as e:
-        _warn(f"Не удалось записать конфиг: {e}")
+def _generate_tls_cert(public_ip: str) -> bool:
+    """Генерирует self-signed TLS сертификат (точно по гайду)."""
+    _info("Генерация self-signed TLS сертификата...")
+    r = _run([
+        "openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+        "-sha256", "-days", "825",
+        "-keyout", str(MGR_TLS_KEY),
+        "-out", str(MGR_TLS_CRT),
+        "-subj", "/CN=olcrtc-manager",
+        "-addext", f"subjectAltName=IP:{public_ip},DNS:localhost",
+    ], capture=True, check=False, timeout=30)
+    if r.returncode != 0:
+        _error(f"openssl failed: {(r.stderr or '').strip()[:300]}")
         return False
-
-    # Клиентский конфиг раньше только печатался на экран и терялся при
-    # потере истории терминала — сохраняем рядом с серверным, отдельным
-    # файлом, чтобы можно было открыть позже через cat/nano.
-    client_text = _client_yaml(carrier, room_id, key, transport, socks_port)
-    client_yaml_path = OLC_LINKS_DIR / f"{name}.client.yaml"
     try:
-        client_yaml_path.write_text(client_text, encoding="utf-8")
+        MGR_TLS_KEY.chmod(0o600)
+        MGR_TLS_CRT.chmod(0o644)
+    except Exception:
+        pass
+    return True
+
+
+def _generate_olcbox_uri(carrier: str, transport: str, room_id: str,
+                          key: str, location_name: str) -> str:
+    """Генерирует OlcBox URI (точно по гайду).
+
+    Формат: olcrtc://<carrier>?<transport><payload>@<room_id>#<key>$<location>
+    Пример: olcrtc://wbstream?vp8channel<vp8-batch=64&vp8-fps=30>@ROOM_ID#KEY$wb-vps
+    """
+    payload = TRANSPORT_PAYLOADS.get(transport, {})
+    payload_str = "&".join(f"{k}={v}" for k, v in payload.items())
+    if payload_str:
+        payload_str = f"<{payload_str}>"
+    return f"olcrtc://{carrier}?{transport}{payload_str}@{room_id}#{key}${location_name}"
+
+
+# =============================================================================
+#  SERVER IP
+# =============================================================================
+def _get_public_ip() -> str:
+    """Пытается определить публичный IP сервера."""
+    # Через curl ifconfig.me (быстро, без DNS-зависимостей).
+    r = _run(["curl", "-s", "--max-time", "5", "ifconfig.me"],
+             capture=True, check=False, timeout=10)
+    ip = r.stdout.strip() if r.returncode == 0 else ""
+    if ip and re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
+        return ip
+    # Fallback: hostname -I
+    r = _run(["hostname", "-I"], capture=True, check=False, timeout=5)
+    if r.returncode == 0:
+        ips = r.stdout.strip().split()
+        for ip in ips:
+            if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip) and not ip.startswith("127."):
+                return ip
+    return ""
+
+
+# =============================================================================
+#  УСТАНОВКА / НАСТРОЙКА / УДАЛЕНИЕ MANAGER PANEL
+# =============================================================================
+def _configure_manager(carrier: str, transport: str, room_id: str,
+                       location_name: str = "wb-vps") -> bool:
+    """Настраивает manager panel: config.json, panel.env, TLS, systemd, UFW.
+
+    Возвращает True при успехе.
+    """
+    st = _load_state()
+
+    # Генерация key (hex 32, как в гайде).
+    key = secrets.token_hex(32)
+
+    # Генерация admin кредов.
+    admin_user = "admin"
+    admin_pass = secrets.token_hex(16)
+
+    # Публичный IP.
+    public_ip = _get_public_ip()
+    if not public_ip:
+        _warn("Не удалось определить публичный IP — TLS будет без IP SAN")
+        public_ip = "127.0.0.1"
+
+    # 1. Директории.
+    MGR_ETC_DIR.mkdir(parents=True, exist_ok=True)
+    MGR_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 2. config.json.
+    config_text = _generate_config_json(carrier, room_id, key, transport, location_name)
+    MGR_CONFIG.write_text(config_text)
+    MGR_CONFIG.chmod(0o600)
+
+    # 3. panel.env.
+    env_text = _generate_panel_env(admin_user, admin_pass)
+    MGR_PANEL_ENV.write_text(env_text)
+    MGR_PANEL_ENV.chmod(0o600)
+
+    # 4. TLS сертификат.
+    if not _generate_tls_cert(public_ip):
+        _warn("TLS не сгенерирован — панель будет без HTTPS")
+
+    # 5. systemd unit.
+    unit_text = _generate_systemd_unit()
+    MGR_UNIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MGR_UNIT_FILE.write_text(unit_text)
+    _run(["systemctl", "daemon-reload"], check=False, quiet=True, timeout=15)
+
+    # 6. UFW — открыть порт через port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register,
+        )
+        port_register(_OLCRTC_MANAGER_SERVICE_TAG, MGR_PORT, "tcp",
+                      comment="olcrtc-manager panel (TLS)", force=True)
+        ufw_open_port(MGR_PORT, "tcp", _OLCRTC_MANAGER_SERVICE_TAG,
+                      comment="olcrtc-manager panel (TLS)")
     except Exception as e:
-        _warn(f"Не удалось записать клиентский конфиг: {e}")
+        _warn(f"UFW: не удалось открыть порт {MGR_PORT}: {e}")
 
-    _ensure_unit_file()
-    unit = _link_unit(name)
-    _run(["systemctl", "enable", "--now", unit], check=False, quiet=True, timeout=20)
-    time.sleep(2)
-    active = _systemd_is_active(unit)
+    # 7. Запуск сервиса.
+    _run(["systemctl", "enable", "--now", "olcrtc-manager"],
+          check=False, quiet=True, timeout=20)
+    _run(["systemctl", "restart", "olcrtc-manager"],
+          check=False, quiet=True, timeout=20)
+    time.sleep(6)
 
-    st["links"][name] = {
-        "carrier": carrier, "transport": transport, "room_id": room_id,
-        "key": key, "socks_port": socks_port,
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    active = _manager_service_active()
+    if not active:
+        _warn("olcrtc-manager не поднялся — проверьте: journalctl -u olcrtc-manager -n 30")
+
+    # 8. Сохранение state.
+    st["config"] = {
+        "carrier": carrier,
+        "transport": transport,
+        "room_id": room_id,
+        "key": key,
+        "location_name": location_name,
+        "admin_user": admin_user,
+        "admin_pass": admin_pass,
+        "public_ip": public_ip,
+        "panel_url": f"https://{public_ip}:{MGR_PORT}/admin",
     }
     _save_state(st)
 
-    if not active:
-        _warn(f"Сервис {unit} не поднялся — проверьте: journalctl -u {unit} -n 30")
+    # 9. OlcBox URI.
+    uri = _generate_olcbox_uri(carrier, transport, room_id, key, location_name)
+    st["config"]["olcbox_uri"] = uri
+    _save_state(st)
+
     return active
 
 
-def _delete_link(name: str, st: dict) -> None:
-    unit = _link_unit(name)
-    _run(["systemctl", "disable", "--now", unit], check=False, quiet=True, timeout=20)
-    yaml_path = OLC_LINKS_DIR / f"{name}.yaml"
-    yaml_path.unlink(missing_ok=True)
-    (OLC_LINKS_DIR / f"{name}.client.yaml").unlink(missing_ok=True)
-    shutil.rmtree(OLC_VAR_DIR / name, ignore_errors=True)
-    st["links"].pop(name, None)
+def _uninstall_manager() -> bool:
+    """Полное удаление manager panel: сервис, бинарники, конфиги, UFW."""
+    _info("Удаление olcrtc-manager...")
+
+    # 1. Остановить сервис.
+    _run(["systemctl", "stop", "olcrtc-manager"], check=False, quiet=True, timeout=20)
+    _run(["systemctl", "disable", "olcrtc-manager"], check=False, quiet=True, timeout=20)
+
+    # 2. Удалить systemd unit.
+    MGR_UNIT_FILE.unlink(missing_ok=True)
+    _run(["systemctl", "daemon-reload"], check=False, quiet=True, timeout=15)
+
+    # 3. UFW — закрыть порт через port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister,
+        )
+        ufw_close_port(MGR_PORT, "tcp", _OLCRTC_MANAGER_SERVICE_TAG,
+                       legacy_comments=["olcrtc-manager panel (TLS)"])
+        port_unregister(_OLCRTC_MANAGER_SERVICE_TAG, MGR_PORT, "tcp")
+    except Exception:
+        pass
+
+    # 4. Удалить конфиги.
+    shutil.rmtree(MGR_ETC_DIR, ignore_errors=True)
+    shutil.rmtree(MGR_DATA_DIR.parent, ignore_errors=True)
+
+    # 5. Удалить бинарники.
+    OLC_BIN.unlink(missing_ok=True)
+    OLC_MGR_BIN.unlink(missing_ok=True)
+
+    # 6. Сброс state.
+    st = _load_state()
+    st["installed"] = False
+    st["manager_installed"] = False
+    st["config"] = {}
     _save_state(st)
 
+    _success("olcrtc-manager полностью удалён")
+    return True
+
 
 # =============================================================================
-#  ЭКРАН: ДОБАВИТЬ НОВЫЙ ЛИНК
+#  СТАТУС / API ПРОВЕРКИ
 # =============================================================================
-def _flow_add_link(st: dict) -> None:
+def _manager_service_active() -> bool:
+    r = _run(["systemctl", "is-active", "olcrtc-manager"],
+             capture=True, check=False, timeout=10)
+    return r.stdout.strip() == "active"
+
+
+def _api_state() -> dict | None:
+    """Запрашивает /api/state через curl (с basic auth из panel.env)."""
+    if not MGR_PANEL_ENV.exists():
+        return None
+    # Читаем креды из panel.env.
+    env_text = MGR_PANEL_ENV.read_text()
+    user = ""
+    passwd = ""
+    for line in env_text.splitlines():
+        if line.startswith("OLCRTC_MANAGER_USER="):
+            user = line.split("=", 1)[1].strip().strip("'\"")
+        elif line.startswith("OLCRTC_MANAGER_PASS="):
+            passwd = line.split("=", 1)[1].strip().strip("'\"")
+    if not user or not passwd:
+        return None
+
+    r = _run([
+        "curl", "-sk", "--max-time", "10",
+        "-u", f"{user}:{passwd}",
+        f"https://127.0.0.1:{MGR_PORT}/api/state",
+    ], capture=True, check=False, timeout=15)
+    if r.returncode != 0 or not r.stdout:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except Exception:
+        return None
+
+
+def _api_logs(room_id: str) -> str:
+    """Запрашивает /api/logs через curl."""
+    if not MGR_PANEL_ENV.exists():
+        return ""
+    env_text = MGR_PANEL_ENV.read_text()
+    user = ""
+    passwd = ""
+    for line in env_text.splitlines():
+        if line.startswith("OLCRTC_MANAGER_USER="):
+            user = line.split("=", 1)[1].strip().strip("'\"")
+        elif line.startswith("OLCRTC_MANAGER_PASS="):
+            passwd = line.split("=", 1)[1].strip().strip("'\"")
+    if not user or not passwd:
+        return ""
+
+    # transport из state.
+    st = _load_state()
+    transport = st.get("config", {}).get("transport", "vp8channel")
+
+    r = _run([
+        "curl", "-sk", "--max-time", "10",
+        "-u", f"{user}:{passwd}",
+        f"https://127.0.0.1:{MGR_PORT}/api/logs/?client_id=wb&room_id={room_id}&transport={transport}",
+    ], capture=True, check=False, timeout=15)
+    return r.stdout if r.returncode == 0 else ""
+
+
+# =============================================================================
+#  TUI: КОНФИГУРАЦИЯ
+# =============================================================================
+def _flow_configure() -> None:
+    """Интерактивная настройка manager panel."""
     print()
-    _box_top("➕ Новый клиент (линк) olcRTC")
+    _box_top("Настройка olcRTC Manager Panel")
+    _box_row()
+    _box_row(f"  {BOLD}Выберите провайдера:{NC}")
     for k, (_, title, hint) in CARRIERS.items():
         _box_item(k, f"{title}  {DIM}— {hint}{NC}")
     _box_bottom()
-    c_choice = input("  Провайдер: ").strip()
+
+    try:
+        c_choice = input(f"{CYAN}  Провайдер [1]:{NC} ").strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        return
     if c_choice not in CARRIERS:
         _warn("Неверный выбор")
-        input(f"{BLUE}Нажмите Enter...{NC}")
+        input(f"{BLUE}  Нажмите Enter...{NC}")
         return
     carrier, carrier_title, _ = CARRIERS[c_choice]
 
@@ -550,285 +800,221 @@ def _flow_add_link(st: dict) -> None:
     for k, (_, hint) in TRANSPORTS.items():
         _box_item(k, hint)
     _box_bottom()
-    t_choice = input("  Транспорт [по умолчанию 1 — datachannel]: ").strip() or "1"
+
+    try:
+        t_choice = input(f"{CYAN}  Транспорт [2 — vp8channel]:{NC} ").strip() or "2"
+    except (EOFError, KeyboardInterrupt):
+        return
     if t_choice not in TRANSPORTS:
         _warn("Неверный выбор")
-        input(f"{BLUE}Нажмите Enter...{NC}")
+        input(f"{BLUE}  Нажмите Enter...{NC}")
         return
     transport, _ = TRANSPORTS[t_choice]
 
     print()
-    raw_name = input("  Имя клиента (латиницей, например ivan-phone): ").strip()
-    name = _sanitize_name(raw_name)
-    if not name:
-        _warn("Имя пустое или содержит только недопустимые символы")
-        input(f"{BLUE}Нажмите Enter...{NC}")
-        return
-    if name in st["links"]:
-        _warn(f"Клиент с именем «{name}» уже существует")
-        input(f"{BLUE}Нажмите Enter...{NC}")
-        return
-
     if carrier == "jitsi":
-        print()
-        _box_top("Jitsi-сервер")
-        for i, h in enumerate(JITSI_HOSTS, 1):
-            _box_item(str(i), h)
-        _box_item(str(len(JITSI_HOSTS) + 1), "Свой сервер (ввести вручную)")
+        _box_top("Jitsi — комната")
+        _box_row(f"  {DIM}Для Jitsi комната генерируется автоматически.{NC}")
+        _box_row(f"  {DIM}Просто нажмите Enter.{NC}")
         _box_bottom()
-        h_choice = input("  Сервер [по умолчанию 1]: ").strip() or "1"
-        if h_choice.isdigit() and 1 <= int(h_choice) <= len(JITSI_HOSTS):
-            host = JITSI_HOSTS[int(h_choice) - 1]
-        else:
-            host = input("  Введите домен Jitsi-сервера: ").strip()
-        if not host:
-            _warn("Сервер не указан")
-            input(f"{BLUE}Нажмите Enter...{NC}")
-            return
-        room_id = f"https://{host}/{_gen_jitsi_room_path()}"
-        _info(f"Комната сгенерирована автоматически: {room_id}")
+        room_id = f"https://meet.jitsi.ru/{secrets.token_hex(8)}"
+        _info(f"Сгенерирована комната: {room_id}")
     else:
-        print()
         _box_top(f"Комната {carrier_title}")
         _box_row(f"  {YELLOW}Комнату нужно создать вручную:{NC}")
         _box_row(f"  {CYAN}{ROOM_CREATE_URL[carrier]}{NC}")
-        _box_row(f"  {DIM}Откройте ссылку в браузере, начните звонок и скопируйте ID комнаты.{NC}")
+        _box_row(f"  {DIM}Откройте ссылку в браузере, начните звонок{NC}")
+        _box_row(f"  {DIM}и скопируйте ID комнаты из URL.{NC}")
+        _box_sep()
+        _box_row(f"  {DIM}Для WB Stream: https://stream.wb.ru/room/<ROOM_ID>{NC}")
+        _box_row(f"  {DIM}ROOM_ID — последняя часть URL после /room/{NC}")
         _box_bottom()
-        room_id = input("  Вставьте ID/URL комнаты: ").strip()
+        try:
+            room_id = input(f"{CYAN}  Вставьте ROOM_ID:{NC} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
         if not room_id:
-            _warn("ID комнаты не указан — отменено")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _warn("ROOM_ID не указан — отменено")
+            input(f"{BLUE}  Нажмите Enter...{NC}")
             return
 
     print()
-    _info(f"Создаю линк «{name}» ({carrier_title}, {transport})...")
-    ok = _create_link(st, name, carrier, transport, room_id)
-    link = st["links"][name]
+    _info(f"Настраиваю manager panel ({carrier_title}, {transport})...")
+    ok = _configure_manager(carrier, transport, room_id)
 
     if ok:
-        _success(f"Линк «{name}» запущен (systemd: {_link_unit(name)})")
+        st = _load_state()
+        cfg = st.get("config", {})
+        _success("Manager panel настроена и запущена!")
+
+        print()
+        _box_top("✅ Готово!")
+        _box_row(f"  Panel URL:  {CYAN}{cfg.get('panel_url', '?')}{NC}")
+        _box_row(f"  User:       {CYAN}{cfg.get('admin_user', 'admin')}{NC}")
+        _box_row(f"  Password:   {YELLOW}{cfg.get('admin_pass', '?')}{NC}")
+        _box_sep()
+        _box_row(f"  {BOLD}OlcBox URI (для клиента):{NC}")
+        _box_row(f"  {CYAN}{cfg.get('olcbox_uri', '?')}{NC}")
+        _box_sep()
+        _box_row(f"  {DIM}Откройте Panel URL в браузере (примите self-signed TLS).{NC}")
+        _box_row(f"  {DIM}В OlcBox введите URI выше или параметры вручную:{NC}")
+        _box_row(f"  {DIM}  Service: {carrier_title}{NC}")
+        _box_row(f"  {DIM}  Transport: {transport}{NC}")
+        _box_row(f"  {DIM}  Room ID: {room_id}{NC}")
+        _box_row(f"  {DIM}  Encryption key: {cfg.get('key', '?')}{NC}")
+        _box_bottom()
     else:
-        _warn(f"Линк «{name}» создан, но сервис не активен — проверьте логи (пункт меню «логи»)")
+        _warn("Manager panel настроена, но сервис не активен.")
+        _warn("Проверьте: journalctl -u olcrtc-manager -n 30")
+
+    input(f"{BLUE}  Нажмите Enter...{NC}")
+
+
+# =============================================================================
+#  TUI: СТАТУС
+# =============================================================================
+def _flow_status() -> None:
+    """Показывает статус manager panel через API."""
+    print()
+    active = _manager_service_active()
+    _box_top("📊 Статус olcRTC Manager")
+    _box_row(f"  Сервис: {GREEN+'● активен' if active else RED+'○ остановлен'}{NC}")
+
+    if active:
+        state = _api_state()
+        if state:
+            _box_sep()
+            # Показываем ключевые поля из API.
+            for client in state.get("clients", []):
+                cid = client.get("client-id", "?")
+                _box_row(f"  Client: {CYAN}{cid}{NC}")
+                for loc in client.get("locations", []):
+                    name = loc.get("name", "?")
+                    status = loc.get("status", "?")
+                    peers = loc.get("peers", "?")
+                    _box_row(f"    Location: {name}")
+                    _box_row(f"    Status:   {status}")
+                    _box_row(f"    Peers:    {peers}")
+        else:
+            _box_row(f"  {YELLOW}API недоступен — проверьте journalctl{NC}")
+    _box_bottom()
+    input(f"{BLUE}  Нажмите Enter...{NC}")
+
+
+# =============================================================================
+#  TUI: ЛОГИ
+# =============================================================================
+def _flow_logs() -> None:
+    """Показывает логи через API."""
+    st = _load_state()
+    room_id = st.get("config", {}).get("room_id", "")
+    if not room_id:
+        _warn("Нет настроенной комнаты")
+        input(f"{BLUE}  Нажмите Enter...{NC}")
+        return
 
     print()
-    _box_top(f"Конфиг клиента «{name}» — скопируйте на устройство клиента")
-    client_text = _client_yaml(carrier, link["room_id"], link["key"], transport, link["socks_port"])
-    for line in client_text.splitlines():
-        _box_row(f"  {DIM}{line}{NC}")
-    _box_sep()
-    _box_row(f"  {WHITE}Сохраните это в файл client.yaml на устройстве клиента,{NC}")
-    _box_row(f"  {WHITE}затем: olcrtc client.yaml  →  SOCKS5 поднимется на 127.0.0.1:{link['socks_port']}{NC}")
-    _box_sep()
-    _box_row(f"  {DIM}Этот конфиг также сохранён на сервере:{NC}")
-    _box_row(f"  {CYAN}{OLC_LINKS_DIR / f'{name}.client.yaml'}{NC}")
+    logs = _api_logs(room_id)
+    _box_top("📋 Логи olcRTC (API)")
+    if not logs:
+        _box_row(f"  {DIM}(пусто или API недоступен){NC}")
+    else:
+        try:
+            data = json.loads(logs)
+            lines = data if isinstance(data, list) else [data]
+            for entry in lines[:30]:
+                msg = entry.get("message", str(entry)) if isinstance(entry, dict) else str(entry)
+                _box_row(f"  {DIM}{msg[:120]}{NC}")
+        except Exception:
+            for line in logs.splitlines()[:30]:
+                _box_row(f"  {DIM}{line[:120]}{NC}")
     _box_bottom()
-    input(f"{BLUE}Нажмите Enter...{NC}")
+    input(f"{BLUE}  Нажмите Enter...{NC}")
 
 
 # =============================================================================
-#  ЭКРАН: СПИСОК / УПРАВЛЕНИЕ ЛИНКАМИ
-# =============================================================================
-def _flow_link_detail(st: dict, name: str) -> None:
-    while True:
-        link = st["links"].get(name)
-        if not link:
-            return
-        unit = _link_unit(name)
-        active = _systemd_is_active(unit)
-
-        os.system("clear")
-        print()
-        _box_top(f"Клиент «{name}»")
-        _box_row(f"  Провайдер:  {CYAN}{link['carrier']}{NC}")
-        _box_row(f"  Транспорт:  {CYAN}{link['transport']}{NC}")
-        _box_row(f"  Комната:    {DIM}{link['room_id']}{NC}")
-        _box_row(f"  SOCKS-порт: {CYAN}{link['socks_port']}{NC}  {DIM}(на стороне клиента){NC}")
-        _box_row(f"  Статус:     {(GREEN+'● активен') if active else (DIM+'○ остановлен')}{NC}")
-        _box_sep()
-        _box_item("1", f"{'Остановить' if active else 'Запустить'} сервис")
-        _box_item("2", "🔁 Перезапустить")
-        _box_item("3", "📋 Лог (последние 30 строк)")
-        _box_item("4", "📄 Показать конфиг клиента ещё раз")
-        _box_item("5", f"{RED}🗑️  Удалить этого клиента{NC}")
-        _box_row()
-        _box_back()
-        _box_bottom()
-        ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
-
-        if ch in ("q", ""):
-            return
-        if ch == "1":
-            print()
-            if active:
-                _run(["systemctl", "stop", unit], check=False, quiet=True, timeout=15)
-                _success(f"{unit} остановлен")
-            else:
-                _run(["systemctl", "start", unit], check=False, quiet=True, timeout=15)
-                time.sleep(1)
-                if _systemd_is_active(unit):
-                    _success(f"{unit} запущен")
-                else:
-                    _warn(f"Не удалось запустить — journalctl -u {unit} -n 30")
-            input(f"{BLUE}Нажмите Enter...{NC}")
-        elif ch == "2":
-            print()
-            _run(["systemctl", "restart", unit], check=False, quiet=True, timeout=20)
-            time.sleep(2)
-            if _systemd_is_active(unit):
-                _success(f"{unit} перезапущен")
-            else:
-                _warn(f"Не поднялся после перезапуска — journalctl -u {unit} -n 30")
-            input(f"{BLUE}Нажмите Enter...{NC}")
-        elif ch == "3":
-            print()
-            r = _run(["journalctl", "-u", unit, "-n", "30", "--no-pager"],
-                      capture=True, check=False, timeout=15)
-            _box_top(f"📋 Лог {unit}")
-            lines = (r.stdout or "").splitlines()[-30:] or ["(пусто)"]
-            for line in lines:
-                _box_row(f"  {DIM}{line[:100]}{NC}")
-            _box_bottom()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-        elif ch == "4":
-            print()
-            client_text = _client_yaml(link["carrier"], link["room_id"], link["key"],
-                                        link["transport"], link["socks_port"])
-            client_yaml_path = OLC_LINKS_DIR / f"{name}.client.yaml"
-            try:
-                OLC_LINKS_DIR.mkdir(parents=True, exist_ok=True)
-                client_yaml_path.write_text(client_text, encoding="utf-8")
-            except Exception as e:
-                _warn(f"Не удалось записать клиентский конфиг: {e}")
-            _box_top(f"Конфиг клиента «{name}»")
-            for line in client_text.splitlines():
-                _box_row(f"  {DIM}{line}{NC}")
-            _box_sep()
-            _box_row(f"  {DIM}Файл на сервере: {NC}{CYAN}{client_yaml_path}{NC}")
-            _box_bottom()
-            input(f"{BLUE}Нажмите Enter...{NC}")
-        elif ch == "5":
-            print()
-            confirm = input(f"  Удалить «{name}» безвозвратно? (yes/нет): ").strip().lower()
-            if confirm in ("yes", "да", "y", "д"):
-                _delete_link(name, st)
-                _success(f"Клиент «{name}» удалён")
-                input(f"{BLUE}Нажмите Enter...{NC}")
-                return
-            else:
-                _info("Отменено")
-                input(f"{BLUE}Нажмите Enter...{NC}")
-        else:
-            _warn("Неверный выбор")
-            time.sleep(1)
-
-
-def _flow_list_links(st: dict) -> None:
-    while True:
-        names = list(st["links"].keys())
-        os.system("clear")
-        print()
-        _box_top(f"📋 Клиенты olcRTC ({len(names)})")
-        if not names:
-            _box_row(f"  {DIM}Пока нет ни одного клиента{NC}")
-        else:
-            for i, n in enumerate(names, 1):
-                link = st["links"][n]
-                active = _systemd_is_active(_link_unit(n))
-                dot = f"{GREEN}●{NC}" if active else f"{DIM}○{NC}"
-                _box_item(str(i), f"{dot} {n}  {DIM}({link['carrier']}/{link['transport']}){NC}")
-        _box_row()
-        _box_back()
-        _box_bottom()
-        ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
-        if ch in ("q", ""):
-            return
-        if ch.isdigit() and 1 <= int(ch) <= len(names):
-            _flow_link_detail(st, names[int(ch) - 1])
-        else:
-            _warn("Неверный выбор")
-            time.sleep(1)
-
-
-# =============================================================================
-#  ГАЙД
+#  TUI: ГАЙД
 # =============================================================================
 def _show_guide() -> None:
     os.system("clear")
     print()
-    _box_top("📖 olcRTC — как это устроено")
-    _box_row(f"  {DIM}Это не обычный VLESS-протокол, а TCP-туннель, замаскированный{NC}")
-    _box_row(f"  {DIM}под видеозвонок в Jitsi / Яндекс.Телемост / WB Stream.{NC}")
+    _box_top("📖 olcRTC — как это работает")
+    _box_row(f"  {DIM}TCP-over-WebRTC: маскирует трафик под видеозвонок{NC}")
+    _box_row(f"  {DIM}в WB Stream / Jitsi / Телемост. Для обхода блокировок{NC}")
+    _box_row(f"  {DIM}по белым спискам.{NC}")
     _box_sep()
-    _box_row(f"  {BOLD}Главное отличие от VLESS/Mieru/NaiveProxy:{NC}")
-    _box_row(f"  {WHITE}Один сервер не обслуживает много клиентов одним портом.{NC}")
-    _box_row(f"  {WHITE}Каждый клиент — это отдельный процесс (отдельный systemd-сервис,{NC}")
-    _box_row(f"  {WHITE}«линк»), который реально участвует в видеозвонке. Для транспортов{NC}")
-    _box_row(f"  {WHITE}vp8channel и videochannel сервер кодирует настоящее видео — это{NC}")
-    _box_row(f"  {WHITE}заметная нагрузка на CPU, в отличие от лёгкого TCP-релея VLESS.{NC}")
-    _box_row(f"  {WHITE}Десять клиентов = десять отдельных «звонков», работающих одновременно.{NC}")
+    _box_row(f"  {BOLD}Архитектура:{NC}")
+    _box_row(f"  {WHITE}olcrtc — туннель (TCP-over-WebRTC){NC}")
+    _box_row(f"  {WHITE}olcrtc-manager — веб-панель + API + supervisor{NC}")
+    _box_row(f"  {WHITE}Manager сам запускает и управляет olcrtc процессами.{NC}")
+    _box_sep()
+    _box_row(f"  {BOLD}Что получает пользователь:{NC}")
+    _box_row(f"  {WHITE}1. Веб-панель на https://SERVER_IP:8888/admin{NC}")
+    _box_row(f"  {WHITE}   (self-signed TLS, basic auth){NC}")
+    _box_row(f"  {WHITE}2. API: /api/state, /api/logs{NC}")
+    _box_row(f"  {WHITE}3. OlcBox URI для клиента{NC}")
+    _box_sep()
+    _box_row(f"  {BOLD}Что нужно клиенту:{NC}")
+    _box_row(f"  {WHITE}OlcBox (community клиент olcrtc, alpha) — вводит URI.{NC}")
+    _box_row(f"  {WHITE}Или olcrtc CLI: go build ./cmd/olcrtc{NC}")
+    _box_row(f"  {WHITE}На устройстве появится SOCKS5 прокси.{NC}")
     _box_sep()
     _box_row(f"  {BOLD}Провайдеры:{NC}")
-    _box_row(f"  {CYAN}Jitsi{NC}      — комната это просто произвольная строка в URL,")
-    _box_row(f"             {DIM}никуда заранее создавать не нужно — полностью автоматизируется.{NC}")
-    _box_row(f"  {CYAN}Телемост{NC}   — комнату нужно один раз создать на telemost.yandex.ru")
-    _box_row(f"             {DIM}и вставить её ID при добавлении клиента.{NC}")
-    _box_row(f"  {CYAN}WB Stream{NC}  — то же самое, комната создаётся на stream.wb.ru.")
+    _box_row(f"  {CYAN}WB Stream{NC}  — комната на stream.wb.ru (нужно создать)")
+    _box_row(f"  {CYAN}Jitsi{NC}      — комната генерируется автоматически")
+    _box_row(f"  {CYAN}Телемост{NC}   — комната на telemost.yandex.ru")
     _box_sep()
     _box_row(f"  {BOLD}Транспорт (скорость по убыванию):{NC}")
-    _box_row(f"  {DIM}datachannel  >  vp8channel  >  seichannel  >  videochannel{NC}")
-    _box_row(f"  {DIM}Чем «видеоподобнее» транспорт, тем лучше маскировка, но ниже скорость.{NC}")
+    _box_row(f"  {DIM}datachannel > vp8channel > seichannel > videochannel{NC}")
     _box_sep()
-    _box_row(f"  {BOLD}Что нужно клиенту (важно):{NC}")
-    _box_row(f"  {WHITE}Обычный vless:// / QR здесь не работает. У olcrtc нет единого{NC}")
-    _box_row(f"  {WHITE}готового мобильного приложения с поддержкой ссылок — клиенту{NC}")
-    _box_row(f"  {WHITE}нужен сам бинарник olcrtc (или его community-форк olcbox, alpha,{NC}")
-    _box_row(f"  {WHITE}для Android — но это не официальный продукт, использовать на свой риск).{NC}")
-    _box_row()
-    _box_row(f"  {WHITE}1. Собрать olcrtc под свою ОС из исходников:{NC}")
-    _box_row(f"     {CYAN}{OLC_REPO}{NC}")
-    _box_row(f"     {DIM}(нужен Go 1.26+, команда: go build ./cmd/olcrtc){NC}")
-    _box_row(f"  {WHITE}2. Сохранить выданный этим меню YAML-конфиг в файл, например{NC}")
-    _box_row(f"     {DIM}client.yaml{NC}")
-    _box_row(f"  {WHITE}3. Запустить: {NC}{CYAN}olcrtc client.yaml{NC}")
-    _box_row(f"  {WHITE}4. На устройстве появится локальный SOCKS5 (127.0.0.1:порт из конфига).{NC}")
-    _box_row(f"     {DIM}Укажите этот SOCKS5 в браузере/прокси-клиенте устройства.{NC}")
-    _box_sep()
-    _box_row(f"  {YELLOW}Это Beta-проект одного автора без официальных релизов — конфиг и{NC}")
-    _box_row(f"  {YELLOW}флаги периодически меняются. Используйте как запасной канал для{NC}")
-    _box_row(f"  {YELLOW}случаев полной блокировки «по белым спискам», а не как основной.{NC}")
+    _box_row(f"  {YELLOW}Beta-проект. Используйте как запасной канал.{NC}")
     _box_bottom()
-    input(f"{BLUE}Нажмите Enter...{NC}")
+    input(f"{BLUE}  Нажмите Enter...{NC}")
 
 
 # =============================================================================
 #  ГЛАВНОЕ МЕНЮ
 # =============================================================================
 def do_olcrtc_menu() -> None:
-    """Интерактивное управление olcRTC: установка, клиенты (линки), гайд."""
+    """Интерактивное управление olcRTC: установка, настройка, статус."""
     while True:
         st = _load_state()
-        installed = _olcrtc_installed()
-        n_links = len(st["links"])
-        n_active = sum(1 for n in st["links"] if _systemd_is_active(_link_unit(n))) if installed else 0
+        installed = _olcrtc_installed() and _manager_installed()
+        configured = bool(st.get("config", {}).get("room_id"))
+        active = _manager_service_active() if installed else False
 
         os.system("clear")
         print()
         _box_top("📹 olcRTC — ТУННЕЛЬ ПОД ВИДЕОЗВОНОК (Beta)")
-        _box_row(f"  {DIM}TCP-over-WebRTC: маскирует трафик под звонок в Jitsi /{NC}")
-        _box_row(f"  {DIM}Телемосте / WB Stream. Для сценариев полного белого списка.{NC}")
+        _box_row(f"  {DIM}TCP-over-WebRTC: маскирует трафик под звонок в{NC}")
+        _box_row(f"  {DIM}WB Stream / Jitsi / Телемост.{NC}")
         _box_sep()
         if not installed:
-            _box_row(f"  Статус:   {RED}не установлен{NC}")
+            _box_row(f"  Статус: {RED}не установлен{NC}")
         else:
-            _box_row(f"  Статус:   {GREEN}● собран{NC}  {DIM}(коммит {st.get('commit', '?')}){NC}")
-            _box_row(f"  Клиентов: {CYAN}{n_links}{NC}  {DIM}(активных: {n_active}){NC}")
+            _box_row(f"  Статус:   {GREEN}● собран{NC}  {DIM}(olcrtc: {st.get('commit','?')}, manager: {st.get('manager_commit','?')}){NC}")
+            if configured:
+                _box_row(f"  Настроен: {GREEN if active else YELLOW}{'● active' if active else '○ stopped'}{NC}")
+                cfg = st.get("config", {})
+                _box_row(f"  Panel:    {CYAN}{cfg.get('panel_url', '?')}{NC}")
+                _box_row(f"  Carrier:  {cfg.get('carrier', '?')}/{cfg.get('transport', '?')}")
+            else:
+                _box_row(f"  Настроен: {DIM}нет (нужно настроить){NC}")
         _box_sep()
 
-        _box_item("1", f"{'🔄 Обновить' if installed else '📥 Установить'} olcrtc (сборка из исходников)")
-        _box_item("2", "📖 Гайд — как это работает и что нужно клиенту")
+        if not installed:
+            _box_item("1", "📥 Установить (сборка olcrtc + olcrtc-manager из исходников)")
+        else:
+            _box_item("1", "🔄 Обновить (пересборка)")
+        _box_item("2", "📖 Гайд — как это работает")
+        if installed and not configured:
+            _box_item("3", "⚙️  Настроить Manager Panel (провайдер, комната)")
+        if configured:
+            _box_item("4", "📊 Статус (через API)")
+            _box_item("5", "📋 Логи (через API)")
+            _box_item("6", "📄 Показать OlcBox URI и креды")
         if installed:
-            _box_item("3", "➕ Добавить нового клиента (линк)")
-            _box_item("4", f"📋 Список клиентов  {DIM}({n_links} шт.){NC}")
+            _box_item("7", f"{RED}🗑️  Удалить полностью{NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -844,20 +1030,50 @@ def do_olcrtc_menu() -> None:
         if ch == "1":
             print()
             if _install_or_update():
-                _success("olcrtc установлен/обновлён")
+                _success("olcrtc и olcrtc-manager установлены/обновлены")
             else:
                 _error("Установка не удалась — см. сообщения выше")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            input(f"{BLUE}  Нажмите Enter...{NC}")
 
         elif ch == "2":
             _show_guide()
 
         elif ch == "3" and installed:
-            _flow_add_link(st)
+            _flow_configure()
 
-        elif ch == "4" and installed:
-            _flow_list_links(st)
+        elif ch == "4" and configured:
+            _flow_status()
+
+        elif ch == "5" and configured:
+            _flow_logs()
+
+        elif ch == "6" and configured:
+            cfg = st.get("config", {})
+            print()
+            _box_top("📄 OlcBox URI и креды")
+            _box_row(f"  Panel URL:  {CYAN}{cfg.get('panel_url', '?')}{NC}")
+            _box_row(f"  User:       {CYAN}{cfg.get('admin_user', 'admin')}{NC}")
+            _box_row(f"  Password:   {YELLOW}{cfg.get('admin_pass', '?')}{NC}")
+            _box_sep()
+            _box_row(f"  {BOLD}OlcBox URI:{NC}")
+            _box_row(f"  {CYAN}{cfg.get('olcbox_uri', '?')}{NC}")
+            _box_sep()
+            _box_row(f"  {DIM}Carrier:    {cfg.get('carrier', '?')}{NC}")
+            _box_row(f"  {DIM}Transport:  {cfg.get('transport', '?')}{NC}")
+            _box_row(f"  {DIM}Room ID:    {cfg.get('room_id', '?')}{NC}")
+            _box_row(f"  {DIM}Key:        {cfg.get('key', '?')}{NC}")
+            _box_bottom()
+            input(f"{BLUE}  Нажмите Enter...{NC}")
+
+        elif ch == "7" and installed:
+            print()
+            confirm = input(f"  {RED}Полностью удалить olcRTC (бинарники, конфиги, сервис)? [y/N]:{NC} ").strip().lower()
+            if confirm in ("y", "yes", "д", "да"):
+                _uninstall_manager()
+            else:
+                _info("Отменено")
+            input(f"{BLUE}  Нажмите Enter...{NC}")
 
         else:
-            _warn("Неверный выбор.")
+            _warn("Неверный выбор")
             time.sleep(1)
