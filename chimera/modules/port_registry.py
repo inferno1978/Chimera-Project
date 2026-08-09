@@ -73,12 +73,16 @@ API:
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
+import os
 import re
 import shutil
 import socket
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -93,6 +97,14 @@ def _core_module():
 
 # ── Константы ────────────────────────────────────────────────────────────────
 PORT_REGISTRY_FILE = Path("/var/lib/xray-installer/port_registry.json")
+
+# v5.0.22: файловая блокировка для атомарного read-modify-write.
+# fcntl.flock — POSIX advisory lock, не требует доп. зависимостей.
+LOCK_FILE = PORT_REGISTRY_FILE.with_suffix(".lock")
+
+# Таймаут ожидания лока (секунды). Если другой процесс держит лок дольше —
+# возвращаем ошибку вместо зависания.
+_LOCK_TIMEOUT_SEC = 10
 
 # Канонические service_tag — короткие строки, без пробелов.
 SERVICE_VLESS           = "vless"
@@ -117,8 +129,52 @@ SERVICE_PORT_HOPPING   = "port_hopping"
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────
 
+@contextlib.contextmanager
+def _registry_lock(timeout: float = _LOCK_TIMEOUT_SEC):
+    """POSIX advisory lock (fcntl.flock) для защиты read-modify-write цикла.
+
+    v5.0.22: обёртывает ВЕСЬ цикл read-modify-write в port_register()/
+    port_unregister() одной блокировкой. Без этого два параллельных
+    процесса могут прочитать одинаковый список, каждый модифицирует свой
+    экземпляр, и второй перезаписывает первый → потеря данных.
+
+    Таймаут: если лок не получен за timeout секунд — raises TimeoutError.
+    Использует LOCK_EX | LOCK_NB в цикле с retry (100мс интервал) —
+    не блокирует поток бесконечно.
+
+    Чтение (port_list_all и т.д.) НЕ использует лок — благодаря атомарной
+    записи через os.replace (см. _registry_save), read всегда получает
+    консистентный снапшот.
+    """
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    f = open(LOCK_FILE, "w")
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break  # лок получен
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"port_registry: не удалось получить лок за {timeout}с — "
+                        "другой процесс держит реестр"
+                    )
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    finally:
+        f.close()
+
+
 def _registry_load() -> list[dict]:
-    """Загружает реестр. Возвращает [] если файла нет или повреждён."""
+    """Загружает реестр. Возвращает [] если файла нет или повреждён.
+
+    Не использует лок — благодаря атомарной записи (os.replace) в
+    _registry_save(), read всегда получает консистентный снапшот.
+    """
     if not PORT_REGISTRY_FILE.exists():
         return []
     try:
@@ -134,15 +190,22 @@ def _registry_load() -> list[dict]:
 
 
 def _registry_save(entries: list[dict]) -> None:
-    """Сохраняет реестр. Создаёт директорию, chmod 0o600."""
+    """Сохраняет реестр атомарно (tempfile + os.replace).
+
+    v5.0.22: не пишет напрямую в PORT_REGISTRY_FILE — сначала пишет во
+    временный файл (.tmp), затем os.replace (атомарная операция на уровне
+    ОС). Защищает от повреждения файла при обрыве процесса посреди записи:
+    если процесс упал после write, но до replace — оригинальный файл
+    остаётся нетронутым, .tmp можно проигнорировать.
+    """
     PORT_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PORT_REGISTRY_FILE.write_text(
-        json.dumps(entries, indent=2, ensure_ascii=False)
-    )
+    tmp = PORT_REGISTRY_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entries, indent=2, ensure_ascii=False))
     try:
-        PORT_REGISTRY_FILE.chmod(0o600)
+        tmp.chmod(0o600)
     except Exception:
         pass
+    os.replace(tmp, PORT_REGISTRY_FILE)  # атомарно на POSIX
 
 
 # ── Проверка системных слушателей ────────────────────────────────────────────
@@ -335,8 +398,12 @@ def port_register(service_tag: str, port: int, proto: str = "tcp",
 
     Returns:
       (success, message)
+
+    v5.0.22: весь read-modify-write цикл обёрнут в _registry_lock() —
+    защищает от гонки при конкурентном доступе (install одного сервиса
+    пересекается с cron-задачей другого).
     """
-    # Валидация.
+    # Валидация (до локировки — не требует доступа к файлу).
     if not isinstance(port, int) or port < 1 or port > 65535:
         return False, f"Невалидный порт: {port}"
     if proto not in ("tcp", "udp"):
@@ -344,7 +411,7 @@ def port_register(service_tag: str, port: int, proto: str = "tcp",
     if not service_tag or not isinstance(service_tag, str):
         return False, "service_tag не указан"
 
-    # Проверка конфликтов (если не force).
+    # Проверка конфликтов (до локировки — использует ss/ufw, не реестр).
     if not force:
         is_free, conflict_descs = port_is_free(port, proto,
                                                 exclude_service=service_tag)
@@ -352,30 +419,34 @@ def port_register(service_tag: str, port: int, proto: str = "tcp",
             return False, (f"Порт {port}/{proto} занят: "
                            + "; ".join(conflict_descs))
 
-    # Если для этого сервиса уже есть запись с таким же port/proto — обновляем.
-    entries = _registry_load()
-    existing_idx = None
-    for i, e in enumerate(entries):
-        if (e.get("service") == service_tag
-            and e.get("port") == port
-            and e.get("proto", "tcp") == proto):
-            existing_idx = i
-            break
+    # read-modify-write под локом.
+    try:
+        with _registry_lock():
+            entries = _registry_load()
+            existing_idx = None
+            for i, e in enumerate(entries):
+                if (e.get("service") == service_tag
+                    and e.get("port") == port
+                    and e.get("proto", "tcp") == proto):
+                    existing_idx = i
+                    break
 
-    entry = {
-        "service":      service_tag,
-        "port":         port,
-        "proto":        proto,
-        "comment":      comment,
-        "registered_at": datetime.now(timezone.utc).isoformat(),
-    }
+            entry = {
+                "service":      service_tag,
+                "port":         port,
+                "proto":        proto,
+                "comment":      comment,
+                "registered_at": datetime.now(timezone.utc).isoformat(),
+            }
 
-    if existing_idx is not None:
-        entries[existing_idx] = entry
-    else:
-        entries.append(entry)
+            if existing_idx is not None:
+                entries[existing_idx] = entry
+            else:
+                entries.append(entry)
 
-    _registry_save(entries)
+            _registry_save(entries)
+    except TimeoutError as e:
+        return False, str(e)
     return True, f"Порт {port}/{proto} зарегистрирован за '{service_tag}'"
 
 
@@ -385,20 +456,26 @@ def port_unregister(service_tag: str, port: "Optional[int]" = None,
 
     Если port/proto не указаны — снимает ВСЕ записи для этого сервиса.
     Возвращает True если что-то было снято, False если записей не было.
+
+    v5.0.22: весь read-modify-write цикл обёрнут в _registry_lock().
     """
-    entries = _registry_load()
-    initial_count = len(entries)
-    new_entries = [
-        e for e in entries
-        if not (
-            e.get("service") == service_tag
-            and (port is None or e.get("port") == port)
-            and (proto is None or e.get("proto", "tcp") == proto)
-        )
-    ]
-    if len(new_entries) == initial_count:
-        return False  # ничего не удалено
-    _registry_save(new_entries)
+    try:
+        with _registry_lock():
+            entries = _registry_load()
+            initial_count = len(entries)
+            new_entries = [
+                e for e in entries
+                if not (
+                    e.get("service") == service_tag
+                    and (port is None or e.get("port") == port)
+                    and (proto is None or e.get("proto", "tcp") == proto)
+                )
+            ]
+            if len(new_entries) == initial_count:
+                return False  # ничего не удалено
+            _registry_save(new_entries)
+    except TimeoutError:
+        return False
     return True
 
 
