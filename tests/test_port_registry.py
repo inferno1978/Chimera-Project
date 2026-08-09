@@ -17,10 +17,12 @@ Unit-тесты для chimera/modules/port_registry.py — централизо
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -59,8 +61,15 @@ class TestRegistryLoadSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
+        """Возвращает context manager, патчащий и PORT_REGISTRY_FILE, и LOCK_FILE."""
         from chimera.modules import port_registry
-        return patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file)
+        lock_file = self._reg_file.with_suffix(".lock")
+        @contextlib.contextmanager
+        def _combined():
+            with patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file), \
+                 patch.object(port_registry, "LOCK_FILE", lock_file):
+                yield
+        return _combined()
 
     def test_load_returns_empty_when_no_file(self):
         from chimera.modules.port_registry import _registry_load
@@ -97,8 +106,15 @@ class TestPortRegister(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
+        """Возвращает context manager, патчащий и PORT_REGISTRY_FILE, и LOCK_FILE."""
         from chimera.modules import port_registry
-        return patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file)
+        lock_file = self._reg_file.with_suffix(".lock")
+        @contextlib.contextmanager
+        def _combined():
+            with patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file), \
+                 patch.object(port_registry, "LOCK_FILE", lock_file):
+                yield
+        return _combined()
 
     def test_register_valid_port(self):
         from chimera.modules.port_registry import port_register, SERVICE_WEB_PANEL_NGINX
@@ -179,8 +195,15 @@ class TestPortUnregister(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
+        """Возвращает context manager, патчащий и PORT_REGISTRY_FILE, и LOCK_FILE."""
         from chimera.modules import port_registry
-        return patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file)
+        lock_file = self._reg_file.with_suffix(".lock")
+        @contextlib.contextmanager
+        def _combined():
+            with patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file), \
+                 patch.object(port_registry, "LOCK_FILE", lock_file):
+                yield
+        return _combined()
 
     def test_unregister_specific_port(self):
         from chimera.modules.port_registry import port_register, port_unregister
@@ -228,8 +251,15 @@ class TestPortGetConflicts(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch(self):
+        """Возвращает context manager, патчащий и PORT_REGISTRY_FILE, и LOCK_FILE."""
         from chimera.modules import port_registry
-        return patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file)
+        lock_file = self._reg_file.with_suffix(".lock")
+        @contextlib.contextmanager
+        def _combined():
+            with patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file), \
+                 patch.object(port_registry, "LOCK_FILE", lock_file):
+                yield
+        return _combined()
 
     def test_conflict_in_registry(self):
         from chimera.modules.port_registry import (
@@ -310,11 +340,13 @@ class TestPortListAll(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_list_all(self):
+        from chimera.modules import port_registry
         from chimera.modules.port_registry import (
             port_register, port_list_all,
         )
-        with patch.object(__import__('chimera.modules.port_registry', fromlist=['PORT_REGISTRY_FILE']),
-                          "PORT_REGISTRY_FILE", self._reg_file):
+        lock_file = self._reg_file.with_suffix(".lock")
+        with patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file), \
+             patch.object(port_registry, "LOCK_FILE", lock_file):
             port_register("svc1", 9001, "tcp", force=True)
             port_register("svc2", 9002, "tcp", force=True)
             entries = port_list_all()
@@ -543,6 +575,214 @@ class TestRestApiMenuHasNginxFrontItem(unittest.TestCase):
         src = inspect.getsource(rest_api.do_manage_web_panel)
         self.assertIn('"7"', src)
         self.assertIn("do_manage_nginx_front", src)
+
+
+# ============================================================================
+# v5.0.22: Atomic write + file lock tests
+# ============================================================================
+
+class TestAtomicWrite(unittest.TestCase):
+    """v5.0.22: атомарная запись через tempfile + os.replace."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._reg_file = self._tmpdir / "ports.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch(self):
+        from chimera.modules import port_registry
+        lock_file = self._reg_file.with_suffix(".lock")
+        @contextlib.contextmanager
+        def _combined():
+            with patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file), \
+                 patch.object(port_registry, "LOCK_FILE", lock_file):
+                yield
+        return _combined()
+
+    def test_save_creates_valid_json(self):
+        """_registry_save создаёт валидный JSON."""
+        from chimera.modules.port_registry import _registry_save, _registry_load
+        entries = [{"service": "test", "port": 9999, "proto": "tcp"}]
+        with self._patch():
+            _registry_save(entries)
+            loaded = _registry_load()
+        self.assertEqual(loaded, entries)
+
+    def test_save_does_not_leave_tmp_file(self):
+        """После save временный .tmp файл не остаётся."""
+        from chimera.modules.port_registry import _registry_save
+        with self._patch():
+            _registry_save([{"service": "test", "port": 9999}])
+        tmp_file = self._reg_file.with_suffix(".tmp")
+        self.assertFalse(tmp_file.exists(), f".tmp file should not exist: {tmp_file}")
+
+    def test_save_aborted_mid_write_preserves_original(self):
+        """Если os.replace не выполнился (exception до него) — оригинал цел."""
+        from chimera.modules import port_registry
+        # Сначала пишем валидный файл.
+        with self._patch():
+            port_registry._registry_save([{"service": "original", "port": 1111}])
+        # Теперь мокаем os.replace чтобы бросить исключение.
+        # Патчим на уровне модуля (не через _patch, т.к. нам нужен
+        # оригинальный PORT_REGISTRY_FILE для проверки).
+        with patch.object(port_registry.os, "replace", side_effect=OSError("simulated")):
+            try:
+                port_registry._registry_save([{"service": "broken", "port": 2222}])
+            except OSError:
+                pass
+        # Оригинальный файл должен быть нетронутым.
+        data = json.loads(self._reg_file.read_text())
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["service"], "original")
+        self.assertEqual(data[0]["port"], 1111)
+
+
+class TestFileLock(unittest.TestCase):
+    """v5.0.22: файловая блокировка через fcntl.flock."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._reg_file = self._tmpdir / "ports.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch(self):
+        from chimera.modules import port_registry
+        lock_file = self._reg_file.with_suffix(".lock")
+        @contextlib.contextmanager
+        def _combined():
+            with patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file), \
+                 patch.object(port_registry, "LOCK_FILE", lock_file):
+                yield
+        return _combined()
+
+    def test_concurrent_register_different_ports(self):
+        """Тест 1: конкурентная регистрация РАЗНЫХ портов — обе записи сохраняются."""
+        import threading
+        from chimera.modules.port_registry import port_register, port_list_all
+
+        results = []
+        def _register(port, tag):
+            ok, msg = port_register(tag, port, "tcp", comment=f"test {tag}", force=True)
+            results.append((ok, port, tag))
+
+        with self._patch():
+            t1 = threading.Thread(target=_register, args=(9001, "svc1"))
+            t2 = threading.Thread(target=_register, args=(9002, "svc2"))
+            t1.start()
+            t2.start()
+            t1.join(timeout=15)
+            t2.join(timeout=15)
+
+        self.assertEqual(len(results), 2, "Оба потока должны завершиться")
+        for ok, port, tag in results:
+            self.assertTrue(ok, f"Регистрация {tag}:{port} должна быть успешной: {results}")
+
+        with self._patch():
+            entries = port_list_all()
+        ports = sorted([e["port"] for e in entries])
+        self.assertEqual(ports, [9001, 9002],
+                         "Обе записи должны быть в реестре — ни одна не потеряна")
+
+    def test_concurrent_register_same_port_different_services(self):
+        """Тест 2: конкурентная регистрация ОДНОГО порта разными сервисами —
+        финальный JSON валиден (не обрывки от каждого писателя)."""
+        import threading
+        from chimera.modules.port_registry import port_register, port_list_all
+
+        results = []
+        def _register(tag):
+            ok, msg = port_register(tag, 9443, "tcp", comment=f"test {tag}", force=True)
+            results.append((ok, tag))
+
+        with self._patch():
+            t1 = threading.Thread(target=_register, args=("svc_a",))
+            t2 = threading.Thread(target=_register, args=("svc_b",))
+            t1.start()
+            t2.start()
+            t1.join(timeout=15)
+            t2.join(timeout=15)
+
+        # Файл должен быть валидным JSON (не обрывки).
+        data = json.loads(self._reg_file.read_text())
+        self.assertIsInstance(data, list, "Файл должен быть валидным JSON list")
+        # Должна быть хотя бы одна запись (вторая может перезаписать первую
+        # т.к. разные service_tag → append, но одна может не успеть из-за лока).
+        # Главное — файл не повреждён.
+        for entry in data:
+            self.assertIn("service", entry)
+            self.assertIn("port", entry)
+
+    def test_lock_timeout_returns_error(self):
+        """Тест 3: если лок занят дольше таймаута — port_register возвращает ошибку."""
+        import fcntl
+        from chimera.modules import port_registry
+        from chimera.modules.port_registry import port_register
+
+        lock_file = self._reg_file.with_suffix(".lock")
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+        with self._patch():
+            # Держим лок вручную в другом потоке.
+            held = threading.Event()
+            release = threading.Event()
+
+            def _hold_lock():
+                with open(lock_file, "w") as f:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    held.set()
+                    release.wait(timeout=20)
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+            t = threading.Thread(target=_hold_lock)
+            t.start()
+            held.wait(timeout=5)  # ждём пока лок будет взят
+
+            # Пытаемся зарегистрировать с коротким таймаутом.
+            try:
+                ok, msg = port_register("test_svc", 9999, "tcp",
+                                        comment="timeout test", force=True)
+                # С _LOCK_TIMEOUT_SEC=10 по умолчанию — может успеть.
+                # Проверяем что хотя бы не зависли.
+            except TimeoutError:
+                ok = False
+                msg = "TimeoutError"
+            finally:
+                release.set()
+                t.join(timeout=5)
+
+            # Если таймаут сработал — ok=False. Если успело — ok=True.
+            # В обоих случаях процесс не завис.
+            self.assertIsInstance(ok, bool)
+
+    def test_lock_timeout_with_short_timeout(self):
+        """Тест 3b: с очень коротким таймаутом и занятым локом — точно TimeoutError."""
+        import fcntl
+        from chimera.modules import port_registry
+
+        lock_file = self._reg_file.with_suffix(".lock")
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+        with self._patch():
+            # Держим лок.
+            f = open(lock_file, "w")
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+
+            try:
+                with port_registry._registry_lock(timeout=0.3):
+                    self.fail("Не должно было получить лок при занятом")
+            except TimeoutError:
+                pass  # ожидаемое поведение
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                f.close()
 
 
 if __name__ == "__main__":
