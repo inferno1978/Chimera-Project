@@ -358,6 +358,211 @@ Fallback на `curl -s ifconfig.me` если `mtproto` недоступен.
 
 ---
 
+## DOC: убраны все упоминания версий из кода, тестов, CHANGELOG и README — 9 августа 2026
+
+**Массовая очистка тегов версий `v5.0.10`..`v5.0.23` из всех исходников и
+документации. Оставлен только `v5.0.0` — базовая версия проекта.**
+
+### Контекст
+
+После серии быстрых релизов (v5.0.10 → v5.0.23) в коде накопились
+жестко прописанные теги версий: в комментариях модулей, в заголовках
+CHANGELOG-записей, в строках таблицы версий README.md, в docstring'ах
+тестов. Это создавало проблемы:
+
+- Каждое обновление требовало ручного bulk-replace по 40+ файлам
+- Версия в `__init__.py` рассинхронизировалась с упоминаниями в коде
+- Тесты падали при сверке hardcoded-строк с фактической версией
+- README вводил в заблуждение (упоминал устаревшие версии)
+
+### Что убрано
+
+53 файла изменено (400 строк удалено, 400 строк добавлено):
+
+| Категория | Файлов | Пример |
+|-----------|--------|--------|
+| `chimera/modules/*.py` | 28 | Комментарии вида `# v5.0.17 — миграция на port_registry` |
+| `tests/*.py` | 12 | Docstring'ы вида `"""Test for v5.0.13 fix"""` |
+| `CHANGELOG.md` | 1 | Теги версий в заголовках разделов |
+| `README.md` | 1 | Таблица "Версия → Описание" |
+| `chimera/_core.py`, `__init__.py` | 2 | Динамическая версия из `__version__` |
+
+### Что оставлено
+
+Только **`v5.0.0`** — это базовая версия проекта (в `__init__.py`,
+заголовке README, исторических записях CHANGELOG до нашей сессии).
+Все остальные версии теперь выводятся из `__version__` в `__init__.py`
+динамически, при необходимости.
+
+### Совместимость
+
+- Поведение кода не изменилось — только комментарии/документация
+- `core.VERSION` остаётся динамическим из `__init__.py`
+- `test_core_dynamic_version.py` обновлён на динамическую проверку
+- 279 тестов (test_port_registry + test_user_ip_whitelist + test_youtube_route
+  + test_youtube_route_v5013 + test_rest_api + test_rest_api_auth +
+  test_user_portal + test_rest_api_web_panel_firewall) — pass, 0 регрессий.
+
+---
+
+## FIX(warp): детализированное сообщение об ошибке wgcf register — 9 августа 2026
+
+**Пользователь получал общее «WARP настроен с ошибками — проверьте логи»
+без объяснения причины. wgcf register падал с TLS handshake timeout к
+api.cloudflareclient.com — теперь показывается детализированное
+сообщение с возможными причинами и шагами диагностики.**
+
+### Проблема
+
+`wgcf register` выполняет HTTPS-запрос к `api.cloudflareclient.com` для
+регистрации нового WARP-аккаунта. На серверах с:
+- заблокированным Cloudflare IP
+- ТСПУ-фильтрацией TLS к cloudflareclient.com
+- временными сетевыми сбоями
+
+...этот запрос падает с TLS handshake timeout. Старый код показывал
+только: `WARP настроен с ошибками — проверьте логи` — без указания
+причины, что заставляло пользователя вручную искать ошибку в логах.
+
+### Фикс
+
+`chimera/modules/warp.py`: при ошибке `wgcf register` анализируется
+текст ошибки и показывается контекстное сообщение:
+
+**TLS handshake timeout:**
+```
+Причина: TLS handshake timeout к api.cloudflareclient.com
+Возможные причины: IP заблокирован Cloudflare, ТСПУ режет TLS,
+временный сетевой сбой.
+Что сделать:
+  1. curl -v https://api.cloudflareclient.com
+  2. Попробовать позже
+  3. Зарегистрировать WARP на другой машине и скопировать конфиг
+```
+
+**Connection refused / no such host:**
+```
+Причина: нет соединения с api.cloudflareclient.com
+Проверьте DNS и интернет-соединение.
+```
+
+**Другие ошибки:** как раньше — `warn` с текстом ошибки.
+
+Меню wizard: «проверьте логи» → «см. подробное сообщение выше».
+
+### Файлы
+
+- `chimera/modules/warp.py` — функция `_warp_register_with_diagnostics()`,
+  +34 строки
+
+### Тесты
+
+23 теста в `test_warp.py` — pass, 0 регрессий.
+
+---
+
+## FIX(port_registry): атомарная запись + файловая блокировка — 9 августа 2026
+
+**Защита от гонки при конкурентном доступе к `port_registry.json`.
+Два процесса (например, install одного сервиса + cron-задача другого)
+могли одновременно прочитать файл, каждый модифицировать свой экземпляр,
+и второй перезаписывал первый → потеря данных.**
+
+### Проблема
+
+`port_registry.json` — shared state-файл, в который пишут много модулей:
+- `port_register(service, port, proto, comment, force)` — install
+- `port_unregister(service, port, proto)` — uninstall
+- `ufw_open_port` / `ufw_close_port` — UFW sync
+
+Старый код: `port_list_all()` → modify in-memory → `_registry_save()`
+без какой-либо блокировки. Если два процесса стартовали одновременно:
+
+```
+T0: Process A reads [vless:443, naiveproxy:8443]
+T1: Process B reads [vless:443, naiveproxy:8443]   ← тот же список
+T2: Process A adds mieru:2012  → writes [vless:443, naiveproxy:8443, mieru:2012]
+T3: Process B adds awg:51820   → writes [vless:443, naiveproxy:8443, awg:51820]
+                                                                  ↑ mieru:2012 ПОТЕРЯН
+```
+
+Аналогичная проблема с write в середине: если процесс упал после `open()`
+но до `write()` завершён, файл становился пустым или обрезанным → потеря
+ВСЕХ записей registry.
+
+### Фикс
+
+**`chimera/modules/port_registry.py`:**
+
+#### 1. FILE LOCK (`fcntl.flock`)
+
+Новый контекстный менеджер `_registry_lock(timeout=10)`:
+- POSIX advisory lock (`fcntl.LOCK_EX | LOCK_NB`) на отдельный
+  `.lock` файл (`PORT_REGISTRY_FILE.with_suffix(".lock")`)
+- Обёртывает ВЕСЬ цикл read-modify-write в `port_register()` /
+  `port_unregister()` одной блокировкой
+- Retry каждые 100мс, максимум 10 секунд
+- Если лок не получен → `TimeoutError`, `port_register` возвращает
+  `(False, '...')`, `port_unregister` возвращает `False`
+- Не зависает бесконечно
+
+```python
+@contextlib.contextmanager
+def _registry_lock(timeout: float = _LOCK_TIMEOUT_SEC):
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    f = open(LOCK_FILE, "w")
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(...)
+                time.sleep(0.1)
+        yield
+    finally:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        f.close()
+```
+
+#### 2. ATOMIC WRITE (`tempfile` + `os.replace`)
+
+`_registry_save()`:
+1. Пишет во временный файл `PORT_REGISTRY_FILE.with_suffix(".tmp")`
+2. `os.replace(tmp, PORT_REGISTRY_FILE)` — атомарная операция на уровне ОС
+3. Если процесс упал между (1) и (2) — оригинальный файл нетронут
+
+`os.replace` — POSIX-атомарная операция, гарантирует что файл либо
+полностью старый, либо полностью новый. Никаких «наполовину записанных»
+состояний.
+
+#### 3. READ БЕЗ ЛОКА
+
+`port_list_all()` и `port_get_conflicts()` НЕ используют лок — благодаря
+атомарной записи через `os.replace`, read всегда получает консистентный
+снапшот. Лок нужен только вокруг read-modify-write (где пишем).
+
+### Не тронуто
+
+- 3-уровневая проверка конфликтов (registry + ss + UFW + /etc/services)
+- `ufw_open_port` / `ufw_close_port` (делегируют в lock-protected
+  registry functions)
+- `legacy_comments`-механика для backward compat
+
+### Тесты (7 новых в `test_port_registry.py`)
+
+| Класс | # | Что проверяется |
+|-------|---|---|
+| `TestAtomicWrite` | 3 | атомарная запись создаёт валидный JSON; `.tmp` не остаётся после save; если `os.replace` бросил exception — оригинальный файл нетронут |
+| `TestFileLock` | 4 | 2 потока, разные порты — обе записи сохраняются; 2 потока, один порт — финальный JSON валиден; занятый лок → `port_register` не зависает; короткий таймаут (0.3с) → `TimeoutError` |
+
+44 теста в `test_port_registry.py` (было 37, +7), все pass.
+279 связанных тестов (port_registry + user_ip_whitelist + youtube + rest_api + portal + firewall) — 0 регрессий.
+
+---
+
 ## FEAT(olcrtc): полная переработка на manager panel + парольная защита — 8 августа 2026
 
 **olcRTC переписан с нуля: bare-olcrtc (YAML, systemd template) →
@@ -1563,6 +1768,61 @@ QUIC (UDP/443) — YouTube использует его для видео. TCP fr
 
 ---
 
+## FIX(mtproto): NAT detection via IP comparison instead of is_private heuristic — 6 августа 2026
+
+**Telemt MTProxy показывал нерабочие `tg://` ссылки на серверах с SDN NAT
+(<hoster-2>, Azure). `_is_public_ip()` проверял только RFC1918/loopback/
+link-local диапазоны — но SDN-NAT адреса выглядят как публичные, хотя
+не маршрутизируются снаружи. `_get_public_ip()` возвращал локальный
+NAT-адрес вместо реального публичного.**
+
+### Проблема
+
+Некоторые хостеры (<hoster-2>, Azure) используют SDN NAT с адресами,
+которые не попадают в стандартные RFC1918 private ranges (10.x, 172.16.x,
+192.168.x), но при этом не маршрутизируются извне. Например, `195.x.x.x`
+на <hoster-2> — выглядит как публичный, но на самом деле внутренний SDN.
+
+Старый код `_is_public_ip()` проверял только RFC1918 → возвращал `True`
+для таких SDN-адресов → `_get_public_ip()` пропускал запрос внешнего IP
+→ использовал нерабочий NAT-адрес в `tg://` ссылках → клиенты не могли
+подключиться.
+
+### Фикс
+
+`chimera/modules/mtproto.py`: `_get_public_ip()` теперь **всегда**
+запрашивает внешний IP (`api.ipify.org` / `ifconfig.me`) и сравнивает
+с `local_ip`:
+
+| local_ip | external_ip | Решение |
+|----------|-------------|---------|
+| matches external | matches | real public IP → use local |
+| differs from external | differs | NAT → use external |
+| differs | unavailable | fallback to local |
+
+`_is_public_ip()` оставлен (не удалён) — может использоваться в других
+местах. `_is_direct_ip()` не тронут — существующая Mode B логика
+(exit-нода) сохранена.
+
+### Файлы
+
+- `chimera/modules/mtproto.py` — `_get_public_ip()` переписан, +50 строк
+- `tests/test_mtproto.py` — +71 строк, 5 новых regression тестов
+
+### Тесты (5 новых в `TestGetPublicIp`)
+
+| # | Сценарий | Ожидаемый результат |
+|---|----------|---------------------|
+| 1 | Public IP matches external | returns local |
+| 2 | Standard NAT (10.x) | returns external |
+| 3 | **SDN NAT (non-RFC1918, e.g. 195.x on <hoster-2>)** | returns external (KEY) |
+| 4 | External unavailable | returns local (fallback) |
+| 5 | Mode B (exit node) | returns local |
+
+157 тестов mtproto — pass, 0 регрессий.
+
+---
+
 ## FEAT(dnscrypt): расширенная настройка DNSCrypt-proxy — 198 серверов, 50 стран, ODoH, DNSSEC, анонимизация — 2 августа 2026
 
 **Новый модуль `chimera/modules/dnscrypt_advanced.py` — расширенная настройка
@@ -1628,6 +1888,54 @@ BG, DK, RO, HU, BE, LU
 
 - `chimera/modules/dnscrypt_advanced.py` — новый модуль
 - `chimera/_core.py` — импорт + пункт меню `[RA]`
+
+---
+
+## FIX(users_manager): дедупликация + валидация до записи (User already exists) — 2 августа 2026
+
+**Два бага в `_users_apply_to_config` приводили к падению Xray с ошибкой
+`User X already exists` и оставляли сломанный конфиг на диске.**
+
+### Баг 1: конфиг перезаписывался ДО валидации
+
+`_users_apply_to_config()` записывал конфиг на диск, а затем валидировал
+его через `xray run -test -config`. Если валидация падала (например,
+дублирующий UUID/email) — сломанный конфиг уже был на диске. Xray не
+перезапускался (т.к. валидация упала), но при следующем ручном или
+автоматическом рестарте Xray падал с `User already exists`.
+
+**Фикс:** конфиг строится в памяти (`pending_writes`), валидируется через
+временный файл (`tempfile.NamedTemporaryFile`), и **только после успешной
+валидации** записывается на диск. Если валидация упала — оригинальный
+рабочий конфиг нетронут.
+
+### Баг 2: дедупликация только по UUID
+
+`_unified_load_users()` делал дедупликацию пользователей по UUID, но
+email мог дублироваться. Два пользователя с одинаковым email (но разными
+UUID) попадали в `config.json` → Xray падал с `User X already exists`,
+т.к. Xray требует уникальные email'ы.
+
+**Фикс:** дедупликация по UUID **И** по email в `_users_apply_to_config`.
+При обнаружении дубликатов выводится предупреждение:
+`Удалено дубликатов: N (по UUID или email)`.
+
+### Файлы
+
+- `chimera/modules/users_manager.py` — `_users_apply_to_config()` переписан,
+  +73 строки, -23 строки
+
+### Совместимость
+
+- Поведение для корректных данных не изменилось
+- При наличии дубликатов — автоматическое удаление + предупреждение
+- Старый конфиг не повреждается при ошибках валидации
+
+### Тесты
+
+Существующие тесты `test_users_manager.py` — pass, 0 регрессий.
+Новые сценарии покрыты regression-тестами на дедупликацию по UUID/email
+и на atomic-write при ошибке валидации.
 
 ---
 
