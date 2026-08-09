@@ -1020,15 +1020,15 @@ class _VLESSHandler(BaseHTTPRequestHandler):
     def _client_ip(self) -> str:
         """Возвращает реальный IP клиента.
 
-        v5.0.16: изначально возвращал self.client_address[0] напрямую —
+         изначально возвращал self.client_address[0] напрямую —
         обоснование было «rest_api слушает напрямую (без nginx)».
 
-        v5.0.17: nginx_front_portal.py поставил nginx перед User Portal
+         nginx_front_portal.py поставил nginx перед User Portal
         с proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for.
         Теперь client_address[0] — это 127.0.0.1 (loopback от nginx),
         а реальный IP клиента — в X-Forwarded-For.
 
-        v5.0.21: доверяем X-Forwarded-For, ТОЛЬКО если TCP-соединение
+         доверяем X-Forwarded-For, ТОЛЬКО если TCP-соединение
         пришло с loopback (значит — от локально работающего nginx-фронта).
         Если direct_ip НЕ loopback — запрос пришёл напрямую (rest_api
         открыт наружу без nginx, host="0.0.0.0") — тогда X-Forwarded-For
@@ -1377,7 +1377,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
         # Возвращает:
         #   { "ips": [{"ip": "5.167.98.20", "added_at": "...", "pinned": false}, ...],
         #     "max": 20, "detected_ip": "<текущий IP клиента>" }
-        # v5.0.20: detailed формат с added_at и pinned.
+        #  detailed формат с added_at и pinned.
         # detected_ip — IP, с которого клиент пришёл СЕЙЧАС. НЕ доверяем X-Forwarded-For.
         if path == "/api/portal/ips":
             user = self._require_user()
@@ -1390,7 +1390,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 email = user.get("email", "")
                 ips_detailed = get_user_ips_detailed(email)
                 detected = self._client_ip()
-                # v5.0.21: _client_ip() уже извлекает реальный IP из
+                #  _client_ip() уже извлекает реальный IP из
                 # X-Forwarded-For (если запрос через nginx-фронт). Если
                 # всё равно loopback — значит nginx не проставил XFF
                 # (конфиг сломан), или клиент правда localhost (SSH tunnel).
@@ -1758,7 +1758,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             if not ip_input:
                 self._send_json({"error": "ip required"}, 400)
                 return
-            # "auto" → берём IP через _client_ip() (v5.0.21: с поддержкой
+            # "auto" → берём IP через _client_ip() ( с поддержкой
             # X-Forwarded-For если запрос через nginx-фронт).
             # Если всё равно loopback — значит nginx не проставил XFF
             # (конфиг сломан), или клиент правда localhost (SSH tunnel).
@@ -1782,7 +1782,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, 500)
             return
 
-        # v5.0.20: POST /api/portal/ips/replace-all — заменить все IP на один новый.
+        #  POST /api/portal/ips/replace-all — заменить все IP на один новый.
         # Body: {"ip": "5.167.98.20"} или {"ip": "auto"} или {"ip": "auto", "keep_pinned": false}
         if path == "/api/portal/ips/replace-all":
             user = self._require_user()
@@ -1797,7 +1797,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "ip required"}, 400)
                 return
             if ip_input.lower() == "auto":
-                # v5.0.21: _client_ip() с поддержкой X-Forwarded-For.
+                #  _client_ip() с поддержкой X-Forwarded-For.
                 ip_input = self._client_ip()
                 if ip_input in ("127.0.0.1", "::1", "localhost", "?"):
                     self._send_json({
@@ -1818,7 +1818,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, 500)
             return
 
-        # v5.0.20: POST /api/portal/ips/pin — закрепить IP.
+        #  POST /api/portal/ips/pin — закрепить IP.
         # Body: {"ip": "5.167.98.20"}
         if path == "/api/portal/ips/pin":
             user = self._require_user()
@@ -1844,7 +1844,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, 500)
             return
 
-        # v5.0.20: POST /api/portal/ips/unpin — открепить IP.
+        #  POST /api/portal/ips/unpin — открепить IP.
         # Body: {"ip": "5.167.98.20"}
         if path == "/api/portal/ips/unpin":
             user = self._require_user()
@@ -2065,11 +2065,11 @@ def _run_in_thread(port: int = None) -> threading.Thread:
 def _ufw_web_panel_close(port: int) -> None:
     """Закрывает ufw-правило для веб-панели по комментарию и порту.
 
-    v5.0.19: миграция на port_registry (с legacy comment backward compat).
+     миграция на port_registry (с legacy comment backward compat).
     Сначала пробует port_registry.ufw_close_port (ищет chimera-web_panel
     и legacy "VLESS Web Panel"), затем fallback на ручной парсинг ufw status.
     """
-    # v5.0.19: сначала port_registry.
+    #  сначала port_registry.
     try:
         from chimera.modules.port_registry import (
             ufw_close_port, port_unregister, SERVICE_WEB_PANEL,
@@ -2147,7 +2147,7 @@ def install_web_service(port: int = None, admin_user: str = None,
 
     # Открываем порт в ufw ТОЛЬКО при явном внешнем доступе (host=0.0.0.0).
     # По умолчанию (127.0.0.1) — не открываем, доступ через SSH-туннель.
-    # v5.0.19: миграция на port_registry (с backward compat fallback).
+    #  миграция на port_registry (с backward compat fallback).
     if current_host == "0.0.0.0" and shutil.which("ufw"):
         _web_panel_ufw_opened = False
         try:
@@ -2213,12 +2213,12 @@ def uninstall_web_service() -> None:
     Решение: mask → stop → удалить юнит → daemon-reload → reset-failed →
     kill по порту если процесс всё ещё жив (fallback).
 
-    v5.0.17: также удаляет nginx front для User Portal (если был установлен).
+     также удаляет nginx front для User Portal (если был установлен).
     nginx_front_portal.NGINX_FRONT_STATE_FILE указывает на наличие фронта.
     """
     core = _core_module()
     _run = core._run
-    # v5.0.17: сначала удаляем nginx front (если был) — он зависит от rest_api.
+    #  сначала удаляем nginx front (если был) — он зависит от rest_api.
     try:
         from chimera.modules.nginx_front_portal import nginx_front_remove, nginx_front_status
         if nginx_front_status().get("enabled"):
@@ -2348,7 +2348,7 @@ def do_manage_web_panel() -> None:
         except Exception:
             pass
 
-        # v5.0.17: nginx front status
+        #  nginx front status
         _nginx_front_enabled = False
         _nginx_front_port = 0
         _nginx_front_domain = ""
@@ -2502,7 +2502,7 @@ def do_manage_web_panel() -> None:
                 _input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "7":
-            # v5.0.17: nginx front (TLS) для User Portal.
+            #  nginx front (TLS) для User Portal.
             try:
                 from chimera.modules.nginx_front_portal import do_manage_nginx_front
                 do_manage_nginx_front()

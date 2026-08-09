@@ -207,22 +207,22 @@ class TestMinSizes(unittest.TestCase):
     """Минимальные размеры для защиты от усечённых загрузок."""
 
     def test_geosite_min_size(self):
-        """geosite.dat — v5.0.0: 20 МБ минимум (реальный файл ~73 МБ).
+        """geosite.dat —  20 МБ минимум (реальный файл ~73 МБ).
 
         Старый порог 3 МБ пропускал устаревшие копии (10 МБ от кэширующего CDN).
         Новый порог 20 МБ отсекает их, но даёт запас ниже актуальных 73 МБ.
         """
         self.assertGreaterEqual(MIN_SIZES["geosite.dat"], 20_000_000,
-                                "geosite.dat min_size должен быть >= 20 МБ (v5.0.0)")
+                                "geosite.dat min_size должен быть >= 20 МБ ")
 
     def test_geoip_min_size(self):
-        """geoip.dat — v5.0.0: 1 МБ минимум (реальный файл ~18 МБ).
+        """geoip.dat —  1 МБ минимум (реальный файл ~18 МБ).
 
         Старый порог 10 КБ был безнадёжно занижен. Новый 1 МБ отсекает
         пустые/обрезанные загрузки.
         """
         self.assertGreaterEqual(MIN_SIZES["geoip.dat"], 1_000_000,
-                                "geoip.dat min_size должен быть >= 1 МБ (v5.0.0)")
+                                "geoip.dat min_size должен быть >= 1 МБ ")
 
     def test_min_sizes_keys(self):
         self.assertEqual(set(MIN_SIZES.keys()), {"geosite.dat", "geoip.dat"})
@@ -276,14 +276,14 @@ class TestBackwardCompatibility(unittest.TestCase):
 
 
 # ============================================================================
-#  CHECKSUM URLS — v5.0.0: sha256-верификация скачанных geo-файлов
+#  CHECKSUM URLS —  sha256-верификация скачанных geo-файлов
 # ============================================================================
 # Апстрим-проект публикует рядом с geosite.dat/geoip.dat их sha256-суммы
 # в файлах geosite.dat.sha256sum/geoip.dat.sha256sum. URL чек-суммы строится
 # теми же фабриками, что URL файла — порядок хостов должен совпадать.
 
 class TestChecksumUrls(unittest.TestCase):
-    """get_geosite_checksum_urls()/get_geoip_checksum_urls() — v5.0.0.
+    """get_geosite_checksum_urls()/get_geoip_checksum_urls() —  
 
     Проверки:
       • Списки непустые и той же длины, что список URL самих файлов

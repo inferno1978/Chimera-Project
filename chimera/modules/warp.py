@@ -337,10 +337,10 @@ ENDPOINT_TCP_TIMEOUT          = 1.5   # сек, уровень 1 (массовы
 ENDPOINT_ICMP_TIMEOUT         = 1.0   # сек, уровень 2 (ICMP ping, если разрешён)
 ENDPOINT_SWITCH_THRESHOLD_MS  = 30    # УТ-4: переключать, если RTT нового ≤ RTT текущего − 30мс
 ENDPOINT_HISTORY_MAX          = 10    # УТ-6: не более 10 записей
-HANDSHAKE_WAIT_ACTIVE_SEC     = 15    # УТ-2, этап 1: дождаться active (v5.0.7: 5→15, для ТСПУ)
-HANDSHAKE_SETTLE_SEC          = 5     # УТ-2, этап 3: пауза перед проверкой (v5.0.7: 3→5)
-HANDSHAKE_CURL_TIMEOUT        = 12    # УТ-2, этап 2: таймаут генерации трафика (v5.0.7: 5→12, для ТСПУ)
-HANDSHAKE_VERIFY_RETRIES      = 3     # v5.0.7: кол-во попыток генерации трафика
+HANDSHAKE_WAIT_ACTIVE_SEC     = 15    # УТ-2, этап 1: дождаться active ( 5→15, для ТСПУ)
+HANDSHAKE_SETTLE_SEC          = 5     # УТ-2, этап 3: пауза перед проверкой ( 3→5)
+HANDSHAKE_CURL_TIMEOUT        = 12    # УТ-2, этап 2: таймаут генерации трафика ( 5→12, для ТСПУ)
+HANDSHAKE_VERIFY_RETRIES      = 3     #  кол-во попыток генерации трафика
 
 
 # =============================================================================
@@ -737,7 +737,7 @@ def install_warp() -> bool:
         if r2.returncode != 0:
             err_text = (r2.stderr or r2.stdout or "").strip()
             warn(f"Ошибка регистрации wgcf: {err_text}")
-            # v5.0.23: детализированное сообщение для пользователя.
+            #  детализированное сообщение для пользователя.
             _err_lower = err_text.lower()
             if "tls handshake timeout" in _err_lower or "timeout" in _err_lower:
                 print()
@@ -1473,7 +1473,7 @@ def _verify_warp_handshake() -> tuple[bool, bool]:
     Возвращает (handshake_ok, warp_on) — rollback в вызывающем коде
     выполняется только если ОБА условия не выполнены.
 
-    v5.0.7 FIX: критически важно для ТСПУ-блокировок.
+     FIX: критически важно для ТСПУ-блокировок.
     ПРОБЛЕМА: раньше curl шёл на https://www.cloudflare.com (hostname) с
     таймаутом 5 сек. Если DNS резолвил Cloudflare IP, заблокированный
     ТСПУ — curl падал за 5 сек, НЕ генерировал трафик через туннель,
@@ -1498,7 +1498,7 @@ def _verify_warp_handshake() -> tuple[bool, bool]:
     if not active:
         return False, False
 
-    # v5.0.7: генерируем трафик через ПРЯМОЙ IP (1.1.1.1), без DNS.
+    #  генерируем трафик через ПРЯМОЙ IP (1.1.1.1), без DNS.
     # Retry loop — WireGuard может требовать нескольких попыток.
     warp_on = False
     for attempt in range(HANDSHAKE_VERIFY_RETRIES):

@@ -733,7 +733,7 @@ def _fw_tool() -> str:
     return "iptables"
 
 def _ipt_open_udp(port: int) -> None:
-    # v5.0.18: миграция на port_registry.
+    #  миграция на port_registry.
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, port_register, SERVICE_WDTT,
@@ -755,7 +755,7 @@ def _ipt_open_udp(port: int) -> None:
         _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
 
 def _ipt_close_udp(port: int) -> None:
-    # v5.0.18: миграция на port_registry (с legacy comment).
+    #  миграция на port_registry (с legacy comment).
     try:
         from chimera.modules.port_registry import (
             ufw_close_port, port_unregister, SERVICE_WDTT,

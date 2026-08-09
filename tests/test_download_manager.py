@@ -555,13 +555,13 @@ class TestPostInstallCallback(unittest.TestCase):
 
 
 # ============================================================================
-#  ТЕСТЫ MIN_SIZES — отбраковка слишком маленьких файлов (v5.0.0)
+#  ТЕСТЫ MIN_SIZES — отбраковка слишком маленьких файлов 
 # ============================================================================
 
 class TestFetchPackageMinSizeRejection(unittest.TestCase):
     """fetch_package() — отбраковка файлов меньше min_size и retry на следующее зеркало.
 
-    v5.0.0: на проде был инцидент — CDN отдал устаревший geosite.dat (10 МБ
+     на проде был инцидент — CDN отдал устаревший geosite.dat (10 МБ
     вместо 73 МБ). Старый порог 3 МБ пропустил его как валидный. Тест проверяет:
       1. Файл < min_size отбраковывается.
       2. Код переходит к следующему зеркалу (НЕ считает загрузку успешной).
@@ -816,7 +816,7 @@ class TestPrintManualHint(unittest.TestCase):
 
 
 # ============================================================================
-#  ТЕСТЫ sha256-верификации (v5.0.0)
+#  ТЕСТЫ sha256-верификации 
 # ============================================================================
 # Тесты покрывают 3 ключевых сценария:
 #   1. Hash НЕ совпал → файл отбракован, переход к следующему зеркалу
@@ -902,7 +902,7 @@ class TestParseChecksumContent(unittest.TestCase):
 class TestFetchPackageChecksumVerification(unittest.TestCase):
     """fetch_package() с checksum_urls — три ключевых сценария.
 
-    v5.0.0: после успешной загрузки файла (размер >= min_size) дополнительно
+     после успешной загрузки файла (размер >= min_size) дополнительно
     проверяется sha256 через скачивание .sha256sum с checksum_urls.
 
     Сценарии:
@@ -960,7 +960,7 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
         файла, поэтому hash не совпадает со старым файлом → отбраковка.
         Mirror2 отдаёт актуальный файл, hash совпадает → успех.
 
-        v5.0.4+: эталонный хэш получается ОДИН РАЗ через _fetch_reference_hash
+         : эталонный хэш получается ОДИН РАЗ через _fetch_reference_hash
         (короткий приоритетный список) ПЕРЕД циклом скачивания. Внутри цикла
         — простое сравнение actual_hash с reference_hash, без повторных
         запросов .sha256sum.
@@ -1029,7 +1029,7 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
 
         self.assertTrue(result, "Должен вернуть True — второе зеркало прошло верификацию")
 
-        # v5.0.4+: эталонный хэш получен ОДИН РАЗ перед циклом, а НЕ для
+        #  : эталонный хэш получен ОДИН РАЗ перед циклом, а НЕ для
         # каждого кандидата. Порядок вызовов:
         #   1. raw.githubusercontent.com/.sha256sum → fresh_hash (reference_hash)
         #   2. mirror1.example.com/.dat (stale) → hash=stale_hash, mismatch
@@ -1057,7 +1057,7 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
         Симулируем: единственное зеркало, файл валидного размера,
         .sha256sum совпадает → успех с первого раза.
 
-        v5.0.4+: reference_hash получен ОДИН РАЗ перед циклом, затем
+         : reference_hash получен ОДИН РАЗ перед циклом, затем
         actual_hash скачанного файла сравнивается напрямую.
 
         КЛЮЧЕВЫЕ проверки:
@@ -1119,7 +1119,7 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
         github.com, cdn.statically.io) возвращает 404 → fetch_package
         принимает файл по размерной проверке с warn.
 
-        v5.0.4+: _fetch_reference_hash возвращает None (деградация) если
+         : _fetch_reference_hash возвращает None (деградация) если
         все 3 приоритетных источника недоступны. Полный список checksum_urls
         (19 зеркал) НЕ перебирается — только короткий приоритетный список.
 
@@ -1236,7 +1236,7 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
         (нет 64-символьного hex) → _fetch_reference_hash пробует следующий
         приоритетный источник, если все 3 отдают мусор → None → деградация.
 
-        v5.0.4+: _fetch_reference_hash перебирает 3 приоритетных источника.
+         : _fetch_reference_hash перебирает 3 приоритетных источника.
         Если все 3 ответили мусором (или упали) → None → деградация.
         """
         import io
@@ -1294,7 +1294,7 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
 
 
 class TestChecksumNotCalledInManualBranch(unittest.TestCase):
-    """v5.0.0 regression-тест: sha256-верификация НЕ вызывается в manual-ветке.
+    """ regression-тест: sha256-верификация НЕ вызывается в manual-ветке.
 
     Когда файл найден в manual_incoming_dir (/root/ — ручное размещение
     через WinSCP), fetch_package использует его без сети и БЕЗ sha256-
@@ -1302,7 +1302,7 @@ class TestChecksumNotCalledInManualBranch(unittest.TestCase):
     сам туда кладёт то, что скачал вручную через curl), верификация по
     хэшу там избыточна.
 
-    v5.0.4+: вместо _verify_checksum теперь мокаем _fetch_reference_hash
+     : вместо _verify_checksum теперь мокаем _fetch_reference_hash
     (она заменила _verify_checksum). Логика та же: в manual-ветке
     fetch_package должен вернуть True ДО сетевого цикла, не вызывая
     ни _fetch_reference_hash, ни _compute_hash.
@@ -1352,7 +1352,7 @@ class TestChecksumNotCalledInManualBranch(unittest.TestCase):
 
 
 # ============================================================================
-#  v5.0.0 REGRESSION TEST: файл в install_dests должен иметь каноническое имя
+#   REGRESSION TEST: файл в install_dests должен иметь каноническое имя
 # ============================================================================
 # КРИТИЧЕСКИЙ regression-тест на баг, обнаруженный 22.07.2026 на проде:
 # geosite.dat/geoip.dat копировались под именем '_download_mgr_geosite.dat'
@@ -1362,7 +1362,7 @@ class TestChecksumNotCalledInManualBranch(unittest.TestCase):
 # дней, все geo-обновления за это время были no-op по факту.
 
 class TestCanonicalFileNameInInstallDests(unittest.TestCase):
-    """v5.0.0 regression: файл в install_dests должен называться
+    """ regression: файл в install_dests должен называться
     'geosite.dat', а НЕ '_download_mgr_geosite.dat'.
 
     Баг введён в fbb2285 (10.07.2026), обнаружен 22.07.2026 на проде —
@@ -1497,7 +1497,7 @@ class TestCanonicalFileNameInInstallDests(unittest.TestCase):
 
 
 # ============================================================================
-#  v5.0.4 REGRESSION TESTS: эталонный хэш ОДИН РАЗ, continue-при-mismatch
+#   REGRESSION TESTS: эталонный хэш ОДИН РАЗ, continue-при-mismatch
 # ============================================================================
 # Эти тесты защищают от регрессии класса багов, который был в v5.0.0-v5.0.3:
 #
@@ -1509,7 +1509,7 @@ class TestCanonicalFileNameInInstallDests(unittest.TestCase):
 #    и ВСЕ .dat-кандидаты помечались невалидными одинаково — скачивание
 #    проваливалось целиком, хотя годные зеркала .dat были дальше в списке.
 #
-# v5.0.4 фикс: _fetch_reference_hash() получает эталонный хэш ОДИН РАЗ с
+#  фикс: _fetch_reference_hash() получает эталонный хэш ОДИН РАЗ с
 # короткого приоритетного списка (raw.githubusercontent.com → release-assets →
 # cdn.statically.io), затем fetch_package просто сравнивает actual_hash
 # с reference_hash для каждого кандидата. continue (НЕ return) при mismatch.
@@ -1517,7 +1517,7 @@ class TestCanonicalFileNameInInstallDests(unittest.TestCase):
 class TestFetchReferenceHashHelper(unittest.TestCase):
     """Прямые тесты _fetch_reference_hash() — без overhead полного fetch_package.
 
-    v5.0.4: новая функция заменяет старую _verify_checksum.
+     новая функция заменяет старую _verify_checksum.
     """
 
     def setUp(self):
@@ -1736,16 +1736,16 @@ class TestFetchReferenceHashHelper(unittest.TestCase):
 
 
 class TestSingleMirrorMismatchDoesNotInvalidateAllCandidates(unittest.TestCase):
-    """ГЛАВНЫЙ regression-тест v5.0.4: несовпадение хэша у ОДНОГО кандидата
+    """ГЛАВНЫЙ regression-тест  несовпадение хэша у ОДНОГО кандидата
     НЕ должно прекращать проверку остальных .dat-зеркал.
 
-    Это защита от класса регрессии, который был в v5.0.0-v5.0.3: если CDN
+    Это защита от класса регрессии, который был в v5.0.0- если CDN
     закэшировал устаревший .sha256sum, _verify_checksum спотыкалась на
     одном и том же протухшем зеркале для ВСЕХ .dat-кандидатов — и все
     кандидаты помечались невалидными одинаково, скачивание проваливалось
     целиком, хотя годные зеркала .dat были дальше в списке.
 
-    v5.0.4 фикс:
+     фикс:
       - reference_hash получается ОДИН РАЗ (через короткий приоритетный список)
       - цикл по .dat-зеркалам ПРОДОЛЖАЕТСЯ (continue) при несовпадении хэша
       - пробуется СЛЕДУЮЩЕЕ зеркало .dat с ТЕМ ЖЕ reference_hash

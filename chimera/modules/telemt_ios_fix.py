@@ -264,9 +264,9 @@ def _pick_free_port(start: int, exclude: int) -> int:
 def _setup_ufw(port: int) -> None:
     """Открывает порт в UFW, если он активен. Дублирует _setup_ufw() из mtproto.py локально.
 
-    v5.0.18: миграция на port_registry (с backward compat fallback на прямой ufw allow).
+     миграция на port_registry (с backward compat fallback на прямой ufw allow).
     """
-    # v5.0.18: сначала пробуем port_registry.
+    #  сначала пробуем port_registry.
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, port_register, SERVICE_TELEMT_IOS_FIX,

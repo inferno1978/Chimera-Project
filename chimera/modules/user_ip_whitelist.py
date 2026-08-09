@@ -105,7 +105,7 @@ CRON_SCRIPT = Path("/usr/local/bin/chimera-clients-wl-rebuild.sh")
 # операторов (3-5 подсетей) + домашний + рабочий. Больше = злоупотребление.
 MAX_IPS_PER_USER = 20
 
-# v5.0.20: Age-based cleanup — IP старше этого количества дней удаляются
+#  Age-based cleanup — IP старше этого количества дней удаляются
 # автоматически (cron, раз в сутки). 0 = cleanup отключен.
 DEFAULT_CLEANUP_RETENTION_DAYS = 30
 
@@ -217,7 +217,7 @@ def _find_user_by_uuid(users: list[dict], uuid_val: str) -> "Optional[dict]":
 def _normalize_user_ips(user: dict) -> list[str]:
     """Возвращает список IP-строк из allowed_ips пользователя.
 
-    v5.0.20: поддерживает оба формата:
+     поддерживает оба формата:
       - Старый: ["5.167.98.20", ...] (просто строки)
       - Новый: [{"ip": "5.167.98.20", "added_at": "...", "pinned": false}, ...]
     Возвращает всегда list[str] (только IP-строки) для backward compat
@@ -241,7 +241,7 @@ def _normalize_user_ips(user: dict) -> list[str]:
 def _normalize_user_ips_detailed(user: dict) -> list[dict]:
     """Возвращает список объектов allowed_ips с метаданными.
 
-    v5.0.20: каждый элемент — {"ip": str, "added_at": str, "pinned": bool}.
+     каждый элемент — {"ip": str, "added_at": str, "pinned": bool}.
     Для старого формата (строки) — конвертирует in-memory с added_at="" и pinned=False.
     Не пишет на диск (миграция происходит при следующем save).
     """
@@ -285,7 +285,7 @@ def add_ip_to_user(email: str, ip: str, pinned: bool = False) -> "tuple[bool, st
     Возвращает (success, message).
     Атомарно: читает users → модифицирует → сохраняет → rebuild ipset.
 
-    v5.0.20:
+     
       - Хранит в detailed формате: {"ip", "added_at", "pinned"}
       - FIFO: если лимит достигнут, удаляет самый старый незакреплённый IP
       - Migration: при добавлении конвертирует старый формат (строки) в detailed
@@ -352,7 +352,7 @@ def remove_ip_from_user(email: str, ip: str) -> "tuple[bool, str]":
     Принимает как нормализованную форму (из get_user_ips), так и произвольную
     (пробуем валидировать и нормализовать перед поиском).
 
-    v5.0.20: работает с detailed форматом, но принимает IP-строку.
+     работает с detailed форматом, но принимает IP-строку.
     """
     users = _users_load()
     user = _find_user_by_email(users, email)
@@ -398,7 +398,7 @@ def get_user_ips(email: str) -> list[str]:
 def get_user_ips_detailed(email: str) -> list[dict]:
     """Возвращает список allowed_ips с метаданными.
 
-    v5.0.20: каждый элемент — {"ip": str, "added_at": str, "pinned": bool}.
+     каждый элемент — {"ip": str, "added_at": str, "pinned": bool}.
     """
     users = _users_load()
     user = _find_user_by_email(users, email)
@@ -452,7 +452,7 @@ def unpin_ip_from_user(email: str, ip: str) -> "tuple[bool, str]":
 def replace_all_ips(email: str, new_ip: str, keep_pinned: bool = True) -> "tuple[bool, str]":
     """Заменяет все IP на один новый. Опционально сохраняет закреплённые.
 
-    v5.0.20: для сценария «у меня сменился IP, хочу только новый».
+     для сценария «у меня сменился IP, хочу только новый».
     Если keep_pinned=True — закреплённые IP не удаляются.
     """
     # Валидация нового IP.
@@ -752,7 +752,7 @@ def remove_cron() -> None:
     CRON_SCRIPT.unlink(missing_ok=True)
 
 
-# ── Age-based cleanup (v5.0.20) ──────────────────────────────────────────────
+# ── Age-based cleanup  ──────────────────────────────────────────────
 
 def _get_cleanup_retention_days() -> int:
     """Возвращает retention period из state.json (или default)."""
@@ -788,7 +788,7 @@ def _is_cleanup_enabled() -> bool:
 def cleanup_old_ips(retention_days: "Optional[int]" = None) -> "tuple[int, int]":
     """Удаляет незакреплённые IP старше retention_days.
 
-    v5.0.20: age-based cleanup для предотвращения накопления старых IP.
+     age-based cleanup для предотвращения накопления старых IP.
     Закреплённые (pinned=True) IP НЕ удаляются.
 
     Args:

@@ -102,7 +102,7 @@ class TestYoutubeApplyToXray(unittest.TestCase):
     def test_adds_youtube_rule_with_domain_entries(self):
         """Правило должно содержать domain:youtube.com в domain[].
 
-        v5.0.0: geosite:youtube убран — его нет в runetfreedom geosite.dat.
+         geosite:youtube убран — его нет в runetfreedom geosite.dat.
         Теперь используем только domain: записи.
         """
         from chimera.modules import youtube_route
@@ -470,7 +470,7 @@ class TestYoutubeDomainsList(unittest.TestCase):
 
 
 # ============================================================================
-#  v5.0.0 — Multi-node YouTube routing: target_tag = "chain-exit-N"
+#   — Multi-node YouTube routing: target_tag = "chain-exit-N"
 # ============================================================================
 
 class TestYoutubeApplyToXrayTargetTag(unittest.TestCase):
@@ -748,7 +748,7 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
             youtube_route.do_manage_youtube_via_ru()
 
         output = captured.getvalue()
-        # v5.0.8: prompt теперь [1/2/F/W/Q] — добавлены кнопки F (RU+fragment) и W (YouTube->WARP)
+        #  prompt теперь [1/2/F/W/Q] — добавлены кнопки F (RU+fragment) и W (YouTube->WARP)
         self.assertIn("[1/2/F/W/Q]", output,
                       f"Single-node должен показать [1/2/F/W/Q], вывод:\n{output}")
         # НЕ должно быть multi-node prompt типа [1-5/F/W/Q]
@@ -787,7 +787,7 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
             youtube_route.do_manage_youtube_via_ru()
 
         output = captured.getvalue()
-        # v5.0.8: prompt теперь [1-5/F/W/Q] — добавлены кнопки F (RU+fragment) и W (YouTube->WARP)
+        #  prompt теперь [1-5/F/W/Q] — добавлены кнопки F (RU+fragment) и W (YouTube->WARP)
         self.assertIn("[1-5/F/W/Q]", output,
                       f"Multi-node (3 nodes) должен показать [1-5/F/W/Q], вывод:\n{output}")
         # Не должно быть single-node prompt
@@ -797,12 +797,12 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
         self.assertIn("2.2.2.2", output)
         self.assertIn("3.3.3.3", output)
 
-    # ── Кейс 9: REGRESSION v5.0.1 — нажатие 'w' не должно молча выходить ──
-    # БАГ (исправлен в v5.0.1): в multi-node меню `int("w")` бросал
+    # ── Кейс 9: REGRESSION  — нажатие 'w' не должно молча выходить ──
+    # БАГ (исправлен в  : в multi-node меню `int("w")` бросал
     # ValueError → except ValueError: return → кнопка [W] молча возвращала
     # пользователя в основное меню без какого-либо сообщения.
     def test_multi_node_w_key_calls_warp_interactive(self):
-        """v5.0.1 regression: 'w' в multi-node меню должен вызвать
+        """ regression: 'w' в multi-node меню должен вызвать
         do_youtube_warp_interactive, а не молча выйти из-за ValueError
         в int('w')."""
         import io
@@ -854,16 +854,16 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
             youtube_route.do_manage_youtube_via_ru()
 
         # КРИТИЧНО: do_youtube_warp_interactive должен быть вызван.
-        # До v5.0.1 фикса это было невозможно — int('w') бросал ValueError.
+        # До  фикса это было невозможно — int('w') бросал ValueError.
         self.assertEqual(warp_called["count"], 1,
                          "do_youtube_warp_interactive должен быть вызван 1 раз "
                          f"при нажатии 'w', фактически {warp_called['count']}. "
                          "Возможно, regression: int('w') снова бросает ValueError "
                          "и обработчик 'w' недостижим.")
 
-    # ── Кейс 10: REGRESSION v5.0.1 — то же для single-node меню ──────────
+    # ── Кейс 10: REGRESSION  — то же для single-node меню ──────────
     def test_single_node_w_key_calls_warp_interactive(self):
-        """v5.0.1 regression: 'w' в single-node меню должен вызвать
+        """ regression: 'w' в single-node меню должен вызвать
         do_youtube_warp_interactive."""
         import io
         from contextlib import redirect_stdout
@@ -912,7 +912,7 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
 class TestResolveNodeIpAndFlag(unittest.TestCase):
     """Тесты для _resolve_node_ip_and_flag — хелпер резолва IP + emoji-флага.
 
-    v5.0.2: флаги стран (🇩🇪, 🇳🇱, ...) рядом с IP exit-нод в YouTube меню.
+     флаги стран (🇩🇪, 🇳🇱, ...) рядом с IP exit-нод в YouTube меню.
     """
 
     def setUp(self):
@@ -932,7 +932,7 @@ class TestResolveNodeIpAndFlag(unittest.TestCase):
     def test_successful_resolve_with_country(self):
         """Host резолвится, ip-api.com отдаёт DE → (IP, '🇩🇪️').
         
-        v5.0.3: флаг включает U+FE0F (VS16) чтобы терминал рендерил
+         флаг включает U+FE0F (VS16) чтобы терминал рендерил
         regional indicator pair как emoji-флаг, не как буквы.
         """
         from chimera.modules import youtube_route
@@ -943,7 +943,7 @@ class TestResolveNodeIpAndFlag(unittest.TestCase):
         with patch("socket.gethostbyname", return_value="132.243.221.181"):
             ip, flag = youtube_route._resolve_node_ip_and_flag("node1.example.com")
         self.assertEqual(ip, "132.243.221.181")
-        # v5.0.3: флаг теперь содержит U+FE0F (VS16) в конце
+        #  флаг теперь содержит U+FE0F (VS16) в конце
         self.assertEqual(flag, "🇩🇪\ufe0f",
                          f"Флаг должен быть 🇩🇪+VS16, получили {flag!r} "
                          f"(codepoints: {[hex(ord(c)) for c in flag]})")
@@ -958,7 +958,7 @@ class TestResolveNodeIpAndFlag(unittest.TestCase):
         with patch("socket.gethostbyname", return_value="80.66.65.15"):
             ip, flag = youtube_route._resolve_node_ip_and_flag("ru-node.example.com")
         self.assertEqual(ip, "80.66.65.15")
-        # v5.0.3: флаг теперь содержит U+FE0F (VS16) в конце
+        #  флаг теперь содержит U+FE0F (VS16) в конце
         self.assertEqual(flag, "🇷🇺\ufe0f",
                          f"Флаг должен быть 🇷🇺+VS16, получили {flag!r}")
 
@@ -997,7 +997,7 @@ class TestResolveNodeIpAndFlag(unittest.TestCase):
                          "не 🌐 (это зарезервировано для балансировщика)")
 
     def test_flag_has_vs16_variation_selector(self):
-        """v5.0.3 regression: emoji-флаг должен заканчиваться U+FE0F (VS16).
+        """ regression: emoji-флаг должен заканчиваться U+FE0F (VS16).
 
         Без VS16 некоторые терминалы рендерят regional indicator pair как
         ОДНУ букву вместо emoji-флага. Был зафиксирован случай (скриншот
@@ -1040,7 +1040,7 @@ class TestResolveNodeIpAndFlag(unittest.TestCase):
 class TestYoutubeMenuFlagRendering(unittest.TestCase):
     """Регрессионные тесты рендера multi-node меню с флагами.
 
-    v5.0.2: флаги 🇷🇺 (RU), 🇩🇪/🇳🇱/... (exit-ноды), 🌍 (балансировщик).
+     флаги 🇷🇺 (RU), 🇩🇪/🇳🇱/... (exit-ноды), 🌍 (балансировщик).
     Границы бокса не должны сломаться — _wcslen корректно считает emoji.
     """
 

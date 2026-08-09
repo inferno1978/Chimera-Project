@@ -62,28 +62,28 @@ _YOUTUBE_RULE_COMMENT = "youtube_via_ru"
 _YOUTUBE_FRAG_RULE_COMMENT = "youtube_via_ru_fragment"
 _YOUTUBE_QUIC_BLOCK_COMMENT = "youtube_block_quic"
 
-# v5.0.13: маркер в state.json для сохранённых оригинальных значений sniffing.
+#  маркер в state.json для сохранённых оригинальных значений sniffing.
 # Используется _youtube_patch_inbounds_for_fragment() / _youtube_restore_inbounds_after_fragment()
 # чтобы корректно откатывать routeOnly/destOverride после отключения fragment.
 #
-# v5.0.14: ВРЕМЕННО выключал вызовы patch_inbounds (routeOnly=True ломал UseIPv4
+#  ВРЕМЕННО выключал вызовы patch_inbounds (routeOnly=True ломал UseIPv4
 # на серверах без IPv6 — фикс v4.12.6).
-# v5.0.15: ВЕРНУТЫ вызовы. Причина: на серверах с IPv6 routeOnly=True работает
+#  ВЕРНУТЫ вызовы. Причина: на серверах с IPv6 routeOnly=True работает
 # корректно и чинит асимметричную маршрутизацию QUIC-видео. Пользователь должен
 # сам выбрать — если сервер без IPv6, можно не включать RU+fragment (или
 # отключить QUIC block). Если с IPv6 — всё работает как задумано.
 _YOUTUBE_SNIFFING_BACKUP_KEY = "_youtube_sniffing_backup"
 
-# v5.0.13/v5.0.15: безопасный sockopt для freedom outbound.
+#  безопасный sockopt для freedom outbound.
 #
-# В v5.0.10 мы добавили sockopt с tcpCongestion='bbr' и это сломало YouTube
-# полностью (v5.0.11/v5.0.12 откатили). Причина — tcpCongestion='bbr' требует
+# В  мы добавили sockopt с tcpCongestion='bbr' и это сломало YouTube
+# полностью (  откатили). Причина — tcpCongestion='bbr' требует
 # загруженного модуля tcp_bbr в ядре, иначе setsockopt(TCP_CONGESTION,"bbr")
 # возвращает ENOTSUP и Xray прерывает КАЖДЫЙ dial через freedom outbound.
 #
-# v5.0.14: временно убран из freedom outbound (у пользователя на сервере без
+#  временно убран из freedom outbound (у пользователя на сервере без
 # IPv6 это вызывало 'Нет подключения' — но причина была в routeOnly, не sockopt).
-# v5.0.15: ВОЗВРАЩЁН. tcpFastOpen/tcpKeepAlive*/tcpUserTimeout безопасны
+#  ВОЗВРАЩЁН. tcpFastOpen/tcpKeepAlive*/tcpUserTimeout безопасны
 # на любом современном ядре (в отличие от tcpCongestion='bbr').
 #
 # Подтверждено документацией Xray (v26.x): sockopt на freedom outbound
@@ -97,7 +97,7 @@ _YOUTUBE_SAFE_SOCKOPT = {
 
 # Список доменов YouTube и связанных сервисов.
 #
-# v5.0.0 FIX: Раньше использовались geosite:youtube и geosite:google, но
+#  FIX: Раньше использовались geosite:youtube и geosite:google, но
 # geosite.dat от runetfreedom (который ставит Chimera) НЕ содержит этих
 # категорий — только российские (category-ru, ru-available-only-inside).
 # Xray падал при старте с "code not found in geosite.dat: YOUTUBE".
@@ -126,7 +126,7 @@ _YOUTUBE_DOMAINS = [
     # CDN видео-стримов (DASH/HLS манифесты + сегменты)
     "domain:googlevideo.com",
     "domain:manifest.googlevideo.com",
-    # v5.0.13: расширенный набор CDN-доменов YouTube.
+    #  расширенный набор CDN-доменов YouTube.
     # Без них видеострим (DASH) может асимметрично уйти через default outbound,
     # пока thumbnails/api идут через fragment — это и есть причина "Shorts
     # долго грузятся" и "видео buffering". Все эти домена на одной AS Google.
@@ -149,7 +149,7 @@ _YOUTUBE_DOMAINS = [
 # =============================================================================
 #  ХЕЛПЕР: IP + ФЛАГ СТРАНЫ для exit-ноды
 # =============================================================================
-# v5.0.2: отображение флага страны рядом с IP exit-ноды в TUI-меню.
+#  отображение флага страны рядом с IP exit-ноды в TUI-меню.
 # Используется в do_manage_youtube_via_ru() для multi-node режима.
 #
 # Алгоритм:
@@ -164,7 +164,7 @@ _YOUTUBE_DOMAINS = [
 #                неизвестна или запрос упал. НЕ возвращаем 🌐 для fallback
 #                (это зарезервировано для балансировщика) — лучше пусто.
 #
-# v5.0.3 FIX: U+FE0F (VARIATION SELECTOR-16) после regional indicator pair.
+#  FIX: U+FE0F (VARIATION SELECTOR-16) после regional indicator pair.
 #   Без VS16 некоторые терминалы (особенно с нестандартными шрифтами) рендерят
 #   regional indicator pair как ОДНУ букву вместо emoji-флага. Был зафиксирован
 #   случай: 🇳🇱 рендерилась как "N" (одна буква), 🇩🇪 как "D", 🇮🇹 как "I",
@@ -254,7 +254,7 @@ def _resolve_node_ip_and_flag(host: str) -> tuple[str, str]:
                     try:
                         from chimera.modules.resources import country_flag_emoji
                         flag = country_flag_emoji(cc)
-                        # v5.0.3: добавляем U+FE0F чтобы терминал рендерил
+                        #  добавляем U+FE0F чтобы терминал рендерил
                         # regional indicator pair как emoji-флаг, не как буквы.
                         flag = _with_emoji_vs16(flag)
                     except Exception:
@@ -272,7 +272,7 @@ def _resolve_node_ip_and_flag(host: str) -> tuple[str, str]:
 # =============================================================================
 
 # =============================================================================
-#  v5.0.13/v5.0.15: ПАТЧ INBOUND SNIFFING ДЛЯ FRAGMENT-РЕЖИМА
+#   ПАТЧ INBOUND SNIFFING ДЛЯ FRAGMENT-РЕЖИМА
 # =============================================================================
 # Проблема: по умолчанию (с v4.12.6) все VLESS/REALITY inbound имеют
 #   routeOnly: False + destOverride: ["http", "tls"]
@@ -521,29 +521,29 @@ def _youtube_apply_fragment_to_xray(
     settings.fragment — Xray разбивает первые N байт TLS ClientHello
     на мелкие куски, что мешает ТСПУ DPI-анализу SNI.
 
-    v5.0.8: ТСПУ начал фильтровать YouTube SNI на прямых соединениях
+     ТСПУ начал фильтровать YouTube SNI на прямых соединениях
     из РФ. Раньше YouTube→RU (direct) работал. Теперь нужен fragment
     чтобы обойти DPI.
 
-    v5.0.9: дефолтные параметры изменены на более сбалансированные
+     дефолтные параметры изменены на более сбалансированные
     (packets="1", length="10-30", interval="3-8") — меньше задержка,
     достаточно для обхода ТСПУ. Пресеты доступны в меню.
 
-    v5.0.10: добавлена опциональная блокировка QUIC (block_quic=True).
+     добавлена опциональная блокировка QUIC (block_quic=True).
     По умолчанию ВЫКЛЮЧЕНА — на некоторых конфигурациях Xray QUIC block
     ломает YouTube полностью. Включается в подменю пресета.
 
-    v5.0.11: block_quic по умолчанию False (был True в v5.0.10, вызывал
+     block_quic по умолчанию False (был True в   вызывал
     'Нет подключения к интернету' у некоторых пользователей).
 
-    v5.0.12: убран sockopt из freedom outbound — он ломал YouTube
+     убран sockopt из freedom outbound — он ломал YouTube
     (tcpFastOpen/tcpCongestion/tcpUserTimeout могут не поддерживаться
     freedom outbound или вызывать проблемы). Возвращаем к чистому
-    fragment, как было в рабочей v5.0.9.
+    fragment, как было в рабочей  
 
-    v5.0.13: ПОЛНАЯ переработка стабильности YouTube через fragment:
+     ПОЛНАЯ переработка стабильности YouTube через fragment:
       • Возврат безопасного sockopt (БЕЗ tcpCongestion='bbr' — он был
-        причиной поломки v5.0.10). Проверено по доке Xray v26.x:
+        причиной поломки  . Проверено по доке Xray v26.x:
         sockopt на freedom outbound поддерживается официально.
       • Патч inbound sniffing: routeOnly=True + destOverride["quic"]
         только при активном fragment. Это чинит:
@@ -557,14 +557,14 @@ def _youtube_apply_fragment_to_xray(
         чтобы активные соединения успели корректно завершиться.
       • Расширенный список YouTube-доменов (CDN variants).
 
-    v5.0.14: HOTFIX — откат опасных изменений v5.0.13 (на сервере без IPv6
-      у пользователя v5.0.13 ломал YouTube полностью):
+     HOTFIX — откат опасных изменений  (на сервере без IPv6
+      у пользователя  ломал YouTube полностью):
       • УБРАН sockopt из freedom outbound.
       • УБРАНЫ вызовы _youtube_patch_inbounds_for_fragment() /
         _youtube_restore_inbounds_after_fragment().
       • ОСТАВЛЕНЫ: maxSplit, расширенный список доменов, грейсфул-рестарт.
 
-    v5.0.15: ВОЗВРАТ v5.0.13 — пользователь переезжает на сервер с IPv6.
+     ВОЗВРАТ  — пользователь переезжает на сервер с IPv6.
       На сервере с IPv6 routeOnly=True безопасен и чинит асимметричную
       маршрутизацию QUIC-видео. Возвращаем:
       • ВОЗВРАЩЁН sockopt в freedom outbound (tcpKeepAlive + TFO + tcpUserTimeout).
@@ -627,12 +627,12 @@ def _youtube_apply_fragment_to_xray(
             # Создаём outbound direct-fragment если его нет.
             # Перезаписываем если есть — чтобы обновить параметры fragment.
             outbounds = [ob for ob in outbounds if ob.get("tag") != _outbound_tag]
-            # v5.0.13/v5.0.15: безопасный sockopt для freedom outbound.
-            # v5.0.10: был sockopt с tcpCongestion='bbr' → ломал YouTube полностью
+            #  безопасный sockopt для freedom outbound.
+            #  был sockopt с tcpCongestion='bbr' → ломал YouTube полностью
             # (bbr требует modprobe tcp_bbr; иначе setsockopt возвращает ENOTSUP,
             #  Xray прерывает dial).
-            # v5.0.12: sockopt убран целиком. v5.0.13: возвращён БЕЗ bbr.
-            # v5.0.14: временно убран. v5.0.15: ВОЗВРАЩЁН.
+            #  sockopt убран целиком.  возвращён БЕЗ bbr.
+            #  временно убран.  ВОЗВРАЩЁН.
             # Подтверждено докой: https://xtls.github.io/en/config/transports/sockopt.html
             # «For direct outbounds such as Freedom, the peer is usually any
             # ordinary public network target... only sockopt is available.»
@@ -644,7 +644,7 @@ def _youtube_apply_fragment_to_xray(
                     "interval": interval,
                 },
             }
-            # v5.0.13: maxSplit — недокументированное, но поддерживаемое поле
+            #  maxSplit — недокументированное, но поддерживаемое поле
             # в fragment. Ограничивает количество фрагментов на один TCP-сегмент.
             # Полезно для больших ClientHello (TLS 1.3 + ECH + ALPN).
             if max_split is not None and max_split != "":
@@ -657,16 +657,16 @@ def _youtube_apply_fragment_to_xray(
             })
             cfg["outbounds"] = outbounds
 
-            # v5.0.13/v5.0.15: ПАТЧ INBOUND SNIFFING — критично для стабильности fragment.
+            #  ПАТЧ INBOUND SNIFFING — критично для стабильности fragment.
             # Без этого QUIC-трафик YouTube (UDP/443) не матчится по domain в
             # routing → идёт через catch-all к exit-нодам. Также routeOnly=True
             # убирает лишний DNS-resolve в freedom outbound.
-            # v5.0.14: временно выключался (ломал UseIPv4 на серверах без IPv6).
-            # v5.0.15: ВОЗВРАЩЁН. На сервере БЕЗ IPv6 — либо не включайте
+            #  временно выключался (ломал UseIPv4 на серверах без IPv6).
+            #  ВОЗВРАЩЁН. На сервере БЕЗ IPv6 — либо не включайте
             # RU+fragment, либо включайте QUIC block.
             _inbounds_changed = _youtube_patch_inbounds_for_fragment(cfg)
 
-            # v5.0.10/v5.0.11: опциональная блокировка QUIC (UDP/443) для YouTube.
+            #  опциональная блокировка QUIC (UDP/443) для YouTube.
             # По умолчанию ВЫКЛЮЧЕНА (block_quic=False) — на некоторых конфигурациях
             # Xray QUIC block ломает YouTube полностью ('Нет подключения').
             # Включается в подменю пресета если пользователь хочет попробовать.
@@ -725,7 +725,7 @@ def _youtube_apply_fragment_to_xray(
         warn("Конфиг Xray не найден — не удалось применить YouTube→RU+fragment")
         return False
 
-    # v5.0.13: грейсфул-рестарт — даём 500мс активным соединениям завершиться
+    #  грейсфул-рестарт — даём 500мс активным соединениям завершиться
     # перед restart xray. Уменьшает "Нет подключения к интернету" при смене
     # preset (активные TCP-коннекты к YouTube CDN рвутся, browser retries,
     # но Xray в момент restart недоступен).
@@ -803,9 +803,9 @@ def _youtube_remove_from_xray() -> bool:
                              if ob.get("tag") not in _youtube_outbound_tags]
             if len(new_outbounds) != len(outbounds):
                 cfg["outbounds"] = new_outbounds
-            # v5.0.13/v5.0.15: восстанавливаем дефолтные значения sniffing в inbound
+            #  восстанавливаем дефолтные значения sniffing в inbound
             # (routeOnly=False, destOverride без 'quic') — откат патча fragment.
-            # v5.0.14: временно выключалось. v5.0.15: ВОЗВРАЩЕНО.
+            #  временно выключалось.  ВОЗВРАЩЕНО.
             _sniff_changed = _youtube_restore_inbounds_after_fragment(cfg)
             if new_count == old_count and len(new_outbounds) == len(outbounds) and not _sniff_changed:
                 # Ничего не изменилось — пропускаем.
@@ -863,8 +863,8 @@ def _geosite_available() -> bool:
 #  TUI-МЕНЮ
 # =============================================================================
 
-# v5.0.9: Пресеты fragment для ТСПУ-обхода.
-# v5.0.13: пресеты расширены — добавлен max_split (недокументированное, но
+#  Пресеты fragment для ТСПУ-обхода.
+#  пресеты расширены — добавлен max_split (недокументированное, но
 # поддерживаемое поле Xray fragment). Ограничивает количество фрагментов на
 # один TCP-сегмент. Полезно для больших ClientHello (TLS 1.3 + ECH + ALPN).
 # None — не добавлять поле (поведение по умолчанию).
@@ -973,14 +973,14 @@ def _fragment_preset_menu(core) -> tuple | None:
         except ValueError:
             return None
 
-    # v5.0.11: вопрос про QUIC block (опционально, по умолчанию ВЫКЛ)
-    # v5.0.13/v5.0.15: с патчем sniffing (routeOnly=True + destOverride[quic])
+    #  вопрос про QUIC block (опционально, по умолчанию ВЫКЛ)
+    #  с патчем sniffing (routeOnly=True + destOverride[quic])
     # QUIC block теперь действительно работает — но всё ещё может вызывать
     # browser retry delay.
-    # v5.0.14: патч sniffing был выключен. v5.0.15: ВОЗВРАЩЁН.
+    #  патч sniffing был выключен.  ВОЗВРАЩЁН.
     print()
     print(f"{DIM}  QUIC (UDP/443) — YouTube использует его для видео.{NC}")
-    print(f"{DIM}  TCP fragment работает только с TCP. С v5.0.15 QUIC-трафик{NC}")
+    print(f"{DIM}  TCP fragment работает только с TCP. С  QUIC-трафик{NC}")
     print(f"{DIM}  теперь корректно маршрутизируется по SNI (routeOnly+quic),{NC}")
     print(f"{DIM}  но фрагментация на QUIC не действует. Блокировка QUIC{NC}")
     print(f"{DIM}  заставляет YouTube fallback на TCP — добавляет 1-3с задержки.{NC}")
@@ -1000,7 +1000,7 @@ def _fragment_preset_menu(core) -> tuple | None:
 def do_manage_youtube_via_ru() -> None:
     """TUI-меню переключателя YouTube→RU / конкретная exit-нода.
 
-    v5.0.0: расширено для multi-node режима — если CHAIN_NODES содержит
+     расширено для multi-node режима — если CHAIN_NODES содержит
     >1 ноду, показывает по пункту на каждую ноду + RU + default.
 
     В single-node режиме (0-1 нода) — старое двухпунктовое меню без
@@ -1105,7 +1105,7 @@ def do_manage_youtube_via_ru() -> None:
     if multi_node:
         # Multi-node меню: RU + N нод + default.
         #
-        # v5.0.2: рядом с IP каждой exit-ноды показываем emoji-флаг страны
+        #  рядом с IP каждой exit-ноды показываем emoji-флаг страны
         # (🇩🇪, 🇳🇱, 🇷🇺, ...). Для пункта "балансировщик" — 🌍 в начале.
         #
         # ВАЖНО про выравнивание и границы бокса:
@@ -1130,7 +1130,7 @@ def do_manage_youtube_via_ru() -> None:
             _is_cur = (current_target == _tag and rule_in_config)
             _marker = "● " if _is_cur else "  "
             _host = nd.get("host", "?")
-            # v5.0.2: резолвим IP + страну через кешированный хелпер.
+            #  резолвим IP + страну через кешированный хелпер.
             # Хелпер делает _resolve_host_fresh (DoH) + curl ip-api.com (4с таймаут)
             # с кешированием по host — повторные перерисовки меню не делают
             # повторных сетевых запросов.
@@ -1147,14 +1147,14 @@ def do_manage_youtube_via_ru() -> None:
         _default_idx = len(nodes) + 2
         _is_cur = (current_target == "off")
         _marker = "● " if _is_cur else "  "
-        # v5.0.2: 🌍 в начале — символизирует балансировщик по всем exit-нодам
+        #  🌍 в начале — символизирует балансировщик по всем exit-нодам
         # (без привязки к конкретной стране). Emoji занимает 2 колонки,
         # _wcslen в box_renderer корректно его посчитает — правая граница
         # бокса останется ровной.
         _box_item(str(_default_idx), f"{_marker}YouTube через 🌍\ufe0f exit-ноды (default, балансировщик)")
         _box_row()
-        # v5.0.8: RU+fragment — обход ТСПУ DPI через TCP-фрагментацию ClientHello.
-        # v5.0.10: перенесён вниз, рядом с WARP — буквы отдельно от цифр.
+        #  RU+fragment — обход ТСПУ DPI через TCP-фрагментацию ClientHello.
+        #  перенесён вниз, рядом с WARP — буквы отдельно от цифр.
         _is_current_frag = (current_target == "ru-fragment" and rule_in_config)
         _marker = "● " if _is_current_frag else "  "
         _box_item("F", f"{_marker}YouTube через 🇷🇺\ufe0f RU+fragment {DIM}(обход ТСПУ DPI){NC}")
@@ -1173,7 +1173,7 @@ def do_manage_youtube_via_ru() -> None:
 
         if ch == "q" or ch == "":
             return
-        # v5.0.1 FIX: проверяем 'w' и 'f' ДО int(ch), иначе int('w') бросает
+        #  FIX: проверяем 'w' и 'f' ДО int(ch), иначе int('w') бросает
         # ValueError и handler ниже недостижим — кнопка [W] молча
         # возвращала пользователя в основное меню.
         if ch == "w":
@@ -1188,8 +1188,8 @@ def do_manage_youtube_via_ru() -> None:
                 _box_warn(f"  {_msg}")
             # Переходим к IP-pin submenu (ниже), не выходим из функции.
         elif ch == "f":
-            # v5.0.8: YouTube → RU с TCP-фрагментацией ClientHello (обход ТСПУ DPI)
-            # v5.0.9: подменю выбора пресета fragment
+            #  YouTube → RU с TCP-фрагментацией ClientHello (обход ТСПУ DPI)
+            #  подменю выбора пресета fragment
             print()
             print(f"{DIM}  RU+fragment: TCP-фрагментация ClientHello для обхода ТСПУ DPI.{NC}")
             print(f"{DIM}  Требуется Xray 26.x+ (XTLS форк с поддержкой fragment в freedom).{NC}")
@@ -1209,7 +1209,7 @@ def do_manage_youtube_via_ru() -> None:
                     rule_in_config = True
                     _box_info(f"YouTube через RU+fragment ({_quic_str}).")
                     _box_info(f"{DIM}  packets={_packets}, length={_length}, interval={_interval}{_ms_str}{NC}")
-                    _box_info(f"{DIM}  v5.0.15: применён patch sniffing (routeOnly+quic) + sockopt (keepalive+TFO).{NC}")
+                    _box_info(f"{DIM}   применён patch sniffing (routeOnly+quic) + sockopt (keepalive+TFO).{NC}")
                     _box_info(f"{DIM}  Требуется IPv6 connectivity на RU-сервере. Если 'Нет подключения'{NC}")
                     _box_info(f"{DIM}  — выключите QUIC block или используйте WARP routing.{NC}")
                     _box_info(f"{DIM}  Если не работает — проверьте: journalctl -u xray -n 30{NC}")
@@ -1230,7 +1230,7 @@ def do_manage_youtube_via_ru() -> None:
                 info("Применяем YouTube→RU...")
                 if _youtube_apply_to_xray():
                     _save_youtube_state("ru")
-                    current_target = "ru"  # v5.0.0 FIX: обновляем локальную переменную
+                    current_target = "ru"  #  FIX: обновляем локальную переменную
                     rule_in_config = True
                     _box_info("YouTube теперь выходит через RU entry-ноду.")
                 else:
@@ -1243,7 +1243,7 @@ def do_manage_youtube_via_ru() -> None:
                 info(f"Применяем YouTube→{_tag} ({_host})...")
                 if _youtube_apply_to_xray(target_tag=_tag):
                     _save_youtube_state(_tag)
-                    current_target = _tag  # v5.0.0 FIX: обновляем локальную переменную
+                    current_target = _tag  #  FIX: обновляем локальную переменную
                     rule_in_config = True
                     _box_info(f"YouTube теперь через Exit-ноду #{_node_idx+1} ({_host}).")
                 else:
@@ -1253,7 +1253,7 @@ def do_manage_youtube_via_ru() -> None:
                 info("Убираем YouTube→RU правило...")
                 if _youtube_remove_from_xray():
                     _save_youtube_state("off")
-                    current_target = "off"  # v5.0.0 FIX: обновляем локальную переменную
+                    current_target = "off"  #  FIX: обновляем локальную переменную
                     _box_info("YouTube теперь через exit-ноды (default).")
                 else:
                     _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
@@ -1261,9 +1261,9 @@ def do_manage_youtube_via_ru() -> None:
                 return
     else:
         # Single-node / no-chain: старое двухпунктовое меню (обратная совместимость).
-        # v5.0.2: добавлены emoji для консистентности с multi-node меню —
+        #  добавлены emoji для консистентности с multi-node меню —
         # 🇷🇺 для RU entry, 🌍 для default (балансировщик).
-        # v5.0.10: F (RU+fragment) перенесён вниз, рядом с WARP.
+        #  F (RU+fragment) перенесён вниз, рядом с WARP.
         _is_cur = (current_target == "ru" and rule_in_config)
         _box_item("1", f"{'● ' if _is_cur else '  '}YouTube через 🇷🇺\ufe0f RU entry")
         _is_cur_off = (current_target == "off")
@@ -1291,7 +1291,7 @@ def do_manage_youtube_via_ru() -> None:
             info("Применяем YouTube→RU...")
             if _youtube_apply_to_xray():
                 _save_youtube_state("ru")
-                current_target = "ru"  # v5.0.0 FIX: обновляем локальную переменную
+                current_target = "ru"  #  FIX: обновляем локальную переменную
                 rule_in_config = True
                 _box_info("YouTube теперь выходит через RU entry-ноду.")
             else:
@@ -1300,13 +1300,13 @@ def do_manage_youtube_via_ru() -> None:
             info("Убираем YouTube→RU правило...")
             if _youtube_remove_from_xray():
                 _save_youtube_state("off")
-                current_target = "off"  # v5.0.0 FIX: обновляем локальную переменную
+                current_target = "off"  #  FIX: обновляем локальную переменную
                 _box_info("YouTube теперь через exit-ноды (default).")
             else:
                 _box_warn("  Не удалось убрать правило — смотрите вывод выше.")
         elif ch == "f":
-            # v5.0.8: YouTube → RU с TCP-фрагментацией ClientHello (обход ТСПУ DPI)
-            # v5.0.9: подменю выбора пресета fragment
+            #  YouTube → RU с TCP-фрагментацией ClientHello (обход ТСПУ DPI)
+            #  подменю выбора пресета fragment
             print()
             print(f"{DIM}  RU+fragment: TCP-фрагментация ClientHello для обхода ТСПУ DPI.{NC}")
             print(f"{DIM}  Требуется Xray 26.x+ (XTLS форк с поддержкой fragment в freedom).{NC}")
@@ -1325,14 +1325,14 @@ def do_manage_youtube_via_ru() -> None:
                     rule_in_config = True
                     _box_info(f"YouTube через RU+fragment ({_quic_str}).")
                     _box_info(f"{DIM}  packets={_packets}, length={_length}, interval={_interval}{_ms_str}{NC}")
-                    _box_info(f"{DIM}  v5.0.15: применён patch sniffing (routeOnly+quic) + sockopt (keepalive+TFO).{NC}")
+                    _box_info(f"{DIM}   применён patch sniffing (routeOnly+quic) + sockopt (keepalive+TFO).{NC}")
                     _box_info(f"{DIM}  Требуется IPv6 connectivity на RU-сервере. Если 'Нет подключения'{NC}")
                     _box_info(f"{DIM}  — выключите QUIC block или используйте WARP routing.{NC}")
                     _box_info(f"{DIM}  Если не работает — проверьте: journalctl -u xray -n 30{NC}")
                 else:
                     _box_warn("  Не удалось применить — смотрите вывод выше.")
         elif ch == "w":
-            # v5.0.1: используем интерактивный flow с авто-установкой WARP.
+            #  используем интерактивный flow с авто-установкой WARP.
             from chimera.modules.youtube_warp_route import do_youtube_warp_interactive
             _ok, _msg = do_youtube_warp_interactive(core)
             if _ok:
@@ -1567,7 +1567,7 @@ def restore_youtube_rule_if_needed(silent: bool = False) -> bool:
       - ru_subnets._ru_subnets_restore_if_needed (после regenerate xray-config)
       - Любого места которое перезаписывает routing полностью.
 
-    v5.0.0: поддерживает не только RU (direct/direct-local), но и
+     поддерживает не только RU (direct/direct-local), но и
     конкретную exit-ноду (chain-exit-N). Читает новый ключ
     "youtube_route_target" (с миграцией со старого "youtube_via_ru").
 
@@ -1635,7 +1635,7 @@ def restore_youtube_rule_if_needed(silent: bool = False) -> bool:
     _result = _youtube_apply_to_xray(target_tag=tag)
 
     # Также пере-применяем IP-pin если он включён в state.
-    # v5.0.0 FIX: раньше это вызывало ВТОРОЙ restart Xray внутри
+    #  FIX: раньше это вызывало ВТОРОЙ restart Xray внутри
     # apply_youtube_ip_pin — два рестарта подряд могли приводить к race
     # condition. Теперь _youtube_apply_to_xray уже перезапустил Xray с
     # доменным правилом, а restore_ip_pin_if_needed добавит IP-pin правило

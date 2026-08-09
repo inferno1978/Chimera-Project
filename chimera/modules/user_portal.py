@@ -639,7 +639,7 @@ async function loadMyIPs() {{
     document.getElementById('btn-auto-ip').style.opacity = '0.5';
   }}
 
-  // Render IP list — v5.0.20: detailed format с pinned статусом.
+  // Render IP list —  detailed format с pinned статусом.
   const container = document.getElementById('ips-list');
   const ips = data.ips || [];
   const max = data.max || 20;
@@ -712,7 +712,7 @@ async function deleteIP(ip) {{
   }}
 }}
 
-// v5.0.20: pin / unpin / replace-all
+//  pin / unpin / replace-all
 async function pinIP(ip) {{
   const res = await fetch('/api/portal/ips/pin', {{
     method: 'POST',
