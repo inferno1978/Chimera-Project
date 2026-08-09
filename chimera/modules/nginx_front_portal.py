@@ -234,15 +234,46 @@ server {{
 
 # ── Установка / удаление ─────────────────────────────────────────────────────
 
+def _generate_self_signed_tls(public_ip: str) -> "tuple[Optional[Path], Optional[Path]]":
+    """Генерирует self-signed TLS сертификат (как в olcRTC).
+
+    Возвращает (cert_path, key_path) или (None, None) при ошибке.
+    Сертификат сохраняется в /etc/olcrtc-manager/ (переиспользуем директорию).
+    Нет — используем отдельную: /etc/nginx/ssl/chimera-portal-self-signed.{crt,key}
+    """
+    ssl_dir = Path("/etc/nginx/ssl")
+    ssl_dir.mkdir(parents=True, exist_ok=True)
+    cert = ssl_dir / "chimera-portal-self-signed.crt"
+    key  = ssl_dir / "chimera-portal-self-signed.key"
+    r = subprocess.run([
+        "openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+        "-sha256", "-days", "825",
+        "-keyout", str(key),
+        "-out", str(cert),
+        "-subj", "/CN=chimera-portal",
+        "-addext", f"subjectAltName=IP:{public_ip or '127.0.0.1'},DNS:localhost",
+    ], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        return None, None
+    try:
+        key.chmod(0o600)
+        cert.chmod(0o644)
+    except Exception:
+        pass
+    return cert, key
+
+
 def nginx_front_install(port: int = DEFAULT_NGINX_FRONT_PORT,
                         domain: "Optional[str]" = None,
-                        backend_port: "Optional[int]" = None) -> "tuple[bool, str]":
+                        backend_port: "Optional[int]" = None,
+                        use_self_signed: bool = False) -> "tuple[bool, str]":
     """Устанавливает nginx front с TLS для User Portal.
 
     Args:
       port: внешний порт nginx (default 9443).
       domain: домен для TLS-сертификата (default = PARAM_DOMAIN).
       backend_port: порт rest_api web_panel (default = из web_config.json или 8443).
+      use_self_signed: если True — генерирует self-signed TLS (без домена).
 
     Returns:
       (success, message)
@@ -264,26 +295,42 @@ def nginx_front_install(port: int = DEFAULT_NGINX_FRONT_PORT,
     if not nginx_bin:
         return False, "nginx не установлен. Установите через основное меню."
 
-    # 3. Определяем домен.
-    if domain is None:
-        domain = core.PARAM_DOMAIN
-    if not domain:
-        return False, ("PARAM_DOMAIN не задан. Сначала установите VLESS с доменом "
-                       "— сертификат будет получен автоматически.")
-
-    # 4. Ищем SSL-сертификат.
-    cert_path, key_path = _find_ssl_cert(domain)
-    if cert_path is None:
-        # Пробуем получить через ssl_certbot.
-        info(f"SSL-сертификат для {domain} не найден, получаем через certbot...")
+    # 3. Определяем сертификат.
+    cert_path = None
+    key_path = None
+    if use_self_signed:
+        # Self-signed TLS (без домена).
+        info("Генерация self-signed TLS сертификата...")
+        # Определяем публичный IP для subjectAltName.
+        public_ip = ""
         try:
-            from chimera.modules.ssl_certbot import obtain_ssl_cert
-            obtain_ssl_cert(domain)
-            cert_path, key_path = _find_ssl_cert(domain)
-        except Exception as e:
-            return False, f"Не удалось получить SSL-сертификат: {e}"
-    if cert_path is None or key_path is None:
-        return False, f"SSL-сертификат для {domain} не найден и не получен"
+            r = _run(["curl", "-s", "--max-time", "5", "ifconfig.me"],
+                     capture=True, check=False, timeout=10)
+            public_ip = r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:
+            pass
+        cert_path, key_path = _generate_self_signed_tls(public_ip)
+        if cert_path is None:
+            return False, "Не удалось сгенерировать self-signed TLS сертификат"
+        domain = public_ip or "localhost"
+    else:
+        # Let's Encrypt сертификат (нужен домен).
+        if domain is None:
+            domain = core.PARAM_DOMAIN
+        if not domain:
+            return False, ("PARAM_DOMAIN не задан. Либо установите VLESS с доменом, "
+                           "либо используйте self-signed режим (без домена).")
+        cert_path, key_path = _find_ssl_cert(domain)
+        if cert_path is None:
+            info(f"SSL-сертификат для {domain} не найден, получаем через certbot...")
+            try:
+                from chimera.modules.ssl_certbot import obtain_ssl_cert
+                obtain_ssl_cert(domain)
+                cert_path, key_path = _find_ssl_cert(domain)
+            except Exception as e:
+                return False, f"Не удалось получить SSL-сертификат: {e}"
+        if cert_path is None or key_path is None:
+            return False, f"SSL-сертификат для {domain} не найден и не получен"
 
     # 5. Определяем backend_port.
     if backend_port is None:
@@ -560,10 +607,12 @@ def do_manage_nginx_front() -> None:
                         warn(f"  {msg}")
                     input(f"\n{BLUE}  Нажмите Enter...{NC}")
             else:
-                # Включить с default port.
+                # Включить с default port — спросить про сертификат.
                 print()
+                use_ss = _ask_self_signed(core)
                 info(f"Устанавливаю nginx front на порту {DEFAULT_NGINX_FRONT_PORT}...")
-                ok, msg = nginx_front_install(port=DEFAULT_NGINX_FRONT_PORT)
+                ok, msg = nginx_front_install(port=DEFAULT_NGINX_FRONT_PORT,
+                                               use_self_signed=use_ss)
                 if ok:
                     success(f"  {msg}")
                 else:
@@ -586,11 +635,13 @@ def do_manage_nginx_front() -> None:
                     warn("  Некорректный порт")
                     input(f"\n{BLUE}  Нажмите Enter...{NC}")
                     continue
+            # Спросить про сертификат.
+            use_ss = _ask_self_signed(core)
             # Если уже включён — сначала удаляем.
             if status["enabled"]:
                 info("  Сначала удаляем старую конфигурацию...")
                 nginx_front_remove()
-            ok, msg = nginx_front_install(port=port)
+            ok, msg = nginx_front_install(port=port, use_self_signed=use_ss)
             if ok:
                 success(f"  {msg}")
             else:
@@ -616,3 +667,33 @@ def _confirm(prompt: str, default: bool = False) -> bool:
     if not ans:
         return default
     return ans in ("y", "yes", "д", "да")
+
+
+def _ask_self_signed(core) -> bool:
+    """Спрашивает пользователя: Let's Encrypt (домен) или self-signed (IP).
+
+    Возвращает True если self-signed, False если Let's Encrypt.
+    """
+    CYAN = core.CYAN
+    NC   = core.NC
+    DIM  = core.DIM
+    YELLOW = core.YELLOW
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_sep = core._box_sep
+    _box_bottom = core._box_bottom
+    _box_item = core._box_item
+
+    print()
+    _box_top("🔒  TLS сертификат")
+    _box_row()
+    _box_row(f"  {DIM}Для доступа к User Portal/Admin Panel по HTTPS нужен TLS.{NC}")
+    _box_sep()
+    _box_item("1", f"Let's Encrypt {DIM}(нужен домен, доверенный сертификат){NC}")
+    _box_item("2", f"Self-signed {DIM}(без домена, по IP — браузер предупредит){NC}")
+    _box_bottom()
+    try:
+        ch = input(f"{CYAN}  Выбор [2 — self-signed]:{NC} ").strip() or "2"
+    except (EOFError, KeyboardInterrupt):
+        return True
+    return ch == "2"
