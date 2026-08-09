@@ -411,27 +411,116 @@ def _manager_installed() -> bool:
 
 
 def _git_clone_or_pull(repo: str, dest: Path, branch: str = "master") -> bool:
-    """Клонирует или обновляет репозиторий через git."""
+    """Клонирует или обновляет репозиторий через git.
+
+    ПУНКТ 2: Если прямой git clone не удался (GitHub недоступен из РФ),
+    пробует через codeload.github.com (HTTP tarball) и известные
+    GitHub-зеркала (согласовано с geo_mirrors.py).
+    """
     if dest.exists() and (dest / ".git").exists():
         _info(f"Обновление {dest.name}...")
         r = _run(["git", "pull", "--ff-only", "origin", branch],
                  capture=True, check=False, timeout=60, cwd=str(dest))
         return r.returncode == 0
-    else:
-        _info(f"Клонирование {repo} → {dest}...")
-        if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)
-        r = _run(["git", "clone", "--depth", "1", "--branch", branch,
-                  repo, str(dest)],
-                 capture=True, check=False, timeout=120)
-        return r.returncode == 0
+
+    _info(f"Клонирование {repo} → {dest}...")
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+
+    # Попытка 1: прямой git clone.
+    r = _run(["git", "clone", "--depth", "1", "--branch", branch,
+              repo, str(dest)],
+             capture=True, check=False, timeout=120)
+    if r.returncode == 0:
+        return True
+
+    _warn(f"Прямой clone не удался, пробую зеркала...")
+
+    # Попытка 2: codeload.github.com tarball (HTTP, не git).
+    # URL: https://codeload.github.com/<owner>/<repo>/tar.gz/refs/heads/<branch>
+    repo_parts = repo.replace("https://github.com/", "").replace(".git", "").split("/")
+    if len(repo_parts) == 2:
+        owner, repo_name = repo_parts
+        tarball_url = f"https://codeload.github.com/{owner}/{repo_name}/tar.gz/refs/heads/{branch}"
+        # Также пробуем через GitHub-прокси (согласовано с geo_mirrors.py).
+        mirror_prefixes = [
+            "",  # прямой codeload
+            "https://gh-proxy.com/",
+            "https://gh.llkk.cc/",
+            "https://ghps.cc/",
+        ]
+        for prefix in mirror_prefixes:
+            url = f"{prefix}{tarball_url}" if prefix else tarball_url
+            _info(f"  Попытка: {url[:80]}...")
+            tmp_tar = Path("/tmp") / f"olcrtc_{repo_name}_{branch}.tar.gz"
+            r = _run(["curl", "-fsSL", "-o", str(tmp_tar), url],
+                     capture=True, check=False, timeout=60)
+            if r.returncode == 0 and tmp_tar.exists() and tmp_tar.stat().st_size > 1000:
+                # Распаковка.
+                tmp_extract = Path("/tmp") / f"olcrtc_extract_{repo_name}"
+                shutil.rmtree(tmp_extract, ignore_errors=True)
+                tmp_extract.mkdir(parents=True, exist_ok=True)
+                r = _run(["tar", "-xzf", str(tmp_tar), "-C", str(tmp_extract),
+                          "--strip-components=1"],
+                         capture=True, check=False, timeout=30)
+                tmp_tar.unlink(missing_ok=True)
+                if r.returncode == 0:
+                    # Копируем в dest и инициализируем .git (для _get_commit_sha).
+                    shutil.copytree(tmp_extract, dest, dirs_exist_ok=True)
+                    shutil.rmtree(tmp_extract, ignore_errors=True)
+                    _run(["git", "init"], capture=True, check=False,
+                         quiet=True, cwd=str(dest), timeout=10)
+                    _run(["git", "add", "-A"], capture=True, check=False,
+                         quiet=True, cwd=str(dest), timeout=10)
+                    _run(["git", "commit", "-m", "mirror-import", "--allow-empty"],
+                         capture=True, check=False, quiet=True, cwd=str(dest), timeout=10)
+                    _info(f"  Зеркало сработало (через {prefix or 'codeload'})")
+                    return True
+
+    _error(f"Не удалось клонировать {repo} ни напрямую, ни через зеркала")
+    return False
+
+
+def _go_mod_download(src_dir: Path) -> bool:
+    """Пытается скачать Go модули с фоллбэком через три прокси.
+
+    ПУНКТ 1: На VPS в РФ proxy.golang.org может быть недоступен.
+    Пробуем три GOPROXY по очереди (как в гайде):
+      1. https://proxy.golang.org,direct
+      2. https://goproxy.io,direct
+      3. direct (без прокси, только VCS)
+    """
+    go = _find_go_binary()
+    if not go:
+        return False
+    for proxy in ("https://proxy.golang.org,direct",
+                  "https://goproxy.io,direct",
+                  "direct"):
+        _info(f"  go mod download (GOPROXY={proxy[:30]}...)...")
+        env = {**os.environ, "GOPROXY": proxy}
+        r = subprocess.run([go, "mod", "download"], cwd=str(src_dir),
+                           env=env, capture_output=True, text=True,
+                           timeout=180)
+        if r.returncode == 0:
+            return True
+        _warn(f"  не удалось: {(r.stderr or '').strip()[:200]}")
+    return False
 
 
 def _go_build(src_dir: Path, output: Path, pkg_path: str = "./cmd/olcrtc") -> bool:
-    """Собирает Go бинарник из src_dir, кладёт в output."""
+    """Собирает Go бинарник из src_dir, кладёт в output.
+
+    ПУНКТ 1: Сначала вызывает _go_mod_download() с GOPROXY-фоллбэком,
+    затем go build с системным GOPROXY (модули уже в кэше).
+    """
     go = _find_go_binary()
     if not go:
         _error("Go не найден — установите Go сначала")
+        return False
+
+    # Сначала go mod download с фоллбэком через три прокси.
+    if not _go_mod_download(src_dir):
+        _error("Не удалось скачать Go модули ни через один прокси")
         return False
 
     env = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": _go_arch()}
@@ -463,6 +552,8 @@ def _install_or_update() -> bool:
     """Полная установка/обновление: Go → olcrtc → olcrtc-manager.
 
     Шаги:
+      0. Очистка старого bare olcrtc.service (ПУНКТ 3)
+      0b. Проверка runtime-зависимостей (ПУНКТ 5)
       1. Проверка/установка Go 1.26+
       2. Клонирование openlibrecommunity/olcrtc (master)
       3. Сборка /usr/local/bin/olcrtc
@@ -470,6 +561,43 @@ def _install_or_update() -> bool:
       5. Сборка /usr/local/bin/olcrtc-manager
       6. Сохранение state
     """
+    # 0. Очистка старого "голого" olcrtc.service от предыдущей версии
+    # модуля (до переработки на manager-panel архитектуру) — иначе
+    # он может конфликтовать с olcrtc-manager.service, который сам
+    # супервайзит olcrtc как подпроцесс.
+    _run(["systemctl", "disable", "--now", "olcrtc.service"],
+         check=False, quiet=True, timeout=15)
+    old_unit = Path("/etc/systemd/system/olcrtc.service")
+    if old_unit.exists():
+        old_unit.unlink()
+        _run(["systemctl", "daemon-reload"], check=False, quiet=True, timeout=15)
+        _info("Удалён старый olcrtc.service от предыдущей версии модуля")
+    # Также чистим template unit если был.
+    old_template = Path("/etc/systemd/system/olcrtc@.service")
+    if old_template.exists():
+        old_template.unlink()
+        _run(["systemctl", "daemon-reload"], check=False, quiet=True, timeout=15)
+        _info("Удалён старый olcrtc@.service template")
+
+    # 0b. Проверка runtime-зависимостей (ПУНКТ 5).
+    # Гайд требует: ca-certificates, curl, iproute2, iptables, openssl.
+    # Bootstrap Химеры обеспечивает базовые пакеты, но olcrtc может
+    # быть установлен на сервере где Chimera только что поставлена —
+    # проверяем явно.
+    _missing_deps = []
+    for cmd, pkg in [("curl", "curl"), ("openssl", "openssl"),
+                     ("ip", "iproute2"), ("tar", "tar"),
+                     ("git", "git")]:
+        if not shutil.which(cmd):
+            _missing_deps.append(pkg)
+    if _missing_deps:
+        _info(f"Устанавливаю runtime-зависимости: {', '.join(_missing_deps)}")
+        try:
+            from chimera.modules.system_deps import _pkg_install
+            _pkg_install(*_missing_deps)
+        except Exception as e:
+            _warn(f"Не удалось установить пакеты ({e}) — продолжаю, могут быть ошибки")
+
     # 1. Go toolchain
     required = _go_required_version()
     if not _go_ok(required):
@@ -671,20 +799,27 @@ def _generate_olcbox_uri(carrier: str, transport: str, room_id: str,
 #  SERVER IP
 # =============================================================================
 def _get_public_ip() -> str:
-    """Пытается определить публичный IP сервера."""
-    # Через curl ifconfig.me (быстро, без DNS-зависимостей).
+    """Определяет публичный IP сервера.
+
+    ПУНКТ 4: Переиспользует _get_public_ip() из mtproto.py, который
+    правильно обрабатывает NAT (сравнение локального IP с внешним
+    echo-сервисом, а не просто is_private-эвристика). Это тот же
+    класс бага, что был исправлен в mtproto.py — некоторые хостеры
+    (<hoster-2>, Azure) используют NAT с адресами, которые выглядят
+    как публичные, но публичными не являются.
+    """
+    try:
+        from chimera.modules.mtproto import _get_public_ip as _mtproto_get_public_ip
+        ipv4, _ipv6 = _mtproto_get_public_ip()
+        return ipv4
+    except Exception:
+        pass
+    # Fallback: простой curl ifconfig.me (если mtproto недоступен).
     r = _run(["curl", "-s", "--max-time", "5", "ifconfig.me"],
              capture=True, check=False, timeout=10)
     ip = r.stdout.strip() if r.returncode == 0 else ""
     if ip and re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
         return ip
-    # Fallback: hostname -I
-    r = _run(["hostname", "-I"], capture=True, check=False, timeout=5)
-    if r.returncode == 0:
-        ips = r.stdout.strip().split()
-        for ip in ips:
-            if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip) and not ip.startswith("127."):
-                return ip
     return ""
 
 
