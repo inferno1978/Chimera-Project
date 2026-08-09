@@ -149,5 +149,158 @@ class TestWlen(unittest.TestCase):
         self.assertEqual(_wlen("中文"), 4)
 
 
+class TestValidateTlsPort(unittest.TestCase):
+    """_validate_tls_port — валидация порта для TLS-фронта Telemt Panel."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_default_port_8444_valid(self):
+        from chimera.modules.telemt_panel import _validate_tls_port, DEFAULT_PANEL_TLS_PORT
+        ok, err = _validate_tls_port(DEFAULT_PANEL_TLS_PORT)
+        self.assertTrue(ok, f"Default port {DEFAULT_PANEL_TLS_PORT} should be valid: {err}")
+
+    def test_zero_invalid(self):
+        from chimera.modules.telemt_panel import _validate_tls_port
+        ok, err = _validate_tls_port(0)
+        self.assertFalse(ok)
+
+    def test_too_large_invalid(self):
+        from chimera.modules.telemt_panel import _validate_tls_port
+        ok, _ = _validate_tls_port(70000)
+        self.assertFalse(ok)
+
+    def test_privileged_port_rejected(self):
+        from chimera.modules.telemt_panel import _validate_tls_port
+        # 443 — VLESS, must be rejected both as privileged and as reserved.
+        ok, err = _validate_tls_port(443)
+        self.assertFalse(ok)
+        self.assertIn("443", err)
+
+    def test_privileged_port_80_rejected(self):
+        from chimera.modules.telemt_panel import _validate_tls_port
+        ok, err = _validate_tls_port(80)
+        self.assertFalse(ok)
+        self.assertIn("80", err)
+
+    def test_reserved_port_8443_rejected(self):
+        """8443 — rest_api web_panel (loopback) — конфликт."""
+        from chimera.modules.telemt_panel import _validate_tls_port
+        ok, err = _validate_tls_port(8443)
+        self.assertFalse(ok)
+        self.assertIn("8443", err)
+
+    def test_reserved_port_8888_rejected(self):
+        """8888 — olcRTC manager panel — конфликт."""
+        from chimera.modules.telemt_panel import _validate_tls_port
+        ok, err = _validate_tls_port(8888)
+        self.assertFalse(ok)
+        self.assertIn("8888", err)
+
+    def test_reserved_port_9443_rejected(self):
+        """9443 — nginx front для User Portal (default) — конфликт."""
+        from chimera.modules.telemt_panel import _validate_tls_port
+        ok, err = _validate_tls_port(9443)
+        self.assertFalse(ok)
+        self.assertIn("9443", err)
+
+    def test_reserved_port_8080_rejected(self):
+        """8080 — Telemt Panel listen (backend) — конфликт."""
+        from chimera.modules.telemt_panel import _validate_tls_port
+        ok, err = _validate_tls_port(8080)
+        self.assertFalse(ok)
+        self.assertIn("8080", err)
+
+    def test_reserved_port_9091_rejected(self):
+        """9091 — Telemt API (loopback) — конфликт."""
+        from chimera.modules.telemt_panel import _validate_tls_port
+        ok, err = _validate_tls_port(9091)
+        self.assertFalse(ok)
+        self.assertIn("9091", err)
+
+    def test_high_port_accepted(self):
+        """Произвольный высокий порт должен быть принят."""
+        from chimera.modules.telemt_panel import _validate_tls_port
+        ok, _ = _validate_tls_port(8445)
+        self.assertTrue(ok)
+
+    def test_high_port_20000_accepted(self):
+        from chimera.modules.telemt_panel import _validate_tls_port
+        ok, _ = _validate_tls_port(20000)
+        self.assertTrue(ok)
+
+    def test_non_int_rejected(self):
+        from chimera.modules.telemt_panel import _validate_tls_port
+        ok, _ = _validate_tls_port("8444")
+        self.assertFalse(ok)
+
+
+class TestTelemtPanelDirectPortRegistry(unittest.TestCase):
+    """Интеграция с port_registry: SERVICE_TELEMT_PANEL_DIRECT константа."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_service_constant_exists(self):
+        from chimera.modules.port_registry import SERVICE_TELEMT_PANEL_DIRECT
+        self.assertEqual(SERVICE_TELEMT_PANEL_DIRECT, "telemt_panel_direct")
+
+    def test_service_constant_in_main_list(self):
+        """Константа SERVICE_TELEMT_PANEL_DIRECT должна быть в перечне всех SERVICE_*
+        через round-trip port_register → port_list_for_service → port_unregister."""
+        import tempfile
+        from pathlib import Path
+        import chimera.modules.port_registry as pr
+        # Подменяем файл реестра на временный.
+        tmpdir = Path(tempfile.mkdtemp())
+        old_file = pr.PORT_REGISTRY_FILE
+        old_lock = pr.LOCK_FILE
+        try:
+            pr.PORT_REGISTRY_FILE = tmpdir / "registry.json"
+            pr.LOCK_FILE = tmpdir / "registry.lock"
+            ok, msg = pr.port_register(
+                pr.SERVICE_TELEMT_PANEL_DIRECT, 8444, "tcp",
+                comment="Telemt Panel direct (TLS)", force=True,
+            )
+            self.assertTrue(ok, msg)
+            entries = pr.port_list_for_service(pr.SERVICE_TELEMT_PANEL_DIRECT)
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["port"], 8444)
+            pr.port_unregister(pr.SERVICE_TELEMT_PANEL_DIRECT, 8444, "tcp")
+            self.assertEqual(
+                len(pr.port_list_for_service(pr.SERVICE_TELEMT_PANEL_DIRECT)), 0
+            )
+        finally:
+            pr.PORT_REGISTRY_FILE = old_file
+            pr.LOCK_FILE = old_lock
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestAskTlsPort(unittest.TestCase):
+    """_ask_tls_port — TUI ввод порта."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_default_on_empty_input(self):
+        from chimera.modules.telemt_panel import _ask_tls_port, DEFAULT_PANEL_TLS_PORT
+        with patch("builtins.input", return_value=""):
+            port = _ask_tls_port()
+        self.assertEqual(port, DEFAULT_PANEL_TLS_PORT)
+
+    def test_custom_port_returned(self):
+        from chimera.modules.telemt_panel import _ask_tls_port
+        with patch("builtins.input", return_value="9999"):
+            port = _ask_tls_port()
+        self.assertEqual(port, 9999)
+
+    def test_invalid_input_falls_back_to_default(self):
+        from chimera.modules.telemt_panel import _ask_tls_port, DEFAULT_PANEL_TLS_PORT
+        with patch("builtins.input", return_value="abc"):
+            port = _ask_tls_port()
+        self.assertEqual(port, DEFAULT_PANEL_TLS_PORT)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
