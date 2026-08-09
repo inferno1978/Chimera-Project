@@ -1018,10 +1018,39 @@ class _VLESSHandler(BaseHTTPRequestHandler):
     # ── Rate-limit (in-memory sliding window, общий для всех потоков) ───────
 
     def _client_ip(self) -> str:
+        """Возвращает реальный IP клиента.
+
+        v5.0.16: изначально возвращал self.client_address[0] напрямую —
+        обоснование было «rest_api слушает напрямую (без nginx)».
+
+        v5.0.17: nginx_front_portal.py поставил nginx перед User Portal
+        с proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for.
+        Теперь client_address[0] — это 127.0.0.1 (loopback от nginx),
+        а реальный IP клиента — в X-Forwarded-For.
+
+        v5.0.21: доверяем X-Forwarded-For, ТОЛЬКО если TCP-соединение
+        пришло с loopback (значит — от локально работающего nginx-фронта).
+        Если direct_ip НЕ loopback — запрос пришёл напрямую (rest_api
+        открыт наружу без nginx, host="0.0.0.0") — тогда X-Forwarded-For
+        может быть подделан клиентом, игнорируем заголовок полностью.
+        """
         try:
-            return self.client_address[0] if self.client_address else "?"
+            direct_ip = self.client_address[0] if self.client_address else "?"
         except Exception:
             return "?"
+
+        # Доверяем X-Forwarded-For ТОЛЬКО если запрос пришёл с loopback
+        # (от локального nginx-фронта, см. nginx_front_portal.py).
+        if direct_ip in ("127.0.0.1", "::1", "localhost"):
+            xff = self.headers.get("X-Forwarded-For", "")
+            if xff:
+                # Берём ПЕРВЫЙ адрес в цепочке (реальный клиент;
+                # $proxy_add_x_forwarded_for в nginx добавляет в конец,
+                # оригинальный клиентский IP — всегда первый).
+                candidate = xff.split(",")[0].strip()
+                if candidate:
+                    return candidate
+        return direct_ip
 
     def _is_rate_limited(self) -> bool:
         """True если IP превысил AUTH_FAIL_MAX попыток за AUTH_FAIL_WINDOW
@@ -1361,6 +1390,10 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 email = user.get("email", "")
                 ips_detailed = get_user_ips_detailed(email)
                 detected = self._client_ip()
+                # v5.0.21: _client_ip() уже извлекает реальный IP из
+                # X-Forwarded-For (если запрос через nginx-фронт). Если
+                # всё равно loopback — значит nginx не проставил XFF
+                # (конфиг сломан), или клиент правда localhost (SSH tunnel).
                 if detected in ("127.0.0.1", "::1", "localhost", "?"):
                     detected = ""
                 self._send_json({
@@ -1725,10 +1758,10 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             if not ip_input:
                 self._send_json({"error": "ip required"}, 400)
                 return
-            # "auto" → берём IP из client_address напрямую.
-            # НЕ доверяем X-Forwarded-For — он может быть подделан клиентом.
-            # rest_api слушает напрямую (без nginx), значит client_address[0]
-            # — это реальный IP TCP-подключения.
+            # "auto" → берём IP через _client_ip() (v5.0.21: с поддержкой
+            # X-Forwarded-For если запрос через nginx-фронт).
+            # Если всё равно loopback — значит nginx не проставил XFF
+            # (конфиг сломан), или клиент правда localhost (SSH tunnel).
             if ip_input.lower() == "auto":
                 ip_input = self._client_ip()
                 if ip_input in ("127.0.0.1", "::1", "localhost", "?"):
@@ -1764,6 +1797,7 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "ip required"}, 400)
                 return
             if ip_input.lower() == "auto":
+                # v5.0.21: _client_ip() с поддержкой X-Forwarded-For.
                 ip_input = self._client_ip()
                 if ip_input in ("127.0.0.1", "::1", "localhost", "?"):
                     self._send_json({
