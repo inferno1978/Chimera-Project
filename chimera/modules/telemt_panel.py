@@ -87,8 +87,11 @@ TELEMT_API_PORT = 9091
 # На чём слушает сама панель (веб-интерфейс). По умолчанию тоже только
 # localhost — наружу пробрасывается через существующий Reality-домен
 # (reverse-proxy на подпуть) либо через SSH-туннень, см. меню "N".
+# При включении "прямого доступа" (self-signed TLS через nginx) —
+# слушает 0.0.0.0, а nginx терминирует TLS на PANEL_TLS_PORT.
 PANEL_LISTEN_HOST = "127.0.0.1"
 PANEL_LISTEN_PORT = 8080
+PANEL_TLS_PORT    = 8444  # для self-signed прямого доступа (nginx front)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  BOX-РЕНДЕРИНГ (1-в-1 со стилем mtproto.py/mieru.py)
@@ -690,6 +693,8 @@ def _uninstall() -> None:
         _warn("Telemt Panel не установлена."); _pause(); return
     if _ask(f"  {RED}Точно удалить Telemt Panel полностью? (y/N): {NC}", "n", c=True).lower() != "y":
         return
+    # Удаляем nginx front для telemt если был.
+    _telemt_remove_direct_access()
     _run(["systemctl", "stop", SERVICE_NAME], check=False)
     _run(["systemctl", "disable", SERVICE_NAME], check=False)
     SERVICE_FILE.unlink(missing_ok=True)
@@ -703,6 +708,168 @@ def _uninstall() -> None:
     _box_info("отключить можно из меню самого Telemt при необходимости.")
     _pause()
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ПРЯМОЙ ДОСТУП (self-signed TLS через nginx)
+# ══════════════════════════════════════════════════════════════════════════════
+TELEMT_NGINX_SITE = "chimera-telemt-panel-nginx"
+TELEMT_NGINX_AVAILABLE = Path("/etc/nginx/sites-available") / TELEMT_NGINX_SITE
+TELEMT_NGINX_ENABLED = Path("/etc/nginx/sites-enabled") / TELEMT_NGINX_SITE
+TELEMT_NGINX_STATE = Path("/var/lib/xray-installer/telemt_panel_direct.json")
+
+
+def _telemt_direct_status() -> dict:
+    try:
+        if TELEMT_NGINX_STATE.exists():
+            return json.loads(TELEMT_NGINX_STATE.read_text())
+    except Exception:
+        pass
+    return {"enabled": False}
+
+
+def _telemt_setup_direct_access() -> bool:
+    """Ставит nginx vhost с self-signed TLS для прямого доступа к Telemt Panel."""
+    if not _is_installed():
+        _warn("Сначала установите Telemt Panel.")
+        return False
+
+    public_ip = ""
+    r = _run(["curl", "-s", "--max-time", "5", "ifconfig.me"], capture=True, check=False)
+    if r.returncode == 0:
+        public_ip = r.stdout.strip()
+
+    # Self-signed TLS.
+    ssl_dir = Path("/etc/nginx/ssl")
+    ssl_dir.mkdir(parents=True, exist_ok=True)
+    cert = ssl_dir / "telemt-panel-self-signed.crt"
+    key  = ssl_dir / "telemt-panel-self-signed.key"
+    r = _run([
+        "openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+        "-sha256", "-days", "825",
+        "-keyout", str(key), "-out", str(cert),
+        "-subj", "/CN=telemt-panel",
+        "-addext", f"subjectAltName=IP:{public_ip or '127.0.0.1'},DNS:localhost",
+    ], capture=True, check=False)
+    if r.returncode != 0:
+        _err("Не удалось сгенерировать TLS сертификат")
+        return False
+    key.chmod(0o600)
+    cert.chmod(0o644)
+
+    # nginx vhost.
+    vhost = f"""# Chimera — nginx front для Telemt Panel (self-signed TLS).
+server {{
+    listen {PANEL_TLS_PORT} ssl http2;
+    server_name _;
+
+    ssl_certificate     {cert};
+    ssl_certificate_key {key};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    access_log /var/log/nginx/telemt-panel-access.log;
+    error_log  /var/log/nginx/telemt-panel-error.log;
+
+    location / {{
+        proxy_pass http://127.0.0.1:{PANEL_LISTEN_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_connect_timeout 30s;
+        proxy_read_timeout 60s;
+    }}
+}}
+"""
+    try:
+        TELEMT_NGINX_AVAILABLE.parent.mkdir(parents=True, exist_ok=True)
+        TELEMT_NGINX_AVAILABLE.write_text(vhost)
+        if TELEMT_NGINX_ENABLED.exists() or TELEMT_NGINX_ENABLED.is_symlink():
+            TELEMT_NGINX_ENABLED.unlink()
+        TELEMT_NGINX_ENABLED.symlink_to(TELEMT_NGINX_AVAILABLE)
+    except Exception as e:
+        _err(f"Не удалось записать nginx vhost: {e}")
+        return False
+
+    # nginx -t + reload.
+    nginx_bin = shutil.which("nginx")
+    if not nginx_bin:
+        _err("nginx не установлен")
+        return False
+    r = _run([nginx_bin, "-t"], capture=True, check=False)
+    if r.returncode != 0:
+        _err(f"nginx -t failed: {r.stderr.strip()[:300]}")
+        TELEMT_NGINX_ENABLED.unlink(missing_ok=True)
+        TELEMT_NGINX_AVAILABLE.unlink(missing_ok=True)
+        return False
+    _run(["systemctl", "reload", "nginx"], check=False)
+
+    # UFW через port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register,
+        )
+        port_register("telemt_panel_direct", PANEL_TLS_PORT, "tcp",
+                      comment="Telemt Panel direct (TLS)", force=True)
+        ufw_open_port(PANEL_TLS_PORT, "tcp", "telemt_panel_direct",
+                      comment="Telemt Panel direct (TLS)")
+    except Exception:
+        pass
+
+    # State.
+    TELEMT_NGINX_STATE.parent.mkdir(parents=True, exist_ok=True)
+    TELEMT_NGINX_STATE.write_text(json.dumps({
+        "enabled": True,
+        "port": PANEL_TLS_PORT,
+        "url": f"https://{public_ip or 'SERVER_IP'}:{PANEL_TLS_PORT}",
+    }, indent=2))
+
+    _ok(f"Прямой доступ включён: https://{public_ip or 'SERVER_IP'}:{PANEL_TLS_PORT}")
+    _box_warn("Браузер предупредит о self-signed TLS — это нормально.")
+    return True
+
+
+def _telemt_remove_direct_access() -> None:
+    """Удаляет nginx vhost + закрывает порт для прямого доступа к Telemt Panel."""
+    state = _telemt_direct_status()
+    if not state.get("enabled"):
+        return
+    TELEMT_NGINX_ENABLED.unlink(missing_ok=True)
+    TELEMT_NGINX_AVAILABLE.unlink(missing_ok=True)
+    nginx_bin = shutil.which("nginx")
+    if nginx_bin:
+        _run([nginx_bin, "-t"], capture=True, check=False)
+        _run(["systemctl", "reload", "nginx"], check=False)
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister,
+        )
+        ufw_close_port(PANEL_TLS_PORT, "tcp", "telemt_panel_direct",
+                       legacy_comments=["Telemt Panel direct (TLS)"])
+        port_unregister("telemt_panel_direct", PANEL_TLS_PORT, "tcp")
+    except Exception:
+        pass
+    TELEMT_NGINX_STATE.unlink(missing_ok=True)
+    _info("Прямой доступ к Telemt Panel отключён, порт закрыт.")
+
+
+def _toggle_direct_access() -> None:
+    """Включить/выключить прямой доступ к Telemt Panel."""
+    state = _telemt_direct_status()
+    if state.get("enabled"):
+        _telemt_remove_direct_access()
+        _ok("Прямой доступ выключен.")
+    else:
+        _telemt_setup_direct_access()
+    _pause()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ГЛАВНОЕ МЕНЮ
 # ══════════════════════════════════════════════════════════════════════════════
@@ -715,12 +882,21 @@ def telemt_panel_menu() -> None:
             else f"{YELLOW}установлена, остановлена{NC}" if _is_installed() \
             else f"{DIM}не установлена{NC}"
         _box_kv("Статус:", status)
+        # Прямой доступ.
+        direct = _telemt_direct_status()
+        if direct.get("enabled"):
+            _box_kv("Прямой доступ:", f"{GREEN}https://...:{direct.get('port', PANEL_TLS_PORT)}{NC}")
         _box_row(); _box_sep()
         _box_item("1", "🚀  Установить / переустановить")
         _box_item("2", "📋  Статус")
         _box_item("3", "🔄  Перезапустить сервис")
         _box_item("4", "⬆️   Проверить и обновить")
         _box_item("5", "🌍  Обновить GeoIP-базы")
+        if _is_installed():
+            if direct.get("enabled"):
+                _box_item("6", f"{YELLOW}🔒  Выключить прямой доступ (TLS){NC}")
+            else:
+                _box_item("6", f"{GREEN}🌐  Включить прямой доступ (self-signed TLS){NC}")
         _box_item("8", f"{RED}🗑️   Полное удаление{NC}")
         _box_sep()
         _box_item("Q", "← Назад в меню Telemt")
@@ -744,6 +920,8 @@ def telemt_panel_menu() -> None:
             _update()
         elif ch == "5":
             _geoip_update_flow()
+        elif ch == "6" and _is_installed():
+            _toggle_direct_access()
         elif ch == "8":
             _uninstall()
         elif ch in ("q", ""):
