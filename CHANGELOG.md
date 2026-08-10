@@ -2,6 +2,147 @@
 
 ---
 
+## FEAT(olcrtc): multi-location support — несколько carrier в одном config.json — 10 августа 2026
+
+**olcRTC теперь поддерживает несколько locations (carrier+room) в одном
+config.json — WB Stream, Jitsi и Телемост работают одновременно, без
+перезатирания конфигов. Пароль веб-панели больше НЕ меняется при
+добавлении/удалении location.**
+
+### Контекст
+
+Старая архитектура: один client с одним location в config.json. При смене
+carrier через TUI старый location полностью перезаписывался — настройки
+WB Stream терялись при переключении на Телемост, и наоборот.
+
+**Тест подтверждения:** тестовый config.json с двумя locations
+(`wbstream` + `telemost`) → `systemctl restart olcrtc-manager` →
+manager запустил **два** olcrtc-процесса, по одному на каждый location.
+Manager поддерживает multi-location нативно — нужен был только TUI.
+
+### Что реализовано
+
+**State.json — новый формат:**
+```json
+{
+  "config": {
+    "panel_url": "https://IP:8888/admin",
+    "admin_user": "admin",
+    "admin_pass": "...",
+    "public_ip": "...",
+    "locations": [
+      {
+        "name": "wb-stream",
+        "carrier": "wbstream",
+        "transport": "vp8channel",
+        "room_id": "019fead4-2cae-7da5-9531-1696c810bbf2",
+        "key": "...",
+        "payload": {"vp8-fps": "30", "vp8-batch": "64"},
+        "olcbox_uri": "olcrtc://wbstream?vp8channel<...>@ROOM#KEY$wb-stream"
+      },
+      {
+        "name": "yandex-telemost",
+        "carrier": "telemost",
+        "transport": "vp8channel",
+        "room_id": "34996201918043",
+        "key": "...",
+        "payload": {...},
+        "olcbox_uri": "olcrtc://telemost?vp8channel<...>@ROOM#KEY$yandex-telemost"
+      }
+    ]
+  }
+}
+```
+
+**Backward compat:** старый формат state (с `carrier`/`room_id`/
+`location_name` на верхнем уровне config) автоматически мигрируется в
+`locations: [...]` при первом `_load_state()`. Пользователь ничего не
+теряет при обновлении.
+
+**`_generate_config_json(locations, quota_used_bytes=0)`** — новый API:
+- Принимает список locations вместо отдельных полей
+- Каждый location генерирует отдельную запись в `clients[0].locations[]`
+- `quota.used_bytes` сохраняется при перезаписи (чтобы не сбрасывать счётчик трафика)
+
+**`_configure_manager(locations)`** — новый API:
+- Принимает список locations
+- НЕ перегенерирует `panel.env` если он уже существует (пароль НЕ меняется!)
+- НЕ перегенерирует TLS сертификат если уже есть
+- НЕ перегенерирует systemd unit если уже есть
+- Использует новые хелперы:
+  - `_ensure_panel_initialized()` — гарантирует что panel.env есть, возвращает креды
+  - `_ensure_tls_and_unit()` — гарантирует TLS + systemd unit + UFW
+  - `_apply_config()` — пишет config.json + перезапускает manager
+  - `_read_existing_quota()` — читает текущий quota.used_bytes из config
+
+**TUI `_flow_configure()` — полностью переписано:**
+
+```
+⚙️  Настройка olcRTC Manager Panel — Locations
+
+  Текущие locations (2):
+  [1] wb-stream          — WB Stream/vp8channel, room=019fead4-...
+  [2] yandex-telemost    — Телемост/vp8channel, room=34996201918043
+
+  [1] ➕  Добавить location
+  [2] 🗑️  Удалить location
+  [3] ✏️  Изменить location
+  [4] 📄  Показать все OlcBox URI
+  [Q] ← Назад
+```
+
+- **Добавить**: интерактивный опрос carrier → transport → room_id → name →
+  key (генерируется автоматически) → запись в config + restart manager
+- **Удалить**: выбор по номеру + подтверждение → удаление из config + restart
+- **Изменить**: выбор по номеру → повторный опрос параметров → перезапись
+- **Показать все OlcBox URI**: список всех URI с кредами панели
+
+**Валидация имени location:**
+- Только латиница, цифры, дефис, подчёркивание: `^[a-zA-Z0-9_-]+$`
+- Уникальность: имя не должно совпадать с уже существующими
+- Имя используется в OlcBox URI как суффикс `$name`
+
+**TUI `_ask_carrier()`, `_ask_transport(carrier)`, `_ask_room_id(carrier)`,
+`_ask_location_name(existing_names)`, `_collect_location(existing_names)`** —
+разбиты на отдельные функции для переиспользования (добавление/изменение).
+
+**Главное меню `do_olcrtc_menu()`:**
+- Показывает количество locations: `Настроен: ● active (2 locations)`
+- Список первых 3 locations с carrier/transport
+- Пункт [6] → «Показать все OlcBox URI и креды» — показывает все URI по очереди
+
+### Что НЕ меняется
+
+- Путь к panel: `https://SERVER_IP:8888/admin` — тот же
+- Порт: 8888 — тот же
+- UFW правило: `olcrtc-manager panel (TLS)` — то же
+- systemd unit: `olcrtc-manager.service` — тот же
+- TLS сертификат: `/etc/olcrtc-manager/tls.crt` — тот же
+
+### Тесты (16 новых в `test_olcrtc.py`)
+
+| Класс | # | Что проверяется |
+|-------|---|---|
+| `TestGenerateConfigJson` | +2 | multiple_locations (WB+Telemost в одном config), quota_preserved |
+| `TestStateIO` | +1 | migrate_old_state_format (авто-миграция) |
+| `TestPanelEnvPreservation` | 2 | existing_env_not_overwritten (пароль НЕ меняется), missing_env_creates_new |
+| `TestReadExistingQuota` | 3 | no_config→0, existing_preserved, malformed→0 |
+| `TestAskLocationName` | 5 | valid, duplicate_rejected, empty_rejected, invalid_chars_rejected, underscore_dash_allowed |
+
+34 теста в `test_olcrtc.py` (было 18, +16), все pass.
+187 связанных тестов (olcrtc + access_control + cdn_masking + port_registry + telemt_panel) — 0 регрессий.
+
+### Файлы
+
+- `chimera/modules/olcrtc.py` — переписаны `_generate_config_json`,
+  `_configure_manager`, `_flow_configure`, `do_olcrtc_menu`; добавлены
+  `_read_existing_quota`, `_apply_config`, `_ensure_panel_initialized`,
+  `_ensure_tls_and_unit`, `_ask_carrier`, `_ask_transport`, `_ask_room_id`,
+  `_ask_location_name`, `_collect_location`
+- `tests/test_olcrtc.py` — обновлены тесты под новый API + 16 новых
+
+---
+
 ## FEAT(panels): Telemt Panel — кастомизация порта TLS-фронта через port_registry — 9 августа 2026
 
 **Telemt Panel теперь поддерживает выбор порта для self-signed TLS-фронта
