@@ -46,7 +46,10 @@ def _setup_core_in_sysmodules():
 
 
 class TestGenerateConfigJson(unittest.TestCase):
-    """_generate_config_json — генерация JSON конфига (формат из гайда)."""
+    """_generate_config_json — генерация JSON конфига (формат из гайда).
+
+    Новый API: принимает список locations вместо отдельных полей.
+    """
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -54,12 +57,15 @@ class TestGenerateConfigJson(unittest.TestCase):
     def test_config_has_required_fields(self):
         """JSON должен содержать все поля из гайда."""
         from chimera.modules.olcrtc import _generate_config_json
-        config_text = _generate_config_json(
-            carrier="wbstream",
-            room_id="test-room-123",
-            key="abc123",
-            transport="vp8channel",
-        )
+        locations = [{
+            "name": "wb-vps",
+            "carrier": "wbstream",
+            "transport": "vp8channel",
+            "room_id": "test-room-123",
+            "key": "abc123",
+            "payload": {"vp8-fps": "30", "vp8-batch": "64"},
+        }]
+        config_text = _generate_config_json(locations)
         config = json.loads(config_text)
 
         self.assertEqual(config["version"], 1)
@@ -74,6 +80,7 @@ class TestGenerateConfigJson(unittest.TestCase):
         self.assertEqual(len(client["locations"]), 1)
 
         loc = client["locations"][0]
+        self.assertEqual(loc["name"], "wb-vps")
         self.assertEqual(loc["carrier"], "wbstream")
         self.assertEqual(loc["link"], "direct")
         self.assertEqual(loc["data"], "/var/lib/olcrtc/data")
@@ -91,12 +98,63 @@ class TestGenerateConfigJson(unittest.TestCase):
 
     def test_config_different_carrier(self):
         from chimera.modules.olcrtc import _generate_config_json
-        config = json.loads(_generate_config_json(
-            carrier="jitsi", room_id="room", key="key",
-            transport="datachannel",
-        ))
+        locations = [{
+            "name": "jitsi-loc",
+            "carrier": "jitsi",
+            "transport": "datachannel",
+            "room_id": "room",
+            "key": "key",
+            "payload": {},
+        }]
+        config = json.loads(_generate_config_json(locations))
         self.assertEqual(config["clients"][0]["locations"][0]["carrier"], "jitsi")
         self.assertEqual(config["clients"][0]["locations"][0]["transport"]["type"], "datachannel")
+
+    def test_config_multiple_locations(self):
+        """Тест: несколько locations в одном config (новая фича)."""
+        from chimera.modules.olcrtc import _generate_config_json
+        locations = [
+            {
+                "name": "wb-stream",
+                "carrier": "wbstream",
+                "transport": "vp8channel",
+                "room_id": "019fead4-2cae-7da5-9531-1696c810bbf2",
+                "key": "key1",
+                "payload": {"vp8-fps": "30", "vp8-batch": "64"},
+            },
+            {
+                "name": "yandex-telemost",
+                "carrier": "telemost",
+                "transport": "vp8channel",
+                "room_id": "34996201918043",
+                "key": "key2",
+                "payload": {"vp8-fps": "30", "vp8-batch": "64"},
+            },
+        ]
+        config = json.loads(_generate_config_json(locations))
+        locs = config["clients"][0]["locations"]
+        self.assertEqual(len(locs), 2)
+        self.assertEqual(locs[0]["name"], "wb-stream")
+        self.assertEqual(locs[0]["carrier"], "wbstream")
+        self.assertEqual(locs[1]["name"], "yandex-telemost")
+        self.assertEqual(locs[1]["carrier"], "telemost")
+        # У каждого location — свой endpoint с правильным room_id.
+        self.assertEqual(locs[0]["endpoint"]["room_id"], "019fead4-2cae-7da5-9531-1696c810bbf2")
+        self.assertEqual(locs[1]["endpoint"]["room_id"], "34996201918043")
+
+    def test_config_quota_preserved(self):
+        """quota.used_bytes сохраняется при передаче."""
+        from chimera.modules.olcrtc import _generate_config_json
+        locations = [{
+            "name": "loc",
+            "carrier": "wbstream",
+            "transport": "vp8channel",
+            "room_id": "r",
+            "key": "k",
+            "payload": {},
+        }]
+        config = json.loads(_generate_config_json(locations, quota_used_bytes=123456))
+        self.assertEqual(config["clients"][0]["quota"]["used_bytes"], 123456)
 
 
 class TestGeneratePanelEnv(unittest.TestCase):
@@ -192,17 +250,46 @@ class TestStateIO(unittest.TestCase):
             st = olcrtc._load_state()
         self.assertFalse(st["installed"])
         self.assertFalse(st["manager_installed"])
-        self.assertEqual(st["config"], {})
+        # Новый формат: config всегда содержит locations (пустой список по умолчанию).
+        self.assertIn("locations", st["config"])
+        self.assertEqual(st["config"]["locations"], [])
 
     def test_save_then_load(self):
         from chimera.modules import olcrtc
         with patch.object(olcrtc, "OLC_STATE_FILE", self._state_file):
             olcrtc._save_state({"installed": True, "manager_installed": True,
-                                "config": {"carrier": "wbstream"}})
+                                "config": {"locations": [{"name": "test", "carrier": "wbstream"}]}})
             st = olcrtc._load_state()
         self.assertTrue(st["installed"])
         self.assertTrue(st["manager_installed"])
-        self.assertEqual(st["config"]["carrier"], "wbstream")
+        self.assertEqual(st["config"]["locations"][0]["name"], "test")
+
+    def test_migrate_old_state_format(self):
+        """Старый формат state (с carrier/room_id) мигрируется в locations."""
+        from chimera.modules import olcrtc
+        old_state = {
+            "installed": True,
+            "manager_installed": True,
+            "config": {
+                "carrier": "wbstream",
+                "transport": "vp8channel",
+                "room_id": "old-room-id",
+                "key": "old-key",
+                "location_name": "old-loc",
+                "olcbox_uri": "olcrtc://...",
+            }
+        }
+        self._state_file.write_text(json.dumps(old_state))
+        with patch.object(olcrtc, "OLC_STATE_FILE", self._state_file):
+            st = olcrtc._load_state()
+        # Должна быть миграция в locations.
+        self.assertIn("locations", st["config"])
+        self.assertEqual(len(st["config"]["locations"]), 1)
+        loc = st["config"]["locations"][0]
+        self.assertEqual(loc["name"], "old-loc")
+        self.assertEqual(loc["carrier"], "wbstream")
+        self.assertEqual(loc["room_id"], "old-room-id")
+        self.assertEqual(loc["key"], "old-key")
 
 
 class TestGoToolchain(unittest.TestCase):
@@ -436,6 +523,135 @@ class TestGetPublicIpViaMtproto(unittest.TestCase):
         from chimera.modules.olcrtc import _get_public_ip
         result = _get_public_ip()
         self.assertEqual(result, "203.0.113.5")
+
+
+# ============================================================================
+# Multi-location support
+# ============================================================================
+
+class TestPanelEnvPreservation(unittest.TestCase):
+    """_ensure_panel_initialized — пароль НЕ меняется если panel.env уже есть."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @patch("chimera.modules.olcrtc.MGR_ETC_DIR")
+    @patch("chimera.modules.olcrtc.MGR_DATA_DIR")
+    @patch("chimera.modules.olcrtc.MGR_PANEL_ENV")
+    def test_existing_panel_env_not_overwritten(self, mock_env_path, mock_data_dir, mock_etc_dir):
+        """Если panel.env существует — читаем креды, НЕ перегенерируем."""
+        from chimera.modules import olcrtc
+
+        # Создаём временный panel.env с известными кредами.
+        env_file = self._tmpdir / "panel.env"
+        env_file.write_text(
+            "OLCRTC_MANAGER_USER='existing_admin'\n"
+            "OLCRTC_MANAGER_PASS='existing_pass_123'\n"
+        )
+        mock_env_path.exists.return_value = True
+        mock_env_path.read_text.return_value = env_file.read_text()
+        mock_env_path.write_text = MagicMock()
+        user, pw = olcrtc._ensure_panel_initialized("1.2.3.4")
+        self.assertEqual(user, "existing_admin")
+        self.assertEqual(pw, "existing_pass_123")
+        # write_text НЕ должен был вызываться — пароль не перегенерирован.
+        mock_env_path.write_text.assert_not_called()
+
+    @patch("chimera.modules.olcrtc.MGR_ETC_DIR")
+    @patch("chimera.modules.olcrtc.MGR_DATA_DIR")
+    @patch("chimera.modules.olcrtc.MGR_PANEL_ENV")
+    def test_missing_panel_env_creates_new(self, mock_env_path, mock_data_dir, mock_etc_dir):
+        """Если panel.env НЕ существует — создаём с новыми кредами."""
+        from chimera.modules import olcrtc
+
+        mock_env_path.exists.return_value = False
+        mock_env_path.write_text = MagicMock()
+        mock_env_path.chmod = MagicMock()
+
+        user, pw = olcrtc._ensure_panel_initialized("1.2.3.4")
+        self.assertEqual(user, "admin")
+        # Пароль — 32 hex символа (16 байт).
+        self.assertEqual(len(pw), 32)
+        self.assertTrue(all(c in "0123456789abcdef" for c in pw))
+        mock_env_path.write_text.assert_called_once()
+
+
+class TestReadExistingQuota(unittest.TestCase):
+    """_read_existing_quota — сохранение счётчика трафика."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_no_config_returns_zero(self):
+        from chimera.modules.olcrtc import _read_existing_quota
+        with patch("chimera.modules.olcrtc.MGR_CONFIG") as mock_cfg:
+            mock_cfg.exists.return_value = False
+            self.assertEqual(_read_existing_quota(), 0)
+
+    def test_existing_quota_preserved(self):
+        from chimera.modules.olcrtc import _read_existing_quota
+        cfg_content = json.dumps({
+            "clients": [{"quota": {"used_bytes": 987654321}}]
+        })
+        with patch("chimera.modules.olcrtc.MGR_CONFIG") as mock_cfg:
+            mock_cfg.exists.return_value = True
+            mock_cfg.read_text.return_value = cfg_content
+            self.assertEqual(_read_existing_quota(), 987654321)
+
+    def test_malformed_config_returns_zero(self):
+        from chimera.modules.olcrtc import _read_existing_quota
+        with patch("chimera.modules.olcrtc.MGR_CONFIG") as mock_cfg:
+            mock_cfg.exists.return_value = True
+            mock_cfg.read_text.return_value = "not json"
+            self.assertEqual(_read_existing_quota(), 0)
+
+
+class TestAskLocationName(unittest.TestCase):
+    """_ask_location_name — валидация имени location."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_valid_name_accepted(self):
+        from chimera.modules.olcrtc import _ask_location_name
+        with patch("builtins.input", return_value="wb-stream"):
+            name = _ask_location_name([])
+        self.assertEqual(name, "wb-stream")
+
+    def test_duplicate_name_rejected(self):
+        from chimera.modules.olcrtc import _ask_location_name
+        with patch("builtins.input", return_value="existing-name"):
+            name = _ask_location_name(["existing-name", "other"])
+        self.assertIsNone(name)
+
+    def test_empty_name_rejected(self):
+        from chimera.modules.olcrtc import _ask_location_name
+        with patch("builtins.input", return_value=""):
+            name = _ask_location_name([])
+        self.assertIsNone(name)
+
+    def test_invalid_chars_rejected(self):
+        from chimera.modules.olcrtc import _ask_location_name
+        # Пробелы, кириллица, спецсимволы — недопустимы.
+        with patch("builtins.input", return_value="имя с пробелом"):
+            name = _ask_location_name([])
+        self.assertIsNone(name)
+
+    def test_underscore_and_dash_allowed(self):
+        from chimera.modules.olcrtc import _ask_location_name
+        with patch("builtins.input", return_value="my_loc-1"):
+            name = _ask_location_name([])
+        self.assertEqual(name, "my_loc-1")
 
 
 if __name__ == "__main__":
