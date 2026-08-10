@@ -195,6 +195,104 @@ TRANSPORT_PAYLOADS = {
 # =============================================================================
 #  СОСТОЯНИЕ
 # =============================================================================
+def _sync_state_from_config(st: dict) -> dict:
+    """Синхронизирует state с реальным config.json manager'а.
+    
+    Проблема: state (olcrtc.json) и config.json могут рассинхронизироваться,
+    если пользователь редактировал config.json вручную или через веб-панель
+    manager'а. TUI должен показывать актуальное состояние.
+    
+    Что делает:
+    1. Читает /etc/olcrtc-manager/config.json
+    2. Извлекает locations из clients[0].locations[]
+    3. Сравнивает с state.config.locations
+    4. Если отличаются — обновляет state (и сохраняет)
+    5. Также читает panel.env для актуальных кредов
+    
+    Returns:
+      Обновлённый state dict.
+    """
+    if not MGR_CONFIG.exists():
+        return st
+    
+    try:
+        mgr_cfg = json.loads(MGR_CONFIG.read_text())
+    except Exception:
+        return st
+    
+    clients = mgr_cfg.get("clients", [])
+    if not clients:
+        return st
+    
+    mgr_locations = clients[0].get("locations", [])
+    
+    # Преобразуем формат manager → формат state.
+    new_locations = []
+    for loc in mgr_locations:
+        transport_type = loc.get("transport", {}).get("type", "vp8channel")
+        payload = loc.get("transport", {}).get("payload", {})
+        room_id = loc.get("endpoint", {}).get("room_id", "")
+        key = loc.get("endpoint", {}).get("key", "")
+        carrier = loc.get("carrier", "")
+        name = loc.get("name", "")
+        # Генерируем olcbox_uri.
+        olcbox_uri = _generate_olcbox_uri(carrier, transport_type, room_id, key, name)
+        new_locations.append({
+            "name": name,
+            "carrier": carrier,
+            "transport": transport_type,
+            "room_id": room_id,
+            "key": key,
+            "payload": payload,
+            "olcbox_uri": olcbox_uri,
+        })
+    
+    cfg = st.get("config", {})
+    old_locations = cfg.get("locations", [])
+    
+    # Сравниваем — если locations отличаются, обновляем state.
+    # Простое сравнение по names + room_ids.
+    def _loc_sig(locs):
+        return sorted([(l.get("name", ""), l.get("room_id", ""), l.get("carrier", "")) for l in locs])
+    
+    if _loc_sig(old_locations) != _loc_sig(new_locations):
+        _info("Синхронизирую state с config.json manager'а...")
+        cfg["locations"] = new_locations
+        # Читаем panel.env для кредов.
+        admin_user, admin_pass = _read_panel_env()
+        if admin_user:
+            cfg["admin_user"] = admin_user
+        if admin_pass:
+            cfg["admin_pass"] = admin_pass
+        # Panel URL.
+        public_ip = cfg.get("public_ip", "")
+        if not public_ip:
+            public_ip = _get_public_ip()
+            cfg["public_ip"] = public_ip
+        cfg["panel_url"] = f"https://{public_ip or 'SERVER_IP'}:{MGR_PORT}/admin"
+        st["config"] = cfg
+        _save_state(st)
+        _success(f"State синхронизирован ({len(new_locations)} location(s))")
+    
+    return st
+
+
+def _read_panel_env() -> tuple:
+    """Читает (admin_user, admin_pass) из panel.env. Возвращает ("", "") если файла нет."""
+    if not MGR_PANEL_ENV.exists():
+        return ("", "")
+    try:
+        user, pw = "", ""
+        for line in MGR_PANEL_ENV.read_text().splitlines():
+            if line.startswith("OLCRTC_MANAGER_USER="):
+                user = line.split("=", 1)[1].strip().strip("'\"")
+            elif line.startswith("OLCRTC_MANAGER_PASS="):
+                pw = line.split("=", 1)[1].strip().strip("'\"")
+        return (user, pw)
+    except Exception:
+        return ("", "")
+
+
 def _load_state() -> dict:
     if OLC_STATE_FILE.exists():
         try:
@@ -229,6 +327,8 @@ def _load_state() -> dict:
             # Гарантируем что locations — список.
             if not isinstance(st["config"].get("locations"), list):
                 st["config"]["locations"] = []
+            # Синхронизируем с config.json manager'а (если он есть).
+            st = _sync_state_from_config(st)
             return st
         except Exception:
             pass

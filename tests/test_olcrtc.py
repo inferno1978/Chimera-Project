@@ -654,5 +654,100 @@ class TestAskLocationName(unittest.TestCase):
         self.assertEqual(name, "my_loc-1")
 
 
+class TestSyncStateFromConfig(unittest.TestCase):
+    """_sync_state_from_config — авто-синхронизация state с config.json manager'а."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_no_config_json_returns_state_unchanged(self):
+        """Если config.json не существует — state не трогается."""
+        from chimera.modules import olcrtc
+        with patch.object(olcrtc, "MGR_CONFIG") as mock_cfg:
+            mock_cfg.exists.return_value = False
+            st = {"config": {"locations": [{"name": "old"}]}}
+            result = olcrtc._sync_state_from_config(st)
+        self.assertEqual(result["config"]["locations"], [{"name": "old"}])
+
+    def test_imports_locations_from_config(self):
+        """Locations из config.json импортируются в state."""
+        from chimera.modules import olcrtc
+        cfg_json = json.dumps({
+            "clients": [{
+                "client-id": "wb",
+                "locations": [
+                    {
+                        "name": "wb-stream",
+                        "carrier": "wbstream",
+                        "endpoint": {"room_id": "ROOM1", "key": "KEY1"},
+                        "transport": {"type": "vp8channel", "payload": {"vp8-fps": "30"}},
+                    },
+                    {
+                        "name": "telemost",
+                        "carrier": "telemost",
+                        "endpoint": {"room_id": "ROOM2", "key": "KEY2"},
+                        "transport": {"type": "vp8channel", "payload": {"vp8-fps": "30"}},
+                    },
+                ]
+            }]
+        })
+        with patch.object(olcrtc, "MGR_CONFIG") as mock_cfg, \
+             patch.object(olcrtc, "MGR_PANEL_ENV") as mock_env, \
+             patch.object(olcrtc, "OLC_STATE_FILE") as mock_state, \
+             patch.object(olcrtc, "_get_public_ip", return_value="1.2.3.4"):
+            mock_cfg.exists.return_value = True
+            mock_cfg.read_text.return_value = cfg_json
+            mock_env.exists.return_value = False
+            mock_state.exists.return_value = False  # не пытаемся сохранить
+            st = {"config": {"locations": []}}
+            result = olcrtc._sync_state_from_config(st)
+        locs = result["config"]["locations"]
+        self.assertEqual(len(locs), 2)
+        self.assertEqual(locs[0]["name"], "wb-stream")
+        self.assertEqual(locs[0]["carrier"], "wbstream")
+        self.assertEqual(locs[0]["room_id"], "ROOM1")
+        self.assertEqual(locs[0]["key"], "KEY1")
+        self.assertEqual(locs[1]["name"], "telemost")
+        # olcbox_uri должен быть сгенерирован.
+        self.assertTrue(locs[0]["olcbox_uri"].startswith("olcrtc://wbstream?vp8channel"))
+        self.assertIn("$wb-stream", locs[0]["olcbox_uri"])
+
+    def test_no_sync_when_already_in_sync(self):
+        """Если state уже совпадает с config.json — не пересохраняет."""
+        from chimera.modules import olcrtc
+        cfg_json = json.dumps({
+            "clients": [{
+                "client-id": "wb",
+                "locations": [{
+                    "name": "wb-vps",
+                    "carrier": "telemost",
+                    "endpoint": {"room_id": "ROOM", "key": "KEY"},
+                    "transport": {"type": "vp8channel", "payload": {}},
+                }]
+            }]
+        })
+        with patch.object(olcrtc, "MGR_CONFIG") as mock_cfg:
+            mock_cfg.exists.return_value = True
+            mock_cfg.read_text.return_value = cfg_json
+            # State уже содержит ту же location.
+            st = {"config": {"locations": [{
+                "name": "wb-vps", "carrier": "telemost",
+                "room_id": "ROOM", "key": "KEY",
+                "transport": "vp8channel", "payload": {},
+                "olcbox_uri": "olcrtc://...",
+            }]}}
+            # _save_state НЕ должен вызываться.
+            with patch.object(olcrtc, "_save_state") as mock_save:
+                result = olcrtc._sync_state_from_config(st)
+                mock_save.assert_not_called()
+        # State не изменился.
+        self.assertEqual(len(result["config"]["locations"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
