@@ -748,6 +748,138 @@ class TestSyncStateFromConfig(unittest.TestCase):
         # State не изменился.
         self.assertEqual(len(result["config"]["locations"]), 1)
 
+    def test_imports_multiple_clients(self):
+        """Locations из нескольких clients[] импортируются в state.
+        
+        Сценарий: пользователь создал второй client через веб-панель.
+        TUI должен видеть его locations.
+        """
+        from chimera.modules import olcrtc
+        cfg_json = json.dumps({
+            "clients": [
+                {
+                    "client-id": "wb",
+                    "locations": [{
+                        "name": "loc-wb",
+                        "carrier": "wbstream",
+                        "endpoint": {"room_id": "R1", "key": "K1"},
+                        "transport": {"type": "vp8channel", "payload": {}},
+                    }]
+                },
+                {
+                    "client-id": "premium",
+                    "locations": [{
+                        "name": "loc-premium",
+                        "carrier": "telemost",
+                        "endpoint": {"room_id": "R2", "key": "K2"},
+                        "transport": {"type": "vp8channel", "payload": {}},
+                    }]
+                }
+            ]
+        })
+        with patch.object(olcrtc, "MGR_CONFIG") as mock_cfg, \
+             patch.object(olcrtc, "MGR_PANEL_ENV") as mock_env, \
+             patch.object(olcrtc, "OLC_STATE_FILE") as mock_state, \
+             patch.object(olcrtc, "_get_public_ip", return_value="1.2.3.4"):
+            mock_cfg.exists.return_value = True
+            mock_cfg.read_text.return_value = cfg_json
+            mock_env.exists.return_value = False
+            mock_state.exists.return_value = False
+            st = {"config": {"locations": []}}
+            result = olcrtc._sync_state_from_config(st)
+        locs = result["config"]["locations"]
+        self.assertEqual(len(locs), 2)
+        # Каждая location помечена своим client_id.
+        self.assertEqual(locs[0]["client_id"], "wb")
+        self.assertEqual(locs[0]["name"], "loc-wb")
+        self.assertEqual(locs[1]["client_id"], "premium")
+        self.assertEqual(locs[1]["name"], "loc-premium")
+        # mgr_clients_meta сохранён для _generate_config_json.
+        mgr_clients = result["config"]["mgr_clients"]
+        self.assertEqual(len(mgr_clients), 2)
+        self.assertEqual(mgr_clients[0]["client-id"], "wb")
+        self.assertEqual(mgr_clients[1]["client-id"], "premium")
+
+
+class TestGenerateConfigMultiClient(unittest.TestCase):
+    """_generate_config_json — сохранение нескольких clients."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_preserves_multiple_clients_via_meta(self):
+        """Если передать mgr_clients_meta — clients сохраняются."""
+        from chimera.modules.olcrtc import _generate_config_json
+        locations = [
+            {"name": "loc-wb", "client_id": "wb", "carrier": "wbstream",
+             "transport": "vp8channel", "room_id": "R1", "key": "K1", "payload": {}},
+            {"name": "loc-premium", "client_id": "premium", "carrier": "telemost",
+             "transport": "vp8channel", "room_id": "R2", "key": "K2", "payload": {}},
+        ]
+        mgr_clients_meta = [
+            {"client-id": "wb", "refresh": "5m", "quota_used_bytes": 100},
+            {"client-id": "premium", "refresh": "10m", "quota_used_bytes": 200},
+        ]
+        config = json.loads(_generate_config_json(
+            locations, quota_used_bytes=100, mgr_clients_meta=mgr_clients_meta
+        ))
+        clients = config["clients"]
+        self.assertEqual(len(clients), 2)
+        # Client "wb" с его location.
+        self.assertEqual(clients[0]["client-id"], "wb")
+        self.assertEqual(len(clients[0]["locations"]), 1)
+        self.assertEqual(clients[0]["locations"][0]["name"], "loc-wb")
+        # Client "premium" с его location.
+        self.assertEqual(clients[1]["client-id"], "premium")
+        self.assertEqual(len(clients[1]["locations"]), 1)
+        self.assertEqual(clients[1]["locations"][0]["name"], "loc-premium")
+        # Quota сохранена.
+        self.assertEqual(clients[0]["quota"]["used_bytes"], 100)
+        self.assertEqual(clients[1]["quota"]["used_bytes"], 200)
+
+    def test_preserves_client_without_locations(self):
+        """Client без locations (созданный в панели, но без loc) сохраняется."""
+        from chimera.modules.olcrtc import _generate_config_json
+        locations = [
+            {"name": "loc1", "client_id": "wb", "carrier": "wbstream",
+             "transport": "vp8channel", "room_id": "R1", "key": "K1", "payload": {}},
+        ]
+        mgr_clients_meta = [
+            {"client-id": "wb", "refresh": "5m", "quota_used_bytes": 0},
+            {"client-id": "empty-client", "refresh": "5m", "quota_used_bytes": 0},
+        ]
+        config = json.loads(_generate_config_json(
+            locations, mgr_clients_meta=mgr_clients_meta
+        ))
+        clients = config["clients"]
+        self.assertEqual(len(clients), 2)
+        # empty-client сохраняется с пустым locations.
+        self.assertEqual(clients[1]["client-id"], "empty-client")
+        self.assertEqual(clients[1]["locations"], [])
+
+    def test_default_single_client_when_no_meta(self):
+        """Без mgr_clients_meta — один client 'wb' (обратная совместимость)."""
+        from chimera.modules.olcrtc import _generate_config_json
+        locations = [
+            {"name": "loc1", "carrier": "wbstream",
+             "transport": "vp8channel", "room_id": "R1", "key": "K1", "payload": {}},
+        ]
+        config = json.loads(_generate_config_json(locations))
+        clients = config["clients"]
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(clients[0]["client-id"], "wb")
+
+    def test_location_without_client_id_goes_to_wb(self):
+        """Location без client_id попадает в client 'wb'."""
+        from chimera.modules.olcrtc import _generate_config_json
+        locations = [
+            {"name": "loc1", "carrier": "wbstream",
+             "transport": "vp8channel", "room_id": "R1", "key": "K1", "payload": {}},
+        ]
+        config = json.loads(_generate_config_json(locations))
+        self.assertEqual(config["clients"][0]["client-id"], "wb")
+        self.assertEqual(config["clients"][0]["locations"][0]["name"], "loc1")
+
 
 if __name__ == "__main__":
     unittest.main()
