@@ -204,10 +204,13 @@ def _sync_state_from_config(st: dict) -> dict:
     
     Что делает:
     1. Читает /etc/olcrtc-manager/config.json
-    2. Извлекает locations из clients[0].locations[]
+    2. Извлекает locations из ВСЕХ clients[] (не только clients[0])
     3. Сравнивает с state.config.locations
     4. Если отличаются — обновляет state (и сохраняет)
     5. Также читает panel.env для актуальных кредов
+    6. Сохраняет mgr_clients в state для последующего восстановления
+       при _generate_config_json (чтобы не потерять clients, созданные
+       через веб-панель)
     
     Returns:
       Обновлённый state dict.
@@ -224,40 +227,52 @@ def _sync_state_from_config(st: dict) -> dict:
     if not clients:
         return st
     
-    mgr_locations = clients[0].get("locations", [])
-    
-    # Преобразуем формат manager → формат state.
-    new_locations = []
-    for loc in mgr_locations:
-        transport_type = loc.get("transport", {}).get("type", "vp8channel")
-        payload = loc.get("transport", {}).get("payload", {})
-        room_id = loc.get("endpoint", {}).get("room_id", "")
-        key = loc.get("endpoint", {}).get("key", "")
-        carrier = loc.get("carrier", "")
-        name = loc.get("name", "")
-        # Генерируем olcbox_uri.
-        olcbox_uri = _generate_olcbox_uri(carrier, transport_type, room_id, key, name)
-        new_locations.append({
-            "name": name,
-            "carrier": carrier,
-            "transport": transport_type,
-            "room_id": room_id,
-            "key": key,
-            "payload": payload,
-            "olcbox_uri": olcbox_uri,
+    # Читаем locations из ВСЕХ clients, не только clients[0].
+    # Каждая location помечается своим client_id, чтобы потом
+    # _generate_config_json мог распределить их обратно.
+    mgr_locations = []
+    mgr_clients_meta = []  # сохраняем метаданные clients для восстановления
+    for client in clients:
+        client_id = client.get("client-id", "wb")
+        client_refresh = client.get("refresh", "5m")
+        client_quota = client.get("quota", {}).get("used_bytes", 0)
+        mgr_clients_meta.append({
+            "client-id": client_id,
+            "refresh": client_refresh,
+            "quota_used_bytes": client_quota,
         })
+        for loc in client.get("locations", []):
+            transport_type = loc.get("transport", {}).get("type", "vp8channel")
+            payload = loc.get("transport", {}).get("payload", {})
+            room_id = loc.get("endpoint", {}).get("room_id", "")
+            key = loc.get("endpoint", {}).get("key", "")
+            carrier = loc.get("carrier", "")
+            name = loc.get("name", "")
+            olcbox_uri = _generate_olcbox_uri(carrier, transport_type, room_id, key, name)
+            mgr_locations.append({
+                "name": name,
+                "client_id": client_id,  # важно: какому client принадлежит
+                "carrier": carrier,
+                "transport": transport_type,
+                "room_id": room_id,
+                "key": key,
+                "payload": payload,
+                "olcbox_uri": olcbox_uri,
+            })
     
     cfg = st.get("config", {})
     old_locations = cfg.get("locations", [])
     
     # Сравниваем — если locations отличаются, обновляем state.
-    # Простое сравнение по names + room_ids.
     def _loc_sig(locs):
-        return sorted([(l.get("name", ""), l.get("room_id", ""), l.get("carrier", "")) for l in locs])
+        return sorted([(l.get("name", ""), l.get("room_id", ""),
+                        l.get("carrier", ""), l.get("client_id", "wb")) for l in locs])
     
-    if _loc_sig(old_locations) != _loc_sig(new_locations):
+    if _loc_sig(old_locations) != _loc_sig(mgr_locations):
         _info("Синхронизирую state с config.json manager'а...")
-        cfg["locations"] = new_locations
+        cfg["locations"] = mgr_locations
+        # Сохраняем метаданные clients для _generate_config_json.
+        cfg["mgr_clients"] = mgr_clients_meta
         # Читаем panel.env для кредов.
         admin_user, admin_pass = _read_panel_env()
         if admin_user:
@@ -272,7 +287,7 @@ def _sync_state_from_config(st: dict) -> dict:
         cfg["panel_url"] = f"https://{public_ip or 'SERVER_IP'}:{MGR_PORT}/admin"
         st["config"] = cfg
         _save_state(st)
-        _success(f"State синхронизирован ({len(new_locations)} location(s))")
+        _success(f"State синхронизирован ({len(mgr_locations)} location(s) в {len(clients)} client(s))")
     
     return st
 
@@ -700,20 +715,28 @@ def _install_or_update() -> bool:
 # =============================================================================
 #  CONFIG.JSON ГЕНЕРАЦИЯ (точно по гайду)
 # =============================================================================
-def _generate_config_json(locations: list, quota_used_bytes: int = 0) -> str:
-    """Генерирует config.json для olcrtc-manager с поддержкой нескольких locations.
+def _generate_config_json(locations: list, quota_used_bytes: int = 0,
+                          mgr_clients_meta: list = None) -> str:
+    """Генерирует config.json для olcrtc-manager с поддержкой нескольких locations
+    и нескольких clients.
 
     Args:
       locations: список словарей вида:
         {
           "name": "wb-stream",
+          "client_id": "wb",  # опционально, по умолчанию "wb"
           "carrier": "wbstream",
           "transport": "vp8channel",
           "room_id": "<ROOM_ID>",
           "key": "<KEY>",
           "payload": {"vp8-fps": "30", "vp8-batch": "64"}
         }
-      quota_used_bytes: счётчик трафика (для совместимости с manager).
+      quota_used_bytes: счётчик трафика для client "wb" (для совместимости).
+      mgr_clients_meta: список метаданных clients из предыдущего config.json
+        (сохраняется _sync_state_from_config). Если передан — используем его
+        для восстановления структуры clients, чтобы не потерять clients,
+        созданные через веб-панель. Формат:
+        [{"client-id": "wb", "refresh": "5m", "quota_used_bytes": 0}, ...]
 
     Format (точно по гайду olcrtc-manager):
     {
@@ -724,47 +747,74 @@ def _generate_config_json(locations: list, quota_used_bytes: int = 0) -> str:
       "refresh": "10m",
       "clients": [
         {
-          "client-id": "wb",
+          "client-id": "<client_id>",
           "refresh": "5m",
           "quota": {"used_bytes": 0},
-          "locations": [
-            {
-              "name": "<name>",
-              "client-id": "wb",
-              "endpoint": {"room_id": "<ROOM_ID>", "key": "<KEY>"},
-              "carrier": "<carrier>",
-              "transport": {"type": "<transport>", "payload": {...}},
-              "link": "direct",
-              "data": "/var/lib/olcrtc/data",
-              "dns": "8.8.8.8:53",
-              "proxy": {}
-            },
-            ...
-          ]
-        }
+          "locations": [...]
+        },
+        ...
       ]
     }
     """
-    locs_json = []
+    # Группируем locations по client_id.
+    # Если у location нет client_id — используем "wb".
+    locations_by_client = {}
     for loc in locations:
-        transport = loc.get("transport", "vp8channel")
-        payload = loc.get("payload") or TRANSPORT_PAYLOADS.get(transport, {})
-        locs_json.append({
-            "name": loc["name"],
+        cid = loc.get("client_id", "wb")
+        locations_by_client.setdefault(cid, []).append(loc)
+
+    # Определяем список clients для записи.
+    # Если есть mgr_clients_meta — используем его (сохраняем clients из панели).
+    # Иначе — один client "wb".
+    if mgr_clients_meta:
+        clients_meta = mgr_clients_meta
+    else:
+        clients_meta = [{
             "client-id": "wb",
-            "endpoint": {
-                "room_id": loc["room_id"],
-                "key": loc["key"],
-            },
-            "carrier": loc["carrier"],
-            "transport": {
-                "type": transport,
-                "payload": payload,
-            },
-            "link": "direct",
-            "data": str(MGR_DATA_DIR),
-            "dns": "8.8.8.8:53",
-            "proxy": {},
+            "refresh": "5m",
+            "quota_used_bytes": quota_used_bytes,
+        }]
+
+    # Гарантируем что client "wb" есть (если в locations есть loc без client_id).
+    existing_cids = [c["client-id"] for c in clients_meta]
+    for cid in locations_by_client:
+        if cid not in existing_cids:
+            clients_meta.append({
+                "client-id": cid,
+                "refresh": "5m",
+                "quota_used_bytes": 0,
+            })
+
+    clients_json = []
+    for meta in clients_meta:
+        cid = meta["client-id"]
+        locs = locations_by_client.get(cid, [])
+        locs_json = []
+        for loc in locs:
+            transport = loc.get("transport", "vp8channel")
+            payload = loc.get("payload") or TRANSPORT_PAYLOADS.get(transport, {})
+            locs_json.append({
+                "name": loc["name"],
+                "client-id": cid,
+                "endpoint": {
+                    "room_id": loc["room_id"],
+                    "key": loc["key"],
+                },
+                "carrier": loc["carrier"],
+                "transport": {
+                    "type": transport,
+                    "payload": payload,
+                },
+                "link": "direct",
+                "data": str(MGR_DATA_DIR),
+                "dns": "8.8.8.8:53",
+                "proxy": {},
+            })
+        clients_json.append({
+            "client-id": cid,
+            "refresh": meta.get("refresh", "5m"),
+            "quota": {"used_bytes": meta.get("quota_used_bytes", 0) if cid != "wb" else quota_used_bytes},
+            "locations": locs_json,
         })
 
     config = {
@@ -773,14 +823,7 @@ def _generate_config_json(locations: list, quota_used_bytes: int = 0) -> str:
         "port": MGR_PORT,
         "subscription_path": "sub",
         "refresh": "10m",
-        "clients": [
-            {
-                "client-id": "wb",
-                "refresh": "5m",
-                "quota": {"used_bytes": quota_used_bytes},
-                "locations": locs_json,
-            }
-        ],
+        "clients": clients_json,
     }
     return json.dumps(config, indent=2, ensure_ascii=False)
 
@@ -912,8 +955,11 @@ def _apply_config(locations: list) -> bool:
     НЕ трогает TLS сертификат.
     НЕ трогает systemd unit.
     
+    Сохраняет существующие clients (созданные через веб-панель) благодаря
+    передаче mgr_clients_meta из state в _generate_config_json.
+    
     Args:
-      locations: список словарей [{name, carrier, transport, room_id, key, payload}, ...]
+      locations: список словарей [{name, carrier, transport, room_id, key, payload, client_id?}, ...]
     
     Returns:
       True если сервис успешно перезапущен, False при ошибке.
@@ -929,12 +975,20 @@ def _apply_config(locations: list) -> bool:
     # 2. Сохранить quota из существующего config.
     quota = _read_existing_quota()
     
-    # 3. Записать новый config.json.
-    config_text = _generate_config_json(locations, quota_used_bytes=quota)
+    # 3. Получить mgr_clients_meta из state (если есть — сохранит clients из панели).
+    st = _load_state()
+    mgr_clients_meta = st.get("config", {}).get("mgr_clients")
+    
+    # 4. Записать новый config.json.
+    config_text = _generate_config_json(
+        locations,
+        quota_used_bytes=quota,
+        mgr_clients_meta=mgr_clients_meta,
+    )
     MGR_CONFIG.write_text(config_text)
     MGR_CONFIG.chmod(0o600)
     
-    # 4. Перезапустить сервис.
+    # 5. Перезапустить сервис.
     _run(["systemctl", "restart", "olcrtc-manager"],
           check=False, quiet=True, timeout=30)
     time.sleep(4)
