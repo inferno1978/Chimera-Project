@@ -205,11 +205,35 @@ def _load_state() -> dict:
             st.setdefault("manager_commit", "")
             st.setdefault("built_at", "")
             st.setdefault("config", {})
+            # Миграция на multi-location формат.
+            # Старый формат: st["config"] = {carrier, transport, room_id, key, ...}
+            # Новый формат:  st["config"] = {panel_url, admin_user, admin_pass,
+            #                                 locations: [{name, carrier, transport, room_id, key, payload}]}
+            cfg = st.get("config", {})
+            if "locations" not in cfg and cfg.get("room_id"):
+                # Старый формат — мигрируем.
+                old_loc = {
+                    "name": cfg.get("location_name", "wb-vps"),
+                    "carrier": cfg.get("carrier", ""),
+                    "transport": cfg.get("transport", "vp8channel"),
+                    "room_id": cfg.get("room_id", ""),
+                    "key": cfg.get("key", ""),
+                    "payload": cfg.get("payload", TRANSPORT_PAYLOADS.get(cfg.get("transport", "vp8channel"), {})),
+                    "olcbox_uri": cfg.get("olcbox_uri", ""),
+                }
+                cfg["locations"] = [old_loc]
+                st["config"] = cfg
+            elif "locations" not in cfg:
+                cfg["locations"] = []
+                st["config"] = cfg
+            # Гарантируем что locations — список.
+            if not isinstance(st["config"].get("locations"), list):
+                st["config"]["locations"] = []
             return st
         except Exception:
             pass
     return {"installed": False, "manager_installed": False, "commit": "",
-            "manager_commit": "", "built_at": "", "config": {}}
+            "manager_commit": "", "built_at": "", "config": {"locations": []}}
 
 
 def _save_state(st: dict) -> None:
@@ -576,73 +600,85 @@ def _install_or_update() -> bool:
 # =============================================================================
 #  CONFIG.JSON ГЕНЕРАЦИЯ (точно по гайду)
 # =============================================================================
-def _generate_config_json(carrier: str, room_id: str, key: str,
-                          transport: str, location_name: str = "wb-vps") -> str:
-    """Генерирует config.json для olcrtc-manager.
+def _generate_config_json(locations: list, quota_used_bytes: int = 0) -> str:
+    """Генерирует config.json для olcrtc-manager с поддержкой нескольких locations.
 
-    Формат — точно по гайду:
+    Args:
+      locations: список словарей вида:
+        {
+          "name": "wb-stream",
+          "carrier": "wbstream",
+          "transport": "vp8channel",
+          "room_id": "<ROOM_ID>",
+          "key": "<KEY>",
+          "payload": {"vp8-fps": "30", "vp8-batch": "64"}
+        }
+      quota_used_bytes: счётчик трафика (для совместимости с manager).
+
+    Format (точно по гайду olcrtc-manager):
     {
       "version": 1,
-      "name": "WB VPS",
+      "name": "Chimera olcRTC",
       "port": 8888,
+      "subscription_path": "sub",
       "refresh": "10m",
       "clients": [
         {
           "client-id": "wb",
           "refresh": "5m",
+          "quota": {"used_bytes": 0},
           "locations": [
             {
-              "name": "wb-vps",
-              "endpoint": {
-                "room_id": "<ROOM_ID>",
-                "key": "<KEY>"
-              },
-              "carrier": "wbstream",
-              "transport": {
-                "type": "vp8channel",
-                "payload": {
-                  "vp8-fps": "30",
-                  "vp8-batch": "64"
-                }
-              },
+              "name": "<name>",
+              "client-id": "wb",
+              "endpoint": {"room_id": "<ROOM_ID>", "key": "<KEY>"},
+              "carrier": "<carrier>",
+              "transport": {"type": "<transport>", "payload": {...}},
               "link": "direct",
               "data": "/var/lib/olcrtc/data",
-              "dns": "8.8.8.8:53"
-            }
+              "dns": "8.8.8.8:53",
+              "proxy": {}
+            },
+            ...
           ]
         }
       ]
     }
     """
-    # Transport payload (из гайда — vp8channel с fps=30, batch=64).
-    payload = TRANSPORT_PAYLOADS.get(transport, {})
+    locs_json = []
+    for loc in locations:
+        transport = loc.get("transport", "vp8channel")
+        payload = loc.get("payload") or TRANSPORT_PAYLOADS.get(transport, {})
+        locs_json.append({
+            "name": loc["name"],
+            "client-id": "wb",
+            "endpoint": {
+                "room_id": loc["room_id"],
+                "key": loc["key"],
+            },
+            "carrier": loc["carrier"],
+            "transport": {
+                "type": transport,
+                "payload": payload,
+            },
+            "link": "direct",
+            "data": str(MGR_DATA_DIR),
+            "dns": "8.8.8.8:53",
+            "proxy": {},
+        })
 
     config = {
         "version": 1,
         "name": "Chimera olcRTC",
         "port": MGR_PORT,
+        "subscription_path": "sub",
         "refresh": "10m",
         "clients": [
             {
                 "client-id": "wb",
                 "refresh": "5m",
-                "locations": [
-                    {
-                        "name": location_name,
-                        "endpoint": {
-                            "room_id": room_id,
-                            "key": key,
-                        },
-                        "carrier": carrier,
-                        "transport": {
-                            "type": transport,
-                            "payload": payload,
-                        },
-                        "link": "direct",
-                        "data": str(MGR_DATA_DIR),
-                        "dns": "8.8.8.8:53",
-                    }
-                ],
+                "quota": {"used_bytes": quota_used_bytes},
+                "locations": locs_json,
             }
         ],
     }
@@ -752,52 +788,117 @@ def _get_public_ip() -> str:
 # =============================================================================
 #  УСТАНОВКА / НАСТРОЙКА / УДАЛЕНИЕ MANAGER PANEL
 # =============================================================================
-def _configure_manager(carrier: str, transport: str, room_id: str,
-                       location_name: str = "wb-vps") -> bool:
-    """Настраивает manager panel: config.json, panel.env, TLS, systemd, UFW.
-
-    Возвращает True при успехе.
+def _read_existing_quota() -> int:
+    """Читает текущий quota.used_bytes из существующего config.json.
+    
+    Нужно чтобы при добавлении/удалении location не сбрасывать счётчик трафика.
     """
-    st = _load_state()
+    if not MGR_CONFIG.exists():
+        return 0
+    try:
+        cfg = json.loads(MGR_CONFIG.read_text())
+        clients = cfg.get("clients", [])
+        if clients:
+            return int(clients[0].get("quota", {}).get("used_bytes", 0))
+    except Exception:
+        pass
+    return 0
 
-    # Генерация key (hex 32, как в гайде).
-    key = secrets.token_hex(32)
 
-    # Генерация admin кредов.
-    admin_user = "admin"
-    admin_pass = secrets.token_hex(16)
-
-    # Публичный IP.
-    public_ip = _get_public_ip()
-    if not public_ip:
-        _warn("Не удалось определить публичный IP — TLS будет без IP SAN")
-        public_ip = "127.0.0.1"
-
+def _apply_config(locations: list) -> bool:
+    """Применяет список locations к config.json и перезапускает manager.
+    
+    НЕ трогает panel.env (пароль остаётся прежним).
+    НЕ трогает TLS сертификат.
+    НЕ трогает systemd unit.
+    
+    Args:
+      locations: список словарей [{name, carrier, transport, room_id, key, payload}, ...]
+    
+    Returns:
+      True если сервис успешно перезапущен, False при ошибке.
+    """
+    if not locations:
+        _warn("Список locations пуст — config.json не записан")
+        return False
+    
     # 1. Директории.
     MGR_ETC_DIR.mkdir(parents=True, exist_ok=True)
     MGR_DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 2. config.json.
-    config_text = _generate_config_json(carrier, room_id, key, transport, location_name)
+    
+    # 2. Сохранить quota из существующего config.
+    quota = _read_existing_quota()
+    
+    # 3. Записать новый config.json.
+    config_text = _generate_config_json(locations, quota_used_bytes=quota)
     MGR_CONFIG.write_text(config_text)
     MGR_CONFIG.chmod(0o600)
+    
+    # 4. Перезапустить сервис.
+    _run(["systemctl", "restart", "olcrtc-manager"],
+          check=False, quiet=True, timeout=30)
+    time.sleep(4)
+    
+    active = _manager_service_active()
+    if not active:
+        _warn("olcrtc-manager не поднялся — проверьте: journalctl -u olcrtc-manager -n 30")
+    
+    return active
 
-    # 3. panel.env.
+
+def _ensure_panel_initialized(public_ip: str) -> tuple[str, str]:
+    """Гарантирует что panel.env, TLS и systemd unit существуют.
+    
+    Если уже есть — не трогает (пароль не меняется!).
+    Если нет — создаёт с новыми кредами.
+    
+    Returns:
+      (admin_user, admin_pass) — текущие креды панели.
+    """
+    # 1. Директории.
+    MGR_ETC_DIR.mkdir(parents=True, exist_ok=True)
+    MGR_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # 2. panel.env — только если не существует.
+    if MGR_PANEL_ENV.exists():
+        # Читаем существующие креды.
+        admin_user = "admin"
+        admin_pass = ""
+        try:
+            for line in MGR_PANEL_ENV.read_text().splitlines():
+                if line.startswith("OLCRTC_MANAGER_USER="):
+                    admin_user = line.split("=", 1)[1].strip().strip("'\"")
+                elif line.startswith("OLCRTC_MANAGER_PASS="):
+                    admin_pass = line.split("=", 1)[1].strip().strip("'\"")
+        except Exception:
+            pass
+        return admin_user, admin_pass
+    
+    # Создаём новый panel.env.
+    admin_user = "admin"
+    admin_pass = secrets.token_hex(16)
     env_text = _generate_panel_env(admin_user, admin_pass)
     MGR_PANEL_ENV.write_text(env_text)
     MGR_PANEL_ENV.chmod(0o600)
+    _info(f"Создан новый panel.env (admin/{admin_pass})")
+    return admin_user, admin_pass
 
-    # 4. TLS сертификат.
-    if not _generate_tls_cert(public_ip):
-        _warn("TLS не сгенерирован — панель будет без HTTPS")
 
-    # 5. systemd unit.
-    unit_text = _generate_systemd_unit()
-    MGR_UNIT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    MGR_UNIT_FILE.write_text(unit_text)
-    _run(["systemctl", "daemon-reload"], check=False, quiet=True, timeout=15)
-
-    # 6. UFW — открыть порт через port_registry.
+def _ensure_tls_and_unit(public_ip: str) -> None:
+    """Гарантирует что TLS сертификат и systemd unit существуют."""
+    # TLS — только если не существует.
+    if not (MGR_TLS_CRT.exists() and MGR_TLS_KEY.exists()):
+        if not _generate_tls_cert(public_ip):
+            _warn("TLS не сгенерирован — панель будет без HTTPS")
+    
+    # systemd unit — только если не существует.
+    if not MGR_UNIT_FILE.exists():
+        unit_text = _generate_systemd_unit()
+        MGR_UNIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MGR_UNIT_FILE.write_text(unit_text)
+        _run(["systemctl", "daemon-reload"], check=False, quiet=True, timeout=15)
+    
+    # UFW — открыть порт (идемпотентно).
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, port_register,
@@ -808,37 +909,56 @@ def _configure_manager(carrier: str, transport: str, room_id: str,
                       comment="olcrtc-manager panel (TLS)")
     except Exception as e:
         _warn(f"UFW: не удалось открыть порт {MGR_PORT}: {e}")
-
-    # 7. Запуск сервиса.
+    
+    # Enable + start.
     _run(["systemctl", "enable", "--now", "olcrtc-manager"],
           check=False, quiet=True, timeout=20)
-    _run(["systemctl", "restart", "olcrtc-manager"],
-          check=False, quiet=True, timeout=20)
-    time.sleep(6)
 
-    active = _manager_service_active()
-    if not active:
-        _warn("olcrtc-manager не поднялся — проверьте: journalctl -u olcrtc-manager -n 30")
 
-    # 8. Сохранение state.
+def _configure_manager(locations: list) -> bool:
+    """Настраивает manager panel со списком locations.
+    
+    НЕ перегенерирует panel.env если уже существует (пароль не меняется!).
+    НЕ перегенерирует TLS если уже существует.
+    
+    Args:
+      locations: список [{name, carrier, transport, room_id, key, payload}, ...]
+    
+    Returns:
+      True при успехе.
+    """
+    st = _load_state()
+    
+    # Публичный IP.
+    public_ip = _get_public_ip()
+    if not public_ip:
+        _warn("Не удалось определить публичный IP — TLS будет без IP SAN")
+        public_ip = "127.0.0.1"
+    
+    # 1. Гарантировать panel.env, TLS, systemd, UFW (без перегенерации если уже есть).
+    admin_user, admin_pass = _ensure_panel_initialized(public_ip)
+    _ensure_tls_and_unit(public_ip)
+    
+    # 2. Применить config.json + перезапуск.
+    active = _apply_config(locations)
+    
+    # 3. Сохранение state.
+    # Генерируем OlcBox URI для каждого location.
+    for loc in locations:
+        loc["olcbox_uri"] = _generate_olcbox_uri(
+            loc["carrier"], loc["transport"], loc["room_id"],
+            loc["key"], loc["name"]
+        )
+    
     st["config"] = {
-        "carrier": carrier,
-        "transport": transport,
-        "room_id": room_id,
-        "key": key,
-        "location_name": location_name,
+        "panel_url": f"https://{public_ip}:{MGR_PORT}/admin",
         "admin_user": admin_user,
         "admin_pass": admin_pass,
         "public_ip": public_ip,
-        "panel_url": f"https://{public_ip}:{MGR_PORT}/admin",
+        "locations": locations,
     }
     _save_state(st)
-
-    # 9. OlcBox URI.
-    uri = _generate_olcbox_uri(carrier, transport, room_id, key, location_name)
-    st["config"]["olcbox_uri"] = uri
-    _save_state(st)
-
+    
     return active
 
 
@@ -952,32 +1072,29 @@ def _api_logs(room_id: str) -> str:
 # =============================================================================
 #  TUI: КОНФИГУРАЦИЯ
 # =============================================================================
-def _flow_configure() -> None:
-    """Интерактивная настройка manager panel."""
+def _ask_carrier() -> str | None:
+    """Спрашивает carrier (провайдера). Возвращает строку ('wbstream'/'jitsi'/'telemost') или None."""
     print()
-    _box_top("Настройка olcRTC Manager Panel")
+    _box_top("Выберите провайдера")
     _box_row()
-    _box_row(f"  {BOLD}Выберите провайдера:{NC}")
     for k, (_, title, hint) in CARRIERS.items():
         _box_item(k, f"{title}  {DIM}— {hint}{NC}")
     _box_bottom()
-
     try:
         c_choice = input(f"{CYAN}  Провайдер [1]:{NC} ").strip() or "1"
     except (EOFError, KeyboardInterrupt):
-        return
+        return None
     if c_choice not in CARRIERS:
         _warn("Неверный выбор")
-        input(f"{BLUE}  Нажмите Enter...{NC}")
-        return
-    carrier, carrier_title, _ = CARRIERS[c_choice]
+        return None
+    return CARRIERS[c_choice][0]
 
-    print()
+
+def _ask_transport(carrier: str) -> str | None:
+    """Спрашивает transport для выбранного carrier. Возвращает строку или None."""
+    carrier_title = next((t for k, (c, t, _) in CARRIERS.items() if c == carrier), carrier)
     # Не все комбинации carrier+transport поддерживаются olcrtc-manager.
-    # WB Stream поддерживает ТОЛЬКО vp8channel (подтверждено ошибкой
-    # "unsupported carrier/transport combination wbstream + datachannel").
-    # Jitsi поддерживает datachannel, vp8channel, seichannel, videochannel.
-    # Телемост — аналогично Jitsi.
+    # WB Stream поддерживает ТОЛЬКО vp8channel.
     SUPPORTED_TRANSPORTS = {
         "wbstream": {"2"},  # только vp8channel
         "jitsi":    {"1", "2", "3", "4"},  # все
@@ -986,6 +1103,7 @@ def _flow_configure() -> None:
     allowed = SUPPORTED_TRANSPORTS.get(carrier, {"2"})
     default_t = "2" if "2" in allowed else sorted(allowed)[0]
 
+    print()
     _box_top("Транспорт (маскировка)")
     for k, (_, hint) in TRANSPORTS.items():
         if k in allowed:
@@ -998,14 +1116,16 @@ def _flow_configure() -> None:
     try:
         t_choice = input(f"{CYAN}  Транспорт [{default_t}]:{NC} ").strip() or default_t
     except (EOFError, KeyboardInterrupt):
-        return
+        return None
     if t_choice not in allowed:
         _warn(f"Транспорт {t_choice} не поддерживается для {carrier_title}")
-        _warn(f"Поддерживаемые: {', '.join(sorted(allowed))}")
-        input(f"{BLUE}  Нажмите Enter...{NC}")
-        return
-    transport, _ = TRANSPORTS[t_choice]
+        return None
+    return TRANSPORTS[t_choice][0]
 
+
+def _ask_room_id(carrier: str) -> str | None:
+    """Спрашивает room_id для выбранного carrier. Возвращает строку или None."""
+    carrier_title = next((t for k, (c, t, _) in CARRIERS.items() if c == carrier), carrier)
     print()
     if carrier == "jitsi":
         _box_top("Jitsi — комната")
@@ -1014,6 +1134,7 @@ def _flow_configure() -> None:
         _box_bottom()
         room_id = f"https://meet.jitsi.ru/{secrets.token_hex(8)}"
         _info(f"Сгенерирована комната: {room_id}")
+        return room_id
     else:
         _box_top(f"Комната {carrier_title}")
         _box_row(f"  {YELLOW}Комнату нужно создать вручную:{NC}")
@@ -1027,42 +1148,239 @@ def _flow_configure() -> None:
         try:
             room_id = input(f"{CYAN}  Вставьте ROOM_ID:{NC} ").strip()
         except (EOFError, KeyboardInterrupt):
-            return
+            return None
         if not room_id:
-            _warn("ROOM_ID не указан — отменено")
-            input(f"{BLUE}  Нажмите Enter...{NC}")
-            return
+            _warn("ROOM_ID не указан")
+            return None
+        return room_id
 
+
+def _ask_location_name(existing_names: list) -> str | None:
+    """Спрашивает имя для новой location. Возвращает строку или None.
+    
+    Имя должно быть уникальным (не в existing_names).
+    Дефолтное имя генерируется на основе carrier.
+    """
     print()
-    _info(f"Настраиваю manager panel ({carrier_title}, {transport})...")
-    ok = _configure_manager(carrier, transport, room_id)
+    _box_top("Имя location")
+    _box_row(f"  {DIM}Имя используется в OlcBox URI ($name в конце).{NC}")
+    _box_row(f"  {DIM}Должно быть уникальным. Допустимы латиница, цифры, дефис.{NC}")
+    _box_bottom()
+    try:
+        name = input(f"{CYAN}  Имя location:{NC} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not name:
+        _warn("Имя не указано")
+        return None
+    if name in existing_names:
+        _warn(f"Имя '{name}' уже существует — выберите другое")
+        return None
+    if not re.match(r'^[a-zA-Z0-9_-]+$', name):
+        _warn("Имя содержит недопустимые символы (только латиница, цифры, дефис, подчёркивание)")
+        return None
+    return name
 
-    if ok:
+
+def _collect_location(existing_names: list) -> dict | None:
+    """Интерактивно собирает параметры для новой/изменяемой location.
+    
+    Returns:
+      dict {name, carrier, transport, room_id, key, payload} или None при отмене.
+    """
+    carrier = _ask_carrier()
+    if not carrier:
+        return None
+    
+    transport = _ask_transport(carrier)
+    if not transport:
+        return None
+    
+    room_id = _ask_room_id(carrier)
+    if not room_id:
+        return None
+    
+    name = _ask_location_name(existing_names)
+    if not name:
+        return None
+    
+    # Генерация key (hex 32, как в гайде).
+    key = secrets.token_hex(32)
+    payload = TRANSPORT_PAYLOADS.get(transport, {}).copy()
+    
+    return {
+        "name": name,
+        "carrier": carrier,
+        "transport": transport,
+        "room_id": room_id,
+        "key": key,
+        "payload": payload,
+    }
+
+
+def _flow_configure() -> None:
+    """Интерактивное управление locations manager panel.
+    
+    Меню:
+      - Показать список существующих locations
+      - [1] Добавить новую location
+      - [2] Удалить location
+      - [3] Изменить location
+      - [4] Показать все OlcBox URI
+    """
+    while True:
         st = _load_state()
         cfg = st.get("config", {})
-        _success("Manager panel настроена и запущена!")
-
+        locations = cfg.get("locations", [])
+        
         print()
-        _box_top("✅ Готово!")
-        _box_row(f"  Panel URL:  {CYAN}{cfg.get('panel_url', '?')}{NC}")
-        _box_row(f"  User:       {CYAN}{cfg.get('admin_user', 'admin')}{NC}")
-        _box_row(f"  Password:   {YELLOW}{cfg.get('admin_pass', '?')}{NC}")
+        _box_top("⚙️  Настройка olcRTC Manager Panel — Locations")
+        _box_row()
+        _box_row(f"  {BOLD}Текущие locations ({len(locations)}):{NC}")
+        if not locations:
+            _box_row(f"  {DIM}  (нет — добавьте первую){NC}")
+        else:
+            for i, loc in enumerate(locations, 1):
+                carrier_title = next((t for k, (c, t, _) in CARRIERS.items() if c == loc.get("carrier", "")), loc.get("carrier", "?"))
+                _box_row(f"  {GREEN}[{i}]{NC} {BOLD}{loc.get('name', '?')}{NC}  {DIM}— {carrier_title}/{loc.get('transport', '?')}, room={loc.get('room_id', '?')[:40]}...{NC}")
         _box_sep()
-        _box_row(f"  {BOLD}OlcBox URI (для клиента):{NC}")
-        _box_row(f"  {CYAN}{cfg.get('olcbox_uri', '?')}{NC}")
-        _box_sep()
-        _box_row(f"  {DIM}Откройте Panel URL в браузере (примите self-signed TLS).{NC}")
-        _box_row(f"  {DIM}В OlcBox введите URI выше или параметры вручную:{NC}")
-        _box_row(f"  {DIM}  Service: {carrier_title}{NC}")
-        _box_row(f"  {DIM}  Transport: {transport}{NC}")
-        _box_row(f"  {DIM}  Room ID: {room_id}{NC}")
-        _box_row(f"  {DIM}  Encryption key: {cfg.get('key', '?')}{NC}")
+        _box_item("1", f"{GREEN}➕  Добавить location{NC}")
+        if locations:
+            _box_item("2", f"{YELLOW}🗑️  Удалить location{NC}")
+            _box_item("3", "✏️  Изменить location")
+            _box_item("4", "📄  Показать все OlcBox URI")
+        _box_row()
+        _box_back()
         _box_bottom()
-    else:
-        _warn("Manager panel настроена, но сервис не активен.")
-        _warn("Проверьте: journalctl -u olcrtc-manager -n 30")
-
-    input(f"{BLUE}  Нажмите Enter...{NC}")
+        
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        
+        if ch in ("q", ""):
+            return
+        
+        if ch == "1":
+            # Добавить location.
+            existing_names = [loc.get("name", "") for loc in locations]
+            new_loc = _collect_location(existing_names)
+            if not new_loc:
+                input(f"{BLUE}  Нажмите Enter...{NC}")
+                continue
+            
+            print()
+            _info(f"Добавляю location '{new_loc['name']}' ({new_loc['carrier']}/{new_loc['transport']})...")
+            locations.append(new_loc)
+            ok = _configure_manager(locations)
+            
+            if ok:
+                _success("Location добавлена, manager перезапущен!")
+                # Показать OlcBox URI для новой location.
+                print()
+                _box_top("✅ Location добавлена")
+                _box_row(f"  {BOLD}Имя:{NC}        {new_loc['name']}")
+                _box_row(f"  {BOLD}Carrier:{NC}    {new_loc['carrier']}")
+                _box_row(f"  {BOLD}Transport:{NC}  {new_loc['transport']}")
+                _box_row(f"  {BOLD}Room ID:{NC}    {new_loc['room_id']}")
+                _box_row(f"  {BOLD}Key:{NC}        {new_loc['key']}")
+                _box_sep()
+                _box_row(f"  {BOLD}OlcBox URI:{NC}")
+                _box_row(f"  {CYAN}{new_loc.get('olcbox_uri', '?')}{NC}")
+                _box_bottom()
+            else:
+                _warn("Location добавлена в state, но сервис не активен.")
+                _warn("Проверьте: journalctl -u olcrtc-manager -n 30")
+            input(f"{BLUE}  Нажмите Enter...{NC}")
+        
+        elif ch == "2" and locations:
+            # Удалить location.
+            print()
+            try:
+                idx_str = input(f"{CYAN}  Номер location для удаления:{NC} ").strip()
+                idx = int(idx_str) - 1
+            except (ValueError, EOFError, KeyboardInterrupt):
+                _warn("Неверный номер")
+                input(f"{BLUE}  Нажмите Enter...{NC}")
+                continue
+            if idx < 0 or idx >= len(locations):
+                _warn("Номер вне диапазона")
+                input(f"{BLUE}  Нажмите Enter...{NC}")
+                continue
+            
+            loc = locations[idx]
+            confirm = input(f"  {RED}Удалить '{loc.get('name', '?')}'? [y/N]:{NC} ").strip().lower()
+            if confirm not in ("y", "yes", "д", "да"):
+                _info("Отменено")
+                input(f"{BLUE}  Нажмите Enter...{NC}")
+                continue
+            
+            del locations[idx]
+            if locations:
+                _info("Удаляю location и перезапускаю manager...")
+                ok = _configure_manager(locations)
+                if ok:
+                    _success("Location удалена, manager перезапущен!")
+                else:
+                    _warn("Location удалена из state, но сервис не активен.")
+            else:
+                # Нет больше locations — остановить сервис.
+                _info("Последняя location удалена — останавливаю сервис...")
+                _run(["systemctl", "stop", "olcrtc-manager"],
+                      check=False, quiet=True, timeout=20)
+                _save_state({**st, "config": {**cfg, "locations": []}})
+                _success("Сервис остановлен, locations пусты")
+            input(f"{BLUE}  Нажмите Enter...{NC}")
+        
+        elif ch == "3" and locations:
+            # Изменить location.
+            print()
+            try:
+                idx_str = input(f"{CYAN}  Номер location для изменения:{NC} ").strip()
+                idx = int(idx_str) - 1
+            except (ValueError, EOFError, KeyboardInterrupt):
+                _warn("Неверный номер")
+                input(f"{BLUE}  Нажмите Enter...{NC}")
+                continue
+            if idx < 0 or idx >= len(locations):
+                _warn("Номер вне диапазона")
+                input(f"{BLUE}  Нажмите Enter...{NC}")
+                continue
+            
+            old_loc = locations[idx]
+            # Для изменения исключаем имя старой location из existing_names.
+            other_names = [loc.get("name", "") for i, loc in enumerate(locations) if i != idx]
+            new_loc = _collect_location(other_names)
+            if not new_loc:
+                input(f"{BLUE}  Нажмите Enter...{NC}")
+                continue
+            
+            print()
+            _info(f"Изменяю location '{old_loc.get('name', '?')}' → '{new_loc['name']}'...")
+            locations[idx] = new_loc
+            ok = _configure_manager(locations)
+            if ok:
+                _success("Location изменена, manager перезапущен!")
+            else:
+                _warn("Location изменена в state, но сервис не активен.")
+            input(f"{BLUE}  Нажмите Enter...{NC}")
+        
+        elif ch == "4" and locations:
+            # Показать все OlcBox URI.
+            print()
+            _box_top("📄 Все OlcBox URI")
+            _box_row()
+            for i, loc in enumerate(locations, 1):
+                carrier_title = next((t for k, (c, t, _) in CARRIERS.items() if c == loc.get("carrier", "")), loc.get("carrier", "?"))
+                _box_row(f"  {GREEN}[{i}]{NC} {BOLD}{loc.get('name', '?')}{NC}  {DIM}({carrier_title}/{loc.get('transport', '?')}){NC}")
+                _box_row(f"  {CYAN}{loc.get('olcbox_uri', '?')}{NC}")
+                _box_row()
+            _box_sep()
+            _box_row(f"  {DIM}Panel: {cfg.get('panel_url', '?')}{NC}")
+            _box_row(f"  {DIM}User:  {cfg.get('admin_user', 'admin')}{NC}")
+            _box_row(f"  {DIM}Pass:  {cfg.get('admin_pass', '?')}{NC}")
+            _box_bottom()
+            input(f"{BLUE}  Нажмите Enter...{NC}")
 
 
 # =============================================================================
@@ -1175,7 +1493,8 @@ def do_olcrtc_menu() -> None:
     while True:
         st = _load_state()
         installed = _olcrtc_installed() and _manager_installed()
-        configured = bool(st.get("config", {}).get("room_id"))
+        locations = st.get("config", {}).get("locations", [])
+        configured = len(locations) > 0
         active = _manager_service_active() if installed else False
 
         os.system("clear")
@@ -1189,10 +1508,15 @@ def do_olcrtc_menu() -> None:
         else:
             _box_row(f"  Статус:   {GREEN}● собран{NC}  {DIM}(olcrtc: {st.get('commit','?')}, manager: {st.get('manager_commit','?')}){NC}")
             if configured:
-                _box_row(f"  Настроен: {GREEN if active else YELLOW}{'● active' if active else '○ stopped'}{NC}")
+                _box_row(f"  Настроен: {GREEN if active else YELLOW}{'● active' if active else '○ stopped'}{NC}  {DIM}({len(locations)} location{'s' if len(locations) != 1 else ''}){NC}")
                 cfg = st.get("config", {})
                 _box_row(f"  Panel:    {CYAN}{cfg.get('panel_url', '?')}{NC}")
-                _box_row(f"  Carrier:  {cfg.get('carrier', '?')}/{cfg.get('transport', '?')}")
+                # Показать первые 3 location.
+                for loc in locations[:3]:
+                    carrier_title = next((t for k, (c, t, _) in CARRIERS.items() if c == loc.get("carrier", "")), loc.get("carrier", "?"))
+                    _box_row(f"  {DIM}  • {loc.get('name', '?')} — {carrier_title}/{loc.get('transport', '?')}{NC}")
+                if len(locations) > 3:
+                    _box_row(f"  {DIM}  • ...и ещё {len(locations) - 3}{NC}")
             else:
                 _box_row(f"  Настроен: {DIM}нет (нужно настроить){NC}")
         _box_sep()
@@ -1203,11 +1527,11 @@ def do_olcrtc_menu() -> None:
             _box_item("1", "🔄 Обновить (пересборка)")
         _box_item("2", "📖 Гайд — как это работает")
         if installed:
-            _box_item("3", "⚙️  Настроить Manager Panel (провайдер, комната)")
+            _box_item("3", "⚙️  Настроить Manager Panel (locations: добавить/удалить/изменить)")
         if configured:
             _box_item("4", "📊 Статус (через API)")
             _box_item("5", "📋 Логи (через API)")
-            _box_item("6", "📄 Показать OlcBox URI и креды")
+            _box_item("6", "📄 Показать все OlcBox URI и креды")
         if installed and configured:
             if active:
                 _box_item("7", f"{YELLOW}⏸️  Остановить сервис{NC}")
@@ -1255,13 +1579,15 @@ def do_olcrtc_menu() -> None:
             _box_row(f"  User:       {CYAN}{cfg.get('admin_user', 'admin')}{NC}")
             _box_row(f"  Password:   {YELLOW}{cfg.get('admin_pass', '?')}{NC}")
             _box_sep()
-            _box_row(f"  {BOLD}OlcBox URI:{NC}")
-            _box_row(f"  {CYAN}{cfg.get('olcbox_uri', '?')}{NC}")
-            _box_sep()
-            _box_row(f"  {DIM}Carrier:    {cfg.get('carrier', '?')}{NC}")
-            _box_row(f"  {DIM}Transport:  {cfg.get('transport', '?')}{NC}")
-            _box_row(f"  {DIM}Room ID:    {cfg.get('room_id', '?')}{NC}")
-            _box_row(f"  {DIM}Key:        {cfg.get('key', '?')}{NC}")
+            _box_row(f"  {BOLD}Locations ({len(locations)}):{NC}")
+            _box_row()
+            for i, loc in enumerate(locations, 1):
+                carrier_title = next((t for k, (c, t, _) in CARRIERS.items() if c == loc.get("carrier", "")), loc.get("carrier", "?"))
+                _box_row(f"  {GREEN}[{i}]{NC} {BOLD}{loc.get('name', '?')}{NC}  {DIM}({carrier_title}/{loc.get('transport', '?')}){NC}")
+                _box_row(f"  {CYAN}{loc.get('olcbox_uri', '?')}{NC}")
+                _box_row(f"  {DIM}Room ID: {loc.get('room_id', '?')}{NC}")
+                _box_row(f"  {DIM}Key:     {loc.get('key', '?')}{NC}")
+                _box_row()
             _box_bottom()
             input(f"{BLUE}  Нажмите Enter...{NC}")
 
