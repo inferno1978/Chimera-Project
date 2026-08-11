@@ -1092,47 +1092,73 @@ def _check_telemt_api_users() -> "tuple[bool, str, list]":
     # 4. Запрашиваем /users у API telemt.
     #    Используем --connect-timeout 3 + --max-time 5.
     #    НЕ передаём -H "" если токена нет (пустой header ломает curl).
+    #
+    #    ВАЖНО: telemt принимает НЕСТАНДАРТНЫЙ формат Authorization:
+    #      Authorization: <raw_token>     ← ПРАВИЛЬНО (без "Bearer")
+    #      Authorization: Bearer <token>  ← НЕ работает (401 unauthorized)
+    #    Подтверждено тестами: с "Bearer" telemt отдаёт 401, без "Bearer"
+    #    — авторизация проходит (404 если endpoint неверный).
     curl_cmd = ["curl", "-s", "--connect-timeout", "3", "--max-time", "5"]
     if auth_token:
-        curl_cmd += ["-H", f"Authorization: Bearer {auth_token}"]
-    curl_cmd.append("http://127.0.0.1:9091/users")
+        # telemt ждёт raw token без префикса "Bearer".
+        curl_cmd += ["-H", f"Authorization: {auth_token}"]
 
-    r = _run(curl_cmd, capture=True, check=False)
-    if r.returncode != 0:
-        err = (r.stderr or "").strip()
-        if not err:
-            err = f"curl exit code {r.returncode} (возможно timeout или connection refused)"
-        return False, f"curl failed: {err[:300]}", []
+    # Пробуем несколько endpoints — telemt может использовать разные пути
+    # в разных версиях. /users, /api/users, /api/v1/users.
+    endpoints_to_try = ["/users", "/api/users", "/api/v1/users", "/v1/users"]
+    last_body = ""
+    for endpoint in endpoints_to_try:
+        curl_cmd_with_endpoint = curl_cmd + [f"http://127.0.0.1:9091{endpoint}"]
+        r = _run(curl_cmd_with_endpoint, capture=True, check=False)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip()
+            if not err:
+                err = f"curl exit code {r.returncode} (возможно timeout или connection refused)"
+            return False, f"curl failed: {err[:300]}", []
 
-    body = (r.stdout or "").strip()
-    if not body:
-        return False, "API вернул пустой ответ (возможно 403 Forbidden — неверный auth_token)", []
+        body = (r.stdout or "").strip()
+        if not body:
+            return False, "API вернул пустой ответ (возможно 403 Forbidden — неверный auth_token)", []
 
-    try:
-        data = _json.loads(body)
-        users_list = []
-        # API может вернуть {users: [...]} или [...] или {data: [...]}.
-        if isinstance(data, dict):
-            # Проверяем на ошибку.
-            if "error" in data or "message" in data:
-                err_msg = data.get("error") or data.get("message") or "unknown error"
-                return False, f"API вернул ошибку: {err_msg}", []
-            users_raw = data.get("users", data.get("data", []))
-        else:
-            users_raw = data
-        if isinstance(users_raw, list):
-            for u in users_raw:
-                if isinstance(u, dict):
-                    name = u.get("name") or u.get("username") or u.get("id")
-                    if name:
-                        users_list.append(str(name))
-                elif isinstance(u, str):
-                    users_list.append(u)
-        return True, f"API отдаёт {len(users_list)} пользователей", users_list
-    except Exception as e:
-        # Если это не JSON — возможно HTML страница ошибки.
-        preview = body[:200].replace("\n", " ")
-        return False, f"API вернул невалидный JSON: {str(e)[:100]}. Тело: {preview}", []
+        # Если 404 — пробуем следующий endpoint.
+        if "not_found" in body or "Route not found" in body:
+            last_body = body
+            continue
+
+        # Парсим JSON.
+        try:
+            data = _json.loads(body)
+            users_list = []
+            # API может вернуть {users: [...]} или [...] или {data: [...]}.
+            if isinstance(data, dict):
+                # Проверяем на ошибку.
+                if "error" in data or "message" in data:
+                    err_msg = data.get("error") or data.get("message") or "unknown error"
+                    if isinstance(err_msg, dict):
+                        err_msg = err_msg.get("message") or str(err_msg)
+                    # Если unauthorized — точно неверный токен.
+                    if "unauthorized" in str(err_msg).lower():
+                        return False, f"401 Unauthorized — неверный auth_token. telemt.toml и config.toml панели должны совпадать.", []
+                    return False, f"API вернул ошибку: {err_msg}", []
+                users_raw = data.get("users", data.get("data", []))
+            else:
+                users_raw = data
+            if isinstance(users_raw, list):
+                for u in users_raw:
+                    if isinstance(u, dict):
+                        name = u.get("name") or u.get("username") or u.get("id")
+                        if name:
+                            users_list.append(str(name))
+                    elif isinstance(u, str):
+                        users_list.append(u)
+            return True, f"API отдаёт {len(users_list)} пользователей (endpoint: {endpoint})", users_list
+        except Exception as e:
+            # Если это не JSON — возможно HTML страница ошибки.
+            preview = body[:200].replace("\n", " ")
+            return False, f"API вернул невалидный JSON: {str(e)[:100]}. Тело: {preview}", []
+
+    # Все endpoints вернули 404.
+    return False, f"API работает (авторизация прошла), но ни один endpoint не найден (пробовали: {', '.join(endpoints_to_try)}). Последний ответ: {last_body[:200]}", []
 
 
 def _sync_panel_auth_token() -> "tuple[bool, str]":
