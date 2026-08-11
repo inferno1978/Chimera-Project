@@ -752,11 +752,26 @@ def _parse_journal(since: Optional[str] = None) -> dict:
          session.?start | accepted | login | handshake.?ok | client.?ok.
          Раньше узкий паттерн пропускал много реальных сообщений telemt,
          из-за чего sessions=0 даже для активных пользователей.
+
+    ВАЖНО (FIX OOM):
+      Раньше использовалось _run(cmd, capture=True) — это загружает ВЕСЬ
+      вывод journalctl в память через subprocess.run(capture_output=True).
+      На сервере с долго работающим telemt журнал может быть сотни MB,
+      и процесс убивается OOM killer'ом («killed» в консоли).
+
+      Теперь используем subprocess.Popen с потоковым чтением построчно —
+      память не накапливается, обрабатываем строки по мере поступления.
+
+    Также: если since пустой — ограничиваем последние 7 дней, чтобы
+    не читать весь журнал с момента установки (может быть огромным).
     """
-    cmd = ["journalctl", "-u", SERVICE_NAME, "--no-pager", "-o", "short-iso"]
-    if since:
-        cmd += ["--since", since]
-    r = _run(cmd, capture=True)
+    # Если since пустой — по умолчанию последние 7 дней.
+    # Иначе можно читать журнал за месяцы → OOM на больших инсталляциях.
+    if not since:
+        since = "7 days ago"
+
+    cmd = ["journalctl", "-u", SERVICE_NAME, "--no-pager", "-o", "short-iso",
+           "--since", since]
 
     result: dict = {}
     # Запоминаем последний timestamp из предыдущей строки — для
@@ -791,38 +806,90 @@ def _parse_journal(since: Optional[str] = None) -> dict:
         re.IGNORECASE
     )
 
-    for line in r.stdout.splitlines():
-        # Сначала пытаемся извлечь timestamp из текущей строки
-        ts = _extract_ts(line)
-        if ts:
-            last_ts = ts
-
-        m_user = re.search(
-            r'(?:user[=:\[]\s*|client[=:\[]\s*|username[=:]\s*|name[=:]\s*)'
-            r'(["\']?)([a-zA-Z][a-zA-Z0-9_\-]+)\1',
-            line, re.IGNORECASE
+    # Потоковое чтение через Popen — НЕ загружает весь вывод в память.
+    # Это фикс OOM killer: раньше _run(capture=True) грузило весь журнал.
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
-        if not m_user:
-            continue
-        uname = m_user.group(2)
-        if uname.lower() in ("root", "telemt", "system", "service", "client"):
-            continue
-        _ensure(uname)
+        # Читаем построчно — память не накапливается.
+        for line in proc.stdout:
+            line = line.rstrip("\n\r")
+            if not line:
+                continue
 
-        # last_seen обновляем: либо из текущей строки, либо из last_ts
-        # (для continuation-строк multiline-сообщений).
-        if ts:
-            result[uname]["last_seen"] = ts
-        elif last_ts:
-            # continuation-строка без своего timestamp — используем
-            # последний известный. Это НЕ идеально (timestamp может быть
-            # из предыдущего log-entry), но лучше чем "—" для активных
-            # пользователей. Только обновляем если текущий last_seen = "—".
-            if result[uname]["last_seen"] == "—":
-                result[uname]["last_seen"] = last_ts
+            # Сначала пытаемся извлечь timestamp из текущей строки
+            ts = _extract_ts(line)
+            if ts:
+                last_ts = ts
 
-        if _SESSION_RE.search(line):
-            result[uname]["sessions"] += 1
+            m_user = re.search(
+                r'(?:user[=:\[]\s*|client[=:\[]\s*|username[=:]\s*|name[=:]\s*)'
+                r'(["\']?)([a-zA-Z][a-zA-Z0-9_\-]+)\1',
+                line, re.IGNORECASE
+            )
+            if not m_user:
+                continue
+            uname = m_user.group(2)
+            if uname.lower() in ("root", "telemt", "system", "service", "client"):
+                continue
+            _ensure(uname)
+
+            # last_seen обновляем: либо из текущей строки, либо из last_ts
+            # (для continuation-строк multiline-сообщений).
+            if ts:
+                result[uname]["last_seen"] = ts
+            elif last_ts:
+                # continuation-строка без своего timestamp — используем
+                # последний известный. Это НЕ идеально (timestamp может быть
+                # из предыдущего log-entry), но лучше чем "—" для активных
+                # пользователей. Только обновляем если текущий last_seen = "—".
+                if result[uname]["last_seen"] == "—":
+                    result[uname]["last_seen"] = last_ts
+
+            if _SESSION_RE.search(line):
+                result[uname]["sessions"] += 1
+
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        # journalctl завис — убиваем.
+        proc.kill()
+        proc.wait()
+    except Exception:
+        # Fallback: если Popen не сработал — пробуем старый способ,
+        # но с жёстким лимитом строк.
+        try:
+            cmd_fallback = cmd + ["--lines", "10000"]
+            r = _run(cmd_fallback, capture=True)
+            for line in r.stdout.splitlines():
+                ts = _extract_ts(line)
+                if ts:
+                    last_ts = ts
+                m_user = re.search(
+                    r'(?:user[=:\[]\s*|client[=:\[]\s*|username[=:]\s*|name[=:]\s*)'
+                    r'(["\']?)([a-zA-Z][a-zA-Z0-9_\-]+)\1',
+                    line, re.IGNORECASE
+                )
+                if not m_user:
+                    continue
+                uname = m_user.group(2)
+                if uname.lower() in ("root", "telemt", "system", "service", "client"):
+                    continue
+                _ensure(uname)
+                if ts:
+                    result[uname]["last_seen"] = ts
+                elif last_ts:
+                    if result[uname]["last_seen"] == "—":
+                        result[uname]["last_seen"] = last_ts
+                if _SESSION_RE.search(line):
+                    result[uname]["sessions"] += 1
+        except Exception:
+            pass
 
     return result
 

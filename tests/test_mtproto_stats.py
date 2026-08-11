@@ -270,22 +270,29 @@ class TestLoadSaveStats(unittest.TestCase):
 
 
 class TestParseJournal(unittest.TestCase):
-    """_parse_journal — парсинг journalctl (mocked _run)."""
+    """_parse_journal — парсинг journalctl (mocked subprocess.Popen).
+
+    ВАЖНО: _parse_journal использует Popen с потоковым чтением (фикс OOM).
+    Мокаем subprocess.Popen, а не _run.
+    """
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def _mock_run(self, stdout: str):
-        m = MagicMock()
-        m.stdout = stdout
-        m.returncode = 0
-        m.stderr = ""
-        return m
+    def _mock_popen(self, stdout: str):
+        """Мокает subprocess.Popen с потоковым stdout."""
+        mock_proc = MagicMock()
+        # Popen возвращает итератор по строкам.
+        # Каждая строка должна заканчиваться \n (как в реальном stdout).
+        lines = stdout.splitlines()
+        mock_proc.stdout = iter([line + "\n" for line in lines])
+        mock_proc.wait.return_value = 0
+        return mock_proc
 
     def test_empty_journal(self):
         from chimera.modules import mtproto_stats
-        with patch.object(mtproto_stats, "_run",
-                          return_value=self._mock_run("")):
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen("")):
             result = mtproto_stats._parse_journal()
         self.assertEqual(result, {})
 
@@ -296,8 +303,8 @@ class TestParseJournal(unittest.TestCase):
             "2026-07-10T12:00:05 INFO user=bob connect from 5.6.7.8",
             "2026-07-10T12:00:10 INFO user=alice auth.ok",
         ])
-        with patch.object(mtproto_stats, "_run",
-                          return_value=self._mock_run(lines)):
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen(lines)):
             result = mtproto_stats._parse_journal()
         self.assertIn("alice", result)
         self.assertIn("bob", result)
@@ -313,8 +320,8 @@ class TestParseJournal(unittest.TestCase):
             "2026-07-10T12:00:01 INFO user=telemt service start",
             "2026-07-10T12:00:02 INFO user=alice connect",
         ])
-        with patch.object(mtproto_stats, "_run",
-                          return_value=self._mock_run(lines)):
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen(lines)):
             result = mtproto_stats._parse_journal()
         self.assertNotIn("root", result)
         self.assertNotIn("telemt", result)
@@ -323,18 +330,18 @@ class TestParseJournal(unittest.TestCase):
     def test_last_seen_extracted_from_timestamp(self):
         from chimera.modules import mtproto_stats
         lines = "2026-07-10T12:34:56 INFO user=alice connect"
-        with patch.object(mtproto_stats, "_run",
-                          return_value=self._mock_run(lines)):
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen(lines)):
             result = mtproto_stats._parse_journal()
         self.assertEqual(result["alice"]["last_seen"], "2026-07-10 12:34:56")
 
     def test_since_filter_passed_to_run(self):
         from chimera.modules import mtproto_stats
-        with patch.object(mtproto_stats, "_run",
-                          return_value=self._mock_run("")) as mock_run:
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen("")) as mock_popen:
             mtproto_stats._parse_journal(since="2026-07-09")
         # проверяем что --since присутствует в аргументах
-        cmd = mock_run.call_args.args[0]
+        cmd = mock_popen.call_args.args[0]
         self.assertIn("--since", cmd)
         self.assertIn("2026-07-09", cmd)
 
@@ -350,8 +357,8 @@ class TestParseJournal(unittest.TestCase):
             "2026-07-26T12:34:56+0300 fast-cheetah telemt[1234]: user=alice connected from 1.2.3.4",
             "2026-07-26T12:35:00+0300 fast-cheetah telemt[1234]: user=bob authenticated",
         ])
-        with patch.object(mtproto_stats, "_run",
-                          return_value=self._mock_run(lines)):
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen(lines)):
             result = mtproto_stats._parse_journal()
         self.assertIn("alice", result)
         self.assertIn("bob", result)
@@ -373,8 +380,8 @@ class TestParseJournal(unittest.TestCase):
             # Continuation-строка БЕЗ timestamp, но с user=
             "                    user=alice, secret=abc123, ip=1.2.3.4",
         ])
-        with patch.object(mtproto_stats, "_run",
-                          return_value=self._mock_run(lines)):
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen(lines)):
             result = mtproto_stats._parse_journal()
         self.assertIn("alice", result)
         # last_seen должен быть из предыдущей строки (fallback на last_ts)
@@ -388,8 +395,8 @@ class TestParseJournal(unittest.TestCase):
         """
         from chimera.modules import mtproto_stats
         lines = "2026-07-26 12:34:56 host telemt[1234]: user=alice connect from 1.2.3.4"
-        with patch.object(mtproto_stats, "_run",
-                          return_value=self._mock_run(lines)):
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen(lines)):
             result = mtproto_stats._parse_journal()
         self.assertIn("alice", result)
         self.assertEqual(result["alice"]["last_seen"], "2026-07-26 12:34:56")
@@ -408,8 +415,8 @@ class TestParseJournal(unittest.TestCase):
             "2026-07-26T12:00:05 host telemt[1234]: user=eve client ok",
             "2026-07-26T12:00:06 host telemt[1234]: user=frank authenticated",
         ])
-        with patch.object(mtproto_stats, "_run",
-                          return_value=self._mock_run(lines)):
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen(lines)):
             result = mtproto_stats._parse_journal()
         # Все 6 пользователей должны быть с sessions=1
         for name in ("alice", "bob", "carol", "dave", "eve", "frank"):
@@ -426,8 +433,8 @@ class TestParseJournal(unittest.TestCase):
             '2026-07-26T12:00:01 host telemt[1234]: user="alice" connect from 1.2.3.4',
             "2026-07-26T12:00:02 host telemt[1234]: user='bob' connect from 5.6.7.8",
         ])
-        with patch.object(mtproto_stats, "_run",
-                          return_value=self._mock_run(lines)):
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen(lines)):
             result = mtproto_stats._parse_journal()
         self.assertIn("alice", result)
         self.assertIn("bob", result)
@@ -443,11 +450,42 @@ class TestParseJournal(unittest.TestCase):
             "2026-07-26T12:00:01 host telemt[1234]: username=alice connect",
             "2026-07-26T12:00:02 host telemt[1234]: name=bob accepted",
         ])
-        with patch.object(mtproto_stats, "_run",
-                          return_value=self._mock_run(lines)):
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen(lines)):
             result = mtproto_stats._parse_journal()
         self.assertIn("alice", result)
         self.assertIn("bob", result)
+
+    def test_default_since_7_days_when_not_specified(self):
+        """Если since пустой — по умолчанию '7 days ago' (фикс OOM).
+
+        Без этого лимита journalctl может читать журнал за месяцы,
+        что приводит к OOM killer на серверах с малым RAM.
+        """
+        from chimera.modules import mtproto_stats
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen("")) as mock_popen:
+            mtproto_stats._parse_journal()  # без since
+        cmd = mock_popen.call_args.args[0]
+        # Должен быть --since с "7 days ago" или подобным.
+        self.assertIn("--since", cmd)
+        since_val = cmd[cmd.index("--since") + 1]
+        self.assertIn("days ago", since_val,
+                      "должен быть лимит по умолчанию (N days ago)")
+
+    def test_uses_popen_not_run_capture(self):
+        """_parse_journal должен использовать subprocess.Popen (потоковое),
+        а не _run(capture=True) — чтобы не загружать весь журнал в память.
+        """
+        import inspect
+        from chimera.modules import mtproto_stats
+        src = inspect.getsource(mtproto_stats._parse_journal)
+        self.assertIn("Popen", src,
+                      "_parse_journal должен использовать Popen для потокового чтения")
+        # НЕ должен использовать _run(cmd, capture=True) как единственный путь.
+        # Fallback на _run допустим, но основной путь — Popen.
+        self.assertIn("proc.stdout", src,
+                      "_parse_journal должен читать построчно через proc.stdout")
 
 
 class TestCollectLastSeenFallback(unittest.TestCase):
