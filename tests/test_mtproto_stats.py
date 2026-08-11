@@ -336,14 +336,36 @@ class TestParseJournal(unittest.TestCase):
         self.assertEqual(result["alice"]["last_seen"], "2026-07-10 12:34:56")
 
     def test_since_filter_passed_to_run(self):
+        """Если since указан как недавняя дата — передаётся как есть."""
         from chimera.modules import mtproto_stats
+        # Недавняя дата (в пределах 7 дней) — передаётся как есть.
+        from datetime import datetime, timedelta
+        recent = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d 00:00:00")
         with patch("chimera.modules.mtproto_stats.subprocess.Popen",
                           return_value=self._mock_popen("")) as mock_popen:
-            mtproto_stats._parse_journal(since="2026-07-09")
+            mtproto_stats._parse_journal(since=recent)
         # проверяем что --since присутствует в аргументах
         cmd = mock_popen.call_args.args[0]
         self.assertIn("--since", cmd)
-        self.assertIn("2026-07-09", cmd)
+        # Недавняя дата должна быть передана как есть.
+        since_val = cmd[cmd.index("--since") + 1]
+        self.assertEqual(since_val, recent)
+
+    def test_old_since_replaced_with_7_days(self):
+        """Если since указан как старая дата (>7 дней) — заменяется на '7 days ago'.
+
+        Это фикс CPU 95%: пользователь жаловался что journalctl грузит CPU
+        10 минут, потому что since был '2026-07-15' (почти месяц назад).
+        """
+        from chimera.modules import mtproto_stats
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen("")) as mock_popen:
+            mtproto_stats._parse_journal(since="2026-07-15 11:12:52")
+        cmd = mock_popen.call_args.args[0]
+        self.assertIn("--since", cmd)
+        since_val = cmd[cmd.index("--since") + 1]
+        self.assertEqual(since_val, "7 days ago",
+                         "старый since (>7 дней) должен быть заменён на '7 days ago'")
 
     # ── Регрессионные тесты на реалистичные форматы journalctl + telemt ──────
     def test_realistic_short_iso_format_with_hostname_and_pid(self):
