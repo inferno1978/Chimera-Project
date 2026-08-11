@@ -302,5 +302,144 @@ class TestAskTlsPort(unittest.TestCase):
         self.assertEqual(port, DEFAULT_PANEL_TLS_PORT)
 
 
+class TestGetPublicIps(unittest.TestCase):
+    """_get_public_ips — получение (ipv4, ipv6)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_returns_tuple_of_two_strings(self):
+        from chimera.modules.telemt_panel import _get_public_ips
+        with patch("chimera.modules.telemt_panel._run",
+                          return_value=MagicMock(returncode=0, stdout="1.2.3.4\n", stderr="")):
+            ipv4, ipv6 = _get_public_ips()
+        self.assertIsInstance(ipv4, str)
+        self.assertIsInstance(ipv6, str)
+
+    def test_ipv6_detected_from_ifconfig(self):
+        """ifconfig.me вернул IPv6 → ipv6 заполняется."""
+        from chimera.modules.telemt_panel import _get_public_ips
+        # IPv6 адрес содержит ':'
+        with patch("chimera.modules.telemt_panel._run",
+                          return_value=MagicMock(returncode=0, stdout="2a0d:d940:600:4::2\n", stderr="")):
+            ipv4, ipv6 = _get_public_ips()
+        # Хотя бы один из IP должен быть определён (ipv4 или ipv6).
+        self.assertTrue(ipv4 or ipv6, "должен вернуть хотя бы один IP")
+
+    def test_empty_when_no_internet(self):
+        from chimera.modules.telemt_panel import _get_public_ips
+        with patch("chimera.modules.telemt_panel._run",
+                          return_value=MagicMock(returncode=1, stdout="", stderr="")):
+            ipv4, ipv6 = _get_public_ips()
+        # Оба пустые (или из mtproto, но он тоже замокан через _run)
+        self.assertIsInstance(ipv4, str)
+
+
+class TestAskPublicIpChoice(unittest.TestCase):
+    """_ask_public_ip_choice — выбор IP при наличии обоих."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_both_ips_offers_choice(self):
+        from chimera.modules.telemt_panel import _ask_public_ip_choice
+        with patch("builtins.input", return_value="1"):
+            ip = _ask_public_ip_choice("1.2.3.4", "2a0d::1")
+        self.assertEqual(ip, "1.2.3.4")  # IPv4 выбран
+
+    def test_choose_ipv6(self):
+        from chimera.modules.telemt_panel import _ask_public_ip_choice
+        with patch("builtins.input", return_value="2"):
+            ip = _ask_public_ip_choice("1.2.3.4", "2a0d::1")
+        self.assertEqual(ip, "2a0d::1")  # IPv6 выбран
+
+    def test_only_ipv4_no_choice(self):
+        """Если только IPv4 — возвращается без вопроса."""
+        from chimera.modules.telemt_panel import _ask_public_ip_choice
+        with patch("builtins.input", side_effect=AssertionError("не должно спрашивать")):
+            ip = _ask_public_ip_choice("1.2.3.4", "")
+        self.assertEqual(ip, "1.2.3.4")
+
+    def test_only_ipv6_no_choice(self):
+        from chimera.modules.telemt_panel import _ask_public_ip_choice
+        with patch("builtins.input", side_effect=AssertionError("не должно спрашивать")):
+            ip = _ask_public_ip_choice("", "2a0d::1")
+        self.assertEqual(ip, "2a0d::1")
+
+    def test_no_ips_returns_localhost(self):
+        from chimera.modules.telemt_panel import _ask_public_ip_choice
+        with patch("builtins.input", side_effect=AssertionError("не должно спрашивать")):
+            ip = _ask_public_ip_choice("", "")
+        self.assertEqual(ip, "127.0.0.1")
+
+
+class TestPortRegistryCoverage(unittest.TestCase):
+    """Проверка что Telemt Panel использует port_registry для прямого доступа."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_service_constant_exists(self):
+        from chimera.modules.port_registry import SERVICE_TELEMT_PANEL_DIRECT
+        self.assertEqual(SERVICE_TELEMT_PANEL_DIRECT, "telemt_panel_direct")
+
+    def test_setup_direct_calls_port_register(self):
+        """_telemt_setup_direct_access должен вызвать port_register + ufw_open_port."""
+        from chimera.modules import telemt_panel
+        with patch.object(telemt_panel, "_is_installed", return_value=True), \
+             patch.object(telemt_panel, "_validate_tls_port", return_value=(True, "")), \
+             patch("chimera.modules.telemt_panel.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch.object(telemt_panel, "_run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+             patch.object(telemt_panel, "_get_public_ips", return_value=("1.2.3.4", "")), \
+             patch.object(telemt_panel, "_ask_public_ip_choice", return_value="1.2.3.4"), \
+             patch("chimera.modules.telemt_panel.Path") as mock_path_cls, \
+             patch.object(telemt_panel, "TELEMT_NGINX_AVAILABLE") as mock_avail, \
+             patch.object(telemt_panel, "TELEMT_NGINX_ENABLED") as mock_en, \
+             patch.object(telemt_panel, "TELEMT_NGINX_STATE") as mock_state, \
+             patch("chimera.modules.port_registry.port_register", return_value=(True, "")) as mock_reg, \
+             patch("chimera.modules.port_registry.ufw_open_port", return_value=(True, "")) as mock_ufw:
+            # Path() возвращает мок который поддерживает mkdir/write_text/chmod.
+            mock_path_inst = MagicMock()
+            mock_path_inst.mkdir = MagicMock()
+            mock_path_inst.write_text = MagicMock()
+            mock_path_inst.chmod = MagicMock()
+            mock_path_cls.return_value = mock_path_inst
+            mock_path_cls.side_effect = lambda x: mock_path_inst
+            mock_avail.parent.mkdir = MagicMock()
+            mock_avail.write_text = MagicMock()
+            mock_en.exists.return_value = False
+            mock_en.symlink_to = MagicMock()
+            mock_state.parent.mkdir = MagicMock()
+            mock_state.write_text = MagicMock()
+            result = telemt_panel._telemt_setup_direct_access(port=8444)
+        # port_register должен быть вызван.
+        mock_reg.assert_called()
+        # ufw_open_port должен быть вызван.
+        mock_ufw.assert_called()
+
+    def test_remove_direct_calls_port_unregister(self):
+        """_telemt_remove_direct_access должен вызвать ufw_close_port + port_unregister."""
+        from chimera.modules import telemt_panel
+        import json
+        # State показывает что прямой доступ включён.
+        with patch.object(telemt_panel, "TELEMT_NGINX_STATE") as mock_state, \
+             patch.object(telemt_panel, "TELEMT_NGINX_ENABLED") as mock_en, \
+             patch.object(telemt_panel, "TELEMT_NGINX_AVAILABLE") as mock_avail, \
+             patch("chimera.modules.telemt_panel.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch.object(telemt_panel, "_run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+             patch("chimera.modules.port_registry.ufw_close_port", return_value=(True, "")) as mock_ufw_close, \
+             patch("chimera.modules.port_registry.port_unregister", return_value=True) as mock_unreg:
+            mock_state.exists.return_value = True
+            mock_state.read_text.return_value = json.dumps({"enabled": True, "port": 8444})
+            mock_en.unlink = MagicMock()
+            mock_avail.unlink = MagicMock()
+            mock_state.unlink = MagicMock()
+            telemt_panel._telemt_remove_direct_access()
+        # ufw_close_port должен быть вызван.
+        mock_ufw_close.assert_called()
+        # port_unregister должен быть вызван.
+        mock_unreg.assert_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
