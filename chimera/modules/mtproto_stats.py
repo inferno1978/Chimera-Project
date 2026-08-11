@@ -764,10 +764,30 @@ def _parse_journal(since: Optional[str] = None) -> dict:
 
     Также: если since пустой — ограничиваем последние 7 дней, чтобы
     не читать весь журнал с момента установки (может быть огромным).
+
+    ВАЖНО (FIX CPU 95%): даже если since указан (например "2026-07-15"),
+    ограничиваем максимум последними 7 днями. Иначе journalctl читает
+    журнал за месяцы — CPU 95% в течение 10+ минут на серверах с
+    активным telemt. Для last_seen и sessions счётчика 7 дней достаточно.
     """
-    # Если since пустой — по умолчанию последние 7 дней.
-    # Иначе можно читать журнал за месяцы → OOM на больших инсталляциях.
-    if not since:
+    from datetime import datetime, timedelta
+    
+    # ЖЁСТКИЙ ЛИМИТ: максимум 7 дней, независимо от since.
+    # Это фикс зависания journalctl на больших журналах.
+    # Если since указан и старше 7 дней — используем "7 days ago".
+    max_since_date = datetime.now() - timedelta(days=7)
+    
+    if since:
+        # Пытаемся распарсить since в формате "YYYY-MM-DD HH:MM:SS".
+        try:
+            since_dt = datetime.strptime(since, "%Y-%m-%d %H:%M:%S")
+            if since_dt < max_since_date:
+                since = "7 days ago"
+        except (ValueError, TypeError):
+            # Если since в другом формате (например "yesterday") —
+            # оставляем как есть, journalctl сам разберётся.
+            pass
+    else:
         since = "7 days ago"
 
     cmd = ["journalctl", "-u", SERVICE_NAME, "--no-pager", "-o", "short-iso",
