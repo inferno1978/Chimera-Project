@@ -1274,7 +1274,19 @@ def _sync_users_to_panel() -> None:
     if len(users) > 5:
         _box_info(f"  ...и ещё {len(users) - 5}")
 
-    # Перезапуск telemt → API подхватит актуальный список.
+    # СНАЧАЛА синхронизируем auth_header (telemt.toml → config.toml панели)
+    # и убираем дубликаты auth_header из telemt.toml.
+    # Это надо сделать ДО перезапуска telemt — иначе telemt может упасть
+    # при старте из-за дубликатов auth_header в [server.api].
+    print()
+    _info("Синхронизирую auth_header (telemt.toml → config.toml панели)...")
+    token_ok, token_msg = _sync_panel_auth_token()
+    if token_ok:
+        _ok(token_msg)
+    else:
+        _warn(token_msg)
+
+    # Перезапуск telemt → API подхватит актуальный список + чистый конфиг.
     print()
     _info("Перезапускаю telemt (API обновит список)...")
     r = _run(["systemctl", "restart", TELEMT_SERVICE], capture=True, check=False)
@@ -1307,16 +1319,6 @@ def _sync_users_to_panel() -> None:
         _box_info("  • Неверный auth_header в конфиге панели")
         _box_info("Проверьте: curl -s http://127.0.0.1:9091/users -H 'Authorization: Bearer <token>'")
 
-    # Синхронизация auth_header: telemt.toml → config.toml панели.
-    # Это частая причина 401 Unauthorized — токен в панели не совпадает.
-    print()
-    _info("Синхронизирую auth_header (telemt.toml → config.toml панели)...")
-    token_ok, token_msg = _sync_panel_auth_token()
-    if token_ok:
-        _ok(token_msg)
-    else:
-        _warn(token_msg)
-
     # Перезапуск telemt-panel → обновит кэш пользователей + подхватит новый токен.
     print()
     _info("Перезапускаю Telemt Panel (обновит кэш)...")
@@ -1326,10 +1328,10 @@ def _sync_users_to_panel() -> None:
     else:
         _err(f"Не удалось перезапустить панель: {r.stderr.strip()[:200]}")
 
-    # Повторная проверка API после синхронизации токена.
+    # Повторная проверка API после перезапуска панели.
     if not api_ok:
         print()
-        _info("Повторная проверка API после синхронизации токена...")
+        _info("Повторная проверка API (возможно telemt не успел подняться)...")
         api_ok2, api_msg2, api_users2 = _check_telemt_api_users()
         if api_ok2:
             _ok(api_msg2)
@@ -1345,6 +1347,7 @@ def _sync_users_to_panel() -> None:
         _box_info(f"API отдаёт: {len(api_users)} пользователей")
     else:
         _box_warn("API telemt НЕ отдаёт пользователей — проблема в telemt, не в панели")
+        _box_info("Проверьте логи: journalctl -u telemt -n 30")
     _box_info("Обновите страницу панели (Ctrl+Shift+R — hard refresh).")
     _box_info("Если всё ещё не видны — проблема в самой панели (Go-бинарник).")
     _box_bot()
