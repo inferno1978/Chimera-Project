@@ -912,16 +912,17 @@ server {{
     location / {{
         proxy_pass http://127.0.0.1:{PANEL_LISTEN_PORT};
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        # ВАЖНО: Panel использует WebSocket с CheckOrigin. Когда nginx
+        # проксирует запросы с публичного IP:порта — Origin и Host не
+        # совпадают с тем, что Panel ожидает (127.0.0.1:8080).
+        # CheckOrigin отклоняет WebSocket → 'Telemt is unreachable'.
+        # Подменяем Origin, Host, и Referer на ожидаемые значения.
+        proxy_set_header Host 127.0.0.1:{PANEL_LISTEN_PORT};
+        proxy_set_header Origin http://127.0.0.1:{PANEL_LISTEN_PORT};
+        proxy_set_header Referer http://127.0.0.1:{PANEL_LISTEN_PORT}/;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        # ВАЖНО: Panel использует WebSocket с CheckOrigin. Когда nginx
-        # проксирует запросы с другого порта/IP — Origin не совпадает
-        # и Panel отклоняет WebSocket ('ws upgrade error: request origin
-        # not allowed by Upgrader.CheckOrigin'). Подменяем Origin на
-        # тот, который Panel ожидает (127.0.0.1:8080).
-        proxy_set_header Origin http://127.0.0.1:{PANEL_LISTEN_PORT};
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_connect_timeout 30s;
