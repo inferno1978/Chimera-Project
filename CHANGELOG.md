@@ -2,6 +2,131 @@
 
 ---
 
+## CRITICAL FIX(uninstall): не удалять чужие nginx-сайты при uninstall — 11 августа 2026
+
+**КРИТИЧЕСКИЙ БАГ: `do_uninstall()` удалял ВСЮ директорию `/etc/nginx`
+со всеми сайтами пользователя. Жалоба от реального пользователя:
+«Поставил Chimera, удалил, он мне убил все имеющиеся сайты nginx.»**
+
+### Причина
+
+`chimera/modules/uninstall.py` содержал:
+
+```python
+# СТРОКИ 133-141 (УДАЛЕНО):
+if PKG_MGR == "apt":
+    _run(["apt-get", "remove", "--purge", "-y", "nginx", "nginx-common"], ...)
+else:
+    _run(["dnf", "remove", "-y", "nginx"], ...)
+
+shutil.rmtree("/etc/nginx", ignore_errors=True)      # ← УДАЛЯЛО ВСЁ
+shutil.rmtree("/var/log/nginx", ignore_errors=True)
+```
+
+**Три проблемы:**
+
+1. `apt-get remove --purge nginx nginx-common` — `--purge` удаляет все
+   конфигурационные файлы пакета, включая `/etc/nginx/sites-*`
+2. `shutil.rmtree("/etc/nginx")` — **удалял ВСЮ директорию** со всеми
+   vhost-файлами пользователя, сертификатами, nginx.conf
+3. Это выполнялось **безусловно** — даже если у пользователя были
+   другие сайты, не связанные с Chimera
+
+### Что произошло у пользователя
+
+1. Пользователь установил Chimera на сервер, где уже был nginx с сайтами
+2. Chimera создала свой vhost в `/etc/nginx/sites-available/<domain>`
+3. Пользователь решил удалить Chimera через меню
+4. `do_uninstall()` выполнил `shutil.rmtree("/etc/nginx")` → **все сайты упали**
+5. Пользователь потерял конфиги всех своих сайтов
+
+### Фикс
+
+`chimera/modules/uninstall.py` — полностью переписана логика удаления nginx:
+
+**1. Удаляем ТОЛЬКО конкретные vhost-файлы Chimera:**
+```python
+nginx_sites_to_remove = [
+    f"/etc/nginx/sites-available/{uninst_domain}",          # основной сайт VLESS
+    f"/etc/nginx/sites-enabled/{uninst_domain}",            # symlink
+    "/etc/nginx/sites-available/chimera-portal-nginx",     # User Portal front
+    "/etc/nginx/sites-enabled/chimera-portal-nginx",       # symlink
+    "/etc/nginx/sites-available/chimera-telemt-panel-nginx",  # Telemt Panel
+    "/etc/nginx/sites-enabled/chimera-telemt-panel-nginx",    # symlink
+]
+for site_path in nginx_sites_to_remove:
+    p = Path(site_path)
+    if p.exists() or p.is_symlink():
+        p.unlink()
+```
+
+**2. default vhost — только если содержит маркер Chimera:**
+```python
+if default_vhost.exists():
+    content = default_vhost.read_text()
+    if "chimera" in content.lower() or uninst_domain in content:
+        default_vhost.unlink()
+```
+
+**3. Проверка других сайтов перед удалением nginx:**
+```python
+sites_enabled = Path("/etc/nginx/sites-enabled")
+other_sites = [f for f in sites_enabled.iterdir()
+               if f.name not in ("chimera-portal-nginx",
+                                 "chimera-telemt-panel-nginx",
+                                 uninst_domain)]
+if not other_sites:
+    # Нет других сайтов — спрашиваем, удалить ли nginx полностью
+    remove_nginx = input("Полностью удалить nginx? [y/N]: ")
+    if remove_nginx in ("y", "yes", "д", "да"):
+        apt-get remove --purge nginx  # только тут!
+        shutil.rmtree("/etc/nginx")
+else:
+    # Есть другие сайты — НЕ удаляем nginx, только reload
+    systemctl reload nginx
+```
+
+**4. `/var/www/<domain>` — спрашиваем перед удалением:**
+```python
+if www_dir.exists():
+    remove_www = input("Удалить /var/www/<domain>? [y/N]: ")
+    if remove_www in ("y", ...):
+        shutil.rmtree(www_dir)
+```
+
+### Что НЕ меняется
+
+- Удаление Xray — без изменений (Xray ставится Chimera, удаляется полностью)
+- Удаление DNSCrypt — без изменений
+- Удаление `/etc/systemd/system/xray.service.d/` — без изменений
+- Drop-in `nginx.service.d/after-xray.conf` — удаляется, но директория
+  `nginx.service.d/` НЕ удаляется (там могут быть чужие drop-in'ы)
+
+### Тесты (11 новых в `test_uninstall_nginx_safety.py`)
+
+| Класс | # | Что проверяется |
+|-------|---|---|
+| `TestUninstallNginxSafety` | 7 | нет безусловного `rmtree('/etc/nginx')`, нет безусловного `apt-get --purge nginx`, удаляются конкретные chimera-* vhost'ы, проверка other_sites, reload nginx, вопрос про /var/www/, проверка маркера Chimera в default vhost |
+| `TestUninstallNginxLogic` | 4 | нет wildcard-удаления sites-*, удаляются только Chimera-файлы (не user-site.com), подтверждение полного удаления, проверка other_sites |
+
+Все 11 тестов pass. 206 связанных тестов (uninstall + olcrtc + access_control + port_registry + telemt_panel + cdn_masking) — 0 регрессий.
+
+### Совместимость
+
+- Пользователи, у которых Chimera — единственный сайт на сервере: при
+  uninstall увидят вопрос «Полностью удалить nginx? [y/N]», могут
+  подтвердить — nginx будет удалён полностью (как раньше)
+- Пользователи, у которых есть другие сайты: nginx НЕ удаляется,
+  только убираются vhost'ы Chimera, nginx перезагружается
+- `/var/www/<domain>` — спрашиваем перед удалением (раньше удаляли молча)
+
+### Файлы
+
+- `chimera/modules/uninstall.py` — переписана логика удаления nginx (строки 125-280)
+- `tests/test_uninstall_nginx_safety.py` — новый файл, 11 regression-тестов
+
+---
+
 ## FEAT(olcrtc): multi-location support — несколько carrier в одном config.json — 10 августа 2026
 
 **olcRTC теперь поддерживает несколько locations (carrier+room) в одном
