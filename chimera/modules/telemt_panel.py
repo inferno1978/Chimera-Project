@@ -1060,7 +1060,25 @@ def _check_telemt_api_users() -> "tuple[bool, str, list]":
       users_list — список имён пользователей из API.
     """
     import json as _json
-    # Читаем auth_header из telemt.toml.
+
+    # 1. Проверяем что telemt сервис активен.
+    r_svc = _run(["systemctl", "is-active", "telemt"], capture=True, check=False)
+    svc_status = r_svc.stdout.strip() if r_svc.returncode == 0 else "unknown"
+    if svc_status != "active":
+        return False, f"telemt сервис не активен (статус: {svc_status}). Проверьте: journalctl -u telemt -n 30", []
+
+    # 2. Проверяем что порт 9091 слушается.
+    r_ss = _run(["ss", "-tlnp"], capture=True, check=False)
+    port_listening = False
+    if r_ss.returncode == 0 and r_ss.stdout:
+        for line in r_ss.stdout.splitlines():
+            if "9091" in line:
+                port_listening = True
+                break
+    if not port_listening:
+        return False, "порт 9091 не слушается. API telemt не включён или telemt не поднялся. Проверьте [server.api] в telemt.toml", []
+
+    # 3. Читаем auth_header из telemt.toml.
     auth_token = ""
     try:
         from chimera.modules.mtproto import CONFIG_FILE as _tcfg
@@ -1071,22 +1089,34 @@ def _check_telemt_api_users() -> "tuple[bool, str, list]":
     except Exception:
         pass
 
-    # Запрашиваем /users у API telemt.
-    r = _run([
-        "curl", "-s", "--max-time", "5",
-        "-H", f"Authorization: Bearer {auth_token}" if auth_token else "",
-        "http://127.0.0.1:9091/users",
-    ], capture=True, check=False)
+    # 4. Запрашиваем /users у API telemt.
+    #    Используем --connect-timeout 3 + --max-time 5.
+    #    НЕ передаём -H "" если токена нет (пустой header ломает curl).
+    curl_cmd = ["curl", "-s", "--connect-timeout", "3", "--max-time", "5"]
+    if auth_token:
+        curl_cmd += ["-H", f"Authorization: Bearer {auth_token}"]
+    curl_cmd.append("http://127.0.0.1:9091/users")
+
+    r = _run(curl_cmd, capture=True, check=False)
     if r.returncode != 0:
-        return False, f"curl failed: {r.stderr.strip()[:200]}", []
-    body = r.stdout.strip()
+        err = (r.stderr or "").strip()
+        if not err:
+            err = f"curl exit code {r.returncode} (возможно timeout или connection refused)"
+        return False, f"curl failed: {err[:300]}", []
+
+    body = (r.stdout or "").strip()
     if not body:
-        return False, "API вернул пустой ответ", []
+        return False, "API вернул пустой ответ (возможно 403 Forbidden — неверный auth_token)", []
+
     try:
         data = _json.loads(body)
         users_list = []
-        # API может вернуть {users: [...]} или [...].
+        # API может вернуть {users: [...]} или [...] или {data: [...]}.
         if isinstance(data, dict):
+            # Проверяем на ошибку.
+            if "error" in data or "message" in data:
+                err_msg = data.get("error") or data.get("message") or "unknown error"
+                return False, f"API вернул ошибку: {err_msg}", []
             users_raw = data.get("users", data.get("data", []))
         else:
             users_raw = data
@@ -1100,7 +1130,9 @@ def _check_telemt_api_users() -> "tuple[bool, str, list]":
                     users_list.append(u)
         return True, f"API отдаёт {len(users_list)} пользователей", users_list
     except Exception as e:
-        return False, f"API вернул невалидный JSON: {str(e)[:100]}", []
+        # Если это не JSON — возможно HTML страница ошибки.
+        preview = body[:200].replace("\n", " ")
+        return False, f"API вернул невалидный JSON: {str(e)[:100]}. Тело: {preview}", []
 
 
 def _sync_users_to_panel() -> None:
