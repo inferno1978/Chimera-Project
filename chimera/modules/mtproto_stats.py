@@ -726,7 +726,7 @@ _RE_BYTES = re.compile(
     re.IGNORECASE
 )
 
-def _parse_journal(since: Optional[str] = None) -> dict:
+def _parse_journal(since: Optional[str] = None, max_days: int = 1) -> dict:
     """
     Парсит journalctl telemt.
     Возвращает: {username: {sessions, last_seen}}
@@ -762,33 +762,39 @@ def _parse_journal(since: Optional[str] = None) -> dict:
       Теперь используем subprocess.Popen с потоковым чтением построчно —
       память не накапливается, обрабатываем строки по мере поступления.
 
-    Также: если since пустой — ограничиваем последние 7 дней, чтобы
+    Также: если since пустой — ограничиваем последние N дней, чтобы
     не читать весь журнал с момента установки (может быть огромным).
 
     ВАЖНО (FIX CPU 95%): даже если since указан (например "2026-07-15"),
-    ограничиваем максимум последними 7 днями. Иначе journalctl читает
+    ограничиваем максимум последними N дней. Иначе journalctl читает
     журнал за месяцы — CPU 95% в течение 10+ минут на серверах с
-    активным telemt. Для last_seen и sessions счётчика 7 дней достаточно.
+    активным telemt. Для last_seen и sessions счётчика N дней достаточно.
+
+    Args:
+      since: исходная дата начала учёта (из stats.json). Если старше
+             max_days — заменяется на "{max_days} days ago".
+      max_days: максимум дней для чтения журнала (по умолчанию 1 = 24 часа).
+                Можно увеличить до 7 если нужна недельная статистика.
     """
     from datetime import datetime, timedelta
     
-    # ЖЁСТКИЙ ЛИМИТ: максимум 7 дней, независимо от since.
+    # ЖЁСТКИЙ ЛИМИТ: максимум max_days дней, независимо от since.
     # Это фикс зависания journalctl на больших журналах.
-    # Если since указан и старше 7 дней — используем "7 days ago".
-    max_since_date = datetime.now() - timedelta(days=7)
+    # Если since указан и старше max_days дней — используем "N days ago".
+    max_since_date = datetime.now() - timedelta(days=max_days)
     
     if since:
         # Пытаемся распарсить since в формате "YYYY-MM-DD HH:MM:SS".
         try:
             since_dt = datetime.strptime(since, "%Y-%m-%d %H:%M:%S")
             if since_dt < max_since_date:
-                since = "7 days ago"
+                since = f"{max_days} days ago"
         except (ValueError, TypeError):
             # Если since в другом формате (например "yesterday") —
             # оставляем как есть, journalctl сам разберётся.
             pass
     else:
-        since = "7 days ago"
+        since = f"{max_days} days ago"
 
     cmd = ["journalctl", "-u", SERVICE_NAME, "--no-pager", "-o", "short-iso",
            "--since", since]
@@ -933,7 +939,7 @@ def _save_stats(d: dict) -> None:
     STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATS_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2))
 
-def _collect(d: dict) -> dict:
+def _collect(d: dict, max_days: int = 1) -> dict:
     """
     Обновляет d из живых источников.
 
@@ -971,7 +977,7 @@ def _collect(d: dict) -> dict:
 
     # ── Per-user: journalctl ──────────────────────────────────────────────────
     since = d["total"].get("since", "")
-    sessions = _parse_journal(since=since if since else None)
+    sessions = _parse_journal(since=since if since else None, max_days=max_days)
 
     for uname, udata in sessions.items():
         if uname not in d["users"]:
@@ -1030,7 +1036,7 @@ def _collect(d: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ОТОБРАЖЕНИЕ СТАТИСТИКИ
 # ══════════════════════════════════════════════════════════════════════════════
-def _render_stats(d: dict, realtime: bool = False) -> None:
+def _render_stats(d: dict, realtime: bool = False, max_days: int = 1) -> None:
     if realtime:
         os.system("clear")
 
@@ -1090,7 +1096,10 @@ def _render_stats(d: dict, realtime: bool = False) -> None:
     _box_row(); _box_sep()
 
     # ── По пользователям ──────────────────────────────────────────────────────
-    _box_row(f"  {BOLD}{CYAN}👥 По пользователям{NC}"); _box_row()
+    _box_row(f"  {BOLD}{CYAN}👥 По пользователям{NC}")
+    # Показываем текущий период чтения журнала.
+    _box_row(f"  {DIM}Журнал: последние {max_days} дн.{NC}")
+    _box_row()
     if not ipt_ok:
         _box_row(f"  {YELLOW}⚠  RX/TX — оценочно, пропорционально сессиям{NC}")
         _box_row()
@@ -1126,6 +1135,11 @@ def _render_stats(d: dict, realtime: bool = False) -> None:
         _box_item("4", "🗑️   Сбросить статистику")
         _box_item("5", "🔍  Диагностика Telemt API (для панели)")
         _box_sep()
+        # Показываем текущий период и предлагаем сменить.
+        period_label = {1: "24 часа", 3: "3 дня", 7: "7 дней"}.get(max_days, f"{max_days} дн.")
+        _box_row(f"  {DIM}Период журнала: {period_label}{NC}")
+        _box_item("6", "📅  Изменить период журнала (1/3/7 дней)")
+        _box_sep()
         _box_item("Q", "← Назад")
         _box_bot()
 
@@ -1144,12 +1158,15 @@ def stats_menu() -> None:
         return
 
     d = _load_stats()
+    # Период чтения журнала (дней). По умолчанию 1 = 24 часа (быстро).
+    # Пользователь может сменить через пункт [6].
+    max_days = 1
 
     while True:
         os.system("clear")
-        d = _collect(d)
+        d = _collect(d, max_days=max_days)
         _save_stats(d)
-        _render_stats(d, realtime=False)
+        _render_stats(d, realtime=False, max_days=max_days)
         print()
 
         try:
@@ -1163,9 +1180,9 @@ def stats_menu() -> None:
         elif ch == "2":
             try:
                 while True:
-                    d = _collect(d)
+                    d = _collect(d, max_days=max_days)
                     _save_stats(d)
-                    _render_stats(d, realtime=True)
+                    _render_stats(d, realtime=True, max_days=max_days)
                     time.sleep(5)
             except KeyboardInterrupt:
                 print(f"\n  {GREEN}Выход из режима реального времени.{NC}\n")
@@ -1238,6 +1255,41 @@ def stats_menu() -> None:
                 _box_row(f"  {RED}✗ Ошибка диагностики: {e}{NC}")
                 _box_sep()
             _box_bot()
+            _pause()
+
+        elif ch == "6":
+            # Смена периода чтения журнала.
+            os.system("clear")
+            print()
+            _box_top("📅  ПЕРИОД ЧТЕНИЯ ЖУРНАЛА")
+            _box_row()
+            _box_row(f"  {DIM}Журнал telemt читается для last_seen и sessions.{NC}")
+            _box_row(f"  {DIM}Больше период — больше данных, но дольше загрузка.{NC}")
+            _box_sep()
+            cur_label = {1: "24 часа (быстро)", 3: "3 дня", 7: "7 дней (медленно)"}.get(max_days, f"{max_days} дн.")
+            _box_row(f"  Текущий: {GREEN}{cur_label}{NC}")
+            _box_sep()
+            _box_item("1", "24 часа  {DIM}(быстро, по умолчанию){NC}")
+            _box_item("2", "3 дня   {DIM}(средне){NC}")
+            _box_item("3", "7 дней  {DIM}(медленно, максимум){NC}")
+            _box_sep()
+            _box_item("Q", "← Отмена")
+            _box_bot()
+            try:
+                pch = _ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            except _Cancelled:
+                continue
+            if pch == "1":
+                max_days = 1
+                print(f"\n  {GREEN}✓ Период: 24 часа{NC}")
+            elif pch == "2":
+                max_days = 3
+                print(f"\n  {GREEN}✓ Период: 3 дня{NC}")
+            elif pch == "3":
+                max_days = 7
+                print(f"\n  {GREEN}✓ Период: 7 дней{NC}")
+            else:
+                continue
             _pause()
 
         elif ch in ("q", ""):

@@ -338,12 +338,13 @@ class TestParseJournal(unittest.TestCase):
     def test_since_filter_passed_to_run(self):
         """Если since указан как недавняя дата — передаётся как есть."""
         from chimera.modules import mtproto_stats
-        # Недавняя дата (в пределах 7 дней) — передаётся как есть.
+        # Недавняя дата (в пределах max_days) — передаётся как есть.
+        # Используем max_days=7 чтобы 2-дневная дата прошла.
         from datetime import datetime, timedelta
         recent = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d 00:00:00")
         with patch("chimera.modules.mtproto_stats.subprocess.Popen",
                           return_value=self._mock_popen("")) as mock_popen:
-            mtproto_stats._parse_journal(since=recent)
+            mtproto_stats._parse_journal(since=recent, max_days=7)
         # проверяем что --since присутствует в аргументах
         cmd = mock_popen.call_args.args[0]
         self.assertIn("--since", cmd)
@@ -351,21 +352,44 @@ class TestParseJournal(unittest.TestCase):
         since_val = cmd[cmd.index("--since") + 1]
         self.assertEqual(since_val, recent)
 
-    def test_old_since_replaced_with_7_days(self):
-        """Если since указан как старая дата (>7 дней) — заменяется на '7 days ago'.
+    def test_old_since_replaced_with_max_days(self):
+        """Если since указан как старая дата (>max_days дней) — заменяется.
 
         Это фикс CPU 95%: пользователь жаловался что journalctl грузит CPU
         10 минут, потому что since был '2026-07-15' (почти месяц назад).
         """
         from chimera.modules import mtproto_stats
+        # max_days=7, since=месяц назад → должно замениться на "7 days ago".
         with patch("chimera.modules.mtproto_stats.subprocess.Popen",
                           return_value=self._mock_popen("")) as mock_popen:
-            mtproto_stats._parse_journal(since="2026-07-15 11:12:52")
+            mtproto_stats._parse_journal(since="2026-07-15 11:12:52", max_days=7)
         cmd = mock_popen.call_args.args[0]
         self.assertIn("--since", cmd)
         since_val = cmd[cmd.index("--since") + 1]
         self.assertEqual(since_val, "7 days ago",
-                         "старый since (>7 дней) должен быть заменён на '7 days ago'")
+                         "старый since (>max_days) должен быть заменён")
+
+    def test_default_max_days_is_1(self):
+        """По умолчанию max_days=1 (24 часа) — быстро, не грузит CPU."""
+        from chimera.modules import mtproto_stats
+        # since=месяц назад, max_days по умолчанию=1 → должно замениться на "1 days ago".
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen("")) as mock_popen:
+            mtproto_stats._parse_journal(since="2026-07-15 11:12:52")
+        cmd = mock_popen.call_args.args[0]
+        since_val = cmd[cmd.index("--since") + 1]
+        self.assertEqual(since_val, "1 days ago",
+                         "по умолчанию max_days=1, старый since заменяется на '1 days ago'")
+
+    def test_empty_since_uses_max_days(self):
+        """Пустой since → используется '{max_days} days ago'."""
+        from chimera.modules import mtproto_stats
+        with patch("chimera.modules.mtproto_stats.subprocess.Popen",
+                          return_value=self._mock_popen("")) as mock_popen:
+            mtproto_stats._parse_journal(since=None, max_days=3)
+        cmd = mock_popen.call_args.args[0]
+        since_val = cmd[cmd.index("--since") + 1]
+        self.assertEqual(since_val, "3 days ago")
 
     # ── Регрессионные тесты на реалистичные форматы journalctl + telemt ──────
     def test_realistic_short_iso_format_with_hostname_and_pid(self):

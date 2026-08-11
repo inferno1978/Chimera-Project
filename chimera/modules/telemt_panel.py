@@ -566,9 +566,10 @@ def _run_install() -> None:
 
     _box_top("УСТАНОВКА TELEMT PANEL")
     _box_row()
-    _box_info("Панель будет слушать только 127.0.0.1:8080 — наружу")
-    _box_info("не светится. Доступ снаружи: SSH-туннель или reverse-proxy")
-    _box_info("на подпуть через уже существующий Reality-домен.")
+    _box_info("Панель будет слушать 127.0.0.1:8080 (loopback).")
+    _box_info("После установки можно включить прямой доступ по HTTPS")
+    _box_info(f"(self-signed TLS на порту {DEFAULT_PANEL_TLS_PORT}) — как у")
+    _box_info("User Portal и olcRTC. Либо использовать SSH-туннель.")
     _box_bot()
     print()
 
@@ -669,6 +670,39 @@ def _run_install() -> None:
     _box_warn("Панель на 127.0.0.1 — прокиньте порт через:")
     _box_info(f"ssh -L {PANEL_LISTEN_PORT}:127.0.0.1:{PANEL_LISTEN_PORT} root@<ваш_сервер>")
     _box_bot()
+
+    # ── 6. Предложить включить прямой доступ (self-signed TLS по публичному IP).
+    # Это как у User Portal / Admin Panel / olcRTC — чтобы не возиться с SSH-туннелем.
+    print()
+    _box_top("🌐  ПРЯМОЙ ДОСТУП ПО ПУБЛИЧНОМУ IP")
+    _box_row()
+    _box_info("Можно включить прямой доступ к панели по HTTPS (self-signed TLS)")
+    _box_info(f"на порту {DEFAULT_PANEL_TLS_PORT} — как у User Portal и olcRTC.")
+    _box_info("Браузер предупредит о self-signed сертификате — это нормально.")
+    _box_row()
+    _box_warn("Без прямого доступа — только через SSH-туннель (как сейчас).")
+    _box_bot()
+    try:
+        enable_direct = _ask(
+            f"  {CYAN}Включить прямой доступ по HTTPS? [Y/n]:{NC} ", "y", c=True
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        enable_direct = "n"
+    if enable_direct in ("y", "yes", "д", "да", ""):
+        print()
+        _info("Настраиваю прямой доступ (nginx + self-signed TLS)...")
+        port = _ask_tls_port()
+        if _telemt_setup_direct_access(port=port):
+            direct = _telemt_direct_status()
+            if direct.get("enabled"):
+                _ok("Прямой доступ включён!")
+                _box_top("✅ ПРЯМОЙ ДОСТУП")
+                _box_kv("URL:", f"{GREEN}{direct.get('url', '?')}{NC}")
+                _box_warn("Браузер предупредит о self-signed TLS — это нормально.")
+                _box_info("Можно принять сертификат и продолжить.")
+                _box_bot()
+    else:
+        _info("Прямой доступ не включён. Можно включить позже через пункт [6] в меню.")
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
