@@ -1060,6 +1060,7 @@ def _check_telemt_api_users() -> "tuple[bool, str, list]":
       users_list — список имён пользователей из API.
     """
     import json as _json
+    import time as _time
 
     # 1. Проверяем что telemt сервис активен.
     r_svc = _run(["systemctl", "is-active", "telemt"], capture=True, check=False)
@@ -1067,16 +1068,22 @@ def _check_telemt_api_users() -> "tuple[bool, str, list]":
     if svc_status != "active":
         return False, f"telemt сервис не активен (статус: {svc_status}). Проверьте: journalctl -u telemt -n 30", []
 
-    # 2. Проверяем что порт 9091 слушается.
-    r_ss = _run(["ss", "-tlnp"], capture=True, check=False)
+    # 2. Проверяем что порт 9091 слушается — с retry (telemt поднимает API
+    #    НЕ сразу после старта, ему нужно ~5-10 сек на handshake с Telegram DC).
     port_listening = False
-    if r_ss.returncode == 0 and r_ss.stdout:
-        for line in r_ss.stdout.splitlines():
-            if "9091" in line:
-                port_listening = True
-                break
+    for attempt in range(5):  # 5 попыток × 2 сек = 10 сек максимум
+        r_ss = _run(["ss", "-tlnp"], capture=True, check=False)
+        if r_ss.returncode == 0 and r_ss.stdout:
+            for line in r_ss.stdout.splitlines():
+                if "9091" in line:
+                    port_listening = True
+                    break
+        if port_listening:
+            break
+        if attempt < 4:
+            _time.sleep(2)
     if not port_listening:
-        return False, "порт 9091 не слушается. API telemt не включён или telemt не поднялся. Проверьте [server.api] в telemt.toml", []
+        return False, "порт 9091 не слушается (ждали 10 сек). telemt занят handshake с Telegram — подождите 10-15 сек и повторите", []
 
     # 3. Читаем auth_header из telemt.toml.
     auth_token = ""
@@ -1089,23 +1096,21 @@ def _check_telemt_api_users() -> "tuple[bool, str, list]":
     except Exception:
         pass
 
-    # 4. Запрашиваем /users у API telemt.
+    # 4. Запрашиваем /v1/users у API telemt.
     #    Используем --connect-timeout 3 + --max-time 5.
-    #    НЕ передаём -H "" если токена нет (пустой header ломает curl).
     #
     #    ВАЖНО: telemt принимает НЕСТАНДАРТНЫЙ формат Authorization:
     #      Authorization: <raw_token>     ← ПРАВИЛЬНО (без "Bearer")
     #      Authorization: Bearer <token>  ← НЕ работает (401 unauthorized)
-    #    Подтверждено тестами: с "Bearer" telemt отдаёт 401, без "Bearer"
-    #    — авторизация проходит (404 если endpoint неверный).
+    #
+    #    Правильный endpoint: /v1/users (подтверждено тестами).
+    #    Формат ответа: {"ok":true, "data":[{"username":"netwalker",...}]}
     curl_cmd = ["curl", "-s", "--connect-timeout", "3", "--max-time", "5"]
     if auth_token:
-        # telemt ждёт raw token без префикса "Bearer".
         curl_cmd += ["-H", f"Authorization: {auth_token}"]
 
-    # Пробуем несколько endpoints — telemt может использовать разные пути
-    # в разных версиях. /users, /api/users, /api/v1/users.
-    endpoints_to_try = ["/users", "/api/users", "/api/v1/users", "/v1/users"]
+    # Пробуем несколько endpoints на случай разных версий telemt.
+    endpoints_to_try = ["/v1/users", "/users", "/api/users", "/api/v1/users"]
     last_body = ""
     for endpoint in endpoints_to_try:
         curl_cmd_with_endpoint = curl_cmd + [f"http://127.0.0.1:9091{endpoint}"]
@@ -1129,36 +1134,33 @@ def _check_telemt_api_users() -> "tuple[bool, str, list]":
         try:
             data = _json.loads(body)
             users_list = []
-            # API может вернуть {users: [...]} или [...] или {data: [...]}.
+            # telemt отдаёт {"ok":true, "data":[...]}.
             if isinstance(data, dict):
                 # Проверяем на ошибку.
-                if "error" in data or "message" in data:
-                    err_msg = data.get("error") or data.get("message") or "unknown error"
-                    if isinstance(err_msg, dict):
-                        err_msg = err_msg.get("message") or str(err_msg)
-                    # Если unauthorized — точно неверный токен.
+                if not data.get("ok", True):
+                    err_obj = data.get("error", {})
+                    err_msg = err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)
                     if "unauthorized" in str(err_msg).lower():
                         return False, f"401 Unauthorized — неверный auth_token. telemt.toml и config.toml панели должны совпадать.", []
                     return False, f"API вернул ошибку: {err_msg}", []
-                users_raw = data.get("users", data.get("data", []))
+                # data может быть в "data" или "users".
+                users_raw = data.get("data", data.get("users", []))
             else:
                 users_raw = data
             if isinstance(users_raw, list):
                 for u in users_raw:
                     if isinstance(u, dict):
-                        name = u.get("name") or u.get("username") or u.get("id")
+                        name = u.get("username") or u.get("name") or u.get("id")
                         if name:
                             users_list.append(str(name))
                     elif isinstance(u, str):
                         users_list.append(u)
             return True, f"API отдаёт {len(users_list)} пользователей (endpoint: {endpoint})", users_list
         except Exception as e:
-            # Если это не JSON — возможно HTML страница ошибки.
             preview = body[:200].replace("\n", " ")
             return False, f"API вернул невалидный JSON: {str(e)[:100]}. Тело: {preview}", []
 
-    # Все endpoints вернули 404.
-    return False, f"API работает (авторизация прошла), но ни один endpoint не найден (пробовали: {', '.join(endpoints_to_try)}). Последний ответ: {last_body[:200]}", []
+    return False, f"API работает (авторизация прошла), но endpoint не найден. Последний ответ: {last_body[:200]}", []
 
 
 def _sync_panel_auth_token() -> "tuple[bool, str]":
@@ -1323,9 +1325,11 @@ def _sync_users_to_panel() -> None:
         _pause()
         return
 
-    # Даём telemt 3 секунды на поднятие API.
+    # Даём telemt 5 секунд на поднятие API.
+    # telemt при старте делает handshake с Telegram DC, и только ПОСЛЕ
+    # этого поднимает API на 9091. Нужно подождать.
     import time
-    time.sleep(3)
+    time.sleep(5)
 
     # ДИАГНОСТИКА: проверяем что API реально отдаёт пользователей.
     print()
