@@ -221,6 +221,58 @@ def _ask(prompt: str, default: str = "", c: bool = False) -> str:
 def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+
+def _get_public_ips() -> "tuple[str, str]":
+    """Возвращает (ipv4, ipv6) публичные адреса сервера.
+
+    Переиспользует mtproto._get_public_ip() который правильно обрабатывает
+    NAT (сравнение локального IP с внешним echo-сервисом).
+    Fallback на curl ifconfig.me если mtproto недоступен.
+    """
+    try:
+        from chimera.modules.mtproto import _get_public_ip as _mtproto_get_public_ip
+        ipv4, ipv6 = _mtproto_get_public_ip()
+        if ipv4 or ipv6:
+            return ipv4, ipv6
+    except Exception:
+        pass
+    # Fallback: curl ifconfig.me (может вернуть IPv6 если сервер IPv6-first).
+    r = _run(["curl", "-s", "--max-time", "5", "ifconfig.me"], capture=True, check=False)
+    ip = r.stdout.strip() if r.returncode == 0 else ""
+    if ":" in ip:
+        return "", ip  # IPv6
+    return ip, ""
+
+
+def _ask_public_ip_choice(ipv4: str, ipv6: str) -> str:
+    """Спрашивает у пользователя какой IP использовать для прямого доступа.
+
+    Если есть только IPv4 или только IPv6 — возвращает его без вопроса.
+    Если есть оба — предлагает выбор.
+
+    Returns:
+      Выбранный IP (строка).
+    """
+    if ipv4 and ipv6:
+        print()
+        _box_top("🌐  ВЫБОР IP АДРЕСА")
+        _box_row()
+        _box_info("У сервера есть и IPv4, и IPv6 адреса.")
+        _box_info("Выберите, по какому IP будет доступна панель:")
+        _box_sep()
+        _box_item("1", f"IPv4: {CYAN}{ipv4}{NC}")
+        _box_item("2", f"IPv6: {CYAN}{ipv6}{NC}")
+        _box_bot()
+        try:
+            ch = _ask(f"{CYAN}  Выбор [1=IPv4]:{NC} ", "1", c=True).strip()
+        except _Cancelled:
+            return ipv4
+        if ch == "2":
+            return ipv6
+        return ipv4
+    # Только один IP — возвращаем его.
+    return ipv4 or ipv6 or "127.0.0.1"
+
 def _is_installed() -> bool:
     return BIN_PATH.exists() and CONFIG_FILE.exists()
 
@@ -818,9 +870,9 @@ def _telemt_setup_direct_access(port: int = DEFAULT_PANEL_TLS_PORT) -> bool:
         pass
 
     public_ip = ""
-    r = _run(["curl", "-s", "--max-time", "5", "ifconfig.me"], capture=True, check=False)
-    if r.returncode == 0:
-        public_ip = r.stdout.strip()
+    ipv4, ipv6 = _get_public_ips()
+    if ipv4 or ipv6:
+        public_ip = _ask_public_ip_choice(ipv4, ipv6)
 
     # Self-signed TLS.
     ssl_dir = Path("/etc/nginx/ssl")
@@ -999,6 +1051,83 @@ def _toggle_direct_access() -> None:
     _pause()
 
 
+def _sync_users_to_panel() -> None:
+    """Принудительно синхронизирует пользователей TUI → Telemt Panel.
+
+    Проблема: Telemt Panel берёт список пользователей из API telemt
+    (127.0.0.1:9091). Если пользователи созданы/изменены в TUI Chimera
+    (через _save_users в telemt.toml), но telemt не перезапущен — API
+    отдаёт устаревший список. Пользователь видит «нет пользователей»
+    или «Новых юзеров не найдено».
+
+    Что делает:
+    1. Читает пользователей из telemt.toml ([access.users] секция)
+    2. Показывает сколько их
+    3. Перезапускает telemt чтобы API подхватил актуальный список
+    4. Перезапускает telemt-panel чтобы обновить кэш
+    """
+    print()
+    _box_top("👥  СИНХРОНИЗАЦИЯ ПОЛЬЗОВАТЕЛЕЙ")
+    _box_row()
+    _box_info("Telemt Panel берёт пользователей из API telemt.")
+    _box_info("Если создали юзеров в TUI, но Panel их не видит —")
+    _box_info("нужно перезапустить telemt чтобы API обновил список.")
+    _box_bot()
+
+    # Читаем пользователей из telemt.toml.
+    try:
+        from chimera.modules.mtproto import _load_users, SERVICE_NAME as TELEMT_SERVICE
+    except ImportError:
+        _err("Модуль mtproto недоступен")
+        _pause()
+        return
+
+    users = _load_users() or {}
+    if not users:
+        _warn("В telemt.toml нет пользователей [access.users].")
+        _box_info("Создайте пользователей в TUI: меню Telemt → управление юзерами.")
+        _pause()
+        return
+
+    _ok(f"Найдено пользователей в telemt.toml: {len(users)}")
+    for name in list(users.keys())[:5]:
+        _box_info(f"  • {name}")
+    if len(users) > 5:
+        _box_info(f"  ...и ещё {len(users) - 5}")
+
+    # Перезапуск telemt → API подхватит актуальный список.
+    print()
+    _info("Перезапускаю telemt (API обновит список)...")
+    r = _run(["systemctl", "restart", TELEMT_SERVICE], capture=True, check=False)
+    if r.returncode == 0:
+        _ok("Telemt перезапущен")
+    else:
+        _err(f"Не удалось перезапустить telemt: {r.stderr.strip()[:200]}")
+        _pause()
+        return
+
+    # Даём telemt 2 секунды на поднятие API.
+    import time
+    time.sleep(2)
+
+    # Перезапуск telemt-panel → обновит кэш пользователей.
+    _info("Перезапускаю Telemt Panel (обновит кэш)...")
+    r = _run(["systemctl", "restart", SERVICE_NAME], capture=True, check=False)
+    if r.returncode == 0:
+        _ok("Telemt Panel перезапущена")
+    else:
+        _err(f"Не удалось перезапустить панель: {r.stderr.strip()[:200]}")
+
+    print()
+    _box_top("✅  ГОТОВО")
+    _box_row()
+    _box_info(f"Пользователей синхронизировано: {len(users)}")
+    _box_info("Обновите страницу панели — пользователи должны появиться.")
+    _box_info("Если всё ещё не видны — проверьте диагностику (пункт [5] в меню Telemt).")
+    _box_bot()
+    _pause()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ГЛАВНОЕ МЕНЮ
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1026,6 +1155,7 @@ def telemt_panel_menu() -> None:
                 _box_item("6", f"{YELLOW}🔒  Выключить прямой доступ (TLS){NC}")
             else:
                 _box_item("6", f"{GREEN}🌐  Включить прямой доступ (self-signed TLS){NC}")
+            _box_item("7", "👥  Синхронизировать пользователей (TUI → Panel)")
         _box_item("8", f"{RED}🗑️   Полное удаление{NC}")
         _box_sep()
         _box_item("Q", "← Назад в меню Telemt")
@@ -1051,6 +1181,8 @@ def telemt_panel_menu() -> None:
             _geoip_update_flow()
         elif ch == "6" and _is_installed():
             _toggle_direct_access()
+        elif ch == "7" and _is_installed():
+            _sync_users_to_panel()
         elif ch == "8":
             _uninstall()
         elif ch in ("q", ""):
