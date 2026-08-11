@@ -1051,6 +1051,58 @@ def _toggle_direct_access() -> None:
     _pause()
 
 
+def _check_telemt_api_users() -> "tuple[bool, str, list]":
+    """Проверяет что telemt API отдаёт пользователей.
+
+    Returns:
+      (ok, message, users_list)
+      ok=True если API доступен и отдаёт пользователей.
+      users_list — список имён пользователей из API.
+    """
+    import json as _json
+    # Читаем auth_header из telemt.toml.
+    auth_token = ""
+    try:
+        from chimera.modules.mtproto import CONFIG_FILE as _tcfg
+        if _tcfg.exists():
+            m = re.search(r'auth_header\s*=\s*"([^"]+)"', _tcfg.read_text())
+            if m:
+                auth_token = m.group(1)
+    except Exception:
+        pass
+
+    # Запрашиваем /users у API telemt.
+    r = _run([
+        "curl", "-s", "--max-time", "5",
+        "-H", f"Authorization: Bearer {auth_token}" if auth_token else "",
+        "http://127.0.0.1:9091/users",
+    ], capture=True, check=False)
+    if r.returncode != 0:
+        return False, f"curl failed: {r.stderr.strip()[:200]}", []
+    body = r.stdout.strip()
+    if not body:
+        return False, "API вернул пустой ответ", []
+    try:
+        data = _json.loads(body)
+        users_list = []
+        # API может вернуть {users: [...]} или [...].
+        if isinstance(data, dict):
+            users_raw = data.get("users", data.get("data", []))
+        else:
+            users_raw = data
+        if isinstance(users_raw, list):
+            for u in users_raw:
+                if isinstance(u, dict):
+                    name = u.get("name") or u.get("username") or u.get("id")
+                    if name:
+                        users_list.append(str(name))
+                elif isinstance(u, str):
+                    users_list.append(u)
+        return True, f"API отдаёт {len(users_list)} пользователей", users_list
+    except Exception as e:
+        return False, f"API вернул невалидный JSON: {str(e)[:100]}", []
+
+
 def _sync_users_to_panel() -> None:
     """Принудительно синхронизирует пользователей TUI → Telemt Panel.
 
@@ -1064,7 +1116,8 @@ def _sync_users_to_panel() -> None:
     1. Читает пользователей из telemt.toml ([access.users] секция)
     2. Показывает сколько их
     3. Перезапускает telemt чтобы API подхватил актуальный список
-    4. Перезапускает telemt-panel чтобы обновить кэш
+    4. Проверяет что API реально отдаёт пользователей (диагностика)
+    5. Перезапускает telemt-panel чтобы обновить кэш
     """
     print()
     _box_top("👥  СИНХРОНИЗАЦИЯ ПОЛЬЗОВАТЕЛЕЙ")
@@ -1106,11 +1159,30 @@ def _sync_users_to_panel() -> None:
         _pause()
         return
 
-    # Даём telemt 2 секунды на поднятие API.
+    # Даём telemt 3 секунды на поднятие API.
     import time
-    time.sleep(2)
+    time.sleep(3)
+
+    # ДИАГНОСТИКА: проверяем что API реально отдаёт пользователей.
+    print()
+    _info("Проверяю что API telemt отдаёт пользователей...")
+    api_ok, api_msg, api_users = _check_telemt_api_users()
+    if api_ok:
+        _ok(api_msg)
+        if api_users:
+            _box_info("API отдаёт:")
+            for name in api_users[:5]:
+                _box_info(f"  • {name}")
+    else:
+        _warn(f"API telemt: {api_msg}")
+        _box_info("Возможные причины:")
+        _box_info("  • API telemt не включён (секция [server.api] в telemt.toml)")
+        _box_info("  • telemt не успел подняться — подождите 5-10 секунд")
+        _box_info("  • Неверный auth_header в конфиге панели")
+        _box_info("Проверьте: curl -s http://127.0.0.1:9091/users -H 'Authorization: Bearer <token>'")
 
     # Перезапуск telemt-panel → обновит кэш пользователей.
+    print()
     _info("Перезапускаю Telemt Panel (обновит кэш)...")
     r = _run(["systemctl", "restart", SERVICE_NAME], capture=True, check=False)
     if r.returncode == 0:
@@ -1121,9 +1193,13 @@ def _sync_users_to_panel() -> None:
     print()
     _box_top("✅  ГОТОВО")
     _box_row()
-    _box_info(f"Пользователей синхронизировано: {len(users)}")
-    _box_info("Обновите страницу панели — пользователи должны появиться.")
-    _box_info("Если всё ещё не видны — проверьте диагностику (пункт [5] в меню Telemt).")
+    _box_info(f"В telemt.toml: {len(users)} пользователей")
+    if api_ok:
+        _box_info(f"API отдаёт: {len(api_users)} пользователей")
+    else:
+        _box_warn("API telemt НЕ отдаёт пользователей — проблема в telemt, не в панели")
+    _box_info("Обновите страницу панели (Ctrl+Shift+R — hard refresh).")
+    _box_info("Если всё ещё не видны — проблема в самой панели (Go-бинарник).")
     _box_bot()
     _pause()
 
