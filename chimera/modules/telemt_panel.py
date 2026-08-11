@@ -1135,6 +1135,100 @@ def _check_telemt_api_users() -> "tuple[bool, str, list]":
         return False, f"API вернул невалидный JSON: {str(e)[:100]}. Тело: {preview}", []
 
 
+def _sync_panel_auth_token() -> "tuple[bool, str]":
+    """Синхронизирует auth_header из telemt.toml в config.toml панели.
+
+    Проблема: при установке Chimera генерирует токен и пишет его в оба файла.
+    Но если telemt.toml пересохранялся (например, через TUI меняли юзеров),
+    токен в telemt.toml мог обновиться, а в конфиге панели остался старый.
+    Или — токен отсутствует в конфиге панели (был утерян).
+
+    Что делает:
+    1. Читает auth_header из telemt.toml (первое совпадение).
+    2. Читает auth_header из config.toml панели.
+    3. Если не совпадают — обновляет в config.toml.
+    4. Также убирает дубликаты auth_header из telemt.toml если есть.
+
+    Returns:
+      (ok, message)
+    """
+    # 1. Читаем auth_header из telemt.toml.
+    try:
+        from chimera.modules.mtproto import CONFIG_FILE as TELEMT_TOML
+    except ImportError:
+        return False, "Модуль mtproto недоступен"
+
+    if not TELEMT_TOML.exists():
+        return False, "telemt.toml не найден"
+
+    telemt_text = TELEMT_TOML.read_text()
+    # Берём ПЕРВЫЙ auth_header (если их несколько — это баг, но берём первый).
+    m_telemt = re.search(r'auth_header\s*=\s*"([^"]+)"', telemt_text)
+    if not m_telemt:
+        return False, "auth_header не найден в telemt.toml. Перезапустите установку панели."
+    telemt_token = m_telemt.group(1)
+
+    # 2. Если в telemt.toml несколько auth_header — убираем дубликаты,
+    #    оставляем только первый в секции [server.api].
+    #    Считаем количество совпадений.
+    auth_header_count = len(re.findall(r'^auth_header\s*=\s*"', telemt_text, re.MULTILINE))
+    if auth_header_count > 1:
+        # Удаляем все auth_header кроме первого.
+        # Простой подход: заменяем секцию [server.api] целиком через ensure_api_enabled.
+        try:
+            from chimera.modules.mtproto import ensure_api_enabled, _get_local_primary_ipv4
+            from chimera.modules.mtproto import TELEMT_API_HOST, TELEMT_API_PORT
+            # ensure_api_enabled перезапишет секцию с одним auth_header.
+            ok, msg = ensure_api_enabled(telemt_token, host=TELEMT_API_HOST,
+                                          port=TELEMT_API_PORT, grant_read_to=SYSTEM_USER)
+            if not ok:
+                _warn(f"Не удалось очистить дубликаты auth_header: {msg}")
+        except Exception as e:
+            _warn(f"Не удалось очистить дубликаты auth_header: {e}")
+
+    # 3. Читаем auth_header из config.toml панели.
+    if not CONFIG_FILE.exists():
+        return False, f"Конфиг панели не найден: {CONFIG_FILE}"
+
+    panel_text = CONFIG_FILE.read_text()
+    m_panel = re.search(r'auth_header\s*=\s*"([^"]+)"', panel_text)
+
+    if m_panel and m_panel.group(1) == telemt_token:
+        # Уже совпадают.
+        return True, f"auth_header в порядке (токен совпадает)"
+
+    # 4. Обновляем auth_header в config.toml панели.
+    if m_panel:
+        # Заменяем существующий.
+        new_panel_text = re.sub(
+            r'auth_header\s*=\s*"[^"]*"',
+            f'auth_header = "{telemt_token}"',
+            panel_text,
+            count=1,
+        )
+    else:
+        # Нет auth_header — добавляем в секцию [telemt].
+        if "[telemt]" in panel_text:
+            new_panel_text = re.sub(
+                r'(\[telemt\]\n)',
+                rf'\1auth_header = "{telemt_token}"\n',
+                panel_text,
+                count=1,
+            )
+        else:
+            # Нет секции [telemt] — добавляем в конец.
+            new_panel_text = panel_text.rstrip() + f"\n\n[telemt]\nauth_header = \"{telemt_token}\"\n"
+
+    CONFIG_FILE.write_text(new_panel_text)
+    try:
+        CONFIG_FILE.chmod(0o640)
+        _run(["chown", f"{SYSTEM_USER}:{SYSTEM_USER}", str(CONFIG_FILE)], check=False)
+    except Exception:
+        pass
+
+    return True, f"auth_header обновлён в config.toml панели (токен синхронизирован)"
+
+
 def _sync_users_to_panel() -> None:
     """Принудительно синхронизирует пользователей TUI → Telemt Panel.
 
@@ -1213,7 +1307,17 @@ def _sync_users_to_panel() -> None:
         _box_info("  • Неверный auth_header в конфиге панели")
         _box_info("Проверьте: curl -s http://127.0.0.1:9091/users -H 'Authorization: Bearer <token>'")
 
-    # Перезапуск telemt-panel → обновит кэш пользователей.
+    # Синхронизация auth_header: telemt.toml → config.toml панели.
+    # Это частая причина 401 Unauthorized — токен в панели не совпадает.
+    print()
+    _info("Синхронизирую auth_header (telemt.toml → config.toml панели)...")
+    token_ok, token_msg = _sync_panel_auth_token()
+    if token_ok:
+        _ok(token_msg)
+    else:
+        _warn(token_msg)
+
+    # Перезапуск telemt-panel → обновит кэш пользователей + подхватит новый токен.
     print()
     _info("Перезапускаю Telemt Panel (обновит кэш)...")
     r = _run(["systemctl", "restart", SERVICE_NAME], capture=True, check=False)
@@ -1221,6 +1325,17 @@ def _sync_users_to_panel() -> None:
         _ok("Telemt Panel перезапущена")
     else:
         _err(f"Не удалось перезапустить панель: {r.stderr.strip()[:200]}")
+
+    # Повторная проверка API после синхронизации токена.
+    if not api_ok:
+        print()
+        _info("Повторная проверка API после синхронизации токена...")
+        api_ok2, api_msg2, api_users2 = _check_telemt_api_users()
+        if api_ok2:
+            _ok(api_msg2)
+            api_ok, api_users = api_ok2, api_users2
+        else:
+            _warn(api_msg2)
 
     print()
     _box_top("✅  ГОТОВО")
