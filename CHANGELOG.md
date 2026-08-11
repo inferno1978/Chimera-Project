@@ -2,6 +2,113 @@
 
 ---
 
+## FIX(mtproto_stats): OOM killer при просмотре статистики Telemt — потоковое чтение journalctl — 11 августа 2026
+
+**Пользователь жаловался: «не могу зайти в статистику telemt, очень долго
+ждёт, потом в консоли пишет "killed"». Причина — `_parse_journal()` загружал
+весь вывод `journalctl` в память через `_run(capture=True)`, что приводило
+к OOM killer на серверах с малым RAM.**
+
+### Причина
+
+`chimera/modules/mtproto_stats.py`, функция `_parse_journal()`:
+
+```python
+# БЫЛО (ОПАСНО):
+cmd = ["journalctl", "-u", "telemt", "--no-pager", "-o", "short-iso"]
+if since:
+    cmd += ["--since", since]
+r = _run(cmd, capture=True)          # ← загружает ВЕСЬ вывод в память
+for line in r.stdout.splitlines():   # ← ещё одна копия в памяти
+```
+
+**Две проблемы:**
+
+1. `_run(capture=True)` = `subprocess.run(capture_output=True)` — загружает
+   **весь stdout** в память как одну строку
+2. `r.stdout.splitlines()` — создаёт **вторую копию** в виде списка строк
+
+Если telemt работает давно и пишет много логов, `journalctl` может выдать
+**сотни тысяч строк** (десятки/сотни MB). На сервере с 1-2 GB RAM процесс
+Python раздувается до предела, и ядро Linux убивает его через OOM killer —
+в консоли появляется `Killed`.
+
+**Усугубляющий фактор:** если `since` пустой (первый запуск статистики,
+или после сброса), `journalctl` без `--since` читает **весь журнал с
+момента установки telemt** — может быть гигабайты логов.
+
+### Фикс
+
+`_parse_journal()` переписана на **потоковое чтение** через
+`subprocess.Popen`:
+
+```python
+# СТАЛО (БЕЗОПАСНО):
+if not since:
+    since = "7 days ago"  # лимит по умолчанию
+
+cmd = ["journalctl", "-u", "telemt", "--no-pager", "-o", "short-iso",
+       "--since", since]
+
+proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                        text=True, encoding="utf-8", errors="replace")
+for line in proc.stdout:       # ← построчное чтение, память не накапливается
+    line = line.rstrip("\n\r")
+    # ... обработка строки ...
+proc.wait(timeout=10)
+```
+
+**Ключевые изменения:**
+
+1. **`subprocess.Popen` с `stdout=PIPE`** — читает построчно через
+   `for line in proc.stdout`, память не накапливается
+2. **`--since "7 days ago"` по умолчанию** — если `since` пустой,
+   ограничивает последние 7 дней (не читает весь журнал)
+3. **`proc.wait(timeout=10)`** — таймаут на зависший journalctl
+4. **`proc.kill()` при `TimeoutExpired`** — убивает зависший процесс
+5. **Fallback на `_run` с `--lines 10000`** — если Popen не сработал,
+   пробуем старый способ с жёстким лимитом строк
+
+### Почему это решает OOM
+
+| Параметр | Было | Стало |
+|----------|------|-------|
+| Память на stdout | O(N) — весь журнал | O(1) — одна строка за раз |
+| Память на splitlines | O(N) — список строк | O(1) — итератор |
+| Лимит по умолчанию | нет (весь журнал) | 7 дней |
+| Таймаут | нет | 10 секунд |
+
+Для журнала 100 MB (типичный для месяца работы telemt):
+- **Было:** ~200 MB RAM (stdout + splitlines) → OOM на 1GB VPS
+- **Стало:** ~1 KB RAM (одна строка) → работает на любом VPS
+
+### Тесты (+2 новых в `test_mtproto_stats.py`)
+
+| Тест | Что проверяет |
+|------|---------------|
+| `test_default_since_7_days_when_not_specified` | при пустом since используется `"7 days ago"` |
+| `test_uses_popen_not_run_capture` | код использует `Popen` и `proc.stdout`, а не `_run(capture=True)` |
+
+Существующие 11 тестов `TestParseJournal` обновлены: мокают
+`subprocess.Popen` вместо `_run` (т.к. теперь основной путь — Popen).
+
+Всего 55 тестов в `test_mtproto_stats.py` — все pass.
+309 связанных тестов (mtproto_stats + mtproto + uninstall + olcrtc + port_registry) — 0 регрессий.
+
+### Файлы
+
+- `chimera/modules/mtproto_stats.py` — `_parse_journal()` переписана на Popen
+- `tests/test_mtproto_stats.py` — 11 тестов обновлены на Popen-мок, +2 новых
+
+### Что ответить пользователю
+
+> Нашёл причину — статистика Telemt читала весь журнал `journalctl` в память,
+> что приводило к OOM killer на серверах с малым RAM. Исправлено: теперь
+> чтение идёт потоково (построчно), плюс по умолчанию ограничение — последние
+> 7 дней. Обновление уже в репозитории.
+
+---
+
 ## CRITICAL FIX(uninstall): не удалять чужие nginx-сайты при uninstall — 11 августа 2026
 
 **КРИТИЧЕСКИЙ БАГ: `do_uninstall()` удалял ВСЮ директорию `/etc/nginx`
