@@ -198,7 +198,28 @@ def _ban_report_show_in_box() -> None:
 def _autoban_load() -> dict:
     try:
         if _XRAY_BAN_STATE.exists():
-            return json.loads(_XRAY_BAN_STATE.read_text())
+            cfg = json.loads(_XRAY_BAN_STATE.read_text())
+            #  FIX: миграция ban_history — ранее cron-скрипт не писал
+            # записи в ban_history (только в banned-словарь). Из-за этого
+            # у существующих инсталляций с десятками банов пункт меню [6]
+            # «История банов» показывал «История пуста».
+            # Если ban_history пуст, но в banned есть записи — переносим
+            # их в историю (один раз, при первом открытии после фикса).
+            banned = cfg.get("banned", {})
+            hist   = cfg.get("ban_history", [])
+            if banned and not hist:
+                cfg["ban_history"] = [
+                    {
+                        "ip":          ip,
+                        "banned_at":   meta.get("banned_at", datetime.now().isoformat()),
+                        "unbanned_at": None,
+                        "count":       meta.get("count", 0),
+                        "reason":      meta.get("reason", "migrated from banned dict"),
+                    }
+                    for ip, meta in banned.items()
+                ]
+                _autoban_save(cfg)
+            return cfg
     except Exception:
         pass
     return {"enabled": False, "threshold": _BAN_THRESHOLD_DEFAULT,
@@ -563,11 +584,28 @@ for line in error_log.read_text(errors='replace').splitlines()[-5000:]:
 for ip, cnt in ip_errors.items():
     if cnt >= threshold and ip not in banned:
         if fw_ban(ip):
-            banned[ip] = {{'count':cnt,'banned_at':datetime.now().isoformat()}}
+            _ban_ts = datetime.now().isoformat()
+            _ban_reason = f'{{cnt}} TLS errors in {{window}}min'
+            banned[ip] = {{'count':cnt,'banned_at':_ban_ts,'reason':_ban_reason}}
             BAN_LOG.parent.mkdir(parents=True,exist_ok=True)
             with open(BAN_LOG,'a') as f:
                 f.write(f'[{{datetime.now():%Y-%m-%d %H:%M:%S}}] BAN {{ip}}: {{cnt}} errors\\n')
             tg(f'AutoBan: {{ip}} banned ({{cnt}} TLS errors in {{window}}min)')
+            #  FIX: добавляем запись в ban_history — иначе пункт меню [6]
+            # «История банов» оставался пустым, хотя banned-список рос.
+            # Раньше cron только инициализировал пустой ban_history если
+            # поля не было, но никогда не добавлял новые баны.
+            if 'ban_history' not in cfg or not isinstance(cfg.get('ban_history'), list):
+                cfg['ban_history'] = []
+            cfg['ban_history'].append({{
+                'ip':          ip,
+                'banned_at':   _ban_ts,
+                'unbanned_at': None,
+                'count':       cnt,
+                'reason':      _ban_reason,
+            }})
+            if len(cfg['ban_history']) > 500:
+                cfg['ban_history'] = cfg['ban_history'][-500:]
 
 cfg['banned'] = banned
 #  FIX: persist whitelist (включая добавленные chain IPs) и
