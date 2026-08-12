@@ -248,7 +248,8 @@ def install_dnscrypt() -> None:
     DNSCRYPT_CONF.chmod(0o644)
 
     # ИСПРАВЛЕНИЕ: создаём отдельного пользователя dnscrypt.
-    # При AWG iptables mangle маркирует трафик по --uid-owner.
+    # При AWG nftables mangle маркирует трафик по --uid-owner
+    # (ЭТАП 1.8: мигрировано с iptables на nftables — awg_fwmark_xray comment).
     # Если dnscrypt-proxy работает от root (uid=0), его исходящие соединения
     # к DNS upstream-серверам (138.124.98.4:443 и т.п.) НЕ получают AWG fwmark
     # и уходят через дефолтный маршрут провайдера, где DoT/DNSCrypt блокируется.
