@@ -929,9 +929,9 @@ iptables -L INPUT -n -v | grep telemt-syn-limit
 
 ## Ссылки
 
-- [CHANGELOG.md](CHANGELOG.md) — история изменений, включая фиксы
+- [CHANGELOG.md](../../CHANGELOG.md) — история изменений, включая фиксы
   iptables-учёта, ME-исключений, идемпотентности правил.
-- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — общая диагностика Chimera.
-- [PROJECT_MAP.md](PROJECT_MAP.md) — карта проекта, модули Telemt:
+- [TROUBLESHOOTING.md](../../TROUBLESHOOTING.md) — общая диагностика Chimera.
+- [PROJECT_MAP.md](../../PROJECT_MAP.md) — карта проекта, модули Telemt:
   `mtproto.py`, `mtproto_stats.py`, `telemt_fallback.py`,
   `telemt_ios_fix.py`, `telemt_panel.py`, `telemt_self_route.py`.
