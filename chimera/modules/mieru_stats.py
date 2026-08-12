@@ -7,8 +7,13 @@ Mieru не пишет access.log с байтами — поэтому испол
 источников, комбинируя их в единую картину:
 
 Источники данных (без новых демонов, без сторонних зависимостей):
-  • iptables -L INPUT -n -v -x  — байты/пакеты на TCP/UDP-порту mita
-      Это основной и наиболее достоверный источник объёма трафика.
+  • nft rule counter на TCP/UDP-порту mita — байты/пакеты.
+      Мигрировано с iptables (этап 1.5): раньше было `iptables -L INPUT -n -v -x`
+      с парсингом байт по совпадению proto+dport. Теперь — единый counter-rule
+      `proto dport <port> counter accept comment "mita-stats"` в `inet chimera input`,
+      чтение через `nft_rule_counter_read(table, "input", comment="mita-stats")`.
+      Семантика та же (считаются те же байты на том же порту), но без парсинга
+      текстового вывода — JSON-парсинг `nft -j list chain`.
   • journalctl -u mita           — события соединений, ошибки, warn
       Парсим строки accepted / closed / error / warning за период.
   • ss -tnp / ss -unp            — активные соединения (TCP/UDP) на порт
@@ -16,7 +21,7 @@ Mieru не пишет access.log с байтами — поэтому испол
   • timedatectl                  — синхронизация NTP (Mieru критично зависит)
 
 Метрики:
-  • Суммарный трафик (байты, пакеты) — iptables INPUT
+  • Суммарный трафик (байты, пакеты) — nft counter на порту mita
   • Скорость (байт/с) между двумя замерами через кэш
   • Кол-во соединений accepted / closed — из journalctl
   • Кол-во ошибок / предупреждений — из journalctl
@@ -28,7 +33,8 @@ Mieru не пишет access.log с байтами — поэтому испол
 
 Не трогает:
   • Xray config.json / state.json
-  • iptables-правила других модулей
+  • nftables-правила других модулей (используется comment-tag "mita-stats"
+    для идемпотентности — см. nft_constants.COMMENT_MITA_STATS)
   • Конфиги mieru.py
 
 Точка входа из mieru.py:
@@ -39,6 +45,18 @@ Mieru не пишет access.log с байтами — поэтому испол
 from __future__ import annotations
 
 from chimera.modules.text_width import wlen as _wlen, plain as _plain
+
+# nftables — централизованная обёртка над `nft` CLI (этап 1.5 миграции).
+# Заменяет парсинг `iptables -L INPUT -n -v -x` (с суммированием байт по
+# совпадению proto+dport) на JSON-based nft_rule_counter_read. Идемпотентность
+# создания правила — через nft_rule_exists/nft_rule_insert вместо iptables -C/-I.
+from .nft_common import (
+    nft_rule_insert, nft_rule_exists, nft_rule_delete_by_comment,
+    nft_rule_counter_read, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT, COMMENT_MITA_STATS,
+)
 
 import json
 import os
@@ -250,107 +268,108 @@ def _get_mita_ports() -> tuple[int, int]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IPTABLES: создаём счётчик на диапазон портов mita если его нет
+#  NFTABLES: создаём счётчик на диапазон портов mita если его нет
+#  (мигрировано с iptables, этап 1.5)
 # ══════════════════════════════════════════════════════════════════════════════
+# Comment-tag для counter-правила — из nft_constants.COMMENT_MITA_STATS = "mita-stats".
+# Идемпотентность: nft_rule_insert с idempotent=True сам проверяет наличие
+# правила по comment-tag и не дублирует. Cleanup дублей (если раньше были
+# дубликаты из-за старой версии кода без -D) — через nft_rule_delete_by_comment.
+_MITA_STATS_COMMENT = COMMENT_MITA_STATS  # "mita-stats"
+
+
+def _nft_mita_rule_spec(port_start: int, port_end: int, proto: str) -> str:
+    """Строит nft-спецификацию правила counter-accept для диапазона портов.
+
+    Пример:
+      _nft_mita_rule_spec(2012, 2012, "tcp") → "tcp dport 2012 counter accept"
+      _nft_mita_rule_spec(2012, 2022, "udp") → "udp dport 2012-2022 counter accept"
+
+    nftables использует дефис для диапазона портов (`2012-2022`), а не
+    двоеточие (`2012:2022`) как iptables. Counter встроен в правило.
+    """
+    p = proto.lower()
+    dport = (str(port_start) if port_start == port_end
+             else f"{port_start}-{port_end}")
+    return f"{p} dport {dport} counter accept"
+
+
 def _ensure_iptables_rule(port_start: int, port_end: int, proto: str) -> bool:
     """
-    Гарантирует ровно одно iptables-правило-счётчик для mita.
-    Использует iptables -C (check) для проверки и -D в цикле для удаления дублей.
-    Правило с mita-stats уже существует и накопило трафик — НЕ пересоздаём.
+    Гарантирует ровно одно nft-правило-счётчик для mita.
+
+    Мигрировано (этап 1.5) с iptables:
+      • `iptables -C INPUT -p <p> --dport <range> -j ACCEPT -m comment --comment mita-stats`
+        → nft_rule_exists(comment="mita-stats")
+      • `iptables -I INPUT 1 -p <p> --dport <range> -j ACCEPT -m comment --comment mita-stats`
+        → nft_rule_insert(rule_spec="<p> dport <range> counter accept",
+          comment="mita-stats", idempotent=True)
+      • Cleanup дублей (через цикл `iptables -D ...` по 30 итераций) —
+        → nft_rule_delete_by_comment(comment="mita-stats", max_iterations=30)
+        перед новым insert (на случай копившихся дублей из старой версии
+        кода без cleanup).
+
+    Если правило с comment="mita-stats" уже существует и накопило трафик — НЕ
+    пересоздаём (counter не сбрасывается). Это эквивалентно поведению старого
+    кода, который тоже не пересоздавал существующее правило (проверка через -C).
+
+    Returns:
+      True если правило существует (или было создано); False если nft
+      недоступен или правило не удалось создать.
     """
-    import subprocess as _sp
-
-    p = proto.lower()
-    dport_arg = str(port_start) if port_start == port_end else f"{port_start}:{port_end}"
-
-    # Базовые аргументы правила (без -I/-D/-C)
-    rule_args = [
-        "-p", p,
-        "--dport", dport_arg,
-        "-j", "ACCEPT",
-        "-m", "comment", "--comment", "mita-stats"
-    ]
-
-    try:
-        # iptables -C INPUT: returncode=0 если правило существует
-        chk = _sp.run(
-            ["iptables", "-C", "INPUT"] + rule_args,
-            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
-        )
-        if chk.returncode == 0:
-            # Правило есть. Проверяем нет ли дублей — считаем через -L
-            r_list = _sp.run(
-                ["iptables", "-L", "INPUT", "-n", "-v", "-x"],
-                capture_output=True, text=True
-            )
-            check_str = (f"dpts:{port_start}:{port_end}"
-                         if port_start != port_end else f"dpt:{port_start}")
-            count = sum(
-                1 for line in r_list.stdout.splitlines()
-                if p in line.lower() and check_str in line
-            )
-            if count <= 1:
-                return True  # ровно одно правило — всё хорошо, не трогаем счётчик
-            # Дубли: удаляем все, потом создадим одно
-        # Удаляем ВСЕ вхождения через -D в цикле (каждый -D удаляет одно)
-        for _ in range(30):
-            d = _sp.run(
-                ["iptables", "-D", "INPUT"] + rule_args,
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
-            )
-            if d.returncode != 0:
-                break  # больше нет
-
-        # Добавляем одно чистое правило
-        add = _sp.run(
-            ["iptables", "-I", "INPUT", "1"] + rule_args,
-            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
-        )
-        return add.returncode == 0
-    except Exception:
+    if not _nft_available():
         return False
+
+    # Если правило уже есть — не трогаем (сохраняем накопленный счётчик).
+    if nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_MITA_STATS_COMMENT, family=NFT_TABLE_FAMILY,
+    ):
+        return True
+
+    # Правила нет — сначала чистим возможные дубли (если раньше была
+    # старая версия без cleanup). nft_rule_delete_by_comment удаляет ВСЕ
+    # правила с этим comment — безопасно для идемпотентности.
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_MITA_STATS_COMMENT, family=NFT_TABLE_FAMILY, max_iterations=30,
+    )
+
+    # Создаём ровно одно новое правило с встроенным counter.
+    rule_spec = _nft_mita_rule_spec(port_start, port_end, proto)
+    return nft_rule_insert(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        rule_spec=rule_spec,
+        comment=_MITA_STATS_COMMENT, family=NFT_TABLE_FAMILY, idempotent=False,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ИСТОЧНИК 1: iptables — байты/пакеты
+#  ИСТОЧНИК 1: nftables — байты/пакеты (мигрировано с iptables)
 # ══════════════════════════════════════════════════════════════════════════════
 def _iptables_stats(port_start: int, port_end: int, proto: str) -> dict:
     """
-    Читает счётчики байт и пакетов из iptables INPUT для правила mita.
-    Возвращает {bytes, packets}.
-    proto: TCP или UDP.
+    Читает счётчики байт и пакетов из nft-правила mita-stats в цепочке input.
+
+    Заменяет: парсинг `iptables -L INPUT -n -v -x` с поиском строки с
+              совпадением proto+dport (форматы `dpts:start:end` для диапазона
+              и `dpt:XXXX` для одиночного порта) и суммированием байт по
+              всем совпадающим строкам (для устойчивости к временным дублям).
+    Теперь: nft_rule_counter_read(table, "input", comment="mita-stats")
+            → JSON-парсинг `nft -j list chain inet chimera input` → counter expr.
+
+    Возвращает {bytes, packets}. proto: TCP или UDP (case-insensitive).
     """
-    result = {"bytes": 0, "packets": 0}
-    try:
-        r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x"], capture=True)
-        # Суммируем все строки с нашим портом (на случай временных дублей)
-        for line in r.stdout.splitlines():
-            lp = line.lower()
-            # Ищем строку с нашим протоколом и портом
-            if proto.lower() not in lp:
-                continue
-            # Диапазон портов: iptables пишет dpts:start:end (с 's')
-            # Одиночный порт: dpt:XXXX (без 's')
-            if port_start != port_end:
-                if f"dpts:{port_start}:{port_end}" not in line and \
-                   f"dpt:{port_start}:{port_end}" not in line and \
-                   f"dport {port_start}:{port_end}" not in line:
-                    continue
-            else:
-                if f"dpt:{port_start}" not in line and \
-                   f"dport {port_start}" not in line:
-                    continue
-            parts = line.split()
-            # Формат iptables -vnxL: pkts bytes target prot ...
-            if len(parts) >= 2:
-                try:
-                    result["packets"] += int(parts[0])
-                    result["bytes"]   += int(parts[1])
-                except (ValueError, IndexError):
-                    pass
-    except Exception:
-        pass
-    return result
+    if not _nft_available():
+        return {"bytes": 0, "packets": 0}
+    cnt = nft_rule_counter_read(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_MITA_STATS_COMMENT, family=NFT_TABLE_FAMILY,
+    )
+    return {
+        "bytes":   int(cnt.get("bytes", 0)),
+        "packets": int(cnt.get("packets", 0)),
+    }
 
 def _iptables_speed(port_start: int, port_end: int, proto: str) -> dict:
     """
@@ -672,7 +691,7 @@ def _show_stats(window_minutes: int = 60) -> None:
     proto      = state.get("protocol",   "TCP")
     users      = state.get("users", [])
     version    = state.get("version", "—")
-    # Гарантируем наличие iptables-счётчика для диапазона портов mita
+    # Гарантируем наличие nft-счётчика для диапазона портов mita
     _ensure_iptables_rule(port_start, port_end, proto)
 
     port_str = str(port_start) if port_start == port_end else f"{port_start}-{port_end}"
@@ -701,8 +720,8 @@ def _show_stats(window_minutes: int = 60) -> None:
 
     _box_sep()
 
-    # ── iptables (байты + скорость) ───────────────────────────────────────────
-    _box_row(f"  {BOLD}{WHITE}Трафик (iptables):{NC}")
+    # ── nftables (байты + скорость) ───────────────────────────────────────────
+    _box_row(f"  {BOLD}{WHITE}Трафик (nftables):{NC}")
     _box_row()
     ipt = _iptables_speed(port_start, port_end, proto)
     _box_kv("  Всего байт:",   f"{YELLOW}{_bytes_human(ipt['bytes'])}{NC}")
@@ -713,9 +732,8 @@ def _show_stats(window_minutes: int = 60) -> None:
             f"{speed_col}{speed_kbps:.1f} кбит/с{NC}")
 
     if ipt["bytes"] == 0:
-        _box_warn("iptables-счётчик ещё не накопил трафик — правило создано автоматически.")
-        grep_arg = str(port_start) if port_start == port_end else f"{port_start}:{port_end}"
-        _box_info(f"Для проверки: iptables -L INPUT -n -v -x | grep {grep_arg}")
+        _box_warn("nft-счётчик ещё не накопил трафик — правило создано автоматически.")
+        _box_info("Для проверки: nft list chain inet chimera input")
 
     # ── Активные соединения ───────────────────────────────────────────────────
     active = _active_connections(port_start, port_end, proto)
@@ -841,7 +859,7 @@ def _show_live(interval: int = 30) -> None:
             _box_kv("NTP:", f"{'✓' if ntp_ok else '✗'}  {DIM}{ntp_desc}{NC}")
 
             ipt = _iptables_speed(port_start, port_end, proto)
-            _box_kv("Трафик (iptables):", f"{YELLOW}{_bytes_human(ipt['bytes'])}{NC}")
+            _box_kv("Трафик (nftables):", f"{YELLOW}{_bytes_human(ipt['bytes'])}{NC}")
             speed_kbps = ipt["speed_bps"] * 8 / 1000
             _box_kv("Скорость:", f"{GREEN}{speed_kbps:.1f} кбит/с{NC}")
 
@@ -911,7 +929,7 @@ def mieru_collect_traffic() -> dict:
     Returns:
       dict — {username: accumulated_bytes} для всех пользователей mieru.
       username берётся из journalctl [metrics - user - NAME] если доступен,
-      иначе используется "_global_" (суммарный трафик mita из iptables).
+      иначе используется "_global_" (суммарный трафик mita из nftables counter-rule).
     """
     try:
         from chimera.modules.traffic_accounting import record_traffic_sample
@@ -938,7 +956,7 @@ def mieru_collect_traffic() -> dict:
             accumulated = record_traffic_sample(username, "mieru", raw)
             result[username] = accumulated
     else:
-        # Fallback на global счётчик из iptables (TCP+UDP порты mita)
+        # Fallback на global счётчик из nftables counter-rule (TCP+UDP порты mita)
         try:
             port_start, port_end = _get_mita_ports()
             raw_total = 0
@@ -978,7 +996,12 @@ def mieru_get_traffic_accumulated(username: str) -> int:
 #  ДИАГНОСТИКА (отдельная страница)
 # ══════════════════════════════════════════════════════════════════════════════
 def _show_diagnostics() -> None:
-    """Детальная диагностика: iptables, ss, NTP, последние 50 строк журнала."""
+    """Детальная диагностика: nftables, ss, NTP, последние 50 строк журнала.
+
+    Мигрировано (этап 1.5): вместо `iptables -L INPUT -n -v -x --line-numbers`
+    показываем `nft list chain inet chimera input` — единый JSON-text output
+    с правилами Chimera на порту mita (фильтрация по comment="mita-stats").
+    """
     os.system("clear")
     state      = _load_mieru_state()
     port_start, port_end = _get_mita_ports()
@@ -993,21 +1016,25 @@ def _show_diagnostics() -> None:
     _box_kv("Порт(ы):", f"{YELLOW}{port_str}/{proto}{NC}")
     _box_sep()
 
-    # ── iptables dump ─────────────────────────────────────────────────────────
-    _box_row(f"  {BOLD}{WHITE}iptables INPUT (все правила на порт {port_start}):{NC}")
+    # ── nftables dump ───────────────────────────────────────────────────────────
+    # Заменяет `iptables -L INPUT -n -v -x --line-numbers` с фильтрацией по порту.
+    # Теперь: `nft list chain inet chimera input` — единый дамп с правилами Chimera.
+    _box_row(f"  {BOLD}{WHITE}nftables input (правила на порт {port_start}):{NC}")
     _box_row()
     try:
-        r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x", "--line-numbers"],
+        r = _run(["nft", "list", "chain", "inet", "chimera", "input"],
                  capture=True)
         found = False
         for line in r.stdout.splitlines():
-            if str(port_start) in line or "Chain" in line or "pkts" in line:
+            # Показываем строки с нашим портом или общую информацию о цепочке
+            if (str(port_start) in line or "chain" in line.lower()
+                    or "mita-stats" in line):
                 _box_log_line(line)
                 found = True
         if not found:
-            _box_warn("Правило для порта не найдено в iptables INPUT.")
+            _box_warn("Правило для порта не найдено в nftables input.")
     except Exception as e:
-        _box_err(f"iptables ошибка: {e}")
+        _box_err(f"nft ошибка: {e}")
 
     # ── ss dump ───────────────────────────────────────────────────────────────
     _box_sep()
@@ -1067,7 +1094,7 @@ def do_mieru_stats_menu() -> None:
         os.system("clear")
         _box_top("📊  MIERU — СТАТИСТИКА ТРАФИКА")
         _box_row()
-        _box_info("Источники: iptables-счётчики, journalctl, ss, timedatectl")
+        _box_info("Источники: nftables-счётчики, journalctl, ss, timedatectl")
         _box_row()
         _box_sep()
         _box_item("1", f"📊  Последний час         {DIM}(60 мин){NC}")
@@ -1075,7 +1102,7 @@ def do_mieru_stats_menu() -> None:
         _box_item("3", f"📊  Последние 24 часа     {DIM}(1440 мин){NC}")
         _box_item("4", f"📡  Живое обновление      {DIM}(каждые 30 сек, Ctrl+C — выход){NC}")
         _box_sep()
-        _box_item("5", f"🔍  Диагностика           {DIM}(iptables, ss, NTP, журнал){NC}")
+        _box_item("5", f"🔍  Диагностика           {DIM}(nftables, ss, NTP, журнал){NC}")
         _box_item("R", f"{DIM}Сбросить кэш счётчиков{NC}")
         _box_sep()
         _box_item("Q", "← Назад в меню Mieru")

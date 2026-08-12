@@ -7,11 +7,17 @@ chimera/modules/naiveproxy_stats.py
   • /var/log/caddy-naive/access.log  — основной: JSON-лог Caddy
       Поля: ts (unix), duration, request.remote_addr, status,
             resp_body_size, request.headers.Authorization (basic-auth логин)
-  • iptables -L INPUT -n -v -x       — суммарные байты на TCP 443
+  • nft rule counter на TCP-порту NaiveProxy (обычно 443) — суммарные байты.
+      Мигрировано с iptables (этап 1.5): раньше было `iptables -L INPUT -n -v -x`
+      с парсингом байт по совпадению `dpt:443`. Теперь — единый counter-rule
+      `tcp dport 443 counter accept comment "naiveproxy-stats"` в `inet chimera input`,
+      чтение через `nft_rule_counter_read(table, "input", comment="naiveproxy-stats")`.
+      Семантика та же (считаются те же байты на том же порту), но без парсинга
+      текстового вывода — JSON-парсинг `nft -j list chain`.
   • ss -tnp                          — активные TCP-соединения на порт
 
 Метрики:
-  • Суммарный трафик (байты) за период: из iptables-счётчика
+  • Суммарный трафик (байты) за период: из nft-counter на TCP 443
   • Кол-во запросов, успешных (2xx), ошибок (4xx/5xx) — из access.log
   • Статистика по пользователям (логин → запросы, байты, last_seen)
   • Топ-5 IP-адресов клиентов
@@ -23,7 +29,8 @@ chimera/modules/naiveproxy_stats.py
 
 Не трогает:
   • Xray config.json / state.json
-  • iptables-правила других модулей
+  • nftables-правила других модулей (используется comment-tag "naiveproxy-stats"
+    для идемпотентности)
   • Конфиги naiveproxy.py
 
 Точка входа из naiveproxy.py:
@@ -35,6 +42,18 @@ from __future__ import annotations
 
 from chimera.modules.text_width import wlen as _wlen, plain as _plain
 
+# nftables — централизованная обёртка над `nft` CLI (этап 1.5 миграции).
+# Заменяет парсинг `iptables -L INPUT -n -v -x` с поиском `dpt:PORT` на
+# JSON-based nft_rule_counter_read. Идемпотентное создание counter-rule —
+# через nft_rule_insert с comment-tag (вместо отсутствующей проверки в старом
+# коде, который никогда не создавал правило, а только читал существующее).
+from .nft_common import (
+    nft_rule_insert, nft_rule_exists, nft_rule_counter_read, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+)
+
 import json
 import os
 import re
@@ -45,6 +64,11 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+# Comment-tag для counter-правила на TCP 443 (порт NaiveProxy).
+# Локальная константа (не вынесена в nft_constants, т.к. используется только
+# в этом модуле). Аналогично COMMENT_MITA_STATS = "mita-stats" в mieru_stats.
+_NAIVEPROXY_STATS_COMMENT = "naiveproxy-stats"
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЦВЕТА — независимые от родительского модуля
@@ -342,21 +366,60 @@ def _empty_log_stats() -> dict:
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ИСТОЧНИК 2: iptables — суммарные байты на порту
+#  ИСТОЧНИК 2: nftables — суммарные байты на порту (мигрировано с iptables)
 # ══════════════════════════════════════════════════════════════════════════════
+def _ensure_nft_counter_rule(port: int) -> bool:
+    """Гарантирует наличие counter-rule `tcp dport <port> counter accept` с
+    comment-tag "naiveproxy-stats" в цепочке input таблицы chimera.
+
+    Заменяет: неявную зависимость от ранее созданного (где-то ещё) правила
+              `iptables -I INPUT 1 -p tcp --dport <port> -j ACCEPT` (старый
+              код НЕ создавал правило сам — только читал существующее).
+    Теперь: модль сам создаёт counter-rule при первом запросе статистики,
+            используя comment-tag для идемпотентности. Cleanup не нужен —
+            nft_rule_insert с idempotent=True не дублирует.
+
+    Returns:
+      True если правило существует (или было создано); False если nft
+      недоступен или правило не удалось создать.
+    """
+    if not _nft_available():
+        return False
+    if nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_NAIVEPROXY_STATS_COMMENT, family=NFT_TABLE_FAMILY,
+    ):
+        return True
+    return nft_rule_insert(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        rule_spec=f"tcp dport {port} counter accept",
+        comment=_NAIVEPROXY_STATS_COMMENT, family=NFT_TABLE_FAMILY,
+        idempotent=True,
+    )
+
+
 def _iptables_bytes(port: int) -> int:
-    """Возвращает байты из iptables INPUT ACCEPT для TCP-порта."""
-    try:
-        r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x"], capture=True)
-        for line in r.stdout.splitlines():
-            if f"dpt:{port}" in line or f"--dport {port}" in line:
-                parts = line.split()
-                # Формат: pkts  bytes  target  prot  opt  in  out  src  dst  ...
-                if len(parts) >= 2 and parts[1].isdigit():
-                    return int(parts[1])
-    except Exception:
-        pass
-    return 0
+    """Возвращает байты из counter-правила nftables input для TCP-порта.
+
+    Заменяет: парсинг `iptables -L INPUT -n -v -x` с поиском строки с
+              `dpt:PORT` или `--dport PORT` и извлечением 2-й колонки (bytes).
+    Теперь: nft_rule_counter_read(table, "input", comment="naiveproxy-stats")
+            → JSON-парсинг `nft -j list chain inet chimera input` → counter expr.
+
+    Имя функции сохранено как `_iptables_bytes` для обратной совместимости
+    с существующими тестами (test_naiveproxy_stats.py патчит именно это имя).
+    Внутри делегирует в nft_rule_counter_read — никаких subprocess-вызовов
+    `iptables` больше нет.
+    """
+    if not _nft_available():
+        return 0
+    # Гарантируем наличие правила — иначе counter всегда будет 0.
+    _ensure_nft_counter_rule(port)
+    cnt = nft_rule_counter_read(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_NAIVEPROXY_STATS_COMMENT, family=NFT_TABLE_FAMILY,
+    )
+    return int(cnt.get("bytes", 0))
 
 def _iptables_speed(port: int) -> tuple[int, float]:
     """
@@ -435,9 +498,9 @@ def _show_stats(window_minutes: int = 60) -> None:
             f"{GREEN}● активен{NC}" if svc_ok else f"{RED}● остановлен{NC}")
     _box_kv("Домен:порт:", f"{state.get('domain', '—')}:{port}")
 
-    # ── iptables (байты + скорость) ───────────────────────────────────────────
+    # ── nftables (байты + скорость) ───────────────────────────────────────────
     ipt_bytes, ipt_speed = _iptables_speed(port)
-    _box_kv("Трафик (iptables):", f"{YELLOW}{_bytes_human(ipt_bytes)}{NC}")
+    _box_kv("Трафик (nftables):", f"{YELLOW}{_bytes_human(ipt_bytes)}{NC}")
     speed_kbps = ipt_speed * 8 / 1000
     if speed_kbps >= 1:
         _box_kv("Скорость:", f"{GREEN}{speed_kbps:.1f} кбит/с{NC}")
@@ -567,7 +630,7 @@ def _show_live(interval: int = 30) -> None:
                     f"{GREEN}● активен{NC}" if svc_ok else f"{RED}● остановлен{NC}")
 
             ipt_bytes, ipt_speed = _iptables_speed(port)
-            _box_kv("Трафик (iptables):", f"{YELLOW}{_bytes_human(ipt_bytes)}{NC}")
+            _box_kv("Трафик (nftables):", f"{YELLOW}{_bytes_human(ipt_bytes)}{NC}")
             speed_kbps = ipt_speed * 8 / 1000
             _box_kv("Скорость:", f"{GREEN}{speed_kbps:.1f} кбит/с{NC}")
 
@@ -814,7 +877,7 @@ def do_naiveproxy_stats_menu() -> None:
         os.system("clear")
         _box_top("📊  NAIVEPROXY — СТАТИСТИКА ТРАФИКА")
         _box_row()
-        _box_info("Источники: access.log (Caddy JSON), iptables-счётчики, ss")
+        _box_info("Источники: access.log (Caddy JSON), nftables-счётчики, ss")
         _box_row()
         _box_sep()
         _box_item("1", f"📊  Последний час         {DIM}(60 мин){NC}")

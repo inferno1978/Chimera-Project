@@ -3,9 +3,13 @@ chimera/modules/mtproto_stats.py
 ───────────────────────────────────────────────────────────────────────────────
 Статистика трафика Telemt MTProxy — зрелая реализация.
 
-Принцип работы:
-  1. iptables ACCOUNTING: цепочки TELEMT_STATS_IN / TELEMT_STATS_OUT считают
-     байты на порту telemt. Cron сбрасывает счётчики в 00:00.
+Принцип работы (мигрировано с iptables на nftables, этап 1.5):
+  1. nftables ACCOUNTING: regular-цепочки `telemt_stats_in` / `telemt_stats_out`
+     в таблице `inet chimera` считают байты на порту telemt (через правила
+     вида `tcp dport <port> counter return comment "telemt-stats-counter"`).
+     Jump-правила из `input`/`output` направляют трафик в эти цепочки.
+     Cron сбрасывает счётчики в 00:00 (re-create chain = `flush` + re-add
+     counter rule).
   2. Суточные данные сохраняются в stats.json (накапливаются, не теряются
      после ночного сброса счётчиков).
   3. Суммарный трафик = сумма по всем дням в stats.json.
@@ -15,6 +19,10 @@ chimera/modules/mtproto_stats.py
 Публичные точки входа:
     stats_menu()                   ← вызывается из mtproto.py
     setup_iptables_accounting(port) ← вызывается из mtproto.py при установке
+                                     (имя сохранено для обратной совместимости
+                                     с mtproto._setup_accounting; внутри делегирует
+                                     в nft_common.nft_chain_ensure / nft_rule_add /
+                                     nft_rule_counter_read).
 ───────────────────────────────────────────────────────────────────────────────
 """
 
@@ -33,6 +41,24 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# nftables — централизованная обёртка над `nft` CLI (этап 1.5 миграции).
+# Заменяет прямые вызовы `iptables -N/-A/-I/-D/-L/-Z/-F` на идемпотентные
+# функции с JSON-парсингом. Семантика: считаются те же байты на том же порту,
+# только через counter-выражение в правиле nftables вместо отдельной цепочки
+# `iptables -L TELEMT_STATS_IN -v -n -x` парсинга.
+from .nft_common import (
+    nft_chain_ensure, nft_chain_exists, nft_chain_flush,
+    nft_rule_add, nft_rule_insert, nft_rule_exists,
+    nft_rule_delete_by_comment, nft_rule_counter_read,
+    nft_persist, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY,
+    NFT_CHAIN_INPUT, NFT_CHAIN_OUTPUT,
+    NFT_CHAIN_TELEMT_STATS_IN, NFT_CHAIN_TELEMT_STATS_OUT,
+    NFT_PERSIST_FILE,
+)
+
 # ── Пути ─────────────────────────────────────────────────────────────────────
 STATS_FILE   = Path("/var/lib/telemt/stats.json")
 CONFIG_FILE  = Path("/etc/telemt/telemt.toml")
@@ -44,9 +70,25 @@ CRON_FILE    = Path("/etc/cron.d/telemt-stats")
 # экспорит PYTHONPATH перед вызовом python3 (тот же паттерн, что в
 # node_health_monitor.py::install_health_monitor и geo_files.py).
 LIMITS_CHECK_SCRIPT = Path("/usr/local/sbin/telemt-limits-check.sh")
-CHAIN_IN     = "TELEMT_STATS_IN"
-CHAIN_OUT    = "TELEMT_STATS_OUT"
+# Wrapper bash-скрипт для cron-сброса nftables счётчиков в 00:00 (этап 1.5:
+# раньше был bare `iptables -Z CHAIN_IN && iptables -Z CHAIN_OUT` — теперь
+# нужен Python для вызова nft_chain_flush + nft_rule_add, т.к. counter в nft
+# встроен в правило и не имеет команды `nft counter zero` для rule-counter'ов).
+RESET_COUNTERS_SCRIPT = Path("/usr/local/sbin/telemt-stats-reset.sh")
+# Legacy имена цепочек (для сохранения совместимости с внешним кодом и
+# документацией в stats.json). Реальные nftables цепочки живут в таблице
+# `inet chimera` с именами из nft_constants: telemt_stats_in / telemt_stats_out.
+CHAIN_IN     = "TELEMT_STATS_IN"   # legacy alias; nft chain = NFT_CHAIN_TELEMT_STATS_IN
+CHAIN_OUT    = "TELEMT_STATS_OUT"  # legacy alias; nft chain = NFT_CHAIN_TELEMT_STATS_OUT
 SERVICE_NAME = "telemt"
+
+# ── Comment-tags для nftables правил ─────────────────────────────────────────
+# Counter-правила в цепочках telemt_stats_in/out несут один и тот же
+# comment-tag (одинаковый для обоих направлений) — `nft_rule_counter_read`
+# различает rx/tx по имени цепочки, а не по comment. Это упрощает cleanup.
+_COMMENT_STATS_COUNTER = "telemt-stats-counter"  # counter rule in telemt_stats_in/out
+_COMMENT_JUMP_IN       = "telemt-stats-jump-in"  # jump INPUT → telemt_stats_in
+_COMMENT_JUMP_OUT      = "telemt-stats-jump-out"  # jump OUTPUT → telemt_stats_out
 
 # ── Цвета (из mtproto.py или собственные) ────────────────────────────────────
 try:
@@ -151,142 +193,163 @@ except ImportError:
             return default
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IPTABLES ACCOUNTING
+#  NFTABLES ACCOUNTING (мигрировано с iptables, этап 1.5)
 # ══════════════════════════════════════════════════════════════════════════════
-# УРОК НА БУДУЩЕЕ: при парсинге вывода iptables/ip/nft с флагом -n значения
-# полей могут быть числовыми вместо текстовых. Для iptables -L -n это в
-# первую очередь ПОЛЕ ПРОТОКОЛА: вместо текстового "tcp" стоит "6"
-# (IPPROTO_TCP). IP-адреса также становятся числовыми, но они нас тут не
-# касаются (мы не сравниваем их со строкой).
+# ИСТОРИЧЕСКАЯ СПРАВКА (для аудита миграции):
+# Раньше (iptables) учёт шёл через цепочки TELEMT_STATS_IN / TELEMT_STATS_OUT
+# в table=filter, jump-правила в INPUT/OUTPUT. Counter был implicit per-rule,
+# парсинг `iptables -L <chain> -v -n -x` извлекал колонку `bytes`.
 #
-# Любой будущий парсинг вывода iptables/ip/nft с флагом -n должен либо не
-# использовать -n для полей, которые сравниваются со строкой, либо явно
-# принимать оба представления (текстовое и числовое). См. _TCP_PROTO_TOKENS
-# ниже — этот набор был введён после ложноположительного отказа на реальном
-# сервере (commit после 0b412e3): jump-правило реально стояло и работало
-# (счётчики 119 пакетов / 15936 байт), но старый код ждал буквально "tcp" и
-# всегда возвращал False из-за "6" в выводе -n.
-_TCP_PROTO_TOKENS = frozenset({"tcp", "6"})
+# Известный баг iptables: `iptables -L -n` выводил протокол числом ("6" вместо
+# "tcp"), что ломало парсер jump-правил на реальном сервере. Раньше это обходили
+# через `_TCP_PROTO_TOKENS = frozenset({"tcp", "6"})`. В nftables JSON такой
+# проблемы НЕТ — протокол всегда строка "tcp".
+#
+# Теперь (nftables, этап 1.5):
+#   • regular-цепочки `telemt_stats_in` / `telemt_stats_out` в `inet chimera`
+#     (создаются через nft_chain_ensure без hook — аналог `iptables -N`).
+#   • jump-правила в `input` / `output` направляют трафик на нужный порт в
+#     эти цепочки (через nft_rule_insert с comment-tag).
+#   • Внутри цепочки одно правило с embedded-counter:
+#       `tcp dport <port> counter return comment "telemt-stats-counter"`
+#     Counter инкрементируется при проходе пакета через правило.
+#   • Чтение counter — через `nft_rule_counter_read(table, chain, comment=...)`
+#     → JSON-парсинг `nft -j list chain inet chimera telemt_stats_in`.
+#   • Ночной сброс (cron 00:00) — flush цепочки + re-add counter-rule
+#     (counter в nftables не имеет команды `zero` для rule-counter'ов, только
+#     для named counters; пересоздание правила эквивалентно `iptables -Z`).
+def _nft_chain_for(direction: str) -> str:
+    """Возвращает имя nft-цепочки для направления ('in' / 'out').
+
+    Args:
+      direction: "in" для входящего (CHAIN_IN, dport) или "out" для
+                 исходящего (CHAIN_OUT, sport).
+
+    Returns:
+      NFT_CHAIN_TELEMT_STATS_IN или NFT_CHAIN_TELEMT_STATS_OUT.
+    """
+    return NFT_CHAIN_TELEMT_STATS_IN if direction == "in" else NFT_CHAIN_TELEMT_STATS_OUT
 
 
+def _nft_jump_comment(direction: str) -> str:
+    """Comment-tag для jump-правила (INPUT→telemt_stats_in или OUTPUT→..._out)."""
+    return _COMMENT_JUMP_IN if direction == "in" else _COMMENT_JUMP_OUT
+
+
+def _nft_chain_exists(chain: str) -> bool:
+    """Проверяет существование nft-цепочки в таблице chimera.
+
+    Заменяет: `iptables -L <chain> -n` (returncode==0 означал существование).
+    Теперь: nft_chain_exists(table, chain) через `nft list chain inet chimera <chain>`.
+    """
+    return nft_chain_exists(table=NFT_TABLE_NAME, chain=chain, family=NFT_TABLE_FAMILY)
+
+
+def _nft_jump_exists(direction: str, port: int) -> bool:
+    """Проверяет наличие jump-правила INPUT→telemt_stats_in (или OUTPUT→..._out).
+
+    Заменяет: парсинг `iptables -L INPUT -v -n` с поиском строки вида
+              `tcp dpt:PORT  --  target=CHAIN_IN`. Требовало _TCP_PROTO_TOKENS
+              из-за бага `iptables -L -n` (протокол числом).
+    Теперь: nft_rule_exists(comment="telemt-stats-jump-in"/"-out") через
+            `nft -j list chain` — без проблем с числовым протоколом.
+    """
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME,
+        chain=NFT_CHAIN_INPUT if direction == "in" else NFT_CHAIN_OUTPUT,
+        comment=_nft_jump_comment(direction),
+        family=NFT_TABLE_FAMILY,
+    )
+
+
+def _nft_remove_all_jumps(direction: str) -> int:
+    """Удаляет ВСЕ jump-правила указанного направления (in/out).
+
+    Заменяет: цикл `iptables -D INPUT -p tcp --dport <port> -j CHAIN_IN` до
+              returncode!=0 (с защитным лимитом 50 итераций).
+    Теперь: один вызов nft_rule_delete_by_comment(table, "input"/"output",
+            comment=_nft_jump_comment(direction), max_iterations=50).
+    Возвращает количество удалённых правил.
+    """
+    parent_chain = NFT_CHAIN_INPUT if direction == "in" else NFT_CHAIN_OUTPUT
+    return nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=parent_chain,
+        comment=_nft_jump_comment(direction),
+        family=NFT_TABLE_FAMILY, max_iterations=50,
+    )
+
+
+# Legacy aliases — сохранены для обратной совместимости со старыми тестами
+# и любым внешним кодом, который мог импортировать эти имена. Делегируют в
+# новые nft-функции. Больше не делают прямых subprocess-вызовов `iptables`.
 def _ipt_chain_exists(chain: str) -> bool:
-    return _run(["iptables", "-L", chain, "-n"], capture=True).returncode == 0
+    """DEPRECATED (этап 1.5): alias для _nft_chain_exists.
+
+    Исторически проверял существование iptables-цепочки через
+    `iptables -L <chain> -n`. Теперь проверяет nft-цепочку.
+    """
+    # chain — legacy имя (CHAIN_IN/CHAIN_OUT = "TELEMT_STATS_IN/OUT").
+    # Мапируем на актуальное nft-имя.
+    nft_chain = (NFT_CHAIN_TELEMT_STATS_IN
+                 if chain == CHAIN_IN
+                 else NFT_CHAIN_TELEMT_STATS_OUT if chain == CHAIN_OUT
+                 else chain)
+    return _nft_chain_exists(nft_chain)
 
 
 def _ipt_jump_exists(parent: str, chain: str, port: int, direction: str) -> bool:
-    """Проверяет что в parent-цепочке (INPUT/OUTPUT) реально стоит
-    jump-правило `-j chain` для порта port.
+    """DEPRECATED (этап 1.5): alias для _nft_jump_exists(direction).
 
-    direction="dport" для INPUT (входящий — dport),
-    direction="sport" для OUTPUT (исходящий — sport).
-
-    Не полагается на успешный returncode `-D`+`-I` — эти команды с check=False
-    не бросают исключений, но и не гарантируют появления правила (например,
-    если iptables не имеет CAP_NET_ADMIN в контейнере, или ядро без
-    netfilter-модуля). Реально проверяем `iptables -L parent -v -n` и ищем
-    цепочку по имени в колонке target.
-
-    ВАЖНО про флаг -n: он делает числовым не только IP-адреса, но и ПОЛЕ
-    ПРОТОКОЛА — вместо текстового "tcp" в этой колонке стоит "6"
-    (IPPROTO_TCP). Реальный вывод с сервера:
-        119 15936 TELEMT_STATS_IN  6  --  *  *  0.0.0.0/0  0.0.0.0/0  tcp dpt:5000
-    Поэтому принимаем оба варианта через _TCP_PROTO_TOKENS = {"tcp", "6"}.
-    См. УРОК НА БУДУЩЕЕ выше.
+    Сигнатура сохранена для совместимости с тестами. Параметры parent/chain/port
+    игнорируются — теперь поиск идёт по comment-tag, а не по парсингу вывода.
+    direction: "dport" → "in", "sport" → "out".
     """
-    r = _run(["iptables", "-L", parent, "-v", "-n"], capture=True)
-    if r.returncode != 0:
-        return False
-    for line in r.stdout.splitlines():
-        parts = line.split()
-        # Формат: pkts bytes target prot opt in out source destination ...
-        # Нужно: target == chain, протокол tcp (или "6" при -n), и в строке
-        # есть порт.
-        if len(parts) < 10:
-            continue
-        target = parts[2]
-        if target != chain:
-            continue
-        prot = parts[3]
-        if prot not in _TCP_PROTO_TOKENS:
-            continue
-        # Ищем опцию dport/sport в строке (могут быть на разных позициях
-        # в зависимости от версии iptables).
-        line_lower = line.lower()
-        if direction == "dport" and f"dpt:{port}" not in line_lower:
-            continue
-        if direction == "sport" and f"spt:{port}" not in line_lower:
-            continue
-        return True
-    return False
+    direction_norm = "in" if direction == "dport" else "out"
+    return _nft_jump_exists(direction_norm, port)
 
 
 def _ipt_remove_all_jumps(parent: str, chain: str, port: int,
                           direction: str) -> int:
-    """Удаляет ВСЕ jump-правила parent → chain для порта, независимо
-    от того, сколько их накопилось. Возвращает количество удалённых
-    правил (для лога). Использует `_ipt_jump_exists()` для проверки
-    after each removal, а не полагается на returncode -D.
+    """DEPRECATED (этап 1.5): alias для _nft_remove_all_jumps(direction).
 
-    Зачем это нужно: пункт [3] «Включить / переинициализировать учёт
-    iptables» может нажиматься многократно (при диагностике). Текущий
-    код делал ОДИН вызов `-D ... -j CHAIN` перед ОДНИМ `-I ... -j CHAIN`
-    — это снижало риск дублирования, но не гарантировало его отсутствие:
-    `-D` удаляет только ОДНО совпадающее правило за вызов, не проверяет
-    результат, и если по какой-то причине правило встретилось дважды
-    (например, из-за более ранней версии кода без `-D` вообще, или
-    ручного вмешательства) — одно из дублей останется висеть, а после
-    `-I` добавится ещё одна свежая копия — правила будут накапливаться
-    с каждым нажатием [3].
-
-    Цикл удаления до исчерпания (с защитным лимитом 50 итераций на случай
-    непредвиденного поведения iptables — штатно никогда не достигается)
-    гарантирует, что после `_ipt_remove_all_jumps` останется РОВНО 0
-    jump-правил, и последующий единственный `-I` приведёт к РОВНО 1
-    правилу в финальном состоянии, сколько бы раз [3] ни нажимали.
+    Сигнатура сохранена для совместимости со старыми тестами. Параметры
+    parent/chain/port игнорируются.
     """
-    removed = 0
-    opt = "--dport" if direction == "dport" else "--sport"
-    # Защита от бесконечного цикла — 50 итераций хватит на любой реальный
-    # сценарий (даже если в INPUT скопилось 50 дублей из-за ручной правки).
-    for _ in range(50):
-        if not _ipt_jump_exists(parent, chain, port, direction):
-            break
-        r = _run(["iptables", "-D", parent, "-p", "tcp", opt, str(port),
-                  "-j", chain])
-        if r.returncode != 0:
-            break
-        removed += 1
-    return removed
+    direction_norm = "in" if direction == "dport" else "out"
+    return _nft_remove_all_jumps(direction_norm)
 
 
 def setup_iptables_accounting(port: int) -> bool:
     """
     Публичная функция — вызывается из mtproto.py при установке.
-    Создаёт цепочки TELEMT_STATS_IN / TELEMT_STATS_OUT.
-    Каждый вызов сначала очищает цепочки (flush), потом добавляет одно
-    правило — так избегаем дублирования счётчиков.
+    Создаёт nft-цепочки `telemt_stats_in` / `telemt_stats_out` в таблице
+    `inet chimera`, добавляет jump-правила из `input`/`output` и counter-правила
+    внутри этих цепочек.
+
+    Каждый вызов сначала очищает counter-цепочки и удаляет все jump-правила
+    (через nft_rule_delete_by_comment с max_iterations=50), потом добавляет
+    ровно по одному новому — так избегаем дублирования счётчиков.
 
     Возвращает True только если ВСЕ четыре проверки постфактум подтверждают
     факт установки:
-      • цепочка CHAIN_IN существует
-      • цепочка CHAIN_OUT существует
-      • jump-правило из INPUT в CHAIN_IN для порта port стоит
-      • jump-правило из OUTPUT в CHAIN_OUT для порта port стоит
+      • цепочка telemt_stats_in существует
+      • цепочка telemt_stats_out существует
+      • jump-правило из input в telemt_stats_in для порта port стоит
+      • jump-правило из output в telemt_stats_out для порта port стоит
 
-    Раньше возвращала None (implicit) и не проверяла результат — все
-    iptables-команды идут с check=False и не бросают исключений при провале,
-    поэтому try/except в mtproto._setup_accounting() почти никогда не
-    срабатывал, и установщик рапортовал «Учёт трафика активирован» даже
-    когда цепочки физически не создались (контейнер без CAP_NET_ADMIN,
-    ядро без netfilter, и т.п.).
-
-    Идемпотентность: при повторных вызовах (пункт [3] меню статистики
-    может нажиматься многократно при диагностике) — ГАРАНТИРОВАННО
-    удаляются ВСЕ ранее установленные jump-правила в INPUT/OUTPUT через
-    _ipt_remove_all_jumps() (цикл до исчерпания), и только потом
-    создаётся ровно одно новое. Не полагаемся на единственный -D.
-    Если удалено >1 правила — логируем как сигнал, что раньше копилось
-    дублирование (полезно для диагностики).
+    Миграция (этап 1.5):
+      • `iptables -N TELEMT_STATS_IN` → nft_chain_ensure("chimera", "telemt_stats_in")
+      • `iptables -I INPUT 1 -p tcp --dport <port> -j TELEMT_STATS_IN`
+        → nft_rule_insert("chimera", "input", "tcp dport <port> jump telemt_stats_in",
+          comment="telemt-stats-jump-in")
+      • `iptables -F TELEMT_STATS_IN`
+        → nft_chain_flush("chimera", "telemt_stats_in")
+      • `iptables -A TELEMT_STATS_IN -p tcp --dport <port> -j RETURN`
+        → nft_rule_add("chimera", "telemt_stats_in",
+          "tcp dport <port> counter return", comment="telemt-stats-counter")
+      • Постфактум-верификация через nft_chain_exists + nft_rule_exists(comment=...).
+        ВАЖНО: больше НЕ нужен _TCP_PROTO_TOKENS = {"tcp", "6"} — в nftables JSON
+        протокол всегда строка "tcp" (баг iptables -L -n исправлен переходом на nft).
     """
     _fail_reasons: list[str] = []
 
@@ -311,56 +374,84 @@ def setup_iptables_accounting(port: int) -> bool:
         except Exception:
             pass
 
-    for chain in (CHAIN_IN, CHAIN_OUT):
-        if not _ipt_chain_exists(chain):
-            _run(["iptables", "-N", chain])
+    # Если nft недоступен — немедленно возвращаем False (бессмысленно пытаться).
+    if not _nft_available():
+        _warn_local("nft binary not available — cannot setup accounting")
+        return False
+
+    # ── Создаём regular-цепочки (аналог `iptables -N CHAIN`) ────────────────
+    nft_chain_ensure(table=NFT_TABLE_NAME, chain=NFT_CHAIN_TELEMT_STATS_IN,
+                     family=NFT_TABLE_FAMILY)
+    nft_chain_ensure(table=NFT_TABLE_NAME, chain=NFT_CHAIN_TELEMT_STATS_OUT,
+                     family=NFT_TABLE_FAMILY)
 
     # ── ИДЕМПОТЕНТНАЯ ОЧИСТКА старых jump-правил ─────────────────────────────
     # Удаляем ВСЕ ранее установленные jump-правила (сколько бы их ни было —
-    # 0, 1 или больше) перед созданием нового. Цикл до исчерпания через
-    # _ipt_jump_exists(), а не один -D. Если >1 — логируем как сигнал
-    # копившегося дублирования (полезно для диагностики).
-    removed_in = _ipt_remove_all_jumps("INPUT", CHAIN_IN, port, "dport")
-    removed_out = _ipt_remove_all_jumps("OUTPUT", CHAIN_OUT, port, "sport")
+    # 0, 1 или больше) перед созданием новых. Цикл до исчерпания через
+    # nft_rule_delete_by_comment (ищет все правила с comment=tag и удаляет
+    # по handle). Если >1 — логируем как сигнал копившегося дублирования.
+    removed_in = _nft_remove_all_jumps("in")
+    removed_out = _nft_remove_all_jumps("out")
     if removed_in > 1:
         _info_local(
-            f"removed {removed_in} duplicate INPUT jump-rules to "
-            f"{CHAIN_IN} (dport={port}) — pre-existing duplication detected"
+            f"removed {removed_in} duplicate input jump-rules to "
+            f"{NFT_CHAIN_TELEMT_STATS_IN} (dport={port}) — pre-existing "
+            f"duplication detected"
         )
     if removed_out > 1:
         _info_local(
-            f"removed {removed_out} duplicate OUTPUT jump-rules to "
-            f"{CHAIN_OUT} (sport={port}) — pre-existing duplication detected"
+            f"removed {removed_out} duplicate output jump-rules to "
+            f"{NFT_CHAIN_TELEMT_STATS_OUT} (sport={port}) — pre-existing "
+            f"duplication detected"
         )
 
-    # INPUT → CHAIN_IN (ровно одно новое правило)
-    _run(["iptables", "-I", "INPUT", "1", "-p", "tcp", "--dport", str(port), "-j", CHAIN_IN])
-    _run(["iptables", "-F", CHAIN_IN])
-    _run(["iptables", "-A", CHAIN_IN, "-p", "tcp", "--dport", str(port),
-          "-m", "comment", "--comment", "telemt-rx", "-j", "RETURN"])
+    # input → telemt_stats_in (одно новое jump-правило с comment-tag)
+    nft_rule_insert(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        rule_spec=f"tcp dport {port} jump {NFT_CHAIN_TELEMT_STATS_IN}",
+        comment=_COMMENT_JUMP_IN, family=NFT_TABLE_FAMILY, idempotent=False,
+    )
+    # output → telemt_stats_out
+    nft_rule_insert(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+        rule_spec=f"tcp sport {port} jump {NFT_CHAIN_TELEMT_STATS_OUT}",
+        comment=_COMMENT_JUMP_OUT, family=NFT_TABLE_FAMILY, idempotent=False,
+    )
 
-    # OUTPUT → CHAIN_OUT (ровно одно новое правило)
-    _run(["iptables", "-I", "OUTPUT", "1", "-p", "tcp", "--sport", str(port), "-j", CHAIN_OUT])
-    _run(["iptables", "-F", CHAIN_OUT])
-    _run(["iptables", "-A", CHAIN_OUT, "-p", "tcp", "--sport", str(port),
-          "-m", "comment", "--comment", "telemt-tx", "-j", "RETURN"])
+    # ── Flush + counter-rules в самих цепочках ───────────────────────────────
+    # flush убирает старые counter-правила (если были), потом добавляем ровно
+    # одно новое. Counter встроен в правило (не named counter), поэтому
+    # `nft_chain_flush` + `nft_rule_add` эквивалентно `iptables -F && iptables -A`.
+    nft_chain_flush(table=NFT_TABLE_NAME, chain=NFT_CHAIN_TELEMT_STATS_IN,
+                    family=NFT_TABLE_FAMILY)
+    nft_chain_flush(table=NFT_TABLE_NAME, chain=NFT_CHAIN_TELEMT_STATS_OUT,
+                    family=NFT_TABLE_FAMILY)
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_TELEMT_STATS_IN,
+        rule_spec=f"tcp dport {port} counter return",
+        comment=_COMMENT_STATS_COUNTER, family=NFT_TABLE_FAMILY, idempotent=False,
+    )
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_TELEMT_STATS_OUT,
+        rule_spec=f"tcp sport {port} counter return",
+        comment=_COMMENT_STATS_COUNTER, family=NFT_TABLE_FAMILY, idempotent=False,
+    )
 
     # ── Постфактум-верификация ───────────────────────────────────────────────
     # Все 4 проверки обязаны пройти. Если хотя бы одна не прошла — возвращаем
-    # False и логируем конкретную причину, чтобы администратор мог
-    # диагностировать (а не получить молчаливое «учёт активирован»).
-    if not _ipt_chain_exists(CHAIN_IN):
-        _warn_local(f"chain {CHAIN_IN} does not exist after iptables -N")
-    if not _ipt_chain_exists(CHAIN_OUT):
-        _warn_local(f"chain {CHAIN_OUT} does not exist after iptables -N")
-    if not _ipt_jump_exists("INPUT", CHAIN_IN, port, "dport"):
-        _warn_local(f"INPUT jump-rule to {CHAIN_IN} for dport={port} not found")
-    if not _ipt_jump_exists("OUTPUT", CHAIN_OUT, port, "sport"):
-        _warn_local(f"OUTPUT jump-rule to {CHAIN_OUT} for sport={port} not found")
+    # False и логируем конкретную причину.
+    if not _nft_chain_exists(NFT_CHAIN_TELEMT_STATS_IN):
+        _warn_local(f"chain {NFT_CHAIN_TELEMT_STATS_IN} does not exist after nft_chain_ensure")
+    if not _nft_chain_exists(NFT_CHAIN_TELEMT_STATS_OUT):
+        _warn_local(f"chain {NFT_CHAIN_TELEMT_STATS_OUT} does not exist after nft_chain_ensure")
+    if not _nft_jump_exists("in", port):
+        _warn_local(f"input jump-rule to {NFT_CHAIN_TELEMT_STATS_IN} for dport={port} not found")
+    if not _nft_jump_exists("out", port):
+        _warn_local(f"output jump-rule to {NFT_CHAIN_TELEMT_STATS_OUT} for sport={port} not found")
 
     if _fail_reasons:
         # Не Critical-fail cron-установку и persist — эти шаги могут
-        # пригодиться при ручной починке iptables. Но возвращаем False,
+        # пригодиться при ручной починке nftables. Но возвращаем False,
         # чтобы mtproto.py показал честный warn, а не фейковый success.
         pass
 
@@ -369,15 +460,15 @@ def setup_iptables_accounting(port: int) -> bool:
     # v5.1: проверка лимитов раньше шла через bare `python3 -c "from
     # chimera.modules.mtproto import mtproto_check_limits; ..."` — это
     # НЕ работало, потому что cron запускается с произвольной cwd и без
-    # PYTHONPATH, и `from chimera...` падал с ModuleNotFoundError
-    # (подтверждено трейсбеком с реального сервера пользователя zvshka).
-    # Квоты/expiry Telemt НИКОГДА реально не проверялись через cron.
-    #
+    # PYTHONPATH, и `from chimera...` падал с ModuleNotFoundError.
     # Паттерн исправления — wrapper bash-скрипт (как в
-    # node_health_monitor.py::install_health_monitor и
-    # geo_files.py::setup_geo_autoupdate): находим путь установки
-    # chimera, экспорим PYTHONPATH, вызываем python -c с
-    # sys.path.insert(0, ...). Cron-файл просто вызывает wrapper.
+    # node_health_monitor.py::install_health_monitor и geo_files.py).
+    #
+    # v6 (этап 1.5): nightly counter-reset тоже делается через wrapper
+    # bash-скрипт, потому что counter в nftables встроен в правило (нет
+    # отдельной команды `nft counter zero` для rule-counter'ов) — нужно
+    # flush + re-add rule. Bare `nft` команда в cron слишком сложна для
+    # одной строки, поэтому вызываем Python.
 
     # Находим путь установки chimera (тот же способ, что в
     # node_health_monitor.py::install_health_monitor).
@@ -393,9 +484,7 @@ def setup_iptables_accounting(port: int) -> bool:
     except Exception:
         installer_path = "/opt/chimera"
 
-    # Wrapper bash-скрипт: export PYTHONPATH + sys.path.insert + python -c.
-    # Ошибки записи wrapper-скрипта НЕ должны блокировать запись cron-файла
-    # (могут быть разные причины: read-only fs, отсутствие /usr/local/sbin и пр.)
+    # Wrapper bash-скрипт для проверки лимитов (как раньше).
     try:
         script_content = (
             "#!/bin/bash\n"
@@ -413,12 +502,32 @@ def setup_iptables_accounting(port: int) -> bool:
     except Exception:
         pass
 
-    # Cron-файл: сброс iptables-счётчиков в 00:00 (pure shell, без python)
-    # + проверка лимитов каждые 5 мин (через wrapper-скрипт).
+    # Wrapper bash-скрипт для nightly counter-reset (новый в этапе 1.5).
+    # Вызывает _reset_accounting() — flush + re-add counter rules.
+    try:
+        reset_content = (
+            "#!/bin/bash\n"
+            f"# Telemt stats counter reset (wrapper для cron; v6/этап-1.5: PYTHONPATH-safe).\n"
+            f"# Заменяет bare `iptables -Z TELEMT_STATS_IN && iptables -Z TELEMT_STATS_OUT`.\n"
+            f"# nftables counter встроен в правило, поэтому нужен Python для flush+re-add.\n"
+            f"export PYTHONPATH=\"{installer_path}:$PYTHONPATH\"\n"
+            f"/usr/bin/python3 -c \"\n"
+            f"import sys\n"
+            f"sys.path.insert(0, '{installer_path}')\n"
+            f"from chimera.modules.mtproto_stats import _reset_accounting\n"
+            f"_reset_accounting()\n"
+            f"\" # telemt-stats-reset\n"
+        )
+        RESET_COUNTERS_SCRIPT.write_text(reset_content)
+        RESET_COUNTERS_SCRIPT.chmod(0o755)
+    except Exception:
+        pass
+
+    # Cron-файл: nightly reset счётчиков через wrapper (00:00)
+    # + проверка лимитов каждые 5 мин через wrapper (как раньше).
     try:
         CRON_FILE.write_text(
-            f"0 0 * * * root iptables -Z {CHAIN_IN} && iptables -Z {CHAIN_OUT}"
-            f"  # telemt-stats\n"
+            f"0 0 * * * root {RESET_COUNTERS_SCRIPT} # telemt-stats-reset\n"
             f"*/5 * * * * root {LIMITS_CHECK_SCRIPT} # telemt-limits-check\n"
         )
         CRON_FILE.chmod(0o644)
@@ -426,53 +535,104 @@ def setup_iptables_accounting(port: int) -> bool:
         pass
 
     # ── Persist ──────────────────────────────────────────────────────────────
-    # Без этого шага цепочки TELEMT_STATS_IN/OUT и джамп-правила в INPUT/OUTPUT
-    # живут только в runtime-таблице iptables и пропадают после любого ребута
-    # сервера (обновление ядра, рестарт VPS) — учёт трафика "перестаёт
-    # работать", хотя сам код _collect()/_read_chain_bytes() ни в чём не
-    # виноват. SYN-limiter и iOS-фикс уже сохраняют свои правила аналогично —
-    # учёт трафика был единственным исключением.
+    # Сохраняем nft ruleset в /etc/nftables.conf через единый nftables.service.
+    # Заменяет netfilter-persistent save + iptables-save > /etc/iptables/rules.v4.
     _persist_accounting_rules()
 
     return len(_fail_reasons) == 0
 
 def _persist_accounting_rules() -> None:
     """
-    Сохраняет текущие iptables-правила (включая TELEMT_STATS_IN/OUT) тем же
-    best-effort способом, что используется в telemt_syn_limiter.py /
-    telemt_ios_fix.py: netfilter-persistent, либо iptables-save в rules.v4.
+    Сохраняет текущий nft ruleset (включая telemt_stats_in/out, jump-правила
+    и counter-rules) в /etc/nftables.conf через единый nftables.service.
+
+    Заменяет (best-effort persist-логика):
+      • `netfilter-persistent save` (если установлен)
+      • Fallback: `iptables-save > /etc/iptables/rules.v4`
+    Теперь: один вызов `nft_persist()` → `nft list ruleset > /etc/nftables.conf`
+            + включение встроенного `nftables.service` через
+            `nft_persist_enable_systemd()`. При ребуте системы стандартный
+            nftables.service читает /etc/nftables.conf через `nft -f` и
+            восстанавливает ВСЕ правила Chimera.
+
+    Не падает, если nft недоступен — правило просто не переживёт перезагрузку,
+    что некритично (модуль можно повторно активировать через меню).
     """
-    if shutil.which("netfilter-persistent"):
-        _run(["netfilter-persistent", "save"])
+    if not _nft_available():
         return
-    rules_path = Path("/etc/iptables/rules.v4")
-    if rules_path.parent.exists():
-        try:
-            r = _run(["iptables-save"], capture=True)
-            if r.returncode == 0 and r.stdout:
-                rules_path.write_text(r.stdout)
-        except Exception:
-            pass
+    try:
+        nft_persist(NFT_PERSIST_FILE)
+        from .nft_common import nft_persist_enable_systemd
+        nft_persist_enable_systemd()
+    except Exception:
+        pass
 
 def _read_chain_bytes(chain: str) -> int:
     """
-    Читает байты из цепочки iptables.
-    Берём ТОЛЬКО первую строку правила (pkts bytes target …),
-    чтобы не задваивать при дублях.
+    Читает байты из counter-правила в nft-цепочке.
+
+    Заменяет: парсинг `iptables -L <chain> -v -n -x` с извлечением 2-й колонки
+              (bytes) первой строки правила.
+    Теперь: nft_rule_counter_read(table, <nft_chain>, comment="telemt-stats-counter")
+            → JSON-парсинг `nft -j list chain inet chimera <chain>` → counter expr.
+
+    Берёт ТОЛЬКО первое правило с comment=telemt-stats-counter (chain flush
+    перед добавлением гарантирует, что такое правило ровно одно — без
+    дублирования при повторных вызовах setup_iptables_accounting).
+
+    Args:
+      chain: legacy имя цепочки (CHAIN_IN="TELEMT_STATS_IN" или
+             CHAIN_OUT="TELEMT_STATS_OUT"). Мапируется на актуальное
+             nft-имя из nft_constants.
     """
-    r = _run(["iptables", "-L", chain, "-v", "-n", "-x"], capture=True)
-    for line in r.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit():
-            return int(parts[1])
-    return 0
+    nft_chain = (NFT_CHAIN_TELEMT_STATS_IN
+                 if chain == CHAIN_IN
+                 else NFT_CHAIN_TELEMT_STATS_OUT if chain == CHAIN_OUT
+                 else chain)
+    cnt = nft_rule_counter_read(
+        table=NFT_TABLE_NAME, chain=nft_chain,
+        comment=_COMMENT_STATS_COUNTER, family=NFT_TABLE_FAMILY,
+    )
+    return int(cnt.get("bytes", 0))
 
 def _reset_accounting() -> None:
-    for chain in (CHAIN_IN, CHAIN_OUT):
-        _run(["iptables", "-Z", chain])
+    """Сбрасывает counter-правила в telemt_stats_in/out (аналог `iptables -Z`).
+
+    Реализация: nft_chain_flush + nft_rule_add повторно для каждой цепочки.
+    Counter в nftables встроен в правило (не named counter), поэтому
+    отдельной команды `nft counter zero` для rule-counter'ов нет — пересоздание
+    правила даёт тот же эффект (counter снова начинает считать с 0).
+
+    Порт telemt берётся из CONFIG_FILE (если доступен), иначе fallback 8443.
+    """
+    if not _nft_available():
+        return
+    port = _get_port()
+    # Flush обеих цепочек
+    nft_chain_flush(table=NFT_TABLE_NAME, chain=NFT_CHAIN_TELEMT_STATS_IN,
+                    family=NFT_TABLE_FAMILY)
+    nft_chain_flush(table=NFT_TABLE_NAME, chain=NFT_CHAIN_TELEMT_STATS_OUT,
+                    family=NFT_TABLE_FAMILY)
+    # Re-add counter rules (counter снова начинает считать с 0)
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_TELEMT_STATS_IN,
+        rule_spec=f"tcp dport {port} counter return",
+        comment=_COMMENT_STATS_COUNTER, family=NFT_TABLE_FAMILY, idempotent=False,
+    )
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_TELEMT_STATS_OUT,
+        rule_spec=f"tcp sport {port} counter return",
+        comment=_COMMENT_STATS_COUNTER, family=NFT_TABLE_FAMILY, idempotent=False,
+    )
 
 def _accounting_active() -> bool:
-    return _ipt_chain_exists(CHAIN_IN) and _ipt_chain_exists(CHAIN_OUT)
+    """Проверяет что nft-цепочки учёта существуют.
+
+    Заменяет: `_ipt_chain_exists(CHAIN_IN) and _ipt_chain_exists(CHAIN_OUT)`.
+    Теперь: nft_chain_exists для обоих nft-имён.
+    """
+    return (_nft_chain_exists(NFT_CHAIN_TELEMT_STATS_IN)
+            and _nft_chain_exists(NFT_CHAIN_TELEMT_STATS_OUT))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1059,7 +1219,7 @@ def _render_stats(d: dict, realtime: bool = False, max_days: int = 1) -> None:
     _box_kv("Сервис:", svc_str)
     _box_kv("Обновлено:", ts)
     _box_kv("Учёт с:", since)
-    _box_kv("Accounting:", (f"{GREEN}iptables активен{NC}" if ipt_ok
+    _box_kv("Accounting:", (f"{GREEN}nftables активен{NC}" if ipt_ok
                            else f"{YELLOW}нет (journalctl){NC}"))
     _box_row(); _box_sep()
 
@@ -1131,7 +1291,7 @@ def _render_stats(d: dict, realtime: bool = False, max_days: int = 1) -> None:
     else:
         _box_item("1", "🔄  Обновить сейчас")
         _box_item("2", "📡  Режим реального времени (5с)")
-        _box_item("3", "⚡  Включить / переинициализировать учёт iptables")
+        _box_item("3", "⚡  Включить / переинициализировать учёт nftables")
         _box_item("4", "🗑️   Сбросить статистику")
         _box_item("5", "🔍  Диагностика Telemt API (для панели)")
         _box_sep()
@@ -1196,7 +1356,7 @@ def stats_menu() -> None:
                     d["ipt_ok"] = True
                     d["total"]["since"] = _now_str()
                     _save_stats(d)
-                    print(f"\n  {GREEN}✓  iptables-учёт активирован.{NC}")
+                    print(f"\n  {GREEN}✓  nftables-учёт активирован.{NC}")
                     print(f"  {GREEN}✓  Cron-сброс счётчиков в 00:00 установлен.{NC}")
                 else:
                     # setup_iptables_accounting вернула False — постфактум-
@@ -1204,18 +1364,18 @@ def stats_menu() -> None:
                     # не появились. Детали уже залогированы в chimera.log.
                     d["ipt_ok"] = False
                     _save_stats(d)
-                    print(f"\n  {YELLOW}⚠  iptables-учёт НЕ активирован.{NC}")
+                    print(f"\n  {YELLOW}⚠  nftables-учёт НЕ активирован.{NC}")
                     print(f"  {YELLOW}  Постфактум-верификация обнаружила, что цепочки "
-                          f"TELEMT_STATS_IN/OUT{NC}")
-                    print(f"  {YELLOW}  или jump-правила из INPUT/OUTPUT не создались.{NC}")
+                          f"telemt_stats_in/out{NC}")
+                    print(f"  {YELLOW}  или jump-правила из input/output не создались.{NC}")
                     print(f"  {DIM}  Возможные причины: контейнер без CAP_NET_ADMIN, "
                           f"ядро без netfilter-модуля,{NC}")
-                    print(f"  {DIM}  iptables-nft vs iptables-legacy конфликт, или "
-                          f"правила уже существуют в другой таблице.{NC}")
+                    print(f"  {DIM}  nft binary недоступен или /etc/nftables.conf "
+                          f"нечитаем.{NC}")
                     print(f"  {DIM}  Подробности — в /var/log/chimera.log "
                           f"(WARN от mtproto_stats.setup_iptables_accounting).{NC}")
             except Exception as e:
-                print(f"\n  {YELLOW}⚠  Не удалось настроить iptables: {e}{NC}")
+                print(f"\n  {YELLOW}⚠  Не удалось настроить nftables: {e}{NC}")
             _pause()
 
         elif ch == "4":
