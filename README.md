@@ -116,7 +116,7 @@ sudo python3 main.py
 | [`TELEMT_FAQ.md`](docs/faq/TELEMT_FAQ.md) | Telemt (MTProto Proxy) — установка, режимы Middle Proxy / Direct, xray-интеграция, SYN Limiter, фрагментация TLS |
 | [`VLESS_FAQ.md`](docs/faq/VLESS_FAQ.md) | VLESS/Reality — установка, конфигурация, XOR/CDN-маскировка, разбор типовых проблем |
 | [`HYSTERIA2.md`](docs/faq/HYSTERIA2.md) | Hysteria2 транспорт — UDP-протокол на базе QUIC, выбор при установке |
-| [`SECURITY_BAN_FAQ.md`](docs/faq/SECURITY_BAN_FAQ.md) | AutoBan / Honeypot / IP-Ban — три модуля защиты от сканеров и DPI-зондов: сравнительная таблица, комбинации, диагностика, бан ASN |
+| [`SECURITY_BAN_FAQ.md`](docs/faq/SECURITY_BAN_FAQ.md) | AutoBan / Honeypot / IP-Ban / GeoIP Block / РФ-блокировка — пять модулей защиты от сканеров и DPI-зондов: сравнительная таблица, комбинации, диагностика, бан ASN |
 
 ## 🗂️ Структура проекта
 
@@ -134,7 +134,7 @@ Chimera-Project/
 │   ├── TELEMT_FAQ.md            #   Telemt (MTProto Proxy)
 │   ├── VLESS_FAQ.md             #   VLESS/Reality
 │   ├── HYSTERIA2.md             #   Hysteria2 транспорт
-│   └── SECURITY_BAN_FAQ.md      #   AutoBan / Honeypot / IP-Ban
+│   └── SECURITY_BAN_FAQ.md      #   AutoBan / Honeypot / IP-Ban / GeoIP Block / РФ-блокировка
 ├── LICENSE
 └── chimera/
     ├── __init__.py
