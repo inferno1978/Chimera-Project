@@ -267,120 +267,113 @@ class TestBuildRedirectRuleArgs(unittest.TestCase):
 # =============================================================================
 class TestIptablesHelpers(unittest.TestCase):
     """_ipt_rule_exists / _ipt_add_rule_idempotent / _ipt_delete_rule —
-    мок subprocess.run."""
+    теперь мок nft_common (этап 1.3 миграции).
+
+    Старая реализация мокала subprocess.run для iptables -C/-A/-D.
+    Новая реализация использует nft_common.nft_rule_exists/add/delete_by_comment.
+    Сигнатуры сохранены для обратной совместимости с callers.
+    """
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def _mock_run(self, returncode=0, stdout=""):
-        """Создаёт MagicMock для subprocess.run с заданным returncode."""
-        m = MagicMock()
-        m.returncode = returncode
-        m.stdout = stdout
-        m.stderr = ""
-        return m
-
-    def test_rule_exists_returns_true_when_check_succeeds(self):
-        """-C возвращает 0 → правило существует."""
+    def test_rule_exists_returns_true_when_nft_returns_true(self):
+        """nft_rule_exists возвращает True → _ipt_rule_exists тоже True."""
         from chimera.modules import dns_redirect
-        with patch("chimera.modules.dns_redirect._run",
-                   return_value=self._mock_run(0)):
+        with patch("chimera.modules.dns_redirect.nft_rule_exists", return_value=True):
             exists = dns_redirect._ipt_rule_exists(
                 "iptables", "nat", "PREROUTING",
-                ["-i", "awg0", "-p", "udp"],
+                ["-i", "awg0", "-p", "udp", "--comment", "xray-dns-redirect"],
             )
         self.assertTrue(exists)
 
-    def test_rule_exists_returns_false_when_check_fails(self):
-        """-C возвращает 1 → правило не существует."""
+    def test_rule_exists_returns_false_when_nft_returns_false(self):
+        """nft_rule_exists возвращает False → _ipt_rule_exists тоже False."""
         from chimera.modules import dns_redirect
-        with patch("chimera.modules.dns_redirect._run",
-                   return_value=self._mock_run(1)):
+        with patch("chimera.modules.dns_redirect.nft_rule_exists", return_value=False):
             exists = dns_redirect._ipt_rule_exists(
                 "iptables", "nat", "PREROUTING",
-                ["-i", "awg0", "-p", "udp"],
+                ["-i", "awg0", "-p", "udp", "--comment", "xray-dns-redirect"],
             )
         self.assertFalse(exists)
 
-    def test_add_idempotent_skips_when_rule_exists(self):
-        """Если правило уже есть (-C=0), -A НЕ вызывается."""
+    def test_rule_exists_returns_false_without_comment(self):
+        """Без --comment в rule_args — нельзя искать в nft → False."""
         from chimera.modules import dns_redirect
-        with patch("chimera.modules.dns_redirect._run",
-                   return_value=self._mock_run(0)) as run_mock:
+        with patch("chimera.modules.dns_redirect.nft_rule_exists", return_value=True):
+            exists = dns_redirect._ipt_rule_exists(
+                "iptables", "nat", "PREROUTING",
+                ["-i", "awg0", "-p", "udp"],  # без --comment
+            )
+        self.assertFalse(exists)
+
+    def test_add_idempotent_calls_nft_rule_add(self):
+        """_ipt_add_rule_idempotent вызывает nft_rule_add с idempotent=True."""
+        from chimera.modules import dns_redirect
+        with patch("chimera.modules.dns_redirect.nft_rule_add", return_value=True) as mock_add:
             ok = dns_redirect._ipt_add_rule_idempotent(
                 "iptables", "nat", "PREROUTING",
                 ["-i", "awg0", "-p", "udp", "--dport", "53",
-                 "-j", "REDIRECT", "--to-ports", "5300"],
+                 "-j", "REDIRECT", "--to-ports", "5300",
+                 "-m", "comment", "--comment", "xray-dns-redirect"],
             )
         self.assertTrue(ok)
-        # _run вызван ОДИН раз (только -C, без -A)
-        self.assertEqual(run_mock.call_count, 1)
-        # Проверяем что это был -C (check), а не -A (add)
-        called_cmd = run_mock.call_args[0][0]
-        self.assertIn("-C", called_cmd)
-        self.assertNotIn("-A", called_cmd)
+        mock_add.assert_called_once()
+        # Проверяем что передан правильный comment
+        _, kwargs = mock_add.call_args
+        self.assertEqual(kwargs.get("comment"), "xray-dns-redirect")
+        # Проверяем что spec содержит iifname и udp dport
+        spec = kwargs.get("rule_spec", "")
+        self.assertIn('iifname "awg0"', spec)
+        self.assertIn("udp dport 53", spec)
+        self.assertIn("redirect to :5300", spec)
+        self.assertTrue(kwargs.get("idempotent"))
 
-    def test_add_idempotent_adds_when_rule_absent(self):
-        """Если правила нет (-C=1), вызывается -A."""
+    def test_add_idempotent_returns_false_on_failure(self):
+        """Если nft_rule_add возвращает False — _ipt_add_rule_idempotent тоже False."""
         from chimera.modules import dns_redirect
-        # Первый вызов (-C) возвращает 1 (правила нет),
-        # второй вызов (-A) возвращает 0 (успех)
-        with patch("chimera.modules.dns_redirect._run",
-                   side_effect=[self._mock_run(1), self._mock_run(0)]) as run_mock:
+        with patch("chimera.modules.dns_redirect.nft_rule_add", return_value=False):
             ok = dns_redirect._ipt_add_rule_idempotent(
                 "iptables", "nat", "PREROUTING",
-                ["-i", "awg0", "-p", "udp"],
-            )
-        self.assertTrue(ok)
-        # _run вызван ДВАЖДЫ: -C затем -A
-        self.assertEqual(run_mock.call_count, 2)
-        first_cmd = run_mock.call_args_list[0][0][0]
-        second_cmd = run_mock.call_args_list[1][0][0]
-        self.assertIn("-C", first_cmd)
-        self.assertIn("-A", second_cmd)
-
-    def test_add_idempotent_returns_false_on_add_failure(self):
-        """Если -A падает, возвращается False."""
-        from chimera.modules import dns_redirect
-        with patch("chimera.modules.dns_redirect._run",
-                   side_effect=[self._mock_run(1), self._mock_run(2)]):  # -C=1, -A=2 (fail)
-            ok = dns_redirect._ipt_add_rule_idempotent(
-                "iptables", "nat", "PREROUTING",
-                ["-i", "awg0"],
+                ["-i", "awg0", "--comment", "xray-dns-redirect"],
             )
         self.assertFalse(ok)
 
-    def test_delete_rule_returns_true_when_deleted(self):
+    def test_delete_rule_calls_nft_delete_by_comment(self):
+        """_ipt_delete_rule вызывает nft_rule_delete_by_comment."""
         from chimera.modules import dns_redirect
-        with patch("chimera.modules.dns_redirect._run",
-                   return_value=self._mock_run(0)):
+        with patch("chimera.modules.dns_redirect.nft_rule_delete_by_comment",
+                   return_value=1) as mock_del:
             ok = dns_redirect._ipt_delete_rule(
                 "iptables", "nat", "PREROUTING",
-                ["-i", "awg0", "-p", "udp"],
+                ["-i", "awg0", "--comment", "xray-dns-redirect"],
             )
         self.assertTrue(ok)
+        mock_del.assert_called_once()
+        _, kwargs = mock_del.call_args
+        self.assertEqual(kwargs.get("comment"), "xray-dns-redirect")
 
-    def test_delete_rule_returns_true_when_rule_absent(self):
-        """-D возвращает 1 если правила нет — это OK для идемпотентности."""
+    def test_delete_rule_returns_true_when_no_rules_found(self):
+        """Если nft_rule_delete_by_comment возвращает 0 (нет правил) — это OK."""
         from chimera.modules import dns_redirect
-        with patch("chimera.modules.dns_redirect._run",
-                   return_value=self._mock_run(1)):
+        with patch("chimera.modules.dns_redirect.nft_rule_delete_by_comment",
+                   return_value=0):
             ok = dns_redirect._ipt_delete_rule(
                 "iptables", "nat", "PREROUTING",
-                ["-i", "awg0"],
+                ["-i", "awg0", "--comment", "xray-dns-redirect"],
+            )
+        self.assertTrue(ok)  # 0 удалено = правил не было = OK
+
+    def test_delete_rule_returns_true_even_on_no_comment(self):
+        """Даже без --comment в rule_args — _ipt_delete_rule не падает."""
+        from chimera.modules import dns_redirect
+        with patch("chimera.modules.dns_redirect.nft_rule_delete_by_comment",
+                   return_value=0):
+            ok = dns_redirect._ipt_delete_rule(
+                "iptables", "nat", "PREROUTING",
+                ["-i", "awg0"],  # без --comment
             )
         self.assertTrue(ok)
-
-    def test_delete_rule_returns_false_on_unexpected_error(self):
-        """-D возвращает 2 (не 0 и не 1) — это ошибка."""
-        from chimera.modules import dns_redirect
-        with patch("chimera.modules.dns_redirect._run",
-                   return_value=self._mock_run(2)):
-            ok = dns_redirect._ipt_delete_rule(
-                "iptables", "nat", "PREROUTING",
-                ["-i", "awg0"],
-            )
-        self.assertFalse(ok)
 
 
 # =============================================================================
@@ -1026,6 +1019,8 @@ class TestBug2CheckRulesAppliedUsesPassedPort(unittest.TestCase):
                    return_value=True), \
              patch("chimera.modules.dns_redirect._ipt_rule_exists",
                    side_effect=rule_exists_checker), \
+             patch("chimera.modules.dns_redirect.nft_rule_exists",
+                   return_value=True), \
              patch("chimera.modules.dns_redirect.get_dnscrypt_listen_ipv6",
                    return_value=False):
             # НЕ мокаем _check_rules_applied — пусть реально вызывается
@@ -1035,15 +1030,16 @@ class TestBug2CheckRulesAppliedUsesPassedPort(unittest.TestCase):
             # оригинальный /var/lib/... (которого нет в CI)
             state = dns_redirect.state_load()
 
-        # Если бы _check_rules_applied использовал get_dnscrypt_port() (5300),
-        # то rule_exists_checker не нашёл бы '6000' в rule_args и вернул бы False
-        # → applied_v4=False → success=False.
-        # На фиксе: _check_rules_applied использует port=6000 → rule_exists_checker
-        # находит '6000' → applied_v4=True → success=True.
+        # В новой nft-реализации _check_rules_applied использует comment-tag
+        # для проверки существования правила (не порт). Мок nft_rule_exists
+        # возвращает True → applied_v4=True → success=True.
+        # Баг, который тестировался ранее (использование get_dnscrypt_port()
+        # вместо переданного порта), в новой архитектуре структурно невозможен —
+        # _check_rules_applied больше не использует port для поиска правила.
         self.assertTrue(result["success"],
                         f"Expected success=True with port=6000, got: {result}")
         self.assertTrue(result["applied_v4"],
-                        "applied_v4 should be True when rules for port=6000 exist")
+                        "applied_v4 should be True when rules exist")
 
         # State должен сохранить target_port=6000 (не 5300 из TOML)
         self.assertEqual(state.get("target_port"), 6000,
