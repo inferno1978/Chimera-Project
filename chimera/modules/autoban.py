@@ -4,18 +4,28 @@ chimera/modules/autoban.py
 Авто-бан IP по ошибкам TLS handshake (без Fail2ban).
 
 Содержит интерактивный экран «Авто-бан IP (TLS handshake ошибки)» и helpers
-для сканирования error.log, блокировки/разблокировки IP через UFW/iptables,
-ротации читаемого отчёта и установки cron-задачи:
+для сканирования error.log, блокировки/разблокировки IP через UFW или
+прямые nft-правила (fallback если ufw не установлен), ротации читаемого
+отчёта и установки cron-задачи:
 
   • _ban_report_rotate()           — удаление отчёта старше 7 дней
   • _ban_report_append(...)        — запись одного бана в текстовый отчёт
   • _ban_report_show_in_box()      — вывод отчёта в рамке под таблицей истории
   • _autoban_load()/_save(data)    — чтение/запись state autoban.json
   • _autoban_get_chain_ips()       — IP нод каскада для автоматического whitelist
-  • _fw_ban/_fw_unban (private)    — блокировка/разблокировка через ufw/iptables
+  • _fw_ban/_fw_unban (private)    — блокировка/разблокировка через ufw/nft
   • _autoban_run_once()            — CLI entry point для --autoban
   • _autoban_install_cron(t, w)    — установка cron-задачи (5 мин)
   • do_manage_autoban()            — интерактивное меню управления
+
+МИГРАЦИЯ (этап 1.1):
+  • iptables fallback (Debian 13/no-ufw системы) → прямой nft через nft_common
+  • Семантика идентична: правило `ip saddr <ip> drop comment "xray-autoban"`
+    в начале цепочки input (insert position=1, чтобы DROP был ПЕРЕД accept).
+  • UFW path сохранён (UFW 0.36+ уже использует nftables backend по умолчанию,
+    это не противоречит миграции).
+  • Cron-скрипт (standalone Python) обновлён: использует `nft` binary напрямую
+    вместо `iptables`.
 
 Точки входа из _core.py:
     from chimera.modules.autoban import (
@@ -44,6 +54,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# nftables — centralized wrapper for `nft` CLI (этап 1.1 миграции)
+from .nft_common import nft_ban_ip, nft_unban_ip
+from .nft_constants import COMMENT_AUTOBAN_BAN
 
 
 # =============================================================================
@@ -287,7 +301,15 @@ def _autoban_get_chain_ips() -> list[str]:
 
 
 def _fw_ban(ip: str) -> bool:
-    """Банит IP через ufw если доступен, иначе через iptables. Возвращает True при успехе."""
+    """Банит IP через ufw если доступен, иначе через nftables.
+
+    Возвращает True при успехе.
+
+    Заменяет iptables fallback (этап 1.1): прямой `nft add rule ... ip saddr
+    <ip> drop comment "xray-autoban"` через nft_common.nft_ban_ip.
+    Семантика идентична iptables -I INPUT 1 (правило вставляется в начало
+    цепочки input, перед любыми ACCEPT).
+    """
     core = _core_module()
     _run = core._run
 
@@ -296,15 +318,18 @@ def _fw_ban(ip: str) -> bool:
         r = _run(["ufw", "deny", "from", ip, "to", "any", "comment", "xray-autoban"],
                  check=False, quiet=True)
         return r.returncode == 0
-    # Fallback: iptables (Debian 13 / nftables системы без ufw)
-    r = _run(["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP",
-              "-m", "comment", "--comment", "xray-autoban"],
-             check=False, quiet=True)
-    return r.returncode == 0
+    # Fallback: nftables (Debian 13 / системы без ufw)
+    # nft_ban_ip использует nft_rule_insert → position=1 (аналог -I INPUT 1)
+    return nft_ban_ip(ip, comment=COMMENT_AUTOBAN_BAN)
 
 
 def _fw_unban(ip: str) -> bool:
-    """Разбанивает IP через ufw или iptables."""
+    """Разбанивает IP через ufw или nftables.
+
+    Заменяет iptables fallback (этап 1.1): nft_unban_ip находит все правила
+    с comment="xray-autoban" и совпадающим saddr, удаляет через handle.
+    Возвращает True если удалено ≥1 правила.
+    """
     core = _core_module()
     _run = core._run
 
@@ -313,10 +338,9 @@ def _fw_unban(ip: str) -> bool:
         r = _run(["ufw", "delete", "deny", "from", ip, "to", "any"],
                  check=False, quiet=True)
         return r.returncode == 0
-    r = _run(["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP",
-              "-m", "comment", "--comment", "xray-autoban"],
-             check=False, quiet=True)
-    return r.returncode == 0
+    # Fallback: nftables — удаляет все правила с comment + matching IP
+    removed = nft_unban_ip(ip, comment=COMMENT_AUTOBAN_BAN)
+    return removed > 0
 
 
 def _autoban_run_once() -> int:
@@ -432,8 +456,9 @@ def _autoban_install_cron(threshold: int, window: int) -> None:
     success = core.success
 
     sh = _XRAY_BAN_SCRIPT
-    # Используем heredoc + iptables-fallback для совместимости с Debian 13
+    # Используем heredoc + nft-fallback для совместимости с Debian 13
     # (нет ufw по умолчанию, textwrap.dedent ломает shebang)
+    # ЭТАП 1.1 миграции: iptables fallback → nft binary напрямую (без chimera import)
     py_body = f"""import json, re, subprocess, sys, time, shutil
 from pathlib import Path
 from datetime import datetime
@@ -456,9 +481,57 @@ def fw_ban(ip):
     if shutil.which('ufw'):
         return subprocess.run(['ufw','deny','from',ip,'to','any','comment','xray-autoban'],
             capture_output=True).returncode == 0
-    return subprocess.run(['iptables','-I','INPUT','-s',ip,'-j','DROP',
-        '-m','comment','--comment','xray-autoban'],
+    # ЭТАП 1.1: nftables вместо iptables (Debian 13/no-ufw systems)
+    # Эквивалент: iptables -I INPUT 1 -s <ip> -j DROP -m comment --comment xray-autoban
+    # → nft insert rule inet chimera input ip saddr <ip> drop comment "xray-autoban"
+    if ':' not in ip:
+        spec = f'ip saddr {{ip}} drop'
+    else:
+        spec = f'ip6 saddr {{ip}} drop'
+    return subprocess.run(['nft','insert','rule','inet','chimera','input',
+        *spec.split(),'comment','"xray-autoban"'],
         capture_output=True).returncode == 0
+
+def fw_unban(ip):
+    if shutil.which('ufw'):
+        return subprocess.run(['ufw','delete','deny','from',ip,'to','any'],
+            capture_output=True).returncode == 0
+    # ЭТАП 1.1: удаляем все nft-правила с comment="xray-autoban" и matching saddr
+    # через nft -a list chain → handles → delete rule ... handle N
+    r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera','input'],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        return False
+    try:
+        data = json.loads(r.stdout)
+        removed = 0
+        for item in data.get('nftables', []):
+            if 'chain' not in item:
+                continue
+            for rule in item['chain'].get('expr', []):
+                if rule.get('comment') != 'xray-autoban':
+                    continue
+                # Проверяем что saddr matches
+                match_ip = False
+                for expr in rule.get('expr', []):
+                    m = expr.get('match', {{}})
+                    left = m.get('left', {{}})
+                    payload = left.get('payload', {{}})
+                    if payload.get('field') == 'saddr' and m.get('right') == ip:
+                        match_ip = True
+                        break
+                if not match_ip:
+                    continue
+                handle = rule.get('handle')
+                if handle is None:
+                    continue
+                dr = subprocess.run(['nft','delete','rule','inet','chimera','input',
+                    'handle',str(handle)], capture_output=True)
+                if dr.returncode == 0:
+                    removed += 1
+        return removed > 0
+    except Exception:
+        return False
 
 #  DoH-resolver: резолв домена exit-ноды → IPv4 через публичные
 # DoH-резолверы (Cloudflare 1.1.1.1 + Google 8.8.8.8 JSON API), минуя

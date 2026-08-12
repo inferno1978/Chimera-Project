@@ -1,7 +1,7 @@
 """
 chimera/modules/ipban.py
 ───────────────────────────────────────────────────────────────────────────────
-Ручной бан IP на уровне iptables через ipset.
+Ручной бан IP на уровне nftables через nft sets.
 
 Возможности:
   • Бан одного IP                  (192.168.1.1)
@@ -10,17 +10,18 @@ chimera/modules/ipban.py
   • Бан подсети (CIDR)             (10.0.0.0/24)
   • Бан целой ASN                  (AS12345 → скачивает префиксы с RIPE Stat)
 
-Реализация:
-  • ipset hash:net  xray_manual_ban   (IPv4)
-  • ipset hash:net  xray_manual_ban6  (IPv6)
-  • iptables  INPUT -m set --match-set xray_manual_ban  src -j DROP
-  • ip6tables INPUT -m set --match-set xray_manual_ban6 src -j DROP
+Реализация (мигрировано с iptables/ipset на nftables, этап 1.1):
+  • nft set inet chimera manual_ban_v4  (type ipv4_addr; flags interval;)
+  • nft set inet chimera manual_ban_v6  (type ipv6_addr; flags interval;)
+  • nft rule inet chimera input ip  saddr @manual_ban_v4 drop comment "xray-manual-ban"
+  • nft rule inet chimera input ip6 saddr @manual_ban_v6 drop comment "xray-manual-ban"
   • Состояние бана → /var/lib/xray-installer/ipban.json
-  • Персистентность — через ipset_persist (сохранение в /etc/ipset.conf)
+  • Персистентность — через nft list ruleset > /etc/nftables.conf
+    (единый файл, заменяет /etc/iptables/rules.v4 + /etc/ipset.conf)
 
 Бан НЕ затрагивает:
   • Xray-конфиг (никаких изменений в config.json)
-  • GeoIP-блокировку (xray_ru_block / xray_ru_block6)
+  • GeoIP-блокировку (ingress_block_v4 / ingress_block_v6)
   • AutoBan (xray-autoban)
   • Службы: xray, nginx, telemt и все прочие
 
@@ -40,6 +41,19 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple
+
+# nftables — централизованная обёртка над `nft` CLI (этап 1.1 миграции)
+from .nft_common import (
+    nft_set_create, nft_set_exists, nft_set_add, nft_set_del,
+    nft_set_flush, nft_set_destroy, nft_set_count,
+    nft_rule_add, nft_rule_exists, nft_rule_delete_by_comment,
+    nft_persist, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    NFT_SET_MANUAL_BAN_V4, NFT_SET_MANUAL_BAN_V6,
+    COMMENT_MANUAL_BAN, NFT_PERSIST_FILE,
+)
 
 # ── Цвета (идентично остальным модулям проекта) ───────────────────────────────
 def _detect_colors() -> dict:
@@ -66,10 +80,15 @@ DIM    = _C['DIM'];   WHITE  = _C['WHITE']; NC     = _C['NC']
 
 # ── Константы ─────────────────────────────────────────────────────────────────
 _STATE_FILE    = Path("/var/lib/xray-installer/ipban.json")
-_IPSET_V4      = "xray_manual_ban"
-_IPSET_V6      = "xray_manual_ban6"
-_COMMENT       = "xray-manual-ban"
-_IPSET_CONF    = Path("/etc/ipset.conf")
+# Имена nft sets (мигрировано с ipset xray_manual_ban / xray_manual_ban6).
+# Сохраняем переменные _IPSET_V4/_IPSET_V6 как aliases для обратной совместимости
+# с любыми местами в этом файле, которые ссылаются на старые имена.
+_IPSET_V4      = NFT_SET_MANUAL_BAN_V4   # "manual_ban_v4"
+_IPSET_V6      = NFT_SET_MANUAL_BAN_V6   # "manual_ban_v6"
+_COMMENT       = COMMENT_MANUAL_BAN       # "xray-manual-ban"
+# nft persist file (заменяет /etc/ipset.conf + /etc/iptables/rules.v4).
+# Один единый файл для всех правил Chimera.
+_IPSET_CONF    = Path(NFT_PERSIST_FILE)   # "/etc/nftables.conf"
 
 _RIPE_PREFIXES = (
     "https://stat.ripe.net/data/announced-prefixes/data.json?resource={asn}"
@@ -139,187 +158,174 @@ def _state_remove_entry(display: str) -> bool:
     return len(state["entries"]) < before
 
 
-# ── ipset-хелперы ─────────────────────────────────────────────────────────────
+# ── nftables-хелперы (замена ipset/iptables, этап 1.1) ─────────────────────────
 def _ipset_available() -> bool:
-    return subprocess.run(["which", "ipset"], capture_output=True).returncode == 0
+    """Алиас для обратной совместимости. Теперь проверяет наличие `nft` binary."""
+    return _nft_available()
 
 
 def _set_exists(name: str) -> bool:
-    return subprocess.run(
-        ["ipset", "list", "-n", name], capture_output=True
-    ).returncode == 0
+    """Проверяет существует ли nft set (в таблице chimera)."""
+    return nft_set_exists(name, table=NFT_TABLE_NAME)
 
 
 def _ensure_sets() -> bool:
-    """Создаёт ipset-сеты если они ещё не существуют."""
-    if not _ipset_available():
-        _err("ipset не установлен. Установите: apt install ipset")
+    """Создаёт nft sets manual_ban_v4 и manual_ban_v6 если их ещё нет.
+
+    Заменяет: ipset create xray_manual_ban hash:net family inet maxelem 65536 -exist
+              ipset create xray_manual_ban6 hash:net family inet6 maxelem 65536 -exist
+    """
+    if not _nft_available():
+        _err("nft не установлен. Установите: apt install nftables")
         return False
-    _run(["ipset", "create", _IPSET_V4, "hash:net",
-          "family", "inet",  "maxelem", "65536", "-exist"], quiet=True)
-    _run(["ipset", "create", _IPSET_V6, "hash:net",
-          "family", "inet6", "maxelem", "65536", "-exist"], quiet=True)
+    # nft set inet chimera manual_ban_v4 { type ipv4_addr; flags interval; size 65536; }
+    nft_set_create(_IPSET_V4, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+                   set_type="ipv4_addr", flags=["interval"], maxelem=65536)
+    # nft set inet chimera manual_ban_v6 { type ipv6_addr; flags interval; size 65536; }
+    nft_set_create(_IPSET_V6, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+                   set_type="ipv6_addr", flags=["interval"], maxelem=65536)
     return True
 
 
 def _ensure_iptables_rules() -> None:
     """
-    Добавляет правила iptables DROP через _IPSET_V4 / _IPSET_V6 в цепочку INPUT,
-    только если они ещё не существуют.
-    Правила ставятся через -A (в конец), не -I 1 — чтобы не перекрыть
-    ESTABLISHED,RELATED и lo-ACCEPT, которые уже находятся выше.
-    """
-    # IPv4
-    _chk4 = subprocess.run(
-        ["iptables", "-C", "INPUT",
-         "-m", "set", "--match-set", _IPSET_V4, "src", "-j", "DROP"],
-        capture_output=True
-    )
-    if _chk4.returncode != 0:
-        _run([
-            "iptables", "-A", "INPUT",
-            "-m", "set", "--match-set", _IPSET_V4, "src",
-            "-j", "DROP",
-            "-m", "comment", "--comment", _COMMENT,
-        ], quiet=True)
+    Добавляет nft-правила DROP для manual_ban sets в цепочку input.
 
-    # IPv6
-    _chk6 = subprocess.run(
-        ["ip6tables", "-C", "INPUT",
-         "-m", "set", "--match-set", _IPSET_V6, "src", "-j", "DROP"],
-        capture_output=True
+    Заменяет:
+      iptables  -A INPUT -m set --match-set xray_manual_ban  src -j DROP \\
+                  -m comment --comment xray-manual-ban
+      ip6tables -A INPUT -m set --match-set xray_manual_ban6 src -j DROP \\
+                  -m comment --comment xray-manual-ban
+
+    Теперь это два правила в одной таблице inet chimera (v4 и v6 одновременно):
+      nft add rule inet chimera input ip  saddr @manual_ban_v4 drop \\
+          comment "xray-manual-ban"
+      nft add rule inet chimera input ip6 saddr @manual_ban_v6 drop \\
+          comment "xray-manual-ban"
+
+    Правила идемпотентны через comment-tag — повторный вызов не дублирует.
+    """
+    # IPv4 — DROP для ip saddr в set
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        rule_spec=f"ip saddr @{_IPSET_V4} drop",
+        family=NFT_TABLE_FAMILY, comment=_COMMENT, idempotent=True
     )
-    if _chk6.returncode != 0:
-        _run([
-            "ip6tables", "-A", "INPUT",
-            "-m", "set", "--match-set", _IPSET_V6, "src",
-            "-j", "DROP",
-            "-m", "comment", "--comment", _COMMENT,
-        ], quiet=True)
+    # IPv6 — DROP для ip6 saddr в set
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        rule_spec=f"ip6 saddr @{_IPSET_V6} drop",
+        family=NFT_TABLE_FAMILY, comment=_COMMENT, idempotent=True
+    )
 
 
 def _remove_iptables_rules() -> None:
-    """Удаляет правила iptables (все вхождения xray-manual-ban)."""
-    for _ in range(10):
-        r = _run([
-            "iptables", "-D", "INPUT",
-            "-m", "set", "--match-set", _IPSET_V4, "src", "-j", "DROP"
-        ], quiet=True)
-        if r.returncode != 0:
-            break
-    for _ in range(10):
-        r = _run([
-            "ip6tables", "-D", "INPUT",
-            "-m", "set", "--match-set", _IPSET_V6, "src", "-j", "DROP"
-        ], quiet=True)
-        if r.returncode != 0:
-            break
+    """Удаляет все nft-правила с comment='xray-manual-ban' из input.
+
+    Заменяет цикл `iptables -D INPUT ...` (10 итераций до rc!=0).
+    nft_rule_delete_by_comment делает то же самое за один вызов через
+    `nft -a list chain` → handles → delete.
+    """
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_COMMENT, family=NFT_TABLE_FAMILY, max_iterations=20
+    )
 
 
 def _ipset_add_cidrs(cidrs: list) -> Tuple[int, int]:
     """
-    Добавляет список CIDR в соответствующие сеты.
-    Возвращает (добавлено_v4, добавлено_v6).
+    Добавляет список CIDR в соответствующие nft sets.
+
+    Заменяет: цикл ipset add xray_manual_ban <cidr> -exist
+    Теперь: один batched nft add element inet chimera manual_ban_v4 { cidrs }
+
+    Возвращает (добавлено_v4, добавлено_v6). В nft batch mode отдельный
+    подсчёт "сколько добавлено нового" невозможен (nft не различает -exist
+    и новый add). Возвращаем len списка как upper bound — это безопасно,
+    потому что callers используют return только для display в TUI.
     """
     v4 = [c for c in cidrs if ":" not in c]
     v6 = [c for c in cidrs if ":" in c]
 
     added_v4 = added_v6 = 0
-    for cidr in v4:
-        r = _run(["ipset", "add", _IPSET_V4, cidr, "-exist"], quiet=True)
-        if r.returncode == 0:
-            added_v4 += 1
-    for cidr in v6:
-        r = _run(["ipset", "add", _IPSET_V6, cidr, "-exist"], quiet=True)
-        if r.returncode == 0:
-            added_v6 += 1
+    if v4:
+        # nft add element inet chimera manual_ban_v4 { cidr1, cidr2, ... }
+        if nft_set_add(_IPSET_V4, v4, table=NFT_TABLE_NAME,
+                       family=NFT_TABLE_FAMILY):
+            added_v4 = len(v4)
+    if v6:
+        if nft_set_add(_IPSET_V6, v6, table=NFT_TABLE_NAME,
+                       family=NFT_TABLE_FAMILY):
+            added_v6 = len(v6)
     return added_v4, added_v6
 
 
 def _ipset_del_cidrs(cidrs: list) -> None:
-    """Удаляет список CIDR из сетов (игнорирует ошибки)."""
-    for cidr in cidrs:
-        if ":" not in cidr:
-            _run(["ipset", "del", _IPSET_V4, cidr], quiet=True)
-        else:
-            _run(["ipset", "del", _IPSET_V6, cidr], quiet=True)
+    """Удаляет список CIDR из nft sets (игнорирует ошибки).
+
+    Заменяет цикл ipset del <name> <cidr>.
+    Теперь: nft delete element inet chimera <set> { cidr1, cidr2, ... }
+    """
+    v4 = [c for c in cidrs if ":" not in c]
+    v6 = [c for c in cidrs if ":" in c]
+    if v4:
+        nft_set_del(_IPSET_V4, v4, table=NFT_TABLE_NAME,
+                    family=NFT_TABLE_FAMILY)
+    if v6:
+        nft_set_del(_IPSET_V6, v6, table=NFT_TABLE_NAME,
+                    family=NFT_TABLE_FAMILY)
 
 
 def _ipset_flush_all() -> None:
-    """Очищает оба сета полностью."""
-    _run(["ipset", "flush", _IPSET_V4], quiet=True)
-    _run(["ipset", "flush", _IPSET_V6], quiet=True)
+    """Очищает оба nft sets полностью.
+
+    Заменяет: ipset flush xray_manual_ban / xray_manual_ban6.
+    Теперь: nft flush set inet chimera manual_ban_v4 / manual_ban_v6.
+    """
+    nft_set_flush(_IPSET_V4, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
+    nft_set_flush(_IPSET_V6, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
 
 
 def _ipset_destroy_all() -> None:
-    """Уничтожает оба сета."""
-    _run(["ipset", "destroy", _IPSET_V4], quiet=True)
-    _run(["ipset", "destroy", _IPSET_V6], quiet=True)
+    """Уничтожает оба nft sets.
+
+    Заменяет: ipset destroy xray_manual_ban / xray_manual_ban6.
+    Теперь: nft delete set inet chimera manual_ban_v4 / manual_ban_v6.
+    """
+    nft_set_destroy(_IPSET_V4, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
+    nft_set_destroy(_IPSET_V6, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
 
 
 def _ipset_count() -> Tuple[int, int]:
-    """Возвращает количество записей в (v4, v6)."""
-    def _cnt(name: str) -> int:
-        if not _set_exists(name):
-            return 0
-        r = subprocess.run(["ipset", "list", name], capture_output=True, text=True)
-        return r.stdout.count("\n") - r.stdout.find("Members:") // 1 if "Members:" in r.stdout else 0
-    # точнее: grep ^[0-9]
-    def _cnt2(name: str) -> int:
-        if not _set_exists(name):
-            return 0
-        r = subprocess.run(["ipset", "list", name], capture_output=True, text=True)
-        after = r.stdout.split("Members:", 1)
-        if len(after) < 2:
-            return 0
-        return sum(1 for ln in after[1].splitlines() if ln.strip())
-    return _cnt2(_IPSET_V4), _cnt2(_IPSET_V6)
+    """Возвращает количество записей в (v4, v6) через JSON-парсинг.
+
+    Заменяет: парсинг текстового `ipset list <name>` → секция "Members:".
+    Теперь: nft -j list set → JSON → len(elem).
+    """
+    return (
+        nft_set_count(_IPSET_V4, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY),
+        nft_set_count(_IPSET_V6, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY),
+    )
 
 
-# ── Сохранение ipset-состояния (персистентность) ──────────────────────────────
+# ── Сохранение ruleset (персистентность, этап 1.1) ────────────────────────────
 def _ipban_persist_save() -> None:
     """
-    Сохраняет xray_manual_ban* в /etc/ipset.conf, дополняя (не заменяя)
-    существующие записи из ingress_geoip / других модулей.
+    Сохраняет весь nft ruleset в /etc/nftables.conf.
+
+    Заменяет: ipset save xray_manual_ban* → /etc/ipset.conf (merge mode).
+    Теперь: nft list ruleset > /etc/nftables.conf (atomic write через tmp+rename).
+
+    Поскольку nftables хранит ВСЕ правила (включая от ingress_geoip,
+    geoblock, user_ip_whitelist, awg_cascade, и т.д.) в одном ruleset,
+    этот вызов сохраняет всё разом. Не нужно merge-логики как с ipset.
     """
-    if not _ipset_available():
+    if not _nft_available():
         return
-
-    # Читаем существующий файл (может содержать xray_ru_block* и т.д.)
-    existing_lines: list[str] = []
-    if _IPSET_CONF.exists():
-        try:
-            raw = _IPSET_CONF.read_text(encoding="utf-8")
-            # Удаляем старые секции xray_manual_ban*
-            skip = False
-            for ln in raw.splitlines():
-                if ln.startswith("create xray_manual_ban"):
-                    skip = True
-                if skip and (ln.startswith("create ") and "xray_manual_ban" not in ln):
-                    skip = False
-                if not skip:
-                    existing_lines.append(ln)
-        except Exception:
-            pass
-
-    # Добавляем свежий дамп xray_manual_ban*
-    new_parts: list[str] = []
-    for name in (_IPSET_V4, _IPSET_V6):
-        if _set_exists(name):
-            r = subprocess.run(["ipset", "save", name], capture_output=True, text=True)
-            if r.returncode == 0 and r.stdout.strip():
-                new_parts.append(r.stdout.strip())
-
-    content = "\n".join(line for line in existing_lines if line) + "\n"
-    if new_parts:
-        content += "\n".join(new_parts) + "\n"
-
-    try:
-        _IPSET_CONF.write_text(content, encoding="utf-8")
-        _IPSET_CONF.chmod(0o600)
-        _info(f"ipset сохранён → {_IPSET_CONF}")
-    except Exception as exc:
-        _warn(f"Не удалось записать {_IPSET_CONF}: {exc}")
+    if nft_persist(str(_IPSET_CONF)):
+        _info(f"nft ruleset сохранён → {_IPSET_CONF}")
+    else:
+        _warn(f"Не удалось сохранить nft ruleset → {_IPSET_CONF}")
 
 
 # ── Парсинг пользовательского ввода ───────────────────────────────────────────
@@ -468,7 +474,7 @@ def ipban_add(raw: str, comment: str = "") -> bool:
     added_v4, added_v6 = _ipset_add_cidrs(cidrs)
     total = added_v4 + added_v6
     if total == 0:
-        _warn(f"Ничего не добавлено для {display!r} (уже в списке или ошибка ipset)")
+        _warn(f"Ничего не добавлено для {display!r} (уже в списке или ошибка nft)")
     else:
         _ok(f"Заблокировано: {display}  "
             f"[{total} CIDR: {added_v4} IPv4 + {added_v6} IPv6]")
@@ -500,19 +506,19 @@ def ipban_remove(display: str) -> bool:
 
 
 def ipban_flush() -> None:
-    """Снимает все баны, удаляет правила iptables и сеты."""
+    """Снимает все баны, удаляет nft-правила и sets."""
     _remove_iptables_rules()
     _ipset_flush_all()
     _ipset_destroy_all()
     _state_save({"entries": []})
     _ipban_persist_save()
-    _ok("Все IP-баны сняты, сеты удалены")
+    _ok("Все IP-баны сняты, nft sets удалены")
 
 
 def ipban_restore() -> None:
     """
     Восстанавливает баны из state (например, после reboot если
-    xray-ipset-restore.service не установлен).
+    nftables.service не включён или /etc/nftables.conf отсутствует).
     """
     state = _state_load()
     entries = state.get("entries", [])
@@ -532,7 +538,7 @@ def ipban_restore() -> None:
 # ── Интерактивное меню ────────────────────────────────────────────────────────
 def do_manage_ipban() -> None:
     """
-    Главное меню управления IP-банами на уровне iptables.
+    Главное меню управления IP-банами на уровне nftables.
     Вызывается из _core.py → _menu_security().
     """
     from chimera._core import (
@@ -548,17 +554,15 @@ def do_manage_ipban() -> None:
         cnt_v4, cnt_v6 = _ipset_count()
         sets_ok  = _set_exists(_IPSET_V4) or _set_exists(_IPSET_V6)
 
-        # статус iptables-правил
-        chk4 = subprocess.run(
-            ["iptables", "-C", "INPUT",
-             "-m", "set", "--match-set", _IPSET_V4, "src", "-j", "DROP"],
-            capture_output=True
-        ).returncode == 0
-        chk6 = subprocess.run(
-            ["ip6tables", "-C", "INPUT",
-             "-m", "set", "--match-set", _IPSET_V6, "src", "-j", "DROP"],
-            capture_output=True
-        ).returncode == 0
+        # статус nft-правил (мигрировано с iptables -C → nft_rule_exists)
+        # Проверяем наличие DROP-правила с comment="xray-manual-ban"
+        chk4 = nft_rule_exists(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            comment=_COMMENT, family=NFT_TABLE_FAMILY
+        )
+        # В nft один comment-tag для обоих правил (v4 и v6) — chk6 = chk4.
+        # Сохраняем отдельную переменную для совместимости с TUI ниже.
+        chk6 = chk4
 
         rules_str = (
             f"{GREEN}активны{NC}"
@@ -570,12 +574,12 @@ def do_manage_ipban() -> None:
         )
         cidr_str = (
             f"{GREEN}{cnt_v4} IPv4 + {cnt_v6} IPv6{NC}"
-            if sets_ok else f"{DIM}ipset не создан{NC}"
+            if sets_ok else f"{DIM}nft set не создан{NC}"
         )
 
         print()
-        _box_top("🚫  IP-БАН  (iptables/ipset)")
-        _box_row(f"  Правила iptables:   {rules_str}")
+        _box_top("🚫  IP-БАН  (nftables)")
+        _box_row(f"  Правила nft:       {rules_str}")
         _box_row(f"  Записей в state:    {entries_str}")
         _box_row(f"  Активных CIDR:      {cidr_str}")
         _box_sep()
@@ -584,8 +588,8 @@ def do_manage_ipban() -> None:
         _box_item("3", f"📋  Список активных банов")
         _box_sep()
         _box_item("4", f"🔄  Восстановить из state  {DIM}(после reboot){NC}")
-        _box_item("5", f"💾  Сохранить ipset → {_IPSET_CONF}")
-        _box_item("X", f"{RED}🗑️   Снять ВСЕ баны{NC}  {DIM}(flush + удаление сетов){NC}")
+        _box_item("5", f"💾  Сохранить nft ruleset → {_IPSET_CONF}")
+        _box_item("X", f"{RED}🗑️   Снять ВСЕ баны{NC}  {DIM}(flush + удаление sets){NC}")
         _box_back()
         _box_bottom()
 
@@ -727,7 +731,7 @@ def do_manage_ipban() -> None:
             _box_sep()
             cnt_v4, cnt_v6 = _ipset_count()
             _box_row(
-                f"  Итого в ipset:  {GREEN}{cnt_v4}{NC} IPv4 + {GREEN}{cnt_v6}{NC} IPv6 CIDR"
+                f"  Итого в nft sets: {GREEN}{cnt_v4}{NC} IPv4 + {GREEN}{cnt_v6}{NC} IPv6 CIDR"
             )
             _box_bottom()
             input(f"{CYAN}Нажмите Enter...{NC}")
@@ -740,10 +744,10 @@ def do_manage_ipban() -> None:
             _box_bottom()
             input(f"{CYAN}Нажмите Enter...{NC}")
 
-        # ── 5. Сохранить ipset ────────────────────────────────────────────────
+        # ── 5. Сохранить nft ruleset ─────────────────────────────────────────
         elif ch == "5":
             print()
-            _box_top("💾  СОХРАНЕНИЕ IPSET...")
+            _box_top("💾  СОХРАНЕНИЕ NFT RULESET...")
             _ipban_persist_save()
             _box_bottom()
             input(f"{CYAN}Нажмите Enter...{NC}")
@@ -752,7 +756,7 @@ def do_manage_ipban() -> None:
         elif ch == "x":
             print()
             _box_top(f"{RED}🗑️   СБРОС ВСЕХ БАНОВ{NC}")
-            _box_row(f"  {YELLOW}Будут удалены ВСЕ правила iptables и ipset-сеты.{NC}")
+            _box_row(f"  {YELLOW}Будут удалены ВСЕ nft-правила и nft sets.{NC}")
             _box_row(f"  {YELLOW}State-файл будет очищен.{NC}")
             _box_bottom()
             try:
