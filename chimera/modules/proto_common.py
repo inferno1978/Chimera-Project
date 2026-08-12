@@ -14,7 +14,8 @@ Extracted (parameterized):
   • proto_save_state(state_path, data, name=None)       — JSON state save (0o600)
   • proto_ask(prompt, default="", c=False)              — interactive prompt
   • proto_gen_password(length=16)                       — human-friendly password
-  • proto_ipt_persist()                                 — save iptables rules
+  • proto_ipt_persist()                                 — save nftables ruleset
+  • proto_ipt_rule_exists(table, chain, args)           — check rule exists
   • proto_get_latest_version(github_api_url, strip_v=False)
                                                          — latest GitHub release tag
   • proto_get_installed_version(binary_path, version_arg="--version",
@@ -25,9 +26,21 @@ Class:
     ``_Cancelled = ProtoCancelled`` so existing ``except _Cancelled:`` and
     ``raise _Cancelled`` code works unchanged.
 
+Миграция на nftables (этап 1.7, migration-engineer-protocols):
+  • proto_ipt_persist() — теперь делегирует в nft_persist() из nft_common.
+    Сохраняет весь ruleset в /etc/nftables.conf (замена netfilter-persistent
+    save / iptables-save > rules.v4). Имя сохранено для совместимости с
+    8 протокольными модулями, импортирующими его через `from proto_common
+    import proto_ipt_persist`.
+  • proto_ipt_rule_exists(table, chain, args) — теперь извлекает --comment
+    из args (если есть) или строит comment из proto/port для OPEN_PORT
+    паттерна (`-p X --dport Y -j ACCEPT` → comment="chimera-open-port-X-Y"),
+    и проверяет через nft_rule_exists(comment=...). Возвращает False если
+    ни comment, ни proto/port не извлечены.
+
 NOT extracted (kept module-local because the logic is genuinely different
 per protocol — different systemd unit content, different state fields,
-different cleanup steps, different client guides, different iptables
+different cleanup steps, different client guides, different nftables
 signatures):
   • _install_service  — each module writes its own systemd unit content
   • _show_status      — each module shows different state fields
@@ -50,6 +63,11 @@ import subprocess
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+# Ленивый импорт nft_common / nft_constants — избегаем циклических зависимостей
+# при импорте proto_common из других модулей. Делегируем фактические вызовы
+# в функции-обёртки, чтобы import-time не падал если nft_common ещё не
+# инициализирован.
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -155,26 +173,33 @@ def proto_gen_password(length: int = 16) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IPTABLES PERSISTENCE
+#  NFTABLES PERSISTENCE (мигрировано с iptables, этап 1.7)
 # ══════════════════════════════════════════════════════════════════════════════
 def proto_ipt_persist() -> None:
-    """Persist current iptables rules so they survive a reboot.
+    """Persist current nftables ruleset so it survives a reboot.
 
-    Uses ``netfilter-persistent`` if available (Debian/Ubuntu default);
-    otherwise falls back to ``iptables-save > /etc/iptables/rules.v4``.
-    Uses ``subprocess.run`` directly (not the module-local ``_run``) so it
-    works identically across all protocol modules regardless of their
-    ``_run`` signature variations.
+    Мигрировано с iptables (этап 1.7). Заменяет:
+      • ``netfilter-persistent save`` (Debian/Ubuntu с iptables-persistent)
+      • ``iptables-save > /etc/iptables/rules.v4``
+
+    Теперь делегирует в ``nft_persist()`` из nft_common.py — сохраняет весь
+    ruleset в ``/etc/nftables.conf`` через ``nft list ruleset > /etc/nftables.conf``.
+    При ребуте системы встроенный ``nftables.service`` (Debian/Ubuntu package)
+    читает этот файл через ``nft -f`` и восстанавливает ВСЕ правила Chimera.
+
+    Имя функции сохранено для совместимости с 8 протокольными модулями,
+    импортирующими его как ``from proto_common import proto_ipt_persist``.
+    Call sites (mieru/naiveproxy/fptn/trusttunnel/turnable/turntunnel/
+    wdtt/webdav_tunnel) не меняют сигнатуру — только внутренняя реализация.
     """
-    if shutil.which("netfilter-persistent"):
-        subprocess.run(["netfilter-persistent", "save"],
-                       capture_output=True, text=True)
-        return
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(["iptables-save"], capture_output=True, text=True)
-    if r.returncode == 0 and r.stdout:
-        (rules_dir / "rules.v4").write_text(r.stdout)
+    try:
+        from .nft_common import nft_persist, nft_persist_enable_systemd
+        nft_persist()
+        nft_persist_enable_systemd()
+    except Exception:
+        # Silent fallback — proto_ipt_persist historically был best-effort
+        # (subprocess.run сам не бросал). Сохраняем семантику.
+        pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -285,33 +310,130 @@ def proto_full_uninstall(service_name: str, config_path, state_path,
 
 
 def proto_ipt_rule_exists(table: str, chain: str, args: list) -> bool:
-    """Проверяет наличие iptables-правила через ``iptables -t {table} -C {chain} {args}``.
+    """Проверяет наличие nft-правила через ``nft_rule_exists(comment=...)``.
+
+    Мигрировано с iptables (этап 1.7). Заменяет вызов
+    ``iptables -t {table} -C {chain} {args}`` на nftables-эквивалент.
 
     Возвращает True если правило существует, False — если нет.
-    Все 5 протокольных модулей (wdtt, mieru, turnable, turntunnel, mtproto)
-    делегируют сюда свои _ipt_rule_exists, собирая table/chain/args под свой кейс.
+    Все протокольные модули (wdtt, mieru, turnable, turntunnel, mtproto,
+    fptn, naiveproxy, webdav_tunnel, trusttunnel) делегируют сюда свои
+    _ipt_rule_exists, собирая table/chain/args под свой кейс.
 
-    КРИТИЧНО: ``iptables -C`` возвращает exit status 1 когда правило НЕ существует
-    — это нормальное поведение для "check if rule exists" (man iptables: "If the
-    rule does not exist, the exit code is 1"). ``_core._run`` по умолчанию имеет
-    ``check=True`` и бросает ``CalledProcessError`` на любом non-zero rc —
-    поэтому МЫ ДОЛЖНЫ явно передавать ``check=False``. Иначе TUI-меню Telemt
-    (и любых других протоколов) падает при открытии если хоть одно iptables-правило
-    отсутствует (что нормально когда протокол остановлен/не установлен).
+    Стратегия извлечения comment (по приоритету):
+      1. ``--comment <tag>`` в args (если caller явно передал) → поиск по tag.
+      2. ``-p X --dport Y -j ACCEPT`` паттерн (OPEN_PORT) → строит comment
+         ``chimera-open-port-X-Y`` (соответствует nft_open_port convention).
+      3. ``-d NET -p tcp -j REDIRECT --to-port PORT`` паттерн (NAT REDIRECT
+         для Telegram tproxy) → строит comment ``mtproto-tproxy``.
+      4. ``-m owner --uid-owner UID -j RETURN`` паттерн (tproxy bypass) →
+         comment ``telemt-tproxy-bypass``.
+      5. ``-p tcp --dport PORT -j RETURN`` паттерн (ME-port bypass) →
+         comment ``mtproto-me-return-PORT``.
+      6. Если ничего не извлечено → возвращает False (defensive).
 
-    Дополнительно: оборачиваем в try/except на случай если ``iptables`` вообще
-    не установлен в системе (FileNotFoundError маскируется _run под rc=127).
+    Map iptables table/chain → nft chain name:
+      ``filter``/``INPUT`` → ``input`` в inet chimera
+      ``filter``/``OUTPUT`` → ``output``
+      ``nat``/``OUTPUT`` → ``output`` (nat hook)
+      ``nat``/``PREROUTING`` → ``prerouting``
+      ``nat``/``POSTROUTING`` → ``postrouting``
+      ``mangle``/``PREROUTING`` → ``mangle_forward``
+      ``mangle``/``OUTPUT`` → ``mangle_output``
+
+    Возвращает False при любой ошибке (nft не установлен, нет прав, и т.п.) —
+    это безопасно для вызывающих функций: они используют результат только для
+    решения "добавлять ли правило". Аналогично iptables -C rc=1 (правило не
+    существует) трактуется как False.
     """
     try:
-        core = _core_module()
-        _run = core._run
-        # check=False — rc=1 (правило не существует) это норма, не ошибка.
-        r = _run(["iptables", "-t", table, "-C", chain] + args,
-                 capture=True, check=False)
-        return r.returncode == 0
+        from .nft_common import nft_rule_exists
+        from .nft_constants import (
+            NFT_TABLE_NAME, NFT_TABLE_FAMILY,
+            NFT_CHAIN_PREROUTING, NFT_CHAIN_POSTROUTING,
+            NFT_CHAIN_MANGLE_OUTPUT, NFT_CHAIN_MANGLE_FORWARD,
+        )
+
+        # Map iptables table/chain → nft chain name (lowercase).
+        _NFT_CHAIN_MAP = {
+            ("filter", "INPUT"):       "input",
+            ("filter", "OUTPUT"):      "output",
+            ("filter", "FORWARD"):     "forward",
+            ("nat",   "INPUT"):        "input",
+            ("nat",   "OUTPUT"):       "output",
+            ("nat",   "PREROUTING"):   NFT_CHAIN_PREROUTING,
+            ("nat",   "POSTROUTING"):  NFT_CHAIN_POSTROUTING,
+            ("mangle", "INPUT"):       "input",
+            ("mangle", "OUTPUT"):      NFT_CHAIN_MANGLE_OUTPUT,
+            ("mangle", "FORWARD"):     NFT_CHAIN_MANGLE_FORWARD,
+            ("mangle", "PREROUTING"):  NFT_CHAIN_MANGLE_FORWARD,
+            ("mangle", "POSTROUTING"): NFT_CHAIN_MANGLE_FORWARD,
+        }
+        nft_chain = _NFT_CHAIN_MAP.get((table, chain), chain.lower())
+
+        # 1) Извлекаем --comment (если caller явно передал)
+        comment = None
+        for i, arg in enumerate(args):
+            if arg == "--comment" and i + 1 < len(args):
+                comment = args[i + 1]
+                break
+
+        # 2) NAT REDIRECT pattern: -d NET -p tcp -j REDIRECT --to-port PORT
+        #    (проверяем ПЕРВЫМ из patterns, т.к. -p X --dport Y может входить
+        #    в состав этого правила как часть `-p tcp`, но действие — REDIRECT,
+        #    а не ACCEPT. Поэтому OPEN_PORT pattern должен идти ПОСЛЕ REDIRECT.)
+        if comment is None:
+            has_redirect = ("-j" in args and "REDIRECT" in args)
+            has_to_port = "--to-port" in args
+            if has_redirect and has_to_port:
+                # Mtproto tproxy REDIRECT — все правила имеют один comment tag.
+                comment = "mtproto-tproxy"
+
+        # 3) RETURN rule for uid-owner (tproxy bypass for xray UID)
+        if comment is None:
+            has_owner = "--uid-owner" in args
+            has_return = ("-j" in args and "RETURN" in args)
+            if has_owner and has_return:
+                comment = "telemt-tproxy-bypass"
+
+        # 4) RETURN rule for ME-port (mtproto ME-bypass)
+        if comment is None:
+            has_return = ("-j" in args and "RETURN" in args)
+            has_dport = "--dport" in args
+            if has_return and has_dport and "-p" in args:
+                # Извлекаем dport для per-port comment
+                dport = None
+                for i, arg in enumerate(args):
+                    if arg == "--dport" and i + 1 < len(args):
+                        dport = args[i + 1]
+                        break
+                if dport:
+                    comment = f"mtproto-me-return-{dport}"
+
+        # 5) OPEN_PORT pattern: `-p X --dport Y -j ACCEPT` (проверяем ПОСЛЕ
+        #    специфичных patterns, чтобы RETURN/REDIRECT не захватывались).
+        if comment is None:
+            proto = dport = None
+            has_accept = ("-j" in args and "ACCEPT" in args)
+            for i, arg in enumerate(args):
+                if arg == "-p" and i + 1 < len(args):
+                    proto = args[i + 1].lower()
+                elif arg == "--dport" and i + 1 < len(args):
+                    dport = args[i + 1]
+            if proto and dport and has_accept:
+                # Это OPEN_PORT pattern (nft_open_port convention).
+                comment = f"chimera-open-port-{proto}-{dport}"
+
+        # 6) Ни один паттерн не распознан — возвращаем False (defensive).
+        if comment is None:
+            return False
+
+        return nft_rule_exists(
+            table=NFT_TABLE_NAME, chain=nft_chain,
+            comment=comment, family=NFT_TABLE_FAMILY,
+        )
     except Exception:
-        # Любой сбой (iptables не установлен, нет прав, и т.п.) — считаем что
-        # правила нет. Это безопасно для всех вызывающих функций: они используют
-        # _ipt_rule_exists только для решения "добавлять ли правило" —
-        # если не можем проверить, лучше добавить (дубликат отловит сам iptables).
+        # Любой сбой (nft не установлен, нет прав, и т.п.) — считаем что
+        # правила нет. Аналогично старой iptables-реализации: try/except
+        # вокруг _run, return False on failure.
         return False

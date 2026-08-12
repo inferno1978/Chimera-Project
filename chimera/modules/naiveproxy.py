@@ -91,6 +91,14 @@ from chimera.modules.proto_common import (
     proto_ask, proto_gen_password, proto_ipt_persist,
     proto_get_latest_version,
 )
+# nftables — централизованная обёртка (этап 1.7 миграции).
+from chimera.modules.nft_common import (
+    nft_open_port, nft_rule_exists, nft_rule_delete_by_comment,
+)
+from chimera.modules.nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    COMMENT_OPEN_PORT_PREFIX,
+)
 # _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
 # `raise _Cancelled` code works unchanged after the local class definition
 # was removed in favour of proto_common.ProtoCancelled.
@@ -462,26 +470,31 @@ def _hash_password(password: str) -> str:
     return "{sha256}" + hashlib.sha256(password.encode()).hexdigest()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IPTABLES
+#  NFTABLES (мигрировано с iptables, этап 1.7)
 # ══════════════════════════════════════════════════════════════════════════════
+def _ipt_rule_comment(port: int) -> str:
+    """Возвращает comment-tag для правила открытия TCP-порта."""
+    return f"{COMMENT_OPEN_PORT_PREFIX}tcp-{port}"
+
 def _ipt_tcp_rule_exists(port: int) -> bool:
-    r = _run(
-        ["iptables", "-t", "filter", "-C", "INPUT",
-         "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
-        capture=True,
+    """Проверяет наличие nft-правила через nft_rule_exists(comment=...)."""
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_ipt_rule_comment(port),
+        family=NFT_TABLE_FAMILY,
     )
-    return r.returncode == 0
 
 def _ipt_open_tcp(port: int) -> None:
-    if not _ipt_tcp_rule_exists(port):
-        _run(["iptables", "-t", "filter", "-I", "INPUT", "1",
-              "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"])
+    """Открывает TCP-порт через nft_open_port (idempotent через comment-tag)."""
+    nft_open_port(port, proto="tcp", comment=_ipt_rule_comment(port))
 
 def _ipt_close_tcp(port: int) -> None:
-    for _ in range(5):
-        if not _ipt_tcp_rule_exists(port): break
-        _run(["iptables", "-t", "filter", "-D", "INPUT",
-              "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"])
+    """Закрывает TCP-порт через nft_rule_delete_by_comment."""
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_ipt_rule_comment(port),
+        family=NFT_TABLE_FAMILY, max_iterations=10,
+    )
 
 # _ipt_persist — вынесен в proto_common (использует subprocess.run напрямую,
 # не зависит от module-local _run). Call sites: proto_ipt_persist.
@@ -530,16 +543,16 @@ def _ufw_close_tcp(port: int) -> None:
     _run(["ufw", "delete", "allow", f"{port}/tcp"], capture=True)
 
 def _open_port(port: int) -> str:
-    """Открывает порт через UFW (если активен) или iptables. Возвращает описание."""
+    """Открывает порт через UFW (если активен) или nftables. Возвращает описание."""
     if _ufw_is_active():
         _ufw_open_tcp(port)
         return f"UFW: TCP {port} открыт."
     _ipt_open_tcp(port)
     proto_ipt_persist()
-    return f"iptables: TCP {port} открыт."
+    return f"nftables: TCP {port} открыт."
 
 def _close_port(port: int) -> None:
-    """Закрывает порт через UFW (если активен) или iptables."""
+    """Закрывает порт через UFW (если активен) или nftables."""
     if _ufw_is_active():
         _ufw_close_tcp(port)
     else:
@@ -827,7 +840,7 @@ def _run_install_inner() -> None:
         _run(["systemctl", "start", "nginx"])
         print(f"  {GREEN}✓{NC}  nginx возвращён.")
 
-    # 6. Firewall (UFW если активен, иначе iptables)
+    # 6. Firewall (UFW если активен, иначе nftables)
     fw_msg = _open_port(port)
     print(f"  {GREEN}✓{NC}  {fw_msg}")
 
@@ -1526,7 +1539,7 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_row(f"  {DIM}  • Конфиги          ({_CFG_DIR}){NC}")
         _box_row(f"  {DIM}  • Фейковый сайт   ({_FAKE_SITE_DIR}){NC}")
         _box_row(f"  {DIM}  • Логи             ({_LOG_DIR}){NC}")
-        _box_row(f"  {DIM}  • iptables TCP 443{NC}")
+        _box_row(f"  {DIM}  • nftables TCP 443{NC}")
         _box_row()
         _box_warn("Xray, VLESS и другие службы не затрагиваются.")
         _box_row()

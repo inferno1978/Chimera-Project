@@ -30,6 +30,8 @@ Telemt запускается под root и сам инициирует сое�
 * Одна функция — один файл: вся логика здесь.
 * Безопасность: изменения минимальны, откатываемы, не трогают конфиг xray.
 * Универсальность: работает для всех режимов (A, B, AWG).
+* Миграция на nftables (этап 1.7) — RETURN rule для uid теперь через
+  nft_mangle_return_uid(uid, comment="telemt-tproxy-bypass").
 
 Публичное API
 -------------
@@ -43,6 +45,16 @@ import shutil
 import subprocess
 from pathlib import Path
 
+# nftables — централизованная обёртка (этап 1.7 миграции).
+from chimera.modules.nft_common import (
+    nft_rule_exists, nft_rule_delete_by_comment,
+    nft_mangle_return_uid, nft_persist, nft_persist_enable_systemd,
+)
+from chimera.modules.nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_OUTPUT,
+    COMMENT_TELEMT_TPROXY_BYPASS, NFT_PERSIST_FILE,
+)
+
 __all__ = ["enable", "disable", "status"]
 
 # ---------------------------------------------------------------------------
@@ -52,7 +64,9 @@ _TELEMT_SERVICE   = Path("/etc/systemd/system/telemt.service")
 _XRAY_SERVICE     = "xray.service"
 _AFTER_MARKER     = "After=xray.service"          # строка которую добавляем
 _XRAY_USER        = "xray"                         # под каким uid работает xray
-_IPT              = "iptables"
+# Comment-tag для RETURN rule (соответствует COMMENT_TELEMT_TPROXY_BYPASS).
+# Заменяет старый _IPT = "iptables" — больше не нужен, работаем через nft.
+_COMMENT_TAG      = COMMENT_TELEMT_TPROXY_BYPASS   # "telemt-tproxy-bypass"
 
 
 # ---------------------------------------------------------------------------
@@ -73,40 +87,47 @@ def _xray_uid() -> int | None:
 
 
 def _return_rule_exists() -> bool:
-    """Проверяет наличие RETURN правила для uid xray в nat OUTPUT."""
+    """Проверяет наличие RETURN правила для uid xray (через nft_rule_exists).
+
+    Заменяет: iptables -t nat -C OUTPUT -m owner --uid-owner <uid> -j RETURN.
+    Теперь: nft_rule_exists(comment="telemt-tproxy-bypass").
+    """
     uid = _xray_uid()
     if uid is None:
         return False
-    r = _run([_IPT, "-t", "nat", "-C", "OUTPUT",
-              "-m", "owner", "--uid-owner", str(uid),
-              "-j", "RETURN"])
-    return r.returncode == 0
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+        comment=_COMMENT_TAG, family=NFT_TABLE_FAMILY,
+    )
 
 
 def _add_return_rule() -> bool:
-    """Вставляет RETURN правило для uid xray на позицию 1 в nat OUTPUT."""
+    """Вставляет RETURN правило для uid xray в начало nat OUTPUT chain.
+
+    Заменяет: iptables -t nat -I OUTPUT 1 -m owner --uid-owner <uid> -j RETURN.
+    Теперь: nft_mangle_return_uid(uid=<uid>, comment="telemt-tproxy-bypass").
+    """
     if _return_rule_exists():
         return True
     uid = _xray_uid()
     if uid is None:
         return False
-    r = _run([_IPT, "-t", "nat", "-I", "OUTPUT", "1",
-              "-m", "owner", "--uid-owner", str(uid),
-              "-j", "RETURN"])
-    return r.returncode == 0
+    return nft_mangle_return_uid(
+        uid=uid, chain=NFT_CHAIN_OUTPUT,
+        comment=_COMMENT_TAG, idempotent=False,
+    )
 
 
 def _del_return_rule() -> None:
-    """Удаляет RETURN правило для uid xray из nat OUTPUT (все копии)."""
-    uid = _xray_uid()
-    if uid is None:
-        return
-    for _ in range(5):
-        if not _return_rule_exists():
-            break
-        _run([_IPT, "-t", "nat", "-D", "OUTPUT",
-              "-m", "owner", "--uid-owner", str(uid),
-              "-j", "RETURN"])
+    """Удаляет RETURN правило для uid xray (через nft_rule_delete_by_comment).
+
+    Заменяет цикл `iptables -t nat -D OUTPUT ... -j RETURN` (5 итераций).
+    Теперь: один вызов nft_rule_delete_by_comment (max_iterations=10).
+    """
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+        comment=_COMMENT_TAG, family=NFT_TABLE_FAMILY, max_iterations=10,
+    )
 
 
 def _service_has_after() -> bool:
@@ -183,14 +204,16 @@ def _systemd_reload() -> None:
 
 
 def _iptables_persist() -> None:
-    """Сохраняет iptables правила для выживания после ребута."""
-    if shutil.which("netfilter-persistent"):
-        r = _run(["netfilter-persistent", "save"])
-        if r.returncode == 0:
-            return
-    # Fallback: сохраняем напрямую в файл
-    _run(["bash", "-c",
-          "mkdir -p /etc/iptables && iptables-save > /etc/iptables/rules.v4 2>/dev/null || true"])
+    """Сохраняет nftables ruleset для выживания после ребута (этап 1.7 миграции).
+
+    Заменяет: netfilter-persistent save / iptables-save > /etc/iptables/rules.v4.
+    Теперь: nft_persist() → /etc/nftables.conf + nft_persist_enable_systemd().
+    """
+    try:
+        nft_persist(NFT_PERSIST_FILE)
+        nft_persist_enable_systemd()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +238,7 @@ def enable() -> tuple[bool, str]:
 
     # 1. RETURN rule
     if not _add_return_rule():
-        return False, "Не удалось добавить iptables RETURN rule для uid xray"
+        return False, "Не удалось добавить nft RETURN rule для uid xray"
 
     # 2. After=xray.service
     if not _TELEMT_SERVICE.exists():
@@ -227,11 +250,11 @@ def enable() -> tuple[bool, str]:
     # 3. Перезагрузка systemd
     _systemd_reload()
 
-    # 4. Сохранить iptables
+    # 4. Сохранить nftables ruleset
     _iptables_persist()
 
     return True, (
-        f"Готово: RETURN rule для uid {_XRAY_USER}({uid}) добавлен на позицию 1, "
+        f"Готово: RETURN rule для uid {_XRAY_USER}({uid}) добавлен в nftables output, "
         f"telemt.service теперь стартует после xray.service. "
         f"Перезапустите telemt: systemctl restart telemt"
     )

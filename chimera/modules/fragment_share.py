@@ -174,21 +174,46 @@ class _OneTimeHandler(BaseHTTPRequestHandler):
         pass  # Подавляем стандартный лог
 
 
-# ── Управление firewall ───────────────────────────────────────────────────
+# ── Управление firewall (мигрировано с iptables, этап 1.7) ───────────────
+# Единая таблица inet chimera покрывает и IPv4, и IPv6 одним правилом —
+# больше НЕ нужны раздельные вызовы iptables/ip6tables.
 def _fw_open(port: int) -> None:
-    for cmd in [
-        ["iptables", "-I", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
-        ["ip6tables", "-I", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
-    ]:
-        subprocess.run(cmd, capture_output=True)
+    """Открывает TCP-порт через nft_open_port (idempotent через comment-tag).
+
+    Заменяет:
+        iptables  -I INPUT -p tcp --dport <port> -j ACCEPT
+        ip6tables -I INPUT -p tcp --dport <port> -j ACCEPT
+    Теперь: один вызов nft_open_port(port, proto="tcp",
+                                    comment="chimera-open-port-tcp-<port>")
+    """
+    try:
+        from chimera.modules.nft_common import nft_open_port
+        nft_open_port(port, proto="tcp",
+                      comment=f"chimera-open-port-tcp-{port}")
+    except Exception:
+        pass
 
 
 def _fw_close(port: int) -> None:
-    for cmd in [
-        ["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
-        ["ip6tables", "-D", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
-    ]:
-        subprocess.run(cmd, capture_output=True)
+    """Закрывает TCP-порт через nft_rule_delete_by_comment.
+
+    Заменяет:
+        iptables  -D INPUT -p tcp --dport <port> -j ACCEPT
+        ip6tables -D INPUT -p tcp --dport <port> -j ACCEPT
+    Теперь: один вызов nft_rule_delete_by_comment (покрывает и v4, и v6).
+    """
+    try:
+        from chimera.modules.nft_common import nft_rule_delete_by_comment
+        from chimera.modules.nft_constants import (
+            NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+        )
+        nft_rule_delete_by_comment(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            comment=f"chimera-open-port-tcp-{port}",
+            family=NFT_TABLE_FAMILY, max_iterations=10,
+        )
+    except Exception:
+        pass
 
 
 # ── Выбор свободного порта ────────────────────────────────────────────────

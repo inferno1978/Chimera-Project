@@ -10,6 +10,8 @@ chimera/modules/awg_diagnose.py
   4. Service: systemctl is-active awg-quick@awg0
   5. Tunnel: awg show (peers + handshakes + transfer)
   6. Carrier-compare: сравнение текущих JC/JMIN/JMAX/I1 с профилем оператора
+  7. NAT/Routing: проверка nftables MASQUERADE + FORWARD правил
+     (мигрировано с iptables -t nat -L на nft list chain inet chimera, этап 1.6)
 """
 from __future__ import annotations
 
@@ -24,6 +26,16 @@ from .awg_state import awgs_state_load, awgs_state_is_installed
 from .awg_presets import awgs_presets_compare_with_carrier, awgs_presets_list
 from .awg_apply import awgs_service_status, awgs_show_handshakes
 from .awg_hw_tuning import awgs_sysctl_get
+
+# ЭТАП 1.6 МИГРАЦИИ: nftables helpers для диагностики NAT/MASQUERADE/FORWARD.
+# Раньше: `iptables -t nat -L POSTROUTING -n -v` → парсинг строк.
+# Теперь: `nft_rule_exists(comment=...)` через `nft -j list chain` JSON.
+from .nft_common import nft_rule_exists
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY,
+    NFT_CHAIN_FORWARD, NFT_CHAIN_POSTROUTING,
+    COMMENT_AWG_MASQ,
+)
 
 
 def _core_module():
@@ -123,6 +135,14 @@ def _diag_nat_routing() -> dict:
     """
     Проверка NAT/MASQUERADE + ip_forward + маршрутизации.
     КРИТИЧНО: без этого 'подключение есть, но интернета нет'.
+
+    ЭТАП 1.6 МИГРАЦИИ:
+      • MASQUERADE проверяется через `nft_rule_exists(comment="awg-masquerade")`
+        вместо парсинга `iptables -t nat -L POSTROUTING -n -v`.
+      • FORWARD проверяется через `nft_rule_exists(comment="awg-forward-in")`
+        вместо парсинга `iptables -L FORWARD -n -v`.
+      • ip_forward / route / rp_filter — без изменений (это sysctl + iproute2,
+        не netfilter).
     """
     core = _core_module()
     from .awg_constants import AWGS_INTERFACE
@@ -143,10 +163,17 @@ def _diag_nat_routing() -> dict:
         "msg":     f"net.ipv4.ip_forward = {ip_fwd} (нужно 1)",
     })
 
-    # 2. MASQUERADE правило
-    r = core._run(["iptables", "-t", "nat", "-L", "POSTROUTING", "-n", "-v"],
-                  capture=True, check=False)
-    has_masq = "MASQUERADE" in r.stdout and subnet.split("/")[0].rsplit(".", 1)[0] in r.stdout
+    # 2. MASQUERADE правило (мигрировано: nft_rule_exists по comment-tag)
+    # Раньше: `iptables -t nat -L POSTROUTING -n -v` → поиск "MASQUERADE" + subnet
+    # Теперь: `nft_rule_exists(table="chimera", chain="postrouting",
+    #                        comment="awg-masquerade")` через JSON `nft -j list chain`
+    try:
+        has_masq = nft_rule_exists(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_POSTROUTING,
+            comment=COMMENT_AWG_MASQ, family=NFT_TABLE_FAMILY,
+        )
+    except Exception:
+        has_masq = False
     checks.append({
         "name":    "MASQUERADE",
         "ok":      has_masq,
@@ -154,10 +181,16 @@ def _diag_nat_routing() -> dict:
         "msg":     f"MASQUERADE для {subnet}: {'есть' if has_masq else 'ОТСУТСТВУЕТ — клиенты не получат интернет!'}",
     })
 
-    # 3. FORWARD правило (awg0 → anywhere)
-    r = core._run(["iptables", "-L", "FORWARD", "-n", "-v"],
-                  capture=True, check=False)
-    has_fwd = AWGS_INTERFACE in r.stdout and "ACCEPT" in r.stdout
+    # 3. FORWARD правило (awg0 → anywhere) — nft_rule_exists по comment "awg-forward-in"
+    # Раньше: `iptables -L FORWARD -n -v` → поиск AWGS_INTERFACE + ACCEPT
+    # Теперь: `nft_rule_exists(comment="awg-forward-in")` в chain=forward
+    try:
+        has_fwd = nft_rule_exists(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_FORWARD,
+            comment="awg-forward-in", family=NFT_TABLE_FAMILY,
+        )
+    except Exception:
+        has_fwd = False
     checks.append({
         "name":    "FORWARD",
         "ok":      has_fwd,
@@ -165,7 +198,7 @@ def _diag_nat_routing() -> dict:
         "msg":     f"FORWARD через {AWGS_INTERFACE}: {'разрешён' if has_fwd else 'не найден (может быть в дефолтной политике)'}",
     })
 
-    # 4. Маршрут к подсети awg0
+    # 4. Маршрут к подсети awg0 (НЕ ТРОГАТЬ — это iproute2, не netfilter)
     r = core._run(["ip", "route", "show"], capture=True, check=False)
     has_route = subnet in r.stdout or AWGS_INTERFACE in r.stdout
     checks.append({
@@ -175,7 +208,7 @@ def _diag_nat_routing() -> dict:
         "msg":     f"Маршрут {subnet} dev {AWGS_INTERFACE}: {'есть' if has_route else 'ОТСУТСТВУЕТ — проверьте Address в awg0.conf (должен быть /24 не /32)'}",
     })
 
-    # 5. rp_filter (предупреждение, не блок)
+    # 5. rp_filter (предупреждение, не блок) — НЕ ТРОГАТЬ (sysctl, не netfilter)
     r = core._run(["sysctl", "-n", f"net.ipv4.conf.{AWGS_INTERFACE}.rp_filter"],
                   capture=True, check=False)
     rp = r.stdout.strip() if r.returncode == 0 else "?"
