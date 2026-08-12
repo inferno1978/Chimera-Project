@@ -107,6 +107,17 @@ cd /opt/chimera
 sudo python3 main.py
 ```
 
+## 📚 Документация и FAQ
+
+Подробные гайды по отдельным компонентам Chimera находятся в [`docs/faq/`](docs/faq/):
+
+| FAQ | Описание |
+|---|---|
+| [`TELEMT_FAQ.md`](docs/faq/TELEMT_FAQ.md) | Telemt (MTProto Proxy) — установка, режимы Middle Proxy / Direct, xray-интеграция, SYN Limiter, фрагментация TLS |
+| [`VLESS_FAQ.md`](docs/faq/VLESS_FAQ.md) | VLESS/Reality — установка, конфигурация, XOR/CDN-маскировка, разбор типовых проблем |
+| [`HYSTERIA2.md`](docs/faq/HYSTERIA2.md) | Hysteria2 транспорт — UDP-протокол на базе QUIC, выбор при установке |
+| [`SECURITY_BAN_FAQ.md`](docs/faq/SECURITY_BAN_FAQ.md) | AutoBan / Honeypot / IP-Ban — три модуля защиты от сканеров и DPI-зондов: сравнительная таблица, комбинации, диагностика, бан ASN |
+
 ## 🗂️ Структура проекта
 
 ```text
@@ -118,7 +129,12 @@ Chimera-Project/
 ├── smoke_test_modules.py        # 42 smoke-теста в стен-режиме
 ├── README.md / INSTALL.md / CHANGELOG.md / TROUBLESHOOTING.md
 ├── PROJECT_MAP.md               # Полная карта 143 модулей по 25 категориям
-├── SECURITY.md / CONTRIBUTING.md / INTEGRATION.md / HYSTERIA2.md
+├── SECURITY.md / CONTRIBUTING.md / INTEGRATION.md
+├── docs/faq/                    # Подробные FAQ по компонентам Chimera
+│   ├── TELEMT_FAQ.md            #   Telemt (MTProto Proxy)
+│   ├── VLESS_FAQ.md             #   VLESS/Reality
+│   ├── HYSTERIA2.md             #   Hysteria2 транспорт
+│   └── SECURITY_BAN_FAQ.md      #   AutoBan / Honeypot / IP-Ban
 ├── LICENSE
 └── chimera/
     ├── __init__.py

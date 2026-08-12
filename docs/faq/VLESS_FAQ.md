@@ -1175,12 +1175,13 @@ Least Ping / и т.д.).
 ## Ссылки
 
 - [TELEMT_FAQ.md](TELEMT_FAQ.md) — FAQ по установке Telemt (MTProto Proxy).
-- [CHANGELOG.md](CHANGELOG.md) — история изменений.
-- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — общая диагностика Chimera.
-- [INSTALL.md](INSTALL.md) — краткая инструкция по установке.
-- [PROJECT_MAP.md](PROJECT_MAP.md) — карта проекта, модули.
+- [SECURITY_BAN_FAQ.md](SECURITY_BAN_FAQ.md) — FAQ по AutoBan / Honeypot / IP-Ban.
+- [CHANGELOG.md](../../CHANGELOG.md) — история изменений.
+- [TROUBLESHOOTING.md](../../TROUBLESHOOTING.md) — общая диагностика Chimera.
+- [INSTALL.md](../../INSTALL.md) — краткая инструкция по установке.
+- [PROJECT_MAP.md](../../PROJECT_MAP.md) — карта проекта, модули.
 - [HYSTERIA2.md](HYSTERIA2.md) — документация по Hysteria2 транспорту.
-- [INTEGRATION.md](INTEGRATION.md) — интеграция с другими системами.
+- [INTEGRATION.md](../../INTEGRATION.md) — интеграция с другими системами.
 
 ---
 
