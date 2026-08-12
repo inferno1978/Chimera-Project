@@ -44,3 +44,6 @@ public_key*
 .pytest_cache/
 .coverage
 htmlcov/
+
+# nft_common local artifacts
+.nft_cmd_log.json
