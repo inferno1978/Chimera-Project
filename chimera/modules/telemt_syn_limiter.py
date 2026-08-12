@@ -23,25 +23,39 @@ telemt_mss_selector.py) здесь не помогает, потому что э
 дублирующиеся SYN от одного и того же клиента отбрасывались, давая TCP-стеку
 шанс довести до конца уже начатое соединение.
 
-Механизм: iptables `hashlimit` (НЕ nftables — проект целиком на iptables,
-смешивать backend'ы на одном сервере рискованно из-за разделяемых
-conntrack-таблиц и нет смысла тащить новую зависимость).
+Механизм (мигрировано с iptables `hashlimit` на nftables `meter`, этап 1.4):
 
+  Раньше (iptables + hashlimit):
     iptables -A INPUT -p tcp --dport <PORT> --syn \
         -m hashlimit --hashlimit-name telemt_syn \
         --hashlimit-mode srcip --hashlimit-srcmask 32 \
         --hashlimit-upto <RATE>/sec --hashlimit-burst <BURST> \
         --hashlimit-htable-expire <EXPIRE_MS> \
-        -j ACCEPT
-    iptables -A INPUT -p tcp --dport <PORT> --syn -j REJECT --reject-with tcp-reset
+        -j ACCEPT -m comment --comment telemt-syn-limit
+    iptables -A INPUT -p tcp --dport <PORT> --syn -j REJECT --reject-with tcp-reset \
+        -m comment --comment telemt-syn-limit
 
-Первое правило пропускает SYN в пределах лимита на src-IP (через скрытую
-hash-таблицу ядра), второе — отбрасывает всё, что превысило лимит для
-данного IP, сразу с TCP RST (а не тихим DROP), чтобы клиент не ждал таймаут
-и реконнектился мгновенно. Не-SYN пакеты (уже установленные соединения)
-правило не трогает.
+  Теперь (nftables + meter — более мощный аналог hashlimit):
+    nft add rule inet chimera input tcp dport <PORT> tcp flags syn / syn,rst \
+        meter telemt_syn_limit { ip saddr limit rate <RATE>/second burst <BURST> packets } \
+        accept comment "telemt-syn-limit-accept"
+    nft add rule inet chimera input tcp dport <PORT> tcp flags syn / syn,rst \
+        reject with tcp reset comment "telemt-syn-limit-reject"
 
-Пресеты (по аналогии с mtpr.sh, адаптированы под iptables hashlimit):
+Первое правило пропускает SYN в пределах лимита на src-IP (через meter —
+динамический набор элементов с per-IP счётчиком), второе — отбрасывает всё,
+что превысило лимит для данного IP, сразу с TCP RST (а не тихим DROP), чтобы
+клиент не ждал таймаут и реконнектился мгновенно. Не-SYN пакеты (уже
+установленные соединения) правило не трогает.
+
+`meter` в nftables превосходит `hashlimit` из iptables тем, что:
+  • Не требует `--hashlimit-htable-expire` — элементы meter истекают по
+    таймауту самого limit (по умолчанию 1 секунда после последнего пакета).
+  • Поддерживает более сложные условия (например, набор адресов через set).
+  • Имеет нативный JSON-вывод через `nft -j list chain` — счётчики
+    accept/reject читаются напрямую без парсинга текста.
+
+Пресеты (по аналогии с mtpr.sh, адаптированы под nftables meter):
   • жёсткий   — 1/sec  burst 1   (рекомендуется по умолчанию)
   • средний   — 1/sec  burst 3
   • мягкий    — 2/sec  burst 5
@@ -51,12 +65,12 @@ hash-таблицу ядра), второе — отбрасывает всё, �
 ──────────────────────
   • Модуль работает только с правилами INPUT для порта Telemt — не трогает
     REDIRECT-правила xray/tproxy (другая chain-логика, другой match).
-  • Все правила маркируются комментарием `--comment "telemt-syn-limit"` —
-    отключение модуля удаляет ТОЛЬКО эти правила, ничего больше.
-  • persist делается тем же механизмом, что и для остальных iptables-правил
-    проекта (см. _iptables_persist() в mtproto.py) — НЕ дублируем его здесь,
-    а сохраняем правила через netfilter-persistent/iptables-save напрямую
-    с тем же безопасным паттерном (best-effort, без падения при отсутствии).
+  • Все правила маркируются комментарием `telemt-syn-limit-accept` /
+    `telemt-syn-limit-reject` (из nft_constants) — отключение модуля удаляет
+    ТОЛЬКО эти правила, ничего больше.
+  • persist делается через единый `nft_persist()` → /etc/nftables.conf
+    + встроенный `nftables.service` (заменяет `netfilter-persistent save` +
+    `iptables-save` + кастомные restore-unit'ы).
   • Установка/удаление идемпотентны: повторный enable() не плодит дубликаты
     правил — сначала disable(), потом добавление актуальных.
 
@@ -85,13 +99,34 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
+# nftables — централизованная обёртка над `nft` CLI (этап 1.4 миграции)
+from .nft_common import (
+    nft_syn_limiter, nft_rule_exists, nft_rule_delete_by_comment,
+    nft_rule_counter_read, nft_persist, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    COMMENT_SYN_LIMIT_ACCEPT, COMMENT_SYN_LIMIT_REJECT,
+    NFT_PERSIST_FILE,
+)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ПУТИ И КОНСТАНТЫ
 # ══════════════════════════════════════════════════════════════════════════════
 _CONFIG_FILE   = Path("/etc/telemt/telemt.toml")
 _SERVICE_NAME  = "telemt"
 _STATE_FILE    = Path("/var/lib/xray-installer/telemt_syn_limiter.json")
-_COMMENT_TAG   = "telemt-syn-limit"
+# Comment-tags для nft-правил (раньше — один "telemt-syn-limit" на оба правила
+# iptables; теперь два отдельных: accept и reject, для более точного cleanup).
+_COMMENT_TAG_ACCEPT = COMMENT_SYN_LIMIT_ACCEPT   # "telemt-syn-limit-accept"
+_COMMENT_TAG_REJECT = COMMENT_SYN_LIMIT_REJECT   # "telemt-syn-limit-reject"
+# Базовый comment, передаваемый в nft_syn_limiter — функция сама добавит
+# суффиксы "-accept" / "-reject".
+_COMMENT_TAG_BASE   = "telemt-syn-limit"
+# Legacy alias для отображения в TUI (одно имя, без -accept/-reject).
+_COMMENT_TAG   = _COMMENT_TAG_BASE
+# Legacy: имя meter (в iptables это был --hashlimit-name telemt_syn).
+# В nftables meter_name = base_comment.replace("-", "_") = "telemt_syn_limit".
 _HASHLIMIT_NAME = "telemt_syn"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -265,123 +300,143 @@ def _save_state(cfg: SynLimiterConfig) -> None:
         pass
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IPTABLES — управление правилами
+#  NFTABLES — управление правилами (замена iptables hashlimit, этап 1.4)
 # ══════════════════════════════════════════════════════════════════════════════
 def _rule_exists() -> bool:
-    """Проверяет, есть ли уже правило с нашим комментарием в INPUT."""
-    r = _run(["iptables", "-S", "INPUT"], capture=True)
-    return _COMMENT_TAG in (r.stdout or "")
+    """Проверяет, есть ли уже правило с нашим comment-tag в nft chain input.
+
+    Заменяет: `iptables -S INPUT` + поиск `_COMMENT_TAG` в выводе.
+    Теперь: nft_rule_exists(comment=...) — ищет правила через `nft -j list chain`.
+
+    Проверяем ОБА comment-tag (accept и reject), т.к. nft_syn_limiter создаёт
+    их парой. Достаточно наличия одного из них (другой создаётся в той же
+    транзакции, но проверка обоих устойчива к частичным состояниям).
+    """
+    return (
+        nft_rule_exists(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            comment=_COMMENT_TAG_ACCEPT, family=NFT_TABLE_FAMILY,
+        )
+        or nft_rule_exists(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            comment=_COMMENT_TAG_REJECT, family=NFT_TABLE_FAMILY,
+        )
+    )
 
 def _remove_rules() -> int:
     """
-    Удаляет ВСЕ правила INPUT с нашим тегом, независимо от порта/rate.
+    Удаляет ВСЕ правила INPUT с нашими comment-tag'ами (accept и reject).
     Безопасно вызывать многократно — если правил нет, просто ничего не делает.
     Возвращает количество удалённых правил.
+
+    Заменяет: цикл `iptables -S INPUT` → парсинг строк с comment →
+              `iptables -D INPUT ...` для каждой найденной строки (10 итераций).
+    Теперь: два вызова nft_rule_delete_by_comment (по одному на каждый тег),
+            каждый находит ВСЕ правила с этим comment через `nft -a -j list
+            chain` → handles → `nft delete rule ... handle <N>`.
     """
-    removed = 0
-    for _ in range(20):  # защита от бесконечного цикла, если что-то пошло не так
-        r = _run(["iptables", "-S", "INPUT"], capture=True)
-        lines = [l for l in (r.stdout or "").splitlines() if _COMMENT_TAG in l]
-        if not lines:
-            break
-        # Берём первую строку, конвертируем "-A INPUT ..." → "-D INPUT ..." и выполняем
-        line = lines[0]
-        if not line.startswith("-A INPUT"):
-            break
-        del_args = ["iptables", "-D", "INPUT"] + line.split()[2:]
-        r2 = _run(del_args, capture=True)
-        if r2.returncode != 0:
-            break
-        removed += 1
-    return removed
+    removed_accept = nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_COMMENT_TAG_ACCEPT, family=NFT_TABLE_FAMILY, max_iterations=20,
+    )
+    removed_reject = nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_COMMENT_TAG_REJECT, family=NFT_TABLE_FAMILY, max_iterations=20,
+    )
+    return removed_accept + removed_reject
 
 def _apply_rules(cfg: SynLimiterConfig) -> tuple[bool, str]:
     """
-    Применяет правила hashlimit для текущего cfg.
-    Идемпотентно: сначала удаляет старые правила с нашим тегом, потом
-    добавляет новые. Порядок ACCEPT-затем-DROP важен — iptables проходит
+    Применяет правила meter (per-IP SYN rate limit) для текущего cfg.
+    Идемпотентно: сначала удаляет старые правила с нашими тегами, потом
+    добавляет новые. Порядок ACCEPT-затем-REJECT важен — nft проходит
     правила по порядку, поэтому ACCEPT (в пределах лимита) должен идти первым.
+
+    Заменяет:
+      iptables -I INPUT 1 -p tcp --dport <port> --syn -m hashlimit ... -j ACCEPT
+      iptables -I INPUT 2 -p tcp --dport <port> --syn -j REJECT --reject-with tcp-reset
+    Теперь: один вызов nft_syn_limiter(port, rate_per_sec, burst, comment=...),
+            который внутри себя создаёт ОБА правила (accept + reject) в
+            правильном порядке через nft_rule_insert (position=1, потом
+            ещё раз position=1 — reject оказывается на позиции 2 после accept).
     """
     if cfg.port <= 0:
         return False, "Не удалось определить порт Telemt — конфиг telemt.toml не найден."
 
     _remove_rules()  # чистим перед применением — гарантия идемпотентности
 
-    accept_cmd = [
-        "iptables", "-I", "INPUT", "1",
-        "-p", "tcp", "--dport", str(cfg.port), "--syn",
-        "-m", "hashlimit",
-        "--hashlimit-name", _HASHLIMIT_NAME,
-        "--hashlimit-mode", "srcip",
-        "--hashlimit-srcmask", "32",
-        "--hashlimit-upto", f"{cfg.rate_per_sec}/sec",
-        "--hashlimit-burst", str(cfg.burst),
-        "--hashlimit-htable-expire", str(cfg.htable_expire_ms),
-        "-m", "comment", "--comment", _COMMENT_TAG,
-        "-j", "ACCEPT",
-    ]
-    # REJECT+tcp-reset вместо DROP: DROP молча топит пакет → клиент ждёт
-    # таймаут (3-5 сек) и только потом ретраит с бэкоффом. RST даёт клиенту
-    # мгновенный сигнал "соединение разорвано" → реконнект без ожидания.
-    reject_cmd = [
-        "iptables", "-I", "INPUT", "2",
-        "-p", "tcp", "--dport", str(cfg.port), "--syn",
-        "-m", "comment", "--comment", _COMMENT_TAG,
-        "-j", "REJECT", "--reject-with", "tcp-reset",
-    ]
+    # nft_syn_limiter создаёт пару правил с comment-tag:
+    #   "telemt-syn-limit-accept" — ACCEPT при в пределах лимита (meter).
+    #   "telemt-syn-limit-reject" — REJECT с tcp-reset при превышении.
+    # htable_expire_ms больше не нужен (meter имеет свой таймаут элементов).
+    ok = nft_syn_limiter(
+        port=cfg.port,
+        rate_per_sec=cfg.rate_per_sec,
+        burst=cfg.burst,
+        comment=_COMMENT_TAG_BASE,  # функция добавит -accept / -reject
+        family=NFT_TABLE_FAMILY,
+        table=NFT_TABLE_NAME,
+        chain=NFT_CHAIN_INPUT,
+        idempotent=False,  # уже почистили выше
+    )
+    if not ok:
+        return False, "Ошибка применения правил nft syn limiter (см. логи)."
 
-    r1 = _run(accept_cmd, capture=True)
-    if r1.returncode != 0:
-        return False, f"Ошибка применения ACCEPT-правила: {r1.stderr.strip()[:120]}"
-
-    r2 = _run(reject_cmd, capture=True)
-    if r2.returncode != 0:
-        # откатываем ACCEPT-правило, чтобы не оставить половинчатое состояние
-        _remove_rules()
-        return False, f"Ошибка применения REJECT-правила: {r2.stderr.strip()[:120]}"
-
-    return True, "Правила hashlimit применены."
+    return True, "Правила meter (per-IP SYN limit) применены."
 
 def _persist_rules() -> None:
     """
-    Сохраняет iptables-правила тем же best-effort способом, что и остальной
-    проект (netfilter-persistent / iptables-save в rules.v4, если доступно).
-    Не падает, если механизм persist отсутствует — правило просто не
-    переживёт перезагрузку, что некритично (модуль можно повторно
-    активировать через меню).
+    Сохраняет nft ruleset в /etc/nftables.conf.
+
+    Заменяет (best-effort persist-логика):
+      • `netfilter-persistent save` (если установлен)
+      • Fallback: `iptables-save > /etc/iptables/rules.v4`
+    Теперь: один вызов `nft_persist()` → `nft list ruleset > /etc/nftables.conf`
+            + включение встроенного `nftables.service` через
+            `nft_persist_enable_systemd()`. При ребуте системы стандартный
+            nftables.service читает /etc/nftables.conf через `nft -f` и
+            восстанавливает ВСЕ правила Chimera.
+
+    Не падает, если nft недоступен — правило просто не переживёт перезагрузку,
+    что некритично (модуль можно повторно активировать через меню).
     """
-    if shutil.which("netfilter-persistent"):
-        _run(["netfilter-persistent", "save"])
+    if not _nft_available():
         return
-    # Fallback: iptables-save → /etc/iptables/rules.v4 (Debian/Ubuntu типичный путь)
-    rules_path = Path("/etc/iptables/rules.v4")
-    if rules_path.parent.exists():
-        try:
-            r = _run(["iptables-save"], capture=True)
-            if r.returncode == 0 and r.stdout:
-                rules_path.write_text(r.stdout)
-        except Exception:
-            pass
+    try:
+        nft_persist(NFT_PERSIST_FILE)
+        from .nft_common import nft_persist_enable_systemd
+        nft_persist_enable_systemd()
+    except Exception:
+        pass
 
 def _get_drop_counter(port: int) -> tuple[int, int]:
-    """Возвращает (packets, bytes) для REJECT-правила нашего тега (счётчик 'отброшенных' SYN)."""
-    r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x"], capture=True)
-    for line in (r.stdout or "").splitlines():
-        if _COMMENT_TAG in line and "REJECT" in line:
-            parts = line.split()
-            if len(parts) >= 2 and parts[0].isdigit():
-                return int(parts[0]), int(parts[1])
-    return 0, 0
+    """Возвращает (packets, bytes) для REJECT-правила нашего тега (счётчик
+    'отброшенных' SYN, превысивших лимит).
+
+    Заменяет: парсинг `iptables -L INPUT -n -v -x` + поиск строки с REJECT и
+              нашим comment, извлечение 2-й и 3-й колонок (pkts, bytes).
+    Теперь: nft_rule_counter_read(table, "input", "telemt-syn-limit-reject")
+            → JSON-парсинг `nft -j list chain` → counter expr → {packets, bytes}.
+    """
+    cnt = nft_rule_counter_read(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_COMMENT_TAG_REJECT, family=NFT_TABLE_FAMILY,
+    )
+    return cnt.get("packets", 0), cnt.get("bytes", 0)
 
 def _get_accept_counter(port: int) -> tuple[int, int]:
-    """Возвращает (packets, bytes) для ACCEPT-правила нашего тега."""
-    r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x"], capture=True)
-    for line in (r.stdout or "").splitlines():
-        if _COMMENT_TAG in line and "ACCEPT" in line:
-            parts = line.split()
-            if len(parts) >= 2 and parts[0].isdigit():
-                return int(parts[0]), int(parts[1])
-    return 0, 0
+    """Возвращает (packets, bytes) для ACCEPT-правила нашего тега (счётчик
+    'принятых' SYN, уложившихся в лимит).
+
+    Заменяет: парсинг `iptables -L INPUT -n -v -x` + поиск строки с ACCEPT и
+              нашим comment, извлечение 2-й и 3-й колонок (pkts, bytes).
+    Теперь: nft_rule_counter_read(table, "input", "telemt-syn-limit-accept").
+    """
+    cnt = nft_rule_counter_read(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_COMMENT_TAG_ACCEPT, family=NFT_TABLE_FAMILY,
+    )
+    return cnt.get("packets", 0), cnt.get("bytes", 0)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ПУБЛИЧНЫЙ API
@@ -405,7 +460,7 @@ def syn_limiter_status_line() -> str:
     if st["enabled"]:
         return f"{GREEN}● активен{NC}  {DIM}{st['rate']}/sec burst {st['burst']} (port {st['port']}){NC}"
     if st["configured_but_inactive"]:
-        return f"{YELLOW}⚠ включён в конфиге, но правил нет в iptables{NC}"
+        return f"{YELLOW}⚠ включён в конфиге, но правил нет в nftables{NC}"
     return f"{DIM}не активен{NC}"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -509,7 +564,7 @@ def syn_limiter_menu() -> None:
         status_str = (
             f"{GREEN}● активен{NC}  {cfg.rate_per_sec}/sec burst {cfg.burst} (port {cfg.port})"
             if active and cfg.enabled else
-            f"{YELLOW}⚠ включён в конфиге, но правил в iptables нет{NC}"
+            f"{YELLOW}⚠ включён в конфиге, но правил в nftables нет{NC}"
             if cfg.enabled and not active else
             f"{DIM}не активен{NC}"
         )

@@ -211,5 +211,183 @@ class TestPresets(unittest.TestCase):
                 self.assertGreater(preset[2], 0)  # burst
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТЕСТЫ МИГРАЦИИ НА NFTABLES (этап 1.4) — мок nft_common
+# ══════════════════════════════════════════════════════════════════════════════
+class TestNftMigration(unittest.TestCase):
+    """Проверяет что telemt_syn_limiter.py использует nft_common вместо прямых
+    iptables subprocess-вызовов (этап 1.4 миграции).
+
+    Мокает nft_syn_limiter / nft_rule_exists / nft_rule_delete_by_comment /
+    nft_rule_counter_read / _nft_available — проверяет что:
+      • _rule_exists проверяет ОБА comment-tag (accept и reject).
+      • _remove_rules вызывает nft_rule_delete_by_comment дважды (для accept
+        и reject тегов).
+      • _apply_rules делегирует в nft_syn_limiter (один вызов, который внутри
+        создаёт пару правил accept+reject).
+      • _persist_rules вызывает nft_persist (а не netfilter-persistent/iptables-save).
+      • _get_accept_counter / _get_drop_counter используют nft_rule_counter_read.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_rule_exists_checks_both_accept_and_reject_tags(self):
+        """_rule_exists проверяет ОБА comment-tag (accept и reject)."""
+        from chimera.modules import telemt_syn_limiter
+        # Если accept-правило найдено → True (даже если reject не найден)
+        with patch("chimera.modules.telemt_syn_limiter.nft_rule_exists",
+                   side_effect=lambda **kw: kw.get("comment") == "telemt-syn-limit-accept"):
+            self.assertTrue(telemt_syn_limiter._rule_exists())
+        # Если reject-правило найдено → True (даже если accept не найден)
+        with patch("chimera.modules.telemt_syn_limiter.nft_rule_exists",
+                   side_effect=lambda **kw: kw.get("comment") == "telemt-syn-limit-reject"):
+            self.assertTrue(telemt_syn_limiter._rule_exists())
+        # Если ни одного правила нет → False
+        with patch("chimera.modules.telemt_syn_limiter.nft_rule_exists",
+                   return_value=False):
+            self.assertFalse(telemt_syn_limiter._rule_exists())
+
+    def test_remove_rules_deletes_both_tags(self):
+        """_remove_rules вызывает nft_rule_delete_by_comment дважды."""
+        from chimera.modules import telemt_syn_limiter
+        with patch("chimera.modules.telemt_syn_limiter.nft_rule_delete_by_comment",
+                   return_value=1) as mock_del:
+            removed = telemt_syn_limiter._remove_rules()
+        self.assertEqual(mock_del.call_count, 2)
+        # Сумма удалённых: 1 (accept) + 1 (reject) = 2
+        self.assertEqual(removed, 2)
+        # Проверяем что оба тега были переданы
+        comments_called = sorted(
+            kwargs.get("comment") for _, kwargs in mock_del.call_args_list
+        )
+        self.assertEqual(comments_called,
+                         ["telemt-syn-limit-accept", "telemt-syn-limit-reject"])
+
+    def test_apply_rules_calls_nft_syn_limiter(self):
+        """_apply_rules делегирует в nft_syn_limiter (один вызов создаёт оба правила)."""
+        from chimera.modules import telemt_syn_limiter
+        cfg = telemt_syn_limiter.SynLimiterConfig(
+            enabled=True, port=8443, rate_per_sec=2, burst=5,
+            htable_expire_ms=60000, preset_name="soft",
+        )
+        with patch("chimera.modules.telemt_syn_limiter.nft_syn_limiter",
+                   return_value=True) as mock_lim, \
+             patch("chimera.modules.telemt_syn_limiter.nft_rule_delete_by_comment",
+                   return_value=0):
+            ok, msg = telemt_syn_limiter._apply_rules(cfg)
+        self.assertTrue(ok)
+        mock_lim.assert_called_once()
+        _, kwargs = mock_lim.call_args
+        self.assertEqual(kwargs.get("port"), 8443)
+        self.assertEqual(kwargs.get("rate_per_sec"), 2)
+        self.assertEqual(kwargs.get("burst"), 5)
+        self.assertEqual(kwargs.get("comment"), "telemt-syn-limit")
+        # idempotent=False т.к. cleanup уже сделан выше
+        self.assertFalse(kwargs.get("idempotent"))
+
+    def test_apply_rules_returns_false_on_nft_failure(self):
+        """Если nft_syn_limiter возвращает False → _apply_rules тоже False."""
+        from chimera.modules import telemt_syn_limiter
+        cfg = telemt_syn_limiter.SynLimiterConfig(
+            enabled=True, port=8443, rate_per_sec=1, burst=1,
+            htable_expire_ms=60000, preset_name="hard",
+        )
+        with patch("chimera.modules.telemt_syn_limiter.nft_syn_limiter",
+                   return_value=False), \
+             patch("chimera.modules.telemt_syn_limiter.nft_rule_delete_by_comment",
+                   return_value=0):
+            ok, msg = telemt_syn_limiter._apply_rules(cfg)
+        self.assertFalse(ok)
+        self.assertIn("Ошибка", msg)
+
+    def test_apply_rules_returns_false_when_port_zero(self):
+        """port=0 → нельзя применять правила (порт неизвестен)."""
+        from chimera.modules import telemt_syn_limiter
+        cfg = telemt_syn_limiter.SynLimiterConfig(
+            enabled=True, port=0, rate_per_sec=1, burst=1,
+        )
+        with patch("chimera.modules.telemt_syn_limiter.nft_syn_limiter") as mock_lim:
+            ok, msg = telemt_syn_limiter._apply_rules(cfg)
+        self.assertFalse(ok)
+        mock_lim.assert_not_called()  # не дошли до вызова nft
+
+    def test_persist_rules_uses_nft_persist(self):
+        """_persist_rules вызывает nft_persist (а не netfilter-persistent/iptables-save)."""
+        from chimera.modules import telemt_syn_limiter
+        with patch("chimera.modules.telemt_syn_limiter._nft_available",
+                   return_value=True), \
+             patch("chimera.modules.telemt_syn_limiter.nft_persist",
+                   return_value=True) as mock_persist, \
+             patch("chimera.modules.nft_common.nft_persist_enable_systemd",
+                   return_value=True):
+            telemt_syn_limiter._persist_rules()
+        mock_persist.assert_called_once()
+
+    def test_persist_rules_skipped_when_nft_unavailable(self):
+        """Если nft недоступен — _persist_rules ничего не делает."""
+        from chimera.modules import telemt_syn_limiter
+        with patch("chimera.modules.telemt_syn_limiter._nft_available",
+                   return_value=False), \
+             patch("chimera.modules.telemt_syn_limiter.nft_persist") as mock_persist:
+            telemt_syn_limiter._persist_rules()
+        mock_persist.assert_not_called()
+
+    def test_get_accept_counter_uses_nft_counter_read(self):
+        """_get_accept_counter делегирует в nft_rule_counter_read с accept tag."""
+        from chimera.modules import telemt_syn_limiter
+        with patch("chimera.modules.telemt_syn_limiter.nft_rule_counter_read",
+                   return_value={"packets": 42, "bytes": 4096}) as mock_cnt:
+            pkts, byts = telemt_syn_limiter._get_accept_counter(8443)
+        self.assertEqual(pkts, 42)
+        self.assertEqual(byts, 4096)
+        mock_cnt.assert_called_once()
+        _, kwargs = mock_cnt.call_args
+        self.assertEqual(kwargs.get("comment"), "telemt-syn-limit-accept")
+        self.assertEqual(kwargs.get("chain"), "input")
+
+    def test_get_drop_counter_uses_nft_counter_read(self):
+        """_get_drop_counter делегирует в nft_rule_counter_read с reject tag."""
+        from chimera.modules import telemt_syn_limiter
+        with patch("chimera.modules.telemt_syn_limiter.nft_rule_counter_read",
+                   return_value={"packets": 10, "bytes": 600}) as mock_cnt:
+            pkts, byts = telemt_syn_limiter._get_drop_counter(8443)
+        self.assertEqual(pkts, 10)
+        self.assertEqual(byts, 600)
+        _, kwargs = mock_cnt.call_args
+        self.assertEqual(kwargs.get("comment"), "telemt-syn-limit-reject")
+
+    def test_status_reflects_nft_rule_existence(self):
+        """status() возвращает enabled=True только если правила есть в nftables."""
+        from chimera.modules import telemt_syn_limiter
+        # Сохраним state и подменяем nft_rule_exists
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        state_file = tmpdir / "syn.json"
+        state_file.write_text(json.dumps({
+            "enabled": True, "port": 8443, "rate_per_sec": 1, "burst": 1,
+            "htable_expire_ms": 60000, "preset_name": "hard",
+        }))
+        try:
+            with patch("chimera.modules.telemt_syn_limiter._STATE_FILE", state_file), \
+                 patch("chimera.modules.telemt_syn_limiter.nft_rule_exists",
+                       return_value=True):
+                st = telemt_syn_limiter.status()
+            self.assertTrue(st["enabled"])
+            self.assertEqual(st["port"], 8443)
+            # configured_but_inactive=False (правила есть)
+            self.assertFalse(st["configured_but_inactive"])
+            with patch("chimera.modules.telemt_syn_limiter._STATE_FILE", state_file), \
+                 patch("chimera.modules.telemt_syn_limiter.nft_rule_exists",
+                       return_value=False):
+                st = telemt_syn_limiter.status()
+            # enabled=False (правил нет), configured_but_inactive=True
+            self.assertFalse(st["enabled"])
+            self.assertTrue(st["configured_but_inactive"])
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

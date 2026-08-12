@@ -5,7 +5,7 @@ MTU/MSS-тюнинг сети и диагностика Path MTU.
 
   • _mtu_probe()              — бинарный поиск максимального MTU (ICMP DF)
   • _mtu_get_iface()          — основной сетевой интерфейс
-  • _mtu_apply()              — ip link set mtu + iptables MSS clamping
+  • _mtu_apply()              — ip link set mtu + nftables MSS clamping
   • _mtu_remove_rules()       — удаление MSS-правил
   • _mtu_state_load/save()    — собственный state в /var/lib/xray-installer/mtu_tuning.json
   • do_mtu_tuning()           — меню автотюнинга MTU/MSS
@@ -16,6 +16,15 @@ MTU/MSS-тюнинг сети и диагностика Path MTU.
 Никаких mutations глобалей _core. Чтение state.json напрямую. Запись в
 собственный _MTU_STATE_FILE. Читает AWG_EXIT_HOST / _nodes_from_state /
 _log_change из ядра через _core_module().
+
+АРХИТЕКТУРА (мигрировано с iptables на nftables, этап 1.4):
+  • nft rules: table=inet chimera, chain=mangle_forward,
+    [<oifname "<iface>">] tcp flags syn / syn,rst tcp option maxseg size set <mss>
+    comment "chimera-mss-clamp"
+  • --set-mss <mss>    → tcp option maxseg size set <mss>
+  • --clamp-mss-to-pmtu → tcp option maxseg size set rt mtu
+  • Cleanup: nft_rule_delete_by_comment(table, "mangle_forward",
+    "chimera-mss-clamp") — один вызов вместо цикла iptables -D по нодам.
 
 Точки входа из _core.py:
     from chimera.modules.mtu_tuning import (
@@ -38,8 +47,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# nftables — централизованная обёртка над `nft` CLI (этап 1.4 миграции)
+from .nft_common import (
+    nft_mangle_mssclamp, nft_rule_delete_by_comment, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_MANGLE_FORWARD,
+    COMMENT_MSS_CLAMP,
+)
+
 # ── Константы ─────────────────────────────────────────────────────────────────
 _MTU_STATE_FILE = Path("/var/lib/xray-installer/mtu_tuning.json")
+# Метка для nft-правил MSS clamping (используется для идемпотентности и
+# безопасного удаления через nft_rule_delete_by_comment).
+_COMMENT = COMMENT_MSS_CLAMP  # "chimera-mss-clamp"
 
 
 # ── Ленивый доступ к ядру ────────────────────────────────────────────────────
@@ -57,7 +78,7 @@ def _mtu_resolve_host(host: str) -> str:
 
     DoH идёт напрямую к Cloudflare/Google, минуя локальный DNS-кэш
     (/etc/hosts, systemd-resolved, nscd, dnsmasq) — это важно, чтобы
-    MTU-пинг и iptables-правила сработали для АКТУАЛЬНОГО IP exit-ноды,
+    MTU-пинг и nft-правила сработали для АКТУАЛЬНОГО IP exit-ноды,
     а не для устаревшей кэш-записи (баг с blackshadows.ru).
     Возвращает IP-строку или '' при ошибке.
     """
@@ -125,8 +146,18 @@ def _mtu_get_iface() -> str:
 
 def _mtu_apply(iface: str, mtu: int, nodes: list) -> None:
     """
-    Применяет MTU на интерфейс и ограничение MSS в iptables
-    для каждой exit-ноды (только для трафика каскада).
+    Применяет MTU на интерфейс и ограничение MSS в nftables (mangle_forward)
+    для трафика каскада + общий clamp-to-pmtu.
+
+    Заменяет (этап 1.4 миграции):
+      • Per-node iptables -t mangle -A FORWARD -d <ip> -p tcp --tcp-flags
+        SYN,RST SYN -j TCPMSS --set-mss <mss> (одна команда на exit-ноду)
+        → nft_mangle_mssclamp(mss=<mss>, out_iface=<iface>) — одно правило
+          для всего интерфейса (MSS одинаковый для всех нод = mtu - 40,
+          пер-нодная детализация не нужна).
+      • iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN
+        -j TCPMSS --clamp-mss-to-pmtu (общий fallback)
+        → nft_mangle_mssclamp(mss=None) → `tcp option maxseg size set rt mtu`.
     """
     core = _core_module()
     _run = core._run
@@ -134,52 +165,58 @@ def _mtu_apply(iface: str, mtu: int, nodes: list) -> None:
     # 1. Устанавливаем MTU на интерфейсе
     _run(["ip", "link", "set", iface, "mtu", str(mtu)], check=False, quiet=True)
 
-    # 2. MSS clamping для каждой exit-ноды
-    mss = mtu - 40  # TCP/IP заголовки: 20 IP + 20 TCP
-    for nd in nodes:
-        host = nd.get("host", "")
-        port = str(nd.get("port", 443))
-        if not host:
-            continue
-        ip = _mtu_resolve_host(host)
-        if not ip:
-            continue
-        # Удалим старое правило если есть, потом добавим новое
-        _run([
-            "iptables", "-t", "mangle", "-D", "FORWARD",
-            "-d", ip, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-            "-j", "TCPMSS", "--set-mss", str(mss),
-        ], check=False, quiet=True)
-        _run([
-            "iptables", "-t", "mangle", "-A", "FORWARD",
-            "-d", ip, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-            "-j", "TCPMSS", "--set-mss", str(mss),
-        ], check=False, quiet=True)
+    # 2. Очищаем старые MSS-правила с нашим comment-tag перед применением новых
+    #    (идемпотентность: один delete-by-comment вместо цикла -D по нодам).
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_FORWARD,
+        comment=_COMMENT, family=NFT_TABLE_FAMILY, max_iterations=100,
+    )
 
-    # 3. Общий FORWARD MSS clamping
-    _run([
-        "iptables", "-t", "mangle", "-C", "FORWARD",
-        "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-        "-j", "TCPMSS", "--clamp-mss-to-pmtu",
-    ], check=False, quiet=True)
+    # 3. MSS clamping --set-mss <mss> для трафика через основной интерфейс.
+    #    Аналог: iptables -t mangle -A FORWARD -o <iface> -p tcp
+    #            --tcp-flags SYN,RST SYN -j TCPMSS --set-mss <mss>
+    mss = mtu - 40  # TCP/IP заголовки: 20 IP + 20 TCP
+    nft_mangle_mssclamp(
+        mss=mss,
+        out_iface=iface,
+        chain=NFT_CHAIN_MANGLE_FORWARD,
+        family=NFT_TABLE_FAMILY,
+        table=NFT_TABLE_NAME,
+        comment=_COMMENT,
+        idempotent=False,  # уже почистили выше
+    )
+
+    # 4. Общий FORWARD MSS clamping --clamp-mss-to-pmtu (fallback для трафика,
+    #    не попадающего в per-iface правило). Заменяет:
+    #    iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN
+    #             -j TCPMSS --clamp-mss-to-pmtu
+    nft_mangle_mssclamp(
+        mss=None,  # None → clamp-to-pmtu → `tcp option maxseg size set rt mtu`
+        chain=NFT_CHAIN_MANGLE_FORWARD,
+        family=NFT_TABLE_FAMILY,
+        table=NFT_TABLE_NAME,
+        comment=_COMMENT,
+        idempotent=False,  # уже почистили выше
+    )
 
 
 def _mtu_remove_rules(nodes: list) -> None:
-    """Удаляет MSS-правила iptables для всех нод."""
-    core = _core_module()
-    _run = core._run
-    for nd in nodes:
-        host = nd.get("host", "")
-        if not host:
-            continue
-        ip = _mtu_resolve_host(host)
-        if not ip:
-            continue
-        _run([
-            "iptables", "-t", "mangle", "-D", "FORWARD",
-            "-d", ip, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-            "-j", "TCPMSS", "--set-mss", "1400",
-        ], check=False, quiet=True)
+    """Удаляет MSS-правила nftables (все правила с comment chimera-mss-clamp
+    в цепочке mangle_forward).
+
+    Заменяет: цикл по нодам `iptables -t mangle -D FORWARD -d <ip> ...`
+              (одна команда на exit-ноду, каждая итерация resolves host → IP
+              и пытается удалить конкретное правило).
+    Теперь: один вызов nft_rule_delete_by_comment находит ВСЕ правила с этим
+            comment в цепочке mangle_forward (через `nft -a -j list chain` →
+            handles) и удаляет их через `nft delete rule ... handle <N>`.
+            nodes больше не нужны для cleanup (но сохранены в сигнатуре для
+            обратной совместимости с _core.py which импортирует эту функцию).
+    """
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_FORWARD,
+        comment=_COMMENT, family=NFT_TABLE_FAMILY, max_iterations=100,
+    )
 
 
 # ============================================================================
@@ -209,7 +246,7 @@ def do_mtu_tuning() -> None:
     """
     Интерактивный MTU/MSS автотюнинг.
     Зондирует MTU до каждой exit-ноды, выбирает оптимальное значение
-    и применяет его через ip link + iptables MSS clamping.
+    и применяет его через ip link + nftables MSS clamping.
     """
     core = _core_module()
     _run          = core._run
@@ -317,7 +354,7 @@ def do_mtu_tuning() -> None:
     _box_row(f"  {CYAN}[1]{NC}  Запустить зондирование и применить")
     _box_row(f"  {CYAN}[2]{NC}  Только зондирование (без применения)")
     _box_row(f"  {CYAN}[3]{NC}  Сбросить — восстановить MTU 1500 и удалить MSS-правила")
-    _box_row(f"  {CYAN}[4]{NC}  Показать текущие MSS-правила iptables")
+    _box_row(f"  {CYAN}[4]{NC}  Показать текущие MSS-правила nftables")
     _box_row(f"  {CYAN}[5]{NC}  Диагностика MTU по маршруту  {DIM}(tracepath + ping sweep){NC}")
 
     _box_row()
@@ -352,13 +389,18 @@ def do_mtu_tuning() -> None:
     if ch == "4":
         os.system("clear")
         print()
-        _box_top("📡  MSS-ПРАВИЛА IPTABLES")
-        r = _run(["iptables", "-t", "mangle", "-L", "FORWARD", "-n", "-v"],
+        _box_top("📡  MSS-ПРАВИЛА NFTABLES")
+        # Заменяет: iptables -t mangle -L FORWARD -n -v (парсинг TCPMSS-строк).
+        # Теперь: nft list chain inet chimera mangle_forward — показывает
+        # все правила цепочки, включая наш comment "chimera-mss-clamp".
+        r = _run(["nft", "list", "chain", "inet", "chimera", "mangle_forward"],
                  capture=True, check=False)
-        if r.stdout.strip():
+        out = (r.stdout or "").strip()
+        if out:
             max_w = _BOX_W - 4
-            for line in r.stdout.strip().splitlines():
-                if "TCPMSS" in line or "target" in line.lower():
+            for line in out.splitlines():
+                # Показываем строки с maxseg (MSS-clamp) или заголовком chain
+                if "maxseg" in line or "chain" in line.lower() or "\t" in line:
                     if len(line) > max_w:
                         line = line[:max_w - 1] + "…"
                     _box_row(f"  {DIM}{line}{NC}")
