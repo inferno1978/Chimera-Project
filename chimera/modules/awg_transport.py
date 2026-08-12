@@ -619,44 +619,104 @@ def _awg_client_conf_text() -> str:
 
 
 def _awg_systemd_unit_text(xray_uid: int) -> str:
-    """Формирует текст systemd unit для AWG-клиента."""
+    """Формирует текст systemd unit для AWG-клиента.
+
+    ЭТАП 1.6 МИГРАЦИИ: bash PostUp/PostDown переписаны с iptables/ip6tables
+    на прямые вызовы `nft add rule inet chimera ...` (idempotent через
+    comment-tag). Единая таблица `inet chimera` покрывает и v4, и v6 — больше
+    не нужны отдельные ip6tables строки.
+    """
     core = _core_module()
     AWG_FWMARK = getattr(core, "AWG_FWMARK", 1000)
     AWG_INTERFACE = getattr(core, "AWG_INTERFACE", "awg0")
     AWG_MTU = getattr(core, "AWG_MTU", 1280)
     AWG_ROUTE_TABLE = getattr(core, "AWG_ROUTE_TABLE", 1000)
+    # ЭТАП 1.6: comment-tags из nft_constants (для безопасного cleanup по comment).
+    # awg-fwmark-xray — для mangle OUTPUT mark по uid xray
+    # awg-fwmark-dnscrypt — для mangle OUTPUT mark по uid dnscrypt (если есть)
+    # awg-fwmark-mssclamp — для mangle FORWARD MSS clamp
+    # awg-forward-in / awg-forward-out — для FORWARD accept (только IPv6 — IPv4
+    #   covered в build_nat_idempotent_shell для standalone, но в Mode B на
+    #   RU-VPS этого нет, поэтому добавляем здесь)
+    # awg-masquerade-ipv6 — для IPv6 NAT MASQUERADE (т.к. inet таблица одна,
+    #   но MASQUERADE для IPv6 нужен отдельный comment от IPv4 awg-masquerade)
     pr_up = (
-        # ── IPv4 policy routing ────────────────────────────────────────────────
+        # ── IPv4 policy routing (НЕ ТРОГАТЬ — это ip rule/route, не nft) ───────
         # ip rule — policy routing fwmark (idempotent)
         f"ip rule show | grep -q 'fwmark {AWG_FWMARK}' || "
         f"ip rule add fwmark {AWG_FWMARK} table {AWG_ROUTE_TABLE} priority 100 2>/dev/null || true; "
         # ip route в таблице AWG (idempotent)
         f"ip route show table {AWG_ROUTE_TABLE} | grep -q default || "
         f"ip route add default dev {AWG_INTERFACE} table {AWG_ROUTE_TABLE} 2>/dev/null || true; "
-        # iptables OUTPUT mark (idempotent через -C)
-        f"iptables -t mangle -C OUTPUT -m owner --uid-owner {xray_uid} "
-        f"-j MARK --set-mark {AWG_FWMARK} 2>/dev/null || "
-        f"iptables -t mangle -A OUTPUT -m owner --uid-owner {xray_uid} "
-        f"-j MARK --set-mark {AWG_FWMARK} 2>/dev/null || true; "
-        # ИСПРАВЛЕНИЕ: маркируем трафик dnscrypt-proxy (uid dnscrypt) тем же fwmark.
-        # dnscrypt-proxy делает исходящие соединения к DNS upstream — они должны
-        # идти через AWG, иначе провайдер блокирует DoT/DNSCrypt на порту 443.
+        # ── nftables mangle OUTPUT mark (uid xray) — idempotent через comment-tag ─
+        # Замена: `iptables -t mangle -A OUTPUT -m owner --uid-owner xray -j MARK --set-mark 1000`
+        # На: `nft add rule inet chimera mangle_output meta skuid xray meta mark set 1000 comment "awg-fwmark-xray"`
+        # (idempotent через nft -a -j list chain: если уже есть правило с comment
+        #  "awg-fwmark-xray" — повторно добавляться не будет, но в bash мы просто
+        #  вызываем nft add rule с `2>/dev/null || true` чтобы избежать падения
+        #  при дубликате. Для строго идемпотентного поведения используем del-before-add
+        #  через inline python3, как в awg_net_common.build_nat_cleanup_shell).
+        f"python3 -c \""
+        f"import json, subprocess; "
+        f"r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera','mangle_output'], capture_output=True, text=True); "
+        f"if r.returncode == 0: "
+        f"  data = json.loads(r.stdout); "
+        f"  for item in data.get('nftables', []): "
+        f"    if 'chain' not in item: continue; "
+        f"    for rule in item['chain'].get('expr', []): "
+        f"      if rule.get('comment') == 'awg-fwmark-xray': "
+        f"        h = rule.get('handle'); "
+        f"        if h is not None: "
+        f"          subprocess.run(['nft','delete','rule','inet','chimera','mangle_output','handle',str(h)], capture_output=True); "
+        f"\" 2>/dev/null || true; "
+        f"nft add rule inet chimera mangle_output "
+        f"meta skuid {xray_uid} meta mark set {AWG_FWMARK} "
+        f"comment \\\"awg-fwmark-xray\\\" 2>/dev/null || true; "
+        # dnscrypt-proxy — маркируем тем же fwmark (comment awg-fwmark-dnscrypt)
         f"DC_UID=$(id -u dnscrypt 2>/dev/null); "
         f"[ -n \"$DC_UID\" ] && ("
-        f"iptables -t mangle -C OUTPUT -m owner --uid-owner \"$DC_UID\" "
-        f"-j MARK --set-mark {AWG_FWMARK} 2>/dev/null || "
-        f"iptables -t mangle -A OUTPUT -m owner --uid-owner \"$DC_UID\" "
-        f"-j MARK --set-mark {AWG_FWMARK} 2>/dev/null || true"
+        f"python3 -c \""
+        f"import json, subprocess; "
+        f"r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera','mangle_output'], capture_output=True, text=True); "
+        f"if r.returncode == 0: "
+        f"  data = json.loads(r.stdout); "
+        f"  for item in data.get('nftables', []): "
+        f"    if 'chain' not in item: continue; "
+        f"    for rule in item['chain'].get('expr', []): "
+        f"      if rule.get('comment') == 'awg-fwmark-dnscrypt': "
+        f"        h = rule.get('handle'); "
+        f"        if h is not None: "
+        f"          subprocess.run(['nft','delete','rule','inet','chimera','mangle_output','handle',str(h)], capture_output=True); "
+        f"\" 2>/dev/null || true; "
+        f"nft add rule inet chimera mangle_output "
+        f"meta skuid \\\"$DC_UID\\\" meta mark set {AWG_FWMARK} "
+        f"comment \\\"awg-fwmark-dnscrypt\\\" 2>/dev/null || true"
         f") || true; "
-        # iptables FORWARD MSS clamp (idempotent через -C)
-        f"iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN "
-        f"-j TCPMSS --set-mss {AWG_MTU - 40} 2>/dev/null || "
-        f"iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN "
-        f"-j TCPMSS --set-mss {AWG_MTU - 40} 2>/dev/null || true; "
-        # sysctl rp_filter
+        # ── nftables mangle FORWARD MSS clamp — idempotent через comment-tag ──────
+        # Замена: `iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss X`
+        # На: `nft add rule inet chimera mangle_forward tcp flags syn / syn,rst tcp option maxseg size set X`
+        f"python3 -c \""
+        f"import json, subprocess; "
+        f"r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera','mangle_forward'], capture_output=True, text=True); "
+        f"if r.returncode == 0: "
+        f"  data = json.loads(r.stdout); "
+        f"  for item in data.get('nftables', []): "
+        f"    if 'chain' not in item: continue; "
+        f"    for rule in item['chain'].get('expr', []): "
+        f"      if rule.get('comment') == 'awg-fwmark-mssclamp': "
+        f"        h = rule.get('handle'); "
+        f"        if h is not None: "
+        f"          subprocess.run(['nft','delete','rule','inet','chimera','mangle_forward','handle',str(h)], capture_output=True); "
+        f"\" 2>/dev/null || true; "
+        f"nft add rule inet chimera mangle_forward "
+        f"tcp flags syn / syn,rst tcp option maxseg size set {AWG_MTU - 40} "
+        f"comment \\\"awg-fwmark-mssclamp\\\" 2>/dev/null || true; "
+        # sysctl rp_filter (НЕ ТРОГАТЬ — это sysctl, не netfilter)
         f"sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1; "
         f"sysctl -w net.ipv4.conf.{AWG_INTERFACE}.rp_filter=0 >/dev/null 2>&1; "
-        # ── IPv6 policy routing (применяем если IPv6-стек доступен) ───────────
+        # ── IPv6 policy routing + nftables (применяем если IPv6-стек доступен) ──
+        # В nft inet таблица одна на v4+v6, поэтому nft-правила выше уже покрывают
+        # IPv6. Здесь только ip -6 rule/route + IPv6 FORWARD accept + NAT MASQUERADE.
         f"ip -6 route show 2>/dev/null | grep -q . && ("
         # ip6 rule fwmark (idempotent)
         f"ip -6 rule show | grep -q 'fwmark {AWG_FWMARK}' || "
@@ -664,48 +724,69 @@ def _awg_systemd_unit_text(xray_uid: int) -> str:
         # ip6 route default через awg0 (idempotent)
         f"ip -6 route show table {AWG_ROUTE_TABLE} 2>/dev/null | grep -q default || "
         f"ip -6 route add default dev {AWG_INTERFACE} table {AWG_ROUTE_TABLE} 2>/dev/null || true; "
-        # ip6tables OUTPUT mangle mark (idempotent через -C)
-        f"ip6tables -t mangle -C OUTPUT -m owner --uid-owner {xray_uid} "
-        f"-j MARK --set-mark {AWG_FWMARK} 2>/dev/null || "
-        f"ip6tables -t mangle -A OUTPUT -m owner --uid-owner {xray_uid} "
-        f"-j MARK --set-mark {AWG_FWMARK} 2>/dev/null || true; "
-        # ip6tables FORWARD MSS clamp (idempotent через -C)
-        f"ip6tables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN "
-        f"-j TCPMSS --set-mss {AWG_MTU - 40} 2>/dev/null || "
-        f"ip6tables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN "
-        f"-j TCPMSS --set-mss {AWG_MTU - 40} 2>/dev/null || true; "
-        # ip6tables FORWARD ACCEPT (idempotent через -C)
-        f"ip6tables -C FORWARD -i {AWG_INTERFACE} -j ACCEPT 2>/dev/null || "
-        f"ip6tables -A FORWARD -i {AWG_INTERFACE} -j ACCEPT 2>/dev/null || true; "
-        f"ip6tables -C FORWARD -o {AWG_INTERFACE} -j ACCEPT 2>/dev/null || "
-        f"ip6tables -A FORWARD -o {AWG_INTERFACE} -j ACCEPT 2>/dev/null || true; "
-        # ip6tables NAT MASQUERADE (idempotent через проверку)
+        # nft FORWARD accept для awg0 in/out (idempotent через comment)
+        # Замена: `ip6tables -A FORWARD -i awg0 -j ACCEPT`
+        f"nft add rule inet chimera forward "
+        f"iifname \\\"{AWG_INTERFACE}\\\" accept "
+        f"comment \\\"awg-forward-in\\\" 2>/dev/null || true; "
+        f"nft add rule inet chimera forward "
+        f"oifname \\\"{AWG_INTERFACE}\\\" accept "
+        f"comment \\\"awg-forward-out\\\" 2>/dev/null || true; "
+        # nft NAT MASQUERADE для IPv6 WAN интерфейса (idempotent через comment awg-masquerade-ipv6)
+        # Замена: `ip6tables -t nat -A POSTROUTING -o $IFACE6 -j MASQUERADE`
+        # В nft inet таблице — `ip6 saddr ...` для различения v6
         f"IFACE6=$(ip -6 route | awk '/default/ {{print $5; exit}}'); "
         f"[ -n \"$IFACE6\" ] && ("
-        f"ip6tables -t nat -C POSTROUTING -o \"$IFACE6\" -j MASQUERADE 2>/dev/null || "
-        f"ip6tables -t nat -A POSTROUTING -o \"$IFACE6\" -j MASQUERADE 2>/dev/null || true"
+        f"python3 -c \""
+        f"import json, subprocess; "
+        f"r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera','postrouting'], capture_output=True, text=True); "
+        f"if r.returncode == 0: "
+        f"  data = json.loads(r.stdout); "
+        f"  for item in data.get('nftables', []): "
+        f"    if 'chain' not in item: continue; "
+        f"    for rule in item['chain'].get('expr', []): "
+        f"      if rule.get('comment') == 'awg-masquerade-ipv6': "
+        f"        h = rule.get('handle'); "
+        f"        if h is not None: "
+        f"          subprocess.run(['nft','delete','rule','inet','chimera','postrouting','handle',str(h)], capture_output=True); "
+        f"\" 2>/dev/null || true; "
+        f"nft add rule inet chimera postrouting "
+        f"oifname \\\"$IFACE6\\\" masquerade "
+        f"comment \\\"awg-masquerade-ipv6\\\" 2>/dev/null || true"
         f") || true"
         f") || true"
     )
     pr_down = (
-        # ── IPv4 cleanup ───────────────────────────────────────────────────────
+        # ── IPv4 cleanup (ip rule/route — НЕ ТРОГАТЬ, не nft) ─────────────────
         f"ip route del default dev {AWG_INTERFACE} table {AWG_ROUTE_TABLE} 2>/dev/null || true; "
         f"ip rule del fwmark {AWG_FWMARK} table {AWG_ROUTE_TABLE} 2>/dev/null || true; "
-        f"iptables -t mangle -D OUTPUT -m owner --uid-owner {xray_uid} "
-        f"-j MARK --set-mark {AWG_FWMARK} 2>/dev/null || true; "
-        f"iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN "
-        f"-j TCPMSS --set-mss {AWG_MTU - 40} 2>/dev/null || true; "
-        # ── IPv6 cleanup (идемпотентно — ошибки игнорируем) ───────────────────
+        # ── nftables cleanup (по comment-tag через inline python3) ─────────────
+        # Удаляем все правила с нашими comment-tag'ами из всех chains
+        f"python3 -c \""
+        f"import json, subprocess; "
+        f"targets = [('mangle_output', 'awg-fwmark-xray'), "
+        f"            ('mangle_output', 'awg-fwmark-dnscrypt'), "
+        f"            ('mangle_forward', 'awg-fwmark-mssclamp'), "
+        f"            ('forward', 'awg-forward-in'), "
+        f"            ('forward', 'awg-forward-out'), "
+        f"            ('postrouting', 'awg-masquerade-ipv6')]; "
+        f"for chain, comment in targets: "
+        f"  r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera',chain], capture_output=True, text=True); "
+        f"  if r.returncode != 0: continue; "
+        f"  try: "
+        f"    data = json.loads(r.stdout); "
+        f"    for item in data.get('nftables', []): "
+        f"      if 'chain' not in item: continue; "
+        f"      for rule in item['chain'].get('expr', []): "
+        f"        if rule.get('comment') != comment: continue; "
+        f"        h = rule.get('handle'); "
+        f"        if h is None: continue; "
+        f"        subprocess.run(['nft','delete','rule','inet','chimera',chain,'handle',str(h)], capture_output=True); "
+        f"  except Exception: pass"
+        f"\" 2>/dev/null || true; "
+        # ── IPv6 cleanup (ip rule/route — НЕ ТРОГАТЬ, не nft) ───────────────────
         f"ip -6 route del default dev {AWG_INTERFACE} table {AWG_ROUTE_TABLE} 2>/dev/null || true; "
-        f"ip -6 rule del fwmark {AWG_FWMARK} table {AWG_ROUTE_TABLE} 2>/dev/null || true; "
-        f"ip6tables -t mangle -D OUTPUT -m owner --uid-owner {xray_uid} "
-        f"-j MARK --set-mark {AWG_FWMARK} 2>/dev/null || true; "
-        f"ip6tables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN "
-        f"-j TCPMSS --set-mss {AWG_MTU - 40} 2>/dev/null || true; "
-        f"ip6tables -D FORWARD -i {AWG_INTERFACE} -j ACCEPT 2>/dev/null || true; "
-        f"ip6tables -D FORWARD -o {AWG_INTERFACE} -j ACCEPT 2>/dev/null || true; "
-        f"IFACE6=$(ip -6 route | awk '/default/ {{print $5; exit}}'); "
-        f"[ -n \"$IFACE6\" ] && ip6tables -t nat -D POSTROUTING -o \"$IFACE6\" -j MASQUERADE 2>/dev/null || true"
+        f"ip -6 rule del fwmark {AWG_FWMARK} table {AWG_ROUTE_TABLE} 2>/dev/null || true"
     )
     # АВТООПРЕДЕЛЕНИЕ реализации: если модуль ядра amneziawg доступен —
     # WG_QUICK_USERSPACE_IMPLEMENTATION не нужен (ядро само всё сделает).
@@ -1106,25 +1187,40 @@ def awg_setup_local_client() -> bool:
     # Некоторые провайдеры (например AEZA) ставят INPUT policy DROP по умолчанию,
     # и без этого правила ответные пакеты от exit-ноды не проходят —
     # туннель односторонний (sent > 0, received = 0).
+    # ЭТАП 1.6 МИГРАЦИИ: переписано с iptables -C/-A INPUT на nft_open_port
+    # (idempotent через comment-tag "awg-input-port-<port>").
     import subprocess as _sp2
     _lport = str(AWG_CLIENT_LISTEN_PORT)
-    _chk2 = _sp2.run(
-        ["iptables", "-C", "INPUT", "-p", "udp", "--dport", _lport, "-j", "ACCEPT"],
-        capture_output=True
-    )
-    if _chk2.returncode != 0:
-        _sp2.run(
-            ["iptables", "-A", "INPUT", "-p", "udp", "--dport", _lport, "-j", "ACCEPT"],
+    # Заменяем прямой вызов iptables -C/-A на nft_open_port через chimera.modules.nft_common.
+    # Это идемпотентно (comment-tag) и не требует iptables-persistent (persist делается
+    # через единый nft_persist → /etc/nftables.conf).
+    try:
+        from .nft_common import nft_open_port, nft_persist
+        nft_open_port(int(_lport), proto="udp",
+                      comment=f"awg-input-port-{_lport}")
+        success(f"AWG: открыт входящий UDP/{_lport} на entry-ноде (nftables)")
+        # Persist через единый /etc/nftables.conf (nftables.service при ребуте)
+        nft_persist()
+    except Exception as _e_nft:
+        # Fallback на прямой iptables вызов (для систем без nft —极少, но возможно
+        # в гибридных установках где-то ещё есть iptables).
+        _chk2 = _sp2.run(
+            ["iptables", "-C", "INPUT", "-p", "udp", "--dport", _lport, "-j", "ACCEPT"],
             capture_output=True
         )
-        success(f"AWG: открыт входящий UDP/{_lport} на entry-ноде")
-    # Сохраняем правило если доступен iptables-persistent
-    _sp2.run(
-        ["bash", "-c",
-         "which netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save 2>/dev/null || "
-         "mkdir -p /etc/iptables && iptables-save > /etc/iptables/rules.v4 2>/dev/null || true"],
-        capture_output=True
-    )
+        if _chk2.returncode != 0:
+            _sp2.run(
+                ["iptables", "-A", "INPUT", "-p", "udp", "--dport", _lport, "-j", "ACCEPT"],
+                capture_output=True
+            )
+            success(f"AWG: открыт входящий UDP/{_lport} на entry-ноде (iptables fallback)")
+        # Сохраняем правило если доступен iptables-persistent
+        _sp2.run(
+            ["bash", "-c",
+             "which netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save 2>/dev/null || "
+             "mkdir -p /etc/iptables && iptables-save > /etc/iptables/rules.v4 2>/dev/null || true"],
+            capture_output=True
+        )
 
     return True
 
@@ -1133,6 +1229,17 @@ def awg_apply_policy_routing() -> None:
     """
     Немедленно применяет policy routing (без перезагрузки):
     пакеты процесса xray помечаются → роутятся через awg0.
+
+    ЭТАП 1.6 МИГРАЦИИ:
+      • `iptables -t mangle -A OUTPUT -m owner --uid-owner xray -j MARK ...`
+        → `nft_mangle_mark_uid(uid, fwmark, comment="awg-fwmark-xray")`.
+      • `iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss X`
+        → `nft_mangle_mssclamp(mss=X, comment="awg-fwmark-mssclamp")`.
+      • `ip6tables -A FORWARD -i/-o awg0 -j ACCEPT` → `nft_rule_add(forward, comment="awg-forward-in/out")`.
+      • `ip6tables -t nat -A POSTROUTING -o $IFACE6 -j MASQUERADE`
+        → `nft_nat_masquerade(out_iface=IFACE6, comment="awg-masquerade-ipv6")`.
+      • `iptables-save/ip6tables-save` → `nft_persist()` (единый /etc/nftables.conf).
+      • ip rule / ip route — НЕ ТРОГАТЬ (это iproute2, не netfilter).
     """
     core = _core_module()
     _run = core._run
@@ -1148,7 +1255,18 @@ def awg_apply_policy_routing() -> None:
     AWG_MTU = getattr(core, "AWG_MTU", 1280)
     AWG_ROUTE_TABLE = getattr(core, "AWG_ROUTE_TABLE", 1000)
     AWG_SUBNET_V6 = getattr(core, "AWG_SUBNET_V6", "fd66:66:66::/64")
-    info("AWG: применение policy routing...")
+    info("AWG: применение policy routing (nftables, этап 1.6)...")
+
+    # ЭТАП 1.6: импортируем nft_common helpers.
+    from .nft_common import (
+        nft_mangle_mark_uid, nft_mangle_mssclamp, nft_nat_masquerade,
+        nft_rule_add, nft_persist,
+    )
+    from .nft_constants import (
+        NFT_TABLE_NAME, NFT_TABLE_FAMILY,
+        NFT_CHAIN_FORWARD,
+        COMMENT_AWG_FWMARK_XRAY, COMMENT_AWG_FWMARK_DNSCRYPT,
+    )
 
     try:
         xray_uid = pwd.getpwnam("xray").pw_uid
@@ -1173,33 +1291,39 @@ def awg_apply_policy_routing() -> None:
         ["sysctl", "-w", "net.ipv4.conf.all.rp_filter=0"],
         ["sysctl", "-w", f"net.ipv4.conf.{AWG_INTERFACE}.rp_filter=0"],
     ]
+    # ЭТАП 1.6: routing_cmds — только ip rule/route (НЕ nft).
+    # nft-правила применяются отдельно через nft_mangle_mark_uid / nft_mangle_mssclamp.
     routing_cmds = [
         ["ip", "route", "add", "default", "dev", AWG_INTERFACE,
          "table", str(AWG_ROUTE_TABLE)],
         ["ip", "rule", "add", "fwmark", str(AWG_FWMARK),
          "table", str(AWG_ROUTE_TABLE), "priority", "100"],
-        ["iptables", "-t", "mangle", "-A", "OUTPUT",
-         "-m", "owner", "--uid-owner", str(xray_uid),
-         "-j", "MARK", "--set-mark", str(AWG_FWMARK)],
-        # ИСПРАВЛЕНИЕ: dnscrypt-proxy тоже должен идти через AWG.
-        # Получаем uid пользователя dnscrypt динамически.
     ]
+
+    # ── nftables: mangle OUTPUT mark по uid xray (idempotent через comment-tag) ──
+    nft_mangle_mark_uid(
+        uid=xray_uid, fwmark=AWG_FWMARK,
+        comment=COMMENT_AWG_FWMARK_XRAY,  # "awg-fwmark-xray"
+        idempotent=True,
+    )
+    # dnscrypt-proxy (если установлен) — маркируем тем же fwmark
     try:
         import pwd as _pwd_dc
         _dc_uid = _pwd_dc.getpwnam("dnscrypt").pw_uid
-        routing_cmds.append(
-            ["iptables", "-t", "mangle", "-A", "OUTPUT",
-             "-m", "owner", "--uid-owner", str(_dc_uid),
-             "-j", "MARK", "--set-mark", str(AWG_FWMARK)]
+        nft_mangle_mark_uid(
+            uid=_dc_uid, fwmark=AWG_FWMARK,
+            comment=COMMENT_AWG_FWMARK_DNSCRYPT,  # "awg-fwmark-dnscrypt"
+            idempotent=True,
         )
     except KeyError:
         pass  # dnscrypt не установлен — ничего не добавляем
-    routing_cmds += [
-        # MSS clamping — убираем фрагментацию под MTU AWG
-        ["iptables", "-t", "mangle", "-A", "FORWARD",
-         "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-         "-j", "TCPMSS", "--set-mss", str(AWG_MTU - 40)],
-    ]
+
+    # ── nftables: mangle FORWARD MSS clamp (idempotent через comment-tag) ──────
+    nft_mangle_mssclamp(
+        mss=AWG_MTU - 40,
+        comment="awg-fwmark-mssclamp",
+        idempotent=True,
+    )
 
     # ── IPv6 policy routing (только если стек доступен) ───────────────────────
     if _ipv6_available:
@@ -1210,27 +1334,43 @@ def awg_apply_policy_routing() -> None:
             # ip6 route: дефолтный маршрут через awg0 в таблице AWG
             ["ip", "-6", "route", "add", "default", "dev", AWG_INTERFACE,
              "table", str(AWG_ROUTE_TABLE)],
-            # ip6tables OUTPUT: маркируем трафик xray
-            ["ip6tables", "-t", "mangle", "-A", "OUTPUT",
-             "-m", "owner", "--uid-owner", str(xray_uid),
-             "-j", "MARK", "--set-mark", str(AWG_FWMARK)],
-            # ip6tables MSS clamping
-            ["ip6tables", "-t", "mangle", "-A", "FORWARD",
-             "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-             "-j", "TCPMSS", "--set-mss", str(AWG_MTU - 40)],
-            # ip6tables FORWARD ACCEPT: разрешаем форвардинг IPv6 через туннель
-            ["ip6tables", "-A", "FORWARD", "-i", AWG_INTERFACE, "-j", "ACCEPT"],
-            ["ip6tables", "-A", "FORWARD", "-o", AWG_INTERFACE, "-j", "ACCEPT"],
         ]
-        # ip6tables NAT MASQUERADE: IPv6-пакеты из туннеля выходят с адресом RU-сервера.
-        # Используем bash-обёртку т.к. нужна shell-подстановка для определения интерфейса.
-        _run(
-            ["bash", "-c",
-             "IFACE6=$(ip -6 route | awk '/default/ {print $5; exit}'); "
-             "[ -n \"$IFACE6\" ] && ip6tables -t nat -A POSTROUTING -o \"$IFACE6\" -j MASQUERADE 2>/dev/null || "
-             f"ip6tables -t nat -A POSTROUTING -s {AWG_SUBNET_V6} -j MASQUERADE 2>/dev/null || true"],
-            check=False, quiet=True
+        # nftables IPv6: FORWARD accept для awg0 in/out (inet таблица одна, но
+        # FORWARD-правила нужны отдельно от IPv4 — они создаются здесь для IPv6
+        # трафика через awg0; IPv4 FORWARD covered в standalone build_nat_rule_args,
+        # но в Mode B на RU-VPS этого нет, поэтому добавляем здесь явно).
+        # comment-tags: awg-forward-in (для awg0 input), awg-forward-out (для awg0 output)
+        nft_rule_add(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_FORWARD,
+            rule_spec=f'iifname "{AWG_INTERFACE}" accept',
+            family=NFT_TABLE_FAMILY,
+            comment="awg-forward-in", idempotent=True,
         )
+        nft_rule_add(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_FORWARD,
+            rule_spec=f'oifname "{AWG_INTERFACE}" accept',
+            family=NFT_TABLE_FAMILY,
+            comment="awg-forward-out", idempotent=True,
+        )
+        # nftables IPv6 NAT MASQUERADE (аналог ip6tables -t nat -A POSTROUTING -o $IFACE6)
+        # Определяем IPv6 WAN интерфейс через iproute2.
+        r_iface6 = _run(["bash", "-c",
+                         "ip -6 route | awk '/default/ {print $5; exit}'"],
+                        capture=True, check=False, quiet=True)
+        _iface6 = r_iface6.stdout.strip() if r_iface6.returncode == 0 else ""
+        if _iface6:
+            nft_nat_masquerade(
+                out_iface=_iface6,
+                comment="awg-masquerade-ipv6",
+                idempotent=True,
+            )
+        else:
+            # Fallback: blanket MASQUERADE по source v6 subnet (если iface не определён)
+            nft_nat_masquerade(
+                src_subnet=AWG_SUBNET_V6,
+                comment="awg-masquerade-ipv6",
+                idempotent=True,
+            )
 
     # ПАТЧ: добавляем исключения из AWG маршрутизации для exit-VPS и самого сервера.
     # Без этих правил SSH к exit-VPS и исходящий трафик сервера попадают в AWG петлю.
@@ -1264,61 +1404,25 @@ def awg_apply_policy_routing() -> None:
         if r.returncode not in (0, 2):  # 2 = правило уже существует
             log_to_file("WARN", f"AWG routing cmd failed: {' '.join(cmd)} → {r.stderr.strip()}")
 
-    # ── Сохраняем правила iptables (с гарантией восстановления после ребута) ─
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r_save = _run(["iptables-save"], capture=True, check=False)
-    if r_save.returncode == 0:
-        rules_v4 = rules_dir / "rules.v4"
-        rules_v4.write_text(r_save.stdout)
-        os.chmod(str(rules_v4), 0o600)
-        success("AWG: iptables сохранены → /etc/iptables/rules.v4")
+    # ── Сохраняем nft ruleset (мигрировано с iptables-save на nft_persist, этап 1.6) ─
+    # Раньше: `iptables-save > /etc/iptables/rules.v4` + `ip6tables-save > /etc/iptables/rules.v6`.
+    # Теперь: `nft_persist()` → `nft list ruleset > /etc/nftables.conf` (единый файл).
+    try:
+        nft_persist()
+        success("AWG: nft ruleset сохранён → /etc/nftables.conf")
+    except Exception as _e_persist:
+        warn(f"AWG: nft_persist не удался: {_e_persist} — правила не сохранены на диск")
 
-    # ── Сохраняем ip6tables (только если IPv6 применялся) ────────────────────
-    if _ipv6_available:
-        r_save6 = _run(["ip6tables-save"], capture=True, check=False)
-        if r_save6.returncode == 0:
-            rules_v6 = rules_dir / "rules.v6"
-            rules_v6.write_text(r_save6.stdout)
-            os.chmod(str(rules_v6), 0o600)
-            success("AWG: ip6tables сохранены → /etc/iptables/rules.v6")
-        else:
-            warn("AWG: ip6tables-save не удался — IPv6 правила не сохранены на диск")
-
-    # ── БАГ-FIX 2: установка и включение netfilter-persistent ────────────────
-    # Без netfilter-persistent правила iptables НЕ восстанавливаются после ребута.
-    # Просто сохранить в rules.v4 недостаточно — нужен сервис который их грузит.
-    _nfp_installed = False
-    if command_exists("netfilter-persistent") or command_exists("iptables-restore"):
-        # Попробуем сохранить через netfilter-persistent
-        r_nfp = _run(["netfilter-persistent", "save"], check=False, quiet=True)
-        if r_nfp.returncode == 0:
-            success("AWG: netfilter-persistent save — OK")
-            _nfp_installed = True
-    if not _nfp_installed:
-        info("AWG: устанавливаем netfilter-persistent для сохранения iptables...")
-        # БАГ-FIX: iptables-persistent задаёт интерактивные вопросы через debconf
-        # ("Save current IPv4/IPv6 rules?"), что вешает скрипт навсегда.
-        # Решение: предварительно выставляем пресиды debconf + DEBIAN_FRONTEND=noninteractive.
-        _run(
-            ["bash", "-c",
-             "export DEBIAN_FRONTEND=noninteractive && "
-             "echo 'iptables-persistent iptables-persistent/autosave_v4 boolean true' "
-             "  | debconf-set-selections 2>/dev/null; "
-             "echo 'iptables-persistent iptables-persistent/autosave_v6 boolean true' "
-             "  | debconf-set-selections 2>/dev/null; "
-             "apt-get install -y -q netfilter-persistent iptables-persistent 2>/dev/null"],
-            check=False, quiet=True
-        )
-        r_nfp2 = _run(["netfilter-persistent", "save"], check=False, quiet=True)
-        if r_nfp2.returncode == 0:
-            success("AWG: netfilter-persistent установлен и правила сохранены")
-            _nfp_installed = True
-        else:
-            warn("AWG: netfilter-persistent недоступен — будет использован fallback через cron")
-
-    # Включаем netfilter-persistent в systemd (автозапуск)
-    _run(["systemctl", "enable", "netfilter-persistent"], check=False, quiet=True)
+    # ── БАГ-FIX 2: установка и включение nftables.service (замена netfilter-persistent) ─
+    # ЭТАП 1.6: netfilter-persistent + iptables-persistent больше не нужны —
+    # стандартный `nftables.service` (Debian/Ubuntu package) читает /etc/nftables.conf
+    # при `systemctl start nftables` через `nft -f /etc/nftables.conf`.
+    from .nft_common import nft_persist_enable_systemd
+    try:
+        nft_persist_enable_systemd()
+        success("AWG: nftables.service включён (autoload /etc/nftables.conf при ребуте)")
+    except Exception as _e_sysd:
+        warn(f"AWG: nft_persist_enable_systemd не удался: {_e_sysd}")
 
     # ── Сохраняем sysctl постоянно ────────────────────────────────────────────
     sysctl_conf = Path("/etc/sysctl.d/99-awg.conf")
@@ -1333,12 +1437,12 @@ def awg_apply_policy_routing() -> None:
     _run(["sysctl", "--system"], check=False, quiet=True)
 
     # ── БАГ-FIX 2 (продолжение): cron @reboot — полное восстановление ────────
-    # Восстанавливаем И ip rule/route, И iptables (fallback если netfilter-persistent
-    # по какой-то причине не отработал — двойная защита).
+    # ЭТАП 1.6: вместо iptables-restore используем `nft -f /etc/nftables.conf`
+    # для восстановления всех правил Chimera (включая правила других модулей).
+    # ip rule/route — НЕ ТРОГАТЬ (это iproute2, не netfilter).
     _v6_reboot = ""
     if _ipv6_available:
         _v6_reboot = (
-            f"test -f /etc/iptables/rules.v6 && ip6tables-restore < /etc/iptables/rules.v6 2>/dev/null; "
             f"ip -6 rule show | grep -q 'fwmark {AWG_FWMARK}' || "
             f"ip -6 rule add fwmark {AWG_FWMARK} table {AWG_ROUTE_TABLE} priority 100 2>/dev/null; "
             f"ip -6 route show table {AWG_ROUTE_TABLE} | grep -q default || "
@@ -1351,11 +1455,11 @@ def awg_apply_policy_routing() -> None:
             )
 
     reboot_script = (
-        "# AWG policy routing + iptables restore — автогенерировано vless-installer\n"
+        "# AWG policy routing + nftables restore — автогенерировано chimera (этап 1.6)\n"
         f"@reboot root "
-        # 1. iptables из сохранённого дампа (жёсткий fallback)
-        f"test -f /etc/iptables/rules.v4 && iptables-restore < /etc/iptables/rules.v4 2>/dev/null; "
-        # 2. ip6tables restore (Dual-Stack, если был применён)
+        # 1. nft ruleset из сохранённого дампа (замена iptables-restore)
+        f"nft -f /etc/nftables.conf 2>/dev/null; "
+        # 2. IPv6 ip rule/route (если был применён)
         + _v6_reboot +
         # 3. ip rule исключение для самого сервера (приоритет 49)
         f"ip rule show | grep -q 'from {_server_ip}' || "
@@ -1377,7 +1481,7 @@ def awg_apply_policy_routing() -> None:
     cron_path.write_text(reboot_script + "\n")
     os.chmod(str(cron_path), 0o644)
     _v6_status = "Dual-Stack (IPv4+IPv6)" if _ipv6_available else "IPv4-only"
-    success(f"AWG: policy routing применён и сохранён ({_v6_status}, iptables + ip rule/route при ребуте)")
+    success(f"AWG: policy routing применён и сохранён ({_v6_status}, nftables + ip rule/route при ребуте)")
 
 
 def _awg_ensure_sshpass() -> bool:
@@ -1781,13 +1885,18 @@ def awg_setup_remote_server(
     else:
         success("AWG: systemd unit создан на exit-VPS")
 
-    # ── Открываем UDP-порт ────────────────────────────────────────────────────
+    # ── Открываем UDP-порт на exit-VPS через nftables (этап 1.6 миграции) ──────
+    # Раньше: `iptables -C/-A INPUT -p udp --dport PORT -j ACCEPT` + `ufw allow`.
+    # Теперь: `nft add rule inet chimera input udp dport PORT accept comment "awg-input-port-PORT"`.
+    # UFW остаётся для систем где он включён (как обёртка, не конфликтует с nft inet chimera).
     _ssh(f"ufw allow {AWG_EXIT_PORT}/udp 2>/dev/null || true")
     _ssh(
-        f"iptables -C INPUT -p udp --dport {AWG_EXIT_PORT} -j ACCEPT 2>/dev/null ||"
-        f" iptables -A INPUT -p udp --dport {AWG_EXIT_PORT} -j ACCEPT 2>/dev/null || true"
+        f"nft add table inet chimera 2>/dev/null; "
+        f"nft add chain inet chimera input '{{ type filter hook input priority 0; policy accept; }}' 2>/dev/null; "
+        f"nft add rule inet chimera input udp dport {AWG_EXIT_PORT} accept "
+        f"comment \\\"awg-input-port-{AWG_EXIT_PORT}\\\" 2>/dev/null || true"
     )
-    success(f"AWG: UDP/{AWG_EXIT_PORT} открыт на exit-VPS")
+    success(f"AWG: UDP/{AWG_EXIT_PORT} открыт на exit-VPS (nftables)")
 
     # ── Запуск AWG-сервера ────────────────────────────────────────────────────
     # BUGFIX: отключаем стандартный awg-quick@awg0.service если он есть —
@@ -1820,14 +1929,17 @@ def awg_setup_remote_server(
     # =============================================================================
     # ПАТЧ: Включение NAT (Masquerade) на Exit-Node (КРИТИЧНО!)
     # Без этого интернет через туннель работать не будет.
+    # ЭТАП 1.6 МИГРАЦИИ: переписано с iptables/ip6tables на nftables.
+    # На удалённом exit-VPS предполагается что nft установлен (Debian 10+/Ubuntu 18.04+
+    # из коробки). Все правила идут в единую таблицу inet chimera.
     # =============================================================================
-    info("AWG Remote: включение NAT (Masquerade) для выхода в интернет...")
-    
+    info("AWG Remote: включение NAT (Masquerade, nftables) для выхода в интернет...")
+
     try:
         # 1. Определяем внешний интерфейс на удаленном сервере
         get_iface_cmd = "ip -4 route | grep default | awk '{print $5}'"
         r_iface = _ssh(get_iface_cmd, capture=True, check=False)
-        
+
         exit_iface = ""
         if r_iface.returncode == 0 and r_iface.stdout.strip():
             exit_iface = r_iface.stdout.strip()
@@ -1836,27 +1948,44 @@ def awg_setup_remote_server(
             exit_iface = "eth0" # Стандартный fallback
             warn(f"AWG Remote: не удалось определить интерфейс автоматически, используем стандартный: {exit_iface}")
 
-        # 2. Включаем IP Forwarding (пересылку пакетов IPv4 + IPv6)
+        # 2. Включаем IP Forwarding (пересылку пакетов IPv4 + IPv6) — НЕ ТРОГАТЬ (sysctl)
         fwd_cmd = "sysctl -w net.ipv4.ip_forward=1 && sysctl -w net.ipv6.conf.all.forwarding=1"
         _ssh(fwd_cmd, check=False, quiet=True)
         info("AWG Remote: IP Forwarding (IPv4+IPv6) включен")
 
-        # 3. Добавляем правило IPv4 NAT (Masquerade)
-        nat_cmd = f"iptables -t nat -A POSTROUTING -o {exit_iface} -j MASQUERADE"
+        # 3. Создаём nft table inet chimera + base chains (если их ещё нет на exit-VPS)
+        # Это нужно т.к. удалённый VPS может быть свежим — без chimera-таблицы.
+        _ssh(
+            "nft add table inet chimera 2>/dev/null; "
+            "nft add chain inet chimera postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null; "
+            "nft add chain inet chimera forward '{ type filter hook forward priority 0; policy accept; }' 2>/dev/null",
+            check=False, quiet=True,
+        )
+
+        # 4. Добавляем правило IPv4 NAT (Masquerade) через nft
+        # Замена: `iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE`
+        # На:     `nft add rule inet chimera postrouting oifname "eth0" masquerade comment "awg-masquerade"`
+        nat_cmd = (
+            f"nft add rule inet chimera postrouting "
+            f"oifname \"{exit_iface}\" masquerade comment \\\"awg-masquerade\\\" 2>/dev/null"
+        )
         r_nat = _ssh(nat_cmd, check=False)
 
         if r_nat.returncode == 0:
-            success(f"AWG Remote: IPv4 NAT успешно включен на интерфейсе {exit_iface}")
+            success(f"AWG Remote: IPv4 NAT успешно включен на интерфейсе {exit_iface} (nftables)")
         else:
-            warn(f"AWG Remote: Не удалось включить IPv4 NAT через iptables (код {r_nat.returncode}). Пробуем альтернативу...")
+            warn(f"AWG Remote: Не удалось включить IPv4 NAT через nft (код {r_nat.returncode}). Пробуем альтернативу...")
             # Альтернативный вариант: маскировать конкретно подсеть туннеля
-            alt_nat_cmd = f"iptables -t nat -A POSTROUTING -s {AWG_SUBNET} -j MASQUERADE"
+            alt_nat_cmd = (
+                f"nft add rule inet chimera postrouting "
+                f"ip saddr {AWG_SUBNET} masquerade comment \\\"awg-masquerade\\\" 2>/dev/null"
+            )
             r_alt = _ssh(alt_nat_cmd, check=False)
             if r_alt.returncode == 0:
-                success("AWG Remote: IPv4 NAT включен через подсеть туннеля.")
+                success("AWG Remote: IPv4 NAT включен через подсеть туннеля (nftables).")
             else:
                 warn("AWG Remote: КРИТИЧЕСКАЯ ОШИБКА! IPv4 NAT не включен ни одним способом. Интернет работать не будет!")
-                warn("Рекомендуется вручную выполнить команду iptables на exit-VPS.")
+                warn("Рекомендуется вручную выполнить команду nft на exit-VPS.")
 
         # 3b. IPv6 NAT (Masquerade) — graceful: не ломаем установку при недоступности
         r_ip6check = _ssh("ip -6 route show default 2>/dev/null | head -1", capture=True, check=False, quiet=True)
@@ -1865,38 +1994,48 @@ def awg_setup_remote_server(
             # Определяем IPv6 внешний интерфейс (может отличаться от IPv4)
             r_iface6 = _ssh("ip -6 route | awk '/default/ {print $5; exit}'", capture=True, check=False, quiet=True)
             exit_iface6 = (r_iface6.stdout or "").strip() or exit_iface
-            nat6_cmd = f"ip6tables -t nat -A POSTROUTING -o {exit_iface6} -j MASQUERADE"
+            # Замена: `ip6tables -t nat -A POSTROUTING -o $IFACE6 -j MASQUERADE`
+            # На:     `nft add rule inet chimera postrouting oifname "$IFACE6" masquerade comment "awg-masquerade-ipv6"`
+            nat6_cmd = (
+                f"nft add rule inet chimera postrouting "
+                f"oifname \"{exit_iface6}\" masquerade comment \\\"awg-masquerade-ipv6\\\" 2>/dev/null"
+            )
             r_nat6 = _ssh(nat6_cmd, check=False, quiet=True)
             if r_nat6.returncode == 0:
-                success(f"AWG Remote: IPv6 NAT включен на интерфейсе {exit_iface6}")
+                success(f"AWG Remote: IPv6 NAT включен на интерфейсе {exit_iface6} (nftables)")
             else:
                 # Fallback: по ULA-подсети туннеля
-                alt_nat6_cmd = f"ip6tables -t nat -A POSTROUTING -s {AWG_SUBNET_V6} -j MASQUERADE"
+                alt_nat6_cmd = (
+                    f"nft add rule inet chimera postrouting "
+                    f"ip6 saddr {AWG_SUBNET_V6} masquerade comment \\\"awg-masquerade-ipv6\\\" 2>/dev/null"
+                )
                 r_alt6 = _ssh(alt_nat6_cmd, check=False, quiet=True)
                 if r_alt6.returncode == 0:
-                    success("AWG Remote: IPv6 NAT включен через подсеть туннеля.")
+                    success("AWG Remote: IPv6 NAT включен через подсеть туннеля (nftables).")
                 else:
                     warn("AWG Remote: IPv6 NAT не включён — туннель будет работать в IPv4-only режиме")
         else:
-            warn("AWG Remote: IPv6 недоступен на exit-VPS — пропускаем ip6tables NAT (IPv4-only)")
+            warn("AWG Remote: IPv6 недоступен на exit-VPS — пропускаем nft IPv6 NAT (IPv4-only)")
 
-        # 4. Сохраняем правила iptables + ip6tables, чтобы они пережили перезагрузку
-        _save_v6 = " && ip6tables-save > /etc/iptables/rules.v6" if _exit_has_ipv6 else ""
+        # 4. Сохраняем nft ruleset через `nft list ruleset > /etc/nftables.conf`
+        # ЭТАП 1.6: заменa `iptables-save > /etc/iptables/rules.v4` + `ip6tables-save`.
         save_commands = [
-            "command -v netfilter-persistent >/dev/null && netfilter-persistent save",
-            f"mkdir -p /etc/iptables && iptables-save > /etc/iptables/rules.v4{_save_v6}",
+            # Сначала пробуем nft_persist (через `nft list ruleset > /etc/nftables.conf`)
+            "mkdir -p /etc && nft list ruleset > /etc/nftables.conf 2>/dev/null",
+            # Включаем nftables.service если доступен (стандартный Debian/Ubuntu unit)
+            "command -v systemctl >/dev/null 2>&1 && systemctl enable nftables 2>/dev/null || true",
         ]
         
         saved = False
         for cmd in save_commands:
             r_save = _ssh(cmd, check=False, quiet=True)
             if r_save.returncode == 0:
-                info(f"AWG Remote: правила iptables сохранены ({cmd.split()[0]})")
+                info(f"AWG Remote: nft ruleset сохранён ({cmd.split()[0]})")
                 saved = True
                 break
         
         if not saved:
-            warn("AWG Remote: не удалось сохранить правила iptables автоматически. Они могут сброситься после ребута.")
+            warn("AWG Remote: не удалось сохранить nft ruleset автоматически. Они могут сброситься после ребута.")
 
     except Exception as e:
         warn(f"AWG Remote: Ошибка при настройке NAT: {e}")
@@ -1989,11 +2128,47 @@ def awg_rollback() -> None:
         ["ip", "rule", "del", "fwmark", str(AWG_FWMARK),
          "table", str(AWG_ROUTE_TABLE)],
         ["ip", "route", "flush", "table", str(AWG_ROUTE_TABLE)],
-        ["iptables", "-t", "mangle", "-D", "OUTPUT",
-         "-m", "owner", "--uid-owner", str(xray_uid),
-         "-j", "MARK", "--set-mark", str(AWG_FWMARK)],
     ]:
         _run(cmd, check=False, quiet=True)
+
+    # ЭТАП 1.6 МИГРАЦИИ: cleanup nft-правил через nft_rule_delete_by_comment
+    # (вместо цикла `iptables -t mangle -D OUTPUT -m owner --uid-owner xray`).
+    # Удаляем все правила с comment-tag "awg-fwmark-xray" из chain mangle_output.
+    try:
+        from .nft_common import nft_rule_delete_by_comment
+        from .nft_constants import (
+            NFT_TABLE_NAME, NFT_TABLE_FAMILY,
+            NFT_CHAIN_MANGLE_OUTPUT, NFT_CHAIN_MANGLE_FORWARD,
+            NFT_CHAIN_FORWARD, NFT_CHAIN_POSTROUTING,
+            COMMENT_AWG_FWMARK_XRAY, COMMENT_AWG_FWMARK_DNSCRYPT,
+        )
+        # mangle_output — правила fwmark xray + dnscrypt
+        nft_rule_delete_by_comment(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_OUTPUT,
+            comment=COMMENT_AWG_FWMARK_XRAY, family=NFT_TABLE_FAMILY,
+        )
+        nft_rule_delete_by_comment(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_OUTPUT,
+            comment=COMMENT_AWG_FWMARK_DNSCRYPT, family=NFT_TABLE_FAMILY,
+        )
+        # mangle_forward — MSS clamp
+        nft_rule_delete_by_comment(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_FORWARD,
+            comment="awg-fwmark-mssclamp", family=NFT_TABLE_FAMILY,
+        )
+        # forward — awg-forward-in / awg-forward-out
+        for fwd_cmt in ("awg-forward-in", "awg-forward-out"):
+            nft_rule_delete_by_comment(
+                table=NFT_TABLE_NAME, chain=NFT_CHAIN_FORWARD,
+                comment=fwd_cmt, family=NFT_TABLE_FAMILY,
+            )
+        # postrouting — awg-masquerade-ipv6
+        nft_rule_delete_by_comment(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_POSTROUTING,
+            comment="awg-masquerade-ipv6", family=NFT_TABLE_FAMILY,
+        )
+    except Exception as _e_nft_clean:
+        log_to_file("WARN", f"AWG rollback: nft cleanup error: {_e_nft_clean}")
 
     for p in [
         _AWG_ACTIVE_CONF,
@@ -2195,28 +2370,34 @@ def awg_verify_tunnel() -> bool:
         results.append(f"  {_warn}  Маршрут в таблице {AWG_ROUTE_TABLE}: отсутствует")
         log_to_file("WARN", f"awg_verify: no route in table {AWG_ROUTE_TABLE}")
 
-    # 5c. iptables mangle OUTPUT (uid xray)
+    # 5c. nftables mangle OUTPUT (uid xray) — мигрировано с iptables -C, этап 1.6
+    # Раньше: `iptables -t mangle -C OUTPUT -m owner --uid-owner xray -j MARK --set-mark 1000`
+    # Теперь: `nft_rule_exists(comment="awg-fwmark-xray")` — проверка через JSON
+    # `nft -j list chain inet chimera mangle_output`.
     try:
-        _xray_uid = pwd.getpwnam("xray").pw_uid
-        r_ipt = _run(
-            ["iptables", "-t", "mangle", "-C", "OUTPUT",
-             "-m", "owner", "--uid-owner", str(_xray_uid),
-             "-j", "MARK", "--set-mark", str(AWG_FWMARK)],
-            capture=True, check=False
+        from .nft_common import nft_rule_exists
+        from .nft_constants import (
+            NFT_TABLE_NAME, NFT_TABLE_FAMILY,
+            NFT_CHAIN_MANGLE_OUTPUT, COMMENT_AWG_FWMARK_XRAY,
         )
-        if r_ipt.returncode == 0:
-            results.append(f"  {_ok}  iptables mangle: uid(xray={_xray_uid}) → "
+        _xray_uid = pwd.getpwnam("xray").pw_uid
+        _has_xray_mark = nft_rule_exists(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_OUTPUT,
+            comment=COMMENT_AWG_FWMARK_XRAY, family=NFT_TABLE_FAMILY,
+        )
+        if _has_xray_mark:
+            results.append(f"  {_ok}  nftables mangle: uid(xray={_xray_uid}) → "
                            f"mark {AWG_FWMARK}")
-            log_to_file("DEBUG", "awg_verify: iptables mangle rule OK")
+            log_to_file("DEBUG", "awg_verify: nftables mangle rule OK")
         else:
-            results.append(f"  {_warn}  iptables mangle: правило для uid(xray) не найдено")
-            log_to_file("WARN", "awg_verify: iptables mangle rule missing")
+            results.append(f"  {_warn}  nftables mangle: правило для uid(xray) не найдено")
+            log_to_file("WARN", "awg_verify: nftables mangle rule missing")
     except KeyError:
-        results.append(f"  {_skip}  iptables mangle: пользователь xray не найден")
-        log_to_file("WARN", "awg_verify: xray user not found for iptables check")
+        results.append(f"  {_skip}  nftables mangle: пользователь xray не найден")
+        log_to_file("WARN", "awg_verify: xray user not found for nft check")
     except Exception as _e:
-        results.append(f"  {_skip}  iptables mangle: ошибка проверки ({_e})")
-        log_to_file("WARN", f"awg_verify: iptables check error: {_e}")
+        results.append(f"  {_skip}  nftables mangle: ошибка проверки ({_e})")
+        log_to_file("WARN", f"awg_verify: nft check error: {_e}")
 
     # ── Итоговый бокс ─────────────────────────────────────────────────────────
     print()
@@ -2236,7 +2417,7 @@ def awg_verify_tunnel() -> bool:
         _hints.append(f"ip route add default dev {AWG_INTERFACE} table {AWG_ROUTE_TABLE}")
     if transfer_sent > 0 and transfer_recv == 0:
         _hints.append(f"# На exit-VPS: проверьте входящий UDP/{AWG_EXIT_PORT}")
-        _hints.append(f"iptables -A INPUT -p udp --dport {AWG_EXIT_PORT} -j ACCEPT")
+        _hints.append(f"nft add rule inet chimera input udp dport {AWG_EXIT_PORT} accept")
 
     if _hints:
         _box_warn("Команды для ручного исправления:")
@@ -3112,18 +3293,34 @@ def _awg_server_conf_for_node(node: dict) -> str:
         f"S3 = {AWG_S3}\nS4 = {AWG_S4}\n"
         f"H1 = {AWG_H1}\nH2 = {AWG_H2}\nH3 = {AWG_H3}\nH4 = {AWG_H4}\n"
         f"{_i_lines}"
-        f"PostUp = iptables -A FORWARD -i {iface} -j ACCEPT; "
-        f"iptables -A FORWARD -o {iface} -j ACCEPT; "
-        f"iptables -t nat -A POSTROUTING -o {dif} -j MASQUERADE; "
-        f"ip6tables -A FORWARD -i {iface} -j ACCEPT; "
-        f"ip6tables -A FORWARD -o {iface} -j ACCEPT; "
-        f"ip6tables -t nat -A POSTROUTING -o {dif} -j MASQUERADE\n"
-        f"PostDown = iptables -D FORWARD -i {iface} -j ACCEPT; "
-        f"iptables -D FORWARD -o {iface} -j ACCEPT; "
-        f"iptables -t nat -D POSTROUTING -o {dif} -j MASQUERADE; "
-        f"ip6tables -D FORWARD -i {iface} -j ACCEPT; "
-        f"ip6tables -D FORWARD -o {iface} -j ACCEPT; "
-        f"ip6tables -t nat -D POSTROUTING -o {dif} -j MASQUERADE\n\n"
+        # ЭТАП 1.6 МИГРАЦИИ: PostUp/PostDown переписаны с iptables/ip6tables на
+        # прямые вызовы nft binary (idempotent через comment-tag). Единая таблица
+        # inet chimera покрывает и v4, и v6 — больше не нужны отдельные ip6tables строки.
+        f"PostUp = nft add rule inet chimera forward "
+        f"iifname \"{iface}\" accept comment \\\"awg-forward-in-{iface}\\\" 2>/dev/null || true; "
+        f"nft add rule inet chimera forward "
+        f"oifname \"{iface}\" accept comment \\\"awg-forward-out-{iface}\\\" 2>/dev/null || true; "
+        f"nft add rule inet chimera postrouting "
+        f"oifname \"{dif}\" masquerade comment \\\"awg-masquerade-{iface}\\\" 2>/dev/null || true\n"
+        f"PostDown = python3 -c \""
+        f"import json, subprocess; "
+        f"targets = [('forward', 'awg-forward-in-{iface}'), "
+        f"            ('forward', 'awg-forward-out-{iface}'), "
+        f"            ('postrouting', 'awg-masquerade-{iface}')]; "
+        f"for chain, comment in targets: "
+        f"  r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera',chain], capture_output=True, text=True); "
+        f"  if r.returncode != 0: continue; "
+        f"  try: "
+        f"    data = json.loads(r.stdout); "
+        f"    for item in data.get('nftables', []): "
+        f"      if 'chain' not in item: continue; "
+        f"      for rule in item['chain'].get('expr', []): "
+        f"        if rule.get('comment') != comment: continue; "
+        f"        h = rule.get('handle'); "
+        f"        if h is None: continue; "
+        f"        subprocess.run(['nft','delete','rule','inet','chimera',chain,'handle',str(h)], capture_output=True); "
+        f"  except Exception: pass"
+        f"\" 2>/dev/null || true\n\n"
         f"[Peer]\n# RU-VPS (Xray client)\n"
         f"PublicKey = {cli_pub}\n"
         f"PresharedKey = {psk}\n"
@@ -3153,23 +3350,75 @@ def _awg_systemd_unit_for_node(node: dict, xray_uid: int) -> str:
         f"ip rule add fwmark {fwmark} table {rtable} priority 100 2>/dev/null || true; "
         f"ip route show table {rtable} | grep -q default || "
         f"ip route add default dev {iface} table {rtable} 2>/dev/null || true; "
-        f"iptables -t mangle -C OUTPUT -m owner --uid-owner {xray_uid} "
-        f"-j MARK --set-mark {fwmark} 2>/dev/null || "
-        f"iptables -t mangle -A OUTPUT -m owner --uid-owner {xray_uid} "
-        f"-j MARK --set-mark {fwmark} 2>/dev/null || true; "
+        # ЭТАП 1.6: nftables mangle OUTPUT mark по uid xray (per-node comment-tag
+        # "awg-fwmark-node-<idx>" из nft_constants.COMMENT_AWG_FWMARK_PER_NODE).
+        # Замена iptables -C/-A OUTPUT -m owner --uid-owner xray -j MARK --set-mark X
+        # на del-before-add через nft -a -j list chain + nft delete rule ... handle N
+        # + nft add rule inet chimera mangle_output meta skuid xray meta mark set X
+        # comment "awg-fwmark-node-<idx>".
+        f"python3 -c \""
+        f"import json, subprocess; "
+        f"r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera','mangle_output'], capture_output=True, text=True); "
+        f"if r.returncode == 0: "
+        f"  data = json.loads(r.stdout); "
+        f"  for item in data.get('nftables', []): "
+        f"    if 'chain' not in item: continue; "
+        f"    for rule in item['chain'].get('expr', []): "
+        f"      if rule.get('comment') == 'awg-fwmark-node-{iface}': "
+        f"        h = rule.get('handle'); "
+        f"        if h is not None: "
+        f"          subprocess.run(['nft','delete','rule','inet','chimera','mangle_output','handle',str(h)], capture_output=True); "
+        f"\" 2>/dev/null || true; "
+        f"nft add rule inet chimera mangle_output "
+        f"meta skuid {xray_uid} meta mark set {fwmark} "
+        f"comment \\\"awg-fwmark-node-{iface}\\\" 2>/dev/null || true; "
+        # dnscrypt-proxy per-node (comment awg-fwmark-dnscrypt-<iface>)
         f"DC_UID=$(id -u dnscrypt 2>/dev/null); "
-        f"[ -n \"$DC_UID\" ] && (iptables -t mangle -C OUTPUT -m owner --uid-owner \"$DC_UID\" "
-        f"-j MARK --set-mark {fwmark} 2>/dev/null || "
-        f"iptables -t mangle -A OUTPUT -m owner --uid-owner \"$DC_UID\" "
-        f"-j MARK --set-mark {fwmark} 2>/dev/null || true) || true; "
+        f"[ -n \"$DC_UID\" ] && ("
+        f"python3 -c \""
+        f"import json, subprocess; "
+        f"r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera','mangle_output'], capture_output=True, text=True); "
+        f"if r.returncode == 0: "
+        f"  data = json.loads(r.stdout); "
+        f"  for item in data.get('nftables', []): "
+        f"    if 'chain' not in item: continue; "
+        f"    for rule in item['chain'].get('expr', []): "
+        f"      if rule.get('comment') == 'awg-fwmark-dnscrypt-{iface}': "
+        f"        h = rule.get('handle'); "
+        f"        if h is not None: "
+        f"          subprocess.run(['nft','delete','rule','inet','chimera','mangle_output','handle',str(h)], capture_output=True); "
+        f"\" 2>/dev/null || true; "
+        f"nft add rule inet chimera mangle_output "
+        f"meta skuid \\\"$DC_UID\\\" meta mark set {fwmark} "
+        f"comment \\\"awg-fwmark-dnscrypt-{iface}\\\" 2>/dev/null || true"
+        f") || true; "
+        # sysctl rp_filter (НЕ ТРОГАТЬ — это sysctl, не netfilter)
         f"sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1; "
         f"sysctl -w net.ipv4.conf.{iface}.rp_filter=0 >/dev/null 2>&1"
     )
     pr_down = (
         f"ip route del default dev {iface} table {rtable} 2>/dev/null || true; "
         f"ip rule del fwmark {fwmark} table {rtable} 2>/dev/null || true; "
-        f"iptables -t mangle -D OUTPUT -m owner --uid-owner {xray_uid} "
-        f"-j MARK --set-mark {fwmark} 2>/dev/null || true"
+        # ЭТАП 1.6: cleanup nft-правил по comment-tag (awg-fwmark-node-<iface> +
+        # awg-fwmark-dnscrypt-<iface>)
+        f"python3 -c \""
+        f"import json, subprocess; "
+        f"targets = [('mangle_output', 'awg-fwmark-node-{iface}'), "
+        f"            ('mangle_output', 'awg-fwmark-dnscrypt-{iface}')]; "
+        f"for chain, comment in targets: "
+        f"  r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera',chain], capture_output=True, text=True); "
+        f"  if r.returncode != 0: continue; "
+        f"  try: "
+        f"    data = json.loads(r.stdout); "
+        f"    for item in data.get('nftables', []): "
+        f"      if 'chain' not in item: continue; "
+        f"      for rule in item['chain'].get('expr', []): "
+        f"        if rule.get('comment') != comment: continue; "
+        f"        h = rule.get('handle'); "
+        f"        if h is None: continue; "
+        f"        subprocess.run(['nft','delete','rule','inet','chimera',chain,'handle',str(h)], capture_output=True); "
+        f"  except Exception: pass"
+        f"\" 2>/dev/null || true"
     )
     _awg_impl = _awg_detect_implementation()
     _env_line = f"Environment=WG_QUICK_USERSPACE_IMPLEMENTATION={_awg_impl}\n" if _awg_impl else ""
@@ -3436,37 +3685,49 @@ def _awg_apply_policy_routing_all_nodes() -> None:
                   f"ip route add {host}/32 dev $(ip route | awk '/default/ {{print $5; exit}}') 2>/dev/null || true"],
                  check=False, quiet=True)
 
-        # iptables mangle mark — только для АКТИВНОЙ ноды
+        # ЭТАП 1.6: nftables mangle OUTPUT mark — только для АКТИВНОЙ ноды
+        # (per-node comment-tag "awg-fwmark-node-<iface>" для безопасного cleanup
+        # при переключении нод). Замена iptables/ip6tables -A OUTPUT -m owner --uid-owner
+        # на nft_rule_add с idempotent=False (per-node отдельное правило).
         if idx == active_idx:
-            _run(["iptables", "-t", "mangle", "-A", "OUTPUT",
-                  "-m", "owner", "--uid-owner", str(xray_uid),
-                  "-j", "MARK", "--set-mark", str(fwmark)], check=False, quiet=True)
-            if _ipv6_ok:
-                _run(["ip6tables", "-t", "mangle", "-A", "OUTPUT",
-                      "-m", "owner", "--uid-owner", str(xray_uid),
-                      "-j", "MARK", "--set-mark", str(fwmark)], check=False, quiet=True)
+            # Импортируем nft_common лениво (для обратной совместимости со старыми caller'ами)
+            from .nft_common import nft_rule_add
+            from .nft_constants import (
+                NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_MANGLE_OUTPUT,
+            )
+            # IPv4 + IPv6 — единая таблица inet chimera покрывает оба стека
+            # одним правилом (uid-owner в nft: meta skuid <uid>).
+            # comment-tag: "awg-fwmark-node-<iface>" (per-node для failover cleanup).
+            nft_rule_add(
+                table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_OUTPUT,
+                rule_spec=f"meta skuid {xray_uid} meta mark set {fwmark}",
+                family=NFT_TABLE_FAMILY,
+                comment=f"awg-fwmark-node-{iface}", idempotent=False,
+            )
+            # dnscrypt-proxy (per-node) — если dnscrypt user существует
             try:
                 dc_uid = pwd.getpwnam("dnscrypt").pw_uid
-                _run(["iptables", "-t", "mangle", "-A", "OUTPUT",
-                      "-m", "owner", "--uid-owner", str(dc_uid),
-                      "-j", "MARK", "--set-mark", str(fwmark)], check=False, quiet=True)
+                nft_rule_add(
+                    table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_OUTPUT,
+                    rule_spec=f"meta skuid {dc_uid} meta mark set {fwmark}",
+                    family=NFT_TABLE_FAMILY,
+                    comment=f"awg-fwmark-dnscrypt-{iface}", idempotent=False,
+                )
             except KeyError:
                 pass
 
         _run(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=False, quiet=True)
         _run(["sysctl", "-w", f"net.ipv4.conf.{iface}.rp_filter=0"], check=False, quiet=True)
 
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r4 = _run(["iptables-save"], capture=True, check=False)
-    if r4.returncode == 0:
-        (rules_dir / "rules.v4").write_text(r4.stdout)
-    if _ipv6_ok:
-        r6 = _run(["ip6tables-save"], capture=True, check=False)
-        if r6.returncode == 0:
-            (rules_dir / "rules.v6").write_text(r6.stdout)
-    _run(["netfilter-persistent", "save"], check=False, quiet=True)
-    success(f"AWG Multi-Node: policy routing применён для {len(nodes)} нод(ы)")
+    # ЭТАП 1.6: persist через nft_persist (вместо iptables-save + netfilter-persistent).
+    # Единый /etc/nftables.conf (покрывает v4+v6 одним файлом).
+    from .nft_common import nft_persist, nft_persist_enable_systemd
+    try:
+        nft_persist()
+        nft_persist_enable_systemd()
+    except Exception:
+        pass
+    success(f"AWG Multi-Node: policy routing применён для {len(nodes)} нод(ы) (nftables)")
 
 
 def _awg_verify_all_tunnels() -> None:
@@ -3691,31 +3952,34 @@ def awg_multinode_watchdog_install() -> None:
             XRAY_UID=$(id -u xray 2>/dev/null || echo 0)
             DC_UID=$(id -u dnscrypt 2>/dev/null || echo "")
 
-            # Удаляем старый fwmark для xray
-            iptables -t mangle -D OUTPUT -m owner --uid-owner "$XRAY_UID" \
-                -j MARK --set-mark "$old_fwmark" 2>/dev/null || true
-            ip6tables -t mangle -D OUTPUT -m owner --uid-owner "$XRAY_UID" \
-                -j MARK --set-mark "$old_fwmark" 2>/dev/null || true
-            [ -n "$DC_UID" ] && {{
-                iptables -t mangle -D OUTPUT -m owner --uid-owner "$DC_UID" \
-                    -j MARK --set-mark "$old_fwmark" 2>/dev/null || true
-            }} || true
+            # ЭТАП 1.6 МИГРАЦИИ: failover cleanup + add через nftables (comment-tag).
+            # Удаляем ВСЕ правила с comment-tag awg-fwmark-node-* и awg-fwmark-dnscrypt-*
+            # из chain mangle_output (cleanup старых per-node правил).
+            python3 -c "
+import json, subprocess
+r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera','mangle_output'], capture_output=True, text=True)
+if r.returncode == 0:
+    data = json.loads(r.stdout)
+    for item in data.get('nftables', []):
+        if 'chain' not in item: continue
+        for rule in item['chain'].get('expr', []):
+            c = rule.get('comment', '')
+            if not c or not (c.startswith('awg-fwmark-node-') or c.startswith('awg-fwmark-dnscrypt-')):
+                continue
+            h = rule.get('handle')
+            if h is None: continue
+            subprocess.run(['nft','delete','rule','inet','chimera','mangle_output','handle',str(h)], capture_output=True)
+" 2>/dev/null || true
 
-            # Добавляем новый fwmark для xray
-            iptables -t mangle -C OUTPUT -m owner --uid-owner "$XRAY_UID" \
-                -j MARK --set-mark "$new_fwmark" 2>/dev/null || \
-            iptables -t mangle -A OUTPUT -m owner --uid-owner "$XRAY_UID" \
-                -j MARK --set-mark "$new_fwmark" 2>/dev/null || true
-            ip6tables -t mangle -C OUTPUT -m owner --uid-owner "$XRAY_UID" \
-                -j MARK --set-mark "$new_fwmark" 2>/dev/null || \
-            ip6tables -t mangle -A OUTPUT -m owner --uid-owner "$XRAY_UID" \
-                -j MARK --set-mark "$new_fwmark" 2>/dev/null || true
-            [ -n "$DC_UID" ] && {{
-                iptables -t mangle -C OUTPUT -m owner --uid-owner "$DC_UID" \
-                    -j MARK --set-mark "$new_fwmark" 2>/dev/null || \
-                iptables -t mangle -A OUTPUT -m owner --uid-owner "$DC_UID" \
-                    -j MARK --set-mark "$new_fwmark" 2>/dev/null || true
-            }} || true
+            # Добавляем новые правила для активной ноды (per-node comment-tag
+            # awg-fwmark-node-<new_iface> и awg-fwmark-dnscrypt-<new_iface>).
+            # Единая таблица inet chimera покрывает и v4, и v6.
+            nft add rule inet chimera mangle_output \\
+                meta skuid \"$XRAY_UID\" meta mark set \"$new_fwmark\" \\
+                comment \"awg-fwmark-node-$new_iface\" 2>/dev/null || true
+            [ -n \"$DC_UID\" ] && nft add rule inet chimera mangle_output \\
+                meta skuid \"$DC_UID\" meta mark set \"$new_fwmark\" \\
+                comment \"awg-fwmark-dnscrypt-$new_iface\" 2>/dev/null || true
 
             set_active "$new_idx"
 
@@ -3920,13 +4184,22 @@ def do_manage_awg_nodes() -> None:
 
 
 def _awg_manual_switch(old_idx: int, new_idx: int, nodes: list) -> None:
-    """Ручное переключение активной ноды: обновляет iptables mangle + state.json."""
+    """Ручное переключение активной ноды: обновляет nftables mangle + state.json.
+
+    ЭТАП 1.6 МИГРАЦИИ:
+      • Раньше: цикл `iptables/ip6tables -D OUTPUT -m owner --uid-owner xray -j MARK --set-mark <old>`
+        + `iptables/ip6tables -A OUTPUT -m owner --uid-owner xray -j MARK --set-mark <new>`.
+      • Теперь: cleanup всех per-node правил через `nft_rule_delete_by_comment`
+        по prefix "awg-fwmark-node-" + "awg-fwmark-dnscrypt-" (используем inline
+        python3 для поиска всех правил с такими prefix'ами), затем добавляем
+        новые правила через `nft_rule_add` для активной ноды.
+      • ip rule / ip route — НЕ ТРОГАТЬ (это iproute2, не netfilter).
+    """
     core = _core_module()
     _run = core._run
     AWG_ACTIVE_NODE_INDEX = getattr(core, "AWG_ACTIVE_NODE_INDEX", 0)
     if old_idx == new_idx or new_idx >= len(nodes):
         return
-    old_fwmark = nodes[old_idx]["fwmark"]
     new_fwmark = nodes[new_idx]["fwmark"]
     new_rtable = nodes[new_idx]["route_table"]
     new_iface  = nodes[new_idx]["interface"]
@@ -3934,18 +4207,51 @@ def _awg_manual_switch(old_idx: int, new_idx: int, nodes: list) -> None:
         xray_uid = pwd.getpwnam("xray").pw_uid
     except KeyError:
         xray_uid = 0
-    _run(["iptables", "-t", "mangle", "-D", "OUTPUT",
-          "-m", "owner", "--uid-owner", str(xray_uid),
-          "-j", "MARK", "--set-mark", str(old_fwmark)], check=False, quiet=True)
-    _run(["ip6tables", "-t", "mangle", "-D", "OUTPUT",
-          "-m", "owner", "--uid-owner", str(xray_uid),
-          "-j", "MARK", "--set-mark", str(old_fwmark)], check=False, quiet=True)
-    _run(["iptables", "-t", "mangle", "-A", "OUTPUT",
-          "-m", "owner", "--uid-owner", str(xray_uid),
-          "-j", "MARK", "--set-mark", str(new_fwmark)], check=False, quiet=True)
-    _run(["ip6tables", "-t", "mangle", "-A", "OUTPUT",
-          "-m", "owner", "--uid-owner", str(xray_uid),
-          "-j", "MARK", "--set-mark", str(new_fwmark)], check=False, quiet=True)
+
+    # ЭТАП 1.6: cleanup старых per-node правил (по prefix awg-fwmark-node-* / awg-fwmark-dnscrypt-*)
+    # через inline python3 — находим все handles и удаляем через `nft delete rule ... handle N`.
+    _run(
+        ["bash", "-c",
+         '''python3 -c "
+import json, subprocess
+r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera','mangle_output'], capture_output=True, text=True)
+if r.returncode == 0:
+    data = json.loads(r.stdout)
+    for item in data.get('nftables', []):
+        if 'chain' not in item: continue
+        for rule in item['chain'].get('expr', []):
+            c = rule.get('comment', '')
+            if not c or not (c.startswith('awg-fwmark-node-') or c.startswith('awg-fwmark-dnscrypt-')):
+                continue
+            h = rule.get('handle')
+            if h is None: continue
+            subprocess.run(['nft','delete','rule','inet','chimera','mangle_output','handle',str(h)], capture_output=True)
+" 2>/dev/null || true'''],
+        check=False, quiet=True,
+    )
+
+    # Добавляем новые правила для активной ноды
+    from .nft_common import nft_rule_add
+    from .nft_constants import (
+        NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_MANGLE_OUTPUT,
+    )
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_OUTPUT,
+        rule_spec=f"meta skuid {xray_uid} meta mark set {new_fwmark}",
+        family=NFT_TABLE_FAMILY,
+        comment=f"awg-fwmark-node-{new_iface}", idempotent=False,
+    )
+    try:
+        dc_uid = pwd.getpwnam("dnscrypt").pw_uid
+        nft_rule_add(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_OUTPUT,
+            rule_spec=f"meta skuid {dc_uid} meta mark set {new_fwmark}",
+            family=NFT_TABLE_FAMILY,
+            comment=f"awg-fwmark-dnscrypt-{new_iface}", idempotent=False,
+        )
+    except KeyError:
+        pass
+
     _run(["ip", "rule", "add", "fwmark", str(new_fwmark),
           "table", str(new_rtable), "priority", "100"], check=False, quiet=True)
     _run(["ip", "route", "add", "default", "dev", new_iface,

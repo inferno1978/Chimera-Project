@@ -89,6 +89,14 @@ from chimera.modules.proto_common import (
     proto_ask, proto_gen_password, proto_ipt_persist, proto_ipt_rule_exists,
     proto_get_latest_version, proto_get_installed_version,
 )
+# nftables — централизованная обёртка (этап 1.7 миграции).
+from chimera.modules.nft_common import (
+    nft_open_port, nft_rule_exists, nft_rule_delete_by_comment,
+)
+from chimera.modules.nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    COMMENT_OPEN_PORT_PREFIX,
+)
 from chimera.modules.mieru_mirrors import (
     get_mita_mirrors, get_mieru_mirrors, get_deb_mirrors, get_rpm_mirrors,
     MANUAL_UPLOAD_PATHS as _MIERU_MANUAL_PATHS,
@@ -453,49 +461,78 @@ def _apply_server_config(cfg: dict) -> Optional[str]:
     return None
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IPTABLES
+#  NFTABLES (мигрировано с iptables, этап 1.7)
 # ══════════════════════════════════════════════════════════════════════════════
 # _ipt_rule_exists — вынесен в proto_common (proto_ipt_rule_exists).
+# Конвенция comment-tag: chimera-open-port-<proto>-<port> (или chimera-open-port-<proto>-<start>-<end>
+# для диапазона портов). Это соответствует COMMENT_OPEN_PORT_PREFIX из nft_constants.
+def _ipt_rule_comment(proto: str, port_start: int, port_end: int) -> str:
+    """Возвращает comment-tag для правила открытия порта.
+
+    Для одиночного порта: chimera-open-port-<proto>-<port>
+    Для диапазона:       chimera-open-port-<proto>-<start>-<end>
+    """
+    if port_start == port_end:
+        return f"{COMMENT_OPEN_PORT_PREFIX}{proto}-{port_start}"
+    return f"{COMMENT_OPEN_PORT_PREFIX}{proto}-{port_start}-{port_end}"
+
 def _ipt_rule_exists(proto: str, port: int) -> bool:
-    return proto_ipt_rule_exists("filter", "INPUT", ["-p", proto.lower(), "--dport", str(port), "-j", "ACCEPT"])
+    """Проверяет наличие nft-правила открытия порта через nft_rule_exists(comment=...).
+
+    Заменяет: proto_ipt_rule_exists("filter", "INPUT",
+        ["-p", proto, "--dport", str(port), "-j", "ACCEPT"])
+    Теперь: nft_rule_exists(table="chimera", chain="input",
+        comment="chimera-open-port-<proto>-<port>")
+    """
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_ipt_rule_comment(proto, port, port),
+        family=NFT_TABLE_FAMILY,
+    ) or proto_ipt_rule_exists("filter", "INPUT",
+        ["-p", proto.lower(), "--dport", str(port), "-j", "ACCEPT"])
 
 def _ipt_open_port(proto: str, port_start: int, port_end: int) -> None:
+    """Открывает порт (или диапазон) в nftables input chain.
+
+    Заменяет:
+        iptables -t filter -I INPUT 1 -p <proto> --dport <port> -j ACCEPT
+        iptables -t filter -I INPUT 1 -p <proto> --dport <start>:<end> -j ACCEPT
+    Теперь:
+        nft_open_port(port, proto, comment="chimera-open-port-<proto>-<port>")
+        (для диапазона — несколько вызовов по одному на каждый порт)
+    """
     proto = proto.lower()
     if port_start == port_end:
-        if not _ipt_rule_exists(proto, port_start):
-            _run(["iptables", "-t", "filter", "-I", "INPUT", "1",
-                  "-p", proto, "--dport", str(port_start), "-j", "ACCEPT"])
+        nft_open_port(port_start, proto=proto,
+                     comment=_ipt_rule_comment(proto, port_start, port_end))
     else:
-        # Диапазон портов
-        r = _run(
-            ["iptables", "-t", "filter", "-C", "INPUT",
-             "-p", proto, "--dport", f"{port_start}:{port_end}", "-j", "ACCEPT"],
-            capture=True,
-        )
-        if r.returncode != 0:
-            _run(["iptables", "-t", "filter", "-I", "INPUT", "1",
-                  "-p", proto, "--dport", f"{port_start}:{port_end}", "-j", "ACCEPT"])
+        # Диапазон портов — nft_open_port не поддерживает диапазоны напрямую,
+        # поэтому перебираем каждый порт (замена `--dport start:end`).
+        for p in range(port_start, port_end + 1):
+            nft_open_port(p, proto=proto,
+                         comment=f"{COMMENT_OPEN_PORT_PREFIX}{proto}-{p}")
 
 def _ipt_close_port(proto: str, port_start: int, port_end: int) -> None:
+    """Закрывает порт (или диапазон) в nftables input chain.
+
+    Заменяет цикл `iptables -t filter -D INPUT ... -j ACCEPT`.
+    Теперь: nft_rule_delete_by_comment удаляет все правила с comment-tag
+    chimera-open-port-<proto>-<port> одним вызовом.
+    """
     proto = proto.lower()
     if port_start == port_end:
-        for _ in range(5):
-            if not _ipt_rule_exists(proto, port_start): break
-            _run(["iptables", "-t", "filter", "-D", "INPUT",
-                  "-p", proto, "--dport", str(port_start), "-j", "ACCEPT"])
+        nft_rule_delete_by_comment(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            comment=_ipt_rule_comment(proto, port_start, port_end),
+            family=NFT_TABLE_FAMILY, max_iterations=10,
+        )
     else:
-        for _ in range(5):
-            r = _run(
-                ["iptables", "-t", "filter", "-C", "INPUT",
-                 "-p", proto, "--dport", f"{port_start}:{port_end}", "-j", "ACCEPT"],
-                capture=True,
+        for p in range(port_start, port_end + 1):
+            nft_rule_delete_by_comment(
+                table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+                comment=f"{COMMENT_OPEN_PORT_PREFIX}{proto}-{p}",
+                family=NFT_TABLE_FAMILY, max_iterations=10,
             )
-            if r.returncode != 0: break
-            _run(["iptables", "-t", "filter", "-D", "INPUT",
-                  "-p", proto, "--dport", f"{port_start}:{port_end}", "-j", "ACCEPT"])
-
-# _ipt_persist — вынесен в proto_common (использует subprocess.run напрямую,
-# не зависит от module-local _run). Call sites: proto_ipt_persist().
 
 def _ufw_is_active() -> bool:
     """Проверяет активен ли UFW."""
@@ -567,17 +604,17 @@ def _ufw_close_port(proto: str, port_start: int, port_end: int) -> None:
         _run(["ufw", "delete", "allow", f"{port_start}:{port_end}/{proto}"], capture=True)
 
 def _open_ports(proto: str, port_start: int, port_end: int) -> str:
-    """Открывает порты через UFW (если активен) или iptables. Возвращает описание."""
+    """Открывает порты через UFW (если активен) или nftables. Возвращает описание."""
     if _ufw_is_active():
         _ufw_open_port(proto, port_start, port_end)
         return f"UFW: {proto} {port_start}-{port_end} открыт."
     else:
         _ipt_open_port(proto, port_start, port_end)
         proto_ipt_persist()
-        return f"iptables: {proto} {port_start}-{port_end} открыт."
+        return f"nftables: {proto} {port_start}-{port_end} открыт."
 
 def _close_ports(proto: str, port_start: int, port_end: int) -> None:
-    """Закрывает порты через UFW (если активен) или iptables."""
+    """Закрывает порты через UFW (если активен) или nftables."""
     if _ufw_is_active():
         _ufw_close_port(proto, port_start, port_end)
     else:
@@ -890,7 +927,7 @@ def _run_install_inner() -> None:
     else:
         print(f"  {YELLOW}⚠{NC}  Сервис не запустился после перезапуска — проверьте логи.")
 
-    # 7. Фаервол (UFW если активен, иначе iptables)
+    # 7. Фаервол (UFW если активен, иначе nftables)
     fw_msg = _open_ports(protocol, port_start, port_end)
     print(f"  {GREEN}✓{NC}  {fw_msg}")
 
@@ -1587,7 +1624,7 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_row(f"  {DIM}  • Сервис systemd  (mita){NC}")
         _box_row(f"  {DIM}  • Бинарники       ({_MITA_BIN}, {_MIERU_BIN}){NC}")
         _box_row(f"  {DIM}  • Конфиги          ({_CFG_DIR}){NC}")
-        _box_row(f"  {DIM}  • iptables порты{NC}")
+        _box_row(f"  {DIM}  • nftables порты{NC}")
         _box_row()
         _box_warn("Xray, VLESS и другие службы не затрагиваются.")
         _box_row()

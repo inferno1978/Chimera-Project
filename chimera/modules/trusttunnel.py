@@ -100,6 +100,14 @@ from chimera.modules.proto_common import (
     ProtoCancelled, proto_load_state, proto_save_state,
     proto_ask, proto_ipt_persist,
 )
+# nftables — централизованная обёртка (этап 1.7 миграции).
+from chimera.modules.nft_common import (
+    nft_open_port, nft_rule_exists, nft_rule_delete_by_comment,
+)
+from chimera.modules.nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    COMMENT_OPEN_PORT_PREFIX,
+)
 _Cancelled = ProtoCancelled
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1064,8 +1072,12 @@ def _ufw_is_active() -> bool:
     r = _run(["ufw", "status"], capture=True)
     return "status: active" in (r.stdout or "").lower()
 
+def _ipt_rule_comment(proto: str, port: int) -> str:
+    """Возвращает comment-tag для правила открытия TCP/UDP-порта."""
+    return f"{COMMENT_OPEN_PORT_PREFIX}{proto}-{port}"
+
 def _open_port(port: int) -> str:
-    """Открыть TCP+UDP порт в ufw (или iptables fallback)."""
+    """Открыть TCP+UDP порт в ufw (или nftables fallback)."""
     #  миграция на port_registry.
     try:
         from chimera.modules.port_registry import (
@@ -1084,17 +1096,19 @@ def _open_port(port: int) -> str:
             _run(["ufw", "allow", f"{port}/{proto}", "comment", "TRUSTTUNNEL"], capture=True)
         return f"UFW: TCP+UDP {port} открыты."
     try:
+        # nftables fallback (этап 1.7 миграции):
+        #   nft_open_port(port, proto, comment="chimera-open-port-<proto>-<port>")
+        #   для proto in (tcp, udp).
         for proto in ("tcp", "udp"):
-            _run(["iptables", "-I", "INPUT", "1", "-p", proto,
-                  "--dport", str(port), "-j", "ACCEPT"])
+            nft_open_port(port, proto=proto, comment=_ipt_rule_comment(proto, port))
         proto_ipt_persist()
-        return f"iptables: TCP+UDP {port} открыты."
+        return f"nftables: TCP+UDP {port} открыты."
     except Exception as e:
-        _log("ERROR", f"_open_port: iptables failed: {e}")
+        _log("ERROR", f"_open_port: nftables failed: {e}")
         return f"ошибка: {e}"
 
 def _close_port(port: int) -> None:
-    """Закрыть TCP+UDP порт в ufw (или iptables fallback)."""
+    """Закрыть TCP+UDP порт в ufw (или nftables fallback)."""
     #  миграция на port_registry (с legacy comment).
     try:
         from chimera.modules.port_registry import (
@@ -1112,9 +1126,13 @@ def _close_port(port: int) -> None:
             _run(["ufw", "delete", "allow", f"{port}/{proto}"], capture=True)
         return
     try:
+        # nftables fallback (этап 1.7 миграции) — cleanup по comment-tag.
         for proto in ("tcp", "udp"):
-            _run(["iptables", "-D", "INPUT", "-p", proto,
-                  "--dport", str(port), "-j", "ACCEPT"])
+            nft_rule_delete_by_comment(
+                table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+                comment=_ipt_rule_comment(proto, port),
+                family=NFT_TABLE_FAMILY, max_iterations=10,
+            )
     except Exception:
         pass
 
@@ -1606,7 +1624,7 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_top("🔐  УДАЛЕНИЕ  •  TRUSTTUNNEL")
         _box_row()
         _box_warn("Будут удалены: бинарники, конфиги, systemd-юнит, cron,")
-        _box_warn("certbot deploy-hook, ufw/iptables правила. Сертификат")
+        _box_warn("certbot deploy-hook, ufw/nftables правила. Сертификат")
         _box_warn("Let's Encrypt останется (управляется certbot).")
         _box_row()
         _box_item("1", "Подтверждаю — удалить")

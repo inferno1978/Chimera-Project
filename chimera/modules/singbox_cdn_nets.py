@@ -24,21 +24,22 @@ CDN IP-allowlist для VLESS-WS-CDN (v4.23.1, fixed v4.23.2).
 
 Архитектура (по образцу tg_nets.py + ingress_geoip.py + ipset_persist.py):
   1. fetch_cdn_nets(provider) — live-fetch через urllib.request
-  2. apply_cdn_allowlist(provider, port) — ipset + iptables + persist
-  3. remove_cdn_allowlist(port) — cleanup iptables + ipset + persist
+  2. apply_cdn_allowlist(provider, port) — nft set + nft rule + persist
+  3. remove_cdn_allowlist(port) — cleanup nft rule + nft set + persist
 
-iptables-подход (v4.23.2: -I INPUT 1 вместо -A, по образцу fptn.py:494):
-  - ipset create singbox_cdn_allowlist_<port> hash:net
-  - ipset add singbox_cdn_allowlist_<port> <cidr> (для каждого CIDR)
-  - iptables -I INPUT 1 -p tcp --dport <port> \
-      -m set ! --match-set singbox_cdn_allowlist_<port> src -j DROP
-    (DROP всего, что НЕ из CDN-диапазона, В НАЧАЛЕ цепочки INPUT)
-  - comment tag: "singbox-cdn-allowlist-<port>" для безопасного удаления
+nftables-подход (мигрировано с ipset/iptables, этап 1.7):
+  - nft set inet chimera singbox_cdn_<port> { type ipv4_addr; flags interval; size 100000; }
+  - nft add element inet chimera singbox_cdn_<port> { cidr1, cidr2, ... } (atomic swap)
+  - nft insert rule inet chimera input tcp dport <port> ip saddr != @singbox_cdn_<port> drop
+    (DROP всего, что НЕ из CDN-диапазона, В НАЧАЛЕ цепочки INPUT — insert position=1)
+  - comment tag: "chimera-singbox-cdn-<port>" для безопасного удаления
+    (соответствует COMMENT_SINGBOX_CDN_PREFIX из nft_constants)
 
-Persistence (v4.23.2, по образцу ipset_persist.py + proto_common.py):
-  - ipset save → /etc/ipset-singbox-cdn.conf
-  - iptables persist через proto_ipt_persist() (netfilter-persistent или iptables-save)
-  - systemd unit singbox-cdn-ipset-restore.service для restore при boot
+Persistence (этап 1.7):
+  - nft_persist() → /etc/nftables.conf (замена ipset save + iptables-save)
+  - systemd unit singbox-cdn-ipset-restore.service сохранён для обратной
+    совместимости, но теперь обновляется для запуска `nft -f /etc/nftables.conf`
+    через стандартный nftables.service (если ещё не включён).
 
 Границы: только vless_ws_cdn listen_port. НЕ трогает правила других протоколов.
 ───────────────────────────────────────────────────────────────────────────────
@@ -59,30 +60,49 @@ from chimera.modules.singbox_common import (
     info, success, warn, error, log_to_file,
     _run, CDN_PROVIDERS,
 )
+# nftables — централизованная обёртка (этап 1.7 миграции).
+from chimera.modules.nft_common import (
+    nft_set_create, nft_set_exists, nft_set_atomic_swap,
+    nft_set_destroy, nft_set_count, nft_set_list_elements,
+    nft_rule_add, nft_rule_exists, nft_rule_delete_by_comment,
+    nft_persist, nft_persist_enable_systemd, _nft_available,
+)
+from chimera.modules.nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    COMMENT_SINGBOX_CDN_PREFIX, singbox_cdn_set_name, NFT_PERSIST_FILE,
+)
 
 
 # ============================================================================
 #  Константы
 # ============================================================================
-_IPSET_PREFIX = "singbox_cdn_allowlist"
-_IPTABLES_COMMENT_PREFIX = "singbox-cdn-allowlist"
+_IPSET_PREFIX = "singbox_cdn_allowlist"  # legacy alias (для backward compat с state)
+_IPTABLES_COMMENT_PREFIX = "singbox-cdn-allowlist"  # legacy alias
 _HTTP_TIMEOUT = 15
 _UA = "Chimera-Project"
 
-# Persistence paths (по образцу ipset_persist.py)
-_IPSET_CONF = Path("/etc/ipset-singbox-cdn.conf")
+# Persistence paths (по образцу ipset_persist.py — сохранены для compat)
+_IPSET_CONF = Path("/etc/ipset-singbox-cdn.conf")  # legacy, не используется после миграции
 _RESTORE_SVC = Path("/etc/systemd/system/singbox-cdn-ipset-restore.service")
 _RESTORE_LOG = Path("/var/log/singbox-cdn-ipset-restore.log")
 
 
 def _ipset_name(port: int) -> str:
-    """Имя ipset для данного порта."""
-    return f"{_IPSET_PREFIX}_{port}"
+    """Имя nft set для данного порта (мигрировано с ipset <port>).
+
+    Возвращает singbox_cdn_<port> (через singbox_cdn_set_name из nft_constants).
+    Имя функции сохранено для совместимости со старыми callers и state.json.
+    """
+    return singbox_cdn_set_name(port)
 
 
 def _iptables_comment(port: int) -> str:
-    """Comment-tag для iptables-правил (для безопасного удаления)."""
-    return f"{_IPTABLES_COMMENT_PREFIX}-{port}"
+    """Comment-tag для nft-правил (для безопасного удаления).
+
+    Возвращает chimera-singbox-cdn-<port> (через COMMENT_SINGBOX_CDN_PREFIX).
+    Имя функции сохранено для совместимости со старыми callers.
+    """
+    return f"{COMMENT_SINGBOX_CDN_PREFIX}{port}"
 
 
 # ============================================================================
@@ -174,133 +194,79 @@ def fetch_cdn_nets(cdn_provider: str) -> tuple[list[str], str]:
 
 
 # ============================================================================
-#  Persistence helpers (v4.23.2, по образцу ipset_persist.py)
+#  Persistence helpers (этап 1.7: миграция с ipset на nft_persist)
 # ============================================================================
 def _ipset_save_port(port: int) -> bool:
-    """Сохраняет ipset для данного порта в /etc/ipset-singbox-cdn.conf.
+    """Сохраняет nftables ruleset в /etc/nftables.conf (этап 1.7 миграции).
 
-    По образцу ipset_persist.py::ipset_save(), но для singbox_cdn_allowlist_<port>.
-    Дописывает в общий файл (не перезаписывает чужие ipset-записи).
+    Бывшая функция сохраняла ipset в /etc/ipset-singbox-cdn.conf через
+    `ipset save`. Теперь этот шаг не нужен — nft_persist() сохраняет весь
+    ruleset (включая nft set singbox_cdn_<port>) в /etc/nftables.conf одним
+    вызовом. Имя функции сохранено для совместимости со старыми callers.
     """
-    ipset = _ipset_name(port)
-    r = subprocess.run(["ipset", "save", ipset], capture_output=True, text=True)
-    if r.returncode != 0 or not r.stdout.strip():
-        return False
-
-    # Читаем существующий файл и фильтруем старые записи для этого ipset
-    existing = ""
-    if _IPSET_CONF.exists():
-        existing = _IPSET_CONF.read_text()
-        # Удаляем старые строки для этого ipset
-        lines = [l for l in existing.splitlines()
-                 if not l.startswith(f"add {ipset} ") and not l.startswith(f"create {ipset} ")]
-        existing = "\n".join(lines) + "\n" if lines else ""
-
-    content = existing + r.stdout.strip() + "\n"
     try:
-        _IPSET_CONF.parent.mkdir(parents=True, exist_ok=True)
-        _IPSET_CONF.write_text(content)
-        _IPSET_CONF.chmod(0o600)
+        nft_persist(NFT_PERSIST_FILE)
+        nft_persist_enable_systemd()
+        return True
     except Exception as e:
-        warn(f"Не удалось записать {_IPSET_CONF}: {e}")
+        warn(f"Не удалось сохранить nftables ruleset: {e}")
         return False
-    return True
 
 
 def _ipset_remove_from_persist(port: int) -> None:
-    """Удаляет ipset для данного порта из персистентного файла."""
-    ipset = _ipset_name(port)
-    if not _IPSET_CONF.exists():
-        return
-    content = _IPSET_CONF.read_text()
-    lines = [l for l in content.splitlines()
-             if not l.startswith(f"add {ipset} ") and not l.startswith(f"create {ipset} ")]
+    """Обновляет persisted state после удаления CDN allowlist для порта.
+
+    Бывшая функция удаляла записи для данного ipset из /etc/ipset-singbox-cdn.conf.
+    Теперь просто перезаписывает /etc/nftables.conf через nft_persist() —
+    в нём уже нет удалённого nft set (мы его уничтожили в remove_cdn_allowlist).
+    """
     try:
-        if lines:
-            _IPSET_CONF.write_text("\n".join(lines) + "\n")
-        else:
-            _IPSET_CONF.unlink()
+        nft_persist(NFT_PERSIST_FILE)
     except Exception:
         pass
 
 
 def _iptables_persist() -> None:
-    """Сохраняет iptables через proto_ipt_persist() (netfilter-persistent или iptables-save).
+    """Сохраняет nftables через nft_persist() (этап 1.7 миграции).
 
-    Переиспользует существующий хелпер из proto_common.py — НЕ изобретает новый механизм.
+    Заменяет: proto_ipt_persist() (netfilter-persistent save / iptables-save).
+    Теперь: nft_persist() → /etc/nftables.conf + nft_persist_enable_systemd().
     """
     try:
-        from chimera.modules.proto_common import proto_ipt_persist
-        proto_ipt_persist()
-    except ImportError:
-        # Fallback: прямой iptables-save
-        import shutil
-        if shutil.which("netfilter-persistent"):
-            subprocess.run(["netfilter-persistent", "save"],
-                           capture_output=True, text=True)
-        else:
-            rules_dir = Path("/etc/iptables")
-            rules_dir.mkdir(parents=True, exist_ok=True)
-            r = subprocess.run(["iptables-save"], capture_output=True, text=True)
-            if r.returncode == 0 and r.stdout:
-                (rules_dir / "rules.v4").write_text(r.stdout)
+        nft_persist(NFT_PERSIST_FILE)
+        nft_persist_enable_systemd()
+    except Exception:
+        pass
 
 
 def _ipset_restore_unit_install() -> None:
-    """Устанавливает systemd unit для restore ipset при boot.
+    """Устанавливает systemd unit для restore nftables ruleset при boot.
 
-    По образцу ipset_persist.py::ipset_restore_unit_install(), но с другим
-    именем юнита (singbox-cdn-ipset-restore) чтобы не конфликтовать с xray-ipset-restore.
-
-    v4.23.3: Before=netfilter-persistent.service добавлено.
-    v4.23.4: Убран After=network-pre.target — создавал ordering cycle
-    (Debian bug #832802). Наш юнит After=network-pre.target, но
-    netfilter-persistent Before=network-pre.target → транзитивный цикл.
-    systemd резолвит такие циклы, молча выкидывая одно из рёбер — какое
-    именно выживет не гарантировано, Before=netfilter-persistent мог вылететь.
-
-    Решение v4.23.4:
-    - Убрать After=network-pre.target — ipset restore чисто локальная kernel-
-      операция, сеть ему не нужна, строка давала только цикл.
-    - DefaultDependencies=no — иначе implicit-зависимости от DefaultDependencies=yes
-      (через basic.target/sysinit.target) могут снова создать цикл (Debian bug #832802).
-      Тот же паттерн что у netfilter-persistent.service в реальной поставке Debian.
-    - After=local-fs.target — ConditionPathExists читает файл с диска (/etc/ipset-
-      singbox-cdn.conf), local-fs.target должен быть смонтирован. local-fs.target
-      не имеет Before на netfilter-persistent — цикла не создаёт.
-      (Проверено: netfilter-persistent.service тоже After=local-fs.target, но
-      это параллельная зависимость, не создающая цикл.)
-
-    Граф зависимостей после фикса (проверено эмпирически через systemd-analyze):
-      singbox-cdn-ipset-restore.service
-        → Before → sing-box.service
-        → Before → netfilter-persistent.service
-        → After  → local-fs.target
-      netfilter-persistent.service (реальная поставка Debian/Ubuntu):
-        → Before → network-pre.target
-        → Before → shutdown.target
-        → After  → systemd-modules-load.service
-        → After  → local-fs.target
-      Цикла нет: все рёбра идут в одном направлении (local-fs.target → ... →
-      singbox-cdn-ipset-restore → netfilter-persistent → network-pre.target).
+    После миграции (этап 1.7) этот unit делегирует в стандартный nftables.service
+    — он читает /etc/nftables.conf и восстанавливает ВСЕ правила Chimera.
+    Legacy ipset-based restore больше не используется, но unit сохранён
+    для обратной совместимости (старые системы могут ссылаться на него).
     """
     if _RESTORE_SVC.exists():
         return  # уже установлен
     _RESTORE_SVC.write_text(textwrap.dedent(f"""\
         [Unit]
-        Description=Restore ipset for sing-box CDN allowlist (VLESS Ultimate)
+        Description=Restore sing-box CDN allowlist (via nftables.service, VLESS Ultimate)
         DefaultDependencies=no
         Before=sing-box.service
         Before=netfilter-persistent.service
         After=local-fs.target
-        ConditionPathExists={_IPSET_CONF}
+        ConditionPathExists={NFT_PERSIST_FILE}
 
         [Service]
         Type=oneshot
         RemainAfterExit=yes
-        ExecStart=/bin/bash -c 'ipset restore -! -f {_IPSET_CONF} 2>&1 | \\
+        # Этап 1.7:restore теперь через стандартный `nft -f /etc/nftables.conf`,
+        # который читает весь nftables ruleset (включая singbox_cdn_<port> set).
+        # Legacy ipset restore удалён — он больше не нужен.
+        ExecStart=/bin/bash -c 'nft -f {NFT_PERSIST_FILE} 2>&1 | \\
             tee -a {_RESTORE_LOG} && \\
-            echo "singbox-cdn ipset restored: $(grep -c ^add {_IPSET_CONF} 2>/dev/null || echo 0) rules" \\
+            echo "singbox-cdn nft ruleset restored" \\
             >> {_RESTORE_LOG}'
         StandardOutput=journal
         StandardError=journal
@@ -314,21 +280,22 @@ def _ipset_restore_unit_install() -> None:
 
 
 # ============================================================================
-#  apply_cdn_allowlist — ipset + iptables + persist (v4.23.2)
+#  apply_cdn_allowlist — nft set + nft rule + persist (этап 1.7)
 # ============================================================================
 def apply_cdn_allowlist(cdn_provider: str, port: int) -> bool:
     """Применяет CDN allowlist на listen_port.
 
-    1. Fetch CIDRs через fetch_cdn_nets()
-    2. Создаёт ipset singbox_cdn_allowlist_<port>
-    3. Добавляет все CIDR в ipset
-    4. Добавляет iptables rule: DROP всего, что НЕ из CDN-диапазона
-       v4.23.2: -I INPUT 1 (в НАЧАЛО цепочки, по образцу fptn.py:494)
-    5. v4.23.2: Persist — ipset save + iptables save + systemd unit для restore
+    Мигрировано с ipset/iptables на nftables (этап 1.7). Шаги:
+      1. Fetch CIDRs через fetch_cdn_nets()
+      2. Создаёт nft set singbox_cdn_<port> (type ipv4_addr, flags interval)
+      3. Atomic swap — заменяет содержимое set на новый список CIDR
+      4. Добавляет nft rule в начало INPUT: DROP всего, что НЕ из CDN-диапазона
+         (insert position=1, чтобы DROP был раньше других ACCEPT-правил)
+      5. Persist — nft_persist() + nft_persist_enable_systemd()
 
     Returns:
       True если allowlist применён.
-      False если fetch провалился или iptables недоступен.
+      False если fetch провалился или nft недоступен.
       В случае False вызывается warn() — НЕ молчит.
     """
     meta = CDN_PROVIDERS.get(cdn_provider)
@@ -345,54 +312,48 @@ def apply_cdn_allowlist(cdn_provider: str, port: int) -> bool:
 
     info(f"CDN allowlist: {meta['display_name']} → {len(cidrs)} CIDR на порт {port}")
 
-    ipset = _ipset_name(port)
-    comment = _iptables_comment(port)
+    ipset = _ipset_name(port)  # теперь это singbox_cdn_<port>
+    comment = _iptables_comment(port)  # теперь это chimera-singbox-cdn-<port>
 
-    # 2. Создаём/очищаем ipset
-    _run(["ipset", "create", ipset, "hash:net", "maxelem", "100000", "-exist"],
-         quiet=True)
-    _run(["ipset", "flush", ipset], quiet=True)
-
-    # 3. Добавляем CIDR через ipset restore (эффективнее, чем по одному)
-    restore_lines = [f"add {ipset} {c}" for c in cidrs if _valid_cidr(c)]
-    if not restore_lines:
-        warn("Нет валидных CIDR для добавления в ipset")
+    # 2. Создаём nft set singbox_cdn_<port> (type ipv4_addr; flags interval; size 100000;)
+    if not _nft_available():
+        warn("nft binary не установлен — CDN allowlist не может быть применён")
         return False
+    nft_set_create(
+        ipset, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+        set_type="ipv4_addr", flags=["interval"], maxelem=100000,
+    )
 
-    # Записываем во временный файл для ipset restore
-    tmp_file = Path(f"/tmp/_singbox_cdn_ipset_{port}.restore")
-    try:
-        tmp_file.write_text("\n".join(restore_lines) + "\n")
-        r = _run(["ipset", "restore", "-!", "-f", str(tmp_file)],
-                 capture=True, quiet=True)
-        if r.returncode != 0:
-            warn(f"ipset restore failed: {r.stderr[:200] if r.stderr else 'unknown'}")
-    finally:
-        tmp_file.unlink(missing_ok=True)
+    # 3. Atomic swap содержимого set (flush + add element в одной транзакции)
+    valid_cidrs = [c for c in cidrs if _valid_cidr(c)]
+    if not valid_cidrs:
+        warn("Нет валидных CIDR для добавления в nft set")
+        return False
+    nft_set_atomic_swap(
+        ipset, valid_cidrs, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+    )
 
-    # 4. iptables: DROP всего, что НЕ из CDN-диапазона на этот порт
-    # v4.23.2: -I INPUT 1 (в НАЧАЛО цепочки, не -A в конец).
-    # По образцу fptn.py:494 — правило должно быть ПЕРВЫМ в INPUT,
-    # чтобы чужие ACCEPT-правила не перехватили трафик раньше DROP.
+    # 4. nft rule: DROP всего, что НЕ из CDN-диапазона на этот порт
     # Сначала удаляем старое правило (если есть) — idempotent
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-m", "set", "!", "--match-set", ipset, "src", "-j", "DROP",
-          "-m", "comment", "--comment", comment],
-         check=False, quiet=True)
-
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=comment, family=NFT_TABLE_FAMILY, max_iterations=10,
+    )
     # Insert на позицию 1 — правило всегда первое в INPUT
-    r = _run(["iptables", "-I", "INPUT", "1", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "!", "--match-set", ipset, "src", "-j", "DROP",
-              "-m", "comment", "--comment", comment],
-             check=False, quiet=True)
-    if r.returncode != 0:
-        warn(f"iptables rule failed: {r.stderr[:200] if r.stderr else 'unknown'}")
+    # nft spec: tcp dport <port> ip saddr != @<set> drop
+    rule_spec = f"tcp dport {port} ip saddr != @{ipset} drop"
+    from chimera.modules.nft_common import nft_rule_insert
+    r_ok = nft_rule_insert(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        rule_spec=rule_spec, family=NFT_TABLE_FAMILY,
+        comment=comment,
+    )
+    if not r_ok:
+        warn(f"nft rule failed для порта {port}")
         warn(f"Порт {port} останется ОТКРЫТ всем интернету — нет allowlist!")
         return False
 
-    # 5. v4.23.2: Persist — ipset save + iptables save + systemd unit
-    # Без этого правила не переживут reboot (ipset уничтожается, iptables-restore
-    # не знает про ссылку на несуществующий ipset).
+    # 5. Persist — nft list ruleset > /etc/nftables.conf + enable nftables.service
     _ipset_save_port(port)
     _ipset_restore_unit_install()
     _iptables_persist()
@@ -404,31 +365,32 @@ def apply_cdn_allowlist(cdn_provider: str, port: int) -> bool:
 
 
 # ============================================================================
-#  remove_cdn_allowlist — cleanup + persist (v4.23.2)
+#  remove_cdn_allowlist — cleanup + persist (этап 1.7)
 # ============================================================================
 def remove_cdn_allowlist(port: int) -> bool:
     """Удаляет CDN allowlist для данного порта.
 
-    1. Удаляет iptables rule
-    2. Уничтожает ipset
-    3. v4.23.2: Обновляет persisted state (иначе после reboot правило "воскреснет")
+    Мигрировано с ipset/iptables на nftables (этап 1.7). Шаги:
+      1. Удаляет nft rule (через nft_rule_delete_by_comment)
+      2. Уничтожает nft set (через nft_set_destroy)
+      3. Обновляет persisted state (nft_persist перезаписывает /etc/nftables.conf)
 
     Returns:
       True при успехе (даже если правил не было — idempotent).
     """
-    ipset = _ipset_name(port)
-    comment = _iptables_comment(port)
+    ipset = _ipset_name(port)  # singbox_cdn_<port>
+    comment = _iptables_comment(port)  # chimera-singbox-cdn-<port>
 
-    # 1. Удаляем iptables rule
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-m", "set", "!", "--match-set", ipset, "src", "-j", "DROP",
-          "-m", "comment", "--comment", comment],
-         check=False, quiet=True)
+    # 1. Удаляем nft rule (по comment-tag)
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=comment, family=NFT_TABLE_FAMILY, max_iterations=10,
+    )
 
-    # 2. Уничтожаем ipset
-    _run(["ipset", "destroy", ipset], check=False, quiet=True)
+    # 2. Уничтожаем nft set
+    nft_set_destroy(ipset, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
 
-    # 3. v4.23.2: Обновляем persisted state
+    # 3. Обновляем persisted state
     _ipset_remove_from_persist(port)
     _iptables_persist()
 
@@ -437,36 +399,36 @@ def remove_cdn_allowlist(port: int) -> bool:
 
 
 # ============================================================================
-#  get_cdn_allowlist_status — для TUI
+#  get_cdn_allowlist_status — для TUI (этап 1.7: nft-based)
 # ============================================================================
 def get_cdn_allowlist_status(port: int) -> dict:
-    """Возвращает статус allowlist для порта."""
-    ipset = _ipset_name(port)
-    comment = _iptables_comment(port)
+    """Возвращает статус allowlist для порта (мигрировано с ipset/iptables на nftables).
+    """
+    ipset = _ipset_name(port)  # singbox_cdn_<port>
+    comment = _iptables_comment(port)  # chimera-singbox-cdn-<port>
 
-    # Проверяем iptables rule
-    r = _run(["iptables", "-C", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "!", "--match-set", ipset, "src", "-j", "DROP",
-              "-m", "comment", "--comment", comment],
-             quiet=True)
-    iptables_active = (r.returncode == 0)
+    # Проверяем nft rule через nft_rule_exists (по comment-tag)
+    nft_rule_active = nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=comment, family=NFT_TABLE_FAMILY,
+    )
 
-    # Проверяем ipset
-    r2 = _run(["ipset", "list", ipset], capture=True, quiet=True)
-    ipset_active = (r2.returncode == 0)
-    ipset_count = 0
-    if ipset_active and r2.stdout:
-        for line in r2.stdout.splitlines():
-            if line.startswith("Number of entries:"):
-                try:
-                    ipset_count = int(line.split(":")[1].strip())
-                except (ValueError, IndexError):
-                    pass
+    # Проверяем nft set и считаем его элементы
+    nft_set_active = nft_set_exists(ipset, table=NFT_TABLE_NAME,
+                                     family=NFT_TABLE_FAMILY)
+    nft_set_entries = 0
+    if nft_set_active:
+        nft_set_entries = nft_set_count(ipset, table=NFT_TABLE_NAME,
+                                         family=NFT_TABLE_FAMILY)
 
     return {
         "port": port,
-        "iptables_rule_active": iptables_active,
-        "ipset_active": ipset_active,
-        "ipset_entries": ipset_count,
-        "ipset_name": ipset,
+        "iptables_rule_active": nft_rule_active,  # legacy field name (для TUI compat)
+        "nft_rule_active": nft_rule_active,
+        "ipset_active": nft_set_active,  # legacy field name
+        "nft_set_active": nft_set_active,
+        "ipset_entries": nft_set_entries,  # legacy field name
+        "nft_set_entries": nft_set_entries,
+        "ipset_name": ipset,  # legacy field name (для TUI display)
+        "nft_set_name": ipset,
     }

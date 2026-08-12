@@ -12,6 +12,8 @@ turntunnel, mtproto, webdav_tunnel).
   3. proto_ask — интерактивный ввод (mocked input)
   4. ProtoCancelled — exception при Ctrl+C
   5. proto_gen_password — генерация пароля
+  6. proto_ipt_persist — делегирование в nft_persist (этап 1.7 миграции)
+  7. proto_ipt_rule_exists — извлечение comment и делегирование в nft_rule_exists
 """
 from __future__ import annotations
 
@@ -221,140 +223,243 @@ class TestProtoCancelled(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  proto_ipt_rule_exists — проверка наличия iptables-правила через -C
+#  proto_ipt_persist — миграция на nft_persist (этап 1.7)
 # ══════════════════════════════════════════════════════════════════════════════
-class TestProtoIptRuleExists(unittest.TestCase):
-    """proto_ipt_rule_exists — проверка наличия iptables-правила.
+class TestProtoIptPersistNftMigration(unittest.TestCase):
+    """proto_ipt_persist — после миграции на nftables (этап 1.7).
 
-    РЕГРЕССИЯ: iptables -C возвращает exit status 1 когда правило НЕ существует
-    — это норма (man iptables: "If the rule does not exist, the exit code is 1").
-    _core._run по умолчанию имеет check=True и бросает CalledProcessError на
-    rc=1. Без явного check=False функция падала при открытии TUI-меню Telemt
-    если хоть одна TG-подсеть не имела правила (что нормально когда Telemt
-    остановлен).
+    Раньше вызывала `netfilter-persistent save` или `iptables-save > rules.v4`.
+    Теперь делегирует в `nft_persist()` из nft_common — сохраняет весь ruleset
+    в /etc/nftables.conf через `nft list ruleset`. Также включает
+    nftables.service через `nft_persist_enable_systemd`.
 
     Тесты проверяют:
-      • rc=0 → True (правило существует)
-      • rc=1 → False (правило не существует, НЕ бросает исключение)
-      • _run бросает исключение → False (defensive, не роняет вызывателя)
-      • импорт core падает → False (defensive)
+      • Делегирование в nft_persist (а не в subprocess netfilter-persistent)
+      • Делегирование в nft_persist_enable_systemd
+      • Silent fallback при ошибке (историческая best-effort семантика)
     """
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def _make_completed(self, returncode: int):
-        """Создаёт mock CompletedProcess."""
-        import subprocess
-        return subprocess.CompletedProcess(
-            args=[], returncode=returncode, stdout="", stderr="",
-        )
-
-    def test_returns_true_when_rule_exists(self):
-        """rc=0 → True (правило существует)."""
+    def test_delegates_to_nft_persist(self):
+        """proto_ipt_persist вызывает nft_persist из nft_common."""
         from chimera.modules import proto_common
-        fake_run = MagicMock(return_value=self._make_completed(0))
-        fake_core = MagicMock()
-        fake_core._run = fake_run
-        with patch.object(proto_common, "_core_module", return_value=fake_core):
+        with patch("chimera.modules.nft_common.nft_persist",
+                   return_value=True) as mock_nft_persist, \
+             patch("chimera.modules.nft_common.nft_persist_enable_systemd",
+                   return_value=True):
+            proto_common.proto_ipt_persist()
+        mock_nft_persist.assert_called_once()
+
+    def test_delegates_to_nft_persist_enable_systemd(self):
+        """proto_ipt_persist также включает nftables.service."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_persist",
+                   return_value=True), \
+             patch("chimera.modules.nft_common.nft_persist_enable_systemd",
+                   return_value=True) as mock_enable:
+            proto_common.proto_ipt_persist()
+        mock_enable.assert_called_once()
+
+    def test_silent_on_exception(self):
+        """При ошибке nft_persist — не бросает, историческая best-effort семантика."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_persist",
+                   side_effect=Exception("nft not found")):
+            # Не должно бросить
+            proto_common.proto_ipt_persist()
+
+    def test_does_not_call_netfilter_persistent(self):
+        """РЕГРЕССИЯ: proto_ipt_persist больше НЕ вызывает netfilter-persistent."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_persist",
+                   return_value=True), \
+             patch("chimera.modules.nft_common.nft_persist_enable_systemd",
+                   return_value=True), \
+             patch("subprocess.run") as mock_subprocess:
+            proto_common.proto_ipt_persist()
+        # subprocess.run не должен вызываться для netfilter-persistent.
+        for call in mock_subprocess.call_args_list:
+            args = call.args[0] if call.args else []
+            if args and "netfilter-persistent" in args:
+                self.fail("proto_ipt_persist не должен вызывать netfilter-persistent")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  proto_ipt_rule_exists — миграция на nft_rule_exists (этап 1.7)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestProtoIptRuleExistsNftMigration(unittest.TestCase):
+    """proto_ipt_rule_exists — после миграции на nftables (этап 1.7).
+
+    Раньше вызывала `iptables -t {table} -C {chain} {args}` (rc==0 → True).
+    Теперь извлекает --comment (или строит comment из proto/port pattern)
+    и делегирует в nft_rule_exists(comment=...).
+
+    Тесты проверяют:
+      • OPEN_PORT pattern: args=`-p tcp --dport 443 -j ACCEPT` → comment=chimera-open-port-tcp-443
+      • --comment explicit: args=`... --comment my-tag` → comment=my-tag
+      • NAT REDIRECT pattern: args=`-d NET -p tcp -j REDIRECT --to-port X` → comment=mtproto-tproxy
+      • UID RETURN pattern: args=`-m owner --uid-owner 999 -j RETURN` → comment=telemt-tproxy-bypass
+      • Unknown pattern → False (defensive)
+      • Map iptables chain → nft chain (INPUT → input, OUTPUT → output, etc.)
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_open_port_pattern_builds_comment(self):
+        """OPEN_PORT pattern: `-p tcp --dport 443 -j ACCEPT` → comment chimera-open-port-tcp-443."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=True) as mock_exists:
             result = proto_common.proto_ipt_rule_exists(
-                "nat", "OUTPUT",
-                ["-d", "91.105.192.0/23", "-p", "tcp", "-j", "REDIRECT",
-                 "--to-port", "10811"],
+                "filter", "INPUT",
+                ["-p", "tcp", "--dport", "443", "-j", "ACCEPT"],
             )
         self.assertTrue(result)
-        # Проверяем что check=False был передан (это ключевая часть фикса).
-        fake_run.assert_called_once()
-        kwargs = fake_run.call_args.kwargs
-        self.assertFalse(kwargs.get("check", True),
-                         "check=False ДОЛЖЕН быть передан — иначе rc=1 бросает")
+        kwargs = mock_exists.call_args.kwargs
+        self.assertEqual(kwargs.get("comment"), "chimera-open-port-tcp-443")
+        self.assertEqual(kwargs.get("chain"), "input")
+        self.assertEqual(kwargs.get("table"), "chimera")
 
-    def test_returns_false_when_rule_not_exists(self):
-        """РЕГРЕССИЯ: rc=1 → False (правило не существует), НЕ бросает исключение.
-
-        До фикса _run с check=True бросал CalledProcessError на rc=1.
-        """
+    def test_open_port_pattern_udp(self):
+        """OPEN_PORT UDP pattern: `-p udp --dport 56000 -j ACCEPT` → comment chimera-open-port-udp-56000."""
         from chimera.modules import proto_common
-        fake_run = MagicMock(return_value=self._make_completed(1))
-        fake_core = MagicMock()
-        fake_core._run = fake_run
-        with patch.object(proto_common, "_core_module", return_value=fake_core):
-            # Не должно бросать — должно вернуть False.
-            result = proto_common.proto_ipt_rule_exists(
-                "nat", "OUTPUT",
-                ["-d", "91.105.192.0/23", "-p", "tcp", "-j", "REDIRECT",
-                 "--to-port", "10811"],
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=True) as mock_exists:
+            proto_common.proto_ipt_rule_exists(
+                "filter", "INPUT",
+                ["-p", "udp", "--dport", "56000", "-j", "ACCEPT"],
             )
-        self.assertFalse(result)
+        kwargs = mock_exists.call_args.kwargs
+        self.assertEqual(kwargs.get("comment"), "chimera-open-port-udp-56000")
 
-    def test_returns_false_on_other_nonzero_rc(self):
-        """rc=2 (iptables error) → False, не бросает."""
+    def test_explicit_comment_extracted(self):
+        """Если args содержит `--comment my-tag` — используем именно его."""
         from chimera.modules import proto_common
-        fake_run = MagicMock(return_value=self._make_completed(2))
-        fake_core = MagicMock()
-        fake_core._run = fake_run
-        with patch.object(proto_common, "_core_module", return_value=fake_core):
-            result = proto_common.proto_ipt_rule_exists(
-                "filter", "INPUT", ["-p", "udp", "--dport", "56000", "-j", "ACCEPT"],
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=True) as mock_exists:
+            proto_common.proto_ipt_rule_exists(
+                "filter", "INPUT",
+                ["-p", "tcp", "--dport", "443", "-j", "ACCEPT",
+                 "-m", "comment", "--comment", "my-custom-tag"],
             )
-        self.assertFalse(result)
+        kwargs = mock_exists.call_args.kwargs
+        self.assertEqual(kwargs.get("comment"), "my-custom-tag")
 
-    def test_returns_false_on_run_exception(self):
-        """Если _run бросает исключение (например, iptables не установлен) —
-        возвращаем False, не пробрасываем исключение."""
+    def test_nat_redirect_pattern(self):
+        """NAT REDIRECT: `-d NET -p tcp -j REDIRECT --to-port 10811` → comment mtproto-tproxy."""
         from chimera.modules import proto_common
-        fake_run = MagicMock(side_effect=Exception("iptables not found"))
-        fake_core = MagicMock()
-        fake_core._run = fake_run
-        with patch.object(proto_common, "_core_module", return_value=fake_core):
-            # Не должно бросать — defensive try/except.
-            result = proto_common.proto_ipt_rule_exists(
-                "filter", "INPUT", ["-p", "udp", "--dport", "56000"],
-            )
-        self.assertFalse(result)
-
-    def test_returns_false_on_core_import_failure(self):
-        """Если _core_module() бросает исключение — возвращаем False."""
-        from chimera.modules import proto_common
-        with patch.object(proto_common, "_core_module",
-                          side_effect=Exception("core unavailable")):
-            result = proto_common.proto_ipt_rule_exists(
-                "filter", "INPUT", ["-p", "udp"],
-            )
-        self.assertFalse(result)
-
-    def test_passes_correct_args_to_run(self):
-        """Проверяем что аргументы передаются корректно: iptables -t <table>
-        -C <chain> + args."""
-        from chimera.modules import proto_common
-        fake_run = MagicMock(return_value=self._make_completed(0))
-        fake_core = MagicMock()
-        fake_core._run = fake_run
-        with patch.object(proto_common, "_core_module", return_value=fake_core):
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=True) as mock_exists:
             proto_common.proto_ipt_rule_exists(
                 "nat", "OUTPUT",
-                ["-d", "10.0.0.0/8", "-p", "tcp", "-j", "ACCEPT"],
+                ["-d", "91.108.0.0/16", "-p", "tcp",
+                 "-j", "REDIRECT", "--to-port", "10811"],
             )
-        args = fake_run.call_args.args[0]
-        self.assertEqual(args[0], "iptables")
-        self.assertEqual(args[1], "-t")
-        self.assertEqual(args[2], "nat")
-        self.assertEqual(args[3], "-C")
-        self.assertEqual(args[4], "OUTPUT")
-        self.assertIn("-d", args)
-        self.assertIn("10.0.0.0/8", args)
+        kwargs = mock_exists.call_args.kwargs
+        self.assertEqual(kwargs.get("comment"), "mtproto-tproxy")
+        self.assertEqual(kwargs.get("chain"), "output")
 
-    def test_does_not_crash_telemt_menu_scenario(self):
-        """Интеграционный тест: имитируем сценарий из баг-репорта —
-        _xray_tproxy_status вызывает _ipt_rule_exists для 19 TG-подсетей,
-        ни одна не имеет правила (Telemt остановлен). Раньше первый же
-        rc=1 валил весь TUI-меню. Теперь — должно работать."""
+    def test_uid_owner_return_pattern(self):
+        """UID RETURN: `-m owner --uid-owner 999 -j RETURN` → comment telemt-tproxy-bypass."""
         from chimera.modules import proto_common
-        # 19 TG-подсетей, ни одной нет правила.
-        fake_run = MagicMock(return_value=self._make_completed(1))
-        fake_core = MagicMock()
-        fake_core._run = fake_run
-        with patch.object(proto_common, "_core_module", return_value=fake_core):
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=True) as mock_exists:
+            proto_common.proto_ipt_rule_exists(
+                "nat", "OUTPUT",
+                ["-m", "owner", "--uid-owner", "999", "-j", "RETURN"],
+            )
+        kwargs = mock_exists.call_args.kwargs
+        self.assertEqual(kwargs.get("comment"), "telemt-tproxy-bypass")
+
+    def test_me_port_return_pattern(self):
+        """ME-port RETURN: `-p tcp --dport 8888 -j RETURN` → comment mtproto-me-return-8888."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=True) as mock_exists:
+            proto_common.proto_ipt_rule_exists(
+                "nat", "OUTPUT",
+                ["-p", "tcp", "--dport", "8888", "-j", "RETURN"],
+            )
+        kwargs = mock_exists.call_args.kwargs
+        self.assertEqual(kwargs.get("comment"), "mtproto-me-return-8888")
+
+    def test_unknown_pattern_returns_false(self):
+        """Если паттерн не распознан — возвращает False (defensive)."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=True) as mock_exists:
+            result = proto_common.proto_ipt_rule_exists(
+                "filter", "INPUT",
+                ["--something-weird", "x"],
+            )
+        self.assertFalse(result)
+        mock_exists.assert_not_called()
+
+    def test_chain_mapping_filter_input(self):
+        """Map filter/INPUT → input."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=True) as mock_exists:
+            proto_common.proto_ipt_rule_exists(
+                "filter", "INPUT",
+                ["-p", "tcp", "--dport", "443", "-j", "ACCEPT"],
+            )
+        self.assertEqual(mock_exists.call_args.kwargs.get("chain"), "input")
+
+    def test_chain_mapping_nat_prerouting(self):
+        """Map nat/PREROUTING → prerouting."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=True) as mock_exists:
+            proto_common.proto_ipt_rule_exists(
+                "nat", "PREROUTING",
+                ["-p", "tcp", "--dport", "8443", "-j", "REDIRECT", "--to-port", "443"],
+            )
+        self.assertEqual(mock_exists.call_args.kwargs.get("chain"), "prerouting")
+
+    def test_chain_mapping_mangle_prerouting(self):
+        """Map mangle/PREROUTING → mangle_forward."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=True) as mock_exists:
+            proto_common.proto_ipt_rule_exists(
+                "mangle", "PREROUTING",
+                ["-p", "tcp", "--dport", "8443", "-j", "ACCEPT"],
+            )
+        self.assertEqual(mock_exists.call_args.kwargs.get("chain"), "mangle_forward")
+
+    def test_returns_false_on_nft_rule_exists_exception(self):
+        """Если nft_rule_exists бросает — proto_ipt_rule_exists возвращает False."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   side_effect=Exception("nft not installed")):
+            result = proto_common.proto_ipt_rule_exists(
+                "filter", "INPUT",
+                ["-p", "tcp", "--dport", "443", "-j", "ACCEPT"],
+            )
+        self.assertFalse(result)
+
+    def test_returns_false_when_nft_says_not_exists(self):
+        """nft_rule_exists возвращает False — проброс False."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=False):
+            result = proto_common.proto_ipt_rule_exists(
+                "filter", "INPUT",
+                ["-p", "tcp", "--dport", "443", "-j", "ACCEPT"],
+            )
+        self.assertFalse(result)
+
+    def test_telemt_menu_scenario_no_crash(self):
+        """Интеграционный тест: 19 TG-подсетей, ни одной нет правила.
+        Раньше первый же rc=1 валил весь TUI-меню Telemt. Теперь — должно работать
+        (nft_rule_exists сам по себе не бросает, returns False)."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=False):
             for i in range(19):
                 result = proto_common.proto_ipt_rule_exists(
                     "nat", "OUTPUT",
@@ -364,6 +469,22 @@ class TestProtoIptRuleExists(unittest.TestCase):
                 self.assertFalse(result,
                                  f"Подсеть {i}: должно быть False (правила нет)")
         # 19 вызовов, ни один не бросил — тест прошёл.
+
+    def test_does_not_call_iptables_subprocess(self):
+        """РЕГРЕССИЯ: proto_ipt_rule_exists больше НЕ вызывает iptables subprocess."""
+        from chimera.modules import proto_common
+        with patch("chimera.modules.nft_common.nft_rule_exists",
+                   return_value=True), \
+             patch("subprocess.run") as mock_subprocess:
+            proto_common.proto_ipt_rule_exists(
+                "filter", "INPUT",
+                ["-p", "tcp", "--dport", "443", "-j", "ACCEPT"],
+            )
+        # subprocess.run не должен вызываться для iptables -C.
+        for call in mock_subprocess.call_args_list:
+            args = call.args[0] if call.args else []
+            if args and "iptables" in args:
+                self.fail("proto_ipt_rule_exists не должен вызывать iptables")
 
 
 if __name__ == "__main__":

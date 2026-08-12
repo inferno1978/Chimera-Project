@@ -7,12 +7,12 @@ chimera/modules/awg_cascade.py
   Клиент ──AWG──► AWG0 (RU, вход) ──┬──► российские сети напрямую (через host)
                                     └──► остальной трафик ──► AWG1 (зарубеж, выход)
 
-Реализация:
+Реализация (мигрировано с iptables/ipset на nftables, этап 1.6):
   • AWG1 (выход): стандартная установка standalone AWG + спец-пир 'cascade_entry'
     для подключения AWG0
   • AWG0 (вход): стандартная установка standalone AWG + клиентский туннель awg1
-    к AWG1 + ipset с RU-сетями + iptables-маршрутизация + systemd-юнит + cron
-    обновления ru.zone
+    к AWG1 + nft set с RU-сетями (awg_cascade_nodes) + nftables-маршрутизация +
+    systemd-юнит + cron обновления ru.zone
 
 Весь трафик к российским сетям (из ru.zone) идёт напрямую через host,
 остальной трафик маркируется fwmark=0x2000 и уходит через awg1 (туннель к AWG1).
@@ -40,6 +40,22 @@ from .awg_standalone import (
 )
 from .awg_peers import awg_peer_add, awg_peer_rebuild_conf
 from .awg_apply import awgs_apply, awgs_service_status
+
+# ЭТАП 1.6 МИГРАЦИИ: импорты nft_common + nft_constants.
+# awgs_ipset (legacy) → nft set awg_cascade_nodes (table inet chimera).
+# iptables mangle MARK → nft rule in mangle_forward chain.
+# ipset restore / swap / destroy → nft_set_atomic_swap / nft_set_destroy.
+from .nft_common import (
+    nft_set_create, nft_set_atomic_swap, nft_set_destroy, nft_set_count,
+    nft_rule_add, nft_rule_delete_by_comment, nft_persist,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY,
+    NFT_CHAIN_POSTROUTING, NFT_CHAIN_FORWARD,
+    NFT_CHAIN_MANGLE_FORWARD, NFT_CHAIN_MANGLE_OUTPUT,
+    NFT_SET_AWG_CASCADE,
+    COMMENT_AWG_MASQ, COMMENT_AWG_CASCADE_MARK,
+)
 
 
 def _core_module():
@@ -97,35 +113,54 @@ def awgs_cascade_download_ru_zone() -> bool:
 
 
 def awgs_cascade_load_ipset() -> bool:
-    """Загружает ru.zone в ipset (атомарно через restore)."""
+    """Загружает ru.zone в nft set (атомарно через nft_set_atomic_swap).
+
+    ЭТАП 1.6 МИГРАЦИИ:
+      • Раньше: `ipset restore -exist -file <tmp>` (создавался временный файл
+        restore с командами `create ... hash:net` + `add ...`).
+      • Теперь: `nft_set_atomic_swap("awg_cascade_nodes", elements)` — атомарно
+        flush + add в одной транзакции `nft -f -`. Set создаётся если его нет
+        (nft_set_create с flags=["interval"] для CIDR-подсетей).
+    """
     core = _core_module()
     if not AWGS_RU_ZONE_FILE.exists() or AWGS_RU_ZONE_FILE.stat().st_size == 0:
         core.log_to_file("WARN", "awgs_cascade_load_ipset: ru.zone пуст")
         return False
 
-    # Создаём временный restore-файл
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".ipset", delete=False) as tmp:
-        tmp.write(f"create {AWGS_IPSET_NAME} hash:net family inet hashsize 4096 maxelem 65536 -exist\n")
-        for line in AWGS_RU_ZONE_FILE.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                tmp.write(f"add {AWGS_IPSET_NAME} {line} -exist\n")
-        tmp_path = tmp.name
+    # Создаём nft set если ещё нет (аналог ipset create -exist)
+    # set_type=ipv4_addr (RU-сети — только IPv4 CIDR), flags=["interval"]
+    # для поддержки CIDR-нотации (10.0.0.0/8).
+    nft_set_create(
+        NFT_SET_AWG_CASCADE, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+        set_type="ipv4_addr", flags=["interval"], maxelem=65536,
+    )
+
+    # Собираем список CIDR из ru.zone
+    elements = []
+    for line in AWGS_RU_ZONE_FILE.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            elements.append(line)
 
     try:
-        r = core._run(["ipset", "restore", "-exist", "-file", tmp_path],
-                      capture=True, check=False)
-        if r.returncode != 0:
-            core.log_to_file("WARN", f"awgs_cascade_load_ipset: {r.stderr}")
+        if not nft_set_atomic_swap(
+            NFT_SET_AWG_CASCADE, elements,
+            table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+        ):
+            core.log_to_file(
+                "WARN",
+                f"awgs_cascade_load_ipset: nft_set_atomic_swap failed "
+                f"({len(elements)} elements)",
+            )
             return False
-        core.log_to_file("INFO", f"ipset {AWGS_IPSET_NAME} загружен")
+        core.log_to_file(
+            "INFO",
+            f"nft set {NFT_SET_AWG_CASCADE} загружен ({len(elements)} сетей)",
+        )
         return True
     except Exception as e:
         core.log_to_file("ERROR", f"awgs_cascade_load_ipset: {e}")
         return False
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
 
 
 # ============================================================================
@@ -285,48 +320,90 @@ def _awgs_cascade_build_awg1_conf(
 
 
 def _awgs_cascade_apply_iptables(exit_subnet: str) -> bool:
-    """Применяет iptables-правила для каскада."""
+    """Применяет nftables-правила для каскада.
+
+    ЭТАП 1.6 МИГРАЦИИ:
+      • Раньше: 5 iptables правил (mangle MARK, nat MASQUERADE, FORWARD in/out,
+        FORWARD ipset match) + ip rule fwmark 0x2000.
+      • Теперь: 5 nft правил в таблице inet chimera (mangle_forward, postrouting,
+        forward x3) + nft set lookup @awg_cascade_nodes.
+
+    Основная идея:
+      1. Трафик к RU-сетям → напрямую через host (без mark, match через @awg_cascade_nodes)
+      2. Весь остальной трафик → mark 0x2000 → route через awg1 (table 2000)
+
+    Используем nft set @awg_cascade_nodes для матчинга RU-сетей.
+
+    Имя функции сохранено для совместимости со старыми тестами (test_awg_cascade.py
+    TestAwgsCascadeApplyIptablesRules патчит именно это имя).
+    """
     core = _core_module()
-    # Основная идея:
-    # 1. Трафик к RU-сетям → напрямую через host (без mark)
-    # 2. Весь остальной трафик → mark 0x2000 → route через awg1 (table 2000)
-    #
-    # Используем ipset для матчинга RU-сетей
 
-    rules = [
-        # Создаём отдельную таблицу маршрутизации для marked-трафика
-        # (через `ip route add default dev awg1 table 2000`)
-        # Но проще: policy routing по fwmark
+    # Гарантируем что nft set awg_cascade_nodes существует (для @awg_cascade_nodes lookup)
+    nft_set_create(
+        NFT_SET_AWG_CASCADE, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+        set_type="ipv4_addr", flags=["interval"], maxelem=65536,
+    )
 
-        # mark трафик от клиентов awg0 (НЕ весь OUTPUT сервера!), кроме RU
-        # Используем -i awg0 в FORWARD (не OUTPUT), чтобы не маркировать
-        # собственный трафик сервера (SSH-ответы и т.п.)
-        f"iptables -t mangle -A FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
+    # Применяем правила через nft_rule_add (idempotent через comment-tag)
+    # Правила используют comment-tag из nft_constants (COMMENT_AWG_CASCADE_MARK,
+    # COMMENT_AWG_MASQ, etc.) для безопасного cleanup при удалении каскада.
 
-        # NAT для выхода через awg1
-        f"iptables -t nat -A POSTROUTING -o awg1 -j MASQUERADE",
+    # 1. mark трафик от клиентов awg0 (НЕ весь OUTPUT сервера!), кроме RU
+    #    Используем FORWARD (не OUTPUT), чтобы не маркировать собственный
+    #    трафик сервера (SSH-ответы и т.п.) — regression fix для SSH lockout.
+    #    iptables -t mangle -A FORWARD -i awg0 -m set ! --match-set awgs_ipset dst -j MARK --set-mark 0x2000
+    #    → nft: iifname "awg0" ip daddr != @awg_cascade_nodes meta mark set 0x2000
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_FORWARD,
+        rule_spec=f'iifname "awg0" ip daddr != @{NFT_SET_AWG_CASCADE} '
+                  f'meta mark set {AWGS_CASCADE_FWMARK}',
+        family=NFT_TABLE_FAMILY,
+        comment=COMMENT_AWG_CASCADE_MARK,  # "awg-cascade-fwmark"
+        idempotent=True,
+    )
 
-        # Разрешаем forward
-        "iptables -A FORWARD -i awg0 -o awg1 -j ACCEPT",
-        "iptables -A FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+    # 2. NAT для выхода через awg1
+    #    iptables -t nat -A POSTROUTING -o awg1 -j MASQUERADE
+    #    → nft: oifname "awg1" masquerade
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_POSTROUTING,
+        rule_spec='oifname "awg1" masquerade',
+        family=NFT_TABLE_FAMILY,
+        comment=COMMENT_AWG_MASQ,  # "awg-masquerade"
+        idempotent=True,
+    )
 
-        # Для RU-сетей — forward напрямую через host-интерфейс
-        f"iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT",
-    ]
+    # 3. Разрешаем forward awg0 → awg1 (новые соединения от клиентов)
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_FORWARD,
+        rule_spec='iifname "awg0" oifname "awg1" accept',
+        family=NFT_TABLE_FAMILY,
+        comment="awg-cascade-fwd-in",
+        idempotent=True,
+    )
 
-    # Применяем правила
-    for rule in rules:
-        # Без -t (filter table)
-        if rule.startswith("iptables -t"):
-            parts = rule.split()
-        else:
-            parts = rule.split()
-        r = core._run(parts, capture=True, check=False, quiet=True)
-        if r.returncode != 0:
-            core.log_to_file("WARN", f"iptables rule failed: {rule}: {r.stderr}")
+    # 4. Разрешаем forward awg1 → awg0 (ESTABLISHED,RELATED — обратный трафик)
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_FORWARD,
+        rule_spec='iifname "awg1" oifname "awg0" '
+                  'ct state { established, related } accept',
+        family=NFT_TABLE_FAMILY,
+        comment="awg-cascade-fwd-out",
+        idempotent=True,
+    )
+
+    # 5. Для RU-сетей — forward напрямую через host-интерфейс (match через @awg_cascade_nodes)
+    nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_FORWARD,
+        rule_spec=f'iifname "awg0" ip daddr @{NFT_SET_AWG_CASCADE} accept',
+        family=NFT_TABLE_FAMILY,
+        comment="awg-cascade-fwd-ru",
+        idempotent=True,
+    )
 
     # Policy routing: marked-трафик → через awg1
-    # Добавляем таблицу 2000 (если ещё нет)
+    # Добавляем таблицу 2000 (если ещё нет) — ЭТО ip route, не nft (НЕ ТРОГАТЬ).
     r = core._run(["ip", "route", "show", "table", "2000"],
                   capture=True, check=False)
     if not r.stdout.strip():
@@ -336,7 +413,7 @@ def _awgs_cascade_apply_iptables(exit_subnet: str) -> bool:
         core._run(["ip", "route", "add", "default", "via", exit_gw, "dev", "awg1", "table", "2000"],
                   check=False, quiet=True)
 
-    # Правило policy routing по fwmark
+    # Правило policy routing по fwmark — ЭТО ip rule, не nft (НЕ ТРОГАТЬ).
     core._run(["ip", "rule", "add", "fwmark", str(AWGS_CASCADE_FWMARK), "lookup", "2000"],
               check=False, quiet=True)
 
@@ -344,41 +421,117 @@ def _awgs_cascade_apply_iptables(exit_subnet: str) -> bool:
 
 
 def _awgs_cascade_create_routing_script(exit_subnet: str) -> None:
-    """Создаёт awg-routing.sh для пересоздания правил при ребуте."""
+    """Создаёт awg-routing.sh для пересоздания правил при ребуте.
+
+    ЭТАП 1.6 МИГРАЦИИ:
+      • Раньше: bash-скрипт с ipset create/restore + iptables -A правила.
+      • Теперь: bash-скрипт с прямыми вызовами `nft add rule inet chimera ...`
+        (idempotent через comment-tag) + `nft add element ...` для заполнения
+        set awg_cascade_nodes (через batch-транзакцию).
+    """
     AWGS_CASCADE_DIR.mkdir(parents=True, exist_ok=True)
     exit_base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
     exit_gw = f"{exit_base}.1"
 
+    # ЭТАП 1.6: bash-скрипт с nft binary напрямую.
+    # Идемпотентность через comment-tag (nft не добавляет дубликаты правил
+    # с одним comment-tag при втором вызове — nft_rule_add проверяет через
+    # `nft -j list chain` JSON). Set awg_cascade_nodes создаётся через
+    # nft add set если ещё нет.
     script = f"""#!/bin/bash
 # AWG Cascade routing — пересоздаёт правила при старте системы
 # Автоматически сгенерировано chimera/modules/awg_cascade.py
+# ЭТАП 1.6 МИГРАЦИИ: переписано с iptables/ipset на nftables (inet chimera).
 
 set -e
 
-# 1. Загрузить ipset из ru.zone
+# 1. Создать nft set awg_cascade_nodes (если ещё нет) и заполнить из ru.zone
 if [ -f "{AWGS_RU_ZONE_FILE}" ]; then
-    ipset create {AWGS_IPSET_NAME} hash:net family inet hashsize 4096 maxelem 65536 -exist
+    # Создаём set если не существует (idempotent: -exist эквивалент в nft —
+    # `add set` с тем же именем не падает если set уже есть, но мы делаем
+    # явную проверку через `list set` чтобы избежать ошибки).
+    nft list set inet chimera {NFT_SET_AWG_CASCADE} >/dev/null 2>&1 || \\
+        nft add set inet chimera {NFT_SET_AWG_CASCADE} \\
+            {{ type ipv4_addr; flags interval; size 65536; }}
+
+    # Собираем элементы в batch-транзакцию (аналог ipset restore)
+    TMP=$(/bin/mktemp)
+    echo "flush set inet chimera {NFT_SET_AWG_CASCADE}" > "$TMP"
+    FIRST=1
+    echo -n "add element inet chimera {NFT_SET_AWG_CASCADE} {{ " >> "$TMP"
     while IFS= read -r line; do
         line=$(echo "$line" | tr -d '[:space:]')
         [ -z "$line" ] && continue
         [ "${{line:0:1}}" = "#" ] && continue
-        ipset add {AWGS_IPSET_NAME} "$line" -exist
+        if [ $FIRST -eq 1 ]; then
+            echo -n "$line" >> "$TMP"
+            FIRST=0
+        else
+            echo -n ", $line" >> "$TMP"
+        fi
     done < "{AWGS_RU_ZONE_FILE}"
+    echo " }}" >> "$TMP"
+    nft -f "$TMP" 2>/dev/null || true
+    rm -f "$TMP"
 fi
 
-# 2. iptables правила
-iptables -t mangle -A OUTPUT -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK}
-iptables -t mangle -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -t nat -A POSTROUTING -o awg1 -j MASQUERADE
-iptables -A FORWARD -i awg0 -o awg1 -j ACCEPT
-iptables -A FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT
+# 2. nft правила (idempotent через comment-tag — nft_rule_add на python
+#    проверяет существование правила по comment перед добавлением, но в bash
+#    мы используем упрощённую схему: добавляем с `2>/dev/null || true`, nft
+#    сам по себе не падает при повторном добавлении правила с тем же comment
+#    в нашем случае — он создаёт ДУБЛЬ правила. Для строго идемпотентного
+#    поведения используем del-before-add: удаляем все правила с этим comment,
+#    затем добавляем одно. Эквивалент nft_rule_delete_by_comment из nft_common.
+for chain_comment in \\
+    "mangle_forward:awg-cascade-fwmark" \\
+    "postrouting:awg-masquerade" \\
+    "forward:awg-cascade-fwd-in" \\
+    "forward:awg-cascade-fwd-out" \\
+    "forward:awg-cascade-fwd-ru"; do
+    chain="${{chain_comment%%:*}}"
+    comment="${{chain_comment#*:}}"
+    # Delete existing rules with this comment (cleanup dublicates)
+    python3 -c "
+import json, subprocess
+r = subprocess.run(['nft','-a','-j','list','chain','inet','chimera','$chain'], capture_output=True, text=True)
+if r.returncode != 0: exit()
+try:
+    data = json.loads(r.stdout)
+    for item in data.get('nftables', []):
+        if 'chain' not in item: continue
+        for rule in item['chain'].get('expr', []):
+            if rule.get('comment') != '$comment': continue
+            h = rule.get('handle')
+            if h is None: continue
+            subprocess.run(['nft','delete','rule','inet','chimera','$chain','handle',str(h)], capture_output=True)
+except Exception: pass
+" 2>/dev/null || true
+done
 
-# 3. Policy routing
+# Добавляем правила (idempotent после cleanup выше — ровно по одному правилу)
+nft add rule inet chimera mangle_forward \\
+    iifname "awg0" ip daddr != @{NFT_SET_AWG_CASCADE} \\
+    meta mark set {AWGS_CASCADE_FWMARK} \\
+    comment "awg-cascade-fwmark" 2>/dev/null || true
+nft add rule inet chimera postrouting \\
+    oifname "awg1" masquerade \\
+    comment "awg-masquerade" 2>/dev/null || true
+nft add rule inet chimera forward \\
+    iifname "awg0" oifname "awg1" accept \\
+    comment "awg-cascade-fwd-in" 2>/dev/null || true
+nft add rule inet chimera forward \\
+    iifname "awg1" oifname "awg0" \\
+    ct state {{ established, related }} accept \\
+    comment "awg-cascade-fwd-out" 2>/dev/null || true
+nft add rule inet chimera forward \\
+    iifname "awg0" ip daddr @{NFT_SET_AWG_CASCADE} accept \\
+    comment "awg-cascade-fwd-ru" 2>/dev/null || true
+
+# 3. Policy routing (НЕ ТРОГАТЬ — это ip rule/route, не nft)
 ip route add default via {exit_gw} dev awg1 table 2000 2>/dev/null || true
 ip rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null || true
 
-echo "AWG Cascade routing started"
+echo "AWG Cascade routing started (nftables)"
 """
     AWGS_ROUTING_SCRIPT.write_text(script)
     AWGS_ROUTING_SCRIPT.chmod(0o755)
@@ -458,14 +611,22 @@ def _awgs_cascade_setup_cron() -> None:
 
 
 def awgs_cascade_update_ru_zone() -> bool:
-    """Cron-задача: обновляет ru.zone и перезагружает ipset."""
+    """Cron-задача: обновляет ru.zone и перезагружает nft set.
+
+    ЭТАП 1.6 МИГРАЦИИ:
+      • Раньше: `ipset destroy awgs_ipset` + `ipset restore -! -f <file>`.
+      • Теперь: `nft_set_destroy` + `awgs_cascade_load_ipset` (которая внутри
+        вызывает `nft_set_atomic_swap` для атомарной замены).
+    """
     core = _core_module()
     core.log_to_file("INFO", "awgs_cascade_update_ru_zone: started")
     if not awgs_cascade_download_ru_zone():
         return False
-    # Пересоздаём ipset
-    core._run(["ipset", "destroy", AWGS_IPSET_NAME],
-              check=False, quiet=True)
+    # Пересоздаём nft set (destroy + create + atomic_swap)
+    # На самом деле awgs_cascade_load_ipset сам делает nft_set_create (if not exists)
+    # + nft_set_atomic_swap — поэтому destroy здесь опционален (для cleanup
+    # от старых элементов, которые могли остаться после rename set'а).
+    nft_set_destroy(NFT_SET_AWG_CASCADE, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
     return awgs_cascade_load_ipset()
 
 
@@ -675,16 +836,14 @@ def _awgs_cascade_status() -> None:
         status_str = f"{GREEN}active{NC}" if rt_active else f"{RED}inactive{NC}"
         _box_row(f"  awg-cascade-routing: {status_str}")
 
-        # Проверяем ipset
-        r = core._run(["ipset", "list", AWGS_IPSET_NAME],
-                      capture=True, check=False)
-        if r.returncode == 0:
-            import re
-            m = re.search(r"Number of entries:\s+(\d+)", r.stdout)
-            n = m.group(1) if m else "?"
-            _box_row(f"  ipset {AWGS_IPSET_NAME}: {GREEN}{n} сетей{NC}")
+        # Проверяем nft set awg_cascade_nodes (мигрировано с ipset, этап 1.6)
+        # Раньше: `ipset list awgs_ipset` → parse "Number of entries: N"
+        # Теперь: `nft_set_count("awg_cascade_nodes")` → JSON parse `nft -j list set`
+        n = nft_set_count(NFT_SET_AWG_CASCADE, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
+        if n > 0:
+            _box_row(f"  nft set {NFT_SET_AWG_CASCADE}: {GREEN}{n} сетей{NC}")
         else:
-            _box_row(f"  ipset {AWGS_IPSET_NAME}: {RED}не загружен{NC}")
+            _box_row(f"  nft set {NFT_SET_AWG_CASCADE}: {RED}не загружен{NC}")
 
         # Выход к AWG1
         _box_row(f"  Exit host: {state.get('cascade_peer_host', '?')}")

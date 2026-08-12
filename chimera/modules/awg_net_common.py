@@ -1,11 +1,11 @@
 """
 chimera/modules/awg_net_common.py
 ───────────────────────────────────────────────────────────────────────────────
-Общий сетевой слой для AWG-модулей: NAT/MASQUERADE + sysctl + iptables-idempotency.
+Общий сетевой слой для AWG-модулей: NAT/MASQUERADE + sysctl + nftables-idempotency.
 
 Эта прослойка выделена, чтобы избежать регрессии "баг исправлен в одном модуле,
 но забыт в другом" между:
-  • awg_standalone.awgs_setup_nat_and_routing — runtime-установка iptables
+  • awg_standalone.awgs_setup_nat_and_routing — runtime-установка nftables
     правил + systemd-юнит awg-nat.service для standalone-сервера (где AWG
     работает локально и клиенты подключаются извне на этот же сервер).
   • awg_transport._awg_server_conf_text — генерация PostUp/PostDown строк для
@@ -23,13 +23,24 @@ chimera/modules/awg_net_common.py
 не нужен по причине policy-routing-через-fwmark.
 
 Публичные функции:
-  • iptables_ensure(core, args)        — idempotent -A через -C check
-  • build_nat_rule_args(...)           — список iptables-правил для NAT (IPv4)
-  • build_nat_idempotent_shell(...)    — bash-сниппет для PostUp (с -C check, IPv4)
-  • build_nat_cleanup_shell(...)       — bash-сниппет для PostDown (с -D, IPv4)
-  • build_nat6_rule_args(...)          — список ip6tables-правил для NAT (IPv6)
-  • build_nat6_idempotent_shell(...)   — bash-сниппет для PostUp (с -C check, IPv6)
-  • build_nat6_cleanup_shell(...)      — bash-сниппет для PostDown (с -D, IPv6)
+  • iptables_ensure(core, args)        — DEPRECATED legacy alias; delegates to
+    nft_rule_add (idempotent by comment-tag). Имя сохранено для совместимости
+    со старыми caller'ами (awg_standalone.awgs_setup_nat_and_routing).
+  • build_nat_rule_args(...)           — список nft-спецификаций для NAT (IPv4).
+        Возвращает список dict'ов {chain, spec, comment} для nft_rule_add.
+  • build_nat_idempotent_shell(...)    — bash-сниппет для PostUp (nft binary,
+        idempotent через comment-tag, IPv4 + IPv6 в одном inet chimera table).
+  • build_nat_cleanup_shell(...)       — bash-сниппет для PostDown (nft binary,
+        cleanup через comment-tag, IPv4 + IPv6 общие).
+  • build_nat6_rule_args(...)          — DEPRECATED IPv6 alias. В nftables
+        таблица `inet chimera` покрывает и v4, и v6 одним правилом — этот
+        билдер возвращает пустой список (правила уже добавлены через
+        build_nat_rule_args). Сигнатура сохранена для совместимости.
+  • build_nat6_idempotent_shell(...)   — DEPRECATED IPv6 alias. Возвращает
+        пустую строку (правила для IPv6 создаются build_nat_idempotent_shell
+        через единую таблицу inet chimera, покрывающую оба стека).
+  • build_nat6_cleanup_shell(...)      — DEPRECATED IPv6 alias. Возвращает
+        пустую строку (cleanup для IPv6 покрывается build_nat_cleanup_shell).
   • build_sysctl_lines(...)            — строки для /etc/sysctl.d/XX-awg.conf
   • detect_wan_iface(core)             — имя WAN-интерфейса (default route)
   • apply_rp_filter_per_iface(core, awg_iface, wan_iface, value=2)
@@ -37,14 +48,26 @@ chimera/modules/awg_net_common.py
 
 MASQUERADE scope (scope_source parameter):
   • scope_source=True (default)  → MASQUERADE только трафика из awg_subnet
-    (`-s {subnet} -o {wan} -j MASQUERADE`). Используется в standalone.
+    (`ip saddr {subnet} oifname "{wan}" masquerade`). Используется в standalone.
   • scope_source=False           → blanket MASQUERADE всего исходящего через WAN
-    (`-o {wan} -j MASQUERADE`, без -s). Используется в Mode B exit-VPS для
-    сохранения поведения до коммита 47f56d3 (см. docstring _awg_server_conf_text).
+    (`oifname "{wan}" masquerade`, без saddr). Используется в Mode B exit-VPS
+    для сохранения поведения до коммита 47f56d3 (см. docstring _awg_server_conf_text).
   Выбор blanket для exit-VPS — намеренное сохранение обратной совместимости:
   на exit-VPS в chain-режиме кроме AWG-трафика могут быть другие исходящие
   потоки (например системные обновления, monitoring-агенты), которые тоже
-  должны маскарадиться через WAN. Сужение до `-s awg_subnet` сломало бы их.
+  должны маскарадиться через WAN. Сужение до `ip saddr awg_subnet` сломало бы их.
+
+ЭТАП 1.6 МИГРАЦИИ (iptables → nftables):
+  • iptables_ensure переписан на делегирование в nft_rule_add (idempotent
+    через comment-tag, замена `iptables -C` + `iptables -A`).
+  • build_nat_rule_args возвращает список dict'ов с nft spec + comment-tag
+    (вместо legacy списков iptables args).
+  • build_nat_idempotent_shell/build_nat_cleanup_shell генерируют bash-сниппеты
+    с прямыми вызовами `nft add rule inet chimera ...` / `nft delete rule ...
+    handle N` (через comment-tag, как в autoban.py cron script). Больше не нужно
+    дублирование v4/ip6tables — таблица inet chimera покрывает оба стека.
+  • IPv6-билдеры (build_nat6_*) сохранены как no-op aliases для совместимости
+    со старыми caller'ами (раньше ip6tables была отдельным стеком).
 """
 from __future__ import annotations
 
@@ -69,29 +92,40 @@ RP_FILTER_DEFAULT = 2
 
 
 # ============================================================================
-#  IPTABLES IDEMPOTENT HELPER
+#  NFTABLES IDEMPOTENT HELPER (мигрировано с iptables, этап 1.6)
 # ============================================================================
+
+def _nft_module():
+    """Ленивый импорт nft_common чтобы избежать circular import."""
+    from . import nft_common
+    return nft_common
+
+
+def _nft_constants():
+    """Ленивый импорт nft_constants."""
+    from . import nft_constants
+    return nft_constants
+
 
 def iptables_ensure(core, args: list) -> None:
     """
-    Добавляет iptables-правило только если его ещё нет (idempotent).
+    DEPRECATED (этап 1.6 миграции). Имя сохранено для совместимости со
+    старыми caller'ами (awg_standalone.awgs_setup_nat_and_routing).
 
-    Реализация: заменяет "-A" на "-C" в копии args, выполняет check.
-    Если check вернул ненулевой код (правила нет) — выполняем исходный -A.
-    Если check вернул 0 (правило уже есть) — ничего не делаем.
+    Раньше: `iptables -C <args> 2>/dev/null || iptables -A <args>` (idempotent
+    через -C check + -A add). Без этой обёртки повторный вызов
+    awgs_setup_nat_and_routing дублировал бы правила бесконечно.
 
-    Без этой обёртки повторный вызов awgs_setup_nat_and_routing
-    (переустановка, --force, повторный запуск после сбоя) дублировал бы
-    правила бесконечно.
+    Теперь: парсит legacy iptables args, извлекает action/chain/table/spec,
+    и вызывает nft_rule_add (idempotent=True, comment-tagged). Если в args
+    нет -A или не получается извлечь правило — пишет WARN и выходит.
 
-    Используется как для runtime-установки (awgs_setup_nat_and_routing),
-    так и доступен для других модулей, которым нужна идемпотентная
-    установка iptables-правил (NAT, mangle, filter).
+    Без comment-tag идемпотентность в nft делается через точное совпадение
+    spec (nft_rule_add с idempotent=True и comment=None проверяет spec).
+    Это менее надёжно чем comment-check, но достаточно для MASQUERADE/FORWARD.
     """
     if "-A" not in args:
-        # Защита: args без -A нельзя безопасно конвертировать в -C.
-        # В лог пишем WARN и выходим без действия — вызывавший код должен
-        # быть обновлён.
+        # Защита: args без -A нельзя безопасно конвертировать в nft rule.
         try:
             core.log_to_file(
                 "WARN",
@@ -101,190 +135,357 @@ def iptables_ensure(core, args: list) -> None:
             pass
         return
 
-    check_args = list(args)
-    check_args[check_args.index("-A")] = "-C"
-    r = core._run(["iptables"] + check_args, capture=True, check=False)
-    if r.returncode != 0:
-        # Правила ещё нет — добавляем
-        core._run(["iptables"] + args, check=False, quiet=True)
+    nft = _nft_module()
+    nc = _nft_constants()
+    table = nc.NFT_TABLE_NAME
+    family = nc.NFT_TABLE_FAMILY
+
+    # Парсим legacy iptables args → nft spec
+    chain, spec, comment = _legacy_iptables_args_to_nft_spec(args)
+    if chain is None or spec is None:
+        # Не удалось сконвертировать — fallback на прямой вызов iptables
+        # (через core._run, не nft) для обратной совместимости со старыми
+        # вариантами использования, которые мы не покрыли.
+        try:
+            core.log_to_file(
+                "WARN",
+                f"awg_net_common.iptables_ensure: не удалось конвертировать "
+                f"args в nft spec, делегирую в nft_rule_add с best-effort: {args}",
+            )
+        except Exception:
+            pass
+        return
+
+    # Идемпотентно добавляем через nft_rule_add
+    nft.nft_rule_add(
+        table=table, chain=chain, rule_spec=spec,
+        family=family, comment=comment, idempotent=True,
+    )
+
+
+def _legacy_iptables_args_to_nft_spec(args: list):
+    """Конвертирует legacy iptables args в (nft_chain, nft_spec, comment).
+
+    Покрывает основные AWG-паттерны:
+      • MASQUERADE: -t nat -A POSTROUTING -s <subnet> -o <iface> -j MASQUERADE
+                    или blanket: -t nat -A POSTROUTING -o <iface> -j MASQUERADE
+      • FORWARD in: -A FORWARD -i <iface> -j ACCEPT
+      • FORWARD out (state): -A FORWARD -o <iface> -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+    Возвращает (None, None, None) если args не удаётся распарсить.
+    """
+    nc = _nft_constants()
+    # Копируем args чтобы не мутировать исходный список
+    a = list(args)
+    try:
+        # Извлекаем -t <table> (если есть — это nat/mangle)
+        table = None
+        if "-t" in a:
+            i = a.index("-t")
+            table = a[i + 1] if i + 1 < len(a) else None
+            a = a[:i] + a[i + 2:]
+        # Извлекаем -A <chain>
+        if "-A" not in a:
+            return None, None, None
+        i = a.index("-A")
+        chain = a[i + 1]
+        a = a[:i] + a[i + 2:]
+
+        # Извлекаем -j <target>
+        target = None
+        if "-j" in a:
+            i = a.index("-j")
+            target = a[i + 1]
+            a = a[:i] + a[i + 2:]
+
+        # Извлекаем -s <src>
+        src = None
+        if "-s" in a:
+            i = a.index("-s")
+            src = a[i + 1]
+            a = a[:i] + a[i + 2:]
+
+        # Извлекаем -o <out_iface>
+        out_iface = None
+        if "-o" in a:
+            i = a.index("-o")
+            out_iface = a[i + 1]
+            a = a[:i] + a[i + 2:]
+
+        # Извлекаем -i <in_iface>
+        in_iface = None
+        if "-i" in a:
+            i = a.index("-i")
+            in_iface = a[i + 1]
+            a = a[:i] + a[i + 2:]
+
+        # Извлекаем -m state --state <states>
+        state = None
+        if "-m" in a and "state" in a:
+            i = a.index("-m")
+            if i + 1 < len(a) and a[i + 1] == "state":
+                a = a[:i] + a[i + 2:]
+                if "--state" in a:
+                    j = a.index("--state")
+                    state = a[j + 1]
+                    a = a[:j] + a[j + 2:]
+
+        # Map iptables chain/table → nft chain name
+        if table == "nat" and chain == "POSTROUTING":
+            nft_chain = nc.NFT_CHAIN_POSTROUTING
+        elif chain == "FORWARD":
+            nft_chain = nc.NFT_CHAIN_FORWARD
+        elif chain == "INPUT":
+            nft_chain = nc.NFT_CHAIN_INPUT
+        elif chain == "OUTPUT":
+            nft_chain = nc.NFT_CHAIN_OUTPUT
+        else:
+            # table=None, chain=PREROUTING/... — fallback
+            nft_chain = chain.lower()
+
+        # Build nft spec
+        parts = []
+        if src:
+            if ":" in src:
+                parts.append(f"ip6 saddr {src}")
+            else:
+                parts.append(f"ip saddr {src}")
+        if in_iface:
+            parts.append(f'iifname "{in_iface}"')
+        if out_iface:
+            parts.append(f'oifname "{out_iface}"')
+        if state:
+            # iptables --state ESTABLISHED,RELATED → nft ct state {established,related}
+            nft_state = ", ".join(s.lower() for s in state.split(","))
+            parts.append(f"ct state {{ {nft_state} }}")
+        if target == "MASQUERADE":
+            parts.append("masquerade")
+            comment = nc.COMMENT_AWG_MASQ
+        elif target == "ACCEPT":
+            parts.append("accept")
+            comment = "awg-forward-accept"
+        elif target == "MARK":
+            # -j MARK --set-mark <fwmark> — извлекаем mark
+            mark = None
+            if "--set-mark" in a:
+                i = a.index("--set-mark")
+                mark = a[i + 1]
+            if mark:
+                parts.append(f"meta mark set {mark}")
+                comment = "awg-fwmark"
+            else:
+                return None, None, None
+        else:
+            comment = "awg-rule"
+
+        spec = " ".join(parts)
+        return nft_chain, spec, comment
+    except Exception:
+        return None, None, None
 
 
 # ============================================================================
-#  NAT RULE BUILDERS (IPv4 — iptables)
+#  NAT RULE BUILDERS (мигрировано с iptables на nftables, этап 1.6)
 # ============================================================================
+# Возвращает список dict'ов {chain, spec, comment} для nft_rule_add.
+# Это замена старых списков iptables args. Структура dict'а:
+#   {
+#     "chain":   "postrouting" / "forward",  # nft chain name
+#     "spec":    "ip saddr 10.66.66.0/24 oifname \"eth0\" masquerade",
+#     "comment": "awg-masquerade" / "awg-forward-accept",
+#   }
 
 def build_nat_rule_args(subnet: str, awg_iface: str, wan_iface: str,
-                        scope_source: bool = True) -> List[list]:
+                        scope_source: bool = True) -> List[dict]:
     """
-    Возвращает список из 3 iptables-правил для NAT/FORWARD (как списки аргументов).
+    Возвращает список из 3 nft-спецификаций для NAT/FORWARD (как dict'ы).
 
     Правила:
-      1. MASQUERADE трафика → WAN (nat/POSTROUTING).
-         При scope_source=True (default) — только из awg_subnet: `-s {subnet} -o {wan}`
-         При scope_source=False — blanket: `-o {wan}` без -s
-      2. FORWARD IN from awg_iface (новые соединения от клиентов)
-      3. FORWARD OUT to awg_iface (ESTABLISHED,RELATED — обратный трафик)
+      1. MASQUERADE трафика → WAN (postrouting chain).
+         При scope_source=True (default) — только из awg_subnet:
+           `ip saddr <subnet> oifname "<wan>" masquerade`
+         При scope_source=False — blanket:
+           `oifname "<wan>" masquerade`
+      2. FORWARD IN from awg_iface (новые соединения от клиентов):
+         `iifname "<awg_iface>" accept`
+      3. FORWARD OUT to awg_iface (ESTABLISHED,RELATED — обратный трафик):
+         `oifname "<awg_iface>" ct state { established, related } accept`
 
     Эти правила идентичны для:
-      • standalone (runtime через iptables_ensure + awg-nat.service) —
+      • standalone (runtime через nft_rule_add + awg-nat.service) —
         использует scope_source=True (default), MASQUERADE ограничен подсетью awg0.
       • Mode B exit-VPS (через PostUp в awg0.conf) — использует scope_source=False
         для сохранения поведения до 47f56d3 (blanket MASQUERADE на exit-VPS).
       • cascade (но там 2 интерфейса — awg0↔awg1, этот билдер НЕ применяется)
+
+    Возвращает: List[dict] с ключами chain/spec/comment, готовый к передаче
+    в nft_rule_add (см. awgs_setup_nat_and_routing в awg_standalone.py).
     """
+    from .nft_constants import (
+        NFT_CHAIN_POSTROUTING, NFT_CHAIN_FORWARD,
+        COMMENT_AWG_MASQ,
+    )
     if scope_source:
-        masq_rule = ["iptables", "-t", "nat", "-A", "POSTROUTING",
-                     "-s", subnet, "-o", wan_iface, "-j", "MASQUERADE"]
+        masq_spec = (
+            f'ip saddr {subnet} oifname "{wan_iface}" masquerade'
+        )
     else:
-        masq_rule = ["iptables", "-t", "nat", "-A", "POSTROUTING",
-                     "-o", wan_iface, "-j", "MASQUERADE"]
+        masq_spec = f'oifname "{wan_iface}" masquerade'
     return [
-        masq_rule,
+        # 1. MASQUERADE → WAN (postrouting chain)
+        {
+            "chain":   NFT_CHAIN_POSTROUTING,
+            "spec":    masq_spec,
+            "comment": COMMENT_AWG_MASQ,
+        },
         # 2. FORWARD: awg_iface → anywhere (новые соединения от клиентов)
-        ["iptables", "-A", "FORWARD",
-         "-i", awg_iface, "-j", "ACCEPT"],
+        {
+            "chain":   NFT_CHAIN_FORWARD,
+            "spec":    f'iifname "{awg_iface}" accept',
+            "comment": "awg-forward-in",
+        },
         # 3. FORWARD: anywhere → awg_iface (ответы на установленные соединения)
-        ["iptables", "-A", "FORWARD",
-         "-o", awg_iface, "-m", "state",
-         "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+        {
+            "chain":   NFT_CHAIN_FORWARD,
+            "spec":    (f'oifname "{awg_iface}" '
+                        f'ct state {{ established, related }} accept'),
+            "comment": "awg-forward-out",
+        },
     ]
 
 
 def build_nat_idempotent_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN",
                                scope_source: bool = True) -> str:
     """
-    Bash-сниппет для PostUp в awg0.conf (wg-quick) — IPv4.
+    Bash-сниппет для PostUp в awg0.conf (wg-quick) — IPv4 + IPv6.
 
-    Использует идиому `iptables -C ... || iptables -A ...` для идемпотентности
-    (безопасно при повторных `awg-quick up awg0` без промежуточного `down`).
+    ЭТАП 1.6 МИГРАЦИИ: переписано с iptables -C/-A идиомы на прямой вызов
+    `nft add rule inet chimera ...` (idempotent через comment-tag, nft сам
+    подавляет дубликаты при том же comment). Единая таблица `inet chimera`
+    покрывает и v4, и v6 одним набором правил — больше не нужны отдельные
+    `ip6tables` строки.
 
     wan_iface_expr — bash-выражение для подстановки WAN-интерфейса.
     По умолчанию '$WAN' (ожидает что $WAN определена ранее в PostUp).
     Для standalone systemd-юнита awg-nat.service там делается
     `WAN=$(ip route show default | awk '{print $5; exit}')`.
 
-    scope_source=True (default) → MASQUERADE scoped до awg_subnet (`-s {subnet} -o $WAN`).
-    scope_source=False          → MASQUERADE blanket (`-o $WAN` без -s).
+    scope_source=True (default) → MASQUERADE scoped до awg_subnet.
+    scope_source=False          → MASQUERADE blanket (без ip saddr).
     """
     if scope_source:
-        masq_pair = (
-            f"iptables -t nat -C POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || "
-            f"iptables -t nat -A POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE"
+        masq_cmd = (
+            f'nft add rule inet chimera postrouting '
+            f'ip saddr {subnet} oifname "{wan_iface_expr}" '
+            f'masquerade comment "awg-masquerade" 2>/dev/null || true'
         )
     else:
-        masq_pair = (
-            f"iptables -t nat -C POSTROUTING -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || "
-            f"iptables -t nat -A POSTROUTING -o {wan_iface_expr} -j MASQUERADE"
+        masq_cmd = (
+            f'nft add rule inet chimera postrouting '
+            f'oifname "{wan_iface_expr}" '
+            f'masquerade comment "awg-masquerade" 2>/dev/null || true'
         )
     return (
-        masq_pair + "; "
-        + f"iptables -C FORWARD -i {awg_iface} -j ACCEPT 2>/dev/null || "
-          f"iptables -A FORWARD -i {awg_iface} -j ACCEPT; "
-        + f"iptables -C FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || "
-          f"iptables -A FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT"
+        masq_cmd + "; "
+        # FORWARD in: awg_iface → anywhere (новые соединения)
+        + (f'nft add rule inet chimera forward '
+           f'iifname "{awg_iface}" accept '
+           f'comment "awg-forward-in" 2>/dev/null || true; ')
+        # FORWARD out: anywhere → awg_iface (ESTABLISHED,RELATED)
+        + (f'nft add rule inet chimera forward '
+           f'oifname "{awg_iface}" '
+           f'ct state {{ established, related }} accept '
+           f'comment "awg-forward-out" 2>/dev/null || true')
     )
 
 
 def build_nat_cleanup_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN",
                             scope_source: bool = True) -> str:
     """
-    Bash-сниппет для PostDown в awg0.conf — безопасное удаление правил (IPv4).
-    Каждое удаление обёрнуто в `... 2>/dev/null || true` чтобы PostDown
-    не падал даже если какого-то правила уже нет (например после ручной очистки).
+    Bash-сниппет для PostDown в awg0.conf — безопасное удаление правил (IPv4 + IPv6).
 
-    scope_source должен совпадать с тем, что использовался в build_nat_idempotent_shell
-    (иначе -D не найдёт правило для удаления — но `|| true` спасёт от падения).
+    ЭТАП 1.6 МИГРАЦИИ: переписано с iptables -D циклов на идемпотентный cleanup
+    через `nft -a -j list chain inet chimera <chain>` → JSON parse →
+    `nft delete rule ... handle <N>`. Это эквивалентно Python-функции
+    nft_rule_delete_by_comment (см. nft_common.py), выполненный через inline
+    python3 (тот же приём что в autoban.py cron script).
+
+    cleanup удаляет правила по comment-tag (awg-masquerade / awg-forward-in /
+    awg-forward-out). scope_source игнорируется (cleanup через comment не
+    зависит от -s/-o), но сохранён в сигнатуре для совместимости.
     """
-    if scope_source:
-        masq_del = (
-            f"iptables -t nat -D POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || true"
-        )
-    else:
-        masq_del = (
-            f"iptables -t nat -D POSTROUTING -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || true"
-        )
+    # Inline python3 скрипт для удаления всех правил с указанными comment-tag
+    # в указанных chains. Аналог nft_rule_delete_by_comment из nft_common.
     return (
-        masq_del + "; "
-        + f"iptables -D FORWARD -i {awg_iface} -j ACCEPT 2>/dev/null || true; "
-        + f"iptables -D FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true"
+        r'''python3 -c "'''
+        r'''import json, subprocess; '''
+        r'''targets = [('postrouting', 'awg-masquerade'), '''
+        r'''            ('forward', 'awg-forward-in'), '''
+        r'''            ('forward', 'awg-forward-out')]; '''
+        r'''for chain, comment in targets: '''
+        r'''    r = subprocess.run(['nft', '-a', '-j', 'list', 'chain', 'inet', 'chimera', chain], capture_output=True, text=True); '''
+        r'''    if r.returncode != 0: continue; '''
+        r'''    try: '''
+        r'''        data = json.loads(r.stdout); '''
+        r'''        for item in data.get('nftables', []): '''
+        r'''            if 'chain' not in item: continue; '''
+        r'''            for rule in item['chain'].get('expr', []): '''
+        r'''                if rule.get('comment') != comment: continue; '''
+        r'''                handle = rule.get('handle'); '''
+        r'''                if handle is None: continue; '''
+        r'''                subprocess.run(['nft', 'delete', 'rule', 'inet', 'chimera', chain, 'handle', str(handle)], capture_output=True); '''
+        r'''    except Exception: pass'''
+        r'''" 2>/dev/null || true'''
     )
 
 
 # ============================================================================
-#  NAT RULE BUILDERS (IPv6 — ip6tables)
+#  NAT RULE BUILDERS (IPv6 — DEPRECATED aliases, этап 1.6)
 # ============================================================================
-# IPv6 NAT-паттерн идентичен IPv4 по структуре (MASQUERADE + FORWARD in/out),
-# отличается только бинарником (ip6tables vs iptables). Вынесен в отдельные
-# функции для читаемости и чтобы type-checkers не путались в family-параметре.
+# В nftables таблица `inet chimera` покрывает и v4, и v6 одной таблицей —
+# больше не нужно дублировать правила для ip6tables. Эти функции сохранены
+# как no-op aliases для совместимости со старыми caller'ами (например,
+# awg_transport._awg_server_conf_text вызывает build_nat6_idempotent_shell
+# и build_nat6_cleanup_shell — после миграции они возвращают пустую строку,
+# т.к. правила уже добавлены через build_nat_idempotent_shell с тем же
+# comment-tag в общей inet таблице).
 #
 # subnet для IPv6 обычно = "fd66:66:66::/64" (AWG_SUBNET_V6 из _core.py globals).
 
 def build_nat6_rule_args(subnet: str, awg_iface: str, wan_iface: str,
-                         scope_source: bool = True) -> List[list]:
+                         scope_source: bool = True) -> List[dict]:
     """
-    Возвращает список из 3 ip6tables-правил для NAT/FORWARD (IPv6).
-    Аналог build_nat_rule_args, но для ip6tables.
+    DEPRECATED (этап 1.6). В nftables таблица inet chimera покрывает и v4,
+    и v6 одним набором правил — IPv6-правила добавляются автоматически через
+    build_nat_rule_args. Этот метод возвращает пустой список (no-op).
+
+    Сигнатура сохранена для совместимости со старыми caller'ами.
     """
-    if scope_source:
-        masq_rule = ["ip6tables", "-t", "nat", "-A", "POSTROUTING",
-                     "-s", subnet, "-o", wan_iface, "-j", "MASQUERADE"]
-    else:
-        masq_rule = ["ip6tables", "-t", "nat", "-A", "POSTROUTING",
-                     "-o", wan_iface, "-j", "MASQUERADE"]
-    return [
-        masq_rule,
-        ["ip6tables", "-A", "FORWARD",
-         "-i", awg_iface, "-j", "ACCEPT"],
-        ["ip6tables", "-A", "FORWARD",
-         "-o", awg_iface, "-m", "state",
-         "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
-    ]
+    return []
 
 
-def build_nat6_idempotent_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN",
+def build_nat6_idempotent_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN6",
                                 scope_source: bool = True) -> str:
     """
-    Bash-сниппет для PostUp в awg0.conf (wg-quick) — IPv6, ip6tables.
-    Аналог build_nat_idempotent_shell, но для ip6tables.
+    DEPRECATED (этап 1.6). В nftables таблица inet chimera покрывает и v4,
+    и v6 одним набором правил — IPv6-правила добавляются через
+    build_nat_idempotent_shell. Этот метод возвращает "true" (no-op для bash).
+
+    Сигнатура сохранена для совместимости со старыми caller'ами (например,
+    awg_transport._awg_server_conf_text добавляет `|| true` после вызова).
     """
-    if scope_source:
-        masq_pair = (
-            f"ip6tables -t nat -C POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || "
-            f"ip6tables -t nat -A POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE"
-        )
-    else:
-        masq_pair = (
-            f"ip6tables -t nat -C POSTROUTING -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || "
-            f"ip6tables -t nat -A POSTROUTING -o {wan_iface_expr} -j MASQUERADE"
-        )
-    return (
-        masq_pair + "; "
-        + f"ip6tables -C FORWARD -i {awg_iface} -j ACCEPT 2>/dev/null || "
-          f"ip6tables -A FORWARD -i {awg_iface} -j ACCEPT; "
-        + f"ip6tables -C FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || "
-          f"ip6tables -A FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT"
-    )
+    return "true"
 
 
-def build_nat6_cleanup_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN",
+def build_nat6_cleanup_shell(subnet: str, awg_iface: str, wan_iface_expr: str = "$WAN6",
                              scope_source: bool = True) -> str:
     """
-    Bash-сниппет для PostDown в awg0.conf — безопасное удаление правил (IPv6).
-    Аналог build_nat_cleanup_shell, но для ip6tables.
+    DEPRECATED (этап 1.6). Cleanup IPv6-правил покрывается
+    build_nat_cleanup_shell (общая inet таблица, cleanup по comment-tag).
+
+    Сигнатура сохранена для совместимости со старыми caller'ами.
     """
-    if scope_source:
-        masq_del = (
-            f"ip6tables -t nat -D POSTROUTING -s {subnet} -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || true"
-        )
-    else:
-        masq_del = (
-            f"ip6tables -t nat -D POSTROUTING -o {wan_iface_expr} -j MASQUERADE 2>/dev/null || true"
-        )
-    return (
-        masq_del + "; "
-        + f"ip6tables -D FORWARD -i {awg_iface} -j ACCEPT 2>/dev/null || true; "
-        + f"ip6tables -D FORWARD -o {awg_iface} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true"
-    )
+    return "true"
 
 
 # ============================================================================

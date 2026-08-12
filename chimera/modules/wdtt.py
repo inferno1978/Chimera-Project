@@ -95,6 +95,15 @@ from chimera.modules.proto_common import (
     ProtoCancelled, proto_load_state, proto_save_state,
     proto_ask, proto_gen_password, proto_ipt_persist, proto_ipt_rule_exists,
 )
+# nftables — централизованная обёртка (этап 1.7 миграции).
+from chimera.modules.nft_common import (
+    nft_open_port, nft_rule_exists, nft_rule_delete_by_comment,
+    nft_nat_masquerade,
+)
+from chimera.modules.nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    NFT_CHAIN_POSTROUTING, COMMENT_OPEN_PORT_PREFIX,
+)
 # _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
 # `raise _Cancelled` code works unchanged after the local class definition
 # was removed in favour of proto_common.ProtoCancelled.
@@ -718,19 +727,19 @@ def _build_wdtt_server() -> bool:
     return ok
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IPTABLES
+#  NFTABLES (мигрировано с iptables, этап 1.7)
 # ══════════════════════════════════════════════════════════════════════════════
 # _ipt_rule_exists — вынесен в proto_common (proto_ipt_rule_exists).
 def _ipt_rule_exists(table: str, chain: str, args: list) -> bool:
     return proto_ipt_rule_exists(table, chain, args)
 
 def _fw_tool() -> str:
-    """ufw, если он есть и активен — иначе raw iptables (fallback)."""
+    """ufw, если он есть и активен — иначе nftables (fallback)."""
     if shutil.which("ufw"):
         r = _run(["ufw", "status"], capture=True, check=False)
         if "Status: active" in (r.stdout or ""):
             return "ufw"
-    return "iptables"
+    return "nftables"
 
 def _ipt_open_udp(port: int) -> None:
     #  миграция на port_registry.
@@ -750,9 +759,10 @@ def _ipt_open_udp(port: int) -> None:
             _run(["ufw", "allow", f"{port}/udp", "comment", "qWDTT DTLS"],
                  check=False)
         return
-    args = ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"]
-    if not _ipt_rule_exists("filter", "INPUT", args):
-        _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
+    # nftables fallback (этап 1.7 миграции):
+    #   nft_open_port(port, "udp", comment="chimera-open-port-udp-<port>")
+    comment = f"{COMMENT_OPEN_PORT_PREFIX}udp-{port}"
+    nft_open_port(port, proto="udp", comment=comment)
 
 def _ipt_close_udp(port: int) -> None:
     #  миграция на port_registry (с legacy comment).
@@ -766,31 +776,42 @@ def _ipt_close_udp(port: int) -> None:
         pass
     if shutil.which("ufw"):
         _run(["ufw", "delete", "allow", f"{port}/udp"], check=False)
-    args = ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"]
-    for _ in range(5):
-        if not _ipt_rule_exists("filter", "INPUT", args):
-            break
-        _run(["iptables", "-t", "filter", "-D", "INPUT"] + args)
+    # nftables fallback (этап 1.7 миграции) — cleanup по comment-tag.
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=f"{COMMENT_OPEN_PORT_PREFIX}udp-{port}",
+        family=NFT_TABLE_FAMILY, max_iterations=10,
+    )
 
 def _ipt_masquerade_exists() -> bool:
-    r = _run(
-        ["iptables", "-t", "nat", "-C", "POSTROUTING",
-         "-s", _WG_SUBNET, "!", "-d", _WG_SUBNET, "-j", "MASQUERADE"],
-        capture=True,
+    """Проверяет наличие MASQUERADE-правила для _WG_SUBNET.
+
+    Заменяет: iptables -t nat -C POSTROUTING -s <subnet> ! -d <subnet> -j MASQUERADE.
+    Теперь: nft_rule_exists(comment="wdtt-masquerade").
+    """
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_POSTROUTING,
+        comment="wdtt-masquerade", family=NFT_TABLE_FAMILY,
     )
-    return r.returncode == 0
 
 def _ipt_add_masquerade() -> None:
-    if not _ipt_masquerade_exists():
-        _run(["iptables", "-t", "nat", "-A", "POSTROUTING",
-              "-s", _WG_SUBNET, "!", "-d", _WG_SUBNET, "-j", "MASQUERADE"])
+    """Добавляет MASQUERADE для _WG_SUBNET.
+
+    Заменяет: iptables -t nat -A POSTROUTING -s <subnet> ! -d <subnet> -j MASQUERADE.
+    Теперь: nft_nat_masquerade(src_subnet=<subnet>, comment="wdtt-masquerade").
+    """
+    nft_nat_masquerade(src_subnet=_WG_SUBNET, comment="wdtt-masquerade")
 
 def _ipt_remove_masquerade() -> None:
-    for _ in range(3):
-        if not _ipt_masquerade_exists():
-            break
-        _run(["iptables", "-t", "nat", "-D", "POSTROUTING",
-              "-s", _WG_SUBNET, "!", "-d", _WG_SUBNET, "-j", "MASQUERADE"])
+    """Удаляет MASQUERADE для _WG_SUBNET.
+
+    Заменяет цикл iptables -t nat -D POSTROUTING ... -j MASQUERADE (3 итерации).
+    Теперь: nft_rule_delete_by_comment (один вызов).
+    """
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_POSTROUTING,
+        comment="wdtt-masquerade", family=NFT_TABLE_FAMILY, max_iterations=10,
+    )
 
 def _enable_ip_forward() -> None:
     """Включает IP forwarding — нужен для WireGuard NAT."""
@@ -1366,7 +1387,7 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_row(f"  {DIM}  • Сервис systemd  (wdtt){NC}")
         _box_row(f"  {DIM}  • Бинарник        ({_BIN_PATH}){NC}")
         _box_row(f"  {DIM}  • Конфиги          ({_CFG_DIR}){NC}")
-        _box_row(f"  {DIM}  • iptables UDP {_DEFAULT_DTLS_PORT} и MASQUERADE{NC}")
+        _box_row(f"  {DIM}  • nftables UDP {_DEFAULT_DTLS_PORT} и MASQUERADE{NC}")
         _box_row(f"  {DIM}  • /var/lib/xray-installer/wdtt.json{NC}")
         _box_row()
         _box_warn("VLESS/Xray конфиги не затрагиваются.")

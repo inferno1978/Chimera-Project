@@ -878,17 +878,17 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
       Loose mode сохраняет anti-spoofing защиту (в отличие от 0=off) и
       достаточно для корректной работы NAT. Раньше сбрасывался global
       all/default rp_filter=0 — это ослабляло защиту всей системы.
-    • iptables MASQUERADE для подсети awg0 → WAN (idempotent через -C check)
-    • iptables FORWARD: awg0 → anywhere (ACCEPT), idempotent
-    • iptables FORWARD: anywhere → awg0 (ESTABLISHED,RELATED ACCEPT), idempotent
+    • nftables MASQUERADE для подсети awg0 → WAN (idempotent через comment-tag)
+    • nftables FORWARD: awg0 → anywhere (ACCEPT), idempotent
+    • nftables FORWARD: anywhere → awg0 (ESTABLISHED,RELATED ACCEPT), idempotent
     • systemd-юнит awg-nat.service для перманентности (After=awg-quick@awg0)
 
     Идемпотентность: при повторных вызовах (переустановка, --force, повторный
     запуск после сбоя) правила НЕ дублируются — каждое добавляется через
-    _iptables_ensure (iptables -C → iptables -A только если -C не нашёл).
-    То же касается systemd-юнита: его ExecStart использует bash-idiому
-    `iptables -C ... || iptables -A ...`, безопасную при многократных
-    `systemctl restart awg-nat`.
+    nft_rule_add (idempotent=True, comment-tag) из chimera.modules.nft_common
+    (этап 1.6 миграции). То же касается systemd-юнита: его ExecStart использует
+    bash-сниппет с прямыми вызовами `nft add rule inet chimera ...` (через
+    comment-tag), безопасный при многократных `systemctl restart awg-nat`.
 
     Общий сетевой слой: NAT-правила и sysctl-конфиг генерируются через
     chimera.modules.awg_net_common — тот же слой использует
@@ -938,22 +938,27 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
     except Exception as e:
         core.log_to_file("WARN", f"awgs_setup_nat sysctl persist: {e}")
 
-    # 2. iptables: MASQUERADE + FORWARD (idempotent через _iptables_ensure)
-    info("Настройка iptables (MASQUERADE + FORWARD, idempotent)...")
+    # 2. nftables: MASQUERADE + FORWARD (idempotent через comment-tag, этап 1.6)
+    info("Настройка nftables (MASQUERADE + FORWARD, idempotent)...")
     awg_subnet = subnet  # уже в формате CIDR (например 10.66.66.0/24)
 
-    # Получаем список правил из общего билдера — тот же самый, что использует
-    # Mode B exit-VPS через PostUp (см. awg_transport._awg_server_conf_text).
+    # Получаем список nft-спецификаций из общего билдера — тот же самый, что
+    # использует Mode B exit-VPS через PostUp (см. awg_transport._awg_server_conf_text).
+    # Каждая спецификация — dict {chain, spec, comment} для nft_rule_add.
     nat_rules = build_nat_rule_args(awg_subnet, AWGS_INTERFACE, wan_iface)
-    for rule_args in nat_rules:
-        # rule_args[0] == "iptables" — iptables_ensure ожидает args без "iptables"
-        # (он сам добавляет "iptables" префикс). Передаём args[1:].
-        iptables_ensure(core, rule_args[1:])
-    success(f"iptables: MASQUERADE {awg_subnet} → {wan_iface} + FORWARD правила")
+    from .nft_common import nft_rule_add
+    from .nft_constants import NFT_TABLE_NAME, NFT_TABLE_FAMILY
+    for rule in nat_rules:
+        nft_rule_add(
+            table=NFT_TABLE_NAME, chain=rule["chain"],
+            rule_spec=rule["spec"], family=NFT_TABLE_FAMILY,
+            comment=rule["comment"], idempotent=True,
+        )
+    success(f"nftables: MASQUERADE {awg_subnet} → {wan_iface} + FORWARD правила")
 
     # 3. systemd-юнит awg-nat.service — для перманентности после reboot.
-    # ExecStart использует bash-идиому `iptables -C || iptables -A` (через
-    # build_nat_idempotent_shell) — безопасен при многократных restart.
+    # ExecStart использует bash-сниппет с прямыми вызовами `nft add rule ...`
+    # (через build_nat_idempotent_shell) — безопасен при многократных restart.
     # WAN определяется в runtime через `ip route show default` (не хардкодим
     # wan_iface, т.к. после ребута интерфейс может переименовать — udev).
     info("Создание systemd-юнита awg-nat.service (idempotent ExecStart)...")

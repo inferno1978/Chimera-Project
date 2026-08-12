@@ -73,6 +73,14 @@ from chimera.modules.proto_common import (
     proto_ask, proto_ipt_persist, proto_ipt_rule_exists,
     proto_get_latest_version, proto_get_installed_version,
 )
+# nftables — централизованная обёртка (этап 1.7 миграции).
+from chimera.modules.nft_common import (
+    nft_open_port, nft_rule_exists, nft_rule_delete_by_comment,
+)
+from chimera.modules.nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    COMMENT_OPEN_PORT_PREFIX,
+)
 # _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
 # `raise _Cancelled` code works unchanged after the local class definition
 # was removed in favour of proto_common.ProtoCancelled.
@@ -332,31 +340,33 @@ def _xray_write_and_test(cfg_path: Path, cfg: dict) -> Optional[str]:
     return None
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IPTABLES
+#  NFTABLES (мигрировано с iptables, этап 1.7)
 # ══════════════════════════════════════════════════════════════════════════════
 # _ipt_rule_exists — вынесен в proto_common (proto_ipt_rule_exists).
+def _ipt_rule_comment(port: int) -> str:
+    """Возвращает comment-tag для правила открытия UDP-порта."""
+    return f"{COMMENT_OPEN_PORT_PREFIX}udp-{port}"
+
 def _ipt_rule_exists(port: int) -> bool:
-    return proto_ipt_rule_exists("filter", "INPUT", ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"])
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_ipt_rule_comment(port),
+        family=NFT_TABLE_FAMILY,
+    ) or proto_ipt_rule_exists("filter", "INPUT",
+        ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"])
 
 def _ipt_open_udp(port: int) -> bool:
-    if _ipt_rule_exists(port):
-        return True
-    r = _run(
-        ["iptables", "-t", "filter", "-I", "INPUT", "1",
-         "-p", "udp", "--dport", str(port), "-j", "ACCEPT"],
-        capture=True,
-    )
-    return r.returncode == 0
+    """Открывает UDP-порт через nft_open_port (idempotent)."""
+    nft_open_port(port, proto="udp", comment=_ipt_rule_comment(port))
+    return True
 
 def _ipt_close_udp(port: int) -> None:
-    for _ in range(5):
-        if not _ipt_rule_exists(port):
-            break
-        _run(
-            ["iptables", "-t", "filter", "-D", "INPUT",
-             "-p", "udp", "--dport", str(port), "-j", "ACCEPT"],
-            capture=True,
-        )
+    """Закрывает UDP-порт через nft_rule_delete_by_comment."""
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_ipt_rule_comment(port),
+        family=NFT_TABLE_FAMILY, max_iterations=10,
+    )
 
 # _ipt_persist — вынесен в proto_common (использует subprocess.run напрямую,
 # не зависит от module-local _run). Call sites: proto_ipt_persist.
@@ -843,13 +853,13 @@ def _run_install_inner() -> None:  # noqa: C901
     _install_service()
     _box_ok("Сервис создан и включён.")
 
-    # ── iptables ──────────────────────────────────────────────────────────────
-    _box_info(f"Открываю UDP-порт {listen_port} в iptables...")
+    # ── nftables ─────────────────────────────────────────────────────────────
+    _box_info(f"Открываю UDP-порт {listen_port} в nftables...")
     if _ipt_open_udp(listen_port):
         proto_ipt_persist()
         _box_ok(f"UDP {listen_port} открыт.")
     else:
-        _box_warn(f"Не удалось открыть UDP {listen_port} в iptables.")
+        _box_warn(f"Не удалось открыть UDP {listen_port} в nftables.")
 
     # ── Запуск сервиса ────────────────────────────────────────────────────────
     _box_info("Запускаю Turnable...")
@@ -982,7 +992,7 @@ def _full_uninstall(silent: bool = False) -> bool:
         _box_row(f"  {DIM}  • Сервис  turnable{NC}")
         _box_row(f"  {DIM}  • Бинарник и конфиги  {_BIN_DIR}{NC}")
         _box_row(f"  {DIM}  • VLESS-inbound из Xray config.json{NC}")
-        _box_row(f"  {DIM}  • iptables UDP-правило{NC}")
+        _box_row(f"  {DIM}  • nftables UDP-правило{NC}")
         _box_row(f"  {DIM}  • turnable.json{NC}")
         _box_row()
         _box_warn("Основной VLESS/REALITY inbound не затрагивается.")
@@ -1027,7 +1037,7 @@ def _full_uninstall(silent: bool = False) -> bool:
 
     _ipt_close_udp(listen_port)
     proto_ipt_persist()
-    if not silent: _ok(f"iptables UDP {listen_port} закрыт.")
+    if not silent: _ok(f"nftables UDP {listen_port} закрыт.")
 
     try:
         if _MODULE_STATE.exists():
@@ -1102,7 +1112,7 @@ def _show_status() -> None:
                              if st["bin_version"] else f"{RED}✗ не установлен{NC}")
     _box_kv("Xray inbound:", f"{GREEN}✓ настроен{NC}"
                              if st["xray_ok"] else f"{RED}✗ отсутствует{NC}")
-    _box_kv("iptables UDP:", f"{GREEN}✓ открыт{NC}"
+    _box_kv("nftables UDP:", f"{GREEN}✓ открыт{NC}"
                              if st["ipt_ok"] else f"{YELLOW}⚠ не найдено правило{NC}")
     _box_row()
     _box_kv("UDP порт:",    str(st["listen_port"]))
@@ -1180,7 +1190,7 @@ def do_turnable_menu() -> None:
             _box_kv("Xray inbound:",
                     f"{xray_col}✓ :{st['xray_port']}{NC}" if st["xray_ok"]
                     else f"{RED}✗ отсутствует{NC}")
-            _box_kv("iptables UDP:",
+            _box_kv("nftables UDP:",
                     f"{ipt_col}✓ открыт{NC}" if st["ipt_ok"]
                     else f"{YELLOW}⚠ не найдено правило{NC}")
 

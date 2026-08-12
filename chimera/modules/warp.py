@@ -1729,7 +1729,13 @@ def _check_ssh_protection() -> None:
     """Проверяет напрямую по таблице маршрутизации ядра, что трафик до
     SSH-клиента не уходит в wg-warp — для новой архитектуры (без iptables
     mangle-меток и policy routing) это прямой и более надёжный эквивалент
-    старой проверки `iptables -t mangle -L OUTPUT`."""
+    старой проверки `iptables -t mangle -L OUTPUT`.
+
+    ЭТАП 1.6 МИГРАЦИИ: warp.py не имеет прямых вызовов iptables/ipset — модуль
+    использует только `ip route get` (iproute2) для проверки маршрутов. Вся
+    fwmark-маршрутизация для Telemt→WARP вынесена в chimera.modules.telemt_warp_route
+    (мигрирован на nftables через nft_mangle_mark_dst + nft_rule_exists по
+    comment-tag "telemt-warp-fwmark")."""
     ssh_ip = _state_get("WARP_SSH_CLIENT_IP", "") or _detect_ssh_client_ip()
     if not ssh_ip:
         ssh_ip = input(f"  {YELLOW}SSH IP не задан. Введите IP клиента:{NC} ").strip()

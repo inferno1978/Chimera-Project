@@ -226,32 +226,69 @@ def _detect_ipv6_available() -> bool:
     except Exception:
         return False
 
-# ── iptables helpers ──────────────────────────────────────────────────────────
+# ── nftables helpers (мигрировано с iptables, этап 1.7) ──────────────────────
+# Единая таблица inet chimera покрывает и IPv4, и IPv6 — больше НЕ нужны
+# раздельные вызовы iptables/ip6tables. Comment-tag для идемпотентности:
+#   chimera-open-port-udp-<port> (соответствует COMMENT_OPEN_PORT_PREFIX).
+def _ipt_rule_comment(port: int) -> str:
+    """Возвращает comment-tag для правила открытия UDP-порта."""
+    return f"chimera-open-port-udp-{port}"
+
 def _ipt_allow_udp(port: int, ipv6: bool = False) -> None:
-    ipt = "ip6tables" if ipv6 else "iptables"
-    _run([ipt, "-C", "INPUT", "-p", "udp", "--dport", str(port), "-j", "ACCEPT"],
-         quiet=True)
-    if _run([ipt, "-C", "INPUT", "-p", "udp", "--dport", str(port), "-j", "ACCEPT"],
-             quiet=True).returncode != 0:
-        _run([ipt, "-I", "INPUT", "-p", "udp", "--dport", str(port), "-j", "ACCEPT"],
-             quiet=True)
+    """Открывает UDP-порт через nft_open_port (idempotent через comment-tag).
+
+    Заменяет:
+        iptables  -C INPUT -p udp --dport <port> -j ACCEPT (fallback на -I если нет)
+        ip6tables -C INPUT -p udp --dport <port> -j ACCEPT (fallback на -I если нет)
+    Теперь: nft_open_port(port, proto="udp", comment="chimera-open-port-udp-<port>")
+    Параметр ipv6 сохранён для совместимости со старыми вызовами, но
+    игнорируется (inet таблица покрывает v4+v6 одним правилом).
+    """
+    try:
+        from chimera.modules.nft_common import nft_open_port
+        nft_open_port(port, proto="udp", comment=_ipt_rule_comment(port))
+    except Exception:
+        pass
 
 def _ipt_remove_udp(port: int, ipv6: bool = False) -> None:
-    ipt = "ip6tables" if ipv6 else "iptables"
-    _run([ipt, "-D", "INPUT", "-p", "udp", "--dport", str(port), "-j", "ACCEPT"],
-         quiet=True)
+    """Удаляет UDP-правило через nft_rule_delete_by_comment.
+
+    Заменяет:
+        iptables  -D INPUT -p udp --dport <port> -j ACCEPT
+        ip6tables -D INPUT -p udp --dport <port> -j ACCEPT
+    Теперь: nft_rule_delete_by_comment(table, "input", comment=..., max_iterations=10)
+    Параметр ipv6 сохранён для совместимости, игнорируется.
+    """
+    try:
+        from chimera.modules.nft_common import nft_rule_delete_by_comment
+        from chimera.modules.nft_constants import (
+            NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+        )
+        nft_rule_delete_by_comment(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            comment=_ipt_rule_comment(port),
+            family=NFT_TABLE_FAMILY, max_iterations=10,
+        )
+    except Exception:
+        pass
 
 def open_udp_ports(ports: list[int], ipv6: bool = False) -> None:
+    """Открывает список UDP-портов в nftables input chain.
+
+    Заменяет цикл по iptables + ip6tables. Параметр ipv6 сохранён для
+    совместимости со старыми вызовами, но игнорируется (inet таблица
+    покрывает v4+v6 одним правилом).
+    """
     for p in ports:
         _ipt_allow_udp(p, ipv6=False)
-        if ipv6 and _detect_ipv6_available():
-            _ipt_allow_udp(p, ipv6=True)
 
 def close_udp_ports(ports: list[int], ipv6: bool = False) -> None:
+    """Закрывает список UDP-портов в nftables input chain.
+
+    Параметр ipv6 сохранён для совместимости, игнорируется.
+    """
     for p in ports:
         _ipt_remove_udp(p, ipv6=False)
-        if ipv6:
-            _ipt_remove_udp(p, ipv6=True)
 
 # ── systemd helpers ───────────────────────────────────────────────────────────
 def _systemctl(action: str, service: str) -> bool:

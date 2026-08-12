@@ -14,8 +14,13 @@ chimera/modules/awg_uninstall.py
   • awg-cascade-routing.service (если каскад)
   • /etc/awg-cascade/ (ru.zone, routing script)
   • UFW-правило для AWG-порта
-  • ipset awg_ru_networks (если каскад)
-  • iptables-правила каскада (если были)
+  • nft set awg_cascade_nodes (если каскад; мигрировано с ipset, этап 1.6)
+  • nft-правила каскада (если были; удаление через comment-tag)
+
+ЭТАП 1.6 МИГРАЦИИ:
+  • `iptables -D` циклы → `nft_rule_delete_by_comment` (удаление по comment-tag
+    через `nft -a -j list chain` JSON parse → `nft delete rule ... handle N`).
+  • `ipset destroy awg_ru_networks` → `nft_set_destroy("awg_cascade_nodes")`.
 
 НЕ удаляет (как договорились в Q4=b):
   • Fail2Ban (используется другими сервисами)
@@ -38,6 +43,18 @@ from .awg_constants import (
 )
 from .awg_state import awgs_state_load, awgs_state_is_installed
 from .awg_standalone import awgs_stop_systemd
+
+# ЭТАП 1.6 МИГРАЦИИ: nftables helpers для cleanup.
+# Раньше: циклы `iptables -D` + `ipset destroy`.
+# Теперь: `nft_rule_delete_by_comment` (через `nft -a -j list chain` JSON parse)
+# + `nft_set_destroy("awg_cascade_nodes")`.
+from .nft_common import nft_rule_delete_by_comment, nft_set_destroy
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY,
+    NFT_CHAIN_FORWARD, NFT_CHAIN_POSTROUTING, NFT_CHAIN_MANGLE_FORWARD,
+    NFT_SET_AWG_CASCADE,
+    COMMENT_AWG_MASQ, COMMENT_AWG_CASCADE_MARK,
+)
 
 
 def _core_module():
@@ -144,34 +161,30 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
         import shutil
         if AWGS_CASCADE_DIR.exists():
             shutil.rmtree(AWGS_CASCADE_DIR, ignore_errors=True)
-        # Удаляем ipset
-        core._run(["ipset", "destroy", AWGS_IPSET_NAME],
-                  check=False, quiet=True)
-        # Удаляем iptables-правила (best-effort)
+        # Удаляем nft set awg_cascade_nodes (мигрировано с ipset, этап 1.6)
+        nft_set_destroy(NFT_SET_AWG_CASCADE, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
+        # Удаляем nft-правила каскада (best-effort, через comment-tag)
         _awgs_uninstall_cleanup_iptables()
 
     # 8. UFW-правило ( через port_registry с legacy comment backward compat)
     info(f"Удаление UFW-правила для UDP {port}...")
     _awg_uninstall_ufw_close(core, port)
 
-    # 8.1 NAT iptables правила (если создавались при установке)
-    info("Удаление iptables NAT правил...")
-    subnet = state.get("subnet", "10.66.66.0/24")
-    # MASQUERADE правило
-    core._run(
-        ["iptables", "-t", "nat", "-D", "POSTROUTING",
-         "-s", subnet, "-j", "MASQUERADE"],
-        check=False, quiet=True,
+    # 8.1 NAT nftables правила (мигрировано с iptables -D циклов, этап 1.6)
+    # Удаляем через comment-tag (awg-masquerade / awg-forward-in / awg-forward-out)
+    # — это идемпотентно и безопасно при повторных вызовах uninstall.
+    info("Удаление nftables NAT правил...")
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_POSTROUTING,
+        comment=COMMENT_AWG_MASQ, family=NFT_TABLE_FAMILY,
     )
-    # FORWARD правила
-    core._run(
-        ["iptables", "-D", "FORWARD", "-i", AWGS_INTERFACE, "-j", "ACCEPT"],
-        check=False, quiet=True,
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_FORWARD,
+        comment="awg-forward-in", family=NFT_TABLE_FAMILY,
     )
-    core._run(
-        ["iptables", "-D", "FORWARD", "-o", AWGS_INTERFACE, "-m", "state",
-         "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
-        check=False, quiet=True,
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_FORWARD,
+        comment="awg-forward-out", family=NFT_TABLE_FAMILY,
     )
 
     # 9. Init-файл и лог
@@ -228,26 +241,36 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
 
 
 def _awgs_uninstall_cleanup_iptables() -> None:
-    """Best-effort удаление iptables-правил каскада."""
+    """Best-effort удаление nft-правил каскада (через comment-tag).
+
+    ЭТАП 1.6 МИГРАЦИИ:
+      • Раньше: циклы `iptables -D` по 6 правилам (mangle OUTPUT MARK, conntrack
+        ACCEPT, nat MASQUERADE, FORWARD in/out, FORWARD ipset match).
+      • Теперь: `nft_rule_delete_by_comment` по comment-tag'ам:
+        - awg-cascade-fwmark (mangle_forward chain)
+        - awg-masquerade (postrouting chain)
+        - awg-cascade-fwd-in / awg-cascade-fwd-out / awg-cascade-fwd-ru (forward chain)
+      • ip rule / ip route — НЕ ТРОГАТЬ (это iproute2, не netfilter).
+    """
     core = _core_module()
     from .awg_constants import AWGS_CASCADE_FWMARK
-    # Список правил для удаления (best-effort, игнорируем ошибки)
-    rules = [
-        ("iptables", "-t", "mangle", "-D", "OUTPUT", "-m", "set", "!",
-         "--match-set", AWGS_IPSET_NAME, "dst", "-j", "MARK",
-         "--set-mark", str(AWGS_CASCADE_FWMARK)),
-        ("iptables", "-t", "mangle", "-D", "OUTPUT", "-m", "conntrack",
-         "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"),
-        ("iptables", "-t", "nat", "-D", "POSTROUTING", "-o", "awg1", "-j", "MASQUERADE"),
-        ("iptables", "-D", "FORWARD", "-i", "awg0", "-o", "awg1", "-j", "ACCEPT"),
-        ("iptables", "-D", "FORWARD", "-i", "awg1", "-o", "awg0",
-         "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"),
-        ("iptables", "-D", "FORWARD", "-i", "awg0", "-m", "set",
-         "--match-set", AWGS_IPSET_NAME, "dst", "-j", "ACCEPT"),
-    ]
-    for rule in rules:
-        core._run(list(rule), check=False, quiet=True)
-    # Policy routing
+
+    # Cleanup nft rules by comment-tag (idempotent — повторный вызов удаляет 0 правил)
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_FORWARD,
+        comment=COMMENT_AWG_CASCADE_MARK, family=NFT_TABLE_FAMILY,
+    )
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_POSTROUTING,
+        comment=COMMENT_AWG_MASQ, family=NFT_TABLE_FAMILY,
+    )
+    for fwd_comment in ("awg-cascade-fwd-in", "awg-cascade-fwd-out", "awg-cascade-fwd-ru"):
+        nft_rule_delete_by_comment(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_FORWARD,
+            comment=fwd_comment, family=NFT_TABLE_FAMILY,
+        )
+
+    # Policy routing (НЕ ТРОГАТЬ — это iproute2, не netfilter)
     core._run(["ip", "rule", "del", "fwmark", str(AWGS_CASCADE_FWMARK), "lookup", "2000"],
               check=False, quiet=True)
     core._run(["ip", "route", "del", "default", "table", "2000"],

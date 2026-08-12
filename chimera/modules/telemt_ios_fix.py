@@ -20,21 +20,24 @@ Telegram другой ClientHello, и один и тот же MSS может н�
 Android/Desktop продолжают использовать основной порт без изменений —
 iOS-пользователям меняется только port= в ссылке, secret и IP те же.
 
-Механизм: iptables (НЕ nftables — проект целиком на iptables, см. принцип в
-telemt_syn_limiter.py).
+Механизм: nftables (мигрировано с iptables, этап 1.7).
 
-    iptables -t mangle -A PREROUTING -p tcp --dport <EXT_PORT> \
-        --tcp-flags SYN,RST SYN \
-        -m comment --comment telemt-ios-mss-fix \
-        -j TCPMSS --set-mss <MSS>
-    iptables -t nat -A PREROUTING -p tcp --dport <EXT_PORT> \
-        -m comment --comment telemt-ios-mss-fix \
-        -j REDIRECT --to-port <PORT>
+    nft add rule inet chimera mangle_forward tcp dport <EXT_PORT> \
+        tcp flags syn / syn,rst tcp option maxseg size set <MSS> \
+        comment "telemt-ios-mss-fix"
+    nft add rule inet chimera prerouting tcp dport <EXT_PORT> \
+        redirect to :<PORT> comment "telemt-ios-mss-fix"
 
-Первое правило (mangle/PREROUTING) клампит MSS только на SYN/SYN-ACK для
+Первое правило (mangle_forward) клампит MSS только на SYN/SYN-ACK для
 нашего внешнего порта — на установленные соединения и остальные порты не
-влияет. Второе (nat/PREROUTING) прозрачно подменяет порт назначения на
+влияет. Второе (prerouting) прозрачно подменяет порт назначения на
 основной порт Telemt до локальной доставки пакета.
+
+Примечание: в iptables это был `iptables -t mangle -A PREROUTING ... -j TCPMSS`.
+В nftables TCPMSS-target заменён на `tcp option maxseg size set <mss>` —
+нативный nft-синтаксис для модификации TCP MSS option. Chain mangle_forward
+имеет hook=forward priority=mangle (ближе всего к legacy mangle/PREROUTING
+семантике; для inbound-трафика на локальный порт этого достаточно).
 
 Конфликт с client_mss
 ──────────────────────
@@ -60,9 +63,8 @@ telemt.toml тем же паттерном регулярки, что и telemt_
   • Правила маркируются комментарием `--comment "telemt-ios-mss-fix"` —
     отключение модуля удаляет ТОЛЬКО их, ничего больше (не трогает
     REDIRECT-правила xray/tproxy — другая chain/match, другой тег).
-  • persist — тот же best-effort паттерн, что в telemt_syn_limiter.py
-    (netfilter-persistent / iptables-save в rules.v4), продублирован
-    локально, а не вызван из mtproto.py.
+  • persist — через nft_persist() из nft_common (замена netfilter-persistent /
+    iptables-save в rules.v4), вызывается локально — не из mtproto.py.
   • Установка/удаление идемпотентны: перед apply правила с нашим тегом
     удаляются, дубликатов не плодит.
 
@@ -92,6 +94,18 @@ import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
+
+# nftables — централизованная обёртка (этап 1.7 миграции).
+from chimera.modules.nft_common import (
+    nft_rule_add, nft_rule_exists, nft_rule_delete_by_comment,
+    nft_mangle_mssclamp, nft_nat_redirect,
+    nft_persist, nft_persist_enable_systemd, _nft_available,
+)
+from chimera.modules.nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY,
+    NFT_CHAIN_PREROUTING, NFT_CHAIN_MANGLE_FORWARD,
+    NFT_PERSIST_FILE,
+)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ПУТИ И КОНСТАНТЫ
@@ -313,34 +327,39 @@ def _save_state(cfg: IosFixConfig) -> None:
         pass
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IPTABLES — управление правилами
+#  NFTABLES — управление правилами (мигрировано с iptables, этап 1.7)
 # ══════════════════════════════════════════════════════════════════════════════
 def _rules_exist() -> bool:
-    """Проверяет, есть ли уже правило с нашим комментарием в mangle/PREROUTING."""
-    r = _run(["iptables", "-t", "mangle", "-S", "PREROUTING"], capture=True)
-    return _COMMENT_TAG in (r.stdout or "")
+    """Проверяет, есть ли уже правило с нашим comment-tag.
+
+    Заменяет: grep по `iptables -t mangle -S PREROUTING` на наличие _COMMENT_TAG.
+    Теперь: nft_rule_exists(comment=_COMMENT_TAG).
+    """
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_FORWARD,
+        comment=_COMMENT_TAG, family=NFT_TABLE_FAMILY,
+    ) or nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_PREROUTING,
+        comment=_COMMENT_TAG, family=NFT_TABLE_FAMILY,
+    )
 
 def _remove_rules() -> int:
     """
-    Удаляет ВСЕ правила mangle/nat PREROUTING с нашим тегом.
+    Удаляет ВСЕ правила mangle_forward + prerouting с нашим тегом.
     Безопасно вызывать многократно — если правил нет, просто ничего не делает.
     Возвращает количество удалённых правил.
     """
     removed = 0
-    for table in ("mangle", "nat"):
-        for _ in range(20):  # защита от бесконечного цикла, если что-то пошло не так
-            r = _run(["iptables", "-t", table, "-S", "PREROUTING"], capture=True)
-            lines = [l for l in (r.stdout or "").splitlines() if _COMMENT_TAG in l]
-            if not lines:
-                break
-            line = lines[0]
-            if not line.startswith("-A PREROUTING"):
-                break
-            del_args = ["iptables", "-t", table, "-D", "PREROUTING"] + line.split()[2:]
-            r2 = _run(del_args, capture=True)
-            if r2.returncode != 0:
-                break
-            removed += 1
+    # mangle_forward (TCPMSS — теперь tcp option maxseg size set)
+    removed += nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_FORWARD,
+        comment=_COMMENT_TAG, family=NFT_TABLE_FAMILY, max_iterations=20,
+    )
+    # prerouting (NAT REDIRECT — теперь nft redirect to :PORT)
+    removed += nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_PREROUTING,
+        comment=_COMMENT_TAG, family=NFT_TABLE_FAMILY, max_iterations=20,
+    )
     return removed
 
 def _apply_rules(cfg: IosFixConfig) -> tuple[bool, str]:
@@ -348,57 +367,67 @@ def _apply_rules(cfg: IosFixConfig) -> tuple[bool, str]:
     Применяет TCPMSS + REDIRECT для текущего cfg.
     Идемпотентно: сначала удаляет старые правила с нашим тегом, потом
     добавляет новые.
+
+    Мигрировано с iptables (этап 1.7). Заменяет:
+      iptables -t mangle -A PREROUTING -p tcp --dport <EXT> \
+          --tcp-flags SYN,RST SYN -j TCPMSS --set-mss <MSS>
+      iptables -t nat -A PREROUTING -p tcp --dport <EXT> \
+          -j REDIRECT --to-port <PORT>
+    Теперь:
+      nft_mangle_mssclamp(mss=<MSS>, comment="telemt-ios-mss-fix")
+      nft_nat_redirect(prerouting=True, proto="tcp", dport=<EXT>,
+                      to_port=<PORT>, comment="telemt-ios-mss-fix")
     """
     if cfg.ext_port <= 0 or cfg.target_port <= 0:
         return False, "Не заданы порты."
 
     _remove_rules()  # чистим перед применением — гарантия идемпотентности
 
-    mss_cmd = [
-        "iptables", "-t", "mangle", "-A", "PREROUTING",
-        "-p", "tcp", "--dport", str(cfg.ext_port),
-        "--tcp-flags", "SYN,RST", "SYN",
-        "-m", "comment", "--comment", _COMMENT_TAG,
-        "-j", "TCPMSS", "--set-mss", str(cfg.mss),
-    ]
-    redirect_cmd = [
-        "iptables", "-t", "nat", "-A", "PREROUTING",
-        "-p", "tcp", "--dport", str(cfg.ext_port),
-        "-m", "comment", "--comment", _COMMENT_TAG,
-        "-j", "REDIRECT", "--to-port", str(cfg.target_port),
-    ]
+    # 1) TCPMSS-clamp в mangle_forward (chain с hook=forward, priority=mangle).
+    #    nft spec: tcp dport <EXT> tcp flags syn / syn,rst tcp option maxseg size set <MSS>
+    #    nft_mangle_mssclamp сам построит spec и добавит comment-tag.
+    try:
+        ok1 = nft_mangle_mssclamp(
+            mss=cfg.mss,
+            chain=NFT_CHAIN_MANGLE_FORWARD,
+            comment=_COMMENT_TAG,
+        )
+    except Exception as e:
+        return False, f"Ошибка применения TCPMSS-правила: {e}"
+    if not ok1:
+        return False, "Ошибка применения TCPMSS-правила (nft_mangle_mssclamp failed)"
 
-    r1 = _run(mss_cmd, capture=True)
-    if r1.returncode != 0:
-        return False, f"Ошибка применения TCPMSS-правила: {r1.stderr.strip()[:120]}"
-
-    r2 = _run(redirect_cmd, capture=True)
-    if r2.returncode != 0:
+    # 2) NAT REDIRECT в prerouting — `tcp dport <EXT> redirect to :<TARGET>`.
+    try:
+        ok2 = nft_nat_redirect(
+            prerouting=True, proto="tcp",
+            dport=cfg.ext_port, to_port=cfg.target_port,
+            comment=_COMMENT_TAG,
+        )
+    except Exception as e:
         # откатываем TCPMSS-правило, чтобы не оставить половинчатое состояние
         _remove_rules()
-        return False, f"Ошибка применения REDIRECT-правила: {r2.stderr.strip()[:120]}"
+        return False, f"Ошибка применения REDIRECT-правила: {e}"
+    if not ok2:
+        _remove_rules()
+        return False, "Ошибка применения REDIRECT-правила (nft_nat_redirect failed)"
 
     return True, "Правила TCPMSS + REDIRECT применены."
 
 def _persist_rules() -> None:
     """
-    Сохраняет iptables-правила тем же best-effort способом, что и
-    telemt_syn_limiter.py (netfilter-persistent / iptables-save в
-    rules.v4, если доступно). Не падает, если механизм persist
-    отсутствует — правило просто не переживёт перезагрузку (можно
-    повторно включить через меню).
+    Сохраняет nftables ruleset (этап 1.7 миграции).
+
+    Заменяет best-effort persist через netfilter-persistent / iptables-save
+    в rules.v4. Теперь делегирует в nft_persist() — сохраняет весь ruleset
+    в /etc/nftables.conf и включает nftables.service. Не падает, если
+    механизм persist недоступен — правило просто не переживёт перезагрузку.
     """
-    if shutil.which("netfilter-persistent"):
-        _run(["netfilter-persistent", "save"])
-        return
-    rules_path = Path("/etc/iptables/rules.v4")
-    if rules_path.parent.exists():
-        try:
-            r = _run(["iptables-save"], capture=True)
-            if r.returncode == 0 and r.stdout:
-                rules_path.write_text(r.stdout)
-        except Exception:
-            pass
+    try:
+        nft_persist(NFT_PERSIST_FILE)
+        nft_persist_enable_systemd()
+    except Exception:
+        pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ПУБЛИЧНЫЙ API
@@ -421,7 +450,7 @@ def ios_fix_status_line() -> str:
     if st["enabled"]:
         return f"{GREEN}● активен{NC}  {DIM}порт {st['ext_port']} → {st['target_port']}, MSS {st['mss']}{NC}"
     if st["configured_but_inactive"]:
-        return f"{YELLOW}⚠ включён в конфиге, но правил нет в iptables{NC}"
+        return f"{YELLOW}⚠ включён в конфиге, но правил нет в nftables{NC}"
     return f"{DIM}не активен{NC}"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -451,7 +480,7 @@ def ios_fix_menu() -> None:
         status_str = (
             f"{GREEN}● активен{NC}  {DIM}порт {cfg.ext_port} → {cfg.target_port}, MSS {cfg.mss}{NC}"
             if active and cfg.enabled else
-            f"{YELLOW}⚠ включён в конфиге, но правил в iptables нет{NC}"
+            f"{YELLOW}⚠ включён в конфиге, но правил в nftables нет{NC}"
             if cfg.enabled and not active else
             f"{DIM}не активен{NC}"
         )

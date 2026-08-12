@@ -39,6 +39,16 @@ from typing import Optional
 from chimera.modules.proto_common import (
     ProtoCancelled, proto_ask, proto_get_installed_version, proto_ipt_rule_exists,
 )
+# nftables — централизованная обёртка (этап 1.7 миграции).
+from chimera.modules.nft_common import (
+    nft_rule_exists, nft_rule_delete_by_comment, nft_rule_add,
+    nft_nat_redirect, nft_persist, nft_persist_enable_systemd,
+    nft_mangle_return_uid, _nft_available,
+)
+from chimera.modules.nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_PREROUTING, NFT_CHAIN_OUTPUT,
+    NFT_PERSIST_FILE, COMMENT_TELEMT_TPROXY_BYPASS,
+)
 from chimera.modules.telemt_mirrors import (
     get_telemt_mirrors as _get_telemt_mirror_urls,
     MANUAL_UPLOAD_PATHS as _TELEMT_MANUAL_PATHS,
@@ -1198,61 +1208,140 @@ def _xray_write_and_test(cfg_path: Path, cfg: dict) -> Optional[str]:
     return None
 
 
-# ── iptables REDIRECT для Telegram-подсетей ───────────────────────────────────
+# ── nftables REDIRECT для Telegram-подсетей (мигрировано с iptables, этап 1.7) ────
 
 # _ipt_rule_exists — вынесен в proto_common (proto_ipt_rule_exists).
-# Выбор iptables vs ip6tables (по ":" в net) остаётся здесь — proto_common
-# работает только с iptables. Для IPv6 вызываем _run напрямую.
-def _ipt_rule_exists(net: str, port: int) -> bool:
-    """Проверяет наличие REDIRECT-правила через iptables -C (не дублирует).
+# В nftables одна таблица inet chimera покрывает и v4, и v6 — больше НЕ
+# нужны раздельные вызовы iptables/ip6tables.
+_TPROXY_REDIRECT_COMMENT = "mtproto-tproxy"  # единый comment для всех tg_nets
 
-    КРИТИЧНО: iptables -C / ip6tables -C возвращают exit status 1 когда правило
-    НЕ существует — это норма (man iptables: "If the rule does not exist, the
-    exit code is 1"). _run с check=True (по умолчанию) бросает CalledProcessError
-    на rc=1, что валило весь TUI-меню Telemt при открытии если хоть одна TG-подсеть
-    не имела правила. Поэтому для IPv6 пути явно передаём check=False.
-    IPv4 путь идёт через proto_ipt_rule_exists (там фикс отдельный).
+
+def _ipt_rule_exists(net: str, port: int) -> bool:
+    """Проверяет наличие nft REDIRECT-правила через nft_rule_exists(comment=...).
+
+    Заменяет: iptables/ip6tables -t nat -C OUTPUT -d <net> -p tcp -j REDIRECT --to-port <port>.
+    Теперь: nft_rule_exists(comment="mtproto-tproxy") (один tag для всех tg_nets).
+
+    КРИТИЧНО: в старой реализации проверка шла по конкретному net (через -d).
+    В nftables-реализации один comment-tag используется для всех tg_nets-правил,
+    поэтому nft_rule_exists вернёт True если ЕСТЬ ХОТЯ БЫ ОДНО правило tproxy
+    (а не «для этого конкретного net»). Для использования в _xray_tproxy_status
+    (подсчёт сколько из tg_nets имеют правило) — см. _nft_tproxy_count, который
+    через JSON-парсинг nft list chain считает количество правил с этим comment.
     """
-    v6  = ":" in net
-    if v6:
-        # IPv6 — ip6tables, не покрывается proto_ipt_rule_exists
-        try:
-            r = _run(["ip6tables", "-t", "nat", "-C", "OUTPUT",
-                      "-d", net, "-p", "tcp",
-                      "-j", "REDIRECT", "--to-port", str(port)],
-                     capture=True, check=False)
-            return r.returncode == 0
-        except Exception:
-            return False
-    return proto_ipt_rule_exists("nat", "OUTPUT",
-                                ["-d", net, "-p", "tcp",
-                                 "-j", "REDIRECT", "--to-port", str(port)])
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+        comment=_TPROXY_REDIRECT_COMMENT, family=NFT_TABLE_FAMILY,
+    )
+
+
+def _nft_tproxy_count() -> int:
+    """Возвращает количество nft-правил REDIRECT для tg-подсетей.
+
+    Заменяет цикл `for net in tg_nets: if _ipt_rule_exists(net, port): count += 1`.
+    Теперь: один запрос `nft -j list chain inet chimera output` → JSON → подсчёт
+    правил с comment="mtproto-tproxy".
+    """
+    try:
+        from chimera.modules.nft_common import _nft_list_chain_rules
+        rules = _nft_list_chain_rules(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+            family=NFT_TABLE_FAMILY,
+        )
+        count = 0
+        for rule in rules:
+            if rule.get("comment") == _TPROXY_REDIRECT_COMMENT:
+                count += 1
+            else:
+                # Альтернативный путь: comment в expr
+                for expr in rule.get("expr", []):
+                    if expr.get("comment") == _TPROXY_REDIRECT_COMMENT:
+                        count += 1
+                        break
+        return count
+    except Exception:
+        return 0
 
 
 def _ipt_add_redirect(net: str, port: int) -> bool:
-    """Добавляет REDIRECT-правило если ещё нет. Возвращает True при успехе."""
-    if _ipt_rule_exists(net, port):
-        return True
-    v6  = ":" in net
-    ipt = "ip6tables" if v6 else "iptables"
-    r   = _run([ipt, "-t", "nat", "-A", "OUTPUT",
-                "-d", net, "-p", "tcp",
-                "-j", "REDIRECT", "--to-port", str(port)],
-               capture=True)
-    return r.returncode == 0
+    """Добавляет nft REDIRECT-правило если ещё нет. Возвращает True при успехе.
+
+    Заменяет: iptables/ip6tables -t nat -A OUTPUT -d <net> -p tcp -j REDIRECT --to-port <port>.
+    Теперь: nft_nat_redirect(prerouting=False, proto="tcp", dport=<port>,
+                            to_port=<port>, comment="mtproto-tproxy").
+
+    ВНИМАНИЕ: nft_nat_redirect не принимает фильтр по dst CIDR напрямую.
+    Для пер-net REDIRECT используем nft_rule_add с полным spec:
+        ip daddr <net> tcp dport <port> redirect to :<port>
+        ip6 daddr <net> tcp dport <port> redirect to :<port>
+    """
+    # Строим spec в зависимости от семейства адреса (v4/v6)
+    if ":" in net:
+        # IPv6 — ip6 daddr <net>
+        spec = f"ip6 daddr {net} tcp dport {port} redirect to :{port}"
+    else:
+        # IPv4 — ip daddr <net>
+        spec = f"ip daddr {net} tcp dport {port} redirect to :{port}"
+    try:
+        from chimera.modules.nft_common import nft_rule_add
+        return nft_rule_add(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+            rule_spec=spec, family=NFT_TABLE_FAMILY,
+            comment=_TPROXY_REDIRECT_COMMENT, idempotent=False,
+        )
+    except Exception:
+        return False
 
 
 def _ipt_del_redirect(net: str, port: int) -> None:
-    """Удаляет REDIRECT-правило (все копии, идемпотентно)."""
-    for _ in range(5):
-        if not _ipt_rule_exists(net, port):
-            break
-        v6  = ":" in net
-        ipt = "ip6tables" if v6 else "iptables"
-        _run([ipt, "-t", "nat", "-D", "OUTPUT",
-              "-d", net, "-p", "tcp",
-              "-j", "REDIRECT", "--to-port", str(port)],
-             capture=True)
+    """Удаляет nft REDIRECT-правила для данного net (идемпотентно).
+
+    Заменяет цикл iptables/ip6tables -t nat -D OUTPUT -d <net> -p tcp -j REDIRECT --to-port <port>.
+    Теперь: ищем правила с comment="mtproto-tproxy" И ip/ip6 daddr == net,
+    удаляем через handle.
+    """
+    try:
+        from chimera.modules.nft_common import (
+            _nft_list_chain_rules_with_handles, _nft_run,
+        )
+        rules = _nft_list_chain_rules_with_handles(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+            family=NFT_TABLE_FAMILY,
+        )
+        # Ищем правила с нашим comment И matching daddr
+        for rule in rules:
+            if rule.get("comment") != _TPROXY_REDIRECT_COMMENT:
+                continue
+            # Проверяем, содержит ли правило match на daddr=net
+            if not _rule_matches_daddr(rule, net):
+                continue
+            handle = rule.get("handle")
+            if handle is None:
+                continue
+            _nft_run(["delete", "rule", NFT_TABLE_FAMILY, NFT_TABLE_NAME,
+                      NFT_CHAIN_OUTPUT, "handle", str(handle)],
+                     check=False)
+    except Exception:
+        pass
+
+
+def _rule_matches_daddr(rule: dict, net: str) -> bool:
+    """Проверяет содержит ли правило match на destination address == net."""
+    ip_key = "ip6" if ":" in net else "ip"
+    for expr in rule.get("expr", []):
+        if not isinstance(expr, dict):
+            continue
+        match = expr.get("match")
+        if not match:
+            continue
+        left = match.get("left", {})
+        payload = left.get("payload", {})
+        # payload protocol = ip / ip6, field = daddr
+        if payload.get("protocol") == ip_key and payload.get("field") == "daddr":
+            right = match.get("right")
+            if right == net or (isinstance(right, dict) and right.get("prefix") == net):
+                return True
+    return False
 
 
 # ── RETURN-правила для ME-портов (исключения из REDIRECT) ────────────────────
@@ -1261,8 +1350,8 @@ def _ipt_del_redirect(net: str, port: int) -> None:
 # telemt не может поднять Middle Proxy pool (RPC handshake проваливается,
 # т.к. xray отдаёт plain TCP вместо MTProto-handshake).
 #
-# ВАЖНО: эти helper-функции работают с ОБЕИМ таблицами — iptables (IPv4)
-# и ip6tables (IPv6) — т.к. ME-серверы доступны и по IPv4, и по IPv6.
+# ВАЖНО: в nftables одна таблица inet chimera покрывает и v4, и v6 — больше
+# НЕ нужны раздельные вызовы iptables/ip6tables.
 
 #: ME-порты, которые исключаются из REDIRECT.
 # ME-серверы Telegram используют порты :8888 (основной), :80 (health-check),
@@ -1281,145 +1370,129 @@ def _ipt_del_redirect(net: str, port: int) -> None:
 _ME_RETURN_PORTS: tuple = ("8888", "80", "443", "8443")
 
 
+def _me_return_comment(dport: str) -> str:
+    """Возвращает per-port comment-tag для ME-RETURN правила."""
+    return f"mtproto-me-return-{dport}"
+
+
 def _ipt_return_rule_exists(ipt: str, dport: str) -> bool:
-    """Проверяет наличие RETURN-правила для dport в таблице ipt
-    (iptables или ip6tables). Через iptables -C (check).
+    """Проверяет наличие RETURN-правила для dport (через nft_rule_exists).
+
+    Заменяет: iptables/ip6tables -t nat -C OUTPUT -p tcp --dport <dport> -j RETURN.
+    Теперь: nft_rule_exists(comment=f"mtproto-me-return-{dport}").
+    Параметр ipt сохранён для совместимости со старыми callers (не используется).
     """
-    r = _run([ipt, "-t", "nat", "-C", "OUTPUT",
-              "-p", "tcp", "--dport", dport, "-j", "RETURN"],
-             capture=True, check=False)
-    return r.returncode == 0
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+        comment=_me_return_comment(dport), family=NFT_TABLE_FAMILY,
+    )
 
 
 def _ipt_remove_all_return_rules(ipt: str, dport: str) -> int:
-    """Удаляет ВСЕ RETURN-правила для dport в таблице ipt, сколько бы
-    их ни было. Возвращает количество удалённых правил.
+    """Удаляет ВСЕ RETURN-правила для dport. Возвращает количество удалённых.
 
-    Аналог _ipt_remove_all_jumps() для RETURN-правил ME-портов.
-    Использует _ipt_return_rule_exists() для проверки after each removal,
-    а не полагается на returncode -D (который удаляет только одно правило
-    за вызов).
-
-    Защита от бесконечного цикла — 20 итераций (больше дублей в
-    реальной системе не бывает, обычно 1-2).
+    Заменяет цикл iptables/ip6tables -t nat -D OUTPUT -p tcp --dport <dport> -j RETURN.
+    Теперь: один вызов nft_rule_delete_by_comment (max_iterations=20).
+    Параметр ipt сохранён для совместимости (не используется).
     """
-    removed = 0
-    for _ in range(20):
-        if not _ipt_return_rule_exists(ipt, dport):
-            break
-        r = _run([ipt, "-t", "nat", "-D", "OUTPUT",
-                  "-p", "tcp", "--dport", dport, "-j", "RETURN"],
-                 capture=True, check=False)
-        if r.returncode != 0:
-            break
-        removed += 1
-    return removed
+    return nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+        comment=_me_return_comment(dport),
+        family=NFT_TABLE_FAMILY, max_iterations=20,
+    )
 
 
 def _ipt_ensure_single_return_rule(ipt: str, dport: str) -> int:
-    """Гарантирует, что в таблице ipt есть РОВНО ОДНО RETURN-правило
-    для dport. Сначала удаляет все существующие (через
-    _ipt_remove_all_return_rules), потом добавляет ровно одно через -I.
+    """Гарантирует ровно одно RETURN-правило для dport.
 
-    Возвращает количество удалённых дублей (для логирования).
+    Сначала удаляет все (через _ipt_remove_all_return_rules), потом добавляет
+    одно через nft_rule_add. Возвращает количество удалённых дублей.
+    Параметр ipt сохранён для совместимости (не используется).
     """
     removed = _ipt_remove_all_return_rules(ipt, dport)
-    _run([ipt, "-t", "nat", "-I", "OUTPUT",
-          "-p", "tcp", "--dport", dport, "-j", "RETURN"],
-         capture=True, check=False)
+    try:
+        from chimera.modules.nft_common import nft_rule_add
+        nft_rule_add(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+            rule_spec=f"tcp dport {dport} return",
+            family=NFT_TABLE_FAMILY,
+            comment=_me_return_comment(dport), idempotent=False,
+        )
+    except Exception:
+        pass
     return removed
 
 
 def _ipt_owner_return_rule_exists(ipt: str, uid: int) -> bool:
-    """Проверяет RETURN-правило по UID (для исключения xray UID 999
-    из REDIRECT-петли).
+    """Проверяет RETURN-правило по UID (через nft_rule_exists).
+
+    Заменяет: iptables/ip6tables -t nat -C OUTPUT -m owner --uid-owner <uid> -j RETURN.
+    Теперь: nft_rule_exists(comment="telemt-tproxy-bypass").
+    Параметр ipt сохранён для совместимости (не используется).
     """
-    r = _run([ipt, "-t", "nat", "-C", "OUTPUT",
-              "-m", "owner", "--uid-owner", str(uid), "-j", "RETURN"],
-             capture=True, check=False)
-    return r.returncode == 0
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+        comment=COMMENT_TELEMT_TPROXY_BYPASS, family=NFT_TABLE_FAMILY,
+    )
 
 
 def _ipt_remove_all_owner_return_rules(ipt: str, uid: int) -> int:
-    """Удаляет ВСЕ RETURN-правила по UID в таблице ipt. Аналог
-    _ipt_remove_all_return_rules, но для owner-match правил.
+    """Удаляет ВСЕ RETURN-правила по UID. Возвращает количество удалённых.
+
+    Заменяет цикл iptables/ip6tables -t nat -D OUTPUT -m owner --uid-owner <uid> -j RETURN.
+    Теперь: один вызов nft_rule_delete_by_comment (max_iterations=20).
+    Параметр ipt сохранён для совместимости (не используется).
     """
-    removed = 0
-    for _ in range(20):
-        if not _ipt_owner_return_rule_exists(ipt, uid):
-            break
-        r = _run([ipt, "-t", "nat", "-D", "OUTPUT",
-                  "-m", "owner", "--uid-owner", str(uid), "-j", "RETURN"],
-                 capture=True, check=False)
-        if r.returncode != 0:
-            break
-        removed += 1
-    return removed
+    return nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+        comment=COMMENT_TELEMT_TPROXY_BYPASS,
+        family=NFT_TABLE_FAMILY, max_iterations=20,
+    )
 
 
 def _ipt_ensure_single_owner_return(ipt: str, uid: int) -> int:
-    """Гарантирует ровно одно RETURN-правило по UID в таблице ipt."""
+    """Гарантирует ровно одно RETURN-правило по UID.
+
+    Заменяет: iptables/ip6tables -t nat -I OUTPUT 1 -m owner --uid-owner <uid> -j RETURN.
+    Теперь: nft_mangle_return_uid(uid=<uid>, comment="telemt-tproxy-bypass").
+    Параметр ipt сохранён для совместимости (не используется).
+    """
     removed = _ipt_remove_all_owner_return_rules(ipt, uid)
-    _run([ipt, "-t", "nat", "-I", "OUTPUT",
-          "-m", "owner", "--uid-owner", str(uid), "-j", "RETURN"],
-         capture=True, check=False)
+    try:
+        nft_mangle_return_uid(
+            uid=uid, chain=NFT_CHAIN_OUTPUT,
+            comment=COMMENT_TELEMT_TPROXY_BYPASS, idempotent=False,
+        )
+    except Exception:
+        pass
     return removed
 
 
 def _iptables_persist() -> None:
-    """
-    Сохраняет iptables-правила для выживания после ребута.
-    Порядок попыток:
-      1. netfilter-persistent save  (Debian/Ubuntu с iptables-persistent)
-      2. iptables-save → /etc/iptables/rules.v4 + rules.v6
+    """Сохраняет nftables ruleset для выживания после ребута (этап 1.7 миграции).
+
+    Заменяет многоступенчатый persist:
+      1. netfilter-persistent save
+      2. iptables-save > /etc/iptables/rules.v4 + rules.v6
       3. systemd-сервис telemt-iptables (fallback)
+    Теперь: один вызов nft_persist() → /etc/nftables.conf + nft_persist_enable_systemd().
     """
-    if shutil.which("netfilter-persistent"):
-        _run(["netfilter-persistent", "save"], capture=True)
-        return
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r4 = _run(["iptables-save"],  capture=True)
-    if r4.returncode == 0 and r4.stdout:
-        (rules_dir / "rules.v4").write_text(r4.stdout)
-    r6 = _run(["ip6tables-save"], capture=True)
-    if r6.returncode == 0 and r6.stdout:
-        (rules_dir / "rules.v6").write_text(r6.stdout)
-    _ensure_ipt_restore_service()
+    try:
+        nft_persist(NFT_PERSIST_FILE)
+        nft_persist_enable_systemd()
+    except Exception:
+        pass
 
 
 def _ensure_ipt_restore_service() -> None:
+    """Совместимость со старыми callers — после миграции (этап 1.7) этот метод
+    ничего не делает. Restore теперь делегирован в стандартный nftables.service
+    (читает /etc/nftables.conf при старте системы).
     """
-    Создаёт systemd-сервис восстановления iptables при загрузке,
-    если нет netfilter-persistent.
-    """
-    svc_path = Path("/etc/systemd/system/telemt-iptables.service")
-    if svc_path.exists():
-        # Пересоздаём чтобы обновить пути если изменились
-        pass
-    rules_v4 = Path("/etc/iptables/rules.v4")
-    rules_v6 = Path("/etc/iptables/rules.v6")
-    exec_lines = ""
-    if rules_v4.exists():
-        exec_lines += f"ExecStart=/bin/sh -c 'iptables-restore < {rules_v4}'\n"
-    if rules_v6.exists():
-        exec_lines += f"ExecStart=/bin/sh -c 'ip6tables-restore < {rules_v6}'\n"
-    if not exec_lines:
-        return
-    svc_path.write_text(
-        "[Unit]\n"
-        "Description=Restore iptables REDIRECT rules for telemt tproxy\n"
-        "Before=network-pre.target\n"
-        "Wants=network-pre.target\n\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        "RemainAfterExit=yes\n"
-        + exec_lines +
-        "\n[Install]\n"
-        "WantedBy=multi-user.target\n"
-    )
-    _run(["systemctl", "daemon-reload"], capture=True)
-    _run(["systemctl", "enable", "telemt-iptables.service"], capture=True)
+    # No-op: nft_persist_enable_systemd() в _iptables_persist() включает
+    # стандартный nftables.service, который автоматически восстанавливает
+    # все правила Chimera при загрузке.
+    pass
 
 
 # ── Публичный API ─────────────────────────────────────────────────────────────
@@ -1496,7 +1569,10 @@ def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
     # (через меню или при emergency_restore) правила накапливались
     # дубли, а при ручной чистке пользователь мог удалить все — и
     # ME-pool снова падал.
-    for _ipt in ("iptables", "ip6tables"):
+    # Этап 1.7: в nftables одна таблица inet chimera покрывает v4+v6.
+    # Параметр _ipt в helpers теперь игнорируется — он сохранён только для
+    # совместимости со старыми signatures.
+    for _ipt in ("nftables",):  # было ("iptables", "ip6tables")
         for _me_port in _ME_RETURN_PORTS:
             _ipt_ensure_single_return_rule(_ipt, _me_port)
     tg_nets = _TG_NETS_current()
@@ -1504,13 +1580,13 @@ def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
     _iptables_persist()
 
     if failed:
-        return False, f"iptables REDIRECT не удалось для: {', '.join(failed)}"
+        return False, f"nftables REDIRECT не удалось для: {', '.join(failed)}"
 
     mode_label = "AWG 2.0" if cascade == "awg" else "VLESS"
     status = "уже был настроен" if (existing_port and not xray_changed) else "добавлен"
     return True, (
         f"dokodemo-door {status} (:{port}), "
-        f"iptables REDIRECT активен [{len(tg_nets)} подсетей], "
+        f"nftables REDIRECT активен [{len(tg_nets)} подсетей], "
         f"транспорт: {mode_label}"
     )
 
@@ -1519,8 +1595,8 @@ def xray_disable_tproxy_for_telemt() -> tuple:
     """
     Полное отключение tproxy-интеграции:
       1. Удаляет dokodemo-door из xray config, перезапускает xray
-      2. Удаляет iptables REDIRECT для всех Telegram-подсетей
-      3. Сохраняет состояние iptables
+      2. Удаляет nftables REDIRECT для всех Telegram-подсетей
+      3. Сохраняет состояние nftables ruleset
     Возвращает (ok: bool, message: str).
     """
     cfg_path = _xray_config_path()
@@ -1541,24 +1617,27 @@ def xray_disable_tproxy_for_telemt() -> tuple:
         _ipt_del_redirect(net, port or XRAY_TPROXY_PORT)
 
     # Удаляем ВСЕ исключения для ME-портов (:8888, :80) — больше не нужны
-    # без REDIRECT. Обе таблицы (iptables + ip6tables). Через цикл
-    # _ipt_remove_all_return_rules — удаляет ВСЕ дубли (а не одно правило
-    # как одиночный -D).
-    for _ipt in ("iptables", "ip6tables"):
+    # без REDIRECT. Этап 1.7: в nftables одна таблица inet chimera
+    # покрывает v4+v6 — один вызов _ipt_remove_all_return_rules
+    # удаляет все дубли.
+    for _ipt in ("nftables",):  # было ("iptables", "ip6tables")
         for _me_port in _ME_RETURN_PORTS:
             _ipt_remove_all_return_rules(_ipt, _me_port)
-    # Удаляем ВСЕ исключения для UID 999 (xray) — аналогично через цикл
-    _ipt_remove_all_owner_return_rules("iptables", 999)
+    # Удаляем ВСЕ исключения для UID 999 (xray) — аналогично.
+    _ipt_remove_all_owner_return_rules("nftables", 999)
 
     _iptables_persist()
 
+    # Этап 1.7: legacy telemt-iptables.service больше не нужен (его функцию
+    # выполняет стандартный nftables.service). Удаляем файл если он остался
+    # от старой установки.
     svc = Path("/etc/systemd/system/telemt-iptables.service")
     if svc.exists():
         _run(["systemctl", "disable", "--now", "telemt-iptables.service"], capture=True)
         svc.unlink(missing_ok=True)
         _run(["systemctl", "daemon-reload"], capture=True)
 
-    return True, "tproxy-интеграция отключена: dokodemo удалён, iptables очищен"
+    return True, "tproxy-интеграция отключена: dokodemo удалён, nftables очищен"
 
 
 def telemt_tproxy_emergency_restore() -> tuple:
@@ -1619,8 +1698,8 @@ def _xray_tproxy_status() -> dict:
       port      – int   (0 если нет)
       cascade   – str   ("awg" | "vless" | "none")
       proxy_tag – str
-      ipt_ok    – bool  (все iptables-правила на месте)
-      ipt_count – int   (сколько из len(_TG_NETS) правил активно)
+      ipt_ok    – bool  (все nft-правила на месте; legacy field name для TUI compat)
+      ipt_count – int   (сколько из len(_TG_NETS) правил активно; legacy field name)
     """
     cfg_path = _xray_config_path()
     cascade  = _xray_cascade_mode()
@@ -1641,20 +1720,17 @@ def _xray_tproxy_status() -> dict:
     pt, is_bal   = _xray_get_proxy_tag(cfg)
     proxy_tag    = pt + (" [balancer]" if is_bal else "")
     tg_nets      = _TG_NETS_current()
-    # Per-net resilience: если даже после фиксов proto_ipt_rule_exists /
-    # _ipt_rule_exists какой-то отдельный net упадёт (например, iptables
-    # временно недоступен), не роняем весь TUI-меню Telemt. Считаем что
-    # для упавшего net правила нет (False), остальные подсети проверяются
-    # нормально. ipt_ok = False если хоть одна не проверена/отсутствует.
-    ipt_active = 0
-    for n in tg_nets:
-        try:
-            if _ipt_rule_exists(n, port):
-                ipt_active += 1
-        except Exception:
-            # Defensive: _ipt_rule_exists сам ловит исключения, но на всякий
-            # случай — если что-то пробилось, считаем что правила нет.
-            pass
+    # Этап 1.7: используем _nft_tproxy_count() — один JSON-запрос к nft list chain,
+    # который считает все правила с comment="mtproto-tproxy". Заменяет цикл по
+    # tg_nets с вызовом _ipt_rule_exists для каждого (было N запросов к nft).
+    # Defensive: _nft_tproxy_count сам ловит исключения, но на всякий случай —
+    # если что-то пробилось, считаем что правил 0 (TUI не должен падать).
+    try:
+        ipt_active = _nft_tproxy_count()
+    except Exception:
+        ipt_active = 0
+    # Cap at tg_nets length (could be more if there are stale rules for old nets).
+    ipt_active = min(ipt_active, len(tg_nets))
 
     return {
         "enabled":   True,

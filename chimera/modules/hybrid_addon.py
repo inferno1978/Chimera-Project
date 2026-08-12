@@ -961,11 +961,21 @@ def detect_firewall() -> str:
             return "firewalld"
     if shutil.which("iptables"):
         return "iptables"
+    if shutil.which("nft"):
+        return "nftables"
     return "none"
 
 
 def open_port(fw: str, port: int, proto: str) -> str:
-    """Возвращает строку-команду отката (или '' если открывать не пришлось)."""
+    """Возвращает строку-команду отката (или '' если открывать не пришлось).
+
+    Мигрировано на nftables (этап 1.7). Поддерживает:
+      • ufw        — ufw allow / ufw delete allow
+      • firewalld  — firewall-cmd --add-port / --remove-port
+      • iptables   — fallback через iptables-nft compat shim (для binary-only env)
+      • nftables   — нативный `nft add rule inet chimera input <proto> dport <port> accept`
+                     (предпочтительный путь; persist через nftables.service)
+    """
     if fw == "ufw":
         r = run(["ufw", "status"])
         rule = f"{port}/{proto}"
@@ -986,7 +996,32 @@ def open_port(fw: str, port: int, proto: str) -> str:
         c_green(f"firewalld: открыт {port}/{proto}.")
         return f"firewall-cmd --zone=public --remove-port={port}/{proto} --permanent && firewall-cmd --reload"
 
-    if fw == "iptables":
+    if fw == "nftables":
+        # Нативный nftables путь (этап 1.7 миграции). Гарантирует что таблица
+        # chimera и цепочка input существуют, добавляет правило с comment-tag
+        # chimera-open-port-<proto>-<port> для идемпотентности и safe cleanup.
+        comment = f"chimera-open-port-{proto}-{port}"
+        # ensure table + chain
+        run(["nft", "create", "table", "inet", "chimera"], check=False)
+        run(["nft", "add", "chain", "inet", "chimera", "input",
+             "{ type filter hook input priority 0; policy accept; }"], check=False)
+        # add rule with comment
+        r = run(["nft", "add", "rule", "inet", "chimera", "input",
+                 proto, "dport", str(port), "accept",
+                 "comment", comment])
+        if r.returncode == 0:
+            # persist через nft list ruleset > /etc/nftables.conf
+            run(["sh", "-c", "nft list ruleset > /etc/nftables.conf"])
+            run(["systemctl", "enable", "nftables"], check=False)
+            c_green(f"nftables: открыт {port}/{proto}.")
+            return f"nft delete rule inet chimera input handle $(nft -a list chain inet chimera input | grep -B1 '{comment}' | head -1 | awk '/handle/{{print $NF}}')"
+        c_yellow(f"nftables: не удалось открыть {port}/{proto} — fallback на iptables.")
+        # Fallback на iptables-nft compat (см. ниже)
+
+    if fw in ("iptables", "nftables"):
+        # iptables-nft compat fallback (iptables binary, который на современных
+        # Debian/Ubuntu работает поверх nf_tables kernel). Сохраняем для
+        # окружений без nft binary, но с iptables-nft shim.
         check = run(["iptables", "-C", "INPUT", "-p", proto, "--dport", str(port), "-j", "ACCEPT"])
         if check.returncode == 0:
             c_green(f"iptables: правило для {port}/{proto} уже есть.")

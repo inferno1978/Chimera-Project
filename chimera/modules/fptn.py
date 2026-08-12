@@ -102,6 +102,14 @@ from chimera.modules.proto_common import (
     ProtoCancelled, proto_load_state, proto_save_state,
     proto_ask, proto_gen_password, proto_ipt_persist,
 )
+# nftables — централизованная обёртка (этап 1.7 миграции).
+from chimera.modules.nft_common import (
+    nft_open_port, nft_rule_exists, nft_rule_delete_by_comment,
+)
+from chimera.modules.nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    COMMENT_OPEN_PORT_PREFIX,
+)
 # _Cancelled aliases ProtoCancelled so existing `except _Cancelled:` and
 # `raise _Cancelled` code works unchanged after the local class definition
 # was removed in favour of proto_common.ProtoCancelled.
@@ -482,26 +490,43 @@ def _detect_out_iface() -> str:
     return ""
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IPTABLES / UFW  (открытие порта — как naiveproxy.py/mieru.py)
+#  NFTABLES / UFW  (открытие порта — мигрировано с iptables, этап 1.7)
 # ══════════════════════════════════════════════════════════════════════════════
+def _ipt_rule_comment(port: int) -> str:
+    """Возвращает comment-tag для правила открытия TCP-порта."""
+    return f"{COMMENT_OPEN_PORT_PREFIX}tcp-{port}"
+
 def _ipt_tcp_rule_exists(port: int) -> bool:
-    r = _run(["iptables", "-t", "filter", "-C", "INPUT",
-              "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"], capture=True)
-    return r.returncode == 0
+    """Проверяет наличие nft-правила через nft_rule_exists(comment=...)."""
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_ipt_rule_comment(port),
+        family=NFT_TABLE_FAMILY,
+    )
 
 def _ipt_open_tcp(port: int) -> None:
-    if not _ipt_tcp_rule_exists(port):
-        _run(["iptables", "-t", "filter", "-I", "INPUT", "1",
-              "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"])
+    """Открывает TCP-порт через nft_open_port (idempotent)."""
+    nft_open_port(port, proto="tcp", comment=_ipt_rule_comment(port))
 
 def _ipt_close_tcp(port: int) -> None:
-    for _ in range(5):
-        if not _ipt_tcp_rule_exists(port): break
-        _run(["iptables", "-t", "filter", "-D", "INPUT",
-              "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"])
+    """Закрывает TCP-порт через nft_rule_delete_by_comment."""
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_ipt_rule_comment(port),
+        family=NFT_TABLE_FAMILY, max_iterations=10,
+    )
 
 # _ipt_persist — вынесен в proto_common (использует subprocess.run напрямую,
 # не зависит от module-local _run). Call sites: proto_ipt_persist.
+#
+# ВАЖНО: `_get_chain_policy` и `_write_fw_reconcile_hook` ниже работают с
+# `iptables` CLI напрямую — это intentional, т.к. fptn-server (Rust binary)
+# сам вызывает `iptables -P INPUT/FORWARD/OUTPUT ACCEPT` при старте через
+# RouteManager::Apply(). В современных Debian/Ubuntu `iptables` binary
+# работает поверх nf_tables (iptables-nft shim) — эти вызовы идут в
+# nf_tables kernel, не в legacy xtables. В будущем fptn-server должен
+# научиться работать с nftables native API; пока что сохраняем compat
+# с его поведением.
 
 def _ufw_is_active() -> bool:
     if not shutil.which("ufw"):
@@ -526,7 +551,7 @@ def _open_port(port: int) -> str:
         return f"UFW: TCP {port} открыт."
     _ipt_open_tcp(port)
     proto_ipt_persist()
-    return f"iptables: TCP {port} открыт."
+    return f"nftables: TCP {port} открыт."
 
 def _close_port(port: int) -> None:
     #  миграция на port_registry (с legacy comment).
