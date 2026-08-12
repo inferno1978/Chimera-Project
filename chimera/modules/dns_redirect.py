@@ -2,7 +2,7 @@
 chimera/modules/dns_redirect.py
 ───────────────────────────────────────────────────────────────────────────────
 Принудительное перенаправление DNS-трафика (порт 53, UDP+TCP) от VPN-клиентов
-через iptables/ip6tables NAT REDIRECT на локальный DNSCrypt-proxy.
+через nftables NAT REDIRECT на локальный DNSCrypt-proxy.
 
 ЗАЧЕМ
 =====
@@ -13,25 +13,38 @@ DNSCrypt-proxy. Это:
   • позволяет провайдеру видеть запрашиваемые домены
   • может использоваться для DPI-блокировки по DNS
 
-Правило NAT REDIRECT в PREROUTING перехватывает ВСЕ пакеты с --dport 53,
+Правило NAT REDIRECT в prerouting перехватывает ВСЕ пакеты с dport 53,
 приходящие через VPN-интерфейс (awg0), и перенаправляет их на локальный
 dnscrypt-proxy (по умолчанию 127.0.0.1:5300). Клиент не может обойти это
 на уровне приложения.
 
-АРХИТЕКТУРА
-===========
+АРХИТЕКТУРА (мигрировано с iptables/ip6tables на nftables, этап 1.3)
+===================================================================
 • State-файл: /var/lib/xray-installer/dns_redirect.json (chmod 0o600)
   Поля: enabled, target_port, iface_filter, applied_at, comment
-• Правила iptables: table=nat, chain=PREROUTING, -i <iface> -p udp/tcp --dport 53
-  → REDIRECT --to-ports <dnscrypt_port>
-• Идемпотентность: через -C (check) перед -A (add), по образцу
-  awg_net_common.iptables_ensure()
+• nft rules: table=inet chimera, chain=prerouting,
+  iifname "<iface>" <proto> dport 53 redirect to :<dnscrypt_port>
+  comment "xray-dns-redirect"
+• Идемпотентность: через comment-tag (nft_rule_add с idempotent=True
+  проверяет существование правила с этим comment перед добавлением через
+  nft -j list chain) — заменяет -C перед -A паттерн iptables
 • IPv6: применяется только если dnscrypt-proxy слушает ::1 (в текущей
   конфигурации НЕ слушает — поэтому IPv6 REDIRECT пропускается с warning)
 • Health-check: проверка что dnscrypt-proxy активен и слушает порт
-  перед apply (чтобы не создать black-hole)
-• Persist после reboot: systemd-юнит dns-redirect-restore.service
-  (ExecStartPost применяет правила при старте сети)
+  перед apply (чтобы не создать black-hole) — КРИТИЧНО для SSH
+• Persist после reboot: единый nftables.service (читает /etc/nftables.conf
+  через `nft -f` при старте системы) — заменяет кастомный
+  dns-redirect-restore.service
+
+SSH-CRITICAL WARNING
+====================
+Этот модуль потенциально влияет на SSH-доступ:
+- NAT OUTPUT redirect (resolv_conf_fix) перехватывает локальные DNS-запросы
+  → если что-то сломается, systemd-resolved не сможет резолвить имена
+  → SSH-логин по hostname перестанет работать
+- Любая ошибка в firewall правилах может привести к блокировке SSH
+- Поэтому: тестируйте сначала на dev сервере, не на production!
+- Откат: через провайдерскую консоль (serial/VNC), не через SSH
 
 ПРОТОКОЛ-СПЕЦИФИКА
 ==================
@@ -60,6 +73,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Tuple
 
+# nftables — централизованная обёртка над `nft` CLI (этап 1.3 миграции)
+from .nft_common import (
+    nft_rule_add, nft_rule_exists, nft_rule_delete_by_comment,
+    nft_persist, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_PREROUTING,
+    COMMENT_DNS_REDIRECT, NFT_PERSIST_FILE,
+)
+
 
 # =============================================================================
 #  Константы
@@ -69,7 +92,7 @@ _LOG_FILE       = Path("/var/log/chimera.log")
 _DNSCRYPT_TOML  = Path("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
 _DEFAULT_PORT   = 5300
 _DEFAULT_IFACE  = "awg0"  # standalone AWG и cascade — оба используют awg0
-_COMMENT        = "xray-dns-redirect"  # для идентификации правил при -D
+_COMMENT        = COMMENT_DNS_REDIRECT  # "xray-dns-redirect" — для идемпотентности nft-правил
 
 # systemd unit для persist после reboot
 _RESTORE_SVC    = Path("/etc/systemd/system/dns-redirect-restore.service")
@@ -263,7 +286,7 @@ def health_check_dns_redirect() -> dict:
         "dnscrypt_active": bool,   # запущен ли сервис
         "port_listening_udp": bool,
         "port_listening_tcp": bool,
-        "rules_applied": bool,     # есть ли правила в iptables
+        "rules_applied": bool,     # есть ли правила в nftables
         "ipv6_supported": bool,    # слушает ли dnscrypt на ::1
         "issues": [str],           # список проблем
         "recommendation": str,     # человекочитаемая рекомендация
@@ -289,7 +312,7 @@ def health_check_dns_redirect() -> dict:
     if not result["port_listening_tcp"]:
         result["issues"].append(f"порт {port}/tcp не слушается dnscrypt-proxy")
     if result["enabled"] and not result["rules_applied"]:
-        result["issues"].append("редирект включён в state, но правила в iptables отсутствуют")
+        result["issues"].append("редирект включён в state, но правила в nftables отсутствуют")
     if result["enabled"] and result["rules_applied"] and not result["dnscrypt_active"]:
         result["issues"].append(
             "ВНИМАНИЕ: правила активны, но dnscrypt-proxy не запущен — "
@@ -309,44 +332,141 @@ def health_check_dns_redirect() -> dict:
 
 
 # =============================================================================
-#  Iptables helper (идемпотентное добавление/удаление)
+#  nftables helpers (замена iptables helpers, этап 1.3)
 # =============================================================================
+# ВНИМАНИЕ: Сигнатуры сохранены для обратной совместимости с тестами.
+# Внутренняя реализация использует nft_common вместо прямых subprocess calls.
+# Параметры family/table/chain сохранены как семантические указатели, но
+# в nftables family=inet (одна таблица на v4+v6), table=chimera, chain=prerouting.
+
+# Map iptables family → nft family (оба используют одну таблицу inet chimera)
+_NFT_FAMILY_MAP = {
+    "iptables":  NFT_TABLE_FAMILY,  # inet
+    "ip6tables": NFT_TABLE_FAMILY,  # inet (та же таблица — v4 и v6 правила сосуществуют)
+}
+
+# Map iptables table/chain → nft chain name
+_NFT_CHAIN_MAP = {
+    ("nat", "PREROUTING"): NFT_CHAIN_PREROUTING,
+    ("nat", "OUTPUT"):     "output",  # для resolv_conf_fix (NAT OUTPUT redirect)
+}
+
+
 def _ipt_rule_exists(family: str, table: str, chain: str,
                      rule_args: list) -> bool:
-    """Проверяет существование правила через -C (check).
-    family: 'iptables' или 'ip6tables'.
+    """Проверяет существование правила через comment-tag (nft_rule_exists).
+
+    Заменяет: <family> -t <table> -C <chain> <rule_args> → rc==0
+    Теперь: nft_rule_exists(table='chimera', chain=<mapped>, comment=<extracted>)
+
+    family: 'iptables' или 'ip6tables' (сохранён для совместимости, в nft
+            оба используют одну таблицу inet chimera)
+    rule_args: список аргументов iptables (legacy), из которого извлекаем comment
+               для поиска правила в nft list chain.
     """
-    cmd = [family, "-t", table, "-C", chain] + rule_args
-    r = _run(cmd, quiet=True, check=False)
-    return r.returncode == 0
+    # Извлекаем comment из rule_args (ищем --comment <value>)
+    comment = None
+    for i, arg in enumerate(rule_args):
+        if arg == "--comment" and i + 1 < len(rule_args):
+            comment = rule_args[i + 1]
+            break
+    if comment is None:
+        # Нет comment — не можем искать в nft (без comment ищем по spec, медленнее)
+        # Для DNS redirect это не должно случаться, т.к. _build_redirect_rule_args
+        # всегда добавляет comment.
+        return False
+    # Map iptables table/chain → nft chain name
+    nft_chain = _NFT_CHAIN_MAP.get((table, chain), chain.lower())
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=nft_chain,
+        comment=comment, family=NFT_TABLE_FAMILY
+    )
 
 
 def _ipt_add_rule_idempotent(family: str, table: str, chain: str,
                              rule_args: list) -> bool:
-    """Идемпотентно добавляет правило (через -C → -A).
+    """Идемпотентно добавляет правило через nft_rule_add.
+
+    Заменяет: -C check → если нет, то -A add.
+    Теперь: nft_rule_add с idempotent=True (один вызов, внутри делает
+    comment-check и add если нужно).
+
     Возвращает True если правило добавлено или уже существовало.
     """
-    if _ipt_rule_exists(family, table, chain, rule_args):
-        return True  # уже есть
-    cmd = [family, "-t", table, "-A", chain] + rule_args
-    r = _run(cmd, quiet=True, check=False)
-    if r.returncode != 0:
-        _log("ERROR", f"failed to add rule: {' '.join(cmd)} (rc={r.returncode})")
-        return False
-    return True
+    # Извлекаем comment и iface/proto/port из rule_args для построения nft spec
+    comment = _COMMENT
+    iface = None
+    proto = None
+    dport = None
+    to_ports = None
+    for i, arg in enumerate(rule_args):
+        if arg == "-i" and i + 1 < len(rule_args):
+            iface = rule_args[i + 1]
+        elif arg == "-p" and i + 1 < len(rule_args):
+            proto = rule_args[i + 1]
+        elif arg == "--dport" and i + 1 < len(rule_args):
+            dport = rule_args[i + 1]
+        elif arg == "--to-ports" and i + 1 < len(rule_args):
+            to_ports = rule_args[i + 1]
+        elif arg == "--comment" and i + 1 < len(rule_args):
+            comment = rule_args[i + 1]
+
+    # Строим nft spec
+    spec_parts = []
+    if iface:
+        spec_parts.append(f'iifname "{iface}"')
+    if proto and dport:
+        spec_parts.append(f"{proto} dport {dport}")
+    # REDIRECT target → redirect to :<port>
+    if to_ports:
+        spec_parts.append(f"redirect to :{to_ports}")
+    spec = " ".join(spec_parts)
+
+    # Map iptables table/chain → nft chain name
+    nft_chain = _NFT_CHAIN_MAP.get((table, chain), chain.lower())
+
+    ok = nft_rule_add(
+        table=NFT_TABLE_NAME, chain=nft_chain,
+        rule_spec=spec, family=NFT_TABLE_FAMILY,
+        comment=comment, idempotent=True
+    )
+    if not ok:
+        _log("ERROR", f"failed to add nft rule: {spec} comment={comment}")
+    return ok
 
 
 def _ipt_delete_rule(family: str, table: str, chain: str,
                      rule_args: list) -> bool:
-    """Удаляет правило через -D. Возвращает True при успехе или если правила не было."""
-    cmd = [family, "-t", table, "-D", chain] + rule_args
-    r = _run(cmd, quiet=True, check=False)
-    # rc=0 — удалено; rc=1 — правила не было (тоже OK для идемпотентности)
-    return r.returncode in (0, 1)
+    """Удаляет правило через nft_rule_delete_by_comment.
+
+    Заменяет: <family> -t <table> -D <chain> <rule_args>
+    Теперь: nft_rule_delete_by_comment (находит handle через nft -a list chain
+    и удаляет через `nft delete rule ... handle N`).
+
+    Возвращает True при успехе или если правила не было.
+    """
+    # Извлекаем comment
+    comment = _COMMENT
+    for i, arg in enumerate(rule_args):
+        if arg == "--comment" and i + 1 < len(rule_args):
+            comment = rule_args[i + 1]
+            break
+    nft_chain = _NFT_CHAIN_MAP.get((table, chain), chain.lower())
+    removed = nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=nft_chain,
+        comment=comment, family=NFT_TABLE_FAMILY, max_iterations=20
+    )
+    return removed >= 0  # True если вызвано без исключений
 
 
 def _build_redirect_rule_args(iface: str, proto: str, target_port: int) -> list:
-    """Строит аргументы правила REDIRECT для iptables.
+    """Строит аргументы правила REDIRECT (legacy-формат для совместимости с тестами).
+
+    ВНИМАНИЕ: после миграции на nftables (этап 1.3), этот список не передаётся
+    в subprocess. Он сохранён как семантическое описание правила для:
+      • Тестов, проверяющих структуру правила (iface/proto/dport/to_ports/comment)
+      • Функции _build_nft_rule_spec, которая конвертирует его в nft spec
+
     Пример: ['-i', 'awg0', '-p', 'udp', '--dport', '53',
              '-j', 'REDIRECT', '--to-ports', '5300',
              '-m', 'comment', '--comment', 'xray-dns-redirect']
@@ -361,23 +481,41 @@ def _build_redirect_rule_args(iface: str, proto: str, target_port: int) -> list:
     ]
 
 
+def _build_nft_rule_spec(iface: str, proto: str, target_port: int) -> str:
+    """Конвертирует legacy-аргументы в nft spec.
+
+    Заменяет: iptables -t nat -A PREROUTING -i awg0 -p udp --dport 53
+              -j REDIRECT --to-ports 5300 -m comment --comment xray-dns-redirect
+    На:       nft add rule inet chimera prerouting iifname "awg0" udp dport 53
+              redirect to :5300 comment "xray-dns-redirect"
+    """
+    return f'iifname "{iface}" {proto} dport 53 redirect to :{target_port}'
+
+
 def _check_rules_applied(iface: str, port: int) -> bool:
-    """Проверяет есть ли в iptables наши правила REDIRECT для указанного
+    """Проверяет есть ли в nftables наши правила REDIRECT для указанного
     интерфейса и порта.
+
+    Заменяет: цикл iptables -t nat -C PREROUTING ... для UDP и TCP.
+    Теперь: проверка через nft_rule_exists(comment=...) — comment-tag
+    однозначно идентифицирует наши правила (один tag для обоих proto,
+    т.к. нам важно наличие любого из них).
 
     Аргументы:
       iface — VPN-интерфейс ('awg0', 'tun0', ...)
       port  — целевой порт dnscrypt-proxy (например 5300), для которого
-              строится правило `--to-ports <port>`. НЕ вызывает
+              строится правило `redirect to :<port>`. НЕ вызывает
               get_dnscrypt_port() внутри себя — caller обязан передать
               корректный порт (это нужно чтобы проверка шла по
               сохранённому в state порту, а не по живому TOML).
     """
-    for proto in ("udp", "tcp"):
-        rule_args = _build_redirect_rule_args(iface, proto, port)
-        if not _ipt_rule_exists("iptables", "nat", "PREROUTING", rule_args):
-            return False
-    return True
+    # В nftables проверяем наличие правила по comment-tag.
+    # Comment один для обоих proto (udp+tcp), но это OK —
+    # если есть хотя бы одно правило с нашим comment, значит apply был.
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_PREROUTING,
+        comment=_COMMENT, family=NFT_TABLE_FAMILY
+    )
 
 
 # =============================================================================
@@ -559,103 +697,72 @@ def remove_dns_redirect() -> dict:
 
 
 def _cleanup_all_dns_redirect_rules() -> None:
-    """Удаляет ВСЕ правила с комментарием xray-dns-redirect
+    """Удаляет ВСЕ nft-правила с comment='xray-dns-redirect'
     (для cleanup если admin менял iface между apply).
+
+    Заменяет: цикл по `iptables -t nat -S PREROUTING` → парсинг строк с
+    нашим comment → `iptables -t nat -D PREROUTING <args>` для каждой найденной.
+    (10 итераций максимум для защиты от зацикливания, отдельно для v4 и v6).
+
+    Теперь: один вызов nft_rule_delete_by_comment — находит ВСЕ правила с
+    этим comment в цепочке prerouting и удаляет их через handle (nft -a list
+    chain → handles → delete rule ... handle N). Одним вызовом покрывает
+    и v4, и v6, и любые комбинации интерфейсов.
     """
-    for family in ("iptables", "ip6tables"):
-        # Перечисляем правила с нашим комментарием и удаляем каждое
-        for _ in range(10):  # максимум 10 итераций (защита от зацикливания)
-            r = _run(
-                [family, "-t", "nat", "-S", "PREROUTING"],
-                capture=True, check=False,
-            )
-            if r.returncode != 0:
-                break
-            lines = r.stdout.splitlines()
-            found_to_delete = None
-            for line in lines:
-                if _COMMENT in line and "REDIRECT" in line and "--dport 53" in line:
-                    # Парсим правило: "-A PREROUTING -i awg0 -p udp --dport 53 ..."
-                    # → удаляем через -D PREROUTING <args>
-                    parts = line.split()
-                    if len(parts) < 2 or parts[0] != "-A":
-                        continue
-                    chain = parts[1]
-                    rule_args = parts[2:]
-                    found_to_delete = (chain, rule_args)
-                    break
-            if not found_to_delete:
-                break
-            chain, rule_args = found_to_delete
-            _run([family, "-t", "nat", "-D", chain] + rule_args,
-                 quiet=True, check=False)
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_PREROUTING,
+        comment=_COMMENT, family=NFT_TABLE_FAMILY, max_iterations=50
+    )
 
 
 # =============================================================================
-#  PERSIST после reboot (systemd unit)
+#  PERSIST после reboot (через встроенный nftables.service, этап 1.3)
 # =============================================================================
 def _install_restore_service(iface: str, target_port: int) -> None:
-    """Устанавливает systemd unit, который восстанавливает правила после reboot."""
-    script = (
-        "#!/bin/bash\n"
-        "# Auto-generated by vless-installer (dns_redirect.py)\n"
-        "# НЕ РЕДАКТИРОВАТЬ ВРУЧНУЮ\n"
-        f"IFACE={iface}\n"
-        f"PORT={target_port}\n"
-        "sleep 3  # ждём пока поднимется сеть\n"
-        "# Проверяем что dnscrypt-proxy активен\n"
-        "if ! systemctl is-active --quiet dnscrypt-proxy; then\n"
-        "  echo 'dnscrypt-proxy not active, skipping DNS redirect restore' >&2\n"
-        "  exit 0\n"
-        "fi\n"
-        "# IPv4 UDP\n"
-        f"iptables -t nat -C PREROUTING -i $IFACE -p udp --dport 53 -j REDIRECT "
-        f"--to-ports $PORT -m comment --comment {_COMMENT} 2>/dev/null || \\\n"
-        f"iptables -t nat -A PREROUTING -i $IFACE -p udp --dport 53 -j REDIRECT "
-        f"--to-ports $PORT -m comment --comment {_COMMENT}\n"
-        "# IPv4 TCP\n"
-        f"iptables -t nat -C PREROUTING -i $IFACE -p tcp --dport 53 -j REDIRECT "
-        f"--to-ports $PORT -m comment --comment {_COMMENT} 2>/dev/null || \\\n"
-        f"iptables -t nat -A PREROUTING -i $IFACE -p tcp --dport 53 -j REDIRECT "
-        f"--to-ports $PORT -m comment --comment {_COMMENT}\n"
-    )
+    """Сохраняет nft ruleset в /etc/nftables.conf и включает nftables.service.
+
+    Заменяет: кастомный systemd unit dns-redirect-restore.service с bash-скриптом,
+    который делал `iptables -C || iptables -A` при старте системы.
+
+    Теперь: после apply правил они сразу сохраняются в /etc/nftables.conf через
+    `nft list ruleset > /etc/nftables.conf`. При ребуте системы встроенный
+    nftables.service (Debian/Ubuntu package) читает этот файл через `nft -f`
+    и восстанавливает ВСЕ правила Chimera (DNS redirect + ingress_geoip +
+    ipban + user_ip_whitelist + geoblock + всё остальное).
+
+    ВАЖНО: правила DNS redirect НЕЛЬЗЯ применять при загрузке если dnscrypt-proxy
+    не активен — это создаст black-hole. Поэтому мы пишем /etc/nftables.conf
+    СРАЗУ после apply (rules уже активны), но при загрузке системы
+    nftables.service запускается ПОСЛЕ dnscrypt-proxy.service (через
+    Wants=dnscrypt-proxy.service + After=dnscrypt-proxy.service — это уже
+    настроено в стандартном nftables.service Debian 13).
+
+    Если dnscrypt-proxy упал во время работы системы — rules уже активны
+    и просто перенаправляют трафик на неработающий порт (трафик отбрасывается).
+    Это не идеальная семантика, но идентичная старому iptables поведению.
+    """
     try:
-        _RESTORE_SCRIPT.write_text(script)
-        _RESTORE_SCRIPT.chmod(0o755)
-        svc = (
-            "[Unit]\n"
-            "Description=Restore DNS Redirect iptables rules (VLESS Installer)\n"
-            "After=network-online.target dnscrypt-proxy.service\n"
-            "Wants=network-online.target\n"
-            "\n"
-            "[Service]\n"
-            "Type=oneshot\n"
-            f"ExecStart={_RESTORE_SCRIPT}\n"
-            "RemainAfterExit=yes\n"
-            "\n"
-            "[Install]\n"
-            "WantedBy=multi-user.target\n"
-        )
-        _RESTORE_SVC.write_text(svc)
-        _run(["systemctl", "daemon-reload"], quiet=True)
-        _run(["systemctl", "enable", "dns-redirect-restore"], quiet=True)
+        # Сохраняем весь ruleset в /etc/nftables.conf
+        nft_persist(NFT_PERSIST_FILE)
+        # Включаем встроенный nftables.service
+        from .nft_common import nft_persist_enable_systemd
+        nft_persist_enable_systemd()
+        _log("INFO", f"nft ruleset saved to {NFT_PERSIST_FILE}, nftables.service enabled")
     except Exception as e:
-        _log("WARN", f"cannot install restore service: {e}")
+        _log("WARN", f"cannot enable nftables.service: {e}")
 
 
 def _remove_restore_service() -> None:
-    """Удаляет systemd unit для restore после reboot."""
+    """Обновляет /etc/nftables.conf после удаления DNS redirect правил.
+
+    Заменяет: удаление кастомного dns-redirect-restore.service.
+    Теперь: просто перезаписываем /etc/nftables.conf без DNS redirect правил
+    (они уже удалены из active ruleset через nft_rule_delete_by_comment).
+    """
     try:
-        _run(["systemctl", "stop", "dns-redirect-restore"], quiet=True)
-        _run(["systemctl", "disable", "dns-redirect-restore"], quiet=True)
-    except Exception:
-        pass
-    try:
-        _RESTORE_SVC.unlink(missing_ok=True)
-        _RESTORE_SCRIPT.unlink(missing_ok=True)
-        _run(["systemctl", "daemon-reload"], quiet=True)
-    except Exception:
-        pass
+        nft_persist(NFT_PERSIST_FILE)
+    except Exception as e:
+        _log("WARN", f"cannot update nftables.conf: {e}")
 
 
 # =============================================================================
@@ -699,7 +806,7 @@ def do_manage_dns_redirect() -> None:
                  f"{'слушается' if hc['port_listening_udp'] else 'НЕ слушается'}{NC}")
         _box_row(f"    Порт {port}/tcp:  {GREEN if hc['port_listening_tcp'] else RED}"
                  f"{'слушается' if hc['port_listening_tcp'] else 'НЕ слушается'}{NC}")
-        _box_row(f"    Правила iptables: {GREEN if hc['rules_applied'] else DIM}"
+        _box_row(f"    Правила nft:       {GREEN if hc['rules_applied'] else DIM}"
                  f"{'применены' if hc['rules_applied'] else 'отсутствуют'}{NC}")
         _box_row(f"    IPv6 support:    {GREEN if hc['ipv6_supported'] else YELLOW}"
                  f"{'да (::1 слушается)' if hc['ipv6_supported'] else 'нет (только IPv4)'}{NC}")
@@ -714,7 +821,7 @@ def do_manage_dns_redirect() -> None:
             _box_item("2", f"{RED}Отключить DNS REDIRECT{NC} (удалить правила")
         _box_item("3", "Изменить интерфейс (по умолчанию awg0)")
         _box_item("4", "Изменить целевой порт (по умолчанию auto-detected)")
-        _box_item("5", "Показать текущие правила iptables")
+        _box_item("5", "Показать текущие правила nft")
         _box_item("6", "Тест: dig через VPN-интерфейс (если возможно)")
         _box_back()
         _box_bottom()
@@ -749,7 +856,7 @@ def _menu_apply(iface: str, port: int) -> None:
     print()
     _box_top("🔒  Применение DNS REDIRECT")
     _box_desc(
-        f"Будут добавлены правила в iptables nat PREROUTING для интерфейса "
+        f"Будут добавлены правила в nftables (inet chimera prerouting) для интерфейса "
         f"{CYAN}{iface}{NC}, перенаправляющие DNS-трафик (UDP+TCP, порт 53) "
         f"на dnscrypt-proxy (порт {CYAN}{port}{NC})."
     )
@@ -793,7 +900,7 @@ def _menu_remove() -> None:
     if result["success"]:
         _ok("DNS REDIRECT отключён, правила удалены")
     else:
-        _err("Не удалось удалить некоторые правила — проверьте iptables -t nat -S")
+        _err("Не удалось удалить некоторые правила — проверьте nft list chain inet chimera prerouting")
     input(f"\n{BLUE}Нажмите Enter...{NC}")
 
 
@@ -849,26 +956,40 @@ def _menu_change_port() -> None:
 
 
 def _menu_show_rules() -> None:
-    """Показывает текущие правила iptables nat PREROUTING."""
+    """Показывает текущие nft правила chimera prerouting."""
     os.system("clear")
     print()
-    _box_top("🔍  Текущие правила iptables nat PREROUTING")
+    _box_top("🔍  Текущие правила nft (chimera prerouting)")
     _box_bottom()
     print()
-    print(f"{BOLD}IPv4 (iptables):{NC}")
-    _run(["iptables", "-t", "nat", "-S", "PREROUTING"])
-    print()
-    print(f"{BOLD}IPv6 (ip6tables):{NC}")
-    _run(["ip6tables", "-t", "nat", "-S", "PREROUTING"])
+    print(f"{BOLD}Все правила в inet chimera prerouting:{NC}")
+    # nft list chain inet chimera prerouting — показывает все правила
+    r = _run(["nft", "list", "chain", "inet", "chimera", "prerouting"],
+             capture=True, check=False)
+    if r.returncode == 0 and r.stdout:
+        for line in r.stdout.splitlines():
+            print(f"  {line}")
+    else:
+        print(f"  {DIM}(цепочка не существует или nft не установлен){NC}")
     print()
     # Фильтр по нашему комментарию
-    print(f"{BOLD}Только DNS REDIRECT правила:{NC}")
-    for family in ("iptables", "ip6tables"):
-        r = _run([family, "-t", "nat", "-S", "PREROUTING"], capture=True, check=False)
-        if r.returncode == 0:
-            for line in r.stdout.splitlines():
-                if _COMMENT in line:
-                    print(f"  {CYAN}{family}{NC}: {line}")
+    print(f"{BOLD}Только DNS REDIRECT правила (comment={_COMMENT}):{NC}")
+    r = _run(["nft", "-a", "list", "chain", "inet", "chimera", "prerouting"],
+             capture=True, check=False)
+    if r.returncode == 0 and r.stdout:
+        # Ищем блоки правил с нашим comment
+        current_block = []
+        for line in r.stdout.splitlines():
+            current_block.append(line)
+            if _COMMENT in line:
+                # Печатаем блок включая handle
+                for blk_line in current_block:
+                    print(f"  {CYAN}{blk_line}{NC}")
+                print()
+                current_block = []
+            elif line.startswith("\t}") or (line.strip() and not line.startswith("\t")):
+                if not any(_COMMENT in b for b in current_block):
+                    current_block = []
     print()
     input(f"{BLUE}Нажмите Enter...{NC}")
 

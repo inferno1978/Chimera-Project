@@ -62,6 +62,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+# nftables — централизованная обёртка над `nft` CLI (этап 1.3 миграции)
+from .nft_common import (
+    nft_rule_add, nft_rule_exists, nft_rule_delete_by_comment,
+    _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY,
+    COMMENT_DNS_LOCAL_REDIRECT,
+)
+
 
 # =============================================================================
 #  Константы
@@ -78,7 +88,9 @@ _DNSCRYPT_TOML        = Path("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
 _DNSCRYPT_SERVICE     = "dnscrypt-proxy.service"
 _LOCAL_DNS            = "127.0.0.1"
 _DNS_PORT             = 53       # стандартный DNS порт (glibc отправляет сюда)
-_IPTABLES_COMMENT     = "chimera-dns-fix"  # для идентификации правил при -D
+_IPTABLES_COMMENT     = COMMENT_DNS_LOCAL_REDIRECT  # "chimera-dns-fix"
+# nft OUTPUT chain name (одна таблица inet chimera для v4+v6)
+_NFT_OUTPUT_CHAIN     = "output"
 
 # Persist-сервис — Python-скрипт (не bash), перезаписывает resolv.conf +
 # nsswitch.conf после ребута если cloud-init их регенерировал.
@@ -201,68 +213,81 @@ def _is_dnscrypt_listening(addr: str, port: int) -> bool:
 
 
 def _is_dns_redirect_active(dnscrypt_port: int) -> bool:
-    """Проверяет, активен ли iptables redirect 53→dnscrypt_port для локальных запросов."""
+    """Проверяет, активен ли nft redirect 53→dnscrypt_port для локальных запросов.
+
+    Заменяет: парсинг `iptables -t nat -L OUTPUT -n` на наличие 'dpt:53' и
+    'redir ports <port>' / 'to:<port>'.
+    Теперь: nft_rule_exists(comment='chimera-dns-fix') — проверка по comment-tag.
+    Порт не проверяется отдельно, т.к. comment однозначно идентифицирует наши
+    правила (один tag для обоих proto udp+tcp).
+    """
     if dnscrypt_port == _DNS_PORT:
         return True  # redirect не нужен — DNSCrypt уже на 53
-    r = _run(["iptables", "-t", "nat", "-L", "OUTPUT", "-n"],
-             capture=True, check=False)
-    if r.returncode != 0:
-        return False
-    # iptables выводит: "REDIRECT tcp ... dpt:53 redir ports 5300"
-    # или в numeric: "REDIRECT tcp ... dpt:53 to:5300"
-    out = r.stdout
-    return ("dpt:53" in out and
-            (f"to:{dnscrypt_port}" in out or f"ports {dnscrypt_port}" in out
-             or f"redir ports {dnscrypt_port}" in out))
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=_NFT_OUTPUT_CHAIN,
+        comment=_IPTABLES_COMMENT, family=NFT_TABLE_FAMILY
+    )
 
 
 def _apply_dns_redirect(dnscrypt_port: int) -> tuple:
-    """Создаёт iptables NAT OUTPUT redirect 53→dnscrypt_port.
+    """Создаёт nft NAT OUTPUT redirect 53→dnscrypt_port.
 
     glibc (curl, dig, apt, python, ssh) отправляет DNS-запросы на
     nameserver:53. DNSCrypt слушает на 5300. Без redirect — DNS мёртв.
     Redirect перехватывает ТОЛЬКО локальные запросы к 127.0.0.1:53 и
     перенаправляет на 5300. НЕ трогает интерфейсы, НЕ убивает SSH.
 
+    Заменяет: iptables -t nat -A OUTPUT -p <proto> -d 127.0.0.1 --dport 53
+              -j REDIRECT --to-ports <port> -m comment --comment chimera-dns-fix
+              (цикл для udp + tcp, с предшествующим -D для idempotency)
+    Теперь:   nft_rule_add(..., rule_spec='<proto> dport 53 ip daddr 127.0.0.1
+              redirect to :<port>', comment='chimera-dns-fix', idempotent=True)
+              для udp и tcp. Idempotency через comment-tag (один вызов
+              nft_rule_add проверяет существование и добавляет если нужно).
+
     Возвращает (ok, error).
     """
     if dnscrypt_port == _DNS_PORT:
         return True, None  # redirect не нужен
 
-    # Удаляем старые правила если есть (idempotent).
-    for proto in ("udp", "tcp"):
-        _run(["iptables", "-t", "nat", "-D", "OUTPUT",
-              "-p", proto, "-d", _LOCAL_DNS, "--dport", str(_DNS_PORT),
-              "-j", "REDIRECT", "--to-ports", str(dnscrypt_port),
-              "-m", "comment", "--comment", _IPTABLES_COMMENT],
-             capture=True, check=False)
+    # Удаляем старые правила с этим comment (если есть старые с другим портом)
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=_NFT_OUTPUT_CHAIN,
+        comment=_IPTABLES_COMMENT, family=NFT_TABLE_FAMILY, max_iterations=20
+    )
 
-    # Добавляем новые.
+    # Добавляем новые (идемпотентно через comment-tag).
     for proto in ("udp", "tcp"):
-        r = _run(["iptables", "-t", "nat", "-A", "OUTPUT",
-                  "-p", proto, "-d", _LOCAL_DNS, "--dport", str(_DNS_PORT),
-                  "-j", "REDIRECT", "--to-ports", str(dnscrypt_port),
-                  "-m", "comment", "--comment", _IPTABLES_COMMENT],
-                 capture=True, check=False)
-        if r.returncode != 0:
-            return False, f"iptables -A OUTPUT {proto}: rc={r.returncode}, stderr={r.stderr.strip()[:120]}"
+        spec = (f"{proto} dport {_DNS_PORT} ip daddr {_LOCAL_DNS} "
+                f"redirect to :{dnscrypt_port}")
+        ok = nft_rule_add(
+            table=NFT_TABLE_NAME, chain=_NFT_OUTPUT_CHAIN,
+            rule_spec=spec, family=NFT_TABLE_FAMILY,
+            comment=_IPTABLES_COMMENT, idempotent=True
+        )
+        if not ok:
+            return False, (f"nft add rule output {proto} dport {_DNS_PORT} "
+                          f"redirect to :{dnscrypt_port} failed")
 
     return True, None
 
 
 def _remove_dns_redirect(dnscrypt_port: int) -> tuple:
-    """Удаляет iptables NAT OUTPUT redirect 53→dnscrypt_port.
+    """Удаляет nft NAT OUTPUT redirect 53→dnscrypt_port.
+
+    Заменяет: цикл iptables -t nat -D OUTPUT ... (для udp + tcp)
+    Теперь: один вызов nft_rule_delete_by_comment — находит все правила
+    с comment='chimera-dns-fix' и удаляет через handle (nft -a list chain
+    → handles → delete rule ... handle N).
 
     Возвращает (ok, error).
     """
     if dnscrypt_port == _DNS_PORT:
         return True, None
-    for proto in ("udp", "tcp"):
-        _run(["iptables", "-t", "nat", "-D", "OUTPUT",
-              "-p", proto, "-d", _LOCAL_DNS, "--dport", str(_DNS_PORT),
-              "-j", "REDIRECT", "--to-ports", str(dnscrypt_port),
-              "-m", "comment", "--comment", _IPTABLES_COMMENT],
-             capture=True, check=False)
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=_NFT_OUTPUT_CHAIN,
+        comment=_IPTABLES_COMMENT, family=NFT_TABLE_FAMILY, max_iterations=20
+    )
     return True, None
 
 
@@ -524,7 +549,8 @@ try:
 except Exception:
     pass
 
-# 5. iptables redirect 53→5300 (БЕЗОПАСНО — не трогает интерфейсы)
+# 5. nft redirect 53→5300 (БЕЗОПАСНО — не трогает интерфейсы)
+# ЭТАП 1.3: мигрировано с iptables на nftables.
 # glibc отправляет DNS на nameserver:53. DNSCrypt слушает на 5300.
 # Без redirect — DNS мёртв после применения фикса.
 DNS_PORT = 53
@@ -541,22 +567,26 @@ try:
             if len(parts) == 2:
                 DNSCRYPT_PORT = int(parts[1])
     if DNSCRYPT_PORT != DNS_PORT:
+        # ЭТАП 1.3: используем nft binary напрямую (этот скрипт standalone,
+        # не импортирует chimera.modules). Эквивалент:
+        # iptables -t nat -A OUTPUT -p <proto> -d 127.0.0.1 --dport 53
+        #   -j REDIRECT --to-ports <port> -m comment --comment chimera-dns-fix
+        # → nft add rule inet chimera output <proto> dport 53 ip daddr 127.0.0.1
+        #   redirect to :<port> comment "chimera-dns-fix"
         for proto in ("udp", "tcp"):
-            # Удаляем старое правило если есть.
-            subprocess.run(["iptables", "-t", "nat", "-D", "OUTPUT",
-                          "-p", proto, "-d", LOCAL_DNS, "--dport", str(DNS_PORT),
-                          "-j", "REDIRECT", "--to-ports", str(DNSCRYPT_PORT),
-                          "-m", "comment", "--comment", "chimera-dns-fix"],
+            spec = f'{proto} dport {DNS_PORT} ip daddr {LOCAL_DNS} redirect to :{DNSCRYPT_PORT}'
+            # nft add rule inet chimera output <spec> comment "chimera-dns-fix"
+            # (idempotent: если уже есть с этим comment, nft не добавит дубль,
+            # но для надёжности сначала flush через delete by comment)
+            subprocess.run(['nft', 'delete', 'rule', 'inet', 'chimera', 'output',
+                          'comment', '"chimera-dns-fix"'],
                          capture_output=True, timeout=5)
-            # Добавляем новое.
-            subprocess.run(["iptables", "-t", "nat", "-A", "OUTPUT",
-                          "-p", proto, "-d", LOCAL_DNS, "--dport", str(DNS_PORT),
-                          "-j", "REDIRECT", "--to-ports", str(DNSCRYPT_PORT),
-                          "-m", "comment", "--comment", "chimera-dns-fix"],
+            subprocess.run(['nft', 'add', 'rule', 'inet', 'chimera', 'output',
+                          *spec.split(), 'comment', '"chimera-dns-fix"'],
                          capture_output=True, timeout=5)
-        log(f"iptables redirect {DNS_PORT}→{DNSCRYPT_PORT}")
+        log(f"nft redirect {DNS_PORT}→{DNSCRYPT_PORT}")
 except Exception as e:
-    log(f"iptables redirect ERROR: {e}")
+    log(f"nft redirect ERROR: {e}")
 
 log("done")
 '''

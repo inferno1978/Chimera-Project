@@ -122,15 +122,13 @@ class TestDiagnoseResolvConf(_BaseTest):
             ("systemctl", "is-active", "dnscrypt-proxy.service"):
                 _make_completed(stdout="active"),
             ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
-            # iptables redirect активен (to:5300 + dpt:53 в выводе)
-            ("iptables",): _make_completed(
-                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 redir ports 5300\n"
-                       "REDIRECT  udp  --  127.0.0.1  anywhere  udp dpt:53 redir ports 5300\n"),
         }
+        # ЭТАП 1.3: _is_dns_redirect_active теперь вызывает nft_rule_exists
         with patch.object(resolv_conf_fix, "_run",
                           side_effect=_mock_run_factory(cmd_to_result)), \
              patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
-                          return_value=("127.0.0.1", 5300)):
+                          return_value=("127.0.0.1", 5300)), \
+             patch.object(resolv_conf_fix, "nft_rule_exists", return_value=True):
             diag = resolv_conf_fix.diagnose_resolv_conf()
         self.assertFalse(diag["fix_needed"])
         self.assertTrue(diag["resolv_conf_on_localhost"])
@@ -210,13 +208,13 @@ class TestFixResolvConf(_BaseTest):
             ("systemctl", "is-active", "dnscrypt-proxy.service"):
                 _make_completed(stdout="active"),
             ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
-            ("iptables",): _make_completed(
-                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 redir ports 5300\n"),
         }
+        # ЭТАП 1.3: _is_dns_redirect_active теперь через nft_rule_exists
         with patch.object(resolv_conf_fix, "_run",
                           side_effect=_mock_run_factory(cmd_to_result)), \
              patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
-                          return_value=("127.0.0.1", 5300)):
+                          return_value=("127.0.0.1", 5300)), \
+             patch.object(resolv_conf_fix, "nft_rule_exists", return_value=True):
             result = resolv_conf_fix.fix_resolv_conf_to_localhost()
         self.assertFalse(result["ok"])
 
@@ -228,8 +226,6 @@ class TestFixResolvConf(_BaseTest):
             ("systemctl", "is-active", "dnscrypt-proxy.service"):
                 _make_completed(stdout="active"),
             ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
-            ("iptables",): _make_completed(
-                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 redir ports 5300\n"),
             ("resolvectl", "dns"): _make_completed(stdout=""),
             ("systemctl", "restart", "systemd-resolved"): _make_completed(rc=0),
             ("resolvectl", "flush-caches"): _make_completed(rc=0),
@@ -237,10 +233,12 @@ class TestFixResolvConf(_BaseTest):
             ("systemctl", "enable"): _make_completed(rc=0),
             ("systemctl", "start"): _make_completed(rc=0),
         }
+        # ЭТАП 1.3: _is_dns_redirect_active теперь через nft_rule_exists
         with patch.object(resolv_conf_fix, "_run",
                           side_effect=_mock_run_factory(cmd_to_result)), \
              patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
-                          return_value=("127.0.0.1", 5300)):
+                          return_value=("127.0.0.1", 5300)), \
+             patch.object(resolv_conf_fix, "nft_rule_exists", return_value=True):
             # Without force — fails
             r1 = resolv_conf_fix.fix_resolv_conf_to_localhost()
             self.assertFalse(r1["ok"])
