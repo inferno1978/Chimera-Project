@@ -90,24 +90,39 @@ class TestIngressStateLoadSave(unittest.TestCase):
 
 
 class TestIngressIpsetAvailable(unittest.TestCase):
-    """_ingress_ipset_available / _ingress_iptables_available."""
+    """_ingress_ipset_available / _ingress_iptables_available — aliases для _nft_available.
+
+    После миграции на nftables (этап 1.2) обе функции делегируют в
+    `chimera.modules.nft_common._nft_available()` — больше не используют
+    `shutil.which` напрямую. Поэтому патчим `_nft_available` в модуле
+    `ingress_geoip` (локальный binding), а не `shutil.which` глобально —
+    это избегает утечек мока между тестовыми модулями.
+    """
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
     def test_returns_true_when_ipset_found(self):
         from chimera.modules.ingress_geoip import _ingress_ipset_available
-        with patch("shutil.which", return_value="/usr/sbin/ipset"):
+        # Patch _nft_available в ingress_geoip (локальный binding из `from
+        # .nft_common import _nft_available`) — это имитирует `nft` binary
+        # доступный в PATH.
+        with patch("chimera.modules.ingress_geoip._nft_available",
+                   return_value=True):
             self.assertTrue(_ingress_ipset_available())
 
     def test_returns_false_when_not_found(self):
         from chimera.modules.ingress_geoip import _ingress_ipset_available
-        with patch("shutil.which", return_value=None):
+        with patch("chimera.modules.ingress_geoip._nft_available",
+                   return_value=False):
             self.assertFalse(_ingress_ipset_available())
 
     def test_iptables_available(self):
+        # _ingress_iptables_available теперь тоже делегирует в _nft_available
+        # (nftables заменяет и iptables, и ip6tables одной утилитой).
         from chimera.modules.ingress_geoip import _ingress_iptables_available
-        with patch("shutil.which", return_value="/usr/sbin/iptables"):
+        with patch("chimera.modules.ingress_geoip._nft_available",
+                   return_value=True):
             self.assertTrue(_ingress_iptables_available())
 
 
