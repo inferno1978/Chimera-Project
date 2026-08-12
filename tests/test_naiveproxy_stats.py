@@ -467,3 +467,91 @@ class TestIptablesSpeed(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТЕСТЫ МИГРАЦИИ НА NFTABLES (этап 1.5) — мок nft_common
+# ══════════════════════════════════════════════════════════════════════════════
+class TestNftMigration(unittest.TestCase):
+    """Проверяет что naiveproxy_stats.py использует nft_common вместо прямых
+    iptables subprocess-вызовов (этап 1.5 миграции).
+
+    Мокает nft_rule_insert / nft_rule_exists / nft_rule_counter_read /
+    _nft_available — проверяет что:
+      • _ensure_nft_counter_rule создаёт counter-rule через nft_rule_insert.
+      • _iptables_bytes делегирует в nft_rule_counter_read (хотя имя сохранено
+        для обратной совместимости со старыми тестами).
+      • Используется comment-tag "naiveproxy-stats" (локальная константа).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_uses_naiveproxy_stats_comment_tag(self):
+        """Comment-tag для counter-rule — "naiveproxy-stats" (локальная константа)."""
+        from chimera.modules import naiveproxy_stats
+        self.assertEqual(naiveproxy_stats._NAIVEPROXY_STATS_COMMENT,
+                         "naiveproxy-stats")
+
+    def test_ensure_nft_counter_rule_returns_false_when_unavailable(self):
+        """Если nft binary недоступен — _ensure_nft_counter_rule возвращает False."""
+        from chimera.modules import naiveproxy_stats
+        with patch("chimera.modules.naiveproxy_stats._nft_available",
+                   return_value=False):
+            self.assertFalse(naiveproxy_stats._ensure_nft_counter_rule(443))
+
+    def test_ensure_nft_counter_rule_returns_true_if_exists(self):
+        """Если counter-rule уже есть — не пересоздаём."""
+        from chimera.modules import naiveproxy_stats
+        with patch("chimera.modules.naiveproxy_stats._nft_available",
+                   return_value=True), \
+             patch("chimera.modules.naiveproxy_stats.nft_rule_exists",
+                   return_value=True) as mock_exists, \
+             patch("chimera.modules.naiveproxy_stats.nft_rule_insert") as mock_insert:
+            result = naiveproxy_stats._ensure_nft_counter_rule(443)
+        self.assertTrue(result)
+        mock_insert.assert_not_called()
+        _, kwargs = mock_exists.call_args
+        self.assertEqual(kwargs.get("comment"), "naiveproxy-stats")
+        self.assertEqual(kwargs.get("chain"), "input")
+
+    def test_ensure_nft_counter_rule_inserts_when_missing(self):
+        """Если counter-rule нет — создаём через nft_rule_insert."""
+        from chimera.modules import naiveproxy_stats
+        with patch("chimera.modules.naiveproxy_stats._nft_available",
+                   return_value=True), \
+             patch("chimera.modules.naiveproxy_stats.nft_rule_exists",
+                   return_value=False), \
+             patch("chimera.modules.naiveproxy_stats.nft_rule_insert",
+                   return_value=True) as mock_insert:
+            result = naiveproxy_stats._ensure_nft_counter_rule(443)
+        self.assertTrue(result)
+        mock_insert.assert_called_once()
+        _, kwargs = mock_insert.call_args
+        spec = kwargs.get("rule_spec", "")
+        self.assertIn("tcp dport 443", spec)
+        self.assertIn("counter accept", spec)
+        self.assertEqual(kwargs.get("comment"), "naiveproxy-stats")
+
+    def test_iptables_bytes_uses_nft_counter_read(self):
+        """_iptables_bytes делегирует в nft_rule_counter_read (имя сохранено)."""
+        from chimera.modules import naiveproxy_stats
+        with patch("chimera.modules.naiveproxy_stats._nft_available",
+                   return_value=True), \
+             patch("chimera.modules.naiveproxy_stats.nft_rule_counter_read",
+                   return_value={"packets": 100, "bytes": 4096}) as mock_cnt, \
+             patch("chimera.modules.naiveproxy_stats._ensure_nft_counter_rule",
+                   return_value=True):
+            result = naiveproxy_stats._iptables_bytes(443)
+        self.assertEqual(result, 4096)
+        mock_cnt.assert_called_once()
+        _, kwargs = mock_cnt.call_args
+        self.assertEqual(kwargs.get("comment"), "naiveproxy-stats")
+        self.assertEqual(kwargs.get("chain"), "input")
+
+    def test_iptables_bytes_returns_zero_when_nft_unavailable(self):
+        """Если nft недоступен — _iptables_bytes возвращает 0."""
+        from chimera.modules import naiveproxy_stats
+        with patch("chimera.modules.naiveproxy_stats._nft_available",
+                   return_value=False):
+            self.assertEqual(naiveproxy_stats._iptables_bytes(443), 0)

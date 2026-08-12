@@ -450,3 +450,106 @@ class TestCalcTrend(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТЕСТЫ МИГРАЦИИ НА NFTABLES (этап 1.5) — мок nft_common
+# ══════════════════════════════════════════════════════════════════════════════
+class TestNftMigration(unittest.TestCase):
+    """Проверяет что mieru_stats.py использует nft_common вместо прямых
+    iptables subprocess-вызовов (этап 1.5 миграции).
+
+    Мокает nft_rule_insert / nft_rule_exists / nft_rule_delete_by_comment /
+    nft_rule_counter_read / _nft_available — проверяет что:
+      • _ensure_iptables_rule создаёт counter-rule через nft_rule_insert.
+      • _iptables_stats читает bytes через nft_rule_counter_read.
+      • Используется comment-tag "mita-stats" (из nft_constants).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_uses_mita_stats_comment_tag(self):
+        """Comment-tag для counter-rule — "mita-stats" из nft_constants."""
+        from chimera.modules import mieru_stats
+        from chimera.modules.nft_constants import COMMENT_MITA_STATS
+        self.assertEqual(mieru_stats._MITA_STATS_COMMENT, COMMENT_MITA_STATS)
+        self.assertEqual(mieru_stats._MITA_STATS_COMMENT, "mita-stats")
+
+    def test_ensure_rule_returns_false_when_nft_unavailable(self):
+        """Если nft binary недоступен — _ensure_iptables_rule возвращает False."""
+        from chimera.modules import mieru_stats
+        with patch("chimera.modules.mieru_stats._nft_available",
+                   return_value=False):
+            self.assertFalse(mieru_stats._ensure_iptables_rule(2012, 2022, "tcp"))
+
+    def test_ensure_rule_returns_true_if_rule_already_exists(self):
+        """Если counter-rule уже есть (через comment-tag) — не пересоздаём."""
+        from chimera.modules import mieru_stats
+        with patch("chimera.modules.mieru_stats._nft_available",
+                   return_value=True), \
+             patch("chimera.modules.mieru_stats.nft_rule_exists",
+                   return_value=True) as mock_exists, \
+             patch("chimera.modules.mieru_stats.nft_rule_insert") as mock_insert:
+            result = mieru_stats._ensure_iptables_rule(2012, 2022, "tcp")
+        self.assertTrue(result)
+        mock_insert.assert_not_called()
+        # Проверяем что exists вызван с правильным comment-tag
+        _, kwargs = mock_exists.call_args
+        self.assertEqual(kwargs.get("comment"), "mita-stats")
+        self.assertEqual(kwargs.get("chain"), "input")
+
+    def test_ensure_rule_inserts_when_missing(self):
+        """Если counter-rule нет — создаём через nft_rule_insert с counter accept."""
+        from chimera.modules import mieru_stats
+        with patch("chimera.modules.mieru_stats._nft_available",
+                   return_value=True), \
+             patch("chimera.modules.mieru_stats.nft_rule_exists",
+                   return_value=False), \
+             patch("chimera.modules.mieru_stats.nft_rule_delete_by_comment",
+                   return_value=0), \
+             patch("chimera.modules.mieru_stats.nft_rule_insert",
+                   return_value=True) as mock_insert:
+            result = mieru_stats._ensure_iptables_rule(2012, 2012, "tcp")
+        self.assertTrue(result)
+        mock_insert.assert_called_once()
+        _, kwargs = mock_insert.call_args
+        # rule_spec должен содержать proto+port+counter
+        spec = kwargs.get("rule_spec", "")
+        self.assertIn("tcp", spec)
+        self.assertIn("2012", spec)
+        self.assertIn("counter accept", spec)
+        self.assertEqual(kwargs.get("comment"), "mita-stats")
+
+    def test_ensure_rule_uses_dash_for_port_range(self):
+        """nft использует дефис для диапазона портов (не двоеточие)."""
+        from chimera.modules import mieru_stats
+        # Проверяем helper-функцию напрямую
+        spec = mieru_stats._nft_mita_rule_spec(2012, 2022, "tcp")
+        self.assertEqual(spec, "tcp dport 2012-2022 counter accept")
+        # Одиночный порт — без дефиса
+        spec = mieru_stats._nft_mita_rule_spec(2012, 2012, "udp")
+        self.assertEqual(spec, "udp dport 2012 counter accept")
+
+    def test_iptables_stats_uses_nft_counter_read(self):
+        """_iptables_stats делегирует в nft_rule_counter_read с comment-tag."""
+        from chimera.modules import mieru_stats
+        with patch("chimera.modules.mieru_stats._nft_available",
+                   return_value=True), \
+             patch("chimera.modules.mieru_stats.nft_rule_counter_read",
+                   return_value={"packets": 100, "bytes": 4096}) as mock_cnt:
+            result = mieru_stats._iptables_stats(2012, 2022, "tcp")
+        self.assertEqual(result["bytes"], 4096)
+        self.assertEqual(result["packets"], 100)
+        mock_cnt.assert_called_once()
+        _, kwargs = mock_cnt.call_args
+        self.assertEqual(kwargs.get("comment"), "mita-stats")
+        self.assertEqual(kwargs.get("chain"), "input")
+
+    def test_iptables_stats_returns_zero_when_nft_unavailable(self):
+        """Если nft недоступен — _iptables_stats возвращает zeros."""
+        from chimera.modules import mieru_stats
+        with patch("chimera.modules.mieru_stats._nft_available",
+                   return_value=False):
+            result = mieru_stats._iptables_stats(2012, 2022, "tcp")
+        self.assertEqual(result, {"bytes": 0, "packets": 0})

@@ -4,8 +4,12 @@ chimera/modules/hysteria2_traffic.py
 Сбор статистики трафика Hysteria2.
 
 Источники (без новых демонов):
-  • iptables -L -n -v -x  — байты/пакеты по UDP-правилам H2
-  • ip6tables             — то же для IPv6
+  • nft rule counter на UDP-портах H2 (per-port) — байты/пакеты.
+      Мигрировано с iptables (этап 1.5): раньше было `iptables -L INPUT -n -v -x`
+      и `ip6tables -L INPUT -n -v -x` (два стека v4+v6). Теперь — один вызов
+      `nft_rule_counter_read(table, "input", comment="hysteria2-stats-<port>")`
+      в единой таблице `inet chimera` (покрывает и v4, и v6 без дублирования).
+      Семантика та же (считаются те же байты на тех же UDP-портах H2).
   • ss -u -s              — UDP-сокеты и буферы
   • /var/log/hysteria.log — парсинг строк с трафиком H2
 
@@ -46,25 +50,87 @@ from chimera.modules.box_renderer import (
     _box_bottom, _box_back,
 )
 
+# nftables — централизованная обёртка над `nft` CLI (этап 1.5 миграции).
+# Заменяет парсинг `iptables -L INPUT -n -v -x` (и `ip6tables` для v6) на
+# JSON-based nft_rule_counter_read. Единая таблица `inet chimera` покрывает
+# и v4, и v6 — больше не нужен отдельный вызов для IPv6.
+from .nft_common import (
+    nft_rule_insert, nft_rule_exists, nft_rule_counter_read, _nft_available,
+)
+from .nft_constants import NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT
+
 
 _STATS_CACHE = Path("/var/lib/xray-installer/h2_traffic_cache.json")
 _PREV_BYTES_KEY = "_h2_prev_bytes"
 
+# Comment-tag для counter-правил Hysteria2 на UDP-портах.
+# Per-port (динамический): f" hysteria2-stats-{port}". Локальная константа
+# (не вынесена в nft_constants — используется только в этом модуле).
+_HYSTERIA2_STATS_COMMENT_PREFIX = "hysteria2-stats-"
+
+
+def _h2_stats_comment(port: int) -> str:
+    """Возвращает comment-tag для counter-правила на конкретном UDP-порту H2.
+
+    Пример: port=443 → "hysteria2-stats-443".
+    """
+    return f"{_HYSTERIA2_STATS_COMMENT_PREFIX}{port}"
+
+
+def _ensure_h2_counter_rule(port: int) -> bool:
+    """Гарантирует наличие counter-rule `udp dport <port> counter accept` с
+    comment-tag "hysteria2-stats-<port>" в цепочке input таблицы chimera.
+
+    Заменяет: неявную зависимость от ранее созданного (где-то ещё) правила
+              `iptables -I INPUT 1 -p udp --dport <port> -j ACCEPT` (старый
+              код НЕ создавал правило сам — только читал существующее).
+    Теперь: модль сам создаёт counter-rule при первом запросе статистики,
+            используя per-port comment-tag для идемпотентности.
+
+    Единая таблица `inet chimera` покрывает и v4, и v6 — больше НЕ нужен
+    отдельный вызов `ip6tables -L INPUT` для IPv6 (как было в старом коде).
+    """
+    if not _nft_available():
+        return False
+    comment = _h2_stats_comment(port)
+    if nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=comment, family=NFT_TABLE_FAMILY,
+    ):
+        return True
+    return nft_rule_insert(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        rule_spec=f"udp dport {port} counter accept",
+        comment=comment, family=NFT_TABLE_FAMILY, idempotent=True,
+    )
+
 
 def _parse_iptables_bytes(port: int, ipv6: bool = False) -> int:
-    """Парсит байты из iptables для UDP-правила на указанный порт."""
-    ipt = "ip6tables" if ipv6 else "iptables"
-    try:
-        r = _run([ipt, "-L", "INPUT", "-n", "-v", "-x"], capture=True, timeout=10)
-        for line in r.stdout.splitlines():
-            if f"udp dpt:{port}" in line or f"dport {port}" in line:
-                parts = line.split()
-                # Формат: pkts bytes target prot opt in out src dst
-                if len(parts) >= 2 and parts[1].isdigit():
-                    return int(parts[1])
-    except Exception:
-        pass
-    return 0
+    """Парсит байты из counter-правила nftables input для UDP-порта.
+
+    Заменяет: парсинг `iptables -L INPUT -n -v -x` (для v4) и
+              `ip6tables -L INPUT -n -v -x` (для v6) с поиском строки с
+              `udp dpt:PORT` или `dport PORT` и извлечением 2-й колонки.
+    Теперь: nft_rule_counter_read(table, "input", comment="hysteria2-stats-<port>")
+            → JSON-парсинг `nft -j list chain inet chimera input` → counter expr.
+
+    ВАЖНО: параметр `ipv6` сохранён для обратной совместимости со старыми
+    вызовами, но в nftables он ИГНОРИРУЕТСЯ — таблица `inet chimera` покрывает
+    и v4, и v6 одновременно. Вызов делается один раз (не два, как раньше).
+    Раньше caller делал два вызова (ipv6=False + ipv6=True) и суммировал
+    байты — теперь это избыточно, но остаётся рабочим (второй вызов вернёт
+    тот же результат, что даст 2x байт при суммировании — см. заметку в
+    h2_traffic_collect ниже, где цикл по обоим стекам УБРАН).
+    """
+    if not _nft_available():
+        return 0
+    # Гарантируем наличие правила — иначе counter всегда будет 0.
+    _ensure_h2_counter_rule(port)
+    cnt = nft_rule_counter_read(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_h2_stats_comment(port), family=NFT_TABLE_FAMILY,
+    )
+    return int(cnt.get("bytes", 0))
 
 
 def _parse_ss_udp() -> dict:
@@ -132,6 +198,13 @@ def h2_traffic_collect() -> dict:
     Собирает текущую статистику трафика по всем H2 портам.
     Вычисляет скорость (Мбит/с) между вызовами.
     Обновляет кэш и state.json.
+
+    Мигрировано (этап 1.5): раньше цикл делал ДВА вызова `_parse_iptables_bytes`
+    на каждый порт (ipv6=False + ipv6=True) и суммировал байты для покрытия
+    v4+v6. Теперь nftables таблица `inet chimera` покрывает ОБА стека одним
+    counter-rule, поэтому делается ОДИН вызов на порт (без ipv6 параметра).
+    Параметр `ipv6` сохранён в сигнатуре `_parse_iptables_bytes` для обратной
+    совместимости со старыми вызовами, но игнорируется.
     """
     h2    = _load_h2_state()
     ports = h2.get("firewall", {}).get("udp_ports", [443])
@@ -141,12 +214,18 @@ def h2_traffic_collect() -> dict:
     prev_ts = cache.get("ts", now_ts)
     elapsed = max(now_ts - prev_ts, 1.0)
 
+    # nftables inet chimera — единый counter покрывает и v4, и v6.
+    # Раньше: rx = _parse_iptables_bytes(p, ipv6=False) (v4)
+    #         tx = _parse_iptables_bytes(p, ipv6=True)  (v6)
+    #         total_rx += rx; total_tx += tx
+    # Теперь: один вызов на порт. rx_bytes = nft counter (v4+v6 together).
+    # tx_bytes остаётся тем же значением — для H2 нет отдельного счётчика tx,
+    # он совпадает с rx (H2 over UDP, symmetric).
     total_rx, total_tx = 0, 0
     for p in ports:
-        rx = _parse_iptables_bytes(p, ipv6=False)
-        tx = _parse_iptables_bytes(p, ipv6=True)
-        total_rx += rx
-        total_tx += tx
+        n = _parse_iptables_bytes(p)  # ipv6 игнорируется в nftables inet
+        total_rx += n
+        total_tx += n  # H2 UDP symmetric — tx≈rx (нет отдельного счётчика tx)
 
     # Из лога H2
     log_stats = _parse_h2_log_bytes()

@@ -6,14 +6,14 @@ chimera/modules/traffic_accounting.py
 ПРОБЛЕМА
 ========
 Разные протоколы имеют разные источники счётчиков трафика (xray Stats API,
-awg show dump, iptables, access.log, journalctl). Многие из них сбрасываются
+awg show dump, nftables counter-rules, access.log, journalctl). Многие из них сбрасываются
 в 0 при рестарте сервиса/ротации логов/ребуте. Без baseline-offset это
 приводит к тихой потере накопленного трафика:
   • VLESS: `systemctl restart xray` сбрасывает Stats API → used_bytes в
     traffic_limits.json уменьшается → пользователь с 9GB/10GB после
     рестарта видит «использовано 0GB».
   • AWG: `systemctl restart awg-quick@awg0` сбрасывает rx/tx в ядре.
-  • Mieru/NaiveProxy/Hysteria2: iptables-счётчики сбрасываются при ребуте.
+  • Mieru/NaiveProxy/Hysteria2: nftables counter-rules сбрасываются при ребуте.
   • NaiveProxy: Caddy roll_size 10mb ротирует access.log → парсер теряет
     per-user byte counter.
 
@@ -43,7 +43,8 @@ awg show dump, iptables, access.log, journalctl). Многие из них сб�
 ДОКУМЕНТАЦИЯ ПО ПРОТОКОЛАМ (из аудита):
   • VLESS/Xray:  raw = xray api statsquery (сброс при restart xray)
   • AWG:         raw = awg show dump rx+tx (сброс при restart awg-quick)
-  • Mieru:       raw = iptables -L INPUT bytes (сброс при restart mita/reboot)
+  • Mieru:       raw = nft_rule_counter_read(table, "input", comment="mita-stats")
+                  (сброс при restart mita/reboot)
   • NaiveProxy:  raw = sum(access.log entry.size) (сброс при Caddy roll_size)
   • MTProto:     УЖЕ имеет baseline (daily snapshots) — НЕ ТРОГАТЬ
   • sing-box:    нет источника — НЕ ТРОГАТЬ
@@ -410,7 +411,7 @@ def record_traffic_sample(user_id: str,
                AWG, username для Mieru/NaiveProxy, и т.п.)
       protocol: имя протокола (должно быть в SUPPORTED_PROTOCOLS)
       raw_counter_bytes: текущее значение raw-счётчика из источника
-                         (xray api / awg show / iptables / access.log)
+                         (xray api / awg show / nft_counter_read / access.log)
 
     Returns:
       int — accumulated total bytes (после применения этого снимка)
