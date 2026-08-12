@@ -5,7 +5,7 @@ Port Hopping — приём подключений на диапазон пор�
 
 Принцип:
     Xray продолжает слушать ОДИН порт (SERVER_PORT, обычно 443).
-    iptables PREROUTING REDIRECT перенаправляет трафик с любого порта из
+    nftables PREROUTING REDIRECT перенаправляет трафик с любого порта из
     заданного диапазона → на SERVER_PORT.
 
     Клиент может подключаться на любой порт диапазона — работает любой.
@@ -31,7 +31,18 @@ Port Hopping — приём подключений на диапазон пор�
         "proto": "tcp"        # tcp | udp | both
     }
 
-Правила iptables:
+АРХИТЕКТУРА (мигрировано с iptables на nftables, этап 1.4):
+    • nft rules: table=inet chimera, chain=prerouting,
+      <proto> dport <range_start>-<range_end> redirect to :<real_port>
+      comment "xray-port-hopping"
+    • Идемпотентность: через comment-tag (nft_rule_add с idempotent=True
+      проверяет существование правила с этим comment перед добавлением через
+      nft -j list chain) — заменяет -C перед -A паттерн iptables
+    • Persist после reboot: единый nftables.service (читает /etc/nftables.conf
+      через `nft -f` при старте системы) — заменяет кастомный
+      xray-port-hopping.service (раньше запускал `iptables -t nat -A ...`).
+
+Правила nftables:
     Помечаются комментарием "xray-port-hopping" для безопасного удаления.
     При отключении — удаляются только свои правила, остальные не трогаются.
 
@@ -50,6 +61,16 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
+
+# nftables — централизованная обёртка над `nft` CLI (этап 1.4 миграции)
+from .nft_common import (
+    nft_nat_redirect, nft_rule_exists, nft_rule_delete_by_comment,
+    nft_persist, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_PREROUTING,
+    COMMENT_PORT_HOPPING, NFT_PERSIST_FILE,
+)
 
 # ── Цвета ─────────────────────────────────────────────────────────────────────
 def _detect_colors() -> dict:
@@ -72,8 +93,11 @@ BLUE=_C['BLUE']; BOLD=_C['BOLD']; DIM=_C['DIM']; WHITE=_C['WHITE']; NC=_C['NC']
 _STATE_FILE  = Path("/var/lib/xray-installer/state.json")
 _PH_FILE     = Path("/var/lib/xray-installer/port_hopping.json")
 _LOG_FILE    = Path("/var/log/chimera.log")
-_COMMENT     = "xray-port-hopping"  # метка для правил iptables
-_PERSIST_DIR = Path("/etc/iptables")
+# Метка для правил nftables (раньше — iptables). Используется для идемпотентного
+# добавления и безопасного удаления правил (nft_rule_delete_by_comment).
+_COMMENT     = COMMENT_PORT_HOPPING  # "xray-port-hopping"
+# Единый persist-файл (заменяет /etc/iptables/rules.v4 + кастомный systemd unit)
+_NFT_CONF    = Path(NFT_PERSIST_FILE)  # "/etc/nftables.conf"
 
 # ── Логирование ────────────────────────────────────────────────────────────────
 def _log(level: str, msg: str) -> None:
@@ -145,75 +169,74 @@ def _ufw_active() -> bool:
 
 
 def _iptables_available() -> bool:
-    try:
-        r = _run(["iptables", "--version"], capture=True, quiet=False)
-        return r.returncode == 0
-    except Exception:
-        return False
+    """Алиас для обратной совместимости. Теперь проверяет наличие `nft` binary.
 
-# ── Ядро: управление правилами iptables ───────────────────────────────────────
+    Заменяет: shutil.which("iptables") / `iptables --version`.
+    Теперь:    _nft_available() из nft_common (проверяет `nft` в PATH).
+    """
+    return _nft_available()
+
+# ── Ядро: управление правилами nftables ───────────────────────────────────────
 
 def _rules_exist(proto: str = "tcp") -> bool:
-    """Проверяет, есть ли наши правила в PREROUTING."""
-    protos = ["tcp", "udp"] if proto == "both" else [proto]
-    for p in protos:
-        r = _run(
-            ["iptables", "-t", "nat", "-C", "PREROUTING",
-             "-p", p, "--dport", "1:65534",
-             "-m", "comment", "--comment", _COMMENT,
-             "-j", "REDIRECT", "--to-port", "1"],
-            capture=True, quiet=False
-        )
-        if r.returncode == 0:
-            return True
-    # Ищем по комментарию в выводе -L
-    r = _run(["iptables", "-t", "nat", "-L", "PREROUTING", "-n", "--line-numbers"], capture=True)
-    return _COMMENT in r.stdout
+    """Проверяет, есть ли наши правила в nft chain prerouting.
+
+    Заменяет: цикл `iptables -t nat -C PREROUTING -p <proto> --dport 1:65534 ...`
+              + парсинг `iptables -t nat -L PREROUTING -n` на наличие comment.
+    Теперь: nft_rule_exists(comment="xray-port-hopping") — comment-tag
+            однозначно идентифицирует наши правила.
+    """
+    return nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_PREROUTING,
+        comment=_COMMENT, family=NFT_TABLE_FAMILY
+    )
 
 
 def _add_rules(range_start: int, range_end: int, real_port: int, proto: str) -> bool:
-    """Добавляет правила PREROUTING REDIRECT. Возвращает True при успехе."""
+    """Добавляет nft правила PREROUTING REDIRECT. Возвращает True при успехе.
+
+    Заменяет:
+        iptables -t nat -A PREROUTING -p <proto> --dport <rs>:<re> \
+            -j REDIRECT --to-port <real_port> -m comment --comment xray-port-hopping
+    Теперь (nft, диапазон через дефис вместо двоеточия):
+        nft add rule inet chimera prerouting <proto> dport <rs>-<re> \
+            redirect to :<real_port> comment "xray-port-hopping"
+
+    Для proto="both" добавляет два правила (tcp и udp). Каждое идемпотентно
+    через comment-tag (повторный вызов НЕ создаёт дубликаты).
+    """
     protos = ["tcp", "udp"] if proto == "both" else [proto]
+    # nft использует диапазон портов через дефис ('10000-20000'), а не
+    # двоеточие как iptables ('10000:20000').
+    dport_range = f"{range_start}-{range_end}"
     ok = True
     for p in protos:
-        port_range = f"{range_start}:{range_end}"
-        r = _run([
-            "iptables", "-t", "nat", "-A", "PREROUTING",
-            "-p", p, "--dport", port_range,
-            "-m", "comment", "--comment", _COMMENT,
-            "-j", "REDIRECT", "--to-port", str(real_port),
-        ], quiet=True)
-        if r.returncode != 0:
-            _err(f"Не удалось добавить правило iptables для {p}")
+        added = nft_nat_redirect(
+            prerouting=True,
+            proto=p,
+            dport=dport_range,
+            to_port=real_port,
+            comment=_COMMENT,
+        )
+        if not added:
+            _err(f"Не удалось добавить правило nft для {p}")
             ok = False
     return ok
 
 
 def _remove_rules() -> bool:
-    """Удаляет все правила с комментарием xray-port-hopping. Безопасно — только свои."""
-    removed = 0
-    for table_chain in [("nat", "PREROUTING")]:
-        table, chain = table_chain
-        while True:
-            r = _run(
-                ["iptables", "-t", table, "-L", chain, "-n", "--line-numbers"],
-                capture=True
-            )
-            lines = r.stdout.splitlines()
-            target_line = None
-            for line in lines:
-                if _COMMENT in line:
-                    # Первая колонка — номер правила
-                    parts = line.split()
-                    if parts and parts[0].isdigit():
-                        target_line = parts[0]
-                        break
-            if target_line is None:
-                break
-            _run(["iptables", "-t", table, "-D", chain, target_line], quiet=True)
-            removed += 1
-            if removed > 50:  # защита от бесконечного цикла
-                break
+    """Удаляет все правила с комментарием xray-port-hopping. Безопасно — только свои.
+
+    Заменяет: цикл `iptables -t nat -L PREROUTING -n --line-numbers` →
+              парсинг номера правила с нашим comment → `iptables -t nat -D`.
+    Теперь: один вызов nft_rule_delete_by_comment находит ВСЕ правила с этим
+            comment в цепочке prerouting (через `nft -a -j list chain` → handles)
+            и удаляет их через `nft delete rule ... handle <N>`.
+    """
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_PREROUTING,
+        comment=_COMMENT, family=NFT_TABLE_FAMILY, max_iterations=50
+    )
     return True
 
 
@@ -270,79 +293,30 @@ def _ufw_delete_range(range_start: int, range_end: int, proto: str) -> None:
 
 
 def _persist_iptables() -> None:
-    """Сохраняет правила iptables для восстановления после перезагрузки."""
-    # Метод 1: iptables-persistent / netfilter-persistent
-    if Path("/etc/iptables").exists():
-        try:
-            r = _run(["iptables-save"], capture=True)
-            if r.returncode == 0:
-                Path("/etc/iptables/rules.v4").write_text(r.stdout)
-        except Exception:
-            pass
+    """Сохраняет nft ruleset для восстановления после перезагрузки.
 
-    # Метод 2: rc.local как fallback
-    rc_local = Path("/etc/rc.local")
-    restore_cmd = f"iptables-restore < /etc/iptables/rules.v4"
-    if rc_local.exists():
-        content = rc_local.read_text()
-        if restore_cmd not in content:
-            # Вставляем перед последней строкой (обычно "exit 0")
-            lines = content.rstrip().splitlines()
-            if lines and lines[-1].strip() == "exit 0":
-                lines.insert(-1, restore_cmd)
-            else:
-                lines.append(restore_cmd)
-            rc_local.write_text("\n".join(lines) + "\n")
-    else:
-        rc_local.write_text(
-            "#!/bin/sh -e\n"
-            f"# Restored by vless-installer port-hopping\n"
-            f"{restore_cmd}\n"
-            "exit 0\n"
-        )
-        rc_local.chmod(0o755)
-
-    # Метод 3: systemd oneshot service (наиболее надёжный)
-    svc_path = Path("/etc/systemd/system/xray-port-hopping.service")
-    ph = _load_ph()
-    if ph.get("enabled"):
-        rs = ph.get("range_start", 10000)
-        re_ = ph.get("range_end", 20000)
-        rp = ph.get("real_port", 443)
-        proto = ph.get("proto", "tcp")
-        protos = ["tcp", "udp"] if proto == "both" else [proto]
-        cmds = []
-        for p in protos:
-            cmds.append(
-                f"ExecStart=/sbin/iptables -t nat -A PREROUTING "
-                f"-p {p} --dport {rs}:{re_} "
-                f"-m comment --comment {_COMMENT} "
-                f"-j REDIRECT --to-port {rp}"
-            )
-        svc_content = (
-            "[Unit]\n"
-            "Description=Xray Port Hopping iptables rules\n"
-            "After=network.target\n"
-            "Before=xray.service\n\n"
-            "[Service]\n"
-            "Type=oneshot\n"
-            "RemainAfterExit=yes\n"
-        )
-        for c in cmds:
-            svc_content += c + "\n"
-        svc_content += (
-            "\n[Install]\n"
-            "WantedBy=multi-user.target\n"
-        )
-        svc_path.write_text(svc_content)
-        _run(["systemctl", "daemon-reload"], quiet=True)
-        _run(["systemctl", "enable", "xray-port-hopping.service"], quiet=True)
-    else:
-        # Отключаем сервис при выключении
-        if svc_path.exists():
-            _run(["systemctl", "disable", "--now", "xray-port-hopping.service"], quiet=True)
-            svc_path.unlink(missing_ok=True)
-            _run(["systemctl", "daemon-reload"], quiet=True)
+    Заменяет (3 разных механизма, существовавших раньше):
+      • Метод 1: iptables-save > /etc/iptables/rules.v4 (если /etc/iptables/ существует)
+      • Метод 2: rc.local с `iptables-restore < /etc/iptables/rules.v4`
+      • Метод 3: кастомный systemd oneshot `xray-port-hopping.service`,
+        который при старте системы делал `iptables -t nat -A PREROUTING ...`.
+    Теперь: один вызов `nft_persist()` → `nft list ruleset > /etc/nftables.conf`.
+            Стандартный `nftables.service` (Debian/Ubuntu package) читает этот
+            файл через `nft -f /etc/nftables.conf` при загрузке системы и
+            восстанавливает ВСЕ правила Chimera (port hopping + dns_redirect +
+            ingress_geoip + ipban + ...).
+    """
+    if not _nft_available():
+        return
+    try:
+        # Сохраняем весь ruleset в /etc/nftables.conf
+        nft_persist(NFT_PERSIST_FILE)
+        # Включаем встроенный nftables.service
+        from .nft_common import nft_persist_enable_systemd
+        nft_persist_enable_systemd()
+        _log("INFO", f"nft ruleset saved to {NFT_PERSIST_FILE}, nftables.service enabled")
+    except Exception as e:
+        _log("WARN", f"cannot persist nft ruleset: {e}")
 
 
 def _enable_hopping(range_start: int, range_end: int, real_port: int, proto: str) -> bool:
@@ -400,9 +374,12 @@ def ph_status() -> dict:
     if not ph.get("enabled"):
         return {"enabled": False}
 
-    # Проверяем, реально ли правила в iptables
-    r = _run(["iptables", "-t", "nat", "-L", "PREROUTING", "-n"], capture=True)
-    rules_active = _COMMENT in r.stdout
+    # Проверяем, реально ли правила в nftables (через comment-tag).
+    # Заменяет: парсинг `iptables -t nat -L PREROUTING -n` на наличие comment.
+    rules_active = nft_rule_exists(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_PREROUTING,
+        comment=_COMMENT, family=NFT_TABLE_FAMILY,
+    )
 
     return {
         "enabled": True,
@@ -420,8 +397,8 @@ def do_port_hopping_menu() -> None:
     if not _iptables_available():
         print()
         _box_top("⚡  PORT HOPPING")
-        _box_warn("iptables не найден на этой системе")
-        _box_info("Установите: apt install iptables")
+        _box_warn("nftables не найден на этой системе")
+        _box_info("Установите: apt install nftables")
         _box_bottom()
         input(f"\n{BLUE}Нажмите Enter...{NC}")
         return
@@ -432,22 +409,25 @@ def do_port_hopping_menu() -> None:
         enabled = ph.get("enabled", False)
         real_port = ph.get("real_port", _real_port())
 
-        # Проверяем активность правил в iptables
+        # Проверяем активность правил в nftables (через comment-tag).
+        # Заменяет: `iptables -t nat -L PREROUTING -n` + поиск comment в выводе.
         rules_active = False
         if enabled:
-            r = _run(["iptables", "-t", "nat", "-L", "PREROUTING", "-n"], capture=True)
-            rules_active = _COMMENT in r.stdout
+            rules_active = nft_rule_exists(
+                table=NFT_TABLE_NAME, chain=NFT_CHAIN_PREROUTING,
+                comment=_COMMENT, family=NFT_TABLE_FAMILY,
+            )
 
         print()
         _box_top("⚡  PORT HOPPING — приём подключений на диапазон портов")
         _box_desc(
-            "Xray слушает один порт. iptables перенаправляет любой порт из диапазона "
+            "Xray слушает один порт. nftables перенаправляет любой порт из диапазона "
             "на него. Клиент выбирает любой свободный порт — ТСПУ не может заблокировать их все."
         )
         _box_sep()
 
         if enabled:
-            status_str = f"{GREEN}ВКЛЮЧЁН{NC}" if rules_active else f"{YELLOW}ВКЛЮЧЁН (правила не найдены в iptables!){NC}"
+            status_str = f"{GREEN}ВКЛЮЧЁН{NC}" if rules_active else f"{YELLOW}ВКЛЮЧЁН (правила не найдены в nftables!){NC}"
         else:
             status_str = f"{DIM}ОТКЛЮЧЁН{NC}"
 
@@ -462,7 +442,7 @@ def do_port_hopping_menu() -> None:
         _box_item("1", f"{'Изменить диапазон / перенастроить' if enabled else 'Включить port hopping'}")
         if enabled:
             _box_item("2", f"{RED}Отключить port hopping{NC}")
-            _box_item("3", "Проверить правила iptables")
+            _box_item("3", "Проверить правила nftables")
             _box_item("4", "Показать готовые ссылки для клиентов")
         _box_back()
         _box_bottom()
@@ -604,29 +584,36 @@ def _menu_disable() -> None:
     """Подтверждение и отключение."""
     print()
     try:
-        ans = input(f"  {YELLOW}Отключить port hopping и удалить правила iptables? [y/N]:{NC} ").strip().lower()
+        ans = input(f"  {YELLOW}Отключить port hopping и удалить правила nftables? [y/N]:{NC} ").strip().lower()
     except KeyboardInterrupt:
         return
     if ans != "y":
         return
-    _info("Удаляю правила iptables...")
+    _info("Удаляю правила nftables...")
     _disable_hopping()
     _ok("Port hopping отключён")
     input(f"\n{BLUE}Нажмите Enter...{NC}")
 
 
 def _menu_show_rules() -> None:
-    """Показывает текущие правила iptables с нашим комментарием."""
+    """Показывает текущие правила nftables с нашим комментарием.
+
+    Заменяет: `iptables -t nat -L PREROUTING -n -v --line-numbers` +
+              фильтрация по comment в выводе.
+    Теперь: `nft list chain inet chimera prerouting` +
+           `nft -a list chain inet chimera prerouting` (с handles для аудита).
+    """
     os.system("clear")
     print()
-    _box_top("🔍  Правила iptables (Port Hopping)")
+    _box_top("🔍  Правила nftables (Port Hopping)")
     _box_bottom()
     print()
-    r = _run(["iptables", "-t", "nat", "-L", "PREROUTING", "-n", "-v", "--line-numbers"], capture=True)
-    lines = r.stdout.splitlines()
+    r = _run(["nft", "list", "chain", "inet", "chimera", "prerouting"],
+             capture=True)
+    lines = (r.stdout or "").splitlines()
     found = False
     for line in lines:
-        if _COMMENT in line or line.startswith("Chain") or line.startswith("num"):
+        if _COMMENT in line or line.startswith("chain") or line.startswith("\t"):
             print(f"  {line}")
             if _COMMENT in line:
                 found = True

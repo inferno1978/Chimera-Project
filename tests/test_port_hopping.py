@@ -186,5 +186,139 @@ class TestLog(unittest.TestCase):
         self.assertIn("red text", content)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТЕСТЫ МИГРАЦИИ НА NFTABLES (этап 1.4) — мок nft_common
+# ══════════════════════════════════════════════════════════════════════════════
+class TestNftMigration(unittest.TestCase):
+    """Проверяет что port_hopping.py использует nft_common вместо прямых
+    iptables subprocess-вызовов (этап 1.4 миграции).
+
+    Мокает nft_nat_redirect / nft_rule_exists / nft_rule_delete_by_comment /
+    _nft_available — проверяет что:
+      • _add_rules делегирует в nft_nat_redirect с правильными аргументами
+        (диапазон через дефис '10000-20000', не двоеточие '10000:20000').
+      • _rules_exists использует nft_rule_exists по comment-tag.
+      • _remove_rules вызывает nft_rule_delete_by_comment.
+      • _iptables_available() делегирует в _nft_available().
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_iptables_available_delegates_to_nft(self):
+        """_iptables_available() теперь алиас для _nft_available()."""
+        from chimera.modules import port_hopping
+        with patch("chimera.modules.port_hopping._nft_available",
+                   return_value=True):
+            self.assertTrue(port_hopping._iptables_available())
+        with patch("chimera.modules.port_hopping._nft_available",
+                   return_value=False):
+            self.assertFalse(port_hopping._iptables_available())
+
+    def test_add_rules_calls_nft_nat_redirect_with_dash_range(self):
+        """_add_rules передаёт диапазон портов через дефис, не двоеточие."""
+        from chimera.modules import port_hopping
+        with patch("chimera.modules.port_hopping.nft_nat_redirect",
+                   return_value=True) as mock_redirect:
+            ok = port_hopping._add_rules(10000, 20000, 443, "tcp")
+        self.assertTrue(ok)
+        mock_redirect.assert_called_once()
+        _, kwargs = mock_redirect.call_args
+        self.assertEqual(kwargs.get("dport"), "10000-20000")  # дефис, не двоеточие
+        self.assertEqual(kwargs.get("to_port"), 443)
+        self.assertEqual(kwargs.get("proto"), "tcp")
+        self.assertEqual(kwargs.get("comment"), "xray-port-hopping")
+        self.assertTrue(kwargs.get("prerouting"))
+
+    def test_add_rules_both_proto_calls_redirect_twice(self):
+        """Для proto='both' — два вызова nft_nat_redirect (tcp + udp)."""
+        from chimera.modules import port_hopping
+        with patch("chimera.modules.port_hopping.nft_nat_redirect",
+                   return_value=True) as mock_redirect:
+            ok = port_hopping._add_rules(10000, 20000, 443, "both")
+        self.assertTrue(ok)
+        self.assertEqual(mock_redirect.call_count, 2)
+        protos_called = sorted(
+            kwargs.get("proto") for _, kwargs in mock_redirect.call_args_list
+        )
+        self.assertEqual(protos_called, ["tcp", "udp"])
+
+    def test_add_rules_returns_false_on_failure(self):
+        """Если nft_nat_redirect возвращает False — _add_rules тоже False."""
+        from chimera.modules import port_hopping
+        with patch("chimera.modules.port_hopping.nft_nat_redirect",
+                   return_value=False):
+            ok = port_hopping._add_rules(10000, 20000, 443, "tcp")
+        self.assertFalse(ok)
+
+    def test_rules_exist_calls_nft_rule_exists(self):
+        """_rules_exist делегирует в nft_rule_exists по comment-tag."""
+        from chimera.modules import port_hopping
+        with patch("chimera.modules.port_hopping.nft_rule_exists",
+                   return_value=True) as mock_exists:
+            result = port_hopping._rules_exist()
+        self.assertTrue(result)
+        mock_exists.assert_called_once()
+        _, kwargs = mock_exists.call_args
+        self.assertEqual(kwargs.get("comment"), "xray-port-hopping")
+        self.assertEqual(kwargs.get("chain"), "prerouting")
+        self.assertEqual(kwargs.get("table"), "chimera")
+
+    def test_remove_rules_calls_nft_delete_by_comment(self):
+        """_remove_rules делегирует в nft_rule_delete_by_comment."""
+        from chimera.modules import port_hopping
+        with patch("chimera.modules.port_hopping.nft_rule_delete_by_comment",
+                   return_value=2) as mock_del:
+            port_hopping._remove_rules()
+        mock_del.assert_called_once()
+        _, kwargs = mock_del.call_args
+        self.assertEqual(kwargs.get("comment"), "xray-port-hopping")
+        self.assertEqual(kwargs.get("chain"), "prerouting")
+        self.assertEqual(kwargs.get("table"), "chimera")
+
+    def test_persist_iptables_uses_nft_persist(self):
+        """_persist_iptables вызывает nft_persist (а не iptables-save)."""
+        from chimera.modules import port_hopping
+        with patch("chimera.modules.port_hopping._nft_available",
+                   return_value=True), \
+             patch("chimera.modules.port_hopping.nft_persist",
+                   return_value=True) as mock_persist, \
+             patch("chimera.modules.nft_common.nft_persist_enable_systemd",
+                   return_value=True):
+            port_hopping._persist_iptables()
+        mock_persist.assert_called_once()
+
+    def test_persist_iptables_skipped_when_nft_unavailable(self):
+        """Если nft недоступен — _persist_iptensors не падает, ничего не делает."""
+        from chimera.modules import port_hopping
+        with patch("chimera.modules.port_hopping._nft_available",
+                   return_value=False), \
+             patch("chimera.modules.port_hopping.nft_persist") as mock_persist:
+            port_hopping._persist_iptables()
+        mock_persist.assert_not_called()
+
+    def test_ph_status_returns_rules_active_from_nft(self):
+        """ph_status() возвращает rules_active на основе nft_rule_exists."""
+        from chimera.modules import port_hopping
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        ph_file = tmpdir / "ph.json"
+        ph_file.write_text(json.dumps({
+            "enabled": True, "real_port": 443,
+            "range_start": 10000, "range_end": 20000, "proto": "tcp",
+        }))
+        try:
+            with patch("chimera.modules.port_hopping._PH_FILE", ph_file), \
+                 patch("chimera.modules.port_hopping.nft_rule_exists",
+                       return_value=True):
+                st = port_hopping.ph_status()
+            self.assertTrue(st["enabled"])
+            self.assertTrue(st["rules_active"])
+            self.assertEqual(st["real_port"], 443)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
