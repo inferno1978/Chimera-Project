@@ -1,14 +1,48 @@
 """
 chimera/modules/ingress_geoip.py
 ───────────────────────────────────────────────────────────────────────────────
-Блокировка входящих соединений из РФ через iptables/ipset.
+Блокировка входящих соединений из РФ через nftables (миграция с iptables/ipset).
 
-  • Применяет через iptables/ip6tables: DROP входящих на SERVER_PORT из РФ подсетей
-  • Использует ipset для эффективной фильтрации (hash:net)
+  • Применяет через nft: DROP входящих на SERVER_PORT из РФ подсетей
+  • Использует nft sets (inet chimera ingress_block_v4 / _v6) для эффективной
+    фильтрации 5000+ CIDR (замена ipset hash:net)
   • Загружает актуальный список РФ подсетей из RIPE NCC
-  • Поддерживает IPv4 и IPv6
-  • Whitelist для SSH и управляющих IP
+  • Поддерживает IPv4 и IPv6 в одной таблице inet (без дублирования ip6tables)
+  • Whitelist для SSH и управляющих IP (через nft_rule_insert на позицию 1)
   • Cron для еженедельного обновления
+
+МИГРАЦИЯ (этап 1.2 — Task ID: 1.2-ingress):
+  Раньше использовалась связка `ipset hash:net` (xray_ru_block / xray_ru_block6)
+  + `iptables -A INPUT -m set --match-set ...` + `ip6tables -A INPUT ...`.
+  Теперь всё живет в единой таблице `inet chimera` (covers both IPv4 + IPv6 без
+  дублирования) и использует централизованные примитивы из
+  `chimera/modules/nft_common.py`:
+
+    • `nft_set_create(name, ..., flags=["interval"], maxelem=N)` — замена
+      `ipset create <name> hash:net family inet maxelem N -exist`.
+    • `nft_set_atomic_swap(name, new_elements, ...)` — замена последовательности
+      `ipset flush <name>` + `ipset restore -! -f <tmpfile>`. Атомарная транзакция
+      `nft -f -` (flush set + add element в одном batch).
+    • `nft_rule_add(table, chain, rule_spec, family, comment=...)` — замена
+      `iptables -D ... -A ... -m set --match-set ... -m comment --comment ...`
+      (идемпотентно по comment-tag, не требует ручного -D перед -A).
+    • `nft_rule_delete_by_comment(table, chain, comment)` — замена цикла
+      `iptables -D INPUT ...` до rc!=0. Один вызов находит все правила с указанным
+      comment и удаляет их через handle.
+    • `nft_set_destroy(name, table, family)` — замена `ipset destroy <name>`.
+    • `nft_rule_insert(table, chain, spec, comment=...)` — замена
+      `iptables -I INPUT 1 -s <ip> -j ACCEPT` для per-IP whitelist.
+    • `nft_persist()` — замена `ipset save` → /etc/ipset.conf. Теперь единый
+      `/etc/nftables.conf` для всех правил Chimera (nft list ruleset).
+    • `nft_persist_enable_systemd()` — замена кастомного
+      `xray-ipset-restore.service` на встроенный `nftables.service`, который
+      читает /etc/nftables.conf при `systemctl start nftables`.
+
+  Comment-tag `xray-ru-ingress-block` сохранён для совместимости с аудитом
+  правил в `nft list ruleset`. Имена nft sets (`ingress_block_v4` / `_v6`)
+  мигрированы с ipset `xray_ru_block` / `xray_ru_block6` (см.
+  LEGACY_IPSET_NAME_MAP в nft_constants для обратной совместимости).
+  Семантика идентична: что блокировалось — то и блокируется.
 
 Точка входа из _core.py:
     from chimera.modules.ingress_geoip import do_manage_ingress_geoip
@@ -27,6 +61,20 @@ import urllib.request as _ur2
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+# nftables — централизованная обёртка над `nft` CLI (этап 1.2 миграции)
+from .nft_common import (
+    nft_set_create, nft_set_destroy, nft_set_atomic_swap,
+    nft_set_count, nft_set_list_elements,
+    nft_rule_add, nft_rule_insert, nft_rule_delete_by_comment,
+    nft_persist, nft_persist_enable_systemd, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    NFT_SET_INGRESS_BLOCK_V4, NFT_SET_INGRESS_BLOCK_V6,
+    COMMENT_INGRESS_GEO_BLOCK, COMMENT_INGRESS_WL_PREFIX,
+    NFT_PERSIST_FILE,
+)
 
 # ── Цвета ─────────────────────────────────────────────────────────────────────
 def _detect_colors() -> dict:
@@ -82,8 +130,23 @@ def _run(cmd: list, capture: bool = False, check: bool = False,
 
 # ── Константы ─────────────────────────────────────────────────────────────────
 INGRESS_GEOIP_FILE  = Path("/var/lib/xray-installer/ingress_geoip.json")
-INGRESS_IPSET_NAME  = "xray_ru_block"
-INGRESS_IPSET6_NAME = "xray_ru_block6"
+# Имена nft sets теперь берутся из nft_constants (мигрировано с ipset-имён
+# `xray_ru_block` / `xray_ru_block6`). Сохраняем переменные INGRESS_IPSET_NAME /
+# INGRESS_IPSET6_NAME как aliases для обратной совместимости — на них могут
+# ссылаться другие модули (например, emergency_repair.py, ipset_persist.py).
+# См. LEGACY_IPSET_NAME_MAP в nft_constants для обратной совместимости со
+# старым state.json.
+INGRESS_IPSET_NAME  = NFT_SET_INGRESS_BLOCK_V4   # "ingress_block_v4"
+INGRESS_IPSET6_NAME = NFT_SET_INGRESS_BLOCK_V6   # "ingress_block_v6"
+# Comment-tag для nft-правил: `xray-ru-ingress-block` (префикс из nft_constants).
+# Используем централизованный COMMENT_INGRESS_GEO_BLOCK чтобы не разойтись с
+# реестром comment-тегов Chimera.
+_INGRESS_COMMENT    = COMMENT_INGRESS_GEO_BLOCK    # "xray-ru-ingress-block"
+# Пер-IP whitelist comment prefix: `xray-ru-wl-<ip>` (с заменой `/` на `_`).
+_INGRESS_WL_PREFIX  = COMMENT_INGRESS_WL_PREFIX   # "xray-ru-wl-"
+# nft persist file (заменяет /etc/ipset.conf + /etc/iptables/rules.v4).
+# Один единый файл для всех правил Chimera.
+_INGRESS_PERSIST    = Path(NFT_PERSIST_FILE)       # "/etc/nftables.conf"
 INGRESS_CRON_SCRIPT = Path("/usr/local/bin/xray-ingress-geoip-update.sh")
 INGRESS_CRON_FILE   = Path("/etc/cron.d/xray-ingress-geoip")
 INGRESS_LOG         = Path("/var/log/xray-ingress-geoip.log")
@@ -104,8 +167,15 @@ from chimera.modules.box_renderer import (
     _box_top, _box_sep, _box_bottom, _box_row, _box_item, _box_back,
 )
 from chimera.modules.tui import tui_confirm
-from chimera.modules.ipset_persist import ipset_save, ipset_restore_unit_install
 from chimera.modules.ripe_file_age import check_ripe_file_age, ripe_file_age_banner
+
+# NOTE: `ipset_persist` модуль пока НЕ мигрирован (этап 4 миграции — persist).
+# Нужные нам функции (сохранение ruleset + установка systemd-юнита для boot
+# restore) теперь реализованы напрямую через nft_common:
+#   • ipset_save()               → nft_persist()  (nft list ruleset → /etc/nftables.conf)
+#   • ipset_restore_unit_install → nft_persist_enable_systemd() (nftables.service)
+# Временно оставляем legacy-импорты для совместимости, но НЕ используем их
+# в коде — они deprecated и будут удалены после миграции ipset_persist.py.
 
 
 def _fetch_ru_subnets_ripe() -> list:
@@ -135,11 +205,22 @@ def _ingress_state_save(data: dict) -> None:
 
 
 def _ingress_ipset_available() -> bool:
-    return bool(shutil.which("ipset"))
+    """Алиас для обратной совместимости (миграция на nftables, этап 1.2).
+
+    Раньше проверял `shutil.which("ipset")`. Теперь проверяет наличие
+    `nft` binary (nftables поддерживает sets нативно — ipset больше не нужен).
+    """
+    return _nft_available()
 
 
 def _ingress_iptables_available() -> bool:
-    return bool(shutil.which("iptables"))
+    """Алиас для обратной совместимости (миграция на nftables, этап 1.2).
+
+    Раньше проверял `shutil.which("iptables")`. Теперь проверяет наличие
+    `nft` binary — nftables заменяет и iptables, и ip6tables одной утилитой
+    (семейство таблицы `inet` покрывает v4+v6).
+    """
+    return _nft_available()
 
 
 def _ingress_get_cidrs() -> "tuple[list[str], list[str]]":
@@ -170,127 +251,118 @@ def _ingress_get_cidrs() -> "tuple[list[str], list[str]]":
 
 def _ingress_apply_ipset(port: int, v4: list, v6: list) -> bool:
     """
-    Применяет блокировку через ipset (эффективно для 5000+ CIDR).
-    Создаёт/обновляет set и добавляет одно правило iptables.
+    Применяет блокировку через nft sets (эффективно для 5000+ CIDR).
+    Создаёт/обновляет nft sets ingress_block_v4 / _v6 и добавляет DROP-правила
+    в цепочку `input` таблицы `inet chimera`.
+
+    Заменяет (миграция этапа 1.2):
+      ipset create xray_ru_block hash:net family inet maxelem 500000 -exist
+      ipset flush xray_ru_block
+      ipset restore -! -f /tmp/xray_ingress_v4.ipset
+      iptables -D INPUT -p tcp --dport <port> -m set --match-set xray_ru_block src \
+          -j DROP
+      iptables -A INPUT -p tcp --dport <port> -m set --match-set xray_ru_block src \
+          -j DROP -m comment --comment xray-ru-ingress-block
+      (и зеркально для IPv6: ipset create family inet6 + ip6tables -A)
+
+    Теперь:
+      nft_set_create("ingress_block_v4", set_type="ipv4_addr",
+                     flags=["interval"], maxelem=500000)
+      nft_set_atomic_swap("ingress_block_v4", v4)  # flush+add в одной транзакции
+      nft_rule_add(table="chimera", chain="input",
+                   rule_spec=f"tcp dport {port} ip saddr @ingress_block_v4 drop",
+                   comment="xray-ru-ingress-block")
+      (аналогично для IPv6: set_type="ipv6_addr", "ip6 saddr @ingress_block_v6")
+
+    Имя функции сохранено как `_ingress_apply_ipset` для обратной совместимости
+    (внешние импортеры могут ссылаться). Внутри всё работает через nft_common.
     """
-    info(f"Применяю ipset блокировку ({len(v4)} IPv4 + {len(v6)} IPv6 CIDR)...")
+    info(f"Применяю nftables блокировку ({len(v4)} IPv4 + {len(v6)} IPv6 CIDR)...")
 
     # ── IPv4 ──
-    cmds_v4 = [
-        ["ipset", "create", INGRESS_IPSET_NAME, "hash:net",
-         "family", "inet", "maxelem", "500000", "-exist"],
-        ["ipset", "flush",  INGRESS_IPSET_NAME],
-    ]
-    for cmd in cmds_v4:
-        r = _run(cmd, check=False, quiet=True)
-        if r.returncode != 0:
-            warn(f"ipset error: {r.stderr.strip()}")
-            return False
-
-    # batch-добавление через временный файл restore
-    restore_v4 = "\n".join(
-        [f"add {INGRESS_IPSET_NAME} {cidr}" for cidr in v4]
+    # nft set inet chimera ingress_block_v4 { type ipv4_addr; flags interval; size 500000; }
+    nft_set_create(
+        INGRESS_IPSET_NAME, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+        set_type="ipv4_addr", flags=["interval"], maxelem=500000,
     )
-    tmp_v4 = Path("/tmp/xray_ingress_v4.ipset")
-    tmp_v4.write_text(restore_v4)
-    r = _run(["ipset", "restore", "-!", "-f", str(tmp_v4)], check=False, quiet=True)
-    tmp_v4.unlink(missing_ok=True)
-    if r.returncode != 0:
-        warn(f"ipset restore v4 failed: {r.stderr.strip()[:200]}")
-
-    # правило iptables: DROP входящих из ru_set на SERVER_PORT.
-    # ВАЖНО: вставляем через -A (в конец), а не -I 1 (в начало).
-    # Правила ESTABLISHED,RELATED и lo-ACCEPT должны стоять ВЫШЕ,
-    # иначе уже установленные соединения клиентов будут обрываться.
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-m", "set", "--match-set", INGRESS_IPSET_NAME, "src", "-j", "DROP"],
-         check=False, quiet=True)
-    r = _run(["iptables", "-A", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", INGRESS_IPSET_NAME, "src",
-              "-j", "DROP", "-m", "comment", "--comment", "xray-ru-ingress-block"],
-             check=False, quiet=True)
-    if r.returncode != 0:
-        warn(f"iptables v4 rule error: {r.stderr.strip()}")
+    # Атомарно заменяем содержимое set на v4 (flush+add одной транзакцией).
+    # Заменяет `ipset flush` + `ipset restore -! -f <tmpfile>`. Между flush и add
+    # нет окна видимости — это улучшение над ipset.
+    if not nft_set_atomic_swap(
+        INGRESS_IPSET_NAME, v4, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+    ):
+        warn(f"nft_set_atomic_swap v4 failed ({INGRESS_IPSET_NAME})")
         return False
-    success(f"IPv4: {len(v4)} CIDR → ipset {INGRESS_IPSET_NAME} → DROP :{port}")
+
+    # nft add rule inet chimera input tcp dport <port> ip saddr @ingress_block_v4
+    #     drop comment "xray-ru-ingress-block"
+    # Идемпотентно по comment-tag — повторный вызов не дублирует правило.
+    if not nft_rule_add(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        rule_spec=f"tcp dport {port} ip saddr @{INGRESS_IPSET_NAME} drop",
+        family=NFT_TABLE_FAMILY, comment=_INGRESS_COMMENT, idempotent=True,
+    ):
+        warn(f"nft_rule_add v4 failed (DROP :{port})")
+        return False
+    success(f"IPv4: {len(v4)} CIDR → nft set {INGRESS_IPSET_NAME} → DROP :{port}")
 
     # ── IPv6 ──
     if v6:
-        _run(["ipset", "create", INGRESS_IPSET6_NAME, "hash:net",
-              "family", "inet6", "maxelem", "100000", "-exist"],
-             check=False, quiet=True)
-        _run(["ipset", "flush", INGRESS_IPSET6_NAME], check=False, quiet=True)
-        restore_v6 = "\n".join(
-            [f"add {INGRESS_IPSET6_NAME} {cidr}" for cidr in v6]
+        # nft set inet chimera ingress_block_v6 { type ipv6_addr; flags interval; size 100000; }
+        nft_set_create(
+            INGRESS_IPSET6_NAME, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+            set_type="ipv6_addr", flags=["interval"], maxelem=100000,
         )
-        tmp_v6 = Path("/tmp/xray_ingress_v6.ipset")
-        tmp_v6.write_text(restore_v6)
-        _run(["ipset", "restore", "-!", "-f", str(tmp_v6)], check=False, quiet=True)
-        tmp_v6.unlink(missing_ok=True)
-
-        _run(["ip6tables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", INGRESS_IPSET6_NAME, "src", "-j", "DROP"],
-             check=False, quiet=True)
-        # Аналогично IPv4 — через -A, а не -I 1
-        _run(["ip6tables", "-A", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", INGRESS_IPSET6_NAME, "src",
-              "-j", "DROP", "-m", "comment", "--comment", "xray-ru-ingress-block"],
-             check=False, quiet=True)
-        success(f"IPv6: {len(v6)} CIDR → ipset {INGRESS_IPSET6_NAME} → DROP :{port}")
+        nft_set_atomic_swap(
+            INGRESS_IPSET6_NAME, v6, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+        )
+        # nft add rule inet chimera input tcp dport <port>
+        #     ip6 saddr @ingress_block_v6 drop comment "xray-ru-ingress-block"
+        nft_rule_add(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            rule_spec=f"tcp dport {port} ip6 saddr @{INGRESS_IPSET6_NAME} drop",
+            family=NFT_TABLE_FAMILY, comment=_INGRESS_COMMENT, idempotent=True,
+        )
+        success(f"IPv6: {len(v6)} CIDR → nft set {INGRESS_IPSET6_NAME} → DROP :{port}")
 
     return True
 
 
 def _ingress_apply_iptables_plain(port: int, v4: list) -> bool:
+    """Deprecated: бывший fallback-режим без ipset (iptables custom chain
+    XRU_BLOCK + по одному правилу -s <cidr> -j DROP).
+
+    В nftables sets поддерживаются нативно (nft_set_create + nft_set_add) —
+    fallback больше не нужен. Функция сохранена для обратной совместимости и
+    просто делегирует в `_ingress_apply_ipset` (IPv6 берётся как []).
     """
-    Fallback без ipset: добавляет отдельное правило на каждый CIDR.
-    Медленно, но работает везде. Рекомендуется только при < 500 CIDR.
-    """
-    if len(v4) > 500:
-        warn(f"Fallback-режим (без ipset): {len(v4)} правил — это медленно!")
-        warn("Установите ipset: apt install ipset")
-
-    info(f"Применяю iptables правила ({len(v4)} CIDR)...")
-    # Удаляем старые правила с комментарием
-    while True:
-        r = _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-                  "-m", "comment", "--comment", "xray-ru-ingress-block",
-                  "-j", "DROP"], check=False, quiet=True)
-        if r.returncode != 0:
-            break
-
-    # Создаём новую цепочку XRU для компактности
-    _run(["iptables", "-N", "XRU_BLOCK"], check=False, quiet=True)
-    _run(["iptables", "-F", "XRU_BLOCK"], check=False, quiet=True)
-    for cidr in v4:
-        _run(["iptables", "-A", "XRU_BLOCK", "-s", cidr, "-j", "DROP"],
-             check=False, quiet=True)
-    _run(["iptables", "-A", "XRU_BLOCK", "-j", "RETURN"], check=False, quiet=True)
-
-    # Привязываем цепочку к INPUT через -A (в конец, НЕ -I 1).
-    # Правила ESTABLISHED,RELATED и whitelist ACCEPT уже стоят выше —
-    # вставка через -I 1 перекрыла бы их и порвала активные сессии.
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-j", "XRU_BLOCK"], check=False, quiet=True)
-    r = _run(["iptables", "-A", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-j", "XRU_BLOCK", "-m", "comment", "--comment", "xray-ru-ingress-block"],
-             check=False, quiet=True)
-    if r.returncode != 0:
-        warn(f"Ошибка iptables: {r.stderr.strip()}")
-        return False
-
-    success(f"iptables plain: {len(v4)} правил → DROP :{port}")
-    return True
+    return _ingress_apply_ipset(port, v4, [])
 
 
 def _ingress_remove() -> None:
-    """Удаляет все правила блокировки входящих РФ, включая whitelist ACCEPT."""
+    """Удаляет все правила блокировки входящих РФ, включая whitelist ACCEPT.
+
+    Заменяет (миграция этапа 1.2):
+      iptables -D INPUT -p tcp --dport <port> -m set --match-set xray_ru_block src \
+          -j DROP -m comment --comment xray-ru-ingress-block  (цикл до rc!=0)
+      ip6tables -D INPUT ... -m set --match-set xray_ru_block6 src -j DROP
+      ipset destroy xray_ru_block / xray_ru_block6
+      iptables -F XRU_BLOCK; iptables -X XRU_BLOCK  (если был fallback-режим)
+
+    Теперь:
+      nft_rule_delete_by_comment(table="chimera", chain="input",
+                                  comment="xray-ru-ingress-block")
+        — один вызов находит ВСЕ правила с этим comment (v4 и v6 вместе,
+          потому что у них одинаковый comment-tag) и удаляет через handle.
+      nft_set_destroy("ingress_block_v4",  table="chimera", family="inet")
+      nft_set_destroy("ingress_block_v6",  table="chimera", family="inet")
+    """
     state = _ingress_state_load()
     port  = state.get("port", 0)
     meth  = state.get("method", "")
 
     #  сначала убираем per-user IP whitelist правило (если было).
-    # Не трогаем ipset и users.json — данные сохраняются для повторного включения.
+    # Не трогаем nft sets и users.json — данные сохраняются для повторного включения.
     try:
         from chimera.modules.user_ip_whitelist import (
             remove_iptables_rule as _wl_remove,
@@ -306,21 +378,26 @@ def _ingress_remove() -> None:
     for _wip in state.get("whitelist", []):
         _ingress_whitelist_remove(_wip, port)
 
-    if meth == "ipset":
-        if port:
-            _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-                  "-m", "set", "--match-set", INGRESS_IPSET_NAME, "src", "-j", "DROP"],
-                 check=False, quiet=True)
-            _run(["ip6tables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-                  "-m", "set", "--match-set", INGRESS_IPSET6_NAME, "src", "-j", "DROP"],
-                 check=False, quiet=True)
-        _run(["ipset", "destroy", INGRESS_IPSET_NAME],  check=False, quiet=True)
-        _run(["ipset", "destroy", INGRESS_IPSET6_NAME], check=False, quiet=True)
-    elif meth == "plain" and port:
-        _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-j", "XRU_BLOCK"], check=False, quiet=True)
-        _run(["iptables", "-F", "XRU_BLOCK"], check=False, quiet=True)
-        _run(["iptables", "-X", "XRU_BLOCK"], check=False, quiet=True)
+    # Удаляем все nft-правила с comment="xray-ru-ingress-block" из цепочки input
+    # таблицы chimera. Заменяет цикл `iptables -D` (нужно было по одному -D на
+    # каждое правило — для IPv4 и IPv6 отдельно). Здесь один вызов покрывает оба.
+    # ВАЖНО: удаляем в любом случае (даже если state.method=plain) — на случай
+    # если state.json устарел или рассинхронизирован с реальным ruleset.
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=_INGRESS_COMMENT, family=NFT_TABLE_FAMILY, max_iterations=20,
+    )
+
+    # Уничтожаем nft sets (v4 + v6) — это два разных set, надо удалить оба.
+    # Заменяет `ipset destroy xray_ru_block` / `xray_ru_block6`.
+    nft_set_destroy(INGRESS_IPSET_NAME,  table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
+    nft_set_destroy(INGRESS_IPSET6_NAME, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
+
+    # Сохраняем обновлённый ruleset в /etc/nftables.conf
+    try:
+        nft_persist()
+    except Exception:
+        pass
 
     # ── Очищаем UFW deny-правила накопленные autoban/honeypot/dpi-detector ───
     # Пока geo-блокировка работала, эти модули могли добавлять ufw deny from <ip>
@@ -373,40 +450,58 @@ def _ingress_flush_autoban_ufw() -> None:
 
 def _ingress_whitelist_apply(ip: str, port: int) -> None:
     """
-    Добавляет правило ACCEPT для конкретного IP/CIDR — вставляет его
-    перед DROP-правилом (позиция 1 в INPUT), чтобы whitelist работал
+    Добавляет nft-правило ACCEPT для конкретного IP/CIDR — вставляет его
+    в начало цепочки input (position=1) чтобы whitelist работал
     для всех портов: SSH (22), порт Xray и любых других сервисов.
-    Помечает правило комментарием xray-ru-wl для управления.
+    Помечает правило комментарием xray-ru-wl-<ip> для управления.
+
+    Заменяет (миграция этапа 1.2):
+      iptables -D INPUT -s <ip> -j ACCEPT -m comment --comment "xray-ru-wl-<ip>"
+      iptables -I INPUT 1 -s <ip> -j ACCEPT -m comment --comment "xray-ru-wl-<ip>"
+      (и зеркально для IPv6 через ip6tables если ip содержит `:`)
+
+    Теперь:
+      nft_rule_insert(table="chimera", chain="input",
+                     rule_spec=f"ip saddr {ip} accept",
+                     comment=f"xray-ru-wl-{ip-with-slashes-replaced}")
+      (для IPv6 через `ip6 saddr {ip} accept` — тот же comment)
+
+    В nft таблица inet chimera покрывает и v4, и v6 одновременно. nft_rule_insert
+    с idempotent=True проверяет существование правила по comment перед вставкой.
     """
-    comment = f"xray-ru-wl-{ip.replace('/', '_')}"
-    # Удаляем старое правило если было (idempotent)
-    _run(["iptables", "-D", "INPUT", "-s", ip, "-j", "ACCEPT",
-          "-m", "comment", "--comment", comment],
-         check=False, quiet=True)
-    # Вставляем ACCEPT самым первым — до всех DROP
-    _run(["iptables", "-I", "INPUT", "1", "-s", ip, "-j", "ACCEPT",
-          "-m", "comment", "--comment", comment],
-         check=False, quiet=True)
-    # IPv6 если это CIDR с двоеточием
+    comment = f"{_INGRESS_WL_PREFIX}{ip.replace('/', '_')}"
+    # IPv6 CIDR содержит `:`, IPv4 — нет. В nft inet таблице можно использовать
+    # как `ip saddr`, так и `ip6 saddr` (nft сам определит формат адреса).
+    # Используем ip6 saddr для IPv6 CIDR, ip saddr для IPv4.
     if ":" in ip:
-        _run(["ip6tables", "-D", "INPUT", "-s", ip, "-j", "ACCEPT",
-              "-m", "comment", "--comment", comment],
-             check=False, quiet=True)
-        _run(["ip6tables", "-I", "INPUT", "1", "-s", ip, "-j", "ACCEPT",
-              "-m", "comment", "--comment", comment],
-             check=False, quiet=True)
+        spec = f"ip6 saddr {ip} accept"
+    else:
+        spec = f"ip saddr {ip} accept"
+    # insert (position=1) — whitelist должен быть ПЕРЕД любыми DROP.
+    # idempotent=True — если правило с таким comment уже есть, повторно не ставится.
+    nft_rule_insert(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        rule_spec=spec, family=NFT_TABLE_FAMILY,
+        comment=comment, idempotent=True,
+    )
 
 
 def _ingress_whitelist_remove(ip: str, port: int) -> None:
-    """Удаляет ACCEPT-правило whitelist для IP/CIDR."""
-    comment = f"xray-ru-wl-{ip.replace('/', '_')}"
-    _run(["iptables", "-D", "INPUT", "-s", ip, "-j", "ACCEPT",
-          "-m", "comment", "--comment", comment],
-         check=False, quiet=True)
-    if ":" in ip:
-        _run(["ip6tables", "-D", "INPUT", "-s", ip, "-j", "ACCEPT",
-              "-m", "comment", "--comment", comment],
-             check=False, quiet=True)
+    """Удаляет ACCEPT-правило whitelist для IP/CIDR.
+
+    Заменяет (миграция этапа 1.2):
+      iptables -D INPUT -s <ip> -j ACCEPT -m comment --comment "xray-ru-wl-<ip>"
+      ip6tables -D INPUT -s <ip> -j ACCEPT -m comment --comment "xray-ru-wl-<ip>"
+
+    Теперь: один вызов nft_rule_delete_by_comment — находит все правила с
+    указанным comment и удаляет через handle (nft -a list chain → handles →
+    delete rule ... handle N).
+    """
+    comment = f"{_INGRESS_WL_PREFIX}{ip.replace('/', '_')}"
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=comment, family=NFT_TABLE_FAMILY, max_iterations=5,
+    )
 
 
 def _ingress_whitelist_apply_all(state: dict, port: int) -> None:
@@ -416,9 +511,14 @@ def _ingress_whitelist_apply_all(state: dict, port: int) -> None:
 
 
 def _ingress_enable(port: int) -> None:
-    """Основной вызов: скачать CIDR, применить, сохранить состояние, поставить cron."""
+    """Основной вызов: скачать CIDR, применить, сохранить состояние, поставить cron.
+
+    После миграции на nftables (этап 1.2) больше нет ветвления ipset vs plain
+    (nft поддерживает sets нативно). `_ingress_iptables_available` теперь
+    эквивалентен `_nft_available()` — проверяет наличие `nft` binary.
+    """
     if not _ingress_iptables_available():
-        warn("iptables не найден — невозможно применить правила")
+        warn("nft не найден — невозможно применить правила. Установите: apt install nftables")
         return
 
     # Проверяем возраст RIPE-файла перед apply
@@ -429,24 +529,27 @@ def _ingress_enable(port: int) -> None:
         warn("Список РФ подсетей пуст — проверьте доступность RIPE NCC")
         return
 
-    use_ipset = _ingress_ipset_available()
-    if use_ipset:
-        ok = _ingress_apply_ipset(port, v4, v6)
-        method = "ipset"
-        if ok:
-            ipset_save()  # persist ipset для boot-restore
-    else:
-        warn("ipset не установлен — используем plain iptables (медленнее)")
-        warn("Рекомендуется: apt install ipset")
-        ok = _ingress_apply_iptables_plain(port, v4)
-        method = "plain"
+    # nftables поддерживает sets нативно — fallback-режим (`_ingress_apply_iptables_plain`)
+    # больше не нужен. Ветка `plain` оставлена в state.json для обратной совместимости
+    # со старыми state-файлами, но в коде всегда используем nft set path.
+    ok = _ingress_apply_ipset(port, v4, v6)
+    method = "nft"  # мигрировано с "ipset" / "plain"
+    if ok:
+        # Сохраняем nft ruleset в /etc/nftables.conf (заменяет `ipset save`).
+        # Восстановление при boot — через `nftables.service` (заменяет
+        # кастомный `xray-ipset-restore.service`).
+        try:
+            nft_persist()
+        except Exception:
+            pass
 
     #  интеграция с per-user IP whitelist (user_ip_whitelist.py).
-    # Ставим ACCEPT-правило для ipset clients_wl ПЕРЕД DROP-правилом РФ,
+    # Ставим ACCEPT-правило для nft set clients_wl ПЕРЕД DROP-правилом РФ,
     # чтобы пользователи с РФ-IP могли подключаться к VLESS на 443.
-    # Это делается ПОСЛЕ _ingress_apply_ipset (который ставит DROP через -A),
-    # через -I INPUT 1 (в самое начало) — приоритет над DROP.
-    # Если user_ip_whitelist не установлен или ipset недоступен —
+    # Это делается ПОСЛЕ _ingress_apply_ipset (который ставит DROP через
+    # nft_rule_add в конец цепочки), через nft_rule_insert (position=1) —
+    # приоритет над DROP.
+    # Если user_ip_whitelist не установлен или nft недоступен —
     # просто пропускаем (блокировка РФ продолжит работать, но без whitelist).
     try:
         from chimera.modules.user_ip_whitelist import (
@@ -455,11 +558,11 @@ def _ingress_enable(port: int) -> None:
         )
         if _wl_apply(port):
             success("Per-user IP whitelist: ACCEPT правило применено "
-                    "(ipset clients_wl → ACCEPT на :%d)" % port)
-            # Устанавливаем cron для автообновления ipset.
+                    "(nft set clients_wl → ACCEPT на :%d)" % port)
+            # Устанавливаем cron для автообновления nft set clients_wl.
             _wl_cron()
         else:
-            info("Per-user IP whitelist: ipset недоступен или нет пользователей — "
+            info("Per-user IP whitelist: nft недоступен или нет пользователей — "
                  "пропускаю. Клиенты с РФ-IP будут заблокированы.")
     except Exception as e:
         warn(f"Per-user IP whitelist: не удалось применить ({e})")
@@ -489,8 +592,12 @@ def _ingress_enable(port: int) -> None:
 
     # Устанавливаем cron для автообновления (еженедельно по воскресеньям в 03:00)
     _ingress_install_cron(port)
-    # Устанавливаем systemd-юнит восстановления ipset при reboot
-    ipset_restore_unit_install()
+    # Включаем systemd `nftables.service` для восстановления правил при reboot.
+    # Заменяет кастомный `xray-ipset-restore.service` (legacy, не нужен при nft).
+    try:
+        nft_persist_enable_systemd()
+    except Exception:
+        pass
 
     log_to_file("INFO",
         f"Ingress GeoIP block enabled: port={port}, "
@@ -525,7 +632,8 @@ def _ingress_install_cron(port: int) -> None:
 
 def do_manage_ingress_geoip() -> None:
     """
-    Меню: блокировка входящих подключений из РФ на уровне iptables.
+    Меню: блокировка входящих подключений из РФ на уровне nftables
+    (мигрировано с iptables/ipset, этап 1.2).
     Предназначено для Режима B — Entry Node в РФ, пользователи за рубежом.
     """
     while True:
@@ -548,9 +656,9 @@ def do_manage_ingress_geoip() -> None:
             except Exception:
                 cur_port = 443
 
-        ipset_ok = _ingress_ipset_available()
+        nft_ok = _nft_available()
 
-        _box_top("БЛОКИРОВКА ВХОДЯЩИХ ИЗ РФ (iptables)")
+        _box_top("БЛОКИРОВКА ВХОДЯЩИХ ИЗ РФ (nftables)")
         _box_row()
 
         wl_ips = state.get("whitelist", [])
@@ -574,7 +682,7 @@ def do_manage_ingress_geoip() -> None:
             _box_row(f"  {DIM}Режим B: Entry Node в РФ, пользователи за рубежом.{NC}")
 
         _box_sep()
-        _box_row(f"  ipset: {''+GREEN+'доступен'+NC if ipset_ok else ''+YELLOW+'НЕТ (apt install ipset)'+NC}")
+        _box_row(f"  nft:   {''+GREEN+'доступен'+NC if nft_ok else ''+YELLOW+'НЕТ (apt install nftables)'+NC}")
         # Whitelist — показываем всегда
         if wl_ips:
             _box_row(f"  {BOLD}Whitelist (всегда разрешены — SSH/управление):{NC}")
@@ -590,7 +698,7 @@ def do_manage_ingress_geoip() -> None:
         else:
             _box_item("1", f"{GREEN}Включить блокировку входящих из РФ{NC}")
 
-        _box_item("3", "Проверить текущие правила iptables")
+        _box_item("3", "Проверить текущие правила nftables")
         _box_item("4", f"Управление whitelist {DIM}(ваш IP, SSH-источники){NC}")
         _box_item("5", f"🧹 Очистить накопленные UFW deny (autoban/honeypot/dpi)")
         _box_row()
@@ -648,21 +756,34 @@ def do_manage_ingress_geoip() -> None:
 
         elif ch == "3":
             print()
-            _box_top("Текущие правила iptables (INPUT)")
+            _box_top("Текущие правила nftables (inet chimera input)")
             _box_row()
-            r = _run(["iptables", "-L", "INPUT", "-n", "--line-numbers"],
-                     check=False, capture=True)
+            # Заменяет `iptables -L INPUT -n --line-numbers`.
+            # `nft list chain inet chimera input` выводит правила Chimera в input.
+            # Включает comment-tag rules (видно комментарий xray-ru-ingress-block
+            # и xray-ru-wl-<ip>).
+            r = _run(["nft", "list", "chain", NFT_TABLE_FAMILY, NFT_TABLE_NAME,
+                      NFT_CHAIN_INPUT], check=False, capture=True)
             for line in r.stdout.splitlines():
-                if "xray-ru-ingress" in line or "XRU_BLOCK" in line \
-                   or line.startswith("num") or line.startswith("Chain"):
+                # Фильтруем: показываем только строки с нашими comment-тегами,
+                # заголовки цепочек и общую статистику set size.
+                if ("xray-ru-ingress" in line or "xray-ru-wl" in line
+                        or line.strip().startswith("chain")
+                        or line.strip().startswith("table")
+                        or line.strip().startswith("type")
+                        or "@" + INGRESS_IPSET_NAME in line
+                        or "@" + INGRESS_IPSET6_NAME in line):
                     _box_row(f"  {line}")
-            if ipset_ok:
+            if nft_ok:
                 _box_row()
-                r2 = _run(["ipset", "list", INGRESS_IPSET_NAME,
-                            "-t"],  # только заголовок, без 5000 IP
-                           check=False, capture=True)
-                for line in r2.stdout.splitlines():
-                    _box_row(f"  {line}")
+                # Количество элементов в nft set (без вывода 5000 IP).
+                # Заменяет `ipset list <name> -t` (заголовок без members).
+                cnt_v4 = nft_set_count(INGRESS_IPSET_NAME,
+                                       table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
+                cnt_v6 = nft_set_count(INGRESS_IPSET6_NAME,
+                                       table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
+                _box_row(f"  nft set @{INGRESS_IPSET_NAME}: {cnt_v4} elements")
+                _box_row(f"  nft set @{INGRESS_IPSET6_NAME}: {cnt_v6} elements")
             _box_row()
             _box_bottom()
             input(f"{BLUE}Нажмите Enter...{NC}")

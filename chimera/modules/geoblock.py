@@ -1,20 +1,47 @@
 """
 chimera/modules/geoblock.py
 ───────────────────────────────────────────────────────────────────────────────
-Гео-блокировка по странам для Telemt (MTProto) — iptables/ipset DROP.
+Гео-блокировка по странам для Telemt (MTProto) — nftables DROP.
 
 Блокирует входящие соединения на порт Telemt с IP-диапазонов указанных стран.
-Работает на уровне iptables (ДО бинарника Telemt), а не на уровне Xray routing.
+Работает на уровне nftables (ДО бинарника Telemt), а не на уровне Xray routing.
 
-Переиспользует паттерн из ingress_geoip.py (ipset hash:net + iptables DROP),
+МИГРАЦИЯ (этап 1.2):
+  Раньше использовался связка `ipset hash:net` + `iptables/ip6tables -m set
+  --match-set` для каждой страны. Теперь всё живет в единой таблице
+  `inet chimera` (covers both IPv4 + IPv6 без дублирования) и использует
+  централизованные примитивы из `chimera/modules/nft_common.py`:
+
+    • `nft_set_create(name, ..., flags=["interval"], maxelem=N)` — замена
+      `ipset create <name> hash:net family inet maxelem N -exist`.
+    • `nft_set_atomic_swap(name, new_elements, ...)` — замена последовательности
+      `ipset flush <name>` + `ipset restore -! -f <tmpfile>`. Атомарная
+      транзакция `nft -f -` (flush set + add element в одном batch) — лучше
+      старого паттерна ipset (между flush и add нет окна видимости).
+    • `nft_rule_add(table, chain, rule_spec, family, comment=...)` — замена
+      `-D ... -A ... -m set --match-set ... -m comment --comment ...`
+      (идемпотентно по comment-tag, не требует ручного -D перед -A).
+    • `nft_rule_delete_by_comment(table, chain, comment)` — замена цикла
+      `iptables -D INPUT ...` до rc!=0. Один вызов находит все правила с
+      указанным comment и удаляет их через `handle` (через `nft -a list chain`).
+    • `nft_set_destroy(name, table, family)` — замена `ipset destroy <name>`.
+    • `nft_persist()` — замена `ipset save` → /etc/ipset.conf. Теперь единый
+      `/etc/nftables.conf` для всех правил Chimera (nft list ruleset).
+
+  Comment-tag `telemt-geoblock-<cc>` сохранён для совместимости с аудитом
+  правил в `nft list ruleset` (тот же префикс `telemt-geoblock-` что и раньше).
+  Семантика идентична: что блокировалось — то и блокируется.
+
+Переиспользует паттерн из ingress_geoip.py (set + DROP rule),
 но в режиме block-list (DROP конкретных стран), а не allow-list.
 
 Источник данных: ipdeny.com — aggregated country zone files.
   IPv4: https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone
   IPv6: https://www.ipdeny.com/ipblocks/data/aggregated/ip6t/{cc}-aggregated.zone
 
-Персистентность: через ipset_save() + systemd-юнит восстановления (как в
-ingress_geoip.py). State в JSON — какие страны заблокированы на каком порту.
+Персистентность: через `nft_persist()` → единый файл /etc/nftables.conf
+(заменяет отдельные /etc/ipset.conf + /etc/iptables/rules.v4 + rules.v6).
+State в JSON — какие страны заблокированы на каком порту.
 
 Точки входа:
     from chimera.modules.geoblock import (
@@ -27,10 +54,20 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+# nftables — централизованная обёртка над `nft` CLI (этап 1.2 миграции)
+from .nft_common import (
+    nft_set_create, nft_set_atomic_swap, nft_set_destroy,
+    nft_rule_add, nft_rule_delete_by_comment,
+    nft_persist, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    geoblock_set_name, COMMENT_GEOBLOCK_PREFIX,
+)
 
 # ── Ленивый доступ к ядру ────────────────────────────────────────────────────
 def _core_module():
@@ -43,12 +80,33 @@ _STATE_FILE = Path("/var/lib/xray-installer/geoblock_telemt.json")
 _IPDENY_V4_BASE = "https://www.ipdeny.com/ipblocks/data/aggregated"
 _IPDENY_V6_BASE = "https://www.ipdeny.com/ipblocks/data/aggregated/ip6t"
 
-# Имена ipset-сетов — уникальные, не конфликтуют с ingress_geoip (xray_ru_block)
-_IPSET_V4_PREFIX = "telemt_geoblock_v4_"
-_IPSET_V6_PREFIX = "telemt_geoblock_v6_"
+# Имена nft sets теперь генерируются через chimera.modules.nft_constants.
+# geoblock_set_name(cc, ipv6=False) → "geoblock_<cc>_v4" / "geoblock_<cc>_v6".
+# Исторически (до миграции, эпоха ipset) использовались имена вида
+# `telemt_geoblock_v4_<cc>` — см. LEGACY_IPSET_NAME_MAP в nft_constants для
+# обратной совместимости со старым state.json (если такой попадётся).
+_IPSET_V4_PREFIX = "telemt_geoblock_v4_"  # legacy alias (для справки)
+_IPSET_V6_PREFIX = "telemt_geoblock_v6_"  # legacy alias (для справки)
 
-# Комментарий для iptables-правил
-_IPT_COMMENT = "telemt-geoblock"
+# Comment-tag для nft-правил: `telemt-geoblock-<cc>` (префикс из nft_constants).
+# Используем централизованный COMMENT_GEOBLOCK_PREFIX чтобы не разойтись
+# с реестром comment-тегов Chimera.
+_IPT_COMMENT = COMMENT_GEOBLOCK_PREFIX  # "telemt-geoblock-"
+
+
+def _set_name_v4(cc: str) -> str:
+    """Имя nft set для IPv4 geoblock страны cc."""
+    return geoblock_set_name(cc, ipv6=False)
+
+
+def _set_name_v6(cc: str) -> str:
+    """Имя nft set для IPv6 geoblock страны cc."""
+    return geoblock_set_name(cc, ipv6=True)
+
+
+def _comment_tag(cc: str) -> str:
+    """Comment-tag для nft-правила блокировки страны cc (для аудита и удаления)."""
+    return f"{COMMENT_GEOBLOCK_PREFIX}{cc.lower()}"
 
 
 # ── State ────────────────────────────────────────────────────────────────────
@@ -111,100 +169,125 @@ def _fetch_country_cidrs(cc: str) -> "tuple[list[str], list[str]]":
     return v4_cidrs, v6_cidrs
 
 
-# ── Применение ipset+iptables ────────────────────────────────────────────────
-
-def _run(cmd: list, **kw):
-    """Делегирует в core._run."""
-    return _core_module()._run(cmd, **kw)
-
+# ── Применение nft set + DROP rule ────────────────────────────────────────────
 
 def _apply_country_block(port: int, cc: str, v4: list, v6: list) -> bool:
-    """Создаёт ipset-сеты и iptables-правила для блокировки страны на порту."""
+    """Создаёт nft set и DROP-правила для блокировки страны на порту.
+
+    Заменяет (миграция этап 1.2):
+      ipset create <name> hash:net family inet maxelem 100000 -exist
+      ipset flush <name>
+      ipset restore -! -f /tmp/geoblock_<cc>_v4.ipset
+      iptables -D INPUT -p tcp --dport <port> -m set --match-set <name> src \\
+          -j DROP -m comment --comment telemt-geoblock-<cc>
+      iptables -A INPUT -p tcp --dport <port> -m set --match-set <name> src \\
+          -j DROP -m comment --comment telemt-geoblock-<cc>
+      (и зеркально для IPv6 через ipset create family inet6 + ip6tables -A)
+
+    Теперь:
+      nft_set_create(name, set_type="ipv4_addr", flags=["interval"], maxelem=N)
+      nft_set_atomic_swap(name, v4_cidrs)  # flush+add в одной транзакции
+      nft_rule_add(table="chimera", chain="input",
+                   rule_spec="tcp dport {port} ip saddr @{name} drop",
+                   comment="telemt-geoblock-{cc}")
+      (аналогично для IPv6: set_type="ipv6_addr", "ip6 saddr @{name}")
+    """
     cc = cc.lower().strip()
-    ipset_v4 = f"{_IPSET_V4_PREFIX}{cc}"
-    ipset_v6 = f"{_IPSET_V6_PREFIX}{cc}"
-    
+    set_v4 = _set_name_v4(cc)
+    set_v6 = _set_name_v6(cc)
+    comment = _comment_tag(cc)
+
     # IPv4
     if v4:
-        _run(["ipset", "create", ipset_v4, "hash:net", "family", "inet",
-              "maxelem", "100000", "-exist"], check=False, quiet=True)
-        _run(["ipset", "flush", ipset_v4], check=False, quiet=True)
-        
-        # Batch-добавление через restore
-        restore_text = "\n".join(f"add {ipset_v4} {cidr}" for cidr in v4)
-        tmp = Path(f"/tmp/geoblock_{cc}_v4.ipset")
-        tmp.write_text(restore_text)
-        _run(["ipset", "restore", "-!", "-f", str(tmp)], check=False, quiet=True)
-        tmp.unlink(missing_ok=True)
-        
-        # iptables DROP
-        _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", ipset_v4, "src", "-j", "DROP",
-              "-m", "comment", "--comment", f"{_IPT_COMMENT}-{cc}"],
-             check=False, quiet=True)
-        _run(["iptables", "-A", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", ipset_v4, "src", "-j", "DROP",
-              "-m", "comment", "--comment", f"{_IPT_COMMENT}-{cc}"],
-             check=False, quiet=True)
-    
+        # nft set inet chimera geoblock_<cc>_v4 { type ipv4_addr; flags interval; size 100000; }
+        nft_set_create(
+            set_v4, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+            set_type="ipv4_addr", flags=["interval"], maxelem=100000,
+        )
+        # Атомарно заменяем содержимое set на v4 (flush+add одной транзакцией).
+        # Заменяет `ipset flush` + `ipset restore -! -f <file>`.
+        nft_set_atomic_swap(
+            set_v4, v4, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+        )
+        # nft add rule inet chimera input tcp dport <port> ip saddr @<set_v4> drop
+        # comment "telemt-geoblock-<cc>"
+        # Идемпотентно по comment-tag: повторный вызов не дублирует правило.
+        nft_rule_add(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            rule_spec=f"tcp dport {port} ip saddr @{set_v4} drop",
+            family=NFT_TABLE_FAMILY, comment=comment, idempotent=True,
+        )
+
     # IPv6
     if v6:
-        _run(["ipset", "create", ipset_v6, "hash:net", "family", "inet6",
-              "maxelem", "50000", "-exist"], check=False, quiet=True)
-        _run(["ipset", "flush", ipset_v6], check=False, quiet=True)
-        
-        restore_text = "\n".join(f"add {ipset_v6} {cidr}" for cidr in v6)
-        tmp = Path(f"/tmp/geoblock_{cc}_v6.ipset")
-        tmp.write_text(restore_text)
-        _run(["ipset", "restore", "-!", "-f", str(tmp)], check=False, quiet=True)
-        tmp.unlink(missing_ok=True)
-        
-        _run(["ip6tables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", ipset_v6, "src", "-j", "DROP",
-              "-m", "comment", "--comment", f"{_IPT_COMMENT}-{cc}"],
-             check=False, quiet=True)
-        _run(["ip6tables", "-A", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", ipset_v6, "src", "-j", "DROP",
-              "-m", "comment", "--comment", f"{_IPT_COMMENT}-{cc}"],
-             check=False, quiet=True)
-    
-    # Persist ipset
+        # nft set inet chimera geoblock_<cc>_v6 { type ipv6_addr; flags interval; size 50000; }
+        nft_set_create(
+            set_v6, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+            set_type="ipv6_addr", flags=["interval"], maxelem=50000,
+        )
+        nft_set_atomic_swap(
+            set_v6, v6, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+        )
+        # nft add rule inet chimera input tcp dport <port> ip6 saddr @<set_v6> drop
+        # comment "telemt-geoblock-<cc>"
+        nft_rule_add(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            rule_spec=f"tcp dport {port} ip6 saddr @{set_v6} drop",
+            family=NFT_TABLE_FAMILY, comment=comment, idempotent=True,
+        )
+
+    # Persist nft ruleset (заменяет `ipset save` → /etc/ipset.conf).
     try:
-        from chimera.modules.ipset_persist import ipset_save
-        ipset_save()
+        nft_persist()
     except Exception:
         pass
-    
+
     return True
 
 
 def _remove_country_block(port: int, cc: str) -> bool:
-    """Удаляет ipset-сеты и iptables-правила для страны."""
+    """Удаляет nft set и DROP-правила для страны.
+
+    Заменяет (миграция этап 1.2):
+      iptables -D INPUT -p tcp --dport <port> -m set --match-set <name> src \\
+          -j DROP -m comment --comment telemt-geoblock-<cc>
+      ip6tables -D INPUT -p tcp --dport <port> -m set --match-set <name6> src \\
+          -j DROP -m comment --comment telemt-geoblock-<cc>
+      ipset destroy <name>
+      ipset destroy <name6>
+
+    Теперь:
+      nft_rule_delete_by_comment(table="chimera", chain="input",
+                                  comment="telemt-geoblock-<cc>")
+        — один вызов находит ВСЕ правила с этим comment (v4 и v6 вместе,
+          потому что у них одинаковый comment-tag) и удаляет через handle.
+      nft_set_destroy(<set_v4>, table="chimera", family="inet")
+      nft_set_destroy(<set_v6>, table="chimera", family="inet")
+    """
     cc = cc.lower().strip()
-    ipset_v4 = f"{_IPSET_V4_PREFIX}{cc}"
-    ipset_v6 = f"{_IPSET_V6_PREFIX}{cc}"
-    
-    # Удаляем iptables-правила
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-m", "set", "--match-set", ipset_v4, "src", "-j", "DROP",
-          "-m", "comment", "--comment", f"{_IPT_COMMENT}-{cc}"],
-         check=False, quiet=True)
-    _run(["ip6tables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-m", "set", "--match-set", ipset_v6, "src", "-j", "DROP",
-          "-m", "comment", "--comment", f"{_IPT_COMMENT}-{cc}"],
-         check=False, quiet=True)
-    
-    # Удаляем ipset-сеты
-    _run(["ipset", "destroy", ipset_v4], check=False, quiet=True)
-    _run(["ipset", "destroy", ipset_v6], check=False, quiet=True)
-    
+    set_v4 = _set_name_v4(cc)
+    set_v6 = _set_name_v6(cc)
+    comment = _comment_tag(cc)
+
+    # Удаляем все nft-правила с comment="telemt-geoblock-<cc>" из input.
+    # Заменяет цикл `iptables -D` (там нужно было по одному -D на каждое
+    # правило — для IPv4 и IPv6 отдельно). Здесь один вызов покрывает оба.
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=comment, family=NFT_TABLE_FAMILY,
+    )
+
+    # Уничтожаем nft sets (set_v4 + set_v6 — это два разных set, их надо
+    # удалить оба).
+    nft_set_destroy(set_v4, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
+    nft_set_destroy(set_v6, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
+
     # Persist
     try:
-        from chimera.modules.ipset_persist import ipset_save
-        ipset_save()
+        nft_persist()
     except Exception:
         pass
-    
+
     return True
 
 
@@ -229,8 +312,9 @@ def geoblock_add_country(port: int, country_code: str) -> bool:
         warn(f"Неверный код страны: {country_code!r} (нужно 2 буквы, например 'ir')")
         return False
     
-    if not shutil.which("ipset"):
-        warn("ipset не установлен: apt install ipset")
+    # Замена `shutil.which("ipset")` на `_nft_available()` из nft_common.
+    if not _nft_available():
+        warn("nft не установлен: apt install nftables")
         return False
     
     info(f"Скачиваю CIDR-список для {cc.upper()}...")
@@ -347,10 +431,11 @@ def geoblock_menu_telemt(port: int) -> None:
         else:
             _box_row(f"  {DIM}Нет заблокированных стран{NC}")
         _box_row()
-        _box_row(f"  {DIM}Блокировка работает на уровне iptables/ipset —{NC}")
+        _box_row(f"  {DIM}Блокировка работает на уровне nftables —{NC}")
         _box_row(f"  {DIM}соединения отбрасываются ДО достижения бинарника Telemt.{NC}")
         _box_row(f"  {DIM}Источник данных: ipdeny.com (aggregated country zones).{NC}")
-        _box_row(f"  {DIM}Персистентность: ipset save + systemd restore при ребуте.{NC}")
+        _box_row(f"  {DIM}Персистентность: nft list ruleset → /etc/nftables.conf +{NC}")
+        _box_row(f"  {DIM}восстановление через nftables.service при ребуте.{NC}")
         _box_sep()
         _box_item("1", "🚫  Заблокировать страну")
         _box_item("2", "✅  Разблокировать страну")

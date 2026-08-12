@@ -355,7 +355,7 @@ class TestCollectAllUserIps(unittest.TestCase):
 
 
 class TestRebuildClientsIpset(unittest.TestCase):
-    """rebuild_clients_ipset — atomic swap (mock subprocess)."""
+    """rebuild_clients_ipset — atomic swap через nft (mocked nft_common)."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -369,88 +369,83 @@ class TestRebuildClientsIpset(unittest.TestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    @patch("chimera.modules.user_ip_whitelist.shutil.which", return_value="/usr/sbin/ipset")
-    @patch("chimera.modules.user_ip_whitelist._run")
-    def test_rebuild_creates_and_swaps(self, mock_run, mock_which):
+    @patch("chimera.modules.user_ip_whitelist._nft_available", return_value=True)
+    @patch("chimera.modules.user_ip_whitelist.nft_set_atomic_swap", return_value=True)
+    @patch("chimera.modules.user_ip_whitelist.nft_set_create", return_value=True)
+    @patch("chimera.modules.user_ip_whitelist.nft_persist", return_value=True)
+    def test_rebuild_uses_atomic_swap(self, mock_persist, mock_create, mock_swap, mock_avail):
+        """После миграции на nftables rebuild вызывает nft_set_atomic_swap
+        (замена ipset swap + restore)."""
         from chimera.modules import user_ip_whitelist
-        # Все subprocess.run возвращают success.
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
         from chimera.modules import users_manager
         with patch.object(users_manager, "_users_load",
-                          side_effect=lambda: json.loads(self._users_file.read_text())), \
-             patch("chimera.modules.ipset_persist.ipset_save", return_value=True):
+                          side_effect=lambda: json.loads(self._users_file.read_text())):
             result = user_ip_whitelist.rebuild_clients_ipset()
-
         self.assertTrue(result)
-        # Должны быть вызваны: create v4, create v4_tmp, restore, swap, destroy.
-        cmd_strs = [" ".join(c.args[0]) if hasattr(c, "args") and isinstance(c.args[0], list) else str(c) for c in mock_run.call_args_list]
-        # Проверяем что были create и swap.
-        all_cmds = []
-        for c in mock_run.call_args_list:
-            if c.args and isinstance(c.args[0], list):
-                all_cmds.append(" ".join(c.args[0]))
-        self.assertTrue(any("create" in c and "clients_wl_v4" in c for c in all_cmds),
-                        f"create v4 missing: {all_cmds}")
-        self.assertTrue(any("swap" in c for c in all_cmds),
-                        f"swap missing: {all_cmds}")
+        # Должен быть вызов nft_set_atomic_swap (замена ipset swap)
+        self.assertGreaterEqual(mock_swap.call_count, 2,  # v4 + v6
+                                 f"nft_set_atomic_swap should be called for v4+v6, "
+                                 f"got {mock_swap.call_count}")
+        # Проверяем что был передан правильный set name
+        call_args = [str(c) for c in mock_swap.call_args_list]
+        self.assertTrue(any("clients_wl_v4" in arg for arg in call_args),
+                        f"clients_wl_v4 missing in {call_args}")
+        self.assertTrue(any("clients_wl_v6" in arg for arg in call_args),
+                        f"clients_wl_v6 missing in {call_args}")
 
-    @patch("chimera.modules.user_ip_whitelist.shutil.which", return_value=None)
-    def test_rebuild_no_ipset(self, mock_which):
-        """Если ipset недоступен — возвращает False, не падает."""
+    @patch("chimera.modules.user_ip_whitelist._nft_available", return_value=False)
+    def test_rebuild_no_nft(self, mock_avail):
+        """Если nft binary недоступен — возвращает False, не падает."""
         from chimera.modules import user_ip_whitelist
         result = user_ip_whitelist.rebuild_clients_ipset()
         self.assertFalse(result)
 
 
 class TestIptablesRule(unittest.TestCase):
-    """apply_iptables_rule / remove_iptables_rule — установка/снятие."""
+    """apply_iptables_rule / remove_iptables_rule — nft версия (этап 1.2 миграции)."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    @patch("chimera.modules.user_ip_whitelist.shutil.which", return_value="/usr/sbin/iptables")
-    @patch("chimera.modules.user_ip_whitelist._run")
+    @patch("chimera.modules.user_ip_whitelist._nft_available", return_value=True)
     @patch("chimera.modules.user_ip_whitelist.rebuild_clients_ipset", return_value=True)
-    def test_apply_iptables_rule_inserts_at_position_1(self, mock_rebuild, mock_run, mock_which):
-        """ACCEPT правило вставляется через -I INPUT 1 (перед DROP)."""
+    @patch("chimera.modules.user_ip_whitelist.nft_rule_insert", return_value=True)
+    def test_apply_iptables_rule_uses_nft_insert(self, mock_insert, mock_rebuild, mock_avail):
+        """ACCEPT правило добавляется через nft_rule_insert (insert position=1)."""
         from chimera.modules import user_ip_whitelist
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         result = user_ip_whitelist.apply_iptables_rule(443)
         self.assertTrue(result)
-        # Проверяем что был вызов с -I INPUT 1.
-        all_cmds = []
-        for c in mock_run.call_args_list:
-            if c.args and isinstance(c.args[0], list):
-                all_cmds.append(c.args[0])
-        # -I INPUT 1 (insert at position 1).
-        insert_calls = [c for c in all_cmds if "iptables" in c[0] and "-I" in c and "INPUT" in c and "1" in c]
-        self.assertGreater(len(insert_calls), 0,
-                           f"Должен быть -I INPUT 1: {all_cmds}")
-        # Проверяем что в правиле есть match-set clients_wl_v4.
-        v4_insert = [c for c in insert_calls if "clients_wl_v4" in c]
-        self.assertGreater(len(v4_insert), 0, "Должен быть clients_wl_v4 в правиле")
+        # Должны быть 2 вызова nft_rule_insert: v4 и v6
+        self.assertEqual(mock_insert.call_count, 2,
+                         f"nft_rule_insert should be called for v4+v6, "
+                         f"got {mock_insert.call_count}")
+        # Проверяем что в rule_spec есть clients_wl_v4
+        call_args = [str(c) for c in mock_insert.call_args_list]
+        v4_call = [c for c in call_args if "clients_wl_v4" in c]
+        self.assertGreater(len(v4_call), 0, f"v4 call with clients_wl_v4 missing: {call_args}")
+        # Проверяем что spec содержит accept
+        self.assertTrue(any("accept" in c for c in call_args),
+                        f"accept missing in nft rule spec: {call_args}")
 
-    @patch("chimera.modules.user_ip_whitelist.shutil.which", return_value=None)
-    def test_apply_iptables_rule_no_iptables(self, mock_which):
-        """Если iptables недоступен — возвращает False."""
+    @patch("chimera.modules.user_ip_whitelist._nft_available", return_value=False)
+    def test_apply_iptables_rule_no_nft(self, mock_avail):
+        """Если nft недоступен — возвращает False."""
         from chimera.modules import user_ip_whitelist
         result = user_ip_whitelist.apply_iptables_rule(443)
         self.assertFalse(result)
 
-    @patch("chimera.modules.user_ip_whitelist.shutil.which", return_value="/usr/sbin/iptables")
-    @patch("chimera.modules.user_ip_whitelist._run")
-    def test_remove_iptables_rule(self, mock_run, mock_which):
-        """remove_iptables_rule удаляет через -D INPUT."""
+    @patch("chimera.modules.user_ip_whitelist._nft_available", return_value=True)
+    @patch("chimera.modules.user_ip_whitelist.nft_rule_delete_by_comment")
+    def test_remove_iptables_rule(self, mock_delete, mock_avail):
+        """remove_iptables_rule вызывает nft_rule_delete_by_comment."""
         from chimera.modules import user_ip_whitelist
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         user_ip_whitelist.remove_iptables_rule(443)
-        all_cmds = []
-        for c in mock_run.call_args_list:
-            if c.args and isinstance(c.args[0], list):
-                all_cmds.append(c.args[0])
-        delete_calls = [c for c in all_cmds if "iptables" in c[0] and "-D" in c and "INPUT" in c]
-        self.assertGreater(len(delete_calls), 0, "Должен быть -D INPUT")
+        mock_delete.assert_called_once()
+        # Проверяем что передан правильный comment
+        args, kwargs = mock_delete.call_args
+        comment = kwargs.get("comment") or (args[2] if len(args) > 2 else None)
+        self.assertEqual(comment, "chimera-clients-wl",
+                         f"comment should be 'chimera-clients-wl', got {comment!r}")
 
 
 class TestCron(unittest.TestCase):
@@ -516,12 +511,16 @@ class TestQ1UserPortalAccessibleWithoutWhitelist(unittest.TestCase):
         """ingress_geoip применяет DROP только к SERVER_PORT, не к 8443."""
         from chimera.modules import ingress_geoip
         import inspect
-        # Проверяем что в _ingress_apply_ipset используется --dport <port>,
-        # а не все порты.
+        # После миграции на nftables (этап 1.2) правило DROP выглядит так:
+        #   nft add rule inet chimera input tcp dport {port} ip saddr @set drop
+        # (см. chimera/modules/ingress_geoip.py:_ingress_apply_ipset).
+        # Проверяем что port берётся из аргумента функции (не хардкод 443),
+        # и используется в spec-строке nft.
         src = inspect.getsource(ingress_geoip._ingress_apply_ipset)
-        self.assertIn("--dport", src)
-        # PORT берётся из аргумента, не хардкод 443.
-        self.assertIn("port", src)
+        # `dport` (без префикса `--`) — это nft-синтаксис (был `--dport` в iptables).
+        self.assertIn("dport", src)
+        # f-string interpolation of port (аргумент функции).
+        self.assertIn("{port}", src)
 
     def test_user_portal_default_port_is_8443(self):
         """rest_api.py слушает на 8443 по умолчанию, не на 443."""
@@ -534,9 +533,10 @@ class TestQ1UserPortalAccessibleWithoutWhitelist(unittest.TestCase):
         from chimera.modules import user_ip_whitelist
         import inspect
         src = inspect.getsource(user_ip_whitelist.apply_iptables_rule)
-        # Использует --dport str(port), где port — аргумент функции.
-        self.assertIn("--dport", src)
-        self.assertIn("str(port)", src)
+        # После миграции на nftables: spec содержит `tcp dport {port}` (f-string)
+        # вместо `--dport str(port)`. Проверяем что port используется как аргумент.
+        self.assertIn("dport", src)
+        self.assertIn("{port}", src)  # f-string interpolation of port
 
 
 class TestQ2XForwardedForConditionalTrust(unittest.TestCase):

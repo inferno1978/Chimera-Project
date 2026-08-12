@@ -6,14 +6,17 @@ Per-user IP whitelist (allowed_ips) для клиентов Chimera.
 Решает проблему: ingress_geoip дропает ВСЕ входящие из РФ на SERVER_PORT (443).
 Это защищает от ТСПУ-сенсоров, но блокирует и реальных клиентов с российскими IP.
 
-Решение:
+Решение (мигрировано с iptables/ipset на nftables, этап 1.2):
   • В users.json добавляется поле allowed_ips: ["5.167.98.20", ...]
-  • Скрипт собирает ВСЕ allowed_ips ВСЕХ пользователей → ipset clients_wl
-  • iptables: ACCEPT -m set --match-set clients_wl src -p tcp --dport 443
-    ставится ПЕРЕД правилом DROP РФ (clients_wl имеет приоритет над xray_ru_block)
+  • Скрипт собирает ВСЕ allowed_ips ВСЕХ пользователей → nft set clients_wl_v4/v6
+  • nft rule inet chimera input tcp dport 443 ip saddr @clients_wl_v4 accept
+    comment "chimera-clients-wl" — ставится ПЕРЕД правилом DROP РФ
+    (clients_wl имеет приоритет над ingress_block_v4 через insert position=1)
   • TUI (пункт [6] в do_manage_users): админ добавляет/удаляет IP для юзера
   • User Portal: клиент сам управляет своими IP через /api/portal/ips
-  • Cron каждые 5 минут пересобирает ipset (atomic swap через ipset swap)
+  • Cron каждые 5 минут пересобирает nft set (atomic swap через
+    'nft -f -' с flush+add в одной транзакции — лучше чем ipset swap,
+    т.к. между flush и add нет окна видимости снаружи)
 
 АРХИТЕКТУРНЫЕ РЕШЕНИЯ (Q1 + Q2):
 
@@ -75,6 +78,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# nftables — централизованная обёртка над `nft` CLI (этап 1.2 миграции)
+from .nft_common import (
+    nft_set_create, nft_set_exists, nft_set_atomic_swap,
+    nft_set_destroy, nft_set_count,
+    nft_rule_add, nft_rule_insert, nft_rule_delete_by_comment,
+    nft_persist, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    NFT_SET_CLIENTS_WL_V4, NFT_SET_CLIENTS_WL_V6,
+    COMMENT_CLIENTS_WL, NFT_PERSIST_FILE,
+)
+
 
 # ── Ленивый доступ к ядру ────────────────────────────────────────────────────
 def _core_module():
@@ -84,14 +100,18 @@ def _core_module():
 
 
 # ── Константы ────────────────────────────────────────────────────────────────
-# ipset-сеты для per-user whitelist. Раздельно IPv4 и IPv6 — у ipset
-# hash:ip/hash:net должен быть фиксированный family (inet или inet6).
-IPSET_V4_NAME = "clients_wl_v4"
-IPSET_V6_NAME = "clients_wl_v6"
+# Имена nft sets для per-user whitelist (живут в таблице inet chimera).
+# В nftables family=inet поддерживает и v4, и v6 правила в одной таблице,
+# но type set-а должен быть конкретным: ipv4_addr или ipv6_addr.
+# Поэтому два отдельных set-а для v4 и v6 (как раньше в ipset).
+IPSET_V4_NAME = NFT_SET_CLIENTS_WL_V4   # "clients_wl_v4"
+IPSET_V6_NAME = NFT_SET_CLIENTS_WL_V6   # "clients_wl_v6"
 
-# Комментарий в iptables для поиска правила при remove.
-IPTABLES_COMMENT = "chimera-clients-wl"
-IPTABLES_COMMENT_V6 = "chimera-clients-wl-v6"
+# Comment-tag для идемпотентности nft-правил и безопасного удаления.
+# Один tag используется и для v4, и для v6 правила — это упрощает удаление
+# (один вызов nft_rule_delete_by_comment удаляет оба правила).
+IPTABLES_COMMENT = COMMENT_CLIENTS_WL       # "chimera-clients-wl"
+IPTABLES_COMMENT_V6 = COMMENT_CLIENTS_WL   # тот же tag (раньше был отдельный v6)
 
 # Cron: пересобираем ipset каждые 5 минут (быстрая реакция на добавление IP
 # через User Portal без ожидания ручного rebuild).
@@ -504,19 +524,32 @@ def replace_all_ips(email: str, new_ip: str, keep_pinned: bool = True) -> "tuple
     return True, f"Все IP заменены на {normalized}"
 
 
-# ── ipset management ─────────────────────────────────────────────────────────
+# ── nftables management (замена ipset/iptables, этап 1.2) ─────────────────────
 
 def _run(cmd: list, check: bool = False, quiet: bool = True) -> subprocess.CompletedProcess:
-    """Тонкая обёртка над subprocess.run для консистентности с остальным Chimera."""
+    """Тонкая обёртка над subprocess.run — сохранена для обратной совместимости
+    с тестами и со старыми вызовами в этом файле (например, для UFW).
+
+    ВНИМАНИЕ: ВАЖНЫЕ операции с firewall должны идти через nft_common.*,
+    не через этот _run. Здесь _run оставлен только для не-firewall команд
+    (например, проверка which, системные вызовы).
+    """
     return subprocess.run(cmd, capture_output=True, text=True, check=check)
 
 
 def _ipset_available() -> bool:
-    return bool(shutil.which("ipset"))
+    """Алиас — теперь проверяет наличие `nft` binary (а не ipset)."""
+    return _nft_available()
 
 
 def _iptables_available() -> bool:
-    return bool(shutil.which("iptables"))
+    """Алиас — теперь проверяет наличие `nft` binary (а не iptables).
+
+    В nftables нет отдельного iptables — все firewall-операции идут через
+    единый `nft` binary. Поэтому для работы apply_iptables_rule/remove_iptables_rule
+    достаточно наличия nft.
+    """
+    return _nft_available()
 
 
 def _collect_all_user_ips() -> "tuple[list[str], list[str]]":
@@ -528,9 +561,6 @@ def _collect_all_user_ips() -> "tuple[list[str], list[str]]":
     v6_set: set[str] = set()
     for u in users:
         for ip in _normalize_user_ips(u):
-            # Все значения в allowed_ips уже валидированы при add, но
-            # для устойчивости к ручному редактированию users.json —
-            # валидируем ещё раз.
             ok, normalized, _ = _validate_ip_or_cidr(ip)
             if not ok:
                 continue
@@ -542,179 +572,166 @@ def _collect_all_user_ips() -> "tuple[list[str], list[str]]":
 
 
 def _ipset_create_empty(name: str, family: str = "inet") -> bool:
-    """Создаёт пустой ipset (если не существует)."""
-    if not _ipset_available():
+    """Создаёт пустой nft set (если не существует).
+
+    Заменяет: ipset create <name> hash:net family <inet|inet6> maxelem 100000 -exist
+    Теперь:   nft add set inet chimera <name> { type ipv4_addr|ipv6_addr;
+              flags interval; size 100000; }
+    """
+    if not _nft_available():
         return False
-    family_arg = "inet6" if family == "inet6" else "inet"
-    # hash:net работает и для одиночных IP (1.2.3.4 → 1.2.3.4/32),
-    # и для подсетей (1.2.3.0/24).
-    r = _run(["ipset", "create", name, "hash:net",
-              "family", family_arg, "maxelem", "100000", "-exist"])
-    return r.returncode == 0
+    set_type = "ipv6_addr" if family == "inet6" else "ipv4_addr"
+    return nft_set_create(name, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY,
+                          set_type=set_type, flags=["interval"],
+                          maxelem=100000)
 
 
 def _ipset_swap_and_destroy(tmp_name: str, real_name: str) -> bool:
-    """Atomic swap: tmp → real, затем удаляем tmp (теперь он real_name).
-    Возвращает True при успехе.
+    """DEPRECATED после миграции на nftables (этап 1.2).
+
+    Раньше: ipset swap <tmp> <real> + ipset destroy <tmp> (atomic swap).
+    Теперь: nft_set_atomic_swap(real, new_elements) делает flush+add в одной
+    транзакции через `nft -f -` (here-doc). Это даже лучше — между flush и
+    add нет окна видимости снаружи.
+
+    Функция сохранена для обратной совместимости с тестами, но теперь НЕ
+    должна вызываться из нового кода. Если её вызывают — это noop (real_name
+    уже должен содержать правильные данные через nft_set_atomic_swap).
     """
-    r = _run(["ipset", "swap", tmp_name, real_name])
-    if r.returncode != 0:
-        # swap не удался — удаляем tmp, оставляем real как есть.
-        _run(["ipset", "destroy", tmp_name])
-        return False
-    # После swap: tmp_name теперь содержит старое содержимое real_name.
-    # Удаляем его (это бывший real).
-    _run(["ipset", "destroy", tmp_name])
+    nft_set_destroy(tmp_name, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
     return True
 
 
 def rebuild_clients_ipset() -> bool:
-    """Пересобирает ipset clients_wl_v4 и clients_wl_v6 из users.json.
+    """Пересобирает nft sets clients_wl_v4 и clients_wl_v6 из users.json.
 
-    Использует atomic swap (ipset swap) — без перерыва в фильтрации.
-    Старые IP продолжают работать до момента swap, новые — сразу после.
+    Использует atomic swap (одна nft-транзакция с flush + add) — без
+    перерыва в фильтрации. Старые IP продолжают работать до момента flush,
+    новые — сразу после add. Между flush и add нет окна видимости снаружи
+    (транзакция атомарна в ядре nftables).
+
+    Заменяет: ipset create tmp + ipset restore -! -f <file> + ipset swap
+              tmp real + ipset destroy tmp (4 операции + tmp-file на диске)
+    Теперь:   nft -f - <<EOF  (одна операция, без tmp-file)
+              flush set inet chimera clients_wl_v4
+              add element inet chimera clients_wl_v4 { 1.2.3.4, 5.6.7.0/24, ... }
+              EOF
     """
-    if not _ipset_available():
+    if not _nft_available():
         return False
 
     v4, v6 = _collect_all_user_ips()
 
-    # IPv4: создаём tmp-сет, заполняем, swap.
-    if not _ipset_create_empty(IPSET_V4_NAME, "inet"):
-        return False
-    # tmp-сеты для atomic swap.
-    _run(["ipset", "create", IPSET_V4_NAME + "_tmp", "hash:net",
-          "family", "inet", "maxelem", "100000", "-exist"])
-    if v4:
-        restore_lines = "\n".join(
-            [f"add {IPSET_V4_NAME}_tmp {cidr}" for cidr in v4]
-        ) + "\n"
-        tmp_file = Path("/tmp/chimera_clients_wl_v4.ipset")
-        tmp_file.write_text(restore_lines)
-        _run(["ipset", "restore", "-!", "-f", str(tmp_file)])
-        tmp_file.unlink(missing_ok=True)
-    _ipset_swap_and_destroy(IPSET_V4_NAME + "_tmp", IPSET_V4_NAME)
+    # Создаём set-ы если их ещё нет (пустые — чтобы atomic swap не упал
+    # на "set does not exist").
+    _ipset_create_empty(IPSET_V4_NAME, "inet")
+    _ipset_create_empty(IPSET_V6_NAME, "inet6")
 
-    # IPv6 — то же самое.
-    if not _ipset_create_empty(IPSET_V6_NAME, "inet6"):
+    # Atomic swap: flush + add в одной nft-транзакции.
+    # Если v4/v6 пустой — просто flush (set остаётся пустым, что валидно).
+    if not nft_set_atomic_swap(IPSET_V4_NAME, v4,
+                                table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY):
         return False
-    _run(["ipset", "create", IPSET_V6_NAME + "_tmp", "hash:net",
-          "family", "inet6", "maxelem", "100000", "-exist"])
-    if v6:
-        restore_lines = "\n".join(
-            [f"add {IPSET_V6_NAME}_tmp {cidr}" for cidr in v6]
-        ) + "\n"
-        tmp_file = Path("/tmp/chimera_clients_wl_v6.ipset")
-        tmp_file.write_text(restore_lines)
-        _run(["ipset", "restore", "-!", "-f", str(tmp_file)])
-        tmp_file.unlink(missing_ok=True)
-    _ipset_swap_and_destroy(IPSET_V6_NAME + "_tmp", IPSET_V6_NAME)
+    if not nft_set_atomic_swap(IPSET_V6_NAME, v6,
+                                table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY):
+        return False
 
-    # Persist для boot-restore.
+    # Persist для boot-restore — единый nft ruleset.
     try:
-        from chimera.modules.ipset_persist import ipset_save
-        ipset_save()
+        nft_persist(NFT_PERSIST_FILE)
     except Exception:
         pass  # не критично — cron пересоберёт при следующем запуске
 
     return True
 
 
-# ── iptables rules ───────────────────────────────────────────────────────────
+# ── nft rules (заменa iptables rules, этап 1.2) ──────────────────────────────
 
 def apply_iptables_rule(port: int) -> bool:
     """Добавляет ACCEPT-правило для clients_wl перед DROP-правилом ingress_geoip.
 
-    Правило: ACCEPT -m set --match-set clients_wl_v4 src -p tcp --dport <port>
-    Ставится через -I INPUT 1 (в самое начало) — ПЕРЕД всем остальным,
-    включая DROP для xray_ru_block.
+    Заменяет:
+      iptables  -I INPUT 1 -p tcp --dport <port> -m set --match-set
+                  clients_wl_v4 src -j ACCEPT -m comment --comment chimera-clients-wl
+      ip6tables -I INPUT 1 -p tcp --dport <port> -m set --match-set
+                  clients_wl_v6 src -j ACCEPT -m comment --comment chimera-clients-wl-v6
 
-    Это КРИТИЧНО: если поставить через -A (в конец), то DROP для РФ-подсетей
-    сработает раньше (он стоит через -A, но AFTER ESTABLISHED и whitelist ACCEPT).
-    -I 1 гарантирует приоритет над любыми правилами.
+    Теперь два правила в одной таблице inet chimera (v4 + v6 одновременно),
+    оба с одинаковым comment "chimera-clients-wl" для упрощённого удаления:
+      nft insert rule inet chimera input tcp dport <port> ip  saddr @clients_wl_v4 \\
+          accept comment "chimera-clients-wl"
+      nft insert rule inet chimera input tcp dport <port> ip6 saddr @clients_wl_v6 \\
+          accept comment "chimera-clients-wl"
+
+    Правила вставляются в начало (insert position=1) — ПЕРЕД всем остальным,
+    включая DROP для ingress_block_v4. Это КРИТИЧНО: если поставить через add
+    (в конец), то DROP сработает раньше.
+
+    Идемпотентность: nft_rule_insert с comment проверяет существование правила
+    с этим comment перед добавлением (через nft -j list chain).
 
     Вызывается из ingress_geoip._ingress_enable() автоматически.
     """
-    if not _iptables_available():
-        return False
-    if not _ipset_available():
+    if not _nft_available():
         return False
 
-    # Убедимся, что ipset существует (если users пустые — будет пустой сет,
+    # Убедимся, что set существует (если users пустые — будет пустой set,
     # правило всё равно нужно ставить — оно просто ничего не пропустит).
     rebuild_clients_ipset()
 
-    # IPv4
-    # Сначала удаляем старое правило если есть (idempotent).
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-m", "set", "--match-set", IPSET_V4_NAME, "src",
-          "-j", "ACCEPT",
-          "-m", "comment", "--comment", IPTABLES_COMMENT],
-         check=False, quiet=True)
-    # Вставляем в начало.
-    r = _run(["iptables", "-I", "INPUT", "1", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", IPSET_V4_NAME, "src",
-              "-j", "ACCEPT",
-              "-m", "comment", "--comment", IPTABLES_COMMENT])
-    if r.returncode != 0:
-        return False
-
-    # IPv6 — то же самое, но в ip6tables.
-    if shutil.which("ip6tables"):
-        _run(["ip6tables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", IPSET_V6_NAME, "src",
-              "-j", "ACCEPT",
-              "-m", "comment", "--comment", IPTABLES_COMMENT_V6],
-             check=False, quiet=True)
-        _run(["ip6tables", "-I", "INPUT", "1", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", IPSET_V6_NAME, "src",
-              "-j", "ACCEPT",
-              "-m", "comment", "--comment", IPTABLES_COMMENT_V6])
+    # IPv4: insert accept rule for v4 source set
+    nft_rule_insert(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        rule_spec=f"tcp dport {port} ip saddr @{IPSET_V4_NAME} accept",
+        family=NFT_TABLE_FAMILY, comment=IPTABLES_COMMENT, idempotent=True
+    )
+    # IPv6: insert accept rule for v6 source set (тот же comment для упрощённого удаления)
+    nft_rule_insert(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        rule_spec=f"tcp dport {port} ip6 saddr @{IPSET_V6_NAME} accept",
+        family=NFT_TABLE_FAMILY, comment=IPTABLES_COMMENT, idempotent=True
+    )
 
     return True
 
 
 def remove_iptables_rule(port: int) -> None:
-    """Удаляет ACCEPT-правило для clients_wl.
+    """Удаляет ACCEPT-правила для clients_wl (обa: v4 и v6).
 
-    Вызывается из ingress_geoip._ingress_remove() автоматически.
-    НЕ удаляет сам ipset и НЕ трогает users.json — данные сохраняются,
+    Заменяет: цикл iptables -D INPUT ... / ip6tables -D INPUT ...
+    Теперь: один вызов nft_rule_delete_by_comment — находит все правила с
+    comment="chimera-clients-wl" и удаляет через handle (nft -a list chain
+    → handles → delete rule ... handle N).
+
+    НЕ удаляет сами nft sets и НЕ трогает users.json — данные сохраняются,
     чтобы при повторном включении ingress_geoip правила восстановились.
     """
-    if not _iptables_available():
+    if not _nft_available():
         return
 
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-m", "set", "--match-set", IPSET_V4_NAME, "src",
-          "-j", "ACCEPT",
-          "-m", "comment", "--comment", IPTABLES_COMMENT],
-         check=False, quiet=True)
-
-    if shutil.which("ip6tables"):
-        _run(["ip6tables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", IPSET_V6_NAME, "src",
-              "-j", "ACCEPT",
-              "-m", "comment", "--comment", IPTABLES_COMMENT_V6],
-             check=False, quiet=True)
-
-    # НЕ удаляем ipset — данные сохраняются для повторного включения.
-    # Если хочется полностью очистить — отдельная функция destroy_ipset().
+    nft_rule_delete_by_comment(
+        table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+        comment=IPTABLES_COMMENT, family=NFT_TABLE_FAMILY, max_iterations=20
+    )
 
 
 def destroy_ipset() -> None:
-    """Полностью удаляет ipset-сеты clients_wl_*. Данные в users.json сохраняются.
+    """Полностью удаляет nft sets clients_wl_*. Данные в users.json сохраняются.
     Вызывается ТОЛЬКО при полном удалении user_ip_whitelist (через TUI пункт).
+
+    Заменяет: ipset destroy clients_wl_v4 / clients_wl_v6
+    Теперь:   nft delete set inet chimera clients_wl_v4 / clients_wl_v6
     """
-    if not _ipset_available():
+    if not _nft_available():
         return
-    _run(["ipset", "destroy", IPSET_V4_NAME], check=False, quiet=True)
-    _run(["ipset", "destroy", IPSET_V6_NAME], check=False, quiet=True)
+    nft_set_destroy(IPSET_V4_NAME, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
+    nft_set_destroy(IPSET_V6_NAME, table=NFT_TABLE_NAME, family=NFT_TABLE_FAMILY)
 
 
 # ── Cron ─────────────────────────────────────────────────────────────────────
 
 def install_cron() -> bool:
-    """Устанавливает cron для пересборки ipset каждые 5 минут.
+    """Устанавливает cron для пересборки nft set каждые 5 минут.
     Cron-скрипт вызывает rebuild_clients_ipset() — если IP не изменились,
     atomic swap не делает ничего (быстро).
     """
@@ -728,7 +745,7 @@ def install_cron() -> bool:
     python_bin = sys.executable or "/usr/bin/python3"
     CRON_SCRIPT.write_text(
         f"#!/bin/bash\n"
-        f"# Авто-пересборка clients_wl ipset из users.json.\n"
+        f"# Авто-пересборка nft set clients_wl_v4/v6 из users.json.\n"
         f"# Вызывается cron каждые {CRON_INTERVAL_MIN} минут.\n"
         f"{python_bin} -c '"
         f"from chimera.modules.user_ip_whitelist import rebuild_clients_ipset; "
@@ -737,7 +754,7 @@ def install_cron() -> bool:
     CRON_SCRIPT.chmod(0o755)
 
     CRON_FILE.write_text(
-        f"# Chimera — per-user IP whitelist ipset rebuild\n"
+        f"# Chimera — per-user IP whitelist nft set rebuild\n"
         f"SHELL=/bin/bash\n"
         f"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
         f"*/{CRON_INTERVAL_MIN} * * * * root {CRON_SCRIPT}\n"
@@ -747,7 +764,7 @@ def install_cron() -> bool:
 
 
 def remove_cron() -> None:
-    """Удаляет cron и cron-скрипт. Не трогает ipset/iptables/users.json."""
+    """Удаляет cron и cron-скрипт. Не трогает nft sets/rules/users.json."""
     CRON_FILE.unlink(missing_ok=True)
     CRON_SCRIPT.unlink(missing_ok=True)
 
@@ -949,8 +966,8 @@ def do_manage_user_ip_whitelist() -> None:
         # Status
         ipset_ok = _ipset_available()
         iptables_ok = _iptables_available()
-        _box_row(f"  ipset:    {GREEN+'доступен'+NC if ipset_ok else YELLOW+'НЕТ (apt install ipset)'+NC}")
-        _box_row(f"  iptables: {GREEN+'доступен'+NC if iptables_ok else YELLOW+'НЕТ'+NC}")
+        _box_row(f"  nft:       {GREEN+'доступен'+NC if ipset_ok else YELLOW+'НЕТ (apt install nftables)'+NC}")
+        _box_row(f"  rules:    {GREEN+'доступны'+NC if iptables_ok else YELLOW+'НЕТ'+NC}")
 
         # Cron status
         cron_ok = CRON_FILE.exists()
@@ -962,7 +979,7 @@ def do_manage_user_ip_whitelist() -> None:
             _box_item("2", f"{YELLOW}Отключить автообновление (cron){NC}")
         else:
             _box_item("2", f"{GREEN}Включить автообновление (cron, каждые {CRON_INTERVAL_MIN} мин){NC}")
-        _box_item("3", "Перестроить ipset сейчас (rebuild)")
+        _box_item("3", "Перестроить nft set сейчас (rebuild)")
         _box_item("4", f"{RED}Очистить все IP всех пользователей{NC}")
         _box_row()
         _box_row(f"  {DIM}Для доступа клиентов с РФ-IP к VLESS на сервере с ingress_geoip.{NC}")
@@ -987,17 +1004,17 @@ def do_manage_user_ip_whitelist() -> None:
                 success("Cron отключён.")
             else:
                 if install_cron():
-                    success(f"Cron включён — ipset пересобирается каждые {CRON_INTERVAL_MIN} мин.")
+                    success(f"Cron включён — nft set пересобирается каждые {CRON_INTERVAL_MIN} мин.")
                 else:
                     warn("Не удалось установить cron.")
             input(f"\n{BLUE}Нажмите Enter...{NC}")
         elif ch == "3":
-            info("Пересобираю ipset...")
+            info("Пересобираю nft set...")
             if rebuild_clients_ipset():
                 v4, v6 = _collect_all_user_ips()
-                success(f"ipset пересобран: {len(v4)} IPv4, {len(v6)} IPv6 записей.")
+                success(f"nft set пересобран: {len(v4)} IPv4, {len(v6)} IPv6 записей.")
             else:
-                warn("Не удалось пересобрать ipset — проверьте наличие ipset/iptables.")
+                warn("Не удалось пересобрать nft set — проверьте наличие nft binary.")
             input(f"\n{BLUE}Нажмите Enter...{NC}")
         elif ch == "4":
             _tui_clear_all_ips(core, users)
