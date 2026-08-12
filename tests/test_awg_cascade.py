@@ -173,6 +173,10 @@ class TestAwgsCascadeBuildAwg1Conf(unittest.TestCase):
 class TestAwgsCascadeApplyIptablesRules(unittest.TestCase):
     """_awgs_cascade_apply_iptables — regression: SSH lockout fix (OUTPUT → FORWARD).
 
+    ЭТАП 1.6: после миграции на nftables, функция использует nft_rule_add
+    вместо core._run(['iptables', ...]). Тесты патчат nft_rule_add и
+    проверяют что rule_spec содержит правильные цепочки/матчеры.
+
     ВНИМАНИЕ: эти тесты проверяют только корректность генерируемой конфигурации/
     команд. Они не могут подтвердить отсутствие SSH lockout на реальном сервере
     — это требует ручной проверки на тестовом VPS перед использованием в проде.
@@ -187,7 +191,6 @@ class TestAwgsCascadeApplyIptablesRules(unittest.TestCase):
         core.log_to_file = MagicMock()
         core.info = MagicMock()
         core.warn = MagicMock()
-        # Записываем все команды для последующего анализа
         self._run_calls = []
 
         def _capture_run(cmd, **kwargs):
@@ -201,82 +204,100 @@ class TestAwgsCascadeApplyIptablesRules(unittest.TestCase):
         core._run = _capture_run
         return core
 
+    def _capture_nft_add(self):
+        """Список для записи всех вызовов nft_rule_add."""
+        self._nft_add_calls = []
+        def _fake_add(**kwargs):
+            self._nft_add_calls.append(kwargs)
+            return True
+        return _fake_add
+
     def test_mark_rule_uses_forward_not_output(self):
-        """Regression: MARK-правило использует '-A FORWARD -i awg0',
-        а НЕ '-A OUTPUT'.
+        """Regression: MARK-правило использует mangle_forward chain,
+        а НЕ mangle_output.
 
         До фикса (коммит 33970c2) правило было '-A OUTPUT', что маркировало
         весь исходящий трафик сервера (включая SSH-ответы) → SSH lockout.
+        ЭТАП 1.6: в nftables проверяем что chain=mangle_forward (не output).
         """
         from chimera.modules import awg_cascade
+        from chimera.modules import nft_common
 
         mock_core = self._mock_core()
-        with patch.object(awg_cascade, "_core_module", return_value=mock_core):
+        _fake_add = self._capture_nft_add()
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(nft_common, 'nft_rule_add', side_effect=_fake_add), \
+             patch.object(nft_common, 'nft_set_create', return_value=True), \
+             patch.object(awg_cascade, 'nft_rule_add', side_effect=_fake_add), \
+             patch.object(awg_cascade, 'nft_set_create', return_value=True):
             awg_cascade._awgs_cascade_apply_iptables("172.16.61.0/24")
 
-        # Собираем все команды в одну строку для анализа
-        all_cmds = [" ".join(cmd) for cmd in self._run_calls]
-        all_text = "\n".join(all_cmds)
-
-        # Должна быть команда с FORWARD -i awg0 и MARK
-        has_forward_mark = any(
-            "FORWARD" in c and "-i" in c and "awg0" in c and "MARK" in c
-            for c in all_cmds
-        )
-        self.assertTrue(has_forward_mark,
-                        f"Expected FORWARD -i awg0 MARK rule, got: {all_cmds}")
-
-        # НЕ должно быть команды с OUTPUT и MARK одновременно
-        has_output_mark = any(
-            "OUTPUT" in c and "MARK" in c
-            for c in all_cmds
-        )
-        self.assertFalse(has_output_mark,
-                         f"OUTPUT + MARK rule found (SSH lockout bug), got: {all_cmds}")
+        # Ищем MARK правило (с meta mark set 0x2000)
+        mark_calls = [c for c in self._nft_add_calls
+                      if "meta mark set" in c.get("rule_spec", "")]
+        self.assertGreater(len(mark_calls), 0,
+                           f"Expected at least 1 MARK rule, got: {self._nft_add_calls}")
+        # Проверяем что MARK правило в mangle_forward chain (НЕ mangle_output)
+        for call in mark_calls:
+            self.assertEqual(call.get("chain"), "mangle_forward",
+                             f"MARK rule should be in mangle_forward (not output) — "
+                             f"SSH lockout regression. Got chain={call.get('chain')}")
 
     def test_no_leftover_conntrack_output_rule(self):
         """Regression: удалённое conntrack OUTPUT-правило отсутствует.
 
-        До фикса в списке правил было:
-          'iptables -t mangle -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT'
-        Это была компенсация для OUTPUT MARK-бага. После перехода на FORWARD
-        это правило больше не нужно.
+        ЭТАП 1.6: проверяем что в mangle_output chain нет conntrack правил.
         """
         from chimera.modules import awg_cascade
+        from chimera.modules import nft_common
 
         mock_core = self._mock_core()
-        with patch.object(awg_cascade, "_core_module", return_value=mock_core):
+        _fake_add = self._capture_nft_add()
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(nft_common, 'nft_rule_add', side_effect=_fake_add), \
+             patch.object(nft_common, 'nft_set_create', return_value=True), \
+             patch.object(awg_cascade, 'nft_rule_add', side_effect=_fake_add), \
+             patch.object(awg_cascade, 'nft_set_create', return_value=True):
             awg_cascade._awgs_cascade_apply_iptables("172.16.61.0/24")
 
-        all_cmds = [" ".join(cmd) for cmd in self._run_calls]
-        all_text = "\n".join(all_cmds)
-
-        # Не должно быть conntrack в OUTPUT
-        has_conntrack_output = any(
-            "OUTPUT" in c and "conntrack" in c
-            for c in all_cmds
-        )
-        self.assertFalse(has_conntrack_output,
-                         f"Leftover conntrack OUTPUT rule found, got: {all_cmds}")
+        # Не должно быть conntrack правил в mangle_output
+        for call in self._nft_add_calls:
+            if call.get("chain") == "mangle_output":
+                self.assertNotIn("ct state", call.get("rule_spec", ""),
+                                 "conntrack rule in mangle_output found (leftover)")
 
     def test_forward_mark_rule_not_for_ru_networks(self):
-        """Дополнительно: FORWARD MARK правило исключает RU-сети через ipset."""
+        """Дополнительно: FORWARD MARK правило исключает RU-сети через @awg_cascade_nodes.
+
+        ЭТАП 1.6: вместо iptables `-m set ! --match-set awgs_ipset dst` используется
+        nft синтаксис `ip daddr != @awg_cascade_nodes`.
+        """
         from chimera.modules import awg_cascade
+        from chimera.modules import nft_common
 
         mock_core = self._mock_core()
-        with patch.object(awg_cascade, "_core_module", return_value=mock_core):
+        _fake_add = self._capture_nft_add()
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(nft_common, 'nft_rule_add', side_effect=_fake_add), \
+             patch.object(nft_common, 'nft_set_create', return_value=True), \
+             patch.object(awg_cascade, 'nft_rule_add', side_effect=_fake_add), \
+             patch.object(awg_cascade, 'nft_set_create', return_value=True):
             awg_cascade._awgs_cascade_apply_iptables("172.16.61.0/24")
 
-        all_cmds = [" ".join(cmd) for cmd in self._run_calls]
-        all_text = "\n".join(all_cmds)
-
-        # FORWARD MARK правило должно содержать ! --match-set
-        has_ipset_exclude = any(
-            "FORWARD" in c and "MARK" in c and "match-set" in c and "!" in c
-            for c in all_cmds
-        )
-        self.assertTrue(has_ipset_exclude,
-                        f"Expected ipset exclusion in FORWARD MARK rule, got: {all_cmds}")
+        # Ищем MARK правило в mangle_forward
+        mark_calls = [c for c in self._nft_add_calls
+                      if "meta mark set" in c.get("rule_spec", "")
+                      and c.get("chain") == "mangle_forward"]
+        self.assertGreater(len(mark_calls), 0,
+                           f"Expected MARK rule in mangle_forward, got: {self._nft_add_calls}")
+        # Должно содержать исключение через @awg_cascade_nodes
+        for call in mark_calls:
+            spec = call.get("rule_spec", "")
+            self.assertIn("@awg_cascade_nodes", spec,
+                          f"MARK rule should exclude RU-networks via @awg_cascade_nodes, "
+                          f"got: {spec}")
+            self.assertIn("!=", spec,
+                          f"MARK rule should have != (negation), got: {spec}")
 
 
 class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
@@ -299,16 +320,21 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
         )
 
     def test_writes_script_with_ipset_references(self):
-        """Скрипт содержит ссылки на ipset и exit_gw (base.1 из exit_subnet).
+        """Скрипт содержит ссылки на nft set и exit_gw (base.1 из exit_subnet).
+
+        ЭТАП 1.6: после миграции на nftables, вместо ipset используется nft set
+        awg_cascade_nodes. Проверяем что в скрипте есть ссылка на этот set.
         Ранее f-string конфликтовал с bash ${line:0:1} → NameError при вызове
         (фикс: экранирование через ${{line:0:1}})."""
         from chimera.modules.awg_cascade import (
-            _awgs_cascade_create_routing_script, AWGS_IPSET_NAME,
+            _awgs_cascade_create_routing_script,
         )
+        from chimera.modules.nft_constants import NFT_SET_AWG_CASCADE
         with self._patch()[0], self._patch()[1]:
             _awgs_cascade_create_routing_script("172.16.61.0/24")
         content = self._script.read_text()
-        self.assertIn(AWGS_IPSET_NAME, content)
+        # Проверяем что скрипт ссылается на nft set awg_cascade_nodes
+        self.assertIn(NFT_SET_AWG_CASCADE, content)
         # exit_gw = base.1 где base = exit_subnet без последнего октета и /CIDR
         # 172.16.61.0/24 → base=172.16.61 → exit_gw=172.16.61.1
         self.assertIn("172.16.61.1", content)

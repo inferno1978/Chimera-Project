@@ -1140,6 +1140,7 @@ def _fw_open_tcp(port: int) -> str:
                 )
             return "ufw"
     if shutil.which("iptables"):
+        # ЭТАП 1.8: прямой iptables fallback сохранён для систем без ufw/nft
         chk = subprocess.run(
             ["iptables", "-C", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
             capture_output=True, check=False,
@@ -1150,6 +1151,12 @@ def _fw_open_tcp(port: int) -> str:
                 check=False,
             )
         return "iptables"
+    if shutil.which("nft"):
+        # ЭТАП 1.8: nft fallback (Debian 13+ где нет iptables binary по умолчанию)
+        from chimera.modules.nft_common import nft_open_port, _nft_available
+        if _nft_available():
+            nft_open_port(port, proto="tcp", comment=f"chimera-open-port-tcp-{port}")
+            return "nft"
     return ""
 
 
@@ -1196,6 +1203,17 @@ def _fw_close_tcp(port: int) -> None:
                 ["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"],
                 check=False,
             )
+    elif shutil.which("nft"):
+        # ЭТАП 1.8: nft cleanup — один вызов nft_rule_delete_by_comment (для всех правил с этим comment)
+        from chimera.modules.nft_common import nft_rule_delete_by_comment
+        from chimera.modules.nft_constants import (
+            NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+        )
+        nft_rule_delete_by_comment(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            comment=f"chimera-open-port-tcp-{port}",
+            family=NFT_TABLE_FAMILY, max_iterations=10,
+        )
 
 
 def _install_service(port: int) -> bool:

@@ -65,6 +65,17 @@ import json
 import time
 from pathlib import Path
 
+# nftables — централизованная обёртка над `nft` CLI (этап 1.8 миграции)
+from .nft_common import (
+    nft_nat_masquerade, nft_mangle_mark_uid, nft_rule_exists,
+    nft_persist, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY,
+    NFT_CHAIN_MANGLE_OUTPUT, NFT_CHAIN_POSTROUTING,
+    COMMENT_AWG_MASQ, COMMENT_AWG_FWMARK_XRAY, COMMENT_AWG_FWMARK_DNSCRYPT,
+)
+
 
 # =============================================================================
 #  ОТЛОЖЕННАЯ ПРИВЯЗКА К ЯДРУ (_core.py)
@@ -595,27 +606,45 @@ def do_emergency_repair() -> None:
                 _box_ok(f"ip route default dev {AWG_INTERFACE} восстановлен")
             else:
                 _box_ok(f"ip route table {AWG_ROUTE_TABLE}: присутствует")
-            _r_nat = _run(["iptables", "-t", "nat", "-L", "POSTROUTING", "-n"],
-                          capture=True, check=False)
-            if "MASQUERADE" not in (_r_nat.stdout or ""):
-                _run(["bash", "-c",
-                      "IFACE=$(ip route | awk '/default/ {print $5; exit}'); "
-                      "[ -n \"$IFACE\" ] && iptables -t nat -A POSTROUTING "
-                      "-o \"$IFACE\" -j MASQUERADE || true"],
-                     check=False, quiet=True)
-                _box_ok("iptables MASQUERADE восстановлен")
+            # ЭТАП 1.8: проверка MASQUERADE через nft_rule_exists (comment-tag)
+            _masq_present = nft_rule_exists(
+                table=NFT_TABLE_NAME, chain=NFT_CHAIN_POSTROUTING,
+                comment=COMMENT_AWG_MASQ, family=NFT_TABLE_FAMILY
+            )
+            if not _masq_present:
+                # Восстанавливаем MASQUERADE для wan-интерфейса
+                # (определяем через ip route как раньше)
+                _wan_iface_r = _run(["bash", "-c",
+                    "ip route | awk '/default/ {print $5; exit}'"],
+                    capture=True, check=False)
+                _wan_iface = (_wan_iface_r.stdout or "").strip()
+                if _wan_iface:
+                    nft_nat_masquerade(
+                        out_iface=_wan_iface,
+                        comment=COMMENT_AWG_MASQ,
+                    )
+                    _box_ok(f"nft MASQUERADE для {_wan_iface} восстановлен")
+                else:
+                    _box_warn("MASQUERADE: не удалось определить wan-интерфейс")
             else:
-                _box_ok("iptables MASQUERADE: присутствует")
-            _r_mangle = _run(["iptables", "-t", "mangle", "-L", "OUTPUT", "-n"],
-                             capture=True, check=False)
-            if f"0x{AWG_FWMARK:x}" not in (_r_mangle.stdout or "").lower():
-                _run(["iptables", "-t", "mangle", "-A", "OUTPUT",
-                      "-m", "owner", "--uid-owner", str(_xray_uid),
-                      "-j", "MARK", "--set-mark", str(AWG_FWMARK)],
-                     check=False, quiet=True)
-                _box_ok(f"iptables mangle fwmark {AWG_FWMARK} восстановлен")
+                _box_ok("nft MASQUERADE: присутствует")
+
+            # Проверка mangle OUTPUT fwmark для Xray uid
+            # ЭТАП 1.8: comment-tag вместо парсинга 'iptables -t mangle -L OUTPUT -n'
+            _xray_mark_present = nft_rule_exists(
+                table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_OUTPUT,
+                comment=COMMENT_AWG_FWMARK_XRAY, family=NFT_TABLE_FAMILY
+            )
+            if not _xray_mark_present:
+                nft_mangle_mark_uid(
+                    uid=_xray_uid, fwmark=AWG_FWMARK,
+                    chain=NFT_CHAIN_MANGLE_OUTPUT,
+                    comment=COMMENT_AWG_FWMARK_XRAY,
+                )
+                _box_ok(f"nft mangle fwmark {AWG_FWMARK} для xray uid восстановлен")
             else:
-                _box_ok(f"iptables mangle OUTPUT fwmark: присутствует")
+                _box_ok(f"nft mangle OUTPUT fwmark для xray: присутствует")
+
             # ИСПРАВЛЕНИЕ: dnscrypt-proxy работает от uid dnscrypt, не от xray.
             # Его DNS-трафик к upstream (203.0.113.105:443 и т.п.) тоже должен
             # идти через AWG — иначе провайдер блокирует DoT/DNSCrypt.
@@ -623,18 +652,19 @@ def do_emergency_repair() -> None:
                 _dc_uid_r = _run(["id", "-u", "dnscrypt"], capture=True, check=False)
                 _dc_uid = int(_dc_uid_r.stdout.strip()) if _dc_uid_r.returncode == 0 else None
                 if _dc_uid is not None:
-                    _r_dc_mangle = _run(
-                        ["iptables", "-t", "mangle", "-L", "OUTPUT", "-n"],
-                        capture=True, check=False)
-                    if f"0x{AWG_FWMARK:x}" not in (_r_dc_mangle.stdout or "").lower() \
-                            or str(_dc_uid) not in (_r_dc_mangle.stdout or ""):
-                        _run(["iptables", "-t", "mangle", "-A", "OUTPUT",
-                              "-m", "owner", "--uid-owner", str(_dc_uid),
-                              "-j", "MARK", "--set-mark", str(AWG_FWMARK)],
-                             check=False, quiet=True)
-                        _box_ok(f"iptables mangle dnscrypt uid {_dc_uid} fwmark восстановлен")
+                    _dc_mark_present = nft_rule_exists(
+                        table=NFT_TABLE_NAME, chain=NFT_CHAIN_MANGLE_OUTPUT,
+                        comment=COMMENT_AWG_FWMARK_DNSCRYPT, family=NFT_TABLE_FAMILY
+                    )
+                    if not _dc_mark_present:
+                        nft_mangle_mark_uid(
+                            uid=_dc_uid, fwmark=AWG_FWMARK,
+                            chain=NFT_CHAIN_MANGLE_OUTPUT,
+                            comment=COMMENT_AWG_FWMARK_DNSCRYPT,
+                        )
+                        _box_ok(f"nft mangle dnscrypt uid {_dc_uid} fwmark восстановлен")
                     else:
-                        _box_ok(f"iptables mangle dnscrypt uid fwmark: присутствует")
+                        _box_ok(f"nft mangle dnscrypt uid fwmark: присутствует")
             except Exception:
                 pass  # dnscrypt не установлен
         except Exception as _awg_e:

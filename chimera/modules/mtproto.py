@@ -1228,11 +1228,19 @@ def _ipt_rule_exists(net: str, port: int) -> bool:
     (а не «для этого конкретного net»). Для использования в _xray_tproxy_status
     (подсчёт сколько из tg_nets имеют правило) — см. _nft_tproxy_count, который
     через JSON-парсинг nft list chain считает количество правил с этим comment.
+
+    РЕГРЕССИЯ: обёртываем в try/except — если nft_rule_exists бросает исключение
+    (например, nft binary не установлен или нет прав), возвращаем False.
+    Это критично для TUI-меню, которое вызывает _ipt_rule_exists в цикле для
+    каждой tg-подсети — иначе одна ошибка роняет весь TUI.
     """
-    return nft_rule_exists(
-        table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
-        comment=_TPROXY_REDIRECT_COMMENT, family=NFT_TABLE_FAMILY,
-    )
+    try:
+        return nft_rule_exists(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
+            comment=_TPROXY_REDIRECT_COMMENT, family=NFT_TABLE_FAMILY,
+        )
+    except Exception:
+        return False
 
 
 def _nft_tproxy_count() -> int:
@@ -1408,10 +1416,12 @@ def _ipt_ensure_single_return_rule(ipt: str, dport: str) -> int:
     Сначала удаляет все (через _ipt_remove_all_return_rules), потом добавляет
     одно через nft_rule_add. Возвращает количество удалённых дублей.
     Параметр ipt сохранён для совместимости (не используется).
+
+    РЕГРЕССИЯ: используем module-level nft_rule_add (импортирован в начале файла),
+    чтобы тесты могли патчить mtproto.nft_rule_add. Не делаем local import.
     """
     removed = _ipt_remove_all_return_rules(ipt, dport)
     try:
-        from chimera.modules.nft_common import nft_rule_add
         nft_rule_add(
             table=NFT_TABLE_NAME, chain=NFT_CHAIN_OUTPUT,
             rule_spec=f"tcp dport {dport} return",
@@ -1456,6 +1466,9 @@ def _ipt_ensure_single_owner_return(ipt: str, uid: int) -> int:
     Заменяет: iptables/ip6tables -t nat -I OUTPUT 1 -m owner --uid-owner <uid> -j RETURN.
     Теперь: nft_mangle_return_uid(uid=<uid>, comment="telemt-tproxy-bypass").
     Параметр ipt сохранён для совместимости (не используется).
+
+    РЕГРЕССИЯ: используем module-level nft_mangle_return_uid (импортирован
+    в начале файла), чтобы тесты могли патчить mtproto.nft_mangle_return_uid.
     """
     removed = _ipt_remove_all_owner_return_rules(ipt, uid)
     try:

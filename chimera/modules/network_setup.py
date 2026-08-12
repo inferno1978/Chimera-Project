@@ -1,10 +1,10 @@
 """
 chimera/modules/network_setup.py
 ───────────────────────────────────────────────────────────────────────────────
-Настройка файрволла (ufw/iptables) + оптимизация сетевого стека (sysctl,
+Настройка файрволла (ufw/nftables) + оптимизация сетевого стека (sysctl,
 limits, BBR, conntrack, THP) + применение sysctl из меню.
 
-  • configure_firewall()         — ufw или iptables + ip6tables.
+  • configure_firewall()         — ufw или nftables.
                                     Открывает 22/80/SERVER_PORT.
                                     Мутирует STAGE_UFW_DONE в _core (через setattr).
   • apply_network_optimizations() — пишет /etc/sysctl.d/99-vless-performance.conf
@@ -12,6 +12,13 @@ limits, BBR, conntrack, THP) + применение sysctl из меню.
                                     Адаптивно под TOTAL_RAM/TOTAL_CPU.
                                     BBR+fq если ядро ≥ 4.9.
   • apply_sysctl_and_limits()    — применяется из меню (sysctl --system).
+
+МИГРАЦИЯ (этап 1.8):
+- iptables/ip6tables fallback path заменён на nftables напрямую через nft_common
+- UFW primary path сохранён (UFW 0.36+ уже использует nftables backend по умолчанию)
+- Если UFW не установлен — fallback на прямой nft (раньше на iptables)
+- /etc/iptables/rules.v4 + rules.v6 + rc.local fallback → /etc/nftables.conf +
+  встроенный nftables.service (Debian/Ubuntu package)
 
 Никаких других state.json мутаций. Все константы (OPTIMIZER_CONF, LIMITS_CONF,
 SYSTEMD_CONF, UFW_MARK_FILE) читаются из _core.
@@ -30,6 +37,16 @@ import subprocess
 import textwrap
 from pathlib import Path
 from typing import Optional
+
+# nftables — централизованная обёртка над `nft` CLI (этап 1.8 миграции)
+from .nft_common import (
+    nft_open_port, nft_rule_insert, nft_rule_add, nft_rule_exists,
+    nft_persist, nft_persist_enable_systemd, _nft_available,
+)
+from .nft_constants import (
+    NFT_TABLE_NAME, NFT_TABLE_FAMILY, NFT_CHAIN_INPUT,
+    NFT_PERSIST_FILE, COMMENT_OPEN_PORT_PREFIX,
+)
 
 
 # ── Ленивый доступ к ядру ────────────────────────────────────────────────────
@@ -61,23 +78,26 @@ def configure_firewall() -> None:
     info("Настройка файрволла...")
     PROGRESS.update(2, "Файрволл")
 
-    # Проверяем INPUT policy DROP
+    # Проверяем INPUT policy DROP (через nft list chain inet chimera input)
+    # ЭТАП 1.8: мигрировано с `iptables -L INPUT -n` → `nft list chain inet chimera input`
     try:
-        _r = subprocess.run(["iptables", "-L", "INPUT", "-n"],
-                            capture_output=True, text=True)
-        if "policy DROP" in _r.stdout:
-            warn("Обнаружен файрвол с политикой INPUT DROP.")
-            warn("Скрипт откроет нужные порты автоматически.")
-            warn("Если после установки порты недоступны — откройте их вручную")
-            warn("в панели управления вашего провайдера.")
+        if _nft_available():
+            _r = subprocess.run(["nft", "list", "chain", "inet", "chimera", "input"],
+                                capture_output=True, text=True, check=False)
+            # Если в выводе есть "policy drop" для base chain
+            if _r.returncode == 0 and "policy drop" in (_r.stdout or ""):
+                warn("Обнаружен файрвол с политикой INPUT DROP.")
+                warn("Скрипт откроет нужные порты автоматически.")
+                warn("Если после установки порты недоступны — откройте их вручную")
+                warn("в панели управления вашего провайдера.")
     except Exception:
         pass
 
     fw_tool = ""
     if command_exists("ufw"):
         fw_tool = "ufw"
-    elif command_exists("iptables"):
-        fw_tool = "iptables"
+    elif _nft_available():
+        fw_tool = "nft"
 
     if fw_tool == "ufw":
         UFW_MARK_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -148,73 +168,52 @@ def configure_firewall() -> None:
         setattr(core, "STAGE_UFW_DONE", True)
         success(f"UFW настроен (22, 80, {SERVER_PORT} — IPv4+IPv6)")
 
-    elif fw_tool == "iptables":
-        def _ipt_allow(port: int) -> None:
-            for cmd in ("iptables", "ip6tables"):
-                r = _run([cmd, "-C", "INPUT", "-p", "tcp", "--dport", str(port),
-                          "-m", "conntrack", "--ctstate", "NEW", "-j", "ACCEPT"],
-                         check=False, quiet=True)
-                if r.returncode != 0:
-                    _run([cmd, "-A", "INPUT", "-p", "tcp", "--dport", str(port),
-                          "-m", "conntrack", "--ctstate", "NEW", "-j", "ACCEPT"],
-                         check=False, quiet=True)
+    elif fw_tool == "nft":
+        # ЭТАП 1.8: fallback path через nftables (замена iptables/ip6tables).
+        # Семантика идентична: открываем 22/80/SERVER_PORT + lo + ESTABLISHED + ICMPv6.
+        # В nft всё в одной таблице inet chimera — покрывает и v4, и v6 одновременно.
 
-        for cmd in ("iptables", "ip6tables"):
-            r = _run([cmd, "-C", "INPUT", "-i", "lo", "-j", "ACCEPT"],
-                     check=False, quiet=True)
-            if r.returncode != 0:
-                _run([cmd, "-I", "INPUT", "1", "-i", "lo", "-j", "ACCEPT"],
-                     check=False, quiet=True)
-            r2 = _run([cmd, "-C", "INPUT", "-m", "conntrack",
-                       "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
-                      check=False, quiet=True)
-            if r2.returncode != 0:
-                _run([cmd, "-I", "INPUT", "2", "-m", "conntrack",
-                      "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
-                     check=False, quiet=True)
+        # 1. Lo interface ACCEPT (insert position=1, перед другими правилами)
+        nft_rule_insert(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            rule_spec='iifname "lo" accept',
+            family=NFT_TABLE_FAMILY,
+            comment=f"{COMMENT_OPEN_PORT_PREFIX}lo",
+            idempotent=True,
+        )
 
-        _run(["ip6tables", "-C", "INPUT", "-p", "ipv6-icmp", "-j", "ACCEPT"],
-             check=False, quiet=True)
+        # 2. ESTABLISHED,RELATED ACCEPT (insert position=2)
+        # В nft: 'ct state established,related accept'
+        nft_rule_insert(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            rule_spec="ct state established,related accept",
+            family=NFT_TABLE_FAMILY,
+            comment=f"{COMMENT_OPEN_PORT_PREFIX}established",
+            idempotent=True,
+        )
 
-        for p in (22, 80, SERVER_PORT):
-            _ipt_allow(p)
+        # 3. ICMPv6 для IPv6邻居 discovery (critical для IPv6 connectivity)
+        # В nft: 'ip6 nexthdr ipv6-icmp accept' (или 'meta l4proto ipv6-icmp accept')
+        nft_rule_add(
+            table=NFT_TABLE_NAME, chain=NFT_CHAIN_INPUT,
+            rule_spec="ip6 nexthdr icmpv6 accept",
+            family=NFT_TABLE_FAMILY,
+            comment=f"{COMMENT_OPEN_PORT_PREFIX}icmpv6",
+            idempotent=True,
+        )
 
-        Path("/etc/iptables").mkdir(exist_ok=True)
-        r4 = _run(["iptables-save"],  capture=True, check=False)
-        Path("/etc/iptables/rules.v4").write_text(r4.stdout)
-        r6 = _run(["ip6tables-save"], capture=True, check=False)
-        Path("/etc/iptables/rules.v6").write_text(r6.stdout)
+        # 4. Открываем 22/80/SERVER_PORT с conntrack --ctstate NEW
+        # В nft: 'tcp dport <port> ct state new accept'
+        for port in (22, 80, SERVER_PORT):
+            nft_open_port(
+                port=port, proto="tcp",
+                comment=f"{COMMENT_OPEN_PORT_PREFIX}tcp-{port}",
+            )
 
-        if PKG_MGR == "apt":
-            _pkg_install("iptables-persistent")
-
-        # Fallback: если netfilter-persistent недоступен — создаём rc.local
-        try:
-            _nfp = subprocess.run(["which", "netfilter-persistent"],
-                                  capture_output=True)
-            if _nfp.returncode != 0:
-                _rc = Path("/etc/rc.local")
-                _rc_shebang = "#!/bin/bash" + chr(10)
-                _rc_content = _rc.read_text() if _rc.exists() else _rc_shebang
-                if "iptables-restore" not in _rc_content:
-                    if not _rc_content.endswith(chr(10)):
-                        _rc_content += chr(10)
-                    _rc_content = _rc_content.replace("exit 0" + chr(10), "").rstrip() + chr(10)
-                    _rc_content += (
-                        chr(10) + "# Restore iptables rules (added by vless-installer)" + chr(10) +
-                        "[ -f /etc/iptables/rules.v4 ] && iptables-restore < /etc/iptables/rules.v4" + chr(10) +
-                        "[ -f /etc/iptables/rules.v6 ] && ip6tables-restore < /etc/iptables/rules.v6" + chr(10) +
-                        "exit 0" + chr(10)
-                    )
-                    _rc.write_text(_rc_content)
-                    os.chmod(str(_rc), 0o755)
-                    subprocess.run(["systemctl", "enable", "rc-local"],
-                                   capture_output=True)
-                    info("iptables: создан rc.local fallback для восстановления правил после ребута")
-        except Exception:
-            pass
-
-        success("iptables + ip6tables настроены")
+        # 5. Persist — единый /etc/nftables.conf + встроенный nftables.service
+        nft_persist(NFT_PERSIST_FILE)
+        nft_persist_enable_systemd()
+        success("nftables настроен (22, 80, SERVER_PORT — IPv4+IPv6 в одной таблице inet chimera)")
     else:
         warn("Файрволл не найден — пропускаем")
 

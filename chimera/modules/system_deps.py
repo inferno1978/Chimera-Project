@@ -104,11 +104,15 @@ _CMD_TO_PKG: dict[str, tuple[str, str]] = {
     "journalctl":      ("systemd",         "systemd"),
     # сеть / файрволл
     "ufw":             ("ufw",             "ufw"),
-    "iptables":        ("iptables",        "iptables"),
+    # ЭТАП 1.8: nftables как primary firewall; iptables-nft сохранён как
+    # compatibility layer для UFW (ufw использует iptables binary
+    # поверх nftables backend на Debian 11+).
+    "nft":             ("nftables",        "nftables"),
+    "iptables":        ("iptables",        "iptables"),  # ufw depends
     "ip6tables":       ("iptables",        "iptables"),
     "iptables-save":   ("iptables",        "iptables"),
     "ip6tables-save":  ("iptables",        "iptables"),
-    "ipset":           ("ipset",           "ipset"),
+    "ipset":           ("ipset",           "ipset"),  # legacy compatibility
     "ping6":           ("iputils-ping",    "iputils"),
     # DNS
     "dig":             ("dnsutils",        "bind-utils"),
@@ -464,7 +468,10 @@ def ensure_startup_dependencies() -> None:
             ["curl", "wget", "unzip", "tar", "openssl", "uuid-runtime",
              "coreutils", "iproute2", "procps", "jq",
              "ufw", "dnsutils", "zstd", "htop",
-             "ipset", "iptables",
+             # ЭТАП 1.8: nftables как primary firewall
+             "nftables",
+             # iptables/ipset сохранены для совместимости (ufw зависит от iptables)
+             "iptables", "ipset",
              "logrotate", "hostname", "iputils-ping",
              "cron", "file", "openssh-server", "passwd",
              "git", "make", "golang-go"] +
@@ -476,7 +483,10 @@ def ensure_startup_dependencies() -> None:
             ["psmisc", "gnupg2", "redhat-lsb-core", "kmod"] +
             ["curl", "wget", "unzip", "tar", "openssl", "util-linux",
              "coreutils", "iproute", "procps-ng", "jq",
-             "ipset", "iptables",
+             # ЭТАП 1.8: nftables как primary firewall
+             "nftables",
+             # iptables/ipset сохранены для совместимости (ufw зависит от iptables)
+             "iptables", "ipset",
              "logrotate", "hostname", "iputils",
              "cronie", "file", "openssh-server", "shadow-utils",
              "git", "make", "golang"] +
@@ -554,7 +564,10 @@ def ensure_startup_dependencies() -> None:
         "curl", "wget", "unzip", "tar", "openssl", "uuid-runtime",
         "coreutils", "iproute2", "procps", "jq",
         "ufw", "dnsutils", "zstd", "htop",
-        "ipset", "iptables",
+        # ЭТАП 1.8: nftables — primary firewall backend
+        "nftables",
+        # iptables/ipset сохранены для совместимости (ufw depends on iptables binary)
+        "iptables", "ipset",
         "logrotate", "hostname", "iputils-ping",
         "cron", "file", "openssh-server", "passwd",
         "git", "make", "golang-go",
@@ -562,7 +575,9 @@ def ensure_startup_dependencies() -> None:
     sys_dnf = [
         "curl", "wget", "unzip", "tar", "openssl", "util-linux",
         "coreutils", "iproute", "procps-ng", "jq",
-        "ipset", "iptables",
+        # ЭТАП 1.8: nftables — primary firewall backend
+        "nftables",
+        "iptables", "ipset",
         "logrotate", "hostname", "iputils",
         "cronie", "file", "openssh-server", "shadow-utils",
         "git", "make", "golang",
