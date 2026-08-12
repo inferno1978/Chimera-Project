@@ -57,6 +57,10 @@ def _log(level: str, msg: str) -> None:
     except Exception:
         pass
 
+def _info(msg: str) -> None: print(f"{CYAN}[INFO]{NC}  {msg}"); _log("INFO", msg)
+def _ok(msg: str)   -> None: print(f"{GREEN}[OK]{NC}    {msg}"); _log("SUCCESS", msg)
+def _warn(msg: str) -> None: print(f"{YELLOW}[WARN]{NC}  {msg}"); _log("WARN", msg)
+
 # ── Импорты ────────────────────────────────────────────────────────────────
 from chimera.modules.box_renderer import (
     _box_top, _box_sep, _box_bottom, _box_row, _box_item, _box_back,
