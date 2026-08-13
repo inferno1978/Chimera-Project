@@ -49,6 +49,7 @@ def do_reconfigure() -> None:
     core = _core_module()
     _box_top    = core._box_top
     _box_row    = core._box_row
+    _box_sep    = core._box_sep
     _box_item   = core._box_item
     _box_bottom = core._box_bottom
     _box_warn   = core._box_warn
