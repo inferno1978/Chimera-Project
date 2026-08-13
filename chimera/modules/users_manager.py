@@ -938,6 +938,8 @@ def generate_client_links() -> None:
     _box_row(f"{BLUE}💡 Совет:{NC} Отсканируйте QR в v2rayNG, Hiddify, FoXray, Nekobox")
     _box_wrap_msg(f"   {DIM}Файлы QR:{NC} ", 12, "/root/vless_qr.png  /root/vless_qr_ipv4.png  /root/vless_qr_ipv6.png")
     _box_row()
+    from chimera.modules.box_renderer import _print_link_warning
+    _print_link_warning(is_vless=True)
     _box_bottom()
 
 
@@ -1098,6 +1100,8 @@ def generate_client_links_ios() -> None:
     _box_wrap_msg(f"   {DIM}Файлы QR:{NC} ", 12,
                   "/root/vless_qr_ios.png  /root/vless_qr_ipv4_ios.png  /root/vless_qr_ipv6_ios.png")
     _box_row()
+    from chimera.modules.box_renderer import _print_link_warning
+    _print_link_warning(is_vless=True)
     _box_bottom()
 
 
