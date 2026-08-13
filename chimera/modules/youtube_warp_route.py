@@ -472,18 +472,23 @@ def apply_youtube_warp_routing(enable: bool, ip_version: str = "auto") -> tuple:
         except Exception as e:
             return False, f"Ошибка kernel маршрутизации: {e}"
 
-        # Передаём ip_version в _xray_apply_warp_outbound — оно выберет
-        # правильный sendThrough и domainStrategy.
-        _xray_apply_warp_outbound(ip_version=ip_version)
-        _singbox_apply_warp_outbound()
-        _install_persistence()
-
-        # Remove conflicting youtube_via_ru rule
+        #  FIX: сначала убираем старые YouTube правила (youtube_via_ru,
+        # fragment, quic-block) — ДО применения WARP. Раньше вызов
+        # _youtube_remove_from_xray() шёл ПОСЛЕ _xray_apply_warp_outbound()
+        # и затирал только что созданный warp outbound (т.к. эта функция
+        # удаляет все outbounds с тегом "warp" из _youtube_outbound_tags).
+        # Теперь: чистим старое → пишем новое → warp outbound не теряется.
         try:
             from chimera.modules.youtube_route import _youtube_remove_from_xray
             _youtube_remove_from_xray()
         except Exception:
             pass
+
+        # Передаём ip_version в _xray_apply_warp_outbound — оно выберет
+        # правильный sendThrough и domainStrategy.
+        _xray_apply_warp_outbound(ip_version=ip_version)
+        _singbox_apply_warp_outbound()
+        _install_persistence()
 
         # Описываем что применили
         if ip_version == "ipv6":
