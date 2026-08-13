@@ -117,29 +117,54 @@ def do_reconfigure() -> None:
 
     info(f"Применяем: домен={new_domain}, порт={new_port}")
 
-    # --- SSL-сертификат (только для xHTTP TLS и если домен сменился) ---
-    if proto == "xhttp" and new_domain != old_domain:
-        info(f"Получаем SSL-сертификат для {new_domain}...")
-        certbot_bin = (Path("/snap/bin/certbot") if Path("/snap/bin/certbot").exists()
-                       else Path("/usr/bin/certbot"))
-        if not certbot_bin.exists():
-            warn("certbot не найден — сертификат нужно получить вручную")
-        else:
-            _run(["systemctl", "stop", "nginx"], check=False, quiet=True)
-            r = _run([
-                str(certbot_bin), "certonly", "--standalone",
-                "-d", new_domain,
-                "--non-interactive", "--agree-tos",
-                "-m", f"admin@{new_domain}",
-                "--keep-until-expiring"
-            ], check=False)
-            if r.returncode != 0:
-                warn("certbot завершился с ошибкой — домен возможно недоступен")
-                ans = input("  Продолжить всё равно? [y/N]: ").strip().lower()
-                if ans != "y":
-                    _run(["systemctl", "start", "nginx"], check=False, quiet=True)
-                    return
-            _run(["systemctl", "start", "nginx"], check=False, quiet=True)
+    # --- SSL-сертификат (для xHTTP TLS и если домен сменился) ---
+    if new_domain != old_domain:
+        if proto == "xhttp":
+            info(f"Получаем SSL-сертификат для {new_domain}...")
+            certbot_bin = (Path("/snap/bin/certbot") if Path("/snap/bin/certbot").exists()
+                           else Path("/usr/bin/certbot"))
+            if not certbot_bin.exists():
+                warn("certbot не найден — сертификат нужно получить вручную")
+            else:
+                _run(["systemctl", "stop", "nginx"], check=False, quiet=True)
+                r = _run([
+                    str(certbot_bin), "certonly", "--standalone",
+                    "-d", new_domain,
+                    "--non-interactive", "--agree-tos",
+                    "-m", f"admin@{new_domain}",
+                    "--keep-until-expiring"
+                ], check=False)
+                if r.returncode != 0:
+                    warn("certbot завершился с ошибкой — домен возможно недоступен")
+                    ans = input("  Продолжить всё равно? [y/N]: ").strip().lower()
+                    if ans != "y":
+                        _run(["systemctl", "start", "nginx"], check=False, quiet=True)
+                        return
+                _run(["systemctl", "start", "nginx"], check=False, quiet=True)
+        #  FIX: Предлагаем удалить старый сертификат Let's Encrypt,
+        # чтобы не оставлять мусор. certbot delete — безопасная операция.
+        old_cert_dir = Path(f"/etc/letsencrypt/live/{old_domain}")
+        if old_cert_dir.exists():
+            info(f"Найден старый сертификат для {old_domain}")
+            ans = input(f"  {CYAN}Удалить старый сертификат {old_domain}? [y/N]:{NC} ").strip().lower()
+            if ans == "y":
+                certbot_bin = (Path("/snap/bin/certbot") if Path("/snap/bin/certbot").exists()
+                               else Path("/usr/bin/certbot"))
+                if certbot_bin.exists():
+                    r = _run([str(certbot_bin), "delete", "--cert-name", old_domain,
+                              "--non-interactive"], check=False, quiet=True)
+                    if r.returncode == 0:
+                        success(f"Старый сертификат {old_domain} удалён")
+                    else:
+                        warn(f"Не удалось удалить сертификат через certbot — можно удалить вручную: {old_cert_dir}")
+                else:
+                    # Fallback: ручное удаление директории
+                    import shutil
+                    try:
+                        shutil.rmtree(old_cert_dir)
+                        success(f"Старый сертификат {old_domain} удалён ({old_cert_dir})")
+                    except Exception as e:
+                        warn(f"Не удалось удалить {old_cert_dir}: {e}")
 
     # --- Патч Xray config.json ---
     patched_xray = False
@@ -151,17 +176,34 @@ def do_reconfigure() -> None:
             for ib in cfg.get("inbounds", []):
                 if ib.get("port") == old_port:
                     ib["port"] = new_port
-            # Патч TLS-сертификата если нужно
-            if proto == "xhttp" and new_domain != old_domain:
-                for ib in cfg.get("inbounds", []):
-                    tls = (ib.get("streamSettings", {})
-                             .get("tlsSettings", {}))
+                #  FIX: Обновляем SNI/serverNames при смене домена.
+                # Раньше это НЕ делалось — клиент подключался с новым SNI,
+                # а сервер ожидал старый → миллион ошибок в секунду.
+                ss = ib.get("streamSettings", {})
+                if new_domain != old_domain:
+                    # REALITY: обновляем serverNames (dest не трогаем — это socket path)
+                    rs = ss.get("realitySettings", {})
+                    if rs:
+                        old_sni_list = rs.get("serverNames", [])
+                        rs["serverNames"] = [
+                            new_domain if sn == old_domain else sn
+                            for sn in old_sni_list
+                        ]
+                        info(f"REALITY serverNames обновлены: {old_domain} → {new_domain}")
+                    # xHTTP TLS: обновляем SNI + пути к сертификатам
+                    tls = ss.get("tlsSettings", {})
                     if tls:
+                        # SNI
+                        if tls.get("serverName") == old_domain:
+                            tls["serverName"] = new_domain
+                        # Сертификаты
                         cert_dir = Path(f"/etc/letsencrypt/live/{new_domain}")
-                        tls["certificates"] = [{
-                            "certificateFile": str(cert_dir / "fullchain.pem"),
-                            "keyFile":         str(cert_dir / "privkey.pem"),
-                        }]
+                        if cert_dir.exists():
+                            tls["certificates"] = [{
+                                "certificateFile": str(cert_dir / "fullchain.pem"),
+                                "keyFile":         str(cert_dir / "privkey.pem"),
+                            }]
+                        info(f"xHTTP TLS SNI/сертификаты обновлены: {old_domain} → {new_domain}")
             # Гарантируем наличие Stats API секций (statsUserUplink/Downlink)
             _apply_stats_to_config(cfg)
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
@@ -203,6 +245,16 @@ def do_reconfigure() -> None:
     try:
         state["domain"]      = new_domain
         state["server_port"] = new_port
+        #  FIX: обновляем reality_dest если это НЕ AWG (там чужой домен).
+        # Для обычного REALITY reality_dest = "" (не используется),
+        # serverNames = PARAM_DOMAIN. Для AWG reality_dest = чужой домен
+        # (cloudflare.com и т.д.) — его НЕ меняем.
+        _awg_enabled = state.get("awg_exit_enabled", False)
+        if not _awg_enabled:
+            # Обычный REALITY: serverNames = домен сервера
+            # reality_dest не используется (пустой), но обновляем на всякий случай
+            if state.get("reality_dest", "") == old_domain:
+                state["reality_dest"] = new_domain
         STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
         setattr(core, "PARAM_DOMAIN", new_domain)
         setattr(core, "SERVER_PORT",  new_port)
@@ -223,6 +275,16 @@ def do_reconfigure() -> None:
             _run(["systemctl", "restart", "xray"], check=False, quiet=True)
             time.sleep(2)
             success(f"Реконфигурация завершена: домен={new_domain}, порт={new_port}")
+            #  FIX: перегенерируем клиентские ссылки с новым доменом/SNI.
+            # Раньше ссылки не обновлялись — пользователи оставались со
+            # старыми ссылками, которые не работали с новым доменом.
+            try:
+                from chimera.modules.users_manager import generate_client_links
+                generate_client_links()
+                success("Клиентские ссылки перегенерированы с новым доменом")
+            except Exception as e:
+                warn(f"Не удалось перегенерировать ссылки: {e}")
+                warn("Сгенерируйте вручную: меню → Пользователи → [3] Показать ссылку")
     log_to_file("INFO", f"Reconfigure: {old_domain}:{old_port} → {new_domain}:{new_port}")
 
 
