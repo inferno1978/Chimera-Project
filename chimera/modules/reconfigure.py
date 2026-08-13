@@ -136,7 +136,75 @@ def do_reconfigure() -> None:
     info(f"Применяем: домен={new_domain}, порт={new_port}"
          f"{' (принудительно)' if force_reapply else ''}")
 
-    # --- SSL-сертификат (для любого протокола если домен сменился или force) ---
+    # --- 1. Патч Nginx конфигов (ДО certbot и до остановки nginx) ---
+    #  FIX: критичный порядок — сначала патчим конфиги, потом получаем
+    # сертификат, потом стартуем nginx. Раньше nginx стартовал ДО патча
+    # конфига → не находил старый сертификат → падал → сокет не создавался
+    # → REALITY падал с EOF.
+    if new_domain != old_domain or force_reapply:
+        import re as _re
+        _nginx_dirs = [
+            NGINX_CONF_DIR,
+            Path("/etc/nginx/sites-available"),
+            Path("/etc/nginx/sites-enabled"),
+        ]
+        cert_dir_new = f"/etc/letsencrypt/live/{new_domain}"
+        for _ndir in _nginx_dirs:
+            if not _ndir.exists():
+                continue
+            for conf in _ndir.iterdir():
+                if not conf.is_file():
+                    continue
+                try:
+                    text = conf.read_text()
+                    changed = False
+                    if new_domain != old_domain or force_reapply:
+                        text2 = _re.sub(
+                            r'(server_name\s+)[^;]+;',
+                            rf'\g<1>{new_domain};',
+                            text
+                        )
+                        text2 = _re.sub(
+                            r'(ssl_certificate\s+).*?/letsencrypt/live/[^/]+/',
+                            rf'\g<1>{cert_dir_new}/',
+                            text2
+                        )
+                        text2 = _re.sub(
+                            r'(ssl_certificate_key\s+).*?/letsencrypt/live/[^/]+/',
+                            rf'\g<1>{cert_dir_new}/',
+                            text2
+                        )
+                        text2 = _re.sub(
+                            r'(root\s+/var/www/)[^;\s]+',
+                            rf'\g<1>{new_domain}',
+                            text2
+                        )
+                        if text2 != text:
+                            text = text2
+                            changed = True
+                    if new_port != old_port:
+                        text2 = text.replace(f"listen {old_port}", f"listen {new_port}")
+                        text2 = text2.replace(f"listen [::]:{old_port}", f"listen [::]:{new_port}")
+                        if text2 != text:
+                            text = text2
+                            changed = True
+                    if changed:
+                        conf.write_text(text)
+                        info(f"Nginx конфиг обновлён: {conf}")
+                except Exception as e:
+                    warn(f"Ошибка патча nginx {conf}: {e}")
+
+        # Создаём web-root для нового домена
+        _new_webroot = Path(f"/var/www/{new_domain}")
+        if not _new_webroot.exists():
+            _new_webroot.mkdir(parents=True, exist_ok=True)
+            _old_webroot = Path(f"/var/www/{old_domain}")
+            _old_index = _old_webroot / "index.html"
+            if _old_index.exists():
+                (_new_webroot / "index.html").write_text(_old_index.read_text())
+            info(f"Web-root создан: {_new_webroot}")
+
+    # --- 2. SSL-сертификат (останавливаем nginx, получаем сертификат, стартуем) ---
     if new_domain != old_domain or force_reapply:
         info(f"Получаем/обновляем SSL-сертификат для {new_domain}...")
         certbot_bin = (Path("/snap/bin/certbot") if Path("/snap/bin/certbot").exists()
@@ -158,20 +226,23 @@ def do_reconfigure() -> None:
                 if ans != "y":
                     _run(["systemctl", "start", "nginx"], check=False, quiet=True)
                     return
+            #  FIX: проверяем что nginx реально стартовал
             _run(["systemctl", "start", "nginx"], check=False, quiet=True)
+            time.sleep(1)
+            _r_ngx = _run(["systemctl", "is-active", "nginx"],
+                          capture=True, check=False, quiet=True)
+            if _r_ngx.stdout.strip() != "active":
+                warn("nginx не стартовал после certbot! Проверьте: nginx -t")
+            else:
+                success("nginx запущен")
 
-        #  FIX: Показываем список ВСЕХ сертификатов Let's Encrypt
-        # и предлагаем выбрать какие удалить. Раньше искали только
-        # old_domain, но сертификатов может быть несколько (старые
-        # домены, тестовые, и т.д.).
+        # Показываем список сертификатов и предлагаем удалить старые
         try:
             r_certs = _run([str(certbot_bin), "certificates"],
                            capture=True, check=False, quiet=True)
             if r_certs.returncode == 0 and r_certs.stdout.strip():
-                # Парсим имена сертификатов
                 cert_names = []
                 for line in r_certs.stdout.splitlines():
-                    # Формат: "  Certificate Name: example.com\n    Domains: ..."
                     if "Certificate Name:" in line:
                         name = line.split("Certificate Name:")[1].strip()
                         if name:
@@ -182,7 +253,6 @@ def do_reconfigure() -> None:
                     _box_row(f"  {DIM}Найдено сертификатов: {len(cert_names)}{NC}")
                     _box_sep()
                     for i, cn in enumerate(cert_names, 1):
-                        # Помечаем текущий домен и старый домен
                         marker = ""
                         if cn == new_domain:
                             marker = f"  {GREEN}← текущий{NC}"
@@ -196,7 +266,6 @@ def do_reconfigure() -> None:
                     del_input = input(f"  {CYAN}Удалить сертификаты:{NC} ").strip().lower()
                     to_delete = set()
                     if del_input == "old":
-                        # Удалить все кроме new_domain
                         to_delete = {cn for cn in cert_names if cn != new_domain}
                     elif del_input:
                         for token in del_input.replace(",", " ").split():
@@ -264,78 +333,6 @@ def do_reconfigure() -> None:
         except Exception as e:
             warn(f"Ошибка патча {cfg_path}: {e}")
 
-    # --- Патч Nginx ---
-    if new_domain != old_domain or force_reapply:
-        import re as _re
-        #  FIX: патчим не только conf.d/*.conf, но и sites-available/*,
-        # sites-enabled/* — Chimera создаёт конфиги и там. Раньше патчились
-        # только conf.d, и конфиги в sites-available оставались со старым
-        # доменом → nginx падал при загрузке сертификата.
-        _nginx_dirs = [
-            NGINX_CONF_DIR,                                    # /etc/nginx/conf.d
-            Path("/etc/nginx/sites-available"),                # sites-available
-            Path("/etc/nginx/sites-enabled"),                  # sites-enabled
-        ]
-        cert_dir_new = f"/etc/letsencrypt/live/{new_domain}"
-        for _ndir in _nginx_dirs:
-            if not _ndir.exists():
-                continue
-            for conf in _ndir.iterdir():
-                if not conf.is_file():
-                    continue
-                try:
-                    text = conf.read_text()
-                    changed = False
-                    if new_domain != old_domain or force_reapply:
-                        # server_name: заменяем все домены на new_domain
-                        text2 = _re.sub(
-                            r'(server_name\s+)[^;]+;',
-                            rf'\g<1>{new_domain};',
-                            text
-                        )
-                        # ssl_certificate: заменяем пути к сертификатам
-                        text2 = _re.sub(
-                            r'(ssl_certificate\s+).*?/letsencrypt/live/[^/]+/',
-                            rf'\g<1>{cert_dir_new}/',
-                            text2
-                        )
-                        text2 = _re.sub(
-                            r'(ssl_certificate_key\s+).*?/letsencrypt/live/[^/]+/',
-                            rf'\g<1>{cert_dir_new}/',
-                            text2
-                        )
-                        # root /var/www/old_domain → /var/www/new_domain
-                        text2 = _re.sub(
-                            r'(root\s+/var/www/)[^;\s]+',
-                            rf'\g<1>{new_domain}',
-                            text2
-                        )
-                        if text2 != text:
-                            text = text2
-                            changed = True
-                    if new_port != old_port:
-                        text2 = text.replace(f"listen {old_port}", f"listen {new_port}")
-                        text2 = text2.replace(f"listen [::]:{old_port}", f"listen [::]:{new_port}")
-                        if text2 != text:
-                            text = text2
-                            changed = True
-                    if changed:
-                        conf.write_text(text)
-                        info(f"Nginx конфиг обновлён: {conf}")
-                except Exception as e:
-                    warn(f"Ошибка патча nginx {conf}: {e}")
-
-        #  FIX: создаём web-root для нового домена если его нет
-        _new_webroot = Path(f"/var/www/{new_domain}")
-        if not _new_webroot.exists():
-            _new_webroot.mkdir(parents=True, exist_ok=True)
-            # Копируем index.html из старого web-root если есть
-            _old_webroot = Path(f"/var/www/{old_domain}")
-            _old_index = _old_webroot / "index.html"
-            if _old_index.exists():
-                (_new_webroot / "index.html").write_text(_old_index.read_text())
-            info(f"Web-root создан: {_new_webroot}")
-
     # --- UFW: открыть новый порт, закрыть старый ---
     #  миграция на port_registry (с backward compat для legacy comments).
     if new_port != old_port:
@@ -371,7 +368,14 @@ def do_reconfigure() -> None:
             warn("Xray конфиг невалиден! Проверьте вручную.")
             warn((val.stdout + val.stderr)[:300])
         else:
-            _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
+            #  FIX: restart вместо reload — reload не работает если nginx
+            # не запущен (например, после неудачного certbot).
+            _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
+            time.sleep(1)
+            _r_ngx2 = _run(["systemctl", "is-active", "nginx"],
+                           capture=True, check=False, quiet=True)
+            if _r_ngx2.stdout.strip() != "active":
+                warn("nginx не запущен после реконфигурации! Проверьте: nginx -t")
             _run(["systemctl", "restart", "xray"], check=False, quiet=True)
             time.sleep(2)
             success(f"Реконфигурация завершена: домен={new_domain}, порт={new_port}")
