@@ -232,21 +232,21 @@ def do_reconfigure() -> None:
                 # а сервер ожидал старый → миллион ошибок в секунду.
                 ss = ib.get("streamSettings", {})
                 if new_domain != old_domain or force_reapply:
-                    # REALITY: обновляем serverNames (dest не трогаем — это socket path)
+                    # REALITY: ПОЛНОСТЬЮ перезаписываем serverNames на new_domain.
+                    # Раньше делали точечный replace (old_domain → new_domain),
+                    # но это не работало если в serverNames лежал домен от
+                    # ЕЩЁ более старой смены (не совпадающий с old_domain из
+                    # state.json). Теперь — перезаписываем весь список.
                     rs = ss.get("realitySettings", {})
                     if rs:
                         old_sni_list = rs.get("serverNames", [])
-                        rs["serverNames"] = [
-                            new_domain if sn == old_domain else sn
-                            for sn in old_sni_list
-                        ]
-                        info(f"REALITY serverNames обновлены: {old_domain} → {new_domain}")
+                        rs["serverNames"] = [new_domain]
+                        info(f"REALITY serverNames: {old_sni_list} → [{new_domain}]")
                     # xHTTP TLS: обновляем SNI + пути к сертификатам
                     tls = ss.get("tlsSettings", {})
                     if tls:
-                        # SNI
-                        if tls.get("serverName") == old_domain:
-                            tls["serverName"] = new_domain
+                        # SNI — перезаписываем полностью
+                        tls["serverName"] = new_domain
                         # Сертификаты
                         cert_dir = Path(f"/etc/letsencrypt/live/{new_domain}")
                         if cert_dir.exists():
@@ -254,7 +254,7 @@ def do_reconfigure() -> None:
                                 "certificateFile": str(cert_dir / "fullchain.pem"),
                                 "keyFile":         str(cert_dir / "privkey.pem"),
                             }]
-                        info(f"xHTTP TLS SNI/сертификаты обновлены: {old_domain} → {new_domain}")
+                        info(f"xHTTP TLS SNI/сертификаты: → {new_domain}")
             # Гарантируем наличие Stats API секций (statsUserUplink/Downlink)
             _apply_stats_to_config(cfg)
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
