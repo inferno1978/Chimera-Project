@@ -219,6 +219,21 @@ def _autoban_load() -> dict:
                     for ip, meta in banned.items()
                 ]
                 _autoban_save(cfg)
+                #  FIX: также пишем мигрированные баны в файл отчёта
+                # (/var/log/xray-ban-report.txt) — иначе пункт [6] показывает
+                # историю, а файл отчёта остаётся пустым со статусом
+                # «не создан (появится после первого бана)». Это несостыковка,
+                # которую пользователи видят как баг.
+                try:
+                    core = _core_module()
+                    _lookup_asn = core._lookup_asn
+                    for ip, meta in banned.items():
+                        _count = meta.get("count", 0)
+                        _reason = meta.get("reason", "migrated from banned dict")
+                        _asn = _lookup_asn(ip) if _lookup_asn else {}
+                        _ban_report_append(ip, _count, _reason, _asn)
+                except Exception:
+                    pass
             return cfg
     except Exception:
         pass
@@ -236,13 +251,108 @@ def _autoban_save(data: dict) -> None:
     _XRAY_BAN_STATE.chmod(0o600)
 
 
+def _get_server_own_ips() -> list[str]:
+    """
+    Возвращает список всех IP-адресов этого сервера (public + все интерфейсы),
+    чтобы автобан не забанил сам себя.
+
+    Источники:
+      1. ip route get 8.8.8.8  → primary public IPv4 (src=...)
+      2. ip -4 addr show       → все IPv4 на всех интерфейсах
+      3. ip -6 addr show       → все IPv6 (глобальные, не link-local)
+
+    Исключаются:
+      - 127.x.x.x (loopback)
+      - ::1 (IPv6 loopback)
+      - 10.66.66.x (AWG tunnel subnet — это не публичные IP)
+      - 172.16.x.x–172.31.x.x (private, но добавляем на случай сложной маршрутизации)
+      - 192.168.x.x (private, но добавляем — могут быть клиенты через NAT)
+      - fe80::/10 (link-local IPv6)
+
+    Функция НЕ использует сеть (curl к ipify) — только локальные команды,
+    поэтому работает даже без интернета. Это критично: если сервер временно
+    без сети, автобан всё равно должен знать свой собственный IP.
+    """
+    ips: list[str] = []
+    try:
+        import subprocess as _sp
+
+        # 1. Primary public IPv4 через ip route get
+        try:
+            r = _sp.run(["ip", "route", "get", "8.8.8.8"],
+                        capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                # Формат: "8.8.8.8 via 1.2.3.1 dev eth0 src 1.2.3.4 uid 0"
+                parts = r.stdout.split()
+                if "src" in parts:
+                    idx = parts.index("src")
+                    if idx + 1 < len(parts):
+                        candidate = parts[idx + 1]
+                        if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', candidate):
+                            if candidate not in ips:
+                                ips.append(candidate)
+        except Exception:
+            pass
+
+        # 2. Все IPv4 на всех интерфейсах
+        try:
+            r = _sp.run(["ip", "-4", "addr", "show"],
+                        capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                # Парсим строки вида: "    inet 1.2.3.4/24 brd ..."
+                for line in r.stdout.splitlines():
+                    m = re.search(r'inet\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
+                    if m:
+                        ip = m.group(1)
+                        # Исключаем loopback и AWG tunnel subnet
+                        if ip.startswith("127."):
+                            continue
+                        if ip not in ips:
+                            ips.append(ip)
+        except Exception:
+            pass
+
+        # 3. Глобальные IPv6 (не link-local)
+        try:
+            r = _sp.run(["ip", "-6", "addr", "show"],
+                        capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    m = re.search(r'inet6\s+([0-9a-fA-F:]+)', line)
+                    if m:
+                        ip6 = m.group(1)
+                        # Исключаем ::1 и fe80:: (link-local)
+                        if ip6 == "::1" or ip6.startswith("fe80:"):
+                            continue
+                        if ip6 not in ips:
+                            ips.append(ip6)
+        except Exception:
+            pass
+
+    except Exception:
+        pass
+    return ips
+
+
 def _autoban_get_chain_ips() -> list[str]:
-    """Возвращает список IP всех нод из state.json (entry + exit) для автоматического whitelist.
-    При AWG 2.0 включает IP exit-VPS туннеля."""
+    """Возвращает список IP всех нод из state.json (entry + exit) + собственные IP сервера
+    для автоматического whitelist.
+    При AWG 2.0 включает IP exit-VPS туннеля.
+    Также включает собственные IP сервера (public + interfaces) — чтобы автобан
+    не забанил сам сервер при TLS-handshake ошибках от loopback/health-check соединений."""
     core = _core_module()
     STATE_FILE = core.STATE_FILE
 
     ips: list[str] = []
+
+    # Собственные IP сервера — добавляем ПЕРВЫМИ, чтобы они всегда были в whitelist.
+    # Это предотвращает само-бан: сервер не должен банить свой собственный IP
+    # при TLS-ошибках от health-check, loopback-соединений, или когда exit-нода
+    # каскада подключается обратно к entry-ноде.
+    for own_ip in _get_server_own_ips():
+        if own_ip not in ips:
+            ips.append(own_ip)
+
     try:
         if not STATE_FILE.exists():
             return ips
@@ -560,6 +670,36 @@ try:
                 _r = _resolve_fresh(_lh)
                 if _r: whitelist.add(_r)
 except: pass
+
+#  FIX: добавляем собственные IP сервера в whitelist — чтобы автобан
+# не забанил сам себя при TLS-ошибках от loopback/health-check или
+# когда exit-нода каскада подключается обратно к entry-ноде.
+# Используем только локальные команды (ip route, ip addr) — без сети.
+try:
+    import subprocess as _sp2
+    # 1. Primary public IPv4 через ip route get
+    _r_route = _sp2.run(['ip', 'route', 'get', '8.8.8.8'],
+                        capture_output=True, text=True, timeout=5)
+    if _r_route.returncode == 0:
+        _parts = _r_route.stdout.split()
+        if 'src' in _parts:
+            _idx = _parts.index('src')
+            if _idx + 1 < len(_parts):
+                _candidate = _parts[_idx + 1]
+                if _re.match(r'^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$', _candidate):
+                    whitelist.add(_candidate)
+    # 2. Все IPv4 на всех интерфейсах
+    _r_addr = _sp2.run(['ip', '-4', 'addr', 'show'],
+                       capture_output=True, text=True, timeout=5)
+    if _r_addr.returncode == 0:
+        for _line in _r_addr.stdout.splitlines():
+            _m = _re.search(r'inet\\s+(\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}})', _line)
+            if _m:
+                _ip = _m.group(1)
+                if not _ip.startswith('127.'):
+                    whitelist.add(_ip)
+except: pass
+
 banned = cfg.get('banned', {{}})
 
 error_log = Path('/var/log/xray/error.log')
@@ -606,6 +746,27 @@ for ip, cnt in ip_errors.items():
             }})
             if len(cfg['ban_history']) > 500:
                 cfg['ban_history'] = cfg['ban_history'][-500:]
+            #  FIX: пишем в читаемый отчёт /var/log/xray-ban-report.txt —
+            # иначе пункт [6] показывает историю, а файл отчёта пустой.
+            # Cron-скрипт не имеет доступа к chimera.modules.asn_cache,
+            # поэтому ASN-инфо не включаем — только IP, время, причина.
+            try:
+                _report_f = Path('/var/log/xray-ban-report.txt')
+                _report_f.parent.mkdir(parents=True, exist_ok=True)
+                _sep = '─' * 64
+                _ts_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                _block = (
+                    f'\\n{{_sep}}\\n'
+                    f'[{{_ts_str}}]  ЗАБЛОКИРОВАН: {{ip}}\\n'
+                    f'  Ошибок:      {{cnt}}  ({{_ban_reason}})\\n'
+                    f'  ASN:         — (cron-скрипт, без ASN-lookup)\\n'
+                    f'  Провайдер:   —\\n'
+                    f'  Организация: —\\n'
+                )
+                with open(_report_f, 'a', encoding='utf-8') as _rf:
+                    _rf.write(_block)
+            except Exception:
+                pass
 
 cfg['banned'] = banned
 #  FIX: persist whitelist (включая добавленные chain IPs) и
@@ -902,18 +1063,28 @@ def do_manage_autoban() -> None:
         elif ch == "5":
             wl = cfg.get("whitelist", list(_BAN_WHITELIST_DEFAULT))
             chain_ips = _autoban_get_chain_ips()
+            # Разделяем: собственные IP сервера vs IP нод каскада
+            own_ips = _get_server_own_ips()
+            chain_only = [ip for ip in chain_ips if ip not in own_ips]
             print()
             _box_top("Whitelist (эти IP никогда не баним)")
+            _box_row(f"  {BOLD}Пользовательский whitelist:{NC}")
             for i, ip in enumerate(wl, 1):
                 _box_item(f"{i}", f"{ip}")
-            if chain_ips:
+            if own_ips:
+                _box_sep()
+                _box_row(f"  {DIM}Автозащита — собственные IP сервера (всегда в whitelist):{NC}")
+                for ip in own_ips:
+                    in_wl = "  (уже в whitelist)" if ip in wl else ""
+                    _box_row(f"    {DIM}• {ip}{in_wl}{NC}")
+            if chain_only:
                 _box_sep()
                 _box_row(f"  {DIM}Автозащита — IP нод каскада (всегда в whitelist):{NC}")
-                for ip in chain_ips:
+                for ip in chain_only:
                     in_wl = "  (уже в whitelist)" if ip in wl else ""
                     _box_row(f"    {DIM}• {ip}{in_wl}{NC}")
             _box_sep()
-            _box_item("+", f"Добавить IP")
+            _box_item("+", f"Добавить IP  {DIM}(например: свой рабочий IP, IP мониторинга){NC}")
             _box_item("-", f"Удалить IP")
             _box_bottom()
             act = input("  Действие [+/-/Enter]: ").strip()

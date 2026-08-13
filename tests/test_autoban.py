@@ -173,5 +173,118 @@ class TestCronScriptWritesHistory(unittest.TestCase):
         self.assertIn("cfg['ban_history'][-500:]", body)
 
 
+class TestServerOwnIPsWhitelist(unittest.TestCase):
+    """
+    Регрессия: сервер не должен банить свой собственный IP.
+    Раньше _autoban_get_chain_ips() добавлял только IP нод каскада,
+    но не собственные IP сервера. При TLS-handshake ошибках от
+    loopback/health-check сервер банил сам себя.
+    """
+    def setUp(self):
+        _setup_core()
+    def test_get_server_own_ips_function_exists(self):
+        """Функция _get_server_own_ips() определена."""
+        from chimera.modules import autoban
+        self.assertTrue(callable(getattr(autoban, '_get_server_own_ips', None)),
+                        "_get_server_own_ips() не определена")
+
+    def test_get_server_own_ips_returns_list(self):
+        """Возвращает список строк (даже если пустой)."""
+        from chimera.modules import autoban
+        ips = autoban._get_server_own_ips()
+        self.assertIsInstance(ips, list)
+        for ip in ips:
+            self.assertIsInstance(ip, str)
+
+    def test_chain_ips_includes_server_own_ips(self):
+        """_autoban_get_chain_ips() включает собственные IP сервера."""
+        from chimera.modules import autoban
+        own_ips = set(autoban._get_server_own_ips())
+        chain_ips = set(autoban._autoban_get_chain_ips())
+        # Все собственные IP должны быть в chain_ips
+        for ip in own_ips:
+            self.assertIn(ip, chain_ips,
+                         f"Собственный IP {ip} не попал в chain_ips — сервер может забанить сам себя")
+
+    def test_cron_script_detects_server_own_ips(self):
+        """Cron-скрипт определяет собственные IP сервера и добавляет в whitelist."""
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "autoban.py").read_text()
+        import re
+        m = re.search(r'py_body = f"""(.*?)"""', src, re.DOTALL)
+        self.assertIsNotNone(m, "py_body f-string не найден")
+        body = m.group(1)
+        # Проверяем наличие команд определения IP сервера
+        self.assertIn("'ip', 'route', 'get'", body,
+                      "cron-скрипт не определяет primary IP через ip route get")
+        self.assertIn("'ip', '-4', 'addr'", body,
+                      "cron-скрипт не получает все интерфейсные IP через ip -4 addr show")
+        self.assertIn("whitelist.add(_candidate)", body,
+                      "cron-скрипт не добавляет primary IP в whitelist")
+        self.assertIn("whitelist.add(_ip)", body,
+                      "cron-скрипт не добавляет интерфейсные IP в whitelist")
+
+
+class TestBanReportFileSync(unittest.TestCase):
+    """
+    Регрессия: файл отчёта /var/log/xray-ban-report.txt должен создаваться
+    при миграции ban_history и при банах из cron-скрипта.
+    Раньше: пункт [6] показывал историю (из JSON), а файл отчёта был пуст
+    со статусом «не создан (появится после первого бана)» — несостыковка.
+    """
+    def test_migration_writes_to_report_file(self):
+        """При миграции banned→ban_history также пишем в файл отчёта."""
+        from chimera.modules import autoban
+        tmp = Path(tempfile.mkdtemp())
+        state_file = tmp / "autoban.json"
+        report_file = tmp / "xray-ban-report.txt"
+        import shutil
+        try:
+            # Create a fake core module with _lookup_asn returning empty dict
+            import types
+            fake_core = types.ModuleType("chimera._core_fake")
+            fake_core._lookup_asn = lambda ip: {}
+            fake_core.STATE_FILE = tmp / "nonexistent_state.json"
+
+            with patch("chimera.modules.autoban._XRAY_BAN_STATE", state_file), \
+                 patch("chimera.modules.autoban._XRAY_BAN_REPORT", report_file), \
+                 patch("chimera.modules.autoban._core_module", return_value=fake_core):
+                # Pre-existing state: 2 bans, no ban_history
+                state_file.write_text(json.dumps({
+                    "enabled": True,
+                    "banned": {
+                        "1.2.3.4": {"count": 10, "banned_at": "2026-08-13T02:20:00",
+                                    "reason": "10 TLS errors in 10min"},
+                        "5.6.7.8": {"count": 15, "banned_at": "2026-08-13T00:25:00",
+                                    "reason": "15 TLS errors in 10min"},
+                    },
+                }))
+                # Trigger migration via _autoban_load
+                loaded = autoban._autoban_load()
+            # After migration: ban_history has 2 entries
+            self.assertEqual(len(loaded["ban_history"]), 2)
+            # Report file should now exist (created during migration)
+            self.assertTrue(report_file.exists(),
+                           "Файл отчёта не создан при миграции — несостыковка с историей")
+            # Report file should contain both IPs
+            content = report_file.read_text()
+            self.assertIn("1.2.3.4", content)
+            self.assertIn("5.6.7.8", content)
+            self.assertIn("ЗАБЛОКИРОВАН:", content)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cron_script_writes_to_report_file(self):
+        """Cron-скрипт пишет в файл отчёта при банах."""
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "autoban.py").read_text()
+        import re
+        m = re.search(r'py_body = f"""(.*?)"""', src, re.DOTALL)
+        self.assertIsNotNone(m, "py_body f-string не найден")
+        body = m.group(1)
+        self.assertIn("xray-ban-report.txt", body,
+                      "cron-скрипт не пишет в файл отчёта")
+        self.assertIn("ЗАБЛОКИРОВАН:", body,
+                      "cron-скрипт не форматирует запись отчёта")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
