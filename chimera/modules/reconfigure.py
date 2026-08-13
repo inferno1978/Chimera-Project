@@ -265,13 +265,38 @@ def do_reconfigure() -> None:
             warn(f"Ошибка патча {cfg_path}: {e}")
 
     # --- Патч Nginx ---
-    if new_domain != old_domain or new_port != old_port:
+    if new_domain != old_domain or force_reapply:
         for conf in NGINX_CONF_DIR.glob("*.conf"):
             try:
                 text = conf.read_text()
                 changed = False
-                if new_domain != old_domain:
-                    text2 = text.replace(old_domain, new_domain)
+                if new_domain != old_domain or force_reapply:
+                    #  FIX: при force_reapply или смене домена — перезаписываем
+                    # ВСЕ домены в nginx конфиге на new_domain. Раньше делали
+                    # точечный replace (old_domain → new_domain), но это не
+                    # работало если в конфиге был домен от ЕЩЁ более старой
+                    # смены (не совпадающий с old_domain из state.json).
+                    # Теперь: ищем server_name и ssl_certificate пути,
+                    # заменяем на new_domain.
+                    import re as _re
+                    # server_name: заменяем все домены на new_domain
+                    text2 = _re.sub(
+                        r'(server_name\s+)[^;]+;',
+                        rf'\g<1>{new_domain};',
+                        text
+                    )
+                    # ssl_certificate: заменяем пути к сертификатам
+                    cert_dir_new = f"/etc/letsencrypt/live/{new_domain}"
+                    text2 = _re.sub(
+                        r'(ssl_certificate\s+).*?/letsencrypt/live/[^/]+/',
+                        rf'\g<1>{cert_dir_new}/',
+                        text2
+                    )
+                    text2 = _re.sub(
+                        r'(ssl_certificate_key\s+).*?/letsencrypt/live/[^/]+/',
+                        rf'\g<1>{cert_dir_new}/',
+                        text2
+                    )
                     if text2 != text:
                         text = text2
                         changed = True
