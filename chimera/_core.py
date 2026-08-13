@@ -4554,6 +4554,8 @@ def do_manage_users() -> None:
                                 print(f"  {_ql}")
                     else:
                         info("Установите qrencode для отображения QR: apt install qrencode")
+                    from chimera.modules.box_renderer import _print_link_warning
+                    _print_link_warning(is_vless=True)
                 except Exception as e:
                     warn(f"Не удалось сгенерировать ссылку: {e}")
             else:

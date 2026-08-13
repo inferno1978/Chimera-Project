@@ -2848,6 +2848,8 @@ SNI:        {PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) els
     print(f"  {MAGENTA}Клиентская ссылка (Entry Node):{NC}")
     _box_link(link)
     print()
+    from chimera.modules.box_renderer import _print_link_warning
+    _print_link_warning(is_vless=True)
     _box_top(f"Файлы")
     # Определяем самый длинный путь для правильного выравнивания
     _has_multi_nodes = len(nodes) > 1

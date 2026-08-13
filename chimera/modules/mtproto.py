@@ -2783,6 +2783,8 @@ def _menu_users(server_ip: str) -> None:
                         ios_link = f"tg://proxy?server={server_ip}&port={_ios_st['ext_port']}&secret={sec}"
                         print(f"  {DIM}└─ iOS:{NC} {CYAN}{ios_link}{NC}")
                     print()
+                from chimera.modules.box_renderer import _print_link_warning
+                _print_link_warning(is_vless=False)
             _pause()
 
         elif ch == "5":
@@ -3588,6 +3590,8 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
             ios_link = f"tg://proxy?server={server_ip}&port={_ios_st['ext_port']}&secret={sec}"
             print(f"  {DIM}└─ iOS:{NC} {CYAN}{ios_link}{NC}")
         print()
+    from chimera.modules.box_renderer import _print_link_warning
+    _print_link_warning(is_vless=False)
     #  FIX: устанавливаем ежедневный cron-бэкап telemt.toml —
     # защита от потери юзеров при сбое или (пере)установке.
     try:
@@ -3895,6 +3899,8 @@ def mtproto_menu() -> None:
                     ios_link = f"tg://proxy?server={server_ip}&port={_ios_st['ext_port']}&secret={sec}"
                     print(f"  {DIM}└─ iOS:{NC} {CYAN}{ios_link}{NC}")
                 print()
+            from chimera.modules.box_renderer import _print_link_warning
+            _print_link_warning(is_vless=False)
             _pause()
 
         elif ch == "4":
