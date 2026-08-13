@@ -266,51 +266,75 @@ def do_reconfigure() -> None:
 
     # --- Патч Nginx ---
     if new_domain != old_domain or force_reapply:
-        for conf in NGINX_CONF_DIR.glob("*.conf"):
-            try:
-                text = conf.read_text()
-                changed = False
-                if new_domain != old_domain or force_reapply:
-                    #  FIX: при force_reapply или смене домена — перезаписываем
-                    # ВСЕ домены в nginx конфиге на new_domain. Раньше делали
-                    # точечный replace (old_domain → new_domain), но это не
-                    # работало если в конфиге был домен от ЕЩЁ более старой
-                    # смены (не совпадающий с old_domain из state.json).
-                    # Теперь: ищем server_name и ssl_certificate пути,
-                    # заменяем на new_domain.
-                    import re as _re
-                    # server_name: заменяем все домены на new_domain
-                    text2 = _re.sub(
-                        r'(server_name\s+)[^;]+;',
-                        rf'\g<1>{new_domain};',
-                        text
-                    )
-                    # ssl_certificate: заменяем пути к сертификатам
-                    cert_dir_new = f"/etc/letsencrypt/live/{new_domain}"
-                    text2 = _re.sub(
-                        r'(ssl_certificate\s+).*?/letsencrypt/live/[^/]+/',
-                        rf'\g<1>{cert_dir_new}/',
-                        text2
-                    )
-                    text2 = _re.sub(
-                        r'(ssl_certificate_key\s+).*?/letsencrypt/live/[^/]+/',
-                        rf'\g<1>{cert_dir_new}/',
-                        text2
-                    )
-                    if text2 != text:
-                        text = text2
-                        changed = True
-                if new_port != old_port:
-                    text2 = text.replace(f"listen {old_port}", f"listen {new_port}")
-                    text2 = text2.replace(f"listen [::]:{old_port}", f"listen [::]:{new_port}")
-                    if text2 != text:
-                        text = text2
-                        changed = True
-                if changed:
-                    conf.write_text(text)
-                    info(f"Nginx конфиг обновлён: {conf}")
-            except Exception as e:
-                warn(f"Ошибка патча nginx {conf}: {e}")
+        import re as _re
+        #  FIX: патчим не только conf.d/*.conf, но и sites-available/*,
+        # sites-enabled/* — Chimera создаёт конфиги и там. Раньше патчились
+        # только conf.d, и конфиги в sites-available оставались со старым
+        # доменом → nginx падал при загрузке сертификата.
+        _nginx_dirs = [
+            NGINX_CONF_DIR,                                    # /etc/nginx/conf.d
+            Path("/etc/nginx/sites-available"),                # sites-available
+            Path("/etc/nginx/sites-enabled"),                  # sites-enabled
+        ]
+        cert_dir_new = f"/etc/letsencrypt/live/{new_domain}"
+        for _ndir in _nginx_dirs:
+            if not _ndir.exists():
+                continue
+            for conf in _ndir.iterdir():
+                if not conf.is_file():
+                    continue
+                try:
+                    text = conf.read_text()
+                    changed = False
+                    if new_domain != old_domain or force_reapply:
+                        # server_name: заменяем все домены на new_domain
+                        text2 = _re.sub(
+                            r'(server_name\s+)[^;]+;',
+                            rf'\g<1>{new_domain};',
+                            text
+                        )
+                        # ssl_certificate: заменяем пути к сертификатам
+                        text2 = _re.sub(
+                            r'(ssl_certificate\s+).*?/letsencrypt/live/[^/]+/',
+                            rf'\g<1>{cert_dir_new}/',
+                            text2
+                        )
+                        text2 = _re.sub(
+                            r'(ssl_certificate_key\s+).*?/letsencrypt/live/[^/]+/',
+                            rf'\g<1>{cert_dir_new}/',
+                            text2
+                        )
+                        # root /var/www/old_domain → /var/www/new_domain
+                        text2 = _re.sub(
+                            r'(root\s+/var/www/)[^;\s]+',
+                            rf'\g<1>{new_domain}',
+                            text2
+                        )
+                        if text2 != text:
+                            text = text2
+                            changed = True
+                    if new_port != old_port:
+                        text2 = text.replace(f"listen {old_port}", f"listen {new_port}")
+                        text2 = text2.replace(f"listen [::]:{old_port}", f"listen [::]:{new_port}")
+                        if text2 != text:
+                            text = text2
+                            changed = True
+                    if changed:
+                        conf.write_text(text)
+                        info(f"Nginx конфиг обновлён: {conf}")
+                except Exception as e:
+                    warn(f"Ошибка патча nginx {conf}: {e}")
+
+        #  FIX: создаём web-root для нового домена если его нет
+        _new_webroot = Path(f"/var/www/{new_domain}")
+        if not _new_webroot.exists():
+            _new_webroot.mkdir(parents=True, exist_ok=True)
+            # Копируем index.html из старого web-root если есть
+            _old_webroot = Path(f"/var/www/{old_domain}")
+            _old_index = _old_webroot / "index.html"
+            if _old_index.exists():
+                (_new_webroot / "index.html").write_text(_old_index.read_text())
+            info(f"Web-root создан: {_new_webroot}")
 
     # --- UFW: открыть новый порт, закрыть старый ---
     #  миграция на port_registry (с backward compat для legacy comments).
