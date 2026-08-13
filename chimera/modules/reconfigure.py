@@ -62,8 +62,11 @@ def do_reconfigure() -> None:
     CONFIG_DIR    = core.CONFIG_DIR
     NGINX_CONF_DIR = core.NGINX_CONF_DIR
     XRAY_BIN      = core.XRAY_BIN
-    CYAN = core.CYAN
-    NC   = core.NC
+    CYAN   = core.CYAN
+    NC     = core.NC
+    YELLOW = core.YELLOW
+    DIM    = core.DIM
+    GREEN  = core.GREEN
 
     print()
     print()
