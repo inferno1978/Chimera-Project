@@ -111,60 +111,107 @@ def do_reconfigure() -> None:
         else:
             warn("Некорректный порт — оставляем прежний")
 
+    #  FIX: если параметры не изменились — предлагаем принудительную
+    # реконфигурацию. Это нужно когда предыдущая смена домена прошла
+    # криво (SNI не обновился, сертификат не получен, и т.д.) и
+    # пользователь хочет «переприменить» с тем же доменом.
+    force_reapply = False
     if new_domain == old_domain and new_port == old_port:
-        warn("Параметры не изменились — выход")
-        return
+        _box_top("Параметры не изменились")
+        _box_row(f"  {YELLOW}Домен и порт те же, но вы можете запустить{NC}")
+        _box_row(f"  {YELLOW}принудительную реконфигурацию — это обновит{NC}")
+        _box_row(f"  {YELLOW}SNI, сертификат, nginx и клиентские ссылки.{NC}")
+        _box_row()
+        _box_row(f"  {DIM}Полезно если предыдущая смена домена прошла криво.{NC}")
+        _box_bottom()
+        ans = input(f"  {CYAN}Принудительная реконфигурация? [y/N]:{NC} ").strip().lower()
+        if ans != "y":
+            return
+        force_reapply = True
 
-    info(f"Применяем: домен={new_domain}, порт={new_port}")
+    info(f"Применяем: домен={new_domain}, порт={new_port}"
+         f"{' (принудительно)' if force_reapply else ''}")
 
-    # --- SSL-сертификат (для xHTTP TLS и если домен сменился) ---
-    if new_domain != old_domain:
-        if proto == "xhttp":
-            info(f"Получаем SSL-сертификат для {new_domain}...")
-            certbot_bin = (Path("/snap/bin/certbot") if Path("/snap/bin/certbot").exists()
-                           else Path("/usr/bin/certbot"))
-            if not certbot_bin.exists():
-                warn("certbot не найден — сертификат нужно получить вручную")
-            else:
-                _run(["systemctl", "stop", "nginx"], check=False, quiet=True)
-                r = _run([
-                    str(certbot_bin), "certonly", "--standalone",
-                    "-d", new_domain,
-                    "--non-interactive", "--agree-tos",
-                    "-m", f"admin@{new_domain}",
-                    "--keep-until-expiring"
-                ], check=False)
-                if r.returncode != 0:
-                    warn("certbot завершился с ошибкой — домен возможно недоступен")
-                    ans = input("  Продолжить всё равно? [y/N]: ").strip().lower()
-                    if ans != "y":
-                        _run(["systemctl", "start", "nginx"], check=False, quiet=True)
-                        return
-                _run(["systemctl", "start", "nginx"], check=False, quiet=True)
-        #  FIX: Предлагаем удалить старый сертификат Let's Encrypt,
-        # чтобы не оставлять мусор. certbot delete — безопасная операция.
-        old_cert_dir = Path(f"/etc/letsencrypt/live/{old_domain}")
-        if old_cert_dir.exists():
-            info(f"Найден старый сертификат для {old_domain}")
-            ans = input(f"  {CYAN}Удалить старый сертификат {old_domain}? [y/N]:{NC} ").strip().lower()
-            if ans == "y":
-                certbot_bin = (Path("/snap/bin/certbot") if Path("/snap/bin/certbot").exists()
-                               else Path("/usr/bin/certbot"))
-                if certbot_bin.exists():
-                    r = _run([str(certbot_bin), "delete", "--cert-name", old_domain,
-                              "--non-interactive"], check=False, quiet=True)
-                    if r.returncode == 0:
-                        success(f"Старый сертификат {old_domain} удалён")
+    # --- SSL-сертификат (для любого протокола если домен сменился или force) ---
+    if new_domain != old_domain or force_reapply:
+        info(f"Получаем/обновляем SSL-сертификат для {new_domain}...")
+        certbot_bin = (Path("/snap/bin/certbot") if Path("/snap/bin/certbot").exists()
+                       else Path("/usr/bin/certbot"))
+        if not certbot_bin.exists():
+            warn("certbot не найден — сертификат нужно получить вручную")
+        else:
+            _run(["systemctl", "stop", "nginx"], check=False, quiet=True)
+            r = _run([
+                str(certbot_bin), "certonly", "--standalone",
+                "-d", new_domain,
+                "--non-interactive", "--agree-tos",
+                "-m", f"admin@{new_domain}",
+                "--keep-until-expiring"
+            ], check=False)
+            if r.returncode != 0:
+                warn("certbot завершился с ошибкой — домен возможно недоступен")
+                ans = input("  Продолжить всё равно? [y/N]: ").strip().lower()
+                if ans != "y":
+                    _run(["systemctl", "start", "nginx"], check=False, quiet=True)
+                    return
+            _run(["systemctl", "start", "nginx"], check=False, quiet=True)
+
+        #  FIX: Показываем список ВСЕХ сертификатов Let's Encrypt
+        # и предлагаем выбрать какие удалить. Раньше искали только
+        # old_domain, но сертификатов может быть несколько (старые
+        # домены, тестовые, и т.д.).
+        try:
+            r_certs = _run([str(certbot_bin), "certificates"],
+                           capture=True, check=False, quiet=True)
+            if r_certs.returncode == 0 and r_certs.stdout.strip():
+                # Парсим имена сертификатов
+                cert_names = []
+                for line in r_certs.stdout.splitlines():
+                    # Формат: "  Certificate Name: example.com\n    Domains: ..."
+                    if "Certificate Name:" in line:
+                        name = line.split("Certificate Name:")[1].strip()
+                        if name:
+                            cert_names.append(name)
+                if cert_names:
+                    print()
+                    _box_top("Сертификаты Let's Encrypt")
+                    _box_row(f"  {DIM}Найдено сертификатов: {len(cert_names)}{NC}")
+                    _box_sep()
+                    for i, cn in enumerate(cert_names, 1):
+                        # Помечаем текущий домен и старый домен
+                        marker = ""
+                        if cn == new_domain:
+                            marker = f"  {GREEN}← текущий{NC}"
+                        elif cn == old_domain:
+                            marker = f"  {YELLOW}← старый домен{NC}"
+                        _box_row(f"  {DIM}{i}{NC}  {CYAN}{cn}{NC}{marker}")
+                    _box_sep()
+                    _box_row(f"  {DIM}Введите номера через запятую для удаления.{NC}")
+                    _box_row(f"  {DIM}Enter — пропустить. 'old' — удалить все кроме текущего.{NC}")
+                    _box_bottom()
+                    del_input = input(f"  {CYAN}Удалить сертификаты:{NC} ").strip().lower()
+                    to_delete = set()
+                    if del_input == "old":
+                        # Удалить все кроме new_domain
+                        to_delete = {cn for cn in cert_names if cn != new_domain}
+                    elif del_input:
+                        for token in del_input.replace(",", " ").split():
+                            if token.isdigit() and 1 <= int(token) <= len(cert_names):
+                                to_delete.add(cert_names[int(token) - 1])
+                    if to_delete:
+                        for cert_name in to_delete:
+                            r_del = _run([str(certbot_bin), "delete",
+                                          "--cert-name", cert_name,
+                                          "--non-interactive"],
+                                         check=False, quiet=True)
+                            if r_del.returncode == 0:
+                                success(f"Сертификат удалён: {cert_name}")
+                            else:
+                                warn(f"Не удалось удалить {cert_name}")
                     else:
-                        warn(f"Не удалось удалить сертификат через certbot — можно удалить вручную: {old_cert_dir}")
-                else:
-                    # Fallback: ручное удаление директории
-                    import shutil
-                    try:
-                        shutil.rmtree(old_cert_dir)
-                        success(f"Старый сертификат {old_domain} удалён ({old_cert_dir})")
-                    except Exception as e:
-                        warn(f"Не удалось удалить {old_cert_dir}: {e}")
+                        info("Удаление сертификатов пропущено")
+        except Exception as e:
+            warn(f"Не удалось получить список сертификатов: {e}")
 
     # --- Патч Xray config.json ---
     patched_xray = False
@@ -180,7 +227,7 @@ def do_reconfigure() -> None:
                 # Раньше это НЕ делалось — клиент подключался с новым SNI,
                 # а сервер ожидал старый → миллион ошибок в секунду.
                 ss = ib.get("streamSettings", {})
-                if new_domain != old_domain:
+                if new_domain != old_domain or force_reapply:
                     # REALITY: обновляем serverNames (dest не трогаем — это socket path)
                     rs = ss.get("realitySettings", {})
                     if rs:
