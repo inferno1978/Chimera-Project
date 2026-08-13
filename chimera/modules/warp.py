@@ -290,7 +290,38 @@ WG_CONFIG_ENDPOINT_BACKUP = Path("/etc/wireguard/wg-warp.conf.endpoint-backup")
 
 # УТ-12: единый список портов — используется и при массовом сканировании,
 # и при точечном зонде конкретного (текущего/ручного/исторического) Endpoint.
-WARP_SCAN_PORTS: tuple[int, ...] = (2408, 500, 1701, 894, 4500)
+# Полный список UDP-портов, поддерживаемых Cloudflare WARP (WireGuard):
+# https://developers.cloudflare.com/cloudflare-one/connections/connect-devices/warp/warp-modes/
+# Дополнительно оставлены 1701 (L2TP) и 4500 (IPsec NAT-T) — на некоторых
+# хостингах WARP работает через них (неофициально, но встречается).
+WARP_SCAN_PORTS: tuple[int, ...] = (
+    2408,   # основной порт WARP (WireGuard)
+    500,    # IPSec NAT-T (fallback)
+    854,    # WARP alternate
+    859,    # WARP alternate
+    864,    # WARP alternate
+    878,    # WARP alternate
+    880,    # WARP alternate
+    890,    # WARP alternate
+    891,    # WARP alternate
+    894,    # WARP alternate (был в старом списке)
+    903,    # WARP alternate
+    908,    # WARP alternate
+    928,    # WARP alternate
+    934,    # WARP alternate
+    939,    # WARP alternate
+    942,    # WARP alternate
+    943,    # WARP alternate
+    945,    # WARP alternate
+    946,    # WARP alternate
+    955,    # WARP alternate
+    968,    # WARP alternate
+    987,    # WARP alternate
+    988,    # WARP alternate
+    1002,   # WARP alternate
+    1701,   # L2TP (legacy, на некоторых хостингах)
+    4500,   # IPsec NAT-T (legacy, на некоторых хостингах)
+)
 
 # Диапазоны для автоматического поиска (п.2 ТЗ).
 WARP_SCAN_RANGES: tuple[str, ...] = (
@@ -2021,7 +2052,15 @@ def _menu_endpoint_manager() -> None:
             else:
                 probe = _probe_single_endpoint(raw)
                 if not probe["tcp_ok"]:
-                    warn(f"Endpoint {raw} не отвечает (TCP) — отклонён.")
+                    #  FIX: даём пользователю возможность применить endpoint
+                    # даже если TCP-тест не прошёл. TCP-тест проверяет только
+                    # TCP-соединение, а WARP работает по UDP (WireGuard).
+                    # На некоторых хостингах TCP closed, но UDP работает.
+                    warn(f"Endpoint {raw} не отвечает (TCP) — но WARP использует UDP.")
+                    print(f"  {YELLOW}TCP-тест может не пройти даже на рабочих endpoints{NC}")
+                    print(f"  {YELLOW}(WARP работает по UDP, а TCP-зонд проверяет TCP-соединение).{NC}")
+                    if input(f"{YELLOW}Применить принудительно? [y/N]:{NC} ").strip().lower() == "y":
+                        _change_warp_endpoint(raw)
                 else:
                     _change_warp_endpoint(raw)
             input(f"{BLUE}Нажмите Enter...{NC}")
