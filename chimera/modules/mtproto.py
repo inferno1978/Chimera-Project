@@ -664,6 +664,73 @@ def _get_port() -> int:
     m = re.search(r'^port\s*=\s*(\d+)', CONFIG_FILE.read_text(), re.MULTILINE)
     return int(m.group(1)) if m else 8443
 
+
+# ── Port conflict check via port_registry ────────────────────────────────────
+# FIX: Telemt default port 8443 conflicts with rest_api web_panel (also 8443).
+# Before this fix, Telemt silently tried to bind 0.0.0.0:8443 and crashed with
+# "Failed to bind: address already in use" + "No listeners. Exiting".
+# Now we check via port_registry BEFORE accepting the port, and auto-suggest
+# a free alternative from 9443..9453 range.
+
+_TELEMT_DEFAULT_PORT       = 8443
+_TELEMT_ALT_PORT_CANDIDATES = [9443, 9444, 9445, 9446, 9447, 9448, 9449, 9450,
+                                9451, 9452, 9453]
+
+
+def _telemt_check_port_conflict(port: int) -> "tuple[bool, list[str], Optional[int]]":
+    """Проверяет порт через port_registry (registry + system + ufw).
+
+    Returns:
+      (is_free, conflict_descriptions, suggested_alternative)
+      - is_free=True если порт свободен
+      - suggested_alternative: первый свободный порт из _TELEMT_ALT_PORT_CANDIDATES
+        (или None если все заняты)
+    """
+    try:
+        from chimera.modules.port_registry import (
+            port_is_free, SERVICE_TELEMT_MTPROTO,
+        )
+        is_free, conflicts = port_is_free(port, "tcp",
+                                           exclude_service=SERVICE_TELEMT_MTPROTO)
+        if is_free:
+            return True, [], None
+        # Ищем альтернативу.
+        suggested = None
+        for cand in _TELEMT_ALT_PORT_CANDIDATES:
+            cand_free, _ = port_is_free(cand, "tcp",
+                                         exclude_service=SERVICE_TELEMT_MTPROTO)
+            if cand_free:
+                suggested = cand
+                break
+        return False, conflicts, suggested
+    except Exception:
+        # port_registry недоступен — не блокируем установку.
+        # Возвращаем "свободен" — пусть Telemt сам попытается забиндиться.
+        return True, [], None
+
+
+def _telemt_register_port(port: int) -> None:
+    """Регистрирует порт Telemt в port_registry (после успешной установки)."""
+    try:
+        from chimera.modules.port_registry import (
+            port_register, SERVICE_TELEMT_MTPROTO,
+        )
+        port_register(SERVICE_TELEMT_MTPROTO, port, "tcp",
+                      comment=f"Telemt MTProto listener (port {port})")
+    except Exception:
+        pass
+
+
+def _telemt_unregister_port(port: "Optional[int]" = None) -> None:
+    """Снимает регистрацию порта Telemt (при удалении)."""
+    try:
+        from chimera.modules.port_registry import (
+            port_unregister, SERVICE_TELEMT_MTPROTO,
+        )
+        port_unregister(SERVICE_TELEMT_MTPROTO, port=port, proto="tcp")
+    except Exception:
+        pass
+
 def _get_domain() -> str:
     if not CONFIG_FILE.exists(): return ""
     m = re.search(r'^tls_domain\s*=\s*"(.+?)"', CONFIG_FILE.read_text(), re.MULTILINE)
@@ -3231,6 +3298,63 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
                 print(); raise _Cancelled()
         else:
             _warn(f"'{pc}' — недопустимый выбор. Введите A, B или C (или Enter для B).")
+
+    # ── FIX: проверка конфликта порта через port_registry ────────────────
+    # Telemt default 8443 конфликтует с rest_api web_panel (тоже 8443).
+    # Без этой проверки Telemt падал с "Failed to bind: address already in use".
+    # Теперь проверяем, и если занято — предлагаем альтернативу.
+    _port_free, _port_conflicts, _port_suggested = _telemt_check_port_conflict(port)
+    if not _port_free:
+        _warn(f"Порт {port} занят:")
+        for _c in _port_conflicts[:3]:
+            print(f"    {DIM}• {_c}{NC}")
+        if _port_suggested is not None:
+            _box_top("⚠  Конфликт порта")
+            _box_row()
+            _box_row(f"  Порт {YELLOW}{port}{NC} уже занят другим сервисом.")
+            _box_row(f"  Telemt не сможет слушать — упадёт с 'address already in use'.")
+            _box_sep()
+            _box_row(f"  {GREEN}Свободный порт найден: {_port_suggested}{NC}")
+            _box_row(f"  {DIM}Рекомендуется использовать его.{NC}")
+            _box_row()
+            _box_item("1", f"Использовать {_port_suggested}  {DIM}(рекомендуется){NC}")
+            _box_item("2", f"Всё равно попробовать {port}  {DIM}(может не заработать){NC}")
+            _box_item("3", "Указать свой порт вручную")
+            _box_item("4", "Отменить установку")
+            _box_bot()
+            try:
+                _ch = input(f"{CYAN}Выбор [1]: {NC}").strip() or "1"
+            except (KeyboardInterrupt, EOFError):
+                raise _Cancelled()
+            if _ch == "1":
+                port = _port_suggested
+                success(f"  Используем порт {port}")
+            elif _ch == "2":
+                _warn(f"  Продолжаем с портом {port} на свой риск.")
+            elif _ch == "3":
+                try:
+                    _custom = int(input(f"{CYAN}Порт (1024-65535): {NC}"))
+                    if 1024 <= _custom <= 65535:
+                        # Проверяем кастомный порт тоже.
+                        _cf, _cc, _cs = _telemt_check_port_conflict(_custom)
+                        if _cf:
+                            port = _custom
+                            success(f"  Используем порт {port}")
+                        else:
+                            _warn(f"  Порт {_custom} тоже занят. Продолжаем на свой риск.")
+                            port = _custom
+                    else:
+                        _warn(f"  Порт вне диапазона. Используем {_port_suggested}.")
+                        port = _port_suggested
+                except ValueError:
+                    _warn("  Некорректный ввод. Используем suggested.")
+                    port = _port_suggested
+            elif _ch == "4":
+                raise _Cancelled()
+        else:
+            _err(f"Порт {port} занят, и все альтернативы тоже заняты.")
+            _err("Освободите порт или выберите другой (опция C).")
+            raise _Cancelled()
 
     # ── Выбор fake-TLS домена ──────────────────────────────────────────────
     # Возвращает str (donor-домен) ИЛИ OwnSiteConfig (свой домен + nginx
