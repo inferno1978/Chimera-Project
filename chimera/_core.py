@@ -6203,13 +6203,17 @@ def do_port_block_detect() -> None:
             lat_str  = f"{DIM}—{NC}"
         else:
             # Возможные форматы ответа check-host.net:
-            #   [[1, "ip", latency_s]]       — успех (порт открыт)
-            #   [[0, "ip", null]]            — отклонено (порт закрыт/заблокирован)
-            #   [null]                       — таймаут
-            #   [{"error": "..."}]           — ошибка ноды (новый формат, не обрабатывался)
-            #   []                           — пустой список
+            #   Старый формат (до 2026):
+            #     [[1, "ip", latency_s]]       — успех (порт открыт)
+            #     [[0, "ip", null]]            — отклонено (порт закрыт/заблокирован)
+            #     [null]                       — таймаут
+            #   Новый формат (с 2026):
+            #     [{"address": "ip", "time": 0.047}]   — успех
+            #     [{"error": "Connection timed out"}]  — ошибка ноды/таймаут
+            #     []                                    — пустой список
             first = res_list[0] if isinstance(res_list, list) and res_list else None
             if first and isinstance(first, list) and len(first) >= 1:
+                # Старый формат: [[1, "ip", latency_s]] или [[0, "ip", null]]
                 try:
                     code = int(first[0])
                 except (TypeError, ValueError):
@@ -6227,17 +6231,37 @@ def do_port_block_detect() -> None:
                 if is_eu:
                     eu_total += 1
                     if ok: eu_ok += 1
-            elif first and isinstance(first, dict) and "error" in first:
-                # Нода вернула ошибку — показываем её текст.
-                # Это НЕ «нет ответа» и НЕ «заблокирован» — это ошибка самой ноды.
-                err_text = str(first.get("error", "unknown"))[:30]
-                stat_str = f"{YELLOW}ошибка: {err_text}{NC}"
-                lat_str  = f"{DIM}—{NC}"
-                # НЕ засчитываем в ru_total/eu_total — это не результат проверки,
-                # а сбой ноды. Итоговый вердикт не должен учитывать эти ноды.
+            elif first and isinstance(first, dict):
+                # Новый формат: dict вместо list.
+                # Если есть "address" и "time" — успех.
+                # Если есть "error" — ошибка ноды.
+                if "address" in first and "time" in first:
+                    # Успешное подключение.
+                    ok = True
+                    lat_s = first.get("time")
+                    stat_str = f"{GREEN}открыт{NC}"
+                    try:
+                        lat_str = f"{int(float(lat_s)*1000)} мс" if lat_s else f"{DIM}—{NC}"
+                    except (TypeError, ValueError):
+                        lat_str = f"{DIM}—{NC}"
+                    if is_ru:
+                        ru_total += 1
+                        if ok: ru_ok += 1
+                    if is_eu:
+                        eu_total += 1
+                        if ok: eu_ok += 1
+                elif "error" in first:
+                    # Нода вернула ошибку — показываем её текст.
+                    err_text = str(first.get("error", "unknown"))[:30]
+                    stat_str = f"{YELLOW}ошибка: {err_text}{NC}"
+                    lat_str  = f"{DIM}—{NC}"
+                    # НЕ засчитываем в ru_total/eu_total — это сбой ноды.
+                else:
+                    # Неизвестный формат dict — показываем как есть.
+                    stat_str = f"{YELLOW}?{NC}"
+                    lat_str  = f"{DIM}—{NC}"
             else:
-                # таймаут [null] или пустой список — считаем как недоступен,
-                # но показываем именно «нет ответа» (не «заблокирован»).
+                # таймаут [null] или пустой список — недоступен.
                 stat_str = f"{YELLOW}нет ответа{NC}"
                 lat_str  = f"{DIM}—{NC}"
                 if is_ru: ru_total += 1
