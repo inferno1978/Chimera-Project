@@ -359,7 +359,9 @@ def panel_nginx_front_install(
       (success, message)
     """
     core = _core_module()
-    info, warn, err, success = core.info, core.warn, core._err, core.success
+    info, warn, success = core.info, core.warn, core.success
+    # В _core.py нет функции err/_err — используем warn для некритичных ошибок.
+    # (die() exits, не подходит — нам нужно показать сообщение и вернуть False.)
     CYAN, NC, GREEN, RED, YELLOW, DIM = core.CYAN, core.NC, core.GREEN, core.RED, core.YELLOW, core.DIM
 
     if cert_name_slug is None:
@@ -368,7 +370,7 @@ def panel_nginx_front_install(
     # 1. Проверка конфликтов порта через port_registry.
     is_free, conflicts = check_port_via_registry(port, service_tag)
     if not is_free:
-        err(f"Порт {port} занят:")
+        warn(f"Порт {port} занят:")
         for c in conflicts[:3]:
             print(f"    {DIM}• {c}{NC}")
         return False, f"Порт {port} занят"
