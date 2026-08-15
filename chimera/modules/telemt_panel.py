@@ -606,8 +606,20 @@ def _install_sudoers(mp) -> bool:
 def _run_install() -> None:
     mp = _get_mtproto_module()
     if not _telemt_is_installed(mp):
-        _err("Telemt не установлен — панели нечего показывать.")
-        _box_info("Сначала установите Telemt через пункт '1' в его собственном меню.")
+        # Чёткое сообщение с инструкцией — пользователь понимает что делать.
+        _box_top("⚠  TELEMT НЕ УСТАНОВЛЕН")
+        _box_row()
+        _box_warn("Telemt Panel — это веб-интерфейс для управления Telemt.")
+        _box_warn("Без самого Telemt (бинарника) панель бесполезна —")
+        _box_warn("она не сможет подключиться к API на 127.0.0.1:9091.")
+        _box_row()
+        _box_info("Сначала установите Telemt (MTProto):")
+        _box_row(f"  {CYAN}1. Выйдите в главное меню (Q → Q){NC}")
+        _box_row(f"  {CYAN}2. Зайдите в меню Telemt (MTProto){NC}")
+        _box_row(f"  {CYAN}3. Выберите пункт 1 — Установить{NC}")
+        _box_row()
+        _box_info("После установки Telemt — возвращайтесь сюда и ставьте панель.")
+        _box_bot()
         _pause()
         return
 
@@ -1294,19 +1306,44 @@ def _sync_users_to_panel() -> None:
 #  ГЛАВНОЕ МЕНЮ
 # ══════════════════════════════════════════════════════════════════════════════
 def telemt_panel_menu() -> None:
+    # Проверяем статус Telemt (MTProto) — без него панель бесполезна.
+    mp = _get_mtproto_module()
+    telemt_installed = _telemt_is_installed(mp) if mp else False
+    
     while True:
         print()
         _box_top("TELEMT PANEL — веб-интерфейс для Telemt")
         _box_row()
+        # Статус самой панели.
         status = f"{GREEN}установлена, активна{NC}" if (_is_installed() and _is_active()) \
             else f"{YELLOW}установлена, остановлена{NC}" if _is_installed() \
             else f"{DIM}не установлена{NC}"
-        _box_kv("Статус:", status)
+        _box_kv("Панель:", status)
+        # Статус Telemt (MTProto) — критический зависимость.
+        if telemt_installed:
+            try:
+                mp_active = mp.is_active() if hasattr(mp, "is_active") else False
+            except Exception:
+                mp_active = False
+            mp_status = (f"{GREEN}● запущен{NC}" if mp_active else
+                         f"{YELLOW}● остановлен{NC}")
+        else:
+            mp_status = f"{RED}✗ не установлен{NC}"
+        _box_kv("Telemt (MTProto):", mp_status)
         # Прямой доступ.
         direct = _telemt_direct_status()
         if direct.get("enabled"):
             _box_kv("Прямой доступ:", f"{GREEN}https://...:{direct.get('port', DEFAULT_PANEL_TLS_PORT)}{NC}")
-        _box_row(); _box_sep()
+        _box_row()
+        
+        # Предупреждение если Telemt не установлен.
+        if not telemt_installed:
+            _box_warn("Telemt (MTProto) не установлен — панель не сможет работать!")
+            _box_info("Сначала установите Telemt через меню:")
+            _box_info(f"  {CYAN}Главное меню → Telemt (MTProto) → 1. Установить{NC}")
+            _box_row()
+        
+        _box_sep()
         _box_item("1", "🚀  Установить / переустановить")
         _box_item("2", "📋  Статус")
         _box_item("3", "🔄  Перезапустить сервис")
