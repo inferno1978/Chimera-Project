@@ -1670,6 +1670,37 @@ def _check_resources() -> None:
 # =============================================================================
 #  IPV6 PREFLIGHT
 # =============================================================================
+def _verify_ipv6_connectivity_quick() -> bool:
+    """
+    Быстрая проверка (≤5 сек) реальной IPv6-связности.
+    Используется в _load_state_into_globals() чтобы не доверять state.json
+    вслепую — IPv6-адрес мог быть сохранён при установке, а позже маршрут
+    мог пропасть (ISP, reboot, изменение routes).
+
+    Возвращает True только если хотя бы одна из проверок успешна:
+      1. ping6 -c1 -W2 2001:4860:4860::8888 (Google Public DNS)
+      2. curl -6 --connect-timeout 4 https://ipv6.icanhazip.com
+    """
+    # 1) ping6 — быстрый и не требует внешних утилит кроме iputils-ping.
+    if command_exists("ping6"):
+        r = _run(["ping6", "-c1", "-W2", "2001:4860:4860::8888"],
+                 check=False, quiet=True)
+        if r.returncode == 0:
+            return True
+
+    # 2) curl -6 — fallback если ping6 не установлен или заблокирован.
+    try:
+        r = _run(["curl", "-6", "-s", "--connect-timeout", "4",
+                  "https://ipv6.icanhazip.com"],
+                 check=False, quiet=True)
+        if r.returncode == 0 and r.stdout.strip():
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 def _check_ipv6_preflight() -> None:
     global IS_IPV6_AVAILABLE, IPV6_PREFLIGHT, IPV6_ROUTE_OK
 
@@ -8456,7 +8487,9 @@ def _menu_security() -> None:
 # =============================================================================
 def _load_state_into_globals() -> None:
     global PARAM_DOMAIN, PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_PRIVATE_KEY, PARAM_SHORTID
-    global IS_IPV6_AVAILABLE, IPV6_PREFLIGHT, PARAM_USE_DNSCRYPT
+    # FIX: добавлен IPV6_ROUTE_OK — нужен для отметки что IPv6-адрес есть, но
+    # связность отсутствует (см. логику ниже в теле функции).
+    global IS_IPV6_AVAILABLE, IPV6_PREFLIGHT, IPV6_ROUTE_OK, PARAM_USE_DNSCRYPT
     global INSTALL_MODE, PROTOCOL_MODE, XHTTP_MODE, XHTTP_PATH, XHTTP_PERF_PRESET
     global AWG_EXIT_ENABLED, AWG_INSTALLED, AWG_EXIT_HOST, AWG_EXIT_PORT, PARAM_REALITY_DEST
     # FIX: AWG_CLIENT_LISTEN_PORT присваивается ниже (state.get("awg_client_listen_port",
@@ -8518,8 +8551,26 @@ def _load_state_into_globals() -> None:
         PARAM_FINGERPRINT = state.get("fingerprint", PARAM_FINGERPRINT) or "chrome"
         IPV6_PREFLIGHT   = state.get("ipv6",        IPV6_PREFLIGHT)
         INSTALL_MODE     = state.get("install_mode", "A")
+        # FIX: Раньше IS_IPV6_AVAILABLE = True ставилось безусловно, если в state
+        # было поле 'ipv6'. Но IPv6 мог сломаться ПОСЛЕ сохранения state (пропал
+        # маршрут, ISP-проблема, reboot без ipv6-маршрута). Xray тогда генерился
+        # с query_strategy=UseIPv6v4 и все outbound к доменам таймаутились по IPv6.
+        # Теперь — быстрая проверка связности (ping6 к Google DNS, fallback curl -6).
         if IPV6_PREFLIGHT:
-            IS_IPV6_AVAILABLE = True
+            if _verify_ipv6_connectivity_quick():
+                IS_IPV6_AVAILABLE = True
+            else:
+                # IPv6-адрес в state есть, но связности НЕТ. Не включаем
+                # query_strategy=UseIPv6v4 — это ломает Xray на доменных outbound.
+                IS_IPV6_AVAILABLE = False
+                # Сохраняем IPV6_PREFLIGHT для отображения в меню,
+                # но помечаем что маршрут не работает.
+                IPV6_ROUTE_OK = False
+                warn(f"IPv6-адрес в state ({IPV6_PREFLIGHT}), но связность "
+                     f"отсутствует — IPv6 отключён, Xray будет использовать "
+                     f"только IPv4 (query_strategy=UseIPv4).")
+        else:
+            IS_IPV6_AVAILABLE = False
         PARAM_USE_DNSCRYPT = state.get("use_dnscrypt", False)
         PROTOCOL_MODE = state.get("protocol_mode", "reality")
         XTLS_FLOW     = state.get("xtls_flow",      "xtls-rprx-vision")

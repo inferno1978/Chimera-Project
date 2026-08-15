@@ -826,12 +826,19 @@ def _diag_check_routing_live(cfg: dict, counters: list) -> None:
     _box_warn = core._box_warn
     _box_info = core._box_info
     _box_dim  = core._box_dim
+    _wiz_hint = getattr(core, "_wiz_hint", None) or _box_dim
+    YELLOW, NC = getattr(core, "YELLOW", "\033[33m"), getattr(core, "NC", "\033[0m")
     _diag_head("5. Тест маршрутизации (TCP ping exit-нод)")
     if not cfg:
         _box_warn("Конфиг не загружен, пропуск")
         return
     _box_info("Проверяем доступность exit-нод напрямую (TCP ping, 10 сек/нода)...")
     outbounds = cfg.get("outbounds", [])
+
+    # FIX: при IPv4-fallback-факапе (state.json хранит IPv6, но маршрут отпал)
+    # добавляем подсказку о том, что query_strategy мог быть UseIPv6v4.
+    stale_ipv6_hint_shown = False
+
     for ob in outbounds:
         tag = ob.get("tag", "")
         if not tag.startswith("chain-exit"):
@@ -856,6 +863,33 @@ def _diag_check_routing_live(cfg: dict, counters: list) -> None:
                     _box_dim("  ↳ На этом сервере нет публичного IPv6, а домен ноды "
                              "резолвится только в AAAA. Клиент может подключаться, "
                              "если у него есть IPv6 или используется другой резолвер.")
+
+                # FIX: новая подсказка при IPv4-failure на IPv4-literal address.
+                # Если в config address=IPv4-literal — диагностика тестирует только
+                # IPv4 (no IPv6 fallback). Но Xray с query_strategy=UseIPv6v4 МОГ
+                # бы попробовать IPv6 если бы address был доменом. Подсказываем.
+                import socket as _sock
+                try:
+                    _sock.inet_aton(host)  # IPv4 literal?
+                    is_ipv4_literal = True
+                except OSError:
+                    is_ipv4_literal = False
+
+                if is_ipv4_literal and not stale_ipv6_hint_shown:
+                    # Проверяем, не stale ли IPv6 flag (адрес есть, связности нет).
+                    ipv6_preflight = getattr(core, "IPV6_PREFLIGHT", "")
+                    is_ipv6_avail  = getattr(core, "IS_IPV6_AVAILABLE", False)
+                    if ipv6_preflight and not is_ipv6_avail:
+                        _wiz_hint(f"{YELLOW}IPv6-адрес на сервере есть ({ipv6_preflight}), "
+                                  f"но связность отсутствует — Xray использует только IPv4. "
+                                  f"Если exit-нода доступна по IPv6, попробуйте указать "
+                                  f"домен вместо IP в chain_nodes.{NC}")
+                    elif not ipv6_preflight:
+                        # IPv6 вообще нет — подсказка про stale IP.
+                        _box_dim(f"  ↳ Address {host} — IPv4-literal, пинг упал. "
+                                 f"Возможно IP устарел. Проверьте актуальный адрес "
+                                 f"exit-ноды и обновите chain_nodes (меню 5).")
+                    stale_ipv6_hint_shown = True
 
 
 def _diag_check_access_log(counters: list) -> dict:
