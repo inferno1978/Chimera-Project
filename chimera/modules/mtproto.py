@@ -1577,12 +1577,25 @@ def _ipt_remove_all_return_rules(ipt: str, dport: str) -> int:
 def _ipt_ensure_single_return_rule(ipt: str, dport: str) -> int:
     """Гарантирует, что в таблице ipt есть РОВНО ОДНО RETURN-правило
     для dport. Сначала удаляет все существующие (через
-    _ipt_remove_all_return_rules), потом добавляет ровно одно через -I.
+    _ipt_remove_all_return_rules), потом добавляет ровно одно через -A
+    (APPEND в конец, а не INSERT в начало).
 
     Возвращает количество удалённых дублей (для логирования).
+
+    ВАЖНО: RETURN-правила для ME-портов (:443, :8888, :80, :8443) должны
+    стоять ПОСЛЕ REDIRECT-правил для TG-подсетей. Иначе RETURN -p tcp
+    --dport 443 (слишком широкое) перехватывает трафик Telemt →
+    149.154.167.51:443 (TG DC), и Telemt идёт напрямую вместо
+    REDIRECT на dokodemo :10811. Симптом: клиенты не подключаются,
+    в логах 'Connection timeout to 149.154.167.51:443'.
+
+    Раньше использовался -I (INSERT в начало) — RETURN стоял выше
+    REDIRECT и блокировал его. Теперь -A (APPEND в конец) — REDIRECT
+    для конкретных TG-подсетей срабатывает первым, RETURN для
+    'любой порт 443' идёт fallback'ом только для не-TG трафика.
     """
     removed = _ipt_remove_all_return_rules(ipt, dport)
-    _run([ipt, "-t", "nat", "-I", "OUTPUT",
+    _run([ipt, "-t", "nat", "-A", "OUTPUT",
           "-p", "tcp", "--dport", dport, "-j", "RETURN"],
          capture=True, check=False)
     return removed
