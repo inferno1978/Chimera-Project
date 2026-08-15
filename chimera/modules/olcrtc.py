@@ -1069,6 +1069,261 @@ def _ensure_tls_and_unit(public_ip: str) -> None:
           check=False, quiet=True, timeout=20)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  LET'S ENCRYPT TLS SUPPORT (domain access)
+# ══════════════════════════════════════════════════════════════════════════════
+# olcrtc-manager берёт TLS cert/key из env-переменных OLCRTC_MANAGER_TLS_CERT
+# и OLCRTC_MANAGER_TLS_KEY (см. _generate_panel_env). Это значит — можно
+# подсунуть Let's Encrypt сертификат просто сменив пути в panel.env.
+# 
+# Раньше поддерживался только self-signed (по IP). Теперь добавлена опция
+# Let's Encrypt — для доступа по домену с доверенным сертификатом.
+# 
+# Архитектура:
+#   1. obtain_ssl_cert(domain) → /etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem
+#   2. chgrp olcrtc-manager /etc/letsencrypt/live/<domain>/* — чтобы бинарник мог читать
+#   3. panel.env: OLCRTC_MANAGER_TLS_CERT='/etc/letsencrypt/live/<domain>/fullchain.pem'
+#                 OLCRTC_MANAGER_TLS_KEY='/etc/letsencrypt/live/<domain>/privkey.pem'
+#   4. systemctl restart olcrtc-manager
+
+
+def _find_le_cert(domain: str) -> tuple[Path, Path] | None:
+    """Ищет Let's Encrypt сертификат для домена.
+    
+    Returns:
+      (cert_path, key_path) или None если не найден.
+    """
+    cert = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem")
+    key  = Path(f"/etc/letsencrypt/live/{domain}/privkey.pem")
+    if cert.exists() and key.exists():
+        return (cert, key)
+    return None
+
+
+def _grant_cert_read_access(cert_path: Path, group: str = "olcrtc-manager") -> bool:
+    """Даёт группе olcrtc-manager право читать сертификат Let's Encrypt.
+    
+    По умолчанию /etc/letsencrypt/live/ доступен только root. olcrtc-manager
+    бинарник запускается от пользователя olcrtc-manager (если есть) или root.
+    
+    Returns:
+      True если права настроены или не нужны (запуск от root).
+    """
+    # Если пользователь olcrtc-manager не существует — менеджер запускается
+    # от root (через systemd unit), права не нужны.
+    r = _run(["getent", "passwd", group], capture=True, check=False, quiet=True)
+    if r.returncode != 0:
+        return True  # запуск от root, ок
+    
+    # chgrp -R olcrtc-manager /etc/letsencrypt/live/<domain>/
+    domain_dir = cert_path.parent
+    parent_dir = domain_dir.parent
+    
+    # Даём группе olcrtc-manager traverse право на /etc/letsencrypt/live/
+    _run(["chmod", "o+x", str(parent_dir)], check=False, quiet=True)
+    # chgrp на директорию домена + рекурсивно на файлы
+    _run(["chgrp", "-R", group, str(domain_dir)], check=False, quiet=True)
+    _run(["chmod", "-R", "g+rX", str(domain_dir)], check=False, quiet=True)
+    
+    return True
+
+
+def _apply_letsencrypt_tls(domain: str) -> bool:
+    """Переключает olcrtc-manager на Let's Encrypt сертификат для домена.
+    
+    1. Получает сертификат через obtain_ssl_cert(domain) если его нет.
+    2. Даёт группе olcrtc-manager право читать сертификат.
+    3. Обновляет panel.env: OLCRTC_MANAGER_TLS_CERT/KEY → пути к LE сертификату.
+    4. Перезапускает olcrtc-manager.
+    
+    Returns:
+      True при успехе.
+    """
+    if not MGR_PANEL_ENV.exists():
+        _error("panel.env не найден — сначала установите olcrtc-manager.")
+        return False
+    
+    # 1. Получаем сертификат.
+    cert_key = _find_le_cert(domain)
+    if cert_key is None:
+        _info(f"SSL-сертификат для {domain} не найден, получаем через certbot...")
+        try:
+            from chimera.modules.ssl_certbot import obtain_ssl_cert
+            obtain_ssl_cert(domain)
+        except Exception as e:
+            _error(f"Не удалось получить SSL-сертификат: {e}")
+            return False
+        cert_key = _find_le_cert(domain)
+        if cert_key is None:
+            _error(f"SSL-сертификат для {domain} так и не получен")
+            return False
+    
+    cert_path, key_path = cert_key
+    _info(f"Используем Let's Encrypt сертификат: {cert_path}")
+    
+    # 2. Даём olcrtc-manager права читать.
+    _grant_cert_read_access(cert_path)
+    
+    # 3. Обновляем panel.env — заменяем TLS_CERT и TLS_KEY пути.
+    env_text = MGR_PANEL_ENV.read_text()
+    new_lines = []
+    for line in env_text.splitlines():
+        if line.startswith("OLCRTC_MANAGER_TLS_CERT="):
+            new_lines.append(f"OLCRTC_MANAGER_TLS_CERT='{cert_path}'")
+        elif line.startswith("OLCRTC_MANAGER_TLS_KEY="):
+            new_lines.append(f"OLCRTC_MANAGER_TLS_KEY='{key_path}'")
+        else:
+            new_lines.append(line)
+    MGR_PANEL_ENV.write_text("\n".join(new_lines) + "\n")
+    MGR_PANEL_ENV.chmod(0o600)
+    _info("panel.env обновлён — пути к Let's Encrypt сертификату прописаны")
+    
+    # 4. Перезапуск.
+    _run(["systemctl", "restart", "olcrtc-manager"],
+         check=False, quiet=True, timeout=20)
+    _success(f"olcrtc-manager переключён на Let's Encrypt сертификат для домена {domain}")
+    return True
+
+
+def _apply_self_signed_tls(public_ip: str) -> bool:
+    """Переключает olcrtc-manager обратно на self-signed сертификат.
+    
+    1. Генерирует новый self-signed сертификат (если его нет).
+    2. Обновляет panel.env: TLS_CERT/KEY → пути к self-signed.
+    3. Перезапускает olcrtc-manager.
+    
+    Returns:
+      True при успехе.
+    """
+    if not MGR_PANEL_ENV.exists():
+        _error("panel.env не найден — сначала установите olcrtc-manager.")
+        return False
+    
+    # 1. Генерируем self-signed если его нет.
+    if not (MGR_TLS_CRT.exists() and MGR_TLS_KEY.exists()):
+        if not _generate_tls_cert(public_ip):
+            _error("Не удалось сгенерировать self-signed TLS")
+            return False
+    
+    # 2. Обновляем panel.env.
+    env_text = MGR_PANEL_ENV.read_text()
+    new_lines = []
+    for line in env_text.splitlines():
+        if line.startswith("OLCRTC_MANAGER_TLS_CERT="):
+            new_lines.append(f"OLCRTC_MANAGER_TLS_CERT='{MGR_TLS_CRT}'")
+        elif line.startswith("OLCRTC_MANAGER_TLS_KEY="):
+            new_lines.append(f"OLCRTC_MANAGER_TLS_KEY='{MGR_TLS_KEY}'")
+        else:
+            new_lines.append(line)
+    MGR_PANEL_ENV.write_text("\n".join(new_lines) + "\n")
+    MGR_PANEL_ENV.chmod(0o600)
+    _info("panel.env обновлён — пути к self-signed сертификату прописаны")
+    
+    # 3. Перезапуск.
+    _run(["systemctl", "restart", "olcrtc-manager"],
+         check=False, quiet=True, timeout=20)
+    _success("olcrtc-manager переключён на self-signed сертификат (доступ по IP)")
+    return True
+
+
+def _tls_mode_status() -> dict:
+    """Возвращает текущий режим TLS для olcrtc-manager.
+    
+    Returns:
+      dict с ключами:
+        mode: 'letsencrypt' | 'self_signed' | 'unknown'
+        domain: str | None (для letsencrypt)
+        cert_path: str
+        key_path: str
+    """
+    if not MGR_PANEL_ENV.exists():
+        return {"mode": "unknown"}
+    
+    cert_path = ""
+    key_path  = ""
+    for line in MGR_PANEL_ENV.read_text().splitlines():
+        if line.startswith("OLCRTC_MANAGER_TLS_CERT="):
+            cert_path = line.split("=", 1)[1].strip().strip("'\"")
+        elif line.startswith("OLCRTC_MANAGER_TLS_KEY="):
+            key_path = line.split("=", 1)[1].strip().strip("'\"")
+    
+    if "/etc/letsencrypt/live/" in cert_path:
+        # Let's Encrypt режим — извлекаем домен.
+        parts = cert_path.split("/")
+        if len(parts) >= 5 and parts[3] == "live":
+            domain = parts[4]
+            return {"mode": "letsencrypt", "domain": domain,
+                    "cert_path": cert_path, "key_path": key_path}
+        return {"mode": "letsencrypt", "domain": None,
+                "cert_path": cert_path, "key_path": key_path}
+    
+    if cert_path == str(MGR_TLS_CRT) and key_path == str(MGR_TLS_KEY):
+        return {"mode": "self_signed", "domain": None,
+                "cert_path": cert_path, "key_path": key_path}
+    
+    return {"mode": "unknown", "cert_path": cert_path, "key_path": key_path}
+
+
+def _toggle_tls_mode() -> None:
+    """Меню переключения режима TLS для olcrtc-manager.
+    
+    Показывает текущий режим и позволяет переключиться:
+      - Let's Encrypt (домен) — доверенный сертификат
+      - Self-signed (IP) — браузер предупредит
+    """
+    if not _manager_installed():
+        _warn("olcrtc-manager не установлен.")
+        return
+    
+    status = _tls_mode_status()
+    mode = status.get("mode", "unknown")
+    domain = status.get("domain")
+    
+    if mode == "letsencrypt":
+        mode_label = "Let's Encrypt"
+    elif mode == "self_signed":
+        mode_label = "Self-signed"
+    else:
+        mode_label = "неизвестно"
+    
+    if domain:
+        _info(f"Текущий режим TLS: {mode_label} ({domain})")
+    else:
+        _info(f"Текущий режим TLS: {mode_label}")
+    
+    print()
+    print(f"  {CYAN}1{NC}. Let's Encrypt (домен) — доверенный сертификат")
+    print(f"  {CYAN}2{NC}. Self-signed (по IP) — браузер предупредит")
+    try:
+        ch = input(f"{CYAN}Выбор [Enter=отмена]: {NC}").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    
+    if ch == "1":
+        # Спрашиваем домен.
+        try:
+            from chimera._core import PARAM_DOMAIN
+        except Exception:
+            PARAM_DOMAIN = ""
+        default_domain = PARAM_DOMAIN or ""
+        prompt = f"{CYAN}Домен"
+        if default_domain:
+            prompt += f" (Enter={default_domain})"
+        prompt += f": {NC}"
+        try:
+            domain = input(prompt).strip() or default_domain
+        except (EOFError, KeyboardInterrupt):
+            return
+        if not domain:
+            _warn("Домен не указан — отмена.")
+            return
+        _apply_letsencrypt_tls(domain)
+    elif ch == "2":
+        public_ip = _get_public_ip() or "127.0.0.1"
+        _apply_self_signed_tls(public_ip)
+    # else: отмена
+
+
 def _configure_manager(locations: list) -> bool:
     """Настраивает manager panel со списком locations.
     
@@ -1693,6 +1948,18 @@ def do_olcrtc_menu() -> None:
                 _box_item("7", f"{GREEN}▶️  Запустить сервис{NC}")
         if installed:
             _box_item("8", f"{RED}🗑️  Удалить полностью{NC}")
+        if installed:
+            # Показать текущий TLS режим + пункт переключения.
+            _tls_st = _tls_mode_status()
+            _tls_mode = _tls_st.get("mode", "unknown")
+            _tls_domain = _tls_st.get("domain")
+            if _tls_mode == "letsencrypt":
+                _tls_label = f"Let's Encrypt ({_tls_domain or '?'})"
+            elif _tls_mode == "self_signed":
+                _tls_label = "Self-signed (по IP)"
+            else:
+                _tls_label = "неизвестно"
+            _box_item("9", f"🔒  Режим TLS: {CYAN}{_tls_label}{NC}  {DIM}(переключить){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -1794,6 +2061,11 @@ def do_olcrtc_menu() -> None:
                 _uninstall_manager()
             else:
                 _info("Отменено")
+            input(f"{BLUE}  Нажмите Enter...{NC}")
+
+        elif ch == "9" and installed:
+            print()
+            _toggle_tls_mode()
             input(f"{BLUE}  Нажмите Enter...{NC}")
 
         else:
