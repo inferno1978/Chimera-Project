@@ -1273,6 +1273,35 @@ def _prompt_one_node_from_link(index: int) -> dict | None:
         _box_row(f"  SNI:      {parsed['sni']}")
         _box_row(f"  FP:       {parsed['fp']}")
 
+        # Валидация host — проверка на self-reference и reverse-DNS.
+        is_valid_host, host_msg, resolved_ip = _validate_chain_node_host(parsed["host"])
+        if not is_valid_host:
+            warn(f"  ⚠ {host_msg}")
+            _box_sep()
+            _box_item("F", f"Изменить host вручную")
+            _box_item("R", f"Ввести ссылку заново")
+            _box_item_exit("0", f"Отмена")
+            _box_bottom()
+            while True:
+                try:
+                    fix = input("  Выбор [F/R/0]: ").strip().lower()
+                except KeyboardInterrupt:
+                    print()
+                    raise
+                if fix == "0":
+                    return None
+                elif fix == "r":
+                    break  # повтор внешнего цикла
+                elif fix in ("f", ""):
+                    parsed["host"] = ""  # заставим _fix_node_fields спросить host
+                    return _fix_node_fields(index, parsed)
+                warn("Введите F, R или 0")
+            continue  # повтор ввода ссылки
+        else:
+            # Показываем куда резолвится host.
+            if resolved_ip and resolved_ip != parsed["host"]:
+                _box_row(f"  {DIM}Резолвится в: {resolved_ip}{NC}")
+
         # Проверка обязательных полей
         warnings = []
         if parsed['proto'] == 'reality':
@@ -1445,6 +1474,15 @@ def _prompt_one_node_manual(index: int) -> dict | None:
         if v == "0":
             return None
         if v:
+            # Валидация host перед сохранением.
+            is_valid, msg, resolved_ip = _validate_chain_node_host(v)
+            if not is_valid:
+                warn(f"   {msg}")
+                # Не выходим из цикла — даём пользователю шанс ввести заново.
+                continue
+            # Если валидация прошла — показываем что резолвится.
+            if resolved_ip and resolved_ip != v:
+                info(f"   {msg}")
             host = v
             break
         warn("   Не может быть пустым")
@@ -2869,6 +2907,139 @@ SNI:        {PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) els
 # =============================================================================
 #  СКОРОСТНЫЕ ТЕСТЫ — latency/geo для exit-нод
 # =============================================================================
+def _validate_chain_node_host(host: str) -> "tuple[bool, str, Optional[str]]":
+    """Валидирует host exit-ноды перед сохранением в CHAIN_NODES.
+
+    Проверки:
+      1. Не пустой.
+      2. Если это домен (не IP) — проверяет что он резолвится.
+      3. Если домен резолвится в IP текущего сервера (self-reference) — ошибка.
+      4. Если домен выглядит как reverse-DNS hostname текущего сервера
+         (содержит часть IP-адреса сервера в имени) — предупреждение.
+
+    Returns:
+      (is_valid, message, resolved_ip)
+      - is_valid=True если host прошёл валидацию (или это IP-литерал)
+      - message: описание результата для пользователя
+      - resolved_ip: IP-адрес в который резолвится host (или сам host если это IP)
+    """
+    import socket
+    import ipaddress
+
+    if not host:
+        return False, "Host не указан", None
+
+    # 1. Проверяем — это уже IP-адрес?
+    try:
+        ipaddress.ip_address(host)
+        # Это валидный IP-литерал — пропускаем дальнейшие проверки.
+        return True, f"IP-адрес: {host}", host
+    except ValueError:
+        pass
+
+    # 2. Это домен — проверяем что резолвится.
+    try:
+        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        return False, f"Домен '{host}' не резолвится: {e}", None
+
+    if not infos:
+        return False, f"Домен '{host}' не отдал IP-адресов", None
+
+    # Берём первый IPv4.
+    resolved_ip = None
+    for family, _, _, _, sockaddr in infos:
+        if family == socket.AF_INET:
+            resolved_ip = sockaddr[0]
+            break
+
+    if not resolved_ip:
+        return False, f"Домен '{host}' не имеет IPv4-адреса", None
+
+    # 3. Проверка на self-reference — не резолвится ли в IP текущего сервера.
+    try:
+        core = _core_module()
+        # Публичный IP текущего сервера (через ip addr или state).
+        local_ip = None
+        try:
+            r = core._run(["ip", "-4", "addr", "show", "scope", "global"],
+                          capture=True, check=False)
+            import re as _re
+            addrs = _re.findall(r'inet\s+(\d+\.\d+\.\d+\.\d+)', r.stdout)
+            # Берём первый публичный IP.
+            for a in addrs:
+                try:
+                    ip_obj = ipaddress.ip_address(a)
+                    if not ip_obj.is_private and not ip_obj.is_loopback:
+                        local_ip = a
+                        break
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+
+        # Внешний IP через echo-сервис (для NAT-серверов).
+        external_ip = None
+        try:
+            r = core._run(["curl", "-s", "--max-time", "3", "https://api.ipify.org"],
+                          capture=True, check=False, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                external_ip = r.stdout.strip()
+        except Exception:
+            pass
+
+        # Если домен резолвится в IP текущего сервера — это явно ошибка.
+        # Пользователь прописал домен текущего сервера как exit-ноду.
+        if local_ip and resolved_ip == local_ip:
+            return False, (
+                f"Домен '{host}' резолвится в {resolved_ip} — это IP текущего сервера! "
+                f"Exit-нода не может быть самим собой. Укажите IP зарубежного VPS."
+            ), resolved_ip
+
+        if external_ip and resolved_ip == external_ip:
+            return False, (
+                f"Домен '{host}' резолвится в {resolved_ip} — это публичный IP текущего сервера (NAT)! "
+                f"Exit-нода не может быть самим собой. Укажите IP зарубежного VPS."
+            ), resolved_ip
+
+        # 4. Проверка на reverse-DNS — если домен содержит IP-сегменты
+        # текущего сервера (например '195.208.3.168.cdn-one.org' или
+        # '2.27.36.231.cdn-one.org' где RU-сервер имеет hostname
+        # '195-208-3-168.cdn-one.org') — это подозрительно.
+        server_hostname = ""
+        try:
+            r = core._run(["hostname", "-f"], capture=True, check=False)
+            server_hostname = r.stdout.strip()
+        except Exception:
+            pass
+
+        if server_hostname and external_ip:
+            # Извлекаем доменную часть из hostname (например 'cdn-one.org').
+            hostname_parts = server_hostname.split(".", 1)
+            if len(hostname_parts) == 2:
+                hostname_domain = hostname_parts[1]
+                # Если домен exit-ноды заканчивается на ту же доменную часть
+                # что и hostname текущего сервера — это reverse-DNS от
+                # текущего сервера или его провайдера.
+                if host.endswith("." + hostname_domain):
+                    # Дополнительная проверка: содержит ли домен IP-сегменты?
+                    # Например '2.27.36.231.cdn-one.org' — reverse-DNS.
+                    import re as _re
+                    if _re.search(r'\d+\.\d+\.\d+\.\d+', host):
+                        return False, (
+                            f"Домен '{host}' похож на reverse-DNS hostname (домен "
+                            f"'{hostname_domain}' совпадает с hostname сервера). "
+                            f"Резолвится в {resolved_ip} — это не похоже на exit-ноду. "
+                            f"Укажите IP зарубежного VPS напрямую (например 31.77.138.58)."
+                        ), resolved_ip
+
+    except Exception:
+        # Ошибка валидации не должна блокировать сохранение — возвращаем success.
+        pass
+
+    return True, f"Домен '{host}' резолвится в {resolved_ip}", resolved_ip
+
+
 def _resolve_host_fresh(host: str, timeout: int = 3) -> Optional[str]:
     """
     Резолв hostname → IPv4 через публичные DoH-резолверы (Cloudflare 1.1.1.1
