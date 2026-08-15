@@ -2,6 +2,176 @@
 
 ---
 
+## FEAT(panels): domain support (Let's Encrypt) для всех панелей + port_registry — 15 августа 2026
+
+**Раньше все панели Chimera поддерживали только self-signed TLS (по IP).
+Браузер ругался на сертификат, приходилось вручную принимать. Теперь
+все 4 панели поддерживают Let's Encrypt — для доступа по домену с
+доверенным сертификатом.**
+
+### Проблема
+
+1. **Telemt Panel** — поддерживал только self-signed TLS через
+   `_telemt_setup_direct_access()`. Не было опции домена.
+2. **User Portal** (rest_api) — уже поддерживал Let's Encrypt через
+   `nginx_front_portal.py`, но логика была дублирована в двух местах.
+3. **olcRTC Manager** — только self-signed (Go-бинарник сам терминирует
+   TLS, берёт cert/key из env-переменных `OLCRTC_MANAGER_TLS_CERT/KEY`).
+4. **Admin Panel** — встроена в rest_api, не требует отдельной настройки.
+
+Кроме того, порт-регистрации не было единой точки — каждая панель
+регистрировала порт по-своему, без общей логики conflict-check.
+
+### Решение — единый helper `panel_nginx_front.py`
+
+Создан новый модуль `chimera/modules/panel_nginx_front.py` (552 строки) —
+единая точка логики для всех панелей, которым нужен nginx front с TLS.
+
+**Поддерживает 2 режима TLS:**
+- **Let's Encrypt** — для домена (PARAM_DOMAIN или свой)
+- **Self-signed** — для доступа по IP
+
+**API:**
+- `panel_nginx_front_install(service_tag, port, backend_port, site_name, state_file, title, use_self_signed, domain, websocket_origin_rewrite, ...)` — установка
+- `panel_nginx_front_remove(service_tag, site_name, state_file, title)` — удаление
+- `panel_nginx_front_status(state_file)` — статус
+- `ask_tls_mode(panel_name)` — UI: Let's Encrypt vs self-signed
+- `ask_domain(default)` — UI: домен
+- `check_port_via_registry(port, service_tag)` — проверка через port_registry
+
+**Все порты регистрируются через port_registry** (14 references) —
+единый conflict-check для всех панелей: registry + system + ufw.
+
+### Refactoring
+
+**`telemt_panel.py`:**
+- `_telemt_setup_direct_access` теперь принимает `use_self_signed` и `domain`
+- Делегирует в `panel_nginx_front_install` с `websocket_origin_rewrite=True`
+  (Telemt Panel требует подмены Host/Origin/Referer для CheckOrigin)
+- Меню установки и toggle спрашивают режим TLS
+- Удалено 7246 символов дублированной логики, заменено 2266 символами wrapper'ов
+
+**`nginx_front_portal.py`** (User Portal):
+- `nginx_front_install` и `nginx_front_remove` стали тонкими обёртками
+- Сохранена обратная совместимость с существующим state.json форматом
+
+### olcRTC Manager — Let's Encrypt через panel.env
+
+olcRTC manager — отдельный Go-бинарник, который сам терминирует TLS.
+Он берёт cert/key из env-переменных `OLCRTC_MANAGER_TLS_CERT/KEY` в
+`/etc/olcrtc-manager/panel.env`. Решение — просто менять пути в panel.env.
+
+**Новые функции в `olcrtc.py`:**
+- `_find_le_cert(domain)` — ищет `/etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem`
+- `_grant_cert_read_access(cert_path)` — даёт группе `olcrtc-manager` права читать
+  сертификат (по умолчанию `/etc/letsencrypt/live/` доступен только root)
+- `_apply_letsencrypt_tls(domain)` — получает сертификат через certbot,
+  обновляет panel.env, перезапускает сервис
+- `_apply_self_signed_tls(public_ip)` — возвращает self-signed режим
+- `_tls_mode_status()` — определяет текущий режим (letsencrypt/self_signed/unknown)
+- `_toggle_tls_mode()` — UI-меню переключения
+
+**В меню olcRTC добавлен пункт [9]** — переключение режима TLS. Показывает
+текущий режим (Let's Encrypt с доменом / Self-signed по IP) и позволяет
+переключиться одним нажатием.
+
+### Тесты
+
+- 15 behavioral tests для `panel_nginx_front` (port free/busy/error,
+  find_ssl_cert, vhost generation with/without ws rewrite, install LE/SS,
+  remove, status) — все прошли
+- 11 behavioral tests для olcRTC Let's Encrypt (find_le_cert, status
+  detection, apply LE/self-signed, grant_cert_access) — все прошли
+- AST validation: обе панели корректно делегируют в helper
+
+### Совместимость
+
+- Старые state.json файлы продолжают работать (поле `self_signed` опциональное)
+- Старые вызовы `nginx_front_install(port=, use_self_signed=)` и
+  `_telemt_setup_direct_access(port=)` работают как раньше
+- Migration не требуется — при первом вызове новой версии просто появится
+  опция выбора режима TLS
+
+### Коммиты
+
+- `8c6130a` — FEAT(panels): domain support via unified panel_nginx_front helper
+- `a6fa4ae` — FIX(mtproto): NameError 'success' is not defined в port conflict menu
+
+---
+
+## FIX(ipv6): stale IS_IPV6_AVAILABLE ломал cascade RU→exit — 14 августа 2026
+
+**Alexey Bezkrovny сообщил: с RU-сервера exit-ноды не пингуются, хотя с
+домашнего IP работают. Химера пашет, но cascade сломан.**
+
+### Причина
+
+В `chimera/_core.py`, функция `_load_state_into_globals()` строка 8519-8520
+безусловно ставила `IS_IPV6_AVAILABLE = True`, если в `state.json` было
+поле `ipv6`. Но IPv6 мог сломаться ПОСЛЕ сохранения state (пропал маршрут,
+ISP-проблема, reboot без ipv6-маршрута). В итоге:
+
+- Xray генерился с `query_strategy=UseIPv6v4`
+- Все outbound к доменам таймаутились по IPv6 (без fallback на IPv4)
+- Cascade RU-entry → exit-nodes ломался молча
+- Диагностика показывала «НЕДОСТУПНА (IPv4 ...: timeout)»
+
+### Фикс
+
+**Новая функция `_verify_ipv6_connectivity_quick()`** — быстрая проверка
+(≤5 сек) реальной IPv6-связности через:
+1. `ping6 -c1 -W2 2001:4860:4860::8888` (Google Public DNS)
+2. Fallback: `curl -6 --connect-timeout 4 https://ipv6.icanhazip.com`
+
+**`_load_state_into_globals()` теперь вызывает эту проверку** перед тем,
+как выставить `IS_IPV6_AVAILABLE=True`. Если связности нет — IPv6
+отключается, выводится warning, Xray использует только IPv4
+(`query_strategy=UseIPv4`).
+
+**В `_diag_check_routing_live()`** добавлена подсказка: при IPv4-failure
+на IPv4-literal address, если `IPV6_PREFLIGHT` есть но `IS_IPV6_AVAILABLE=False`
+— советует указать домен вместо IP в `chain_nodes`.
+
+### Коммит
+
+- `9ac6289` — FIX(ipv6): verify connectivity before enabling IS_IPV6_AVAILABLE from state
+
+---
+
+## FIX(telemt): port conflict check — Telemt default 8443 конфликтует с rest_api — 15 августа 2026
+
+**Andycar сообщил: Telemt service запускается, но падает в restart-loop
+с "Failed to bind: address already in use addr=0.0.0.0:8443 pid=731
+process=python3" + "No listeners. Exiting".**
+
+### Причина
+
+Telemt default port = 8443. Chimera rest_api User Portal тоже слушает
+127.0.0.1:8443 (`DEFAULT_WEB_PORT = 8443`). При установке Telemt на
+сервере, где уже стоит User Portal — конфликт.
+
+`_setup_ufw()` уже вызывал `port_register(SERVICE_TELEMT_MTPROTO, port, ...,
+force=True)`, но `force=True` пропускал conflict-check.
+
+### Фикс
+
+**3 новые helper-функции в `mtproto.py`:**
+- `_telemt_check_port_conflict(port)` — проверяет через port_registry
+  (registry + system + ufw), возвращает `(is_free, conflicts, suggested)`
+- `_telemt_register_port(port)` — регистрирует после установки
+- `_telemt_unregister_port(port)` — снимает при удалении
+
+**В меню выбора порта** (после A/B/C) — проверка конфликта. Если занято:
+- Показывает кто занял и почему
+- Предлагает свободный порт из 9443..9453
+- Даёт выбор: suggested / всё равно / свой / отмена
+
+### Коммит
+
+- `fd41a48` — FIX(telemt): check port conflicts via port_registry before install
+
+---
+
 ## FEAT(telemt): бэкап юзеров при каждом изменении + cron + восстановление — 13 августа 2026
 
 **Пользователь жаловался: «было 10 юзеров, зашёл в TUI — остался 1
