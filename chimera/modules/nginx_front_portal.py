@@ -269,6 +269,9 @@ def nginx_front_install(port: int = DEFAULT_NGINX_FRONT_PORT,
                         use_self_signed: bool = False) -> "tuple[bool, str]":
     """Устанавливает nginx front с TLS для User Portal.
 
+    Делегирует в chimera.modules.panel_nginx_front — единая точка логики
+    для всех панелей Chimera (User Portal, Telemt Panel, будущие).
+
     Args:
       port: внешний порт nginx (default 9443).
       domain: домен для TLS-сертификата (default = PARAM_DOMAIN).
@@ -278,61 +281,10 @@ def nginx_front_install(port: int = DEFAULT_NGINX_FRONT_PORT,
     Returns:
       (success, message)
     """
-    core = _core_module()
-    info    = core.info
-    success = core.success
-    warn    = core.warn
-    _run    = core._run
-    log_to_file = core.log_to_file
+    from chimera.modules.panel_nginx_front import panel_nginx_front_install
+    from chimera.modules.port_registry import SERVICE_WEB_PANEL_NGINX
 
-    # 1. Валидация порта.
-    ok, err = _validate_port(port)
-    if not ok:
-        return False, err
-
-    # 2. Проверяем что nginx установлен.
-    nginx_bin = core.find_nginx_bin()
-    if not nginx_bin:
-        return False, "nginx не установлен. Установите через основное меню."
-
-    # 3. Определяем сертификат.
-    cert_path = None
-    key_path = None
-    if use_self_signed:
-        # Self-signed TLS (без домена).
-        info("Генерация self-signed TLS сертификата...")
-        # Определяем публичный IP для subjectAltName.
-        public_ip = ""
-        try:
-            r = _run(["curl", "-s", "--max-time", "5", "ifconfig.me"],
-                     capture=True, check=False, timeout=10)
-            public_ip = r.stdout.strip() if r.returncode == 0 else ""
-        except Exception:
-            pass
-        cert_path, key_path = _generate_self_signed_tls(public_ip)
-        if cert_path is None:
-            return False, "Не удалось сгенерировать self-signed TLS сертификат"
-        domain = public_ip or "localhost"
-    else:
-        # Let's Encrypt сертификат (нужен домен).
-        if domain is None:
-            domain = core.PARAM_DOMAIN
-        if not domain:
-            return False, ("PARAM_DOMAIN не задан. Либо установите VLESS с доменом, "
-                           "либо используйте self-signed режим (без домена).")
-        cert_path, key_path = _find_ssl_cert(domain)
-        if cert_path is None:
-            info(f"SSL-сертификат для {domain} не найден, получаем через certbot...")
-            try:
-                from chimera.modules.ssl_certbot import obtain_ssl_cert
-                obtain_ssl_cert(domain)
-                cert_path, key_path = _find_ssl_cert(domain)
-            except Exception as e:
-                return False, f"Не удалось получить SSL-сертификат: {e}"
-        if cert_path is None or key_path is None:
-            return False, f"SSL-сертификат для {domain} не найден и не получен"
-
-    # 5. Определяем backend_port.
+    # Определяем backend_port (порт rest_api web_panel).
     if backend_port is None:
         try:
             from chimera.modules.rest_api import _web_config_load, DEFAULT_WEB_PORT
@@ -340,94 +292,52 @@ def nginx_front_install(port: int = DEFAULT_NGINX_FRONT_PORT,
         except Exception:
             backend_port = 8443
 
-    # 6. Регистрируем порт в port_registry + проверка конфликтов.
-    from chimera.modules.port_registry import (
-        port_register, ufw_open_port, SERVICE_WEB_PANEL_NGINX,
+    ok, msg = panel_nginx_front_install(
+        service_tag=SERVICE_WEB_PANEL_NGINX,
+        port=port,
+        backend_port=backend_port,
+        site_name=NGINX_SITE_NAME,
+        state_file=NGINX_FRONT_STATE_FILE,
+        title="User Portal",
+        use_self_signed=use_self_signed,
+        domain=domain,
+        websocket_origin_rewrite=False,  # User Portal не требует CheckOrigin rewrite
+        backend_http_scheme="http",
+        cert_name_slug="chimera-portal",
     )
-    ok, msg = port_register(SERVICE_WEB_PANEL_NGINX, port, "tcp",
-                            comment=f"nginx front для User Portal (TLS, →127.0.0.1:{backend_port})")
-    if not ok:
-        return False, msg
 
-    # 7. Генерируем vhost config.
-    vhost = _generate_vhost(port, backend_port, cert_path, key_path, domain)
-    try:
-        NGINX_SITE_AVAILABLE.parent.mkdir(parents=True, exist_ok=True)
-        NGINX_SITE_AVAILABLE.write_text(vhost)
-    except Exception as e:
-        return False, f"Не удалось записать vhost: {e}"
-
-    # 8. Enable site (symlink).
-    try:
-        if NGINX_SITE_ENABLED.exists() or NGINX_SITE_ENABLED.is_symlink():
-            NGINX_SITE_ENABLED.unlink()
-        NGINX_SITE_ENABLED.symlink_to(NGINX_SITE_AVAILABLE)
-    except Exception as e:
-        return False, f"Не удалось enable site: {e}"
-
-    # 9. nginx -t (проверка конфигурации).
-    r = _run([nginx_bin, "-t"], capture=True, check=False)
-    if r.returncode != 0:
-        # Откат: удаляем vhost.
+    # Дополнительно сохраняем расширенный state (для обратной совместимости
+    # с существующим кодом, который читает backend_port, cert_path и т.д.)
+    if ok:
         try:
-            NGINX_SITE_ENABLED.unlink(missing_ok=True)
-            NGINX_SITE_AVAILABLE.unlink(missing_ok=True)
+            core = _core_module()
+            state = {
+                "enabled":      True,
+                "port":         port,
+                "domain":       domain or core.PARAM_DOMAIN,
+                "backend_port": backend_port,
+                "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            }
+            _state_save(state)
+            core.log_to_file("INFO",
+                f"nginx_front_portal: installed port={port} "
+                f"domain={domain} backend=127.0.0.1:{backend_port}")
         except Exception:
             pass
-        from chimera.modules.port_registry import port_unregister
-        port_unregister(SERVICE_WEB_PANEL_NGINX, port, "tcp")
-        return False, f"nginx -t failed: {r.stderr.strip()[:300]}"
 
-    # 10. Reload nginx.
-    r = _run(["systemctl", "reload", "nginx"], capture=True, check=False)
-    if r.returncode != 0:
-        # Откат.
-        try:
-            NGINX_SITE_ENABLED.unlink(missing_ok=True)
-            NGINX_SITE_AVAILABLE.unlink(missing_ok=True)
-        except Exception:
-            pass
-        from chimera.modules.port_registry import port_unregister
-        port_unregister(SERVICE_WEB_PANEL_NGINX, port, "tcp")
-        return False, f"nginx reload failed: {r.stderr.strip()[:300]}"
-
-    # 11. UFW open (опционально — если UFW активен).
-    if shutil.which("ufw"):
-        ok, msg = ufw_open_port(port, "tcp", SERVICE_WEB_PANEL_NGINX,
-                               comment="nginx front для User Portal (TLS)")
-        if ok:
-            info(f"UFW: {msg}")
-        else:
-            warn(f"UFW: {msg}")
-
-    # 12. Сохраняем state.
-    _state_save({
-        "enabled":      True,
-        "port":         port,
-        "domain":       domain,
-        "backend_port": backend_port,
-        "cert_path":    str(cert_path),
-        "key_path":     str(key_path),
-        "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    })
-
-    success(f"nginx front для User Portal установлен: https://{domain}:{port}")
-    log_to_file("INFO", f"nginx_front_portal: installed port={port} domain={domain} backend=127.0.0.1:{backend_port}")
-    return True, f"nginx front установлен на порту {port} (https://{domain}:{port})"
+    return ok, msg
 
 
 def nginx_front_remove() -> "tuple[bool, str]":
     """Удаляет nginx front для User Portal.
 
+    Делегирует в chimera.modules.panel_nginx_front — единая точка логики.
+
     Возвращает (success, message).
     Сертификат НЕ трогаем — он может использоваться VLESS/nginx основным сайтом.
     """
-    core = _core_module()
-    info    = core.info
-    success = core.success
-    warn    = core.warn
-    _run    = core._run
-    log_to_file = core.log_to_file
+    from chimera.modules.panel_nginx_front import panel_nginx_front_remove
+    from chimera.modules.port_registry import SERVICE_WEB_PANEL_NGINX
 
     state = _state_load()
     if not state.get("enabled"):
@@ -435,47 +345,24 @@ def nginx_front_remove() -> "tuple[bool, str]":
 
     port = state.get("port")
 
-    # 1. Disable site (удаляем symlink).
-    try:
-        NGINX_SITE_ENABLED.unlink(missing_ok=True)
-    except Exception as e:
-        warn(f"Не удалось удалить symlink: {e}")
+    ok, msg = panel_nginx_front_remove(
+        service_tag=SERVICE_WEB_PANEL_NGINX,
+        site_name=NGINX_SITE_NAME,
+        state_file=NGINX_FRONT_STATE_FILE,
+        title="User Portal",
+    )
 
-    # 2. Удаляем vhost config.
-    try:
-        NGINX_SITE_AVAILABLE.unlink(missing_ok=True)
-    except Exception as e:
-        warn(f"Не удалось удалить vhost: {e}")
-
-    # 3. nginx -t + reload.
-    nginx_bin = core.find_nginx_bin()
-    if nginx_bin:
-        r = _run([nginx_bin, "-t"], capture=True, check=False)
-        if r.returncode == 0:
-            _run(["systemctl", "reload", "nginx"], capture=True, check=False)
-        else:
-            warn(f"nginx -t failed after remove: {r.stderr.strip()[:200]}")
-
-    # 4. UFW close.
-    if port and shutil.which("ufw"):
-        from chimera.modules.port_registry import (
-            ufw_close_port, SERVICE_WEB_PANEL_NGINX,
-        )
-        ok, msg = ufw_close_port(port, "tcp", SERVICE_WEB_PANEL_NGINX)
-        if ok:
-            info(f"UFW: {msg}")
-
-    # 5. Разрегистрируем порт.
-    from chimera.modules.port_registry import port_unregister, SERVICE_WEB_PANEL_NGINX
-    port_unregister(SERVICE_WEB_PANEL_NGINX)
-
-    # 6. Сохраняем state.
+    # Сохраняем расширенный state (для обратной совместимости с nginx_front_status).
     _state_save({"enabled": False, "port": 0, "domain": "",
                  "backend_port": 0, "installed_at": ""})
 
-    success("nginx front для User Portal удалён")
-    log_to_file("INFO", f"nginx_front_portal: removed (was port={port})")
-    return True, "nginx front удалён"
+    try:
+        core = _core_module()
+        core.log_to_file("INFO", f"nginx_front_portal: removed (was port={port})")
+    except Exception:
+        pass
+
+    return ok, msg
 
 
 def nginx_front_status() -> dict:
