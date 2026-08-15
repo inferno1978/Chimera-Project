@@ -3328,7 +3328,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
                 raise _Cancelled()
             if _ch == "1":
                 port = _port_suggested
-                success(f"  Используем порт {port}")
+                _ok(f"  Используем порт {port}")
             elif _ch == "2":
                 _warn(f"  Продолжаем с портом {port} на свой риск.")
             elif _ch == "3":
@@ -3339,7 +3339,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
                         _cf, _cc, _cs = _telemt_check_port_conflict(_custom)
                         if _cf:
                             port = _custom
-                            success(f"  Используем порт {port}")
+                            _ok(f"  Используем порт {port}")
                         else:
                             _warn(f"  Порт {_custom} тоже занят. Продолжаем на свой риск.")
                             port = _custom
