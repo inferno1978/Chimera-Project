@@ -723,16 +723,16 @@ def _run_install() -> None:
     _box_info(f"ssh -L {PANEL_LISTEN_PORT}:127.0.0.1:{PANEL_LISTEN_PORT} root@<ваш_сервер>")
     _box_bot()
 
-    # ── 6. Предложить включить прямой доступ (self-signed TLS по публичному IP).
-    # Это как у User Portal / Admin Panel / olcRTC — чтобы не возиться с SSH-туннелем.
+    # ── 6. Предложить включить прямой доступ (TLS по публичному IP или домену).
+    # Поддерживает 2 режима: Let's Encrypt (домен) и self-signed (IP).
     print()
-    _box_top("🌐  ПРЯМОЙ ДОСТУП ПО ПУБЛИЧНОМУ IP")
+    _box_top("🌐  ПРЯМОЙ ДОСТУП ПО HTTPS")
     _box_row()
-    _box_info("Можно включить прямой доступ к панели по HTTPS (self-signed TLS)")
-    _box_info(f"на порту {DEFAULT_PANEL_TLS_PORT} — как у User Portal и olcRTC.")
-    _box_info("Браузер предупредит о self-signed сертификате — это нормально.")
+    _box_info("Можно включить прямой доступ к панели по HTTPS:")
+    _box_info(f"  • Let's Encrypt — для домена (доверенный сертификат)")
+    _box_info(f"  • Self-signed — по IP на порту {DEFAULT_PANEL_TLS_PORT}")
     _box_row()
-    _box_warn("Без прямого доступа — только через SSH-туннель (как сейчас).")
+    _box_warn("Без прямого доступа — только через SSH-туннель.")
     _box_bot()
     try:
         enable_direct = _ask(
@@ -742,16 +742,27 @@ def _run_install() -> None:
         enable_direct = "n"
     if enable_direct in ("y", "yes", "д", "да", ""):
         print()
-        _info("Настраиваю прямой доступ (nginx + self-signed TLS)...")
+        # Спрашиваем режим TLS.
+        from chimera.modules.panel_nginx_front import ask_tls_mode, ask_domain
+        use_ss, _ = ask_tls_mode(panel_name="Telemt Panel")
+        domain = None
+        if not use_ss:
+            domain = ask_domain()
+            if not domain:
+                _warn("Домен не указан — откат на self-signed.")
+                use_ss = True
         port = _ask_tls_port()
-        if _telemt_setup_direct_access(port=port):
+        if _telemt_setup_direct_access(port=port, use_self_signed=use_ss, domain=domain):
             direct = _telemt_direct_status()
             if direct.get("enabled"):
                 _ok("Прямой доступ включён!")
                 _box_top("✅ ПРЯМОЙ ДОСТУП")
                 _box_kv("URL:", f"{GREEN}{direct.get('url', '?')}{NC}")
-                _box_warn("Браузер предупредит о self-signed TLS — это нормально.")
-                _box_info("Можно принять сертификат и продолжить.")
+                if direct.get("self_signed"):
+                    _box_warn("Браузер предупредит о self-signed TLS — это нормально.")
+                    _box_info("Можно принять сертификат и продолжить.")
+                else:
+                    _box_ok("Let's Encrypt сертификат — браузер не предупредит.")
                 _box_bot()
     else:
         _info("Прямой доступ не включён. Можно включить позже через пункт [6] в меню.")
@@ -838,190 +849,66 @@ def _telemt_direct_status() -> dict:
     return {"enabled": False}
 
 
-def _telemt_setup_direct_access(port: int = DEFAULT_PANEL_TLS_PORT) -> bool:
-    """Ставит nginx vhost с self-signed TLS для прямого доступа к Telemt Panel.
+def _telemt_setup_direct_access(port: int = DEFAULT_PANEL_TLS_PORT,
+                                  use_self_signed: bool = True,
+                                  domain: "Optional[str]" = None) -> bool:
+    """Ставит nginx vhost с TLS для прямого доступа к Telemt Panel.
+
+    Поддерживает 2 режима:
+      - Self-signed (по умолчанию): для доступа по IP, браузер предупредит.
+      - Let's Encrypt: для доступа по домену, доверенный сертификат.
+
+    Делегирует в chimera.modules.panel_nginx_front — единая точка логики
+    для всех панелей Chimera (User Portal, Telemt Panel, будущие).
 
     Args:
       port: внешний порт nginx (default DEFAULT_PANEL_TLS_PORT = 8444).
-            Валидируется через _validate_tls_port + port_registry conflict-check.
+      use_self_signed: True → self-signed (по IP), False → Let's Encrypt (по домену).
+      domain: домен для Let's Encrypt (если None и не self_signed — спросить).
     """
+    from chimera.modules.panel_nginx_front import panel_nginx_front_install
+    from chimera.modules.port_registry import SERVICE_TELEMT_PANEL_DIRECT
+
     if not _is_installed():
         _warn("Сначала установите Telemt Panel.")
         return False
 
-    # 1. Валидация порта.
+    # Валидация порта.
     ok, err = _validate_tls_port(port)
     if not ok:
         _err(err)
         return False
 
-    # 2. Проверка конфликтов через port_registry.
-    try:
-        from chimera.modules.port_registry import port_is_free
-        is_free, conflicts = port_is_free(port, "tcp",
-                                          exclude_service="telemt_panel_direct")
-        if not is_free:
-            _err(f"Порт {port} занят:")
-            for c in conflicts[:3]:
-                _box_row(f"  {DIM}• {c}{NC}")
-            return False
-    except Exception:
-        # port_registry недоступен — продолжаем без conflict-check.
-        pass
-
-    public_ip = ""
-    ipv4, ipv6 = _get_public_ips()
-    if ipv4 or ipv6:
-        public_ip = _ask_public_ip_choice(ipv4, ipv6)
-
-    # Self-signed TLS.
-    ssl_dir = Path("/etc/nginx/ssl")
-    ssl_dir.mkdir(parents=True, exist_ok=True)
-    cert = ssl_dir / "telemt-panel-self-signed.crt"
-    key  = ssl_dir / "telemt-panel-self-signed.key"
-    r = _run([
-        "openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
-        "-sha256", "-days", "825",
-        "-keyout", str(key), "-out", str(cert),
-        "-subj", "/CN=telemt-panel",
-        "-addext", f"subjectAltName=IP:{public_ip or '127.0.0.1'},DNS:localhost",
-    ], capture=True, check=False)
-    if r.returncode != 0:
-        _err("Не удалось сгенерировать TLS сертификат")
-        return False
-    key.chmod(0o600)
-    cert.chmod(0o644)
-
-    # nginx vhost.
-    vhost = f"""# Chimera — nginx front для Telemt Panel (self-signed TLS).
-server {{
-    listen {port} ssl http2;
-    server_name _;
-
-    ssl_certificate     {cert};
-    ssl_certificate_key {key};
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers off;
-
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-
-    access_log /var/log/nginx/telemt-panel-access.log;
-    error_log  /var/log/nginx/telemt-panel-error.log;
-
-    location / {{
-        proxy_pass http://127.0.0.1:{PANEL_LISTEN_PORT};
-        proxy_http_version 1.1;
-        # ВАЖНО: Panel использует WebSocket с CheckOrigin. Когда nginx
-        # проксирует запросы с публичного IP:порта — Origin и Host не
-        # совпадают с тем, что Panel ожидает (127.0.0.1:8080).
-        # CheckOrigin отклоняет WebSocket → 'Telemt is unreachable'.
-        # Подменяем Origin, Host, и Referer на ожидаемые значения.
-        proxy_set_header Host 127.0.0.1:{PANEL_LISTEN_PORT};
-        proxy_set_header Origin http://127.0.0.1:{PANEL_LISTEN_PORT};
-        proxy_set_header Referer http://127.0.0.1:{PANEL_LISTEN_PORT}/;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_connect_timeout 30s;
-        # WebSocket long-lived: 1 час вместо 60 сек.
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }}
-}}
-"""
-    try:
-        TELEMT_NGINX_AVAILABLE.parent.mkdir(parents=True, exist_ok=True)
-        TELEMT_NGINX_AVAILABLE.write_text(vhost)
-        if TELEMT_NGINX_ENABLED.exists() or TELEMT_NGINX_ENABLED.is_symlink():
-            TELEMT_NGINX_ENABLED.unlink()
-        TELEMT_NGINX_ENABLED.symlink_to(TELEMT_NGINX_AVAILABLE)
-    except Exception as e:
-        _err(f"Не удалось записать nginx vhost: {e}")
-        return False
-
-    # nginx -t + reload.
-    nginx_bin = shutil.which("nginx")
-    if not nginx_bin:
-        _err("nginx не установлен")
-        return False
-    r = _run([nginx_bin, "-t"], capture=True, check=False)
-    if r.returncode != 0:
-        _err(f"nginx -t failed: {r.stderr.strip()[:300]}")
-        TELEMT_NGINX_ENABLED.unlink(missing_ok=True)
-        TELEMT_NGINX_AVAILABLE.unlink(missing_ok=True)
-        return False
-    _run(["systemctl", "reload", "nginx"], check=False)
-
-    # UFW через port_registry.
-    try:
-        from chimera.modules.port_registry import (
-            ufw_open_port, port_register, SERVICE_TELEMT_PANEL_DIRECT,
-        )
-        port_register(SERVICE_TELEMT_PANEL_DIRECT, port, "tcp",
-                      comment="Telemt Panel direct (TLS)", force=True)
-        ufw_open_port(port, "tcp", SERVICE_TELEMT_PANEL_DIRECT,
-                      comment="Telemt Panel direct (TLS)")
-    except Exception:
-        # Fallback на строковый литерал (для обратной совместимости со старым registry).
-        try:
-            from chimera.modules.port_registry import (
-                ufw_open_port, port_register,
-            )
-            port_register("telemt_panel_direct", port, "tcp",
-                          comment="Telemt Panel direct (TLS)", force=True)
-            ufw_open_port(port, "tcp", "telemt_panel_direct",
-                          comment="Telemt Panel direct (TLS)")
-        except Exception:
-            pass
-
-    # State.
-    TELEMT_NGINX_STATE.parent.mkdir(parents=True, exist_ok=True)
-    TELEMT_NGINX_STATE.write_text(json.dumps({
-        "enabled": True,
-        "port": port,
-        "url": f"https://{public_ip or 'SERVER_IP'}:{port}",
-    }, indent=2))
-
-    _ok(f"Прямой доступ включён: https://{public_ip or 'SERVER_IP'}:{port}")
-    _box_warn("Браузер предупредит о self-signed TLS — это нормально.")
-    return True
+    ok, msg = panel_nginx_front_install(
+        service_tag=SERVICE_TELEMT_PANEL_DIRECT,
+        port=port,
+        backend_port=PANEL_LISTEN_PORT,
+        site_name=TELEMT_NGINX_SITE,
+        state_file=TELEMT_NGINX_STATE,
+        title="Telemt Panel",
+        use_self_signed=use_self_signed,
+        domain=domain,
+        websocket_origin_rewrite=True,  # Telemt Panel требует CheckOrigin rewrite
+        backend_http_scheme="http",
+        cert_name_slug="telemt-panel",
+    )
+    return ok
 
 
 def _telemt_remove_direct_access() -> None:
     """Удаляет nginx vhost + закрывает порт для прямого доступа к Telemt Panel."""
+    from chimera.modules.panel_nginx_front import panel_nginx_front_remove
+    from chimera.modules.port_registry import SERVICE_TELEMT_PANEL_DIRECT
+
     state = _telemt_direct_status()
     if not state.get("enabled"):
         return
-    port = state.get("port", DEFAULT_PANEL_TLS_PORT)
-    TELEMT_NGINX_ENABLED.unlink(missing_ok=True)
-    TELEMT_NGINX_AVAILABLE.unlink(missing_ok=True)
-    nginx_bin = shutil.which("nginx")
-    if nginx_bin:
-        _run([nginx_bin, "-t"], capture=True, check=False)
-        _run(["systemctl", "reload", "nginx"], check=False)
-    # port_registry close: пробуем новую константу, fallback на старый литерал.
-    try:
-        from chimera.modules.port_registry import (
-            ufw_close_port, port_unregister, SERVICE_TELEMT_PANEL_DIRECT,
-        )
-        ufw_close_port(port, "tcp", SERVICE_TELEMT_PANEL_DIRECT,
-                       legacy_comments=["Telemt Panel direct (TLS)"])
-        port_unregister(SERVICE_TELEMT_PANEL_DIRECT, port, "tcp")
-    except Exception:
-        try:
-            from chimera.modules.port_registry import (
-                ufw_close_port, port_unregister,
-            )
-            ufw_close_port(port, "tcp", "telemt_panel_direct",
-                           legacy_comments=["Telemt Panel direct (TLS)"])
-            port_unregister("telemt_panel_direct", port, "tcp")
-        except Exception:
-            pass
-    TELEMT_NGINX_STATE.unlink(missing_ok=True)
-    _info("Прямой доступ к Telemt Panel отключён, порт закрыт.")
+    panel_nginx_front_remove(
+        service_tag=SERVICE_TELEMT_PANEL_DIRECT,
+        site_name=TELEMT_NGINX_SITE,
+        state_file=TELEMT_NGINX_STATE,
+        title="Telemt Panel",
+    )
 
 
 def _ask_tls_port() -> int:
@@ -1047,16 +934,26 @@ def _ask_tls_port() -> int:
 def _toggle_direct_access() -> None:
     """Включить/выключить прямой доступ к Telemt Panel.
 
-    При включении спрашивает порт (default = DEFAULT_PANEL_TLS_PORT = 8444),
-    проверяет конфликты через port_registry, ставит self-signed TLS.
+    При включении спрашивает:
+      1. Режим TLS: Let's Encrypt (домен) или self-signed (IP)
+      2. Порт (default = DEFAULT_PANEL_TLS_PORT = 8444)
+    Проверяет конфликты через port_registry.
     """
     state = _telemt_direct_status()
     if state.get("enabled"):
         _telemt_remove_direct_access()
         _ok("Прямой доступ выключен.")
     else:
+        from chimera.modules.panel_nginx_front import ask_tls_mode, ask_domain
+        use_ss, _ = ask_tls_mode(panel_name="Telemt Panel")
+        domain = None
+        if not use_ss:
+            domain = ask_domain()
+            if not domain:
+                _warn("Домен не указан — откат на self-signed.")
+                use_ss = True
         port = _ask_tls_port()
-        _telemt_setup_direct_access(port=port)
+        _telemt_setup_direct_access(port=port, use_self_signed=use_ss, domain=domain)
     _pause()
 
 
