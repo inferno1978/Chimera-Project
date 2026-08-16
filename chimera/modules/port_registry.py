@@ -44,6 +44,7 @@ API:
   SERVICE_AWG_EXIT        — AmneziaWG exit (remote)
   SERVICE_SINGBOX         — sing-box (любой протокол)
   SERVICE_SUBSCRIPTION    — Subscription server
+  SERVICE_SUBSCRIPTION_NGINX — nginx front для subscription с TLS (настраиваемый)
   SERVICE_HYSTERIA2       — Hysteria2
 
 Паттерн использования (на примере нового сервиса):
@@ -123,6 +124,7 @@ SERVICE_AWG_STANDALONE  = "awg_standalone"
 SERVICE_AWG_EXIT        = "awg_exit"
 SERVICE_SINGBOX         = "singbox"
 SERVICE_SUBSCRIPTION    = "subscription"
+SERVICE_SUBSCRIPTION_NGINX = "subscription_nginx"
 SERVICE_HYSTERIA2       = "hysteria2"
 SERVICE_WEBDAV_TUNNEL  = "webdav_tunnel"
 SERVICE_PORT_HOPPING   = "port_hopping"

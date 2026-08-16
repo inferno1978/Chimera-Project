@@ -160,6 +160,16 @@ _TRAFFIC_LIMITS_FILE = Path("/var/lib/xray-installer/traffic_limits.json")
 _UNIT_PATH   = Path("/etc/systemd/system/vless-subscription.service")
 _NGINX_SNIP  = Path("/etc/nginx/snippets/vless-subscription.conf")
 
+# ── nginx front (прямой доступ по домену/IP с TLS) ──────────────────────────
+# По аналогии с rest_api.nginx_front_portal и telemt_panel._telemt_setup_direct_access.
+# Когда nginx front включён — backend слушает 127.0.0.1 (loopback), а nginx
+# терминирует TLS на отдельном порту (default 9444) и проксирует на backend.
+# Когда выключён — backend возвращается на 0.0.0.0 (старый режим, обратная
+# совместимость: существующие URL https://<домен>:8443/sub/<token> продолжают работать).
+_SUB_NGINX_SITE_NAME   = "chimera-subscription-nginx"
+_SUB_NGINX_STATE_FILE  = Path("/var/lib/xray-installer/subscription_nginx_front.json")
+DEFAULT_SUB_NGINX_PORT = 9444  # не конфликтует с 8443 (backend), 9443 (User Portal nginx)
+
 SERVICE_NAME  = "vless-subscription"
 DEFAULT_PORT  = 8443
 
@@ -1060,7 +1070,13 @@ def serve(port: int = DEFAULT_PORT) -> None:
     domain = state.get("domain", "")
     certfile, keyfile = _find_cert_pair(domain)
 
-    httpd = ThreadingHTTPServer(("0.0.0.0", port), _SubHandler)
+    # SUB_LISTEN_HOST из окружения — для переключения 0.0.0.0 ↔ 127.0.0.1
+    # без правки кода. Когда nginx front включён (через _sub_backend_bind_loopback),
+    # unit-файл прокидывает SUB_LISTEN_HOST=127.0.0.1 — backend слушает loopback,
+    # а наружу торчит только nginx с TLS. Когда выключён — переменной нет, дефолт 0.0.0.0.
+    listen_host = os.environ.get("SUB_LISTEN_HOST", "0.0.0.0")
+
+    httpd = ThreadingHTTPServer((listen_host, port), _SubHandler)
     if certfile and keyfile:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(certfile, keyfile)
@@ -1070,7 +1086,7 @@ def serve(port: int = DEFAULT_PORT) -> None:
         _warn("Сертификат не найден — подписка отдаётся по HTTP (без TLS). "
               "Поставьте сертификат Let's Encrypt на домен или проксируйте через nginx с TLS.")
 
-    _ok(f"Слушаю :{port} …")
+    _ok(f"Слушаю {listen_host}:{port} …")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -1448,6 +1464,171 @@ def uninstall_subscription_service() -> None:
     cfg["enabled"] = False
     _save_sub_conf(cfg)
 
+    # Также снимаем nginx front если был включён — иначе остаётся висеть
+    # orphaned vhost + открытый порт, и подписка всё равно не отвечает
+    # (backend мёртв, nginx проксирует в никуда).
+    try:
+        _sub_nginx_remove()
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  NGINX FRONT (прямой доступ по домену/IP с TLS)
+# ──────────────────────────────────────────────────────────────────────────
+# По аналогии с rest_api.nginx_front_portal и telemt_panel._telemt_setup_direct_access.
+# Делегирует в chimera.modules.panel_nginx_front — единая точка логики.
+#
+# Поведение:
+#   nginx front ON  → backend слушает 127.0.0.1:8443 (loopback), nginx терминирует
+#                     TLS на порту 9444 (или настраиваемом) и проксирует на backend.
+#                     UFW открывает порт 9444, порт 8443 НЕ открывается наружу.
+#   nginx front OFF → backend слушает 0.0.0.0:8443 (старый режим, обратная совместимость).
+#                     UFW открывает порт 8443. Старые URL продолжают работать.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _sub_nginx_status() -> dict:
+    """Возвращает состояние nginx front для подписки."""
+    if not _SUB_NGINX_STATE_FILE.exists():
+        return {"enabled": False}
+    try:
+        return json.loads(_SUB_NGINX_STATE_FILE.read_text())
+    except Exception:
+        return {"enabled": False}
+
+
+def _sub_backend_bind_loopback() -> None:
+    """Переключает backend-сервис подписки на 127.0.0.1 (loopback).
+
+    Вызывается при включении nginx front — наружу торчит только nginx.
+    Атомарно: обновляет unit-файл + перезапускает сервис. UFW-порт 8443
+    при этом закрывается (он больше не нужен снаружи).
+    """
+    cfg = _load_sub_conf()
+    port = cfg.get("listen_port", DEFAULT_PORT)
+
+    # Закрываем старый порт 8443 в UFW (через port_registry, идемпотентно).
+    _fw_close_tcp(port)
+
+    # Меняем unit-файл так, чтобы backend слушал 127.0.0.1.
+    # Это делается через служебную переменную окружения SUB_LISTEN_HOST
+    # которую читает serve() — см. ниже.
+    if _UNIT_PATH.exists():
+        try:
+            content = _UNIT_PATH.read_text()
+            # Если уже есть SUB_LISTEN_HOST=127.0.0.1 — ничего не делаем.
+            if "SUB_LISTEN_HOST=127.0.0.1" not in content:
+                # Добавляем Environment=SUB_LISTEN_HOST=127.0.0.1 в [Service].
+                if "Environment=" in content and "SUB_LISTEN_HOST" not in content:
+                    content = content.replace(
+                        "Environment=",
+                        "Environment=SUB_LISTEN_HOST=127.0.0.1\nEnvironment=",
+                        1,
+                    )
+                elif "[Service]" in content:
+                    content = content.replace(
+                        "[Service]",
+                        "[Service]\nEnvironment=SUB_LISTEN_HOST=127.0.0.1",
+                        1,
+                    )
+                _UNIT_PATH.write_text(content)
+                subprocess.run(["systemctl", "daemon-reload"], check=False)
+                subprocess.run(["systemctl", "restart", SERVICE_NAME], check=False)
+        except Exception:
+            pass
+
+
+def _sub_backend_bind_public() -> None:
+    """Возвращает backend на 0.0.0.0 (старый режим, без nginx front).
+
+    Удаляет SUB_LISTEN_HOST из unit-файла, открывает порт 8443 в UFW.
+    """
+    cfg = _load_sub_conf()
+    port = cfg.get("listen_port", DEFAULT_PORT)
+
+    if _UNIT_PATH.exists():
+        try:
+            content = _UNIT_PATH.read_text()
+            changed = False
+            # Удаляем строку Environment=SUB_LISTEN_HOST=127.0.0.1
+            if "SUB_LISTEN_HOST=127.0.0.1" in content:
+                lines = content.splitlines()
+                new_lines = [l for l in lines if "SUB_LISTEN_HOST=127.0.0.1" not in l]
+                content = "\n".join(new_lines) + "\n"
+                changed = True
+            if changed:
+                _UNIT_PATH.write_text(content)
+                subprocess.run(["systemctl", "daemon-reload"], check=False)
+                subprocess.run(["systemctl", "restart", SERVICE_NAME], check=False)
+        except Exception:
+            pass
+
+    # Открываем порт 8443 (если сервис включён).
+    if cfg.get("enabled"):
+        _fw_open_tcp(port)
+
+
+def _sub_nginx_install(port: int, use_self_signed: bool, domain: "Optional[str]") -> "tuple[bool, str]":
+    """Устанавливает nginx front с TLS для подписки.
+
+    Делегирует в chimera.modules.panel_nginx_front.
+    """
+    from chimera.modules.panel_nginx_front import panel_nginx_front_install
+    from chimera.modules.port_registry import SERVICE_SUBSCRIPTION_NGINX
+
+    backend_port = _load_sub_conf().get("listen_port", DEFAULT_PORT)
+
+    ok, msg = panel_nginx_front_install(
+        service_tag=SERVICE_SUBSCRIPTION_NGINX,
+        port=port,
+        backend_port=backend_port,
+        site_name=_SUB_NGINX_SITE_NAME,
+        state_file=_SUB_NGINX_STATE_FILE,
+        title="Подписка",
+        use_self_signed=use_self_signed,
+        domain=domain,
+        websocket_origin_rewrite=False,
+        backend_http_scheme="https",  # backend сам имеет TLS от LE-сертификата
+        cert_name_slug="chimera-subscription",
+    )
+    return ok, msg
+
+
+def _sub_nginx_remove() -> "tuple[bool, str]":
+    """Удаляет nginx front + закрывает порт + возвращает backend на 0.0.0.0."""
+    from chimera.modules.panel_nginx_front import panel_nginx_front_remove
+    from chimera.modules.port_registry import SERVICE_SUBSCRIPTION_NGINX
+
+    if not _sub_nginx_status().get("enabled"):
+        return True, "nginx front уже выключен"
+
+    panel_nginx_front_remove(
+        service_tag=SERVICE_SUBSCRIPTION_NGINX,
+        site_name=_SUB_NGINX_SITE_NAME,
+        state_file=_SUB_NGINX_STATE_FILE,
+        title="Подписка",
+    )
+    # Возвращаем backend на 0.0.0.0 — старые URL должны снова заработать.
+    _sub_backend_bind_public()
+    return True, "nginx front удалён"
+
+
+def _sub_nginx_get_url(token: str) -> "Optional[str]":
+    """Возвращает URL подписки через nginx front (если включён).
+
+    Если nginx front выключен — возвращает None (caller использует старый URL).
+    """
+    st = _sub_nginx_status()
+    if not st.get("enabled"):
+        return None
+    port = st.get("port", DEFAULT_SUB_NGINX_PORT)
+    domain = st.get("domain")
+    if not domain:
+        # Self-signed — используем public IP из state файла.
+        return None  # fallback — backend URL будет показан
+    return f"https://{domain}:{port}/sub/{token}"
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # CLI / МЕНЮ (вызывается отдельно, НЕ вшито в _core.py)
 # ══════════════════════════════════════════════════════════════════════════
@@ -1460,6 +1641,13 @@ def do_subscription_menu() -> None:
         enabled = cfg.get("enabled", False)
         status = f"{GREEN}включена{NC}" if enabled else f"{DIM}выключена{NC}"
 
+        # Проверяем состояние nginx front — для отображения в меню.
+        nginx_front = _sub_nginx_status()
+        nginx_front_enabled = nginx_front.get("enabled", False)
+        nginx_front_port = nginx_front.get("port", DEFAULT_SUB_NGINX_PORT)
+        nginx_front_domain = nginx_front.get("domain") or state.get("domain", "")
+        nginx_front_self_signed = nginx_front.get("self_signed", False)
+
         _box_top(f"🔁  ЕДИНАЯ ПОДПИСКА  {DIM}({NC}{status}{DIM}){NC}")
         _box_row()
         if not state or not state.get("domain"):
@@ -1470,12 +1658,25 @@ def do_subscription_menu() -> None:
             input(f"\n{CYAN}Enter…{NC}")
             return
 
+        if nginx_front_enabled:
+            mode = "self-signed (по IP)" if nginx_front_self_signed else f"Let's Encrypt ({nginx_front_domain})"
+            _box_row(f"  {GREEN}🌐 nginx front (TLS):{NC} {CYAN}{mode}{NC}  {DIM}→ порт {nginx_front_port}{NC}")
+            _box_row(f"  {DIM}backend слушает 127.0.0.1:{cfg.get('listen_port', DEFAULT_PORT)} (loopback){NC}")
+            _box_row()
+        else:
+            _box_row(f"  {DIM}nginx front: выключен — backend на 0.0.0.0:{cfg.get('listen_port', DEFAULT_PORT)} (свой TLS){NC}")
+            _box_row()
+
         _box_item("1", "🚀 Включить / переустановить сервис")
         _box_item("2", "🔗 Показать ссылки подписки для всех пользователей")
         _box_item("3", f"🔄 Сгенерировать pepper заново  {DIM}(инвалидирует все ссылки){NC}")
         _box_item("4", "🛑 Выключить сервис")
         _box_item("5", f"🧩 Привязать сателлитные логины к UUID  {DIM}(Mieru/Naive/Telemt/TrustTunnel/sing-box){NC}")
         _box_item("6", f"{RED}🗑️  Удалить полностью{NC}")
+        if nginx_front_enabled:
+            _box_item("7", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}(вернуть на 0.0.0.0:{cfg.get('listen_port', DEFAULT_PORT)}){NC}")
+        else:
+            _box_item("7", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ по домену/IP{NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -1534,18 +1735,38 @@ def do_subscription_menu() -> None:
             port = cfg.get("listen_port", DEFAULT_PORT)
             os.system("clear")
 
+            # Если nginx front включён — показываем URL'ы через него.
+            # Если нет — старые URL'ы через backend на 0.0.0.0:port.
+            ng_st = _sub_nginx_status()
+            use_nginx = ng_st.get("enabled", False)
+            if use_nginx:
+                ng_port = ng_st.get("port", DEFAULT_SUB_NGINX_PORT)
+                ng_domain = ng_st.get("domain") or domain
+                ng_self_signed = ng_st.get("self_signed", False)
+                # Для self-signed domain может быть пустым — fallback на public IP.
+                host_label = ng_domain if ng_domain else "<IP сервера>"
+                host_for_url = ng_domain if ng_domain else state.get("server_ip", host_label)
+                url_base = f"https://{host_for_url}:{ng_port}/sub"
+                scheme_note = (f"self-signed TLS (по IP {host_label})" if ng_self_signed
+                                else f"Let's Encrypt ({ng_domain})")
+            else:
+                url_base = f"https://{domain}:{port}/sub"
+                scheme_note = f"собственный TLS (backend 0.0.0.0:{port})"
+
             rows = []
             for u in _load_all_users():
                 if u.get("disabled") or not u.get("uuid"):
                     continue
                 token = _token_for(u["uuid"], pepper)
-                url = f"https://{domain}:{port}/sub/{token}"
-                url_ios = f"https://{domain}:{port}/sub/{token}/ios"
-                url_sb = f"https://{domain}:{port}/sub/{token}?format=singbox"
+                url = f"{url_base}/{token}"
+                url_ios = f"{url_base}/{token}/ios"
+                url_sb = f"{url_base}/{token}?format=singbox"
                 label = u.get("email", u.get("name", "?"))
                 rows.append((label, url, url_ios, url_sb))
 
             _box_top("🔗  ССЫЛКИ ПОДПИСКИ")
+            _box_row()
+            _box_row(f"  {DIM}Режим:{NC} {scheme_note}")
             _box_row()
             if not rows:
                 _box_warn_line("Нет активных пользователей.")
@@ -1618,6 +1839,70 @@ def do_subscription_menu() -> None:
                     _ok("Сервис подписки полностью удалён, порт свободен.")
                 else:
                     _info("Отменено.")
+                input(f"\n{BOLD}Enter…{NC}")
+
+        elif ch == "7":
+            # nginx front (TLS) — прямой доступ по домену/IP.
+            ng_st = _sub_nginx_status()
+            if ng_st.get("enabled"):
+                # Выключение.
+                _box_top("🌐  NGINX FRONT — ВЫКЛЮЧЕНИЕ")
+                _box_row()
+                _box_row(f"  {DIM}Будет удалён nginx vhost + закрыт порт {ng_st.get('port', DEFAULT_SUB_NGINX_PORT)}.{NC}")
+                _box_row(f"  {DIM}Backend вернётся на 0.0.0.0:{cfg.get('listen_port', DEFAULT_PORT)} — старые URL снова заработают.{NC}")
+                _box_row()
+                _box_back()
+                _box_bottom()
+                confirm = input(f"  {YELLOW}Выключить nginx front? [y/N]:{NC} ").strip().lower()
+                if confirm == "y":
+                    ok, msg = _sub_nginx_remove()
+                    if ok:
+                        _ok(msg)
+                    else:
+                        _err(msg)
+                else:
+                    _info("Отменено.")
+                input(f"\n{BOLD}Enter…{NC}")
+            else:
+                # Включение.
+                if not cfg.get("enabled"):
+                    _warn("Сначала включите сервис подписки (пункт 1).")
+                    input(f"\n{BOLD}Enter…{NC}")
+                    continue
+                # Спрашиваем порт.
+                try:
+                    port_str = input(f"  Порт для nginx front [Enter={DEFAULT_SUB_NGINX_PORT}]: ").strip()
+                    ng_port = int(port_str) if port_str else DEFAULT_SUB_NGINX_PORT
+                except (ValueError, EOFError, KeyboardInterrupt):
+                    ng_port = DEFAULT_SUB_NGINX_PORT
+                # Спрашиваем режим TLS.
+                try:
+                    from chimera.modules.panel_nginx_front import ask_tls_mode, ask_domain
+                except ImportError:
+                    _err("panel_nginx_front недоступен — не могу установить nginx front.")
+                    input(f"\n{BOLD}Enter…{NC}")
+                    continue
+                use_self_signed, _ = ask_tls_mode("подписку")
+                domain = None
+                if not use_self_signed:
+                    domain = ask_domain(default=state.get("domain", ""))
+                    if not domain:
+                        _warn("Домен не указан — отмена. Используйте self-signed режим.")
+                        input(f"\n{BOLD}Enter…{NC}")
+                        continue
+                # Сначала ставим nginx front (это открывает порт 9444),
+                # потом переключаем backend на loopback.
+                ok, msg = _sub_nginx_install(ng_port, use_self_signed, domain)
+                if not ok:
+                    _err(f"Не удалось установить nginx front: {msg}")
+                    input(f"\n{BOLD}Enter…{NC}")
+                    continue
+                # Переключаем backend на 127.0.0.1 (loopback).
+                _sub_backend_bind_loopback()
+                _ok(f"nginx front включён на порту {ng_port}.")
+                _info(f"Backend переведён на 127.0.0.1:{cfg.get('listen_port', DEFAULT_PORT)} (loopback).")
+                _info(f"Старый URL https://{state.get('domain', '<домен>')}:{cfg.get('listen_port', DEFAULT_PORT)}/sub/... больше не работает.")
+                _info(f"Новый URL: https://{domain or '<IP сервера>'}:{ng_port}/sub/<token>")
                 input(f"\n{BOLD}Enter…{NC}")
 
         elif ch == "" or ch.lower() == "q" or ch == "0":
