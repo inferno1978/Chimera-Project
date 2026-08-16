@@ -2,6 +2,110 @@
 
 ---
 
+## FEAT(singbox_client_rulesets): Podkop/OpenWrt split-tunneling для РФ-сервисов — 16 августа 2026
+
+**Пользователи Chimera на Podkop/OpenWrt жаловались что Госуслуги, Wildberries,
+Ozon, Детский Мир и другие российские сервисы «жалуются на VPN» — антифрод
+видит иностранный IP и требует подтверждение личности / показывает капчу /
+блокирует вход. Теперь sing-box клиентский конфиг содержит готовые
+`route.rule_set` + `route.rules` со списками `hydraponique/roscomvpn-geosite`
+(217⭐, форк roscomvpn-проекта): `category-ru.srs` → `direct`, `category-geoblock-ru.srs`
+→ `proxy`, `whitelist.srs` → `direct`.**
+
+### Проблема
+
+Стандартный sing-box клиентский конфиг, который генерирует Chimera для подписки
+(`?format=singbox`) и для `/api/portal/singbox`, содержал только `outbounds`
+(VLESS Reality / xHTTP) + `route.final="vless-out"`. Это значит ВЕСЬ трафик
+клиента — включая Госуслуги, банки, маркетплейсы — уходил в VPN-туннель.
+
+Российские антифрод-системы видят «иностранный» IP клиента и:
+  - Госуслуги: требуют подтверждение по СНИЛС / блокируют вход
+  - WB / Ozon: показывают капчу / запрещают оплату картой РФ
+  - Детский Мир: показывают «войдите с российского IP»
+
+Пользователь на Podkop/OpenWrt мог вручную прописать `.srs` URL'ы в поле
+«Наборы правил», но при первой же опечатке в имени репозитория все URL'ы
+возвращали HTTP 404 (распространённая опечатка: `hydraronique/roscomprn-geosite`
+вместо правильного `hydraponique/roscomvpn-geosite`).
+
+### Решение — модуль `singbox_client_rulesets.py`
+
+Создан новый модуль `chimera/modules/singbox_client_rulesets.py` (≈380 строк):
+  - **Каталог из 8 ruleset'ов** с правильными URL'ами на `cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geosite@HEAD/release/sing-box/<name>.srs`
+  - **Дефолтный набор** из 3 ruleset'ов: `ru-direct` (РФ → direct),
+    `geoblock-ru-proxy` (заблокированные → proxy), `private-direct` (приватные → direct)
+  - **TUI-меню** «Sing-box rulesets для Podkop / OpenWrt» — вкл/выкл фичу,
+    выбор ruleset'ов по номеру, сброс к дефолту
+  - **Идемпотентная инъекция** `inject_route_rulesets(config, proxy_outbound_tag)` —
+    добавляет `route.rule_set` (binary format, download_detour=proxy) и
+    `route.rules` (сгруппированные по action: direct/proxy)
+  - **Опционально и выключено по умолчанию** — обратная совместимость 100%
+
+### Интеграция в 3 места
+
+Один и тот же `inject_route_rulesets()` вызывается из:
+  1. `subscription.build_subscription_singbox_config(user)` — sing-box JSON для подписки `?format=singbox`
+  2. `rest_api._generate_singbox_config(user)` — sing-box JSON для `/api/portal/singbox`
+  3. `client_config_export.do_generate_client_config()` — файл `/root/xray-client-configs/sing-box.json`
+
+Каждая точка обёрнута в `try/except` — если фича недоступна или упала,
+конфиг возвращается без `route.rule_set` (graceful degradation). Hiddify JSON
+НЕ получает инъекцию — он использует схему `routing → rules` (отличается от
+sing-box `route → rule_set/rules`), mixing вызвал бы путаницу.
+
+### TUI путь
+
+Главное меню → **2 Управление пользователями** → **R Sing-box rulesets**
+
+### Что меняется для пользователя
+
+- **По умолчанию — НИЧЕГО.** Существующие конфиги остаются такими же, как
+  раньше (только `outbounds`).
+- **После включения в TUI** — sing-box клиентский конфиг будет содержать:
+  ```json
+  "route": {
+    "final": "vless-out",
+    "rule_set": [
+      {"type": "remote", "tag": "ru-direct", "format": "binary",
+       "url": "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geosite@HEAD/release/sing-box/category-ru.srs",
+       "download_detour": "vless-out"},
+      ...
+    ],
+    "rules": [
+      {"rule_set": ["ru-direct", "private-direct"], "outbound": "direct"},
+      {"rule_set": ["geoblock-ru-proxy"], "outbound": "vless-out"}
+    ]
+  }
+  ```
+- Podkop при импорте подписки `?format=singbox` автоматически подхватит
+  эти ruleset'ы — Госуслуги/WB/Ozon/ДМ пойдут напрямую, заблокированные
+  зарубежные сервисы — через VPN.
+
+### Тесты
+
+29 новых тестов в `tests/test_singbox_client_rulesets.py`:
+  - Структура каталога и корректность URL'ов (защита от опечатки `hydraronique`)
+  - Чтение/запись state.json, атомарность, сохранение других полей
+  - Идемпотентность инъекции
+  - Обратная совместимость (фича выключена — конфиг не меняется)
+  - Интеграция с `subscription.build_subscription_singbox_config`
+  - Интеграция с `rest_api._generate_singbox_config`
+
+Все 213 существующих тестов в `test_subscription_*`, `test_rest_api_*`,
+`test_client_config_export` проходят без регрессий.
+
+### Файлы
+
+- **NEW** `chimera/modules/singbox_client_rulesets.py` (≈380 строк)
+- **MOD** `chimera/modules/subscription.py` (+10 строк в `build_subscription_singbox_config`)
+- **MOD** `chimera/modules/rest_api.py` (+18 строк в `_generate_singbox_config`)
+- **MOD** `chimera/modules/client_config_export.py` (+15 строк, реорганизован порядок hiddify→singbox)
+- **MOD** `chimera/_core.py` (+12 строк, новый пункт меню «R» в подменю клиентов)
+- **NEW** `tests/test_singbox_client_rulesets.py` (29 тестов)
+
+---
+
 ## FEAT(panels): domain support (Let's Encrypt) для всех панелей + port_registry — 15 августа 2026
 
 **Раньше все панели Chimera поддерживали только self-signed TLS (по IP).
