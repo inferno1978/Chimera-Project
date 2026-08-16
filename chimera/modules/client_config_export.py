@@ -264,14 +264,31 @@ def do_generate_client_config() -> None:
     vless_link_file = out_dir / "vless-link.txt"
 
     clash_file.write_text(clash_proxy)
-    singbox_file.write_text(json.dumps(singbox, indent=2, ensure_ascii=False))
 
     # --- Hiddify JSON --- (тот же формат что sing-box, с routing)
-    hiddify_config = dict(singbox)
+    # ВАЖНО: Hiddify-копия создаётся ДО инъекции singbox_client_rulesets.
+    # Hiddify использует схему routing → rules (отличается от sing-box
+    # route → rule_set/rules). Если бы инъекция попала в Hiddify-конфиг,
+    # mixing схем вызвал бы путаницу. Поэтому: shallow-copy делаем сейчас,
+    # инъекцию в singbox — ниже, после записи hiddify.json.
+    hiddify_config = {**singbox}
     hiddify_config["routing"] = {
         "rules": [{"type": "default", "outbound": "vless-out"}]
     }
     hiddify_file.write_text(json.dumps(hiddify_config, indent=2, ensure_ascii=False))
+
+    # --- Sing-box JSON ---
+    # singbox_client_rulesets: опциональная инъекция route.rule_set + rules
+    # с готовыми .srs-списками для Podkop/OpenWrt (РФ-домены → direct и т.д.).
+    # По умолчанию ВЫКЛЮЧЕНО — обратная совместимость 100%.
+    # См. chimera/modules/singbox_client_rulesets.py
+    try:
+        from chimera.modules.singbox_client_rulesets import inject_route_rulesets
+        inject_route_rulesets(singbox, "vless-out")
+    except Exception as _e:
+        log_to_file("WARN", f"singbox_client_rulesets.inject failed: {_e}")
+
+    singbox_file.write_text(json.dumps(singbox, indent=2, ensure_ascii=False))
 
     # --- VLESS-ссылка --- (plain text, для импорта в v2rayN/Karing/NekoBox)
     if proto == "reality":

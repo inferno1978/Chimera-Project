@@ -245,6 +245,7 @@
 | Файл | За что отвечает |
 |---|---|
 | `client_config_export.py` | Генерация Clash Meta YAML + Sing-box JSON + VLESS-ссылки + SFTP push + one-time HTTP share с QR-кодами |
+| `singbox_client_rulesets.py` | Готовые `.srs` ruleset'ы для sing-box клиентских конфигов (Podkop/OpenWrt). Каталог из 8 ruleset'ов с URL'ами на `hydraponique/roscomvpn-geosite`. По умолчанию ВЫКЛЮЧЕНО — обратная совместимость 100%. При включении в TUI добавляет `route.rule_set` + `route.rules` в sing-box JSON: `category-ru.srs` → direct (Госуслуги/WB/Ozon/ДМ мимо VPN), `category-geoblock-ru.srs` → proxy (заблокированные в РФ через VPN), `whitelist.srs` → direct. Идемпотентная инъекция через `inject_route_rulesets(config, proxy_outbound_tag)`. |
 
 ---
 

@@ -703,6 +703,18 @@ def build_subscription_singbox_config(user: dict) -> str:
             "final": outbounds[0].get("tag", "direct"),
         },
     }
+
+    # singbox_client_rulesets: опциональная инъекция route.rule_set + rules
+    # с готовыми .srs-списками для Podkop/OpenWrt (РФ-домены → direct,
+    # заблокированные → proxy). По умолчанию ВЫКЛЮЧЕНО — обратная совместимость
+    # 100%: без этой опции конфиг остаётся таким же, как до патча.
+    # См. chimera/modules/singbox_client_rulesets.py
+    try:
+        from chimera.modules.singbox_client_rulesets import inject_route_rulesets
+        inject_route_rulesets(config, outbounds[0].get("tag", "vless-out"))
+    except Exception as _e:
+        _log("WARN", f"singbox_client_rulesets.inject failed: {_e}")
+
     return _json.dumps(config, indent=2, ensure_ascii=False)
 
 
