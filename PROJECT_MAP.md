@@ -47,7 +47,7 @@
 | `credential_rotation.py` | Ротация UUID (cron) + REALITY-ключей (x25519 + ShortID) + меню `_menu_rotation` |
 | `user_fp_manager.py` | Управление TLS fingerprint'ами пользователей |
 | `fingerprint_manager.py` | Список поддерживаемых fingerprint'ов + `prompt_fingerprint` |
-| `subscription.py` | Генерация подписок (subscription links) для клиентов |
+| `subscription.py` | Генерация подписок (subscription links) для клиентов + единый HTTP-сервер на 0.0.0.0:8443 (свой TLS от LE). **Пункт меню «7. nginx front (TLS)»** — прямой доступ по домену/IP через nginx (LE или self-signed), backend переводится на 127.0.0.1 (loopback). Регистрация через `port_registry.SERVICE_SUBSCRIPTION_NGINX`. |
 
 ---
 
