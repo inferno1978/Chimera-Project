@@ -899,6 +899,23 @@ def _generate_singbox_config(user: dict) -> str:
             }]
         }
 
+    # singbox_client_rulesets: опциональная инъекция route.rule_set + rules
+    # с готовыми .srs-списками для Podkop/OpenWrt (РФ-домены → direct и т.д.).
+    # По умолчанию ВЫКЛЮЧЕНО — обратная совместимость 100%.
+    # См. chimera/modules/singbox_client_rulesets.py
+    try:
+        from chimera.modules.singbox_client_rulesets import inject_route_rulesets
+        inject_route_rulesets(config, "vless-out")
+    except Exception as _e:
+        # Никогда не должен ронять генерацию конфига — фича опциональна.
+        # Логируем и продолжаем с config без ruleset'ов.
+        try:
+            core = _core_module()
+            if hasattr(core, "log_to_file"):
+                core.log_to_file("WARN", f"singbox_client_rulesets.inject failed: {_e}")
+        except Exception:
+            pass
+
     return json.dumps(config, indent=2, ensure_ascii=False)
 
 

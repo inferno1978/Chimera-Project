@@ -7050,6 +7050,7 @@ def _menu_users() -> None:
         _box_item("H", f"🔁 Единая подписка  {DIM}(все транспорты в одном URL){NC}")
         _box_item("M", f"🪞 Entry Mirrors  {DIM}(резервные точки входа){NC}")
         _box_item("K", f"📱 iOS/Karing-ссылки  {DIM}(сводный экран, без Vision flow){NC}")
+        _box_item("R", f"🌐 Sing-box rulesets  {DIM}(Podkop/OpenWrt: РФ → direct, заблок. → proxy){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -7113,6 +7114,18 @@ def _menu_users() -> None:
                 continue
             generate_client_links_ios()
             input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch.lower() == "r":
+            try:
+                from chimera.modules.singbox_client_rulesets import (
+                    do_manage_singbox_rulesets,
+                )
+                do_manage_singbox_rulesets()
+            except ImportError as _e:
+                warn(f"Модуль singbox_client_rulesets не найден: {_e}")
+                time.sleep(2)
+            except Exception as _e:
+                warn(f"Ошибка в singbox_client_rulesets: {_e}")
+                time.sleep(2)
         elif ch.lower() == "q" or ch == "":
             break
         else:
