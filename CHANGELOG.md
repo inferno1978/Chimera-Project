@@ -2,6 +2,106 @@
 
 ---
 
+## FEAT(subscription): nginx front (TLS) — прямой доступ к подписке по домену/IP — 16 августа 2026
+
+**Раньше подписка (subscription.py) слушала на 0.0.0.0:8443 с собственным TLS-стеком
+на Python (переиспользовала LE-сертификат от PARAM_DOMAIN). Это работало, но:
+  - Не было выбора между «прямой доступ по домену» / «по IP» / «только loopback + nginx front»
+  - Не было интеграции с port_registry для порта nginx front
+  - Не было унифицированного TUI-меню как у User Portal (пункт 7) и Telemt Panel
+
+Теперь у подписки есть пункт «7. nginx front (TLS)» — аналогично другим панелям.
+При включении nginx front: backend переходит на 127.0.0.1 (loopback), nginx
+терминирует TLS на отдельном порту (default 9444) с LE или self-signed сертификатом.**
+
+### Что добавлено
+
+**1. Новый сервис-тег `SERVICE_SUBSCRIPTION_NGINX`** в `port_registry.py` — для
+nginx front подписки. Регистрируется через `panel_nginx_front.panel_nginx_front_install()`
+с автоматической проверкой конфликтов (registry + system + ufw + /etc/services).
+
+**2. Функции управления nginx front в `subscription.py`:**
+  - `_sub_nginx_status()` — чтение состояния из `_SUB_NGINX_STATE_FILE`
+  - `_sub_nginx_install(port, use_self_signed, domain)` — установка через `panel_nginx_front`
+  - `_sub_nginx_remove()` — удаление + возврат backend на 0.0.0.0
+  - `_sub_nginx_get_url(token)` — генерация URL с учётом nginx front
+  - `_sub_backend_bind_loopback()` — переключение backend на 127.0.0.1 через `SUB_LISTEN_HOST` env
+  - `_sub_backend_bind_public()` — возврат backend на 0.0.0.0 (обратная совместимость)
+
+**3. `serve()` читает `SUB_LISTEN_HOST` из окружения** — переключение
+0.0.0.0 ↔ 127.0.0.1 без правки кода. Unit-файл прокидывает `Environment=SUB_LISTEN_HOST=127.0.0.1`
+при включении nginx front.
+
+**4. Пункт меню «7. nginx front (TLS)»** в `do_subscription_menu()`:
+  - При выключении — показывает текущий режим, предлагает включить
+  - При включении — спрашивает порт (default 9444), режим TLS (LE / self-signed), домен
+  - При включённом — показывает состояние + предлагает выключить
+
+**5. Обновлённый показ URL'ов** (пункт 2 меню) — при включённом nginx front URL'ы
+меняются с `https://<домен>:8443/sub/<token>` на `https://<домен>:9444/sub/<token>`.
+
+**6. `uninstall_subscription_service()` теперь также снимает nginx front** — иначе
+оставался orphaned vhost + открытый порт, и подписка всё равно не отвечала (backend
+мёртв, nginx проксирует в никуда).
+
+### Поведение
+
+| Состояние | Backend | nginx front | URL | UFW |
+|---|---|---|---|---|
+| nginx front OFF (дефолт) | 0.0.0.0:8443 (свой TLS) | нет | `https://<домен>:8443/sub/<token>` | 8443/tcp открыт |
+| nginx front ON, LE | 127.0.0.1:8443 (loopback) | 0.0.0.0:9444 (LE TLS) | `https://<домен>:9444/sub/<token>` | 9444/tcp открыт, 8443 закрыт |
+| nginx front ON, self-signed | 127.0.0.1:8443 (loopback) | 0.0.0.0:9444 (self-signed) | `https://<IP>:9444/sub/<token>` | 9444/tcp открыт, 8443 закрыт |
+
+### Обратная совместимость
+
+- **По умолчанию ничего не меняется.** Если nginx front не включён — подписка
+  работает как раньше (0.0.0.0:8443, свой TLS).
+- **Старые URL продолжают работать** до тех пор, пока администратор явно не
+  включит nginx front.
+- **При выключении nginx front** backend автоматически возвращается на 0.0.0.0
+  и старые URL снова работают.
+
+### TUI путь
+
+Главное меню → **2 Управление пользователями** → **H Единая подписка** → **7 nginx front (TLS)**
+
+### Аудит port_registry
+
+Заодно провёл полный аудит использования `port_registry` по всем модулям:
+- ✅ **Все основные сервисы** (VLESS, Hysteria2, AWG, NaiveProxy, Mieru, TrustTunnel,
+  Telemt, FPTN, WDTT, Web Panel, Subscription, sing-box, WebDAV, Port hopping, olcRTC)
+  корректно используют `port_register` / `port_unregister` / `ufw_open_port` / `ufw_close_port`.
+- ✅ **Одноразовые share-серверы** (`client_config_export.do_share_config_server`,
+  `fragment_share`) — корректно открывают и закрывают порт в `finally` блоке
+  (один просмотр / 5 минут).
+- ✅ **deny-rules** (`autoban`, `honeypot`, `ingress_geoip`) — не нуждаются в
+  port_registry (это блокировка IP, не открытие портов).
+- ✅ **SSH hardening** — намеренно не мигрирован (критичная операция, см. README).
+- ✅ **awg_transport** — UFW выполняется на REMOTE сервере через SSH (не локальный).
+
+### Тесты
+
+21 новый тест в `tests/test_subscription_nginx_front.py`:
+  - `SERVICE_SUBSCRIPTION_NGINX` существует в port_registry
+  - Константы (`DEFAULT_SUB_NGINX_PORT`, `_SUB_NGINX_STATE_FILE`, `_SUB_NGINX_SITE_NAME`)
+  - `_sub_nginx_status()` — чтение состояния (вкл/выкл/битый JSON)
+  - `serve()` читает `SUB_LISTEN_HOST` (0.0.0.0 по умолчанию, 127.0.0.1 если задано)
+  - `_sub_nginx_get_url()` — URL генерация с учётом nginx front
+  - `_sub_nginx_install()` — вызов `panel_nginx_front_install` с правильными параметрами
+  - `_sub_backend_bind_loopback()` — добавление `SUB_LISTEN_HOST` в unit-файл (идемпотентно)
+  - `_sub_backend_bind_public()` — удаление `SUB_LISTEN_HOST` из unit-файла
+  - `uninstall_subscription_service()` — вызывает `_sub_nginx_remove()` при полном удалении
+
+Все 296 связанных тестов проходят без регрессий.
+
+### Файлы
+
+- **MOD** `chimera/modules/port_registry.py` (+2 строки, новый `SERVICE_SUBSCRIPTION_NGINX`)
+- **MOD** `chimera/modules/subscription.py` (+200 строк, функции nginx front + пункт меню)
+- **NEW** `tests/test_subscription_nginx_front.py` (21 тест)
+
+---
+
 ## FEAT(singbox_client_rulesets): Podkop/OpenWrt split-tunneling для РФ-сервисов — 16 августа 2026
 
 **Пользователи Chimera на Podkop/OpenWrt жаловались что Госуслуги, Wildberries,
