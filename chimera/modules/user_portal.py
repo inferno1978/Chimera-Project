@@ -448,6 +448,7 @@ body {{
       <button class="tab active" data-tab="connect" onclick="switchTab('connect')">🔗 Подключение</button>
       <button class="tab" data-tab="subscription" id="tab-subscription" style="display:none" onclick="switchTab('subscription')">📚 Подписка</button>
       <button class="tab" data-tab="awg" id="tab-awg" style="display:none" onclick="switchTab('awg')">🛡 AmneziaWG</button>
+      <button class="tab" data-tab="satellites" id="tab-satellites" style="display:none" onclick="switchTab('satellites')">🛰 Сателлиты</button>
       <button class="tab" data-tab="traffic" onclick="switchTab('traffic')">📊 Трафик</button>
       <button class="tab" data-tab="system" onclick="switchTab('system')">🖥 Сервер</button>
       <button class="tab" data-tab="downloads" onclick="switchTab('downloads')">📥 Конфиги</button>
@@ -481,6 +482,16 @@ body {{
     <div class="card" id="awg-card">
       <div class="card-title">🛡 Мой AmneziaWG</div>
       <div id="awg-container">
+        <div class="loading"><span class="spinner"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB: Satellites (Mieru/NaiveProxy/Telemt/TrustTunnel/sing-box) -->
+  <div class="tab-panel" id="panel-satellites">
+    <div class="card" id="sat-card" style="display:none">
+      <div class="card-title">🛰 Сателлиты</div>
+      <div id="sat-container">
         <div class="loading"><span class="spinner"></span></div>
       </div>
     </div>
@@ -1081,16 +1092,145 @@ async function regenMyAWG() {{
   }}
 }}
 
+// ── Load satellites (Mieru/Naive/Telemt/TrustTunnel/sing-box) ─────────
+async function loadSatellites() {{
+  let info, sug;
+  try {{
+    [info, sug] = await Promise.all([
+      api('/api/portal/sat-info'),
+      api('/api/portal/sat-suggest'),
+    ]);
+  }} catch (e) {{ return; }}
+  if (!info || !sug) return;
+
+  // sats — текущие привязки юзера
+  const sats = (info.satellites || []);
+  // suggestions — все 5 сателлитов со скан-логинами
+  const sugs = (sug.suggestions || []);
+
+  // Таб «Сателлиты» показываем если есть хоть одна привязка ИЛИ есть
+  // доступные логины для авто-привязки.
+  const hasAnything = sats.length > 0 || sugs.some(s => s.available_logins && s.available_logins.length > 0);
+  const card = document.getElementById('sat-card');
+  const satTab = document.getElementById('tab-satellites');
+  if (card) card.style.display = hasAnything ? 'block' : 'none';
+  if (satTab) satTab.style.display = hasAnything ? '' : 'none';
+  if (!hasAnything) return;
+
+  const container = document.getElementById('sat-container');
+  let html = '';
+
+  // ── Текущие привязки ─────────────────────────────────────────────
+  if (sats.length > 0) {{
+    html += '<div style="margin-bottom:16px"><strong style="color:var(--accent-light)">✅ Привязанные сателлиты:</strong></div>';
+    html += '<div style="display:flex; flex-direction:column; gap:10px">';
+    for (const s of sats) {{
+      const status = s.active
+        ? '<span style="color:var(--green)">● активен</span>'
+        : '<span style="color:var(--red)">● логин не найден</span>';
+      html += `
+        <div style="padding:12px; background:rgba(15,23,42,0.5); border-radius:10px; border:1px solid var(--border)">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px">
+            <div>
+              <strong>${{s.label}}</strong>
+              <div style="font-size:0.82rem; color:var(--text-dim); margin-top:2px">Логин: <code>${{s.login}}</code></div>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center">
+              ${{status}}
+              <button class="btn btn-ghost" style="padding:6px 12px; font-size:0.82rem" onclick="unbindSatellite('${{s.satellite}}')">Отвязать</button>
+            </div>
+          </div>
+        </div>`;
+    }}
+    html += '</div>';
+  }}
+
+  // ── Доступные для привязки (auto-suggest) ─────────────────────────
+  const available = sugs.filter(s => s.available_logins && s.available_logins.length > 0 && !sats.some(x => x.satellite === s.satellite));
+  if (available.length > 0) {{
+    html += `<div style="margin-top:20px; margin-bottom:16px"><strong style="color:var(--accent-light)">🔗 Доступные для привязки:</strong></div>`;
+    for (const s of available) {{
+      const matched = s.matched_login;
+      const options = s.available_logins.map((login, i) => {{
+        const isMatch = login === matched;
+        return `<option value="${{login}}" ${{isMatch ? 'selected' : ''}}>${{login}}${{isMatch ? ' (совпадает с именем)' : ''}}</option>`;
+      }}).join('');
+      html += `
+        <div style="padding:12px; background:rgba(15,23,42,0.5); border-radius:10px; border:1px solid var(--border); margin-bottom:10px">
+          <div style="margin-bottom:8px"><strong>${{s.satellite_label}}</strong></div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+            <select class="input-field" id="sat-select-${{s.satellite}}" style="flex:1; min-width:180px; margin:0; padding:8px 12px">
+              ${{options}}
+            </select>
+            <button class="btn btn-primary" style="padding:8px 16px" onclick="bindSatellite('${{s.satellite}}')">Привязать</button>
+          </div>
+        </div>`;
+    }}
+  }}
+
+  if (sats.length === 0 && available.length === 0) {{
+    html += '<div style="padding:20px; text-align:center; color:var(--text-dim)">Нет доступных сателлитов для привязки.<br>Установите хотя бы один (Mieru/NaiveProxy/Telemt/TrustTunnel/sing-box) через меню установщика.</div>';
+  }}
+
+  html += `<div style="margin-top:16px; padding:12px; background:rgba(15,23,42,0.5); border-radius:10px; font-size:0.82rem; color:var(--text-dim); line-height:1.6">
+    <strong style="color:var(--accent-light)">ℹ️ Что это:</strong><br>
+    Сателлиты — дополнительные протоколы (Mieru, NaiveProxy, MTProto/Telemt, TrustTunnel, sing-box) с отдельными логинами. Привяжите логин к своему аккаунту, и он автоматически попадёт в вашу подписку — клиентские приложения получат все ссылки одним списком.
+  </div>`;
+
+  container.innerHTML = html;
+}}
+
+async function bindSatellite(satellite) {{
+  const sel = document.getElementById('sat-select-' + satellite);
+  if (!sel) return;
+  const login = sel.value;
+  if (!login) {{ showToast('Выберите логин', 'error'); return; }}
+  const res = await fetch('/api/portal/sat-bind', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    credentials: 'same-origin',
+    body: JSON.stringify({{ satellite, login }}),
+  }});
+  const data = await res.json();
+  if (data.status === 'bound') {{
+    showToast('Привязано: ' + (data.satellite || satellite));
+    loadSatellites();
+    loadSubscription();  // подписка обновится — там появятся новые ссылки
+  }} else {{
+    showToast(data.error || 'Ошибка', 'error');
+  }}
+}}
+
+async function unbindSatellite(satellite) {{
+  if (!confirm('Отвязать сателлит «' + satellite + '»? Связь будет удалена, логин останется в системе.')) return;
+  const res = await fetch('/api/portal/sat-unbind', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    credentials: 'same-origin',
+    body: JSON.stringify({{ satellite }}),
+  }});
+  const data = await res.json();
+  if (data.status === 'unbound') {{
+    showToast('Отвязано');
+    loadSatellites();
+    loadSubscription();
+  }} else {{
+    showToast(data.error || 'Ошибка', 'error');
+  }}
+}}
+
 // ── Init ────────────────────────────────────────────────────────────────────
 loadLinks();
 loadSubscription();
 loadTraffic();
 loadHealth();
 loadMyAWG();
+loadSatellites();
 loadMyIPs();
 setInterval(loadHealth, 30000);
 setInterval(loadTraffic, 60000);
 setInterval(loadMyAWG, 60000);
+setInterval(loadSatellites, 60000);
 </script>
 </body>
 </html>'''

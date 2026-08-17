@@ -323,10 +323,30 @@ def _identity_overrides() -> dict:
 
 def _match_by_name(user: dict, satellite: str, pool_keys) -> Optional[str]:
     """Возвращает ключ (имя/логин) в pool_keys, соответствующий этому
-    UUID-пользователю: сначала ручной override, потом эвристика по имени."""
-    override = _identity_overrides().get(user.get("uuid", ""), {}).get(satellite)
+    UUID-пользователю.
+
+    Приоритет:
+      1. subscription.json → identity_map[uuid][satellite]  (manual override)
+      2. satellite_bindings.json → find_login(uuid, satellite)  (CRUD, canon)
+      3. Эвристика по имени (старый fallback, 100% backward compat)
+
+    Шаг 2 — канонический путь, добавленный в v5 вместе с модулем
+    satellite_bindings. Шаги 1 и 3 сохранены как escape-hatch и для
+    инсталляций без side-table."""
+    uuid_str = user.get("uuid", "")
+    # 1. identity_map (manual override).
+    override = _identity_overrides().get(uuid_str, {}).get(satellite)
     if override and override in pool_keys:
         return override
+    # 2. satellite_bindings (canon).
+    try:
+        from chimera.modules import satellite_bindings as _sb
+        bound = _sb.resolve_login(user, satellite, pool_keys)
+        if bound and bound in pool_keys:
+            return bound
+    except ImportError:
+        pass
+    # 3. Heuristics by name.
     candidates = _candidate_names(user)
     for key in pool_keys:
         if key.strip().lower() in candidates:
@@ -1865,7 +1885,7 @@ def do_subscription_menu() -> None:
         _box_item("2", "🔗 Показать ссылки подписки для всех пользователей")
         _box_item("3", f"🔄 Сгенерировать pepper заново  {DIM}(инвалидирует все ссылки){NC}")
         _box_item("4", "🛑 Выключить сервис")
-        _box_item("5", f"🧩 Привязать сателлитные логины к UUID  {DIM}(Mieru/Naive/Telemt/TrustTunnel/sing-box){NC}")
+        _box_item("5", f"🧩 Привязка сателлитов к UUID  {DIM}(Mieru/Naive/Telemt/TrustTunnel/sing-box, авто-скан){NC}")
         _box_item("6", f"{RED}🗑️  Удалить полностью{NC}")
         if nginx_front_enabled:
             _box_item("7", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}(вернуть на 0.0.0.0:{cfg.get('listen_port', DEFAULT_PORT)}){NC}")
@@ -2164,9 +2184,34 @@ def do_subscription_menu() -> None:
 
 
 def _do_identity_map_menu(cfg: dict) -> None:
+    """Пункт 5: привязка сателлитных логинов к UUID пользователя.
+
+    Новая реализация (v5): использует satellite_bindings.json (canon CRUD).
+    Старый identity_map в subscription.json остаётся как escape-hatch
+    (приоритет выше), но новая секция показывает оба источника и
+    предлагает авто-привязку по совпадению имени/UUID.
+
+    UX:
+      1. Выбор пользователя из списка.
+      2. Авто-сканирование всех 5 сателлитов + предложения привязки
+         (matched_login по email-local-part / name / UUID).
+      3. Per-satellite меню: принять предложение / выбрать из списка /
+         снять привязку.
+    """
+    try:
+        from chimera.modules import satellite_bindings as _sb
+    except ImportError as _e:
+        _err(f"Модуль satellite_bindings недоступен: {_e}")
+        input(f"\n{BOLD}Enter…{NC}")
+        return
+
     users = [u for u in _load_all_users() if u.get("uuid")]
     os.system("clear")
-    _box_top("🧩  ПРИВЯЗКА САТЕЛЛИТНЫХ ЛОГИНОВ К UUID")
+    _box_top("🧩  ПРИВЯЗКА САТЕЛЛИТОВ К ПОЛЬЗОВАТЕЛЯМ")
+    _box_row()
+    _box_row(f"  {DIM}Per-user привязка Mieru/NaiveProxy/Telemt/TrustTunnel/sing-box.{NC}")
+    _box_row(f"  {DIM}Канонический путь — satellite_bindings.json.{NC}")
+    _box_row(f"  {DIM}Identity map (legacy) остаётся как escape-hatch (приоритет выше).{NC}")
     _box_row()
     if not users:
         _box_warn_line("Нет пользователей.")
@@ -2176,59 +2221,137 @@ def _do_identity_map_menu(cfg: dict) -> None:
         return
 
     for i, u in enumerate(users, 1):
+        n_bind = len(_sb.list_for_user(u["uuid"]))
+        bind_label = f"{GREEN}({n_bind} привязок){NC}" if n_bind else f"{DIM}(нет привязок){NC}"
         _box_row(f"  {DIM}{i}.{NC} {WHITE}{u.get('email', u.get('name','?'))}{NC}  "
-                  f"{DIM}[{u['uuid'][:8]}…]{NC}")
+                  f"{DIM}[{u['uuid'][:8]}…]{NC}  {bind_label}")
     _box_row()
     _box_back()
     _box_bottom()
 
     try:
-        idx = int(input("Номер пользователя: ").strip()) - 1
+        idx = int(input(f"{CYAN}Номер пользователя:{NC} ").strip()) - 1
         target = users[idx]
-    except (ValueError, IndexError):
-        _warn("Неверный номер.")
+    except (ValueError, IndexError, KeyboardInterrupt, EOFError):
+        _warn("Отменено.")
         input(f"\n{BOLD}Enter…{NC}")
         return
 
-    mieru_pool = set()
-    if _MIERU_STATE.exists():
-        mieru_pool |= {u["username"] for u in json.loads(_MIERU_STATE.read_text()).get("users", [])}
-    if _MITA_HYBRID_CFG.exists():
-        mieru_pool |= {u["name"] for u in json.loads(_MITA_HYBRID_CFG.read_text()).get("users", [])}
-    naive_pool = set()
-    if _NAIVE_STATE.exists():
-        naive_pool |= {u["username"] for u in json.loads(_NAIVE_STATE.read_text()).get("users", [])}
-    telemt_cfg = _parse_telemt_toml()
-    telemt_pool = set(telemt_cfg["users"].keys()) if telemt_cfg else set()
-
+    # Авто-предложения привязок.
+    suggestions = _sb.suggest_for_user(target)
     os.system("clear")
     _box_top(f"🧩  {target.get('email', target.get('name','?'))}")
     _box_row()
-    _box_row(f"  Mieru доступные:      {', '.join(sorted(mieru_pool)) or '—'}")
-    _box_row(f"  NaiveProxy доступные: {', '.join(sorted(naive_pool)) or '—'}")
-    _box_row(f"  Telemt доступные:     {', '.join(sorted(telemt_pool)) or '—'}")
+    _box_row(f"  {DIM}UUID: {target['uuid']}{NC}")
     _box_row()
+
+    # ── Показ предложений и текущих привязок ─────────────────────────
+    _box_row(f"  {BOLD}Сателлит         Текущая привязка    Предложение{NC}")
+    _box_row()
+    for sug in suggestions:
+        sat = sug["satellite"]
+        label = sug["satellite_label"][:24]
+        cur = sug.get("current_binding") or f"{DIM}—{NC}"
+        matched = sug.get("matched_login")
+        if matched:
+            prop = f"{GREEN}{matched}{NC}"
+        elif sug.get("available_logins"):
+            prop = f"{YELLOW}(выбрать из {len(sug['available_logins'])}){NC}"
+        else:
+            prop = f"{DIM}нет логинов{NC}"
+        _box_row(f"  {label:<16}  {cur:<20}  →  {prop}")
+    _box_row()
+    _box_row(f"  {DIM}Действия:{NC}")
+    _box_item("1", "✅ Принять все предложения (авто-привязка)")
+    _box_item("2", "✏️  Выбрать привязки вручную (per-satellite)")
+    _box_item("3", "🧹 Снять все привязки этого пользователя")
+    _box_item("4", "📋 Показать identity_map (legacy escape-hatch)")
+    _box_row()
+    _box_back()
     _box_bottom()
 
-    m = input("Mieru логин (Enter — пропустить): ").strip()
-    n = input("NaiveProxy логин (Enter — пропустить): ").strip()
-    t = input("Telemt логин (Enter — пропустить): ").strip()
+    try:
+        sub_ch = input(f"{CYAN}Выбор:{NC} ").strip()
+    except (KeyboardInterrupt, EOFError):
+        return
 
-    idmap = cfg.setdefault("identity_map", {})
-    entry = idmap.setdefault(target["uuid"], {})
-    if m: entry["mieru"] = m
-    if n: entry["naive"] = n
-    if t: entry["telemt"] = t
-    # Новые сателлиты: TrustTunnel и sing-box протоколы (shadowtls/anytls/tuic).
-    # Для TrustTunnel matching идёт по email (не по name), но identity_map
-    # можно использовать для ручного override если email не совпадает.
-    tt = input("TrustTunnel логин/email (Enter — пропустить): ").strip()
-    sb = input("sing-box (shadowtls/anytls/tuic) имя (Enter — пропустить): ").strip()
-    if tt: entry["trusttunnel"] = tt
-    if sb: entry["singbox"] = sb
-    _save_sub_conf(cfg)
-    _ok("Привязка сохранена.")
-    input(f"\n{BOLD}Enter…{NC}")
+    if sub_ch == "1":
+        # Авто-привязка всех matched.
+        bound = 0
+        for sug in suggestions:
+            if sug.get("matched_login"):
+                if _sb.set_binding(
+                    satellite=sug["satellite"],
+                    login=sug["matched_login"],
+                    owner_uuid=target["uuid"],
+                    owner_email=target.get("email", ""),
+                ):
+                    bound += 1
+        _ok(f"Привязано {bound} сателлитов.")
+        input(f"\n{BOLD}Enter…{NC}")
+
+    elif sub_ch == "2":
+        # Per-satellite ручной выбор.
+        for sug in suggestions:
+            sat = sug["satellite"]
+            label = sug["satellite_label"]
+            logins = sug.get("available_logins") or []
+            cur = sug.get("current_binding")
+            if not logins:
+                _warn(f"{label}: нет установленных логинов — пропускаю.")
+                continue
+            print()
+            print(f"  {BOLD}{label}{NC} {DIM}([Enter] = оставить «{cur or '—'}», 0 = снять, ? = список){NC}")
+            for j, lg in enumerate(logins[:10], 1):
+                marker = f" {GREEN}← текущая{NC}" if lg == cur else ""
+                print(f"    {DIM}{j}.{NC} {lg}{marker}")
+            try:
+                v = input(f"  {CYAN}Выбор:{NC} ").strip()
+            except (KeyboardInterrupt, EOFError):
+                break
+            if v == "" or v.lower() == "?":
+                continue
+            if v == "0":
+                _sb.remove_binding(sat, target["uuid"])
+                _ok(f"{label}: привязка снята.")
+                continue
+            try:
+                idx_l = int(v) - 1
+                if 0 <= idx_l < len(logins):
+                    _sb.set_binding(sat, logins[idx_l],
+                                    target["uuid"], target.get("email", ""))
+                    _ok(f"{label}: привязан «{logins[idx_l]}».")
+                else:
+                    _warn("Неверный номер.")
+            except ValueError:
+                _warn("Неверный ввод.")
+        input(f"\n{BOLD}Enter…{NC}")
+
+    elif sub_ch == "3":
+        confirm = input(f"  {YELLOW}Снять все привязки пользователя? (y/N):{NC} ").strip().lower()
+        if confirm == "y":
+            n = _sb.remove_user(target["uuid"])
+            _ok(f"Снято {n} привязок.")
+        input(f"\n{BOLD}Enter…{NC}")
+
+    elif sub_ch == "4":
+        # Показать legacy identity_map.
+        os.system("clear")
+        _box_top(f"🧩  IDENTITY_MAP (LEGACY) — {target.get('email','?')}")
+        _box_row()
+        idmap = cfg.get("identity_map", {}).get(target["uuid"], {})
+        if not idmap:
+            _box_warn_line("Identity map пуст — все привязки идут через satellite_bindings.json.")
+        else:
+            for sat, login in idmap.items():
+                _box_row(f"  {sat:<14} → {login}")
+        _box_row()
+        _box_row(f"  {DIM}Identity map имеет ПРИОРИТЕТ над satellite_bindings.{NC}")
+        _box_row(f"  {DIM}Используется только как escape-hatch для edge cases.{NC}")
+        _box_row()
+        _box_back()
+        _box_bottom()
+        input(f"\n{BOLD}Enter…{NC}")
 
 
 if __name__ == "__main__":

@@ -330,6 +330,22 @@ tr:hover { background: rgba(56,189,248,0.05); }
     </table>
   </div>
 
+  <!-- Satellites section (per-user bindings: Mieru/NaiveProxy/Telemt/TrustTunnel/sing-box) -->
+  <div class="table-card" id="sat-section">
+    <h2>🛰 Сателлиты <button class="btn btn-sm btn-primary" onclick="loadSatellites()">↻</button></h2>
+    <div id="sat-admin-status" style="margin-bottom:16px">
+      <div class="loading"><span class="spinner"></span></div>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Сателлит</th><th>Логин</th><th>Пользователь</th><th>Действия</th></tr>
+      </thead>
+      <tbody id="sat-bindings-tbody">
+        <tr><td colspan="4" class="loading"><span class="spinner"></span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
   <!-- AmneziaWG section -->
   <div class="table-card" id="awg-section">
     <h2>🛡 AmneziaWG <button class="btn btn-sm btn-primary" onclick="loadAWG()">↻</button></h2>
@@ -1003,6 +1019,66 @@ async function modifyAWGPeer() {
   }
 }
 
+// ── Satellite bindings (admin CRUD) ─────────────────────────────────
+async function loadSatellites() {
+  const statusEl = document.getElementById('sat-admin-status');
+  const tbody = document.getElementById('sat-bindings-tbody');
+  const data = await api('/api/sat/info');
+  if (!data || data.error) {
+    statusEl.innerHTML = '<span style="color:#f87171">Ошибка загрузки</span>';
+    tbody.innerHTML = '';
+    return;
+  }
+  const labels = data.satellite_labels || {};
+  const bindings = data.bindings || [];
+  const available = data.available || {};
+
+  // Статус: кол-во привязок + доступные логины
+  const availableCount = Object.values(available).reduce((s, l) => s + l.length, 0);
+  statusEl.innerHTML = `<div style="font-size:0.9rem">
+    <span style="color:#4ade80">● ${bindings.length} привязок</span>
+    &nbsp;·&nbsp; <span style="opacity:0.7">${availableCount} логинов доступно</span>
+  </div>`;
+
+  if (!bindings.length) {
+    tbody.innerHTML = '<tr><td colspan="4" style="opacity:0.6">Нет привязок. Юзеры могут привязать сателлиты самостоятельно в User Portal → вкладка «Сателлиты», или через TUI установщика (раздел подписки → пункт 5).</td></tr>';
+    return;
+  }
+
+  // Загружаем список пользователей для маппинга UUID → email
+  const usersData = await api('/api/users');
+  const userMap = {};
+  if (usersData && usersData.users) {
+    for (const u of usersData.users) userMap[u.uuid] = u;
+  }
+
+  tbody.innerHTML = bindings.map(b => {
+    const u = userMap[b.owner_uuid] || {};
+    const email = esc(b.owner_email || u.email || b.owner_uuid.slice(0, 8) + '…');
+    const satLabel = esc(labels[b.satellite] || b.satellite);
+    return `
+      <tr>
+        <td>${satLabel} <span style="opacity:0.5;font-size:0.78rem">[${esc(b.satellite)}]</span></td>
+        <td><code style="font-size:0.78rem">${esc(b.login)}</code></td>
+        <td>${email}</td>
+        <td>
+          <button class="btn btn-danger btn-sm" onclick="unbindSatAdmin('${esc(b.satellite)}', '${esc(b.owner_uuid)}')">🗑 Отвязать</button>
+        </td>
+      </tr>`;
+  }).join('');
+}
+
+async function unbindSatAdmin(satellite, ownerUuid) {
+  if (!confirm('Отвязать «' + satellite + '» от пользователя?')) return;
+  const res = await api('/api/sat/unbind', 'POST', { satellite, owner_uuid: ownerUuid });
+  if (res && res.status === 'unbound') {
+    showToast('Отвязано');
+    loadSatellites();
+  } else {
+    showToast((res && res.error) || 'Ошибка', 'error');
+  }
+}
+
 // ── Subscription (единая подписка) ────────────────────────────────────
 async function loadSubscription() {
   const statusEl = document.getElementById('sub-status');
@@ -1042,6 +1118,7 @@ async function loadSubscription() {
 
 loadHealth();
 loadUsers();
+loadSatellites();
 loadSubscription();
 loadAWG();
 setInterval(loadHealth, 30000); // обновление каждые 30с
