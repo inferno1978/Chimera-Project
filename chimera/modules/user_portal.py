@@ -688,10 +688,10 @@ async function loadSubscription() {{
     <div class="qr-container">
       <img src="${{qrUrl}}" alt="QR подписки" loading="lazy">
     </div>
-    <div style="display:flex; gap:10px; flex-wrap:wrap">
-      <button class="btn btn-primary" style="flex:1;min-width:160px" onclick="copySubUrl()">📋 Копировать URL</button>
-      <a class="btn btn-ghost" href="/api/portal/sub-clash" download>mihomo (полный)</a>
-      <a class="btn btn-ghost" href="/api/portal/sub-singbox" download>sing-box (полный)</a>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:stretch">
+      <button class="btn btn-primary" style="flex:1 1 200px; min-width:200px" onclick="copySubUrl()">📋 Копировать URL</button>
+      <a class="btn btn-ghost" style="flex:1 1 200px; min-width:200px; display:inline-flex; justify-content:center" href="/api/portal/sub-clash" download>mihomo — полная конфигурация</a>
+      <a class="btn btn-ghost" style="flex:1 1 200px; min-width:200px; display:inline-flex; justify-content:center" href="/api/portal/sub-singbox" download>sing-box — полная конфигурация</a>
     </div>
     <div style="margin-top:12px;padding:12px;background:rgba(15,23,42,0.5);border-radius:10px;font-size:0.82rem;color:var(--text-dim);line-height:1.7">
       <strong style="color:var(--accent-light)">💡 Как использовать:</strong><br>
