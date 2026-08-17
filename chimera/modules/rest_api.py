@@ -1296,6 +1296,19 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             self._send_json({"backups": backups, "count": len(backups)})
             return
 
+        # GET /api/subscription/info — сводка подписки для Admin Panel:
+        # статус сервиса, базовый URL, per-user ссылки всех форматов,
+        # статус мульти-нод фичи и список нод (Mode B).
+        if path == "/api/subscription/info":
+            if not self._require_admin():
+                return
+            try:
+                from chimera.modules.subscription import get_admin_subscription_info
+                self._send_json(get_admin_subscription_info())
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
         # ── User Portal API (GET) ──────────────────────────────────────────────
         # links / traffic / health / clash / singbox — это GET-запросы (browser
         # шлёт fetch(path) без method). password — POST (меняет состояние).
@@ -1349,6 +1362,72 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(clash.encode("utf-8"))))
             self.end_headers()
             self.wfile.write(clash.encode("utf-8"))
+            return
+
+        # GET /api/portal/sub-info — сводка подписки текущего юзера:
+        # URL'ы всех форматов (base64/ios/singbox/clash) + статус мульти-нод
+        # фичи и список нод (Mode B). Используется карточкой «Моя подписка».
+        if path == "/api/portal/sub-info":
+            user = self._require_user()
+            if user is None:
+                return
+            try:
+                from chimera.modules.subscription import get_portal_subscription_info
+                self._send_json(get_portal_subscription_info(user))
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # GET /api/portal/sub-clash — полный мульти-нодовый mihomo YAML
+        # (группы Выбор/Auto/Fallback/Balance + правила). Отличие от
+        # /api/portal/clash: тот — минимальный single-proxy, этот — полный
+        # конфиг из подписки (тот же, что ?format=clash).
+        if path == "/api/portal/sub-clash":
+            user = self._require_user()
+            if user is None:
+                return
+            body = ""
+            try:
+                from chimera.modules import subscription_multinode as _mn
+                body = _mn.build_mihomo_config(user)
+            except Exception:
+                pass
+            if not body:
+                body = _generate_clash_config(user)
+            if not body:
+                self._send_json({"error": "clash config unavailable"}, 503)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/yaml; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="chimera-mihomo.yaml"')
+            self.send_header("Content-Length", str(len(body.encode("utf-8"))))
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+            return
+
+        # GET /api/portal/sub-singbox — полный мульти-нодовый sing-box JSON
+        # (selector «🎯 Chimera» + urltest «auto» + все ноды).
+        if path == "/api/portal/sub-singbox":
+            user = self._require_user()
+            if user is None:
+                return
+            body = ""
+            try:
+                from chimera.modules import subscription_multinode as _mn
+                body = _mn.build_singbox_config(user)
+            except Exception:
+                pass
+            if not body:
+                body = _generate_singbox_config(user)
+            if not body:
+                self._send_json({"error": "singbox config unavailable"}, 503)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="chimera-singbox.json"')
+            self.send_header("Content-Length", str(len(body.encode("utf-8"))))
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
             return
 
         if path == "/api/portal/singbox":
