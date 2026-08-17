@@ -914,6 +914,19 @@ def _gen_vless_link(host: str, uuid_str: str, pbk: str,
 
 
 def generate_client_links() -> None:
+    """Показывает ссылки и QR-коды для ВСЕХ активных пользователей.
+
+    BUGFIX (v5): раньше эта функция использовала глобальный `PARAM_UUID`
+    из _core.py — это UUID начального юзера, созданного при установке.
+    Если этот юзер был удалён через TUI 2 → 1 → D, `PARAM_UUID` оставался
+    устаревшим, и функция показывала ссылку с несуществующим UUID →
+    "invalid request user id" в клиентах. Теперь читаем актуальный список
+    юзеров через `_unified_load_users()` (мёрж users.json + config.json Xray)
+    и показываем ссылки для каждого активного.
+
+    Совместимость: если юзеров нет (fresh install до создания users.json) —
+    fallback на старое поведение с PARAM_UUID (для reconfigure/emergency_repair).
+    """
     core = _core_module()
     _box_top    = core._box_top
     _box_row    = core._box_row
@@ -921,19 +934,6 @@ def generate_client_links() -> None:
     _box_link   = core._box_link
     _box_wrap_msg = core._box_wrap_msg
     _get_box_width = core._get_box_width
-    get_server_ip  = core.get_server_ip
-    PARAM_FINGERPRINT = core.PARAM_FINGERPRINT
-    PROTOCOL_MODE     = core.PROTOCOL_MODE
-    PARAM_REALITY_DEST = core.PARAM_REALITY_DEST
-    AWG_EXIT_ENABLED  = core.AWG_EXIT_ENABLED
-    PARAM_DOMAIN      = core.PARAM_DOMAIN
-    PARAM_UUID        = core.PARAM_UUID
-    PARAM_PUBLIC_KEY  = core.PARAM_PUBLIC_KEY
-    PARAM_SHORTID     = core.PARAM_SHORTID
-    XHTTP_PATH        = core.XHTTP_PATH
-    XHTTP_MODE        = core.XHTTP_MODE
-    SERVER_PORT       = core.SERVER_PORT
-    IS_IPV6_AVAILABLE = core.IS_IPV6_AVAILABLE
     GREEN   = core.GREEN
     CYAN    = core.CYAN
     MAGENTA = core.MAGENTA
@@ -943,71 +943,60 @@ def generate_client_links() -> None:
 
     _BOX_W = _get_box_width()
     setattr(core, "_BOX_W", _BOX_W)
+
     print()
-    print()
-    _box_top(f"Ссылки для подключения")
+    _box_top(f"🔗  Ссылки для подключения")
     _box_row()
-    fp = PARAM_FINGERPRINT or "chrome"
-    proto = PROTOCOL_MODE  # "reality" или "xhttp"
-    # При AWG SNI = домен маскировки, при обычном REALITY SNI = собственный домен
-    _sni = PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) else PARAM_DOMAIN
 
-    ipv4 = get_server_ip("4")
-    if ipv4:
-        link4 = _gen_vless_link(
-            ipv4, PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
-            proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
-            port=SERVER_PORT,
-        )
-        print()
-        print(f"{GREEN}📡 IPv4 ссылка:{NC}")
-        _box_link(link4)
-        link_file = Path("/root/vless_link.txt")
-        link_file.write_text(link4)
-        link_file.chmod(0o600)
-        print()
-        _show_qr(link4, "IPv4", "/root/vless_qr_ipv4.png")
+    # ── Загружаем АКТУАЛЬНЫЙ список юзеров (мёрж users.json + config.json) ──
+    try:
+        all_users = _unified_load_users()
+    except Exception:
+        all_users = []
 
-    # BUGFIX: IPV6_PREFLIGHT — это первый global-scope адрес из `ip -6 addr
-    # show`, определённый один раз при установке, без подтверждения, что
-    # именно ОН виден снаружи (при нескольких global IPv6 — privacy-адреса
-    # RFC4941, доп. интерфейсы от WARP/AWG — порядок в выводе `ip addr` не
-    # гарантирован). IPv4-ссылка рядом уже строится через get_server_ip("4")
-    # с внешней проверкой (curl api4.ipify.org) — используем ту же логику
-    # для IPv6, вместо непроверенного локального адреса.
-    ipv6_ext = get_server_ip("6") if IS_IPV6_AVAILABLE else ""
-    if ipv6_ext:
-        link6 = _gen_vless_link(
-            f"[{ipv6_ext}]", PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
-            proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
-            port=SERVER_PORT,
-        )
-        print()
-        print(f"{CYAN}🌐 IPv6 ссылка:{NC}")
-        _box_link(link6)
-        link6_file = Path("/root/vless_link_ipv6.txt")
-        link6_file.write_text(link6)
-        link6_file.chmod(0o600)
-        print()
-        _show_qr(link6, "IPv6", "/root/vless_qr_ipv6.png")
+    # Фильтруем: только активные (не disabled) и с UUID.
+    active_users = [u for u in all_users
+                    if u.get("uuid") and not u.get("disabled")
+                    and not u.get("is_ios_shadow")]  # iOS-shadows не показываем
 
-    link_ds = _gen_vless_link(
-        PARAM_DOMAIN, PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
-        proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
-        port=SERVER_PORT,
-    )
-    print()
-    print(f"{MAGENTA}🔄 Domain (DualStack) ссылка:{NC}")
-    _box_link(link_ds)
-    print()
-    _show_qr(link_ds, "Domain/DualStack", "/root/vless_qr.png")
-    print()
+    if not active_users:
+        # Fallback: нет активных юзеров — показываем PARAM_UUID (если есть).
+        # Это редкий случай (emergency_repair, fresh install без юзеров),
+        # но оставляем для обратной совместимости.
+        _param_uuid = getattr(core, "PARAM_UUID", "")
+        if _param_uuid:
+            _box_row(f"  {DIM}Активные юзеры не найдены. Показываю PARAM_UUID из state.json.{NC}")
+            _box_row(f"  {DIM}Это может быть устаревшим — создайте юзера через 2 → 1 → A.{NC}")
+            _box_row()
+            try:
+                _unified_show_links({"uuid": _param_uuid,
+                                     "email": getattr(core, "PARAM_USER_EMAIL", "") or "default",
+                                     "name": getattr(core, "PARAM_USER_NAME", "") or "default"})
+            except Exception as _e:
+                _box_row(f"  {DIM}Не удалось построить ссылку: {_e}{NC}")
+        else:
+            _box_row(f"  {DIM}Нет активных пользователей.{NC}")
+            _box_row(f"  {DIM}Создайте через: Главное меню → 2 → 1 → A (Добавить).{NC}")
+        _box_bottom()
+        return
 
+    # ── Показываем ссылки для каждого активного юзера ──────────────────────
+    _box_row(f"  {GREEN}Найдено активных юзеров: {len(active_users)}{NC}")
+    _box_row(f"  {DIM}Каждому отдаются 3 ссылки: IPv4, IPv6 (если есть), Domain.{NC}")
     _box_row()
-    proto_label = f"xHTTP TLS ({XHTTP_MODE})" if proto == "xhttp" else "VLESS+REALITY"
-    _box_row(f"{BLUE}💡 Протокол: {proto_label}{NC}")
-    _box_row(f"{BLUE}💡 Совет:{NC} Отсканируйте QR в v2rayNG, Hiddify, FoXray, Nekobox")
-    _box_wrap_msg(f"   {DIM}Файлы QR:{NC} ", 12, "/root/vless_qr.png  /root/vless_qr_ipv4.png  /root/vless_qr_ipv6.png")
+
+    for u in active_users:
+        label = u.get("email", u.get("name", u.get("uuid", "?")[:8]))
+        _box_row(f"  {CYAN}━━━ {label} ━━━{NC}")
+        _box_row()
+        try:
+            _unified_show_links(u)
+        except Exception as _e:
+            _box_row(f"  {DIM}Ошибка построения ссылок: {_e}{NC}")
+        _box_row()
+
+    _box_row(f"{BLUE}💡 Совет:{NC} Отсканируйте QR в v2rayNG, Hiddify, FoXray, Nekobox, Nyamebox")
+    _box_row(f"{DIM}   Файлы QR: /root/vless_qr_*.png (один на юзера){NC}")
     _box_row()
     from chimera.modules.box_renderer import _print_link_warning
     _print_link_warning(is_vless=True)
