@@ -348,6 +348,22 @@ body {{
     </div>
   </div>
 
+  <!-- My Subscription (единая подписка: все форматы + мульти-нод конфиги) -->
+  <div class="card fade-in" id="sub-card" style="animation-delay: 0.12s; display:none">
+    <div class="card-title">📚 Моя подписка</div>
+    <div id="sub-container">
+      <div class="loading"><span class="spinner"></span></div>
+    </div>
+  </div>
+
+  <!-- My Subscription (единая подписка: все форматы + мульти-нод конфиги) -->
+  <div class="card fade-in" id="sub-card" style="animation-delay: 0.12s; display:none">
+    <div class="card-title">📚 Моя подписка</div>
+    <div id="sub-container">
+      <div class="loading"><span class="spinner"></span></div>
+    </div>
+  </div>
+
   <!-- My AmneziaWG (показывается только если у юзера есть привязанный пир) -->
   <div class="card fade-in" id="awg-card" style="animation-delay: 0.15s; display:none">
     <div class="card-title">🛡 Мой AmneziaWG</div>
@@ -505,7 +521,58 @@ function copyLink(i) {{
   }});
 }}
 
-// ── Load traffic + TTL ──────────────────────────────────────────────────────
+// ── Load subscription (единая подписка) ──────────────────────────────
+async function loadSubscription() {{
+  let data;
+  try {{
+    data = await api('/api/portal/sub-info');
+  }} catch (e) {{ return; }}
+  if (!data || !data.service_enabled || !data.urls || !data.urls.base64) return;
+
+  const card = document.getElementById('sub-card');
+  const container = document.getElementById('sub-container');
+  card.style.display = '';
+
+  const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(data.urls.base64);
+  const nodes = (data.multinode && data.multinode.nodes) || [];
+  let nodeRows = '';
+  if (data.multinode && data.multinode.enabled && nodes.length) {{
+    nodeRows = `<div style="margin-top:14px;padding:12px;background:rgba(15,23,42,0.5);border-radius:10px;font-size:0.85rem;color:var(--text-dim);line-height:1.7">` +
+      `<strong style="color:var(--accent-light)">🌐 Нод в конфигах: ${{nodes.length}}</strong><br>` +
+      nodes.map(n => `• ${{n.name}} <span style="opacity:0.6">(${{n.kind === 'exit' ? 'exit' : (n.kind === 'mirror' ? 'зеркало' : 'вход')}})</span>`).join('<br>') +
+      `</div>`;
+  }}
+
+  container.innerHTML = `
+    <div class="link-box" id="sub-url-box">${{data.urls.base64}}</div>
+    <div class="qr-container">
+      <img src="${{qrUrl}}" alt="QR подписки" loading="lazy">
+    </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap">
+      <button class="btn btn-primary" style="flex:1;min-width:160px" onclick="copySubUrl()">📋 Копировать URL</button>
+      <a class="btn btn-ghost" href="/api/portal/sub-clash" download>mihomo (полный)</a>
+      <a class="btn btn-ghost" href="/api/portal/sub-singbox" download>sing-box (полный)</a>
+    </div>
+    <div style="margin-top:12px;padding:12px;background:rgba(15,23,42,0.5);border-radius:10px;font-size:0.82rem;color:var(--text-dim);line-height:1.7">
+      <strong style="color:var(--accent-light)">💡 Как использовать:</strong><br>
+      • <strong>FlClash / Mihomo / Clash</strong> — добавьте URL как подписку или скачайте полный конфиг кнопкой выше (группы выбора нод, RU-сплит, adblock)<br>
+      • <strong>NekoBox / Happ / v2rayNG</strong> — добавьте URL как подписку: формат sing-box и exit-ноды подберутся автоматически<br>
+      • <strong>Karing (iOS)</strong> — используйте ссылку с суффиксом <code>/ios</code><br>
+      • Подписка обновляется автоматически (клиент перечитывает её раз в 6 часов)
+    </div>
+    ${{nodeRows}}
+  `;
+}}
+
+function copySubUrl() {{
+  const el = document.getElementById('sub-url-box');
+  navigator.clipboard.writeText(el.textContent).then(() => {{
+    showToast('URL подписки скопирован!');
+  }}).catch(() => {{
+    showToast('Ошибка копирования', 'error');
+  }});
+}}
+
 async function loadTraffic() {{
   const data = await api('/api/portal/traffic');
   if (!data) return;
@@ -873,6 +940,7 @@ async function regenMyAWG() {{
 
 // ── Init ────────────────────────────────────────────────────────────────────
 loadLinks();
+loadSubscription();
 loadTraffic();
 loadHealth();
 loadMyAWG();

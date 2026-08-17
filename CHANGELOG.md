@@ -2,6 +2,98 @@
 
 ---
 
+## FEAT(subscription_multinode): мульти-нод конфиги подписки для Mode B — mihomo YAML + sing-box selector + exit-URI — 17 августа 2026
+
+**Раньше единая подписка отдавала клиенту только entry-ноду: vless:// в
+base64, минимальный single-outbound sing-box JSON и никакой поддержки
+mihomo/Clash. «Кастомный конфиг mihomo» с 3 exit-нодами, группами выбора
+и RU-сплитом приходилось поддерживать вручную вне инсталлятора. Теперь
+этот конфиг генерируется автоматически из уже известных серверу данных
+(chain_nodes в state.json, entry_mirrors.json, users.json) — без каких-либо
+изменений серверной топологии.**
+
+### Что добавлено
+
+**1. Новый модуль `chimera/modules/subscription_multinode.py`:**
+  - `collect_nodes(user)` — реестр нод: entry (каскад, UUID юзера) + все
+    chain-exit'ы (chain_nodes[] + legacy chain_exit_*) + включённые entry
+    mirrors. Имена с GeoIP-флагами (ip-api.com, кеш 7 суток в
+    subscription.json → multinode.geo_cache, fallback «🌐»).
+  - `build_mihomo_config(user)` — полный mihomo/Clash Meta YAML по эталону
+    проекта: DNS fake-ip + DoH + умный сплит (RU → Яндекс DoH, домены нод →
+    1.1.1.1), TUN mixed, sniffer, geox-URL (jsDelivr), rule-providers
+    (Loyalsoldier .txt + MetaCubeX .mrs), группы «📍 Выбор ноды» / Proxy /
+    Auto (url-test) / Fallback / Balance-RR/Hash/Sticky/Weighted /
+    Streaming(+Auto) / Telegram(+Auto) / AI(+Auto), правила: adblock
+    (ручной + GEOSITE + reject), QUIC-block YouTube (AND-правила), стриминг/
+    Telegram/AI RULE-SET, РФ-direct списки, applications/direct/private,
+    gfw/proxy, GEOIP LAN/CN/RU + ru-ripe-subnets .mrs, MATCH,Proxy.
+    Динамически: proxies всех нод, домены нод в fake-ip-filter /
+    nameserver-policy / правилах защиты. В Mode A — упрощённая структура.
+  - `build_singbox_config(user, extra_outbounds)` — все ноды как vless
+    outbounds (Reality/xHTTP) + сателлиты + selector «🎯 Chimera» +
+    urltest «auto», route.final → selector, RU-сплит через
+    singbox_client_rulesets.inject_route_rulesets.
+  - `get_multinode_uris(user)` — vless:// каждой exit-ноды (chain-UUID,
+    флаг+имя в fragment) — v2rayNG/Happ/NekoBox сами сгруппируют.
+  - `multinode_status()` / `set_multinode_enabled(on/off/auto)` — флаг:
+    явный ключ subscription.json → multinode.enabled, иначе АВТО
+    (install_mode=B и есть exit-ноды).
+  - Компромисс (осознанный): прямые подключения к exit'ам идут под
+    chain-UUID ноды — per-user учёт трафика работает только на каскаде.
+
+**2. `subscription.py`:**
+  - Новый формат `?format=clash` (+ `mihomo`/`meta`/`yaml`) и UA-эвристика
+    (clash/mihomo/flclash/stash/clashx → clash). Профиль Chimera-mihomo.
+  - `?format=singbox` — при активной мульти-нод фиче отдаёт конфиг с
+    selector/urltest, иначе прежний single-outbound (совместимость 100%).
+  - base64-тело: vless:// exit-нод добавляются после entry-ссылки.
+  - iOS-тело: exit-URI ИСКЛЮЧАЮТСЯ (shadow-клиент на exit завести нельзя —
+    та же политика, что и для mirrors; лог с количеством исключённых).
+  - Пункт меню «2»: показывает mihomo/Clash YAML URL.
+  - Пункт меню «8. Мульти-нод конфиги (Mode B)»: статус + список нод +
+    вкл/выкл/авто.
+  - Хелперы: `get_subscription_base_url()` (nginx-front aware),
+    `get_portal_subscription_info(user)`, `get_admin_subscription_info()`.
+
+**3. `rest_api.py` (User Portal):**
+  - `GET /api/portal/sub-info` — URL'ы всех форматов + статус фичи + ноды.
+  - `GET /api/portal/sub-clash` — скачивание полного mihomo YAML
+    (chimera-mihomo.yaml; fallback на single-proxy при отсутствии нод).
+  - `GET /api/portal/sub-singbox` — скачивание мульти-нод sing-box JSON
+    (chimera-singbox.json).
+
+**4. `rest_api.py` (Admin):** `GET /api/subscription/info` — статус сервиса,
+базовый URL, per-user ссылки (base64/ios/singbox/clash), мульти-нод статус.
+
+**5. `user_portal.py`:** карточка «📚 Моя подписка» (после «Подключение»):
+URL + QR (копирование), кнопки «mihomo (полный)» / «sing-box (полный)»,
+подсказки по клиентам, список нод при активной фиче. Скрывается, если
+подписка выключена.
+
+**6. `admin_panel.py`:** секция «🔁 Подписка»: статус сервиса + мульти-нод
+бейдж + таблица per-user URL с быстрыми ссылками на форматы (esc() для XSS).
+
+### Поведение
+
+| Состояние | base64 | ?format=singbox | ?format=clash |
+|---|---|---|---|
+| Mode B, фича авто/вкл, есть exit-ноды | entry + mirrors + сателлиты + **exit-URI** | **selector + urltest + все ноды** | **полный мульти-нод YAML** |
+| Mode A / фича выкл / нет exit-нод | как раньше (побайтово) | single-outbound как раньше | single-proxy YAML (fallback) |
+| iOS-подписка (`/ios`) | без exit-URI (только каскад) | — | — |
+
+### Тесты
+
+`tests/test_subscription_multinode.py` — 23 теста: реестр нод (вкл. legacy-
+формат и неполные ноды), статус фичи (авто/явный), mihomo YAML (структура,
+группы, кавычки, Mode A, пустой), sing-box JSON (selector/urltest/extra/
+пустой), exit-URI, `_resolve_format` (clash), base64/iOS тела, HTTP e2e
+(?format=clash, ?format=singbox, UA ClashMeta→clash, дефолт→base64),
+хелперы панелей. Регрессия: 67 подписочных + 108 rest_api/panel тестов OK,
+verify.py 10/10 (332 проверки).
+
+---
+
 ## FEAT(subscription): nginx front (TLS) — прямой доступ к подписке по домену/IP — 16 августа 2026
 
 **Раньше подписка (subscription.py) слушала на 0.0.0.0:8443 с собственным TLS-стеком

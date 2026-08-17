@@ -47,7 +47,8 @@
 | `credential_rotation.py` | Ротация UUID (cron) + REALITY-ключей (x25519 + ShortID) + меню `_menu_rotation` |
 | `user_fp_manager.py` | Управление TLS fingerprint'ами пользователей |
 | `fingerprint_manager.py` | Список поддерживаемых fingerprint'ов + `prompt_fingerprint` |
-| `subscription.py` | Генерация подписок (subscription links) для клиентов + единый HTTP-сервер на 0.0.0.0:8443 (свой TLS от LE). **Пункт меню «7. nginx front (TLS)»** — прямой доступ по домену/IP через nginx (LE или self-signed), backend переводится на 127.0.0.1 (loopback). Регистрация через `port_registry.SERVICE_SUBSCRIPTION_NGINX`. |
+| `subscription.py` | Генерация подписок (subscription links) для клиентов + единый HTTP-сервер на 0.0.0.0:8443 (свой TLS от LE). **Пункт меню «7. nginx front (TLS)»** — прямой доступ по домену/IP через nginx (LE или self-signed), backend переводится на 127.0.0.1 (loopback). Регистрация через `port_registry.SERVICE_SUBSCRIPTION_NGINX`. Content negotiation: `?format=base64/singbox/clash/base64_safe` + UA-эвристика (NekoBox→singbox, ClashMeta/FlClash/Mihomo→clash, Karing→base64_safe). Хелперы для панелей: `get_subscription_base_url` / `get_portal_subscription_info` / `get_admin_subscription_info`. **Пункт меню «8. Мульти-нод конфиги (Mode B)»** — управление фичей. |
+| `subscription_multinode.py` | Мульти-нодовые клиентские конфиги подписки (Mode B): реестр нод (entry + chain_nodes exits + entry mirrors) с GeoIP-флагами (ip-api, кеш 7 суток в subscription.json), `build_mihomo_config` — полный mihomo/Clash Meta YAML по эталону проекта (DNS fake-ip+DoH сплит, TUN, sniffer, rule-providers Loyalsoldier+MetaCubeX .mrs, группы «📍 Выбор ноды»/Auto/Fallback/Balance-RR/Hash/Sticky/Weighted/Streaming/Telegram/AI, правила adblock+QUIC-block+RU-direct+GEOIP RU), `build_singbox_config` — все ноды как outbounds + selector «🎯 Chimera» + urltest «auto», route.final→selector + RU-сплит rulesets, `get_multinode_uris` — vless:// exit-нод (chain-UUID) в base64-подписку. Флаг: subscription.json→multinode.enabled (явный) или авто (Mode B + есть exit-ноды). Exit-URI исключаются из iOS-подписки (shadow-клиент на exit завести нельзя). Тесты: `tests/test_subscription_multinode.py` (23 теста). |
 
 ---
 
@@ -245,6 +246,7 @@
 | Файл | За что отвечает |
 |---|---|
 | `client_config_export.py` | Генерация Clash Meta YAML + Sing-box JSON + VLESS-ссылки + SFTP push + one-time HTTP share с QR-кодами |
+| `subscription_multinode.py` | Мульти-нод конфиги подписки (см. секцию 3) — mihomo YAML / sing-box selector/urltest / exit-URI в base64 |
 | `singbox_client_rulesets.py` | Готовые `.srs` ruleset'ы для sing-box клиентских конфигов (Podkop/OpenWrt). Каталог из 8 ruleset'ов с URL'ами на `hydraponique/roscomvpn-geosite`. По умолчанию ВЫКЛЮЧЕНО — обратная совместимость 100%. При включении в TUI добавляет `route.rule_set` + `route.rules` в sing-box JSON: `category-ru.srs` → direct (Госуслуги/WB/Ozon/ДМ мимо VPN), `category-geoblock-ru.srs` → proxy (заблокированные в РФ через VPN), `whitelist.srs` → direct. Идемпотентная инъекция через `inject_route_rulesets(config, proxy_outbound_tag)`. |
 
 ---

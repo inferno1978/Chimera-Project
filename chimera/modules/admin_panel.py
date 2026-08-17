@@ -314,6 +314,38 @@ tr:hover { background: rgba(56,189,248,0.05); }
     </table>
   </div>
 
+  <!-- Subscription section (единая подписка: per-user URL всех форматов) -->
+  <div class="table-card" id="sub-section">
+    <h2>🔁 Подписка <button class="btn btn-sm btn-primary" onclick="loadSubscription()">↻</button></h2>
+    <div id="sub-status" style="margin-bottom:16px">
+      <div class="loading"><span class="spinner"></span></div>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Пользователь</th><th>URL подписки</th><th>Форматы</th></tr>
+      </thead>
+      <tbody id="sub-users-tbody">
+        <tr><td colspan="3" class="loading"><span class="spinner"></span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Subscription section (единая подписка: per-user URL всех форматов) -->
+  <div class="table-card" id="sub-section">
+    <h2>🔁 Подписка <button class="btn btn-sm btn-primary" onclick="loadSubscription()">↻</button></h2>
+    <div id="sub-status" style="margin-bottom:16px">
+      <div class="loading"><span class="spinner"></span></div>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Пользователь</th><th>URL подписки</th><th>Форматы</th></tr>
+      </thead>
+      <tbody id="sub-users-tbody">
+        <tr><td colspan="3" class="loading"><span class="spinner"></span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
   <!-- AmneziaWG section -->
   <div class="table-card" id="awg-section">
     <h2>🛡 AmneziaWG <button class="btn btn-sm btn-primary" onclick="loadAWG()">↻</button></h2>
@@ -987,9 +1019,46 @@ async function modifyAWGPeer() {
   }
 }
 
-// ── Init ────────────────────────────────────────────────────────────────────
+// ── Subscription (единая подписка) ────────────────────────────────────
+async function loadSubscription() {
+  const statusEl = document.getElementById('sub-status');
+  const tbody = document.getElementById('sub-users-tbody');
+  const data = await api('/api/subscription/info');
+  if (!data || data.error) {
+    statusEl.innerHTML = '<span style="color:#f87171">Ошибка загрузки подписки</span>';
+    tbody.innerHTML = '';
+    return;
+  }
+  const svc = data.service_enabled
+    ? '<span style="color:#4ade80">● включена</span>'
+    : '<span style="color:#f87171">● выключена</span>';
+  const mn = data.multinode || {};
+  const mnBadge = mn.enabled
+    ? `&nbsp;·&nbsp; <span style="color:#4ade80">мульти-нод: ${esc(String((mn.nodes || []).length))} нод</span>`
+    : '&nbsp;·&nbsp; <span style="opacity:0.6">мульти-нод: выкл</span>';
+  statusEl.innerHTML =
+    `<div style="font-size:0.9rem">${svc}${mnBadge} &nbsp;·&nbsp; <span style="opacity:0.7">${esc(data.base_url || '')}</span></div>`;
+
+  const users = data.users || [];
+  if (!users.length) {
+    tbody.innerHTML = '<tr><td colspan="3" style="opacity:0.6">Нет активных пользователей с подпиской</td></tr>';
+    return;
+  }
+  tbody.innerHTML = users.map(u => `
+    <tr>
+      <td>${esc(u.email)}</td>
+      <td style="max-width:420px"><code style="font-size:0.72rem;word-break:break-all">${esc(u.url)}</code></td>
+      <td style="white-space:nowrap;font-size:0.8rem">
+        <a href="${esc(u.url_clash)}" target="_blank" style="color:#38bdf8">mihomo</a> ·
+        <a href="${esc(u.url_singbox)}" target="_blank" style="color:#38bdf8">sing-box</a> ·
+        <a href="${esc(u.url_ios)}" target="_blank" style="color:#38bdf8">iOS</a>
+      </td>
+    </tr>`).join('');
+}
+
 loadHealth();
 loadUsers();
+loadSubscription();
 loadAWG();
 setInterval(loadHealth, 30000); // обновление каждые 30с
 setInterval(loadAWG, 60000); // AWG статус/пиры каждые 60с
