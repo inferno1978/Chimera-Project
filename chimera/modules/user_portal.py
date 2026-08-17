@@ -47,11 +47,13 @@ def get_portal_html(user: dict) -> str:
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 
 body {{
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
   background: var(--bg);
   color: var(--text);
   min-height: 100vh;
   overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }}
 
 /* Анимированный фон */
@@ -93,10 +95,110 @@ body {{
 }}
 
 .container {{
-  max-width: 700px;
+  max-width: 880px;
   margin: 0 auto;
   padding: 20px;
-  padding-top: 40px;
+  padding-top: 32px;
+}}
+
+/* Sticky header + tabs */
+.sticky-top {{
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border);
+  margin: -32px -20px 24px;
+  padding: 20px 20px 14px;
+}}
+
+.sticky-top .header {{
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 18px;
+  text-align: left;
+}}
+.sticky-top .header .avatar {{
+  margin: 0;
+  width: 56px; height: 56px;
+  font-size: 1.5rem;
+  flex-shrink: 0;
+}}
+.sticky-top .header h1 {{
+  font-size: 1.25rem;
+  margin: 0;
+}}
+.sticky-top .header .subtitle {{
+  margin-top: 2px;
+  font-size: 0.88rem;
+}}
+
+/* Tabs */
+.tabs {{
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  padding-bottom: 2px;
+}}
+.tabs::-webkit-scrollbar {{ display: none; }}
+.tab {{
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 16px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.4);
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  user-select: none;
+}}
+.tab:hover {{
+  color: var(--accent-light);
+  background: rgba(56, 189, 248, 0.08);
+  border-color: var(--border);
+}}
+.tab.active {{
+  background: linear-gradient(135deg, var(--accent), var(--accent-light));
+  color: var(--bg);
+  font-weight: 600;
+  box-shadow: 0 4px 16px var(--accent-glow);
+  border-color: transparent;
+}}
+.tab .badge {{
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.18);
+  color: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  margin-left: 2px;
+}}
+.tab.active .badge {{
+  background: rgba(15, 23, 42, 0.28);
+  color: var(--bg);
+}}
+
+/* Tab panels (каждый таб — своя «страница») */
+.tab-panel {{ display: none; }}
+.tab-panel.active {{ display: block; animation: fadeIn 0.35s ease forwards; }}
+
+@media (max-width: 600px) {{
+  .sticky-top .header {{ gap: 12px; }}
+  .sticky-top .header .avatar {{ width: 44px; height: 44px; font-size: 1.2rem; }}
+  .sticky-top .header h1 {{ font-size: 1.05rem; }}
+  .tab {{ padding: 8px 12px; font-size: 0.85rem; }}
 }}
 
 /* Анимация появления */
@@ -333,116 +435,144 @@ body {{
 <div class="particles" id="particles"></div>
 
 <div class="container">
-  <!-- Header -->
-  <div class="header fade-in">
-    <div class="avatar">{initial_safe}</div>
-    <h1>{name_safe}</h1>
-    <div class="subtitle">{email_safe}</div>
-  </div>
-
-  <!-- VLESS Links + QR -->
-  <div class="card fade-in" style="animation-delay: 0.1s">
-    <div class="card-title">🔗 Подключение</div>
-    <div id="links-container">
-      <div class="loading"><span class="spinner"></span></div>
+  <!-- Sticky header + tabs -->
+  <div class="sticky-top">
+    <div class="header">
+      <div class="avatar">{initial_safe}</div>
+      <div style="flex:1;min-width:0">
+        <h1>{name_safe}</h1>
+        <div class="subtitle">{email_safe}</div>
+      </div>
+    </div>
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-tab="connect" onclick="switchTab('connect')">🔗 Подключение</button>
+      <button class="tab" data-tab="subscription" id="tab-subscription" style="display:none" onclick="switchTab('subscription')">📚 Подписка</button>
+      <button class="tab" data-tab="awg" id="tab-awg" style="display:none" onclick="switchTab('awg')">🛡 AmneziaWG</button>
+      <button class="tab" data-tab="traffic" onclick="switchTab('traffic')">📊 Трафик</button>
+      <button class="tab" data-tab="system" onclick="switchTab('system')">🖥 Сервер</button>
+      <button class="tab" data-tab="downloads" onclick="switchTab('downloads')">📥 Конфиги</button>
+      <button class="tab" data-tab="ips" onclick="switchTab('ips')">🛂 IP</button>
+      <button class="tab" data-tab="security" onclick="switchTab('security')">🔒 Пароль</button>
     </div>
   </div>
 
-  <!-- My Subscription (единая подписка: все форматы + мульти-нод конфиги) -->
-  <div class="card fade-in" id="sub-card" style="animation-delay: 0.12s; display:none">
-    <div class="card-title">📚 Моя подписка</div>
-    <div id="sub-container">
-      <div class="loading"><span class="spinner"></span></div>
+  <!-- TAB: Подключение -->
+  <div class="tab-panel active" id="panel-connect">
+    <div class="card">
+      <div class="card-title">🔗 Подключение</div>
+      <div id="links-container">
+        <div class="loading"><span class="spinner"></span></div>
+      </div>
     </div>
   </div>
 
-  <!-- My AmneziaWG (показывается только если у юзера есть привязанный пир) -->
-  <div class="card fade-in" id="awg-card" style="animation-delay: 0.15s; display:none">
-    <div class="card-title">🛡 Мой AmneziaWG</div>
-    <div id="awg-container">
-      <div class="loading"><span class="spinner"></span></div>
+  <!-- TAB: Подписка -->
+  <div class="tab-panel" id="panel-subscription">
+    <div class="card" id="sub-card">
+      <div class="card-title">📚 Моя подписка</div>
+      <div id="sub-container">
+        <div class="loading"><span class="spinner"></span></div>
+      </div>
     </div>
   </div>
 
-  <!-- Traffic -->
-  <div class="card fade-in" style="animation-delay: 0.2s">
-    <div class="card-title">📊 Трафик</div>
-    <div id="traffic-container">
-      <div class="loading"><span class="spinner"></span></div>
+  <!-- TAB: AmneziaWG -->
+  <div class="tab-panel" id="panel-awg">
+    <div class="card" id="awg-card">
+      <div class="card-title">🛡 Мой AmneziaWG</div>
+      <div id="awg-container">
+        <div class="loading"><span class="spinner"></span></div>
+      </div>
     </div>
   </div>
 
-  <!-- TTL -->
-  <div class="card fade-in" id="ttl-card" style="animation-delay: 0.3s; display:none">
-    <div class="card-title">⏰ Срок действия</div>
-    <div id="ttl-container"></div>
-  </div>
-
-  <!-- System Status -->
-  <div class="card fade-in" style="animation-delay: 0.4s">
-    <div class="card-title">🖥 Состояние сервера</div>
-    <div class="sys-grid" id="sys-grid">
-      <div class="loading"><span class="spinner"></span></div>
+  <!-- TAB: Трафик -->
+  <div class="tab-panel" id="panel-traffic">
+    <div class="card">
+      <div class="card-title">📊 Трафик</div>
+      <div id="traffic-container">
+        <div class="loading"><span class="spinner"></span></div>
+      </div>
+    </div>
+    <div class="card" id="ttl-card" style="display:none">
+      <div class="card-title">⏰ Срок действия</div>
+      <div id="ttl-container"></div>
     </div>
   </div>
 
-  <!-- Download configs -->
-  <div class="card fade-in" style="animation-delay: 0.5s">
-    <div class="card-title">📥 Скачать конфиги</div>
-    <div style="display:flex; gap:12px; flex-wrap:wrap">
-      <a class="btn btn-ghost" href="/api/portal/clash" download>Clash Meta</a>
-      <a class="btn btn-ghost" href="/api/portal/singbox" download>Sing-box</a>
-      <a class="btn btn-ghost" href="/api/portal/hiddify" download>Hiddify</a>
-      <a class="btn btn-ghost" href="/api/portal/vless-link" download>VLESS-ссылка</a>
-    </div>
-    <div style="margin-top:16px; padding:12px; background:rgba(15,23,42,0.5); border-radius:10px; font-size:0.85rem; color:var(--text-dim); line-height:1.6">
-      <strong style="color:var(--accent-light)">📱 Подсказка по клиентам:</strong><br>
-      • <strong>Clash Meta</strong> / <strong>Mihomo</strong> — скачайте файл Clash Meta выше, импортируйте в приложение<br>
-      • <strong>Sing-box</strong> — скачайте файл Sing-box выше, импортируйте в приложение<br>
-      • <strong>Hiddify</strong> — скачайте файл Hiddify выше или отсканируйте QR-код<br>
-      • <strong>v2rayN</strong> / <strong>v2rayNG</strong> / <strong>Karing</strong> / <strong>NekoBox</strong> / <strong>INCY</strong> / <strong>HAPP</strong> — отсканируйте QR-код или скопируйте VLESS-ссылку<br>
-      • <strong>Streisand</strong> / <strong>Shadowrocket</strong> (iOS) — отсканируйте QR-код<br>
-      • <strong>AmneziaWG</strong> — если у вас есть AWG-пир, конфиг доступен в блоке «Мой AmneziaWG» выше
+  <!-- TAB: Состояние сервера -->
+  <div class="tab-panel" id="panel-system">
+    <div class="card">
+      <div class="card-title">🖥 Состояние сервера</div>
+      <div class="sys-grid" id="sys-grid">
+        <div class="loading"><span class="spinner"></span></div>
+      </div>
     </div>
   </div>
 
-  <!-- Change password -->
-  <div class="card fade-in" style="animation-delay: 0.6s">
-    <div class="card-title">🔒 Смена пароля портала</div>
-    <input type="password" class="input-field" id="new-pass" placeholder="Новый пароль (мин. 8 символов)">
-    <button class="btn btn-primary btn-full" onclick="changePassword()">Сменить пароль</button>
+  <!-- TAB: Скачать конфиги -->
+  <div class="tab-panel" id="panel-downloads">
+    <div class="card">
+      <div class="card-title">📥 Скачать конфиги</div>
+      <div style="display:flex; gap:12px; flex-wrap:wrap">
+        <a class="btn btn-ghost" href="/api/portal/clash" download>Clash Meta</a>
+        <a class="btn btn-ghost" href="/api/portal/singbox" download>Sing-box</a>
+        <a class="btn btn-ghost" href="/api/portal/hiddify" download>Hiddify</a>
+        <a class="btn btn-ghost" href="/api/portal/vless-link" download>VLESS-ссылка</a>
+      </div>
+      <div style="margin-top:16px; padding:12px; background:rgba(15,23,42,0.5); border-radius:10px; font-size:0.85rem; color:var(--text-dim); line-height:1.6">
+        <strong style="color:var(--accent-light)">📱 Подсказка по клиентам:</strong><br>
+        • <strong>Clash Meta</strong> / <strong>Mihomo</strong> — скачайте файл Clash Meta выше, импортируйте в приложение<br>
+        • <strong>Sing-box</strong> — скачайте файл Sing-box выше, импортируйте в приложение<br>
+        • <strong>Hiddify</strong> — скачайте файл Hiddify выше или отсканируйте QR-код<br>
+        • <strong>v2rayN</strong> / <strong>v2rayNG</strong> / <strong>Karing</strong> / <strong>NekoBox</strong> / <strong>INCY</strong> / <strong>HAPP</strong> — отсканируйте QR-код или скопируйте VLESS-ссылку<br>
+        • <strong>Streisand</strong> / <strong>Shadowrocket</strong> (iOS) — отсканируйте QR-код<br>
+        • <strong>AmneziaWG</strong> — если у вас есть AWG-пир, конфиг доступен во вкладке «AmneziaWG»
+      </div>
+    </div>
   </div>
 
-  <!-- My IP addresses (per-user whitelist for ingress_geoip) -->
-  <div class="card fade-in" style="animation-delay: 0.7s">
-    <div class="card-title">🛂 Мои IP-адреса</div>
-    <div id="ips-detected" style="margin-bottom:12px;padding:10px;border-radius:8px;background:rgba(15,23,42,0.5);font-size:0.88rem;color:var(--text-dim);line-height:1.5">
-      <span class="spinner" style="display:inline-block;width:14px;height:14px;border:2px solid var(--accent) transparent;border-radius:50%;animation:spin 1s linear infinite;vertical-align:middle"></span>
-      Определяем ваш текущий IP...
+  <!-- TAB: Пароль -->
+  <div class="tab-panel" id="panel-security">
+    <div class="card">
+      <div class="card-title">🔒 Смена пароля портала</div>
+      <input type="password" class="input-field" id="new-pass" placeholder="Новый пароль (мин. 8 символов)">
+      <button class="btn btn-primary btn-full" onclick="changePassword()">Сменить пароль</button>
     </div>
-    <div id="ips-list" style="margin-bottom:12px">
-      <div class="loading"><span class="spinner"></span></div>
-    </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <input type="text" class="input-field" id="new-ip" placeholder="IP или CIDR (5.167.98.20 или 5.167.98.0/24)" style="flex:1;min-width:200px">
-      <button class="btn btn-primary" onclick="addIP()">Добавить</button>
-      <button class="btn btn-ghost" onclick="addAutoIP()" id="btn-auto-ip">Текущий IP</button>
-    </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
-      <button class="btn btn-ghost" onclick="replaceAllIPs()" style="font-size:0.85rem">🔄 Заменить все на текущий</button>
-    </div>
-    <div style="margin-top:12px;padding:10px;background:rgba(15,23,42,0.5);border-radius:8px;font-size:0.82rem;color:var(--text-dim);line-height:1.5">
-      <strong style="color:var(--accent-light)">ℹ️ Для чего это нужно:</strong><br>
-      Если на сервере включена блокировка входящих из РФ — клиенты с российскими IP
-      не смогут подключиться к VLESS на порту 443. Добавьте свой IP-адрес сюда,
-      и вы получите доступ. IP берётся напрямую из вашего TCP-подключения —
-      его нельзя подделать.<br><br>
-      <strong style="color:var(--accent-light)">📌 Закрепление:</strong>
-      Закреплённые IP (📌) не удаляются автоматически при очистке старых адресов.
-      Закрепите свой домашний статический IP, если он есть.<br><br>
-      <strong style="color:var(--accent-light)">🔄 Заменить все:</strong>
-      Удаляет все ваши IP (кроме закреплённых) и добавляет текущий.
-      Полезно при смене провайдера или если накопилось много старых адресов.
+  </div>
+
+  <!-- TAB: IP-адреса -->
+  <div class="tab-panel" id="panel-ips">
+    <div class="card">
+      <div class="card-title">🛂 Мои IP-адреса</div>
+      <div id="ips-detected" style="margin-bottom:12px;padding:10px;border-radius:8px;background:rgba(15,23,42,0.5);font-size:0.88rem;color:var(--text-dim);line-height:1.5">
+        <span class="spinner" style="display:inline-block;width:14px;height:14px;border:2px solid var(--accent) transparent;border-radius:50%;animation:spin 1s linear infinite;vertical-align:middle"></span>
+        Определяем ваш текущий IP...
+      </div>
+      <div id="ips-list" style="margin-bottom:12px">
+        <div class="loading"><span class="spinner"></span></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input type="text" class="input-field" id="new-ip" placeholder="IP или CIDR (5.167.98.20 или 5.167.98.0/24)" style="flex:1;min-width:200px">
+        <button class="btn btn-primary" onclick="addIP()">Добавить</button>
+        <button class="btn btn-ghost" onclick="addAutoIP()" id="btn-auto-ip">Текущий IP</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <button class="btn btn-ghost" onclick="replaceAllIPs()" style="font-size:0.85rem">🔄 Заменить все на текущий</button>
+      </div>
+      <div style="margin-top:12px;padding:10px;background:rgba(15,23,42,0.5);border-radius:8px;font-size:0.82rem;color:var(--text-dim);line-height:1.5">
+        <strong style="color:var(--accent-light)">ℹ️ Для чего это нужно:</strong><br>
+        Если на сервере включена блокировка входящих из РФ — клиенты с российскими IP
+        не смогут подключиться к VLESS на порту 443. Добавьте свой IP-адрес сюда,
+        и вы получите доступ. IP берётся напрямую из вашего TCP-подключения —
+        его нельзя подделать.<br><br>
+        <strong style="color:var(--accent-light)">📌 Закрепление:</strong>
+        Закреплённые IP (📌) не удаляются автоматически при очистке старых адресов.
+        Закрепите свой домашний статический IP, если он есть.<br><br>
+        <strong style="color:var(--accent-light)">🔄 Заменить все:</strong>
+        Удаляет все ваши IP (кроме закреплённых) и добавляет текущий.
+        Полезно при смене провайдера или если накопилось много старых адресов.
+      </div>
     </div>
   </div>
 </div>
@@ -450,6 +580,21 @@ body {{
 <div class="toast" id="toast"></div>
 
 <script>
+// ── Tab navigation ───────────────────────────────────────────────────────────
+function switchTab(tab) {{
+  document.querySelectorAll('.tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.tab-panel').forEach(p =>
+    p.classList.toggle('active', p.id === 'panel-' + tab));
+  // Хеш в URL для shareable link + Back-button браузера
+  history.replaceState(null, '', '#' + tab);
+}}
+// При загрузке — активируем таб из URL hash или дефолтный
+(function() {{
+  const h = (location.hash || '#connect').slice(1);
+  if (document.getElementById('panel-' + h)) switchTab(h);
+}})();
+
 // ── Particles ───────────────────────────────────────────────────────────────
 (function initParticles() {{
   const container = document.getElementById('particles');
@@ -524,6 +669,9 @@ async function loadSubscription() {{
   const card = document.getElementById('sub-card');
   const container = document.getElementById('sub-container');
   card.style.display = '';
+  // Показываем таб «Подписка» в меню
+  const subTab = document.getElementById('tab-subscription');
+  if (subTab) subTab.style.display = '';
 
   const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(data.urls.base64);
   const nodes = (data.multinode && data.multinode.nodes) || [];
@@ -912,6 +1060,9 @@ async function loadMyAWG() {{
     </div>
   `;
   document.getElementById('awg-card').style.display = 'block';
+  // Показываем таб «AmneziaWG» в меню
+  const awgTab = document.getElementById('tab-awg');
+  if (awgTab) awgTab.style.display = '';
 }}
 
 async function regenMyAWG() {{
