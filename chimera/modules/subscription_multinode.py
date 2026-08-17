@@ -508,6 +508,33 @@ _RULE_PROVIDERS = """rule-providers:
     interval: 86400
     format: yaml
 
+  # Greatfire (китайские заблокированные домены → proxy)
+  greatfire:
+    type: http
+    behavior: domain
+    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/greatfire.txt"
+    path: ./ruleset/loyalsoldier/greatfire.yaml
+    interval: 86400
+    format: yaml
+
+  # Telegram CIDR (Loyalsoldier — резерв к MetaCubeX telegram-ip)
+  telegramcidr:
+    type: http
+    behavior: ipcidr
+    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/telegramcidr.txt"
+    path: ./ruleset/loyalsoldier/telegramcidr.yaml
+    interval: 86400
+    format: yaml
+
+  # Китайские IP-диапазоны (Loyalsoldier — резерв к GEOIP,CN)
+  cncidr:
+    type: http
+    behavior: ipcidr
+    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/cncidr.txt"
+    path: ./ruleset/loyalsoldier/cncidr.yaml
+    interval: 86400
+    format: yaml
+
   # Приложения (Steam, Battle.net и т.д.)
   applications:
     type: http
@@ -534,6 +561,15 @@ _RULE_PROVIDERS = """rule-providers:
     interval: 86400
     format: mrs
 
+  # Netflix IP (CDN-диапазоны Netflix — защита от DNS-подмены)
+  netflix-ip:
+    type: http
+    behavior: ipcidr
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geoip/netflix.mrs"
+    path: ./ruleset/metacubex/netflix-ip.mrs
+    interval: 86400
+    format: mrs
+
   twitch-domains:
     type: http
     behavior: domain
@@ -547,6 +583,15 @@ _RULE_PROVIDERS = """rule-providers:
     behavior: domain
     url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/spotify.mrs"
     path: ./ruleset/metacubex/spotify-domains.mrs
+    interval: 86400
+    format: mrs
+
+  # Disney+ домены (стриминг)
+  disney-domains:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/disney.mrs"
+    path: ./ruleset/metacubex/disney-domains.mrs
     interval: 86400
     format: mrs
 
@@ -603,7 +648,9 @@ _RULES_STATIC_HEAD = """rules:
   - DOMAIN-SUFFIX,adsystem.amazon.com,REJECT
   - DOMAIN-SUFFIX,adnxs.com,REJECT
   - DOMAIN-SUFFIX,criteo.com,REJECT
+  - DOMAIN-SUFFIX,criteo.net,REJECT
   - DOMAIN-SUFFIX,2mdn.net,REJECT
+  - DOMAIN-SUFFIX,moatads.com,REJECT
   - DOMAIN-SUFFIX,adsrvr.org,REJECT
   - DOMAIN-SUFFIX,rubiconproject.com,REJECT
   - DOMAIN-SUFFIX,pubmatic.com,REJECT
@@ -615,6 +662,8 @@ _RULES_STATIC_HEAD = """rules:
   - DOMAIN-SUFFIX,amplitude.com,REJECT
   - DOMAIN-SUFFIX,mixpanel.com,REJECT
   - DOMAIN-SUFFIX,clarity.ms,REJECT
+  - DOMAIN-SUFFIX,fullstory.com,REJECT
+  - DOMAIN-SUFFIX,chartbeat.com,REJECT
   - DOMAIN-KEYWORD,adservice,REJECT
   - DOMAIN-KEYWORD,telemetry,REJECT
   - DOMAIN-SUFFIX,vortex.data.microsoft.com,REJECT
@@ -631,6 +680,7 @@ _RULES_STATIC_HEAD = """rules:
   - DOMAIN-SUFFIX,safebrowsing.google.com,REJECT
   - DOMAIN-SUFFIX,clientservices.googleapis.com,REJECT
   - DOMAIN-SUFFIX,update.googleapis.com,REJECT
+  - DOMAIN-SUFFIX,optimizationguide-pa.googleapis.com,REJECT
   - DOMAIN-SUFFIX,sls.update.microsoft.com,REJECT
   - DOMAIN-SUFFIX,stats.microsoft.com,REJECT
   - DOMAIN-KEYWORD,analytics,REJECT
@@ -676,17 +726,19 @@ _RULES_STATIC_TAIL = """  # ── AI сервисы (домены + auto-update
   # ── Стриминг ──
   - RULE-SET,youtube-domains,Streaming
   - RULE-SET,netflix-domains,Streaming
+  - RULE-SET,netflix-ip,Streaming
   - RULE-SET,twitch-domains,Streaming
   - RULE-SET,spotify-domains,Streaming
   - RULE-SET,tiktok-domains,Streaming
+  - RULE-SET,disney-domains,Streaming
   - DOMAIN-SUFFIX,hbomax.com,Streaming
   - DOMAIN-SUFFIX,primevideo.com,Streaming
   - DOMAIN-SUFFIX,hulu.com,Streaming
-  - DOMAIN-SUFFIX,disneyplus.com,Streaming
 
   # ── Telegram ──
   - RULE-SET,telegram-domains,Telegram
   - RULE-SET,telegram-ip,Telegram
+  - RULE-SET,telegramcidr,Telegram
 
   # ── Яндекс ──
   - DOMAIN-KEYWORD,yandex,DIRECT
@@ -696,6 +748,8 @@ _RULES_STATIC_TAIL = """  # ── AI сервисы (домены + auto-update
   - DOMAIN-SUFFIX,ya.ru,DIRECT
   - DOMAIN-SUFFIX,yastatic.net,DIRECT
   - DOMAIN-SUFFIX,mc.yandex.ru,DIRECT
+  - DOMAIN-SUFFIX,mc.webvisor.org,DIRECT
+  - DOMAIN-SUFFIX,mc.webvisor.com,DIRECT
   - DOMAIN-SUFFIX,an.yandex.ru,DIRECT
 
   # ── VK и Mail.ru ──
@@ -703,6 +757,9 @@ _RULES_STATIC_TAIL = """  # ── AI сервисы (домены + auto-update
   - DOMAIN-SUFFIX,vk.ru,DIRECT
   - DOMAIN-SUFFIX,vkuseraudio.net,DIRECT
   - DOMAIN-SUFFIX,vkuserapi.net,DIRECT
+  - DOMAIN-SUFFIX,vk.me,DIRECT
+  - DOMAIN-SUFFIX,vk-portal.net,DIRECT
+  - DOMAIN-SUFFIX,vk-cdn.net,DIRECT
   - DOMAIN-SUFFIX,userapi.com,DIRECT
   - DOMAIN-SUFFIX,mail.ru,DIRECT
   - DOMAIN-SUFFIX,ok.ru,DIRECT
@@ -716,28 +773,42 @@ _RULES_STATIC_TAIL = """  # ── AI сервисы (домены + auto-update
   - DOMAIN-SUFFIX,vtb.ru,DIRECT
   - DOMAIN-SUFFIX,gazprombank.ru,DIRECT
   - DOMAIN-SUFFIX,open.ru,DIRECT
+  - DOMAIN-SUFFIX,open-broker.ru,DIRECT
   - DOMAIN-SUFFIX,rshb.ru,DIRECT
   - DOMAIN-SUFFIX,psb.ru,DIRECT
+  - DOMAIN-SUFFIX,uralsib.ru,DIRECT
+  - DOMAIN-SUFFIX,absolutbank.ru,DIRECT
   - DOMAIN-SUFFIX,sovcombank.ru,DIRECT
+  - DOMAIN-SUFFIX,creditcard.ru,DIRECT
 
   # ── Магазины ──
   - DOMAIN-SUFFIX,ozon.ru,DIRECT
   - DOMAIN-SUFFIX,wildberries.ru,DIRECT
   - DOMAIN-SUFFIX,aliexpress.ru,DIRECT
+  - DOMAIN-SUFFIX,aliexpress.com,DIRECT
+  - DOMAIN-SUFFIX,alibaba.com,DIRECT
   - DOMAIN-SUFFIX,mvideo.ru,DIRECT
   - DOMAIN-SUFFIX,eldorado.ru,DIRECT
   - DOMAIN-SUFFIX,dns-shop.ru,DIRECT
+  - DOMAIN-SUFFIX,sportmaster.ru,DIRECT
   - DOMAIN-SUFFIX,cian.ru,DIRECT
   - DOMAIN-SUFFIX,auto.ru,DIRECT
+  - DOMAIN-SUFFIX,drom.ru,DIRECT
   - DOMAIN-SUFFIX,avito.ru,DIRECT
   - DOMAIN-KEYWORD,avito,DIRECT
+  - DOMAIN-SUFFIX,edadeal.ru,DIRECT
 
   # ── Государство ──
   - DOMAIN-SUFFIX,gosuslugi.ru,DIRECT
   - DOMAIN-SUFFIX,gov.ru,DIRECT
   - DOMAIN-SUFFIX,nalog.gov.ru,DIRECT
+  - DOMAIN-SUFFIX,api-interface.nalog.ru,DIRECT
   - DOMAIN-SUFFIX,pfr.gov.ru,DIRECT
+  - DOMAIN-SUFFIX,fssprus.ru,DIRECT
   - DOMAIN-SUFFIX,mos.ru,DIRECT
+  - DOMAIN-SUFFIX,fastbox.mos.ru,DIRECT
+  - DOMAIN-SUFFIX,brave.nalog.ru,DIRECT
+  - DOMAIN-SUFFIX,brave.gosuslugi.ru,DIRECT
   - DOMAIN-SUFFIX,gibdd.ru,DIRECT
 
   # ── Операторы и медиа ──
@@ -748,33 +819,63 @@ _RULES_STATIC_TAIL = """  # ── AI сервисы (домены + auto-update
   - DOMAIN-SUFFIX,rt.ru,DIRECT
   - DOMAIN-SUFFIX,rostelecom.ru,DIRECT
   - DOMAIN-SUFFIX,dom.ru,DIRECT
+  - DOMAIN-SUFFIX,tricolor.tv,DIRECT
+  - DOMAIN-SUFFIX,ufanet.ru,DIRECT
   - DOMAIN-SUFFIX,kinopoisk.ru,DIRECT
   - DOMAIN-KEYWORD,kinopoisk,DIRECT
   - DOMAIN-SUFFIX,1tv.ru,DIRECT
+  - DOMAIN-SUFFIX,firstchannel.ru,DIRECT
   - DOMAIN-SUFFIX,ria.ru,DIRECT
   - DOMAIN-SUFFIX,tass.ru,DIRECT
   - DOMAIN-SUFFIX,lenta.ru,DIRECT
   - DOMAIN-SUFFIX,rambler.ru,DIRECT
+  - DOMAIN-KEYWORD,rambler,DIRECT
+  - DOMAIN-SUFFIX,lostfilm.tv,DIRECT
 
   # ── IT ──
   - DOMAIN-SUFFIX,habr.ru,DIRECT
   - DOMAIN-SUFFIX,habr.com,DIRECT
   - DOMAIN-SUFFIX,4pda.to,DIRECT
+  - DOMAIN-SUFFIX,4pda.ru,DIRECT
   - DOMAIN-SUFFIX,litres.ru,DIRECT
+  - DOMAIN-SUFFIX,bookmate.ru,DIRECT
+  - DOMAIN-SUFFIX,mybook.ru,DIRECT
+  - DOMAIN-SUFFIX,studfile.net,DIRECT
+  - DOMAIN-SUFFIX,garant.ru,DIRECT
+  - DOMAIN-SUFFIX,consultant.ru,DIRECT
+  - DOMAIN-SUFFIX,msu.ru,DIRECT
+  - DOMAIN-SUFFIX,spbu.ru,DIRECT
+  - DOMAIN-SUFFIX,mtuci.ru,DIRECT
+  - DOMAIN-SUFFIX,hse.ru,DIRECT
+  - DOMAIN-SUFFIX,mipt.ru,DIRECT
+  - DOMAIN-SUFFIX,urfu.ru,DIRECT
+  - DOMAIN-SUFFIX,kpfu.ru,DIRECT
+  - DOMAIN-SUFFIX,mgimo.ru,DIRECT
+  - DOMAIN-SUFFIX,bmstu.ru,DIRECT
   - DOMAIN-SUFFIX,2ip.ru,DIRECT
   - DOMAIN-SUFFIX,2ip.io,DIRECT
   - DOMAIN-SUFFIX,2gis.ru,DIRECT
   - DOMAIN-SUFFIX,rutracker.org,DIRECT
+  - DOMAIN-SUFFIX,rutracker.ru,DIRECT
   - DOMAIN-SUFFIX,dtf.ru,DIRECT
   - DOMAIN-SUFFIX,stopgame.ru,DIRECT
+  - DOMAIN-SUFFIX,igromania.ru,DIRECT
+  - DOMAIN-SUFFIX,kanobu.ru,DIRECT
+  - DOMAIN-SUFFIX,gg.ru,DIRECT
+  - DOMAIN-SUFFIX,e1.ru,DIRECT
+  - DOMAIN-SUFFIX,nn.ru,DIRECT
+  - DOMAIN-SUFFIX,rugion.ru,DIRECT
+  - DOMAIN-SUFFIX,skbkontur.ru,DIRECT
+  - DOMAIN-SUFFIX,kontur.ru,DIRECT
 
   # ── Внешние списки: прямые и приложения (Loyalsoldier) ──
   - RULE-SET,applications,DIRECT
   - RULE-SET,direct,DIRECT
   - RULE-SET,private,DIRECT
 
-  # ── GFW (заблокированные домены → прокси) ──
+  # ── GFW + Greatfire (заблокированные домены → прокси) ──
   - RULE-SET,gfw,Proxy
+  - RULE-SET,greatfire,Proxy
 
   # ── Внешний список: прокси-домены (Loyalsoldier) ──
   - RULE-SET,proxy,Proxy
