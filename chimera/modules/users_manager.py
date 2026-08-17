@@ -1069,96 +1069,113 @@ def generate_client_links_ios() -> None:
     proto = PROTOCOL_MODE  # "reality" или "xhttp"
     _sni = PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) else PARAM_DOMAIN
 
-    # ── Резолвим email и UUID для генерации ссылок ────────────────────────
-    # Для REALITY: shadow-клиент (без flow), UUID берётся из него.
-    # Для xHTTP: оригинальный PARAM_UUID, shadow не нужен.
-    # Email — из живого clients[] по PARAM_UUID (защита от рассинхрона
-    # state.json ↔ clients[], та же логика, что в do_user_show_link_ios_by_uuid).
-    link_uuid = PARAM_UUID
-    link_email = ""
-    if proto == "reality":
-        cfg = _users_get_config()
-        try:
-            with cfg.open() as f:
-                c = json.load(f)
-            clients = (c.get("inbounds", [{}])[0]
-                       .get("settings", {}).get("clients", []))
-            base_client = next((cl for cl in clients if cl.get("id", "") == PARAM_UUID), None)
-            if not base_client:
-                warn(f"PARAM_UUID '{PARAM_UUID[:8]}…' не найден в clients[] config.json.")
-                _box_warn("Возможно, список пользователей не применён. "
-                          "Ссылки будут с оригинальным UUID (могут не работать на iOS без shadow).")
-            else:
-                base_email = base_client.get("email", "")
-                if not base_email:
-                    warn("У root-юзера в clients[] пустой email — "
-                         "невозможно создать iOS-shadow.")
-                    _box_warn("Ссылки будут с оригинальным UUID (могут не работать на iOS).")
+    # ── BUGFIX (v5): загружаем АКТУАЛЬНЫЙ список юзеров через
+    #    _unified_load_users(), а не PARAM_UUID. Раньше использовался
+    #    PARAM_UUID — UUID НАЧАЛЬНОГО юзера, который мог быть удалён.
+    #    Теперь перебираем всех активных юзеров и для каждого строим
+    #    iOS-совместимую ссылку (с shadow для REALITY).
+    try:
+        all_users = _unified_load_users()
+    except Exception:
+        all_users = []
+    active_users = [u for u in all_users
+                    if u.get("uuid") and not u.get("disabled")
+                    and not u.get("is_ios_shadow")]
+
+    if not active_users and PARAM_UUID:
+        # Fallback: показываем PARAM_UUID (старое поведение).
+        active_users = [{"uuid": PARAM_UUID,
+                         "email": getattr(core, "PARAM_USER_EMAIL", "") or "default",
+                         "name": getattr(core, "PARAM_USER_NAME", "") or "default"}]
+
+    if not active_users:
+        _box_row(f"  {DIM}Нет активных пользователей для iOS-ссылок.{NC}")
+        _box_bottom()
+        return
+
+    _box_row(f"  {GREEN}Найдено активных юзеров: {len(active_users)}{NC}")
+    _box_row(f"  {DIM}Для каждого создаётся iOS-совместимая ссылка (shadow для REALITY).{NC}")
+    _box_row()
+
+    # ── Цикл по всем активным юзерам ──────────────────────────────────
+    for u in active_users:
+        link_uuid = u.get("uuid", PARAM_UUID)
+        link_email = u.get("email", "")
+        _u_label = u.get("email", u.get("name", link_uuid[:8]))
+        _box_row(f"  {CYAN}━━━ {_u_label} ━━━{NC}")
+        _box_row()
+
+        # Для REALITY: shadow-клиент (без flow), UUID берётся из него.
+        # Для xHTTP: оригинальный UUID, shadow не нужен.
+        if proto == "reality":
+            cfg = _users_get_config()
+            try:
+                with cfg.open() as f:
+                    c = json.load(f)
+                clients = (c.get("inbounds", [{}])[0]
+                           .get("settings", {}).get("clients", []))
+                base_client = next((cl for cl in clients if cl.get("id", "") == link_uuid), None)
+                if not base_client:
+                    _box_warn(f"UUID '{link_uuid[:8]}…' не найден в clients[] config.json.")
+                    _box_warn("Ссылки будут с оригинальным UUID (могут не работать на iOS без shadow).")
                 else:
-                    shadow = _users_get_or_create_ios_shadow(cfg, base_email)
-                    if shadow is not None:
-                        link_uuid, link_email = shadow
-                    # если shadow вернул None при proto == "reality" —
-                    # это ненормально (xhttp-инбаунд не должен быть reality),
-                    # но не роняем — fallback на PARAM_UUID.
-        except Exception as e:
-            warn(f"Ошибка чтения config.json для shadow: {e}")
-            _box_warn("Ссылки будут с оригинальным UUID (могут не работать на iOS).")
+                    base_email = base_client.get("email", "")
+                    if not base_email:
+                        _box_warn("У юзера в clients[] пустой email — невозможно создать iOS-shadow.")
+                    else:
+                        shadow = _users_get_or_create_ios_shadow(cfg, base_email)
+                        if shadow is not None:
+                            link_uuid, link_email = shadow
+            except Exception as e:
+                _box_warn(f"Ошибка чтения config.json для shadow: {e}")
 
-    ipv4 = get_server_ip("4")
-    if ipv4:
-        link4 = _gen_vless_link(
-            ipv4, link_uuid, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
-            proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
-            port=SERVER_PORT,
-        )
-        link4 = to_ios_karing_link(link4)
-        print()
-        print(f"{GREEN}📡 IPv4 ссылка (iOS):{NC}")
-        _box_link(link4)
-        link_file = Path("/root/vless_link_ios.txt")
-        link_file.write_text(link4)
-        link_file.chmod(0o600)
-        print()
-        _show_qr(link4, "IPv4 (iOS)", "/root/vless_qr_ipv4_ios.png")
+        ipv4 = get_server_ip("4")
+        if ipv4:
+            link4 = _gen_vless_link(
+                ipv4, link_uuid, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
+                proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
+                port=SERVER_PORT,
+            )
+            link4 = to_ios_karing_link(link4)
+            print(f"{GREEN}📡 IPv4 ссылка (iOS):{NC}")
+            _box_link(link4)
+            _u_safe = link_email.replace("@", "_at_").replace("/", "_")
+            link_file = Path(f"/root/vless_link_ios_{_u_safe}.txt")
+            link_file.write_text(link4)
+            link_file.chmod(0o600)
+            print()
+            _show_qr(link4, f"IPv4 (iOS) — {_u_label}", str(link_file).replace(".txt", ".png").replace("/root/", "/root/vless_qr_ipv4_ios_"))
 
-    ipv6_ext = get_server_ip("6") if IS_IPV6_AVAILABLE else ""
-    if ipv6_ext:
-        link6 = _gen_vless_link(
-            f"[{ipv6_ext}]", link_uuid, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
-            proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
-            port=SERVER_PORT,
-        )
-        link6 = to_ios_karing_link(link6)
-        print()
-        print(f"{CYAN}🌐 IPv6 ссылка (iOS):{NC}")
-        _box_link(link6)
-        link6_file = Path("/root/vless_link_ipv6_ios.txt")
-        link6_file.write_text(link6)
-        link6_file.chmod(0o600)
-        print()
-        _show_qr(link6, "IPv6 (iOS)", "/root/vless_qr_ipv6_ios.png")
+        ipv6_ext = get_server_ip("6") if IS_IPV6_AVAILABLE else ""
+        if ipv6_ext:
+            link6 = _gen_vless_link(
+                f"[{ipv6_ext}]", link_uuid, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
+                proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
+                port=SERVER_PORT,
+            )
+            link6 = to_ios_karing_link(link6)
+            print(f"{CYAN}🌐 IPv6 ссылка (iOS):{NC}")
+            _box_link(link6)
+            print()
 
-    if PARAM_DOMAIN:
-        link_ds = _gen_vless_link(
-            PARAM_DOMAIN, link_uuid, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
-            proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
-            port=SERVER_PORT,
-        )
-        link_ds = to_ios_karing_link(link_ds)
-        print()
-        print(f"{MAGENTA}🔄 Domain (DualStack) ссылка (iOS):{NC}")
-        _box_link(link_ds)
-        print()
-        _show_qr(link_ds, "Domain/DualStack (iOS)", "/root/vless_qr_ios.png")
-        print()
+        if PARAM_DOMAIN:
+            link_ds = _gen_vless_link(
+                PARAM_DOMAIN, link_uuid, PARAM_PUBLIC_KEY, PARAM_SHORTID, _sni, fp,
+                proto=proto, xhttp_path=XHTTP_PATH, xhttp_mode=XHTTP_MODE,
+                port=SERVER_PORT,
+            )
+            link_ds = to_ios_karing_link(link_ds)
+            print(f"{MAGENTA}🔄 Domain (DualStack) ссылка (iOS):{NC}")
+            _box_link(link_ds)
+            print()
+        _box_row()
 
     _box_row()
     proto_label = f"xHTTP TLS ({XHTTP_MODE})" if proto == "xhttp" else "VLESS+REALITY"
     _box_row(f"{BLUE}💡 Протокол: {proto_label} | Порт: {SERVER_PORT}{NC}")
     _box_row(f"{BLUE}💡 Совет:{NC} Импортируйте в Karing (iOS) или Hiddify (iOS)")
     _box_wrap_msg(f"   {DIM}Файлы QR:{NC} ", 12,
-                  "/root/vless_qr_ios.png  /root/vless_qr_ipv4_ios.png  /root/vless_qr_ipv6_ios.png")
+                  "/root/vless_qr_ios_*.png  /root/vless_link_ios_*.txt")
     _box_row()
     from chimera.modules.box_renderer import _print_link_warning
     _print_link_warning(is_vless=True)

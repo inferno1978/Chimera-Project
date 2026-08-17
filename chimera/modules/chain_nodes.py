@@ -2723,30 +2723,67 @@ def generate_chain_summary() -> None:
             "fp":      CHAIN_EXIT_FP,
         }]
 
+    # ── BUGFIX (v5): загружаем АКТУАЛЬНЫЙ список юзеров через
+    #    _unified_load_users(), а не глобальный PARAM_UUID. Раньше
+    #    использовался PARAM_UUID — это UUID НАЧАЛЬНОГО юзера, который
+    #    оставался устаревшим после удаления этого юзера через TUI
+    #    2 → 1 → D. В результате "Клиентская ссылка (Entry Node)" в
+    #    Mode B показывала UUID, которого больше нет в clients[] →
+    #    "invalid request user id" в клиентах.
+    #
+    #    Теперь: показываем ссылки для ВСЕХ активных юзеров. Если юзеров
+    #    нет — fallback на PARAM_UUID (для emergency_repair/fresh install).
+    try:
+        from chimera.modules.users_manager import _unified_load_users
+        all_users = _unified_load_users()
+        active_users = [u for u in all_users
+                        if u.get("uuid") and not u.get("disabled")
+                        and not u.get("is_ios_shadow")]
+    except Exception:
+        active_users = []
+    if not active_users and PARAM_UUID:
+        # Fallback — PARAM_UUID (старое поведение).
+        active_users = [{"uuid": PARAM_UUID,
+                         "email": getattr(core, "PARAM_USER_EMAIL", "") or "default",
+                         "name": getattr(core, "PARAM_USER_NAME", "") or "default"}]
+
     # Клиентская ссылка — подключаться к entry (российскому) VPS
     import urllib.parse as _uparse
     _, _, _chain_flag = get_server_country_cached()
     _chain_flag_prefix = f"{_chain_flag} " if _chain_flag and _chain_flag != "🌐" else ""
-    _chain_label = _chain_flag_prefix + _uparse.quote(f"{PARAM_DOMAIN}-chain")
     proto = PROTOCOL_MODE
-    if proto == "xhttp":
-        _path_enc = _uparse.quote(XHTTP_PATH, safe="/")
-        _cs_fp = PARAM_FINGERPRINT or _fp_from_state()
-        link = (
-            f"vless://{PARAM_UUID}@{entry_host}:{SERVER_PORT}"
-            f"?type=xhttp&security=tls&sni={PARAM_DOMAIN}"
-            f"&path={_path_enc}&mode={XHTTP_MODE}"
-            f"&fp={_cs_fp}#{_chain_label}"
+
+    # ── Строим ссылки для каждого активного юзера ───────────────────
+    # Раньше была ОДНА ссылка на PARAM_UUID. Теперь — список ссылок,
+    # по одной на каждого активного юзера. Берём первую для записи в
+    # /root/vless_link.txt (для обратной совместимости с инструкцией),
+    # но показываем все в боксе.
+    def _build_entry_link(user_uuid: str, label: str = "") -> str:
+        _chain_label = _chain_flag_prefix + _uparse.quote(
+            label or f"{PARAM_DOMAIN}-chain"
         )
-    else:
-        _reality_sni = PARAM_REALITY_DEST if AWG_EXIT_ENABLED else PARAM_DOMAIN
-        _cs_fp = PARAM_FINGERPRINT or _fp_from_state()
-        link = (
-            f"vless://{PARAM_UUID}@{entry_host}:{SERVER_PORT}"
-            f"?type=tcp&security=reality&pbk={PARAM_PUBLIC_KEY}"
-            f"&fp={_cs_fp}&sni={_reality_sni}&sid={PARAM_SHORTID}"
-            f"&flow=xtls-rprx-vision#{_chain_label}"
-        )
+        if proto == "xhttp":
+            _path_enc = _uparse.quote(XHTTP_PATH, safe="/")
+            _cs_fp = PARAM_FINGERPRINT or _fp_from_state()
+            return (
+                f"vless://{user_uuid}@{entry_host}:{SERVER_PORT}"
+                f"?type=xhttp&security=tls&sni={PARAM_DOMAIN}"
+                f"&path={_path_enc}&mode={XHTTP_MODE}"
+                f"&fp={_cs_fp}#{_chain_label}"
+            )
+        else:
+            _reality_sni = PARAM_REALITY_DEST if AWG_EXIT_ENABLED else PARAM_DOMAIN
+            _cs_fp = PARAM_FINGERPRINT or _fp_from_state()
+            return (
+                f"vless://{user_uuid}@{entry_host}:{SERVER_PORT}"
+                f"?type=tcp&security=reality&pbk={PARAM_PUBLIC_KEY}"
+                f"&fp={_cs_fp}&sni={_reality_sni}&sid={PARAM_SHORTID}"
+                f"&flow=xtls-rprx-vision#{_chain_label}"
+            )
+
+    # Первая ссылка — для записи в файлы (обратная совместимость).
+    first_user = active_users[0] if active_users else {"uuid": PARAM_UUID, "email": "default"}
+    link = _build_entry_link(first_user.get("uuid", PARAM_UUID), f"{PARAM_DOMAIN}-chain")
 
     # Определяем метку стратегии ДО цикла — она нужна внутри него
     strategy_labels = {
@@ -2883,8 +2920,18 @@ SNI:        {PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) els
         _box_row(f"    UUID:    {CYAN}{nd['uuid']}{NC}")
         _box_row(f"    SNI:     {CYAN}{nd['sni']}{NC}")
     _box_sep()
-    print(f"  {MAGENTA}Клиентская ссылка (Entry Node):{NC}")
+    if len(active_users) > 1:
+        print(f"  {MAGENTA}Клиентские ссылки (Entry Node) — {len(active_users)} юзеров:{NC}")
+    else:
+        print(f"  {MAGENTA}Клиентская ссылка (Entry Node):{NC}")
     _box_link(link)
+    # Если юзеров больше одного — показываем остальные ссылки тоже.
+    if len(active_users) > 1:
+        for u in active_users[1:]:
+            _u_label = u.get("email", u.get("name", u.get("uuid", "?")[:8]))
+            _u_link = _build_entry_link(u.get("uuid", ""), f"{PARAM_DOMAIN}-chain · {_u_label}")
+            print(f"  {DIM}─── {_u_label} ───{NC}")
+            _box_link(_u_link)
     print()
     from chimera.modules.box_renderer import _print_link_warning
     _print_link_warning(is_vless=True)
