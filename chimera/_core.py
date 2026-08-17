@@ -927,6 +927,14 @@ PARAM_SHORTID:         str  = ""
 PARAM_PUBLIC_KEY:      str  = ""
 PARAM_PRIVATE_KEY:     str  = ""
 PARAM_EMAIL:           str  = ""
+# Email/имя администратора — спрашиваются при установке (install_prompts.py
+# [1/12]/[2/12]). Используются в users.json (email + name), User Portal,
+# Admin Panel, QR-кодах, подписке. Раньше создавался безымянный дефолтный
+# юзер с email из PARAM_EMAIL (LE-email) — это путало админов при удалении
+# и замене. PARAM_EMAIL остаётся для LE, отдельно — PARAM_USER_EMAIL для
+# идентификации юзера.
+PARAM_USER_EMAIL:      str  = ""
+PARAM_USER_NAME:       str  = ""
 PARAM_SPIDERX:         str  = ""
 PARAM_SOCKET_PATH:     str  = ""
 PARAM_REALITY_DEST:    str  = ""   # dest/sni для REALITY при AWG-транспорте (чужой сайт, напр. www.cloudflare.com)
@@ -3619,6 +3627,11 @@ def do_full_install() -> None:
         "strategy":       PARAM_DOMAIN_STRATEGY,
         "template":       PARAM_SITE_TEMPLATE,
         "email":          PARAM_EMAIL,
+        # Сохраняем email/имя начального юзера — это нужно для user portal /
+        # admin panel / подписки. Также позволяет при повторной установке
+        # восстановить начального юзера с тем же именем.
+        "user_email":     PARAM_USER_EMAIL,
+        "user_name":      PARAM_USER_NAME,
         "ipv6":           IPV6_PREFLIGHT,
         "use_dnscrypt":   PARAM_USE_DNSCRYPT,
         "fingerprint":    PARAM_FINGERPRINT,
@@ -3844,14 +3857,19 @@ def do_full_install() -> None:
     else:
         generate_client_links()
 
-    # Синхронизируем начального пользователя в единый users.json
+    # Синхронизируем начального пользователя в единый users.json.
+    # Берём email/имя из PARAM_USER_EMAIL/PARAM_USER_NAME (заполняются в
+    # install_prompts.py [1/12]/[2/12]). Если их нет (старая инсталляция
+    # без этого патча) — fallback на PARAM_EMAIL (LE email) или дефолт.
+    _init_email = (PARAM_USER_EMAIL or PARAM_EMAIL or "default@chimera.local").strip()
+    _init_name = (PARAM_USER_NAME or _init_email.split("@")[0] or "admin").strip()
     try:
         existing = _unified_load_users()
         if not any(u.get("uuid") == PARAM_UUID for u in existing):
             existing.append({
                 "uuid":    PARAM_UUID,
-                "email":   PARAM_EMAIL or "default@xray",
-                "name":    (PARAM_EMAIL or "default@xray").split("@")[0],
+                "email":   _init_email,
+                "name":    _init_name,
                 "created": datetime.now(timezone.utc).isoformat(),
                 "source":  INSTALL_MODE,
             })
