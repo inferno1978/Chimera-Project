@@ -113,9 +113,81 @@ def prompt_parameters() -> None:
     _box_top(f"Настройка параметров установки")
     _box_row()
 
+    # --- 0. Email + Name пользователя (по умолчанию раньше создавался
+    #     "безымянный" дефолтный юзер, что приводило к путанице при удалении
+    #     и замене. Теперь спрашиваем сразу — это имя будет использоваться
+    #     в User Portal, Admin Panel, users.json, QR-кодах, подписке.
+    #     Работает для всех режимов: A/B, VLESS/xHTTP. ---
+    _box_sep()
+    _box_row(f" {BLUE}[1/12] Email администратора:{NC}")
+    _box_row(f" {DIM}Используется в User Portal, Admin Panel, QR-кодах, подписке.{NC}")
+    _box_row(f" {DIM}Никаких email не отправляется — это просто идентификатор.{NC}")
+    _box_item("1", f"Ввести вручную (рекомендуется, например: ivan@example.com)")
+    _box_item("2", f"Использовать дефолтный: {DIM}admin@chimera.local{NC}")
+    _box_bottom()
+    while True:
+        try:
+            choice = input("   Выбор [1/2]: ").strip() or "1"
+        except KeyboardInterrupt:
+            print(); raise
+        if choice == "1":
+            while True:
+                try:
+                    v = input("   Email: ").strip()
+                except KeyboardInterrupt:
+                    print(); raise
+                if v and "@" in v and re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', v):
+                    PARAM_USER_EMAIL = v
+                    setattr(core, "PARAM_USER_EMAIL", PARAM_USER_EMAIL)
+                    success(f"   Email: {PARAM_USER_EMAIL}")
+                    break
+                warn("   Некорректный email (формат: name@domain.tld)")
+            break
+        elif choice == "2":
+            PARAM_USER_EMAIL = "admin@chimera.local"
+            setattr(core, "PARAM_USER_EMAIL", PARAM_USER_EMAIL)
+            success(f"   Email: {PARAM_USER_EMAIL}")
+            break
+        else:
+            warn("   Введите 1 или 2")
+
+    # --- 0b. Имя (никнейм) — берётся из email-local-part по умолчанию,
+    #     но можно переопределить. Используется в device_label и
+    #     идентификации устройства в User Portal. ---
+    _box_top(f" {BLUE}[2/12] Имя (никнейм) пользователя:{NC}")
+    _default_name = PARAM_USER_EMAIL.split("@")[0] if "@" in PARAM_USER_EMAIL else "admin"
+    _box_item("1", f"Использовать «{_default_name}» (из email) — рекомендуется")
+    _box_item("2", f"Ввести вручную")
+    _box_bottom()
+    while True:
+        try:
+            choice = input(f"   Выбор [1/2]: ").strip() or "1"
+        except KeyboardInterrupt:
+            print(); raise
+        if choice == "1":
+            PARAM_USER_NAME = _default_name
+            setattr(core, "PARAM_USER_NAME", PARAM_USER_NAME)
+            success(f"   Имя: {PARAM_USER_NAME}")
+            break
+        elif choice == "2":
+            while True:
+                try:
+                    v = input("   Имя: ").strip()
+                except KeyboardInterrupt:
+                    print(); raise
+                if v and re.match(r'^[A-Za-z0-9_\-\.]{2,32}$', v):
+                    PARAM_USER_NAME = v
+                    setattr(core, "PARAM_USER_NAME", PARAM_USER_NAME)
+                    success(f"   Имя: {PARAM_USER_NAME}")
+                    break
+                warn("   Имя: 2-32 символа, латиница/цифры/_-. (без пробелов)")
+            break
+        else:
+            warn("   Введите 1 или 2")
+
     # --- 1. UUID ---
     _box_sep()
-    _box_row(f" {BLUE}[1/11] UUID клиента:{NC}")
+    _box_row(f" {BLUE}[3/12] UUID клиента:{NC}")
     auto_uuid = gen_uuid()
     _box_item("1", f"Сгенерировать автоматически: {DIM}{auto_uuid}{NC}")
     _box_item("2", f"Ввести вручную")
@@ -150,7 +222,7 @@ def prompt_parameters() -> None:
             warn("   Введите 1 или 2")
 
     # --- 2. ShortID ---
-    _box_top(f" {BLUE}[2/11] ShortID (REALITY):{NC}")
+    _box_top(f" {BLUE}[4/12] ShortID (REALITY):{NC}")
     auto_sid = gen_hex(8)
     _box_item("1", f"Сгенерировать автоматически: {DIM}{auto_sid}{NC}")
     _box_item("2", f"Ввести вручную (hex, чётная длина 2-16)")
@@ -187,7 +259,7 @@ def prompt_parameters() -> None:
     # --- 3. Ключи REALITY (только для REALITY) ---
     key_mode = "auto"
     if PROTOCOL_MODE == "reality":
-        _box_top(f" {BLUE}[3/11] Ключи REALITY (x25519) — будут сгенерированы после установки Xray:{NC}")
+        _box_top(f" {BLUE}[5/12] Ключи REALITY (x25519) — будут сгенерированы после установки Xray:{NC}")
         _box_item("1", f"Сгенерировать автоматически (рекомендуется)")
         _box_item("2", f"Ввести вручную (если уже есть пара ключей)")
         _box_bottom()
@@ -230,11 +302,11 @@ def prompt_parameters() -> None:
             else:
                 warn("   Введите 1 или 2")
     else:
-        info("[3/11] Ключи REALITY: пропущено (xHTTP TLS использует TLS-сертификат Let's Encrypt)")
+        info("[5/12] Ключи REALITY: пропущено (xHTTP TLS использует TLS-сертификат Let's Encrypt)")
 
     # --- 4. SpiderX (только для REALITY) ---
     if PROTOCOL_MODE == "reality":
-        _box_top(f" {BLUE}[4/11] SpiderX (путь краулера REALITY):{NC}")
+        _box_top(f" {BLUE}[6/12] SpiderX (путь краулера REALITY):{NC}")
         auto_spx = gen_spiderx()
         _box_item("1", f"Сгенерировать автоматически: {DIM}{auto_spx}{NC}")
         _box_item("2", f"Ввести вручную")
@@ -270,7 +342,7 @@ def prompt_parameters() -> None:
     else:
         PARAM_SPIDERX = gen_spiderx()   # значение не используется, но задаём
         setattr(core, "PARAM_SPIDERX", PARAM_SPIDERX)
-        info(f"[4/11] SpiderX: пропущено (xHTTP TLS)")
+        info(f"[6/12] SpiderX: пропущено (xHTTP TLS)")
 
     # --- 5. Unix Socket (только для REALITY) ---
     if PROTOCOL_MODE == "reality":
@@ -292,7 +364,7 @@ def prompt_parameters() -> None:
             except Exception:
                 pass
         auto_sock = _existing_sock if _existing_sock else f"/dev/shm/{gen_hex(4)}.socket"
-        _box_top(f" {BLUE}[5/11] Unix socket path:{NC}")
+        _box_top(f" {BLUE}[7/12] Unix socket path:{NC}")
         _box_item("1", f"Использовать: {DIM}{auto_sock}{NC}")
         _box_item("2", f"Ввести вручную")
         _box_bottom()
@@ -327,10 +399,10 @@ def prompt_parameters() -> None:
     else:
         PARAM_SOCKET_PATH = f"/dev/shm/{gen_hex(4)}.socket"  # заглушка
         setattr(core, "PARAM_SOCKET_PATH", PARAM_SOCKET_PATH)
-        info(f"[5/11] Unix socket: пропущено (xHTTP TLS не использует сокет)")
+        info(f"[7/12] Unix socket: пропущено (xHTTP TLS не использует сокет)")
 
     # --- 6. Домен ---
-    _box_top(f" {BLUE}[6/11] Домен (SNI):{NC}")
+    _box_top(f" {BLUE}[8/12] Домен (SNI):{NC}")
     _box_bottom()
     while True:
         try:
@@ -349,7 +421,7 @@ def prompt_parameters() -> None:
         warn("   Некорректный домен. Введите FQDN вида my.example.com")
 
     # --- 7. Email ---
-    _box_top(f" {BLUE}[7/11] Email для Let's Encrypt:{NC}")
+    _box_top(f" {BLUE}[9/12] Email для Let's Encrypt:{NC}")
     _box_bottom()
     while True:
         try:
@@ -365,7 +437,7 @@ def prompt_parameters() -> None:
         warn("   Некорректный email")
 
     # --- 8. domainStrategy ---
-    _box_top(f" {BLUE}[8/11] Стратегия исходящих соединений:{NC}")
+    _box_top(f" {BLUE}[10/12] Стратегия исходящих соединений:{NC}")
     if IS_IPV6_AVAILABLE:
         _box_row(f"   {GREEN}ℹ IPv6 обнаружен на сервере{NC}")
     _box_item("1", f"UseIPv6v4 — сначала IPv6, fallback IPv4 {GREEN}(рекомендуется){NC}")
@@ -388,7 +460,7 @@ def prompt_parameters() -> None:
     success(f"   domainStrategy: {PARAM_DOMAIN_STRATEGY}")
 
     # --- 9. Шаблон сайта ---
-    _box_top(f" {BLUE}[9/11] Шаблон сайта-заглушки:{NC}")
+    _box_top(f" {BLUE}[11/12] Шаблон сайта-заглушки:{NC}")
     _box_item("1",  f"TechHub             — IT-портал (RU) · fade-up reveal")
     _box_item("2",  f"NexCloud            — serverless SaaS · gradient mesh")
     _box_item("3",  f"Holm & Oak          — homeware store · parallax")
@@ -429,7 +501,7 @@ def prompt_parameters() -> None:
     success(f"   Шаблон: {tmpl_names[int(PARAM_SITE_TEMPLATE)]}")
 
     # --- 10. DNSCrypt-proxy ---
-    _box_top(f" {BLUE}[10/11] DNSCrypt-proxy (зашифрованный DNS):{NC}")
+    _box_top(f" {BLUE}[12/12] DNSCrypt-proxy (зашифрованный DNS):{NC}")
     _box_item("Y", f"Установить DNSCrypt-proxy {GREEN}(рекомендуется){NC}")
     _box_desc(f"Шифрует DNS-запросы, защищает от слежки провайдера")
     _box_item("N", f"Использовать публичные DNS напрямую (1.1.1.1 / 8.8.8.8)")
@@ -455,7 +527,7 @@ def prompt_parameters() -> None:
         warn("   Введите Y или N")
 
     # --- 11. Fingerprint ---
-    _box_top(f" {BLUE}[11/11] TLS Fingerprint (uTLS):{NC}")
+    _box_top(f" {BLUE}[12/12] TLS Fingerprint (uTLS):{NC}")
     _box_row(f"   Определяет, под какой браузер маскируется TLS-хендшейк клиента.")
     _box_row(f"   Влияет на обход DPI. Должен совпадать в клиенте и на сервере.")
     _box_bottom()
