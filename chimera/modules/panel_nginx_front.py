@@ -364,6 +364,19 @@ def panel_nginx_front_install(
     # (die() exits, не подходит — нам нужно показать сообщение и вернуть False.)
     CYAN, NC, GREEN, RED, YELLOW, DIM = core.CYAN, core.NC, core.GREEN, core.RED, core.YELLOW, core.DIM
 
+    # ── Подгрузка state.json в глобали, если ещё не сделано ──────────
+    # do_manage_web_panel() / do_subscription_menu() вызывают этот модуль
+    # БЕЗ _load_state_into_globals() — поэтому PARAM_DOMAIN пустой, и nginx
+    # front падает с "DOMAIN не задан". Подгружаем явно (идемпотентно).
+    try:
+        if not getattr(core, "PARAM_DOMAIN", ""):
+            if hasattr(core, "_load_state_into_globals"):
+                core._load_state_into_globals()
+    except Exception:
+        # _load_state_into_globals может не существовать в старых версиях —
+        # fallback ниже: читаем state.json напрямую.
+        pass
+
     if cert_name_slug is None:
         cert_name_slug = site_name.replace(".", "-").replace("_", "-")
 
@@ -395,6 +408,18 @@ def panel_nginx_front_install(
         # Let's Encrypt.
         if domain is None:
             domain = getattr(core, "PARAM_DOMAIN", "") or ""
+        # Fallback: если PARAM_DOMAIN всё ещё пустой — читаем state.json
+        # напрямую (на случай если _load_state_into_globals не вызвалась
+        # или в старой версии проекта).
+        if not domain:
+            try:
+                import json as _json
+                _state_path = Path("/var/lib/xray-installer/state.json")
+                if _state_path.exists():
+                    _state = _json.loads(_state_path.read_text())
+                    domain = _state.get("domain", "") or ""
+            except Exception:
+                pass
         if not domain:
             return False, ("DOMAIN не задан. Либо установите VLESS с доменом, "
                            "либо используйте self-signed режим (без домена).")
