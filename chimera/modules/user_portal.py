@@ -356,14 +356,6 @@ body {{
     </div>
   </div>
 
-  <!-- My Subscription (единая подписка: все форматы + мульти-нод конфиги) -->
-  <div class="card fade-in" id="sub-card" style="animation-delay: 0.12s; display:none">
-    <div class="card-title">📚 Моя подписка</div>
-    <div id="sub-container">
-      <div class="loading"><span class="spinner"></span></div>
-    </div>
-  </div>
-
   <!-- My AmneziaWG (показывается только если у юзера есть привязанный пир) -->
   <div class="card fade-in" id="awg-card" style="animation-delay: 0.15s; display:none">
     <div class="card-title">🛡 Мой AmneziaWG</div>
