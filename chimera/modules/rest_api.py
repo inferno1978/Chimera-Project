@@ -1309,6 +1309,18 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, 500)
             return
 
+        # GET /api/sat/info — все привязки сателлитов + все доступные логины
+        # (для Admin Panel).
+        if path == "/api/sat/info":
+            if not self._require_admin():
+                return
+            try:
+                from chimera.modules.satellite_bindings import get_admin_satellites_info
+                self._send_json(get_admin_satellites_info())
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
         # ── User Portal API (GET) ──────────────────────────────────────────────
         # links / traffic / health / clash / singbox — это GET-запросы (browser
         # шлёт fetch(path) без method). password — POST (меняет состояние).
@@ -1374,6 +1386,34 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             try:
                 from chimera.modules.subscription import get_portal_subscription_info
                 self._send_json(get_portal_subscription_info(user))
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # GET /api/portal/sat-info — привязки сателлитных протоколов
+        # текущего юзера (Mieru/NaiveProxy/Telemt/TrustTunnel/sing-box).
+        # Используется карточкой «🛰 Сателлиты» в User Portal.
+        if path == "/api/portal/sat-info":
+            user = self._require_user()
+            if user is None:
+                return
+            try:
+                from chimera.modules.satellite_bindings import get_user_satellites_info
+                self._send_json({"satellites": get_user_satellites_info(user)})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # GET /api/portal/sat-suggest — предложения привязки для юзера
+        # (авто-сканирование логинов всех сателлитов, matches по имени/uuid).
+        # Используется кнопкой «Авто-привязка» в User Portal.
+        if path == "/api/portal/sat-suggest":
+            user = self._require_user()
+            if user is None:
+                return
+            try:
+                from chimera.modules.satellite_bindings import suggest_for_user
+                self._send_json({"suggestions": suggest_for_user(user)})
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
             return
@@ -1835,6 +1875,123 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                     self._send_json({"status": "changed"})
                     return
             self._send_json({"error": "user not found"}, 404)
+            return
+
+        # ── Satellite bindings (admin CRUD) ───────────────────────────────
+        # POST /api/sat/bind — привязать логин сателлита к UUID юзера.
+        # Body: {satellite, login, owner_uuid, owner_email?}
+        if path == "/api/sat/bind":
+            if not self._require_admin():
+                return
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            try:
+                from chimera.modules.satellite_bindings import set_binding
+                ok = set_binding(
+                    satellite=body.get("satellite", ""),
+                    login=body.get("login", ""),
+                    owner_uuid=body.get("owner_uuid", ""),
+                    owner_email=body.get("owner_email", ""),
+                )
+                if ok:
+                    self._send_json({"status": "bound"})
+                else:
+                    self._send_json({"error": "invalid arguments"}, 400)
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # POST /api/sat/unbind — отвязать сателлит от UUID юзера.
+        # Body: {satellite, owner_uuid}
+        if path == "/api/sat/unbind":
+            if not self._require_admin():
+                return
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            try:
+                from chimera.modules.satellite_bindings import remove_binding
+                ok = remove_binding(
+                    satellite=body.get("satellite", ""),
+                    owner_uuid=body.get("owner_uuid", ""),
+                )
+                self._send_json({"status": "unbound" if ok else "not_found"})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # ── User-side satellite auto-bind (Portal → bindings.json) ────────
+        # POST /api/portal/sat-bind — юзер сам привязывает предложенный
+        # логин (auto-suggest) или手动 указывает. Body: {satellite, login}
+        if path == "/api/portal/sat-bind":
+            user = self._require_user()
+            if user is None:
+                return
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            satellite = body.get("satellite", "").strip()
+            login = body.get("login", "").strip()
+            if not satellite or not login:
+                self._send_json({"error": "satellite и login обязательны"}, 400)
+                return
+            try:
+                from chimera.modules.satellite_bindings import (
+                    set_binding, scan_all_satellites, SATELLITES,
+                )
+                # Валидация: login должен существовать в сателлите
+                # (защита от привязки произвольного логина).
+                scan = scan_all_satellites()
+                sat_key = None
+                for s in SATELLITES:
+                    if s == satellite.lower() or s.startswith(satellite.lower()):
+                        sat_key = s
+                        break
+                if not sat_key:
+                    self._send_json({"error": f"unknown satellite: {satellite}"}, 400)
+                    return
+                available_logins = [l.get("login") for l in scan.get(sat_key, [])]
+                if login not in available_logins:
+                    self._send_json({"error": f"login '{login}' не найден в {sat_key}"}, 400)
+                    return
+                set_binding(
+                    satellite=sat_key,
+                    login=login,
+                    owner_uuid=user.get("uuid", ""),
+                    owner_email=user.get("email", ""),
+                )
+                self._send_json({"status": "bound", "satellite": sat_key, "login": login})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # POST /api/portal/sat-unbind — юзер отвязывает свой сателлит.
+        # Body: {satellite}
+        if path == "/api/portal/sat-unbind":
+            user = self._require_user()
+            if user is None:
+                return
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            satellite = body.get("satellite", "").strip()
+            if not satellite:
+                self._send_json({"error": "satellite обязателен"}, 400)
+                return
+            try:
+                from chimera.modules.satellite_bindings import remove_binding
+                ok = remove_binding(
+                    satellite=satellite,
+                    owner_uuid=user.get("uuid", ""),
+                )
+                self._send_json({"status": "unbound" if ok else "not_found"})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
             return
 
         # POST /api/portal/ips — добавить IP в whitelist текущего пользователя.

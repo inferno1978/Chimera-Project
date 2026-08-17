@@ -2,6 +2,95 @@
 
 ---
 
+## FEAT(satellite_bindings): per-user привязка сателлитов (Mieru/NaiveProxy/Telemt/TrustTunnel/sing-box) с синхронизацией TUI↔Portal — 17 августа 2026
+
+**Раньше привязка UUID-пользователя к логину сателлита (Mieru/NaiveProxy/
+Telemt/TrustTunnel/sing-box) шла эвристикой по имени: device_label / name /
+email-local-part совпадает с логином сателлита (case-insensitive). Это
+работало, но не давало чёткой per-user привязки (как у AWG owner_email),
+админ не видел в панели, какие сателлиты привязаны к каждому юзеру, и
+должен был вручную прописывать `subscription.json → identity_map` для
+edge cases. Теперь есть полноценный CRUD + авто-предложения + UI в TUI,
+User Portal и Admin Panel — с полной синхронизацией.**
+
+### Что добавлено
+
+**1. Новый модуль `chimera/modules/satellite_bindings.py`:**
+  - Единый side-table `/var/lib/xray-installer/satellite_bindings.json`
+    с CRUD API: `set_binding`/`find_login`/`remove_binding`/`list_for_user`/
+    `list_all`/`remove_user`/`find_owner`.
+  - **НЕ трогает форматы state сателлитов** (Telemt TOML, TrustTunnel TOML,
+    Mieru/NaiveProxy/singbox JSON) — только отображение UUID→login.
+    Безопасно для существующих инсталляций.
+  - `scan_all_satellites()` — авто-сканирование логинов всех 5 сателлитов
+    (парсинг каждого state-файла в его формате).
+  - `suggest_for_user(user)` — авто-предложения привязок по совпадению
+    имени/email-local-part/UUID. Возвращает current_binding + matched_login
+    + available_logins для каждого сателлита.
+  - `resolve_login(user, satellite, pool_keys)` — канонический резолвер
+    для `subscription._match_by_name`.
+  - Хелперы для панелей: `get_user_satellites_info`/`get_admin_satellites_info`.
+
+**2. `subscription.py`:**
+  - `_match_by_name` теперь использует 3-уровневый приоритет:
+    1. `subscription.json → identity_map[uuid][satellite]` (legacy override)
+    2. `satellite_bindings.json → find_login(uuid, satellite)` (canon, новый)
+    3. Эвристика по имени (старый fallback, 100% backward compat)
+  - Пункт 5 TUI-меню полностью переписан: выбор юзера → авто-скан всех
+    сателлитов + предложения → 4 действия (принять все / выбрать вручную /
+    снять все / показать legacy identity_map).
+  - Текст пункта 5 обновлён: «Привязка сателлитов к UUID (авто-скан)».
+
+**3. `rest_api.py` (User Portal):**
+  - `GET /api/portal/sat-info` — текущие привязки юзера со статусом active.
+  - `GET /api/portal/sat-suggest` — авто-предложения привязок.
+  - `POST /api/portal/sat-bind` — юзер привязывает логин (с валидацией:
+    логин должен существовать в сателлите).
+  - `POST /api/portal/sat-unbind` — юзер отвязывает свой сателлит.
+
+**4. `rest_api.py` (Admin):**
+  - `GET /api/sat/info` — все привязки + все доступные логины.
+  - `POST /api/sat/bind` — привязка для любого юзера.
+  - `POST /api/sat/unbind` — отвязка для любого юзера.
+
+**5. `user_portal.py`:**
+  - Новый таб «🛰 Сателлиты» (между AWG и Трафиком; показывается только
+    если есть привязки или доступные логины).
+  - Карточка показывает: текущие привязки (со статусом «● активен» /
+    «● логин не найден») с кнопкой «Отвязать» + доступные для привязки
+    с выпадающим списком логинов (auto-suggest выделяет совпадение) +
+    кнопкой «Привязать».
+  - При bind/unbind автоматически обновляется и подписка
+    (`loadSubscription()`).
+
+**6. `admin_panel.py`:**
+  - Новая секция «🛰 Сателлиты» (между «Подписка» и «AmneziaWG»).
+  - Статус: «● N привязок · M логинов доступно».
+  - Таблица: сателлит / логин / пользователь / кнопка «🗑 Отвязать».
+  - UUID→email маппинг через `/api/users` для отображения.
+
+### Поведение
+
+| Сценарий | Результат |
+|---|---|
+| Юзер с email `alice@x.com`, в Mieru есть `alice` | TUI/Portal предложит привязку, после accept — URI Mieru в подписке |
+| Юзер привязан к `custom_login`, который не совпадает с именем | Без bindings — URI не попадает в подписку (эвристика не сработает). С bindings — попадает |
+| Identity map в subscription.json | Имеет приоритет над bindings (escape-hatch) |
+| Удаление VLESS-юзера | `remove_user(uuid)` снимает все его привязки |
+| Юзер отвязал сателлит в Portal | Логин остаётся в системе, привязка снимается, URI исчезает из подписки |
+| Старая инсталляция без side-table | Эвристика по имени продолжает работать (fallback) |
+
+### Тесты
+
+`tests/test_satellite_bindings.py` — 20 тестов: CRUD (set/find/remove/
+update/list/find_owner/invalid), scan_all_satellites (5 сателлитов),
+suggest_for_user (match по email-local-part/UUID, current_binding),
+subscription._match_by_name (3-уровневый приоритет), HTTP e2e, хелперы
+панелей. Регрессия: 136 тестов (subscription+rest_api+admin_panel) OK,
+verify.py 10/10 (332 проверки).
+
+---
+
 ## FEAT(subscription_multinode): мульти-нод конфиги подписки для Mode B — mihomo YAML + sing-box selector + exit-URI — 17 августа 2026
 
 **Раньше единая подписка отдавала клиенту только entry-ноду: vless:// в
