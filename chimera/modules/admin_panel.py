@@ -330,22 +330,6 @@ tr:hover { background: rgba(56,189,248,0.05); }
     </table>
   </div>
 
-  <!-- Subscription section (единая подписка: per-user URL всех форматов) -->
-  <div class="table-card" id="sub-section">
-    <h2>🔁 Подписка <button class="btn btn-sm btn-primary" onclick="loadSubscription()">↻</button></h2>
-    <div id="sub-status" style="margin-bottom:16px">
-      <div class="loading"><span class="spinner"></span></div>
-    </div>
-    <table>
-      <thead>
-        <tr><th>Пользователь</th><th>URL подписки</th><th>Форматы</th></tr>
-      </thead>
-      <tbody id="sub-users-tbody">
-        <tr><td colspan="3" class="loading"><span class="spinner"></span></td></tr>
-      </tbody>
-    </table>
-  </div>
-
   <!-- AmneziaWG section -->
   <div class="table-card" id="awg-section">
     <h2>🛡 AmneziaWG <button class="btn btn-sm btn-primary" onclick="loadAWG()">↻</button></h2>
