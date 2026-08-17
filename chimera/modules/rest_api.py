@@ -2182,6 +2182,15 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                     deleted_user.get("email", "").split("@")[0],
                     user=deleted_user,
                 )
+            # v5: также снимаем все привязки сателлитов из side-table
+            # satellite_bindings.json — иначе в Admin Panel в секции
+            # «Сателлиты» остаются висящие записи с несуществующим UUID.
+            if deleted_user is not None:
+                try:
+                    from chimera.modules.satellite_bindings import remove_user as _sb_remove_user
+                    _sb_remove_user(deleted_user.get("uuid", ""))
+                except Exception:
+                    pass
             self._send_json({
                 "status": "deleted", "email": email,
                 "protocol_sync": protocol_sync,

@@ -2,6 +2,89 @@
 
 ---
 
+## FIX(install_prompts+users_manager+admin_panel): email/имя при установке + WARNING при удалении юзера — 17 августа 2026
+
+**Баг: при удалении дефолтного «безымянного» юзера через TUI 2 → D, в
+клиентах (Nyamebox/v2rayNG/FlClash), где был импортирован его UUID,
+подключения переставали работать с ошибкой "invalid request user id".
+Админ не понимал причину — сервер жив, Xray работает, но клиенты шлют
+старый UUID. Один пользователь переустановил сервер из-за этого дважды.**
+
+### Корневая причина
+
+При установке создавался дефолтный юзер с email из `PARAM_EMAIL` (это
+email для Let's Encrypt, например `admin@chimera.online`) — что путало
+админов, т.к. email для LE и email юзера — разные сущности. При удалении
+этого юзера — UUID исчезал из `clients[]` config.json, но в клиентах
+оставался закешированным. Также не было подтверждения удаления — можно
+было случайно удалить единственного юзера одним нажатием.
+
+### Что исправлено
+
+**1. `install_prompts.py`: новые шаги [1/12] Email + [2/12] Имя при установке**
+  - Шаг [1/12] спрашивает email администратора (с валидацией формата
+    `name@domain.tld`). Дефолт `admin@chimera.local` если выбрать пункт 2.
+  - Шаг [2/12] спрашивает имя (никнейм). По умолчанию берётся из
+    email-local-part (например `ivan` из `ivan@example.com`). Валидация:
+    2-32 символа, `[A-Za-z0-9_\-\.]`.
+  - Сохраняются в новые глобалы `PARAM_USER_EMAIL` / `PARAM_USER_NAME`
+    (объявлены в `_core.py`).
+  - Все остальные шаги переиндексированы: было [1-11/11], стало [3-12/12].
+  - Работает для всех режимов: A/B, VLESS Reality / xHTTP TLS.
+
+**2. `_core.py`:**
+  - Объявлены новые глобалы `PARAM_USER_EMAIL` / `PARAM_USER_NAME`.
+  - При создании начального users.json — берётся `PARAM_USER_EMAIL`
+    (если задан) с fallback на `PARAM_EMAIL` (LE) и затем на дефолт
+    `default@chimera.local`. Раньше было `default@xray` — смещало
+    идентификацию юзера с проектом xray.
+  - state.json теперь содержит `user_email` / `user_name` — для
+    последующего восстановления при reconfigure/emergency_repair.
+
+**3. `users_manager.py::do_user_delete()`: WARNING + подтверждение**
+  - После выбора юзера для удаления — показывает большой red WARNING:
+    `⚠ УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ` + email + UUID + 4-шаговый чеклист
+    «Действия перед удалением».
+  - Подтверждение `[y/N]` — по умолчанию N (безопасно).
+  - Дополнительно: после удаления чистит не только config.json Xray,
+    но и users.json (раньше оставался с устаревшей записью) +
+    снимает все привязки сателлитов из satellite_bindings.json
+    (через `remove_user(uuid)`).
+  - Синхронизировано с iOS-shadow cleanup (уже было).
+
+**4. `admin_panel.py::deleteUser()`: тот же WARNING в браузере**
+  - `confirm()` показывает полный текст предупреждения с 4-шаговым
+    чеклистом, идентичным TUI.
+  - После успешного удаления — обновляет не только таблицу юзеров,
+    но и подписку (`loadSubscription()`) и сателлиты (`loadSatellites()`)
+    — т.к. привязки этого UUID были сняты.
+
+**5. `rest_api.py::DELETE /api/users/{email}`:**
+  - Дополнительно вызывает `satellite_bindings.remove_user(uuid)` —
+    снимает все привязки сателлитов (Mieru/NaiveProxy/Telemt/
+    TrustTunnel/sing-box) к этому UUID. Раньше оставались «висящие»
+    записи в Admin Panel → секция «Сателлиты».
+
+### Поведение
+
+| Сценарий | До | После |
+|---|---|---|
+| Установка | Создаётся `default@xray` (безымянный) | Спрашивается email + имя |
+| Удаление юзера в TUI | Сразу удаляет без подтверждения | WARNING + `[y/N]` подтверждение |
+| Удаление юзера в Admin Panel | `confirm("Удалить?")` | Полный WARNING с чеклистом |
+| После удаления | users.json + satellite_bindings не чистятся | Чистятся все 3 источника |
+| User Portal / Admin Panel | Не показывали email начального юзера при установке | Email/имя сохранены в state.json |
+
+### Тесты
+
+Регрессия: 190 тестов OK (subscription+satellite_bindings+rest_api+
+admin_panel+user_lifecycle+client_config_export). verify.py 10/10
+(332 проверки). Существующие тесты удаления юзера / синхронизации
+продолжают работать (TUI WARNING — это interactive prompt, в
+тестах не вызывается).
+
+---
+
 ## FEAT(satellite_bindings): per-user привязка сателлитов (Mieru/NaiveProxy/Telemt/TrustTunnel/sing-box) с синхронизацией TUI↔Portal — 17 августа 2026
 
 **Раньше привязка UUID-пользователя к логину сателлита (Mieru/NaiveProxy/

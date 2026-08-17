@@ -682,13 +682,33 @@ async function toggleUser(email) {
 }
 
 async function deleteUser(email) {
-  if (!confirm(`Удалить ${email}?`)) return;
+  // Полное предупреждение, синхронизированное с TUI do_user_delete:
+  // пользователь должен понимать, что после удаления все клиенты
+  // (Nyamebox/v2rayNG/FlClash/etc) с этим UUID перестанут работать.
+  const ok = confirm(
+    `⚠ УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ\n\n` +
+    `Email: ${email}\n\n` +
+    `В клиентских приложениях (Nyamebox/v2rayNG/FlClash и др.), где\n` +
+    `импортирован этот юзер, подключения перестанут работать с\n` +
+    `ошибкой "invalid request user id".\n\n` +
+    `Действия перед удалением:\n` +
+    `1. Убедитесь, что есть другой активный юзер.\n` +
+    `2. Скопируйте его ссылку (User Portal → «🔗 Подключение»).\n` +
+    `3. Обновите подписку в клиентах.\n` +
+    `4. Старые профили в клиентах удалите.\n\n` +
+    `Продолжить удаление?`
+  );
+  if (!ok) return;
   const data = await api(`/api/users/${encodeURIComponent(email)}`, 'DELETE');
   if (data && data.status === 'deleted') {
     showToast('Удалён: ' + email);
     loadUsers();
+    // Обновить также подписку (если она использует этого юзера)
+    if (typeof loadSubscription === 'function') loadSubscription();
+    // Обновить сателлиты (привязки к этому UUID были сняты)
+    if (typeof loadSatellites === 'function') loadSatellites();
   } else {
-    showToast('Ошибка удаления', 'error');
+    showToast(data && data.error ? data.error : 'Ошибка удаления', 'error');
   }
 }
 

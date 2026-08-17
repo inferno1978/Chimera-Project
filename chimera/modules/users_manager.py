@@ -316,8 +316,14 @@ def do_user_delete() -> None:
     _box_bottom = core._box_bottom
     _box_item   = core._box_item
     _box_link   = core._box_link
+    _box_warn   = core._box_warn
+    _box_sep    = core._box_sep
+    _box_back   = core._box_back
     CYAN        = core.CYAN
     BOLD        = core.BOLD
+    YELLOW      = core.YELLOW
+    RED         = core.RED
+    DIM         = core.DIM
     NC          = core.NC
     warn        = core.warn
     success     = core.success
@@ -347,11 +353,52 @@ def do_user_delete() -> None:
             warn("Нельзя удалить последнего пользователя")
             return
 
+        # ─── WARNING + подтверждение ────────────────────────────────────
+        # Раньше удаление проходило без подтверждения — админ мог случайно
+        # удалить единственного юзера, после чего все клиенты (Nyamebox,
+        # v2rayNG, FlClash) с профилями этого юзера переставали работать
+        # с ошибкой "invalid request user id". Подтверждение + явное
+        # предупреждение «обновите ссылки/подписку в клиентах».
+        del_email = removed[0].get("email", "") if removed else target
+        del_uuid  = removed[0].get("id", "") if removed else ""
+        del_uuid_short = del_uuid[:8] + "…" if len(del_uuid) > 8 else del_uuid
+
+        os.system("clear")
+        _box_top(f"{RED}⚠️  УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ{NC}")
+        _box_row()
+        _box_row(f"  {BOLD}Email:{NC}  {del_email}")
+        _box_row(f"  {BOLD}UUID:{NC}   {del_uuid_short} {DIM}({del_uuid}){NC}")
+        _box_row()
+        _box_warn(f"  ⚠ В клиентских приложениях (Nyamebox/v2rayNG/FlClash/etc),")
+        _box_warn(f"    где импортирован этот юзер, подключения перестанут работать")
+        _box_warn(f"    с ошибкой «invalid request user id».")
+        _box_row()
+        _box_row(f"  {DIM}Действия перед удалением:{NC}")
+        _box_row(f"  {DIM}1. Убедитесь, что есть другой активный юзер.{NC}")
+        _box_row(f"  {DIM}2. Скопируйте его ссылку из меню 2 → 2 (Показать ссылки).{NC}")
+        _box_row(f"  {DIM}3. Обновите подписку в клиентах (или импортируйте{NC}")
+        _box_row(f"  {DIM}    новую ссылку вручную).{NC}")
+        _box_row(f"  {DIM}4. Старые профили в клиентах удалите.{NC}")
+        _box_row()
+        _box_sep()
+        _box_item("y", f"{RED}Да, удалить «{del_email}»{NC}")
+        _box_item("n", f"Отмена (рекомендуется)", )
+        _box_back()
+        _box_bottom()
+        try:
+            confirm = input(f"{CYAN}Удалить? [y/N]:{NC} ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            warn("Отмена")
+            return
+        if confirm != "y":
+            warn("Отмена удаления")
+            return
+
         c["inbounds"][0]["settings"]["clients"] = new_clients
         with cfg.open('w') as f:
             json.dump(c, f, indent=2, ensure_ascii=False)
 
-        del_email = removed[0].get("email", "") if removed else target
         success(f"Пользователь '{del_email}' удалён")
         for p in (f"/root/vless_link_{del_email}.txt",
                   f"/root/vless_qr_{del_email}.png"):
@@ -391,6 +438,30 @@ def do_user_delete() -> None:
                 warn(f"Предупреждение: не удалось удалить iOS-shadow для '{del_email}': {_shadow_e}")
             except Exception:
                 pass
+
+        # ── Синхронизация: удалить из users.json + снять привязки сателлитов ──
+        # Раньше do_user_delete работал только с config.json Xray — users.json
+        # оставался с устаревшей записью. Теперь чистим и users.json, и
+        # satellite_bindings.json (если есть привязки сателлитов к этому UUID).
+        try:
+            existing = _unified_load_users()
+            existing = [u for u in existing if u.get("uuid") != del_uuid]
+            _users_save([{
+                "uuid":    u.get("uuid", ""),
+                "email":   u.get("email", ""),
+                "name":    u.get("name", ""),
+                "created": u.get("created", ""),
+            } for u in existing])
+        except Exception as _e:
+            try:
+                warn(f"Предупреждение: не удалось очистить users.json: {_e}")
+            except Exception:
+                pass
+        try:
+            from chimera.modules.satellite_bindings import remove_user as _sb_remove_user
+            _sb_remove_user(del_uuid)
+        except Exception:
+            pass  # модуль может быть недоступен — не критично
     except Exception as e:
         warn(f"Ошибка при удалении: {e}")
 
