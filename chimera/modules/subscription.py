@@ -83,6 +83,15 @@ from chimera.modules.box_renderer import (
     _box_info, _box_warn as _box_warn_line, _box_ok as _box_ok_line,
 )
 
+# ── Мульти-нодовые конфиги (Mode B): mihomo YAML + sing-box selector ──────
+# Импорт мягкий: при отсутствии модуля подписка продолжает работать
+# как раньше (100% обратная совместимость).
+try:
+    from chimera.modules import subscription_multinode as _mn
+except Exception as _mn_err:  # pragma: no cover
+    _mn = None
+    _MN_IMPORT_ERR = str(_mn_err)
+
 # ── Логирование (единый формат с остальными модулями) ──────────────────────
 _LOG_FILE = Path("/var/log/chimera.log")
 
@@ -590,7 +599,10 @@ def _collect_registry_uris(user: dict) -> list[str]:
 #
 # Поддерживаемые форматы:
 #   "base64" (default) — текущее поведение: Base64-список share-links.
-#   "singbox"           — полный sing-box JSON config с outbounds.
+#   "singbox"           — полный sing-box JSON config с outbounds
+#                         (мульти-нодовый в Mode B: selector + urltest).
+#   "clash"             — полный mihomo/Clash Meta YAML (мульти-нодовый:
+#                         группы Выбор/Auto/Fallback/Balance + правила).
 #   "base64_safe"       — Base64-список БЕЗ naive+https:// и mierus://
 #                         (для клиентов, которые не умеют их парсить).
 #
@@ -605,6 +617,11 @@ _UA_FORMAT_MAP = {
     "nyamebox": "singbox",
     "sing-box": "singbox",
     "karing": "base64_safe",
+    "clash": "clash",
+    "mihomo": "clash",
+    "flclash": "clash",
+    "stash": "clash",
+    "clashx": "clash",
 }
 
 
@@ -615,13 +632,15 @@ def _resolve_format(requested: str, user_agent: str) -> str:
       requested — значение query-параметра ?format= (может быть пустым).
       user_agent — заголовок User-Agent (может быть пустым).
 
-    Returns: 'base64' | 'singbox' | 'base64_safe'
+    Returns: 'base64' | 'singbox' | 'clash' | 'base64_safe'
     """
     # 1. Явный параметр — высший приоритет.
     if requested:
         fmt = requested.lower().strip()
         if fmt in ("singbox", "sing-box", "json"):
             return "singbox"
+        if fmt in ("clash", "mihomo", "meta", "clashmeta", "yaml"):
+            return "clash"
         if fmt in ("safe", "base64_safe", "base64safe"):
             return "base64_safe"
         if fmt in ("auto", "default", "base64"):
@@ -766,6 +785,15 @@ def build_subscription_body(user: dict) -> bytes:
     else:
         _log("INFO", "hybrid_mieru активен — vless:// исключён из подписки")
 
+    # Мульти-нодовые exit-ноды (Mode B): vless:// каждой exit со своим
+    # chain-UUID — клиенты (v2rayNG/Happ/NekoBox) сами сгруппируют и дадут
+    # выбор/авто-переключение. См. subscription_multinode.get_multinode_uris.
+    if _mn is not None:
+        try:
+            links += _mn.get_multinode_uris(user)
+        except Exception as e:
+            _log("WARN", f"multinode uris: {e}")
+
     links += _build_mieru_uris(user, ipv4 or state.get("domain", ""))
     links += _build_naive_uris(user)
     links += _build_fptn_uris(user, ipv4 or state.get("domain", ""))
@@ -878,6 +906,22 @@ def build_subscription_body_ios(user: dict) -> bytes:
                      "(do_unified_user_manager → 1 → K)")
         except Exception as e:
             _log("WARN", f"entry_mirrors недоступен: {e}")
+
+    # ── Мульти-нодовые exit-URI ИСКЛЮЧАЮТСЯ из iOS-подписки ────────
+    # Exit-ноды — отдельные серверы со своими chain-UUID; заводить там
+    # shadow-клиенты программно нельзя (та же причина, что и для mirrors:
+    # clients[] на exit-серверах этот модуль не редактирует). Ссылка без
+    # shadow с постпроцессором Karing дала бы разрыв хендшейка.
+    if _mn is not None:
+        try:
+            _excluded_mn = len(_mn.get_multinode_uris(user))
+            if _excluded_mn > 0:
+                _log("WARN",
+                     f"iOS-подписка: {_excluded_mn} exit-нод исключены — прямые "
+                     "ссылки требуют shadow-клиента на каждом exit; в iOS-"
+                     "подписке доступен только каскад через entry")
+        except Exception as e:
+            _log("WARN", f"multinode ios check: {e}")
 
     payload = "\n".join(links)
     return base64.b64encode(payload.encode())
@@ -1001,13 +1045,57 @@ class _SubHandler(BaseHTTPRequestHandler):
         fmt = _resolve_format(fmt_param, user_agent)
 
         if fmt == "singbox":
-            # Полный sing-box JSON config.
-            body = build_subscription_singbox_config(user).encode("utf-8")
+            # Полный sing-box JSON config. В Mode B (мульти-нод активна) —
+            # все ноды + selector «🎯 Chimera» + urltest «auto»; иначе —
+            # старый single-outbound конфиг (100% обратная совместимость).
+            body_str = ""
+            if _mn is not None and _mn.is_multinode_active():
+                try:
+                    body_str = _mn.build_singbox_config(
+                        user, extra_outbounds=_collect_registry_json_outbounds(user))
+                except Exception as e:
+                    _log("WARN", f"multinode singbox build: {e}")
+            if not body_str:
+                body_str = build_subscription_singbox_config(user)
+            body = body_str.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Profile-Update-Interval", "6")
             self.send_header("Profile-Title", "Chimera-singbox")
+            userinfo = _build_userinfo_header(user)
+            if userinfo:
+                self.send_header("Subscription-Userinfo", userinfo)
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if fmt == "clash":
+            # Полный mihomo/Clash Meta YAML (мульти-нодовый в Mode B:
+            # группы Выбор/Auto/Fallback/Balance + правила по эталону).
+            # Fallback на single-proxy YAML из rest_api — если нод нет.
+            clash_body = ""
+            if _mn is not None:
+                try:
+                    clash_body = _mn.build_mihomo_config(user)
+                except Exception as e:
+                    _log("WARN", f"multinode clash build: {e}")
+            if not clash_body:
+                try:
+                    from chimera.modules.rest_api import _generate_clash_config
+                    clash_body = _generate_clash_config(user)
+                except Exception as e:
+                    _log("WARN", f"clash fallback build: {e}")
+            if not clash_body:
+                self.send_response(503)
+                self.end_headers()
+                return
+            body = clash_body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/yaml; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Profile-Update-Interval", "6")
+            self.send_header("Profile-Title", "Chimera-mihomo")
             userinfo = _build_userinfo_header(user)
             if userinfo:
                 self.send_header("Subscription-Userinfo", userinfo)
@@ -1630,6 +1718,112 @@ def _sub_nginx_get_url(token: str) -> "Optional[str]":
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  ПОМОЩНИКИ ДЛЯ REST API / ПАНЕЛЕЙ (User Portal, Admin Panel)
+# ══════════════════════════════════════════════════════════════════════════
+
+def get_subscription_base_url() -> str:
+    """Внешний базовый URL подписки: https://<host>:<port>/sub.
+
+    Учитывает nginx front (если включён — его домен/порт), иначе —
+    домен + listen_port backend'а. Используется User/Admin панелями
+    для показа ссылок юзеру."""
+    cfg = _load_sub_conf()
+    state = _load_state() or {}
+    ng = _sub_nginx_status()
+    if ng.get("enabled"):
+        port = ng.get("port", DEFAULT_SUB_NGINX_PORT)
+        host = ng.get("domain") or state.get("domain", "") or _get_server_ip("4")
+    else:
+        port = cfg.get("listen_port", DEFAULT_PORT)
+        host = state.get("domain", "") or _get_server_ip("4")
+    return f"https://{host}:{port}/sub"
+
+
+def get_portal_subscription_info(user: dict) -> dict:
+    """Сводка подписки для User Portal (GET /api/portal/sub-info).
+
+    Возвращает URL'ы всех форматов + статус мульти-нод фичи и список нод.
+    Не бросает исключений — панель должна работать даже без подписки."""
+    try:
+        cfg = _load_sub_conf()
+        service_enabled = bool(cfg.get("enabled"))
+        base = get_subscription_base_url()
+        info: dict = {
+            "service_enabled": service_enabled,
+            "base_url": base,
+            "urls": {},
+            "multinode": {"enabled": False, "nodes": []},
+        }
+        uuid_str = user.get("uuid", "")
+        pepper = cfg.get("pepper", "")
+        if service_enabled and uuid_str and pepper:
+            token = _token_for(uuid_str, pepper)
+            info["urls"] = {
+                "base64":  f"{base}/{token}",
+                "ios":     f"{base}/{token}/ios",
+                "singbox": f"{base}/{token}?format=singbox",
+                "clash":   f"{base}/{token}?format=clash",
+            }
+        if _mn is not None:
+            try:
+                st = _mn.multinode_status()
+                info["multinode"] = {
+                    "enabled": bool(st.get("enabled")),
+                    "nodes": _mn.summarize_nodes(user),
+                }
+            except Exception as e:
+                _log("WARN", f"portal multinode info: {e}")
+        return info
+    except Exception as e:
+        _log("WARN", f"get_portal_subscription_info: {e}")
+        return {"service_enabled": False, "base_url": "", "urls": {},
+                "multinode": {"enabled": False, "nodes": []}}
+
+
+def get_admin_subscription_info() -> dict:
+    """Сводка для Admin Panel (GET /api/subscription/info): статус сервиса
+    + URL всех форматов на каждого активного пользователя."""
+    try:
+        cfg = _load_sub_conf()
+        base = get_subscription_base_url()
+        pepper = cfg.get("pepper", "")
+        users_out: list[dict] = []
+        if cfg.get("enabled") and pepper:
+            for u in _load_all_users():
+                if u.get("disabled") or not u.get("uuid"):
+                    continue
+                token = _token_for(u["uuid"], pepper)
+                users_out.append({
+                    "email": u.get("email", u.get("name", "?")),
+                    "url":       f"{base}/{token}",
+                    "url_ios":   f"{base}/{token}/ios",
+                    "url_singbox": f"{base}/{token}?format=singbox",
+                    "url_clash": f"{base}/{token}?format=clash",
+                })
+        mn: dict = {"enabled": False, "nodes": []}
+        if _mn is not None:
+            try:
+                st = _mn.multinode_status()
+                mn = {"enabled": bool(st.get("enabled")),
+                      "reason": st.get("reason", ""),
+                      "nodes": _mn.summarize_nodes()}
+            except Exception as e:
+                _log("WARN", f"admin multinode info: {e}")
+        return {
+            "service_enabled": bool(cfg.get("enabled")),
+            "listen_port": cfg.get("listen_port", DEFAULT_PORT),
+            "base_url": base,
+            "users": users_out,
+            "multinode": mn,
+        }
+    except Exception as e:
+        _log("WARN", f"get_admin_subscription_info: {e}")
+        return {"service_enabled": False, "listen_port": DEFAULT_PORT,
+                "base_url": "", "users": [],
+                "multinode": {"enabled": False, "nodes": []}}
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # CLI / МЕНЮ (вызывается отдельно, НЕ вшито в _core.py)
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -1677,6 +1871,13 @@ def do_subscription_menu() -> None:
             _box_item("7", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}(вернуть на 0.0.0.0:{cfg.get('listen_port', DEFAULT_PORT)}){NC}")
         else:
             _box_item("7", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ по домену/IP{NC}")
+        if _mn is not None:
+            try:
+                _mn_st = _mn.multinode_status()
+                _mn_label = "вкл" if _mn_st["enabled"] else "выкл"
+                _box_item("8", f"🌐 Мульти-нод конфиги (Mode B) — {_mn_label}  {DIM}(mihomo/sing-box/exit-URI){NC}")
+            except Exception:
+                _box_item("8", f"🌐 Мульти-нод конфиги (Mode B)  {DIM}(mihomo/sing-box/exit-URI){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -1761,8 +1962,9 @@ def do_subscription_menu() -> None:
                 url = f"{url_base}/{token}"
                 url_ios = f"{url_base}/{token}/ios"
                 url_sb = f"{url_base}/{token}?format=singbox"
+                url_cl = f"{url_base}/{token}?format=clash"
                 label = u.get("email", u.get("name", "?"))
-                rows.append((label, url, url_ios, url_sb))
+                rows.append((label, url, url_ios, url_sb, url_cl))
 
             _box_top("🔗  ССЫЛКИ ПОДПИСКИ")
             _box_row()
@@ -1770,18 +1972,19 @@ def do_subscription_menu() -> None:
             _box_row()
             if not rows:
                 _box_warn_line("Нет активных пользователей.")
-            for label, url, url_ios, url_sb in rows:
+            for label, url, url_ios, url_sb, url_cl in rows:
                 _box_row(f"  {WHITE}{label}{NC}")
                 _box_row(f"  {GREEN}{url}{NC}")
                 _box_row(f"  {DIM}iOS/Karing:{NC} {CYAN}{url_ios}{NC}")
                 _box_row(f"  {DIM}sing-box JSON:{NC} {CYAN}{url_sb}{NC}")
+                _box_row(f"  {DIM}mihomo/Clash YAML:{NC} {CYAN}{url_cl}{NC}")
                 _box_row()
             _box_back()
             _box_bottom()
 
             # QR — вне рамки, qrencode рисует свою фиксированную ASCII-сетку,
             # внутри box она ломает выравнивание.
-            for label, url, url_ios, url_sb in rows:
+            for label, url, url_ios, url_sb, url_cl in rows:
                 print()
                 _print_qr(url, f"{label} (основной)")
                 _print_qr(url_ios, f"{label} (iOS/Karing)")
@@ -1904,6 +2107,55 @@ def do_subscription_menu() -> None:
                 _info(f"Старый URL https://{state.get('domain', '<домен>')}:{cfg.get('listen_port', DEFAULT_PORT)}/sub/... больше не работает.")
                 _info(f"Новый URL: https://{domain or '<IP сервера>'}:{ng_port}/sub/<token>")
                 input(f"\n{BOLD}Enter…{NC}")
+
+        elif ch == "8":
+            # Мульти-нод конфиги (Mode B): mihomo ?format=clash + sing-box
+            # selector + exit-URI в base64. Управление вкл/выкл/авто.
+            if _mn is None:
+                _err(f"Модуль subscription_multinode недоступен: {_MN_IMPORT_ERR}")
+                input(f"\n{BOLD}Enter…{NC}")
+                continue
+            st = _mn.multinode_status()
+            state_ = st["enabled"]
+            os.system("clear")
+            _box_top("🌐  МУЛЬТИ-НОД КОНФИГИ (MODE B)")
+            _box_row()
+            if state_:
+                _box_ok_line(f"Состояние: включена ({st['reason']})")
+            else:
+                _box_warn_line(f"Состояние: выключена ({st['reason']})")
+            _box_row()
+            nodes = _mn.summarize_nodes()
+            if nodes:
+                _box_row(f"  {DIM}Ноды в конфигах ({len(nodes)}):{NC}")
+                for n in nodes:
+                    kind_label = {"exit": "exit", "entry": "entry",
+                                  "entry_cascade": "каскад",
+                                  "mirror": "mirror"}.get(n["kind"], n["kind"])
+                    _box_row(f"    {WHITE}{n['name']}{NC}  {DIM}[{kind_label}] → {n['host']}:{n['port']}{NC}")
+            else:
+                _box_warn_line("Нод не найдено — добавьте exit-ноды (Chain/Nodes, Mode B).")
+            _box_row()
+            _box_row(f"  {DIM}?format=clash   — mihomo/Clash Meta YAML (группы Выбор/Auto/Balance){NC}")
+            _box_row(f"  {DIM}?format=singbox — sing-box JSON (selector «🎯 Chimera» + auto){NC}")
+            _box_row(f"  {DIM}base64           — vless:// каждой exit-ноды дополнительно{NC}")
+            _box_row()
+            _box_item("1", f"{'🔴 Выключить принудительно' if state_ else '🟢 Включить принудительно'}")
+            _box_item("2", "⚙ Авто (по Mode B: вкл при наличии exit-нод)")
+            _box_row()
+            _box_back()
+            _box_bottom()
+            try:
+                sub_ch = input(f"{CYAN}Выбор:{NC} ").strip()
+            except (KeyboardInterrupt, EOFError):
+                continue
+            if sub_ch == "1":
+                _mn.set_multinode_enabled("off" if state_ else "on")
+                _ok(f"Мульти-нод конфиги: {'выключены' if state_ else 'включены'}.")
+            elif sub_ch == "2":
+                _mn.set_multinode_enabled("auto")
+                _ok("Режим авто: активна при install_mode=B и наличии exit-нод.")
+            input(f"\n{BOLD}Enter…{NC}")
 
         elif ch == "" or ch.lower() == "q" or ch == "0":
             return
