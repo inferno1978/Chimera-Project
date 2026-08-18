@@ -129,6 +129,8 @@ SERVICE_HYSTERIA2       = "hysteria2"
 SERVICE_WEBDAV_TUNNEL  = "webdav_tunnel"
 SERVICE_PORT_HOPPING   = "port_hopping"
 SERVICE_OLCRTC_MANAGER = "olcrtc_manager"
+SERVICE_B4_WEB         = "b4_web"          # b4 Web UI (loopback, 9700)
+SERVICE_B4_NGINX       = "b4_nginx"        # nginx front для b4 Web UI (TLS, 9743)
 
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────

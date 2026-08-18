@@ -555,7 +555,7 @@ def _b4_nginx_get_url() -> Optional[str]:
 
 
 def install_b4() -> bool:
-    """Полная установка b4: binary + config + systemd + iptables."""
+    """Полная установка b4: binary + config + systemd + iptables + port_registry."""
     if not _download_b4_binary():
         return False
     if not _write_default_config():
@@ -566,6 +566,13 @@ def install_b4() -> bool:
     subprocess.run(["systemctl", "daemon-reload"], check=False)
     # Применяем iptables (до старта сервиса — b4 с --skip-tables ждёт queue).
     _iptables_apply()
+    # Регистрируем порт b4 Web UI в port_registry (loopback, не открываем UFW).
+    try:
+        from chimera.modules.port_registry import port_register, SERVICE_B4_WEB
+        port_register(SERVICE_B4_WEB, B4_WEB_PORT, "tcp",
+                      comment="b4 Web UI (loopback)", force=True)
+    except Exception:
+        pass
     # Запускаем сервис.
     r = subprocess.run(["systemctl", "enable", "--now", "b4"],
                        capture_output=True, text=True, check=False)
@@ -596,9 +603,17 @@ def uninstall_b4() -> bool:
     subprocess.run(["systemctl", "disable", "b4"], capture_output=True, check=False)
     # 2. Удаляем iptables правила.
     _iptables_remove()
-    # 2b. Снимаем nginx front (если был включён).
+    # 2b. Снимаем nginx front (если был включён) — закрывает порт nginx.
     try:
         _b4_nginx_remove()
+    except Exception:
+        pass
+    # 2c. Снимаем регистрацию порта b4 Web UI из port_registry.
+    try:
+        from chimera.modules.port_registry import (
+            port_unregister, SERVICE_B4_WEB,
+        )
+        port_unregister(SERVICE_B4_WEB, B4_WEB_PORT, "tcp")
     except Exception:
         pass
     # 3. mask + remove unit.
@@ -720,6 +735,87 @@ def switch_preset(preset_name: str) -> bool:
     return True
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  КАСТОМНЫЕ СЕТЫ (импорт из файла или вставка JSON)
+# ══════════════════════════════════════════════════════════════════════════
+
+def import_custom_set(json_str: str) -> bool:
+    """Импортирует кастомный b4 set из JSON-строки.
+
+    Принимает JSON в формате b4 (один объект сета ИЛИ {"sets": [...]}).
+    Оборачивает в правильный формат, добавляет id если нет, сохраняет
+    как активный конфиг b4, перезапускает сервис.
+
+    Используется:
+      • TUI: пункт «Импортировать кастомный сет»
+      • REST API: POST /api/b4/import-set
+    """
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        _err(f"Невалидный JSON: {e}")
+        return False
+
+    # Если это {"sets": [...]} — берём первый set.
+    if isinstance(data, dict) and "sets" in data:
+        sets = data["sets"]
+        if not sets:
+            _err("Пустой массив sets")
+            return False
+        custom_set = sets[0]
+    elif isinstance(data, dict):
+        # Одиночный объект — обрабатываем как один set.
+        custom_set = data
+    else:
+        _err("Ожидается JSON-объект с set")
+        return False
+
+    # Добавляем id если нет.
+    if not custom_set.get("id"):
+        custom_set["id"] = "youtube-custom"
+    # Убираем geosite_categories если нет geosite_path (вызывает ошибку).
+    targets = custom_set.get("targets", {})
+    if "geosite_categories" in targets and "geosite_path" not in data:
+        _warn("Убран geosite_categories (нет geosite_path). Используйте sni_domains.")
+        targets.pop("geosite_categories", None)
+
+    # Проверяем минимально-обязательные поля.
+    if not targets.get("sni_domains"):
+        _err("В сете нет targets.sni_domains — нечего матчить")
+        return False
+
+    # Сохраняем конфиг.
+    config = {
+        "sets": [custom_set],
+        "routing": {"enabled": False},
+        "udp": {"mode": "fake"},
+    }
+    B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+    # Перезапускаем сервис.
+    subprocess.run(["systemctl", "restart", "b4"], capture_output=True, check=False)
+    # Сохраняем state.
+    state = _load_state()
+    state["active_preset"] = "custom"
+    _save_state(state)
+    name = custom_set.get("name", "custom")
+    _ok(f"Кастомный сет «{name}» импортирован, b4 перезапущен")
+    return True
+
+
+def import_custom_set_from_file(file_path: str) -> bool:
+    """Импортирует кастомный сет из JSON-файла."""
+    path = Path(file_path)
+    if not path.exists():
+        _err(f"Файл не найден: {file_path}")
+        return False
+    try:
+        json_str = path.read_text()
+    except Exception as e:
+        _err(f"Не удалось прочитать файл: {e}")
+        return False
+    return import_custom_set(json_str)
+
+
 def run_discovery(timeout_sec: int = 60) -> dict:
     """Запускает Discovery b4 — автоподбор рабочего сета под текущего провайдера.
 
@@ -772,7 +868,11 @@ def health_check_youtube() -> dict:
         # URL → ожидаемый результат (любой HTTP-код = OK,
         # timeout/connection-reset = FAIL)
         ("youtube.com", "https://www.youtube.com/"),
-        ("googlevideo.com", "https://r1.sn.googlevideo.com/"),
+        # googlevideo.com — CDN без правильного пути отдаёт 403/404.
+        # Но не все r*.sn.googlevideo.com хосты доступны. Используем
+        # основной домен googlevideo.com — он отдаёт 404 на root.
+        ("googlevideo.com", "https://googlevideo.com/"),
+        # ytimg.com — конкретный thumbnail (точно работает).
         ("ytimg.com", "https://i.ytimg.com/vi/dQw4w9WgXcQ/default.jpg"),
     ]
     for label, url in targets:
@@ -888,17 +988,18 @@ def do_youtube_b4_menu() -> None:
             else:
                 _box_item("1", "🚀 Запустить b4")
             _box_item("2", "🔄 Переключить preset")
-            _box_item("3", "🔍 Discovery (автоподбор сета под провайдера)")
-            _box_item("4", "🏥 Health check YouTube (работает ли?)")
-            _box_item("5", "📋 Логи b4 (последние 30 строк)")
-            _box_item("6", "🌐 Открыть Web UI (SSH-туннель инструкция)")
+            _box_item("3", "📥 Импортировать кастомный сет (JSON)")
+            _box_item("4", "🔍 Discovery (автоподбор сета под провайдера)")
+            _box_item("5", "🏥 Health check YouTube (работает ли?)")
+            _box_item("6", "📋 Логи b4 (последние 30 строк)")
+            _box_item("7", "🌐 Открыть Web UI (SSH-туннель инструкция)")
             # nginx front (TLS) для прямого доступа к Web UI из браузера.
             ng_st = _b4_nginx_status()
             if ng_st.get("enabled"):
                 ng_url = _b4_nginx_get_url()
-                _box_item("7", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}({ng_url}){NC}")
+                _box_item("8", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}({ng_url}){NC}")
             else:
-                _box_item("7", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ к Web UI по HTTPS{NC}")
+                _box_item("8", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ к Web UI по HTTPS{NC}")
             _box_row()
             _box_item("R", f"{RED}🗑️  Удалить b4 полностью{NC}")
             _box_row()
@@ -949,15 +1050,45 @@ def do_youtube_b4_menu() -> None:
             input(f"\n{BOLD}Enter…{NC}")
 
         elif s["installed"] and ch == "3":
+            # Импорт кастомного сета.
+            print()
+            _box_top("📥  ИМПОРТ КАСТОМНОГО СЕТА")
+            _box_row()
+            _box_row(f"  {DIM}Вставьте JSON сета (из b4 Web UI, из файла, или{NC}")
+            _box_row(f"  {DIM}написанный вручную). Формат:{NC}")
+            _box_row(f"  {DIM}{{\"name\":\"...\",\"targets\":{{\"sni_domains\":[...]}},...}}{NC}")
+            _box_row(f"  {DIM}Или: {{\"sets\":[...]}} — возьмётся первый set.{NC}")
+            _box_row()
+            _box_row(f"  {DIM}Двойной Enter — конец ввода. Ctrl+C — отмена.{NC}")
+            _box_bottom()
+            lines = []
+            try:
+                while True:
+                    line = input()
+                    if not line.strip():
+                        break
+                    lines.append(line)
+            except (KeyboardInterrupt, EOFError):
+                print()
+                _warn("Отмена.")
+                input(f"\n{BOLD}Enter…{NC}")
+                continue
+            json_str = "\n".join(lines)
+            if not json_str.strip():
+                _warn("Пустой ввод.")
+                input(f"\n{BOLD}Enter…{NC}")
+                continue
+            import_custom_set(json_str)
+            input(f"\n{BOLD}Enter…{NC}")
+
+        elif s["installed"] and ch == "4":
             # Discovery.
             result = run_discovery(timeout_sec=60)
             if "error" not in result:
                 _info(f"Результат: {json.dumps(result, indent=2, ensure_ascii=False)}")
             input(f"\n{BOLD}Enter…{NC}")
 
-        elif s["installed"] and ch == "4":
-            # Health check.
-            print()
+        elif s["installed"] and ch == "5":
             _info("Проверяю YouTube (3 запроса, до 30с)...")
             result = health_check_youtube()
             for t in result["targets"]:
@@ -972,7 +1103,7 @@ def do_youtube_b4_menu() -> None:
                 _info("Попробуйте: Discovery (пункт 3) или другой preset (пункт 2).")
             input(f"\n{BOLD}Enter…{NC}")
 
-        elif s["installed"] and ch == "5":
+        elif s["installed"] and ch == "6":
             # Логи.
             os.system("clear")
             _box_top("📋  ЛОГИ B4 (ПОСЛЕДНИЕ 30 СТРОК)")
@@ -988,7 +1119,7 @@ def do_youtube_b4_menu() -> None:
             _box_bottom()
             input(f"\n{BOLD}Enter…{NC}")
 
-        elif s["installed"] and ch == "6":
+        elif s["installed"] and ch == "7":
             # Web UI инструкция.
             web_port = s.get("web_port", B4_WEB_PORT)
             os.system("clear")
@@ -1012,7 +1143,7 @@ def do_youtube_b4_menu() -> None:
             _box_bottom()
             input(f"\n{BOLD}Enter…{NC}")
 
-        elif s["installed"] and ch == "7":
+        elif s["installed"] and ch == "8":
             # nginx front (TLS) для b4 Web UI.
             ng_st = _b4_nginx_status()
             if ng_st.get("enabled"):
