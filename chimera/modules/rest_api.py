@@ -1321,6 +1321,28 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, 500)
             return
 
+        # GET /api/b4/info — полный статус b4 для Admin Panel.
+        if path == "/api/b4/info":
+            if not self._require_admin():
+                return
+            try:
+                from chimera.modules.youtube_b4 import get_admin_info
+                self._send_json(get_admin_info())
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # GET /api/b4/health — health check YouTube (работает ли?).
+        if path == "/api/b4/health":
+            if not self._require_admin():
+                return
+            try:
+                from chimera.modules.youtube_b4 import health_check_youtube
+                self._send_json(health_check_youtube())
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
         # ── User Portal API (GET) ──────────────────────────────────────────────
         # links / traffic / health / clash / singbox — это GET-запросы (browser
         # шлёт fetch(path) без method). password — POST (меняет состояние).
@@ -1414,6 +1436,20 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             try:
                 from chimera.modules.satellite_bindings import suggest_for_user
                 self._send_json({"suggestions": suggest_for_user(user)})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # GET /api/portal/b4-info — краткий статус b4 (DPI bypass YouTube)
+        # для User Portal. Не требует admin-прав — юзер видит только
+        # «включено/выключено», без технических деталей.
+        if path == "/api/portal/b4-info":
+            user = self._require_user()
+            if user is None:
+                return
+            try:
+                from chimera.modules.youtube_b4 import get_portal_info
+                self._send_json(get_portal_info())
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
             return
@@ -1919,6 +1955,84 @@ class _VLESSHandler(BaseHTTPRequestHandler):
                     owner_uuid=body.get("owner_uuid", ""),
                 )
                 self._send_json({"status": "unbound" if ok else "not_found"})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # ── b4 management (admin) ────────────────────────────────────────
+        # POST /api/b4/install — установить b4 (скачать + конфиг + systemd + iptables).
+        if path == "/api/b4/install":
+            if not self._require_admin():
+                return
+            try:
+                from chimera.modules.youtube_b4 import install_b4
+                ok = install_b4()
+                self._send_json({"status": "installed" if ok else "failed"})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # POST /api/b4/uninstall — удалить b4 полностью.
+        if path == "/api/b4/uninstall":
+            if not self._require_admin():
+                return
+            try:
+                from chimera.modules.youtube_b4 import uninstall_b4
+                uninstall_b4()
+                self._send_json({"status": "uninstalled"})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # POST /api/b4/enable — запустить b4.
+        if path == "/api/b4/enable":
+            if not self._require_admin():
+                return
+            try:
+                from chimera.modules.youtube_b4 import enable
+                ok = enable()
+                self._send_json({"status": "enabled" if ok else "failed"})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # POST /api/b4/disable — остановить b4 (без удаления).
+        if path == "/api/b4/disable":
+            if not self._require_admin():
+                return
+            try:
+                from chimera.modules.youtube_b4 import disable
+                disable()
+                self._send_json({"status": "disabled"})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # POST /api/b4/preset — переключить preset.
+        # Body: {preset: "default"|"aggressive"|"light"}
+        if path == "/api/b4/preset":
+            if not self._require_admin():
+                return
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            try:
+                from chimera.modules.youtube_b4 import switch_preset
+                ok = switch_preset(body.get("preset", ""))
+                self._send_json({"status": "switched" if ok else "failed"})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        # POST /api/b4/discovery — запустить Discovery (автоподбор сета).
+        if path == "/api/b4/discovery":
+            if not self._require_admin():
+                return
+            try:
+                from chimera.modules.youtube_b4 import run_discovery
+                result = run_discovery(timeout_sec=60)
+                self._send_json(result)
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
             return
