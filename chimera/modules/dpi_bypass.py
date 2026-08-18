@@ -692,12 +692,23 @@ def do_dpi_bypass_menu() -> None:
                 _box_row()
                 try:
                     r = subprocess.run(
-                        ["journalctl", "-u", "b4", "-n", "30", "--no-pager"],
+                        ["journalctl", "-u", "b4", "-n", "30", "--no-pager", "-o", "cat"],
                         capture_output=True, text=True, check=False, timeout=5,
                     )
-                    print(r.stdout or "(пусто)")
+                    raw = r.stdout or "(пусто)"
                 except Exception as e:
-                    print(f"  {DIM}Ошибка: {e}{NC}")
+                    raw = f"Ошибка: {e}"
+                # Усечение строк по ширине рамки.
+                from chimera.modules.box_renderer import _get_box_width as _gw
+                _w = _gw() - 2
+                for line in raw.splitlines():
+                    _line = line if len(line) <= _w else line[:_w-3] + "..."
+                    print(f"  {DIM}{_line}{NC}")
+                _box_row()
+                _box_row(f"  {DIM}Полные логи:{NC}")
+                _box_row(f"    {CYAN}journalctl -u b4 -f{NC}  {DIM}(live режим){NC}")
+                _box_row(f"    {CYAN}journalctl -u b4 -n 100 --no-pager{NC}  {DIM}(последние 100){NC}")
+                _box_row(f"  {DIM}Файл логов:{NC} /var/log/b4/")
                 _box_bottom()
                 input(f"\n{BOLD}Enter…{NC}")
 
