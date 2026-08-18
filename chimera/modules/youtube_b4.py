@@ -122,6 +122,13 @@ B4_QUEUE_NUM   = 537
 B4_MARK         = 32768  # SO_MARK для raw socket пакетов (чтобы исключить ре-queue)
 B4_IPT_COMMENT  = "chimera-youtube-b4"
 
+# nginx front для b4 Web UI — по аналогии с User Portal и подпиской.
+# b4 Web UI слушает 0.0.0.0:9700 (HTTP, без TLS). nginx front ставит
+# TLS перед ним (LE или self-signed), доступ через браузер напрямую.
+B4_NGINX_SITE_NAME   = "chimera-b4-nginx"
+B4_NGINX_STATE_FILE  = Path("/var/lib/xray-installer/b4_nginx_front.json")
+DEFAULT_B4_NGINX_PORT = 9743  # не конфликтует с 9443 (User Portal), 9444 (Subscription)
+
 # Web UI b4 (для Discovery и управления через браузер).
 # Default 7000, но может конфликтовать — переключаем на 9700.
 B4_WEB_PORT     = 9700
@@ -366,7 +373,6 @@ WorkingDirectory={B4_CONFIG_DIR}
 Restart=always
 RestartSec=3
 StartLimitBurst=10
-StartLimitIntervalSec=60
 User=root
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -466,6 +472,88 @@ def _iptables_remove() -> None:
     _ok("iptables mangle правила b4 удалены")
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  NGINX FRONT ДЛЯ b4 WEB UI (прямой доступ по HTTPS из браузера)
+# ══════════════════════════════════════════════════════════════════════════
+# По аналогии с subscription.py → _sub_nginx_install/_sub_nginx_remove.
+# Делегирует в chimera.modules.panel_nginx_front.
+
+def _b4_nginx_status() -> dict:
+    """Возвращает состояние nginx front для b4 Web UI."""
+    if not B4_NGINX_STATE_FILE.exists():
+        return {"enabled": False}
+    try:
+        return json.loads(B4_NGINX_STATE_FILE.read_text())
+    except Exception:
+        return {"enabled": False}
+
+
+def _b4_nginx_install(port: int, use_self_signed: bool, domain) -> tuple:
+    """Устанавливает nginx front с TLS для b4 Web UI."""
+    from chimera.modules.panel_nginx_front import panel_nginx_front_install
+    from chimera.modules.port_registry import SERVICE_SUBSCRIPTION_NGINX
+
+    backend_port = B4_WEB_PORT  # b4 Web UI слушает на 9700
+
+    ok, msg = panel_nginx_front_install(
+        service_tag="chimera-b4-nginx",
+        port=port,
+        backend_port=backend_port,
+        site_name=B4_NGINX_SITE_NAME,
+        state_file=B4_NGINX_STATE_FILE,
+        title="b4 Web UI",
+        use_self_signed=use_self_signed,
+        domain=domain,
+        websocket_origin_rewrite=False,
+        backend_http_scheme="http",  # b4 Web UI — HTTP (нет своего TLS)
+        cert_name_slug="chimera-b4",
+    )
+    # Также закрываем прямой доступ к 9700 (только через nginx).
+    if ok:
+        try:
+            subprocess.run(["ufw", "deny", f"{B4_WEB_PORT}/tcp",
+                            "comment", "chimera-b4-direct-block"],
+                           capture_output=True, check=False)
+        except Exception:
+            pass
+    return ok, msg
+
+
+def _b4_nginx_remove() -> tuple:
+    """Удаляет nginx front + открывает 9700 обратно (для SSH-туннеля)."""
+    from chimera.modules.panel_nginx_front import panel_nginx_front_remove
+
+    if not _b4_nginx_status().get("enabled"):
+        return True, "nginx front уже выключен"
+
+    panel_nginx_front_remove(
+        service_tag="chimera-b4-nginx",
+        site_name=B4_NGINX_SITE_NAME,
+        state_file=B4_NGINX_STATE_FILE,
+        title="b4 Web UI",
+    )
+    # Возвращаем доступ к 9700 (для SSH-туннеля).
+    try:
+        subprocess.run(["ufw", "delete", "deny", f"{B4_WEB_PORT}/tcp"],
+                       capture_output=True, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    return True, "nginx front удалён"
+
+
+def _b4_nginx_get_url() -> Optional[str]:
+    """Возвращает URL b4 Web UI через nginx front (если включён)."""
+    st = _b4_nginx_status()
+    if not st.get("enabled"):
+        return None
+    port = st.get("port", DEFAULT_B4_NGINX_PORT)
+    domain = st.get("domain")
+    if not domain:
+        return None
+    return f"https://{domain}:{port}"
+
+
 def install_b4() -> bool:
     """Полная установка b4: binary + config + systemd + iptables."""
     if not _download_b4_binary():
@@ -508,6 +596,11 @@ def uninstall_b4() -> bool:
     subprocess.run(["systemctl", "disable", "b4"], capture_output=True, check=False)
     # 2. Удаляем iptables правила.
     _iptables_remove()
+    # 2b. Снимаем nginx front (если был включён).
+    try:
+        _b4_nginx_remove()
+    except Exception:
+        pass
     # 3. mask + remove unit.
     subprocess.run(["systemctl", "mask", "b4"], capture_output=True, check=False)
     B4_UNIT_PATH.unlink(missing_ok=True)
@@ -551,6 +644,9 @@ def status() -> dict:
                 version = m.group(1)
         except Exception:
             pass
+    # nginx front status.
+    ng = _b4_nginx_status()
+    nginx_url = _b4_nginx_get_url()
     return {
         "installed": True,
         "service_active": service_active,
@@ -562,6 +658,9 @@ def status() -> dict:
         "queue_num": B4_QUEUE_NUM,
         "mark": B4_MARK,
         "enabled": state.get("enabled", False),
+        "nginx_front_enabled": ng.get("enabled", False),
+        "nginx_front_port": ng.get("port", DEFAULT_B4_NGINX_PORT),
+        "nginx_front_url": nginx_url,
     }
 
 
@@ -661,12 +760,20 @@ def health_check_youtube() -> dict:
       1. Прямой запрос к youtube.com (через b4 — должен работать)
       2. Запрос к googlevideo.com (CDN)
       3. Запрос к ytimg.com (статика)
+
+    Важно: googlevideo.com и ytimg.com не отдают 200 на root URL — они
+    возвращают 404 (это нормально, CDN без правильного пути). Поэтому
+    принимаем любой HTTP-ответ (2xx/3xx/4xx) как «работает» — главное
+    что TCP/TLS-handshake прошёл и сервер ответил. Если ТСПУ блокирует —
+    curl получит timeout или connection reset, не HTTP-код.
     """
     results = {"targets": [], "all_ok": True}
     targets = [
+        # URL → ожидаемый результат (любой HTTP-код = OK,
+        # timeout/connection-reset = FAIL)
         ("youtube.com", "https://www.youtube.com/"),
-        ("googlevideo.com", "https://manifest.googlevideo.com/"),
-        ("ytimg.com", "https://i.ytimg.com/"),
+        ("googlevideo.com", "https://r1.sn.googlevideo.com/"),
+        ("ytimg.com", "https://i.ytimg.com/vi/dQw4w9WgXcQ/default.jpg"),
     ]
     for label, url in targets:
         try:
@@ -675,12 +782,15 @@ def health_check_youtube() -> dict:
                  "-w", "%{http_code} %{time_total}", url],
                 capture_output=True, text=True, check=False, timeout=15,
             )
+            # OK = curl вернул любой HTTP-код (200/302/404/403 = сервер ответил).
+            # FAIL = timeout, connection reset, DNS-fail (пустой stdout).
+            http_code = r.stdout.strip().split()[0] if r.stdout.strip() else ""
             ok = (r.returncode == 0 and
-                  r.stdout.strip().startswith("2"))
+                  http_code and http_code[0] in ("2", "3", "4"))
             results["targets"].append({
                 "target": label,
                 "ok": ok,
-                "code": r.stdout.strip() if r.stdout else "",
+                "code": r.stdout.strip() if r.stdout else "TIMEOUT/RESET",
             })
             if not ok:
                 results["all_ok"] = False
@@ -757,6 +867,10 @@ def do_youtube_b4_menu() -> None:
             preset_label = PRESETS.get(s.get("active_preset"), ("—",))[0]
             _box_row(f"  Preset:       {CYAN}{preset_label}{NC}")
             _box_row(f"  Web UI:       {CYAN}http://127.0.0.1:{s.get('web_port')}{NC}")
+            # Если nginx front включён — показываем прямой URL.
+            ng_url = s.get("nginx_front_url")
+            if ng_url:
+                _box_row(f"  Web UI (TLS): {GREEN}{ng_url}{NC}")
             _box_row(f"  Queue:        {CYAN}NFQUEUE {s.get('queue_num')}{NC} (mark={s.get('mark')})")
             _box_row(f"  Config:       {DIM}{s.get('config_path')}{NC}")
             _box_row(f"  Binary:       {DIM}{s.get('binary_path')}{NC}")
@@ -778,6 +892,13 @@ def do_youtube_b4_menu() -> None:
             _box_item("4", "🏥 Health check YouTube (работает ли?)")
             _box_item("5", "📋 Логи b4 (последние 30 строк)")
             _box_item("6", "🌐 Открыть Web UI (SSH-туннель инструкция)")
+            # nginx front (TLS) для прямого доступа к Web UI из браузера.
+            ng_st = _b4_nginx_status()
+            if ng_st.get("enabled"):
+                ng_url = _b4_nginx_get_url()
+                _box_item("7", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}({ng_url}){NC}")
+            else:
+                _box_item("7", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ к Web UI по HTTPS{NC}")
             _box_row()
             _box_item("R", f"{RED}🗑️  Удалить b4 полностью{NC}")
             _box_row()
@@ -889,6 +1010,71 @@ def do_youtube_b4_menu() -> None:
             _box_row()
             _box_back()
             _box_bottom()
+            input(f"\n{BOLD}Enter…{NC}")
+
+        elif s["installed"] and ch == "7":
+            # nginx front (TLS) для b4 Web UI.
+            ng_st = _b4_nginx_status()
+            if ng_st.get("enabled"):
+                # Выключение.
+                os.system("clear")
+                _box_top("🌐  NGINX FRONT ДЛЯ B4 — ВЫКЛЮЧЕНИЕ")
+                _box_row()
+                _box_row(f"  {DIM}Будет удалён nginx vhost + закрыт порт {ng_st.get('port', DEFAULT_B4_NGINX_PORT)}.{NC}")
+                _box_row(f"  {DIM}Доступ к Web UI вернётся на SSH-туннель.{NC}")
+                _box_row()
+                _box_back()
+                _box_bottom()
+                confirm = input(f"  {YELLOW}Выключить nginx front? [y/N]:{NC} ").strip().lower()
+                if confirm == "y":
+                    ok, msg = _b4_nginx_remove()
+                    if ok:
+                        _ok(msg)
+                    else:
+                        _err(msg)
+                else:
+                    _info("Отменено.")
+            else:
+                # Включение.
+                state = _load_state()
+                # Спрашиваем порт.
+                try:
+                    port_str = input(f"  Порт для nginx front [Enter={DEFAULT_B4_NGINX_PORT}]: ").strip()
+                    ng_port = int(port_str) if port_str else DEFAULT_B4_NGINX_PORT
+                except (ValueError, EOFError, KeyboardInterrupt):
+                    ng_port = DEFAULT_B4_NGINX_PORT
+                # Спрашиваем режим TLS.
+                try:
+                    from chimera.modules.panel_nginx_front import ask_tls_mode, ask_domain
+                except ImportError:
+                    _err("panel_nginx_front недоступен — не могу установить nginx front.")
+                    input(f"\n{BOLD}Enter…{NC}")
+                    continue
+                use_self_signed, _ = ask_tls_mode("b4 Web UI")
+                domain = None
+                if not use_self_signed:
+                    # Пытаемся взять домен из state.json.
+                    try:
+                        core = _core_module()
+                        if not getattr(core, "PARAM_DOMAIN", ""):
+                            if hasattr(core, "_load_state_into_globals"):
+                                core._load_state_into_globals()
+                        domain = ask_domain(default=getattr(core, "PARAM_DOMAIN", ""))
+                    except Exception:
+                        domain = ask_domain(default="")
+                    if not domain:
+                        _warn("Домен не указан — отмена. Используйте self-signed режим.")
+                        input(f"\n{BOLD}Enter…{NC}")
+                        continue
+                ok, msg = _b4_nginx_install(ng_port, use_self_signed, domain)
+                if ok:
+                    _ok(f"nginx front включён на порту {ng_port}.")
+                    url = _b4_nginx_get_url()
+                    if url:
+                        _info(f"Web UI доступен: {url}")
+                    _info(f"Прямой доступ к порту {B4_WEB_PORT} закрыт (только через nginx).")
+                else:
+                    _err(f"Не удалось установить nginx front: {msg}")
             input(f"\n{BOLD}Enter…{NC}")
 
         elif s["installed"] and ch == "r":
