@@ -33,6 +33,8 @@ Chimera Project. Охватывает YouTube (специализированн�
 
 ## 1. Что такое DPI Bypass и зачем он нужен
 
+### Контекст: история проблемы YouTube в Chimera
+
 **ТСПУ** (Технические средства противодействия угрозам) — DPI-система
 на уровне российских провайдеров. Она:
 
@@ -41,7 +43,80 @@ Chimera Project. Охватывает YouTube (специализированн�
 - Блокирует QUIC (UDP/443) — браузер не может установить соединение.
 - Отвечает forged RST — рвёт соединение.
 
-**b4** обходит ТСПУ:
+### Ранние попытки решения в Chimera (и почему они не сработали)
+
+В Chimera Project было **два предыдущих подхода** к починке YouTube
+на entry-нодах, ни один из которых не решил проблему полностью:
+
+**Попытка 1: TCP-фрагментация ClientHello (freedom outbound + fragment)**
+
+Chimera имеет 12 модулей фрагментации (`fragment_*.py`) и серверную
+фрагментацию (`server_fragment.py`). Идея: разбить TLS ClientHello на
+несколько TCP-сегментов, чтобы ТСПУ не смог собрать полный SNI.
+
+**Почему не сработало:**
+- Xray `freedom` outbound умеет **только базовую фрагментацию по смещению
+  байтов** (`packets:"1-3"` + `length` + `interval`). Он не умеет:
+  - Отправлять фейковый ClientHello с decoy-SNI (DuckDuckGo/Google),
+    который ТСПУ читает, а сервер отбрасывает.
+  - Разрезать ClientHello в середине SNI (SNI-aware split).
+  - Инжектить fake RST для corrupt DPI per-flow state.
+  - Перехватывать QUIC (UDP/443) — только TCP.
+- На серверах без IPv6 `routeOnly=True` ломал `domainStrategy=UseIPv4` —
+  freedom outbound получал IP от клиента вместо домена → dial падал.
+- Патч `patch_inbounds_for_fragment` был **выключен** из-за этого бага.
+- Результат: «работает урывками», «без IPv6 не работает совсем».
+
+**Попытка 2: YouTube через Cloudflare WARP (`youtube_warp_route.py`)**
+
+Маршрутизация YouTube-трафика через Cloudflare WARP (WireGuard-туннель
+от entry VPS к Cloudflare). Xray `freedom` outbound с `sendThrough`
+отправляет YouTube-трафик через интерфейс `wg-warp`.
+
+**Почему не сработало:**
+- WARP сам по себе не обходит ТСПУ — он меняет маршрут (через Cloudflare),
+  но ТСПУ всё равно видит SNI `youtube.com` в ClientHello на пути к WARP.
+- Cloudflare WARP имеет **лимиты трафика** (free tier ~1GB/день) — для
+  видео это неприемлемо.
+- Добавляет лишний хоп: entry VPS → Cloudflare WARP → YouTube, вместо
+  entry VPS → YouTube напрямую.
+- Не решает QUIC-блокировку (WARP не перехватывает UDP/443).
+
+### Почему выбран b4
+
+**b4 (Bye Bye Big Bro)** — Linux-демон от DanielLavrushin, который
+работает на сетевом уровне (L3/L4) через NFQUEUE + raw sockets. Он
+делает то, чего не могут ни Xray fragment, ни WARP:
+
+| Возможность | Xray fragment | WARP | **b4** |
+|---|---|---|---|
+| Fake SNI (decoy ClientHello) | ❌ | ❌ | ✅ 9 типов payload |
+| SNI-aware split (в середине SNI) | ❌ | ❌ | ✅ |
+| QUIC-перехват (UDP/443) | ❌ | ❌ | ✅ |
+| Fake RST (corrupt DPI state) | ❌ | ❌ | ✅ |
+| RST protection (отбрасывать forged RST) | ❌ | ❌ | ✅ |
+| Discovery (автоподбор сета) | ❌ | ❌ | ✅ |
+| Не добавляет лишний хоп | ✅ | ❌ (через Cloudflare) | ✅ |
+| Без лимитов трафика | ✅ | ❌ (free tier 1GB) | ✅ |
+| Не требует remote server | ✅ | ❌ | ✅ |
+
+**Ключевое решение:** b4 ставится **на entry VPS** (не на роутер юзера, не
+на exit-ноду). Entry VPS находится в РФ и сам ходит к YouTube CDN напрямую.
+b4 перехватывает **исходящий** трафик от Xray к YouTube и мутирует пакеты
+так, что ТСПУ не может сопоставить SNI → пропускает. Юзер не ставит b4
+на свой роутер — он просто подключается по VLESS, и YouTube работает.
+
+### Дополнительный бонус: YouTube без рекламы
+
+Поскольку entry VPS находится в РФ, YouTube видит российский IP-адрес.
+YouTube не показывает рекламу пользователям из РФ (с 2022 года). Таким
+образом, **весь YouTube-трафик через Chimera + b4 идёт без рекламы** —
+видео загружается сразу, без pre-roll и mid-roll рекламы. Это было одной
+из целей всего проекта — обеспечить стабильный доступ к YouTube без
+троттлинга и без рекламы, через единый VLESS-туннель без необходимости
+настраивать отдельные инструменты на клиенте.
+
+### Как b4 обходит ТСПУ
 
 1. **Фейковый SNI** — отправляет decoy ClientHello с SNI другого сайта
    (например, `staticcdn.duckduckgo.com` или `www.google.com`). ТСПУ читает
