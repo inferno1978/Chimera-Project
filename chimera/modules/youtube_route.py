@@ -1353,9 +1353,10 @@ def do_manage_youtube_via_ru() -> None:
                 _box_warn(f"  Модуль youtube_b4 не найден: {_e}")
             except Exception as _e:
                 _box_warn(f"  Ошибка: {_e}")
-            # НЕ return — остаёмся в меню YouTube (раньше return выбрасывал
-            # в главное меню, и юзер не понимал куда делся).
-            continue  # перерисовать меню YouTube после выхода из b4
+            # После b4-меню — проваливаемся в input (как другие пункты).
+            # Меню YouTube не в while-loop, поэтому continue не нужен.
+            input(f"\n{BLUE}  Нажмите Enter...{NC}")
+            return  # возвращаемся в меню «Настройки сети»
         else:
             return
 
