@@ -1175,8 +1175,8 @@ def do_manage_youtube_via_ru() -> None:
 
         if ch == "q" or ch == "":
             return
-        #  FIX: проверяем 'w' и 'f' ДО int(ch), иначе int('w') бросает
-        # ValueError и handler ниже недостижим — кнопка [W] молча
+        #  FIX: проверяем 'w', 'f' и 'b' ДО int(ch), иначе int('w') бросает
+        # ValueError и handler ниже недостижим — кнопка [W]/[B] молча
         # возвращала пользователя в основное меню.
         if ch == "w":
             from chimera.modules.youtube_warp_route import do_youtube_warp_interactive
@@ -1217,6 +1217,17 @@ def do_manage_youtube_via_ru() -> None:
                     _box_info(f"{DIM}  Если не работает — проверьте: journalctl -u xray -n 30{NC}")
                 else:
                     _box_warn("  Не удалось применить — смотрите вывод выше.")
+        elif ch == "b":
+            # b4 (DPI bypass для YouTube на entry VPS)
+            try:
+                from chimera.modules.youtube_b4 import do_youtube_b4_menu
+                do_youtube_b4_menu()
+            except ImportError as _e:
+                _box_warn(f"  Модуль youtube_b4 не найден: {_e}")
+            except Exception as _e:
+                _box_warn(f"  Ошибка: {_e}")
+            input(f"\n{BLUE}  Нажмите Enter...{NC}")
+            return
         else:
             try:
                 _choice = int(ch)
