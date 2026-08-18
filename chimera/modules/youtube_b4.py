@@ -134,6 +134,7 @@ B4_WEB_PORT     = 9700
 # Проверен на провайдере юзера — работает с b4 на роутере.
 # На VPS может потребоваться Discovery для подбора под конкретного хостера.
 DEFAULT_SET_YOUTUBE = {
+    "id": "youtube",
     "b4_version": B4_VERSION,
     "name": "Youtube",
     "enabled": True,
@@ -148,8 +149,16 @@ DEFAULT_SET_YOUTUBE = {
         # sni=true, sni_seq_length=1 — из defaults b4
     },
     "targets": {
-        "sni_domains": ["youtube.com"],
-        "geosite_categories": ["youtube"],
+        "sni_domains": [
+            "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com",
+            "youtu.be", "youtube-nocookie.com", "youtubeeducation.com",
+            "youtubei.googleapis.com", "youtube-googletag.com",
+            "manifest.googlevideo.com", "i.ytimg.com", "wide.youtube.com",
+            "accounts.youtube.com", "m.youtube.com", "tv.youtube.com",
+            "gaming.youtube.com", "music.youtube.com", "studio.youtube.com",
+            "ads.youtube.com", "creators.youtube.com",
+            "developers.google.com", "cloud.youtube.com",
+        ],
     },
     "dns": {
         "enabled": True,
@@ -160,6 +169,7 @@ DEFAULT_SET_YOUTUBE = {
 # Альтернативный сет — более агрессивный (Google fake + disorder + меньше delay).
 # Может работать там, где DuckDuckGo-preset перестал работать.
 AGGRESSIVE_SET_YOUTUBE = {
+    "id": "youtube",
     "b4_version": B4_VERSION,
     "name": "Youtube-Aggressive",
     "enabled": True,
@@ -172,8 +182,16 @@ AGGRESSIVE_SET_YOUTUBE = {
         "sni_type": 2,  # Google preset (www.google.com)
     },
     "targets": {
-        "sni_domains": ["youtube.com"],
-        "geosite_categories": ["youtube"],
+        "sni_domains": [
+            "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com",
+            "youtu.be", "youtube-nocookie.com", "youtubeeducation.com",
+            "youtubei.googleapis.com", "youtube-googletag.com",
+            "manifest.googlevideo.com", "i.ytimg.com", "wide.youtube.com",
+            "accounts.youtube.com", "m.youtube.com", "tv.youtube.com",
+            "gaming.youtube.com", "music.youtube.com", "studio.youtube.com",
+            "ads.youtube.com", "creators.youtube.com",
+            "developers.google.com", "cloud.youtube.com",
+        ],
     },
     "dns": {
         "enabled": True,
@@ -184,6 +202,7 @@ AGGRESSIVE_SET_YOUTUBE = {
 # Лёгкий сет — без fake SNI, только фрагментация.
 # Минимальный оверхед, для «поверхностного» DPI.
 LIGHT_SET_YOUTUBE = {
+    "id": "youtube",
     "b4_version": B4_VERSION,
     "name": "Youtube-Light",
     "enabled": True,
@@ -196,8 +215,16 @@ LIGHT_SET_YOUTUBE = {
         "sni": False,
     },
     "targets": {
-        "sni_domains": ["youtube.com"],
-        "geosite_categories": ["youtube"],
+        "sni_domains": [
+            "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com",
+            "youtu.be", "youtube-nocookie.com", "youtubeeducation.com",
+            "youtubei.googleapis.com", "youtube-googletag.com",
+            "manifest.googlevideo.com", "i.ytimg.com", "wide.youtube.com",
+            "accounts.youtube.com", "m.youtube.com", "tv.youtube.com",
+            "gaming.youtube.com", "music.youtube.com", "studio.youtube.com",
+            "ads.youtube.com", "creators.youtube.com",
+            "developers.google.com", "cloud.youtube.com",
+        ],
     },
     "dns": {
         "enabled": True,
@@ -289,21 +316,22 @@ def _download_b4_binary() -> bool:
 
 
 def _write_default_config() -> bool:
-    """Создаёт дефолтный config.json с одним set "Youtube" (эталон)."""
+    """Создаёт дефолтный config.json с одним set "Youtube" (эталон).
+
+    Формат: {"sets": [...]} — b4 требует массив sets, каждый с
+    уникальным "id". Без "id" — ошибка "each set must have a unique
+    non-empty ID". Без "sets" — "Loaded targets: 0 domains" (сет
+    не загружен, b4 работает в no-op режиме).
+    """
     B4_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     B4_SETS_DIR.mkdir(parents=True, exist_ok=True)
     B4_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    # b4 принимает либо один конфиг-файл с одним set, либо директорию с
-    # наборами. Используем формат "single config" — самый простой.
+    # Полный set из DEFAULT_SET_YOUTUBE (включает id, targets, faking, etc).
+    youtube_set = dict(DEFAULT_SET_YOUTUBE)
+
     config = {
-        "b4_version": B4_VERSION,
-        "name": "Chimera-YouTube",
-        "enabled": True,
-        "tcp": DEFAULT_SET_YOUTUBE["tcp"],
-        "faking": DEFAULT_SET_YOUTUBE["faking"],
-        "targets": DEFAULT_SET_YOUTUBE["targets"],
-        "dns": DEFAULT_SET_YOUTUBE["dns"],
+        "sets": [youtube_set],
         # Дополнительные поля для Chimera-специфики:
         "routing": {"enabled": False},  # Не SOCKS5-upstream — direct bypass
         "udp": {"mode": "fake"},
@@ -574,18 +602,15 @@ def switch_preset(preset_name: str) -> bool:
         return False
     label, set_data = PRESETS[preset_name]
     _info(f"Переключаю на preset «{label}»...")
-    # Читаем текущий конфиг, заменяем set-поля.
-    try:
-        config = json.loads(B4_CONFIG_FILE.read_text())
-    except Exception:
-        config = {}
-    config.update({
-        "tcp": set_data["tcp"],
-        "faking": set_data["faking"],
-        "targets": set_data["targets"],
-        "dns": set_data["dns"],
-        "name": set_data["name"],
-    })
+    # Полностью пересоздаём конфиг в правильном формате {"sets": [...]}.
+    # Раньше пытались делать config.update() на верхнем уровне — но b4
+    # ожидает sets[0] с полями tcp/faking/targets/dns, а не на верхнем уровне.
+    new_set = dict(set_data)  # копия (включает id, b4_version, name, и т.д.)
+    config = {
+        "sets": [new_set],
+        "routing": {"enabled": False},
+        "udp": {"mode": "fake"},
+    }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     # Перезапускаем сервис.
     subprocess.run(["systemctl", "restart", "b4"], capture_output=True, check=False)
