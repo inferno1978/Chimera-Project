@@ -1353,7 +1353,8 @@ def do_manage_youtube_via_ru() -> None:
                 _box_warn(f"  Модуль youtube_b4 не найден: {_e}")
             except Exception as _e:
                 _box_warn(f"  Ошибка: {_e}")
-            return
+            # НЕ return — остаёмся в меню YouTube (раньше return выбрасывал
+            # в главное меню, и юзер не понимал куда делся).
         else:
             return
 
