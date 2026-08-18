@@ -106,7 +106,7 @@ def do_reconfigure() -> None:
     if ch in ("1", "3"):
         raw = input(f"  Новый домен [{old_domain}]: ").strip()
         if raw:
-            new_domain = raw
+            new_domain = raw.lower()  # DNS нечувствителен к регистру
 
     if ch in ("2", "3"):
         raw = input(f"  Новый порт [{old_port}]: ").strip()
