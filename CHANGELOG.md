@@ -2,6 +2,191 @@
 
 ---
 
+## FEAT(dpi_bypass): централизованный DPI Bypass (b4) для любых заблокированных ресурсов + автообновление — 18 августа 2026
+
+**Новый модуль `chimera/modules/dpi_bypass.py` — централизованное управление
+b4 для ЛЮБЫХ заблокированных ресурсов (не только YouTube). Делит binary/
+config/systemd с `youtube_b4.py` — если b4 уже установлен, показывает
+«Установлен, активен» и не предлагает переустановку.**
+
+### Полный путь из главного меню
+
+```
+python3 main.py
+→ Главное меню → 3 (Настройки сети)
+→ Меню «Настройки сети» → D (DPI Bypass)
+→ Меню «DPI Bypass (b4) — централизованный»
+```
+
+### Что умеет
+
+| Пункт | Функция |
+|---|---|
+| Статус | Показывает «Установлен, активен» + версию + проверку обновлений + список set'ов |
+| 1 | Запуск/остановка b4 |
+| 2 | Импорт кастомного сета (JSON) — добавляет к существующим, не заменяет |
+| 3 | Управление set'ами: список + включить/выключить/удалить |
+| 4 | Автообновление b4 binary (GitHub releases + SHA256 + backup + restore) |
+| 5 | Health check для всех set'ов |
+| 6 | Логи b4 (journalctl -n 30) |
+
+### Автообновление b4
+
+1. Проверка последней версии на GitHub API.
+2. Сравнение с установленной.
+3. Если есть обновление:
+   - Скачать `b4-linux-{arch}.tar.gz`
+   - Проверить SHA256 (через `.sha256` файл)
+   - Остановить сервис
+   - Backup старого binary
+   - Заменить binary
+   - Запустить сервис
+   - Проверить что active (если нет — восстановить из backup)
+4. Конфиг и set'ы НЕ затрагиваются.
+5. Обновить state с новой версией.
+
+### Управление set'ами (CRUD)
+
+- **Просмотр** — список всех set'ов с доменами и статусом (enabled/disabled)
+- **Включить/выключить** — toggle on/off (b4 перезапускается)
+- **Удалить** — удалить set по id (b4 перезапускается)
+- **Импорт** — добавить новый set из JSON (Discovery / Web UI / вручную).
+  Set добавляется к существующим (не заменяет YouTube set). Если set с таким
+  `id` уже есть — перезаписывается.
+
+### Port registry
+
+Добавлен `SERVICE_B4_DNS` для порта 5453 (b4 DNS TCP listener — ранее
+не был зарегистрирован). Теперь при установке b4 регистрируются 3 порта:
+- 9700 (Web UI, loopback) — `SERVICE_B4_WEB`
+- 5453 (DNS TCP, internal) — `SERVICE_B4_DNS`
+- 9743 (nginx front, через panel_nginx_front) — `SERVICE_B4_NGINX`
+
+При удалении — все 3 снимаются.
+
+### Синхронизация с youtube_b4
+
+Оба модуля (`youtube_b4.py` и `dpi_bypass.py`) работают с **одним и тем же**
+конфигом `/etc/b4/config.json` и **одним и тем же** сервисом `b4.service`.
+Двусторонняя синхронизация через общий файл — без дополнительного кода.
+
+### CLI
+
+```bash
+python3 -m chimera.modules.dpi_bypass              # открыть TUI-меню
+python3 -m chimera.modules.dpi_bypass status       # статус (JSON)
+python3 -m chimera.modules.dpi_bypass update        # автообновление
+python3 -m chimera.modules.dpi_bypass health        # health check (JSON)
+python3 -m chimera.modules.dpi_bypass sets          # список set'ов (JSON)
+```
+
+### FAQ
+
+См. `docs/faq/DPI_BYPASS_FAQ.md` — полное руководство с полными путями из
+главного меню, описанием работы, решением проблем.
+
+---
+
+## FEAT(youtube_b4): b4 (DPI bypass для YouTube на entry VPS) — 17-18 августа 2026
+
+**Новый модуль `chimera/modules/youtube_b4.py` — интеграция с b4 (Bye Bye
+Big Bro, DanielLavrushin/b4). b4 — статически слинкованный Go binary,
+ставится на entry VPS как systemd-сервис. Перехватывает ИСХОДЯЩИЙ TCP/UDP
+трафик от Xray к YouTube CDN через iptables mangle + NFQUEUE. Применяет
+DPI bypass: фейковый ClientHello (DPI читает, сервер отбрасывает) +
+фрагментация combo стратегией (split в середине SNI). ТСПУ не видит SNI →
+пропускает → YouTube работает.**
+
+### Полный путь из главного меню
+
+```
+python3 main.py
+→ Главное меню → 3 (Настройки сети)
+→ Меню «Настройки сети» → Y (YouTube через RU)
+→ Меню «YouTube маршрутизация» → 1 (YouTube через RU entry)
+   (включает geosite:youtube → outbound:direct в Xray)
+→ Вернуться назад → B (b4 DPI bypass)
+→ Меню b4 → 1 (Установить)
+```
+
+Альтернативно: `python3 -m chimera.modules.youtube_b4`
+
+### Архитектура
+
+```
+Клиент (без изменений)
+    ↓ VLESS Reality (ТСПУ не видит)
+Entry VPS
+    ↓ Xray: geosite:youtube → outbound:direct
+    ↓ freedom outbound открывает TCP к youtube.com:443
+    ↓ iptables mangle OUTPUT → NFQUEUE 537
+    ↓ b4: fake Google/DuckDuckGo ClientHello + фрагментация
+    ↓ raw socket (SO_MARK=32768) → YouTube CDN
+    ↓ ТСПУ не видит SNI → пропускает → YouTube работает
+```
+
+### 3 пресета
+
+| Preset | Fake SNI | seg2delay | Описание |
+|---|---|---|---|
+| Default | DuckDuckGo (sni_type=3) | 20-60ms | Эталон, проверенный на провайдере |
+| Aggressive | Google (sni_type=2) | 10-30ms | Меньше delay, для жёсткого DPI |
+| Light | Нет (sni=false) | 30-80ms | Только фрагментация, без fake SNI |
+
+### iptables mangle (3 правила)
+
+1. TCP/443 → NFQUEUE 537 (HTTPS)
+2. UDP/53 → NFQUEUE 537 (DNS interception для DoH)
+3. UDP/443 → NFQUEUE 537 (QUIC перехват — без него браузеры обходят b4)
+
+Все правила используют `mark != 32768` — исключает пакеты самого b4
+из ре-queue (предотвращает бесконечный цикл).
+
+### Конфиг b4
+
+Формат: `{"sets": [...]}` — массив set'ов, каждый с уникальным `id`.
+Set "Youtube" содержит 22 домена (аналог geosite:youtube, без требования
+geosite.dat): youtube.com, googlevideo.com, ytimg.com, ggpht.com, youtu.be,
+m.youtube.com, music.youtube.com, и т.д.
+
+### Интеграция с Chimera
+
+- Не требует изменений в Xray config (работает поверх routing
+  `geosite:youtube → direct`, который уже есть в youtube_route.py).
+- Совместим с UFW/iptables/ingress_geoip (mangle vs filter таблицы).
+- IPv4/IPv6 — не важно (работает на L3).
+- port_registry: 3 порта (9700, 5453, 9743).
+- nginx front для Web UI (LE или self-signed, через panel_nginx_front).
+- Импорт кастомных сетов (из Discovery / Web UI / вручную).
+- Discovery для автоподбора под провайдера.
+- Health check YouTube.
+- Автообновление binary.
+
+### REST API (9 endpoints)
+
+- Admin: GET `/api/b4/info`, `/api/b4/health`
+- Admin: POST `/api/b4/install`, `/api/b4/uninstall`, `/api/b4/enable`,
+  `/api/b4/disable`, `/api/b4/preset`, `/api/b4/discovery`
+- User: GET `/api/portal/b4-info` (только статус)
+
+### TUI (8 пунктов + R)
+
+1. Запуск/остановка
+2. Переключить preset (default/aggressive/light)
+3. Импорт кастомного сета (JSON)
+4. Discovery (автоподбор)
+5. Health check
+6. Логи (journalctl -n 30)
+7. Web UI (SSH-туннель инструкция)
+8. nginx front (TLS) — вкл/выкл
+R. Удалить b4 полностью
+
+### FAQ
+
+См. `docs/faq/DPI_BYPASS_FAQ.md` — полное руководство.
+
+---
+
 ## FIX(install_prompts+users_manager+admin_panel): email/имя при установке + WARNING при удалении юзера — 17 августа 2026
 
 **Баг: при удалении дефолтного «безымянного» юзера через TUI 2 → D, в
