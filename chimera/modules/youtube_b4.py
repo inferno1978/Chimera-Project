@@ -577,11 +577,18 @@ def install_b4() -> bool:
     subprocess.run(["systemctl", "daemon-reload"], check=False)
     # Применяем iptables (до старта сервиса — b4 с --skip-tables ждёт queue).
     _iptables_apply()
-    # Регистрируем порт b4 Web UI в port_registry (loopback, не открываем UFW).
+    # Регистрируем порты b4 в port_registry.
     try:
-        from chimera.modules.port_registry import port_register, SERVICE_B4_WEB
+        from chimera.modules.port_registry import (
+            port_register, SERVICE_B4_WEB, SERVICE_B4_DNS,
+        )
         port_register(SERVICE_B4_WEB, B4_WEB_PORT, "tcp",
                       comment="b4 Web UI (loopback)", force=True)
+        # b4 DNS TCP listener на 0.0.0.0:5453 — открывается самим b4,
+        # регистрируем в port_registry для учёта (UFW не открываем —
+        # это внутренний DNS-forwarder, не для внешнего доступа).
+        port_register(SERVICE_B4_DNS, 5453, "tcp",
+                      comment="b4 DNS TCP listener (internal)", force=True)
     except Exception:
         pass
     # Запускаем сервис.
@@ -619,12 +626,13 @@ def uninstall_b4() -> bool:
         _b4_nginx_remove()
     except Exception:
         pass
-    # 2c. Снимаем регистрацию порта b4 Web UI из port_registry.
+    # 2c. Снимаем регистрацию портов b4 из port_registry.
     try:
         from chimera.modules.port_registry import (
-            port_unregister, SERVICE_B4_WEB,
+            port_unregister, SERVICE_B4_WEB, SERVICE_B4_DNS,
         )
         port_unregister(SERVICE_B4_WEB, B4_WEB_PORT, "tcp")
+        port_unregister(SERVICE_B4_DNS, 5453, "tcp")
     except Exception:
         pass
     # 3. mask + remove unit.

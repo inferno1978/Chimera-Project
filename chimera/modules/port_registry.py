@@ -131,6 +131,7 @@ SERVICE_PORT_HOPPING   = "port_hopping"
 SERVICE_OLCRTC_MANAGER = "olcrtc_manager"
 SERVICE_B4_WEB         = "b4_web"          # b4 Web UI (loopback, 9700)
 SERVICE_B4_NGINX       = "b4_nginx"        # nginx front для b4 Web UI (TLS, 9743)
+SERVICE_B4_DNS         = "b4_dns"          # b4 DNS TCP listener (0.0.0.0:5453)
 
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────
