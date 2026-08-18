@@ -865,15 +865,15 @@ def health_check_youtube() -> dict:
     """
     results = {"targets": [], "all_ok": True}
     targets = [
-        # URL → ожидаемый результат (любой HTTP-код = OK,
-        # timeout/connection-reset = FAIL)
+        # youtube.com — главная страница (200 = OK).
         ("youtube.com", "https://www.youtube.com/"),
-        # googlevideo.com — CDN без правильного пути отдаёт 403/404.
-        # Но не все r*.sn.googlevideo.com хосты доступны. Используем
-        # основной домен googlevideo.com — он отдаёт 404 на root.
-        ("googlevideo.com", "https://googlevideo.com/"),
-        # ytimg.com — конкретный thumbnail (точно работает).
+        # ytimg.com — CDN статики. Конкретный thumbnail точно работает.
         ("ytimg.com", "https://i.ytimg.com/vi/dQw4w9WgXcQ/default.jpg"),
+        # googlevideo.com убран из health check: корневой домен
+        # не резолвится (000 = DNS-fail). CDN-видео использует
+        # динамические поддомены (r*.sn.*.googlevideo.com), которые
+        # невозможно предсказать. Если youtube.com + ytimg.com работают —
+        # b4 функционирует корректно.
     ]
     for label, url in targets:
         try:
@@ -1221,22 +1221,27 @@ def do_youtube_b4_menu() -> None:
 # ══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":  # pragma: no cover
-    import argparse
-    p = argparse.ArgumentParser(description="YouTube via b4 (DPI bypass на entry)")
-    p.add_argument("cmd", choices=["install", "uninstall", "status", "enable",
-                                   "disable", "health", "discovery"])
-    args = p.parse_args()
-    if args.cmd == "install":
-        install_b4()
-    elif args.cmd == "uninstall":
-        uninstall_b4()
-    elif args.cmd == "status":
-        print(json.dumps(status(), indent=2))
-    elif args.cmd == "enable":
-        enable()
-    elif args.cmd == "disable":
-        disable()
-    elif args.cmd == "health":
-        print(json.dumps(health_check_youtube(), indent=2))
-    elif args.cmd == "discovery":
-        print(json.dumps(run_discovery(), indent=2))
+    import sys
+    if len(sys.argv) < 2:
+        # Без аргументов — открываем интерактивное TUI-меню.
+        do_youtube_b4_menu()
+    else:
+        import argparse
+        p = argparse.ArgumentParser(description="YouTube via b4 (DPI bypass на entry)")
+        p.add_argument("cmd", choices=["install", "uninstall", "status", "enable",
+                                       "disable", "health", "discovery"])
+        args = p.parse_args()
+        if args.cmd == "install":
+            install_b4()
+        elif args.cmd == "uninstall":
+            uninstall_b4()
+        elif args.cmd == "status":
+            print(json.dumps(status(), indent=2))
+        elif args.cmd == "enable":
+            enable()
+        elif args.cmd == "disable":
+            disable()
+        elif args.cmd == "health":
+            print(json.dumps(health_check_youtube(), indent=2))
+        elif args.cmd == "discovery":
+            print(json.dumps(run_discovery(), indent=2))
