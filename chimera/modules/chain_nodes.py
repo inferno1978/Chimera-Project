@@ -2231,7 +2231,7 @@ def do_manage_nodes() -> None:
         state = json.loads(STATE_FILE.read_text())
         INSTALL_MODE      = state.get("install_mode",  "A")
         setattr(core, "INSTALL_MODE", INSTALL_MODE)
-        PARAM_DOMAIN      = state.get("domain",        PARAM_DOMAIN)
+        PARAM_DOMAIN      = (state.get("domain",        PARAM_DOMAIN) or "").lower()  # DNS case-insensitive
         setattr(core, "PARAM_DOMAIN", PARAM_DOMAIN)
         PARAM_UUID        = state.get("uuid",          PARAM_UUID)
         setattr(core, "PARAM_UUID", PARAM_UUID)

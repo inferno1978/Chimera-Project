@@ -8621,7 +8621,7 @@ def _load_state_into_globals() -> None:
         return
     try:
         state = json.loads(STATE_FILE.read_text())
-        PARAM_DOMAIN     = state.get("domain",      PARAM_DOMAIN)
+        PARAM_DOMAIN     = (state.get("domain",      PARAM_DOMAIN) or "").lower()  # DNS case-insensitive
         PARAM_UUID       = state.get("uuid",        PARAM_UUID)
         PARAM_PUBLIC_KEY = state.get("public_key",  PARAM_PUBLIC_KEY)
         PARAM_PRIVATE_KEY = state.get("private_key", PARAM_PRIVATE_KEY)
