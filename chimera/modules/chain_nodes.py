@@ -76,6 +76,106 @@ def _core_module():
 
 
 # =============================================================================
+#  Helpers: routing rules + sniffing для VLESS REALITY TCP каскада
+# =============================================================================
+#  ВАЖНАЯ ИСТОРИЯ ФИКСА (commit fd1ede6 predecessors):
+#  Раньше catch-all правило в routing было:
+#      {"type": "field", "network": "tcp,udp", "outboundTag": "chain-exit"}
+#  Это матчило И TCP, И UDP. Но VLESS over REALITY работает ТОЛЬКО по TCP —
+#  UDP-трафик физически не может быть туннелирован. Симптомы на клиенте:
+#    • DNS-запросы (UDP:53 к 1.1.1.1) → обрыв → «dns: exchange failed»
+#    • QUIC (UDP:443 от браузеров) → обрыв → EOF
+#    • Весь остальной UDP → обрыв → «EOF» при попытке подключения
+#  Тестовый Xray-клиент на самом entry работал (curl --socks5 только TCP),
+#  но полноценный VPN-клиент (Nyamebox/Hiddify/v2rayN) сразу падал.
+#
+#  Кроме того, в sniffing.destOverride не было «quic» и «dns», поэтому Xray
+#  не перехватывал DNS-запросы на уровне приложения и не отправлял их на
+#  свой встроенный DNS-резолвер — они шли «как есть» к 1.1.1.1:53 и попадали
+#  в catch-all → обрыв.
+#
+#  ФИКС: единый helper строит правильный набор правил для VLESS REALITY TCP
+#  каскада. Используется в 3 местах: single-node, multi-node pinned,
+#  multi-node balancer — что гарантирует единое поведение. AWG и xHTTP
+#  режимы эти хелперы НЕ затрагивают (у них другой routing: fwmark/loopback).
+# =============================================================================
+
+def _build_chain_routing_rules(outbound_target: str,
+                               balancer: bool = False) -> list:
+    """Строит список routing rules для VLESS REALITY TCP каскада.
+
+    Параметры:
+      outbound_target — тег outbound'а цепочки ('chain-exit', 'chain-exit-1')
+                        или 'chain-balancer' если balancer=True.
+      balancer         — True если outbound_target это balancerTag, не outboundTag.
+
+    Возвращает список routing rules (порядок важен — первый матч выигрывает):
+      1. loopback → direct (DNSCrypt на 127.0.0.1:5300 и т.п.)
+      2. bittorrent → BLOCK (всегда)
+      3. UDP DNS (порт 53 tcp+udp) → direct (резолвится через DNSCrypt на entry)
+      4. QUIC (UDP порт 443) → BLOCK (браузер откатится на TCP/HTTP2)
+      5. Весь остальной UDP → BLOCK (VLESS REALITY TCP-only не туннелирует UDP)
+      6. TCP → outbound_target (chain-exit-1 / chain-balancer)
+
+    Совместимость: для AWG-режима эта функция НЕ вызывается — там используется
+    fwmark-based routing через awg0. См. generate_xray_config() для AWG.
+    """
+    # Catch-all правило для TCP: через exit-ноду или balancer.
+    # При balancer=True используем balancerTag, иначе outboundTag.
+    if balancer:
+        _tcp_rule = {"type": "field", "network": "tcp",
+                     "balancerTag": outbound_target}
+    else:
+        _tcp_rule = {"type": "field", "network": "tcp",
+                     "outboundTag": outbound_target}
+    return [
+        # loopback → direct (DNSCrypt, внутренние сервисы Xray)
+        {"type": "field", "ip": ["127.0.0.1/8", "::1/128"], "outboundTag": "direct"},
+        # Блокируем торренты (всегда — независимо от transport)
+        {"type": "field", "protocol": ["bittorrent"], "outboundTag": "BLOCK"},
+        # UDP DNS (tcp+udp на порт 53) → direct
+        # Xray сам резолвит через DNSCrypt на entry (127.0.0.1:5300).
+        # Клиентские DNS-запросы (через туннель к 1.1.1.1:53) уходят напрямую
+        # с entry, не через chain-exit (который не умеет UDP).
+        {"type": "field", "port": "53", "network": "tcp,udp",
+         "outboundTag": "direct"},
+        # QUIC (UDP:443) → BLOCK
+        # Браузер при BLOCK'd QUIC автоматически откатится на TCP (HTTP/2).
+        # Это стандартное поведение для всех VPN-туннелей без UDP-поддержки.
+        {"type": "field", "port": "443", "network": "udp",
+         "outboundTag": "BLOCK"},
+        # Весь остальной UDP → BLOCK
+        # VLESS over REALITY — TCP-only transport, UDP туннелировать не может.
+        # Без этого правила UDP-трафик попадал в catch-all → обрыв → EOF.
+        {"type": "field", "network": "udp", "outboundTag": "BLOCK"},
+        # Только TCP → через exit-ноду (chain-exit-1 / chain-balancer)
+        _tcp_rule,
+    ]
+
+
+def _build_chain_sniffing(awg: bool = False) -> dict:
+    """Строит sniffing-блок для VLESS REALITY inbound.
+
+    Параметры:
+      awg — True если AWG-режим (metadataOnly=True, т.к. routing через ядро).
+
+    Возвращает dict с enabled/destOverride/metadataOnly/routeOnly.
+    destOverride включает 'http', 'tls', 'quic' (последнее — для перехвата
+    QUIC-трафика и его маршрутизации через BLOCK правило вместо падения
+    в catch-all с последующим обрывом).
+    """
+    return {
+        "enabled":      True,
+        "destOverride": ["http", "tls", "quic"],
+        # AWG использует маршрутизацию ядра — sniffing доменов не нужен.
+        # Базовый VLESS/REALITY: metadataOnly=False обязателен — xray должен
+        # читать SNI/Host, чтобы freedom мог резолвить домены.
+        "metadataOnly": True if awg else False,
+        "routeOnly":    False,
+    }
+
+
+# =============================================================================
 #  Prompt-функции: параметры Exit Node (Режим B)
 # =============================================================================
 def prompt_chain_params() -> None:
@@ -569,15 +669,10 @@ def generate_xray_config_chain_entry() -> None:
                 }],
                 "decryption": "none",
             },
-            "sniffing": {
-                "enabled":      True,
-                "destOverride": ["http", "tls"],
-                # AWG использует маршрутизацию ядра — sniffing доменов не нужен (metadataOnly=True).
-                # Базовый VLESS/REALITY: metadataOnly=False обязателен — xray должен читать SNI/Host
-                # чтобы freedom мог резолвить домены и применять UseIPv6v4 domainStrategy.
-                "metadataOnly": True if AWG_EXIT_ENABLED else False,
-                "routeOnly":    False,
-            },
+            # FIX: sniffing с 'quic' в destOverride — Xray перехватывает QUIC
+            # и маршрутизирует через BLOCK правило вместо падения в catch-all.
+            # Без этого браузерные QUIC-запросы рвут соединение → EOF на клиенте.
+            "sniffing": _build_chain_sniffing(awg=AWG_EXIT_ENABLED),
             "streamSettings": {
                 "network": "tcp",
                 "sockopt": _build_sockopt(),
@@ -665,16 +760,7 @@ def generate_xray_config_chain_entry() -> None:
         ],
         "routing": {
             "domainStrategy": "IPIfNonMatch",
-            "rules": [
-                # ИСПРАВЛЕНИЕ: loopback → direct ВСЕГДА (не только при AWG).
-                # DNS-запросы Xray к 127.0.0.1:5300 (DNSCrypt) должны идти через
-                # direct (loopback), иначе попадают в chain-exit → EOF.
-                {"type": "field", "ip": ["127.0.0.1/8", "::1/128"], "outboundTag": "direct"},
-                # Блокируем торренты
-                {"type": "field", "protocol": ["bittorrent"], "outboundTag": "BLOCK"},
-                # Всё остальное — через exit node
-                {"type": "field", "network": "tcp,udp", "outboundTag": "chain-exit"},
-            ],
+            "rules": _build_chain_routing_rules("chain-exit"),
         },
     }
 
@@ -1977,15 +2063,9 @@ def generate_xray_config_chain_entry_multi() -> None:
                 }],
                 "decryption": "none",
             },
-            "sniffing": {
-                "enabled":      True,
-                "destOverride": ["http", "tls"],
-                # AWG использует маршрутизацию ядра — sniffing доменов не нужен (metadataOnly=True).
-                # Базовый VLESS/REALITY: metadataOnly=False обязателен — xray должен читать SNI/Host
-                # чтобы freedom мог резолвить домены и применять UseIPv6v4 domainStrategy.
-                "metadataOnly": True if AWG_EXIT_ENABLED else False,
-                "routeOnly":    False,
-            },
+            # FIX: sniffing с 'quic' в destOverride — Xray перехватывает QUIC
+            # и маршрутизирует через BLOCK правило вместо падения в catch-all.
+            "sniffing": _build_chain_sniffing(awg=AWG_EXIT_ENABLED),
             "streamSettings": {
                 "network": "tcp",
                 "sockopt": _build_sockopt(),
@@ -2019,15 +2099,11 @@ def generate_xray_config_chain_entry_multi() -> None:
             info(f"Pinned-режим: весь трафик → нода #{pinned+1} ({nodes[pinned]['host']})")
         balancers   = []
         observatory = None
-        routing_rules = [
-            # ИСПРАВЛЕНИЕ: loopback → direct ВСЕГДА (не только при AWG).
-            # Без этого DNS-запросы Xray к 127.0.0.1:5300 (DNSCrypt-proxy) попадают
-            # в exit-outbound (VLESS TCP) и получают "read response: EOF",
-            # т.к. UDP к loopback невозможно туннелировать через VLESS.
-            {"type": "field", "ip": ["127.0.0.1/8", "::1/128"], "outboundTag": "direct"},
-            {"type": "field", "protocol": ["bittorrent"], "outboundTag": "BLOCK"},
-            {"type": "field", "network": "tcp,udp",       "outboundTag": effective_tag},
-        ]
+        # FIX: используем единый helper — он правильно обрабатывает UDP
+        # (DNS→direct, QUIC→BLOCK, UDP→BLOCK, только TCP→exit-нода).
+        # Раньше catch-all {"network": "tcp,udp"} рвал UDP-трафик, что
+        # приводило к EOF и «dns: exchange failed» у VPN-клиентов.
+        routing_rules = _build_chain_routing_rules(effective_tag)
     else:
         # Несколько нод — балансировщик с выбранной стратегией
         strategy = CHAIN_BALANCER_STRATEGY  # "roundRobin" | "leastPing" | "random"
@@ -2036,15 +2112,8 @@ def generate_xray_config_chain_entry_multi() -> None:
             "selector": outbound_tags,
             "strategy": {"type": strategy},
         }]
-        routing_rules = [
-            # ИСПРАВЛЕНИЕ: loopback → direct ВСЕГДА (не только при AWG).
-            # Xray резолвит домены клиентов через встроенный DNS (IPIfNonMatch),
-            # запросы идут к 127.0.0.1:5300 (DNSCrypt-proxy) — они должны уходить
-            # через direct (loopback), а не через balancer/VLESS → EOF.
-            {"type": "field", "ip": ["127.0.0.1/8", "::1/128"], "outboundTag": "direct"},
-            {"type": "field", "protocol": ["bittorrent"], "outboundTag": "BLOCK"},
-            {"type": "field", "network": "tcp,udp",       "balancerTag": "chain-balancer"},
-        ]
+        # FIX: тот же helper, но с balancer=True (использует balancerTag).
+        routing_rules = _build_chain_routing_rules("chain-balancer", balancer=True)
         # leastPing / leastLoad требуют observatory — без него деградирует до random
         if strategy in ("leastPing", "leastLoad"):
             observatory = {
