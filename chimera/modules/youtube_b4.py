@@ -374,7 +374,9 @@ ExecStart={B4_BINARY_PATH} --config {B4_CONFIG_FILE} \\
     --web-port {B4_WEB_PORT} \\
     --log-dir {B4_LOG_DIR} \\
     --verbose info \\
-    --skip-tables
+    --skip-tables \\
+    --ipv4 \\
+    --ipv6
 WorkingDirectory={B4_CONFIG_DIR}
 Restart=always
 RestartSec=3
@@ -462,31 +464,98 @@ def _iptables_apply() -> bool:
             capture_output=True, check=False,
         )
 
-    _ok("iptables mangle правила применены")
+    _ok("iptables mangle правила применены (IPv4)")
     _info(f"  Chain: mangle → b4_mangle → NFQUEUE {B4_QUEUE_NUM}")
     _info(f"  Target: tcp dport 443 + udp dport 53 + udp dport 443 (QUIC)")
     _info(f"  Mark: {B4_MARK} (исключает пакеты самого b4 из ре-queue)")
+
+    # ── IPv6: аналогичные правила через ip6tables ────────────────────
+    # На серверах с IPv6 — YouTube-трафик уходит по IPv6, и без ip6tables
+    # правил b4 не перехватывает его → ТСПУ блокирует → чёрная страница.
+    # ip6tables может отсутствовать на некоторых системах — проверяем.
+    ip6t = shutil.which("ip6tables")
+    if ip6t:
+        subprocess.run(
+            ["ip6tables", "-t", "mangle", "-N", "b4_mangle6"],
+            capture_output=True, check=False,
+        )
+        subprocess.run(
+            ["ip6tables", "-t", "mangle", "-F", "b4_mangle6"],
+            capture_output=True, check=False,
+        )
+        # TCP/443 → NFQUEUE
+        subprocess.run(
+            ["ip6tables", "-t", "mangle", "-A", "b4_mangle6",
+             "-p", "tcp", "--dport", "443",
+             "-m", "mark", "!", "--mark", str(B4_MARK),
+             "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
+             "-m", "comment", "--comment", B4_IPT_COMMENT],
+            capture_output=True, check=False,
+        )
+        # UDP/53 → NFQUEUE
+        subprocess.run(
+            ["ip6tables", "-t", "mangle", "-A", "b4_mangle6",
+             "-p", "udp", "--dport", "53",
+             "-m", "mark", "!", "--mark", str(B4_MARK),
+             "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
+             "-m", "comment", "--comment", B4_IPT_COMMENT + "-dns"],
+            capture_output=True, check=False,
+        )
+        # UDP/443 (QUIC) → NFQUEUE
+        subprocess.run(
+            ["ip6tables", "-t", "mangle", "-A", "b4_mangle6",
+             "-p", "udp", "--dport", "443",
+             "-m", "mark", "!", "--mark", str(B4_MARK),
+             "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
+             "-m", "comment", "--comment", B4_IPT_COMMENT + "-quic"],
+            capture_output=True, check=False,
+        )
+        # Jump из OUTPUT
+        r6 = subprocess.run(
+            ["ip6tables", "-t", "mangle", "-C", "OUTPUT", "-j", "b4_mangle6"],
+            capture_output=True, check=False,
+        )
+        if r6.returncode != 0:
+            subprocess.run(
+                ["ip6tables", "-t", "mangle", "-A", "OUTPUT", "-j", "b4_mangle6"],
+                capture_output=True, check=False,
+            )
+        _ok("ip6tables mangle правила применены (IPv6)")
+    else:
+        _warn("ip6tables не найден — IPv6 трафик не перехватывается b4")
+        _warn("Если сервер имеет IPv6 — YouTube может не работать через IPv6")
     return True
 
 
 def _iptables_remove() -> None:
-    """Удаляет все iptables правила b4 (идемпотентно)."""
-    # 1. Удаляем jump из OUTPUT.
+    """Удаляет все iptables/ip6tables правила b4 (идемпотентно)."""
+    # IPv4
     subprocess.run(
         ["iptables", "-t", "mangle", "-D", "OUTPUT", "-j", "b4_mangle"],
         capture_output=True, check=False,
     )
-    # 2. Очищаем цепочку b4_mangle.
     subprocess.run(
         ["iptables", "-t", "mangle", "-F", "b4_mangle"],
         capture_output=True, check=False,
     )
-    # 3. Удаляем саму цепочку.
     subprocess.run(
         ["iptables", "-t", "mangle", "-X", "b4_mangle"],
         capture_output=True, check=False,
     )
-    _ok("iptables mangle правила b4 удалены")
+    # IPv6
+    subprocess.run(
+        ["ip6tables", "-t", "mangle", "-D", "OUTPUT", "-j", "b4_mangle6"],
+        capture_output=True, check=False,
+    )
+    subprocess.run(
+        ["ip6tables", "-t", "mangle", "-F", "b4_mangle6"],
+        capture_output=True, check=False,
+    )
+    subprocess.run(
+        ["ip6tables", "-t", "mangle", "-X", "b4_mangle6"],
+        capture_output=True, check=False,
+    )
+    _ok("iptables + ip6tables mangle правила b4 удалены")
 
 
 # ══════════════════════════════════════════════════════════════════════════
