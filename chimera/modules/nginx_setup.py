@@ -211,6 +211,101 @@ def _ensure_nginx_sites_enabled_include() -> None:
     info("nginx.conf: добавлен include /etc/nginx/sites-enabled/* (nginx.org репо)")
 
 
+# =============================================================================
+#  _cleanup_stale_chimera_vhosts — удаление старых Chimera vhost при смене домена
+# =============================================================================
+#  ВАЖНАЯ ИСТОРИЯ ФИКСА:
+#  Раньше setup_nginx_temp/final создавали новый vhost-файл для нового домена,
+#  но НЕ удаляли старый. При установке поверх (смене домена) в sites-enabled/
+#  оставались два vhost-а с одинаковым listen 443 → nginx падал с
+#  «duplicate listen options for 0.0.0.0:443» либо один из vhost-ов тихо
+#  игнорировался.
+#
+#  ФИКС: перед созданием нового vhost сканируем sites-available/ и sites-enabled/,
+#  находим все Chimera-конфиги (по маркерам proxy_protocol/xver/realpath//dev/shm/),
+#  и удаляем те, что не совпадают с новым доменом.
+#
+#  ВАЖНО: не трогаем:
+#    • sites-available/default (это стандартный vhost Ubuntu/Debian, не наш)
+#    • sites-available/chimera-portal-nginx (Portal front — отдельная фича)
+#    • sites-available/chimera-telemt-panel-nginx (Telemt front — отдельная фича)
+#    • Любые чужие vhost-ы без Chimera-маркеров
+# =============================================================================
+def _cleanup_stale_chimera_vhosts(new_domain: str) -> int:
+    """Удаляет старые Chimera VLESS vhost-файлы при смене домена.
+
+    Возвращает количество удалённых файлов (для логирования).
+    Безопасна: не трогает default, chimera-portal-nginx, chimera-telemt-panel-nginx,
+    и любые vhost-ы без явных Chimera-маркеров (proxy_protocol, /dev/shm/, xver).
+    """
+    core = _core_module()
+    info = core.info
+    NGINX_CONF_DIR = core.NGINX_CONF_DIR
+    NGINX_ENABLED_DIR = core.NGINX_ENABLED_DIR
+
+    # Список имён, которые НИКОГДА не удаляем (это другие фичи Chimera или default).
+    PROTECTED_NAMES = {
+        "default",
+        "chimera-portal-nginx",
+        "chimera-telemt-panel-nginx",
+    }
+
+    # Маркеры, по которым отличаем Chimera VLESS vhost от чужого.
+    # proxy_protocol — используется в REALITY (xver=1).
+    # /dev/shm/ — путь unix-сокета, который Chimera генерирует автоматически.
+    # xver — директива Proxy Protocol, используется в REALITY inbound.
+    # realpath — нестандартная директива, может встретиться в старых конфигах.
+    CHIMERA_MARKERS = ("proxy_protocol", "/dev/shm/", "xver", "realpath")
+
+    removed = 0
+    for site_dir in (NGINX_CONF_DIR, NGINX_ENABLED_DIR):
+        if not site_dir.exists():
+            continue
+        for f in site_dir.iterdir():
+            # Пропускаем скрытые файлы (.swp, .bak) и директории.
+            if f.name.startswith(".") or f.is_dir():
+                continue
+            # Пропускаем защищённые имена (default, portal, telemt).
+            if f.name in PROTECTED_NAMES:
+                continue
+            # Пропускаем новый домен (его только что создали / создадим).
+            if f.name == new_domain:
+                continue
+            # Для симлинка — resolve() к target. Если target уже удалён
+            # (предыдущей итерацией по sites-available), это висячий symlink —
+            # удаляем безусловно, это мусор от предыдущей установки.
+            target = f
+            if f.is_symlink():
+                try:
+                    target = f.resolve()
+                except Exception:
+                    target = f
+                if not target.exists():
+                    try:
+                        f.unlink()
+                        removed += 1
+                        info(f"  Удалён висячий симлинк Chimera: {f}")
+                    except Exception:
+                        pass
+                    continue
+            # Читаем содержимое файла (или target'а симлинка).
+            try:
+                content = target.read_text() if target.is_file() else ""
+            except Exception:
+                continue
+            # Если нет ни одного Chimera-маркера — это чужой vhost, не трогаем.
+            if not any(m in content for m in CHIMERA_MARKERS):
+                continue
+            # Это Chimera vhost от старого домена — удаляем.
+            try:
+                f.unlink()
+                removed += 1
+                info(f"  Удалён старый Chimera vhost: {f}")
+            except Exception:
+                pass
+    return removed
+
+
 def setup_nginx_temp(domain: Optional[str] = None) -> None:
     """Создаёт временный HTTP:80 vhost для certbot ACME-челленджа.
 
@@ -265,6 +360,18 @@ def setup_nginx_temp(domain: Optional[str] = None) -> None:
     # nginx из официального репо (nginx.org) не включает sites-enabled по умолчанию.
     # Проверяем nginx.conf и добавляем include если отсутствует.
     _ensure_nginx_sites_enabled_include()
+
+    # FIX: удаляем старые Chimera vhost-файлы от предыдущих установок.
+    # Без этого при установке поверх (смена домена) в sites-enabled остаются
+    # два vhost-а с одинаковым listen 443 → nginx падает с duplicate listen.
+    # Безопасно: не трогает default, portal-nginx, telemt-nginx, чужие сайты.
+    try:
+        _removed_count = _cleanup_stale_chimera_vhosts(PARAM_DOMAIN)
+        if _removed_count > 0:
+            success(f"  Удалено {_removed_count} старых Chimera vhost-ов "
+                    f"(не {PARAM_DOMAIN})")
+    except Exception as _e:
+        warn(f"  Очистка старых vhost-ов пропущена: {_e}")
 
     cfg = NGINX_CONF_DIR / PARAM_DOMAIN
     cfg.write_text(textwrap.dedent(f"""\

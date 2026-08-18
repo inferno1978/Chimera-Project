@@ -2,6 +2,106 @@
 
 ---
 
+## FIX(chain_nodes+nginx_setup+uninstall): 3 критичных бага Mode B установки — 19 августа 2026
+
+**Три бага, блокирующих работу Mode B + VLESS REALITY TCP каскада. Все
+найдены через аудит кода установщика после диагностической сессии на
+сервере Choose (choose24.ru), где клиент Nyamebox получал `EOF` /
+`dns: exchange failed` при попытке подключения.**
+
+### Баг #1 (КРИТИЧНЫЙ): UDP-трафик рвался в TCP-only outbound
+
+**Симптомы на клиенте**: `EOF`, `dns: exchange failed`, полная неработоспособность
+VPN-туннеля через полноценного клиента (Nyamebox / Hiddify / v2rayN), при этом
+локальный тест через `curl --socks5` проходил (потому что curl только TCP).
+
+**Корень проблемы**: в `chain_nodes.py` catch-all routing rule было:
+```python
+{"type": "field", "network": "tcp,udp", "outboundTag": "chain-exit-1"}
+```
+
+VLESS over REALITY — это **TCP-only transport**. UDP-трафик физически не может
+быть туннелирован. Catch-all `tcp,udp` матчил и TCP, и UDP, и весь UDP падал:
+- DNS-запросы на `1.1.1.1:53` → обрыв → `dns: exchange failed`
+- QUIC от браузеров на `:443` → обрыв → `EOF`
+- Весь остальной UDP → обрыв → `EOF`
+
+Доп. фактор: `sniffing.destOverride = ["http", "tls"]` — без `"quic"` Xray не
+перехватывал QUIC-трафик, и тот летел в catch-all.
+
+**Фикс**: создан единый helper `_build_chain_routing_rules(outbound_target, balancer=False)`
+и `_build_chain_sniffing(awg=False)`. Они строят корректный набор правил:
+
+| # | Правило | Куда |
+|---|---|---|
+| 1 | loopback (127.0.0.1/8, ::1/128) → direct | DNSCrypt на 127.0.0.1:5300 |
+| 2 | bittorrent → BLOCK | всегда |
+| 3 | порт 53 (tcp+udp) → direct | резолв через DNSCrypt на entry |
+| 4 | порт 443 UDP (QUIC) → BLOCK | браузер откатится на TCP |
+| 5 | весь остальной UDP → BLOCK | VLESS TCP-only |
+| 6 | TCP → chain-exit / chain-balancer | exit-нода |
+
+Helper используется в 3 местах: single-node (L776), multi-node pinned (L2129),
+multi-node balancer (L2146). **Гарантирует единое поведение**.
+AWG-режим и xHTTP-режим НЕ затронуты (там другая routing-архитектура).
+
+**Когда появился**: коммит `8a037e3c` от 7 июля 2026 (рефакторинг chain_nodes
+в отдельный модуль). **НЕ связан** с коммитом про email/name install prompts
+(`2e14443`, 17 августа 2026).
+
+### Баг #2 (СРЕДНИЙ): старые nginx vhost-файлы не удалялись при смене домена
+
+**Симптом**: при установке поверх (новый домен вместо старого) в
+`/etc/nginx/sites-enabled/` оставались два vhost-а с одинаковым `listen 443` →
+nginx падал с `duplicate listen options for 0.0.0.0:443`, либо один из vhost-ов
+тихо игнорировался.
+
+**Фикс**: создан helper `_cleanup_stale_chimera_vhosts(new_domain)` в
+`nginx_setup.py`. Сканирует `sites-available/` и `sites-enabled/`, находит
+Chimera-конфиги по маркерам (`proxy_protocol`, `/dev/shm/`, `xver`, `realpath`)
+и удаляет те, что не совпадают с новым доменом. Безопасно: не трогает
+`default`, `chimera-portal-nginx`, `chimera-telemt-panel-nginx` и любые чужие
+vhost-ы без Chimera-маркеров.
+
+Вызывается из `setup_nginx_temp` перед созданием нового vhost.
+
+**Когда появился**: изначальный код `nginx_setup.py` (6 июля 2026).
+
+### Баг #3 (СРЕДНИЙ): uninstall.py предлагал снести nginx даже при дефолтном vhost
+
+**Симптом**: пользователь запускал uninstall, в `sites-enabled/` оставался
+только стандартный `default` vhost Ubuntu/Debian, и `other_sites = [default]`
+срабатывал → пользователю предлагали «Полностью удалить nginx?».
+
+**Фикс**: добавлен `"default"` в список исключений `other_sites`. Теперь
+стандартный vhost не считается «другим сайтом», и nginx не предлагается к
+полному удалению, если кроме `default` ничего нет.
+
+**Когда появился**: коммит `89e170e2` от 11 августа 2026 (фикс «не удалять чужие
+nginx-сайты при uninstall»). Иронично — фикс для одной проблемы создал другую.
+
+### Тесты
+
+- `tests/test_chain_nodes.py`: +12 новых тестов для хелпер-функций
+  (`TestChainRoutingRulesHelpers`), обновлены 2 существующих теста.
+- `tests/test_uninstall_nginx_safety.py`: +1 новый тест для `default` в исключениях.
+- `tests/test_nginx_cleanup_stale_vhosts.py`: **новый файл**, 12 тестов для
+  `_cleanup_stale_chimera_vhosts` (включая смешанные сценарии).
+- Всего: 80 тестов OK, `verify.py` 10.0/10 (335 проверок).
+
+### Файлы
+
+- `chimera/modules/chain_nodes.py` — добавлены helpers `_build_chain_routing_rules`
+  и `_build_chain_sniffing`; заменены 3 sniffing блока и 3 routing rules.
+- `chimera/modules/nginx_setup.py` — добавлен helper
+  `_cleanup_stale_chimera_vhosts`; вызывается из `setup_nginx_temp`.
+- `chimera/modules/uninstall.py` — добавлен `"default"` в список исключений.
+- `tests/test_chain_nodes.py` — обновлён, +12 тестов.
+- `tests/test_uninstall_nginx_safety.py` — +1 тест.
+- `tests/test_nginx_cleanup_stale_vhosts.py` — новый файл, 12 тестов.
+
+---
+
 ## FEAT(dpi_bypass): централизованный DPI Bypass (b4) для любых заблокированных ресурсов + автообновление — 18 августа 2026
 
 **Новый модуль `chimera/modules/dpi_bypass.py` — централизованное управление
