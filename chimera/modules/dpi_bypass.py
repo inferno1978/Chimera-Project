@@ -764,6 +764,102 @@ def switch_preset(preset_name: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  XRAY ROUTING — домены set'а → outbound:direct (через b4 на entry)
+# ══════════════════════════════════════════════════════════════════════════
+
+_XRAY_RULE_PREFIX = "chimera-b4-route-"
+
+
+def apply_routing_for_set(set_id: str, domains: list) -> bool:
+    """Добавляет Xray routing-правило: domain:[...] → outbound:direct."""
+    if not domains:
+        return False
+    comment = _XRAY_RULE_PREFIX + set_id
+    xray_domains = [f"domain:{d}" for d in domains]
+    new_rule = {
+        "type": "field",
+        "domain": xray_domains,
+        "outboundTag": "direct",
+        "comment": comment,
+    }
+    written = set()
+    ok = False
+    for cfg_path in (Path("/usr/local/etc/xray/config.json"),
+                     Path("/etc/xray/config.json")):
+        if not cfg_path.exists():
+            continue
+        try:
+            real = str(cfg_path.resolve())
+        except Exception:
+            real = str(cfg_path)
+        if real in written:
+            continue
+        written.add(real)
+        try:
+            cfg = json.loads(cfg_path.read_text())
+            routing = cfg.setdefault("routing", {})
+            rules = routing.setdefault("rules", [])
+            rules = [r for r in rules if r.get("comment") != comment]
+            routing["rules"] = [new_rule] + rules
+            cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+            ok = True
+        except Exception as e:
+            _log("WARN", f"apply_routing_for_set({set_id}): {e}")
+    if ok:
+        _info(f"Xray routing: {len(domains)} доменов set'{set_id}' → direct")
+        subprocess.run(["systemctl", "restart", "xray"],
+                       capture_output=True, check=False)
+        time.sleep(1)
+    return ok
+
+
+def remove_routing_for_set(set_id: str) -> bool:
+    """Удаляет Xray routing-правило для set'а."""
+    comment = _XRAY_RULE_PREFIX + set_id
+    written = set()
+    ok = False
+    for cfg_path in (Path("/usr/local/etc/xray/config.json"),
+                     Path("/etc/xray/config.json")):
+        if not cfg_path.exists():
+            continue
+        try:
+            real = str(cfg_path.resolve())
+        except Exception:
+            real = str(cfg_path)
+        if real in written:
+            continue
+        written.add(real)
+        try:
+            cfg = json.loads(cfg_path.read_text())
+            routing = cfg.get("routing", {})
+            rules = routing.get("rules", [])
+            before = len(rules)
+            rules = [r for r in rules if r.get("comment") != comment]
+            if len(rules) != before:
+                routing["rules"] = rules
+                cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+                ok = True
+        except Exception as e:
+            _log("WARN", f"remove_routing_for_set({set_id}): {e}")
+    if ok:
+        _info(f"Xray routing для set'{set_id}' удалён")
+        subprocess.run(["systemctl", "restart", "xray"],
+                       capture_output=True, check=False)
+        time.sleep(1)
+    return ok
+
+
+def apply_routing_for_all_sets() -> None:
+    """Применяет Xray routing для ВСЕХ set'ов в конфиге b4."""
+    sets = _detect_sets()
+    for s in sets:
+        sid = s.get("id", "")
+        domains = s.get("domains", [])
+        if sid and domains:
+            apply_routing_for_set(sid, domains)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  КАСТОМНЫЕ СЕТЫ (импорт из файла или вставка JSON)
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -827,6 +923,12 @@ def import_custom_set(json_str: str) -> bool:
     _save_state(state)
     name = custom_set.get("name", "custom")
     _ok(f"Кастомный сет «{name}» импортирован, b4 перезапущен")
+    # Применяем Xray routing: домены сета → outbound:direct,
+    # чтобы трафик шёл через entry VPS (где стоит b4), а не через exit.
+    for s in new_sets:
+        domains = s.get("targets", {}).get("sni_domains", [])
+        if domains:
+            apply_routing_for_set(s.get("id", "custom"), domains)
     return True
 
 
