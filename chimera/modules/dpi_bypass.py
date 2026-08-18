@@ -269,6 +269,196 @@ def _save_state(state: dict) -> None:
 #  УСТАНОВКА / УДАЛЕНИЕ B4
 # ══════════════════════════════════════════════════════════════════════════
 
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ДЕТЕКТ УСТАНОВКИ (shared с youtube_b4.py)
+# ══════════════════════════════════════════════════════════════════════════
+def _detect_installed() -> bool:
+    """Проверяет установлен ли b4 (binary + systemd-unit)."""
+    return B4_BINARY_PATH.exists() and B4_UNIT_PATH.exists()
+
+
+def _detect_service_active() -> bool:
+    """Проверяет запущен ли сервис b4."""
+    r = subprocess.run(["systemctl", "is-active", "b4"],
+                       capture_output=True, text=True, check=False)
+    return (r.returncode == 0 and r.stdout.strip() == "active")
+
+
+def _detect_version() -> str:
+    """Получает версию установленного b4 binary."""
+    if not B4_BINARY_PATH.exists():
+        return ""
+    try:
+        r = subprocess.run([str(B4_BINARY_PATH), "--version"],
+                           capture_output=True, text=True, check=False, timeout=5)
+        m = re.search(r'B4 version:\s*(\S+)', r.stdout)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+
+def _detect_latest_version() -> str:
+    """Проверяет последнюю версию b4 на GitHub."""
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/DanielLavrushin/b4/releases/latest",
+            headers={"User-Agent": "chimera-installer/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        tag = data.get("tag_name", "")
+        if tag.startswith("v"):
+            tag = tag[1:]
+        return tag
+    except Exception as e:
+        _log("WARN", f"check_latest_version: {e}")
+        return ""
+
+
+def _detect_sets() -> list:
+    """Читает текущие set'ы из config.json b4."""
+    if not B4_CONFIG_FILE.exists():
+        return []
+    try:
+        cfg = json.loads(B4_CONFIG_FILE.read_text())
+        sets = cfg.get("sets", [])
+        result = []
+        for s in sets:
+            result.append({
+                "id":       s.get("id", "?"),
+                "name":     s.get("name", "?"),
+                "enabled":  s.get("enabled", True),
+                "domains":  s.get("targets", {}).get("sni_domains", []),
+                "sni_type": s.get("faking", {}).get("sni_type", ""),
+            })
+        return result
+    except Exception:
+        return []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  АВТООБНОВЛЕНИЕ B4 BINARY
+# ══════════════════════════════════════════════════════════════════════════
+def auto_update() -> dict:
+    """Проверяет и обновляет b4 binary до последней версии.
+
+    1. Проверка GitHub API → последняя версия.
+    2. Сравнение с установленной.
+    3. Скачать → SHA256 → stop → backup → replace → start → verify.
+    4. Конфиг и set'ы НЕ затрагиваются.
+    """
+    if not _detect_installed():
+        return {"updated": False, "message": "b4 не установлен"}
+
+    old_version = _detect_version()
+    latest = _detect_latest_version()
+    if not latest:
+        return {"updated": False, "old_version": old_version,
+                "message": "Не удалось проверить последнюю версию"}
+
+    if old_version == latest:
+        return {"updated": False, "old_version": old_version,
+                "new_version": latest, "message": f"Уже актуальная версия {old_version}"}
+
+    _info(f"Обновление: {old_version} → {latest}")
+
+    arch = _detect_arch()
+    if not arch:
+        return {"updated": False, "message": "Неподдерживаемая архитектура"}
+    url = f"https://github.com/DanielLavrushin/b4/releases/download/v{latest}/b4-linux-{arch}.tar.gz"
+    tmp_tar = Path("/tmp/b4-update.tar.gz")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "chimera-installer/5.0"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            tmp_tar.write_bytes(resp.read())
+    except Exception as e:
+        return {"updated": False, "message": f"Скачивание не удалось: {e}"}
+
+    # SHA256 проверка.
+    sha_url = url + ".sha256"
+    try:
+        req = urllib.request.Request(sha_url, headers={"User-Agent": "chimera-installer/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            expected_sha = resp.read().decode().strip().split()[0]
+        import hashlib
+        actual_sha = hashlib.sha256(tmp_tar.read_bytes()).hexdigest()
+        if expected_sha and actual_sha != expected_sha:
+            tmp_tar.unlink(missing_ok=True)
+            return {"updated": False, "message": f"SHA256 mismatch"}
+        _ok(f"SHA256 проверен: {actual_sha[:16]}...")
+    except Exception:
+        _warn("SHA256 файл недоступен — пропуск проверки")
+
+    # Распаковать.
+    extract_dir = Path("/tmp/b4-update-extract")
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    try:
+        with tarfile.open(tmp_tar, "r:gz") as tf:
+            tf.extractall(path=extract_dir)
+    except Exception as e:
+        tmp_tar.unlink(missing_ok=True)
+        return {"updated": False, "message": f"Распаковка не удалось: {e}"}
+
+    new_binary = extract_dir / "b4"
+    if not new_binary.exists():
+        tmp_tar.unlink(missing_ok=True)
+        return {"updated": False, "message": "В архиве нет b4 binary"}
+
+    # Остановить сервис.
+    _info("Останавливаю b4...")
+    subprocess.run(["systemctl", "stop", "b4"], capture_output=True, check=False)
+
+    # Backup + replace.
+    backup_path = B4_BINARY_PATH.with_suffix(".bak")
+    try:
+        shutil.copy2(B4_BINARY_PATH, backup_path)
+    except Exception:
+        pass
+    try:
+        shutil.copy2(new_binary, B4_BINARY_PATH)
+        B4_BINARY_PATH.chmod(0o755)
+    except Exception as e:
+        if backup_path.exists():
+            shutil.copy2(backup_path, B4_BINARY_PATH)
+            B4_BINARY_PATH.chmod(0o755)
+        return {"updated": False, "message": f"Замена binary не удалась: {e}"}
+
+    # Запустить + проверить.
+    _info("Запускаю b4...")
+    subprocess.run(["systemctl", "start", "b4"], capture_output=True, check=False)
+    time.sleep(2)
+
+    if not _detect_service_active():
+        _err("Новая версия не запустилась — восстанавливаю предыдущую...")
+        subprocess.run(["systemctl", "stop", "b4"], capture_output=True, check=False)
+        if backup_path.exists():
+            shutil.copy2(backup_path, B4_BINARY_PATH)
+            B4_BINARY_PATH.chmod(0o755)
+        subprocess.run(["systemctl", "start", "b4"], capture_output=True, check=False)
+        time.sleep(2)
+        return {"updated": False, "old_version": old_version,
+                "message": "Новая версия не запустилась — восстановлена предыдущая"}
+
+    # Обновить state.
+    new_version = _detect_version()
+    state = _load_state()
+    state["version"] = new_version
+    _save_state(state)
+
+    # Cleanup.
+    backup_path.unlink(missing_ok=True)
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    tmp_tar.unlink(missing_ok=True)
+
+    _ok(f"b4 обновлён: {old_version} → {new_version}")
+    _info("Конфиг и set'ы сохранены без изменений.")
+    return {"updated": True, "old_version": old_version,
+            "new_version": new_version,
+            "message": f"Обновлено: {old_version} → {new_version}"}
+
 def _detect_arch() -> str:
     """Возвращает 'amd64' / 'arm64' / 'armv7' / '386' / etc."""
     r = subprocess.run(["uname", "-m"], capture_output=True, text=True)
@@ -1119,10 +1309,10 @@ def do_dpi_bypass_menu() -> None:
                 _box_item("1", "🚀 Запустить b4")
             _box_item("2", "🔄 Переключить preset")
             _box_item("3", "📥 Импортировать кастомный сет (JSON)")
-            _box_item("4", "🔍 Discovery (автоподбор сета под провайдера)")
-            _box_item("5", "🏥 Health check YouTube (работает ли?)")
-            _box_item("6", "📋 Логи b4 (последние 30 строк)")
-            _box_item("7", "🌐 Открыть Web UI (SSH-туннель инструкция)")
+            _box_item("4", "🔍 Discovery (автоподбор сета)")
+            _box_item("5", "🔄 Проверить обновление b4")
+            _box_item("6", "🏥 Health check (работают ли сайты?)")
+            _box_item("7", "📋 Логи b4 (последние 30 строк)")
             # nginx front (TLS) для прямого доступа к Web UI из браузера.
             ng_st = _b4_nginx_status()
             if ng_st.get("enabled"):
@@ -1219,7 +1409,17 @@ def do_dpi_bypass_menu() -> None:
             input(f"\n{BOLD}Enter…{NC}")
 
         elif s["installed"] and ch == "5":
-            _info("Проверяю YouTube (3 запроса, до 30с)...")
+            # Автообновление b4.
+            _info("Проверяю обновления...")
+            result = auto_update()
+            if result.get("updated"):
+                _ok(result["message"])
+            else:
+                _info(result["message"])
+            input(f"\n{BOLD}Enter…{NC}")
+
+        elif s["installed"] and ch == "6":
+            _info("Проверяю сайты (до 30с)...")
             result = health_check_youtube()
             for t in result["targets"]:
                 col = GREEN if t["ok"] else RED
