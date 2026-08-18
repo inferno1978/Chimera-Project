@@ -966,7 +966,7 @@ def get_admin_info() -> dict:
 #  TUI-МЕНЮ
 # ══════════════════════════════════════════════════════════════════════════
 
-def do_youtube_b4_menu() -> None:
+def do_dpi_bypass_menu() -> None:
     """TUI-меню управления b4 для YouTube DPI bypass."""
     while True:
         os.system("clear")
