@@ -7381,7 +7381,7 @@ def _menu_network() -> None:
         _box_item("P", f"🧪 Постквантовый VLESS  {DIM}(экспериментально, отдельный порт){NC}")
         _box_sep()
         _box_item("Y", f"📺 YouTube через RU  {DIM}(geosite:youtube → direct/exit toggle){NC}")
-        _box_item("D", f"🛡 DPI Bypass (b4)  {DIM}(централизованный, для любых заблокированных ресурсов){NC}")
+        _box_item("B", f"🛡 DPI Bypass (b4)  {DIM}(централизованный, для любых заблокированных ресурсов){NC}")
         _box_sep()
         _box_item("H", f"🚀 Hysteria2 транспорт  {DIM}(Режим B, Exit-нода, Балансировщик, DPI){NC}")
         _box_row()
@@ -7503,7 +7503,7 @@ def _menu_network() -> None:
             except ImportError as e:
                 warn(f"Модуль youtube_route не найден: {e}")
                 time.sleep(2)
-        elif ch.lower() == "d":
+        elif ch.lower() == "b":
             # DPI Bypass (b4) — централизованный, для любых заблокированных ресурсов.
             try:
                 from chimera.modules.dpi_bypass import do_dpi_bypass_menu
