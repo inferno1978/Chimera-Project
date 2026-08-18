@@ -1161,6 +1161,8 @@ def do_manage_youtube_via_ru() -> None:
         _is_cur_warp = (current_target == "warp")
         _marker = "● " if _is_cur_warp else "  "
         _box_item("W", f"{_marker}YouTube через ☁️ WARP (Cloudflare)")
+        _box_row
+        _box_item("B", "📺 b4 (DPI bypass на entry) {DIM}(fake SNI + фрагментация){NC}")
         _box_row()
         _box_item("Q", f"{DIM}Назад{NC}")
         _box_bottom()
@@ -1278,7 +1280,7 @@ def do_manage_youtube_via_ru() -> None:
         _box_bottom()
 
         try:
-            ch = input(f"{CYAN}  Выбор [1/2/F/W/Q]:{NC} ").strip().lower()
+            ch = input(f"{CYAN}  Выбор [1/2/F/W/B/Q]:{NC} ").strip().lower()
         except KeyboardInterrupt:
             print()
             return
@@ -1342,6 +1344,16 @@ def do_manage_youtube_via_ru() -> None:
                 _box_info(f"  {_msg}")
             else:
                 _box_warn(f"  {_msg}")
+        elif ch == "b":
+            # b4 (DPI bypass для YouTube на entry VPS)
+            try:
+                from chimera.modules.youtube_b4 import do_youtube_b4_menu
+                do_youtube_b4_menu()
+            except ImportError as _e:
+                _box_warn(f"  Модуль youtube_b4 не найден: {_e}")
+            except Exception as _e:
+                _box_warn(f"  Ошибка: {_e}")
+            return
         else:
             return
 
