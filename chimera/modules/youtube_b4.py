@@ -433,6 +433,17 @@ def _iptables_apply() -> bool:
          "-m", "comment", "--comment", B4_IPT_COMMENT + "-dns"],
         capture_output=True, check=False,
     )
+    # Правило 3: QUIC (UDP/443) — браузеры пробуют QUIC первым для YouTube.
+    # Без этого правила QUIC bypass-ит b4 и ТСПУ блокирует → "Нет подключения".
+    # b4 умеет обрабатывать QUIC (fake QUIC Initial, sni_type работает для QUIC).
+    subprocess.run(
+        ["iptables", "-t", "mangle", "-A", "b4_mangle",
+         "-p", "udp", "--dport", "443",
+         "-m", "mark", "!", "--mark", str(B4_MARK),
+         "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
+         "-m", "comment", "--comment", B4_IPT_COMMENT + "-quic"],
+        capture_output=True, check=False,
+    )
 
     # Добавляем jump из OUTPUT в b4_mangle (если ещё нет).
     r = subprocess.run(
@@ -447,7 +458,7 @@ def _iptables_apply() -> bool:
 
     _ok("iptables mangle правила применены")
     _info(f"  Chain: mangle → b4_mangle → NFQUEUE {B4_QUEUE_NUM}")
-    _info(f"  Target: tcp dport 443 + udp dport 53 (исходящий)")
+    _info(f"  Target: tcp dport 443 + udp dport 53 + udp dport 443 (QUIC)")
     _info(f"  Mark: {B4_MARK} (исключает пакеты самого b4 из ре-queue)")
     return True
 
