@@ -697,12 +697,24 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
         # balancers должен отсутствовать или быть пустым
         balancers = cfg.get("routing", {}).get("balancers", [])
         self.assertEqual(balancers, [])
-        # routing rule с tcp,udp → outboundTag=chain-exit-1
+        # FIX: catch-all теперь только TCP (VLESS REALITY не туннелирует UDP).
+        # Проверяем что TCP-правило ссылается на chain-exit-1.
         rules = cfg["routing"]["rules"]
-        rr_rule = next((r for r in rules
-                        if "tcp,udp" in r.get("network", "")), None)
-        self.assertIsNotNone(rr_rule, "Должно быть routing-правило для tcp,udp")
-        self.assertEqual(rr_rule["outboundTag"], "chain-exit-1")
+        tcp_rule = next((r for r in rules
+                         if r.get("network") == "tcp"), None)
+        self.assertIsNotNone(tcp_rule, "Должно быть TCP catch-all правило")
+        self.assertEqual(tcp_rule["outboundTag"], "chain-exit-1")
+        # Дополнительно: UDP-трафик должен блокироваться (VLESS TCP-only)
+        udp_block_rule = next((r for r in rules
+                                if r.get("network") == "udp"
+                                and r.get("outboundTag") == "BLOCK"), None)
+        self.assertIsNotNone(udp_block_rule,
+                             "Должно быть правило блокировки UDP")
+        # DNS (порт 53) → direct (резолвится через DNSCrypt на entry)
+        dns_rule = next((r for r in rules
+                         if r.get("port") == "53"), None)
+        self.assertIsNotNone(dns_rule,
+                             "Должно быть правило для DNS (порт 53)")
         # observatory не нужен для 1 ноды
         self.assertNotIn("observatory", cfg)
 
@@ -728,12 +740,24 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
         self.assertIn("observatory", cfg)
         self.assertEqual(cfg["observatory"]["probeUrl"],
                          "https://1.1.1.1/cdn-cgi/trace")
-        # Routing rule → balancerTag, не outboundTag
+        # FIX: catch-all теперь только TCP (VLESS REALITY не туннелирует UDP).
+        # Проверяем что TCP-правило ссылается на balancerTag, не outboundTag.
         rules = cfg["routing"]["rules"]
-        rr_rule = next((r for r in rules
-                        if "tcp,udp" in r.get("network", "")))
-        self.assertIn("balancerTag", rr_rule)
-        self.assertEqual(rr_rule["balancerTag"], "chain-balancer")
+        tcp_rule = next((r for r in rules
+                         if r.get("network") == "tcp"), None)
+        self.assertIsNotNone(tcp_rule, "Должно быть TCP catch-all правило")
+        self.assertIn("balancerTag", tcp_rule)
+        self.assertEqual(tcp_rule["balancerTag"], "chain-balancer")
+        # Дополнительно: должны быть правила для блокировки UDP и DNS→direct
+        udp_block_rule = next((r for r in rules
+                                if r.get("network") == "udp"
+                                and r.get("outboundTag") == "BLOCK"), None)
+        self.assertIsNotNone(udp_block_rule,
+                             "Должно быть правило блокировки UDP")
+        dns_rule = next((r for r in rules
+                         if r.get("port") == "53"), None)
+        self.assertIsNotNone(dns_rule,
+                             "Должно быть правило для DNS (порт 53)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -883,6 +907,156 @@ class TestResolveHostFresh(unittest.TestCase):
                    side_effect=socket.gaierror("DNS fail")):
             result = chain_nodes._resolve_host_fresh("nonexistent.invalid")
         self.assertIsNone(result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  _build_chain_routing_rules + _build_chain_sniffing — единые хелперы
+#  для VLESS REALITY TCP каскада (FIX: раньше catch-all был tcp,udp → обрыв UDP)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestChainRoutingRulesHelpers(unittest.TestCase):
+    """_build_chain_routing_rules и _build_chain_sniffing — структура правил.
+
+    FIX (commit): раньше catch-all было {"network": "tcp,udp", "outboundTag": "chain-exit"},
+    что рвало UDP-трафик (VLESS REALITY TCP-only). Теперь:
+      - DNS (порт 53) → direct
+      - QUIC (UDP:443) → BLOCK (браузер откатится на TCP)
+      - Весь остальной UDP → BLOCK
+      - Только TCP → chain-exit / chain-balancer
+    """
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+
+    def test_build_chain_routing_rules_single_node_uses_outbound_tag(self):
+        """Single-node: catch-all rule имеет outboundTag, не balancerTag."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-1")
+        # Последнее правило — TCP catch-all
+        tcp_rule = rules[-1]
+        self.assertEqual(tcp_rule["network"], "tcp")
+        self.assertEqual(tcp_rule["outboundTag"], "chain-exit-1")
+        self.assertNotIn("balancerTag", tcp_rule)
+
+    def test_build_chain_routing_rules_balancer_uses_balancer_tag(self):
+        """Balancer mode: catch-all rule имеет balancerTag, не outboundTag."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-balancer",
+                                                        balancer=True)
+        tcp_rule = rules[-1]
+        self.assertEqual(tcp_rule["network"], "tcp")
+        self.assertEqual(tcp_rule["balancerTag"], "chain-balancer")
+        self.assertNotIn("outboundTag", tcp_rule)
+
+    def test_build_chain_routing_rules_has_loopback_direct(self):
+        """loopback (127.0.0.1/8, ::1/128) → direct — для DNSCrypt."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-1")
+        loopback_rule = next(
+            (r for r in rules
+             if "127.0.0.1/8" in r.get("ip", [])),
+            None
+        )
+        self.assertIsNotNone(loopback_rule)
+        self.assertEqual(loopback_rule["outboundTag"], "direct")
+
+    def test_build_chain_routing_rules_has_bittorrent_block(self):
+        """bittorrent → BLOCK."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-1")
+        bt_rule = next(
+            (r for r in rules
+             if "bittorrent" in r.get("protocol", [])),
+            None
+        )
+        self.assertIsNotNone(bt_rule)
+        self.assertEqual(bt_rule["outboundTag"], "BLOCK")
+
+    def test_build_chain_routing_rules_dns_port_53_to_direct(self):
+        """DNS (порт 53) → direct (резолвится через DNSCrypt на entry)."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-1")
+        dns_rule = next(
+            (r for r in rules if r.get("port") == "53"),
+            None
+        )
+        self.assertIsNotNone(dns_rule)
+        self.assertEqual(dns_rule["network"], "tcp,udp")
+        self.assertEqual(dns_rule["outboundTag"], "direct")
+
+    def test_build_chain_routing_rules_quic_443_udp_to_block(self):
+        """QUIC (UDP:443) → BLOCK — браузер откатится на TCP/HTTP2."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-1")
+        quic_rule = next(
+            (r for r in rules
+             if r.get("port") == "443" and r.get("network") == "udp"),
+            None
+        )
+        self.assertIsNotNone(quic_rule)
+        self.assertEqual(quic_rule["outboundTag"], "BLOCK")
+
+    def test_build_chain_routing_rules_udp_all_to_block(self):
+        """Весь остальной UDP → BLOCK (VLESS REALITY TCP-only)."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-1")
+        udp_block_rule = next(
+            (r for r in rules
+             if r.get("network") == "udp"
+             and r.get("outboundTag") == "BLOCK"
+             and "port" not in r),
+            None
+        )
+        self.assertIsNotNone(udp_block_rule)
+
+    def test_build_chain_routing_rules_no_tcp_udp_catchall(self):
+        """FIX: НЕ должно быть catch-all правила {network: 'tcp,udp'} без port.
+        Старый баг: catch-all матчил весь UDP и рвал его (VLESS TCP-only).
+        Теперь 'tcp,udp' разрешено ТОЛЬКО для конкретного порта (DNS:53).
+        """
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-1")
+        for r in rules:
+            if r.get("network") == "tcp,udp":
+                # Допустимо только с явным портом (например, DNS:53)
+                self.assertIn("port", r,
+                              f"Правило {r} не должно быть catch-all "
+                              f"(tcp,udp без port) — это рвало UDP-трафик")
+
+    def test_build_chain_routing_rules_order_loopback_first(self):
+        """loopback → direct должно быть ПЕРВЫМ правилом (Xray резолвит
+        через DNSCrypt на 127.0.0.1:5300, должен матчится раньше catch-all).
+        """
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-1")
+        self.assertIn("127.0.0.1/8", rules[0].get("ip", []))
+        self.assertEqual(rules[0]["outboundTag"], "direct")
+
+    def test_build_chain_routing_rules_order_tcp_catchall_last(self):
+        """TCP catch-all должно быть ПОСЛЕДНИМ правилом (матчиться по умолчанию)."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-1")
+        self.assertEqual(rules[-1]["network"], "tcp")
+
+    def test_build_chain_sniffing_default(self):
+        """sniffing без AWG: destOverride содержит http, tls, quic;
+        metadataOnly=False (xray должен читать SNI/Host).
+        """
+        from chimera.modules import chain_nodes
+        sn = chain_nodes._build_chain_sniffing(awg=False)
+        self.assertTrue(sn["enabled"])
+        self.assertIn("http", sn["destOverride"])
+        self.assertIn("tls", sn["destOverride"])
+        self.assertIn("quic", sn["destOverride"])
+        self.assertFalse(sn["metadataOnly"])
+        self.assertFalse(sn["routeOnly"])
+
+    def test_build_chain_sniffing_awg(self):
+        """sniffing с AWG: metadataOnly=True (routing через ядро)."""
+        from chimera.modules import chain_nodes
+        sn = chain_nodes._build_chain_sniffing(awg=True)
+        self.assertTrue(sn["enabled"])
+        self.assertIn("quic", sn["destOverride"])
+        self.assertTrue(sn["metadataOnly"])
 
 
 if __name__ == "__main__":

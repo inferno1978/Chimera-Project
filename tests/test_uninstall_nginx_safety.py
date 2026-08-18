@@ -189,6 +189,17 @@ class TestUninstallNginxLogic(unittest.TestCase):
         self.assertIn("other_sites", self.src,
                       "uninstall.py должен проверять other_sites")
 
+    def test_default_vhost_not_treated_as_other_site(self):
+        """FIX: 'default' vhost (стандартный vhost Ubuntu/Debian) НЕ должен
+        считаться «другим сайтом» — иначе пользователю предлагали полностью
+        снести nginx даже если кроме default'а ничего нет.
+        """
+        # Проверяем что 'default' есть в списке исключений other_sites.
+        # Контекст: в исходнике должно быть "default" в tuple/list исключений.
+        self.assertIn('"default"', self.src,
+                      "uninstall.py должен включать 'default' в список "
+                      "исключений other_sites (стандартный vhost Ubuntu/Debian)")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

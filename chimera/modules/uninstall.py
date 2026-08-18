@@ -212,9 +212,14 @@ def do_uninstall() -> None:
     sites_enabled = Path("/etc/nginx/sites-enabled")
     other_sites = []
     if sites_enabled.exists():
+        # FIX: 'default' добавлен в список исключений. Раньше стандартный
+        # vhost Ubuntu/Debian считался «другим сайтом», и пользователю
+        # предлагали полностью снести nginx — даже если кроме default'а
+        # ничего нет. Теперь default не считается «другим сайтом».
         other_sites = [f for f in sites_enabled.iterdir()
                        if f.name not in ("chimera-portal-nginx",
                                           "chimera-telemt-panel-nginx",
+                                          "default",
                                           uninst_domain)
                        and not f.name.startswith(".")]
 
