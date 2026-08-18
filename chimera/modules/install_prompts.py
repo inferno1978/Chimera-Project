@@ -414,7 +414,7 @@ def prompt_parameters() -> None:
             warn("   Домен не может быть пустым")
             continue
         if re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*\.[a-zA-Z]{2,}$', v):
-            PARAM_DOMAIN = v
+            PARAM_DOMAIN = v.lower()  # DNS нечувствителен к регистру — нормализуем
             setattr(core, "PARAM_DOMAIN", PARAM_DOMAIN)
             success(f"   Домен: {PARAM_DOMAIN}")
             break
