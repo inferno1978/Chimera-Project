@@ -341,7 +341,13 @@ def _write_default_config() -> bool:
         "sets": [youtube_set],
         # Дополнительные поля для Chimera-специфики:
         "routing": {"enabled": False},  # Не SOCKS5-upstream — direct bypass
-        "udp": {"mode": "fake"},
+        "udp": {
+            "mode": "fake",              # fake UDP packets (b4 default)
+            "filter_quic": "block",      # Блокировать QUIC (UDP/443) — браузер
+                                         # откатывается на TCP/HTTP2, где b4
+                                         # применяет fake SNI + фрагментацию.
+                                         # Без этого QUIC bypass-ит DPI bypass.
+        },
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     B4_CONFIG_FILE.chmod(0o644)
@@ -742,7 +748,10 @@ def switch_preset(preset_name: str) -> bool:
     config = {
         "sets": [new_set],
         "routing": {"enabled": False},
-        "udp": {"mode": "fake"},
+        "udp": {
+            "mode": "fake",
+            "filter_quic": "block",  # Блокировать QUIC — браузер на TCP/HTTP2.
+        },
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     # Перезапускаем сервис.
@@ -1135,13 +1144,12 @@ def do_youtube_b4_menu() -> None:
                 raw = r.stdout or "(пусто)"
             except Exception as e:
                 raw = f"Ошибка: {e}"
-            # Усечение строк по ширине рамки.
+            # Усечение строк по ширине рамки (через _box_row — не ломает границы).
             from chimera.modules.box_renderer import _get_box_width as _gw
-            _w = _gw() - 2  # -2 для отступа внутри рамки
+            _w = _gw() - 4  # -4 для отступа "  " + запас
             for line in raw.splitlines():
-                # Усекаем длинные строки.
                 _line = line if len(line) <= _w else line[:_w-3] + "..."
-                print(f"  {DIM}{_line}{NC}")
+                _box_row(f"  {DIM}{_line}{NC}")
             _box_row()
             _box_row(f"  {DIM}Полные логи:{NC}")
             _box_row(f"    {CYAN}journalctl -u b4 -f{NC}  {DIM}(live режим){NC}")
