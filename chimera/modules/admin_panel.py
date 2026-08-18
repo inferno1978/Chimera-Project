@@ -346,6 +346,16 @@ tr:hover { background: rgba(56,189,248,0.05); }
     </table>
   </div>
 
+  <!-- b4 section (YouTube DPI bypass на entry) -->
+  <div class="table-card" id="b4-section">
+    <h2>📺 b4 (YouTube DPI) <button class="btn btn-sm btn-primary" onclick="loadB4()">↻</button> <button class="btn btn-sm btn-primary" onclick="healthCheckB4()">🏥 Health</button></h2>
+    <div id="b4-admin-status" style="margin-bottom:16px">
+      <div class="loading"><span class="spinner"></span></div>
+    </div>
+    <div id="b4-actions" style="margin-bottom:16px"></div>
+    <div id="b4-logs" style="max-height:300px; overflow-y:auto; background:rgba(15,23,42,0.5); border-radius:8px; padding:12px; font-family:monospace; font-size:0.78rem; color:#94a3b8; display:none"></div>
+  </div>
+
   <!-- AmneziaWG section -->
   <div class="table-card" id="awg-section">
     <h2>🛡 AmneziaWG <button class="btn btn-sm btn-primary" onclick="loadAWG()">↻</button></h2>
@@ -1136,9 +1146,154 @@ async function loadSubscription() {
     </tr>`).join('');
 }
 
+// ── b4 (YouTube DPI bypass) management ─────────────────────────────
+async function loadB4() {
+  const statusEl = document.getElementById('b4-admin-status');
+  const actionsEl = document.getElementById('b4-actions');
+  const logsEl = document.getElementById('b4-logs');
+  const data = await api('/api/b4/info');
+  if (!data || data.error) {
+    statusEl.innerHTML = '<span style="color:#f87171">Ошибка загрузки b4</span>';
+    actionsEl.innerHTML = '';
+    logsEl.style.display = 'none';
+    return;
+  }
+
+  if (!data.installed) {
+    statusEl.innerHTML = '<span style="color:#94a3b8">● b4 не установлен</span><br><span style="opacity:0.7;font-size:0.85rem">DPI bypass для YouTube на entry VPS</span>';
+    actionsEl.innerHTML = '<button class="btn btn-primary" onclick="installB4()">🚀 Установить b4</button>';
+    logsEl.style.display = 'none';
+    return;
+  }
+
+  const svc = data.service_active
+    ? '<span style="color:#4ade80">● active</span>'
+    : '<span style="color:#f87171">● stopped</span>';
+  const preset = data.active_preset || '—';
+  const presets = data.presets || [];
+  let presetOptions = presets.map(p => `<option value="${{p.name}}" ${{p.name === preset ? 'selected' : ''}}>${{esc(p.label)}}</option>`).join('');
+
+  statusEl.innerHTML = `<div style="font-size:0.9rem">
+    ${{svc}} &nbsp;·&nbsp; v${{esc(data.version || '?')}} &nbsp;·&nbsp;
+    Preset: <strong>${{esc(preset)}}</strong> &nbsp;·&nbsp;
+    Queue: ${{data.queue_num}} &nbsp;·&nbsp; Web: <a href="http://127.0.0.1:${{data.web_port}}" target="_blank" style="color:#38bdf8">:${{data.web_port}}</a>
+  </div>`;
+
+  actionsEl.innerHTML = `
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+      ${{data.service_active
+        ? '<button class="btn btn-ghost" onclick="disableB4()">🛑 Остановить</button>'
+        : '<button class="btn btn-primary" onclick="enableB4()">🚀 Запустить</button>'}}
+      <select id="b4-preset-select" style="padding:8px 12px; background:rgba(15,23,42,0.6); border:1px solid var(--border); border-radius:8px; color:var(--text)">
+        ${{presetOptions}}
+      </select>
+      <button class="btn btn-ghost" onclick="switchPresetB4()">🔄 Применить preset</button>
+      <button class="btn btn-ghost" onclick="runDiscoveryB4()">🔍 Discovery</button>
+      <button class="btn btn-ghost" onclick="toggleB4Logs()">📋 Логи</button>
+      <button class="btn btn-danger" onclick="uninstallB4()">🗑️ Удалить</button>
+    </div>`;
+
+  if (data.logs && data.logs.length > 0) {
+    logsEl.textContent = data.logs.join('\\n');
+  } else {
+    logsEl.textContent = '(нет логов)';
+  }
+}
+
+async function installB4() {
+  if (!confirm('Установить b4? Будет скачан binary (~7MB), создан конфиг + systemd-unit + iptables mangle правила.')) return;
+  showToast('Устанавливаю b4... (до 60с)');
+  const res = await api('/api/b4/install', 'POST', {});
+  if (res && res.status === 'installed') {
+    showToast('b4 установлен!');
+    loadB4();
+  } else {
+    showToast((res && res.error) || 'Ошибка установки', 'error');
+  }
+}
+
+async function uninstallB4() {
+  if (!confirm('Удалить b4 полностью? Binary + конфиг + iptables правила будут удалены.')) return;
+  const res = await api('/api/b4/uninstall', 'POST', {});
+  if (res && res.status === 'uninstalled') {
+    showToast('b4 удалён');
+    loadB4();
+  } else {
+    showToast('Ошибка', 'error');
+  }
+}
+
+async function enableB4() {
+  const res = await api('/api/b4/enable', 'POST', {});
+  if (res && res.status === 'enabled') {
+    showToast('b4 запущен');
+    loadB4();
+  } else {
+    showToast('Ошибка запуска', 'error');
+  }
+}
+
+async function disableB4() {
+  if (!confirm('Остановить b4? YouTube DPI bypass будет отключён (без удаления).')) return;
+  const res = await api('/api/b4/disable', 'POST', {});
+  if (res && res.status === 'disabled') {
+    showToast('b4 остановлен');
+    loadB4();
+  } else {
+    showToast('Ошибка', 'error');
+  }
+}
+
+async function switchPresetB4() {
+  const sel = document.getElementById('b4-preset-select');
+  if (!sel) return;
+  const preset = sel.value;
+  const res = await api('/api/b4/preset', 'POST', { preset });
+  if (res && res.status === 'switched') {
+    showToast('Preset переключён: ' + preset);
+    loadB4();
+  } else {
+    showToast('Ошибка', 'error');
+  }
+}
+
+async function runDiscoveryB4() {
+  if (!confirm('Запустить Discovery? b4 автоматически подберёт рабочий сет под текущего провайдера (до 60с).')) return;
+  showToast('Discovery запущен...');
+  const res = await api('/api/b4/discovery', 'POST', {});
+  if (res && !res.error) {
+    showToast('Discovery завершён');
+    loadB4();
+  } else {
+    showToast((res && res.error) || 'Discovery failed', 'error');
+  }
+}
+
+async function healthCheckB4() {
+  showToast('Проверяю YouTube (до 30с)...');
+  const res = await api('/api/b4/health');
+  if (!res || res.error) {
+    showToast('Ошибка проверки', 'error');
+    return;
+  }
+  const targets = res.targets || [];
+  let msg = targets.map(t => `${{t.target}}: ${{t.ok ? '✓' : '✗'}}`).join(' | ');
+  if (res.all_ok) {
+    showToast('✓ YouTube работает! ' + msg, 'success');
+  } else {
+    showToast('✗ Часть целей недоступна: ' + msg, 'error');
+  }
+}
+
+function toggleB4Logs() {
+  const el = document.getElementById('b4-logs');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
 loadHealth();
 loadUsers();
 loadSatellites();
+loadB4();
 loadSubscription();
 loadAWG();
 setInterval(loadHealth, 30000); // обновление каждые 30с

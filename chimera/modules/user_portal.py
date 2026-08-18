@@ -449,6 +449,7 @@ body {{
       <button class="tab" data-tab="subscription" id="tab-subscription" style="display:none" onclick="switchTab('subscription')">📚 Подписка</button>
       <button class="tab" data-tab="awg" id="tab-awg" style="display:none" onclick="switchTab('awg')">🛡 AmneziaWG</button>
       <button class="tab" data-tab="satellites" id="tab-satellites" style="display:none" onclick="switchTab('satellites')">🛰 Сателлиты</button>
+      <button class="tab" data-tab="b4" id="tab-b4" style="display:none" onclick="switchTab('b4')">📺 YouTube DPI</button>
       <button class="tab" data-tab="traffic" onclick="switchTab('traffic')">📊 Трафик</button>
       <button class="tab" data-tab="system" onclick="switchTab('system')">🖥 Сервер</button>
       <button class="tab" data-tab="downloads" onclick="switchTab('downloads')">📥 Конфиги</button>
@@ -492,6 +493,16 @@ body {{
     <div class="card" id="sat-card" style="display:none">
       <div class="card-title">🛰 Сателлиты</div>
       <div id="sat-container">
+        <div class="loading"><span class="spinner"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB: YouTube DPI (b4 status — read-only для юзера) -->
+  <div class="tab-panel" id="panel-b4">
+    <div class="card" id="b4-card" style="display:none">
+      <div class="card-title">📺 YouTube DPI Bypass</div>
+      <div id="b4-container">
         <div class="loading"><span class="spinner"></span></div>
       </div>
     </div>
@@ -1219,6 +1230,55 @@ async function unbindSatellite(satellite) {{
   }}
 }}
 
+// ── Load YouTube DPI bypass (b4) status ─────────────────────────────
+async function loadB4() {{
+  let data;
+  try {{
+    data = await api('/api/portal/b4-info');
+  }} catch (e) {{ return; }}
+  if (!data) return;
+
+  const card = document.getElementById('b4-card');
+  const container = document.getElementById('b4-container');
+  const b4Tab = document.getElementById('tab-b4');
+
+  if (!data.installed) {{
+    // b4 не установлен — скрываем таб (нечего показывать юзеру).
+    if (card) card.style.display = 'none';
+    if (b4Tab) b4Tab.style.display = 'none';
+    return;
+  }}
+
+  // Показываем таб.
+  if (card) card.style.display = 'block';
+  if (b4Tab) b4Tab.style.display = '';
+
+  const statusColor = data.active ? 'var(--green)' : 'var(--red)';
+  const statusText = data.active ? '✓ активен' : '✗ остановлен';
+  const presetLabel = data.preset_label || data.preset || '—';
+
+  container.innerHTML = `
+    <div style="padding:16px; background:rgba(15,23,42,0.5); border-radius:10px; border:1px solid var(--border); margin-bottom:16px">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px">
+        <div>
+          <div style="font-size:1rem; font-weight:600">Статус: <span style="color:${{statusColor}}">${{statusText}}</span></div>
+          <div style="font-size:0.85rem; color:var(--text-dim); margin-top:4px">Preset: ${{presetLabel}}</div>
+        </div>
+        <div style="font-size:2rem">${{data.active ? '🟢' : '🔴'}}</div>
+      </div>
+    </div>
+    <div style="padding:14px; background:rgba(56,189,248,0.08); border-radius:10px; border:1px solid var(--border); font-size:0.85rem; color:var(--text-dim); line-height:1.7">
+      <strong style="color:var(--accent-light)">📺 Что это даёт:</strong><br>
+      • YouTube работает без троттлинга от ТСПУ<br>
+      • Не нужно настраивать отдельный клиент — работает автоматически через ваш VPN<br>
+      • DPI видит фейковый SNI (DuckDuckGo) вместо youtube.com → пропускает<br>
+      • Не влияет на другие сайты — b4 обрабатывает только YouTube-трафик<br><br>
+      <strong style="color:var(--accent-light)">⚙️ Как включить/выключить:</strong><br>
+      Управление b4 доступно только администратору через TUI установщика или Admin Panel. Если YouTube перестал работать — попросите админа переключить preset или запустить Discovery.
+    </div>
+  `;
+}}
+
 // ── Init ────────────────────────────────────────────────────────────────────
 loadLinks();
 loadSubscription();
@@ -1226,11 +1286,13 @@ loadTraffic();
 loadHealth();
 loadMyAWG();
 loadSatellites();
+loadB4();
 loadMyIPs();
 setInterval(loadHealth, 30000);
 setInterval(loadTraffic, 60000);
 setInterval(loadMyAWG, 60000);
 setInterval(loadSatellites, 60000);
+setInterval(loadB4, 60000);
 </script>
 </body>
 </html>'''
