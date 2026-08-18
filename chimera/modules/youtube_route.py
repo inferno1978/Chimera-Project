@@ -1355,6 +1355,7 @@ def do_manage_youtube_via_ru() -> None:
                 _box_warn(f"  Ошибка: {_e}")
             # НЕ return — остаёмся в меню YouTube (раньше return выбрасывал
             # в главное меню, и юзер не понимал куда делся).
+            continue  # перерисовать меню YouTube после выхода из b4
         else:
             return
 
