@@ -1415,5 +1415,300 @@ class TestYoutubeB4HasPresetDetection(unittest.TestCase):
         self.assertTrue(yt_result)
 
 
+class TestNativeB4Rules(unittest.TestCase):
+    """REGRESSION: b4 управляет своими iptables-правилами (native mode).
+
+    Раньше Chimera ставила правила вручную через --skip-tables, что
+    приводило к перехвату ВЕСЁГО 443-трафика (exit-ноды, google.com и т.д.).
+    Теперь b4 сам управляет своими правилами через ipset — перехватывается
+    только YouTube-трафик.
+
+    Проверяем:
+      1. systemd-unit НЕ содержит --skip-tables.
+      2. _iptables_apply() НЕ ставит IPv4 правила (только IPv6 fallback).
+      3. install_b4() вызывает _iptables_remove() перед стартом (cleanup).
+      4. enable() НЕ вызывает _iptables_apply() для IPv4.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.youtube_b4 = youtube_b4
+        self.dpi_bypass = dpi_bypass
+
+    def test_systemd_unit_no_skip_tables_youtube_b4(self):
+        """systemd-unit в youtube_b4 НЕ содержит --skip-tables.
+
+        Проверяем СГЕНЕРИРОВАННЫЙ unit (вызов _write_systemd_unit), а не
+        исходник функции — docstring упоминает --skip-tables для объяснения.
+        """
+        import tempfile
+        tmp_unit = Path(tempfile.mkdtemp()) / "b4.service"
+        orig_unit_path = self.youtube_b4.B4_UNIT_PATH
+        self.youtube_b4.B4_UNIT_PATH = tmp_unit
+        try:
+            self.youtube_b4._write_systemd_unit()
+            unit_content = tmp_unit.read_text()
+        finally:
+            self.youtube_b4.B4_UNIT_PATH = orig_unit_path
+        # В сгенерированном unit НЕ должно быть --skip-tables в ExecStart
+        self.assertNotIn("--skip-tables", unit_content,
+                         "Сгенерированный systemd-unit НЕ должен содержать --skip-tables")
+
+    def test_systemd_unit_no_skip_tables_dpi_bypass(self):
+        """systemd-unit в dpi_bypass НЕ содержит --skip-tables."""
+        import tempfile
+        tmp_unit = Path(tempfile.mkdtemp()) / "b4.service"
+        orig_unit_path = self.dpi_bypass.B4_UNIT_PATH
+        self.dpi_bypass.B4_UNIT_PATH = tmp_unit
+        try:
+            self.dpi_bypass._write_systemd_unit()
+            unit_content = tmp_unit.read_text()
+        finally:
+            self.dpi_bypass.B4_UNIT_PATH = orig_unit_path
+        self.assertNotIn("--skip-tables", unit_content,
+                         "Сгенерированный systemd-unit НЕ должен содержать --skip-tables")
+
+    def test_iptables_apply_no_ipv4_rules_youtube_b4(self):
+        """_iptables_apply() в youtube_b4 НЕ ставит IPv4 правила (только IPv6)."""
+        import inspect
+        src = inspect.getsource(self.youtube_b4._iptables_apply)
+        # НЕ должно быть iptables -t mangle -A b4_mangle (IPv4)
+        self.assertNotIn('"-A", "b4_mangle"', src,
+                         "_iptables_apply() НЕ должен ставить IPv4 правила")
+        # ДОЛЖНО быть ip6tables (IPv6 fallback)
+        self.assertIn("ip6tables", src,
+                      "_iptables_apply() ДОЛЖЕН ставить IPv6 fallback правила")
+
+    def test_iptables_apply_no_ipv4_rules_dpi_bypass(self):
+        """_iptables_apply() в dpi_bypass НЕ ставит IPv4 правила (только IPv6)."""
+        import inspect
+        src = inspect.getsource(self.dpi_bypass._iptables_apply)
+        self.assertNotIn('"-A", "b4_mangle"', src,
+                         "_iptables_apply() НЕ должен ставить IPv4 правила")
+        self.assertIn("ip6tables", src,
+                      "_iptables_apply() ДОЛЖЕН ставить IPv6 fallback правила")
+
+    def test_iptables_remove_still_cleans_ipv4(self):
+        """_iptables_remove() ВСЁ ЕЩЁ убирает IPv4 правила (cleanup при crash).
+
+        Даже в native mode, _iptables_remove() должен убирать b4_mangle (IPv4) —
+        на случай если b4 упал без cleanup'а (kill, OOM) или при миграции
+        со старого режима.
+        """
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4._iptables_remove)
+        dpi_src = inspect.getsource(self.dpi_bypass._iptables_remove)
+        # Оба должны содержать cleanup для b4_mangle (IPv4)
+        self.assertIn('"b4_mangle"', yt_src,
+                      "_iptables_remove() должен убирать IPv4 b4_mangle (cleanup)")
+        self.assertIn('"b4_mangle"', dpi_src,
+                      "_iptables_remove() должен убирать IPv4 b4_mangle (cleanup)")
+        # Оба должны содержать cleanup для b4_mangle6 (IPv6)
+        self.assertIn('"b4_mangle6"', yt_src)
+        self.assertIn('"b4_mangle6"', dpi_src)
+
+    def test_install_b4_calls_iptables_remove_before_start(self):
+        """install_b4() вызывает _iptables_remove() перед стартом b4.
+
+        Это нужно для cleanup старых Chimera'ных правил (до v5) при
+        переустановке или миграции.
+        """
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4.install_b4)
+        dpi_src = inspect.getsource(self.dpi_bypass.install_b4)
+        self.assertIn("_iptables_remove()", yt_src,
+                      "install_b4() должен вызывать _iptables_remove() перед стартом")
+        self.assertIn("_iptables_remove()", dpi_src,
+                      "install_b4() должен вызывать _iptables_remove() перед стартом")
+
+    def test_both_modules_have_migrate_function(self):
+        """REGRESSION: оба модуля имеют _migrate_to_native_rules_if_needed()."""
+        self.assertTrue(hasattr(self.youtube_b4, '_migrate_to_native_rules_if_needed'))
+        self.assertTrue(hasattr(self.dpi_bypass, '_migrate_to_native_rules_if_needed'))
+
+    def test_migrate_function_calls_write_systemd_unit(self):
+        """_migrate_to_native_rules_if_needed() вызывает _write_systemd_unit().
+
+        Это перезаписывает старый unit (с --skip-tables) на новый (native).
+        """
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4._migrate_to_native_rules_if_needed)
+        dpi_src = inspect.getsource(self.dpi_bypass._migrate_to_native_rules_if_needed)
+        self.assertIn("_write_systemd_unit()", yt_src)
+        self.assertIn("_write_systemd_unit()", dpi_src)
+
+    def test_migrate_function_calls_iptables_remove(self):
+        """_migrate_to_native_rules_if_needed() убирает старые IPv4 правила."""
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4._migrate_to_native_rules_if_needed)
+        dpi_src = inspect.getsource(self.dpi_bypass._migrate_to_native_rules_if_needed)
+        self.assertIn("_iptables_remove()", yt_src)
+        self.assertIn("_iptables_remove()", dpi_src)
+
+    def test_migrate_function_restarts_b4(self):
+        """_migrate_to_native_rules_if_needed() перезапускает b4."""
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4._migrate_to_native_rules_if_needed)
+        dpi_src = inspect.getsource(self.dpi_bypass._migrate_to_native_rules_if_needed)
+        # Проверяем что вызывается systemctl restart b4
+        self.assertIn('"restart"', yt_src)
+        self.assertIn('"b4"', yt_src)
+        self.assertIn('"restart"', dpi_src)
+        self.assertIn('"b4"', dpi_src)
+
+    def test_menu_calls_migrate_on_open(self):
+        """do_*_menu() вызывает _migrate_to_native_rules_if_needed() при открытии."""
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4.do_youtube_b4_menu)
+        dpi_src = inspect.getsource(self.dpi_bypass.do_dpi_bypass_menu)
+        self.assertIn("_migrate_to_native_rules_if_needed()", yt_src,
+                      "do_youtube_b4_menu должен вызывать миграцию при открытии")
+        self.assertIn("_migrate_to_native_rules_if_needed()", dpi_src,
+                      "do_dpi_bypass_menu должен вызывать миграцию при открытии")
+
+
+class TestMigrateFunctionBehavior(unittest.TestCase):
+    """Поведенческие тесты _migrate_to_native_rules_if_needed()."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._unit_path = self._tmpdir / "b4.service"
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)
+        self.dpi_bypass = dpi_bypass
+        self.dpi_bypass.B4_UNIT_PATH = self._unit_path
+        self.dpi_bypass.subprocess = MagicMock()
+        # Mock _write_systemd_unit, _iptables_remove, _iptables_apply
+        self.dpi_bypass._write_systemd_unit = lambda: True
+        self.dpi_bypass._iptables_remove = lambda: None
+        self.dpi_bypass._iptables_apply = lambda: True
+
+    def test_returns_false_when_unit_missing(self):
+        """Unit не существует → миграция не нужна."""
+        self._unit_path.unlink(missing_ok=True)
+        result = self.dpi_bypass._migrate_to_native_rules_if_needed()
+        self.assertFalse(result)
+
+    def test_returns_false_when_unit_already_native(self):
+        """Unit без --skip-tables → миграция не нужна."""
+        self._unit_path.write_text("""
+[Service]
+ExecStart=/usr/local/bin/b4 --config /etc/b4/config.json --ipv4 --ipv6
+""")
+        result = self.dpi_bypass._migrate_to_native_rules_if_needed()
+        self.assertFalse(result)
+
+    def test_returns_true_when_unit_has_skip_tables(self):
+        """Unit с --skip-tables → миграция выполняется."""
+        self._unit_path.write_text("""
+[Service]
+ExecStart=/usr/local/bin/b4 --config /etc/b4/config.json --skip-tables --ipv4
+""")
+        # Mock systemctl restart success
+        self.dpi_bypass.subprocess.run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
+        result = self.dpi_bypass._migrate_to_native_rules_if_needed()
+        self.assertTrue(result)
+
+    def test_migrate_calls_write_systemd_unit_when_needed(self):
+        """При миграции вызывается _write_systemd_unit()."""
+        self._unit_path.write_text("ExecStart=... --skip-tables ...")
+        write_called = []
+        self.dpi_bypass._write_systemd_unit = lambda: write_called.append(True) or True
+        self.dpi_bypass.subprocess.run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
+        self.dpi_bypass._migrate_to_native_rules_if_needed()
+        self.assertEqual(len(write_called), 1,
+                         "_write_systemd_unit должен быть вызван ровно 1 раз")
+
+    def test_migrate_calls_iptables_remove_when_needed(self):
+        """При миграции вызывается _iptables_remove()."""
+        self._unit_path.write_text("ExecStart=... --skip-tables ...")
+        remove_called = []
+        self.dpi_bypass._iptables_remove = lambda: remove_called.append(True)
+        self.dpi_bypass.subprocess.run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
+        self.dpi_bypass._migrate_to_native_rules_if_needed()
+        self.assertEqual(len(remove_called), 1)
+
+
+class TestNativeRulesSyncBetweenModules(unittest.TestCase):
+    """REGRESSION: синхронизация native b4 rules между youtube_b4 и dpi_bypass.
+
+    Оба модуля должны:
+      - Иметь _migrate_to_native_rules_if_needed()
+      - НЕ использовать --skip-tables
+      - Иметь идентичную логику IPv6 fallback
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.youtube_b4 = youtube_b4
+        self.dpi_bypass = dpi_bypass
+
+    def test_both_modules_no_skip_tables(self):
+        """Оба модуля НЕ используют --skip-tables в сгенерированном unit."""
+        import tempfile
+        # youtube_b4
+        tmp_unit_yt = Path(tempfile.mkdtemp()) / "b4.service"
+        orig_yt = self.youtube_b4.B4_UNIT_PATH
+        self.youtube_b4.B4_UNIT_PATH = tmp_unit_yt
+        try:
+            self.youtube_b4._write_systemd_unit()
+            yt_content = tmp_unit_yt.read_text()
+        finally:
+            self.youtube_b4.B4_UNIT_PATH = orig_yt
+        # dpi_bypass
+        tmp_unit_dpi = Path(tempfile.mkdtemp()) / "b4.service"
+        orig_dpi = self.dpi_bypass.B4_UNIT_PATH
+        self.dpi_bypass.B4_UNIT_PATH = tmp_unit_dpi
+        try:
+            self.dpi_bypass._write_systemd_unit()
+            dpi_content = tmp_unit_dpi.read_text()
+        finally:
+            self.dpi_bypass.B4_UNIT_PATH = orig_dpi
+        self.assertNotIn("--skip-tables", yt_content)
+        self.assertNotIn("--skip-tables", dpi_content)
+
+    def test_both_modules_have_ipv6_fallback(self):
+        """Оба модуля имеют IPv6 fallback в _iptables_apply()."""
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4._iptables_apply)
+        dpi_src = inspect.getsource(self.dpi_bypass._iptables_apply)
+        self.assertIn("ip6tables", yt_src)
+        self.assertIn("ip6tables", dpi_src)
+        self.assertIn("b4_mangle6", yt_src)
+        self.assertIn("b4_mangle6", dpi_src)
+
+    def test_both_modules_no_ipv4_apply(self):
+        """Оба модуля НЕ ставят IPv4 правила в _iptables_apply()."""
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4._iptables_apply)
+        dpi_src = inspect.getsource(self.dpi_bypass._iptables_apply)
+        # Не должно быть "-A", "b4_mangle" (IPv4 add rule)
+        self.assertNotIn('"-A", "b4_mangle"', yt_src)
+        self.assertNotIn('"-A", "b4_mangle"', dpi_src)
+
+    def test_both_modules_have_migrate_function(self):
+        """Оба модуля имеют _migrate_to_native_rules_if_needed()."""
+        self.assertTrue(hasattr(self.youtube_b4, '_migrate_to_native_rules_if_needed'))
+        self.assertTrue(hasattr(self.dpi_bypass, '_migrate_to_native_rules_if_needed'))
+
+    def test_both_modules_call_migrate_in_menu(self):
+        """Оба модуля вызывают миграцию при открытии меню."""
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4.do_youtube_b4_menu)
+        dpi_src = inspect.getsource(self.dpi_bypass.do_dpi_bypass_menu)
+        self.assertIn("_migrate_to_native_rules_if_needed()", yt_src)
+        self.assertIn("_migrate_to_native_rules_if_needed()", dpi_src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
