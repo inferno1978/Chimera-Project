@@ -693,102 +693,55 @@ WantedBy=multi-user.target
 
 
 def _iptables_apply() -> bool:
-    """Ставит ТОЛЬКО IPv6 iptables mangle правила для b4 (fallback).
+    """No-op: b4 сам управляет своими правилами через nftables (IPv4 + IPv6).
 
-    ВАЖНО: Начиная с Chimera v5, b4 сам управляет своими IPv4 iptables-
-    правилами (native mode, без --skip-tables). b4 использует ipset —
-    перехватывается только трафик к доменам из активного сета, а не
-    весь 443. Это исправляет:
-      - Логи b4 забитые записями о не-YouTube трафике (exit-ноды, google.com)
+    ВАЖНО: Начиная с Chimera v5, b4 полностью сам управляет своими
+    правилами перехвата. b4 создаёт `table inet b4_mangle` в nftables —
+    эта таблица работает ОДНОВРЕМЕННО для IPv4 и IPv6 (inet = оба
+    протокола). b4 использует умный фильтр `ct original packets < 20` —
+    перехватывает только первые 20 пакетов соединения (ClientHello +
+    пара пакетов), потом пропускает трафик напрямую. Это минимизирует
+    нагрузку на NFQUEUE и логирует только YouTube-трафик.
+
+    Chimera НЕ ставит НИКАКИХ правил — ни IPv4, ни IPv6. Раньше (до v5)
+    Chimera ставила правила через `--skip-tables`, что приводило к:
+      - Перехвату ВЕСЁГО 443-трафика (exit-ноды, google.com, etc.)
       - 1.4+ GB лишнего трафика через NFQUEUE
-      - Поломку Discovery (b4 применял preset к собственным тестовым пакетам)
+      - Поломке Discovery (b4 применял preset к собственным тестовым пакетам)
+      - "Дрисне" в логах b4 от не-YouTube трафика
 
-    IPv6-правила остаются Chimera'ными как fallback:
-      - Если b4 сам ставит IPv6 правила — дублирования нет (NFQUEUE
-        идемпотентен).
-      - Если b4 НЕ ставит IPv6 правила — Chimera'ные спасут ситуацию.
-      - На серверах без IPv6 — ip6tables правила не применяются.
+    После перехода на native b4 rules:
+      - Сервер без IPv6: только b4 native → логи чистые.
+      - Сервер с IPv6: только b4 native (table inet) → логи чистые.
+        Раньше Chimera'ные IPv6 правила (b4_mangle6) создавали ДВОЙНОЙ
+        перехват — b4 получал каждый IPv6-пакет без фильтра < 20, что
+        приводило к "дрисне" в логах. Теперь этого нет.
 
-    IPv4 правила НЕ ставим — b4 сделает сам при старте.
+    Эта функция оставлена как no-op для обратной совместимости —
+    install_b4() / enable() вызывают её, но она ничего не делает.
+    Cleanup правил (старых Chimera'ных) делает _iptables_remove().
     """
-    # ── IPv4: НЕ трогаем — b4 сам управляет через native mode ──
-    # Раньше здесь были правила для b4_mangle (IPv4). Убрано в v5.
-    # b4 сам создаёт свою цепочку + ipset при старте (без --skip-tables).
-
-    # ── IPv6: fallback правила (на случай если b4 их не ставит) ──
-    # На серверах с IPv6 — YouTube-трафик уходит по IPv6, и без ip6tables
-    # правил b4 не перехватывает его → ТСПУ блокирует → чёрная страница.
-    # ip6tables может отсутствовать на некоторых системах — проверяем.
-    ip6t = shutil.which("ip6tables")
-    if ip6t:
-        subprocess.run(
-            ["ip6tables", "-t", "mangle", "-N", "b4_mangle6"],
-            capture_output=True, check=False,
-        )
-        subprocess.run(
-            ["ip6tables", "-t", "mangle", "-F", "b4_mangle6"],
-            capture_output=True, check=False,
-        )
-        # TCP/443 → NFQUEUE
-        subprocess.run(
-            ["ip6tables", "-t", "mangle", "-A", "b4_mangle6",
-             "-p", "tcp", "--dport", "443",
-             "-m", "mark", "!", "--mark", str(B4_MARK),
-             "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
-             "-m", "comment", "--comment", B4_IPT_COMMENT],
-            capture_output=True, check=False,
-        )
-        # UDP/53 → NFQUEUE
-        subprocess.run(
-            ["ip6tables", "-t", "mangle", "-A", "b4_mangle6",
-             "-p", "udp", "--dport", "53",
-             "-m", "mark", "!", "--mark", str(B4_MARK),
-             "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
-             "-m", "comment", "--comment", B4_IPT_COMMENT + "-dns"],
-            capture_output=True, check=False,
-        )
-        # UDP/443 (QUIC) → NFQUEUE
-        subprocess.run(
-            ["ip6tables", "-t", "mangle", "-A", "b4_mangle6",
-             "-p", "udp", "--dport", "443",
-             "-m", "mark", "!", "--mark", str(B4_MARK),
-             "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
-             "-m", "comment", "--comment", B4_IPT_COMMENT + "-quic"],
-            capture_output=True, check=False,
-        )
-        # Jump из OUTPUT
-        r6 = subprocess.run(
-            ["ip6tables", "-t", "mangle", "-C", "OUTPUT", "-j", "b4_mangle6"],
-            capture_output=True, check=False,
-        )
-        if r6.returncode != 0:
-            subprocess.run(
-                ["ip6tables", "-t", "mangle", "-A", "OUTPUT", "-j", "b4_mangle6"],
-                capture_output=True, check=False,
-            )
-        _ok("ip6tables mangle правила применены (IPv6 fallback)")
-        _info("  IPv4: b4 управляет своими правилами (native mode)")
-        _info("  IPv6: Chimera fallback (если b4 не ставит сам)")
-    else:
-        _info("ip6tables не найден — IPv6 не настроен (нормально для серверов без IPv6)")
-        _info("IPv4: b4 управляет своими правилами (native mode)")
+    _info("iptables: b4 управляет своими правилами (native nftables, IPv4+IPv6)")
     return True
 
 
 def _iptables_remove() -> None:
-    """Удаляет iptables/ip6tables правила b4 (идемпотентно).
+    """Удаляет СТАРЫЕ iptables/ip6tables правила Chimera (идемпотентно).
 
-    ВАЖНО: Начиная с Chimera v5, b4 сам управляет своими IPv4 правилами.
-    При `systemctl stop b4` — b4 сам убирает свои IPv4 правила.
-    Но на случай если b4 упал без cleanup'а (kill -9, OOM) — убираем
-    IPv4 правила вручную (безопасно: если их нет, -D/-F/-X просто вернут
-    ошибку, мы её игнорируем через check=False).
+    ВАЖНО: Начиная с Chimera v5, b4 полностью сам управляет своими
+    правилами через nftables `table inet b4_mangle` (IPv4 + IPv6).
+    Chimera НЕ ставит НИКАКИХ правил. Эта функция нужна только для:
+      1. Cleanup при uninstall_b4() — убрать старые правила Chimera.
+      2. Cleanup при crash b4 (kill, OOM) — на случай если остались
+         старые правила (до v5).
+      3. Миграция со старого режима — _migrate_to_native_rules_if_needed()
+         вызывает эту функцию, чтобы убрать старые Chimera'ные правила
+         (b4_mangle для IPv4 + b4_mangle6 для IPv6).
 
-    IPv6 правила — Chimera'ные (fallback), убираем всегда.
+    Все команды идемпотентны — если правил нет, -D/-F/-X просто вернут
+    ошибку, мы её игнорируем через check=False.
     """
-    # IPv4 — cleanup на случай если b4 не убрал сам (kill, OOM, crash).
-    # Если b4 уже убрал — команды просто вернут ошибку, мы её игнорируем.
-    # Также убираем СТАРЫЕ правила Chimera (до v5) на случай миграции.
+    # IPv4 — cleanup старых Chimera'ных правил (до v5) + на случай crash b4.
     subprocess.run(
         ["iptables", "-t", "mangle", "-D", "OUTPUT", "-j", "b4_mangle"],
         capture_output=True, check=False,
