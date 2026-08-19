@@ -163,8 +163,8 @@ class TestImportCustomSet(unittest.TestCase):
         self.assertEqual(self._routing_calls,
                          [("youtube-custom", ["x.com"])])
 
-    def test_geosite_categories_removed_without_geosite_path(self):
-        """geosite_categories убирается если нет geosite_path."""
+    def test_geosite_categories_preserved(self):
+        """geosite_categories сохраняется (b4 поддерживает через sitedat_path)."""
         test_json = json.dumps({
             "id": "geo-set",
             "targets": {
@@ -175,9 +175,9 @@ class TestImportCustomSet(unittest.TestCase):
         result = self.dpi_bypass.import_custom_set(test_json)
         self.assertTrue(result)
         saved = json.loads(self._config_file.read_text())
-        # geosite_categories должен быть убран
-        self.assertNotIn("geosite_categories",
-                          saved["sets"][0]["targets"])
+        # geosite_categories должен остаться (b4 умеет с ним работать)
+        self.assertIn("geosite_categories",
+                      saved["sets"][0]["targets"])
 
     def test_no_name_uses_default_in_message(self):
         """Set без name — в сообщении используется 'custom'."""
