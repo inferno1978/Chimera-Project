@@ -1576,6 +1576,57 @@ class TestNativeB4Rules(unittest.TestCase):
         self.assertIn("_migrate_to_native_rules_if_needed()", dpi_src,
                       "do_dpi_bypass_menu должен вызывать миграцию при открытии")
 
+    def test_systemd_unit_uses_verbose_silent_youtube_b4(self):
+        """REGRESSION: systemd-unit в youtube_b4 использует --verbose silent.
+
+        b4 при --verbose info логирует каждый пакет (~1.1М строк/час).
+        --verbose silent отключает это, оставляя только ошибки.
+        """
+        import tempfile
+        tmp_unit = Path(tempfile.mkdtemp()) / "b4.service"
+        orig = self.youtube_b4.B4_UNIT_PATH
+        self.youtube_b4.B4_UNIT_PATH = tmp_unit
+        try:
+            self.youtube_b4._write_systemd_unit()
+            content = tmp_unit.read_text()
+        finally:
+            self.youtube_b4.B4_UNIT_PATH = orig
+        self.assertIn("--verbose silent", content)
+        self.assertNotIn("--verbose info", content)
+        self.assertNotIn("--verbose warn", content)
+
+    def test_systemd_unit_uses_verbose_silent_dpi_bypass(self):
+        """REGRESSION: systemd-unit в dpi_bypass использует --verbose silent."""
+        import tempfile
+        tmp_unit = Path(tempfile.mkdtemp()) / "b4.service"
+        orig = self.dpi_bypass.B4_UNIT_PATH
+        self.dpi_bypass.B4_UNIT_PATH = tmp_unit
+        try:
+            self.dpi_bypass._write_systemd_unit()
+            content = tmp_unit.read_text()
+        finally:
+            self.dpi_bypass.B4_UNIT_PATH = orig
+        self.assertIn("--verbose silent", content)
+        self.assertNotIn("--verbose info", content)
+        self.assertNotIn("--verbose warn", content)
+
+    def test_migrate_detects_verbose_info(self):
+        """REGRESSION: миграция детектит --verbose info и мигрирует на silent."""
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4._migrate_to_native_rules_if_needed)
+        dpi_src = inspect.getsource(self.dpi_bypass._migrate_to_native_rules_if_needed)
+        # Проверяем что миграция ищет --verbose info
+        self.assertIn('"--verbose info"', yt_src)
+        self.assertIn('"--verbose info"', dpi_src)
+
+    def test_migrate_detects_verbose_warn(self):
+        """REGRESSION: миграция детектит --verbose warn (баг b4, фильтрует как info)."""
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4._migrate_to_native_rules_if_needed)
+        dpi_src = inspect.getsource(self.dpi_bypass._migrate_to_native_rules_if_needed)
+        self.assertIn('"--verbose warn"', yt_src)
+        self.assertIn('"--verbose warn"', dpi_src)
+
 
 class TestMigrateFunctionBehavior(unittest.TestCase):
     """Поведенческие тесты _migrate_to_native_rules_if_needed()."""
@@ -1639,6 +1690,36 @@ ExecStart=/usr/local/bin/b4 --config /etc/b4/config.json --skip-tables --ipv4
         self.dpi_bypass.subprocess.run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
         self.dpi_bypass._migrate_to_native_rules_if_needed()
         self.assertEqual(len(remove_called), 1)
+
+    def test_returns_true_when_unit_has_verbose_info(self):
+        """REGRESSION: Unit с --verbose info → миграция выполняется (→ silent)."""
+        self._unit_path.write_text("""
+[Service]
+ExecStart=/usr/local/bin/b4 --config /etc/b4/config.json --verbose info --ipv4 --ipv6
+""")
+        self.dpi_bypass.subprocess.run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
+        result = self.dpi_bypass._migrate_to_native_rules_if_needed()
+        self.assertTrue(result)
+
+    def test_returns_true_when_unit_has_verbose_warn(self):
+        """REGRESSION: Unit с --verbose warn → миграция выполняется (баг b4, фильтрует как info)."""
+        self._unit_path.write_text("""
+[Service]
+ExecStart=/usr/local/bin/b4 --config /etc/b4/config.json --verbose warn --ipv4 --ipv6
+""")
+        self.dpi_bypass.subprocess.run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
+        result = self.dpi_bypass._migrate_to_native_rules_if_needed()
+        self.assertTrue(result)
+
+    def test_returns_false_when_unit_already_silent(self):
+        """REGRESSION: Unit с --verbose silent → миграция НЕ нужна."""
+        self._unit_path.write_text("""
+[Service]
+ExecStart=/usr/local/bin/b4 --config /etc/b4/config.json --verbose silent --ipv4 --ipv6
+""")
+        self.dpi_bypass.subprocess.run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
+        result = self.dpi_bypass._migrate_to_native_rules_if_needed()
+        self.assertFalse(result)
 
 
 class TestNativeRulesSyncBetweenModules(unittest.TestCase):
