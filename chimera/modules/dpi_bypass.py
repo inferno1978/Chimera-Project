@@ -1115,7 +1115,10 @@ def import_custom_set(json_str: str) -> bool:
     _ok(f"Кастомный сет «{name}» импортирован, b4 перезапущен")
     # Применяем Xray routing: домены сета → outbound:direct,
     # чтобы трафик шёл через entry VPS (где стоит b4), а не через exit.
-    for s in new_sets:
+    #  FIX: было `for s in new_sets:` — переменная new_sets НЕ определена
+    # в этой функции (only custom_set). Импорт всегда работает с одним
+    # сетом — берём [custom_set].
+    for s in [custom_set]:
         domains = s.get("targets", {}).get("sni_domains", [])
         if domains:
             apply_routing_for_set(s.get("id", "custom"), domains)

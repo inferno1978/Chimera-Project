@@ -2,6 +2,117 @@
 
 ---
 
+## FIX(dpi_bypass): NameError в import_custom_set (new_sets не определена) — 19 августа 2026
+
+**В централизованном DPI Bypass модуле функция `import_custom_set()` бросала
+`NameError: name 'new_sets' is not defined` при импорте кастомного сета
+через TUI или REST API. Сам сет сохранялся в config и сервис b4
+перезапускался, но функция не возвращала True и не применяла Xray routing
+правило для новых доменов.**
+
+### Корневая причина
+
+В коммите `adbc98e` (FEAT: Xray routing для кастомных сетов) в конце
+`import_custom_set()` в `dpi_bypass.py` был добавлен блок применения
+Xray routing для импортируемого сета:
+
+```python
+    for s in new_sets:                    # ← new_sets НЕ определена!
+        domains = s.get("targets", {}).get("sni_domains", [])
+        if domains:
+            apply_routing_for_set(s.get("id", "custom"), domains)
+```
+
+Но переменная `new_sets` **нигде** в функции не определяется. В функции
+обрабатывается только `custom_set` (один set; если в JSON был массив
+`{"sets": [...]}`, берётся `sets[0]`).
+
+### Симптом
+
+TUI → DPI Bypass → Импортировать кастомный сет → вставить JSON → Enter:
+
+```
+[OK]    Кастомный сет «Test Set» импортирован, b4 перезапущен
+Traceback (most recent call last):
+  ...
+  File ".../chimera/modules/dpi_bypass.py", line 1118, in import_custom_set
+    for s in new_sets:
+NameError: name 'new_sets' is not defined
+```
+
+b4-сервис корректно настроен, но TUI показывает traceback вместо чистого
+возврата, и Xray routing для доменов сета не применён.
+
+### Фикс
+
+`chimera/modules/dpi_bypass.py`:
+
+```diff
+-    for s in new_sets:
++    #  FIX: было `for s in new_sets:` — переменная new_sets НЕ определена
++    # в этой функции (only custom_set). Импорт всегда работает с одним
++    # сетом — берём [custom_set].
++    for s in [custom_set]:
+         domains = s.get("targets", {}).get("sni_domains", [])
+         if domains:
+             apply_routing_for_set(s.get("id", "custom"), domains)
+```
+
+### Тесты
+
+Добавлен новый файл `tests/test_dpi_bypass.py` (27 тестов):
+
+- `TestImportCustomSet` (9 тестов): REGRESSION для `new_sets` бага —
+  проверка что `import_custom_set` возвращает True (а не бросает NameError)
+  для одиночного set-объекта, для `{"sets": [...]}` массива, для пустого
+  массива, для невалидного JSON, для set без sni_domains, для set без id
+  (получает дефолтный 'youtube-custom'), для set с geosite_categories
+  (убирается без geosite_path), и проверка что `apply_routing_for_set`
+  вызывается с правильными аргументами.
+- `TestImportCustomSetFromFile` (2 теста): чтение из файла, несуществующий
+  файл.
+- `TestRoutingForSet` (3 теста): сигнатуры `apply_routing_for_set`,
+  `remove_routing_for_set`, `apply_routing_for_all_sets`.
+- `TestSyncWithYoutubeB4` (9 тестов): REGRESSION — проверка что оба
+  модуля (`youtube_b4.py` и `dpi_bypass.py`) используют **одни и те же**
+  пути: B4_BINARY_PATH, B4_CONFIG_FILE, B4_CONFIG_DIR, B4_SETS_DIR,
+  B4_UNIT_PATH, _STATE_FILE, B4_NGINX_STATE_FILE, B4_VERSION, B4_QUEUE_NUM,
+  B4_MARK, B4_IPT_COMMENT. Это и есть архитектурная основа синхронизации
+  между двумя модулями.
+- `TestStateFileRoundTrip` (4 теста): `_load_state`/`_save_state` —
+  дефолт при отсутствии файла, дефолт при повреждённом JSON, запись
+  валидного JSON, создание родительского каталога.
+
+### Синхронизация youtube_b4 ↔ dpi_bypass
+
+Архитектура синхронизации **не пострадала**. Оба модуля продолжают
+работать с одними и теми же файлами/путями (см. `TestSyncWithYoutubeB4`):
+
+| Ресурс | Путь |
+|--------|------|
+| b4 binary | `/usr/local/bin/b4` |
+| config dir | `/etc/b4` |
+| config file | `/etc/b4/config.json` |
+| sets dir | `/etc/b4/sets` |
+| systemd unit | `/etc/systemd/system/b4.service` |
+| state file | `/var/lib/xray-installer/youtube_b4_state.json` |
+| nginx front state | `/var/lib/xray-installer/b4_nginx_front.json` |
+
+Двусторонняя синхронизация через общий файл — без дополнительного кода.
+Изменение сета в любом из модулей немедленно видно другому (общий
+`config.json`). Перезапуск сервиса через один общий systemd-unit.
+
+### Файлы
+
+- `chimera/modules/dpi_bypass.py` — фикс `new_sets` → `[custom_set]`
+- `tests/test_dpi_bypass.py` — новый файл, 27 unit-тестов
+
+### Тесты
+
+105 тестов проходят (включая 27 новых для dpi_bypass).
+
+---
+
 ## FIX(youtube_route): восстановлен пункт [B] (b4 DPI bypass) в single-node меню — 19 августа 2026
 
 **На RU-entry серверах без chain-exit нод (single-node режим) пункт
