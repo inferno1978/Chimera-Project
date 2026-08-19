@@ -660,11 +660,17 @@ def _write_default_config() -> bool:
 
 
 def _write_systemd_unit() -> bool:
-    """Создаёт systemd-unit для b4."""
-    # ВАЖНО: --skip-tables=False (по умолчанию) — b4 сам ставит iptables
-    # правила при старте. Но мы хотим координировать с Chimera — поэтому
-    # используем --skip-tables=True и ставим правила сами (через
-    # iptables-ensure, идемпотентно).
+    """Создаёт systemd-unit для b4.
+
+    ВАЖНО: b4 сам управляет своими iptables-правилами (native mode).
+    Раньше Chimera ставила правила вручную через --skip-tables, но это
+    приводило к тому, что b4 перехватывал ВЕСЬ 443-трафик (включая
+    exit-ноды, google.com и т.д.), а не только YouTube. Теперь b4 сам
+    создаёт свои правила через ipset — перехватывается только трафик к
+    доменам из активного сета.
+
+    IPv6-правила остаются Chimera'ными (fallback) — см. _iptables_apply().
+    """
     unit = f"""[Unit]
 Description=b4 (Bye Bye Big Bro) — DPI bypass for YouTube on entry VPS
 After=network-online.target xray.service
@@ -678,7 +684,8 @@ ExecStart={B4_BINARY_PATH} --config {B4_CONFIG_FILE} \\
     --web-port {B4_WEB_PORT} \\
     --log-dir {B4_LOG_DIR} \\
     --verbose info \\
-    --skip-tables
+    --ipv4 \\
+    --ipv6
 WorkingDirectory={B4_CONFIG_DIR}
 Restart=always
 RestartSec=3
@@ -698,99 +705,127 @@ WantedBy=multi-user.target
 
 
 def _iptables_apply() -> bool:
-    """Ставит iptables mangle правила для b4.
+    """Ставит ТОЛЬКО IPv6 iptables mangle правила для b4 (fallback).
 
-    ВАЖНО: b4 сам умеет ставить правила (через --skip-tables=False),
-    но мы делаем это вручную для:
-      1. Идемпотентности (через -C check перед -A)
-      2. Координации с Chimera (comment-tag для cleanup)
-      3. Совместимости с UFW (mangle — отдельная таблица, не filter)
+    ВАЖНО: Начиная с Chimera v5, b4 сам управляет своими IPv4 iptables-
+    правилами (native mode, без --skip-tables). b4 использует ipset —
+    перехватывается только трафик к доменам из активного сета, а не
+    весь 443. Это исправляет:
+      - Логи b4 забитые записями о не-YouTube трафике (exit-ноды, google.com)
+      - Лишний трафик через NFQUEUE
+      - Поломку Discovery (b4 применял preset к собственным тестовым пакетам)
 
-    Правила:
-      1. mangle OUTPUT: tcp dport 443 mark != B4_MARK → NFQUEUE B4_QUEUE_NUM
-         (только ИСХОДЯЩИЙ, только 443 порт, исключаем сами пакеты b4 по mark)
-      2. mangle OUTPUT: udp dport 53 → NFQUEUE B4_QUEUE_NUM
-         (DNS interception для DoH)
+    IPv6-правила остаются Chimera'ными как fallback:
+      - Если b4 сам ставит IPv6 правила — дублирования нет (NFQUEUE
+        идемпотентен).
+      - Если b4 НЕ ставит IPv6 правила — Chimera'ные спасут ситуацию.
+      - На серверах без IPv6 — ip6tables правила не применяются.
+
+    IPv4 правила НЕ ставим — b4 сделает сам при старте.
     """
-    # Создаём цепочку b4_mangle в mangle таблице (если нет).
-    subprocess.run(
-        ["iptables", "-t", "mangle", "-N", "b4_mangle"],
-        capture_output=True, check=False,  # -N падает если уже есть
-    )
-    # Очищаем (на случай если мы перезаписываем правила).
-    subprocess.run(
-        ["iptables", "-t", "mangle", "-F", "b4_mangle"],
-        capture_output=True, check=False,
-    )
+    # ── IPv4: НЕ трогаем — b4 сам управляет через native mode ──
+    # Раньше здесь были правила для b4_mangle (IPv4). Убрано в v5.
+    # b4 сам создаёт свою цепочку + ipset при старте (без --skip-tables).
 
-    # Правило 1: TCP dport 443 (исходящий) → b4_mangle.
-    # ВАЖНО: mark != B4_MARK — иначе пакеты b4 (raw socket, SO_MARK)
-    # попадут в NFQUEUE снова → бесконечный цикл.
-    subprocess.run(
-        ["iptables", "-t", "mangle", "-A", "b4_mangle",
-         "-p", "tcp", "--dport", "443",
-         "-m", "mark", "!", "--mark", str(B4_MARK),
-         "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
-         "-m", "comment", "--comment", B4_IPT_COMMENT],
-        capture_output=True, check=False,
-    )
-    # Правило 2: DNS (UDP 53) → b4_mangle (для DoH interception).
-    subprocess.run(
-        ["iptables", "-t", "mangle", "-A", "b4_mangle",
-         "-p", "udp", "--dport", "53",
-         "-m", "mark", "!", "--mark", str(B4_MARK),
-         "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
-         "-m", "comment", "--comment", B4_IPT_COMMENT + "-dns"],
-        capture_output=True, check=False,
-    )
-    # Правило 3: QUIC (UDP/443) — браузеры пробуют QUIC первым для YouTube.
-    # Без этого правила QUIC bypass-ит b4 и ТСПУ блокирует → "Нет подключения".
-    # b4 умеет обрабатывать QUIC (fake QUIC Initial, sni_type работает для QUIC).
-    subprocess.run(
-        ["iptables", "-t", "mangle", "-A", "b4_mangle",
-         "-p", "udp", "--dport", "443",
-         "-m", "mark", "!", "--mark", str(B4_MARK),
-         "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
-         "-m", "comment", "--comment", B4_IPT_COMMENT + "-quic"],
-        capture_output=True, check=False,
-    )
-
-    # Добавляем jump из OUTPUT в b4_mangle (если ещё нет).
-    r = subprocess.run(
-        ["iptables", "-t", "mangle", "-C", "OUTPUT", "-j", "b4_mangle"],
-        capture_output=True, check=False,
-    )
-    if r.returncode != 0:
+    # ── IPv6: fallback правила (на случай если b4 их не ставит) ──
+    # На серверах с IPv6 — YouTube-трафик уходит по IPv6, и без ip6tables
+    # правил b4 не перехватывает его → ТСПУ блокирует → чёрная страница.
+    # ip6tables может отсутствовать на некоторых системах — проверяем.
+    ip6t = shutil.which("ip6tables")
+    if ip6t:
         subprocess.run(
-            ["iptables", "-t", "mangle", "-A", "OUTPUT", "-j", "b4_mangle"],
+            ["ip6tables", "-t", "mangle", "-N", "b4_mangle6"],
             capture_output=True, check=False,
         )
-
-    _ok("iptables mangle правила применены")
-    _info(f"  Chain: mangle → b4_mangle → NFQUEUE {B4_QUEUE_NUM}")
-    _info(f"  Target: tcp dport 443 + udp dport 53 + udp dport 443 (QUIC)")
-    _info(f"  Mark: {B4_MARK} (исключает пакеты самого b4 из ре-queue)")
+        subprocess.run(
+            ["ip6tables", "-t", "mangle", "-F", "b4_mangle6"],
+            capture_output=True, check=False,
+        )
+        # TCP/443 → NFQUEUE
+        subprocess.run(
+            ["ip6tables", "-t", "mangle", "-A", "b4_mangle6",
+             "-p", "tcp", "--dport", "443",
+             "-m", "mark", "!", "--mark", str(B4_MARK),
+             "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
+             "-m", "comment", "--comment", B4_IPT_COMMENT],
+            capture_output=True, check=False,
+        )
+        # UDP/53 → NFQUEUE
+        subprocess.run(
+            ["ip6tables", "-t", "mangle", "-A", "b4_mangle6",
+             "-p", "udp", "--dport", "53",
+             "-m", "mark", "!", "--mark", str(B4_MARK),
+             "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
+             "-m", "comment", "--comment", B4_IPT_COMMENT + "-dns"],
+            capture_output=True, check=False,
+        )
+        # UDP/443 (QUIC) → NFQUEUE
+        subprocess.run(
+            ["ip6tables", "-t", "mangle", "-A", "b4_mangle6",
+             "-p", "udp", "--dport", "443",
+             "-m", "mark", "!", "--mark", str(B4_MARK),
+             "-j", "NFQUEUE", "--queue-num", str(B4_QUEUE_NUM),
+             "-m", "comment", "--comment", B4_IPT_COMMENT + "-quic"],
+            capture_output=True, check=False,
+        )
+        # Jump из OUTPUT
+        r6 = subprocess.run(
+            ["ip6tables", "-t", "mangle", "-C", "OUTPUT", "-j", "b4_mangle6"],
+            capture_output=True, check=False,
+        )
+        if r6.returncode != 0:
+            subprocess.run(
+                ["ip6tables", "-t", "mangle", "-A", "OUTPUT", "-j", "b4_mangle6"],
+                capture_output=True, check=False,
+            )
+        _ok("ip6tables mangle правила применены (IPv6 fallback)")
+        _info("  IPv4: b4 управляет своими правилами (native mode)")
+        _info("  IPv6: Chimera fallback (если b4 не ставит сам)")
+    else:
+        _info("ip6tables не найден — IPv6 не настроен (нормально для серверов без IPv6)")
+        _info("IPv4: b4 управляет своими правилами (native mode)")
     return True
 
 
 def _iptables_remove() -> None:
-    """Удаляет все iptables правила b4 (идемпотентно)."""
-    # 1. Удаляем jump из OUTPUT.
+    """Удаляет iptables/ip6tables правила b4 (идемпотентно).
+
+    ВАЖНО: Начиная с Chimera v5, b4 сам управляет своими IPv4 правилами.
+    При `systemctl stop b4` — b4 сам убирает свои IPv4 правила.
+    Но на случай если b4 упал без cleanup'а (kill -9, OOM) — убираем
+    IPv4 правила вручную (безопасно: если их нет, -D/-F/-X просто вернут
+    ошибку, мы её игнорируем через check=False).
+
+    IPv6 правила — Chimera'ные (fallback), убираем всегда.
+    """
+    # IPv4 — cleanup на случай если b4 не убрал сам (kill, OOM, crash).
+    # Также убираем СТАРЫЕ правила Chimera (до v5) на случай миграции.
     subprocess.run(
         ["iptables", "-t", "mangle", "-D", "OUTPUT", "-j", "b4_mangle"],
         capture_output=True, check=False,
     )
-    # 2. Очищаем цепочку b4_mangle.
     subprocess.run(
         ["iptables", "-t", "mangle", "-F", "b4_mangle"],
         capture_output=True, check=False,
     )
-    # 3. Удаляем саму цепочку.
     subprocess.run(
         ["iptables", "-t", "mangle", "-X", "b4_mangle"],
         capture_output=True, check=False,
     )
-    _ok("iptables mangle правила b4 удалены")
+    # IPv6 — Chimera'ные fallback правила, убираем всегда.
+    subprocess.run(
+        ["ip6tables", "-t", "mangle", "-D", "OUTPUT", "-j", "b4_mangle6"],
+        capture_output=True, check=False,
+    )
+    subprocess.run(
+        ["ip6tables", "-t", "mangle", "-F", "b4_mangle6"],
+        capture_output=True, check=False,
+    )
+    subprocess.run(
+        ["ip6tables", "-t", "mangle", "-X", "b4_mangle6"],
+        capture_output=True, check=False,
+    )
+    _ok("iptables + ip6tables mangle правила b4 удалены")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -876,7 +911,12 @@ def _b4_nginx_get_url() -> Optional[str]:
 
 
 def install_b4() -> bool:
-    """Полная установка b4: binary + config + systemd + iptables + port_registry."""
+    """Полная установка b4: binary + config + systemd + port_registry.
+
+    ВАЖНО: Начиная с v5, Chimera НЕ ставит IPv4 iptables-правила вручную.
+    b4 сам управляет своими правилами (native mode, без --skip-tables).
+    IPv6-правила остаются Chimera'ными как fallback — см. _iptables_apply().
+    """
     if not _download_b4_binary():
         return False
     if not _write_default_config():
@@ -885,7 +925,10 @@ def install_b4() -> bool:
         return False
     # systemd daemon-reload.
     subprocess.run(["systemctl", "daemon-reload"], check=False)
-    # Применяем iptables (до старта сервиса — b4 с --skip-tables ждёт queue).
+    #  Убираем старые Chimera'ные IPv4 правила (до v5) — на случай
+    # миграции. b4 при старте создаст свои (native mode).
+    _iptables_remove()
+    # Применяем ТОЛЬКО IPv6 fallback правила (IPv4 — b4 сделает сам).
     _iptables_apply()
     # Регистрируем порты b4 в port_registry.
     try:
@@ -901,7 +944,7 @@ def install_b4() -> bool:
                       comment="b4 DNS TCP listener (internal)", force=True)
     except Exception:
         pass
-    # Запускаем сервис.
+    # Запускаем сервис — b4 сам создаст свои iptables-правила.
     r = subprocess.run(["systemctl", "enable", "--now", "b4"],
                        capture_output=True, text=True, check=False)
     if r.returncode != 0:
@@ -1094,11 +1137,16 @@ def status() -> dict:
 
 
 def enable() -> bool:
-    """Запускает b4 сервис (если установлен)."""
+    """Запускает b4 сервис (если установлен).
+
+    b4 сам ставит свои IPv4 iptables-правила при старте (native mode).
+    IPv6 fallback правила ставит Chimera (на случай если b4 их не ставит).
+    """
     if not B4_BINARY_PATH.exists():
         _err("b4 не установлен. Сначала выполните установку.")
         return False
-    _iptables_apply()  # на случай если правила были удалены
+    # IPv6 fallback — Chimera. IPv4 — b4 сам при старте.
+    _iptables_apply()
     r = subprocess.run(["systemctl", "enable", "--now", "b4"],
                        capture_output=True, text=True, check=False)
     if r.returncode != 0:
@@ -1112,14 +1160,69 @@ def enable() -> bool:
 
 
 def disable() -> bool:
-    """Останавливает b4 сервис (без удаления)."""
+    """Останавливает b4 сервис (без удаления).
+
+    b4 сам убирает свои IPv4 iptables-правила при остановке.
+    IPv6 fallback правила убирает Chimera.
+    На случай если b4 упал без cleanup'а — _iptables_remove() подстрахует.
+    """
     subprocess.run(["systemctl", "stop", "b4"], capture_output=True, check=False)
     subprocess.run(["systemctl", "disable", "b4"], capture_output=True, check=False)
+    # Cleanup IPv4 (на случай crash b4) + IPv6 (Chimera'ные).
     _iptables_remove()
     state = _load_state()
     state["enabled"] = False
     _save_state(state)
     _ok("b4 остановлен (binary и config сохранены)")
+    return True
+
+
+def _migrate_to_native_rules_if_needed() -> bool:
+    """Авто-миграция со старого режима (--skip-tables) на native b4 rules.
+
+    Детектит старый systemd-unit (с --skip-tables) и если найден:
+      1. Перезаписывает unit без --skip-tables.
+      2. Убирает старые Chimera'ные IPv4 iptables-правила.
+      3. Перезапускает b4 (он сам создаст свои native правила).
+
+    Вызывается автоматически при открытии меню b4 (do_dpi_bypass_menu).
+    Идемпотентна — если unit уже новый, ничего не делает.
+
+    Возвращает True если миграция выполнена, False если не нужна.
+    """
+    if not B4_UNIT_PATH.exists():
+        return False  # b4 не установлен — нечего мигрировать
+    try:
+        unit_content = B4_UNIT_PATH.read_text()
+    except Exception:
+        return False
+    # Детектим старый режим: presence of --skip-tables в ExecStart.
+    if "--skip-tables" not in unit_content:
+        return False  # Уже native mode — миграция не нужна
+    # Миграция нужна.
+    _info("Обнаружен старый режим b4 (--skip-tables). Мигрирую на native rules...")
+    _info("b4 будет сам управлять своими iptables-правилами (только YouTube-трафик)")
+    # 1. Перезаписываем unit без --skip-tables.
+    if not _write_systemd_unit():
+        _err("Не удалось перезаписать systemd-unit")
+        return False
+    # 2. daemon-reload.
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+    # 3. Убираем старые Chimera'ные IPv4 правила.
+    _iptables_remove()
+    # 4. Применяем IPv6 fallback (IPv4 — b4 сам при старте).
+    _iptables_apply()
+    # 5. Перезапускаем b4 — он создаст свои native правила.
+    r = subprocess.run(["systemctl", "restart", "b4"],
+                       capture_output=True, text=True, check=False)
+    if r.returncode == 0:
+        _ok("Миграция завершена: b4 теперь управляет своими правилами (native mode)")
+        _info("  IPv4: b4 native (только YouTube-трафик через ipset)")
+        _info("  IPv6: Chimera fallback")
+        _info("  Логи b4 больше не содержат не-YouTube трафик (exit-ноды и т.д.)")
+    else:
+        _err(f"Не удалось перезапустить b4 после миграции: {r.stderr.strip()}")
+        _info("Проверьте логи: journalctl -u b4 -n 30")
     return True
 
 
@@ -1473,6 +1576,9 @@ def get_admin_info() -> dict:
 
 def do_dpi_bypass_menu() -> None:
     """TUI-меню управления b4 для YouTube DPI bypass."""
+    #  Авто-миграция со старого режима (--skip-tables) на native b4 rules.
+    # Если обнаружен старый systemd-unit — мигрируем автоматически.
+    _migrate_to_native_rules_if_needed()
     while True:
         os.system("clear")
         s = status()
