@@ -2,6 +2,150 @@
 
 ---
 
+## FEAT(youtube_b4+dpi_bypass): обновление b4 до pre-release версий с предупреждением — 19 августа 2026
+
+**Добавлена возможность обновлять b4 binary до PRE-RELEASE версий (beta/RC)
+из обоих модулей — `youtube_b4.py` и `dpi_bypass.py`. Логика обновления
+stable-релизов сохранена без изменений. При выборе pre-release
+пользователю показывается warning с подтверждением [y/N].**
+
+### Архитектура
+
+GitHub API предоставляет два endpoint'а для релизов:
+
+| Endpoint | Что возвращает |
+|----------|----------------|
+| `/releases/latest` | Один самый свежий СТАБИЛЬНЫЙ релиз (prerelease=false) |
+| `/releases` | Массив ВСЕХ релизов (включая pre-release), от новых к старым |
+
+Раньше `_detect_latest_version()` использовал `/releases/latest` —
+видел только стабильные. Для pre-release добавлен
+`_detect_latest_prerelease_version()` — использует `/releases` и
+фильтрует где `prerelease=true`, берёт первый (самый свежий).
+
+### Рефакторинг auto_update() (без изменения поведения)
+
+Логика скачивания/установки binary (90+ строк: скачать → SHA256 →
+распаковать → stop → backup → replace → start → verify → cleanup)
+вынесена в общий helper `_do_b4_binary_update(old_version, target_version)`.
+
+`auto_update()` теперь вызывает helper:
+```python
+def auto_update():
+    if not _detect_installed(): return {...}
+    old_version = _detect_version()
+    latest = _detect_latest_version()
+    if old_version == latest: return {...}
+    return _do_b4_binary_update(old_version, latest)
+```
+
+Поведение `auto_update()` **не изменилось** — те же шаги, те же проверки,
+те же возвращаемые dict'и. Просто код переиспользуется.
+
+### Новая функция auto_update_prerelease()
+
+`auto_update_prerelease(confirm=True)` — симметрична `auto_update()`, но:
+1. Использует `_detect_latest_prerelease_version()` вместо
+   `_detect_latest_version()`.
+2. Печатает warning через `_warn()` (всегда — попадает в лог):
+   ```
+   [WARN]  ⚠  Установка PRE-RELEASE версии b4: 1.78.0 → 1.80.0-rc1
+   [WARN]  Установка preprelease версии может привести к ошибкам и нестабильной работе.
+   ```
+3. Если `confirm=True` (default) — спрашивает пользователя:
+   ```
+   Вы точно хотите установить preprelease версию 1.80.0-rc1? [y/N]:
+   ```
+   Принимаются: `y`, `yes`, `д`, `да` (case-insensitive). Любой другой
+   ответ (или EOFError, или KeyboardInterrupt) → отмена.
+4. Если `confirm=False` — обновление без вопроса (для REST API/тестов).
+   Warning всё равно печатается в лог.
+
+### Меню TUI — оба модуля
+
+**`dpi_bypass.py`** (централизованный DPI Bypass):
+- `[5]` 🔄 Проверить обновление b4 — stable (как было)
+- `[U]` 🧪 Обновить до pre-release версии (нестабильно!) — **НОВОЕ**
+
+**`youtube_b4.py`** (YouTube-specific):
+- `[5]` 🔄 Проверить обновление b4 (stable) — **НОВОЕ** (раньше не было)
+- `[U]` 🧪 Обновить до pre-release версии (нестабильно!) — **НОВОЕ**
+- Пункты 5-8 перенумерованы в 6-9 (Health check → 6, Логи → 7,
+  Web UI → 8, nginx front → 9).
+
+### Синхронизация между модулями
+
+Архитектура синхронизации **не изменилась** — общий binary
+`/usr/local/bin/b4`. Когда любой модуль обновляет binary:
+1. Записывает новую версию в общий state.json (`version` поле).
+2. Перезапускает общий systemd-unit `b4.service`.
+3. Другой модуль при следующем `status()` читает версию из binary
+   (через `_detect_version()`) — видит обновление немедленно.
+
+Не важно, из какого модуля запустили обновление — результат виден
+в обоих. Конфиг `/etc/b4/config.json` и set'ы НЕ затрагиваются
+обновлением (только binary).
+
+### Файлы
+
+- `chimera/modules/dpi_bypass.py` — рефакторинг `auto_update()` +
+  `_detect_latest_prerelease_version()` + `auto_update_prerelease()` +
+  `_do_b4_binary_update()` (общий helper) + пункт меню [U]
+- `chimera/modules/youtube_b4.py` — добавлены ВСЕ update-функции
+  (раньше не было) + пункт меню [5] (stable) + [U] (pre-release) +
+  перенумерованы пункты 5-8 → 6-9
+- `tests/test_dpi_bypass.py` — 34 новых теста
+
+### Тесты (34 новых)
+
+**`TestDetectLatestPrereleaseVersion`** (7):
+- Возвращает первый pre-release из списка
+- Убирает 'v' префикс из tag_name
+- Возвращает '' если pre-release релизов нет
+- Возвращает '' если список релизов пуст
+- Возвращает '' при сетевой ошибке
+- Пропускает релизы где prerelease=false или ключ отсутствует
+- Использует `/releases` endpoint, а НЕ `/releases/latest`
+
+**`TestAutoUpdatePrerelease`** (8):
+- b4 не установлен → откат
+- Нет pre-release на GitHub → откат
+- Уже установлена pre-release версия → откат
+- confirm=True + 'n' → откат, обновления нет
+- confirm=True + 'y' → обновление
+- confirm=False → обновление без вопроса
+- EOFError на input → откат (как 'n')
+- Русские 'да'/'д' принимаются как подтверждение
+
+**`TestAutoUpdateRelease`** (4):
+- REGRESSION: рефакторинг не сломал stable update
+- b4 не установлен → откат
+- Не удалось проверить версию → откат
+- Уже актуальная → откат
+- Новая версия → вызывается _do_b4_binary_update
+
+**`TestYoutubeB4HasUpdateFunctions`** (9):
+- REGRESSION: youtube_b4.py получил все update-функции
+- `_detect_installed`, `_detect_version`, `_detect_service_active`
+- `_detect_latest_version`, `_detect_latest_prerelease_version`
+- `_do_b4_binary_update`, `auto_update`, `auto_update_prerelease`
+- `auto_update_prerelease` принимает параметр `confirm` (default=True)
+
+**`TestPreReleaseSyncBetweenModules`** (6):
+- REGRESSION: оба модуля имеют идентичные update-функции
+- Оба имеют `_detect_latest_prerelease_version`
+- Оба имеют `auto_update_prerelease`
+- Оба имеют `_do_b4_binary_update`
+- Оба запрашивают один и тот же GitHub endpoint
+- Сигнатуры `auto_update_prerelease` идентичны
+- Общий `B4_BINARY_PATH` обеспечивает синхронизацию
+
+### Тесты
+
+139 тестов проходят (105 предыдущих + 34 новых).
+
+---
+
 ## FIX(dpi_bypass): NameError в import_custom_set (new_sets не определена) — 19 августа 2026
 
 **В централизованном DPI Bypass модуле функция `import_custom_set()` бросала

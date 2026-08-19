@@ -322,6 +322,298 @@ def _download_b4_binary() -> bool:
     return True
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  ДЕТЕКТ УСТАНОВКИ (shared с dpi_bypass.py)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _detect_installed() -> bool:
+    """Проверяет установлен ли b4 (binary + systemd-unit)."""
+    return B4_BINARY_PATH.exists() and B4_UNIT_PATH.exists()
+
+
+def _detect_service_active() -> bool:
+    """Проверяет запущен ли сервис b4."""
+    r = subprocess.run(["systemctl", "is-active", "b4"],
+                       capture_output=True, text=True, check=False)
+    return (r.returncode == 0 and r.stdout.strip() == "active")
+
+
+def _detect_version() -> str:
+    """Получает версию установленного b4 binary."""
+    if not B4_BINARY_PATH.exists():
+        return ""
+    try:
+        r = subprocess.run([str(B4_BINARY_PATH), "--version"],
+                           capture_output=True, text=True, check=False, timeout=5)
+        m = re.search(r'B4 version:\s*(\S+)', r.stdout)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  АВТООБНОВЛЕНИЕ B4 BINARY (release + pre-release)
+# ══════════════════════════════════════════════════════════════════════════
+#  Эти функции зеркалируют dpi_bypass.py — оба модуля работают с одним
+#  binary /usr/local/bin/b4, поэтому обновление из любого модуля видно
+#  другому сразу (через общий config + binary + state).
+# ══════════════════════════════════════════════════════════════════════════
+
+def _detect_latest_version() -> str:
+    """Проверяет последнюю СТАБИЛЬНУЮ версию b4 на GitHub.
+
+    /releases/latest возвращает только стабильные релизы (prerelease=false).
+    Для pre-release используйте _detect_latest_prerelease_version().
+    """
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/DanielLavrushin/b4/releases/latest",
+            headers={"User-Agent": "chimera-installer/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        tag = data.get("tag_name", "")
+        if tag.startswith("v"):
+            tag = tag[1:]
+        return tag
+    except Exception as e:
+        _log("WARN", f"check_latest_version: {e}")
+        return ""
+
+
+def _detect_latest_prerelease_version() -> str:
+    """Проверяет последнюю ПРЕ-релизную версию b4 на GitHub.
+
+    GitHub API endpoint `/releases/latest` возвращает только стабильные
+    релизы (prerelease=false). Для pre-release нужно использовать
+    `/releases` (возвращает массив ВСЕХ релизов, включая pre-release) и
+    отфильтровать где prerelease=true. Берём первый — он самый свежий.
+
+    Возвращает "" если:
+      - нет pre-release релизов (только стабильные)
+      - сетевая ошибка / GitHub недоступен
+    """
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/DanielLavrushin/b4/releases",
+            headers={"User-Agent": "chimera-installer/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        # data — список релизов, отсортированных GitHub'ом от новых к старым.
+        # Ищем первый где prerelease=true.
+        for release in data:
+            if release.get("prerelease", False):
+                tag = release.get("tag_name", "")
+                if tag.startswith("v"):
+                    tag = tag[1:]
+                return tag
+        return ""  # Pre-release релизов нет
+    except Exception as e:
+        _log("WARN", f"check_latest_prerelease_version: {e}")
+        return ""
+
+
+def _do_b4_binary_update(old_version: str, target_version: str) -> dict:
+    """Скачивает и устанавливает конкретную версию b4 binary.
+
+    Общая логика для auto_update() (release) и auto_update_prerelease().
+    НЕ делает проверку версии через GitHub API — caller передаёт уже
+    известный target_version. Делает всё остальное:
+      1. Архитектура
+      2. Скачать tar.gz
+      3. SHA256 verify (опционально — если .sha256 файл недоступен, skip)
+      4. Распаковать
+      5. Остановить сервис
+      6. Backup + replace binary
+      7. Запустить + verify (если не запустилась — откат)
+      8. Обновить state.json (version)
+      9. Cleanup
+
+    Возвращает dict с ключами: updated, old_version, new_version, message.
+    """
+    arch = _detect_arch()
+    if not arch:
+        return {"updated": False, "old_version": old_version,
+                "message": "Неподдерживаемая архитектура"}
+
+    url = f"https://github.com/DanielLavrushin/b4/releases/download/v{target_version}/b4-linux-{arch}.tar.gz"
+    tmp_tar = Path("/tmp/b4-update.tar.gz")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "chimera-installer/5.0"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            tmp_tar.write_bytes(resp.read())
+    except Exception as e:
+        return {"updated": False, "old_version": old_version,
+                "message": f"Скачивание не удалось: {e}"}
+
+    # SHA256 проверка.
+    sha_url = url + ".sha256"
+    try:
+        req = urllib.request.Request(sha_url, headers={"User-Agent": "chimera-installer/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            expected_sha = resp.read().decode().strip().split()[0]
+        import hashlib
+        actual_sha = hashlib.sha256(tmp_tar.read_bytes()).hexdigest()
+        if expected_sha and actual_sha != expected_sha:
+            tmp_tar.unlink(missing_ok=True)
+            return {"updated": False, "old_version": old_version,
+                    "message": "SHA256 mismatch"}
+        _ok(f"SHA256 проверен: {actual_sha[:16]}...")
+    except Exception:
+        _warn("SHA256 файл недоступен — пропуск проверки")
+
+    # Распаковать.
+    extract_dir = Path("/tmp/b4-update-extract")
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    try:
+        with tarfile.open(tmp_tar, "r:gz") as tf:
+            tf.extractall(path=extract_dir)
+    except Exception as e:
+        tmp_tar.unlink(missing_ok=True)
+        return {"updated": False, "old_version": old_version,
+                "message": f"Распаковка не удалось: {e}"}
+
+    new_binary = extract_dir / "b4"
+    if not new_binary.exists():
+        tmp_tar.unlink(missing_ok=True)
+        return {"updated": False, "old_version": old_version,
+                "message": "В архиве нет b4 binary"}
+
+    # Остановить сервис.
+    _info("Останавливаю b4...")
+    subprocess.run(["systemctl", "stop", "b4"], capture_output=True, check=False)
+
+    # Backup + replace.
+    backup_path = B4_BINARY_PATH.with_suffix(".bak")
+    try:
+        shutil.copy2(B4_BINARY_PATH, backup_path)
+    except Exception:
+        pass
+    try:
+        shutil.copy2(new_binary, B4_BINARY_PATH)
+        B4_BINARY_PATH.chmod(0o755)
+    except Exception as e:
+        if backup_path.exists():
+            shutil.copy2(backup_path, B4_BINARY_PATH)
+            B4_BINARY_PATH.chmod(0o755)
+        return {"updated": False, "old_version": old_version,
+                "message": f"Замена binary не удалась: {e}"}
+
+    # Запустить + проверить.
+    _info("Запускаю b4...")
+    subprocess.run(["systemctl", "start", "b4"], capture_output=True, check=False)
+    time.sleep(2)
+
+    if not _detect_service_active():
+        _err("Новая версия не запустилась — восстанавливаю предыдущую...")
+        subprocess.run(["systemctl", "stop", "b4"], capture_output=True, check=False)
+        if backup_path.exists():
+            shutil.copy2(backup_path, B4_BINARY_PATH)
+            B4_BINARY_PATH.chmod(0o755)
+        subprocess.run(["systemctl", "start", "b4"], capture_output=True, check=False)
+        time.sleep(2)
+        return {"updated": False, "old_version": old_version,
+                "message": "Новая версия не запустилась — восстановлена предыдущая"}
+
+    # Обновить state.
+    new_version = _detect_version()
+    state = _load_state()
+    state["version"] = new_version
+    _save_state(state)
+
+    # Cleanup.
+    backup_path.unlink(missing_ok=True)
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    tmp_tar.unlink(missing_ok=True)
+
+    _ok(f"b4 обновлён: {old_version} → {new_version}")
+    _info("Конфиг и set'ы сохранены без изменений.")
+    return {"updated": True, "old_version": old_version,
+            "new_version": new_version,
+            "message": f"Обновлено: {old_version} → {new_version}"}
+
+
+def auto_update() -> dict:
+    """Проверяет и обновляет b4 binary до последней СТАБИЛЬНОЙ версии.
+
+    1. Проверка GitHub API /releases/latest → последняя стабильная версия.
+    2. Сравнение с установленной.
+    3. Скачать → SHA256 → stop → backup → replace → start → verify.
+    4. Конфиг и set'ы НЕ затрагиваются.
+
+    Для PRE-RELEASE обновлений используйте auto_update_prerelease().
+    """
+    if not _detect_installed():
+        return {"updated": False, "message": "b4 не установлен"}
+
+    old_version = _detect_version()
+    latest = _detect_latest_version()
+    if not latest:
+        return {"updated": False, "old_version": old_version,
+                "message": "Не удалось проверить последнюю версию"}
+
+    if old_version == latest:
+        return {"updated": False, "old_version": old_version,
+                "new_version": latest, "message": f"Уже актуальная версия {old_version}"}
+
+    _info(f"Обновление: {old_version} → {latest}")
+    return _do_b4_binary_update(old_version, latest)
+
+
+def auto_update_prerelease(confirm: bool = True) -> dict:
+    """Обновляет b4 binary до последней ПРЕ-релизной версии.
+
+    Симметрична auto_update(), но использует GitHub API /releases для
+    поиска pre-release версий (prerelease=true). Pre-release — это
+    бета/RC версии, которые могут содержать баги и нестабильные изменения.
+
+    Параметр confirm (bool):
+      True  — печатает warning пользователю перед обновлением
+              (используется в TUI-меню для интерактивного подтверждения).
+      False — обновляет без подтверждения (для REST API / тестов).
+              Warning ВСЕГДА печатается через _warn() — он попадает в лог,
+              но не требует ответа пользователя.
+
+    Возвращает тот же формат dict что и auto_update().
+    """
+    if not _detect_installed():
+        return {"updated": False, "message": "b4 не установлен"}
+
+    old_version = _detect_version()
+    latest_pre = _detect_latest_prerelease_version()
+    if not latest_pre:
+        return {"updated": False, "old_version": old_version,
+                "message": "Pre-release версии не найдены на GitHub"}
+
+    if old_version == latest_pre:
+        return {"updated": False, "old_version": old_version,
+                "new_version": latest_pre,
+                "message": f"Уже установлена pre-release версия {old_version}"}
+
+    # Warning всегда печатается (для лога).
+    _warn(f"⚠  Установка PRE-RELEASE версии b4: {old_version} → {latest_pre}")
+    _warn("Установка preprelease версии может привести к ошибкам и нестабильной работе.")
+
+    if confirm:
+        try:
+            ans = input(
+                f"{YELLOW}Вы точно хотите установить preprelease версию {latest_pre}? [y/N]:{NC} "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans not in ("y", "yes", "д", "да"):
+            _info("Обновление до pre-release отменено пользователем.")
+            return {"updated": False, "old_version": old_version,
+                    "new_version": latest_pre,
+                    "message": "Отменено пользователем"}
+
+    _info(f"Обновление (PRE-RELEASE): {old_version} → {latest_pre}")
+    return _do_b4_binary_update(old_version, latest_pre)
+
+
 def _write_default_config() -> bool:
     """Создаёт дефолтный config.json с одним set "Youtube" (эталон).
 
@@ -1087,16 +1379,18 @@ def do_youtube_b4_menu() -> None:
             _box_item("2", "🔄 Переключить preset")
             _box_item("3", "📥 Импортировать кастомный сет (JSON)")
             _box_item("4", "🔍 Discovery (автоподбор сета под провайдера)")
-            _box_item("5", "🏥 Health check YouTube (работает ли?)")
-            _box_item("6", "📋 Логи b4 (последние 30 строк)")
-            _box_item("7", "🌐 Открыть Web UI (SSH-туннель инструкция)")
+            _box_item("5", "🔄 Проверить обновление b4 (stable)")
+            _box_item("U", f"🧪 Обновить до pre-release версии  {YELLOW}(нестабильно!){NC}")
+            _box_item("6", "🏥 Health check YouTube (работает ли?)")
+            _box_item("7", "📋 Логи b4 (последние 30 строк)")
+            _box_item("8", "🌐 Открыть Web UI (SSH-туннель инструкция)")
             # nginx front (TLS) для прямого доступа к Web UI из браузера.
             ng_st = _b4_nginx_status()
             if ng_st.get("enabled"):
                 ng_url = _b4_nginx_get_url()
-                _box_item("8", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}({ng_url}){NC}")
+                _box_item("9", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}({ng_url}){NC}")
             else:
-                _box_item("8", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ к Web UI по HTTPS{NC}")
+                _box_item("9", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ к Web UI по HTTPS{NC}")
             _box_row()
             _box_item("R", f"{RED}🗑️  Удалить b4 полностью{NC}")
             _box_row()
@@ -1186,6 +1480,27 @@ def do_youtube_b4_menu() -> None:
             input(f"\n{BOLD}Enter…{NC}")
 
         elif s["installed"] and ch == "5":
+            # Автообновление b4 (stable release).
+            _info("Проверяю обновления...")
+            result = auto_update()
+            if result.get("updated"):
+                _ok(result["message"])
+            else:
+                _info(result["message"])
+            input(f"\n{BOLD}Enter…{NC}")
+
+        elif s["installed"] and ch == "u":
+            # Обновление до PRE-RELEASE версии (с предупреждением).
+            # auto_update_prerelease(confirm=True) сама показывает warning
+            # и спрашивает [y/N]. Если пользователь ответил не "y" — откат.
+            result = auto_update_prerelease(confirm=True)
+            if result.get("updated"):
+                _ok(result["message"])
+            else:
+                _info(result["message"])
+            input(f"\n{BOLD}Enter…{NC}")
+
+        elif s["installed"] and ch == "6":
             _info("Проверяю YouTube (3 запроса, до 30с)...")
             result = health_check_youtube()
             for t in result["targets"]:
@@ -1200,7 +1515,7 @@ def do_youtube_b4_menu() -> None:
                 _info("Попробуйте: Discovery (пункт 3) или другой preset (пункт 2).")
             input(f"\n{BOLD}Enter…{NC}")
 
-        elif s["installed"] and ch == "6":
+        elif s["installed"] and ch == "7":
             # Логи.
             os.system("clear")
             _box_top("📋  ЛОГИ B4 (ПОСЛЕДНИЕ 30 СТРОК)")
@@ -1227,7 +1542,7 @@ def do_youtube_b4_menu() -> None:
             _box_bottom()
             input(f"\n{BOLD}Enter…{NC}")
 
-        elif s["installed"] and ch == "7":
+        elif s["installed"] and ch == "8":
             # Web UI инструкция.
             web_port = s.get("web_port", B4_WEB_PORT)
             os.system("clear")
@@ -1251,7 +1566,7 @@ def do_youtube_b4_menu() -> None:
             _box_bottom()
             input(f"\n{BOLD}Enter…{NC}")
 
-        elif s["installed"] and ch == "8":
+        elif s["installed"] and ch == "9":
             # nginx front (TLS) для b4 Web UI.
             ng_st = _b4_nginx_status()
             if ng_st.get("enabled"):
