@@ -1023,6 +1023,75 @@ def uninstall_b4() -> bool:
 #  СТАТУС / УПРАВЛЕНИЕ
 # ══════════════════════════════════════════════════════════════════════════
 
+def _sets_match(a: dict, b: dict) -> bool:
+    """Сравнивает ключевые поля двух b4 set'ов.
+
+    Используется для детекта активного preset'а из config.json —
+    сравнивает текущий set с встроенными пресетами (DEFAULT/AGGRESSIVE/LIGHT).
+
+    Сравниваются только функциональные поля (домены, fake SNI, фрагментация).
+    Не сравниваются: id, name, b4_version, enabled — они не влияют на работу
+    b4, и Web UI может их менять без потери функциональности.
+
+    Возвращает True если set'ы функционально идентичны.
+    """
+    # Домены (sni_domains) — сравниваем как множества (порядок не важен).
+    a_domains = set(a.get("targets", {}).get("sni_domains", []))
+    b_domains = set(b.get("targets", {}).get("sni_domains", []))
+    if a_domains != b_domains:
+        return False
+    # Fake SNI — тип (DuckDuckGo=3, Google=2, и т.д.) и TTL.
+    a_faking = a.get("faking", {})
+    b_faking = b.get("faking", {})
+    if a_faking.get("sni_type") != b_faking.get("sni_type"):
+        return False
+    if a_faking.get("ttl") != b_faking.get("ttl"):
+        return False
+    # SNI on/off (для light preset'а, где sni=False).
+    if a_faking.get("sni", True) != b_faking.get("sni", True):
+        return False
+    # Фрагментация TCP.
+    a_tcp = a.get("tcp", {})
+    b_tcp = b.get("tcp", {})
+    if a_tcp.get("seg2delay") != b_tcp.get("seg2delay"):
+        return False
+    if a_tcp.get("seg2delay_max") != b_tcp.get("seg2delay_max"):
+        return False
+    return True
+
+
+def _detect_active_preset_from_config() -> tuple:
+    """Детектит активный preset из /etc/b4/config.json.
+
+    Сравнивает текущий set[0] из config.json с встроенными пресетами
+    (DEFAULT_SET_YOUTUBE / AGGRESSIVE_SET_YOUTUBE / LIGHT_SET_YOUTUBE).
+
+    Возвращает кортеж (preset_name, set_name):
+      preset_name: 'default' / 'aggressive' / 'light' / 'custom' / 'unknown'
+      set_name: имя set'а из config.json (для отображения в UI), или None
+
+    'custom' — set не совпал ни с одним встроенным пресетом (правлен через
+    Web UI / Discovery / импортирован).
+    'unknown' — config.json отсутствует, повреждён, или sets пустой.
+    """
+    if not B4_CONFIG_FILE.exists():
+        return ("unknown", None)
+    try:
+        cfg = json.loads(B4_CONFIG_FILE.read_text())
+        sets = cfg.get("sets", [])
+        if not sets:
+            return ("unknown", None)
+        current_set = sets[0]
+        set_name = current_set.get("name")
+        # Сравниваем с встроенными пресетами.
+        for preset_name, (_, built_in_set) in PRESETS.items():
+            if _sets_match(current_set, built_in_set):
+                return (preset_name, set_name)
+        return ("custom", set_name)
+    except Exception:
+        return ("unknown", None)
+
+
 def status() -> dict:
     """Возвращает сводку состояния b4."""
     state = _load_state()
@@ -1045,13 +1114,28 @@ def status() -> dict:
                 version = m.group(1)
         except Exception:
             pass
+
+    #  Авто-синхронизация active_preset с config.json.
+    # Web UI b4 / Discovery меняют config.json, но не трогают state.json.
+    # Детектим актуальный preset из config.json и обновляем state при
+    # расхождении. Это делает подпись в меню честной: если set правлен
+    # через Web UI — TUI покажет 'custom' вместо устаревшего имени preset'а.
+    detected_preset, detected_set_name = _detect_active_preset_from_config()
+    state_preset = state.get("active_preset")
+    if detected_preset != "unknown" and detected_preset != state_preset:
+        # Config был изменён внешне (Web UI / Discovery) — обновляем state.
+        state["active_preset"] = detected_preset
+        _save_state(state)
+    active_preset = detected_preset if detected_preset != "unknown" else state_preset
+
     # nginx front status.
     ng = _b4_nginx_status()
     nginx_url = _b4_nginx_get_url()
     return {
         "installed": True,
         "service_active": service_active,
-        "active_preset": state.get("active_preset"),
+        "active_preset": active_preset,
+        "active_set_name": detected_set_name,
         "version": version,
         "web_port": state.get("web_port", B4_WEB_PORT),
         "config_path": str(B4_CONFIG_FILE),
@@ -1298,11 +1382,22 @@ def health_check_youtube() -> dict:
 def get_portal_info() -> dict:
     """Краткий статус для User Portal."""
     s = status()
+    _preset_name = s.get("active_preset")
+    _set_name = s.get("active_set_name")
+    if _preset_name in PRESETS:
+        _label = PRESETS[_preset_name][0]
+    elif _preset_name == "custom" and _set_name:
+        _label = f"custom ({_set_name})"
+    elif _preset_name == "custom":
+        _label = "custom"
+    else:
+        _label = None
     return {
         "installed": s["installed"],
         "active": s.get("service_active", False),
-        "preset": s.get("active_preset"),
-        "preset_label": PRESETS.get(s.get("active_preset"), ("",))[0] if s.get("active_preset") else None,
+        "preset": _preset_name,
+        "preset_label": _label,
+        "active_set_name": _set_name,
     }
 
 
@@ -1353,7 +1448,20 @@ def do_youtube_b4_menu() -> None:
             status_str = "active" if s.get("service_active") else "stopped"
             _box_row(f"  Сервис:       {status_col}{status_str}{NC}")
             _box_row(f"  Версия:       {CYAN}{s.get('version', '?')}{NC}")
-            preset_label = PRESETS.get(s.get("active_preset"), ("—",))[0]
+            #  Отображение preset: A+B подход.
+            # A: детектим preset из config.json (через _detect_active_preset_from_config).
+            # B: если preset='custom' — показываем и 'custom', и имя set'а из config.json.
+            _preset_name = s.get("active_preset")
+            _set_name = s.get("active_set_name")
+            if _preset_name in PRESETS:
+                preset_label = PRESETS[_preset_name][0]
+            elif _preset_name == "custom" and _set_name:
+                # Кастомный set — показываем имя из config.json.
+                preset_label = f"custom ({_set_name})"
+            elif _preset_name == "custom":
+                preset_label = "custom"
+            else:
+                preset_label = "—"
             _box_row(f"  Preset:       {CYAN}{preset_label}{NC}")
             _box_row(f"  Web UI:       {CYAN}http://127.0.0.1:{s.get('web_port')}{NC}")
             # Если nginx front включён — показываем прямой URL.
