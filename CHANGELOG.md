@@ -2,6 +2,154 @@
 
 ---
 
+## FIX(dpi_bypass): синхронизация меню с youtube_b4 (эталон) — пункт [7] открывал Web UI вместо Логов — 19 августа 2026
+
+**В централизованном DPI Bypass модуле (`dpi_bypass.py`) при нажатии
+[7] "Логи b4" открывалось совершенно другое меню — "🌐 WEB UI B4
+(ИНСТРУКЦИЯ)". Меню `youtube_b4.py` (эталон) работало правильно.
+Пользователь попросил синхронизировать меню, взяв за эталон
+`youtube_b4.py`, ничего не сломав.**
+
+### Корневая причина — ДВА бага в `dpi_bypass.py`
+
+**Баг 1: Дубликат обработчика `ch == "6"`** (критичный):
+
+```python
+elif s["installed"] and ch == "6":   # ← строка 1550: Health check
+    ...
+elif s["installed"] and ch == "6":   # ← строка 1565: Логи (НИКОГДА не выполнится!)
+    ...
+elif s["installed"] and ch == "7":   # ← Web UI инструкция
+    ...
+elif s["installed"] and ch == "8":   # ← nginx front
+    ...
+```
+
+Так как оба — `elif`, второй `ch == "6"` (Логи) **недостижим** —
+первый (Health check) перехватывал все нажатия "6". Поэтому:
+
+| Нажатие | Меню показывало | Что открывалось (баг) |
+|---------|-----------------|----------------------|
+| [6] | Health check | Health check ✓ |
+| [7] | Логи b4 | **Web UI инструкция** ✗ |
+| [8] | nginx front | nginx front ✓ |
+
+**Баг 2: В рендере меню отсутствовал пункт "8. Web UI инструкция"**:
+
+В `dpi_bypass.py` рендер меню был:
+```
+[6] Health check
+[7] Логи b4
+[8] nginx front     ← нет пункта Web UI инструкция!
+```
+
+А в эталоне `youtube_b4.py`:
+```
+[6] Health check
+[7] Логи b4
+[8] Web UI инструкция
+[9] nginx front
+```
+
+То есть в `dpi_bypass.py` пункт Web UI инструкция отсутствовал в рендере,
+но обработчик для него был (на `ch == "7"`). Из-за этого нумерация
+съехала: [7] в меню = Логи, но обработчик `ch == "7"` = Web UI.
+
+### Фикс
+
+**1. Рендер меню `dpi_bypass.py`** — добавлен пункт [8] Web UI инструкция,
+nginx front перенесён с [8] на [9]:
+```diff
+ _box_item("6", "🏥 Health check YouTube (работает ли?)")
+ _box_item("7", "📋 Логи b4 (последние 30 строк)")
++_box_item("8", "🌐 Открыть Web UI (SSH-туннель инструкция)")
+ _box_item("9", f"🌐 nginx front (TLS) — ...")  # было [8]
+```
+
+**2. Обработчики `dpi_bypass.py`** — удалён дубликат `ch == "6"`,
+перенumbered:
+```diff
+-elif s["installed"] and ch == "6":  # ← Health check (1-й)
+-    ...
+-elif s["installed"] and ch == "6":  # ← Логи (2-й, недостижим) — УДАЛЁН
+-    ...
+-elif s["installed"] and ch == "7":  # ← Web UI инструкция
+-    ...
+-elif s["installed"] and ch == "8":  # ← nginx front
++elif s["installed"] and ch == "6":  # Health check
++    ...
++elif s["installed"] and ch == "7":  # Логи
++    ...
++elif s["installed"] and ch == "8":  # Web UI инструкция
++    ...
++elif s["installed"] and ch == "9":  # nginx front
+```
+
+**3. Косметическая синхронизация формулировок** с эталоном `youtube_b4.py`:
+- `[4]` "Discovery (автоподбор сета)" → "Discovery (автоподбор сета под провайдера)"
+- `[5]` "Проверить обновление b4" → "Проверить обновление b4 (stable)"
+- `[6]` "Health check (работают ли сайты?)" → "Health check YouTube (работает ли?)"
+
+### Результат — меню идентичны байт-в-байт
+
+После фикса оба меню рендерят **одинаковые** пункты:
+
+```
+[1]  🛑 Остановить b4 (без удаления)
+[2]  🔄 Переключить preset
+[3]  📥 Импортировать кастомный сет (JSON)
+[4]  🔍 Discovery (автоподбор сета под провайдера)
+[5]  🔄 Проверить обновление b4 (stable)
+[U]  🧪 Обновить до pre-release версии  (нестабильно!)
+[6]  🏥 Health check YouTube (работает ли?)
+[7]  📋 Логи b4 (последние 30 строк)
+[8]  🌐 Открыть Web UI (SSH-туннель инструкция)
+[9]  🌐 nginx front (TLS) — включить прямой доступ к Web UI по HTTPS
+[R]  🗑️  Удалить b4 полностью
+[Q]  ← Назад в главное меню
+```
+
+### Что НЕ менялось (проверено тестами)
+
+- ✅ Импорт кастомных сетов (`import_custom_set`, `import_custom_set_from_file`)
+- ✅ Discovery (`run_discovery`)
+- ✅ Обновление stable (`auto_update`)
+- ✅ Обновление pre-release (`auto_update_prerelease` + warning + [y/N])
+- ✅ Health check (`health_check_youtube`)
+- ✅ Логи (`journalctl -u b4`)
+- ✅ Web UI инструкция
+- ✅ nginx front (TLS) — включение/выключение
+- ✅ Удаление b4 (`uninstall_b4`)
+- ✅ Синхронизация между модулями (общий binary/config/state)
+- ✅ Все обработчики работают на правильные пункты
+
+### Тесты (5 новых)
+
+Добавлен класс `TestMenuItemsSync` в `tests/test_dpi_bypass.py`:
+
+- `test_menus_render_identical_items` — REGRESSION: оба модуля рендерят
+  ОДИНАКОВЫЕ пункты меню (byte-for-byte сравнение).
+- `test_menu_has_eight_web_ui_item` — REGRESSION: пункт [8] должен быть
+  Web UI инструкция (раньше отсутствовал).
+- `test_menu_has_nine_nginx_front` — REGRESSION: nginx front на [9],
+  а не на [8].
+- `test_no_duplicate_handlers_in_dpi_bypass` — REGRESSION: каждый
+  обработчик `ch=="N"` встречается ровно 1 раз (раньше `ch=="6"`
+  был дважды).
+- `test_menu_item_7_is_logs_not_webui` — REGRESSION: пункт [7] должен
+  быть Логи, а не Web UI инструкция (именно этот баг видел пользователь).
+
+### Файлы
+
+- `chimera/modules/dpi_bypass.py` — фиксы рендера меню + обработчиков
+- `tests/test_dpi_bypass.py` — 5 новых regression-тестов
+
+### Тесты
+
+144 теста проходят (139 предыдущих + 5 новых).
+
+---
+
 ## FEAT(youtube_b4+dpi_bypass): обновление b4 до pre-release версий с предупреждением — 19 августа 2026
 
 **Добавлена возможность обновлять b4 binary до PRE-RELEASE версий (beta/RC)

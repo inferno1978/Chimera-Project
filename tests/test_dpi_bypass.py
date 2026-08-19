@@ -18,6 +18,7 @@ Unit-тесты для chimera/modules/dpi_bypass.py — централизов�
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import types
@@ -806,6 +807,134 @@ class TestPreReleaseSyncBetweenModules(unittest.TestCase):
                          self.dpi_bypass.B4_BINARY_PATH)
         self.assertEqual(str(self.youtube_b4.B4_BINARY_PATH),
                          "/usr/local/bin/b4")
+
+
+class TestMenuItemsSync(unittest.TestCase):
+    """REGRESSION: синхронизация пунктов меню между youtube_b4 и dpi_bypass.
+
+    БАГ (исправлен): в dpi_bypass.py был дубликат обработчика `ch == "6"`
+    (один для Health check, другой для Логов). Из-за этого Логи никогда не
+    открывались — при нажатии 7 (Логи по меню) открывался Web UI инструкция
+    (потому что обработчик ch=="7" был привязан к Web UI, а не к Логам).
+
+    Также в dpi_bypass.py отсутствовал пункт "8. Web UI инструкция" —
+    nginx front был на 8, а в youtube_b4.py (эталон) nginx front на 9.
+
+    Этот тест проверяет:
+      1. Меню обоих модулей рендерят ОДИНАКОВЫЕ пункты (byte-for-byte).
+      2. Обработчики в dpi_bypass.py не имеют дубликатов.
+      3. Каждый пункт меню [N] имеет соответствующий обработчик ch=="N".
+      4. Нажатие [7] в dpi_bypass открывает именно Логи, а не Web UI.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.youtube_b4 = youtube_b4
+        self.dpi_bypass = dpi_bypass
+
+    def _render_menu_items(self, module, menu_func_name):
+        """Рендерит меню и возвращает список (key, label) пунктов."""
+        import io
+        from contextlib import redirect_stdout
+
+        def _fake_status():
+            return {
+                'installed': True, 'service_active': True,
+                'active_preset': 'default', 'version': '1.78.0',
+                'web_port': 9700, 'config_path': '/etc/b4/config.json',
+                'binary_path': '/usr/local/bin/b4', 'queue_num': 537,
+                'mark': 32768, 'nginx_front_enabled': False,
+                'nginx_front_port': 9743, 'nginx_front_url': None,
+            }
+        module.status = _fake_status
+        module._b4_nginx_status = lambda: {'enabled': False, 'port': 9743}
+
+        inputs = iter(['q'])
+        def _input(prompt='', *a, **kw):
+            return next(inputs)
+
+        captured = io.StringIO()
+        with patch("builtins.input", side_effect=_input), \
+             redirect_stdout(captured):
+            try:
+                getattr(module, menu_func_name)()
+            except StopIteration:
+                pass
+
+        output = captured.getvalue()
+        # Извлекаем пункты вида [N] или [U] или [R]
+        items = []
+        for line in output.split('\n'):
+            m = re.search(r'\[([0-9UR])\]\s+(.+?)(?:\s{2,}|\s*$)', line)
+            if m:
+                items.append((m.group(1), m.group(2).strip()))
+        return items
+
+    def test_menus_render_identical_items(self):
+        """Оба модуля рендерят ОДИНАКОВЫЕ пункты меню."""
+        yt_items = self._render_menu_items(self.youtube_b4, 'do_youtube_b4_menu')
+        dpi_items = self._render_menu_items(self.dpi_bypass, 'do_dpi_bypass_menu')
+        self.assertEqual(yt_items, dpi_items,
+                         f"Меню должны быть идентичны.\n"
+                         f"youtube_b4: {yt_items}\n"
+                         f"dpi_bypass: {dpi_items}")
+
+    def test_menu_has_eight_web_ui_item(self):
+        """REGRESSION: в dpi_bypass.py должен быть пункт [8] Web UI инструкция.
+
+        Раньше этого пункта не было — nginx front был на 8, а Web UI
+        инструкция вообще отсутствовала в рендере (но обработчик был).
+        """
+        dpi_items = self._render_menu_items(self.dpi_bypass, 'do_dpi_bypass_menu')
+        keys = [k for k, _ in dpi_items]
+        self.assertIn("8", keys, "Пункт [8] должен присутствовать в меню")
+        # Пункт 8 должен быть именно Web UI инструкция
+        item_8 = [label for k, label in dpi_items if k == "8"][0]
+        self.assertIn("Web UI", item_8,
+                      f"Пункт [8] должен быть Web UI инструкция, а не '{item_8}'")
+
+    def test_menu_has_nine_nginx_front(self):
+        """REGRESSION: nginx front должен быть на [9], а не на [8]."""
+        dpi_items = self._render_menu_items(self.dpi_bypass, 'do_dpi_bypass_menu')
+        item_9 = [label for k, label in dpi_items if k == "9"]
+        self.assertTrue(item_9, "Пункт [9] должен присутствовать в меню")
+        self.assertIn("nginx front", item_9[0])
+
+    def test_no_duplicate_handlers_in_dpi_bypass(self):
+        """REGRESSION: в dpi_bypass.py не должно быть дубликатов обработчиков.
+
+        БАГ: раньше было два `elif s["installed"] and ch == "6":` —
+        первый для Health check, второй для Логов. Второй никогда не
+        выполнялся (elif). Проверяем что каждый ch=="N" встречается
+        ровно один раз в исходнике.
+        """
+        import inspect
+        src = inspect.getsource(self.dpi_bypass.do_dpi_bypass_menu)
+        # Считаем количество каждого обработчика
+        for key in ["5", "6", "7", "8", "9", "u", "r"]:
+            pattern = f'elif s["installed"] and ch == "{key}":'
+            count = src.count(pattern)
+            self.assertEqual(count, 1,
+                             f"Обработчик ch==\"{key}\" должен встречаться ровно 1 раз, "
+                             f"найдено {count}")
+
+    def test_menu_item_7_is_logs_not_webui(self):
+        """REGRESSION: пункт [7] в dpi_bypass должен быть Логи, не Web UI.
+
+        Именно этот баг видел пользователь: нажал 7 (Логи по меню),
+        а открылся Web UI инструкция.
+        """
+        dpi_items = self._render_menu_items(self.dpi_bypass, 'do_dpi_bypass_menu')
+        item_7 = [label for k, label in dpi_items if k == "7"]
+        self.assertTrue(item_7, "Пункт [7] должен присутствовать в меню")
+        self.assertIn("Логи", item_7[0],
+                      f"Пункт [7] должен быть 'Логи b4', а не '{item_7[0]}'")
+        self.assertNotIn("Web UI", item_7[0],
+                         f"Пункт [7] НЕ должен быть Web UI инструкцией")
 
 
 if __name__ == "__main__":

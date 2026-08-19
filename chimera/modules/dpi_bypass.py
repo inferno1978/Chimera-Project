@@ -1426,18 +1426,19 @@ def do_dpi_bypass_menu() -> None:
                 _box_item("1", "🚀 Запустить b4")
             _box_item("2", "🔄 Переключить preset")
             _box_item("3", "📥 Импортировать кастомный сет (JSON)")
-            _box_item("4", "🔍 Discovery (автоподбор сета)")
-            _box_item("5", "🔄 Проверить обновление b4")
+            _box_item("4", "🔍 Discovery (автоподбор сета под провайдера)")
+            _box_item("5", "🔄 Проверить обновление b4 (stable)")
             _box_item("U", f"🧪 Обновить до pre-release версии  {YELLOW}(нестабильно!){NC}")
-            _box_item("6", "🏥 Health check (работают ли сайты?)")
+            _box_item("6", "🏥 Health check YouTube (работает ли?)")
             _box_item("7", "📋 Логи b4 (последние 30 строк)")
+            _box_item("8", "🌐 Открыть Web UI (SSH-туннель инструкция)")
             # nginx front (TLS) для прямого доступа к Web UI из браузера.
             ng_st = _b4_nginx_status()
             if ng_st.get("enabled"):
                 ng_url = _b4_nginx_get_url()
-                _box_item("8", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}({ng_url}){NC}")
+                _box_item("9", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}({ng_url}){NC}")
             else:
-                _box_item("8", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ к Web UI по HTTPS{NC}")
+                _box_item("9", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ к Web UI по HTTPS{NC}")
             _box_row()
             _box_item("R", f"{RED}🗑️  Удалить b4 полностью{NC}")
             _box_row()
@@ -1562,7 +1563,7 @@ def do_dpi_bypass_menu() -> None:
                 _info("Попробуйте: Discovery (пункт 3) или другой preset (пункт 2).")
             input(f"\n{BOLD}Enter…{NC}")
 
-        elif s["installed"] and ch == "6":
+        elif s["installed"] and ch == "7":
             # Логи.
             os.system("clear")
             _box_top("📋  ЛОГИ B4 (ПОСЛЕДНИЕ 30 СТРОК)")
@@ -1589,7 +1590,7 @@ def do_dpi_bypass_menu() -> None:
             _box_bottom()
             input(f"\n{BOLD}Enter…{NC}")
 
-        elif s["installed"] and ch == "7":
+        elif s["installed"] and ch == "8":
             # Web UI инструкция.
             web_port = s.get("web_port", B4_WEB_PORT)
             os.system("clear")
@@ -1613,7 +1614,7 @@ def do_dpi_bypass_menu() -> None:
             _box_bottom()
             input(f"\n{BOLD}Enter…{NC}")
 
-        elif s["installed"] and ch == "8":
+        elif s["installed"] and ch == "9":
             # nginx front (TLS) для b4 Web UI.
             ng_st = _b4_nginx_status()
             if ng_st.get("enabled"):
