@@ -1161,14 +1161,13 @@ def do_manage_youtube_via_ru() -> None:
         _is_cur_warp = (current_target == "warp")
         _marker = "● " if _is_cur_warp else "  "
         _box_item("W", f"{_marker}YouTube через ☁️ WARP (Cloudflare)")
-        _box_row
-        _box_item("B", "📺 b4 (DPI bypass на entry) {DIM}(fake SNI + фрагментация){NC}")
+        _box_item("B", f"📺 b4 (DPI bypass на entry) {DIM}(fake SNI + фрагментация){NC}")
         _box_row()
         _box_item("Q", f"{DIM}Назад{NC}")
         _box_bottom()
 
         try:
-            ch = input(f"{CYAN}  Выбор [1-{_default_idx}/F/W/Q]:{NC} ").strip().lower()
+            ch = input(f"{CYAN}  Выбор [1-{_default_idx}/F/W/B/Q]:{NC} ").strip().lower()
         except KeyboardInterrupt:
             print()
             return
@@ -1286,6 +1285,7 @@ def do_manage_youtube_via_ru() -> None:
         _box_item("F", f"{'● ' if _is_cur_frag else '  '}YouTube через 🇷🇺\ufe0f RU+fragment {DIM}(обход ТСПУ DPI){NC}")
         _is_cur_warp = (current_target == "warp")
         _box_item("W", f"{'● ' if _is_cur_warp else '  '}YouTube через ☁\ufe0f WARP (Cloudflare)")
+        _box_item("B", f"📺 b4 (DPI bypass на entry) {DIM}(fake SNI + фрагментация){NC}")
         _box_row()
         _box_item("Q", f"{DIM}Назад{NC}")
         _box_bottom()
