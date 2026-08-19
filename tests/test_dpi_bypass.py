@@ -1862,7 +1862,7 @@ class TestCleanInstallEmptyConfig(unittest.TestCase):
                          "install_b4() НЕ должен вызывать _write_default_config()")
 
     def test_write_empty_config_creates_empty_sets(self):
-        """_write_empty_config() создаёт config с пустым массивом sets."""
+        """_write_empty_config() создаёт config с пустым массивом sets + geosite_path."""
         import tempfile
         tmpdir = Path(tempfile.mkdtemp())
         config_file = tmpdir / "config.json"
@@ -1880,6 +1880,11 @@ class TestCleanInstallEmptyConfig(unittest.TestCase):
             self.assertEqual(cfg["sets"], [])
             self.assertIn("routing", cfg)
             self.assertIn("udp", cfg)
+            # geosite_path обязателен для Discovery в Web UI
+            self.assertIn("system", cfg)
+            self.assertIn("geosite_path", cfg["system"])
+            self.assertEqual(cfg["system"]["geosite_path"],
+                             "/usr/share/xray/geosite.dat")
         finally:
             self.youtube_b4.B4_CONFIG_FILE = orig
             self.youtube_b4.B4_CONFIG_DIR = orig_dir
