@@ -2,6 +2,100 @@
 
 ---
 
+## FIX(youtube_b4+dpi_bypass): убрать IPv6 fallback — b4 сам через nftables table inet — 19 августа 2026
+
+**Убраны Chimera'ные IPv6 iptables-правила (`b4_mangle6`), которые
+создавали двойной перехват на серверах с IPv6 и приводили к "дрисне"
+в логах b4 от не-YouTube трафика (exit-ноды, google.com). b4 полностью
+сам управляет через nftables `table inet b4_mangle` — эта таблица
+работает одновременно для IPv4 и IPv6 с умным фильтром
+`ct original packets < 20` (перехват только первых 20 пакетов соединения).**
+
+### Проблема
+
+После перехода на native b4 rules (предыдущий коммит) на сервере с IPv6
+в логах b4 осталась "дрисня" от не-YouTube IPv6-трафика:
+
+```
+TCP [2a12:bec4:1280:50::2]:59550 → [2a12:bec4:1c90:16::2]:443 total-shadows.online
+TCP [2a12:bec4:1280:50::2]:5290  → [2a12:bec4:1460:443::2]:443 totalshadows.online
+```
+
+Это exit-ноды по IPv6. b4 их перехватывал, проверял — не YouTube,
+пропускал, но логировал каждый пакет.
+
+### Причина — двойной перехват IPv6
+
+Анализ `nft list ruleset` показал:
+
+1. **b4 native** создаёт `table inet b4_mangle` в nftables:
+   ```
+   chain b4_chain {
+       tcp dport 443 ct original packets < 20 ... queue to 537-540
+   }
+   ```
+   `table inet` работает **одновременно для IPv4 и IPv6**. b4 перехватывает
+   только первые 20 пакетов соединения (ClientHello + пара пакетов), потом
+   пропускает трафик напрямую. Это минимизирует нагрузку и логирует только
+   YouTube.
+
+2. **Chimera'ные правила** в `ip6 mangle → b4_mangle6` (fallback):
+   ```
+   tcp dport 443 ... queue num 537
+   ```
+   Ловят **ВЕСЬ** IPv6 443 трафик **без фильтра** по количеству пакетов.
+
+Результат: b4 получал каждый IPv6-пакет от Chimera (не только первые 20),
+проверял — не YouTube, пропускал, но **логировал каждый**. Счётчики это
+подтвердили:
+- b4 native: 560 пакетов (с фильтром < 20)
+- Chimera fallback: 272529 пакетов (в 487 раз больше!)
+
+### Решение — убрать IPv6 fallback полностью
+
+`_iptables_apply()` теперь **no-op** — не ставит НИКАКИХ правил
+(ни IPv4, ни IPv6). b4 полностью сам управляет через `table inet b4_mangle`.
+
+`_iptables_remove()` оставлен для cleanup:
+- При uninstall_b4() — убирает старые Chimera'ные правила.
+- При crash b4 (kill, OOM) — на случай если остались старые правила.
+- При миграции — убирает b4_mangle (IPv4) + b4_mangle6 (IPv6).
+
+### Что произошло после фикса
+
+- **Сервер без IPv6**: ничего не изменилось (уже было чисто).
+- **Сервер с IPv6**: Chimera'ные `b4_mangle6` удалятся при следующем
+  открытии меню b4 (авто-миграция). b4 продолжит работать через
+  `table inet b4_mangle` — логи станут чистыми.
+
+### Безопасность
+
+- b4 НЕ затронут — продолжает работать через native nftables.
+- YouTube работает по обоим протоколам (b4 обрабатывает через inet).
+- Chimera не ставит НИКАКИХ правил — нечего сломать.
+- `_iptables_remove()` убирает только старые Chimera'ные правила (не b4).
+
+### Тесты (обновлены)
+
+- `test_iptables_apply_no_ipv4_rules_*` — теперь проверяют что нет ни IPv4,
+  ни IPv6 правил (раньше проверяли только IPv4, ожидая IPv6 fallback).
+- `test_both_modules_no_iptables_apply` — REGRESSION: `_iptables_apply()`
+  не вызывает `subprocess.run` вообще (no-op). Проверка через AST-анализ
+  кода функции.
+- `test_both_modules_iptables_remove_cleans_both_v4_v6` — REGRESSION:
+  `_iptables_remove()` убирает и IPv4, и IPv6 (для cleanup/миграции).
+
+202 теста проходят.
+
+### Файлы
+
+- `chimera/modules/youtube_b4.py` — `_iptables_apply()` → no-op,
+  обновлён docstring `_iptables_remove()`.
+- `chimera/modules/dpi_bypass.py` — те же изменения (синхронно).
+- `tests/test_dpi_bypass.py` — обновлены тесты.
+
+---
+
 ## FEAT(youtube_b4+dpi_bypass): native b4 rules — b4 сам управляет iptables — 19 августа 2026
 
 **Chimera больше НЕ ставит IPv4 iptables-правила вручную для b4. Теперь

@@ -1473,24 +1473,30 @@ class TestNativeB4Rules(unittest.TestCase):
                          "Сгенерированный systemd-unit НЕ должен содержать --skip-tables")
 
     def test_iptables_apply_no_ipv4_rules_youtube_b4(self):
-        """_iptables_apply() в youtube_b4 НЕ ставит IPv4 правила (только IPv6)."""
+        """_iptables_apply() в youtube_b4 НЕ ставит НИКАКИХ правил (no-op).
+
+        b4 сам управляет через nftables `table inet b4_mangle` (IPv4+IPv6).
+        Chimera не ставит ни IPv4, ни IPv6 правила.
+        """
         import inspect
         src = inspect.getsource(self.youtube_b4._iptables_apply)
         # НЕ должно быть iptables -t mangle -A b4_mangle (IPv4)
         self.assertNotIn('"-A", "b4_mangle"', src,
                          "_iptables_apply() НЕ должен ставить IPv4 правила")
-        # ДОЛЖНО быть ip6tables (IPv6 fallback)
-        self.assertIn("ip6tables", src,
-                      "_iptables_apply() ДОЛЖЕН ставить IPv6 fallback правила")
+        # НЕ должно быть ip6tables (IPv6 fallback убран — b4 сам через inet)
+        self.assertNotIn("ip6tables", src,
+                         "_iptables_apply() НЕ должен ставить IPv6 правила "
+                         "(b4 сам через table inet)")
 
     def test_iptables_apply_no_ipv4_rules_dpi_bypass(self):
-        """_iptables_apply() в dpi_bypass НЕ ставит IPv4 правила (только IPv6)."""
+        """_iptables_apply() в dpi_bypass НЕ ставит НИКАКИХ правил (no-op)."""
         import inspect
         src = inspect.getsource(self.dpi_bypass._iptables_apply)
         self.assertNotIn('"-A", "b4_mangle"', src,
                          "_iptables_apply() НЕ должен ставить IPv4 правила")
-        self.assertIn("ip6tables", src,
-                      "_iptables_apply() ДОЛЖЕН ставить IPv6 fallback правила")
+        self.assertNotIn("ip6tables", src,
+                         "_iptables_apply() НЕ должен ставить IPv6 правила "
+                         "(b4 сам через table inet)")
 
     def test_iptables_remove_still_cleans_ipv4(self):
         """_iptables_remove() ВСЁ ЕЩЁ убирает IPv4 правила (cleanup при crash).
@@ -1677,24 +1683,46 @@ class TestNativeRulesSyncBetweenModules(unittest.TestCase):
         self.assertNotIn("--skip-tables", yt_content)
         self.assertNotIn("--skip-tables", dpi_content)
 
-    def test_both_modules_have_ipv6_fallback(self):
-        """Оба модуля имеют IPv6 fallback в _iptables_apply()."""
-        import inspect
-        yt_src = inspect.getsource(self.youtube_b4._iptables_apply)
-        dpi_src = inspect.getsource(self.dpi_bypass._iptables_apply)
-        self.assertIn("ip6tables", yt_src)
-        self.assertIn("ip6tables", dpi_src)
-        self.assertIn("b4_mangle6", yt_src)
-        self.assertIn("b4_mangle6", dpi_src)
+    def test_both_modules_no_iptables_apply(self):
+        """REGRESSION: оба модуля НЕ ставят НИКАКИХ правил в _iptables_apply().
 
-    def test_both_modules_no_ipv4_apply(self):
-        """Оба модуля НЕ ставят IPv4 правила в _iptables_apply()."""
+        b4 сам управляет через nftables `table inet b4_mangle` (IPv4+IPv6).
+        Chimera не ставит ни IPv4, ни IPv6 правила. Раньше (до этого фикса)
+        Chimera ставила IPv6 fallback, что приводило к двойному перехвату
+        на серверах с IPv6 и "дрисне" в логах b4.
+
+        Проверяем что _iptables_apply() НЕ вызывает subprocess.run вообще —
+        функция должна быть no-op (только информационное сообщение через _info).
+        """
+        import inspect, ast
+        for module_name, module in [("youtube_b4", self.youtube_b4),
+                                     ("dpi_bypass", self.dpi_bypass)]:
+            src = inspect.getsource(module._iptables_apply)
+            tree = ast.parse(src)
+            # Ищем вызовы subprocess.run — их НЕ должно быть
+            subprocess_calls = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    # Проверяем subprocess.run(...)
+                    func = node.func
+                    if isinstance(func, ast.Attribute) and func.attr == "run":
+                        if isinstance(func.value, ast.Name) and func.value.id == "subprocess":
+                            subprocess_calls.append(node)
+            self.assertEqual(len(subprocess_calls), 0,
+                f"{module_name}: _iptables_apply() должен быть no-op "
+                f"(не вызывать subprocess.run), но найдено {len(subprocess_calls)} вызовов")
+
+    def test_both_modules_iptables_remove_cleans_both_v4_v6(self):
+        """_iptables_remove() убирает и IPv4, и IPv6 правила (cleanup)."""
         import inspect
-        yt_src = inspect.getsource(self.youtube_b4._iptables_apply)
-        dpi_src = inspect.getsource(self.dpi_bypass._iptables_apply)
-        # Не должно быть "-A", "b4_mangle" (IPv4 add rule)
-        self.assertNotIn('"-A", "b4_mangle"', yt_src)
-        self.assertNotIn('"-A", "b4_mangle"', dpi_src)
+        yt_src = inspect.getsource(self.youtube_b4._iptables_remove)
+        dpi_src = inspect.getsource(self.dpi_bypass._iptables_remove)
+        # IPv4 cleanup (для миграции со старого режима + crash b4)
+        self.assertIn('"b4_mangle"', yt_src)
+        self.assertIn('"b4_mangle"', dpi_src)
+        # IPv6 cleanup (убираем старые Chimera'ные b4_mangle6)
+        self.assertIn('"b4_mangle6"', yt_src)
+        self.assertIn('"b4_mangle6"', dpi_src)
 
     def test_both_modules_have_migrate_function(self):
         """Оба модуля имеют _migrate_to_native_rules_if_needed()."""
