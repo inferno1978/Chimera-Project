@@ -1084,11 +1084,11 @@ class TestDetectActivePresetFromConfig(unittest.TestCase):
         result = self.dpi_bypass._detect_active_preset_from_config()
         self.assertEqual(result, ("unknown", None))
 
-    def test_returns_unknown_when_sets_empty(self):
-        """Пустой массив sets → ('unknown', None)."""
+    def test_returns_none_when_sets_empty(self):
+        """Пустой массив sets → ('none', None) — clean install, пресет не выбран."""
         self._config_file.write_text(json.dumps({"sets": []}))
         result = self.dpi_bypass._detect_active_preset_from_config()
-        self.assertEqual(result, ("unknown", None))
+        self.assertEqual(result, ("none", None))
 
     def test_detects_default_preset(self):
         """Set совпадает с DEFAULT_SET_YOUTUBE → ('default', set_name)."""
@@ -1817,6 +1817,155 @@ class TestNativeRulesSyncBetweenModules(unittest.TestCase):
         dpi_src = inspect.getsource(self.dpi_bypass.do_dpi_bypass_menu)
         self.assertIn("_migrate_to_native_rules_if_needed()", yt_src)
         self.assertIn("_migrate_to_native_rules_if_needed()", dpi_src)
+
+
+class TestCleanInstallEmptyConfig(unittest.TestCase):
+    """REGRESSION: clean install — b4 устанавливается с ПУСТЫМ конфигом.
+
+    Пользователь должен выбрать пресет через TUI ([2]) или Discovery в Web UI.
+    Это даёт гибкость — не всем подойдут встроенные пресеты.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.youtube_b4 = youtube_b4
+        self.dpi_bypass = dpi_bypass
+
+    def test_youtube_b4_has_write_empty_config(self):
+        """REGRESSION: youtube_b4 имеет _write_empty_config()."""
+        self.assertTrue(hasattr(self.youtube_b4, '_write_empty_config'))
+
+    def test_dpi_bypass_has_write_empty_config(self):
+        """REGRESSION: dpi_bypass имеет _write_empty_config()."""
+        self.assertTrue(hasattr(self.dpi_bypass, '_write_empty_config'))
+
+    def test_install_b4_uses_empty_config_youtube_b4(self):
+        """REGRESSION: install_b4() в youtube_b4 вызывает _write_empty_config()."""
+        import inspect
+        src = inspect.getsource(self.youtube_b4.install_b4)
+        self.assertIn("_write_empty_config()", src,
+                      "install_b4() должен вызывать _write_empty_config()")
+        self.assertNotIn("_write_default_config()", src,
+                         "install_b4() НЕ должен вызывать _write_default_config()")
+
+    def test_install_b4_uses_empty_config_dpi_bypass(self):
+        """REGRESSION: install_b4() в dpi_bypass вызывает _write_empty_config()."""
+        import inspect
+        src = inspect.getsource(self.dpi_bypass.install_b4)
+        self.assertIn("_write_empty_config()", src,
+                      "install_b4() должен вызывать _write_empty_config()")
+        self.assertNotIn("_write_default_config()", src,
+                         "install_b4() НЕ должен вызывать _write_default_config()")
+
+    def test_write_empty_config_creates_empty_sets(self):
+        """_write_empty_config() создаёт config с пустым массивом sets."""
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        config_file = tmpdir / "config.json"
+        orig = self.youtube_b4.B4_CONFIG_FILE
+        orig_dir = self.youtube_b4.B4_CONFIG_DIR
+        orig_sets = self.youtube_b4.B4_SETS_DIR
+        orig_log = self.youtube_b4.B4_LOG_DIR
+        self.youtube_b4.B4_CONFIG_FILE = config_file
+        self.youtube_b4.B4_CONFIG_DIR = tmpdir
+        self.youtube_b4.B4_SETS_DIR = tmpdir / "sets"
+        self.youtube_b4.B4_LOG_DIR = tmpdir / "log"
+        try:
+            self.youtube_b4._write_empty_config()
+            cfg = json.loads(config_file.read_text())
+            self.assertEqual(cfg["sets"], [])
+            self.assertIn("routing", cfg)
+            self.assertIn("udp", cfg)
+        finally:
+            self.youtube_b4.B4_CONFIG_FILE = orig
+            self.youtube_b4.B4_CONFIG_DIR = orig_dir
+            self.youtube_b4.B4_SETS_DIR = orig_sets
+            self.youtube_b4.B4_LOG_DIR = orig_log
+
+    def test_detect_returns_none_for_empty_config(self):
+        """_detect_active_preset_from_config() возвращает 'none' для пустого config."""
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        config_file = tmpdir / "config.json"
+        config_file.write_text(json.dumps({"sets": []}))
+        orig = self.youtube_b4.B4_CONFIG_FILE
+        self.youtube_b4.B4_CONFIG_FILE = config_file
+        try:
+            result = self.youtube_b4._detect_active_preset_from_config()
+            self.assertEqual(result, ("none", None))
+        finally:
+            self.youtube_b4.B4_CONFIG_FILE = orig
+
+    def test_install_b4_sets_preset_none_in_state(self):
+        """REGRESSION: install_b4() сохраняет active_preset=None в state.json."""
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4.install_b4)
+        dpi_src = inspect.getsource(self.dpi_bypass.install_b4)
+        # Проверяем что в _save_state передаётся active_preset: None
+        self.assertIn('"active_preset": None', yt_src)
+        self.assertIn('"active_preset": None', dpi_src)
+
+
+class TestMenuWarningForCleanInstall(unittest.TestCase):
+    """REGRESSION: меню показывает предупреждение при active_preset='none'."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.youtube_b4 = youtube_b4
+        self.dpi_bypass = dpi_bypass
+
+    def test_youtube_b4_menu_has_warning_for_none(self):
+        """do_youtube_b4_menu() содержит предупреждение при preset='none'."""
+        import inspect
+        src = inspect.getsource(self.youtube_b4.do_youtube_b4_menu)
+        self.assertIn('"none"', src)
+        self.assertIn("ПРЕСЕТ НЕ ВЫБРАН", src)
+
+    def test_dpi_bypass_menu_has_warning_for_none(self):
+        """do_dpi_bypass_menu() содержит предупреждение при preset='none'."""
+        import inspect
+        src = inspect.getsource(self.dpi_bypass.do_dpi_bypass_menu)
+        self.assertIn('"none"', src)
+        self.assertIn("ПРЕСЕТ НЕ ВЫБРАН", src)
+
+    def test_youtube_b4_menu_has_preset_list(self):
+        """youtube_b4 меню содержит список пресетов с плюсами/минусами."""
+        import inspect
+        src = inspect.getsource(self.youtube_b4.do_youtube_b4_menu)
+        # Должны быть упоминания всех 3 пресетов
+        self.assertIn("Эталон", src)
+        self.assertIn("Агрессивный", src)
+        self.assertIn("Лёгкий", src)
+        # Должны быть плюсы/минусы
+        self.assertIn("+", src)
+        self.assertIn("-", src)
+
+    def test_dpi_bypass_menu_no_preset_list(self):
+        """dpi_bypass меню НЕ содержит список пресетов (только предупреждение).
+
+        Список пресетов с плюсами/минусами есть только в youtube_b4 модуле.
+        """
+        import inspect
+        src = inspect.getsource(self.dpi_bypass.do_dpi_bypass_menu)
+        # Не должно быть подробного списка с плюсами/минусами
+        # (может быть упоминание 'preset' в общих пунктах меню, но не список)
+        self.assertNotIn("Стабильный, проверен на большинстве", src)
+        self.assertNotIn("Пробивает там, где DuckDuckGo заблокирован", src)
+
+    def test_youtube_b4_menu_has_discovery_hint(self):
+        """youtube_b4 меню содержит подсказку про Discovery в Web UI."""
+        import inspect
+        src = inspect.getsource(self.youtube_b4.do_youtube_b4_menu)
+        self.assertIn("Discovery", src)
+        self.assertIn("Web UI", src)
 
 
 if __name__ == "__main__":

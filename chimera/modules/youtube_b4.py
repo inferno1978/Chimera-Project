@@ -614,6 +614,33 @@ def auto_update_prerelease(confirm: bool = True) -> dict:
     return _do_b4_binary_update(old_version, latest_pre)
 
 
+def _write_empty_config() -> bool:
+    """Создаёт ПУСТОЙ config.json без set'ов (clean install).
+
+    Пользователь должен выбрать пресет через TUI ([2] Переключить preset)
+    или подобрать через Discovery в Web UI. Это даёт гибкость — не всем
+    подойдут встроенные пресеты (зависит от провайдера и ТСПУ).
+
+    b4 запускается с пустым sets — работает в no-op режиме (не применяет
+    DPI bypass), но Web UI, Discovery, API доступны.
+    """
+    B4_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    B4_SETS_DIR.mkdir(parents=True, exist_ok=True)
+    B4_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    config = {
+        "sets": [],
+        "routing": {"enabled": False},
+        "udp": {
+            "mode": "fake",
+            "filter_quic": "block",
+        },
+    }
+    B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+    B4_CONFIG_FILE.chmod(0o644)
+    _ok(f"Конфиг создан (пустой): {B4_CONFIG_FILE}")
+    return True
+
+
 def _write_default_config() -> bool:
     """Создаёт дефолтный config.json с одним set "Youtube" (эталон).
 
@@ -856,15 +883,18 @@ def _b4_nginx_get_url() -> Optional[str]:
 
 
 def install_b4() -> bool:
-    """Полная установка b4: binary + config + systemd + port_registry.
+    """Полная установка b4: binary + пустой config + systemd + port_registry.
 
     ВАЖНО: Начиная с v5, Chimera НЕ ставит IPv4 iptables-правила вручную.
     b4 сам управляет своими правилами (native mode, без --skip-tables).
-    IPv6-правила остаются Chimera'ными как fallback — см. _iptables_apply().
+
+    Конфиг создаётся ПУСТЫМ (без set'ов) — пользователь должен выбрать
+    пресет через TUI ([2]) или Discovery в Web UI. Это даёт гибкость:
+    не всем подойдут встроенные пресеты (зависит от провайдера/ТСПУ).
     """
     if not _download_b4_binary():
         return False
-    if not _write_default_config():
+    if not _write_empty_config():
         return False
     if not _write_systemd_unit():
         return False
@@ -896,10 +926,10 @@ def install_b4() -> bool:
         _err(f"Не удалось запустить b4: {r.stderr.strip()}")
         _info("Проверьте логи: journalctl -u b4 -n 30")
         return False
-    # Сохраняем state.
+    # Сохраняем state — preset=None (пустой конфиг, пользователь выберет).
     _save_state({
         "installed": True,
-        "active_preset": "default",
+        "active_preset": None,
         "enabled": True,
         "version": B4_VERSION,
         "web_port": B4_WEB_PORT,
@@ -909,6 +939,8 @@ def install_b4() -> bool:
     _info(f"Web UI: http://127.0.0.1:{B4_WEB_PORT} (только локально)")
     _info(f"Логи: journalctl -u b4 -f")
     _info(f"Config: {B4_CONFIG_FILE}")
+    _warn("⚠  b4 установлен с ПУСТЫМ конфигом — DPI bypass неактивен!")
+    _info("Выберите пресет через [2] или Discovery в Web UI [8].")
     return True
 
 
@@ -998,12 +1030,14 @@ def _detect_active_preset_from_config() -> tuple:
     (DEFAULT_SET_YOUTUBE / AGGRESSIVE_SET_YOUTUBE / LIGHT_SET_YOUTUBE).
 
     Возвращает кортеж (preset_name, set_name):
-      preset_name: 'default' / 'aggressive' / 'light' / 'custom' / 'unknown'
+      preset_name: 'default'/'aggressive'/'light'/'custom'/'none'/'unknown'
       set_name: имя set'а из config.json (для отображения в UI), или None
 
+    'none' — config.json существует, но sets пустой (clean install,
+      пользователь ещё не выбрал пресет).
     'custom' — set не совпал ни с одним встроенным пресетом (правлен через
-    Web UI / Discovery / импортирован).
-    'unknown' — config.json отсутствует, повреждён, или sets пустой.
+      Web UI / Discovery / импортирован).
+    'unknown' — config.json отсутствует или повреждён.
     """
     if not B4_CONFIG_FILE.exists():
         return ("unknown", None)
@@ -1011,7 +1045,7 @@ def _detect_active_preset_from_config() -> tuple:
         cfg = json.loads(B4_CONFIG_FILE.read_text())
         sets = cfg.get("sets", [])
         if not sets:
-            return ("unknown", None)
+            return ("none", None)  # clean install, no preset selected
         current_set = sets[0]
         set_name = current_set.get("name")
         # Сравниваем с встроенными пресетами.
@@ -1400,6 +1434,8 @@ def get_portal_info() -> dict:
         _label = f"custom ({_set_name})"
     elif _preset_name == "custom":
         _label = "custom"
+    elif _preset_name == "none":
+        _label = "не выбран"
     else:
         _label = None
     return {
@@ -1473,9 +1509,12 @@ def do_youtube_b4_menu() -> None:
                 preset_label = f"custom ({_set_name})"
             elif _preset_name == "custom":
                 preset_label = "custom"
+            elif _preset_name == "none":
+                # Clean install — пресет не выбран.
+                preset_label = f"{YELLOW}НЕ ВЫБРАН — выберите [2] или Discovery{NC}"
             else:
                 preset_label = "—"
-            _box_row(f"  Preset:       {CYAN}{preset_label}{NC}")
+            _box_row(f"  Preset:       {preset_label}")
             _box_row(f"  Web UI:       {CYAN}http://127.0.0.1:{s.get('web_port')}{NC}")
             # Если nginx front включён — показываем прямой URL.
             ng_url = s.get("nginx_front_url")
@@ -1492,6 +1531,30 @@ def do_youtube_b4_menu() -> None:
             _box_row(f"  {DIM}4. b4: fake DuckDuckGo ClientHello + фрагментация{NC}")
             _box_row(f"  {DIM}5. ТСПУ не видит SNI → пропускает → YouTube работает{NC}")
             _box_row()
+            #  Предупреждение если пресет не выбран (clean install).
+            if s.get("active_preset") == "none":
+                _box_warn("⚠  ПРЕСЕТ НЕ ВЫБРАН — DPI bypass неактивен!")
+                _box_row()
+                _box_row(f"  {BOLD}Выберите конфигурацию:{NC}")
+                _box_row()
+                _box_row(f"  {CYAN}[2] Эталон (DuckDuckGo fake + combo){NC}")
+                _box_row(f"      {DIM}+ Стабильный, проверен на большинстве РТ-провайдеров{NC}")
+                _box_row(f"      {DIM}- Может не сработать если ТСПУ режет DuckDuckGo SNI{NC}")
+                _box_row()
+                _box_row(f"  {CYAN}[2] Агрессивный (Google fake + меньше delay){NC}")
+                _box_row(f"      {DIM}+ Пробивает там, где DuckDuckGo заблокирован{NC}")
+                _box_row(f"      {DIM}- Выше нагрузка на CPU, больше latency{NC}")
+                _box_row()
+                _box_row(f"  {CYAN}[2] Лёгкий (только фрагментация, без fake){NC}")
+                _box_row(f"      {DIM}+ Минимальный оверхед, для слабого DPI{NC}")
+                _box_row(f"      {DIM}- Не пробивает ТСПУ с SNI-инспекцией{NC}")
+                _box_row()
+                _box_row(f"  {CYAN}[4] Discovery в Web UI{NC}")
+                _box_row(f"      {DIM}+ Автоподбор под вашего провайдера{NC}")
+                _box_row(f"      {DIM}- Занимает 1-5 минут, требует Web UI [8]{NC}")
+                _box_row()
+                _box_row(f"  {DIM}Нажмите [2] для выбора пресета или [8] для Web UI.{NC}")
+                _box_row()
             _box_sep()
             if s.get("service_active"):
                 _box_item("1", "🛑 Остановить b4 (без удаления)")
