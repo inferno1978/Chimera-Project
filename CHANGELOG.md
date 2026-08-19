@@ -2,6 +2,91 @@
 
 ---
 
+## FIX(youtube_route): восстановлен пункт [B] (b4 DPI bypass) в single-node меню — 19 августа 2026
+
+**На RU-entry серверах без chain-exit нод (single-node режим) пункт
+[B] (b4 DPI bypass) отсутствовал в меню YouTube маршрутизации, хотя
+prompt `Выбор [1/2/F/W/B/Q]:` упоминал кнопку B и обработчик `elif ch == "b":`
+правильно вызывал `do_youtube_b4_menu()`. Пользователь не видел визуально
+опцию B — только literal упоминание в prompt-строке.**
+
+### Корневая причина
+
+В коммите `f483fba` (FEAT: добавлен пункт B в меню YouTube) обработка B
+была добавлена в **обе** ветки меню (single-node и multi-node), но
+**`_box_item("B", ...)` был добавлен ТОЛЬКО в multi-node ветку**.
+В single-node ветке забыли добавить строку рендеринга пункта меню.
+
+Дополнительно в multi-node ветке были два косметических бага:
+1. `_box_row` без скобок (`_box_row` вместо `_box_row()`) — no-op, ссылка
+   на функцию вместо вызова. Не рендерил разделитель.
+2. `_box_item("B", "📺 b4 ... {DIM}...{NC}")` — НЕ f-string, поэтому
+   `{DIM}` и `{NC}` выводились как literal текст на экран (видны были
+   фигурные скобки).
+
+Также multi-node prompt `[1-N/F/W/Q]` не упоминал B, несмотря на то что
+пункт B отображался в меню.
+
+### Симптом у пользователя
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          📺  YouTube маршрутизация                           ║
+╠══════════════════════════════════════════════════════════════════════════════║
+║  [1]  ● YouTube через 🇷🇺️ RU entry                                            ║
+║  [2]    YouTube через 🌍️ exit-ноды (default)                                 ║
+║  [F]    YouTube через 🇷🇺️ RU+fragment (обход ТСПУ DPI)                        ║
+║  [W]    YouTube через ☁️ WARP (Cloudflare)                                   ║
+║  [Q]  Назад                                                                  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+  Выбор [1/2/F/W/B/Q]:
+```
+
+B упоминается в prompt, но не виден в списке пунктов.
+
+### Фикс
+
+**`chimera/modules/youtube_route.py`**:
+
+1. **Single-node ветка**: добавлен `_box_item("B", f"📺 b4 (DPI bypass
+   на entry) {DIM}(fake SNI + фрагментация){NC}")` после пункта [W]
+   (между W и существующим `_box_row()` перед Q).
+
+2. **Multi-node ветка**: убран no-op `_box_row` (без скобок),
+   исправлен B-item на f-string (теперь `{DIM}`/`{NC}` интерполируются
+   как ANSI-коды, а не выводятся literal).
+
+3. **Multi-node prompt**: `[1-N/F/W/Q]` → `[1-N/F/W/B/Q]` — теперь
+   упоминает B, как и single-node prompt.
+
+4. Обработчик `elif ch == "b":` (в обеих ветках) БЫЛ корректным и
+   **не менялся**: вызывает `do_youtube_b4_menu()`, ждёт Enter, return
+   (без провала в IP-pin submenu).
+
+**`tests/test_youtube_route.py`**:
+
+- `test_single_node_shows_two_item_menu`: ожидание prompt обновлено с
+  `[1/2/F/W/Q]` на `[1/2/F/W/B/Q]` (тест уже падал до фикса — prompt
+  был обновлён, но expected-строка нет).
+- `test_three_nodes_shows_five_items`: ожидание prompt обновлено с
+  `[1-5/F/W/Q]` на `[1-5/F/W/B/Q]`.
+- Добавлены 2 новых regression-теста:
+  - `test_single_node_renders_b_item` — проверяет что `[B]` рендерится
+    в single-node меню + упоминается "b4" и "DPI bypass".
+  - `test_multi_node_renders_b_item` — проверяет что `[B]` рендерится
+    в multi-node меню + нет literal `{DIM}`/`{NC}` текста.
+
+### Файлы
+
+- `chimera/modules/youtube_route.py` — фиксы рендера B-item + prompt
+- `tests/test_youtube_route.py` — обновлённые + новые regression-тесты
+
+### Тесты
+
+44 теста проходят (включая 2 новых regression-теста для пункта [B]).
+
+---
+
 ## FIX(chain_nodes+nginx_setup+uninstall): 3 критичных бага Mode B установки — 19 августа 2026
 
 **Три бага, блокирующих работу Mode B + VLESS REALITY TCP каскада. Все
@@ -3309,6 +3394,7 @@ QUIC (UDP/443) — YouTube использует его для видео. TCP fr
 - Кнопка [W] (WARP) перенесена вниз меню, рядом с [F] (fragment) — буквы
   отдельно от цифр
 - Prompt обновлён: `[1/2/F/W/Q]` (single-node) и `[1-N/F/W/Q]` (multi-node)
+  — позже дополнен кнопкой B (b4): `[1/2/F/W/B/Q]` / `[1-N/F/W/B/Q]`
 - `current_display` показывает выбранный маршрут (RU/WARP/RU+fragment/exit-нода)
 - Согласованность state.json с config.json (detect regenerate)
 - Restore после regenerate xray-config
