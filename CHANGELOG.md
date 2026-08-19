@@ -2,6 +2,117 @@
 
 ---
 
+## FEAT(youtube_b4+dpi_bypass): авто-детект preset из config.json (подход A+B) — 19 августа 2026
+
+**Ранее TUI показывал устаревшее имя preset'а из `state.json`, даже если
+set был изменён через Web UI b4 или Discovery. Теперь `status()`
+детектит актуальный preset из `/etc/b4/config.json` и автоматически
+обновляет `state.json`. При кастомном set'е показывает
+`custom (имя_seta)` вместо устаревшего имени.**
+
+### Проблема
+
+У b4 два хранилища:
+1. `/etc/b4/config.json` — общий конфиг, читаемый и Web UI b4, и TUI Chimera.
+2. `/var/lib/xray-installer/youtube_b4_state.json` — локальный state Chimera
+   (поле `active_preset`).
+
+Web UI b4 и Discovery пишут **только** в `config.json`, не трогая
+`state.json`. TUI Chimera пишет в оба. Поэтому когда Web UI менял set
+(домены, fake SNI, фрагментацию) — TUI продолжал показывать старое имя
+preset'а из `state.json` (например «Эталон»), хотя фактически set уже
+был другой.
+
+### Решение — подход A+B
+
+**Подход A: авто-детект preset из config.json**
+
+Добавлены функции `_sets_match(a, b)` и `_detect_active_preset_from_config()`:
+- `_sets_match` сравнивает ключевые поля двух set'ов: домены (sni_domains),
+  fake SNI (sni_type, ttl, sni on/off), TCP-фрагментацию (seg2delay,
+  seg2delay_max). НЕ сравнивает id, name, b4_version, enabled — они не
+  влияют на работу b4, и Web UI может их менять.
+- `_detect_active_preset_from_config` читает `sets[0]` из config.json и
+  сравнивает с встроенными пресетами (DEFAULT/AGGRESSIVE/LIGHT).
+  Возвращает кортеж `(preset_name, set_name)`:
+  - `'default'`/`'aggressive'`/`'light'` — совпал с встроенным пресетом.
+  - `'custom'` — не совпал ни с одним (правлен через Web UI / Discovery /
+    импортирован).
+  - `'unknown'` — config.json отсутствует, повреждён, или sets пустой.
+
+В `status()` добавлена авто-синхронизация: если детектированный preset
+отличается от `state["active_preset"]` — `state.json` обновляется.
+
+**Подход B: отображение имени set'а при custom**
+
+В меню TUI и в `get_portal_info()` (для REST API):
+- Если preset из `PRESETS` (default/aggressive/light) — показываем подпись
+  (например «Эталон (DuckDuckGo fake + combo)»).
+- Если `custom` и есть `set_name` — показываем `custom (имя_seta)`
+  (например `custom (Youtube-Extended)`).
+- Если `custom` без name — показываем просто `custom`.
+
+### Примеры
+
+| Ситуация | Раньше | Сейчас |
+|----------|--------|--------|
+| TUI включила `aggressive`, Web UI не трогал | `Preset: Агрессивный (Google fake + меньше delay)` ✅ | `Preset: Агрессивный (Google fake + меньше delay)` ✅ |
+| TUI включила `default`, Web UI добавил домен | `Preset: Эталон (DuckDuckGo fake + combo)` ❌ (неправда) | `Preset: custom (Youtube-Extended)` ✅ |
+| Web UI Discovery нашёл новый set | `Preset: Эталон` ❌ | `Preset: custom (Discovery-Result-2026-08-19)` ✅ |
+| TUI включила `aggressive`, Web UI поменял `seg2delay` | `Preset: Агрессивный` ❌ | `Preset: custom (Youtube-Aggressive)` ✅ |
+| TUI импортировала кастомный set через [3] | `Preset: custom` ✅ | `Preset: custom (имя_seta)` ✅ (информативнее) |
+
+### Синхронизация между модулями
+
+Функции добавлены в **оба модуля** синхронно:
+- `youtube_b4.py`: `_sets_match`, `_detect_active_preset_from_config`,
+  обновлён `status()`, обновлено отображение в меню, обновлён `get_portal_info()`.
+- `dpi_bypass.py`: те же изменения.
+- `status()` в обоих модулях возвращает новое поле `active_set_name`.
+
+### Тесты (37 новых)
+
+**`TestSetsMatch`** (14): сравнение set'ов — идентичные match, разные домены
+no match, добавленный домен no match, перемешанные домены match, разный
+sni_type/ttl/seg2delay no match, разный id/name/enabled match (не влияют).
+
+**`TestDetectActivePresetFromConfig`** (11): детект default/aggressive/light,
+детект custom при изменении доменов/sni_type/seg2delay, unknown при
+отсутствующем/повреждённом config, детект default даже с другим id/name.
+
+**`TestStatusAutoSyncPreset`** (4): REGRESSION — state.json обновляется при
+расхождении с config.json, state не перезаписывается при совпадении,
+fallback на state при unknown, status возвращает active_set_name.
+
+**`TestMenuPresetDisplayAplusB`** (4): REGRESSION — меню показывает подпись
+для стандартных пресетов, `custom (имя)` для кастомных с name, просто
+`custom` для кастомных без name, НЕ показывает устаревшее имя.
+
+**`TestYoutubeB4HasPresetDetection`** (4): REGRESSION — youtube_b4 имеет те
+же функции что dpi_bypass, _sets_match работает идентично в обоих модулях.
+
+### Файлы
+
+- `chimera/modules/dpi_bypass.py` — `_sets_match`, `_detect_active_preset_from_config`,
+  обновлён `status()`, отображение в меню, `get_portal_info()`.
+- `chimera/modules/youtube_b4.py` — те же изменения (синхронно).
+- `tests/test_dpi_bypass.py` — 37 новых тестов.
+
+### Тесты
+
+181 тест проходит (144 предыдущих + 37 новых).
+
+### Что НЕ менялось
+
+- ✅ Импорт кастомных сетов (`import_custom_set`)
+- ✅ Discovery (`run_discovery`)
+- ✅ Обновление stable/pre-release (`auto_update` / `auto_update_prerelease`)
+- ✅ Health check, Логи, Web UI инструкция, nginx front
+- ✅ Синхронизация между модулями (общий binary/config/state)
+- ✅ Все пункты меню и их обработчики
+
+---
+
 ## FIX(dpi_bypass): синхронизация меню с youtube_b4 (эталон) — пункт [7] открывал Web UI вместо Логов — 19 августа 2026
 
 **В централизованном DPI Bypass модуле (`dpi_bypass.py`) при нажатии
