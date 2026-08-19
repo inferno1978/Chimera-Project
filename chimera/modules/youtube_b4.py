@@ -623,6 +623,11 @@ def _write_empty_config() -> bool:
 
     b4 запускается с пустым sets — работает в no-op режиме (не применяет
     DPI bypass), но Web UI, Discovery, API доступны.
+
+    ВАЖНО: geosite_path обязателен для Discovery в Web UI. Без него b4
+    падает с 'geosite path not configured' при попытке создать set через
+    Discovery (т.к. Discovery использует geosite_categories вместо
+    sni_domains).
     """
     B4_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     B4_SETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -633,6 +638,13 @@ def _write_empty_config() -> bool:
         "udp": {
             "mode": "fake",
             "filter_quic": "block",
+        },
+        "system": {
+            "geosite_path": "/usr/share/xray/geosite.dat",
+            "geo": {
+                "ipdat_path": "/etc/b4/geoip.dat",
+                "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
+            },
         },
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
