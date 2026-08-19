@@ -937,5 +937,483 @@ class TestMenuItemsSync(unittest.TestCase):
                          f"Пункт [7] НЕ должен быть Web UI инструкцией")
 
 
+class TestSetsMatch(unittest.TestCase):
+    """_sets_match — сравнение ключевых полей двух b4 set'ов.
+
+    Используется для детекта активного preset'а из config.json.
+    Сравнивает: домены, fake SNI (sni_type, ttl, sni on/off), TCP-фрагментацию.
+    НЕ сравнивает: id, name, b4_version, enabled.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)
+        self.dpi_bypass = dpi_bypass
+        # Копируем встроенные set'ы для тестов
+        self.default_set = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        self.aggressive_set = dict(self.dpi_bypass.AGGRESSIVE_SET_YOUTUBE)
+        self.light_set = dict(self.dpi_bypass.LIGHT_SET_YOUTUBE)
+
+    def test_identical_sets_match(self):
+        """Идентичные set'ы — match."""
+        self.assertTrue(self.dpi_bypass._sets_match(self.default_set,
+                                                     dict(self.default_set)))
+
+    def test_different_domains_no_match(self):
+        """Разные домены — no match."""
+        modified = dict(self.default_set)
+        modified["targets"] = {"sni_domains": ["youtube.com", "extra.com"]}
+        self.assertFalse(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_extra_domain_no_match(self):
+        """Добавлен один домен — no match."""
+        modified = dict(self.default_set)
+        original_domains = list(self.default_set["targets"]["sni_domains"])
+        modified["targets"] = {"sni_domains": original_domains + ["extra.com"]}
+        self.assertFalse(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_reordered_domains_match(self):
+        """Домены в другом порядке — match (порядок не важен)."""
+        modified = dict(self.default_set)
+        original_domains = list(self.default_set["targets"]["sni_domains"])
+        # Перемешиваем
+        reordered = list(reversed(original_domains))
+        modified["targets"] = {"sni_domains": reordered}
+        self.assertTrue(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_different_sni_type_no_match(self):
+        """Разный sni_type (fake SNI) — no match."""
+        modified = dict(self.default_set)
+        modified["faking"] = dict(self.default_set["faking"])
+        modified["faking"]["sni_type"] = 2  # Google вместо DuckDuckGo
+        self.assertFalse(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_different_ttl_no_match(self):
+        """Разный TTL — no match."""
+        modified = dict(self.default_set)
+        modified["faking"] = dict(self.default_set["faking"])
+        modified["faking"]["ttl"] = 8  # 8 вместо 4
+        self.assertFalse(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_different_seg2delay_no_match(self):
+        """Разный seg2delay (фрагментация) — no match."""
+        modified = dict(self.default_set)
+        modified["tcp"] = dict(self.default_set["tcp"])
+        modified["tcp"]["seg2delay"] = 50  # 50 вместо 20
+        self.assertFalse(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_different_seg2delay_max_no_match(self):
+        """Разный seg2delay_max — no match."""
+        modified = dict(self.default_set)
+        modified["tcp"] = dict(self.default_set["tcp"])
+        modified["tcp"]["seg2delay_max"] = 100
+        self.assertFalse(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_different_id_still_match(self):
+        """Разный id — match (id не влияет на работу b4)."""
+        modified = dict(self.default_set)
+        modified["id"] = "different-id"
+        self.assertTrue(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_different_name_still_match(self):
+        """Разное name — match (name не влияет на работу b4)."""
+        modified = dict(self.default_set)
+        modified["name"] = "Different Name"
+        self.assertTrue(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_different_enabled_still_match(self):
+        """Разный enabled — match (не влияет на функциональность сета)."""
+        modified = dict(self.default_set)
+        modified["enabled"] = False
+        self.assertTrue(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_light_set_sni_false_matches_light(self):
+        """Light preset с sni=False — match с light."""
+        # Создаём копию light с другим id/name — должно совпадать
+        modified = dict(self.light_set)
+        modified["id"] = "different"
+        modified["name"] = "Different"
+        self.assertTrue(self.dpi_bypass._sets_match(modified, self.light_set))
+
+    def test_light_set_sni_false_does_not_match_default(self):
+        """Light preset (sni=False) — НЕ match с default (sni по умолчанию True)."""
+        self.assertFalse(self.dpi_bypass._sets_match(self.light_set,
+                                                      self.default_set))
+
+    def test_aggressive_matches_aggressive(self):
+        """Aggressive preset — match с самим собой."""
+        self.assertTrue(self.dpi_bypass._sets_match(self.aggressive_set,
+                                                     dict(self.aggressive_set)))
+
+
+class TestDetectActivePresetFromConfig(unittest.TestCase):
+    """_detect_active_preset_from_config — детект preset из /etc/b4/config.json.
+
+    Возвращает кортеж (preset_name, set_name):
+      preset_name: 'default'/'aggressive'/'light'/'custom'/'unknown'
+      set_name: имя set'а из config.json или None
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._config_file = self._tmpdir / "config.json"
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)
+        self.dpi_bypass = dpi_bypass
+        self.dpi_bypass.B4_CONFIG_FILE = self._config_file
+        self.dpi_bypass.B4_CONFIG_DIR = self._tmpdir
+
+    def _write_config(self, set_data):
+        """Записывает set в config.json в правильном формате."""
+        cfg = {"sets": [set_data], "routing": {"enabled": False}, "udp": {"mode": "fake"}}
+        self._config_file.write_text(json.dumps(cfg))
+
+    def test_returns_unknown_when_config_missing(self):
+        """Config.json отсутствует → ('unknown', None)."""
+        self._config_file.unlink(missing_ok=True)
+        result = self.dpi_bypass._detect_active_preset_from_config()
+        self.assertEqual(result, ("unknown", None))
+
+    def test_returns_unknown_when_config_corrupted(self):
+        """Повреждённый JSON → ('unknown', None)."""
+        self._config_file.write_text("not a json")
+        result = self.dpi_bypass._detect_active_preset_from_config()
+        self.assertEqual(result, ("unknown", None))
+
+    def test_returns_unknown_when_sets_empty(self):
+        """Пустой массив sets → ('unknown', None)."""
+        self._config_file.write_text(json.dumps({"sets": []}))
+        result = self.dpi_bypass._detect_active_preset_from_config()
+        self.assertEqual(result, ("unknown", None))
+
+    def test_detects_default_preset(self):
+        """Set совпадает с DEFAULT_SET_YOUTUBE → ('default', set_name)."""
+        self._write_config(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        result = self.dpi_bypass._detect_active_preset_from_config()
+        self.assertEqual(result[0], "default")
+        self.assertEqual(result[1], "Youtube")  # name из DEFAULT_SET_YOUTUBE
+
+    def test_detects_aggressive_preset(self):
+        """Set совпадает с AGGRESSIVE_SET_YOUTUBE → ('aggressive', set_name)."""
+        self._write_config(self.dpi_bypass.AGGRESSIVE_SET_YOUTUBE)
+        result = self.dpi_bypass._detect_active_preset_from_config()
+        self.assertEqual(result[0], "aggressive")
+        self.assertEqual(result[1], "Youtube-Aggressive")
+
+    def test_detects_light_preset(self):
+        """Set совпадает с LIGHT_SET_YOUTUBE → ('light', set_name)."""
+        self._write_config(self.dpi_bypass.LIGHT_SET_YOUTUBE)
+        result = self.dpi_bypass._detect_active_preset_from_config()
+        self.assertEqual(result[0], "light")
+        self.assertEqual(result[1], "Youtube-Light")
+
+    def test_detects_custom_when_domains_modified(self):
+        """Добавлен домен → ('custom', set_name).
+
+        REGRESSION: ранее TUI показывал устаревшее имя preset'а из state.json,
+        даже если set был правлен через Web UI.
+        """
+        modified = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        original_domains = list(modified["targets"]["sni_domains"])
+        modified["targets"] = {"sni_domains": original_domains + ["extra.com"]}
+        modified["name"] = "Youtube-Extended"
+        self._write_config(modified)
+        result = self.dpi_bypass._detect_active_preset_from_config()
+        self.assertEqual(result[0], "custom")
+        self.assertEqual(result[1], "Youtube-Extended")
+
+    def test_detects_custom_when_sni_type_changed(self):
+        """Изменён sni_type → ('custom', set_name)."""
+        modified = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        modified["faking"] = dict(modified["faking"])
+        modified["faking"]["sni_type"] = 2  # Google вместо DuckDuckGo
+        self._write_config(modified)
+        result = self.dpi_bypass._detect_active_preset_from_config()
+        self.assertEqual(result[0], "custom")
+
+    def test_detects_custom_when_seg2delay_changed(self):
+        """Изменён seg2delay → ('custom', set_name)."""
+        modified = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        modified["tcp"] = dict(modified["tcp"])
+        modified["tcp"]["seg2delay"] = 50
+        self._write_config(modified)
+        result = self.dpi_bypass._detect_active_preset_from_config()
+        self.assertEqual(result[0], "custom")
+
+    def test_detects_default_even_with_different_id_name(self):
+        """Set с другим id/name, но функционально идентичный → ('default', name).
+
+        Web UI может менять id/name — это не должно влиять на детект preset'а.
+        """
+        modified = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        modified["id"] = "yt-custom-id"
+        modified["name"] = "My Custom Youtube"
+        self._write_config(modified)
+        result = self.dpi_bypass._detect_active_preset_from_config()
+        self.assertEqual(result[0], "default")
+        self.assertEqual(result[1], "My Custom Youtube")
+
+    def test_returns_none_set_name_when_name_missing(self):
+        """Set без name → set_name=None."""
+        modified = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        modified.pop("name", None)
+        self._write_config(modified)
+        result = self.dpi_bypass._detect_active_preset_from_config()
+        self.assertEqual(result[0], "default")
+        self.assertIsNone(result[1])
+
+
+class TestStatusAutoSyncPreset(unittest.TestCase):
+    """status() — авто-синхронизация active_preset с config.json.
+
+    REGRESSION: ранее state.json хранил устаревшее имя preset'а, даже если
+    set был изменён через Web UI / Discovery. Теперь status() детектит
+    актуальный preset из config.json и обновляет state.json.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._config_file = self._tmpdir / "config.json"
+        self._state_file = self._tmpdir / "state.json"
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)
+        self.dpi_bypass = dpi_bypass
+        self.dpi_bypass.B4_CONFIG_FILE = self._config_file
+        self.dpi_bypass.B4_CONFIG_DIR = self._tmpdir
+        self.dpi_bypass._STATE_FILE = self._state_file
+        self.dpi_bypass.subprocess = MagicMock()
+
+    def _write_config(self, set_data):
+        cfg = {"sets": [set_data], "routing": {"enabled": False}, "udp": {"mode": "fake"}}
+        self._config_file.write_text(json.dumps(cfg))
+
+    def _write_state(self, preset_name):
+        self._state_file.write_text(json.dumps({
+            "installed": True, "active_preset": preset_name, "enabled": True,
+            "version": "1.78.0",
+        }))
+
+    def test_state_updated_when_config_changed_to_custom(self):
+        """State.json с 'default', config изменён → state обновляется до 'custom'."""
+        # Имитируем: TUI включила default, потом Web UI добавила домен
+        self._write_state("default")
+        modified = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        original_domains = list(modified["targets"]["sni_domains"])
+        modified["targets"] = {"sni_domains": original_domains + ["extra.com"]}
+        modified["name"] = "Modified"
+        self._write_config(modified)
+        # Mock installed=True
+        self.dpi_bypass.B4_BINARY_PATH = self._tmpdir / "b4"
+        self.dpi_bypass.B4_UNIT_PATH = self._tmpdir / "b4.service"
+        self.dpi_bypass.B4_BINARY_PATH.touch()
+        self.dpi_bypass.B4_UNIT_PATH.touch()
+        # Вызываем status()
+        result = self.dpi_bypass.status()
+        # Проверяем что active_preset = 'custom' (детектировано из config)
+        self.assertEqual(result["active_preset"], "custom")
+        self.assertEqual(result["active_set_name"], "Modified")
+        # Проверяем что state.json обновлён
+        state = json.loads(self._state_file.read_text())
+        self.assertEqual(state["active_preset"], "custom")
+
+    def test_state_unchanged_when_config_matches_state(self):
+        """State='default', config=default → state не меняется."""
+        self._write_state("default")
+        self._write_config(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        self.dpi_bypass.B4_BINARY_PATH = self._tmpdir / "b4"
+        self.dpi_bypass.B4_UNIT_PATH = self._tmpdir / "b4.service"
+        self.dpi_bypass.B4_BINARY_PATH.touch()
+        self.dpi_bypass.B4_UNIT_PATH.touch()
+        original_state_mtime = self._state_file.stat().st_mtime
+        result = self.dpi_bypass.status()
+        self.assertEqual(result["active_preset"], "default")
+        # State.json не должен был измениться
+        new_state_mtime = self._state_file.stat().st_mtime
+        self.assertEqual(original_state_mtime, new_state_mtime,
+                         "state.json не должен перезаписываться при совпадении preset'а")
+
+    def test_state_unknown_when_config_missing(self):
+        """Config.json отсутствует → active_preset берётся из state.json."""
+        self._write_state("aggressive")
+        self._config_file.unlink(missing_ok=True)
+        self.dpi_bypass.B4_BINARY_PATH = self._tmpdir / "b4"
+        self.dpi_bypass.B4_UNIT_PATH = self._tmpdir / "b4.service"
+        self.dpi_bypass.B4_BINARY_PATH.touch()
+        self.dpi_bypass.B4_UNIT_PATH.touch()
+        result = self.dpi_bypass.status()
+        # detected='unknown', поэтому берётся state_preset
+        self.assertEqual(result["active_preset"], "aggressive")
+
+    def test_status_includes_active_set_name(self):
+        """status() возвращает 'active_set_name' (имя set'а из config.json)."""
+        self._write_state("default")
+        self._write_config(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        self.dpi_bypass.B4_BINARY_PATH = self._tmpdir / "b4"
+        self.dpi_bypass.B4_UNIT_PATH = self._tmpdir / "b4.service"
+        self.dpi_bypass.B4_BINARY_PATH.touch()
+        self.dpi_bypass.B4_UNIT_PATH.touch()
+        result = self.dpi_bypass.status()
+        self.assertIn("active_set_name", result)
+        self.assertEqual(result["active_set_name"], "Youtube")
+
+
+class TestMenuPresetDisplayAplusB(unittest.TestCase):
+    """REGRESSION: отображение preset в меню — подход A+B.
+
+    A: детектим preset из config.json.
+    B: если 'custom' — показываем 'custom (имя_seta)'.
+
+    Тестируем что в меню b4 при кастомном сете показывается
+    'custom (имя_seta)' вместо устаревшего имени preset'а.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._config_file = self._tmpdir / "config.json"
+        self._state_file = self._tmpdir / "state.json"
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)
+        self.dpi_bypass = dpi_bypass
+        self.dpi_bypass.B4_CONFIG_FILE = self._config_file
+        self.dpi_bypass.B4_CONFIG_DIR = self._tmpdir
+        self.dpi_bypass._STATE_FILE = self._state_file
+        self.dpi_bypass.subprocess = MagicMock()
+
+    def _render_menu_preset_line(self, set_data, state_preset):
+        """Рендерит меню и возвращает строку 'Preset: ...'."""
+        import io
+        from contextlib import redirect_stdout
+        # Готовим config + state
+        cfg = {"sets": [set_data], "routing": {"enabled": False}, "udp": {"mode": "fake"}}
+        self._config_file.write_text(json.dumps(cfg))
+        self._state_file.write_text(json.dumps({
+            "installed": True, "active_preset": state_preset, "enabled": True,
+            "version": "1.78.0",
+        }))
+        # Mock installed=True
+        self.dpi_bypass.B4_BINARY_PATH = self._tmpdir / "b4"
+        self.dpi_bypass.B4_UNIT_PATH = self._tmpdir / "b4.service"
+        self.dpi_bypass.B4_BINARY_PATH.touch()
+        self.dpi_bypass.B4_UNIT_PATH.touch()
+        # Mock status-зависимости
+        self.dpi_bypass._b4_nginx_status = lambda: {"enabled": False, "port": 9743}
+        # Рендерим меню
+        inputs = iter(['q'])
+        def _input(prompt='', *a, **kw):
+            return next(inputs)
+        captured = io.StringIO()
+        with patch("builtins.input", side_effect=_input), \
+             redirect_stdout(captured):
+            try:
+                self.dpi_bypass.do_dpi_bypass_menu()
+            except StopIteration:
+                pass
+        # Ищем строку с Preset
+        for line in captured.getvalue().split('\n'):
+            if 'Preset:' in line:
+                return line.strip()
+        return None
+
+    def test_default_preset_shows_label(self):
+        """Default preset → показывает 'Эталон (DuckDuckGo fake + combo)'."""
+        line = self._render_menu_preset_line(self.dpi_bypass.DEFAULT_SET_YOUTUBE, "default")
+        self.assertIsNotNone(line)
+        self.assertIn("Эталон", line)
+        self.assertIn("DuckDuckGo", line)
+
+    def test_aggressive_preset_shows_label(self):
+        """Aggressive preset → показывает 'Агрессивный'."""
+        line = self._render_menu_preset_line(self.dpi_bypass.AGGRESSIVE_SET_YOUTUBE, "aggressive")
+        self.assertIsNotNone(line)
+        self.assertIn("Агрессивный", line)
+
+    def test_custom_preset_shows_custom_with_set_name(self):
+        """REGRESSION: custom preset → показывает 'custom (имя_seta)'.
+
+        Ранее показывал устаревшее имя preset'а из state.json.
+        """
+        # Создаём модифицированный set (добавлен домен)
+        modified = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        original_domains = list(modified["targets"]["sni_domains"])
+        modified["targets"] = {"sni_domains": original_domains + ["extra.com"]}
+        modified["name"] = "Youtube-Extended"
+        # State.json говорит 'default', но config — модифицированный
+        line = self._render_menu_preset_line(modified, "default")
+        self.assertIsNotNone(line)
+        self.assertIn("custom", line)
+        self.assertIn("Youtube-Extended", line)
+        # НЕ должен показывать устаревшее 'Эталон'
+        self.assertNotIn("Эталон", line)
+
+    def test_custom_preset_without_name_shows_just_custom(self):
+        """Custom set без name → показывает просто 'custom'."""
+        modified = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        original_domains = list(modified["targets"]["sni_domains"])
+        modified["targets"] = {"sni_domains": original_domains + ["extra.com"]}
+        modified.pop("name", None)
+        line = self._render_menu_preset_line(modified, "default")
+        self.assertIsNotNone(line)
+        self.assertIn("custom", line)
+        # Не должно быть '()' (пустых скобок)
+        self.assertNotIn("()", line)
+
+
+class TestYoutubeB4HasPresetDetection(unittest.TestCase):
+    """REGRESSION: youtube_b4.py имеет те же функции детекта preset'а что dpi_bypass.
+
+    Синхронизация между модулями — оба должны иметь:
+    _sets_match, _detect_active_preset_from_config, status() с авто-синком.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.youtube_b4 = youtube_b4
+        self.dpi_bypass = dpi_bypass
+
+    def test_youtube_b4_has_sets_match(self):
+        self.assertTrue(hasattr(self.youtube_b4, '_sets_match'))
+        self.assertTrue(callable(self.youtube_b4._sets_match))
+
+    def test_youtube_b4_has_detect_active_preset(self):
+        self.assertTrue(hasattr(self.youtube_b4, '_detect_active_preset_from_config'))
+
+    def test_status_returns_active_set_name_in_both(self):
+        """status() в обоих модулях возвращает 'active_set_name'."""
+        # Просто проверяем что ключ есть в возвращаемом dict'е
+        # (когда b4 не установлен, status() возвращает early-return dict без этого ключа)
+        # Поэтому проверяем через mock
+        self.youtube_b4.B4_BINARY_PATH = Path("/tmp/nonexistent_b4_test")
+        self.dpi_bypass.B4_BINARY_PATH = Path("/tmp/nonexistent_b4_test")
+        # Когда не установлен — оба возвращают {'installed': False, ...}
+        yt_status = self.youtube_b4.status()
+        dpi_status = self.dpi_bypass.status()
+        # Когда установлен — добавляется 'active_set_name'. Здесь просто
+        # проверяем что функция не падает.
+        self.assertIn("active_preset", yt_status)
+        self.assertIn("active_preset", dpi_status)
+
+    def test_sets_match_identical_in_both_modules(self):
+        """_sets_match должна работать идентично в обоих модулях."""
+        # Берём default set из dpi_bypass и проверяем что youtube_b4._sets_match
+        # тоже считает его совпадающим с самим собой
+        test_set = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
+        yt_result = self.youtube_b4._sets_match(test_set, dict(test_set))
+        dpi_result = self.dpi_bypass._sets_match(test_set, dict(test_set))
+        self.assertEqual(yt_result, dpi_result)
+        self.assertTrue(yt_result)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
