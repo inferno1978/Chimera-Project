@@ -650,14 +650,17 @@ def _write_default_config() -> bool:
 def _write_systemd_unit() -> bool:
     """Создаёт systemd-unit для b4.
 
-    ВАЖНО: b4 сам управляет своими iptables-правилами (native mode).
-    Раньше Chimera ставила правила вручную через --skip-tables, но это
-    приводило к тому, что b4 перехватывал ВЕСЬ 443-трафик (включая
-    exit-ноды, google.com и т.д.), а не только YouTube. Теперь b4 сам
-    создаёт свои правила через ipset — перехватывается только трафик к
-    доменам из активного сета.
+    ВАЖНО: b4 сам управляет своими iptables-правилами (native mode, без
+    --skip-tables). b4 создаёт `table inet b4_mangle` в nftables — эта
+    таблица работает одновременно для IPv4 и IPv6 с фильтром
+    `ct original packets < 20` (перехват только первых 20 пакетов).
 
-    IPv6-правила остаются Chimera'ными (fallback) — см. _iptables_apply().
+    --verbose silent: b4 при `--verbose info` логирует КАЖДЫЙ перехваченный
+    пакет (даже не-YouTube — exit-ноды, Telegram, mail.ru). Это ~1.1М
+    строк/час в journald. Уровень `warn` не работает (баг b4 — фильтрует
+    как info). `silent` отключает логирование пакетов, оставляя только
+    критические ошибки. YouTube работает, Web UI работает, Discovery
+    работает — логирование не влияет на перехват.
     """
     unit = f"""[Unit]
 Description=b4 (Bye Bye Big Bro) — DPI bypass for YouTube on entry VPS
@@ -671,7 +674,7 @@ ExecStart={B4_BINARY_PATH} --config {B4_CONFIG_FILE} \\
     --mark {B4_MARK} \\
     --web-port {B4_WEB_PORT} \\
     --log-dir {B4_LOG_DIR} \\
-    --verbose info \\
+    --verbose silent \\
     --ipv4 \\
     --ipv6
 WorkingDirectory={B4_CONFIG_DIR}
@@ -1119,15 +1122,23 @@ def disable() -> bool:
 
 
 def _migrate_to_native_rules_if_needed() -> bool:
-    """Авто-миграция со старого режима (--skip-tables) на native b4 rules.
+    """Авто-миграция systemd-unit b4 на актуальный формат.
 
-    Детектит старый systemd-unit (с --skip-tables) и если найден:
-      1. Перезаписывает unit без --skip-tables.
-      2. Убирает старые Chimera'ные IPv4 iptables-правила.
-      3. Перезапускает b4 (он сам создаст свои native правила).
+    Проверяет два условия и если хотя бы одно найдено — перезаписывает
+    unit на актуальный (native b4 rules + --verbose silent):
+
+    1. --skip-tables (старый режим, Chimera управляла iptables вручную).
+       Миграция: убрать --skip-tables, b4 сам управляет через nftables.
+    2. --verbose info или --verbose warn (b4 логирует каждый пакет —
+       ~1.1М строк/час, засоряет journald). Миграция: --verbose silent.
+       Уровень warn не работает (баг b4 — фильтрует как info).
+
+    При миграции также:
+      - Убирает старые Chimera'ные iptables правила (b4_mangle + b4_mangle6).
+      - Перезапускает b4.
 
     Вызывается автоматически при открытии меню b4 (do_youtube_b4_menu).
-    Идемпотентна — если unit уже новый, ничего не делает.
+    Идемпотентна — если unit уже актуальный, ничего не делает.
 
     Возвращает True если миграция выполнена, False если не нужна.
     """
@@ -1137,30 +1148,41 @@ def _migrate_to_native_rules_if_needed() -> bool:
         unit_content = B4_UNIT_PATH.read_text()
     except Exception:
         return False
-    # Детектим старый режим: presence of --skip-tables в ExecStart.
-    if "--skip-tables" not in unit_content:
-        return False  # Уже native mode — миграция не нужна
+
+    # Детектим что нужно мигрировать.
+    needs_migration = False
+    reasons = []
+    if "--skip-tables" in unit_content:
+        needs_migration = True
+        reasons.append("--skip-tables → native b4 rules")
+    if "--verbose info" in unit_content or "--verbose warn" in unit_content:
+        needs_migration = True
+        reasons.append("--verbose info/warn → --verbose silent (логи чистые)")
+
+    if not needs_migration:
+        return False  # Unit уже актуальный — миграция не нужна
+
     # Миграция нужна.
-    _info("Обнаружен старый режим b4 (--skip-tables). Мигрирую на native rules...")
-    _info("b4 будет сам управлять своими iptables-правилами (только YouTube-трафик)")
-    # 1. Перезаписываем unit без --skip-tables.
+    _info("Обнаружен устаревший systemd-unit b4. Мигрирую:")
+    for reason in reasons:
+        _info(f"  • {reason}")
+
+    # 1. Перезаписываем unit на актуальный (native + silent).
     if not _write_systemd_unit():
         _err("Не удалось перезаписать systemd-unit")
         return False
     # 2. daemon-reload.
     subprocess.run(["systemctl", "daemon-reload"], check=False)
-    # 3. Убираем старые Chimera'ные IPv4 правила.
+    # 3. Убираем старые Chimera'ные iptables правила (IPv4 + IPv6).
     _iptables_remove()
-    # 4. Применяем IPv6 fallback (IPv4 — b4 сам при старте).
-    _iptables_apply()
-    # 5. Перезапускаем b4 — он создаст свои native правила.
+    # 4. Перезапускаем b4 — он создаст свои native nftables правила.
     r = subprocess.run(["systemctl", "restart", "b4"],
                        capture_output=True, text=True, check=False)
     if r.returncode == 0:
-        _ok("Миграция завершена: b4 теперь управляет своими правилами (native mode)")
-        _info("  IPv4: b4 native (только YouTube-трафик через ipset)")
-        _info("  IPv6: Chimera fallback")
-        _info("  Логи b4 больше не содержат не-YouTube трафик (exit-ноды и т.д.)")
+        _ok("Миграция завершена: b4 обновлён")
+        _info("  • b4 сам управляет iptables (nftables table inet, IPv4+IPv6)")
+        _info("  • --verbose silent — логи чистые (только ошибки)")
+        _info("  • YouTube, Web UI, Discovery продолжают работать")
     else:
         _err(f"Не удалось перезапустить b4 после миграции: {r.stderr.strip()}")
         _info("Проверьте логи: journalctl -u b4 -n 30")
