@@ -748,11 +748,11 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
             youtube_route.do_manage_youtube_via_ru()
 
         output = captured.getvalue()
-        #  prompt теперь [1/2/F/W/Q] — добавлены кнопки F (RU+fragment) и W (YouTube->WARP)
-        self.assertIn("[1/2/F/W/Q]", output,
-                      f"Single-node должен показать [1/2/F/W/Q], вывод:\n{output}")
-        # НЕ должно быть multi-node prompt типа [1-5/F/W/Q]
-        self.assertNotIn("[1-5/F/W/Q]", output)
+        #  prompt теперь [1/2/F/W/B/Q] — добавлены кнопки F (RU+fragment), W (YouTube->WARP) и B (b4 DPI bypass)
+        self.assertIn("[1/2/F/W/B/Q]", output,
+                      f"Single-node должен показать [1/2/F/W/B/Q], вывод:\n{output}")
+        # НЕ должно быть multi-node prompt типа [1-5/F/W/B/Q]
+        self.assertNotIn("[1-5/F/W/B/Q]", output)
 
     # ── Кейс 8: len(CHAIN_NODES)==3 → меню показывает 5 пунктов ───────────
     def test_three_nodes_shows_five_items(self):
@@ -787,15 +787,101 @@ class TestDoManageYoutubeMigration(unittest.TestCase):
             youtube_route.do_manage_youtube_via_ru()
 
         output = captured.getvalue()
-        #  prompt теперь [1-5/F/W/Q] — добавлены кнопки F (RU+fragment) и W (YouTube->WARP)
-        self.assertIn("[1-5/F/W/Q]", output,
-                      f"Multi-node (3 nodes) должен показать [1-5/F/W/Q], вывод:\n{output}")
+        #  prompt теперь [1-5/F/W/B/Q] — добавлены кнопки F (RU+fragment), W (YouTube->WARP) и B (b4 DPI bypass)
+        self.assertIn("[1-5/F/W/B/Q]", output,
+                      f"Multi-node (3 nodes) должен показать [1-5/F/W/B/Q], вывод:\n{output}")
         # Не должно быть single-node prompt
-        self.assertNotIn("[1/2/F/W/Q]", output)
+        self.assertNotIn("[1/2/F/W/B/Q]", output)
         # Должны быть хосты нод
         self.assertIn("1.1.1.1", output)
         self.assertIn("2.2.2.2", output)
         self.assertIn("3.3.3.3", output)
+
+    # ── Кейс 8b: REGRESSION — пункт [B] (b4 DPI bypass) должен отображаться
+    # в ОБЕИХ ветках меню (single-node и multi-node). БАГ: в коммите f483fba
+    # B был добавлен в prompt и в handler, но _box_item("B", ...) забыли
+    # добавить в single-node ветку → на RU-entry серверах без chain-exit
+    # пользователь не видел пункт B в меню.
+    def test_single_node_renders_b_item(self):
+        """REGRESSION: single-node меню должно отображать пункт [B] (b4)."""
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import youtube_route
+        self._state_path.write_text(json.dumps({"youtube_route_target": "off"}))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        core.CHAIN_NODES = []  # 0 nodes → single-node mode
+        core.AWG_EXIT_ENABLED = False
+        core.CONFIG_DIR = self._tmpdir
+        core.info = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.CYAN = core.NC = core.GREEN = core.YELLOW = ""
+        core.RED = core.BOLD = core.DIM = core.BLUE = ""
+
+        def _input_with_print(prompt="", *a, **kw):
+            print(prompt, end="", flush=True)
+            return "q"
+
+        captured = io.StringIO()
+        with patch.object(youtube_route, "_core_module", lambda: core), \
+             patch("builtins.input", side_effect=_input_with_print), \
+             redirect_stdout(captured):
+            youtube_route.do_manage_youtube_via_ru()
+
+        output = captured.getvalue()
+        # Пункт [B] должен быть виден в single-node меню
+        self.assertIn("[B]", output,
+                      f"Single-node меню должно содержать пункт [B], вывод:\n{output}")
+        # Текст пункта должен упоминать b4 / DPI bypass
+        self.assertIn("b4", output.lower(),
+                      f"Single-node меню должно упоминать b4, вывод:\n{output}")
+        self.assertIn("DPI bypass", output,
+                      f"Single-node меню должно упоминать 'DPI bypass', вывод:\n{output}")
+
+    def test_multi_node_renders_b_item(self):
+        """REGRESSION: multi-node меню должно отображать пункт [B] (b4)."""
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import youtube_route
+        self._state_path.write_text(json.dumps({"youtube_route_target": "off"}))
+        core = sys.modules["chimera._core"]
+        core.STATE_FILE = self._state_path
+        core.CHAIN_NODES = [
+            {"host": "1.1.1.1", "port": 443},
+            {"host": "2.2.2.2", "port": 443},
+        ]
+        core.AWG_EXIT_ENABLED = False
+        core.CONFIG_DIR = self._tmpdir
+        core.info = lambda *a, **kw: None
+        core.warn = lambda *a, **kw: None
+        core.success = lambda *a, **kw: None
+        core.CYAN = core.NC = core.GREEN = core.YELLOW = ""
+        core.RED = core.BOLD = core.DIM = core.BLUE = ""
+
+        def _input_with_print(prompt="", *a, **kw):
+            print(prompt, end="", flush=True)
+            return "q"
+
+        captured = io.StringIO()
+        with patch.object(youtube_route, "_core_module", lambda: core), \
+             patch("builtins.input", side_effect=_input_with_print), \
+             redirect_stdout(captured):
+            youtube_route.do_manage_youtube_via_ru()
+
+        output = captured.getvalue()
+        # Пункт [B] должен быть виден в multi-node меню
+        self.assertIn("[B]", output,
+                      f"Multi-node меню должно содержать пункт [B], вывод:\n{output}")
+        # Текст пункта должен упоминать b4 / DPI bypass
+        self.assertIn("b4", output.lower(),
+                      f"Multi-node меню должно упоминать b4, вывод:\n{output}")
+        # REGRESSION: {DIM}/{NC} не должны выводиться как literal текст
+        # (старая бага: _box_item("B", "...{DIM}...{NC}") без f-строки)
+        self.assertNotIn("{DIM}", output,
+                         f"{{DIM}} не должен выводиться как literal текст, вывод:\n{output}")
+        self.assertNotIn("{NC}", output,
+                         f"{{NC}} не должен выводиться как literal текст, вывод:\n{output}")
 
     # ── Кейс 9: REGRESSION  — нажатие 'w' не должно молча выходить ──
     # БАГ (исправлен в  : в multi-node меню `int("w")` бросал
