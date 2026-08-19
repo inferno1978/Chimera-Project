@@ -2,6 +2,159 @@
 
 ---
 
+## FEAT(youtube_b4+dpi_bypass): native b4 rules — b4 сам управляет iptables — 19 августа 2026
+
+**Chimera больше НЕ ставит IPv4 iptables-правила вручную для b4. Теперь
+b4 сам управляет своими правилами (native mode, без `--skip-tables`) —
+перехватывается только YouTube-трафик через ipset, а не весь 443. Это
+исправляет логи b4 забитые записями о не-YouTube трафике (exit-ноды,
+google.com) и лишнюю нагрузку на NFQUEUE. IPv6-правила остаются
+Chimera'ными как fallback.**
+
+### Проблема
+
+Chimera ставила **свои собственные** iptables-правила в mangle-таблице:
+
+```
+-A OUTPUT -j b4_mangle                              ← весь OUTPUT
+-A b4_mangle -p tcp --dport 443 ... -j NFQUEUE 537  ← ВЕСЬ TCP/443
+```
+
+И запускала b4 с флагом `--skip-tables` — «b4, не ставь свои правила,
+я уже всё сделала». Это приводило к:
+
+1. **Логи b4 забиты** записями о не-YouTube трафике:
+   ```
+   TCP 176.123.162.42:41062 → 31.77.168.49:443 totalshadows.online
+   TCP 176.123.162.42:5242  → 132.243.221.181:443 total-shadows.ru
+   ```
+   Это трафик к exit-нодам (Leaseweb, Hetzner) — b4 его перехватывал, но
+   не применял стратегию (не YouTube), только логировал.
+
+2. **1.4+ GB лишнего трафика через NFQUEUE** — весь 443-трафик сервера
+   (exit-ноды, google.com, яндекс, etc.) проходил через b4.
+
+3. **Discovery ломался** — b4 применял активный preset к собственным
+   тестовым пакетам Discovery (петля обратной связи).
+
+Разработчик b4 (Данил) подтвердил: b4 умеет сам управлять своими
+правилами через ipset — перехватывается только трафик к доменам из
+активного сета. `--skip-tables` был хаком Chimera, который мешал b4.
+
+### Решение — native b4 rules
+
+**Убрано:**
+- `--skip-tables` из systemd-unit (`_write_systemd_unit()`).
+- IPv4 iptables-правила из `_iptables_apply()` (b4 ставит сам).
+
+**Оставлено (fallback):**
+- IPv6 iptables-правила в `_iptables_apply()` — на случай если b4 не
+  ставит их сам. На серверах без IPv6 — не применяются.
+- `_iptables_remove()` убирает и IPv4, и IPv6 — для cleanup при crash b4
+  (kill, OOM) и при миграции со старого режима.
+
+**Изменено:**
+- `install_b4()` — вызывает `_iptables_remove()` перед стартом (cleanup
+  старых Chimera'ных правил), затем `_iptables_apply()` (только IPv6),
+  затем запускает b4 (он сам ставит IPv4).
+- `enable()` — вызывает `_iptables_apply()` (только IPv6), затем
+  запускает b4 (он сам ставит IPv4).
+- `disable()` — останавливает b4 (он сам убирает IPv4), затем
+  `_iptables_remove()` (cleanup IPv4 на случай crash + IPv6 Chimera'ные).
+
+### Авто-миграция
+
+Добавлена функция `_migrate_to_native_rules_if_needed()` — вызывается
+автоматически при открытии меню b4 (`do_youtube_b4_menu()` /
+`do_dpi_bypass_menu()`). Если обнаружен старый systemd-unit (с
+`--skip-tables`):
+
+1. Перезаписывает unit без `--skip-tables`.
+2. Убирает старые Chimera'ные IPv4 iptables-правила.
+3. Применяет IPv6 fallback.
+4. Перезапускает b4 — он создаёт свои native правила.
+
+Идемпотентна — если unit уже новый, ничего не делает.
+
+### Что осталось от Chimera
+
+- ✅ Установка binary (`_download_b4_binary()`)
+- ✅ Создание config.json с тремя preset'ами (default/aggressive/light)
+- ✅ Создание systemd-unit (без `--skip-tables`)
+- ✅ IPv6 fallback правила (`_iptables_apply()`)
+- ✅ Cleanup при uninstall/crash (`_iptables_remove()`)
+- ✅ nginx front для Web UI
+- ✅ Обновления (stable + pre-release)
+- ✅ Preset detection (A+B)
+- ✅ Все меню и обработчики
+
+### Что НЕ менялось
+
+- ✅ Импорт кастомных сетов (`import_custom_set`)
+- ✅ Discovery (`run_discovery`) — теперь должна работать (b4 exempt'ит
+  свой трафик через native правила)
+- ✅ Health check, Логи, Web UI инструкция, nginx front
+- ✅ Синхронизация между модулями (общий binary/config/state)
+- ✅ Все пункты меню и их обработчики
+- ✅ Главное меню Chimera, VLESS/REALITY/AWG/Hysteria2/etc.
+- ✅ Все остальные модули Chimera
+
+### Безопасность
+
+- **b4 не установлен** → меню показывает «Установить b4» → ничего не меняется.
+- **b4 установлен, но не запущен** → при запуске b4 сам ставит правила.
+- **Chimera без b4** → модули импортируются без ошибок → главное меню работает.
+- **Старый b4 (с `--skip-tables`)** → авто-миграция при открытии меню.
+
+### Откат
+
+Если native b4 rules не заработают:
+```bash
+cd /opt/chimera
+git revert <commit-hash>
+git push
+# На сервере:
+git pull
+systemctl restart b4
+```
+
+Один режим = один путь кода = проще поддерживать. Два режима — это
+технический долг. Данил подтвердил, что b4 умеет управлять своими
+правилами — это официальный способ работы b4.
+
+### Тесты (21 новый)
+
+**`TestNativeB4Rules`** (11): REGRESSION — systemd-unit НЕ содержит
+`--skip-tables`, `_iptables_apply()` НЕ ставит IPv4 (только IPv6),
+`_iptables_remove()` ВСЁ ЕЩЁ убирает IPv4 (cleanup), `install_b4()`
+вызывает `_iptables_remove()`, оба модуля имеют `_migrate_*`,
+миграция вызывает `_write_systemd_unit()` / `_iptables_remove()` /
+`systemctl restart b4`, меню вызывает миграцию при открытии.
+
+**`TestMigrateFunctionBehavior`** (5): поведенческие тесты — миграция
+не нужна если unit отсутствует, не нужна если уже native, выполняется
+если есть `--skip-tables`, вызывает `_write_systemd_unit()` и
+`_iptables_remove()`.
+
+**`TestNativeRulesSyncBetweenModules`** (5): REGRESSION — оба модуля
+НЕ используют `--skip-tables`, оба имеют IPv6 fallback, оба НЕ ставят
+IPv4, оба имеют миграцию, оба вызывают миграцию в меню.
+
+### Файлы
+
+- `chimera/modules/youtube_b4.py` — убран `--skip-tables`, обновлён
+  `_iptables_apply()` (только IPv6), `_iptables_remove()` (cleanup),
+  `install_b4()`, `enable()`, `disable()`, добавлена
+  `_migrate_to_native_rules_if_needed()`, вызов миграции в меню.
+- `chimera/modules/dpi_bypass.py` — те же изменения (синхронно).
+- `tests/test_dpi_bypass.py` — 21 новый тест.
+
+### Тесты
+
+202 теста проходят (181 предыдущий + 21 новый).
+
+---
+
 ## FEAT(youtube_b4+dpi_bypass): авто-детект preset из config.json (подход A+B) — 19 августа 2026
 
 **Ранее TUI показывал устаревшее имя preset'а из `state.json`, даже если
