@@ -162,8 +162,8 @@ class TestImportCustomSet(unittest.TestCase):
         self.assertTrue(saved["sets"][0]["id"].startswith("custom-"),
                         f"id должен начинаться с 'custom-', got: {saved['sets'][0]['id']}")
 
-    def test_geosite_categories_removed_when_sni_domains_present(self):
-        """geosite_categories убирается если есть sni_domains (он не нужен)."""
+    def test_geosite_categories_preserved(self):
+        """geosite_categories сохраняется (system с sitedat_path сохраняется)."""
         test_json = json.dumps({
             "id": "geo-set",
             "targets": {
@@ -174,11 +174,8 @@ class TestImportCustomSet(unittest.TestCase):
         result = self.dpi_bypass.import_custom_set(test_json)
         self.assertTrue(result)
         saved = json.loads(self._config_file.read_text())
-        # geosite_categories должен быть убран (есть sni_domains)
-        self.assertNotIn("geosite_categories",
-                         saved["sets"][0]["targets"])
-        # sni_domains должен остаться
-        self.assertIn("sni_domains",
+        # geosite_categories должен остаться (b4 умеет с ним работать)
+        self.assertIn("geosite_categories",
                       saved["sets"][0]["targets"])
 
     def test_no_name_uses_default_in_message(self):

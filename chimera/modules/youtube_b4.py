@@ -1339,15 +1339,12 @@ def import_custom_set(json_str: str) -> bool:
     import uuid
     if not custom_set.get("id"):
         custom_set["id"] = f"custom-{uuid.uuid4().hex[:12]}"
-    # Убираем geosite_categories если есть sni_domains — b4 требует geosite_path.
-    # Если sni_domains есть — убираем geosite_categories (он не нужен, b4
-    # использует sni_domains). geosite_categories нужен только для Discovery.
-    targets = custom_set.get("targets", {})
-    if targets.get("sni_domains") and targets.get("geosite_categories"):
-        _info("Убран geosite_categories (есть sni_domains — он не нужен)")
-        targets.pop("geosite_categories", None)
+    # geosite_categories сохраняем как есть — секция system с
+    # sitedat_path/geosite_path сохраняется при импорте, поэтому b4
+    # может обрабатывать geosite_categories без ошибок.
 
     # Проверяем минимально-обязательные поля.
+    targets = custom_set.get("targets", {})
     if not targets.get("sni_domains") and not targets.get("geosite_categories"):
         _err("В сете нет targets.sni_domains и нет geosite_categories — нечего матчить")
         return False
