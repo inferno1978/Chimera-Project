@@ -1418,12 +1418,15 @@ def import_custom_set(json_str: str) -> bool:
     # Добавляем id если нет.
     if not custom_set.get("id"):
         custom_set["id"] = "youtube-custom"
-    # geosite_categories теперь поддерживается (geosite_path есть в конфиге).
-    # Раньше мы убирали geosite_categories, но b4 научился с ним работать
-    # (через system.geo.sitedat_path в config.json). Оставляем как есть.
+    # Убираем geosite_categories если нет sni_domains — b4 требует geosite_path.
+    # Если sni_domains есть — убираем geosite_categories (он не нужен, b4
+    # использует sni_domains). geosite_categories нужен только для Discovery.
+    targets = custom_set.get("targets", {})
+    if targets.get("sni_domains") and targets.get("geosite_categories"):
+        _info("Убран geosite_categories (есть sni_domains — он не нужен)")
+        targets.pop("geosite_categories", None)
 
     # Проверяем минимально-обязательные поля.
-    targets = custom_set.get("targets", {})
     if not targets.get("sni_domains") and not targets.get("geosite_categories"):
         _err("В сете нет targets.sni_domains и нет geosite_categories — нечего матчить")
         return False
