@@ -1081,6 +1081,23 @@ def _detect_active_preset_from_config() -> tuple:
         return ("unknown", None)
 
 
+def _get_enabled_sets() -> list:
+    """Возвращает список имён активных (enabled=true) сетов из config.json."""
+    if not B4_CONFIG_FILE.exists():
+        return []
+    try:
+        cfg = json.loads(B4_CONFIG_FILE.read_text())
+        sets = cfg.get("sets", [])
+        enabled = []
+        for s in sets:
+            if s.get("enabled", False):
+                name = s.get("name", s.get("id", "?"))
+                enabled.append(name)
+        return enabled
+    except Exception:
+        return []
+
+
 def status() -> dict:
     """Возвращает сводку состояния b4."""
     state = _load_state()
@@ -1117,6 +1134,9 @@ def status() -> dict:
         _save_state(state)
     active_preset = detected_preset if detected_preset != "unknown" else state_preset
 
+    #  Получаем список всех активных (enabled) сетов из config.json.
+    active_sets = _get_enabled_sets()
+
     # nginx front status.
     ng = _b4_nginx_status()
     nginx_url = _b4_nginx_get_url()
@@ -1125,6 +1145,7 @@ def status() -> dict:
         "service_active": service_active,
         "active_preset": active_preset,
         "active_set_name": detected_set_name,
+        "active_sets": active_sets,
         "version": version,
         "web_port": state.get("web_port", B4_WEB_PORT),
         "config_path": str(B4_CONFIG_FILE),
@@ -1680,21 +1701,21 @@ def do_dpi_bypass_menu() -> None:
             status_str = "active" if s.get("service_active") else "stopped"
             _box_row(f"  Сервис:       {status_col}{status_str}{NC}")
             _box_row(f"  Версия:       {CYAN}{s.get('version', '?')}{NC}")
-            #  Отображение preset: A+B подход.
-            # A: детектим preset из config.json (через _detect_active_preset_from_config).
-            # B: если preset='custom' — показываем и 'custom', и имя set'а из config.json.
+            #  Отображение активных сетов из config.json.
+            # Показываем все активные (enabled=true) сеты с зелёными точками.
+            _active_sets = s.get("active_sets", [])
             _preset_name = s.get("active_preset")
-            _set_name = s.get("active_set_name")
-            if _preset_name in PRESETS:
+            if _active_sets:
+                _dots = "  ".join(f"{GREEN}●{NC} {name}" for name in _active_sets)
+                preset_label = _dots
+            elif _preset_name == "none":
+                preset_label = f"{YELLOW}НЕ ВЫБРАН — выберите [2] или Discovery{NC}"
+            elif _preset_name in PRESETS:
                 preset_label = PRESETS[_preset_name][0]
-            elif _preset_name == "custom" and _set_name:
-                # Кастомный set — показываем имя из config.json.
-                preset_label = f"custom ({_set_name})"
+            elif _preset_name == "custom" and s.get("active_set_name"):
+                preset_label = f"custom ({s.get('active_set_name')})"
             elif _preset_name == "custom":
                 preset_label = "custom"
-            elif _preset_name == "none":
-                # Clean install — пресет не выбран.
-                preset_label = f"{YELLOW}НЕ ВЫБРАН — выберите [2] или Discovery{NC}"
             else:
                 preset_label = "—"
             _box_row(f"  Preset:       {preset_label}")

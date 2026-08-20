@@ -1324,48 +1324,42 @@ class TestMenuPresetDisplayAplusB(unittest.TestCase):
                 return line.strip()
         return None
 
-    def test_default_preset_shows_label(self):
-        """Default preset → показывает 'Эталон (DuckDuckGo fake + combo)'."""
+    def test_default_preset_shows_active_set_name(self):
+        """Default preset → показывает зелёную точку + имя сета 'Youtube'."""
         line = self._render_menu_preset_line(self.dpi_bypass.DEFAULT_SET_YOUTUBE, "default")
         self.assertIsNotNone(line)
-        self.assertIn("Эталон", line)
-        self.assertIn("DuckDuckGo", line)
+        # Должно показать имя сета из config.json (не подпись пресета)
+        self.assertIn("Youtube", line)
 
-    def test_aggressive_preset_shows_label(self):
-        """Aggressive preset → показывает 'Агрессивный'."""
+    def test_aggressive_preset_shows_active_set_name(self):
+        """Aggressive preset → показывает зелёную точку + 'Youtube-Aggressive'."""
         line = self._render_menu_preset_line(self.dpi_bypass.AGGRESSIVE_SET_YOUTUBE, "aggressive")
         self.assertIsNotNone(line)
-        self.assertIn("Агрессивный", line)
+        self.assertIn("Youtube-Aggressive", line)
 
-    def test_custom_preset_shows_custom_with_set_name(self):
-        """REGRESSION: custom preset → показывает 'custom (имя_seta)'.
+    def test_custom_preset_shows_active_set_name(self):
+        """REGRESSION: custom preset → показывает зелёную точку + имя сета.
 
         Ранее показывал устаревшее имя preset'а из state.json.
         """
-        # Создаём модифицированный set (добавлен домен)
         modified = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
         original_domains = list(modified["targets"]["sni_domains"])
         modified["targets"] = {"sni_domains": original_domains + ["extra.com"]}
         modified["name"] = "Youtube-Extended"
-        # State.json говорит 'default', но config — модифицированный
         line = self._render_menu_preset_line(modified, "default")
         self.assertIsNotNone(line)
-        self.assertIn("custom", line)
         self.assertIn("Youtube-Extended", line)
-        # НЕ должен показывать устаревшее 'Эталон'
-        self.assertNotIn("Эталон", line)
 
-    def test_custom_preset_without_name_shows_just_custom(self):
-        """Custom set без name → показывает просто 'custom'."""
+    def test_custom_preset_without_name_shows_id(self):
+        """Custom set без name → показывает id сета (fallback)."""
         modified = dict(self.dpi_bypass.DEFAULT_SET_YOUTUBE)
         original_domains = list(modified["targets"]["sni_domains"])
         modified["targets"] = {"sni_domains": original_domains + ["extra.com"]}
         modified.pop("name", None)
         line = self._render_menu_preset_line(modified, "default")
         self.assertIsNotNone(line)
-        self.assertIn("custom", line)
-        # Не должно быть '()' (пустых скобок)
-        self.assertNotIn("()", line)
+        # Должен показать id (fallback когда нет name)
+        self.assertIn("youtube", line)
 
 
 class TestYoutubeB4HasPresetDetection(unittest.TestCase):
