@@ -1309,7 +1309,7 @@ def import_custom_set(json_str: str) -> bool:
     # Добавляем id если нет.
     if not custom_set.get("id"):
         custom_set["id"] = "youtube-custom"
-    # Убираем geosite_categories если нет sni_domains — b4 требует geosite_path.
+    # Убираем geosite_categories если есть sni_domains — b4 требует geosite_path.
     # Если sni_domains есть — убираем geosite_categories (он не нужен, b4
     # использует sni_domains). geosite_categories нужен только для Discovery.
     targets = custom_set.get("targets", {})
@@ -1322,9 +1322,34 @@ def import_custom_set(json_str: str) -> bool:
         _err("В сете нет targets.sni_domains и нет geosite_categories — нечего матчить")
         return False
 
-    # Сохраняем конфиг.
+    #  Мультисетовый импорт: добавляем сет к существующим, не стирая.
+    # Читаем текущий config.json, если он есть. Если в нём уже есть сеты —
+    # добавляем новый к массиву (или заменяем, если id совпадает).
+    existing_sets = []
+    if B4_CONFIG_FILE.exists():
+        try:
+            existing_cfg = json.loads(B4_CONFIG_FILE.read_text())
+            existing_sets = existing_cfg.get("sets", [])
+        except Exception:
+            pass  # Конфиг повреждён — начнём с пустого массива
+
+    # Проверяем, нет ли уже сета с таким id — если есть, заменяем.
+    set_id = custom_set.get("id")
+    replaced = False
+    for i, s in enumerate(existing_sets):
+        if s.get("id") == set_id:
+            existing_sets[i] = custom_set
+            replaced = True
+            break
+    if not replaced:
+        existing_sets.append(custom_set)
+
+    _info(f"Сетов в конфиге: {len(existing_sets)} "
+          f"({'заменён' if replaced else 'добавлен'} id={set_id})")
+
+    # Сохраняем конфиг (существующие сеты + новый + системные настройки).
     config = {
-        "sets": [custom_set],
+        "sets": existing_sets,
         "routing": {"enabled": False},
         "udp": {
             "mode": "fake",
