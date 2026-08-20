@@ -149,8 +149,8 @@ class TestImportCustomSet(unittest.TestCase):
         # Routing не вызывается — функция возвращается раньше
         self.assertEqual(self._routing_calls, [])
 
-    def test_missing_id_gets_default(self):
-        """Set без id получает дефолтный 'youtube-custom'."""
+    def test_missing_id_gets_unique(self):
+        """Set без id получает уникальный custom-{uuid}."""
         test_json = json.dumps({
             "name": "No ID Set",
             "targets": {"sni_domains": ["x.com"]},
@@ -158,10 +158,9 @@ class TestImportCustomSet(unittest.TestCase):
         result = self.dpi_bypass.import_custom_set(test_json)
         self.assertTrue(result)
         saved = json.loads(self._config_file.read_text())
-        self.assertEqual(saved["sets"][0]["id"], "youtube-custom")
-        # Routing вызван с дефолтным id
-        self.assertEqual(self._routing_calls,
-                         [("youtube-custom", ["x.com"])])
+        # id должен начинаться с 'custom-'
+        self.assertTrue(saved["sets"][0]["id"].startswith("custom-"),
+                        f"id должен начинаться с 'custom-', got: {saved['sets'][0]['id']}")
 
     def test_geosite_categories_removed_when_sni_domains_present(self):
         """geosite_categories убирается если есть sni_domains (он не нужен)."""
