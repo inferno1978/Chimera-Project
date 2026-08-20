@@ -1665,7 +1665,7 @@ def do_youtube_b4_menu() -> None:
             _box_row(f"  {DIM}{{\"name\":\"...\",\"targets\":{{\"sni_domains\":[...]}},...}}{NC}")
             _box_row(f"  {DIM}Или: {{\"sets\":[...]}} — возьмётся первый set.{NC}")
             _box_row()
-            _box_row(f"  {DIM}Двойной Enter — конец ввода. Ctrl+C — отмена.{NC}")
+            _box_row(f"  {DIM}Вставьте JSON и нажмите Enter. Ctrl+C — отмена.{NC}")
             _box_bottom()
             lines = []
             try:
@@ -1674,6 +1674,11 @@ def do_youtube_b4_menu() -> None:
                     if not line.strip():
                         break
                     lines.append(line)
+                    # Авто-завершение: если строка начинается с '{' и
+                    # заканчивается '}' — это полный JSON в одну строку.
+                    joined = "".join(lines).strip()
+                    if joined.startswith("{") and joined.endswith("}"):
+                        break
             except (KeyboardInterrupt, EOFError):
                 print()
                 _warn("Отмена.")
