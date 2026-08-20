@@ -1690,6 +1690,15 @@ def do_dpi_bypass_menu() -> None:
                 _box_row(f"  {DIM}Список пресетов с плюсами/минусами — в модуле{NC}")
                 _box_row(f"  {DIM}YouTube через B4 (Главное меню → 3 → Y → B).{NC}")
                 _box_row()
+            #  Инструкция по импорту сета из Discovery (всегда показывается).
+            _box_row(f"  {YELLOW}{BOLD}📋 ИМПОРТ СЕТА ИЗ DISCOVERY (Web UI → TUI):{NC}")
+            _box_row(f"  {YELLOW}1. Найдите стратегию в Web UI b4 → Discovery{NC}")
+            _box_row(f"  {YELLOW}2. Use This Strategy → Create Set{NC}")
+            _box_row(f"  {YELLOW}3. Sets → три точки на карточке → Edit → Import/Export{NC}")
+            _box_row(f"  {YELLOW}4. Copy JSON → удалите созданный сет{NC}")
+            _box_row(f"  {YELLOW}5. TUI: [3] Импортировать кастомный сет → вставьте JSON{NC}")
+            _box_row(f"  {YELLOW}6. Web UI → Sets → F5 — проверьте, что сет импортирован{NC}")
+            _box_row()
             _box_sep()
             if s.get("service_active"):
                 _box_item("1", "🛑 Остановить b4 (без удаления)")
