@@ -1326,13 +1326,15 @@ def import_custom_set(json_str: str) -> bool:
         return False
 
     #  Мультисетовый импорт: добавляем сет к существующим, не стирая.
-    # Читаем текущий config.json, если он есть. Если в нём уже есть сеты —
-    # добавляем новый к массиву (или заменяем, если id совпадает).
+    # Читаем текущий config.json, если он есть. Сохраняем существующие сеты
+    # и секцию system (geosite/geoip пути), чтобы b4 не терял настройки.
     existing_sets = []
+    existing_system = None
     if B4_CONFIG_FILE.exists():
         try:
             existing_cfg = json.loads(B4_CONFIG_FILE.read_text())
             existing_sets = existing_cfg.get("sets", [])
+            existing_system = existing_cfg.get("system")
         except Exception:
             pass  # Конфиг повреждён — начнём с пустого массива
 
@@ -1350,7 +1352,17 @@ def import_custom_set(json_str: str) -> bool:
     _info(f"Сетов в конфиге: {len(existing_sets)} "
           f"({'заменён' if replaced else 'добавлен'} id={set_id})")
 
-    # Сохраняем конфиг (существующие сеты + новый + системные настройки).
+    # Сохраняем конфиг.
+    # Если b4 уже создал свою секцию system (с sitedat_path, ipdat_url, и т.д.)
+    # — сохраняем её как есть. Если нет — создаём дефолтную.
+    if not existing_system:
+        existing_system = {
+            "geosite_path": "/usr/share/xray/geosite.dat",
+            "geo": {
+                "ipdat_path": "/etc/b4/geoip.dat",
+                "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
+            },
+        }
     config = {
         "sets": existing_sets,
         "routing": {"enabled": False},
@@ -1358,13 +1370,7 @@ def import_custom_set(json_str: str) -> bool:
             "mode": "fake",
             "filter_quic": "block",  # Блокировать QUIC — браузер на TCP/HTTP2.
         },
-        "system": {
-            "geosite_path": "/usr/share/xray/geosite.dat",
-            "geo": {
-                "ipdat_path": "/etc/b4/geoip.dat",
-                "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
-            },
-        },
+        "system": existing_system,
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     # Перезапускаем сервис.
