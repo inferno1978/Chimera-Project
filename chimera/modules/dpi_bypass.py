@@ -1415,9 +1415,12 @@ def import_custom_set(json_str: str) -> bool:
         _err("Ожидается JSON-объект с set")
         return False
 
-    # Добавляем id если нет.
+    # Добавляем уникальный id если нет.
+    # Используем uuid4 — каждый сет получает свой id, чтобы можно было
+    # импортировать несколько сетов без замены.
+    import uuid
     if not custom_set.get("id"):
-        custom_set["id"] = "youtube-custom"
+        custom_set["id"] = f"custom-{uuid.uuid4().hex[:12]}"
     # Убираем geosite_categories если есть sni_domains — b4 требует geosite_path.
     # Если sni_domains есть — убираем geosite_categories (он не нужен, b4
     # использует sni_domains). geosite_categories нужен только для Discovery.
