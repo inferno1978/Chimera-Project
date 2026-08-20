@@ -1266,6 +1266,13 @@ def switch_preset(preset_name: str) -> bool:
             "mode": "fake",
             "filter_quic": "block",  # Блокировать QUIC — браузер на TCP/HTTP2.
         },
+        "system": {
+            "geosite_path": "/usr/share/xray/geosite.dat",
+            "geo": {
+                "ipdat_path": "/etc/b4/geoip.dat",
+                "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
+            },
+        },
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     # Перезапускаем сервис.
@@ -1425,7 +1432,17 @@ def import_custom_set(json_str: str) -> bool:
     config = {
         "sets": [custom_set],
         "routing": {"enabled": False},
-        "udp": {"mode": "fake"},
+        "udp": {
+            "mode": "fake",
+            "filter_quic": "block",  # Блокировать QUIC — браузер на TCP/HTTP2.
+        },
+        "system": {
+            "geosite_path": "/usr/share/xray/geosite.dat",
+            "geo": {
+                "ipdat_path": "/etc/b4/geoip.dat",
+                "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
+            },
+        },
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     # Перезапускаем сервис.
