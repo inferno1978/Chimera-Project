@@ -1089,6 +1089,10 @@ def _show_status() -> None:
         print(f"  {DIM}{line}{NC}")
 
     print()
+    print(f"  {DIM}Полные логи:{NC}")
+    print(f"    {CYAN}journalctl -u csqtt -f{NC}  {DIM}(live режим){NC}")
+    print(f"    {CYAN}journalctl -u csqtt -n 100 --no-pager{NC}  {DIM}(последние 100){NC}")
+    print()
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
