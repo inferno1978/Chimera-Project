@@ -178,7 +178,8 @@
 | `mieru_stats.py` | Статистика Mieru |
 | `fptn.py` | FPTN — L3 VPN с honeypot anti-probing (свой TUN, Protobuf поверх TLS) |
 | `pq_vless.py` | Post-Quantum VLESS |
-| `vkturn_menu.py` | Меню VKTurn |
+| `vk_bypass_menu.py` | Единое меню VK Whitelist Bypass (4 модуля) |
+| `vkturn_menu.py` | (устарело) Меню VKTurn — теперь часть vk_bypass_menu |
 
 ---
 
@@ -186,11 +187,18 @@
 
 | Файл | За что отвечает |
 |---|---|
-| `turntunnel.py` | TURN-туннель |
-| `turntunnel_links.py` | Генерация ссылок TURN-туннеля |
-| `turnable.py` | TURN-able transports (транспорты с поддержкой TURN) |
+| `turntunnel.py` | FreeTurn — vk-turn-proxy + FreeTurn Android |
+| `turntunnel_links.py` | Менеджер VK-call ссылок (для FreeTurn) |
+| `turnable.py` | WireTurn — Turnable + WireTurn Android |
 | `olcrtc.py` | OLC RTC (WebRTC-based) |
-| `wdtt.py` | WDTT (WebRTC DataChannel Tunnel) |
+| `wdtt.py` | qWDTT — WireGuard-over-TURN (Android + Go server) |
+| `wdtt_packages.py` | PackageSpec для qWDTT (Go source) |
+| `wdtt_mirrors.py` | Зеркала qWDTT source |
+| `csqtt.py` | CSQTT — RTP/TURN Tunnel (Android + Rust server) |
+| `csqtt_packages.py` | PackageSpec для CSQTT (Rust + Zig + cargo-zigbuild) |
+| `csqtt_mirrors.py` | Зеркала CSQTT source |
+| `turn_packages.py` | PackageSpec для FreeTurn/WireTurn binaries |
+| `turn_mirrors.py` | Зеркала для FreeTurn/WireTurn |
 | `webdav_tunnel.py` | WebDAV-туннель |
 | `slipgate.py` | Slipgate (обход DPI через mux) |
 | `hybrid_addon.py` | Гибридный аддон (комбинация протоколов) |
