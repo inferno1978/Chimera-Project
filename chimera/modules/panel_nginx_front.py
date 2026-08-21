@@ -274,6 +274,12 @@ def _generate_vhost(port: int,
         proxy_buffering off;
         proxy_request_buffering off;"""
 
+    # SSL verification для HTTPS backend (self-signed cert).
+    ssl_verify_block = ""
+    if backend_http_scheme == "https":
+        ssl_verify_block = """        proxy_ssl_verify off;
+        proxy_ssl_session_reuse on;"""
+
     # ACME challenge block — только для Let's Encrypt (когда есть domain)
     acme_block = ""
     if domain and domain != "_":
@@ -317,6 +323,7 @@ server {{
     location / {{
         proxy_pass {backend_http_scheme}://127.0.0.1:{backend_port};
         proxy_http_version 1.1;
+{ssl_verify_block}
 {ws_headers}
     }}{acme_block}
 }}
