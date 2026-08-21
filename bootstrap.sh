@@ -101,6 +101,10 @@ echo -e "\n${BOLD}[4/5] Загрузка Chimera Project${NC}"
 INSTALL_DIR="/opt/chimera"
 REPO_URL="https://gitlab.com/netwalker071778/chimera-project"
 BRANCH="chimera-v5"
+# GitLab-style archive URL (НЕ GitHub-style /archive/refs/heads/,
+# который GitLab перенаправляет на /users/sign_in — требует логина).
+# GitLab-style: /-/archive/{branch}/{project}-{branch}.tar.gz — работает анонимно.
+ARCHIVE_URL="https://gitlab.com/netwalker071778/chimera-project/-/archive/chimera-v5/chimera-project-chimera-v5.tar.gz"
 
 # Ищем существующую установку в стандартных системных путях.
 # ВАЖНО: домашние директории разработчиков НЕ проверяем — это личные пути,
@@ -261,7 +265,7 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
     else
         warn "git pull не удался (возможно divergent branches) — полное обновление через archive..."
         # _archive_update может вернуть 1 (graceful failure) — не дадим set -e убить скрипт
-        if ! _archive_update "$INSTALL_DIR" "${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"; then
+        if ! _archive_update "$INSTALL_DIR" "${ARCHIVE_URL}"; then
             warn "Обновление через archive не удалось. Установка НЕ изменена."
             warn "Попробуйте вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
         fi
@@ -270,7 +274,7 @@ else
     if [[ -d "$INSTALL_DIR" ]] && [[ -f "${INSTALL_DIR}/main.py" ]]; then
         # Установка без .git — обновляем через _archive_update (atomic, с rollback)
         info "Установка без git обнаружена — полное обновление через archive..."
-        if ! _archive_update "$INSTALL_DIR" "${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"; then
+        if ! _archive_update "$INSTALL_DIR" "${ARCHIVE_URL}"; then
             warn "Обновление через archive не удалось. Установка НЕ изменена."
             warn "Попробуйте вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
         fi
@@ -279,15 +283,13 @@ else
         if ! git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
             warn "git clone не удался — загружаю архив..."
             mkdir -p "$INSTALL_DIR"
-            _ARCHIVE_URL="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
+            _ARCHIVE_URL="${ARCHIVE_URL}"
             # Для свежей установки используем упрощённый путь (backup не нужен —
             # INSTALL_DIR пустой, откатываться некуда). Но staging + verify — обязательно.
             _CLONE_TMP="/tmp/chimera_install_$$.tar.gz"
             _CLONE_STAGING="/tmp/chimera_clone_staging_$$"
             rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
-            if curl -fsSL --connect-timeout 30 --retry 3 -o "$_CLONE_TMP" "$_ARCHIVE_URL" 2>/dev/null || \
-               curl -fsSL --connect-timeout 30 --retry 3 -o "$_CLONE_TMP" \
-                 "https://gitlab.com/netwalker071778/chimera-project/-/archive/chimera-v5/chimera-project-chimera-v5.tar.gz" 2>/dev/null; then
+            if curl -fsSL --connect-timeout 30 --retry 3 -o "$_CLONE_TMP" "$_ARCHIVE_URL" 2>/dev/null; then
                 mkdir -p "$_CLONE_STAGING"
                 if tar -xzf "$_CLONE_TMP" -C "$_CLONE_STAGING" 2>/dev/null; then
                     _extracted=""
