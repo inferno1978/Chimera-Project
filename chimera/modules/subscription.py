@@ -588,6 +588,7 @@ _SUBSCRIBABLE_PROTOCOLS = [
     "chimera.modules.trusttunnel",
     "chimera.modules.singbox_menu",
     "chimera.modules.wdtt",
+    "chimera.modules.csqtt",
     "chimera.modules.awg_peers",
     "chimera.modules.hysteria2_sync",
 ]
@@ -785,6 +786,8 @@ def _filter_safe_links(links: list[str]) -> list[str]:
             continue
         if link.startswith("qwdtt://"):
             continue  # qWDTT — только Android APK, не стандартный share-link
+        if link.startswith("csqtt://"):
+            continue  # CSQTT — только Android APK, не стандартный share-link
         if link.startswith("vpn://"):
             continue  # Amnezia VPN deep-link — только Amnezia Client
         filtered.append(link)
