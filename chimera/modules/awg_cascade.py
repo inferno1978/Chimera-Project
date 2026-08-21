@@ -63,7 +63,7 @@ def awgs_cascade_download_ru_zone() -> bool:
     fetch_package сам:
       1. Проверяет /root/ru.zone (manual_incoming_dir из spec) — если
          найден и размер >= 1 KB, использует без сети (WinSCP-friendly).
-      2. Иначе — перебирает 9 зеркал (ipdeny + GitHub raw + 7 gh-proxy)
+      2. Иначе — перебирает 5 зеркал (ipdeny + GitHub raw + 3 gh-proxy)
          по очереди через urllib.
       3. При успехе — post_install копирует в /etc/amneziawg/cascade/ru.zone
          + sanity check (lines_count > 100).

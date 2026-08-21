@@ -171,7 +171,7 @@ class TestGetSingboxMirrors(unittest.TestCase):
         urls = get_singbox_mirrors(tag="1.11.4",
                                    filename="sing-box-1.11.4-linux-amd64.tar.gz")
         self.assertIsInstance(urls, list)
-        self.assertGreater(len(urls), 5)  # минимум 5 зеркал
+        self.assertGreater(len(urls), 3)  # минимум 4 зеркала (1 release + 3 прокси)
 
     def test_empty_inputs_return_empty(self):
         from chimera.modules.singbox_mirrors import get_singbox_mirrors
@@ -243,21 +243,21 @@ class TestGetSingboxMirrors(unittest.TestCase):
         from chimera.modules.singbox_mirrors import get_singbox_mirrors
         urls = get_singbox_mirrors(tag="1.13.14",
                                    filename="sing-box-1.13.14-linux-amd64.tar.gz")
-        # Должно быть минимум 5 gh-proxy URL
-        gh_proxy_count = sum(1 for u in urls if "ghproxy" in u or "gh.con.sh" in u
-                             or "gitmirror" in u or "moeyy" in u or "ghps.cc" in u)
-        self.assertGreaterEqual(gh_proxy_count, 5,
+        # Должно быть минимум 3 gh-proxy URL
+        gh_proxy_count = sum(1 for u in urls if "ghproxy" in u or "gh-proxy" in u
+                             or "gh.llkk" in u)
+        self.assertGreaterEqual(gh_proxy_count, 3,
                                 f"Слишком мало gh-proxy URL: {gh_proxy_count}")
 
-    def test_mirror_count_is_8_after_exclusion(self):
-        """После исключения jsDelivr/raw/Statically должно быть 8 зеркал."""
+    def test_mirror_count_is_4_after_exclusion(self):
+        """После исключения jsDelivr/raw/Statically должно быть 4 зеркала."""
         from chimera.modules.singbox_mirrors import (
             SINGBOX_MIRRORS_COUNT, get_singbox_mirrors,
         )
         urls = get_singbox_mirrors(tag="1.13.14",
                                    filename="sing-box-1.13.14-linux-amd64.tar.gz")
         self.assertEqual(len(urls), SINGBOX_MIRRORS_COUNT)
-        self.assertEqual(SINGBOX_MIRRORS_COUNT, 8)
+        self.assertEqual(SINGBOX_MIRRORS_COUNT, 4)
 
     def test_tag_empty_returns_empty(self):
         """Без tag URL не генерируются (защита от дефолтных тегов)."""
@@ -270,7 +270,7 @@ class TestGetSingboxMirrors(unittest.TestCase):
         Баг v4.22.0-v4.22.2: _get_latest_release_info() делал tag.lstrip('v'),
         отрезая 'v' из 'v1.13.14'. Это ломало URL — GitHub возвращает 404 для
         /releases/download/1.13.14/ (нужно /releases/download/v1.13.14/).
-        Все 8 зеркал падали. Тест гарантирует что 'v' сохраняется.
+        Все 4 зеркала падали. Тест гарантирует что 'v' сохраняется.
         """
         from chimera.modules.singbox_mirrors import get_singbox_mirrors
         urls = get_singbox_mirrors(tag="v1.13.14",

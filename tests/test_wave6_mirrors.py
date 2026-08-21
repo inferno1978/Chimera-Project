@@ -54,24 +54,24 @@ class TestAwgTransportMirrors(unittest.TestCase):
             get_amneziawg_tools_mirrors, AWG_TOOLS_MIRRORS_COUNT,
         )
         urls = get_amneziawg_tools_mirrors(tag="v1.0.0", arch="amd64")
-        self.assertEqual(len(urls), 14)
-        self.assertEqual(AWG_TOOLS_MIRRORS_COUNT, 14)
+        self.assertEqual(len(urls), 10)
+        self.assertEqual(AWG_TOOLS_MIRRORS_COUNT, 10)
 
     def test_awg_go_source_mirrors_count(self):
         from chimera.modules.awg_transport_mirrors import (
             get_amneziawg_go_source_mirrors, AWG_GO_SOURCE_MIRRORS_COUNT,
         )
         urls = get_amneziawg_go_source_mirrors()
-        self.assertEqual(len(urls), 9)
-        self.assertEqual(AWG_GO_SOURCE_MIRRORS_COUNT, 9)
+        self.assertEqual(len(urls), 5)
+        self.assertEqual(AWG_GO_SOURCE_MIRRORS_COUNT, 5)
 
     def test_awg_kmod_source_mirrors_count(self):
         from chimera.modules.awg_transport_mirrors import (
             get_amneziawg_kmod_source_mirrors, AWG_KMOD_SOURCE_MIRRORS_COUNT,
         )
         urls = get_amneziawg_kmod_source_mirrors()
-        self.assertEqual(len(urls), 9)
-        self.assertEqual(AWG_KMOD_SOURCE_MIRRORS_COUNT, 9)
+        self.assertEqual(len(urls), 5)
+        self.assertEqual(AWG_KMOD_SOURCE_MIRRORS_COUNT, 5)
 
     def test_all_urls_are_https(self):
         from chimera.modules.awg_transport_mirrors import (
@@ -231,18 +231,18 @@ class TestAwgPostInstallNegative(unittest.TestCase):
 #  olcrtc_mirrors
 # ============================================================================
 class TestOlcrtcMirrors(unittest.TestCase):
-    """olcrtc_mirrors — 9 зеркал для source tarball."""
+    """olcrtc_mirrors — 5 зеркал для source tarball."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_returns_9_urls(self):
+    def test_returns_5_urls(self):
         from chimera.modules.olcrtc_mirrors import (
             get_olcrtc_source_mirrors, OLCRTC_SOURCE_MIRRORS_COUNT,
         )
         urls = get_olcrtc_source_mirrors()
-        self.assertEqual(len(urls), 9)
-        self.assertEqual(OLCRTC_SOURCE_MIRRORS_COUNT, 9)
+        self.assertEqual(len(urls), 5)
+        self.assertEqual(OLCRTC_SOURCE_MIRRORS_COUNT, 5)
 
     def test_all_urls_are_https(self):
         from chimera.modules.olcrtc_mirrors import get_olcrtc_source_mirrors

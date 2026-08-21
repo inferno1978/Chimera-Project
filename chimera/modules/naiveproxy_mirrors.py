@@ -85,7 +85,7 @@ def get_naiveproxy_mirrors() -> list[str]:
     )
 
 
-# Количество зеркал — 4 jsDelivr + release + 7 прокси = 12.
+# Количество зеркал — 4 jsDelivr + release + 3 прокси = 8.
 NAIVEPROXY_MIRRORS_COUNT: int = len(get_naiveproxy_mirrors())
 
 

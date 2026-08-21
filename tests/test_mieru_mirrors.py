@@ -74,10 +74,10 @@ class TestMirrorListStructure(unittest.TestCase):
         self.assertEqual(MIERU_MIRRORS_COUNT,
                          len(get_mita_mirrors(self.TEST_VERSION)))
 
-    def test_at_least_14_mirrors(self):
-        """После миграции на build_mirror_urls: ≥14 зеркал (4 jsDelivr + raw
-        + release + 7 прокси + Statically). Старый код давал 9 — теперь 14."""
-        self.assertGreaterEqual(MIERU_MIRRORS_COUNT, 14)
+    def test_at_least_10_mirrors(self):
+        """После миграции на build_mirror_urls: ≥10 зеркал (4 jsDelivr + raw
+        + release + 3 прокси + Statically)."""
+        self.assertGreaterEqual(MIERU_MIRRORS_COUNT, 10)
 
     def test_no_duplicate_urls(self):
         for fn in (get_mita_mirrors, get_mieru_mirrors,
@@ -167,9 +167,7 @@ class TestMirrorCategories(unittest.TestCase):
 
     def test_github_proxy_mirrors_present(self):
         urls = get_mita_mirrors(self.TEST_VERSION)
-        for proxy in ("ghproxy.net", "ghproxy.com", "mirror.ghproxy.com",
-                      "gh.con.sh", "hub.gitmirror.com", "github.moeyy.xyz",
-                      "ghps.cc"):
+        for proxy in ("ghproxy.net", "gh-proxy.com", "gh.llkk.cc"):
             with self.subTest(proxy=proxy):
                 self.assertTrue(
                     any(proxy in u for u in urls),
