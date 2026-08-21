@@ -113,8 +113,11 @@ _MODULE_STATE     = Path("/var/lib/xray-installer/csqtt.json")
 _GITHUB_REPO      = "amurcanov/csqtt"
 
 # Порты по умолчанию
-_DEFAULT_DATA_PORT = 46000   # входящий UDP data-plane (RTP/TURN)
-_DEFAULT_WEB_PORT  = 46002   # Web Panel (HTTPS, loopback)
+# CSQTT использует свои встроенные дефолты (40000/40500), которые
+# нельзя изменить через CLI — binary игнорирует --listen/--web-port
+# при работе через systemd. Принимаем как есть.
+_DEFAULT_DATA_PORT = 40000   # входящий UDP data-plane (RTP/TURN)
+_DEFAULT_WEB_PORT  = 40500   # Web Panel (HTTPS, 0.0.0.0)
 _DEFAULT_NGINX_PORT = 46443  # nginx front для Web Panel (TLS)
 
 # TUN сеть
@@ -514,6 +517,46 @@ def _ipt_close_udp(port: int) -> None:
             break
         _run(["iptables", "-t", "filter", "-D", "INPUT"] + args)
 
+def _ipt_open_tcp(port: int) -> None:
+    """Открывает TCP-порт для Web Panel CSQTT."""
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register, SERVICE_CSQTT_WEB,
+        )
+        port_register(SERVICE_CSQTT_WEB, port, "tcp",
+                      comment="CSQTT Web Panel", force=True)
+        ufw_open_port(port, "tcp", SERVICE_CSQTT_WEB, comment="CSQTT Web Panel")
+        return
+    except Exception:
+        pass
+    if _fw_tool() == "ufw":
+        r = _run(["ufw", "status"], capture=True, check=False)
+        if not re.search(rf'^{port}/tcp\b.*ALLOW', r.stdout or "", re.MULTILINE):
+            _run(["ufw", "allow", f"{port}/tcp", "comment", "CSQTT Web Panel"],
+                 check=False)
+        return
+    args = ["-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]
+    if not _ipt_rule_exists("filter", "INPUT", args):
+        _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
+
+def _ipt_close_tcp(port: int) -> None:
+    """Закрывает TCP-порт Web Panel CSQTT."""
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister, SERVICE_CSQTT_WEB,
+        )
+        ufw_close_port(port, "tcp", SERVICE_CSQTT_WEB, legacy_comments=["CSQTT Web Panel"])
+        port_unregister(SERVICE_CSQTT_WEB, port, "tcp")
+    except Exception:
+        pass
+    if shutil.which("ufw"):
+        _run(["ufw", "delete", "allow", f"{port}/tcp"], check=False)
+    args = ["-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]
+    for _ in range(5):
+        if not _ipt_rule_exists("filter", "INPUT", args):
+            break
+        _run(["iptables", "-t", "filter", "-D", "INPUT"] + args)
+
 def _ipt_masquerade_exists() -> bool:
     r = _run(
         ["iptables", "-t", "nat", "-C", "POSTROUTING",
@@ -568,7 +611,7 @@ def _csqtt_nginx_install(port: int, use_self_signed: bool, domain) -> tuple:
     ok, msg = panel_nginx_front_install(
         service_tag="csqtt_nginx",
         port=port,
-        backend_port=_DEFAULT_WEB_PORT,
+        backend_port=_DEFAULT_WEB_PORT,  # 40500 — реальный порт CSQTT web panel
         site_name="chimera-csqtt-nginx",
         state_file=_CSQTT_NGINX_STATE_FILE,
         title="CSQTT Web Panel",
@@ -599,6 +642,8 @@ def _csqtt_nginx_remove() -> tuple:
 # ══════════════════════════════════════════════════════════════════════════════
 def _install_service(data_port: int, web_port: int, main_pass: str,
                      web_user: str, web_pass: str, dns: str) -> None:
+    # CSQTT использует встроенные дефолтные порты (40000/40500),
+    # которые нельзя изменить через CLI. Передаём только конфигурацию.
     _SERVICE_FILE.write_text(
         "[Unit]\n"
         "Description=CSQTT — RTP/TURN Tunnel Server\n"
@@ -609,8 +654,6 @@ def _install_service(data_port: int, web_port: int, main_pass: str,
         "Type=simple\n"
         f"ExecStart={_BIN_PATH} "
         f"--config-dir {_CFG_DIR} "
-        f"--listen 0.0.0.0:{data_port} "
-        f"--web-port {web_port} "
         f"--password {main_pass} "
         f"--web-user {web_user} "
         f"--web-pass {web_pass} "
@@ -684,17 +727,9 @@ def _run_install_inner() -> None:
         )
         main_pass = raw if raw else (proto_gen_password() if not old_pass else old_pass)
 
-        raw = proto_ask(
-            f"  {CYAN}UDP порт data-plane [{old_data}]: {NC}",
-            default=str(old_data), c=True,
-        )
-        data_port = int(raw) if raw.isdigit() else old_data
-
-        raw = proto_ask(
-            f"  {CYAN}TCP порт Web Panel [{old_web}]: {NC}",
-            default=str(old_web), c=True,
-        )
-        web_port = int(raw) if raw.isdigit() else old_web
+        # CSQTT использует фиксированные порты (40000/40500) — не спрашиваем.
+        data_port = _DEFAULT_DATA_PORT
+        web_port = _DEFAULT_WEB_PORT
 
         web_user = proto_ask(
             f"  {CYAN}Web Panel логин [{old_wuser}]: {NC}",
@@ -758,9 +793,10 @@ def _run_install_inner() -> None:
     # 4. Firewall + NAT
     fw_tool = _fw_tool()
     _ipt_open_udp(data_port)
+    _ipt_open_tcp(web_port)  # Web Panel слушает на 0.0.0.0
     _ipt_add_masquerade()
     proto_ipt_persist()
-    print(f"  {GREEN}✓{NC}  {fw_tool}: UDP {data_port} открыт, NAT настроен.")
+    print(f"  {GREEN}✓{NC}  {fw_tool}: UDP {data_port} + TCP {web_port} открыты, NAT настроен.")
 
     # 5. Systemd
     _install_service(data_port, web_port, main_pass, web_user, web_pass, dns)
@@ -1146,6 +1182,7 @@ def _full_uninstall(silent: bool = False) -> bool:
         shutil.rmtree(_CFG_DIR, ignore_errors=True)
 
     _ipt_close_udp(data_port)
+    _ipt_close_tcp(state.get("web_port", _DEFAULT_WEB_PORT))
     _ipt_remove_masquerade()
     proto_ipt_persist()
 
