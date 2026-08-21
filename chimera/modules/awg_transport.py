@@ -224,8 +224,8 @@ def awg_install_local() -> bool:
         tag = _json.loads(r_tag.stdout).get("tag_name", "")
         if tag and _awg_zip_suffix:
             # МИГРАЦИЯ: раньше один прямой URL через curl, без зеркал.
-            # Теперь fetch_package(AWG_TOOLS_SPEC, tag=..., arch=...) — 14
-            # зеркал через urllib (jsDelivr + raw + release + 7 gh-proxy +
+            # Теперь fetch_package(AWG_TOOLS_SPEC, tag=..., arch=...) — 10
+            # зеркал через urllib (jsDelivr + raw + release + 3 gh-proxy +
             # Statically), проверка /root/ для ручного размещения.
             from chimera.modules.download_manager import fetch_package
             from chimera.modules.awg_transport_packages import AWG_TOOLS_SPEC
@@ -272,8 +272,8 @@ def _awg_install_go_version_binary_only() -> bool:
     # МИГРАЦИЯ (Wave 6, Variant A): раньше `git clone --depth=1` без зеркал.
     # Теперь fetch_package(AWG_GO_SOURCE_SPEC) — HTTP tarball через
     # codeload.github.com (Variant A согласно анализу: Makefile tolerates
-    # missing .git/, submodules отсутствуют). 9 зеркал (прямой GitHub +
-    # codeload + 7 gh-proxy), проверка /root/ для ручного размещения.
+    # missing .git/, submodules отсутствуют). 5 зеркал (прямой GitHub +
+    # codeload + 3 gh-proxy), проверка /root/ для ручного размещения.
     from chimera.modules.download_manager import fetch_package
     from chimera.modules.awg_transport_packages import AWG_GO_SOURCE_SPEC
 
@@ -968,7 +968,7 @@ def ensure_amneziawg_ready(remote_host: str = None, ssh_fn=None) -> None:
         # bash one-liner, без зеркал. Теперь fetch_package(AWG_KMOD_SOURCE_SPEC)
         # — HTTP tarball (Variant A согласно анализу: Makefile в src/ не
         # использует git, версия hardcoded 1.0.0, submodules отсутствуют).
-        # 9 зеркал (прямой GitHub + codeload + 7 gh-proxy).
+        # 5 зеркал (прямой GitHub + codeload + 3 gh-proxy).
         #
         # post_install AWG_KMOD_SOURCE_SPEC делает:
         #   1. extract tarball → amneziawg-linux-kernel-module-master/

@@ -17,10 +17,10 @@ chimera/modules/awg_transport_mirrors.py
   Все три — БЕЗ fallback, БЕЗ проверки ручного размещения.
 
 РЕШЕНИЕ (Wave 6 — Variant A для git-clone случаев, согласно анализу):
-  • amneziawg-tools zip: github_mirrors.build_mirror_urls() — 14 URL.
+  • amneziawg-tools zip: github_mirrors.build_mirror_urls() — 10 URL.
   • amneziawg-go source tarball: github_mirrors.build_source_archive_mirror_urls()
-    — 9 URL (прямой GitHub + codeload + 7 gh-proxy).
-  • amneziawg-linux-kernel-module source tarball: то же — 9 URL.
+    — 5 URL (прямой GitHub + codeload + 3 gh-proxy).
+  • amneziawg-linux-kernel-module source tarball: то же — 5 URL.
 
   Все три используют fetch_package() из download_manager.py с PackageSpec
   из awg_transport_packages.py. Variant A (HTTP tarball вместо git clone)
@@ -98,7 +98,7 @@ def get_amneziawg_tools_mirrors(tag: str, arch: str = "amd64") -> list[str]:
             "ubuntu-22.04-arm64-amneziawg-tools.zip" (arm64).
 
     Возвращает:
-      14 URL через build_mirror_urls (jsDelivr + raw + release + 7 proxy +
+      10 URL через build_mirror_urls (jsDelivr + raw + release + 3 proxy +
       Statically).
     """
     if not tag:
@@ -124,7 +124,7 @@ def get_amneziawg_go_source_mirrors() -> list[str]:
     """Упорядоченный список URL для скачивания amneziawg-go source tarball.
 
     Использует build_source_archive_mirror_urls (прямой GitHub + codeload +
-    7 gh-proxy = 9 URL). Branch: master.
+    3 gh-proxy = 5 URL). Branch: master.
 
     Build: `make` (Makefile tolerates missing .git/ — см. анализ Wave 6).
     """
@@ -155,7 +155,7 @@ def get_amneziawg_kmod_source_mirrors() -> list[str]:
 
 
 # Количество зеркал — для отображения в TUI.
-AWG_TOOLS_MIRRORS_COUNT: int = 14
+AWG_TOOLS_MIRRORS_COUNT: int = 10
 AWG_GO_SOURCE_MIRRORS_COUNT: int = len(get_amneziawg_go_source_mirrors())
 AWG_KMOD_SOURCE_MIRRORS_COUNT: int = len(get_amneziawg_kmod_source_mirrors())
 

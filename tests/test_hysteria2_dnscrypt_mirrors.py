@@ -50,18 +50,18 @@ def _setup_core_in_sysmodules():
 #  hysteria2_mirrors — реестр зеркал Hysteria2 binary
 # ============================================================================
 class TestHysteria2Mirrors(unittest.TestCase):
-    """hysteria2_mirrors — 14 зеркал для hysteria-linux-{arch}."""
+    """hysteria2_mirrors — 10 зеркал для hysteria-linux-{arch}."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_returns_14_urls(self):
+    def test_returns_10_urls(self):
         from chimera.modules.hysteria2_mirrors import (
             get_hysteria2_mirrors, HYSTERIA2_MIRRORS_COUNT,
         )
         urls = get_hysteria2_mirrors(tag="latest", arch="amd64")
-        self.assertEqual(len(urls), 14)
-        self.assertEqual(HYSTERIA2_MIRRORS_COUNT, 14)
+        self.assertEqual(len(urls), 10)
+        self.assertEqual(HYSTERIA2_MIRRORS_COUNT, 10)
 
     def test_all_urls_are_https(self):
         from chimera.modules.hysteria2_mirrors import get_hysteria2_mirrors
@@ -94,7 +94,7 @@ class TestHysteria2Mirrors(unittest.TestCase):
     def test_has_gh_proxy(self):
         from chimera.modules.hysteria2_mirrors import get_hysteria2_mirrors
         urls = get_hysteria2_mirrors(tag="latest", arch="amd64")
-        proxy_domains = ["ghproxy", "gh.con.sh", "gitmirror", "moeyy", "ghps.cc"]
+        proxy_domains = ["ghproxy", "gh-proxy", "gh.llkk"]
         has_proxy = any(any(d in u for d in proxy_domains) for u in urls)
         self.assertTrue(has_proxy)
 
@@ -122,18 +122,18 @@ class TestHysteria2Mirrors(unittest.TestCase):
 #  dnscrypt_mirrors — реестр зеркал dnscrypt-proxy tarball
 # ============================================================================
 class TestDnscryptMirrors(unittest.TestCase):
-    """dnscrypt_mirrors — 14 зеркал для dnscrypt-proxy-{arch}-{tag}.tar.gz."""
+    """dnscrypt_mirrors — 10 зеркал для dnscrypt-proxy-{arch}-{tag}.tar.gz."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_returns_14_urls(self):
+    def test_returns_10_urls(self):
         from chimera.modules.dnscrypt_mirrors import (
             get_dnscrypt_mirrors, DNSCRYPT_MIRRORS_COUNT,
         )
         urls = get_dnscrypt_mirrors(tag="2.1.5", arch="linux_x86_64")
-        self.assertEqual(len(urls), 14)
-        self.assertEqual(DNSCRYPT_MIRRORS_COUNT, 14)
+        self.assertEqual(len(urls), 10)
+        self.assertEqual(DNSCRYPT_MIRRORS_COUNT, 10)
 
     def test_all_urls_are_https(self):
         from chimera.modules.dnscrypt_mirrors import get_dnscrypt_mirrors

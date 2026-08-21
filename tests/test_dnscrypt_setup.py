@@ -130,14 +130,14 @@ class TestDnscryptSpecSanity(unittest.TestCase):
         from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
         self.assertIsNotNone(DNSCRYPT_SPEC.post_install)
 
-    def test_mirror_urls_has_14_entries(self):
-        """Сценарий 2: 14 зеркал для fallback (4 jsDelivr + raw + release + 7 proxy + Statically)."""
+    def test_mirror_urls_has_10_entries(self):
+        """Сценарий 2: 10 зеркал для fallback (4 jsDelivr + raw + release + 3 proxy + Statically)."""
         from chimera.modules.dnscrypt_packages import DNSCRYPT_SPEC
         urls = DNSCRYPT_SPEC.mirror_urls_builder(
             filename="dnscrypt-proxy-linux_x86_64-2.1.5.tar.gz",
             tag="2.1.5", arch="linux_x86_64",
         )
-        self.assertEqual(len(urls), 14)
+        self.assertEqual(len(urls), 10)
 
     def test_post_install_returns_false_on_non_tarball(self):
         """post_install возвращает False на не-tar.gz файле."""

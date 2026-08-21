@@ -71,7 +71,7 @@ def get_slipgate_installer_mirrors() -> list[str]:
       Упорядоченный список URL:
         1. jsDelivr CDN family (4 бэкенда) — /gh/anonvector/slipgate@main/...
         2. raw.githubusercontent.com/main/install.sh
-        3. 7 GitHub-прокси (оборачивают raw GitHub URL)
+        3. 3 GitHub-прокси (оборачивают raw GitHub URL)
         4. Statically CDN
     """
     return build_mirror_urls(
@@ -83,7 +83,7 @@ def get_slipgate_installer_mirrors() -> list[str]:
     )
 
 
-# Количество зеркал — 4 jsDelivr + raw + 7 proxy + Statically = 13.
+# Количество зеркал — 4 jsDelivr + raw + 3 proxy + Statically = 9.
 SLIPGATE_INSTALLER_MIRRORS_COUNT: int = len(get_slipgate_installer_mirrors())
 
 

@@ -16,7 +16,7 @@ chimera/modules/github_mirrors.py
   1. jsDelivr CDN family (4 бэкенда по умолчанию)
   2. raw GitHub (raw.githubusercontent.com)
   3. release GitHub (releases/latest/download или releases/download/{tag}/)
-  4. GitHub-прокси (7 хостов по умолчанию)
+  4. GitHub-прокси (3 хоста по умолчанию — см. GITHUB_PROXY_HOSTS)
   5. Statically CDN
 
 Этот порядок совпадает с geo_mirrors.py — для эквивалентных входных
@@ -47,24 +47,33 @@ from typing import Optional
 
 #: Список GitHub-прокси-хостов (китайские + комьюнити CDN).
 #: Порядок важен — соответствует порядку в существующих *_mirrors.py модулях.
-#: NOTE 2026-07: некоторые хосты могут быть временно недоступны (mirror.ghproxy.com,
-#: hub.gitmirror.com, github.moeyy.xyz, ghps.cc). fetch_package перебирает их
-#: по очереди и 404/NXDOMAIN пропускает. Не удаляйте хосты без необходимости —
-#: это сломает тесты, проверяющие точное количество зеркал.
 #:
-#: Этот список — ОБЩИЙ для всех пакетов (geo, mieru, telemt). Расширяется
-#: только тогда, когда новый хост подтверждён для ВСЕХ пакетов. Специфичные
-#: для конкретного пакета дополнительные зеркала (например РФ-зеркала для
-#: geo-файлов) добавляются в самом *_mirrors.py модуле, НЕ здесь — чтобы
-#: не раздувать списки для mieru/telemt, где эти хосты не тестировались.
+#: NOTE 2026-08: проверены на доступность (curl GET 4 bytes, gzip magic).
+#: Из 7 хостов, бывших в списке до 2026-08-21, РАБОЧИМИ оказались только 3.
+#: Удалены как мёртвые:
+#:   • ghproxy.com        — отдаёт HTML (1797 байт, не gzip)
+#:   • mirror.ghproxy.com — connection timeout / 0 байт
+#:   • gh.con.sh          — отдаёт 48 байт (HTML error page)
+#:   • hub.gitmirror.com  — connection timeout / 0 байт
+#:   • github.moeyy.xyz   — connection timeout / 0 байт
+#:   • ghps.cc            — HTTP 404 (прокси-сервис остановлен)
+#:
+#: Рабочие (2026-08-21):
+#:   • ghproxy.net  — стабильный, отдаёт gzip
+#:   • gh-proxy.com — стабильный, отдаёт gzip
+#:   • gh.llkk.cc   — стабильный, отдаёт gzip
+#:
+#: Этот список — ОБЩИЙ для всех пакетов (geo, mieru, telemt, csqtt, …).
+#: Специфичные для конкретного пакета дополнительные зеркала (например
+#: РФ-зеркала для geo-файлов) добавляются в самом *_mirrors.py модуле,
+#: НЕ здесь — чтобы не раздувать списки для mieru/telemt, где эти хосты
+#: не тестировались. geo_mirrors.py содержит собственный расширенный
+#: список прокси (включая mirror.ghproxy.com.tr) — он не зависит от
+#: этой константы.
 GITHUB_PROXY_HOSTS: list[str] = [
     "ghproxy.net",
-    "ghproxy.com",
-    "mirror.ghproxy.com",
-    "gh.con.sh",
-    "hub.gitmirror.com",
-    "github.moeyy.xyz",
-    "ghps.cc",
+    "gh-proxy.com",
+    "gh.llkk.cc",
 ]
 
 #: jsDelivr CDN бэкенды (4 хоста). У каждого свои рейт-лимиты и доступность.
@@ -177,7 +186,7 @@ def build_mirror_urls(
       2. raw GitHub (raw.githubusercontent.com) — если include_raw_github
       3. release GitHub (releases/latest/download или releases/download/{tag}/)
          — если include_release_github
-      4. GitHub-прокси family (7 хостов по умолчанию)
+      4. GitHub-прокси family (3 хоста по умолчанию)
       5. Statically CDN — если include_statically
 
     Параметры:
@@ -285,7 +294,7 @@ def build_source_archive_mirror_urls(
       1. Прямой GitHub: https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.tar.gz
       2. Codeload (отдельный домен GitHub для tarball'ов, чуть быстрее):
          https://codeload.github.com/{owner}/{repo}/tar.gz/refs/heads/{branch}
-      3. GitHub-прокси family (7 хостов по умолчанию) — каждый оборачивает
+      3. GitHub-прокси family (3 хоста по умолчанию) — каждый оборачивает
          прямой GitHub URL.
 
     Параметры:
