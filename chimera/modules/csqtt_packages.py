@@ -215,6 +215,92 @@ def _atomic_replace_binary(built: Path, bin_path: Path,
     return True
 
 
+def _ensure_swap_and_pick_jobs() -> int:
+    """Anti-OOM: измеряет RAM+swap, при необходимости создаёт /swapfile,
+    возвращает количество параллельных задач для cargo (-j N).
+
+    Логика:
+      • Читаем /proc/meminfo (MemAvailable + SwapFree).
+      • Если SwapFree < 1 GB и /swapfile не существует — создаём swap
+        на 2 GB (требует 2 GB свободного места на корневом разделе).
+      • Возвращаем -j:
+        - 1, если (RAM + swap) < 2 GB — самый безопасный режим
+        - 2, иначе (хватит для параллельной сборки 2 крейтов)
+    """
+    try:
+        meminfo = Path("/proc/meminfo").read_text()
+        avail_kb = 0
+        swap_free_kb = 0
+        swap_total_kb = 0
+        for line in meminfo.splitlines():
+            if line.startswith("MemAvailable:"):
+                avail_kb = int(line.split()[1])
+            elif line.startswith("SwapTotal:"):
+                swap_total_kb = int(line.split()[1])
+            elif line.startswith("SwapFree:"):
+                swap_free_kb = int(line.split()[1])
+
+        ram_gb = avail_kb / (1024 * 1024)
+        swap_gb = swap_free_kb / (1024 * 1024)
+        print(f"[INFO] RAM available: {ram_gb:.2f} GB, swap free: {swap_gb:.2f} GB")
+
+        # Если swap < 1 GB — пробуем создать /swapfile на 2 GB
+        if swap_total_kb < 1024 * 1024:  # < 1 GB total swap
+            swapfile = Path("/swapfile")
+            if not swapfile.exists():
+                # Проверяем свободное место на /
+                df = subprocess.run(["df", "-B1", "/"], capture_output=True, text=True)
+                try:
+                    free_bytes = int(df.stdout.splitlines()[1].split()[3])
+                    if free_bytes >= 2 * 1024 * 1024 * 1024:  # >= 2 GB свободно
+                        print("[INFO] Создаю /swapfile на 2 GB (anti-OOM для сборки)...")
+                        cmds = [
+                            ["fallocate", "-l", "2G", str(swapfile)],
+                            ["chmod", "600", str(swapfile)],
+                            ["mkswap", str(swapfile)],
+                            ["swapon", str(swapfile)],
+                        ]
+                        ok = True
+                        for c in cmds:
+                            r = subprocess.run(c, capture_output=True, text=True)
+                            if r.returncode != 0:
+                                print(f"[WARN] {c[0]} не удалось: {r.stderr.strip()[:200]}")
+                                ok = False
+                                break
+                        if ok:
+                            # Добавляем в /etc/fstab для persist после ребута
+                            fstab = Path("/etc/fstab")
+                            if fstab.exists():
+                                fstab_text = fstab.read_text()
+                                if "/swapfile" not in fstab_text:
+                                    fstab.write_text(fstab_text.rstrip() + "\n/swapfile none swap sw 0 0\n")
+                            print("[OK] /swapfile создан и включён (2 GB)")
+                            swap_gb = 2.0
+                        else:
+                            # Чистим частично созданный swapfile
+                            if swapfile.exists():
+                                swapfile.unlink()
+                except (ValueError, IndexError):
+                    pass
+            else:
+                # swapfile уже существует но не активен — пробуем включить
+                r = subprocess.run(["swapon", str(swapfile)], capture_output=True, text=True)
+                if r.returncode == 0:
+                    print("[OK] /swapfile активирован")
+                    swap_gb = 2.0
+
+        total_gb = ram_gb + swap_gb
+        if total_gb < 2.0:
+            print(f"[INFO] Всего {total_gb:.2f} GB — использую -j 1 (safest)")
+            return 1
+        else:
+            print(f"[INFO] Всего {total_gb:.2f} GB — использую -j 2")
+            return 2
+    except Exception as e:
+        print(f"[WARN] Не удалось определить RAM/swap: {e}, использую -j 1 (safest)")
+        return 1
+
+
 def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
     """Собирает CSQTT сервер из исходников."""
     import tarfile
@@ -265,13 +351,28 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
     arch = _detect_arch()
     target = f"{arch}-unknown-linux-musl"
 
+    # Anti-OOM: aws-lc-sys (криптография) при компиляции одного .c файла
+    # жрёт до 1.5-2 GB RAM одним процессом rustc/cc. На VPS с < 2 GB RAM
+    # без swap это = гарантированный SIGKILL от OOM killer.
+    #
+    # Стратегия:
+    #   1. Замеряем доступный RAM + swap.
+    #   2. Если swap маленький (< 1 GB) — автоматически создаём /swapfile
+    #      на 2 GB (если есть свободное место на диске).
+    #   3. Выбираем -j по итоговому объёму памяти:
+    #      < 1.5 GB → -j 1 (только один rustc за раз, самый безопасный)
+    #      1.5-3 GB → -j 2
+    #      > 3 GB   → -j 2 (всё равно -j 2, т.к. musl-build тяжелее обычного)
+    jobs = _ensure_swap_and_pick_jobs()
+    timeout = 2400 if jobs == 1 else 1800   # -j 1 → 40 мин, -j 2 → 30 мин
+
     print(f"[INFO] Собираю CSQTT для {target}...")
-    print(f"[INFO] -j 2 — ограничение параллельности (anti-OOM для VPS с малым RAM)")
+    print(f"[INFO] cargo -j {jobs} — anti-OOM (aws-lc-sys ест до 2 GB RAM/процесс)")
     r = subprocess.run(
-        ["cargo", "zigbuild", "--release", "--target", target, "-j", "2"],
+        ["cargo", "zigbuild", "--release", "--target", target, "-j", str(jobs)],
         cwd=str(csqtt_dir),
         capture_output=True, text=True,
-        env=env, timeout=1800,
+        env=env, timeout=timeout,
     )
     if r.returncode != 0:
         print(f"[ERR] Сборка не удалась: {r.stderr[-500:]}")
