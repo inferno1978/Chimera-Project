@@ -2,6 +2,271 @@
 
 ---
 
+## FEAT(csqtt): новый протокол CSQTT — RTP/TURN Tunnel Server — 21 августа 2026
+
+**Добавлен новый модуль `chimera/modules/csqtt.py` (~1550 строк) — интеграция
+с [CSQTT](https://github.com/amurcanov/csqtt) (amurcanov/csqtt). CSQTT —
+Rust/io_uring туннельный сервер, маскирующий пользовательский трафик под
+зашифрованный RTP/TURN медиапоток (видеозвонок). Android-клиент поднимает
+локальный TUN-интерфейс, трафик идёт через TURN-серверы как медиапоток и
+терминируется на VPS в `csqtt-server`, который через TUN+NAT выпускает его в
+открытый интернет. По сравнению с qWDTT (WireGuard-over-TURN) протокол
+обеспечивает более высокий уровень обфускации: DPI видит не WireGuard
+handshake, а обычный TURN-трафик, неотличимый от видеозвонка.**
+
+Три коммита за 21 августа реализовали и довели до рабочего состояния
+полную интеграцию CSQTT в архитектуру Chimera:
+- `7606db4` FEAT — основная интеграция (новые файлы, контракты, сборка).
+- `898843d` FIX — `proxy_ssl_verify off` для HTTPS backend + подсказки по логам.
+- `5a80199` FIX — фиксированные порты 40000/40500 (binary игнорирует CLI флаги).
+
+### Полный путь из главного меню
+
+```
+python3 main.py
+→ Главное меню → 18 (CSQTT (RTP/TURN Tunnel))
+→ Меню CSQTT → 1 (Установить CSQTT)
+```
+
+Альтернативно: `python3 -m chimera.modules.csqtt`
+
+### Архитектура трафика
+
+```
+Android (CSQTT APK)
+    │  RTP AEAD / ChaCha20-Poly1305 поверх UDP/TURN
+    ▼
+TURN-серверы (трафик = медиа-поток звонка)
+    │  UDP → VPS :40000
+    ▼
+csqtt-server  (:40000/udp data-plane)
+    │  TUN: csqtt1  (10.66.67.0/24)
+    │  NAT (MASQUERADE) → Интернет
+    ▼
+Web Panel: :40500 (HTTPS, axum + rustls, 0.0.0.0)
+    │  проксируется через nginx front на выбранном порту (default 46443)
+    ▼
+Внешний доступ: https://<domain>:<nginx_port>  (TLS, self-signed или LE)
+```
+
+### Ключевые отличия от qWDTT
+
+| Аспект | qWDTT | CSQTT |
+|---|---|---|
+| Протокол туннеля | WireGuard-over-TURN | RTP/AEAD (ChaCha20-Poly1305) |
+| Сервер | Go | Rust/io_uring (высокая производительность) |
+| Web Panel | Внешний nginx | Встроенная HTTPS-панель (axum + rustls) |
+| Туннель | WireGuard | TUN + NAT (MASQUERADE) |
+| Аутентификация | Парольная (по owner_email) | Парольная (по owner_email) |
+| Дип-линк | `qwdtt://` (только Android APK) | `csqtt://` (только Android APK) |
+
+### Сборка из исходников
+
+CSQTT — Rust-проект (edition 2024, musl target), не имеет готовых
+prebuilt-бинарей. Модуль автоматически:
+
+1. Скачивает исходники через `download_manager` с зеркал GitHub
+   (`csqtt_mirrors.py` → общая инфраструктура `github_mirrors.py`).
+2. Устанавливает Rust 1.97.1 через rustup (если не установлен или
+   версия не совпадает).
+3. Устанавливает Zig (нужен для кросс-компиляции musl target).
+4. Устанавливает `cargo-zigbuild`.
+5. Собирает: `cargo zigbuild --release --target <arch>-unknown-linux-musl`.
+6. Атомарно заменяет binary в `/usr/local/bin/csqtt-server` (temporary
+   file → rename → systemctl restart).
+
+Архитектуры: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`
+(авто-детект через `uname -m`).
+
+### Конфигурация — фиксированные порты (коммит 5a80199)
+
+CSQTT binary игнорирует CLI-флаги `--listen`/`--web-port` и использует
+встроенные дефолты. Поэтому порты зафиксированы в модуле и не
+запрашиваются у пользователя при установке:
+
+- **40000/udp** — data-plane (входящий RTP/TURN трафик от клиентов).
+- **40500/tcp** — Web Panel (HTTPS, слушает на `0.0.0.0`).
+- **46443/tcp** (default) — nginx front для Web Panel, пользователь
+  может выбрать любой порт при установке (например, 41000).
+
+Systemd-unit не передаёт `--listen`/`--web-port` (бесполезно), только
+`--config-dir`, `--password`, `--web-user`, `--web-pass`, `--dns`.
+
+### Systemd-сервис
+
+`/etc/systemd/system/csqtt.service`:
+
+```ini
+[Unit]
+Description=CSQTT — RTP/TURN Tunnel Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/csqtt-server \
+    --config-dir /etc/csqtt \
+    --password <main_password> \
+    --web-user <web_user> \
+    --web-pass <web_pass> \
+    --dns 1.1.1.1
+Restart=always
+RestartSec=5
+User=root
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Управление паролями + hot reload
+
+Пароли хранятся в `/etc/csqtt/passwords.json` (chmod 0600):
+
+```json
+{
+  "main_password": "<бессрочный пароль администратора>",
+  "passwords": {
+    "<pwd>": {
+      "device_ids": [],
+      "max_devices": 1,
+      "expires_at": 1234567890,
+      "down_bytes": 0,
+      "up_bytes": 0,
+      "is_deactivated": false,
+      "owner_email": "user@example.com"
+    }
+  },
+  "devices": {}
+}
+```
+
+- Главный пароль — бессрочный, для себя.
+- Юзерские пароли — генерируются автоматически (proto_gen_password),
+  TTL 365 дней, лимит устройств = 1.
+- **Hot reload**: после изменения `passwords.json` серверу отправляется
+  `SIGHUP` (`kill -HUP $(pidof csqtt-server)`) — csqtt перечитывает
+  конфиг без перезапуска активных сессий.
+- Bulk sync: при установке CSQTT все существующие VLESS-юзеры
+  автоматически получают CSQTT-пароли (через `_sync_all_from_vless`
+  из `rest_api`).
+
+### Web Panel + nginx front (TLS)
+
+Web Panel встроена в csqtt-server (HTTPS на `:40500`). Прямой доступ
+снаружи через `panel_nginx_front` (общий механизм, используется также
+для b4 и других панелей):
+
+- Self-signed сертификат (по умолчанию) или Let's Encrypt (если
+  передан домен).
+- **`proxy_ssl_verify off`** в nginx upstream — критично, т.к. CSQTT
+  использует self-signed HTTPS, и без этой опции nginx отклоняет
+  сертификат → 502 Bad Gateway (коммит 898843d).
+- `proxy_ssl_session_reuse on` — оптимизация TLS-handshake к backend.
+- `backend_http_scheme="https"` — csqtt web panel уже HTTPS, не HTTP.
+- Сохранение состояния в
+  `/var/lib/xray-installer/csqtt_nginx_front.json`.
+- Удаление: nginx vhost + сертификат + закрытие порта через
+  `port_registry`.
+
+### Интеграция с Chimera — 5 точек
+
+1. **`chimera/_core.py`**:
+   - `from chimera.modules.csqtt import do_csqtt_menu` (строка 77).
+   - Пункт `[18] 🎵 CSQTT (RTP/TURN Tunnel)` в главном меню (строка 8884).
+   - `_extract_csqtt_ports()` — extractor для UDP data_port + TCP
+     web_port (строка 1402).
+   - Запись в `_INSTALLED_PROTOCOLS` реестре (строка 1506): key=`csqtt`,
+     state_file=`/var/lib/xray-installer/csqtt.json`.
+
+2. **`chimera/modules/port_registry.py`** — 3 новых ключа сервисов:
+   - `SERVICE_CSQTT = "csqtt"` (UDP, data-plane).
+   - `SERVICE_CSQTT_WEB = "csqtt_web"` (TCP, Web Panel loopback).
+   - `SERVICE_CSQTT_NGINX = "csqtt_nginx"` (TCP, nginx front TLS).
+
+3. **`chimera/modules/rest_api.py`**:
+   - `"chimera.modules.csqtt"` добавлен в `_SYNCABLE_PROTOCOLS`
+     (строка 315).
+   - Contract: `is_active()`, `ensure_user_full(user)`,
+     `remove_user_full(user)`, `rename_user_full(old, new)`.
+   - При создании/удалении/переименовании VLESS-юзера автоматически
+     создаётся/удаляется/пересоздаётся CSQTT-пароль с тем же
+     `owner_email`.
+
+4. **`chimera/modules/subscription.py`**:
+   - `"chimera.modules.csqtt"` добавлен в `_SUBSCRIBABLE_PROTOCOLS`
+     (строка 591).
+   - Contract: `get_subscription_uris(user)` — возвращает
+     `csqtt://config?name=...&peer=...&pass=...` ссылку.
+   - Внимание: `csqtt://` ссылки **исключаются** из стандартной
+     base64-подписки (строка 789) — это deep-link только для Android
+     APK, не стандартный share-link.
+
+5. **`chimera/modules/panel_nginx_front.py`**:
+   - Расширение: при `backend_http_scheme='https'` добавляется
+     `proxy_ssl_verify off` + `proxy_ssl_session_reuse on` (коммит 898843d).
+   - Используется общий механизм для nginx front (как в b4, TrustTunnel,
+     и других панелях).
+
+### TUI модуля (8 пунктов + Guide + Back)
+
+```
+╔══════════════════════════════════════════════════════════════════╗
+║                    CSQTT  •  RTP/TURN Tunnel                     ║
+╠══════════════════════════════════════════════════════════════════║
+║  Статус:                 ● активен                               ║
+║  Data порт:              40000                                   ║
+║  Web Panel:              https://127.0.0.1:40500                 ║
+║  Паролей:                1                                       ║
+║  Web (TLS):              https://<domain>:<nginx_port>           ║
+╠══════════════════════════════════════════════════════════════════║
+║  [1]  🚀  Переустановить                                         ║
+║  [2]  🔑  Управление паролями                                    ║
+║  [3]  🔗  Показать ссылку (главный пароль)                       ║
+║  [4]  🔄  Перезапустить сервис                                   ║
+║  [5]  📊  Статус / логи                                          ║
+║  [6]  🌐  Web UI (SSH-туннель инструкция)                        ║
+║  [7]  🌐 nginx front (TLS) — вкл/выкл                           ║
+╠══════════════════════════════════════════════════════════════════║
+║  [8]  🗑️   Удалить CSQTT                                         ║
+╠══════════════════════════════════════════════════════════════════║
+║  [G]  📖  Гайд: установка, подключение, Web Panel                ║
+║  [Q]  ← Назад в главное меню VLESS                               ║
+╚══════════════════════════════════════════════════════════════════╝
+```
+
+Пункт [5] (Статус/логи) показывает последние 30 строк `journalctl -u
+csqtt` + подсказки для live-режима и просмотра 100 строк (коммит 898843d).
+
+### Полнота удаления
+
+`_full_uninstall()` убирает всё:
+- systemd-сервис (`csqtt.service`).
+- Binary (`/usr/local/bin/csqtt-server`).
+- Конфиги (`/etc/csqtt/`).
+- iptables: UDP data_port, TCP web_port, MASQUERADE.
+- nginx front (vhost + сертификат + порт через `port_registry`).
+- State file (`/var/lib/xray-installer/csqtt.json`).
+- nginx state file (`/var/lib/xray-installer/csqtt_nginx_front.json`).
+
+### Файлы
+
+- `chimera/modules/csqtt.py` — основной модуль (~1550 строк).
+- `chimera/modules/csqtt_mirrors.py` — зеркала GitHub (через
+  `github_mirrors.build_source_archive_mirror_urls`).
+- `chimera/modules/csqtt_packages.py` — `PackageSpec` + `post_install`
+  (Rust + Zig + cargo-zigbuild + атомарная замена binary).
+- `chimera/modules/_core.py` — импорт, пункт меню 18, handler,
+  `_extract_csqtt_ports`, запись в `_INSTALLED_PROTOCOLS`.
+- `chimera/modules/port_registry.py` — 3 новых SERVICE_CSQTT_* констант.
+- `chimera/modules/rest_api.py` — добавлен в `_SYNCABLE_PROTOCOLS`.
+- `chimera/modules/subscription.py` — добавлен в
+  `_SUBSCRIBABLE_PROTOCOLS`, `csqtt://` skip в `_filter_safe_links`.
+- `chimera/modules/panel_nginx_front.py` — `proxy_ssl_verify off` для
+  HTTPS backend.
+
+---
+
 ## FIX(youtube_b4+dpi_bypass): убрать IPv6 fallback — b4 сам через nftables table inet — 19 августа 2026
 
 **Убраны Chimera'ные IPv6 iptables-правила (`b4_mangle6`), которые
