@@ -69,7 +69,7 @@ from chimera.modules.github_mirrors import build_mirror_urls
 # ============================================================================
 # Раньше здесь был собственный список _MIRROR_FACTORIES (9 зеркал).
 # Теперь делегируем в единый build_mirror_urls() из github_mirrors.py.
-# Это даёт 14 зеркал (4 jsDelivr + raw GitHub + release GitHub + 7 прокси +
+# Это даёт 10 зеркал (4 jsDelivr + raw GitHub + release GitHub + 3 прокси +
 # Statically) — строгий superset старых 9.
 #
 # Порядок зеркал изменился: старый (release → proxy → jsDelivr) → новый
@@ -140,7 +140,7 @@ def get_all_mirrors(version: str) -> dict[str, list[str]]:
     return result
 
 
-MIERU_MIRRORS_COUNT: int = 14
+MIERU_MIRRORS_COUNT: int = 10
 """Количество зеркал на каждый файл (для отображения в TUI)."""
 
 

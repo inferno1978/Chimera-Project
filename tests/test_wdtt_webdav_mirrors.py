@@ -12,7 +12,7 @@ Unit-тесты для mirror-реестров и PackageSpecs Волны 2:
   • chimera/modules/webdav_packages.py::WEBDAV_SOURCE_SPEC
 
 Покрывает:
-  • Корректность URL-шаблонов (прямой GitHub + codeload + 7 gh-proxy для
+  • Корректность URL-шаблонов (прямой GitHub + codeload + 3 gh-proxy для
     source-архивов; go.dev + 3 региональных зеркала для Go toolchain)
   • Что все URL — HTTPS
   • Что URL содержат owner/repo/branch (source) или version/arch (Go)
@@ -58,8 +58,8 @@ class TestBuildSourceArchiveMirrorUrls(unittest.TestCase):
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_returns_9_urls_for_default_config(self):
-        """1 прямой + 1 codeload + 7 прокси = 9 URL."""
+    def test_returns_5_urls_for_default_config(self):
+        """1 прямой + 1 codeload + 3 прокси = 5 URL."""
         from chimera.modules.github_mirrors import (
             build_source_archive_mirror_urls, GITHUB_PROXY_HOSTS,
         )
@@ -92,7 +92,7 @@ class TestBuildSourceArchiveMirrorUrls(unittest.TestCase):
     def test_proxy_urls_come_after_direct_and_codeload(self):
         from chimera.modules.github_mirrors import build_source_archive_mirror_urls
         urls = build_source_archive_mirror_urls("a", "b", "main")
-        # URLs 2..8 — прокси (начиная с ghproxy.net)
+        # URLs 2..4 — прокси (начиная с ghproxy.net)
         self.assertIn("ghproxy.net", urls[2])
         self.assertIn("/a/b/archive/refs/heads/main.tar.gz", urls[2])
 
@@ -101,8 +101,8 @@ class TestBuildSourceArchiveMirrorUrls(unittest.TestCase):
         urls = build_source_archive_mirror_urls(
             "a", "b", "main", include_codeload=False,
         )
-        # Без codeload: 1 прямой + 7 прокси = 8 URL
-        self.assertEqual(len(urls), 8)
+        # Без codeload: 1 прямой + 3 прокси = 4 URL
+        self.assertEqual(len(urls), 4)
         self.assertNotIn("codeload.github.com", "".join(urls))
 
     def test_returns_empty_on_missing_args(self):
@@ -243,18 +243,18 @@ class TestGoToolchainSpecSanity(unittest.TestCase):
 #  wdtt_mirrors — реестр зеркал qWDTT source
 # ============================================================================
 class TestWdttMirrors(unittest.TestCase):
-    """wdtt_mirrors — 9 зеркал для proxy-turn-vk-android-master.tar.gz."""
+    """wdtt_mirrors — 5 зеркал для proxy-turn-vk-android-master.tar.gz."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_returns_9_urls(self):
+    def test_returns_5_urls(self):
         from chimera.modules.wdtt_mirrors import (
             get_wdtt_source_mirrors, WDTT_SOURCE_MIRRORS_COUNT,
         )
         urls = get_wdtt_source_mirrors()
-        self.assertEqual(len(urls), 9)
-        self.assertEqual(WDTT_SOURCE_MIRRORS_COUNT, 9)
+        self.assertEqual(len(urls), 5)
+        self.assertEqual(WDTT_SOURCE_MIRRORS_COUNT, 5)
 
     def test_all_urls_are_https(self):
         from chimera.modules.wdtt_mirrors import get_wdtt_source_mirrors
@@ -331,25 +331,25 @@ class TestWdttSourceSpecSanity(unittest.TestCase):
         urls = WDTT_SOURCE_SPEC.mirror_urls_builder(
             filename="proxy-turn-vk-android-master.tar.gz",
         )
-        self.assertEqual(len(urls), 9)
+        self.assertEqual(len(urls), 5)
 
 
 # ============================================================================
 #  webdav_mirrors — реестр зеркал webdav-tunnel source
 # ============================================================================
 class TestWebdavMirrors(unittest.TestCase):
-    """webdav_mirrors — 9 зеркал для webdav-tunnel-main.tar.gz."""
+    """webdav_mirrors — 5 зеркал для webdav-tunnel-main.tar.gz."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_returns_9_urls(self):
+    def test_returns_5_urls(self):
         from chimera.modules.webdav_mirrors import (
             get_webdav_source_mirrors, WEBDAV_SOURCE_MIRRORS_COUNT,
         )
         urls = get_webdav_source_mirrors()
-        self.assertEqual(len(urls), 9)
-        self.assertEqual(WEBDAV_SOURCE_MIRRORS_COUNT, 9)
+        self.assertEqual(len(urls), 5)
+        self.assertEqual(WEBDAV_SOURCE_MIRRORS_COUNT, 5)
 
     def test_all_urls_are_https(self):
         from chimera.modules.webdav_mirrors import get_webdav_source_mirrors
@@ -419,7 +419,7 @@ class TestWebdavSourceSpecSanity(unittest.TestCase):
         urls = WEBDAV_SOURCE_SPEC.mirror_urls_builder(
             filename="webdav-tunnel-main.tar.gz",
         )
-        self.assertEqual(len(urls), 9)
+        self.assertEqual(len(urls), 5)
 
 
 # ============================================================================

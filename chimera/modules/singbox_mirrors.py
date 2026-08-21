@@ -87,9 +87,9 @@ def get_singbox_mirrors(tag: str, filename: str) -> list[str]:
     )
 
 
-# Количество зеркал — 8 (1 release GitHub + 7 gh-proxy).
+# Количество зеркал — 1 release GitHub + 3 gh-proxy = 4.
 # jsDelivr/raw/Statically исключены — не могут отдавать release assets.
-SINGBOX_MIRRORS_COUNT: int = 8  # константа для TUI
+SINGBOX_MIRRORS_COUNT: int = 4  # константа для TUI
 
 
 # ============================================================================

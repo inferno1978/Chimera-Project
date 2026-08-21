@@ -42,18 +42,18 @@ def _setup_core_in_sysmodules():
 #  naiveproxy_mirrors
 # ============================================================================
 class TestNaiveproxyMirrors(unittest.TestCase):
-    """naiveproxy_mirrors — 12 зеркал для caddy-linux-amd64."""
+    """naiveproxy_mirrors — 8 зеркал для caddy-linux-amd64."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_returns_12_urls(self):
+    def test_returns_8_urls(self):
         from chimera.modules.naiveproxy_mirrors import (
             get_naiveproxy_mirrors, NAIVEPROXY_MIRRORS_COUNT,
         )
         urls = get_naiveproxy_mirrors()
-        self.assertEqual(len(urls), 12)
-        self.assertEqual(NAIVEPROXY_MIRRORS_COUNT, 12)
+        self.assertEqual(len(urls), 8)
+        self.assertEqual(NAIVEPROXY_MIRRORS_COUNT, 8)
 
     def test_all_urls_are_https(self):
         from chimera.modules.naiveproxy_mirrors import get_naiveproxy_mirrors
@@ -123,10 +123,10 @@ class TestNaiveproxySpecSanity(unittest.TestCase):
         from chimera.modules.naiveproxy_packages import NAIVEPROXY_SPEC
         self.assertIsNotNone(NAIVEPROXY_SPEC.post_install)
 
-    def test_mirror_urls_has_12_entries(self):
+    def test_mirror_urls_has_8_entries(self):
         from chimera.modules.naiveproxy_packages import NAIVEPROXY_SPEC
         urls = NAIVEPROXY_SPEC.mirror_urls_builder(filename="caddy-linux-amd64")
-        self.assertEqual(len(urls), 12)
+        self.assertEqual(len(urls), 8)
 
 
 # ============================================================================
@@ -195,18 +195,18 @@ class TestNaiveproxyDownloadBinaryMigrated(unittest.TestCase):
 #  fptn_mirrors
 # ============================================================================
 class TestFptnMirrors(unittest.TestCase):
-    """fptn_mirrors — 14 зеркал для fptn-server .deb."""
+    """fptn_mirrors — 10 зеркал для fptn-server .deb."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_returns_14_urls(self):
+    def test_returns_10_urls(self):
         from chimera.modules.fptn_mirrors import (
             get_fptn_mirrors, FPTN_MIRRORS_COUNT,
         )
         urls = get_fptn_mirrors(tag="0.7.6", filename="fptn-server-ubuntu22.04-amd64.deb")
-        self.assertEqual(len(urls), 14)
-        self.assertEqual(FPTN_MIRRORS_COUNT, 14)
+        self.assertEqual(len(urls), 10)
+        self.assertEqual(FPTN_MIRRORS_COUNT, 10)
 
     def test_all_urls_are_https(self):
         from chimera.modules.fptn_mirrors import get_fptn_mirrors
@@ -327,23 +327,23 @@ class TestXrayMirrorsSanity(unittest.TestCase):
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_zip_mirrors_count_14(self):
+    def test_zip_mirrors_count_10(self):
         from chimera.modules.xray_mirrors import (
             get_xray_zip_mirrors, XRAY_ZIP_MIRRORS_COUNT,
         )
         urls = get_xray_zip_mirrors(tag="v25.4.30", arch="64")
-        # 4 jsDelivr + raw + release + 7 proxy + Statically = 14
-        self.assertEqual(len(urls), 14)
-        self.assertEqual(XRAY_ZIP_MIRRORS_COUNT, 14)
+        # 4 jsDelivr + raw + release + 3 proxy + Statically = 10
+        self.assertEqual(len(urls), 10)
+        self.assertEqual(XRAY_ZIP_MIRRORS_COUNT, 10)
 
-    def test_checksums_mirrors_count_14(self):
+    def test_checksums_mirrors_count_10(self):
         from chimera.modules.xray_mirrors import (
             get_xray_checksums_mirrors, XRAY_CHK_MIRRORS_COUNT,
         )
         urls = get_xray_checksums_mirrors(tag="v25.4.30", arch="64")
-        # 4 jsDelivr + raw + release + 7 proxy + Statically = 14
-        self.assertEqual(len(urls), 14)
-        self.assertEqual(XRAY_CHK_MIRRORS_COUNT, 14)
+        # 4 jsDelivr + raw + release + 3 proxy + Statically = 10
+        self.assertEqual(len(urls), 10)
+        self.assertEqual(XRAY_CHK_MIRRORS_COUNT, 10)
 
     def test_installer_mirrors_non_empty(self):
         from chimera.modules.xray_mirrors import (

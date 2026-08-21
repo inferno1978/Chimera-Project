@@ -42,18 +42,18 @@ def _setup_core_in_sysmodules():
 #  awg_cascade_mirrors — ru.zone
 # ============================================================================
 class TestAwgCascadeMirrors(unittest.TestCase):
-    """awg_cascade_mirrors — 9 зеркал для ru.zone (ipdeny + raw + 7 proxy)."""
+    """awg_cascade_mirrors — 5 зеркал для ru.zone (ipdeny + raw + 3 proxy)."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_returns_9_urls(self):
+    def test_returns_5_urls(self):
         from chimera.modules.awg_cascade_mirrors import (
             get_ru_zone_mirrors, RU_ZONE_MIRRORS_COUNT,
         )
         urls = get_ru_zone_mirrors()
-        self.assertEqual(len(urls), 9)
-        self.assertEqual(RU_ZONE_MIRRORS_COUNT, 9)
+        self.assertEqual(len(urls), 5)
+        self.assertEqual(RU_ZONE_MIRRORS_COUNT, 5)
 
     def test_all_urls_are_https(self):
         from chimera.modules.awg_cascade_mirrors import get_ru_zone_mirrors
@@ -73,7 +73,7 @@ class TestAwgCascadeMirrors(unittest.TestCase):
     def test_has_gh_proxy(self):
         from chimera.modules.awg_cascade_mirrors import get_ru_zone_mirrors
         urls = get_ru_zone_mirrors()
-        proxy_domains = ["ghproxy", "gh.con.sh", "gitmirror", "moeyy", "ghps.cc"]
+        proxy_domains = ["ghproxy", "gh-proxy", "gh.llkk"]
         has_proxy = any(any(d in u for d in proxy_domains) for u in urls)
         self.assertTrue(has_proxy)
 
@@ -118,18 +118,18 @@ class TestRuZoneSpecSanity(unittest.TestCase):
 #  slipgate_mirrors
 # ============================================================================
 class TestSlipgateMirrors(unittest.TestCase):
-    """slipgate_mirrors — 13 зеркал для install.sh."""
+    """slipgate_mirrors — 9 зеркал для install.sh."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_returns_13_urls(self):
+    def test_returns_9_urls(self):
         from chimera.modules.slipgate_mirrors import (
             get_slipgate_installer_mirrors, SLIPGATE_INSTALLER_MIRRORS_COUNT,
         )
         urls = get_slipgate_installer_mirrors()
-        self.assertEqual(len(urls), 13)
-        self.assertEqual(SLIPGATE_INSTALLER_MIRRORS_COUNT, 13)
+        self.assertEqual(len(urls), 9)
+        self.assertEqual(SLIPGATE_INSTALLER_MIRRORS_COUNT, 9)
 
     def test_all_urls_are_https(self):
         from chimera.modules.slipgate_mirrors import get_slipgate_installer_mirrors

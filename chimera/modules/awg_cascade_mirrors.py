@@ -96,7 +96,7 @@ def get_ru_zone_mirrors() -> list[str]:
     return urls
 
 
-# Количество зеркал — 1 ipdeny + 1 raw + 7 прокси = 9.
+# Количество зеркал — 1 ipdeny + 1 raw + 3 прокси = 5.
 RU_ZONE_MIRRORS_COUNT: int = len(get_ru_zone_mirrors())
 
 

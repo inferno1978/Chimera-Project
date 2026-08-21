@@ -186,9 +186,9 @@ class TestBuildMirrorUrlsGeoBitForBit(unittest.TestCase):
                 self.assertEqual(old, new)
         self.assertTrue(set(new_urls).issubset(set(old_urls)))
 
-    def test_exact_url_count_14(self):
-        """build_mirror_urls даёт ровно 14 зеркал — это общий baseline.
-        geo_mirrors теперь содержит 19 (14 + 4 новых gh-proxy + 1 jsd.cooluc.ru)."""
+    def test_exact_url_count_10(self):
+        """build_mirror_urls даёт ровно 10 зеркал — это общий baseline.
+        geo_mirrors содержит больше (14+ за счёт РФ-специфичных fallback'ов)."""
         urls = build_mirror_urls(
             owner="runetfreedom",
             repo="russia-v2ray-rules-dat",
@@ -196,8 +196,8 @@ class TestBuildMirrorUrlsGeoBitForBit(unittest.TestCase):
             tag="latest",
             ref="release",
         )
-        # 4 jsDelivr + 1 raw + 1 release + 7 proxy + 1 Statically = 14
-        self.assertEqual(len(urls), 14)
+        # 4 jsDelivr + 1 raw + 1 release + 3 proxy + 1 Statically = 10
+        self.assertEqual(len(urls), 10)
 
     def test_geo_mirrors_has_more_urls_than_build_mirror_urls(self):
         """geo_mirrors должен иметь больше URL, чем build_mirror_urls,
@@ -235,11 +235,11 @@ class TestBuildMirrorUrlsGeoBitForBit(unittest.TestCase):
         # 6: release GitHub
         self.assertIn("github.com/runetfreedom", urls[5])
         self.assertIn("releases/latest/download", urls[5])
-        # 7-13: gh-proxy
-        for url in urls[6:13]:
+        # 7-9: gh-proxy (3 хоста)
+        for url in urls[6:9]:
             self.assertIn("/https://github.com/", url)
-        # 14: Statically
-        self.assertIn("cdn.statically.io", urls[13])
+        # 10: Statically
+        self.assertIn("cdn.statically.io", urls[9])
 
 
 class TestBuildMirrorUrlsMieruSetMatch(unittest.TestCase):
@@ -266,16 +266,16 @@ class TestBuildMirrorUrlsMieruSetMatch(unittest.TestCase):
         self.assertEqual(set(old_urls), set(new_urls),
                          "URL как SET должны совпадать (теперь обе используют build_mirror_urls)")
 
-    def test_mieru_url_count_14(self):
-        """После миграции mieru даёт 14 зеркал (как geo — полный набор)."""
+    def test_mieru_url_count_10(self):
+        """После миграции mieru даёт 10 зеркал (как geo — полный набор)."""
         urls = build_mirror_urls(
             owner="enfein",
             repo="mieru",
             filename="mita.tar.gz",
             tag="v3.33.0",
         )
-        # 4 jsDelivr + 1 raw + 1 release + 7 proxy + 1 Statically = 14
-        self.assertEqual(len(urls), 14)
+        # 4 jsDelivr + 1 raw + 1 release + 3 proxy + 1 Statically = 10
+        self.assertEqual(len(urls), 10)
 
 
 class TestBuildMirrorUrlsTelemtSetMatch(unittest.TestCase):
@@ -305,8 +305,8 @@ class TestBuildMirrorUrlsTelemtSetMatch(unittest.TestCase):
         # поэтому ожидаем БИТ-В-БИТ совпадение
         self.assertEqual(old_urls, new_urls)
 
-    def test_telemt_url_count_8(self):
-        """telemt даёт 8 зеркал: 1 release + 7 proxy."""
+    def test_telemt_url_count_4(self):
+        """telemt даёт 4 зеркала: 1 release + 3 proxy."""
         urls = build_mirror_urls(
             owner="telemt",
             repo="telemt",
@@ -316,8 +316,8 @@ class TestBuildMirrorUrlsTelemtSetMatch(unittest.TestCase):
             include_raw_github=False,
             include_statically=False,
         )
-        # 0 jsDelivr + 0 raw + 1 release + 7 proxy + 0 Statically = 8
-        self.assertEqual(len(urls), 8)
+        # 0 jsDelivr + 0 raw + 1 release + 3 proxy + 0 Statically = 4
+        self.assertEqual(len(urls), 4)
 
 
 # ============================================================================
@@ -434,12 +434,11 @@ class TestConstants(unittest.TestCase):
     """Публичные константы — корректные значения."""
 
     def test_github_proxy_hosts_count(self):
-        self.assertEqual(len(GITHUB_PROXY_HOSTS), 7)
+        self.assertEqual(len(GITHUB_PROXY_HOSTS), 3)
 
     def test_github_proxy_hosts_content(self):
         expected = [
-            "ghproxy.net", "ghproxy.com", "mirror.ghproxy.com",
-            "gh.con.sh", "hub.gitmirror.com", "github.moeyy.xyz", "ghps.cc",
+            "ghproxy.net", "gh-proxy.com", "gh.llkk.cc",
         ]
         self.assertEqual(GITHUB_PROXY_HOSTS, expected)
 

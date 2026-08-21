@@ -58,9 +58,9 @@ class TestMirrorListStructure(unittest.TestCase):
         self.assertEqual(TELEMT_MIRRORS_COUNT, len(get_telemt_mirrors()))
         self.assertEqual(TELEMT_MIRRORS_COUNT, len(get_telemt_panel_mirrors()))
 
-    def test_at_least_8_mirrors(self):
-        """Должно быть ≥8 зеркал: 1 GitHub + 7 GitHub-прокси."""
-        self.assertGreaterEqual(TELEMT_MIRRORS_COUNT, 8)
+    def test_at_least_4_mirrors(self):
+        """Должно быть ≥4 зеркал: 1 GitHub + 3 GitHub-прокси."""
+        self.assertGreaterEqual(TELEMT_MIRRORS_COUNT, 4)
 
     def test_no_duplicate_urls(self):
         for urls in (get_telemt_mirrors(), get_telemt_panel_mirrors()):
@@ -142,11 +142,9 @@ class TestMirrorCategories(unittest.TestCase):
         )
 
     def test_github_proxy_mirrors_present(self):
-        """Должны быть все 7 GitHub-прокси."""
+        """Должны быть все 3 GitHub-прокси."""
         urls = get_telemt_mirrors()
-        for proxy in ("ghproxy.net", "ghproxy.com", "mirror.ghproxy.com",
-                      "gh.con.sh", "hub.gitmirror.com", "github.moeyy.xyz",
-                      "ghps.cc"):
+        for proxy in ("ghproxy.net", "gh-proxy.com", "gh.llkk.cc"):
             with self.subTest(proxy=proxy):
                 self.assertTrue(
                     any(proxy in u for u in urls),
@@ -280,7 +278,7 @@ class TestPrintManualHint(unittest.TestCase):
         with redirect_stdout(buf):
             print_telemt_manual_download_hint("telemt")
         output = buf.getvalue()
-        for host in ("github.com", "ghproxy.net", "gh.con.sh"):
+        for host in ("github.com", "ghproxy.net", "gh-proxy.com"):
             with self.subTest(host=host):
                 self.assertIn(host, output)
 

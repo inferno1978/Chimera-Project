@@ -266,11 +266,12 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
     target = f"{arch}-unknown-linux-musl"
 
     print(f"[INFO] Собираю CSQTT для {target}...")
+    print(f"[INFO] -j 2 — ограничение параллельности (anti-OOM для VPS с малым RAM)")
     r = subprocess.run(
-        ["cargo", "zigbuild", "--release", "--target", target],
+        ["cargo", "zigbuild", "--release", "--target", target, "-j", "2"],
         cwd=str(csqtt_dir),
         capture_output=True, text=True,
-        env=env, timeout=600,
+        env=env, timeout=1800,
     )
     if r.returncode != 0:
         print(f"[ERR] Сборка не удалась: {r.stderr[-500:]}")

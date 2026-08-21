@@ -16,8 +16,8 @@ chimera/modules/dnscrypt_mirrors.py
 
 РЕШЕНИЕ (по аналогии с mieru_mirrors.py):
   1. Реестр зеркал через github_mirrors.build_mirror_urls():
-     jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub + 7 gh-proxy +
-     Statically — итого до 14 URL.
+     jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub + 3 gh-proxy +
+     Statically — итого до 10 URL.
   2. fetch_package(DNSCRYPT_SPEC, tag=..., arch=...) из dnscrypt_packages.py
      перебирает зеркала по очереди и проверяет /root/ для ручного размещения.
   3. При тотальном провале fetch_package() вызывает print_manual_hint() из
@@ -104,8 +104,8 @@ def get_dnscrypt_mirrors(tag: str, arch: str = "linux_x86_64") -> list[str]:
 
 
 # Количество зеркал — вычисляется через build_mirror_urls.
-# Для tag="2.1.5": 4 jsDelivr + raw + release + 7 proxy + Statically = 14.
-DNSCRYPT_MIRRORS_COUNT: int = 14  # константа для TUI (не дёргаем API при import)
+# Для tag="2.1.5": 4 jsDelivr + raw + release + 3 proxy + Statically = 10.
+DNSCRYPT_MIRRORS_COUNT: int = 10  # константа для TUI (не дёргаем API при import)
 
 
 # ============================================================================

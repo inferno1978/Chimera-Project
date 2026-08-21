@@ -14,8 +14,8 @@ chimera/modules/fptn_mirrors.py
 
 РЕШЕНИЕ (по аналогии с mieru_mirrors.py):
   1. Реестр зеркал через github_mirrors.build_mirror_urls():
-     jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub + 7 gh-proxy +
-     Statically — итого до 14 URL.
+     jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub + 3 gh-proxy +
+     Statically — итого до 10 URL.
   2. fetch_package(FPTN_SPEC, tag=..., filename=...) из fptn_packages.py
      перебирает зеркала по очереди и проверяет /root/ для ручного размещения.
   3. При тотальном провале fetch_package() вызывает print_manual_hint() из
@@ -97,8 +97,8 @@ def get_fptn_mirrors(tag: str, filename: str) -> list[str]:
     )
 
 
-# Количество зеркал — 14 (4 jsDelivr + raw + release + 7 proxy + Statically).
-FPTN_MIRRORS_COUNT: int = 14  # константа для TUI
+# Количество зеркал — 10 (4 jsDelivr + raw + release + 3 proxy + Statically).
+FPTN_MIRRORS_COUNT: int = 10  # константа для TUI
 
 
 # ============================================================================
