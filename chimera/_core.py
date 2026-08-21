@@ -74,6 +74,7 @@ from chimera.modules.ipban import do_manage_ipban
 from chimera.modules.vkturn_menu import do_vkturn_menu
 from chimera.modules.slipgate import do_slipgate_menu
 from chimera.modules.wdtt import do_wdtt_menu
+from chimera.modules.csqtt import do_csqtt_menu
 from chimera.modules.naiveproxy import do_naiveproxy_menu
 from chimera.modules.mieru import do_mieru_menu
 from chimera.modules.webdav_tunnel import do_webdav_tunnel_menu
@@ -1398,6 +1399,18 @@ def _extract_trusttunnel_ports(st: dict) -> list:
     return [int(p)] if isinstance(p, (int, str)) and str(p).isdigit() else []
 
 
+def _extract_csqtt_ports(st: dict) -> list:
+    """CSQTT: UDP data_port + TCP web_port."""
+    if not isinstance(st, dict) or not st.get("installed"):
+        return []
+    ports = []
+    for k in ("data_port", "web_port"):
+        v = st.get(k)
+        if isinstance(v, (int, str)) and str(v).isdigit():
+            ports.append(int(v))
+    return ports
+
+
 def _extract_subscription_ports(st: dict) -> list:
     """Chimera subscription endpoint: TCP-порт HTTPS-хендлера подписки.
     state['listen_port'] (default 8443). Условие: state['enabled'] is True."""
@@ -1489,6 +1502,12 @@ PROTOCOL_PORT_REGISTRY = [
         "label": "TrustTunnel (TCP+UDP, HTTP/2+HTTP/3)",
         "state_file": Path("/var/lib/xray-installer/trusttunnel.json"),
         "extractor": _extract_trusttunnel_ports,
+    },
+    {
+        "key": "csqtt",
+        "label": "CSQTT (UDP data-plane + TCP Web Panel)",
+        "state_file": Path("/var/lib/xray-installer/csqtt.json"),
+        "extractor": _extract_csqtt_ports,
     },
     {
         "key": "subscription",
@@ -8862,11 +8881,15 @@ def main_menu() -> None:
             _box_row(f"     {DIM}AdGuard VPN protocol (HTTP/2+HTTP/3 over TLS) — tt:// deep-link{NC}")
             _box_row()
             _box_sep()
+            _box_row(f"  {CYAN}18{NC} 🎵 {TITLE}CSQTT (RTP/TURN Tunnel){NC}  {DIM}(NEW){NC}")
+            _box_row(f"     {DIM}Туннель поверх TURN/RTP — маскировка под видеозвонок, Web Panel{NC}")
+            _box_row()
+            _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–17 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–18 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -8976,6 +8999,13 @@ def main_menu() -> None:
                 do_trusttunnel_menu()
             except ImportError as _e:
                 warn(f"Модуль TrustTunnel не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "18":
+            try:
+                do_csqtt_menu()
+            except ImportError as _e:
+                warn(f"Модуль CSQTT не найден: {_e}")
                 time.sleep(2)
 
         # ── Скрытое меню: olcRTC (туннель под видеозвонок) ────────────────
