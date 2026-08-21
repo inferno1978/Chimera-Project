@@ -312,6 +312,7 @@ _SYNCABLE_PROTOCOLS = [
     "chimera.modules.singbox_users",
     "chimera.modules.wdtt",
     "chimera.modules.fptn",
+    "chimera.modules.csqtt",
     "chimera.modules.awg_peers",
     "chimera.modules.hysteria2_sync",
 ]

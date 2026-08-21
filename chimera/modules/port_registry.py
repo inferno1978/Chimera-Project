@@ -46,6 +46,11 @@ API:
   SERVICE_SUBSCRIPTION    — Subscription server
   SERVICE_SUBSCRIPTION_NGINX — nginx front для subscription с TLS (настраиваемый)
   SERVICE_HYSTERIA2       — Hysteria2
+  SERVICE_B4_WEB          — b4 Web UI (loopback, 9700)
+  SERVICE_B4_NGINX        — nginx front для b4 Web UI (TLS, 9743)
+  SERVICE_CSQTT           — CSQTT data-plane (UDP, 46000)
+  SERVICE_CSQTT_WEB       — CSQTT Web Panel (loopback, 46002)
+  SERVICE_CSQTT_NGINX     — nginx front для CSQTT Web Panel (TLS)
 
 Паттерн использования (на примере нового сервиса):
   from chimera.modules.port_registry import (
@@ -132,6 +137,9 @@ SERVICE_OLCRTC_MANAGER = "olcrtc_manager"
 SERVICE_B4_WEB         = "b4_web"          # b4 Web UI (loopback, 9700)
 SERVICE_B4_NGINX       = "b4_nginx"        # nginx front для b4 Web UI (TLS, 9743)
 SERVICE_B4_DNS         = "b4_dns"          # b4 DNS TCP listener (0.0.0.0:5453)
+SERVICE_CSQTT          = "csqtt"           # CSQTT data-plane (UDP, 46000)
+SERVICE_CSQTT_WEB      = "csqtt_web"       # CSQTT Web Panel (loopback, 46002)
+SERVICE_CSQTT_NGINX    = "csqtt_nginx"     # nginx front для CSQTT Web Panel (TLS)
 
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────
