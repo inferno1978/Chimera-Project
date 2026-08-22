@@ -403,7 +403,25 @@ def fetch_package(
                 )
             tmp_path.unlink(missing_ok=True)
 
-        except Exception:
+        except Exception as _exc:
+            # ВАЖНО: НЕ глотать исключения молча! Раньше тут было просто
+            # `except Exception:` без имени и без лога — это приводило к
+            # циклическому перебору всех зеркал при падении post_install
+            # (например subprocess.TimeoutExpired при сборке Rust, или
+            # OSError при rename через /tmp). Юзер видел 5× "✓ скачано"
+            # и потом "Не удалось скачать" — без пояснений.
+            #
+            # Теперь: логируем тип исключения и сообщение, чтобы юзер
+            # видел, ЧТО именно упало. После этого — continue к следующему
+            # зеркалу (как и раньше).
+            if progress_label:
+                exc_type = type(_exc).__name__
+                exc_msg = str(_exc)[:200]
+                print(
+                    f"  {progress_label} ⚠ зеркало {url_idx}/{len(urls)} упало "
+                    f"с исключением {exc_type}: {exc_msg}",
+                    flush=True,
+                )
             tmp_path.unlink(missing_ok=True)
             continue
 

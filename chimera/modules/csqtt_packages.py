@@ -306,6 +306,7 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
     import tarfile
 
     # 1. Распаковываем
+    print("[INFO] Распаковываю tarball...")
     extract_dir = Path("/tmp/csqtt_build")
     shutil.rmtree(extract_dir, ignore_errors=True)
     extract_dir.mkdir(parents=True, exist_ok=True)
@@ -314,7 +315,7 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
         with tarfile.open(src, "r:gz") as tf:
             tf.extractall(path=extract_dir)
     except Exception as e:
-        print(f"[ERR] Распаковка не удалась: {e}")
+        print(f"[ERR] Распаковка не удалась: {type(e).__name__}: {e}")
         return False
 
     # 2. Находим директорию с исходниками
@@ -329,18 +330,33 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
         return False
 
     # 3. Проверяем/устанавливаем Rust
-    if not _ensure_rust_toolchain():
-        print("[ERR] Rust toolchain недоступен")
+    print("[INFO] Проверяю/устанавливаю Rust toolchain...")
+    try:
+        if not _ensure_rust_toolchain():
+            print("[ERR] Rust toolchain недоступен")
+            return False
+    except Exception as e:
+        print(f"[ERR] Rust toolchain упал с исключением: {type(e).__name__}: {e}")
         return False
 
     # 4. Проверяем/устанавливаем Zig
-    if not _ensure_zig():
-        print("[ERR] Zig недоступен")
+    print("[INFO] Проверяю/устанавливаю Zig...")
+    try:
+        if not _ensure_zig():
+            print("[ERR] Zig недоступен")
+            return False
+    except Exception as e:
+        print(f"[ERR] Zig упал с исключением: {type(e).__name__}: {e}")
         return False
 
     # 5. Проверяем/устанавливаем cargo-zigbuild
-    if not _ensure_cargo_zigbuild():
-        print("[ERR] cargo-zigbuild недоступен")
+    print("[INFO] Проверяю/устанавливаю cargo-zigbuild...")
+    try:
+        if not _ensure_cargo_zigbuild():
+            print("[ERR] cargo-zigbuild недоступен")
+            return False
+    except Exception as e:
+        print(f"[ERR] cargo-zigbuild упал с исключением: {type(e).__name__}: {e}")
         return False
 
     # 6. Собираем
@@ -363,19 +379,44 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
     #      < 1.5 GB → -j 1 (только один rustc за раз, самый безопасный)
     #      1.5-3 GB → -j 2
     #      > 3 GB   → -j 2 (всё равно -j 2, т.к. musl-build тяжелее обычного)
-    jobs = _ensure_swap_and_pick_jobs()
+    print("[INFO] Анализирую RAM/swap для anti-OOM...")
+    try:
+        jobs = _ensure_swap_and_pick_jobs()
+    except Exception as e:
+        print(f"[WARN] _ensure_swap_and_pick_jobs упал: {type(e).__name__}: {e}")
+        print(f"[INFO] Fallback: использую -j 1 (safest)")
+        jobs = 1
     timeout = 2400 if jobs == 1 else 1800   # -j 1 → 40 мин, -j 2 → 30 мин
 
     print(f"[INFO] Собираю CSQTT для {target}...")
     print(f"[INFO] cargo -j {jobs} — anti-OOM (aws-lc-sys ест до 2 GB RAM/процесс)")
-    r = subprocess.run(
-        ["cargo", "zigbuild", "--release", "--target", target, "-j", str(jobs)],
-        cwd=str(csqtt_dir),
-        capture_output=True, text=True,
-        env=env, timeout=timeout,
-    )
+    print(f"[INFO] Это может занять 5-20 минут. Не прерывайте!")
+    try:
+        r = subprocess.run(
+            ["cargo", "zigbuild", "--release", "--target", target, "-j", str(jobs)],
+            cwd=str(csqtt_dir),
+            capture_output=True, text=True,
+            env=env, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[ERR] Сборка превысила timeout {timeout} сек ({timeout // 60} мин)")
+        print(f"[ERR] Возможные причины:")
+        print(f"      - VPS слишком медленный (1 vCPU)")
+        print(f"      - Медленный диск (HDD вместо SSD)")
+        print(f"      - Сетевые паузы при скачивании crates с crates.io")
+        print(f"[ERR] Попробуйте запустить direct-build скрипт для повторной попытки:")
+        print(f"      bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/scripts/csqtt-direct-build.sh)")
+        return False
+    except Exception as e:
+        print(f"[ERR] cargo zigbuild упал с исключением: {type(e).__name__}: {e}")
+        return False
+
     if r.returncode != 0:
-        print(f"[ERR] Сборка не удалась: {r.stderr[-500:]}")
+        # Показываем больше stderr для диагностики
+        stderr_tail = r.stderr[-1500:] if r.stderr else "(пусто)"
+        print(f"[ERR] Сборка не удалась (exit code {r.returncode})")
+        print(f"[ERR] Последние 1500 символов stderr:")
+        print(stderr_tail)
         return False
 
     # 7. Находим собранный binary
@@ -385,11 +426,24 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
         built_bin = csqtt_dir / "target" / "release" / "csqtt"
     if not built_bin.exists():
         print("[ERR] Binary не найден после сборки")
+        print(f"[ERR] Искал в: {csqtt_dir}/target/{target}/release/csqtt")
+        print(f"[ERR] И в:     {csqtt_dir}/target/release/csqtt")
+        # Покажем что реально есть в target/
+        target_dir = csqtt_dir / "target"
+        if target_dir.exists():
+            print(f"[ERR] Содержимое target/:")
+            for p in target_dir.rglob("csqtt*"):
+                print(f"  {p}")
         return False
 
     # 8. Атомарно заменяем
-    if not _atomic_replace_binary(built_bin, _CSQTT_BIN_PATH,
-                                   _CSQTT_SERVICE_NAME, _CSQTT_SERVICE_FILE):
+    print("[INFO] Устанавливаю binary...")
+    try:
+        if not _atomic_replace_binary(built_bin, _CSQTT_BIN_PATH,
+                                       _CSQTT_SERVICE_NAME, _CSQTT_SERVICE_FILE):
+            return False
+    except Exception as e:
+        print(f"[ERR] Установка binary упала: {type(e).__name__}: {e}")
         return False
 
     print(f"[OK] CSQTT собран и установлен: {_CSQTT_BIN_PATH}")
