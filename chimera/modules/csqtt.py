@@ -461,7 +461,7 @@ def _build_csqtt_server() -> bool:
     from chimera.modules.csqtt_packages import CSQTT_SOURCE_SPEC
 
     print(f"  {CYAN}→{NC}  Скачиваю исходники CSQTT (через download_manager)...")
-    ok = fetch_package(CSQTT_SOURCE_SPEC)
+    ok = fetch_package(CSQTT_SOURCE_SPEC, progress_label="CSQTT")
     if ok:
         print(f"  {GREEN}✓{NC}  csqtt-server установлен: {_BIN_PATH}")
     return ok
@@ -767,6 +767,50 @@ def _run_install_inner() -> None:
         _box_top("🚀  УСТАНОВКА  •  CSQTT")
         _box_err("Не удалось собрать csqtt-server.")
         _box_err("Убедитесь что доступны Rust, Zig и интернет.")
+        _box_row()
+        _box_row(f"  {DIM}Диагностика:{NC}")
+        # Проверяем, есть ли файл в /root/
+        manual_path = Path("/root/csqtt-main.tar.gz")
+        if manual_path.exists():
+            ms = manual_path.stat().st_size
+            _box_row(f"  {DIM}  • /root/csqtt-main.tar.gz — найден ({ms} байт){NC}")
+            _box_row(f"  {DIM}    файл есть, но сборка упала. Смотрите ошибку выше.{NC}")
+            _box_row(f"  {DIM}    Запустите direct-build скрипт для подробных логов:{NC}")
+            _box_row(f"  {CYAN}    bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/scripts/csqtt-direct-build.sh){NC}")
+        else:
+            _box_row(f"  {DIM}  • /root/csqtt-main.tar.gz — НЕ найден{NC}")
+            _box_row(f"  {DIM}    Скачайте вручную:{NC}")
+            _box_row(f"  {CYAN}    curl -fL \"https://github.com/amurcanov/csqtt/archive/refs/heads/main.tar.gz\" -o /root/csqtt-main.tar.gz{NC}")
+            _box_row(f"  {DIM}    и повторите установку.{NC}")
+        # Проверяем свободное место
+        try:
+            import shutil as _sh
+            total, used, free = _sh.disk_usage("/root")
+            free_mb = free // (1024 * 1024)
+            if free_mb < 2048:
+                _box_row(f"  {YELLOW}⚠ свободное место: {free_mb} MB (нужно ≥ 2048 MB для Rust-сборки){NC}")
+            else:
+                _box_row(f"  {DIM}  • свободное место: {free_mb} MB ✓{NC}")
+        except Exception:
+            pass
+        # Проверяем RAM
+        try:
+            meminfo = Path("/proc/meminfo").read_text()
+            mem_avail_kb = 0
+            swap_total_kb = 0
+            for line in meminfo.splitlines():
+                if line.startswith("MemAvailable:"):
+                    mem_avail_kb = int(line.split()[1])
+                elif line.startswith("SwapTotal:"):
+                    swap_total_kb = int(line.split()[1])
+            total_mb = (mem_avail_kb + swap_total_kb) // 1024
+            if total_mb < 1024:
+                _box_row(f"  {YELLOW}⚠ RAM+swap: {total_mb} MB (мало для сборки, нужно ≥ 1024 MB){NC}")
+                _box_row(f"  {DIM}    Добавьте swap: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile{NC}")
+            else:
+                _box_row(f"  {DIM}  • RAM+swap: {total_mb} MB ✓{NC}")
+        except Exception:
+            pass
         _box_bot(); _pause(); return
 
     print()
