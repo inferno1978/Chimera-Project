@@ -591,7 +591,8 @@ def panel_nginx_front_remove(
         if r.returncode == 0:
             subprocess.run(["systemctl", "reload", "nginx"], check=False)
 
-    # 4. Закрываем порт в UFW + снимаем регистрацию.
+    # 4. Закрываем порт в фаерволе + снимаем регистрацию.
+    # Симметрично panel_nginx_front_install: UFW → iptables fallback.
     if port is not None:
         try:
             from chimera.modules.port_registry import (
@@ -599,8 +600,34 @@ def panel_nginx_front_remove(
             )
             ufw_close_port(port, "tcp", service_tag)
             port_unregister(service_tag, port=port, proto="tcp")
-        except Exception:
-            pass
+            info(f"  {CYAN}Порт {port}/tcp закрыт в UFW + снят с регистрации{NC}")
+        except Exception as _e:
+            warn(f"  {YELLOW}port_registry/UFW error: {_e} — fallback на iptables...{NC}")
+        # Fallback: убираем orphaned iptables правила (если port_registry
+        # не нашёл их, или UFW inactive при install).
+        import shutil as _sh
+        ipt = _sh.which("iptables")
+        if ipt:
+            args = ["-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]
+            for _ in range(5):
+                r_check = subprocess.run(
+                    [ipt, "-C", "INPUT"] + args,
+                    capture_output=True, check=False,
+                )
+                if r_check.returncode != 0:
+                    break  # правила нет — выходим
+                subprocess.run(
+                    [ipt, "-D", "INPUT"] + args,
+                    capture_output=True, check=False,
+                )
+            # Persist после удаления.
+            np = _sh.which("netfilter-persistent")
+            if np:
+                subprocess.run([np, "save"], capture_output=True, check=False)
+        # Также снимаем orphaned UFW правило (если осталось).
+        if _sh.which("ufw"):
+            subprocess.run(["ufw", "delete", "allow", f"{port}/tcp"],
+                           capture_output=True, input="y\n", check=False)
 
     # 5. Очищаем state.
     state_file.unlink(missing_ok=True)

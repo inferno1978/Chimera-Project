@@ -516,6 +516,7 @@ def _ipt_rule_exists(table: str, chain: str, args: list) -> bool:
     return proto_ipt_rule_exists(table, chain, args)
 
 def _fw_tool() -> str:
+    """Возвращает 'ufw' если UFW установлен и активен, иначе 'iptables'."""
     if shutil.which("ufw"):
         r = _run(["ufw", "status"], capture=True, check=False)
         if "Status: active" in (r.stdout or ""):
@@ -523,82 +524,130 @@ def _fw_tool() -> str:
     return "iptables"
 
 def _ipt_open_udp(port: int) -> None:
+    """Открывает UDP-порт для CSQTT data-plane (46000).
+
+    Алгоритм:
+      1. Регистрируем в port_registry (JSON — для других модулей).
+      2. Через ufw_open_port (если UFW активен) — с chimera-csqtt comment.
+      3. Fallback на iptables если UFW недоступен.
+      4. Логируем результат.
+    """
+    fw = _fw_tool()
+    opened_via = ""
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, port_register, SERVICE_CSQTT,
         )
+        # Регистрируем в port_registry (всегда — даже если UFW inactive).
         port_register(SERVICE_CSQTT, port, "udp",
                       comment="CSQTT data-plane", force=True)
-        ufw_open_port(port, "udp", SERVICE_CSQTT, comment="CSQTT data-plane")
-        return
-    except Exception:
-        pass
-    if _fw_tool() == "ufw":
-        r = _run(["ufw", "status"], capture=True, check=False)
-        if not re.search(rf'^{port}/udp\b.*ALLOW', r.stdout or "", re.MULTILINE):
-            _run(["ufw", "allow", f"{port}/udp", "comment", "CSQTT data-plane"],
-                 check=False)
-        return
-    args = ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"]
-    if not _ipt_rule_exists("filter", "INPUT", args):
-        _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
+        # Пытаемся открыть через UFW.
+        ufw_ok, ufw_msg = ufw_open_port(port, "udp", SERVICE_CSQTT,
+                                         comment="CSQTT data-plane")
+        if ufw_ok:
+            opened_via = f"UFW ({ufw_msg})"
+        else:
+            # UFW недоступен/inactive — fallback на iptables.
+            args = ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"]
+            if not _ipt_rule_exists("filter", "INPUT", args):
+                _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
+                opened_via = "iptables (fallback — UFW недоступен)"
+            else:
+                opened_via = "iptables (уже открыт)"
+    except Exception as _e:
+        # port_registry недоступен — fallback на прямой iptables/ufw.
+        if fw == "ufw":
+            r = _run(["ufw", "status"], capture=True, check=False)
+            if not re.search(rf'^{port}/udp\b.*ALLOW', r.stdout or "", re.MULTILINE):
+                _run(["ufw", "allow", f"{port}/udp", "comment", "CSQTT data-plane"],
+                     check=False)
+            opened_via = "UFW (fallback — port_registry недоступен)"
+        else:
+            args = ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"]
+            if not _ipt_rule_exists("filter", "INPUT", args):
+                _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
+            opened_via = f"iptables (fallback — port_registry error: {_e})"
+    print(f"  {GREEN}✓{NC}  UDP {port} открыт ({opened_via})")
 
 def _ipt_close_udp(port: int) -> None:
+    """Закрывает UDP-порт CSQTT data-plane + снимает регистрацию."""
+    closed_via = ""
     try:
         from chimera.modules.port_registry import (
             ufw_close_port, port_unregister, SERVICE_CSQTT,
         )
-        ufw_close_port(port, "udp", SERVICE_CSQTT, legacy_comments=["CSQTT data-plane"])
+        ufw_close_port(port, "udp", SERVICE_CSQTT,
+                       legacy_comments=["CSQTT data-plane"])
         port_unregister(SERVICE_CSQTT, port, "udp")
-    except Exception:
-        pass
-    if shutil.which("ufw"):
+        closed_via = "UFW + port_registry"
+    except Exception as _e:
+        closed_via = f"fallback ({_e})"
+    # Двойная проверка — снимаем orphaned правила (если port_registry не нашёл).
+    if shutil.which("ufw") and _fw_tool() == "ufw":
         _run(["ufw", "delete", "allow", f"{port}/udp"], check=False)
     args = ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"]
     for _ in range(5):
         if not _ipt_rule_exists("filter", "INPUT", args):
             break
         _run(["iptables", "-t", "filter", "-D", "INPUT"] + args)
+    print(f"  {GREEN}✓{NC}  UDP {port} закрыт ({closed_via})")
 
 def _ipt_open_tcp(port: int) -> None:
-    """Открывает TCP-порт для Web Panel CSQTT."""
+    """Открывает TCP-порт для Web Panel CSQTT (46002)."""
+    fw = _fw_tool()
+    opened_via = ""
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, port_register, SERVICE_CSQTT_WEB,
         )
         port_register(SERVICE_CSQTT_WEB, port, "tcp",
                       comment="CSQTT Web Panel", force=True)
-        ufw_open_port(port, "tcp", SERVICE_CSQTT_WEB, comment="CSQTT Web Panel")
-        return
-    except Exception:
-        pass
-    if _fw_tool() == "ufw":
-        r = _run(["ufw", "status"], capture=True, check=False)
-        if not re.search(rf'^{port}/tcp\b.*ALLOW', r.stdout or "", re.MULTILINE):
-            _run(["ufw", "allow", f"{port}/tcp", "comment", "CSQTT Web Panel"],
-                 check=False)
-        return
-    args = ["-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]
-    if not _ipt_rule_exists("filter", "INPUT", args):
-        _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
+        ufw_ok, ufw_msg = ufw_open_port(port, "tcp", SERVICE_CSQTT_WEB,
+                                         comment="CSQTT Web Panel")
+        if ufw_ok:
+            opened_via = f"UFW ({ufw_msg})"
+        else:
+            args = ["-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]
+            if not _ipt_rule_exists("filter", "INPUT", args):
+                _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
+                opened_via = "iptables (fallback — UFW недоступен)"
+            else:
+                opened_via = "iptables (уже открыт)"
+    except Exception as _e:
+        if fw == "ufw":
+            r = _run(["ufw", "status"], capture=True, check=False)
+            if not re.search(rf'^{port}/tcp\b.*ALLOW', r.stdout or "", re.MULTILINE):
+                _run(["ufw", "allow", f"{port}/tcp", "comment", "CSQTT Web Panel"],
+                     check=False)
+            opened_via = "UFW (fallback — port_registry недоступен)"
+        else:
+            args = ["-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]
+            if not _ipt_rule_exists("filter", "INPUT", args):
+                _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
+            opened_via = f"iptables (fallback — port_registry error: {_e})"
+    print(f"  {GREEN}✓{NC}  TCP {port} открыт ({opened_via})")
 
 def _ipt_close_tcp(port: int) -> None:
-    """Закрывает TCP-порт Web Panel CSQTT."""
+    """Закрывает TCP-порт Web Panel CSQTT + снимает регистрацию."""
+    closed_via = ""
     try:
         from chimera.modules.port_registry import (
             ufw_close_port, port_unregister, SERVICE_CSQTT_WEB,
         )
-        ufw_close_port(port, "tcp", SERVICE_CSQTT_WEB, legacy_comments=["CSQTT Web Panel"])
+        ufw_close_port(port, "tcp", SERVICE_CSQTT_WEB,
+                       legacy_comments=["CSQTT Web Panel"])
         port_unregister(SERVICE_CSQTT_WEB, port, "tcp")
-    except Exception:
-        pass
-    if shutil.which("ufw"):
+        closed_via = "UFW + port_registry"
+    except Exception as _e:
+        closed_via = f"fallback ({_e})"
+    if shutil.which("ufw") and _fw_tool() == "ufw":
         _run(["ufw", "delete", "allow", f"{port}/tcp"], check=False)
     args = ["-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]
     for _ in range(5):
         if not _ipt_rule_exists("filter", "INPUT", args):
             break
         _run(["iptables", "-t", "filter", "-D", "INPUT"] + args)
+    print(f"  {GREEN}✓{NC}  TCP {port} закрыт ({closed_via})")
 
 def _ipt_masquerade_exists() -> bool:
     r = _run(
@@ -609,21 +658,38 @@ def _ipt_masquerade_exists() -> bool:
     return r.returncode == 0
 
 def _ipt_add_masquerade() -> None:
+    """Добавляет MASQUERADE для TUN-интерфейса csqtt1 (10.66.67.0/24).
+
+    MASQUERADE — это NAT (не port opening), поэтому port_registry тут
+    не используется (он для INPUT chain портов). Но логируем для видимости.
+    """
     if not _ipt_masquerade_exists():
         _run(["iptables", "-t", "nat", "-A", "POSTROUTING",
               "-s", _TUN_SUBNET, "!", "-d", _TUN_SUBNET, "-j", "MASQUERADE"])
+        print(f"  {GREEN}✓{NC}  MASQUERADE для {_TUN_SUBNET} добавлен")
+    else:
+        print(f"  {DIM}MASQUERADE для {_TUN_SUBNET} уже существует{NC}")
 
 def _ipt_remove_masquerade() -> None:
+    """Удаляет MASQUERADE для TUN-интерфейса csqtt1."""
+    removed = 0
     for _ in range(3):
         if not _ipt_masquerade_exists():
             break
         _run(["iptables", "-t", "nat", "-D", "POSTROUTING",
               "-s", _TUN_SUBNET, "!", "-d", _TUN_SUBNET, "-j", "MASQUERADE"])
+        removed += 1
+    if removed:
+        print(f"  {GREEN}✓{NC}  MASQUERADE для {_TUN_SUBNET} удалён "
+              f"({removed} правил)")
+    else:
+        print(f"  {DIM}MASQUERADE для {_TUN_SUBNET} не найден{NC}")
 
 def _enable_ip_forward() -> None:
     _run(["sysctl", "-w", "net.ipv4.ip_forward=1"])
     sysctl = Path("/etc/sysctl.d/99-csqtt.conf")
     sysctl.write_text("net.ipv4.ip_forward = 1\n")
+    print(f"  {GREEN}✓{NC}  IP forwarding включён")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  NGINX FRONT для Web Panel
@@ -873,17 +939,14 @@ def _run_install_inner() -> None:
 
     print(f"  {GREEN}✓{NC}  Конфиг создан: {_CFG_DIR}")
 
-    # 3. IP forwarding
+    # 3. IP forwarding (логирование внутри _enable_ip_forward)
     _enable_ip_forward()
-    print(f"  {GREEN}✓{NC}  IP forwarding включён.")
 
-    # 4. Firewall + NAT
-    fw_tool = _fw_tool()
+    # 4. Firewall + NAT (логирование внутри каждой функции)
     _ipt_open_udp(data_port)
     _ipt_open_tcp(web_port)  # Web Panel слушает на 0.0.0.0
     _ipt_add_masquerade()
     proto_ipt_persist()
-    print(f"  {GREEN}✓{NC}  {fw_tool}: UDP {data_port} + TCP {web_port} открыты, NAT настроен.")
 
     # 5. Systemd
     _install_service(data_port, web_port, main_pass, web_user, web_pass, dns)
