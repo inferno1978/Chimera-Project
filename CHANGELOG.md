@@ -2,6 +2,118 @@
 
 ---
 
+## FIX(csqtt): порты 46000/46002 (не 40000/40500) — CSQTT 2.0.0 сменил дефолты — 22 августа 2026
+
+**502 Bad Gateway при доступе к CSQTT Web Panel через nginx front
+оказался следствием устаревшей информации о портах. CSQTT binary
+версии 2.0.0 (которую мы только что собрали из исходников) использует
+хардкоднутые дефолты 46000/46002, а не 40000/40500 как было в 1.x.**
+
+### Симптом (лог юзера)
+
+```
+systemctl status csqtt:
+  ● active (running), Main PID 1162156
+
+journalctl -u csqtt:
+  [INFO]  CSQTT Server 2.0.0
+  [INFO]  RTP AEAD: 0.0.0.0:46000     ← data-plane на 46000
+  [INFO]  Web: 0.0.0.0:46002          ← Web Panel на 46002
+
+ss -tlnp | grep csqtt:
+  LISTEN 0.0.0.0:46002                ← реально слушает 46002
+  LISTEN 127.0.0.1:46003
+  LISTEN 127.0.0.1:46004
+
+curl https://127.0.0.1:40500:        ← Connection refused!
+  connect to 127.0.0.1 port 40500 failed: Connection refused
+
+nginx vhost для csqtt:
+  proxy_pass https://127.0.0.1:40500; ← nginx стучится на 40500, а там пусто
+```
+
+### Корень проблемы
+
+В коммите `5a80199` (FIX(csqtt): фиксированные порты 40000/40500)
+я захардкодил порты 40000/40500, опираясь на устаревшую информацию
+о версии 1.x. Но в amurcanov/csqtt 2.0.0 (которую мы собираем из
+main ветки) разработчик изменил дефолты на **46000/46002**.
+
+Это значит:
+- `_DEFAULT_DATA_PORT = 40000` → должно быть 46000
+- `_DEFAULT_WEB_PORT  = 40500` → должно быть 46002
+- nginx vhost `proxy_pass https://127.0.0.1:40500` → должно быть 46002
+
+CSQTT-сервер слушает на правильных портах (46000/46002), но nginx
+стучится на 40500 — там пусто → 502 Bad Gateway.
+
+### Решение
+
+В `chimera/modules/csqtt.py`:
+
+```python
+# Было:
+_DEFAULT_DATA_PORT = 40000
+_DEFAULT_WEB_PORT  = 40500
+
+# Стало:
+_DEFAULT_DATA_PORT = 46000
+_DEFAULT_WEB_PORT  = 46002
+```
+
+Это автоматически поправит:
+- `_csqtt_nginx_install()`: `backend_port=_DEFAULT_WEB_PORT` (46002)
+  → nginx vhost будет `proxy_pass https://127.0.0.1:46002`
+- `_ipt_open_udp(data_port)`: откроет 46000 вместо 40000
+- `_ipt_close_udp(data_port)`: закроет правильно при uninstall
+- `_ipt_open_tcp(web_port)`: откроет 46002
+- `_ipt_close_tcp(web_port)`: закроет правильно
+- Все `state.get("data_port", _DEFAULT_DATA_PORT)` вернут 46000
+- Все `state.get("web_port", _DEFAULT_WEB_PORT)` вернут 46002
+
+Также обновлены:
+- Все комментарии с упоминанием 40000/40500
+- `docs/faq/VK_BYPASS_FAQ.md` — все упоминания портов в таблицах
+  и ASCII-диаграммах
+
+### Что НЕ менялось
+
+- `_DEFAULT_NGINX_PORT = 46443` — nginx front остаётся на 46443
+  (или любой другой, который юзер выбрал при установке, например 41000)
+- Systemd-unit — не менялся, передаёт только --config-dir/--password/
+  --web-user/--web-pass/--dns, порты CSQTT всё равно берёт из хардкода.
+- `_extract_csqtt_ports()` в _core.py — берёт значения из state.json,
+  который теперь будет содержать 46000/46002 (после переустановки).
+
+### Что нужно сделать юзеру
+
+После `git pull` (получит фикс `PORTS_FIX`):
+
+1. Переустановить nginx front через меню:
+   `8 (VK Whitelist Bypass) → 4 (CSQTT) → 7 (nginx front) → выключить`
+   затем
+   `7 (nginx front) → включить → порт 41000`
+   Это пересоздаст vhost с правильным `proxy_pass https://127.0.0.1:46002`
+
+2. Переустановить CSQTT полностью (опционально, чтобы обновить state.json):
+   `8 → 4 → 1 (Переустановить) → 1 (сохранить пароли)`
+
+3. Проверить:
+   ```
+   ss -tlnp | grep 46002     ← должно показать csqtt-server
+   curl -k https://127.0.0.1:46002    ← должно вернуть HTML Web Panel
+   curl -k https://panel.example:41000    ← должно вернуть HTML через nginx
+   ```
+
+### Файлы
+
+- `chimera/modules/csqtt.py` — `_DEFAULT_DATA_PORT = 46000`,
+  `_DEFAULT_WEB_PORT = 46002`, обновлены комментарии.
+- `docs/faq/VK_BYPASS_FAQ.md` — все упоминания 40000 → 46000,
+  40500 → 46002 в таблицах, ASCII-диаграммах, TUI-боксах.
+
+---
+
 ## FIX(csqtt_packages): _ensure_rust_toolchain — PATH для rustc + ловля FileNotFoundError — 22 августа 2026
 
 **КОРНЕВАЯ ПРИЧИНА всех проблем с установкой CSQTT:
