@@ -205,7 +205,7 @@ HTTPS Web Panel (axum + rustls) для управления паролями.
 │   │ Сервер: vk-turn-proxy / Turnable / wdtt-server /         │      │
 │   │         csqtt-server                                     │      │
 │   │                                                          │      │
-│   │  • Слушает UDP-порт (56000 / 56001 / 40000)              │      │
+│   │  • Слушает UDP-порт (56000 / 56001 / 46000)              │      │
 │   │  • Терминирует TURN-трафик                               │      │
 │   │  • Дешифрует payload (или передаёт дальше как relay)     │      │
 │   └──────────────────┬───────────────────────────────────────┘      │
@@ -227,7 +227,7 @@ HTTPS Web Panel (axum + rustls) для управления паролями.
 
 - Трафик маскируется под RTP/DTLS медиа-поток звонка ВКонтакте.
 - Проходит через TURN-серверы VK (находятся в белом списке РКН).
-- Слушает UDP-порт на VPS (56000 / 56001 / 40000).
+- Слушает UDP-порт на VPS (56000 / 56001 / 46000).
 - Требует специализированный Android-клиент (FreeTurn / WireTurn /
   qWDTT / CSQTT APK).
 - Может работать одновременно с другими модулями Chimera
@@ -242,7 +242,7 @@ HTTPS Web Panel (axum + rustls) для управления паролями.
 | Шифрование | нет (доверяем серверу) | сквозное (Turnable) | сквозное (WG) | сквозное (RTP AEAD) |
 | Android-клиент | FreeTurn (samosvalishe) | WireTurn (spkprsnts) | qWDTT (SpaceNeuroX) | CSQTT (amurcanov) |
 | Управление | ручное + VK-call links | `turnable://` deep-link | пароли + TG-бот | пароли + Web Panel |
-| Web Panel | нет | нет | нет | есть (HTTPS 40500) |
+| Web Panel | нет | нет | нет | есть (HTTPS 46002) |
 | Интеграция с Chimera | только TUI | только TUI | sync + subscription | sync + subscription |
 
 Подробное сравнение — в следующем разделе.
@@ -256,9 +256,9 @@ HTTPS Web Panel (axum + rustls) для управления паролями.
 | **Серверный язык** | Go | Go | Go | Rust (edition 2024) |
 | **Серверный binary** | `/opt/vk-turn-proxy/server` | `/opt/turnable/turnable` | `/usr/local/bin/wdtt-server` | `/usr/local/bin/csqtt-server` |
 | **Systemd unit** | `vk-turn-proxy.service` | `turnable.service` | `wdtt.service` | `csqtt.service` |
-| **Слушает UDP-порт** | 56000 (изменяемый) | 56001 (хардкод) | 56000 (DTLS) + 56001 (WG) | 40000 (хардкод) |
+| **Слушает UDP-порт** | 56000 (изменяемый) | 56001 (хардкод) | 56000 (DTLS) + 56001 (WG) | 46000 (хардкод) |
 | **Куда форвардит** | UDP 51820 (WG/H2 внешний) | TCP 12767 (Xray loopback) | TUN wdtt0 → NAT | TUN csqtt1 → NAT |
-| **Web Panel** | нет | нет | нет | HTTPS :40500 + nginx front |
+| **Web Panel** | нет | нет | нет | HTTPS :46002 + nginx front |
 | **Пароли / auth** | нет (без ключей) | keygen в config | пароли + TTL + device-limit | пароли + TTL + device-limit |
 | **Telegram-бот** | нет | нет | есть (опционально) | нет |
 | **Deep-link** | нет (ручная настройка) | `turnable://` | `qwdtt://` | `csqtt://` |
@@ -586,14 +586,14 @@ Android (CSQTT APK)
     │  (маскировка под видеозвонок)
     ▼
 TURN-серверы ВКонтакте
-    │  UDP → VPS :40000
+    │  UDP → VPS :46000
     ▼
-csqtt-server  (:40000/udp data-plane)
+csqtt-server  (:46000/udp data-plane)
     │  Терминирует RTP AEAD
     │  TUN: csqtt1  (10.66.67.0/24)
     │  NAT (MASQUERADE) → INTERNET
     ▼
-Web Panel: :40500 (HTTPS, axum + rustls, 0.0.0.0)
+Web Panel: :46002 (HTTPS, axum + rustls, 0.0.0.0)
     │  nginx front: :46443 (TLS, опционально)
     ▼
 → открытый интернет
@@ -605,7 +605,7 @@ Web Panel: :40500 (HTTPS, axum + rustls, 0.0.0.0)
 - **Максимальная обфускация** — DPI видит обычный TURN-трафик,
   неотличимый от реального видеозвонка (нет WireGuard handshake,
   нет VLESS-специфичных паттернов).
-- **Встроенная Web Panel** на HTTPS (порт 40500, axum + rustls),
+- **Встроенная Web Panel** на HTTPS (порт 46002, axum + rustls),
   доступна напрямую или через nginx front (TLS).
 - **Пароли с TTL и device-limit** — как у qWDTT, но управляются
   через Web Panel или TUI.
@@ -662,8 +662,8 @@ target). Решение — функция `_ensure_swap_and_pick_jobs()`:
 ║            🎵  CSQTT  •  RTP/TURN Tunnel                         ║
 ╠══════════════════════════════════════════════════════════════════║
 ║  Статус:                 ● активен                               ║
-║  Data порт:              40000                                   ║
-║  Web Panel:              https://127.0.0.1:40500                 ║
+║  Data порт:              46000                                   ║
+║  Web Panel:              https://127.0.0.1:46002                 ║
 ║  Паролей:                5                                       ║
 ║  Web (TLS):              https://example.com:46443               ║
 ║                                                                  ║
@@ -682,7 +682,7 @@ target). Решение — функция `_ensure_swap_and_pick_jobs()`:
 
 ### Web Panel
 
-Доступна напрямую на `https://<server-ip>:40500` (self-signed
+Доступна напрямую на `https://<server-ip>:46002` (self-signed
 сертификат), либо через nginx front на выбранном порту (по
 умолчанию 46443, можно поставить любой, например 41000).
 
@@ -707,7 +707,7 @@ target). Решение — функция `_ensure_swap_and_pick_jobs()`:
 - Занимает больше RAM в простое (~50 MB vs ~10 MB у FreeTurn).
 - Занимает больше места на диске (~25 MB binary + ~500 MB
   Rust toolchain).
-- Фиксированные порты 40000/40500 (binary игнорирует CLI-флаги).
+- Фиксированные порты 46000/46002 (binary игнорирует CLI-флаги).
 
 ---
 
@@ -813,8 +813,8 @@ python3 /opt/chimera/main.py
 | qWDTT | DTLS от TURN | 56000 | UDP | ✅ да |
 | qWDTT | внутренний WG | 56001 | UDP | ✅ да |
 | qWDTT | TUN-порт Android | 9000 | TCP | ✅ да |
-| CSQTT | data-plane от TURN | 40000 | UDP | ❌ хардкод |
-| CSQTT | Web Panel | 40500 | TCP | ❌ хардкод |
+| CSQTT | data-plane от TURN | 46000 | UDP | ❌ хардкод |
+| CSQTT | Web Panel | 46002 | TCP | ❌ хардкод |
 | CSQTT | nginx front (TLS) | 46443 | TCP | ✅ да |
 
 **Важно**: FreeTurn и qWDTT оба используют 56000/udp по умолчанию.
