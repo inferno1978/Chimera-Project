@@ -2,6 +2,77 @@
 
 ---
 
+## FIX(csqtt): deep-link v2 формат — csqtt://connect (не csqtt://config) — 22 августа 2026
+
+**Юзер (SpecteR) сообщил о баге: при импорте ссылки в CSQTT Android-
+клиент (роль «участник») возникала ошибка «неверная ссылка csqtt v2».
+Клиент ожидает `csqtt://connect?v=2&...`, а Chimera генерировала
+`csqtt://config?name=...&peer=ip:port&pass=...` — устаревший формат,
+который Android-клиент не парсит.**
+
+### Корень проблемы
+
+Старый формат (в Chimera до этого коммита):
+```
+csqtt://config?name=CSQTT-1.2.3.4&peer=1.2.3.4:46000&pass=mypass
+```
+
+Новый формат v2 (требует Android-клиент, см. upstream
+`app/src/main/java/com/csqtt/client/ui/utils/UiUtils.kt`):
+```
+csqtt://connect?v=2&host=1.2.3.4&peer=46000&password=mypass
+```
+
+Различия:
+- **host**: `config` → `connect`
+- **v=2**: новый обязательный параметр (версия формата)
+- **host=**: вместо `peer=ip:port` — отдельный параметр host с IP/доменом
+- **peer=**: только порт (без IP), например `46000`
+- **password=**: вместо `pass=`
+- **name=**: убран — upstream-парсер отвергает fragment (часть после `#`)
+- **hashes=**: опциональный параметр для VK-хешей
+
+### Решение
+
+**1. Новая helper-функция `_build_csqtt_v2_link()`** в csqtt.py:
+- Принимает: server_ip, data_port, password, name (не используется), vk_hashes
+- URL-encode password (там могут быть спецсимволы `@`, `!`, пробелы)
+- URL-encode host (для доменов с не-ASCII символами)
+- Добавляет `hashes=` только если vk_hashes непустой
+- Возвращает корректный `csqtt://connect?v=2&host=...&peer=...&password=...`
+
+**2. Все 8 мест генерации csqtt:// ссылок** переписаны на вызов
+`_build_csqtt_v2_link()`:
+- `get_subscription_uris()` — для подписки (sync contract)
+- `_run_install_inner()` — после установки
+- `_create_password()` — при создании нового пароля
+- `_show_password_link()` — при показе ссылки юзеру
+- `_guide_connect()` — в гайде по подключению
+- `_full_uninstall()` — после удаления (если что-то осталось)
+- Другие места
+
+**3. Обновлён гайд** в `_guide_connect()`:
+- Старый формат `csqtt://config?` заменён на `csqtt://connect?v=2&host=IP&peer=PORT&password=ПАРОЛЬ`
+- Параметры `v=2`, `host`, `peer`, `password`, `hashes` описаны
+
+### Тесты
+
+- 4 unit-теста пройдены:
+  - Базовая ссылка: `csqtt://connect?v=2&host=1.2.3.4&peer=46000&password=mySecretPass`
+  - С VK-хешами: добавляется `&hashes=hash1,hash2`
+  - Пустые хеши: параметр не добавляется (важно — upstream возвращает null)
+  - Спецсимволы в пароле: URL-encoded (`p@ss w0rd!` → `p%40ss%20w0rd%21`)
+
+### Файлы
+
+- `chimera/modules/csqtt.py`:
+  - Добавлен `import urllib.parse`
+  - Новая функция `_build_csqtt_v2_link()` (строки 269-309)
+  - 8 мест генерации ссылок переписаны
+  - Гайд `_guide_connect()` обновлён
+
+---
+
 ## FIX(connection_audit): активные соединения Xray + имена VLESS-юзеров — 22 августа 2026
 
 **Юзер (Alexey Bezkrovny) сообщил о баге: в разделе «Активные

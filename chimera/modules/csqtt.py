@@ -63,6 +63,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -265,6 +266,48 @@ def _run(cmd: list, capture: bool = False, check: bool = False,
         kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return subprocess.run(cmd, **kw)
 
+def _build_csqtt_v2_link(server_ip: str, data_port: int, password: str,
+                         name: str = "", vk_hashes: str = "") -> str:
+    """Строит корректный csqtt:// deep-link в формате v2.
+
+    Формат (подтверждён из upstream amurcanov/csqtt Android-клиента,
+    файл app/src/main/java/com/csqtt/client/ui/utils/UiUtils.kt):
+
+        csqtt://connect?v=2&host=<ip>&peer=<port>&password=<пароль>
+
+    Обязательные параметры:
+      - v=2                  — версия формата (фиксированное значение)
+      - host=<server_ip>     — IP или домен сервера
+      - peer=<port>          — порт data-plane (46000 по умолчанию)
+      - password=<password>  — пароль юзера или главный пароль
+
+    Необязательные:
+      - hashes=<vk_hashes>   — VK-хеши через запятую
+
+    ВАЖНО: upstream-парсер (UiUtils.kt) отвергает ссылки с fragment
+    (часть после '#'), поэтому name НЕ добавляется в ссылку —
+    используйте параметр name только для отображения в UI Chimera.
+
+    Старый формат csqtt://config?name=...&peer=ip:port&pass=...
+    НЕ поддерживается клиентом в "роли участника" — выдаёт
+    "неверная ссылка csqtt v2". Исправлено 22.08.2026 после баг-репорта
+    от юзера SpecteR.
+    """
+    # URL-encode password — там могут быть спецсимволы
+    host_enc = urllib.parse.quote(str(server_ip), safe="")
+    port_enc = str(int(data_port))
+    pwd_enc = urllib.parse.quote(str(password), safe="")
+
+    # Базовый v2-формат
+    link = f"csqtt://connect?v=2&host={host_enc}&peer={port_enc}&password={pwd_enc}"
+
+    # Опциональные VK-хеши — только если реально есть значение.
+    # Если передать пустой hashes — upstream-парсер вернёт null.
+    if vk_hashes and vk_hashes.strip():
+        link += f"&hashes={urllib.parse.quote(vk_hashes, safe=',')}"
+
+    return link
+
 def _get_server_ip() -> str:
     try:
         import socket
@@ -447,11 +490,7 @@ def get_subscription_uris(user: dict) -> list:
         state = proto_load_state(_MODULE_STATE)
         server_ip = _get_server_ip()
         data_port = state.get("data_port", _DEFAULT_DATA_PORT)
-        link = (
-            f"csqtt://config?name=CSQTT-{server_ip}"
-            f"&peer={server_ip}:{data_port}"
-            f"&pass={pwd}"
-        )
+        link = _build_csqtt_v2_link(server_ip, data_port, pwd)
         return [link]
     except Exception:
         return []
@@ -897,11 +936,7 @@ def _run_install_inner() -> None:
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Быстрая ссылка для CSQTT:{NC}")
     _box_row()
-    csqtt_link = (
-        f"csqtt://config?name=CSQTT-{server_ip}"
-        f"&peer={server_ip}:{data_port}"
-        f"&pass={main_pass}"
-    )
+    csqtt_link = _build_csqtt_v2_link(server_ip, data_port, main_pass)
     _box_link(csqtt_link)
     _box_row()
     _box_info("Web Panel доступна через SSH-туннель:")
@@ -1032,9 +1067,7 @@ def _create_password() -> None:
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Ссылка csqtt:// для клиента:{NC}")
     _box_bot()
-    link = (f"csqtt://config?name=CSQTT-{server_ip}"
-            f"&peer={server_ip}:{data_port}"
-            f"&pass={new_pass}")
+    link = _build_csqtt_v2_link(server_ip, data_port, new_pass)
     print()
     _box_link(link)
     print()
@@ -1066,9 +1099,7 @@ def _show_password_link(passwords: dict, server_ip: str, data_port: int) -> None
     except (ValueError, IndexError):
         print(f"  {RED}✗{NC}  Неверный номер."); _pause(); return
 
-    link = (f"csqtt://config?name=CSQTT-{server_ip}"
-            f"&peer={server_ip}:{data_port}"
-            f"&pass={pw}")
+    link = _build_csqtt_v2_link(server_ip, data_port, pw)
     print()
     _box_top("🔗  ССЫЛКА ДЛЯ КЛИЕНТА")
     _box_row()
@@ -1308,12 +1339,15 @@ def _guide_connect() -> None:
     _box_top("🔗  ПОДКЛЮЧЕНИЕ ПО csqtt://")
     _box_row()
     _box_sep()
-    _box_row(f"  {BOLD}{WHITE}Формат ссылки:{NC}")
+    _box_row(f"  {BOLD}{WHITE}Формат ссылки (v2):{NC}")
     _box_row()
-    _box_row(f"  {CYAN}csqtt://config?{NC}")
-    _box_row(f"  {DIM}  name=  — название профиля{NC}")
-    _box_row(f"  {DIM}  peer=  — IP:порт сервера (например 1.2.3.4:46000){NC}")
-    _box_row(f"  {DIM}  pass=  — пароль подключения{NC}")
+    _box_row(f"  {CYAN}csqtt://connect?v=2&host=IP&peer=PORT&password=ПАРОЛЬ{NC}")
+    _box_row()
+    _box_row(f"  {DIM}  v=2          — версия формата (фиксировано){NC}")
+    _box_row(f"  {DIM}  host=        — IP или домен сервера{NC}")
+    _box_row(f"  {DIM}  peer=        — порт data-plane (46000 по умолчанию){NC}")
+    _box_row(f"  {DIM}  password=    — пароль юзера или главный пароль{NC}")
+    _box_row(f"  {DIM}  hashes=      — (опционально) VK-хеши через запятую{NC}")
     _box_row()
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Как импортировать:{NC}")
@@ -1474,9 +1508,7 @@ def do_csqtt_menu() -> None:
             _box_top("🔗  ССЫЛКА  •  ГЛАВНЫЙ ПАРОЛЬ")
             _box_row()
             _box_bot()
-            link = (f"csqtt://config?name=CSQTT-{server_ip}"
-                    f"&peer={server_ip}:{data_port}"
-                    f"&pass={main_pass}")
+            link = _build_csqtt_v2_link(server_ip, data_port, main_pass)
             print()
             _box_link(link)
             print()
