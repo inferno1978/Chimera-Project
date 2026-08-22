@@ -113,11 +113,15 @@ _MODULE_STATE     = Path("/var/lib/xray-installer/csqtt.json")
 _GITHUB_REPO      = "amurcanov/csqtt"
 
 # Порты по умолчанию
-# CSQTT использует свои встроенные дефолты (40000/40500), которые
-# нельзя изменить через CLI — binary игнорирует --listen/--web-port
+# CSQTT binary 2.0.0 использует хардкоднутые дефолты 46000/46002.
+# Раньше (1.x) было 40000/40500 — см. CHANGELOG.
+# Проверено через `ss -tlnp | grep csqtt` и `journalctl -u csqtt` 22.08.2026:
+#   [INFO]  RTP AEAD: 0.0.0.0:46000   ← data-plane
+#   [INFO]  Web: 0.0.0.0:46002        ← Web Panel
+# Эти порты нельзя изменить через CLI — binary игнорирует --listen/--web-port
 # при работе через systemd. Принимаем как есть.
-_DEFAULT_DATA_PORT = 40000   # входящий UDP data-plane (RTP/TURN)
-_DEFAULT_WEB_PORT  = 40500   # Web Panel (HTTPS, 0.0.0.0)
+_DEFAULT_DATA_PORT = 46000   # входящий UDP data-plane (RTP/TURN)
+_DEFAULT_WEB_PORT  = 46002   # Web Panel (HTTPS, 0.0.0.0)
 _DEFAULT_NGINX_PORT = 46443  # nginx front для Web Panel (TLS)
 
 # TUN сеть
@@ -611,7 +615,7 @@ def _csqtt_nginx_install(port: int, use_self_signed: bool, domain) -> tuple:
     ok, msg = panel_nginx_front_install(
         service_tag="csqtt_nginx",
         port=port,
-        backend_port=_DEFAULT_WEB_PORT,  # 40500 — реальный порт CSQTT web panel
+        backend_port=_DEFAULT_WEB_PORT,  # 46002 — реальный порт CSQTT web panel
         site_name="chimera-csqtt-nginx",
         state_file=_CSQTT_NGINX_STATE_FILE,
         title="CSQTT Web Panel",
@@ -642,8 +646,8 @@ def _csqtt_nginx_remove() -> tuple:
 # ══════════════════════════════════════════════════════════════════════════════
 def _install_service(data_port: int, web_port: int, main_pass: str,
                      web_user: str, web_pass: str, dns: str) -> None:
-    # CSQTT использует встроенные дефолтные порты (40000/40500),
-    # которые нельзя изменить через CLI. Передаём только конфигурацию.
+    # CSQTT binary 2.0.0 использует встроенные дефолтные порты 46000/46002
+    # (хардкод, нельзя изменить через CLI). Передаём только конфигурацию.
     _SERVICE_FILE.write_text(
         "[Unit]\n"
         "Description=CSQTT — RTP/TURN Tunnel Server\n"
@@ -727,7 +731,7 @@ def _run_install_inner() -> None:
         )
         main_pass = raw if raw else (proto_gen_password() if not old_pass else old_pass)
 
-        # CSQTT использует фиксированные порты (40000/40500) — не спрашиваем.
+        # CSQTT использует фиксированные порты (46000/46002) — не спрашиваем.
         data_port = _DEFAULT_DATA_PORT
         web_port = _DEFAULT_WEB_PORT
 
