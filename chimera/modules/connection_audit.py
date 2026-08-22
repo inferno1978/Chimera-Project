@@ -299,6 +299,19 @@ def _audit_suspicious() -> None:
 
 
 def _audit_active_now() -> None:
+    """Показывает активные TCP-соединения процесса xray с привязкой к VLESS-юзерам.
+
+    Алгоритм:
+      1. ss -tnpH state established → все TCP-соединения в состоянии ESTABLISHED.
+      2. Фильтр по процессу xray (по users:(("xray",...)) ).
+      3. Парсинг через regex — надёжно работает на всех версиях iproute2
+         (старые с 1 числовым столбцом Recv-Q, новые с Recv-Q + Send-Q).
+      4. Для каждого соединения: если локальный порт = 443 (или другой VLESS
+         inbound), то удалённый адрес = клиентский IP.
+      5. Через _parse_access_log() строим map: client_IP → email (по последним
+         записям access.log). Сопоставляем — получаем email юзера для каждого
+         активного соединения.
+    """
     core = _core_module()
     _box_top    = core._box_top
     _box_row    = core._box_row
@@ -307,25 +320,116 @@ def _audit_active_now() -> None:
     _run        = core._run
     info        = core.info
     warn        = core.warn
-    BOLD, CYAN, NC, GREEN, DIM = core.BOLD, core.CYAN, core.NC, core.GREEN, core.DIM
+    BOLD, CYAN, NC, GREEN, DIM, YELLOW = (
+        core.BOLD, core.CYAN, core.NC, core.GREEN, core.DIM, core.YELLOW
+    )
 
     print()
     info("Активные соединения Xray:")
     try:
-        r = _run(["ss", "-tnp", "state", "established"], capture=True, check=False)
+        # -H = без заголовка, -n = числовые адреса, -p = процесс
+        r = _run(["ss", "-tnpH", "state", "established"], capture=True, check=False)
         lines = [l for l in r.stdout.splitlines() if "xray" in l]
         if not lines:
             info("Нет активных соединений с процессом xray")
             return
+
+        # Парсинг через regex — надёжно работает на всех версиях ss.
+        # Формат (iproute2 5.x+): tcp ESTAB 0 0 local:port peer:port users:(("xray",pid=N,fd=N))
+        # Формат (старые): tcp ESTAB 0 local:port peer:port users:(...)
+        # IPv6-адреса в квадратных скобках: [::ffff:1.2.3.4]:55164
+        # (?:\d+\s+){1,2} — 1 или 2 числовых столбца (Recv-Q, опционально Send-Q)
+        pat = re.compile(
+            r'^\S+\s+\S+\s+(?:\d+\s+){1,2}'
+            r'(?P<local>\[[^\]]+\]:\d+|[^\s:]+:\d+)\s+'
+            r'(?P<peer>\[[^\]]+\]:\d+|[^\s:]+:\d+)\s+'
+            r'users:\(\("(?P<proc>[^"]+)"'
+        )
+
+        # Построим map: client_IP → email через access.log
+        ip_to_email: dict[str, str] = {}
+        try:
+            entries = _parse_access_log()
+            for e in entries:
+                ip = e.get("src_ip", "")
+                em = e.get("email", "")
+                if ip and em:
+                    # Нормализуем IPv4-mapped IPv6: ::ffff:1.2.3.4 → 1.2.3.4
+                    if ip.startswith("::ffff:"):
+                        ip = ip[7:]
+                    ip_to_email[ip] = em
+        except Exception:
+            pass
+
+        # Внешний IP VPS (чтобы отличать входящие от исходящих)
+        try:
+            from chimera._core import get_server_ip
+            vps_ip = get_server_ip("4") or ""
+        except Exception:
+            vps_ip = ""
+
         _box_top("Активные соединения Xray")
-        _box_row(f"  {BOLD}{'Локал. адрес':<26} {'Удал. адрес':<26} {'Процесс'}{NC}")
+        _box_row(f"  {BOLD}{'Локал. адрес':<28} {'Удал. адрес':<28} {'VLESS юзер':<28}{NC}")
         _box_sep()
-        for line in lines[:30]:
-            parts = line.split()
-            if len(parts) >= 5:
-                _box_row(f"  {CYAN}{parts[3]:<26}{NC} {GREEN}{parts[4]:<26}{NC} {DIM}{(parts[-1] if len(parts)>5 else '')[:30]}{NC}")
+        shown = 0
+        no_email_count = 0
+        for line in lines[:50]:
+            m = pat.match(line.strip())
+            if not m:
+                continue
+            local = m.group("local")
+            peer  = m.group("peer")
+
+            # Извлекаем IP из peer (без порта, без IPv6-скобок)
+            peer_ip = peer
+            if peer_ip.startswith("["):
+                peer_ip = peer_ip[1:].split("]")[0]
+            else:
+                peer_ip = peer_ip.rsplit(":", 1)[0]
+            if peer_ip.startswith("::ffff:"):
+                peer_ip = peer_ip[7:]
+
+            # Если локальный адрес = VPS IP — значит это входящее соединение
+            # от клиента (peer = клиентский IP). Иначе — исходящее от Xray.
+            local_ip = local
+            if local_ip.startswith("["):
+                local_ip = local_ip[1:].split("]")[0]
+            else:
+                local_ip = local_ip.rsplit(":", 1)[0]
+            if local_ip.startswith("::ffff:"):
+                local_ip = local_ip[7:]
+
+            # Определяем email юзера по клиентскому IP
+            email = ""
+            if vps_ip and local_ip == vps_ip:
+                # Входящее соединение: peer = клиент
+                email = ip_to_email.get(peer_ip, "")
+            else:
+                # Исходящее соединение: local = клиент (Xray к exit-ноде)
+                email = ip_to_email.get(local_ip, "")
+
+            if not email:
+                no_email_count += 1
+                email_display = f"{DIM}(не сопоставлен){NC}"
+            else:
+                email_display = f"{YELLOW}{email[:26]}{NC}"
+
+            _box_row(
+                f"  {CYAN}{local:<28}{NC} {GREEN}{peer:<28}{NC} {email_display}"
+            )
+            shown += 1
+
+        if shown == 0:
+            _box_row(f"  {DIM}Не удалось распарсить ни одной строки ss{NC}")
+            _box_row(f"  {DIM}(проверьте формат вывода `ss -tnpH`){NC}")
         _box_sep()
-        _box_row(f"  {DIM}Всего: {len(lines)} соединений{NC}")
+        _box_row(f"  {DIM}Всего: {len(lines)} соединений (показано {shown}){NC}")
+        if no_email_count > 0:
+            _box_row(f"  {DIM}Без email: {no_email_count} (нет в access.log или loglevel < info){NC}")
+        if not ip_to_email:
+            _box_row()
+            _box_row(f"  {YELLOW}⚠ access.log пуст или loglevel < info — email не сопоставлены{NC}")
+            _box_row(f"  {DIM}  Для включения: config.json → log.loglevel = 'info', restart xray{NC}")
         _box_row()
         _box_bottom()
     except Exception as e:
