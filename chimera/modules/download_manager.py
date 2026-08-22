@@ -410,8 +410,62 @@ def fetch_package(
     # ── 3) Все зеркала провалились — подсказка ─────────────────────────────
     tmp_path.unlink(missing_ok=True)
     if print_hint_on_failure:
+        # Диагностика: показываем, искали ли manual-файл и что нашли.
+        # Это помогает юзеру понять, почему сеть вообще запустилась.
+        _print_manual_diagnostic(spec, manual_path, filename)
         print_manual_hint(spec, filename=filename, **filename_kwargs)
     return False
+
+
+def _print_manual_diagnostic(spec: PackageSpec, manual_path: Path, filename: str) -> None:
+    """Печатает диагностику состояния manual-файла перед show manual hint.
+    
+    Показывает:
+    - Где искали manual-файл (manual_incoming_dir / filename)
+    - Найден ли файл и какого размера
+    - Свободное место на диске
+    
+    Это помогает юзеру понять, почему fetch_package вообще пошёл в сеть
+    (например, если файл был удалён или имеет слишком маленький размер).
+    """
+    # Color setup (как в print_manual_hint — через importlib чтобы избежать circular import)
+    import importlib
+    try:
+        core = importlib.import_module("chimera._core")
+        YELLOW = core.YELLOW
+        NC = core.NC
+        DIM = core.DIM
+    except Exception:
+        YELLOW = NC = DIM = ""
+
+    print()
+    print(f"  {YELLOW}─── Диагностика ───{NC}")
+    print(f"  {DIM}manual_incoming_dir:{NC} {spec.manual_incoming_dir}")
+    print(f"  {DIM}expected filename:{NC}   {filename}")
+    print(f"  {DIM}expected path:{NC}       {manual_path}")
+    if manual_path.exists():
+        ms = manual_path.stat().st_size
+        verdict = (f"{YELLOW}✓ достаточно (>= {spec.min_size} байт){NC}"
+                   if ms >= spec.min_size
+                   else f"{YELLOW}✗ меньше минимума {spec.min_size}{NC}")
+        print(f"  {DIM}manual file found:{NC}   ДА ({ms} байт) — {verdict}")
+        if ms >= spec.min_size:
+            print(f"  {YELLOW}⚠ файл существует и валиден, но не был использован —{NC}")
+            print(f"  {YELLOW}  значит post_install упал. Смотрите ошибку выше (до этого блока).{NC}")
+    else:
+        print(f"  {DIM}manual file found:{NC}   НЕТ")
+        print(f"  {YELLOW}→ чтобы пропустить зеркала, скачайте файл вручную{NC}")
+        print(f"  {YELLOW}  и положите в: {manual_path}{NC}")
+    # Свободное место на диске
+    try:
+        import shutil as _sh
+        total, used, free = _sh.disk_usage(str(spec.manual_incoming_dir))
+        free_mb = free // (1024 * 1024)
+        total_mb = total // (1024 * 1024)
+        print(f"  {DIM}disk free:{NC}           {free_mb} MB (из {total_mb} MB)")
+    except Exception:
+        pass
+    print()
 
 
 # ============================================================================

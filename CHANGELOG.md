@@ -2,6 +2,120 @@
 
 ---
 
+## FIX(csqtt+download_manager): детальная диагностика при падении установки CSQTT — 22 августа 2026
+
+**Проблема: юзер удалил CSQTT, попытался переустановить — увидел
+старое сообщение «Не удалось скачать CSQTT source автоматически»
+со списком 5 зеркал, без пояснения что именно пошло не так.
+Предыдущий фикс (a49ed5c) добавил явное логирование, но оно
+не срабатывало, потому что _build_csqtt_server вызывал fetch_package
+БЕЗ progress_label — все print() с if progress_label: были silent.**
+
+### Корень проблемы #1 — отсутствующий progress_label
+
+В csqtt.py:
+```python
+ok = fetch_package(CSQTT_SOURCE_SPEC)  # ← без progress_label!
+```
+
+`fetch_package` принимает `progress_label: Optional[str] = None`.
+Все мои новые логи были обёрнуты в `if progress_label: print(...)`.
+Без `progress_label` они **не печатались** — юзер видел только
+старый `print_manual_hint` со списком зеркал.
+
+### Корень проблемы #2 — нет диагностики в print_manual_hint
+
+Когда `fetch_package` идёт в сеть (manual-файл не найден) и все
+зеркала падают — вызывается `print_manual_hint`, который показывает
+только список зеркал и команду curl. Но не показывает:
+- Существовал ли manual-файл в /root/ вообще?
+- Какой размер /root/csqtt-main.tar.gz если он есть?
+- Сколько свободного места на диске?
+- Хватит ли RAM для сборки?
+
+Юзер в замешательстве — не понимает, качать ли файл вручную или
+искать проблему в чём-то другом.
+
+### Решение
+
+**1. csqtt.py: передаём progress_label в fetch_package:**
+```python
+ok = fetch_package(CSQTT_SOURCE_SPEC, progress_label="CSQTT")
+```
+Теперь мои логи из a49ed5c реально печатаются:
+```
+  CSQTT ✓ найден локальный файл: /root/csqtt-main.tar.gz (540835 байт) — скачивание не требуется
+```
+
+**2. csqtt.py: детальная диагностика в _run_install_inner при ошибке:**
+
+Когда _build_csqtt_server возвращает False, юзер видит:
+```
+╔══════════════════════════════════════════════════════════════════╗
+║                     🚀  УСТАНОВКА  •  CSQTT                      ║
+╠══════════════════════════════════════════════════════════════════║
+║  ✗  Не удалось собрать csqtt-server.                             ║
+║  ✗  Убедитесь что доступны Rust, Zig и интернет.                 ║
+║                                                                  ║
+║  Диагностика:                                                    ║
+║  • /root/csqtt-main.tar.gz — найден (540835 байт)                ║
+║    файл есть, но сборка упала. Смотрите ошибку выше.             ║
+║    Запустите direct-build скрипт для подробных логов:            ║
+║    bash <(curl -fsSL https://gitlab.com/.../csqtt-direct-build.sh)║
+║  • свободное место: 5000 MB ✓                                   ║
+║  • RAM+swap: 1500 MB ✓                                          ║
+╚══════════════════════════════════════════════════════════════════╝
+```
+
+Если файла НЕТ — показывает команду curl для скачивания.
+Если мало RAM — показывает команду для добавления swap.
+Если мало места — предупреждает.
+
+**3. download_manager.py: функция _print_manual_diagnostic()**
+
+Новая функция, вызывается ПЕРЕД print_manual_hint. Показывает:
+- Где искали manual-файл (manual_incoming_dir / filename / path)
+- Найден ли файл и какого размера
+- Если найден и валиден, но не использовался → значит post_install упал
+- Если не найден → явное сообщение «→ чтобы пропустить зеркала, скачайте вручную»
+- Свободное место на диске
+
+**4. scripts/ — 3 диагностических скрипта в репо:**
+
+- `scripts/csqtt-direct-build.sh` — запускает post_install напрямую
+  на /root/csqtt-main.tar.gz с подробным выводом (импорт, распаковка,
+  Rust, Zig, cargo, сборка — каждый шаг логируется).
+- `scripts/csqtt-manual-download.sh` — пробует 5 зеркал по очереди
+  с нормальным User-Agent (Mozilla/5.0), при успехе кладёт в /root/.
+- `scripts/csqtt-download-diag.sh` — полная диагностика сети
+  (DNS, TCP, HTTP HEAD, реальный download, iptables, /etc/hosts).
+
+Скрипты доступны через raw endpoint GitLab:
+```
+bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/scripts/csqtt-direct-build.sh)
+```
+
+### Тесты
+
+- 85 тестов в test_download_manager.py + test_github_mirrors.py passed.
+- 0 регрессий.
+
+### Файлы
+
+- `chimera/modules/csqtt.py`:
+  - `_build_csqtt_server()`: добавлен progress_label="CSQTT".
+  - `_run_install_inner()`: при ошибке _build_csqtt_server показывает
+    детальную диагностику (manual-файл, disk free, RAM+swap).
+- `chimera/modules/download_manager.py`:
+  - Новая функция `_print_manual_diagnostic()`.
+  - Вызывается перед `print_manual_hint` в блоке "все зеркала провалились".
+- `scripts/csqtt-direct-build.sh` — НОВЫЙ.
+- `scripts/csqtt-manual-download.sh` — НОВЫЙ.
+- `scripts/csqtt-download-diag.sh` — НОВЫЙ.
+
+---
+
+
 ## FIX(download_manager): явное логирование при нахождении manual-файла + понятная ошибка при падении post_install — 22 августа 2026
 
 **Проблема: при установке CSQTT юзер скачал /root/csqtt-main.tar.gz
