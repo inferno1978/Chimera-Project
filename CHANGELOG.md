@@ -2,6 +2,156 @@
 
 ---
 
+## FIX(csqtt+panel_nginx_front): полная регистрация портов в port_registry + логирование + симметричный iptables fallback — 22 августа 2026
+
+**Полный аудит портов CSQTT и их регистрации в port_registry.
+Найдены и исправлены 4 проблемы: молчаливые except: pass, отсутствие
+логирования, неполный fallback на iptables при remove, дублирующая
+логика. Теперь все 3 порта CSQTT (46000/46002/46443) + MASQUERADE
+полностью управляются через port_registry с явным логированием
+каждого шага.**
+
+### Аудит — что было до фикса
+
+| Компонент | port_registry? | UFW? | iptables fallback? | Логирование? |
+|---|---|---|---|---|
+| `_ipt_open_udp` (46000) | ✅ SERVICE_CSQTT | ✅ | ✅ через `_fw_tool()` | ❌ молча |
+| `_ipt_close_udp` | ✅ port_unregister | ✅ | ✅ через iptables -D | ❌ молча |
+| `_ipt_open_tcp` (46002) | ✅ SERVICE_CSQTT_WEB | ✅ | ✅ | ❌ молча |
+| `_ipt_close_tcp` | ✅ port_unregister | ✅ | ✅ | ❌ молча |
+| `_ipt_add_masquerade` | ❌ | ❌ | ✅ iptables direct | ❌ молча |
+| `_ipt_remove_masquerade` | ❌ | ❌ | ✅ iptables direct | ❌ молча |
+| `_enable_ip_forward` | n/a | n/a | n/a | ❌ молча |
+| `panel_nginx_front_install` | ✅ | ✅ | ✅ (фикс 4813a1f) | ✅ |
+| `panel_nginx_front_remove` | ✅ | ✅ | ❌ **НЕТ fallback** | ❌ `except: pass` |
+
+### Найденные проблемы
+
+1. **`_ipt_open_udp` / `_ipt_open_tcp`** — `try/except: pass` глотал
+   ошибки port_registry без логирования. Если port_registry падал —
+   fallback срабатывал, но юзер не видел результата.
+
+2. **`_ipt_close_udp` / `_ipt_close_tcp`** — та же проблема с
+   `try/except: pass`. + дублирующая логика: сначала port_registry,
+   потом raw ufw/iptables безусловно (даже если port_registry уже всё
+   сделал).
+
+3. **MASQUERADE** (`_ipt_add_masquerade` / `_ipt_remove_masquerade`) —
+   не использует port_registry. Это **правильно** (MASQUERADE — это NAT
+   в POSTROUTING chain, не port opening в INPUT). Но не было
+   логирования — юзер не видел, добавилось правило или нет.
+
+4. **`panel_nginx_front_remove`** — `try/except: pass` (строка 602-603).
+   Если `ufw_close_port` упадёт — порт останется открытым. Нет fallback
+   на iptables -D. Несимметрично с `panel_nginx_front_install` (которая
+   после фикса 4813a1f имеет fallback).
+
+5. **Нет логирования** в `_ipt_open_*` / `_ipt_close_*` — юзер не видел,
+   открылись порты или нет. Только общая строка «UDP 46000 + TCP 46002
+   открыты» в install, без деталей.
+
+### Решение
+
+**1. `_ipt_open_udp` / `_ipt_open_tcp`** — переписаны:
+
+```python
+def _ipt_open_udp(port):
+    fw = _fw_tool()
+    opened_via = ""
+    try:
+        port_register(SERVICE_CSQTT, port, "udp", ..., force=True)
+        ufw_ok, ufw_msg = ufw_open_port(port, "udp", SERVICE_CSQTT, ...)
+        if ufw_ok:
+            opened_via = f"UFW ({ufw_msg})"
+        else:
+            # Fallback на iptables
+            if not _ipt_rule_exists("filter", "INPUT", args):
+                _run(["iptables", "-t", "filter", "-I", "INPUT", "1"] + args)
+                opened_via = "iptables (fallback — UFW недоступен)"
+    except Exception as _e:
+        # port_registry недоступен — fallback
+        ...
+    print(f"  ✓ UDP {port} открыт ({opened_via})")
+```
+
+Теперь юзер видит:
+```
+✓ UDP 46000 открыт (UFW (Уже открыто нашим правилом))
+✓ TCP 46002 открыт (iptables (fallback — UFW недоступен))
+```
+
+**2. `_ipt_close_udp` / `_ipt_close_tcp`** — переписаны аналогично.
+   port_registry вызывается, результат логируется. Двойная проверка
+   через iptables -D оставлена (снимает orphaned правила).
+
+**3. `_ipt_add_masquerade` / `_ipt_remove_masquerade`** — добавлено
+   логирование:
+   ```
+   ✓ MASQUERADE для 10.66.67.0/24 добавлен
+   ```
+   или
+   ```
+   MASQUERADE для 10.66.67.0/24 уже существует
+   ```
+   MASQUERADE не регистрируется в port_registry (это NAT, не port
+   opening) — это правильно, оставлено как есть.
+
+**4. `_enable_ip_forward`** — добавлено логирование:
+   ```
+   ✓ IP forwarding включён
+   ```
+
+**5. `panel_nginx_front_remove`** — переписан блок 4 (close port):
+   - Симметрично с `panel_nginx_front_install`: UFW → iptables fallback.
+   - `ufw_close_port` + `port_unregister` — с логированием.
+   - Fallback: `iptables -C INPUT ...` (проверка) → `iptables -D INPUT ...`
+     (удаление) в цикле до 5 раз (снимает orphaned правила).
+   - `netfilter-persistent save` — сохранение после удаления.
+   - `ufw delete allow PORT/tcp` — снимает orphaned UFW правило.
+   - `except Exception as _e` — логирует ошибку, не молчит.
+
+**6. `_run_install_inner`** — убрана дублирующая строка логирования
+   «UDP 46000 + TCP 46002 открыты, NAT настроен». Теперь каждая функция
+   логирует свой результат сама.
+
+### Что НЕ менялось
+
+- Логика регистрации портов (SERVICE_CSQTT, SERVICE_CSQTT_WEB,
+  SERVICE_CSQTT_NGINX) — не тронута.
+- `port_register(force=True)` — не тронут (перезаписывает существующие
+  записи).
+- `proto_ipt_persist()` — не тронут (вызывается после всех операций).
+- 158 тестов nginx/port_registry/download_manager проходят без регрессий.
+
+### Финальная таблица — что стало после фикса
+
+| Компонент | port_registry? | UFW? | iptables fallback? | Логирование? |
+|---|---|---|---|---|
+| `_ipt_open_udp` (46000) | ✅ | ✅ | ✅ | ✅ |
+| `_ipt_close_udp` | ✅ | ✅ | ✅ | ✅ |
+| `_ipt_open_tcp` (46002) | ✅ | ✅ | ✅ | ✅ |
+| `_ipt_close_tcp` | ✅ | ✅ | ✅ | ✅ |
+| `_ipt_add_masquerade` | n/a (NAT) | n/a | ✅ | ✅ |
+| `_ipt_remove_masquerade` | n/a (NAT) | n/a | ✅ | ✅ |
+| `_enable_ip_forward` | n/a | n/a | n/a | ✅ |
+| `panel_nginx_front_install` | ✅ | ✅ | ✅ | ✅ |
+| `panel_nginx_front_remove` | ✅ | ✅ | ✅ | ✅ |
+
+### Файлы
+
+- `chimera/modules/csqtt.py`:
+  - `_ipt_open_udp` / `_ipt_close_udp` — переписаны с логированием.
+  - `_ipt_open_tcp` / `_ipt_close_tcp` — переписаны с логированием.
+  - `_ipt_add_masquerade` / `_ipt_remove_masquerade` — добавлено
+    логирование.
+  - `_enable_ip_forward` — добавлено логирование.
+  - `_run_install_inner` — убрана дублирующая строка.
+- `chimera/modules/panel_nginx_front.py`:
+  - `panel_nginx_front_remove` — блок 4 (close port) переписан с
+    iptables fallback + логированием.
+
+---
+
 ## FIX(panel_nginx_front): открытие порта nginx front в фаерволе — 22 августа 2026
 
 **Юзер (SpecteR) сообщил о баге: назначил nginx front порт 45443,
