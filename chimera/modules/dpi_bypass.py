@@ -1312,16 +1312,81 @@ def switch_preset(preset_name: str) -> bool:
 _XRAY_RULE_PREFIX = "chimera-b4-route-"
 
 
+def _get_xray_outbound_tag() -> str:
+    """Возвращает outboundTag для b4-маршрутизации.
+
+    Если включён AWG exit (Mode B) — используем 'direct-local'
+    (freedom outbound с domainStrategy=UseIPv4).
+    Иначе — 'direct'.
+    """
+    try:
+        from chimera._core import AWG_EXIT_ENABLED, INSTALL_MODE
+        if getattr(AWG_EXIT_ENABLED, "value", AWG_EXIT_ENABLED) and INSTALL_MODE == "B":
+            return "direct-local"
+    except Exception:
+        pass
+    return "direct"
+
+
+def _ensure_direct_local_outbound(cfg: dict) -> None:
+    """Если outboundTag='direct-local' — убеждаемся что такой outbound существует.
+    Если нет — создаём freedom outbound с domainStrategy=UseIPv4.
+    """
+    outbounds = cfg.get("outbounds", [])
+    has_direct_local = any(
+        o.get("tag") == "direct-local" for o in outbounds
+    )
+    if not has_direct_local:
+        outbounds.append({
+            "protocol": "freedom",
+            "tag": "direct-local",
+            "settings": {"domainStrategy": "UseIPv4"},
+        })
+        cfg["outbounds"] = outbounds
+
+
+def _xray_safe_restart() -> bool:
+    """Безопасный restart Xray с валидацией config и rollback.
+    Использует _xray_safe_apply_config если доступна, иначе raw restart.
+    """
+    try:
+        from chimera.modules.xray_install import _xray_safe_apply_config
+        return _xray_safe_apply_config()
+    except ImportError:
+        # Fallback — raw restart (менее безопасно, но лучше чем ничего)
+        subprocess.run(["systemctl", "restart", "xray"],
+                       capture_output=True, check=False)
+        time.sleep(1)
+        return True
+
+
+def _set_xray_config_owner(cfg_path: Path) -> None:
+    """Устанавливает правильные права на config.json (640 root:xray)."""
+    try:
+        from chimera._core import _set_config_owner
+        _set_config_owner(cfg_path)
+    except ImportError:
+        try:
+            cfg_path.chmod(0o644)
+        except Exception:
+            pass
+
+
 def apply_routing_for_set(set_id: str, domains: list) -> bool:
-    """Добавляет Xray routing-правило: domain:[...] → outbound:direct."""
+    """Добавляет/обновляет Xray routing-правило: domain:[...] → outbound:direct.
+
+    AWG-aware: если включён AWG exit — использует 'direct-local' outbound.
+    Безопасный restart: использует _xray_safe_apply_config с валидацией.
+    """
     if not domains:
         return False
     comment = _XRAY_RULE_PREFIX + set_id
+    outbound_tag = _get_xray_outbound_tag()
     xray_domains = [f"domain:{d}" for d in domains]
     new_rule = {
         "type": "field",
         "domain": xray_domains,
-        "outboundTag": "direct",
+        "outboundTag": outbound_tag,
         "comment": comment,
     }
     written = set()
@@ -1339,24 +1404,28 @@ def apply_routing_for_set(set_id: str, domains: list) -> bool:
         written.add(real)
         try:
             cfg = json.loads(cfg_path.read_text())
+            # Если AWG — убеждаемся что direct-local outbound существует.
+            if outbound_tag == "direct-local":
+                _ensure_direct_local_outbound(cfg)
             routing = cfg.setdefault("routing", {})
             rules = routing.setdefault("rules", [])
+            # Удаляем старое правило для этого set'а (идемпотентность).
             rules = [r for r in rules if r.get("comment") != comment]
+            # Добавляем новое в начало (top-down eval, first match wins).
             routing["rules"] = [new_rule] + rules
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+            _set_xray_config_owner(cfg_path)
             ok = True
         except Exception as e:
             _log("WARN", f"apply_routing_for_set({set_id}): {e}")
     if ok:
-        _info(f"Xray routing: {len(domains)} доменов set'{set_id}' → direct")
-        subprocess.run(["systemctl", "restart", "xray"],
-                       capture_output=True, check=False)
-        time.sleep(1)
+        _info(f"Xray routing: {len(domains)} доменов set'{set_id}' → {outbound_tag}")
+        _xray_safe_restart()
     return ok
 
 
 def remove_routing_for_set(set_id: str) -> bool:
-    """Удаляет Xray routing-правило для set'а."""
+    """Удаляет Xray routing-правило для set'а. Безопасный restart."""
     comment = _XRAY_RULE_PREFIX + set_id
     written = set()
     ok = False
@@ -1380,25 +1449,113 @@ def remove_routing_for_set(set_id: str) -> bool:
             if len(rules) != before:
                 routing["rules"] = rules
                 cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+                _set_xray_config_owner(cfg_path)
                 ok = True
         except Exception as e:
             _log("WARN", f"remove_routing_for_set({set_id}): {e}")
     if ok:
         _info(f"Xray routing для set'{set_id}' удалён")
-        subprocess.run(["systemctl", "restart", "xray"],
-                       capture_output=True, check=False)
-        time.sleep(1)
+        _xray_safe_restart()
     return ok
 
 
-def apply_routing_for_all_sets() -> None:
-    """Применяет Xray routing для ВСЕХ set'ов в конфиге b4."""
+def apply_routing_for_all_sets() -> dict:
+    """Синхронизирует ВСЕ b4-сеты с Xray routing.
+
+    Для каждого enabled set'а — создаёт/обновляет routing-правило.
+    Для disabled/удалённых set'ов — удаляет stale правила.
+    Один restart Xray в конце (не N restarts).
+
+    Returns:
+        {"applied": int, "removed": int, "total_domains": int, "errors": list}
+    """
+    result = {"applied": 0, "removed": 0, "total_domains": 0, "errors": []}
     sets = _detect_sets()
+    active_set_ids = set()
+    all_domains = []
+    outbound_tag = _get_xray_outbound_tag()
+
+    # Собираем домены из всех enabled set'ов.
     for s in sets:
         sid = s.get("id", "")
         domains = s.get("domains", [])
-        if sid and domains:
-            apply_routing_for_set(sid, domains)
+        is_enabled = s.get("enabled", False)
+        if sid and domains and is_enabled:
+            active_set_ids.add(sid)
+            all_domains.extend(domains)
+            result["total_domains"] += len(domains)
+
+    # Дедуплицируем домены.
+    all_domains = sorted(set(all_domains))
+
+    # Находим stale правила (для disabled/удалённых set'ов).
+    stale_comments = []
+    for cfg_path in (Path("/usr/local/etc/xray/config.json"),
+                     Path("/etc/xray/config.json")):
+        if not cfg_path.exists():
+            continue
+        try:
+            cfg = json.loads(cfg_path.read_text())
+            routing = cfg.get("routing", {})
+            rules = routing.get("rules", [])
+            for r in rules:
+                c = r.get("comment", "")
+                if c.startswith(_XRAY_RULE_PREFIX):
+                    sid = c[len(_XRAY_RULE_PREFIX):]
+                    if sid not in active_set_ids:
+                        stale_comments.append(c)
+        except Exception:
+            pass
+
+    # Применяем изменения в config.json (один write на все set'ы).
+    comment_all = _XRAY_RULE_PREFIX + "all-synced"
+    new_rule_all = {
+        "type": "field",
+        "domain": [f"domain:{d}" for d in all_domains],
+        "outboundTag": outbound_tag,
+        "comment": comment_all,
+    }
+    written = set()
+    ok = False
+    for cfg_path in (Path("/usr/local/etc/xray/config.json"),
+                     Path("/etc/xray/config.json")):
+        if not cfg_path.exists():
+            continue
+        try:
+            real = str(cfg_path.resolve())
+        except Exception:
+            real = str(cfg_path)
+        if real in written:
+            continue
+        written.add(real)
+        try:
+            cfg = json.loads(cfg_path.read_text())
+            if outbound_tag == "direct-local":
+                _ensure_direct_local_outbound(cfg)
+            routing = cfg.setdefault("routing", {})
+            rules = routing.setdefault("rules", [])
+            # Удаляем все старые b4-правила (per-set и all-synced).
+            rules = [r for r in rules
+                     if not (r.get("comment", "").startswith(_XRAY_RULE_PREFIX))]
+            # Добавляем единое правило.
+            routing["rules"] = [new_rule_all] + rules
+            cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+            _set_xray_config_owner(cfg_path)
+            ok = True
+        except Exception as e:
+            result["errors"].append(str(e))
+            _log("WARN", f"apply_routing_for_all_sets: {e}")
+
+    if ok:
+        result["applied"] = len(active_set_ids)
+        result["removed"] = len(stale_comments)
+        _info(f"Xray routing синхронизирован: {len(active_set_ids)} set'ов, "
+              f"{len(all_domains)} доменов → {outbound_tag}")
+        if stale_comments:
+            _info(f"Удалено stale-правил: {len(stale_comments)}")
+        _xray_safe_restart()
+
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1510,13 +1667,11 @@ def import_custom_set(json_str: str) -> bool:
     _ok(f"Кастомный сет «{name}» импортирован, b4 перезапущен")
     # Применяем Xray routing: домены сета → outbound:direct,
     # чтобы трафик шёл через entry VPS (где стоит b4), а не через exit.
-    #  FIX: было `for s in new_sets:` — переменная new_sets НЕ определена
-    # в этой функции (only custom_set). Импорт всегда работает с одним
-    # сетом — берём [custom_set].
-    for s in [custom_set]:
-        domains = s.get("targets", {}).get("sni_domains", [])
-        if domains:
-            apply_routing_for_set(s.get("id", "custom"), domains)
+    # Авто-синхронизация всех b4-сетов с Xray routing.
+    # Раньше вызывалось apply_routing_for_set для одного сета — но это
+    # создавало N restarts Xray при N сетах. Теперь — один bulk sync.
+    _info("Авто-синхронизация b4 → Xray routing...")
+    apply_routing_for_all_sets()
     return True
 
 
@@ -1777,6 +1932,9 @@ def do_dpi_bypass_menu() -> None:
             else:
                 _box_item("9", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ к Web UI по HTTPS{NC}")
             _box_row()
+            if s["installed"]:
+                _box_item("S", f"🔁 Синхронизировать домены b4 → Xray routing  {DIM}(все активные сеты → direct){NC}")
+                _box_row()
             _box_item("R", f"{RED}🗑️  Удалить b4 полностью{NC}")
             _box_row()
             _box_back()
@@ -2019,6 +2177,40 @@ def do_dpi_bypass_menu() -> None:
                     _info(f"Прямой доступ к порту {B4_WEB_PORT} закрыт (только через nginx).")
                 else:
                     _err(f"Не удалось установить nginx front: {msg}")
+            input(f"\n{BOLD}Enter…{NC}")
+
+        elif s["installed"] and ch == "s":
+            # Синхронизация доменов b4 → Xray routing.
+            os.system("clear")
+            _box_top("🔁  СИНХРОНИЗАЦИЯ b4 → XRAY ROUTING")
+            _box_row()
+            _box_row(f"  {DIM}Читаю активные b4-сеты...{NC}")
+            _box_bot()
+            print()
+            try:
+                result = apply_routing_for_all_sets()
+                print()
+                _box_top("🔁  РЕЗУЛЬТАТ СИНХРОНИЗАЦИИ")
+                _box_row()
+                _box_row(f"  Применено set'ов:    {GREEN}{result['applied']}{NC}")
+                _box_row(f"  Всего доменов:       {GREEN}{result['total_domains']}{NC}")
+                _box_row(f"  Удалено stale:       {YELLOW}{result['removed']}{NC}")
+                if result.get("errors"):
+                    _box_row(f"  Ошибки:              {RED}{len(result['errors'])}{NC}")
+                    for e in result["errors"][:3]:
+                        _box_row(f"    {DIM}• {e[:60]}{NC}")
+                else:
+                    _box_row(f"  Ошибки:              {GREEN}0{NC}")
+                _box_row()
+                _box_row(f"  {DIM}Все домены из активных b4-сетов теперь идут через{NC}")
+                _box_row(f"  {DIM}direct (RU-сервер) → b4 → DPI bypass → целевой сайт.{NC}")
+                _box_row(f"  {DIM}Каскад на exit-ноды для них отключён.{NC}")
+                _box_bot()
+            except Exception as e:
+                _box_top("🔁  СИНХРОНИЗАЦИЯ b4 → XRAY ROUTING")
+                _box_row()
+                _box_err(f"Ошибка синхронизации: {e}")
+                _box_bot()
             input(f"\n{BOLD}Enter…{NC}")
 
         elif s["installed"] and ch == "r":
