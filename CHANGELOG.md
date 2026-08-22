@@ -2,6 +2,121 @@
 
 ---
 
+## FIX(panel_nginx_front): открытие порта nginx front в фаерволе — 22 августа 2026
+
+**Юзер (SpecteR) сообщил о баге: назначил nginx front порт 45443,
+чтобы открыть Web Panel CSQTT, но 45443 недоступен извне, хотя nginx
+слушал этот порт (видно в ss). Web Panel открывалась только на 46002
+(напрямую, минуя nginx).**
+
+### Корень проблемы
+
+В `panel_nginx_front.py:panel_nginx_front_install()` блок открытия
+порта в фаерволе (строка 482-492) выглядел так:
+
+```python
+try:
+    from chimera.modules.port_registry import (
+        ufw_open_port, port_register,
+    )
+    port_register(service_tag, port, "tcp", ...)
+    ufw_open_port(port, "tcp", service_tag, ...)
+except Exception:
+    pass   # ← молча! без лога!
+```
+
+Проблемы:
+1. **`except Exception: pass`** глотал все ошибки молча.
+2. **`ufw_open_port()`** работает только если UFW установлен **И активен**.
+   Если UFW не установлен или `inactive` — функция возвращает False,
+   но вызывающий код это игнорировал.
+3. **Нет fallback на iptables** — если UFW недоступен, порт НЕ
+   открывался нигде. nginx слушал, но фаервол блокировал.
+
+На многих VPS (особенно российских хостеров) UFW либо не установлен,
+либо inactive по умолчанию. В итоге nginx front порт оставался
+закрытым в фаерволе, и юзер видел «502 Bad Gateway» или «Connection
+refused» при попытке зайти через `https://domain:45443`.
+
+### Решение
+
+Полностью переписан блок открытия порта (строки 482-538):
+
+1. **Проверка результата `ufw_open_port()`** — если вернул False,
+   выводим причину и переходим к fallback.
+
+2. **Fallback на iptables** — если UFW недоступен:
+   - `iptables -C INPUT -p tcp --dport PORT -j ACCEPT` — проверка
+     существующего правила (идемпотентность).
+   - `iptables -I INPUT 1 -p tcp --dport PORT -j ACCEPT` — добавление,
+     если правила нет.
+   - `netfilter-persistent save` — сохранение правил (если установлен).
+
+3. **Логирование каждого шага** — юзер видит:
+   ```
+   Порт 45443/tcp открыт в UFW: Уже открыто нашим правилом
+   ```
+   или:
+   ```
+   UFW недоступен (ufw не установлен) — открываю порт через iptables...
+   Порт 45443/tcp открыт в iptables
+   ```
+   или при ошибке:
+   ```
+   Не удалось открыть порт 45443 в iptables: <причина>
+   Откройте вручную: iptables -I INPUT 1 -p tcp --dport 45443 -j ACCEPT
+   ```
+
+4. **Если ни UFW, ни iptables не найдены** — предупреждаем и
+   предлагаем проверить security group хостинг-провайдера:
+   ```
+   Ни UFW, ни iptables не найдены — порт 45443 НЕ открыт в фаерволе!
+   Откройте вручную или проверьте security group хостинг-провайдера.
+   ```
+
+5. **`except Exception as _e`** — теперь ловит с именем и логирует
+   конкретную ошибку, а не молча пропускает.
+
+### Что НЕ менялось
+
+- Логика `panel_nginx_front_install()` до шага 6 (генерация vhost,
+  nginx -t, reload) — не тронута.
+- `panel_nginx_front_remove()` — не тронута (она удаляет правила через
+  `ufw_close_port`, но не через iptables — это отдельная задача).
+- `port_register()` — не тронут (только регистрирует в JSON, не
+  меняет фаервол).
+- Все 172 теста с nginx/panel_nginx проходят без регрессий.
+
+### Файлы
+
+- `chimera/modules/panel_nginx_front.py` — блок 6 (firewall open)
+  переписан с UFW→iptables fallback + явным логированием.
+
+### Что делать юзеру
+
+После `git pull`:
+
+1. Переустановить nginx front через меню:
+   `8 (VK Whitelist Bypass) → 4 (CSQTT) → 7 (nginx front) → выключить`
+   затем
+   `7 (nginx front) → включить → порт 45443`
+
+2. Теперь в выводе будет видно, открыт ли порт:
+   ```
+   Порт 45443/tcp открыт в UFW: ...
+   ```
+   или
+   ```
+   UFW недоступен — открываю порт через iptables...
+   Порт 45443/tcp открыт в iptables
+   ```
+
+3. Если всё ещё не работает — возможно, порт блокирует security
+   group хостинг-провайдера (Aeza, Selectel, AWS, и т.д.). Проверьте
+   в панели хостинга.
+
+---
+
 ## FIX(csqtt): deep-link v2 формат — csqtt://connect (не csqtt://config) — 22 августа 2026
 
 **Юзер (SpecteR) сообщил о баге: при импорте ссылки в CSQTT Android-
