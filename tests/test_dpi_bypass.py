@@ -71,19 +71,27 @@ class TestImportCustomSet(unittest.TestCase):
         self.dpi_bypass._STATE_FILE = self._state_file
         # Не позволяем реально вызывать systemctl
         self.dpi_bypass.subprocess = MagicMock()
-        # Трекаем вызовы apply_routing_for_set
+        # Трекаем вызовы apply_routing_for_all_sets
         self._routing_calls = []
-        self._orig_apply = self.dpi_bypass.apply_routing_for_set
+        self._orig_apply = self.dpi_bypass.apply_routing_for_all_sets
 
-        def _fake_apply(set_id, domains):
-            self._routing_calls.append((set_id, list(domains)))
-            return True
+        def _fake_apply_all():
+            # Симулируем: читаем сеты из конфига и записываем вызовы
+            sets = self.dpi_bypass._detect_sets()
+            for s in sets:
+                sid = s.get("id", "")
+                domains = s.get("domains", [])
+                if sid and domains:
+                    self._routing_calls.append((sid, list(domains)))
+            return {"applied": len(self._routing_calls), "removed": 0,
+                    "total_domains": sum(len(d) for _, d in self._routing_calls),
+                    "errors": []}
 
-        self.dpi_bypass.apply_routing_for_set = _fake_apply
+        self.dpi_bypass.apply_routing_for_all_sets = _fake_apply_all
 
     def tearDown(self):
         # Восстанавливаем оригинал на случай если кто-то ещё использует модуль
-        self.dpi_bypass.apply_routing_for_set = self._orig_apply
+        self.dpi_bypass.apply_routing_for_all_sets = self._orig_apply
 
     def test_single_set_object(self):
         """Импорт одиночного set-объекта (не обёрнутого в {'sets': [...]})."""

@@ -2,6 +2,129 @@
 
 ---
 
+## FEAT(dpi_bypass): авто-синхронизация доменов b4 → Xray routing — 23 августа 2026
+
+**Проблема: при добавлении доменов в b4-сеты (YouTube, Rutracker,
+Discord, и т.д.) трафик всё равно шёл через каскад на exit-ноды
+(NL/DE/PL), а не через RU-сервер с b4. Это происходило потому,
+что Xray routing не знал про b4-домены и отправлял их по
+маршруту по умолчанию (MATCH → Proxy → exit-нода).**
+
+b4 — это фильтр nftables OUTPUT chain. Он перехватывает только
+прямой трафик сервера (freedom outbound). Если Xray заворачивает
+трафик в VLESS-туннель к exit-ноде — b4 его не видит (SNI зашифрован
+внутри VLESS).
+
+### Решение
+
+**Новая кнопка [S] в меню b4** — «Синхронизировать домены b4 → Xray routing».
+При нажатии:
+1. Читает все **enabled** b4-сеты из `/etc/b4/config.json`.
+2. Собирает все `sni_domains` из всех сетов.
+3. Дедуплицирует.
+4. Создаёт единое Xray routing-правило: `domain:[...] → outbound:direct`.
+5. Удаляет stale-правила для disabled/удалённых сетов.
+6. Перезапускает Xray (один раз, через `_xray_safe_apply_config`).
+
+Также **автоматически** вызывается после `import_custom_set()` —
+новый сет сразу применяется к Xray routing без ручного нажатия [S].
+
+### Архитектура
+
+```
+Юзер добавляет домен "discord.com" в b4-сет через Web UI
+    ↓
+Нажимает [S] в TUI (или импортирует через [3])
+    ↓
+apply_routing_for_all_sets():
+    1. _detect_sets() → [{"id":"youtube","enabled":true,"domains":[...]},
+                          {"id":"hyperion","enabled":true,"domains":[...]}]
+    2. Собираем все домены → ["youtube.com","discord.com","rutracker.org",...]
+    3. Дедуплицируем → unique sorted list
+    4. Находим stale правила (chimera-b4-route-* для disabled set'ов)
+    5. Пишем в config.json:
+       routing.rules = [
+         {
+           "type": "field",
+           "domain": ["domain:youtube.com","domain:discord.com",...],
+           "outboundTag": "direct",  ← или "direct-local" если AWG exit
+           "comment": "chimera-b4-route-all-synced"
+         },
+         ... остальные правила
+       ]
+    6. _set_config_owner (640 root:xray)
+    7. _xray_safe_apply_config (валидация + restart + rollback)
+```
+
+### Что изменилось в коде
+
+**Новые функции:**
+- `_get_xray_outbound_tag()` — AWG-aware: возвращает `"direct-local"`
+  если AWG exit включён (Mode B), иначе `"direct"`.
+- `_ensure_direct_local_outbound(cfg)` — если `direct-local` — создаёт
+  `freedom` outbound с `domainStrategy=UseIPv4` если его нет.
+- `_xray_safe_restart()` — обёртка над `_xray_safe_apply_config` с
+  fallback на raw `systemctl restart xray`.
+- `_set_xray_config_owner(cfg_path)` — устанавливает 640 root:xray.
+
+**Обновлённые функции:**
+- `apply_routing_for_set()` — AWG-aware outboundTag, безопасный restart,
+  `_set_config_owner` после записи.
+- `remove_routing_for_set()` — безопасный restart, `_set_config_owner`.
+- `apply_routing_for_all_sets()` — полностью переписана:
+  - Собирает домены из всех **enabled** сетов (раньше — из всех).
+  - Дедуплицирует.
+  - Создаёт **одно** единое правило (раньше — N правил, N restarts).
+  - Удаляет stale правила для disabled/удалённых сетов.
+  - Один restart Xray в конце.
+  - Возвращает dict с результатом: `{applied, removed, total_domains, errors}`.
+
+**Меню b4:**
+- Добавлен пункт `[S]` — «🔁 Синхронизировать домены b4 → Xray routing».
+- Показывает результат: сколько set'ов применено, сколько доменов,
+  сколько stale-правил удалено.
+
+**Авто-trigger:**
+- `import_custom_set()` теперь вызывает `apply_routing_for_all_sets()`
+  вместо `apply_routing_for_set()` для одного сета.
+
+### AWG-aware
+
+Если включён AWG exit (Mode B):
+- `_get_xray_outbound_tag()` возвращает `"direct-local"`.
+- `_ensure_direct_local_outbound()` создаёт `freedom` outbound с
+  `domainStrategy=UseIPv4` если его нет.
+- Все домены идут через `direct-local` → b4 → DPI bypass.
+
+### Безопасность
+
+- `_xray_safe_apply_config` — валидирует config перед restart, делает
+  backup, откатывается при ошибке, проверяет `systemctl is-active`
+  в течение 15 секунд.
+- `_set_config_owner` — устанавливает 640 root:xray после записи
+  (без этого xray падает с permission denied).
+- Идемпотентность — многократное нажатие [S] не создаёт дубликатов
+  правил (старые удаляются, новое добавляется).
+
+### Тесты
+
+- 143 теста в `test_dpi_bypass.py` проходят без регрессий.
+- Тесты `TestImportCustomSet` обновлены: теперь проверяют вызов
+  `apply_routing_for_all_sets` вместо `apply_routing_for_set`.
+
+### Файлы
+
+- `chimera/modules/dpi_bypass.py`:
+  - Новые функции: `_get_xray_outbound_tag`, `_ensure_direct_local_outbound`,
+    `_xray_safe_restart`, `_set_xray_config_owner`.
+  - Переписаны: `apply_routing_for_set`, `remove_routing_for_set`,
+    `apply_routing_for_all_sets`.
+  - `import_custom_set` — вызывает `apply_routing_for_all_sets`.
+  - Меню — добавлен пункт [S].
+- `tests/test_dpi_bypass.py` — обновлены mock'и для `apply_routing_for_all_sets`.
+
+---
+
 ## FIX(csqtt+panel_nginx_front): полная регистрация портов в port_registry + логирование + симметричный iptables fallback — 22 августа 2026
 
 **Полный аудит портов CSQTT и их регистрации в port_registry.
