@@ -1975,6 +1975,52 @@ def _xray_config_rollback(backup_cfg: Path, cfg: Path) -> None:
         warn("Xray не запустился даже после отката! Проверьте: journalctl -u xray -n 50")
 
 
+def _ensure_sniffing_on_vless_inbounds(cfg_path: Path) -> None:
+    """Автоматически включает sniffing на всех VLESS-инbound'ах.
+
+    Если sniffing выключен — Xray не видит SNI внутри VLESS-туннеля,
+    и routing по доменам (domain:...) не работает. Трафик уходит на
+    exit-ноду вместо direct (где стоит b4).
+
+    Эта функция вызывается из _xray_safe_apply_config ПЕРЕД валидацией.
+    Она читает config.json, проверяет все inbounds с protocol=vless,
+    и если sniffing выключен — включает его с destOverride=['http','tls'].
+
+    Также обрабатывает tproxy-инbound'ы (protocol=vmess + tag=tproxy-*).
+    """
+    try:
+        with open(cfg_path, "r") as f:
+            cfg = json.load(f)
+    except Exception:
+        return
+
+    changed = False
+    for ib in cfg.get("inbounds", []):
+        proto = ib.get("protocol", "")
+        tag = ib.get("tag", "")
+        # VLESS-инbound'ы (основной + iOS shadow + любые другие).
+        # TProxy-инbound'ы (для Telemt и др.).
+        if proto in ("vless", "vmess") or tag.startswith("tproxy-"):
+            sniffing = ib.get("sniffing", {})
+            if not sniffing.get("enabled", False):
+                ib["sniffing"] = {
+                    "enabled": True,
+                    "destOverride": ["http", "tls"],
+                }
+                changed = True
+            elif "destOverride" not in sniffing:
+                sniffing["destOverride"] = ["http", "tls"]
+                ib["sniffing"] = sniffing
+                changed = True
+
+    if changed:
+        try:
+            with open(cfg_path, "w") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+
 def _xray_safe_apply_config(cfg: Path | None = None,
                              *,
                              service_restart: bool = True) -> bool:
@@ -2014,6 +2060,13 @@ def _xray_safe_apply_config(cfg: Path | None = None,
     except Exception as e:
         warn(f"Не удалось создать бэкап конфига: {e}. Применение отменено.")
         return False
+
+    # ── 2.5. Авто-фикс sniffing на всех VLESS-инbound'ах ──────────────────────
+    # Если на VLESS-инbound'е выключен sniffing — Xray не видит SNI внутри
+    # туннеля, и routing по доменам (domain:...) не работает. Трафик уходит
+    # на exit-ноду вместо direct (где стоит b4).
+    # Автоматически включаем sniffing на всех inbound'ах с protocol=vless.
+    _ensure_sniffing_on_vless_inbounds(cfg)
 
     # ── 3. Валидация ──────────────────────────────────────────────────────────
     xray_bin = shutil.which("xray") or "/usr/local/bin/xray"
