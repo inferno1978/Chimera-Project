@@ -57,41 +57,85 @@ def _check_zig() -> str | None:
 
 def _ensure_rust_toolchain() -> bool:
     """Устанавливает Rust через rustup, если не установлен."""
+    # Гарантируем что /root/.cargo/bin в PATH для subprocess.run ниже.
+    # Без этого _check_rust() может найти rustc в /root/.cargo/bin/rustc
+    # (через Path.exists()), но subprocess.run(["rustc", ...]) упадёт с
+    # FileNotFoundError, т.к. /root/.cargo/bin нет в $PATH.
+    cargo_bin = Path("/root/.cargo/bin")
+    if cargo_bin.exists():
+        path_env = os.environ.get("PATH", "")
+        if str(cargo_bin) not in path_env.split(":"):
+            os.environ["PATH"] = f"{cargo_bin}:{path_env}"
+
     if _check_rust() and _check_cargo():
         # Проверяем версию
-        r = subprocess.run(["rustc", "--version"], capture_output=True, text=True)
-        if r.returncode == 0 and _RUST_VERSION in r.stdout:
+        try:
+            r = subprocess.run(["rustc", "--version"], capture_output=True, text=True)
+        except FileNotFoundError:
+            # _check_rust() нашёл путь, но в PATH его нет (или бинарник
+            # битый). Пытаемся переустановить.
+            print("[INFO] rustc найден, но не запускается — переустанавливаю...")
+            r = None
+        if r and r.returncode == 0 and _RUST_VERSION in r.stdout:
             return True
         # Если версия не та — переустанавливаем
-        print(f"[INFO] Нужен Rust {_RUST_VERSION}, проверяю...")
+        print(f"[INFO] Нужен Rust {_RUST_VERSION}, переустанавливаю...")
 
     # Устанавливаем через rustup
     print("[INFO] Устанавливаю Rust toolchain через rustup...")
-    r = subprocess.run(
-        ["bash", "-c",
-         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | "
-         "sh -s -- -y --default-toolchain {} --profile minimal".format(_RUST_VERSION)],
-        capture_output=True, text=True, timeout=300,
-    )
-    if r.returncode != 0:
-        print(f"[ERR] Не удалось установить Rust: {r.stderr}")
+    print(f"[INFO] Это может занять 1-3 минуты (скачивание ~150 MB)...")
+    try:
+        r = subprocess.run(
+            ["bash", "-c",
+             "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | "
+             "sh -s -- -y --default-toolchain {} --profile minimal".format(_RUST_VERSION)],
+            capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[ERR] rustup превысил timeout 300 сек (медленный интернет?)")
+        return False
+    except Exception as e:
+        print(f"[ERR] rustup упал с исключением: {type(e).__name__}: {e}")
         return False
 
-    # Добавляем cargo в PATH
-    cargo_bin = Path("/root/.cargo/bin")
-    env = dict(os.environ)
-    env["PATH"] = f"{cargo_bin}:{env.get('PATH', '')}"
+    if r.returncode != 0:
+        print(f"[ERR] Не удалось установить Rust: {r.stderr[-500:]}")
+        return False
+
+    # Обновляем PATH после установки
+    path_env = os.environ.get("PATH", "")
+    if str(cargo_bin) not in path_env.split(":"):
+        os.environ["PATH"] = f"{cargo_bin}:{path_env}"
 
     # Устанавливаем musl target
-    r = subprocess.run(
-        ["rustup", "target", "add", _RUST_TARGET],
-        capture_output=True, text=True, env=env, timeout=120,
-    )
-    if r.returncode != 0:
-        print(f"[ERR] Не удалось добавить target {_RUST_TARGET}: {r.stderr}")
+    print(f"[INFO] Добавляю target {_RUST_TARGET}...")
+    try:
+        r = subprocess.run(
+            ["rustup", "target", "add", _RUST_TARGET],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[ERR] rustup target add превысил timeout 120 сек")
+        return False
+    except Exception as e:
+        print(f"[ERR] rustup target add упал: {type(e).__name__}: {e}")
         return False
 
-    print("[OK] Rust toolchain установлен")
+    if r.returncode != 0:
+        print(f"[ERR] Не удалось добавить target {_RUST_TARGET}: {r.stderr[-500:]}")
+        return False
+
+    # Финальная проверка — что rustc реально работает
+    try:
+        r = subprocess.run(["rustc", "--version"], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"[ERR] rustc установлен, но не запускается: {r.stderr}")
+            return False
+        print(f"[OK] Rust toolchain установлен: {r.stdout.strip()}")
+    except FileNotFoundError:
+        print(f"[ERR] Rust установлен, но rustc не в PATH. Перезапустите установку.")
+        return False
+
     return True
 
 

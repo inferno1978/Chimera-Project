@@ -2,6 +2,61 @@
 
 ---
 
+## FIX(csqtt_packages): _ensure_rust_toolchain — PATH для rustc + ловля FileNotFoundError — 22 августа 2026
+
+**КОРНЕВАЯ ПРИЧИНА всех проблем с установкой CSQTT:
+FileNotFoundError: [Errno 2] No such file or directory: 'rustc'
+
+Юзер видел:
+  [INFO] Проверяю/устанавливаю Rust toolchain...
+  [ERR] Rust toolchain упал с исключением: FileNotFoundError: [Errno 2] No such file or directory: 'rustc'
+
+Это происходило потому что:
+1. _check_rust() проверяет Path.exists() для /root/.cargo/bin/rustc
+   — если файл есть (даже битый или как symlink на отсутствующий
+   target), возвращает путь.
+2. subprocess.run(["rustc", "--version"]) использует $PATH, в котором
+   /root/.cargo/bin может НЕ быть (если rustup ещё не добавил его).
+3. FileNotFoundError пробивался наружу, ловился в fetch_package,
+   и юзер видел 5× "✓ скачано" + "Не удалось скачать" без пояснений
+   (исправлено в предыдущем коммите ab93e2c, теперь видна причина).
+
+Решение:
+
+1. _ensure_rust_toolchain() добавляет /root/.cargo/bin в PATH ДО
+   любых subprocess.run вызовов. Раньше PATH обновлялся только в
+   env-переменной для cargo zigbuild, но не для subprocess.run с
+   ["rustc", ...] и ["rustup", ...].
+
+2. Ловля FileNotFoundError в проверке версии:
+   - Если _check_rust() нашёл путь, но subprocess.run падает с
+     FileNotFoundError — это значит rustc битый или не в PATH.
+     Печатаем "[INFO] rustc найден, но не запускается — переустанавливаю..."
+     и продолжаем к rustup install.
+
+3. Ловля subprocess.TimeoutExpired для rustup install (300 сек) и
+   rustup target add (120 сек) — показывает понятное сообщение
+   про медленный интернет.
+
+4. Финальная проверка после установки: subprocess.run(["rustc",
+   "--version"]) — если всё ещё FileNotFoundError, значит rustup
+   что-то не доделал, просим юзера перезапустить установку.
+
+5. Расширенные логи: "[INFO] Это может занять 1-3 минуты (скачивание
+   ~150 MB)..." перед rustup install.
+
+Теперь _ensure_rust_toolchain() НЕ выбрасывает FileNotFoundError
+наружу — он либо возвращает True (Rust установлен и работает), либо
+False с понятным [ERR] сообщением.
+
+Тесты: 48 passed в test_download_manager.py.
+
+Файлы:
+- chimera/modules/csqtt_packages.py — _ensure_rust_toolchain()
+  переписана с PATH-фиксом и try/except.
+
+---
+
 ## FIX(download_manager+csqtt_packages): ловля и логирование исключений post_install — 22 августа 2026
 
 **КРИТИЧЕСКИЙ БАГ: fetch_package() глотал исключения из post_install
