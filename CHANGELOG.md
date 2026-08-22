@@ -2,6 +2,100 @@
 
 ---
 
+## FIX(download_manager+csqtt_packages): ловля и логирование исключений post_install — 22 августа 2026
+
+**КРИТИЧЕСКИЙ БАГ: fetch_package() глотал исключения из post_install
+молча. Юзер видел 5× «✓ скачано» и потом «Не удалось скачать» —
+без пояснений. На самом деле post_install (сборка Rust) падал с
+исключением (TimeoutExpired, OSError, и т.п.), но except Exception:
+без логирования прятал ошибку.**
+
+### Симптом (лог юзера)
+
+```
+CSQTT → зеркало 1/5: github.com...
+CSQTT ✓ скачано (528 КБ)         ← файл скачан успешно
+                                   ← тут post_install упал с исключением
+CSQTT → зеркало 2/5: codeload...  ← и пошло по кругу
+CSQTT ✓ скачано (528 КБ)
+...
+CSQTT → зеркало 5/5: gh.llkk.cc...
+CSQTT ✓ скачано (528 КБ)
+
+manual file found:   НЕТ          ← но в /root/ его нет (он в /tmp/)
+Не удалось скачать CSQTT source автоматически.
+```
+
+Все 5 зеркал успешно скачали tarball, но `post_install` каждый раз
+падал с исключением, которое **глоталось** молча. Юзер не видел
+настоящей ошибки (TimeoutExpired, OSError, и т.п.).
+
+### Корень проблемы — `except Exception:` без логирования
+
+В `fetch_package()` (download_manager.py) цикл по зеркалам обёрнут в:
+
+```python
+try:
+    # скачать, проверить, переименовать, post_install
+except Exception:        # ← без имени, без лога!
+    tmp_path.unlink(missing_ok=True)
+    continue              # ← молча к следующему зеркалу
+```
+
+Когда `post_install` выбрасывал `subprocess.TimeoutExpired` (сборка
+Rust превысила 30/40 мин) или `OSError` (проблема с /tmp/) —
+исключение глоталось, и fetch_package переходил к следующему зеркалу.
+Юзер видел 5 успешных скачиваний и финальное «Не удалось скачать».
+
+### Решение
+
+**1. download_manager.py: логируем исключения в цикле зеркал**
+
+```python
+except Exception as _exc:
+    if progress_label:
+        exc_type = type(_exc).__name__
+        exc_msg = str(_exc)[:200]
+        print(f"  {progress_label} ⚠ зеркало {url_idx}/{len(urls)} упало "
+              f"с исключением {exc_type}: {exc_msg}", flush=True)
+    tmp_path.unlink(missing_ok=True)
+    continue
+```
+
+Теперь юзер видит конкретную ошибку:
+```
+CSQTT ⚠ зеркало 1/5 упало с исключением TimeoutExpired: Command 'cargo zigbuild...' timed out after 1800 seconds
+```
+
+**2. csqtt_packages.py: обёртка всех шагов post_install в try/except**
+
+`_post_install_csqtt_source` теперь:
+- Печатает `[INFO]` перед каждым шагом (видно прогресс).
+- Ловит `subprocess.TimeoutExpired` отдельно — показывает, что
+  сборка превысила timeout, с подсказкой запустить direct-build.
+- Ловит `Exception` для каждого `_ensure_*` вызова (Rust/Zig/cargo).
+- Показывает последние 1500 символов stderr при ошибке компиляции.
+- Показывает содержимое `target/` если binary не найден.
+
+Теперь post_install НЕ выбрасывает исключения наружу — он всегда
+возвращает `False` с понятным `[ERR]` сообщением. А если
+исключение всё-таки пробивается — fetch_package его логирует.
+
+### Что НЕ менялось
+
+- Логика цикла по зеркалам — не тронута.
+- Возвращаемые значения `fetch_package` — не тронуты.
+- 48 тестов `test_download_manager.py` проходят без регрессий.
+
+### Файлы
+
+- `chimera/modules/download_manager.py` — `except Exception as _exc`
+  с логированием типа и сообщения исключения.
+- `chimera/modules/csqtt_packages.py` — `_post_install_csqtt_source`
+  с try/except на каждом шаге + расширенная диагностика stderr.
+
+---
+
 ## FIX(csqtt+download_manager): детальная диагностика при падении установки CSQTT — 22 августа 2026
 
 **Проблема: юзер удалил CSQTT, попытался переустановить — увидел
