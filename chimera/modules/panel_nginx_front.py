@@ -479,17 +479,63 @@ def panel_nginx_front_install(
         return False, f"nginx -t failed: {r.stderr.strip()[:300]}"
     subprocess.run(["systemctl", "reload", "nginx"], check=False)
 
-    # 6. Регистрация в port_registry + UFW.
+    # 6. Регистрация в port_registry + открытие порта в фаерволе.
+    # ВАЖНО: ufw_open_port() работает только если UFW активен.
+    # Если UFW не установлен или inactive — fallback на iptables.
+    # Иначе юзер видит 'nginx слушает порт, но извне недоступен' (как
+    # было в баг-репорте SpecteR 22.08.2026 — порт 45443 назначен,
+    # nginx слушал, но фаервол блокировал).
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, port_register,
         )
         port_register(service_tag, port, "tcp",
                       comment=f"{title} (nginx front, TLS, →127.0.0.1:{backend_port})")
-        ufw_open_port(port, "tcp", service_tag,
-                      comment=f"{title} (nginx front, TLS)")
-    except Exception:
-        pass
+        ufw_ok, ufw_msg = ufw_open_port(port, "tcp", service_tag,
+                                        comment=f"{title} (nginx front, TLS)")
+        if ufw_ok:
+            info(f"  {CYAN}Порт {port}/tcp открыт в UFW: {ufw_msg}{NC}")
+        else:
+            # UFW не установлен или inactive — fallback на iptables.
+            info(f"  {YELLOW}UFW недоступен ({ufw_msg}) — открываю порт через iptables...{NC}")
+            import shutil as _sh
+            ipt = _sh.which("iptables")
+            if ipt:
+                # Проверяем существующее правило (идемпотентность).
+                r_check = subprocess.run(
+                    [ipt, "-C", "INPUT", "-p", "tcp", "--dport", str(port),
+                     "-j", "ACCEPT"],
+                    capture_output=True, check=False,
+                )
+                if r_check.returncode != 0:
+                    # Правила нет — добавляем.
+                    r_add = subprocess.run(
+                        [ipt, "-I", "INPUT", "1", "-p", "tcp",
+                         "--dport", str(port), "-j", "ACCEPT"],
+                        capture_output=True, text=True, check=False,
+                    )
+                    if r_add.returncode == 0:
+                        info(f"  {CYAN}Порт {port}/tcp открыт в iptables{NC}")
+                        # Persist rules (iptables-persistent / netfilter-persistent).
+                        np = _sh.which("netfilter-persistent")
+                        if np:
+                            subprocess.run([np, "save"], capture_output=True, check=False)
+                    else:
+                        warn(f"  {RED}Не удалось открыть порт {port} в iptables: "
+                             f"{r_add.stderr.strip()[:200]}{NC}")
+                        warn(f"  {YELLOW}Откройте вручную: iptables -I INPUT 1 "
+                             f"-p tcp --dport {port} -j ACCEPT{NC}")
+                else:
+                    info(f"  {DIM}Порт {port}/tcp уже открыт в iptables{NC}")
+            else:
+                warn(f"  {RED}Ни UFW, ни iptables не найдены — порт {port} "
+                     f"НЕ открыт в фаерволе!{NC}")
+                warn(f"  {YELLOW}Откройте вручную или проверьте security group "
+                     f"хостинг-провайдера.{NC}")
+    except Exception as _e:
+        warn(f"  {RED}Ошибка открытия порта {port} в фаерволе: {_e}{NC}")
+        warn(f"  {YELLOW}Откройте вручную: iptables -I INPUT 1 -p tcp "
+             f"--dport {port} -j ACCEPT{NC}")
 
     # 7. State file.
     state_file.parent.mkdir(parents=True, exist_ok=True)
