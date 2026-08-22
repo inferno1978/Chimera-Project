@@ -2185,7 +2185,7 @@ def do_dpi_bypass_menu() -> None:
             _box_top("🔁  СИНХРОНИЗАЦИЯ b4 → XRAY ROUTING")
             _box_row()
             _box_row(f"  {DIM}Читаю активные b4-сеты...{NC}")
-            _box_bot()
+            _box_bottom()
             print()
             try:
                 result = apply_routing_for_all_sets()
@@ -2205,12 +2205,12 @@ def do_dpi_bypass_menu() -> None:
                 _box_row(f"  {DIM}Все домены из активных b4-сетов теперь идут через{NC}")
                 _box_row(f"  {DIM}direct (RU-сервер) → b4 → DPI bypass → целевой сайт.{NC}")
                 _box_row(f"  {DIM}Каскад на exit-ноды для них отключён.{NC}")
-                _box_bot()
+                _box_bottom()
             except Exception as e:
                 _box_top("🔁  СИНХРОНИЗАЦИЯ b4 → XRAY ROUTING")
                 _box_row()
-                _box_err(f"Ошибка синхронизации: {e}")
-                _box_bot()
+                _box_warn(f"Ошибка синхронизации: {e}")
+                _box_bottom()
             input(f"\n{BOLD}Enter…{NC}")
 
         elif s["installed"] and ch == "r":
