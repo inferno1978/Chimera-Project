@@ -188,9 +188,28 @@ def fetch_package(
                 _manual_size = manual_path.stat().st_size
                 if _manual_size >= spec.min_size:
                     # Файл найден локально — используем без сети
+                    if progress_label:
+                        print(
+                            f"  {progress_label} ✓ найден локальный файл: "
+                            f"{manual_path} ({_manual_size} байт) — скачивание не требуется",
+                            flush=True,
+                        )
                     if spec.post_install is not None:
                         ok = spec.post_install(manual_path, spec.install_dests)
                         if not ok:
+                            # Файл найден и валиден, но post_install упал
+                            # (сборка/распаковка/установка зависимостей).
+                            # Это НЕ "не удалось скачать" — это "сборка упала".
+                            # Сообщение про зеркала здесь НЕ нужно — оно вводит
+                            # юзера в заблуждение. post_install уже напечатал
+                            # конкретную ошибку (например "[ERR] Rust toolchain
+                            # недоступен" или "[ERR] Сборка не удалась: ...").
+                            if progress_label:
+                                print(
+                                    f"  {progress_label} ✗ файл найден, но "
+                                    f"post_install упал — смотрите ошибку выше",
+                                    flush=True,
+                                )
                             return False
                     else:
                         _default_copy_to_dests(manual_path, spec.install_dests)
