@@ -236,7 +236,7 @@ def _generate_one(preset: dict) -> Optional[Path]:
             "tcpFastOpen": True,
             "tcpKeepAliveInterval": 15,
             "tcpKeepAliveIdle":     60,
-            "tcpUserTimeout":       10000,
+            "tcpUserTimeout":       30000,
             "tcpCongestion":        "bbr",
         }
 

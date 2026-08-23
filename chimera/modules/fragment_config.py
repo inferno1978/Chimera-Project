@@ -136,7 +136,7 @@ def build_fragment_sockopt(
         "tcpFastOpen": True,
         "tcpKeepAliveInterval": 15,
         "tcpKeepAliveIdle":   60,
-        "tcpUserTimeout":     10000,
+        "tcpUserTimeout":     30000,
         "tcpCongestion":      "bbr",
         "fragment": {
             "packets":  packets,

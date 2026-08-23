@@ -91,7 +91,7 @@ _YOUTUBE_SNIFFING_BACKUP_KEY = "_youtube_sniffing_backup"
 _YOUTUBE_SAFE_SOCKOPT = {
     "tcpKeepAliveIdle":     60,
     "tcpKeepAliveInterval": 15,
-    "tcpUserTimeout":       10000,
+    "tcpUserTimeout":       30000,
     "tcpFastOpen":          True,
 }
 

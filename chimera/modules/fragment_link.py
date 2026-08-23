@@ -253,7 +253,7 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
             "tcpFastOpen": True,
             "tcpKeepAliveInterval": 15,
             "tcpKeepAliveIdle": 60,
-            "tcpUserTimeout": 10000,
+            "tcpUserTimeout": 30000,
             "tcpCongestion": "bbr",
         }
     )
