@@ -2,6 +2,51 @@
 
 ---
 
+## FIX(_core+chain_nodes+youtube_route+fragment_*): tcpUserTimeout 10с → 30с — не рвать соединения на коротких стогах тракта — 23 августа 2026
+
+**Проблема: у клиентов (mux поверх одного TCP) периодически валились «тонны»
+EOF-ошибок разом + микрозатупы. Диагноз по tcpdump на entry-ноде: тракт
+клиент↔сервер эпизодически застаивает (потеря ACK окном на 10–45с, местами
+порча потока — bad record MAC), после чего сервер сам убивал соединение
+тройным RST — ровно через tcpUserTimeout=10с неподтверждённых данных. С
+mux-клиентами смерть одного TCP = смерть всех мультиплексированных стримов
+одновременно → волна EOF → реконнект всех соединений.**
+
+### Решение
+
+`tcpUserTimeout` поднят с 10000 до 30000 мс во ВСЕХ местах генерации
+sockopt (серверные inbound, freedom-outbound YouTube-direct, chain/exit
+ноды, клиентские fragment-конфиги):
+
+- `chimera/_core.py` — `_build_sockopt()` (главное: все inbound REALITY/xHTTP);
+- `chimera/modules/chain_nodes.py` — конфиги chain/exit-нод (2 места);
+- `chimera/modules/youtube_route.py` — sockopt для freedom outbound (RU-direct);
+- `chimera/modules/fragment_config.py`, `fragment_presets.py`,
+  `fragment_link.py` — клиентские конфиги с фрагментацией.
+
+30с даёт TCP-ретрансмиссии время вылечить соединение самостоятельно:
+стог ≤30с теперь переживается без разрыва, волна EOF не возникает.
+Стоги длиннее 30с по-прежнему рвут соединение (это правильно — лучше
+реконнект, чем вечный висяк).
+
+### Примечание для уже развёрнутых серверов
+
+Патч влияет на **вновь генерируемые** конфиги. Живой config.json можно
+пропатчить на месте без переустановки:
+
+```bash
+jq '.inbounds[].streamSettings.sockopt.tcpUserTimeout = 30000' \
+   /usr/local/etc/xray/config.json > /tmp/xray.json
+jq empty /tmp/xray.json && install -o root -g xray -m 640 \
+   /tmp/xray.json /usr/local/etc/xray/config.json && systemctl restart xray
+```
+
+### Файлы
+
+- `chimera/_core.py` + 5 модулей — 7 вхождений tcpUserTimeout.
+
+---
+
 ## FEAT(youtube_b4+dpi_bypass): раздел «Обновление Bye Bye Big Bro» — подменю release/pre-release, принудительное обновление, синхронизация версии — 23 августа 2026
 
 **Проблема: в обоих связанных модулях (YouTube через B4 и централизованный

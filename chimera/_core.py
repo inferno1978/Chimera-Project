@@ -1812,11 +1812,15 @@ def _build_sockopt(tcp_no_delay: bool | None = None) -> dict:
     tcp_no_delay: None → использовать глобальный XHTTP_TCP_NO_DELAY
     """
     no_delay = tcp_no_delay if tcp_no_delay is not None else XHTTP_TCP_NO_DELAY
+    # tcpUserTimeout=30s: при 10s ядро убивало соединение RST-ом после любого
+    # стога тракта длиннее 10с (потеря ACK окном) — с mux-клиентами один RST
+    # ронял ВСЕ мультиплексированные стримы разом (волна EOF у клиентов).
+    # 30с даёт TCP-ретрансмиссии время вылечить соединение самостоятельно.
     opt: dict = {
         "tcpFastOpen":        True,
         "tcpKeepAliveInterval": 15,
         "tcpKeepAliveIdle":   60,
-        "tcpUserTimeout":     10000,
+        "tcpUserTimeout":     30000,
         "tcpCongestion":      "bbr",
     }
     if no_delay:
