@@ -361,6 +361,45 @@ def _detect_version() -> str:
 #  другому сразу (через общий config + binary + state).
 # ══════════════════════════════════════════════════════════════════════════
 
+def sync_b4_version_state() -> dict:
+    """Синхронизация версии b4 между связанными модулями Chimera.
+
+    Модули youtube_b4.py («YouTube через B4») и dpi_bypass.py
+    (централизованный «DPI Bypass») работают с ОДНИМ binary
+    (/usr/local/bin/b4) и ОДНИМ общим state-файлом
+    (/var/lib/xray-installer/youtube_b4_state.json). Но b4 можно
+    обновить и мимо Chimera — из собственного Web UI b4
+    (Settings → Update), через install.sh или заменив binary вручную.
+    В этом случае binary меняется, а state["version"] остаётся со
+    старой версией — меню врут.
+
+    Функция читает ФАКТИЧЕСКУЮ версию binary (`b4 --version`) и
+    записывает её в общий state. Поскольку state один на оба модуля —
+    после вызова оба меню (YouTube через B4 и DPI Bypass) показывают
+    одну и ту же актуальную версию.
+
+    Вызывается:
+      • при входе в раздел «Обновление Bye Bye Big Bro» (оба модуля);
+      • после каждого успешного обновления (release / pre-release).
+
+    Возвращает dict:
+      {"synced": bool,          — была ли перезаписана версия в state
+       "version": str,          — фактическая версия binary ("" если нет)
+       "old_state_version": str — что было в state до синхронизации}
+    """
+    version = _detect_version()
+    state = _load_state()
+    old = state.get("version", "")
+    # Пишем только если binary отдаёт версию и она отличается от state.
+    if version and version != old:
+        state["version"] = version
+        _save_state(state)
+        _log("INFO", f"sync_b4_version_state: {old or '—'} → {version} "
+                     f"(общий state обновлён, видят оба модуля)")
+        return {"synced": True, "version": version, "old_state_version": old}
+    return {"synced": False, "version": version, "old_state_version": old}
+
+
 def _detect_latest_version() -> str:
     """Проверяет последнюю СТАБИЛЬНУЮ версию b4 на GitHub.
 
@@ -536,13 +575,22 @@ def _do_b4_binary_update(old_version: str, target_version: str) -> dict:
             "message": f"Обновлено: {old_version} → {new_version}"}
 
 
-def auto_update() -> dict:
+def auto_update(force: bool = False) -> dict:
     """Проверяет и обновляет b4 binary до последней СТАБИЛЬНОЙ версии.
 
     1. Проверка GitHub API /releases/latest → последняя стабильная версия.
     2. Сравнение с установленной.
     3. Скачать → SHA256 → stop → backup → replace → start → verify.
     4. Конфиг и set'ы НЕ затрагиваются.
+
+    Параметр force (bool):
+      False — если установленная версия совпадает с последней release,
+              обновление не выполняется («уже актуальная версия»).
+      True  — ПРИНУДИТЕЛЬНАЯ установка последней release-версии, даже
+              если она совпадает с установленной. Полезно: переустановка
+              поверх повреждённого binary, откат с pre-release на
+              стабильную, восстановление после обновления мимо Chimera
+              (Web UI b4 → Settings → Update, install.sh).
 
     Для PRE-RELEASE обновлений используйте auto_update_prerelease().
     """
@@ -555,15 +603,18 @@ def auto_update() -> dict:
         return {"updated": False, "old_version": old_version,
                 "message": "Не удалось проверить последнюю версию"}
 
-    if old_version == latest:
+    if old_version == latest and not force:
         return {"updated": False, "old_version": old_version,
                 "new_version": latest, "message": f"Уже актуальная версия {old_version}"}
 
-    _info(f"Обновление: {old_version} → {latest}")
+    if old_version == latest:
+        _info(f"Принудительная переустановка release-версии: {latest}")
+    else:
+        _info(f"Обновление: {old_version} → {latest}")
     return _do_b4_binary_update(old_version, latest)
 
 
-def auto_update_prerelease(confirm: bool = True) -> dict:
+def auto_update_prerelease(confirm: bool = True, force: bool = False) -> dict:
     """Обновляет b4 binary до последней ПРЕ-релизной версии.
 
     Симметрична auto_update(), но использует GitHub API /releases для
@@ -577,6 +628,12 @@ def auto_update_prerelease(confirm: bool = True) -> dict:
               Warning ВСЕГДА печатается через _warn() — он попадает в лог,
               но не требует ответа пользователя.
 
+    Параметр force (bool):
+      False — если установлена та же pre-release версия — откат без
+              переустановки.
+      True  — ПРИНУДИТЕЛЬНАЯ переустановка той же pre-release версии
+              (например, binary повреждён или заменён мимо Chimera).
+
     Возвращает тот же формат dict что и auto_update().
     """
     if not _detect_installed():
@@ -588,7 +645,7 @@ def auto_update_prerelease(confirm: bool = True) -> dict:
         return {"updated": False, "old_version": old_version,
                 "message": "Pre-release версии не найдены на GitHub"}
 
-    if old_version == latest_pre:
+    if old_version == latest_pre and not force:
         return {"updated": False, "old_version": old_version,
                 "new_version": latest_pre,
                 "message": f"Уже установлена pre-release версия {old_version}"}
@@ -612,6 +669,148 @@ def auto_update_prerelease(confirm: bool = True) -> dict:
 
     _info(f"Обновление (PRE-RELEASE): {old_version} → {latest_pre}")
     return _do_b4_binary_update(old_version, latest_pre)
+
+
+def do_b4_update_menu() -> None:
+    """Раздел «Обновление Bye Bye Big Bro» — подменю с двумя подразделами.
+
+      [1] Обновление до последней release версии
+      [2] Обновление до prerelease версии
+
+    Что делает раздел:
+      • Показывает установленную версию binary и доступные версии
+        (последняя release и последний pre-release с GitHub).
+      • ПРИНУДИТЕЛЬНОЕ обновление: если установленная версия совпадает
+        с выбранной — предлагает переустановку поверх той же версии
+        (force). Полезно при повреждённом binary, для отката с
+        pre-release на стабильную и после обновления мимо Chimera
+        (Web UI b4 → Settings → Update, install.sh, ручная замена).
+      • Синхронизация версии между связанными модулями: при входе в
+        раздел фактическая версия binary записывается в общий state
+        (sync_b4_version_state) — модули «YouTube через B4» и «DPI
+        Bypass» работают с одним binary и одним state-файлом, поэтому
+        оба показывают одну и ту же актуальную версию.
+    """
+    while True:
+        os.system("clear")
+        # Синхронизация версии binary → общий state (видят оба модуля).
+        sync_b4_version_state()
+        installed_version = _detect_version()
+        # Доступные версии на GitHub (для сводки в шапке раздела).
+        latest_stable = _detect_latest_version()
+        latest_pre = _detect_latest_prerelease_version()
+
+        _box_top("🔄  ОБНОВЛЕНИЕ BYE BYE BIG BRO")
+        _box_row()
+        if installed_version:
+            _box_row(f"  Установленная версия:  {CYAN}{installed_version}{NC}")
+        else:
+            _box_row(f"  Установленная версия:  {YELLOW}не определена{NC}")
+        if latest_stable:
+            _box_row(f"  Последняя release:     {GREEN}{latest_stable}{NC}")
+        else:
+            _box_row(f"  Последняя release:     {DIM}недоступна (GitHub не отвечает){NC}")
+        if latest_pre:
+            _box_row(f"  Последняя pre-release: {YELLOW}{latest_pre}{NC}")
+        else:
+            _box_row(f"  Последняя pre-release: {DIM}нет доступных pre-release{NC}")
+        _box_row()
+        _box_row(f"  {DIM}Модули «YouTube через B4» и «DPI Bypass» работают с одним{NC}")
+        _box_row(f"  {DIM}binary — версия общая и синхронизирована между ними.{NC}")
+        _box_row()
+        _box_item("1", "✅ Обновление до последней release версии")
+        _box_item("2", f"🧪 Обновление до prerelease версии  {YELLOW}(нестабильно!){NC}")
+        _box_row()
+        _box_back()
+        _box_bottom()
+
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            return
+        if ch in ("q", "0", ""):
+            return
+
+        if ch == "1":
+            # ── Подраздел 1: обновление до последней RELEASE версии ──────
+            if not _detect_installed():
+                _err("b4 не установлен. Сначала выполните установку.")
+                input(f"\n{BOLD}Enter…{NC}")
+                continue
+            old = _detect_version()
+            latest = _detect_latest_version()
+            if not latest:
+                _err("Не удалось проверить последнюю release-версию (GitHub недоступен).")
+                input(f"\n{BOLD}Enter…{NC}")
+                continue
+            if old == latest:
+                # Версии совпадают → ПРИНУДИТЕЛЬНАЯ переустановка.
+                _info(f"Установлена последняя release-версия: {old}.")
+                try:
+                    ans = input(
+                        f"{YELLOW}Принудительно переустановить {latest}? [y/N]:{NC} "
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    ans = "n"
+                if ans not in ("y", "yes", "д", "да"):
+                    _info("Отменено — версия не менялась.")
+                    input(f"\n{BOLD}Enter…{NC}")
+                    continue
+                result = auto_update(force=True)
+            else:
+                _info("Проверяю обновления...")
+                result = auto_update()
+            if result.get("updated"):
+                _ok(result["message"])
+                # Синхронизируем версию в общем state — второй модуль
+                # (YouTube через B4 ↔ DPI Bypass) увидит новую версию.
+                sync_b4_version_state()
+                _info("Версия синхронизирована между модулями B4 "
+                      "(YouTube через B4 + DPI Bypass).")
+            else:
+                _info(result["message"])
+            input(f"\n{BOLD}Enter…{NC}")
+
+        elif ch == "2":
+            # ── Подраздел 2: обновление до PRE-RELEASE версии ───────────
+            if not _detect_installed():
+                _err("b4 не установлен. Сначала выполните установку.")
+                input(f"\n{BOLD}Enter…{NC}")
+                continue
+            old = _detect_version()
+            latest_pre = _detect_latest_prerelease_version()
+            if not latest_pre:
+                _err("Pre-release версии не найдены на GitHub.")
+                input(f"\n{BOLD}Enter…{NC}")
+                continue
+            if old == latest_pre:
+                # Версии совпадают → ПРИНУДИТЕЛЬНАЯ переустановка.
+                _info(f"Установлена последняя pre-release версия: {old}.")
+                try:
+                    ans = input(
+                        f"{YELLOW}Принудительно переустановить {latest_pre}? [y/N]:{NC} "
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    ans = "n"
+                if ans not in ("y", "yes", "д", "да"):
+                    _info("Отменено — версия не менялась.")
+                    input(f"\n{BOLD}Enter…{NC}")
+                    continue
+                # Пользователь только что подтвердил — второй вопрос не нужен.
+                # Warning всё равно печатается через _warn() (в лог).
+                result = auto_update_prerelease(confirm=False, force=True)
+            else:
+                # auto_update_prerelease(confirm=True) сама показывает
+                # warning и спрашивает [y/N].
+                result = auto_update_prerelease(confirm=True)
+            if result.get("updated"):
+                _ok(result["message"])
+                sync_b4_version_state()
+                _info("Версия синхронизирована между модулями B4 "
+                      "(YouTube через B4 + DPI Bypass).")
+            else:
+                _info(result["message"])
+            input(f"\n{BOLD}Enter…{NC}")
 
 
 def _write_empty_config() -> bool:
@@ -1671,8 +1870,7 @@ def do_youtube_b4_menu() -> None:
             _box_item("2", "🔄 Переключить preset")
             _box_item("3", "📥 Импортировать кастомный сет (JSON)")
             _box_item("4", "🔍 Discovery (автоподбор сета под провайдера)")
-            _box_item("5", "🔄 Проверить обновление b4 (stable)")
-            _box_item("U", f"🧪 Обновить до pre-release версии  {YELLOW}(нестабильно!){NC}")
+            _box_item("5", "🔄 Обновление Bye Bye Big Bro (release / pre-release)")
             _box_item("6", "🏥 Health check YouTube (работает ли?)")
             _box_item("7", "📋 Логи b4 (последние 30 строк)")
             _box_item("8", "🌐 Открыть Web UI (SSH-туннель инструкция)")
@@ -1777,25 +1975,17 @@ def do_youtube_b4_menu() -> None:
             input(f"\n{BOLD}Enter…{NC}")
 
         elif s["installed"] and ch == "5":
-            # Автообновление b4 (stable release).
-            _info("Проверяю обновления...")
-            result = auto_update()
-            if result.get("updated"):
-                _ok(result["message"])
-            else:
-                _info(result["message"])
-            input(f"\n{BOLD}Enter…{NC}")
+            # Раздел «Обновление Bye Bye Big Bro» — подменю с двумя
+            # подразделами: release / pre-release + принудительное
+            # обновление + синхронизация версии между связанными
+            # модулями (общий binary + общий state).
+            do_b4_update_menu()
 
         elif s["installed"] and ch == "u":
-            # Обновление до PRE-RELEASE версии (с предупреждением).
-            # auto_update_prerelease(confirm=True) сама показывает warning
-            # и спрашивает [y/N]. Если пользователь ответил не "y" — откат.
-            result = auto_update_prerelease(confirm=True)
-            if result.get("updated"):
-                _ok(result["message"])
-            else:
-                _info(result["message"])
-            input(f"\n{BOLD}Enter…{NC}")
+            # Скрытый алиас [U] (совместимость со старой привычкой):
+            # раньше [U] сразу запускал pre-release обновление. Теперь
+            # открывает раздел обновления, где pre-release — подраздел [2].
+            do_b4_update_menu()
 
         elif s["installed"] and ch == "6":
             _info("Проверяю YouTube (3 запроса, до 30с)...")
@@ -1949,7 +2139,8 @@ if __name__ == "__main__":  # pragma: no cover
         import argparse
         p = argparse.ArgumentParser(description="YouTube via b4 (DPI bypass на entry)")
         p.add_argument("cmd", choices=["install", "uninstall", "status", "enable",
-                                       "disable", "health", "discovery"])
+                                       "disable", "health", "discovery",
+                                       "update", "update-pre", "sync-version"])
         args = p.parse_args()
         if args.cmd == "install":
             install_b4()
@@ -1965,3 +2156,12 @@ if __name__ == "__main__":  # pragma: no cover
             print(json.dumps(health_check_youtube(), indent=2))
         elif args.cmd == "discovery":
             print(json.dumps(run_discovery(), indent=2))
+        elif args.cmd == "update":
+            # Обновление до последней release-версии (force — вторым
+            # аргументом CLI не задаётся, см. TUI-подменю).
+            print(json.dumps(auto_update(), indent=2, ensure_ascii=False))
+        elif args.cmd == "update-pre":
+            print(json.dumps(auto_update_prerelease(confirm=False),
+                             indent=2, ensure_ascii=False))
+        elif args.cmd == "sync-version":
+            print(json.dumps(sync_b4_version_state(), indent=2, ensure_ascii=False))

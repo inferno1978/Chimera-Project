@@ -1974,5 +1974,229 @@ class TestMenuWarningForCleanInstall(unittest.TestCase):
         self.assertIn("Web UI", src)
 
 
+class TestUpdateMenuAndVersionSync(unittest.TestCase):
+    """Раздел «Обновление Bye Bye Big Bro»: подменю + принудительное
+    обновление + синхронизация версии между модулями.
+
+    Проверяет:
+      1. sync_b4_version_state() — фактическая версия binary
+         записывается в общий state (его читают оба модуля).
+      2. auto_update(force=True) — принудительная переустановка той же
+         release-версии (раньше совпадение версий = «уже актуальная»).
+      3. auto_update_prerelease(force=True) — то же для pre-release.
+      4. Подменю обновления рендерит два подраздела: release и prerelease.
+      5. Главные меню обоих модулей содержат пункт «Обновление Bye Bye
+         Big Bro» и открывают подменю (do_b4_update_menu).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state_file = self._tmpdir / "state.json"
+        import importlib
+        from chimera.modules import dpi_bypass, youtube_b4
+        importlib.reload(dpi_bypass)
+        importlib.reload(youtube_b4)
+        self.dpi_bypass = dpi_bypass
+        self.youtube_b4 = youtube_b4
+        # Общий state-файл для обоих модулей (как в проде).
+        self.dpi_bypass._STATE_FILE = self._state_file
+        self.youtube_b4._STATE_FILE = self._state_file
+        self.dpi_bypass.subprocess = MagicMock()
+        self.youtube_b4.subprocess = MagicMock()
+
+    # ── sync_b4_version_state ──────────────────────────────────────────
+
+    def test_sync_writes_binary_version_to_shared_state(self):
+        """Версия binary записывается в общий state — оба модуля читают один файл."""
+        self.dpi_bypass._detect_version = lambda: "1.79.0"
+        self.dpi_bypass._save_state({"installed": True, "version": "1.78.0"})
+        result = self.dpi_bypass.sync_b4_version_state()
+        self.assertTrue(result["synced"])
+        self.assertEqual(result["version"], "1.79.0")
+        self.assertEqual(result["old_state_version"], "1.78.0")
+        # State перезаписан — второй модуль (youtube_b4) видит новую версию.
+        self.assertEqual(self.youtube_b4._load_state().get("version"), "1.79.0")
+
+    def test_sync_no_write_when_version_matches(self):
+        """Совпадающая версия → перезаписи нет (synced=False)."""
+        self.dpi_bypass._detect_version = lambda: "1.79.0"
+        self.dpi_bypass._save_state({"installed": True, "version": "1.79.0"})
+        result = self.dpi_bypass.sync_b4_version_state()
+        self.assertFalse(result["synced"])
+        self.assertEqual(result["version"], "1.79.0")
+
+    def test_sync_empty_binary_version_does_not_clear_state(self):
+        """Binary не отвечает версию → state не трогаем."""
+        self.dpi_bypass._detect_version = lambda: ""
+        self.dpi_bypass._save_state({"installed": True, "version": "1.78.0"})
+        result = self.dpi_bypass.sync_b4_version_state()
+        self.assertFalse(result["synced"])
+        self.assertEqual(self.dpi_bypass._load_state().get("version"), "1.78.0")
+
+    def test_both_modules_have_sync_function(self):
+        """sync_b4_version_state есть в обоих модулях (зеркалирование)."""
+        self.assertTrue(hasattr(self.youtube_b4, 'sync_b4_version_state'))
+        self.assertTrue(hasattr(self.dpi_bypass, 'sync_b4_version_state'))
+        self.assertTrue(callable(self.youtube_b4.sync_b4_version_state))
+        self.assertTrue(callable(self.dpi_bypass.sync_b4_version_state))
+
+    def test_sync_via_youtube_b4_visible_to_dpi_bypass(self):
+        """Синхронизация через youtube_b4 видна dpi_bypass (общий state)."""
+        self.youtube_b4._detect_version = lambda: "1.79.1"
+        self.youtube_b4.sync_b4_version_state()
+        # dpi_bypass читает тот же state-файл.
+        self.assertEqual(self.dpi_bypass._load_state().get("version"), "1.79.1")
+
+    # ── force-обновление ───────────────────────────────────────────────
+
+    def test_auto_update_force_reinstalls_same_version(self):
+        """force=True → совпадение версий НЕ останавливает обновление."""
+        self.dpi_bypass._detect_installed = lambda: True
+        self.dpi_bypass._detect_version = lambda: "1.79.0"
+        self.dpi_bypass._detect_latest_version = lambda: "1.79.0"
+        called = []
+        def _fake_update(old, new):
+            called.append((old, new))
+            return {"updated": True, "old_version": old, "new_version": new,
+                    "message": "reinstalled"}
+        self.dpi_bypass._do_b4_binary_update = _fake_update
+        result = self.dpi_bypass.auto_update(force=True)
+        self.assertTrue(result["updated"])
+        self.assertEqual(called, [("1.79.0", "1.79.0")])
+
+    def test_auto_update_without_force_skips_when_same(self):
+        """force=False (default) → совпадение = «уже актуальная»."""
+        self.dpi_bypass._detect_installed = lambda: True
+        self.dpi_bypass._detect_version = lambda: "1.79.0"
+        self.dpi_bypass._detect_latest_version = lambda: "1.79.0"
+        self.dpi_bypass._do_b4_binary_update = lambda old, new: {
+            "updated": True, "message": "should not be called"}
+        result = self.dpi_bypass.auto_update()
+        self.assertFalse(result["updated"])
+        self.assertIn("Уже актуальная", result["message"])
+
+    def test_auto_update_prerelease_force_reinstalls_same_version(self):
+        """force=True → принудительная переустановка pre-release."""
+        self.dpi_bypass._detect_installed = lambda: True
+        self.dpi_bypass._detect_version = lambda: "1.80.0-rc1"
+        self.dpi_bypass._detect_latest_prerelease_version = lambda: "1.80.0-rc1"
+        called = []
+        def _fake_update(old, new):
+            called.append((old, new))
+            return {"updated": True, "old_version": old, "new_version": new,
+                    "message": "reinstalled"}
+        self.dpi_bypass._do_b4_binary_update = _fake_update
+        result = self.dpi_bypass.auto_update_prerelease(confirm=False, force=True)
+        self.assertTrue(result["updated"])
+        self.assertEqual(called, [("1.80.0-rc1", "1.80.0-rc1")])
+
+    def test_force_param_in_both_modules(self):
+        """auto_update / auto_update_prerelease принимают force в обоих модулях."""
+        import inspect
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            self.assertIn("force", inspect.signature(mod.auto_update).parameters)
+            pre_sig = inspect.signature(mod.auto_update_prerelease)
+            self.assertIn("force", pre_sig.parameters)
+            self.assertEqual(list(pre_sig.parameters.keys()), ["confirm", "force"])
+        # Сигнатуры auto_update идентичны в обоих модулях.
+        self.assertEqual(
+            list(inspect.signature(self.youtube_b4.auto_update).parameters),
+            list(inspect.signature(self.dpi_bypass.auto_update).parameters))
+
+    # ── подменю обновления ─────────────────────────────────────────────
+
+    def _render_update_menu(self, module):
+        """Рендерит do_b4_update_menu без сети, возвращает вывод."""
+        import io
+        from contextlib import redirect_stdout
+        module._detect_version = lambda: "1.78.0"
+        module._detect_latest_version = lambda: "1.79.0"
+        module._detect_latest_prerelease_version = lambda: "1.80.0-rc1"
+        inputs = iter(['q'])
+        captured = io.StringIO()
+        with patch("builtins.input", side_effect=lambda *a, **kw: next(inputs)), \
+             redirect_stdout(captured):
+            try:
+                module.do_b4_update_menu()
+            except StopIteration:
+                pass
+        return captured.getvalue()
+
+    def test_update_menu_renders_two_subsections(self):
+        """Подменю содержит оба подраздела: release и prerelease."""
+        out = self._render_update_menu(self.dpi_bypass)
+        self.assertIn("ОБНОВЛЕНИЕ BYE BYE BIG BRO", out)
+        self.assertIn("Обновление до последней release версии", out)
+        self.assertIn("Обновление до prerelease версии", out)
+        # Сводка версий в шапке.
+        self.assertIn("1.78.0", out)
+        self.assertIn("1.79.0", out)
+        self.assertIn("1.80.0-rc1", out)
+
+    def test_update_menu_identical_in_both_modules(self):
+        """Подменю обновления зеркалируется в обоих модулях."""
+        dpi_out = self._render_update_menu(self.dpi_bypass)
+        yt_out = self._render_update_menu(self.youtube_b4)
+        for key in ("ОБНОВЛЕНИЕ BYE BYE BIG BRO",
+                    "Обновление до последней release версии",
+                    "Обновление до prerelease версии",
+                    "Установленная версия",
+                    "Последняя release",
+                    "Последняя pre-release"):
+            self.assertIn(key, dpi_out)
+            self.assertIn(key, yt_out)
+
+    def test_update_menu_calls_sync_on_entry(self):
+        """При входе в подменю вызывается синхронизация версии."""
+        self.dpi_bypass._detect_version = lambda: "1.78.0"
+        self.dpi_bypass._detect_latest_version = lambda: "1.79.0"
+        self.dpi_bypass._detect_latest_prerelease_version = lambda: "1.80.0-rc1"
+        sync_called = []
+        self.dpi_bypass.sync_b4_version_state = lambda: (
+            sync_called.append(1) or
+            {"synced": False, "version": "1.78.0", "old_state_version": "1.78.0"})
+        with patch("builtins.input", return_value="q"):
+            self.dpi_bypass.do_b4_update_menu()
+        self.assertEqual(len(sync_called), 1)
+
+    def test_main_menus_have_update_section_item(self):
+        """Главные меню содержат пункт «Обновление Bye Bye Big Bro»."""
+        import inspect
+        yt_src = inspect.getsource(self.youtube_b4.do_youtube_b4_menu)
+        dpi_src = inspect.getsource(self.dpi_bypass.do_dpi_bypass_menu)
+        self.assertIn("Обновление Bye Bye Big Bro", yt_src)
+        self.assertIn("Обновление Bye Bye Big Bro", dpi_src)
+        # Старых пунктов больше нет.
+        self.assertNotIn("Проверить обновление b4 (stable)", yt_src)
+        self.assertNotIn("Проверить обновление b4 (stable)", dpi_src)
+
+    def test_main_menus_open_update_submenu(self):
+        """Пункт [5] и алиас [U] открывают do_b4_update_menu."""
+        import inspect
+        for src in (inspect.getsource(self.youtube_b4.do_youtube_b4_menu),
+                    inspect.getsource(self.dpi_bypass.do_dpi_bypass_menu)):
+            self.assertIn("do_b4_update_menu()", src)
+
+    def test_cli_has_update_commands(self):
+        """CLI обоих модулей умеет update / update-pre / sync-version."""
+        import inspect
+        for src in (inspect.getsource(self.youtube_b4),
+                    inspect.getsource(self.dpi_bypass)):
+            self.assertIn('"update", "update-pre", "sync-version"', src)
+
+    def test_dpi_bypass_main_runs_own_menu(self):
+        """REGRESSION: __main__ dpi_bypass вызывает do_dpi_bypass_menu.
+
+        Раньше там стоял вызов do_youtube_b4_menu() — функции из
+        youtube_b4.py, которой нет в пространстве имён dpi_bypass
+        (NameError при запуске `python3 -m chimera.modules.dpi_bypass`).
+        """
+        import inspect
+        dpi_src = inspect.getsource(self.dpi_bypass)
+        self.assertIn("do_dpi_bypass_menu()", dpi_src.split('if __name__')[1])
+        self.assertNotIn("do_youtube_b4_menu()", dpi_src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
