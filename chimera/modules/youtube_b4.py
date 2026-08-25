@@ -49,6 +49,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
@@ -1468,26 +1469,33 @@ def switch_preset(preset_name: str) -> bool:
         return False
     label, set_data = PRESETS[preset_name]
     _info(f"Переключаю на preset «{label}»...")
-    # Полностью пересоздаём конфиг в правильном формате {"sets": [...]}.
-    # Раньше пытались делать config.update() на верхнем уровне — но b4
-    # ожидает sets[0] с полями tcp/faking/targets/dns, а не на верхнем уровне.
-    new_set = dict(set_data)  # копия (включает id, b4_version, name, и т.д.)
-    config = {
-        "sets": [new_set],
-        "routing": {"enabled": False},
-        "udp": {
-            "mode": "fake",
-            "filter_quic": "block",  # Блокировать QUIC — браузер на TCP/HTTP2.
-        },
-        "system": {
+    # Preset заменяет ВСЕ set'ы (семантика прежняя), но остальной конфиг
+    # МЁРЖИМ с существующим: топ-уровневые секции queue (NFQUEUE/mark),
+    # ui и system.webserver (порт Web UI, авторизация) обязаны
+    # сохраниться — раньше конфиг перезаписывался минимальным шаблоном
+    # и настройки сбрасывались на дефолты b4.
+    # Глубокая копия: _normalize_set_domains мутирует targets.
+    new_set = json.loads(json.dumps(set_data))
+    _normalize_set_domains(new_set)  # на случай wildcard-записей в пресете
+    existing_cfg = {}
+    if B4_CONFIG_FILE.exists():
+        try:
+            parsed = json.loads(B4_CONFIG_FILE.read_text())
+            if isinstance(parsed, dict):
+                existing_cfg = parsed
+        except Exception:
+            pass  # Конфиг повреждён — начнём с чистого шаблона
+    existing_cfg["sets"] = [new_set]
+    # Секция system (geosite/geoip пути для Discovery) — обязательна.
+    if not existing_cfg.get("system"):
+        existing_cfg["system"] = {
             "geosite_path": "/usr/share/xray/geosite.dat",
             "geo": {
                 "ipdat_path": "/etc/b4/geoip.dat",
                 "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
             },
-        },
-    }
-    B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+        }
+    B4_CONFIG_FILE.write_text(json.dumps(existing_cfg, indent=2, ensure_ascii=False))
     # Перезапускаем сервис.
     subprocess.run(["systemctl", "restart", "b4"], capture_output=True, check=False)
     state = _load_state()
@@ -1498,6 +1506,255 @@ def switch_preset(preset_name: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  НОРМАЛИЗАЦИЯ ДОМЕНОВ b4 + REST API (общий блок, зеркален в dpi_bypass.py)
+# ══════════════════════════════════════════════════════════════════════════
+
+# b4 не поддерживает wildcard-записи вида "*.example.com": движок
+# сни-матчинга (sni/domain.go ParseDomainEntry + MatchDomainEntry)
+# сравнивает записи литерально — apex "whatsapp.com" покрывает и
+# "web.whatsapp.com" (suffix-walk), а вот "*.whatsapp.com" не совпадает
+# ни с одним реальным хостом. Собственный Web UI b4 при ручном вводе
+# домена молча стриппит "*." (catchall.ts normalizeDomainEntry) и
+# подсказывает «b4 и так совпадает с поддоменами» — но JSON-импорт
+# (Web UI Import/Export, сторонние сеты, Chimera TUI) делал этого НЕ
+# всегда. Из-за этого сторонние сеты с "*.domain"-записями
+# импортировались пустышками: трафик не матчился, бейджей в Traffic
+# не было. Нормализуем те же семантики на стороне Chimera.
+_B4_DOMAIN_ANY_SHORTHANDS = {"*", "**", "*.*", "any", "all", "0/0"}
+_B4_DOMAIN_CATCH_ALL = "regexp:.*"
+
+
+def _normalize_b4_domain_entry(raw) -> Optional[str]:
+    """Нормализация доменной записи к семантикам движка b4.
+
+    Зеркалит Web UI b4 (catchall.ts normalizeDomainEntry) и движок
+    (ParseDomainEntry — lowercase/trim/точки):
+      • "*.example.com"  → "example.com" (apex покрывает поддомены);
+      • "*"/"**"/"any"/"all"/"0/0" → "regexp:.*" (catch-all);
+      • "regexp:..."     → без изменений (регэксп-запись движка);
+      • пустая запись    → None (выбрасывается).
+    """
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    low = value.lower()
+    if low in _B4_DOMAIN_ANY_SHORTHANDS:
+        return _B4_DOMAIN_CATCH_ALL
+    if low.startswith("regexp:"):
+        # Движок парсит регэкспы по lowercased-строке — зеркалим.
+        return low
+    normalized = value
+    while normalized.startswith("*."):
+        normalized = normalized[2:]
+    normalized = normalized.strip(".").lower()
+    return normalized or None
+
+
+def _normalize_set_domains(custom_set: dict) -> int:
+    """Нормализует targets.sni_domains сета in-place (wildcard → apex).
+
+    Возвращает количество изменённых/удалённых записей (для лога).
+    Дедуплицирует результат: "*.whatsapp.com" и "whatsapp.com" после
+    нормализации — одна и та же запись.
+    """
+    targets = custom_set.get("targets")
+    if not isinstance(targets, dict):
+        return 0
+    raw_domains = targets.get("sni_domains")
+    if not isinstance(raw_domains, list):
+        return 0
+    normalized, seen, changed = [], set(), 0
+    for raw in raw_domains:
+        if not isinstance(raw, str):
+            normalized.append(raw)  # мусор не трогаем — b4 сам валидирует
+            continue
+        norm = _normalize_b4_domain_entry(raw)
+        if norm is None:
+            changed += 1
+            continue
+        if norm != raw.strip().lower():
+            changed += 1
+        if norm not in seen:
+            seen.add(norm)
+            normalized.append(norm)
+    targets["sni_domains"] = normalized
+    return changed
+
+
+def _xray_domain_entries_from_b4(domains: list) -> list:
+    """Готовит domain-записи для Xray routing-правила из доменов b4-сета.
+
+    Xray-матчер "domain:example.com" — суффиксный (матчит и поддомены),
+    поэтому "*.example.com" нормализуем к apex. Catch-all ("regexp:.*")
+    и регэксп-записи b4 в Xray routing НЕ транслируем: пинить ВЕСЬ
+    трафик на direct-outbound по catch-all сету опасно (уводит VPN-трафик
+    мимо туннеля), а литеральные "domain:*"/"domain:regexp:..." и раньше
+    были no-op — сохраняем это поведение явно. Возвращает уникальные
+    "domain:..." записи.
+    """
+    entries, seen = [], set()
+    for d in (domains or []):
+        if not isinstance(d, str):
+            continue
+        low = d.strip().lower()
+        if not low or low.startswith("regexp:") or low in _B4_DOMAIN_ANY_SHORTHANDS:
+            continue
+        norm = _normalize_b4_domain_entry(d)
+        if not norm or norm == _B4_DOMAIN_CATCH_ALL:
+            continue
+        if norm not in seen:
+            seen.add(norm)
+            entries.append(f"domain:{norm}")
+    return entries
+
+
+#  REST API b4 (Web UI backend, b4 >= 1.78): /api/sets — CRUD сетов с
+#  hot-reload на стороне b4 (saveAndPushConfig: валидация конфига +
+#  атомарное сохранение config.json + обновление живого состояния БЕЗ
+#  рестарта сервиса). Импорт через REST не теряет топ-уровневые секции
+#  config.json (queue / ui / system.webserver) — их пишет и читает сам
+#  b4. Авторизация Web UI на Chimera-установках по умолчанию выключена
+#  (Chimera не задаёт username/password); если включена — REST вернёт
+#  401 и вызывающий код откатится на прямую запись config.json.
+_B4_REST_TIMEOUT = 5.0  # сек; API живёт на 127.0.0.1
+_B4_REST_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _b4_web_port() -> Optional[int]:
+    """Актуальный порт Web UI b4 (по убыванию приоритета):
+
+    1. systemd-unit: флаг --web-port. Явно заданный флаг применяется
+       ПОВЕРХ config.json (config/bind.go: ApplyFlags) — на
+       Chimera-установках флаг ставится всегда, это фактический порт
+       запущенного сервиса;
+    2. config.json: system.web_server.port (json-тег WebServerConfig
+       в структуре Config b4 — именно web_server, с подчёркиванием);
+    3. state web_port (пишется установщиком Chimera);
+    4. дефолт Chimera B4_WEB_PORT (9700).
+    """
+    # 1. Флаг --web-port из systemd-unit (фактический runtime-порт).
+    try:
+        if B4_UNIT_PATH.exists():
+            m = re.search(r"--web-port[=\s]+(\d{1,5})\b", B4_UNIT_PATH.read_text())
+            if m:
+                port = int(m.group(1))
+                if 0 < port < 65536:
+                    return port
+    except Exception:
+        pass
+    # 2. config.json: system.web_server.port.
+    try:
+        if B4_CONFIG_FILE.exists():
+            cfg = json.loads(B4_CONFIG_FILE.read_text())
+            if isinstance(cfg, dict):
+                web_server = (cfg.get("system") or {}).get("web_server")
+                port = web_server.get("port") if isinstance(web_server, dict) else None
+                if isinstance(port, int) and 0 < port < 65536:
+                    return port
+    except Exception:
+        pass
+    # 3. state → 4. дефолт.
+    try:
+        port = _load_state().get("web_port")
+        if isinstance(port, int) and 0 < port < 65536:
+            return port
+    except Exception:
+        pass
+    return B4_WEB_PORT
+
+
+def _b4_rest_request(method: str, path: str, payload: Optional[dict] = None):
+    """HTTP-запрос к локальному REST API b4 (без прокси, 127.0.0.1).
+
+    Returns:
+        (status_code, parsed_body | None) — при любом HTTP-ответе;
+        None — если соединиться не удалось (b4 не запущен / API нет).
+    """
+    port = _b4_web_port()
+    if not port:
+        return None
+    url = f"http://127.0.0.1:{port}{path}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    try:
+        with _B4_REST_OPENER.open(req, timeout=_B4_REST_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            try:
+                return (resp.status, json.loads(body) if body.strip() else None)
+            except json.JSONDecodeError:
+                return (resp.status, None)
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+            parsed = json.loads(body) if body.strip() else None
+        except Exception:
+            parsed = None
+        return (e.code, parsed)
+    except Exception:
+        return None
+
+
+def _b4_rest_import_set(custom_set: dict) -> Optional[bool]:
+    """Импорт сета через REST API b4: PUT /api/sets/{id} (замена) или
+    POST /api/sets (создание; id назначает сам b4).
+
+    Замена ищется по id, затем по имени: POST назначает сету новый uuid,
+    поэтому без сверки по имени повторный импорт того же JSON плодил бы
+    дубликат сета.
+
+    Returns:
+        True  — b4 принял сет (hot-reload выполнен на его стороне);
+        False — b4 явно отклонил сет (валидация); config.json НЕ трогаем;
+        None  — API недоступен (не запущен / нет API / auth включён) —
+                вызывающий код откатывается на запись config.json.
+    """
+    resp = _b4_rest_request("GET", "/api/sets")
+    if resp is None:
+        return None
+    status, sets = resp
+    if status == 401:
+        _info("Web UI b4 под паролем — REST API требует авторизации, "
+              "использую прямую запись config.json")
+        return None
+    if status != 200 or not isinstance(sets, list):
+        return None
+
+    set_id = str(custom_set.get("id") or "")
+    name = str(custom_set.get("name") or "")
+    target_id, matched_by = "", ""
+    if set_id:
+        for s in sets:
+            if isinstance(s, dict) and s.get("id") == set_id:
+                target_id, matched_by = str(s.get("id") or ""), "id"
+                break
+    if not target_id and name:
+        for s in sets:
+            if isinstance(s, dict) and s.get("name") == name:
+                target_id, matched_by = str(s.get("id") or ""), "имени"
+                break
+
+    if target_id:
+        _info(f"REST API: заменяю существующий сет (совпадение по {matched_by}, "
+              f"id={target_id})")
+        resp = _b4_rest_request("PUT", f"/api/sets/{target_id}", custom_set)
+    else:
+        resp = _b4_rest_request("POST", "/api/sets", custom_set)
+    if resp is None:
+        return None
+    status, body = resp
+    if status in (200, 201):
+        return True
+    detail = ""
+    if isinstance(body, dict):
+        detail = str(body.get("error") or body.get("message") or body)
+    elif body is not None:
+        detail = str(body)
+    _err(f"b4 отклонил сет (HTTP {status}){': ' + detail[:300] if detail else ''}")
+    return False
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  КАСТОМНЫЕ СЕТЫ (импорт из файла или вставка JSON)
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -1505,8 +1762,12 @@ def import_custom_set(json_str: str) -> bool:
     """Импортирует кастомный b4 set из JSON-строки.
 
     Принимает JSON в формате b4 (один объект сета ИЛИ {"sets": [...]}).
-    Оборачивает в правильный формат, добавляет id если нет, сохраняет
-    как активный конфиг b4, перезапускает сервис.
+    Добавляет id если нет, нормализует wildcard-домены ("*.example.com" →
+    apex "example.com" — движок b4 матчит поддомены суффикс-матчингом,
+    wildcard-записи не поддерживает), импортирует через REST API b4
+    (hot-reload: без рестарта сервиса и без перезаписи config.json).
+    Если REST недоступен — откат на прямую запись config.json с МЁРЖЕМ
+    (топ-уровневые секции queue/ui/system сохраняются).
 
     Используется:
       • TUI: пункт «Импортировать кастомный сет»
@@ -1538,9 +1799,17 @@ def import_custom_set(json_str: str) -> bool:
     import uuid
     if not custom_set.get("id"):
         custom_set["id"] = f"custom-{uuid.uuid4().hex[:12]}"
-    # geosite_categories сохраняем как есть — секция system с
-    # sitedat_path/geosite_path сохраняется при импорте, поэтому b4
-    # может обрабатывать geosite_categories без ошибок.
+
+    # Нормализация wildcard-доменов: "*.whatsapp.com" → "whatsapp.com".
+    # Без этого сторонние сеты с wildcard-записями импортируются
+    # пустышками: движок b4 сравнивает записи литерально, реальный
+    # трафик (web.whatsapp.com и т.п.) не матчится — бейджей в
+    # Traffic нет, DPI-обработка не применяется.
+    changed_domains = _normalize_set_domains(custom_set)
+    if changed_domains:
+        _info(f"Нормализовано доменных записей: {changed_domains} "
+              f'(wildcard "*.domain" → apex: b4 матчит поддомены '
+              f"суффикс-матчингом, wildcard-записи движком не поддерживаются)")
 
     # Проверяем минимально-обязательные поля.
     targets = custom_set.get("targets", {})
@@ -1548,24 +1817,58 @@ def import_custom_set(json_str: str) -> bool:
         _err("В сете нет targets.sni_domains и нет geosite_categories — нечего матчить")
         return False
 
+    # Импортируем сет ВКЛЮЧЁННЫМ: если в JSON нет поля enabled, b4
+    # (Go-декодер) молча считает его false — сет импортировался
+    # выключенным и не матчил трафик до ручного включения в Web UI.
+    if "enabled" not in custom_set:
+        custom_set["enabled"] = True
+
+    #  Основной путь: REST API b4 (b4 >= 1.78). b4 сам валидирует сет,
+    #  применяет hot-reload (без systemctl restart — соединения не рвутся,
+    #  Discovery-кеш и статистика не теряются) и сохраняет config.json,
+    #  не теряя топ-уровневые секции (queue/ui/system.webserver).
+    #  REST недоступен (b4 не запущен, старая версия, Web UI под паролем)
+    #  → откат на прямую запись config.json ниже.
+    rest_result = _b4_rest_import_set(custom_set)
+    if rest_result is True:
+        # Сохраняем state.
+        state = _load_state()
+        state["active_preset"] = "custom"
+        _save_state(state)
+        name = custom_set.get("name", "custom")
+        _ok(f"Кастомный сет «{name}» импортирован через REST API "
+            f"(hot-reload, без рестарта b4)")
+        return True
+    if rest_result is False:
+        # b4 явно отклонил сет (валидация) — НЕ пишем невалидный сет в
+        # config.json: при следующем рестарте b4 не смог бы загрузить
+        # конфиг. Пользователь видит причину отказа выше.
+        return False
+
+    #  ЛЕГАСИ-ПУТЬ: прямая запись config.json (b4 без REST API).
     #  Мультисетовый импорт: добавляем сет к существующим, не стирая.
-    # Читаем текущий config.json, если он есть. Сохраняем существующие сеты
-    # и секцию system (geosite/geoip пути), чтобы b4 не терял настройки.
-    existing_sets = []
-    existing_system = None
+    #  ВАЖНО: мёржим с существующим конфигом, а не перезаписываем
+    #  минимальным шаблоном — топ-уровневые секции queue (NFQUEUE-номер,
+    #  mark, ipv4/ipv6), ui и system.webserver (порт Web UI, auth) ранее
+    #  терялись и сбрасывались на дефолты b4.
+    existing_cfg = {}
     if B4_CONFIG_FILE.exists():
         try:
-            existing_cfg = json.loads(B4_CONFIG_FILE.read_text())
-            existing_sets = existing_cfg.get("sets", [])
-            existing_system = existing_cfg.get("system")
+            parsed = json.loads(B4_CONFIG_FILE.read_text())
+            if isinstance(parsed, dict):
+                existing_cfg = parsed
         except Exception:
-            pass  # Конфиг повреждён — начнём с пустого массива
+            pass  # Конфиг повреждён — начнём с чистого конфига
+
+    existing_sets = existing_cfg.get("sets")
+    if not isinstance(existing_sets, list):
+        existing_sets = []
 
     # Проверяем, нет ли уже сета с таким id — если есть, заменяем.
     set_id = custom_set.get("id")
     replaced = False
     for i, s in enumerate(existing_sets):
-        if s.get("id") == set_id:
+        if isinstance(s, dict) and s.get("id") == set_id:
             existing_sets[i] = custom_set
             replaced = True
             break
@@ -1575,27 +1878,25 @@ def import_custom_set(json_str: str) -> bool:
     _info(f"Сетов в конфиге: {len(existing_sets)} "
           f"({'заменён' if replaced else 'добавлен'} id={set_id})")
 
-    # Сохраняем конфиг.
-    # Если b4 уже создал свою секцию system (с sitedat_path, ipdat_url, и т.д.)
-    # — сохраняем её как есть. Если нет — создаём дефолтную.
-    if not existing_system:
-        existing_system = {
+    existing_cfg["sets"] = existing_sets
+    # Секция system (geosite/geoip пути для Discovery) — обязательна.
+    # Если b4 уже создал свою (с sitedat_path, ipdat_url и т.д.) —
+    # сохраняем её как есть.
+    if not existing_cfg.get("system"):
+        existing_cfg["system"] = {
             "geosite_path": "/usr/share/xray/geosite.dat",
             "geo": {
                 "ipdat_path": "/etc/b4/geoip.dat",
                 "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
             },
         }
-    config = {
-        "sets": existing_sets,
-        "routing": {"enabled": False},
-        "udp": {
-            "mode": "fake",
-            "filter_quic": "block",  # Блокировать QUIC — браузер на TCP/HTTP2.
-        },
-        "system": existing_system,
-    }
-    B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+    try:
+        B4_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        B4_CONFIG_FILE.write_text(json.dumps(existing_cfg, indent=2, ensure_ascii=False))
+        B4_CONFIG_FILE.chmod(0o644)
+    except OSError as e:
+        _err(f"Не удалось записать {B4_CONFIG_FILE}: {e}")
+        return False
     # Перезапускаем сервис.
     subprocess.run(["systemctl", "restart", "b4"], capture_output=True, check=False)
     # Сохраняем state.

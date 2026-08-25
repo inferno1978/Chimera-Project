@@ -2,6 +2,69 @@
 
 ---
 
+## FIX(dpi_bypass+youtube_b4): импорт b4-сетов — wildcard-домены, REST API, сохранность config.json — 25 августа 2026
+
+**Проблема: сеты для FB/IG/WA, импортированные через TUI Chimera, не давали
+бейджей в Traffic и не обрабатывались b4, тогда как YouTube-сеты работали.
+Корней три, все в цепочке «импорт сета → матчинг трафика»:**
+
+1. **Wildcard-домены не матчятся движком b4.** Сторонние сеты несут записи
+   вида `*.whatsapp.com`, но движок b4 (sni/domain.go ParseDomainEntry +
+   MatchDomainEntry) сравнивает записи литерально — apex `whatsapp.com`
+   покрывает поддомены суффикс-матчингом, а `*.whatsapp.com` не совпадает
+   ни с одним реальным хостом. Собственный Web UI b4 при ручном вводе
+   стриппит `*.` (catchall.ts normalizeDomainEntry), JSON-импорт — нет.
+   Импортированный с wildcards сет = пустышка: без бейджей, без DPI-обработки.
+2. **Xray routing не пинил домены сета на direct.** apply_routing_*
+   писали `domain:*.whatsapp.com` — суффикс-матчер Xray литеральную
+   wildcard-строку тоже не понимает. Трафик FB/IG/WA не уходил на
+   direct-outbound entry-ноды (где стоит b4) — механизм, эквивалентный
+   «YouTube через RU Entry», молча не работал. YouTube работал потому,
+   что вся его цепочка (пресеты, youtube_route.py, сет) на apex-доменах.
+3. **Импорт перезаписывал config.json минимальным шаблоном.** Терялись
+   queue (NFQUEUE/mark), ui и system.web_server (порт Web UI, токен MCP!)
+   со сбросом на дефолты + systemctl restart на каждый импорт. Плюс
+   сет без поля `enabled` через REST-декодер b4 импортировался
+   выключенным.
+
+### Решение
+
+- **Нормализация доменов** (зеркалит catchall.ts Web UI b4):
+  `*.example.com` → `example.com`; `*`/`any`/`all` → `regexp:.*`;
+  `regexp:...` — как есть; дедуп. Применяется при импорте сета
+  (`_normalize_set_domains`) и при построении Xray-правил
+  (`_xray_domain_entries_from_b4` — regexp/catch-all записи в Xray
+  routing не транслируются; правило с пустым домен-массивом больше
+  не пишется — оно матчило бы весь трафик).
+- **Импорт через REST API b4** (PUT/POST /api/sets, hot-reload без
+  рестарта): b4 сам валидирует сет, применяет изменения live и сохраняет
+  config.json целиком. Идемпотентность: замена по id, затем по имени —
+  повторный импорт того же JSON не плодит дубликаты. Web UI под паролем
+  (401) или API недоступен → откат на прямую запись config.json.
+  Явный отказ валидатора b4 → импорт прерван (невалидный сет не пишется
+  в config.json, чтобы не ломать загрузку b4).
+- **Легаси-запись стала read-modify-write**: меняется только массив
+  `sets`, прочие top-level секции (queue/ui/system/version) сохраняются.
+  То же для `switch_preset`. Порт Web UI для REST детектится по
+  приоритету: флаг `--web-port` из systemd-unit (runtime-истина) →
+  `system.web_server.port` → state → дефолт.
+- Сет без `enabled` импортируется включённым (Go-декодер REST считает
+  отсутствующий bool = false; загрузчик config.json, наоборот,
+  pre-populate true — дефолт выравнивает оба пути).
+
+### Файлы
+
+- `chimera/modules/dpi_bypass.py` — нормализация + REST-импорт +
+  мёрж конфига (import_custom_set, switch_preset, apply_routing_for_set,
+  apply_routing_for_all_sets);
+- `chimera/modules/youtube_b4.py` — зеркально (нормализация + REST-импорт
+  + мёрж конфига);
+- `tests/test_dpi_bypass.py` — +39 тестов: нормализация, REST-пути
+  (POST/PUT/401/400/недоступен), сохранность top-level секций,
+  детект порта, пустые правила, синхронность модулей. Итог: 198 OK.
+
+---
+
 ## FIX(_core+chain_nodes+youtube_route+fragment_*): tcpUserTimeout 10с → 30с — не рвать соединения на коротких стогах тракта — 23 августа 2026
 
 **Проблема: у клиентов (mux поверх одного TCP) периодически валились «тонны»
