@@ -2530,26 +2530,23 @@ def do_dpi_bypass_menu() -> None:
             _box_row(f"  {DIM}{{\"name\":\"...\",\"targets\":{{\"sni_domains\":[...]}},...}}{NC}")
             _box_row(f"  {DIM}Или: {{\"sets\":[...]}} — возьмётся первый set.{NC}")
             _box_row()
-            _box_row(f"  {DIM}Вставьте JSON и нажмите Enter. Ctrl+C — отмена.{NC}")
+            _box_row(f"  {DIM}Вставьте JSON одной строкой или многострочно.{NC}")
+            _box_row(f"  {DIM}Чтение закончится автоматически, когда глубина '{{...}}' = 0.{NC}")
+            _box_row(f"  {DIM}Ctrl+C — отмена, Ctrl+D — конец ввода.{NC}")
             _box_bottom()
-            lines = []
+            # v4.26 FIX: readline-цикл через input() обрезает вставку на 4 КБ
+            # из-за канонического режима TTY (N_TTY_BUF_SIZE = 4096 в Linux).
+            # Большие сеты (Meta-facebook-v18-MAX и т.п., 8-15 КБ) падали с
+            # «Unterminated string at: column 4092». Используем cbreak-режим
+            # через termios — читаем посимвольно, без 4-КБ буфера.
+            from chimera.modules._tty_json import read_long_json_stdin
             try:
-                while True:
-                    line = input()
-                    if not line.strip():
-                        break
-                    lines.append(line)
-                    # Авто-завершение: если строка начинается с '{' и
-                    # заканчивается '}' — это полный JSON в одну строку.
-                    joined = "".join(lines).strip()
-                    if joined.startswith("{") and joined.endswith("}"):
-                        break
-            except (KeyboardInterrupt, EOFError):
+                json_str = read_long_json_stdin()
+            except KeyboardInterrupt:
                 print()
                 _warn("Отмена.")
                 input(f"\n{BOLD}Enter…{NC}")
                 continue
-            json_str = "\n".join(lines)
             if not json_str.strip():
                 _warn("Пустой ввод.")
                 input(f"\n{BOLD}Enter…{NC}")
