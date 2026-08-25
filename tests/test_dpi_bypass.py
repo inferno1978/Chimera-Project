@@ -71,6 +71,9 @@ class TestImportCustomSet(unittest.TestCase):
         self.dpi_bypass._STATE_FILE = self._state_file
         # Не позволяем реально вызывать systemctl
         self.dpi_bypass.subprocess = MagicMock()
+        # Изолируем от реального REST API b4 (иначе на сервере с живым b4
+        # тест импортировал бы сеты в прод). Форсим легаси-путь (config.json).
+        self.dpi_bypass._b4_rest_import_set = lambda cs: None
         # Трекаем вызовы apply_routing_for_all_sets
         self._routing_calls = []
         self._orig_apply = self.dpi_bypass.apply_routing_for_all_sets
@@ -216,6 +219,8 @@ class TestImportCustomSetFromFile(unittest.TestCase):
         self.dpi_bypass.B4_CONFIG_DIR = self._tmpdir
         self.dpi_bypass._STATE_FILE = self._state_file
         self.dpi_bypass.subprocess = MagicMock()
+        # Изолируем от реального REST API b4 (форсим легаси-путь).
+        self.dpi_bypass._b4_rest_import_set = lambda cs: None
         # Заглушка для apply_routing_for_set
         self.dpi_bypass.apply_routing_for_set = lambda *a, **kw: True
 
@@ -2196,6 +2201,637 @@ class TestUpdateMenuAndVersionSync(unittest.TestCase):
         dpi_src = inspect.getsource(self.dpi_bypass)
         self.assertIn("do_dpi_bypass_menu()", dpi_src.split('if __name__')[1])
         self.assertNotIn("do_youtube_b4_menu()", dpi_src)
+
+
+class TestDomainNormalization(unittest.TestCase):
+    """_normalize_b4_domain_entry / _normalize_set_domains — нормализация
+    wildcard-доменов к семантикам движка b4.
+
+    REGRESSION: движок b4 (sni/domain.go) сравнивает записи литерально —
+    "*.whatsapp.com" не матчит web.whatsapp.com. Собственный Web UI b4
+    стриппит "*." при ручном вводе, но JSON-импорт — нет. Сторонние
+    WA/FB/IG-сеты с wildcard-записями импортировались пустышками: нет
+    матча → нет бейджа в Traffic → нет DPI-обработки.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)
+        self.dpi_bypass = dpi_bypass
+
+    def test_wildcard_stripped_to_apex(self):
+        """'*.whatsapp.com' → 'whatsapp.com' (apex покрывает поддомены)."""
+        self.assertEqual(
+            self.dpi_bypass._normalize_b4_domain_entry("*.whatsapp.com"),
+            "whatsapp.com")
+
+    def test_double_wildcard_stripped(self):
+        """'*.*.example.com' → 'example.com' (повторяющийся '*.')."""
+        self.assertEqual(
+            self.dpi_bypass._normalize_b4_domain_entry("*.*.example.com"),
+            "example.com")
+
+    def test_plain_domain_unchanged(self):
+        n = self.dpi_bypass._normalize_b4_domain_entry("web.whatsapp.com")
+        self.assertEqual(n, "web.whatsapp.com")
+
+    def test_case_and_dots_normalized(self):
+        """'Example.COM.' → 'example.com' (движок lowercase + trim точек)."""
+        n = self.dpi_bypass._normalize_b4_domain_entry("  Example.COM.  ")
+        self.assertEqual(n, "example.com")
+
+    def test_any_shorthand_becomes_catch_all(self):
+        """'*'/'any'/'all' → 'regexp:.*' (catch-all движка b4)."""
+        for raw in ("*", "**", "*.*", "any", "all", "0/0"):
+            self.assertEqual(
+                self.dpi_bypass._normalize_b4_domain_entry(raw),
+                "regexp:.*", f"{raw} должен стать catch-all")
+
+    def test_regexp_entry_preserved(self):
+        n = self.dpi_bypass._normalize_b4_domain_entry("regexp:.*\\.googlevideo\\.com")
+        self.assertEqual(n, "regexp:.*\\.googlevideo\\.com")
+
+    def test_empty_entry_returns_none(self):
+        for raw in ("", "   ", None):
+            self.assertIsNone(self.dpi_bypass._normalize_b4_domain_entry(raw))
+
+    def test_normalize_set_domains_inplace(self):
+        """Сет с wildcard-записями нормализуется in-place + дедуп."""
+        custom_set = {
+            "id": "wa",
+            "targets": {"sni_domains": [
+                "*.whatsapp.com", "whatsapp.com", "wa.me",
+                "  *.WHATSAPP.NET  ", "",
+            ]},
+        }
+        changed = self.dpi_bypass._normalize_set_domains(custom_set)
+        self.assertEqual(custom_set["targets"]["sni_domains"],
+                         ["whatsapp.com", "wa.me", "whatsapp.net"])
+        self.assertEqual(changed, 3)  # *.com, *.NET(кейс+пробелы), ''
+
+    def test_normalize_set_domains_no_targets(self):
+        """Сет без targets / без sni_domains — no-op, без исключений."""
+        self.assertEqual(self.dpi_bypass._normalize_set_domains({"id": "x"}), 0)
+        self.assertEqual(
+            self.dpi_bypass._normalize_set_domains(
+                {"targets": {"geosite_categories": ["youtube"]}}), 0)
+
+
+class TestXrayDomainEntries(unittest.TestCase):
+    """_xray_domain_entries_from_b4 — домены b4-сета → записи Xray routing.
+
+    REGRESSION: apply_routing_for_* писал в Xray 'domain:*.whatsapp.com' —
+    литеральная wildcard-запись не матчит НИЧЕГО в суффикс-матчере Xray,
+    поэтому трафик FB/IG/WA не пинился на direct (RU entry) — в отличие
+    от YouTube, где youtube_route.py всегда писал apex-домены.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)
+        self.dpi_bypass = dpi_bypass
+
+    def test_wildcard_becomes_apex_entry(self):
+        entries = self.dpi_bypass._xray_domain_entries_from_b4(
+            ["*.whatsapp.com", "web.facebook.com"])
+        self.assertEqual(entries, ["domain:whatsapp.com",
+                                   "domain:web.facebook.com"])
+
+    def test_catch_all_not_translated(self):
+        """Catch-all не транслируется — пин всего трафика на direct опасен."""
+        entries = self.dpi_bypass._xray_domain_entries_from_b4(
+            ["*", "any", "regexp:.*", "whatsapp.com"])
+        self.assertEqual(entries, ["domain:whatsapp.com"])
+
+    def test_regexp_entries_skipped(self):
+        entries = self.dpi_bypass._xray_domain_entries_from_b4(
+            ["regexp:.*\\.ggpht\\.com", "ytimg.com"])
+        self.assertEqual(entries, ["domain:ytimg.com"])
+
+    def test_dedupe(self):
+        entries = self.dpi_bypass._xray_domain_entries_from_b4(
+            ["*.whatsapp.com", "whatsapp.com", "WHATSAPP.COM."])
+        self.assertEqual(entries, ["domain:whatsapp.com"])
+
+    def test_empty_and_garbage(self):
+        self.assertEqual(
+            self.dpi_bypass._xray_domain_entries_from_b4([]), [])
+        self.assertEqual(
+            self.dpi_bypass._xray_domain_entries_from_b4(
+                [None, 42, "", "   "]), [])
+
+
+class TestImportWildcardNormalization(unittest.TestCase):
+    """import_custom_set нормализует wildcard-домены при импорте
+    (легаси-путь config.json — REST отключён)."""
+
+    def setUp(self):
+        self.core = _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)  # чистый модуль (патчи прошлых классов)
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._config_file = self._tmpdir / "config.json"
+        self._state_file = self._tmpdir / "state.json"
+        self.dpi_bypass = dpi_bypass
+        self.dpi_bypass.B4_CONFIG_FILE = self._config_file
+        self.dpi_bypass.B4_CONFIG_DIR = self._tmpdir
+        self.dpi_bypass._STATE_FILE = self._state_file
+        self.dpi_bypass.subprocess = MagicMock()
+        self.dpi_bypass._b4_rest_import_set = lambda cs: None  # легаси-путь
+        self.dpi_bypass.apply_routing_for_all_sets = lambda: {
+            "applied": 0, "removed": 0, "total_domains": 0, "errors": []}
+
+    def test_wildcards_normalized_in_saved_config(self):
+        """Реальный сторонний WA-сет: wildcard'ы → apex в config.json."""
+        wa_set = {
+            "id": "third-party-wa",
+            "name": "whatsapp",
+            "enabled": True,
+            "targets": {"sni_domains": [
+                "*.whatsapp.com", "*.whatsapp.net", "*.whatsapp.org",
+                "*.whatsapp.tv", "wa.me",
+            ]},
+        }
+        self.assertTrue(self.dpi_bypass.import_custom_set(json.dumps(wa_set)))
+        saved = json.loads(self._config_file.read_text())
+        domains = saved["sets"][0]["targets"]["sni_domains"]
+        self.assertIn("whatsapp.com", domains)
+        self.assertIn("whatsapp.net", domains)
+        self.assertIn("wa.me", domains)
+        self.assertNotIn("*.whatsapp.com", domains)
+        # Ни одной wildcard-записи не осталось
+        self.assertFalse(any(d.startswith("*.") for d in domains))
+
+    def test_enabled_defaults_to_true(self):
+        """REGRESSION: сет без 'enabled' импортировался выключенным
+        (Go-декодер b4 считает отсутствующее поле = false)."""
+        test_json = json.dumps({
+            "id": "no-enabled",
+            "targets": {"sni_domains": ["example.com"]},
+        })
+        self.assertTrue(self.dpi_bypass.import_custom_set(test_json))
+        saved = json.loads(self._config_file.read_text())
+        self.assertIs(saved["sets"][0]["enabled"], True)
+
+    def test_existing_enabled_value_respected(self):
+        """Явное enabled=False в JSON не перезаписывается."""
+        test_json = json.dumps({
+            "id": "explicit-disabled",
+            "enabled": False,
+            "targets": {"sni_domains": ["example.com"]},
+        })
+        self.assertTrue(self.dpi_bypass.import_custom_set(test_json))
+        saved = json.loads(self._config_file.read_text())
+        self.assertIs(saved["sets"][0]["enabled"], False)
+
+
+class TestImportPreservesTopLevelConfig(unittest.TestCase):
+    """REGRESSION: import_custom_set перезаписывал весь config.json
+    минимальным шаблоном {sets, routing, udp, system} — терялись
+    топ-уровневые queue (NFQUEUE/mark/ipv6), ui и system.webserver
+    (порт Web UI, auth) со сбросом на дефолты b4."""
+
+    def setUp(self):
+        self.core = _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)  # чистый модуль (патчи прошлых классов)
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._config_file = self._tmpdir / "config.json"
+        self._state_file = self._tmpdir / "state.json"
+        self.dpi_bypass = dpi_bypass
+        self.dpi_bypass.B4_CONFIG_FILE = self._config_file
+        self.dpi_bypass.B4_CONFIG_DIR = self._tmpdir
+        self.dpi_bypass._STATE_FILE = self._state_file
+        self.dpi_bypass.subprocess = MagicMock()
+        self.dpi_bypass._b4_rest_import_set = lambda cs: None
+        self.dpi_bypass.apply_routing_for_all_sets = lambda: {
+            "applied": 0, "removed": 0, "total_domains": 0, "errors": []}
+
+    def test_queue_ui_system_webserver_survive(self):
+        # Конфиг в каноническом формате b4 v1.79 (как пишет сам b4)
+        existing = {
+            "queue": {"num": 537, "mark": 32768, "ipv6": False},
+            "sets": [{"id": "old-set", "name": "Old", "enabled": True,
+                      "targets": {"sni_domains": ["old.com"]}}],
+            "system": {
+                "webserver": {"port": 7000, "username": "admin",
+                              "password": "secret"},
+                "geosite_path": "/usr/share/xray/geosite.dat",
+            },
+            "ui": {"theme": "dark"},
+        }
+        self._config_file.write_text(json.dumps(existing))
+        test_json = json.dumps({
+            "id": "new-set",
+            "targets": {"sni_domains": ["new.com"]},
+        })
+        self.assertTrue(self.dpi_bypass.import_custom_set(test_json))
+        saved = json.loads(self._config_file.read_text())
+        # Топ-уровневые секции сохранены
+        self.assertEqual(saved["queue"], {"num": 537, "mark": 32768,
+                                          "ipv6": False})
+        self.assertEqual(saved["ui"], {"theme": "dark"})
+        self.assertEqual(saved["system"]["webserver"]["port"], 7000)
+        self.assertEqual(saved["system"]["webserver"]["username"], "admin")
+        self.assertEqual(saved["system"]["webserver"]["password"], "secret")
+        # Старый сет не потерян, новый добавлен
+        ids = [s["id"] for s in saved["sets"]]
+        self.assertEqual(ids, ["old-set", "new-set"])
+
+    def test_corrupted_config_recovers(self):
+        """Повреждённый config.json → импорт в чистый конфиг, не крах."""
+        self._config_file.write_text("{corrupted json")
+        test_json = json.dumps({
+            "id": "fresh-set",
+            "targets": {"sni_domains": ["fresh.com"]},
+        })
+        self.assertTrue(self.dpi_bypass.import_custom_set(test_json))
+        saved = json.loads(self._config_file.read_text())
+        self.assertEqual(saved["sets"][0]["id"], "fresh-set")
+        # system-секция создана (geosite для Discovery)
+        self.assertIn("geosite_path", saved["system"])
+
+
+class TestImportViaRestApi(unittest.TestCase):
+    """import_custom_set через REST API b4 (мокнутый _b4_rest_request)."""
+
+    def setUp(self):
+        self.core = _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)  # чистый модуль (патчи прошлых классов)
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._config_file = self._tmpdir / "config.json"
+        self._state_file = self._tmpdir / "state.json"
+        self.dpi_bypass = dpi_bypass
+        self.dpi_bypass.B4_CONFIG_FILE = self._config_file
+        self.dpi_bypass.B4_CONFIG_DIR = self._tmpdir
+        self.dpi_bypass._STATE_FILE = self._state_file
+        self.dpi_bypass.subprocess = MagicMock()
+        self._calls = []
+        self._routing_calls = []
+        self.dpi_bypass.apply_routing_for_all_sets = \
+            lambda: self._routing_calls.append(1) or {
+                "applied": 0, "removed": 0, "total_domains": 0, "errors": []}
+
+    def _mock_rest(self, responses):
+        """responses: list of (status, body) в порядке вызовов."""
+        def fake_request(method, path, payload=None):
+            self._calls.append((method, path, payload))
+            return responses.pop(0) if responses else (200, None)
+        self.dpi_bypass._b4_rest_request = fake_request
+
+    def test_new_set_posted_normalized_and_enabled(self):
+        """Новый сет → POST /api/sets с нормализованными доменами."""
+        self._mock_rest([(200, []),
+                         (201, {"id": "b4-uuid", "name": "wa"})])
+        test_json = json.dumps({
+            "name": "wa",
+            "targets": {"sni_domains": ["*.whatsapp.com", "wa.me"]},
+        })
+        self.assertTrue(self.dpi_bypass.import_custom_set(test_json))
+        # GET /api/sets + POST /api/sets
+        self.assertEqual([c[0] for c in self._calls], ["GET", "POST"])
+        self.assertEqual(self._calls[1][1], "/api/sets")
+        posted = self._calls[1][2]
+        self.assertEqual(posted["targets"]["sni_domains"],
+                         ["whatsapp.com", "wa.me"])
+        self.assertIs(posted["enabled"], True)
+        # REST-путь: config.json НЕ пишется, systemctl НЕ вызывается
+        self.assertFalse(self._config_file.exists())
+        self.assertFalse(self.dpi_bypass.subprocess.run.called)
+        # State обновлён, routing синхронизирован
+        state = json.loads(self._state_file.read_text())
+        self.assertEqual(state["active_preset"], "custom")
+        self.assertEqual(len(self._routing_calls), 1)
+
+    def test_existing_id_replaced_via_put(self):
+        """Сет с существующим id → PUT /api/sets/{id} (замена)."""
+        self._mock_rest([(200, [{"id": "wa-1", "name": "old-name"}]),
+                         (200, {"id": "wa-1"})])
+        test_json = json.dumps({
+            "id": "wa-1", "name": "new-name",
+            "targets": {"sni_domains": ["example.com"]},
+        })
+        self.assertTrue(self.dpi_bypass.import_custom_set(test_json))
+        self.assertEqual(self._calls[1][0], "PUT")
+        self.assertEqual(self._calls[1][1], "/api/sets/wa-1")
+
+    def test_same_name_replaced_via_put(self):
+        """Повторный импорт того же JSON (новый id от b4) → PUT по имени,
+        а не дубль через POST."""
+        self._mock_rest([(200, [{"id": "b4-uuid-1", "name": "wa"}]),
+                         (200, {"id": "b4-uuid-1"})])
+        test_json = json.dumps({
+            "id": "original-id", "name": "wa",
+            "targets": {"sni_domains": ["whatsapp.com"]},
+        })
+        self.assertTrue(self.dpi_bypass.import_custom_set(test_json))
+        self.assertEqual(self._calls[1][0], "PUT")
+        self.assertEqual(self._calls[1][1], "/api/sets/b4-uuid-1")
+
+    def test_rejected_set_does_not_touch_config(self):
+        """b4 отклонил сет (валидация, HTTP 400) → False, config.json
+        НЕ пишется (иначе невалидный сет ломал бы загрузку b4)."""
+        self._mock_rest([(200, []),
+                         (400, {"error": "invalid set: bad port"})])
+        test_json = json.dumps({
+            "id": "bad", "targets": {"sni_domains": ["x.com"]},
+        })
+        self.assertFalse(self.dpi_bypass.import_custom_set(test_json))
+        self.assertFalse(self._config_file.exists())
+
+    def test_api_unavailable_falls_back_to_config(self):
+        """API недоступен (None) → откат на легаси-путь config.json."""
+        self.dpi_bypass._b4_rest_request = \
+            lambda method, path, payload=None: None
+        test_json = json.dumps({
+            "id": "fallback", "targets": {"sni_domains": ["fb.com"]},
+        })
+        self.assertTrue(self.dpi_bypass.import_custom_set(test_json))
+        saved = json.loads(self._config_file.read_text())
+        self.assertEqual(saved["sets"][0]["id"], "fallback")
+        # Легаси-путь перезапускает сервис
+        self.assertTrue(self.dpi_bypass.subprocess.run.called)
+
+    def test_auth_enabled_falls_back_to_config(self):
+        """Web UI под паролем (401) → откат на легаси-путь."""
+        self.dpi_bypass._b4_rest_request = \
+            lambda method, path, payload=None: (401, {"error": "unauthorized"})
+        test_json = json.dumps({
+            "id": "auth", "targets": {"sni_domains": ["ig.com"]},
+        })
+        self.assertTrue(self.dpi_bypass.import_custom_set(test_json))
+        saved = json.loads(self._config_file.read_text())
+        self.assertEqual(saved["sets"][0]["id"], "auth")
+
+
+class TestB4WebPortDetection(unittest.TestCase):
+    """_b4_web_port — детект порта Web UI b4.
+
+    Приоритет: флаг --web-port из systemd-unit (runtime-истина — флаг
+    применяется поверх config.json, config/bind.go) → config.json
+    system.web_server.port → state → дефолт 9700.
+    """
+
+    def setUp(self):
+        self.core = _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)  # чистый модуль (патчи прошлых классов)
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._config_file = self._tmpdir / "config.json"
+        self._state_file = self._tmpdir / "state.json"
+        self._unit_file = self._tmpdir / "b4.service"
+        self.dpi_bypass = dpi_bypass
+        self.dpi_bypass.B4_CONFIG_FILE = self._config_file
+        self.dpi_bypass._STATE_FILE = self._state_file
+        # Герметичность: /etc/systemd/system/b4.service хоста не влияет.
+        self.dpi_bypass.B4_UNIT_PATH = self._unit_file
+
+    def test_unit_flag_takes_precedence(self):
+        """Флаг --web-port из systemd-unit важнее config.json
+        (bind.go: явно заданный флаг применяется поверх конфига)."""
+        self._unit_file.write_text(
+            "[Service]\n"
+            "ExecStart=/usr/local/bin/b4 --config /etc/b4/config.json \\\n"
+            "    --queue-num 537 --mark 32768 \\\n"
+            "    --web-port 9701 \\\n"
+            "    --verbose silent --ipv4 --ipv6\n")
+        self._config_file.write_text(json.dumps(
+            {"system": {"web_server": {"port": 8123}}}))
+        self.assertEqual(self.dpi_bypass._b4_web_port(), 9701)
+
+    def test_port_from_config_json(self):
+        """Порт читается из system.web_server.port (json-тег
+        WebServerConfig в структуре Config b4 — web_server, не webserver)."""
+        self._config_file.write_text(json.dumps(
+            {"system": {"web_server": {"port": 8123}}}))
+        self.assertEqual(self.dpi_bypass._b4_web_port(), 8123)
+
+    def test_fallback_to_state(self):
+        """Нет web_server.port → state web_port → дефолт 9700."""
+        self._config_file.write_text(json.dumps({"sets": []}))
+        self._state_file.write_text(json.dumps({"web_port": 9701}))
+        self.assertEqual(self.dpi_bypass._b4_web_port(), 9701)
+        self._state_file.write_text(json.dumps({}))
+        self.assertEqual(self.dpi_bypass._b4_web_port(), 9700)
+
+    def test_no_config_uses_default(self):
+        self.assertEqual(self.dpi_bypass._b4_web_port(), 9700)
+
+    def test_invalid_port_ignored(self):
+        """Мусор в port (строка/0/отрицательный) не ломает детект."""
+        self._config_file.write_text(json.dumps(
+            {"system": {"web_server": {"port": "not-a-port"}}}))
+        self.assertEqual(self.dpi_bypass._b4_web_port(), 9700)
+
+
+class TestApplyRoutingAllSetsNormalization(unittest.TestCase):
+    """apply_routing_for_all_sets нормализует домены в Xray-правиле и
+    не пишет правило с пустым массивом domain (match-all в Xray)."""
+
+    def setUp(self):
+        self.core = _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)  # чистый модуль (патчи прошлых классов)
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._config_file = self._tmpdir / "config.json"
+        self._xray_dir = self._tmpdir / "xray"
+        self._xray_dir.mkdir()
+        self._xray_config = self._xray_dir / "config.json"
+        self.dpi_bypass = dpi_bypass
+        self.dpi_bypass.B4_CONFIG_FILE = self._config_file
+        self.dpi_bypass._STATE_FILE = self._tmpdir / "state.json"
+        # Перенаправляем пути Xray в tmp
+        self._orig_paths = dpi_bypass.Path
+        self.dpi_bypass._xray_safe_restart = lambda: True
+        self.dpi_bypass._get_xray_outbound_tag = lambda: "direct"
+        self.dpi_bypass._set_xray_config_owner = lambda p: None
+
+    def _patch_xray_paths(self):
+        """Подменяет константы путей Xray на tmp-пути."""
+        import chimera.modules.dpi_bypass as m
+        real_path = m.Path
+
+        def fake_path(*args, **kwargs):
+            p = str(args[0]) if args else ""
+            for candidate, replacement in (
+                    ("/usr/local/etc/xray/config.json", self._xray_config),
+                    ("/etc/xray/config.json", self._xray_config)):
+                if p == candidate:
+                    return real_path(str(replacement))
+            return real_path(*args, **kwargs)
+        return fake_path
+
+    def test_wildcard_domains_normalized_in_rule(self):
+        """Сеты с wildcard'ами (легаси-импорт до фикса) → правило
+        получает apex-домены: routing чинится даже без переимпорта."""
+        self._config_file.write_text(json.dumps({
+            "sets": [
+                {"id": "wa-set", "enabled": True,
+                 "targets": {"sni_domains": ["*.whatsapp.com", "wa.me"]}},
+                {"id": "fb-set", "enabled": True,
+                 "targets": {"sni_domains": ["*.facebook.com"]}},
+            ]}))
+        self._xray_config.write_text(json.dumps({
+            "routing": {"rules": [
+                {"type": "field", "outboundTag": "proxy",
+                 "domain": ["geosite:youtube"]}]}}))
+        fake_path = self._patch_xray_paths()
+        with patch.object(self.dpi_bypass, "Path", fake_path):
+            result = self.dpi_bypass.apply_routing_for_all_sets()
+        self.assertEqual(result["applied"], 2)
+        rules = json.loads(self._xray_config.read_text())["routing"]["rules"]
+        b4_rule = next(r for r in rules
+                       if r.get("comment", "").startswith("chimera-b4-route-"))
+        self.assertEqual(b4_rule["domain"],
+                         ["domain:facebook.com", "domain:whatsapp.com",
+                          "domain:wa.me"])  # sorted-порядок доменов
+        # Прочие правила не тронуты
+        other = [r for r in rules if not r.get("comment", "").startswith(
+            "chimera-b4-route-")]
+        self.assertEqual(len(other), 1)
+
+    def test_catch_all_only_sets_produce_no_rule(self):
+        """Сет только с catch-all → правило НЕ пишется (пустой domain
+        в Xray = match-all = весь трафик на direct)."""
+        self._config_file.write_text(json.dumps({
+            "sets": [{"id": "catchall-set", "enabled": True,
+                      "targets": {"sni_domains": ["*", "regexp:.*"]}}]}))
+        self._xray_config.write_text(json.dumps({
+            "routing": {"rules": [
+                {"type": "field", "outboundTag": "direct",
+                 "comment": "chimera-b4-route-all-synced",
+                 "domain": ["domain:stale.com"]}]}}))
+        fake_path = self._patch_xray_paths()
+        with patch.object(self.dpi_bypass, "Path", fake_path):
+            result = self.dpi_bypass.apply_routing_for_all_sets()
+        self.assertEqual(result["applied"], 0)
+        rules = json.loads(self._xray_config.read_text())["routing"]["rules"]
+        # Stale-правило удалено, новое НЕ добавлено
+        self.assertEqual(rules, [])
+
+    def test_disabled_sets_excluded(self):
+        """Disabled-сет не попадает в правило (и его stale-правило
+        удаляется)."""
+        self._config_file.write_text(json.dumps({
+            "sets": [
+                {"id": "on", "enabled": True,
+                 "targets": {"sni_domains": ["ok.com"]}},
+                {"id": "off", "enabled": False,
+                 "targets": {"sni_domains": ["off.com"]}},
+            ]}))
+        self._xray_config.write_text(json.dumps({
+            "routing": {"rules": [
+                {"type": "field", "outboundTag": "direct",
+                 "comment": "chimera-b4-route-off",
+                 "domain": ["domain:off.com"]}]}}))
+        fake_path = self._patch_xray_paths()
+        with patch.object(self.dpi_bypass, "Path", fake_path):
+            result = self.dpi_bypass.apply_routing_for_all_sets()
+        self.assertEqual(result["applied"], 1)
+        rules = json.loads(self._xray_config.read_text())["routing"]["rules"]
+        b4_rule = next(r for r in rules
+                       if r.get("comment") == "chimera-b4-route-all-synced")
+        self.assertEqual(b4_rule["domain"], ["domain:ok.com"])
+
+
+class TestSwitchPresetPreservesConfig(unittest.TestCase):
+    """switch_preset мёржит конфиг, а не перезаписывает минимальным
+    шаблоном (queue/ui/system.webserver должны сохраниться)."""
+
+    def setUp(self):
+        self.core = _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import dpi_bypass
+        importlib.reload(dpi_bypass)  # чистый модуль (патчи прошлых классов)
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._config_file = self._tmpdir / "config.json"
+        self._state_file = self._tmpdir / "state.json"
+        self.dpi_bypass = dpi_bypass
+        self.dpi_bypass.B4_CONFIG_FILE = self._config_file
+        self.dpi_bypass.B4_CONFIG_DIR = self._tmpdir
+        self.dpi_bypass._STATE_FILE = self._state_file
+        self.dpi_bypass.subprocess = MagicMock()
+
+    def test_preset_switch_keeps_top_level(self):
+        existing = {
+            "queue": {"num": 537, "mark": 32768},
+            "sets": [{"id": "custom-wa", "name": "WA",
+                      "enabled": True,
+                      "targets": {"sni_domains": ["whatsapp.com"]}}],
+            "system": {"webserver": {"port": 7000}},
+        }
+        self._config_file.write_text(json.dumps(existing))
+        self.assertTrue(self.dpi_bypass.switch_preset("default"))
+        saved = json.loads(self._config_file.read_text())
+        # Топ-уровневые секции сохранены
+        self.assertEqual(saved["queue"], {"num": 537, "mark": 32768})
+        self.assertEqual(saved["system"]["webserver"]["port"], 7000)
+        # Preset заменил set'ы (прежняя семантика)
+        self.assertEqual(len(saved["sets"]), 1)
+        self.assertEqual(saved["sets"][0]["name"], "Youtube")
+
+    def test_preset_not_mutated_by_normalization(self):
+        """Глобальный PRESETS не мутируется при switch_preset
+        (глубокая копия перед _normalize_set_domains)."""
+        before = json.dumps(self.dpi_bypass.PRESETS["default"][1])
+        self.assertTrue(self.dpi_bypass.switch_preset("default"))
+        after = json.dumps(self.dpi_bypass.PRESETS["default"][1])
+        self.assertEqual(before, after)
+
+
+class TestNormalizationSyncBetweenModules(unittest.TestCase):
+    """Нормализация и REST-хелперы зеркальны в dpi_bypass и youtube_b4."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.youtube_b4 = youtube_b4
+        self.dpi_bypass = dpi_bypass
+
+    def test_both_modules_have_helpers(self):
+        for fn in ("_normalize_b4_domain_entry", "_normalize_set_domains",
+                   "_xray_domain_entries_from_b4", "_b4_web_port",
+                   "_b4_rest_request", "_b4_rest_import_set"):
+            self.assertTrue(hasattr(self.dpi_bypass, fn),
+                            f"dpi_bypass lacks {fn}")
+            self.assertTrue(hasattr(self.youtube_b4, fn),
+                            f"youtube_b4 lacks {fn}")
+
+    def test_normalization_behaves_identically(self):
+        cases = ["*.whatsapp.com", "*.*.example.com", "*", "any",
+                 "regexp:.*\\.com", "Example.COM.", "", "wa.me"]
+        for raw in cases:
+            self.assertEqual(
+                self.dpi_bypass._normalize_b4_domain_entry(raw),
+                self.youtube_b4._normalize_b4_domain_entry(raw),
+                f"divergence for {raw!r}")
+
+    def test_xray_entries_behave_identically(self):
+        domains = ["*.whatsapp.com", "whatsapp.com", "*", "regexp:.*",
+                   "wa.me", " Example.COM. "]
+        self.assertEqual(
+            self.dpi_bypass._xray_domain_entries_from_b4(domains),
+            self.youtube_b4._xray_domain_entries_from_b4(domains))
+
+    def test_rest_import_set_code_identical(self):
+        """REST-импорт в обоих модулях — один и тот же код (зеркало)."""
+        import inspect
+        src_a = inspect.getsource(self.dpi_bypass._b4_rest_import_set)
+        src_b = inspect.getsource(self.youtube_b4._b4_rest_import_set)
+        self.assertEqual(src_a, src_b)
 
 
 if __name__ == "__main__":
