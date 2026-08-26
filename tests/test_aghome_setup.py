@@ -411,8 +411,27 @@ class TestBuildSections(unittest.TestCase):
                       self.mod.build_http_section(self.mod.AGH_WEB_HTTP_PUB))
         self.assertIn("address: 127.0.0.1:3000",
                       self.mod.build_http_section(self.mod.AGH_WEB_LOOPBACK))
-        self.assertIn("address: 127.0.0.1:3000",
+        # v48: TLS-режимы биндят 0.0.0.0 — HTTPS :30443 следует хосту
+        # http.address, иначе Web UI снаружи требует SSH-туннель
+        self.assertIn("address: 0.0.0.0:3000",
                       self.mod.build_http_section(self.mod.AGH_WEB_HTTPS_LE))
+        self.assertIn("address: 0.0.0.0:3000",
+                      self.mod.build_http_section(self.mod.AGH_WEB_HTTPS_SELF))
+
+    def test_http_section_tls_bind_follows_v48(self):
+        """Regression v48: https-режимы НЕ должны уходить в loopback —
+        AGH биндит port_https на хост http.address (web.go:
+        netip.AddrPortFrom(BindAddr, portHTTPS)), loopback-бинд оставлял
+        :30443 недоступным снаружи при открытом UFW.
+        """
+        for mode in (self.mod.AGH_WEB_HTTPS_LE, self.mod.AGH_WEB_HTTPS_SELF,
+                     self.mod.AGH_WEB_HTTP_PUB):
+            s = self.mod.build_http_section(mode)
+            self.assertIn("address: 0.0.0.0:3000", s,
+                          f"{mode}: HTTPS-порт останется loopback-only")
+        # loopback — единственный полностью локальный режим
+        self.assertIn("address: 127.0.0.1:3000",
+                      self.mod.build_http_section(self.mod.AGH_WEB_LOOPBACK))
 
     def test_filters_section_three_filters(self):
         s = self.mod.build_filters_section()
@@ -1091,7 +1110,7 @@ schema_version: 29
         self.assertIn("- 127.0.0.1:5300", text)          # upstream → dnscrypt
         self.assertIn("ratelimit: 20", text)
         self.assertIn("cache_size: 4194304", text)
-        self.assertIn("address: 127.0.0.1:3000", text)   # web loopback
+        self.assertIn("address: 0.0.0.0:3000", text)      # v48: TLS-режим биндит 0.0.0.0 (UFW снаружи закрыт)
         self.assertIn("port_https: 30443", text)         # DoH+UI TLS
         self.assertIn("port_dns_over_tls: 853", text)
         self.assertIn("adguardteam.github.io/AdGuardSDNSFilter", text)
