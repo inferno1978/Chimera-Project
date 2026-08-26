@@ -311,15 +311,51 @@ def _wait_service(svc: str, max_sec: int = 30) -> bool:
 # ============================================================================
 #  МИГРАЦИЯ: СНЯТЬ :53 У DNSCRYPT
 # ============================================================================
+def _ensure_dns_redirect_safety(port: int, remove: bool = False) -> bool:
+    """Страховка DNS на время wizard-фазы: redirect 53→port (или снятие).
+
+    v41: на живых серверах с ручным фиксом v33 redirect НИКОГДА не
+    ставился (dnscrypt слушал :53 напрямую, redirect был не нужен).
+    Миграция снимала :53 — и DNS попадал в black-hole: resolv.conf →
+    127.0.0.1:53, где больше никого нет (AGH в wizard-режиме :53 не
+    слушает). Ставим redirect ДО правки TOML: пока dnscrypt ещё на
+    :53+{port} — redirect не мешает, после снятия :53 — единственный
+    путь. Использует канонические правила resolv_conf_fix (comment
+    «chimera-dns-fix» — персист-скрипт узнаёт их на ребуте).
+
+    Возвращает True при успехе (или если port == 53 — redirect не нужен).
+    """
+    if port == 53:
+        return True
+    try:
+        from chimera.modules.resolv_conf_fix import (
+            _apply_dns_redirect, _remove_dns_redirect,
+        )
+        if remove:
+            ok, _err = _remove_dns_redirect(port)
+        else:
+            ok, _err = _apply_dns_redirect(port)
+        return ok
+    except Exception:
+        return False
+
+
 def migrate_dnscrypt_off_53() -> bool:
     """Снимает :53 у dnscrypt-proxy (ручной фикс v33 на живых серверах
     слушал 127.0.0.1:53).
 
-    Перезаписывает listen_addresses на [127.0.0.1:{port}] (только :5300),
-    делает бэкап TOML, рестартит dnscrypt и проверяет что :5300 слушается.
-    Идемпотентно: если dnscrypt не слушает :53 — ничего не делает.
+    Порядок (v41 — с защитой от DNS black-hole):
+      1. Если dnscrypt держит :53 — СНАЧАЛА ставим redirect-страховку
+         53→{port} (DNS жив на протяжении всей миграции), только потом
+         правим TOML и рестартим.
+      2. Если dnscrypt :53 уже не держит (повторная установка) — тоже
+         гарантируем redirect: wizard-фаза живёт на нём.
+      3. Провал рестарта — откат TOML + снятие redirect.
 
-    Возвращает True если после вызова dnscrypt слушает ТОЛЬКО :5300.
+    Идемпотентно: повторный вызов безопасен.
+
+    Возвращает True если dnscrypt слушает ТОЛЬКО :{port} И redirect
+    (или сам :53) обслуживает системный DNS.
     """
     core = _core_module()
     warn = core.warn
@@ -374,7 +410,30 @@ def migrate_dnscrypt_off_53() -> bool:
 
     if not dns53_taken:
         info("AGH: dnscrypt не держит :53 — миграция не требуется")
+        # v41: повторная установка на сервере в битом состоянии (миграция
+        # прошлой версии уже сняла :53, но redirect никто не поставил) —
+        # самовосстановление: ставим страховку, DNS оживает через dnscrypt.
+        if _port_listening(port, "udp") or port == 53:
+            if port != 53 and _ensure_dns_redirect_safety(port):
+                info(f"AGH: redirect-страховка 53→{port} установлена "
+                     "(wizard-фаза: DNS живёт через dnscrypt)")
+            elif port != 53:
+                warn("AGH: не удалось поставить redirect 53→" + str(port)
+                     + " — если DNS не резолвит, Сеть → диагностика DNS")
         return True
+
+    # v41: СНАЧАЛА страховка — потом правка TOML. Пока dnscrypt слушает
+    # и :53, и {port}, redirect 53→{port} ничего не ломает; после снятия
+    # :53 он становится единственным путём DNS. На серверах с ручным
+    # фиксом v33 redirect никогда не ставился — без него миграция
+    # создавала DNS black-hole («Could not resolve host»). БЕЗ страховки
+    # TOML не трогаем.
+    if not _ensure_dns_redirect_safety(port):
+        warn(f"AGH: не удалось поставить redirect-страховку 53→{port} "
+             "(iptables недоступен?)")
+        warn("AGH: миграция прервана ДО правки TOML — системный DNS не тронут")
+        return False
+    info(f"AGH: redirect-страховка 53→{port} установлена — DNS жив при миграции")
 
     # Бэкап + перезапись listen_addresses → только 127.0.0.1:{port}
     bak = toml_path.with_name(
@@ -396,7 +455,7 @@ def migrate_dnscrypt_off_53() -> bool:
     subprocess.run(["systemctl", "restart", "dnscrypt-proxy"],
                    capture_output=True, check=False)
     if not _wait_service("dnscrypt-proxy", 30):
-        # откат
+        # откат: TOML + снятие страховки (возврат к исходному состоянию)
         warn("AGH: dnscrypt не поднялся после миграции — откат TOML")
         try:
             shutil.copy2(bak, toml_path)
@@ -405,6 +464,7 @@ def migrate_dnscrypt_off_53() -> bool:
             _wait_service("dnscrypt-proxy", 20)
         except Exception:
             pass
+        _ensure_dns_redirect_safety(port, remove=True)
         return False
 
     # dnscrypt может слушать :53 несколько секунд (SS backlog) — проверяем

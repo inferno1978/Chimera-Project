@@ -335,9 +335,13 @@ class TestMigrateDnscryptOff53(unittest.TestCase):
         # после рестарта — только 5300
         ss_5300 = ("udp UNCONN 0 0 127.0.0.1:5300 0.0.0.0:* "
                    "users:((\"dnscrypt-proxy\"))\n")
+        safety_calls = []
         with patch.object(self.mod, "_core_module",
                           return_value=self._core_mock()), \
              patch.object(self.mod, "AGH_DNSCRYPT_TOML", self.toml), \
+             patch.object(self.mod, "_ensure_dns_redirect_safety",
+                          side_effect=lambda port, remove=False:
+                              safety_calls.append((port, remove)) or True), \
              patch.object(self.mod, "subprocess") as sub:
             state = {"migrated": False, "restarted": False}
             def run_side_effect(cmd, **kw):
@@ -349,6 +353,7 @@ class TestMigrateDnscryptOff53(unittest.TestCase):
                     out = "inactive"
                 elif "restart" in cmd_s:
                     state["restarted"] = True
+                    safety_calls.append(("restart", None))
                 elif "-ulnp" in cmd_s or "-tulnp" in cmd_s:
                     # до рестарта dnscrypt держит :53, после — только 5300
                     out = ss_5300 if state["restarted"] else ss_53
@@ -365,12 +370,19 @@ class TestMigrateDnscryptOff53(unittest.TestCase):
         self.assertEqual(len(baks), 1)
         # бэкап содержит оригинальный (двухадресный) конфиг
         self.assertIn("127.0.0.1:53", baks[0].read_text())
+        # v41: страховка 53→5300 поставлена ДО рестарта dnscrypt
+        self.assertEqual(safety_calls[0], (5300, False))
+        restarts = [i for i, c in enumerate(safety_calls) if c[0] == "restart"]
+        self.assertTrue(restarts, "restart dnscrypt должен быть вызван")
+        self.assertLess(safety_calls.index((5300, False)), restarts[0])
 
     def test_no_migration_when_53_free(self):
         self.toml.write_text("listen_addresses = ['127.0.0.1:5300']\n")
         with patch.object(self.mod, "_core_module",
                           return_value=self._core_mock()), \
              patch.object(self.mod, "AGH_DNSCRYPT_TOML", self.toml), \
+             patch.object(self.mod, "_ensure_dns_redirect_safety",
+                          return_value=True) as safety, \
              patch.object(self.mod, "subprocess") as sub:
             sub.run.return_value = MagicMock(
                 returncode=0,
@@ -381,6 +393,87 @@ class TestMigrateDnscryptOff53(unittest.TestCase):
         self.assertEqual(
             self.toml.read_text(), "listen_addresses = ['127.0.0.1:5300']\n")
         self.assertEqual(list(self.toml.parent.glob("*.bak")), [])
+        # v41: даже без миграции — страховка wizard-фазы (self-healing
+        # серверов, где прошлая миграция сняла :53 без redirect)
+        safety.assert_called_once_with(5300)
+
+    def test_aborts_before_toml_when_no_redirect_safety(self):
+        """v41: без redirect-страховки TOML НЕ трогаем (DNS не сломаем).
+
+        Регресс живого сервера: миграция снимала :53, redirect никто не
+        ставил (v33-серверы жили без redirect — dnscrypt был на :53) →
+        после снятия :53 DNS black-hole («Could not resolve host»).
+        """
+        original = ("listen_addresses = ['127.0.0.1:53', '127.0.0.1:5300']\n")
+        self.toml.write_text(original)
+        ss_53 = ("udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
+                 "users:((\"dnscrypt-proxy\"))\n")
+        with patch.object(self.mod, "_core_module",
+                          return_value=self._core_mock()), \
+             patch.object(self.mod, "AGH_DNSCRYPT_TOML", self.toml), \
+             patch.object(self.mod, "_ensure_dns_redirect_safety",
+                          return_value=False), \
+             patch.object(self.mod, "subprocess") as sub:
+            restarted = []
+            def run_side_effect(cmd, **kw):
+                cmd_s = " ".join(cmd)
+                out = ""
+                if "is-active" in cmd_s:
+                    out = "active"
+                elif "restart" in cmd_s:
+                    restarted.append(cmd_s)
+                elif "-ulnp" in cmd_s or "-tulnp" in cmd_s:
+                    out = ss_53
+                return MagicMock(returncode=0, stdout=out, stderr="")
+            sub.run.side_effect = run_side_effect
+            ok = self.mod.migrate_dnscrypt_off_53()
+        self.assertFalse(ok)
+        # TOML не тронут, бэкапов нет, dnscrypt не рестартился
+        self.assertEqual(self.toml.read_text(), original)
+        self.assertEqual(list(self.toml.parent.glob("*.bak")), [])
+        self.assertEqual(restarted, [])
+
+    def test_rollback_removes_redirect_safety(self):
+        """v41: провал рестарта dnscrypt — откат TOML + снятие страховки."""
+        self.toml.write_text(
+            "listen_addresses = ['127.0.0.1:53', '127.0.0.1:5300']\n")
+        ss_53 = ("udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
+                 "users:((\"dnscrypt-proxy\"))\n")
+        safety_calls = []
+        with patch.object(self.mod, "_core_module",
+                          return_value=self._core_mock()), \
+             patch.object(self.mod, "AGH_DNSCRYPT_TOML", self.toml), \
+             patch.object(self.mod, "_ensure_dns_redirect_safety",
+                          side_effect=lambda port, remove=False:
+                              safety_calls.append((port, remove)) or True), \
+             patch.object(self.mod, "subprocess") as sub:
+            flags = {"restarted": False}
+
+            def run_side_effect(cmd, **kw):
+                cmd_s = " ".join(cmd)
+                out = ""
+                if "is-active" in cmd_s:
+                    # до рестарта — active; после рестарта dnscrypt «упал»
+                    out = "failed" if flags["restarted"] else "active"
+                elif "is-failed" in cmd_s:
+                    out = "failed" if flags["restarted"] else "inactive"
+                elif "restart" in cmd_s:
+                    flags["restarted"] = True
+                elif "-ulnp" in cmd_s or "-tulnp" in cmd_s:
+                    out = ss_53
+                rc = 1 if out == "failed" else 0
+                return MagicMock(returncode=rc, stdout=out, stderr="")
+            sub.run.side_effect = run_side_effect
+
+            ok = self.mod.migrate_dnscrypt_off_53()
+        self.assertFalse(ok)
+        # TOML восстановлен из бэкапа (двухадресный конфиг вернулся)
+        self.assertIn("127.0.0.1:53", self.toml.read_text())
+        # страховка: поставлена ДО правки, снята при откате
+        self.assertIn((5300, False), safety_calls)
+        self.assertIn((5300, True), safety_calls)
+        self.assertLess(safety_calls.index((5300, False)),
+                        safety_calls.index((5300, True)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
