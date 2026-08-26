@@ -207,6 +207,9 @@ def singbox_ufw_close(port: int, proto: str, protocol_tag: str,
             if _parse_to(r["to"]) == (port, proto)
             and r["comment"] == comment]
     if not ours:
+        # v49: нашего правила нет, но ensure_open регистрирует порт
+        # безусловно (force=True) — запись реестра могла остаться.
+        _singbox_port_unregister_safe(port, proto)
         return True  # нет нашего правила — нечего закрывать
 
     # Проверим, не используется ли порт другим sing-box протоколом.
@@ -245,7 +248,17 @@ def singbox_ufw_close_all() -> int:
     """Закрывает ВСЕ sing-box правила в UFW. Для uninstall.
 
     Возвращает количество удалённых правил.
+
+    v49: снятие регистраций port_registry выполняется БЕЗУСЛОВНО —
+    раньше ранний `return 0` при неактивном UFW оставлял все записи
+    SERVICE_SINGBOX жить в реестре (stale entries после uninstall).
     """
+    # v49: сначала безусловно чистим реестр
+    try:
+        from chimera.modules.port_registry import port_unregister, SERVICE_SINGBOX
+        port_unregister(SERVICE_SINGBOX)  # снимает все порты для SERVICE_SINGBOX
+    except Exception:
+        pass
     if not _ufw_active():
         return 0
     rules = _ufw_parse_rules()
@@ -275,12 +288,6 @@ def singbox_ufw_close_all() -> int:
     if deleted:
         success(f"Удалено {deleted} sing-box правил UFW")
         log_to_file("INFO", f"UFW: удалено {deleted} sing-box правил")
-    #  снимаем ВСЕ sing-box регистрации в port_registry.
-    try:
-        from chimera.modules.port_registry import port_unregister, SERVICE_SINGBOX
-        port_unregister(SERVICE_SINGBOX)  # снимает все порты для SERVICE_SINGBOX
-    except Exception:
-        pass
     return deleted
 
 

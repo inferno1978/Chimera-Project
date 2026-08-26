@@ -350,6 +350,20 @@ def _enable_hopping(range_start: int, range_end: int, real_port: int, proto: str
     # Сначала чистим старые правила (если были)
     _remove_rules()
 
+    # v49: смена диапазона — СТАРЫЙ диапазон закрываем целиком (UFW-правило
+    # диапазона + записи реестра за каждый порт), иначе они утекают навсегда.
+    old = _load_ph()
+    if old.get("enabled") and old.get("range_start") and old.get("range_end"):
+        old_rs, old_re = int(old["range_start"]), int(old["range_end"])
+        same_range = (old_rs == range_start and old_re == range_end
+                      and old.get("proto", "tcp") == proto)
+        if not same_range:
+            try:
+                _ufw_delete_range(old_rs, old_re, old.get("proto", "tcp"))
+                _info(f"UFW: старый диапазон {old_rs}-{old_re} закрыт (смена диапазона)")
+            except Exception:
+                pass
+
     # Добавляем новые
     if not _add_rules(range_start, range_end, real_port, proto):
         return False
@@ -381,9 +395,17 @@ def _disable_hopping() -> bool:
     ph = _load_ph()
     _remove_rules()
 
-    if _ufw_active() and ph.get("range_start") and ph.get("range_end"):
-        _ufw_delete_range(ph["range_start"], ph["range_end"], ph.get("proto", "tcp"))
-        _info("UFW: правило диапазона удалено")
+    # v49: чистим UFW-правило + записи реестра БЕЗусловно. Раньше всё
+    # было за `if _ufw_active()` — при выключенном UFW записи реестра
+    # оставались жить (stale entries).
+    if ph.get("range_start") and ph.get("range_end"):
+        try:
+            _ufw_delete_range(ph["range_start"], ph["range_end"],
+                              ph.get("proto", "tcp"))
+            if _ufw_active():
+                _info("UFW: правило диапазона удалено")
+        except Exception:
+            pass
 
     cfg = {"enabled": False}
     _save_ph(cfg)
