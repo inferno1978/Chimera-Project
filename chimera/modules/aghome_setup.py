@@ -344,14 +344,27 @@ def _get_ssh_client_ip() -> str:
 
 
 def _wait_service(svc: str, max_sec: int = 30) -> bool:
-    """Ждёт пока служба станет active. Возвращает True при успехе."""
-    for _ in range(max_sec):
+    """Ждёт пока служба станет СТАБИЛЬНО active. True при успехе.
+
+    v47: одиночного is-active мало. Crash-looping служба (невалидный
+    конфиг): systemd помечает active → процесс умирает через ~0.5с →
+    failed → автозапуск через 5с. Старая логика ловила миг «active» и
+    возвращала True — self-heal откат конфига НЕ срабатывал, crash-loop
+    оставался жить (инцидент vds13195, рестарт-каунтер 390+).
+    Требуем 3 ПОДРЯД активные проверки (1с интервал).
+    """
+    streak = 0
+    for _ in range(max_sec + 4):  # +4с запас на подтверждение стабильности
         if _svc_is_active(svc):
-            return True
-        r = subprocess.run(["systemctl", "is-failed", svc],
-                           capture_output=True, text=True, check=False)
-        if r.stdout.strip() == "failed":
-            return False
+            streak += 1
+            if streak >= 3:
+                return True
+        else:
+            streak = 0
+            r = subprocess.run(["systemctl", "is-failed", svc],
+                               capture_output=True, text=True, check=False)
+            if r.stdout.strip() == "failed":
+                return False
         time.sleep(1)
     return False
 
@@ -905,14 +918,31 @@ def build_http_section(web_mode: str) -> str:
 
 
 def build_filters_section() -> str:
-    """Секция filters: — все 3 списка (AdGuard DNS + AdAway + OISD Big)."""
+    """Секция filters: — все 3 списка (AdGuard DNS + AdAway + OISD Big).
+
+    v47: ТОЛЬКО filters:. Раньше блок тащил внутри себя ещё и
+    whitelist_filters/user_rules — а мастерские копии этих секций
+    оставались в конфиге → duplicate mapping keys → строгий YAML-парсер
+    AGH отказывался стартовать → crash-loop → DNS down (инцидент
+    vds13195: «mapping key whitelist_filters already defined»).
+    """
     entries = []
     for i, (url, name) in enumerate(AGH_FILTERS, start=1):
         entries.append(
             f"  - enabled: true\n    url: {_yaml_quote(url)}\n"
             f"    name: {_yaml_quote(name)}\n    id: {i}")
     body = "\n".join(entries)
-    return f"filters:\n{body}\nwhitelist_filters: []\nuser_rules: []\n"
+    return f"filters:\n{body}\n"
+
+
+def build_whitelist_filters_section() -> str:
+    """Секция whitelist_filters: — ОТДЕЛЬНО (v47, см. build_filters_section)."""
+    return "whitelist_filters: []\n"
+
+
+def build_user_rules_section() -> str:
+    """Секция user_rules: — ОТДЕЛЬНО (v47, см. build_filters_section)."""
+    return "user_rules: []\n"
 
 
 def build_querylog_section() -> str:
@@ -939,6 +969,54 @@ def build_statistics_section() -> str:
 # ============================================================================
 #  YAML: ХИРУРГИЧЕСКАЯ ЗАМЕНА СЕКЦИЙ
 # ============================================================================
+_TOP_KEY_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*):(\s|$)')
+
+
+def _duplicate_top_keys(text: str) -> "list[str]":
+    """Top-level ключи YAML, встречающиеся более одного раза (v47).
+
+    AGH v0.107 строго валидирует конфиг: duplicate mapping key =
+    «Couldn't get logging settings ... already defined» + отказ
+    стартовать → crash-loop → DNS down.
+    """
+    counts: dict[str, int] = {}
+    for ln in text.splitlines():
+        m = _TOP_KEY_RE.match(ln)
+        if m:
+            counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+    return [k for k, n in counts.items() if n > 1]
+
+
+def _dedup_top_level_sections(text: str) -> str:
+    """Убирает дубли top-level секций YAML — остаётся ПЕРВОЕ вхождение (v47).
+
+    Safety-net для текстовой хирургии конфига: генераторы секций не
+    должны плодить дубли, но цена пропуска — crash-loop AGH и мёртвый
+    DNS. Первое вхождение = наша каноническая секция (пишется на место
+    исходной), остальные копии — вырезаются целиком до следующего
+    top-level ключа.
+    """
+    lines = text.splitlines(keepends=True)
+    starts: list[tuple[int, str]] = []
+    for i, ln in enumerate(lines):
+        m = _TOP_KEY_RE.match(ln)
+        if m:
+            starts.append((i, m.group(1)))
+    if not starts:
+        return text
+    seen: set[str] = set()
+    drop: set[int] = set()
+    for k, (si, key) in enumerate(starts):
+        if key in seen:
+            end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
+            drop.update(range(si, end))
+        else:
+            seen.add(key)
+    if not drop:
+        return text
+    return "".join(ln for i, ln in enumerate(lines) if i not in drop)
+
+
 def yaml_replace_sections(text: str, sections: "dict[str, Optional[str]]",
                           scalars: "dict[str, str]" = {}) -> str:
     """Заменяет top-level секции YAML не разбирая остальное.
@@ -1010,6 +1088,11 @@ def yaml_replace_sections(text: str, sections: "dict[str, Optional[str]]",
             result.append(block)
 
     out = "".join(result)
+
+    # v47 SAFETY-NET: дедупликация top-level ключей (первое вхождение
+    # побеждает). Скаляры ниже делаем ПОСЛЕ — их подстановка тоже не
+    # должна встретить дублей.
+    out = _dedup_top_level_sections(out)
 
     # Скаляры (language и т.п.)
     for key, val in scalars.items():
@@ -2149,16 +2232,29 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         pass
 
     sections: dict = {
-        "http":          build_http_section(web_mode),
-        "dns":           build_dns_section(dc_port, public_ip, tls_enabled),
-        "tls":           build_tls_section(tls_enabled, server_name, cert_path, key_path),
-        "filters":       build_filters_section(),
-        "querylog":      build_querylog_section(),
-        "statistics":    build_statistics_section(),
-        "dhcp":          "dhcp:\n  enabled: false\n",
+        "http":             build_http_section(web_mode),
+        "dns":              build_dns_section(dc_port, public_ip, tls_enabled),
+        "tls":              build_tls_section(tls_enabled, server_name, cert_path, key_path),
+        "filters":          build_filters_section(),
+        "whitelist_filters": build_whitelist_filters_section(),
+        "user_rules":       build_user_rules_section(),
+        "querylog":         build_querylog_section(),
+        "statistics":       build_statistics_section(),
+        "dhcp":             "dhcp:\n  enabled: false\n",
     }
     new_text = yaml_replace_sections(
         original, sections, scalars={"language": "ru"})
+
+    # ── v47 GATE: дубли top-level ключей = crash-loop AGH ────────────
+    # Строгий YAML-парсер AGH падает на «mapping key already defined».
+    # Safety-net в yaml_replace_sections вычищает дубли, сюда попасть
+    # нельзя — но если всё же попали, живой конфиг НЕ трогаем (DNS
+    # важнее финализации).
+    dups = _duplicate_top_keys(new_text)
+    if dups:
+        warn(f"AGH: BUG — дубли top-level ключей {sorted(dups)}; "
+             "конфиг НЕ записан, живой конфиг не тронут")
+        return False
 
     # ── Бэкап + запись ────────────────────────────────────────────────
     AGH_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
