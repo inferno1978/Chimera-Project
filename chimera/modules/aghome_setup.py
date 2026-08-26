@@ -36,6 +36,21 @@ AdGuard Home — DNS-сервер с фильтрацией рекламных �
     ФАКТИЧЕСКИМ запросом к 127.0.0.1:53 (dig/getent); при отказе —
     авто-восстановление redirect 53→5300 (оба протокола) + красный
     бокс с ручными командами. ok:true фикса ≠ живой DNS.
+  • TLS-SELF-HEAL (v45, <node-2>): AGH при ошибке загрузки сертификата
+    НЕ падает — home.go (newTLSManager err → лог) молча ставит
+    tls.enabled=false, пишет это в yaml и служит plain DNS :53.
+    Симптом: «DNS слушает :53, а :30443/:853 — нет». Финализация теперь
+    поллит TLS-порты, при отказе берёт точную причину из journalctl,
+    проверяет пару cert/key (openssl pubkey) и права пользователя
+    adguard, чинит (chown / self-signed fallback / рестарт) и
+    перезаписывает tls-секцию в live-конфиге.
+  • ЛОЖНЫЙ :53 (v45): _port_listening больше не считает systemd-resolved
+    stub (127.0.0.53:53) слушателем :53 — проверка «AGH владеет :53»
+    идёт по ИМЕНИ ПРОЦЕССА AdGuardHome в ss (aghome_dns_ready —
+    критично для resolv_conf_fix/xray_install).
+  • XRAY MODE-B (v45): перегенерация конфига Xray в режиме B вызывает
+    chain_nodes.generate_xray_config_chain_entry_multi (жил в
+    xray_install → AttributeError, конфиг не пересоздавался).
   • Служба работает от отдельного пользователя `adguard` с
     CAP_NET_BIND_SERVICE (а не от root, как на роутере).
 
@@ -123,6 +138,7 @@ AGH_GROUP        = "adguard"
 
 AGH_STATE_FILE   = Path("/var/lib/xray-installer/aghome_state.json")
 AGH_BACKUP_DIR   = Path("/root/aghome-backups")
+XRAY_STATE_FILE  = Path("/var/lib/xray-installer/state.json")
 
 # Порты (канонические значения Chimera; web/DoH/DoT/DoQ — публичные,
 # DNS :53 — loopback+public bind, в UFW снаружи НЕ открывается).
@@ -224,22 +240,44 @@ def aghome_wizard_pending() -> bool:
     return is_aghome_active() and not AGH_CONF.exists()
 
 
-def _port_listening(port: int, proto: str = "udp") -> bool:
-    """Проверяет что порт слушается (ss)."""
+def _port_listening(port: int, proto: str = "udp", proc: str = "") -> bool:
+    """Проверяет что порт слушается (ss).
+
+    v45 (<node-2>): регресс-фикс «ложный :53».
+      1. port=53 — строки systemd-resolved stub (127.0.0.53/127.0.0.54:53,
+         процесс systemd-resolved) ИСКЛЮЧАЮТСЯ: они дают ложное
+         «:53 слушается», хотя AGH порт не занял (мастер/упал TLS).
+      2. proc — требовать имя процесса-владельца в строке ss, напр.
+         proc="AdGuardHome". Единственный надёжный способ отличить
+         владельца :53 от resolved stub.
+    """
     flag = "-ulnp" if proto == "udp" else "-tlnp"
     try:
         r = subprocess.run(["ss", flag], capture_output=True, text=True,
                            check=False, timeout=10)
-        return bool(re.search(rf":{port}\s", r.stdout))
+        for ln in r.stdout.splitlines():
+            if not re.search(rf":{port}\s", ln):
+                continue
+            if port == 53 and ("127.0.0.53" in ln or "127.0.0.54" in ln
+                               or "resolved" in ln):
+                continue  # systemd-resolved stub — НЕ владелец :53
+            if proc and proc not in ln:
+                continue
+            return True
+        return False
     except Exception:
         return False
 
 
 def aghome_dns_ready() -> bool:
-    """AGH полностью готов: служба активна И слушает :53 (udp).
-    Именно это условие используют resolv_conf_fix и xray_install —
-    «AGH владеет :53»."""
-    return is_aghome_active() and _port_listening(AGH_DNS_PORT, "udp")
+    """AGH полностью готов: служба активна И :53/udp слушает ИМЕННО AGH.
+
+    v45: proc-фильтр обязателен — без него systemd-resolved stub
+    (127.0.0.53:53) давал ложный positive, resolv_conf_fix считал
+    «AGH владеет :53» и снимал redirect → DNS black-hole.
+    Именно это условие используют resolv_conf_fix и xray_install."""
+    return is_aghome_active() and _port_listening(
+        AGH_DNS_PORT, "udp", proc="AdGuardHome")
 
 
 def _get_dnscrypt_port() -> int:
@@ -607,7 +645,21 @@ def _prepare_tls_cert(mode: str, domain: str) -> "tuple[Optional[Path], Optional
             shutil.copy2(le_cert, AGH_CERT_PATH)
             shutil.copy2(le_key, AGH_KEY_PATH)
             _own_certs()
+            _own_certs_dir()
             _install_certbot_deploy_hook(domain)
+            # v45: превентивная проверка ДО записи yaml — иначе AGH молча
+            # выключит tls (enabled=false) и DoH/DoT/DoQ не поднимутся.
+            pair_ok, pair_why = _cert_pair_matches(AGH_CERT_PATH, AGH_KEY_PATH)
+            if not pair_ok:
+                warn(f"AGH: LE-пара битая ({pair_why}) — fallback self-signed")
+                return _generate_self_signed_tls(domain)
+            readable, rwhy = _certs_readable_by_user(
+                AGH_USER, AGH_CERT_PATH, AGH_KEY_PATH)
+            if not readable:
+                warn(f"AGH: сертификат не читается пользователем {AGH_USER} "
+                     f"({rwhy}) — чиню права")
+                _own_certs()
+                _own_certs_dir()
             info(f"AGH: LE-сертификат {domain} → {AGH_CERT_PATH}")
             return AGH_CERT_PATH, AGH_KEY_PATH
         except Exception as e:
@@ -628,6 +680,7 @@ def _own_certs() -> None:
         AGH_CERT_PATH.chmod(0o644)
     except Exception:
         pass
+    _own_certs_dir()
 
 
 def _generate_self_signed_tls(cn: str = "") -> "tuple[Optional[Path], Optional[Path]]":
@@ -658,6 +711,11 @@ def _generate_self_signed_tls(cn: str = "") -> "tuple[Optional[Path], Optional[P
             core.warn(f"AGH: openssl упал: {r.stderr.strip()[:200]}")
             return None, None
         _own_certs()
+        # v45: пара должна совпадать (иначе AGH молча выключит TLS)
+        pair_ok, pair_why = _cert_pair_matches(AGH_CERT_PATH, AGH_KEY_PATH)
+        if not pair_ok:
+            core.warn(f"AGH: self-signed пара битая: {pair_why}")
+            return None, None
         return AGH_CERT_PATH, AGH_KEY_PATH
     except Exception as e:
         core.warn(f"AGH: не удалось сгенерировать self-signed: {e}")
@@ -1394,7 +1452,8 @@ def _ensure_system_dns_alive(reason: str = "") -> bool:
 
     # ── Ступень 2: рестарт AGH, если он владеет :53 ────────────────────
     try:
-        if _svc_is_active() and _port_listening(AGH_DNS_PORT, "udp"):
+        if _svc_is_active() and _port_listening(AGH_DNS_PORT, "udp",
+                                               proc="AdGuardHome"):
             subprocess.run(["systemctl", "restart", AGH_SERVICE_NAME],
                            capture_output=True, check=False)
             if _wait_service(AGH_SERVICE_NAME, 20) and _dns_probe_ok():
@@ -1820,6 +1879,213 @@ def _wait_wizard_completed(timeout_sec: int, poll_sec: float = 5.0) -> bool:
 # ============================================================================
 #  ФИНАЛИЗАЦИЯ (после мастера; идемпотентна)
 # ============================================================================
+# ── v45: TLS-диагностика/self-heal ──────────────────────────────────────────
+# AGH при ошибке загрузки сертификата НЕ падает (home.go: newTLSManager →
+# err → лог + onConfigModified): молча ставит tls.enabled=false, пишет это
+# в yaml и продолжает на plain DNS. Симптом: служба активна, :53 слушает,
+# а :30443/:853 — нет. Хелперы ниже диагностируют причину по journalctl,
+# чинят права/пару сертификата и перезапускают TLS-секцию на live-конфиге.
+
+
+def _tls_ports_status() -> "dict[tuple[int, str], bool]":
+    """Состояние TLS-портов AGH: DoH(:30443/tcp), DoT(:853/tcp), DoQ(:853/udp)."""
+    return {
+        (AGH_DOH_PORT, "tcp"): _port_listening(AGH_DOH_PORT, "tcp",
+                                               proc="AdGuardHome"),
+        (AGH_DOT_PORT, "tcp"): _port_listening(AGH_DOT_PORT, "tcp",
+                                               proc="AdGuardHome"),
+        (AGH_DOQ_PORT, "udp"): _port_listening(AGH_DOQ_PORT, "udp",
+                                               proc="AdGuardHome"),
+    }
+
+
+def _tls_live_enabled(text: str) -> "bool | None":
+    """tls.enabled из ЖИВОГО yaml (AGH мог сам переписать на false).
+
+    None — секции tls нет (не смогли определить).
+    """
+    m = re.search(r'^tls:\s*$', text, re.MULTILINE)
+    if not m:
+        return None
+    for ln in text[m.end():].splitlines():
+        if re.match(r'^[A-Za-z_]', ln):        # следующая top-level секция
+            break
+        em = re.match(r'^\s*enabled:\s*(\w+)', ln)
+        if em:
+            return em.group(1).lower() == "true"
+    return None
+
+
+def _agh_tls_journal_errors(tail: int = 120) -> str:
+    """Строки об ошибках TLS из journalctl AdGuardHome (для точного WARN)."""
+    try:
+        r = subprocess.run(
+            ["journalctl", "-u", AGH_SERVICE_NAME, "-n", str(tail),
+             "--no-pager", "--no-hostname"],
+            capture_output=True, text=True, check=False, timeout=15)
+        hits = [ln.strip() for ln in r.stdout.splitlines()
+                if re.search(r'(?i)tls|certificate|private.?key', ln)
+                and re.search(r'(?i)error|warn|fatal|fail|couldn', ln)]
+        return " | ".join(hits[-3:]) if hits else ""
+    except Exception:
+        return ""
+
+
+def _cert_pair_matches(cert: Path, key: Path) -> "tuple[bool, str]":
+    """Сертификат и приватный ключ — одна пара? (openssl pubkey compare).
+
+    Возвращает (ok, причина). ok=True также когда openssl недоступен —
+    блокируем ТОЛЬКО при доказанном рассинхроне (оба pubkey получены и
+    различаются).
+    """
+    try:
+        c = subprocess.run(["openssl", "x509", "-in", str(cert),
+                            "-noout", "-pubkey"],
+                           capture_output=True, text=True, check=False,
+                           timeout=15)
+        k = subprocess.run(["openssl", "pkey", "-in", str(key), "-pubout"],
+                           capture_output=True, text=True, check=False,
+                           timeout=15)
+        if c.returncode != 0 or k.returncode != 0:
+            return True, "openssl не смог прочитать пару (пропускаю проверку)"
+        cpub = c.stdout.strip()
+        kpub = k.stdout.strip()
+        if not cpub or not kpub:
+            return True, "пустой pubkey (пропускаю проверку)"
+        if cpub == kpub:
+            return True, ""
+        return False, "публичные ключи сертификата и private key различаются"
+    except Exception as e:
+        return True, f"проверка недоступна ({e})"
+
+
+def _certs_readable_by_user(user: str, cert: Path, key: Path) -> "tuple[bool, str]":
+    """Читаемы ли cert/key от имени пользователя службы (runuser/sudo)."""
+    test_cmd = f"test -r {cert} && test -r {key}"
+    for prefix in (["runuser", "-u", user, "--", "sh", "-c"],
+                   ["sudo", "-n", "-u", user, "--", "sh", "-c"]):
+        try:
+            r = subprocess.run(prefix + [test_cmd],
+                               capture_output=True, text=True, check=False,
+                               timeout=15)
+            if r.returncode == 0:
+                return True, ""
+            return False, (f"{Path(prefix[0]).name} rc={r.returncode}: "
+                           f"{(r.stderr or '').strip()[:120]}")
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+    return True, "runuser/sudo недоступны — проверка пропущена"
+
+
+def _own_certs_dir() -> None:
+    """Владелец каталога certs — adguard (право на обход каталога)."""
+    try:
+        subprocess.run(["chown", f"{AGH_USER}:{AGH_GROUP}", str(AGH_CERTS_DIR)],
+                       capture_output=True, check=False)
+        AGH_CERTS_DIR.chmod(0o755)
+    except Exception:
+        pass
+
+
+def _heal_tls_listeners(server_name: str, domain: str,
+                        cert_path: "Path | None",
+                        key_path: "Path | None") -> "tuple[bool, Path, Path, str]":
+    """Диагностика + починка TLS-портов AGH (v45).
+
+    Порядок:
+      1. journalctl — точная причина от самого AGH.
+      2. Локальная проверка пары: файлы есть? пара совпадает? читаемы
+         пользователем adguard?
+      3. Починка: права (chown) / self-signed fallback (пара битая) /
+         простой рестарт (локально всё ок — транзиент).
+      4. Перезапись tls-секции в ЖИВОМ конфиге (AGH мог сам выставить
+         enabled:false) + restart + ожидание портов.
+
+    Возвращает (tls_ok, cert_path, key_path, итоговое_сообщение).
+    """
+    core = _core_module()
+    info, warn = core.info, core.warn
+
+    # ── 1. Причина от AGH ─────────────────────────────────────────────
+    jerr = _agh_tls_journal_errors()
+    if jerr:
+        warn(f"AGH: журнал AGH: {jerr[:300]}")
+    try:
+        live_text = AGH_CONF.read_text(errors="replace")
+    except Exception as e:
+        return False, cert_path, key_path, f"не читается конфиг: {e}"
+    if _tls_live_enabled(live_text) is False:
+        info("AGH: AGH сам выключил TLS (сертификат не загрузился) — чиню")
+
+    # ── 2. Локальная диагностика ──────────────────────────────────────
+    problems: list[str] = []
+    only_perms = False
+    if not (cert_path and key_path
+            and Path(cert_path).exists() and Path(key_path).exists()):
+        problems.append("файлы сертификата отсутствуют")
+    else:
+        pair_ok, pair_why = _cert_pair_matches(Path(cert_path), Path(key_path))
+        if not pair_ok:
+            problems.append(f"пара рассинхронена: {pair_why}")
+        readable, rwhy = _certs_readable_by_user(AGH_USER, Path(cert_path),
+                                                 Path(key_path))
+        if not readable:
+            problems.append(f"файлы не читаются пользователем {AGH_USER}: {rwhy}")
+            only_perms = len(problems) == 1
+
+    # ── 3. Починка ────────────────────────────────────────────────────
+    if problems:
+        for p in problems:
+            warn(f"AGH: TLS: {p}")
+        if only_perms:
+            info("AGH: чиню права на сертификаты (chown adguard)")
+            _own_certs()
+            _own_certs_dir()
+        else:
+            info("AGH: переключаю TLS на self-signed сертификат "
+                 "(LE-пару можно вернуть позже через меню)")
+            cert_path, key_path = _generate_self_signed_tls(
+                domain or server_name or _get_public_ip() or "localhost")
+            if cert_path is None:
+                return (False, cert_path, key_path,
+                        "self-signed создать не удалось — TLS отключён, "
+                        "plain DNS :53 продолжает работать")
+    else:
+        info("AGH: сертификат локально корректен — перезапускаю AGH "
+             "(повторная попытка поднятия TLS)")
+
+    if not (cert_path and key_path):
+        return False, cert_path, key_path, "нет валидного сертификата"
+
+    # ── 4. Перезапись tls-секции в live-конфиге + рестарт ─────────────
+    try:
+        live_text = AGH_CONF.read_text(errors="replace")
+        new_tls = build_tls_section(True, server_name,
+                                    Path(cert_path), Path(key_path))
+        AGH_CONF.write_text(
+            yaml_replace_sections(live_text, {"tls": new_tls}))
+        subprocess.run(["chown", f"{AGH_USER}:{AGH_GROUP}", str(AGH_CONF)],
+                       capture_output=True, check=False)
+    except Exception as e:
+        return False, cert_path, key_path, f"не удалось обновить конфиг: {e}"
+
+    subprocess.run(["systemctl", "restart", AGH_SERVICE_NAME],
+                   capture_output=True, check=False)
+    if not _wait_service(AGH_SERVICE_NAME, 30):
+        return (False, cert_path, key_path,
+                "AGH не поднялся после TLS-лечения — journalctl -u "
+                f"{AGH_SERVICE_NAME} -n 30")
+    # TLS-порты могут подняться на 1-3 с позже службы — поллим
+    for _ in range(8):
+        if all(_tls_ports_status().values()):
+            return True, cert_path, key_path, "TLS-порты подняты"
+        time.sleep(2)
+    return (False, cert_path, key_path,
+            "TLS-порты не поднялись и после лечения — см. журнал выше")
+
+
 def finalize_aghome_config(web_mode: str = "", domain: str = "",
                            interactive: bool = True) -> bool:
     """Применяет канонический конфиг Chimera к yaml, написанному мастером.
@@ -1954,20 +2220,49 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         return False
 
     # ── Верификация портов ────────────────────────────────────────────
-    dns_udp = _port_listening(AGH_DNS_PORT, "udp")
-    dns_tcp = _port_listening(AGH_DNS_PORT, "tcp")
+    # v45: только по процессу AdGuardHome (127.0.0.53:53 systemd-resolved
+    # давал ложное «DNS слушает») + retry: AGH биндит порты на 1-3 с
+    # позже, чем systemd помечает службу active.
+    dns_udp = _port_listening(AGH_DNS_PORT, "udp", proc="AdGuardHome")
+    if not dns_udp:
+        for _ in range(6):
+            time.sleep(2)
+            dns_udp = _port_listening(AGH_DNS_PORT, "udp", proc="AdGuardHome")
+            if dns_udp:
+                break
+    dns_tcp = _port_listening(AGH_DNS_PORT, "tcp", proc="AdGuardHome")
     if dns_udp:
         success(f"AGH: DNS слушает :{AGH_DNS_PORT} (udp{'+' + 'tcp' if dns_tcp else ''})")
     else:
         warn(f"AGH: активна, но :{AGH_DNS_PORT}/udp не слушается — journalctl")
 
     if tls_enabled:
-        for port, proto, label in (
-            (AGH_DOH_PORT, "tcp", "DoH+HTTPS"),
-            (AGH_DOT_PORT, "tcp", "DoT"),
-            (AGH_DOQ_PORT, "udp", "DoQ"),
-        ):
-            if _port_listening(port, proto):
+        # v45: AGH при ошибке сертификата молча ставит tls.enabled=false
+        # и продолжает на plain DNS → порты не поднимутся сами. Даём
+        # время, затем диагностируем и чиним (_heal_tls_listeners).
+        ports = _tls_ports_status()
+        if not all(ports.values()):
+            for _ in range(6):
+                time.sleep(2)
+                ports = _tls_ports_status()
+                if all(ports.values()):
+                    break
+        if not all(ports.values()):
+            warn("AGH: TLS-порты не поднялись — диагностирую причину...")
+            healed, cert_path, key_path, msg = _heal_tls_listeners(
+                server_name, domain, cert_path, key_path)
+            if not healed:
+                warn(f"AGH: TLS не восстановлен: {msg}")
+                warn("AGH: DNS :53 работает; DoH/DoT/DoQ выключены "
+                     "до починки сертификата")
+            else:
+                success("AGH: TLS восстановлен (self-heal)")
+            ports = _tls_ports_status()
+        for (port, proto), up in ports.items():
+            label = {(AGH_DOH_PORT, "tcp"): "DoH+HTTPS",
+                     (AGH_DOT_PORT, "tcp"): "DoT",
+                     (AGH_DOQ_PORT, "udp"): "DoQ"}[(port, proto)]
+            if up:
                 success(f"AGH: {label} слушает :{port}/{proto}")
             else:
                 warn(f"AGH: {label} :{port}/{proto} не слушается")
@@ -2072,7 +2367,7 @@ def _regenerate_xray_config(interactive: bool = True) -> bool:
     core = _core_module()
     info, warn = core.info, core.warn
     try:
-        state_path = Path("/var/lib/xray-installer/state.json")
+        state_path = XRAY_STATE_FILE
         if not state_path.exists():
             warn("AGH: state.json не найден — конфиг Xray не перегенерирован")
             return False
@@ -2083,10 +2378,21 @@ def _regenerate_xray_config(interactive: bool = True) -> bool:
         if hasattr(core, "_load_state_into_globals"):
             core._load_state_into_globals()
 
+        # v45 (<node-2>): generate_xray_config_chain_entry_multi живёт в
+        # chain_nodes (не в xray_install — AttributeError «no attribute»
+        # ломал перегенерацию конфига Xray в режиме B).
+        from chimera.modules import chain_nodes
         from chimera.modules import xray_install
         if mode == "B":
-            xray_install.generate_xray_config_chain_entry_multi()
-        elif protocol == "xhttp":
+            gen = getattr(chain_nodes, "generate_xray_config_chain_entry_multi",
+                          None)
+            if gen is None:
+                warn("AGH: chain_nodes.generate_xray_config_chain_entry_multi "
+                     "недоступен — конфиг Xray не перегенерирован")
+                return False
+            gen()
+        elif (protocol == "xhttp"
+              and hasattr(xray_install, "generate_xray_config_xhttp")):
             xray_install.generate_xray_config_xhttp()
         else:
             xray_install.generate_xray_config()
@@ -2291,19 +2597,25 @@ def aghome_status() -> dict:
         "version":          version,
         "web_mode":         st.get("web_mode", ""),
         "web_port":         web_port,
-        "web_listening":    _port_listening(web_port, "tcp"),
+        "web_listening":    _port_listening(web_port, "tcp",
+                                             proc="AdGuardHome"),
         "domain":           domain,
         "self_signed":      st.get("self_signed", False),
         "tls_enabled":      tls_enabled,
         "doh_port":         st.get("doh_port", AGH_DOH_PORT),
-        "doh_listening":    _port_listening(st.get("doh_port", AGH_DOH_PORT), "tcp"),
+        "doh_listening":    _port_listening(st.get("doh_port", AGH_DOH_PORT), "tcp",
+                                             proc="AdGuardHome"),
         "dot_port":         st.get("dot_port", AGH_DOT_PORT),
-        "dot_listening":    _port_listening(st.get("dot_port", AGH_DOT_PORT), "tcp"),
+        "dot_listening":    _port_listening(st.get("dot_port", AGH_DOT_PORT), "tcp",
+                                             proc="AdGuardHome"),
         "doq_port":         st.get("doq_port", AGH_DOQ_PORT),
-        "doq_listening":    _port_listening(st.get("doq_port", AGH_DOQ_PORT), "udp"),
+        "doq_listening":    _port_listening(st.get("doq_port", AGH_DOQ_PORT), "udp",
+                                             proc="AdGuardHome"),
         "dns_port":         AGH_DNS_PORT,
-        "dns_udp":          _port_listening(AGH_DNS_PORT, "udp"),
-        "dns_tcp":          _port_listening(AGH_DNS_PORT, "tcp"),
+        "dns_udp":          _port_listening(AGH_DNS_PORT, "udp",
+                                             proc="AdGuardHome"),
+        "dns_tcp":          _port_listening(AGH_DNS_PORT, "tcp",
+                                             proc="AdGuardHome"),
         "upstream_port":    _get_dnscrypt_port(),
         "upstream_active":  _svc_is_active("dnscrypt-proxy"),
         "filters":          len(AGH_FILTERS),
