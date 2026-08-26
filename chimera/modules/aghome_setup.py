@@ -899,15 +899,23 @@ def build_tls_section(tls_enabled: bool, server_name: str,
 def build_http_section(web_mode: str) -> str:
     """Секция http: — адрес Web UI по выбранному режиму.
 
-    https_le/https_self: plain HTTP на loopback (SSH-туннель), публичный
-    доступ — через native TLS на :30443.
-    http_public: 0.0.0.0:{port} (plain, на выбор пользователя).
-    loopback: 127.0.0.1:{port}.
+    v48: AGH биндит HTTPS-порт (:30443) на ТОТ ЖЕ хост, что и
+    http.address (исходники AGH: netip.AddrPortFrom(web.conf.BindAddr,
+    portHTTPS)) — отдельных bind-настроек у TLS-порта нет. Поэтому в
+    TLS-режимах (https_le/https_self) bind 0.0.0.0:3000: иначе :30443
+    оставался loopback, UFW-порт 30443 висел бесполезно, а Web UI снаружи
+    требовал SSH-туннель (запрещён требованием «без туннелей»).
+    Публичный доступ к plain :3000 закрыт UFW
+    (_register_aghome_ports: web_public_plain=False → close), снаружи —
+    только TLS :30443 (Web UI + DoH мультиплексированы).
+    http_public: 0.0.0.0:{port} + UFW открыт (plain, на выбор пользователя).
+    loopback: 127.0.0.1:{port} (полностью локальный режим).
     """
-    if web_mode == AGH_WEB_HTTP_PUB:
-        addr = f"0.0.0.0:{AGH_WEB_PORT}"
-    else:
+    if web_mode == AGH_WEB_LOOPBACK:
         addr = f"127.0.0.1:{AGH_WEB_PORT}"
+    else:
+        # http_public, https_le, https_self — см. docstring v48
+        addr = f"0.0.0.0:{AGH_WEB_PORT}"
     return f"""http:
   pprof:
     port: 6060
@@ -1389,6 +1397,10 @@ def _ask_web_mode() -> "tuple[str, str]":
       2. https_self   — self-signed, https://IP:30443
       3. http_public  — plain HTTP 0.0.0.0:3000
       4. loopback     — 127.0.0.1:3000 (SSH-туннель)
+
+    v48: https_le/https_self биндят http на 0.0.0.0:3000 (UFW снаружи
+    закрыт) — HTTPS :30443 в AGH следует хосту http.address, иначе
+    Web UI доступен только с туннелем.
     """
     core = _core_module()
     CYAN, NC, DIM, GREEN, YELLOW = core.CYAN, core.NC, core.DIM, core.GREEN, core.YELLOW

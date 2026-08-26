@@ -2,6 +2,43 @@
 
 ---
 
+## FIX(aghome): Web UI/DoH :30443 недоступны снаружи — HTTPS-порт следует хосту http.address — 27 августа 2026 (v48)
+
+**Инцидент v48 (vds13195):** после v47-починки AGH поднялся, но
+`ss -lntup` показал: `:30443` (DoH+Web UI HTTPS) и `:3000` слушаются
+ТОЛЬКО на 127.0.0.1. UFW при этом открывает 30443/tcp публично — порт
+висел бесполезно, а Web UI снаружи был недоступен ВООБЩЕ (доступен лишь
+через SSH-туннель, который явно запрещён требованием «без туннелей»).
+
+**Root cause:** у AGH НЕТ отдельных bind-настроек у TLS-порта.
+HTTPS-сервер биндится на хост из `http.address` (исходники AGH
+internal/home/web.go: `netip.AddrPortFrom(web.conf.BindAddr.Addr(),
+portHTTPS)`). Наша `build_http_section()` для TLS-режимов ставила
+`127.0.0.1:3000` → и plain, и HTTPS оставались loopback. Проектная
+предпосылка «plain на loopback, публично — native TLS на :30443» была
+неверна архитектурно.
+
+**Фикс:** TLS-режимы (https_le/https_self) биндят `http.address` на
+`0.0.0.0:3000`. Безопасность не страдает: публичный доступ к plain
+:3000 закрывает UFW (`_register_aghome_ports`: web_public_plain=False →
+`ufw_close_quiet`), снаружи — только TLS :30443 (Web UI + DoH
+мультиплексированы, LE-сертификат домена). Loopback-режим не изменился.
+Побочный плюс: bind 0.0.0.0 переживает смену публичного IP (не нужен
+self-heal на bind_hosts).
+
+**Применение на живом сервере:** `git pull` → повторная финализация
+`finalize_aghome_config()` (идемпотентна: LE-сертификат уже в
+/etc/letsencrypt — просто копируется, redirect уже снят, UFW-правила
+идемпотентны) → проверка `ss -lntup | grep 30443` (должен стать 0.0.0.0)
++ браузер `https://<домен>:30443`.
+
+**Тесты:** +1 regression (`test_http_section_tls_bind_follows_v48`:
+все публичные режимы → 0.0.0.0, loopback → 127.0.0.1); обновлены
+`test_http_section_modes` и finalize-ассерты https_self → 0.0.0.0.
+Всего 123 passed.
+
+---
+
 ## FIX(aghome): ROOT CAUSE crash-loop AGH — дубли top-level ключей в AdGuardHome.yaml — 27 августа 2026 (v47)
 
 **Инцидент v47 (vds13195):** AdGuardHome ушёл в crash-loop (рестарт-каунтер
