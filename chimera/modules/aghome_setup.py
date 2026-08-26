@@ -22,10 +22,20 @@ AdGuard Home — DNS-сервер с фильтрацией рекламных �
   • OISD Big URL: https://big.oisd.nl/ — роутерный /basic отдаёт 404
     (мёртвый фильтр), корневой URL проверен (267k записей).
   • Пароль админа НЕ предгенерируется (роутер: admin/admin bcrypt).
-    AGH стартует БЕЗ конфига → нативный wizard в браузере задаёт логин/
-    пароль (detectFirstRun: конфига нет → firstRun → wizard).
-  • Параллельный HTTP-интерфейс :3000 защищён: временный UFW-доступ
-    только с IP SSH-клиента (мастер без пароля — не выставляем наружу).
+    AGH стартует БЕЗ конфига → wizard; по умолчанию завершается
+    HEADLESS — POST /control/install/configure на loopback :3000
+    (логин/пароль вводятся в TUI, yaml с bcrypt пишет сам AGH).
+    Веб-мастер в браузере — fallback (v44: браузерный POST падал
+    «Failed to fetch» из-за сетевого пути браузер→VPS).
+  • HTTP-интерфейс :3000: на время веб-мастера порт открыт в UFW
+    для ВСЕХ (v44: доступ только с IP SSH-клиента ломался при
+    CGNAT/смене IP/прокси — мастер нельзя было пройти без туннелей);
+    финализация закрывает. Headless-пути UFW не нужен вовсе.
+  • DNS-ALIVE гарантия (v44): перед/после КАЖДОЙ фазы AGH (скачивание,
+    wizard, удаление, сброс пароля) системный DNS проверяется
+    ФАКТИЧЕСКИМ запросом к 127.0.0.1:53 (dig/getent); при отказе —
+    авто-восстановление redirect 53→5300 (оба протокола) + красный
+    бокс с ручными командами. ok:true фикса ≠ живой DNS.
   • Служба работает от отдельного пользователя `adguard` с
     CAP_NET_BIND_SERVICE (а не от root, как на роутере).
 
@@ -1050,12 +1060,17 @@ def _ufw_clean_wizard_rules(port: int = AGH_WEB_PORT) -> list:
             # в колонке From, слова «from» в строке НЕТ. Ищем первый IPv4
             # до комментария (комментарий наших правил IP не содержит).
             m = re.search(r'\b(\d+\.\d+\.\d+\.\d+)\b', line.split("#")[0])
-            if not m:
-                continue
-            ip = m.group(1)
-            _ufw_delete_rule("allow", "from", ip, "to", "any",
-                             "port", str(port), "proto", "tcp")
-            removed.append(ip)
+            if m:
+                ip = m.group(1)
+                _ufw_delete_rule("allow", "from", ip, "to", "any",
+                                 "port", str(port), "proto", "tcp")
+                removed.append(ip)
+            else:
+                # v44: правило «для всех» (Anywhere) — удаляем по порту
+                mp = re.match(r'\s*(\d+)/tcp\s+ALLOW\s+Anywhere', line)
+                if mp:
+                    _ufw_delete_rule("allow", f"{mp.group(1)}/tcp")
+                    removed.append("0.0.0.0/0")
     except Exception:
         pass
     return removed
@@ -1074,27 +1089,37 @@ def _is_public_ipv4(ip: str) -> bool:
         return False
 
 
-def _open_wizard_access(ssh_ip: str) -> list:
-    """Временный доступ к мастеру :3000 — с IP SSH-клиента И с public
-    IP VPS.
+def _ufw_allow_port_all(port: int) -> bool:
+    """Открывает TCP-порт для всех (временно, на время wizard-фазы)."""
+    try:
+        if not shutil.which("ufw"):
+            return False
+        r = subprocess.run(
+            ["ufw", "allow", f"{port}/tcp", "comment",
+             "chimera-aghome-wizard-temp"],
+            capture_output=True, text=True, check=False,
+            input="y\n", timeout=30)
+        return r.returncode == 0
+    except Exception:
+        return False
 
-    Public IP обязателен: браузер через VLESS/xray-туннель НА ЭТОЙ ЖЕ
-    VPS приходит на :3000 с source-IP сервера (hairpin) — без правила
-    для pub_ip мастер недоступен через туннель. Чистит старые
-    wizard-правила, возвращает список реально открытых IP.
+
+def _open_wizard_access(ssh_ip: str) -> list:
+    """Временный доступ к мастеру :3000 — ДЛЯ ВСЕХ, без туннелей.
+
+    Регресс v44 (vds13195): доступ только с IP SSH-клиента + public IP
+    VPS ломался (CGNAT, смена IP клиента, прокси-цепочки браузера) —
+    мастер нельзя было пройти без SSH-туннеля. Wizard-фаза короткая,
+    панель требует пароль: :3000 открывается для всех, финализация
+    закрывает (_ufw_clean_wizard_rules по comment).
+
+    ssh_ip сохраняется вызывающим кодом в state для совместимости;
+    per-IP правила больше не ставятся (но старые чистятся).
     """
-    pub_ip = _get_public_ip()
-    want = []
-    if ssh_ip:
-        want.append(ssh_ip)
-    if pub_ip and pub_ip not in want:
-        want.append(pub_ip)
     _ufw_clean_wizard_rules()
-    opened = []
-    for ip in want:
-        if _ufw_allow_from_ip(ip, AGH_WEB_PORT):
-            opened.append(ip)
-    return opened
+    if _ufw_allow_port_all(AGH_WEB_PORT):
+        return ["0.0.0.0/0"]
+    return []
 
 
 def _register_aghome_ports(dc_port: int, tls_enabled: bool,
@@ -1275,23 +1300,377 @@ def _ask_web_mode() -> "tuple[str, str]":
     return AGH_WEB_HTTPS_LE, domain
 
 
+# ============================================================================
+#  DNS-ALIVE ГАРАНТИЯ (анти black-hole в любой фазе AGH)
+# ============================================================================
+def _dns_probe_ok(timeout: int = 2) -> bool:
+    """Отвечает ли системный DNS на 127.0.0.1:53 — фактический запрос.
+
+    Любой DNS-ответ (NOERROR/NXDOMAIN) = путь жив; таймаут/refused =
+    мёртв. dig при наличии, иначе getent hosts (rc != 0 = не
+    разрезолвился). Проверка «правила на месте» недостаточна —
+    ok:true от фикса ≠ работающий DNS (инцидент v44).
+    """
+    if shutil.which("dig"):
+        try:
+            r = subprocess.run(
+                ["dig", "@127.0.0.1", "github.com",
+                 f"+time={timeout}", "+tries=1"],
+                capture_output=True, text=True,
+                timeout=timeout + 3, check=False)
+            return r.returncode == 0
+        except Exception:
+            return False
+    try:
+        r = subprocess.run(["getent", "hosts", "github.com"],
+                           capture_output=True, text=True,
+                           timeout=timeout + 3, check=False)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _dns_blackhole_help_box() -> None:
+    """Красный бокс с ручными командами — DNS мёртв даже после авто-фикса."""
+    core = _core_module()
+    RED, CYAN, DIM, NC = core.RED, core.CYAN, core.DIM, core.NC
+    _box_top, _box_row, _box_bottom = (
+        core._box_top, core._box_row, core._box_bottom)
+    print()
+    _box_top(f"{RED}⚠ DNS НЕ ОТВЕЧАЕТ — ручное восстановление{NC}")
+    _box_row()
+    _box_row(f"  {DIM}dnscrypt-proxy слушает 127.0.0.1:5300 — перенаправьте{NC}")
+    _box_row(f"  {DIM}локальный :53 на него (оба протокола, glibc шлёт UDP):{NC}")
+    _box_row()
+    _box_row(f"  {CYAN}iptables -t nat -A OUTPUT -p udp -d 127.0.0.1 \\{NC}")
+    _box_row(f"  {CYAN}  --dport 53 -j REDIRECT --to-ports 5300{NC}")
+    _box_row(f"  {CYAN}iptables -t nat -A OUTPUT -p tcp -d 127.0.0.1 \\{NC}")
+    _box_row(f"  {CYAN}  --dport 53 -j REDIRECT --to-ports 5300{NC}")
+    _box_row(f"  {CYAN}dig @127.0.0.1 github.com +time=2 +tries=1{NC}")
+    _box_row()
+    _box_row(f"  {DIM}Затем повторите операцию (Сеть → A).{NC}")
+    _box_bottom()
+
+
+def _ensure_system_dns_alive(reason: str = "") -> bool:
+    """Гарантия живого системного DNS (127.0.0.1:53) в ЛЮБОЙ фазе AGH.
+
+    Инцидент v44 (vds13195): удаление AGH и провал скачивания оставляли
+    систему с мёртвым DNS — GitHub «недоступен», git pull мёртв,
+    повторная установка невозможна. DNS обязан быть жив в КАЖДОЙ точке
+    выхода из install/uninstall/wizard-фаз.
+
+    Лестница восстановления (после каждой ступени — фактический probe):
+      1. Полный resolv-фикс (resolv.conf + nsswitch + redirect обоих
+         протоколов + persist-сервис; AGH-aware — не мешает живому AGH).
+      2. Рестарт AdGuardHome, если он активен и держит :53 (финализиро-
+         ванное состояние, AGH мог подвиснуть).
+      3. Рестарт dnscrypt-proxy (если не активен) + прямые iptables
+         redirect 53→порт dnscrypt (оба протокола).
+    Возвращает True только если DNS реально отвечает.
+    """
+    core = _core_module()
+    info, warn = core.info, core.warn
+    why = f" ({reason})" if reason else ""
+
+    if _dns_probe_ok():
+        return True
+
+    warn(f"AGH: системный DNS на 127.0.0.1:53 не отвечает{why} — восстанавливаю")
+
+    # ── Ступень 1: полный resolv-фикс ──────────────────────────────────
+    try:
+        from chimera.modules.resolv_conf_fix import (
+            fix_resolv_conf_to_localhost,
+        )
+        result = fix_resolv_conf_to_localhost(force=True)
+        if not result.get("ok"):
+            warn(f"AGH: resolv-фикс: {result.get('error')}")
+    except Exception as e:
+        warn(f"AGH: resolv-фикс недоступен: {e}")
+    if _dns_probe_ok():
+        info("AGH: DNS восстановлен (resolv-фикс)")
+        return True
+
+    # ── Ступень 2: рестарт AGH, если он владеет :53 ────────────────────
+    try:
+        if _svc_is_active() and _port_listening(AGH_DNS_PORT, "udp"):
+            subprocess.run(["systemctl", "restart", AGH_SERVICE_NAME],
+                           capture_output=True, check=False)
+            if _wait_service(AGH_SERVICE_NAME, 20) and _dns_probe_ok():
+                info("AGH: DNS восстановлен (рестарт AdGuardHome)")
+                return True
+    except Exception:
+        pass
+
+    # ── Ступень 3: dnscrypt + прямые iptables (обо протокола) ──────────
+    try:
+        if not _svc_is_active("dnscrypt-proxy"):
+            subprocess.run(["systemctl", "restart", "dnscrypt-proxy"],
+                           capture_output=True, check=False)
+            _wait_service("dnscrypt-proxy", 20)
+        port = _get_dnscrypt_port()
+        if port and port != AGH_DNS_PORT:
+            for proto in ("udp", "tcp"):
+                subprocess.run(
+                    ["iptables", "-t", "nat", "-A", "OUTPUT",
+                     "-p", proto, "-d", "127.0.0.1", "--dport", "53",
+                     "-j", "REDIRECT", "--to-ports", str(port),
+                     "-m", "comment", "--comment", "chimera-dns-fix"],
+                    capture_output=True, check=False)
+    except Exception as e:
+        warn(f"AGH: прямое восстановление: {e}")
+    if _dns_probe_ok():
+        info("AGH: DNS восстановлен (прямой iptables redirect)")
+        return True
+
+    warn("AGH: КРИТИЧНО — DNS по-прежнему мёртв после авто-восстановления")
+    _dns_blackhole_help_box()
+    return False
+
+
+# ============================================================================
+#  HEADLESS-МАСТЕР (без браузера и туннелей — API на loopback)
+# ============================================================================
+def _agh_install_api_post(path: str, payload: dict, timeout: int = 15) -> tuple:
+    """POST к API мастера первого запуска AGH (127.0.0.1:3000).
+
+    Те же endpoints, что дергает веб-мастер (v44: браузерный POST
+    /control/install/check_config падал «Failed to fetch» из-за
+    сетевого пути браузер→VPS; loopback-путь не зависит ни от UFW,
+    ни от туннелей, ни от прокси клиента). Возвращает (ok, error).
+    """
+    import urllib.error
+    import urllib.request
+    url = f"http://127.0.0.1:{AGH_WEB_PORT}{path}"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, method="POST",
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status in (200, 204):
+                return True, None
+            return False, f"HTTP {resp.status}"
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode(errors="replace")[:200]
+        except Exception:
+            body = ""
+        return False, f"HTTP {e.code}" + (f": {body}" if body else "")
+    except Exception as e:
+        return False, str(e)[:200]
+
+
+def _wizard_configure_headless(username: str, password: str,
+                               timeout_sec: int = 20) -> bool:
+    """Завершает мастер первого запуска БЕЗ браузера и туннелей.
+
+    POST /control/install/configure на loopback — ровно то, что делает
+    веб-мастер на шаге 5: AGH сам пишет yaml (users + bcrypt-пароль,
+    корректный schema_version) и стартует DNS на 127.0.0.1:53.
+    Пока redirect 53→5300 активен, системный DNS продолжает работать
+    через dnscrypt; финализация затем переключит его на AGH.
+    """
+    core = _core_module()
+    info, warn = core.info, core.warn
+
+    web_conf = {"ip": "0.0.0.0", "port": AGH_WEB_PORT}
+    dns_conf = {"ip": "127.0.0.1", "port": AGH_DNS_PORT}
+
+    # Пре-валидация (не фатальна: в старых сборках endpoint отсутствует)
+    ok, err = _agh_install_api_post(
+        "/control/install/check_config", {"web": web_conf, "dns": dns_conf})
+    if not ok:
+        info(f"AGH: check_config: {err or 'ок'} (продолжаю)")
+
+    payload = {"web": web_conf, "dns": dns_conf,
+               "username": username, "password": password}
+    ok, err = _agh_install_api_post("/control/install/configure", payload)
+    if not ok:
+        warn(f"AGH: configure не прошёл: {err}")
+        return False
+
+    # AGH пишет конфиг мгновенно; ждём появления секции users.
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if AGH_CONF.exists():
+            try:
+                if _yaml_has_users(AGH_CONF.read_text(errors="replace")):
+                    return True
+            except Exception:
+                pass
+        time.sleep(1)
+    warn("AGH: configure прошёл, но конфиг с users не появился")
+    return False
+
+
+def _ask_admin_credentials() -> "tuple[str, str] | None":
+    """Логин + пароль администратора AGH в TUI (пароль дважды, без эха)."""
+    core = _core_module()
+    CYAN, NC, YELLOW = core.CYAN, core.NC, core.YELLOW
+    import getpass
+    try:
+        username = input(
+            f"{CYAN}Логин администратора [admin]: {NC}").strip() or "admin"
+        while True:
+            pw1 = getpass.getpass(f"{CYAN}Пароль: {NC}")
+            if len(pw1) < 6:
+                print(f"{YELLOW}  Минимум 6 символов — ещё раз{NC}")
+                continue
+            pw2 = getpass.getpass(f"{CYAN}Повтор пароля: {NC}")
+            if pw1 != pw2:
+                print(f"{YELLOW}  Пароли не совпадают — ещё раз{NC}")
+                continue
+            return username, pw1
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
+def _ask_headless_wizard() -> bool:
+    """Способ завершения мастера: headless-API (рекомендуется) или веб."""
+    core = _core_module()
+    CYAN, NC, DIM, GREEN = core.CYAN, core.NC, core.DIM, core.GREEN
+    _box_top, _box_row, _box_sep, _box_bottom, _box_item = (
+        core._box_top, core._box_row, core._box_sep, core._box_bottom,
+        core._box_item)
+    print()
+    _box_top("🛡️  AdGuard Home — создание администратора")
+    _box_row()
+    _box_row(f"  {DIM}Мастер можно завершить прямо здесь — без браузера,{NC}")
+    _box_row(f"  {DIM}туннелей и UFW (API на loopback).{NC}")
+    _box_sep()
+    _box_item("1", f"Без браузера {GREEN}(рекомендуется){NC}")
+    _box_item("2", f"Веб-мастер http://<IP-сервера>:{AGH_WEB_PORT} "
+                   f"{DIM}(порт временно открыт){NC}")
+    _box_bottom()
+    try:
+        ch = input(f"{CYAN}Выбор [1]: {NC}").strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        return True
+    return ch != "2"
+
+
+def _print_wizard_instructions(domain: str = "") -> None:
+    """Инструкция по веб-мастеру: URL — ВСЕГДА адрес СЕРВЕРА (v40),
+    порт открыт для всех — туннели НЕ нужны (v44)."""
+    core = _core_module()
+    _CYAN = getattr(core, "CYAN", "")
+    _NC = getattr(core, "NC", "")
+    _DIM = getattr(core, "DIM", "")
+    pub_ip = _get_public_ip()
+    wizard_host = pub_ip if _is_public_ipv4(pub_ip) else "IP-СЕРВЕРА"
+    print()
+    core._box_top("🛡️  AdGuard Home — мастер первого запуска")
+    core._box_row()
+    core._box_row(f"  Откройте в браузере {_CYAN}http://{wizard_host}:{AGH_WEB_PORT}{_NC}")
+    if domain:
+        core._box_row(f"  {_DIM}(или http://{domain}:{AGH_WEB_PORT}){_NC}")
+    core._box_sep()
+    core._box_row(f"  {_DIM}Порт {AGH_WEB_PORT} открыт для всех — SSH-туннели НЕ нужны{_NC}")
+    core._box_sep()
+    core._box_row(f"  1. Веб-интерфейс: {_CYAN}Все интерфейсы / 0.0.0.0 :{AGH_WEB_PORT}{_NC}")
+    core._box_row(f"  2. DNS-сервер:    {_CYAN}Только 127.0.0.1 (Loopback){_NC}")
+    core._box_row(f"     {_DIM}(Chimera перенастроит адреса автоматически){_NC}")
+    core._box_row(f"  3. Логин/пароль:  {_CYAN}придумайте (admin + ваш пароль){_NC}")
+    core._box_sep()
+    core._box_row(f"  {_DIM}Пока мастер не завершён, :53 держит redirect → dnscrypt.{_NC}")
+    core._box_bottom()
+
+
+def _complete_first_run_wizard(web_mode: str, domain: str,
+                               interactive: bool = True,
+                               state_extra: "dict | None" = None) -> bool:
+    """Мастер первого запуска: headless-API (по умолчанию) или браузер.
+
+    Headless (v44): логин/пароль в TUI → POST /control/install/configure
+    на loopback → конфиг с users пишет сам AGH. Не нужен ни браузер,
+    ни SSH-туннель, ни UFW. Веб-мастер — fallback: :3000 временно
+    открыт для всех, инструкция с URL сервера.
+
+    Возвращает True, если конфиг с users создан (мастер завершён).
+    """
+    core = _core_module()
+    info, warn, success = core.info, core.warn, core.success
+    ssh_ip = _get_ssh_client_ip()
+
+    aghome_state_save({
+        **(state_extra or {}),
+        "enabled": True,
+        "phase": "wizard",
+        "web_mode": web_mode,
+        "web_port": AGH_WEB_PORT,
+        "domain": domain,
+        "self_signed": web_mode == AGH_WEB_HTTPS_SELF,
+        "tls_enabled": web_mode in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF),
+        "doh_port": AGH_DOH_PORT,
+        "dot_port": AGH_DOT_PORT,
+        "doq_port": AGH_DOQ_PORT,
+        "wizard_ips": ["0.0.0.0/0"],
+        "wizard_ssh_ip": ssh_ip,
+        "installed_at": datetime.now().isoformat(),
+    })
+
+    # ── Путь 1: headless — без браузера, без туннелей ──────────────────
+    if interactive and _ask_headless_wizard():
+        creds = _ask_admin_credentials()
+        if creds:
+            info("AGH: завершаю мастер локально (API loopback)...")
+            if _wizard_configure_headless(*creds):
+                success("AGH: администратор создан — мастер завершён "
+                        "без браузера")
+                return True
+            warn("AGH: headless-настройка не удалась — перехожу к веб-мастеру")
+        else:
+            info("AGH: пароль не задан — перехожу к веб-мастеру")
+
+    # ── Путь 2: веб-мастер (fallback) ──────────────────────────────────
+    wizard_ips = _open_wizard_access(ssh_ip)
+    if wizard_ips:
+        info(f"AGH: порт {AGH_WEB_PORT} временно открыт в UFW "
+             f"(для всех, до завершения мастера)")
+    else:
+        info(f"AGH: UFW недоступен — мастер на :{AGH_WEB_PORT}, "
+             f"если порт не закрыт снаружи")
+
+    _print_wizard_instructions(domain)
+
+    if not interactive:
+        # do_full_install продолжит своё; мастер завершат позже (A → 2)
+        return False
+
+    info("Ожидание завершения мастера "
+         f"(до {AGH_WIZARD_WAIT_SEC // 60} мин, Ctrl+C — пропустить)...")
+    return _wait_wizard_completed(AGH_WIZARD_WAIT_SEC)
+
+
 def install_aghome(interactive: bool = True) -> bool:
     """Установка AdGuard Home поверх DNSCrypt.
 
     Шаги:
+      0. DNS-alive: системный DNS жив ДО всего (иначе GitHub недоступен).
       1. Проверка: dnscrypt-proxy активен (upstream-требование).
       2. Скачивание бинарника (fetch_package + зеркала).
       3. Пользователь adguard + рабочие директории.
       4. МИГРАЦИЯ: снять :53 у dnscrypt (redirect 53→5300 страхует DNS).
-      5. systemd-unit + старт БЕЗ конфига → нативный wizard (:3000).
-      6. Временный доступ к :3000 (IP SSH-клиента) + порт_registry.
-      7. interactive: ожидание завершения мастера → финализация.
+      5. systemd-unit + старт БЕЗ конфига → wizard (:3000).
+      6. Мастер: headless-API (по умолчанию — без браузера и туннелей)
+         или веб (:3000 временно открыт для всех).
+      7. interactive: финализация после завершения мастера.
 
     Возвращает True если AGH установлен и (interactive) финализирован.
+    В КАЖДОЙ точке выхода (в т.ч. провальной) DNS остаётся живым —
+    _ensure_system_dns_alive (v44).
     """
     core = _core_module()
     info, warn, success = core.info, core.warn, core.success
     _run = core._run
+
+    # ── 0. DNS-alive: системный DNS жив ДО всего остального ───────────
+    # v44 (vds13195): установка запускалась уже с мёртвым DNS → GitHub
+    # «недоступен», скачивание проваливалось, а система оставалась без
+    # DNS. Чиним ДО: redirect 53→5300 (оба протокола) + resolv.conf.
+    _ensure_system_dns_alive("перед установкой AGH")
 
     # ── 1. dnscrypt обязателен (upstream) ─────────────────────────────
     if not _svc_is_active("dnscrypt-proxy"):
@@ -1332,6 +1711,9 @@ def install_aghome(interactive: bool = True) -> bool:
         if not fetch_package(AGHOME_SPEC, tag=tag, arch=agh_arch):
             warn("AGH: не удалось скачать AdGuardHome — установка прервана")
             warn("AGH: скачайте tar.gz вручную в /root/ и повторите (Сеть → A)")
+            # Ручное скачивание тоже требует DNS — гарантируем живой
+            # резолв после провала (v44).
+            _ensure_system_dns_alive("после провала скачивания")
             return False
         success(f"AGH: бинарник установлен: {AGH_BIN}")
 
@@ -1341,9 +1723,10 @@ def install_aghome(interactive: bool = True) -> bool:
     (AGH_WORK_DIR / "data").mkdir(parents=True, exist_ok=True)
     _create_aghome_user()
 
-    # ── 4. Миграция dnscrypt с :53 ────────────────────────────────────
+    # ── 4. Миграция dnscrypt с :53 ────────────────────────────────────────
     if not migrate_dnscrypt_off_53():
         warn("AGH: не удалось освободить :53 у dnscrypt — установка прервана")
+        _ensure_system_dns_alive("после провала миграции dnscrypt")
         return False
 
     # ── 5. systemd unit + wizard-старт ────────────────────────────────
@@ -1364,77 +1747,24 @@ def install_aghome(interactive: bool = True) -> bool:
 
     if not _wait_service(AGH_SERVICE_NAME, 30):
         warn("AGH: служба не запустилась — journalctl -u AdGuardHome -n 30")
+        _ensure_system_dns_alive("после провала старта AGH")
         return False
     success(f"AGH: служба активна ( {'мастер первого запуска' if wizard_restart else 'существующий конфиг'} )")
 
-    # ── 6. Доступ к мастеру + state ───────────────────────────────────
+    # ── 6+7. Мастер: headless-API (по умолчанию) или веб ─────────────
     web_mode, domain = AGH_WEB_LOOPBACK, ""
     if wizard_restart:
-        ssh_ip = _get_ssh_client_ip()
         web_mode, domain = _ask_web_mode()
-
-        # Доступ: IP SSH-клиента + public IP VPS (hairpin через VLESS-
-        # туннель на этой же VPS: браузер через прокси = запрос с IP VPS)
-        wizard_ips = _open_wizard_access(ssh_ip)
-        if wizard_ips:
-            info("AGH: мастер открыт в UFW для IP: "
-                 + ", ".join(wizard_ips) + " (временно)")
-        elif ssh_ip:
-            info("AGH: UFW недоступен — используйте SSH-туннель")
-        else:
-            info("AGH: IP SSH-клиента не определён — используйте SSH-туннель")
-
-        aghome_state_save({
-            "enabled": True,
-            "phase": "wizard",
-            "web_mode": web_mode,
-            "web_port": AGH_WEB_PORT,
-            "domain": domain,
-            "self_signed": web_mode == AGH_WEB_HTTPS_SELF,
-            "tls_enabled": web_mode in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF),
-            "doh_port": AGH_DOH_PORT,
-            "dot_port": AGH_DOT_PORT,
-            "doq_port": AGH_DOQ_PORT,
-            "wizard_ips": wizard_ips,
-            "wizard_ssh_ip": ssh_ip,
-            "installed_at": datetime.now().isoformat(),
-        })
-
-        # Инструкция по мастеру: URL — ВСЕГДА адрес СЕРВЕРА
-        # (никогда IP SSH-клиента: на нём ничего не слушает).
-        pub_ip = _get_public_ip()
-        wizard_host = pub_ip if _is_public_ipv4(pub_ip) else "IP-СЕРВЕРА"
-        _CYAN = getattr(core, "CYAN", "")
-        _NC = getattr(core, "NC", "")
-        _DIM = getattr(core, "DIM", "")
-        print()
-        core._box_top("🛡️  AdGuard Home — мастер первого запуска")
-        core._box_row()
-        core._box_row(f"  Откройте в браузере {_CYAN}http://{wizard_host}:{AGH_WEB_PORT}{_NC}")
-        if domain:
-            core._box_row(f"  {_DIM}(или http://{domain}:{AGH_WEB_PORT}){_NC}")
-        core._box_sep()
-        core._box_row(f"  {_DIM}Через VLESS-туннель — тот же URL (доступ с IP сервера открыт){_NC}")
-        core._box_row(f"  {_DIM}Напрямую не открывается: ssh -L {AGH_WEB_PORT}:127.0.0.1:{AGH_WEB_PORT} root@{wizard_host}{_NC}")
-        core._box_sep()
-        core._box_row(f"  1. Веб-интерфейс: {_CYAN}Все интерфейсы / 0.0.0.0 :{AGH_WEB_PORT}{_NC}")
-        core._box_row(f"  2. DNS-сервер:    {_CYAN}Только 127.0.0.1 (Loopback){_NC}")
-        core._box_row(f"     {_DIM}(Chimera перенастроит адреса автоматически){_NC}")
-        core._box_row(f"  3. Логин/пароль:  {_CYAN}придумайте (admin + ваш пароль){_NC}")
-        core._box_sep()
-        core._box_row(f"  {_DIM}Пока мастер не завершён, :53 держит redirect → dnscrypt.{_NC}")
-        core._box_bottom()
-
-        # ── 7. Ожидание мастера ───────────────────────────────────────
+        if _complete_first_run_wizard(web_mode, domain, interactive):
+            return finalize_aghome_config(web_mode=web_mode,
+                                          domain=domain,
+                                          interactive=interactive)
+        # Мастер не завершён (таймаут/неинтерактивно/headless-провал
+        # и таймаут веб-пути) — DNS обязан остаться живым (v44).
+        _ensure_system_dns_alive("wizard-фаза (мастер не завершён)")
         if interactive:
-            info("Ожидание завершения мастера в браузере "
-                 f"(до {AGH_WIZARD_WAIT_SEC // 60} мин, Ctrl+C — пропустить)...")
-            if _wait_wizard_completed(AGH_WIZARD_WAIT_SEC):
-                return finalize_aghome_config()
             warn("AGH: мастер не завершён — установка продолжается")
-            info("AGH: завершите мастер позже и выберите: Сеть → A → 2 (Завершить настройку)")
-            return True
-        # неинтерактивно (do_full_install продолжит своё)
+            info("AGH: завершите позже: Сеть → A → 2 (Завершить настройку)")
         return True
 
     # Существующий конфиг → сразу финализируем (идемпотентно)
@@ -1447,7 +1777,11 @@ def install_aghome(interactive: bool = True) -> bool:
 
 
 def _wait_wizard_completed(timeout_sec: int, poll_sec: float = 5.0) -> bool:
-    """Ждёт пока мастер первого запуска запишет конфиг с users."""
+    """Ждёт пока мастер первого запуска запишет конфиг с users.
+
+    В цикле поддерживает DNS-alive (v44): redirect 53→5300 мог
+    слететь во время ожидания — пробим фактическим запросом и чиним.
+    """
     core = _core_module()
     deadline = time.monotonic() + timeout_sec
     last_dot = 0
@@ -1460,6 +1794,13 @@ def _wait_wizard_completed(timeout_sec: int, poll_sec: float = 5.0) -> bool:
             if _yaml_has_users(text):
                 print()
                 return True
+        # DNS black-hole недопустим даже во время ожидания мастера
+        if not _dns_probe_ok():
+            try:
+                core.warn("AGH: DNS не отвечает во время мастера — чиню")
+            except Exception:
+                pass
+            _ensure_system_dns_alive("ожидание мастера")
         # активность службы могла упасть — мастер требует живой web
         if not _svc_is_active():
             try:
@@ -1843,6 +2184,13 @@ def uninstall_aghome() -> bool:
     except Exception as e:
         warn(f"AGH: resolv-фикс недоступен: {e}")
 
+    # v44: ok:true фикса ≠ живой DNS — проверяем ФАКТИЧЕСКИМ запросом
+    # и чиним при отказе (resolv-фикс → рестарт AGH → прямые iptables).
+    if _ensure_system_dns_alive("после удаления AGH"):
+        info("AGH: системный DNS жив")
+    else:
+        warn("AGH: DNS НЕ восстановлен автоматически — команды в боксе выше")
+
     # ── 7. Xray ───────────────────────────────────────────────────────
     _regenerate_xray_config(interactive=False)
 
@@ -1865,10 +2213,11 @@ def aghome_reset_admin_password() -> bool:
 
     Механика (единственный способ без bcrypt в окружении Python):
       1. Стоп AGH, yaml → бэкап, yaml удаляется.
-      2. Старт AGH → detectFirstRun: конфига нет → мастер в браузере.
-      3. Пользователь задаёт новый логин/пароль.
-      4. _wait_wizard_completed → финализация (секции восстанавливаются
-         из aghome_state.json — режим Web UI/домен/TLS сохраняются).
+      2. Старт AGH → detectFirstRun: конфига нет → мастер.
+      3. Новый логин/пароль: headless-API (v44, по умолчанию — без
+         браузера и туннелей) или веб-мастер.
+      4. Финализация (секции восстанавливаются из aghome_state.json —
+         режим Web UI/домен/TLS сохраняются).
     """
     core = _core_module()
     info, warn, success = core.info, core.warn, core.success
@@ -1897,28 +2246,19 @@ def aghome_reset_admin_password() -> bool:
                    capture_output=True, check=False)
     if not _wait_service(AGH_SERVICE_NAME, 30):
         warn("AGH: служба не запустилась в режиме мастера")
+        _ensure_system_dns_alive("сброс пароля (служба не стартовала)")
         return False
 
-    ssh_ip = _get_ssh_client_ip()
-    wizard_ips = _open_wizard_access(ssh_ip)
-    if wizard_ips:
-        info("AGH: мастер открыт в UFW для IP: "
-             + ", ".join(wizard_ips) + " (временно)")
-    wizard_host = _get_public_ip()
-    if not _is_public_ipv4(wizard_host):
-        wizard_host = "IP-СЕРВЕРА"
-    info(f"AGH: откройте http://{wizard_host}:{AGH_WEB_PORT} "
-         f"и задайте НОВЫЙ логин/пароль администратора")
-
-    aghome_state_save({**st, "phase": "wizard",
-                       "wizard_ips": wizard_ips, "wizard_ssh_ip": ssh_ip})
-
-    if _wait_wizard_completed(AGH_WIZARD_WAIT_SEC):
+    if _complete_first_run_wizard(
+            st.get("web_mode", AGH_WEB_HTTPS_LE), st.get("domain", ""),
+            interactive=True, state_extra=st):
         ok = finalize_aghome_config(web_mode=st.get("web_mode", AGH_WEB_HTTPS_LE),
                                     domain=st.get("domain", ""))
         if ok:
             success("AGH: пароль администратора обновлён, конфиг восстановлен")
         return ok
+
+    _ensure_system_dns_alive("сброс пароля (мастер не завершён)")
     warn("AGH: мастер не завершён — пароль не изменён, конфиг не тронут")
     info("AGH: повторите позже: Сеть → A → 3 (Сброс пароля)")
     return False
