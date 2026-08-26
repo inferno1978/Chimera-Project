@@ -80,6 +80,12 @@ _LOCAL_DNS            = "127.0.0.1"
 _DNS_PORT             = 53       # стандартный DNS порт (glibc отправляет сюда)
 _IPTABLES_COMMENT     = "chimera-dns-fix"  # для идентификации правил при -D
 
+# AdGuard Home (AGH) — DNS-сервер Chimera на 127.0.0.1:53 поверх dnscrypt.
+# Когда AGH владеет :53, redirect 53→5300 НЕ нужен (и ВРЕДЕН — он ворует
+# трафик у AGH). См. chimera/modules/aghome_setup.py.
+_AGH_SERVICE          = "AdGuardHome.service"
+_AGH_CONF             = Path("/opt/AdGuardHome/AdGuardHome.yaml")
+
 # Persist-сервис — Python-скрипт (не bash), перезаписывает resolv.conf +
 # nsswitch.conf после ребута если cloud-init их регенерировал.
 # НЕ содержит НИ ОДНОЙ networkctl команды.
@@ -159,6 +165,35 @@ def _is_dnscrypt_service_active() -> bool:
     r = _run(["systemctl", "is-active", _DNSCRYPT_SERVICE],
              capture=True, check=False)
     return r.returncode == 0 and r.stdout.strip() == "active"
+
+
+def _is_aghome_active() -> bool:
+    """Служба AdGuardHome активна."""
+    r = _run(["systemctl", "is-active", _AGH_SERVICE],
+             capture=True, check=False)
+    return r.returncode == 0 and r.stdout.strip() == "active"
+
+
+def _is_aghome_serving_53() -> bool:
+    """AGH активен И слушает :53 (udp) — «AGH владеет :53».
+
+    Именно в этом состоянии redirect 53→dnscrypt_port ДОЛЖЕН БЫТЬ СНЯТ:
+    правило REDIRECT в nat OUTPUT перехватывает запросы к 127.0.0.1:53
+    и уводит их мимо AGH на dnscrypt:5300 — фильтры/кеш AGH молча
+    обходятся. Проверка udp-порта через ss — фактическое состояние
+    слушателя, а не только состояние юнита.
+    """
+    if not _is_aghome_active():
+        return False
+    r = _run(["ss", "-ulnp"], capture=True, check=False)
+    if r.returncode != 0:
+        return False
+    for line in r.stdout.splitlines():
+        # Ищем слушателя udp :53, принадлежащего AdGuardHome.
+        if re.search(r':53\s', line):
+            if "AdGuardHome" in line or "adguard" in line.lower():
+                return True
+    return False
 
 
 def _get_dnscrypt_listen_addr_port() -> Optional[tuple]:
@@ -313,6 +348,7 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
       resolv_conf_exists, resolv_conf_is_symlink, resolv_conf_nameservers,
       resolv_conf_on_localhost, nsswitch_has_resolve,
       dnscrypt_service_active, dnscrypt_listen, dnscrypt_listening,
+      aghome_active, aghome_serving_53, dns_redirect_active,
       fix_needed, fix_method, leak_reasons
     """
     result: Dict[str, Any] = {
@@ -325,6 +361,8 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
         "dnscrypt_service_active": _is_dnscrypt_service_active(),
         "dnscrypt_listen": _get_dnscrypt_listen_addr_port(),
         "dnscrypt_listening": False,
+        "aghome_active": _is_aghome_active(),
+        "aghome_serving_53": False,
         "dns_redirect_active": True,  # default: не нужен (port == 53)
         "fix_needed": False,
         "fix_method": None,
@@ -351,6 +389,18 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
             result["dns_redirect_active"] = _is_dns_redirect_active(port)
         else:
             result["dns_redirect_active"] = True  # не нужен если port == 53
+
+    # AGH владеет :53? В этом состоянии redirect не нужен ВООБЩЕ.
+    result["aghome_serving_53"] = _is_aghome_serving_53()
+    if result["aghome_serving_53"]:
+        # redirect может быть только ВРЕДНЫМ (ворует трафик у AGH):
+        # «dns_redirect_active» в AGH-режиме означает «redirect-правила
+        # отсутствуют» — это правильное состояние.
+        if result["dnscrypt_listen"] and result["dnscrypt_listen"][1] != _DNS_PORT:
+            result["dns_redirect_active"] = not _is_dns_redirect_active(
+                result["dnscrypt_listen"][1])
+        else:
+            result["dns_redirect_active"] = not _is_dns_redirect_active(5300)
 
     dnscrypt_ready = (
         result["dnscrypt_service_active"]
@@ -384,13 +434,26 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
 
     # iptables redirect 53→dnscrypt_port НЕ активен — DNS мёртв.
     # resolv.conf → 127.0.0.1, но glibc идёт на порт 53, а DNSCrypt на 5300.
+    # ИСКЛЮЧЕНИЕ: если AGH служит на :53 — glibc попадает в AGH, DNS жив,
+    # redirect не нужен (причина не срабатывает).
     if (result["resolv_conf_on_localhost"]
             and not result.get("dns_redirect_active", True)
             and result["dnscrypt_listen"]
-            and result["dnscrypt_listen"][1] != _DNS_PORT):
+            and result["dnscrypt_listen"][1] != _DNS_PORT
+            and not result["aghome_serving_53"]):
         reasons.append(
             f"iptables redirect 53→{result['dnscrypt_listen'][1]} НЕ активен — "
             f"DNS мёртв (glibc → 127.0.0.1:53, никто не слушает)"
+        )
+
+    # AGH владеет :53, но redirect 53→dnscrypt ВСЁ ЕЩЁ активен — трафик
+    # воруется у AGH (фильтры/кеш/DoH молча обходятся). Нужен re-fix.
+    if (result["aghome_serving_53"]
+            and result["resolv_conf_on_localhost"]
+            and not result.get("dns_redirect_active", True)):
+        reasons.append(
+            "iptables redirect 53→dnscrypt активен при живом AdGuard Home — "
+            "запросы обходят AGH (фильтры/кеш не работают)"
         )
 
     if reasons and dnscrypt_ready:
@@ -527,13 +590,55 @@ except Exception:
 # 5. iptables redirect 53→5300 (БЕЗОПАСНО — не трогает интерфейсы)
 # glibc отправляет DNS на nameserver:53. DNSCrypt слушает на 5300.
 # Без redirect — DNS мёртв после применения фикса.
+#
+# AGH-AWARE: если AdGuard Home активен и слушает :53 — redirect НЕ ставим
+# и снимаем если висит (REDIRECT в nat OUTPUT перехватывает запросы к
+# 127.0.0.1:53 и уводит их мимо AGH на dnscrypt — фильтры/кеш AGH молча
+# обходятся). Пока AGH в wizard-режиме (не слушает :53) или не установлен —
+# redirect ставится как раньше (dnscrypt страхует :53-трафик).
+import time as _time
 DNS_PORT = 53
 DNSCRYPT_PORT = 5300  # default; можно переопределить из TOML
+
+def _agh_serves_53():
+    """AdGuardHome активен И слушает udp :53."""
+    try:
+        r = subprocess.run(["systemctl", "is-active", "AdGuardHome"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return False
+        rr = subprocess.run(["ss", "-ulnp"], capture_output=True, timeout=5)
+        out = rr.stdout.decode(errors="replace") if isinstance(rr.stdout, bytes) else rr.stdout
+        for ln in out.splitlines():
+            if re.search(r":53\\s", ln):
+                if "AdGuardHome" in ln or "adguard" in ln.lower():
+                    return True
+        return False
+    except Exception:
+        return False
+
+def _del_redirect(port):
+    for proto in ("udp", "tcp"):
+        subprocess.run(["iptables", "-t", "nat", "-D", "OUTPUT",
+                        "-p", proto, "-d", LOCAL_DNS, "--dport", str(DNS_PORT),
+                        "-j", "REDIRECT", "--to-ports", str(port),
+                        "-m", "comment", "--comment", "chimera-dns-fix"],
+                       capture_output=True, timeout=5)
+
+def _add_redirect(port):
+    for proto in ("udp", "tcp"):
+        _del_redirect(port)  # idempotent
+        subprocess.run(["iptables", "-t", "nat", "-A", "OUTPUT",
+                        "-p", proto, "-d", LOCAL_DNS, "--dport", str(DNS_PORT),
+                        "-j", "REDIRECT", "--to-ports", str(port),
+                        "-m", "comment", "--comment", "chimera-dns-fix"],
+                       capture_output=True, timeout=5)
+
 try:
     # Читаем порт DNSCrypt из TOML.
     toml = Path("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
     if toml.exists():
-        m = re.search(r"listen_addresses\\s*=\\s*\\[\\s*['\\\"]([^'\\\"]+)['\\\"]",
+        m = re.search(r"listen_addresses\\s*=\\s*\\[\\s*['\\"]([^'\\"]+)['\\"]",
                       toml.read_text(errors="replace"), re.IGNORECASE)
         if m:
             addr_port = m.group(1)
@@ -541,20 +646,28 @@ try:
             if len(parts) == 2:
                 DNSCRYPT_PORT = int(parts[1])
     if DNSCRYPT_PORT != DNS_PORT:
-        for proto in ("udp", "tcp"):
-            # Удаляем старое правило если есть.
-            subprocess.run(["iptables", "-t", "nat", "-D", "OUTPUT",
-                          "-p", proto, "-d", LOCAL_DNS, "--dport", str(DNS_PORT),
-                          "-j", "REDIRECT", "--to-ports", str(DNSCRYPT_PORT),
-                          "-m", "comment", "--comment", "chimera-dns-fix"],
-                         capture_output=True, timeout=5)
-            # Добавляем новое.
-            subprocess.run(["iptables", "-t", "nat", "-A", "OUTPUT",
-                          "-p", proto, "-d", LOCAL_DNS, "--dport", str(DNS_PORT),
-                          "-j", "REDIRECT", "--to-ports", str(DNSCRYPT_PORT),
-                          "-m", "comment", "--comment", "chimera-dns-fix"],
-                         capture_output=True, timeout=5)
-        log(f"iptables redirect {DNS_PORT}→{DNSCRYPT_PORT}")
+        # Ждём до 20с пока AGH поднимется на буте (unit-ordering race:
+        # chimera-dns-fix может стартовать раньше AdGuardHome).
+        agh_ok = False
+        for _ in range(20):
+            agh_ok = _agh_serves_53()
+            if agh_ok:
+                break
+            # AGH не активен/не установлен — не ждём.
+            try:
+                ra = subprocess.run(["systemctl", "is-active", "AdGuardHome"],
+                                    capture_output=True, text=True, timeout=5)
+                if (ra.stdout or "").strip() not in ("active", "activating"):
+                    break
+            except Exception:
+                break
+            _time.sleep(1)
+        if agh_ok:
+            _del_redirect(DNSCRYPT_PORT)
+            log(f"AGH serves :{DNS_PORT} — redirect {DNS_PORT}\\u2192{DNSCRYPT_PORT} снят")
+        else:
+            _add_redirect(DNSCRYPT_PORT)
+            log(f"iptables redirect {DNS_PORT}\\u2192{DNSCRYPT_PORT}")
 except Exception as e:
     log(f"iptables redirect ERROR: {e}")
 
@@ -572,7 +685,7 @@ log("done")
     service_content = f"""[Unit]
 Description=Chimera Project — persist DNS-leak fix after reboot
 Documentation=https://github.com/inferno1978/Chimera-Project
-After=network-online.target systemd-resolved.service dnscrypt-proxy.service
+After=network-online.target systemd-resolved.service dnscrypt-proxy.service AdGuardHome.service
 Wants=network-online.target
 Requires=systemd-resolved.service
 
@@ -750,10 +863,26 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False,
     # на 5300. Без redirect — DNS мёртв (Could not resolve host).
     # iptables NAT OUTPUT redirect перехватывает ТОЛЬКО локальные запросы к
     # 127.0.0.1:53 → перенаправляет на 5300. НЕ трогает интерфейсы.
+    #
+    # AGH-AWARE ВЕТКА: если AdGuard Home служит на :53, redirect НЕ НУЖЕН и
+    # ВРЕДЕН (REDIRECT перехватывает запросы к 127.0.0.1:53 и уводит их
+    # мимо AGH на dnscrypt:5300 — фильтры/кеш AGH молча обходятся).
+    # В этом случае: СНЯТЬ существующие правила и НЕ ставить новые.
+    # Пока AGH в wizard-режиме (не слушает :53) — redirect остаётся
+    # страховкой (dnscrypt продолжает обслуживать :53-трафик).
     dnscrypt_port = 5300  # default
     if diag["dnscrypt_listen"]:
         dnscrypt_port = diag["dnscrypt_listen"][1]
-    if dnscrypt_port != _DNS_PORT:
+    agh_serving = diag.get("aghome_serving_53", False)
+    if agh_serving:
+        ok_r, err_r = _remove_dns_redirect(dnscrypt_port)
+        if ok_r:
+            actions.append(
+                f"AGH служит на :53 — iptables redirect 53→{dnscrypt_port} снят "
+                f"(системный DNS → AdGuard Home)")
+        else:
+            warnings.append(f"AGH: не удалось снять redirect: {err_r}")
+    elif dnscrypt_port != _DNS_PORT:
         ok_r, err_r = _apply_dns_redirect(dnscrypt_port)
         if ok_r:
             actions.append(f"iptables redirect 53→{dnscrypt_port} (локальные DNS → DNSCrypt)")

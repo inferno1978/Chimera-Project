@@ -526,6 +526,36 @@ def prompt_parameters() -> None:
             break
         warn("   Введите Y или N")
 
+    # --- 10.5 AdGuard Home (только при DNSCrypt — AGH работает поверх него) ---
+    PARAM_USE_AGHOME = False
+    setattr(core, "PARAM_USE_AGHOME", PARAM_USE_AGHOME)
+    if PARAM_USE_DNSCRYPT:
+        _box_top(f" {BLUE}[12/12] AdGuard Home (DNS-сервер с фильтрацией):{NC}")
+        _box_item("Y", f"Установить AdGuard Home {GREEN}(рекомендуется){NC}")
+        _box_desc(f"AGH на :53 — кеш 4MB + фильтры AdGuard/AdAway/OISD Big,")
+        _box_desc(f"Web UI, DoH/DoT/DoQ; DNSCrypt → :5300 (шифрованный upstream)")
+        _box_item("N", f"Только DNSCrypt (как раньше){NC}")
+        _box_desc(f"Проще, без дополнительного слоя")
+        _box_row()
+        _box_bottom()
+        while True:
+            try:
+                choice = input("   Установить AdGuard Home? [Y/n]: ").strip().lower()
+            except KeyboardInterrupt:
+                print()
+                raise
+            if choice in ('y', 'yes', ''):
+                PARAM_USE_AGHOME = True
+                setattr(core, "PARAM_USE_AGHOME", PARAM_USE_AGHOME)
+                success("   AdGuard Home: будет установлен (мастер задаст пароль в браузере)")
+                break
+            elif choice in ('n', 'no'):
+                PARAM_USE_AGHOME = False
+                setattr(core, "PARAM_USE_AGHOME", PARAM_USE_AGHOME)
+                info("   AdGuard Home: пропускаем (DNS остаётся на DNSCrypt)")
+                break
+            warn("   Введите Y или N")
+
     # --- 11. Fingerprint ---
     _box_top(f" {BLUE}[12/12] TLS Fingerprint (uTLS):{NC}")
     _box_row(f"   Определяет, под какой браузер маскируется TLS-хендшейк клиента.")
@@ -575,6 +605,9 @@ def prompt_parameters() -> None:
     _box_row(f"  {CYAN}Шаблон:{NC}          {tmpl_names[int(PARAM_SITE_TEMPLATE)]}")
     dc_str = "да (зашифрованный DNS)" if PARAM_USE_DNSCRYPT else "нет (1.1.1.1 / 8.8.8.8)"
     _box_row(f"  {CYAN}DNSCrypt:{NC}        {dc_str}")
+    if PARAM_USE_DNSCRYPT:
+        ag_str = "да (:53, фильтры, DoH/DoT)" if PARAM_USE_AGHOME else "нет"
+        _box_row(f"  {CYAN}AdGuard Home:{NC}    {ag_str}")
     _box_row()
     _box_bottom()
 

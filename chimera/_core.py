@@ -959,6 +959,18 @@ DNSCRYPT_LISTEN_PORT = 5300
 DNSCRYPT_INSTALLED:  bool = False
 PARAM_USE_DNSCRYPT:  bool = False
 
+# AdGuard Home globals (DNS-сервер :53 поверх DNSCrypt — см. modules/aghome_setup.py)
+AGHOME_BIN           = Path("/usr/local/bin/AdGuardHome")
+AGHOME_WORK_DIR      = Path("/opt/AdGuardHome")
+AGHOME_CONF          = AGHOME_WORK_DIR / "AdGuardHome.yaml"
+AGHOME_SERVICE       = Path("/etc/systemd/system/AdGuardHome.service")
+AGHOME_WEB_PORT:     int = 3000    # Web UI (plain HTTP, loopback/публично)
+AGHOME_DNS_PORT:     int = 53      # DNS — AGH владеет :53
+AGHOME_DOH_PORT:     int = 30443   # DoH + Web UI HTTPS (native TLS AGH)
+AGHOME_DOT_PORT:     int = 853     # DoT (tcp) / DoQ (udp)
+AGHOME_INSTALLED:    bool = False
+PARAM_USE_AGHOME:    bool = False
+
 # =============================================================================
 #  CLOUDFLARE WARP GLOBALS
 # =============================================================================
@@ -3335,6 +3347,7 @@ _AWG_REMOTE_CONF_PATH = "/etc/amnezia/amneziawg/awg0.conf"
 
 def do_full_install() -> None:
     global INSTALL_STARTED, PARAM_USE_DNSCRYPT, DNSCRYPT_INSTALLED
+    global PARAM_USE_AGHOME, AGHOME_INSTALLED
     global SPLIT_TUNNEL_ENABLED, SPLIT_TUNNEL_EXTRA_DOMAINS, SPLIT_TUNNEL_EXTRA_IPS
     global H2_EXIT_ENABLED
 
@@ -3396,6 +3409,33 @@ def do_full_install() -> None:
     install_dnscrypt();             PROGRESS.update(5,  "DNSCrypt")
     if PARAM_USE_DNSCRYPT:
         apply_dnscrypt_tuning()
+    # AdGuard Home (v37): DNS-сервер :53 поверх DNSCrypt — после
+    # установки dnscrypt (upstream-требование). Внутри install_aghome:
+    # миграция dnscrypt с :53 → wizard (:3000, ждём до 5 мин) → финализация
+    # (секции dns/tls/filters, снятие redirect 53→5300). Пока мастер не
+    # завершён — DNS страхует redirect → dnscrypt:5300.
+    if PARAM_USE_AGHOME and PARAM_USE_DNSCRYPT:
+        try:
+            from chimera.modules.aghome_setup import install_aghome, aghome_dns_ready
+            if install_aghome(interactive=True):
+                AGHOME_INSTALLED = aghome_dns_ready()
+                if AGHOME_INSTALLED:
+                    PARAM_USE_AGHOME = True
+                PROGRESS.update(3, "AdGuard Home")
+            else:
+                AGHOME_INSTALLED = False
+                PARAM_USE_AGHOME = False
+                warn("AdGuard Home не установлен — DNS остаётся на DNSCrypt")
+        except ImportError as _e:
+            warn(f"Модуль aghome_setup недоступен: {_e}")
+            PARAM_USE_AGHOME = False
+        except Exception as _e:
+            warn(f"AdGuard Home: ошибка установки: {_e} — DNS остаётся на DNSCrypt")
+            PARAM_USE_AGHOME = False
+            AGHOME_INSTALLED = False
+    elif PARAM_USE_AGHOME and not PARAM_USE_DNSCRYPT:
+        warn("AdGuard Home требует DNSCrypt-proxy — AGH пропущен")
+        PARAM_USE_AGHOME = False
     configure_firewall();           PROGRESS.update(5,  "Файрволл")
 
     # Проверяем доступность порта снаружи — только предупреждение, не блокировка.
@@ -3520,6 +3560,40 @@ def do_full_install() -> None:
                     generate_xray_config()
     else:
         info("Шаг 1/3: DNSCrypt-proxy пропущен (не выбран)")
+
+    # Шаг 1.5: AdGuard Home — ПОСЛЕ dnscrypt (upstream), ДО xray (клиент :53).
+    # Порядок boot: dnscrypt-proxy.service → AdGuardHome.service → xray
+    # (задан в systemd-unit'ах через After=/Before=).
+    if PARAM_USE_AGHOME:
+        info("Шаг 1.5: запуск AdGuard Home...")
+        try:
+            from chimera.modules.aghome_setup import (
+                is_aghome_installed, is_aghome_active, aghome_dns_ready,
+                aghome_wizard_pending, finalize_aghome_config,
+            )
+            if is_aghome_installed() and not is_aghome_active():
+                _run(["systemctl", "restart", "AdGuardHome"],
+                     check=False, quiet=True)
+                _wait_service_active("AdGuardHome", 30)
+            if aghome_dns_ready():
+                success("  AdGuard Home активен на :53 (upstream → dnscrypt)")
+            elif aghome_wizard_pending():
+                info("  AdGuard Home в режиме мастера — DNS на dnscrypt redirect")
+                info("  Завершите мастер: Сеть → AdGuard Home (A) → 2")
+            elif is_aghome_installed() and AGH_CONF.exists():
+                # установлен с конфигом, но DNS не готов — переприменяем
+                info("  AdGuard Home: переприменяю канонический конфиг...")
+                if finalize_aghome_config(interactive=False):
+                    success("  AdGuard Home активен на :53")
+                else:
+                    warn("  AdGuard Home не поднялся на :53 — DNS на dnscrypt")
+                    warn("  Проверьте: journalctl -u AdGuardHome -n 30")
+            else:
+                warn("  AdGuard Home не установлен/не настроен — DNS на dnscrypt")
+        except ImportError as _e:
+            warn(f"  Модуль aghome_setup недоступен: {_e}")
+        except Exception as _e:
+            warn(f"  AdGuard Home: {_e}")
 
     # Шаг 2: Xray ПЕРВЫМ — очищает старый сокет, создаёт новый
     info("Шаг 2/3: запуск Xray...")
@@ -3655,6 +3729,7 @@ def do_full_install() -> None:
         "user_name":      PARAM_USER_NAME,
         "ipv6":           IPV6_PREFLIGHT,
         "use_dnscrypt":   PARAM_USE_DNSCRYPT,
+        "use_aghome":     PARAM_USE_AGHOME,
         "fingerprint":    PARAM_FINGERPRINT,
         "split_tunnel":   SPLIT_TUNNEL_ENABLED,
         "split_extra_domains": SPLIT_TUNNEL_EXTRA_DOMAINS,
@@ -3814,7 +3889,15 @@ def do_full_install() -> None:
             _box_row(f"  {DIM}(+ ещё {len(CHAIN_NODES)-1} нод в round-robin){NC}")
     _box_sep()
     _box_row(f"  Настройки:")
-    if DNSCRYPT_INSTALLED:
+    _agh_dns = False
+    try:
+        from chimera.modules.aghome_setup import aghome_dns_ready as _aghr
+        _agh_dns = _aghr()
+    except Exception:
+        pass
+    if _agh_dns:
+        _box_row(f"  DNS:          {CYAN}AdGuard Home :53 (кеш+фильтры) → DNSCrypt :{DNSCRYPT_LISTEN_PORT} → fallback 9.9.9.9/1.1.1.1{NC}")
+    elif DNSCRYPT_INSTALLED:
         _box_row(f"  DNS:          {CYAN}DNSCrypt-proxy ({DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}) → fallback 1.1.1.1/8.8.8.8{NC}")
     elif IS_IPV6_AVAILABLE:
         _box_row(f"  DNS:          {CYAN}AdGuard IPv6 → CF IPv6 → Google IPv6 → fallback IPv4{NC}")
@@ -7387,6 +7470,7 @@ def _menu_network() -> None:
         _box_item("3", f"🔒 DNSCrypt-proxy  {DIM}(управление и оптимизация){NC}")
         _box_item("R", f"🔍 DNSCrypt: выбор резолверов  {DIM}(замер latency → server_names){NC}")
         _box_item("RA", f"🛡️ DNSCrypt: расширенная настройка  {DIM}(198 серверов, ODoH, DNSSEC, анонимизация){NC}")
+        _box_item("A", f"🛡️ AdGuard Home  {DIM}(DNS :53 + фильтры + DoH/DoT — поверх DNSCrypt){NC}")
         _box_item("4", f"☁️  Cloudflare WARP  {DIM}(управление туннелем){NC}")
         _box_item("5", f"🔄 Сменить домен / порт  {DIM}(без переустановки){NC}")
         _box_item("6", f"🌍 Стратегия исходящих  {DIM}(domainStrategy){NC}")
@@ -7480,6 +7564,14 @@ def _menu_network() -> None:
             do_dnscrypt_selector_menu()
         elif ch.lower() == "ra":
             do_dnscrypt_advanced_menu()
+        elif ch.lower() == "a":
+            # AdGuard Home — DNS-сервер :53 (кеш+фильтры) поверх DNSCrypt :5300.
+            try:
+                from chimera.modules.aghome_setup import do_aghome_menu
+                do_aghome_menu()
+            except ImportError as e:
+                warn(f"Модуль aghome_setup не найден: {e}")
+                time.sleep(2)
         elif ch.lower() == "dr":
             do_manage_dns_redirect()
         elif ch.lower() == "d":
@@ -8589,6 +8681,7 @@ def _load_state_into_globals() -> None:
     # FIX: добавлен IPV6_ROUTE_OK — нужен для отметки что IPv6-адрес есть, но
     # связность отсутствует (см. логику ниже в теле функции).
     global IS_IPV6_AVAILABLE, IPV6_PREFLIGHT, IPV6_ROUTE_OK, PARAM_USE_DNSCRYPT
+    global PARAM_USE_AGHOME, AGHOME_INSTALLED
     global INSTALL_MODE, PROTOCOL_MODE, XHTTP_MODE, XHTTP_PATH, XHTTP_PERF_PRESET
     global AWG_EXIT_ENABLED, AWG_INSTALLED, AWG_EXIT_HOST, AWG_EXIT_PORT, PARAM_REALITY_DEST
     # FIX: AWG_CLIENT_LISTEN_PORT присваивается ниже (state.get("awg_client_listen_port",
@@ -8671,6 +8764,16 @@ def _load_state_into_globals() -> None:
         else:
             IS_IPV6_AVAILABLE = False
         PARAM_USE_DNSCRYPT = state.get("use_dnscrypt", False)
+        # AdGuard Home (v37): AGH-слой поверх DNSCrypt. AGHOME_INSTALLED
+        # определяется по факту (бинарник + служба), а не только из state.
+        PARAM_USE_AGHOME = state.get("use_aghome", False)
+        try:
+            from chimera.modules.aghome_setup import is_aghome_installed as _aghi
+            AGHOME_INSTALLED = _aghi()
+        except Exception:
+            AGHOME_INSTALLED = AGHOME_BIN.exists()
+        if PARAM_USE_AGHOME and not PARAM_USE_DNSCRYPT:
+            PARAM_USE_AGHOME = False  # AGH без dnscrypt не имеет смысла
         PROTOCOL_MODE = state.get("protocol_mode", "reality")
         XTLS_FLOW     = state.get("xtls_flow",      "xtls-rprx-vision")
         # YouTube routing toggle (youtube_route.py). Default False — YouTube

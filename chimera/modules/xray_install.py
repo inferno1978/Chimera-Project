@@ -791,11 +791,29 @@ def generate_xray_config() -> None:
         query_strategy = "UseIPv4"
 
     # DNS servers JSON
+    # AGH-AWARE (v37): если AdGuard Home владеет 127.0.0.1:53 — DNS Xray
+    # идёт через AGH (кеш + фильтры + DoT-upstream dnscrypt), иначе —
+    # напрямую в dnscrypt:5300 (как раньше).
+    agh_dns = False
+    try:
+        from chimera.modules.aghome_setup import aghome_dns_ready
+        agh_dns = aghome_dns_ready()
+    except Exception:
+        agh_dns = False
+
     r_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
                     capture=True, check=False)
     dnscrypt_running = (DNSCRYPT_INSTALLED or r_active.stdout.strip() == "active")
 
-    if dnscrypt_running:
+    if agh_dns:
+        info("DNS: используем AdGuard Home (127.0.0.1:53) → dnscrypt upstream")
+        dns_servers = [
+            {"address": "127.0.0.1", "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "127.0.0.1", "port": 53, "network": "tcp", "skipFallback": True},
+            {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
+            {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
+        ]
+    elif dnscrypt_running:
         info(f"DNS: используем DNSCrypt-proxy "
              f"({DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT})")
         dns_servers = [
@@ -1041,11 +1059,27 @@ def generate_xray_config_xhttp() -> None:
         query_strategy = "UseIPv4"
 
     # DNS серверы
+    # AGH-AWARE (v37): аналогично generate_xray_config() — при живом AGH
+    # DNS Xray идёт через 127.0.0.1:53 (AGH), а не напрямую в dnscrypt.
+    agh_dns = False
+    try:
+        from chimera.modules.aghome_setup import aghome_dns_ready
+        agh_dns = aghome_dns_ready()
+    except Exception:
+        agh_dns = False
+
     r_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
                     capture=True, check=False)
     dnscrypt_running = (DNSCRYPT_INSTALLED or r_active.stdout.strip() == "active")
 
-    if dnscrypt_running:
+    if agh_dns:
+        dns_servers = [
+            {"address": "127.0.0.1", "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "127.0.0.1", "port": 53, "network": "tcp", "skipFallback": True},
+            {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
+            {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
+        ]
+    elif dnscrypt_running:
         dns_servers = [
             {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
              "network": "udp", "skipFallback": False},
