@@ -11,6 +11,7 @@ Unit-тесты для AdGuard Home стека Chimera:
   6. migrate_dnscrypt_off_53 — снятие :53 у dnscrypt
   7. resolv_conf_fix AGH-aware — diagnose/фикс при живом AGH
   8. aghome_dns_ready / is_aghome_active — хелперы состояния
+  9. wizard-доступ: UFW-правила (ssh_ip + pub_ip) и URL из адреса сервера
 """
 from __future__ import annotations
 
@@ -444,6 +445,103 @@ class TestStateHelpers(unittest.TestCase):
         d = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
         return d
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  wizard-доступ: UFW-правила + URL из адреса сервера
+# ─────────────────────────────────────────────────────────────────────────────
+class TestWizardAccess(unittest.TestCase):
+    """Регресс v40: URL мастера строился из IP SSH-клиента.
+
+    При SSH через VLESS-туннель sshd видит IP самого VPS, при прямом
+    SSH — домашний IP (на нём ничего не слушает). UFW открывался только
+    для одного IP: браузер через туннель (source = IP VPS) блокировался,
+    а после отключения туннеля «Failed to fetch» / страница недоступна.
+    """
+
+    def setUp(self):
+        import chimera.modules.aghome_setup as ags
+        self.mod = ags
+
+    def test_is_public_ipv4(self):
+        self.assertTrue(self.mod._is_public_ipv4("203.0.113.103"))
+        self.assertFalse(self.mod._is_public_ipv4("192.168.1.10"))
+        self.assertFalse(self.mod._is_public_ipv4("10.0.0.1"))
+        self.assertFalse(self.mod._is_public_ipv4("172.16.0.2"))
+        self.assertFalse(self.mod._is_public_ipv4("127.0.0.1"))
+        self.assertFalse(self.mod._is_public_ipv4("100.64.1.1"))  # CGNAT
+        self.assertFalse(self.mod._is_public_ipv4("not-an-ip"))
+        self.assertFalse(self.mod._is_public_ipv4("::1"))
+
+    def test_ufw_clean_wizard_rules(self):
+        calls = []
+        with patch.object(self.mod, "shutil") as sh, \
+             patch.object(self.mod, "subprocess") as sub:
+            sh.which.return_value = "/usr/sbin/ufw"
+
+            def run_side(cmd, **kw):
+                calls.append(" ".join(cmd))
+                if "status" in cmd:
+                    return MagicMock(returncode=0, stdout=(
+                        "To                         Action      From\n"
+                        "--                         ------      ----\n"
+                        "3000/tcp                   ALLOW       203.0.113.103  # chimera-aghome-wizard-temp\n"
+                        "3000/tcp                   ALLOW       203.0.113.7     # chimera-aghome-wizard-temp\n"
+                        "22/tcp                     ALLOW       Anywhere\n"))
+                return MagicMock(returncode=0, stdout="Rule deleted\n")
+
+            sub.run.side_effect = run_side
+            removed = self.mod._ufw_clean_wizard_rules()
+        self.assertEqual(sorted(removed),
+                         ["203.0.113.103", "203.0.113.7"])
+        deletes = [c for c in calls if c.startswith("ufw delete")]
+        self.assertEqual(len(deletes), 2)
+        # посторонние правила (22/tcp ALLOW Anywhere) не тронуты
+
+    def test_open_wizard_access_ssh_and_public(self):
+        # Прямой SSH (домашний IP) + hairpin через VLESS (IP VPS) — оба правила
+        with patch.object(self.mod, "_get_public_ip",
+                          return_value="203.0.113.103"), \
+             patch.object(self.mod, "_ufw_clean_wizard_rules",
+                          return_value=[]), \
+             patch.object(self.mod, "_ufw_allow_from_ip",
+                          side_effect=lambda ip, port: True) as allow:
+            opened = self.mod._open_wizard_access("203.0.113.7")
+        self.assertEqual(opened, ["203.0.113.7", "203.0.113.103"])
+        self.assertEqual(allow.call_count, 2)
+
+    def test_open_wizard_access_dedup_when_ssh_via_tunnel(self):
+        # SSH через VLESS-туннель на этой же VPS: ssh_ip == pub_ip → одно правило
+        with patch.object(self.mod, "_get_public_ip",
+                          return_value="203.0.113.103"), \
+             patch.object(self.mod, "_ufw_clean_wizard_rules",
+                          return_value=[]), \
+             patch.object(self.mod, "_ufw_allow_from_ip",
+                          side_effect=lambda ip, port: True) as allow:
+            opened = self.mod._open_wizard_access("203.0.113.103")
+        self.assertEqual(opened, ["203.0.113.103"])
+        self.assertEqual(allow.call_count, 1)
+
+    def test_open_wizard_access_cleans_old_rules_first(self):
+        order = []
+        with patch.object(self.mod, "_get_public_ip",
+                          return_value="203.0.113.103"), \
+             patch.object(self.mod, "_ufw_clean_wizard_rules",
+                          side_effect=lambda *a, **kw: order.append("clean")), \
+             patch.object(self.mod, "_ufw_allow_from_ip",
+                          side_effect=lambda ip, port:
+                              order.append("allow:" + ip) or True):
+            self.mod._open_wizard_access("203.0.113.7")
+        self.assertEqual(order[0], "clean")
+        self.assertIn("allow:203.0.113.7", order)
+        self.assertIn("allow:203.0.113.103", order)
+
+    def test_wizard_url_never_uses_ssh_client_ip(self):
+        """Source-guard: URL мастера — только из адреса сервера."""
+        src = (_PROJECT_ROOT / "chimera" / "modules" /
+               "aghome_setup.py").read_text(encoding="utf-8")
+        self.assertNotIn("http://{ssh_ip", src)
+        self.assertIn("http://{wizard_host}", src)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

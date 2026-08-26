@@ -971,6 +971,72 @@ def _ufw_delete_rule(*args: str) -> None:
         pass
 
 
+def _ufw_clean_wizard_rules(port: int = AGH_WEB_PORT) -> list:
+    """Удаляет ВСЕ старые временные wizard-правила (по comment).
+
+    Покрывает переустановки и крэши между добавлением правила и
+    сохранением state (правило без clean-up оставалось в UFW навсегда).
+    """
+    removed = []
+    try:
+        if not shutil.which("ufw"):
+            return removed
+        r = subprocess.run(["ufw", "status"], capture_output=True,
+                           text=True, check=False, timeout=30)
+        for line in r.stdout.splitlines():
+            if "chimera-aghome-wizard-temp" not in line:
+                continue
+            # ufw status: "3000/tcp  ALLOW  <IP>  # comment" — IP стоит
+            # в колонке From, слова «from» в строке НЕТ. Ищем первый IPv4
+            # до комментария (комментарий наших правил IP не содержит).
+            m = re.search(r'\b(\d+\.\d+\.\d+\.\d+)\b', line.split("#")[0])
+            if not m:
+                continue
+            ip = m.group(1)
+            _ufw_delete_rule("allow", "from", ip, "to", "any",
+                             "port", str(port), "proto", "tcp")
+            removed.append(ip)
+    except Exception:
+        pass
+    return removed
+
+
+def _is_public_ipv4(ip: str) -> bool:
+    """IPv4 и глобальный (не RFC1918/CGNAT/loopback/TEST-NET) — годится
+    как хост в URL для пользователя."""
+    try:
+        import ipaddress
+        a = ipaddress.ip_address(ip)
+        # is_global строже is_private: CGNAT 100.64/10 и TEST-NET
+        # не являются private, но и не global
+        return a.version == 4 and a.is_global
+    except Exception:
+        return False
+
+
+def _open_wizard_access(ssh_ip: str) -> list:
+    """Временный доступ к мастеру :3000 — с IP SSH-клиента И с public
+    IP VPS.
+
+    Public IP обязателен: браузер через VLESS/xray-туннель НА ЭТОЙ ЖЕ
+    VPS приходит на :3000 с source-IP сервера (hairpin) — без правила
+    для pub_ip мастер недоступен через туннель. Чистит старые
+    wizard-правила, возвращает список реально открытых IP.
+    """
+    pub_ip = _get_public_ip()
+    want = []
+    if ssh_ip:
+        want.append(ssh_ip)
+    if pub_ip and pub_ip not in want:
+        want.append(pub_ip)
+    _ufw_clean_wizard_rules()
+    opened = []
+    for ip in want:
+        if _ufw_allow_from_ip(ip, AGH_WEB_PORT):
+            opened.append(ip)
+    return opened
+
+
 def _register_aghome_ports(dc_port: int, tls_enabled: bool,
                            web_public_plain: bool) -> None:
     """Регистрирует все порты DNS-стека в port_registry + открывает публичные
@@ -1246,13 +1312,15 @@ def install_aghome(interactive: bool = True) -> bool:
     if wizard_restart:
         ssh_ip = _get_ssh_client_ip()
         web_mode, domain = _ask_web_mode()
-        opened_ip = ""
-        if ssh_ip:
-            if _ufw_allow_from_ip(ssh_ip, AGH_WEB_PORT):
-                opened_ip = ssh_ip
-                info(f"AGH: Web UI мастер открыт для вашего IP {ssh_ip} (временно)")
-            else:
-                info("AGH: UFW недоступен — используйте SSH-туннель")
+
+        # Доступ: IP SSH-клиента + public IP VPS (hairpin через VLESS-
+        # туннель на этой же VPS: браузер через прокси = запрос с IP VPS)
+        wizard_ips = _open_wizard_access(ssh_ip)
+        if wizard_ips:
+            info("AGH: мастер открыт в UFW для IP: "
+                 + ", ".join(wizard_ips) + " (временно)")
+        elif ssh_ip:
+            info("AGH: UFW недоступен — используйте SSH-туннель")
         else:
             info("AGH: IP SSH-клиента не определён — используйте SSH-туннель")
 
@@ -1267,21 +1335,27 @@ def install_aghome(interactive: bool = True) -> bool:
             "doh_port": AGH_DOH_PORT,
             "dot_port": AGH_DOT_PORT,
             "doq_port": AGH_DOQ_PORT,
-            "wizard_ssh_ip": opened_ip,
+            "wizard_ips": wizard_ips,
+            "wizard_ssh_ip": ssh_ip,
             "installed_at": datetime.now().isoformat(),
         })
 
-        # Инструкция по мастеру
+        # Инструкция по мастеру: URL — ВСЕГДА адрес СЕРВЕРА
+        # (никогда IP SSH-клиента: на нём ничего не слушает).
         pub_ip = _get_public_ip()
+        wizard_host = pub_ip if _is_public_ipv4(pub_ip) else "IP-СЕРВЕРА"
         _CYAN = getattr(core, "CYAN", "")
         _NC = getattr(core, "NC", "")
         _DIM = getattr(core, "DIM", "")
         print()
         core._box_top("🛡️  AdGuard Home — мастер первого запуска")
         core._box_row()
-        core._box_row(f"  Откройте в браузере {_CYAN}http://{ssh_ip or '127.0.0.1'}:{AGH_WEB_PORT}{_NC}")
-        if not ssh_ip:
-            core._box_row(f"  {_DIM}(с локальной машины: ssh -L {AGH_WEB_PORT}:127.0.0.1:{AGH_WEB_PORT} root@{pub_ip or 'SERVER_IP'}){_NC}")
+        core._box_row(f"  Откройте в браузере {_CYAN}http://{wizard_host}:{AGH_WEB_PORT}{_NC}")
+        if domain:
+            core._box_row(f"  {_DIM}(или http://{domain}:{AGH_WEB_PORT}){_NC}")
+        core._box_sep()
+        core._box_row(f"  {_DIM}Через VLESS-туннель — тот же URL (доступ с IP сервера открыт){_NC}")
+        core._box_row(f"  {_DIM}Напрямую не открывается: ssh -L {AGH_WEB_PORT}:127.0.0.1:{AGH_WEB_PORT} root@{wizard_host}{_NC}")
         core._box_sep()
         core._box_row(f"  1. Веб-интерфейс: {_CYAN}Все интерфейсы / 0.0.0.0 :{AGH_WEB_PORT}{_NC}")
         core._box_row(f"  2. DNS-сервер:    {_CYAN}Только 127.0.0.1 (Loopback){_NC}")
@@ -1515,10 +1589,15 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
             _remove_dns_redirect_direct()
 
     # ── Временный wizard-доступ → финальные порты ─────────────────────
-    wizard_ip = st.get("wizard_ssh_ip", "")
-    if wizard_ip:
-        _ufw_delete_rule("allow", "from", wizard_ip, "to", "any",
+    # Удаляем ВСЕ временные правила: wizard_ips (список), legacy
+    # wizard_ssh_ip (одиночный) + подчистка по comment (крэши/переустановки)
+    legacy_ips = list(st.get("wizard_ips", []))
+    if st.get("wizard_ssh_ip"):
+        legacy_ips.append(st["wizard_ssh_ip"])
+    for wip in dict.fromkeys(legacy_ips):  # уникальные, порядок сохранён
+        _ufw_delete_rule("allow", "from", str(wip), "to", "any",
                          "port", str(AGH_WEB_PORT), "proto", "tcp")
+    _ufw_clean_wizard_rules()
     _register_aghome_ports(dc_port, tls_enabled,
                            web_public_plain=(web_mode == AGH_WEB_HTTP_PUB))
 
@@ -1540,6 +1619,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         "doh_port": AGH_DOH_PORT,
         "dot_port": AGH_DOT_PORT,
         "doq_port": AGH_DOQ_PORT,
+        "wizard_ips": [],
         "wizard_ssh_ip": "",
         "finalized_at": datetime.now().isoformat(),
     })
@@ -1687,6 +1767,7 @@ def uninstall_aghome() -> bool:
     _remove_certbot_deploy_hook()
 
     # ── 5. Порты ──────────────────────────────────────────────────────
+    _ufw_clean_wizard_rules()  # висящие wizard-temp правила
     _unregister_aghome_ports()
 
     # ── 6. DNS обратно на dnscrypt redirect ───────────────────────────
@@ -1759,13 +1840,18 @@ def aghome_reset_admin_password() -> bool:
         return False
 
     ssh_ip = _get_ssh_client_ip()
-    if ssh_ip:
-        _ufw_allow_from_ip(ssh_ip, AGH_WEB_PORT)
-        info(f"AGH: мастер открыт для вашего IP {ssh_ip} (временно)")
-    info(f"AGH: откройте http://{ssh_ip or '127.0.0.1'}:{AGH_WEB_PORT} "
+    wizard_ips = _open_wizard_access(ssh_ip)
+    if wizard_ips:
+        info("AGH: мастер открыт в UFW для IP: "
+             + ", ".join(wizard_ips) + " (временно)")
+    wizard_host = _get_public_ip()
+    if not _is_public_ipv4(wizard_host):
+        wizard_host = "IP-СЕРВЕРА"
+    info(f"AGH: откройте http://{wizard_host}:{AGH_WEB_PORT} "
          f"и задайте НОВЫЙ логин/пароль администратора")
 
-    aghome_state_save({**st, "phase": "wizard", "wizard_ssh_ip": ssh_ip})
+    aghome_state_save({**st, "phase": "wizard",
+                       "wizard_ips": wizard_ips, "wizard_ssh_ip": ssh_ip})
 
     if _wait_wizard_completed(AGH_WIZARD_WAIT_SEC):
         ok = finalize_aghome_config(web_mode=st.get("web_mode", AGH_WEB_HTTPS_LE),
