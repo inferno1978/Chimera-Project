@@ -2,6 +2,109 @@
 
 ---
 
+## FEAT(aghome): AdGuard Home — DNS-сервер :53 с фильтрацией поверх DNSCrypt — 26 августа 2026
+
+**Полноценный AGH-слой как в роутерном стеке: AdGuard Home на :53
+(кеш + фильтры + Web UI + DoH/DoT/DoQ), DNSCrypt остаётся на :5300
+(шифрованный upstream). Без dnsmasq (на VPS не нужен).**
+
+### Новые модули
+
+- `chimera/modules/aghome_setup.py` — установка, миграция, финализация,
+  uninstall, сброс пароля, TUI-меню (Сеть → **A**):
+  - Установка: GitHub API + зеркала (gh-прокси + официальный CDN
+    `static.adtidy.org` — работает при блокировках GitHub), systemd-unit
+    от пользователя `adguard` с `CAP_NET_BIND_SERVICE` (не root).
+  - **Миграция с нулевым даунтаймом:** `migrate_dnscrypt_off_53()` снимает
+    :53 у dnscrypt (ручной фикс v33 на живых серверах) с бэкапом TOML и
+    откатом при провале; пока AGH поднимается — redirect 53→5300
+    продолжает обслуживать DNS.
+  - **Мастер первого запуска:** AGH стартует БЕЗ конфига (detectFirstRun
+    по исходникам v0.107.62: файла нет → wizard в браузере, DNS не
+    стартует до завершения). Пароль задаёт пользователь — НЕ
+    предгенерированный admin/admin как на роутере. Временный UFW-доступ
+    к :3000 только с IP SSH-клиента (мастер без пароля не выставляется
+    наружу).
+  - **Финализация:** `yaml_replace_sections()` — хирургическая замена
+    top-level секций YAML (dns/tls/http/filters/querylog/statistics/
+    whitelist_filters/user_rules/dhcp), написанного мастером;
+    users/schema_version/theme не тронуты (bcrypt-пароль сохраняется).
+    Само-healing: loopback-only bind при провале, откат к конфигу
+    мастера, возврат redirect на dnscrypt при полном провале.
+  - **DoH/DoT/DoQ:** :30443/tcp (DoH + Web UI HTTPS — native TLS AGH
+    мультиплексирует их на одном порту), :853/tcp (DoT), :853/udp (DoQ).
+    LE-сертификат домена Xray синкается в /opt/AdGuardHome/certs/ +
+    certbot deploy-hook на renewal; без домена — self-signed openssl.
+  - **Фильтры (все 3):** AdGuard DNS filter + AdAway + OISD Big
+    (`https://big.oisd.nl/` — роутерный `/basic` отдаёт 404, корневой
+    URL проверен: 267k записей).
+  - **Конфиг dns:** upstream `127.0.0.1:{порт dnscrypt}`, bootstrap
+    `127.0.0.1:5300` (нет plain-DNS утечки — улучшение относительно
+    роутера), fallback `9.9.9.9:53 + 1.1.1.1:53` (как на роутере, не
+    strict), ratelimit 20, кеш 4MB optimistic, DNSSEC on, querylog +
+    statistics on (ретенция 90 дней — решение пользователя).
+  - `bind_hosts: [127.0.0.1, PUBLIC_IP]` — публичный IP нужен для
+    DoT/DoQ/DoH; **:53 снаружи в UFW НЕ открывается** (нет open
+    resolver — аналог firewall WAN DROP роутера).
+- `chimera/modules/aghome_mirrors.py` — зеркала: GitHub release
+  (version-pinned) → gh-прокси → static.adtidy.org (latest, не зависит
+  от GitHub) → releases/latest. jsDelivr/raw/Statically НЕ используются
+  (не отдают release-ассеты).
+- `chimera/modules/aghome_packages.py` — PackageSpec
+  (`AdGuardHome_linux_{arch}.tar.gz`, arch: amd64/arm64/armv7/386;
+  post_install: tar → rglob → /usr/local/bin/AdGuardHome).
+
+### Интеграция
+
+- `_core.py`: константы AGHOME_*, PARAM_USE_AGHOME; пункт **A** в меню
+  Сеть; вопрос в wizard (после DNSCrypt, только при его выборе);
+  `use_aghome` в state.json + `_load_state_into_globals`; Шаг 1.5 в
+  порядке запуска служб (dnscrypt → AGH → xray → nginx); строка DNS в
+  финальном статус-боксе.
+- `port_registry.py`: теги SERVICE_DNSCRYPT (5300), SERVICE_AGHOME (53),
+  SERVICE_AGHOME_WEB (3000), SERVICE_AGHOME_DOH (30443), SERVICE_AGHOME_DOT
+  (853/tcp), SERVICE_AGHOME_DOQ (853/udp). dnscrypt:5300 регистрируется
+  в `dnscrypt_setup.py` при установке (force=True, паттерн b4_dns).
+  AGH-порты регистрируются при финализации, закрываются при uninstall.
+- `resolv_conf_fix.py` — **AGH-aware**:
+  - `_is_aghome_serving_53()` (systemctl + ss);
+  - diagnose: при живом AGH redirect «не активен» = правильное состояние;
+    redirect ПРИ живом AGH = причина для re-fix («запросы обходят AGH»);
+  - fix: при живом AGH redirect СНИМАЕТСЯ (-D), не ставится (-A);
+  - persist-скрипт (генерируемый) сам выбирает ветку на каждом ребуте:
+    ждёт до 20с AGH (enabled), при живом AGH — снимает redirect, иначе
+    ставит (dnscrypt страхует :53); unit: After=AdGuardHome.service.
+- `xray_install.py` + `chain_nodes.py` (entry-multi): при живом AGH DNS
+  Xray = `127.0.0.1:53` (udp+tcp через AGH, кеш+фильтры) с fallback
+  1.1.1.1/8.8.8.8; иначе — прежний dnscrypt:5300. Exit-шаблоны Режима B
+  не тронуты (чужие VPS без AGH).
+- systemd-unit AGH: `After=dnscrypt-proxy.service`,
+  `Before=xray.service nginx.service chimera-dns-fix.service` —
+  порядок boot зафиксирован.
+
+### Uninstall (полный откат)
+
+Stop/disable → unit → бинарник → /opt/AdGuardHome (бэкап tar.gz в
+/root/aghome-backups/) → пользователь → certbot hook → закрытие портов
+(UFW + port_registry по всем AGH-тегам) → `fix_resolv_conf_to_localhost
+(force=True)` восстанавливает redirect 53→5300 (AGH неактивен —
+dnscrypt-ветка) → перегенерация конфига Xray (DNS → dnscrypt:5300).
+
+### Тесты
+
+`tests/test_aghome_setup.py` — 45 кейсов: зеркала, PackageSpec,
+yaml_replace_sections (замена/добавление/удаление секций, сохранность
+users), _yaml_has_users (lockout-защита), build_*_section (все канонические
+значения), migrate_dnscrypt_off_53 (снятие :53 с бэкапом и откатом),
+aghome_dns_ready/wizard_pending, resolv_conf_fix AGH-aware (снятие -D без
+-A, wizard-режим), finalize end-to-end (users сохранены, канонические
+секции применены, redirect снят, xray перегенерирован), source-level
+guard'ы интеграции. `tests/test_resolv_conf_fix.py` +2 (AGH-ветки).
+Полный прогон: 5127 passed, 18 failed — все 18 предсуществующие
+(идентичный набор до/после изменений, git stash-верификация).
+
+---
+
 ## FIX(dpi_bypass+youtube_b4+_tty_json): импорт больших b4-сетов (>4 КБ) через TUI — 26 августа 2026
 
 **Проблема: сеты длиннее 4 КБ (Meta-facebook-v18-MAX, Meta-instagram-v18-MAX

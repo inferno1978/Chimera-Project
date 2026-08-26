@@ -314,6 +314,20 @@ def install_dnscrypt() -> None:
             setattr(core, "DNSCRYPT_INSTALLED", True)
             success(f"DNSCrypt-proxy {dc_tag} запущен на "
                     f"{DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}")
+            # port_registry (v37): внутренний loopback-слушатель — force=True
+            # (паттерн b4_dns 5453). Публично порт не открывается.
+            try:
+                from chimera.modules.port_registry import (
+                    port_register, SERVICE_DNSCRYPT,
+                )
+                port_register(SERVICE_DNSCRYPT, DNSCRYPT_LISTEN_PORT, "udp",
+                              comment="dnscrypt-proxy (loopback, upstream для AGH)",
+                              force=True)
+                port_register(SERVICE_DNSCRYPT, DNSCRYPT_LISTEN_PORT, "tcp",
+                              comment="dnscrypt-proxy (loopback, upstream для AGH)",
+                              force=True)
+            except Exception:
+                pass
         else:
             warn(f"DNSCrypt-proxy активен, но порт {DNSCRYPT_LISTEN_PORT} не слушает")
     else:

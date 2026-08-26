@@ -1921,7 +1921,24 @@ def generate_xray_config_chain_entry_multi() -> None:
                     capture=True, check=False)
     dnscrypt_running = (DNSCRYPT_INSTALLED or r_active.stdout.strip() == "active")
 
-    if dnscrypt_running:
+    # AGH-AWARE (v37): при живом AdGuard Home на :53 — DNS entry-ноды
+    # через AGH (кеш+фильтры). Exit-шаблоны выше НЕ трогаем — они
+    # разворачиваются на чужих VPS без AGH.
+    agh_dns = False
+    try:
+        from chimera.modules.aghome_setup import aghome_dns_ready
+        agh_dns = aghome_dns_ready()
+    except Exception:
+        agh_dns = False
+
+    if agh_dns:
+        dns_servers = [
+            {"address": "127.0.0.1", "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "127.0.0.1", "port": 53, "network": "tcp", "skipFallback": True},
+            {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
+            {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
+        ]
+    elif dnscrypt_running:
         dns_servers = [
             {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
              "network": "udp", "skipFallback": False},
