@@ -965,7 +965,28 @@ def detect_firewall() -> str:
 
 
 def open_port(fw: str, port: int, proto: str) -> str:
-    """Возвращает строку-команду отката (или '' если открывать не пришлось)."""
+    """Возвращает строку-команду отката (или '' если открывать не пришлось).
+
+    v49: порт регистрируется в port_registry (SERVICE_HYBRID_ADDON) и
+    открывается tagged-правилом UFW (comment chimera-hybrid_addon) —
+    раньше raw `ufw allow` без comment и без записи в реестре делал порты
+    невидимыми для conflict-детекции и аудита. Fallback на прежние
+    raw-команды сохранён (iptables/firewalld и UFW-недоступность).
+    """
+    # v49: сначала port_registry + tagged UFW-правило
+    try:
+        from chimera.modules.port_registry import (
+            port_register, ufw_open_port, SERVICE_HYBRID_ADDON,
+        )
+        port_register(SERVICE_HYBRID_ADDON, port, proto,
+                      comment="Mieru hybrid addon (mita перед Xray)", force=True)
+        ok, _msg = ufw_open_port(port, proto, SERVICE_HYBRID_ADDON,
+                                 comment="Mieru hybrid addon")
+        if ok:
+            c_green(f"ufw: открыт {port}/{proto} (chimera-hybrid_addon).")
+            return ""   # закрытие — через close_port (rollback), не raw-команду
+    except Exception:
+        pass
     if fw == "ufw":
         r = run(["ufw", "status"])
         rule = f"{port}/{proto}"
@@ -1054,9 +1075,30 @@ def do_rollback() -> None:
         run(["systemctl", "disable", "mita"])
         c_green("Mieru (mita) остановлен и снят с автозагрузки.")
 
+        # v49: закрытие портов через port_registry (tagged-правила)
+        closed_reg = False
+        try:
+            from chimera.modules.port_registry import (
+                ufw_close_port, port_unregister, SERVICE_HYBRID_ADDON,
+            )
+            for key, proto in (("tcp_port", "tcp"), ("udp_port", "udp")):
+                try:
+                    pr = int(state.get(key, 0) or 0)
+                except (TypeError, ValueError):
+                    pr = 0
+                if pr:
+                    ufw_close_port(pr, proto, SERVICE_HYBRID_ADDON,
+                                   legacy_comments=["Mieru hybrid addon"])
+            port_unregister(SERVICE_HYBRID_ADDON)
+            closed_reg = True
+        except Exception:
+            pass
+        # legacy raw-команды (fallback старых установок / iptables / firewalld)
         for rollback_cmd in state.get("firewall_rollback", []):
             if rollback_cmd:
                 run(rollback_cmd.split())
+        if closed_reg:
+            c_green("Порты аддона закрыты (UFW + port_registry).")
         c_green("Правила файрвола, добавленные аддоном, удалены (если были).")
 
         STATE_FILE.unlink(missing_ok=True)

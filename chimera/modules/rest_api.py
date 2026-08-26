@@ -2525,15 +2525,26 @@ def install_web_service(port: int = None, admin_user: str = None,
     # Открываем порт в ufw ТОЛЬКО при явном внешнем доступе (host=0.0.0.0).
     # По умолчанию (127.0.0.1) — не открываем, доступ через SSH-туннель.
     #  миграция на port_registry (с backward compat fallback).
+    # v49: port_register — ВСЕГДА (и loopback): конфликт-детекция должна
+    # видеть панель (webdav_tunnel тоже дефолтит на 8443). UFW — только
+    # при 0.0.0.0.
+    try:
+        from chimera.modules.port_registry import (
+            ufw_open_port, port_register, SERVICE_WEB_PANEL,
+        )
+        _reg_comment = ("VLESS Web Panel (exposed, no TLS)"
+                        if current_host == "0.0.0.0"
+                        else "VLESS Web Panel (loopback)")
+        port_register(SERVICE_WEB_PANEL, port, "tcp",
+                      comment=_reg_comment, force=True)
+    except Exception:
+        pass
     if current_host == "0.0.0.0" and shutil.which("ufw"):
         _web_panel_ufw_opened = False
         try:
             from chimera.modules.port_registry import (
-                ufw_open_port, port_register, SERVICE_WEB_PANEL,
+                ufw_open_port, SERVICE_WEB_PANEL,
             )
-            port_register(SERVICE_WEB_PANEL, port, "tcp",
-                          comment="VLESS Web Panel (exposed, no TLS)",
-                          force=True)
             ok, msg = ufw_open_port(port, "tcp", SERVICE_WEB_PANEL,
                                     comment="VLESS Web Panel (exposed, no TLS)")
             if ok:

@@ -43,6 +43,130 @@ def _core_module():
 
 
 # =============================================================================
+#  ЗАКРЫТИЕ ПОРТОВ УДАЛЯЕМЫХ СЕРВИСОВ (UFW + port_registry, v49)
+# =============================================================================
+def _close_chimera_ports() -> list:
+    """Закрывает UFW-правила и снимает регистрацию портов удаляемых сервисов.
+
+    v49: do_uninstall обещал «правила UFW» в баннере, но не закрывал ничего —
+    orphaned allow-правила и записи port_registry оставались жить после
+    полного удаления стека.
+
+    Закрывает: SERVICE_VLESS (КРОМЕ 22/tcp — SSH, иначе lockout),
+    SERVICE_DNSCRYPT (dnscrypt удаляется), SERVICE_AGHOME* (если AGH стоит —
+    его upstream dnscrypt удаляется, стек мёртв).
+    Возвращает список строк для вывода пользователю.
+    """
+    lines: list = []
+    try:
+        from chimera.modules.port_registry import (
+            port_unregister, ufw_close_port, port_list_for_service,
+            SERVICE_VLESS, SERVICE_DNSCRYPT, SERVICE_AGHOME,
+            SERVICE_AGHOME_WEB, SERVICE_AGHOME_DOH, SERVICE_AGHOME_DOT,
+            SERVICE_AGHOME_DOQ,
+        )
+    except Exception as e:
+        return [f"port_registry недоступен: {e} — порты закрыты не были"]
+
+    def _close_tag(tag: str, keep_ports: frozenset = frozenset()) -> int:
+        closed = 0
+        try:
+            entries = port_list_for_service(tag)
+        except Exception:
+            entries = []
+        for e in entries:
+            try:
+                port = int(e.get("port", 0))
+                proto = str(e.get("proto", "tcp"))
+            except Exception:
+                continue
+            if not port:
+                continue
+            if port in keep_ports:
+                # правило UFW НЕ трогаем (SSH!), запись реестра снимаем
+                port_unregister(tag, port=port, proto=proto)
+                lines.append(f"  {tag}: {port}/{proto} — правило UFW оставлено (SSH)")
+                continue
+            try:
+                ufw_close_port(port, proto, tag,
+                               legacy_comments=["VLESS", "SSH",
+                                                "HTTP (certbot ACME)",
+                                                "VLESS reconfigure"])
+                port_unregister(tag, port=port, proto=proto)
+                closed += 1
+            except Exception:
+                pass
+        if closed:
+            lines.append(f"  {tag}: закрыто портов — {closed}")
+        return closed
+
+    _close_tag(SERVICE_VLESS, keep_ports=frozenset({22}))
+    _close_tag(SERVICE_DNSCRYPT)
+
+    # AGH стоит? его upstream (dnscrypt) удаляется — останавливаем и его
+    try:
+        if Path("/opt/AdGuardHome/AdGuardHome").exists():
+            import subprocess as _sp
+            _sp.run(["systemctl", "stop", "AdGuardHome"],
+                    capture_output=True, check=False)
+            _sp.run(["systemctl", "disable", "AdGuardHome"],
+                    capture_output=True, check=False)
+            for tag in (SERVICE_AGHOME, SERVICE_AGHOME_WEB,
+                        SERVICE_AGHOME_DOH, SERVICE_AGHOME_DOT,
+                        SERVICE_AGHOME_DOQ):
+                _close_tag(tag)
+            lines.append("  AdGuardHome остановлен и отключён "
+                         "(upstream dnscrypt удалён)")
+    except Exception:
+        pass
+
+    # Дефицит записей: чистим всё, что могло остаться под этими тегами
+    for tag in (SERVICE_VLESS, SERVICE_DNSCRYPT, SERVICE_AGHOME,
+                SERVICE_AGHOME_WEB, SERVICE_AGHOME_DOH, SERVICE_AGHOME_DOT,
+                SERVICE_AGHOME_DOQ):
+        try:
+            port_unregister(tag)
+        except Exception:
+            pass
+    return lines
+
+
+def _restore_dns_after_full_uninstall() -> list:
+    """DNS-ALIVE при полном удалении: resolv.conf → внешний DNS из бэкапа.
+
+    do_uninstall удаляет dnscrypt (и, возможно, останавливает AGH) —
+    системный DNS (127.0.0.1) умирает. Восстанавливаем бэкап resolv.conf
+    и гасим chimera-dns-fix/watchdog (иначе watchdog каждую минуту будет
+    пытаться оживить удалённый dnscrypt и переоткрывать redirect).
+    """
+    lines: list = []
+    try:
+        from chimera.modules import resolv_conf_fix as rcf
+        # 1. watchdog + persist OFF (реанимация мёртвого стека недопустима)
+        try:
+            rcf._remove_dns_watchdog()
+            lines.append("  chimera-dns-watchdog остановлен и удалён")
+        except Exception:
+            pass
+        try:
+            rcf._disable_persist_service()
+            lines.append("  chimera-dns-fix.service остановлен и удалён")
+        except Exception:
+            pass
+        # 2. resolv.conf → бэкап (внешний DNS)
+        result = rcf.rollback_resolv_conf()
+        if result.get("ok"):
+            lines.append("  /etc/resolv.conf восстановлен из бэкапа (внешний DNS)")
+        else:
+            err = str(result.get("error") or "")
+            if "backup" not in err.lower():
+                lines.append(f"  восстановление resolv.conf: {err}")
+    except Exception as e:
+        lines.append(f"  DNS-восстановление пропущено: {e}")
+    return lines
+
+
+# =============================================================================
 #  УДАЛЕНИЕ VLESS REALITY
 # =============================================================================
 def do_uninstall() -> None:
@@ -64,7 +188,7 @@ def do_uninstall() -> None:
     YELLOW, RED, NC = core.YELLOW, core.RED, core.NC
 
     _box_top("УДАЛЕНИЕ VLESS REALITY")
-    _box_warn("Будет удалено: Xray, Nginx, сайт, правила UFW")
+    _box_warn("Будет удалено: Xray, Nginx, сайт, правила UFW, DNSCrypt")
     _box_row()
     _box_bottom()
     uninst_domain = input(f"{YELLOW}Домен для подтверждения удаления:{NC} ").strip()
@@ -279,6 +403,18 @@ def do_uninstall() -> None:
                 _box_info(f"Удалено: /var/www/{uninst_domain}")
             else:
                 _box_info(f"Оставлено: /var/www/{uninst_domain}")
+
+    # ────────────────────────────────────────────────────────────────────────
+    #  UFW + port_registry: закрыть порты удалённых сервисов (v49)
+    # ────────────────────────────────────────────────────────────────────────
+    _box_info("Закрытие портов UFW и снятие регистрации (port_registry)...")
+    for line in _close_chimera_ports():
+        _box_info(line)
+
+    # DNS-ALIVE: системный DNS не должен умереть вместе со стеком (v49)
+    _box_info("Восстановление системного DNS (внешний резолвер)...")
+    for line in _restore_dns_after_full_uninstall():
+        _box_info(line)
 
     _box_row()
     _box_bottom()

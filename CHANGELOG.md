@@ -2,6 +2,85 @@
 
 ---
 
+## FEAT(aghome)+FIX(ports): кастомный порт Web UI + тотальный аудит port_registry — 27 августа 2026 (v49)
+
+### Фича: кастомный порт Web UI AdGuard Home
+
+При установке (и смене режима Сеть → A → 4) спрашивается порт Web UI
+(по умолчанию 3000). Валидация: 1024–65535, не служебный (22/53/80/443/
+853/5300/30443), свободен по port_registry (конфликты + ss + UFW).
+Весь жизненный цикл — через port_registry:
+
+- установка/финализация: `port_register(SERVICE_AGHOME_WEB, порт)` +
+  UFW open только в режиме «HTTP публично» (иначе close);
+- смена порта: СТАРЫЙ порт закрывается в UFW и снимается с регистрации
+  (по записям реестра тега) — порт не течёт;
+- wizard-фаза всегда на дефолтном :3000 (AGH без конфига слушает только
+  его), кастомный порт пишет headless-мастер и финализация;
+- удаление AGH: закрываются ВСЕ порты тега SERVICE_AGHOME_WEB (реестр +
+  state + дефолт 3000);
+- URL в финальном выводе учитывает кастомный порт.
+
+### Аудит port_registry по всем модулям (fix дыр жизненного цикла)
+
+Аудитены 30+ модулей: есть ли register при установке, open UFW,
+close+unregister при удалении/отключении. Закрытые дыры:
+
+1. **uninstall.py (полное удаление)** — обещал «правила UFW» в баннере,
+   но не закрывал ВООБЩЕ ничего. Теперь: закрытие/unregister SERVICE_VLESS
+   (22/tcp остаётся открытым — SSH-lockout недопустим, запись реестра
+   снимается), SERVICE_DNSCRYPT, SERVICE_AGHOME* (AGH останавливается —
+   его upstream dnscrypt удаляется). Плюс DNS-ALIVE при полном удалении:
+   resolv.conf → бэкап (внешний DNS), chimera-dns-fix.service и
+   chimera-dns-watchdog гасятся (иначе watchdog вечно реанимировал бы
+   мёртвый dnscrypt).
+2. **telemt_ios_fix.py** — отключение iOS-фикса удаляло только iptables:
+   UFW allow + запись SERVICE_TELEMT_IOS_FIX оставались навсегда. Теперь
+   `_teardown_ufw()`: close+unregister на отключении И при смене порта;
+   полный uninstall Telemt (mtproto.py) тоже чистит iOS-фикс.
+3. **port_hopping.py** — смена диапазона оставляла СТАРЫЙ диапазон
+   (UFW-правило + до 100k записей реестра) жить вечно. Теперь старый
+   диапазон закрывается при смене; disable чистит реестр безусловно
+   (раньше — только при активном UFW).
+4. **singbox_menu.py `_switch_cdn_provider`** — смена CDN-провайдера
+   меняла порт, не закрывая старый и не открывая новый (orphaned UFW +
+   stale SERVICE_SINGBOX). Теперь close old + open new.
+5. **singbox_ufw.py** — `close_all()` при неактивном UFW возвращался
+   ДО unregister (все записи SERVICE_SINGBOX оставались); `close()` при
+   чужом/отсутствующем правиле не снимал регистрацию. Оба исправлены.
+6. **hybrid_addon.py** — порты открывались raw `ufw allow` без comment
+   и не регистрировались нигде (слепота конфликт-детекции). Теперь
+   SERVICE_HYBRID_ADDON: register + tagged UFW; rollback закрывает и
+   снимает регистрацию (legacy raw-команды — fallback).
+7. **naiveproxy.py / mieru.py** — register/unregister выполнялись только
+   при активном UFW: установка при выключенном UFW не регистрировала,
+   удаление при выключенном оставлял stale-записи. Теперь реестр
+   безусловен, UFW-правило — по активности UFW.
+8. **rest_api.py** — Web Panel :8443 регистрировался только в режиме
+   0.0.0.0; loopback-режим был невидим (webdav_tunnel дефолтит на тот же
+   8443!). Теперь register всегда, UFW — только при 0.0.0.0.
+9. **telemt_panel.py** — loopback-бэкенд :8080 теперь в реестре
+   (SERVICE_TELEMT_PANEL_WEB, паттерн b4_web/csqtt_web).
+10. **port_registry.py** — SERVICE_B4_NGINX приведён к фактическому
+    значению "chimera-b4-nginx" (константа расходилась с реальностью);
+    новый тег SERVICE_HYBRID_ADDON; dead-импорты убраны из b4-модулей.
+11. **reconfigure.py** — при смене порта Xray предупреждение о
+    зависимых port hopping / ingress_geoip (их правила ссылаются на
+    старый порт).
+
+Найдено, но оставлено как есть (осознанно): awg_transport — удалённая
+exit-VPS по SSH (реестр локального хоста неприменим; README фиксирует),
+exit-порты chain_nodes — ручное развертывание на чужих VPS.
+
+**Тесты:** +11 (кастомный порт: секции/валидация/wizard/headless/lifecycle/
+uninstall; аудит: mtproto→ios_fix hook). Всего затронутых наборов:
+aghome 130 passed, port_hopping/singbox/hybrid/naive/mieru/ios_fix/
+port_registry 425 passed, rest_api/dpi/olcrtc/admin/telemt_panel 389
+passed. Pre-existing падения (mtproto ×5, telemt_panel ×2, hysteria ×1 —
+экранно-средовые, воспроизводятся на чистом дереве) не тронуты.
+
+---
+
 ## FIX(aghome): Web UI/DoH :30443 недоступны снаружи — HTTPS-порт следует хосту http.address — 27 августа 2026 (v48)
 
 **Инцидент v48 (<node-2>):** после v47-починки AGH поднялся, но

@@ -431,6 +431,13 @@ def _vless_reconfigure_ufw_port_change(core, new_port: int, old_port: int) -> No
         ufw_close_port(old_port, "tcp", SERVICE_VLESS,
                        legacy_comments=_LEGACY_COMMENTS)
         port_unregister(SERVICE_VLESS, old_port, "tcp")
+        # v49: зависимые модули держат ссылку на СТАРЫЙ порт — предупредить.
+        try:
+            core.warn(f"Порт Xray изменён {old_port} → {new_port}: проверьте "
+                      "port hopping и ingress_geoip (если включены) — их "
+                      "правила ссылаются на старый порт")
+        except Exception:
+            pass
     except Exception:
         # Fallback: старый код (прямой ufw allow/delete).
         _run(["ufw", "allow", str(new_port), "comment", "VLESS reconfigure"],

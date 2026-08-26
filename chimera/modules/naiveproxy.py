@@ -498,25 +498,26 @@ def _ufw_is_active() -> bool:
     return "status: active" in r.stdout.lower()
 
 def _ufw_open_tcp(port: int) -> None:
-    if not _ufw_is_active():
-        return
-    #  миграция на port_registry.
+    # v49: port_register — БЕЗУСЛОВНО (реестр живёт независимо от UFW);
+    # раньше ранний return при неактивном UFW оставлял порт
+    # незарегистрированным (conflict-детекция слепа).
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, port_register, SERVICE_NAIVEPROXY,
         )
         port_register(SERVICE_NAIVEPROXY, port, "tcp",
                       comment="NaiveProxy", force=True)
-        ufw_open_port(port, "tcp", SERVICE_NAIVEPROXY, comment="NaiveProxy")
+        if _ufw_is_active():
+            ufw_open_port(port, "tcp", SERVICE_NAIVEPROXY, comment="NaiveProxy")
         return
     except Exception:
         pass
-    _run(["ufw", "allow", f"{port}/tcp", "comment", "NaiveProxy"], capture=True)
+    if _ufw_is_active():
+        _run(["ufw", "allow", f"{port}/tcp", "comment", "NaiveProxy"], capture=True)
 
 def _ufw_close_tcp(port: int) -> None:
-    if not _ufw_is_active():
-        return
-    #  миграция на port_registry (с legacy comment для backward compat).
+    # v49: port_unregister — БЕЗУСЛОВНО (раньше ранний return при
+    # неактивном UFW оставлял stale-запись в реестре после uninstall).
     try:
         from chimera.modules.port_registry import (
             ufw_close_port, port_unregister, SERVICE_NAIVEPROXY,
