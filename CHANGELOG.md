@@ -2,6 +2,47 @@
 
 ---
 
+## FEAT(dns): WATCHDOG — системный DNS больше не умирает НАДОЛГО — 27 августа 2026 (v46)
+
+**Инцидент v46 (<node-2>):** через ~час после успешной финализации AGH
+(DNS: AGH:53 → dnscrypt:5300, redirect снят, resolv.conf → 127.0.0.1)
+системный DNS умер: `dig ya.ru` → connection refused на 127.0.0.1:53.
+При этом tls-секция в yaml осталась `enabled: true`, ошибок TLS в
+journal нет — умер сам AdGuardHome (креш-луп/OOM), а вместе с ним и
+единственный слушатель :53. git pull невозможен («Could not resolve
+host»), скачивание чего-либо — тоже.
+
+**Дыра v44/v45:** `_ensure_system_dns_alive` гарантировал живой DNS
+только В МОМЕНТ операций установки/удаления/wizard'а. Смерть AGH ЧАСОМ
+позже никто не отслеживал — persist-скрипт работает лишь на буте.
+
+**Фикс — chimera-dns-watchdog (systemd-timer, каждые 60 с):**
+- `/usr/local/bin/chimera-dns-watchdog.sh` + `.service` + `.timer`
+  (OnBootSec=2min, OnUnitActiveSec=60s).
+- Лестница self-heal: probe 127.0.0.1:53 (dig rc=0 / getent; повтор
+  через 3с — транзиент смертью не считается) → AGH активен? рестарт
+  AdGuardHome + probe → dnscrypt-proxy (рестарт если лежит) + redirect
+  53→порт из TOML (udp+tcp, идемпотентный -C/-A) + probe.
+- Философия: живость важнее фильтрации. Redirect при живом AGH лишь
+  обводит фильтры для локальных процессов (внешние клиенты идут в AGH
+  через INPUT), без redirect — full black-hole.
+- Действия в journal: `journalctl -t chimera-dns-watchdog`.
+- Установка: `fix_resolv_conf_to_localhost()` (шаг 10.5, идемпотентно)
+  — т.е. ставится и при DNS-фиксе, и при финализации/удалении AGH
+  (они вызывают этот фикс). Отказ установки (не root) НЕ ломает
+  основной фикс — только warning.
+- `rollback_resolv_conf()` сносит watchdog вместе с persist-сервисом —
+  иначе watchdog «чинил» бы 127.0.0.1:53 и боролся с откатом к
+  внешнему DNS.
+
+**Тесты:** +8 (bash -n синтаксис скрипта, маркеры логики probe/AGH/
+redirect/TOML/logger, запись всех 3 файлов + исполняемость, enable
+--now + немедленный прогон, провал enable, не-root не фатален,
+fix-флоу ставит watchdog, rollback сносит). test_resolv_conf_fix: 28
+зелёных.
+
+---
+
 ## FIX(aghome): TLS-SELF-HEAL + ложный «:53 слушается» + Xray mode-B — 27 августа 2026 (v45)
 
 **Инцидент v45 (<node-2>):** v44 встал, headless-мастер прошёл без
