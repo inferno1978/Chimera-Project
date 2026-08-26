@@ -15,6 +15,9 @@ Unit-тесты для AdGuard Home стека Chimera:
   10. DNS-ALIVE гарантия: probe dig/getent + лестница восстановления (v44)
   11. HEADLESS-мастер: POST /control/install/configure на loopback (v44)
   12. uninstall: DNS проверяется фактическим запросом после удаления (v44)
+  13. v47 anti-duplicate-keys: дубли top-level ключей YAML = crash-loop AGH
+      (инцидент <node-2>: «whitelist_filters already defined», рестарт-каунтер 390+)
+      + _wait_service: флапающий crash-loop не считается успехом
 """
 from __future__ import annotations
 
@@ -202,6 +205,129 @@ class TestYamlReplaceSections(unittest.TestCase):
         self.assertIn("tls:\n  enabled: true", out)
         self.assertIn("querylog:\n  enabled: true", out)
         self.assertIn("- name: admin", out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  v47: ANTI-DUPLICATE-KEYS (инцидент <node-2> — crash-loop AGH)
+# ─────────────────────────────────────────────────────────────────────────────
+class TestYamlNoDuplicateTopKeys(unittest.TestCase):
+    """Regression v47: финализация писала в AdGuardHome.yaml дубли
+    whitelist_filters/user_rules (секция filters тащила их внутри себя,
+    а мастерские копии оставались) — строгий YAML-парсер AGH падал:
+    «mapping key whitelist_filters already defined at line 108».
+    """
+
+    WIZARD_CONFIG = (
+        "http:\n  address: 0.0.0.0:3000\n"
+        "users:\n  - name: admin\n    password: $2a$10$bcrypt\n"
+        "schema_version: 29\n"
+        "dns:\n  port: 53\n"
+        "tls:\n  enabled: false\n"
+        "filters:\n  - enabled: true\n    url: https://x/f.txt\n    name: f\n    id: 1\n"
+        "whitelist_filters: []\n"
+        "user_rules: []\n"
+        "querylog:\n  enabled: true\n"
+        "statistics:\n  enabled: true\n"
+    )
+
+    def setUp(self):
+        from chimera.modules import aghome_setup
+        self.mod = aghome_setup
+
+    def _finalize_sections(self):
+        return {
+            "http": self.mod.build_http_section(self.mod.AGH_WEB_LOOPBACK),
+            "filters": self.mod.build_filters_section(),
+            "whitelist_filters": self.mod.build_whitelist_filters_section(),
+            "user_rules": self.mod.build_user_rules_section(),
+            "querylog": self.mod.build_querylog_section(),
+            "statistics": self.mod.build_statistics_section(),
+            "dhcp": "dhcp:\n  enabled: false\n",
+        }
+
+    def test_finalize_on_wizard_config_no_dups(self):
+        out = self.mod.yaml_replace_sections(
+            self.WIZARD_CONFIG, self._finalize_sections(),
+            scalars={"language": "ru"})
+        self.assertEqual(self.mod._duplicate_top_keys(out), [])
+        for key in ("filters", "whitelist_filters", "user_rules",
+                    "querylog", "statistics", "dhcp"):
+            self.assertEqual(
+                sum(1 for ln in out.splitlines() if ln.startswith(key + ":")),
+                1, f"top-level key {key!r} must appear exactly once")
+        # users/master-данные не тронуты, скаляр применён
+        self.assertIn("- name: admin", out)
+        self.assertIn("$2a$10$bcrypt", out)
+        self.assertIn("language: ru", out)
+
+    def test_filters_section_no_embedded_keys(self):
+        top = [ln for ln in self.mod.build_filters_section().splitlines()
+               if not ln.startswith((" ", "-"))]
+        self.assertEqual(top, ["filters:"],
+                         "build_filters_section не должен тащить чужие top-level ключи")
+
+    def test_safety_net_collapses_preexisting_dups(self):
+        # даже если дубли УЖЕ в конфиге — заменять можно безопасно
+        text = ("filters:\n  - id: 1\n"
+                "whitelist_filters: []\nuser_rules: []\n"
+                "whitelist_filters: []\nuser_rules: []\n"
+                "querylog:\n  enabled: true\n")
+        out = self.mod.yaml_replace_sections(
+            text, {"querylog": "querylog:\n  enabled: true\n"})
+        self.assertEqual(self.mod._duplicate_top_keys(out), [])
+        self.assertEqual(out.count("whitelist_filters:"), 1)
+        self.assertEqual(out.count("user_rules:"), 1)
+
+    def test_duplicate_top_keys_detects(self):
+        self.assertEqual(self.mod._duplicate_top_keys("a: 1\nb: 2\na: 3\n"), ["a"])
+        self.assertEqual(self.mod._duplicate_top_keys("a: 1\nb: 2\n"), [])
+
+    def test_dedup_keeps_first_occurrence(self):
+        text = ("user_rules:\n  - '@@||ok^'\n"
+                "user_rules: []\nquerylog:\n  enabled: true\n")
+        out = self.mod._dedup_top_level_sections(text)
+        self.assertEqual(self.mod._duplicate_top_keys(out), [])
+        self.assertIn("- '@@||ok^'", out)
+        self.assertNotIn("user_rules: []", out)
+        self.assertIn("querylog:", out)
+
+
+class TestWaitServiceStable(unittest.TestCase):
+    """v47: crash-loop флап (systemd active на ~0.5с каждые 5с) не должен
+    считаться успехом — иначе self-heal откат конфига не срабатывал и
+    AGH оставался в crash-loop (рестарт-каунтер 390+ на <node-2>).
+    """
+
+    def setUp(self):
+        from chimera.modules import aghome_setup
+        self.mod = aghome_setup
+
+    def test_stable_active_passes(self):
+        with patch.object(self.mod, "_svc_is_active",
+                          side_effect=[True] * 10), \
+             patch.object(self.mod.time, "sleep", lambda s: None):
+            self.assertTrue(self.mod._wait_service("svc", 10))
+
+    def test_flapping_active_rejected(self):
+        # миг «active» при старте → процесс умирает → failed до рестарта
+        flap = [True, False, False, False, False, True, False]
+        failed = MagicMock()
+        failed.stdout = "failed\n"
+        with patch.object(self.mod, "_svc_is_active", side_effect=flap), \
+             patch.object(self.mod, "subprocess") as sp, \
+             patch.object(self.mod.time, "sleep", lambda s: None):
+            sp.run.return_value = failed
+            self.assertFalse(self.mod._wait_service("svc", 12))
+
+    def test_slow_start_then_stable_passes(self):
+        seq = [False] * 5 + [True] * 10
+        activating = MagicMock()
+        activating.stdout = "active\n"
+        with patch.object(self.mod, "_svc_is_active", side_effect=seq), \
+             patch.object(self.mod, "subprocess") as sp, \
+             patch.object(self.mod.time, "sleep", lambda s: None):
+            sp.run.return_value = activating
+            self.assertTrue(self.mod._wait_service("svc", 12))
 
 
 class TestYamlHasUsers(unittest.TestCase):

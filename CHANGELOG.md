@@ -2,6 +2,55 @@
 
 ---
 
+## FIX(aghome): ROOT CAUSE crash-loop AGH — дубли top-level ключей в AdGuardHome.yaml — 27 августа 2026 (v47)
+
+**Инцидент v47 (<node-2>):** AdGuardHome ушёл в crash-loop (рестарт-каунтер
+390+), в journal одна и та же ошибка:
+`yaml: construct errors: line 110: mapping key "whitelist_filters" already
+defined at line 108; line 111: mapping key "user_rules" already defined
+at line 109`. Служба умирает через ~0.5с после старта. DNS выжил только
+благодаря v46-watchdog (redirect 53→5300 → dnscrypt).
+
+**Root cause (настоящий, v46 его не нашёл — лечил симптомы):**
+`build_filters_section()` возвращала блок `filters:` с ПРИКЛЕЕННЫМИ
+внутрь `whitelist_filters: []` и `user_rules: []`. Финализация заменяла
+секцию `filters` этим блоком, а мастерские (wizard) копии
+`whitelist_filters`/`user_rules` в конфиге ОСТАВАЛИСЬ — итог: каждый
+ключ дважды. AGH v0.107 строго валидирует YAML: duplicate mapping key =
+отказ стартовать. Конфиг ломался В МОМЕНТ финализации — все WARN'и
+«порт 30443/853 не слушается» были следствием, а не отдельными багами.
+
+**Второй баг (почему self-heal не откатил конфиг):** `_wait_service`
+возвращал True на ПЕРВОМ is-active. Crash-looping служба каждые ~5с
+на ~0.5с помечается active (systemd: start → активен → exit(1) → failed
+→ автозапуск). Старая логика ловила миг «active» → считала успехом →
+откат к конфигу мастера не срабатывал → crash-loop оставался жить.
+
+**Фиксы:**
+- `build_filters_section()` — теперь ТОЛЬКО `filters:`;
+  `build_whitelist_filters_section()` / `build_user_rules_section()` —
+  отдельные секции (замещают мастерские копии по месту).
+- SAFETY-NET в `yaml_replace_sections()`: дедупликация top-level ключей
+  (первое вхождение побеждает) — даже дубли, УЖЕ живущие в конфиге,
+  схлопываются при следующей правке.
+- GATE перед записью: `_duplicate_top_keys(new_text)` непуст → конфиг
+  НЕ записывается, живой конфиг не тронут (DNS важнее финализации).
+- `_wait_service()`: успех = 3 ПОДРЯД активные проверки (1с интервал) —
+  флап crash-loop'а больше не считается успехом, self-heal откат
+  срабатывает как задумано.
+
+**Починка живого сервера (без переустановки):** бэкап yaml → дедуп
+top-level ключей (первое вхождение) → `systemctl restart AdGuardHome`
+→ `fix_resolv_conf_to_localhost(force=True)` (AGH-aware ветка снимет
+redirect 53→5300, AGH забирает :53) → проверка dig @127.0.0.1.
+
+**Тесты:** +9 regression (tests/test_aghome_setup.py):
+wizard-конфиг × финализация без дублей; safety-net на конфиге с уже
+живущими дублями; `_dedup_top_level_sections` keep-first;
+`_wait_service` stable/flap/slow-start. Всего 122 passed.
+
+---
+
 ## FEAT(dns): WATCHDOG — системный DNS больше не умирает НАДОЛГО — 27 августа 2026 (v46)
 
 **Инцидент v46 (<node-2>):** через ~час после успешной финализации AGH
