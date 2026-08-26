@@ -235,20 +235,59 @@ def _is_dnscrypt_listening(addr: str, port: int) -> bool:
     return False
 
 
-def _is_dns_redirect_active(dnscrypt_port: int) -> bool:
-    """Проверяет, активен ли iptables redirect 53→dnscrypt_port для локальных запросов."""
-    if dnscrypt_port == _DNS_PORT:
-        return True  # redirect не нужен — DNSCrypt уже на 53
+def _dns_redirect_protos(dnscrypt_port: int) -> set:
+    """Протоколы (подмножество {'udp','tcp'}), для которых в nat OUTPUT
+    есть redirect 53→dnscrypt_port.
+
+    Парсинг ПОСТРОЧНЫЙ: каждая строка вывода iptables -L — одно правило.
+    Кросс-строчный поиск ("dpt:53 где-то" + "to:5300 где-то") считал
+    активным состояние «только tcp» — при нём UDP-DNS на 127.0.0.1:53
+    уходит в никуда, а git/curl падают с «Could not resolve host»
+    (инцидент v43 на живом сервере).
+    """
     r = _run(["iptables", "-t", "nat", "-L", "OUTPUT", "-n"],
              capture=True, check=False)
     if r.returncode != 0:
+        return set()
+    found = set()
+    port = str(dnscrypt_port)
+    for ln in r.stdout.splitlines():
+        if "dpt:53" not in ln:
+            continue
+        # iptables выводит "... redir ports 5300" или "... to:5300"
+        if not (f"to:{port}" in ln or f"ports {port}" in ln):
+            continue
+        # proto-токен именно в ЭТОЙ строке правила (не в соседней)
+        padded = f"  {ln}  "
+        for proto in ("udp", "tcp"):
+            if f" {proto} " in padded:
+                found.add(proto)
+    return found
+
+
+def _is_dns_redirect_active(dnscrypt_port: int) -> bool:
+    """Проверяет, активен ли iptables redirect 53→dnscrypt_port для локальных запросов.
+
+    Требуются ОБА правила — udp И tcp: glibc (curl, git, apt, python) шлёт
+    DNS по UDP, TCP используется только как fallback при truncated-ответах.
+    Состояние «только tcp» = UDP-запросы на 127.0.0.1:53 не перенаправляются
+    → «Could not resolve host» → redirect НЕ активен, нужен re-fix.
+    """
+    if dnscrypt_port == _DNS_PORT:
+        return True  # redirect не нужен — DNSCrypt уже на 53
+    return {"udp", "tcp"} <= _dns_redirect_protos(dnscrypt_port)
+
+
+def _any_dns_redirect_rule(dnscrypt_port: int) -> bool:
+    """Есть ли ХОТЯ БЫ ОДНО redirect-правило 53→dnscrypt_port (любой протокол).
+
+    Для AGH-режима: даже единственное tcp-правило уводит TCP-DNS мимо
+    AdGuard Home — детект присутствия redirect'а должен срабатывать на
+    любой протокол, чтобы «ворующий» redirect был замечен и снят.
+    """
+    if dnscrypt_port == _DNS_PORT:
         return False
-    # iptables выводит: "REDIRECT tcp ... dpt:53 redir ports 5300"
-    # или в numeric: "REDIRECT tcp ... dpt:53 to:5300"
-    out = r.stdout
-    return ("dpt:53" in out and
-            (f"to:{dnscrypt_port}" in out or f"ports {dnscrypt_port}" in out
-             or f"redir ports {dnscrypt_port}" in out))
+    return bool(_dns_redirect_protos(dnscrypt_port))
 
 
 def _apply_dns_redirect(dnscrypt_port: int) -> tuple:
@@ -395,12 +434,13 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
     if result["aghome_serving_53"]:
         # redirect может быть только ВРЕДНЫМ (ворует трафик у AGH):
         # «dns_redirect_active» в AGH-режиме означает «redirect-правила
-        # отсутствуют» — это правильное состояние.
+        # отсутствуют» — это правильное состояние. Для детекта достаточно
+        # ОДНОГО правила любого протокола (даже tcp-only обходит AGH).
         if result["dnscrypt_listen"] and result["dnscrypt_listen"][1] != _DNS_PORT:
-            result["dns_redirect_active"] = not _is_dns_redirect_active(
+            result["dns_redirect_active"] = not _any_dns_redirect_rule(
                 result["dnscrypt_listen"][1])
         else:
-            result["dns_redirect_active"] = not _is_dns_redirect_active(5300)
+            result["dns_redirect_active"] = not _any_dns_redirect_rule(5300)
 
     dnscrypt_ready = (
         result["dnscrypt_service_active"]

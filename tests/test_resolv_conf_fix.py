@@ -211,7 +211,8 @@ class TestFixResolvConf(_BaseTest):
                 _make_completed(stdout="active"),
             ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
             ("iptables",): _make_completed(
-                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 redir ports 5300\n"),
+                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 redir ports 5300\n"
+                       "REDIRECT  udp  --  127.0.0.1  anywhere  udp dpt:53 redir ports 5300\n"),
         }
         with patch.object(resolv_conf_fix, "_run",
                           side_effect=_mock_run_factory(cmd_to_result)), \
@@ -229,7 +230,8 @@ class TestFixResolvConf(_BaseTest):
                 _make_completed(stdout="active"),
             ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
             ("iptables",): _make_completed(
-                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 redir ports 5300\n"),
+                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 redir ports 5300\n"
+                       "REDIRECT  udp  --  127.0.0.1  anywhere  udp dpt:53 redir ports 5300\n"),
             ("resolvectl", "dns"): _make_completed(stdout=""),
             ("systemctl", "restart", "systemd-resolved"): _make_completed(rc=0),
             ("resolvectl", "flush-caches"): _make_completed(rc=0),
@@ -451,6 +453,8 @@ class TestAghAwareFix(_BaseTest):
             ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
             ("iptables",): _make_completed(
                 stdout="REDIRECT  udp  --  127.0.0.1  anywhere  udp dpt:53 "
+                       "redir ports 5300\n"
+                       "REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 "
                        "redir ports 5300\n"),
         }
         with patch.object(resolv_conf_fix, "_run",
@@ -462,6 +466,64 @@ class TestAghAwareFix(_BaseTest):
         self.assertFalse(diag["aghome_serving_53"])   # wizard-режим
         self.assertTrue(diag["dns_redirect_active"])  # redirect есть = ОК
         self.assertFalse(diag["fix_needed"])          # ничего чинить не надо
+
+    def test_diag_tcp_only_redirect_is_dead_dns(self):
+        """Регрессия v43 (живой сервер): в nat OUTPUT осталось ТОЛЬКО tcp-правило
+        (udp исчез) → UDP-DNS на 127.0.0.1:53 уходит в никуда → git падал
+        «Could not resolve host», при этом diagnose считал redirect активным
+        (кросс-строчный поиск). Теперь tcp-only = redirect НЕ активен,
+        fix_needed=True → авто-фикс переустановит ОБА правила."""
+        from chimera.modules import resolv_conf_fix
+        self._resolv_conf.write_text("nameserver 127.0.0.1\n")
+        self._nsswitch.write_text("hosts: files dns\n")
+        cmd_to_result = {
+            ("systemctl", "is-active", "dnscrypt-proxy.service"):
+                _make_completed(stdout="active"),
+            ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
+            ("iptables",): _make_completed(
+                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 "
+                       "redir ports 5300\n"),
+        }
+        with patch.object(resolv_conf_fix, "_run",
+                          side_effect=_mock_run_factory(cmd_to_result)), \
+             patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
+                          return_value=("127.0.0.1", 5300)):
+            diag = resolv_conf_fix.diagnose_resolv_conf()
+        self.assertFalse(diag["dns_redirect_active"],
+                         "tcp-only redirect НЕ должен считаться активным")
+        self.assertTrue(diag["fix_needed"],
+                        "tcp-only = мёртвый UDP DNS → фикс нужен")
+        self.assertTrue(any("redirect" in r for r in diag["leak_reasons"]))
+
+    def test_diag_agh_mode_tcp_only_redirect_steals_traffic(self):
+        """AGH на :53 + tcp-only redirect: даже ОДНО tcp-правило уводит DNS
+        мимо AGH → dns_redirect_active=False (redirect присутствует) →
+        причина «запросы обходят AGH» → re-fix снимет оба правила."""
+        from chimera.modules import resolv_conf_fix
+        self._resolv_conf.write_text("nameserver 127.0.0.1\n")
+        self._nsswitch.write_text("hosts: files dns\n")
+        cmd_to_result = {
+            ("systemctl", "is-active", "AdGuardHome.service"):
+                _make_completed(stdout="active"),
+            ("systemctl", "is-active", "dnscrypt-proxy.service"):
+                _make_completed(stdout="active"),
+            ("ss", "-ulnp"): _make_completed(stdout=(
+                "udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
+                "users:((\"AdGuardHome\",pid=999))\n")),
+            ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
+            ("iptables",): _make_completed(
+                stdout="REDIRECT  tcp  --  127.0.0.1  anywhere  tcp dpt:53 "
+                       "redir ports 5300\n"),
+        }
+        with patch.object(resolv_conf_fix, "_run",
+                          side_effect=_mock_run_factory(cmd_to_result)), \
+             patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
+                          return_value=("127.0.0.1", 5300)):
+            diag = resolv_conf_fix.diagnose_resolv_conf()
+        self.assertTrue(diag["aghome_serving_53"])
+        self.assertFalse(diag["dns_redirect_active"],
+                         "tcp-only redirect присутствует → ворует трафик у AGH")
+        self.assertTrue(any("обходят AGH" in r for r in diag["leak_reasons"]))
 
 
 if __name__ == "__main__":
