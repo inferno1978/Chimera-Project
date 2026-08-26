@@ -42,10 +42,28 @@ chimera/modules/resolv_conf_fix.py
 - Из DNS Leak Test: prompt "Исправить автоматически? [Y/n]".
 - Из меню Сеть → DNSCrypt.
 
+DNS-WATCHDOG (v46, vds13195)
+============================
+AGH (владелец :53 после финализации) умер через ~час после установки
+(креш/OOM) → :53 без слушателя, redirect 53→5300 уже снят, resolv.conf →
+127.0.0.1 → системный DNS мёртв, git pull невозможен. _ensure_system_dns_alive
+из aghome_setup работал только В МОМЕНТ операций — постоянного надзора не было.
+
+Решение: chimera-dns-watchdog.timer (каждые 60с) → chimera-dns-watchdog.sh:
+  0. probe 127.0.0.1:53 (dig rc=0 / getent), повтор через 3с (анти-флап);
+  1. AGH активен → systemctl restart AdGuardHome → probe;
+  2. dnscrypt-proxy (restart если лежит) + redirect 53→порт из TOML
+     (udp+tcp, idempotent) → probe.
+Живость важнее фильтрации: redirect при живом AGH лишь обходит фильтры
+(внешние клиенты продолжают попадать в AGH), а без него — black-hole.
+Действия пишутся в journal: journalctl -t chimera-dns-watchdog.
+Установка: fix_resolv_conf_to_localhost() (шаг 10.5); rollback сносит
+watchdog вместе с persist-сервисом (иначе борется с откатом).
+
 Публичное API:
   do_fix_resolv_conf_interactive() — TUI-экран
-  fix_resolv_conf_to_localhost()   — программный fix
-  rollback_resolv_conf()           — программный rollback
+  fix_resolv_conf_to_localhost()   — программный fix (+ watchdog)
+  rollback_resolv_conf()           — программный rollback (− watchdog)
   diagnose_resolv_conf()           — диагностика
 ───────────────────────────────────────────────────────────────────────────────
 """
@@ -92,6 +110,18 @@ _AGH_CONF             = Path("/opt/AdGuardHome/AdGuardHome.yaml")
 _PERSIST_SVC_NAME     = "chimera-dns-fix.service"
 _PERSIST_SVC_PATH     = Path("/etc/systemd/system") / _PERSIST_SVC_NAME
 _PERSIST_SCRIPT_PATH  = Path("/usr/local/bin/chimera-dns-fix-apply.py")
+
+# DNS-WATCHDOG (v46, vds13195) — systemd-timer каждую минуту пробует
+# 127.0.0.1:53 (dig/getent). Мёртв → лестница: рестарт AGH (владелец :53)
+# → dnscrypt + redirect 53→порт (оба протокола). Закрывает дыру v44/v45:
+# _ensure_system_dns_alive работал только В МОМЕНТ операций, а AGH,
+# умерший ЧАС спустя (OOM/креш-луп), уносил системный DNS с собой —
+# redirect уже снят, resolv.conf → 127.0.0.1, слушателя нет → black-hole.
+_WATCHDOG_SVC_NAME    = "chimera-dns-watchdog.service"
+_WATCHDOG_TIMER_NAME  = "chimera-dns-watchdog.timer"
+_WATCHDOG_SVC_PATH    = Path("/etc/systemd/system") / _WATCHDOG_SVC_NAME
+_WATCHDOG_TIMER_PATH  = Path("/etc/systemd/system") / _WATCHDOG_TIMER_NAME
+_WATCHDOG_SCRIPT_PATH = Path("/usr/local/bin/chimera-dns-watchdog.sh")
 
 
 # =============================================================================
@@ -763,6 +793,180 @@ def _enable_persist_service() -> tuple:
     return True, None
 
 
+# =============================================================================
+#  DNS-WATCHDOG (v46) — системный DNS не должен умирать НАДОЛГО
+# =============================================================================
+def _watchdog_script_content() -> str:
+    """Bash-скрипт watchdog: probe → self-heal лестница.
+
+    Порядок:
+      0. probe 127.0.0.1:53 (dig rc=0 = ответ есть; fallback getent),
+         повтор через 3с (анти-ложное-срабатывание на транзиент).
+      1. AGH активен → restart AdGuardHome → probe (владелец :53).
+      2. dnscrypt-proxy (restart если лежит) + redirect 53→порт
+         (udp+tcp, idempotent -C/-A) → probe.
+    Всё пишет в journal через logger -t chimera-dns-watchdog.
+    """
+    return """#!/bin/bash
+# Chimera Project — DNS-watchdog: системный DNS не должен умирать надолго.
+# Сгенерировано chimera/modules/resolv_conf_fix.py. НЕ редактировать вручную.
+# Управление: systemctl list-timers | grep chimera-dns-watchdog
+
+TAG="chimera-dns-watchdog"
+PROBE_DOMAIN="ya.ru"
+
+dns_alive() {
+    if command -v dig >/dev/null 2>&1; then
+        dig @127.0.0.1 "$PROBE_DOMAIN" +time=1 +tries=1 +short >/dev/null 2>&1
+        return $?
+    fi
+    getent hosts "$PROBE_DOMAIN" >/dev/null 2>&1
+}
+
+add_redirect() {
+    local port="$1" proto
+    for proto in udp tcp; do
+        iptables -t nat -C OUTPUT -p "$proto" -d 127.0.0.1 --dport 53 \\
+            -j REDIRECT --to-ports "$port" -m comment --comment chimera-dns-fix \\
+            2>/dev/null || \\
+        iptables -t nat -A OUTPUT -p "$proto" -d 127.0.0.1 --dport 53 \\
+            -j REDIRECT --to-ports "$port" -m comment --comment chimera-dns-fix \\
+            2>/dev/null
+    done
+}
+
+# 0. probe (двойной — транзиент не считается смертью)
+if dns_alive; then
+    exit 0
+fi
+sleep 3
+if dns_alive; then
+    exit 0
+fi
+
+logger -t "$TAG" "DNS 127.0.0.1:53 не отвечает — восстановление"
+
+# 1. AdGuard Home — если активен, он владелец :53
+if systemctl is-active --quiet AdGuardHome 2>/dev/null; then
+    systemctl restart AdGuardHome
+    sleep 5
+    if dns_alive; then
+        logger -t "$TAG" "DNS восстановлен: рестарт AdGuardHome"
+        exit 0
+    fi
+    logger -t "$TAG" "рестарт AdGuardHome не помог — fallback dnscrypt"
+fi
+
+# 2. dnscrypt-proxy + redirect 53→порт (живость важнее фильтрации)
+systemctl is-active --quiet dnscrypt-proxy 2>/dev/null || \\
+    systemctl restart dnscrypt-proxy
+sleep 2
+PORT=5300
+TOML=/etc/dnscrypt-proxy/dnscrypt-proxy.toml
+if [ -f "$TOML" ]; then
+    P=$(grep -oP "listen_addresses\\s*=\\s*\\[\\s*['\\\"][^'\\\"]*:\\K[0-9]+" "$TOML" 2>/dev/null | head -1)
+    [ -n "$P" ] && [ "$P" != "53" ] && PORT="$P"
+fi
+add_redirect "$PORT"
+sleep 1
+if dns_alive; then
+    logger -t "$TAG" "DNS восстановлен: redirect 53->$PORT (dnscrypt)"
+else
+    logger -t "$TAG" "КРИТИЧНО: DNS мёртв даже после redirect 53->$PORT — journalctl -u dnscrypt-proxy -n 30"
+fi
+exit 0
+"""
+
+
+def _write_dns_watchdog() -> "tuple[Path, Path, Path, Optional[str]]":
+    """Пишет watchdog-скрипт + service + timer. Возвращает (script, svc,
+    timer, err)."""
+    script = _watchdog_script_content()
+    try:
+        _WATCHDOG_SCRIPT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _WATCHDOG_SCRIPT_PATH.write_text(script)
+        _WATCHDOG_SCRIPT_PATH.chmod(0o755)
+    except PermissionError:
+        return None, None, None, f"нет прав на {_WATCHDOG_SCRIPT_PATH} (нужен root)"
+    except Exception as e:
+        return None, None, None, f"не удалось создать {_WATCHDOG_SCRIPT_PATH}: {e}"
+
+    svc = f"""[Unit]
+Description=Chimera Project — DNS watchdog (probe 127.0.0.1:53, self-heal)
+Documentation=https://github.com/inferno1978/Chimera-Project
+After=network-online.target dnscrypt-proxy.service AdGuardHome.service
+
+[Service]
+Type=oneshot
+ExecStart={_WATCHDOG_SCRIPT_PATH}
+TimeoutStartSec=90s
+StandardOutput=journal
+StandardError=journal
+"""
+    timer = f"""[Unit]
+Description=Chimera Project — DNS watchdog timer (каждую минуту)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=15s
+Unit={_WATCHDOG_SVC_NAME}
+
+[Install]
+WantedBy=timers.target
+"""
+    try:
+        _WATCHDOG_SVC_PATH.write_text(svc)
+        _WATCHDOG_TIMER_PATH.write_text(timer)
+    except PermissionError:
+        return _WATCHDOG_SCRIPT_PATH, None, None, \
+            f"нет прав на {_WATCHDOG_SVC_PATH} (нужен root)"
+    except Exception as e:
+        return _WATCHDOG_SCRIPT_PATH, None, None, \
+            f"не удалось создать unit-файлы: {e}"
+    return _WATCHDOG_SCRIPT_PATH, _WATCHDOG_SVC_PATH, _WATCHDOG_TIMER_PATH, None
+
+
+def _ensure_dns_watchdog() -> tuple:
+    """Устанавливает/обновляет watchdog-timer (идемпотентно).
+
+    Возвращает (ok, err). err=None и ok=True — таймер активен.
+    """
+    script, svc, timer, err = _write_dns_watchdog()
+    if err:
+        # Нет прав (не root / песочница) — НЕ ломаем основной фикс,
+        # watchdog не критичен для текущего запуска.
+        return False, err
+    _run(["systemctl", "daemon-reload"], capture=True, check=False)
+    r = _run(["systemctl", "enable", "--now", _WATCHDOG_TIMER_NAME],
+             capture=True, check=False)
+    if r.returncode != 0:
+        return False, (f"systemctl enable --now {_WATCHDOG_TIMER_NAME}: "
+                       f"rc={r.returncode}, stderr={(r.stderr or '').strip()[:120]}")
+    # Однократный прогон сразу — не ждём минуту до первого probe
+    _run(["systemctl", "start", _WATCHDOG_SVC_NAME],
+         capture=True, check=False)
+    return True, None
+
+
+def _remove_dns_watchdog() -> None:
+    """Отключает и удаляет watchdog (rollback DNS-фикса)."""
+    try:
+        _run(["systemctl", "disable", "--now", _WATCHDOG_TIMER_NAME],
+             capture=True, check=False)
+        _run(["systemctl", "stop", _WATCHDOG_SVC_NAME],
+             capture=True, check=False)
+        _run(["systemctl", "daemon-reload"], capture=True, check=False)
+    except Exception:
+        pass
+    for p in (_WATCHDOG_TIMER_PATH, _WATCHDOG_SVC_PATH,
+              _WATCHDOG_SCRIPT_PATH):
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def _disable_persist_service() -> tuple:
     _run(["systemctl", "stop", _PERSIST_SVC_NAME], capture=True, check=False)
     _run(["systemctl", "disable", _PERSIST_SVC_NAME], capture=True, check=False)
@@ -1012,6 +1216,19 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False,
         else:
             warnings.append(f"persist-сервис создан, но не активирован: {perr2}")
 
+    # ── 10.5 WATCHDOG — DNS не должен умирать НАДОЛГО (v46) ─────────────────
+    # AGH умер через час после финализации (креш/OOM) → :53 без слушателя,
+    # redirect уже снят → системный DNS мёртв. Watchdog каждую минуту
+    # пробует 127.0.0.1:53 и сам чинит (рестарт AGH → dnscrypt-redirect).
+    try:
+        wok, werr = _ensure_dns_watchdog()
+    except Exception as e:
+        wok, werr = False, str(e)
+    if wok:
+        actions.append(f"watchdog активен: {_WATCHDOG_TIMER_NAME} (probe каждую минуту)")
+    else:
+        warnings.append(f"watchdog не установлен: {werr}")
+
     # ── Сохранить state ─────────────────────────────────────────────────────
     _state_save({
         "fixed": True,
@@ -1080,6 +1297,14 @@ def rollback_resolv_conf() -> Dict[str, Any]:
         actions.append(f"остановлен и удалён persist-сервис: {_PERSIST_SVC_NAME}")
     else:
         warnings.append(f"ошибка удаления persist-сервиса: {err_ds}")
+
+    # 1.5. Удалить DNS-watchdog (v46) — иначе он будет «чинить» 127.0.0.1:53
+    # и бороться с откатом к внешнему DNS.
+    try:
+        _remove_dns_watchdog()
+        actions.append(f"остановлен и удалён watchdog: {_WATCHDOG_TIMER_NAME}")
+    except Exception as e:
+        warnings.append(f"ошибка удаления watchdog: {e}")
 
     # 2. Восстановить /etc/resolv.conf из бэкапа
     if _BACKUP_RESOLV.exists():

@@ -75,6 +75,9 @@ class _BaseTest(unittest.TestCase):
         self._dnscrypt_toml = self._tmpdir / "dnscrypt.toml"
         self._persist_svc = self._tmpdir / "chimera-dns-fix.service"
         self._persist_script = self._tmpdir / "chimera-dns-fix-apply.py"
+        self._wd_svc = self._tmpdir / "chimera-dns-watchdog.service"
+        self._wd_timer = self._tmpdir / "chimera-dns-watchdog.timer"
+        self._wd_script = self._tmpdir / "chimera-dns-watchdog.sh"
 
         patches = [
             patch("chimera.modules.resolv_conf_fix._RESOLV_CONF", self._resolv_conf),
@@ -87,6 +90,9 @@ class _BaseTest(unittest.TestCase):
             patch("chimera.modules.resolv_conf_fix._DNSCRYPT_TOML", self._dnscrypt_toml),
             patch("chimera.modules.resolv_conf_fix._PERSIST_SVC_PATH", self._persist_svc),
             patch("chimera.modules.resolv_conf_fix._PERSIST_SCRIPT_PATH", self._persist_script),
+            patch("chimera.modules.resolv_conf_fix._WATCHDOG_SVC_PATH", self._wd_svc),
+            patch("chimera.modules.resolv_conf_fix._WATCHDOG_TIMER_PATH", self._wd_timer),
+            patch("chimera.modules.resolv_conf_fix._WATCHDOG_SCRIPT_PATH", self._wd_script),
         ]
         for p in patches:
             p.start()
@@ -524,6 +530,145 @@ class TestAghAwareFix(_BaseTest):
         self.assertFalse(diag["dns_redirect_active"],
                          "tcp-only redirect присутствует → ворует трафик у AGH")
         self.assertTrue(any("обходят AGH" in r for r in diag["leak_reasons"]))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  v46: DNS-WATCHDOG — системный DNS не должен умирать НАДОЛГО
+# ══════════════════════════════════════════════════════════════════════════════
+class TestDnsWatchdog(_BaseTest):
+    """vds13195: AGH умер ЧАС спустя после финализации (креш/OOM) → :53 без
+    слушателя, redirect уже снят → системный DNS мёртв. v46: timer каждую
+    минуту пробует 127.0.0.1:53 и сам чинит (рестарт AGH → dnscrypt-redirect)."""
+
+    def setUp(self):
+        super().setUp()
+        from chimera.modules import resolv_conf_fix
+        self.mod = resolv_conf_fix
+
+    def test_watchdog_script_valid_bash(self):
+        import subprocess as sp
+        script = self.mod._watchdog_script_content()
+        # bash -n — синтаксис
+        r = sp.run(["bash", "-n", "/dev/stdin"], input=script,
+                   capture_output=True, text=True, timeout=15)
+        self.assertEqual(r.returncode, 0,
+                         f"bash syntax error: {r.stderr[:300]}")
+
+    def test_watchdog_script_logic_markers(self):
+        s = self.mod._watchdog_script_content()
+        # probe 127.0.0.1 + двойная проверка (анти-флап)
+        self.assertIn("dig @127.0.0.1", s)
+        self.assertIn("getent hosts", s)
+        self.assertEqual(s.count("if dns_alive; then"), 4)
+        # ступень 1: рестарт AGH
+        self.assertIn("systemctl restart AdGuardHome", s)
+        # ступень 2: dnscrypt + redirect ОБА протокола
+        self.assertIn("dnscrypt-proxy", s)
+        self.assertIn('for proto in udp tcp', s)
+        self.assertIn("-j REDIRECT --to-ports", s)
+        # идемпотентность redirect
+        self.assertIn("iptables -t nat -C OUTPUT", s)
+        # порт из TOML, не хардкод
+        self.assertIn("dnscrypt-proxy.toml", s)
+        # журнал действий
+        self.assertIn('logger -t "$TAG"', s)
+
+    def test_write_dns_watchdog_creates_all_files(self):
+        script, svc, timer, err = self.mod._write_dns_watchdog()
+        self.assertIsNone(err)
+        self.assertTrue(script.exists() and svc.exists() and timer.exists())
+        self.assertEqual(svc.read_text().count("Oneshot") +
+                         svc.read_text().count("oneshot"), 1)
+        self.assertIn("OnUnitActiveSec=60s", timer.read_text())
+        self.assertIn("WantedBy=timers.target", timer.read_text())
+        # скрипт исполняемый
+        import stat as _stat
+        self.assertTrue(script.stat().st_mode & _stat.S_IXUSR)
+
+    def test_ensure_dns_watchdog_ok(self):
+        calls = []
+
+        def run_recorder(cmd, *a, **kw):
+            calls.append(tuple(cmd))
+            return _make_completed(rc=0)
+
+        with patch.object(self.mod, "_run", side_effect=run_recorder):
+            ok, err = self.mod._ensure_dns_watchdog()
+        self.assertTrue(ok, f"err: {err}")
+        enable = [c for c in calls if "enable" in c and "--now" in c]
+        self.assertEqual(len(enable), 1)
+        self.assertIn(self.mod._WATCHDOG_TIMER_NAME, enable[0])
+        # files written
+        self.assertTrue(self._wd_script.exists())
+
+    def test_ensure_dns_watchdog_enable_fail(self):
+        def run_fail(cmd, *a, **kw):
+            if "enable" in cmd:
+                return _make_completed(rc=1, stderr="Access denied")
+            return _make_completed(rc=0)
+
+        with patch.object(self.mod, "_run", side_effect=run_fail):
+            ok, err = self.mod._ensure_dns_watchdog()
+        self.assertFalse(ok)
+        self.assertIn("enable", err)
+
+    def test_ensure_dns_watchdog_no_root_not_fatal(self):
+        """Нет прав на запись → (False, err), но исключение наружу НЕ летит
+        (watchdog не должен ломать основной resolv-фикс)."""
+        def write_fail(self, *a, **kw):
+            raise PermissionError("EACCES")
+
+        with patch.object(Path, "write_text", write_fail):
+            ok, err = self.mod._ensure_dns_watchdog()
+        self.assertFalse(ok)
+        self.assertIn("нет прав", err)
+
+    def test_fix_flow_installs_watchdog(self):
+        """fix_resolv_conf_to_localhost → actions содержит 'watchdog активен'."""
+        self._resolv_conf.write_text("nameserver 8.8.8.8\n")
+        self._nsswitch.write_text("hosts: files dns\n")
+        cmd_to_result = {
+            ("systemctl", "is-active", "dnscrypt-proxy.service"):
+                _make_completed(stdout="active"),
+            ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
+        }
+        with patch.object(self.mod, "_run",
+                          side_effect=_mock_run_factory(cmd_to_result)), \
+             patch.object(self.mod, "_get_dnscrypt_listen_addr_port",
+                          return_value=("127.0.0.1", 5300)):
+            result = self.mod.fix_resolv_conf_to_localhost(force=True)
+        self.assertTrue(result["ok"], f"result: {result}")
+        self.assertTrue(any("watchdog" in a for a in result["actions"]),
+                        f"нет watchdog в actions: {result['actions']}")
+        # файлы watchdog реально записаны
+        self.assertTrue(self._wd_script.exists())
+        self.assertTrue(self._wd_timer.exists())
+
+    def test_rollback_removes_watchdog(self):
+        """rollback сносит watchdog-файлы (иначе он борется с откатом)."""
+        self._resolv_conf.write_text("nameserver 127.0.0.1\n")
+        self._nsswitch.write_text("hosts: files dns\n")
+        # state: фикс применён
+        self.mod._state_save({"fixed": True, "method": "static_resolv_conf"})
+        # создаём watchdog-файлы как будто установлены
+        self._wd_script.write_text("#!/bin/bash\ntrue\n")
+        self._wd_svc.write_text("[Unit]\n")
+        self._wd_timer.write_text("[Unit]\n")
+        self._backup_resolv.write_text("nameserver 1.1.1.1\n")
+        self._backup_nsswitch.write_text("hosts: files dns\n")
+
+        def run_stub(cmd, *a, **kw):
+            return _make_completed(rc=0, stdout="")
+
+        with patch.object(self.mod, "_run", side_effect=run_stub), \
+             patch.object(self.mod, "diagnose_resolv_conf",
+                          return_value={"dnscrypt_listen": ("127.0.0.1", 5300)}):
+            result = self.mod.rollback_resolv_conf()
+        self.assertTrue(result["ok"], f"result: {result}")
+        self.assertFalse(self._wd_script.exists())
+        self.assertFalse(self._wd_svc.exists())
+        self.assertFalse(self._wd_timer.exists())
+        self.assertTrue(any("watchdog" in a for a in result["actions"]))
 
 
 if __name__ == "__main__":
