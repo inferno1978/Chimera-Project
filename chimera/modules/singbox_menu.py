@@ -1430,6 +1430,22 @@ def _switch_cdn_provider() -> None:
             remove_cdn_allowlist(old_port)
         except Exception:
             pass  # не критично — порт больше не слушается
+        # v49: смена порта при смене CDN — старый порт закрываем в UFW и
+        # реестре, новый открываем/регистрируем. Раньше старое правило
+        # vless_ws_cdn оставалось жить (orphaned UFW + stale запись
+        # SERVICE_SINGBOX), а новый порт не открывался вовсе.
+        try:
+            from chimera.modules.singbox_ufw import (
+                singbox_ufw_close, singbox_ufw_ensure_open,
+            )
+            singbox_ufw_close(old_port, "tcp", "vless_ws_cdn", listen="0.0.0.0")
+            if port:
+                singbox_ufw_ensure_open(port, "tcp", "vless_ws_cdn",
+                                        listen="0.0.0.0")
+                info(f"UFW: порт {old_port} закрыт, {port}/tcp открыт "
+                     f"(смена CDN)")
+        except Exception as e:
+            warn(f"UFW-обновление порта при смене CDN: {e}")
 
     success(f"CDN переключён: {CDN_PROVIDERS[current]['display_name'] if current else '—'} → "
             f"{CDN_PROVIDERS[new_provider]['display_name']}")

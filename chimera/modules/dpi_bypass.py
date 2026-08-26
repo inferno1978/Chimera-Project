@@ -1048,7 +1048,6 @@ def _b4_nginx_status() -> dict:
 def _b4_nginx_install(port: int, use_self_signed: bool, domain) -> tuple:
     """Устанавливает nginx front с TLS для b4 Web UI."""
     from chimera.modules.panel_nginx_front import panel_nginx_front_install
-    from chimera.modules.port_registry import SERVICE_SUBSCRIPTION_NGINX
 
     backend_port = B4_WEB_PORT  # b4 Web UI слушает на 9700
 

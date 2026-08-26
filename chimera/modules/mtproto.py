@@ -2165,6 +2165,23 @@ def _full_uninstall(silent: bool = False) -> bool:
     #  миграция на port_registry (с legacy comment).
     _mtproto_ufw_close(port)
 
+    # v49: iOS-фикс (ext_port) — его UFW/реестр не чистились при полном
+    # удалении Telemt (orphaned allow + stale запись SERVICE_TELEMT_IOS_FIX)
+    try:
+        from chimera.modules import telemt_ios_fix as _ios
+        _st = _ios._load_state()
+        if _st and getattr(_st, "ext_port", 0):
+            _ios._teardown_ufw(int(_st.ext_port))
+            _info(f"iOS-фикс: порт {_st.ext_port}/tcp закрыт (UFW/реестр)")
+        # iptables-правила фикса + state тоже убираем
+        try:
+            _ios._remove_rules()
+            _ios._save_state(_ios.IosFixConfig(enabled=False))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     _box_info("Удаляю файлы...")
     for t in [BIN_PATH, SERVICE_FILE, CONFIG_DIR, WORK_DIR,
               LOG_FILE, CRON_FILE, OPTIMIZER_CONF, LIMITS_CONF]:

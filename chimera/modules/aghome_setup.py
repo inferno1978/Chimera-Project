@@ -144,6 +144,8 @@ XRAY_STATE_FILE  = Path("/var/lib/xray-installer/state.json")
 # DNS :53 — loopback+public bind, в UFW снаружи НЕ открывается).
 AGH_DNS_PORT     = 53
 AGH_WEB_PORT     = 3000
+# Порты, которые Web UI занять не может (служебные DNS-стека и системы).
+AGH_WEB_PORT_RESERVED = {22, 53, 80, 443, 853, 5300, 30443}
 AGH_DOH_PORT     = 30443   # DoH + Web UI HTTPS (native TLS AGH)
 AGH_DOT_PORT     = 853     # DoT (tcp)
 AGH_DOQ_PORT     = 853     # DoQ (udp)
@@ -896,8 +898,12 @@ def build_tls_section(tls_enabled: bool, server_name: str,
 """
 
 
-def build_http_section(web_mode: str) -> str:
+def build_http_section(web_mode: str, web_port: int = AGH_WEB_PORT) -> str:
     """Секция http: — адрес Web UI по выбранному режиму.
+
+    v49: web_port — кастомный порт Web UI (по умолчанию AGH_WEB_PORT);
+    применяется ко всем режимам (wizard-фаза всегда на :3000 — порт
+    меняется при финализации).
 
     v48: AGH биндит HTTPS-порт (:30443) на ТОТ ЖЕ хост, что и
     http.address (исходники AGH: netip.AddrPortFrom(web.conf.BindAddr,
@@ -905,17 +911,17 @@ def build_http_section(web_mode: str) -> str:
     TLS-режимах (https_le/https_self) bind 0.0.0.0:3000: иначе :30443
     оставался loopback, UFW-порт 30443 висел бесполезно, а Web UI снаружи
     требовал SSH-туннель (запрещён требованием «без туннелей»).
-    Публичный доступ к plain :3000 закрыт UFW
+    Публичный доступ к plain-порту закрыт UFW
     (_register_aghome_ports: web_public_plain=False → close), снаружи —
     только TLS :30443 (Web UI + DoH мультиплексированы).
     http_public: 0.0.0.0:{port} + UFW открыт (plain, на выбор пользователя).
     loopback: 127.0.0.1:{port} (полностью локальный режим).
     """
     if web_mode == AGH_WEB_LOOPBACK:
-        addr = f"127.0.0.1:{AGH_WEB_PORT}"
+        addr = f"127.0.0.1:{web_port}"
     else:
         # http_public, https_le, https_self — см. docstring v48
-        addr = f"0.0.0.0:{AGH_WEB_PORT}"
+        addr = f"0.0.0.0:{web_port}"
     return f"""http:
   pprof:
     port: 6060
@@ -1272,12 +1278,18 @@ def _open_wizard_access(ssh_ip: str) -> list:
 
 
 def _register_aghome_ports(dc_port: int, tls_enabled: bool,
-                           web_public_plain: bool) -> None:
+                           web_public_plain: bool,
+                           web_port: int = AGH_WEB_PORT) -> None:
     """Регистрирует все порты DNS-стека в port_registry + открывает публичные
-    в UFW. Вызывается при установке/финализации (идемпотентно)."""
+    в UFW. Вызывается при установке/финализации (идемпотентно).
+
+    v49: web_port — кастомный порт Web UI. При смене порта закрывает UFW и
+    снимает регистрацию СТАРОГО порта (порт не должен течь).
+    """
     try:
         from chimera.modules.port_registry import (
-            port_register, ufw_open_port,
+            port_register, ufw_open_port, port_unregister,
+            port_list_for_service,
             SERVICE_DNSCRYPT, SERVICE_AGHOME, SERVICE_AGHOME_WEB,
             SERVICE_AGHOME_DOH, SERVICE_AGHOME_DOT, SERVICE_AGHOME_DOQ,
         )
@@ -1306,17 +1318,31 @@ def _register_aghome_ports(dc_port: int, tls_enabled: bool,
                   comment="AdGuard Home DNS (loopback+public bind, UFW закрыт снаружи)",
                   force=True)
 
-    # Web UI :3000
-    port_register(SERVICE_AGHOME_WEB, AGH_WEB_PORT, "tcp",
+    # Web UI: кастомный порт (v49). Сначала — уборка СТАРЫХ записей тега
+    # с другим портом (смена порта при переустановке/финализации).
+    try:
+        for e in port_list_for_service(SERVICE_AGHOME_WEB):
+            try:
+                old_port = int(e.get("port", 0))
+            except Exception:
+                old_port = 0
+            if old_port and old_port != web_port:
+                ufw_close_quiet(old_port, "tcp", SERVICE_AGHOME_WEB)
+                port_unregister(SERVICE_AGHOME_WEB, port=old_port, proto="tcp")
+                info(f"AGH: порт Web UI {old_port} → {web_port} "
+                     f"(UFW/реестр обновлены)")
+    except Exception:
+        pass
+    port_register(SERVICE_AGHOME_WEB, web_port, "tcp",
                   comment="AdGuard Home Web UI", force=True)
     if web_public_plain:
-        ok, msg = ufw_open_port(AGH_WEB_PORT, "tcp", SERVICE_AGHOME_WEB,
+        ok, msg = ufw_open_port(web_port, "tcp", SERVICE_AGHOME_WEB,
                                 comment="AdGuard Home Web UI (HTTP)")
         if ok:
-            info(f"AGH: порт {AGH_WEB_PORT}/tcp открыт в UFW (Web UI)")
+            info(f"AGH: порт {web_port}/tcp открыт в UFW (Web UI)")
     else:
-        # loopback-режим — публичный доступ закрыт
-        ufw_close_quiet(AGH_WEB_PORT, "tcp", SERVICE_AGHOME_WEB)
+        # loopback/TLS-режим — публичный доступ закрыт
+        ufw_close_quiet(web_port, "tcp", SERVICE_AGHOME_WEB)
 
     # DoH/DoT/DoQ — только при TLS
     if tls_enabled:
@@ -1346,23 +1372,45 @@ def ufw_close_quiet(port: int, proto: str, service_tag: str) -> None:
 
 def _unregister_aghome_ports() -> None:
     """Снимает регистрацию и закрывает ВСЕ порты DNS-стека AGH
-    (кроме dnscrypt :5300 — он остаётся жить)."""
+    (кроме dnscrypt :5300 — он остаётся жить).
+
+    v49: Web UI-порт может быть кастомным — закрываем ВСЕ записи тега
+    SERVICE_AGHOME_WEB из реестра (+ дефолт 3000 страховочно).
+    """
     try:
         from chimera.modules.port_registry import (
-            port_unregister, ufw_close_port,
+            port_unregister, ufw_close_port, port_list_for_service,
             SERVICE_AGHOME, SERVICE_AGHOME_WEB, SERVICE_AGHOME_DOH,
             SERVICE_AGHOME_DOT, SERVICE_AGHOME_DOQ,
         )
         for tag, port, proto in (
             (SERVICE_AGHOME,         AGH_DNS_PORT, "udp"),
             (SERVICE_AGHOME,         AGH_DNS_PORT, "tcp"),
-            (SERVICE_AGHOME_WEB,     AGH_WEB_PORT, "tcp"),
             (SERVICE_AGHOME_DOH,     AGH_DOH_PORT, "tcp"),
             (SERVICE_AGHOME_DOT,     AGH_DOT_PORT, "tcp"),
             (SERVICE_AGHOME_DOQ,     AGH_DOQ_PORT, "udp"),
         ):
             ufw_close_port(port, proto, tag)
             port_unregister(tag, port=port, proto=proto)
+        # Web UI — все кастомные порты тега + дефолт
+        web_ports = set()
+        try:
+            for e in port_list_for_service(SERVICE_AGHOME_WEB):
+                try:
+                    web_ports.add(int(e.get("port", 0)))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        web_ports.add(AGH_WEB_PORT)
+        # прошлые версии могли знать порт только из state — добавим его
+        try:
+            web_ports.add(int(aghome_state_load().get("web_port", 0) or 0))
+        except Exception:
+            pass
+        for p in sorted(x for x in web_ports if x):
+            ufw_close_port(p, "tcp", SERVICE_AGHOME_WEB)
+            port_unregister(SERVICE_AGHOME_WEB, port=p, proto="tcp")
     except Exception:
         pass
 
@@ -1387,6 +1435,73 @@ def _get_latest_agh_tag() -> str:
             pass
         time.sleep(3)
     return ""
+
+
+def _validate_web_port(port: int) -> "tuple[bool, str]":
+    """Кастомный порт Web UI: диапазон + не служебный + свободен (v49)."""
+    if not (1024 <= port <= 65535):
+        return False, "порт должен быть в диапазоне 1024–65535"
+    if port in AGH_WEB_PORT_RESERVED:
+        return False, (f"порт {port} служебный (SSH/DNS/DoT/DoQ/DoH/dnscrypt) "
+                       "— выберите другой")
+    try:
+        from chimera.modules.port_registry import (
+            port_is_free, SERVICE_AGHOME_WEB,
+        )
+        free, conflicts = port_is_free(port, "tcp",
+                                       exclude_service=SERVICE_AGHOME_WEB)
+        if not free:
+            return False, "порт занят: " + "; ".join(conflicts[:3])
+    except Exception:
+        # port_registry недоступен — не блокируем, проверим хотя бы ss
+        if _port_listening(port, "tcp"):
+            return False, f"порт {port}/tcp уже слушается"
+    return True, ""
+
+
+def _ask_web_port() -> int:
+    """Спрашивает порт Web UI (plain HTTP/локальный вход; v49).
+
+    Основной вход в Web UI — TLS :30443 (не меняется). Кастомный порт
+    управляет plain-доступом: режим «HTTP публично» и локальный вход.
+    Wizard-фаза всегда на :3000 — порт применяется при финализации.
+    """
+    core = _core_module()
+    CYAN, NC, DIM, YELLOW = core.CYAN, core.NC, core.DIM, core.YELLOW
+    _box_top, _box_row, _box_sep, _box_bottom = (
+        core._box_top, core._box_row, core._box_sep, core._box_bottom)
+    print()
+    _box_top("🛡️  AdGuard Home — порт Web UI (plain HTTP)")
+    _box_row()
+    _box_row(f"  {DIM}Основной вход — TLS :{AGH_DOH_PORT} (Web UI + DoH).{NC}")
+    _box_row(f"  {DIM}Этот порт — для plain-режима «HTTP публично» и локального входа.{NC}")
+    _box_sep()
+    try:
+        raw = input(f"{CYAN}  Порт Web UI [{AGH_WEB_PORT}]: {NC}").strip()
+    except (EOFError, KeyboardInterrupt):
+        return AGH_WEB_PORT
+    while True:
+        if not raw:
+            return AGH_WEB_PORT
+        try:
+            port = int(raw)
+        except ValueError:
+            try:
+                print(f"{YELLOW}  Нужно число (Enter = {AGH_WEB_PORT}){NC}")
+                raw = input(f"{CYAN}  Порт Web UI [{AGH_WEB_PORT}]: {NC}").strip()
+            except (EOFError, KeyboardInterrupt):
+                return AGH_WEB_PORT
+            continue
+        if port == AGH_WEB_PORT:
+            return AGH_WEB_PORT
+        ok, why = _validate_web_port(port)
+        if ok:
+            return port
+        try:
+            print(f"{YELLOW}  {why}{NC}")
+            raw = input(f"{CYAN}  Порт Web UI [{AGH_WEB_PORT}]: {NC}").strip()
+        except (EOFError, KeyboardInterrupt):
+            return AGH_WEB_PORT
 
 
 def _ask_web_mode() -> "tuple[str, str]":
@@ -1422,6 +1537,8 @@ def _ask_web_mode() -> "tuple[str, str]":
     _box_item("2", f"HTTPS + self-signed {DIM}(по IP, браузер предупредит){NC}")
     _box_item("3", f"HTTP публично :{AGH_WEB_PORT} {DIM}(без TLS — пароль открытым текстом){NC}")
     _box_item("4", f"Только локально 127.0.0.1:{AGH_WEB_PORT} {DIM}(SSH-туннель){NC}")
+    _box_row()
+    _box_row(f"  {DIM}Порт plain-доступа можно поменять следующим вопросом (v49).{NC}")
     _box_bottom()
     try:
         ch = input(f"{CYAN}  Выбор [1]: {NC}").strip() or "1"
@@ -1617,6 +1734,7 @@ def _agh_install_api_post(path: str, payload: dict, timeout: int = 15) -> tuple:
 
 
 def _wizard_configure_headless(username: str, password: str,
+                               web_port: int = AGH_WEB_PORT,
                                timeout_sec: int = 20) -> bool:
     """Завершает мастер первого запуска БЕЗ браузера и туннелей.
 
@@ -1625,11 +1743,14 @@ def _wizard_configure_headless(username: str, password: str,
     корректный schema_version) и стартует DNS на 127.0.0.1:53.
     Пока redirect 53→5300 активен, системный DNS продолжает работать
     через dnscrypt; финализация затем переключит его на AGH.
+
+    v49: web_port — кастомный порт Web UI в payload мастера (API живёт
+    на дефолтном :3000, а конфиг пишет уже с нужным портом).
     """
     core = _core_module()
     info, warn = core.info, core.warn
 
-    web_conf = {"ip": "0.0.0.0", "port": AGH_WEB_PORT}
+    web_conf = {"ip": "0.0.0.0", "port": web_port}
     dns_conf = {"ip": "127.0.0.1", "port": AGH_DNS_PORT}
 
     # Пре-валидация (не фатальна: в старых сборках endpoint отсутствует)
@@ -1734,13 +1855,17 @@ def _print_wizard_instructions(domain: str = "") -> None:
 
 def _complete_first_run_wizard(web_mode: str, domain: str,
                                interactive: bool = True,
-                               state_extra: "dict | None" = None) -> bool:
+                               state_extra: "dict | None" = None,
+                               web_port: int = AGH_WEB_PORT) -> bool:
     """Мастер первого запуска: headless-API (по умолчанию) или браузер.
 
     Headless (v44): логин/пароль в TUI → POST /control/install/configure
     на loopback → конфиг с users пишет сам AGH. Не нужен ни браузер,
     ни SSH-туннель, ни UFW. Веб-мастер — fallback: :3000 временно
     открыт для всех, инструкция с URL сервера.
+
+    v49: web_port — финальный порт Web UI (wizard-фаза слушает дефолт
+    :3000; кастомный порт применит финализация).
 
     Возвращает True, если конфиг с users создан (мастер завершён).
     """
@@ -1753,7 +1878,7 @@ def _complete_first_run_wizard(web_mode: str, domain: str,
         "enabled": True,
         "phase": "wizard",
         "web_mode": web_mode,
-        "web_port": AGH_WEB_PORT,
+        "web_port": web_port,
         "domain": domain,
         "self_signed": web_mode == AGH_WEB_HTTPS_SELF,
         "tls_enabled": web_mode in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF),
@@ -1770,7 +1895,7 @@ def _complete_first_run_wizard(web_mode: str, domain: str,
         creds = _ask_admin_credentials()
         if creds:
             info("AGH: завершаю мастер локально (API loopback)...")
-            if _wizard_configure_headless(*creds):
+            if _wizard_configure_headless(*creds, web_port=web_port):
                 success("AGH: администратор создан — мастер завершён "
                         "без браузера")
                 return True
@@ -1906,12 +2031,15 @@ def install_aghome(interactive: bool = True) -> bool:
     success(f"AGH: служба активна ( {'мастер первого запуска' if wizard_restart else 'существующий конфиг'} )")
 
     # ── 6+7. Мастер: headless-API (по умолчанию) или веб ─────────────
-    web_mode, domain = AGH_WEB_LOOPBACK, ""
+    web_mode, domain, web_port = AGH_WEB_LOOPBACK, "", AGH_WEB_PORT
     if wizard_restart:
         web_mode, domain = _ask_web_mode()
-        if _complete_first_run_wizard(web_mode, domain, interactive):
+        web_port = _ask_web_port()          # v49: кастомный порт Web UI
+        if _complete_first_run_wizard(web_mode, domain, interactive,
+                                      web_port=web_port):
             return finalize_aghome_config(web_mode=web_mode,
                                           domain=domain,
+                                          web_port=web_port,
                                           interactive=interactive)
         # Мастер не завершён (таймаут/неинтерактивно/headless-провал
         # и таймаут веб-пути) — DNS обязан остаться живым (v44).
@@ -2182,7 +2310,8 @@ def _heal_tls_listeners(server_name: str, domain: str,
 
 
 def finalize_aghome_config(web_mode: str = "", domain: str = "",
-                           interactive: bool = True) -> bool:
+                           interactive: bool = True,
+                           web_port: int = 0) -> bool:
     """Применяет канонический конфиг Chimera к yaml, написанному мастером.
 
     Шаги:
@@ -2196,6 +2325,9 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
          fix_resolv_conf_to_localhost(force=True) с AGH-aware веткой.
       7. Закрывает временный wizard-доступ, финальные порты в UFW/реестре.
       8. Перегенерирует конфиг Xray (DNS → 127.0.0.1:53 → AGH).
+
+    v49: web_port — кастомный порт Web UI (0/None → из state, иначе
+    AGH_WEB_PORT). При смене порта старый закрывается в UFW/реестре.
     """
     core = _core_module()
     info, warn, success = core.info, core.warn, core.success
@@ -2219,6 +2351,18 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         web_mode = st.get("web_mode", AGH_WEB_HTTPS_LE)
     if not domain:
         domain = st.get("domain", "") or (getattr(core, "PARAM_DOMAIN", "") or "")
+    # v49: кастомный порт Web UI (state → дефолт)
+    try:
+        web_port = int(web_port) if web_port else 0
+    except (TypeError, ValueError):
+        web_port = 0
+    if not web_port:
+        try:
+            web_port = int(st.get("web_port", 0) or 0)
+        except (TypeError, ValueError):
+            web_port = 0
+    if not web_port or not (1 <= web_port <= 65535):
+        web_port = AGH_WEB_PORT
     tls_enabled = web_mode in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF)
 
     # ── TLS-сертификат ────────────────────────────────────────────────
@@ -2244,7 +2388,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         pass
 
     sections: dict = {
-        "http":             build_http_section(web_mode),
+        "http":             build_http_section(web_mode, web_port),
         "dns":              build_dns_section(dc_port, public_ip, tls_enabled),
         "tls":              build_tls_section(tls_enabled, server_name, cert_path, key_path),
         "filters":          build_filters_section(),
@@ -2403,7 +2547,8 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
                          "port", str(AGH_WEB_PORT), "proto", "tcp")
     _ufw_clean_wizard_rules()
     _register_aghome_ports(dc_port, tls_enabled,
-                           web_public_plain=(web_mode == AGH_WEB_HTTP_PUB))
+                           web_public_plain=(web_mode == AGH_WEB_HTTP_PUB),
+                           web_port=web_port)
 
     # ── Перегенерация конфига Xray ────────────────────────────────────
     if dns_udp:
@@ -2415,7 +2560,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         "enabled": True,
         "phase": "finalized",
         "web_mode": web_mode,
-        "web_port": AGH_WEB_PORT,
+        "web_port": web_port,
         "domain": domain,
         "self_signed": web_mode == AGH_WEB_HTTPS_SELF,
         "tls_enabled": tls_enabled,
@@ -2431,6 +2576,10 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
     if tls_enabled and domain:
         info(f"AGH: DoH: https://{domain}:{AGH_DOH_PORT}/dns-query")
         info(f"AGH: DoT: {domain}:{AGH_DOT_PORT} | DoQ: {domain}:{AGH_DOQ_PORT}/udp")
+    if web_mode == AGH_WEB_HTTP_PUB:
+        info(f"AGH: Web UI: http://{domain or (_get_public_ip() or 'IP-СЕРВЕРА')}:{web_port}")
+    elif web_port != AGH_WEB_PORT:
+        info(f"AGH: Web UI (локально): http://127.0.0.1:{web_port}")
     return True
 
 
@@ -2663,11 +2812,13 @@ def aghome_reset_admin_password() -> bool:
         _ensure_system_dns_alive("сброс пароля (служба не стартовала)")
         return False
 
+    web_port = int(st.get("web_port", AGH_WEB_PORT) or AGH_WEB_PORT)
     if _complete_first_run_wizard(
             st.get("web_mode", AGH_WEB_HTTPS_LE), st.get("domain", ""),
-            interactive=True, state_extra=st):
+            interactive=True, state_extra=st, web_port=web_port):
         ok = finalize_aghome_config(web_mode=st.get("web_mode", AGH_WEB_HTTPS_LE),
-                                    domain=st.get("domain", ""))
+                                    domain=st.get("domain", ""),
+                                    web_port=web_port)
         if ok:
             success("AGH: пароль администратора обновлён, конфиг восстановлен")
         return ok
@@ -2858,13 +3009,16 @@ def do_aghome_menu() -> None:
         elif ch == "4":
             try:
                 web_mode, domain = _ask_web_mode()
+                web_port = _ask_web_port()          # v49: кастомный порт
                 st2 = aghome_state_load()
                 aghome_state_save({**st2, "web_mode": web_mode, "domain": domain,
+                                   "web_port": web_port,
                                    "self_signed": web_mode == AGH_WEB_HTTPS_SELF,
                                    "tls_enabled": web_mode in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF)})
                 core.info("AGH: режим сохранён — применяю конфиг...")
                 if AGH_CONF.exists() and not aghome_wizard_pending():
-                    finalize_aghome_config(web_mode=web_mode, domain=domain)
+                    finalize_aghome_config(web_mode=web_mode, domain=domain,
+                                           web_port=web_port)
                 else:
                     core.info("AGH: применится автоматически после завершения мастера")
             except Exception as e:

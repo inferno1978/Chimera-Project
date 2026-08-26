@@ -286,6 +286,30 @@ def _setup_ufw(port: int) -> None:
         _run(["ufw", "allow", f"{port}/tcp", "comment", "Telemt iOS-fix"])
         _box_ok(f"UFW: открыт порт {port}/tcp")
 
+
+def _teardown_ufw(port: int) -> None:
+    """Закрывает порт iOS-фикса в UFW и снимает регистрацию (v49).
+
+    Раньше disable-путь удалял только iptables-правила — UFW allow и
+    запись port_registry оставались жить (orphaned rule + stale entry).
+    Также вызывается при смене порта (старый порт закрываем ДО открытия
+    нового) и из полного удаления Telemt (mtproto._full_uninstall).
+    """
+    if not port:
+        return
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister, SERVICE_TELEMT_IOS_FIX,
+        )
+        ufw_close_port(port, "tcp", SERVICE_TELEMT_IOS_FIX,
+                       legacy_comments=["Telemt iOS-fix"])
+        port_unregister(SERVICE_TELEMT_IOS_FIX, port=port, proto="tcp")
+        return
+    except Exception:
+        pass
+    if shutil.which("ufw"):
+        _run(["ufw", "delete", "allow", f"{port}/tcp"], capture=True)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  STATE — храним применённую конфигурацию отдельно от telemt.toml
 # ══════════════════════════════════════════════════════════════════════════════
@@ -520,6 +544,10 @@ def ios_fix_menu() -> None:
                 if _strip_client_mss():
                     _box_ok("client_mss удалён из конфига.")
 
+            # v49: смена порта — старый UFW/реестр закрываем до нового
+            if cfg.enabled and cfg.ext_port and cfg.ext_port != ext_port:
+                _teardown_ufw(cfg.ext_port)
+
             new_cfg = IosFixConfig(enabled=True, ext_port=ext_port,
                                     target_port=target_port, mss=mss)
             ok, msg = _apply_rules(new_cfg)
@@ -543,6 +571,7 @@ def ios_fix_menu() -> None:
                 _box_info("iOS-фикс уже не активен."); _pause(); continue
             removed = _remove_rules()
             _persist_rules()
+            _teardown_ufw(cfg.ext_port if cfg.ext_port else 0)  # v49
             _save_state(IosFixConfig(enabled=False))
             _run(["systemctl", "restart", _SERVICE_NAME])
             print()

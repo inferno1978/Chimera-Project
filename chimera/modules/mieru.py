@@ -511,9 +511,9 @@ def _ufw_open_port(proto: str, port_start: int, port_end: int) -> None:
 
      миграция на port_registry (с backward compat fallback).
     """
-    if not _ufw_is_active():
-        return
+    # v49: port_register — БЕЗУСЛОВНО; UFW-правило — только если UFW активен.
     proto = proto.lower()
+    ufw_on = _ufw_is_active()
     #  сначала port_registry.
     try:
         from chimera.modules.port_registry import (
@@ -522,17 +522,21 @@ def _ufw_open_port(proto: str, port_start: int, port_end: int) -> None:
         if port_start == port_end:
             port_register(SERVICE_MIERU, port_start, proto,
                           comment="Mieru", force=True)
-            ufw_open_port(port_start, proto, SERVICE_MIERU, comment="Mieru")
+            if ufw_on:
+                ufw_open_port(port_start, proto, SERVICE_MIERU, comment="Mieru")
         else:
             # Для range регистрируем каждый порт отдельно (для conflict detection).
             for p in range(port_start, port_end + 1):
                 port_register(SERVICE_MIERU, p, proto,
                               comment="Mieru range", force=True)
-            ufw_open_port_range(port_start, port_end, proto, SERVICE_MIERU,
-                                comment="Mieru range")
+            if ufw_on:
+                ufw_open_port_range(port_start, port_end, proto, SERVICE_MIERU,
+                                    comment="Mieru range")
         return
     except Exception:
         pass
+    if not ufw_on:
+        return
     if port_start == port_end:
         _run(["ufw", "allow", f"{port_start}/{proto}"], capture=True)
     else:
@@ -543,8 +547,8 @@ def _ufw_close_port(proto: str, port_start: int, port_end: int) -> None:
 
      миграция на port_registry (с backward compat).
     """
-    if not _ufw_is_active():
-        return
+    # v49: port_unregister — БЕЗУСЛОВНО (stale-записи после uninstall
+    # при неактивном UFW больше не остаются).
     proto = proto.lower()
     #  сначала port_registry.
     try:

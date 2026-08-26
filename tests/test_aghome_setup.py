@@ -433,6 +433,47 @@ class TestBuildSections(unittest.TestCase):
         self.assertIn("address: 127.0.0.1:3000",
                       self.mod.build_http_section(self.mod.AGH_WEB_LOOPBACK))
 
+    def test_http_section_custom_port_v49(self):
+        """v49: кастомный порт Web UI применяется во всех режимах."""
+        self.assertIn("address: 0.0.0.0:8081",
+                      self.mod.build_http_section(self.mod.AGH_WEB_HTTP_PUB, 8081))
+        self.assertIn("address: 0.0.0.0:8081",
+                      self.mod.build_http_section(self.mod.AGH_WEB_HTTPS_LE, 8081))
+        self.assertIn("address: 127.0.0.1:8081",
+                      self.mod.build_http_section(self.mod.AGH_WEB_LOOPBACK, 8081))
+        # дефолт не сломан
+        self.assertIn("address: 0.0.0.0:3000",
+                      self.mod.build_http_section(self.mod.AGH_WEB_HTTP_PUB))
+
+    def test_validate_web_port_v49(self):
+        """v49: валидация кастомного порта — диапазон/служебные/занятость."""
+        # привилегированные (<1024) отклоняются диапазоном —
+        # это покрывает и системные 22/53/80/443
+        for bad in (22, 53, 80, 443, 853):   # 853 тоже < 1024
+            ok, why = self.mod._validate_web_port(bad)
+            self.assertFalse(ok, f"{bad} должен быть запрещён")
+            self.assertIn("диапазон", why)
+        # служебные порты DNS-стека (>=1024) — отдельная блокировка
+        for bad in (5300, 30443):
+            ok, why = self.mod._validate_web_port(bad)
+            self.assertFalse(ok, f"{bad} должен быть запрещён")
+            self.assertIn("служебный", why)
+        # вне диапазона
+        ok, _ = self.mod._validate_web_port(70000)
+        self.assertFalse(ok)
+        # занят по реестру (port_is_free → конфликты)
+        import chimera.modules.port_registry as pr
+        with patch.object(pr, "port_is_free",
+                          return_value=(False, ["vless слушает :8081"])):
+            ok, why = self.mod._validate_web_port(8081)
+            self.assertFalse(ok)
+            self.assertIn("занят", why)
+            self.assertIn("8081", why)
+        # свободен
+        with patch.object(pr, "port_is_free", return_value=(True, [])):
+            ok, _ = self.mod._validate_web_port(8081)
+            self.assertTrue(ok)
+
     def test_filters_section_three_filters(self):
         s = self.mod.build_filters_section()
         self.assertIn("adguardteam.github.io/AdGuardSDNSFilter", s)
@@ -795,6 +836,83 @@ class TestWizardAccess(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 #  resolv_conf_fix — AGH-aware ветки
 # ─────────────────────────────────────────────────────────────────────────────
+class TestWebPortLifecycleV49(unittest.TestCase):
+    """v49: кастомный порт Web UI — открытие/смена/закрытие через
+    port_registry (register на установке, close+unregister на удалении,
+    при смене порта старый не течёт)."""
+
+    def setUp(self):
+        import chimera.modules.aghome_setup as ags
+        self.mod = ags
+
+    def test_register_custom_port_opens_ufw_public(self):
+        import chimera.modules.port_registry as pr
+        with patch.object(pr, "port_register", return_value=(True, "")) as reg, \
+             patch.object(pr, "ufw_open_port", return_value=(True, "")) as opn, \
+             patch.object(pr, "port_list_for_service", return_value=[]), \
+             patch.object(pr, "port_unregister", return_value=True), \
+             patch.object(self.mod, "ufw_close_quiet") as cq, \
+             patch.object(self.mod, "_core_module") as cm:
+            cm.return_value.info = MagicMock()
+            self.mod._register_aghome_ports(5300, True, True, web_port=8081)
+        reg_calls = [c for c in reg.call_args_list
+                     if c.args[:2] == (pr.SERVICE_AGHOME_WEB, 8081)]
+        self.assertEqual(len(reg_calls), 1)
+        opn.assert_any_call(8081, "tcp", pr.SERVICE_AGHOME_WEB,
+                            comment="AdGuard Home Web UI (HTTP)")
+        cq.assert_not_called()   # публичный режим — не закрываем
+
+    def test_register_custom_port_closes_ufw_tls_mode(self):
+        import chimera.modules.port_registry as pr
+        with patch.object(pr, "port_register", return_value=(True, "")), \
+             patch.object(pr, "ufw_open_port", return_value=(True, "")), \
+             patch.object(pr, "port_list_for_service", return_value=[]), \
+             patch.object(pr, "port_unregister"), \
+             patch.object(self.mod, "ufw_close_quiet") as cq, \
+             patch.object(self.mod, "_core_module") as cm:
+            cm.return_value.info = MagicMock()
+            self.mod._register_aghome_ports(5300, True, False, web_port=8081)
+        cq.assert_called_once_with(8081, "tcp", pr.SERVICE_AGHOME_WEB)
+
+    def test_register_port_change_closes_old(self):
+        """Смена порта: старый (3000) закрывается в UFW и реестре."""
+        import chimera.modules.port_registry as pr
+        with patch.object(pr, "port_register", return_value=(True, "")), \
+             patch.object(pr, "ufw_open_port", return_value=(True, "")), \
+             patch.object(pr, "ufw_close_port", return_value=(True, "")) as close, \
+             patch.object(pr, "port_list_for_service",
+                          return_value=[{"service": "aghome_web",
+                                         "port": 3000, "proto": "tcp"}]) as lst, \
+             patch.object(pr, "port_unregister", return_value=True) as unreg, \
+             patch.object(self.mod, "_core_module") as cm:
+            cm.return_value.info = MagicMock()
+            self.mod._register_aghome_ports(5300, True, True, web_port=8081)
+        lst.assert_called_with(pr.SERVICE_AGHOME_WEB)
+        close.assert_any_call(3000, "tcp", pr.SERVICE_AGHOME_WEB)
+        unreg.assert_any_call(pr.SERVICE_AGHOME_WEB, port=3000, proto="tcp")
+
+    def test_unregister_closes_custom_and_default(self):
+        """Удаление AGH: закрываются и кастомный порт (реестр/state), и 3000."""
+        import chimera.modules.port_registry as pr
+        st = {"web_port": 8081}
+        with patch.object(pr, "ufw_close_port", return_value=(True, "")) as close, \
+             patch.object(pr, "port_list_for_service",
+                          return_value=[{"service": "aghome_web",
+                                         "port": 8081, "proto": "tcp"}]), \
+             patch.object(pr, "port_unregister", return_value=True) as unreg, \
+             patch.object(self.mod, "aghome_state_load", return_value=st):
+            self.mod._unregister_aghome_ports()
+        close.assert_any_call(8081, "tcp", pr.SERVICE_AGHOME_WEB)
+        close.assert_any_call(3000, "tcp", pr.SERVICE_AGHOME_WEB)
+        unreg.assert_any_call(pr.SERVICE_AGHOME_WEB, port=8081, proto="tcp")
+        unreg.assert_any_call(pr.SERVICE_AGHOME_WEB, port=3000, proto="tcp")
+        # DNS/DoH/DoT/DoQ тоже закрыты
+        close.assert_any_call(53, "udp", pr.SERVICE_AGHOME)
+        close.assert_any_call(30443, "tcp", pr.SERVICE_AGHOME_DOH)
+        close.assert_any_call(853, "tcp", pr.SERVICE_AGHOME_DOT)
+        close.assert_any_call(853, "udp", pr.SERVICE_AGHOME_DOQ)
+
+
 class TestResolvConfAghAware(unittest.TestCase):
     def setUp(self):
         import importlib
@@ -1402,7 +1520,9 @@ class TestHeadlessWizard(unittest.TestCase):
             self.assertTrue(self.mod._complete_first_run_wizard(
                 self.mod.AGH_WEB_HTTP_PUB, "", True))
         ask.assert_called_once()
-        configure.assert_called_once_with("admin", "pw123456")
+        # v49: headless получает и кастомный порт Web UI (дефолт 3000)
+        configure.assert_called_once_with("admin", "pw123456",
+                                          web_port=self.mod.AGH_WEB_PORT)
         open_acc.assert_not_called()
         wait.assert_not_called()
         instr.assert_not_called()
@@ -1410,6 +1530,23 @@ class TestHeadlessWizard(unittest.TestCase):
         st = save.call_args[0][0]
         self.assertEqual(st["phase"], "wizard")
         self.assertEqual(st["wizard_ips"], ["0.0.0.0/0"])
+        self.assertEqual(st["web_port"], self.mod.AGH_WEB_PORT)
+
+    def test_complete_first_run_wizard_custom_port(self):
+        """v49: кастомный порт Web UI — в payload мастера и в state."""
+        with patch.object(self.mod, "_ask_headless_wizard", return_value=True), \
+             patch.object(self.mod, "_ask_admin_credentials",
+                          return_value=("admin", "pw123456")), \
+             patch.object(self.mod, "_wizard_configure_headless",
+                          return_value=True) as configure, \
+             patch.object(self.mod, "_open_wizard_access") as open_acc, \
+             patch.object(self.mod, "aghome_state_save") as save:
+            self.assertTrue(self.mod._complete_first_run_wizard(
+                self.mod.AGH_WEB_HTTP_PUB, "", True, web_port=8081))
+        configure.assert_called_once_with("admin", "pw123456", web_port=8081)
+        open_acc.assert_not_called()
+        st = save.call_args[0][0]
+        self.assertEqual(st["web_port"], 8081)
 
     def test_complete_first_run_wizard_falls_back_to_web(self):
         """Headless-провал → веб-мастер: :3000 открыт, инструкция, ожидание."""

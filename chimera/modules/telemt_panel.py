@@ -637,6 +637,17 @@ def _run_install() -> None:
     _box_bot()
     print()
 
+    # v49: loopback-бэкенд :8080 регистрируем в port_registry (паттерн
+    # b4_web/csqtt_web/web_panel — конфликт-детекция видит слушателя)
+    try:
+        from chimera.modules.port_registry import (
+            port_register, SERVICE_TELEMT_PANEL_WEB,
+        )
+        port_register(SERVICE_TELEMT_PANEL_WEB, PANEL_LISTEN_PORT, "tcp",
+                      comment="Telemt Panel backend (loopback)", force=True)
+    except Exception:
+        pass
+
     # ── 1. Системный пользователь + группа — ДО включения [server.api], иначе
     #      chgrp внутри ensure_api_enabled() бьёт мимо ещё не созданной группы.
     _create_system_user()

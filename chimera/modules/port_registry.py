@@ -129,6 +129,7 @@ SERVICE_TELEMT          = "telemt"
 SERVICE_TELEMT_MTPROTO  = "telemt_mtproto"
 SERVICE_TELEMT_IOS_FIX  = "telemt_ios_fix"
 SERVICE_TELEMT_PANEL_DIRECT = "telemt_panel_direct"
+SERVICE_TELEMT_PANEL_WEB   = "telemt_panel_web"   # Telemt Panel backend (loopback, 8080)
 SERVICE_FPTN            = "fptn"
 SERVICE_WDTT            = "wdtt"
 SERVICE_AWG_STANDALONE  = "awg_standalone"
@@ -141,12 +142,16 @@ SERVICE_WEBDAV_TUNNEL  = "webdav_tunnel"
 SERVICE_PORT_HOPPING   = "port_hopping"
 SERVICE_OLCRTC_MANAGER = "olcrtc_manager"
 SERVICE_B4_WEB         = "b4_web"          # b4 Web UI (loopback, 9700)
-SERVICE_B4_NGINX       = "b4_nginx"        # nginx front для b4 Web UI (TLS, 9743)
+# v49: значение = фактический service_tag, которым b4-модули (dpi_bypass.py,
+# youtube_b4.py) регистрируют nginx-front в panel_nginx_front (исторический
+# литерал; константа раньше расходилась с реальностью и нигде не использовалась).
+SERVICE_B4_NGINX       = "chimera-b4-nginx"   # nginx front для b4 Web UI (TLS, 9743)
 SERVICE_B4_DNS         = "b4_dns"          # b4 DNS TCP listener (0.0.0.0:5453)
 SERVICE_CSQTT          = "csqtt"           # CSQTT data-plane (UDP, 46000)
 SERVICE_CSQTT_WEB      = "csqtt_web"       # CSQTT Web Panel (loopback, 46002)
 SERVICE_CSQTT_NGINX    = "csqtt_nginx"     # nginx front для CSQTT Web Panel (TLS)
 # DNS-стек: dnscrypt-proxy (шифрованный upstream) + AdGuard Home (:53)
+SERVICE_HYBRID_ADDON   = "hybrid_addon"    # Mieru hybrid addon (mita перед Xray; tcp+udp)
 SERVICE_DNSCRYPT       = "dnscrypt"        # dnscrypt-proxy (loopback, 5300 — upstream для AGH)
 SERVICE_AGHOME         = "aghome"          # AdGuard Home DNS :53 (loopback+public bind)
 SERVICE_AGHOME_WEB     = "aghome_web"      # AdGuard Home Web UI (:3000)
