@@ -51,6 +51,12 @@ API:
   SERVICE_CSQTT           — CSQTT data-plane (UDP, 46000)
   SERVICE_CSQTT_WEB       — CSQTT Web Panel (loopback, 46002)
   SERVICE_CSQTT_NGINX     — nginx front для CSQTT Web Panel (TLS)
+  SERVICE_DNSCRYPT        — dnscrypt-proxy (loopback, 5300 — upstream для AGH)
+  SERVICE_AGHOME          — AdGuard Home DNS (:53, loopback+public bind)
+  SERVICE_AGHOME_WEB      — AdGuard Home Web UI (:3000)
+  SERVICE_AGHOME_DOH      — AdGuard Home DoH (:30443/tcp)
+  SERVICE_AGHOME_DOT      — AdGuard Home DoT (:853/tcp)
+  SERVICE_AGHOME_DOQ      — AdGuard Home DoQ (:853/udp)
 
 Паттерн использования (на примере нового сервиса):
   from chimera.modules.port_registry import (
@@ -140,6 +146,13 @@ SERVICE_B4_DNS         = "b4_dns"          # b4 DNS TCP listener (0.0.0.0:5453)
 SERVICE_CSQTT          = "csqtt"           # CSQTT data-plane (UDP, 46000)
 SERVICE_CSQTT_WEB      = "csqtt_web"       # CSQTT Web Panel (loopback, 46002)
 SERVICE_CSQTT_NGINX    = "csqtt_nginx"     # nginx front для CSQTT Web Panel (TLS)
+# DNS-стек: dnscrypt-proxy (шифрованный upstream) + AdGuard Home (:53)
+SERVICE_DNSCRYPT       = "dnscrypt"        # dnscrypt-proxy (loopback, 5300 — upstream для AGH)
+SERVICE_AGHOME         = "aghome"          # AdGuard Home DNS :53 (loopback+public bind)
+SERVICE_AGHOME_WEB     = "aghome_web"      # AdGuard Home Web UI (:3000)
+SERVICE_AGHOME_DOH     = "aghome_doh"      # AdGuard Home DoH (:30443/tcp)
+SERVICE_AGHOME_DOT     = "aghome_dot"      # AdGuard Home DoT (:853/tcp)
+SERVICE_AGHOME_DOQ     = "aghome_doq"      # AdGuard Home DoQ (:853/udp)
 
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────
