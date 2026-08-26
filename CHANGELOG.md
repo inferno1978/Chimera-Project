@@ -2,6 +2,74 @@
 
 ---
 
+## FIX(aghome): TLS-SELF-HEAL + ложный «:53 слушается» + Xray mode-B — 27 августа 2026 (v45)
+
+**Инцидент v45 (vds13195):** v44 встал, headless-мастер прошёл без
+браузера/туннелей, DNS-стек поднялся (AGH:53 → dnscrypt:5300), но
+финализация завершилась с тремя WARN: DoH/HTTPS :30443, DoT :853/tcp,
+DoQ :853/udp не слушаются; плюс «не удалось перегенерировать конфиг
+Xray: module 'chimera.modules.xray_install' has no attribute
+'generate_xray_config_chain_entry_multi'».
+
+**Причина 1 (TLS) — найдена в исходниках AGH (v0.107.62):** при ошибке
+загрузки сертификата AGH НЕ падает — internal/home/home.go
+(`newTLSManager` err → лог + `onConfigModified()`) + internal/home/
+tls.go:126 (`m.conf.Enabled = false`) молча ставят tls.enabled=false,
+ПЕРЕПИСЫВАЮТ yaml и продолжают служить plain DNS. Симптом: служба
+активна, :53 udp+tcp слушается, а TLS-портов нет. Модуль печатал
+голое WARN без диагноза.
+
+**Причина 2 (ложный :53):** `_port_listening(53)` матчит в выводе ss
+строку `127.0.0.53:53` — это systemd-resolved stub, а не AGH.
+«AGH: DNS слушает :53» могло быть истинным при НЕподнятом AGH; хуже —
+`aghome_dns_ready()` (условие «AGH владеет :53» для resolv_conf_fix /
+xray_install) давал ложный positive → redirect 53→5300 снимался при
+фактически мёртвом :53 → DNS black-hole (механика v41).
+
+**Причина 3 (Xray):** `_regenerate_xray_config()` в режиме B вызывал
+`xray_install.generate_xray_config_chain_entry_multi()` — генератор
+живёт в `chimera/modules/chain_nodes.py` (вынос из _core), в
+xray_install его нет → AttributeError, конфиг Xray (DNS → AGH:53)
+не пересоздавался ни при финализации, ни при удалении AGH.
+
+**Фикс 1 — TLS-SELF-HEAL (диагноз + починка вместо голого WARN):**
+- `_tls_ports_status()` — DoH/DoT/DoQ только по процессу AdGuardHome.
+- Финализация поллит TLS-порты до 12 с (AGH биндит их на 1–3 с позже
+  active), затем `_heal_tls_listeners()`:
+  1. `_agh_tls_journal_errors()` — точная причина из journalctl
+     (tls/certificate/private key + error/warn);
+  2. `_cert_pair_matches()` — openssl pubkey compare (x509 -pubkey vs
+     pkey -pubout); блокирует ТОЛЬКО при доказанном рассинхроне;
+  3. `_certs_readable_by_user()` — runuser/sudo от имени adguard;
+  4. починка: только права → chown файлов и каталога certs; пара
+     битая/файлы отсутствуют → self-signed fallback; локально ок →
+     рестарт (транзиент);
+  5. перезапись tls-секции в ЖИВОМ конфиге (AGH успел выставить
+     enabled:false) + restart + poll портов до 16 с.
+- `_prepare_tls_cert()` — превентивная проверка пары и прав ДО записи
+  yaml (fallback self-signed сразу, без цикла AGH-выключений).
+
+**Фикс 2 — proc-фильтр `_port_listening(port, proto, proc=)`:**
+- port=53: строки systemd-resolved (127.0.0.53/127.0.0.54, процесс
+  systemd-resolve) исключаются всегда;
+- proc="AdGuardHome" — проверка владельца по имени процесса во всех
+  AGH-точках: aghome_dns_ready, финализация (:53/tcp+udp, :3000,
+  :30443, :853), aghome_status, DNS-alive-лестница. resolv-фикс и
+  persist-скрипт уже были процесс-зависимыми — теперь и AGH-слой.
+
+**Фикс 3 — Xray mode-B:** вызов `chain_nodes.
+generate_xray_config_chain_entry_multi()` (getattr-guard),
+xhttp/reality — как прежде в xray_install. Путь state.json вынесен в
+`XRAY_STATE_FILE` (тестируемость).
+
+**Тесты:** +12 (resolved-stub игнор/владелец/чужой процесс/
+aghome_dns_ready, _tls_live_enabled parse, pair matches
+mismatch/ok/openssl-недоступен, heal: self-signed fallback + only-perms
+chown, xray: mode-B→chain_nodes / mode-A reality/xhttp, финализация
+вызывает heal при лежащих TLS-портах). Всего 86 зелёных.
+
+---
+
 ## FIX(aghome): DNS-ALIVE гарантия + HEADLESS-мастер — 26 августа 2026
 
 **Инцидент v44 (vds13195):** два каскадных отказа за одну сессию.

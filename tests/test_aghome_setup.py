@@ -1340,3 +1340,404 @@ class TestUninstallDnsAlive(unittest.TestCase):
                         "DNS-alive должен идти ПЕРЕД проверкой dnscrypt")
         self.assertLess(i_ensure, i_fetch,
                         "DNS-alive должен идти ПЕРЕД скачиванием")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  v45: ложный :53 (systemd-resolved stub) + proc-фильтр
+# ─────────────────────────────────────────────────────────────────────────────
+class TestPortListeningResolvedStub(unittest.TestCase):
+    """vds13195: _port_listening(53) матчила 127.0.0.53:53 (systemd-resolved)
+    → ложное «AGH владеет :53» → resolv-фикс снимал redirect → black-hole."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import chimera.modules.aghome_setup as ags
+        self.mod = ags
+
+    def _ss(self, lines):
+        patcher = patch.object(self.mod, "subprocess")
+        sub = patcher.start()
+        self.addCleanup(patcher.stop)
+        sub.run.return_value = MagicMock(returncode=0, stdout="\n".join(lines))
+        return sub
+
+    def test_resolved_stub_is_not_owner_of_53(self):
+        self._ss([
+            "udp UNCONN 0 0 127.0.0.53:53 0.0.0.0:* "
+            'users:(("systemd-resolve",pid=999))',
+            "tcp LISTEN 0 0 127.0.0.53:53 0.0.0.0:* "
+            'users:(("systemd-resolve",pid=999))',
+        ])
+        self.assertFalse(self.mod._port_listening(53, "udp"))
+        self.assertFalse(self.mod._port_listening(53, "tcp"))
+
+    def test_agh_owner_of_53_detected(self):
+        self._ss([
+            "udp UNCONN 0 0 127.0.0.53:53 0.0.0.0:* "
+            'users:(("systemd-resolve",pid=999))',
+            "udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
+            'users:(("AdGuardHome",pid=1))',
+        ])
+        self.assertTrue(self.mod._port_listening(53, "udp"))
+        self.assertTrue(self.mod._port_listening(53, "udp", proc="AdGuardHome"))
+
+    def test_proc_filter_excludes_foreign_owner(self):
+        """:53 слушает dnscrypt → proc=AdGuardHome обязан вернуть False."""
+        self._ss([
+            "udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
+            'users:(("dnscrypt-proxy",pid=7))',
+        ])
+        self.assertTrue(self.mod._port_listening(53, "udp"))
+        self.assertFalse(self.mod._port_listening(53, "udp", proc="AdGuardHome"))
+        self.assertTrue(self.mod._port_listening(53, "udp", proc="dnscrypt-proxy"))
+
+    def test_aghome_dns_ready_requires_agh_process(self):
+        """resolved-stub на :53 ≠ «AGH владеет :53» (критично для
+        resolv_conf_fix: ложный positive сносил redirect 53→5300)."""
+        def run_stub(cmd, **kw):
+            cmd_s = " ".join(cmd)
+            if "is-active" in cmd_s:
+                return MagicMock(returncode=0, stdout="active\n")
+            if cmd and cmd[0] == "ss":
+                return MagicMock(returncode=0, stdout=(
+                    "udp UNCONN 0 0 127.0.0.53:53 0.0.0.0:* "
+                    'users:(("systemd-resolve",pid=999))\n'
+                    "udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
+                    'users:(("dnscrypt-proxy",pid=7))\n'))
+            return MagicMock(returncode=0, stdout="")
+        with patch.object(self.mod, "subprocess") as sub:
+            sub.run.side_effect = run_stub
+            self.assertFalse(self.mod.aghome_dns_ready())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  v45: TLS-self-heal — tls-секция, диагностика, починка
+# ─────────────────────────────────────────────────────────────────────────────
+class TestTlsSelfHealV45(unittest.TestCase):
+    """AGH при битом сертификате молча ставит tls.enabled=false и живёт
+    на plain DNS (home.go: newTLSManager err → лог, не fatal). v45:
+    финализация диагностирует и чинит TLS-порты."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        import chimera.modules.aghome_setup as ags
+        importlib.reload(ags)
+        self.mod = ags
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(
+            self._tmpdir, ignore_errors=True))
+
+    def _core(self):
+        core = MagicMock()
+        core.info = core.warn = core.success = core.dim = (
+            lambda *a, **k: None)
+        core._box_top = core._box_row = core._box_sep = core._box_bottom = (
+            lambda *a, **k: None)
+        return core
+
+    def test_tls_live_enabled_parse(self):
+        self.assertTrue(self.mod._tls_live_enabled(
+            "tls:\n  enabled: true\n  port_https: 30443\n"))
+        self.assertFalse(self.mod._tls_live_enabled(
+            "tls:\n  enabled: false\n  port_https: 0\n"))
+        self.assertIsNone(self.mod._tls_live_enabled("http:\n  address: x\n"))
+        # секция закончилась — следующая top-level
+        self.assertTrue(self.mod._tls_live_enabled(
+            "tls:\n  enabled: true\nhttp:\n  address: x\n"))
+
+    def test_cert_pair_matches_definitive_mismatch(self):
+        """Оба pubkey получены и различаются → False (блокируем)."""
+        cert = self._tmpdir / "c.crt"
+        key = self._tmpdir / "c.key"
+        cert.write_text("x")
+        key.write_text("y")
+        with patch.object(self.mod, "subprocess") as sub:
+            sub.run.side_effect = [
+                MagicMock(returncode=0, stdout="-----BEGIN PUBLIC KEY-----\nAAA\n"),
+                MagicMock(returncode=0, stdout="-----BEGIN PUBLIC KEY-----\nBBB\n"),
+            ]
+            ok, why = self.mod._cert_pair_matches(cert, key)
+            self.assertFalse(ok)
+            self.assertIn("различаются", why)
+        with patch.object(self.mod, "subprocess") as sub:
+            pub = "-----BEGIN PUBLIC KEY-----\nAAA\n"
+            sub.run.side_effect = [
+                MagicMock(returncode=0, stdout=pub),
+                MagicMock(returncode=0, stdout=pub),
+            ]
+            ok, _ = self.mod._cert_pair_matches(cert, key)
+            self.assertTrue(ok)
+        # openssl недоступен → не блокируем (ok=True)
+        with patch.object(self.mod, "subprocess") as sub:
+            sub.run.side_effect = [
+                MagicMock(returncode=1, stdout=""),
+                MagicMock(returncode=1, stdout=""),
+            ]
+            ok, _ = self.mod._cert_pair_matches(cert, key)
+            self.assertTrue(ok)
+
+    def test_heal_tls_pair_mismatch_falls_back_selfsigned(self):
+        """Пара LE рассинхронена → self-signed fallback + перезапись
+        tls-секции в live-конфиге (AGH успел выставить enabled:false)."""
+        conf = self._tmpdir / "AdGuardHome.yaml"
+        conf.write_text(
+            "http:\n  address: 127.0.0.1:3000\n"
+            "tls:\n  enabled: false\n  port_https: 0\n"
+            "users:\n  - name: admin\n    password: $2a$10$hash\n")
+
+        bad_cert = self._tmpdir / "agh-tls.crt"
+        bad_key = self._tmpdir / "agh-tls.key"
+        bad_cert.write_text("cert")
+        bad_key.write_text("key")
+        ss_cert = self._tmpdir / "self.crt"
+        ss_key = self._tmpdir / "self.key"
+        ss_cert.write_text("ss-cert")
+        ss_key.write_text("ss-key")
+
+        with patch.object(self.mod, "_core_module",
+                          return_value=self._core()), \
+             patch.object(self.mod, "AGH_CONF", conf), \
+             patch.object(self.mod, "_agh_tls_journal_errors",
+                          return_value="tls_manager: initializing err=bad pair"), \
+             patch.object(self.mod, "_cert_pair_matches",
+                          return_value=(False, "pubkey различаются")), \
+             patch.object(self.mod, "_certs_readable_by_user",
+                          return_value=(True, "")), \
+             patch.object(self.mod, "_generate_self_signed_tls",
+                          return_value=(ss_cert, ss_key)) as gen_ss, \
+             patch.object(self.mod, "_wait_service",
+                          return_value=True), \
+             patch.object(self.mod, "_tls_ports_status",
+                          return_value={(30443, "tcp"): True,
+                                        (853, "tcp"): True,
+                                        (853, "udp"): True}), \
+             patch.object(self.mod, "subprocess") as sub:
+            sub.run.return_value = MagicMock(returncode=0, stdout="")
+            healed, cpath, kpath, msg = self.mod._heal_tls_listeners(
+                "chimeraprodcdn.online", "chimeraprodcdn.online",
+                bad_cert, bad_key)
+
+        self.assertTrue(healed, msg)
+        gen_ss.assert_called_once()
+        self.assertEqual(cpath, ss_cert)
+        text = conf.read_text()
+        self.assertIn("enabled: true", text)
+        self.assertIn(str(ss_cert), text)          # новая пара в yaml
+        self.assertIn("port_https: 30443", text)
+        # старые (битые) пути не должны остаться в tls-секции
+        tls_sec = text[text.find("tls:"):text.find("users:")]
+        self.assertNotIn(str(bad_cert), tls_sec)
+
+    def test_heal_tls_only_perms_fixes_ownership(self):
+        """Единственная проблема — права → chown, LE-пара сохраняется."""
+        conf = self._tmpdir / "AdGuardHome.yaml"
+        conf.write_text("tls:\n  enabled: false\n  port_https: 0\n")
+        cert = self._tmpdir / "agh-tls.crt"
+        key = self._tmpdir / "agh-tls.key"
+        cert.write_text("c")
+        key.write_text("k")
+
+        with patch.object(self.mod, "_core_module",
+                          return_value=self._core()), \
+             patch.object(self.mod, "AGH_CONF", conf), \
+             patch.object(self.mod, "_agh_tls_journal_errors",
+                          return_value=""), \
+             patch.object(self.mod, "_cert_pair_matches",
+                          return_value=(True, "")), \
+             patch.object(self.mod, "_certs_readable_by_user",
+                          return_value=(False, "runuser rc=1: Permission denied")), \
+             patch.object(self.mod, "_own_certs") as own, \
+             patch.object(self.mod, "_own_certs_dir") as ownd, \
+             patch.object(self.mod, "_generate_self_signed_tls") as gen_ss, \
+             patch.object(self.mod, "_wait_service",
+                          return_value=True), \
+             patch.object(self.mod, "_tls_ports_status",
+                          return_value={(30443, "tcp"): True,
+                                        (853, "tcp"): True,
+                                        (853, "udp"): True}), \
+             patch.object(self.mod, "subprocess") as sub:
+            sub.run.return_value = MagicMock(returncode=0, stdout="")
+            healed, cpath, kpath, msg = self.mod._heal_tls_listeners(
+                "chimeraprodcdn.online", "chimeraprodcdn.online",
+                cert, key)
+
+        self.assertTrue(healed, msg)
+        gen_ss.assert_not_called()          # LE-пара сохранена
+        own.assert_called_once()
+        ownd.assert_called_once()
+        self.assertEqual(cpath, cert)
+        self.assertIn("enabled: true", conf.read_text())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  v45: перегенерация Xray в режиме B — chain_nodes (не xray_install)
+# ─────────────────────────────────────────────────────────────────────────────
+class TestXrayRegenModeB(unittest.TestCase):
+    """vds13195: AttributeError «xray_install has no attribute
+    generate_xray_config_chain_entry_multi» — генератор живёт в chain_nodes."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        import chimera.modules.aghome_setup as ags
+        importlib.reload(ags)
+        self.mod = ags
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(
+            self._tmpdir, ignore_errors=True))
+        # фейковые chain_nodes / xray_install — без тяжёлых импортов
+        self._fake_cn = types.ModuleType("chimera.modules.chain_nodes")
+        self._fake_cn.generate_xray_config_chain_entry_multi = MagicMock()
+        self._fake_xi = types.ModuleType("chimera.modules.xray_install")
+        self._fake_xi.generate_xray_config = MagicMock()
+        self._fake_xi.generate_xray_config_xhttp = MagicMock()
+        import chimera.modules as cm_pkg
+        self._saved = tuple(sys.modules.get(k) for k in
+                            ("chimera.modules.chain_nodes",
+                             "chimera.modules.xray_install"))
+        sys.modules["chimera.modules.chain_nodes"] = self._fake_cn
+        sys.modules["chimera.modules.xray_install"] = self._fake_xi
+        cm_pkg.chain_nodes = self._fake_cn
+        cm_pkg.xray_install = self._fake_xi
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        import chimera.modules as cm_pkg
+        for key, mod in zip(("chimera.modules.chain_nodes",
+                             "chimera.modules.xray_install"), self._saved):
+            if mod is not None:
+                sys.modules[key] = mod
+            else:
+                sys.modules.pop(key, None)
+        for attr in ("chain_nodes", "xray_install"):
+            if hasattr(cm_pkg, attr):
+                delattr(cm_pkg, attr)
+
+    def _state(self, mode, protocol):
+        st = self._tmpdir / "state.json"
+        st.write_text(json.dumps(
+            {"protocol_mode": protocol, "install_mode": mode}))
+        return st
+
+    def test_mode_b_calls_chain_nodes(self):
+        core = MagicMock()
+        core.info = core.warn = lambda *a, **k: None
+        with patch.object(self.mod, "_core_module", return_value=core), \
+             patch.object(self.mod, "XRAY_STATE_FILE",
+                          self._state("B", "reality")), \
+             patch.object(self.mod, "_svc_is_active", return_value=True), \
+             patch.object(self.mod, "subprocess") as sub:
+            sub.run.return_value = MagicMock(returncode=0, stdout="")
+            self.assertTrue(self.mod._regenerate_xray_config())
+        self._fake_cn.generate_xray_config_chain_entry_multi.assert_called_once()
+        self._fake_xi.generate_xray_config.assert_not_called()
+        self._fake_xi.generate_xray_config_xhttp.assert_not_called()
+
+    def test_mode_a_reality_calls_standard_generator(self):
+        core = MagicMock()
+        core.info = core.warn = lambda *a, **k: None
+        with patch.object(self.mod, "_core_module", return_value=core), \
+             patch.object(self.mod, "XRAY_STATE_FILE",
+                          self._state("A", "reality")), \
+             patch.object(self.mod, "_svc_is_active", return_value=True), \
+             patch.object(self.mod, "subprocess") as sub:
+            sub.run.return_value = MagicMock(returncode=0, stdout="")
+            self.assertTrue(self.mod._regenerate_xray_config())
+        self._fake_xi.generate_xray_config.assert_called_once()
+        self._fake_cn.generate_xray_config_chain_entry_multi.assert_not_called()
+
+    def test_mode_a_xhttp_calls_xhttp_generator(self):
+        core = MagicMock()
+        core.info = core.warn = lambda *a, **k: None
+        with patch.object(self.mod, "_core_module", return_value=core), \
+             patch.object(self.mod, "XRAY_STATE_FILE",
+                          self._state("A", "xhttp")), \
+             patch.object(self.mod, "_svc_is_active", return_value=True), \
+             patch.object(self.mod, "subprocess") as sub:
+            sub.run.return_value = MagicMock(returncode=0, stdout="")
+            self.assertTrue(self.mod._regenerate_xray_config())
+        self._fake_xi.generate_xray_config_xhttp.assert_called_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  v45: финализация вызывает TLS-лечение, если порты не поднялись
+# ─────────────────────────────────────────────────────────────────────────────
+class TestFinalizeTlsHealInvocation(unittest.TestCase):
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        import chimera.modules.aghome_setup as ags
+        importlib.reload(ags)
+        self.mod = ags
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(
+            self._tmpdir, ignore_errors=True))
+
+    def test_finalize_heals_tls_when_ports_down(self):
+        """:53 у AGH, но TLS-порты не поднялись → _heal_tls_listeners."""
+        core = MagicMock()
+        core.info = core.warn = core.success = core.dim = (
+            lambda *a, **k: None)
+        core._box_top = core._box_row = core._box_sep = core._box_bottom = (
+            lambda *a, **k: None)
+        core.PARAM_DOMAIN = "chimeraprodcdn.online"
+
+        conf = self._tmpdir / "AdGuardHome.yaml"
+        conf.write_text(
+            "http:\n  address: 0.0.0.0:3000\n"
+            "dns:\n  port: 53\n"
+            "tls:\n  enabled: false\n"
+            "users:\n  - name: admin\n    password: $2a$10$bcrypt\n"
+            "schema_version: 29\n")
+        state_file = self._tmpdir / "aghome_state.json"
+        ss_cert = self._tmpdir / "self.crt"
+        ss_key = self._tmpdir / "self.key"
+        ss_cert.write_text("c")
+        ss_key.write_text("k")
+
+        def ss_listener(cmd, **kw):
+            cmd_s = " ".join(cmd)
+            out, rc = "", 0
+            if "is-active" in cmd_s:
+                out = "active"
+            elif "is-failed" in cmd_s:
+                out = "inactive"
+            elif cmd and cmd[0] == "ss":
+                # ТОЛЬКО :53 (AGH) — TLS-порты не поднялись
+                out = ("udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
+                       'users:(("AdGuardHome",pid=1))\n'
+                       "tcp LISTEN 0 0 127.0.0.1:53 0.0.0.0:* "
+                       'users:(("AdGuardHome",pid=1))\n')
+            return MagicMock(returncode=rc, stdout=out, stderr="")
+
+        with patch.object(self.mod, "_core_module", return_value=core), \
+             patch.object(self.mod, "AGH_CONF", conf), \
+             patch.object(self.mod, "AGH_STATE_FILE", state_file), \
+             patch.object(self.mod, "AGH_BACKUP_DIR", self._tmpdir / "bak"), \
+             patch.object(self.mod, "_prepare_tls_cert",
+                          return_value=(self._tmpdir / "le.crt",
+                                        self._tmpdir / "le.key")), \
+             patch.object(self.mod, "_get_dnscrypt_port", return_value=5300), \
+             patch.object(self.mod, "_get_public_ip", return_value="1.2.3.4"), \
+             patch.object(self.mod, "_register_aghome_ports"), \
+             patch.object(self.mod, "_regenerate_xray_config"), \
+             patch.object(self.mod, "_heal_tls_listeners",
+                          return_value=(True, ss_cert, ss_key,
+                                        "TLS-порты подняты")) as heal, \
+             patch("time.sleep", lambda s: None), \
+             patch.object(self.mod, "subprocess") as sub:
+            sub.run.side_effect = ss_listener
+            import chimera.modules.resolv_conf_fix as rcf
+            with patch.object(rcf, "fix_resolv_conf_to_localhost",
+                              return_value={"ok": True, "actions": [],
+                                            "warnings": [], "error": None}):
+                ok = self.mod.finalize_aghome_config(
+                    web_mode="https_le", domain="chimeraprodcdn.online")
+
+        self.assertTrue(ok)
+        heal.assert_called_once()
+        # после heal конфиг содержит self-signed пару (AGH успел
+        # переписать tls.enabled=false — финализация вернула секцию)
+        self.assertEqual(heal.call_args[0][:2],
+                         ("chimeraprodcdn.online", "chimeraprodcdn.online"))
