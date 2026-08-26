@@ -2,6 +2,56 @@
 
 ---
 
+## FIX(aghome): DNS-ALIVE гарантия + HEADLESS-мастер — 26 августа 2026
+
+**Инцидент v44 (<node-2>):** два каскадных отказа за одну сессию.
+
+**1. Удаление AGH убило системный DNS.** `uninstall_aghome()` вызывал
+`fix_resolv_conf_to_localhost(force=True)` и доверял ok:true — но
+ok:true ≠ работающий DNS: dnscrypt мог не слушаться в момент фикса,
+preflight падал, redirect не вставал, а uninstall завершался «успехом».
+Следующая установка не могла скачать бинарник («GitHub API недоступен»
+— DNS мёртв), ручное скачивание тоже требовало DNS.
+
+**2. Мастер невозможно пройти без SSH-туннеля.** UFW-доступ к :3000
+только с IP SSH-клиента + pub_ip: CGNAT/смена IP/прокси-цепочки
+браузера → «Failed to fetch» на POST /control/install/check_config
+(сетевой путь браузер→VPS), страница перестала открываться вовсе.
+
+**Фикс 1 — DNS-alive гарантия (во ВСЕХ фазах AGH):**
+- `_dns_probe_ok()` — фактический запрос к 127.0.0.1:53 (dig, fallback
+  getent). Любой DNS-ответ = путь жив; таймаут = мёртв.
+- `_ensure_system_dns_alive(reason)` — лестница восстановления с probe
+  после каждой ступени: resolv-фикс → рестарт AGH (если владеет :53) →
+  рестарт dnscrypt + прямые iptables redirect 53→порт dnscrypt
+  (ОБА протокола). Провал всех ступеней → красный бокс с командами.
+- Точки вызова: install шаг 0 (ДО скачивания — GitHub нужен живой DNS),
+  после провалов скачивания/миграции/старта службы, в цикле ожидания
+  мастера, после uninstall (проверка фактом вместо доверия ok:true),
+  в сбросе пароля.
+
+**Фикс 2 — мастер БЕЗ браузера и туннелей (headless, по умолчанию):**
+- `_wizard_configure_headless()` — POST /control/install/configure на
+  127.0.0.1:3000 (loopback — не зависит от UFW/туннелей/прокси), ровно
+  то же, что веб-мастер на шаге 5: yaml с users + bcrypt пишет сам AGH.
+- `_ask_admin_credentials()` — логин/пароль в TUI (getpass, дважды,
+  мин. 6 символов).
+- `_complete_first_run_wizard()` — общий путь install/reset-password:
+  headless (по умолчанию) → fallback веб-мастер.
+- Веб-fallback: `_open_wizard_access()` открывает :3000 для ВСЕХ
+  (v44-регресс per-IP правил), финализация закрывает;
+  `_ufw_clean_wizard_rules()` чистит и «Anywhere»-правила.
+
+**Тесты:** +20 (probe оба пути, лестница восстановления с прямым
+iptables udp+tcp, help-box при провале, repair в ожидании мастера,
+API POST url/method/payload/HTTP-error/conn-error, configure success/
+fail, credentials retry/EOF, headless default/fallback, uninstall
+verify, порядок шага 0). 3 старых wizard-теста обновлены на контракт
+«открыто для всех».
+
+---
+
+
 ## FIX(dns): tcp-only redirect 53→5300 больше не считается «активным» — 26 августа 2026
 
 **Инцидент на живом сервере (<node-2>):** после
