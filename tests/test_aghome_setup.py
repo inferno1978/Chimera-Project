@@ -11,7 +11,10 @@ Unit-тесты для AdGuard Home стека Chimera:
   6. migrate_dnscrypt_off_53 — снятие :53 у dnscrypt
   7. resolv_conf_fix AGH-aware — diagnose/фикс при живом AGH
   8. aghome_dns_ready / is_aghome_active — хелперы состояния
-  9. wizard-доступ: UFW-правила (ssh_ip + pub_ip) и URL из адреса сервера
+  9. wizard-доступ: UFW «для всех» + URL из адреса сервера (v44 — без туннелей)
+  10. DNS-ALIVE гарантия: probe dig/getent + лестница восстановления (v44)
+  11. HEADLESS-мастер: POST /control/install/configure на loopback (v44)
+  12. uninstall: DNS проверяется фактическим запросом после удаления (v44)
 """
 from __future__ import annotations
 
@@ -580,54 +583,61 @@ class TestWizardAccess(unittest.TestCase):
                         "--                         ------      ----\n"
                         "3000/tcp                   ALLOW       203.0.113.103  # chimera-aghome-wizard-temp\n"
                         "3000/tcp                   ALLOW       203.0.113.7     # chimera-aghome-wizard-temp\n"
+                        "3000/tcp                   ALLOW       Anywhere       # chimera-aghome-wizard-temp\n"
                         "22/tcp                     ALLOW       Anywhere\n"))
                 return MagicMock(returncode=0, stdout="Rule deleted\n")
 
             sub.run.side_effect = run_side
             removed = self.mod._ufw_clean_wizard_rules()
+        # per-IP (legacy) + правило «для всех» (v44)
         self.assertEqual(sorted(removed),
-                         ["203.0.113.103", "203.0.113.7"])
+                         ["0.0.0.0/0", "203.0.113.103", "203.0.113.7"])
         deletes = [c for c in calls if c.startswith("ufw delete")]
-        self.assertEqual(len(deletes), 2)
+        self.assertEqual(len(deletes), 3)
+        self.assertIn("ufw delete allow 3000/tcp", deletes)
         # посторонние правила (22/tcp ALLOW Anywhere) не тронуты
 
-    def test_open_wizard_access_ssh_and_public(self):
-        # Прямой SSH (домашний IP) + hairpin через VLESS (IP VPS) — оба правила
-        with patch.object(self.mod, "_get_public_ip",
-                          return_value="203.0.113.103"), \
-             patch.object(self.mod, "_ufw_clean_wizard_rules",
-                          return_value=[]), \
-             patch.object(self.mod, "_ufw_allow_from_ip",
-                          side_effect=lambda ip, port: True) as allow:
+    def test_open_wizard_access_opens_port_for_all(self):
+        # v44: доступ «для всех» — без туннелей, CGNAT и смены IP не страшны
+        with patch.object(self.mod, "_ufw_clean_wizard_rules",
+                          return_value=[]) as clean, \
+             patch.object(self.mod, "_ufw_allow_port_all",
+                          side_effect=lambda port: True) as allow:
             opened = self.mod._open_wizard_access("203.0.113.7")
-        self.assertEqual(opened, ["203.0.113.7", "203.0.113.103"])
-        self.assertEqual(allow.call_count, 2)
-
-    def test_open_wizard_access_dedup_when_ssh_via_tunnel(self):
-        # SSH через VLESS-туннель на этой же VPS: ssh_ip == pub_ip → одно правило
-        with patch.object(self.mod, "_get_public_ip",
-                          return_value="203.0.113.103"), \
-             patch.object(self.mod, "_ufw_clean_wizard_rules",
-                          return_value=[]), \
-             patch.object(self.mod, "_ufw_allow_from_ip",
-                          side_effect=lambda ip, port: True) as allow:
-            opened = self.mod._open_wizard_access("203.0.113.103")
-        self.assertEqual(opened, ["203.0.113.103"])
+        self.assertEqual(opened, ["0.0.0.0/0"])
         self.assertEqual(allow.call_count, 1)
+        allow.assert_called_once_with(self.mod.AGH_WEB_PORT)
+        clean.assert_called_once()
+
+    def test_open_wizard_access_empty_when_ufw_unavailable(self):
+        with patch.object(self.mod, "_ufw_clean_wizard_rules",
+                          return_value=[]), \
+             patch.object(self.mod, "_ufw_allow_port_all",
+                          return_value=False):
+            opened = self.mod._open_wizard_access("203.0.113.7")
+        self.assertEqual(opened, [])
 
     def test_open_wizard_access_cleans_old_rules_first(self):
         order = []
-        with patch.object(self.mod, "_get_public_ip",
-                          return_value="203.0.113.103"), \
-             patch.object(self.mod, "_ufw_clean_wizard_rules",
+        with patch.object(self.mod, "_ufw_clean_wizard_rules",
                           side_effect=lambda *a, **kw: order.append("clean")), \
-             patch.object(self.mod, "_ufw_allow_from_ip",
-                          side_effect=lambda ip, port:
-                              order.append("allow:" + ip) or True):
+             patch.object(self.mod, "_ufw_allow_port_all",
+                          side_effect=lambda port:
+                              order.append("allow-all") or True):
             self.mod._open_wizard_access("203.0.113.7")
-        self.assertEqual(order[0], "clean")
-        self.assertIn("allow:203.0.113.7", order)
-        self.assertIn("allow:203.0.113.103", order)
+        self.assertEqual(order, ["clean", "allow-all"])
+
+    def test_ufw_allow_port_all_command(self):
+        calls = []
+        with patch.object(self.mod.shutil, "which",
+                          return_value="/usr/sbin/ufw"), \
+             patch.object(self.mod.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=0)
+            self.assertTrue(self.mod._ufw_allow_port_all(3000))
+            cmd = run.call_args[0][0]
+            self.assertEqual(
+                cmd, ["ufw", "allow", "3000/tcp", "comment",
+                      "chimera-aghome-wizard-temp"])
 
     def test_wizard_url_never_uses_ssh_client_ip(self):
         """Source-guard: URL мастера — только из адреса сервера."""
@@ -994,3 +1004,339 @@ schema_version: 29
              patch.object(self.mod, "AGH_STATE_FILE", self.state_file):
             ok = self.mod.finalize_aghome_config()
         self.assertFalse(ok)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  v44: DNS-ALIVE гарантия — фактический probe + авто-восстановление
+# ─────────────────────────────────────────────────────────────────────────────
+class TestDnsAliveGuarantee(unittest.TestCase):
+    """Инцидент v44 (<node-2>): удаление AGH / провал скачивания
+    оставляли систему с мёртвым DNS (GitHub «недоступен», повторная
+    установка невозможна). ok:true фикса ≠ живой DNS — проверяем
+    фактическим запросом и чиним лестницей: resolv-фикс → рестарт
+    AGH → прямые iptables (оба протокола).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        import chimera.modules.aghome_setup as ags
+        importlib.reload(ags)
+        self.mod = ags
+
+    def test_probe_ok_dig(self):
+        with patch.object(self.mod.shutil, "which",
+                          return_value="/usr/bin/dig"), \
+             patch.object(self.mod.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=0)
+            self.assertTrue(self.mod._dns_probe_ok())
+            cmd = run.call_args[0][0]
+            self.assertEqual(cmd[:3], ["dig", "@127.0.0.1", "github.com"])
+            self.assertIn("+tries=1", cmd)
+
+    def test_probe_dead_dig_rc9(self):
+        with patch.object(self.mod.shutil, "which",
+                          return_value="/usr/bin/dig"), \
+             patch.object(self.mod.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=9)  # no reply
+            self.assertFalse(self.mod._dns_probe_ok())
+
+    def test_probe_falls_back_to_getent(self):
+        with patch.object(self.mod.shutil, "which", return_value=None), \
+             patch.object(self.mod.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=2)  # not found
+            self.assertFalse(self.mod._dns_probe_ok())
+            cmd = run.call_args[0][0]
+            self.assertEqual(cmd[:2], ["getent", "hosts"])
+
+    def test_ensure_no_action_when_alive(self):
+        with patch.object(self.mod, "_dns_probe_ok", return_value=True), \
+             patch.object(self.mod, "_emergency_restore_dnscrypt_redirect") as em:
+            self.assertTrue(self.mod._ensure_system_dns_alive())
+            em.assert_not_called()
+
+    def test_ensure_repairs_with_resolv_fix(self):
+        calls = {"fix": 0}
+
+        def fake_fix(force=False):
+            calls["fix"] += 1
+            return {"ok": True}
+
+        # probe: мёртв → (после фикса) жив
+        with patch.object(self.mod, "_dns_probe_ok",
+                          side_effect=[False, True]), \
+             patch("chimera.modules.resolv_conf_fix."
+                   "fix_resolv_conf_to_localhost",
+                   side_effect=fake_fix):
+            self.assertTrue(self.mod._ensure_system_dns_alive("тест"))
+        self.assertEqual(calls["fix"], 1)
+
+    def test_ensure_direct_iptables_both_protos(self):
+        """resolv-фикс недоступен → прямые iptables udp+tcp на порт dnscrypt."""
+        ipt = []
+
+        def run_side(cmd, **kw):
+            ipt.append(" ".join(cmd))
+            return MagicMock(returncode=0, stdout="")
+
+        # probe: мёртв → мёртв → жив; AGH не активен; dnscrypt не активен
+        with patch.object(self.mod, "_dns_probe_ok",
+                          side_effect=[False, False, True]), \
+             patch("chimera.modules.resolv_conf_fix."
+                   "fix_resolv_conf_to_localhost",
+                   side_effect=ImportError("модуль недоступен")), \
+             patch.object(self.mod, "_svc_is_active", return_value=False), \
+             patch.object(self.mod, "_wait_service", return_value=True), \
+             patch.object(self.mod, "_get_dnscrypt_port", return_value=5300), \
+             patch.object(self.mod.subprocess, "run", side_effect=run_side):
+            self.assertTrue(self.mod._ensure_system_dns_alive())
+
+        adds = [c for c in ipt if "-A OUTPUT" in c and "REDIRECT" in c]
+        self.assertEqual(len(adds), 2, msg=str(ipt))
+        self.assertTrue(any("-p udp" in a for a in adds))
+        self.assertTrue(any("-p tcp" in a for a in adds))
+        self.assertTrue(all("--to-ports 5300" in a for a in adds))
+
+    def test_ensure_failed_shows_help_box(self):
+        """Все ступени провалились → красный бокс + False."""
+        with patch.object(self.mod, "_dns_probe_ok", return_value=False), \
+             patch("chimera.modules.resolv_conf_fix."
+                   "fix_resolv_conf_to_localhost",
+                   side_effect=ImportError("нет")), \
+             patch.object(self.mod, "_svc_is_active", return_value=False), \
+             patch.object(self.mod, "_get_dnscrypt_port", return_value=5300), \
+             patch.object(self.mod.subprocess, "run",
+                          return_value=MagicMock(returncode=0)), \
+             patch.object(self.mod, "_dns_blackhole_help_box") as box:
+            self.assertFalse(self.mod._ensure_system_dns_alive())
+        box.assert_called_once()
+
+    def test_wait_wizard_repairs_dns(self):
+        """Во время ожидания мастера DNS умер → _ensure_system_dns_alive."""
+        with patch.object(self.mod, "AGH_CONF") as conf, \
+             patch.object(self.mod, "_dns_probe_ok", return_value=False), \
+             patch.object(self.mod, "_ensure_system_dns_alive") as ensure, \
+             patch.object(self.mod, "_svc_is_active", return_value=False), \
+             patch.object(self.mod.time, "monotonic",
+                          side_effect=[0, 1]), \
+             patch.object(self.mod.time, "sleep", lambda s: None):
+            conf.exists.return_value = False
+            self.assertFalse(self.mod._wait_wizard_completed(300))
+        ensure.assert_called_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  v44: HEADLESS-мастер — API loopback, без браузера и туннелей
+# ─────────────────────────────────────────────────────────────────────────────
+class TestHeadlessWizard(unittest.TestCase):
+    """Браузерный POST /control/install/check_config падал «Failed to
+    fetch» (сетевой путь браузер→VPS). Headless: те же endpoints на
+    loopback — не зависят от UFW/туннелей/прокси клиента.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        import chimera.modules.aghome_setup as ags
+        importlib.reload(ags)
+        self.mod = ags
+
+    def test_api_post_url_method_payload(self):
+        import urllib.request
+
+        captured = {}
+
+        class FakeResp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=0):
+            captured["url"] = req.full_url
+            captured["data"] = json.loads(req.data.decode())
+            captured["method"] = req.get_method()
+            return FakeResp()
+
+        with patch.object(urllib.request, "urlopen",
+                          side_effect=fake_urlopen):
+            ok, err = self.mod._agh_install_api_post(
+                "/control/install/configure", {"username": "admin"})
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+        self.assertEqual(
+            captured["url"],
+            "http://127.0.0.1:3000/control/install/configure")
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["data"]["username"], "admin")
+
+    def test_api_post_http_error(self):
+        import urllib.error
+        import urllib.request
+
+        def fake_urlopen(req, timeout=0):
+            raise urllib.error.HTTPError(
+                req.full_url, 500, "boom", {}, None)
+
+        with patch.object(urllib.request, "urlopen",
+                          side_effect=fake_urlopen):
+            ok, err = self.mod._agh_install_api_post("/x", {})
+        self.assertFalse(ok)
+        self.assertIn("500", err)
+
+    def test_api_post_connection_error(self):
+        import urllib.request
+
+        with patch.object(urllib.request, "urlopen",
+                          side_effect=OSError("conn refused")):
+            ok, err = self.mod._agh_install_api_post("/x", {})
+        self.assertFalse(ok)
+        self.assertIn("conn refused", err)
+
+    def test_configure_headless_success(self):
+        with patch.object(self.mod, "_agh_install_api_post",
+                          return_value=(True, None)) as api, \
+             patch.object(self.mod, "AGH_CONF") as conf, \
+             patch.object(self.mod.time, "sleep", lambda s: None):
+            conf.exists.return_value = True
+            conf.read_text.return_value = "users:\n- name: admin\n  password: $2a$10$x\n"
+            self.assertTrue(
+                self.mod._wizard_configure_headless("admin", "pw123456"))
+        # два вызова: check_config + configure
+        self.assertEqual(api.call_count, 2)
+        paths = [c.args[0] for c in api.call_args_list]
+        self.assertEqual(paths, ["/control/install/check_config",
+                                 "/control/install/configure"])
+        payload = api.call_args_list[1].args[1]
+        self.assertEqual(payload["username"], "admin")
+        self.assertEqual(payload["password"], "pw123456")
+        self.assertEqual(payload["dns"], {"ip": "127.0.0.1", "port": 53})
+        self.assertEqual(payload["web"], {"ip": "0.0.0.0", "port": 3000})
+
+    def test_configure_headless_configure_fail(self):
+        with patch.object(self.mod, "_agh_install_api_post",
+                          return_value=(False, "HTTP 400: bad")):
+            self.assertFalse(
+                self.mod._wizard_configure_headless("admin", "pw123456"))
+
+    def test_ask_admin_credentials_retry_mismatch(self):
+        with patch("builtins.input", return_value="admin"), \
+             patch("getpass.getpass",
+                   side_effect=["short", "longpassword1",
+                                "longpassword2",
+                                "longpassword2", "longpassword2"]) as gp:
+            creds = self.mod._ask_admin_credentials()
+        self.assertEqual(creds, ("admin", "longpassword2"))
+        # короткий + несовпадение (оба пароля заново) + успешная пара
+        self.assertEqual(gp.call_count, 5)
+
+    def test_ask_admin_credentials_eof_returns_none(self):
+        with patch("builtins.input", side_effect=EOFError):
+            self.assertIsNone(self.mod._ask_admin_credentials())
+
+    def test_ask_headless_wizard_default(self):
+        with patch("builtins.input", return_value=""):
+            self.assertTrue(self.mod._ask_headless_wizard())
+        with patch("builtins.input", return_value="2"):
+            self.assertFalse(self.mod._ask_headless_wizard())
+
+    def test_complete_first_run_wizard_headless(self):
+        """Headless-путь: configure → True; UFW/веб-ожидание не нужны."""
+        with patch.object(self.mod, "_ask_headless_wizard", return_value=True), \
+             patch.object(self.mod, "_ask_admin_credentials",
+                          return_value=("admin", "pw123456")) as ask, \
+             patch.object(self.mod, "_wizard_configure_headless",
+                          return_value=True) as configure, \
+             patch.object(self.mod, "_open_wizard_access") as open_acc, \
+             patch.object(self.mod, "_wait_wizard_completed") as wait, \
+             patch.object(self.mod, "_print_wizard_instructions") as instr, \
+             patch.object(self.mod, "aghome_state_save") as save:
+            self.assertTrue(self.mod._complete_first_run_wizard(
+                self.mod.AGH_WEB_HTTP_PUB, "", True))
+        ask.assert_called_once()
+        configure.assert_called_once_with("admin", "pw123456")
+        open_acc.assert_not_called()
+        wait.assert_not_called()
+        instr.assert_not_called()
+        save.assert_called_once()
+        st = save.call_args[0][0]
+        self.assertEqual(st["phase"], "wizard")
+        self.assertEqual(st["wizard_ips"], ["0.0.0.0/0"])
+
+    def test_complete_first_run_wizard_falls_back_to_web(self):
+        """Headless-провал → веб-мастер: :3000 открыт, инструкция, ожидание."""
+        with patch.object(self.mod, "_ask_headless_wizard", return_value=True), \
+             patch.object(self.mod, "_ask_admin_credentials",
+                          return_value=("admin", "pw123456")), \
+             patch.object(self.mod, "_wizard_configure_headless",
+                          return_value=False), \
+             patch.object(self.mod, "_open_wizard_access",
+                          return_value=["0.0.0.0/0"]) as open_acc, \
+             patch.object(self.mod, "_print_wizard_instructions") as instr, \
+             patch.object(self.mod, "_wait_wizard_completed",
+                          return_value=True) as wait:
+            self.assertTrue(self.mod._complete_first_run_wizard(
+                self.mod.AGH_WEB_HTTP_PUB, "", True))
+        open_acc.assert_called_once()
+        instr.assert_called_once()
+        wait.assert_called_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  v44: uninstall — DNS проверяется фактическим запросом после удаления
+# ─────────────────────────────────────────────────────────────────────────────
+class TestUninstallDnsAlive(unittest.TestCase):
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        import chimera.modules.aghome_setup as ags
+        importlib.reload(ags)
+        self.mod = ags
+
+    def test_uninstall_verifies_dns_alive(self):
+        with patch.object(self.mod, "is_aghome_installed",
+                          return_value=True), \
+             patch.object(self.mod, "AGH_SERVICE_UNIT") as unit, \
+             patch.object(self.mod, "AGH_BIN") as aghbin, \
+             patch.object(self.mod, "AGH_WORK_DIR") as workdir, \
+             patch.object(self.mod, "AGH_STATE_FILE") as statef, \
+             patch.object(self.mod, "AGH_BACKUP_DIR") as backup_dir, \
+             patch.object(self.mod.subprocess, "run",
+                          MagicMock(returncode=0)), \
+             patch.object(self.mod.shutil, "rmtree"), \
+             patch.object(self.mod, "_remove_certbot_deploy_hook"), \
+             patch.object(self.mod, "_ufw_clean_wizard_rules"), \
+             patch.object(self.mod, "_unregister_aghome_ports"), \
+             patch.object(self.mod, "_regenerate_xray_config"), \
+             patch.object(self.mod, "aghome_state_save"), \
+             patch("chimera.modules.resolv_conf_fix."
+                   "fix_resolv_conf_to_localhost",
+                   return_value={"ok": True}), \
+             patch.object(self.mod, "_ensure_system_dns_alive",
+                          return_value=True) as ensure:
+            unit.exists.return_value = True
+            aghbin.unlink = MagicMock()
+            workdir.exists.return_value = False
+            statef.unlink = MagicMock()
+            backup_dir.mkdir = MagicMock()
+            self.assertTrue(self.mod.uninstall_aghome())
+        ensure.assert_called_once()
+
+    def test_install_calls_dns_alive_before_download(self):
+        """Шаг 0: DNS-alive проверяется ДО скачивания (v44)."""
+        import re as _re
+        src = (_PROJECT_ROOT / "chimera" / "modules" /
+               "aghome_setup.py").read_text(encoding="utf-8")
+        m = _re.search(r"def install_aghome.*?(?=\ndef )", src, _re.DOTALL)
+        body = m.group(0)
+        i_ensure = body.find('_ensure_system_dns_alive("перед установкой AGH")')
+        i_dnscrypt = body.find('_svc_is_active("dnscrypt-proxy")')
+        i_fetch = body.find("fetch_package(AGHOME_SPEC")
+        self.assertGreater(i_ensure, 0)
+        self.assertLess(i_ensure, i_dnscrypt,
+                        "DNS-alive должен идти ПЕРЕД проверкой dnscrypt")
+        self.assertLess(i_ensure, i_fetch,
+                        "DNS-alive должен идти ПЕРЕД скачиванием")
