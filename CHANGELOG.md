@@ -2,6 +2,41 @@
 
 ---
 
+## docs(aghome): AGH_FAQ.md — детальный FAQ по AdGuard Home в Chimera — 27 августа 2026 (v50)
+
+Новый `docs/faq/AGH_FAQ.md` (21 раздел, ~1400 строк) в формате
+существующих FAQ репозитория. Без истории багфиксов — только
+проекция «как устроено и как пользоваться»:
+
+- зачем введён AGH (проблемы однослойного DNSCrypt, сравнение с
+  Pi-hole/Blocky/unbound, происхождение от роутерного скрипта);
+- архитектура связки Xray + AGH + DNSCrypt (схема, разделение ролей,
+  порядок запуска systemd, юнит от пользователя adguard);
+- что даёт установка: фильтрация, кеш 4MB optimistic, Web UI,
+  публичные DoH/DoT/DoQ, DNSSEC, anti-abuse;
+- честные плюсы и минусы связки (латентность промаха, +1 точка
+  отказа, false positives фильтров, query log 90 дней, RAM, порты
+  видны сканерам) с указанием компенсаций Chimera;
+- установка по шагам: DNS-alive probe, зеркала, миграция dnscrypt
+  с :53 с нулевым даунтаймом, headless-мастер и веб-fallback;
+- режимы Web UI и кастомный порт (v49): таблица режимов, правила
+  валидации, «почему TLS-порт :30443 один на всё»;
+- финализация: таблица заменяемых секций, конвейер из 9 шагов,
+  лестница self-heal, идемпотентность;
+- разбор каждого параметра канонической dns-секции (upstream/
+  bootstrap/fallback, кеш, ratelimit, refuse_any, DNSSEC, querylog);
+- фильтры (AdGuard DNS + AdAway + OISD Big), user_rules, обновление;
+- полная карта портов с тегами port_registry и сценариями
+  open/close при установке/удалении;
+- клиенты (glibc/Xray/внешние DoH-DoT-DoQ), надёжность DNS
+  (watchdog, persist AGH-aware, probe фактом), сертификаты (LE +
+  certbot hook, self-signed), удаление/сброс пароля/переприменение,
+  меню Сеть → A, диагностика, шпаргалка команд.
+
+Кросс-ссылки: README (таблица FAQ), DNSCRYPT_FAQ.md (Ссылки).
+
+---
+
 ## FEAT(aghome)+FIX(ports): кастомный порт Web UI + тотальный аудит port_registry — 27 августа 2026 (v49)
 
 ### Фича: кастомный порт Web UI AdGuard Home
