@@ -19,8 +19,10 @@ chimera/modules/turn_mirrors.py
   нет ни подсказки, ни второго зеркала, ни шанса положить файл через WinSCP.
 
 РЕШЕНИЕ (по аналогии с geo_mirrors.py / mieru_mirrors.py):
-  1. Реестр зеркал: jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub +
-     7 GitHub-прокси + Statically CDN — итого до 14 URL на файл.
+  1. Реестр зеркал: jsDelivr CDN (4 бэкенда) + release GitHub +
+     3 GitHub-прокси — итого до 8 URL на файл.
+     (raw/Statically отключены — нет ветки "latest";
+     2026-08-21 мёртвые gh-proxy вычищены — было 7, осталось 3 рабочих.)
   2. MANUAL_UPLOAD_PATHS: /root/ (рекомендуется, WinSCP-friendly),
      /usr/local/bin/, /opt/vk-turn-proxy/, /opt/turnable/.
   3. turntunnel.py / turnable.py используют fetch_package() из
@@ -87,7 +89,7 @@ def get_turntunnel_mirrors() -> list[str]:
       1. jsDelivr CDN family (4 бэкенда)
       2. raw.githubusercontent.com (HEAD default branch)
       3. github.com/.../releases/latest/download/
-      4. 7 GitHub-прокси
+      4. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc)
       5. Statically CDN
     """
     return build_mirror_urls(
@@ -116,7 +118,7 @@ def get_turnable_mirrors(version: str) -> list[str]:
       2. raw.githubusercontent.com (branch {version} — обычно 404, но
          дёшево попробовать)
       3. github.com/.../releases/download/{version}/...
-      4. 7 GitHub-прокси — /releases/download/{version}/...
+      4. 3 GitHub-прокси — /releases/download/{version}/...
       5. Statically CDN — /gh/.../.../{version}/...
     """
     return build_mirror_urls(
@@ -136,7 +138,7 @@ def get_turnable_mirrors(version: str) -> list[str]:
 # ============================================================================
 
 # Количество зеркал на каждый файл — вычисляется через build_mirror_urls.
-# Используется для отображения в TUI ("14 зеркал в fallback").
+# Используется для отображения в TUI ("8 зеркал в fallback").
 # Ленивая инициализация (не дёргаем _is_amd64 на module-load).
 TURNTUNNEL_MIRRORS_COUNT: int = len(get_turntunnel_mirrors())
 TURNABLE_MIRRORS_COUNT: int = len(get_turnable_mirrors("0.4.1"))

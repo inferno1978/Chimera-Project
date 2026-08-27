@@ -13,8 +13,9 @@ chimera/modules/webdav_mirrors.py
   urlretrieve() выбрасывает исключение, вся сборка webdav-tunnel падает.
 
 РЕШЕНИЕ (по аналогии с wdtt_mirrors.py):
-  1. Реестр зеркал: прямой GitHub + codeload.github.com + 7 GitHub-прокси.
-     Итого 9 URL на архив.
+  1. Реестр зеркал: прямой GitHub + codeload.github.com + 3 GitHub-прокси.
+     Итого 5 URL на архив.
+     (2026-08-21: мёртвые gh-proxy вычищены — было 7, осталось 3 рабочих.)
   2. fetch_package(WEBDAV_SOURCE_SPEC) из webdav_packages.py перебирает
      зеркала по очереди и проверяет /root/ для ручного размещения.
   3. При тотальном провале fetch_package() вызывает print_manual_hint() из
@@ -67,7 +68,7 @@ def get_webdav_source_mirrors() -> list[str]:
          https://github.com/spkprsnts/webdav-tunnel/archive/refs/heads/main.tar.gz
       2. Codeload:
          https://codeload.github.com/spkprsnts/webdav-tunnel/tar.gz/refs/heads/main
-      3. 7 GitHub-прокси.
+      3. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc).
     """
     return build_source_archive_mirror_urls(
         owner=_WEBDAV_OWNER,
@@ -76,7 +77,7 @@ def get_webdav_source_mirrors() -> list[str]:
     )
 
 
-# Количество зеркал — 1 прямой + 1 codeload + 7 прокси = 9 URL.
+# Количество зеркал — 1 прямой + 1 codeload + 3 прокси = 5 URL.
 WEBDAV_SOURCE_MIRRORS_COUNT: int = len(get_webdav_source_mirrors())
 
 

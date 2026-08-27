@@ -14,8 +14,9 @@ chimera/modules/naiveproxy_mirrors.py
 
 РЕШЕНИЕ (по аналогии с turn_mirrors.py / hysteria2_mirrors.py):
   1. Реестр зеркал через github_mirrors.build_mirror_urls():
-     jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub + 7 gh-proxy +
-     Statically — итого до 14 URL.
+     jsDelivr CDN (4 бэкенда) + release GitHub + 3 gh-proxy —
+     итого 8 URL. (raw/Statically отключены: только release-assets;
+     2026-08-21 мёртвые gh-proxy вычищены — было 7, осталось 3 рабочих.)
   2. fetch_package(NAIVEPROXY_SPEC) из naiveproxy_packages.py перебирает
      зеркала по очереди и проверяет /root/ для ручного размещения.
   3. При тотальном провале fetch_package() вызывает print_manual_hint() из
@@ -67,10 +68,10 @@ def get_naiveproxy_mirrors() -> list[str]:
       2. raw.githubusercontent.com (HEAD default branch — НЕ РАБОТАЕТ для
          release-assets, но дёшево попробовать; для tag="latest" отключаем)
       3. github.com/.../releases/latest/download/
-      4. 7 GitHub-прокси
+      4. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc)
       5. Statically CDN (для tag="latest" — нет ветки, отключаем)
 
-    Итого 12 URL: 4 jsDelivr + release + 7 gh-proxy (raw и Statically
+    Итого 8 URL: 4 jsDelivr + release + 3 gh-proxy (raw и Statically
     отключены для tag="latest", т.к. ветки "latest" не существует).
     """
     return build_mirror_urls(

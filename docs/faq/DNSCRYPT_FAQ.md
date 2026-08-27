@@ -196,7 +196,7 @@ Chimera. В меню установки есть пункт «DNSCrypt-proxy» �
 3. **Запрашивает последнюю версию** через GitHub API
    (`https://api.github.com/repos/DNSCrypt/dnscrypt-proxy/releases/latest`).
 4. **Скачивает tarball** через `fetch_package(DNSCRYPT_SPEC, tag, arch)`
-   из `download_manager.py`. Используется 14 зеркал (GitHub + jsDelivr
+   из `download_manager.py`. Используется 10 зеркал (GitHub + jsDelivr
    + зеркала Chimera) — если GitHub недоступен, скачивание продолжается.
 5. **Распаковывает** tarball, находит бинарник `dnscrypt-proxy`,
    копирует в `/usr/local/bin/dnscrypt-proxy` (chmod 0o755).

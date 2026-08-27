@@ -67,7 +67,8 @@ def get_ru_zone_mirrors() -> list[str]:
       1. Прямой ipdeny.com (primary — обновляется ежедневно)
       2. GitHub raw bivlked/amneziawg-installer@v5.18.4/cascade/ru.zone
          (fallback — статический снимок)
-      3. 7 GitHub-прокси оборачивают GitHub raw URL (для РФ где raw.githubusercontent.com
+      3. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc) оборачивают
+         GitHub raw URL (для РФ где raw.githubusercontent.com
          заблокирован)
 
     Возвращает:

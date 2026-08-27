@@ -146,7 +146,7 @@ _MODULE_STATE  = Path("/var/lib/xray-installer/webdav_tunnel.json")
 
 _GITHUB_REPO  = "spkprsnts/webdav-tunnel"
 # _SOURCE_URL — удалён при миграции на download_manager. Теперь зеркала
-# (прямой GitHub + codeload + 7 gh-proxy) собираются в
+# (прямой GitHub + codeload + 3 gh-proxy) собираются в
 # webdav_mirrors.get_webdav_source_mirrors() и перебираются автоматически
 # через fetch_package(WEBDAV_SOURCE_SPEC).
 

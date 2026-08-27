@@ -12,7 +12,7 @@ chimera/modules/olcrtc_mirrors.py
 
 РЕШЕНИЕ (Wave 6 — Variant A согласно анализу):
   • HTTP tarball через github_mirrors.build_source_archive_mirror_urls():
-    прямой GitHub + codeload + 7 gh-proxy = 9 URL.
+    прямой GitHub + codeload + 3 gh-proxy = 5 URL.
   • Build: `go build` (pure Go, не требует .git/).
   • Commit SHA для state file: получается через отдельный GitHub API call
     к /commits/master (вместо `git rev-parse --short HEAD`).
@@ -67,7 +67,7 @@ def get_olcrtc_source_mirrors() -> list[str]:
     """Упорядоченный список URL для скачивания olcrtc source tarball.
 
     Использует build_source_archive_mirror_urls (прямой GitHub + codeload +
-    7 gh-proxy = 9 URL). Branch: master.
+    3 gh-proxy = 5 URL). Branch: master.
 
     Build: `go build` (pure Go, не требует .git/).
     """
@@ -86,7 +86,7 @@ def get_olcrtc_commits_api_url() -> str:
     return _OLCRTC_COMMITS_API
 
 
-# Количество зеркал — 1 прямой + 1 codeload + 7 прокси = 9.
+# Количество зеркал — 1 прямой + 1 codeload + 3 прокси = 5.
 OLCRTC_SOURCE_MIRRORS_COUNT: int = len(get_olcrtc_source_mirrors())
 
 

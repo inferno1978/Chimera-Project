@@ -6,8 +6,8 @@ chimera/modules/singbox_mirrors.py
 
 По образцу fptn_mirrors.py:
   1. Реестр зеркал через github_mirrors.build_mirror_urls():
-     jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub + 7 gh-proxy +
-     Statically — итого до 14 URL.
+     release GitHub + 3 gh-proxy — итого 4 URL.
+     (jsDelivr/raw/Statically исключены — release assets.)
   2. fetch_package(SINGBOX_SPEC, tag=..., filename=...) из singbox_packages.py
      перебирает зеркала по очереди и проверяет /root/ для ручного размещения.
   3. При тотальном провале fetch_package() вызывает print_manual_hint().
@@ -63,12 +63,12 @@ def get_singbox_mirrors(tag: str, filename: str) -> list[str]:
     Возвращает:
       Упорядоченный список URL (через build_mirror_urls):
         1. release GitHub (/releases/download/{tag}/{filename})
-        2. 7 GitHub-прокси
+        2. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc)
 
     ВАЖНО: jsDelivr (4 URL), raw.githubusercontent (1 URL), Statically (1 URL)
     ИСКЛЮЧЕНЫ, потому что они могут отдавать ТОЛЬКО файлы из repo tree, а не
     GitHub release assets. sing-box бинарник — это release asset. Включение
-    этих зеркал приводило к 6 из 14 гарантированным 404, что замедляло
+    этих зеркал приводило к гарантированным 404, что замедляло
     скачивание и вводило в заблуждение (print_manual_hint показывал
     несуществующие URL).
     """

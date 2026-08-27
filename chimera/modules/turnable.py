@@ -123,7 +123,7 @@ _XRAY_INBOUND_TAG = "vless-turnable-inbound"
 
 _TURNABLE_VERSION = "0.4.1"
 # _GITHUB_RELEASES_URL — удалён при миграции на download_manager.
-# Теперь зеркала (jsDelivr CDN + release GitHub + 7 gh-proxy) собираются в
+# Теперь зеркала (jsDelivr CDN + release GitHub + 3 gh-proxy) собираются в
 # turn_mirrors.get_turnable_mirrors(version) и перебираются автоматически
 # через fetch_package(TURNABLE_SPEC, version=_TURNABLE_VERSION).
 _GITHUB_API_URL = "https://api.github.com/repos/TheAirBlow/Turnable/releases/latest"

@@ -340,7 +340,7 @@ def _install_mita_package(version: str) -> bool:
     из mieru_packages.py. fetch_package сам:
       1. Проверяет /root/{filename} (manual_incoming_dir) — если найден,
          использует без сети (WinSCP-friendly).
-      2. Иначе — перебирает зеркала через urllib (14 зеркал).
+      2. Иначе — перебирает зеркала через urllib (10 зеркал).
       3. При успехе — вызывает post_install (dpkg -i / rpm -Uvh / tar -xzf).
       4. При провале — возвращает False.
 
@@ -358,7 +358,7 @@ def _install_mita_package(version: str) -> bool:
 
     # --- Debian/Ubuntu (.deb) ---
     if shutil.which("dpkg"):
-        print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.deb, 14 зеркал в fallback)...")
+        print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.deb, {MIERU_MIRRORS_COUNT} зеркал в fallback)...")
         try:
             ok = fetch_package(MITA_DEB_SPEC, print_hint_on_failure=False,
                                version=version, arch=arch)
@@ -370,7 +370,7 @@ def _install_mita_package(version: str) -> bool:
 
     # --- RPM (RedHat/CentOS) ---
     elif shutil.which("rpm"):
-        print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.rpm, 14 зеркал в fallback)...")
+        print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.rpm, {MIERU_MIRRORS_COUNT} зеркал в fallback)...")
         try:
             ok = fetch_package(MITA_RPM_SPEC, print_hint_on_failure=False,
                                version=version, rpm_arch=rpm_arch)
@@ -381,7 +381,7 @@ def _install_mita_package(version: str) -> bool:
             print(f"  {YELLOW}⚠{NC}  Ошибка .rpm: {e}, пробую tar.gz...")
 
     # --- Fallback: tar.gz ---
-    print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.tar.gz, 14 зеркал в fallback)...")
+    print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.tar.gz, {MIERU_MIRRORS_COUNT} зеркал в fallback)...")
     result = fetch_package(MITA_TARGZ_SPEC, print_hint_on_failure=False,
                            version=version, arch=arch)
     if result:

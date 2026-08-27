@@ -18,8 +18,9 @@ chimera/modules/xray_mirrors.py
 
 РЕШЕНИЕ (по аналогии с mieru_mirrors.py / turn_mirrors.py):
   1. Реестр зеркал через github_mirrors.build_mirror_urls():
-     jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub + 7 gh-proxy +
-     Statically — итого до 14 URL.
+     jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub + 3 gh-proxy +
+     Statically — итого до 10 URL.
+     (2026-08-21: мёртвые gh-proxy вычищены — было 7, осталось 3 рабочих.)
   2. fetch_package(XRAY_ZIP_SPEC, tag=..., arch=...) из xray_packages.py
      перебирает зеркала по очереди и проверяет /root/ для ручного размещения.
   3. При тотальном провале fetch_package() вызывает print_manual_hint() из
@@ -85,7 +86,7 @@ def get_xray_zip_mirrors(tag: str, arch: str = "64") -> list[str]:
         1. jsDelivr CDN family (4 бэкенда) — /gh/XTLS/Xray-core@{tag}/...
         2. raw.githubusercontent.com/{tag}/Xray-linux-{arch}.zip
         3. release GitHub (/releases/download/{tag}/Xray-linux-{arch}.zip)
-        4. 7 GitHub-прокси
+        4. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc)
         5. Statically CDN
 
     Примечание: jsDelivr/raw GitHub могут не иметь релизных zip'ов (они
@@ -149,7 +150,7 @@ def get_xray_installer_mirrors() -> list[str]:
       Упорядоченный список URL:
         1. jsDelivr CDN family (4 бэкенда) — /gh/XTLS/Xray-install@main/...
         2. raw.githubusercontent.com/main/install-release.sh
-        3. 7 GitHub-прокси (оборачивают raw GitHub URL)
+        3. 3 GitHub-прокси (оборачивают raw GitHub URL)
         4. Statically CDN
     """
     return build_mirror_urls(

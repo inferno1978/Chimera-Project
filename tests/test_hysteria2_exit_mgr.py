@@ -133,13 +133,27 @@ class TestHysteria2SpecSanity(unittest.TestCase):
         from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
         self.assertIsNotNone(HYSTERIA2_SPEC.post_install)
 
-    def test_mirror_urls_has_14_entries(self):
-        """Сценарий 2: 14 зеркал для fallback."""
+    def test_mirror_urls_matches_registry_count(self):
+        """Сценарий 2: зеркала соответствуют реестру (fallback не пуст).
+
+        2026-08-21 из GITHUB_PROXY_HOSTS вычищены мёртвые gh-proxy (7 → 3),
+        актуальное число URL — 10 (4 jsDelivr + raw + release + 3 gh-proxy +
+        Statically). Тест сверяет spec ↔ реестр ↔ константу и фиксирует
+        точное текущее число — чтобы незаметная потеря зеркал не прошла
+        молча (как в test_hysteria2_dnscrypt_mirrors).
+        """
         from chimera.modules.hysteria2_packages import HYSTERIA2_SPEC
+        from chimera.modules.hysteria2_mirrors import (
+            HYSTERIA2_MIRRORS_COUNT, get_hysteria2_mirrors,
+        )
         urls = HYSTERIA2_SPEC.mirror_urls_builder(
             filename="hysteria-linux-amd64", arch="amd64",
         )
-        self.assertEqual(len(urls), 14)
+        self.assertEqual(len(urls), 10)
+        self.assertEqual(len(urls), HYSTERIA2_MIRRORS_COUNT)
+        self.assertEqual(
+            urls, get_hysteria2_mirrors(tag="latest", arch="amd64"),
+        )
 
     def test_post_install_rejects_non_elf(self):
         """post_install возвращает False на не-ELF файле."""

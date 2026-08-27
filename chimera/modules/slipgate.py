@@ -380,7 +380,7 @@ def _run_install_inner() -> None:
     # БЕЗ зеркал, БЕЗ fallback, БЕЗ проверки ручного размещения.
     # Теперь: fetch_package(SLIPGATE_INSTALLER_SPEC) скачивает install.sh в
     # /tmp/slipgate-install.sh (через post_install), затем bash запускает
-    # скрипт. fetch_package перебирает 13 зеркал (jsDelivr + raw + 7 gh-proxy
+    # скрипт. fetch_package перебирает 9 зеркал (jsDelivr + raw + 3 gh-proxy
     # + Statically) и проверяет /root/install.sh для ручного размещения.
     from chimera.modules.download_manager import fetch_package
     from chimera.modules.slipgate_packages import (

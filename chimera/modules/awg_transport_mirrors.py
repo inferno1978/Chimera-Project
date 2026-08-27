@@ -142,7 +142,8 @@ def get_amneziawg_kmod_source_mirrors() -> list[str]:
     """Упорядоченный список URL для скачивания amneziawg-linux-kernel-module
     source tarball.
 
-    Использует build_source_archive_mirror_urls (9 URL). Branch: master.
+    Использует build_source_archive_mirror_urls (прямой GitHub + codeload +
+    3 gh-proxy = 5 URL). Branch: master.
 
     Build: `cd src && make dkms-install && dkms add/build/install` или
     fallback `make && make install` (из src/, не из root!).

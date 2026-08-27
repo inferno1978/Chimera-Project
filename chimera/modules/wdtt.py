@@ -142,7 +142,7 @@ _GITHUB_REPO      = "SpaceNeuroX/proxy-turn-vk-android"
 # ни разу не использовался — модуль всегда собирает из master.tar.gz, а
 # не из релизных артефактов).
 # _SOURCE_URL — удалён при миграции. Теперь зеркала (прямой GitHub +
-# codeload + 7 gh-proxy) собираются в wdtt_mirrors.get_wdtt_source_mirrors()
+# codeload + 3 gh-proxy) собираются в wdtt_mirrors.get_wdtt_source_mirrors()
 # и перебираются автоматически через fetch_package(WDTT_SOURCE_SPEC).
 
 # Порты по умолчанию

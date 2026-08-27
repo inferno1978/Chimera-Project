@@ -17,8 +17,9 @@ chimera/modules/hysteria2_mirrors.py
 
 РЕШЕНИЕ (по аналогии с turn_mirrors.py / mieru_mirrors.py):
   1. Реестр зеркал через github_mirrors.build_mirror_urls():
-     jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub + 7 gh-proxy +
-     Statically — итого до 14 URL.
+     jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub + 3 gh-proxy +
+     Statically — итого до 10 URL.
+     (2026-08-21: мёртвые gh-proxy вычищены — было 7, осталось 3 рабочих.)
   2. fetch_package(HYSTERIA2_SPEC, arch=...) из hysteria2_packages.py
      перебирает зеркала по очереди и проверяет /root/ для ручного
      размещения.
@@ -101,7 +102,7 @@ def get_hysteria2_mirrors(
            принимает ref со слешем).
         2. raw.githubusercontent.com/app/{filename} — branch "app".
         3. release GitHub (/releases/latest/download/ или /releases/download/{tag}/).
-        4. 7 GitHub-прокси — с полным tag.
+        4. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc) — с полным tag.
         5. Statically CDN — через /app/ ветку.
 
     Особенность: для tag="app/vX.Y.Z" jsDelivr/raw/Statically используют
@@ -125,7 +126,7 @@ def get_hysteria2_mirrors(
 
 
 # Количество зеркал — вычисляется через build_mirror_urls.
-# Для tag="latest": 4 jsDelivr + raw + release + 7 proxy + Statically = 14.
+# Для tag="latest": 4 jsDelivr + raw + release + 3 proxy + Statically = 10.
 HYSTERIA2_MIRRORS_COUNT: int = len(get_hysteria2_mirrors())
 
 
