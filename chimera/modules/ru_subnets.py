@@ -355,20 +355,25 @@ def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
                 info("xray.service: убран ExecStartPre rm -f socket (BUGFIX)")
         except Exception:
             pass  # не критично — _nginx_restart_if_reality восстановит сокет
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    # Ждём xray активно (до 15 сек). sleep(2) недостаточно при большом конфиге
-    # с тысячами RIPE/AS правил — xray может подниматься дольше.
-    # Если xray не active в момент проверки — nginx не перезапустится
-    # и останется с proxy_pass к старому сокету → постоянный EOF клиентов.
-    # Ждём xray до 90 сек: конфиг с 13 000+ RIPE-правил поднимается 30–60 сек,
-    # range(15) было недостаточно и приводило к тому что _nginx_restart_if_reality
-    # не вызывалась вовсе. Теперь nginx перезапускается в любом случае.
-    for _wi in range(90):
-        r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-        if r.stdout.strip() == "active":
-            break
-        time.sleep(1)
-    if r.stdout.strip() != "active":
+    # v56 (start-limit-fix): безопасный рестарт (reset-failed) — apply может
+    # вызываться в потоках, где xray уже рестартился 2-3 раза за минуту;
+    # голый restart упирается в StartLimitBurst=3/60s юнита. Ждём до 90 сек:
+    # конфиг с 13 000+ RIPE-правил поднимается 30–60 сек. Если xray не
+    # active — nginx не перезапустится и останется с proxy_pass к старому
+    # сокету → постоянный EOF клиентов. nginx перезапускаем в любом случае.
+    _safe_restart = getattr(core, "_xray_safe_restart", None)
+    if callable(_safe_restart):
+        _xray_active = _safe_restart(wait_active=90, attempts=1)
+    else:  # fallback на старое поведение (старое ядро без хелпера)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        _xray_active = False
+        for _wi in range(90):
+            r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+            if r.stdout.strip() == "active":
+                _xray_active = True
+                break
+            time.sleep(1)
+    if not _xray_active:
         warn("Xray не запустился за 90 сек — проверьте: journalctl -u xray -n 30")
         _nginx_restart_if_reality()   # nginx перезапускаем в любом случае
         return False

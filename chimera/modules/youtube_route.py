@@ -489,14 +489,23 @@ def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
         return False
 
     # Restart xray, wait for it to come up (mirror ru_subnets).
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    r = None
-    for _ in range(30):
-        r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-        if r.stdout.strip() == "active":
-            break
-        time.sleep(1)
-    if not r or r.stdout.strip() != "active":
+    # v56 (start-limit-fix): безопасный рестарт — этот apply вызывается
+    # внутри _rebuild_and_restart_xray и идёт ПЕРВЫМ в серии рестартов
+    # (YouTube → IP-pin → tproxy → финальный); голые restarts упираются
+    # в StartLimitBurst=3/60s юнита xray и последний start отклоняется.
+    _safe_restart = getattr(core, "_xray_safe_restart", None)
+    if callable(_safe_restart):
+        _restart_ok = _safe_restart()
+    else:  # fallback на старое поведение (старое ядро без хелпера)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        _restart_ok = False
+        for _ in range(30):
+            r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+            if r.stdout.strip() == "active":
+                _restart_ok = True
+                break
+            time.sleep(1)
+    if not _restart_ok:
         warn("Xray не запустился — проверьте: journalctl -u xray -n 30")
         _nginx_restart_if_reality()
         return False
@@ -732,14 +741,22 @@ def _youtube_apply_fragment_to_xray(
     time.sleep(0.5)
 
     # Restart xray, wait for it to come up.
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    r = None
-    for _ in range(30):
-        r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-        if r.stdout.strip() == "active":
-            break
-        time.sleep(1)
-    if not r or r.stdout.strip() != "active":
+    # v56 (start-limit-fix): безопасный рестарт (reset-failed) — вызывается
+    # в цепочке пересборки, где несколько рестартов подряд упираются в
+    # StartLimitBurst=3/60s юнита xray. См. _core._xray_safe_restart.
+    _safe_restart = getattr(core, "_xray_safe_restart", None)
+    if callable(_safe_restart):
+        _restart_ok = _safe_restart()
+    else:  # fallback на старое поведение (старое ядро без хелпера)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        _restart_ok = False
+        for _ in range(30):
+            r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+            if r.stdout.strip() == "active":
+                _restart_ok = True
+                break
+            time.sleep(1)
+    if not _restart_ok:
         warn("Xray не запустился — возможно ваш Xray не поддерживает fragment в freedom.settings")
         warn("Проверьте: journalctl -u xray -n 30")
         warn("Откатите: меню YouTube → [6] (exit-ноды default)")

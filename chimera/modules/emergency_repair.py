@@ -10,7 +10,8 @@ _core.py (~858 строк). Это оркестратор, который:
   2.  Диагностирует, что именно сломано (юнит-файл, права сокета, сертификат...).
   3.  Пересоздаёт systemd-юнит Xray + nginx.service.d override.
   4.  Восстанавливает права на директорию сокета и TLS-сертификаты.
-  5.  Перезапускает: DNSCrypt → Xray (с ожиданием сокета) → Nginx.
+  5.  Поднимает AdGuardHome (если установлен — до пересборки конфига) и
+      перезапускает: DNSCrypt → Xray (с ожиданием сокета) → Nginx.
   6.  Перезапускает fail2ban, irqbalance, WARP — если установлены.
   7.  Восстанавливает все systemd-таймеры (watchdog, autoupdate, geo, ru-subnets).
   8.  Проверяет все cron.d-задачи (certbot, geo, fp, uuid, tg, ttl, limits...).
@@ -87,7 +88,8 @@ def do_emergency_repair() -> None:
       2.  Диагностирует, что именно сломано (юнит-файл, права сокета, сертификат...).
       3.  Пересоздаёт systemd-юнит Xray + nginx.service.d override.
       4.  Восстанавливает права на директорию сокета и TLS-сертификаты.
-      5.  Перезапускает: DNSCrypt → Xray (с ожиданием сокета) → Nginx.
+      5.  Поднимает AdGuardHome (если установлен — до пересборки конфига) и
+          перезапускает: DNSCrypt → Xray (с ожиданием сокета) → Nginx.
       6.  Перезапускает fail2ban, irqbalance, WARP — если установлены.
       7.  Восстанавливает все systemd-таймеры (watchdog, autoupdate, geo, ru-subnets).
       8.  Проверяет все cron.d-задачи (certbot, geo, fp, uuid, tg, ttl, limits...).
@@ -758,12 +760,19 @@ def do_emergency_repair() -> None:
             time.sleep(2)
 
     # Запуск Xray
+    # v56 (start-limit-fix): reset-failed обязателен перед каждым start —
+    # если восстановление запущено вскоре после неудачной пересборки
+    # (3+ рестарта подряд), счётчик start-rate-limit юнита xray
+    # (StartLimitBurst=3/60s) ещё не остыл и первый же start был бы
+    # отклонён («Start request repeated too quickly» → start-limit-hit).
+    _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
     _run(["systemctl", "stop",  "xray"], check=False, quiet=True)
     time.sleep(1)
     _run(["systemctl", "start", "xray"], check=False, quiet=True)
     xray_ok_started = _wait_service_active("xray", 25, silent=True)
     if not xray_ok_started:
         _box_warn("Повторная попытка запуска Xray...")
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
         _run(["systemctl", "stop",  "xray"], check=False, quiet=True)
         time.sleep(4)
         _run(["systemctl", "start", "xray"], check=False, quiet=True)
@@ -1003,6 +1012,21 @@ def do_emergency_repair() -> None:
         if r_dc2.returncode == 0:
             svcs_check.insert(0, ("dnscrypt-proxy", "DNSCrypt-proxy"))
 
+    # v56: AdGuardHome — если установлен, это звено DNS-цепочки
+    # «Xray → AGH(127.0.0.1:53) → DNSCrypt(5300)»: шагом выше восстановление
+    # уже поднимает его (agh_ensure_running), здесь — финальный контроль.
+    # Не установлен → строка не выводится (как у DNSCrypt при is-enabled != 0).
+    _agh_installed = False
+    try:
+        from chimera.modules.aghome_setup import is_aghome_installed
+        _agh_installed = is_aghome_installed()
+    except Exception:
+        _agh_installed = Path("/etc/systemd/system/AdGuardHome.service").exists()
+    if _agh_installed:
+        # После DNSCrypt, перед Xray — порядок DNS-цепочки снизу вверх.
+        _dc_count = sum(1 for s, _l in svcs_check if s == "dnscrypt-proxy")
+        svcs_check.insert(_dc_count, ("AdGuardHome", "AdGuardHome"))
+
     all_ok = True
     for svc_name, svc_label in svcs_check:
         rs = _run(["systemctl", "is-active", svc_name], capture=True, check=False)
@@ -1047,6 +1071,9 @@ def do_emergency_repair() -> None:
         _box_wrap_msg(f"  {DIM}", 2, f"journalctl -u xray -n 30 --no-pager{NC}")
         _box_wrap_msg(f"  {DIM}", 2, f"journalctl -u nginx -n 20 --no-pager{NC}")
         _box_wrap_msg(f"  {DIM}", 2, f"journalctl -u fail2ban -n 10 --no-pager{NC}")
+        if _agh_installed:
+            _box_wrap_msg(f"  {DIM}", 2,
+                f"journalctl -u AdGuardHome -n 20 --no-pager{NC}")
 
     log_to_file("INFO", f"do_emergency_repair: завершено, all_ok={all_ok}, "
                         f"issues={issues}")

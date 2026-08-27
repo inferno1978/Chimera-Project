@@ -1742,6 +1742,13 @@ def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
             _xray_remove_dokodemo(cfg)
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             return False, err
+        # v56 (start-limit-fix): reset-failed перед рестартом — сбрасывает
+        # счётчик start-rate-limit (StartLimitBurst=3/60s в юните xray).
+        # tproxy-restore вызывается из _rebuild_and_restart_xray ТРЕТЬИМ
+        # рестартом подряд (после YouTube и IP-pin) — без сброса лимита
+        # этот start отклоняется, xray остаётся в failed (start-limit-hit)
+        # при валидном конфиге. См. _core._xray_safe_restart.
+        _run(["systemctl", "reset-failed", XRAY_SERVICE_NAME])
         _run(["systemctl", "restart", XRAY_SERVICE_NAME])
 
     # ── iptables REDIRECT ─────────────────────────────────────────────────────
@@ -1802,6 +1809,9 @@ def xray_disable_tproxy_for_telemt() -> tuple:
             if _xray_remove_dokodemo(cfg):
                 cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
                 cfg_path.chmod(0o640)
+                # v56 (start-limit-fix): reset-failed перед рестартом —
+                # сброс счётчика start-rate-limit юнита xray (см. выше).
+                _run(["systemctl", "reset-failed", XRAY_SERVICE_NAME])
                 _run(["systemctl", "restart", XRAY_SERVICE_NAME])
         except Exception as e:
             return False, f"Не удалось обновить xray config: {e}"
