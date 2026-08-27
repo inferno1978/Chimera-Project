@@ -122,6 +122,7 @@ sudo python3 main.py
 | [`HYSTERIA2.md`](docs/faq/HYSTERIA2.md) | Hysteria2 транспорт — UDP-протокол на базе QUIC, выбор при установке |
 | [`SECURITY_BAN_FAQ.md`](docs/faq/SECURITY_BAN_FAQ.md) | AutoBan / Honeypot / IP-Ban / GeoIP Block / РФ-блокировка — пять модулей защиты от сканеров и DPI-зондов: сравнительная таблица, комбинации, диагностика, бан ASN |
 | [`DNSCRYPT_FAQ.md`](docs/faq/DNSCRYPT_FAQ.md) | DNSCrypt-proxy — зашифрованный DNS: установка, конфигурация, выбор резолверов, анонимизация, ODoH/DNSSEC, принудительный DNS REDIRECT, диагностика утечек DNS |
+| [`AGH_FAQ.md`](docs/faq/AGH_FAQ.md) | AdGuard Home — DNS-сервер с фильтрацией: архитектура связки Xray + AGH + DNSCrypt, плюсы и минусы, установка с нулевым даунтаймом, режимы Web UI и кастомный порт, финализация, порты и port_registry, надёжность DNS |
 
 ## 🗂️ Структура проекта
 
