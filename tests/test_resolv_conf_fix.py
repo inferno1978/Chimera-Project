@@ -430,7 +430,9 @@ class TestAghAwareFix(_BaseTest):
         _mock_run, recorded = self._run_with_recorder()
         with patch.object(resolv_conf_fix, "_run", side_effect=_mock_run), \
              patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
-                          return_value=("127.0.0.1", 5300)):
+                          return_value=("127.0.0.1", 5300)), \
+             patch.object(resolv_conf_fix, "agh_probe_resolve",
+                          return_value=(True, "www.example.com → 1 ответ, 5 мс")):
             result = resolv_conf_fix.fix_resolv_conf_to_localhost(force=True)
         self.assertTrue(result["ok"], f"result: {result}")
         # redirect СНЯТ: есть -D команды
@@ -442,6 +444,48 @@ class TestAghAwareFix(_BaseTest):
         # action-строка упоминает AGH
         agh_actions = [a for a in result["actions"] if "AGH" in a or "AdGuard" in a]
         self.assertTrue(agh_actions, f"нет action про AGH: {result['actions']}")
+
+    def test_fix_keeps_redirect_when_agh_serves_53_but_broken(self):
+        """v55: AGH слушает :53, но живая проба резолва провалилась →
+        redirect НЕ снимается (это обход сломанного AGH), а ставится
+        (обе ветки: dns.servers xray уже откатятся на 5300, glibc пойдёт
+        через redirect) — DNS остаётся живым."""
+        from chimera.modules import resolv_conf_fix
+        self._resolv_conf.write_text("nameserver 127.0.0.1\n")
+        self._nsswitch.write_text("hosts: files dns\n")
+        cmd_to_result = {
+            ("systemctl", "is-active", "AdGuardHome.service"):
+                _make_completed(stdout="active"),
+            ("systemctl", "is-active", "dnscrypt-proxy.service"):
+                _make_completed(stdout="active"),
+            ("ss", "-ulnp"): _make_completed(stdout=(
+                "udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
+                "users:((\"AdGuardHome\",pid=999))\n")),
+            ("ss", "-tlnu"): _make_completed(stdout="UDP 127.0.0.1:5300"),
+            ("iptables",): _make_completed(stdout=""),
+        }
+        recorded = {"iptables": []}
+        def _rec_mock_run(cmd, capture=False, quiet=False, check=False, **kw):
+            if cmd and cmd[0] == "iptables":
+                recorded["iptables"].append(tuple(cmd))
+            for prefix, result in cmd_to_result.items():
+                if tuple(cmd[:len(prefix)]) == prefix:
+                    return result
+            return MagicMock(returncode=0, stdout="", stderr="")
+        with patch.object(resolv_conf_fix, "_run", side_effect=_rec_mock_run), \
+             patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
+                          return_value=("127.0.0.1", 5300)), \
+             patch.object(resolv_conf_fix, "agh_probe_resolve",
+                          return_value=(False, "нет валидного ответа")):
+            diag = resolv_conf_fix.diagnose_resolv_conf()
+            result = resolv_conf_fix.fix_resolv_conf_to_localhost(force=True)
+        self.assertTrue(diag["aghome_serving_53"])
+        self.assertFalse(diag["agh_resolves"],
+                         "проба провалена — agh_resolves=False")
+        self.assertTrue(result["ok"], f"result: {result}")
+        # redirect ПОСТАВЛЕН: есть -A команды (обход сломанного AGH)
+        self.assertTrue(any("-A" in c for c in recorded["iptables"]),
+                        f"нет iptables -A (обход не создан): {recorded['iptables']}")
 
     def test_diag_agh_wizard_mode_keeps_redirect_reasoning(self):
         """AGH активен, но :53 НЕ слушает (wizard) → redirect всё ещё нужен,
@@ -524,9 +568,12 @@ class TestAghAwareFix(_BaseTest):
         with patch.object(resolv_conf_fix, "_run",
                           side_effect=_mock_run_factory(cmd_to_result)), \
              patch.object(resolv_conf_fix, "_get_dnscrypt_listen_addr_port",
-                          return_value=("127.0.0.1", 5300)):
+                          return_value=("127.0.0.1", 5300)), \
+             patch.object(resolv_conf_fix, "agh_probe_resolve",
+                          return_value=(True, "www.example.com → 1 ответ, 5 мс")):
             diag = resolv_conf_fix.diagnose_resolv_conf()
         self.assertTrue(diag["aghome_serving_53"])
+        self.assertTrue(diag["agh_resolves"])   # v55: проба ОК (мок)
         self.assertFalse(diag["dns_redirect_active"],
                          "tcp-only redirect присутствует → ворует трафик у AGH")
         self.assertTrue(any("обходят AGH" in r for r in diag["leak_reasons"]))

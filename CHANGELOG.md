@@ -2,6 +2,87 @@
 
 ---
 
+## FEAT(xray_install+chain_nodes+emergency_repair+resolv_conf_fix+agh_probe): углублённый health-check AGH — живая проба резолва + нейтрализация redirect 53→5300 (v55) — 27 августа 2026
+
+**Задача: в стеке «AdGuardHome (127.0.0.1:53) → DNSCrypt (127.0.0.1:5300) →
+интернет» переключать DNS Xray на AGH только когда ВЕСЬ путь реально
+работает. v37 уже умел «сервис активен + :53 принадлежит AGH»
+(aghome_setup.aghome_dns_ready), но это не отличало живой AGH от
+полудохлого: сервис active, порт слушается — а upstream лежит
+(«порт перенесён, а по факту нифига не работает»). v55 добавляет
+end-to-end гарантию.**
+
+### Новый модуль `chimera/modules/agh_probe.py`
+
+Health-check «можно ли доверить локальному AGH DNS для Xray». Три
+обязательных критерия (все три, иначе — безопасный откат на 5300):
+
+1. **Сервис активен** — `systemctl is-active` для обеих форм юнита
+   (`adguardhome` / `AdGuardHome`).
+2. **AGH владеет 127.0.0.1:53/udp** — парсинг `ss -ulnp`: имя процесса
+   содержит `adguardhome` И адрес ровно `127.0.0.1:53` (граница слова
+   отсекает `:5300`; `127.0.0.53:53` systemd-resolved не совпадает строкой).
+3. **AGH реально резолвит** — живой DNS A-запрос (собственный DNS-клиент
+   на struct/socket, без зависимостей) к 127.0.0.1:53: `www.example.com`,
+   2 попытки, таймаут 2 с. Проверяет end-to-end всю цепочку
+   AGH → upstream (DNSCrypt/DoH) → интернет: валидность txid, QR-бита,
+   RCODE=NOERROR, наличия answer-записей.
+
+**Побочный эффект — нейтрализация iptables redirect 53→5300:**
+`resolv_conf_fix.py` создаёт в nat OUTPUT redirect «-d 127.0.0.1 --dport 53 →
+REDIRECT --to-ports 5300» (нужен, когда DNSCrypt слушает не на 53). Если
+AGH занял :53, этот redirect молча уводит ЛЮБОЙ локальный DNS (glibc, Xray,
+B4) с AGH на DNSCrypt. После подтверждения владения портом redirect
+снимается ДО пробы резолва; **если проба провалилась — восстанавливается**
+(rollback: система никогда не остаётся хуже исходного состояния).
+
+**Принцип безопасности:** любые сбои (сервис лёг, порт не AGH, резолв
+таймаутит, iptables недоступен) = `(False, причина)` → вызывающий код
+остаётся на прежнем пути DNSCrypt:5300. Функция не бросает исключений.
+
+### Интеграция
+
+- **`generate_xray_config()` / `generate_xray_config_xhttp()`** (xray_install.py)
+  и **`generate_xray_config_chain_entry()` / `generate_xray_config_chain_entry_multi()`**
+  (chain_nodes.py — Режим B single и multi): лёгкая проверка
+  `aghome_dns_ready()` (сервис+порт) заменена на полный `agh_dns_available()`;
+  при здоровом AGH `dns.servers[0] = 127.0.0.1:53` + живой fallback-лестница
+  `DNSCrypt:5300 (skipFallback=false) → 1.1.1.1 → 8.8.8.8` — AGH упал
+  ПОСЛЕ генерации → DNS VPN-клиентов не умирает, xray сам переходит на
+  DNSCrypt. При нездоровом AGH — прежний порядок без изменений.
+- **`do_emergency_repair()`** (emergency_repair.py): поднимает
+  остановленный AGH ДО пересборки xray-конфига (`agh_ensure_running`:
+  systemctl start + ожидание active до 5 с; юнита нет / не поднялся →
+  генераторы молча откатятся на 5300 — это безопасный путь, не ошибка
+  восстановления).
+- **`resolv_conf_fix.py`**: diagnose при AGH на :53 гоняет живую пробу
+  резолва (поля `agh_resolves`, `agh_note`); фикс-флоу v37-ветка
+  «снять redirect» теперь требует agh_resolves=True, а при
+  «AGH на :53, но не резолвит» — СТАВИТ redirect как обход сломанного
+  AGH + warning «проверьте upstream в AdGuardHome.yaml»; причина
+  «запросы обходят AGH» гейтится agh_resolves; TUI-диагностика
+  показывает блок AdGuardHome с результатом пробы.
+
+### Тесты
+
+`tests/test_agh_probe.py` — 39 кейсов: парсинг systemctl/ss (отсечки :5300
+и 127.0.0.53), DNS-wire (построение запроса, валидация txid/QR/RCODE/ANCOUNT,
+таймаут), iptables-спецификации (парсинг порта, зеркальность -D/-A,
+совместимость comment `chimera-dns-fix`), полный flow (снятие redirect при
+успехе / rollback при провале пробы / ранний выход без траты пробы),
+autostart-ветка, wiring-гарантии во все 4 генератора + emergency_repair
+(AGH поднимается ДО `_need_regen`) + AGH-guard в resolv_conf_fix.
+
+**Регрессий нет:** полный прогон 212 тестовых файлов — 204 OK,
+8 падающих (dns_redirect, hysteria2_exit_mgr, ios_*, mtproto, telemt_panel,
+test_runner, wave6_mirrors) падают и на чистом дереве до правок
+(проверено stash-циклом), к DNS-интеграции отношения не имеют.
+AGH-тесты resolv_conf_fix (3 кейса v45) обновлены: живая проба
+резолва мокается явно (AGH-healthy сценарий), семантика тестов
+сохранена.
+
+---
+
 ## TEST+FIX(mirrors): актуализация счётчиков зеркал после вычистки мёртвых gh-proxy + olcrtc commit-SHA через GitHub API — 27 августа 2026 (v54)
 
 Два хвоста, оставшихся от вычистки мёртвых GitHub-прокси 2026-08-21

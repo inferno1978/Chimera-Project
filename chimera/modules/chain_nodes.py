@@ -59,6 +59,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from chimera.modules.agh_probe import agh_dns_available
+
 
 # =============================================================================
 #  ОТЛОЖЕННАЯ ПРИВЯЗКА К ЯДРУ (_core.py)
@@ -609,7 +611,26 @@ def generate_xray_config_chain_entry() -> None:
                     capture=True, check=False)
     dnscrypt_running = (DNSCRYPT_INSTALLED or r_active.stdout.strip() == "active")
 
-    if dnscrypt_running:
+    # AdGuardHome health-check (см. agh_probe.py): AGH жив и держит
+    # 127.0.0.1:53 → Xray → AGH → DNSCrypt; сбой проверки → DNSCrypt:5300.
+    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info, log_warn=warn)
+
+    if agh_ok:
+        dns_servers = [
+            {"address": "127.0.0.1", "port": 53,
+             "network": "udp", "skipFallback": False},
+        ]
+        if dnscrypt_running:
+            # Живой fallback на случай падения AGH после генерации
+            dns_servers.append(
+                {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
+                 "network": "udp", "skipFallback": False})
+        dns_servers += [
+            {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
+            {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
+        ]
+        info(f"DNS: AdGuardHome здоров ({agh_note}) — Xray → AGH:53 → DNSCrypt")
+    elif dnscrypt_running:
         dns_servers = [
             {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
              "network": "udp", "skipFallback": False},
@@ -1935,20 +1956,26 @@ def generate_xray_config_chain_entry_multi() -> None:
     # AGH-AWARE (v37): при живом AdGuard Home на :53 — DNS entry-ноды
     # через AGH (кеш+фильтры). Exit-шаблоны выше НЕ трогаем — они
     # разворачиваются на чужих VPS без AGH.
-    agh_dns = False
-    try:
-        from chimera.modules.aghome_setup import aghome_dns_ready
-        agh_dns = aghome_dns_ready()
-    except Exception:
-        agh_dns = False
+    # v55 (agh_probe): health-check углублён — живая проба резолва
+    # (end-to-end AGH → DNSCrypt → интернет) + нейтрализация iptables
+    # redirect 53→5300. Сбой любого шага → прежний путь DNSCrypt:5300.
+    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info, log_warn=warn)
 
-    if agh_dns:
+    if agh_ok:
         dns_servers = [
-            {"address": "127.0.0.1", "port": 53, "network": "udp", "skipFallback": False},
-            {"address": "127.0.0.1", "port": 53, "network": "tcp", "skipFallback": True},
+            {"address": "127.0.0.1", "port": 53,
+             "network": "udp", "skipFallback": False},
+        ]
+        if dnscrypt_running:
+            # Живой fallback на случай падения AGH после генерации
+            dns_servers.append(
+                {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
+                 "network": "udp", "skipFallback": False})
+        dns_servers += [
             {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
             {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
         ]
+        info(f"DNS: AdGuardHome здоров ({agh_note}) — Xray → AGH:53 → DNSCrypt")
     elif dnscrypt_running:
         dns_servers = [
             {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
