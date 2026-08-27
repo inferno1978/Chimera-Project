@@ -613,6 +613,59 @@ def _get_commit_sha(src_dir: Path) -> str:
     return r.stdout.strip()[:7] if r.returncode == 0 else "?"
 
 
+def _http_get_text(url: str, timeout: int = 15) -> str | None:
+    """GET-запрос, возвращает текст ответа или None при любой ошибке.
+
+    Лёгкий хелпер для GitHub API вызовов (без внешних зависимостей).
+    User-Agent обязателен: api.github.com отклоняет запросы без UA (403).
+    """
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _olcrtc_fetch_commit_sha() -> str:
+    """Короткий SHA HEAD ветки olcrtc через GitHub API.
+
+    Зачем API вместо `git rev-parse` (миграция Wave 6, Variant A — см.
+    olcrtc_packages.py / olcrtc_mirrors.py): при скачивании исходников
+    через HTTP-tarball зеркала .git/ отсутствует, а эмуляция
+    `git init + commit` записывала в state file SHA свежесозданного
+    коммита вместо настоящего upstream SHA.
+
+    Возвращает sha[:7]. При любой ошибке (сеть / не-JSON / нет поля
+    sha) — "?": state сохраняется, установка не падает.
+    """
+    from chimera.modules.olcrtc_mirrors import get_olcrtc_commits_api_url
+    text = _http_get_text(get_olcrtc_commits_api_url())
+    if not text:
+        return "?"
+    try:
+        data = json.loads(text)
+        sha = data.get("sha")
+        return sha[:7] if sha else "?"
+    except Exception:
+        return "?"
+
+
+def _olcrtc_commit(src_dir: Path | None = None) -> str:
+    """Commit SHA olcrtc для state file — канонический путь.
+
+    Делегирует к _olcrtc_fetch_commit_sha() (GitHub API вместо
+    `git rev-parse --short HEAD`). Если API недоступен ("?") и передан
+    src_dir с локальным git-репозиторием — fallback на локальный SHA
+    (осмыслен при прямом git clone: там rev-parse даёт настоящий
+    upstream SHA).
+    """
+    sha = _olcrtc_fetch_commit_sha()
+    if sha == "?" and src_dir is not None:
+        return _get_commit_sha(src_dir)
+    return sha
+
+
 def _install_or_update() -> bool:
     """Полная установка/обновление: Go → olcrtc → olcrtc-manager.
 
@@ -684,7 +737,10 @@ def _install_or_update() -> bool:
         return False
     if not _go_build(olcrtc_src, OLC_BIN, "./cmd/olcrtc"):
         return False
-    olc_commit = _get_commit_sha(olcrtc_src)
+    # SHA из GitHub API (миграция Wave 6): при tarball-зеркале .git/
+    # эмулируется и rev-parse дал бы мусорный SHA; при недоступном API —
+    # fallback на локальный git (прямой clone).
+    olc_commit = _olcrtc_commit(olcrtc_src)
     _success(f"olcrtc собран (коммит {olc_commit})")
 
     # 4-5. Клонирование и сборка olcrtc-manager.

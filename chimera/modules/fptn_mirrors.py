@@ -82,7 +82,7 @@ def get_fptn_mirrors(tag: str, filename: str) -> list[str]:
         1. jsDelivr CDN family (4 бэкенда)
         2. raw.githubusercontent.com/{tag}/{filename}
         3. release GitHub (/releases/download/{tag}/{filename})
-        4. 7 GitHub-прокси
+        4. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc)
         5. Statically CDN
     """
     if not tag or not filename:

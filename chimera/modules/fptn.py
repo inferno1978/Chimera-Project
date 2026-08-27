@@ -382,7 +382,7 @@ def _download_binaries() -> tuple:
     download_manager.py. fetch_package сам:
       1. Проверяет /root/{filename} (manual_incoming_dir из spec) — если
          найден и размер >= 100 KB, использует без сети (WinSCP-friendly).
-      2. Иначе — перебирает 14 зеркал (4 jsDelivr + raw + release + 7
+      2. Иначе — перебирает 10 зеркал (4 jsDelivr + raw + release + 3
          gh-proxy + Statically) по очереди через urllib.
       3. При успехе — post_install делает dpkg-deb -x и копирует
          fptn-server + fptn-passwd в /usr/bin/ (chmod 0o755).

@@ -139,7 +139,7 @@ _GITHUB_API      = "https://api.github.com/repos/klzgrad/naiveproxy/releases/lat
 # _BIN_URL_AMD64 — удалён при миграции (был dead code, ни разу не использовался —
 # модуль использует caddy-naive binary, не naiveproxy tarball).
 # _CADDY_NAIVE_URL — удалён при миграции. Теперь зеркала (4 jsDelivr + release
-# GitHub + 7 gh-proxy) собираются в naiveproxy_mirrors.get_naiveproxy_mirrors()
+# GitHub + 3 gh-proxy) собираются в naiveproxy_mirrors.get_naiveproxy_mirrors()
 # и перебираются автоматически через fetch_package(NAIVEPROXY_SPEC).
 
 _DEFAULT_PORT    = 443

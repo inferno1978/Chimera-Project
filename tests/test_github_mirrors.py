@@ -101,7 +101,8 @@ class TestGhProxyUrl(unittest.TestCase):
                          "https://ghproxy.com/https://github.com/enfein/mieru/releases/download/v3.33.0/mita.tar.gz")
 
     def test_all_proxy_hosts(self):
-        """Проверяем что все 7 прокси-хостов дают валидные URL."""
+        """Проверяем что все прокси-хосты (3 рабочих после вычистки
+        мёртвых 2026-08-21) дают валидные URL."""
         for host in GITHUB_PROXY_HOSTS:
             with self.subTest(host=host):
                 url = gh_proxy_url(host, "test", "repo", "latest", "file.dat")
@@ -252,7 +253,7 @@ class TestBuildMirrorUrlsMieruSetMatch(unittest.TestCase):
 
     def test_mita_mirrors_set_match(self):
         """После миграции mieru_mirrors на build_mirror_urls: SET должен
-        совпадать с полным build_mirror_urls (14 зеркал, без ограничений)."""
+        совпадать с полным build_mirror_urls (10 зеркал, без ограничений)."""
         from chimera.modules.mieru_mirrors import get_mita_mirrors
 
         old_urls = get_mita_mirrors("3.33.0")

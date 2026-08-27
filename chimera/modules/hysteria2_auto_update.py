@@ -79,7 +79,7 @@ def h2_update_apply(force: bool = False) -> bool:
     hysteria2_exit_mgr._install_h2_binary(). Это УНИФИЦИРУЕТ два пути
     скачивания (раньше они были независимыми с разным поведением при
     сбое сети) и даёт auto_update бесплатно:
-      • 14 зеркал fallback вместо одного URL.
+      • 10 зеркал fallback вместо одного URL.
       • WinSCP-friendly ручное размещение в /root/.
       • min_size=1 MB защита (раньше не было).
       • ELF magic проверка в post_install (раньше только запуск version).

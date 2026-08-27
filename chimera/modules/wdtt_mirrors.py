@@ -13,8 +13,9 @@ chimera/modules/wdtt_mirrors.py
   urlretrieve() выбрасывает исключение, вся сборка wdtt-server падает.
 
 РЕШЕНИЕ (по аналогии с turn_mirrors.py):
-  1. Реестр зеркал: прямой GitHub + codeload.github.com + 7 GitHub-прокси.
-     Итого 9 URL на архив.
+  1. Реестр зеркал: прямой GitHub + codeload.github.com + 3 GitHub-прокси.
+     Итого 5 URL на архив.
+     (2026-08-21: мёртвые gh-proxy вычищены — было 7, осталось 3 рабочих.)
   2. fetch_package(WDTT_SOURCE_SPEC) из wdtt_packages.py перебирает зеркала
      по очереди и проверяет /root/ для ручного размещения.
   3. При тотальном провале fetch_package() вызывает print_manual_hint() из
@@ -68,8 +69,7 @@ def get_wdtt_source_mirrors() -> list[str]:
          https://github.com/SpaceNeuroX/proxy-turn-vk-android/archive/refs/heads/master.tar.gz
       2. Codeload (альтернативный домен GitHub):
          https://codeload.github.com/SpaceNeuroX/proxy-turn-vk-android/tar.gz/refs/heads/master
-      3. 7 GitHub-прокси: ghproxy.net, ghproxy.com, mirror.ghproxy.com,
-         gh.con.sh, hub.gitmirror.com, github.moeyy.xyz, ghps.cc — каждый
+      3. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc) — каждый
          оборачивает прямой GitHub URL.
     """
     return build_source_archive_mirror_urls(
@@ -80,7 +80,7 @@ def get_wdtt_source_mirrors() -> list[str]:
 
 
 # Количество зеркал — вычисляется через build_source_archive_mirror_urls.
-# 1 прямой + 1 codeload + 7 прокси = 9 URL.
+# 1 прямой + 1 codeload + 3 прокси = 5 URL.
 WDTT_SOURCE_MIRRORS_COUNT: int = len(get_wdtt_source_mirrors())
 
 

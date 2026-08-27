@@ -6,7 +6,7 @@ Unit-тесты для chimera/modules/turn_mirrors.py и turn_packages.py.
 
 Покрывает:
   • Структуру и инварианты списка зеркал для vk-turn-proxy и turnable
-  • Корректность URL-шаблонов (jsDelivr CDN + release GitHub + 7 gh-proxy)
+  • Корректность URL-шаблонов (jsDelivr CDN + release GitHub + 3 gh-proxy)
   • Что /root/ — первый в MANUAL_UPLOAD_PATHS (рекомендуемый для WinSCP)
   • Что manual_incoming_dir в PackageSpec'ах указывает на /root/
   • КРИТИЧЕСКИЙ ИНВАРИАНТ: manual_incoming_dir != install_dests (защита от
@@ -84,7 +84,7 @@ class TestMirrorListStructure(unittest.TestCase):
 
     def test_turntunnel_at_least_5_mirrors(self):
         """Минимум 5 зеркал: 4 jsDelivr + release GitHub + gh-proxy (минимум 1).
-        Реально 12: 4 jsDelivr + release GitHub + 7 gh-proxy = 12 (raw GitHub
+        Реально 8: 4 jsDelivr + release GitHub + 3 gh-proxy = 8 (raw GitHub
         и Statically отключены для tag=latest, т.к. ветки "latest" не существует)."""
         self.assertGreaterEqual(TURNTUNNEL_MIRRORS_COUNT, 5)
 

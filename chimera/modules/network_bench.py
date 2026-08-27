@@ -511,7 +511,8 @@ def install_iperf3() -> bool:
     # ручного размещения.
     #
     # Теперь: fetch_package(IPERF3_SPEC, arch=...) из download_manager.py.
-    # fetch_package перебирает 8 зеркал (release GitHub + 7 gh-proxy) и
+    # fetch_package перебирает 8 зеркал (4 jsDelivr + release GitHub +
+    # 3 gh-proxy) и
     # проверяет /root/iperf3-{arch} для ручного размещения.
     from chimera.modules.download_manager import fetch_package
     from chimera.modules.iperf3_packages import IPERF3_SPEC

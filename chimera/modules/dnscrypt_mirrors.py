@@ -84,7 +84,8 @@ def get_dnscrypt_mirrors(tag: str, arch: str = "linux_x86_64") -> list[str]:
         1. jsDelivr CDN family (4 бэкенда) — /gh/DNSCrypt/dnscrypt-proxy@{tag}/...
         2. raw.githubusercontent.com/{tag}/{filename}
         3. release GitHub (/releases/download/{tag}/{filename})
-        4. 7 GitHub-прокси — /releases/download/{tag}/{filename}
+        4. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc) —
+           /releases/download/{tag}/{filename}
         5. Statically CDN — /gh/DNSCrypt/dnscrypt-proxy/{tag}/{filename}
 
     Имя файла: "dnscrypt-proxy-{arch}-{tag}.tar.gz" (версия ВКЛЮЧЕНА в имя).
