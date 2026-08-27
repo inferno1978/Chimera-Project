@@ -761,6 +761,165 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  BUGFIX (v53): регенерация конфига сохраняет юзеров (anti-EOF)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestChainEntryMultiPreservesUsers(unittest.TestCase):
+    """
+    РЕГРЕССИЯ v53 (реальный инцидент на VPS без IPv6):
+    после установки AGH _regenerate_xray_config() перегенерировала
+    /etc/xray/config.json с clients=[PARAM_UUID из state.json].
+    state.json содержал dc1c190b-... (второй прогон промптов), а
+    выданная клиентская ссылка — b707d8cc-... (users.json). UUID из
+    ссылки выпал из конфига → xray рвал каждое соединение
+    «invalid request user id» → сплошные EOF в клиенте.
+
+    Фикс: clients собираются из _unified_load_users() (users.json +
+    текущий конфиг) + PARAM_UUID. Ссылки, выданные ДО регенерации,
+    обязаны оставаться валидными.
+    """
+
+    # UUID из клиентской ссылки (инцидент на panel.example)
+    _LINK_UUID = "aa0025-0000-4000-8000-000000000025"
+    # UUID, который попал в state.json (и раньше — единственный в clients)
+    _STATE_UUID = "aa0026-0000-4000-8000-000000000026"
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+        self._tmpdir = tempfile.mkdtemp()
+        self._config_dir = Path(self._tmpdir) / "xray"
+        self._config_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _prepare(self, users: list | None = None):
+        """fake_core из xhttp-регрессии, переведённый в reality-режим."""
+        c = self._fake_core
+        c._assert_reality_dest_sane = lambda *a, **kw: None
+        c._run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+        c._build_xhttp_settings = MagicMock(return_value=(
+            {"path": "/xh", "mode": "stream-up"}, {"tcpFastOpen": True}))
+        c._build_tls_settings_xhttp = MagicMock(return_value={
+            "serverName": "test.example.com", "certificates": []})
+        c._build_sockopt = MagicMock(return_value={"tcpFastOpen": True})
+        c._build_exit_xhttp_outbound_settings = MagicMock(return_value={
+            "path": "/x", "mode": "stream-up"})
+        c._xray_log_block = MagicMock(return_value={"loglevel": "info"})
+        c._apply_stats_to_config = MagicMock()
+        c._set_config_owner = MagicMock()
+        c.build_split_tunnel_routing_rules = MagicMock(return_value=[])
+        c.generate_xray_config = MagicMock()
+        c.generate_xray_config_xhttp = MagicMock()
+        c.info = MagicMock()
+        c.warn = MagicMock()
+        c.success = MagicMock()
+        c.log_to_file = MagicMock()
+        c._h2_reapply_transport_if_active = MagicMock()
+        c.PROTOCOL_MODE = "reality"
+        c.PARAM_DOMAIN = "test.example.com"
+        c.PARAM_UUID = self._STATE_UUID          # state.json «правда»
+        c.XTLS_FLOW = "xtls-rprx-vision"
+        c.XHTTP_MODE = "stream-up"
+        c.XHTTP_PATH = "/xh"
+        c.XHTTP_BACKEND_PORT = 8443
+        c.XHTTP_TCP_NO_DELAY = False
+        c.XHTTP_ENABLE_SESSION_RESUMPTION = False
+        c.AWG_EXIT_ENABLED = False
+        c.H2_EXIT_ENABLED = False
+        c.PARAM_REALITY_DEST = ""
+        c.PARAM_SOCKET_PATH = "/var/run/xray/vless-reality.sock"
+        c.PARAM_SPIDERX = "/"
+        c.PARAM_PRIVATE_KEY = "PRIV"
+        c.PARAM_PUBLIC_KEY = "PUB"
+        c.PARAM_SHORTID = "abcd1234"
+        c.SERVER_PORT = 443
+        c.AWG_FWMARK = 1000
+        c.SPLIT_TUNNEL_ENABLED = False
+        c.IS_IPV6_AVAILABLE = False
+        c.DNSCRYPT_LISTEN_PORT = 5300
+        c.DNSCRYPT_LISTEN_ADDR = "127.0.0.1"
+        c.DNSCRYPT_INSTALLED = False
+        c.CHAIN_BALANCER_STRATEGY = "roundRobin"
+        c.CHAIN_PINNED_NODE_INDEX = -1
+        c.CONFIG_DIR = self._config_dir
+        c.XRAY_BIN = "/usr/local/bin/xray"
+        c.Any = object
+        c.CHAIN_NODES = [{
+            "host":    "1.2.3.4",
+            "port":    443,
+            "uuid":    "exit-uuid-1234",
+            "pubkey":  "EXIT_PUB",
+            "shortid": "exit0123",
+            "sni":     "exit.example.com",
+            "fp":      "chrome",
+            "proto":   "reality",
+        }]
+        c.CHAIN_EXIT_HOST = ""
+        c.CHAIN_EXIT_PORT = 443
+        c.CHAIN_EXIT_UUID = ""
+        c.CHAIN_EXIT_PUBKEY = ""
+        c.CHAIN_EXIT_SHORTID = ""
+        c.CHAIN_EXIT_SNI = ""
+        c.CHAIN_EXIT_FP = "chrome"
+        # users.json — юзер, чья ссылка выдана клиенту (источник ссылки)
+        users_file = self._config_dir / "users.json"
+        users_file.write_text(json.dumps(
+            users if users is not None else [
+                {"uuid": self._LINK_UUID, "email": "netwalker@xray",
+                 "name": "netwalker", "created": "2026-08-20", "source": "B"},
+            ]))
+        c.USERS_FILE = users_file
+
+    def _generate(self):
+        from chimera.modules import chain_nodes
+        # Паттерн «Path.exists(self)» внутри лямбды РЕКУРСИВЕН (Path.exists
+        # уже заменён) — RecursionError молча гасится try/except фикса.
+        # Захватываем оригинал ДО патча, как в test_users_manager.
+        _skip = ("usr/local/etc/xray", "/etc/xray/config.json")
+        _orig_exists = Path.exists
+
+        def _exists(p):
+            if any(s in str(p) for s in _skip):
+                return False
+            return _orig_exists(p)
+
+        with patch.object(Path, "exists", _exists):
+            chain_nodes.generate_xray_config_chain_entry_multi()
+        return json.loads((self._config_dir / "config.json").read_text())
+
+    def test_link_uuid_survives_regeneration(self):
+        """UUID из выданной ссылки остаётся в clients после регенерации."""
+        self._prepare()
+        cfg = self._generate()
+        clients = cfg["inbounds"][0]["settings"]["clients"]
+        ids = [cl["id"] for cl in clients]
+        self.assertIn(self._LINK_UUID, ids,
+                      "UUID из клиентской ссылки обязан остаться в clients — "
+                      "иначе клиент получает EOF «invalid request user id»")
+        self.assertIn(self._STATE_UUID, ids,
+                      "PARAM_UUID из state.json тоже должен присутствовать")
+        self.assertEqual(len(ids), len(set(ids)), "Без дублей UUID")
+
+    def test_clients_have_email_and_flow_in_reality(self):
+        """REALITY-клиенты: email у всех, flow у всех."""
+        self._prepare()
+        cfg = self._generate()
+        clients = cfg["inbounds"][0]["settings"]["clients"]
+        self.assertGreaterEqual(len(clients), 2)
+        for cl in clients:
+            self.assertTrue(cl.get("email"), "email обязателен (дедуп xray)")
+            self.assertEqual(cl.get("flow"), "xtls-rprx-vision")
+
+    def test_fresh_install_single_param_uuid(self):
+        """Fresh install (users.json пуст) → clients=[PARAM_UUID], как раньше."""
+        self._prepare(users=[])
+        cfg = self._generate()
+        clients = cfg["inbounds"][0]["settings"]["clients"]
+        self.assertEqual([cl["id"] for cl in clients], [self._STATE_UUID])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  _save_chain_nodes_to_state — запись нод обратно в state.json
 # ══════════════════════════════════════════════════════════════════════════════
 class TestSaveChainNodesToState(unittest.TestCase):
