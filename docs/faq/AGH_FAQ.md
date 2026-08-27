@@ -1250,7 +1250,7 @@ resolver — все остальные домены молчат (транзит
 | 4 | Не добавлять домены DNS-резолверов (`cloudflare-dns.com`, `dns.google`, `dns.quad9.net`) в сеты — и тем более в Block | Upstream DNSCrypt и так зашифрован; Block на таком домене рвёт upstream |
 | 5 | Не использовать домены сетов как REALITY dest/SNI для exit-нод | Туннели к exit-нодам идут через очередь b4: совпадение SNI включит стратегии на собственном туннеле |
 | 6 | В сете «Перенаправление DNS» → обычный DNS `127.0.0.1`, а не внешний DoH | b4 остаётся прозрачным: домены сетов идут через AGH → DNSCrypt, единая DNS-плоскость |
-| 7 | Импорт кастомных сетов — только через TUI Chimera (пункт 3), не через Web UI | Сеты из Discovery содержат `geosite_categories` и не работают (DPI_BYPASS_FAQ §7) |
+| 7 | Импорт кастомных сетов — только через TUI Chimera (пункт 3), не через Web UI | Chimera нормализует wildcard-домены, выставляет `enabled`, прописывает `system.geo.sitedat_path` и чистит legacy-поля (DPI_BYPASS_FAQ §7) |
 
 По пунктам 1–2 Chimera позаботилась бы и сама, а вот пункты 3–6 —
 зона ручной дисциплины: их нарушение не ломает стек сразу, но
@@ -1269,11 +1269,14 @@ resolver — все остальные домены молчат (транзит
   перехваченных запросах. Никогда не совмещать с catch-all.
 - **Закреплённые адреса (pins)** — работают только для доменов,
   уже входящих в цели сета; TTL ответа — 60 секунд.
-- Создание сета прямо в Web UI (Discovery → Create Set) работает
-  некорректно: b4 сохраняет `geosite_categories`, для которых нужен
-  `geosite_path`. Рабочий путь: Discovery → Use This Strategy →
+- Сет, созданный прямо в Web UI (Discovery → Create Set), может
+  содержать `geosite_categories` — для них валидация b4 требует
+  `system.geo.sitedat_path` (Chimera прописывает путь к geosite.dat
+  Xray). Рабочий путь при проблемах: Discovery → Use This Strategy →
   Create Set → три точки на карточке → Edit → Import/Export →
   Copy JSON → удалить сет → импорт через TUI Chimera (пункт 3).
+  QUIC-блок — per-set: включается переключателем «Блокировать QUIC»
+  (карточка сета → UDP).
 - Модули «YouTube через B4» и «DPI Bypass» работают с одним конфигом
   `/etc/b4/config.json` и одним сервисом — изменения видны в обоих
   меню (подробно — DPI_BYPASS_FAQ §13).

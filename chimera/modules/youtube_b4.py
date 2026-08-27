@@ -138,18 +138,30 @@ B4_WEB_PORT     = 9700
 #  ДЕФОЛТНЫЕ СЕТЫ
 # ══════════════════════════════════════════════════════════════════════════
 
+#  КАНОН QUIC-БЛОКА (b4 >= 1.79, docs: sets/udp.md + Web UI «Блокировать QUIC»):
+#  per-set "udp": {"filter_quic": "all", "mode": "reject"}.
+#  filter_quic и mode живут ТОЛЬКО внутри сета — верхнего уровня "udp"
+#  в Config b4 нет (queue/system/sets/ui), значения "block" не существует:
+#  NormalizeQUICFilter переименует всё, кроме "all", в "sni".
+#  "reject" = дроп + ICMP port unreachable → мгновенный откат браузера
+#  на TCP/HTTP2, где работают fake SNI + фрагментация.
+_B4_QUIC_BLOCK_UDP = {
+    "mode": "reject",
+    "filter_quic": "all",
+}
+
 # Эталонный сет юзера (DuckDuckGo fake + combo fragmentation).
 # Проверен на провайдере юзера — работает с b4 на роутере.
 # На VPS может потребоваться Discovery для подбора под конкретного хостера.
 DEFAULT_SET_YOUTUBE = {
     "id": "youtube",
-    "b4_version": B4_VERSION,
     "name": "Youtube",
     "enabled": True,
     "tcp": {
         "seg2delay": 20,
         "seg2delay_max": 60,
     },
+    "udp": dict(_B4_QUIC_BLOCK_UDP),
     "faking": {
         "ttl": 4,
         "sni_type": 3,  # DuckDuckGo preset
@@ -178,13 +190,13 @@ DEFAULT_SET_YOUTUBE = {
 # Может работать там, где DuckDuckGo-preset перестал работать.
 AGGRESSIVE_SET_YOUTUBE = {
     "id": "youtube",
-    "b4_version": B4_VERSION,
     "name": "Youtube-Aggressive",
     "enabled": True,
     "tcp": {
         "seg2delay": 10,
         "seg2delay_max": 30,
     },
+    "udp": dict(_B4_QUIC_BLOCK_UDP),
     "faking": {
         "ttl": 4,
         "sni_type": 2,  # Google preset (www.google.com)
@@ -211,13 +223,13 @@ AGGRESSIVE_SET_YOUTUBE = {
 # Минимальный оверхед, для «поверхностного» DPI.
 LIGHT_SET_YOUTUBE = {
     "id": "youtube",
-    "b4_version": B4_VERSION,
     "name": "Youtube-Light",
     "enabled": True,
     "tcp": {
         "seg2delay": 30,
         "seg2delay_max": 80,
     },
+    "udp": dict(_B4_QUIC_BLOCK_UDP),
     "faking": {
         # Fake SNI выключен — только фрагментация
         "sni": False,
@@ -824,24 +836,24 @@ def _write_empty_config() -> bool:
     b4 запускается с пустым sets — работает в no-op режиме (не применяет
     DPI bypass), но Web UI, Discovery, API доступны.
 
-    ВАЖНО: geosite_path обязателен для Discovery в Web UI. Без него b4
-    падает с 'geosite path not configured' при попытке создать set через
-    Discovery (т.к. Discovery использует geosite_categories вместо
-    sni_domains).
+    Формат — только живые поля b4 (Config = version/queue/system/sets/ui):
+    никаких верхнеуровневых "udp"/"routing" (b4 их не читает и выкидывает
+    при собственном сохранении конфига). QUIC-блок — per-set, живёт в
+    каждом сете (см. _B4_QUIC_BLOCK_UDP).
+
+    ВАЖНО: system.geo.sitedat_path нужен для сетов с geosite_categories
+    (в т.ч. создаваемых через Discovery в Web UI): без него валидация b4
+    отклоняет сет с 'geosite path must be configured'. Путь указывает на
+    geosite.dat самого Xray — отдельный файл b4 не нужен.
     """
     B4_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     B4_SETS_DIR.mkdir(parents=True, exist_ok=True)
     B4_LOG_DIR.mkdir(parents=True, exist_ok=True)
     config = {
         "sets": [],
-        "routing": {"enabled": False},
-        "udp": {
-            "mode": "fake",
-            "filter_quic": "block",
-        },
         "system": {
-            "geosite_path": "/usr/share/xray/geosite.dat",
             "geo": {
+                "sitedat_path": "/usr/share/xray/geosite.dat",
                 "ipdat_path": "/etc/b4/geoip.dat",
                 "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
             },
@@ -870,14 +882,13 @@ def _write_default_config() -> bool:
 
     config = {
         "sets": [youtube_set],
-        # Дополнительные поля для Chimera-специфики:
-        "routing": {"enabled": False},  # Не SOCKS5-upstream — direct bypass
-        "udp": {
-            "mode": "fake",              # fake UDP packets (b4 default)
-            "filter_quic": "block",      # Блокировать QUIC (UDP/443) — браузер
-                                         # откатывается на TCP/HTTP2, где b4
-                                         # применяет fake SNI + фрагментацию.
-                                         # Без этого QUIC bypass-ит DPI bypass.
+        # Система (geosite/geoip пути для Discovery) — как в _write_empty_config.
+        "system": {
+            "geo": {
+                "sitedat_path": "/usr/share/xray/geosite.dat",
+                "ipdat_path": "/etc/b4/geoip.dat",
+                "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
+            },
         },
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
@@ -1231,6 +1242,15 @@ def _sets_match(a: dict, b: dict) -> bool:
         return False
     if a_tcp.get("seg2delay_max") != b_tcp.get("seg2delay_max"):
         return False
+    # QUIC-блок per-set (b4 >= 1.79): mode + filter_quic. Сет без
+    # udp-секции (defaults b4: mode="fake", filter_quic="sni") — это
+    # ДРУГОЕ поведение, чем квик-блок (mode="reject", filter_quic="all").
+    a_udp = a.get("udp", {})
+    b_udp = b.get("udp", {})
+    if a_udp.get("mode") != b_udp.get("mode"):
+        return False
+    if a_udp.get("filter_quic") != b_udp.get("filter_quic"):
+        return False
     return True
 
 
@@ -1461,6 +1481,53 @@ def _migrate_to_native_rules_if_needed() -> bool:
     return True
 
 
+def _b4_clean_legacy_config_keys(cfg: dict) -> int:
+    """Чистит legacy-поля b4-конфига in-place, возвращает число исправлений.
+
+    b4 (проверено по исходникам 1.80rc1: src/config/config.go) читает
+    только version/queue/system/sets/ui — остальные верхнеуровневые ключи
+    игнорируются при загрузке и выкидываются при сохранении самим b4
+    (MarshalSparse пишет только поля структур). Прежние версии Chimera
+    писали мёртвые ключи:
+
+      • верхнеуровневые "udp" (c filter_quic:"block") и "routing" —
+        b4 их никогда не читал: QUIC-настройки живут per-set
+        (sets[].udp), значения "block" не существует вовсе
+        (NormalizeQUICFilter переписывает всё ≠ "all" в "sni");
+      • "system.geosite_path" — правильное поле system.geo.sitedat_path
+        (GeoDatConfig, json-тег sitedat_path);
+      • "b4_version" внутри сета — не поле SetConfig, informational-мусор.
+
+    Вызывается перед записью config.json из switch_preset() и
+    import_custom_set() — конфиг, написанный старой Chimera, конвергирует
+    к живому формату при первом же переключении пресета / импорте сета.
+    """
+    fixed = 0
+    if not isinstance(cfg, dict):
+        return 0
+    # 1. Мёртвые верхнеуровневые секции.
+    for key in ("udp", "routing"):
+        if key in cfg:
+            del cfg[key]
+            fixed += 1
+    # 2. system.geosite_path → system.geo.sitedat_path.
+    system = cfg.get("system")
+    if isinstance(system, dict) and "geosite_path" in system:
+        legacy_path = system.pop("geosite_path")
+        fixed += 1
+        geo = system.setdefault("geo", {})
+        if isinstance(geo, dict) and not geo.get("sitedat_path") and legacy_path:
+            geo["sitedat_path"] = legacy_path
+    # 3. Мёртвое поле b4_version в сетах.
+    sets = cfg.get("sets")
+    if isinstance(sets, list):
+        for s in sets:
+            if isinstance(s, dict) and "b4_version" in s:
+                del s["b4_version"]
+                fixed += 1
+    return fixed
+
+
 def switch_preset(preset_name: str) -> bool:
     """Меняет активный preset (default/aggressive/light). Перезапускает b4."""
     if preset_name not in PRESETS:
@@ -1488,12 +1555,17 @@ def switch_preset(preset_name: str) -> bool:
     # Секция system (geosite/geoip пути для Discovery) — обязательна.
     if not existing_cfg.get("system"):
         existing_cfg["system"] = {
-            "geosite_path": "/usr/share/xray/geosite.dat",
             "geo": {
+                "sitedat_path": "/usr/share/xray/geosite.dat",
                 "ipdat_path": "/etc/b4/geoip.dat",
                 "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
             },
         }
+    # Чистим legacy-поля старого конфига (udp/routing, geosite_path, b4_version).
+    legacy_fixed = _b4_clean_legacy_config_keys(existing_cfg)
+    if legacy_fixed:
+        _info(f"Чистка legacy-полей конфига b4: {legacy_fixed} исправлений "
+              f"(udp/routing, geosite_path → geo.sitedat_path, b4_version)")
     B4_CONFIG_FILE.write_text(json.dumps(existing_cfg, indent=2, ensure_ascii=False))
     # Перезапускаем сервис.
     subprocess.run(["systemctl", "restart", "b4"], capture_output=True, check=False)
@@ -1822,6 +1894,13 @@ def import_custom_set(json_str: str) -> bool:
     if "enabled" not in custom_set:
         custom_set["enabled"] = True
 
+    # Мёртвое поле b4_version (не поле SetConfig — b4 его игнорирует
+    # и выкидывает при сохранении). В сете может прийти из экспорта
+    # конфига, написанного старой Chimera.
+    if "b4_version" in custom_set:
+        del custom_set["b4_version"]
+        _info("Удалено legacy-поле b4_version из импортируемого сета")
+
     #  Основной путь: REST API b4 (b4 >= 1.78). b4 сам валидирует сет,
     #  применяет hot-reload (без systemctl restart — соединения не рвутся,
     #  Discovery-кеш и статистика не теряются) и сохраняет config.json,
@@ -1883,12 +1962,17 @@ def import_custom_set(json_str: str) -> bool:
     # сохраняем её как есть.
     if not existing_cfg.get("system"):
         existing_cfg["system"] = {
-            "geosite_path": "/usr/share/xray/geosite.dat",
             "geo": {
+                "sitedat_path": "/usr/share/xray/geosite.dat",
                 "ipdat_path": "/etc/b4/geoip.dat",
                 "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
             },
         }
+    # Чистим legacy-поля старого конфига (udp/routing, geosite_path, b4_version).
+    legacy_fixed = _b4_clean_legacy_config_keys(existing_cfg)
+    if legacy_fixed:
+        _info(f"Чистка legacy-полей конфига b4: {legacy_fixed} исправлений "
+              f"(udp/routing, geosite_path → geo.sitedat_path, b4_version)")
     try:
         B4_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         B4_CONFIG_FILE.write_text(json.dumps(existing_cfg, indent=2, ensure_ascii=False))
