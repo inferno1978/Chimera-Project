@@ -624,6 +624,24 @@ def generate_xray_config_chain_entry() -> None:
 
     query_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
 
+    # ── BUGFIX (v53): clients — из ЕДИНОГО источника юзеров ──────────
+    #    Раньше сюда жёстко подставлялся PARAM_UUID из state.json. При
+    #    регенерации конфига (AGH-финализация / «Пересоздать конфиг
+    #    Xray» / emergency repair) все остальные юзеры выпадали из
+    #    clients → xray рвал соединения «invalid request user id» →
+    #    EOF у клиентов со ссылками, выданными до регенерации.
+    #    Теперь: _unified_load_users() (users.json + текущий конфиг) +
+    #    PARAM_UUID как fallback/дополнение. Fresh install поведение
+    #    не меняется (юзеров нет → clients=[PARAM_UUID]).
+    try:
+        from chimera.modules.users_manager import (
+            _users_collect_for_config, _clients_from_users)
+        _cfg_users = _users_collect_for_config(
+            PARAM_UUID, f"user@{PARAM_DOMAIN}")
+    except Exception:
+        _cfg_users = [{"uuid": PARAM_UUID,
+                       "email": f"user@{PARAM_DOMAIN}"}]
+
     if PROTOCOL_MODE == "xhttp":
         cert_path_str = f"/etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem"
         key_path_str  = f"/etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem"
@@ -634,10 +652,7 @@ def generate_xray_config_chain_entry() -> None:
             "listen":   "::",
             "protocol": "vless",
             "settings": {
-                "clients": [{
-                    "id":    PARAM_UUID,
-                    "email": f"user@{PARAM_DOMAIN}",
-                }],
+                "clients": _clients_from_users(_cfg_users),
                 "decryption": "none",
             },
             "sniffing": {
@@ -662,11 +677,7 @@ def generate_xray_config_chain_entry() -> None:
             "listen":   "::",
             "protocol": "vless",
             "settings": {
-                "clients": [{
-                    "id":    PARAM_UUID,
-                    "email": f"user@{PARAM_DOMAIN}",
-                    **( {"flow": XTLS_FLOW} if XTLS_FLOW else {} ),
-                }],
+                "clients": _clients_from_users(_cfg_users, XTLS_FLOW),
                 "decryption": "none",
             },
             # FIX: sniffing с 'quic' в destOverride — Xray перехватывает QUIC
@@ -2030,6 +2041,25 @@ def generate_xray_config_chain_entry_multi() -> None:
         outbounds_exit.append(out)
 
     # Inbound от клиента — зависит от PROTOCOL_MODE
+    # ── BUGFIX (v53): clients — из ЕДИНОГО источника юзеров ──────────
+    #    Раньше сюда жёстко подставлялся PARAM_UUID из state.json. При
+    #    регенерации конфига (AGH-финализация / «Пересоздать конфиг
+    #    Xray» / emergency repair) все остальные юзеры выпадали из
+    #    clients → xray рвал соединения «invalid request user id» →
+    #    EOF у клиентов со ссылками, выданными до регенерации
+    #    (регрессия на vds без IPv6: state.uuid ≠ uuid в /root/vless_link.txt).
+    #    Теперь: _unified_load_users() (users.json + текущий конфиг) +
+    #    PARAM_UUID как fallback/дополнение. Fresh install поведение
+    #    не меняется (юзеров нет → clients=[PARAM_UUID]).
+    try:
+        from chimera.modules.users_manager import (
+            _users_collect_for_config, _clients_from_users)
+        _cfg_users = _users_collect_for_config(
+            PARAM_UUID, f"user@{PARAM_DOMAIN}")
+    except Exception:
+        _cfg_users = [{"uuid": PARAM_UUID,
+                       "email": f"user@{PARAM_DOMAIN}"}]
+
     if PROTOCOL_MODE == "xhttp":
         # Схема Nginx → Xray (loopback backend):
         # Xray-core не поддерживает fallbacks для xHTTP (задокументированное
@@ -2046,10 +2076,7 @@ def generate_xray_config_chain_entry_multi() -> None:
             "listen":   "127.0.0.1",          # только loopback — извне не доступно
             "protocol": "vless",
             "settings": {
-                "clients": [{
-                    "id":    PARAM_UUID,
-                    "email": f"user@{PARAM_DOMAIN}",
-                }],
+                "clients": _clients_from_users(_cfg_users),
                 "decryption": "none",
             },
             "sniffing": {
@@ -2073,11 +2100,7 @@ def generate_xray_config_chain_entry_multi() -> None:
             "listen":   "::",
             "protocol": "vless",
             "settings": {
-                "clients": [{
-                    "id":    PARAM_UUID,
-                    "email": f"user@{PARAM_DOMAIN}",
-                    **( {"flow": XTLS_FLOW} if XTLS_FLOW else {} ),
-                }],
+                "clients": _clients_from_users(_cfg_users, XTLS_FLOW),
                 "decryption": "none",
             },
             # FIX: sniffing с 'quic' в destOverride — Xray перехватывает QUIC

@@ -2,6 +2,43 @@
 
 ---
 
+## FIX(xray): регенерация конфига сохраняет юзеров — anti-EOF «invalid request user id» — 27 августа 2026 (v53)
+
+Реальный инцидент (VPS без IPv6, panel.example): после установки
+AdGuard Home `_regenerate_xray_config()` пересоздала
+`/etc/xray/config.json` с `clients=[PARAM_UUID из state.json]`.
+state.json к этому моменту содержал UUID второго прогона промптов
+(dc1c190b), а выданная клиентская ссылка — UUID юзера из users.json
+(b707d8cc, /root/vless_link.txt). UUID из ссылки выпал из clients →
+xray рвал каждое соединение «invalid request user id» → сплошные
+EOF в клиенте. AGH был виноват лишь косвенно (совпадение по времени).
+
+Фикс — единый источник юзеров для ЛЮБОЙ генерации конфига:
+
+- `users_manager._users_collect_for_config(param_uuid, param_email)` —
+  новый канон: активные юзеры из `_unified_load_users()` (users.json +
+  текущий config.json; без disabled и ios-shadow) с дедупликацией по
+  UUID и email + PARAM_UUID как fallback/дополнение. Fresh install
+  не меняется (юзеров нет → clients=[PARAM_UUID]);
+- `users_manager._clients_from_users(users, flow)` — формат Xray
+  clients `[{"id","email"[,"flow"]}]` (совпадает с
+  `_users_patch_config_no_restart`);
+- генераторы переписаны на канон (6 точек): chain_nodes.
+  `generate_xray_config_chain_entry()` (reality + xhttp),
+  `generate_xray_config_chain_entry_multi()` (reality + xhttp),
+  xray_install.`generate_xray_config()`,
+  `generate_xray_config_xhttp()`. Теперь AGH-финализация,
+  «Пересоздать конфиг Xray» и emergency repair не могут выкинуть
+  существующих юзеров из inbound — ссылки, выданные ДО регенерации,
+  остаются валидными.
+
+Тесты: +10 (TestUsersCollectForConfig — 7, TestChainEntryMulti-
+PreservesUsers — 3, включая точную репродукцию инцидента: users.json
+b707d8cc + state.json dc1c190b → оба UUID в clients). Полный прогон
+зелёный (кроме заведомо красного test_mirror_urls_has_14_entries).
+
+---
+
 ## FIX(b4)+DOCS: семантика b4 1.79+/1.80rc1 — per-set QUIC-блок, чистка legacy-полей конфига — 27 августа 2026 (v52)
 
 Актуализация под реальную семантику b4 (проверено по исходникам

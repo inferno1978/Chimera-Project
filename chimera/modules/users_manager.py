@@ -1493,6 +1493,69 @@ def _unified_load_users() -> list[dict]:
     return merged
 
 
+def _users_collect_for_config(param_uuid: str, param_email: str = "") -> list[dict]:
+    """
+    Единый источник юзеров для ГЕНЕРАЦИИ/РЕГЕНЕРАЦИИ конфига Xray.
+
+    Возвращает активных юзеров из _unified_load_users() (users.json +
+    текущий config.json; без disabled и ios_shadow), дедуп по UUID и
+    email. Если param_uuid среди них отсутствует — добавляется и он
+    (fallback для fresh install: юзеров ещё нет, конфиг получает хотя
+    бы PARAM_UUID как раньше).
+
+    ЗАЧЕМ: регенерация конфига (AGH-финализация, «Пересоздать конфиг
+    Xray», emergency repair) раньше писала clients=[PARAM_UUID из
+    state.json]. Если state.json расходился с выданными ссылками
+    (повторный прогон промптов), UUID из ссылок выпадал из конфига →
+    xray рвал соединение «invalid request user id» → EOF у клиентов.
+    Ссылки, выданные пользователю, обязаны оставаться валидными.
+    """
+    users: list[dict] = []
+    try:
+        users = _unified_load_users()
+    except Exception:
+        users = []
+    active = [u for u in users
+              if u.get("uuid") and not u.get("disabled")
+              and not u.get("is_ios_shadow")]
+
+    seen_uuids: set[str] = set()
+    seen_emails: set[str] = set()
+    out: list[dict] = []
+    for u in active:
+        uid = u["uuid"]
+        email = u.get("email") or f"{uid[:8]}@xray"
+        if uid in seen_uuids or email in seen_emails:
+            continue
+        seen_uuids.add(uid)
+        seen_emails.add(email)
+        out.append({"uuid": uid, "email": email})
+
+    if param_uuid and param_uuid not in seen_uuids:
+        p_email = param_email or f"{param_uuid[:8]}@xray"
+        if p_email not in seen_emails:
+            out.append({"uuid": param_uuid, "email": p_email})
+    return out
+
+
+def _clients_from_users(users: list[dict], flow: str = "") -> list[dict]:
+    """
+    [{"uuid","email"}] → формат clients Xray inbound
+    ([{"id","email"[,"flow"]}]). flow добавляется только если непустой
+    (REALITY-инбаунды используют xtls-rprx-vision, xHTTP — нет).
+    Формат совпадает с _users_patch_config_no_restart().
+    """
+    clients: list[dict] = []
+    for u in users:
+        c: dict = {"id": u["uuid"]}
+        if u.get("email"):
+            c["email"] = u["email"]
+        if flow:
+            c["flow"] = flow
+        clients.append(c)
+    return clients
+
+
 def _unified_save_users(users: list[dict]) -> None:
     """
     Сохраняет список пользователей в обоих форматах одновременно:
