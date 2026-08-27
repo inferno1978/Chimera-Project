@@ -953,8 +953,9 @@ class TestSetsMatch(unittest.TestCase):
     """_sets_match — сравнение ключевых полей двух b4 set'ов.
 
     Используется для детекта активного preset'а из config.json.
-    Сравнивает: домены, fake SNI (sni_type, ttl, sni on/off), TCP-фрагментацию.
-    НЕ сравнивает: id, name, b4_version, enabled.
+    Сравнивает: домены, fake SNI (sni_type, ttl, sni on/off), TCP-фрагментацию,
+    QUIC-блок per-set (udp.mode + udp.filter_quic).
+    НЕ сравнивает: id, name, enabled.
     """
 
     def setUp(self):
@@ -1058,6 +1059,41 @@ class TestSetsMatch(unittest.TestCase):
         """Aggressive preset — match с самим собой."""
         self.assertTrue(self.dpi_bypass._sets_match(self.aggressive_set,
                                                      dict(self.aggressive_set)))
+
+    def test_missing_udp_section_no_match_with_preset(self):
+        """Сет без udp-секции (defaults b4: fake/sni) ≠ пресет с QUIC-блоком.
+
+        QUIC-блок — per-set (b4 >= 1.79): reject/all — другое поведение,
+        чем fake/sni. Старый конфиг без udp-секции — это 'custom'.
+        """
+        legacy_set = dict(self.default_set)
+        legacy_set.pop("udp", None)
+        self.assertFalse(self.dpi_bypass._sets_match(legacy_set,
+                                                     self.default_set))
+
+    def test_different_udp_mode_no_match(self):
+        """Разный udp.mode (reject vs fake) — no match."""
+        modified = dict(self.default_set)
+        modified["udp"] = {"mode": "fake", "filter_quic": "all"}
+        self.assertFalse(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_different_filter_quic_no_match(self):
+        """Разный udp.filter_quic (all vs sni) — no match."""
+        modified = dict(self.default_set)
+        modified["udp"] = {"mode": "reject", "filter_quic": "sni"}
+        self.assertFalse(self.dpi_bypass._sets_match(modified, self.default_set))
+
+    def test_legacy_filter_quic_block_is_not_quic_block(self):
+        """REGRESSION: filter_quic="block" — легаси-значение.
+
+        NormalizeQUICFilter b4 переписывает всё, кроме "all", в "sni" —
+        т.е. "block" НЕ является QUIC-блоком. Сет с udp.filter_quic="block"
+        не должен матчиться с пресетом (reject/all).
+        """
+        legacy_set = dict(self.default_set)
+        legacy_set["udp"] = {"mode": "reject", "filter_quic": "block"}
+        self.assertFalse(self.dpi_bypass._sets_match(legacy_set,
+                                                     self.default_set))
 
 
 class TestDetectActivePresetFromConfig(unittest.TestCase):
@@ -1868,7 +1904,13 @@ class TestCleanInstallEmptyConfig(unittest.TestCase):
                          "install_b4() НЕ должен вызывать _write_default_config()")
 
     def test_write_empty_config_creates_empty_sets(self):
-        """_write_empty_config() создаёт config с пустым массивом sets + geosite_path."""
+        """_write_empty_config() создаёт config: пустой sets + system.geo.sitedat_path.
+
+        REGRESSION (b4 1.79+/1.80rc1): верхнеуровневые "udp"/"routing" —
+        мёртвые ключи (Config b4 = version/queue/system/sets/ui), b4 их не
+        читает и выкидывает при собственном сохранении. Правильный путь
+        geosite — system.geo.sitedat_path (GeoDatConfig), не system.geosite_path.
+        """
         import tempfile
         tmpdir = Path(tempfile.mkdtemp())
         config_file = tmpdir / "config.json"
@@ -1884,13 +1926,20 @@ class TestCleanInstallEmptyConfig(unittest.TestCase):
             self.youtube_b4._write_empty_config()
             cfg = json.loads(config_file.read_text())
             self.assertEqual(cfg["sets"], [])
-            self.assertIn("routing", cfg)
-            self.assertIn("udp", cfg)
-            # geosite_path обязателен для Discovery в Web UI
+            # Мёртвые верхнеуровневые секции — НЕ пишем.
+            self.assertNotIn("routing", cfg,
+                             "верхнеуровневый routing — мёртвый ключ b4")
+            self.assertNotIn("udp", cfg,
+                             "верхнеуровневый udp — мёртвый ключ b4 "
+                             "(QUIC-настройки per-set)")
+            # system.geo.sitedat_path — живой путь к geosite.dat.
             self.assertIn("system", cfg)
-            self.assertIn("geosite_path", cfg["system"])
-            self.assertEqual(cfg["system"]["geosite_path"],
+            self.assertIn("geo", cfg["system"])
+            self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
                              "/usr/share/xray/geosite.dat")
+            self.assertNotIn("geosite_path", cfg["system"],
+                             "system.geosite_path — мёртвый ключ "
+                             "(правильный — system.geo.sitedat_path)")
         finally:
             self.youtube_b4.B4_CONFIG_FILE = orig
             self.youtube_b4.B4_CONFIG_DIR = orig_dir
@@ -2390,6 +2439,182 @@ class TestImportWildcardNormalization(unittest.TestCase):
         self.assertIs(saved["sets"][0]["enabled"], False)
 
 
+class TestB4LegacyConfigCleanup(unittest.TestCase):
+    """_b4_clean_legacy_config_keys — чистка legacy-полей конфига b4.
+
+    Семантика b4 1.79+/1.80rc1 (по исходникам и docs: sets/udp.md):
+      • Config = version/queue/system/sets/ui — верхнеуровневые "udp"
+        (с filter_quic:"block") и "routing" мёртвые;
+      • QUIC-настройки per-set: sets[].udp.mode + sets[].udp.filter_quic;
+      • filter_quic "block" не существует — NormalizeQUICFilter всё,
+        кроме "all", переписывает в "sni";
+      • правильный путь geosite — system.geo.sitedat_path;
+      • "b4_version" в сете — не поле SetConfig.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.youtube_b4 = youtube_b4
+        self.dpi_bypass = dpi_bypass
+
+    def test_removes_dead_top_level_keys(self):
+        """Верхнеуровневые udp/routing удаляются."""
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            cfg = {
+                "sets": [],
+                "routing": {"enabled": False},
+                "udp": {"mode": "fake", "filter_quic": "block"},
+            }
+            fixed = mod._b4_clean_legacy_config_keys(cfg)
+            self.assertEqual(fixed, 2)
+            self.assertNotIn("udp", cfg)
+            self.assertNotIn("routing", cfg)
+
+    def test_migrates_geosite_path_to_geo_sitedat(self):
+        """system.geosite_path → system.geo.sitedat_path (без потери пути)."""
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            cfg = {
+                "sets": [],
+                "system": {
+                    "geosite_path": "/usr/share/xray/geosite.dat",
+                    "geo": {"ipdat_path": "/etc/b4/geoip.dat"},
+                },
+            }
+            fixed = mod._b4_clean_legacy_config_keys(cfg)
+            self.assertEqual(fixed, 1)
+            self.assertNotIn("geosite_path", cfg["system"])
+            self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
+                             "/usr/share/xray/geosite.dat")
+            # Существующие geo-поля не тронуты
+            self.assertEqual(cfg["system"]["geo"]["ipdat_path"],
+                             "/etc/b4/geoip.dat")
+
+    def test_geosite_migration_does_not_overwrite_existing_sitedat(self):
+        """Уже заданный geo.sitedat_path не перезаписывается легаси-значением."""
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            cfg = {
+                "sets": [],
+                "system": {
+                    "geosite_path": "/old/path.dat",
+                    "geo": {"sitedat_path": "/b4/geosite.dat"},
+                },
+            }
+            mod._b4_clean_legacy_config_keys(cfg)
+            self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
+                             "/b4/geosite.dat")
+
+    def test_removes_b4_version_from_sets(self):
+        """Мёртвое поле b4_version вычищается из каждого сета."""
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            cfg = {
+                "sets": [
+                    {"id": "a", "b4_version": "1.78.0"},
+                    {"id": "b", "b4_version": "1.78.0"},
+                    {"id": "c"},
+                ],
+            }
+            fixed = mod._b4_clean_legacy_config_keys(cfg)
+            self.assertEqual(fixed, 2)
+            for s in cfg["sets"]:
+                self.assertNotIn("b4_version", s)
+            self.assertEqual([s["id"] for s in cfg["sets"]], ["a", "b", "c"])
+
+    def test_clean_config_untouched(self):
+        """Конфиг без legacy-полей — 0 исправлений, содержимое не меняется."""
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            cfg = {
+                "version": 52,
+                "sets": [{"id": "x", "udp": {"mode": "reject",
+                                            "filter_quic": "all"}}],
+                "system": {"geo": {"sitedat_path": "/usr/share/xray/geosite.dat"}},
+            }
+            snapshot = json.loads(json.dumps(cfg))
+            fixed = mod._b4_clean_legacy_config_keys(cfg)
+            self.assertEqual(fixed, 0)
+            self.assertEqual(cfg, snapshot)
+
+    def test_non_dict_input_safe(self):
+        """Не-dict на входе — 0 исправлений, без исключения."""
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            self.assertEqual(mod._b4_clean_legacy_config_keys(None), 0)
+            self.assertEqual(mod._b4_clean_legacy_config_keys("junk"), 0)
+
+    def test_import_strips_b4_version_from_incoming_set(self):
+        """import_custom_set вычищает b4_version из вставляемого сета."""
+        self._tmpdir = Path(tempfile.mkdtemp())
+        config_file = self._tmpdir / "config.json"
+        state_file = self._tmpdir / "state.json"
+        self.dpi_bypass.B4_CONFIG_FILE = config_file
+        self.dpi_bypass.B4_CONFIG_DIR = self._tmpdir
+        self.dpi_bypass._STATE_FILE = state_file
+        self.dpi_bypass.subprocess = MagicMock()
+        self.dpi_bypass._b4_rest_import_set = lambda cs: None
+        self.dpi_bypass.apply_routing_for_all_sets = lambda: {
+            "applied": 0, "removed": 0, "total_domains": 0, "errors": []}
+        test_json = json.dumps({
+            "id": "legacy-export",
+            "b4_version": "1.78.0",
+            "targets": {"sni_domains": ["example.com"]},
+        })
+        self.assertTrue(self.dpi_bypass.import_custom_set(test_json))
+        saved = json.loads(config_file.read_text())
+        self.assertNotIn("b4_version", saved["sets"][0])
+        self.assertEqual(saved["sets"][0]["id"], "legacy-export")
+
+
+class TestPresetsQuicBlock(unittest.TestCase):
+    """Пресеты Chimera содержат per-set QUIC-блок — канон b4 1.79+.
+
+    "Блокировать QUIC" (Web UI, вкладка UDP сета) = filter_quic:"all" +
+    mode:"reject" → ICMP port unreachable → мгновенный откат браузера
+    на TCP/HTTP2, где работают fake SNI + фрагментация. Значения
+    "block" не существует: NormalizeQUICFilter → "sni".
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.modules = (youtube_b4, dpi_bypass)
+
+    def test_all_presets_have_quic_block(self):
+        """Все 3 пресета содержат udp: {mode: reject, filter_quic: all}."""
+        for mod in self.modules:
+            for name, (_label, set_data) in mod.PRESETS.items():
+                udp = set_data.get("udp", {})
+                self.assertEqual(udp.get("mode"), "reject",
+                                 f"{mod.__name__}/{name}: udp.mode")
+                self.assertEqual(udp.get("filter_quic"), "all",
+                                 f"{mod.__name__}/{name}: udp.filter_quic")
+
+    def test_presets_have_no_legacy_fields(self):
+        """В пресетах нет мёртвых полей (b4_version)."""
+        for mod in self.modules:
+            for name, (_label, set_data) in mod.PRESETS.items():
+                self.assertNotIn("b4_version", set_data,
+                                 f"{mod.__name__}/{name}: b4_version — мёртвое поле")
+
+    def test_presets_mirrored_between_modules(self):
+        """Пресеты в youtube_b4 и dpi_bypass идентичны (зеркалирование)."""
+        yt = self.modules[0]
+        dpi = self.modules[1]
+        self.assertEqual(yt.DEFAULT_SET_YOUTUBE, dpi.DEFAULT_SET_YOUTUBE)
+        self.assertEqual(yt.AGGRESSIVE_SET_YOUTUBE, dpi.AGGRESSIVE_SET_YOUTUBE)
+        self.assertEqual(yt.LIGHT_SET_YOUTUBE, dpi.LIGHT_SET_YOUTUBE)
+
+    def test_quic_block_constant_canonical(self):
+        """_B4_QUIC_BLOCK_UDP — каноническая пара reject/all."""
+        for mod in self.modules:
+            self.assertEqual(mod._B4_QUIC_BLOCK_UDP,
+                             {"mode": "reject", "filter_quic": "all"})
+
+
 class TestImportPreservesTopLevelConfig(unittest.TestCase):
     """REGRESSION: import_custom_set перезаписывал весь config.json
     минимальным шаблоном {sets, routing, udp, system} — терялись
@@ -2443,6 +2668,10 @@ class TestImportPreservesTopLevelConfig(unittest.TestCase):
         # Старый сет не потерян, новый добавлен
         ids = [s["id"] for s in saved["sets"]]
         self.assertEqual(ids, ["old-set", "new-set"])
+        # Legacy-поле system.geosite_path мигрировано в system.geo.sitedat_path
+        self.assertNotIn("geosite_path", saved["system"])
+        self.assertEqual(saved["system"]["geo"]["sitedat_path"],
+                         "/usr/share/xray/geosite.dat")
 
     def test_corrupted_config_recovers(self):
         """Повреждённый config.json → импорт в чистый конфиг, не крах."""
@@ -2454,8 +2683,9 @@ class TestImportPreservesTopLevelConfig(unittest.TestCase):
         self.assertTrue(self.dpi_bypass.import_custom_set(test_json))
         saved = json.loads(self._config_file.read_text())
         self.assertEqual(saved["sets"][0]["id"], "fresh-set")
-        # system-секция создана (geosite для Discovery)
-        self.assertIn("geosite_path", saved["system"])
+        # system-секция создана (geosite для Discovery) — живой ключ
+        self.assertEqual(saved["system"]["geo"]["sitedat_path"],
+                         "/usr/share/xray/geosite.dat")
 
 
 class TestImportViaRestApi(unittest.TestCase):
