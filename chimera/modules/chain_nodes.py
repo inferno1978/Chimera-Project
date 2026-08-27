@@ -2744,10 +2744,10 @@ def do_manage_nodes() -> None:
                         warn(f"Не удалось обновить config.json: {_e3}")
                 ans = input(f"{YELLOW}Перезапустить Xray для применения? [y/N]:{NC} ").strip().lower()
                 if ans == 'y':
-                    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-                    time.sleep(3)
-                    rs = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-                    if rs.stdout.strip() == "active":
+                    # v56 (start-limit-fix): безопасный рестарт — см.
+                    # _core._xray_safe_restart (StartLimitBurst=3/60s)
+                    _safe_restart = getattr(core, "_xray_safe_restart", None)
+                    if callable(_safe_restart) and _safe_restart():
                         success("Xray активен — новая domainStrategy применена")
                     else:
                         warn("Xray не запустился — проверьте: journalctl -u xray -n 30")

@@ -456,15 +456,25 @@ def apply_youtube_ip_pin(target_tag: str) -> bool:
     #  FIX: если _youtube_apply_to_xray только что перезапустил Xray,
     # второй restart подряд может упасть (systemd не успел обработать первый).
     # Добавляем sleep 2с перед restart и увеличиваем таймаут ожидания.
+    # v56 (start-limit-fix): сам рестарт — через _xray_safe_restart
+    # (reset-failed): в цепочке _rebuild_and_restart_xray это уже ВТОРОЙ
+    # рестарт за несколько секунд, дальше будут tproxy и финальный —
+    # голые restarts упираются в StartLimitBurst=3/60s юнита xray,
+    # последний start отклоняется (start-limit-hit) при валидном конфиге.
     time.sleep(2)
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    r = None
-    for _ in range(45):  # увеличено с 30 до 45
-        r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-        if r.stdout.strip() == "active":
-            break
-        time.sleep(1)
-    if not r or r.stdout.strip() != "active":
+    _safe_restart = getattr(core, "_xray_safe_restart", None)
+    if callable(_safe_restart):
+        _restart_ok = _safe_restart(wait_active=45)
+    else:  # fallback на старое поведение (старое ядро без хелпера)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        _restart_ok = False
+        for _ in range(45):
+            r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+            if r.stdout.strip() == "active":
+                _restart_ok = True
+                break
+            time.sleep(1)
+    if not _restart_ok:
         warn("Xray не запустился — проверьте: journalctl -u xray -n 30")
         _nginx_restart_if_reality()
         return False

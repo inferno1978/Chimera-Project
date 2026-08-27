@@ -32,24 +32,28 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules(awg_enabled: bool = False):
-    """Загружает chimera._core через exec и регистрирует в sys.modules."""
+    """Загружает chimera._core через exec и регистрирует в sys.modules.
+
+    v56: exec выполняется ПРЯМО в __dict__ фейкового модуля (раньше — в
+    отдельный dict g, копируемый в модуль). Теперь мутации вида
+    ``core._run = MagicMock(...)`` из тестов видны функциям ядра через
+    их __globals__ — без этого _xray_safe_restart и другие функции,
+    вызывающие _run напрямую, уходили в реальный subprocess и висли
+    в wait-циклах по 45-90 секунд.
+    """
     core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
-    g = {}
+    fake_core = types.ModuleType("chimera._core")
     with patch.object(Path, 'mkdir', lambda self, *a, **kw: None), \
          patch.object(Path, 'touch', lambda self, *a, **kw: None), \
          patch.object(Path, 'chmod', lambda self, *a, **kw: None), \
          patch('os.chown', lambda *a, **kw: None), \
          patch('os.geteuid', return_value=0):
-        exec(compile(src, str(core_path), "exec"), g)
-    fake_core = types.ModuleType("chimera._core")
-    fake_core.__dict__.update(g)
+        exec(compile(src, str(core_path), "exec"), fake_core.__dict__)
     sys.modules["chimera._core"] = fake_core
     # Override AWG_EXIT_ENABLED after loading (default is False from state).
     fake_core.AWG_EXIT_ENABLED = awg_enabled
     return fake_core
-
-
 def _make_completed(stdout: str = "", returncode: int = 0):
     return subprocess.CompletedProcess(
         args=[], returncode=returncode, stdout=stdout, stderr="",
@@ -217,6 +221,9 @@ class TestYoutubeApplyToXray(unittest.TestCase):
         core._set_config_owner = lambda p: None
         # systemctl is-active возвращает 'failed'.
         core._run = MagicMock(return_value=_make_completed("failed"))
+        # v56: рестарт идёт через _xray_safe_restart — мокаем, чтобы не
+        # крутить два 45-секундных wait-цикла с реальным time.sleep.
+        core._xray_safe_restart = MagicMock(return_value=False)
         core._nginx_restart_if_reality = MagicMock()
         core.info = lambda *a, **kw: None
         core.success = lambda *a, **kw: None

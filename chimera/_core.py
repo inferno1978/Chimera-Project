@@ -2862,13 +2862,62 @@ def do_change_domain_strategy() -> None:
 
     ans = input(f"{YELLOW}Перезапустить Xray для применения? [y/N]:{NC} ").strip().lower()
     if ans == 'y':
-        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-        time.sleep(3)
-        rs = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-        if rs.stdout.strip() == "active":
+        # v56: безопасный рестарт — см. _xray_safe_restart()
+        if _xray_safe_restart():
             success("Xray активен — новая domainStrategy применена")
         else:
             warn("Xray не запустился — проверьте: journalctl -u xray -n 30")
+
+
+def _xray_safe_restart(wait_active: int = 45, attempts: int = 2) -> bool:
+    """
+    v56 (start-limit-fix): безопасный перезапуск xray, устойчивый к
+    systemd start-rate-limit.
+
+    ПРОБЛЕМА (репродукция 2026-08-27, vds13195): юнит xray.service,
+    который пишет chimera, содержит ``StartLimitIntervalSec=60s`` +
+    ``StartLimitBurst=3``. Поток пересборки конфига
+    (``_rebuild_and_restart_xray``) делает 3-5 рестартов ПОДРЯД за
+    несколько секунд: YouTube-restore → IP-pin restore → Telemt tproxy →
+    финальный рестарт. Четвёртый start внутри 60 секунд systemd
+    ОТКАЗЫВАЕТСЯ запускать: «Start request repeated too quickly» →
+    failed (start-limit-hit) → xray остаётся мёртвым ПРИ ВАЛИДНОМ
+    конфиге (журнал: Started → Reading config → Warning → Stopping,
+    три раза подряд, затем start-limit-hit).
+
+    РЕШЕНИЕ: ``systemctl reset-failed xray`` перед рестартом — он
+    сбрасывает и failed-состояние, и счётчик start-rate-limit
+    (ratelimit_reset внутри unit_reset_failed), после чего start
+    принимается. Плюс одна повторная попытка с паузой — на случай
+    реальных проблем с конфигом (тогда wait-цикл честно выйдет по
+    таймауту и вернёт False).
+
+    Используется во всех точках рестарта цепочки пересборки
+    (_core/youtube_route/youtube_ip_pin/ru_subnets/as_direct/
+    chain_nodes); mtproto патчится инлайн-``reset-failed`` (модуль
+    самодостаточен, без привязки к _core).
+
+    :param wait_active: сколько секунд ждать is-active после рестарта
+                        (90 — для конфигов с 13 000+ RIPE-правил)
+    :param attempts:    число попыток (каждая с reset-failed)
+    :return: True если сервис активен после рестарта
+    """
+    for _attempt in range(1, attempts + 1):
+        # Сброс failed-состояния И счётчика start-rate-limit юнита.
+        # Для не-failed юнита команда безвредна (тихо игнорируем код).
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        _r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+        for _ in range(wait_active):
+            if _r.stdout.strip() == "active":
+                return True
+            time.sleep(1)
+            _r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+        if _attempt < attempts:
+            warn(f"Xray не активен после рестарта "
+                 f"(попытка {_attempt}/{attempts}) — повторяем с reset-failed...")
+            time.sleep(2)
+    return False
 
 
 def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
@@ -2983,10 +3032,12 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
         warn(f"SNI-dispatch восстановление: {_sd_e}")
 
     # Финальный рестарт
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    time.sleep(3)
-    rs = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-    if rs.stdout.strip() == "active":
+    # v56 (start-limit-fix): раньше здесь был голый `systemctl restart xray`.
+    # Выше по этому же flow YouTube-restore, IP-pin и Telemt tproxy уже
+    # сделали по рестарту каждый — при StartLimitBurst=3/60s юнита xray
+    # финальный start отклонялся (start-limit-hit) и xray оставался в
+    # failed при валидном конфиге. Безопасный рестарт сбрасывает лимит.
+    if _xray_safe_restart():
         success(ok_msg)
     else:
         warn("Xray не запустился — проверьте: journalctl -u xray -n 30")
