@@ -2,6 +2,59 @@
 
 ---
 
+## FIX(b4)+DOCS: семантика b4 1.79+/1.80rc1 — per-set QUIC-блок, чистка legacy-полей конфига — 27 августа 2026 (v52)
+
+Актуализация под реальную семантику b4 (проверено по исходникам
+v1.80.0rc1: src/config/{config,types,migration}.go, docs sets/udp.md).
+Старый QUIC-блок Chimera не работал ВООБЩЕ: верхнеуровневой секции
+`udp` у Config b4 нет (только version/queue/system/sets/ui) — ключ
+игнорировался при загрузке и выкидывался при сохранении самим b4;
+значения `filter_quic: "block"` не существует — NormalizeQUICFilter
+переписывает всё, кроме `"all"`, в `"sni"`. Сеты работали на дефолтах
+(udp.mode="fake" → декой-шторм + IP-фрагменты → микрофризы).
+
+Код (youtube_b4.py + dpi_bypass.py, зеркально):
+
+- пресеты (default/aggressive/light): + per-set QUIC-блок —
+  канон из docs b4 и переключателя «Блокировать QUIC» Web UI:
+  `"udp": {"filter_quic": "all", "mode": "reject"}` (reject = ICMP
+  port unreachable → мгновенный откат браузера на TCP/HTTP2);
+- пресеты: удалено мёртвое поле `b4_version` (не поле SetConfig);
+- `_write_empty_config()` / `_write_default_config()`: убраны
+  мёртвые верхнеуровневые `udp` (c filter_quic:"block") и
+  `routing`; `system.geosite_path` (мёртвый ключ) заменён на
+  валидный `system.geo.sitedat_path` — путь к geosite.dat Xray,
+  из-за мёртвого ключа сеты с geosite_categories не проходили
+  валидацию b4 ('geosite path must be configured');
+- новый `_b4_clean_legacy_config_keys(cfg)`: чистка legacy-полей
+  старого конфига in-place (верхнеуровневые udp/routing,
+  geosite_path → geo.sitedat_path без потери пути, b4_version в
+  сетах) — вызывается из switch_preset() и import_custom_set(),
+  конфиг конвергирует к живому формату при первом переключении
+  пресета / импорте сета;
+- import_custom_set(): вычищает b4_version из вставляемого сета
+  (экспорт старой Chimera);
+- `_sets_match()`: + сравнение udp.mode + udp.filter_quic — сет
+  без QUIC-блока корректно детектится как 'custom', а не мимикрирует
+  под пресет.
+
+Тесты (tests/test_dpi_bypass.py): 213 passed (+19): TestSetsMatch
+udp-кейсы (в т.ч. REGRESSION filter_quic="block" ≠ QUIC-блок),
+TestB4LegacyConfigCleanup (7), TestPresetsQuicBlock (4),
+обновлены test_write_empty_config / test_queue_ui_system_webserver_
+survive / test_corrupted_config_recovers под новый формат.
+
+DOCS: DPI_BYPASS_FAQ.md актуализирован под b4 1.79+ — §5 (формат
+конфига при установке), §6 (пресеты содержат QUIC-блок), §7 (что
+делает Chimera при импорте; warning про geosite-категории),
+§11 (QUIC-блок: полная семантика per-set — filter_quic sni/all,
+mode off/fake/drop/reject, канон, почему блокируют а не обходят,
+историческая справка про мёртвый "block"), §15 (триблшутинг QUIC:
+спиннер/микрофризы). AGH_FAQ §15: чек-лист п.7 и нюансы сетов —
+та же семантика.
+
+---
+
 ## docs(aghome): AGH_FAQ §15 — B4 (DPI-обход) в связке Xray + AGH + DNSCrypt — 27 августа 2026 (v51)
 
 Новый раздел 15 в `docs/faq/AGH_FAQ.md` (~280 строк): как b4
