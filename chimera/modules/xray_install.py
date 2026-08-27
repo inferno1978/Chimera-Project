@@ -85,6 +85,7 @@ from chimera.modules.xray_mirrors import (
     XRAY_ZIP_MIRRORS_COUNT, XRAY_CHK_MIRRORS_COUNT,
 )
 from chimera.modules.geo_packages import GEOSITE_SPEC, GEOIP_SPEC
+from chimera.modules.agh_probe import agh_dns_available
 
 
 # =============================================================================
@@ -811,25 +812,32 @@ def generate_xray_config() -> None:
     # AGH-AWARE (v37): если AdGuard Home владеет 127.0.0.1:53 — DNS Xray
     # идёт через AGH (кеш + фильтры + DoT-upstream dnscrypt), иначе —
     # напрямую в dnscrypt:5300 (как раньше).
-    agh_dns = False
-    try:
-        from chimera.modules.aghome_setup import aghome_dns_ready
-        agh_dns = aghome_dns_ready()
-    except Exception:
-        agh_dns = False
+    # v55 (agh_probe): health-check углублён — обязательная живая проба
+    # резолва (end-to-end AGH → DNSCrypt → интернет) + нейтрализация
+    # iptables redirect 53→5300 (он молча уводил локальный DNS в обход
+    # AGH). Сбой любого шага → прежний путь DNSCrypt:5300.
+    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info, log_warn=warn)
 
     r_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
                     capture=True, check=False)
     dnscrypt_running = (DNSCRYPT_INSTALLED or r_active.stdout.strip() == "active")
 
-    if agh_dns:
-        info("DNS: используем AdGuard Home (127.0.0.1:53) → dnscrypt upstream")
+    if agh_ok:
         dns_servers = [
-            {"address": "127.0.0.1", "port": 53, "network": "udp", "skipFallback": False},
-            {"address": "127.0.0.1", "port": 53, "network": "tcp", "skipFallback": True},
+            {"address": "127.0.0.1", "port": 53,
+             "network": "udp", "skipFallback": False},
+        ]
+        if dnscrypt_running:
+            # Живой fallback: AGH лёг ПОСЛЕ генерации — Xray перейдёт на
+            # DNSCrypt:5300, DNS для VPN-клиентов не умирает (skipFallback=False).
+            dns_servers.append(
+                {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
+                 "network": "udp", "skipFallback": False})
+        dns_servers += [
             {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
             {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
         ]
+        info(f"DNS: AdGuardHome здоров ({agh_note}) — Xray → AGH:53 → DNSCrypt")
     elif dnscrypt_running:
         info(f"DNS: используем DNSCrypt-proxy "
              f"({DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT})")
@@ -1094,24 +1102,30 @@ def generate_xray_config_xhttp() -> None:
     # DNS серверы
     # AGH-AWARE (v37): аналогично generate_xray_config() — при живом AGH
     # DNS Xray идёт через 127.0.0.1:53 (AGH), а не напрямую в dnscrypt.
-    agh_dns = False
-    try:
-        from chimera.modules.aghome_setup import aghome_dns_ready
-        agh_dns = aghome_dns_ready()
-    except Exception:
-        agh_dns = False
+    # v55 (agh_probe): health-check углублён — живая проба резолва
+    # (end-to-end AGH → DNSCrypt → интернет) + нейтрализация iptables
+    # redirect 53→5300. Сбой любого шага → прежний путь DNSCrypt:5300.
+    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info, log_warn=warn)
 
     r_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
                     capture=True, check=False)
     dnscrypt_running = (DNSCRYPT_INSTALLED or r_active.stdout.strip() == "active")
 
-    if agh_dns:
+    if agh_ok:
         dns_servers = [
-            {"address": "127.0.0.1", "port": 53, "network": "udp", "skipFallback": False},
-            {"address": "127.0.0.1", "port": 53, "network": "tcp", "skipFallback": True},
+            {"address": "127.0.0.1", "port": 53,
+             "network": "udp", "skipFallback": False},
+        ]
+        if dnscrypt_running:
+            # Живой fallback на случай падения AGH после генерации
+            dns_servers.append(
+                {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
+                 "network": "udp", "skipFallback": False})
+        dns_servers += [
             {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
             {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
         ]
+        info(f"DNS: AdGuardHome здоров ({agh_note}) — Xray → AGH:53 → DNSCrypt")
     elif dnscrypt_running:
         dns_servers = [
             {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,

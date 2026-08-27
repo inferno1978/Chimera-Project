@@ -80,6 +80,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+from chimera.modules.agh_probe import agh_probe_resolve
+
 
 # =============================================================================
 #  Константы
@@ -433,6 +435,10 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
         "aghome_active": _is_aghome_active(),
         "aghome_serving_53": False,
         "dns_redirect_active": True,  # default: не нужен (port == 53)
+        # v55 (agh_probe): глубокий health-check — живая проба резолва
+        # (end-to-end AGH → DNSCrypt → интернет), только при AGH на :53
+        "agh_resolves": False,
+        "agh_note": "",
         "fix_needed": False,
         "fix_method": None,
         "leak_reasons": [],
@@ -460,17 +466,35 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
             result["dns_redirect_active"] = True  # не нужен если port == 53
 
     # AGH владеет :53? В этом состоянии redirect не нужен ВООБЩЕ.
+    # v55 (agh_probe): глубокий health-check — живая проба резолва
+    # (end-to-end AGH → DNSCrypt → интернет): отвечает на вопрос «работает
+    # ли ВЕСЬ путь», который is-active/ss проверить не могут.
     result["aghome_serving_53"] = _is_aghome_serving_53()
     if result["aghome_serving_53"]:
-        # redirect может быть только ВРЕДНЫМ (ворует трафик у AGH):
-        # «dns_redirect_active» в AGH-режиме означает «redirect-правила
-        # отсутствуют» — это правильное состояние. Для детекта достаточно
-        # ОДНОГО правила любого протокола (даже tcp-only обходит AGH).
-        if result["dnscrypt_listen"] and result["dnscrypt_listen"][1] != _DNS_PORT:
-            result["dns_redirect_active"] = not _any_dns_redirect_rule(
-                result["dnscrypt_listen"][1])
+        agh_ok, agh_note = agh_probe_resolve()
+        result["agh_resolves"] = agh_ok
+        result["agh_note"] = agh_note
+        if agh_ok:
+            # AGH жив: redirect может быть только ВРЕДНЫМ (ворует трафик у
+            # AGH). «dns_redirect_active» в AGH-режиме означает «redirect-
+            # правила отсутствуют» — это правильное состояние. Для детекта
+            # достаточно ОДНОГО правила любого протокола (даже tcp-only
+            # обходит AGH).
+            if result["dnscrypt_listen"] and result["dnscrypt_listen"][1] != _DNS_PORT:
+                result["dns_redirect_active"] = not _any_dns_redirect_rule(
+                    result["dnscrypt_listen"][1])
+            else:
+                result["dns_redirect_active"] = not _any_dns_redirect_rule(5300)
         else:
-            result["dns_redirect_active"] = not _any_dns_redirect_rule(5300)
+            # AGH слушает :53, но НЕ резолвит (провал end-to-end пробы):
+            # фактическое состояние iptables. Redirect есть → грин (DNS жив
+            # через dnscrypt-обход сломанного AGH); нет → причина «DNS мёртв»
+            # загорится ниже, и фикс создаст redirect как обход.
+            if result["dnscrypt_listen"] and result["dnscrypt_listen"][1] != _DNS_PORT:
+                result["dns_redirect_active"] = _is_dns_redirect_active(
+                    result["dnscrypt_listen"][1])
+            else:
+                result["dns_redirect_active"] = _is_dns_redirect_active(5300)
 
     dnscrypt_ready = (
         result["dnscrypt_service_active"]
@@ -516,9 +540,12 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
             f"DNS мёртв (glibc → 127.0.0.1:53, никто не слушает)"
         )
 
-    # AGH владеет :53, но redirect 53→dnscrypt ВСЁ ЕЩЁ активен — трафик
-    # воруется у AGH (фильтры/кеш/DoH молча обходятся). Нужен re-fix.
+    # AGH владеет :53 И РЕЗОЛВИТ, но redirect 53→dnscrypt ВСЁ ЕЩЁ активен —
+    # трафик воруется у AGH (фильтры/кеш/DoH молча обходятся). Нужен re-fix.
+    # v55: guard agh_resolves — при сломанном AGH redirect не «вор» ,
+    # а спасательный обход (см. ветку ниже в fix-flow).
     if (result["aghome_serving_53"]
+            and result.get("agh_resolves")
             and result["resolv_conf_on_localhost"]
             and not result.get("dns_redirect_active", True)):
         reasons.append(
@@ -1108,24 +1135,45 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False,
     # iptables NAT OUTPUT redirect перехватывает ТОЛЬКО локальные запросы к
     # 127.0.0.1:53 → перенаправляет на 5300. НЕ трогает интерфейсы.
     #
-    # AGH-AWARE ВЕТКА: если AdGuard Home служит на :53, redirect НЕ НУЖЕН и
-    # ВРЕДЕН (REDIRECT перехватывает запросы к 127.0.0.1:53 и уводит их
+    # AGH-AWARE ВЕТКА (v37): если AdGuard Home служит на :53, redirect НЕ НУЖЕН
+    # и ВРЕДЕН (REDIRECT перехватывает запросы к 127.0.0.1:53 и уводит их
     # мимо AGH на dnscrypt:5300 — фильтры/кеш AGH молча обходятся).
     # В этом случае: СНЯТЬ существующие правила и НЕ ставить новые.
     # Пока AGH в wizard-режиме (не слушает :53) — redirect остаётся
     # страховкой (dnscrypt продолжает обслуживать :53-трафик).
+    #
+    # v55 (agh_probe): «служит на :53» теперь подтверждается живой пробой
+    # резолва (diag['agh_resolves'], end-to-end AGH → DNSCrypt → интернет).
+    # AGH на :53, но НЕ резолвит → redirect НЕ снимаем, а ставим: это обход
+    # сломанного AGH (glibc → :53 DNAT → dnscrypt:5300 → интернет), DNS
+    # остаётся живым, пока AGH чинят (проверьте upstream в AdGuardHome.yaml).
     dnscrypt_port = 5300  # default
     if diag["dnscrypt_listen"]:
         dnscrypt_port = diag["dnscrypt_listen"][1]
     agh_serving = diag.get("aghome_serving_53", False)
-    if agh_serving:
+    agh_resolves = diag.get("agh_resolves", False)
+    if agh_serving and agh_resolves:
+        # AGH жив и резолвит: redirect может быть только вредным
         ok_r, err_r = _remove_dns_redirect(dnscrypt_port)
         if ok_r:
             actions.append(
-                f"AGH служит на :53 — iptables redirect 53→{dnscrypt_port} снят "
-                f"(системный DNS → AdGuard Home)")
+                f"AGH служит на :53 и резолвит — iptables redirect 53→{dnscrypt_port} "
+                f"снят (системный DNS → AdGuard Home)")
         else:
             warnings.append(f"AGH: не удалось снять redirect: {err_r}")
+    elif agh_serving:
+        # AGH на :53, но НЕ резолвит (провал пробы) — redirect как обход
+        # сломанного AGH: glibc → :53 (DNAT) → dnscrypt:5300 → интернет
+        ok_r, err_r = _apply_dns_redirect(dnscrypt_port)
+        if ok_r:
+            actions.append(f"iptables redirect 53→{dnscrypt_port} "
+                           f"(AGH на :53 не резолвит — обход через DNSCrypt)")
+        else:
+            warnings.append(f"iptables redirect: {err_r}")
+        warnings.append(f"AdGuardHome на 127.0.0.1:53 не резолвит "
+                        f"({diag.get('agh_note', '')}) — локальный DNS идёт "
+                        f"мимо AGH через redirect; проверьте upstream в "
+                        f"AdGuardHome.yaml")
     elif dnscrypt_port != _DNS_PORT:
         ok_r, err_r = _apply_dns_redirect(dnscrypt_port)
         if ok_r:
@@ -1414,15 +1462,36 @@ def _print_diagnosis(diag: Dict[str, Any]) -> None:
         if diag["dnscrypt_listening"]:
             _box_row(f"    listen:  {GREEN}{listen_str} ✓ слушает{NC}")
             if port != _DNS_PORT:
-                redirect_ok = _is_dns_redirect_active(port)
-                if redirect_ok:
-                    _box_row(f"    iptables redirect 53→{port}: {GREEN}✓ активен{NC}")
+                if diag.get("aghome_serving_53") and diag.get("agh_resolves"):
+                    _box_row(f"    iptables redirect 53→{port}: {GREEN}не нужен — AGH на :53{NC}")
                 else:
-                    _box_row(f"    iptables redirect 53→{port}: {RED}✗ НЕ активен (DNS не будет работать!){NC}")
+                    redirect_ok = _is_dns_redirect_active(port)
+                    if redirect_ok:
+                        _box_row(f"    iptables redirect 53→{port}: {GREEN}✓ активен{NC}")
+                    else:
+                        _box_row(f"    iptables redirect 53→{port}: {RED}✗ НЕ активен (DNS не будет работать!){NC}")
         else:
             _box_row(f"    listen:  {RED}{listen_str} ✗ НЕ слушает{NC}")
     else:
         _box_row(f"    listen:  {DIM}не определён (TOML не найден){NC}")
+    _box_row()
+
+    # AdGuardHome (стек «AGH:53 → DNSCrypt:5300»)
+    if diag.get("aghome_active") or diag.get("aghome_serving_53"):
+        _box_row(f"  {BOLD}AdGuardHome:{NC}")
+        if diag.get("aghome_serving_53"):
+            if diag.get("agh_resolves"):
+                _box_row(f"    127.0.0.1:53: {GREEN}✓ AGH слушает и резолвит "
+                         f"({diag.get('agh_note', '')}){NC}")
+                _box_row(f"    {DIM}локальный DNS: glibc/Xray → AGH → DNSCrypt{NC}")
+            else:
+                _box_row(f"    127.0.0.1:53: {RED}✗ AGH слушает, но НЕ резолвит "
+                         f"({diag.get('agh_note', '')}){NC}")
+                _box_row(f"    {YELLOW}выполните фикс — redirect отведёт DNS на DNSCrypt{NC}")
+        else:
+            _box_row(f"    сервис:  {GREEN}active{NC} {DIM}(127.0.0.1:53 не держит — "
+                     f"в DNS-цепочке не участвует){NC}")
+        _box_row()
     _box_sep()
 
     # Итог

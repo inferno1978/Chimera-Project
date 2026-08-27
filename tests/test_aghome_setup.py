@@ -954,9 +954,11 @@ class TestResolvConfAghAware(unittest.TestCase):
             self.assertFalse(self.mod._is_aghome_serving_53())
 
     def test_diag_no_false_reason_when_agh_serves(self):
-        """AGH служит :53, redirect отсутствует → НЕТ причины 'redirect не
-        активен' (DNS жив через AGH), fix не требуется."""
+        """AGH служит :53 (и резолвит — v55 мок пробы), redirect отсутствует →
+        НЕТ причины 'redirect не активен' (DNS жив через AGH), fix не требуется."""
         with patch.object(self.mod, "_run", self._mock_run(True, False)), \
+             patch.object(self.mod, "agh_probe_resolve",
+                          return_value=(True, "www.example.com → 1 ответ, 5 мс")), \
              patch.object(self.mod, "_RESOLV_CONF") as p_resolv, \
              patch.object(self.mod, "_NSSWITCH_CONF") as p_ns, \
              patch.object(self.mod, "_DNSCRYPT_TOML") as p_toml:
@@ -973,9 +975,11 @@ class TestResolvConfAghAware(unittest.TestCase):
         self.assertFalse(has_dead_dns_reason)
 
     def test_diag_reason_when_redirect_steals_agh_traffic(self):
-        """AGH служит :53, НО redirect активен → причина 'запросы обходят AGH',
-        fix_required → фикс снимет redirect."""
+        """AGH служит :53 (и резолвит — v55 мок пробы), НО redirect активен →
+        причина 'запросы обходят AGH', fix_required → фикс снимет redirect."""
         with patch.object(self.mod, "_run", self._mock_run(True, True)), \
+             patch.object(self.mod, "agh_probe_resolve",
+                          return_value=(True, "www.example.com → 1 ответ, 5 мс")), \
              patch.object(self.mod, "_RESOLV_CONF") as p_resolv, \
              patch.object(self.mod, "_NSSWITCH_CONF") as p_ns, \
              patch.object(self.mod, "_DNSCRYPT_TOML") as p_toml:
@@ -1042,8 +1046,9 @@ class TestIntegrationSourceChecks(unittest.TestCase):
         for rel in ("chimera/modules/xray_install.py",
                     "chimera/modules/chain_nodes.py"):
             src = self._read(rel)
-            self.assertIn("aghome_dns_ready", src,
-                          f"{rel}: нет AGH-ветки DNS")
+            self.assertIn("agh_dns_available", src,
+                          f"{rel}: нет AGH-ветки DNS (v55: agh_dns_available "
+                          f"— глубокий health-check, заменил aghome_dns_ready)")
             self.assertIn('"port": 53', src,
                           f"{rel}: нет DNS-сервера 127.0.0.1:53")
 

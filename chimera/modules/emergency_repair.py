@@ -649,6 +649,21 @@ def do_emergency_repair() -> None:
                 _box_warn(f"AWG Multi-Node: {_mne}")
         # === END PATCH v2 ===
 
+    # ── AdGuardHome: поднять ДО пересборки конфига ────────────────────────────
+    # В стеке «Xray → AGH(127.0.0.1:53) → DNSCrypt(5300)» генераторы конфига
+    # делают health-check AGH (agh_probe.py) и переключают DNS Xray на :53
+    # только у живого и резолвящего AGH. Остановленный после краха AGH без
+    # этого шага молча «выпадал» из цепочки — конфиг откатывался на 5300.
+    try:
+        from chimera.modules.agh_probe import agh_ensure_running
+        _agh_ok, _agh_note = agh_ensure_running(_run)
+        if _agh_ok:
+            _box_ok(f"AdGuardHome: {_agh_note}")
+        # не установлен / не поднялся → генераторы сами откатятся на
+        # DNSCrypt:5300 — это безопасный путь, не ошибка восстановления
+    except Exception as _agh_e:
+        _box_warn(f"AdGuardHome: {_agh_e}")
+
     # Пересборка конфига:
     # - всегда при AWG_EXIT_ENABLED (даже валидный старый конфиг может не иметь AWG sockopt mark)
     # - при отсутствии или невалидности конфига в остальных режимах
