@@ -2,6 +2,80 @@
 
 ---
 
+## FIX(_core+xray_install+emergency_repair+youtube_route+youtube_ip_pin+ru_subnets+as_direct+chain_nodes+mtproto): start-limit-hit при пересборке конфига + AdGuardHome в итоговом health-report (v56) — 27 августа 2026
+
+**Задача 1: после пересборки конфига из меню (Главное меню → 3 → 7 →
+пересборка) Xray оставался мёртвым при ВАЛИДНОМ конфиге. Диагноз по
+журналу: три цикла Started → Reading config → Stopping подряд, затем
+«Start request repeated too quickly» → failed (start-limit-hit).**
+
+### Корень зла
+
+Юнит xray.service, который пишет chimera, содержит жёсткий лимит
+`StartLimitIntervalSec=60s` + `StartLimitBurst=3`. А поток пересборки
+(`_rebuild_and_restart_xray`) делает 3-5 рестартов ПОДРЯД за несколько
+секунд: YouTube-restore → IP-pin restore → Telemt tproxy → финальный
+рестарт. Четвёртый start внутри 60 секунд systemd отклоняет — xray
+остаётся в failed, хотя конфиг прошёл `xray run -test`. Аварийное
+восстановление «лечило» потому, что запускается позже (окно лимита
+остывало) и делает 1-2 старта с паузами.
+
+### Решение (эшелонированное)
+
+1. **`_core._xray_safe_restart(wait_active=45, attempts=2)`** — единая
+   точка безопасного рестарта: `systemctl reset-failed xray` перед
+   каждым рестартом (сбрасывает и failed-состояние, и счётчик
+   start-rate-limit), затем restart + wait-цикл is-active, при неудаче —
+   повторная попытка. Возвращает bool.
+2. Вызовы в цепочке пересборки переведены на хелпер (с fallback на
+   старое поведение для старого ядра): `_rebuild_and_restart_xray`
+   (финальный рестарт), domainStrategy-меню (_core и chain_nodes),
+   `youtube_route._youtube_apply_to_xray` + fragment-вариант,
+   `youtube_ip_pin.apply_youtube_ip_pin`, `ru_subnets._ru_subnets_apply_to_xray`
+   (wait 90), `as_direct._as_direct_apply_to_xray` (wait 90).
+3. **mtproto** (самодостаточный модуль без привязки к _core): инлайн
+   `reset-failed` перед обоими restart xray (enable/disable tproxy).
+4. **emergency_repair**: reset-failed перед каждой попыткой запуска Xray —
+   чинит сценарий «неудачная пересборка → сразу аварийное восстановление»
+   (счётчик лимита ещё не остыл, первый start был бы отклонён).
+5. **Юнит-шаблон** (xray_install.py): `StartLimitBurst` 3 → 10 для новых
+   установок (защита crash-loop сохранена: Restart=on-failure +
+   RestartSec=5s → ~10 попыток, затем systemd сдаётся). Существующие
+   серверы не требуют переписывания юнита — код теперь сбрасывает лимит
+   сам (п.1-3).
+
+### Задача 2: AdGuardHome в итоговой проверке аварийного восстановления
+
+Шаг [11/11] «Итоговая проверка состояния» не показывал AGH, хотя
+восстановление поднимает его ещё ДО пересборки конфига (v55,
+agh_ensure_running). Теперь AGH выводится в списке основных сервисов
+между DNSCrypt-proxy и Xray (порядок DNS-цепочки «Xray → AGH:53 →
+DNSCrypt:5300» снизу вверх) — **если установлен** (детект по бинарнику
+AGH через agHome_setup.is_aghome_installed, fallback — наличие юнит-файла
+AdGuardHome.service). Не установлен → строка не выводится, как у
+DNSCrypt при is-enabled != 0. При неудачном восстановлении в подсказки
+диагностики добавлен `journalctl -u AdGuardHome -n 20`.
+
+### Тесты
+
+- Новый `tests/test_xray_safe_restart.py` (10 тестов): порядок
+  reset-failed → restart, мгновенный успех, повторная попытка с повторным
+  reset-failed, честный False после исчерпания попыток, attempts=1,
+  пины регрессий (StartLimitBurst=10, reset-failed в mtproto ×2,
+  AGH в финальной проверке, safe-restart в _rebuild_and_restart_xray).
+- Тест-хелпер `_setup_core_in_sysmodules` в 3 файлах (youtube_route,
+  youtube_ip_pin, youtube_route_v5013): exec теперь идёт ПРЯМО в
+  `__dict__` фейкового модуля — мутации `core._run = MagicMock(...)`
+  стали видны функциям ядра через `__globals__` (раньше функции вида
+  `_xray_safe_restart` уходили в реальный subprocess и висли в
+  wait-циклах по 45-90 с).
+- Полный прогон: 5305 passed, 12 failed — все 12 пре-существующие
+  (ios_shadow_client, ios_patch5, mtproto/GetPublicIp+ReturnRuleIdempotency,
+  telemt_panel), на чистом дереве идентичны.
+
+---
+
+
 ## FEAT(xray_install+chain_nodes+emergency_repair+resolv_conf_fix+agh_probe): углублённый health-check AGH — живая проба резолва + нейтрализация redirect 53→5300 (v55) — 27 августа 2026
 
 **Задача: в стеке «AdGuardHome (127.0.0.1:53) → DNSCrypt (127.0.0.1:5300) →

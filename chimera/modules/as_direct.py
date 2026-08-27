@@ -527,14 +527,23 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
             warn((_dry.stdout + _dry.stderr)[:300])
             return False
 
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    # Ждём xray до 90 сек (тот же RIPE-конфиг, те же 30–60 сек на валидацию)
-    for _wi in range(90):
-        r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-        if r.stdout.strip() == "active":
-            break
-        time.sleep(1)
-    if r.stdout.strip() == "active":
+    # v56 (start-limit-fix): безопасный рестарт (reset-failed) — apply может
+    # идти в цепочке с другими рестартами; StartLimitBurst=3/60s юнита xray
+    # отклоняет 4-й start за минуту (start-limit-hit). Ждём до 90 сек —
+    # тот же RIPE-конфиг, те же 30–60 сек на валидацию.
+    _safe_restart = getattr(core, "_xray_safe_restart", None)
+    if callable(_safe_restart):
+        _xray_active = _safe_restart(wait_active=90, attempts=1)
+    else:  # fallback на старое поведение (старое ядро без хелпера)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        _xray_active = False
+        for _wi in range(90):
+            r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+            if r.stdout.strip() == "active":
+                _xray_active = True
+                break
+            time.sleep(1)
+    if _xray_active:
         action_label = {"direct": "direct", "proxy": "proxy (VPN)", "block": "BLOCK"}[action]
         success(f"Xray перезапущен -- {asn}: {len(cidrs_v4)} IPv4 + {len(cidrs_v6)} IPv6 -> {action_label}")
         _nginx_restart_if_reality()

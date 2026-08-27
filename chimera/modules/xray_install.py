@@ -1390,7 +1390,15 @@ def create_xray_service() -> None:
         {after_line}
         {wants_line}
         StartLimitIntervalSec=60s
-        StartLimitBurst=3
+        # v56 (start-limit-fix): было StartLimitBurst=3 — пересборка конфига
+        # (YouTube restore → IP-pin → tproxy → финальный рестарт) делает
+        # 3-5 start'ов за несколько секунд, и 4-й отклонялся: start-limit-hit,
+        # xray мёртв при валидном конфиге. Код теперь зовёт reset-failed
+        # перед каждым рестартом (_xray_safe_restart), а burst поднят до 10
+        # как страховка для остальных вызывающих (watchdog, ExecReload).
+        # Crash-loop-защита сохранена: Restart=on-failure + RestartSec=5s
+        # → 10 попыток за ~50с, затем systemd сдаётся.
+        StartLimitBurst=10
 
         [Service]
         User=xray
