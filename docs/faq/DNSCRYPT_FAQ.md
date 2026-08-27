@@ -1774,6 +1774,8 @@ systemctl restart dnscrypt-proxy
 
 ## Ссылки
 
+- [AGH_FAQ.md](AGH_FAQ.md) — FAQ по AdGuard Home: верхний слой
+  DNS-стека Chimera (фильтрация + кеш + DoH/DoT/DoQ поверх DNSCrypt).
 - [SECURITY_BAN_FAQ.md](SECURITY_BAN_FAQ.md) — FAQ по AutoBan /
   Honeypot / IP-Ban / GeoIP Block / РФ-блокировка.
 - [TELEMT_FAQ.md](TELEMT_FAQ.md) — FAQ по Telemt (MTProto Proxy).
