@@ -14,8 +14,9 @@ chimera/modules/iperf3_mirrors.py
 
 РЕШЕНИЕ (по аналогии с turn_mirrors.py / hysteria2_mirrors.py):
   1. Реестр зеркал через github_mirrors.build_mirror_urls():
-     jsDelivr CDN (4 бэкенда) + raw GitHub + release GitHub + 7 gh-proxy +
-     Statically — итого до 14 URL.
+     jsDelivr CDN (4 бэкенда) + release GitHub + 3 gh-proxy —
+     итого 8 URL. (raw/Statically отключены — нет ветки "latest";
+     2026-08-21 мёртвые gh-proxy вычищены — было 7, осталось 3 рабочих.)
   2. fetch_package(IPERF3_SPEC, arch=...) из iperf3_packages.py перебирает
     зеркала по очереди и проверяет /root/ для ручного размещения.
   3. При тотальном провале fetch_package() вызывает print_manual_hint().
@@ -65,15 +66,14 @@ def get_iperf3_mirrors(arch: str = "amd64") -> list[str]:
 
     Возвращает:
       Упорядоченный список URL (через build_mirror_urls):
-        1. jsDelivr CDN family (4 бэкенда) — через @iperf3 ветку? НЕТ, нет
-           такой ветки. Отключаем для tag="latest".
+        1. jsDelivr CDN family (4 бэкенда) — /gh/…@latest/{filename}
         2. raw.githubusercontent.com (нет ветки "latest" — отключаем)
         3. release GitHub (/releases/latest/download/iperf3-{arch})
-        4. 7 GitHub-прокси
+        4. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc)
         5. Statically CDN (нет ветки "latest" — отключаем)
 
-    Итого 8 URL: release + 7 gh-proxy (jsDelivr/raw/Statically отключены
-    для tag="latest").
+    Итого 8 URL: 4 jsDelivr + release + 3 gh-proxy (raw/Statically
+    отключены для tag="latest").
     """
     filename = f"iperf3-{arch}"
     return build_mirror_urls(
@@ -86,7 +86,7 @@ def get_iperf3_mirrors(arch: str = "amd64") -> list[str]:
     )
 
 
-# Количество зеркал — 1 release + 7 прокси = 8.
+# Количество зеркал — 4 jsDelivr + 1 release + 3 прокси = 8.
 IPERF3_MIRRORS_COUNT: int = len(get_iperf3_mirrors())
 
 

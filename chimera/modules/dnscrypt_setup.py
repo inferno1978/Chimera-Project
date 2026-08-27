@@ -140,7 +140,7 @@ def install_dnscrypt() -> None:
     # из download_manager.py. fetch_package сам:
     #   1. Проверяет /root/dnscrypt-proxy-{arch}-{tag}.tar.gz
     #      (manual_incoming_dir из spec) — если найден, использует без сети.
-    #   2. Иначе — перебирает 14 зеркал по очереди через urllib.
+    #   2. Иначе — перебирает 10 зеркал по очереди через urllib.
     #   3. При успехе — post_install распаковывает tar.gz, находит
     #      dnscrypt-proxy бинарник через rglob, копирует в
     #      /usr/local/bin/dnscrypt-proxy (chmod 0o755).

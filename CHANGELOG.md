@@ -2,6 +2,58 @@
 
 ---
 
+## TEST+FIX(mirrors): актуализация счётчиков зеркал после вычистки мёртвых gh-proxy + olcrtc commit-SHA через GitHub API — 27 августа 2026 (v54)
+
+Два хвоста, оставшихся от вычистки мёртвых GitHub-прокси 2026-08-21
+(GITHUB_PROXY_HOSTS: 7 → 3 рабочих, остальное — timeouts/HTML-заглушки).
+
+**1. Красный test_mirror_urls_has_14_entries (pre-existing, врал в TUI).**
+Вычистку прокси сопроводили обновлением части модулей (fptn_mirrors,
+dnscrypt_mirrors — «10 URL»), но забыли: тест в test_hysteria2_exit_mgr
+(ждал захардкоженное 14, реально 10), докстринги/комментарии ещё ~20
+модулей и — главное — TUI-выводы mieru.py («14 зеркал в fallback»
+при фактических 10). Фикс:
+
+- тест переписан в test_mirror_urls_matches_registry_count: сверка
+  spec ↔ реестр ↔ HYSTERIA2_MIRRORS_COUNT + точное текущее число 10
+  (как в соседнем test_hysteria2_dnscrypt_mirrors);
+- mieru.py: TUI-принты «14 зеркал» → f-string с MIERU_MIRRORS_COUNT —
+  число больше не разъедется с реестром при следующей чистке;
+- актуализированы все докстринги/комментарии по фактическим наборам:
+  hysteria2/dnscrypt/fptn/xray/mieru = 10 (4 jsDelivr + raw + release
+  + 3 gh-proxy + Statically), iperf3/naiveproxy/turntunnel = 8 (без
+  raw/Statically), singbox = 4 (release + 3 прокси), slipgate = 9,
+  wdtt/webdav/olcrtc/awg-kmod = 5 (прямой + codeload + 3 прокси),
+  geo = 19 (собственный расширенный список). Исторические описания
+  багов (CHANGELOG, test_geo_files, test_all_specs) не тронуты.
+
+**2. Пять красных тестов wave6 (TestOlcrtcCommitShaMigrated).** Тесты
+под недоведённую миграцию Wave 6 (Variant A): olcrtc_packages.py и
+зеркала были, а `olcrtc._olcrtc_fetch_commit_sha()` в модуле — нет
+(AttributeError). Заодно это реальный баг качества данных: при
+скачивании исходников через curl-tarball зеркала код делал
+`git init + git add + git commit` и писал в state file SHA этого
+свежесозданного коммита-эмуляции вместо настоящего upstream SHA.
+Фикс:
+
+- `olcrtc._http_get_text(url)` — лёгкий GET-хелпер (UA обязателен:
+  api.github.com режет запросы без него);
+- `olcrtc._olcrtc_fetch_commit_sha()` — короткий SHA HEAD ветки
+  master из GitHub API /commits/master (URL — из
+  olcrtc_mirrors.get_olcrtc_commits_api_url()); при любой ошибке
+  (сеть / не-JSON / нет поля sha) — «?», установка не падает;
+- `olcrtc._olcrtc_commit(src_dir=None)` — канонический путь для
+  state file: API-SHA, при недоступном API — fallback на локальный
+  git (прямой clone даёт настоящий SHA);
+- `_install_or_update()`: `olc_commit = _olcrtc_commit(olcrtc_src)`
+  вместо `_get_commit_sha(olcrtc_src)`.
+
+Тесты: wave6_mirrors 40 passed (было 35+5 FAILED), olcrtc 42 passed,
+зеркальный набор 461 passed, регресс правленных модулей 339 passed,
+hysteria2-семья + download_manager 220 passed. Ноль новых фейлов.
+
+---
+
 ## FIX(xray): регенерация конфига сохраняет юзеров — anti-EOF «invalid request user id» — 27 августа 2026 (v53)
 
 Реальный инцидент (VPS без IPv6, chimeravpn.online): после установки

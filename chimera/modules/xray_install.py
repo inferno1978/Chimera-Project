@@ -154,7 +154,7 @@ def _xray_print_manual_download_hint(zip_name: str, tag: str, xray_arch: str) ->
     и ожидаемые пути размещения файлов на сервере.
 
     После Wave 4 миграции: зеркала берутся из единого реестра xray_mirrors.py
-    (14 URL вместо 7 inline-копий ранее). Это гарантирует что пользователь
+    (10 URL вместо 7 inline-копий ранее). Это гарантирует что пользователь
     видит АКТУАЛЬНЫЙ список зеркал, синхронизированный с fetch_package().
     """
     core = _core_module()
@@ -163,7 +163,7 @@ def _xray_print_manual_download_hint(zip_name: str, tag: str, xray_arch: str) ->
     CYAN, GREEN = core.CYAN, core.GREEN
     DIM = core.DIM
 
-    # Зеркала из единого реестра (14 URL через build_mirror_urls)
+    # Зеркала из единого реестра (10 URL через build_mirror_urls)
     XRAY_MANUAL_MIRRORS = get_xray_zip_mirrors(tag=tag, arch=xray_arch)
     XRAY_CHECKSUMS_MIRRORS = get_xray_checksums_mirrors(tag=tag, arch=xray_arch)
     sep = f"{YELLOW}{'─'*64}{NC}"
@@ -306,7 +306,7 @@ def install_xray() -> None:
     # Метод 1: официальный установщик XTLS
     # Скачивание install-release.sh через fetch_package(XRAY_INSTALLER_SPEC):
     # post_install сам запускает `bash src install`, удаляет drop-in файлы и
-    # проверяет что xray появился. Зеркала — 14 URL через xray_mirrors.
+    # проверяет что xray появился. Зеркала — 10 URL через xray_mirrors.
     info("Метод 1: официальный установщик XTLS...")
     try:
         # Ленивый импорт — чтобы избежать circular imports на module load time.
@@ -449,8 +449,8 @@ def install_xray() -> None:
 
         # ── Зеркала для скачивания ZIP — из единого реестра xray_mirrors ──────
         # Раньше здесь был inline список из 7 URL (прямой GitHub + 6 ghproxy),
-        # теперь — 14 URL через get_xray_zip_mirrors() (jsDelivr CDN × 4 +
-        # raw GitHub + release GitHub + 7 gh-proxy + Statically).
+        # теперь — 10 URL через get_xray_zip_mirrors() (jsDelivr CDN × 4 +
+        # raw GitHub + release GitHub + 3 gh-proxy + Statically).
         _ZIP_MIRRORS = get_xray_zip_mirrors(tag=latest_tag, arch=xray_arch)
         # .dgst URL — для _xray_try_local_zip (manual retry).
         # post_install XRAY_ZIP_SPEC сам скачивает .dgst через
@@ -472,7 +472,7 @@ def install_xray() -> None:
         # fetch_package сам:
         #   1. Проверяет /root/Xray-linux-{arch}.zip (manual_incoming_dir) —
         #      если найден, использует без сети.
-        #   2. Иначе — перебирает 14 зеркал через urllib.
+        #   2. Иначе — перебирает 10 зеркал через urllib.
         #   3. При успехе — post_install:
         #      a. ZIP magic проверка (PK\x03\x04).
         #      b. Скачивание checksums.txt через fetch_package(XRAY_CHECKSUMS_SPEC).
@@ -1580,7 +1580,7 @@ def _xray_update_geo_runetfreedom() -> bool:
 
     После Wave 4 миграции: использует fetch_package(GEOSITE_SPEC) и
     fetch_package(GEOIP_SPEC) из geo_packages.py (как и download_geo_files
-    в geo_files.py). Зеркала — единый реестр geo_mirrors.py (14 URL на файл).
+    в geo_files.py). Зеркала — единый реестр geo_mirrors.py (19 URL на файл).
     post_install в GEOSITE_SPEC/GEOIP_SPEC копирует файл в 3 dest_dirs
     (/etc/xray, /usr/local/share/xray, /usr/local/etc/xray) + chmod 644 +
     chown root:xray.
@@ -1637,7 +1637,7 @@ def _xray_update_geo_runetfreedom() -> bool:
     # fetch_package сам:
     #   1. Проверяет /root/{filename} (manual_incoming_dir из PackageSpec) —
     #      если найден, использует без сети.
-    #   2. Иначе — перебирает 14 зеркал через urllib.
+    #   2. Иначе — перебирает 19 зеркал через urllib.
     #   3. При успехе — post_install копирует в 3 dest_dirs + chmod 644 +
     #      chown root:xray.
     #   4. При провале — возвращает False (hint подавлен, т.к. ниже свой).
@@ -1762,7 +1762,7 @@ def _xray_do_upgrade(tag: str, is_prerelease: bool = False) -> bool:
       2. Бэкап старого бинарника (ДО замены — для rollback при ошибке теста).
       3. fetch_package(XRAY_ZIP_SPEC, tag, arch) — скачать zip + SHA256 verify +
          распаковка + copy xray → /usr/local/bin/xray + .dat preservation.
-         14 зеркал (вместо одного прямого URL в старом коде).
+         10 зеркал (вместо одного прямого URL в старом коде).
       4. Тест конфига новым бинарником.
       5. При ошибке теста — восстановление старого бинарника из бэкапа.
       6. Cleanup старых бэкапов (оставляем 5 последних).
@@ -1775,7 +1775,7 @@ def _xray_do_upgrade(tag: str, is_prerelease: bool = False) -> bool:
         При ошибке — abort без замены.
 
     Теперь:
-      • 14 зеркал через fetch_package(XRAY_ZIP_SPEC) — jsDelivr/raw/release/gh-proxy/Statically.
+      • 10 зеркал через fetch_package(XRAY_ZIP_SPEC) — jsDelivr/raw/release/gh-proxy/Statically.
       • Тест конфига делается ПОСЛЕ замены бинарника. При ошибке — rollback
         из бэкапа. Это эквивалентно по safety: если тест провален, бинарник
         возвращается к старой версии.
@@ -1839,7 +1839,7 @@ def _xray_do_upgrade(tag: str, is_prerelease: bool = False) -> bool:
 
     # ── Шаг 3: скачивание + замена бинарника через fetch_package ───────────
     # fetch_package(XRAY_ZIP_SPEC) делает:
-    #   1. Скачивание zip (14 зеркал через urllib — jsDelivr/raw/release/gh-proxy/Statically).
+    #   1. Скачивание zip (10 зеркал через urllib — jsDelivr/raw/release/gh-proxy/Statically).
     #   2. ZIP magic проверка (PK\x03\x04).
     #   3. Скачивание checksums.txt через fetch_package(XRAY_CHECKSUMS_SPEC, tag=...).
     #   4. SHA256 верификация. При провале — False (пробуем следующее зеркало zip'а).

@@ -17,7 +17,8 @@ chimera/modules/mieru_mirrors.py
   и пользователь не получает актуальный бинарник.
 
 РЕШЕНИЕ (по аналогии с geo_mirrors.py):
-  1. Реестр зеркал: прямой GitHub + 7 GitHub-прокси + jsDelivr CDN
+  1. Реестр зеркал: прямой GitHub + 3 GitHub-прокси (ghproxy.net,
+     gh-proxy.com, gh.llkk.cc) + jsDelivr CDN
      (jsDelivr умеет проксировать release-assets через /gh/…@tag/).
   2. MANUAL_UPLOAD_PATHS: /root/ (рекомендуется, WinSCP-friendly),
      /usr/local/bin/, /opt/mieru/.

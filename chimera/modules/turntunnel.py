@@ -110,8 +110,8 @@ _DEFAULT_LISTEN_PORT = 56000   # UDP — порт на который подкл
 _DEFAULT_TARGET_PORT = 51820   # порт WireGuard / Hysteria2 на VPS (редактируется)
 
 # _GITHUB_RELEASES_URL — удалён при миграции на download_manager.
-# Теперь зеркала (jsDelivr CDN + raw GitHub + release GitHub + 7 gh-proxy +
-# Statically) собираются в turn_mirrors.get_turntunnel_mirrors() и
+# Теперь зеркала (jsDelivr CDN + release GitHub + 3 gh-proxy) собираются
+# в turn_mirrors.get_turntunnel_mirrors() и
 # перебираются автоматически через fetch_package(TURNTUNNEL_SPEC).
 _GITHUB_API_URL = "https://api.github.com/repos/cacggghp/vk-turn-proxy/releases/latest"
 

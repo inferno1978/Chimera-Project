@@ -6,7 +6,7 @@ Unit-тесты для chimera/modules/mieru_mirrors.py.
 
 Покрывает:
   • Структуру и инварианты списка зеркал
-  • Корректность URL-шаблонов (прямой GitHub + 7 прокси + jsDelivr)
+  • Корректность URL-шаблонов (прямой GitHub + 3 прокси + jsDelivr)
   • Что /root/ — первый в MANUAL_UPLOAD_PATHS (рекомендуемый для WinSCP)
   • Что _is_amd64() и _gh_proxy() работают
   • Что find_manual_upload() ищет файл в путях (через mock)

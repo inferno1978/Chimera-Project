@@ -109,8 +109,8 @@ def _install_h2_binary() -> bool:
       1. Проверяет /root/hysteria-linux-{arch} (manual_incoming_dir из
          spec) — если найден и размер >= 1 MB, использует без сети
          (WinSCP-friendly).
-      2. Иначе — перебирает 14 зеркал (jsDelivr CDN + raw + release
-         GitHub + 7 gh-proxy + Statically) по очереди через urllib.
+      2. Иначе — перебирает 10 зеркал (jsDelivr CDN + raw + release
+         GitHub + 3 gh-proxy + Statically) по очереди через urllib.
       3. При успехе — post_install проверяет ELF magic и atomic-replaces
          /usr/local/bin/hysteria (stop service → unlink → copy2 → restart).
       4. При провале — print_manual_hint() с инструкцией.

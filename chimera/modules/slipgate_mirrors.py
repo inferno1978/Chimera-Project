@@ -13,8 +13,8 @@ chimera/modules/slipgate_mirrors.py
 
 РЕШЕНИЕ (по аналогии с xray_mirrors.py для install-release.sh):
   1. Реестр зеркал через github_mirrors.build_mirror_urls():
-     jsDelivr CDN (4 бэкенда) + raw GitHub + 7 gh-proxy + Statically —
-     итого 13 URL. (release-assets неприменим — это файл в репозитории,
+     jsDelivr CDN (4 бэкенда) + raw GitHub + 3 gh-proxy + Statically —
+     итого 9 URL. (release-assets неприменим — это файл в репозитории,
      не релизный ассет.)
   2. fetch_package(SLIPGATE_INSTALLER_SPEC) из slipgate_packages.py
      перебирает зеркала по очереди и проверяет /root/ для ручного

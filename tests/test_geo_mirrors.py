@@ -62,10 +62,11 @@ class TestMirrorListStructure(unittest.TestCase):
 
     def test_at_least_14_mirrors(self):
         """Regression: старый список содержал 9 зеркал.
-        После рефакторинга должно быть ≥14 (4 jsDelivr + 2 GitHub + 7 прокси + 1 Statically).
         Wave 2026-07: добавлены РФ-специфичные fallback'и (4 новых gh-proxy + 1 РФ-зеркало
-        jsDelivr) — теперь 19 зеркал. Нижняя граница остаётся 14, чтобы не ломать
-        будущие rollback'и."""
+        jsDelivr) — теперь 19 зеркал (4 jsDelivr + 2 GitHub + 11 прокси +
+        Statically + РФ-CDN jsd.cooluc.ru; geo_mirrors ведёт собственный
+        расширенный список прокси, не зависящий от GITHUB_PROXY_HOSTS).
+        Нижняя граница остаётся 14, чтобы не ломать будущие rollback'и."""
         self.assertGreaterEqual(GEO_MIRRORS_COUNT, 14)
 
     def test_no_duplicate_urls(self):
