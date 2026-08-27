@@ -790,6 +790,23 @@ def generate_xray_config() -> None:
     if not IS_IPV6_AVAILABLE:
         query_strategy = "UseIPv4"
 
+    # BUGFIX (v53): clients — из единого источника юзеров
+    # (_users_collect_for_config), а не только PARAM_UUID. Регенерация
+    # конфига (AGH-финализация, «Пересоздать конфиг Xray», emergency
+    # repair) не должна выкидывать существующих юзеров из inbound —
+    # иначе xray рвёт соединения «invalid request user id» → EOF у
+    # клиентов со ссылками, выданными до регенерации. Fresh install
+    # не меняется (юзеров нет → clients=[PARAM_UUID]).
+    try:
+        from chimera.modules.users_manager import (
+            _users_collect_for_config, _clients_from_users)
+        _cfg_users = _users_collect_for_config(
+            PARAM_UUID, f"user@{PARAM_DOMAIN}")
+    except Exception:
+        _cfg_users = [{"uuid": PARAM_UUID,
+                       "email": f"user@{PARAM_DOMAIN}"}]
+    _cfg_clients = _clients_from_users(_cfg_users, XTLS_FLOW)
+
     # DNS servers JSON
     # AGH-AWARE (v37): если AdGuard Home владеет 127.0.0.1:53 — DNS Xray
     # идёт через AGH (кеш + фильтры + DoT-upstream dnscrypt), иначе —
@@ -861,11 +878,12 @@ def generate_xray_config() -> None:
             "listen":   "::",
             "protocol": "vless",
             "settings": {
-                "clients": [{
-                    "id":    PARAM_UUID,
-                    "email": f"user@{PARAM_DOMAIN}",
-                    **( {"flow": XTLS_FLOW} if XTLS_FLOW else {} ),
-                }],
+                # BUGFIX (v53): clients — из единого источника юзеров
+                # (_users_collect_for_config), а не только PARAM_UUID:
+                # регенерация конфига не должна выкидывать существующих
+                # юзеров из inbound (иначе — «invalid request user id»
+                # и EOF у клиентов со ссылками, выданными до регенерации).
+                "clients": _cfg_clients,
                 "decryption": "none",
             },
             "sniffing": {
@@ -1058,6 +1076,21 @@ def generate_xray_config_xhttp() -> None:
     if not IS_IPV6_AVAILABLE:
         query_strategy = "UseIPv4"
 
+    # BUGFIX (v53): clients — из единого источника юзеров
+    # (_users_collect_for_config), а не только PARAM_UUID — регенерация
+    # конфига не должна выкидывать существующих юзеров из inbound
+    # («invalid request user id» → EOF у клиентов со старыми ссылками).
+    # xHTTP не использует flow — передаём пустой.
+    try:
+        from chimera.modules.users_manager import (
+            _users_collect_for_config, _clients_from_users)
+        _cfg_users = _users_collect_for_config(
+            PARAM_UUID, f"user@{PARAM_DOMAIN}")
+    except Exception:
+        _cfg_users = [{"uuid": PARAM_UUID,
+                       "email": f"user@{PARAM_DOMAIN}"}]
+    _cfg_clients_no_flow = _clients_from_users(_cfg_users)
+
     # DNS серверы
     # AGH-AWARE (v37): аналогично generate_xray_config() — при живом AGH
     # DNS Xray идёт через 127.0.0.1:53 (AGH), а не напрямую в dnscrypt.
@@ -1167,11 +1200,10 @@ def generate_xray_config_xhttp() -> None:
             "listen":   "127.0.0.1",         # только loopback — извне не доступно
             "protocol": "vless",
             "settings": {
-                "clients": [{
-                    "id":    PARAM_UUID,
-                    "email": f"user@{PARAM_DOMAIN}",
-                    # xHTTP не использует flow xtls-rprx-vision
-                }],
+                # BUGFIX (v53): clients — из единого источника юзеров
+                # (_users_collect_for_config), а не только PARAM_UUID
+                # (регенерация не выкидывает существующих юзеров).
+                "clients": _cfg_clients_no_flow,
                 "decryption": "none",
             },
             "sniffing": {

@@ -548,6 +548,119 @@ class TestUnifiedLoadUsers(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  _users_collect_for_config / _clients_from_users — единый источник юзеров
+#  для генерации/регенерации конфига Xray (BUGFIX v53)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestUsersCollectForConfig(unittest.TestCase):
+    """
+    Регрессия v53: регенерация конфига Xray (AGH-финализация,
+    «Пересоздать конфиг», emergency repair) обязана сохранять в
+    clients ВСЕХ активных юзеров — иначе клиенты со ссылками,
+    выданными до регенерации, получают EOF («invalid request user id»).
+    """
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+        self._tmpdir = tempfile.mkdtemp()
+        self._users_file = Path(self._tmpdir) / "users.json"
+        self._fake_core.USERS_FILE = self._users_file
+        # /etc/xray/config.json не должен подсасываться на тест-машине
+        self._cfg_paths = {"/etc/xray/config.json",
+                           "/usr/local/etc/xray/config.json"}
+        self._orig_exists = Path.exists
+
+    def tearDown(self):
+        Path.exists = self._orig_exists
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _collect(self, param_uuid="param-uuid", param_email="user@example.com"):
+        from chimera.modules import users_manager
+        orig_exists = self._orig_exists
+        # Локальная переменная (НЕ self._cfg_paths): внутри _exists self —
+        # это Path-объект, обращение к атрибутам TestCase падает с
+        # AttributeError, который _users_collect_for_config молча глотает.
+        cfg_paths = self._cfg_paths
+
+        def _exists(p):
+            if str(p) in cfg_paths:
+                return False
+            return orig_exists(p)
+
+        with patch.object(Path, "exists", _exists):
+            return users_manager._users_collect_for_config(
+                param_uuid, param_email)
+
+    def test_fresh_install_fallback_to_param_uuid(self):
+        """Юзеров нет (fresh install) → только PARAM_UUID, как раньше."""
+        result = self._collect(param_uuid="fresh-uuid",
+                               param_email="user@example.com")
+        self.assertEqual(result, [{"uuid": "fresh-uuid",
+                                   "email": "user@example.com"}])
+
+    def test_users_json_preserved_plus_param_uuid(self):
+        """Юзер из users.json сохраняется, PARAM_UUID добавляется (сценарий
+        state.json ≠ users.json: ссылка выдана с uuid из users.json)."""
+        self._users_file.write_text(json.dumps([
+            {"uuid": "link-uuid", "email": "alice@xray", "name": "alice"},
+        ]))
+        result = self._collect(param_uuid="state-uuid",
+                               param_email="user@example.com")
+        uuids = [u["uuid"] for u in result]
+        self.assertIn("link-uuid", uuids,
+                      "UUID из выданной ссылки обязан остаться в конфиге")
+        self.assertIn("state-uuid", uuids)
+        self.assertEqual(len(result), 2)
+
+    def test_param_uuid_already_present_no_duplicate(self):
+        """PARAM_UUID совпадает с юзером → дубликата нет."""
+        self._users_file.write_text(json.dumps([
+            {"uuid": "same-uuid", "email": "alice@xray", "name": "alice"},
+        ]))
+        result = self._collect(param_uuid="same-uuid",
+                               param_email="user@example.com")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["email"], "alice@xray")
+
+    def test_disabled_user_excluded(self):
+        """Disabled-юзер в clients не попадает (xray не должен его пускать)."""
+        self._users_file.write_text(json.dumps([
+            {"uuid": "active-uuid", "email": "a@xray", "name": "a"},
+            {"uuid": "off-uuid", "email": "b@xray", "name": "b",
+             "disabled": True},
+        ]))
+        result = self._collect(param_uuid="param-uuid",
+                               param_email="user@example.com")
+        uuids = [u["uuid"] for u in result]
+        self.assertNotIn("off-uuid", uuids)
+        self.assertIn("active-uuid", uuids)
+
+    def test_duplicate_email_filtered(self):
+        """Дубль email отфильтрован — xray падает на «User X already exists»."""
+        self._users_file.write_text(json.dumps([
+            {"uuid": "u1", "email": "same@xray", "name": "a"},
+            {"uuid": "u2", "email": "same@xray", "name": "b"},
+        ]))
+        result = self._collect(param_uuid="param-uuid",
+                               param_email="user@example.com")
+        emails = [u["email"] for u in result]
+        self.assertEqual(len(emails), len(set(emails)),
+                         "email должны быть уникальны")
+        self.assertIn("u1", [u["uuid"] for u in result])
+        self.assertNotIn("u2", [u["uuid"] for u in result])
+
+    def test_clients_from_users_flow(self):
+        """_clients_from_users: формат Xray clients, flow по требованию."""
+        from chimera.modules.users_manager import _clients_from_users
+        users = [{"uuid": "u1", "email": "a@xray"}]
+        with_flow = _clients_from_users(users, "xtls-rprx-vision")
+        self.assertEqual(with_flow, [{"id": "u1", "email": "a@xray",
+                                      "flow": "xtls-rprx-vision"}])
+        no_flow = _clients_from_users(users)
+        self.assertEqual(no_flow, [{"id": "u1", "email": "a@xray"}])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  _unified_save_users — синхронизация users.json + config.json
 # ══════════════════════════════════════════════════════════════════════════════
 class TestUnifiedSaveUsers(unittest.TestCase):
