@@ -2,6 +2,94 @@
 
 ---
 
+## FIX+FEAT(uninstall+resolv_conf_fix): DNS не умирает при полном удалении Chimera + чистое удаление AdGuard Home (v59) — 28 августа 2026
+
+**Инцидент (server-ru): после полного удаления Chimera (с установленным
+AdGuard Home) сервер оставался с мёртвым DNS — `ping ya.ru` →
+`Temporary failure in name resolution`, `nslookup` → `SERVFAIL` от
+systemd-resolved stub (127.0.0.53). Требование: при удалении всего стека
+DNS обязан откатываться к состоянию ЧИСТОЙ системы и выживаться живой
+пробой, а AGH должен удаляться максимально чисто.**
+
+### Корень проблемы (4 причины, все закрыты)
+
+1. **`rollback_resolv_conf()` отказывался работать при
+   `state.fixed=False`** (state-файл утерян/повреждён/не создан) — откат
+   тихо пропускался, а drop-in `/etc/systemd/resolved.conf.d/
+   chimera-dns.conf` (`DNS=127.0.0.1`, `FallbackDNS=<пусто>`,
+   `Domains=~.`) оставался жить: systemd-resolved гнал ВСЕ запросы в
+   мёртвый 127.0.0.1:53 (AGH/dnscrypt уже удалены) → SERVFAIL от stub.
+2. **resolv.conf восстанавливался только при наличии бэкапа** — без
+   бэкапа оставался `nameserver 127.0.0.1` → black-hole.
+3. **Никто не проверял живым probe'ом**, что DNS реально ожил после
+   отката — удаление рапортовало успех при мёртвом DNS.
+4. **iptables-redirect 53→порт удалялся только под заранее известный
+   порт dnscrypt** — правила с другим портом переживали удаление.
+
+### hard_restore_clean_dns() — безусловный откат к чистой системе
+
+Новая функция `resolv_conf_fix.hard_restore_clean_dns()` (вызывается из
+`do_uninstall` ПОСЛЕ сноса AGH/dnscrypt):
+
+- **НЕ требует state.fixed** — вычищает артефакты по фактическому
+  наличию: persist-сервис, watchdog, drop-in, iptables, бэкапы;
+- **`_iptables_sweep_comment()`** — удаляет ВСЕ nat OUTPUT-правила с
+  comment `chimera-dns-fix` (любой порт/протокол, enumerate → delete);
+- **resolv.conf по лестнице**: бэкап (только с ВНЕШНИМИ NS — «отравленный»
+  бэкап из локальных NS не используется) → systemd-resolved stub-symlink
+  (как на чистой системе) → публичный DNS;
+- **живая проба `getent hosts ya.ru`** после восстановления;
+  при провале — автоматический fallback на публичный DNS
+  (77.88.8.8 + 1.1.1.1) и повторная проба;
+- при успехе удаляет бэкапы `.chimera.bak` (чистая система); при провале
+  пробы — сохраняет их и честно сообщает ok=False + команды оживления.
+
+`rollback_resolv_conf()` тоже укреплён: при `state.fixed=False`, но живых
+артефактах фикса (drop-in/бэкапы/persist/watchdog) откат выполняется,
+а не отказывается (анти-black-hole).
+
+### Полное удаление AdGuard Home (`uninstall._remove_aghome_full()`)
+
+Раньше `do_uninstall` только stop/disable AGH — бинарник,
+`/opt/AdGuardHome`, юзер adguard, unit и certbot-hook оставались
+балластом. Теперь:
+
+1. stop/disable + удаление `/etc/systemd/system/AdGuardHome.service`;
+2. бэкап `/opt/AdGuardHome` → `/root/aghome-backups/aghome-*.tar.gz`
+   (данные пользователя не теряются);
+3. `rm -rf /opt/AdGuardHome` + `/usr/local/bin/AdGuardHome`;
+4. `userdel`/`groupdel adguard`;
+5. снятие certbot deploy-hook (`chimera-aghome.sh`);
+6. снятие wizard-temp UFW-правил.
+
+### Прочая зачистка при полном удалении
+
+- **`_remove_dns_redirect_artifacts()`** — PREROUTING-редиректы
+  `xray-dns-redirect` (модуль dns_redirect для VPN-клиентов) +
+  systemd-юнит `dns-redirect-restore.service` +
+  `/usr/local/bin/xray-dns-redirect-restore.sh`;
+- **финальная зачистка**: `/var/lib/xray-installer` (state всех модулей)
+  и `/var/log/chimera.log`;
+- порядок шагов: порты → AGH → dns_redirect → **DNS hard restore** →
+  state-cleanup (DNS восстанавливается строго ПОСЛЕ сноса всех
+  DNS-компонентов стека);
+- при мёртвом DNS после restore — в выводе готовые команды оживления
+  вручную.
+
+### Тесты
+
+`tests/test_v59_uninstall_dns_alive.py` — 23 теста: безусловный
+hard restore без state; удаление drop-in; бэкап/stub/публичный DNS;
+«отравленный» бэкап; fallback при мёртвой пробе + честный ok=False;
+iptables-sweep любых портов; persist/watchdog; rollback при
+артефактах без state; статические гварды порядка шагов uninstall;
+функциональные `_remove_aghome_full` (бэкап до rmtree, graceful
+«не установлен»); интеграция `_restore_dns_after_full_uninstall`.
+Регрессия: 254 теста соседних модулей (resolv_conf_fix, ag home_setup,
+dns_redirect, agh_probe, nginx-safety, subscription-uninstall) — зелёные.
+
+---
+
 ## FEAT+FIX(_core+12 модулей): Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи не остаются пустыми при генерации/регенерации конфигов (v58) — 28 августа 2026
 
 **Задача: при генерации/перегенерации конфигов НИГДЕ не должно остаться

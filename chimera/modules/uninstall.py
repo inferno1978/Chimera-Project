@@ -6,7 +6,10 @@ chimera/modules/uninstall.py
 Одна функция:
 
 • **do_uninstall** — интерактивное удаление Xray, Nginx, сайта, правил UFW,
-  DNSCrypt-proxy и т.д. Перед удалением требует подтверждение доменом.
+  DNSCrypt-proxy и AdGuard Home (v59 — полностью, с бэкапом данных).
+  DNS откатывается к состоянию чистой системы: безусловно (v59 — без
+  зависимости от state-файла), с живой пробой резолва и fallback на
+  публичный DNS, чтобы сервер никогда не оставался с мёртвым DNS.
 
 Точки входа из _core.py:
     from chimera.modules.uninstall import do_uninstall
@@ -132,37 +135,166 @@ def _close_chimera_ports() -> list:
 
 
 def _restore_dns_after_full_uninstall() -> list:
-    """DNS-ALIVE при полном удалении: resolv.conf → внешний DNS из бэкапа.
+    """DNS-ALIVE при полном удалении: откат к состоянию ЧИСТОЙ системы (v59).
 
-    do_uninstall удаляет dnscrypt (и, возможно, останавливает AGH) —
-    системный DNS (127.0.0.1) умирает. Восстанавливаем бэкап resolv.conf
-    и гасим chimera-dns-fix/watchdog (иначе watchdog каждую минуту будет
-    пытаться оживить удалённый dnscrypt и переоткрывать redirect).
+    Инцидент v59 (server-ru): удаление Chimera с AGH убивало DNS —
+    SERVFAIL от 127.0.0.53. Причины: rollback_resolv_conf() требовал
+    state.fixed=True (state утерян → откат тихо пропускался, а drop-in
+    chimera-dns.conf продолжал гнать ВСЕ запросы systemd-resolved в
+    мёртвый 127.0.0.1:53); resolv.conf восстанавливался только из бэкапа;
+    никто не проверял, что DNS реально ожил.
+
+    Теперь — hard_restore_clean_dns(): БЕЗУСЛОВНАЯ зачистка всех
+    артефактов DNS-фикса (drop-in + iptables + persist + watchdog +
+    resolv.conf/nsswitch) + живая проба + fallback на публичный DNS.
+    """
+    lines: list = []
+    dns_ok = False
+    try:
+        from chimera.modules import resolv_conf_fix as rcf
+        result = rcf.hard_restore_clean_dns()
+        dns_ok = bool(result.get("probe_ok"))
+        for a in result.get("actions", []):
+            lines.append(f"  {a}")
+        for w in result.get("warnings", []):
+            lines.append(f"  ⚠ {w}")
+    except Exception as e:
+        lines.append(f"  DNS-восстановление пропущено: {e}")
+
+    if dns_ok:
+        lines.append("  ✓ Системный DNS жив (проверено живой пробой)")
+    else:
+        lines.append("  ✗ DNS всё ещё мёртв — выполните вручную:")
+        lines.append("    rm -f /etc/systemd/resolved.conf.d/chimera-dns.conf")
+        lines.append("    ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf")
+        lines.append("    systemctl restart systemd-resolved")
+        lines.append("    # если не помогло:")
+        lines.append("    printf 'nameserver 77.88.8.8\\nnameserver 1.1.1.1\\n' > /etc/resolv.conf")
+    return lines
+
+
+# =============================================================================
+#  v59: ПОЛНОЕ УДАЛЕНИЕ ADGUARD HOME
+# =============================================================================
+# Пути AGH вынесены в модульные константы — для unit-тестов
+# (tests/test_v59_uninstall_dns_alive.py патчит их на tmpdir).
+_AGH_DIR          = Path("/opt/AdGuardHome")
+_AGH_UNIT         = Path("/etc/systemd/system/AdGuardHome.service")
+_AGH_BIN          = Path("/usr/local/bin/AdGuardHome")
+_AGH_USER         = "adguard"
+_AGH_BACKUP_DIR   = Path("/root/aghome-backups")
+_AGH_CERTBOT_HOOK = Path("/etc/letsencrypt/renewal-hooks/deploy/chimera-aghome.sh")
+
+
+def _remove_aghome_full() -> list:
+    """v59: полное удаление AdGuard Home при удалении всего стека.
+
+    Раньше do_uninstall только stop/disable AGH («upstream dnscrypt
+    удаляется, стек мёртв») — бинарник, /opt/AdGuardHome, юзер adguard,
+    unit и certbot-hook оставались балластом. Теперь — чистое удаление:
+      1. stop/disable + удаление unit-файла;
+      2. бэкап /opt/AdGuardHome → /root/aghome-backups/aghome-*.tar.gz
+         (данные пользователя не теряются);
+      3. rm -rf /opt/AdGuardHome + /usr/local/bin/AdGuardHome;
+      4. userdel/groupdel adguard;
+      5. снятие certbot deploy-hook;
+      6. снятие wizard-temp UFW-правил.
+    Порты UFW/port_registry закрываются отдельно (_close_chimera_ports).
+    """
+    import subprocess as _sp
+    from datetime import datetime as _dt
+
+    lines: list = []
+
+    if not (_AGH_DIR.exists() or _AGH_UNIT.exists() or _AGH_BIN.exists()):
+        return ["  AdGuardHome не установлен — пропускаю"]
+
+    # 1. Служба
+    _sp.run(["systemctl", "stop", "AdGuardHome"],
+            capture_output=True, check=False)
+    _sp.run(["systemctl", "disable", "AdGuardHome"],
+            capture_output=True, check=False)
+    try:
+        _AGH_UNIT.unlink(missing_ok=True)
+        _sp.run(["systemctl", "daemon-reload"],
+                capture_output=True, check=False)
+        lines.append("  служба AdGuardHome остановлена и удалена")
+    except Exception:
+        pass
+
+    # 2. Бэкап рабочей директории (данные пользователя!)
+    if _AGH_DIR.exists():
+        try:
+            _AGH_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            tgz = _AGH_BACKUP_DIR / ("aghome-"
+                                     + _dt.now().strftime("%Y%m%d%H%M%S")
+                                     + ".tar.gz")
+            _sp.run(["tar", "-czf", str(tgz), "-C", "/opt", "AdGuardHome"],
+                    capture_output=True, check=False, timeout=120)
+            if tgz.exists() and tgz.stat().st_size > 0:
+                lines.append(f"  бэкап AGH → {tgz}")
+        except Exception as e:
+            lines.append(f"  ⚠ бэкап AGH не создан: {e}")
+
+    # 3. Файлы
+    shutil.rmtree(_AGH_DIR, ignore_errors=True)
+    _AGH_BIN.unlink(missing_ok=True)
+
+    # 4. Пользователь и группа
+    _sp.run(["userdel", _AGH_USER], capture_output=True, check=False)
+    _sp.run(["groupdel", _AGH_USER], capture_output=True, check=False)
+
+    # 5. Certbot deploy-hook
+    _AGH_CERTBOT_HOOK.unlink(missing_ok=True)
+
+    # 6. Wizard-temp UFW-правила (висящие allow от мастера первого запуска)
+    try:
+        from chimera.modules.aghome_setup import _ufw_clean_wizard_rules
+        removed = _ufw_clean_wizard_rules()
+        if removed:
+            lines.append(f"  UFW: сняты wizard-правила AGH ({len(removed)} шт.)")
+    except Exception:
+        pass
+
+    lines.append("  AdGuard Home полностью удалён (файлы, юзер, unit, hook)")
+    return lines
+
+
+# =============================================================================
+#  v59: АРТЕФАКТЫ МОДУЛЯ dns_redirect
+# =============================================================================
+def _remove_dns_redirect_artifacts() -> list:
+    """v59: PREROUTING-редиректы 53→5300 для VPN-клиентов + restore-сервис.
+
+    Модуль dns_redirect (меню «DNS-redirect для VPN-клиентов») оставляет
+    после себя iptables PREROUTING-правила (comment xray-dns-redirect) и
+    systemd-юнит dns-redirect-restore.service, который восстанавливает
+    правила после ребута. При полном удалении стека — вычищаем всё.
     """
     lines: list = []
     try:
-        from chimera.modules import resolv_conf_fix as rcf
-        # 1. watchdog + persist OFF (реанимация мёртвого стека недопустима)
-        try:
-            rcf._remove_dns_watchdog()
-            lines.append("  chimera-dns-watchdog остановлен и удалён")
-        except Exception:
-            pass
-        try:
-            rcf._disable_persist_service()
-            lines.append("  chimera-dns-fix.service остановлен и удалён")
-        except Exception:
-            pass
-        # 2. resolv.conf → бэкап (внешний DNS)
-        result = rcf.rollback_resolv_conf()
-        if result.get("ok"):
-            lines.append("  /etc/resolv.conf восстановлен из бэкапа (внешний DNS)")
+        from chimera.modules import dns_redirect as dr
+        result = dr.remove_dns_redirect()
+        if result.get("success"):
+            lines.append("  dns_redirect: PREROUTING-правила (xray-dns-redirect) "
+                         "вычищены, restore-сервис удалён")
         else:
-            err = str(result.get("error") or "")
-            if "backup" not in err.lower():
-                lines.append(f"  восстановление resolv.conf: {err}")
+            lines.append("  ⚠ dns_redirect: часть правил могла остаться — "
+                         "проверьте: iptables -t nat -S PREROUTING")
     except Exception as e:
-        lines.append(f"  DNS-восстановление пропущено: {e}")
+        # Модуль недоступен — ручная зачистка по известным путям
+        lines.append(f"  dns_redirect: модуль недоступен ({e}) — ручная зачистка")
+        try:
+            import subprocess as _sp
+            _sp.run(["systemctl", "disable", "--now", "dns-redirect-restore"],
+                    capture_output=True, check=False)
+            Path("/etc/systemd/system/dns-redirect-restore.service").unlink(
+                missing_ok=True)
+            Path("/usr/local/bin/xray-dns-redirect-restore.sh").unlink(
+                missing_ok=True)
+            lines.append("  dns_redirect: restore-сервис удалён вручную")
+        except Exception:
+            pass
     return lines
 
 
@@ -188,7 +320,8 @@ def do_uninstall() -> None:
     YELLOW, RED, NC = core.YELLOW, core.RED, core.NC
 
     _box_top("УДАЛЕНИЕ VLESS REALITY")
-    _box_warn("Будет удалено: Xray, Nginx, сайт, правила UFW, DNSCrypt")
+    _box_warn("Будет удалено: Xray, Nginx, сайт, правила UFW, DNSCrypt, AdGuard Home")
+    _box_warn("DNS будет откачен к состоянию чистой системы (resolv.conf/nsswitch)")
     _box_row()
     _box_bottom()
     uninst_domain = input(f"{YELLOW}Домен для подтверждения удаления:{NC} ").strip()
@@ -411,10 +544,38 @@ def do_uninstall() -> None:
     for line in _close_chimera_ports():
         _box_info(line)
 
-    # DNS-ALIVE: системный DNS не должен умереть вместе со стеком (v49)
-    _box_info("Восстановление системного DNS (внешний резолвер)...")
+    # ────────────────────────────────────────────────────────────────────────
+    #  v59: ПОЛНОЕ удаление AdGuard Home (файлы, юзер, unit, certbot-hook)
+    # ────────────────────────────────────────────────────────────────────────
+    _box_info("Полное удаление AdGuard Home (с бэкапом данных)...")
+    for line in _remove_aghome_full():
+        _box_info(line)
+
+    # ────────────────────────────────────────────────────────────────────────
+    #  v59: артефакты dns_redirect (PREROUTING-редиректы + restore-сервис)
+    # ────────────────────────────────────────────────────────────────────────
+    _box_info("Очистка DNS-redirect артефактов (PREROUTING, restore-сервис)...")
+    for line in _remove_dns_redirect_artifacts():
+        _box_info(line)
+
+    # ────────────────────────────────────────────────────────────────────────
+    #  DNS-ALIVE v59: откат к состоянию ЧИСТОЙ системы — безусловно,
+    #  с живой пробой и fallback на публичный DNS (инцидент server-ru:
+    #  после удаления стека с AGH systemd-resolved отдавал SERVFAIL)
+    # ────────────────────────────────────────────────────────────────────────
+    _box_info("Восстановление системного DNS (откат к чистой системе)...")
     for line in _restore_dns_after_full_uninstall():
         _box_info(line)
+
+    # ────────────────────────────────────────────────────────────────────────
+    #  v59: финальная зачистка state-каталога установки
+    # ────────────────────────────────────────────────────────────────────────
+    _box_info("Финальная зачистка state-файлов Chimera...")
+    state_dir = Path("/var/lib/xray-installer")
+    if state_dir.exists():
+        shutil.rmtree(state_dir, ignore_errors=True)
+        _box_info("  удалён /var/lib/xray-installer (state всех модулей)")
+    Path("/var/log/chimera.log").unlink(missing_ok=True)
 
     _box_row()
     _box_bottom()
