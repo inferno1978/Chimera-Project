@@ -81,6 +81,16 @@ def do_health_report(send_tg_flag: bool = True) -> str:
     nginx_ok = r.stdout.strip() == "active"
     lines.append(f"{'✅' if nginx_ok else '❌'} Nginx: {'активен' if nginx_ok else 'НЕ АКТИВЕН'}")
 
+    # v62: фактический DNS-путь Xray — config.json + живой DNS-стек.
+    # Одна строка закрывает «через что идут DNS-запросы»: конфиг «через
+    # AGH» + мёртвый AGH = запросы молча в fallback, фильтры обходятся.
+    try:
+        from chimera.modules.agh_probe import xray_dns_path_report
+        dns_rep = xray_dns_path_report(run=_run)
+        lines.append(f"{dns_rep['icon']} {dns_rep['line']}")
+    except Exception:
+        lines.append("⚠️ DNS-путь: не удалось проверить")
+
     # SSL
     domain = ""
     try:
@@ -216,6 +226,37 @@ try:
     p = r.stdout.splitlines()[-1].split()
     pct = float(p[4].replace('%',''))
     lines.append(f'{{chr(9989) if pct<80 else chr(9888)}} Диск: {{p[2]}}/{{p[1]}} ({{pct:.0f}}%)')
+except: pass
+# v62: фактический DNS-путь Xray (config.json + живой DNS-стек)
+try:
+    _servers = []
+    for _cp in ('/etc/xray/config.json','/usr/local/etc/xray/config.json'):
+        _p = Path(_cp)
+        if _p.exists():
+            try:
+                _servers = (json.loads(_p.read_text()).get('dns') or {{}}).get('servers') or []
+                if _servers: break
+            except: pass
+    if _servers:
+        _s0 = _servers[0] or {{}}
+        _a = str(_s0.get('address','')); _po = _s0.get('port', 53)
+        if _a == '127.0.0.1' and _po == 53:
+            _agh = _run(['systemctl','is-active','AdGuardHome']).stdout.strip() == 'active'
+            if _agh:
+                _ss = _run(['ss','-ulnp']).stdout or ''
+                _agh = any('adguardhome' in _l.lower()
+                           and re.search(r'127[.]0[.]0[.]1:53(?![0-9])', _l)
+                           for _l in _ss.splitlines())
+            lines.append((chr(9989) if _agh else chr(9888))
+                + ' DNS: Xray → AGH:53 → DNSCrypt:5300'
+                + ('' if _agh else ' (AGH не активен — запросы через fallback)'))
+        elif _a == '127.0.0.1':
+            _dc = _run(['systemctl','is-active','dnscrypt-proxy']).stdout.strip() == 'active'
+            lines.append((chr(9989) if _dc else chr(9888))
+                + f' DNS: Xray → DNSCrypt:{{_po}}'
+                + ('' if _dc else ' (dnscrypt не активен)'))
+        else:
+            lines.append(chr(8505) + f' DNS: Xray → {{_a}}:{{_po}} (публичный)')
 except: pass
 for dat_name in ('geosite.dat','geoip.dat'):
     dat = Path(f'/etc/xray/{{dat_name}}')
