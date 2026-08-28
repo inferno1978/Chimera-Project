@@ -41,6 +41,7 @@ import shutil
 import string
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -224,7 +225,24 @@ def generate_self_signed_cert(domain: str) -> None:
     _run    = core._run
 
     le_path = Path(f"/etc/letsencrypt/live/{domain}")
+    archive_path = Path(f"/etc/letsencrypt/archive/{domain}")
     info(f"Генерация самоподписанного сертификата для {domain}...")
+    # v63: live/<domain>/*.pem у certbot — СИМЛИНКИ в archive/. Прямая
+    # запись openssl затирает ВАЛИДНЫЙ LE-сертификат безвозвратно
+    # (инцидент v63: certbot упал на rate-limit → самоподпис затёр
+    # свежий LE-сертификат через симлинки). Перед записью — бэкап
+    # всего lineage в /root/: файлы можно вернуть руками за минуту.
+    try:
+        if archive_path.exists() and any(archive_path.glob("*.pem")):
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            backup = Path(f"/root/le-cert-backup-{domain}-{ts}.tar.gz")
+            _run(["tar", "czf", str(backup),
+                  "-C", "/etc/letsencrypt",
+                  f"archive/{domain}", f"live/{domain}"],
+                 quiet=True, check=False)
+            info(f"Бэкап существующего lineage перед заменой: {backup}")
+    except Exception:
+        pass
     le_path.mkdir(parents=True, exist_ok=True)
     _run([
         "openssl", "req", "-x509", "-nodes", "-days", "365",
