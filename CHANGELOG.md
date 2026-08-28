@@ -2,6 +2,115 @@
 
 ---
 
+## FEAT+FIX(olcrtc+21 модуль): AGH-aware DNS во всех генераторах конфигов + тотальная защита от start-limit-hit (v57) — 28 августа 2026
+
+**Задача 1: во ВСЕХ местах сборки/пересборки конфигов, где фигурирует
+локальный резолвер, должен фигурировать AdGuardHome (127.0.0.1:53), а не
+DNSCrypt (127.0.0.1:5300) — с умным определением «AGH установлен и
+РЕАЛЬНО работает» и автооткатом на 5300 при провале проверки (образец —
+v55, agh_probe.agh_dns_available).**
+
+### Аудит всех генераторов конфигов (DNS-секций)
+
+- ✅ 4 генератора Xray (REALITY / xHTTP / chain-single / chain-multi) —
+  AGH-aware с v55 (agh_dns_available → dns.servers[0]=127.0.0.1:53 +
+  живой fallback DNSCrypt:5300 → 1.1.1.1). Без изменений.
+- ✅ Exit-node шаблоны (chain_nodes._make_exit_node_config) — публичный
+  DNS (1.1.1.1/8.8.8.8) намеро: конфиги разворачиваются на ЗАРУБЕЖНЫХ
+  VPS без AGH/dnscrypt. Без изменений.
+- ✅ Клиентские конфиги (rest_api clash/singbox, hybrid_addon karing,
+  subscription*, fragment_*) — DNS клиента, не сервера. Без изменений.
+- ✅ B4-пресеты (dpi_bypass/youtube_b4) — DoH 1.1.1.1 by design
+  (b4-внутренние health-чеки). Без изменений.
+- ❌→✅ **olcrtc._generate_config_json** — единственный оставшийся
+  генератор с серверным DNS: в dns-поле каждого location был жёстко
+  прописан `8.8.8.8:53` (мимо и AGH, и dnscrypt). Теперь новый хелпер
+  `_resolver_for_olcrtc()` выбирает резолвер по образцу v55:
+  1. живой AGH (agh_dns_available: сервис → владение :53 → end-to-end
+     проба резолва) → `127.0.0.1:53`;
+  2. AGH нет/болен + dnscrypt-proxy active → `127.0.0.1:5300`;
+  3. нет локального DNS-стека → прежний дефолт `8.8.8.8:53`.
+  Любой сбой проверки = тихий откат на следующий уровень, olcrtc-manager
+  никогда не остаётся с мёртвым резолвером.
+
+**Задача 2: ошибки start-limit-hit больше не возникают НИ В ОДНОМ
+модуле. v56 закрыла цепочку пересборки; v57 закрывает ВСЕ остальные
+точки рестарта xray — полный аудит по всему дереву chimera/.**
+
+### Закрытые точки (26 сайтов в 19 модулях + 3 bash-скрипта)
+
+Ядро и общие хелперы:
+- `_core.py` (6 сайтов): смена fingerprint, применение юзеров
+  (ручной JSON), восстановление конфига, патч статистики, переключение
+  XTLS-flow, network-restore — все переведены на `_xray_safe_restart`.
+- `xray_install.py`: **`_xray_safe_apply_config`** (самый частый путь:
+  юзеры, b4-сеты, routing — теперь reset-failed через
+  `_core._xray_safe_restart`, с fallback), `_xray_restart_all_services`,
+  `_xray_config_rollback` (рестарт после отката = второй подряд —
+  именно здесь ловился лимит), авто-update cron-скрипт (bash).
+- `users_manager._users_apply_to_config` — массовые операции с юзерами.
+
+Модули (getattr(core, "_xray_safe_restart") с fallback-ветками,
+инлайн reset-failed или локальный хелпер):
+- `dns_rules._dns_reload_xray` — серия правок DNS-правил = серия
+  рестартов; добавлены reset-failed + wait-цикл + повтор.
+- `youtube_warp_route` (×2), `ru_subnets` (remove + fallback), `as_direct`
+  и `youtube_route`, `youtube_ip_pin` (fallback-ветки v56), `reconfigure`,
+  `geoip_block` (×2), `traffic_tracking`, `credential_rotation` (×2),
+  `migration`, `backup_rollback` (restart xray+nginx), `singbox_nginx`
+  (×3, включая рестарт после отката), `turnable` (×2), `user_fp_manager`
+  (×2), `awg_transport`, `olcrtc-соседи`.
+- `pq_vless` (×3): новый локальный хелпер `_xray_restart_safe()` —
+  модуль самодостаточен (без привязки к _core).
+- `smart_balancer`: **особо важный фикс** — балансировщик рестартит xray
+  в health-check цикле; без reset-failed серия балансировочных рестартов
+  упирается в лимит и xray «зависает» в failed.
+- `dpi_bypass._xray_safe_restart` — reset-failed в fallback-ветке
+  (импорт нескольких b4-сетов подряд).
+- `hybrid_addon.restart_service` — reset-failed перед рестартом +
+  повторная попытка (rollback-механика apply_xray_change делает 2+
+  рестарта подряд).
+
+Bash-скрипты, порождаемые chimera:
+- `_core.py` fp-rotate cron: reset-failed перед start/restart.
+- `fail2ban_setup.py` xray-watchdog.sh: **reset-failed ОБЯЗАТЕЛЕН** —
+  без него watchdog сам не может поднять xray, упавший с start-limit-hit
+  (restart из failed-состояния отклоняется тем же лимитом); плюс вторая
+  попытка с reset-failed.
+- `cluster_ops.py` (×3): SSH-команды на удалённые VPS (op_restart,
+  op_rotate_uuid, авто-update) — reset-failed в remote-строках.
+
+### Статический гвард (регрессионная защита)
+
+Новый `tests/test_v57_agh_aware_and_start_limit.py` (9 тестов) содержит
+**статический гвард**: сканирует ВСЁ дерево chimera/*.py и требует,
+чтобы каждый «systemctl restart xray» был защищён reset-failed в
+соседних строках, шёл через безопасную обёртку (_xray_safe_restart /
+_xray_restart_safe / restart_service) или был исключён явно
+(ExecReload-юнит, докстринги, UI-подсказки). Новый голый рестарт в любом
+модуле = красный тест. Гвард при первом запуске нашёл и закрыл 17
+дополнительных незакрытых сайтов, пропущенных ручным аудитом (geoip_block,
+smart_balancer, turnable, traffic_tracking, migration, backup_rollback,
+credential_rotation, singbox_nginx, user_fp_manager, awg_transport) —
+ровно тот класс ошибок, из-за которого v56 пришлось делать срочно.
+
+### Тесты
+
+- `test_v57_agh_aware_and_start_limit.py` (9): olcrtc-резолвер (AGH →
+  dnscrypt → 8.8.8.8, тихий откат при исключении в agh_probe, подстановка
+  в dns-поле locations), статический гвард restart'ов, пины
+  (_xray_safe_apply_config → _xray_safe_restart, reset-failed в
+  watchdog и fp-rotate).
+- Целевые прогоны затронутых модулей: 548 + 113 + 85 + 9 passed
+  (agh/aghome/safe-restart/dns_rules/pq_vless/users_manager/fail2ban/
+  cluster_ops/olcrtc/hybrid/ru_subnets/as_direct/youtube_*/xray_install/
+  geoip/smart_balancer/turnable/traffic_tracking/credential_rotation/
+  migration/user_fp_manager/singbox_nginx/backup/awg_transport).
+- Все изменённые файлы компилируются (py_compile).
+
+---
+
+
 ## FIX(_core+xray_install+emergency_repair+youtube_route+youtube_ip_pin+ru_subnets+as_direct+chain_nodes+mtproto): start-limit-hit при пересборке конфига + AdGuardHome в итоговом health-report (v56) — 27 августа 2026
 
 **Задача 1: после пересборки конфига из меню (Главное меню → 3 → 7 →

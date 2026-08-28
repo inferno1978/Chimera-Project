@@ -376,8 +376,15 @@ def do_reconfigure() -> None:
                            capture=True, check=False, quiet=True)
             if _r_ngx2.stdout.strip() != "active":
                 warn("nginx не запущен после реконфигурации! Проверьте: nginx -t")
-            _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-            time.sleep(2)
+            # v57 (start-limit-fix): безопасный рестарт (reset-failed) —
+            # реконфигурация рестартит nginx и xray в цепочке с certbot
+            _safe_restart = getattr(core, "_xray_safe_restart", None)
+            if callable(_safe_restart):
+                _safe_restart(wait_active=15, attempts=2)
+            else:
+                _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
+                _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+                time.sleep(2)
             success(f"Реконфигурация завершена: домен={new_domain}, порт={new_port}")
             #  FIX: перегенерируем клиентские ссылки с новым доменом/SNI.
             # Раньше ссылки не обновлялись — пользователи оставались со

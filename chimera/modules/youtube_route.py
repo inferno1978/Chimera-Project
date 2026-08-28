@@ -497,6 +497,7 @@ def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
     if callable(_safe_restart):
         _restart_ok = _safe_restart()
     else:  # fallback на старое поведение (старое ядро без хелпера)
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)  # v57
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         _restart_ok = False
         for _ in range(30):
@@ -748,6 +749,7 @@ def _youtube_apply_fragment_to_xray(
     if callable(_safe_restart):
         _restart_ok = _safe_restart()
     else:  # fallback на старое поведение (старое ядро без хелпера)
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)  # v57
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         _restart_ok = False
         for _ in range(30):
@@ -846,6 +848,7 @@ def _youtube_remove_from_xray() -> bool:
         # Но всё равно перезапускаем xray чтобы конфиг был consistent.
         success("Правило YouTube→RU не найдено в конфиге — уже выключено.")
     else:
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)  # v57
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         r = None
         for _ in range(30):

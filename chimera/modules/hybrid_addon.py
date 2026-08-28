@@ -614,6 +614,11 @@ def validate_xray_config(path: Path) -> bool:
 
 
 def restart_service(name: str) -> bool:
+    # v57 (start-limit-fix): reset-failed перед рестартом — rollback-механика
+    # apply_xray_change() может сделать 2+ рестарта подряд (apply → откат),
+    # а юнит xray имеет StartLimitBurst — без сброса счётчика 3-й рестарт
+    # за 60с отклоняется systemd'ом (start-limit-hit).
+    run(["systemctl", "reset-failed", name], check=False)
     r = run(["systemctl", "restart", name])
     if r.returncode != 0:
         c_red(f"systemctl restart {name} завершился с ошибкой: {r.stderr.strip()}")
@@ -624,7 +629,18 @@ def restart_service(name: str) -> bool:
     if active:
         c_green(f"Служба {name} активна.")
     else:
-        c_red(f"Служба {name} НЕ активна после restart (статус: {r.stdout.strip()!r}).")
+        # Одна повторная попытка с reset-failed (конфиг валиден, но счётчик
+        # start-rate-limit мог сработать на цепочке рестартов)
+        run(["systemctl", "reset-failed", name], check=False)
+        r2 = run(["systemctl", "restart", name], check=False)
+        if r2.returncode == 0:
+            time.sleep(1.5)
+            r = run(["systemctl", "is-active", name])
+            active = r.stdout.strip() == "active"
+        if active:
+            c_green(f"Служба {name} активна (после повторной попытки).")
+        else:
+            c_red(f"Служба {name} НЕ активна после restart (статус: {r.stdout.strip()!r}).")
     return active
 
 

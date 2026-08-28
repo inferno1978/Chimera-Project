@@ -406,6 +406,11 @@ def _sb_reload_xray() -> bool:
     _sb_log("INFO: пауза 3 сек перед restart (graceful window для клиентов)...")
     time.sleep(3)
 
+    # v57 (start-limit-fix): reset-failed перед рестартом — балансировщик
+    # рестартит xray циклично (health-check loop), StartLimitBurst юнита
+    # без сброса счётчика блокирует серию балансировочных рестартов
+    subprocess.run(["systemctl", "reset-failed", "xray"],
+                   capture_output=True, check=False)
     subprocess.run(["systemctl", "restart", "xray"],
                    capture_output=True, timeout=30)
 

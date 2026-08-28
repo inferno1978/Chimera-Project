@@ -466,6 +466,7 @@ def apply_youtube_ip_pin(target_tag: str) -> bool:
     if callable(_safe_restart):
         _restart_ok = _safe_restart(wait_active=45)
     else:  # fallback на старое поведение (старое ядро без хелпера)
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)  # v57
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         _restart_ok = False
         for _ in range(45):
@@ -528,6 +529,7 @@ def remove_youtube_ip_pin() -> bool:
     if not ok:
         success("YouTube IP-pin правило не найдено — уже выключено.")
     else:
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)  # v57
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         r = None
         for _ in range(30):

@@ -289,6 +289,7 @@ def op_restart(host: str, ssh_key: Optional[str] = None,
     t0 = time.monotonic()
     ok, out, err = _ssh(
         host,
+        'systemctl reset-failed xray 2>/dev/null || true; '
         'systemctl restart xray && sleep 5 && systemctl is-active xray',
         ssh_key=ssh_key, password=password, timeout=60,
     )
@@ -319,8 +320,10 @@ def op_update_xray(host: str, ssh_key: Optional[str] = None,
         "cd $TMP && unzip -q xray.zip; "
         "cp $BIN ${BIN}.bak; "
         "cp xray $BIN && chmod +x $BIN; "
+        "systemctl reset-failed xray 2>/dev/null || true; "
         "systemctl restart xray && sleep 5; "
-        "systemctl is-active xray || { cp ${BIN}.bak $BIN; systemctl restart xray; "
+        "systemctl is-active xray || { cp ${BIN}.bak $BIN; "
+        "  systemctl reset-failed xray 2>/dev/null || true; systemctl restart xray; "
         "  echo ROLLBACK; exit 1; }; "
         "echo updated to $LATEST; "
         "rm -rf $TMP; "
@@ -356,6 +359,7 @@ def op_rotate_uuid(host: str, ssh_key: Optional[str] = None,
                           duration=time.monotonic() - t0)
     ok2, out2, err2 = _ssh(
         host,
+        'systemctl reset-failed xray 2>/dev/null || true; '
         'systemctl restart xray && sleep 5 && systemctl is-active xray',
         ssh_key=ssh_key, password=password, timeout=60,
     )

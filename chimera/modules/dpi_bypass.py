@@ -1636,7 +1636,11 @@ def _xray_safe_restart() -> bool:
         from chimera.modules.xray_install import _xray_safe_apply_config
         return _xray_safe_apply_config()
     except ImportError:
-        # Fallback — raw restart (менее безопасно, но лучше чем ничего)
+        # Fallback — raw restart (менее безопасно, но лучше чем ничего).
+        # v57 (start-limit-fix): reset-failed перед рестартом — импорт b4-сетов
+        # делает несколько apply подряд (routing для каждого сета).
+        subprocess.run(["systemctl", "reset-failed", "xray"],
+                       capture_output=True, check=False)
         subprocess.run(["systemctl", "restart", "xray"],
                        capture_output=True, check=False)
         time.sleep(1)

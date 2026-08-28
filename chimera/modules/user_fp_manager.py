@@ -189,6 +189,8 @@ def _validate_and_restart() -> tuple[bool, str]:
         return False, (r.stdout + r.stderr).strip()[:300]
 
     # Перезапуск
+    # v57 (start-limit-fix): reset-failed перед рестартом (StartLimitBurst)
+    subprocess.run(["systemctl", "reset-failed", "xray"], check=False)
     subprocess.run(["systemctl", "restart", "xray"], check=False)
     time.sleep(2)
 
@@ -403,6 +405,8 @@ def _fp_apply_via_xray(new_fp):
             return False, (r.stdout + r.stderr).strip()[:200]
 
     # Перезапуск
+    # v57 (start-limit-fix): reset-failed перед рестартом (StartLimitBurst)
+    subprocess.run(["systemctl", "reset-failed", "xray"], check=False)
     subprocess.run(["systemctl", "restart", "xray"], check=False)
     import time as _time
     _time.sleep(2)

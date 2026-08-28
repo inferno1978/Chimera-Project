@@ -2654,10 +2654,24 @@ def _regenerate_xray_config(interactive: bool = True) -> bool:
         else:
             xray_install.generate_xray_config()
 
+        # v57 (start-limit-fix): reset-failed перед рестартом — перегенерация
+        # конфига xray (финализация/удаление AGH) идёт в цепочке с другими
+        # рестартами (dnscrypt, AGH, ru_subnets restore)
+        subprocess.run(["systemctl", "reset-failed", "xray"],
+                       capture_output=True, check=False)
         subprocess.run(["systemctl", "restart", "xray"],
                        capture_output=True, check=False)
         time.sleep(2)
         if _svc_is_active("xray"):
+            info("AGH: конфиг Xray обновлён (DNS → 127.0.0.1:53 через AGH)")
+            return True
+        # Повторная попытка после reset-failed (start-limit мог сработать
+        # на рестартах соседних сервисов миграции)
+        subprocess.run(["systemctl", "reset-failed", "xray"],
+                       capture_output=True, check=False)
+        subprocess.run(["systemctl", "restart", "xray"],
+                       capture_output=True, check=False)
+        if _wait_service("xray", 15):
             info("AGH: конфиг Xray обновлён (DNS → 127.0.0.1:53 через AGH)")
             return True
         warn("AGH: xray не перезапустился — journalctl -u xray -n 20")
