@@ -386,12 +386,37 @@ class TestPortRegistryCoverage(unittest.TestCase):
     def test_setup_direct_calls_port_register(self):
         """_telemt_setup_direct_access должен вызвать port_register + ufw_open_port."""
         from chimera.modules import telemt_panel
+        from chimera.modules import panel_nginx_front
+        # v65: герметичность — nginx-фронт исполняется по-настоящему (именно
+        # он вызывает port_register/ufw_open_port), но ВСЕ его побочные
+        # эффекты замоканы: генерация сертификата, nginx -t, curl, запись
+        # vhost-файлов, curl ifconfig.me. Реальный nginx и /etc/nginx
+        # в песочнице не нужны.
+        _mock_sites_avail = MagicMock()
+        _mock_sites_en = MagicMock()
+        _mock_sites_en.exists.return_value = False
+        _mock_vhost_file = MagicMock()
+        _mock_sites_avail.__truediv__ = lambda self, x: _mock_vhost_file
+        _mock_sites_en.__truediv__ = lambda self, x: _mock_vhost_file
         with patch.object(telemt_panel, "_is_installed", return_value=True), \
              patch.object(telemt_panel, "_validate_tls_port", return_value=(True, "")), \
              patch("chimera.modules.telemt_panel.shutil.which", return_value="/usr/sbin/nginx"), \
              patch.object(telemt_panel, "_run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
              patch.object(telemt_panel, "_get_public_ips", return_value=("1.2.3.4", "")), \
              patch.object(telemt_panel, "_ask_public_ip_choice", return_value="1.2.3.4"), \
+             patch.object(panel_nginx_front, "check_port_via_registry",
+                          return_value=(True, [])), \
+             patch.object(panel_nginx_front, "_generate_self_signed_tls",
+                          return_value=(MagicMock(), MagicMock())), \
+             patch("chimera.modules.panel_nginx_front.subprocess.run",
+                          return_value=MagicMock(returncode=0, stdout="", stderr="")) as _m_pnf_run, \
+             patch("chimera.modules.panel_nginx_front.shutil.which",
+                          return_value="/usr/sbin/nginx"), \
+             patch.object(panel_nginx_front, "NGINX_SITES_AVAILABLE",
+                          _mock_sites_avail), \
+             patch.object(panel_nginx_front, "NGINX_SITES_ENABLED",
+                          _mock_sites_en), \
+             patch.object(panel_nginx_front, "NGINX_SSL_DIR", MagicMock()), \
              patch("chimera.modules.telemt_panel.Path") as mock_path_cls, \
              patch.object(telemt_panel, "TELEMT_NGINX_AVAILABLE") as mock_avail, \
              patch.object(telemt_panel, "TELEMT_NGINX_ENABLED") as mock_en, \
@@ -420,13 +445,30 @@ class TestPortRegistryCoverage(unittest.TestCase):
     def test_remove_direct_calls_port_unregister(self):
         """_telemt_remove_direct_access должен вызвать ufw_close_port + port_unregister."""
         from chimera.modules import telemt_panel
+        from chimera.modules import panel_nginx_front
         import json
+        # v65: герметичность — nginx-фронт исполняется по-настоящему (именно
+        # он вызывает ufw_close_port/port_unregister), но nginx -t/reload,
+        # unlink vhost-файлов и state.json замоканы.
+        _mock_sites_avail = MagicMock()
+        _mock_sites_en = MagicMock()
+        _mock_vhost_file = MagicMock()
+        _mock_sites_avail.__truediv__ = lambda self, x: _mock_vhost_file
+        _mock_sites_en.__truediv__ = lambda self, x: _mock_vhost_file
         # State показывает что прямой доступ включён.
         with patch.object(telemt_panel, "TELEMT_NGINX_STATE") as mock_state, \
              patch.object(telemt_panel, "TELEMT_NGINX_ENABLED") as mock_en, \
              patch.object(telemt_panel, "TELEMT_NGINX_AVAILABLE") as mock_avail, \
              patch("chimera.modules.telemt_panel.shutil.which", return_value="/usr/sbin/nginx"), \
              patch.object(telemt_panel, "_run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+             patch.object(panel_nginx_front, "NGINX_SITES_AVAILABLE",
+                          _mock_sites_avail), \
+             patch.object(panel_nginx_front, "NGINX_SITES_ENABLED",
+                          _mock_sites_en), \
+             patch("chimera.modules.panel_nginx_front.subprocess.run",
+                          return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+             patch("chimera.modules.panel_nginx_front.shutil.which",
+                          return_value="/usr/sbin/nginx"), \
              patch("chimera.modules.port_registry.ufw_close_port", return_value=(True, "")) as mock_ufw_close, \
              patch("chimera.modules.port_registry.port_unregister", return_value=True) as mock_unreg:
             mock_state.exists.return_value = True

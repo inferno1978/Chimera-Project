@@ -241,15 +241,28 @@ try:
         _s0 = _servers[0] or {{}}
         _a = str(_s0.get('address','')); _po = _s0.get('port', 53)
         if _a == '127.0.0.1' and _po == 53:
-            _agh = _run(['systemctl','is-active','AdGuardHome']).stdout.strip() == 'active'
+            _agh_units = ('AdGuardHome', 'adguardhome')
+            _agh = any(_run(['systemctl','is-active',_u]).stdout.strip() == 'active'
+                       for _u in _agh_units)
             if _agh:
                 _ss = _run(['ss','-ulnp']).stdout or ''
                 _agh = any('adguardhome' in _l.lower()
                            and re.search(r'127[.]0[.]0[.]1:53(?![0-9])', _l)
                            for _l in _ss.splitlines())
-            lines.append((chr(9989) if _agh else chr(9888))
-                + ' DNS: Xray → AGH:53 → DNSCrypt:5300'
-                + ('' if _agh else ' (AGH не активен — запросы через fallback)'))
+            _agh_resolves = None
+            if _agh:
+                # v65: сервис+порт ≠ работающий DNS — живая проба резолва
+                try:
+                    _r = _run(['dig','@127.0.0.1','ya.ru','+time=2','+tries=1','+short'])
+                    _agh_resolves = bool((_r.stdout or '').strip())
+                except Exception:
+                    _agh_resolves = _run(['getent','hosts','ya.ru']).returncode == 0
+            if _agh and _agh_resolves:
+                lines.append(chr(9989) + ' DNS: Xray → AGH:53 → DNSCrypt:5300')
+            elif _agh:
+                lines.append(chr(9888) + ' DNS: AGH на :53 не резолвит — Xray идёт через fallback')
+            else:
+                lines.append(chr(9888) + ' DNS: Xray → AGH:53 → DNSCrypt:5300 (AGH не активен — запросы через fallback)')
         elif _a == '127.0.0.1':
             _dc = _run(['systemctl','is-active','dnscrypt-proxy']).stdout.strip() == 'active'
             lines.append((chr(9989) if _dc else chr(9888))

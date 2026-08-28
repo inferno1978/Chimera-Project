@@ -786,7 +786,7 @@ def _resolver_for_olcrtc() -> str:
     # 1. AGH: глубокий health-check (сервис → владение :53 → проба резолва)
     try:
         from chimera.modules.agh_probe import agh_dns_available
-        agh_ok, _note = agh_dns_available(run=_run)
+        agh_ok, _note = agh_dns_available(run=_run, autostart=True)
         if agh_ok:
             return "127.0.0.1:53"
     except Exception:
