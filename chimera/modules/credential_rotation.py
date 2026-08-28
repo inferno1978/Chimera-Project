@@ -152,8 +152,32 @@ if os.path.exists(p):
     with open(p, 'w') as f: json.dump(s, f, indent=2, ensure_ascii=False)
 " "$NEW_UUID" >> "$LOG" 2>&1
 
+        # users.json (v58): ротация ОБЯЗАНА менять uuid и здесь — иначе
+        # следующая регенерация конфига (_users_collect_for_config, v53)
+        # молча возвращает СТАРЫЙ uuid из users.json, и все ссылки,
+        # выданные после ротации, умирают.
+        python3 -c "
+import json, sys
+nu = sys.argv[1]
+p = '/etc/xray/users.json'
+import os;
+if os.path.exists(p):
+    with open(p) as f: u = json.load(f)
+    if isinstance(u, list) and u:
+        u[0]['uuid'] = nu
+    elif isinstance(u, dict):
+        for k in u:
+            if isinstance(u[k], dict) and 'uuid' in u[k]:
+                u[k]['uuid'] = nu
+                break
+    with open(p, 'w') as f: json.dump(u, f, indent=2, ensure_ascii=False)
+" "$NEW_UUID" >> "$LOG" 2>&1
+
         if /usr/local/bin/xray -test -config /usr/local/etc/xray/config.json >> "$LOG" 2>&1; then
             # Xray 26.x не поддерживает горячий reload через SIGHUP — используем restart.
+            # v58: reset-failed перед restart — защита от start-limit-hit
+            # (см. v56/v57; без него cron-ротация сама может заблокировать xray).
+            systemctl reset-failed xray >> "$LOG" 2>&1 || true
             if systemctl is-active --quiet xray 2>/dev/null; then
                 systemctl restart xray >> "$LOG" 2>&1 \\
                     && echo "[$DATE] Xray перезапущен (uuid=$NEW_UUID)" >> "$LOG" \\

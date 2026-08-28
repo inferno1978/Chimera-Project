@@ -1677,9 +1677,18 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
     domain     = st.get("domain", "")
     port       = st.get("server_port", 443)
     proto      = st.get("protocol_mode", "reality")
-    pub_key    = st.get("public_key", "")
-    short_id   = st.get("short_id", "")
-    spiderx    = st.get("spiderx", "/")
+    # v58: pbk/sid/spx — с fallback на живой config.json (частично битый
+    # state.json больше не выдаёт ссылки с pbk=&sid=).
+    try:
+        pub_key, short_id, _spx_live = core._reality_transport_params_from_state(st)
+        spiderx    = st.get("spiderx", "") or _spx_live or "/"
+    except Exception:
+        pub_key    = st.get("public_key", "")
+        short_id   = st.get("short_id", "")
+        spiderx    = st.get("spiderx", "/")
+    if proto == "reality" and not (pub_key and short_id):
+        warn("REALITY-параметры неполны (pbk/sid) — ссылки могут не работать; "
+             "проверьте state.json и /etc/xray/config.json")
     xhttp_path = st.get("xhttp_path", "/")
     xhttp_mode = st.get("xhttp_mode", "stream-up")
     ipv6       = st.get("ipv6", "")          # сохранённый IPv6 из state.json

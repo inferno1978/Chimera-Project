@@ -1568,6 +1568,20 @@ def do_csqtt_menu() -> None:
             server_ip = _get_server_ip()
             data_port = state.get("data_port", _DEFAULT_DATA_PORT)
             main_pass = state.get("main_password", "")
+            # v58: guard — ссылка с ПУСТЫМ паролем (битый/усечённый state.json)
+            # нерабоча и вводит в заблуждение; показываем ошибку вместо битой ссылки.
+            if not main_pass:
+                _box_top("🔗  ССЫЛКА  •  ГЛАВНЫЙ ПАРОЛЬ")
+                _box_row()
+                _box_bot()
+                print()
+                _box_warn("main_password отсутствует в state.json — ссылка не "
+                          "может быть построена. Восстановите state.json из "
+                          "бэкапа или переустановите модуль (пароль будет "
+                          "переиспользован из конфига, если он цел).")
+                print()
+                _pause()
+                continue
             _box_top("🔗  ССЫЛКА  •  ГЛАВНЫЙ ПАРОЛЬ")
             _box_row()
             _box_bot()

@@ -240,8 +240,17 @@ def _build_vless_uri(user: dict, state: dict) -> Optional[str]:
         return None
     proto      = state.get("protocol_mode", "reality")
     port       = int(state.get("server_port", 443))
-    pub_key    = state.get("public_key", "")
-    short_id   = state.get("short_id", "")
+    # v58: pbk/sid/spx — с fallback на живой config.json. При частично
+    # повреждённом state.json (domain/uuid на месте, ключи потеряны)
+    # ссылки получали pbk=&sid= и молча ломались. Источник истины для
+    # выданных ссылок — realitySettings текущего конфига.
+    try:
+        pub_key, short_id, spiderx_fallback = _core_call(
+            "_reality_transport_params_from_state", state)
+    except Exception:
+        pub_key    = state.get("public_key", "")
+        short_id   = state.get("short_id", "")
+        spiderx_fallback = ""
     fp         = state.get("fingerprint", "chrome") or "chrome"
     xhttp_path = state.get("xhttp_path", "/")
     xhttp_mode = state.get("xhttp_mode", "stream-up")
@@ -251,6 +260,10 @@ def _build_vless_uri(user: dict, state: dict) -> Optional[str]:
     uuid_str = user.get("uuid", "")
     if not uuid_str:
         return None
+    if proto == "reality" and not (pub_key and short_id):
+        _warn(f"REALITY-параметры неполны (pbk={'да' if pub_key else 'НЕТ'}, "
+              f"sid={'да' if short_id else 'НЕТ'}) — ссылка для "
+              f"{user.get('email','?')} может не работать; проверьте state.json")
     try:
         return _gen_vless_link(host, uuid_str, pub_key, short_id, sni, fp,
                                 proto, xhttp_path, xhttp_mode, port)
