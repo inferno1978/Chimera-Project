@@ -3638,6 +3638,13 @@ def do_full_install() -> None:
     install_dnscrypt();             PROGRESS.update(5,  "DNSCrypt")
     if PARAM_USE_DNSCRYPT:
         apply_dnscrypt_tuning()
+    # v66: файрволл — ДО AdGuard Home. Финализация AGH выпускает
+    # LE-сертификат (certbot HTTP-01): :80 обязан уже пропускаться UFW.
+    # Раньше configure_firewall шла ПОСЛЕ install_aghome → на образах с
+    # активным UFW челлендж LE блокировался → AGH всегда получал
+    # self-signed. Порядок безопасен: 22/80/SERVER_PORT открываются до
+    # enable, остальные шаги UFW-aware (port_registry/_open_wizard_access).
+    configure_firewall();           PROGRESS.update(5,  "Файрволл")
     # AdGuard Home (v37): DNS-сервер :53 поверх DNSCrypt — после
     # установки dnscrypt (upstream-требование). Внутри install_aghome:
     # миграция dnscrypt с :53 → wizard (:3000, ждём до 5 мин) → финализация
@@ -3665,7 +3672,6 @@ def do_full_install() -> None:
     elif PARAM_USE_AGHOME and not PARAM_USE_DNSCRYPT:
         warn("AdGuard Home требует DNSCrypt-proxy — AGH пропущен")
         PARAM_USE_AGHOME = False
-    configure_firewall();           PROGRESS.update(5,  "Файрволл")
 
     # v60: убран ложный ранний чек «порт SERVER_PORT может быть недоступен
     # снаружи» — он выполнялся ДО запуска xray (порт ещё не слушался) и
