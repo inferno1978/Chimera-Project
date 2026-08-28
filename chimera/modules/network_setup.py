@@ -47,6 +47,7 @@ def configure_firewall() -> None:
     core = _core_module()
     info    = core.info
     warn    = core.warn
+    dim     = core.dim
     success = core.success
     _run    = core._run
     PROGRESS = core.PROGRESS
@@ -61,15 +62,19 @@ def configure_firewall() -> None:
     info("Настройка файрволла...")
     PROGRESS.update(2, "Файрволл")
 
-    # Проверяем INPUT policy DROP
+    # Проверяем INPUT policy DROP: скрипт сам откроет нужные порты ниже,
+    # а реальная внешняя доступность проверяется финальной «Проверкой
+    # сетевой доступности» — поэтому v60: info вместо warn (4× [WARN]
+    # на полностью штатной ситуации, инцидент переустановки
+    # 203.0.113.109).
     try:
         _r = subprocess.run(["iptables", "-L", "INPUT", "-n"],
                             capture_output=True, text=True)
         if "policy DROP" in _r.stdout:
-            warn("Обнаружен файрвол с политикой INPUT DROP.")
-            warn("Скрипт откроет нужные порты автоматически.")
-            warn("Если после установки порты недоступны — откройте их вручную")
-            warn("в панели управления вашего провайдера.")
+            info("Обнаружен файрвол с политикой INPUT DROP — "
+                 "нужные порты будут открыты автоматически")
+            dim("Если после установки порты недоступны — откройте их "
+                "в панели управления вашего провайдера")
     except Exception:
         pass
 

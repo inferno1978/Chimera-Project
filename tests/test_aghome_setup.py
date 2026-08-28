@@ -1318,10 +1318,34 @@ class TestDnsAliveGuarantee(unittest.TestCase):
             self.assertEqual(cmd[:2], ["getent", "hosts"])
 
     def test_ensure_no_action_when_alive(self):
-        with patch.object(self.mod, "_dns_probe_ok", return_value=True), \
+        with patch.object(self.mod, "_system_dns_ok", return_value=True), \
              patch.object(self.mod, "_emergency_restore_dnscrypt_redirect") as em:
             self.assertTrue(self.mod._ensure_system_dns_alive())
             em.assert_not_called()
+
+    def test_ensure_no_action_when_provider_dns_alive(self):
+        """v60: чистая установка — системный DNS провайдера жив, :53 пуст:
+        выход молча, БЕЗ resolv-фикса (старый код ломал DNS провайдера)."""
+        with patch.object(self.mod, "_system_dns_ok", return_value=True) as sysok, \
+             patch.object(self.mod, "_dns_probe_ok", return_value=False), \
+             patch("chimera.modules.resolv_conf_fix."
+                   "fix_resolv_conf_to_localhost") as fix, \
+             patch.object(self.mod.time, "sleep", lambda s: None):
+            self.assertTrue(self.mod._ensure_system_dns_alive("перед установкой AGH"))
+        sysok.assert_called()
+        fix.assert_not_called()
+
+    def test_ensure_flap_protection(self):
+        """v60: единичный таймаут системного резолва ≠ мёртвый DNS —
+        вторая проба проходит, восстановление не запускается."""
+        with patch.object(self.mod, "_system_dns_ok",
+                          side_effect=[False, True]) as sysok, \
+             patch("chimera.modules.resolv_conf_fix."
+                   "fix_resolv_conf_to_localhost") as fix, \
+             patch.object(self.mod.time, "sleep", lambda s: None):
+            self.assertTrue(self.mod._ensure_system_dns_alive())
+        self.assertEqual(sysok.call_count, 2)
+        fix.assert_not_called()
 
     def test_ensure_repairs_with_resolv_fix(self):
         calls = {"fix": 0}
@@ -1330,12 +1354,13 @@ class TestDnsAliveGuarantee(unittest.TestCase):
             calls["fix"] += 1
             return {"ok": True}
 
-        # probe: мёртв → (после фикса) жив
-        with patch.object(self.mod, "_dns_probe_ok",
-                          side_effect=[False, True]), \
+        # системная проба: мёртв → мёртв → (после фикса + settle) жив
+        with patch.object(self.mod, "_system_dns_ok",
+                          side_effect=[False, False, True]), \
              patch("chimera.modules.resolv_conf_fix."
                    "fix_resolv_conf_to_localhost",
-                   side_effect=fake_fix):
+                   side_effect=fake_fix), \
+             patch.object(self.mod.time, "sleep", lambda s: None):
             self.assertTrue(self.mod._ensure_system_dns_alive("тест"))
         self.assertEqual(calls["fix"], 1)
 
@@ -1347,16 +1372,20 @@ class TestDnsAliveGuarantee(unittest.TestCase):
             ipt.append(" ".join(cmd))
             return MagicMock(returncode=0, stdout="")
 
-        # probe: мёртв → мёртв → жив; AGH не активен; dnscrypt не активен
-        with patch.object(self.mod, "_dns_probe_ok",
-                          side_effect=[False, False, True]), \
+        # проба: фаза0 ×2 мёртв → settle после фикса ×3 мёртв →
+        # settle после iptables: мёртв, мёртв, жив; AGH/dnscrypt не активны
+        with patch.object(self.mod, "_system_dns_ok",
+                          side_effect=[False, False,
+                                       False, False, False,
+                                       False, False, True]), \
              patch("chimera.modules.resolv_conf_fix."
                    "fix_resolv_conf_to_localhost",
                    side_effect=ImportError("модуль недоступен")), \
              patch.object(self.mod, "_svc_is_active", return_value=False), \
              patch.object(self.mod, "_wait_service", return_value=True), \
              patch.object(self.mod, "_get_dnscrypt_port", return_value=5300), \
-             patch.object(self.mod.subprocess, "run", side_effect=run_side):
+             patch.object(self.mod.subprocess, "run", side_effect=run_side), \
+             patch.object(self.mod.time, "sleep", lambda s: None):
             self.assertTrue(self.mod._ensure_system_dns_alive())
 
         adds = [c for c in ipt if "-A OUTPUT" in c and "REDIRECT" in c]
@@ -1365,9 +1394,31 @@ class TestDnsAliveGuarantee(unittest.TestCase):
         self.assertTrue(any("-p tcp" in a for a in adds))
         self.assertTrue(all("--to-ports 5300" in a for a in adds))
 
+    def test_ensure_public_dns_last_resort(self):
+        """v60: локальный стек не поднялся — публичный DNS в resolv.conf,
+        установка продолжается (DNS жив любой ценой)."""
+        with patch.object(self.mod, "_system_dns_ok",
+                          side_effect=[False, False,
+                                       False, False, False,
+                                       False, False, False,
+                                       True]), \
+             patch("chimera.modules.resolv_conf_fix."
+                   "fix_resolv_conf_to_localhost",
+                   side_effect=ImportError("нет")), \
+             patch.object(self.mod, "_svc_is_active", return_value=False), \
+             patch.object(self.mod, "_wait_service", return_value=True), \
+             patch.object(self.mod, "_get_dnscrypt_port", return_value=5300), \
+             patch.object(self.mod.subprocess, "run",
+                          return_value=MagicMock(returncode=0)), \
+             patch.object(self.mod, "_emergency_public_dns_fallback",
+                          return_value=True) as pub, \
+             patch.object(self.mod.time, "sleep", lambda s: None):
+            self.assertTrue(self.mod._ensure_system_dns_alive())
+        pub.assert_called_once()
+
     def test_ensure_failed_shows_help_box(self):
-        """Все ступени провалились → красный бокс + False."""
-        with patch.object(self.mod, "_dns_probe_ok", return_value=False), \
+        """Все ступени (включая публичный DNS) провалились → бокс + False."""
+        with patch.object(self.mod, "_system_dns_ok", return_value=False), \
              patch("chimera.modules.resolv_conf_fix."
                    "fix_resolv_conf_to_localhost",
                    side_effect=ImportError("нет")), \
@@ -1375,6 +1426,9 @@ class TestDnsAliveGuarantee(unittest.TestCase):
              patch.object(self.mod, "_get_dnscrypt_port", return_value=5300), \
              patch.object(self.mod.subprocess, "run",
                           return_value=MagicMock(returncode=0)), \
+             patch.object(self.mod, "_emergency_public_dns_fallback",
+                          return_value=False), \
+             patch.object(self.mod.time, "sleep", lambda s: None), \
              patch.object(self.mod, "_dns_blackhole_help_box") as box:
             self.assertFalse(self.mod._ensure_system_dns_alive())
         box.assert_called_once()
@@ -1382,7 +1436,7 @@ class TestDnsAliveGuarantee(unittest.TestCase):
     def test_wait_wizard_repairs_dns(self):
         """Во время ожидания мастера DNS умер → _ensure_system_dns_alive."""
         with patch.object(self.mod, "AGH_CONF") as conf, \
-             patch.object(self.mod, "_dns_probe_ok", return_value=False), \
+             patch.object(self.mod, "_system_dns_ok", return_value=False), \
              patch.object(self.mod, "_ensure_system_dns_alive") as ensure, \
              patch.object(self.mod, "_svc_is_active", return_value=False), \
              patch.object(self.mod.time, "monotonic",

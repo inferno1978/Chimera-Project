@@ -393,10 +393,13 @@ def fetch_package(
             # Это критично для диагностики случаев когда CDN отдаёт устаревшую
             # копию файла (был инцидент с geosite.dat: 10 МБ вместо 73 МБ,
             # прошёл старый порог 3 МБ — см. geo_mirrors.MIN_SIZES).
+            # v60: маркер "·" вместо "⚠" — это штатный фолбэк на следующее
+            # зеркало, а не предупреждение (403-шум jsdelivr на РФ-IP
+            # выглядел как серия варнингов на полностью рабочей загрузке).
             _actual_size = tmp_path.stat().st_size if tmp_path.exists() else 0
             if progress_label:
                 print(
-                    f"  {progress_label} ⚠ зеркало {url_idx}/{len(urls)} отдало "
+                    f"  {progress_label} · зеркало {url_idx}/{len(urls)} отдало "
                     f"{_actual_size} байт (< {spec.min_size} минимум) — "
                     f"пробуем следующее зеркало",
                     flush=True,
@@ -414,12 +417,15 @@ def fetch_package(
             # Теперь: логируем тип исключения и сообщение, чтобы юзер
             # видел, ЧТО именно упало. После этого — continue к следующему
             # зеркалу (как и раньше).
+            # v60: маркер "·" вместо "⚠" — сетевой фолбэк на следующее
+            # зеркало штатен; "⚠" остаётся только на проблемах целостности
+            # (hash mismatch) и битых ручных файлах.
             if progress_label:
                 exc_type = type(_exc).__name__
                 exc_msg = str(_exc)[:200]
                 print(
-                    f"  {progress_label} ⚠ зеркало {url_idx}/{len(urls)} упало "
-                    f"с исключением {exc_type}: {exc_msg}",
+                    f"  {progress_label} · зеркало {url_idx}/{len(urls)} недоступно "
+                    f"({exc_type}: {exc_msg}) — пробую следующее",
                     flush=True,
                 )
             tmp_path.unlink(missing_ok=True)
