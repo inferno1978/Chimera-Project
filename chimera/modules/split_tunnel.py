@@ -78,6 +78,113 @@ def _core_module():
 # =============================================================================
 #  ВСПОМОГАТЕЛЬНАЯ: проверка geo-файлов во всех директориях Xray
 # =============================================================================
+
+# ── v68: РЕАЛЬНЫЙ порядок поиска geo-файлов Xray-core ─────────────────────────
+# ПРОВЕРЕНО по исходникам Xray-core (common/platform/others.go, GetAssetLocation):
+#   1. env  xray.location.asset (или XRAY_LOCATION_ASSET)
+#   2. каталог БИНАРНИКА (/usr/local/bin — где живёт бинарник Chimera)
+#   3. /usr/local/share/xray/
+#   4. /usr/share/xray/
+#   5. /opt/share/xray/
+# ВАЖНО:
+#   • /etc/xray в списке ПОИСКА ОТСУТСТВУЕТ;
+#   • поле routing.geoDataBasePath в config.json Xray-core НЕ ПОДДЕРЖИВАЕТ
+#     и молча игнорирует (оно появилось в проекте по ошибке);
+#   • эмпирика: конфиг с geosite:category-ru при отсутствии geosite.dat
+#     в пути поиска → xray exit 23; в юните стоит RestartPreventExitStatus=23
+#     → служба ОСТАЁТСЯ МЁРТВОЙ → порт 443 закрыт → «i/o timeout» ЛЮБОГО
+#     подключения (клиент видит полностью мёртвый сервер).
+# Каноническое хранилище Chimera — /etc/xray (сюда пишут все загрузчики),
+# поэтому юнит выставляет Environment=xray.location.asset=/etc/xray
+# (create_xray_service, v68), а _geo_files_available ЗЕРКАЛИТ файлы в
+# /usr/local/share/xray — для юнитов без env и для ручных запусков.
+XRAY_REAL_ASSET_DIRS = [
+    Path("/usr/local/share/xray"),   # путь поиска №3 Xray-core
+    Path("/usr/share/xray"),         # путь поиска №4
+    Path("/opt/share/xray"),         # путь поиска №5
+]
+
+
+def _mirror_geo_to_share_dir(geosite_src: Path, geoip_src: Path) -> bool:
+    """v68: зеркалит канонические geo-файлы в /usr/local/share/xray —
+    РЕАЛЬНЫЙ путь поиска Xray-core (когда env xray.location.asset не задан).
+
+    Гарантирует, что файл, который ПРОВЕРЯЕТ проект (grep по /etc/xray),
+    и файл, который ЗАГРУЖАЕТ Xray (/usr/local/share/xray), — идентичны.
+    Инцидент (v68): /etc/xray содержал runetfreedom-geosite (73 МБ, с
+    категорией ru-available-only-inside), а /usr/local/share/xray — стоковый
+    geosite.dat из zip XTLS (без категории) → правило добавлено по grep'у
+    /etc/xray → Xray загрузил стоковый файл → «code not found in
+    geosite.dat» → exit 23 → служба мертва → ВЕСЬ каскадный режим
+    «не работает, i/o timeout» (в Режиме A без split geo-правил нет —
+    потому Режим A и работал).
+    """
+    import shutil
+    mirrored = False
+    share_dir = XRAY_REAL_ASSET_DIRS[0]
+    try:
+        share_dir.mkdir(parents=True, exist_ok=True)
+        for src in (geosite_src, geoip_src):
+            dst = share_dir / src.name
+            need_copy = True
+            if dst.exists():
+                try:
+                    if dst.stat().st_size == src.stat().st_size:
+                        need_copy = False
+                except Exception:
+                    need_copy = True
+            if need_copy:
+                shutil.copy2(str(src), str(dst))
+                try:
+                    dst.chmod(0o644)
+                except Exception:
+                    pass
+                mirrored = True
+    except Exception:
+        pass
+    return mirrored
+
+
+def strip_geo_rules(config: dict) -> bool:
+    """v68: удаляет из routing.rules правила с geosite:/geoip: ссылками и
+    geoDataBasePath. Возвращает True если что-то удалено.
+
+    ПОЧЕМУ: если geosite.dat/geoip.dat не загрузились (нет в пути поиска
+    Xray, битые, стоковые без нужной категории) — Xray ОТКАЗЫВАЕТСЯ
+    СТАРТОВАТЬ (exit 23; RestartPreventExitStatus=23 → служба мертва,
+    порт 443 закрыт, ВСЕ клиенты получают i/o timeout). Деградация
+    «geo-правила выключены, Xray жив» лучше мёртвого сервера: весь
+    трафик идёт через exit-ноду (или direct в Режиме A) — туннель жив.
+    Вызывается генераторами при провале `xray run -test`.
+    """
+    routing = config.get("routing")
+    if not isinstance(routing, dict):
+        return False
+    changed = False
+
+    def _has_geo_ref(obj) -> bool:
+        if isinstance(obj, str):
+            return obj.startswith("geosite:") or obj.startswith("geoip:")
+        if isinstance(obj, list):
+            return any(_has_geo_ref(x) for x in obj)
+        return False
+
+    rules = routing.get("rules")
+    if isinstance(rules, list):
+        kept = []
+        for r in rules:
+            if isinstance(r, dict) and (_has_geo_ref(r.get("domain"))
+                                        or _has_geo_ref(r.get("ip"))):
+                changed = True
+                continue
+            kept.append(r)
+        routing["rules"] = kept
+    if "geoDataBasePath" in routing:
+        routing.pop("geoDataBasePath")
+        changed = True
+    return changed
+
+
 def _geo_files_available(auto_copy: bool = True) -> bool:
     """Проверяет наличие geosite.dat и geoip.dat в директориях где Xray
     их ищет. Возвращает True если оба файла найдены.
@@ -120,8 +227,8 @@ def _geo_files_available(auto_copy: bool = True) -> bool:
              f"Обновите: Настройки сети → 1 (Split Tunneling) → 6 (Обновить).")
         return False
 
-    # Если файлы найдены но НЕ в /etc/xray/ — копируем туда (Xray ищет
-    # через geoDataBasePath=/etc/xray/ в config.json).
+    # Если файлы найдены но НЕ в /etc/xray/ — копируем туда (каноническое
+    # хранилище; юнит v68 указывает xray.location.asset=/etc/xray).
     if auto_copy and geosite_src != GEOSITE_DAT:
         try:
             GEOSITE_DAT.parent.mkdir(parents=True, exist_ok=True)
@@ -132,6 +239,20 @@ def _geo_files_available(auto_copy: bool = True) -> bool:
         try:
             GEOIP_DAT.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(geoip_src), str(GEOIP_DAT))
+        except Exception:
+            pass
+
+    # v68: зеркалим канонические копии в /usr/local/share/xray — РЕАЛЬНЫЙ
+    # путь поиска Xray-core для юнитов без xray.location.asset. Поле
+    # geoDataBasePath Xray игнорирует, /etc/xray сам по себе НЕ ищется.
+    if auto_copy:
+        try:
+            _gs = GEOSITE_DAT if GEOSITE_DAT.exists() else geosite_src
+            _gi = GEOIP_DAT if GEOIP_DAT.exists() else geoip_src
+            if _mirror_geo_to_share_dir(_gs, _gi):
+                getattr(core, "info", lambda msg: None)(
+                    "Geo: файлы зеркалированы в /usr/local/share/xray "
+                    "(реальный путь поиска Xray-core)")
         except Exception:
             pass
 

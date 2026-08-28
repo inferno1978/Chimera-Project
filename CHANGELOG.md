@@ -2,6 +2,106 @@
 
 ---
 
+## FIX(split_tunnel+xray_install+chain_nodes): ROOT CAUSE «в каскадном режиме не работает НИЧЕГО» — Xray не находит geo-файлы, служба мертва (v68) — 28 августа 2026
+
+**СИМПТОМЫ (матрица тестов пользователя):**
+```
+Режим A (без split) + AGH + DNSCrypt            → РАБОТАЕТ (RU + иностранные)
+Режим B (каскад, 1 нода) + split + AGH + DNSCrypt → i/o timeout
+Режим B (каскад, 1 нода) + split + DNSCrypt
+                   (блокировка входящих ВЫКЛ)     → i/o timeout
+```
+
+**КОРНЕВАЯ ПРИЧИНА (доказана исходниками Xray-core + воспроизведена на
+реальном бинарнике Xray v26.7.28):**
+
+Xray-core ищет geoip.dat/geosite.dat ТОЛЬКО здесь (common/platform/
+others.go → GetAssetLocation):
+```
+1. env xray.location.asset (или XRAY_LOCATION_ASSET)
+2. каталог БИНАРНИКА            (/usr/local/bin)
+3. /usr/local/share/xray/
+4. /usr/share/xray/
+5. /opt/share/xray/
+```
+**`/etc/xray` в списке ПОИСКА ОТСУТСТВУЕТ. Поле `routing.geoDataBasePath`
+Xray-core НЕ поддерживает и молча игнорирует** — проект годами полагался
+на него и на «/etc/xray» как на место поиска.
+
+Geo-правила (`geosite:category-ru`, `geosite:ru-available-only-inside`,
+`geoip:ru`) генерируются ТОЛЬКО при включённом раздельном туннелировании /
+РФ-подсетях. Если geo-файлы не находятся в РЕАЛЬНОМ пути поиска Xray:
+
+```
+xray: common/geodata: failed to open geosite.dat → exit 23
+systemd: RestartPreventExitStatus=23 → служба ОСТАЁТСЯ МЁРТВОЙ
+→ порт 443 закрыт → ВСЕ клиенты: «dial tcp <server>:443: i/o timeout»
+```
+
+Режим A пользователя был БЕЗ раздельного туннелирования → geo-правил нет
+→ Xray жив → «работает». Режим B — С раздельным туннелированием →
+geo-правила → Xray мёртв → «не работает НИЧЕГО». Русские сайты при этом
+продолжали открываться клиентски (локальные RU-direct правила mihomo),
+создавая иллюзию «только ру открываются».
+
+**РАСХОЖДЕНИЕ ФАЙЛОВ (почему зависит от сервера/переустановки):**
+проект проверяет категории grep'ом по `/etc/xray/geosite.dat` (первый
+кандидат), а Xray ЗАГРУЖАЕТ `/usr/local/share/xray/geosite.dat`. Если в
+`/etc/xray` лежит runetfreedom-geosite (73 МБ, с категорией
+ru-available-only-inside), а в `/usr/local/share/xray` — стоковый
+geosite.dat из zip XTLS (кладётся туда install_xray, если порог
+10/15 МБ не сработал) или файл отсутствует/частично скачан → grep
+«видит» категорию, Xray — нет → exit 23 → мёртвый сервер. Класс бага
+существует со времён появления split tunneling, но массово проявился
+в каскадных установках с split после AGH-эры (v61+ добавил многократные
+регенерации конфига — каждая встреча с рассинхронизированными geo-файлами
+стала фатальной).
+
+**ВОСПРОИЗВЕДЕНИЕ (scripts/sim_mode_b_config.py, реальный xray v26.7.28,
+конфиг Режима B с 1 нодой + split, runetfreedom geosite 73 МБ):**
+```
+S1: юнит БЕЗ env, geo только в /etc/xray  → rc=23  XRAY МЁРТВ (инцидент)
+S2: Environment=xray.location.asset=...    → rc=0  ФИКС РАБОТАЕТ
+S3: strip_geo_rules (geo-self-heal)        → rc=0  ФИКС РАБОТАЕТ
+```
+
+**ИСПРАВЛЕНИЯ (тройная защита):**
+
+1. `xray_install.py` — `create_xray_service`: юнит получает
+   `Environment=xray.location.asset=/etc/xray` (когда оба .dat в /etc/xray
+   и >1 МБ) — Xray грузит канонические файлы проекта напрямую.
+
+2. `split_tunnel.py` — `_geo_files_available()`: зеркалирует geo-файлы в
+   `/usr/local/share/xray` (`_mirror_geo_to_share_dir`) — реальный путь
+   поиска для юнитов без env и ручных запусков; гарантирует, что файл,
+   который ПРОВЕРЯЕТ grep, и файл, который ЗАГРУЖАЕТ Xray, идентичны.
+
+3. `split_tunnel.py` — НОВОЕ `strip_geo_rules()` + geo-self-heal во ВСЕХ
+   4 генераторах (generate_xray_config, generate_xray_config_xhttp,
+   generate_xray_config_chain_entry, generate_xray_config_chain_entry_multi):
+   провал `xray run -test` → geo-правила удаляются → ретест → живой конфиг
+   + громкое предупреждение. Деградация «split выключен, туннель жив» вместо
+   мёртвого сервера с i/o timeout на всё.
+
+**Хот-фикс для УЖЕ сломанного сервера (до обновления):**
+```bash
+systemctl is-active xray
+journalctl -u xray -n 15 --no-pager | grep -iE "geosite|geoip|geodata"
+mkdir -p /usr/local/share/xray
+cp -f /etc/xray/geosite.dat /etc/xray/geoip.dat /usr/local/share/xray/
+chmod 644 /usr/local/share/xray/*.dat
+systemctl reset-failed xray && systemctl restart xray
+```
+
+**Тесты:** `tests/test_v68_geo_asset_path.py` — 12 кейсов (порядок
+поиска Xray, зеркалирование/перезапись стока, хирургический strip только
+geo-правил с сохранением catch-all, env-пин в юните, self-heal в 4
+генераторах, поведенческий поток восстановления). Смежные наборы
+(xray_install, chain_nodes, ru_subnets, geo_files, youtube_route,
+geosite_category_check) — 184 passed.
+
+---
+
 ## FIX(ingress_geoip+dnscrypt_setup+aghome+xray_install+chain_nodes+ru_subnets): whitelist-баг «D» + гео-резистентный DNS для Entry в РФ (v67) — 28 августа 2026
 
 **СИМПТОМЫ (инцидент: Entry-нода в РФ, пул из 4 exit-нод):**
