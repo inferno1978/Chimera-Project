@@ -480,6 +480,77 @@ def _ingress_flush_autoban_ufw() -> None:
         warn(f"UFW очистка: {e}")
 
 
+# ── v67: детекция IP АДМИНИСТРАТОРА (источник SSH-сессии) ────────────────────
+# ИНЦИДЕНТ: старый пункт «D» (Определить мой текущий IP автоматически) запрашивал
+# api.ipify.org С САМОГО СЕРВЕРА → в whitelist попадал IP САМОГО СЕРВЕРА, а не IP
+# администратора. На Entry-ноде в РФ администратор из РФ включал блокировку —
+# его реальный IP оказывался НЕ в whitelist → все его пакеты на порт Xray
+# DROPались (клиент: «dial tcp <server>:443: i/o timeout»), туннель умирал.
+def _detect_admin_ssh_ip() -> str:
+    """IP администратора — источник ТЕКУЩЕЙ SSH-сессии меню.
+
+    Порядок источников:
+      1. $SSH_CLIENT / $SSH_CONNECTION (первое поле) — интерактивная сессия;
+      2. `who -m` — адрес последнего входа текущего терминала;
+      3. `ss -tn state established '( sport = :22 )'` — пир SSH-сессий.
+    Возвращает "" если не удалось (локальная консоль / cron).
+    """
+    # 1) ENV — самый надёжный источник для интерактивной SSH-сессии
+    for var in ("SSH_CLIENT", "SSH_CONNECTION"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            ip = val.split()[0].strip()
+            if ip:
+                return ip
+    # 2) who -m
+    try:
+        r = _run(["who", "-m"], capture=True, check=False)
+        if r.returncode == 0 and r.stdout:
+            m = re.search(r"\(([\d.:a-fA-F]+)\)\s*$", r.stdout.strip())
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    # 3) ss: established-соединения sshd (порт 22)
+    try:
+        r = _run(["ss", "-tn", "state", "established", "( sport = :22 )"],
+                 capture=True, check=False)
+        if r.returncode == 0 and r.stdout:
+            for line in r.stdout.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 4:
+                    peer = parts[3]
+                    ip = peer.rsplit(":", 1)[0].strip("[]")
+                    if ip and ip not in ("127.0.0.1", "::1", "*"):
+                        return ip
+    except Exception:
+        pass
+    return ""
+
+
+def _server_own_ips() -> "list[str]":
+    """Собственные адреса сервера — для предупреждения о бесполезных
+    whitelist-записях (IP сервера не защищает доступ администратора)."""
+    ips: "list[str]" = []
+    try:
+        r = _run(["hostname", "-I"], capture=True, check=False)
+        if r.returncode == 0 and r.stdout:
+            ips += [t.strip() for t in r.stdout.split() if t.strip()]
+    except Exception:
+        pass
+    try:
+        r = _run(["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                 capture=True, check=False)
+        if r.returncode == 0 and r.stdout:
+            for line in r.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 4:
+                    ips.append(parts[3].split("/")[0])
+    except Exception:
+        pass
+    return [ip for ip in dict.fromkeys(ips) if ip]
+
+
 def _ingress_whitelist_apply(ip: str, port: int) -> None:
     """
     Добавляет правило ACCEPT для конкретного IP/CIDR — вставляет его
@@ -529,6 +600,24 @@ def _ingress_enable(port: int) -> None:
     if not _ingress_iptables_available():
         warn("iptables не найден — невозможно применить правила")
         return
+
+    # ── v67: аварийная страховка whitelist ──────────────────────────────────
+    # Даже если вызывающий код (меню/cron/CLI) не позаботился о whitelist —
+    # при запуске из интерактивной SSH-сессии автоматически добавляем IP
+    # администратора, чтобы включение блокировки не отрезало его от порта Xray.
+    try:
+        _admin_ip = _detect_admin_ssh_ip()
+        if _admin_ip and _admin_ip not in _server_own_ips():
+            _st = _ingress_state_load()
+            _wl = _st.get("whitelist") or []
+            if _admin_ip not in _wl:
+                _wl.append(_admin_ip)
+                _st["whitelist"] = _wl
+                _ingress_state_save(_st)
+                info(f"Whitelist: автоматически добавлен IP текущей SSH-сессии "
+                     f"администратора ({_admin_ip})")
+    except Exception:
+        pass  # страховка не должна блокировать включение
 
     # Проверяем возраст RIPE-файла перед apply
     if not check_ripe_file_age(interactive=True):
@@ -745,6 +834,35 @@ def do_manage_ingress_geoip() -> None:
                 _box_row()
                 _box_bottom()
                 print()
+                # ── v67: страховка whitelist перед включением ─────────────────
+                # Если в whitelist нет ни одного РАБОЧЕГО IP администратора —
+                # предлагаем добавить IP текущей SSH-сессии автоматически.
+                # «Рабочий» = не IP самого сервера (частый случай старого бага
+                # автоопределения «D», добавлявшего IP сервера вместо IP админа).
+                _admin_ip = _detect_admin_ssh_ip()
+                _own_ips  = _server_own_ips()
+                _wl_list  = state.get("whitelist") or []
+                _wl_effective = [w for w in _wl_list if w not in _own_ips]
+                if not _wl_effective and _admin_ip and _admin_ip not in _own_ips:
+                    print(f"  {YELLOW}Whitelist не содержит рабочего IP администратора!{NC}")
+                    if tui_confirm(f"Добавить ваш текущий IP ({_admin_ip}) в whitelist?",
+                                   default=True):
+                        if _admin_ip not in _wl_list:
+                            _wl_list.append(_admin_ip)
+                            state["whitelist"] = _wl_list
+                            _ingress_state_save(state)
+                            success(f"Добавлен в whitelist: {_admin_ip}")
+                elif not _wl_effective:
+                    print(f"  {RED}ВНИМАНИЕ: whitelist пуст, IP SSH-сессии не определён.{NC}")
+                    print(f"  {DIM}Если вы подключаетесь из РФ — после включения вы "
+                          f"потеряете доступ к порту {cur_port}!{NC}")
+                # Предупреждение о бесполезных записях (IP самого сервера)
+                _useless = [w for w in _wl_list if w in _own_ips]
+                if _useless:
+                    warn(f"Whitelist содержит IP самого сервера "
+                         f"({', '.join(_useless)}) — он НЕ защищает ваш доступ. "
+                         f"Добавьте ваш реальный IP: пункт 4 → D.")
+                print()
                 if tui_confirm("Применить блокировку?", default=False):
                     _ingress_enable(cur_port)
                 input(f"{BLUE}Нажмите Enter...{NC}")
@@ -796,28 +914,44 @@ def do_manage_ingress_geoip() -> None:
             wl_act = input("  Действие [+/-/D/Enter]: ").strip().lower()
 
             if wl_act == "d":
-                # Автоопределение внешнего IP
-                _my_ip = ""
-                for _url in ("https://api.ipify.org", "https://ifconfig.me/ip",
-                             "https://icanhazip.com"):
-                    try:
-                        import urllib.request as _ur2
-                        with _ur2.urlopen(_url, timeout=5) as _r2:
-                            _my_ip = _r2.read().decode().strip()
-                        if _my_ip:
-                            break
-                    except Exception:
-                        continue
+                # v67: определяем IP АДМИНИСТРАТОРА (источник текущей SSH-сессии),
+                # а НЕ внешний IP сервера. Старый код запрашивал ipify с сервера —
+                # в whitelist попадал IP самого сервера, администратор из РФ
+                # терял доступ к порту Xray сразу после включения блокировки.
+                _my_ip = _detect_admin_ssh_ip()
                 if _my_ip:
                     print()
-                    print(f"  {GREEN}Ваш внешний IP:{NC} {CYAN}{_my_ip}{NC}")
-                    if tui_confirm(f"Добавить {_my_ip} в whitelist?", default=True):
+                    print(f"  {GREEN}IP вашего SSH-подключения (администратора): "
+                          f"{CYAN}{_my_ip}{NC}")
+                    if _my_ip in _server_own_ips():
+                        warn("Определён локальный/собственный IP сервера — "
+                             "для whitelist он бесполезен")
+                        _prefill_ip = ""
+                    elif tui_confirm(f"Добавить {_my_ip} в whitelist?", default=True):
                         wl_act = "+"
                         _prefill_ip = _my_ip
                     else:
                         _prefill_ip = ""
                 else:
-                    warn("Не удалось определить внешний IP — введите вручную")
+                    # SSH-источник не найден (локальная консоль). Показываем
+                    # внешний IP сервера ТОЛЬКО как справку — это НЕ IP админа.
+                    _ext_ip = ""
+                    for _url in ("https://api.ipify.org", "https://ifconfig.me/ip",
+                                 "https://icanhazip.com"):
+                        try:
+                            import urllib.request as _ur2
+                            with _ur2.urlopen(_url, timeout=5) as _r2:
+                                _ext_ip = _r2.read().decode().strip()
+                            if _ext_ip:
+                                break
+                        except Exception:
+                            continue
+                    print()
+                    warn("IP SSH-сессии не определён (локальная консоль?)")
+                    if _ext_ip:
+                        print(f"  {DIM}Внешний IP сервера: {_ext_ip} — это НЕ ваш IP!{NC}")
+                    print(f"  {DIM}Узнайте свой IP (2ip.ru / ifconfig.me с ВАШЕГО "
+                          f"устройства) и введите вручную.{NC}")
                     wl_act = "+"
                     _prefill_ip = ""
             else:

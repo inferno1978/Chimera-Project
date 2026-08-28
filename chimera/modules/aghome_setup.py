@@ -168,7 +168,11 @@ AGH_FILTERS: list[tuple[str, str]] = [
 ]
 
 # Fallback-резолверы — как на роутере (НЕ strict; решение пользователя).
-AGH_FALLBACK_DNS: list[str] = ["9.9.9.9:53", "1.1.1.1:53"]
+# v67: фолбэки AGH обязаны быть достижимы и с зарубежных, и с РФ-хостингов
+# (Режим B: Entry в РФ). 1.1.1.1:53 душится TSPU — заменён на второй anycast
+# Quad9 (149.112.112.112). Quad9 не фильтруется РКН и не отравляет ответы
+# для зарубежных доменов (в отличие от РФ-резолверов).
+AGH_FALLBACK_DNS: list[str] = ["9.9.9.9:53", "149.112.112.112:53"]
 
 # Время ожидания мастера в браузере (сек) при интерактивной установке.
 AGH_WIZARD_WAIT_SEC = 300
@@ -1078,7 +1082,7 @@ def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool) -> str:
   bootstrap_dns:
     - 127.0.0.1:{dc_port}
     - 9.9.9.9:53
-    - 1.1.1.1:53
+    - 149.112.112.112:53
   fallback_dns:
 {chr(10).join(f"    - {f}" for f in AGH_FALLBACK_DNS)}
   upstream_mode: parallel
