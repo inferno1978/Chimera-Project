@@ -2,6 +2,97 @@
 
 ---
 
+## FIX(ingress_geoip+reconfigure)+FEAT(agh-autostart): блокировка входящих РФ следует за портом Xray + AGH поднимается при пересборке + чистка дубликатов iptables (v64) — 28 августа 2026
+
+**Диагностика инцидента (server-ru после переустановки): серверная
+часть ЗДОРОВА — Режим B, 4 exit-ноды (roundRobin), split tunneling
+применён (category-ru/geoip:ru → direct, остальное → chain-balancer),
+DNS-цепочка Xray → AGH:53 → DNSCrypt:5300 жива, входящие из РФ (5→G)
+выключены и не мешают. Корень «работают только ру-ресурсы» —
+КЛИЕНТСКИЙ: sing-box/NyameBox логи `dns: exchange failed … dial tcp
+203.0.113.102:443: i/o timeout` — это дозвон КЛИЕНТА до сожжённого
+entry-IP (прерывистый РКН/хостер-дроп на пути РФ→IP:443). Когда дозвон
+жив — access.log показывает исправный сплит (Telegram→chain-exit-N,
+РФ→direct). v64 закрывает три серверных дефекта, найденных при аудите
+всех потоков пересборки конфига (split tunnel, РФ подсети 5→2→5,
+ingress 5→G, аварийное восстановление, reconfigure).**
+
+### 1. ingress_geoip: перенос блокировки при смене порта Xray
+
+`ingress_geoip_follow_port(new_port)` — вызывается из
+reconfigure.do_reconfigure() при смене server_port. Раньше там был
+только WARN (v49): DROP-правило ipset оставалось на СТАРОМ порту,
+недельный cron каждую неделю переприменял блокировку на СТАРЫЙ порт
+из ingress_geoip.json — защита молча исчезала после смены порта.
+Теперь: DROP (ipset/plain) переносится со старого порта на новый,
+per-user whitelist ACCEPT (clients_wl, портозависимое правило)
+переносится следом, ingress_geoip.json обновляется (cron и меню видят
+актуальный порт). ipset-сеты и их содержимое не трогаются — перенос
+без загрузок RIPE и без интерактивных промптов. ip6tables переносится
+только если v6-сет реально существует. Портозависимость UUID/ShortID/
+REALITY-ключей не затрагивается в принципе — модуль работает на уровне
+iptables и в config.json не пишет.
+
+### 2. ingress_geoip: чистка исторического бага дубликатов iptables
+
+Правила добавляются с `-m comment --comment xray-ru-ingress-block`, а
+удаление исторически шло БЕЗ comment-матчера — а `iptables -D`
+требует ПОЛНОГО совпадения спецификации. Удаление молча проваливалось:
+еженедельный cron (_ingress_remove + _ingress_enable) добавлял
+DROP-правило повторно, дубликаты копились неделями; в plain-режиме
+спека удаления вообще ссылалась на `-j DROP` при фактическом
+`-j XRU_BLOCK`. Новый helper `_ingress_ipt_delete()` удаляет ОБЕ спеки
+(с comment и без) и повторяет пока удаляется (чистка накопленных
+дубликатов, до 64 итераций) — используется в apply/remove/follow_port.
+Теперь `ipset destroy` при полном удалении больше не падает с
+«set is in use».
+
+### 3. AGH-autostart во всех генераторах конфига
+
+`agh_dns_available(..., autostart=True)` в четырёх генераторах
+(generate_xray_config, generate_xray_config_xhttp,
+generate_xray_config_chain_entry, generate_xray_config_chain_entry_multi):
+AGH установлен, но остановлен в момент пересборки → он ПОДНИМАЕТСЯ
+перед пробой и Xray получает DNS Xray → AGH:53 → DNSCrypt:5300
+(требование: «AGH должен запускаться и слушать порты, если он
+установлен»). Не установлен — autostart безвреден (systemctl start
+несуществующего юнита: rc≠0, no-op). Не поднялся за 5с — прежний
+фолбэк DNSCrypt:5300. Аварийное восстановление уже поднимало AGH
+(agh_ensure_running) — теперь все потоки пересборки ведут себя
+одинаково.
+
+### 4. Аудит потоков пересборки (результат — без изменений кода)
+
+- **Split tunneling (меню 5→1→7)**: UUID/ShortID/REALITY-ключи НЕ
+  генерируются заново — Anti-Empty Identity Guard v58 (state.json →
+  живой config.json → users.json; новое значение только на чистой
+  установке, когда ссылок ещё нет). Пользователи, RIPE-правила,
+  AS-direct, YouTube-правило, Telemt tproxy, PQ-VLESS, server
+  fragment, SNI-dispatch — восстанавливаются после пересборки.
+- **РФ подсети (5→2→5)**: применяется патчем живого config.json
+  (identity-параметры не участвуют), при любой пересборке
+  `_ru_subnets_restore_if_needed` вставляет РФ-CIDR → direct в начало
+  правил; при включённом балансировщике catch-all не дублируется.
+- **Аварийное восстановление**: все параметры из state.json
+  (/var/lib/xray-installer/state.json), AGH поднимается ДО пересборки,
+  dnscrypt перезапускается, DNS-путь Xray контролируется в конце.
+
+### Тесты
+
+NEW tests/test_v64_ingress_port_follow_agh_autostart.py — 15:
+_ingress_ipt_delete ×3 (обе спеки, дубликаты, plain-спека, no-op);
+follow_port ×6 (выключено/тот же порт → no-op; ipset-перенос: удаление
+старого порта обеими спеками, DROP нового с comment, ip6tables только
+при живом v6-сете, clients_wl remove(443)→apply(8443), state обновлён;
+plain-метод; отсутствие whitelist-модуля не роняет перенос);
+_remove обе спеки ×1; autostart ×3 (сигнатура, источник 4 генераторов,
+путь старта остановленного AGH); хук reconfigure ×2.
+
+Регрессия: ingress_geoip+agh_probe+v57+v61+chain_nodes 133,
+v58+v59+aghome 147, v60+v63 58 — зелёные.
+
+---
+
 ## FIX(ssl_certbot+resources): защита LE-сертификата от затирания + устойчивая DNS-проверка + идемпотентный certbot (v63) — 28 августа 2026
 
 **Инцидент v63 (server-ru, 203.0.113.102, установка DNSCrypt без AGH):
