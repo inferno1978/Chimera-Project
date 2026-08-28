@@ -55,16 +55,20 @@ REDIRECT --to-ports 5300», когда DNSCrypt слушает не на 53. Е�
   agh_service_active(run) / agh_owns_dns53(run)
   dns53_redirect_state(run) → int | None
   dns53_redirect_remove(run, port) / dns53_redirect_restore(run, port)
+  xray_dns_path_report(run) → dict (фактический DNS-путь Xray — для
+                             health-отчётов меню и emergency repair)
 ───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
 
+import json
 import random
 import re
 import socket
 import struct
 import subprocess
 import time
+from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 # ─── Константы ───────────────────────────────────────────────────────────────
@@ -78,6 +82,13 @@ AGH_START_WAIT = 5                   # сек ожидания старта се
 
 # Спецификации iptables-правил — идентичны resolv_conf_fix.py
 _IPTABLES_COMMENT = "chimera-dns-fix"
+
+# Пути к config.json Xray (канонический Chimera + официальный установщик)
+# — те же кандидаты, что и в финальной проверке do_full_install.
+_XRAY_CONFIG_CANDIDATES: Tuple[Path, ...] = (
+    Path("/etc/xray/config.json"),
+    Path("/usr/local/etc/xray/config.json"),
+)
 
 # ─── Runner по умолчанию (когда core._run недоступен: юнит-тесты) ────────────
 def _default_run(cmd, capture: bool = True, check: bool = False,
@@ -333,3 +344,93 @@ def agh_dns_available(run: Optional[Callable] = None,
         log_warn(f"AdGuardHome не резолвит ({note}) — iptables redirect "
                  f"53→{redir_port} восстановлен")
     return False, f"не резолвит: {note}"
+
+
+# =============================================================================
+#  ФАКТИЧЕСКИЙ DNS-ПУТЬ XRAY (для health-отчётов и emergency repair)
+# =============================================================================
+def _xray_dns_servers_from_config() -> list:
+    """dns.servers из ФАКТИЧЕСКОГО config.json Xray (первый найденный).
+
+    Никаких предположений о том, ЧТО должен был сгенерировать генератор —
+    читаем итоговый артефакт (те же кандидаты, что в финальной проверке
+    do_full_install). Пустой список = конфига нет / без DNS-секции.
+    """
+    for p in _XRAY_CONFIG_CANDIDATES:
+        try:
+            if not p.exists():
+                continue
+            cfg = json.loads(p.read_text(errors="replace"))
+            servers = (cfg.get("dns") or {}).get("servers") or []
+            if servers:
+                return servers
+        except Exception:
+            continue
+    return []
+
+
+def xray_dns_path_report(run: Optional[Callable] = None) -> dict:
+    """v62: фактический DNS-путь Xray одной строкой — для health-отчёта
+    меню (health.py / health_report.py) и emergency repair.
+
+    Читает ФАКТИЧЕСКИЙ config.json (dns.servers[0] — генераторы ставят
+    туда основной путь: AGH:53 / DNSCrypt:5300 / публичный DNS) и сверяет
+    его с ЖИВЫМ состоянием стека: конфиг «через AGH» + мёртвый AGH =
+    запросы Xray молча уходят в runtime-fallback, фильтры и кеш AGH
+    обходятся — именно эту ситуацию отчёт обязан показать.
+
+    Возвращает dict (plain text, без ANSI — пригоден для Telegram/лога):
+      ok     — путь здоров (первый сервер реально работает)
+      icon   — ✅ / ⚠️ / ℹ️ / ❌
+      chain  — короткая цепочка: «Xray → AGH:53 → DNSCrypt:5300»
+      line   — готовая строка «DNS-путь: …» (иконкой не начинается)
+
+    Побочных эффектов нет (в отличие от agh_dns_available — iptables
+    не трогаем: это диагностика, а не лечение).
+    """
+    run = run or _default_run
+    servers = _xray_dns_servers_from_config()
+    if not servers:
+        return {"ok": False, "icon": "❌", "chain": "—",
+                "line": "DNS-путь: config.json не найден или без DNS-секции"}
+
+    first = servers[0] if isinstance(servers[0], dict) else {}
+    addr = str(first.get("address", ""))
+    try:
+        port = int(first.get("port", 53))
+    except (TypeError, ValueError):
+        port = 53
+
+    # Ветка 1: AGH (127.0.0.1:53) — критерии agh_dns_available без
+    # побочных эффектов: сервис активен + владеет :53 + живая проба.
+    if addr == AGH_DNS_ADDR and port == AGH_DNS_PORT:
+        chain = "Xray → AGH:53 → DNSCrypt:5300"
+        if agh_service_active(run) and agh_owns_dns53(run):
+            probe_ok, note = agh_probe_resolve()
+            if probe_ok:
+                return {"ok": True, "icon": "✅", "chain": chain,
+                        "line": f"DNS-путь: {chain} — AGH отвечает ({note})"}
+            return {"ok": False, "icon": "⚠️", "chain": chain,
+                    "line": f"DNS-путь: {chain} — AGH не резолвит ({note}); "
+                            f"Xray идёт через fallback, фильтры AGH "
+                            f"не применяются"}
+        return {"ok": False, "icon": "⚠️", "chain": chain,
+                "line": "DNS-путь: конфиг указывает на AGH:53, но сервис "
+                        "AGH не активен/не владеет :53 — Xray идёт через "
+                        "fallback, фильтры AGH не применяются"}
+
+    # Ветка 2: DNSCrypt напрямую (127.0.0.1:<порт>)
+    if addr == "127.0.0.1":
+        chain = f"Xray → DNSCrypt:{port}"
+        r = run(["systemctl", "is-active", "dnscrypt-proxy"],
+                capture=True, check=False)
+        if (getattr(r, "stdout", "") or "").strip() == "active":
+            return {"ok": True, "icon": "✅", "chain": chain,
+                    "line": f"DNS-путь: {chain} → интернет"}
+        return {"ok": False, "icon": "⚠️", "chain": chain,
+                "line": f"DNS-путь: {chain} — dnscrypt-proxy не активен"}
+
+    # Ветка 3: публичный DNS напрямую (легитимный путь без локального стека)
+    chain = f"Xray → {addr}:{port} (публичный DNS напрямую)"
+    return {"ok": True, "icon": "ℹ️", "chain": chain,
+            "line": f"DNS-путь: {chain}"}

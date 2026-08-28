@@ -1056,6 +1056,21 @@ def do_emergency_repair() -> None:
         else:
             _box_warn(f"{svc_label}: ○ {status}")
 
+    # v62: фактический DNS-путь Xray — config.json + живой DNS-стек.
+    # Одна строка закрывает «через что идут DNS-запросы Xray» после
+    # восстановления: конфиг «через AGH» + не поднявшийся AGH = запросы
+    # молча уходят в fallback, фильтры AGH обходятся. all_ok не трогаем —
+    # DNS жив через runtime-fallback (skipFallback=False), это диагностика.
+    try:
+        from chimera.modules.agh_probe import xray_dns_path_report
+        _dns_rep = xray_dns_path_report(run=_run)
+        if _dns_rep["ok"]:
+            _box_ok(f"DNS-путь: {_dns_rep['chain']}")
+        else:
+            _box_warn(_dns_rep["line"])
+    except Exception as _e:
+        _box_row(f"  {DIM}DNS-путь: не удалось проверить ({_e}){NC}")
+
     _box_row()
     if all_ok:
         _box_ok("✅  Аварийное восстановление завершено успешно")
