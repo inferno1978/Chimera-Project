@@ -2,6 +2,85 @@
 
 ---
 
+## FIX(aghome+_core): выпуск LE-сертификата AGH — certbot без отвечающего HTTP:80 (v66) — 28 августа 2026
+
+**СИМПТОМ (инцидент: fresh-сервер, домен picaresque.space):**
+```
+[OK]    AGH: администратор создан — мастер завершён без браузера
+[INFO]  AGH: LE-сертификат для picaresque.space не найден — получаем через certbot...
+[INFO]  Выпуск сертификата Let's Encrypt...
+[WARN]  Не удалось получить сертификат LE — генерируем самоподписанный
+```
+
+**КОРНЕНАЯ ПРИЧИНА (порядок установки, НЕ занятый порт):**
+certbot у Chimera работает в режиме `--webroot`: он НЕ слушает :80 сам —
+ему нужен веб-сервер, отдающий `/.well-known/acme-challenge/` из webroot
+ДОМЕНА. Такой endpoint создаёт `setup_nginx_temp(domain)` (паттерн
+VLESS/mtproto/telemt, fix v4.20.3 — «без vhost'а challenge уходит в
+дефолтный server и certbot получает 404»). В AGH-флоу этого шага НЕ БЫЛО:
+
+  1. `do_full_install`: `install_aghome()` стоит РАНЬШЕ
+     `setup_nginx_temp()` (главный флоу, ~8 шагов позже) и РАНЬШЕ
+     `configure_firewall()`;
+  2. к моменту финализации AGH nginx уже установлен
+     (`install_dependencies`), но с ДЕФОЛТНЫМ vhost → ACME-челлендж
+     получает 404 (файл лежит в `/var/www/<domain>/`, а дефолтный server
+     отдаёт `/var/www/html/`);
+  3. на образах с активным UFW :80 ещё и не пропускается
+     (`configure_firewall` не отработала);
+  4. при standalone-установке (Сеть → A) nginx/certbot могут отсутствовать
+     вовсе, `PARAM_EMAIL` — пустой (certbot падает на `--email ""`).
+
+Итог: LE-выпуск внутри AGH падал ВСЕГДА → молчаливый self-signed
+fallback → DoT/DoQ/HTTPS Web UI AGH с самоподписанным сертификатом.
+
+Гипотеза «AGH занимает :80» НЕ подтвердилась: AGH биндит web :3000,
+TLS :30443, DoT :853, DNS :53 (loopback); 80 ∈ `AGH_WEB_PORT_RESERVED`
+(Web UI не может его занять). Подозрение о неверном ПОРЯДКЕ установки
+было верным.
+
+### 1. aghome_setup._ensure_acme_http80(domain): ACME-endpoint ДО certbot
+
+Новый хелпер вызывается в `_prepare_tls_cert` (LE-ветка) ПЕРЕД
+`obtain_ssl_cert(domain)` — паттерн mtproto/telemt v4.20.3:
+  • certbot ставится при отсутствии (паттерн hysteria2_cert_mgr);
+  • `PARAM_EMAIL` при пустом значении → `admin@<domain>` (тот же дефолт,
+    что в `install_prompts` — иначе `--email ""` валит certbot);
+  • `setup_nginx_temp(domain)` — nginx при необходимости + vhost с
+    ACME-location (правит и случай «nginx есть, но домен другой»);
+  • `ufw allow 80/tcp comment "HTTP (certbot ACME)"` — правило байт-в-байт
+    идентично `network_setup.configure_firewall` (ufw не дублирует);
+    остаётся навсегда — нужно certbot renew (deploy-hook синкает
+    сертификат в AGH).
+  ACME-vhost не содержит Chimera-маркеров (`proxy_protocol`, `/dev/shm/`,
+  `xver`, `realpath`) → `_cleanup_stale_chimera_vhosts` его НЕ трогает →
+  renewals для AGH-домена работают и после смены домена VLESS.
+
+### 2. do_full_install: configure_firewall() ДО install_aghome()
+
+Файрволл переводится в финальное состояние до wizard-фазы AGH: LE-челлендж
+HTTP-01 требует открытого :80. Раньше `configure_firewall` шла ПОСЛЕ
+`install_aghome` → на образах с предактивным UFW челлендж блокировался.
+Порядок безопасен: 22/80/SERVER_PORT открываются ДО `ufw enable`
+(SSH-lockout исключён), остальные шаги UFW-aware (port_registry,
+`_open_wizard_access` для веб-мастера).
+
+### 3. Тесты (tests/test_v66_agh_le_cert_order.py, 10 шт.)
+
+  • `_ensure_acme_http80`: полная последовательность (vhost + UFW-правило
+    с идентичным комментарием + email-дефолт), установка certbot при
+    отсутствии, отсутствие перезаписи существующего email, отказо-
+    устойчивость (setup_nginx_temp упал → warn, не raise), отсутствие ufw
+    → шаг пропущен;
+  • `_prepare_tls_cert` (LE, сертификата нет): порядок
+    `_ensure_acme_http80 → obtain_ssl_cert → self-signed fallback`;
+  • статические пины: `configure_firewall` ДО `install_aghome` в
+    do_full_install; `_ensure_acme_http80` ДО `obtain_ssl_cert` внутри
+    ветки «сертификата нет»; идентичность UFW-правила network_setup;
+    `AGH_WEB_PORT_RESERVED` содержит 80 (AGH никогда не биндит :80).
+
+---
+
 ## FIX(aghome+agh_probe+emergency_repair+uninstall+health_report): RATelimit-баг AGH — тихий DROP DNS Xray → EOF-шторм у клиентов (v65) — 28 августа 2026
 
 **КОРЕННАЯ ПРИЧИНА инцидента «клиент сыпал EOFами, убрал AGH — всё

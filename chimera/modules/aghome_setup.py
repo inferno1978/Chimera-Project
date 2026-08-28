@@ -803,6 +803,63 @@ def _create_aghome_user() -> bool:
 # ============================================================================
 #  TLS-СЕРТИФИКАТЫ
 # ============================================================================
+def _ensure_acme_http80(domain: str) -> None:
+    """Гарантирует отвечающий HTTP:80 endpoint ДО запуска certbot (v66).
+
+    certbot --webroot НЕ слушает :80 сам — ему нужен веб-сервер, который
+    отдаёт /.well-known/acme-challenge/ из webroot-а ЭТОГО домена.
+    В момент выпуска AGH-сертификата этого может не быть:
+      • do_full_install: install_aghome() идёт РАНЬШЕ setup_nginx_temp()
+        (главный флоу) и раньше configure_firewall() → challenge уходит
+        в дефолтный vhost nginx (404) или в закрытый UFW → LE-выпуск
+        ВСЕГДА падал в self-signed (инцидент: picaresque.space);
+      • standalone-установка (Сеть → A): nginx/certbot могут отсутствовать
+        вовсе, PARAM_EMAIL — пустой (certbot требует --email).
+
+    Паттерн mtproto/telemt (v4.20.3): setup_nginx_temp(domain) ставит
+    nginx при необходимости и создаёт vhost с ACME-location. Дополнительно:
+      • certbot ставится при отсутствии (паттерн hysteria2_cert_mgr);
+      • UFW пропускает :80 (правило и комментарий идентичны
+        network_setup.configure_firewall — ufw не дублирует);
+      • PARAM_EMAIL при пустом значении → admin@<domain> (тот же дефолт,
+        что в install_prompts). Право :80 остаётся открытым навсегда —
+        оно нужно certbot renew (deploy-hook синкает сертификат в AGH).
+    """
+    core = _core_module()
+    info, warn = core.info, core.warn
+
+    # 0) certbot обязан существовать (fresh-сервер без VLESS-стека).
+    if not shutil.which("certbot"):
+        info("AGH: certbot не найден — устанавливаю...")
+        r = subprocess.run(
+            ["apt-get", "install", "-y", "-q", "certbot"],
+            env={"DEBIAN_FRONTEND": "noninteractive"},
+            capture_output=True, check=False)
+        if r.returncode != 0 and not shutil.which("certbot"):
+            warn("AGH: не удалось установить certbot — выпуск LE невозможен")
+
+    # 1) Email для LE-регистрации (certbot падает на --email "").
+    if domain and not (getattr(core, "PARAM_EMAIL", "") or "").strip():
+        setattr(core, "PARAM_EMAIL", f"admin@{domain}")
+
+    # 2) ACME-vhost на :80 (nginx ставится при необходимости).
+    try:
+        from chimera.modules.nginx_setup import setup_nginx_temp
+        setup_nginx_temp(domain=domain)
+    except Exception as e:
+        warn(f"AGH: не удалось поднять ACME-vhost для {domain}: {e}")
+        warn("AGH: без него certbot, скорее всего, не выпустит сертификат")
+
+    # 3) :80 в UFW (не дублируется — совпадает с configure_firewall).
+    try:
+        if shutil.which("ufw"):
+            subprocess.run(
+                ["ufw", "allow", "80/tcp", "comment", "HTTP (certbot ACME)"],
+                capture_output=True, check=False)
+    except Exception:
+        pass
+
+
 def _prepare_tls_cert(mode: str, domain: str) -> "tuple[Optional[Path], Optional[Path]]":
     """Готовит TLS-сертификат для DoH/DoT/DoQ + HTTPS Web UI.
 
@@ -828,6 +885,10 @@ def _prepare_tls_cert(mode: str, domain: str) -> "tuple[Optional[Path], Optional
         le_key  = Path(f"/etc/letsencrypt/live/{domain}/privkey.pem")
         if not (le_cert.exists() and le_key.exists()):
             info(f"AGH: LE-сертификат для {domain} не найден — получаем через certbot...")
+            # v66: ДО certbot — отвечающий HTTP:80 (ACME-vhost + UFW + email).
+            # Раньше webroot-челлендж уходил в дефолтный vhost nginx (404)
+            # или в ещё не настроенный UFW → LE всегда падал в self-signed.
+            _ensure_acme_http80(domain)
             try:
                 from chimera.modules.ssl_certbot import obtain_ssl_cert
                 obtain_ssl_cert(domain)
