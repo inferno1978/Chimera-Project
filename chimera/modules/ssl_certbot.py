@@ -60,6 +60,100 @@ def _core_module():
 
 
 # =============================================================================
+#  v63: УСТОЙЧИВАЯ ПРОВЕРКА DNS + ЗАЩИТА ВАЛИДНОГО LE-СЕРТИФИКАТА
+# =============================================================================
+def _dig_a_records(server: str, domain: str) -> list:
+    """A-записи domain через указанный DNS-сервер (dig, короткий таймаут).
+
+    +time=3 +tries=1 — dig сам ограничивает время (локальный резолвер в
+    середине установки может бутстрапиться дольше; не вешаем установку).
+    """
+    core = _core_module()
+    try:
+        r = core._run(
+            ["dig", "+short", "+time=3", "+tries=1", f"@{server}", domain, "A"],
+            capture=True, check=False)
+        return [x for x in (r.stdout or "").strip().split()
+                if x and not x.endswith(".")]
+    except Exception:
+        return []
+
+
+def domain_points_to_server(domain: str, ipv4: str) -> "tuple[bool, str]":
+    """Резолвит domain и проверяет, что среди A-записей есть ipv4.
+
+    Инцидент v63 (server-ru, 203.0.113.102): единственный dig через
+    системный резолвер (127.0.0.1 = DNSCrypt, который установщик только
+    что перезапустил: кэш холодный, DoH-upstream ещё бутстрапится) давал
+    таймаут → ЛОЖНЫЙ «домен НЕ резолвится», хотя nslookup через 1.1.1.1
+    отвечал мгновенно. Проверяем по нескольким независимым путям:
+      1) локальный резолвер — dig @127.0.0.1, 2 попытки с паузой 2с
+         (DNSCrypt поднимается не мгновенно);
+      2) getaddrinfo — системный путь, работает даже без dig;
+      3) внешние резолверы 1.1.1.1 / 8.8.8.8 / 77.88.8.8 напрямую
+         (полностью обходят локальный DNSCrypt; LE валидирует так же —
+         из интернета, не через наш резолвер).
+    Возвращает (True, источник) если хоть один путь подтвердил IP.
+    """
+    # 1) локальный резолвер ×2 (DNSCrypt мог только что стартовать)
+    if ipv4 in _dig_a_records("127.0.0.1", domain):
+        return True, "локальный резолвер"
+    time.sleep(2)
+    if ipv4 in _dig_a_records("127.0.0.1", domain):
+        return True, "локальный резолвер"
+    # 2) системный резолвер без dig (getaddrinfo, только IPv4)
+    try:
+        import socket
+        got = {x[4][0] for x in
+               socket.getaddrinfo(domain, None, socket.AF_INET)}
+        if ipv4 in got:
+            return True, "getaddrinfo"
+    except Exception:
+        pass
+    # 3) внешние резолверы — независимый источник истины
+    for ext in ("1.1.1.1", "8.8.8.8", "77.88.8.8"):
+        if ipv4 in _dig_a_records(ext, domain):
+            return True, ext
+    return False, ""
+
+
+def existing_cert_status(cert_path: Path) -> "tuple[bool, bool, int, str, str]":
+    """Состояние сертификата на диске.
+
+    Возвращает (exists, self_signed, days_left, expiry_str, issuer_str).
+    self_signed=True — сертификат сгенерирован нами (маркер O=SelfSigned
+    из generate_self_signed_cert) либо issuer совпадает с subject.
+    """
+    if not cert_path.exists():
+        return False, False, 0, "", ""
+    core = _core_module()
+    _run = core._run
+    issuer = subject = expiry = ""
+    try:
+        r = _run(["openssl", "x509", "-noout", "-issuer", "-subject",
+                  "-enddate", "-in", str(cert_path)],
+                 capture=True, check=False)
+        for line in (r.stdout or "").splitlines():
+            if line.startswith("issuer="):
+                issuer = line.split("=", 1)[1].strip()
+            elif line.startswith("subject="):
+                subject = line.split("=", 1)[1].strip()
+            elif line.startswith("notAfter="):
+                expiry = line.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    self_signed = ("SelfSigned" in issuer) or (issuer != "" and issuer == subject)
+    days_left = 0
+    if expiry:
+        try:
+            r2 = _run(["date", "-d", expiry, "+%s"], capture=True, check=False)
+            days_left = (int(r2.stdout.strip()) - int(time.time())) // 86400
+        except Exception:
+            days_left = 0
+    return True, self_signed, days_left, expiry, issuer
+
+
+# =============================================================================
 #  ВЫПУСК СЕРТИФИКАТА LET'S ENCRYPT
 # =============================================================================
 def obtain_ssl_cert(domain: Optional[str] = None) -> None:
@@ -91,12 +185,21 @@ def obtain_ssl_cert(domain: Optional[str] = None) -> None:
     CYAN, NC, GREEN, RED, YELLOW = core.CYAN, core.NC, core.GREEN, core.RED, core.YELLOW
     # fix_letsencrypt_permissions — модуль-локальная (см. ниже)
     info(f"Получение SSL-сертификата для {PARAM_DOMAIN}...")
-    # === Проверка DNS перед получением сертификата ===
+    # === Проверка DNS перед получением сертификата (v63: устойчивая) ===
+    # Один dig через системный резолвер давал ЛОЖНЫЙ WARN, когда локальный
+    # DNSCrypt ещё бутстрапился (инцидент v63). Теперь: локальный (2 попытки)
+    # → getaddrinfo → внешние 1.1.1.1/8.8.8.8/77.88.8.8. WARN только если
+    # НЕ резолвится НИГДЕ — тогда certbot действительно упадёт.
     ipv4 = get_server_ip("4")
     if ipv4:
-        resolved = _run(["dig", "+short", PARAM_DOMAIN], capture=True, check=False).stdout.strip().split()
-        if ipv4 not in resolved and PARAM_DOMAIN not in resolved:
-            warn(f"Домен {PARAM_DOMAIN} НЕ резолвится в IP сервера ({ipv4})!")
+        dns_ok, dns_via = domain_points_to_server(PARAM_DOMAIN, ipv4)
+        if dns_ok:
+            if dns_via not in ("локальный резолвер", "getaddrinfo"):
+                info(f"DNS подтверждён через {dns_via} "
+                     f"(локальный резолвер ещё стартует)")
+        else:
+            warn(f"Домен {PARAM_DOMAIN} НЕ резолвится в IP сервера ({ipv4}) "
+                 f"ни локально, ни через внешние резолверы!")
             warn("Это может привести к ошибке certbot.")
             if input(f"{YELLOW}Продолжить всё равно? [y/N]:{NC} ").strip().lower() != 'y':
                 die("DNS не настроен корректно. Исправьте A-запись и запустите заново.")
@@ -105,22 +208,26 @@ def obtain_ssl_cert(domain: Optional[str] = None) -> None:
     key_path  = Path(f"/etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem")
     web_root  = Path(f"/var/www/{PARAM_DOMAIN}")
     request_new = True
+    user_reissue = False   # v63: явный «R» от пользователя → --force-renewal
 
     if cert_path.exists() and key_path.exists():
-        try:
-            r = _run(["openssl", "x509", "-enddate", "-noout", "-in", str(cert_path)],
-                     capture=True, check=False)
-            expiry = r.stdout.strip().split("=", 1)[1]
-            r2 = _run(["date", "-d", expiry, "+%s"], capture=True, check=False)
-            expiry_epoch = int(r2.stdout.strip())
-            days_left = (expiry_epoch - int(time.time())) // 86400
-        except Exception:
-            expiry    = "unknown"
-            days_left = 0
+        # v63: единый разбор статуса (issuer + срок) — показывает в боксе,
+        # КЕМ выдан сертификат, и подсказывает верный выбор по умолчанию:
+        # самоподпис → перевыпустить (R), валидный LE → использовать (U).
+        _ex, _selfsigned, days_left, expiry, _issuer = \
+            existing_cert_status(cert_path)
+        if not expiry:
+            expiry = "unknown"
 
         print()
         _box_top("Найден существующий сертификат")
         _box_row()
+        if _selfsigned:
+            _box_row(f"  Кем выдан:  {RED}САМОПОДПИСАННЫЙ{NC} — рекомендуем перевыпустить")
+        elif "Encrypt" in _issuer:
+            _box_row(f"  Кем выдан:  {GREEN}Let's Encrypt{NC}")
+        elif _issuer:
+            _box_row(f"  Кем выдан:  {CYAN}{_issuer}{NC}")
         _box_row(f"  Истекает: {CYAN}{expiry}{NC}")
         color = GREEN if days_left > 0 else RED
         label = f"{days_left} дней" if days_left > 0 else "ИСТЁК"
@@ -130,14 +237,16 @@ def obtain_ssl_cert(domain: Optional[str] = None) -> None:
         _box_item("R", f"Перевыпустить новый")
         _box_sep()
         _box_bottom()
+        default_choice = "r" if _selfsigned else "u"
         while True:
-            choice = input("  Выбор [U/R]: ").strip().lower() or "u"
+            choice = input("  Выбор [U/R]: ").strip().lower() or default_choice
             if choice == "u":
                 request_new = False
                 success("Используется существующий сертификат")
                 break
             elif choice == "r":
                 request_new = True
+                user_reissue = True
                 info("Будет выпущен новый сертификат")
                 break
             warn("Введите U или R")
@@ -148,21 +257,43 @@ def obtain_ssl_cert(domain: Optional[str] = None) -> None:
         (web_root / "index.html").write_text("<h1>ACME Verification</h1>")
 
         le_ok = False
-        r = _run([
+        # v63: --force-renewal ТОЛЬКО при явном «R» от пользователя.
+        # Раньше флаг был безусловным: каждый повторный запуск установки
+        # принуждал certbot к новому выпуску → исчерпывался лимит LE
+        # «5 дублей за 7 дней» (инцидент v63). Без флага certbot на
+        # валидном сертификате отвечает «not yet due for renewal»
+        # (exit 0) и НЕ трогает его — установка идемпотентна.
+        certbot_cmd = [
             "certbot", "certonly", "--webroot",
             "--webroot-path", str(web_root),
             "--non-interactive", "--agree-tos",
             "--email", PARAM_EMAIL,
-            "--force-renewal",
             "-d", PARAM_DOMAIN,
-        ], capture=True, check=False)
+        ]
+        if user_reissue:
+            certbot_cmd.append("--force-renewal")
+        r = _run(certbot_cmd, capture=True, check=False)
         if r.returncode == 0:
             success("Сертификат Let's Encrypt успешно выпущен")
             le_ok = True
 
         if not le_ok:
-            warn("Не удалось получить сертификат LE — генерируем самоподписанный")
-            generate_self_signed_cert(PARAM_DOMAIN)
+            # v63: certbot упал (rate-limit, недоступность :80 и т.п.) —
+            # если на диске есть ВАЛИДНЫЙ НЕсамоподписанный сертификат,
+            # используем его. Раньше здесь безусловно генерировался
+            # самоподписанный, который ЗАТИРАЛ живой LE-сертификат:
+            # openssl писал прямо в /etc/letsencrypt/live/<domain>/, а у
+            # certbot это СИМЛИНКИ в archive/ — сертификат погибал
+            # безвозвратно, до конца срока действия.
+            _ex2, _ss2, _days2, _exp2, _ = existing_cert_status(cert_path)
+            if _ex2 and not _ss2 and _days2 > 0:
+                warn("certbot не смог выпустить сертификат (подробности: "
+                     "/var/log/letsencrypt/letsencrypt.log)")
+                success(f"Найден валидный сертификат (истекает {_exp2}) — "
+                        f"используем его, самоподписанный НЕ генерируем")
+            else:
+                warn("Не удалось получить сертификат LE — генерируем самоподписанный")
+                generate_self_signed_cert(PARAM_DOMAIN)
 
         if not cert_path.exists():
             warn(f"Сертификат не найден по пути {cert_path} — проверьте DNS и порт 80.")
