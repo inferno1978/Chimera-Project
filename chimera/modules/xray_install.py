@@ -702,6 +702,13 @@ def _detect_xhttp_mode_support() -> None:
 
 def generate_xray_config() -> None:
     core = _core_module()
+    # v58: Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи не должны
+    # быть пустыми при регенерации (state.json битый/утерян → восстановление
+    # из живого config.json/users.json; иначе ссылки юзеров ломаются).
+    try:
+        core._identity_params_recover()
+    except Exception:
+        pass  # guard не должен блокировать генерацию
     DNSCRYPT_LISTEN_PORT = core.DNSCRYPT_LISTEN_PORT
     _assert_reality_dest_sane = core._assert_reality_dest_sane
     info    = core.info
@@ -1036,6 +1043,10 @@ def generate_xray_config_xhttp() -> None:
     """
     Генерация конфига Xray для VLESS + xHTTP + TLS (Режим A).
 
+    v58: в начале — Anti-Empty Identity Guard (UUID и параметры доступа
+    не должны остаться пустыми при регенерации — см. _core.
+    _identity_params_recover).
+
     Схема Nginx → Xray (см. https://github.com/XTLS/Xray-core/discussions/4113 —
     fallbacks для xHTTP НЕ поддерживаются в Xray-core):
       • Nginx терминирует TLS на SERVER_PORT (по умолч. 443), отдаёт сайт-заглушку
@@ -1046,6 +1057,12 @@ def generate_xray_config_xhttp() -> None:
     Это позволяет одновременно держать рабочий сайт-заглушку и прокси на одном :443.
     """
     core = _core_module()
+    # v58: Anti-Empty Identity Guard — UUID и параметры доступа не должны
+    # остаться пустыми при регенерации (см. _core._identity_params_recover).
+    try:
+        core._identity_params_recover()
+    except Exception:
+        pass  # guard не должен блокировать генерацию
     DNSCRYPT_LISTEN_PORT = core.DNSCRYPT_LISTEN_PORT
     info    = core.info
     CONFIG_DIR = core.CONFIG_DIR

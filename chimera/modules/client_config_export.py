@@ -92,8 +92,15 @@ def do_generate_client_config() -> None:
     domain    = state.get("domain", "")
     port      = state.get("server_port", 443)
     vuuid     = state.get("uuid", "")
-    pub_key   = state.get("public_key", "")
-    short_id  = state.get("short_id", "")
+    # v58: pbk/sid — с fallback на живой config.json (частично битый
+    # state.json больше не выдаёт Clash/vless-конфиги с пустыми ключами).
+    try:
+        import importlib as _il
+        _core_mod = _il.import_module("chimera._core")
+        pub_key, short_id, _spx_live = _core_mod._reality_transport_params_from_state(state)
+    except Exception:
+        pub_key   = state.get("public_key", "")
+        short_id  = state.get("short_id", "")
     proto     = state.get("protocol_mode", "reality")
     fp        = state.get("fingerprint", "chrome")
     # === FIX 2: SNI строго из reality_dest (AWG/REALITY) или domain (классика/xHTTP) ===
@@ -598,8 +605,12 @@ def do_share_config_server() -> None:
         if not links:
             domain   = state.get("domain", "")
             vuuid    = state.get("uuid", "")
-            pub_key  = state.get("public_key", "")
-            short_id = state.get("short_id", "")
+            # v58: pbk/sid с fallback на живой config.json
+            try:
+                pub_key, short_id, _spx2 = core._reality_transport_params_from_state(state)
+            except Exception:
+                pub_key  = state.get("public_key", "")
+                short_id = state.get("short_id", "")
             fp       = state.get("fingerprint", "chrome")
             port     = state.get("server_port", 443)
             proto    = state.get("protocol_mode", "reality")

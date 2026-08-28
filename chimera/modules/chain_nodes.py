@@ -547,6 +547,13 @@ def generate_xray_config_chain_entry() -> None:
     • Исходящий — VLESS+REALITY → зарубежный VPS (exit node)
     """
     core = _core_module()
+    # v58: Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи entry-ноды
+    # не должны быть пустыми при регенерации (восстановление из живого
+    # config.json/users.json — иначе ссылки юзеров ломаются).
+    try:
+        core._identity_params_recover()
+    except Exception:
+        pass  # guard не должен блокировать генерацию
     _assert_reality_dest_sane = core._assert_reality_dest_sane
     _run = core._run
     _build_xhttp_settings = core._build_xhttp_settings
@@ -1835,6 +1842,13 @@ def generate_xray_config_chain_entry_multi() -> None:
     Если нода одна — конфиг идентичен оригинальному (без balancer).
     """
     core = _core_module()
+    # v58: Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи entry-ноды
+    # не должны быть пустыми при регенерации (восстановление из живого
+    # config.json/users.json — иначе ссылки юзеров ломаются).
+    try:
+        core._identity_params_recover()
+    except Exception:
+        pass  # guard не должен блокировать генерацию
     _assert_reality_dest_sane = core._assert_reality_dest_sane
     _run = core._run
     _build_xhttp_settings = core._build_xhttp_settings
