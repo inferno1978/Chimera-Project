@@ -2,6 +2,67 @@
 
 ---
 
+## FEAT(agh_probe+health+health_report+emergency_repair): DNS-путь Xray в health-отчёте меню и emergency repair (v62) — 28 августа 2026
+
+**Запрос пользователя (после v61): «добавь вывод DNS-пути в итоговый
+health-отчёт меню и в emergency_repair». Вопрос «через что идут
+DNS-запросы Xray — AGH, DNSCrypt или системный резольвер?» теперь виден
+не только в логе установки (v61), но и во всех регулярных отчётах.**
+
+### agh_probe.xray_dns_path_report() — единый источник строки
+
+Новая функция (public API модуля): читает ФАКТИЧЕСКИЙ config.json
+(`dns.servers[0]` — те же кандидаты путей, что в финальной проверке
+do_full_install) и сверяет с ЖИВЫМ состоянием стека:
+
+- конфиг «AGH:53» + AGH жив (сервис активен + владеет :53 + живая проба
+  резолва — критерии `agh_dns_available` БЕЗ побочных эффектов) →
+  `✅ DNS-путь: Xray → AGH:53 → DNSCrypt:5300 — AGH отвечает (…)`;
+- конфиг «AGH:53» + AGH мёртв/не владеет :53/не резолвит → `⚠️ … Xray
+  идёт через fallback, фильтры AGH не применяются` — главный сценарий,
+  ради которого всё затевалось: DNS жив (runtime-fallback
+  skipFallback=False), но фильтрация молча обходится;
+- конфиг «DNSCrypt:5300» → ✅/⚠️ по `is-active dnscrypt-proxy`;
+- публичный DNS → ℹ️ (легитимный путь без локального стека);
+- конфига нет → ❌.
+
+Строка — plain text без ANSI (пригодна для Telegram и лога). iptables
+НЕ трогается: это диагностика, а не лечение (в отличие от
+`agh_dns_available`).
+
+### Куда встроено (3 точки)
+
+- **health.py**: `health_check_dns_path()` в `run_full_health_check()`
+  (сразу после Xray, до Nginx/SSL). Провал DNS-пути → статус
+  `degraded`: «конфиг через AGH + мёртвый AGH» — не «всё зелёное»;
+- **health_report.py** (Мониторинг → 7, ежедневный отчёт cron 08:00):
+  DNS-строка в `do_health_report()` (после Nginx) + компактная копия
+  блока в stringified cron-скрипте — ветки AGH (is-active + владение
+  :53 через `ss -ulnp`, граница `:53` от `:5300` — regex
+  `127[.]0[.]0[.]1:53(?![0-9])`)/DNSCrypt/публичный, рендер
+  компилируется (проверено тестом);
+- **emergency_repair.py**: DNS-строка в итоговом health-report (шаг
+  11/11, после списка сервисов): ok → `_box_ok` с цепочкой, провал →
+  `_box_warn` с диагнозом. `all_ok` НЕ трогает — DNS жив через
+  runtime-fallback, это диагностика, а не упавший сервис.
+
+### Тесты
+
+- NEW `tests/test_v62_dns_path_report.py` — 24 теста: полная матрица
+  `xray_dns_path_report` (AGH жив/мёртв/не-владеет/не-резолвит,
+  DNSCrypt активен/мёртв, публичный, нет конфига, битый JSON, отказ
+  побочных эффектов на iptables), `health_check_dns_path`
+  (success/warn/exception + degraded + порядок после Xray),
+  `do_health_report` (строка есть, exception обработан), cron-скрипт
+  (payload компилируется, маркеры веток, end-to-end exec рендера:
+  AGH-ветка даёт строку без fallback, мёртвый AGH даёт пометку),
+  emergency_repair (статические пины шага 11/11 + all_ok не тронут);
+- Прогоны: v62 24, health/health_report/agh_probe/v61/v57 111,
+  aghome/v60/resolv/v59/smoke 208, emergency/identity/xray 42 — все
+  зелёные.
+
+---
+
 ## FIX+FEAT(_core+aghome_setup): порядок установки AGH→Xray + гарантия «запросы Xray идут через AGH» (v61) — 28 августа 2026
 
 **Инцидент (переустановка 176.123.162.42, Режим B): финализация AGH

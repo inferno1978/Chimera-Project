@@ -7,6 +7,8 @@ chimera/modules/health.py
   • health_check_nginx()  — проверяет активность Nginx
   • health_check_ssl()    — проверяет срок действия TLS-сертификата
   • health_check_ports()  — проверяет доступность портов 22, 80, SERVER_PORT
+  • health_check_dns_path() — фактический DNS-путь Xray (v62: config.json
+                            + живой DNS-стек: AGH:53 / DNSCrypt / публичный)
   • run_full_health_check() — запускает все проверки и пишет статус
   • do_check_tls_cert()   — интерактивный просмотр информации о сертификате
 
@@ -315,12 +317,35 @@ def health_check_ports() -> bool:
     return True
 
 
+def health_check_dns_path() -> bool:
+    """v62: фактический DNS-путь Xray — config.json + живой DNS-стек.
+
+    Одна строка в health-отчёте закрывает вопрос «через что идут
+    DNS-запросы Xray»: читаем ФАКТИЧЕСКИЙ config.json (dns.servers[0])
+    и сверяем с живым состоянием стека. Конфиг «через AGH» + мёртвый
+    AGH = запросы молча уходят в runtime-fallback, фильтры/кеш AGH
+    обходятся — это degraded, а не «всё зелёное».
+    """
+    try:
+        from chimera.modules.agh_probe import xray_dns_path_report
+        rep = xray_dns_path_report(run=_run)
+        if rep["ok"]:
+            success(rep["line"])
+            return True
+        warn(rep["line"])
+        return False
+    except Exception as e:
+        warn(f"DNS-путь: не удалось проверить ({e})")
+        return False
+
+
 def run_full_health_check() -> bool:
     info("=== Полная проверка здоровья системы ===")
     status = "healthy"
-    if not health_check_xray():  status = "degraded"
-    if not health_check_nginx(): status = "degraded"
-    if not health_check_ssl():   status = "degraded"
+    if not health_check_xray():      status = "degraded"
+    if not health_check_dns_path(): status = "degraded"
+    if not health_check_nginx():     status = "degraded"
+    if not health_check_ssl():       status = "degraded"
     health_check_ports()
     HEALTH_CHECK_FILE.parent.mkdir(parents=True, exist_ok=True)
     HEALTH_CHECK_FILE.write_text(status)
