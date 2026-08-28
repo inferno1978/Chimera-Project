@@ -829,7 +829,11 @@ def generate_xray_config() -> None:
     # резолва (end-to-end AGH → DNSCrypt → интернет) + нейтрализация
     # iptables redirect 53→5300 (он молча уводил локальный DNS в обход
     # AGH). Сбой любого шага → прежний путь DNSCrypt:5300.
-    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info, log_warn=warn)
+    # v64 (agh-autostart): AGH установлен, но остановлен → ПОДНИМАЕМ его
+    # перед пробой («AGH должен запускаться и слушать порты, если он
+    # установлен»). Не установлен — autostart безвреден (no-op).
+    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info,
+                                         log_warn=warn, autostart=True)
 
     r_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
                     capture=True, check=False)
@@ -1128,7 +1132,9 @@ def generate_xray_config_xhttp() -> None:
     # v55 (agh_probe): health-check углублён — живая проба резолва
     # (end-to-end AGH → DNSCrypt → интернет) + нейтрализация iptables
     # redirect 53→5300. Сбой любого шага → прежний путь DNSCrypt:5300.
-    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info, log_warn=warn)
+    # v64 (agh-autostart): AGH установлен, но остановлен → поднимаем перед пробой.
+    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info,
+                                         log_warn=warn, autostart=True)
 
     r_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
                     capture=True, check=False)

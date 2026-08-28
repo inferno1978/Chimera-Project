@@ -337,6 +337,21 @@ def do_reconfigure() -> None:
     #  миграция на port_registry (с backward compat для legacy comments).
     if new_port != old_port:
         _vless_reconfigure_ufw_port_change(core, new_port, old_port)
+        # v64 (ingress-follow-port): блокировка входящих РФ переносится на
+        # новый порт автоматически (DROP-правило + clients_wl whitelist +
+        # ingress_geoip.json). Раньше здесь был только WARN — защита
+        # оставалась на старом порту, недельный cron тоже переприменял её
+        # на старый порт из state-файла.
+        try:
+            from chimera.modules.ingress_geoip import ingress_geoip_follow_port
+            if ingress_geoip_follow_port(new_port):
+                success(f"Ingress-блокировка РФ следует за портом :{new_port}")
+        except ImportError:
+            pass
+        except Exception as e:
+            warn(f"Ingress-блокировка РФ: не удалось перенести на порт "
+                 f"{new_port}: {e}")
+            warn("Перепримените вручную: меню → [G] → отключить и включить")
 
     # --- Обновить state.json ---
     try:
@@ -438,11 +453,13 @@ def _vless_reconfigure_ufw_port_change(core, new_port: int, old_port: int) -> No
         ufw_close_port(old_port, "tcp", SERVICE_VLESS,
                        legacy_comments=_LEGACY_COMMENTS)
         port_unregister(SERVICE_VLESS, old_port, "tcp")
-        # v49: зависимые модули держат ссылку на СТАРЫЙ порт — предупредить.
+        # v49→v64: зависимые модули держат ссылку на СТАРЫЙ порт.
+        # ingress_geoip теперь переносится автоматически (см. хук в
+        # do_reconfigure); port hopping — остаётся ручной проверкой.
         try:
             core.warn(f"Порт Xray изменён {old_port} → {new_port}: проверьте "
-                      "port hopping и ingress_geoip (если включены) — их "
-                      "правила ссылаются на старый порт")
+                      "port hopping (если включён) — его правила ссылаются "
+                      "на старый порт")
         except Exception:
             pass
     except Exception:
