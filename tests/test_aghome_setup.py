@@ -370,9 +370,11 @@ class TestBuildSections(unittest.TestCase):
         self.assertIn("- 127.0.0.1:5300", s)
         # upstream + bootstrap содержат порт dnscrypt
         self.assertGreaterEqual(s.count("127.0.0.1:5300"), 2)
-        # fallback как на роутере
+        # fallback: Quad9 x2 (v67 — 1.1.1.1 душится из РФ, заменён на
+        # второй anycast Quad9 149.112.112.112)
         self.assertIn("- 9.9.9.9:53", s)
-        self.assertIn("- 1.1.1.1:53", s)
+        self.assertIn("- 149.112.112.112:53", s)
+        self.assertNotIn("- 1.1.1.1:53", s)
         # bind_hosts: loopback + public
         self.assertIn("- \"127.0.0.1\"", s)
         self.assertIn("- \"1.2.3.4\"", s)

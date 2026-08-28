@@ -157,10 +157,17 @@ def install_dnscrypt() -> None:
     success(f"Бинарник DNSCrypt-proxy установлен: {DNSCRYPT_BIN}")
     DNSCRYPT_CONF_DIR.mkdir(parents=True, exist_ok=True)
 
+    # v67: гео-резистентный набор резолверов. Режим B подразумевает Entry-ноду
+    # В РФ — а оттуда cloudflare (1.1.1.1) душится, google DoH (dns.google)
+    # заблокирован. DNSCrypt-протокол Quad9 (порт 8443, БЕЗ SNI) переживает
+    # DPI-фильтрацию и не фильтруется РКН → lb_estimator сам выбирает живой
+    # сервер: за рубежом выигрывают cloudflare/google, из РФ — quad9.
+    # Имена сверены со свежим v3/public-resolvers.md (DNSCrypt/dnscrypt-resolvers).
     _dnscrypt_server_names = (
-        'server_names = ["cloudflare", "cloudflare-ipv6", "google", "google-ipv6"]'
+        'server_names = ["cloudflare", "cloudflare-ipv6", "google", "google-ipv6", '
+        '"quad9-dnscrypt-ip4-nofilter-pri", "quad9-dnscrypt-ip6-nofilter-pri"]'
         if IS_IPV6_AVAILABLE else
-        'server_names = ["cloudflare", "google"]'
+        'server_names = ["cloudflare", "google", "quad9-dnscrypt-ip4-nofilter-pri"]'
     )
     DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
         ## dnscrypt-proxy.toml — сгенерирован Chimera Project v4.12.10
@@ -193,13 +200,17 @@ def install_dnscrypt() -> None:
 
         cert_refresh_delay = 240
 
-        bootstrap_resolvers = ['1.1.1.1:53', '8.8.8.8:53']
+        ## v67: bootstrap/fallback обязаны быть достижимы И с зарубежных, И с
+        ## РФ-хостингов. 8.8.8.8:53 заблокирован в РФ (РКН, 2024), 1.1.1.1:53
+        ## душится TSPU. Quad9 + Яндекс-резолвер работают отовсюду (используются
+        ## ТОЛЬКО для резолва имён DoH-серверов, не для клиентских запросов).
+        bootstrap_resolvers = ['9.9.9.9:53', '77.88.8.8:53']
         ignore_system_dns = true
 
-        fallback_resolvers = ['1.1.1.1:53', '8.8.8.8:53']
+        fallback_resolvers = ['9.9.9.9:53', '77.88.8.8:53']
 
         netprobe_timeout = 5
-        netprobe_address = '1.1.1.1:53'
+        netprobe_address = '9.9.9.9:53'
 
         offline_mode = false
         reject_ttl = 10
