@@ -1546,7 +1546,16 @@ def trusttunnel_install(domain: str,
         _log("ERROR", f"install: cert files missing at {cert_chain}"); return False
 
     listen_addr = f"0.0.0.0:{port}"
-    admin_pass = trusttunnel_derive_password("00000000-0000-0000-0000-000000000000")
+    # v58: БЫЛО trusttunnel_derive_password("00000000-...") — публично
+    # вычислимый placeholder-пароль (SHA-256 от известной константы):
+    # любой, кто читал исходники, знал админ-пароль. Теперь случайный
+    # секрет (token_urlsafe), который сохраняется в state.json (0600)
+    # и печатается в лог установки для доверенных потребителей.
+    import uuid as _uuid_mod
+    import secrets as _secrets_mod
+    _admin_uuid = str(_uuid_mod.uuid4())
+    admin_pass = _secrets_mod.token_urlsafe(18)
+    _log("INFO", f"install: admin uuid={_admin_uuid}, password={admin_pass[:4]}***")
     wizard_cmd = [
         str(_WIZARD_PATH), "-m", "non-interactive",
         "-a", listen_addr, "-c", f"admin:{admin_pass}", "-n", domain,
@@ -1590,6 +1599,10 @@ def trusttunnel_install(domain: str,
         "creds_toml":      str(_CREDS_TOML),
         "rules_toml":      str(_RULES_TOML),
         "metrics_port":    _METRICS_PORT,
+        # v58: креды админа (раньше — предсказуемый placeholder)
+        "admin_user":      "admin",
+        "admin_password":  admin_pass,
+        "admin_uuid":      _admin_uuid,
         "installed_at":    datetime.now(timezone.utc).isoformat(),
     }
     proto_save_state(_STATE_FILE, state)

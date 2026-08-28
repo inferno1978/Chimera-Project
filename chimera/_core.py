@@ -4708,9 +4708,15 @@ def do_manage_users() -> None:
                     domain    = st.get("domain", "")
                     port      = st.get("server_port", 443)
                     proto     = st.get("protocol_mode", "reality")
-                    pub_key   = st.get("public_key", "")
-                    short_id  = st.get("short_id", "")
-                    spiderx   = st.get("spiderx", "/")
+                    # v58: pbk/sid с fallback на живой config.json —
+                    # частично битый state.json не должен выдавать битые ссылки
+                    try:
+                        pub_key, short_id, _spx_fb = _reality_transport_params_from_state(st)
+                        spiderx = st.get("spiderx", "") or _spx_fb or "/"
+                    except Exception:
+                        pub_key   = st.get("public_key", "")
+                        short_id  = st.get("short_id", "")
+                        spiderx   = st.get("spiderx", "/")
                     xhttp_path = st.get("xhttp_path", "/")
                     server_ip = get_server_ip("4")
                     # SNI: при Mode B + AWG — домен маскировки, иначе собственный домен
@@ -8723,6 +8729,283 @@ def _menu_security() -> None:
 
 # (_menu_rotation вынесен в chimera.modules.credential_rotation;
 #  импорт — в верхней секции этого файла.)
+
+
+# =============================================================================
+#  v58: ANTI-EMPTY IDENTITY GUARD
+#  Гарантия непустых идентификационных параметров (UUID, ShortID, REALITY-
+#  ключи, домен, сокет, spiderX) перед ЛЮБОЙ генерацией/регенерацией конфига.
+#  Пустой privateKey/shortIds/uuid в config.json = REALITY-handshake рвётся
+#  у ВСЕХ клиентов со ссылками, выданными до регенерации.
+# =============================================================================
+def _identity_read_live_config() -> dict:
+    """
+    Читает ЖИВОЙ xray config.json (первый найденный из двух путей) и
+    достаёт идентификационные параметры. Возвращает dict (пустой, если
+    конфига нет/битый):
+      uuid, short_id, private_key, public_key, domain(sni), spiderx
+    """
+    for cfg_path in (CONFIG_DIR / "config.json",
+                     Path("/usr/local/etc/xray/config.json")):
+        try:
+            if not cfg_path.exists():
+                continue
+            cfg = json.loads(cfg_path.read_text())
+            out: dict = {}
+            for inb in cfg.get("inbounds", []):
+                rs = inb.get("streamSettings", {}).get("realitySettings", {})
+                if not rs:
+                    continue
+                if not out.get("private_key"):
+                    out["private_key"] = rs.get("privateKey", "") or ""
+                if not out.get("public_key"):
+                    out["public_key"] = rs.get("publicKey", "") or ""
+                sids = rs.get("shortIds", [])
+                if not out.get("short_id") and sids:
+                    out["short_id"] = str(sids[0]) if sids[0] else ""
+                if not out.get("spiderx"):
+                    out["spiderx"] = rs.get("spiderX", "") or ""
+                sn = rs.get("serverNames", [])
+                if not out.get("domain") and sn:
+                    out["domain"] = sn[0] or ""
+                if not out.get("uuid"):
+                    clients = inb.get("settings", {}).get("clients", [])
+                    if clients:
+                        out["uuid"] = clients[0].get("id", "") or ""
+                break
+            if out:
+                return out
+        except Exception:
+            continue
+    return {}
+
+
+def _identity_pubkey_from_privkey(priv: str) -> str:
+    """Выводит публичный x25519-ключ из приватного (xray x25519 -i)."""
+    try:
+        r = _run([str(XRAY_BIN), "x25519", "-i", priv],
+                 capture=True, check=False)
+        if r.returncode == 0 and r.stdout:
+            # Парсер из xray_install — работает со всеми версиями xray
+            # (включая v26+, где PublicKey печатается как Password).
+            _priv, pub = _parse_x25519_keys(r.stdout)
+            if pub:
+                return pub
+    except Exception:
+        pass
+    return ""
+
+
+def _identity_params_recover() -> list:
+    """
+    v58: Anti-Empty Identity Guard — ЕДИНАЯ точка гарантии того, что при
+    генерации/регенерации конфига Xray идентификационные параметры не
+    останутся пустыми. Вызывается из всех генераторов конфига
+    (xray_install.generate_xray_config / generate_xray_config_xhttp,
+    chain_nodes.generate_xray_config_chain_entry / _entry_multi).
+
+    Порядок восстановления каждого пустого параметра:
+      1. state.json  (uuid / short_id / public_key / private_key /
+                      domain / socket / spiderx)
+      2. ЖИВОЙ /etc/xray/config.json (realitySettings + clients[0].id) —
+         источник истины: именно из него были построены ссылки юзеров
+      3. users.json  (первый непустой uuid)
+      4. public_key из private_key (xray x25519 -i)
+      5. Ничего не нашлось (fresh install — ни state, ни конфига):
+         генерация НОВОГО значения. Конфиг с пустыми полями хуже:
+         xray не стартует/рвёт handshake. Новое значение = ссылок всё
+         равно нет (их ещё никому не выдавали).
+
+    Побочный эффект (self-heal): восстановленные значения записываются
+    обратно в state.json, если они там пустые/отсутствуют — генераторы
+    ссылок (subscription / fragment_link / client_config_export /
+    users_manager) читают state.json напрямую и должны видеть те же
+    параметры, из которых собран конфиг.
+
+    :return: список имён восстановленных полей (для лога); [] если всё
+             уже было заполнено.
+    """
+    global PARAM_DOMAIN, PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_PRIVATE_KEY
+    global PARAM_SHORTID, PARAM_SOCKET_PATH, PARAM_SPIDERX
+
+    recovered: list = []
+
+    # ── Шаг 0: читаем источники восстановления ──────────────────────────
+    state: dict = {}
+    try:
+        if STATE_FILE.exists():
+            state = json.loads(STATE_FILE.read_text())
+    except Exception:
+        state = {}
+    live = _identity_read_live_config()
+
+    def _first_nonempty(*vals):
+        for v in vals:
+            if v:
+                return v
+        return ""
+
+    # ── Шаг 1: PARAM_UUID ────────────────────────────────────────────────
+    if not PARAM_UUID:
+        new_val = _first_nonempty(
+            state.get("uuid", ""),
+            live.get("uuid", ""),
+        )
+        if not new_val:
+            # users.json — первый непустой uuid
+            try:
+                if USERS_FILE.exists():
+                    for u in json.loads(USERS_FILE.read_text()):
+                        if u.get("uuid"):
+                            new_val = u["uuid"]
+                            break
+            except Exception:
+                pass
+        if not new_val:
+            new_val = str(uuid.uuid4())
+        PARAM_UUID = new_val
+        recovered.append("uuid")
+
+    # ── Шаг 2: REALITY-ключи и ShortID ──────────────────────────────────
+    if not PARAM_PRIVATE_KEY:
+        new_val = _first_nonempty(
+            state.get("private_key", ""),
+            live.get("private_key", ""),
+        )
+        if not new_val:
+            # Fresh install: генерируем новую пару (guard не должен
+            # оставить конфиг без ключей)
+            try:
+                r = _run([str(XRAY_BIN), "x25519"], capture=True, check=False)
+                if r.returncode == 0 and r.stdout:
+                    _priv, _pub = _parse_x25519_keys(r.stdout)
+                    if _priv:
+                        new_val = _priv
+                        if not PARAM_PUBLIC_KEY and _pub:
+                            PARAM_PUBLIC_KEY = _pub
+                            if "public_key" not in recovered:
+                                recovered.append("public_key")
+            except Exception:
+                pass
+        if new_val:
+            PARAM_PRIVATE_KEY = new_val
+            recovered.append("private_key")
+        else:
+            warn("identity-guard: не удалось восстановить REALITY private "
+                 "key — конфиг будет невалиден (нет xray?)")
+
+    if not PARAM_PUBLIC_KEY:
+        new_val = _first_nonempty(
+            state.get("public_key", ""),
+            live.get("public_key", ""),
+        )
+        if not new_val and PARAM_PRIVATE_KEY:
+            new_val = _identity_pubkey_from_privkey(PARAM_PRIVATE_KEY)
+        if not new_val:
+            warn("identity-guard: public_key пуст — ссылки pbk= будут "
+                 "битыми; проверьте state.json")
+        else:
+            PARAM_PUBLIC_KEY = new_val
+            recovered.append("public_key")
+
+    if not PARAM_SHORTID:
+        new_val = _first_nonempty(
+            state.get("short_id", ""),
+            live.get("short_id", ""),
+        )
+        if not new_val:
+            # Fresh install fallback: случайный hex (валидный ShortID)
+            new_val = uuid.uuid4().hex[:8]
+        PARAM_SHORTID = new_val
+        recovered.append("short_id")
+
+    # ── Шаг 3: домен / сокет / spiderX ──────────────────────────────────
+    if not PARAM_DOMAIN:
+        new_val = _first_nonempty(
+            (state.get("domain", "") or "").lower(),
+            live.get("domain", ""),
+        )
+        if new_val:
+            PARAM_DOMAIN = new_val
+            recovered.append("domain")
+
+    if not PARAM_SOCKET_PATH and PROTOCOL_MODE == "reality" \
+            and not AWG_EXIT_ENABLED:
+        new_val = _first_nonempty(
+            state.get("socket", ""),
+        )
+        if new_val:
+            PARAM_SOCKET_PATH = new_val
+            recovered.append("socket")
+
+    if not PARAM_SPIDERX:
+        new_val = _first_nonempty(
+            state.get("spiderx", ""),
+            live.get("spiderx", ""),
+        )
+        if not new_val:
+            new_val = "/" + uuid.uuid4().hex[:6]
+        PARAM_SPIDERX = new_val
+        recovered.append("spiderx")
+
+    # ── Шаг 4: self-heal state.json ─────────────────────────────────────
+    # Восстановленные (или найденные в live-конфиге) значения записываем
+    # в state.json, если они там пустые/отсутствуют — генераторы ссылок
+    # (subscription и др.) читают state напрямую.
+    try:
+        if STATE_FILE.exists() and state:
+            _heal_fields = {
+                "uuid":         PARAM_UUID,
+                "public_key":   PARAM_PUBLIC_KEY,
+                "private_key":  PARAM_PRIVATE_KEY,
+                "short_id":     PARAM_SHORTID,
+                "spiderx":      PARAM_SPIDERX,
+            }
+            if PARAM_DOMAIN:
+                _heal_fields["domain"] = PARAM_DOMAIN
+            _changed = False
+            for k, v in _heal_fields.items():
+                if v and not state.get(k):
+                    state[k] = v
+                    _changed = True
+            if _changed:
+                STATE_FILE.write_text(
+                    json.dumps(state, indent=2, ensure_ascii=False))
+                info("identity-guard: state.json дополнен недостающими "
+                     f"полями ({', '.join(k for k, v in _heal_fields.items() if v and not state.get(k, 'x'))})")
+    except Exception:
+        pass  # self-heal не критичен
+
+    if recovered:
+        warn("identity-guard: восстановлены параметры, отсутствовавшие "
+             f"в памяти: {', '.join(recovered)} (источники: state.json / "
+             "текущий config.json / users.json)")
+    return recovered
+
+
+def _reality_transport_params_from_state(state: dict) -> tuple:
+    """
+    v58: (public_key, short_id, spiderx) для генераторов КЛИЕНТСКИХ ссылок
+    с fallback на живой config.json. Генераторы ссылок (subscription,
+    fragment_link, client_config_export, users_manager) читают state.json
+    напрямую — при частично повреждённом state (domain/uuid на месте,
+    public_key/short_id потеряны) они молча выдавали ссылки вида
+    ``vless://...?pbk=&sid=`` — рабочие ссылки превращались в битые.
+    Здесь: пустое значение добирается из текущего config.json
+    (realitySettings), который и есть источник истины для выданных ссылок.
+    """
+    pub  = (state or {}).get("public_key", "") or ""
+    sid  = (state or {}).get("short_id", "") or ""
+    spx  = (state or {}).get("spiderx", "") or ""
+    if not (pub and sid):
+        live = _identity_read_live_config()
+        if not pub:
+            pub = live.get("public_key", "")
+        if not sid:
+            sid = live.get("short_id", "")
+        if not spx:
+            spx = live.get("spiderx", "")
+    return pub, sid, spx
 
 
 # =============================================================================

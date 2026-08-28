@@ -288,12 +288,22 @@ def _build_vless_ws_cdn_inbound(state_ib: dict) -> dict:
     ws_path = state_ib.get("ws_path", "/")
     host = state_ib.get("host", "")
 
+    # v58: Anti-Empty Identity Guard — пустой uuid в state ранее давал
+    # users: [] (мёртвый inbound: коннекты принимаются, авторизация
+    # невозможна). Теперь генерация падает с внятной ошибкой, старый
+    # рабочий конфиг не перезаписывается.
+    if not uuid_val:
+        raise ValueError(
+            "vless-ws-cdn inbound: uuid пуст в singbox_state.json — "
+            "генерация отменена (иначе inbound без юзеров сломает "
+            "выданные ссылки). Восстановите state или пересоздайте inbound.")
+
     inbound = {
         "type":         "vless",
         "tag":          "vless-ws-cdn-in",
         "listen":       state_ib.get("listen", "0.0.0.0"),
         "listen_port":  state_ib.get("listen_port", 8443),
-        "users":        [{"uuid": uuid_val}] if uuid_val else [],
+        "users":        [{"uuid": uuid_val}],
         "transport": {
             "type":    "ws",
             "path":    ws_path,
@@ -344,7 +354,12 @@ def singbox_generate_config() -> bool:
 
     # VLESS-WS-CDN (v4.23)
     if inbounds_state.get("vless_ws_cdn", {}).get("enabled"):
-        inbounds.append(_build_vless_ws_cdn_inbound(inbounds_state["vless_ws_cdn"]))
+        # v58: guard — ValueError при пустом uuid не должен валить всю
+        # генерацию конфига (другие inbound'ы остаются рабочими).
+        try:
+            inbounds.append(_build_vless_ws_cdn_inbound(inbounds_state["vless_ws_cdn"]))
+        except ValueError as e:
+            error(f"inbound vless-ws-cdn пропущен: {e}")
 
     if not inbounds:
         warn("Нет включённых inbound'ов — конфиг будет пустым (только direct outbound)")

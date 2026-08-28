@@ -97,12 +97,22 @@ def awg_peer_rebuild_conf(apply: bool = True, params_override: dict = None) -> b
     """
     core = _core_module()
     state = awgs_state_load()
+    # v58: Anti-Empty Identity Guard — при битом/пустом awg-state.json
+    # server_privkey="" молча попадал в awg0.conf (PrivateKey = ) → конфиг
+    # с пустым ключом ПЕРЕЗАПИСЫВАЛ рабочий awg0.conf и валил всех AWG-
+    # клиентов. Пустой ключ = отказ от rebuild, рабочий конфиг не трогаем.
+    _server_privkey = state.get("server_privkey", "")
+    if not _server_privkey:
+        core.warn("AWG identity-guard: server_privkey пуст в awg-state.json "
+                  "— отказ от перезаписи awg0.conf (существующий конфиг "
+                  "сохранён). Восстановите awg-state.json из бэкапа.")
+        return False
     # params_override имеет приоритет — позволяет строить конфиг с новыми
     # параметрами ДО того, как они записаны в state.
     params = params_override if params_override is not None \
         else state.get("params", AWGS_DEFAULT_PARAMS)
     conf_content = awgs_build_server_conf(
-        server_privkey=state.get("server_privkey", ""),
+        server_privkey=_server_privkey,
         port=state.get("port", 51820),
         subnet=state.get("subnet", "10.66.66.0/24"),
         subnet_v6=state.get("subnet_v6", ""),

@@ -2,6 +2,102 @@
 
 ---
 
+## FEAT+FIX(_core+12 модулей): Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи не остаются пустыми при генерации/регенерации конфигов (v58) — 28 августа 2026
+
+**Задача: при генерации/перегенерации конфигов НИГДЕ не должно остаться
+мест, где UUID, ShortID и другие параметры доступа остаются без
+значений — чтобы ВСЕ ссылки, выданные пользователям, продолжали
+работать после любой пересборки.**
+
+### Корень проблемы
+
+Все генераторы конфига Xray (REALITY / xHTTP / chain-entry / chain-multi)
+подставляли глобалы `PARAM_UUID / PARAM_SHORTID / PARAM_PRIVATE_KEY /
+PARAM_PUBLIC_KEY` без проверки: если state.json отсутствует/повреждён
+или глобалы не были загружены — конфиг писался с ПУСТЫМИ
+`realitySettings.privateKey/shortIds` и `clients[].id`. xray либо не
+стартовал, либо рвал REALITY-handshake у всех клиентов. Параллельно
+генераторы клиентских ссылок (subscription / fragment_link /
+client_config_export / users_manager) читали state.json напрямую и при
+частично битом state (domain/uuid на месте, public_key/short_id
+потеряны) молча выдавали `vless://...?pbk=&sid=` — рабочие ссылки
+превращались в битые без единого предупреждения.
+
+### Anti-Empty Identity Guard (ядро — `_core.py`)
+
+- **`_identity_params_recover()`** — единая точка гарантии непустых
+  идентификационных параметров перед ЛЮБОЙ генерацией/регенерацией
+  конфига. Порядок восстановления каждого пустого параметра:
+  1. state.json (uuid/short_id/public_key/private_key/domain/socket/spiderx);
+  2. ЖИВОЙ /etc/xray/config.json (realitySettings + clients[0].id) —
+     источник истины: именно из него построены ссылки юзеров;
+  3. users.json (первый непустой uuid);
+  4. public_key из private_key (`xray x25519 -i`, парсер
+     `_parse_x25519_keys` — работает и с v26+, где PublicKey=Password);
+  5. полный vacuum (fresh install) — генерация НОВОГО значения:
+     конфиг с пустыми полями хуже, чем новая личность (ссылок всё
+     равно ещё никому не выдавали).
+  + **self-heal state.json**: восстановленные значения дописываются в
+  state.json, если там пусто — генераторы ссылок читают state напрямую
+  и видят те же параметры, из которых собран конфиг.
+- **`_reality_transport_params_from_state()`** — (public_key, short_id,
+  spiderx) для генераторов ссылок с fallback на живой config.json.
+- Guard встроен в начало всех 4 генераторов конфига:
+  `xray_install.generate_xray_config / generate_xray_config_xhttp`,
+  `chain_nodes.generate_xray_config_chain_entry / _entry_multi`
+  (обёрнуто try/except — guard не блокирует генерацию).
+- Fallback применён в генераторах ссылок: `subscription._build_vless_uri`,
+  `users_manager._unified_show_links`, `fragment_link._load_state`,
+  `client_config_export` (генерация конфигов + share-сервер),
+  блок показа ссылок в меню `_core.py` — плюс ЯВНОЕ предупреждение,
+  если pbk/sid неполны даже после восстановления.
+
+### Мини-фиксы по аудиту (пустые/placeholder-креды в других модулях)
+
+- **`credential_rotation`** — cron-скрипт ротации UUID теперь патчит и
+  **users.json** (раньше только config+state → следующая регенерация
+  через `_users_collect_for_config` (v53) воскрешала СТАРЫЙ uuid, и все
+  ссылки, выданные после ротации, умирали) + `reset-failed` перед
+  restart (консистентно с v56/v57).
+- **`awg_peers.awg_peer_rebuild_conf`** — пустой `server_privkey` в
+  битом awg-state.json больше НЕ перезаписывает рабочий awg0.conf
+  конфигом с `PrivateKey = ` (было: все AWG-клиенты offline). Guard →
+  False + warning, существующий конфиг сохранён.
+- **`singbox_config._build_vless_ws_cdn_inbound`** — пустой uuid в
+  state больше НЕ даёт `users: []` (мёртвый inbound: коннекты
+  принимаются, авторизация невозможна) — ValueError с внятной
+  ошибкой, генерация пропускает только этот inbound, остальные
+  работают; старый конфиг не перезаписывается битым.
+- **`csqtt`** — «Ссылка главного пароля» при пустом `main_password`
+  (битый state) показывает ошибку вместо нерабочей ссылки
+  `csqtt://...&password=`.
+- **`trusttunnel.trusttunnel_install`** — программный install больше не
+  использует ПРЕДСКАЗУЕМЫЙ placeholder-пароль
+  (`derive_password("00000000-...")` — публично вычислимый SHA-256);
+  теперь `secrets.token_urlsafe(18)` + сохранение admin_user/
+  admin_password/admin_uuid в state.json.
+- **`xray_install.generate_reality_keys`** (xHTTP-режим) — уже был OK
+  ("n/a" вместо пустых), не менялся.
+
+### Тесты
+
+- Новый `tests/test_v58_identity_guard.py` — 19 тестов: noop при полных
+  параметрах; восстановление из живого конфига/state/users.json;
+  деривация public из private; fresh-install генерация непустых;
+  self-heal state.json; fallback pbk/sid для ссылок; статические пины
+  вызова guard в 4 генераторах; мини-фиксы (awg/singbox/cron/
+  trusttunnel/csqtt); end-to-end сценарий «битый state + рабочий
+  конфиг → регенерация сохраняет РОВНО параметры выданных ссылок».
+- Обновлён `test_singbox_vless_ws_cdn.py::test_users_empty_when_no_uuid`
+  под новый контракт (ValueError вместо users: []).
+- Регрессия: users_manager (46), user_lifecycle (47), trusttunnel (27),
+  awg_peers, credential_rotation, client_config_export, chain_nodes,
+  xray_install, fragment_link, subscription (6 наборов), singbox (11
+  наборов), v57, xray_safe_apply — все зелёные. Smoke-тест модулей:
+  0 ImportError / 0 NameError.
+
+---
+
 ## FEAT+FIX(olcrtc+21 модуль): AGH-aware DNS во всех генераторах конфигов + тотальная защита от start-limit-hit (v57) — 28 августа 2026
 
 **Задача 1: во ВСЕХ местах сборки/пересборки конфигов, где фигурирует

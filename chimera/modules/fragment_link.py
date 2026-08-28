@@ -628,6 +628,27 @@ def _load_state() -> Optional[dict]:
     if not state.get("domain") or not state.get("uuid"):
         _warn("В state.json нет domain/uuid — завершите установку сервера")
         return None
+    # v58: Anti-Empty Identity Guard для ссылок — при частично битом
+    # state.json (domain/uuid есть, public_key/short_id потеряны) ссылки
+    # получали pbk=&sid= и молча ломались. Добираем параметры доступа
+    # из ЖИВОГО /etc/xray/config.json (realitySettings) — он и есть
+    # источник истины для выданных пользователям ссылок.
+    try:
+        import importlib as _il
+        _core_mod = _il.import_module("chimera._core")
+        _pub, _sid, _spx = _core_mod._reality_transport_params_from_state(state)
+        if _pub and not state.get("public_key"):
+            state["public_key"] = _pub
+        if _sid and not state.get("short_id"):
+            state["short_id"] = _sid
+        if _spx and not state.get("spiderx"):
+            state["spiderx"] = _spx
+        if state.get("protocol_mode", "reality") == "reality" \
+                and not (state.get("public_key") and state.get("short_id")):
+            _warn("REALITY-параметры неполны (pbk/sid) даже после восстановления "
+                  "из config.json — ссылки могут не работать")
+    except Exception:
+        pass  # fallback: работаем с тем, что есть в state
     return state
 
 # ══════════════════════════════════════════════════════════════════════════
