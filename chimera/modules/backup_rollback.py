@@ -98,6 +98,8 @@ def perform_rollback() -> None:
         if src.exists():
             shutil.copy2(src, dst)
     _run(["systemctl", "daemon-reload"], check=False, quiet=True)
+    # v57 (start-limit-fix): reset-failed перед рестартом (StartLimitBurst)
+    _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
     _run(["systemctl", "restart", "xray", "nginx"], check=False, quiet=True)
     success("Откат завершён")
 

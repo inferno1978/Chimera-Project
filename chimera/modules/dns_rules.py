@@ -227,14 +227,29 @@ def _dns_remove_routing_rule(domain: str) -> bool:
 
 
 def _dns_reload_xray() -> None:
-    # Xray 26.x не поддерживает SIGHUP reload — используем restart напрямую
+    # Xray 26.x не поддерживает SIGHUP reload — используем restart напрямую.
+    # v57 (start-limit-fix): reset-failed перед рестартом — юзер может
+    # добавить/удалить несколько правил подряд, каждый раз = restart;
+    # 4-й рестарт за 60с без reset-failed ловит start-limit-hit.
+    _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
     r = _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    time.sleep(1)
-    ok = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+    # Ждём активность (до 15с) вместо фиксированного sleep(1)
+    for _ in range(15):
+        time.sleep(1)
+        ok = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+        if ok.stdout.strip() == "active":
+            break
     if ok.stdout.strip() == "active":
         _success("Xray перезапущен с новыми DNS правилами")
     else:
-        _warn("Xray не запустился — проверьте конфиг!")
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        time.sleep(2)
+        ok = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+        if ok.stdout.strip() == "active":
+            _success("Xray перезапущен с новыми DNS правилами")
+        else:
+            _warn("Xray не запустился — проверьте конфиг!")
 
 
 def _dns_validate_ip(text: str) -> "str | None":

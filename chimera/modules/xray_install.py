@@ -1965,18 +1965,28 @@ def _xray_restart_all_services() -> bool:
     success = core.success
 
     info("Перезапуск Xray...")
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    for i in range(1, 6):
-        time.sleep(3)
-        rs = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-        if rs.stdout.strip() == "active":
-            success("Xray запущен успешно")
-            rn = _run(["systemctl", "is-active", "nginx"], capture=True, check=False)
-            if rn.stdout.strip() == "active":
-                _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
-                info("Nginx перезапущен")
-            return True
-        info(f"Ожидание запуска Xray... ({i*3}/15 сек)")
+    # v57 (start-limit-fix): reset-failed перед рестартом (см. v56/v57 —
+    # вызовы после обновления бинарника идут в цепочке с другими рестартами)
+    _safe_restart = getattr(core, "_xray_safe_restart", None)
+    _xray_active = False
+    if callable(_safe_restart):
+        _xray_active = _safe_restart(wait_active=15, attempts=2)
+    else:
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        for i in range(1, 6):
+            time.sleep(3)
+            rs = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+            if rs.stdout.strip() == "active":
+                _xray_active = True
+                break
+    if _xray_active:
+        success("Xray запущен успешно")
+        rn = _run(["systemctl", "is-active", "nginx"], capture=True, check=False)
+        if rn.stdout.strip() == "active":
+            _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
+            info("Nginx перезапущен")
+        return True
     return False
 
 
@@ -2054,10 +2064,18 @@ def _xray_config_rollback(backup_cfg: Path, cfg: Path) -> None:
         warn(f"Не удалось откатить конфиг: {e}")
         log_to_file("ERROR", f"Откат конфига провалился: {e}")
         return
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    time.sleep(2)
-    r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-    if r.stdout.strip() == "active":
+    # v57 (start-limit-fix): это ВТОРОЙ рестарт подряд после провала apply —
+    # без reset-failed именно здесь чаще всего ловится start-limit-hit
+    _safe_restart = getattr(core, "_xray_safe_restart", None)
+    if callable(_safe_restart):
+        _ok = _safe_restart(wait_active=15, attempts=2)
+    else:
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        time.sleep(2)
+        r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+        _ok = r.stdout.strip() == "active"
+    if _ok:
         success("Xray запущен на откатанном конфиге")
     else:
         warn("Xray не запустился даже после отката! Проверьте: journalctl -u xray -n 50")
@@ -2188,18 +2206,32 @@ def _xray_safe_apply_config(cfg: Path | None = None,
         backup_cfg.unlink(missing_ok=True)
         return True
 
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+    # v57 (start-limit-fix): голый restart здесь — самый частый источник
+    # start-limit-hit: _xray_safe_apply_config вызывается цепочками
+    # (юзер добавлен → b4-сет импорт → routing-правило), каждый вызов =
+    # restart. reset-failed через _core._xray_safe_restart снимает
+    # счётчик StartLimitBurst юнита перед каждым рестартом.
+    _safe_restart = getattr(core, "_xray_safe_restart", None)
+    if callable(_safe_restart):
+        restarted = _safe_restart(wait_active=15, attempts=2)
+    else:  # fallback для старого ядра без хелпера (v56)
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        restarted = False
+        for i in range(1, 6):
+            time.sleep(3)
+            r2 = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+            if r2.stdout.strip() == "active":
+                restarted = True
+                break
+            info(f"Ожидание запуска Xray... ({i*3}/15 сек)")
     _nginx_restart_if_reality()
 
-    for i in range(1, 6):
-        time.sleep(3)
-        r2 = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-        if r2.stdout.strip() == "active":
-            success("Xray перезапущен успешно (конфиг прошёл проверку)")
-            log_to_file("SUCCESS", f"xray перезапущен после применения {cfg}")
-            backup_cfg.unlink(missing_ok=True)
-            return True
-        info(f"Ожидание запуска Xray... ({i*3}/15 сек)")
+    if restarted:
+        success("Xray перезапущен успешно (конфиг прошёл проверку)")
+        log_to_file("SUCCESS", f"xray перезапущен после применения {cfg}")
+        backup_cfg.unlink(missing_ok=True)
+        return True
 
     # ── 6. Xray не поднялся — откат ───────────────────────────────────────────
     warn("Xray не запустился после применения конфига — запускаю откат")
@@ -2554,6 +2586,9 @@ def _install_autoupdate_service() -> None:
             cp "$DAT_FILE" "$DEST" 2>/dev/null || true
         done
 
+        # v57 (start-limit-fix): reset-failed — автообновление может совпасть
+        # с другими рестартами xray в том же окне StartLimitBurst
+        systemctl reset-failed xray 2>/dev/null || true
         systemctl restart xray 2>/dev/null || true
         # Ждём запуска до 15 секунд (по 3 сек × 5 попыток)
         XRAY_OK=0
@@ -2568,6 +2603,7 @@ def _install_autoupdate_service() -> None:
         if [[ "$XRAY_OK" -eq 0 ]]; then
             log "ERROR: Xray не запустился за 15 сек — откат к $CURRENT"
             cp "$BACKUP" "$XRAY_BIN" && chmod 755 "$XRAY_BIN" || true
+            systemctl reset-failed xray 2>/dev/null || true
             systemctl restart xray 2>/dev/null || true
             python3 "$(readlink -f "$0" 2>/dev/null || echo "$0")" --tg-event xray_down "🔴 Autoupdate ОШИБКА: Xray не запустился после $LATEST — откат к $CURRENT" 2>/dev/null || true
             exit 1

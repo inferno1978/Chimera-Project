@@ -347,6 +347,8 @@ def do_full_migration_import() -> None:
                 str(CONFIG_DIR / "config.json")],
                capture=True, check=False, quiet=True)
     if val.returncode == 0:
+        # v57 (start-limit-fix): reset-failed перед рестартом (StartLimitBurst)
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         time.sleep(2)
         r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)

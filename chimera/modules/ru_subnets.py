@@ -365,6 +365,8 @@ def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
     if callable(_safe_restart):
         _xray_active = _safe_restart(wait_active=90, attempts=1)
     else:  # fallback на старое поведение (старое ядро без хелпера)
+        # v57: reset-failed и в fallback-ветке (счётчик StartLimitBurst)
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         _xray_active = False
         for _wi in range(90):
@@ -413,7 +415,14 @@ def _ru_subnets_remove_from_xray() -> None:
             _set_config_owner(cfg_path)
         except Exception as e:
             warn(f"Ошибка {cfg_path}: {e}")
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+    # v57 (start-limit-fix): безопасный рестарт (reset-failed) — удаление
+    # правил может идти сразу после их применения (apply уже рестартил xray)
+    _safe_restart = getattr(core, "_xray_safe_restart", None)
+    if callable(_safe_restart):
+        _safe_restart(wait_active=90, attempts=1)
+    else:
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
     _nginx_restart_if_reality()
     success("Правила РФ подсетей удалены из Xray")
 

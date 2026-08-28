@@ -102,6 +102,26 @@ def _run(cmd: list[str], capture: bool = False, check: bool = False,
         return subprocess.CompletedProcess(cmd, 127, stdout="", stderr=f"command not found: {cmd[0]}")
 
 
+def _xray_restart_safe(wait_active: int = 15, attempts: int = 2) -> bool:
+    """v57 (start-limit-fix): безопасный рестарт xray (reset-failed + ожидание).
+
+    PQ-инбаунд/flow-переключения могут идти в цепочке с другими рестартами
+    xray (пересборка конфига, юзеры, b4-сеты) — голый restart упирается в
+    StartLimitBurst юнита. См. _core._xray_safe_restart (v56).
+    """
+    for _attempt in range(1, max(1, attempts) + 1):
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        for _ in range(max(1, wait_active)):
+            time.sleep(1)
+            rs = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+            if (rs.stdout or "").strip() == "active":
+                return True
+        if _attempt < attempts:
+            time.sleep(2)
+    return False
+
+
 # =============================================================================
 #  КОНСТАНТЫ — те же реальные пути, что используются по всему проекту
 #  (chimera/_core.py: CONFIG_DIR, USERS_FILE; modules/mtproto.py:
@@ -484,10 +504,8 @@ def enable_pq_vless(
         err = _write_and_test(cfg_path, cfg)
         if err:
             return False, err
-        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-        time.sleep(2)
-        rs = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-        if (rs.stdout or "").strip() != "active":
+        # v57 (start-limit-fix): безопасный рестарт
+        if not _xray_restart_safe():
             return False, "Xray не запустился после добавления PQ-инбаунда — проверьте: journalctl -u xray -n 30"
 
     pq_state_save({
@@ -522,7 +540,8 @@ def disable_pq_vless() -> tuple[bool, str]:
         err = _write_and_test(cfg_path, cfg)
         if err:
             return False, err
-        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        # v57 (start-limit-fix): безопасный рестарт
+        _xray_restart_safe()
 
     pq_state_save({"pq_vless_enabled": False})
     return True, ("PQ VLESS-инбаунд отключён" if changed else "PQ-инбаунд не был активен")
@@ -578,10 +597,8 @@ def set_pq_flow(
     err = _write_and_test(cfg_path, cfg)
     if err:
         return False, err
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    time.sleep(2)
-    rs = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-    if (rs.stdout or "").strip() != "active":
+    # v57 (start-limit-fix): безопасный рестарт
+    if not _xray_restart_safe():
         return False, "Xray не запустился после переключения flow — проверьте: journalctl -u xray -n 30"
 
     pq_state_save({"pq_vless_xtls_flow": xtls_flow})

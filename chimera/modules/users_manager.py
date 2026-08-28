@@ -1406,11 +1406,19 @@ def _users_apply_to_config(users: list[dict]) -> bool:
             warn(f"Ошибка записи {cfg_path}: {e}")
             return False
 
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+    # v57 (start-limit-fix): безопасный рестарт (reset-failed) — массовые
+    # операции с юзерами (добавили нескольких подряд) = серия рестартов
+    _safe_restart = getattr(core, "_xray_safe_restart", None)
+    if callable(_safe_restart):
+        _ok = _safe_restart(wait_active=15, attempts=2)
+    else:
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
+        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+        time.sleep(2)
+        r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+        _ok = r.stdout.strip() == "active"
     _nginx_restart_if_reality()
-    time.sleep(2)
-    r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-    if r.stdout.strip() != "active":
+    if not _ok:
         warn("Xray не запустился после обновления пользователей!")
         r_jnl = _run(["journalctl", "-u", "xray", "-n", "15", "--no-pager"],
                      capture=True, check=False, quiet=True)
