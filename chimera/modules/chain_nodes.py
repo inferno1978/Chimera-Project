@@ -873,8 +873,26 @@ def generate_xray_config_chain_entry() -> None:
     if r.returncode == 0:
         success("Конфиг Entry Node (Режим B) создан и валиден")
     else:
-        warn("Конфигурация создана с предупреждением")
-        log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
+        # v68 (geo-self-heal): см. generate_xray_config_chain_entry_multi
+        _healed = False
+        try:
+            _cfg_h = json.loads(cfg_file.read_text())
+            from chimera.modules.split_tunnel import strip_geo_rules
+            if strip_geo_rules(_cfg_h):
+                cfg_file.write_text(json.dumps(_cfg_h, indent=2, ensure_ascii=False))
+                _set_config_owner(cfg_file)
+                r2 = _run([str(XRAY_BIN), "run", "-test", "-config", str(cfg_file)],
+                          capture=True, check=False)
+                if r2.returncode == 0:
+                    _healed = True
+                    warn("GEO-SELF-HEAL: geo-файлы не загрузились — geosite/geoip-"
+                         "правила УДАЛЕНЫ, Xray жив. Обновите geo-файлы "
+                         "(Сеть → 3 → GeoIP/GeoSite).")
+        except Exception:
+            pass
+        if not _healed:
+            warn("Конфигурация создана с предупреждением")
+            log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
 
 
 # =============================================================================
@@ -2333,8 +2351,30 @@ def generate_xray_config_chain_entry_multi() -> None:
         else:
             success(f"Конфиг Entry Node (Режим B, {n_nodes} нод, стратегия: {strategy_label}) создан и валиден")
     else:
-        warn("Конфигурация создана с предупреждением")
-        log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
+        # v68 (geo-self-heal): негрузимые geo-правила = МЁРТВЫЙ Xray (exit 23
+        # + RestartPreventExitStatus=23) = i/o timeout для ВСЕХ клиентов.
+        # Убираем geosite:/geoip: правила, ретестим, пишем живой конфиг.
+        _healed = False
+        try:
+            _cfg_h = json.loads(cfg_file.read_text())
+            from chimera.modules.split_tunnel import strip_geo_rules
+            if strip_geo_rules(_cfg_h):
+                cfg_file.write_text(json.dumps(_cfg_h, indent=2, ensure_ascii=False))
+                _set_config_owner(cfg_file)
+                r2 = _run([str(XRAY_BIN), "run", "-test", "-config", str(cfg_file)],
+                          capture=True, check=False)
+                if r2.returncode == 0:
+                    _healed = True
+                    warn("GEO-SELF-HEAL: geo-файлы не загрузились (нет в пути "
+                         "поиска Xray / категория отсутствует) — geosite/geoip-"
+                         "правила УДАЛЕНЫ, Xray жив. Раздельное туннелирование "
+                         "деградировало: весь трафик через exit-ноду. "
+                         "Лечение: обновите geo-файлы (Сеть → 3 → GeoIP/GeoSite).")
+        except Exception:
+            pass
+        if not _healed:
+            warn("Конфигурация создана с предупреждением")
+            log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
     _h2_reapply_transport_if_active()
 
 

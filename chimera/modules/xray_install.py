@@ -1054,8 +1054,27 @@ def generate_xray_config() -> None:
         else:
             success("DNS: IPv4-режим (1.1.1.1 → 8.8.8.8 → 9.9.9.9)")
     else:
-        warn("Конфигурация создана (валидация вернула предупреждение)")
-        log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
+        # v68 (geo-self-heal): негрузимые geo-правила = МЁРТВЫЙ Xray (exit 23
+        # + RestartPreventExitStatus=23) = i/o timeout для ВСЕХ клиентов.
+        _healed = False
+        try:
+            _cfg_h = json.loads(cfg_file.read_text())
+            from chimera.modules.split_tunnel import strip_geo_rules
+            if strip_geo_rules(_cfg_h):
+                cfg_file.write_text(json.dumps(_cfg_h, indent=2, ensure_ascii=False))
+                _set_config_owner(cfg_file)
+                r2 = _run([str(XRAY_BIN), "run", "-test", "-config", str(cfg_file)],
+                          capture=True, check=False)
+                if r2.returncode == 0:
+                    _healed = True
+                    warn("GEO-SELF-HEAL: geo-файлы не загрузились — geosite/geoip-"
+                         "правила УДАЛЕНЫ, Xray жив. Обновите geo-файлы "
+                         "(Сеть → 3 → GeoIP/GeoSite).")
+        except Exception:
+            pass
+        if not _healed:
+            warn("Конфигурация создана (валидация вернула предупреждение)")
+            log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
 
 
 def generate_xray_config_xhttp() -> None:
@@ -1357,8 +1376,26 @@ def generate_xray_config_xhttp() -> None:
                 f"(mode={XHTTP_MODE}, path={XHTTP_PATH}, "
                 f"backend=127.0.0.1:{XHTTP_BACKEND_PORT}, TLS=Nginx:{SERVER_PORT})")
     else:
-        warn("Конфигурация создана (валидация вернула предупреждение — возможно, сертификат ещё не получен)")
-        log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
+        # v68 (geo-self-heal): см. generate_xray_config
+        _healed = False
+        try:
+            _cfg_h = json.loads(cfg_file.read_text())
+            from chimera.modules.split_tunnel import strip_geo_rules
+            if strip_geo_rules(_cfg_h):
+                cfg_file.write_text(json.dumps(_cfg_h, indent=2, ensure_ascii=False))
+                _set_config_owner(cfg_file)
+                r2 = _run([str(XRAY_BIN), "run", "-test", "-config", str(cfg_file)],
+                          capture=True, check=False)
+                if r2.returncode == 0:
+                    _healed = True
+                    warn("GEO-SELF-HEAL: geo-файлы не загрузились — geosite/geoip-"
+                         "правила УДАЛЕНЫ, Xray жив. Обновите geo-файлы "
+                         "(Сеть → 3 → GeoIP/GeoSite).")
+        except Exception:
+            pass
+        if not _healed:
+            warn("Конфигурация создана (валидация вернула предупреждение — возможно, сертификат ещё не получен)")
+            log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
 
 # =============================================================================
 # =============================================================================
@@ -1421,6 +1458,26 @@ def create_xray_service() -> None:
         svc_desc = "Xray Service (VLESS TCP REALITY)"
 
     pre_block = f"\n        {pre_cmds}\n" if pre_cmds else ""
+
+    # ── v68: пин пути geo-файлов ─────────────────────────────────────────────
+    # Xray-core ищет geoip/geosite ТОЛЬКО в: env xray.location.asset →
+    # каталог бинарника → /usr/local/share/xray → /usr/share/xray →
+    # /opt/share/xray. Поле routing.geoDataBasePath Xray НЕ поддерживает,
+    # /etc/xray сам по себе НЕ ищется. Канонические файлы Chimera живут в
+    # /etc/xray — пиним env на него, когда оба файла на месте (иначе не
+    # пиним вовсе: Xray возьмёт /usr/local/share/xray, куда их зеркалит
+    # split_tunnel._geo_files_available).
+    _geo_env_line = ""
+    try:
+        _gs = Path("/etc/xray/geosite.dat")
+        _gi = Path("/etc/xray/geoip.dat")
+        if _gs.exists() and _gi.exists() \
+                and _gs.stat().st_size > 1024 * 1024 \
+                and _gi.stat().st_size > 1024 * 1024:
+            _geo_env_line = "Environment=xray.location.asset=/etc/xray"
+    except Exception:
+        _geo_env_line = ""
+
     XRAY_SERVICE.write_text(textwrap.dedent(f"""\
         [Unit]
         Description={svc_desc}
@@ -1441,6 +1498,7 @@ def create_xray_service() -> None:
         [Service]
         User=xray
         Group=xray
+        {_geo_env_line}
         CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
         AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
         NoNewPrivileges=true
