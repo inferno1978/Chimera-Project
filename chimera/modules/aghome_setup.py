@@ -2763,14 +2763,41 @@ def _regenerate_xray_config(interactive: bool = True) -> bool:
     Выбирает генератор по state.json (protocol_mode/install_mode),
     подгружает глобали, рестартит xray. При провале — warn (конфиг можно
     пересоздать через меню: Установка → Пересоздать конфиг Xray).
+
+    v61 (install-order): НЕ перегенерирует, когда идёт do_full_install
+    (INSTALL_STARTED=True, INSTALL_COMPLETED=False — AGH ставится ДО
+    Xray) или state.json отсутствует (чистая установка). В обоих случаях
+    конфиг Xray ещё не существует или будет (пере)создан ниже по потоку
+    AGH-aware генератором из СВЕЖИХ параметров (живая проба
+    agh_dns_available() → DNS 127.0.0.1:53), а регенерация здесь по
+    СТАРОМУ state.json затёрла бы только что введённые UUID/ключи/режим
+    через _load_state_into_globals(). Итоговый DNS-путь верифицируется
+    по фактическому config.json функцией _verify_xray_dns_via_agh()
+    (_core.py, конец установки). Вызов актуален из меню (AGH включают
+    поверх живой установки) и при удалении AGH.
     """
     core = _core_module()
     info, warn = core.info, core.warn
     try:
+        # v61 (install-order): идёт do_full_install (AGH ставится ДО
+        # Xray)? Перегенерировать НЕЛЬЗЯ: конфиг Xray будет создан ниже
+        # по потоку AGH-aware генератором из СВЕЖИХ параметров, а вызов
+        # _load_state_into_globals() здесь затёр бы только что введённые
+        # параметры (UUID/ключи/режим) СТАРЫМ state.json при переустановке
+        # поверх живой установки. Маркер: INSTALL_STARTED=True и
+        # INSTALL_COMPLETED=False (устанавливается в конце do_full_install).
+        mid_install = (getattr(core, "INSTALL_STARTED", False)
+                       and not getattr(core, "INSTALL_COMPLETED", True))
         state_path = XRAY_STATE_FILE
+        if mid_install:
+            info("AGH: установка в процессе — конфиг Xray будет создан "
+                 "этапом установки Xray из свежих параметров "
+                 "(DNS сразу через AGH:53)")
+            return True
         if not state_path.exists():
-            warn("AGH: state.json не найден — конфиг Xray не перегенерирован")
-            return False
+            info("AGH: Xray ещё не установлен — его конфиг будет создан "
+                 "на этапе установки Xray (DNS сразу через AGH:53)")
+            return True
         state = json.loads(state_path.read_text())
         protocol = state.get("protocol_mode", "reality")
         mode = state.get("install_mode", "A")

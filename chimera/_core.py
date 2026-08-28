@@ -3436,6 +3436,144 @@ _AWG_REMOTE_CONF_PATH = "/etc/amnezia/amneziawg/awg0.conf"
 # (AWG transport — awg_check_tool, awg_generate_keys, awg_install_local, _awg_install_go_version_binary_only, _awg_install_go_version, _awg_detect_implementation, _awg_create_userspace_stubs, _awg_server_conf_text, _awg_client_conf_text, _awg_systemd_unit_text, ensure_amneziawg_ready, awg_setup_local_client, awg_apply_policy_routing, _awg_ensure_sshpass, awg_setup_remote_server, _awg_print_manual_guide, awg_rollback, awg_verify_tunnel, _awg_cleanup_stale_interfaces, awg_full_setup — вынесены в
 #  chimera.modules.awg_transport; импорт — в верхней секции этого файла.)
 
+
+def _xray_config_path_for_verify() -> Path | None:
+    """Путь к фактическому config.json Xray (для верификации DNS-пути).
+
+    Кандидаты — те же, что и в финальной проверке do_full_install:
+    /etc/xray/config.json (CONFIG_DIR) и /usr/local/etc/xray/config.json
+    (официальный установщик Xray). None = конфига нет.
+    """
+    for _p in (CONFIG_DIR / "config.json",
+               Path("/usr/local/etc/xray/config.json")):
+        try:
+            if _p.exists():
+                return _p
+        except Exception:
+            continue
+    return None
+
+
+def _xray_config_uses_agh_dns(cfg_path: Path) -> bool:
+    """Первый DNS-сервер конфига Xray — 127.0.0.1:53 (AGH)?
+
+    Генераторы (xray_install/chain_nodes) при живом AGH ставят его первым
+    сервером с живым fallback на DNSCrypt:5300 и публичные — значит,
+    достаточно проверить ПЕРВЫЙ элемент dns.servers.
+    """
+    try:
+        cfg = json.loads(cfg_path.read_text(errors="replace"))
+        servers = (cfg.get("dns") or {}).get("servers") or []
+        if not servers:
+            return False
+        first = servers[0] or {}
+        return (str(first.get("address", "")) == "127.0.0.1"
+                and int(first.get("port", -1)) == 53)
+    except Exception:
+        return False
+
+
+def _verify_xray_dns_via_agh() -> bool:
+    """v61 (agh-guarantee): гарантия «запросы Xray идут через AGH».
+
+    Генераторы конфига выбирают DNS-путь ЖИВОЙ пробой
+    agh_dns_available() в момент генерации: если AGH тогда временно
+    не отвечал (рестарт после финализации, гонка с dnscrypt) — конфиг
+    молча получал DNSCrypt:5300/публичный DNS, и фильтры с кешем AGH
+    обходились. Проверяем ФАКТИЧЕСКИЙ config.json (первый DNS-сервер):
+
+      • 127.0.0.1:53 есть          → success (путь подтверждён);
+      • нет, но AGH сейчас жив     → перегенерация конфига генератором
+        из in-memory глобалей установки + рестарт xray (reset-failed,
+        защита start-limit) + повторная проверка по файлу;
+      • нет и AGH не поднялся      → это легитимный fallback (о факте
+        уже предупредили на шаге 1.5 запуска сервисов) — info, не warn.
+
+    Вызывается из do_full_install ПОСЛЕ сохранения state.json и ДО
+    run_full_health_check() — health-отчёт видит уже исправленный конфиг.
+    Возвращает True, если итоговый конфиг идёт через AGH.
+    """
+    global PARAM_USE_AGHOME
+    if not PARAM_USE_AGHOME:
+        return False
+
+    cfg_path = _xray_config_path_for_verify()
+    if cfg_path is None:
+        # Конфига нет вообще — финальная проверка do_full_install
+        # выдаст КРИТИЧНО сама; здесь молчим, не дублируем.
+        log_to_file("INFO", "agh-guarantee: config.json не найден — "
+                            "проверка DNS-пути пропущена")
+        return False
+
+    if _xray_config_uses_agh_dns(cfg_path):
+        success(f"DNS-путь подтверждён: Xray → AGH:53 → DNSCrypt:5300 "
+                f"({cfg_path})")
+        log_to_file("INFO", "agh-guarantee: dns.servers[0] = 127.0.0.1:53 "
+                            f"({cfg_path})")
+        return True
+
+    # Конфиг НЕ идёт через AGH, хотя AGH выбран. Жив ли AGH сейчас?
+    try:
+        from chimera.modules.aghome_setup import aghome_dns_ready
+    except Exception as _e:
+        log_to_file("WARN", f"agh-guarantee: aghome_setup недоступен: {_e}")
+        return False
+
+    if not aghome_dns_ready():
+        info("DNS-путь: Xray → DNSCrypt напрямую (AGH не поднялся на :53 — "
+             "fallback, см. шаг 1.5 выше)")
+        log_to_file("WARN", "agh-guarantee: AGH не готов, конфиг Xray идёт "
+                            "мимо AGH (fallback)")
+        return False
+
+    # AGH жив, а конфиг мимо него — перегенерируем. Вызываем генератор
+    # НАПРЯМУЮ из in-memory глобалей установки: state.json только что
+    # сохранён из них же, а _load_state_into_globals() тут был бы
+    # небезопасен (при переустановке мог бы затереть свежие параметры
+    # старым state.json до его перезаписи).
+    info("Конфиг Xray не использует AGH — перегенерирую (AGH сейчас активен)...")
+    regen_ok = False
+    try:
+        if INSTALL_MODE == "B":
+            generate_xray_config_chain_entry_multi()
+        elif PROTOCOL_MODE == "xhttp":
+            generate_xray_config_xhttp()
+        else:
+            generate_xray_config()
+        regen_ok = True
+    except Exception as _e:
+        log_to_file("WARN", f"agh-guarantee: регенерация упала: {_e}")
+
+    if regen_ok:
+        # reset-failed перед рестартом (start-limit защита, v57) — рестарт
+        # идёт в цепочке с рестартами dnscrypt/AGH миграции DNS-стека.
+        _run(["systemctl", "reset-failed", "xray"], capture=True,
+             check=False, quiet=True)
+        _run(["systemctl", "restart", "xray"], capture=True,
+             check=False, quiet=True)
+        if not _wait_service_active("xray", 15, silent=True):
+            _run(["systemctl", "reset-failed", "xray"], capture=True,
+                 check=False, quiet=True)
+            _run(["systemctl", "restart", "xray"], capture=True,
+                 check=False, quiet=True)
+            _wait_service_active("xray", 15, silent=True)
+
+    cfg_path = _xray_config_path_for_verify() or cfg_path
+    if _xray_config_uses_agh_dns(cfg_path):
+        success(f"DNS-путь исправлен: Xray → AGH:53 → DNSCrypt:5300 "
+                f"({cfg_path})")
+        log_to_file("INFO", "agh-guarantee: после регенерации "
+                            f"dns.servers[0] = 127.0.0.1:53")
+        return True
+    warn(f"Конфиг Xray по-прежнему не идёт через AGH "
+         f"(регенерация: {'ok' if regen_ok else 'сбой'}) — "
+         f"DNS работает через DNSCrypt:5300 (fallback), "
+         f"фильтры AGH не применяются к Xray")
+    log_to_file("WARN", "agh-guarantee: конфиг Xray не через AGH после "
+                        "регенерации")
+    return False
+
+
 def do_full_install() -> None:
     global INSTALL_STARTED, PARAM_USE_DNSCRYPT, DNSCRYPT_INSTALLED
     global PARAM_USE_AGHOME, AGHOME_INSTALLED
@@ -3874,6 +4012,18 @@ def do_full_install() -> None:
             "h2_exit_enabled":   H2_EXIT_ENABLED,
         })
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+
+    # ── v61 (agh-guarantee): верификация DNS-пути Xray ────────────────────────
+    # AGH выбран → ФАКТИЧЕСКИЙ config.json обязан идти через 127.0.0.1:53.
+    # Генератор делает живую пробу agh_dns_available() в момент генерации;
+    # если AGH тогда временно не отвечал — конфиг молча получил fallback.
+    # Здесь проверяем итоговый артефакт и чиним регенерацией (state.json
+    # уже сохранён). Идёт ДО health-check — отчёт видит исправленный конфиг.
+    if PARAM_USE_AGHOME:
+        try:
+            _verify_xray_dns_via_agh()
+        except Exception as _e:
+            log_to_file("WARN", f"agh-guarantee: {_e}")
 
     PROGRESS.update(5, "Проверки")
 
