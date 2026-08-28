@@ -2,6 +2,77 @@
 
 ---
 
+## FIX(subscription_multinode): ROOT CAUSE «клиентский конфиг каскада мёртв» — 6 фатальных багов sing-box-профиля Режима B (v69) — 29 августа 2026
+
+**СИМПТОМЫ:** клиент (sing-box-совместимый) с профилем мульти-ноды (Режим B):
+«Тест задержки» → шторм `dns: exchange failed … dial tcp <entry>:443: i/o timeout`
+/ `context deadline exceeded`; соединения не устанавливаются ни к одному сайту.
+Режим A (одиночный конфиг) на тех же серверах — работает.
+
+**МЕТОДИКА:** конфиг, который генерирует `build_singbox_config()`, прогнан
+через РЕАЛЬНЫЕ бинарники sing-box 1.11.15 / 1.12.25 / 1.13.19, затем поднят
+полный E2E-каскад в песочнице: клиент sing-box 1.13.19 → entry Xray (конфиг
+`generate_xray_config_chain_entry_multi`) → exit Xray → интернет
+(`scripts/sim_mode_b_e2e.py`).
+
+**НАЙДЕННЫЕ ФАТАЛЬНЫЕ БАГИ (каждый из них отдельно валит клиент на старте):**
+
+| # | Баг | Чем проявляется |
+|---|-----|-----------------|
+| 1 | legacy special outbounds `block`/`dns-out` | `FATAL … ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true` на 1.12.25+ |
+| 2 | легаси-блок `dns.fakeip.*` (диапазоны вне сервера) | `FATAL … ENABLE_DEPRECATED_LEGACY_DNS_FAKEIP_OPTIONS=true` на 1.13+ |
+| 3 | легаси DNS-правило `outbound: any` | `FATAL … ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM=true` на 1.13+ |
+| 4 | `detour: direct` у local-dns к ПУСТОМУ direct-outbound | `FATAL … detour to an empty direct outbound makes no sense` на старте 1.13+ |
+| 5 | rule-set'ы `geosite-ru`, `geoip-telegram`, `geoip-private` — **файлов не существует** (HTTP 404: в sing-geosite нет категории «ru», в sing-geoip нет telegram/private) | `FATAL … initial rule-set … 404 Not Found` на загрузке |
+| 6 | `download_detour: direct` у rule-set'ов | тот же «empty direct outbound» FATAL |
+
+Плюс два поведенческих бага (не валивают старт, но убивают трафик):
+- **selector default = первый EXIT** — из РФ exit-ноды напрямую недоступны
+  (для того и каскад) → весь трафик И DNS (detour remote-dns через selector)
+  уходят в i/o timeout. Группы Streaming/Telegram/AI — тоже дефолтили на
+  прямой exit.
+- **local-dns = AliDNS `223.5.5.5`** (Китай) — резолв доменов нод из РФ
+  стабильно таймаутит (`context deadline exceeded`).
+
+**ИСПРАВЛЕНИЯ (subscription_multinode.py):**
+- Убраны outbounds `block`/`dns-out` (роль выполняют route-actions
+  `reject`/`hijack-dns`, уже использовавшиеся в правилах).
+- fakeip-диапазоны перенесены внутрь сервера `{"type":"fakeip", …}`.
+- Правило `outbound: any` заменено на `route.default_domain_resolver` +
+  `domain_resolver: local-dns` у vless-нод с доменным адресом.
+- Убраны оба detour-к-пустому-direct (local-dns, rule-set download).
+- Rule-set'ы заменены на проверенные HTTP-пробой URL (все 200):
+  `geosite-ru` → `geosite-category-ru` (SagerNet),
+  `geoip-telegram`/`geoip-private` → MetaCubeX/meta-rules-dat@sing.
+- **Selector default = ENTRY-каскад**; entry добавлен в группы
+  Streaming/Telegram/AI (и их urltest) как дефолт.
+- local-dns → **Yandex `77.88.8.8`** (живой из РФ).
+- Guard-правило: `domain_suffix` доменов нод → local-dns СТРОГО до правила
+  fakeip (защита от петли резолва в любой версии sing-box).
+- `strict_route: false` (Windows: WFP-правила strict_route рвут собственные
+  dial sing-box — симптом «dial tcp <entry>:443 i/o timeout» при живом TCP).
+- Целевые версии профиля: sing-box **1.12+/1.13+** (формат DNS 1.11 не
+  знает — старым клиентам отдаётся single-outbound конфиг).
+
+**E2E-ВЕРИФИКАЦИЯ (реальные бинарники, scripts/sim_mode_b_e2e.py):**
+```
+sing-box check 1.12.25: OK   sing-box check 1.13.19: OK (без WARN)
+клиент sing-box 1.13.19 → entry (Chimera) → exit → api.ipify.org: 200
+generate_204: HTTP 204 | selector: Entry (каскад)
+«Тест задержки» (clash API delay): 35 ms
+```
+
+**ТЕСТЫ:** новый `tests/test_v69_singbox_multinode_config.py` (14 кейсов);
+обновлён `test_subscription_multinode.py` (block/dns-out теперь ЗАПРЕЩЕНЫ);
+подписочные/REST/TG/chain/singbox-наборы: 646 passed, 0 failed.
+
+**ДЕЙСТВИЯ НА СЕРВЕРЕ:** `git pull` → перегенерировать клиентский профиль
+(подписка/экспорт) → в клиенте **обновить профиль** (переимпортировать
+ссылку или перекачать полный конфиг) → перезапустить ядро. Клиент должен
+быть sing-box **1.12+** (актуальные Hiddify/sing-box-GUI/NekoBox подходят).
+
+---
+
 ## FIX(split_tunnel+xray_install+chain_nodes): ROOT CAUSE «в каскадном режиме не работает НИЧЕГО» — Xray не находит geo-файлы, служба мертва (v68) — 28 августа 2026
 
 **СИМПТОМЫ (матрица тестов пользователя):**
