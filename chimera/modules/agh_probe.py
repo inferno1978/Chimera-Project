@@ -335,6 +335,30 @@ def agh_dns_available(run: Optional[Callable] = None,
     # Шаг 4: end-to-end проба резолва
     ok_probe, note = agh_probe_resolve()
     if ok_probe:
+        # v65 (ratelimit-heal): санация ЖИВОГО конфига AGH. Эмпирика:
+        # ratelimit>0 в AGH v0.107.79 = ТИХИЙ DROP сверх лимита (без
+        # REFUSED и без логов), whitelist-поле мёртво, весь DNS Xray =
+        # один /24-бакет 20 rps → EOF-шторм у клиентов. Проба на 1-2 qps
+        # этого НЕ ловит — патчу конфиг при подтверждённо живом AGH.
+        # Вызывается всеми 4 генераторами конфига + resolv-фиксом.
+        try:
+            from chimera.modules.aghome_setup import (
+                aghome_fix_ratelimit_if_needed)
+            healed, hnote = aghome_fix_ratelimit_if_needed(
+                log_info=log_info, log_warn=log_warn)
+            if healed:
+                return True, note
+            # Патч записан, но AGH не поднялся — :53 больше нельзя
+            # доверять: возвращаем redirect (если снимали) и уходим
+            # в fallback на DNSCrypt:5300.
+            if redir_port is not None:
+                dns53_redirect_restore(run, redir_port)
+                log_warn(f"AGH не поднялся после санации ({hnote}) — "
+                         f"redirect 53→{redir_port} восстановлен")
+            return False, f"AGH не поднялся после санации ({hnote})"
+        except Exception as _e:
+            # Санация опциональна (проба уже прошла) — не блокируем путь.
+            log_warn(f"AGH: санация ratelimit пропущена: {_e}")
         return True, note
 
     # Шаг 5: проба провалилась — откатываем redirect, чтобы не оставить

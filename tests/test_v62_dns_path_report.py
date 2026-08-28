@@ -391,6 +391,9 @@ class TestCronScriptDnsBlock(unittest.TestCase):
             elif cmd[0] == "ss":
                 out = ("udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
                        'users:(("AdGuardHome",pid=1,fd=6))\n')
+            elif cmd[:1] == ["dig"]:
+                # v65: живая проба резолва AGH в cron-скрипте — отвечает IP
+                out = "77.88.55.77\n"
             elif cmd[0] == "curl":
                 # tg_send: '-d', 'text=<msg>'
                 for i, arg in enumerate(cmd):

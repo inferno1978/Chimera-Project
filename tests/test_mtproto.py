@@ -1784,8 +1784,13 @@ class TestReturnRuleIdempotency(unittest.TestCase):
                         return_rules[(ipt, dport)] = return_rules.get((ipt, dport), 0) - 1
                         return MagicMock(returncode=0, stdout="", stderr="")
                     return MagicMock(returncode=1, stdout="", stderr="not found")
-                # -I (insert) — инкремент count
-                if "-I" in cmd and "--dport" in cmd and "RETURN" in cmd:
+                # -I (insert) / -A (append) — инкремент count.
+                # v65: _ipt_ensure_single_return_rule использует -A
+                # (f794c8f: RETURN должен стоять ПОСЛЕ REDIRECT-правил
+                # TG-подсетей, иначе перехватывает трафик Telemt) — мок
+                # обязан считать оба варианта добавления правила.
+                if ("-I" in cmd or "-A" in cmd) and "--dport" in cmd \
+                        and "RETURN" in cmd:
                     dport_idx = cmd.index("--dport") + 1
                     dport = cmd[dport_idx]
                     return_rules[(ipt, dport)] = return_rules.get((ipt, dport), 0) + 1

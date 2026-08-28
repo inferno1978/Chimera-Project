@@ -282,6 +282,189 @@ def aghome_dns_ready() -> bool:
         AGH_DNS_PORT, "udp", proc="AdGuardHome")
 
 
+def aghome_fix_ratelimit_if_needed(log_info=None, log_warn=None) -> "tuple[bool, str]":
+    """v65: санация ratelimit/upstream_timeout ЖИВОГО AdGuardHome.yaml.
+
+    Эмпирика на живом AGH v0.107.79 (инцидент: «клиент сыпал EOFами,
+    убрал AGH — всё заработало»): ratelimit: 20 при subnet_len 24 =
+    ОДИН бакет 20 rps на весь DNS Xray; сверх лимита запросы ТИХО
+    дропаются (без REFUSED и без записи в лог), ratelimit_whitelist —
+    мёртвое поле. Xray за каждый дроп платит 4 секунды до fallback.
+    Единственный рабочий фикс — ratelimit: 0 (Ratelimit==0 → PassThrough).
+    upstream_timeout 10s → 3s: SERVFAIL успевает до 4с-таймаута Xray.
+
+    Идемпотентно: правит ТОЛЬКО строки ratelimit:/upstream_timeout:
+    ВНУТРИ dns:-секции (users, фильтры, upstream, tls не трогает),
+    бэкап .pre-ratelimit-fix.bak перед записью, рестарт + ожидание
+    active и :53. iptables НЕ трогает (вызывается из agh_probe).
+
+    Возвращает (True, note) — фикс не нужен или применён успешно;
+    (False, причина) — патч записан, но AGH не поднялся (вызывающий
+    обязан откатиться на DNSCrypt:5300).
+    """
+    log_info = log_info or (lambda m: None)
+    log_warn = log_warn or (lambda m: None)
+
+    if not AGH_CONF.exists():
+        return True, "нет конфига AGH — no-op"
+    try:
+        text = AGH_CONF.read_text(errors="replace")
+    except Exception as e:
+        return True, f"yaml не читается ({e}) — no-op"
+
+    # Правки только ВНУТРИ dns:-секции (до следующей top-level колонки)
+    m_dns = re.search(r'^dns:\s*$', text, re.MULTILINE)
+    if not m_dns:
+        return True, "секции dns: нет — no-op"
+    sec_start = m_dns.end()
+    m_next = re.search(r'^[A-Za-z_][A-Za-z0-9_]*:', text[sec_start:],
+                       re.MULTILINE)
+    sec_end = sec_start + (m_next.start() if m_next
+                           else len(text[sec_start:]))
+    section = text[sec_start:sec_end]
+
+    patched: list[str] = []
+    new_section = section
+    m_rl = re.search(r'^  ratelimit:\s*(\d+)\s*$', section, re.MULTILINE)
+    if m_rl and int(m_rl.group(1)) != 0:
+        new_section = (new_section[:m_rl.start()] + "  ratelimit: 0"
+                       + new_section[m_rl.end():])
+        patched.append(f"ratelimit {m_rl.group(1)} → 0")
+    m_ut = re.search(r'^  upstream_timeout:\s*(\d+)s\s*$', new_section,
+                     re.MULTILINE)
+    if m_ut and int(m_ut.group(1)) > 3:
+        new_section = (new_section[:m_ut.start()] + "  upstream_timeout: 3s"
+                       + new_section[m_ut.end():])
+        patched.append(f"upstream_timeout {m_ut.group(1)}s → 3s")
+
+    if not patched:
+        return True, "конфиг уже санитарен (ratelimit=0, timeout<=3s)"
+
+    log_warn(f"AGH: конфиг угрожает DNS Xray ({'; '.join(patched)}) — "
+             "патчу и перезапускаю (тихие дропы = EOF у клиентов)")
+
+    # Бэкап + запись (права как у finalize)
+    try:
+        AGH_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        bak = AGH_BACKUP_DIR / ("AdGuardHome.yaml."
+                                + datetime.now().strftime("%Y%m%d%H%M%S")
+                                + ".pre-ratelimit-fix.bak")
+        shutil.copy2(AGH_CONF, bak)
+        AGH_CONF.write_text(text[:sec_start] + new_section + text[sec_end:])
+        subprocess.run(["chown", f"{AGH_USER}:{AGH_GROUP}", str(AGH_CONF)],
+                       capture_output=True, check=False)
+        AGH_CONF.chmod(0o640)
+    except Exception as e:
+        log_warn(f"AGH: не удалось записать патч: {e}")
+        return True, f"патч не записан ({e}) — конфиг не тронут"
+
+    # Рестарт + ожидание живого :53
+    subprocess.run(["systemctl", "restart", AGH_SERVICE_NAME],
+                   capture_output=True, check=False)
+    if not _wait_service(AGH_SERVICE_NAME, 30):
+        return False, f"AGH не поднялся после патча ({'; '.join(patched)})"
+    ready = False
+    for _ in range(5):
+        if aghome_dns_ready():
+            ready = True
+            break
+        time.sleep(2)
+    if not ready:
+        return False, "AGH active, но :53 не слушается после патча"
+    log_info(f"AGH: санация применена ({'; '.join(patched)}), :53 слушает")
+    return True, "патч применён: " + ", ".join(patched)
+
+
+def _agh_core_port_conflicts(extra_ports: "tuple[int, ...]" = ()) -> "dict[int, list[str]]":
+    """v65: конфликтуют ли порты AGH с портами ядра Chimera (Xray/AWG).
+
+    AGH биндит фиксированные порты (DNS :53, DoT/DoQ :853, DoH+WebUI
+    :30443) и стартует ДО xray (unit: Before=xray.service): коллизия =
+    AGH отбирает порт → xray не может забиндиться → EOF у ВСЕХ клиентов.
+    Источники проверки:
+      1. глобали текущей установки (do_full_install: AGH ставится ДО
+         Xray — порт из SERVER_PORT);
+      2. state.json (живая установка / установка из меню):
+         server_port, awg_client_listen_port;
+      3. живые чужие слушатели (ss -tulnp) на портах AGH.
+    systemd-resolved stub (127.0.0.53:53) НЕ конфликт — другой адрес;
+    сам AGH (рефинализация) исключается по имени процесса.
+
+    Возвращает {порт AGH: [причины]} — только пересечения с портами
+    AGH (53/853/30443 + extra_ports), шум отсеивается.
+    """
+    conflicts: "dict[int, list[str]]" = {}
+
+    def _note(port: int, reason: str) -> None:
+        conflicts.setdefault(int(port), []).append(reason)
+
+    # 1) Глобали текущей установки
+    try:
+        _core = _core_module()
+        _sp = int(getattr(_core, "SERVER_PORT", 0) or 0)
+        if _sp:
+            _note(_sp, "Xray (SERVER_PORT текущей установки)")
+    except Exception:
+        pass
+
+    # 2) state.json (живая установка / меню)
+    try:
+        if XRAY_STATE_FILE.exists():
+            _st = json.loads(XRAY_STATE_FILE.read_text())
+            _sp = int(_st.get("server_port", 0) or 0)
+            if _sp:
+                _note(_sp, "Xray (state.json server_port)")
+            _awg = int(_st.get("awg_client_listen_port", 0) or 0)
+            if _awg:
+                _note(_awg, "AWG (state.json awg_client_listen_port)")
+    except Exception:
+        pass
+
+    # 3) Живые чужие слушатели (ss), кроме AGH и resolved stub
+    ports_to_check = {AGH_DNS_PORT, AGH_DOT_PORT, AGH_DOH_PORT}
+    ports_to_check.update(int(p) for p in extra_ports if p)
+    try:
+        r = subprocess.run(["ss", "-tulnp"], capture_output=True, text=True,
+                           check=False, timeout=10)
+        for ln in (r.stdout or "").splitlines():
+            if "adguardhome" in ln.lower():
+                continue  # сам AGH (финализация/перезапуск)
+            if "resolved" in ln or "127.0.0.53" in ln or "127.0.0.54" in ln:
+                continue  # systemd-resolved stub — не конфликт
+            for port in ports_to_check:
+                if re.search(rf':{port}\s', ln):
+                    m = re.search(r'users:\(\("([^"]+)"', ln)
+                    proc = m.group(1) if m else "unknown"
+                    _note(port, f"порт слушает {proc}")
+    except Exception:
+        pass
+
+    return {p: reasons for p, reasons in conflicts.items()
+            if p in ports_to_check}
+
+
+def _find_free_web_port(preferred: int) -> int:
+    """v65: первый свободный порт для Web UI, начиная с preferred+1.
+
+    Занятый web-порт = FATAL для AGH (bind http → crash-loop → мёртвый
+    DNS :53). При коллизии сдвигаем порт и предупреждаем.
+    """
+    for cand in list(range(preferred + 1, 3100)) + list(range(3101, 3200)):
+        if cand in AGH_WEB_PORT_RESERVED:
+            continue
+        if _port_listening(cand, "tcp"):
+            continue
+        try:
+            from chimera.modules.port_registry import port_is_free
+            free, _ = port_is_free(cand, "tcp")
+            if not free:
+                continue
+        except Exception:
+            pass
+        return cand
+    return 0
+
+
 def _get_dnscrypt_port() -> int:
     """Реальный порт dnscrypt-proxy (из TOML; default 5300)."""
     try:
@@ -796,6 +979,20 @@ def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool) -> str:
 
     Публичный :53 НЕ открывается в UFW — open resolver исключён;
     public IP в bind_hosts нужен только для DoT(:853)/DoQ(:853)/DoH(:30443).
+
+    v65 (ratelimit: 0 — КРИТИЧНО, эмпирика на живом AGH v0.107.79):
+      • ratelimit>0 = ТИХИЙ DROP сверх лимита: ни REFUSED, ни записи в
+        лог/querylog — клиент видит чистый таймаут;
+      • ratelimit_whitelist — МЁРТВОЕ ПОЛЕ (парсится, но не подключено
+        к ratelimit-мидлвари — баг AGH), вайтлистить 127.0.0.1 нельзя;
+      • ratelimit_subnet_len_ipv4: 24 → весь DNS-трафик Xray (единственный
+        клиент 127.0.0.1) делил ОДИН бакет 20 rps: страница браузера =
+        20-60 запросов → бо́льшая часть дропается молча → Xray платит 4с
+        за каждый lookup до fallback → EOF-шторм у клиентов.
+    Публичный :53 закрыт в UFW (нет open resolver) → лимит не нужен.
+    upstream_timeout: 3s (< 4с-таймаута Xray): SERVFAIL от AGH приходит
+    ДО таймаута Xray → мгновенный fallback на DNSCrypt вместо
+    4-секундного black-hole пенальти за каждый запрос.
     """
     bind_hosts = ["127.0.0.1"]
     if public_ip:
@@ -807,7 +1004,9 @@ def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool) -> str:
 {bind_lines}
   port: {AGH_DNS_PORT}
   anonymize_client_ip: false
-  ratelimit: 20
+  # v65: 0 = без лимита (тихие дропы лимита убивали DNS Xray; whitelist мёртв).
+  # Публичный :53 закрыт в UFW — open resolver исключён.
+  ratelimit: 0
   ratelimit_subnet_len_ipv4: 24
   ratelimit_subnet_len_ipv6: 56
   ratelimit_whitelist: []
@@ -848,7 +1047,9 @@ def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool) -> str:
   ipset: []
   ipset_file: ""
   bootstrap_prefer_ipv6: false
-  upstream_timeout: 10s
+  # v65: 3s < 4с-таймаута DNS-клиента Xray → SERVFAIL успевает до
+  # таймаута, Xray мгновенно уходит в fallback (не 4с black-hole).
+  upstream_timeout: 3s
   private_networks: []
   use_private_ptr_resolvers: false
   local_ptr_upstreams: []
@@ -2095,6 +2296,20 @@ def install_aghome(interactive: bool = True) -> bool:
         warn("AGH: сначала установите DNSCrypt (Сеть → установка / wizard)")
         return False
 
+    # ── 1b. v65: конфликт портов AGH с Xray/AWG ──────────────────────
+    # Xray/AWG на :53 — AGH не сможет владеть DNS-портом (ломает xray);
+    # :853/:30443 — AGH отберёт порт у Xray на буте (Before=xray.service).
+    _pc = _agh_core_port_conflicts()
+    if AGH_DNS_PORT in _pc:
+        warn(f"AGH: порт 53 занят ({'; '.join(_pc[AGH_DNS_PORT])}) — "
+             "AGH обязан владеть 127.0.0.1:53, установка отменена")
+        warn("AGH: смените порт Xray (меню 5 → R) или откажитесь от AGH")
+        return False
+    for _p in (AGH_DOT_PORT, AGH_DOH_PORT, AGH_DOQ_PORT):
+        if _p in _pc:
+            warn(f"AGH: порт {_p} занят ({'; '.join(_pc[_p])}) — "
+                 "TLS-порты (DoH/DoT/DoQ) будут отключены при финализации")
+
     info("Установка AdGuard Home...")
 
     # ── 2. Бинарник ───────────────────────────────────────────────────
@@ -2507,6 +2722,33 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
     if not web_port or not (1 <= web_port <= 65535):
         web_port = AGH_WEB_PORT
     tls_enabled = web_mode in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF)
+
+    # ── v65: защита от портов-коллизий AGH ↔ Xray/AWG/чужие сервисы ────
+    # AGH биндит фиксированные 53/853/30443 ДО старта xray — коллизия
+    # отдаёт порт AGH и роняет xray (EOF у всех клиентов). Xray на :53 —
+    # финализация невозможна в принципе (AGH обязан владеть :53).
+    _port_conf = _agh_core_port_conflicts(extra_ports=(web_port,))
+    if AGH_DNS_PORT in _port_conf:
+        warn(f"AGH: порт {AGH_DNS_PORT} занят "
+             f"({'; '.join(_port_conf[AGH_DNS_PORT])}) — AGH обязан "
+             f"владеть DNS :53; финализация отменена, конфиг не тронут")
+        return False
+    if tls_enabled:
+        _tls_hit = [p for p in (AGH_DOH_PORT, AGH_DOT_PORT, AGH_DOQ_PORT)
+                    if p in _port_conf]
+        if _tls_hit:
+            for _p in _tls_hit:
+                warn(f"AGH: порт {_p} занят ({'; '.join(_port_conf[_p])}) — "
+                     f"TLS-порты DoH/DoT/DoQ отключены")
+            tls_enabled = False
+            web_mode = AGH_WEB_HTTP_PUB if web_mode != AGH_WEB_LOOPBACK else web_mode
+    if web_port in _port_conf:
+        # Web-порт занят → AGH crash-loop (bind web = fatal) — сдвигаем.
+        _new_wp = _find_free_web_port(web_port)
+        if _new_wp:
+            warn(f"AGH: порт Web UI {web_port} занят "
+                 f"({'; '.join(_port_conf[web_port])}) → порт {_new_wp}")
+            web_port = _new_wp
 
     # ── TLS-сертификат ────────────────────────────────────────────────
     cert_path = key_path = None

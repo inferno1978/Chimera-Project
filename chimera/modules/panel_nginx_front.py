@@ -567,6 +567,15 @@ def panel_nginx_front_remove(
     """
     core = _core_module()
     info, success = core.info, core.success
+    # v65: warn/CYAN/NC/YELLOW использовались ниже (шаг port_registry),
+    # но НЕ были определены → NameError: (1) info(f"{CYAN}…") падал,
+    # (2) except-обработчик звал warn(f"{YELLOW}…") — тоже NameError,
+    # уже НЕПЕРЕХВАЧЕННЫЙ → удаление панели в продакшене роняло
+    # _telemt_remove_direct_access / user_portal с traceback ПОСЛЕ
+    # успешного закрытия порта (vhost уже удалён, порт закрыт —
+    # частичное состояние + крах TUI).
+    warn = core.warn
+    CYAN, NC, YELLOW = core.CYAN, core.NC, core.YELLOW
 
     available = NGINX_SITES_AVAILABLE / site_name
     enabled   = NGINX_SITES_ENABLED / site_name

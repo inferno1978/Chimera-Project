@@ -107,8 +107,15 @@ def _close_chimera_ports() -> list:
     _close_tag(SERVICE_DNSCRYPT)
 
     # AGH стоит? его upstream (dnscrypt) удаляется — останавливаем и его
+    # v65: детект по бинарнику/unit/yaml — старая проверка
+    # /opt/AdGuardHome/AdGuardHome не срабатывала НИКОГДА (бинарник
+    # живёт в /usr/local/bin, в /opt только yaml/data) → stop/disable
+    # и закрытие UFW-портов aghome_* были мёртвым кодом.
     try:
-        if Path("/opt/AdGuardHome/AdGuardHome").exists():
+        _agh_here = (Path("/usr/local/bin/AdGuardHome").exists()
+                     or Path("/etc/systemd/system/AdGuardHome.service").exists()
+                     or Path("/opt/AdGuardHome/AdGuardHome.yaml").exists())
+        if _agh_here:
             import subprocess as _sp
             _sp.run(["systemctl", "stop", "AdGuardHome"],
                     capture_output=True, check=False)
@@ -253,6 +260,17 @@ def _remove_aghome_full() -> list:
         removed = _ufw_clean_wizard_rules()
         if removed:
             lines.append(f"  UFW: сняты wizard-правила AGH ({len(removed)} шт.)")
+    except Exception:
+        pass
+
+    # 6.5. v65: UFW/port_registry — порты aghome_web/doh/dot/doq.
+    # Раньше их закрывал только _close_chimera_ports с мёртвым детектом
+    # (см. выше) → после полного удаления порты 3000/30443/853
+    # оставались открытыми в UFW навсегда.
+    try:
+        from chimera.modules.aghome_setup import _unregister_aghome_ports
+        _unregister_aghome_ports()
+        lines.append("  UFW/реестр: порты AGH (web/DoH/DoT/DoQ) закрыты")
     except Exception:
         pass
 

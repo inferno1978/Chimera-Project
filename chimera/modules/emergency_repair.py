@@ -651,6 +651,30 @@ def do_emergency_repair() -> None:
                 _box_warn(f"AWG Multi-Node: {_mne}")
         # === END PATCH v2 ===
 
+    # ── DNSCrypt: поднять ДО AGH и пересборки конфига (v65) ───────────────
+    # Раньше dnscrypt рестартился ПОСЛЕ пересборки: генераторы конфига
+    # делают живую пробу AGH → dnscrypt → интернет, и при лежащем
+    # dnscrypt проба проваливалась — конфиг молча получал fallback
+    # DNSCrypt:5300 (AGH:53 терялся, хотя dnscrypt вот-вот поднялся бы).
+    # ИСПРАВЛЕНИЕ (историческое): проверяется не только флаг
+    # PARAM_USE_DNSCRYPT из state.json — DNSCrypt может использоваться
+    # Xray как DNS upstream даже при PARAM_USE_DNSCRYPT=False (Режим B +
+    # AWG), тогда без перезапуска получали "actively refused" на upstream.
+    _r_dc_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
+                        capture=True, check=False)
+    _dc_is_running = (_r_dc_active.stdout.strip() == "active")
+    if PARAM_USE_DNSCRYPT or _dc_is_running:
+        r_dc = _run(["systemctl", "is-enabled", "dnscrypt-proxy"],
+                    capture=True, check=False)
+        if r_dc.returncode == 0 or _dc_is_running:
+            _run(["systemctl", "stop",    "dnscrypt-proxy"], check=False, quiet=True)
+            _run(["systemctl", "start",   "dnscrypt-proxy"], check=False, quiet=True)
+            if _wait_service_active("dnscrypt-proxy", 10, silent=True):
+                _box_ok("dnscrypt-proxy запущен")
+            else:
+                _box_warn("dnscrypt-proxy не запустился")
+            time.sleep(2)
+
     # ── AdGuardHome: поднять ДО пересборки конфига ────────────────────────────
     # В стеке «Xray → AGH(127.0.0.1:53) → DNSCrypt(5300)» генераторы конфига
     # делают health-check AGH (agh_probe.py) и переключают DNS Xray на :53
@@ -736,28 +760,6 @@ def do_emergency_repair() -> None:
         _box_row(f"  {DIM}Модуль mtproto не найден — Telemt tproxy пропуск{NC}")
     except Exception as _tp_e:
         _box_warn(f"Telemt tproxy: {_tp_e}")
-
-    # DNSCrypt
-    # ИСПРАВЛЕНИЕ: раньше проверялся только флаг PARAM_USE_DNSCRYPT из state.json.
-    # Но DNSCrypt мог быть запущен (и использоваться Xray как DNS upstream) даже
-    # при PARAM_USE_DNSCRYPT=False — например, в Режиме B + AWG, где DNSCrypt
-    # не всегда записывается в state.json. В таком случае после аварийного
-    # восстановления Xray пытался слать DNS через DNSCrypt, тот не был перезапущен
-    # и не имел корректного AWG-маршрута, что давало "actively refused" на DNS upstream.
-    _r_dc_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
-                        capture=True, check=False)
-    _dc_is_running = (_r_dc_active.stdout.strip() == "active")
-    if PARAM_USE_DNSCRYPT or _dc_is_running:
-        r_dc = _run(["systemctl", "is-enabled", "dnscrypt-proxy"],
-                    capture=True, check=False)
-        if r_dc.returncode == 0 or _dc_is_running:
-            _run(["systemctl", "stop",    "dnscrypt-proxy"], check=False, quiet=True)
-            _run(["systemctl", "start",   "dnscrypt-proxy"], check=False, quiet=True)
-            if _wait_service_active("dnscrypt-proxy", 10, silent=True):
-                _box_ok("dnscrypt-proxy запущен")
-            else:
-                _box_warn("dnscrypt-proxy не запустился")
-            time.sleep(2)
 
     # Запуск Xray
     # v56 (start-limit-fix): reset-failed обязателен перед каждым start —

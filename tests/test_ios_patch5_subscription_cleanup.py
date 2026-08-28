@@ -421,7 +421,11 @@ class TestSubscriptionMenuShowsIosUrl(unittest.TestCase):
         found = False
         for line in block.split("\n"):
             stripped = line.strip()
-            if 'url_ios = f"https://' in stripped and not stripped.startswith("#"):
+            # v65: после выноса схемы в url_base (подписка за TLS-фронтом)
+            # url_ios строится от url_base — сканируем оба паттерна.
+            ios_pattern = ('url_ios = f"https://' in stripped
+                           or 'url_ios = f"{url_base}' in stripped)
+            if ios_pattern and not stripped.startswith("#"):
                 found = True
                 break
         self.assertTrue(found,
