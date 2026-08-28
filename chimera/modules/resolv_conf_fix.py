@@ -99,6 +99,7 @@ _DNSCRYPT_SERVICE     = "dnscrypt-proxy.service"
 _LOCAL_DNS            = "127.0.0.1"
 _DNS_PORT             = 53       # стандартный DNS порт (glibc отправляет сюда)
 _IPTABLES_COMMENT     = "chimera-dns-fix"  # для идентификации правил при -D
+_STUB_RESOLV_CONF     = Path("/run/systemd/resolve/stub-resolv.conf")
 
 # AdGuard Home (AGH) — DNS-сервер Chimera на 127.0.0.1:53 поверх dnscrypt.
 # Когда AGH владеет :53, redirect 53→5300 НЕ нужен (и ВРЕДЕН — он ворует
@@ -1336,8 +1337,24 @@ def rollback_resolv_conf() -> Dict[str, Any]:
 
     state = _state_load()
     if not state.get("fixed"):
-        return {"ok": False, "method": None, "actions": [],
-                "warnings": [], "error": "фикс не был применён (state.fixed=False)"}
+        # v59 (инцидент server-ru): state-файл мог быть утерян/повреждён,
+        # а артефакты фикса — продолжать жить (drop-in chimera-dns.conf,
+        # бэкапы, persist-сервис, watchdog). Отказ в этой ситуации оставлял
+        # systemd-resolved без upstream после удаления стека → SERVFAIL.
+        # Если найден ХОТЯ БЫ ОДИН артефакт — откатываем безусловно.
+        _artifacts_left = (
+            _RESOLVED_DROPIN_FILE.exists()
+            or _BACKUP_RESOLV.exists()
+            or _PERSIST_SVC_PATH.exists()
+            or _WATCHDOG_TIMER_PATH.exists()
+            or _PERSIST_SCRIPT_PATH.exists()
+            or _WATCHDOG_SCRIPT_PATH.exists()
+        )
+        if not _artifacts_left:
+            return {"ok": False, "method": None, "actions": [],
+                    "warnings": [], "error": "фикс не был применён (state.fixed=False)"}
+        warnings.append("state.fixed=False, но найдены артефакты фикса — "
+                        "выполняю откат (анти-black-hole, v59)")
 
     # 1. Остановить persist-сервис
     ok_ds, err_ds = _disable_persist_service()
@@ -1407,6 +1424,233 @@ def rollback_resolv_conf() -> Dict[str, Any]:
     _ok("DNS откачен к прежнему состоянию")
     return {"ok": True, "method": "static_resolv_conf", "actions": actions,
             "warnings": warnings, "error": None}
+
+
+# =============================================================================
+#  v59: HARD RESTORE — безусловный откат DNS к состоянию чистой системы
+# =============================================================================
+# Инцидент v59 (server-ru): ПОЛНОЕ удаление Chimera (с AGH) убивало DNS.
+# Корневые причины, закрываемые этим блоком:
+#   1. rollback_resolv_conf() требует state.fixed=True — state-файл мог быть
+#      утерян/повреждён/не создан → откат тихо пропускался, а drop-in
+#      /etc/systemd/resolved.conf.d/chimera-dns.conf (DNS=127.0.0.1,
+#      FallbackDNS=<пусто>, Domains=~.) оставался жить: systemd-resolved
+#      гнал ВСЕ запросы в мёртвый 127.0.0.1:53 → SERVFAIL от 127.0.0.53.
+#   2. resolv.conf восстанавливался только при наличии бэкапа; без бэкапа —
+#      оставался nameserver 127.0.0.1 → black-hole.
+#   3. Откат никак не проверял, что DNS ФАКТИЧЕСКИ ожил.
+#   4. iptables-redirect удалялся только под заранее известный порт
+#      dnscrypt; правила с другим портом переживали удаление.
+_PUBLIC_FALLBACK_DNS: tuple = ("77.88.8.8", "1.1.1.1")
+
+
+def _iptables_sweep_comment(comment: str, chains: tuple = ("OUTPUT",),
+                            table: str = "nat") -> int:
+    """Удаляет ВСЕ правила таблицы с данным comment (любой порт/протокол).
+
+    Перечисляет правила через iptables -t <table> -S <chain>, находит строки
+    с comment и удаляет каждую через -D (полная спецификация правила —
+    надёжнее, чем reconstruct аргументов). Цикл до полного отсутствия.
+    Возвращает число удалённых правил.
+    """
+    removed = 0
+    for chain in chains:
+        for _ in range(20):  # защита от зацикливания
+            r = _run(["iptables", "-t", table, "-S", chain],
+                     capture=True, check=False)
+            if r.returncode != 0:
+                break
+            target = None
+            for line in (r.stdout or "").splitlines():
+                if comment in line and line.startswith("-A "):
+                    parts = line.split()
+                    if len(parts) < 3:
+                        continue
+                    # "-A OUTPUT -d 127.0.0.1/32 ..." → ("-D", chain, args)
+                    target = (parts[1], parts[2:])
+                    break
+            if not target:
+                break
+            _run(["iptables", "-t", table, "-D", target[0]] + target[1],
+                 quiet=True, check=False)
+            removed += 1
+    return removed
+
+
+def _probe_system_dns(host: str = "ya.ru") -> bool:
+    """Живая проба СИСТЕМНОГО резолва: getent → nsswitch → resolv.conf.
+
+    Это ровно тот путь, которым пользуются ping/curl/apt — если getent
+    проходит, сервер может резолвить.
+    """
+    try:
+        r = _run(["getent", "hosts", host], capture=True, check=False)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def hard_restore_clean_dns(probe_host: str = "ya.ru",
+                           keep_backups: bool = False) -> Dict[str, Any]:
+    """v59: БЕЗУСЛОВНЫЙ откат DNS к состоянию чистой системы.
+
+    Вызывается ТОЛЬКО при полном удалении стека Chimera (uninstall.py),
+    когда AGH/dnscrypt уже снесены. Отличия от rollback_resolv_conf():
+      • НЕ требует state.fixed=True (state мог быть утерян/повреждён);
+      • вычищает ВСЕ iptables-правила с comment «chimera-dns-fix»
+        (любой порт, а не только текущий порт dnscrypt);
+      • resolv.conf: бэкап → systemd-resolved stub (как на чистой
+        системе) → публичный DNS; «отравленный» бэкап (все NS локальные)
+        НЕ используется;
+      • живая проба getent после восстановления + автоматический
+        fallback на публичный DNS, если stub не ожил;
+      • при успехе удаляет бэкапы .chimera.bak (чистая система).
+
+    Возвращает {"ok": probe_ok, "method", "actions", "warnings",
+                "error": None, "probe_ok": probe_ok}.
+    """
+    actions: List[str] = []
+    warnings: List[str] = []
+
+    # ── 1. persist-сервис + watchdog OFF (идемпотентно, безусловно) ──────
+    try:
+        _disable_persist_service()
+        actions.append("chimera-dns-fix.service остановлен и удалён")
+    except Exception as e:
+        warnings.append(f"persist-сервис: {e}")
+    try:
+        _remove_dns_watchdog()
+        actions.append("chimera-dns-watchdog.timer остановлен и удалён")
+    except Exception as e:
+        warnings.append(f"watchdog: {e}")
+
+    # ── 2. iptables: вычистить ВСЕ redirect-правила chimera-dns-fix ──────
+    try:
+        n = _iptables_sweep_comment(_IPTABLES_COMMENT, chains=("OUTPUT",))
+        if n:
+            actions.append(f"удалено iptables redirect-правил (53→*): {n}")
+    except Exception as e:
+        warnings.append(f"iptables sweep: {e}")
+
+    # ── 3. drop-in systemd-resolved (ГЛАВНЫЙ DNS-killer после удаления) ──
+    if _RESOLVED_DROPIN_FILE.exists():
+        try:
+            _RESOLVED_DROPIN_FILE.unlink()
+            actions.append("удалён drop-in /etc/systemd/resolved.conf.d/chimera-dns.conf")
+        except Exception as e:
+            warnings.append(f"drop-in: {e}")
+
+    # ── 4. nsswitch.conf из бэкапа (вернуть `resolve` в hosts:) ──────────
+    if _BACKUP_NSSWITCH.exists():
+        try:
+            shutil.copy2(str(_BACKUP_NSSWITCH), str(_NSSWITCH_CONF))
+            actions.append("восстановлен /etc/nsswitch.conf из бэкапа")
+        except Exception as e:
+            warnings.append(f"nsswitch: {e}")
+
+    # ── 5. рестарт systemd-resolved (сбрасывает runtime per-link 127.0.0.1) ──
+    resolved_active = False
+    try:
+        r = _run(["systemctl", "is-active", "systemd-resolved"],
+                 capture=True, check=False)
+        resolved_active = (r.stdout or "").strip() == "active"
+    except Exception:
+        resolved_active = False
+    if resolved_active:
+        _run(["systemctl", "restart", "systemd-resolved"],
+             capture=True, check=False)
+        actions.append("systemd-resolved перезапущен")
+        _run(["resolvectl", "flush-caches"], capture=True, check=False)
+
+    # ── 6. /etc/resolv.conf: бэкап → stub → публичный DNS ────────────────
+    method: Optional[str] = None
+    if _BACKUP_RESOLV.exists():
+        try:
+            text = _BACKUP_RESOLV.read_text(errors="replace")
+            ns = [ln.split()[1] for ln in text.splitlines()
+                  if ln.strip().startswith("nameserver") and len(ln.split()) > 1]
+            external = [ip for ip in ns if not ip.startswith("127.")]
+            if ns and external:
+                if _RESOLV_CONF.is_symlink() or _RESOLV_CONF.exists():
+                    _RESOLV_CONF.unlink()
+                shutil.copy2(str(_BACKUP_RESOLV), str(_RESOLV_CONF))
+                actions.append("восстановлен /etc/resolv.conf из бэкапа "
+                               f"(NS: {', '.join(external)})")
+                method = "backup"
+            elif ns:
+                warnings.append("бэкап resolv.conf содержит только локальные "
+                                "NS — не используется (анти-black-hole)")
+        except Exception as e:
+            warnings.append(f"бэкап resolv.conf: {e}")
+
+    stub = _STUB_RESOLV_CONF
+    if method is None and resolved_active and stub.exists():
+        try:
+            if _RESOLV_CONF.is_symlink() or _RESOLV_CONF.exists():
+                _RESOLV_CONF.unlink()
+            _RESOLV_CONF.symlink_to(stub)
+            actions.append("/etc/resolv.conf → systemd-resolved stub "
+                           "(как на чистой системе)")
+            method = "stub"
+        except Exception as e:
+            warnings.append(f"resolv.conf → stub: {e}")
+
+    if method is None:
+        try:
+            if _RESOLV_CONF.is_symlink() or _RESOLV_CONF.exists():
+                _RESOLV_CONF.unlink()
+            content = "".join(f"nameserver {ip}\n"
+                              for ip in _PUBLIC_FALLBACK_DNS)
+            _RESOLV_CONF.write_text(content)
+            actions.append(f"/etc/resolv.conf → публичный DNS "
+                           f"({', '.join(_PUBLIC_FALLBACK_DNS)})")
+            method = "public"
+        except Exception as e:
+            warnings.append(f"resolv.conf → public: {e}")
+
+    # ── 7. живая проба + автоматический fallback на публичный DNS ────────
+    time.sleep(1.5)
+    probe_ok = _probe_system_dns(probe_host)
+    if not probe_ok:
+        try:
+            if _RESOLV_CONF.is_symlink() or _RESOLV_CONF.exists():
+                _RESOLV_CONF.unlink()
+            content = "".join(f"nameserver {ip}\n"
+                              for ip in _PUBLIC_FALLBACK_DNS)
+            _RESOLV_CONF.write_text(content)
+            actions.append("DNS-проба не прошла — /etc/resolv.conf → "
+                           f"публичный DNS ({', '.join(_PUBLIC_FALLBACK_DNS)})")
+            method = "public-fallback"
+            time.sleep(1.0)
+            probe_ok = _probe_system_dns(probe_host)
+        except Exception as e:
+            warnings.append(f"public fallback: {e}")
+
+    # ── 8. state + бэкапы ────────────────────────────────────────────────
+    _state_save({
+        "fixed": False, "method": None, "applied_at": None,
+        "backup_resolv": None, "backup_nsswitch": None,
+        "persist_service": False,
+        "rolled_back_at": datetime.now().isoformat(),
+        "hard_restored_at": datetime.now().isoformat(),
+    })
+    if probe_ok and not keep_backups:
+        try:
+            _BACKUP_RESOLV.unlink(missing_ok=True)
+            _BACKUP_NSSWITCH.unlink(missing_ok=True)
+            actions.append("бэкапы /etc/*.chimera.bak удалены (DNS жив)")
+        except Exception:
+            pass
+    elif not probe_ok:
+        warnings.append("DNS-прова не прошла — бэкапы /etc/*.chimera.bak "
+                        "сохранены для ручного восстановления")
+
+    if probe_ok:
+        _ok(f"hard_restore_clean_dns: системный DNS жив (method={method})")
+    else:
+        _err(f"hard_restore_clean_dns: DNS НЕ восстановлен (method={method})")
+    return {"ok": probe_ok, "method": method, "actions": actions,
+            "warnings": warnings, "error": None, "probe_ok": probe_ok}
 
 
 # =============================================================================
