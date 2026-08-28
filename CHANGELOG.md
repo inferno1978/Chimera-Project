@@ -2,6 +2,102 @@
 
 ---
 
+## FIX(ingress_geoip+dnscrypt_setup+aghome+xray_install+chain_nodes+ru_subnets): whitelist-баг «D» + гео-резистентный DNS для Entry в РФ (v67) — 28 августа 2026
+
+**СИМПТОМЫ (инцидент: Entry-нода в РФ, пул из 4 exit-нод):**
+```
+1) После чистой установки открываются только RU-ресурсы, иностранные — нет.
+2) После Главное меню → 5 → 2 → 5 (РФ подсети → direct) и 5 → G
+   (Блокировка входящих из РФ, IP внесён в whitelist «D»-кнопкой)
+   соединение полностью перестаёт проходить; в логах клиента (mihomo):
+   ERROR[0016] dns: exchange failed for mtalk.google.com. IN A:
+   dial tcp 132.243.230.231:443: i/o timeout
+```
+
+**КОРНЕВАЯ ПРИЧИНА №1 — whitelist получал IP САМОГО СЕРВЕРА (ingress_geoip.py):**
+Кнопка «D — Определить мой текущий IP автоматически» в меню whitelist (5 → G → 4)
+запрашивала `api.ipify.org` С САМОГО СЕРВЕРА → возвращался внешний IP СЕРВЕРА
+(в инциденте — 132.243.230.231), а не IP администратора. Администратор из РФ
+добавлял в whitelist бесполезный адрес → после включения блокировки его
+реальные пакеты на порт Xray DROPались ipset xray_ru_block (весь RIPE-список РФ)
+→ клиент не мог даже установить туннель → `dial tcp <server>:443: i/o timeout`
+(i/o timeout = firewall DROP, а не «connection refused»).
+
+**КОРНЕВАЯ ПРИЧИНА №2 — DNS-стек не переживает РФ-локацию Entry-ноды:**
+Режим B явно предусматривает Entry в РФ, но все DNS-дефолты были выбраны «как
+для зарубежного VPS»:
+  • DNSCrypt TOML: `bootstrap/fallback_resolvers = 1.1.1.1:53, 8.8.8.8:53`
+    (8.8.8.8:53 заблокирован РКН, 1.1.1.1:53 душится TSPU) и
+    `netprobe_address = 1.1.1.1:53` — netprobe из РФ фейлится, dnscrypt-proxy
+    решает «сети нет»;
+  • `server_names = cloudflare/google` — dns.google (DoH) заблокирован в РФ,
+    cloudflare ненадёжен;
+  • AGH `fallback_dns = 9.9.9.9:53, 1.1.1.1:53` — второй фолбэк мёртв из РФ;
+  • Xray `dns.servers` не имел ни одного живого fallback, достижимого из РФ
+    (1.1.1.1/8.8.8.8 стояли с `skipFallback: true` — инертны).
+Итог на РФ-Entry: DNS black-hole / мульти-секундные зависания резолва →
+`domainStrategy: IPIfNonMatch` вешал КАЖДОЕ доменное соединение (RU-домены
+матчатся geosite-правилами без резолва — потому «ру-ресурсы открываются,
+иностранные нет»). Пользователь ошибочно атрибутировал это AGH: на прежнем
+(зарубежном) сервере те же апстримы работали.
+
+**ИСПРАВЛЕНИЯ:**
+
+1. `ingress_geoip.py`:
+   • НОВОЕ `_detect_admin_ssh_ip()` — IP источника текущей SSH-сессии:
+     `$SSH_CLIENT`/`$SSH_CONNECTION` → `who -m` → `ss -tn '( sport = :22 )'`;
+     семейство-корректно (IPv4/IPv6 определяется автоматически);
+   • НОВОЕ `_server_own_ips()` — собственные адреса сервера;
+   • «D» теперь возвращает IP АДМИНИСТРАТОРА; если SSH-сессия не найдена —
+     внешний IP сервера показывается ТОЛЬКО как справка с явным «это НЕ ваш IP»;
+   • `_ingress_enable()`: аварийная страховка — IP текущей SSH-сессии
+     автоматически добавляется в whitelist до применения DROP (работает и при
+     вызовах из cron/CLI);
+   • Меню включения: если в whitelist нет рабочего IP — предлагается добавить
+     IP SSH-сессии (default=Y); записи, равные IP сервера, помечаются
+     предупреждением «не защищает ваш доступ».
+
+2. `dnscrypt_setup.py` (гео-резистентные дефолты TOML):
+   • `server_names` += `quad9-dnscrypt-ip4/ip6-nofilter-pri` — DNSCrypt-протокол
+     Quad9 (порт 8443, БЕЗ SNI) переживает DPI РФ и не отравляет ответы;
+     `lb_estimator` сам выбирает живой сервер (за рубежом — cloudflare/google);
+   • `bootstrap/fallback_resolvers = ['9.9.9.9:53', '77.88.8.8:53']` —
+     достижимы и из РФ, и из-за рубежа;
+   • `netprobe_address = '9.9.9.9:53'`.
+   Имена резолверов сверены со свежим списком
+   DNSCrypt/dnscrypt-resolvers `v3/public-resolvers.md`.
+
+3. `aghome_setup.py`: `AGH_FALLBACK_DNS = 9.9.9.9 + 149.112.112.112`
+   (два anycast Quad9 вместо мёртвого из РФ 1.1.1.1); `bootstrap_dns` аналогично.
+
+4. `xray_install.py` + `chain_nodes.py` (все генераторы конфигов, ветки
+   AGH-healthy и DNSCrypt-only): добавлен живой fallback
+   `{"address": "9.9.9.9", "skipFallback": False}` — последний рубеж,
+   срабатывает ТОЛЬКО при падении AGH+DNSCrypt (лучше открытый DNS,
+   чем black-hole для IPIfNonMatch-резолва).
+
+5. `ru_subnets.py`: перед применением РФ-подсетей — честное предупреждение
+   «Xray перезапустится, подключение оборвётся на 30-60 сек (загрузка
+   13000+ CIDR). Это НОРМАЛЬНО» — раньше плановый downtime принимали за поломку.
+
+**Верификация по документации:**
+  • Порядок Xray routing-правил — первое совпадение побеждает (docs:
+    xtls.github.io, Routing); правила РФ-подсетей вставляются в начало, но не
+    пересекаются с DNS-петлёй (loopback-правило выше по факту IP 127.0.0.1 не
+    входит в RIPE-список РФ);
+  • dnsscrypt-proxy: `fallback_resolvers` — только IP-резолверы для резолва
+    имён DoH-серверов; `netprobe_address` — проверка сети на старте (docs:
+    dnscrypt-proxy GitHub README);
+  • RF-блокировки: 8.8.8.8:53/dns.google — реестр РКН (2024), 1.1.1.1:53 —
+    троттлинг TSPU; Quad9 не фильтруется.
+
+**Тесты:** `tests/test_v67_admin_whitelist_geo_dns.py` — 14 кейсов
+(SSH-детекция IPv4/IPv6/приоритет ENV, авто-whitelist в `_ingress_enable`,
+отсечение IP сервера, quad9/9.9.9.9/77.88.8.8 в TOML, AGH fallback,
+Quad9-fallback в xray_install ×2 и chain_nodes ×4).
+
+---
+
 ## FIX(aghome+_core): выпуск LE-сертификата AGH — certbot без отвечающего HTTP:80 (v66) — 28 августа 2026
 
 **СИМПТОМ (инцидент: fresh-сервер, домен picaresque.space):**

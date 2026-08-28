@@ -548,6 +548,11 @@ def do_manage_ru_subnet_direct() -> None:
                 continue
             success(f"Получено {len(cidrs)} подсетей РФ")
             _ru_subnets_save(cidrs)
+            # v67: честное предупреждение о downtime — конфиг с 13000+ CIDR
+            # грузится 30-60 сек; без этого администратор принимает плановый
+            # разрыв за «опция сломала подключение».
+            warn("Применяем правила: Xray будет перезапущен — подключение "
+                 "оборвётся на 30-60 сек (загрузка 13000+ CIDR). Это НОРМАЛЬНО.")
             _ru_subnets_apply_to_xray(cidrs)
             input(f"{BLUE}Нажмите Enter...{NC}")
 
@@ -557,6 +562,8 @@ def do_manage_ru_subnet_direct() -> None:
                 warn(f"Файл не найден или пуст: {RU_SUBNETS_FILE}")
                 input(f"{BLUE}Нажмите Enter...{NC}")
                 continue
+            warn("Применяем правила: Xray будет перезапущен — подключение "
+                 "оборвётся на 30-60 сек (загрузка 13000+ CIDR). Это НОРМАЛЬНО.")
             _ru_subnets_apply_to_xray(cidrs)
             input(f"{BLUE}Нажмите Enter...{NC}")
 
