@@ -3241,6 +3241,31 @@ def _fp_from_state() -> str:
 #  chimera.modules.geo_files; импорт — в верхней секции этого файла.)
 
 
+def _logrotate_debug_ok(cfg_path: "Path") -> bool:
+    """Валидность logrotate-конфига через `logrotate --debug`.
+
+    v60: критерий — отсутствие строк 'error:' в выводе (реальная
+    невалидность конфига ВСЕГДА сопровождается 'error: <файл>:
+    <строка> ...'). Голый rc!=0 ненадёжен: часть сборок logrotate
+    возвращает ненулевой код на валидных конфигах (warning-строки,
+    отсутствующие логи с missingok) — инцидент переустановки
+    176.123.162.42: [WARN] «проверьте конфиг вручную: xray-heavy» на
+    валидном конфиге. Отсутствие logrotate в системе = не ошибка
+    конфига (пакет доустановится, конфиг уже корректен).
+    """
+    try:
+        r = _run(["logrotate", "--debug", str(cfg_path)],
+                 check=False, quiet=True)
+    except Exception:
+        return True
+    if r.returncode == 127:
+        # logrotate не установлен — конфиг не проверяем, но и не
+        # ругаемся: синтаксис генерируем сами.
+        return True
+    out = (r.stdout or "") + (r.stderr or "")
+    return not re.search(r'(?im)^\s*error\s*:', out)
+
+
 def setup_logrotate() -> None:
     """
     Настраивает logrotate для /var/log/xray/*.log и вспомогательных логов.
@@ -3334,16 +3359,31 @@ def setup_logrotate() -> None:
     """))
     LOGROTATE_XRAY_HEAVY.chmod(0o644)
 
-    # Проверяем синтаксис (не фатально — logrotate сам сообщит об ошибке)
-    r = _run(["logrotate", "--debug", str(LOGROTATE_XRAY)],
-             check=False, quiet=True)
-    if r.returncode != 0:
-        warn("logrotate: проверьте конфиг вручную: /etc/logrotate.d/xray")
-    else:
+    # v60: логи autoban/watchdog создаются позже их cron-скриптами —
+    # создаём пустые заранее: часть сборок logrotate в --debug возвращает
+    # rc!=0 на отсутствующих логах даже с missingok (инцидент
+    # переустановки 176.123.162.42: [WARN] «проверьте конфиг вручную»
+    # на полностью валидном xray-heavy).
+    for _lf in heavy_entries:
+        try:
+            _lp = Path(_lf)
+            if not _lp.exists():
+                _lp.touch()
+        except Exception:
+            pass
+
+    # Проверяем синтаксис: logrotate --debug валиден, если в выводе НЕТ
+    # строк 'error:' (реальная невалидность конфига всегда сопровождается
+    # 'error: <файл>: <строка> ...'). Голый rc!=0 ненадёжен — бывает и на
+    # валидных конфигах (warning-строки, особенности отдельных сборок).
+    if _logrotate_debug_ok(LOGROTATE_XRAY):
         success("logrotate настроен: /etc/logrotate.d/xray (daily, 14 дней, gzip)")
-    r2 = _run(["logrotate", "--debug", str(LOGROTATE_XRAY_HEAVY)],
-              check=False, quiet=True)
-    if r2.returncode != 0:
+    else:
+        warn("logrotate: проверьте конфиг вручную: /etc/logrotate.d/xray")
+    if _logrotate_debug_ok(LOGROTATE_XRAY_HEAVY):
+        success("logrotate настроен: /etc/logrotate.d/xray-heavy "
+                "(chimera/autoban/watchdog, daily, maxsize 50M)")
+    else:
         warn("logrotate: проверьте конфиг вручную: /etc/logrotate.d/xray-heavy")
     dim("  access.log + error.log: ежедневно, 14 архивов")
     dim("  autoupdate/geo-update:  еженедельно, 4 архива")
@@ -3489,22 +3529,11 @@ def do_full_install() -> None:
         PARAM_USE_AGHOME = False
     configure_firewall();           PROGRESS.update(5,  "Файрволл")
 
-    # Проверяем доступность порта снаружи — только предупреждение, не блокировка.
-    # Если провайдер управляет файрволом на уровне гипервизора (AEZA и др.),
-    # iptables правил скрипта может быть недостаточно.
-    try:
-        import socket as _sock
-        _s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
-        _s.settimeout(3)
-        _local_ip = _sock.gethostbyname(_sock.gethostname())
-        _res = _s.connect_ex((_local_ip, SERVER_PORT))
-        _s.close()
-        if _res != 0:
-            warn(f"Порт {SERVER_PORT}/tcp может быть недоступен снаружи.")
-            warn(f"Если клиент не подключается — откройте порт {SERVER_PORT}/tcp")
-            warn(f"в панели управления вашего провайдера.")
-    except Exception:
-        pass
+    # v60: убран ложный ранний чек «порт SERVER_PORT может быть недоступен
+    # снаружи» — он выполнялся ДО запуска xray (порт ещё не слушался) и
+    # проверял connect к IP hostname (на Ubuntu это 127.0.1.1), т.е. на
+    # чистой установке предупреждал ВСЕГДА. Реальная внешняя проверка
+    # портов уже есть в финальной «Проверке сетевой доступности».
 
     apply_network_optimizations();  PROGRESS.update(5,  "Оптимизация")
     install_xray();                 PROGRESS.update(10, "Xray")

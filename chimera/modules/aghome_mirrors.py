@@ -62,7 +62,21 @@ AGHOME_REPO  = "AdGuardHome"
 # блокировка). static.adtidy.org отдаёт latest — тег используется только
 # для GitHub-зеркал; при провале всех version-pinned URL fallback-канал
 # отдаст актуальный release.
-AGHOME_FALLBACK_TAG = "v0.107.62"
+# v60 (2026-08-28): v0.107.62 → v0.107.79 — синхронизировано с release-
+# каналом static.adtidy.org (проверено: отдаёт v0.107.79 от 2026-08-18;
+# инцидент переустановки 176.123.162.42 ставил устаревший v0.107.62).
+AGHOME_FALLBACK_TAG = "v0.107.79"
+
+#: Дополнительные GitHub-прокси, проверенные для release-ассетов
+#: AdGuardHome (2026-08-28, HTTP 200 + корректный Content-Length).
+#: НЕ входят в общий GITHUB_PROXY_HOSTS — тот список общесетевой и
+#: консервативен; AGH-специфичные хосты не должны влиять на загрузки
+#: других пакетов. ghproxy.net из общего списка в августе 2026 был
+#: недоступен — независимый набор повышает шансы на автоскачивание.
+_AGHOME_EXTRA_PROXY_HOSTS: tuple[str, ...] = (
+    "ghfast.top",
+    "gh.ddlc.top",
+)
 
 
 # ============================================================================
@@ -106,8 +120,20 @@ def get_aghome_mirrors(tag: str, arch: str = "amd64") -> list[str]:
             f"releases/download/{tag}/{filename}"
         )
 
+    # 2.5) v60: AGH-специфичные доп. прокси (проверены 2026-08-28,
+    #      отдают корректный tarball того же размера, что github.com)
+    for proxy_host in _AGHOME_EXTRA_PROXY_HOSTS:
+        if not proxy_host:
+            continue
+        urls.append(
+            f"https://{proxy_host}/https://github.com/{AGHOME_OWNER}/{AGHOME_REPO}/"
+            f"releases/download/{tag}/{filename}"
+        )
+
     # 3) Официальный CDN AdGuard — latest release-канал.
     #    Не зависит от GitHub вообще (главный fallback для РФ).
+    #    v60: поднят на позицию выше GitHub-latest — быстрее и стабильнее
+    #    прокси-хостов (Qrator CDN, Франкфурт).
     urls.append(f"https://static.adtidy.org/adguardhome/release/{filename}")
 
     # 4) GitHub Releases latest (без тега — редирект на последний release)

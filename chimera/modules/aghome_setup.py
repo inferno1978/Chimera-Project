@@ -1419,21 +1419,33 @@ def _unregister_aghome_ports() -> None:
 #  УСТАНОВКА
 # ============================================================================
 def _get_latest_agh_tag() -> str:
-    """Последний release-tag AGH из GitHub API (3 попытки)."""
-    for attempt in range(3):
-        try:
-            r = subprocess.run(
-                ["curl", "-fsSL", "--connect-timeout", "10",
-                 "https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest"],
-                capture_output=True, text=True, check=False, timeout=30)
-            if r.returncode == 0:
-                data = json.loads(r.stdout)
-                tag = data.get("tag_name", "")
-                if tag:
-                    return tag
-        except Exception:
-            pass
-        time.sleep(3)
+    """Последний release-tag AGH из GitHub API (3 раунда × 2 зеркала).
+
+    v60: api.github.com с РФ-сетей флапает с первого раза (инцидент
+    переустановки 176.123.162.42: «GitHub API недоступен» при живой
+    сети) — зеркалируем запрос через gh-прокси. Полный провал всех
+    попыток → вызывающий код использует pinned AGHOME_FALLBACK_TAG +
+    канал static.adtidy.org (не зависит от GitHub вообще).
+    """
+    _api_urls = [
+        "https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest",
+        "https://gh-proxy.com/https://api.github.com/repos/AdguardTeam/"
+        "AdGuardHome/releases/latest",
+    ]
+    for _attempt in range(3):
+        for api_url in _api_urls:
+            try:
+                r = subprocess.run(
+                    ["curl", "-fsSL", "--connect-timeout", "10", api_url],
+                    capture_output=True, text=True, check=False, timeout=30)
+                if r.returncode == 0:
+                    data = json.loads(r.stdout)
+                    tag = data.get("tag_name", "")
+                    if tag:
+                        return tag
+            except Exception:
+                pass
+        time.sleep(2)
     return ""
 
 
@@ -1580,6 +1592,10 @@ def _dns_probe_ok(timeout: int = 2) -> bool:
     мёртв. dig при наличии, иначе getent hosts (rc != 0 = не
     разрезолвился). Проверка «правила на месте» недостаточна —
     ok:true от фикса ≠ работающий DNS (инцидент v44).
+
+    ВНИМАНИЕ: это проба КОНКРЕТНОГО адреса 127.0.0.1:53. Критерий
+    «система вообще резолвит» — _system_dns_ok() (v60): на чистой
+    установке :53 свободен до старта AGH, и это НОРМА, а не авария.
     """
     if shutil.which("dig"):
         try:
@@ -1600,8 +1616,96 @@ def _dns_probe_ok(timeout: int = 2) -> bool:
         return False
 
 
+def _system_dns_ok(timeout: int = 4) -> bool:
+    """Резолвит ли СИСТЕМА имена — фактический запрос через nsswitch.
+
+    Путь системного разрешения: nsswitch.conf → resolv.conf. Это может
+    быть DNS провайдера (чистая установка), stub 127.0.0.53, AGH на
+    127.0.0.1:53 или 127.0.0.1 + redirect на dnscrypt — ЛЮБОЙ рабочий
+    путь проходит проверку.
+
+    v60 (инцидент переустановки 176.123.162.42): старый критерий
+    «127.0.0.1:53 обязан отвечать» на чистой системе (AGH ещё не
+    ставился, dnscrypt на :5300) давал ложный «DNS мёртв», а
+    «восстановление» ЛОМАЛО рабочий DNS провайдера, направляя
+    resolv.conf на ещё не готовый dnscrypt — все зеркала AGH
+    «падали» из-за мёртвого резолва.
+
+    getent hosts — честный системный путь (nsswitch + resolv.conf);
+    dig github.com без @server — fallback при отсутствии getent.
+    """
+    try:
+        r = subprocess.run(["getent", "hosts", "github.com"],
+                           capture_output=True, text=True,
+                           timeout=timeout + 2, check=False)
+        return r.returncode == 0
+    except Exception:
+        pass
+    if shutil.which("dig"):
+        try:
+            r = subprocess.run(
+                ["dig", "github.com", f"+time={timeout}", "+tries=1"],
+                capture_output=True, text=True,
+                timeout=timeout + 3, check=False)
+            return r.returncode == 0
+        except Exception:
+            return False
+    return False
+
+
+def _probe_dns_with_settle(attempts: int = 3, interval: float = 2.0) -> bool:
+    """Системная DNS-проба с ожиданием готовности резолвера.
+
+    dnscrypt-proxy и AGH после (ре)старта нуждаются в секундах на
+    bootstrap (DoH/TLS handshake, prefetch сертификатов) — мгновенная
+    одиночная проба после изменений даёт ложный «мёртв» (инцидент
+    переустановки 176.123.162.42: redirect был поставлен верно, но
+    dnscrypt ещё поднимался, dig с +time=2 не дождался).
+    """
+    for i in range(attempts):
+        if i:
+            time.sleep(interval)
+        if _system_dns_ok():
+            return True
+    return False
+
+
+def _emergency_public_dns_fallback() -> bool:
+    """Последняя ступень: публичный DNS напрямую в resolv.conf.
+
+    Локальные резолверы (AGH / dnscrypt / redirect) не поднялись —
+    живой системный DNS через публичные серверы лучше мёртвого
+    127.0.0.1: установка продолжится, а resolv-фикс / финализация
+    AGH позже вернут системный DNS на локальный резолвер.
+    """
+    try:
+        resolv = Path("/etc/resolv.conf")
+        if resolv.is_symlink():
+            resolv.unlink()
+        elif resolv.exists():
+            bak = resolv.parent / "resolv.conf.pre-public-fallback.bak"
+            if not bak.exists():
+                shutil.copy2(str(resolv), str(bak))
+        resolv.write_text(
+            "# Chimera: аварийный DNS-fallback — локальные резолверы "
+            "недоступны\n"
+            "# Восстановление локального пути: Сеть → A (resolv-фикс)\n"
+            "nameserver 1.1.1.1\n"
+            "nameserver 8.8.8.8\n"
+            "options timeout:2 attempts:2\n"
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _dns_blackhole_help_box() -> None:
-    """Красный бокс с ручными командами — DNS мёртв даже после авто-фикса."""
+    """Красный бокс с ручными командами — DNS мёртв даже после авто-фикса.
+
+    v60: два независимых пути оживления — публичный DNS напрямую
+    (быстрее всего, не зависит от локального стека) и локальный
+    redirect на dnscrypt:5300.
+    """
     core = _core_module()
     RED, CYAN, DIM, NC = core.RED, core.CYAN, core.DIM, core.NC
     _box_top, _box_row, _box_bottom = (
@@ -1609,8 +1713,15 @@ def _dns_blackhole_help_box() -> None:
     print()
     _box_top(f"{RED}⚠ DNS НЕ ОТВЕЧАЕТ — ручное восстановление{NC}")
     _box_row()
-    _box_row(f"  {DIM}dnscrypt-proxy слушает 127.0.0.1:5300 — перенаправьте{NC}")
-    _box_row(f"  {DIM}локальный :53 на него (оба протокола, glibc шлёт UDP):{NC}")
+    _box_row(f"  {DIM}Вариант 1 — публичный DNS напрямую (не зависит от{NC}")
+    _box_row(f"  {DIM}локального стека, glibc шлёт UDP):{NC}")
+    _box_row()
+    _box_row(f"  {CYAN}printf 'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n' "
+             f"> /etc/resolv.conf{NC}")
+    _box_row(f"  {CYAN}getent hosts github.com{NC}")
+    _box_row()
+    _box_row(f"  {DIM}Вариант 2 — локальный DNSCrypt (слушает 127.0.0.1:5300),{NC}")
+    _box_row(f"  {DIM}перенаправьте локальный :53 на него (оба протокола):{NC}")
     _box_row()
     _box_row(f"  {CYAN}iptables -t nat -A OUTPUT -p udp -d 127.0.0.1 \\{NC}")
     _box_row(f"  {CYAN}  --dport 53 -j REDIRECT --to-ports 5300{NC}")
@@ -1623,30 +1734,48 @@ def _dns_blackhole_help_box() -> None:
 
 
 def _ensure_system_dns_alive(reason: str = "") -> bool:
-    """Гарантия живого системного DNS (127.0.0.1:53) в ЛЮБОЙ фазе AGH.
+    """Гарантия живого СИСТЕМНОГО DNS в ЛЮБОЙ фазе AGH.
 
-    Инцидент v44 (vds13195): удаление AGH и провал скачивания оставляли
-    систему с мёртвым DNS — GitHub «недоступен», git pull мёртв,
-    повторная установка невозможна. DNS обязан быть жив в КАЖДОЙ точке
-    выхода из install/uninstall/wizard-фаз.
+    v60: критерий живости — СИСТЕМА резолвит имена (getent через
+    nsswitch → resolv.conf), а НЕ «127.0.0.1:53 отвечает». Системный
+    DNS может идти через DNS провайдера (чистая установка — :53
+    свободен до старта AGH), через AGH на :53 или через redirect на
+    dnscrypt — ЛЮБОЙ рабочий путь проходит проверку МОЛЧА. Старая
+    проверка только 127.0.0.1:53 на чистой системе давала ложный
+    «DNS мёртв», а «восстановление» ломало рабочий DNS провайдера,
+    направляя resolv.conf на ещё не готовый dnscrypt (инцидент
+    переустановки 176.123.162.42: все зеркала AGH «упали» из-за
+    мёртвого резолва, [WARN] AGH: КРИТИЧНО на полностью рабочей
+    системе).
 
-    Лестница восстановления (после каждой ступени — фактический probe):
+    Инцидент v44 (vds13195) остаётся покрыт: если система НЕ
+    резолвит (resolv.conf → мёртвый 127.0.0.1 без слушателя после
+    удаления AGH), поднимается лестница:
       1. Полный resolv-фикс (resolv.conf + nsswitch + redirect обоих
          протоколов + persist-сервис; AGH-aware — не мешает живому AGH).
-      2. Рестарт AdGuardHome, если он активен и держит :53 (финализиро-
-         ванное состояние, AGH мог подвиснуть).
-      3. Рестарт dnscrypt-proxy (если не активен) + прямые iptables
-         redirect 53→порт dnscrypt (оба протокола).
-    Возвращает True только если DNS реально отвечает.
+      2. Рестарт AdGuardHome, если он держит :53 (AGH мог подвиснуть).
+      3. Рестарт dnscrypt-proxy + прямые iptables redirect 53→порт
+         dnscrypt (оба протокола).
+      4. Публичный DNS напрямую в resolv.conf (последний рубеж,
+         локальный стек не поднимается вообще).
+    После каждой ступени — системная проба с settle-задержкой
+    (dnscrypt/AGH поднимаются не мгновенно).
+    Возвращает True только если система реально резолвит.
     """
     core = _core_module()
     info, warn = core.info, core.warn
     why = f" ({reason})" if reason else ""
 
-    if _dns_probe_ok():
+    # ── Фаза 0: система резолвит — молча выходим ──────────────────────
+    # Чистая установка: DNS провайдера жив, :53 пуст — это НОРМА.
+    if _system_dns_ok():
+        return True
+    time.sleep(1)
+    if _system_dns_ok():
+        # флап-защита: единичный таймаут ≠ мёртвый DNS
         return True
 
-    warn(f"AGH: системный DNS на 127.0.0.1:53 не отвечает{why} — восстанавливаю")
+    warn(f"AGH: системный DNS не резолвит{why} — восстанавливаю")
 
     # ── Ступень 1: полный resolv-фикс ──────────────────────────────────
     try:
@@ -1658,7 +1787,7 @@ def _ensure_system_dns_alive(reason: str = "") -> bool:
             warn(f"AGH: resolv-фикс: {result.get('error')}")
     except Exception as e:
         warn(f"AGH: resolv-фикс недоступен: {e}")
-    if _dns_probe_ok():
+    if _probe_dns_with_settle():
         info("AGH: DNS восстановлен (resolv-фикс)")
         return True
 
@@ -1668,7 +1797,7 @@ def _ensure_system_dns_alive(reason: str = "") -> bool:
                                                proc="AdGuardHome"):
             subprocess.run(["systemctl", "restart", AGH_SERVICE_NAME],
                            capture_output=True, check=False)
-            if _wait_service(AGH_SERVICE_NAME, 20) and _dns_probe_ok():
+            if _wait_service(AGH_SERVICE_NAME, 20) and _probe_dns_with_settle():
                 info("AGH: DNS восстановлен (рестарт AdGuardHome)")
                 return True
     except Exception:
@@ -1691,8 +1820,17 @@ def _ensure_system_dns_alive(reason: str = "") -> bool:
                     capture_output=True, check=False)
     except Exception as e:
         warn(f"AGH: прямое восстановление: {e}")
-    if _dns_probe_ok():
+    if _probe_dns_with_settle():
         info("AGH: DNS восстановлен (прямой iptables redirect)")
+        return True
+
+    # ── Ступень 4 (v60): публичный DNS напрямую ────────────────────────
+    # Локальный стек не поднимается — живой публичный DNS лучше
+    # мёртвого 127.0.0.1: установка продолжится (AGH скачается),
+    # локальный резолвер вернёт resolv-фикс/финализация.
+    if _emergency_public_dns_fallback() and _probe_dns_with_settle():
+        info("AGH: DNS восстановлен (публичный DNS напрямую — локальные "
+             "резолверы недоступны)")
         return True
 
     warn("AGH: КРИТИЧНО — DNS по-прежнему мёртв после авто-восстановления")
@@ -1987,7 +2125,10 @@ def install_aghome(interactive: bool = True) -> bool:
         info(f"AGH: {tag} (linux_{agh_arch})")
         from chimera.modules.download_manager import fetch_package
         from chimera.modules.aghome_packages import AGHOME_SPEC
-        if not fetch_package(AGHOME_SPEC, tag=tag, arch=agh_arch):
+        # progress_label: попытки зеркал видны пользователю (раньше все
+        # 6 URL молча перебирались — «Не удалось скачать» без диагноза).
+        if not fetch_package(AGHOME_SPEC, tag=tag, arch=agh_arch,
+                             progress_label="AGH"):
             warn("AGH: не удалось скачать AdGuardHome — установка прервана")
             warn("AGH: скачайте tar.gz вручную в /root/ и повторите (Сеть → A)")
             # Ручное скачивание тоже требует DNS — гарантируем живой
@@ -2076,8 +2217,10 @@ def _wait_wizard_completed(timeout_sec: int, poll_sec: float = 5.0) -> bool:
             if _yaml_has_users(text):
                 print()
                 return True
-        # DNS black-hole недопустим даже во время ожидания мастера
-        if not _dns_probe_ok():
+        # DNS black-hole недопустим даже во время ожидания мастера.
+        # v60: системная проба (nsswitch-путь), а не только 127.0.0.1:53 —
+        # wizard-фаза может идти и на DNS провайдера (чистая установка).
+        if not _system_dns_ok():
             try:
                 core.warn("AGH: DNS не отвечает во время мастера — чиню")
             except Exception:
