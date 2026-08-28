@@ -380,7 +380,10 @@ class TestBuildSections(unittest.TestCase):
         self.assertIn("cache_size: 4194304", s)
         self.assertIn("cache_optimistic: true", s)
         self.assertIn("enable_dnssec: true", s)
-        self.assertIn("ratelimit: 20", s)
+        # v65: ratelimit 0 (тихие дропы лимита убивали DNS Xray — EOF-шторм)
+        self.assertIn("ratelimit: 0", s)
+        self.assertNotIn("ratelimit: 20", s)
+        self.assertIn("upstream_timeout: 3s", s)
         self.assertIn("serve_plain_dns: true", s)
 
     def test_dns_section_no_public_ip(self):
@@ -1231,7 +1234,7 @@ schema_version: 29
 
         # 2. канонические секции применены
         self.assertIn("- 127.0.0.1:5300", text)          # upstream → dnscrypt
-        self.assertIn("ratelimit: 20", text)
+        self.assertIn("ratelimit: 0", text)              # v65: без лимита
         self.assertIn("cache_size: 4194304", text)
         self.assertIn("address: 0.0.0.0:3000", text)      # v48: TLS-режим биндит 0.0.0.0 (UFW снаружи закрыт)
         self.assertIn("port_https: 30443", text)         # DoH+UI TLS

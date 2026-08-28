@@ -203,7 +203,7 @@ class TestNoRegressionAddDelete(unittest.TestCase):
         with patch.object(users_manager, "_users_get_config", return_value=self._cfg_path), \
              patch.object(users_manager, "_users_apply_config", lambda cfg: None), \
              patch.object(users_manager, "_core_module", return_value=self._fake_core), \
-             patch("builtins.input", side_effect=["charlie@example.com"]):
+             patch("builtins.input", side_effect=["charlie@example.com", "y"]):
             try:
                 users_manager.do_user_delete()
             except Exception:
@@ -469,7 +469,7 @@ class TestDeleteWithAndWithoutShadow(unittest.TestCase):
                  patch.object(users_manager, "_users_apply_config", lambda cfg: None), \
                  patch.object(users_manager, "_core_module", return_value=self._fake_core), \
                  patch.object(Path, "unlink", lambda self, *a, **kw: None), \
-                 patch("builtins.input", side_effect=["alice@example.com"]):
+                 patch("builtins.input", side_effect=["alice@example.com", "y"]):  # v65: подтверждение удаления
                 try:
                     users_manager.do_user_delete()
                 except Exception:
@@ -497,7 +497,7 @@ class TestDeleteWithAndWithoutShadow(unittest.TestCase):
                  patch.object(users_manager, "_users_apply_config", lambda cfg: None), \
                  patch.object(users_manager, "_core_module", return_value=self._fake_core), \
                  patch.object(Path, "unlink", lambda self, *a, **kw: None), \
-                 patch("builtins.input", side_effect=["alice@example.com"]):
+                 patch("builtins.input", side_effect=["alice@example.com", "y"]):  # v65: подтверждение удаления
                 try:
                     users_manager.do_user_delete()
                 except Exception:
@@ -750,11 +750,15 @@ class TestStep0Closure(unittest.TestCase):
         для каждого пользователя. Это защищает от случайного отката к
         состоянию, когда iOS-маршрут был закомментирован (патч №2)."""
         src = (_PROJECT_ROOT / "chimera" / "modules" / "subscription.py").read_text()
-        # Активная (не закомментированная) строка с url_ios = f"https://
+        # Активная (не закомментированная) строка с url_ios
+        # v65: после выноса схемы в url_base (подписка за TLS-фронтом)
+        # url_ios строится от url_base — сканируем оба паттерна.
         found = False
         for line in src.split("\n"):
             stripped = line.strip()
-            if 'url_ios = f"https://' in stripped and not stripped.startswith("#"):
+            ios_pattern = ('url_ios = f"https://' in stripped
+                           or 'url_ios = f"{url_base}' in stripped)
+            if ios_pattern and not stripped.startswith("#"):
                 found = True
                 break
         self.assertTrue(found,

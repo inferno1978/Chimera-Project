@@ -2,6 +2,160 @@
 
 ---
 
+## FIX(aghome+agh_probe+emergency_repair+uninstall+health_report): RATelimit-баг AGH — тихий DROP DNS Xray → EOF-шторм у клиентов (v65) — 28 августа 2026
+
+**КОРЕННАЯ ПРИЧИНА инцидента «клиент сыпал EOFами, убрал AGH — всё
+заработало», доказанная ЭМПИРИЧЕСКИ на живом AdGuardHome v0.107.79
+(бинарник запущен с генерируемым Chimera yaml, blast-тесты через
+python-сокеты + замеры на живом Xray-core 26.3.27):**
+
+  1. `dns.ratelimit: 20` + `ratelimit_subnet_len_ipv4: 24` → весь
+     DNS-трафик Xray (единственный клиент 127.0.0.1) делил ОДИН бакет
+     20 rps. Замер: blast из 50 запросов ≈ за 1с → ровно 20 ответов,
+     30 ТИХО ДРОПНУТЫ.
+  2. Тихий DROP — это не REFUSED: ни записи в лог, ни в querylog
+     (ratelimit-мидлварь стоит ПЕРЕД querylog) — «AGH работает» по
+     всем метрикам, а DNS клиентов умирает.
+  3. `ratelimit_whitelist` — МЁРТВОЕ ПОЛЕ в v0.107.79: парсится,
+     round-trip'ится в yaml, но НИКОГДА не подключается к
+     ratelimit-мидлвари (newRatelimitMw не передаёт AllowlistAddrs).
+     Вайтлистить 127.0.0.1 НЕЛЬЗЯ. CIDR-запись — FATAL при старте.
+  4. Xray-core за каждый дроп-lookup платит 4.002с (замер; REFUSED →
+     0.5мс): страница браузера = 20-60 DNS-запросов → бо́льшая часть
+    lookup'ов упирается в 4с-таймаут до fallback → соединения
+     рвутся/висят → EOF-шторм. Проба agh_probe_resolve (1-2 qps)
+     этого НЕ ловила — «AGH здоров».
+  5. `upstream_timeout: 10s` > 4с-таймаута Xray: подвисший upstream
+     держал запрос дольше, чем Xray готов ждать → тот же 4с black-hole.
+     Единственный рабочий фикс — `ratelimit: 0` (Ratelimit==0 →
+     PassThrough, подтверждено замером 50/50) + `upstream_timeout: 3s`.
+
+### 1. build_dns_section: ratelimit 0 + upstream_timeout 3s
+
+Генератор канонической dns:-секции теперь пишет `ratelimit: 0`
+(публичный :53 закрыт в UFW — лимит от open-resolver не нужен) и
+`upstream_timeout: 3s` (SERVFAIL от AGH приходит ДО таймаута Xray →
+мгновенный fallback вместо 4с пенальти).
+
+### 2. aghome_fix_ratelimit_if_needed(): санация ЖИВЫХ установок
+
+Проблема: у уже развёрнутых серверов yaml содержит ratelimit: 20.
+Новая функция санации вызывается из agh_dns_available() ПОСЛЕ успешной
+end-to-end пробы (т.е. из ВСЕХ 4 генераторов конфига + resolv-фикса +
+аварийного восстановления): правит ТОЛЬКО строки `ratelimit:` /
+`upstream_timeout:` ВНУТРИ dns:-секции (users, фильтры, upstream, tls
+не трогает), бэкап `.pre-ratelimit-fix.bak`, рестарт + ожидание
+active и :53. iptables НЕ трогает. Провал (AGH не поднялся после
+патча) → восстановление redirect 53→5300 + fallback генераторов на
+DNSCrypt — система не остаётся в худшем состоянии.
+
+### 3. _agh_core_port_conflicts(): защита от портов-коллизий AGH ↔ Xray
+
+AGH биндит фиксированные 53/853/30443 и стартует ДО xray
+(unit: Before=xray.service): коллизия = AGH отбирает порт → xray не
+может забиндиться → EOF у ВСЕХ клиентов. Новый guard проверяет
+глобали установки + state.json (server_port, awg_client_listen_port)
++ живых слушателей ss (AGH и resolved-stub исключаются):
+  • install_aghome: Xray на :53 → установка AGH отменена ДО
+    скачивания (раньше — молча, потом AGH не мог забиндиться);
+  • finalize_aghome_config: :53 занят → финализация отменена, живой
+    конфиг не тронут; DoH/DoT/DoQ при коллизии отключаются; занятый
+    Web-порт сдвигается (_find_free_web_port — bind web = FATAL
+    crash-loop для AGH).
+
+### 4. emergency_repair: dnscrypt поднимается ДО AGH и пересборки
+
+Раньше dnscrypt рестартился ПОСЛЕ пересборки конфига: генераторы
+делают живую пробу AGH → dnscrypt → интернет, и при лежащем dnscrypt
+проба проваливалась — конфиг молча получал fallback DNSCrypt:5300
+(AGH:53 терялся, хотя dnscrypt вот-вот поднялся бы). Теперь порядок:
+dnscrypt → AGH (agh_ensure_running) → пересборка → users/RIPE/AS →
+tproxy → xray → nginx.
+
+### 5. uninstall: мёртвый детект AGH + утечка UFW-портов
+
+`_close_chimera_ports` проверял `/opt/AdGuardHome/AdGuardHome` —
+этот путь НЕ СУЩЕСТВУЕТ НИКОГДА (бинарник в /usr/local/bin, в /opt
+только yaml/data) → stop/disable AGH и закрытие UFW-портов aghome_*
+были мёртвым кодом: после полного удаления Chimera порты
+3000/30443/853 оставались открытыми в UFW навсегда. Теперь детект по
+бинарнику/unit/yaml + _remove_aghome_full вызывает
+_unregister_aghome_ports() (закрывает Web UI/DoH/DoT/DoQ).
+
+### 6. health_report cron: живая проба резолва AGH
+
+Cron-скрипт ежедневного отчёта проверял только systemctl is-active +
+владение :53 — «AGH активен, но не резолвит» (upstream мёртв,
+SERVFAIL на всё) репортился как ✅. Теперь добавлена живая проба
+dig @127.0.0.1 (fallback getent) + оба имени юнита
+(AdGuardHome/adguardhome — agh_probe.AGH_UNIT_CANDIDATES).
+
+### 7. olcrtc: agh_dns_available(autostart=True)
+
+Выравнивание с 4 генераторами Xray (v64): остановленный AGH
+поднимается перед пробой.
+
+### 8. mtproto._get_public_ip: восстановлена семантика _is_direct_ip
+
+Регрессия 6af113b: фиксируя «NAT-сервера отдавали приватный IP в
+tg:// ссылках», логика NAT-vs-Mode-B целиком перешла на
+`_is_public_ip(local_ip)` — SDN-сценарий (внешний IP забинден на
+машине, отличается от primary) потерял обработку. Комбинированная
+логика v65: (1) внешний == локальный → локальный; (2) внешний
+забинден (`_is_direct_ip`) → ВНЕШНИЙ (SDN 1:1 / доп. адрес); (3)
+локальный RFC1918/CGNAT/loopback (`_is_nat_local_ip`, TEST-NET
+исключён — стенды) → ВНЕШНИЙ (инцидент 6af113b сохранён); (4) иначе
+локальный публичный + внешний чужой → Mode B → ЛОКАЛЬНЫЙ.
+
+### 9. panel_nginx_front_remove: NameError ронял удаление панели
+
+`warn`/`CYAN`/`NC`/`YELLOW` использовались в шаге port_registry, но
+НЕ были определены в функции: `info(f"{CYAN}…")` → NameError,
+except-обработчик звал `warn(f"{YELLOW}…")` → ВТОРОЙ NameError,
+уже неперехваченный → удаление прямого доступа (Telemt Panel /
+User Portal) в продакшене падало с traceback ПОСЛЕ успешного
+закрытия порта (vhost удалён, порт закрыт — частичное состояние +
+крах TUI). Найдено герметичным тестом (раньше тест падал раньше —
+на отсутствии nginx в песочнице, маскируя баг).
+
+### 10. Герметичность тестов + актуализация под осознанные фичи
+
+- test_telemt_panel: nginx-фронт исполняется по-настоящему (именно
+  он зовёт port_register/ufw), но ВСЕ побочные эффекты замоканы
+  (сертификат, nginx -t, curl, vhost-файлы) — тест больше не
+  требует root/nginx в песочнице;
+- test_mtproto: stateful-мок iptables считает и `-A` (APPEND) —
+  f794c8f перевёл RETURN-правила с -I на -A (RETURN обязан стоять
+  ПОСЛЕ REDIRECT TG-подсетей), мок не заметил;
+- test_ios_shadow_client: сканер url_ios понимает оба паттерна
+  (`url_ios = f"https://…` и `url_ios = f"{url_base}/…` после выноса
+  схемы в url_base); delete-тесты отвечают «y» на подтверждение
+  удаления (фича безопасности «не удалить юзера случайно»);
+- test_ios_patch5: тот же двойной паттерн url_ios.
+
+### Тесты
+
+NEW tests/test_v65_agh_ratelimit_heal.py — 24: build_dns_section ×3
+(ratelimit 0/timeout 3s/whitelist без CIDR/parallel); санация ×6
+(патч 20→0+10s→3s только в dns:-секции, users/upstream/schema не
+тронуты, бэкап, рестарт; no-op при санитарном конфиге; no-op без
+yaml; провал → False; iptables не трогается); конфликты портов ×5
+(Xray на :53 через state.json/глобали, resolved-stub и сам AGH не
+конфликт, :30443/:853 детект); _find_free_web_port ×1; хук
+agh_dns_available ×4 (санация на успехе, провал → fallback +
+redirect восстановлен, импорт-сбой не рвёт пробу, без санации при
+провале пробы); install-guard ×1 + source-order ×1; emergency_repair
+порядок ×1; uninstall-детект ×2; cron-проба ×1.
+Обновлены: test_aghome_setup (ratelimit: 0 + upstream_timeout: 3s),
+test_v62 (мок dig для живой пробы cron-скрипта), test_mtproto
+(-A-мок), test_ios_shadow_client (url_base-паттерн + «y»-подтверждение),
+test_ios_patch5 (url_base-паттерн), test_telemt_panel (герметичность).
+
+Полная регрессия: 5514 passed + 1319 subtests + 9 skipped —
+0 failures (223 файла, чанки 112+111).
+
+---
+
 ## FIX(ingress_geoip+reconfigure)+FEAT(agh-autostart): блокировка входящих РФ следует за портом Xray + AGH поднимается при пересборке + чистка дубликатов iptables (v64) — 28 августа 2026
 
 **Диагностика инцидента (bright-lynx после переустановки): серверная
