@@ -317,7 +317,9 @@ def install_xray() -> None:
             XRAY_INSTALLER_SPEC, print_hint_on_failure=False,
         )
     except Exception as ex:
-        warn(f"Официальный установщик недоступен: {ex}")
+        # v60: метод 2 (прямой zip + SHA256) — штатный разработанный
+        # fallback, деградации нет — info вместо warn.
+        info(f"Официальный установщик недоступен ({ex}) — перехожу к прямой загрузке")
         installer_ok = False
 
     if installer_ok:
@@ -334,7 +336,8 @@ def install_xray() -> None:
             xray_installed = True
             success("Xray установлен через официальный установщик")
     else:
-        warn("Официальный установщик недоступен")
+        # v60: штатный fallback на метод 2 — info вместо warn.
+        info("Официальный установщик недоступен — перехожу к прямой загрузке")
 
     # Метод 2: прямой zip с GitHub + SHA256 (несколько зеркал)
     if not xray_installed:
@@ -369,7 +372,8 @@ def install_xray() -> None:
                     break
             if latest_tag:
                 break
-            warn(f"  latest: попытка {attempt}/3 не удалась, повтор...")
+            # v60: транзиентный флап API, ретрай внутри цикла — info.
+            info(f"  latest: попытка {attempt}/3 не удалась, повтор...")
             time.sleep(2)
 
         # ── Шаг B: stable недоступен — предлагаем выбор из prerelease ────────
@@ -682,7 +686,9 @@ def _detect_xhttp_mode_support() -> None:
             if major >= 25:
                 XHTTP_MODE_SUPPORTED = False
                 setattr(core, "XHTTP_MODE_SUPPORTED", XHTTP_MODE_SUPPORTED)
-                warn(f"Xray {ver_line.split()[1]} — date-based версия, "
+                # v60: date-based нумерация — НОРМА для актуальных релизов
+                # Xray (25.x.x+); поле корректно опускается — info вместо warn.
+                info(f"Xray {ver_line.split()[1]} — date-based версия, "
                      "поле \"mode\" в xhttpSettings не поддерживается, будет опущено")
                 return
             # Семантическая версия (1.x / 2.x) — поддерживает mode
