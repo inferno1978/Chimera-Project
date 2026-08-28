@@ -620,7 +620,9 @@ def generate_xray_config_chain_entry() -> None:
 
     # AdGuardHome health-check (см. agh_probe.py): AGH жив и держит
     # 127.0.0.1:53 → Xray → AGH → DNSCrypt; сбой проверки → DNSCrypt:5300.
-    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info, log_warn=warn)
+    # v64 (agh-autostart): установлен, но остановлен → поднимаем перед пробой.
+    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info,
+                                         log_warn=warn, autostart=True)
 
     if agh_ok:
         dns_servers = [
@@ -1973,7 +1975,12 @@ def generate_xray_config_chain_entry_multi() -> None:
     # v55 (agh_probe): health-check углублён — живая проба резолва
     # (end-to-end AGH → DNSCrypt → интернет) + нейтрализация iptables
     # redirect 53→5300. Сбой любого шага → прежний путь DNSCrypt:5300.
-    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info, log_warn=warn)
+    # v64 (agh-autostart): AGH установлен, но остановлен → ПОДНИМАЕМ его
+    # перед пробой («AGH должен запускаться и слушать порты, если он
+    # установлен»). Не установлен — autostart безвреден (no-op, rc≠0
+    # у systemctl start несуществующего юнита).
+    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info,
+                                         log_warn=warn, autostart=True)
 
     if agh_ok:
         dns_servers = [

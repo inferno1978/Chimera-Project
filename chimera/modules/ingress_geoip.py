@@ -128,6 +128,52 @@ def _ingress_state_load() -> dict:
             "updated_at": "", "method": ""}
 
 
+# ── v64: единый comment-маркер ingress-правил iptables ────────────────────────
+# Правила добавляются с «-m comment --comment xray-ru-ingress-block».
+# Исторические версии кода удаляли их БЕЗ comment-матчера — а iptables -D
+# требует ПОЛНОГО совпадения спецификации (включая comment). Удаление молча
+# проваливалось → еженедельный cron (_ingress_remove + _ingress_enable)
+# добавлял DROP-правило повторно, дубликаты копились неделями.
+_INGRESS_IPT_COMMENT = "xray-ru-ingress-block"
+
+
+def _ingress_ipt_delete(ipt: str, port: int, set_name: str = "",
+                        jump_chain: str = "", max_attempts: int = 64) -> int:
+    """Удаляет ingress-правило на порту port — ОБЕ спеки и ВСЕ дубликаты.
+
+    ipt         — "iptables" | "ip6tables"
+    set_name    — непусто: правило ipset-метода (-m set --match-set NAME src -j DROP)
+    jump_chain  — непусто: привязка plain-метода (-j CHAIN)
+
+    Пробует спеку С comment-матчером и БЕЗ него (исторические правила могли
+    быть добавлены без comment), повторяет пока удаляется (чистка дубликатов
+    от старого бага). Возвращает число удалённых правил.
+    """
+    removed = 0
+    for _ in range(max_attempts):
+        if set_name:
+            base = [ipt, "-D", "INPUT", "-p", "tcp", "--dport", str(port),
+                    "-m", "set", "--match-set", set_name, "src", "-j", "DROP"]
+        elif jump_chain:
+            base = [ipt, "-D", "INPUT", "-p", "tcp", "--dport", str(port),
+                    "-j", jump_chain]
+        else:
+            break
+        specs = [
+            base + ["-m", "comment", "--comment", _INGRESS_IPT_COMMENT],
+            base,
+        ]
+        matched_any = False
+        for spec in specs:
+            r = _run(spec, check=False, quiet=True)
+            if getattr(r, "returncode", 1) == 0:
+                removed += 1
+                matched_any = True
+        if not matched_any:
+            break
+    return removed
+
+
 def _ingress_state_save(data: dict) -> None:
     INGRESS_GEOIP_FILE.parent.mkdir(parents=True, exist_ok=True)
     INGRESS_GEOIP_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
@@ -202,9 +248,9 @@ def _ingress_apply_ipset(port: int, v4: list, v6: list) -> bool:
     # ВАЖНО: вставляем через -A (в конец), а не -I 1 (в начало).
     # Правила ESTABLISHED,RELATED и lo-ACCEPT должны стоять ВЫШЕ,
     # иначе уже установленные соединения клиентов будут обрываться.
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-m", "set", "--match-set", INGRESS_IPSET_NAME, "src", "-j", "DROP"],
-         check=False, quiet=True)
+    # v64: удаление старого правила — через _ingress_ipt_delete (обе спеки
+    # + дубликаты от старого бага с несоответствием comment-матчера).
+    _ingress_ipt_delete("iptables", port, set_name=INGRESS_IPSET_NAME)
     r = _run(["iptables", "-A", "INPUT", "-p", "tcp", "--dport", str(port),
               "-m", "set", "--match-set", INGRESS_IPSET_NAME, "src",
               "-j", "DROP", "-m", "comment", "--comment", "xray-ru-ingress-block"],
@@ -228,9 +274,7 @@ def _ingress_apply_ipset(port: int, v4: list, v6: list) -> bool:
         _run(["ipset", "restore", "-!", "-f", str(tmp_v6)], check=False, quiet=True)
         tmp_v6.unlink(missing_ok=True)
 
-        _run(["ip6tables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-m", "set", "--match-set", INGRESS_IPSET6_NAME, "src", "-j", "DROP"],
-             check=False, quiet=True)
+        _ingress_ipt_delete("ip6tables", port, set_name=INGRESS_IPSET6_NAME)
         # Аналогично IPv4 — через -A, а не -I 1
         _run(["ip6tables", "-A", "INPUT", "-p", "tcp", "--dport", str(port),
               "-m", "set", "--match-set", INGRESS_IPSET6_NAME, "src",
@@ -251,13 +295,10 @@ def _ingress_apply_iptables_plain(port: int, v4: list) -> bool:
         warn("Установите ipset: apt install ipset")
 
     info(f"Применяю iptables правила ({len(v4)} CIDR)...")
-    # Удаляем старые правила с комментарием
-    while True:
-        r = _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-                  "-m", "comment", "--comment", "xray-ru-ingress-block",
-                  "-j", "DROP"], check=False, quiet=True)
-        if r.returncode != 0:
-            break
+    # v64: чистим старую привязку (обе спеки + дубликаты). Историческая
+    # спека здесь была «-j DROP», а правило на самом деле «-j XRU_BLOCK» —
+    # удаление никогда не срабатывало.
+    _ingress_ipt_delete("iptables", port, jump_chain="XRU_BLOCK")
 
     # Создаём новую цепочку XRU для компактности
     _run(["iptables", "-N", "XRU_BLOCK"], check=False, quiet=True)
@@ -270,8 +311,7 @@ def _ingress_apply_iptables_plain(port: int, v4: list) -> bool:
     # Привязываем цепочку к INPUT через -A (в конец, НЕ -I 1).
     # Правила ESTABLISHED,RELATED и whitelist ACCEPT уже стоят выше —
     # вставка через -I 1 перекрыла бы их и порвала активные сессии.
-    _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-          "-j", "XRU_BLOCK"], check=False, quiet=True)
+    # (Удаление старой привязки уже сделано выше через _ingress_ipt_delete.)
     r = _run(["iptables", "-A", "INPUT", "-p", "tcp", "--dport", str(port),
               "-j", "XRU_BLOCK", "-m", "comment", "--comment", "xray-ru-ingress-block"],
              check=False, quiet=True)
@@ -308,17 +348,15 @@ def _ingress_remove() -> None:
 
     if meth == "ipset":
         if port:
-            _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-                  "-m", "set", "--match-set", INGRESS_IPSET_NAME, "src", "-j", "DROP"],
-                 check=False, quiet=True)
-            _run(["ip6tables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-                  "-m", "set", "--match-set", INGRESS_IPSET6_NAME, "src", "-j", "DROP"],
-                 check=False, quiet=True)
+            # v64: удаление по ОБЕИМ спекам (+дубликаты) — раньше спека без
+            # comment-матчера не совпадала с правилом, ipset destroy падал
+            # («set is in use»), правило оставалось в INPUT навсегда.
+            _ingress_ipt_delete("iptables", port, set_name=INGRESS_IPSET_NAME)
+            _ingress_ipt_delete("ip6tables", port, set_name=INGRESS_IPSET6_NAME)
         _run(["ipset", "destroy", INGRESS_IPSET_NAME],  check=False, quiet=True)
         _run(["ipset", "destroy", INGRESS_IPSET6_NAME], check=False, quiet=True)
     elif meth == "plain" and port:
-        _run(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-              "-j", "XRU_BLOCK"], check=False, quiet=True)
+        _ingress_ipt_delete("iptables", port, jump_chain="XRU_BLOCK")
         _run(["iptables", "-F", "XRU_BLOCK"], check=False, quiet=True)
         _run(["iptables", "-X", "XRU_BLOCK"], check=False, quiet=True)
 
@@ -333,6 +371,77 @@ def _ingress_remove() -> None:
     INGRESS_CRON_FILE.unlink(missing_ok=True)
     INGRESS_CRON_SCRIPT.unlink(missing_ok=True)
     success("Блокировка входящих РФ удалена")
+
+
+def ingress_geoip_follow_port(new_port: int) -> bool:
+    """v64: перенос ingress-блокировки РФ на новый порт Xray.
+
+    Вызывается из reconfigure.do_reconfigure() при смене server_port
+    (раньше там был только WARN: DROP-правило оставалось на старом порту,
+    а недельный cron каждую неделю переприменял блокировку на СТАРЫЙ порт
+    из ingress_geoip.json — защита молча исчезала).
+
+    Что делает (только если блокировка ВКЛЮЧЕНА и порт изменился):
+      • DROP-правило (ipset/plain) переносится со старого порта на новый
+        (спеки идентичны _ingress_apply_* — с comment-матчером);
+      • per-user whitelist ACCEPT (clients_wl, портозависимое правило)
+        переносится вслед за ним;
+      • ingress_geoip.json обновляется — cron и меню видят новый порт.
+
+    Сами ipset-сеты и их содержимое НЕ трогаются (никаких загрузок RIPE,
+    никаких интерактивных промптов). Возвращает True если перенос выполнен.
+    """
+    state = _ingress_state_load()
+    if not state.get("enabled"):
+        return False
+    old_port = state.get("port", 0)
+    if not old_port or old_port == new_port:
+        return False
+    meth = state.get("method", "ipset")
+
+    if meth == "ipset":
+        # IPv4 — всегда
+        _ingress_ipt_delete("iptables", old_port, set_name=INGRESS_IPSET_NAME)
+        _run(["iptables", "-A", "INPUT", "-p", "tcp", "--dport", str(new_port),
+              "-m", "set", "--match-set", INGRESS_IPSET_NAME, "src",
+              "-j", "DROP", "-m", "comment", "--comment",
+              _INGRESS_IPT_COMMENT], check=False, quiet=True)
+        # IPv6 — только если v6-сет реально существует (v6 CIDR могли
+        # отсутствовать при первичном enable — правила ip6tables не было)
+        r_set6 = _run(["ipset", "list", INGRESS_IPSET6_NAME],
+                      capture=True, check=False, quiet=True)
+        if getattr(r_set6, "returncode", 1) == 0:
+            _ingress_ipt_delete("ip6tables", old_port,
+                                set_name=INGRESS_IPSET6_NAME)
+            _run(["ip6tables", "-A", "INPUT", "-p", "tcp",
+                  "--dport", str(new_port), "-m", "set",
+                  "--match-set", INGRESS_IPSET6_NAME, "src", "-j", "DROP",
+                  "-m", "comment", "--comment", _INGRESS_IPT_COMMENT],
+                 check=False, quiet=True)
+    else:
+        _ingress_ipt_delete("iptables", old_port, jump_chain="XRU_BLOCK")
+        _run(["iptables", "-A", "INPUT", "-p", "tcp", "--dport", str(new_port),
+              "-j", "XRU_BLOCK", "-m", "comment", "--comment",
+              _INGRESS_IPT_COMMENT], check=False, quiet=True)
+
+    # per-user whitelist ACCEPT (clients_wl) — правило с --dport <port>
+    try:
+        from chimera.modules.user_ip_whitelist import (
+            apply_iptables_rule as _wl_apply,
+            remove_iptables_rule as _wl_remove,
+        )
+        _wl_remove(old_port)
+        _wl_apply(new_port)
+    except Exception:
+        pass  # модуль не установлен — не критично
+
+    state["port"] = new_port
+    _ingress_state_save(state)
+    success(f"Блокировка входящих РФ: DROP перенесён :{old_port} → :{new_port} "
+            f"(ipset-сеты не тронуты, whitelist перенесён)")
+    log_to_file("INFO",
+                f"ingress_geoip follow port: {old_port} → {new_port}")
+    return True
 
 
 def _ingress_flush_autoban_ufw() -> None:
