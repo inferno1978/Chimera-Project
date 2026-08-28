@@ -830,6 +830,8 @@ def _run_install_inner() -> None:  # noqa: C901
     _box_ok("VLESS-inbound добавлен в Xray.")
 
     _box_info("Перезапускаю Xray...")
+    # v57 (start-limit-fix): reset-failed перед рестартом
+    _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
     _run(["systemctl", "restart", "xray"])
     time.sleep(2)
     r = _run(["systemctl", "is-active", "xray"], capture=True)
@@ -1020,6 +1022,8 @@ def _full_uninstall(silent: bool = False) -> bool:
             if _xray_remove_inbound(cfg):
                 cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
                 cfg_path.chmod(0o640)
+                # v57 (start-limit-fix): reset-failed перед рестартом
+                _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
                 _run(["systemctl", "restart", "xray"])
                 if not silent: _ok("VLESS-inbound удалён из Xray, Xray перезапущен.")
         except Exception as e:

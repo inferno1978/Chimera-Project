@@ -4365,6 +4365,10 @@ if changed:
         # Валидация и применение конфига
         if /usr/local/bin/xray -test -config /usr/local/etc/xray/config.json >> "$LOG" 2>&1; then
             # Xray 26.x не поддерживает горячий reload через SIGHUP — используем restart.
+            # v57 (start-limit-fix): reset-failed перед start/restart — сбрасывает
+            # счётчик StartLimitBurst юнита (fp-ротация может совпасть с другими
+            # рестартами xray за то же окно).
+            systemctl reset-failed xray >> "$LOG" 2>&1 || true
             if systemctl is-active --quiet xray 2>/dev/null; then
                 systemctl restart xray >> "$LOG" 2>&1 \
                     && echo "[$DATE] Xray перезапущен (fp=$NEW_FP)" >> "$LOG" \
@@ -4462,9 +4466,11 @@ def do_manage_fingerprint() -> None:
                 warn("Конфиг невалиден — fingerprint не применён")
                 warn((val.stdout + val.stderr)[:200])
             else:
-                _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-                time.sleep(2)
-                success(f"Fingerprint изменён на: {new_fp}, Xray перезапущен")
+                # v57 (start-limit-fix): безопасный рестарт (reset-failed)
+                if _xray_safe_restart(wait_active=15, attempts=2):
+                    success(f"Fingerprint изменён на: {new_fp}, Xray перезапущен")
+                else:
+                    warn("Fingerprint изменён, но Xray не поднялся — journalctl -u xray -n 30")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "2":
@@ -5232,10 +5238,9 @@ def do_unified_user_manager() -> None:
                     capture=True, check=False, quiet=True
                 )
                 if val.returncode == 0:
-                    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-                    time.sleep(2)
-                    r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-                    if r.stdout.strip() == "active":
+                    # v57 (start-limit-fix): безопасный рестарт (reset-failed) —
+                    # применение юзеров может идти в цепочке с другими рестартами
+                    if _xray_safe_restart(wait_active=15, attempts=2):
                         success(f"Готово — {len(users)} пользователей применено, Xray перезапущен")
                     else:
                         # Xray не стартовал — выводим последние строки journalctl
@@ -5895,10 +5900,8 @@ def do_import_config() -> None:
                 str(CONFIG_DIR / "config.json")],
                capture=True, check=False, quiet=True)
     if val.returncode == 0:
-        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-        time.sleep(2)
-        r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-        if r.stdout.strip() == "active":
+        # v57 (start-limit-fix): безопасный рестарт (reset-failed)
+        if _xray_safe_restart(wait_active=15, attempts=2):
             success("Xray перезапущен с восстановленным конфигом")
         else:
             warn("Xray не запустился — journalctl -u xray -n 20")
@@ -7027,11 +7030,11 @@ def do_patch_stats_api() -> None:
                 return
             break
 
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    time.sleep(3)
-    _r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+    # v57 (start-limit-fix): безопасный рестарт (reset-failed) вместо
+    # голого restart + sleep(3)
+    _ok = _xray_safe_restart(wait_active=15, attempts=2)
     _r2 = _run(["pgrep", "-x", "xray"], capture=True, check=False)
-    if _r.stdout.strip() == "active" and _r2.returncode == 0:
+    if _ok and _r2.returncode == 0:
         _box_ok("Xray: OK")
         _box_ok("Xray перезапущен. Статистика по пользователям будет накапливаться с этого момента.")
         _box_info("Откройте U → 4 (Статистика трафика детально) после прохождения трафика.")
@@ -7489,10 +7492,8 @@ def do_manage_xtls_flow() -> None:
             time.sleep(2)
             return
 
-    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-    time.sleep(2)
-    r = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
-    if r.stdout.strip() == "active":
+    # v57 (start-limit-fix): безопасный рестарт (reset-failed)
+    if _xray_safe_restart(wait_active=15, attempts=2):
         flow_label = new_flow if new_flow else "(без flow)"
         success(f"XTLS-flow изменён: {old_flow or '(нет)'} → {flow_label}")
         _box_row()
@@ -9325,8 +9326,8 @@ def _start_services_sequentially(
 
     xray_ok = False
     if xray_restart:
-        _run(["systemctl", "restart", "xray"], check=False, quiet=True)
-        xray_ok = _wait_service_active("xray", max_sec=timeout, silent=True)
+        # v57 (start-limit-fix): безопасный рестарт (reset-failed) + ожидание
+        xray_ok = _xray_safe_restart(wait_active=max(timeout, 15), attempts=2)
         if xray_ok:
             success("  ✓ Xray активен")
         else:

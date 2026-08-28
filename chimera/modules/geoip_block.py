@@ -350,6 +350,8 @@ def _geoip_apply_routing(extra_rules: list) -> None:
         except Exception as e:
             warn(f"Ошибка патча {cfg_path}: {e}")
 
+    # v57 (start-limit-fix): reset-failed перед рестартом
+    _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
     _run(["systemctl", "restart", "xray"], check=False, quiet=True)
     _nginx_restart_if_reality()
     time.sleep(1)
@@ -462,6 +464,8 @@ def _geoip_remove_all() -> None:
             _set_config_owner(cfg_path)
         except Exception as e:
             warn(f"Ошибка {cfg_path}: {e}")
+    # v57 (start-limit-fix): reset-failed перед рестартом
+    _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
     _run(["systemctl", "restart", "xray"], check=False, quiet=True)
     _nginx_restart_if_reality()
     success("Все GeoIP-правила удалены")

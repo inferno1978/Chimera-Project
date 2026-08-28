@@ -232,6 +232,8 @@ def do_manage_uuid_rotation() -> None:
             if val.returncode != 0:
                 warn("Конфиг невалиден — UUID не применён")
             else:
+                # v57 (start-limit-fix): reset-failed перед рестартом
+                _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
                 _run(["systemctl", "restart", "xray"], check=False, quiet=True)
                 time.sleep(2)
                 success(f"Новый UUID: {new_uuid}")
@@ -480,6 +482,8 @@ def do_manage_reality_keys() -> None:
                 input(f"{BLUE}Нажмите Enter...{NC}")
                 continue
 
+            # v57 (start-limit-fix): reset-failed перед рестартом
+            _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
             _run(["systemctl", "restart", "xray"], check=False, quiet=True)
             time.sleep(2)
 

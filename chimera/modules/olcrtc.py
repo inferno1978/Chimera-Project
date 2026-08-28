@@ -771,6 +771,37 @@ def _install_or_update() -> bool:
 # =============================================================================
 #  CONFIG.JSON ГЕНЕРАЦИЯ (точно по гайду)
 # =============================================================================
+def _resolver_for_olcrtc() -> str:
+    """v57 (agh-aware): DNS-резолвер для locations olcrtc-manager.
+
+    Порядок (как у генераторов Xray — см. agh_probe.py):
+      1. AdGuardHome 127.0.0.1:53 — если сервис активен, владеет :53 и
+         РЕАЛЬНО резолвит (живая проба end-to-end AGH → upstream → интернет);
+      2. DNSCrypt-proxy 127.0.0.1:5300 — если AGH нет/болен, а dnscrypt жив;
+      3. 8.8.8.8:53 — прежний дефолт (нет локального DNS-стека).
+
+    Любой сбой проверки → автооткат на следующий уровень: olcrtc-manager
+    никогда не остаётся с мёртвым резолвером.
+    """
+    # 1. AGH: глубокий health-check (сервис → владение :53 → проба резолва)
+    try:
+        from chimera.modules.agh_probe import agh_dns_available
+        agh_ok, _note = agh_dns_available(run=_run)
+        if agh_ok:
+            return "127.0.0.1:53"
+    except Exception:
+        pass
+
+    # 2. DNSCrypt на 5300 (порождён chimera; порт дефолтный)
+    r = _run(["systemctl", "is-active", "dnscrypt-proxy"],
+             capture=True, check=False)
+    if (getattr(r, "stdout", "") or "").strip() == "active":
+        return "127.0.0.1:5300"
+
+    # 3. Прежний дефолт
+    return "8.8.8.8:53"
+
+
 def _generate_config_json(locations: list, quota_used_bytes: int = 0,
                           mgr_clients_meta: list = None) -> str:
     """Генерирует config.json для olcrtc-manager с поддержкой нескольких locations
@@ -841,6 +872,10 @@ def _generate_config_json(locations: list, quota_used_bytes: int = 0,
                 "quota_used_bytes": 0,
             })
 
+    # v57 (agh-aware): резолвер locations — через живой AGH (:53), при сбое
+    # проверки → dnscrypt:5300, без локального стека → 8.8.8.8 (прежний дефолт)
+    resolver = _resolver_for_olcrtc()
+
     clients_json = []
     for meta in clients_meta:
         cid = meta["client-id"]
@@ -863,7 +898,7 @@ def _generate_config_json(locations: list, quota_used_bytes: int = 0,
                 },
                 "link": "direct",
                 "data": str(MGR_DATA_DIR),
-                "dns": "8.8.8.8:53",
+                "dns": resolver,
                 "proxy": {},
             })
         clients_json.append({
