@@ -83,7 +83,9 @@ _YOUTUBE_SNIFFING_BACKUP_KEY = "_youtube_sniffing_backup"
 #
 #  временно убран из freedom outbound (у пользователя на сервере без
 # IPv6 это вызывало 'Нет подключения' — но причина была в routeOnly, не sockopt).
-#  ВОЗВРАЩЁН. tcpFastOpen/tcpKeepAlive*/tcpUserTimeout безопасны
+#  ВОЗВРАЩЁН. tcpFastOpen УБРАН из базового набора (инцидент 28.08.2026:
+# DPI/TSPU резали data-in-SYN — TFO теперь опционален через tfo_settings,
+# по умолчанию ВЫКЛЮЧЕН). tcpKeepAlive*/tcpUserTimeout безопасны
 # на любом современном ядре (в отличие от tcpCongestion='bbr').
 #
 # Подтверждено документацией Xray (v26.x): sockopt на freedom outbound
@@ -92,8 +94,13 @@ _YOUTUBE_SAFE_SOCKOPT = {
     "tcpKeepAliveIdle":     60,
     "tcpKeepAliveInterval": 15,
     "tcpUserTimeout":       30000,
-    "tcpFastOpen":          True,
 }
+
+
+def _youtube_sockopt() -> dict:
+    """sockopt для freedom outbound: базовый набор + TFO по настройке."""
+    from chimera.modules.tfo_settings import tfo_sockopt
+    return {**_YOUTUBE_SAFE_SOCKOPT, **tfo_sockopt()}
 
 # Список доменов YouTube и связанных сервисов.
 #
@@ -663,7 +670,7 @@ def _youtube_apply_fragment_to_xray(
                 "protocol": "freedom",
                 "tag":      _outbound_tag,
                 "settings": _fragment_settings,
-                "sockopt":  dict(_YOUTUBE_SAFE_SOCKOPT),
+                "sockopt":  _youtube_sockopt(),
             })
             cfg["outbounds"] = outbounds
 

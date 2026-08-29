@@ -48,18 +48,33 @@ class TestBuildFragmentSockopt(unittest.TestCase):
     def test_returns_dict_with_required_keys(self):
         from chimera.modules.fragment_config import build_fragment_sockopt
         s = build_fragment_sockopt()
-        for key in ("tcpFastOpen", "tcpKeepAliveInterval", "tcpKeepAliveIdle",
+        # TFO (tcpFastOpen) УБРАН из дефолта — инцидент 28.08.2026 (DPI
+        # резал data-in-SYN). Проверяем что базовые поля на месте.
+        for key in ("tcpKeepAliveInterval", "tcpKeepAliveIdle",
                      "tcpUserTimeout", "tcpCongestion", "fragment"):
             self.assertIn(key, s)
+        self.assertNotIn("tcpFastOpen", s,
+                         "TFO не должен быть в sockopt по умолчанию")
 
     def test_default_values(self):
         from chimera.modules.fragment_config import build_fragment_sockopt
         s = build_fragment_sockopt()
-        self.assertTrue(s["tcpFastOpen"])
+        self.assertNotIn("tcpFastOpen", s)
         self.assertEqual(s["tcpCongestion"], "bbr")
         self.assertEqual(s["fragment"]["packets"], "1-3")
         self.assertEqual(s["fragment"]["length"], "3-7")
         self.assertEqual(s["fragment"]["interval"], "10-20")
+
+    def test_tfo_added_when_enabled(self):
+        """При включённом TFO (override) поле tcpFastOpen появляется."""
+        from chimera.modules import tfo_settings
+        from chimera.modules.fragment_config import build_fragment_sockopt
+        tfo_settings.set_tfo_override(True)
+        try:
+            s = build_fragment_sockopt()
+            self.assertTrue(s.get("tcpFastOpen"))
+        finally:
+            tfo_settings.clear_tfo_override()
 
     def test_custom_values(self):
         from chimera.modules.fragment_config import build_fragment_sockopt

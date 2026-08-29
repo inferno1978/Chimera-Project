@@ -2,6 +2,89 @@
 
 ---
 
+## SECURITY/DEFAULT(tfo_settings): TCP Fast Open ВЫКЛЮЧЕН по умолчанию во всём проекте + центральный модуль управления — 29 августа 2026
+
+**Проблема (инцидент 28.08.2026, продакшн):** на vds13216 (138.124.255.112,
+Режим B, каскад → xyloss.online:9443, VLESS+REALITY) внезапно умер весь
+foreign-трафик. RU-direct продолжал работать. Симптомы:
+
+```
+proxy/vless/encoding: failed to read response version >
+  read tcp 138.124.255.112:...->31.77.170.20:9443: read: connection timed out
+common/mux: unexpected EOF
+```
+
+**Диагностика (A/B-тест на самой .112, standalone xray в /tmp):**
+- конфиг с `tcpFastOpen: true` → таймаут, 0 байт за 30с, 3 попытки;
+- идентичный конфиг БЕЗ TFO → туннель работает мгновенно (IP exit получен);
+- с соседней .238 тот же конфиг с теми же ключами работал (маршрут жив, ключи верны);
+- openssl TLS-хендшейк проходил за 0.27с даже с .112.
+
+**Корень:** TFO отправляет TLS ClientHello ВНУТРИ SYN-пакета (data-in-SYN).
+Транзитный DPI/TSPU с 28.08.2026 распознаёт это как не-браузерный трафик
+(настоящий браузер ClientHello в SYN не кладёт) и режет соединение ПОСЛЕ
+успешного TLS. Отсюда «TLS жив — туннель мёртв».
+
+**Фикс — TFO полностью выключен по умолчанию во ВСЕХ генераторах:**
+
+1. **Новый модуль `chimera/modules/tfo_settings.py`** — единая точка правды:
+   - `is_tfo_enabled()` — override → state.json(`tfo_enabled`) → `False`;
+   - `tfo_sockopt()` / `tfo_dial()` — поля для Xray/sing-box генераторов;
+   - `set_tfo_state()` — персист в state.json (merge, атомарно);
+   - `apply_tfo_to_xray_config()` — живой патчер `/etc/xray/config.json`
+     (добавляет/удаляет `tcpFastOpen` во всех inbounds/outbounds, идемпотентно,
+     сохраняет mark/fragment/keepalive);
+   - `prompt_tfo_choice()` — промпт установки с предупреждением (дефолт ВЫКЛ);
+   - `do_manage_tfo()` — меню с безопасным применением (бэкап → патч →
+     `xray run -test` → рестарт → автоОТКАТ при ошибке).
+
+2. **Генераторы, где убран хардкод `tcpFastOpen: true`:**
+   - `_core.py::_build_sockopt` — центральный билдер (REALITY + xHTTP,
+     одиночный режим A, каскад B, exit-ноды, client-inbound);
+   - `chain_nodes.py` — exit-нода inbound (xHTTP) + outbound к exit (xHTTP);
+   - `youtube_route.py` — freedom outbound (`_YOUTUBE_SAFE_SOCKOPT` без TFO,
+     новый `_youtube_sockopt()`);
+   - `fragment_config.py::build_fragment_sockopt` — клиентские fragment-конфиги;
+   - `fragment_presets.py` — пресет-профили;
+   - `fragment_link.py` — Xray-клиент + sing-box dial;
+   - `fragment_noise.py::build_singbox_noise_dial` — noise-профили;
+   - `fragment_mux.py` — mux-профили (sing-box).
+
+3. **Промпт при установке** (`do_full_install` + dry-run): вопрос о TFO с
+   предупреждением о DPI-риске, дефолт (Enter) = ВЫКЛЮЧИТЬ. Выбор
+   персистится в state.json → его подхватывают ВСЕ последующие
+   генерации/перегенерации (reconfigure, switch_mode, меню перегенерации).
+
+4. **Пункт меню «Настройки сети → T»** — вкл/выкл TFO на живом сервере без
+   переустановки: state.json → config.json (все sockopt) → тест-валидация →
+   рестарт Xray с автооткатом.
+
+5. **ЯДРО (sysctl) НЕ ТРОГАЕМ:** `net.ipv4.tcp_fastopen = 3` в
+   `network_setup.py` остаётся как было. Настройка ядра безвредна: data-in-SYN
+   возникает ТОЛЬКО когда приложение явно просит TFO (sockopt `tcpFastOpen`
+   в конфиге Xray) — с выключенным sockopt ядро TFO не активирует. Решение
+   администратора: sysctl работе не мешал, оставлен = 3.
+
+6. **Для остальных протоколов** (AWG, Hysteria2, Mieru, Naive, TUIC и пр.):
+   TFO неприменим (UDP-транспорты без sockopt TFO) — настройки не требуется;
+   TCP-конфиги этих модулей TFO никогда не содержали (проверено grep'ом
+   `fastopen|fast_open` по всему репозиторию).
+
+**Тесты:** новый `tests/test_tfo_settings.py` (23 кейса: дефолт OFF, override,
+merge-запись state, патчер config.json — вкл/выкл/идемпотентность/сохранность
+чужих полей, интеграция `_build_sockopt` и `_build_xhttp_settings`); фикс
+хардкод-пути в `test_v69_singbox_multinode_config.py` (портабельность:
+`/home/z/my-project/chimera-latest` → путь относительно теста).
+Обновлены: `test_fragment_config.py`, `test_fragment_noise.py`,
+`test_youtube_route_v5013.py` (дефолт — БЕЗ tcpFastOpen; при включённом
+override — поле появляется).
+
+**Миграция существующих серверов:** ничего делать не нужно — при следующей
+перегенерации конфига TFO исчезнет автоматически (дефолт OFF). Быстрый фикс
+на живом сервере без перегенерации: меню «Настройки сети → T» → выключить.
+
+---
+
 ## FIX(xray_install): ROOT CAUSE «Режим B мёртв на свежей установке» — устаревший кэш зеркала подсунул Xray v26.3.27 → DPI режет REALITY-ногу entry→exit (v70) — 29 августа 2026
 
 **СИМПТОМЫ:** новый сервер (Режим B, каскад + split): РУ-ресурсы работают
@@ -2131,7 +2214,6 @@ aghome_dns_ready/wizard_pending, resolv_conf_fix AGH-aware (снятие -D бе
 guard'ы интеграции. `tests/test_resolv_conf_fix.py` +2 (AGH-ветки).
 Полный прогон: 5127 passed, 18 failed — все 18 предсуществующие
 (идентичный набор до/после изменений, git stash-верификация).
-
 ---
 
 ## FIX(dpi_bypass+youtube_b4+_tty_json): импорт больших b4-сетов (>4 КБ) через TUI — 26 августа 2026

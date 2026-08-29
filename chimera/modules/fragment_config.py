@@ -122,9 +122,13 @@ def build_fragment_sockopt(
     Возвращает dict sockopt с секцией fragment.
     Используется fragment_fuzzer.py и do_fragment_config_menu().
 
-    Пример результата:
+    TFO (tcpFastOpen) добавляется ТОЛЬКО если включён в tfo_settings
+    (дефолт ВЫКЛ — инцидент 28.08.2026: DPI резал data-in-SYN).
+
+    Пример результата (TFO выключен — базовый случай):
         {
-            "tcpFastOpen": true,
+            "tcpKeepAliveInterval": 15,
+            ... ,
             "fragment": {
                 "packets":  "1-3",
                 "length":   "3-7",
@@ -132,8 +136,9 @@ def build_fragment_sockopt(
             }
         }
     """
+    from chimera.modules.tfo_settings import tfo_sockopt
     return {
-        "tcpFastOpen": True,
+        **tfo_sockopt(),
         "tcpKeepAliveInterval": 15,
         "tcpKeepAliveIdle":   60,
         "tcpUserTimeout":     30000,

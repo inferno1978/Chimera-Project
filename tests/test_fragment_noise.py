@@ -69,10 +69,21 @@ class TestBuildNoiseSockopt(unittest.TestCase):
         self.assertEqual(noise["packet"], "100-200")
         self.assertEqual(noise["delay"], "50-100")
 
-    def test_has_tcp_fast_open(self):
+    def test_no_tcp_fast_open_by_default(self):
+        """TFO выключен по умолчанию (инцидент 28.08.2026: DPI резал data-in-SYN)."""
         from chimera.modules.fragment_noise import build_noise_sockopt
         s = build_noise_sockopt()
-        self.assertTrue(s["tcpFastOpen"])
+        self.assertNotIn("tcpFastOpen", s)
+
+    def test_tcp_fast_open_when_enabled(self):
+        from chimera.modules import tfo_settings
+        from chimera.modules.fragment_noise import build_noise_sockopt
+        tfo_settings.set_tfo_override(True)
+        try:
+            s = build_noise_sockopt()
+            self.assertTrue(s.get("tcpFastOpen"))
+        finally:
+            tfo_settings.clear_tfo_override()
 
 
 class TestBuildSingboxNoiseDial(unittest.TestCase):
@@ -84,8 +95,20 @@ class TestBuildSingboxNoiseDial(unittest.TestCase):
     def test_returns_dict_with_required_keys(self):
         from chimera.modules.fragment_noise import build_singbox_noise_dial
         d = build_singbox_noise_dial("1-3", "3-7", "10-20", "20-50", "10-20")
-        for key in ("tcp_fast_open", "fragment", "noise"):
+        # tcp_fast_open по умолчанию НЕТ (TFO дефолт ВЫКЛ)
+        for key in ("fragment", "noise"):
             self.assertIn(key, d)
+        self.assertNotIn("tcp_fast_open", d)
+
+    def test_tcp_fast_open_present_when_enabled(self):
+        from chimera.modules import tfo_settings
+        from chimera.modules.fragment_noise import build_singbox_noise_dial
+        tfo_settings.set_tfo_override(True)
+        try:
+            d = build_singbox_noise_dial("1-3", "3-7", "10-20", "20-50", "10-20")
+            self.assertTrue(d.get("tcp_fast_open"))
+        finally:
+            tfo_settings.clear_tfo_override()
 
     def test_fragment_enabled(self):
         from chimera.modules.fragment_noise import build_singbox_noise_dial

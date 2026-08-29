@@ -224,6 +224,13 @@ from chimera.modules.dnscrypt_setup import (
 from chimera.modules.network_setup import (
     configure_firewall, apply_network_optimizations, apply_sysctl_and_limits,
 )
+# TFO (TCP Fast Open): централизованное управление, дефолт ВЫКЛЮЧЕН.
+# Инцидент 28.08.2026: DPI/TSPU резали TFO-пакеты (data-in-SYN), каскад
+# .112 → xyloss.online умирал при живом TLS. Подробности: modules/tfo_settings.py
+from chimera.modules.tfo_settings import (
+    is_tfo_enabled, set_tfo_state, set_tfo_override, clear_tfo_override,
+    tfo_sockopt, tfo_dial, prompt_tfo_choice, do_manage_tfo,
+)
 # ── Tier-2 рефакторинг: GeoIP/GeoSite files ──────────────────────────────────
 from chimera.modules.geo_files import (
     download_geo_files, setup_geo_autoupdate, do_manage_geo_update,
@@ -1822,6 +1829,11 @@ def _build_sockopt(tcp_no_delay: bool | None = None) -> dict:
     Возвращает словарь sockopt с полным набором TCP-оптимизаций.
     Применяется ко всем протоколам (REALITY и xHTTP).
     tcp_no_delay: None → использовать глобальный XHTTP_TCP_NO_DELAY
+
+    ВАЖНО (инцидент 28.08.2026): tcpFastOpen ПО УМОЛЧАНИЮ ОТКЛЮЧЕН —
+    TFO кладёт ClientHello внутрь SYN, что DPI/TSPU распознают как
+    не-браузерный трафик и режут. Включается только явно:
+    промптом установки или меню «Настройки сети → T» (tfo_settings.py).
     """
     no_delay = tcp_no_delay if tcp_no_delay is not None else XHTTP_TCP_NO_DELAY
     # tcpUserTimeout=30s: при 10s ядро убивало соединение RST-ом после любого
@@ -1829,12 +1841,14 @@ def _build_sockopt(tcp_no_delay: bool | None = None) -> dict:
     # ронял ВСЕ мультиплексированные стримы разом (волна EOF у клиентов).
     # 30с даёт TCP-ретрансмиссии время вылечить соединение самостоятельно.
     opt: dict = {
-        "tcpFastOpen":        True,
         "tcpKeepAliveInterval": 15,
         "tcpKeepAliveIdle":   60,
         "tcpUserTimeout":     30000,
         "tcpCongestion":      "bbr",
     }
+    # TFO — только по явному выбору пользователя (дефолт: выключен)
+    if is_tfo_enabled():
+        opt["tcpFastOpen"] = True
     if no_delay:
         opt["tcpNoDelay"] = True
     return opt
@@ -3610,6 +3624,9 @@ def do_full_install() -> None:
         # ── Раздельное туннелирование (split tunneling) ──────────────────────────
         prompt_split_tunnel()
 
+        # ── TCP Fast Open: промпт с предупреждением (дефолт ВЫКЛ) ──────────────
+        prompt_tfo_choice()
+
     except KeyboardInterrupt:
         print()
         print(f"{YELLOW}[Отмена]{NC} Настройка установки прервана — возврат в меню.")
@@ -3958,6 +3975,10 @@ def do_full_install() -> None:
         "split_tunnel":   SPLIT_TUNNEL_ENABLED,
         "split_extra_domains": SPLIT_TUNNEL_EXTRA_DOMAINS,
         "split_extra_ips":     SPLIT_TUNNEL_EXTRA_IPS,
+        # TFO (TCP Fast Open): дефолт False — см. modules/tfo_settings.py.
+        # Сохраняем фактический выбор пользователя (override от промпта
+        # установки имеет приоритет до записи state.json).
+        "tfo_enabled":    is_tfo_enabled(),
         "installed_at":   datetime.now(timezone.utc).isoformat(),
     }
     if INSTALL_MODE == "B":
@@ -4274,6 +4295,7 @@ def do_dry_run() -> None:
         if INSTALL_MODE == "B":
             prompt_chain_params_multi()
         prompt_split_tunnel()
+        prompt_tfo_choice()
     except KeyboardInterrupt:
         print()
         warn("Dry-run прерван пользователем.")
@@ -7725,6 +7747,7 @@ def _menu_network() -> None:
         _box_item("D", f"🌐 Кастомные DNS правила  {DIM}(hosts / routing override){NC}")
         _box_item("DR", f"🔒 Принудительный DNS REDIRECT  {DIM}(NAT на dnscrypt-proxy, anti-leak){NC}")
         _box_item("M", f"📏 MTU/MSS автотюнинг  {DIM}(оптимизация для exit-нод){NC}")
+        _box_item("T", f"⚡ TCP Fast Open (TFO)  {DIM}(вкл/выкл, по умолчанию ВЫКЛ — анти-DPI){NC}")
         _box_item("X", f"⚡ XTLS-flow режим  {DIM}(Vision / Splice / none — только REALITY){NC}")
         _box_item("P", f"🧪 Постквантовый VLESS  {DIM}(экспериментально, отдельный порт){NC}")
         _box_sep()
@@ -7821,6 +7844,8 @@ def _menu_network() -> None:
             do_manage_dns_rules()
         elif ch.lower() == "m":
             do_mtu_tuning()
+        elif ch.lower() == "t":
+            do_manage_tfo()
         elif ch.lower() == "x":
             _load_state_into_globals()
             if PROTOCOL_MODE != "reality":

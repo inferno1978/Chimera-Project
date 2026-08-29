@@ -130,9 +130,13 @@ def build_singbox_noise_dial(
     """
     Возвращает dial_fields для sing-box с fragment + noise.
     Используется fragment_link.py при генерации Sing-box конфига.
+
+    TFO (tcp_fast_open) — только по настройке tfo_settings (дефолт ВЫКЛ,
+    инцидент 28.08.2026: DPI резал data-in-SYN).
     """
+    from chimera.modules.tfo_settings import tfo_dial
     return {
-        "tcp_fast_open": True,
+        **tfo_dial(),
         "fragment": {
             "enabled": True,
             "size":    length,
