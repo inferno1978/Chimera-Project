@@ -52,6 +52,9 @@ TFO_KEY = "tfo_enabled"
 # значение «переезжает» в state.json, override можно очистить.
 _OVERRIDE: bool | None = None
 
+# Резервный сброс цвета для _error (когда _core недоступен)
+NC_FALLBACK = "\033[0m"
+
 
 # =============================================================================
 #  ЧТЕНИЕ / ЗАПИСЬ СОСТОЯНИЯ
@@ -259,11 +262,15 @@ def do_manage_tfo() -> None:
     _box_top    = core._box_top
     _box_row    = core._box_row
     _box_item   = core._box_item
+    _box_desc   = core._box_desc
+    _box_back   = core._box_back
     _box_bottom = core._box_bottom
     info    = core.info
     success = core.success
     warn    = core.warn
-    error   = core.error
+    # ВНИМАНИЕ: в _core.py НЕТ функции error (только info/success/warn) —
+    # свой хелпер _error (инцидент 29.08.2026: AttributeError в меню T).
+    error   = _error
     GREEN  = core.GREEN
     RED    = core.RED
     YELLOW = core.YELLOW
@@ -316,12 +323,12 @@ def do_manage_tfo() -> None:
 
 
 def _tfo_apply(enabled: bool) -> None:
-    """Применить состояние TFO: state → config.json → sysctl → рестарт."""
+    """Применить состояние TFO: state → config.json → рестарт."""
     core = _core_module()
     info    = core.info
     success = core.success
     warn    = core.warn
-    error   = core.error
+    error   = _error  # в _core нет error — см. do_manage_tfo
 
     if not set_tfo_state(enabled):
         error("Не удалось сохранить состояние — отмена.")
@@ -394,11 +401,26 @@ def _core_module():
     return importlib.import_module("chimera._core")
 
 
+def _error(msg: str) -> None:
+    """[ERROR]-печать. В _core.py функции error НЕТ (только info/success/
+    warn + log_to_file) — свой хелпер по паттерну olcrtc.py. Отказ _core
+    (headless/тесты) → печать в stderr, без падения."""
+    try:
+        core = _core_module()
+        print(f"{core.RED}[ERROR]{NC_FALLBACK} {msg}")
+        try:
+            core.log_to_file("ERROR", msg)
+        except Exception:
+            pass
+    except Exception:
+        print(f"[tfo:ERROR] {msg}", file=sys.stderr)
+
+
 def _emit(level: str, msg: str) -> None:
     """Логирование без жёсткой зависимости от _core (для cron/тестов)."""
     try:
         core = _core_module()
-        fn = {"info": core.info, "warn": core.warn, "error": core.error}.get(level)
+        fn = {"info": core.info, "warn": core.warn, "error": _error}.get(level)
         if fn:
             fn(msg)
             return

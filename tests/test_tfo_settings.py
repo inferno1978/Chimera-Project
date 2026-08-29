@@ -273,5 +273,97 @@ class TestBuildSockoptIntegration(unittest.TestCase):
         self.assertNotIn("tcpFastOpen", sockopt)
 
 
+class TestCoreBindingsRegression(unittest.TestCase):
+    """Регрессия инцидента 29.08.2026 (меню T на проде):
+
+    AttributeError: module '__main__' has no attribute 'error' —
+    tfo_settings дергал core.error, которого в _core.py НЕТ
+    (есть только info/success/warn + log_to_file). main.py исполняет
+    _core.py в namespace __main__, поэтому вылетает именно так.
+
+    Тест №1 ловит ВЕСЬ класс багов: каждое core.X из tfo_settings.py
+    обязано существовать в реальном _core.py.
+    Тест №2: core.error больше не запрашивается вообще (хелпер _error).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import tfo_settings
+        self.tfo = tfo_settings
+        self.tfo.clear_tfo_override()
+
+    def test_every_core_attr_exists_in_real_core(self):
+        import re
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "tfo_settings.py").read_text()
+        # (?<![\w.]) — не матчим «_core.py» из комментариев: реальный доступ
+        # core.X в коде идёт после пробела/скобки/оператора, не после буквы
+        attrs = set(re.findall(r"(?<![\w.])core\.([A-Za-z_]\w*)", src))
+        self.assertTrue(attrs, "regex сломан — не найдено ни одного core.X")
+        core = sys.modules["chimera._core"]
+        missing = sorted(a for a in attrs if not hasattr(core, a))
+        self.assertEqual(
+            missing, [],
+            f"tfo_settings дергает core.{'/'.join(missing)}, но в _core.py "
+            f"этого нет — будет AttributeError на проде")
+
+    def test_core_error_never_requested(self):
+        import re
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "tfo_settings.py").read_text()
+        self.assertNotIn(
+            "core.error", src,
+            "core.error не существует в _core.py — используйте локальный "
+            "хелпер _error() (инцидент 29.08.2026)")
+
+
+class TestMenuTSmoke(unittest.TestCase):
+    """Smoke-прогон UI-функций TFO: отрисовка меню/промпта не падает
+    (ловит и NameError отзабинженных локалов — _box_desc/_box_back)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import tfo_settings
+        self.tfo = tfo_settings
+        self.tfo.clear_tfo_override()
+
+    def tearDown(self):
+        self.tfo.clear_tfo_override()
+
+    def test_manage_menu_renders_and_exits(self):
+        """Меню T: полная отрисовка (все box-функции) + выход по 'b'.
+        До фикса падало: AttributeError core.error (до input) и
+        NameError _box_desc/_box_back (при отрисовке)."""
+        with patch("builtins.input", return_value="b"):
+            self.tfo.do_manage_tfo()  # не должно бросить ничего
+
+    def test_prompt_choice_default_is_off(self):
+        """Промпт установки: Enter по умолчанию = ВЫКЛЮЧИТЬ."""
+        with patch("builtins.input", return_value=""):
+            enabled = self.tfo.prompt_tfo_choice()
+        self.assertFalse(enabled)
+        self.assertFalse(self.tfo.is_tfo_enabled())
+
+    def test_prompt_choice_explicit_on(self):
+        with patch("builtins.input", return_value="2"):
+            enabled = self.tfo.prompt_tfo_choice()
+        self.assertTrue(enabled)
+        self.assertTrue(self.tfo.is_tfo_enabled())
+
+    def test_tfo_apply_no_config_branch(self):
+        """_tfo_apply при отсутствии config.json: state пишется, xray
+        не трогается (warn-ветка). Проверяет привязки info/success/warn."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            old_state, old_cfg = self.tfo.STATE_FILE, self.tfo.XRAY_CONFIG
+            self.tfo.STATE_FILE = Path(td) / "state.json"
+            self.tfo.XRAY_CONFIG = Path(td) / "config.json"
+            try:
+                self.tfo._tfo_apply(False)
+                data = json.loads(self.tfo.STATE_FILE.read_text())
+                self.assertFalse(data["tfo_enabled"])
+                self.assertFalse(self.tfo.is_tfo_enabled())
+            finally:
+                self.tfo.STATE_FILE, self.tfo.XRAY_CONFIG = old_state, old_cfg
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
