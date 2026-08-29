@@ -313,9 +313,12 @@ class TestSingboxConfig(unittest.TestCase):
         # Все ноды как vless outbounds
         vless_obs = [ob for ob in cfg["outbounds"] if ob["type"] == "vless"]
         self.assertEqual(len(vless_obs), 3)
-        # Служебные outbound'ы
-        for t in ("direct", "block", "dns-out"):
-            self.assertIn(t, tags)
+        # Служебные outbound'ы: direct — есть; block/dns-out УДАЛЕНЫ (v69:
+        # legacy special outbounds = FATAL на старте sing-box 1.12.25+;
+        # их роль выполняют route-actions reject/hijack-dns).
+        self.assertIn("direct", tags)
+        self.assertNotIn("block", tags)
+        self.assertNotIn("dns-out", tags)
         # Reality у exit-нод
         exit1 = next(ob for ob in vless_obs if ob.get("uuid") == "exit-uuid-1")
         self.assertTrue(exit1["tls"]["reality"]["enabled"])
