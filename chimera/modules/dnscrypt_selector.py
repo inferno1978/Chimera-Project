@@ -159,16 +159,15 @@ def _fetch_resolver_list() -> tuple[list[str], bool]:
             flags=re.MULTILINE | re.DOTALL,
         )
         # Меняем порт во временном конфиге чтобы не конфликтовать
-        # с рабочим dnscrypt-proxy который уже занял основной порт
+        # с рабочим dnscrypt-proxy который уже занял основной порт.
+        # v72: перезаписываем строку ЦЕЛИКОМ — IPv6-элементы '[::1]:5300'
+        # содержат ']' внутри списка, first-entry-регэксп оставлял второй
+        # слушатель на занятом порту (dnscrypt-proxy -list падал bind'ом).
         tmp_content = re.sub(
-            r"(listen_addresses\s*=\s*\[')[^']+(')",
-            r"\g<1>127.0.0.1:15353\g<2>",
+            r"^listen_addresses\s*=\s*\[[^\n]*\][^\n]*$",
+            "listen_addresses = ['127.0.0.1:15353']",
             tmp_content,
-        )
-        tmp_content = re.sub(
-            r'(listen_addresses\s*=\s*\[")[^"]+(")',
-            r'\g<1>127.0.0.1:15353\g<2>',
-            tmp_content,
+            flags=re.MULTILINE,
         )
         fd, tmp_conf = tempfile.mkstemp(suffix=".toml")
         with os.fdopen(fd, "w") as f:

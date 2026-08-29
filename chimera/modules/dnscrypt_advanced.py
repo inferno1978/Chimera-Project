@@ -587,7 +587,10 @@ def _read_config() -> str:
     return _DNSCRYPT_CONF.read_text(errors="replace")
 
 def _get_listen_addresses(content: str) -> str:
-    m = re.search(r"^listen_addresses\s*=\s*\[.*?\]", content, re.MULTILINE)
+    # v72: жадный [^\n]* до ПОСЛЕДНЕЙ ']' в строке — IPv6-элементы
+    # '[::1]:5300' содержат ']' внутри списка; ленивый .*? обрезал
+    # строку на внутренней скобке и портил перегенерированный TOML.
+    m = re.search(r"^listen_addresses\s*=\s*\[[^\n]*\]", content, re.MULTILINE)
     return m.group(0) if m else "listen_addresses = ['127.0.0.1:5300']"
 
 def _get_current_server_names() -> List[str]:

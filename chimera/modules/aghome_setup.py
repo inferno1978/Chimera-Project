@@ -487,6 +487,71 @@ def _get_dnscrypt_port() -> int:
         return 5300
 
 
+# ── v72: IPv6 в DNS-стеке ───────────────────────────────────────────────────
+def _get_public_ipv6() -> str:
+    """Публичный глобальный IPv6 сервера (для bind_hosts AGH).
+
+    Порядок: `ip -6 addr scope global` (без сети, мгновенно) → curl -6.
+    Пропускаем deprecated/temporary (приватность-адреса ротируются —
+    bind на них переломается при ротации), fe80:: (link-local).
+    Возвращаем адрес БЕЗ префиксной длины; пустая строка = IPv6 нет.
+    """
+    def _pick(candidates: list) -> str:
+        # сначала стабильные (без temporary/deprecated), иначе любой
+        stable = [a for a, flags in candidates if not flags]
+        pool = stable or [a for a, _ in candidates]
+        return pool[0] if pool else ""
+
+    try:
+        r = subprocess.run(["ip", "-6", "addr", "show", "scope", "global"],
+                           capture_output=True, text=True, check=False, timeout=10)
+        candidates: list = []
+        for line in r.stdout.splitlines():
+            m = re.match(r"\s*inet6\s+([0-9a-fA-F:]+)/(\d+)\s+scope\s+global\s*(.*)", line)
+            if not m:
+                continue
+            addr, flags = m.group(1), m.group(3) or ""
+            if addr.startswith("fe80") or "." in addr:   # link-local / v4-mapped
+                continue
+            candidates.append((addr.lower(), "temporary" in flags or "deprecated" in flags))
+        v6 = _pick(candidates)
+        if v6:
+            return v6
+    except Exception:
+        pass
+    # fallback: внешний сервис
+    try:
+        r = subprocess.run(["curl", "-6", "-fsS", "--max-time", "6",
+                            "https://api6.ipify.org"],
+                           capture_output=True, text=True, check=False, timeout=10)
+        v6 = r.stdout.strip().lower()
+        if re.fullmatch(r"[0-9a-f:]+", v6) and ":" in v6 and not v6.startswith("fe80"):
+            return v6
+    except Exception:
+        pass
+    return ""
+
+
+def _rewrite_dnscrypt_listen(content: str, port: int, ipv6: bool) -> str:
+    """Перезаписывает строку listen_addresses в TOML dnscrypt (v72).
+
+    Брекет-безопасно: IPv6-элементы вида '[::1]:5300' содержат ']' внутри
+    списка — поэтому матчу ВСЮ строку до конца (жадный [^\n]*), а не до
+    первого ']'. При ipv6 добавляем [::1]:{port} вторым слушателем,
+    127.0.0.1 всегда первый (на него ориентируются остальные модули).
+    Конфиг без listen_addresses возвращается как есть.
+    """
+    m = re.search(r"^listen_addresses\s*=\s*\[[^\n]*\][^\n]*$",
+                  content, re.MULTILINE)
+    if not m:
+        return content
+    entries = [f"'127.0.0.1:{port}'"]
+    if ipv6:
+        entries.append(f"'[::1]:{port}'")
+    new_line = "listen_addresses = [" + ", ".join(entries) + "]"
+    return content[:m.start()] + new_line + content[m.end():]
+
+
 def _get_public_ip() -> str:
     """Публичный IPv4 сервера: сначала state.json (domain не нужен — IP),
     затем curl, затем ip addr."""
@@ -623,14 +688,15 @@ def migrate_dnscrypt_off_53() -> bool:
         warn(f"AGH: не удалось прочитать dnscrypt TOML: {e}")
         return False
 
-    # Текущие listen_addresses
-    m = re.search(r'^(listen_addresses\s*=\s*\[)([^\]]*)(\])',
+    # Текущие listen_addresses (v72: брекет-безопасно — IPv6-элементы
+    # '[::1]:5300' содержат ']' внутри списка, поэтому матчу всю строку)
+    m = re.search(r"^listen_addresses\s*=\s*\[[^\n]*\][^\n]*$",
                   content, re.MULTILINE)
     if not m:
         warn("AGH: listen_addresses не найден в dnscrypt TOML")
         return False
 
-    listens = re.findall(r'[\'"]([^\'"]+)[\'"]', m.group(2))
+    listens = re.findall(r'[\'"]([^\'"]+)[\'"]', m.group(0))
     # Порт dnscrypt = первый адрес с портом НЕ 53 (если dnscrypt слушал и :53,
     # и :5300 — берём 5300; :53 уходим освобождать AGH).
     port = 5300
@@ -685,7 +751,8 @@ def migrate_dnscrypt_off_53() -> bool:
         return False
     info(f"AGH: redirect-страховка 53→{port} установлена — DNS жив при миграции")
 
-    # Бэкап + перезапись listen_addresses → только 127.0.0.1:{port}
+    # Бэкап + перезапись listen_addresses → 127.0.0.1:{port}
+    # (+ '[::1]:{port}' вторым слушателем при IPv6 на сервере — v72)
     bak = toml_path.with_name(
         toml_path.name + "." + datetime.now().strftime("%Y%m%d%H%M%S") + ".preAGH.bak")
     try:
@@ -694,8 +761,10 @@ def migrate_dnscrypt_off_53() -> bool:
         warn(f"AGH: не удалось сделать бэкап dnscrypt TOML: {e}")
         return False
 
-    new_listen = f"{m.group(1)}'127.0.0.1:{port}'{m.group(3)}"
-    content = content[:m.start()] + new_listen + content[m.end():]
+    ipv6 = bool(getattr(core, "IS_IPV6_AVAILABLE", False))
+    content = _rewrite_dnscrypt_listen(content, port, ipv6)
+    if ipv6:
+        info(f"AGH: dnscrypt мигрирован на 127.0.0.1:{port} + [::1]:{port} (IPv6)")
     try:
         toml_path.write_text(content)
     except Exception as e:
@@ -1037,13 +1106,19 @@ def _yaml_list(items: list, indent: int = 2) -> str:
     return "\n" + "\n".join(f"{pad}- {_yaml_quote(str(i))}" for i in items)
 
 
-def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool) -> str:
+def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool,
+                      public_ipv6: str = "") -> str:
     """Секция dns: — канонический конфиг Chimera (по мотивам роутерного,
     с VPS-адаптацией: bind_hosts = loopback + public IP для DoT/DoQ,
     приватные PTR выключены — нет LAN).
 
     Публичный :53 НЕ открывается в UFW — open resolver исключён;
     public IP в bind_hosts нужен только для DoT(:853)/DoQ(:853)/DoH(:30443).
+
+    v72: public_ipv6 — публичный IPv6 сервера, добавляется в bind_hosts:
+    AGH биндит :53/DoT/DoH/Web и на IPv6 (IPv6-клиенты видны в статистике,
+    DoT/DoH доступны по v6). Пустая строка (нет IPv6 / self-heal
+    loopback-only) — прежнее поведение байт-в-байт.
 
     v65 (ratelimit: 0 — КРИТИЧНО, эмпирика на живом AGH v0.107.79):
       • ratelimit>0 = ТИХИЙ DROP сверх лимита: ни REFUSED, ни записи в
@@ -1062,6 +1137,10 @@ def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool) -> str:
     bind_hosts = ["127.0.0.1"]
     if public_ip:
         bind_hosts.append(public_ip)
+    if public_ipv6:
+        # v72: конкретный адрес (не '::' — wildcard-бинд конфликтует с
+        # уже забинженным 127.0.0.1/public IPv4 в Go dual-stack)
+        bind_hosts.append(public_ipv6)
     bind_lines = "\n".join(f"    - {_yaml_quote(h)}" for h in bind_hosts)
 
     return f"""dns:
@@ -2836,10 +2915,14 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         # без public IP TLS-порты бессмысленны публично, но оставляем —
         # loopback DoH/DoT тоже валидны (тесты, локальные клиенты).
         pass
+    public_ipv6 = _get_public_ipv6()   # v72: bind_hosts += IPv6
+    if public_ipv6:
+        info(f"AGH: IPv6 bind: {public_ipv6} — DoT/DoH/Web доступны и по v6")
 
     sections: dict = {
         "http":             build_http_section(web_mode, web_port),
-        "dns":              build_dns_section(dc_port, public_ip, tls_enabled),
+        "dns":              build_dns_section(dc_port, public_ip, tls_enabled,
+                                           public_ipv6=public_ipv6),
         "tls":              build_tls_section(tls_enabled, server_name, cert_path, key_path),
         "filters":          build_filters_section(),
         "whitelist_filters": build_whitelist_filters_section(),
