@@ -62,6 +62,23 @@ def _get_dnscrypt_port() -> int:
 
 
 # ============================================================================
+#  LISTEN-ADDRESSES (IPv6-aware, v72)
+# ============================================================================
+def _toml_listen_addresses(addr: str, port: int, ipv6: bool) -> str:
+    """Строка listen_addresses для dnscrypt-proxy.toml.
+
+    IPv4-loopback всегда первый (DNSCRYPT_LISTEN_ADDR — канон из _core,
+    его же ждут регэкспы остальных модулей: _get_dnscrypt_port,
+    resolv_conf_fix, dns_redirect). При ipv6 добавляется [::1] вторым
+    элементом — dns_redirect.get_dnscrypt_listen_ipv6() видит ::1 и
+    включает ip6tables-редирект 53→port в redirect-режиме.
+    """
+    if ipv6:
+        return f"['{addr}:{port}', '[::1]:{port}']"
+    return f"['{addr}:{port}']"
+
+
+# ============================================================================
 #  УСТАНОВКА
 # ============================================================================
 def install_dnscrypt() -> None:
@@ -172,8 +189,10 @@ def install_dnscrypt() -> None:
     DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
         ## dnscrypt-proxy.toml — сгенерирован Chimera Project v4.12.10
         ## Слушает на {DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}
+        ## v72: при IPv6 на сервере дополнительно слушаем [::1] — DNS-путь
+        ## IPv6-готов (redirect 53→{DNSCRYPT_LISTEN_PORT} в dns_redirect включается автоматически).
 
-        listen_addresses = ['{DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}']
+        listen_addresses = {_toml_listen_addresses(DNSCRYPT_LISTEN_ADDR, DNSCRYPT_LISTEN_PORT, IS_IPV6_AVAILABLE)}
 
         max_clients = 250
 
