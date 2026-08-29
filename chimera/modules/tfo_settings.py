@@ -364,7 +364,12 @@ def _tfo_apply(enabled: bool) -> None:
 
 
 def _test_and_restart_xray(backup: Path | None) -> bool:
-    """xray run -test → systemctl restart xray; откат из backup при неудаче."""
+    """xray run -test → systemctl restart xray; откат из backup при неудаче.
+
+    v72.1: reset-failed перед каждым рестартом (паттерн v57 — двойной
+    рестарт при откате без сброса ловит start-limit-hit, guard-тест
+    test_v57_...::test_no_bare_xray_restarts).
+    """
     core = _core_module()
     warn = core.warn
     r = subprocess.run(["xray", "run", "-test", "-c", str(XRAY_CONFIG)],
@@ -373,11 +378,15 @@ def _test_and_restart_xray(backup: Path | None) -> bool:
         warn(f"Новый конфиг НЕ валиден — откатываю и не перезапускаю Xray.")
         _rollback(backup)
         return False
+    subprocess.run(["systemctl", "reset-failed", "xray"],
+                   capture_output=True, check=False)
     r = subprocess.run(["systemctl", "restart", "xray"],
                        capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         warn("systemctl restart xray вернул ошибку — откат конфига.")
         _rollback(backup)
+        subprocess.run(["systemctl", "reset-failed", "xray"],
+                       capture_output=True, check=False)
         subprocess.run(["systemctl", "restart", "xray"],
                        capture_output=True, timeout=60)
         return False

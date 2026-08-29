@@ -2,6 +2,73 @@
 
 ---
 
+## FIX(dns-ipv6): enable-dns-ipv6.sh v72.1 — ложный «DNS мёртв» на живом сервере: прямые пробы + settle + reset-failed + лестница отката; self-heal #0 в finalize (v72.1) — 30 августа 2026
+
+**Контекст (инцидент <node-2>, 30.08):** первый запуск
+`enable-dns-ipv6.sh` (v72) на живом сервере: шаги 1–2 прошли, на шаге 3
+(AGH `bind_hosts += 2a12:bec4:1280:50::2`) скрипт выдал
+«AGH упал или DNS мёртв — ОТКАТ», а после отката — «DNS мёртв даже
+после отката».
+
+**Причина (скрипт):** `dns_alive` был ОДНИМ системным `getent hosts
+ya.ru` (8с) — двумя этажами ниже собственного урока проекта:
+
+- **v60** (`aghome_setup._system_dns_ok`): системная проба зависит от
+  resolv.conf и НЕ измеряет здоровье AGH; прямая проба `@127.0.0.1:53`
+  — единственный честный критерий.
+- **v60 settle** (`_probe_dns_with_settle`): dnscrypt/AGH после
+  рестарта поднимаются секунды (DoH/TLS handshake, prefetch
+  сертификатов) — одиночная мгновенная проба даёт ложный «мёртв».
+  Скрипт перезапустил dnscrypt (шаг 2), затем AGH (шаг 3) и пробил
+  систему в самом холодном окне цепочки.
+- **v57 (start-limit):** два рестарта AGH за минуту без
+  `systemctl reset-failed` могли оставить службу в start-limit-hit —
+  «мёртв даже после отката».
+
+**Правки скрипта (v72.1):**
+
+1. `probe_dns_at <server> [port]` — прямой UDP DNS-запрос:
+   `dig @srv ya.ru +time=2 +tries=1` → fallback python3-UDP
+   (AF_INET/AF_INET6 по наличию ':', любой ответ ≥ 12 байт = жив).
+   `dns_alive` — прямые пробы к `127.0.0.1:53` + запасная к `[v6]:53`
+   с settle-повторами 4×2с.
+2. `restart_svc()` — `systemctl reset-failed` перед КАЖДЫМ рестартом
+   (паттерн v57).
+3. Лестница отката: конфиг AGH → +рестарт dnscrypt (upstream) →
+   полный откат к до-скриптовому состоянию (включая dnscrypt-конфиг,
+   `latest_bak` находит бэкап и от прошлого запуска) → если и это не
+   помогло — journalctl обеих служб прямо в выводе (причина видна
+   сразу, без отдельного похода в журнал). При провале IPv6-старта
+   6 строк журнала AGH печатаются ДО отката.
+4. Шаг 2: settle-ожидание слушателя `[::1]` (до 15с) вместо
+   мгновенной ss-проверки.
+
+**Правки кода (aghome_setup.finalize_aghome_config):**
+
+5. **Self-heal #0 (v72.1):** если AGH не стартовала с IPv6 в
+   bind_hosts — сначала снимается ТОЛЬКО IPv6 (публичный IPv4/DoT/DoH
+   и loopback остаются жить). Прежний путь сразу ронял всё до
+   loopback-only, теряя ещё и TLS-порты. Полный сброс остаётся
+   self-heal #1.
+6. `systemctl reset-failed AdGuardHome` перед всеми рестартами
+   финализатора (v57-паттерн; guard-тест v57 ловил их и раньше —
+   см. пункт 7).
+7. **Попутно (guard v57):** `tfo_settings._test_and_restart_xray` из
+   b5dc8ab делал голые `systemctl restart xray` без reset-failed —
+   статический guard `test_no_bare_xray_restarts` был красным с того
+   коммита. Добавлен reset-failed перед обоими рестартами (включая
+   rollback-рестарт).
+
+**Тесты:** новый `tests/test_enable_dns_ipv6_script.py` (bash -n,
+структурные guard'ы: reset-failed перед каждым рестартом / отсутствие
+getent / settle-повторы / лестница отката; функциональные: python-блок
+UDP-пробы против мок-DNS на ephemeral-порту — ответ = exit 0, мёртвый
+порт = exit ≠ 0); `test_aghome_setup` + self-heal #0 (IPv6 снят,
+IPv4 сохранён, ровно 2 ожидания сервиса, reset-failed ≥ 2); DNS-регрессия
+280 passed; v57-guard снова зелёный; блок-тести python-блоков 7/7.
+
+---
+
 ## FEAT(dnscrypt+aghome): IPv6 в DNS-стеке — dnscrypt слушает [::1], AGH биндит публичный IPv6 (v72) — 29 августа 2026
 
 **Контекст:** на серверах с IPv6 (<node-2>) статистика AdGuard Home
