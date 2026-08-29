@@ -1311,6 +1311,98 @@ schema_version: 29
         baks = list((self._tmpdir / "backups").glob("AdGuardHome.yaml.*.bak"))
         self.assertEqual(len(baks), 1)
 
+    def test_finalize_selfheal0_drops_ipv6_keeps_ipv4(self):
+        """v72.1 (инцидент vds13195): AGH не стартует с IPv6 в bind_hosts →
+        self-heal #0 снимает ТОЛЬКО IPv6 — публичный IPv4 (DoT/DoH) и
+        loopback остаются. Прежний путь сразу ронял всё до loopback-only.
+        """
+        core = MagicMock()
+        core.info = core.warn = core.success = core.dim = (
+            lambda *a, **k: None)
+        core._box_top = core._box_row = core._box_sep = core._box_bottom = (
+            lambda *a, **k: None)
+        core.PARAM_DOMAIN = "dns.example.com"
+
+        state = {"enabled": True, "phase": "wizard",
+                 "web_mode": "https_self", "domain": "dns.example.com",
+                 "tls_enabled": True, "web_port": 3000}
+        calls = {"cmds": []}
+
+        def ss_listener(cmd, **kw):
+            cmd_s = " ".join(cmd)
+            calls["cmds"].append(list(cmd))
+            out, rc = "", 0
+            if "is-active" in cmd_s:
+                out = "active"
+            elif "is-failed" in cmd_s:
+                out = "inactive"
+            elif cmd and cmd[0] == "ss":
+                out = (
+                    "udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
+                    "users:((\"AdGuardHome\"))\n"
+                    "tcp LISTEN 0 0 127.0.0.1:53 0.0.0.0:* "
+                    "users:((\"AdGuardHome\"))\n"
+                    "tcp LISTEN 0 0 0.0.0.0:853 0.0.0.0:* "
+                    "users:((\"AdGuardHome\"))\n"
+                    "tcp LISTEN 0 0 0.0.0.0:30443 0.0.0.0:* "
+                    "users:((\"AdGuardHome\"))\n")
+            return MagicMock(returncode=rc, stdout=out, stderr="")
+
+        wait_calls = []
+
+        def fake_wait(svc, sec):
+            wait_calls.append(sec)
+            return len(wait_calls) == 2      # 1-й старт FAIL, после снятия IPv6 — OK
+
+        with patch.object(self.mod, "_core_module", return_value=core), \
+             patch.object(self.mod, "AGH_CONF", self.conf), \
+             patch.object(self.mod, "AGH_STATE_FILE", self.state_file), \
+             patch.object(self.mod, "AGH_BACKUP_DIR", self._tmpdir / "backups"), \
+             patch.object(self.mod, "_prepare_tls_cert",
+                          return_value=(Path("/opt/AdGuardHome/certs/c.crt"),
+                                        Path("/opt/AdGuardHome/certs/c.key"))), \
+             patch.object(self.mod, "_get_dnscrypt_port", return_value=5300), \
+             patch.object(self.mod, "_get_public_ip", return_value="1.2.3.4"), \
+             patch.object(self.mod, "_get_public_ipv6",
+                          return_value="2a12:bec4:1280:50::2"), \
+             patch.object(self.mod, "_wait_service", side_effect=fake_wait), \
+             patch.object(self.mod, "_register_aghome_ports",
+                          return_value=None), \
+             patch.object(self.mod, "_regenerate_xray_config",
+                          return_value=None), \
+             patch.object(self.mod, "subprocess") as sub:
+            sub.run.side_effect = ss_listener
+
+            import chimera.modules.resolv_conf_fix as rcf
+            with patch.object(rcf, "fix_resolv_conf_to_localhost",
+                              return_value={"ok": True, "actions": [],
+                                            "warnings": [], "error": None}):
+                ok = self.mod.finalize_aghome_config(
+                    web_mode="https_self", domain="dns.example.com")
+
+        self.assertTrue(ok)
+        text = self.conf.read_text()
+
+        # IPv6 снят, публичный IPv4 остался (DoT/DoH живут)
+        self.assertNotIn("2a12:bec4", text)
+        self.assertIn('- "1.2.3.4"', text)
+        self.assertIn('- "127.0.0.1"', text)
+
+        # users не тронуты
+        self.assertIn("$2a$10$SomeBcryptHashFromWizard", text)
+
+        # ровно два ожидания сервиса: старт с IPv6 (fail) + без IPv6 (ok)
+        self.assertEqual(len(wait_calls), 2, wait_calls)
+
+        # v57-паттерн: reset-failed перед рестартами (start-limit)
+        resets = [c for c in calls["cmds"]
+                  if c[:3] == ["systemctl", "reset-failed", "AdGuardHome"]]
+        self.assertGreaterEqual(len(resets), 2, calls["cmds"])
+
+        # финализация завершилась (не откат к конфигу мастера)
+        st = json.loads(self.state_file.read_text())
+        self.assertEqual(st["phase"], "finalized")
+
     def test_finalize_refuses_without_users(self):
         """Конфиг без users (мастер не завершён) → отказ, lockout-защита."""
         core = MagicMock()

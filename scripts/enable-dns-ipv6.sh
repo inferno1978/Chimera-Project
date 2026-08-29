@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  Chimera Project — enable-dns-ipv6.sh (v72)
+#  Chimera Project — enable-dns-ipv6.sh (v72.1)
 # ============================================================================
 #  Включает IPv6 в DNS-стеке на ЖИВОМ сервере (AGH + dnscrypt):
 #
@@ -12,14 +12,27 @@
 #       ufw-правило покрывает v4+v6 автоматически).
 #
 #  ЧЕГО СКРИПТ НЕ ДЕЛАЕТ (осознанно, дизайн проекта v65):
-#    НЕ открывает :53 наружу в UFW — иначе получится open resolver
-#    (усиление DDoS). Публичный IPv6-доступ к DNS — через DoT :853 и
-#    DoH :30443, которые уже открыты. IPv6-клиенты появляются в
-#    статистике AGH («Частые клиенты») при подключении по DoT/DoH.
+#    НЕ открывает :53 наружу в UFW — иначе open resolver (усиление DDoS).
+#    Публичный IPv6-доступ к DNS — через DoT :853 и DoH :30443, которые
+#    уже открыты. IPv6-клиенты появляются в статистике AGH при DoT/DoH.
+#
+#  v72.1 (инцидент vds13195 30.08: «AGH упал или DNS мёртв — ОТКАТ» →
+#  «DNS мёртв даже после отката»):
+#    - dns_alive был ОДНИМ системным getent без settle — во время
+#      bootstrap AGH+dnscrypt после рестарта (DoH/TLS handshake, prefetch
+#      сертификатов) это ложный «мёртв» (урок v60 из aghome_setup).
+#      Теперь: ПРЯМАЯ проба к AGH (dig @127.0.0.1 / python3-UDP, любой
+#      ответ = жив) + settle-повторы 4×2с + запасной пробел на [v6]:53.
+#    - systemctl reset-failed перед КАЖДЫМ рестартом (start-limit,
+#      паттерн v57) — двойной рестарт за минуту мог оставить AGH
+#      в start-limit-hit навсегда.
+#    - Лестница отката: конфиг AGH → +рестарт dnscrypt (upstream) →
+#      полный откат к до-скриптовому состоянию (включая dnscrypt) →
+#      journalctl обеих служб прямо в выводе.
 #
 #  Идемпотентен: повторный запуск ничего не ломает (пропускает готовое).
-#  Безопасен: бэкап каждого файла перед правкой + проверка сервиса +
-#  DNS-ALIVE проверка + авточтобыоткат при падении.
+#  Безопасен: бэкап каждого файла перед правкой (.preIPv6.bak) +
+#  прямые DNS-пробы + авточтобыоткат.
 #
 #  Запуск:  sudo bash scripts/enable-dns-ipv6.sh
 # ============================================================================
@@ -61,8 +74,48 @@ wait_svc() {  # wait_svc <имя> <сек>
     return 1
 }
 
-dns_alive() {  # системный DNS реально отвечает
-    timeout 8 getent hosts ya.ru >/dev/null 2>&1
+restart_svc() {  # v72.1: reset-failed + restart (start-limit, паттерн v57)
+    systemctl reset-failed "$1" >/dev/null 2>&1 || true
+    systemctl restart "$1"
+}
+
+latest_bak() {  # самый свежий <файл>.*.preIPv6.bak (может быть от прошлого запуска)
+    ls -t "$1".*.preIPv6.bak 2>/dev/null | head -1
+}
+
+probe_dns_at() {  # probe_dns_at <server> [port] — один прямой UDP DNS-запрос
+    local srv="$1" port="${2:-53}"
+    if command -v dig >/dev/null 2>&1; then
+        timeout 5 dig "@$srv" -p "$port" ya.ru +time=2 +tries=1 >/dev/null 2>&1
+        return $?
+    fi
+    python3 - "$srv" "$port" 2>/dev/null << 'PYEOF'
+import socket, sys
+srv, port = sys.argv[1], int(sys.argv[2])
+q = (b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+     b"\x02ya\x02ru\x00\x00\x01\x00\x01")          # ya.ru A
+s = socket.socket(socket.AF_INET6 if ":" in srv else socket.AF_INET,
+                  socket.SOCK_DGRAM)
+s.settimeout(3)
+try:
+    s.sendto(q, (srv, port))
+    d, _ = s.recvfrom(512)
+    sys.exit(0 if len(d) >= 12 else 1)             # любой ответ = путь жив
+except Exception:
+    sys.exit(1)
+finally:
+    s.close()
+PYEOF
+}
+
+dns_alive() {  # v72.1: прямые пробы к AGH с settle-повторами (урок v60)
+    local i
+    for ((i=1; i<=4; i++)); do
+        probe_dns_at "127.0.0.1" && return 0
+        [ -n "${V6:-}" ] && probe_dns_at "$V6" && return 0
+        sleep 2
+    done
+    return 1
 }
 
 # ── 1. Публичный IPv6 ───────────────────────────────────────────────────────
@@ -96,13 +149,16 @@ ok "IPv6: $V6"
 
 # ── 2. dnscrypt-proxy: [::1]:PORT ───────────────────────────────────────────
 hdr "2/4  dnscrypt-proxy — слушатель [::1]"
+DNSBAK=""
 if [ ! -f "$DNSTOML" ]; then
     skip "TOML не найден ($DNSTOML) — dnscrypt не установлен, пропускаю"
 elif grep -q "\[::1\]" "$DNSTOML" 2>/dev/null && systemctl is-active --quiet "$DNS_SVC"; then
     skip "'[::1]' уже в конфиге, сервис активен — готово"
+    DNSBAK="$(latest_bak "$DNSTOML")"
 else
     BAK="$DNSTOML.$TS.preIPv6.bak"
     cp -a "$DNSTOML" "$BAK"
+    DNSBAK="$BAK"
     ok "бэкап: $BAK"
     OUT="$(python3 - "$DNSTOML" 2>&1 << 'PYEOF'
 import re, sys
@@ -130,13 +186,23 @@ PYEOF
 )"; RC=$?
     if [ $RC -eq 0 ]; then
         [ -n "$OUT" ] && echo -e "  $OUT"
-        systemctl restart "$DNS_SVC"
-        if wait_svc "$DNS_SVC" 15 && ss -tulnp 2>/dev/null | grep "$DNS_SVC" | grep -q "\[::1\]"; then
+        restart_svc "$DNS_SVC"
+        # v72.1: settle — слушатель появляется на 1-3с позже active
+        DC_UP=0
+        for ((i=1; i<=15; i++)); do
+            if systemctl is-active --quiet "$DNS_SVC" && \
+               ss -tulnp 2>/dev/null | grep "$DNS_SVC" | grep -q "\[::1\]"; then
+                DC_UP=1; break
+            fi
+            sleep 1
+        done
+        if [ $DC_UP -eq 1 ]; then
             ok "dnscrypt-proxy слушает 127.0.0.1 + [::1]"
         else
             bad "dnscrypt-proxy не поднялся с [::1] — откат"
+            journalctl -u "$DNS_SVC" -n 6 --no-pager 2>/dev/null | sed 's/^/    /'
             cp -a "$BAK" "$DNSTOML"
-            systemctl restart "$DNS_SVC"; wait_svc "$DNS_SVC" 15 || true
+            restart_svc "$DNS_SVC"; wait_svc "$DNS_SVC" 15 || true
             exit 1
         fi
     else
@@ -174,22 +240,54 @@ PYEOF
 )"; RC=$?
     if [ $RC -eq 0 ]; then
         [ -n "$OUT" ] && echo -e "  $OUT"
-        systemctl restart "$AGH_SVC"
+        restart_svc "$AGH_SVC"
         if wait_svc "$AGH_SVC" 25 && dns_alive; then
-            ok "AGH активен, DNS жив (getent OK)"
+            ok "AGH активен, DNS отвечает (прямая проба :53)"
             if ss -tuln 2>/dev/null | grep -qF "[$V6]:"; then
                 ok "AGH биндит $V6 (:53/DoT/DoH/Web по IPv6)"
             else
                 skip "AGH активен, но $V6 в ss не виден — проверь: ss -tuln | grep $V6"
             fi
         else
-            bad "AGH упал или DNS мёртв — ОТКАТ конфига"
+            bad "AGH не поднялся с IPv6 или DNS не отвечает — откат"
+            echo "    причина (журнал AGH):"
+            journalctl -u "$AGH_SVC" -n 8 --no-pager 2>/dev/null | tail -6 | sed 's/^/      /'
+            # ── Лестница отката (v72.1) ──
+            # Ступень 1: вернуть конфиг AGH
             cp -a "$BAK" "$AGHYAML"
-            systemctl restart "$AGH_SVC"; wait_svc "$AGH_SVC" 20 || true
+            restart_svc "$AGH_SVC"
+            if wait_svc "$AGH_SVC" 20 && dns_alive; then
+                ok "откат прошёл: AGH активен, DNS жив (IPv6 выключен)"
+                exit 1
+            fi
+            # Ступень 2: поднять и upstream (dnscrypt), затем AGH
+            bad "DNS не ожил — рестарт dnscrypt (upstream AGH) + AGH"
+            restart_svc "$DNS_SVC"; wait_svc "$DNS_SVC" 15 || true
+            sleep 2
+            restart_svc "$AGH_SVC"
+            if wait_svc "$AGH_SVC" 20 && dns_alive; then
+                ok "DNS восстановлен (рестарт dnscrypt + AGH; IPv6 выключен)"
+                exit 1
+            fi
+            # Ступень 3: полный откат к до-скриптовому состоянию
+            bad "Полный откат к состоянию до скрипта (dnscrypt-конфиг тоже)"
+            if [ -n "$DNSBAK" ] && [ -f "$DNSBAK" ]; then
+                cp -a "$DNSBAK" "$DNSTOML"
+                restart_svc "$DNS_SVC"; wait_svc "$DNS_SVC" 15 || true
+                sleep 2
+                restart_svc "$AGH_SVC"; wait_svc "$AGH_SVC" 20 || true
+            fi
             if dns_alive; then
-                ok "откат прошёл, DNS жив (IPv6 выключен)"
+                ok "Полный откат: DNS жив (всё как до скрипта)"
             else
-                bad "DNS мёртв даже после отката! Смотри: journalctl -u AdGuardHome -n 30"
+                bad "DNS мёртв после полного отката — диагностика:"
+                echo "    dnscrypt-proxy: $(systemctl is-active "$DNS_SVC" 2>/dev/null)"
+                echo "    AdGuardHome:    $(systemctl is-active "$AGH_SVC" 2>/dev/null)"
+                echo "    --- AdGuardHome, последние 12 строк ---"
+                journalctl -u "$AGH_SVC" -n 15 --no-pager 2>/dev/null | tail -12 | sed 's/^/    /'
+                echo "    --- dnscrypt-proxy, последние 8 строк ---"
+                journalctl -u "$DNS_SVC" -n 10 --no-pager 2>/dev/null | tail -8 | sed 's/^/    /'
+                bad "Пришли этот вывод целиком — причина в журналах выше"
             fi
             exit 1
         fi

@@ -2963,9 +2963,38 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         return False
 
     # ── Restart + верификация ─────────────────────────────────────────
+    # v72.1: reset-failed перед рестартом (паттерн v57 — start-limit)
+    subprocess.run(["systemctl", "reset-failed", AGH_SERVICE_NAME],
+                   capture_output=True, check=False)
     subprocess.run(["systemctl", "restart", AGH_SERVICE_NAME],
                    capture_output=True, check=False)
     ok = _wait_service(AGH_SERVICE_NAME, 30)
+
+    if not ok and public_ipv6:
+        # Self-heal #0 (v72.1, инцидент vds13195 30.08): AGH не стартовал
+        # с IPv6 в bind_hosts — сначала снимаем ТОЛЬКО IPv6: публичный IPv4
+        # (DoT/DoH/Web) и loopback остаются жить. Прежний путь сразу ронял
+        # всё до loopback-only, теряя ещё и TLS-порты.
+        warn("AGH: не запустилась с IPv6 в bind_hosts — "
+             "пробую без IPv6 (публичный IPv4 остаётся)")
+        healed = build_dns_section(dc_port, public_ip, tls_enabled,
+                                   public_ipv6="")
+        new_text2 = yaml_replace_sections(new_text, {"dns": healed})
+        try:
+            AGH_CONF.write_text(new_text2)
+            subprocess.run(["chown", f"{AGH_USER}:{AGH_GROUP}", str(AGH_CONF)],
+                           capture_output=True, check=False)
+        except Exception:
+            pass
+        subprocess.run(["systemctl", "reset-failed", AGH_SERVICE_NAME],
+                       capture_output=True, check=False)
+        subprocess.run(["systemctl", "restart", AGH_SERVICE_NAME],
+                       capture_output=True, check=False)
+        ok = _wait_service(AGH_SERVICE_NAME, 20)
+        if ok:
+            public_ipv6 = ""
+            warn("AGH: работает без IPv6-bind (IPv4+loopback); причина в "
+                 "journalctl -u AdGuardHome -n 20")
 
     if not ok:
         # Self-heal #1: без public IP в bind_hosts (типовая причина падения —
@@ -2979,6 +3008,8 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
                            capture_output=True, check=False)
         except Exception:
             pass
+        subprocess.run(["systemctl", "reset-failed", AGH_SERVICE_NAME],
+                       capture_output=True, check=False)
         subprocess.run(["systemctl", "restart", AGH_SERVICE_NAME],
                        capture_output=True, check=False)
         ok = _wait_service(AGH_SERVICE_NAME, 20)
@@ -2993,6 +3024,8 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
                            capture_output=True, check=False)
         except Exception:
             pass
+        subprocess.run(["systemctl", "reset-failed", AGH_SERVICE_NAME],
+                       capture_output=True, check=False)
         subprocess.run(["systemctl", "restart", AGH_SERVICE_NAME],
                        capture_output=True, check=False)
         if _wait_service(AGH_SERVICE_NAME, 20):
