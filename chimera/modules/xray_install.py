@@ -257,6 +257,36 @@ def _xray_try_local_zip(zip_name: str, xray_arch: str, chk_url: str, latest_tag:
     return False
 
 
+def _max_version_tag(tags: list) -> str:
+    """
+    v70 (stale-mirror-guard): возвращает МАКСИМАЛЬНЫЙ тег из списка
+    (semver-подобное сравнение: v26.10.3 > v26.7.28 > v26.3.27).
+    Некорректные теги игнорируются; при пустом результате — ''.
+    """
+    def _key(tag: str):
+        if not isinstance(tag, str):
+            return None
+        m = re.match(r"^[vV]?(\d+(?:\.\d+)*)", tag.strip())
+        if not m:
+            return None
+        return tuple(int(p) for p in m.group(1).split("."))
+    best_tag, best_key = "", None
+    for t in tags:
+        k = _key(t)
+        if k is None:
+            continue
+        # добиваем нулями до общей длины для корректного сравнения кортежей
+        if best_key is not None:
+            width = max(len(k), len(best_key))
+            k2 = k + (0,) * (width - len(k))
+            b2 = best_key + (0,) * (width - len(best_key))
+            if k2 > b2:
+                best_tag, best_key = t, k
+        else:
+            best_tag, best_key = t, k
+    return best_tag
+
+
 def install_xray() -> None:
     core = _core_module()
     XRAY_BIN = core.XRAY_BIN
@@ -352,6 +382,18 @@ def install_xray() -> None:
             "https://api.github.com/repos/XTLS/Xray-core/releases/latest",
             "https://ghproxy.net/https://api.github.com/repos/XTLS/Xray-core/releases/latest",
         ]
+        # v70 (stale-mirror-guard): зеркала gh-proxy КЭШИРУЮТ ответы API на
+        # недели/месяцы. Инцидент: установка 28.08 с РФ получила от ghproxy
+        # закэшированный "latest" = v26.3.27 (на 4 месяца старее реального
+        # v26.7.28) → всё скачалось самосогласованно по старому тегу (zip+
+        # SHA256 совпали) → на сервере осел бинарник с uTLS-отпечатком
+        # Firefox 120 (2023 год). Стёртый TLS-отпечаток — эталонная
+        # сигнатура прокси-инструментов для DPI: ТСПУ на международном
+        # плече RU→зарубеж рвал REALITY-хендшейк entry→exit (клиент видел
+        # 30-секундный таймаут = tcpUserTimeout из sockopt), при живом
+        # обычном TLS и живом ping. Поэтому: собираем tag_name СО ВСЕХ
+        # зеркал и берём МАКСИМАЛЬНУЮ версию, а не первый ответ.
+        _collected_tags: list = []
         for attempt in range(1, 4):
             for api_url in _API_MIRRORS:
                 try:
@@ -362,19 +404,22 @@ def install_xray() -> None:
                     ], capture=True, check=False)
                     if r.returncode == 0 and r.stdout:
                         data = json.loads(r.stdout)
-                        latest_tag = data.get("tag_name", "")
-                        if latest_tag:
-                            info(f"  Stable latest: {latest_tag}")
-                            break
+                        _tag = data.get("tag_name", "")
+                        if _tag and _tag not in _collected_tags:
+                            _collected_tags.append(_tag)
                 except Exception:
                     pass
-                if latest_tag:
-                    break
-            if latest_tag:
+            if _collected_tags:
                 break
             # v60: транзиентный флап API, ретрай внутри цикла — info.
             info(f"  latest: попытка {attempt}/3 не удалась, повтор...")
             time.sleep(2)
+        if _collected_tags:
+            latest_tag = _max_version_tag(_collected_tags)
+            if len(_collected_tags) > 1:
+                info(f"  Ответы зеркал: {', '.join(_collected_tags)} → выбираю максимальный: {latest_tag}")
+            else:
+                info(f"  Stable latest: {latest_tag}")
 
         # ── Шаг B: stable недоступен — предлагаем выбор из prerelease ────────
         if not latest_tag:
@@ -567,6 +612,20 @@ def install_xray() -> None:
 
     r = _run([str(XRAY_BIN), "version"], capture=True, check=False)
     xray_ver = r.stdout.splitlines()[0] if r.stdout else "unknown"
+    # v70 (stale-mirror-guard): сверяем РЕАЛЬНУЮ версию бинарника с той,
+    # что собирались поставить. Расхождение = зеркало подсунуло не тот zip
+    # (кэш) или локальный файл оказался другой версии.
+    try:
+        _real_ver = (xray_ver.split()[1] if len(xray_ver.split()) > 1 else "").strip()
+        _want_ver = latest_tag.lstrip("vV") if latest_tag else ""
+        if _want_ver and _real_ver and _real_ver != _want_ver:
+            warn(f"  ВНИМАНИЕ: установлен Xray {_real_ver}, ожидался {_want_ver}!")
+            warn("  Зеркало могло отдать устаревший/чужой файл. Старый бинарник =")
+            warn("  старый uTLS-отпечаток (fp=firefox) → DPI режет REALITY-ногу")
+            warn("  entry→exit на международном плече. Перезапустите установку")
+            warn("  или положите актуальный zip в /root/ вручную.")
+    except Exception:
+        pass
     STAGE_XRAY_DONE = True
     setattr(core, "STAGE_XRAY_DONE", STAGE_XRAY_DONE)
     PROGRESS.update(3, "Xray")
@@ -1474,7 +1533,12 @@ def create_xray_service() -> None:
         if _gs.exists() and _gi.exists() \
                 and _gs.stat().st_size > 1024 * 1024 \
                 and _gi.stat().st_size > 1024 * 1024:
-            _geo_env_line = "Environment=xray.location.asset=/etc/xray"
+            # v70: имя env-переменной с ТОЧКАМИ systemd ОТКАЗЫВАЕТСЯ
+            # парсить ("Invalid environment assignment, ignoring") — юнит
+            # молча терял строку. Xray принимает обе формы (EnvFlag AltName:
+            # xray.location.asset ↔ XRAY_LOCATION_ASSET) — используем
+            # подчёркивания, которые systemd принимает всегда.
+            _geo_env_line = "Environment=XRAY_LOCATION_ASSET=/etc/xray"
     except Exception:
         _geo_env_line = ""
 
