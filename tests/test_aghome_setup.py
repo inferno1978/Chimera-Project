@@ -512,11 +512,14 @@ class TestMigrateDnscryptOff53(unittest.TestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def _core_mock(self):
+    def _core_mock(self, ipv6=False):
         core = MagicMock()
         core.info = lambda *a, **k: None
         core.warn = lambda *a, **k: None
         core.success = lambda *a, **k: None
+        # v72: явное значение — иначе MagicMock-атрибут truthy и миграция
+        # считает IPv6 доступным (добавляет '[::1]')
+        core.IS_IPV6_AVAILABLE = ipv6
         return core
 
     def test_strips_53_from_listen_addresses(self):
@@ -559,6 +562,8 @@ class TestMigrateDnscryptOff53(unittest.TestCase):
         content = self.toml.read_text()
         self.assertIn("listen_addresses = ['127.0.0.1:5300']", content)
         self.assertNotIn(":53'", content)
+        # v72: без IPv6 — только v4-loopback
+        self.assertNotIn("[::1]", content)
         # бэкап создан
         baks = list(self.toml.parent.glob("dnscrypt-proxy.toml.*.preAGH.bak"))
         self.assertEqual(len(baks), 1)
@@ -569,6 +574,46 @@ class TestMigrateDnscryptOff53(unittest.TestCase):
         restarts = [i for i, c in enumerate(safety_calls) if c[0] == "restart"]
         self.assertTrue(restarts, "restart dnscrypt должен быть вызван")
         self.assertLess(safety_calls.index((5300, False)), restarts[0])
+
+    def test_strips_53_adds_ipv6_listen_v72(self):
+        """v72: при живом IPv6 миграция добавляет '[::1]:5300' вторым
+        слушателем (127.0.0.1 всегда первый)."""
+        self.toml.write_text(
+            "listen_addresses = ['127.0.0.1:53', '127.0.0.1:5300']\n"
+            "server_names = ['cloudflare']\n")
+        ss_53 = ("udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
+                 "users:((\"dnscrypt-proxy\"))\n")
+        ss_both = ("udp UNCONN 0 0 127.0.0.1:5300 0.0.0.0:* "
+                   "users:((\"dnscrypt-proxy\"))\n"
+                   "udp UNCONN 0 0 [::1]:5300 [::]:* "
+                   "users:((\"dnscrypt-proxy\"))\n")
+        with patch.object(self.mod, "_core_module",
+                          return_value=self._core_mock(ipv6=True)), \
+             patch.object(self.mod, "AGH_DNSCRYPT_TOML", self.toml), \
+             patch.object(self.mod, "_ensure_dns_redirect_safety",
+                          return_value=True), \
+             patch.object(self.mod, "subprocess") as sub:
+            state = {"restarted": False}
+            def run_side_effect(cmd, **kw):
+                cmd_s = " ".join(cmd)
+                out = ""
+                if "is-active" in cmd_s:
+                    out = "active"
+                elif "is-failed" in cmd_s:
+                    out = "inactive"
+                elif "restart" in cmd_s:
+                    state["restarted"] = True
+                elif "-ulnp" in cmd_s or "-tulnp" in cmd_s:
+                    out = ss_both if state["restarted"] else ss_53
+                return MagicMock(returncode=0, stdout=out, stderr="")
+            sub.run.side_effect = run_side_effect
+            ok = self.mod.migrate_dnscrypt_off_53()
+        self.assertTrue(ok)
+        content = self.toml.read_text()
+        self.assertIn(
+            "listen_addresses = ['127.0.0.1:5300', '[::1]:5300']", content)
+        self.assertNotIn(":53'", content)
+        self.assertIn("server_names = ['cloudflare']", content)
 
     def test_no_migration_when_53_free(self):
         self.toml.write_text("listen_addresses = ['127.0.0.1:5300']\n")
