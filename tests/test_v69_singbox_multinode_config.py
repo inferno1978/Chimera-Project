@@ -23,7 +23,7 @@ import uuid as uuid_mod
 from pathlib import Path
 from unittest.mock import patch
 
-PROJECT = Path("/home/z/my-project/chimera-latest")
+PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
 
@@ -73,6 +73,12 @@ STATE = {
 class TestV69SingboxMultinodeConfig(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # Гигиена sys.modules: сохраняем то, что подменим (chimera._core и
+        # закэшированный subscription_multinode), чтобы НЕ травмировать
+        # другие тесты в этом же pytest-процессе (test_subscription_multinode
+        # и пр. подменяют _core по-своему).
+        cls._saved = {k: sys.modules.get(k) for k in
+                      ("chimera._core", "chimera.modules.subscription_multinode")}
         cls.sm, cls.fake_core = _make_module()
         cls.sm._load_state = lambda: dict(STATE)
         cls.sm._geo_lookup = lambda host: "NL"
@@ -80,6 +86,23 @@ class TestV69SingboxMultinodeConfig(unittest.TestCase):
         assert raw, "build_singbox_config вернул ''"
         cls.cfg = json.loads(raw)
         cls.ob_types = {o["tag"]: o["type"] for o in cls.cfg["outbounds"]}
+
+    @classmethod
+    def tearDownClass(cls):
+        # Полная гигиена: недостаточно pop из sys.modules — пакет
+        # chimera.modules держит АТРИБУТ submodule, и последующий
+        # `from chimera.modules import subscription_multinode` достанет
+        # СТАРЫЙ объект (с нашими monkey-patch _load_state/_geo_lookup).
+        import chimera.modules as _pkg
+        for name, mod in cls._saved.items():
+            short = name.rsplit(".", 1)[-1]
+            if mod is None:
+                sys.modules.pop(name, None)
+                if short in vars(_pkg):
+                    delattr(_pkg, short)
+            else:
+                sys.modules[name] = mod
+                setattr(_pkg, short, mod)
 
     # ── 1. Легаси-конструкции, валившие старт sing-box ─────────────────────
 

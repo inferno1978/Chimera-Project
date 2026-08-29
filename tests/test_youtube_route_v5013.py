@@ -329,8 +329,9 @@ class TestSafeSockopt(unittest.TestCase):
         )
 
     def test_sockopt_present_without_bbr(self):
-        """freedom outbound должен иметь sockopt с tcpKeepAlive* и tcpFastOpen,
-        но БЕЗ tcpCongestion='bbr' (это была причина поломки  ."""
+        """freedom outbound должен иметь sockopt с tcpKeepAlive*, но БЕЗ
+        tcpCongestion='bbr' и БЕЗ tcpFastOpen (дефолт TFO ВЫКЛ с 28.08.2026 —
+        DPI/TSPU резали data-in-SYN)."""
         from chimera.modules import youtube_route
         self._cfg_path.write_text(json.dumps(_make_xray_config_with_fragment()))
         core = sys.modules["chimera._core"]
@@ -354,7 +355,9 @@ class TestSafeSockopt(unittest.TestCase):
         self.assertIn("tcpKeepAliveIdle", so)
         self.assertIn("tcpKeepAliveInterval", so)
         self.assertIn("tcpUserTimeout", so)
-        self.assertIn("tcpFastOpen", so)
+        # TFO по умолчанию ВЫКЛЮЧЕН (инцидент 28.08.2026).
+        self.assertNotIn("tcpFastOpen", so,
+                         "tcpFastOpen не должен быть в sockopt по умолчанию (анти-DPI)")
         # КРИТИЧНО: не должно быть tcpCongestion='bbr' — это ломало YouTube.
         self.assertNotIn("tcpCongestion", so,
                          "tcpCongestion НЕ должен присутствовать (bbr ломал YouTube)")

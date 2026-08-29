@@ -250,8 +250,11 @@ def _build_singbox_mux_json(state: dict, frag_packets: str, frag_length: str,
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 
+    # TFO — только по настройке tfo_settings (дефолт ВЫКЛ,
+    # инцидент 28.08.2026: DPI резал data-in-SYN).
+    from chimera.modules.tfo_settings import tfo_dial
     dial = {
-        "tcp_fast_open": True,
+        **tfo_dial(),
         "fragment": {"enabled": True, "size": frag_length, "sleep": frag_interval},
     }
     multiplex = build_singbox_multiplex(sb_protocol)
