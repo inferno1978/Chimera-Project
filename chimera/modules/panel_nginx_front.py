@@ -635,8 +635,12 @@ def panel_nginx_front_remove(
                 subprocess.run([np, "save"], capture_output=True, check=False)
         # Также снимаем orphaned UFW правило (если осталось).
         if _sh.which("ufw"):
+            # text=True ОБЯЗАТЕЛЬНО при input=str (иначе memoryview()
+            # падает: «a bytes-like object is required, not 'str'» —
+            # инцидент 29.08.2026, прод). Паттерн как в port_registry.
             subprocess.run(["ufw", "delete", "allow", f"{port}/tcp"],
-                           capture_output=True, input="y\n", check=False)
+                           capture_output=True, text=True,
+                           input="y\n", check=False)
 
     # 5. Очищаем state.
     state_file.unlink(missing_ok=True)
