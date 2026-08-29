@@ -246,11 +246,14 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 
+    # TFO — только по настройке tfo_settings (дефолт ВЫКЛ,
+    # инцидент 28.08.2026: DPI резал data-in-SYN).
+    from chimera.modules.tfo_settings import tfo_sockopt
     sockopt = (
         build_fragment_sockopt(packets, length, interval)
         if packets and length and interval
         else {
-            "tcpFastOpen": True,
+            **tfo_sockopt(),
             "tcpKeepAliveInterval": 15,
             "tcpKeepAliveIdle": 60,
             "tcpUserTimeout": 30000,
@@ -323,9 +326,11 @@ def _build_singbox_json(state: dict, packets: str, length: str,
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 
+    # TFO — только по настройке tfo_settings (дефолт ВЫКЛ).
+    from chimera.modules.tfo_settings import tfo_dial
     dial_fields: dict = {}
     if packets and length and interval:
-        dial_fields["tcp_fast_open"] = True
+        dial_fields.update(tfo_dial())
         dial_fields["fragment"] = {"enabled": True, "size": length, "sleep": interval}
 
     if proto == "reality":

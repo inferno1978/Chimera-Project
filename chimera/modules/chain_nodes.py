@@ -61,6 +61,10 @@ from typing import Optional
 
 from chimera.modules.agh_probe import agh_dns_available
 
+# TFO (TCP Fast Open): централизованная настройка, дефолт ВЫКЛЮЧЕН
+# (инцидент 28.08.2026 — DPI резал data-in-SYN, см. tfo_settings.py)
+from chimera.modules.tfo_settings import tfo_sockopt
+
 
 # =============================================================================
 #  ОТЛОЖЕННАЯ ПРИВЯЗКА К ЯДРУ (_core.py)
@@ -931,7 +935,7 @@ def _make_exit_node_config(nd: dict) -> dict:
                 "network":  "xhttp",
                 "security": "tls",
                 "sockopt":  {
-                    "tcpFastOpen":        True,
+                    **tfo_sockopt(),
                     "tcpKeepAliveInterval": 15,
                     "tcpKeepAliveIdle":   60,
                     "tcpUserTimeout":     30000,
@@ -2076,7 +2080,7 @@ def generate_xray_config_chain_entry_multi() -> None:
                     "network":  "xhttp",
                     "security": "tls",
                     "sockopt":  {
-                        "tcpFastOpen":        True,
+                        **tfo_sockopt(),
                         "tcpKeepAliveInterval": 15,
                         "tcpKeepAliveIdle":   60,
                         "tcpUserTimeout":     30000,

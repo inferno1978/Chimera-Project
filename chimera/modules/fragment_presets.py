@@ -231,9 +231,12 @@ def _generate_one(preset: dict) -> Optional[Path]:
         if not server_host or not uuid_val:
             return None
 
-        # sockopt без fragment
+        # sockopt без fragment.
+        # TFO — только по настройке tfo_settings (дефолт ВЫКЛ,
+        # инцидент 28.08.2026: DPI резал data-in-SYN).
+        from chimera.modules.tfo_settings import tfo_sockopt
         sockopt = {
-            "tcpFastOpen": True,
+            **tfo_sockopt(),
             "tcpKeepAliveInterval": 15,
             "tcpKeepAliveIdle":     60,
             "tcpUserTimeout":       30000,
