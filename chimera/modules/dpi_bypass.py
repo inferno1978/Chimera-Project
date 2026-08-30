@@ -111,6 +111,45 @@ B4_VERSION = "1.78.0"
 B4_BINARY_PATH = Path("/usr/local/bin/b4")
 B4_CONFIG_DIR  = Path("/etc/b4")
 B4_CONFIG_FILE = B4_CONFIG_DIR / "config.json"
+
+
+# ── Geosite.dat для b4 (system.geo.sitedat_path) ──────────────────────────
+# Прежние версии Chimera хардкодили /usr/share/xray/geosite.dat — «делим
+# geosite Xray с b4». На установках без Xray (или где /usr лежит на
+# read-only ФС: контейнер, immutable-слой) файла нет, а Web UI b4 при
+# Update геосайта пытается создать /usr/share/xray и падает с 500
+# (mkdir: read-only file system). Живой путь: общий geosite.dat Xray,
+# если файл существует; иначе — собственный /etc/b4/geosite.dat
+# (дефолтная Destination Directory Web UI b4, базу панель качает сама).
+B4_XRAY_GEOSITE_LEGACY  = "/usr/share/xray/geosite.dat"
+B4_GEOSITE_SHARED_PATHS = ("/usr/local/share/xray/geosite.dat",
+                           "/usr/share/xray/geosite.dat")
+B4_GEOSITE_LOCAL_PATH   = str(B4_CONFIG_DIR / "geosite.dat")
+B4_GEOIP_URL            = ("https://github.com/DanielLavrushin/b4geoip/"
+                           "releases/latest/download/geoip.dat")
+
+
+def _b4_geosite_path() -> str:
+    """Живой путь geosite.dat для system.geo.sitedat_path.
+
+    Первый существующий общий geosite.dat Xray (порядок как в поиске
+    asset-каталогов Xray: /usr/local/share/xray → /usr/share/xray),
+    иначе /etc/b4/geosite.dat — туда Web UI b4 скачивает базу сам.
+    B4_GEOSITE_SHARED_PATHS читается при вызове (тестируется патчем).
+    """
+    for candidate in B4_GEOSITE_SHARED_PATHS:
+        if Path(candidate).is_file():
+            return candidate
+    return B4_GEOSITE_LOCAL_PATH
+
+
+def _b4_geo_section() -> dict:
+    """Секция system.geo для нового b4-конфига (пути geosite/geoip)."""
+    return {
+        "sitedat_path": _b4_geosite_path(),
+        "ipdat_path": str(B4_CONFIG_DIR / "geoip.dat"),
+        "ipdat_url": B4_GEOIP_URL,
+    }
 B4_SETS_DIR    = B4_CONFIG_DIR / "sets"
 B4_LOG_DIR     = Path("/var/log/b4")
 B4_UNIT_PATH   = Path("/etc/systemd/system/b4.service")
@@ -860,8 +899,10 @@ def _write_empty_config() -> bool:
 
     ВАЖНО: system.geo.sitedat_path нужен для сетов с geosite_categories
     (в т.ч. создаваемых через Discovery в Web UI): без него валидация b4
-    отклоняет сет с 'geosite path must be configured'. Путь указывает на
-    geosite.dat самого Xray — отдельный файл b4 не нужен.
+    отклоняет сет с 'geosite path must be configured'. Путь выбирает
+    _b4_geosite_path(): общий geosite.dat Xray, если файл существует,
+    иначе /etc/b4/geosite.dat — куда Web UI b4 скачивает базу сам
+    (хардкод /usr/share/xray на read-only /usr падал с 500).
     """
     B4_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     B4_SETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -869,11 +910,7 @@ def _write_empty_config() -> bool:
     config = {
         "sets": [],
         "system": {
-            "geo": {
-                "sitedat_path": "/usr/share/xray/geosite.dat",
-                "ipdat_path": "/etc/b4/geoip.dat",
-                "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
-            },
+            "geo": _b4_geo_section(),
         },
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
@@ -901,11 +938,7 @@ def _write_default_config() -> bool:
         "sets": [youtube_set],
         # Система (geosite/geoip пути для Discovery) — как в _write_empty_config.
         "system": {
-            "geo": {
-                "sitedat_path": "/usr/share/xray/geosite.dat",
-                "ipdat_path": "/etc/b4/geoip.dat",
-                "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
-            },
+            "geo": _b4_geo_section(),
         },
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
@@ -1509,7 +1542,11 @@ def _b4_clean_legacy_config_keys(cfg: dict) -> int:
         (NormalizeQUICFilter переписывает всё ≠ "all" в "sni");
       • "system.geosite_path" — правильное поле system.geo.sitedat_path
         (GeoDatConfig, json-тег sitedat_path);
-      • "b4_version" внутри сета — не поле SetConfig, informational-мусор.
+      • "b4_version" внутри сета — не поле SetConfig, informational-мусор;
+      • system.geo.sitedat_path == "/usr/share/xray/geosite.dat" (хардкод
+        прежних версий Chimera), а файла на машине нет — путь переводится
+        на живой (geosite.dat Xray, если появился, иначе /etc/b4/geosite.dat):
+        иначе Update геосайта в Web UI b4 падает с 500 на read-only /usr.
 
     Вызывается перед записью config.json из switch_preset() и
     import_custom_set() — конфиг, написанный старой Chimera, конвергирует
@@ -1531,6 +1568,19 @@ def _b4_clean_legacy_config_keys(cfg: dict) -> int:
         geo = system.setdefault("geo", {})
         if isinstance(geo, dict) and not geo.get("sitedat_path") and legacy_path:
             geo["sitedat_path"] = legacy_path
+    # 2b. Мёртвый хардкод прежних версий Chimera: sitedat_path указывает на
+    # geosite.dat Xray, которого на машине нет (нет Xray, /usr на read-only
+    # ФС — контейнер) → Web UI b4 при Update геосайта падает с 500
+    # (mkdir /usr/share/xray: read-only file system). Переводим на живой
+    # путь из _b4_geosite_path() (файл Xray, если появился, иначе /etc/b4).
+    system = cfg.get("system")
+    if isinstance(system, dict):
+        geo = system.get("geo")
+        if isinstance(geo, dict) and geo.get("sitedat_path") == B4_XRAY_GEOSITE_LEGACY:
+            healed = _b4_geosite_path()
+            if healed != B4_XRAY_GEOSITE_LEGACY:
+                geo["sitedat_path"] = healed
+                fixed += 1
     # 3. Мёртвое поле b4_version в сетах.
     sets = cfg.get("sets")
     if isinstance(sets, list):
@@ -1568,11 +1618,7 @@ def switch_preset(preset_name: str) -> bool:
     # Секция system (geosite/geoip пути для Discovery) — обязательна.
     if not existing_cfg.get("system"):
         existing_cfg["system"] = {
-            "geo": {
-                "sitedat_path": "/usr/share/xray/geosite.dat",
-                "ipdat_path": "/etc/b4/geoip.dat",
-                "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
-            },
+            "geo": _b4_geo_section(),
         }
     # Чистим legacy-поля старого конфига (udp/routing, geosite_path, b4_version).
     legacy_fixed = _b4_clean_legacy_config_keys(existing_cfg)
@@ -2332,11 +2378,7 @@ def import_custom_set(json_str: str) -> bool:
     # сохраняем её как есть.
     if not existing_cfg.get("system"):
         existing_cfg["system"] = {
-            "geo": {
-                "sitedat_path": "/usr/share/xray/geosite.dat",
-                "ipdat_path": "/etc/b4/geoip.dat",
-                "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/releases/latest/download/geoip.dat",
-            },
+            "geo": _b4_geo_section(),
         }
     # Чистим legacy-поля старого конфига (udp/routing, geosite_path, b4_version).
     legacy_fixed = _b4_clean_legacy_config_keys(existing_cfg)

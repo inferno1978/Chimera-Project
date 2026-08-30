@@ -2,6 +2,59 @@
 
 ---
 
+## FIX(dpi_bypass+youtube_b4): живой geosite-путь для b4 вместо хардкода /usr/share/xray (500 в Web UI при Update геосайта) — 30 августа 2026
+
+**Контекст:** на chimeravpn.online (91.224.87.154) Update Geosite/GeoIP в
+Web UI b4 (Settings → Geodat Settings) падал с ошибкой 500:
+
+    Error: 500: failed to create directory /usr/share/xray:
+    mkdir /usr/share/xray: read-only file system
+
+**Корень:** модули dpi_bypass/youtube_b4 при создании/пополнении
+b4-конфига хардкодили `system.geo.sitedat_path =
+"/usr/share/xray/geosite.dat"` («делим geosite.dat Xray с b4») — по 4
+места в каждом модуле: _write_empty_config, _write_default_config,
+switch_preset, import_custom_set. На установках без Xray или с read-only
+/usr (контейнер, immutable-слой) файла нет, а Web UI b4 при Update
+пытается создать каталог из sitedat_path и получает EROFS → 500; сам b4
+при каждом сохранении сета с geosite-категориями спамит «Geosite file
+not found». Сам b4 (Go-код, UI, инсталлер) к этому пути отношения не
+имеет — источник пути именно Chimera (проверено grep по исходникам b4
+v1.80.2: строка /usr/share/xray в коде b4 отсутствует).
+
+**Фиксы (v72.4):**
+
+1. Новый резолвер `_b4_geosite_path()`: первый существующий общий
+   geosite.dat Xray (/usr/local/share/xray → /usr/share/xray, порядок
+   asset-поиска Xray), иначе — собственный `/etc/b4/geosite.dat`
+   (дефолтная Destination Directory Web UI b4: панель качает базу туда
+   без ошибок). Единая `_b4_geo_section()` используется во всех 4 местах
+   обоих модулей.
+2. Самолечение в `_b4_clean_legacy_config_keys` (правило 2b): конфиг со
+   старым хардкодом `/usr/share/xray/geosite.dat` при первом же
+   переключении пресета / импорте сета переводится на живой путь (файл
+   Xray, если появился, иначе /etc/b4/geosite.dat). Произвольные
+   пользовательские пути не трогаются.
+3. Инцидент на chimeravpn.online закрыт параллельно руками: geosite.dat
+   (Loyalsoldier, 11 MB) и geoip.dat (b4geoip, 18 MB) скачаны в /etc/b4,
+   конфиг уже указывает туда; geosite-категории сетов
+   (meta/instagram/youtube/google/xhamster) разворачиваются в домены,
+   spam «Geosite file not found» прекратился, Update в Web UI проходит.
+4. Тесты: +5 (резолвер, предпочтение общего файла Xray при clean
+   install, самолечение мёртвого хардкода, репойнт на живой общий файл,
+   неприкосновенность пользовательских путей), 5 существующих переведены
+   на новые инварианты/нейтральные пути, патчи B4_GEOSITE_SHARED_PATHS
+   дают детерминизм на любой машине (в т.ч. с установленным Xray).
+   218 passed (test_dpi_bypass.py) + 24 passed (test_b4_mcp_nginx.py).
+5. FAQ (DPI_BYPASS_FAQ.md): пример конфига и описание sitedat_path
+   обновлены под резолвер.
+
+**Затронуто:** chimera/modules/dpi_bypass.py,
+chimera/modules/youtube_b4.py, tests/test_dpi_bypass.py,
+docs/faq/DPI_BYPASS_FAQ.md.
+
+---
+
 ## FIX(scripts): enable-b4-mcp-nginx.sh v72.3 — бэкапы вне sites-enabled («conflicting server name») — 30 августа 2026
 
 **Контекст:** первый запуск скрипта v72.2 на chimeravpn.online

@@ -264,16 +264,19 @@ python3 -m chimera.modules.youtube_b4 install
      "sets": [],
      "system": {
        "geo": {
-         "sitedat_path": "/usr/share/xray/geosite.dat",
+         "sitedat_path": "<geosite.dat Xray, если он есть, иначе /etc/b4/geosite.dat>",
          "ipdat_path": "/etc/b4/geoip.dat",
          "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/..."
        }
      }
    }
    ```
-   `system.geo.sitedat_path` — путь к geosite.dat Xray: сеты с
+   `system.geo.sitedat_path` — путь к geosite.dat: сеты с
    geosite-категориями (в т.ч. из Discovery) валидируются b4 только при
-   заданном пути.
+   заданном пути. Если на машине стоит Xray, используется его geosite.dat
+   (общий файл); иначе — /etc/b4/geosite.dat, который Web UI b4 скачивает
+   сам (Settings → Geodat Settings → Update). Хардкод /usr/share/xray из
+   прежних версий убран: на read-only /usr Update падал с 500.
 3. Создаётся systemd-unit `/etc/systemd/system/b4.service`.
 4. iptables-правила Chimera НЕ ставятся: b4 сам создаёт свою таблицу
    `b4_mangle` в nftables (IPv4+IPv6, перехват первых пакетов соединения).
