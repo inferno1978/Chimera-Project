@@ -1918,10 +1918,12 @@ class TestCleanInstallEmptyConfig(unittest.TestCase):
         orig_dir = self.youtube_b4.B4_CONFIG_DIR
         orig_sets = self.youtube_b4.B4_SETS_DIR
         orig_log = self.youtube_b4.B4_LOG_DIR
+        orig_shared = self.youtube_b4.B4_GEOSITE_SHARED_PATHS
         self.youtube_b4.B4_CONFIG_FILE = config_file
         self.youtube_b4.B4_CONFIG_DIR = tmpdir
         self.youtube_b4.B4_SETS_DIR = tmpdir / "sets"
         self.youtube_b4.B4_LOG_DIR = tmpdir / "log"
+        self.youtube_b4.B4_GEOSITE_SHARED_PATHS = ()  # нет общего geosite Xray
         try:
             self.youtube_b4._write_empty_config()
             cfg = json.loads(config_file.read_text())
@@ -1932,11 +1934,12 @@ class TestCleanInstallEmptyConfig(unittest.TestCase):
             self.assertNotIn("udp", cfg,
                              "верхнеуровневый udp — мёртвый ключ b4 "
                              "(QUIC-настройки per-set)")
-            # system.geo.sitedat_path — живой путь к geosite.dat.
+            # system.geo.sitedat_path — живой путь к geosite.dat:
+            # без общего файла Xray — собственный путь b4 (/etc/b4).
             self.assertIn("system", cfg)
             self.assertIn("geo", cfg["system"])
             self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
-                             "/usr/share/xray/geosite.dat")
+                             "/etc/b4/geosite.dat")
             self.assertNotIn("geosite_path", cfg["system"],
                              "system.geosite_path — мёртвый ключ "
                              "(правильный — system.geo.sitedat_path)")
@@ -1945,6 +1948,31 @@ class TestCleanInstallEmptyConfig(unittest.TestCase):
             self.youtube_b4.B4_CONFIG_DIR = orig_dir
             self.youtube_b4.B4_SETS_DIR = orig_sets
             self.youtube_b4.B4_LOG_DIR = orig_log
+            self.youtube_b4.B4_GEOSITE_SHARED_PATHS = orig_shared
+
+    def test_write_empty_config_prefers_shared_xray_geosite(self):
+        """Общий geosite.dat Xray существует → sitedat_path указывает на него."""
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        shared = tmpdir / "geosite.dat"
+        shared.write_bytes(b"shared-xray-geosite")
+        config_file = tmpdir / "config.json"
+        mod = self.youtube_b4
+        orig = (mod.B4_CONFIG_FILE, mod.B4_CONFIG_DIR, mod.B4_SETS_DIR,
+                mod.B4_LOG_DIR, mod.B4_GEOSITE_SHARED_PATHS)
+        mod.B4_CONFIG_FILE = config_file
+        mod.B4_CONFIG_DIR = tmpdir
+        mod.B4_SETS_DIR = tmpdir / "sets"
+        mod.B4_LOG_DIR = tmpdir / "log"
+        mod.B4_GEOSITE_SHARED_PATHS = (str(shared),)
+        try:
+            mod._write_empty_config()
+            cfg = json.loads(config_file.read_text())
+            self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
+                             str(shared))
+        finally:
+            (mod.B4_CONFIG_FILE, mod.B4_CONFIG_DIR, mod.B4_SETS_DIR,
+             mod.B4_LOG_DIR, mod.B4_GEOSITE_SHARED_PATHS) = orig
 
     def test_detect_returns_none_for_empty_config(self):
         """_detect_active_preset_from_config() возвращает 'none' для пустого config."""
@@ -2449,7 +2477,8 @@ class TestB4LegacyConfigCleanup(unittest.TestCase):
       • filter_quic "block" не существует — NormalizeQUICFilter всё,
         кроме "all", переписывает в "sni";
       • правильный путь geosite — system.geo.sitedat_path;
-      • "b4_version" в сете — не поле SetConfig.
+      • "b4_version" в сете — не поле SetConfig;
+      • sitedat_path с мёртвым xray-хардкодом лечится на живой путь.
     """
 
     def setUp(self):
@@ -2480,7 +2509,7 @@ class TestB4LegacyConfigCleanup(unittest.TestCase):
             cfg = {
                 "sets": [],
                 "system": {
-                    "geosite_path": "/usr/share/xray/geosite.dat",
+                    "geosite_path": "/opt/xray/geosite.dat",
                     "geo": {"ipdat_path": "/etc/b4/geoip.dat"},
                 },
             }
@@ -2488,7 +2517,7 @@ class TestB4LegacyConfigCleanup(unittest.TestCase):
             self.assertEqual(fixed, 1)
             self.assertNotIn("geosite_path", cfg["system"])
             self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
-                             "/usr/share/xray/geosite.dat")
+                             "/opt/xray/geosite.dat")
             # Существующие geo-поля не тронуты
             self.assertEqual(cfg["system"]["geo"]["ipdat_path"],
                              "/etc/b4/geoip.dat")
@@ -2506,6 +2535,74 @@ class TestB4LegacyConfigCleanup(unittest.TestCase):
             mod._b4_clean_legacy_config_keys(cfg)
             self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
                              "/b4/geosite.dat")
+
+    def test_heals_dead_xray_sitedat_path(self):
+        """REGRESSION (panel.example, 30.08.2026): хардкод
+        /usr/share/xray/geosite.dat без файла → /etc/b4/geosite.dat.
+
+        Web UI b4 падал с 500 'failed to create directory /usr/share/xray:
+        read-only file system' при Update геосайта — sitedat_path в конфиге
+        указывал на отсутствующий geosite.dat Xray.
+        """
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            orig = mod.B4_GEOSITE_SHARED_PATHS
+            mod.B4_GEOSITE_SHARED_PATHS = ()
+            try:
+                cfg = {"sets": [], "system": {
+                    "geo": {"sitedat_path": "/usr/share/xray/geosite.dat"}}}
+                fixed = mod._b4_clean_legacy_config_keys(cfg)
+                self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
+                                 "/etc/b4/geosite.dat")
+                self.assertGreaterEqual(fixed, 1)
+            finally:
+                mod.B4_GEOSITE_SHARED_PATHS = orig
+
+    def test_heals_dead_xray_path_to_live_shared_file(self):
+        """Мёртвый xray-хардкод + живой общий файл в другом месте → репойнт."""
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        shared = tmpdir / "geosite.dat"
+        shared.write_bytes(b"shared")
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            orig = mod.B4_GEOSITE_SHARED_PATHS
+            mod.B4_GEOSITE_SHARED_PATHS = (str(shared),)
+            try:
+                cfg = {"sets": [], "system": {
+                    "geo": {"sitedat_path": "/usr/share/xray/geosite.dat"}}}
+                fixed = mod._b4_clean_legacy_config_keys(cfg)
+                self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
+                                 str(shared))
+                self.assertGreaterEqual(fixed, 1)
+            finally:
+                mod.B4_GEOSITE_SHARED_PATHS = orig
+
+    def test_b4_geosite_path_resolver(self):
+        """Резолвер: первый существующий общий файл Xray, иначе /etc/b4."""
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        first = tmpdir / "first.dat"
+        first.write_bytes(b"1")
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            orig = mod.B4_GEOSITE_SHARED_PATHS
+            try:
+                mod.B4_GEOSITE_SHARED_PATHS = (
+                    str(tmpdir / "missing.dat"), str(first))
+                self.assertEqual(mod._b4_geosite_path(), str(first))
+                mod.B4_GEOSITE_SHARED_PATHS = ()
+                self.assertEqual(mod._b4_geosite_path(),
+                                 "/etc/b4/geosite.dat")
+            finally:
+                mod.B4_GEOSITE_SHARED_PATHS = orig
+
+    def test_custom_sitedat_path_never_touched(self):
+        """Пользовательский sitedat_path не лечим — только наш хардкод."""
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            cfg = {"sets": [], "system": {
+                "geo": {"sitedat_path": "/mnt/tmpfs/geosite.dat"}}}
+            fixed = mod._b4_clean_legacy_config_keys(cfg)
+            self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
+                             "/mnt/tmpfs/geosite.dat")
+            self.assertEqual(fixed, 0)
 
     def test_removes_b4_version_from_sets(self):
         """Мёртвое поле b4_version вычищается из каждого сета."""
@@ -2530,7 +2627,7 @@ class TestB4LegacyConfigCleanup(unittest.TestCase):
                 "version": 52,
                 "sets": [{"id": "x", "udp": {"mode": "reject",
                                             "filter_quic": "all"}}],
-                "system": {"geo": {"sitedat_path": "/usr/share/xray/geosite.dat"}},
+                "system": {"geo": {"sitedat_path": "/opt/geosite.dat"}},
             }
             snapshot = json.loads(json.dumps(cfg))
             fixed = mod._b4_clean_legacy_config_keys(cfg)
@@ -2553,6 +2650,7 @@ class TestB4LegacyConfigCleanup(unittest.TestCase):
         self.dpi_bypass._STATE_FILE = state_file
         self.dpi_bypass.subprocess = MagicMock()
         self.dpi_bypass._b4_rest_import_set = lambda cs: None
+        self.dpi_bypass.B4_GEOSITE_SHARED_PATHS = ()  # нет geosite Xray
         self.dpi_bypass.apply_routing_for_all_sets = lambda: {
             "applied": 0, "removed": 0, "total_domains": 0, "errors": []}
         test_json = json.dumps({
@@ -2635,6 +2733,7 @@ class TestImportPreservesTopLevelConfig(unittest.TestCase):
         self.dpi_bypass._STATE_FILE = self._state_file
         self.dpi_bypass.subprocess = MagicMock()
         self.dpi_bypass._b4_rest_import_set = lambda cs: None
+        self.dpi_bypass.B4_GEOSITE_SHARED_PATHS = ()  # нет geosite Xray
         self.dpi_bypass.apply_routing_for_all_sets = lambda: {
             "applied": 0, "removed": 0, "total_domains": 0, "errors": []}
 
@@ -2668,10 +2767,11 @@ class TestImportPreservesTopLevelConfig(unittest.TestCase):
         # Старый сет не потерян, новый добавлен
         ids = [s["id"] for s in saved["sets"]]
         self.assertEqual(ids, ["old-set", "new-set"])
-        # Legacy-поле system.geosite_path мигрировано в system.geo.sitedat_path
+        # Legacy-поле system.geosite_path мигрировано в system.geo.sitedat_path,
+        # мёртвый xray-хардкод заменён на живой /etc/b4/geosite.dat
         self.assertNotIn("geosite_path", saved["system"])
         self.assertEqual(saved["system"]["geo"]["sitedat_path"],
-                         "/usr/share/xray/geosite.dat")
+                         "/etc/b4/geosite.dat")
 
     def test_corrupted_config_recovers(self):
         """Повреждённый config.json → импорт в чистый конфиг, не крах."""
@@ -2685,7 +2785,7 @@ class TestImportPreservesTopLevelConfig(unittest.TestCase):
         self.assertEqual(saved["sets"][0]["id"], "fresh-set")
         # system-секция создана (geosite для Discovery) — живой ключ
         self.assertEqual(saved["system"]["geo"]["sitedat_path"],
-                         "/usr/share/xray/geosite.dat")
+                         "/etc/b4/geosite.dat")
 
 
 class TestImportViaRestApi(unittest.TestCase):
