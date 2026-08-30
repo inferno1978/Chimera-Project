@@ -1074,6 +1074,7 @@ def _b4_nginx_install(port: int, use_self_signed: bool, domain) -> tuple:
         websocket_origin_rewrite=False,
         backend_http_scheme="http",  # b4 Web UI — HTTP (нет своего TLS)
         cert_name_slug="chimera-b4",
+        mcp_proxy=True,  # v72.2: location /api/mcp с loopback-Host (go-sdk)
     )
     # Также закрываем прямой доступ к 9700 (только через nginx).
     if ok:
@@ -1981,11 +1982,66 @@ def _xray_domain_entries_from_b4(domains: list) -> list:
 #  атомарное сохранение config.json + обновление живого состояния БЕЗ
 #  рестарта сервиса). Импорт через REST не теряет топ-уровневые секции
 #  config.json (queue / ui / system.webserver) — их пишет и читает сам
-#  b4. Авторизация Web UI на Chimera-установках по умолчанию выключена
-#  (Chimera не задаёт username/password); если включена — REST вернёт
-#  401 и вызывающий код откатится на прямую запись config.json.
+#  b4. Web-авторизация (v72.2): если администратор включил username/
+#  password в b4 Web UI — Chimera логинится через /api/login и
+#  отправляет Bearer-токен (учётка читается из config.json; токен
+#  кэшируется до 401, затем перевыпускается).
 _B4_REST_TIMEOUT = 5.0  # сек; API живёт на 127.0.0.1
 _B4_REST_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_B4_API_TOKEN = {"value": None}  # кэш Bearer-токена REST API (web-auth b4)
+
+
+def _b4_web_credentials() -> "Optional[tuple]":
+    """(username, password) web-авторизации b4 из config.json.
+
+    Chimera учётку не задаёт, но администратор может включить auth в
+    b4 Web UI (Settings → Web Server) — при открытом наружу nginx front
+    (порт 9743) это обязательная мера: без неё /api/config и /api/sets
+    открыты всему интернету.
+    """
+    try:
+        if not B4_CONFIG_FILE.exists():
+            return None
+        cfg = json.loads(B4_CONFIG_FILE.read_text())
+        ws = (cfg.get("system") or {}).get("web_server")
+        if not isinstance(ws, dict):
+            return None
+        u, p = str(ws.get("username") or ""), str(ws.get("password") or "")
+        return (u, p) if u and p else None
+    except Exception:
+        return None
+
+
+def _b4_api_token() -> "Optional[str]":
+    """Bearer-токен REST API b4: POST /api/login → {"token": ...}.
+
+    Токен живёт 24ч на стороне b4; кэшируем его в _B4_API_TOKEN,
+    при 401 вызывающий код сбрасывает кэш и перевыпускает.
+    Возвращает None, если web-auth выключена или логин не удался
+    (вызывающий код тогда отправит запрос без токена — как раньше).
+    """
+    if _B4_API_TOKEN["value"]:
+        return _B4_API_TOKEN["value"]
+    creds = _b4_web_credentials()
+    if not creds:
+        return None
+    try:
+        port = _b4_web_port()
+        if not port:
+            return None
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/login",
+            data=json.dumps({"username": creds[0], "password": creds[1]}).encode("utf-8"),
+            method="POST")
+        req.add_header("Content-Type", "application/json")
+        with _B4_REST_OPENER.open(req, timeout=_B4_REST_TIMEOUT) as resp:
+            body = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+        token = body.get("token") if isinstance(body, dict) else None
+        if token:
+            _B4_API_TOKEN["value"] = token
+        return token
+    except Exception:
+        return None
 
 
 def _b4_web_port() -> Optional[int]:
@@ -2031,8 +2087,13 @@ def _b4_web_port() -> Optional[int]:
     return B4_WEB_PORT
 
 
-def _b4_rest_request(method: str, path: str, payload: Optional[dict] = None):
+def _b4_rest_request(method: str, path: str, payload: Optional[dict] = None,
+                     _retry_auth: bool = True):
     """HTTP-запрос к локальному REST API b4 (без прокси, 127.0.0.1).
+
+    При включённой web-авторизации добавляет Authorization: Bearer
+    (токен из _b4_api_token); при 401 перевыпускает токен и
+    повторяет запрос один раз.
 
     Returns:
         (status_code, parsed_body | None) — при любом HTTP-ответе;
@@ -2045,6 +2106,9 @@ def _b4_rest_request(method: str, path: str, payload: Optional[dict] = None):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    token = _b4_api_token()
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
     try:
         with _B4_REST_OPENER.open(req, timeout=_B4_REST_TIMEOUT) as resp:
             body = resp.read().decode("utf-8", errors="replace")
@@ -2053,6 +2117,10 @@ def _b4_rest_request(method: str, path: str, payload: Optional[dict] = None):
             except json.JSONDecodeError:
                 return (resp.status, None)
     except urllib.error.HTTPError as e:
+        if e.code == 401 and _retry_auth:
+            # Токен протух (TTL 24ч) или пароль сменили — перевыпускаем.
+            _B4_API_TOKEN["value"] = None
+            return _b4_rest_request(method, path, payload, _retry_auth=False)
         try:
             body = e.read().decode("utf-8", errors="replace")
             parsed = json.loads(body) if body.strip() else None
