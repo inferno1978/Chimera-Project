@@ -2,6 +2,56 @@
 
 ---
 
+## FEAT/SECURITY(panel_nginx_front+dpi_bypass+youtube_b4): MCP-прокси b4 через nginx front + REST-авторизация b4 (v72.2) — 30 августа 2026
+
+**Контекст:** b4 >= 1.80 поднял MCP-сервер (`/api/mcp`, Model Context
+Protocol — управление b4 из AI-клиентов). Инцидент на chimeravpn.online
+(91.224.87.154, порт 9743): MCP-клиент с корректным токеном получал
+403 Forbidden.
+
+**Корень №1 (403):** MCP go-sdk (StreamableHTTPHandler) включает
+DNS-rebinding защиту: при loopback-бэкенде (nginx 9743 → 127.0.0.1:9700)
+Host-заголовок обязан быть loopback. nginx front слал `Host $host`
+(домен) → `Forbidden: invalid Host header`. Подтверждено ручной пробой:
+`Host: localhost` → initialize проходит.
+
+**Корень №2 (SECURITY):** REST API b4-панели был открыт БЕЗ авторизации
+(`/api/config`, `/api/sets` отдавали 200 без токена — Chimera не задаёт
+web_server.username/password, а администратор их не выставил). Любой
+мог читать и ПЕРЕЗАПИСЫВАТЬ конфиг b4 через публичный порт 9743.
+
+**Фиксы:**
+
+1. **panel_nginx_front.py** — новый параметр `mcp_proxy` (дефолт False,
+   чужие панели не затронуты): генерирует `location /api/mcp` с
+   `Host 127.0.0.1:<backend_port>` (обход DNS-rebinding защиты ТОЛЬКО
+   на этом пути), стриппингом Origin (mcpGate сверяет его с Host),
+   SSE-стримингом (`proxy_buffering off` — без него события
+   буферизуются) и `proxy_read_timeout 3600s`
+   (b4_find_bypass_strategy идёт минутами).
+2. **dpi_bypass.py + youtube_b4.py** — `_b4_nginx_install` теперь
+   передаёт `mcp_proxy=True`: после переустановки nginx front через TUI
+   MCP-локация сохраняется.
+3. **dpi_bypass.py + youtube_b4.py — REST-авторизация:** если
+   администратор включил username/password в b4 Web UI, Chimera
+   логинится `POST /api/login` → Bearer-токен (кэш до 401 → перевыпуск,
+   retry один раз). Учётка читается из `/etc/b4/config.json`. БЕЗ
+   этого фикса включение пароля панели ломало импорт сетов (401 →
+   откат на прямую запись config.json = конфликт с live-режимом b4).
+4. **scripts/enable-b4-mcp-nginx.sh** — one-shot для ЖИВОГО сервера:
+   находит фронт b4 (chimera-b4-nginx или любой сайт с proxy_pass на
+   127.0.0.1:9700), идемпотентно вставляет `location /api/mcp`,
+   `nginx -t` + reload + авточтобыоткат + финальная проба эндпоинта.
+
+**Порядок внедрения на живой ноде:** `git pull` →
+`sudo bash scripts/enable-b4-mcp-nginx.sh` → ВКЛЮЧИТЬ username/password
+в b4 Web UI (Settings → Web Server) — до этого панель открыта интернету.
+
+Тесты: tests/test_b4_mcp_nginx.py (17) — генерация vhost с/без mcp_proxy,
+передача mcp_proxy обоими модулями, credentials/token/Bearer/401-retry.
+
+---
+
 ## FIX(dns-ipv6): enable-dns-ipv6.sh v72.1 — ложный «DNS мёртв» на живом сервере: прямые пробы + settle + reset-failed + лестница отката; self-heal #0 в finalize (v72.1) — 30 августа 2026
 
 **Контекст (инцидент vds13195, 30.08):** первый запуск
