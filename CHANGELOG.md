@@ -2,6 +2,48 @@
 
 ---
 
+## FIX(scripts): enable-b4-mcp-nginx.sh v72.3 — бэкапы вне sites-enabled («conflicting server name») — 30 августа 2026
+
+**Контекст:** первый запуск скрипта v72.2 на chimeravpn.online
+(91.224.87.154) прошёл успешно (MCP-локация вставлена, nginx -t OK,
+MCP-клиенты заработали без Host-хаков), но на каждый nginx -t/reload
+вылезал warning:
+
+    [warn] conflicting server name "chimeravpn.online" on 0.0.0.0:9743, ignored
+
+**Корень:** скрипт клал бэкап конфига рядом с сайтом —
+`/etc/nginx/sites-enabled/chimera-b4-nginx.<ts>.preMCP.bak`. Debian-nginx
+подключает `sites-enabled/*` ЦЕЛИКОМ (все расширения, включая .bak),
+поэтому бэкап с оригинальным server-блоком (`server_name chimeravpn.online`
+:9743) грузился как дубликат. Для трафика не страшно (легаси-бэкап
+алфавитно позже основного файла → nginx его игнорировал, активен
+пропатченный конфиг), но warning замусоривает каждый nginx -t/reload,
+а при удалении основного файла легаси-бэкап молча стал бы активным
+конфигом БЕЗ MCP-локации.
+
+**Фиксы (v72.3):**
+
+1. Бэкапы пишутся в `/etc/nginx/chimera-backups/` — вне glob-каталогов
+   nginx (sites-enabled/*, conf.d/*.conf).
+2. Самоисцеление: повторный запуск выносит старые `*.preMCP.bak` из
+   sites-enabled/conf.d в chimera-backups/ (+ nginx -t + reload) ДО
+   раннего выхода «локация уже есть» — иначе уже пропатченная нода
+   никогда бы не дочистилась.
+3. Поиск фронта (fallback-режим без chimera-b4-nginx) больше не
+   принимает `.bak`-файлы за сайт.
+
+**Применение на живой ноде:** `cd /opt/chimera && git pull && sudo bash
+scripts/enable-b4-mcp-nginx.sh` — повторный запуск вынесет легаси-бэкап
+и уберёт warning.
+
+**Тесты:** tests/test_b4_mcp_nginx.py +7 (структурные: бэкап вне
+sites-enabled, чистка ДО раннего exit, skip .bak при поиске; функциональные
+в песочнице с фейковыми nginx/systemctl/curl: исцеление легаси-бэкапа,
+свежая вставка с бэкапом вне sites-enabled, идемпотентный повтор).
+Итого по файлу: 24.
+
+---
+
 ## FEAT/SECURITY(panel_nginx_front+dpi_bypass+youtube_b4): MCP-прокси b4 через nginx front + REST-авторизация b4 (v72.2) — 30 августа 2026
 
 **Контекст:** b4 >= 1.80 поднял MCP-сервер (`/api/mcp`, Model Context
