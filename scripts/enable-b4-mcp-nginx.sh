@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  Chimera Project — enable-b4-mcp-nginx.sh (v72.2)
+#  Chimera Project — enable-b4-mcp-nginx.sh (v72.3)
 # ============================================================================
 #  Добавляет location /api/mcp в существующий nginx front b4 Web UI
 #  (порт 9743) — чтобы MCP-клиенты (Claude, Cursor и др.) могли ходить
@@ -17,7 +17,15 @@
 #  ВАЖНО: MCP-сервер b4 должен быть включён в самом b4:
 #    b4 Web UI → Settings → API → MCP → Enable (+ сгенерировать токен).
 #
-#  Идемпотентен: повторный запуск ничего не меняет (если локация есть).
+#  v72.3: бэкапы больше НЕ пишутся в sites-enabled — nginx подключает
+#  /etc/nginx/sites-enabled/* ЦЕЛИКОМ (все файлы, включая .bak), и бэкап
+#  с оригинальным server-блоком давал на каждый nginx -t warning
+#  «conflicting server name ... ignored». Теперь бэкапы живут в
+#  /etc/nginx/chimera-backups/, а повторный запуск выносит туда старые
+#  .preMCP.bak из sites-enabled/conf.d (+ nginx -t + reload).
+#
+#  Идемпотентен: повторный запуск ничего не меняет в конфиге сайта
+#  (если локация есть) и заодно вычищает бэкапы v72.2 из sites-enabled.
 #  Безопасен: бэкап конфига + nginx -t + авточтобыоткат.
 #
 #  Запуск:  sudo bash scripts/enable-b4-mcp-nginx.sh
@@ -31,6 +39,8 @@ bad()  { echo -e "  ${R}[!!]${N} $*"; }
 hdr()  { echo -e "\n${B}── $* ──${N}"; }
 
 TS="$(date +%Y%m%d%H%M%S)"
+# Бэкапы ТОЛЬКО сюда: sites-enabled/* грузится nginx ЦЕЛИКОМ (все расширения).
+BAKDIR="/etc/nginx/chimera-backups"
 
 [ "$(id -u)" -eq 0 ] || { echo "Запусти от root: sudo bash $0"; exit 1; }
 
@@ -47,6 +57,7 @@ else
         [ -d "$d" ] || continue
         for f in "$d"/*.conf "$d"/*; do
             [ -f "$f" ] || continue
+            case "$f" in *.bak) continue ;; esac   # бэкапы — не сайт
             if grep -q "127.0.0.1:9700" "$f" 2>/dev/null && grep -q "proxy_pass" "$f" 2>/dev/null; then
                 SITE="$f"; break 2
             fi
@@ -61,8 +72,39 @@ if [ -z "$SITE" ]; then
 fi
 ok "сайт: $SITE"
 
-# ── 2. Проверки состояния ───────────────────────────────────────────────────
-hdr "2/4  Проверка текущего состояния"
+# ── 2. Чистка бэкапов и проверка состояния ───────────────────────────────────────────────────
+hdr "2/4  Чистка бэкапов и проверка состояния"
+
+# nginx подключает sites-enabled/* ЦЕЛИКОМ — .bak-файлы в нём грузятся
+# как дубликаты server-блоков («conflicting server name ... ignored»).
+# Выносим старые бэкапы (оставались там до v72.3) в BAKDIR.
+MOVED_LIST=""
+for d in /etc/nginx/sites-enabled /etc/nginx/conf.d; do
+    [ -d "$d" ] || continue
+    for old in "$d"/*.preMCP.bak; do
+        [ -f "$old" ] || continue
+        mkdir -p "$BAKDIR"
+        if mv "$old" "$BAKDIR/" 2>/dev/null; then
+            MOVED_LIST="$MOVED_LIST $old"
+            ok "бэкап вынесен из $d → $BAKDIR/: $(basename "$old")"
+        else
+            bad "не смог перенести $old — разберись вручную"
+        fi
+    done
+done
+if [ -n "$MOVED_LIST" ]; then
+    if nginx -t >/dev/null 2>&1; then
+        (nginx -s reload 2>/dev/null || systemctl reload nginx 2>/dev/null) \
+            && ok "nginx перезагружен — «conflicting server name» устранён"
+    else
+        bad "nginx -t FAILED после чистки — возвращаю бэкапы на место"
+        for old in $MOVED_LIST; do
+            mv "$BAKDIR/$(basename "$old")" "$old" 2>/dev/null || true
+        done
+        exit 1
+    fi
+fi
+
 if grep -q "location /api/mcp {" "$SITE"; then
     skip "location /api/mcp уже есть — готово"
     exit 0
@@ -77,7 +119,8 @@ ok "фронт найден, MCP-локации нет — добавляю"
 
 # ── 3. Вставка location /api/mcp ────────────────────────────────────────────
 hdr "3/4  Вставка location /api/mcp"
-BAK="$SITE.$TS.preMCP.bak"
+mkdir -p "$BAKDIR"
+BAK="$BAKDIR/$(basename "$SITE").$TS.preMCP.bak"
 cp -a "$SITE" "$BAK"
 ok "бэкап: $BAK"
 
@@ -175,4 +218,4 @@ echo -e '        "headers": { "Authorization": "Bearer <MCP-токен из b4>"
 echo -e '      }'
 echo -e '    }'
 echo -e "  После переустановки nginx front через TUI локация сохранится"
-echo -e "  (v72.2 генерирует её сам — обнови /opt/chimera: git pull)."
+echo -e "  (модули v72.2 генерируют её сами — обнови /opt/chimera: git pull)."

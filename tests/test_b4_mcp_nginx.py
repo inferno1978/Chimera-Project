@@ -22,6 +22,11 @@ nginx front b4 (порт 9743) до v72.2 слал Host $host (домен) → �
   5. REST-авторизация b4: _b4_web_credentials (config.json),
      _b4_api_token (POST /api/login, кэш), _b4_rest_request (Bearer,
      перевыпуск при 401).
+  6. scripts/enable-b4-mcp-nginx.sh (v72.3): бэкапы НЕ в sites-enabled
+     (nginx подключает sites-enabled/* ЦЕЛИКОМ, включая .bak → дубликат
+     server-блока «conflicting server name ... ignored»); повторный
+     запуск выносит старые .preMCP.bak в /etc/nginx/chimera-backups/.
+     Функционально — в песочнице (фейковые nginx/systemctl/curl).
 """
 from __future__ import annotations
 
@@ -284,6 +289,179 @@ class TestB4RestAuth(unittest.TestCase):
         self.assertEqual(opener.open.call_count, 1)  # без /api/login
         req = opener.open.call_args[0][0]
         self.assertIsNone(req.get_header("Authorization"))
+
+
+# ─── v72.3: гигиена бэкапов scripts/enable-b4-mcp-nginx.sh ───────────────────
+
+SH_PATH = _PROJECT_ROOT / "scripts" / "enable-b4-mcp-nginx.sh"
+
+_SITE_CONF = """server {
+    listen 9743 ssl;
+    server_name panel.example;
+    location / {
+        proxy_pass http://127.0.0.1:9700;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+"""
+
+_MCP_LOCATION = """    # MCP (Model Context Protocol) — b4 control plane.
+    location /api/mcp {
+        proxy_pass http://127.0.0.1:9700;
+        proxy_set_header Host 127.0.0.1:9700;
+        proxy_buffering off;
+    }
+"""
+
+
+def _site_with_mcp() -> str:
+    return _SITE_CONF.replace(
+        "    location / {", _MCP_LOCATION + "\n    location / {", 1)
+
+
+class TestScriptBackupHygieneStructural(unittest.TestCase):
+    """Инцидент 203.0.113.102 (30.08): скрипт v72.2 клал бэкап рядом с
+    сайтом (/etc/nginx/sites-enabled/chimera-b4-nginx.<ts>.preMCP.bak).
+    Debian-nginx подключает sites-enabled/* ЦЕЛИКОМ — все расширения,
+    включая .bak — поэтому бэкап грузился как дубликат server-блока:
+    «conflicting server name "panel.example" on 0.0.0.0:9743, ignored»
+    на каждый nginx -t/reload.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = SH_PATH.read_text(encoding="utf-8")
+
+    def test_bash_syntax(self):
+        import subprocess
+        r = subprocess.run(["bash", "-n", str(SH_PATH)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_backup_written_outside_sites_enabled(self):
+        """Бэкап пишется в /etc/nginx/chimera-backups/, НЕ рядом с сайтом."""
+        self.assertIn('BAKDIR="/etc/nginx/chimera-backups"', self.text)
+        self.assertIn('BAK="$BAKDIR/$(basename "$SITE").$TS.preMCP.bak"',
+                      self.text)
+        # паттерн v72.2 (бэкап прямо в sites-enabled) не должен вернуться
+        self.assertNotIn('BAK="$SITE.$TS.preMCP.bak"', self.text)
+
+    def test_cleanup_precedes_early_exit(self):
+        """Чистка старых .preMCP.bak идёт ДО раннего exit 0 «уже есть».
+
+        Без этого повторный запуск на ноде 203.0.113.102 (локация уже
+        вставлена) никогда не дошёл бы до чистки — warning остался бы
+        навсегда.
+        """
+        cleanup = self.text.index("*.preMCP.bak")
+        early = self.text.index("уже есть — готово")
+        self.assertLess(cleanup, early)
+        self.assertIn("conflicting server name", self.text)
+
+    def test_site_search_skips_bak_files(self):
+        """Поиск фронта не должен принять .bak-файл за сайт."""
+        self.assertIn("*.bak) continue", self.text)
+
+
+class TestScriptBackupHygieneFunctional(unittest.TestCase):
+    """Скрипт в песочнице: /etc/nginx → временный каталог, nginx/
+    systemctl/curl — фейки. Сценарии: исцеление легаси-бэкапа, свежая
+    вставка (бэкап вне sites-enabled), идемпотентный повтор.
+    """
+
+    def _sandbox(self, site_text: str, legacy_bak: bool = False):
+        import os
+        import subprocess
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="b4mcp_")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        tmp = Path(tmp)
+        nginx_root = tmp / "nginx"
+        sites = nginx_root / "sites-enabled"
+        sites.mkdir(parents=True)
+        (tmp / "bin").mkdir()
+        calls = tmp / "calls.txt"
+
+        def fake(name: str, body: str):
+            p = tmp / "bin" / name
+            p.write_text(body)
+            p.chmod(0o755)
+
+        fake("nginx", '#!/usr/bin/env bash\necho "nginx $*" >> "$CALLS"\nexit 0\n')
+        fake("systemctl", '#!/usr/bin/env bash\necho "systemctl $*" >> "$CALLS"\nexit 0\n')
+        # ответ MCP-эндпоинта (SSE) — чтобы финальная проба прошла
+        fake("curl", '#!/usr/bin/env bash\necho "event: message"\n'
+                     'echo \'data: {"jsonrpc":"2.0","id":1,"result":{}}\'\nexit 0\n')
+
+        site = sites / "chimera-b4-nginx"
+        site.write_text(site_text, encoding="utf-8")
+        if legacy_bak:
+            (sites / "chimera-b4-nginx.20260830115539.preMCP.bak").write_text(
+                _SITE_CONF, encoding="utf-8")
+
+        src = SH_PATH.read_text(encoding="utf-8")
+        src = src.replace("/etc/nginx", str(nginx_root))
+        src = src.replace('[ "$(id -u)" -eq 0 ]', "true")  # sandbox не root
+        run_sh = tmp / "run.sh"
+        run_sh.write_text(src, encoding="utf-8")
+
+        env = dict(os.environ,
+                   PATH=f"{tmp / 'bin'}:{os.environ['PATH']}",
+                   CALLS=str(calls))
+        r = subprocess.run(["bash", str(run_sh)], capture_output=True,
+                           text=True, env=env, timeout=60)
+        return r, site, sites, nginx_root / "chimera-backups", calls
+
+    def test_heal_legacy_backup_on_rerun(self):
+        """Нода после v72.2: локация есть, .bak лежит в sites-enabled →
+        повторный запуск выносит .bak в chimera-backups/ и reload'ит."""
+        r, site, sites, backups, calls = self._sandbox(
+            _site_with_mcp(), legacy_bak=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # .bak покинул sites-enabled и живёт в chimera-backups/
+        self.assertEqual(list(sites.glob("*.bak")), [])
+        moved = list(backups.glob("*.preMCP.bak"))
+        self.assertEqual(len(moved), 1, f"ожидался 1 бэкап: {moved}")
+        # конфиг сайта не тронут (идемпотентность)
+        self.assertEqual(site.read_text(encoding="utf-8"), _site_with_mcp())
+        # после чистки: nginx -t + reload
+        calls_text = calls.read_text()
+        self.assertIn("nginx -t", calls_text)
+        self.assertIn("nginx -s reload", calls_text)
+        self.assertIn("уже есть", r.stdout)
+
+    def test_fresh_insert_backup_outside_sites_enabled(self):
+        """Свежая нода: вставка локации + бэкап ТОЛЬКО в chimera-backups/."""
+        r, site, sites, backups, calls = self._sandbox(_SITE_CONF)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        cfg = site.read_text(encoding="utf-8")
+        self.assertIn("location /api/mcp {", cfg)
+        self.assertIn("proxy_set_header Host 127.0.0.1:9700;", cfg)
+        self.assertIn("proxy_buffering off;", cfg)
+        # оригинал сохранён и НЕ в sites-enabled (корень инцидента v72.2)
+        self.assertEqual(list(sites.glob("*.bak")), [])
+        saved = next(iter(backups.glob("*.preMCP.bak")))
+        self.assertEqual(saved.read_text(encoding="utf-8"), _SITE_CONF)
+        # nginx -t + reload + финальная проба прошли
+        calls_text = calls.read_text()
+        self.assertIn("nginx -t", calls_text)
+        self.assertIn("nginx -s reload", calls_text)
+        self.assertIn("MCP-эндпоинт отвечает", r.stdout)
+
+    def test_rerun_creates_no_new_backup(self):
+        """Повторный запуск после вставки: новых бэкапов, ноль изменений."""
+        r1, site, _, _, _ = self._sandbox(_SITE_CONF)
+        self.assertEqual(r1.returncode, 0, r1.stdout + r1.stderr)
+        cfg_after_first = site.read_text(encoding="utf-8")
+        # второй запуск по уже пропатченному конфигу (новая песочница с ним)
+        r2, site2, sites2, backups2, _ = self._sandbox(cfg_after_first)
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        self.assertEqual(len(list(backups2.glob("*.preMCP.bak"))), 0)
+        self.assertEqual(list(sites2.glob("*.bak")), [])
+        self.assertEqual(
+            site2.read_text(encoding="utf-8"), cfg_after_first)
+        self.assertIn("уже есть", r2.stdout)
 
 
 if __name__ == "__main__":
