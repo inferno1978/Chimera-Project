@@ -228,6 +228,7 @@ def _generate_vhost(port: int,
                     backend_http_scheme: str = "http",
                     websocket_origin_rewrite: bool = False,
                     panel_name_slug: str = "panel",
+                    mcp_proxy: bool = False,
                     ) -> str:
     """Генерирует nginx vhost config.
 
@@ -240,6 +241,10 @@ def _generate_vhost(port: int,
       websocket_origin_rewrite: если True — подменять Host/Origin/Referer
         на 127.0.0.1:backend_port (нужно для Telemt Panel CheckOrigin).
       panel_name_slug: slug панели для логов/файлов (например 'telemt-panel').
+      mcp_proxy: если True — добавить location /api/mcp с loopback-Host
+        (MCP go-sdk запрещает не-loopback Host при loopback-бэкенде —
+        DNS-rebinding защита), SSE без буферизации и долгим таймаутом
+        (нужно для b4 >= 1.80, MCP-сервер панели).
     """
     # WebSocket origin rewrite block
     if websocket_origin_rewrite:
@@ -273,6 +278,33 @@ def _generate_vhost(port: int,
         proxy_read_timeout 60s;
         proxy_buffering off;
         proxy_request_buffering off;"""
+
+    # MCP-эндпоинт (b4 >= 1.80): go-sdk StreamableHTTPHandler требует,
+    # чтобы при loopback-бэкенде Host был loopback (DNS-rebinding
+    # защита) — иначе 403 «invalid Host header». Подменяем Host,
+    # стриппаем Origin (mcpGate сверяет его с Host) и включаем
+    # SSE-стриминг: без буферизации, с долгим read-timeout
+    # (b4_find_bypass_strategy может идти минутами).
+    mcp_block = ""
+    if mcp_proxy:
+        mcp_block = f"""
+    # MCP (Model Context Protocol) — b4 control plane. Host обязан быть
+    # loopback (go-sdk DNS-rebinding protection). НЕ редактировать вручную.
+    location /api/mcp {{
+        proxy_pass {backend_http_scheme}://127.0.0.1:{backend_port};
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1:{backend_port};
+        proxy_set_header Origin "";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }}
+"""
 
     # SSL verification для HTTPS backend (self-signed cert).
     ssl_verify_block = ""
@@ -320,7 +352,9 @@ server {{
     error_log  /var/log/nginx/{panel_name_slug}-nginx-error.log;
 
     # Проксирование на backend (loopback).
-    location / {{
+    # location /api/mcp (mcp_block) идёт ПЕРВЫМ: prefix-локация длиннее /
+    # выигрывает матчинг независимо от порядка, но так конфиг читабельнее.
+{mcp_block}    location / {{
         proxy_pass {backend_http_scheme}://127.0.0.1:{backend_port};
         proxy_http_version 1.1;
 {ssl_verify_block}
@@ -346,6 +380,7 @@ def panel_nginx_front_install(
     websocket_origin_rewrite: bool = False,
     backend_http_scheme: str = "http",
     cert_name_slug: "Optional[str]" = None,
+    mcp_proxy: bool = False,
 ) -> "tuple[bool, str]":
     """Устанавливает nginx front с TLS для панели.
 
@@ -361,6 +396,8 @@ def panel_nginx_front_install(
       websocket_origin_rewrite: подменять Host/Origin/Referer для WebSocket CheckOrigin.
       backend_http_scheme: 'http' или 'https'.
       cert_name_slug: slug для имени self-signed сертификата.
+      mcp_proxy: True → добавить location /api/mcp (loopback-Host для
+        MCP go-sdk, SSE без буферизации; b4 >= 1.80).
 
     Returns:
       (success, message)
@@ -453,6 +490,7 @@ def panel_nginx_front_install(
         backend_http_scheme=backend_http_scheme,
         websocket_origin_rewrite=websocket_origin_rewrite,
         panel_name_slug=cert_name_slug,
+        mcp_proxy=mcp_proxy,
     )
 
     # 4. Запись vhost + symlink.
