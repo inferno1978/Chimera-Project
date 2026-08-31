@@ -123,6 +123,7 @@ sudo python3 main.py
 | [`SECURITY_BAN_FAQ.md`](docs/faq/SECURITY_BAN_FAQ.md) | AutoBan / Honeypot / IP-Ban / GeoIP Block / РФ-блокировка — пять модулей защиты от сканеров и DPI-зондов: сравнительная таблица, комбинации, диагностика, бан ASN |
 | [`DNSCRYPT_FAQ.md`](docs/faq/DNSCRYPT_FAQ.md) | DNSCrypt-proxy — зашифрованный DNS: установка, конфигурация, выбор резолверов, анонимизация, ODoH/DNSSEC, принудительный DNS REDIRECT, диагностика утечек DNS |
 | [`AGH_FAQ.md`](docs/faq/AGH_FAQ.md) | AdGuard Home — DNS-сервер с фильтрацией: архитектура связки Xray + AGH + DNSCrypt, плюсы и минусы, установка с нулевым даунтаймом, режимы Web UI и кастомный порт, финализация, порты и port_registry, надёжность DNS, взаимодействие с b4 (DPI-обход) |
+| [`AI_ACCESS_FAQ.md`](docs/faq/AI_ACCESS_FAQ.md) | ИИ-агент на роутере — удалённое управление b4 через MCP/REST: включение MCP-сервера, токен, три пути доступа (LAN/WAN/nginx front), firewall-правила с Source IP и персистенцией, роли «пользователь vs ИИ», встроенные защиты b4, сравнение с VLESS-туннелями, автобан и Q&A |
 
 ## 🗂️ Структура проекта
 
@@ -141,7 +142,8 @@ Chimera-Project/
 │   ├── VLESS_FAQ.md             #   VLESS/Reality
 │   ├── HYSTERIA2.md             #   Hysteria2 транспорт
 │   ├── SECURITY_BAN_FAQ.md      #   AutoBan / Honeypot / IP-Ban / GeoIP Block / РФ-блокировка
-│   └── DNSCRYPT_FAQ.md          #   DNSCrypt-proxy — зашифрованный DNS, анти-утечки
+│   ├── DNSCRYPT_FAQ.md          #   DNSCrypt-proxy — зашифрованный DNS, анти-утечки
+│   └── AI_ACCESS_FAQ.md         #   ИИ-агент на роутере — управление b4 через MCP/REST
 ├── LICENSE
 └── chimera/
     ├── __init__.py
