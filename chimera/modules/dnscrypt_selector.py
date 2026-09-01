@@ -656,6 +656,13 @@ def do_dnscrypt_selector_menu() -> None:
         _info(f"Текущие server_names: {', '.join(current)}")
     else:
         _info("server_names не установлен (используется весь пул)")
+    try:
+        from chimera.modules.dnscrypt_update import (
+            get_version_status_line, get_pool_status_line)
+        _info(f"Версия: {get_version_status_line()}")
+        _info(f"Пул: {get_pool_status_line()}")
+    except Exception:
+        pass
     print()
     _info("Получаю список резолверов...")
     print()

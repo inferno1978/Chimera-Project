@@ -28,8 +28,9 @@ v73: гео-резистентность DNS-стека Chimera — добивк
 
 Тестируем:
   1. Пины [RA]: bootstrap/fallback/netprobe без отравы (9.9.9.9+77.88.8.8);
-  2. Пул: 192 сервера, нет moscow/cloudflare/google, голова — kyiv;
-     маршруты: 194, нет moscow/CF/GG, wildcard на месте;
+  2. Пул: 245 серверов (v74: синк с живым списком, 192 было в v73),
+     нет moscow/cloudflare/google, голова — kyiv;
+     маршруты: 180 (v74), нет moscow/CF/GG, wildcard на месте;
   3. [T] fallback_resolvers = v67-канон; шаблон [R] не сломан;
   4. xhttp-генератор синхронен с главным (4 живых Quad9-fallback);
   5. _safe_apply_preset (моки): фаза-1 = quad9-dnscrypt; resolv.conf
@@ -111,7 +112,8 @@ class TestServerPool(unittest.TestCase):
     """2. Пул [RA]: 192 сервера, moscow/CF/GG исключены, голова — kyiv."""
 
     def test_pool_size_and_head(self):
-        self.assertEqual(len(_SERVER_NAMES), 192)
+        # v74: пул синхронизирован с живым списком — 245 серверов
+        self.assertEqual(len(_SERVER_NAMES), 245)
         self.assertEqual(_SERVER_NAMES[0], "dnscry.pt-kyiv-ipv4")
         self.assertEqual(_SERVER_NAMES[1], "dnscry.pt-kyiv-ipv6")
 
@@ -131,7 +133,8 @@ class TestServerPool(unittest.TestCase):
             self.assertIn(name, _SERVER_NAMES)
 
     def test_routes_size_and_no_excluded(self):
-        self.assertEqual(len(_ANON_ROUTES), 194)
+        # v74: 179 персональных + 1 wildcard (DoH-серверы не маршрутятся)
+        self.assertEqual(len(_ANON_ROUTES), 180)
         joined = "\n".join(_ANON_ROUTES)
         self.assertNotIn("moscow", joined)
         for name in ("'cloudflare'", "'google'"):
@@ -210,9 +213,15 @@ class TestSafeApplyPreset(unittest.TestCase):
         self.assertEqual(fake.writes, [_TEMP_RESOLV, _ORIG_RESOLV])
 
     def test_phase1_failure_rollback_and_restore(self):
-        ok, fake, _, resolves_mock = self._run(resolves_return=False)
+        # v74: фаза-1 провал → откат бэкапа (1 проверка) → экстренный конфиг
+        # quad9 (5 проверок) — сервер не остаётся без DNS.
+        ok, fake, apply_mock, resolves_mock = self._run(resolves_return=False)
         self.assertFalse(ok)
-        self.assertEqual(resolves_mock.call_count, 4, "фаза-1 делает до 4 попыток")
+        self.assertEqual(resolves_mock.call_count, 10,
+                         "4 (фаза-1) + 1 (откат) + 5 (экстренный)")
+        calls = [c.args[0] for c in apply_mock.call_args_list]
+        self.assertEqual(calls, [_QUAD9_PHASE1, _QUAD9_PHASE1],
+                         "экстренный фолбэк обязан идти на quad9-dnscrypt")
         self.assertEqual(fake.writes, [_TEMP_RESOLV, _ORIG_RESOLV])
 
     def test_phase2_restart_failure_rolls_back_to_quad9(self):

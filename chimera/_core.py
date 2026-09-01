@@ -7734,7 +7734,8 @@ def _menu_network() -> None:
         _box_item("2", "🔍 Диагностика split tunneling")
         _box_item("3", f"🔒 DNSCrypt-proxy  {DIM}(управление и оптимизация){NC}")
         _box_item("R", f"🔍 DNSCrypt: выбор резолверов  {DIM}(замер latency → server_names){NC}")
-        _box_item("RA", f"🛡️ DNSCrypt: расширенная настройка  {DIM}(198 серверов, ODoH, DNSSEC, анонимизация){NC}")
+        _box_item("RA", f"🛡️ DNSCrypt: расширенная настройка  {DIM}(245 серверов, 51 страна, ODoH, DNSSEC, анонимизация){NC}")
+        _box_item("DU", f"⬆️  DNSCrypt: обновление и синк  {DIM}(версия/автообновление/пул 6ч/цепочка xray→AGH→dnscrypt){NC}")
         _box_item("A", f"🛡️ AdGuard Home  {DIM}(DNS :53 + фильтры + DoH/DoT — поверх DNSCrypt){NC}")
         _box_item("4", f"☁️  Cloudflare WARP  {DIM}(управление туннелем){NC}")
         _box_item("5", f"🔄 Сменить домен / порт  {DIM}(без переустановки){NC}")
@@ -7830,6 +7831,15 @@ def _menu_network() -> None:
             do_dnscrypt_selector_menu()
         elif ch.lower() == "ra":
             do_dnscrypt_advanced_menu()
+        elif ch.lower() == "du":
+            # v74: единое меню обновления/синка dnscrypt (синхронизировано
+            # через state-файл со всеми DNS-меню: RA, AGH, селектор)
+            try:
+                from chimera.modules.dnscrypt_update import do_dnscrypt_update_menu
+                do_dnscrypt_update_menu()
+            except Exception as e:
+                warn(f"Модуль dnscrypt_update недоступен: {e}")
+                time.sleep(2)
         elif ch.lower() == "a":
             # AdGuard Home — DNS-сервер :53 (кеш+фильтры) поверх DNSCrypt :5300.
             try:
@@ -8770,6 +8780,26 @@ def do_scheduler_menu() -> None:
             "unit":     "xray-autoupdate.timer",
             "log":      None,
             "configure": None,  # управляется в меню установки
+        },
+        {
+            "id":       "dnscrypt-autoupdate",
+            "emoji":    "🔒",
+            "label":    "Авто-обновление DNSCrypt-proxy",
+            "schedule": "ежедневно 04:10",
+            "cron":     None,
+            "unit":     "dnscrypt-autoupdate.timer",
+            "log":      "/var/log/dnscrypt-autoupdate.log",
+            "configure": None,  # v74: меню Сеть → DU (do_dnscrypt_update_menu)
+        },
+        {
+            "id":       "dnscrypt-pool-sync",
+            "emoji":    "🔄",
+            "label":    "Синк пула DNSCrypt (живой список)",
+            "schedule": "каждые 6 ч",
+            "cron":     "/etc/cron.d/xray-dnscrypt-pool-sync",
+            "unit":     None,
+            "log":      "/var/log/dnscrypt-pool-sync.log",
+            "configure": None,  # v74: меню Сеть → DU (do_dnscrypt_update_menu)
         },
         {
             "id":       "rusubnets",

@@ -3570,12 +3570,20 @@ def do_aghome_menu() -> None:
         _box_row()
         _box_row(f"  {DIM}DNS: AGH :{AGH_DNS_PORT} (кеш+фильтры) → dnscrypt :5300 "
                  f"(шифрование){NC}")
+        try:
+            from chimera.modules.dnscrypt_update import (
+                get_version_status_line, get_pool_status_line)
+            _box_row(f"  {DIM}dnscrypt: {get_version_status_line()}{NC}")
+            _box_row(f"  {DIM}пул: {get_pool_status_line()}{NC}")
+        except Exception:
+            pass
         _box_row()
         _box_item("1", f"📦 Установить / переустановить{DIM}(wizard + финализация){NC}")
         _box_item("2", f"📊 Статус + завершить настройку{DIM}(если мастер не завершён){NC}")
         _box_item("3", f"🔑 Сброс пароля админа{DIM}(мастер заново){NC}")
         _box_item("4", f"🔒 Сменить режим Web UI / TLS{DIM}(домен, self-signed, публичность){NC}")
         _box_item("5", f"🔄 Переприменить конфиг{DIM}(фильтры/DoH/DoT/DoQ по канону){NC}")
+        _box_item("6", f"⬆️  Обновление/синк dnscrypt{DIM}(версия/пул/цепочка — общее меню){NC}")
         _box_sep()
         _box_item("9", f"🗑️  Удалить AdGuard Home{DIM}(откат к dnscrypt:5300){NC}")
         _box_row()
@@ -3631,6 +3639,13 @@ def do_aghome_menu() -> None:
             except Exception as e:
                 core.warn(f"AGH: ошибка смены режима: {e}")
             input(f"{core.BLUE}Нажмите Enter...{NC}")
+        elif ch == "6":
+            # v74: единое меню dnscrypt (state-файл синхронизирует все меню)
+            try:
+                from chimera.modules.dnscrypt_update import do_dnscrypt_update_menu
+                do_dnscrypt_update_menu()
+            except Exception as e:
+                core.warn(f"dnscrypt_update недоступен: {e}")
         elif ch == "5":
             try:
                 if AGH_CONF.exists() and not aghome_wizard_pending():
