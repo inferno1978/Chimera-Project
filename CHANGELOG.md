@@ -2,6 +2,92 @@
 
 ---
 
+## FEAT(dnscrypt): v74 — динамический пул DNSCrypt (245/51), авто-обновление бинарника, синк по cron, тест цепочки xray→AGH→dnscrypt, экстренный DNS-фолбэк — 1 сентября 2026
+
+**Контекст:** пул [RA] v73 дрейфовал от реальности: 37 из 192 имён
+мертвы в живом `public-resolvers.md` (budapest/brussels/athens/Tier-4-хвост),
+реально живых 155; оживания upstream происходят под НОВЫМИ именами
+(sydney→sydney02, cs-france→cs-fr) — «держать мёртвых в пуле»
+бессмысленно, нужен регулярный ресинк. dnscrypt-proxy в репо пиннился
+на 2.1.5 при latest 2.1.18 (механика источников/клампы сверены по
+исходникам обеих версий: refresh_delay в часах [24..168]/[25..169],
+SIGHUP-reload отсутствует, при явном server_names проверка require_*
+пропускается — качество держит только курация).
+
+**Пул (245 серверов, 51 страна):**
+
+1. −37 мёртвых имён → `_POOL_GRAVEYARD` (кладбище: pool-sync
+   автоматически возвращает имя в пул, если оно снова появится в
+   живом списке).
+2. +90 живых: замены выродившихся стран (AL/tirana, GR/thessaloniki,
+   HU/cs-hungary, FR/cs-fr+marseille, LU/circl, IT/cs-milan,
+   ES/cs-barcelona, NO/cs-norway, RO/cs-ro+oradea+timisoara, MD,
+   DK, AT, SE, DE/bremen, UA/kyiv02, PT/lisbon02), UK-восстановление
+   (cs-london, cs-manchester, coventry/newcastle/redditch),
+   IE/dublin, вторые города (dusseldorf02/03, ebenecity02, naaldwijk),
+   глобальный блок (HK×3, JP/tokyo02, KR/seoul02, SG/singapore02,
+   TW/taipeh, IN/mumbai02+bengaluru, AU/sydney02+brisbane+perth,
+   NZ/auckland, CA/toronto02+vancouver+calgary, BD, NG, PK, LA, CL).
+   Итог: 129 IPv4 / 116 IPv6; 221 анонимизируемых / 24 DoH-напрямую.
+3. Маршруты: 179 персональных + wildcard (30 живых релеев); мёртвые
+   релеи заменены (anon-cs-ch6→belgium6, anon-cs-swe6→austria6,
+   dnscry.pt-anon-frankfurt→jena); DoH-серверы из маршрутов исключены
+   (ERROR «cannot be anonymized» больше не пишется).
+
+**Источники (гарантия обновления при старте):**
+
+4. dnscry.pt-источники УДАЛЕНЫ (единственный URL за антиботом без
+   failover: при пустом кеше — [FATAL] Invalid encoded signature на
+   ВСЁМ старте; контент на 100% избыточен — все dnscry.pt-серверы
+   и релеи есть в официальных списках). Официальные источники
+   усилены третьим зеркалом cdn.jsdelivr.net (идентичен побайтово,
+   RF-резистентность).
+5. `http3_probe` удалён из параметров: в 2.1.5 ключа нет — [FATAL]
+   Unsupported key (RA-конфиг не стартовал ВООБЩЕ); в 2.1.18
+   default false. `refresh_delay` 73→25.
+6. Версия: dnscrypt_packages default 2.1.5→2.1.18 (установка и так
+   берёт latest с GitHub API — теперь и дефолт честный).
+
+**Динамика (dnscrypt_update.py — новый модуль, ~1200 строк):**
+
+7. **Синк пула каждые 6 ч** (cron `/etc/cron.d/xray-dnscrypt-pool-sync`
+   → standalone `/usr/local/bin/chimera-dnscrypt-pool-sync.py` +
+   шаблон `/etc/dnscrypt-proxy/pool-template.json`): пул = шаблон ∩
+   живые КАШИ прокси (minisign уже проверен прокси — простой режим),
+   + воскрешения из кладбища; маршруты ребилдятся по живым релеям;
+   конфиг меняется ТОЛЬКО при дрейфе (идемпотентность — рестарта нет);
+   рестарт → резолв-тест → откат бэкапа при провале → экстренный
+   конфиг quad9-dnscrypt. Аномалии (<40 серверов/битый список) —
+   конфиг не трогается вовсе.
+8. **Авто-обновление бинарника**: systemd timer 04:10 +
+   `/usr/local/bin/dnscrypt-autoupdate.sh` (зеркала GitHub+gh-proxy,
+   бэкап в /var/backups/dnscrypt/binaries, смоук-тест ДО остановки,
+   откат при провале). Ручное — из меню.
+9. **Единое меню [DU]** (Сеть→DU; пункты 5/6 в [RA]; пункт 6 в AGH):
+   версия/latest/авто/синк/цепочка — всё через общий state-файл
+   `/var/lib/chimera/dnscrypt-state.json`: обновил в одном меню —
+   во всех остальных информация актуальна сразу (синхронизация меню,
+   как заказывал юзер). Шапки [RA]/AGH/селектора показывают пул
+   последнего синка и версию.
+10. **Тест цепочки xray → AGH(:53) → dnscrypt(:5300)** после
+    применения пресета [RA] и в [DU]: реальными dig-запросами на
+    каждом звене (dnscrypt:порт, системный :53 = AGH или redirect,
+    xray: активность + config.json DNS→127.0.0.1).
+11. **«Сервер без DNS» исключён**: _safe_apply_preset — откат бэкапа
+    теперь ВЕРИФИЦИРУЕТ резолвинг; если откат не поднял — экстренный
+    конфиг quad9-dnscrypt; поверх — AGH fallback_dns (9.9.9.9/
+    149.112.112.112) и redirect 53→5300. Планировщик (меню 5) —
+    задачи dnscrypt-autoupdate и dnscrypt-pool-sync.
+
+**Ничего не сломано (проверено):** полный сьют 5709 passed
+(3 чанка, включая обновлённые test_v73_geo_resistant_dns — счётчики
+192/194→245/180 и новый путь отката) + новый
+`tests/test_v74_dnscrypt_dynamic_pool.py` (18 тестов: пул/маршруты/
+параметры, state, интеграция standalone pool-sync в песочнице —
+идемпотентность, удаление мёртвых, воскрешение из кладбища, форму
+конфига, tiny-list-abort, bash -n авто-агента, деплой-шаблон) +
+smoke_test_modules 43/43.
+
 ## FIX(dnscrypt_advanced+dnscrypt_setup+xray_install): v73 — гео-резистентность DNS: добивка [RA]/[T]/xhttp после v67/v72 (отрава bootstrap/fallback, мёртвая фаза-1, resolv.conf без гарантии отката, dnscry.pt-moscow в голове пула) — 1 сентября 2026
 
 **Контекст:** ТСПУ глушит DoH/DoT Google/Cloudflare и отравляет plain

@@ -31,6 +31,8 @@
 | `network_setup.py` | Настройка файрвола (ufw/iptables), sysctl-оптимизации (BBR+fq, conntrack, буферы), `apply_sysctl_and_limits` |
 | `dnscrypt_setup.py` | Установка DNSCrypt-proxy (бинарник + конфиг + systemd-юнит + пользователь dnscrypt), `apply_dnscrypt_tuning` |
 | `dnscrypt_selector.py` | Меню выбора резолверов DNSCrypt |
+| `dnscrypt_advanced.py` | [RA] расширенный пресет DNSCrypt: пул 245/51 страна, анонимизация, RTT-замер (v74: синк с живым списком, кладбище, экстренный фолбэк, тест цепочки) |
+| `dnscrypt_update.py` | v74: обновление/авто-обновление бинарника (timer 04:10), синк пула cron 6 ч, проверка цепочки xray→AGH→dnscrypt, общий state для всех DNS-меню |
 | `geo_files.py` | Загрузка geosite.dat/geoip.dat (8 зеркал + wget fallback + ручное размещение), `setup_geo_autoupdate` (cron Sunday 03:00) |
 | `backup_rollback.py` | `create_backup`/`perform_rollback` + 14 unit-тестов + `verify_connectivity` |
 | `emergency_repair.py` | `do_emergency_repair` — восстановление сервера из state.json (858 строк, оркестратор полной переустановки) |

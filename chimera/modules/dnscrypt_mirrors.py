@@ -24,8 +24,8 @@ chimera/modules/dnscrypt_mirrors.py
      download_manager.py.
 
 Особенность версионирования dnscrypt-proxy:
-  • GitHub Releases API возвращает tag_name="2.1.5" (без префикса "v").
-  • Asset URL: /releases/download/2.1.5/dnscrypt-proxy-linux_x86_64-2.1.5.tar.gz
+  • GitHub Releases API возвращает tag_name="2.1.18" (без префикса "v").
+  • Asset URL: /releases/download/2.1.18/dnscrypt-proxy-linux_x86_64-2.1.18.tar.gz
   • Имя файла ВКЛЮЧАЕТ версию: "dnscrypt-proxy-{arch}-{tag}.tar.gz"
     (в отличие от mieru, где версия только в пути, не в имени).
   • build_mirror_urls(tag=tag) формирует /releases/download/{tag}/... —
