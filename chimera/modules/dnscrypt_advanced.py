@@ -1,12 +1,27 @@
 """
 chimera/modules/dnscrypt_advanced.py
 ───────────────────────────────────────────────────────────────────────────────
-Расширенная настройка DNSCrypt-proxy: 198 серверов в 50 странах, ODoH, DNSSEC,
-131 анонимизированный маршрут, RTT-замер, ручная настройка параметров.
+Расширенная настройка DNSCrypt-proxy: 192 сервера в 49 странах, ODoH, DNSSEC,
+194 анонимизированных маршрута, RTT-замер, ручная настройка параметров.
+
+v73 (гео-резистентность пресета, синхрон с v67 в dnscrypt_setup):
+  • dnscry.pt-moscow ИСКЛЮЧЁН: RU-юрисдикция/хостер — риск отравления
+    рекурсии (голова списка = де-факто основной резолвер в lb_strategy p2);
+    список теперь начинается с kyiv.
+  • Хвост cloudflare/google удалён: DoH CF/GG из РФ душится ТСПУ
+    (мёртвый груз); за рубежом пул и так богат DoH-серверами.
+  • bootstrap/fallback → 9.9.9.9 + 77.88.8.8 (v67-канон).
+  • Фаза-1 пресета — quad9-dnscrypt (DNSCrypt-протокол, порт 8443,
+    без SNI — жив и из РФ, и из-за рубежа).
+  • resolv.conf на время применения временно указывает на 9.9.9.9/77.88.8.8
+    и ВОССТАНАВЛИВАЕТСЯ гарантированно (try/finally — раньше Ctrl+C посреди
+    фазы оставлял систему на временном DNS).
 
 БЕЗОПАСНОСТЬ:
   • НЕ вызывает networkctl / ifconfig / ip link / dhclient.
-  • НЕ трогает /etc/resolv.conf, /etc/nsswitch.conf, сетевые интерфейсы.
+  • НЕ трогает /etc/nsswitch.conf, сетевые интерфейсы. resolv.conf — только
+    временная подмена на живые 9.9.9.9/77.88.8.8 с гарантированным
+     восстановлением (v73, try/finally).
   • Только перезаписывает /etc/dnscrypt-proxy/dnscrypt-proxy.toml + restart сервиса.
   • Бэкап конфига перед изменением.
 
@@ -58,12 +73,12 @@ def _warn(msg):  print(f"{YELLOW}[WARN]{NC}  {msg}")
 def _err(msg):   print(f"{RED}[ERR]{NC}   {msg}")
 
 # =============================================================================
-#  ПОЛНЫЙ СПИСОК СЕРВЕРОВ — 198 шт., 50 стран
-#  Yandex ИСКЛЮЧЁН (утечка DNS). RU-серверы — через EU relay.
+#  ПОЛНЫЙ СПИСОК СЕРВЕРОВ — 192 шт., 49 стран
+#  Yandex ИСКЛЮЧЁН (утечка DNS). dnscry.pt-moscow ИСКЛЮЧЁН (v73: RU-юрисдикция,
+#  риск hoster-level отравления рекурсии; голова списка — kyiv). Хвост
+#  cloudflare/google удалён (v73: из РФ DoH CF/GG душатся ТСПУ).
 # =============================================================================
 _SERVER_NAMES: List[str] = [
-    # ── RU (2) — dnscry.pt-moscow через EU relay ──────────────────────────
-    "dnscry.pt-moscow-ipv4", "dnscry.pt-moscow-ipv6",
     # ── UA (2) ────────────────────────────────────────────────────────────
     "dnscry.pt-kyiv-ipv4", "dnscry.pt-kyiv-ipv6",
     # ── EE (2) ────────────────────────────────────────────────────────────
@@ -209,22 +224,19 @@ _SERVER_NAMES: List[str] = [
     "dnscry.pt-bangkok-ipv4", "dnscry.pt-bangkok-ipv6",
     # ── ID (2) — Джакарта ─────────────────────────────────────────────────
     "dnscry.pt-jakarta-ipv4", "dnscry.pt-jakarta-ipv6",
-    # ── Глобальные DoH (cloudflare + google как fallback) ─────────────────
-    "cloudflare", "cloudflare-ipv6",
-    "google", "google-ipv6",
+    # v73: глобальный DoH-fallback cloudflare/google удалён (мёртвый груз из
+    # РФ; cf. v67-комментарий в dnscrypt_setup). Мёртвых записей в пуле нет.
 ]
 
 # =============================================================================
-#  АНОНИМИЗИРОВАННЫЕ МАРШРУТЫ — 130 + wildcard
+#  АНОНИМИЗИРОВАННЫЕ МАРШРУТЫ — 193 + wildcard (v73: 194 всего)
 #  Принцип: server в стране X → relay в стране Y (≠ X, не сосед)
 #  Relay видит IP клиента, не видит запрос.
 #  Server видит запрос, не знает IP клиента (видит relay).
 # =============================================================================
 _ANON_ROUTES: List[str] = [
-    # ── RU → FI/PL/DE/SE ──────────────────────────────────────────────────
-    "{ server_name='dnscry.pt-moscow-ipv4', via=['anon-cs-finland','anon-cs-poland','anon-cs-de','anon-cs-swe'] }",
-    "{ server_name='dnscry.pt-moscow-ipv6', via=['anon-cs-finland6','anon-cs-poland6','anon-cs-de6','anon-cs-swe6'] }",
-    # ── UA → FI/PL/DE/SE (не RU, не сосед) ─────────────────────────────────
+    # v73: маршруты dnscry.pt-moscow исключены вместе с серверами (RU-юрисдикция).
+    # ── UA → FI/PL/DE/SE (не сосед) ────────────────────────────────────────
     "{ server_name='dnscry.pt-kyiv-ipv4', via=['anon-cs-finland','anon-cs-poland','anon-cs-de','anon-cs-swe'] }",
     "{ server_name='dnscry.pt-kyiv-ipv6', via=['anon-cs-finland6','anon-cs-poland6','anon-cs-de6','anon-cs-swe6'] }",
     # ── EE → FI/PL/DE/SE ──────────────────────────────────────────────────
@@ -475,11 +487,7 @@ _ANON_ROUTES: List[str] = [
     # ── ID → DE/NL/CH/SE ──────────────────────────────────────────────────
     "{ server_name='dnscry.pt-jakarta-ipv4',      via=['anon-cs-de','anon-cs-nl','anon-cs-ch','anon-cs-swe'] }",
     "{ server_name='dnscry.pt-jakarta-ipv6',      via=['anon-cs-de6','anon-cs-nl6','anon-cs-ch6','anon-cs-swe6'] }",
-    # ── Глобальные DoH → EU relay ─────────────────────────────────────────
-    "{ server_name='cloudflare',      via=['anon-cs-de','anon-cs-finland','anon-cs-poland','anon-cs-nl'] }",
-    "{ server_name='cloudflare-ipv6', via=['anon-cs-de6','anon-cs-finland6','anon-cs-poland6','anon-cs-nl6'] }",
-    "{ server_name='google',          via=['anon-cs-de','anon-cs-finland','anon-cs-poland','anon-cs-nl'] }",
-    "{ server_name='google-ipv6',     via=['anon-cs-de6','anon-cs-finland6','anon-cs-poland6','anon-cs-nl6'] }",
+    # v73: маршруты cloudflare/google исключены вместе с серверами.
     # ── WILDCARD — все серверы без явного маршрута ────────────────────────
     "{ server_name='*', via=["
     "'anon-cs-finland','anon-cs-finland6','anon-cs-poland','anon-cs-poland6',"
@@ -525,8 +533,11 @@ _SECURITY_PARAMS: Dict[str, str] = {
     "cache_max_ttl":         "3600",
     "cache_neg_min_ttl":     "300",
     "cache_neg_max_ttl":     "900",
-    "bootstrap_resolvers":   "['9.9.9.9:53', '8.8.8.8:53', '1.1.1.1:53']",
-    "fallback_resolvers":    "['9.9.9.9:53', '8.8.8.8:53', '1.1.1.1:53']",
+    # v73 = v67-канон (dnscrypt_setup): 8.8.8.8/1.1.1.1 в РФ отравлены
+    # (DNAT→НСДИ, NXDomain-spoof), 9.9.9.9 + 77.88.8.8 работают отовсюду.
+    # Используются ТОЛЬКО для резолва имён DoH-upstream'ов.
+    "bootstrap_resolvers":   "['9.9.9.9:53', '77.88.8.8:53']",
+    "fallback_resolvers":    "['9.9.9.9:53', '77.88.8.8:53']",
     "ignore_system_dns":     "true",
     "netprobe_timeout":      "10",
     "netprobe_address":      "'9.9.9.9:53'",
@@ -614,7 +625,7 @@ def _apply_preset(server_names: List[str],
     config = f"""## dnscrypt-proxy.toml — Chimera Project (advanced preset)
 ## Сгенерирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ## {len(server_names)} серверов · {len(anon_routes)} маршрутов · ODoH · DNSSEC
-## 50 стран: RU, UA, EE, LV, LT, FI, PL, DE, SE, CH, NL, CZ, RS, AT, NO, IS,
+## 49 стран: UA, EE, LV, LT, FI, PL, DE, SE, CH, NL, CZ, RS, AT, NO, IS,
 ## BG, DK, RO, HU, BE, LU, TR, SK, MD, FR, IT, ES, GR, SI, HR, PT, UK, JP, SG, GE
 
 {listen}
@@ -698,13 +709,20 @@ def _safe_apply_preset(server_names: List[str],
     """Безопасное применение пресета с откатом при неудаче.
 
     Двухфазное применение:
-      Фаза 1: Записать конфиг с базовыми серверами (cloudflare + google) +
-               новыми источниками (dnscry.pt, odoh). Перезапустить dnscrypt.
+      Фаза 1: Записать конфиг с базовыми серверами (v73: quad9-dnscrypt —
+               DNSCrypt-протокол жив и из РФ, и из-за рубежа, в отличие от
+               душимых ТСПУ cloudflare/google DoH) + новыми источниками
+               (dnscry.pt, odoh). Перезапустить dnscrypt.
                dnscrypt скачает списки серверов из dnscry.pt.
       Фаза 2: Подождать 15 сек (скачивание). Записать полный конфиг
-               (198 серверов + маршруты). Перезапустить.
+               (весь список серверов + маршруты). Перезапустить.
 
     Если dnscrypt падает на любой фазе — откат с возвратом resolv.conf.
+
+    v73: resolv.conf восстанавливается через try/finally при ЛЮБОМ исходе
+    (включая Ctrl+C и обрыв SSH посреди фазы) — раньше прерывание оставляло
+    систему на временном DNS. Временные nameserver-ы — живые из РФ
+    9.9.9.9/77.88.8.8 (раньше 8.8.8.8/1.1.1.1 — отравлены ТСПУ).
 
     Возвращает True при успехе, False при неудаче (с откатом).
     """
@@ -716,111 +734,122 @@ def _safe_apply_preset(server_names: List[str],
     if bak:
         _ok(f"Бэкап конфига: {bak}")
 
-    # 2. Временно записать 8.8.8.8 в resolv.conf (fallback DNS).
+    # 2. Временный bootstrap-DNS в resolv.conf на время применения.
+    #    v73 = v67-канон: 9.9.9.9 + 77.88.8.8 достижимы и из РФ, и из-за
+    #    рубежа; 8.8.8.8/1.1.1.1 в РФ DNAT-ятся ТСПУ на НСДИ (NXDomain-spoof).
     try:
         if resolv_path.exists():
             resolv_backup = resolv_path.read_text(errors="replace")
-            resolv_path.write_text("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
-            _info("Временный fallback DNS: 8.8.8.8 (на время применения)")
+            resolv_path.write_text("nameserver 9.9.9.9\nnameserver 77.88.8.8\n")
+            _info("Временный fallback DNS: 9.9.9.9 + 77.88.8.8 (на время применения)")
     except Exception:
         pass
 
-    # ── ФАЗА 1: базовые серверы + новые источники ──────────────────────────
-    _info("Фаза 1/2: запись базовых серверов + источников dnscry.pt...")
-    phase1_names = ["cloudflare", "cloudflare-ipv6", "google", "google-ipv6"]
-    if not _apply_preset(phase1_names, security_params, [], extra_sources=extra_sources):
+    def _restore_resolv() -> None:
         if resolv_backup is not None:
-            try: resolv_path.write_text(resolv_backup)
-            except Exception: pass
-        return False
+            try:
+                resolv_path.write_text(resolv_backup)
+            except Exception:
+                pass
 
-    if not _restart_dnscrypt():
-        _warn("dnscrypt-proxy не запустился (фаза 1) — возвращаю конфиг...")
-        try:
-            shutil.copy2(str(bak), str(_DNSCRYPT_CONF))
+    # v73: всё тело применения — под try/finally: восстановление resolv.conf
+    # гарантировано при любом исходе, включая KeyboardInterrupt (Ctrl+C)
+    # и потерю SSH-сессии (обрыв = SIGHUP/смерть процесса без finally —
+    # тогда остаётся временный DNS, но живой, а не отравленный).
+    try:
+        # ── ФАЗА 1: базовые серверы + новые источники ──────────────────
+        _info("Фаза 1/2: запись базовых серверов + источников dnscry.pt...")
+        # v73: quad9-dnscrypt вместо cloudflare/google — фаза-1 обязана
+        # резолвить ИЗ РФ (см. v67 в dnscrypt_setup); имена живут в
+        # стандартном public-resolvers, от источника dnscry.pt не зависят.
+        phase1_names = ["quad9-dnscrypt-ip4-nofilter-pri",
+                        "quad9-dnscrypt-ip6-nofilter-pri"]
+        if not _apply_preset(phase1_names, security_params, [], extra_sources=extra_sources):
+            return False
+
+        if not _restart_dnscrypt():
+            _warn("dnscrypt-proxy не запустился (фаза 1) — возвращаю конфиг...")
+            try:
+                shutil.copy2(str(bak), str(_DNSCRYPT_CONF))
+                _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
+                time.sleep(2)
+            except Exception:
+                pass
+            _err("Пресет не применён — конфиг возвращён в исходное состояние. Проверьте journalctl -u dnscrypt-proxy")
+            return False
+
+        # Проверить что фаза 1 резолвит. v73: с ретраями — на старте
+        # netprobe/latency-ranking держит ~15-20с окно, когда :5300 ещё
+        # не отвечает (живой кейс: не путать с блокировкой).
+        _info("Проверяю что dnscrypt-proxy резолвит (фаза 1)...")
+        phase1_ok = False
+        for attempt in range(4):
+            if _dnscrypt_resolves():
+                phase1_ok = True
+                break
+            time.sleep(3)
+            _info(f"Ожидание ({attempt+1}/4) — dnscrypt-proxy стартует...")
+
+        if not phase1_ok:
+            _warn("dnscrypt-proxy не резолвит (фаза 1) — возвращаю конфиг...")
+            try:
+                shutil.copy2(str(bak), str(_DNSCRYPT_CONF))
+                _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
+                time.sleep(2)
+            except Exception:
+                pass
+            _err("Пресет не применён — dnscrypt не резолвит. Конфиг возвращён в исходное состояние.")
+            return False
+
+        _ok("Фаза 1: dnscrypt-proxy резолвит (quad9-dnscrypt)")
+
+        # ── ФАЗА 2: полный список серверов + маршруты ──────────────────
+        _info(f"Фаза 2/2: запись полного списка ({len(server_names)} серверов, {len(anon_routes)} маршрутов)...")
+        _info("Ожидаю 15 сек — dnscrypt скачивает источники dnscry.pt...")
+        time.sleep(15)
+
+        if not _apply_preset(server_names, security_params, anon_routes, extra_sources=extra_sources):
+            # Если не удалось записать — фаза 1 конфиг остаётся (рабочий).
+            _warn("Не удалось записать полный конфиг — остаётся базовый (quad9-dnscrypt)")
+            return False
+
+        if not _restart_dnscrypt():
+            _warn("dnscrypt-proxy не запустился (фаза 2) — возвращаю базовый конфиг...")
+            # Возвращаем фаза-1 конфиг.
+            _apply_preset(phase1_names, security_params, [], extra_sources=extra_sources)
             _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
             time.sleep(2)
-        except Exception:
-            pass
-        if resolv_backup is not None:
-            try: resolv_path.write_text(resolv_backup)
-            except Exception: pass
-        _err("Пресет не применён — конфиг возвращён в исходное состояние. Проверьте journalctl -u dnscrypt-proxy")
-        return False
+            _err("Полный пресет не применён — оставлен базовый (quad9-dnscrypt).")
+            _warn("Источники dnscry.pt могут быть недоступны. Попробуйте позже ещё раз.")
+            return False
 
-    # Проверить что фаза 1 резолвит.
-    _info("Проверяю что dnscrypt-proxy резолвит (фаза 1)...")
-    if not _dnscrypt_resolves():
-        _warn("dnscrypt-proxy не резолвит (фаза 1) — возвращаю конфиг...")
-        try:
-            shutil.copy2(str(bak), str(_DNSCRYPT_CONF))
+        # Проверить что фаза 2 резолвит.
+        _info("Проверяю что dnscrypt-proxy резолвит (фаза 2)...")
+        resolves = False
+        for attempt in range(4):
+            time.sleep(3)
+            if _dnscrypt_resolves():
+                resolves = True
+                break
+            _info(f"Ожидание ({attempt+1}/4) — dnscrypt-proxy стартует...")
+
+        if not resolves:
+            _warn("dnscrypt не резолвит (фаза 2) — возвращаю базовый конфиг...")
+            _apply_preset(phase1_names, security_params, [], extra_sources=extra_sources)
             _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
             time.sleep(2)
-        except Exception:
-            pass
-        if resolv_backup is not None:
-            try: resolv_path.write_text(resolv_backup)
-            except Exception: pass
-        _err("Пресет не применён — dnscrypt не резолвит. Конфиг возвращён в исходное состояние.")
-        return False
+            _err("Полный пресет не применён — оставлен базовый (quad9-dnscrypt).")
+            _warn("Источники dnscry.pt могли не скачаться. Попробуйте позже ещё раз.")
+            _warn("Проверьте: ls -la /etc/dnscrypt-proxy/dnscry.pt-*.md")
+            return False
 
-    _ok("Фаза 1: dnscrypt-proxy резолвит (cloudflare + google)")
-
-    # ── ФАЗА 2: полный список серверов + маршруты ──────────────────────────
-    _info(f"Фаза 2/2: запись полного списка ({len(server_names)} серверов, {len(anon_routes)} маршрутов)...")
-    _info("Ожидаю 15 сек — dnscrypt скачивает источники dnscry.pt...")
-    time.sleep(15)
-
-    if not _apply_preset(server_names, security_params, anon_routes, extra_sources=extra_sources):
-        # Если не удалось записать — фаза 1 конфиг остаётся (рабочий).
-        _warn("Не удалось записать полный конфиг — остаётся базовый (cloudflare + google)")
-        if resolv_backup is not None:
-            try: resolv_path.write_text(resolv_backup)
-            except Exception: pass
-        return False
-
-    if not _restart_dnscrypt():
-        _warn("dnscrypt-proxy не запустился (фаза 2) — возвращаю базовый конфиг...")
-        # Возвращаем фаза-1 конфиг.
-        _apply_preset(phase1_names, security_params, [], extra_sources=extra_sources)
-        _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
-        time.sleep(2)
-        if resolv_backup is not None:
-            try: resolv_path.write_text(resolv_backup)
-            except Exception: pass
-        _err("Полный пресет не применён — оставлен базовый (cloudflare + google).")
-        _warn("Источники dnscry.pt могут быть недоступны. Попробуйте позже ещё раз.")
-        return False
-
-    # Проверить что фаза 2 резолвит.
-    _info("Проверяю что dnscrypt-proxy резолвит (фаза 2)...")
-    resolves = False
-    for attempt in range(4):
-        time.sleep(3)
-        if _dnscrypt_resolves():
-            resolves = True
-            break
-        _info(f"Ожидание ({attempt+1}/4) — dnscrypt-proxy стартует...")
-
-    if not resolves:
-        _warn("dnscrypt не резолвит (фаза 2) — возвращаю базовый конфиг...")
-        _apply_preset(phase1_names, security_params, [], extra_sources=extra_sources)
-        _run(["systemctl", "restart", "dnscrypt-proxy"], quiet=True)
-        time.sleep(2)
-        if resolv_backup is not None:
-            try: resolv_path.write_text(resolv_backup)
-            except Exception: pass
-        _err("Полный пресет не применён — оставлен базовый (cloudflare + google).")
-        _warn("Источники dnscry.pt могли не скачаться. Попробуйте позже ещё раз.")
-        _warn("Проверьте: ls -la /etc/dnscrypt-proxy/dnscry.pt-*.md")
-        return False
-
-    # Успех!
-    if resolv_backup is not None:
-        try: resolv_path.write_text(resolv_backup)
-        except Exception: pass
-    _ok(f"DNSCrypt-proxy резолвит DNS — пресет применён ({len(server_names)} серверов)!")
-    return True
+        # Успех!
+        _ok(f"DNSCrypt-proxy резолвит DNS — пресет применён ({len(server_names)} серверов)!")
+        return True
+    finally:
+        # v73: восстановление resolv.conf при ЛЮБОМ исходе — включая
+        # Ctrl+C (KeyboardInterrupt) и нештатные исключения посреди фаз.
+        _restore_resolv()
 
 
 # =============================================================================
@@ -870,9 +899,9 @@ def _measure_rtt(server_names: List[str]) -> Dict[str, float]:
 def _screen_preset() -> None:
     os.system("clear")
     print()
-    _box_top("🛡️  ПРЕСЕТ: 198 СЕРВЕРОВ, 50 СТРАН, АНОНИМИЗАЦИЯ")
+    _box_top("🛡️  ПРЕСЕТ: 192 СЕРВЕРА, 49 СТРАН, АНОНИМИЗАЦИЯ")
     _box_row()
-    _box_row(f"  {BOLD}Серверы:{NC} {len(_SERVER_NAMES)} шт. (50 стран, EU+RU+Asia+Global)")
+    _box_row(f"  {BOLD}Серверы:{NC} {len(_SERVER_NAMES)} шт. (49 стран, EU+Asia+Global)")
     _box_row(f"  {BOLD}Маршруты:{NC} {len(_ANON_ROUTES)} анонимизированных")
     _box_row(f"  {BOLD}Протоколы:{NC} DNSCrypt + DoH + ODoH")
     _box_row(f"  {BOLD}Безопасность:{NC} DNSSEC + nolog + nofilter")
@@ -881,11 +910,11 @@ def _screen_preset() -> None:
     _box_row(f"  {BOLD}Анонимизация:{NC} server → relay в другой стране")
     _box_row()
     _box_row(f"  {DIM}Yandex DNS ИСКЛЮЧЁН (утечка).{NC}")
-    _box_row(f"  {DIM}RU-серверы (dnscry.pt-moscow) — через EU relay.{NC}")
+    _box_row(f"  {DIM}v73: moscow/CF/GG исключены — гео-резистентность.{NC}")
     _box_row(f"  {DIM}Новые: UA, TR, SK, MD, FR, IT, ES, GR, SI, HR, PT, UK, JP, SG, GE{NC}")
     _box_row()
     _box_warn("Бэкап конфига будет создан перед изменением.")
-    _box_row(f"  {GREEN}НЕ трогает: resolv.conf, nsswitch, интерфейсы, SSH.{NC}")
+    _box_row(f"  {GREEN}resolv.conf: временно 9.9.9.9/77.88.8.8, восстановление гарантировано.{NC}")
     _box_bottom()
     print()
     try:
@@ -1093,7 +1122,7 @@ def _screen_manual_params() -> None:
             _box_sep()
 
         _box_sep()
-        _box_item("P", f"{GREEN}Применить весь пресет{NC}  (198 серверов + все параметры)")
+        _box_item("P", f"{GREEN}Применить весь пресет{NC}  (192 сервера + все параметры)")
         _box_item("R", f"{YELLOW}Перезапустить dnscrypt-proxy{NC}  (без изменения конфига)")
         _box_item("Q", f"{DIM}← Назад{NC}")
         _box_bottom()
@@ -1263,7 +1292,7 @@ def do_dnscrypt_advanced_menu() -> None:
         print()
         _box_top("🛡️  РАСШИРЕННАЯ НАСТРОЙКА DNSCRYPT-PROXY")
         _box_desc(
-            "198 серверов в 50 странах. ODoH, DNSSEC, анонимизация. "
+            "192 сервера в 49 странах. ODoH, DNSSEC, анонимизация. "
             "RTT-замер реальной latency. Ручная настройка параметров. "
             "НЕ трогает resolv.conf / nsswitch / интерфейсы."
         )
@@ -1278,7 +1307,7 @@ def do_dnscrypt_advanced_menu() -> None:
                  f"DNSSEC: {'✓' if has_dnssec else '✗'}  "
                  f"Анонимизация: {'✓' if has_anon else '✗'}")
         _box_sep()
-        _box_item("1", f"{GREEN}Применить пресет (198 серверов, 50 стран){NC}")
+        _box_item("1", f"{GREEN}Применить пресет (192 сервера, 49 стран){NC}")
         _box_item("2", f"{CYAN}RTT-замер и выбор серверов{NC}  (реальная latency)")
         _box_item("3", f"{YELLOW}Ручная настройка параметров{NC}  (DNSSEC, ODoH, cache...)")
         _box_item("4", "📊  Статус конфигурации")
