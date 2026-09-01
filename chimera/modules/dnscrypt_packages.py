@@ -18,7 +18,7 @@ ad-hoc через curl + tar + rglob.
       5. cleanup временной директории
 
   • Архитектура и версия подставляются через filename_kwargs:
-    fetch_package(DNSCRYPT_SPEC, tag="2.1.5", arch="linux_x86_64")
+    fetch_package(DNSCRYPT_SPEC, tag="2.1.18", arch="linux_x86_64")
 
 install_dests = [/usr/local/bin] — это DNSCRYPT_BIN.parent из _core.
 manual_incoming_dir = /root/ — не совпадает с install_dests, assert проходит.
@@ -63,7 +63,7 @@ _MIN_DNSCRYPT_TARBALL_SIZE = 100_000  # 100 KB
 # ============================================================================
 def _dnscrypt_mirror_urls(
     filename: str,
-    tag: str = "2.1.5",
+    tag: str = "2.1.18",
     arch: str = "linux_x86_64",
     **kw,
 ) -> list[str]:
