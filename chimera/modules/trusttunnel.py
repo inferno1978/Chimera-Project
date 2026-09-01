@@ -23,6 +23,23 @@ prebuilt-релиза (trusttunnel-v<ver>-linux-<arch>.tar.gz, GitHub Releases),
 генератор), дальше — свой systemd-юнит + credentials.toml, как и с остальными
 протоколами в этом инсталляторе.
 
+⚠️  ВАЖНО — upstream setup_wizard ≤ v1.0.33 ДЕДЛОКИТСЯ при
+  `--cert-type provided|letsencrypt` в non-interactive режиме:
+  tls_hosts_settings.rs::build_with_runtime() держит MutexGuard
+  PREDEFINED_PARAMS весь then-блок (`if let Some(ref cert_type) =
+  get_predefined_params().cert_type { ... }` — времка из scrutinee живёт до
+  конца выражения в Rust ≤2021), а вложенный вызов
+  load_provided_cert_noninteractive() лочит ТОТ ЖЕ мьютекс → однопоточный
+  futex-дедлок, процесс виснет навсегда до hosts.toml. Симптом у юзера:
+  «setup_wizard exited 124» (таймаут инсталлятора) + отсутствие cron/
+  renewal-hooks/service. Воспроизведено эмпирически на v1.0.33 x86_64
+  (provided/letsencrypt виснут; без --cert-type — «Setup Complete!»).
+  ПОЭТОМУ визард запускается БЕЗ --cert-type (self-signed ветка, дедлока
+  нет), а hosts.toml перегенерируется на LE-пути _write_hosts_toml()
+  ПОСЛЕ визарда (формат = сериализация TlsHostsSettings, сверен с выводом
+  визарда и проверен на живом endpoint). НЕ возвращать cert-флаги в
+  _wizard_cmd, пока апстрим не пропатчит (мастер на 2026-09 всё ещё болен).
+
 ⚠️  ВАЖНО — апстрим НЕ поддерживает hot-reload credentials.toml:
   SIGHUP перезагружает ТОЛЬКО hosts.toml (TLS-хосты/сертификаты). Смена
   пользователей (add/remove/block/unblock) требует `systemctl restart
@@ -57,7 +74,8 @@ Python (без вызова 17-МБ бинарника на каждый зап�
 Что модуль делает:
   • Скачивает и распаковывает официальный prebuilt-релиз (GPG-верификация)
   • Получает Let's Encrypt сертификат через существующий ssl_certbot
-  • Запускает setup_wizard --cert-type provided --cert-chain-path ...
+  • Запускает setup_wizard (БЕЗ --cert-type — обход дедлока ≤ v1.0.33)
+  • Подменяет hosts.toml на LE-сертификат (_write_hosts_toml)
   • Пишет systemd-юнит + ExecReload (для SIGHUP-reload при renew сертификата)
   • Устанавливает certbot deploy-hook (systemctl reload trusttunnel)
   • Устанавливает cron: --trusttunnel-health + --trusttunnel-stats (5 мин)
@@ -292,7 +310,21 @@ def _run(cmd: list, capture: bool = False, check: bool = False,
     try:
         return subprocess.run(cmd, **kw)
     except subprocess.TimeoutExpired as e:
-        return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=str(e))
+        # v74.1: частичный вывод процесса — в stderr. При таймауте внешнего
+        # бинарника (напр. зависший setup_wizard) вызывающий видит, ГДЕ тот
+        # остановился (последние строки stdout/stderr), а не голое
+        # «Command ... timed out after N seconds».
+        partial = ""
+        for chunk in (getattr(e, "stdout", None), getattr(e, "stderr", None)):
+            if isinstance(chunk, bytes):
+                chunk = chunk.decode("utf-8", "replace")
+            if chunk and chunk.strip():
+                partial += ("\n" if partial else "") + chunk.strip()
+        err = f"timeout after {e.timeout}s"
+        if partial:
+            tail = "\n".join(partial.splitlines()[-12:])
+            err += f"; вывод процесса (последние строки):\n{tail}"
+        return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=err)
 
 def _get_server_ip() -> str:
     try:
@@ -1240,6 +1272,64 @@ def _remove_cert_renewal_hook() -> None:
         except Exception:
             pass
 
+# ── setup_wizard: CLI + подмена hosts.toml (обход upstream-дедлока) ─────────
+# Полный разбор бага — в докстринге модуля (⚠️ блок) и TROUBLESHOOTING.md
+# («TrustTunnel — известные архитектурные ограничения» → setup_wizard 124).
+# Эмпирика (v1.0.33 x86_64, sandbox scripts/tt-repro):
+#   --cert-type provided      → futex-дедлок, exit 124 по таймауту, hosts.toml НЕТ
+#   --cert-type letsencrypt   → тот же дедлок
+#   без --cert-type           → «Setup Complete!», hosts.toml + certs/ на месте
+#   подмена hosts.toml на LE  → endpoint слушает TCP+UDP, отдаёт LE-сертификат
+
+def _wizard_cmd(listen_addr: str, creds: str, domain: str) -> list:
+    """CLI-команда setup_wizard для non-interactive установки.
+
+    ⚠️ Специально БЕЗ `--cert-type/--cert-chain-path/--cert-key-path`:
+    provided/letsencrypt-ветки upstream-визарда (≤ v1.0.33) дедлочатся
+    на PREDEFINED_PARAMS (см. докстринг модуля). Self-signed ветка
+    работает; сертификат подменяется после визарда — _write_hosts_toml().
+    НЕ возвращать cert-флаги, пока апстрим не закроет дедлок.
+    """
+    return [
+        str(_WIZARD_PATH), "-m", "non-interactive",
+        "-a", listen_addr, "-c", creds, "-n", domain,
+        "--lib-settings", str(_VPN_TOML),
+        "--hosts-settings", str(_HOSTS_TOML),
+    ]
+
+def _write_hosts_toml(domain: str, cert_chain: Path, cert_key: Path) -> bool:
+    """Перезаписать hosts.toml путями реального (LE) сертификата.
+
+    Формат = toml::ser::to_string(&TlsHostsSettings) апстрима, сверен с
+    генератом setup_wizard v1.0.33: три пустых host-массива + один
+    [[main_hosts]] (hostname/cert_chain_path/private_key_path/allowed_sni).
+    certbot обновляет файлы по симлинкам live/<domain>/ — путь не меняется,
+    SIGHUP-reload (deploy-hook) подхватывает новый сертификат без рестарта.
+    hostname = домен (для LE совпадает с SAN; SNI-выбор цепочки по нему).
+    """
+    if not cert_chain.exists() or not cert_key.exists():
+        _log("ERROR", f"_write_hosts_toml: cert files missing: {cert_chain} / {cert_key}")
+        return False
+    hosts_text = (
+        "ping_hosts = []\n"
+        "speedtest_hosts = []\n"
+        "reverse_proxy_hosts = []\n"
+        "\n"
+        "[[main_hosts]]\n"
+        f'hostname = "{domain}"\n'
+        f'cert_chain_path = "{cert_chain}"\n'
+        f'private_key_path = "{cert_key}"\n'
+        "allowed_sni = []\n"
+    )
+    try:
+        _HOSTS_TOML.parent.mkdir(parents=True, exist_ok=True)
+        _HOSTS_TOML.write_text(hosts_text)
+    except Exception as e:
+        _log("ERROR", f"_write_hosts_toml: cannot write {_HOSTS_TOML}: {e}")
+        return False
+    _log("INFO", f"_write_hosts_toml: {domain} → {cert_chain}")
+    return True
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  УСТАНОВКА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1406,26 +1496,45 @@ def _run_install_inner() -> None:
         _box_bot(); _pause(); return
     print(f"  {GREEN}✓{NC}  Сертификат получен{' (self-signed)' if _le_failed else ''}")
 
-    _box_info("Запускаю setup_wizard (non-interactive, --cert-type provided)...")
+    # v74.1: визард запускается БЕЗ --cert-type — provided-ветка upstream
+    # (≤ v1.0.33) дедлочится на PREDEFINED_PARAMS и виснет до таймаута
+    # («exited 124», инцидент 2026-09-01) — см. _wizard_cmd. stdin закрываем
+    # (input_text=""): случайный интерактивный промпт умрёт по EOF сразу,
+    # а не провисит до таймаута; таймаут поднят 60→90 (генерация self-signed
+    # + запись конфигов на медленных VPS).
+    _box_info("Запускаю setup_wizard (non-interactive, self-signed)...")
     listen_addr = f"0.0.0.0:{port}"
     # v4.24: используем email+UUID пользователя вместо хардкода
     # 'admin' + dummy UUID 00000000-... Пароль детерминированно выводится
     # из UUID (trusttunnel_derive_password).
     admin_pass = trusttunnel_derive_password(_admin_uuid)
-    wizard_cmd = [
-        str(_WIZARD_PATH), "-m", "non-interactive",
-        "-a", listen_addr, "-c", f"{admin_email}:{admin_pass}", "-n", domain,
-        "--cert-type", "provided",
-        "--cert-chain-path", str(cert_chain),
-        "--cert-key-path", str(cert_key),
-        "--lib-settings", str(_VPN_TOML),
-        "--hosts-settings", str(_HOSTS_TOML),
-    ]
-    r = _run(wizard_cmd, capture=True, timeout=60, cwd=str(_INSTALL_DIR))
+    wizard_cmd = _wizard_cmd(listen_addr, f"{admin_email}:{admin_pass}", domain)
+    r = _run(wizard_cmd, capture=True, timeout=90, cwd=str(_INSTALL_DIR),
+             input_text="")
     if r.returncode != 0:
-        _box_err(f"setup_wizard exited {r.returncode}: {r.stderr[:300]}")
+        _box_err(f"setup_wizard exited {r.returncode}: {r.stderr[:400]}")
+        _box_warn("Полный вывод визарда — выше (последние строки); лог установки")
+        _box_warn("— /var/log/xray-trusttunnel.log. Если вывод обрывается на")
+        _box_warn("'Let's build the TLS hosts settings' — это upstream-дедлок")
+        _box_warn("(--cert-type больше не передаётся; обновите setup_wizard).")
         _box_bot(); _pause(); return
+    for gen in (_VPN_TOML, _HOSTS_TOML, _CREDS_TOML):
+        if not gen.exists():
+            _box_err(f"setup_wizard вернул 0, но {gen} не создан — конфиг")
+            _box_err("неполный. Проверьте права на запись и место на диске.")
+            _box_bot(); _pause(); return
     print(f"  {GREEN}✓{NC}  vpn.toml + hosts.toml + credentials.toml сгенерированы")
+
+    # v74.1: подменяем self-signed визарда на реальный (LE) сертификат.
+    _box_info("Подменяю hosts.toml на Let's Encrypt сертификат...")
+    if _write_hosts_toml(domain, cert_chain, cert_key):
+        print(f"  {GREEN}✓{NC}  hosts.toml → {cert_chain}")
+    else:
+        # Self-signed визарда (certs/cert.pem в _INSTALL_DIR) остаётся
+        # рабочим фолбэком: клиенты TrustTunnel принимают self-signed
+        # (pin сертификата в tt:// deep-link, тег 0x08).
+        _box_warn("hosts.toml НЕ переписан — сервис останется на self-signed")
+        _box_warn(f"визарда ({_INSTALL_DIR}/certs/cert.pem). Причина в логе.")
     print(f"  {GREEN}✓{NC}  Первый пользователь: {YELLOW}{admin_email}{NC}")
     print(f"  {DIM}    Пароль (derived from UUID): {admin_pass[:8]}...{NC}")
 
@@ -1556,18 +1665,20 @@ def trusttunnel_install(domain: str,
     _admin_uuid = str(_uuid_mod.uuid4())
     admin_pass = _secrets_mod.token_urlsafe(18)
     _log("INFO", f"install: admin uuid={_admin_uuid}, password={admin_pass[:4]}***")
-    wizard_cmd = [
-        str(_WIZARD_PATH), "-m", "non-interactive",
-        "-a", listen_addr, "-c", f"admin:{admin_pass}", "-n", domain,
-        "--cert-type", "provided",
-        "--cert-chain-path", str(cert_chain),
-        "--cert-key-path", str(cert_key),
-        "--lib-settings", str(_VPN_TOML),
-        "--hosts-settings", str(_HOSTS_TOML),
-    ]
-    r = _run(wizard_cmd, capture=True, timeout=60, cwd=str(_INSTALL_DIR))
+    # v74.1: БЕЗ --cert-type — обход дедлока апстрима ≤ v1.0.33 (см.
+    # _wizard_cmd); hosts.toml подменяется на LE сразу после визарда.
+    wizard_cmd = _wizard_cmd(listen_addr, f"admin:{admin_pass}", domain)
+    r = _run(wizard_cmd, capture=True, timeout=90, cwd=str(_INSTALL_DIR),
+             input_text="")
     if r.returncode != 0:
         _log("ERROR", f"install: setup_wizard exited {r.returncode}: {r.stderr[:300]}")
+        return False
+    for gen in (_VPN_TOML, _HOSTS_TOML, _CREDS_TOML):
+        if not gen.exists():
+            _log("ERROR", f"install: setup_wizard ok, but {gen} not created")
+            return False
+    if not _write_hosts_toml(domain, cert_chain, cert_key):
+        _log("ERROR", "install: cannot rewrite hosts.toml to LE cert paths")
         return False
 
     try:
@@ -1905,9 +2016,11 @@ def _guide_certs() -> None:
     _box_top("🔒  СЕРТИФИКАТЫ И ПОРТЫ  •  TRUSTTUNNEL")
     _box_row()
     _box_info("Сертификат — Let's Encrypt через существующий ssl_certbot.")
-    _box_info("Feed в setup_wizard через --cert-type provided. Авто-renewal —")
-    _box_info("через certbot cron + deploy-hook systemctl reload trusttunnel")
-    _box_info("(SIGHUP перезагружает hosts.toml, без рестарта, без разрыва).")
+    _box_info("Визард генерит self-signed, hosts.toml затем подменяется на LE")
+    _box_info("(обход дедлока визарда ≤ v1.0.33, см. TROUBLESHOOTING.md).")
+    _box_info("Авто-renewal — через certbot cron + deploy-hook")
+    _box_info("systemctl reload trusttunnel (SIGHUP перезагружает hosts.toml,")
+    _box_info("без рестарта, без разрыва соединений).")
     _box_row()
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Домен:{NC}")

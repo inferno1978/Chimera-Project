@@ -87,7 +87,7 @@ bash bootstrap.sh
 
 **Порт по умолчанию: `8443` (TCP + UDP).** Это отдельный порт, не 443 — порт 443 уже занят VLESS (TCP, REALITY или xHTTP) и Hysteria2 (UDP), а TrustTunnel слушает одновременно TCP и UDP на одном номере порта, не имеет SNI-dispatch и не умеет fallback. При установке конфликт проверяется через `core.check_port_used_by_other_protocol`.
 
-Сертификаты — через существующий конвейер `ssl_certbot.obtain_ssl_cert()`, feed в `setup_wizard --cert-type provided`. Авто-renewal — через certbot cron + deploy-hook `systemctl reload trusttunnel` (SIGHUP перезагружает `hosts.toml` без рестарта, без разрыва активных сессий).
+Сертификаты — через существующий конвейер `ssl_certbot.obtain_ssl_cert()`. `setup_wizard` запускается БЕЗ `--cert-type` (обход upstream-дедлока ≤ v1.0.33 — ветки provided/letsencrypt гарантированно виснут в non-interactive, см. TROUBLESHOOTING.md §3), после чего `hosts.toml` перегенерируется на LE-пути. Авто-renewal — через certbot cron + deploy-hook `systemctl reload trusttunnel` (SIGHUP перезагружает `hosts.toml` без рестарта, без разрыва активных сессий).
 
 Управление пользователями — общий `user_lifecycle.TrustTunnelAdapter`, credentials в `/opt/trusttunnel/credentials.toml` (TOML, массив `[[client]]`). Известные ограничения — см. [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) (агрегированный трафик, рестарт при смене пользователей).
 

@@ -2,6 +2,68 @@
 
 ---
 
+## FIX(trusttunnel): v74.1 — обход upstream-дедлока setup_wizard: установка TrustTunnel больше не падает с «exited 124» — 2 сентября 2026
+
+**Контекст:** инцидент на чистом VPS (2026-09-01): установка TrustTunnel
+обрывалась на «Запускаю setup_wizard» с `setup_wizard exited 124:
+Command '/opt/trusttunnel/setup_wizard ...' timed out after 60 seconds`.
+Бинарники скачаны, сертификат LE получен, но ВСЁ после визарда не
+выполнялось: нет vpn/hosts/credentials.toml, systemd-юнита,
+`/etc/cron.d/trusttunnel`, certbot renewal-hook; state-файл не писался
+(модуль считал себя неустановленным).
+
+**Причина — баг upstream, не Chimera:** `setup_wizard` ≤ v1.0.33
+(актуальный релиз; master на 2026-09 тоже болен) гарантированно
+дедлочится при `--cert-type provided|letsencrypt` в non-interactive:
+`tools/setup_wizard/tls_hosts_settings.rs::build_with_runtime()` держит
+MutexGuard PREDEFINED_PARAMS весь then-блок `if let Some(ref
+cert_type) = get_predefined_params().cert_type` (временка из scrutinee
+живёт до конца выражения в Rust ≤2021), а вложенный
+`load_provided_cert_noninteractive()` повторно лочит тот же мьютекс →
+однопоточный futex-дедлок (подтверждено /proc: единственный поток в
+`futex_wait`), процесс виснет навсегда; Chimera убивала его по
+таймауту. Воспроизведено эмпирически на v1.0.33 x86_64:
+provided/letsencrypt → виснет (вывод обрывается на «Let's build the
+TLS hosts settings»); БЕЗ --cert-type → «Setup Complete!».
+
+**Фикс (обход, бинарник апстрима не патчим — теряем GPG):**
+
+1. **`_wizard_cmd()`** — единый конструктор команды визарда для обеих
+   веток установки (TUI + программная): БЕЗ cert-флагов. Регрессионный
+   страж — тест прямо запрещает `--cert-type/--cert-chain-path/
+   --cert-key-path` в команде.
+2. **`_write_hosts_toml()`** — после визарда hosts.toml
+   перегенерируется на LE-пути (`/etc/letsencrypt/live/<domain>/
+   {fullchain,privkey}.pem`); формат = toml-сериализация TlsHostsSettings
+   апстрима, сверен с генератом визарда v1.0.33 и проверен на живом
+   endpoint (TCP+UDP listen, TLS-handshake отдаёт LE-сертификат).
+   При провале подмены сервис остаётся на self-signed визарда
+   (клиенты TrustTunnel принимают self-signed — pin в deep-link).
+3. **Диагностика `_run()`**: при TimeoutExpired stderr теперь содержит
+   хвост stdout/stderr зависшего процесса (видно, ГДЕ виснет), а не
+   голое «Command timed out»; bytes-вывод декодируется.
+4. **Гигиена визарда**: stdin закрывается (`input_text=""`) — случайный
+   интерактивный промпт умирает по EOF сразу; таймаут 60→90 с; после
+   «успеха» валидируется фактическое создание vpn.toml + hosts.toml +
+   credentials.toml (молчаливые полусборки отсечены).
+5. **Доки**: докстринг модуля (⚠️-блок с разбором дедлока),
+   `_guide_certs` (честный текст про self-signed + подмену), README,
+   TROUBLESHOOTING §3 (симптомы/причина/лечение/инструкция для
+   пострадавших нод + upstream-report), VPS-чеклист (проверка
+   hosts.toml → LE-пути).
+6. **Тесты +8**: TestWizardDeadlockWorkaround (запрет cert-флагов,
+   формат hosts.toml = генерату визарда, missing-cert/unwritable →
+   False, _run-таймауты с частичным выводом str/bytes/без) +
+   TestInstallWritesLeHostsToml (программная установка пишет LE-пути).
+   trusttunnel-сьюты: 97 passed (70 + 27).
+
+**Пострадавшим нодам:** `git pull` → меню `18` → `1` (переустановка);
+частично раскатанные файлы перезапишутся, cron/hook/юнит доустановятся.
+Upstream-репорт (tools/setup_wizard/tls_hosts_settings.rs, фикс — drop
+guard'а или Rust 2024 edition) — рекомендуется юзеру.
+
+---
+
 ## FEAT(dnscrypt): v74 — динамический пул DNSCrypt (245/51), авто-обновление бинарника, синк по cron, тест цепочки xray→AGH→dnscrypt, экстренный DNS-фолбэк — 1 сентября 2026
 
 **Контекст:** пул [RA] v73 дрейфовал от реальности: 37 из 192 имён

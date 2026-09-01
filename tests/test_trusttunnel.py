@@ -986,5 +986,217 @@ class TestCronInstallUninstall(unittest.TestCase):
             patch.stopall()
 
 
+# =============================================================================
+#  v74.1 — обход upstream-дедлока setup_wizard (exit 124)
+# =============================================================================
+class TestWizardDeadlockWorkaround(unittest.TestCase):
+    """v74.1: upstream setup_wizard ≤ v1.0.33 ДЕДЛОКИТСЯ (однопоточный
+    futex на PREDEFINED_PARAMS: времка-MutexGuard из `if let` scrutinee
+    живёт весь then-блок в Rust ≤2021, вложенный вызов лочит тот же мьютекс)
+    при `--cert-type provided|letsencrypt` в non-interactive. Симптом из
+    инцидента 2026-09-01: «setup_wizard exited 124», установка обрывается
+    ДО hosts.toml/systemd/cron/renewal-hook.
+
+    Фикс: визард запускается БЕЗ cert-флагов (self-signed ветка — дедлока
+    нет), hosts.toml перегенерируется на LE-пути через _write_hosts_toml().
+    Тесты ниже — регрессионный страж: cert-флаги НЕ должны вернуться."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+
+    def _patched_paths(self):
+        from chimera.modules import trusttunnel
+        return [
+            patch.object(trusttunnel, "_INSTALL_DIR", self.tmpdir / "tt"),
+            patch.object(trusttunnel, "_WIZARD_PATH", self.tmpdir / "tt" / "setup_wizard"),
+            patch.object(trusttunnel, "_VPN_TOML", self.tmpdir / "tt" / "vpn.toml"),
+            patch.object(trusttunnel, "_HOSTS_TOML", self.tmpdir / "tt" / "hosts.toml"),
+        ]
+
+    def test_wizard_cmd_has_no_cert_type_flags(self):
+        """REGRESSION GUARD: --cert-type/--cert-chain-path/--cert-key-path
+        запрещены — provided/letsencrypt-ветки визарда дедлочатся."""
+        from chimera.modules import trusttunnel
+        from contextlib import ExitStack
+        with ExitStack() as st:
+            for p in self._patched_paths():
+                st.enter_context(p)
+            cmd = trusttunnel._wizard_cmd(
+                "0.0.0.0:8443", "admin@example.com:secret-pwd", "vpn.example.com")
+        joined = " ".join(cmd)
+        # Смертельно опасные флаги (дедлок апстрима ≤ v1.0.33)
+        self.assertNotIn("--cert-type", joined)
+        self.assertNotIn("--cert-chain-path", joined)
+        self.assertNotIn("--cert-key-path", joined)
+        self.assertNotIn("provided", joined)
+        self.assertNotIn("letsencrypt", joined)
+        # Обязательные non-interactive параметры (upstream main.rs:
+        # required_if_eq mode=non-interactive)
+        self.assertIn("-m", cmd)
+        self.assertIn("non-interactive", cmd)
+        self.assertIn("0.0.0.0:8443", cmd)
+        self.assertIn("admin@example.com:secret-pwd", cmd)
+        self.assertIn("vpn.example.com", cmd)
+        self.assertIn("--lib-settings", joined)
+        self.assertIn("--hosts-settings", joined)
+        # Абсолютные пути конфигов из констант модуля
+        self.assertIn(str(self.tmpdir / "tt" / "vpn.toml"), cmd)
+        self.assertIn(str(self.tmpdir / "tt" / "hosts.toml"), cmd)
+        # Список (не shell-строка) — args передаются без shell-инъекций
+        self.assertIsInstance(cmd, list)
+
+    def test_write_hosts_toml_format_matches_wizard(self):
+        """Формат hosts.toml = toml::ser::to_string(&TlsHostsSettings):
+        сверен с реальным генератом setup_wizard v1.0.33 (Phase 0)."""
+        from chimera.modules import trusttunnel
+        chain = self.tmpdir / "fullchain.pem"; chain.write_text("CERT")
+        key = self.tmpdir / "privkey.pem"; key.write_text("KEY")
+        from contextlib import ExitStack
+        with ExitStack() as st:
+            for p in self._patched_paths():
+                st.enter_context(p)
+            ok = trusttunnel._write_hosts_toml("vpn.example.com", chain, key)
+            hosts = (self.tmpdir / "tt" / "hosts.toml").read_text()
+        self.assertTrue(ok)
+        # Структура = выводу визарда (эмпирика v1.0.33, t-none/hosts.toml)
+        lines = hosts.splitlines()
+        self.assertEqual(lines[0], "ping_hosts = []")
+        self.assertEqual(lines[1], "speedtest_hosts = []")
+        self.assertEqual(lines[2], "reverse_proxy_hosts = []")
+        self.assertIn("[[main_hosts]]", hosts)
+        self.assertIn('hostname = "vpn.example.com"', hosts)
+        self.assertIn(f'cert_chain_path = "{chain}"', hosts)
+        self.assertIn(f'private_key_path = "{key}"', hosts)
+        self.assertIn("allowed_sni = []", hosts)
+
+    def test_write_hosts_toml_missing_cert_files(self):
+        """Нет файлов сертификата → False, hosts.toml не трогаем."""
+        from chimera.modules import trusttunnel
+        from contextlib import ExitStack
+        chain = self.tmpdir / "nonexistent.pem"
+        key = self.tmpdir / "nonexistent.key"
+        with ExitStack() as st:
+            for p in self._patched_paths():
+                st.enter_context(p)
+            # _HOSTS_TOML патчится на tmp, но chain.exists() реален → False
+            ok = trusttunnel._write_hosts_toml("vpn.example.com", chain, key)
+            hosts_exists = (self.tmpdir / "tt" / "hosts.toml").exists()
+        self.assertFalse(ok)
+        self.assertFalse(hosts_exists)
+
+    def test_write_hosts_toml_unwritable_target(self):
+        """Недоступный путь записи → False, без исключения наружу."""
+        from chimera.modules import trusttunnel
+        chain = self.tmpdir / "fullchain.pem"; chain.write_text("CERT")
+        key = self.tmpdir / "privkey.pem"; key.write_text("KEY")
+        # Родитель — обычный файл, а не директория → write_text упадёт
+        blocker = self.tmpdir / "blocker"; blocker.write_text("x")
+        with patch.object(trusttunnel, "_HOSTS_TOML", blocker / "hosts.toml"):
+            ok = trusttunnel._write_hosts_toml("vpn.example.com", chain, key)
+        self.assertFalse(ok)
+
+    def test_run_timeout_returns_124_with_partial_output(self):
+        """_run(TimeoutExpired) → CompletedProcess(124), stderr содержит
+        хвост вывода процесса (диагностика зависшего визарда)."""
+        from chimera.modules import trusttunnel
+        import subprocess as sp
+        def boom(cmd, **kw):
+            raise sp.TimeoutExpired(
+                cmd, 60,
+                output="Welcome to the setup wizard\nLet's build the TLS hosts settings",
+                stderr="")
+        with patch("subprocess.run", side_effect=boom):
+            r = trusttunnel._run(["/opt/trusttunnel/setup_wizard"],
+                                 capture=True, timeout=60)
+        self.assertEqual(r.returncode, 124)
+        self.assertIn("timeout after 60s", r.stderr)
+        self.assertIn("TLS hosts settings", r.stderr)  # частичный вывод
+        self.assertEqual(r.stdout, "")
+
+    def test_run_timeout_decodes_bytes_partial_output(self):
+        """bytes-вариант частичного вывода декодируется без падения."""
+        from chimera.modules import trusttunnel
+        import subprocess as sp
+        def boom(cmd, **kw):
+            raise sp.TimeoutExpired(
+                cmd, 5, output=b"\xd1\x81\xd0\xb5\xd1\x80\xd0\xb2\xd0\xb5\xd1\x80", stderr=None)
+        with patch("subprocess.run", side_effect=boom):
+            r = trusttunnel._run(["x"], capture=True, timeout=5)
+        self.assertEqual(r.returncode, 124)
+        self.assertIn("сервер", r.stderr)
+
+    def test_run_timeout_without_partial_output(self):
+        """TimeoutExpired без вывода → stderr = только 'timeout after Ns'."""
+        from chimera.modules import trusttunnel
+        import subprocess as sp
+        def boom(cmd, **kw):
+            raise sp.TimeoutExpired(cmd, 7)
+        with patch("subprocess.run", side_effect=boom):
+            r = trusttunnel._run(["x"], capture=True, timeout=7)
+        self.assertEqual(r.returncode, 124)
+        self.assertEqual(r.stderr, "timeout after 7s")
+
+
+class TestInstallWritesLeHostsToml(unittest.TestCase):
+    """v74.1: программная установка trusttunnel_install() после визарда
+    перегенерирует hosts.toml на LE-пути (обход дедлока)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+
+    def test_install_writes_le_hosts_toml(self):
+        from chimera.modules import trusttunnel
+        patches = [
+            patch.object(trusttunnel, "_install_cron"),
+            patch.object(trusttunnel, "_remove_cron"),
+            patch.object(trusttunnel, "_download_and_install_binary",
+                         return_value=(True, "1.0.33")),
+            patch.object(trusttunnel, "_import_gpg_key"),
+            patch.object(trusttunnel, "_verify_gpg_signature", return_value=True),
+            patch("chimera.modules.ssl_certbot.obtain_ssl_cert"),
+            patch.object(trusttunnel, "_check_domain_available", return_value=""),
+            patch.object(trusttunnel, "_check_port_available", return_value=""),
+            patch.object(trusttunnel, "_open_port"),
+            patch.object(trusttunnel, "_close_port"),
+            patch.object(trusttunnel, "_install_systemd_unit"),
+            patch.object(trusttunnel, "_remove_systemd_unit"),
+            patch.object(trusttunnel, "_install_cert_renewal_hook"),
+            patch.object(trusttunnel, "_remove_cert_renewal_hook"),
+            # v74.1: визард «отработал» — но конфигов НЕ создал (мок);
+            # валидация ниже включена в патч Path.exists → True
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+            patch.object(trusttunnel, "_INSTALL_DIR", self.tmpdir / "tt"),
+            patch.object(trusttunnel, "_BINARY_PATH", self.tmpdir / "tt" / "endpoint"),
+            patch.object(trusttunnel, "_WIZARD_PATH", self.tmpdir / "tt" / "setup_wizard"),
+            patch.object(trusttunnel, "_VPN_TOML", self.tmpdir / "tt" / "vpn.toml"),
+            patch.object(trusttunnel, "_HOSTS_TOML", self.tmpdir / "tt" / "hosts.toml"),
+            patch.object(trusttunnel, "_CREDS_TOML", self.tmpdir / "tt" / "creds.toml"),
+            patch.object(trusttunnel, "_RULES_TOML", self.tmpdir / "tt" / "rules.toml"),
+            patch.object(trusttunnel, "_STATE_FILE", self.tmpdir / "state.json"),
+            patch("pathlib.Path.exists", return_value=True),
+            patch.object(trusttunnel, "trusttunnel_load_state",
+                         return_value={"installed": True, "listen_port": 8443}),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            # РЕАЛЬНАЯ _write_hosts_toml (не мок) пишет в tmp-песочницу
+            ok = trusttunnel.trusttunnel_install("test.example.com", 8443, "")
+            self.assertTrue(ok, "install should succeed")
+            hosts = (self.tmpdir / "tt" / "hosts.toml").read_text()
+            self.assertIn("[[main_hosts]]", hosts)
+            self.assertIn('hostname = "test.example.com"', hosts)
+            self.assertIn("/etc/letsencrypt/live/test.example.com/fullchain.pem", hosts)
+            self.assertIn("/etc/letsencrypt/live/test.example.com/privkey.pem", hosts)
+            self.assertIn("allowed_sni = []", hosts)
+            self.assertIn("ping_hosts = []", hosts)
+        finally:
+            patch.stopall()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
