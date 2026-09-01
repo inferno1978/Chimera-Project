@@ -403,7 +403,10 @@ def apply_dnscrypt_tuning() -> None:
         "timeout":            "1500",
         "netprobe_timeout":   "5",
         "reject_ttl":         "10",
-        "fallback_resolvers": "['1.1.1.1:53', '8.8.8.8:53']",
+        # v73 = v67-канон (шаблон install_dnscrypt): 1.1.1.1/8.8.8.8 в РФ
+        # отравлены (DNAT→НСДИ, NXDomain-spoof) — тюнинг [T] не должен
+        # возвращать отраву в уже вычищенный конфиг.
+        "fallback_resolvers": "['9.9.9.9:53', '77.88.8.8:53']",
         "cache":              "true",
         "cache_size":         "32768",
         "cache_min_ttl":      "300",
