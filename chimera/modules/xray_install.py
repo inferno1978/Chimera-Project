@@ -1237,6 +1237,13 @@ def generate_xray_config_xhttp() -> None:
             dns_servers.append(
                 {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
                  "network": "udp", "skipFallback": False})
+        # v73 (синхрон с generate_xray_config v67): последний живой fallback —
+        # Quad9 напрямую (UDP:53 anycast, достижим и из РФ, и из-за рубежа).
+        # Срабатывает ТОЛЬКО при падении AGH+DNSCrypt — лучше открытый DNS,
+        # чем black-hole для IPIfNonMatch-резолва. 1.1.1.1/8.8.8.8 ниже —
+        # skipFallback (мёртвый груз в РФ, живые за рубежом).
+        dns_servers.append(
+            {"address": "9.9.9.9", "port": 53, "network": "udp", "skipFallback": False})
         dns_servers += [
             {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
             {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
@@ -1246,6 +1253,9 @@ def generate_xray_config_xhttp() -> None:
         dns_servers = [
             {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
              "network": "udp", "skipFallback": False},
+            # v73 (синхрон с generate_xray_config v67): живой Quad9-fallback —
+            # достижим из РФ (1.1.1.1/8.8.8.8 ниже — skipFallback, отрава в РФ).
+            {"address": "9.9.9.9", "port": 53, "network": "udp", "skipFallback": False},
             {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
             {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
         ]
