@@ -40,7 +40,14 @@ sudo python3 main.py
 - [ ] `cat /etc/cron.d/trusttunnel` → файл существует, содержит `--trusttunnel-health` и `--trusttunnel-stats` строки с интервалом `*/5 * * * *`
 - [ ] `cat /etc/letsencrypt/renewal-hooks/deploy/trusttunnel-reload.sh` → файл существует, содержит `systemctl reload trusttunnel`
 - [ ] `ls /etc/letsencrypt/live/<домен>/{fullchain,privkey}.pem` → сертификат получен
+- [ ] `grep cert_chain_path /opt/trusttunnel/hosts.toml` → `/etc/letsencrypt/live/<домен>/fullchain.pem` (НЕ `certs/cert.pem` — self-signed визарда остаётся только как файловый фолбэк)
 - [ ] `ufw status | grep 8443` → порты 8443/tcp и 8443/udp открыты с комментарием `TRUSTTUNNEL`
+
+> **Если установка упала с «setup_wizard exited 124»** — на релизах до v74.1
+> это upstream-дедлок визарда (`--cert-type provided` в non-interactive);
+> v74.1+ запускает визард без cert-флагов и подменяет `hosts.toml` на LE.
+> Лечение: обновить проект (`git pull`) и повторить установку. Подробности:
+> `TROUBLESHOOTING.md` → TrustTunnel → п. 3.
 
 ---
 

@@ -650,6 +650,26 @@ Upstream TrustTunnel **не поддерживает hot-reload `credentials.tom
 
 **Не митигируется:** ручное добавление/удаление пользователя через TUI-меню (пункт 18) или через клиентского Telegram-бота. Эти одиночные операции рестартуют сервис сразу. Это задокументированное поведение — если на сервере активно пользуются TrustTunnel, планировать массовые пользовательские операции на cron-окно (например, ночью) или через `batch_context()` в кастомном скрипте.
 
+### 3. setup_wizard зависает с «exit 124» — upstream-дедлок (исправлено в v74.1)
+
+**Симптомы** (инцидент на чистом VPS, 2026-09-01): установка TrustTunnel обрывается на шаге «Запускаю setup_wizard» с ошибкой `setup_wizard exited 124: Command '/opt/trusttunnel/setup_wizard ...' timed out after 60 seconds`. При этом бинарники установлены, сертификат Let's Encrypt получен, но **после падения визарда не выполняется ничего**: нет `vpn.toml`/`hosts.toml`/`credentials.toml`, нет systemd-юнита, нет `/etc/cron.d/trusttunnel`, нет certbot renewal-hook, сервис не запущен — установка возвращается с `return` ДО этих шагов.
+
+**Причина — баг upstream `setup_wizard` ≤ v1.0.33** (актуальный релиз на 2026-09; master тоже болен), а не Chimera. В `tools/setup_wizard/tls_hosts_settings.rs::build_with_runtime()`:
+
+```rust
+if let Some(ref cert_type) = crate::get_predefined_params().cert_type {   // ← MutexGuard-времка
+    if cert_type == "provided" {                                          //    живёт ВЕСЬ then-блок
+        return load_provided_cert_noninteractive();                       // ← лочит ТОТ ЖЕ мьютекс
+    }                                                                     //    → futex-дедлок
+}
+```
+
+В Rust ≤2021 времка из scrutinee `if let` живёт до конца всего выражения, включая then-блок; вложенный вызов `get_predefined_params()` повторно берёт `PREDEFINED_PARAMS.lock()` → однопоточный дедлок (подтверждено `/proc/<pid>/task`: единственный поток в `futex_wait_queue_me`), процесс виснет навсегда — Chimera убивает его по таймауту (124). Виснут ветки `--cert-type provided` **и** `--cert-type letsencrypt`; ветка по умолчанию (self-signed) идёт после закрытия guard'а и работает. Chimera до v74.1 передавала визарду `--cert-type provided --cert-chain-path ... --cert-key-path ...` — отсюда гарантированный дедлок на каждом чистом инсталле, где визард не уложился обойти его стороной.
+
+**Исправление (v74.1):** визард запускается **без cert-флагов** (`_wizard_cmd()`) — self-signed ветка, дедлока нет, конфиги генерируются штатно; сразу после этого `hosts.toml` **перегенерируется** на пути реального (LE) сертификата (`_write_hosts_toml()`, формат сверен с сериализацией апстрима и проверен на живом endpoint: TCP+UDP listen + TLS-handshake отдаёт LE-сертификат). Дополнительно: stdin визарда закрывается (`input_text=""` — случайный интерактивный промпт умирает по EOF, а не виснет), таймаут 60→90 с, `_run()` при таймауте возвращает хвост вывода процесса (видно, ГДЕ завис), после визарда валидируется создание `vpn.toml`/`hosts.toml`/`credentials.toml`. Регрессионный страж — `tests/test_trusttunnel.py::TestWizardDeadlockWorkaround` (cert-флаги в команде визарда запрещены тестом).
+
+**Что делать пользователю на пострадавшей ноде:** обновить проект (`git pull`) и повторить установку через меню (`18` → `1`) — визард уже не получает опасных флагов, частично раскатанные бинарники в `/opt/trusttunnel` будут перезаписаны, cron/renewal-hook/systemd-юнит доустановятся. **Upstream:** баг стоит зарепортить в https://github.com/TrustTunnel/TrustTunnel (файл `tools/setup_wizard/tls_hosts_settings.rs`, функции `build_with_runtime`/`load_provided_cert_noninteractive`; фикс на стороне апстрима — `drop()` guard'а до вложенных вызовов или Rust 2024 edition, где времки `if let` живут короче).
+
 ### См. также
 
 - **Установка/удаление:** Меню → `18` (TrustTunnel) → `1` (Установить) / `8` (Удалить)
