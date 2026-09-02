@@ -1632,6 +1632,12 @@ def do_wdtt_menu() -> None:
             tg = "✓ настроен" if state.get("bot_token") else "не настроен"
             tg_col = GREEN if state.get("bot_token") else DIM
             _box_kv("Telegram-бот:", f"{tg_col}{tg}{NC}")
+            # v75: статус обновления из апстрима (state-кэш, без сети).
+            try:
+                from chimera.modules.upstream_updates import get_update_status_line
+                _box_kv("Обновление:", get_update_status_line("wdtt"))
+            except Exception:
+                pass
 
         _box_row(); _box_sep()
 
@@ -1643,6 +1649,7 @@ def do_wdtt_menu() -> None:
             _box_item("3", "🔗  Показать ссылку (главный пароль)")
             _box_item("4", "🔄  Перезапустить сервис")
             _box_item("5", "📊  Статус / логи")
+            _box_item("U", "⬆️   Обновление из апстрима (проверка/авто/таймер)")
             _box_sep()
             _box_item("8", f"{RED}🗑️   Удалить qWDTT{NC}")
 
@@ -1698,6 +1705,16 @@ def do_wdtt_menu() -> None:
 
         elif ch == "5" and installed:
             _show_status()
+
+        elif ch == "u" and installed:
+            # v75: единое меню обновления из апстрима
+            # (SpaceNeuroX/proxy-turn-vk-android).
+            try:
+                from chimera.modules.upstream_updates import do_upstream_update_menu
+                do_upstream_update_menu(focus="wdtt")
+            except ImportError as e:
+                print(f"  {RED}✗{NC}  upstream_updates недоступен: {e}")
+                _pause()
 
         elif ch == "8" and installed:
             try:

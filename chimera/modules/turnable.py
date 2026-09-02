@@ -1055,45 +1055,23 @@ def _full_uninstall(silent: bool = False) -> bool:
 #  ОБНОВЛЕНИЕ
 # ══════════════════════════════════════════════════════════════════════════════
 def _run_update() -> None:
-    os.system("clear")
-    _box_top("⬆️  ОБНОВЛЕНИЕ  •  TURNABLE")
-    _box_row()
-    cur = _get_installed_version()
-    _box_kv("Установлена:", cur or "—")
-    _box_info("Проверяю последний релиз на GitHub...")
-    _box_bot(); print()
+    """v75: обновление Turnable через единый центр upstream_updates.
 
-    latest = proto_get_latest_version(_GITHUB_API_URL)
-    os.system("clear")
-    _box_top("⬆️  ОБНОВЛЕНИЕ  •  TURNABLE")
-    _box_row()
-    _box_kv("Установлена:", cur or "—")
-    _box_kv("Последняя:",   latest)
-    _box_row()
+    До v75 здесь был собственный флоу с багом: меню обещало «Обновить до
+    {latest}», но _download_binary() скачивал PINNED _TURNABLE_VERSION
+    (0.4.1) — версия в реальности не менялась. Теперь тег latest
+    передаётся в fetch_package(TURNABLE_SPEC, version=latest) динамически.
 
-    if cur == latest and cur != "unknown":
-        _box_info("Уже установлена последняя версия.")
-        _box_bot(); _pause(); return
-
-    _box_item("Y", f"Обновить до {latest}")
-    _box_item("N", "← Отмена")
-    _box_bot(); print()
-
+    Дополнительно пользователь получает: бэкап+откат, smoke-тест сервиса,
+    force-переустановку, вкл/выкл авто и установку таймера 04:40 — всё
+    в едином меню (как DU в dnscrypt v74).
+    """
     try:
-        ans = proto_ask(f"{CYAN}Обновить? [Y/n]: {NC}", default="y", c=True).strip().lower()
-    except _Cancelled:
-        return
-    if ans not in ("y", ""):
-        return
-
-    _run(["systemctl", "stop", _SERVICE_NAME])
-    if _download_binary():
-        _run(["systemctl", "start", _SERVICE_NAME])
-        _ok(f"Обновлено до {latest}.")
-    else:
-        _err("Обновление не удалось.")
-        _run(["systemctl", "start", _SERVICE_NAME])
-    _pause()
+        from chimera.modules.upstream_updates import do_upstream_update_menu
+        do_upstream_update_menu(focus="turnable")
+    except ImportError as e:
+        _err(f"Модуль upstream_updates недоступен: {e}")
+        _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  СТАТУС / ЛОГИ
@@ -1194,6 +1172,13 @@ def do_turnable_menu() -> None:
             _box_kv("iptables UDP:",
                     f"{ipt_col}✓ открыт{NC}" if st["ipt_ok"]
                     else f"{YELLOW}⚠ не найдено правило{NC}")
+            # v75: статус обновления из апстрима (из state-кэша, сеть
+            # не дёргается) — как DU-строка в dnscrypt-меню v74.
+            try:
+                from chimera.modules.upstream_updates import get_update_status_line
+                _box_kv("Обновление:", get_update_status_line("turnable"))
+            except Exception:
+                pass
 
         _box_row(); _box_sep()
 
@@ -1204,7 +1189,7 @@ def do_turnable_menu() -> None:
             _box_item("2", "📱  Показать настройки / QR для WireTurn")
             _box_item("3", "🔗  Перегенерировать turnable:// ссылку")
             _box_item("4", "🔄  Перезапустить сервис")
-            _box_item("5", "⬆️   Обновить бинарник")
+            _box_item("5", "⬆️   Обновление (проверка/авто/таймер)")
             _box_item("6", "📊  Статус / логи")
             _box_sep()
             _box_item("8", f"{RED}🗑️   Удалить{NC}")

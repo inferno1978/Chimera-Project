@@ -40,10 +40,13 @@ manual_dir = /root/, install_dests = [/tmp/wdtt_packages] — коллизии �
 """
 from __future__ import annotations
 
+import hashlib
+import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from chimera.modules.download_manager import PackageSpec
 from chimera.modules.wdtt_mirrors import get_wdtt_source_mirrors
@@ -70,6 +73,17 @@ _WDTT_SERVICE_FILE = Path("/etc/systemd/system/wdtt.service")
 # 1000 байт (1 KB) — нижний порог, отлавливает HTML-страницы 404.
 _MIN_SOURCE_TARBALL_SIZE = 1000
 
+# Дефолтная требуемая версия Go (когда go.mod недоступен до скачивания).
+# v74.2: поднята 1.21.0 → 1.25.0 (upstream go.mod требует 1.25.0).
+_GO_REQUIRED_DEFAULT = "1.25.0"
+
+# v75 (upstream_updates): информация о последней сборке — заполняется
+# _post_install_wdtt_source, читается upstream_updates._build_info():
+#   tarball_sha256 — детект «зеркало отдало тот же архив»;
+#   layout         — какой набор build-таргетов сработал;
+#   go_required    — версия Go, потребованная go.mod upstream.
+LAST_BUILD_INFO: Dict[str, Any] = {}
+
 
 # ============================================================================
 #  mirror_urls_builder — обёртка для PackageSpec API
@@ -82,6 +96,195 @@ def _wdtt_source_mirror_urls(filename: str, **kw) -> list[str]:
     """
     return get_wdtt_source_mirrors()
 
+
+# ============================================================================
+#  v75: layout-probe — build-таргеты и требования go.mod читаются из архива
+# ============================================================================
+def _go_mod_requirement(src_dir: Path) -> str:
+    """Версия Go из директивы 'go X.Y[.Z]' в go.mod распакованных исходников.
+
+    Фолбэк _GO_REQUIRED_DEFAULT — если go.mod не читается. Именно так
+    «изменение требований апстрима» (инцидент v74.2: go 1.21 → 1.25)
+    перестаёт быть сюрпризом: требование читается из upstream-файла,
+    а не захардкожено в Chimera.
+    """
+    gomod = src_dir / "go.mod"
+    if gomod.exists():
+        try:
+            m = re.search(r"^go\s+(\d+\.\d+(?:\.\d+)?)",
+                          gomod.read_text(errors="replace"), re.M)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+    return _GO_REQUIRED_DEFAULT
+
+
+def _go_version_tuple(go: str) -> Optional[tuple]:
+    """(major, minor, patch) установленного go; None если не определился."""
+    try:
+        r = subprocess.run([go, "version"], capture_output=True, text=True)
+        m = re.search(r"go(\d+\.\d+(?:\.\d+)?)", r.stdout or "")
+        if m:
+            return tuple(int(p) for p in m.group(1).split("."))
+    except Exception:
+        pass
+    return None
+
+
+def _probe_wdtt_build_targets(src_dir: Path) -> List[str]:
+    """v75: упорядоченные go-build таргеты для wdtt-server.
+
+    Три уровня (вместо двух захардкоженных до v75):
+      1. Известные layout'ы (в порядке приоритета):
+           ./server      — модульный layout upstream с 02.09 (v74.2)
+           ./server.go   — корневой файл (старые архивы)
+      2. Корневые *.go с 'package main' → файловые таргеты
+         (main.go / любой root-файл main-пакета — будущие переименования).
+      3. Поддиректории 1-го уровня с 'package main' (есть main.go или
+         любой .go с func main) → "./{sub}"; включая ./cmd/*/
+         (стандартная go-конвенция будущих версий upstream).
+
+    Возврат — уникальный список; go build пробует их по очереди
+    (первый успешный выигрывает — как в v74.2, но список шире).
+    """
+    targets: List[str] = []
+
+    def _add(t: str) -> None:
+        if t not in targets:
+            targets.append(t)
+
+    # ── Уровень 1: известные имена ────────────────────────────────────
+    if (src_dir / "server").is_dir() and (src_dir / "server" / "main.go").is_file():
+        _add("./server")
+    elif (src_dir / "server").is_dir():
+        _add("./server")
+    if (src_dir / "server.go").is_file():
+        _add("./server.go")
+
+    # ── Уровень 2: корневые *.go с package main ──────────────────────
+    try:
+        root_go = sorted(src_dir.glob("*.go"))
+    except Exception:
+        root_go = []
+    main_root_files = []
+    for gf in root_go:
+        try:
+            if "package main" in gf.read_text(errors="replace")[:2000]:
+                main_root_files.append(gf.name)
+        except Exception:
+            continue
+    if main_root_files and len(main_root_files) == len(root_go) and root_go:
+        _add(".")            # все корневые .go — один main-пакет
+    for name in main_root_files:
+        _add(f"./{name}")
+
+    # ── Уровень 3: поддиректории с package main / cmd/* ────────────
+    try:
+        subs = sorted(d for d in src_dir.iterdir() if d.is_dir()
+                      and not d.name.startswith("."))
+    except Exception:
+        subs = []
+    for d in subs:
+        if d.name in ("server", "cmd"):
+            continue          # server уже в уровне 1; cmd — ниже
+        try:
+            gos = list(d.glob("*.go"))
+        except Exception:
+            continue
+        if not gos:
+            continue
+        is_main = False
+        for gf in gos[:5]:
+            try:
+                txt = gf.read_text(errors="replace")
+            except Exception:
+                continue
+            if "package main" in txt[:2000] and "func main(" in txt:
+                is_main = True
+                break
+        if is_main:
+            _add(f"./{d.name}")
+    # cmd/ подпакеты (go-конвенция)
+    cmd_dir = src_dir / "cmd"
+    if cmd_dir.is_dir():
+        try:
+            for d in sorted(cmd_dir.iterdir()):
+                if d.is_dir() and (d / "main.go").is_file():
+                    _add(f"./cmd/{d.name}")
+        except Exception:
+            pass
+
+    return targets
+
+
+def _ensure_go_meets(required: str) -> Optional[str]:
+    """Гарантирует что установленный Go >= required; при нехватке ставит
+    свежий Go через download_manager (GO_TOOLCHAIN_SPEC — зеркала + /root/).
+
+    Политика:
+      • Go отсутствует → ставим latest (go.dev, фолбэк go{required}).
+      • Go есть, версия >= required → используем как есть.
+      • Go есть, версия < required → ставим свежий (драйф требований
+        upstream, инцидент v74.2: go 1.21 при требовании 1.25).
+      • Go есть, но версия не определилась (экзотика) → НЕ качаем
+        60 MB вслепую: используем существующий, реальную пригодность
+        покажет go build с диагностикой.
+
+    Возвращает путь к go или None. Это локальная копия логики
+    wdtt.py._ensure_go (нельзя импортировать wdtt.py — циклическая
+    зависимость через turn_packages → download_manager).
+    """
+    go = _find_go_binary()
+    if go:
+        cur = _go_version_tuple(go)
+        if cur is None:
+            print(f"  [INFO] Версия установленного Go не определилась — "
+                  f"пробую собрать имеющимся (требование: {required})")
+            return go
+        req = _ver3(required)
+        if cur >= req:
+            return go
+        print(f"  [INFO] Установленный Go {cur} < требуемого {required} — "
+              f"обновляю toolchain...")
+
+    # Ставим свежий Go: latest с go.dev, фолбэк go{required}.
+    from chimera.modules.download_manager import fetch_package
+    from chimera.modules.go_toolchain_packages import GO_TOOLCHAIN_SPEC
+
+    version = ""
+    try:
+        import urllib.request
+        with urllib.request.urlopen("https://go.dev/VERSION?m=text",
+                                   timeout=15) as resp:
+            version = resp.read().decode("utf-8", "replace").splitlines()[0].strip()
+        if not version.startswith("go"):
+            version = f"go{required}"
+    except Exception:
+        version = f"go{required}"
+
+    import subprocess as _sp
+    arch_raw = _sp.run(["uname", "-m"], capture_output=True, text=True)
+    arch = "arm64" if (arch_raw.stdout or "").strip() == "aarch64" else "amd64"
+
+    print(f"  [INFO] Устанавливаю {version} ({arch}, через download_manager)...")
+    if not fetch_package(GO_TOOLCHAIN_SPEC, version=version, arch=arch):
+        return None
+
+    go = _find_go_binary()
+    if go:
+        cur = _go_version_tuple(go)
+        if cur is None or cur >= _ver3(required):
+            return go
+    return None
+
+
+def _ver3(v: str) -> tuple:
+    """"1.25" / "1.25.0" → (1, 25, 0) — кортеж для сравнения версий."""
+    parts = [int(p) for p in v.split(".")[:3]]
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
 
 # ============================================================================
 #  post_install — распаковка + go build + atomic-replace
@@ -106,13 +309,29 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
       6. cleanup временной директории
 
     Go toolchain должен быть установлен ДО этого вызова — вызывающий код
-    отвечает за _ensure_go().
+    отвечает за _ensure_go(). НО v75: если go.mod распакованных исходников
+    требует БОЛЬШЕ, чем установлено (драйф требований upstream), post_install
+    сам догоняет toolchain через download_manager (_ensure_go_meets) —
+    именно так класс бага v74.2 («go.mod requires go >= 1.25.0» при
+    установленном 1.21) закрыт навсегда.
 
     Возвращает True при успехе, False при любой ошибке (даёт fetch_package
     шанс попробовать следующее зеркало — хотя для source-tarball это
     малополезно, т.к. ошибка обычно в сборке, а не в скачивании).
     """
     import os
+
+    # v75: хэш tarball — для upstream_updates (детект «зеркало отдало
+    # прежний архив» + диагностика).
+    LAST_BUILD_INFO.clear()
+    try:
+        h = hashlib.sha256()
+        with open(src, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        LAST_BUILD_INFO["tarball_sha256"] = h.hexdigest()
+    except Exception:
+        pass
 
     tmp = Path(tempfile.mkdtemp())
     try:
@@ -124,15 +343,29 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
         if r.returncode != 0:
             return False
 
-        # 2. Поиск директории с исходниками
+        # 2. Поиск директории с исходниками.
+        #    v75: кроме канонического proxy-turn-vk-android-* — фолбэк на
+        #    ЛЮБУЮ верхнюю директорию с go.mod (если upstream переименует
+        #    репозиторий, имя папки в архиве изменится, а сборка выживет).
         src_dirs = list(tmp.glob("proxy-turn-vk-android-*"))
+        if not src_dirs:
+            try:
+                src_dirs = [d for d in tmp.iterdir()
+                            if d.is_dir() and (d / "go.mod").is_file()]
+            except Exception:
+                src_dirs = []
         if not src_dirs:
             return False
         src_dir = src_dirs[0]
 
-        # 3. Определяем путь к go (должен быть уже установлен)
-        go = _find_go_binary()
+        # 3. v75: требование go.mod → гарантируем подходящий Go.
+        #    _ensure_go_meets сам ставит свежий Go через download_manager,
+        #    если установленный старее требуемого.
+        required = _go_mod_requirement(src_dir)
+        LAST_BUILD_INFO["go_required"] = required
+        go = _ensure_go_meets(required)
         if not go:
+            print(f"  [ERR] Go {required}+ недоступен — установка прервана")
             return False
 
         # 4. go mod tidy (с GOSUMDB=off fallback — go.sum отсутствует в репо)
@@ -154,23 +387,18 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
             if r2.returncode != 0:
                 return False
 
-        # 5. go build: v74.2 (wdtt-layout-fix) — upstream
-        #    SpaceNeuroX/proxy-turn-vk-android переехал на модульный layout:
-        #    сервер теперь в ./server (package main, main.go внутри), корневого
-        #    server.go больше нет (проверено на архиве master от 02.09,
-        #    1869228 байт). Фолбэк на ./server.go сохранён для старых архивов,
-        #    скачанных вручную до переезда upstream.
-        #    CLI-флаги нового server/main.go совместимы со старым:
-        #    -listen/-wg-port/-config-dir/-password/-admin/-bot-token на месте.
+        # 5. v75: build-таргеты — layout-probe (_probe_wdtt_build_targets):
+        #    известные ./server и ./server.go (v74.2) + корневые main-файлы
+        #    + поддиректории package main + cmd/*. Будущие переезды upstream
+        #    подхватываются автоматически, первый успешный таргет выигрывает.
         env = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"}
         built = tmp / "wdtt-server"
-        build_targets: list[str] = []
-        if (src_dir / "server").is_dir():
-            build_targets.append("./server")
-        if (src_dir / "server.go").is_file():
-            build_targets.append("./server.go")
+        build_targets = _probe_wdtt_build_targets(src_dir)
         if not build_targets:
+            print("  [ERR] В архиве нет main-пакета Go (server/, server.go, "
+                  "package main) — layout не распознан")
             return False
+        built_ok = False
         for target in build_targets:
             r = subprocess.run(
                 [go, "build", "-o", str(built),
@@ -179,13 +407,17 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
                 env=env, cwd=str(src_dir),
             )
             if r.returncode == 0 and built.exists():
+                LAST_BUILD_INFO["build_target"] = target
+                built_ok = True
                 break
-        else:
+        if not built_ok:
+            print(f"  [ERR] go build не удался (пробовал: {build_targets})")
             return False
 
         # 6. Atomic-replace /usr/local/bin/wdtt-server
         _atomic_replace_binary(built, _WDTT_BIN_PATH, _WDTT_SERVICE_NAME,
                                _WDTT_SERVICE_FILE)
+        LAST_BUILD_INFO["layout"] = LAST_BUILD_INFO.get("build_target", "")
 
         return True
 

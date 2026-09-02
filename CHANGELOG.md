@@ -2,6 +2,74 @@
 
 ---
 
+## FEAT(upstream): v75 — авто+ручное обновление из апстримов для Turnable/CSQTT/qWDTT, layout-probe вместо зашитых путей — 2 сентября 2026
+
+**Контекст:** три краша установки v74.2 (turnable `quiet`, CSQTT
+`rust-server`, qWDTT `./server` + Go 1.25) — следствия одного класса
+проблем: upstream (TheAirBlow/amurcanov/SpaceNeuroX) меняет layout
+архивов и требования toolchain «молча», Chimera с зашитыми путями
+падала, пользователь узнавал по красному экрану. Запрос: «сделать,
+чтобы подобные ошибки больше не возникали — автообновление +
+ручное обновление, учитывать все изменения апстримов, завязать на
+менеджер загрузок».
+
+**Новый модуль `chimera/modules/upstream_updates.py`** — единый центр:
+
+1. **Ревизии.** «Версия» source-модулей = HEAD sha ветки (GitHub API
+   `/commits/{branch}`); Turnable = тег релиза. Любой коммит апстрима
+   = «есть обновление». Кэш проверки 6 ч в state.
+2. **Единый state** `/var/lib/chimera/upstream-updates.json`: установленная
+   ревизия/тег, sha256 tarball, layout, last_check/update/error, флаг
+   auto на цель.
+3. **Ручное обновление** — меню `do_upstream_update_menu()` (единое и
+   сфокусированное): проверить сейчас / обновить / force-переустановка /
+   вкл-выкл auto / поставить-убрать таймер. Пункт «U» в меню CSQTT и
+   qWDTT, пункт 5 Turnable, статусные строки в шапках всех трёх меню.
+4. **Автообновление** — агент `/usr/local/bin/chimera-upstream-update.py`
+   (генерируется с подставленным корнем репозитория) + systemd
+   `chimera-upstream-update.timer` (04:40, RandomizedDelaySec 30 мин,
+   TimeoutStartSec 60 мин — Rust-сборка небыстрая; разнесено с dnscrypt
+   04:10 и h2 03:00). CLI: `main.py --upstream-autoupdate`.
+   Безопасность: не ставит с нуля (только когда бинарник существует),
+   бэкап (5 копий) → замена → smoke-тест сервиса → откат при провале.
+5. **Завязано на download_manager** — всё скачивание через
+   `fetch_package(spec)`: зеркала-фолбэки, ручное размещение /root/,
+   min_size, post_install.
+6. **Защита от ложных циклов:** если зеркало отдало тот же tarball
+   (sha256 совпал) при новой ревизии HEAD — ревизия НЕ поднимается,
+   агент повторит на следующий день (CDN-кэш протухнет).
+
+**Layout-probe (учёт будущих изменений апстримов):**
+
+- `csqtt_packages._probe_csqtt_layout()` — 3 уровня: известные
+  поддиры (rust-server/csqtt-uring/server) → крейт в корне архива →
+  rglob("Cargo.toml") со скорингом (клиентский крейт −100). Имя
+  бинарника и rust-version читаются из Cargo.toml;
+  `_ensure_rust_toolchain(version)` берёт MAX(upstream, пиннинг).
+- `wdtt_packages._probe_wdtt_build_targets()` — известные ./server и
+  ./server.go → корневые *.go с package main → поддиректории с
+  package main + cmd/*-конвенция. Требование Go читается из go.mod
+  распакованных исходников (`_go_mod_requirement`);
+  `_ensure_go_meets()` сам догоняет toolchain через download_manager,
+  если установленный Go старее (закрывает класс «go.mod requires
+  go >= 1.25.0» навсегда). Фолбэк: любая верхняя директория с go.mod
+  (upstream переименует репо — сборка выживет).
+
+**Багфикс Turnable (обнаружен при ревизии):** `_run_update` обещал
+«Обновить до {latest}», но `_download_binary()` качал pinned
+`_TURNABLE_VERSION` 0.4.1 — версия никогда не менялась. Теперь тег
+latest передаётся в `fetch_package(TURNABLE_SPEC, version=latest)`
+динамически.
+
+**Тесты:** +39 (`tests/test_upstream_updates.py`): state-мерж, кэш 6 ч,
+sha[:12], check-ветвления (legacy/доступно/актуален/API-down),
+динамический latest (регрессия pinned 0.4.1), tarball-sha-логика,
+агент (skip неустановленных/auto-off, exit-коды), все уровни обоих
+layout-probe, клиентский крейт игнорируется, генерация агента/timer.
+Смежные сюиты: 43 wdtt + 51 csqtt/dl + 33 turnable — без регрессий.
+
+---
+
 ## FIX(trusttunnel): v74.1 — обход upstream-дедлока setup_wizard: установка TrustTunnel больше не падает с «exited 124» — 2 сентября 2026
 
 **Контекст:** инцидент на чистом VPS (2026-09-01): установка TrustTunnel
