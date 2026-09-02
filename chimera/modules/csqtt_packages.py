@@ -9,10 +9,13 @@ CSQTT сервер — Rust проект (edition 2024, musl target).
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 from chimera.modules.download_manager import PackageSpec
 from chimera.modules.csqtt_mirrors import get_csqtt_source_mirrors
@@ -28,6 +31,127 @@ _MIN_SOURCE_TARBALL_SIZE = 1000   # 1 KB
 # Rust toolchain
 _RUST_VERSION = "1.97.1"
 _RUST_TARGET  = "x86_64-unknown-linux-musl"
+
+# v75 (upstream_updates): информация о последней сборке — заполняется
+# _post_install_csqtt_source, читается upstream_updates._build_info()
+# для state-файла /var/lib/chimera/upstream-updates.json:
+#   tarball_sha256 — детект «зеркало отдало тот же архив»;
+#   layout         — какой уровень probe сработал (диагностика дрейфа);
+#   rust_required  — что потребовал upstream в Cargo.toml.
+LAST_BUILD_INFO: Dict[str, Any] = {}
+
+# Известные имена серверной директории (в порядке приоритета):
+#   rust-server  — upstream с 02.09 (v74.2)
+#   csqtt-uring  — старый layout (локальные архивы до переезда)
+#   server       — возможное будущее имя (простая эвристика)
+_KNOWN_SERVER_SUBDIRS = ("rust-server", "csqtt-uring", "server")
+
+
+def _parse_cargo_toml(cargo: Path) -> Dict[str, Any]:
+    """Мини-парсер Cargo.toml без внешних зависимостей: [package].name,
+    [[bin]].name, rust-version. Терпим к комментариям и лишним секциям."""
+    try:
+        text = cargo.read_text(errors="replace")
+    except Exception:
+        return {}
+    info: Dict[str, Any] = {}
+    m = re.search(r'\[package\][^\[]*?^name\s*=\s*"([^"]+)"',
+                  text, re.M | re.S)
+    if m:
+        info["package_name"] = m.group(1)
+    bins = re.findall(r'\[\[bin\]\][^\[]*?^name\s*=\s*"([^"]+)"',
+                      text, re.M | re.S)
+    if bins:
+        info["bin_names"] = bins
+    m = re.search(r'^rust-version\s*=\s*"([^"]+)"', text, re.M)
+    if m:
+        info["rust_version"] = m.group(1)
+    return info
+
+
+def _probe_csqtt_layout(extract_dir: Path) -> Optional[Dict[str, Any]]:
+    """v75: ищет серверный Rust-крейт CSQTT в распакованном архиве.
+
+    Три уровня (вместо одного захардкоженного пути до v74.2, который
+    ломался при каждом переименовании папки upstream):
+
+      1. Канонический layout: <корень>/csqtt-*/{rust-server|csqtt-uring|server}
+         с Cargo.toml внутри.
+      2. Cargo.toml прямо в csqtt-*/ (upstream убрал вложенность).
+      3. Future-proof: rglob("Cargo.toml") по всему дереву (глубина ≤ 3) —
+         берём крейт по скорингу:
+           +100  package_name == "csqtt"
+           +60   package_name.startswith("csqtt") и не "client"
+           +40   bin name "csqtt"
+           +20   есть src/main.rs (бинарный крейт)
+           −100 имя содержит "client" (rust-client — НЕ сервер!)
+
+    Возвращает {"source_dir", "bin_names", "rust_required", "how"} | None.
+    """
+    def _mk(cargo_dir: Path, how: str) -> Dict[str, Any]:
+        pi = _parse_cargo_toml(cargo_dir / "Cargo.toml")
+        names = list(pi.get("bin_names", []))
+        pkg = pi.get("package_name")
+        if pkg and pkg not in names:
+            names.append(pkg)
+        if "csqtt" not in names:
+            names.append("csqtt")       # легаси-кандидат (до v75)
+        return {
+            "source_dir": cargo_dir,
+            "bin_names": names,
+            "rust_required": pi.get("rust_version"),
+            "how": how,
+        }
+
+    # ── Уровень 1: известные имена серверных поддиректорий ─────────────
+    try:
+        top_dirs = [d for d in extract_dir.iterdir() if d.is_dir()]
+    except Exception:
+        return None
+    for top in top_dirs:
+        for sub in _KNOWN_SERVER_SUBDIRS:
+            cand = top / sub
+            if (cand / "Cargo.toml").is_file():
+                return _mk(cand, f"known:{sub}")
+
+    # ── Уровень 2: крейт прямо в корне архива ──────────────────────────
+    for top in top_dirs:
+        if (top / "Cargo.toml").is_file():
+            pi = _parse_cargo_toml(top / "Cargo.toml")
+            name = (pi.get("package_name") or "").lower()
+            if name == "csqtt" or (name.startswith("csqtt")
+                                   and "client" not in name):
+                return _mk(top, "crate-at-root")
+
+    # ── Уровень 3: future-proof rglob по дереву ────────────────────────
+    scored = []
+    try:
+        cargos = [c for c in extract_dir.rglob("Cargo.toml")
+                  if len(c.relative_to(extract_dir).parts) <= 3]
+    except Exception:
+        cargos = []
+    for cargo in cargos:
+        d = cargo.parent
+        pi = _parse_cargo_toml(cargo)
+        pkg = (pi.get("package_name") or "").lower()
+        score = 0
+        if "client" in pkg or "client" in d.name.lower():
+            score -= 100
+        if pkg == "csqtt":
+            score += 100
+        elif pkg.startswith("csqtt"):
+            score += 60
+        if "csqtt" in (pi.get("bin_names") or []):
+            score += 40
+        if (d / "src" / "main.rs").is_file():
+            score += 20
+        if score > 0:
+            scored.append((score, d))
+    if scored:
+        scored.sort(key=lambda x: -x[0])
+        return _mk(scored[0][1], f"rglob:{scored[0][0]}pts")
+
+    return None
 
 
 def _csqtt_source_mirror_urls(filename, **kw) -> list[str]:
@@ -55,8 +179,24 @@ def _check_zig() -> str | None:
     return shutil.which("zig")
 
 
-def _ensure_rust_toolchain() -> bool:
-    """Устанавливает Rust через rustup, если не установлен."""
+def _ensure_rust_toolchain(version: Optional[str] = None) -> bool:
+    """Устанавливает Rust через rustup, если не установлен.
+
+    v75: version — требование upstream из Cargo.toml (rust-version).
+    Берётся MAX(требование, пиннинг _RUST_VERSION): если upstream
+    поднял минимальную версию, ставим её; если Cargo.toml молчит —
+    остаётся проверенный пиннинг проекта.
+    """
+    wanted = _RUST_VERSION
+    if version:
+        try:
+            a = tuple(int(p) for p in version.split(".")[:3])
+            b = tuple(int(p) for p in _RUST_VERSION.split(".")[:3])
+            if a > b:
+                wanted = version
+        except (ValueError, IndexError):
+            pass
+
     # Гарантируем что /root/.cargo/bin в PATH для subprocess.run ниже.
     # Без этого _check_rust() может найти rustc в /root/.cargo/bin/rustc
     # (через Path.exists()), но subprocess.run(["rustc", ...]) упадёт с
@@ -76,10 +216,10 @@ def _ensure_rust_toolchain() -> bool:
             # битый). Пытаемся переустановить.
             print("[INFO] rustc найден, но не запускается — переустанавливаю...")
             r = None
-        if r and r.returncode == 0 and _RUST_VERSION in r.stdout:
+        if r and r.returncode == 0 and wanted in r.stdout:
             return True
         # Если версия не та — переустанавливаем
-        print(f"[INFO] Нужен Rust {_RUST_VERSION}, переустанавливаю...")
+        print(f"[INFO] Нужен Rust {wanted}, переустанавливаю...")
 
     # Устанавливаем через rustup
     print("[INFO] Устанавливаю Rust toolchain через rustup...")
@@ -88,7 +228,7 @@ def _ensure_rust_toolchain() -> bool:
         r = subprocess.run(
             ["bash", "-c",
              "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | "
-             "sh -s -- -y --default-toolchain {} --profile minimal".format(_RUST_VERSION)],
+             "sh -s -- -y --default-toolchain {} --profile minimal".format(wanted)],
             capture_output=True, text=True, timeout=300,
         )
     except subprocess.TimeoutExpired:
@@ -346,8 +486,26 @@ def _ensure_swap_and_pick_jobs() -> int:
 
 
 def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
-    """Собирает CSQTT сервер из исходников."""
+    """Собирает CSQTT сервер из исходников.
+
+    v75: директория исходников и имя бинарника определяются layout-probe
+    (_probe_csqtt_layout), а не захардкожены — переименование папки
+    upstream (инцидент v74.2: csqtt-uring → rust-server) больше не
+    ломает установку. Требуемая версия Rust читается из Cargo.toml.
+    """
     import tarfile
+
+    # v75: хэш скачанного tarball — для upstream_updates (детект
+    # «зеркало отдало прежний архив» + диагностика дрейфа layout).
+    LAST_BUILD_INFO.clear()
+    try:
+        h = hashlib.sha256()
+        with open(src, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        LAST_BUILD_INFO["tarball_sha256"] = h.hexdigest()
+    except Exception:
+        pass
 
     # 1. Распаковываем
     print("[INFO] Распаковываю tarball...")
@@ -362,26 +520,13 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
         print(f"[ERR] Распаковка не удалась: {type(e).__name__}: {e}")
         return False
 
-    # 2. Находим директорию с исходниками
-    csqtt_dir = None
-    for item in extract_dir.iterdir():
-        if item.is_dir() and item.name.startswith("csqtt-"):
-            # v74.2 (csqtt-layout-fix): upstream amurcanov/csqtt переименовал
-            # серверную директорию csqtt-uring → rust-server (проверено на
-            # архиве csqtt-main.tar.gz 734601 байт от 02.09: в корне
-            # rust-client/ + rust-server/, папки csqtt-uring больше нет).
-            # Оба варианта поддерживаются — старые локально скачанные архивы
-            # тоже собираются.
-            for sub in ("rust-server", "csqtt-uring"):
-                cand = item / sub
-                if cand.is_dir():
-                    csqtt_dir = cand
-                    break
-            break
-
-    if not csqtt_dir or not csqtt_dir.exists():
-        print("[ERR] Директория сервера CSQTT не найдена "
-              "(rust-server / csqtt-uring)")
+    # 2. v75: layout-probe — ищем серверный крейт (3 уровня, см.
+    #    _probe_csqtt_layout). До v74.2 путь был захардкожен и ломался
+    #    при переименованиях upstream.
+    probe = _probe_csqtt_layout(extract_dir)
+    if not probe:
+        print("[ERR] Серверный крейт CSQTT не найден в архиве "
+              "(rust-server / csqtt-uring / Cargo.toml)")
         try:
             top = list(extract_dir.iterdir())
             if top:
@@ -393,10 +538,17 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
             pass
         return False
 
-    # 3. Проверяем/устанавливаем Rust
+    csqtt_dir: Path = probe["source_dir"]
+    bin_names = probe["bin_names"]
+    LAST_BUILD_INFO["layout"] = probe["how"]
+    if probe.get("rust_required"):
+        LAST_BUILD_INFO["rust_required"] = probe["rust_required"]
+    print(f"[INFO] Layout: {probe['how']} → {csqtt_dir}")
+
+    # 3. Проверяем/устанавливаем Rust (v75: версия из Cargo.toml)
     print("[INFO] Проверяю/устанавливаю Rust toolchain...")
     try:
-        if not _ensure_rust_toolchain():
+        if not _ensure_rust_toolchain(probe.get("rust_required")):
             print("[ERR] Rust toolchain недоступен")
             return False
     except Exception as e:
@@ -483,19 +635,26 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
         print(stderr_tail)
         return False
 
-    # 7. Находим собранный binary
-    built_bin = csqtt_dir / "target" / target / "release" / "csqtt"
-    if not built_bin.exists():
-        # Пробуем дефолтный путь
-        built_bin = csqtt_dir / "target" / "release" / "csqtt"
-    if not built_bin.exists():
-        print("[ERR] Binary не найден после сборки")
-        print(f"[ERR] Искал в: {csqtt_dir}/target/{target}/release/csqtt")
-        print(f"[ERR] И в:     {csqtt_dir}/target/release/csqtt")
+    # 7. v75: Находим собранный binary — кандидаты из probe (имя пакета
+    #    / [[bin]] / легаси «csqtt»), оба возможных пути target/.
+    built_bin = None
+    for name in bin_names:
+        for cand in (csqtt_dir / "target" / target / "release" / name,
+                     csqtt_dir / "target" / "release" / name):
+            if cand.exists():
+                built_bin = cand
+                break
+        if built_bin:
+            break
+    if not built_bin:
+        print(f"[ERR] Binary не найден после сборки")
+        print(f"[ERR] Искал имена: {bin_names} в:")
+        print(f"[ERR]   {csqtt_dir}/target/{target}/release/")
+        print(f"[ERR]   {csqtt_dir}/target/release/")
         # Покажем что реально есть в target/
         target_dir = csqtt_dir / "target"
         if target_dir.exists():
-            print(f"[ERR] Содержимое target/:")
+            print("[ERR] Содержимое target/:")
             for p in target_dir.rglob("csqtt*"):
                 print(f"  {p}")
         return False
