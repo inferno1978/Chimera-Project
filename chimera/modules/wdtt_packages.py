@@ -13,7 +13,8 @@ urllib.request.urlretrieve + tar + go build + atomic-replace.
       1. tar -xzf (распаковка во временную директорию)
       2. Поиск директории proxy-turn-vk-android-*
       3. go mod tidy (с GOSUMDB=off fallback — go.sum не в репозитории)
-      4. go build -o wdtt-server -ldflags "-s -w" ./server.go
+      4. go build -o wdtt-server -ldflags "-s -w" — ./server (новый layout
+         upstream от 02.09, v74.2) с фолбэком на ./server.go (старые архивы)
          (env: CGO_ENABLED=0, GOOS=linux, GOARCH=amd64 — как в старом коде)
       5. Atomic-replace /usr/local/bin/wdtt-server:
          - stop wdtt service если активен (защита от ETXTBSY)
@@ -93,7 +94,8 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
       1. tar -xzf во временную директорию
       2. Поиск proxy-turn-vk-android-* директории
       3. go mod tidy (с GOSUMDB=off fallback — go.sum отсутствует в репо)
-      4. go build -o wdtt-server -ldflags "-s -w" ./server.go
+      4. go build -o wdtt-server -ldflags "-s -w" — ./server (новый layout
+         upstream от 02.09, v74.2) с фолбэком на ./server.go (старые архивы)
          env: CGO_ENABLED=0, GOOS=linux, GOARCH=amd64 (как в старом коде —
          намеренно hardcoded amd64, см. комментарий в wdtt.py)
       5. Atomic-replace:
@@ -152,16 +154,33 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
             if r2.returncode != 0:
                 return False
 
-        # 5. go build (намеренно hardcoded GOARCH=amd64 — как в старом коде)
+        # 5. go build: v74.2 (wdtt-layout-fix) — upstream
+        #    SpaceNeuroX/proxy-turn-vk-android переехал на модульный layout:
+        #    сервер теперь в ./server (package main, main.go внутри), корневого
+        #    server.go больше нет (проверено на архиве master от 02.09,
+        #    1869228 байт). Фолбэк на ./server.go сохранён для старых архивов,
+        #    скачанных вручную до переезда upstream.
+        #    CLI-флаги нового server/main.go совместимы со старым:
+        #    -listen/-wg-port/-config-dir/-password/-admin/-bot-token на месте.
         env = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"}
         built = tmp / "wdtt-server"
-        r = subprocess.run(
-            [go, "build", "-o", str(built),
-             "-ldflags", "-s -w", "./server.go"],
-            capture_output=True, text=True,
-            env=env, cwd=str(src_dir),
-        )
-        if r.returncode != 0 or not built.exists():
+        build_targets: list[str] = []
+        if (src_dir / "server").is_dir():
+            build_targets.append("./server")
+        if (src_dir / "server.go").is_file():
+            build_targets.append("./server.go")
+        if not build_targets:
+            return False
+        for target in build_targets:
+            r = subprocess.run(
+                [go, "build", "-o", str(built),
+                 "-ldflags", "-s -w", target],
+                capture_output=True, text=True,
+                env=env, cwd=str(src_dir),
+            )
+            if r.returncode == 0 and built.exists():
+                break
+        else:
             return False
 
         # 6. Atomic-replace /usr/local/bin/wdtt-server

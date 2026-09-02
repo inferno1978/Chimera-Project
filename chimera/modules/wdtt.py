@@ -615,7 +615,13 @@ def _go_required_version(gomod: Path) -> str:
                 return m.group(1)
         except Exception:
             pass
-    return "1.21.0"
+    # v74.2 (wdtt-layout-fix): дефолт поднят 1.21.0 → 1.25.0 —
+    # upstream SpaceNeuroX/proxy-turn-vk-android (master от 02.09)
+    # в go.mod требует go 1.25.0. Если на сервере уже стоит старый Go
+    # (1.21-1.24), он проходил проверку, но go build падал с
+    # "go.mod requires go >= 1.25.0". _ensure_go(1.25.0+) при
+    # необходимости ставит свежий Go (резолв go.dev/VERSION?m=text).
+    return "1.25.0"
 
 def _install_go_toolchain(required: str) -> Optional[str]:
     """
@@ -704,7 +710,8 @@ def _build_wdtt_server() -> bool:
     # будет звать go build и упадёт без Go.
     # _ensure_go() сам вызывает _install_go_toolchain → fetch_package(GO_TOOLCHAIN_SPEC)
     # если текущий Go старее требуемого или отсутствует.
-    # Используем _go_required_version с пустым go.mod Path — вернёт дефолт "1.21.0".
+    # Используем _go_required_version с пустым go.mod Path — вернёт дефолт
+    # "1.25.0" (v74.2: под go.mod нового апстрима SpaceNeuroX, ./server- layout).
     required = _go_required_version(Path("/nonexistent/go.mod"))
     go = _ensure_go(required)
     if not go:
