@@ -3440,5 +3440,553 @@ class TestNormalizationSyncBetweenModules(unittest.TestCase):
         self.assertEqual(src_a, src_b)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  v76: КЭШ LATEST-ВЕРСИЙ (release / pre-release) В ШАПКЕ ГЛАВНОГО МЕНЮ
+# ══════════════════════════════════════════════════════════════════════════
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def _plain(s: str) -> str:
+    return _ANSI_RE.sub('', s)
+
+
+class _B4BothModulesMixin:
+    """Общая setUp для тестов v76 — оба модуля B4, кэш в state."""
+
+    def _setup_modules(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.youtube_b4 = youtube_b4
+        self.dpi_bypass = dpi_bypass
+        self.modules = [youtube_b4, dpi_bypass]
+
+    def _isolated_state(self, mod, state: dict) -> Path:
+        """Перенаправляет _STATE_FILE модуля во временный файл с данными."""
+        tmpdir = Path(tempfile.mkdtemp())
+        state_file = tmpdir / "state.json"
+        state_file.write_text(json.dumps(state))
+        mod._STATE_FILE = state_file
+        return state_file
+
+
+class TestB4VersionKey(_B4BothModulesMixin, unittest.TestCase):
+    """_b4_version_key — сравнение версий b4 (числа, v-префикс, rc-суффикс).
+
+    Реальные форматы тегов DanielLavrushin/b4:
+      release: "v1.80.3"  pre-release: "v1.80.4rc1" (суффикс без дефиса).
+    """
+
+    def setUp(self):
+        self._setup_modules()
+
+    def test_numeric_not_string_comparison(self):
+        """«1.9.0» < «1.76.2»: числа, а не строки ('9' > '7' строкой!)."""
+        for mod in self.modules:
+            self.assertLess(mod._b4_version_key("1.9.0"),
+                            mod._b4_version_key("1.76.2"))
+
+    def test_prerelease_less_than_its_release(self):
+        """Semver: 1.80.4rc1 < 1.80.4 (pre-release младше своего релиза)."""
+        for mod in self.modules:
+            self.assertLess(mod._b4_version_key("1.80.4rc1"),
+                            mod._b4_version_key("1.80.4"))
+
+    def test_v_prefix_ignored(self):
+        """«v1.80.3» == «1.80.3» (v-префикс тега не влияет на порядок)."""
+        for mod in self.modules:
+            self.assertEqual(mod._b4_version_key("v1.80.3"),
+                             mod._b4_version_key("1.80.3"))
+
+    def test_patch_level_ordering(self):
+        for mod in self.modules:
+            self.assertLess(mod._b4_version_key("1.78.0"),
+                            mod._b4_version_key("1.80.3"))
+            self.assertLess(mod._b4_version_key("1.80.3"),
+                            mod._b4_version_key("1.80.10"))
+
+    def test_unparsable_returns_empty_numbers(self):
+        """Мусор («unknown», «») → пустые числа → распознать нельзя."""
+        for mod in self.modules:
+            self.assertEqual(mod._b4_version_key("unknown")[0], ())
+            self.assertEqual(mod._b4_version_key("")[0], ())
+
+    def test_identical_in_both_modules(self):
+        for v in ("1.78.0", "v1.80.4rc1", "1.9", "x", ""):
+            self.assertEqual(self.youtube_b4._b4_version_key(v),
+                             self.dpi_bypass._b4_version_key(v))
+
+    def test_never_compares_str_with_int(self):
+        """Смешанные ключи не бросают TypeError при любом сочетании."""
+        import itertools
+        versions = ["1.9", "1.9.0", "1.9.0rc1", "1.9.1", "v1.10.0",
+                    "1.80.4rc1", "1.80.4rc2", "1.80.4", ""]
+        for mod in self.modules:
+            keys = [mod._b4_version_key(v) for v in versions]
+            for a, b in itertools.combinations(keys, 2):
+                try:
+                    (a < b) or (a > b) or (a == b)
+                except TypeError:
+                    self.fail(f"TypeError comparing {a!r} vs {b!r}")
+
+
+class TestB4UpdateAvailability(_B4BothModulesMixin, unittest.TestCase):
+    """_b4_update_availability — «есть ли что ставить» (без сети)."""
+
+    def setUp(self):
+        self._setup_modules()
+        self.cache = {"release": "1.80.3", "prerelease": "1.80.4rc1",
+                      "checked_at": 1.0, "ok": True}
+
+    def test_both_channels_newer(self):
+        for mod in self.modules:
+            a = mod._b4_update_availability("1.78.0", self.cache)
+            self.assertTrue(a["known"])
+            self.assertTrue(a["release_update"])
+            self.assertTrue(a["pre_update"])
+            self.assertFalse(a["up_to_date"])
+
+    def test_release_equal_prerelease_newer(self):
+        """Установлен последний release → предлагается только pre-release."""
+        for mod in self.modules:
+            a = mod._b4_update_availability("1.80.3", self.cache)
+            self.assertFalse(a["release_update"])
+            self.assertTrue(a["pre_update"])
+            self.assertFalse(a["up_to_date"])
+
+    def test_on_latest_prerelease(self):
+        """Установлен последний pre-release → ставить нечего."""
+        for mod in self.modules:
+            a = mod._b4_update_availability("1.80.4rc1", self.cache)
+            self.assertFalse(a["release_update"])
+            self.assertFalse(a["pre_update"])
+            self.assertTrue(a["up_to_date"])
+
+    def test_installed_newer_than_cache(self):
+        """Установлена более новая версия (обновление мимо Chimera) —
+        «доступных» нет, «актуальная» не заявляем (в сравнении младше)."""
+        for mod in self.modules:
+            a = mod._b4_update_availability("1.81.0", self.cache)
+            self.assertFalse(a["release_update"])
+            self.assertFalse(a["pre_update"])
+
+    def test_no_cache_data_means_unknown(self):
+        for mod in self.modules:
+            a = mod._b4_update_availability(
+                "1.78.0", {"release": "", "prerelease": "",
+                           "checked_at": 0.0, "ok": False})
+            self.assertFalse(a["known"])
+            self.assertFalse(a["release_update"])
+            self.assertFalse(a["up_to_date"])
+
+    def test_unparsable_installed_not_compared(self):
+        """Установленная версия-мусор → никаких «доступных обновлений»."""
+        for mod in self.modules:
+            a = mod._b4_update_availability("unknown", self.cache)
+            self.assertTrue(a["known"])
+            self.assertFalse(a["release_update"])
+            self.assertFalse(a["pre_update"])
+            self.assertFalse(a["up_to_date"])
+
+    def test_release_rc_upgrade_offered(self):
+        """Установлен rc1, вышел финальный релиз → предлагаем release."""
+        for mod in self.modules:
+            a = mod._b4_update_availability(
+                "1.80.4rc1", {"release": "1.80.4", "prerelease": "1.80.4rc1",
+                              "checked_at": 1.0, "ok": True})
+            self.assertTrue(a["release_update"])
+            self.assertFalse(a["pre_update"])
+
+
+class TestB4UpdateHeaderRow(_B4BothModulesMixin, unittest.TestCase):
+    """_b4_update_header_row — строка «Обновление:» для шапки меню."""
+
+    def setUp(self):
+        self._setup_modules()
+        self.cache = {"release": "1.80.3", "prerelease": "1.80.4rc1",
+                      "checked_at": 1.0, "ok": True}
+
+    def test_updates_available_row_shows_both_channels(self):
+        for mod in self.modules:
+            row = _plain(mod._b4_update_header_row("1.78.0", self.cache))
+            self.assertIn("Обновление:", row)
+            self.assertIn("release 1.80.3", row)
+            self.assertIn("pre-release 1.80.4rc1", row)
+            self.assertIn("[5]", row)
+
+    def test_row_fits_narrow_terminal(self):
+        """Строка с обоими каналами влезает в минимальную рамку (64)."""
+        for mod in self.modules:
+            row = _plain(mod._b4_update_header_row("1.78.0", self.cache))
+            self.assertLessEqual(len(row.strip()), 64,
+                                 f"строка шире рамки: {row!r}")
+
+    def test_up_to_date_row(self):
+        for mod in self.modules:
+            row = _plain(mod._b4_update_header_row("1.80.4rc1", self.cache))
+            self.assertIn("актуальн", row)
+            self.assertNotIn("[5]", row)
+
+    def test_unknown_row_mentions_github(self):
+        for mod in self.modules:
+            row = _plain(mod._b4_update_header_row(
+                "1.78.0", {"release": "", "prerelease": "",
+                           "checked_at": 0.0, "ok": False}))
+            self.assertIn("не проверено", row)
+            self.assertIn("GitHub", row)
+
+    def test_undefined_version_row_lists_versions(self):
+        for mod in self.modules:
+            row = _plain(mod._b4_update_header_row("", self.cache))
+            self.assertIn("release 1.80.3", row)
+            self.assertIn("не определена", row)
+
+    def test_rows_identical_in_both_modules(self):
+        for installed in ("1.78.0", "1.80.4rc1", "", "unknown"):
+            self.assertEqual(
+                _plain(self.youtube_b4._b4_update_header_row(installed, self.cache)),
+                _plain(self.dpi_bypass._b4_update_header_row(installed, self.cache)))
+
+
+class TestB4LatestCache(_B4BothModulesMixin, unittest.TestCase):
+    """Кэш latest-версий в общем state: TTL, force, неудача, guard."""
+
+    def setUp(self):
+        self._setup_modules()
+
+    def _detectors(self, mod, release="1.80.3", prerelease="1.80.4rc1"):
+        """Патчит детекторы; счётчик вызовов — в self.calls."""
+        self.calls = {"rel": 0, "pre": 0}
+        def _rel(timeout=10):
+            self.calls["rel"] += 1
+            return release
+        def _pre(timeout=10):
+            self.calls["pre"] += 1
+            return prerelease
+        patcher_rel = patch.object(mod, "_detect_latest_version", _rel)
+        patcher_pre = patch.object(
+            mod, "_detect_latest_prerelease_version", _pre)
+        patcher_inst = patch.object(mod, "_detect_installed",
+                                    lambda: True)
+        patcher_rel.start(); patcher_pre.start(); patcher_inst.start()
+        self.addCleanup(patcher_rel.stop)
+        self.addCleanup(patcher_pre.stop)
+        self.addCleanup(patcher_inst.stop)
+
+    def test_b4_latest_cache_reads_state(self):
+        import time
+        for mod in self.modules:
+            state_file = self._isolated_state(mod, {
+                "latest_release": "1.80.3", "latest_prerelease": "1.80.4rc1",
+                "latest_checked_at": 123.5, "latest_check_ok": True,
+            })
+            cache = mod._b4_latest_cache()
+            self.assertEqual(cache["release"], "1.80.3")
+            self.assertEqual(cache["prerelease"], "1.80.4rc1")
+            self.assertAlmostEqual(cache["checked_at"], 123.5)
+            self.assertTrue(cache["ok"])
+
+    def test_b4_latest_cache_defaults(self):
+        for mod in self.modules:
+            state_file = self._isolated_state(mod, {"installed": True})
+            cache = mod._b4_latest_cache()
+            self.assertEqual(cache["release"], "")
+            self.assertEqual(cache["prerelease"], "")
+            self.assertEqual(cache["checked_at"], 0.0)
+            self.assertFalse(cache["ok"])
+
+    def test_fresh_cache_no_network(self):
+        """Свежий успешный кэш (TTL 6 ч) — GitHub не дёргается."""
+        import time
+        for mod in self.modules:
+            self._isolated_state(mod, {
+                "latest_release": "1.80.3", "latest_prerelease": "1.80.4rc1",
+                "latest_checked_at": time.time(), "latest_check_ok": True,
+            })
+            self._detectors(mod)
+            cache = mod._refresh_b4_latest_cache()
+            self.assertEqual(self.calls["rel"], 0)
+            self.assertEqual(self.calls["pre"], 0)
+            self.assertEqual(cache["release"], "1.80.3")
+
+    def test_stale_cache_refreshes_and_saves(self):
+        """Кэш старше 6 ч — проверка GitHub + запись в state."""
+        import time
+        for mod in self.modules:
+            state_file = self._isolated_state(mod, {
+                "latest_release": "1.78.0", "latest_prerelease": "",
+                "latest_checked_at": time.time() - 7 * 3600,
+                "latest_check_ok": True,
+            })
+            self._detectors(mod)
+            cache = mod._refresh_b4_latest_cache()
+            self.assertEqual(self.calls["rel"], 1)
+            self.assertEqual(self.calls["pre"], 1)
+            self.assertEqual(cache["release"], "1.80.3")
+            self.assertEqual(cache["prerelease"], "1.80.4rc1")
+            self.assertTrue(cache["ok"])
+            # Значения записаны в state (видит второй модуль).
+            saved = json.loads(state_file.read_text())
+            self.assertEqual(saved["latest_release"], "1.80.3")
+            self.assertEqual(saved["latest_prerelease"], "1.80.4rc1")
+            self.assertTrue(saved["latest_check_ok"])
+
+    def test_force_ignores_fresh_ttl(self):
+        import time
+        for mod in self.modules:
+            self._isolated_state(mod, {
+                "latest_release": "1.78.0", "latest_prerelease": "",
+                "latest_checked_at": time.time(), "latest_check_ok": True,
+            })
+            self._detectors(mod)
+            mod._refresh_b4_latest_cache(force=True)
+            self.assertEqual(self.calls["rel"], 1)
+
+    def test_failed_check_preserves_old_values(self):
+        """GitHub недоступен — прежние версии НЕ затираются, ok=False."""
+        import time
+        for mod in self.modules:
+            state_file = self._isolated_state(mod, {
+                "latest_release": "1.80.3", "latest_prerelease": "1.80.4rc1",
+                "latest_checked_at": time.time() - 7 * 3600,
+                "latest_check_ok": True,
+            })
+            self._detectors(mod, release="", prerelease="")
+            cache = mod._refresh_b4_latest_cache()
+            self.assertEqual(cache["release"], "1.80.3")
+            self.assertEqual(cache["prerelease"], "1.80.4rc1")
+            self.assertFalse(cache["ok"])
+            saved = json.loads(state_file.read_text())
+            self.assertEqual(saved["latest_release"], "1.80.3")
+            self.assertFalse(saved["latest_check_ok"])
+
+    def test_failed_check_retry_ttl_30min(self):
+        """После неудачи повтор не раньше чем через 30 минут."""
+        import time
+        for mod in self.modules:
+            # Неудача 1 минуту назад — сеть не дёргаем.
+            self._isolated_state(mod, {
+                "latest_release": "1.80.3", "latest_prerelease": "",
+                "latest_checked_at": time.time() - 60,
+                "latest_check_ok": False,
+            })
+            self._detectors(mod)
+
+            def _no_network(timeout=10):
+                raise AssertionError("network must not be called")
+            with patch.object(mod, "_detect_latest_version", _no_network):
+                cache = mod._refresh_b4_latest_cache()
+            self.assertEqual(cache["release"], "1.80.3")
+
+            # Неудача 31 минуту назад — повторная попытка.
+            self._isolated_state(mod, {
+                "latest_release": "1.80.3", "latest_prerelease": "",
+                "latest_checked_at": time.time() - 31 * 60,
+                "latest_check_ok": False,
+            })
+            cache = mod._refresh_b4_latest_cache()
+            self.assertEqual(self.calls["rel"], 1)
+
+    def test_not_installed_no_network(self):
+        """b4 не установлен — GitHub не запрашивается вовсе."""
+        for mod in self.modules:
+            self._isolated_state(mod, {})
+
+            def _no_network(timeout=10):
+                raise AssertionError("network must not be called")
+            with patch.object(mod, "_detect_latest_version", _no_network), \
+                 patch.object(mod, "_detect_installed", lambda: False):
+                cache = mod._refresh_b4_latest_cache(force=True)
+            self.assertEqual(cache["release"], "")
+
+    def test_short_timeout_passed_to_detectors(self):
+        """Фоновая проверка использует короткий таймаут B4_LATEST_TIMEOUT."""
+        seen = {}
+        for mod in self.modules:
+            self._isolated_state(mod, {})
+            def _rel(timeout=10):
+                seen["timeout"] = timeout
+                return "1.80.3"
+            with patch.object(mod, "_detect_latest_version", _rel), \
+                 patch.object(mod, "_detect_latest_prerelease_version",
+                              lambda timeout=10: ""), \
+                 patch.object(mod, "_detect_installed", lambda: True):
+                mod._refresh_b4_latest_cache(force=True)
+            self.assertEqual(seen["timeout"], mod.B4_LATEST_TIMEOUT)
+            self.assertLess(mod.B4_LATEST_TIMEOUT, 10)
+
+
+class TestMenuUpdateHeaderRow(_B4BothModulesMixin, unittest.TestCase):
+    """Главное меню рендерит строку «Обновление:» с доступными версиями.
+
+    v76: юзер, зайдя в главное меню модуля, сразу видит готовые к
+    установке release/pre-release — не заходя в раздел [5].
+    """
+
+    def setUp(self):
+        self._setup_modules()
+
+    def _render_menu(self, mod, menu_func_name, fake_cache, version='1.78.0'):
+        import io
+        from contextlib import redirect_stdout
+
+        def _fake_status():
+            return {
+                'installed': True, 'service_active': True,
+                'active_preset': 'default', 'version': version,
+                'web_port': 9700, 'config_path': '/etc/b4/config.json',
+                'binary_path': '/usr/local/bin/b4', 'queue_num': 537,
+                'mark': 32768, 'nginx_front_enabled': False,
+                'nginx_front_port': 9743, 'nginx_front_url': None,
+            }
+
+        inputs = iter(['q'])
+        def _input(prompt='', *a, **kw):
+            return next(inputs)
+
+        captured = io.StringIO()
+        with patch.object(mod, "status", _fake_status), \
+             patch.object(mod, "_b4_nginx_status",
+                          lambda: {'enabled': False, 'port': 9743}), \
+             patch.object(mod, "_migrate_to_native_rules_if_needed",
+                          lambda: None), \
+             patch.object(mod, "_refresh_b4_latest_cache",
+                          lambda force=False: fake_cache), \
+             patch("builtins.input", side_effect=_input), \
+             redirect_stdout(captured):
+            try:
+                getattr(mod, menu_func_name)()
+            except StopIteration:
+                pass
+        return captured.getvalue()
+
+    def test_menu_row_shows_available_updates(self):
+        """Меню содержит строку с обеими доступными версиями и отсылкой [5]."""
+        fake_cache = {"release": "1.80.3", "prerelease": "1.80.4rc1",
+                      "checked_at": 1.0, "ok": True}
+        for mod, menu in ((self.youtube_b4, 'do_youtube_b4_menu'),
+                          (self.dpi_bypass, 'do_dpi_bypass_menu')):
+            out = _plain(self._render_menu(mod, menu, fake_cache))
+            lines = [l for l in out.splitlines() if "Обновление:" in l]
+            self.assertEqual(len(lines), 1,
+                             f"ожидалась одна строка «Обновление:», "
+                             f"получено {len(lines)} в {mod.__name__}")
+            self.assertIn("release 1.80.3", lines[0])
+            self.assertIn("pre-release 1.80.4rc1", lines[0])
+            self.assertIn("[5]", lines[0])
+            # Строка не разорвана переносом: [5] на той же строке,
+            # до правой границы рамки.
+            body = lines[0].rstrip().rstrip('║').rstrip()
+            self.assertTrue(body.endswith("[5]"),
+                            f"строка разорвана переносом: {lines[0]!r}")
+
+    def test_menu_row_after_update_shows_up_to_date(self):
+        """После успешного обновления (кэш свежий) — «актуальная версия»."""
+        fake_cache = {"release": "1.80.3", "prerelease": "1.80.4rc1",
+                      "checked_at": 1.0, "ok": True}
+        for mod, menu in ((self.youtube_b4, 'do_youtube_b4_menu'),
+                          (self.dpi_bypass, 'do_dpi_bypass_menu')):
+            out = _plain(self._render_menu(mod, menu, fake_cache,
+                                           version='1.80.4rc1'))
+            lines = [l for l in out.splitlines() if "Обновление:" in l]
+            self.assertEqual(len(lines), 1)
+            self.assertIn("актуальн", lines[0])
+
+    def test_update_menu_resets_cache_after_success(self):
+        """do_b4_update_menu после успешного обновления сбрасывает кэш
+        (_refresh_b4_latest_cache(force=True)) — шапка сразу честная."""
+        import inspect
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            src = inspect.getsource(mod.do_b4_update_menu)
+            self.assertIn("_refresh_b4_latest_cache(force=True)", src,
+                          f"{mod.__name__}: do_b4_update_menu должен "
+                          f"сбрасывать кэш после успешного обновления")
+
+    def test_main_menu_calls_refresh_cache(self):
+        """Главные меню получают кэш через _refresh_b4_latest_cache."""
+        import inspect
+        for mod, menu_name in ((self.youtube_b4, "do_youtube_b4_menu"),
+                               (self.dpi_bypass, "do_dpi_bypass_menu")):
+            src = inspect.getsource(getattr(mod, menu_name))
+            self.assertIn("_refresh_b4_latest_cache()", src,
+                          f"{mod.__name__}.{menu_name} должен вызывать "
+                          f"_refresh_b4_latest_cache()")
+            self.assertIn("_b4_update_header_row(", src,
+                          f"{mod.__name__}.{menu_name} должен рендерить "
+                          f"строку _b4_update_header_row")
+
+
+class TestB4LatestSyncBetweenModules(_B4BothModulesMixin, unittest.TestCase):
+    """Синхронизация кэша latest между youtube_b4 и dpi_bypass.
+
+    Оба модуля читают/пишут ОДИН общий state-файл — кэш, обновлённый
+    одним модулем, сразу виден другому.
+    """
+
+    def setUp(self):
+        self._setup_modules()
+
+    def test_both_modules_have_latest_cache_functions(self):
+        for fn in ("_b4_version_key", "_b4_latest_cache",
+                   "_refresh_b4_latest_cache", "_b4_update_availability",
+                   "_b4_update_header_row"):
+            self.assertTrue(hasattr(self.youtube_b4, fn),
+                            f"youtube_b4 lacks {fn}")
+            self.assertTrue(hasattr(self.dpi_bypass, fn),
+                            f"dpi_bypass lacks {fn}")
+
+    def test_identical_ttl_constants(self):
+        for const in ("B4_LATEST_CACHE_TTL", "B4_LATEST_RETRY_TTL",
+                      "B4_LATEST_TIMEOUT"):
+            self.assertEqual(getattr(self.youtube_b4, const),
+                             getattr(self.dpi_bypass, const),
+                             f"{const} расходится между модулями")
+        # TTL успешной проверки — 6 часов (идиома upstream_updates).
+        self.assertEqual(self.youtube_b4.B4_LATEST_CACHE_TTL, 6 * 3600)
+        # TTL повторной попытки после неудачи — 30 минут.
+        self.assertEqual(self.youtube_b4.B4_LATEST_RETRY_TTL, 30 * 60)
+
+    def test_shared_state_file_single_source_of_cache(self):
+        """Кэш живёт в общем youtube_b4_state.json — один на оба модуля."""
+        self.assertEqual(self.youtube_b4._STATE_FILE,
+                         self.dpi_bypass._STATE_FILE)
+
+    def test_cache_written_by_one_module_visible_to_other(self):
+        """Кэш, записанный youtube_b4, читает dpi_bypass (общий state)."""
+        import time
+        state_file = self._isolated_state(self.youtube_b4, {})
+        self.dpi_bypass._STATE_FILE = state_file
+        calls = {"rel": 0}
+        with patch.object(self.youtube_b4, "_detect_latest_version",
+                          lambda timeout=10: "1.80.3"), \
+             patch.object(self.youtube_b4, "_detect_latest_prerelease_version",
+                          lambda timeout=10: "1.80.4rc1"), \
+             patch.object(self.youtube_b4, "_detect_installed",
+                          lambda: True):
+            self.youtube_b4._refresh_b4_latest_cache(force=True)
+        # Второй модуль читает ТОТ ЖЕ state — кэш виден без сети.
+        with patch.object(self.dpi_bypass, "_detect_latest_version",
+                          lambda timeout=10: (_ for _ in ()).throw(
+                              AssertionError("network!"))):
+            cache = self.dpi_bypass._refresh_b4_latest_cache()
+        self.assertEqual(cache["release"], "1.80.3")
+        self.assertEqual(cache["prerelease"], "1.80.4rc1")
+        self.assertTrue(cache["ok"])
+
+    def test_detector_functions_accept_timeout_param(self):
+        """_detect_latest_version/_detect_latest_prerelease_version
+        принимют timeout (для фоновой проверки шапки)."""
+        import inspect
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            for fn in ("_detect_latest_version",
+                       "_detect_latest_prerelease_version"):
+                sig = inspect.signature(getattr(mod, fn))
+                self.assertIn("timeout", sig.parameters)
+                self.assertEqual(sig.parameters["timeout"].default, 10)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
