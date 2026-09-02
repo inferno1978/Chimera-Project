@@ -553,6 +553,91 @@ class TestDownloadAndInstall(unittest.TestCase):
              patch.object(self.m, "_STATE_FILE", self.state):
             return self.m._download_and_install(version)
 
+    def _run_install_root(self, version: str, make_root):
+        """Как _run_install, но структуру «архива» строит make_root(dest)."""
+        dl = patch.object(self.m, "_download_tarball", return_value=True)
+
+        def fake_extract(tar_path, dest_dir):
+            return make_root(Path(dest_dir))
+
+        ex = patch.object(self.m, "_extract_tarball", side_effect=fake_extract)
+        with dl, ex, patch.object(self.m, "_RUNTIME_ROOT", self.rt_root), \
+             patch.object(self.m, "_STATE_FILE", self.state):
+            return self.m._download_and_install(version)
+
+    def _make_files_only_root(self, dest: Path) -> Path:
+        """Регистресс v77.1: распакованный «архив» из ОДНИХ ФАЙЛОВ.
+
+        Порядок iterdir() зависит от ФС (tmpfs — порядок создания,
+        ext4 — hash-порядок). Без директорий ПЕРВЫЙ скопированный элемент
+        гарантированно файл — как на проде, где первым шёл LICENSE и
+        copy2 падал FileNotFoundError (.staging-4.1.0/LICENSE, Errno 2):
+        staging не был создан явно, а возникал только неявно через
+        copytree-директорию. Фикстура детерминированно воспроизводит
+        этот порядок на ЛЮБОЙ ФС.
+        """
+        root = dest / "dpi-detector-4.1.0"
+        root.mkdir(parents=True)
+        # создаём файлы ПЕРВЫМИ и НЕ создаём ни одной директории
+        (root / "LICENSE").write_text("MIT")
+        (root / "README.md").write_text("readme")
+        (root / "requirements.txt").write_text("httpx\nrich\nPyYAML\n")
+        (root / "config.yml").write_text("x: 1\n")
+        (root / "domains.txt").write_text("# domains\n")
+        (root / "dpi_detector.py").write_text('CURRENT_VERSION = "4.1.0"\n')
+        return root
+
+    def test_regression_files_only_upstream_no_staging_crash(self):
+        """v77.1: файл-первым (нет директорий) — staging создаётся явно,
+        установка не падает FileNotFoundError (прод-репорт Errno 2)."""
+        ok, msg = self._run_install_root("4.1.0", self._make_files_only_root)
+        self.assertTrue(ok, msg)
+        final = self.rt_root / "4.1.0"
+        self.assertTrue((final / "dpi_detector.py").is_file())
+        self.assertTrue((final / "LICENSE").is_file())
+        self.assertFalse(list(self.rt_root.glob(".staging-*")))
+
+    def test_regression_staging_exists_before_any_copy(self):
+        """v77.1: staging существует ДО первого копирования файла."""
+        # _make_files_only_root: все элементы — файлы; в момент copy2
+        # staging-каталог уже должен существовать (проверяем в пробе).
+        staging_at_copy = {}
+
+        real_copy2 = __import__("shutil").copy2
+
+        def probing_copy2(src, dst, *a, **kw):
+            if "dpi_detector" in str(dst) or "LICENSE" in str(dst):
+                staging_at_copy["exists"] = Path(dst).parent.exists()
+                staging_at_copy["is_staging"] = ".staging-" in str(dst)
+            return real_copy2(src, dst, *a, **kw)
+
+        dl = patch.object(self.m, "_download_tarball", return_value=True)
+
+        def fake_extract(tar_path, dest_dir):
+            return self._make_files_only_root(Path(dest_dir))
+
+        ex = patch.object(self.m, "_extract_tarball", side_effect=fake_extract)
+        cp = patch.object(self.m.shutil, "copy2", side_effect=probing_copy2)
+        with dl, ex, cp, patch.object(self.m, "_RUNTIME_ROOT", self.rt_root), \
+             patch.object(self.m, "_STATE_FILE", self.state):
+            ok, msg = self.m._download_and_install("4.1.0")
+        self.assertTrue(ok, msg)
+        self.assertTrue(staging_at_copy.get("is_staging", False),
+                        "copy2 должен вызываться в staging")
+        self.assertTrue(staging_at_copy.get("exists", False),
+                        "staging-каталог должен существовать до копирования")
+
+    def test_regression_final_exists_as_file_replaced(self):
+        """v77.1: мусор-ФАЙЛ с именем версии на месте final — заменяется,
+        rmtree(NotADirectoryError) не роняет установку."""
+        self.rt_root.mkdir(parents=True, exist_ok=True)
+        (self.rt_root / "4.1.0").write_text("файл-обманка")
+        ok, msg = self._run_install("4.1.0", "4.1.0")
+        self.assertTrue(ok, msg)
+        final = self.rt_root / "4.1.0"
+        self.assertTrue(final.is_dir())
+        self.assertTrue((final / "dpi_detector.py").is_file())
+
     def test_success(self):
         ok, msg = self._run_install("4.1.0", "4.1.0")
         self.assertTrue(ok, msg)
