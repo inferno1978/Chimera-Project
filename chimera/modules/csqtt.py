@@ -499,12 +499,36 @@ def get_subscription_uris(user: dict) -> list:
 #  СБОРКА / УСТАНОВКА БИНАРНИКА
 # ══════════════════════════════════════════════════════════════════════════════
 def _build_csqtt_server() -> bool:
-    """Скачивает исходники CSQTT и собирает через download_manager."""
-    from chimera.modules.download_manager import fetch_package
-    from chimera.modules.csqtt_packages import CSQTT_SOURCE_SPEC
+    """Устанавливает csqtt-server: готовый ручной бинарь → исходники.
 
+    v76.1: сначала ищем ГОТОВЫЙ бинарь, загруженный юзером вручную
+    (scp/WinSCP в /root, /tmp, /opt, /usr/local/src, /home/<юзер>/).
+    Если найден (ELF + архитектура сервера) — устанавливаем его
+    БЕЗ сборки: серверу, который не тянет Rust-компиляцию, это
+    единственный путь. Раньше установщик такой бинарь не видел и
+    всегда предлагал собирать заново. Если бинаря нет — прежний
+    путь: скачать исходники и собрать через download_manager.
+    """
+    from chimera.modules.download_manager import fetch_package
+    from chimera.modules import csqtt_packages
+
+    # v76.1: шаг 1 — готовый бинарь, если юзер его принёс.
+    print(f"  {CYAN}→{NC}  Проверяю готовый бинарь csqtt-server "
+          f"(ручное размещение)...")
+    try:
+        if csqtt_packages.install_manual_binary():
+            print(f"  {GREEN}✓{NC}  csqtt-server установлен (без сборки): "
+                  f"{_BIN_PATH}")
+            return True
+    except Exception as e:
+        # Скан ручного бинаря не должен ронять установку — идём
+        # в штатный путь (исходники → сборка), как раньше.
+        print(f"  {YELLOW}⚠{NC}  Проверка ручного бинаря упала "
+              f"({type(e).__name__}: {e}) — пробую сборку из исходников")
+
+    # Шаг 2 (прежний путь): исходники → сборка.
     print(f"  {CYAN}→{NC}  Скачиваю исходники CSQTT (через download_manager)...")
-    ok = fetch_package(CSQTT_SOURCE_SPEC, progress_label="CSQTT")
+    ok = fetch_package(csqtt_packages.CSQTT_SOURCE_SPEC, progress_label="CSQTT")
     if ok:
         print(f"  {GREEN}✓{NC}  csqtt-server установлен: {_BIN_PATH}")
     return ok
@@ -789,6 +813,84 @@ def _run_install() -> None:
         print(f"\n  {YELLOW}Установка прервана.{NC}\n")
         _pause()
 
+def _print_install_failure_box() -> None:
+    """v76.1: блок ошибки установки бинарника + инструкция.
+
+    Порядок подсказок = порядок «стоимости» для юзера:
+      1. ГОТОВЫЙ бинарь с другой машины (без сборки вообще) — самый
+         простой путь для слабых VPS: собрать где-нибудь ещё, закинуть
+         в /root (или парочку других директорий), повторить установку —
+         установщик подхватит бинарь сам.
+      2. Исходный tarball вручную (прежняя подсказка).
+      3. Диагностика места/RAM (прежняя).
+    """
+    _box_top("🚀  УСТАНОВКА  •  CSQTT")
+    _box_err("Не удалось собрать csqtt-server.")
+    _box_err("Убедитесь что доступны Rust, Zig и интернет.")
+    _box_row()
+    # v76.1 — приоритетная подсказка: готовый бинарь без сборки
+    _box_row(f"  {BOLD}Без сборки — готовый бинарь с другой машины:{NC}")
+    _box_row(f"  {DIM}соберите на другой машине и загрузите на сервер (scp/WinSCP){NC}")
+    _box_row(f"  {DIM}под именем csqtt-server — установщик сам найдёт его{NC}")
+    _box_row(f"  {DIM}при повторном запуске установки и НЕ будет собирать заново.{NC}")
+    _box_row(f"  {CYAN}  директории: /root/  /tmp/  /opt/  /usr/local/src/  /home/<юзер>/{NC}")
+    _box_row()
+    _box_row(f"  {DIM}Диагностика (путь через исходники):{NC}")
+    # Проверяем, есть ли файл в /root/ (os.PathLike.exists() в 3.12
+    # поднимает PermissionError на недоступной директории — обходим)
+    manual_path = Path("/root/csqtt-main.tar.gz")
+    try:
+        manual_exists = manual_path.exists()
+    except (PermissionError, OSError):
+        manual_exists = False
+    if manual_exists:
+        ms = manual_path.stat().st_size
+        _box_row(f"  {DIM}  • /root/csqtt-main.tar.gz — найден ({ms} байт){NC}")
+        _box_row(f"  {DIM}    файл есть, но сборка упала. Смотрите ошибку выше.{NC}")
+        _box_row(f"  {DIM}    Запустите direct-build скрипт для подробных логов:{NC}")
+        _box_row(f"  {CYAN}    bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/scripts/csqtt-direct-build.sh){NC}")
+    else:
+        _box_row(f"  {DIM}  • /root/csqtt-main.tar.gz — НЕ найден{NC}")
+        _box_row(f"  {DIM}    Скачайте вручную:{NC}")
+        _box_row(f"  {CYAN}    curl -fL \"https://github.com/amurcanov/csqtt/archive/refs/heads/main.tar.gz\" -o /root/csqtt-main.tar.gz{NC}")
+        _box_row(f"  {DIM}    и повторите установку.{NC}")
+    # Проверяем свободное место
+    try:
+        import shutil as _sh
+        total, used, free = _sh.disk_usage("/root")
+        free_mb = free // (1024 * 1024)
+        if free_mb < 2048:
+            _box_row(f"  {YELLOW}⚠ свободное место: {free_mb} MB (нужно ≥ 2048 MB для Rust-сборки){NC}")
+        else:
+            _box_row(f"  {DIM}  • свободное место: {free_mb} MB ✓{NC}")
+    except Exception:
+        pass
+    # Проверяем RAM
+    try:
+        meminfo = Path("/proc/meminfo").read_text()
+        mem_avail_kb = 0
+        swap_total_kb = 0
+        for line in meminfo.splitlines():
+            if line.startswith("MemAvailable:"):
+                mem_avail_kb = int(line.split()[1])
+            elif line.startswith("SwapTotal:"):
+                swap_total_kb = int(line.split()[1])
+        total_mb = (mem_avail_kb + swap_total_kb) // 1024
+        if total_mb < 1024:
+            _box_row(f"  {YELLOW}⚠ RAM+swap: {total_mb} MB (мало для сборки, нужно ≥ 1024 MB){NC}")
+            _box_row(f"  {DIM}    Добавьте swap: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile{NC}")
+        else:
+            _box_row(f"  {DIM}  • RAM+swap: {total_mb} MB ✓{NC}")
+    except Exception:
+        pass
+    # Полная пошаговая инструкция «бинарь с другой машины»
+    try:
+        from chimera.modules.csqtt_packages import print_manual_binary_hint
+        print_manual_binary_hint()
+    except Exception:
+        pass
+
+
 def _run_install_inner() -> None:
     os.system("clear")
     _box_top("🚀  УСТАНОВКА  •  CSQTT")
@@ -867,59 +969,13 @@ def _run_install_inner() -> None:
     _box_top("🚀  УСТАНОВКА  •  CSQTT")
     _box_row()
 
-    # 1. Бинарник
-    _box_info("Сборка csqtt-server из исходников (Rust + Zig)...")
+    # 1. Бинарник (v76.1: готовый ручной бинарь → потом сборка из исходников)
+    _box_info("Бинарь csqtt-server: готовый (если найден) или сборка (Rust + Zig)...")
     _box_bot(); print()
 
     if not _build_csqtt_server():
         print()
-        _box_top("🚀  УСТАНОВКА  •  CSQTT")
-        _box_err("Не удалось собрать csqtt-server.")
-        _box_err("Убедитесь что доступны Rust, Zig и интернет.")
-        _box_row()
-        _box_row(f"  {DIM}Диагностика:{NC}")
-        # Проверяем, есть ли файл в /root/
-        manual_path = Path("/root/csqtt-main.tar.gz")
-        if manual_path.exists():
-            ms = manual_path.stat().st_size
-            _box_row(f"  {DIM}  • /root/csqtt-main.tar.gz — найден ({ms} байт){NC}")
-            _box_row(f"  {DIM}    файл есть, но сборка упала. Смотрите ошибку выше.{NC}")
-            _box_row(f"  {DIM}    Запустите direct-build скрипт для подробных логов:{NC}")
-            _box_row(f"  {CYAN}    bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/scripts/csqtt-direct-build.sh){NC}")
-        else:
-            _box_row(f"  {DIM}  • /root/csqtt-main.tar.gz — НЕ найден{NC}")
-            _box_row(f"  {DIM}    Скачайте вручную:{NC}")
-            _box_row(f"  {CYAN}    curl -fL \"https://github.com/amurcanov/csqtt/archive/refs/heads/main.tar.gz\" -o /root/csqtt-main.tar.gz{NC}")
-            _box_row(f"  {DIM}    и повторите установку.{NC}")
-        # Проверяем свободное место
-        try:
-            import shutil as _sh
-            total, used, free = _sh.disk_usage("/root")
-            free_mb = free // (1024 * 1024)
-            if free_mb < 2048:
-                _box_row(f"  {YELLOW}⚠ свободное место: {free_mb} MB (нужно ≥ 2048 MB для Rust-сборки){NC}")
-            else:
-                _box_row(f"  {DIM}  • свободное место: {free_mb} MB ✓{NC}")
-        except Exception:
-            pass
-        # Проверяем RAM
-        try:
-            meminfo = Path("/proc/meminfo").read_text()
-            mem_avail_kb = 0
-            swap_total_kb = 0
-            for line in meminfo.splitlines():
-                if line.startswith("MemAvailable:"):
-                    mem_avail_kb = int(line.split()[1])
-                elif line.startswith("SwapTotal:"):
-                    swap_total_kb = int(line.split()[1])
-            total_mb = (mem_avail_kb + swap_total_kb) // 1024
-            if total_mb < 1024:
-                _box_row(f"  {YELLOW}⚠ RAM+swap: {total_mb} MB (мало для сборки, нужно ≥ 1024 MB){NC}")
-                _box_row(f"  {DIM}    Добавьте swap: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile{NC}")
-            else:
-                _box_row(f"  {DIM}  • RAM+swap: {total_mb} MB ✓{NC}")
-        except Exception:
-            pass
+        _print_install_failure_box()
         _box_bot(); _pause(); return
 
     print()

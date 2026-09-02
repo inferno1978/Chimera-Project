@@ -28,6 +28,33 @@ _CSQTT_SERVICE_NAME   = "csqtt"
 _CSQTT_SERVICE_FILE   = Path("/etc/systemd/system/csqtt.service")
 _MIN_SOURCE_TARBALL_SIZE = 1000   # 1 KB
 
+# ── v76.1: ГОТОВЫЙ бинарь, собранный на ДРУГОЙ машине ────────────────────────
+# Юзер, чей сервер не тянет Rust-сборку (OOM/слабый VPS), компилирует
+# csqtt-server где-нибудь ещё, загружает файл на сервер (scp/WinSCP/SFTP)
+# в одну из директорий ниже — и повторный запуск установки подхватывает
+# бинарь АВТОМАТИЧЕСКИ, не предлагая сборку заново.
+_MANUAL_BIN_DIRS = (
+    Path("/root"),            # scp/WinSCP под root — дефолт
+    Path("/tmp"),             # временные загрузки
+    Path("/opt"),             # классика для ручного софта
+    Path("/usr/local/src"),   # исходники/артефакты
+)
+_MANUAL_BIN_HOME = Path("/home")   # /home/<юзер>/csqtt-server (верхний уровень)
+# Точные имена (приоритет), затем glob-шаблоны — cargo-zigbuild может дать
+# имя с target-суффиксом: csqtt-server-x86_64-unknown-linux-musl
+_MANUAL_BIN_EXACT = ("csqtt-server", "csqtt")
+_MANUAL_BIN_GLOBS = ("csqtt-server*", "csqtt*server*", "csqtt_server*",
+                     "csqtt-server-*.bin", "csqtt.bin")
+# Суффиксы, которые бинарем быть не могут (архивы/тексты) — исключаем из
+# кандидатов, чтобы не пугать юзера «нашёл файл, но он не ELF».
+_MANUAL_BIN_BAD_SUFFIXES = {".gz", ".tgz", ".tar", ".xz", ".zip", ".bz2",
+                            ".txt", ".md", ".json", ".sig", ".asc", ".sum",
+                            ".sha256", ".py", ".sh", ".rs", ".toml"}
+_MANUAL_BIN_MIN_SIZE = 1_000_000   # 1 MB: Rust-релиз с aws-lc-sys много больше
+# ELF e_machine → архитектура (проверка «бинарь собран под этот сервер»)
+_ELF_MACHINES = {62: "x86_64", 183: "aarch64", 40: "arm", 3: "x86",
+                 243: "riscv64"}
+
 # Rust toolchain
 _RUST_VERSION = "1.97.1"
 _RUST_TARGET  = "x86_64-unknown-linux-musl"
@@ -366,6 +393,208 @@ def _detect_arch() -> str:
         "arm64":   "aarch64",
     }
     return arch_map.get(m, "x86_64")
+
+
+def _elf_arch(path: Path) -> Optional[str]:
+    """Читает ELF-заголовок файла → архитектура ('x86_64'/'aarch64'/...).
+
+    None = не ELF (нет magic \\x7fELF), файл короче заголовка, битый
+    e_machine или неизвестная машина. Осознанно НЕ проверяем класс
+    32/64-bit и endianness данных: e_machine достаточно, чтобы понять,
+    запустится ли бинарь на этом сервере.
+    """
+    import struct
+    try:
+        with open(path, "rb") as f:
+            hdr = f.read(20)
+    except Exception:
+        return None
+    if len(hdr) < 20 or hdr[:4] != b"\x7fELF":
+        return None
+    ei_data = hdr[5]                # 1 = LE, 2 = BE
+    fmt = ">" if ei_data == 2 else "<"
+    try:
+        machine = struct.unpack(fmt + "H", hdr[18:20])[0]
+    except Exception:
+        return None
+    return _ELF_MACHINES.get(machine)
+
+
+def _validate_manual_binary(path: Path) -> tuple:
+    """Проверяет, что файл — рабочий ELF-бинарь под архитектуру СЕРВЕРА.
+
+    Возвращает (ok, why): why — человекочитаемая причина отказа (для
+    диагностики «нашёл файл, но он не подходит»).
+    """
+    try:
+        size = path.stat().st_size
+    except Exception as e:
+        return False, f"не читается: {e}"
+    if size < _MANUAL_BIN_MIN_SIZE:
+        return False, (f"слишком маленький ({size} байт < "
+                       f"{_MANUAL_BIN_MIN_SIZE})")
+    arch = _elf_arch(path)
+    if arch is None:
+        return False, "не ELF-бинарь (нет magic)"
+    host = _detect_arch()
+    if arch != host:
+        return False, (f"архитектура {arch} ≠ сервера {host} — "
+                       f"на этом сервере не запустится")
+    return True, f"ELF {arch}, {size} байт"
+
+
+def _scan_manual_bin_candidates() -> list:
+    """Все кандидаты «ручного бинаря» в порядке приоритета.
+
+    Порядок: точные имена по директориям (в порядке _MANUAL_BIN_DIRS),
+    затем glob-шаблоны по тем же директориям. Плюс /home/<юзер>/ —
+    только файлы верхнего уровня (не бегаем по всему /home).
+
+    /usr/local/bin/csqtt-server сюда НЕ входит — это место НАЗНАЧЕНИЯ,
+    оно проверяется отдельно в install_manual_binary().
+    """
+    candidates: list = []
+    dirs: list = [d for d in _MANUAL_BIN_DIRS if d.is_dir()]
+    try:
+        if _MANUAL_BIN_HOME.is_dir():
+            dirs += [d for d in _MANUAL_BIN_HOME.iterdir()
+                     if d.is_dir()]
+    except (PermissionError, OSError):
+        pass
+
+    for d in dirs:
+        for name in _MANUAL_BIN_EXACT:
+            p = d / name
+            try:
+                if p.is_file() and p.suffix not in _MANUAL_BIN_BAD_SUFFIXES:
+                    candidates.append(p)
+            except (PermissionError, OSError):
+                continue
+
+    for d in dirs:
+        for pattern in _MANUAL_BIN_GLOBS:
+            try:
+                for p in sorted(d.glob(pattern)):
+                    if (p.is_file()
+                            and p not in candidates
+                            and p.suffix not in _MANUAL_BIN_BAD_SUFFIXES):
+                        candidates.append(p)
+            except (PermissionError, OSError):
+                continue
+    return candidates
+
+
+def find_manual_binary() -> tuple:
+    """Ищет ГОТОВЫЙ бинарь среди кандидатов (см. _scan_manual_bin_candidates).
+
+    Возвращает (валидный_путь | None, [(путь, причина), ...]).
+    Список отклонённых — для диагностики: юзер видит, ЧТО нашлось и
+    ПОЧЕМУ не подошло (не ELF / чужая архитектура / слишком маленький).
+    """
+    rejects: list = []
+    for cand in _scan_manual_bin_candidates():
+        ok, why = _validate_manual_binary(cand)
+        if ok:
+            return cand, rejects
+        rejects.append((cand, why))
+    return None, rejects
+
+
+def install_manual_binary(verbose: bool = True) -> bool:
+    """v76.1: устанавливает ГОТОВЫЙ бинарь, загруженный юзером вручную.
+
+    Приоритет:
+      1. Ручные директории (_MANUAL_BIN_DIRS + /home/<юзер>/): файл
+         csqtt-server / csqtt / csqtt-server-* с валидным ELF-заголовком
+         под архитектуру сервера → атомарная установка в
+         /usr/local/bin/csqtt-server. Сеть и исходники НЕ трогаем.
+      2. Если ручного нет, но по месту назначения уже лежит ВАЛИДНЫЙ
+         бинарь (юзер скопировал прямо в /usr/local/bin, или это
+         «переустановить с сохранением» после прошлой установки) —
+         считаем установленным, сборка не требуется.
+
+    Валидация (см. _validate_manual_binary): ELF magic, архитектура
+    e_machine == архитектура сервера, размер >= 1 MB. Это отсекает
+    случайные файлы, архивы и бинари чужой архитектуры (собранный на
+    M1 Mac aarch64-бинарь не молча ляжет на x86_64-VPS).
+
+    Возвращает True только если бинарь УСТАНОВЛЕН (или уже на месте).
+    False = ручного бинаря нет → вызывающий код идёт в сборку из
+    исходников, как раньше.
+    """
+    found, rejects = find_manual_binary()
+
+    if verbose and rejects:
+        # Диагностика отклонённых кандидатов — ВСЕГДА (даже когда
+        # валидного не нашлось): юзер, закинувший бинарь не той
+        # архитектуры, должен видеть причину, а не молчаливое
+        # «иду собирать из исходников».
+        for rej_path, rej_why in rejects:
+            print(f"[WARN]   {rej_path} отклонён: {rej_why}")
+
+    if not found:
+        # Кандидатов нет — проверяем, не лежит ли уже валидный бинарь
+        # по месту назначения (частный случай: юзер сам скопировал в
+        # /usr/local/bin, либо переустановка с сохранением).
+        if _CSQTT_BIN_PATH.is_file():
+            ok, why = _validate_manual_binary(_CSQTT_BIN_PATH)
+            if ok:
+                if verbose:
+                    print(f"[OK] csqtt-server уже на месте: "
+                          f"{_CSQTT_BIN_PATH} ({why}) — сборка не требуется")
+                try:
+                    _CSQTT_BIN_PATH.chmod(0o755)
+                except Exception:
+                    pass
+                return True
+        return False
+
+    if verbose:
+        try:
+            size_mb = found.stat().st_size / (1024 * 1024)
+            print(f"[OK] Найден готовый бинарь csqtt-server: {found} "
+                  f"({size_mb:.1f} MB) — устанавливаю без сборки")
+        except Exception:
+            print(f"[OK] Найден готовый бинарь csqtt-server: {found} "
+                  f"— устанавливаю без сборки")
+
+    try:
+        ok = _atomic_replace_binary(found, _CSQTT_BIN_PATH,
+                                    _CSQTT_SERVICE_NAME,
+                                    _CSQTT_SERVICE_FILE)
+    except Exception as e:
+        print(f"[ERR] Установка ручного бинаря упала: "
+              f"{type(e).__name__}: {e}")
+        return False
+    if ok and verbose:
+        print(f"[OK] Готовый бинарь установлен: {_CSQTT_BIN_PATH}")
+    return ok
+
+
+def print_manual_binary_hint() -> None:
+    """v76.1: инструкция «как поставить готовый бинарь без сборки».
+
+    Печатается в блоке ошибки установки CSQTT: юзер, чей сервер не
+    тянет сборку, собирает бинарь на другой машине, загружает на
+    сервер — и повторный запуск установки подхватывает его сам.
+    """
+    print()
+    print("[HINT] Сборка на этом сервере не тянет? Есть путь без сборки:")
+    print("  1. Соберите csqtt-server на другой машине (Linux, ТА ЖЕ")
+    print("     архитектура, что и сервер):")
+    print("       git clone https://github.com/amurcanov/csqtt")
+    print("       cd csqtt/rust-server && cargo build --release")
+    print("       # бинарь: target/release/csqtt")
+    print("       # (кросс-сборка без установленного Rust на сервере:")
+    print("       #  cargo zigbuild --release --target x86_64-unknown-linux-musl)")
+    print("  2. Загрузите бинарь на сервер (scp/WinSCP) под именем")
+    print("     csqtt-server в любую из директорий:")
+    for d in _MANUAL_BIN_DIRS:
+        print(f"         {d}/")
+    print(f"         {_MANUAL_BIN_HOME}/<юзер>/")
+    print("  3. Повторите установку CSQTT — установщик сам найдёт бинарь")
+    print("     (проверит ELF-заголовок и архитектуру) и НЕ будет")
+    print("     предлагать сборку заново.")
 
 
 def _atomic_replace_binary(built: Path, bin_path: Path,
