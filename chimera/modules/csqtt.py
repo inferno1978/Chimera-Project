@@ -1518,6 +1518,12 @@ def do_csqtt_menu() -> None:
             _box_kv("Data порт:",   str(state.get("data_port", "—")))
             _box_kv("Web Panel:",   f"https://127.0.0.1:{state.get('web_port', '—')}")
             _box_kv("Паролей:",     str(pw_count))
+            # v75: статус обновления из апстрима (state-кэш, без сети).
+            try:
+                from chimera.modules.upstream_updates import get_update_status_line
+                _box_kv("Обновление:", get_update_status_line("csqtt"))
+            except Exception:
+                pass
             # nginx front status
             ng_url = _csqtt_nginx_get_url()
             if ng_url:
@@ -1541,6 +1547,7 @@ def do_csqtt_menu() -> None:
                 _box_item("7", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}({ng_url}){NC}")
             else:
                 _box_item("7", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ к Web Panel по HTTPS{NC}")
+            _box_item("U", "⬆️   Обновление из апстрима (проверка/авто/таймер)")
             _box_sep()
             _box_item("8", f"{RED}🗑️   Удалить CSQTT{NC}")
 
@@ -1683,6 +1690,16 @@ def do_csqtt_menu() -> None:
         elif ch == "8" and installed:
             try: _full_uninstall(silent=False)
             except _Cancelled: print(f"  {DIM}Отменено.{NC}"); _pause()
+
+        elif ch == "u" and installed:
+            # v75: единое меню обновления из апстрима (amurcanov/csqtt):
+            # проверка ревизии / обновление / force / авто / таймер.
+            try:
+                from chimera.modules.upstream_updates import do_upstream_update_menu
+                do_upstream_update_menu(focus="csqtt")
+            except ImportError as e:
+                print(f"  {RED}✗{NC}  upstream_updates недоступен: {e}")
+                _pause()
 
         elif ch == "g":
             try: _show_guide()

@@ -336,6 +336,17 @@ if "--h2-autoupdate" in sys.argv:
     h2_autoupdate_cron()
     sys.exit(0)
 
+# --- Upstream-модули (Turnable/CSQTT/qWDTT): автообновление из апстримов ---
+# v75: вызывается systemd-таймером chimera-upstream-update.timer (04:40)
+# или вручную. Не-интерактивно: проверка GitHub API → fetch_package →
+# сборка (layout-probe) → smoke-тест → откат при провале.
+if "--upstream-autoupdate" in sys.argv:
+    if os.geteuid() != 0:
+        print("ERROR: требуются права root", file=sys.stderr)
+        sys.exit(1)
+    from chimera.modules.upstream_updates import run_agent
+    sys.exit(run_agent())
+
 # --- Hysteria2: мониторинг сертификата (из cron еженедельно) ---
 if "--h2-cert-monitor" in sys.argv:
     from chimera.modules.hysteria2_cert_mgr import h2_cert_monitor
