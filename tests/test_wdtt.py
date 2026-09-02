@@ -117,7 +117,7 @@ class TestGoRequiredVersion(unittest.TestCase):
 
     def test_returns_default_when_no_file(self):
         from chimera.modules.wdtt import _go_required_version
-        self.assertEqual(_go_required_version(self._gomod), "1.21.0")
+        self.assertEqual(_go_required_version(self._gomod), "1.25.0")
 
     def test_returns_version_from_file(self):
         from chimera.modules.wdtt import _go_required_version
@@ -127,7 +127,7 @@ class TestGoRequiredVersion(unittest.TestCase):
     def test_returns_default_when_no_directive(self):
         from chimera.modules.wdtt import _go_required_version
         self._gomod.write_text("module wdtt\n")
-        self.assertEqual(_go_required_version(self._gomod), "1.21.0")
+        self.assertEqual(_go_required_version(self._gomod), "1.25.0")
 
 
 class TestIsInstalled(unittest.TestCase):
@@ -482,3 +482,90 @@ class TestGoToolchainSpecSanity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestPostInstallBuildLayout(unittest.TestCase):
+    """v74.2 (wdtt-layout-fix): выбор build-таргета по layout архива.
+
+    Upstream SpaceNeuroX/proxy-turn-vk-android (master от 02.09) переехал
+    на модульный layout: сервер в ./server (package main), корневого
+    server.go больше нет. Старые архивы (server.go в корне) должны
+    собираться фолбэком.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        go_bin = self._tmpdir / "fakego"
+        go_bin.write_text("#!/bin/sh\nexit 0\n")
+        go_bin.chmod(0o755)
+        self._go = str(go_bin)
+        self._calls = []
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _make_tarball(self, layout: str) -> Path:
+        import tarfile
+        pkg = self._tmpdir / "pkg" / "proxy-turn-vk-android-master"
+        pkg.mkdir(parents=True)
+        (pkg / "go.mod").write_text("module wg-turn-client\ngo 1.25.0\n")
+        if layout == "new":
+            (pkg / "server").mkdir()
+            (pkg / "server" / "main.go").write_text("package main\n")
+        else:
+            (pkg / "server.go").write_text("package main\n")
+        tb = self._tmpdir / f"{layout}.tar.gz"
+        with tarfile.open(tb, "w:gz") as tf:
+            tf.add(pkg, arcname="proxy-turn-vk-android-master")
+        return tb
+
+    def _run_post(self, tb: Path):
+        from chimera.modules import wdtt_packages
+        from unittest.mock import MagicMock
+        # subprocess общий для всех модулей: сохраняем оригинал ДО патча,
+        # чтобы tar-распаковка выполнялась по-настоящему без рекурсии.
+        orig_run = wdtt_packages.subprocess.run
+        calls = self._calls
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd and cmd[0] == "tar":
+                return orig_run(cmd, **kw)
+            rc = MagicMock()
+            rc.returncode = 0
+            if cmd and cmd[0] == self._go and "build" in cmd:
+                out = Path(cmd[cmd.index("-o") + 1])
+                out.write_bytes(b"\x7fELF-fake")
+            return rc
+
+        with patch.object(wdtt_packages, "_find_go_binary", return_value=self._go), \
+             patch.object(wdtt_packages.subprocess, "run", side_effect=fake_run), \
+             patch.object(wdtt_packages, "_atomic_replace_binary"):
+            ok = wdtt_packages._post_install_wdtt_source(tb, [self._tmpdir])
+        builds = [c for c in calls if c and c[0] == self._go and "build" in c]
+        return ok, builds
+
+    def test_new_layout_builds_server_dir(self):
+        ok, builds = self._run_post(self._make_tarball("new"))
+        self.assertTrue(ok)
+        self.assertEqual(len(builds), 1)
+        self.assertEqual(builds[0][-1], "./server")
+
+    def test_old_layout_builds_server_go_fallback(self):
+        ok, builds = self._run_post(self._make_tarball("old"))
+        self.assertTrue(ok)
+        self.assertEqual(len(builds), 1)
+        self.assertEqual(builds[0][-1], "./server.go")
+
+    def test_no_layout_returns_false(self):
+        import tarfile
+        pkg = self._tmpdir / "empty" / "proxy-turn-vk-android-master"
+        pkg.mkdir(parents=True)
+        (pkg / "README.md").write_text("no go sources\n")
+        tb = self._tmpdir / "empty.tar.gz"
+        with tarfile.open(tb, "w:gz") as tf:
+            tf.add(pkg, arcname="proxy-turn-vk-android-master")
+        ok, _ = self._run_post(tb)
+        self.assertFalse(ok)

@@ -366,11 +366,31 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
     csqtt_dir = None
     for item in extract_dir.iterdir():
         if item.is_dir() and item.name.startswith("csqtt-"):
-            csqtt_dir = item / "csqtt-uring"
+            # v74.2 (csqtt-layout-fix): upstream amurcanov/csqtt переименовал
+            # серверную директорию csqtt-uring → rust-server (проверено на
+            # архиве csqtt-main.tar.gz 734601 байт от 02.09: в корне
+            # rust-client/ + rust-server/, папки csqtt-uring больше нет).
+            # Оба варианта поддерживаются — старые локально скачанные архивы
+            # тоже собираются.
+            for sub in ("rust-server", "csqtt-uring"):
+                cand = item / sub
+                if cand.is_dir():
+                    csqtt_dir = cand
+                    break
             break
 
     if not csqtt_dir or not csqtt_dir.exists():
-        print("[ERR] Директория csqtt-uring не найдена")
+        print("[ERR] Директория сервера CSQTT не найдена "
+              "(rust-server / csqtt-uring)")
+        try:
+            top = list(extract_dir.iterdir())
+            if top:
+                print(f"[ERR]   {top[0].name}/ → "
+                      f"{sorted(c.name for c in top[0].iterdir() if c.is_dir())}")
+            else:
+                print("[ERR]   (архив распакован, но пуст)")
+        except Exception:
+            pass
         return False
 
     # 3. Проверяем/устанавливаем Rust

@@ -431,3 +431,35 @@ class TestTurnableSpecSanity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestRunQuietCompat(unittest.TestCase):
+    """v74.2 (run-quiet-fix): _run(..., quiet=True) не должен падать TypeError.
+
+    Regression-тест: вызовы _run(..., quiet=True) из v57 (start-limit-fix,
+    systemctl reset-failed) падали на Debian 13 / Python 3.13 с
+    "TypeError: run() got an unexpected keyword argument 'quiet'",
+    потому что локальный turnable._run не принимал quiet (в отличие от
+    chimera._core._run).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_quiet_kwarg_accepted(self):
+        import subprocess as sp
+        from chimera.modules import turnable
+        with patch.object(turnable.subprocess, "run") as m:
+            m.return_value = sp.CompletedProcess(["x"], 0)
+            r = turnable._run(["systemctl", "reset-failed", "xray"],
+                              check=False, quiet=True)
+        m.assert_called_once()
+        self.assertEqual(r.returncode, 0)
+
+    def test_call_without_quiet_still_works(self):
+        import subprocess as sp
+        from chimera.modules import turnable
+        with patch.object(turnable.subprocess, "run") as m:
+            m.return_value = sp.CompletedProcess(["x"], 0)
+            turnable._run(["systemctl", "restart", "xray"])
+        m.assert_called_once()

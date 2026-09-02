@@ -220,7 +220,14 @@ def _print_link_full(link: str, color: str = "") -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
-def _run(cmd: list, capture: bool = False, check: bool = False) -> subprocess.CompletedProcess:
+def _run(cmd: list, capture: bool = False, check: bool = False,
+         quiet: bool = False) -> subprocess.CompletedProcess:
+    # v74.2 (run-quiet-fix): параметр quiet добавлен для сигнатурной
+    # совместимости с _core._run — вызовы _run(..., quiet=True) из
+    # v57 (start-limit-fix, строки reset-failed) падали с
+    # "TypeError: run() got an unexpected keyword argument 'quiet'"
+    # на Debian 13 / Python 3.13. Семантически no-op: локальный _run
+    # и так глушит вывод (DEVNULL при не-capture).
     kw: dict = {"check": check}
     if capture:
         kw.update(capture_output=True, text=True, encoding="utf-8", errors="replace")
