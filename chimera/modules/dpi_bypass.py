@@ -418,14 +418,19 @@ def _detect_version() -> str:
     return ""
 
 
-def _detect_latest_version() -> str:
-    """Проверяет последнюю версию b4 на GitHub."""
+def _detect_latest_version(timeout: int = 10) -> str:
+    """Проверяет последнюю версию b4 на GitHub.
+
+    Параметр timeout (сек, default 10) позволяет вызывающему коду
+    (_refresh_b4_latest_cache для шапки меню) запросить более короткий
+    таймаут, чтобы не подвешивать отрисовку меню при недоступном GitHub.
+    """
     try:
         req = urllib.request.Request(
             "https://api.github.com/repos/DanielLavrushin/b4/releases/latest",
             headers={"User-Agent": "chimera-installer/5.0"},
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
         tag = data.get("tag_name", "")
         if tag.startswith("v"):
@@ -504,13 +509,15 @@ def sync_b4_version_state() -> dict:
     return {"synced": False, "version": version, "old_state_version": old}
 
 
-def _detect_latest_prerelease_version() -> str:
+def _detect_latest_prerelease_version(timeout: int = 10) -> str:
     """Проверяет последнюю ПРЕ-релизную версию b4 на GitHub.
 
     GitHub API endpoint `/releases/latest` возвращает только стабильные
     релизы (prerelease=false). Для pre-release нужно использовать
     `/releases` (возвращает массив ВСЕХ релизов, включая pre-release) и
     отфильтровать где prerelease=true. Берём первый — он самый свежий.
+
+    Параметр timeout (сек, default 10) — как в _detect_latest_version.
 
     Возвращает "" если:
       - нет pre-release релизов (только стабильные)
@@ -521,7 +528,7 @@ def _detect_latest_prerelease_version() -> str:
             "https://api.github.com/repos/DanielLavrushin/b4/releases",
             headers={"User-Agent": "chimera-installer/5.0"},
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
         # data — список релизов, отсортированных GitHub'ом от новых к старым.
         # Ищем первый где prerelease=true.
@@ -535,6 +542,211 @@ def _detect_latest_prerelease_version() -> str:
     except Exception as e:
         _log("WARN", f"check_latest_prerelease_version: {e}")
         return ""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  КЭШ ПОСЛЕДНИХ ВЕРСИЙ B4 (release / pre-release) ДЛЯ ШАПКИ МЕНЮ
+# ══════════════════════════════════════════════════════════════════════════
+#  v76: шапка главного меню показывает не только установленную версию,
+#  но и готовые к установке release/pre-release. Чтобы не ходить в
+#  GitHub API при каждой перерисовке меню (меню перерисовывается после
+#  каждого действия), найденные версии кэшируются в ОБЩЕМ state-файле
+#  (youtube_b4_state.json — его читают оба модуля B4), по идиоме
+#  upstream_updates/dnscrypt_update:
+#    • успешная проверка  → повторный запрос не раньше чем через 6 часов;
+#    • неудачная (GitHub недоступен) → повторная попытка через 30 минут,
+#      прежние значения НЕ затираются (показываем последние известные);
+#    • b4 не установлен → GitHub не дёргаем вовсе (обновлять нечего);
+#    • раздел обновлений [5] всегда проверяет live (force) и после
+#      успешного обновления сбрасывает кэш — шапка сразу честная.
+# ══════════════════════════════════════════════════════════════════════════
+
+# Свежесть кэша после успешной проверки GitHub (сек) — как в upstream_updates.
+B4_LATEST_CACHE_TTL = 6 * 3600
+# Повторная попытка после НЕудачной проверки (сек): GitHub мог быть
+# временно недоступен — не мучаем юзера 20-секундными паузами каждый вход.
+B4_LATEST_RETRY_TTL = 30 * 60
+# Таймаут GitHub API для фоновой проверки кэша (короче дефолтных 10 сек,
+# чтобы вход в меню не подвисал надолго при недоступном GitHub).
+B4_LATEST_TIMEOUT = 6
+
+
+def _b4_version_key(version: str) -> tuple:
+    """Ключ сравнения версий b4: новее/старее, без сети.
+
+    Реальные форматы тегов b4 (DanielLavrushin/b4):
+      release:     "1.80.3", "v1.80.3"
+      pre-release: "1.80.4rc1", "v1.76.2rc3"  (суффикс БЕЗ дефиса)
+
+    Ключ = (числовые_компоненты, признак_релиза, суффикс):
+      "1.78.0"    → ((1, 78, 0), 1, "")
+      "1.80.4rc1" → ((1, 80, 4), 0, "rc1")
+      "v1.80.3"   → ((1, 80, 3), 1, "")
+
+    Свойства (semver-совместимые):
+      • числа сравниваются как числа: "1.9.0" < "1.76.2" (не строкой!);
+      • pre-release МЛАДШЕ своего релиза: "1.80.4rc1" < "1.80.4"
+        (признак 0 < 1);
+      • сравнение суффиксов (str vs str) происходит только между двумя
+        pre-release с равными числами — смешения типов не возникает.
+    """
+    v = str(version or "").strip()
+    if v.startswith("v"):
+        v = v[1:]
+    m = re.match(r"^(\d+(?:\.\d+)*)", v)
+    if not m:
+        return ((), 0, v)
+    nums = tuple(int(x) for x in m.group(1).split("."))
+    suffix = v[m.end():]           # "rc1", "-rc.1", "" для чистого релиза
+    is_release = 1 if not suffix else 0
+    return (nums, is_release, suffix)
+
+
+def _b4_latest_cache() -> dict:
+    """Читает кэш latest-версий из общего state (БЕЗ сети).
+
+    Поля (заполняет _refresh_b4_latest_cache):
+      release     — последняя стабильная версия ("" если неизвестна);
+      prerelease  — последний pre-release ("" если нет/неизвестен);
+      checked_at  — unix-time последней проверки GitHub;
+      ok          — была ли та проверка успешной (данные актуальны).
+    """
+    state = _load_state()
+    try:
+        checked_at = float(state.get("latest_checked_at", 0) or 0)
+    except (TypeError, ValueError):
+        checked_at = 0.0
+    return {
+        "release":     str(state.get("latest_release", "") or ""),
+        "prerelease":  str(state.get("latest_prerelease", "") or ""),
+        "checked_at":  checked_at,
+        "ok":          bool(state.get("latest_check_ok", False)),
+    }
+
+
+def _refresh_b4_latest_cache(force: bool = False) -> dict:
+    """Обновляет кэш latest-версий (release + pre-release) в общем state.
+
+    TTL: успешная проверка свежа 6 часов (B4_LATEST_CACHE_TTL), неудачная
+    — 30 минут (B4_LATEST_RETRY_TTL). При неудаче прежние значения не
+    затираются (шапка показывает последние известные версии). Если b4 не
+    установлен — GitHub не запрашивается вовсе (обновлять нечего).
+
+    Вызывается в цикле отрисовки главного меню обоих модулей B4: при
+    свежем кэше — мгновенный возврат без сети, при устаревшем — одна
+    пара коротких (B4_LATEST_TIMEOUT) запросов к GitHub API.
+
+    force=True — игнорировать TTL и проверить прямо сейчас (используется
+    после успешного обновления в do_b4_update_menu, чтобы шапка сразу
+    показывала честное «актуальная версия»).
+
+    Возвращает актуальный кэш (dict как _b4_latest_cache).
+    """
+    cache = _b4_latest_cache()
+    ttl = B4_LATEST_CACHE_TTL if cache.get("ok") else B4_LATEST_RETRY_TTL
+    checked_at = cache.get("checked_at", 0.0)
+    if (not force and checked_at
+            and 0 <= time.time() - checked_at < ttl):
+        return cache
+    # b4 не установлен — узнавать latest бессмысленно, сеть не дёргаем.
+    if not _detect_installed():
+        return cache
+    release = _detect_latest_version(timeout=B4_LATEST_TIMEOUT)
+    prerelease = _detect_latest_prerelease_version(timeout=B4_LATEST_TIMEOUT)
+    ok = bool(release or prerelease)
+    try:
+        state = _load_state()
+        if ok:
+            state["latest_release"] = release
+            state["latest_prerelease"] = prerelease
+        # При неудаче (GitHub недоступен) прежние версии оставляем —
+        # показываем «последние известные», повторная попытка через
+        # B4_LATEST_RETRY_TTL.
+        state["latest_checked_at"] = time.time()
+        state["latest_check_ok"] = ok
+        _save_state(state)
+        if ok:
+            _log("INFO", f"b4 latest: release={release or '—'}, "
+                         f"pre-release={prerelease or '—'} (кэш обновлён)")
+        else:
+            _log("WARN", "b4 latest: GitHub недоступен — кэш не обновлён "
+                         "(повтор через 30 мин)")
+    except Exception as e:
+        _log("WARN", f"refresh_b4_latest_cache: {e}")
+    return _b4_latest_cache()
+
+
+def _b4_update_availability(installed: str = "",
+                            cache: Optional[dict] = None) -> dict:
+    """Сводка «есть ли что ставить» для шапки меню (БЕЗ сети).
+
+    Сравнивает установленную версию с кэшем latest (release + pre-release).
+    Возвращает dict:
+      known          — есть ли вообще данные о доступных версиях;
+      release        — latest release из кэша;
+      prerelease     — latest pre-release из кэша;
+      release_update — release НОВЕЕ установленной (можно ставить);
+      pre_update     — pre-release НОВЕЕ установленной (можно ставить);
+      up_to_date     — сравнение возможно и ставить нечего;
+      installed      — установленная версия (для контекста).
+    """
+    if cache is None:
+        cache = _b4_latest_cache()
+    rel = str(cache.get("release", "") or "")
+    pre = str(cache.get("prerelease", "") or "")
+    installed = str(installed or "")
+    if not (rel or pre):
+        return {"known": False, "release": "", "prerelease": "",
+                "release_update": False, "pre_update": False,
+                "up_to_date": False, "installed": installed}
+    # Сравнение возможно только если установленная версия распарсилась
+    # в числа ("" или мусор вроде "unknown" сравнивать нельзя).
+    can_compare = bool(installed) and bool(_b4_version_key(installed)[0])
+    rel_upd = bool(can_compare and rel
+                   and _b4_version_key(installed) < _b4_version_key(rel))
+    pre_upd = bool(can_compare and pre
+                   and _b4_version_key(installed) < _b4_version_key(pre))
+    return {"known": True, "release": rel, "prerelease": pre,
+            "release_update": rel_upd, "pre_update": pre_upd,
+            "up_to_date": bool(can_compare and not rel_upd and not pre_upd),
+            "installed": installed}
+
+
+def _b4_update_header_row(installed: str = "",
+                          cache: Optional[dict] = None) -> str:
+    """Строка «Обновление: …» для шапки ГЛАВНОГО меню (без сети).
+
+    Ровно под строкой «Версия:» показывает доступные release/pre-release
+    версии, чтобы юзер видел обновления сразу при входе в меню — не
+    заходя в раздел [5]. Варианты:
+
+      release 1.80.3 / pre-release 1.80.4rc1  → [5]
+      release 1.80.3  → [5]
+      pre-release 1.80.4rc1  → [5]
+      нет — установлена актуальная версия
+      не проверено (GitHub недоступен) → [5]
+      release 1.80.3 (версия не определена)
+    """
+    a = _b4_update_availability(installed, cache)
+    if not a["known"]:
+        return f"  Обновление:   {DIM}не проверено (GitHub недоступен) → [5]{NC}"
+    parts = []
+    if a["release_update"]:
+        parts.append(f"release {a['release']}")
+    if a["pre_update"]:
+        parts.append(f"pre-release {a['prerelease']}")
+    if parts:
+        return (f"  Обновление:   {YELLOW}{BOLD}{' / '.join(parts)}{NC}"
+                f"  {DIM}→ [5]{NC}")
+    if a["up_to_date"]:
+        return f"  Обновление:   {GREEN}нет — установлена актуальная версия{NC}"
+    # Версия не определена (не сравнить), но latest известны — просто
+    # показываем их: юзер решит, ставить ли через [5].
+    avail = " / ".join(x for x in (f"release {a['release']}"
+                                   if a["release"] else "",
+                                   f"pre-release {a['prerelease']}"
+                                   if a["prerelease"] else "") if x)
+    return f"  Обновление:   {DIM}{avail} (версия не определена){NC}"
 
 
 def _do_b4_binary_update(old_version: str, target_version: str) -> dict:
@@ -772,6 +984,10 @@ def do_b4_update_menu() -> None:
         (sync_b4_version_state) — модули «DPI Bypass» и «YouTube через
         B4» работают с одним binary и одним state-файлом, поэтому
         оба показывают одну и ту же актуальную версию.
+      • v76: после успешного обновления сбрасывается кэш latest-версий
+        (_refresh_b4_latest_cache(force=True)) — шапки главных меню
+        обоих модулей сразу показывают честное «актуальная версия»,
+        без ожидания TTL.
     """
     while True:
         os.system("clear")
@@ -847,6 +1063,9 @@ def do_b4_update_menu() -> None:
                 # Синхронизируем версию в общем state — второй модуль
                 # (DPI Bypass ↔ YouTube через B4) увидит новую версию.
                 sync_b4_version_state()
+                # v76: сбрасываем кэш latest — шапка главного меню
+                # сразу показывает «актуальная версия».
+                _refresh_b4_latest_cache(force=True)
                 _info("Версия синхронизирована между модулями B4 "
                       "(DPI Bypass + YouTube через B4).")
             else:
@@ -888,6 +1107,9 @@ def do_b4_update_menu() -> None:
             if result.get("updated"):
                 _ok(result["message"])
                 sync_b4_version_state()
+                # v76: сбрасываем кэш latest — шапка главного меню
+                # сразу показывает «актуальная версия».
+                _refresh_b4_latest_cache(force=True)
                 _info("Версия синхронизирована между модулями B4 "
                       "(DPI Bypass + YouTube через B4).")
             else:
@@ -2689,6 +2911,11 @@ def do_dpi_bypass_menu() -> None:
     while True:
         os.system("clear")
         s = status()
+        #  v76: кэш latest-версий (release / pre-release) для шапки.
+        # Сеть — только при устаревшем кэше (TTL 6 ч); при свежем —
+        # мгновенно из общего state (меню перерисовывается после каждого
+        # действия — GitHub API не должен дёргаться каждый раз).
+        _b4_latest = _refresh_b4_latest_cache()
         _box_top(f"📺  YOUTUBE VIA B4 (DPI BYPASS НА ENTRY)  {DIM}v{s.get('version', '?')}{NC}")
         _box_row()
         if not s["installed"]:
@@ -2710,6 +2937,10 @@ def do_dpi_bypass_menu() -> None:
             status_str = "active" if s.get("service_active") else "stopped"
             _box_row(f"  Сервис:       {status_col}{status_str}{NC}")
             _box_row(f"  Версия:       {CYAN}{s.get('version', '?')}{NC}")
+            #  v76: доступные release/pre-release сразу в шапке — юзер
+            # видит обновления при входе в меню, не заходя в [5].
+            _box_row(_b4_update_header_row(str(s.get("version", "") or ""),
+                                            _b4_latest))
             #  Отображение активных сетов из config.json.
             # Показываем все активные (enabled=true) сеты с зелёными точками.
             _active_sets = s.get("active_sets", [])
