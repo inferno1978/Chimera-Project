@@ -445,9 +445,16 @@ def _download_and_install(version: str) -> Tuple[bool, str]:
             return False, f"в архиве версия {got or 'не определена'}, ожидалась {v}"
 
         # ── сборка runtime-копии ──
+        # v77.1: staging создаём ЯВНО до копирования. Раньше каталог
+        # возникал неявно — первым скопированным copytree-директорией
+        # (makedirs создаёт промежуточные пути). Если же первым в
+        # iterdir() оказывался ФАЙЛ (например LICENSE), copy2 падал
+        # FileNotFoundError: порядок readdir зависит от ФС (tmpfs —
+        # порядок создания, ext4 — hash) и на проде файл запросто идёт
+        # первым. Прод-репорт: .staging-4.1.0/LICENSE, Errno 2.
         if staging.exists():
             shutil.rmtree(staging)
-        _RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+        staging.mkdir(parents=True, exist_ok=True)
         for item in root.iterdir():
             if item.name in _COPY_EXCLUDE:
                 continue
@@ -459,8 +466,13 @@ def _download_and_install(version: str) -> Tuple[bool, str]:
         if not (staging / "dpi_detector.py").is_file():
             return False, "после копирования нет точки входа dpi_detector.py"
 
+        # v77.1: final может существовать как ФАЙЛ (мусор/обманка с именем
+        # версии) — rmtree на нём падает NotADirectoryError; unlink и вперёд.
         if final.exists():
-            shutil.rmtree(final)
+            if final.is_dir():
+                shutil.rmtree(final)
+            else:
+                final.unlink()
         staging.rename(final)
         _prune_runtime(keep=final)
 
