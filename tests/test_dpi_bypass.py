@@ -1950,29 +1950,44 @@ class TestCleanInstallEmptyConfig(unittest.TestCase):
             self.youtube_b4.B4_LOG_DIR = orig_log
             self.youtube_b4.B4_GEOSITE_SHARED_PATHS = orig_shared
 
-    def test_write_empty_config_prefers_shared_xray_geosite(self):
-        """Общий geosite.dat Xray существует → sitedat_path указывает на него."""
+    def test_write_empty_config_always_local_geosite_with_seed(self):
+        """v75.1 (3 машины, 500 EROFS в Web UI b4): общий geosite.dat Xray
+        существует → sitedat_path ВСЁ РАВНО собственный /etc/b4/geosite.dat,
+        а база КОПИРУЕТСЯ туда (seed). /usr read-only для процесса b4
+        (ProtectSystem=strict) — шаринг ломает Update геосайта.
+        """
         import tempfile
         tmpdir = Path(tempfile.mkdtemp())
-        shared = tmpdir / "geosite.dat"
+        shared = tmpdir / "shared" / "geosite.dat"
+        shared.parent.mkdir()
         shared.write_bytes(b"shared-xray-geosite")
+        local = tmpdir / "b4" / "geosite.dat"
         config_file = tmpdir / "config.json"
         mod = self.youtube_b4
         orig = (mod.B4_CONFIG_FILE, mod.B4_CONFIG_DIR, mod.B4_SETS_DIR,
-                mod.B4_LOG_DIR, mod.B4_GEOSITE_SHARED_PATHS)
+                mod.B4_LOG_DIR, mod.B4_GEOSITE_SHARED_PATHS,
+                mod.B4_GEOSITE_LOCAL_PATH)
         mod.B4_CONFIG_FILE = config_file
         mod.B4_CONFIG_DIR = tmpdir
         mod.B4_SETS_DIR = tmpdir / "sets"
         mod.B4_LOG_DIR = tmpdir / "log"
         mod.B4_GEOSITE_SHARED_PATHS = (str(shared),)
+        mod.B4_GEOSITE_LOCAL_PATH = str(local)
         try:
             mod._write_empty_config()
             cfg = json.loads(config_file.read_text())
             self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
-                             str(shared))
+                             str(local))
+            # Seed: общий файл Xray скопирован в собственный каталог b4.
+            self.assertTrue(local.is_file())
+            self.assertEqual(local.read_bytes(), b"shared-xray-geosite")
+            # Шаринг не используется: путь сета ≠ путь Xray.
+            self.assertNotEqual(cfg["system"]["geo"]["sitedat_path"],
+                                str(shared))
         finally:
             (mod.B4_CONFIG_FILE, mod.B4_CONFIG_DIR, mod.B4_SETS_DIR,
-             mod.B4_LOG_DIR, mod.B4_GEOSITE_SHARED_PATHS) = orig
+             mod.B4_LOG_DIR, mod.B4_GEOSITE_SHARED_PATHS,
+             mod.B4_GEOSITE_LOCAL_PATH) = orig
 
     def test_detect_returns_none_for_empty_config(self):
         """_detect_active_preset_from_config() возвращает 'none' для пустого config."""
@@ -2467,6 +2482,254 @@ class TestImportWildcardNormalization(unittest.TestCase):
         self.assertIs(saved["sets"][0]["enabled"], False)
 
 
+class TestB4GeoDefaultsAndAutoHeal(unittest.TestCase):
+    """v75.1 — geosite-пути b4 «как это необходимо B4": всегда /etc/b4,
+    seed-копия из Xray, авто-лечение из status().
+
+    Контекст: третья машина (picaresque.space) с легаси-хардкодом
+    /usr/share/xray/geosite.dat — v72.4 лечил только при переключении
+    пресета/импорте сета, юзер после обновления Химеры их не делал.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.youtube_b4 = youtube_b4
+        self.dpi_bypass = dpi_bypass
+
+    def test_geo_section_defaults(self):
+        """_b4_geo_section(): sitedat_path=/etc/b4 + sitedat_url + auto_update."""
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            geo = mod._b4_geo_section()
+            self.assertEqual(geo["sitedat_path"], "/etc/b4/geosite.dat")
+            self.assertEqual(geo["ipdat_path"], "/etc/b4/geoip.dat")
+            self.assertIn("runetfreedom", geo["sitedat_url"])
+            self.assertIn("b4geoip", geo["ipdat_url"])
+            self.assertTrue(geo["auto_update"]["on_startup"])
+            self.assertEqual(geo["auto_update"]["interval"], "weekly")
+
+    def test_seed_copies_shared_geosite(self):
+        """_seed_b4_geosite(): копия (не ссылка) из общего файла Xray."""
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        shared = tmpdir / "xray" / "geosite.dat"
+        shared.parent.mkdir()
+        shared.write_bytes(b"geosite-base")
+        for i, mod in enumerate((self.youtube_b4, self.dpi_bypass)):
+            local = tmpdir / f"b4-{i}" / "geosite.dat"
+            orig = (mod.B4_GEOSITE_SHARED_PATHS, mod.B4_GEOSITE_LOCAL_PATH)
+            mod.B4_GEOSITE_SHARED_PATHS = (str(shared),)
+            mod.B4_GEOSITE_LOCAL_PATH = str(local)
+            try:
+                self.assertTrue(mod._seed_b4_geosite())
+                self.assertEqual(local.read_bytes(), b"geosite-base")
+                # Источник не тронут (копия, не move).
+                self.assertEqual(shared.read_bytes(), b"geosite-base")
+            finally:
+                (mod.B4_GEOSITE_SHARED_PATHS,
+                 mod.B4_GEOSITE_LOCAL_PATH) = orig
+
+    def test_seed_noop_when_local_exists(self):
+        """_seed_b4_geosite(): база уже есть — ничего не делаем."""
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        shared = tmpdir / "geosite.dat"
+        shared.write_bytes(b"shared")
+        local = tmpdir / "geosite.dat"
+        local.write_bytes(b"own-base")
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            orig = (mod.B4_GEOSITE_SHARED_PATHS, mod.B4_GEOSITE_LOCAL_PATH)
+            mod.B4_GEOSITE_SHARED_PATHS = (str(shared),)
+            mod.B4_GEOSITE_LOCAL_PATH = str(local)
+            try:
+                self.assertFalse(mod._seed_b4_geosite())
+                self.assertEqual(local.read_bytes(), b"own-base")
+            finally:
+                (mod.B4_GEOSITE_SHARED_PATHS,
+                 mod.B4_GEOSITE_LOCAL_PATH) = orig
+
+    def test_seed_noop_without_shared(self):
+        """_seed_b4_geosite(): общего файла нет — False, ничего не создаём
+        (базу скачает сам b4 через auto_update.on_startup / Web UI)."""
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        local = tmpdir / "b4" / "geosite.dat"
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            orig = (mod.B4_GEOSITE_SHARED_PATHS, mod.B4_GEOSITE_LOCAL_PATH)
+            mod.B4_GEOSITE_SHARED_PATHS = ()
+            mod.B4_GEOSITE_LOCAL_PATH = str(local)
+            try:
+                self.assertFalse(mod._seed_b4_geosite())
+                self.assertFalse(local.exists())
+            finally:
+                (mod.B4_GEOSITE_SHARED_PATHS,
+                 mod.B4_GEOSITE_LOCAL_PATH) = orig
+
+    def test_heals_shared_xray_path_even_if_file_exists(self):
+        """v72.4-«общий» путь /usr/local/share/xray/geosite.dat (файл жив)
+        — тоже мёртвый для b4: /usr read-only, Update = 500 EROFS."""
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        shared = tmpdir / "geosite.dat"
+        shared.write_bytes(b"shared")
+        local = tmpdir / "b4" / "geosite.dat"
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            orig = (mod.B4_GEOSITE_SHARED_PATHS, mod.B4_GEOSITE_LOCAL_PATH)
+            mod.B4_GEOSITE_SHARED_PATHS = (str(shared),)
+            mod.B4_GEOSITE_LOCAL_PATH = str(local)
+            try:
+                cfg = {"sets": [], "system": {
+                    "geo": {"sitedat_path": str(shared)}}}
+                fixed = mod._b4_clean_legacy_config_keys(cfg)
+                self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
+                                 str(local))
+                self.assertGreaterEqual(fixed, 1)
+            finally:
+                (mod.B4_GEOSITE_SHARED_PATHS,
+                 mod.B4_GEOSITE_LOCAL_PATH) = orig
+
+    def test_heal_fills_url_and_autoupdate_only_when_empty(self):
+        """Лечение дозаполняет sitedat_url/auto_update только если пусты."""
+        import tempfile
+        tmpdir = Path(tempfile.mkdtemp())
+        local = tmpdir / "b4" / "geosite.dat"
+        for mod in (self.youtube_b4, self.dpi_bypass):
+            orig = (mod.B4_GEOSITE_SHARED_PATHS, mod.B4_GEOSITE_LOCAL_PATH)
+            mod.B4_GEOSITE_SHARED_PATHS = ()
+            mod.B4_GEOSITE_LOCAL_PATH = str(local)
+            try:
+                # 1) Пустые URL/auto_update — заполняются дефолтами.
+                cfg = {"sets": [], "system": {
+                    "geo": {"sitedat_path": "/usr/share/xray/geosite.dat"}}}
+                mod._b4_clean_legacy_config_keys(cfg)
+                geo = cfg["system"]["geo"]
+                self.assertEqual(geo["sitedat_path"], str(local))
+                self.assertIn("runetfreedom", geo["sitedat_url"])
+                self.assertTrue(geo["auto_update"]["on_startup"])
+                # 2) Пользовательские значения — не трогаем.
+                cfg2 = {"sets": [], "system": {"geo": {
+                    "sitedat_path": "/usr/share/xray/geosite.dat",
+                    "sitedat_url": "https://my.mirror/geosite.dat",
+                    "auto_update": {"on_startup": False,
+                                    "interval": "monthly"}}}}
+                mod._b4_clean_legacy_config_keys(cfg2)
+                geo2 = cfg2["system"]["geo"]
+                self.assertEqual(geo2["sitedat_url"],
+                                 "https://my.mirror/geosite.dat")
+                self.assertFalse(geo2["auto_update"]["on_startup"])
+                self.assertEqual(geo2["auto_update"]["interval"], "monthly")
+            finally:
+                (mod.B4_GEOSITE_SHARED_PATHS,
+                 mod.B4_GEOSITE_LOCAL_PATH) = orig
+
+    def test_status_autoheals_dead_geo_paths(self):
+        """REGRESSION (третья машина): status() лечит мёртвый
+        sitedat_path в config.json — без переключения пресета/импорта
+        сета. Конфиг перезаписан, b4 перезапущен, seed скопирован."""
+        import tempfile
+        from unittest.mock import MagicMock
+        tmpdir = Path(tempfile.mkdtemp())
+        shared = tmpdir / "xray" / "geosite.dat"
+        shared.parent.mkdir()
+        shared.write_bytes(b"geosite-base")
+        local = tmpdir / "b4" / "geosite.dat"
+        config_file = tmpdir / "config.json"
+        config_file.write_text(json.dumps({
+            "sets": [],
+            "system": {"geo": {
+                "sitedat_path": "/usr/share/xray/geosite.dat",
+                "ipdat_path": "/etc/b4/geoip.dat",
+                "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/"
+                            "releases/latest/download/geoip.dat",
+            }},
+        }))
+        state_file = tmpdir / "state.json"
+        state_file.write_text(json.dumps({
+            "installed": True, "active_preset": None, "enabled": True,
+            "version": "1.78.0", "web_port": 9700,
+        }))
+        mod = self.dpi_bypass
+        orig = (mod.B4_CONFIG_FILE, mod._STATE_FILE, mod.B4_BINARY_PATH,
+                mod.B4_UNIT_PATH, mod.B4_GEOSITE_SHARED_PATHS,
+                mod.B4_GEOSITE_LOCAL_PATH, mod.subprocess)
+        mod.B4_CONFIG_FILE = config_file
+        mod._STATE_FILE = state_file
+        mod.B4_BINARY_PATH = tmpdir / "b4bin"
+        mod.B4_UNIT_PATH = tmpdir / "b4.service"
+        mod.B4_BINARY_PATH.touch()
+        mod.B4_UNIT_PATH.touch()
+        mod.B4_GEOSITE_SHARED_PATHS = (str(shared),)
+        mod.B4_GEOSITE_LOCAL_PATH = str(local)
+        mod.subprocess = MagicMock()
+        try:
+            mod.status()
+            cfg = json.loads(config_file.read_text())
+            geo = cfg["system"]["geo"]
+            self.assertEqual(geo["sitedat_path"], str(local))
+            self.assertIn("runetfreedom", geo["sitedat_url"])
+            self.assertTrue(geo["auto_update"]["on_startup"])
+            # Seed скопирован, b4 перезапущен.
+            self.assertEqual(local.read_bytes(), b"geosite-base")
+            restarts = [c for c in mod.subprocess.run.call_args_list
+                        if c.args and "restart" in c.args[0]]
+            self.assertTrue(restarts,
+                            "status() должен перезапустить b4 после лечения")
+        finally:
+            (mod.B4_CONFIG_FILE, mod._STATE_FILE, mod.B4_BINARY_PATH,
+             mod.B4_UNIT_PATH, mod.B4_GEOSITE_SHARED_PATHS,
+             mod.B4_GEOSITE_LOCAL_PATH, mod.subprocess) = orig
+
+    def test_status_no_heal_for_custom_geo_paths(self):
+        """status() НЕ трогает произвольный пользовательский путь."""
+        import tempfile
+        from unittest.mock import MagicMock
+        tmpdir = Path(tempfile.mkdtemp())
+        local = tmpdir / "b4" / "geosite.dat"
+        config_file = tmpdir / "config.json"
+        original_cfg = {
+            "sets": [],
+            "system": {"geo": {
+                "sitedat_path": "/mnt/tmpfs/geosite.dat",
+                "sitedat_url": "https://my.mirror/geosite.dat",
+            }},
+        }
+        config_file.write_text(json.dumps(original_cfg))
+        state_file = tmpdir / "state.json"
+        state_file.write_text(json.dumps({
+            "installed": True, "active_preset": None, "enabled": True,
+            "version": "1.78.0", "web_port": 9700,
+        }))
+        mod = self.dpi_bypass
+        orig = (mod.B4_CONFIG_FILE, mod._STATE_FILE, mod.B4_BINARY_PATH,
+                mod.B4_UNIT_PATH, mod.B4_GEOSITE_SHARED_PATHS,
+                mod.B4_GEOSITE_LOCAL_PATH, mod.subprocess)
+        mod.B4_CONFIG_FILE = config_file
+        mod._STATE_FILE = state_file
+        mod.B4_BINARY_PATH = tmpdir / "b4"
+        mod.B4_UNIT_PATH = tmpdir / "b4.service"
+        mod.B4_BINARY_PATH.touch()
+        mod.B4_UNIT_PATH.touch()
+        mod.B4_GEOSITE_SHARED_PATHS = ()
+        mod.B4_GEOSITE_LOCAL_PATH = str(local)
+        mod.subprocess = MagicMock()
+        try:
+            mod.status()
+            cfg = json.loads(config_file.read_text())
+            self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
+                             "/mnt/tmpfs/geosite.dat")
+            restarts = [c for c in mod.subprocess.run.call_args_list
+                        if c.args and "restart" in c.args[0]]
+            self.assertFalse(restarts,
+                             "пользовательский путь — рестарт не нужен")
+        finally:
+            (mod.B4_CONFIG_FILE, mod._STATE_FILE, mod.B4_BINARY_PATH,
+             mod.B4_UNIT_PATH, mod.B4_GEOSITE_SHARED_PATHS,
+             mod.B4_GEOSITE_LOCAL_PATH, mod.subprocess) = orig
+
+
 class TestB4LegacyConfigCleanup(unittest.TestCase):
     """_b4_clean_legacy_config_keys — чистка legacy-полей конфига b4.
 
@@ -2557,42 +2820,55 @@ class TestB4LegacyConfigCleanup(unittest.TestCase):
             finally:
                 mod.B4_GEOSITE_SHARED_PATHS = orig
 
-    def test_heals_dead_xray_path_to_live_shared_file(self):
-        """Мёртвый xray-хардкод + живой общий файл в другом месте → репойнт."""
+    def test_heals_dead_xray_path_even_with_live_shared_file(self):
+        """v75.1: мёртвый xray-хардкод + живой общий файл → ВСЁ РАВНО
+        /etc/b4/geosite.dat (НЕ репойнт на общий файл).
+
+        REGRESSION (3 машины): /usr read-only для b4 — Update геосайта
+        в Web UI падал с 500 EROFS даже при существующем общем файле
+        (Web UI берёт Destination Directory из dirname(sitedat_path)).
+        """
         import tempfile
         tmpdir = Path(tempfile.mkdtemp())
         shared = tmpdir / "geosite.dat"
         shared.write_bytes(b"shared")
+        local = tmpdir / "b4" / "geosite.dat"
         for mod in (self.youtube_b4, self.dpi_bypass):
-            orig = mod.B4_GEOSITE_SHARED_PATHS
+            orig = (mod.B4_GEOSITE_SHARED_PATHS, mod.B4_GEOSITE_LOCAL_PATH)
             mod.B4_GEOSITE_SHARED_PATHS = (str(shared),)
+            mod.B4_GEOSITE_LOCAL_PATH = str(local)
             try:
                 cfg = {"sets": [], "system": {
                     "geo": {"sitedat_path": "/usr/share/xray/geosite.dat"}}}
                 fixed = mod._b4_clean_legacy_config_keys(cfg)
                 self.assertEqual(cfg["system"]["geo"]["sitedat_path"],
-                                 str(shared))
+                                 str(local))
                 self.assertGreaterEqual(fixed, 1)
             finally:
-                mod.B4_GEOSITE_SHARED_PATHS = orig
+                (mod.B4_GEOSITE_SHARED_PATHS,
+                 mod.B4_GEOSITE_LOCAL_PATH) = orig
 
     def test_b4_geosite_path_resolver(self):
-        """Резолвер: первый существующий общий файл Xray, иначе /etc/b4."""
+        """v75.1: резолвер ВСЕГДА возвращает /etc/b4/geosite.dat —
+        существование общих geosite-файлов Xray не меняет выбор (они
+        остаются только seed-источником)."""
         import tempfile
         tmpdir = Path(tempfile.mkdtemp())
         first = tmpdir / "first.dat"
         first.write_bytes(b"1")
+        local = tmpdir / "b4" / "geosite.dat"
         for mod in (self.youtube_b4, self.dpi_bypass):
-            orig = mod.B4_GEOSITE_SHARED_PATHS
+            orig = (mod.B4_GEOSITE_SHARED_PATHS, mod.B4_GEOSITE_LOCAL_PATH)
             try:
                 mod.B4_GEOSITE_SHARED_PATHS = (
                     str(tmpdir / "missing.dat"), str(first))
-                self.assertEqual(mod._b4_geosite_path(), str(first))
+                mod.B4_GEOSITE_LOCAL_PATH = str(local)
+                self.assertEqual(mod._b4_geosite_path(), str(local))
                 mod.B4_GEOSITE_SHARED_PATHS = ()
-                self.assertEqual(mod._b4_geosite_path(),
-                                 "/etc/b4/geosite.dat")
+                self.assertEqual(mod._b4_geosite_path(), str(local))
             finally:
-                mod.B4_GEOSITE_SHARED_PATHS = orig
+                (mod.B4_GEOSITE_SHARED_PATHS,
+                 mod.B4_GEOSITE_LOCAL_PATH) = orig
 
     def test_custom_sitedat_path_never_touched(self):
         """Пользовательский sitedat_path не лечим — только наш хардкод."""

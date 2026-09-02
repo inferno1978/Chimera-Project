@@ -264,19 +264,26 @@ python3 -m chimera.modules.youtube_b4 install
      "sets": [],
      "system": {
        "geo": {
-         "sitedat_path": "<geosite.dat Xray, если он есть, иначе /etc/b4/geosite.dat>",
+         "sitedat_path": "/etc/b4/geosite.dat",
+         "sitedat_url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat",
          "ipdat_path": "/etc/b4/geoip.dat",
-         "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/..."
+         "ipdat_url": "https://github.com/DanielLavrushin/b4geoip/...",
+         "auto_update": {"on_startup": true, "interval": "weekly"}
        }
      }
    }
    ```
    `system.geo.sitedat_path` — путь к geosite.dat: сеты с
    geosite-категориями (в т.ч. из Discovery) валидируются b4 только при
-   заданном пути. Если на машине стоит Xray, используется его geosite.dat
-   (общий файл); иначе — /etc/b4/geosite.dat, который Web UI b4 скачивает
-   сам (Settings → Geodat Settings → Update). Хардкод /usr/share/xray из
-   прежних версий убран: на read-only /usr Update падал с 500.
+   заданном пути. Путь — всегда собственный `/etc/b4/geosite.dat`
+   (v75.1): это дефолтная Destination Directory Web UI b4 и единственный
+   каталог гео-баз в ReadWritePaths systemd-юнита — /usr для процесса
+   b4 read-only, и любой путь в /usr ломал Update геосайта в Web UI
+   (500 EROFS; три машины). Geosite-базы у Xray и b4 больше НЕ шарятся:
+   если у Xray есть geosite.dat — Chimera копирует его в /etc/b4 (seed),
+   дальше каждая сторона обновляет свой файл. Если базы нет — её скачает
+   сам b4 (auto_update.on_startup, ~45с после старта) или юзер через
+   Web UI (Settings → Geodat Settings → Update).
 3. Создаётся systemd-unit `/etc/systemd/system/b4.service`.
 4. iptables-правила Chimera НЕ ставятся: b4 сам создаёт свою таблицу
    `b4_mangle` в nftables (IPv4+IPv6, перехват первых пакетов соединения).
@@ -316,8 +323,8 @@ python3 -m chimera.modules.youtube_b4 install
 > настроенный путь к geosite-базе (`system.geo.sitedat_path`). Если сет
 > с категориями не загружается (видео не крутится, стратегия не
 > применяется) — импортируйте его через TUI Chimera (пункт [3]):
-> Chimera прописывает `system.geo.sitedat_path` (geosite.dat Xray) при
-> установке и миграции конфига.
+> Chimera прописывает `system.geo.sitedat_path` (/etc/b4/geosite.dat,
+> с seed-копией базы) при установке и миграции конфига.
 
 ### Полный путь импорта сета из Discovery (Web UI → TUI)
 

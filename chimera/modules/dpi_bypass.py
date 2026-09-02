@@ -114,41 +114,107 @@ B4_CONFIG_FILE = B4_CONFIG_DIR / "config.json"
 
 
 # ── Geosite.dat для b4 (system.geo.sitedat_path) ──────────────────────────
-# Прежние версии Chimera хардкодили /usr/share/xray/geosite.dat — «делим
-# geosite Xray с b4». На установках без Xray (или где /usr лежит на
-# read-only ФС: контейнер, immutable-слой) файла нет, а Web UI b4 при
-# Update геосайта пытается создать /usr/share/xray и падает с 500
-# (mkdir: read-only file system). Живой путь: общий geosite.dat Xray,
-# если файл существует; иначе — собственный /etc/b4/geosite.dat
-# (дефолтная Destination Directory Web UI b4, базу панель качает сама).
+# v75.1: путь geosite для b4 — ВСЕГДА собственный /etc/b4/geosite.dat
+# («как это необходимо B4»). Web UI b4 берёт Destination Directory из
+# dirname(sitedat_path) и качает туда базу при Update; auto_update b4
+# пишет туда же. Наш systemd-юнит (ProtectSystem=strict +
+# ReadWritePaths=/etc/b4) делает /usr read-only для процесса b4 — любой
+# путь в /usr (легаси-хардкод Chimera /usr/share/xray или v72.4-«общий»
+# /usr/local/share/xray) ломает Update геосайта: mkdir/write → EROFS →
+# 500 (инциденты на трёх машинах: chimeravpn.online, x2, picaresque).
+# Шарить один geosite.dat с Xray нельзя: чтение работает, Update — нет.
+# Общий файл Xray остаётся только seed-источником первой копии
+# (_seed_b4_geosite копирует, не линкует: Xray обновляет свой файл,
+# b4 — свой).
 B4_XRAY_GEOSITE_LEGACY  = "/usr/share/xray/geosite.dat"
 B4_GEOSITE_SHARED_PATHS = ("/usr/local/share/xray/geosite.dat",
                            "/usr/share/xray/geosite.dat")
 B4_GEOSITE_LOCAL_PATH   = str(B4_CONFIG_DIR / "geosite.dat")
+# Источник geosite-базы — тот же, что Chimera ставит для Xray
+# (runetfreedom/russia-v2ray-rules-dat, см. geo_mirrors/download_manager):
+# seed-копия и автообновление b4 качают одну и ту же базу.
+B4_GEOSITE_URL          = ("https://raw.githubusercontent.com/runetfreedom/"
+                           "russia-v2ray-rules-dat/release/geosite.dat")
 B4_GEOIP_URL            = ("https://github.com/DanielLavrushin/b4geoip/"
                            "releases/latest/download/geoip.dat")
 
 
 def _b4_geosite_path() -> str:
-    """Живой путь geosite.dat для system.geo.sitedat_path.
+    """Путь geosite.dat для system.geo.sitedat_path — всегда /etc/b4/geosite.dat.
 
-    Первый существующий общий geosite.dat Xray (порядок как в поиске
-    asset-каталогов Xray: /usr/local/share/xray → /usr/share/xray),
-    иначе /etc/b4/geosite.dat — туда Web UI b4 скачивает базу сам.
-    B4_GEOSITE_SHARED_PATHS читается при вызове (тестируется патчем).
+    «Как это необходимо B4»: собственный записываемый каталог b4 —
+    дефолтная Destination Directory Web UI b4 и единственный каталог
+    гео-баз в ReadWritePaths systemd-юнита. B4_GEOSITE_LOCAL_PATH
+    читается при вызове (тестируется патчем).
     """
-    for candidate in B4_GEOSITE_SHARED_PATHS:
-        if Path(candidate).is_file():
-            return candidate
     return B4_GEOSITE_LOCAL_PATH
+
+
+def _seed_b4_geosite() -> bool:
+    """Копирует geosite.dat Xray в /etc/b4, если базы у b4 ещё нет (seed).
+
+    Копия, не ссылка: b4 обновляет свой файл через Web UI/auto_update,
+    Xray — своим механизмом (geo-модули Chimera); шаринг одного файла
+    ломал Update b4 (EROFS на /usr). Если общего файла Xray нет — не
+    делаем ничего: базу скачает сам b4 (auto_update.on_startup, 45с
+    после старта) или юзер через Web UI (Destination Directory
+    по умолчанию — /etc/b4). B4_GEOSITE_SHARED_PATHS и
+    B4_GEOSITE_LOCAL_PATH читаются при вызове (тестируются патчем).
+    """
+    local = Path(B4_GEOSITE_LOCAL_PATH)
+    if local.exists():
+        return False
+    for src_path in B4_GEOSITE_SHARED_PATHS:
+        src = Path(src_path)
+        if src.is_file() and src.stat().st_size > 0:
+            try:
+                local.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, local)
+                _info(f"Geosite-база посеяна: {src} → {local} "
+                      f"({local.stat().st_size // 1024} KB)")
+                return True
+            except OSError as e:
+                _warn(f"Не удалось скопировать geosite {src} → {local}: {e}")
+    return False
+
+
+def _b4_heal_geo_paths(geo: dict) -> bool:
+    """Лечит мёртвые для b4 sitedat-пути in-place, True если были изменения.
+
+    Мёртвые пути = легаси-хардкод Chimera /usr/share/xray/geosite.dat и
+    «общие» пути Xray (B4_GEOSITE_SHARED_PATHS: /usr/local/share/xray,
+    /usr/share/xray) — ДАЖЕ если файл там существует: /usr read-only
+    для процесса b4 (ProtectSystem=strict), а Web UI b4 берёт
+    Destination Directory из dirname(sitedat_path) → Update геосайта
+    = mkdir/write в /usr → 500 EROFS. Переводим на собственный
+    /etc/b4/geosite.dat; sitedat_url и auto_update дозаполняем только
+    когда пусты (пользовательские значения не трогаем). Произвольные
+    пользовательские пути sitedat_path не лечим.
+    B4_GEOSITE_SHARED_PATHS/B4_GEOSITE_LOCAL_PATH читаются при вызове.
+    """
+    if not isinstance(geo, dict):
+        return False
+    dead = set(B4_GEOSITE_SHARED_PATHS) | {B4_XRAY_GEOSITE_LEGACY}
+    if geo.get("sitedat_path") not in dead:
+        return False
+    geo["sitedat_path"] = B4_GEOSITE_LOCAL_PATH
+    if not geo.get("sitedat_url"):
+        geo["sitedat_url"] = B4_GEOSITE_URL
+    if not geo.get("auto_update"):
+        geo["auto_update"] = {"on_startup": True, "interval": "weekly"}
+    return True
 
 
 def _b4_geo_section() -> dict:
     """Секция system.geo для нового b4-конфига (пути geosite/geoip)."""
     return {
         "sitedat_path": _b4_geosite_path(),
+        "sitedat_url": B4_GEOSITE_URL,
         "ipdat_path": str(B4_CONFIG_DIR / "geoip.dat"),
         "ipdat_url": B4_GEOIP_URL,
+        # Нативное самовосстановление b4: если базы пропадут — перекачает
+        # через ~45с после старта (5 мин ретраев); weekly — фоновый рефреш.
+        "auto_update": {"on_startup": True, "interval": "weekly"},
     }
 B4_SETS_DIR    = B4_CONFIG_DIR / "sets"
 B4_LOG_DIR     = Path("/var/log/b4")
@@ -899,10 +965,12 @@ def _write_empty_config() -> bool:
 
     ВАЖНО: system.geo.sitedat_path нужен для сетов с geosite_categories
     (в т.ч. создаваемых через Discovery в Web UI): без него валидация b4
-    отклоняет сет с 'geosite path must be configured'. Путь выбирает
-    _b4_geosite_path(): общий geosite.dat Xray, если файл существует,
-    иначе /etc/b4/geosite.dat — куда Web UI b4 скачивает базу сам
-    (хардкод /usr/share/xray на read-only /usr падал с 500).
+    отклоняет сет с 'geosite path must be configured'. Путь — всегда
+    собственный /etc/b4/geosite.dat (_b4_geosite_path): это дефолтная
+    Destination Directory Web UI b4 и единственный каталог гео-баз в
+    ReadWritePaths юнита (шаринг с Xray ломал Update: 500 EROFS на
+    read-only /usr). Если у Xray есть общий geosite.dat — копируем его
+    в /etc/b4 (seed), категории работают сразу после установки.
     """
     B4_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     B4_SETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -915,6 +983,9 @@ def _write_empty_config() -> bool:
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     B4_CONFIG_FILE.chmod(0o644)
+    # v75.1: сеем geosite-базу из общей копии Xray, если она есть —
+    # категории geosite в сетах работают сразу, без Update в Web UI.
+    _seed_b4_geosite()
     _ok(f"Конфиг создан (пустой): {B4_CONFIG_FILE}")
     return True
 
@@ -943,6 +1014,8 @@ def _write_default_config() -> bool:
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     B4_CONFIG_FILE.chmod(0o644)
+    # v75.1: seed geosite-базы из общей копии Xray (см. _write_empty_config).
+    _seed_b4_geosite()
     _ok(f"Конфиг создан: {B4_CONFIG_FILE}")
     return True
 
@@ -1356,6 +1429,48 @@ def _get_enabled_sets() -> list:
         return []
 
 
+def _heal_b4_config() -> bool:
+    """Авто-лечение мёртвых geosite-путей в config.json (v75.1).
+
+    Машины, установленные до v72.4, несли хардкод
+    system.geo.sitedat_path=/usr/share/xray/geosite.dat (источник —
+    Chimera, НЕ b4: в Go-коде b4 пути /usr/share/xray нет, дефолт
+    GeoSitePath="" + sanitize лечит только относительные пути).
+    v72.4 чинил путь только при переключении пресета/импорте сета —
+    если юзер после обновления Химеры ни того ни другого не делал,
+    конфиг оставался сломанным: Update геосайта в Web UI b4 = 500
+    EROFS (третья машина, picaresque.space). Теперь status()
+    (меню модуля / REST-панели) проверяет конфиг при каждом вызове и
+    при первом же касании лечит: перезапись + seed-базы + рестарт b4.
+    Произвольные пользовательские пути не трогаем.
+    """
+    if not B4_CONFIG_FILE.exists():
+        return False
+    try:
+        cfg = json.loads(B4_CONFIG_FILE.read_text())
+    except Exception:
+        return False  # Битый конфиг — юнит b4 сам ругнётся в journalctl
+    if not isinstance(cfg, dict):
+        return False
+    system = cfg.get("system")
+    geo = system.get("geo") if isinstance(system, dict) else None
+    if not isinstance(geo, dict) or not _b4_heal_geo_paths(geo):
+        return False
+    try:
+        B4_CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+        B4_CONFIG_FILE.chmod(0o644)
+    except OSError as e:
+        _err(f"Не удалось записать {B4_CONFIG_FILE}: {e}")
+        return False
+    _seed_b4_geosite()
+    _ok(f"Гео-пути b4 вылечены: sitedat_path → {B4_GEOSITE_LOCAL_PATH} "
+        f"(+URL/auto_update), b4 перезапущен")
+    # b4 должен перечитать конфиг (пути гео-баз читаются при старте).
+    subprocess.run(["systemctl", "restart", "b4"],
+                   capture_output=True, check=False)
+    return True
+
+
 def status() -> dict:
     """Возвращает сводку состояния b4."""
     state = _load_state()
@@ -1367,6 +1482,11 @@ def status() -> dict:
     r = subprocess.run(["systemctl", "is-active", "b4"],
                        capture_output=True, text=True, check=False)
     service_active = (r.returncode == 0 and r.stdout.strip() == "active")
+    #  v75.1: авто-лечение мёртвых geosite-путей (легаси-хардкод и
+    # «общие» пути Xray в read-only /usr). Конфиг, оставшийся от старой
+    # Chimera, конвергирует при первом же открытии меню модуля —
+    # даже если юзер никогда не переключал пресет/не импортировал сет.
+    _heal_b4_config()
     # Version.
     version = state.get("version", "")
     if not version and B4_BINARY_PATH.exists():
@@ -1543,10 +1663,12 @@ def _b4_clean_legacy_config_keys(cfg: dict) -> int:
       • "system.geosite_path" — правильное поле system.geo.sitedat_path
         (GeoDatConfig, json-тег sitedat_path);
       • "b4_version" внутри сета — не поле SetConfig, informational-мусор;
-      • system.geo.sitedat_path == "/usr/share/xray/geosite.dat" (хардкод
-        прежних версий Chimera), а файла на машине нет — путь переводится
-        на живой (geosite.dat Xray, если появился, иначе /etc/b4/geosite.dat):
-        иначе Update геосайта в Web UI b4 падает с 500 на read-only /usr.
+      • system.geo.sitedat_path — мёртвый для b4 путь (легаси-хардкод
+        Chimera /usr/share/xray/geosite.dat или v72.4-«общий» путь Xray
+        /usr/local/share/xray|/usr/share/xray): /usr read-only для b4
+        (ProtectSystem=strict), Update геосайта в Web UI падает с 500 —
+        путь переводится на собственный /etc/b4/geosite.dat (+URL,
+        auto_update, если пусты).
 
     Вызывается перед записью config.json из switch_preset() и
     import_custom_set() — конфиг, написанный старой Chimera, конвергирует
@@ -1568,19 +1690,19 @@ def _b4_clean_legacy_config_keys(cfg: dict) -> int:
         geo = system.setdefault("geo", {})
         if isinstance(geo, dict) and not geo.get("sitedat_path") and legacy_path:
             geo["sitedat_path"] = legacy_path
-    # 2b. Мёртвый хардкод прежних версий Chimera: sitedat_path указывает на
-    # geosite.dat Xray, которого на машине нет (нет Xray, /usr на read-only
-    # ФС — контейнер) → Web UI b4 при Update геосайта падает с 500
-    # (mkdir /usr/share/xray: read-only file system). Переводим на живой
-    # путь из _b4_geosite_path() (файл Xray, если появился, иначе /etc/b4).
+    # 2b. Мёртвые для b4 geosite-пути (v75.1): легаси-хардкод Chimera
+    # (/usr/share/xray/geosite.dat) и «общие» пути Xray
+    # (B4_GEOSITE_SHARED_PATHS) — ДАЖЕ при живом файле: /usr read-only
+    # для процесса b4 (ProtectSystem=strict), Web UI берёт Destination
+    # Directory из dirname(sitedat_path) → Update геосайта = 500 EROFS
+    # (mkdir /usr/...: read-only file system; три машины). Лечим на
+    # собственный /etc/b4/geosite.dat (+ sitedat_url/auto_update,
+    # если пусты) — _b4_heal_geo_paths.
     system = cfg.get("system")
     if isinstance(system, dict):
         geo = system.get("geo")
-        if isinstance(geo, dict) and geo.get("sitedat_path") == B4_XRAY_GEOSITE_LEGACY:
-            healed = _b4_geosite_path()
-            if healed != B4_XRAY_GEOSITE_LEGACY:
-                geo["sitedat_path"] = healed
-                fixed += 1
+        if isinstance(geo, dict) and _b4_heal_geo_paths(geo):
+            fixed += 1
     # 3. Мёртвое поле b4_version в сетах.
     sets = cfg.get("sets")
     if isinstance(sets, list):
