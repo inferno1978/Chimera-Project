@@ -248,7 +248,7 @@
 | Файл | За что отвечает |
 |---|---|
 | `dpi_detector.py` | Детектор DPI-зондирования (анализ error.log на паттерны зондов) |
-| `dpi_censor_check.py` | Проверка цензора DPI (внешние тесты) |
+| `dpi_censor_check.py` | Проверка цензора DPI (внешние тесты, v77: автообновление апстрима Runnin4ik/dpi-detector в runtime-копию /var/lib/xray-installer/dpi-detector/) |
 
 ---
 
