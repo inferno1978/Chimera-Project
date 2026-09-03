@@ -21,11 +21,13 @@ Unit-тесты для AdGuard Home стека Chimera:
 """
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
@@ -2224,3 +2226,117 @@ class TestFinalizeTlsHealInvocation(unittest.TestCase):
         # переписать tls.enabled=false — финализация вернула секцию)
         self.assertEqual(heal.call_args[0][:2],
                          ("cdn.example", "cdn.example"))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  v78: _client_dns_links + показ готовых ссылок в статус-боксе
+# ─────────────────────────────────────────────────────────────────────────────
+class TestClientDnsLinks(unittest.TestCase):
+    """Готовые ссылки DoH/DoT/DoQ для вставки в клиент из статуса AGH."""
+
+    def setUp(self):
+        from chimera.modules import aghome_setup
+        self.mod = aghome_setup
+
+    def test_tls_off_no_links(self):
+        self.assertEqual(
+            self.mod._client_dns_links({"tls_enabled": False, "domain": "a.b"}),
+            [])
+
+    def test_domain_links(self):
+        links = self.mod._client_dns_links({
+            "tls_enabled": True, "domain": "cdn.example",
+            "doh_port": 30443, "dot_port": 853, "doq_port": 853})
+        self.assertEqual(links, [
+            ("DoH", "https://cdn.example:30443/dns-query"),
+            ("DoT", "tls://cdn.example:853"),
+            ("DoQ", "quic://cdn.example:853"),
+        ])
+
+    def test_default_ports(self):
+        links = self.mod._client_dns_links({"tls_enabled": True,
+                                            "domain": "dns.example.org"})
+        self.assertEqual(
+            [u for _, u in links],
+            ["https://dns.example.org:30443/dns-query",
+             "tls://dns.example.org:853",
+             "quic://dns.example.org:853"])
+
+    def test_no_domain_falls_back_to_public_ip(self):
+        with patch.object(self.mod, "_get_public_ip", return_value="8.8.4.4"):
+            links = self.mod._client_dns_links({"tls_enabled": True,
+                                                "domain": ""})
+        self.assertEqual(links[0], ("DoH", "https://8.8.4.4:30443/dns-query"))
+        self.assertEqual(links[2], ("DoQ", "quic://8.8.4.4:853"))
+
+    def test_private_ip_without_domain_no_links(self):
+        # self-signed без домена на приватной сети — ссылка бесполезна
+        with patch.object(self.mod, "_get_public_ip", return_value="192.168.50.1"):
+            self.assertEqual(
+                self.mod._client_dns_links({"tls_enabled": True, "domain": " "}),
+                [])
+
+
+class TestPrintAghomeStatusLinks(unittest.TestCase):
+    """Статус-бокс AGH содержит готовые ссылки; длинные URL переносятся
+    внутри рамки, не ломая правую границу ║."""
+
+    def _fake_status(self, domain: str) -> dict:
+        return {
+            "installed": True, "version": "0.107.79", "active": True,
+            "enabled": True, "dns_port": 53, "dns_udp": True, "dns_tcp": True,
+            "upstream_port": 5300, "upstream_active": True,
+            "web_port": 3000, "web_listening": True, "web_mode": "https_le",
+            "tls_enabled": True, "domain": domain, "self_signed": False,
+            "doh_port": 30443, "doh_listening": True,
+            "dot_port": 853, "dot_listening": True,
+            "doq_port": 853, "doq_listening": True,
+            "wizard_pending": False, "filters": 3, "conf_exists": True,
+        }
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import aghome_setup
+        self.mod = aghome_setup
+
+    def _render(self, domain: str) -> str:
+        buf = io.StringIO()
+        with patch.object(self.mod, "aghome_status",
+                          return_value=self._fake_status(domain)), \
+             redirect_stdout(buf):
+            self.mod.print_aghome_status()
+        return buf.getvalue()
+
+    def test_box_contains_links(self):
+        out = self._render("cdn.example")
+        self.assertIn("Готовые ссылки для клиентов", out)
+        self.assertIn("https://cdn.example:30443/dns-query", out)
+        self.assertIn("tls://cdn.example:853", out)
+        self.assertIn("quic://cdn.example:853", out)
+        for line in out.splitlines():
+            if "dns-query" in line or "tls://" in line or "quic://" in line:
+                self.assertTrue(
+                    line.rstrip().endswith("║"),
+                    f"строка без правой границы: {line!r}")
+
+    def test_long_url_wraps_inside_frame(self):
+        long_domain = "dns." + "verylongsubdomain" * 3 + ".example.org"
+        url = f"https://{long_domain}:30443/dns-query"
+        out = self._render(long_domain)
+        # URL разрезан на куски (одного вхождения нет), но рамка цела
+        self.assertNotIn(url, out)
+        self.assertIn("https://", out)
+        self.assertIn("dns-query", out)
+        for line in out.splitlines():
+            if line.startswith("║") and line.strip("║ \n"):
+                self.assertTrue(line.rstrip().endswith("║"),
+                                f"рамка сломана: {line!r}")
+
+    def test_tls_off_no_links_block(self):
+        st = self._fake_status("cdn.example")
+        st["tls_enabled"] = False
+        buf = io.StringIO()
+        with patch.object(self.mod, "aghome_status", return_value=st), \
+             redirect_stdout(buf):
+            self.mod.print_aghome_status()
+        self.assertNotIn("Готовые ссылки для клиентов", buf.getvalue())
