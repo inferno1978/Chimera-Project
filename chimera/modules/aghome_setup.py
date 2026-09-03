@@ -3439,6 +3439,30 @@ def aghome_reset_admin_password() -> bool:
 # ============================================================================
 #  СТАТУС
 # ============================================================================
+
+def _client_dns_links(s: dict) -> "list[tuple[str, str]]":
+    """Готовые ссылки DoH/DoT/DoQ для вставки в клиент (браузер/ОС/приложение).
+
+    Хост = домен TLS (LE-режим); если домена нет — публичный IPv4
+    (self-signed-сеть). Пустой список, если TLS выключен или хост
+    определить не удалось (нет домена и IP приватный — ссылка была бы
+    бесполезна за пределами сервера).
+    """
+    if not s.get("tls_enabled"):
+        return []
+    host = str(s.get("domain") or "").strip()
+    if not host:
+        ip = str(_get_public_ip() or "").strip()
+        host = ip if _is_public_ipv4(ip) else ""
+    if not host:
+        return []
+    return [
+        ("DoH", f"https://{host}:{s.get('doh_port', AGH_DOH_PORT)}/dns-query"),
+        ("DoT", f"tls://{host}:{s.get('dot_port', AGH_DOT_PORT)}"),
+        ("DoQ", f"quic://{host}:{s.get('doq_port', AGH_DOQ_PORT)}"),
+    ]
+
+
 def aghome_status() -> dict:
     """Сводное состояние AGH для TUI/диагностики."""
     st = aghome_state_load()
@@ -3527,6 +3551,18 @@ def print_aghome_status() -> None:
                  f"(https + /dns-query)")
         _box_row(f"  DoT :{s['dot_port']}/tcp:       {_mark(s['dot_listening'])}")
         _box_row(f"  DoQ :{s['doq_port']}/udp:       {_mark(s['doq_listening'])}")
+        # v78: готовые ссылки для вставки в клиент — прямо в статус-боксе.
+        # _box_row сам переносит длинные URL внутри рамки (жёсткая резка
+        # по видимой ширине), правая граница ║ не ломается.
+        links = _client_dns_links(s)
+        if links:
+            _box_sep()
+            _box_row(f"  {CYAN}Готовые ссылки для клиентов (настройки DNS):{NC}")
+            for label, url in links:
+                _box_row(f"  {label}:  {url}")
+            if s.get("self_signed"):
+                _box_row(f"  {DIM}⚠ self-signed: клиент должен разрешить "
+                         f"недоверенный сертификат{NC}")
     else:
         _box_row(f"  TLS:               {DIM}выключен (DoH/DoT/DoQ недоступны){NC}")
     _box_sep()
