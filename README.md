@@ -124,6 +124,7 @@ sudo python3 main.py
 | [`DNSCRYPT_FAQ.md`](docs/faq/DNSCRYPT_FAQ.md) | DNSCrypt-proxy — зашифрованный DNS: установка, конфигурация, выбор резолверов, анонимизация, ODoH/DNSSEC, принудительный DNS REDIRECT, диагностика утечек DNS |
 | [`AGH_FAQ.md`](docs/faq/AGH_FAQ.md) | AdGuard Home — DNS-сервер с фильтрацией: архитектура связки Xray + AGH + DNSCrypt, плюсы и минусы, установка с нулевым даунтаймом, режимы Web UI и кастомный порт, финализация, порты и port_registry, надёжность DNS, взаимодействие с b4 (DPI-обход) |
 | [`AI_ACCESS_TG_FAQ.md`](docs/faq/AI_ACCESS_TG_FAQ.md) | ИИ-агент на роутере + разблокировка Telegram — MCP/REST-доступ к b4: включение MCP-сервера, токен, три пути доступа (LAN/WAN/nginx front), firewall-правила с Source IP и персистенцией, роли «пользователь vs ИИ», живой кейс разблокировки ТГ (мост mtproto-ws, дороги: WS-edge / CF-пул Flowseal / socat / CF Worker, почему Discovery бессилен при IP-блоке), встроенные защиты b4, сравнение с VLESS-туннелями, автобан и Q&A |
+| [`RU_NODE_CASCADE_FAQ.md`](docs/faq/RU_NODE_CASCADE_FAQ.md) | Выбор RU-ноды для каскада — цензурный аудит входной ноды: четыре цензора на пути (реестр оператора / ТСПУ-антитуннель / фильтры аплинка / v6-плечо), три оси профиля, два живых кейса (лицензированный оператор vs «офшорная полка» с РФ-транзитом), чек-лист аудита в 7 шагов, матрица «профиль → роль», живые и режущиеся хостеры плеча entry→exit, ловушки интерпретации детектора, Q&A |
 
 ## 🗂️ Структура проекта
 
@@ -143,7 +144,8 @@ Chimera-Project/
 │   ├── HYSTERIA2.md             #   Hysteria2 транспорт
 │   ├── SECURITY_BAN_FAQ.md      #   AutoBan / Honeypot / IP-Ban / GeoIP Block / РФ-блокировка
 │   ├── DNSCRYPT_FAQ.md          #   DNSCrypt-proxy — зашифрованный DNS, анти-утечки
-│   └── AI_ACCESS_TG_FAQ.md     #   ИИ-агент на роутере + разблокировка ТГ (MCP/REST)
+│   ├── AI_ACCESS_TG_FAQ.md     #   ИИ-агент на роутере + разблокировка ТГ (MCP/REST)
+│   └── RU_NODE_CASCADE_FAQ.md  #   Выбор RU-ноды для каскада (цензурный аудит)
 ├── LICENSE
 └── chimera/
     ├── __init__.py
