@@ -7,6 +7,10 @@ fingerprint_manager.py
 - Полный актуальный список FP, поддерживаемых Xray-core.
 - Интерактивный выбор FP пользователем во время установки.
 - Валидацию ввода и безопасный fallback.
+- REALITY-guard: random/randomized несовместимы с REALITY
+  (auth-proof передаётся в session_id ClientHello; randomized-Hello
+  сервер не разбирает → соединение молча уходит на сайт-приманку).
+  Подтверждено живым тестом на флоте проекта (v9-конфиг, 2026-09-05).
 
 Интегрируется в _core.py минимально и точечно:
   - PARAM_FINGERPRINT хранит выбранный FP для текущей сессии установки.
@@ -18,6 +22,8 @@ from __future__ import annotations
 __all__ = [
     "XRAY_FP_LIST",
     "DEFAULT_FP",
+    "REALITY_INCOMPATIBLE_FP",
+    "reality_fp_warning",
     "prompt_fingerprint",
 ]
 
@@ -41,6 +47,31 @@ XRAY_FP_LIST: list[str] = [
 ]
 
 DEFAULT_FP: str = "chrome"
+
+# ---------------------------------------------------------------------------
+#  REALITY-guard (v9, 2026-09-05)
+#  random/randomized НЕ работают с REALITY-инбаундами: REALITY несёт
+#  auth-proof (UUID-производную) в поле session_id ClientHello; hello,
+#  порождаемый random/randomized, сервер разобрать не может → решает
+#  «чужой» и молча форвардит соединение на сайт-приманку (dest). Снаружи
+#  это выглядит как «TCP жив, туннеля нет, соединение не устанавливается».
+#  Для plain-TLS (не REALITY) random работать может — поэтому из общего
+#  списка FP не удаляем, а предупреждаем/отклоняем на этапе выбора.
+# ---------------------------------------------------------------------------
+REALITY_INCOMPATIBLE_FP: frozenset = frozenset({"random", "randomized"})
+
+
+def reality_fp_warning(fp: str) -> str:
+    """Предупреждение для FP, несовместимых с REALITY ("" = совместим)."""
+    if fp not in REALITY_INCOMPATIBLE_FP:
+        return ""
+    return (
+        f"FP '{fp}' несовместим с REALITY: auth-proof передаётся в session_id "
+        "ClientHello, а random/randomized порождает Hello, из которого сервер "
+        "не может извлечь proof — соединение молча уходит на сайт-приманку "
+        "(TCP жив, туннеля нет). Для REALITY используй фиксированный браузерный "
+        "FP: chrome / firefox / safari / ios / android / edge / 360 / qq."
+    )
 
 # Сопоставление номера → имени FP
 _FP_MENU: dict[str, str] = {str(i): fp for i, fp in enumerate(XRAY_FP_LIST, 1)}
@@ -115,11 +146,26 @@ def prompt_fingerprint(
 
         if raw in _FP_MENU:
             chosen = _FP_MENU[raw]
-            success(f"  Fingerprint: {chosen}")
-            return chosen
+        elif raw in valid_names:
+            chosen = raw
+        else:
+            warn(f"  Некорректный выбор. Введите номер 1–{len(XRAY_FP_LIST)} или имя из списка.")
+            continue
 
-        if raw in valid_names:
-            success(f"  Fingerprint: {raw}")
-            return raw
+        # REALITY-guard: random/randomized несовместимы с REALITY
+        w = reality_fp_warning(chosen)
+        if w:
+            warn(f"  {w}")
+            try:
+                confirm = input(
+                    f"  {CYAN}Всё равно продолжить с '{chosen}'? [y/N]: {NC}"
+                ).strip().lower()
+            except KeyboardInterrupt:
+                print()
+                raise
+            if confirm not in ("y", "yes", "д", "да"):
+                print(f"  Выбор '{chosen}' отменён — выберите фиксированный браузерный FP.")
+                continue
 
-        warn(f"  Некорректный выбор. Введите номер 1–{len(XRAY_FP_LIST)} или имя из списка.")
+        success(f"  Fingerprint: {chosen}")
+        return chosen
