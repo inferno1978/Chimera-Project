@@ -10,11 +10,15 @@ chimera/modules/subscription_multinode.py
   ноды прямо в приложении — без изменения серверной топологии:
 
     • mihomo/Clash Meta YAML (?format=clash) — по образу и подобию
-      эталонного конфига проекта: DNS fake-ip + DoH + умный сплит,
-      TUN, sniffer, geox-зеркала, rule-providers (Loyalsoldier .txt +
-      MetaCubeX .mrs), группы «📍 Выбор ноды» / Auto / Fallback /
-      Balance-RR/Hash/Sticky/Weighted / Streaming / Telegram / AI,
-      правила (adblock, QUIC-block YouTube, РФ-direct, GEOIP RU).
+      эталонного конфига проекта v9 (client-configs, 2026-09-05):
+      DNS fake-ip + эшелоны (личные AGH → Quad9/AdGuard → CF/Google)
+      + сплит на rule-set:, TUN, sniffer, полный отказ от .dat
+      (geodata-mode: false, в geox-url только mmdb+asn), rule-providers
+      (Loyalsoldier .txt + MetaCubeX .mrs), дашборд zashboard c
+      per-user secret, группы «📍 Выбор ноды» / Auto / Fallback /
+      Balance-RR/Hash/Sticky/Weighted / RU-Auto / YouTube / Streaming /
+      Telegram / AI (Telegram — через RU-каскад по умолчанию, урок PL),
+      правила (adblock, ASN-рулинг, QUIC-block, РФ-direct, GEOIP RU).
 
     • sing-box JSON (?format=singbox, мульти-нодовый) — все ноды как
       outbounds + selector «🎯 Chimera» + urltest «auto», route.final →
@@ -41,6 +45,7 @@ chimera/modules/subscription_multinode.py
 """
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import re
@@ -453,11 +458,32 @@ def _node_domains(nodes: list[dict]) -> list[str]:
     return out
 
 
-# Статический каркас — проверенный эталонный конфиг проекта
-# (chimera-nodes-full: Loyalsoldier + MetaCubeX, jsDelivr CDN из РФ).
+# [эталон v9] Личный AGH (AdGuard Home) — 1-й эшелон DNS сгенерированных
+# конфигов: ответ AGH побеждает всегда, пока жив (см. fallback-filter).
+# ЕДИНСТВЕННОЕ место правки, если поднимешь другие AGH-эндпоинты.
+_AGH_DOH = (
+    "https://chimeraprodcdn.online:30443/dns-query",
+    "https://chimeravpn.online:30443/dns-query",
+)
+
+
+def _agh_hosts() -> list[str]:
+    """Хосты AGH-эндпоинтов (для dns.fake-ip-filter — симметрия эталона)."""
+    hosts: list[str] = []
+    for url in _AGH_DOH:
+        try:
+            h = urllib.parse.urlparse(url).hostname
+            if h and h not in hosts:
+                hosts.append(h)
+        except Exception:
+            continue
+    return hosts
+
+
+# Статический каркас — эталонный конфиг проекта v9
+# (chimera-nodes-full_v9: полный отказ от .dat — в geox-url остались
+# только country.mmdb (фолбэк GEOIP,RU) и GeoLite2-ASN.mmdb (IP-ASN)).
 _GEOX_URLS = """geox-url:
-  geoip: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
-  geosite: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
   mmdb: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
   asn: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb"
 """
@@ -490,14 +516,17 @@ _RULE_PROVIDERS = """rule-providers:
     interval: 86400
     format: yaml
 
-  # Private IP (локальная сеть)
+  # Private IP (локальная сеть) — чистый CIDR, без reverse-DNS доменов:
+  # Loyalsoldier private.txt содержит wildcard-записи (+.100.in-addr.arpa),
+  # которые mihomo не парсит ("invalid Ipcidr" warnings). Заменено на
+  # MetaCubeX private.mrs (эталон v9) — только валидные CIDR.
   private:
     type: http
     behavior: ipcidr
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/private.txt"
-    path: ./ruleset/loyalsoldier/private.yaml
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geoip/private.mrs"
+    path: ./ruleset/metacubex/private-ip.mrs
     interval: 86400
-    format: yaml
+    format: mrs
 
   # GFWList (заблокированные домены)
   gfw:
@@ -627,6 +656,27 @@ _RULE_PROVIDERS = """rule-providers:
     interval: 86400
     format: mrs
 
+  # [эталон v9] Блокировка рекламы (mrs) — замена GEOSITE,category-ads-all:
+  # работает и в rules (RULE-SET,category-ads-all,REJECT), и в
+  # nameserver-policy (rule-set: → rcode://success). geosite.dat не нужен.
+  category-ads-all:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/category-ads-all.mrs"
+    path: ./ruleset/metacubex/category-ads-all.mrs
+    interval: 86400
+    format: mrs
+
+  # [эталон v9] Китайские домены (mrs) — замена "geosite:cn" в
+  # nameserver-policy (CN-домены → Google/223.5.5.5).
+  cn-domains:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/cn.mrs"
+    path: ./ruleset/metacubex/cn-domains.mrs
+    interval: 86400
+    format: mrs
+
   # РФ подсети (IPv4 + IPv6, бинарный .mrs)
   ru-ripe-subnets:
     type: http
@@ -689,7 +739,8 @@ _RULES_STATIC_HEAD = """rules:
   - DOMAIN-SUFFIX,bugsnag.com,REJECT
 
   # ── Гео-блокировка рекламы ──
-  - GEOSITE,category-ads-all,REJECT
+  # [эталон v9] GEOSITE → RULE-SET (mrs-провайдер), geosite.dat не нужен
+  - RULE-SET,category-ads-all,REJECT
 
   # ── Внешние списки: блокировка (Loyalsoldier) ──
   - RULE-SET,reject,REJECT
@@ -723,17 +774,24 @@ _RULES_STATIC_TAIL = """  # ── AI сервисы (домены + auto-update
   - AND,((DOMAIN-SUFFIX,youtube-nocookie.com),(NETWORK,udp),(DST-PORT,443)),REJECT
   - AND,((DOMAIN-SUFFIX,youtubei.googleapis.com),(NETWORK,udp),(DST-PORT,443)),REJECT
 
-  # ── Стриминг ──
-  - RULE-SET,youtube-domains,Streaming
+  # ── YouTube — отдельная группа (по умолчанию следует за Proxy, т.е. за
+  #    выбором в «📍 Выбор ноды»; можно закрепить за конкретной нодой) ──
+  - RULE-SET,youtube-domains,YouTube
+
+  # ── Стриминг (домены) ──
   - RULE-SET,netflix-domains,Streaming
-  - RULE-SET,netflix-ip,Streaming
   - RULE-SET,twitch-domains,Streaming
   - RULE-SET,spotify-domains,Streaming
   - RULE-SET,tiktok-domains,Streaming
   - RULE-SET,disney-domains,Streaming
+  # Дополнительные стриминг-домены (не в MetaCubeX)
   - DOMAIN-SUFFIX,hbomax.com,Streaming
   - DOMAIN-SUFFIX,primevideo.com,Streaming
   - DOMAIN-SUFFIX,hulu.com,Streaming
+
+  # ── Стриминг (IP-диапазоны) — защита от DNS-подмены: если ТСПУ
+  #    подменит IP, он всё равно попадёт в Streaming по IP-правилу ──
+  - RULE-SET,netflix-ip,Streaming
 
   # ── Telegram ──
   - RULE-SET,telegram-domains,Telegram
@@ -880,15 +938,40 @@ _RULES_STATIC_TAIL = """  # ── AI сервисы (домены + auto-update
   # ── Внешний список: прокси-домены (Loyalsoldier) ──
   - RULE-SET,proxy,Proxy
 
+  # ── [эталон v9] ASN-рулинг (GeoLite2-ASN.mmdb подключён в geox-url) ──
+  # Ловит по автономной системе то, что доменные правила могли пропустить
+  # (голые IP / свежие домены). Тип — IP-ASN: голого «ASN» ядро не знает
+  # ("unsupported rule type: ASN", проверено на mihomo v1.19.30).
+  # Стоит ПОСЛЕ доменных RULE-SET (их исключения приоритетнее) и ДО GEOIP.
+  - IP-ASN,15169,YouTube  # Google LLC: весь стек YT/Translate/gstatic-CDN
+  - IP-ASN,2906,Streaming # Netflix (geo-блок RU-аккаунтов)
+  - IP-ASN,62041,Telegram # Telegram Messenger Inc
+  - IP-ASN,59930,Telegram # Telegram (второй ASN)
+  - IP-ASN,32934,Proxy    # Meta: Instagram/FB/WhatsApp (заблок. в РФ)
+  - IP-ASN,13414,Proxy    # Twitter/X (заблок. в РФ)
+
   # ── Гео-маршрутизация ──
-  - GEOIP,LAN,DIRECT
-  - GEOIP,CN,DIRECT
+  # [эталон v9] GEOIP,LAN снят — полностью перекрыт RULE-SET,private
+  # (ipcidr mrs: RFC1918/loopback/link-local/CGNAT). GEOIP,CN → RULE-SET
+  # cncidr: провайдер качался и раньше, теперь работает и в rules —
+  # geoip.dat не нужен.
+  - RULE-SET,cncidr,DIRECT
 
   # ── РФ подсети из ru.mrs (явный rule-provider, ~25000 CIDR) ──
+  # Срабатывает ПЕРЕД GEOIP,RU — быстрее и прозрачнее в UI.
+  # Если rule-set не скачался — fallback на GEOIP,RU ниже.
   - RULE-SET,ru-ripe-subnets,DIRECT
 
-  # ── Fallback: встроенный GeoIP ──
+  # ── Fallback: встроенный GeoIP (geodata-mode:false → country.mmdb) ──
   - GEOIP,RU,DIRECT
+
+  # ── [эталон v2] Глобальная блокировка QUIC для ПРОКСИРУЕМОГО трафика ──
+  # Стоит ПОСЛЕ всех DIRECT-правил и прямо ПЕРЕД MATCH,Proxy — блокирует
+  # UDP/443 только для того, что и так уйдёт в прокси-каскад (Reality =
+  # TCP-only, QUIC в каскаде страдает от head-of-line blocking). Прямой
+  # RU-трафик QUIC продолжает использовать (отматчен DIRECT выше).
+  # Браузеры при REJECT UDP/443 молча откатываются на TCP/HTTP2.
+  - AND,((NETWORK,udp),(DST-PORT,443)),REJECT
 
   # ── Всё остальное — через прокси ──
   - MATCH,Proxy
@@ -912,11 +995,19 @@ def build_mihomo_config(user: dict) -> str:
         exit_names = [n["name"] for n in exits]
         all_names = [n["name"] for n in nodes]
 
+        # Дашборд: per-user secret — детерминирован из UUID подписчика
+        # (стабилен между обновлениями подписки, свой у каждого юзера).
+        dash_secret = hashlib.sha256(
+            ("chimera-dash:" + (user.get("uuid") or "shared")).encode()
+        ).hexdigest()[:16]
+
         lines: list[str] = []
         lines += [
             "# ═══════════════════════════════════════════════════════════════════",
             "#  Chimera Project — auto-generated mihomo config",
             f"#  {len(exits)} exit-нод + entry" + (" + mirrors" if reg["mirrors"] else ""),
+            "#  Эталон: client-configs v9 (2026-09-05) — mrs без .dat,",
+            "#  AGH-эшелоны DNS, дашборд, ASN-рулинг, TG-каскад по умолчанию.",
             "# ═══════════════════════════════════════════════════════════════════",
             "",
             "profile:",
@@ -925,11 +1016,13 @@ def build_mihomo_config(user: dict) -> str:
             "",
         ]
 
-        # ── DNS ──────────────────────────────────────────────────────────
+        # ── DNS (эталон v9): fake-ip + AGH-эшелоны + сплит на rule-set ──────
         lines += [
             "dns:",
             "  enable: true",
-            "  listen: 0.0.0.0:1053",
+            "  # 127.0.0.1 вместо 0.0.0.0 (эталон v4): при allow-lan: false",
+            "  # наружу DNS слушать незачем (TUN dns-hijack перехватывает сам).",
+            "  listen: 127.0.0.1:1053",
             "  ipv6: true",
             "  prefer-h3: true",
             "  cache-algorithm: arc",
@@ -955,36 +1048,64 @@ def build_mihomo_config(user: dict) -> str:
             '    - "+.2ip.ru"',
             '    - "+.2ip.io"',
         ]
+        seen_dom = set(domains)
         for d in domains:
             lines.append(f'    - "+.{d}"')
+        for h in _agh_hosts():
+            if h not in seen_dom:
+                seen_dom.add(h)
+                lines.append(f'    - "+.{h}"')
         lines += [
             "  proxy-server-nameserver:",
+            "    # Яндекс DoH первым (эталон v4): резолвит домены нод при",
+            "    # холодном старте из РФ (DoH CF/Google не всегда доступны).",
+            "    - https://dns.yandex.ru/dns-query",
             "    - https://1.1.1.1/dns-query",
             "    - https://8.8.8.8/dns-query",
             "  default-nameserver:",
+            "    # 77.88.8.8 (Яндекс) первым — бутстрап dns.yandex.ru",
+            "    - 77.88.8.8",
             "    - 1.1.1.1",
             "    - 8.8.8.8",
             "  nameserver:",
-            "    - https://1.1.1.1/dns-query",
-            "    - https://8.8.8.8/dns-query",
+            "    # 1-й эшелон (эталон v6) — личные AGH: их ответ побеждает",
+            "    # ВСЕГДА, пока группа жива и валидна (диктует fallback-filter).",
+        ]
+        for url in _AGH_DOH:
+            lines.append(f"    - {url}")
+        lines += [
+            "  # 2/3-й эшелоны (эталон v6) — аварийный путь: fallback-ответ",
+            "  # берётся ТОЛЬКО если оба AGH не ответили или вернули богон",
+            "  # (240/4, 0/8, 127/8). Нюанс: fallback опрашивается ПАРАЛЛЕЛЬНО —",
+            "  # копия запроса уходит и туда (живучесть vs приватность —",
+            "  # осознанный размен эталона).",
             "  fallback:",
+            "    - https://dns.quad9.net/dns-query",
+            "    - https://dns.adguard-dns.com/dns-query",
             "    - https://1.1.1.1/dns-query",
             "    - https://8.8.8.8/dns-query",
             "  fallback-filter:",
-            "    geoip: true",
-            "    geoip-code: RU",
+            "    geoip: false",
             "    ipcidr:",
             "      - 240.0.0.0/4",
-            "  # Умный сплит DNS: RU-домены резолвим через Яндекс DoH",
+            "      - 0.0.0.0/8",
+            "      - 127.0.0.0/8",
+            "  # Умный сплит DNS: RU-домены через Яндекс DoH — CDN отдаёт",
+            "  # российский edge. rule-set: вместо geosite: (эталон v9):",
+            "  # референсы на mrs-провайдеры, geosite.dat не нужен вовсе.",
             "  nameserver-policy:",
-            '    "geosite:category-ads-all":',
+            '    "rule-set:category-ads-all":',
             "      - rcode://success",
+            '    "rule-set:cn-domains":',
+            "      - https://dns.google/dns-query",
+            "      - 223.5.5.5",
             '    "+.ru,+.su,+.рф":',
             "      - https://dns.yandex.ru/dns-query",
             "      - 77.88.8.8",
         ]
-        for d in domains:
-            lines.append(f'    "+.{d}":')
+        if domains:
+            combined = ",".join(f"+.{d}" for d in domains)
+            lines.append(f'    "{combined}":')
             lines.append("      - https://1.1.1.1/dns-query")
         lines += [
             "",
@@ -1000,21 +1121,48 @@ def build_mihomo_config(user: dict) -> str:
             "",
             "allow-lan: false",
             "mode: rule",
-            "log-level: warning",
+            # [эталон v2] info — лог живой по умолчанию: видно health-check'и
+            # и дайлы. Шумно — уровень меняется на лету в панели клиента.
+            "log-level: info",
             "ipv6: true",
             "unified-delay: true",
             "tcp-concurrent: true",
-            "geodata-mode: true",
+            # [эталон v9] false — GEOIP-матчинг через country.mmdb (metadb),
+            # geoip.dat не качается; GEOSITE-правил в конфиге нет вовсе.
+            "geodata-mode: false",
+            # [эталон v4] ETag-условные запросы: 304 → тело ruleset не качается.
+            "etag-support: true",
             "geo-auto-update: true",
             "geo-update-interval: 24",
-            "find-process-mode: always",
-            "global-client-fingerprint: firefox",
+            "find-process-mode: off",
+            # global-client-fingerprint УДАЛЁН (эталон v2/v9): опция выпилена
+            # из mihomo v1.19+, с ней конфиг падает на старте ядра. FP задаётся
+            # на каждой ноде отдельно — см. client-fingerprint в блоках нод.
             "keep-alive-interval: 30",
             "keep-alive-idle: 600",
             "",
+            # ── Дашборд (эталон v9): zashboard через external-ui ──
+            # REST API на loopback + панель http://127.0.0.1:9097/ui
+            # (коннекты, latency-грид, смена selected). secret выведен
+            # детерминированно из UUID подписчика: свой у каждого,
+            # стабильный между обновлениями подписки — ссылки панели
+            # не ломаются при каждом refresh.
+            "external-controller: 127.0.0.1:9097",
+            f'secret: "{dash_secret}"',
+            "external-ui: ui",
+            "external-ui-name: zashboard",
+            'external-ui-url: "https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip"',
+            "",
             _GEOX_URLS,
+            # Sniffer (эталон v9): перехват SNI для точного роутинга.
+            # override-destination на TLS/QUIC: mihomo подменяет IP
+            # назначения обратно на домен — иначе в VLESS-туннель уходит
+            # голый IP, серверный Xray не видит домен и не может применить
+            # routing-правила (например, b4 → direct).
             "sniffer:",
             "  enable: true",
+            "  force-dns-mapping: true",
+            "  parse-pure-ip: true",
             "  sniff:",
             "    HTTP:",
             "      ports:",
@@ -1025,10 +1173,12 @@ def build_mihomo_config(user: dict) -> str:
             "      ports:",
             "        - 443",
             "        - 8443",
+            "      override-destination: true",
             "    QUIC:",
             "      ports:",
             "        - 443",
             "        - 8443",
+            "      override-destination: true",
             "",
             _RULE_PROVIDERS,
             "",
@@ -1043,6 +1193,14 @@ def build_mihomo_config(user: dict) -> str:
         if exits:
             auto_balance = ["Auto", "Fallback", "Balance-RR", "Balance-Hash",
                             "Balance-Sticky", "Balance-Weighted"]
+            # RU-ноды (entry + зеркала) — «домашняя» сторона конфига
+            # (эталон v9: группа 🇷🇺 RU-Auto + RU-каскад Telegram).
+            entry = reg["entry"]
+            ru_names = ([entry["name"]] if entry else []) + \
+                [m["name"] for m in reg["mirrors"]]
+            has_ru = bool(ru_names)
+            ru_auto = "🇷🇺 RU-Auto"
+
             lines += [
                 "  # 📍 Ручной выбор ноды (tap → список всех нод + опции)",
                 f"  - name: {_yq('📍 Выбор ноды')}",
@@ -1051,17 +1209,19 @@ def build_mihomo_config(user: dict) -> str:
             ]
             for nm in exit_names:
                 lines.append(f"      - {_yq(nm)}")
-            entry = reg["entry"]
-            if entry:
-                lines.append(f"      - {_yq(entry['name'])}")
-            for nm in [m["name"] for m in reg["mirrors"]]:
+            for nm in ru_names:
                 lines.append(f"      - {_yq(nm)}")
+            if has_ru:
+                lines.append(f"      - {_yq(ru_auto)}")
             for nm in auto_balance:
                 lines.append(f"      - {nm}")
 
             lines += [
                 "",
-                "  # Главная группа — на неё ссылаются все rules",
+                "  # Главная группа — на неё ссылаются все rules.",
+                "  # ⚠ profile.store-selected: выбор здесь «залипает» и",
+                "  # перекрывает «📍 Выбор ноды» — лечится выбором «Выбор",
+                "  # ноды» первым элементом этой группы (заметка эталона v9).",
                 f"  - name: {_yq('Proxy')}",
                 "    type: select",
                 "    proxies:",
@@ -1071,10 +1231,19 @@ def build_mihomo_config(user: dict) -> str:
                 lines.append(f"      - {nm}")
             for nm in all_names:
                 lines.append(f"      - {_yq(nm)}")
+            if has_ru:
+                lines.append(f"      - {_yq(ru_auto)}")
 
             lines += [
                 "",
-                "  # Авто по пингу (каждые 5 мин, tolerance 50мс)",
+                "  # 🧠 Smart-переключатель (эталон v4 П.8): ML-выбор ноды",
+                "  # (lightgbm) вместо «быстрейшего пинга». Живая группа",
+                "  # type: smart НЕ включена: сток FlClash smart не парсит",
+                "  # (issue #1380). Включение — одна строка: смени type ниже",
+                "  # на smart (ядра mihomo-smart / Mihomo-Party smart-core).",
+                "  #",
+                "  # Авто по пингу (каждые 5 мин, tolerance 50мс).",
+                "  # RU-ноды не включены в Auto — только ручной выбор.",
                 f"  - name: {_yq('Auto')}",
                 "    type: url-test",
                 "    proxies:",
@@ -1086,6 +1255,12 @@ def build_mihomo_config(user: dict) -> str:
                 "    interval: 300",
                 "    tolerance: 50",
                 "    lazy: true",
+                "    # ── smart-advanced — раскомментируй при type: smart ──",
+                '    # policy-priority: "localhost,active"',
+                "    # uselightgbm: true",
+                "    # collectdata: true",
+                "    # sample-rate: 1",
+                "    # prefer-asn: false",
                 "",
                 "  # Мгновенное переключение при падении (проверка каждую 1 мин)",
                 f"  - name: {_yq('Fallback')}",
@@ -1155,33 +1330,140 @@ def build_mihomo_config(user: dict) -> str:
                 "    lazy: true",
             ]
 
-            # Streaming / Telegram / AI (+авто-подгруппы)
-            for gname in ("Streaming", "Telegram", "AI"):
+            # ── 🇷🇺 RU-Auto — авто-переключение RU-нод (эталон v9) ──
+            if has_ru:
                 lines += [
                     "",
-                    f"  - name: {_yq(gname)}",
-                    "    type: select",
-                    "    proxies:",
-                    f"      - {_yq(exit_names[0])}",
-                    f"      - {_yq(gname + '-Auto')}",
-                ]
-                for nm in exit_names[1:]:
-                    lines.append(f"      - {_yq(nm)}")
-                lines.append(f"      - {_yq('Proxy')}")
-                lines += [
-                    "",
-                    f"  - name: {_yq(gname + '-Auto')}",
-                    "    type: url-test",
+                    "  # 🇷🇺 RU-Auto — fallback: entry → зеркала (проверка раз в",
+                    "  # 60с; lazy: false — каскад должен проверяться всегда).",
+                    "  # Страховка каскада: группа Telegram по умолчанию идёт",
+                    "  # сюда — прямой Reality+Telegram от провайдера полубанит",
+                    "  # exit-подсети (урок PL из эталона v8).",
+                    f"  - name: {_yq(ru_auto)}",
+                    "    type: fallback",
                     "    proxies:",
                 ]
-                for nm in exit_names:
+                for nm in ru_names:
                     lines.append(f"      - {_yq(nm)}")
                 lines += [
                     '    url: "https://www.gstatic.com/generate_204"',
-                    "    interval: 300",
-                    "    tolerance: 80",
-                    "    lazy: true",
+                    "    interval: 60",
+                    "    lazy: false",
                 ]
+
+            # ── YouTube — следует за Proxy (эталон v9) ──
+            lines += [
+                "",
+                "  # 📺 YouTube — по умолчанию следует за Proxy (= за выбором в",
+                "  # «📍 Выбор ноды»); можно закрепить за конкретной нодой.",
+                f"  - name: {_yq('YouTube')}",
+                "    type: select",
+                "    proxies:",
+                f"      - {_yq('Proxy')}",
+            ]
+            for nm in ru_names:
+                lines.append(f"      - {_yq(nm)}")
+            if has_ru:
+                lines.append(f"      - {_yq(ru_auto)}")
+            for nm in exit_names:
+                lines.append(f"      - {_yq(nm)}")
+            lines.append(f"      - {_yq('Balance-Hash')}")
+
+            # ── Streaming — первая exit-нода или авто (эталон v9) ──
+            lines += [
+                "",
+                "  # Стриминг — первая exit-нода (по умолчанию) или авто",
+                f"  - name: {_yq('Streaming')}",
+                "    type: select",
+                "    proxies:",
+                f"      - {_yq(exit_names[0])}",
+                f"      - {_yq('Streaming-Auto')}",
+            ]
+            for nm in exit_names[1:]:
+                lines.append(f"      - {_yq(nm)}")
+            for nm in ru_names:
+                lines.append(f"      - {_yq(nm)}")
+            lines += [
+                f"      - {_yq('Balance-Hash')}",
+                f"      - {_yq('Proxy')}",
+                "",
+                f"  - name: {_yq('Streaming-Auto')}",
+                "    type: url-test",
+                "    proxies:",
+            ]
+            for nm in exit_names:
+                lines.append(f"      - {_yq(nm)}")
+            lines += [
+                '    url: "https://www.gstatic.com/generate_204"',
+                "    interval: 300",
+                "    tolerance: 80",
+                "    lazy: true",
+            ]
+
+            # ── Telegram — RU-каскад по умолчанию (эталон v8/v9, урок PL) ──
+            lines += [
+                "",
+                "  # Telegram — по умолчанию через RU-каскад (RU-Auto):",
+                "  # прямой Reality+Telegram от провайдера с высокой",
+                "  # вероятностью полубанит exit-подсеть (урок PL). Прямые",
+                "  # exit'ы и Telegram-Auto — ручной запас.",
+                f"  - name: {_yq('Telegram')}",
+                "    type: select",
+                "    proxies:",
+            ]
+            if has_ru:
+                lines.append(f"      - {_yq(ru_auto)}")
+                for nm in ru_names:
+                    lines.append(f"      - {_yq(nm)}")
+            else:
+                lines.append(f"      - {_yq(exit_names[0])}")
+            lines.append(f"      - {_yq('Telegram-Auto')}")
+            for nm in exit_names:
+                lines.append(f"      - {_yq(nm)}")
+            lines.append(f"      - {_yq('Proxy')}")
+            lines += [
+                "",
+                "  # Прямые зарубежные exit'ы для Telegram (ручной обход каскада)",
+                f"  - name: {_yq('Telegram-Auto')}",
+                "    type: url-test",
+                "    proxies:",
+            ]
+            for nm in exit_names:
+                lines.append(f"      - {_yq(nm)}")
+            lines += [
+                '    url: "https://cp.cloudflare.com/generate_204"',
+                "    interval: 300",
+                "    tolerance: 80",
+                "    lazy: true",
+            ]
+
+            # ── AI — первая exit-нода или авто (эталон v9) ──
+            lines += [
+                "",
+                "  # AI сервисы — первая exit-нода (по умолчанию) или авто",
+                f"  - name: {_yq('AI')}",
+                "    type: select",
+                "    proxies:",
+                f"      - {_yq(exit_names[0])}",
+                f"      - {_yq('AI-Auto')}",
+            ]
+            for nm in exit_names[1:]:
+                lines.append(f"      - {_yq(nm)}")
+            lines.append(f"      - {_yq('Proxy')}")
+            lines += [
+                "",
+                f"  - name: {_yq('AI-Auto')}",
+                "    type: url-test",
+                "    proxies:",
+            ]
+            for nm in exit_names:
+                lines.append(f"      - {_yq(nm)}")
+            lines += [
+                '    url: "https://cp.cloudflare.com/generate_204"',
+                "    interval: 300",
+                "    tolerance: 80",
+                "    lazy: true",
+            ]
         else:
             # Упрощённая структура (Mode A / нет exit-нод): Proxy select.
             lines += [
@@ -1192,14 +1474,39 @@ def build_mihomo_config(user: dict) -> str:
             for nm in all_names:
                 lines.append(f"      - {_yq(nm)}")
 
-        # ── Правила ──────────────────────────────────────────────────────
-        lines += ["", _RULES_STATIC_HEAD]
-        if domains:
-            lines.append("  # ── Защита прокси-доменов (все ноды) ──")
-            for d in domains:
-                lines.append(f"  - DOMAIN-SUFFIX,{d},Proxy")
+        # ── Правила (эталон v9) ──────────────────────────────────────────
+        # Статические списки ссылаются на группы YouTube/Streaming/Telegram/
+        # AI — они существуют только в мульти-нодовой ветке (exits). В Mode A
+        # (без exit-нод) правила вырождаются в MATCH,Proxy — раньше конфиг
+        # ссылался на несуществующие группы и не проходил mihomo -t.
+        if exits:
+            lines += ["", _RULES_STATIC_HEAD]
+            # Защита доменов (эталон v2): зарубежные exit-домены → Proxy
+            # (им нужен каскад), RU-entry/зеркала → DIRECT (сами ноды —
+            # напрямую достижимые, раньше уходили в hairpin «через себя»).
+            exit_domains = _node_domains(exits)
+            ru_domains = [d for d in _node_domains(
+                ([entry] if entry else []) + reg["mirrors"])
+                if d not in exit_domains]
+            if exit_domains:
+                lines.append("  # ── Защита прокси-доменов: exit'ы → Proxy ──")
+                for d in exit_domains:
+                    lines.append(f"  - DOMAIN-SUFFIX,{d},Proxy")
+            if ru_domains:
+                lines.append("  # ── RU-entry домены → DIRECT (без hairpin) ──")
+                for d in ru_domains:
+                    lines.append(f"  - DOMAIN-SUFFIX,{d},DIRECT")
+            if exit_domains or ru_domains:
+                lines.append("")
+            # CDN качалок rule-providers/geo-баз → первая exit-нода
+            # (эталон v7: через RU-тракт jsDelivr стог — [Provider] EOF).
+            lines.append("  # ── CDN rule-providers/geo-качалок → первая exit-нода ──")
+            lines.append(f"  - DOMAIN-SUFFIX,jsdelivr.net,{exit_names[0]}")
+            lines.append(f"  - DOMAIN-SUFFIX,jsdelivr.com,{exit_names[0]}")
             lines.append("")
-        lines.append(_RULES_STATIC_TAIL)
+            lines.append(_RULES_STATIC_TAIL)
+        else:
+            lines += ["", "rules:", "  - MATCH,Proxy"]
 
         return "\n".join(lines) + "\n"
     except Exception as e:
