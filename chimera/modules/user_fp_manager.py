@@ -237,9 +237,17 @@ def apply_fp(new_fp: str) -> tuple[bool, str]:
 
     Возвращает (ok: bool, message: str).
     """
-    from chimera.modules.fingerprint_manager import XRAY_FP_LIST
+    from chimera.modules.fingerprint_manager import (
+        XRAY_FP_LIST, reality_fp_warning,
+    )
     if new_fp not in XRAY_FP_LIST:
         return False, f"Неизвестный fingerprint: {new_fp!r}"
+
+    # REALITY-guard (v9, 2026-09-05): random/randomized ломают REALITY-
+    # соединения (auth-proof не извлекается из randomized ClientHello).
+    w = reality_fp_warning(new_fp)
+    if w:
+        return False, w
 
     ok, err = _patch_config_fp(new_fp)
     if not ok:
@@ -459,6 +467,19 @@ def handle_setfp(msg, args):
     if new_fp not in _FP_LIST_BOT:
         fp_list = ", ".join(_FP_LIST_BOT)
         send(uid, f"❌ Неизвестный fingerprint: <code>{new_fp}</code>\n\nДоступные:\n{fp_list}")
+        return
+    # REALITY-guard (v9, 2026-09-05): random/randomized несовместимы
+    # с REALITY — auth-proof передаётся в session_id ClientHello,
+    # сервер не может извлечь его из randomized-Hello, соединение
+    # молча уходит на сайт-приманку. Фиксированные браузерные FP работают.
+    if new_fp in ("random", "randomized"):
+        send(uid, "❌ FP <code>" + new_fp + "</code> несовместим с REALITY: "
+                  "auth-proof передаётся в session_id ClientHello, сервер "
+                  "не может извлечь его из randomized-Hello — соединение "
+                  "молча уходит на сайт-приманку. Используй фиксированный "
+                  "браузерный FP: chrome / firefox / safari / ios / android / "
+                  "edge / 360 / qq.")
+        _log("Admin " + str(uid) + " tried incompatible REALITY FP: " + repr(new_fp))
         return
     send(uid, f"⏳ Применяю fingerprint <code>{new_fp}</code>...")
     ok, errmsg = _fp_apply_via_xray(new_fp)

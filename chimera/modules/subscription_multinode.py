@@ -1138,6 +1138,8 @@ def build_mihomo_config(user: dict) -> str:
             # global-client-fingerprint УДАЛЁН (эталон v2/v9): опция выпилена
             # из mihomo v1.19+, с ней конфиг падает на старте ядра. FP задаётся
             # на каждой ноде отдельно — см. client-fingerprint в блоках нод.
+            # Доп. аргумент REALITY: random/randomized FP ломает auth-proof
+            # (см. REALITY_INCOMPATIBLE_FP в fingerprint_manager).
             "keep-alive-interval: 30",
             "keep-alive-idle: 600",
             "",

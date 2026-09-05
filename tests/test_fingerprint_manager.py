@@ -57,6 +57,53 @@ class TestFingerprintManager(unittest.TestCase):
         for key in _FP_MENU:
             self.assertTrue(key.isdigit())
 
+
+class TestRealityFpGuard(unittest.TestCase):
+    """v9 (2026-09-05): REALITY-guard для random/randomized."""
+
+    def setUp(self): _setup_core()
+
+    def test_reality_incompatible_set_subset_of_fp_list(self):
+        from chimera.modules.fingerprint_manager import (
+            XRAY_FP_LIST, REALITY_INCOMPATIBLE_FP,
+        )
+        self.assertTrue(REALITY_INCOMPATIBLE_FP.issubset(set(XRAY_FP_LIST)))
+        self.assertIn("random", REALITY_INCOMPATIBLE_FP)
+        self.assertIn("randomized", REALITY_INCOMPATIBLE_FP)
+
+    def test_warning_nonempty_for_random(self):
+        from chimera.modules.fingerprint_manager import reality_fp_warning
+        w = reality_fp_warning("random")
+        self.assertTrue(w)
+        self.assertIn("REALITY", w)
+        self.assertIn("session_id", w)
+
+    def test_warning_nonempty_for_randomized(self):
+        from chimera.modules.fingerprint_manager import reality_fp_warning
+        self.assertTrue(reality_fp_warning("randomized"))
+
+    def test_warning_empty_for_fixed_browser_fps(self):
+        from chimera.modules.fingerprint_manager import reality_fp_warning
+        for fp in ("chrome", "firefox", "safari", "ios", "android",
+                   "edge", "360", "qq", "none"):
+            self.assertEqual(reality_fp_warning(fp), "", msg=fp)
+
+    def test_prompt_confirm_declined_returns_fixed_fp(self):
+        """Выбор random + отказ от подтверждения → повторный выбор chrome."""
+        from chimera.modules import fingerprint_manager as fm
+        inputs = iter(["9", "n", "1"])   # random → нет → chrome
+        with patch("builtins.input", lambda *a, **k: next(inputs)):
+            got = fm.prompt_fingerprint(current="firefox")
+        self.assertEqual(got, "chrome")
+
+    def test_prompt_confirm_accepted_keeps_random(self):
+        """Выбор random + явное подтверждение → возвращается random."""
+        from chimera.modules import fingerprint_manager as fm
+        inputs = iter(["9", "y"])        # random → да
+        with patch("builtins.input", lambda *a, **k: next(inputs)):
+            got = fm.prompt_fingerprint(current="firefox")
+        self.assertEqual(got, "random")
+
 # ── config_backup ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

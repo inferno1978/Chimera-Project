@@ -63,6 +63,35 @@ rest_api 55 — все passed.
 
 ---
 
+## FIX(fingerprint+multinode): REALITY-guard на random/randomized + вырезан фатальный global-client-fingerprint из генератора — 5 сентября 2026
+
+**Что исправлено:**
+
+1. `fingerprint_manager.py`: `REALITY_INCOMPATIBLE_FP` = {random,
+   randomized} + `reality_fp_warning()`. Причина: REALITY несёт
+   auth-proof в session_id ClientHello; hello от random/randomized
+   сервер разобрать не может → соединение молча уходит на сайт-приманку
+   («TCP жив, туннеля нет» — совпадает с живым тестом на флоте).
+   `prompt_fingerprint` предупреждает и требует подтверждение [y/N];
+   из общего списка FP не удалены (для plain-TLS могут работать).
+2. `user_fp_manager.py`: `apply_fp()` отклоняет random/randomized ДО
+   файловых операций; TG-бот `/setfp` — отдельный гард в
+   TG_FP_COMMANDS_BLOCK (у бота свой путь применения в обход apply_fp).
+3. `subscription_multinode.py`: из `build_mihomo_config` удалён
+   `global-client-fingerprint: firefox` — опция выпилена из mihomo
+   v1.19+, с ней сгенерированные подписочные конфиги падают на старте
+   ядра (урок v2 клиентского эталона от 2026-08-24). FP и так задаётся
+   на каждой ноде в `_mihomo_proxy_block`.
+
+**Тесты:** +9 (TestRealityFpGuard ×6 — warning для random/randomized,
+пустые для фиксированных браузерных FP, подтверждение-отказ-повтор в
+prompt; TestApplyFpRealityGuard ×3 — отклонение до файловых операций,
+гард в TG-блоке). Смежные сьюты без изменений: test_fingerprint_manager
+9, test_user_fp_manager 19, test_subscription_multinode 23, test_tg_bot
+24, test_tg_client_bot 49, test_client_config_export 7 — все passed.
+
+---
+
 ## FEAT(aghome): v78 — статус AGH показывает готовые ссылки DoH/DoT/DoQ для клиентов — 4 сентября 2026
 
 **Что добавлено:** В статус-бокс AGH (Сеть → A → 2) после блока
