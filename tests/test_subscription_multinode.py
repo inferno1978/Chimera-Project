@@ -226,10 +226,12 @@ class TestMihomoConfig(unittest.TestCase):
                         "proxy-groups:", "rules:", "rule-providers:",
                         "geox-url:"):
             self.assertIn(section, cfg, f"missing section: {section}")
-        # Группы эталона
+        # Группы эталона v9 (16: + RU-Auto, YouTube, авто-подгруппы)
         for group in ('"📍 Выбор ноды"', '"Proxy"', '"Auto"', '"Fallback"',
                       '"Balance-RR"', '"Balance-Hash"', '"Balance-Sticky"',
-                      '"Balance-Weighted"', '"Streaming"', '"Telegram"', '"AI"'):
+                      '"Balance-Weighted"', '"🇷🇺 RU-Auto"', '"YouTube"',
+                      '"Streaming"', '"Streaming-Auto"', '"Telegram"',
+                      '"Telegram-Auto"', '"AI"', '"AI-Auto"'):
             self.assertIn(group, cfg, f"missing group: {group}")
         # Ноды: 2 exit + entry
         self.assertIn("exit-uuid-1", cfg)
@@ -246,6 +248,68 @@ class TestMihomoConfig(unittest.TestCase):
         # Домены нод в DNS-фильтре
         self.assertIn("+.exit1.example.com", cfg)
         self.assertIn("+.entry.test.online", cfg)
+
+        # ── Эталон v9: полный отказ от .dat ──
+        self.assertIn("geodata-mode: false", cfg)
+        self.assertNotIn("geodata-mode: true", cfg)
+        self.assertNotIn("global-client-fingerprint", cfg)
+        self.assertIn("etag-support: true", cfg)
+        self.assertIn("find-process-mode: off", cfg)
+        # mrs-провайдеры и rule-set-ссылки вместо GEOSITE/GEOIP
+        self.assertIn("RULE-SET,category-ads-all,REJECT", cfg)
+        self.assertIn('"rule-set:category-ads-all"', cfg)
+        self.assertIn('"rule-set:cn-domains"', cfg)
+        self.assertIn("category-ads-all.mrs", cfg)
+        self.assertIn("RULE-SET,cncidr,DIRECT", cfg)
+        self.assertIn("private.mrs", cfg)  # private.txt → mrs (без warnings)
+        # .dat-эпоха в реальных правилах отсутствует
+        rule_lines = [l for l in cfg.splitlines()
+                      if l.strip().startswith("- ") and not l.lstrip().startswith("#")]
+        for stale in ("GEOSITE,", "GEOIP,LAN", "GEOIP,CN"):
+            self.assertFalse(any(stale in l for l in rule_lines),
+                             f"stale rule {stale} в v9-конфиге")
+        # ASN-рулинг (GeoLite2-ASN.mmdb)
+        self.assertIn("IP-ASN,15169,YouTube", cfg)
+        self.assertIn("IP-ASN,62041,Telegram", cfg)
+        # Глобальный QUIC-блок перед MATCH
+        self.assertIn("- AND,((NETWORK,udp),(DST-PORT,443)),REJECT", cfg)
+
+        # ── Дашборд (эталон v9): zashboard + per-user secret ──
+        self.assertIn("external-controller: 127.0.0.1:9097", cfg)
+        self.assertIn("external-ui-name: zashboard", cfg)
+
+        # ── DNS: AGH-эшелоны + Яндекс-бутстрап + loopback-listen ──
+        self.assertIn("listen: 127.0.0.1:1053", cfg)
+        self.assertIn("https://cdn.example:30443/dns-query", cfg)
+        self.assertIn("https://dns.quad9.net/dns-query", cfg)
+        self.assertIn("https://dns.adguard-dns.com/dns-query", cfg)
+        self.assertIn("https://dns.yandex.ru/dns-query", cfg)
+        self.assertIn("77.88.8.8", cfg)
+        self.assertIn("geoip: false", cfg)  # fallback-filter v6
+
+        # ── Защита доменов: exit → Proxy, RU-entry → DIRECT (hairpin-фикс v2) ──
+        self.assertIn("DOMAIN-SUFFIX,exit1.example.com,Proxy", cfg)
+        self.assertIn("DOMAIN-SUFFIX,entry.test.online,DIRECT", cfg)
+        # jsdelivr-качалки → первая exit-нода (урок [Provider] EOF)
+        self.assertIn("DOMAIN-SUFFIX,jsdelivr.net,", cfg)
+
+        # Telegram: RU-каскад первым в группе (урок PL из эталона v8)
+        self.assertIn(
+            '- name: "Telegram"\n    type: select\n    proxies:\n      - "🇷🇺 RU-Auto"',
+            cfg)
+
+    def test_dashboard_secret_stable_per_user(self):
+        """Secret дашборда детерминирован из UUID: одинаков между
+        генерациями (не ломает ссылки панели при refresh подписки)."""
+        import re as _re
+        cfg1 = self._build(_TEST_STATE_MODE_B)
+        cfg2 = self._build(_TEST_STATE_MODE_B)
+        s1 = _re.findall(r'secret: "([0-9a-f]{16})"', cfg1)
+        s2 = _re.findall(r'secret: "([0-9a-f]{16})"', cfg2)
+        self.assertEqual(len(s1), 1)
+        self.assertEqual(s1, s2)
+        # не хардкод секрета эталона в генератор
+        self.assertNotEqual(s1[0], "0f1e2d3c00000008")
 
     def test_yaml_sanity_quotes_and_indents(self):
         cfg = self._build(_TEST_STATE_MODE_B)

@@ -2,6 +2,67 @@
 
 ---
 
+## FEAT(subscription_multinode): генератор mihomo-конфигов синхронизирован с эталоном v9 — 5 сентября 2026
+
+**Что добавлено:** `build_mihomo_config` (конфиги `?format=clash` для
+подписчиков) приведён к ручному эталону
+`client-configs/chimera-nodes-full_v9_RU1-plain-fi.yaml` — до этого
+генератор выдавал конфиги v4-эпохи. Изменения статического каркаса
+(динамика — ноды/группы/домены из реестра — сохранена):
+
+- **Полный отказ от .dat**: `geodata-mode: false`, в `geox-url`
+  остались только `country.mmdb` (фолбэк `GEOIP,RU`) +
+  `GeoLite2-ASN.mmdb` (IP-ASN). `GEOSITE,category-ads-all` →
+  `RULE-SET,category-ads-all` (новый mrs-провайдер); `GEOIP,CN` →
+  `RULE-SET,cncidr`; `GEOIP,LAN` снят (перекрыт `private.mrs`);
+  `nameserver-policy` на `rule-set:` (+ новый провайдер `cn-domains`);
+  `private.txt` → `private.mrs` (Loyalsoldier-вариант давал
+  "invalid Ipcidr" warnings). Проверено живым `mihomo -t` v1.19.30.
+- **DNS-схема эталона**: `listen 127.0.0.1:1053` (было `0.0.0.0`);
+  Яндекс DoH первым в `proxy-server-nameserver` + `77.88.8.8` первым в
+  `default-nameserver` (холодный старт из РФ); `nameserver` — личные
+  AGH (`_AGH_DOH`, 1-й эшелон, единственная точка правки), `fallback` —
+  Quad9 + AdGuard public + CF/Google (эшелоны v6), `fallback-filter`
+  `geoip: false` + богоны. ⚠ Осознанно: прямая дорога подписчиков
+  теперь идёт через AGH владельца (ёмкость/приватность — размен
+  эталона; при желании выключается правкой `_AGH_DOH`).
+- **Дашборд (эталон v9)**: `external-controller 127.0.0.1:9097` +
+  zashboard через `external-ui`. `secret` выведен детерминированно из
+  UUID подписчика (sha256, 16 hex): свой у каждого, стабильный между
+  обновлениями подписки — ссылки панели не ломаются при refresh.
+- **Группы эталона (16)**: + `🇷🇺 RU-Auto` (fallback entry→зеркала,
+  lazy: false), + `YouTube` (следует за Proxy); **Telegram — через
+  RU-каскад по умолчанию** (урок PL: прямой Reality+Telegram от
+  провайдера полубанит exit-подсети); + авто-подгруппы
+  Streaming/Telegram/AI-Auto (tolerance 80, CF-check). Smart-переключатель
+  (v4 П.8) — комментариями в группе Auto (type: url-test → smart).
+- **Правила**: + ASN-рулинг (IP-ASN: Google→YouTube, Netflix→Streaming,
+  Telegram×2, Meta/Twitter→Proxy); + глобальный QUIC-блок перед MATCH
+  (Reality = TCP-only); `youtube-domains` → группа YouTube; защита
+  доменов по типу ноды: exit → Proxy, RU-entry/зеркала → DIRECT
+  (hairpin-фикс v2); CDN качалок jsDelivr → первая exit-нода (урок
+  [Provider] EOF).
+- **Корень**: `etag-support: true`, `find-process-mode: off`,
+  `log-level: info`; `global-client-fingerprint` УДАЛЁН (опция выпилена
+  из mihomo v1.19+, конфиг падал на старте ядра — урок v2 эталона;
+  FP и так per-node из state нод).
+- **FIX Mode A**: раньше конфиг без exit-нод ссылался правилами на
+  несуществующие группы (YouTube/Streaming/Telegram/AI) — mihomo -t
+  не проходил. Теперь правила вырождаются в `MATCH,Proxy`.
+
+**Тесты:** test_subscription_multinode 24 passed (+1 новый
+test_dashboard_secret_stable_per_user; test_mode_b_full_structure
+расширен на v9-маркеры). Смежные сьюты не задеты: client_config_export
++ rest_api_auth 47, subscription + e2e + content_negotiation 65,
+subscription_registry + ios_link_regression + ios_patch5 63,
+rest_api 55 — все passed.
+
+**Проверка:** сгенерированный конфиг (2 exit + entry + зеркало)
+валидирован живым ядром mihomo v1.19.30 (`-t` successful);
+экземпляр сохранён рядом с эталоном для eyeball-ревью.
+
+---
+
 ## FEAT(aghome): v78 — статус AGH показывает готовые ссылки DoH/DoT/DoQ для клиентов — 4 сентября 2026
 
 **Что добавлено:** В статус-бокс AGH (Сеть → A → 2) после блока
