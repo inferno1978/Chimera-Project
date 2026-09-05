@@ -1028,7 +1028,15 @@ def build_mihomo_config(user: dict) -> str:
             "  cache-algorithm: arc",
             "  enhanced-mode: fake-ip",
             "  fake-ip-range: 198.18.0.1/16",
-            "  fake-ip-range-ipv6: fc00::/18",
+            # [v9.3-фикс] Было "fake-ip-range-ipv6: fc00::/18" — мёртвая
+            # строка: ключа fake-ip-range-ipv6 у mihomo НЕ существует
+            # (ядро молча игнорирует, конфиг валиден). Настоящее имя
+            # опции — fake-ip-range6; дефолт fdfe:dcba:9876::1/126 — тот
+            # самый «загадочный IPv6» fdfedcba9876::1 в карте соединений
+            # клиента (DNS подменяет AAAA из этого пула, домен ядро
+            # восстанавливает по своей телефонной книге). Пин дефолта
+            # явной строкой — страховка от смены пула будущими ядрами.
+            "  fake-ip-range6: fdfe:dcba:9876::1/126",
             "  fake-ip-filter:",
             '    - "*.lan"',
             '    - "*.local"',
