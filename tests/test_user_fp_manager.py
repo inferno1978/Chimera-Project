@@ -88,6 +88,36 @@ class TestPatchTgBotScript(unittest.TestCase):
         self.assertNotIn("handle_fp", result)
 
 
+class TestApplyFpRealityGuard(unittest.TestCase):
+    """v9 (2026-09-05): apply_fp отклоняет random/randomized (REALITY)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_random_rejected_with_reality_explanation(self):
+        from chimera.modules import user_fp_manager as ufm
+        with patch.object(ufm, "_patch_config_fp") as mock_patch:
+            ok, msg = ufm.apply_fp("random")
+        self.assertFalse(ok)
+        self.assertIn("REALITY", msg)
+        self.assertIn("session_id", msg)
+        # гард срабатывает ДО каких-либо файловых операций
+        mock_patch.assert_not_called()
+
+    def test_randomized_rejected(self):
+        from chimera.modules import user_fp_manager as ufm
+        with patch.object(ufm, "_patch_config_fp") as mock_patch:
+            ok, msg = ufm.apply_fp("randomized")
+        self.assertFalse(ok)
+        mock_patch.assert_not_called()
+
+    def test_tg_bot_block_contains_guard(self):
+        """TG-бот (/setfp) тоже отклоняет random/randomized."""
+        from chimera.modules.user_fp_manager import TG_FP_COMMANDS_BLOCK
+        self.assertIn('new_fp in ("random", "randomized")', TG_FP_COMMANDS_BLOCK)
+        self.assertIn("несовместим с REALITY", TG_FP_COMMANDS_BLOCK)
+
+
 class TestCurrentFp(unittest.TestCase):
     """current_fp — определение fingerprint."""
 
