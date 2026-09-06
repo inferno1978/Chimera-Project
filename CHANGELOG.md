@@ -2,6 +2,51 @@
 
 ---
 
+## FEAT(b4/vps): Heavy-схема с эскалацией на cdn-vps — всем сетам, DNS не тронут — 6 сентября 2026 (поздний вечер)
+
+**Кейс:** юзер принёс MCP-эндпоинт VPS cdn-vps (b4 v1.81.0,
+19 инструментов, паритет с роутером) и попросил выстроить ту же
+схему Heavy с эскалацией, что на роутере, — для всех сетов.
+DNS «пока не прописываем».
+
+**Что сделано (MCP):**
+- **Инвентаризация:** 5 сетов. Пара Youtube-Fat/Heavy уже
+  существовала (escalate прошит, пороги вменяемые) —
+  верифицирована как есть. Одиночки: YT-Wide-Legacy,
+  Meta-Universal, XHamster-Smooth. DNS сетов (1.1.1.1 у
+  YT/Meta, локальный 127.0.0.1 у XHamster, выкл у YT-Wide) —
+  решено не трогать.
+- **3 новые пары** по роутерному рецепту: duplicate(Fat) →
+  вычистка targets (эскалация-only) → heavy-профиль с другой
+  осью десинка (desync ack/2, pastseq, sni_mutation full,
+  Meta/YT-Wide ещё frag→tcp) → на Fat escalate.to с явными
+  порогами (rst 3/30с, ttl 3600с, stall 3/3000мс, dns 2).
+  Сборка 53/53 проверок; DNS-блоки сверены с BEFORE-снимком —
+  не изменён ни один байт.
+- **Механика по исходникам:** эскалация работает без DNS —
+  триггеры stall / forged RST / dead IP чисто трафиковые
+  (handler.go:599, inc.go:61, ipblock.go:101); DNS-триггер
+  (dns.go:181) включится сам, когда пропишем DoH.
+- **Живая верификация:** watchdog 5/5 healthy, 0 фейлов
+  (www.youtube.com 117.8 КБ/с, www.facebook.com 33.1 — Meta,
+  xhamster.com 34.5 — Fat; два последних добавлены в
+  наблюдение). Главная улика: эскалация сработала в проде
+  через ~минуту после сборки — CDN-стриминг
+  fi.fleet-b.example пошёл через XHamster-Heavy-v1 и
+  держится (40/40 свежих коннектов). Наблюдение задокументировано:
+  SNI-less коннекты к Telegram-DC (MTProto-апстрим, 149.154.x)
+  атрибутируются Heavy по IP-хинту — TTL-фейки протоколу не
+  вредят, маршрут само-возвращается через 3600с.
+- **Репо:** +8 артефактов `set-artifacts/vps-prodcdn/` (формат
+  роутерный, id вычищен, `_meta` с dns-untouched/heavy_axis/
+  live_check), OWN_DOH_FAQ §8 + §7, README, PROJECT_MAP.
+
+**Скрипты:** mcp_b4.py (мульти-эндпоинт router|prodcdn),
+vps_inventory.py, vps_heavy_pairs.py, vps_live_test.py,
+vps_followup.py, vps_health_final.py, vps_artifacts.py.
+
+---
+
 ## FEAT(b4/dns): Heavy-пары всем одиночным сетам — DNS-резерв теперь у всех 7 пар — 6 сентября 2026 (вечер)
 
 **Кейс:** после утренней миграции на свои DoH у 4 одиночных сетов

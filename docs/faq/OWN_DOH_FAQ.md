@@ -143,4 +143,50 @@ Bearer, веб-морда — логин/пароль).
   фейлах подряд попробует Heavy-ось.
 - На двух VPS, где b4 крутится рядом с DoH: прописать по той же
   схеме с приоритетом локального сервера (co-located — суб-мс) и
-  кросс-VPS резервом.
+  кросс-VPS резервом. Этап 1 для cdn-vps сделан 06.09
+  (Heavy-схема со эскалацией, DNS не тронут — см. §8); остались
+  vpn-node (ждём MCP-эндпоинт) и сам этап DNS.
+
+## 8. VPS-инстансы: Heavy-схема без DNS (этап 1 — cdn-vps)
+
+На VPS `cdn.example` b4 (v1.81.0, доступ через MCP с
+Bearer) маршрутит собственный исходящий трафик сетами — и его
+egress тоже под цензурой (baseline до youtube.com с VPS =
+TLS_DROP). 06.09 на нём выстроена та же схема «Fat + Heavy +
+эскалация», что на роутере, — по явному указанию «DNS пока не
+прописываем»: dns-блоки не тронуты ни у одного сета (у
+YouTube/Meta остался Cloudflare 1.1.1.1, у XHamster — локальный
+127.0.0.1, у YT-Wide — выключен).
+
+**Сеты (8, было 5):** пара Youtube-Fat/Heavy существовала —
+проверена как есть; новые: Meta-Universal→Meta-Heavy,
+XHamster-Smooth→XHamster-Heavy, YT-Wide-Legacy→YT-Wide-Heavy.
+Рецепт роутерный: duplicate(Fat) → вычистка targets
+(эскалация-only) → heavy-профиль с другой осью десинка (desync
+ack/2, pastseq, sni_mutation full; Meta/YT-Wide ещё frag→tcp) →
+on Fat escalate.to с порогами rst 3/30с / ttl 3600с / stall
+3/3000мс / dns 2.
+
+**Почему эскалация работает без DNS:** триггеры stall / forged
+RST / dead IP — чисто трафиковые (handler.go:599, inc.go:61,
+ipblock.go:101); DNS-триггер (dns.go:181) включится сам, когда
+пропишем DoH. Пороги даже при нулях добираются дефолтами
+(Resolved*-геттеры).
+
+**Живая проверка (06.09):** watchdog 5/5 healthy, 0 фейлов —
+www.youtube.com 117.8 КБ/с, www.facebook.com 33.1 (Meta),
+xhamster.com 34.5 (Fat). Главная улика: эскалация сработала в
+проде через ~минуту после сборки — CDN-стриминг
+`fi.fleet-b.example` пошёл через XHamster-Heavy-v1 и
+держится (40/40 свежих коннектов). Артефакты:
+`set-artifacts/vps-prodcdn/*.json`.
+
+**Наблюдение (следить):** SNI-less коннекты VPS к Telegram-DC
+(149.154.x — MTProto-апстрим) атрибутируются Heavy по IP-хинту
+от эскалационного маршрута. Десинки TTL-фейковые, протоколу не
+вредят; маршрут живёт 3600с и само-возвращается. Если MTProto
+зашумит — снять эскалацию или подождать TTL.
+
+Этап 2 (по команде): прописать DoH по co-located схеме
+(prodcdn-сеты → свой DoH первично, Heavy → vpn-node-резерв),
+инстанс vpn-node ждёт MCP-эндпоинта.
