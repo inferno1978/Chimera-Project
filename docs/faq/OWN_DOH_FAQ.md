@@ -143,11 +143,11 @@ Bearer, веб-морда — логин/пароль).
   фейлах подряд попробует Heavy-ось.
 - На двух VPS, где b4 крутится рядом с DoH: прописать по той же
   схеме с приоритетом локального сервера (co-located — суб-мс) и
-  кросс-VPS резервом. Этап 1 для chimeraprodcdn сделан 06.09
-  (Heavy-схема со эскалацией, DNS не тронут — см. §8); остались
-  chimeravpn (ждём MCP-эндпоинт) и сам этап DNS.
+  кросс-VPS резервом. Этап 1 сделан 06.09 на ОБОИХ инстансах —
+  chimeraprodcdn и chimeravpn (Heavy-схема с эскалацией, DNS не
+  тронут — см. §8); остался сам этап DNS (по команде юзера).
 
-## 8. VPS-инстансы: Heavy-схема без DNS (этап 1 — chimeraprodcdn)
+## 8. VPS-инстансы: Heavy-схема без DNS (этап 1 — chimeraprodcdn и chimeravpn)
 
 На VPS `chimeraprodcdn.online` b4 (v1.81.0, доступ через MCP с
 Bearer) маршрутит собственный исходящий трафик сетами — и его
@@ -187,6 +187,22 @@ xhamster.com 34.5 (Fat). Главная улика: эскалация сраб�
 вредят; маршрут живёт 3600с и само-возвращается. Если MTProto
 зашумит — снять эскалацию или подождать TTL.
 
+**chimeravpn (вторая нода, 06.09 поздним вечером):** юзер принёс
+MCP-эндпоинт — сделано «то же самое». Было 5 сетов (пара только у
+YouTube); собраны Meta-Heavy / XHamster-Heavy / YT-Wide-Heavy,
+эскалационные пороги на всех Fat, верификация 53/53, DNS не тронут
+(у YouTube/Meta — Cloudflare 1.1.1.1, у XHamster — локальный
+127.0.0.1, у YT-Wide — выкл). Watchdog 5/5 healthy (добавлены
+www.facebook.com и xhamster.com): www.youtube.com 136-141 КБ/с,
+xhamster.com 24.8 КБ/с. Эскалация задействована живьём через ~30с
+после wiring: коннекты xhamster.com (адрес, где Fat-ось ловит RST)
+переброшены XHamster-Smooth-v5 → XHamster-Heavy-v1, 21/100 свежих
+коннектов идут через Heavy; SNI-less DNS-путь b4 к 1.1.1.1:443
+едет с атрибуцией эскалированного флоу (как MTProto-наблюдение на
+prodcdn). Эпизод www.facebook.com «degraded» (TCP RST) был
+транзиентом egress — восстановился сам (18 КБ/с). Артефакты:
+`set-artifacts/vps-vpn/*.json`.
+
 Этап 2 (по команде): прописать DoH по co-located схеме
-(prodcdn-сеты → свой DoH первично, Heavy → chimeravpn-резерв),
-инстанс chimeravpn ждёт MCP-эндпоинта.
+(prodcdn-сеты → свой DoH первично + chimeravpn-резерв; vpn-сеты →
+свой + chimeraprodcdn-резерв) — на обеих нодах этап 1 завершён.

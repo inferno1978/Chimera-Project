@@ -1,0 +1,206 @@
+{
+  "sets": [
+    {
+      "name": "YT-Wide-Legacy",
+      "tcp": {
+        "conn_bytes_limit": 19,
+        "seg2delay": 20,
+        "seg2delay_max": 50,
+        "syn_fake": false,
+        "syn_fake_len": 0,
+        "syn_ttl": 7,
+        "drop_sack": true,
+        "dport_filter": "",
+        "incoming": {
+          "mode": "off",
+          "min": 14,
+          "max": 14,
+          "fake_ttl": 7,
+          "fake_count": 3,
+          "strategy": "badsum"
+        },
+        "desync": {
+          "mode": "rst",
+          "ttl": 5,
+          "count": 10,
+          "post_desync": false
+        },
+        "win": {
+          "mode": "off",
+          "values": [
+            0,
+            1460,
+            8192,
+            65535
+          ]
+        },
+        "duplicate": {
+          "enabled": false,
+          "count": 3
+        },
+        "ip_block_detect": {
+          "enabled": false,
+          "retransmit_threshold": 3,
+          "timeout_ms": 3000,
+          "cache_blocked_ips": false,
+          "syn_detect": false,
+          "syn_threshold": 3,
+          "heal_dns": false,
+          "heal_ttl_sec": 60
+        },
+        "rst_protection": {
+          "enabled": false,
+          "ttl_tolerance": 3
+        }
+      },
+      "udp": {
+        "mode": "fake",
+        "fake_seq_length": 6,
+        "fake_len": 64,
+        "faking_strategy": "none",
+        "fake_payload_file": "",
+        "dport_filter": "",
+        "filter_quic": "sni",
+        "filter_stun": true,
+        "conn_bytes_limit": 8,
+        "seg2delay": 0,
+        "seg2delay_max": 0
+      },
+      "fragmentation": {
+        "strategy": "disorder",
+        "reverse_order": true,
+        "strategy_pool": [],
+        "tlsrec_pos": 0,
+        "tlsrec_pos_max": 0,
+        "middle_sni": true,
+        "sni_position": 1,
+        "sni_position_max": 0,
+        "oob_position": 0,
+        "oob_position_max": 0,
+        "oob_char": 120,
+        "seq_overlap_pattern": [
+          "0x16",
+          "0x03",
+          "0x03",
+          "0x00",
+          "0x00"
+        ],
+        "seq_overlap_length": 0,
+        "combo": {
+          "first_byte_split": false,
+          "extension_split": false,
+          "shuffle_mode": "full",
+          "first_delay_ms": 30,
+          "first_delay_ms_max": 0,
+          "jitter_max_us": 1000,
+          "jitter_max_us_max": 0,
+          "decoy_enabled": false,
+          "fake_per_segment": false,
+          "fake_per_seg_count": 1,
+          "fake_per_seg_count_max": 0
+        },
+        "disorder": {
+          "shuffle_mode": "reverse",
+          "min_jitter_us": 500,
+          "max_jitter_us": 2100,
+          "fake_per_segment": true,
+          "fake_per_seg_count": 3,
+          "fake_per_seg_count_max": 0
+        }
+      },
+      "faking": {
+        "sni": true,
+        "ttl": 7,
+        "strategy": "pastseq",
+        "seq_offset": 10000,
+        "sni_seq_length": 11,
+        "sni_type": 8,
+        "custom_payload": "",
+        "payload_file": "",
+        "payload_domain": "",
+        "tls_mod": [
+          "rnd",
+          "dupsid"
+        ],
+        "timestamp_decrease": 600000,
+        "sni_mutation": {
+          "mode": "off",
+          "grease_count": 3,
+          "padding_size": 2048,
+          "fake_ext_count": 5,
+          "fake_snis": [
+            "ya.ru",
+            "vk.com",
+            "max.ru"
+          ]
+        },
+        "tcp_md5": false,
+        "apply_ttl": false,
+        "md5_on_fake": false,
+        "fake_len_mode": ""
+      },
+      "targets": {
+        "sni_domains": [
+          "wide-youtube.l.google.com"
+        ],
+        "ip": [],
+        "geosite_categories": [],
+        "geoip_categories": [],
+        "source_devices": [],
+        "source_devices_exclude": false,
+        "domain_only": false,
+        "tls": "",
+        "ip_version": ""
+      },
+      "enabled": true,
+      "dns": {
+        "enabled": true,
+        "target_dns": "https://1.1.1.1/dns-query",
+        "doh_url": "",
+        "fragment_query": false,
+        "strict": false
+      },
+      "routing": {
+        "enabled": false,
+        "mode": "interface",
+        "egress_interface": "",
+        "egress_ip": "",
+        "upstream": {
+          "host": "",
+          "port": 0,
+          "fail_open": false,
+          "use_domain": true,
+          "udp": false
+        },
+        "fwmark": 0,
+        "table": 0,
+        "source_interfaces": [],
+        "ip_ttl_seconds": 3600,
+        "block_action": "reject",
+        "router_traffic": "auto",
+        "kill_switch": false
+      },
+      "escalate": {
+        "to": "4ef58d1e-0b3c-4141-a345-25fbb168ffe2",
+        "rst_threshold": 3,
+        "rst_window_sec": 30,
+        "ttl_sec": 3600,
+        "stall_threshold": 3,
+        "stall_timeout_ms": 3000,
+        "dns_threshold": 2
+      },
+      "mss_clamp": {
+        "enabled": false,
+        "size": 0
+      }
+    }
+  ],
+  "_meta": {
+    "vps": "chimeravpn.online (b4 v1.81.0, engine nfqueue) — вторая нода",
+    "built": "2026-09-06: Heavy-схема с эскалацией для всех сетов, как на роутере и vps-prodcdn (этап 1 — БЕЗ DNS).",
+    "pair_built": "escalate.to -> YT-Wide-Heavy-v1 (4ef58d1e-0b3c-4141-a345-25fbb168ffe2), пороги rst 3/30с / ttl 3600с / stall 3/3000мс / dns 2. Триггеры эскалации: stall / forged RST / dead IP / DNS.",
+    "dns": "НЕ тронут по указанию юзера (этап VPS-DNS отложен; конфиг как до сборки).",
+    "heavy_axis": "Fat: frag disorder + desync rst/5/10 + seg2delay 20/50; Heavy: frag tcp + desync ack/7/2 + sni_mutation full — другая ось обхода",
+    "live_check": "wide-youtube.l.google.com: TLS_DROP в обе стороны (блок адресного уровня); домен дополнительно покрыт geosite:youtube в Youtube-Fat-v1 (позиция раньше — затенение, как на роутере и vps-prodcdn)."
+  }
+}

@@ -2,6 +2,50 @@
 
 ---
 
+## FEAT(b4/vps): Heavy-схема с эскалацией на chimeravpn (вторая нода) — всем сетам, DNS не тронут — 6 сентября 2026 (ночь)
+
+**Кейс:** юзер принёс MCP-эндпоинт второй VPS chimeravpn
+(`https://chimeravpn.online:9743/api/mcp`, b4 v1.81.0, паритет
+инструментов) и попросил «сделать то же самое», что на
+chimeraprodcdn и роутере. DNS «мои пока не прописываем».
+
+**Что сделано (MCP):**
+- **Инвентаризация:** 5 сетов; пара Youtube-Fat/Heavy
+  существовала (escalate прошит) — верифицирована как есть.
+  Одиночки: Meta-Universal, XHamster-Smooth, YT-Wide-Legacy.
+  DNS (1.1.1.1 у YT/Meta, 127.0.0.1 у XHamster, выкл у
+  YT-Wide) — не тронуты, сверены с BEFORE-снимком.
+- **3 новые пары** по роутерному рецепту: duplicate(Fat) →
+  вычистка targets (эскалация-only) → heavy-профиль с другой
+  осью десинка (desync ack/2, pastseq, sni_mutation full;
+  Meta/YT-Wide ещё frag→tcp; XHamster seg2delay→0) → на Fat
+  escalate.to с явными порогами (rst 3/30с, ttl 3600с, stall
+  3/3000мс, dns 2). Верификация 53/53, включая
+  «DNS не тронут» по обеим сторонам всех 4 пар.
+- **Живая верификация:** watchdog 5/5 healthy (добавлены
+  www.facebook.com и xhamster.com): www.youtube.com 136-141
+  КБ/с, xhamster.com 24.8 КБ/с; эпизод facebook «degraded»
+  (TCP RST) оказался транзиентом egress — восстановился сам.
+  Эскалация задействована живьём через ~30с после wiring:
+  коннекты xhamster.com (адрес, где Fat-ось ловит RST)
+  переброшены XHamster-Smooth-v5 → XHamster-Heavy-v1 —
+  21/100 свежих коннектов идут через Heavy; SNI-less DNS-путь
+  b4 к 1.1.1.1:443 едет с атрибуцией эскалированного флоу
+  (зеркало MTProto-наблюдения на prodcdn — задокументировано).
+- **Репо:** +8 артефактов `set-artifacts/vps-vpn/` (формат
+  роутерный, id вычищен, `_meta`: vps/dns-untouched/heavy_axis/
+  live_check, без портов и токенов); OWN_DOH_FAQ §8 расширен на
+  обе ноды, §7 актуализирован; README и PROJECT_MAP — дерево
+  артефактов. Скрипты (вне репо): vps_vpn_heavy_pairs.py,
+  vps_vpn_live_test.py, vps_vpn_artifacts.py, vps_inventory.py
+  (мульти-эндпоинт), mcp_b4.py (эндпоинты router|prodcdn|vpn).
+
+**Итог:** обе VPS-ноды (chimeraprodcdn и chimeravpn) прошли
+этап 1 — Heavy-схема с эскалацией всем сетам, DNS не тронут.
+Этап 2 (co-located DoH + кросс-VPS резерв) — по команде юзера.
+
+---
+
 ## FEAT(b4/vps): Heavy-схема с эскалацией на chimeraprodcdn — всем сетам, DNS не тронут — 6 сентября 2026 (поздний вечер)
 
 **Кейс:** юзер принёс MCP-эндпоинт VPS chimeraprodcdn (b4 v1.81.0,
