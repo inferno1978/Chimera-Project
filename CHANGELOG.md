@@ -2,6 +2,54 @@
 
 ---
 
+## FEAT(b4/dns): Heavy-пары всем одиночным сетам — DNS-резерв теперь у всех 7 пар — 6 сентября 2026 (вечер)
+
+**Кейс:** после утренней миграции на свои DoH у 4 одиночных сетов
+(XHamster/XVideos/Meta/YT-Nocookie) остался только основной
+резолвер — DNS-фейловера через эскалацию, как у пар
+YouTube/GitHub/NNM, не было. Запрос: собрать пары и «с DNS тоже
+разобраться».
+
+**Что сделано (MCP, b4 v1.81.0):**
+- **Разбор механики по исходникам:** Heavy-сет с пустыми targets —
+  валидный «эскалация-only» дизайн: в DNS-пути и трафик-пути
+  `escalatedSetFor` (nfq/dns.go:313, handler.go) подменяет сет для
+  домена целиком — и резолв через его DoH, и его профиль десинка;
+  dns-hint от его ответов доучитывается. Прямого матчинга нет:
+  если Fat выключить — трафик просто перестаёт матчиться
+  (fail-closed, в духе strict).
+- **4 Heavy-сета** (duplicate(Fat) → вычистка targets → vpn DoH →
+  heavy-профиль): XHamster-Heavy (desync ack/2 + pastseq +
+  sni_mutation full), XVideos-Heavy (frag tcp + pastseq +
+  ip_block_detect cache/syn), Meta-Heavy (desync off + мутация
+  SNI — смена оси вместо десинка), YT-Nocookie-Heavy (frag tcp +
+  desync ack/2 + mutation full + block_action reject). Профиль
+  каждой пары — другая ось обхода, чтобы эскалация меняла
+  способ доставки, а не только DNS.
+- **Эскалация привязана:** escalate.to на всех 4 Fat; найден и
+  починен баг — у YT-Nocookie-In escalate-поля были нулями
+  (rst/ttl/stall/dns_threshold), проставлены явно как у живых пар.
+- **Верификация:** 46/46 проверок снимками (doh/strict/targets
+  пустые/дельты профиля/эскалация); живые тесты: xhamster.com
+  baseline TLS_DROP → 25.8 КБ/с, www.xvideos.com TLS_RST →
+  28.6 КБ/с, www.facebook.com TLS_DROP → 39.0 КБ/с через b4;
+  watchdog 6/6 healthy.
+- **Нюанс youtube-nocookie:** www.youtube-nocookie.com падает в
+  ОБЕ стороны (и через b4, и мимо) — блок адресного уровня у
+  провайдера. DNS ни при чём: prodcdn/vpn/Cloudflare-референс
+  отдают здоровые Google-IP (проверено прямыми DoH-запросами).
+  Живого клиентского трафика на домене нет (embed). Пара собрана:
+  3 стилла подряд — эскалация попробует Heavy-ось.
+- **Артефакты/доки:** 8 новых артефактов в set-artifacts
+  (4 пары Fat+Heavy, формат как NNM-Fat), OWN_DOH_FAQ.md
+  (таблица 14 сетов, дизайн Heavy, §7 закрывает пункт про пары),
+  README, PROJECT_MAP.
+
+**Ограничения/далее:** оба своих DoH лягут одновременно — DNS
+сетов встанет (цена strict); миграция двух VPS-инстансов b4
+(co-located приоритет) — не начата.
+
+---
 ## FEAT(b4/dns): миграция DNS всех сетов на собственные DoH-резолверы — 6 сентября 2026
 
 **Кейс:** во всех сетах с DNS-редиректом был прописан публичный

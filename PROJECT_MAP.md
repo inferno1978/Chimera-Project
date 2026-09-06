@@ -381,10 +381,11 @@ vendor/                   (вендор внешних проектов — вн
     │                      nfq/tun/tproxy, discovery, mcp-сервер в src/http)
     ├── installer/        (установщик ОС-пакетов)
     ├── toolkit/          (утилиты)
-    └── set-artifacts/    (готовые сеты: GitHub-Fat-v1.json, NNM-Fat-v1.json
-                           + JSON-верификации обоих MCP-кейсов; dns-блоки
-                           перенесены на свои DoH 2026-09-06 — см.
-                           docs/faq/OWN_DOH_FAQ.md)
+    └── set-artifacts/    (готовые сеты — 6 пар Fat+Heavy: NNM, GitHub,
+                           XHamster, XVideos, Meta, YT-Nocookie (4 пары
+                           добавлены 06.09 вечером, эскалация-only Heavy
+                           с пустыми targets) + JSON-верификации MCP-кейсов;
+                           dns-блоки на своих DoH — см. OWN_DOH_FAQ.md)
 ```
 
 ## Паттерн доступа к ядру

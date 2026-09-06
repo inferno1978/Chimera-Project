@@ -15,17 +15,23 @@ DoH-сервера пользователя (подняты на его VPS, п�
 |---|---|---|---|
 | Youtube-Fat-v1 | `cdn.example:30443` (основной) | true | → Youtube-Heavy-v1 |
 | Youtube-Heavy-v1 | `panel.example:30443` (резерв) | true | — |
-| YT-Nocookie-In | `cdn-vps` (основной) | true | нет пары |
+| YT-Nocookie-In | `cdn-vps` (основной) | true | → YT-Nocookie-Heavy-v1 |
+| YT-Nocookie-Heavy-v1 | `vpn-node` (резерв) | true | — |
 | GitHub-Fat-v1 | `cdn-vps` (основной) | true | → GitHub-Heavy-v1 |
 | GitHub-Heavy-v1 | `vpn-node` (резерв) | true | — |
-| XHamster-Smooth-v5 | `cdn-vps` (основной) | true | нет пары |
-| XVideos-v1 | `cdn-vps` (основной) | true | нет пары |
-| Meta-Universal-v1 | `cdn-vps` (основной) | true | нет пары |
+| XHamster-Smooth-v5 | `cdn-vps` (основной) | true | → XHamster-Heavy-v1 |
+| XHamster-Heavy-v1 | `vpn-node` (резерв) | true | — |
+| XVideos-v1 | `cdn-vps` (основной) | true | → XVideos-Heavy-v1 |
+| XVideos-Heavy-v1 | `vpn-node` (резерв) | true | — |
+| Meta-Universal-v1 | `cdn-vps` (основной) | true | → Meta-Heavy-v1 |
+| Meta-Heavy-v1 | `vpn-node` (резерв) | true | — |
 | NNM-Fat-v1 | `cdn-vps` (основной) | true | → NNM-Heavy-v1 |
 | NNM-Heavy-v1 | `vpn-node` (резерв) | true | — |
 
-Не тронуты (DNS-редирект изначально выключен, наружу из них ничего
-не ходит): `Telegram-WS-Bridge`, `YT-Wide-Legacy`, `speedtest`.
+Все 7 DNS-сетов с парами (первые 3 пары — YouTube/GitHub/NNM —
+были с самого начала, 4 доклеены 6 сентября вечером). Не тронуты
+(DNS-редирект изначально выключен, наружу из них ничего не ходит):
+`Telegram-WS-Bridge`, `YT-Wide-Legacy`, `speedtest`.
 
 Серверы: `cdn.example` (203.0.113.103, серт Let's Encrypt
 до 30.10.2026) — основной; `panel.example` (203.0.113.102, серт
@@ -46,10 +52,20 @@ TLS 1.3, ~1 с отклик из РФ.
 - Состояние живёт `escalate.ttl_sec` (3600): через час само
   вернётся на основной. Хороший ответ сбрасывает счётчик.
 
-Цена схемы: Heavy-сет — полная копия таргетов Fat-а (своей стратегии
-DNS-фейловер не требует, но трафик-эскалация пойдёт через его
-стратегию). У одиночных сетов без пары (XHamster/XVideos/Meta/
-YT-Nocookie) резерва нет — только основной.
+Дизайн Heavy-сета (единообразный для всех 7 пар): **targets пустые** —
+сет матчится только через таблицу эскалаций (`escalatedSetFor`
+подменяет сет для домена: и DNS, и трафик) и dns-hint от собственных
+ответов. Напрямую он ничего не перехватывает, а если Fat выключить —
+трафик просто перестанет матчиться (fail-closed, в духе strict).
+Профиль Heavy — другая ось обхода, чтобы эскалация меняла не только
+DNS, но и способ доставки: Heavy собраны через `duplicate(Fat)` +
+доводка (frag combo→tcp, faking →pastseq, desync ack/2, sni_mutation
+full, ip_block_detect cache/syn — набор зависит от пары).
+
+Найденный по ходу баг: у `YT-Nocookie-In` escalate-поля были нулями
+(rst/ttl/stall/dns_threshold) — при пустом `escalate.to` это молчало,
+но после привязки пары проставлены явно (rst 3/30с, ttl 3600с,
+stall 3/3000мс, dns_threshold 2), как у остальных пар.
 
 ## 3. strict=true: «наружу — ничего»
 
@@ -118,8 +134,13 @@ Bearer, веб-морда — логин/пароль).
 
 ## 7. Осталось сделать (по желанию)
 
-- Одиночным сетам (XHamster/XVideos/Meta/YT-Nocookie) можно
-  собрать Heavy-пары — тогда и у них появится резервный DNS.
+- ~~Одиночным сетам собрать Heavy-пары~~ — готово (06.09, вечером):
+  4 пары XHamster/XVideos/Meta/YT-Nocookie, живые проверки в
+  `set-artifacts/*.json` (`_meta.live_check`).
+- Нюанс `www.youtube-nocookie.com`: падает в обе стороны (и через
+  b4, и мимо) — блок адресного уровня, DNS ни при чём (prodcdn/vpn/CF
+  отдают здоровые Google-IP). Пара собрана; стилл-эскалация при 3
+  фейлах подряд попробует Heavy-ось.
 - На двух VPS, где b4 крутится рядом с DoH: прописать по той же
   схеме с приоритетом локального сервера (co-located — суб-мс) и
   кросс-VPS резервом.
