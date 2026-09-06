@@ -384,8 +384,11 @@ vendor/                   (вендор внешних проектов — вн
     └── set-artifacts/    (готовые сеты — 6 пар Fat+Heavy: NNM, GitHub,
                            XHamster, XVideos, Meta, YT-Nocookie (4 пары
                            добавлены 06.09 вечером, эскалация-only Heavy
-                           с пустыми targets) + JSON-верификации MCP-кейсов;
-                           dns-блоки на своих DoH — см. OWN_DOH_FAQ.md)
+                           с пустыми targets) + vps-prodcdn/ — 8 сетов
+                           VPS chimeraprodcdn: Heavy-схема с эскалацией
+                           всем сетам, DNS не тронут (этап 1, 06.09) +
+                           JSON-верификации MCP-кейсов; dns-блоки
+                           роутерных на своих DoH — см. OWN_DOH_FAQ.md)
 ```
 
 ## Паттерн доступа к ядру
