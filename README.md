@@ -127,6 +127,7 @@ sudo python3 main.py
 | [`RU_NODE_CASCADE_FAQ.md`](docs/faq/RU_NODE_CASCADE_FAQ.md) | Выбор RU-ноды для каскада — цензурный аудит входной ноды: четыре цензора на пути (реестр оператора / ТСПУ-антитуннель / фильтры аплинка / v6-плечо), три оси профиля, два живых кейса (лицензированный оператор vs «офшорная полка» с РФ-транзитом), чек-лист аудита в 7 шагов, матрица «профиль → роль», живые и режущиеся хостеры плеча entry→exit, ловушки интерпретации детектора, Q&A |
 | [`DPI_BYPASS_FAQ.md`](docs/faq/DPI_BYPASS_FAQ.md) | DPI Bypass (b4) — обход ТСПУ для YouTube и любых заблокированных ресурсов: почему b4, а не fragment/WARP, ТСПУ-ярусы (почему дома строже, чем на VPS), установка на entry VPS, пресеты, Discovery, импорт сетов, Web UI и nginx front, CRUD сетов, health check, решение проблем |
 | [`GITHUB_BYPASS_FAQ.md`](docs/faq/GITHUB_BYPASS_FAQ.md) | GitHub Bypass (b4) — обход частичных блокировок GitHub (РКН и исходники): диагностика трёх режимов блока (SNI-фильтр / троттлинг / DNS-отравление), артефакты зондов на CDN-корнях, архитектура сета GitHub-Fat-v1 (combo + timestamp-фейк + DoH + эскалация на Heavy), три слоя таргетов (19 суффиксов + geosite:github на 64 домена + 87 CIDR из api.github.com/meta), установка тремя способами (MCP/Web UI/TUI), watchdog-верификация, тонкая настройка, честные ограничения (IP-душение лечится только routing→upstream) |
+| [`NNM_BYPASS_FAQ.md`](docs/faq/NNM_BYPASS_FAQ.md) | NNM-Club Bypass (b4) — SNI-блок торрент-трекера за Cloudflare (полный цикл 2026-09-06): диагностика TLS_RST/TLS_DROP, разведка сателлитов (жив только nnmclub.to, зеркала — парковки/сквоттеры, таблица), Discovery → desync-fin-ttl6-c2 → сет NNM-Fat-v1 (desync-ack + pastseq + DoH против dns_poisoned + rst_protection + эскалация на NNM-Heavy-v1), почему «Discovery нашёл, но не заработало» (баг apply 1.80.x + DNS-плечо + отсутствие верификации), установка (MCP/Web UI/TUI), ограничения CF-ротации краёв |
 
 ## 🗂️ Структура проекта
 
@@ -150,10 +151,11 @@ Chimera-Project/
 │   ├── AI_ACCESS_TG_FAQ.md     #   ИИ-агент на роутере + разблокировка ТГ (MCP/REST)
 │   ├── RU_NODE_CASCADE_FAQ.md  #   Выбор RU-ноды для каскада (цензурный аудит)
 │   ├── DPI_BYPASS_FAQ.md        #   DPI Bypass (b4) — обход ТСПУ (YouTube и любые сайты)
-│   └── GITHUB_BYPASS_FAQ.md     #   GitHub Bypass (b4) — частичные блокировки GitHub (сет GitHub-Fat-v1)
+│   ├── GITHUB_BYPASS_FAQ.md     #   GitHub Bypass (b4) — частичные блокировки GitHub (сет GitHub-Fat-v1)
+│   └── NNM_BYPASS_FAQ.md       #   NNM-Club Bypass (b4) — SNI-блок за Cloudflare (сет NNM-Fat-v1)
 ├── vendor/
 │   └── b4/                      #   Исходники b4 v1.81.0 (апстрим DanielLavrushin/b4): src, installer, toolkit
-│       └── set-artifacts/       #   Готовые сеты: GitHub-Fat-v1.json + верификация (watchdog/MCP-кейс)
+│       └── set-artifacts/       #   Готовые сеты: GitHub-Fat-v1.json, NNM-Fat-v1.json + верификации (MCP-кейсы)
 ├── LICENSE
 └── chimera/
     ├── __init__.py

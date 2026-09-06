@@ -381,7 +381,8 @@ vendor/                   (вендор внешних проектов — вн
     │                      nfq/tun/tproxy, discovery, mcp-сервер в src/http)
     ├── installer/        (установщик ОС-пакетов)
     ├── toolkit/          (утилиты)
-    └── set-artifacts/    (готовые сеты: GitHub-Fat-v1.json + верификация)
+    └── set-artifacts/    (готовые сеты: GitHub-Fat-v1.json, NNM-Fat-v1.json
+                           + JSON-верификации обоих MCP-кейсов)
 ```
 
 ## Паттерн доступа к ядру
