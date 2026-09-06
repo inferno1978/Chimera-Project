@@ -2,6 +2,54 @@
 
 ---
 
+## FEAT(b4/nnm): сет NNM-Fat-v1 — полный цикл обхода SNI-блока nnmclub.to — 6 сентября 2026
+
+**Кейс:** NNM-Club не открывается из РФ (SNI-блок + DNS-отравление).
+Пользователь сам прогонял Discovery — стратегия «нашлась», но сет
+не заработал и был удалён. Запрос: полный цикл с разведкой
+сателлитов и максимально жирным сетом.
+
+**Что сделано (MCP, b4 v1.81.0):**
+- **Диагностика:** `b4_test_domain_now both` → TLS_RST/TLS_DROP
+  в обеих модах (активный сброс TLS-хандшейка по SNI), сайт за
+  Cloudflare (NS bart/lola, SAN `*.nnmclub.to`).
+- **Разведка сателлитов** (DoH CF+Google, HTTP-пробы, SAN, NS/MX):
+  жив только `nnmclub.to` + поддомены (`www`, `api` — те же CF-IP,
+  `mail` — MX); исторические зеркала (`nnm-club.cc/info/name`,
+  `nnmclub.me`, `nnm-club.ru` и ещё 8) — парковки/сквоттеры,
+  в сет не включены. Суффикс `nnmclub.to` покрывает весь сайт.
+- **Discovery (свежий, 1.81.0):** 37+39+232 проверки → победитель
+  `desync-fin-ttl6-c2` (семейство desync), подтверждён ×3,
+  1050 КБ/с; отдельным флагом — `dns_poisoned: true`.
+- **Сет NNM-Fat-v1** (apply + дожирнение): позиция 1;
+  `fragmentation.strategy=tcp` + `tcp.desync {ack, ttl 7, count 2}`
+  + faking `pastseq`; `sni_domains: nnmclub.to` (суффикс);
+  9 IP-хвостов (CF-края v4+v6 из discovery и DoH-снимка —
+  без широких CF-диапазонов, края общие с чужими сайтами);
+  `dns.enabled` + DoH 1.1.1.1 (лечение отравления);
+  `rst_protection.enabled`; эскалация на созданный
+  **NNM-Heavy-v1** (tcp, id ea0fab01…).
+- **Живая верификация:** baseline FAIL (TLS_DROP) /
+  **through_b4 OK 101.6 КБ/с**; `check_domain`: nnmclub.to exact,
+  api.nnmclub.to covered; watchdog: добавлен, первый чек
+  **healthy 89.0 КБ/с, 0 фейлов** (теперь 6 доменов).
+- **Почему у юзера не взлетело:** баг apply в b4 1.80.x (сет не
+  соответствовал найденной стратегии — починено в 1.81.0) +
+  DNS-плечо не лечилось (dns_poisoned) + верификация после apply
+  не выполнялась. Полный цикл разобран в FAQ §5.
+- **Доки:** `docs/faq/NNM_BYPASS_FAQ.md` (9 разделов: блок vs
+  GitHub-кейс, диагностика, таблица сателлитов, архитектура,
+  «почему не заработало», установка×3, проверка, ограничения
+  CF-ротации, troubleshooting); артефакты
+  `vendor/b4/set-artifacts/NNM-Fat-v1.json` + верификация
+  (id вычищен, домашний IP/токены не входят — проверено);
+  README (таблица FAQ + дерево), PROJECT_MAP, этот CHANGELOG.
+
+**На роутере:** 21 сет, NNM-Fat-v1 на позиции 1, watchdog
+следит за github.com, raw, nnmclub.to + 3 YouTube-доменами.
+
+---
+
 ## FIX(vendor/b4): метка вендоренного снапшота — это v1.81.0, а не v1.80.4 — 6 сентября 2026
 
 **Кейс:** пользователь попросил ревендорить исходники b4 v1.81.0
