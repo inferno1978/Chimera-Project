@@ -1,0 +1,319 @@
+{
+  "sets": [
+    {
+      "name": "XHamster-Smooth-v5",
+      "tcp": {
+        "conn_bytes_limit": 19,
+        "seg2delay": 10,
+        "seg2delay_max": 30,
+        "syn_fake": false,
+        "syn_fake_len": 0,
+        "syn_ttl": 7,
+        "drop_sack": false,
+        "dport_filter": "443",
+        "incoming": {
+          "mode": "off",
+          "min": 14,
+          "max": 14,
+          "fake_ttl": 7,
+          "fake_count": 3,
+          "strategy": "badsum"
+        },
+        "desync": {
+          "mode": "off",
+          "ttl": 7,
+          "count": 3,
+          "post_desync": false
+        },
+        "win": {
+          "mode": "off",
+          "values": [
+            0,
+            1460,
+            8192,
+            65535
+          ]
+        },
+        "duplicate": {
+          "enabled": false,
+          "count": 3
+        },
+        "ip_block_detect": {
+          "enabled": false,
+          "retransmit_threshold": 3,
+          "timeout_ms": 3000,
+          "cache_blocked_ips": true,
+          "syn_detect": true,
+          "syn_threshold": 3,
+          "heal_dns": false,
+          "heal_ttl_sec": 60
+        },
+        "rst_protection": {
+          "enabled": false,
+          "ttl_tolerance": 3
+        }
+      },
+      "udp": {
+        "mode": "reject",
+        "fake_seq_length": 6,
+        "fake_len": 64,
+        "faking_strategy": "none",
+        "fake_payload_file": "",
+        "dport_filter": "",
+        "filter_quic": "all",
+        "filter_stun": true,
+        "conn_bytes_limit": 8,
+        "seg2delay": 0,
+        "seg2delay_max": 0
+      },
+      "fragmentation": {
+        "strategy": "tcp",
+        "reverse_order": true,
+        "strategy_pool": [],
+        "tlsrec_pos": 0,
+        "tlsrec_pos_max": 0,
+        "middle_sni": true,
+        "sni_position": 1,
+        "sni_position_max": 0,
+        "oob_position": 0,
+        "oob_position_max": 0,
+        "oob_char": 120,
+        "seq_overlap_pattern": [],
+        "seq_overlap_length": 0,
+        "combo": {
+          "first_byte_split": true,
+          "extension_split": true,
+          "shuffle_mode": "full",
+          "first_delay_ms": 30,
+          "first_delay_ms_max": 0,
+          "jitter_max_us": 1000,
+          "jitter_max_us_max": 0,
+          "decoy_enabled": false,
+          "fake_per_segment": false,
+          "fake_per_seg_count": 1,
+          "fake_per_seg_count_max": 0
+        },
+        "disorder": {
+          "shuffle_mode": "full",
+          "min_jitter_us": 1000,
+          "max_jitter_us": 3000,
+          "fake_per_segment": false,
+          "fake_per_seg_count": 1,
+          "fake_per_seg_count_max": 0
+        }
+      },
+      "faking": {
+        "sni": true,
+        "ttl": 4,
+        "strategy": "timestamp",
+        "seq_offset": 10000,
+        "sni_seq_length": 2,
+        "sni_type": 8,
+        "custom_payload": "",
+        "payload_file": "",
+        "payload_domain": "",
+        "tls_mod": [
+          "rnd"
+        ],
+        "timestamp_decrease": 600000,
+        "sni_mutation": {
+          "mode": "off",
+          "grease_count": 3,
+          "padding_size": 2048,
+          "fake_ext_count": 5,
+          "fake_snis": [
+            "ya.ru",
+            "vk.com",
+            "max.ru"
+          ]
+        },
+        "tcp_md5": false,
+        "apply_ttl": true,
+        "md5_on_fake": false,
+        "fake_len_mode": ""
+      },
+      "targets": {
+        "sni_domains": [
+          "xhamster.com",
+          "xhamster.desi",
+          "xhamster2.com",
+          "xhamster3.com",
+          "xhamster18.com",
+          "xhamsterproxy.com",
+          "xhamsterproxy2.com",
+          "xhamsterproxy3.com",
+          "xhamsterporno.com",
+          "xhamster7.com",
+          "xhamster8.com",
+          "xhamster9.com",
+          "xhamster10.com",
+          "xhamster11.com",
+          "xhamster12.com",
+          "xhamster13.com",
+          "xhamster14.com",
+          "xhamster15.com",
+          "xhamster20.com",
+          "xhamster25.com",
+          "xhamster30.com",
+          "xhamster40.com",
+          "xhamster50.com",
+          "xh.video",
+          "xhcdn.com",
+          "xhcdn2.com",
+          "xhcdn3.com",
+          "xhcdn4.com",
+          "xhcdn5.com",
+          "xhcdn6.com",
+          "xhcdn7.com",
+          "xhcdn8.com",
+          "xhcdn9.com",
+          "xhcdn10.com",
+          "xhcdn11.com",
+          "xhcdn12.com",
+          "xhcdn13.com",
+          "xhcdn14.com",
+          "xhcdn15.com",
+          "xhcdn16.com",
+          "xhcdn17.com",
+          "xhcdn18.com",
+          "xhcdn19.com",
+          "xhcdn20.com",
+          "xhcdn21.com",
+          "xhcdn22.com",
+          "xhcdn23.com",
+          "xhcdn24.com",
+          "xhcdn25.com",
+          "xhspot.com",
+          "xhplanet.com",
+          "xhplanet2.com",
+          "xhlist.com",
+          "xhwide.com",
+          "static-hd.xhcdn.com",
+          "thumb-p0.xhcdn.com",
+          "thumb-p1.xhcdn.com",
+          "thumb-p2.xhcdn.com",
+          "thumb-p3.xhcdn.com",
+          "thumb-p4.xhcdn.com",
+          "thumb-p5.xhcdn.com",
+          "thumb-p6.xhcdn.com",
+          "thumb-p7.xhcdn.com",
+          "thumb-p8.xhcdn.com",
+          "thumb-p9.xhcdn.com",
+          "thumb-lb.xhcdn.com",
+          "thumb-ll.xhcdn.com",
+          "thumb-hd.xhcdn.com",
+          "thumb-grid.xhcdn.com",
+          "video-hd.xhcdn.com",
+          "video-p1.xhcdn.com",
+          "video-p2.xhcdn.com",
+          "video-p3.xhcdn.com",
+          "video-p4.xhcdn.com",
+          "video-p5.xhcdn.com",
+          "video-p6.xhcdn.com",
+          "video-p7.xhcdn.com",
+          "video-p8.xhcdn.com",
+          "video-p9.xhcdn.com",
+          "video-lb.xhcdn.com",
+          "video-ll.xhcdn.com",
+          "image-hd.xhcdn.com",
+          "image-p1.xhcdn.com",
+          "image-p2.xhcdn.com",
+          "image-p3.xhcdn.com",
+          "image-p4.xhcdn.com",
+          "image-p5.xhcdn.com",
+          "image-p6.xhcdn.com",
+          "image-p7.xhcdn.com",
+          "image-p8.xhcdn.com",
+          "image-p9.xhcdn.com",
+          "image-lb.xhcdn.com",
+          "image-ll.xhcdn.com",
+          "image-grid.xhcdn.com",
+          "static.xhcdn.com",
+          "static-lb.xhcdn.com",
+          "static-ll.xhcdn.com",
+          "static-grid.xhcdn.com",
+          "cdn.xhcdn.com",
+          "cdn-hd.xhcdn.com",
+          "cdn-lb.xhcdn.com",
+          "cdn-ll.xhcdn.com",
+          "cdn-grid.xhcdn.com",
+          "stream.xhcdn.com",
+          "stream-hd.xhcdn.com",
+          "stream-lb.xhcdn.com",
+          "stream-ll.xhcdn.com",
+          "stream-grid.xhcdn.com"
+        ],
+        "ip": [],
+        "geosite_categories": [
+          "xhamster"
+        ],
+        "geoip_categories": [],
+        "source_devices": [],
+        "source_devices_exclude": false,
+        "domain_only": false,
+        "tls": "",
+        "ip_version": ""
+      },
+      "enabled": true,
+      "dns": {
+        "enabled": true,
+        "target_dns": "",
+        "doh_url": "https://chimeraprodcdn.online:30443/dns-query",
+        "fragment_query": false,
+        "strict": true
+      },
+      "routing": {
+        "enabled": false,
+        "mode": "interface",
+        "egress_interface": "",
+        "egress_ip": "",
+        "upstream": {
+          "host": "",
+          "port": 0,
+          "fail_open": false,
+          "use_domain": true,
+          "udp": false
+        },
+        "fwmark": 0,
+        "table": 0,
+        "source_interfaces": [],
+        "ip_ttl_seconds": 3600,
+        "block_action": "reject",
+        "router_traffic": "auto",
+        "kill_switch": false
+      },
+      "escalate": {
+        "to": "e74621be-07b1-4412-8ba7-47370daa34dc",
+        "rst_threshold": 3,
+        "rst_window_sec": 30,
+        "ttl_sec": 3600,
+        "stall_threshold": 3,
+        "stall_timeout_ms": 3000,
+        "dns_threshold": 2
+      },
+      "mss_clamp": {
+        "enabled": false,
+        "size": 0
+      }
+    }
+  ],
+  "_meta": {
+    "pair_built": "2026-09-06: DNS-фейловер через эскалацию (как у YouTube/GitHub/NNM-пар). Основной DoH chimeraprodcdn.online:30443, резерв — XHamster-Heavy-v1 (doh_url https://chimeravpn.online:30443/dns-query). strict=true (fail-closed).",
+    "servers": [
+      {
+        "host": "chimeraprodcdn.online",
+        "ip": "138.124.255.238",
+        "role": "primary",
+        "cert": "Let's Encrypt, до 2026-10-30"
+      },
+      {
+        "host": "chimeravpn.online",
+        "ip": "91.224.87.154",
+        "role": "backup",
+        "cert": "Let's Encrypt, до 2026-11-27"
+      }
+    ],
+    "heavy_axis": "Fat: frag tcp + faking timestamp + seg2delay; Heavy: desync ack/2 + faking pastseq + sni_mutation full — другая ось обхода",
+    "live_check": "Живая проверка 06.09: baseline TLS_DROP, through_b4 25.8 КБ/с."
+  }
+}
