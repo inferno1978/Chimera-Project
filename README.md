@@ -152,7 +152,7 @@ Chimera-Project/
 │   ├── DPI_BYPASS_FAQ.md        #   DPI Bypass (b4) — обход ТСПУ (YouTube и любые сайты)
 │   └── GITHUB_BYPASS_FAQ.md     #   GitHub Bypass (b4) — частичные блокировки GitHub (сет GitHub-Fat-v1)
 ├── vendor/
-│   └── b4/                      #   Исходники b4 v1.80.4 (апстрим DanielLavrushin/b4): src, installer, toolkit
+│   └── b4/                      #   Исходники b4 v1.81.0 (апстрим DanielLavrushin/b4): src, installer, toolkit
 │       └── set-artifacts/       #   Готовые сеты: GitHub-Fat-v1.json + верификация (watchdog/MCP-кейс)
 ├── LICENSE
 └── chimera/
