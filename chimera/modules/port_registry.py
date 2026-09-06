@@ -483,6 +483,65 @@ def port_register(service_tag: str, port: int, proto: str = "tcp",
     return True, f"Порт {port}/{proto} зарегистрирован за '{service_tag}'"
 
 
+def port_register_range(service_tag: str, port_start: int, port_end: int,
+                        proto: str = "tcp", comment: str = "",
+                        ) -> "tuple[bool, str]":
+    """Массовая регистрация диапазона портов за сервисом (port hopping, Mieru).
+
+    v79: поэлементный вызов port_register() на диапазон 10000-20000 —
+    это 10001 итераций «lock + полный read/parse + полный dump/write
+    реестра», файл при этом растёт → O(N^2): минуты «зависания» TUI
+    без единой строчки вывода (bench: 3000 итераций = 24с и замедление).
+    Здесь — ОДИН lock, ОДИН load, append недостающих записей, ОДИН save →
+    O(N), 10001 порт регистрируется за доли секунды.
+
+    force-семантика (как port_register(force=True)): конфликты по каждому
+    порту НЕ проверяются — диапазон port hopping это REDIRECT в PREROUTING,
+    порты не занимают слушателей. Конфликт-детект для одиночных портов
+    (port_get_conflicts) после регистрации работает как обычно: каждый
+    порт диапазона виден в реестре занятым сервисом.
+
+    Идемпотентно: существующие записи (service, port, proto) не дублируются.
+    """
+    if port_start > port_end:
+        port_start, port_end = port_end, port_start
+    if (not isinstance(port_start, int) or not isinstance(port_end, int)
+            or port_start < 1 or port_end > 65535):
+        return False, f"Невалидный диапазон: {port_start}-{port_end}"
+    if proto not in ("tcp", "udp"):
+        return False, f"Невалидный proto: {proto} (нужно tcp/udp)"
+    if not service_tag or not isinstance(service_tag, str):
+        return False, "service_tag не указан"
+
+    now = datetime.now(timezone.utc).isoformat()
+    added = 0
+    try:
+        with _registry_lock():
+            entries = _registry_load()
+            existing = {
+                (e.get("service"), e.get("port"), e.get("proto", "tcp"))
+                for e in entries
+                if isinstance(e, dict)
+            }
+            for port in range(port_start, port_end + 1):
+                if (service_tag, port, proto) in existing:
+                    continue
+                entries.append({
+                    "service":      service_tag,
+                    "port":         port,
+                    "proto":        proto,
+                    "comment":      comment,
+                    "registered_at": now,
+                })
+                added += 1
+            if added:
+                _registry_save(entries)
+    except TimeoutError as e:
+        return False, str(e)
+    return True, (f"Диапазон {port_start}-{port_end}/{proto} "
+                  f"зарегистрирован за '{service_tag}' (+{added} записей)")
+
+
 def port_unregister(service_tag: str, port: "Optional[int]" = None,
                     proto: "Optional[str]" = None) -> bool:
     """Снимает регистрацию порта(ов) за сервисом.
@@ -501,6 +560,41 @@ def port_unregister(service_tag: str, port: "Optional[int]" = None,
                 if not (
                     e.get("service") == service_tag
                     and (port is None or e.get("port") == port)
+                    and (proto is None or e.get("proto", "tcp") == proto)
+                )
+            ]
+            if len(new_entries) == initial_count:
+                return False  # ничего не удалено
+            _registry_save(new_entries)
+    except TimeoutError:
+        return False
+    return True
+
+
+def port_unregister_range(service_tag: str, port_start: int, port_end: int,
+                          proto: "Optional[str]" = None) -> bool:
+    """Снимает регистрацию диапазона портов за сервисом одним заходом.
+
+    v79: парная к port_register_range(). Раньше отключение port hopping
+    (смена диапазона / disable) звало port_unregister() на каждый порт —
+    тот же O(N^2): 10001 итераций полного rewrite реестра, «TUI завис».
+    Здесь — ОДИН lock + ОДИН load + фильтр + ОДИН save.
+
+    proto=None (как в port_unregister) снимает записи обоих протоколов
+    в диапазоне. Возвращает True если что-то было снято.
+    """
+    if port_start > port_end:
+        port_start, port_end = port_end, port_start
+    try:
+        with _registry_lock():
+            entries = _registry_load()
+            initial_count = len(entries)
+            new_entries = [
+                e for e in entries
+                if not (
+                    e.get("service") == service_tag
+                    and isinstance(e.get("port"), int)
+                    and port_start <= e.get("port") <= port_end
                     and (proto is None or e.get("proto", "tcp") == proto)
                 )
             ]
