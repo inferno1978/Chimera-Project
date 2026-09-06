@@ -221,17 +221,20 @@ def _ufw_allow_range(range_start: int, range_end: int, proto: str) -> None:
     """Добавляет правило UFW для диапазона портов.
 
      миграция на port_registry (с backward compat fallback).
+     v79: регистрация диапазона — ОДНИМ заходом (port_register_range),
+    а не циклом port_register() на каждый порт: на диапазоне 10000-20000
+    поэлементный цикл = O(N^2) перезаписей реестра (минуты без вывода,
+    TUI выглядит зависшим — bench: 3000 итераций = 24с с замедлением).
     """
     protos = ["tcp", "udp"] if proto == "both" else [proto]
     #  сначала port_registry.
     try:
         from chimera.modules.port_registry import (
-            ufw_open_port_range, port_register, SERVICE_PORT_HOPPING,
+            ufw_open_port_range, port_register_range, SERVICE_PORT_HOPPING,
         )
         for p in protos:
-            for port in range(range_start, range_end + 1):
-                port_register(SERVICE_PORT_HOPPING, port, p,
-                              comment="port hopping range", force=True)
+            port_register_range(SERVICE_PORT_HOPPING, range_start, range_end, p,
+                                comment="port hopping range")
             ufw_open_port_range(range_start, range_end, p, SERVICE_PORT_HOPPING,
                                 comment="port hopping range")
         return
@@ -248,18 +251,19 @@ def _ufw_delete_range(range_start: int, range_end: int, proto: str) -> None:
     """Удаляет правило UFW для диапазона портов.
 
      миграция на port_registry (с legacy comment для backward compat).
+     v79: снятие регистрации — ОДНИМ заходом (port_unregister_range),
+    не поэлементным port_unregister() (тот же O(N^2)-завис).
     """
     protos = ["tcp", "udp"] if proto == "both" else [proto]
     #  сначала port_registry.
     try:
         from chimera.modules.port_registry import (
-            ufw_close_port_range, port_unregister, SERVICE_PORT_HOPPING,
+            ufw_close_port_range, port_unregister_range, SERVICE_PORT_HOPPING,
         )
         for p in protos:
             ufw_close_port_range(range_start, range_end, p, SERVICE_PORT_HOPPING,
                                  legacy_comments=[_COMMENT])
-            for port in range(range_start, range_end + 1):
-                port_unregister(SERVICE_PORT_HOPPING, port, p)
+            port_unregister_range(SERVICE_PORT_HOPPING, range_start, range_end, p)
         return
     except Exception:
         pass
